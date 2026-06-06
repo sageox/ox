@@ -194,6 +194,12 @@ func (s *Store) Add(task *Task) (added bool, err error) {
 	if payloadSize(task.Payload) > MaxPayloadLen {
 		return false, fmt.Errorf("task payload exceeds %d bytes", MaxPayloadLen)
 	}
+	// payload is surfaced verbatim to the model on claim; reject keys that look
+	// like they carry a credential so a producer can't leak a secret into the
+	// agent's context window.
+	if k := sensitivePayloadKey(task.Payload); k != "" {
+		return false, fmt.Errorf("task payload key %q looks sensitive; payload is surfaced to an AI coworker and must not carry secrets", k)
+	}
 
 	ctx := context.Background()
 	if err := s.reconcile(ctx); err != nil {
@@ -673,6 +679,29 @@ func payloadFromDB(s string) map[string]string {
 		return nil
 	}
 	return m
+}
+
+// sensitivePayloadKeyParts are case-insensitive substrings that mark a payload
+// key as credential-bearing. "session" is intentionally absent — it is a
+// legitimate payload key (e.g. the session-finalize producer) and only the
+// compound "session_token" form is sensitive.
+var sensitivePayloadKeyParts = []string{
+	"password", "passwd", "secret", "token", "apikey", "api_key",
+	"access_key", "private_key", "credential", "bearer", "client_secret",
+}
+
+// sensitivePayloadKey returns the first payload key whose name suggests it
+// carries a credential, or "" if none do.
+func sensitivePayloadKey(p map[string]string) string {
+	for k := range p {
+		lk := strings.ToLower(k)
+		for _, part := range sensitivePayloadKeyParts {
+			if strings.Contains(lk, part) {
+				return k
+			}
+		}
+	}
+	return ""
 }
 
 // payloadSize returns the total bytes across a payload map's keys and values.

@@ -224,3 +224,23 @@ func TestSchemaVersionMismatch_Recreates(t *testing.T) {
 		t.Fatalf("expected schema-mismatch recreate to empty the queue, got %d tasks", len(tasks))
 	}
 }
+
+// TestAdd_RejectsSensitivePayloadKey verifies a producer cannot stash a
+// credential-named field in payload, which is surfaced verbatim to the model on
+// claim. The legitimate "session" key must still be accepted.
+func TestAdd_RejectsSensitivePayloadKey(t *testing.T) {
+	store := newTestStore(t)
+	for i, k := range []string{"password", "api_key", "SECRET", "auth_token", "client_secret"} {
+		_, err := store.Add(&Task{
+			Title:    "x",
+			DedupKey: k, // distinct key so each Add is independent
+			Payload:  map[string]string{k: "value"},
+		})
+		if err == nil {
+			t.Fatalf("[%d] expected Add to reject sensitive payload key %q", i, k)
+		}
+	}
+	if _, err := store.Add(&Task{Title: "ok", Payload: map[string]string{"session": "2026-01-10T09-00-testuser-OxFIN"}}); err != nil {
+		t.Fatalf("legitimate 'session' payload key must be allowed: %v", err)
+	}
+}

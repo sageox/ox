@@ -99,6 +99,10 @@ func BuildHumanSummary(output Output) string {
 		fmt.Fprintf(&sb, "- **Doctor Attention Needed:** %s\n", output.DoctorHint)
 	}
 
+	if output.AgentTasksReady > 0 {
+		fmt.Fprintf(&sb, "- **Scheduled Agent Tasks:** %d ready — claim with `ox agent <id> tasks next` (run in a subagent)\n", output.AgentTasksReady)
+	}
+
 	if output.HooksInstalled {
 		fmt.Fprintf(&sb, "- **Hooks Installed:** %s\n", output.HooksRestartNotice)
 	}

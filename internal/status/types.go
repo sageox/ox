@@ -19,6 +19,15 @@ type JSONOutput struct {
 	AICoworkers  []AICoworkerJSON  `json:"ai_coworkers,omitempty"`
 	Daemon       *DaemonJSON       `json:"daemon,omitempty"`
 	Version      *VersionJSON      `json:"version,omitempty"`
+	AgentTasks   *AgentTasksJSON   `json:"agent_tasks,omitempty"`
+}
+
+// AgentTasksJSON summarizes the project-local scheduled-task queue for
+// `ox status --json`. Omitted when the queue is empty so tooling sees the same
+// "silent when empty" behavior as the human output.
+type AgentTasksJSON struct {
+	Ready      int `json:"ready"`
+	InProgress int `json:"in_progress"`
 }
 
 // BubblesJSON is the unified knowledge-bubble summary surfaced by

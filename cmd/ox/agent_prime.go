@@ -501,6 +501,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		doctorHint = "Run 'ox agent doctor' to finalize incomplete sessions" // quote command names in prose for scannability
 	}
 
+	// Surface scheduled agent tasks at prime — the universal delivery channel
+	// (every adapter runs prime at session start). Best-effort and gated on the
+	// queue existing so a read never materializes the directory.
+	agentTasksReady := countReadyAgentTasks(projectRoot, agentType)
+
 	// build intent-to-command guidance for agent consumption
 	guidance := buildGuidance(agentID, projectRoot, teamCtx, ledgerStatus)
 	timing["guidance_build"] = time.Since(phaseStart).Milliseconds()
@@ -604,6 +609,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		PrimeCallCount:     primeCallCount,
 		NeedsDoctorAgent:   needsDoctorAgent,
 		DoctorHint:         doctorHint,
+		AgentTasksReady:    agentTasksReady,
 		HooksInstalled:     hooksInstalled,
 		CurrentUserName:    currentUserName,
 		CurrentUserAliases: currentUserAliases,

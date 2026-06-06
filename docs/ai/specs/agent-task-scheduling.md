@@ -144,19 +144,48 @@ also has a Go API: `agenttask.Enqueue(projectRoot, Task{...})`.
 
 ## Surfacing
 
-Tasks surface through the **UserPromptSubmit hook only** (`handlePrompt`),
-the single reliable channel into Claude's context mid-session. On each prompt,
-`emitAgentTasks` checks for ready tasks targeting this agent and emits a
-throttled `<system-reminder>` block instructing the agent to dispatch each
-task to a **subagent with a fresh context**, then mark it done.
+Tasks reach an agent through **two complementary channels**, plus an always-
+available pull. No agent is left with a silent queue.
+
+### 1. Prime-time (universal — every adapter)
+
+`ox agent prime` runs at session start for **every** adapter (Claude Code via
+hook, OpenCode via plugin, amp/pi/aider via their AGENTS.md/CONVENTIONS.md
+marker). Prime counts ready tasks claimable by this agent
+(`countReadyAgentTasks`) and emits a high-priority `<immediate-actions>` entry
+telling the agent to claim and run each in a subagent. Because prime is the one
+thing every adapter does, this is the universal delivery floor — even agents
+with no per-prompt hook learn about queued work at session start.
+
+### 2. Mid-session push (Claude Code + Codex)
+
+For adapters whose host has a per-prompt hook whose stdout is injected into the
+model (empirically Claude Code's `UserPromptSubmit` and Codex's equivalent —
+both map to `phasePrompt`), `handlePrompt` calls `emitAgentTasks` on **every
+prompt**, emitting a throttled `<system-reminder>` block. This catches work
+enqueued *after* prime, mid-session.
 
 Throttling (avoid re-injecting unchanged context): a per-agent cursor in
 `.sageox/cache/agent_tasks_seen/<agentID>.json` records the signature (hash of
 sorted ready task ids) last surfaced. The block is re-emitted **only when the
-ready set changes** — a new task, or a completed/claimed one. An unchanged
-pending queue is never re-injected turn after turn (identical context is noise),
-and an idle queue costs zero context. The agent can always pull on demand with
-`ox agent <id> tasks list`.
+ready set changes**. An idle queue costs zero context.
+
+### 3. Pull (universal fallback)
+
+Any agent, any adapter, any time: `ox agent <id> tasks next` / `tasks list`.
+Agent-agnostic CLI; the SQL claim filters by `target_agent`.
+
+### Adapter push matrix
+
+| Channel | Adapters |
+|---|---|
+| Prime-time (session start) | **all** — claude-code, codex, gemini, opencode, amp, pi, aider, droid |
+| Mid-session per-prompt push | claude-code, codex (only hosts with a verified injectable per-prompt hook) |
+| Pull (on demand) | **all** |
+
+Adding mid-session push to another adapter requires that host to expose a
+per-prompt hook whose output reaches the model, and a `phasePrompt` mapping in
+`agent_hook.go` — verified via live runs in `ox-test-harness`, not in this repo.
 
 ## Daemon producer
 

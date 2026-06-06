@@ -373,6 +373,11 @@ type Output struct {
 	// Doctor agent marker
 	NeedsDoctorAgent bool   `json:"needs_doctor_agent,omitempty"` // true if .needs-doctor-agent marker exists
 	DoctorHint       string `json:"doctor_hint,omitempty"`        // hint for agent to run ox agent doctor
+	// Scheduled agent tasks ready for THIS agent to claim. Surfacing them at
+	// prime time is the universal delivery channel: every adapter runs `ox agent
+	// prime` at session start, so even agents without a per-prompt push hook
+	// (the mid-session channel, claude-code/codex) still learn about queued work.
+	AgentTasksReady int `json:"agent_tasks_ready,omitempty"`
 	// Observation recording directive (behavioral, not just a tool reference)
 	ObservationDirective string `json:"observation_directive,omitempty"` // proactive instruction to record observations via ox memory put
 	// Murmur directive (behavioral — set when murmuring: "auto")

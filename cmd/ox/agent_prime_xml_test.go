@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/agenttask"
 	"github.com/sageox/ox/internal/claude"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/prime"
@@ -825,5 +828,73 @@ func TestOutputAgentPrimeXML_TeamRules_AlwaysAndIndexed(t *testing.T) {
 	}
 	if !strings.Contains(xml, `estimated_always_tokens="12"`) {
 		t.Error("budget should report estimated tokens for always-tier")
+	}
+}
+
+// TestOutputAgentPrimeXML_AgentTasksSurfaced verifies scheduled agent tasks are
+// surfaced in <immediate-actions> at prime time — the universal delivery channel
+// that reaches every adapter (not just those with a mid-session push hook).
+func TestOutputAgentPrimeXML_AgentTasksSurfaced(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	if _, err := outputAgentPrimeXML(cmd, agentPrimeOutput{
+		AgentID:         "test-agent",
+		Status:          "fresh",
+		AgentTasksReady: 3,
+	}); err != nil {
+		t.Fatalf("outputAgentPrimeXML: %v", err)
+	}
+	xml := buf.String()
+	start := strings.Index(xml, "<immediate-actions>")
+	end := strings.Index(xml, "</immediate-actions>")
+	if start < 0 || end < 0 {
+		t.Fatal("expected <immediate-actions> block when AgentTasksReady > 0")
+	}
+	block := xml[start:end]
+	if !strings.Contains(block, "3 scheduled agent task") {
+		t.Errorf("expected task count in actions, got: %s", block)
+	}
+	if !strings.Contains(block, "tasks next") {
+		t.Errorf("expected claim instruction in actions, got: %s", block)
+	}
+
+	// zero ready → no task action
+	buf.Reset()
+	cmd2 := &cobra.Command{}
+	cmd2.SetOut(&buf)
+	if _, err := outputAgentPrimeXML(cmd2, agentPrimeOutput{AgentID: "a", Status: "fresh"}); err != nil {
+		t.Fatalf("outputAgentPrimeXML: %v", err)
+	}
+	if strings.Contains(buf.String(), "scheduled agent task") {
+		t.Error("no task action expected when AgentTasksReady == 0")
+	}
+}
+
+// TestCountReadyAgentTasks_AgentTypeFiltered verifies prime's task count honors
+// target_agent so an agent is only nudged about work it can actually claim.
+func TestCountReadyAgentTasks_AgentTypeFiltered(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agenttask.Enqueue(root, &agenttask.Task{Title: "anyone", Priority: 5}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := agenttask.Enqueue(root, &agenttask.Task{Title: "codex-only", TargetAgent: "codex", Priority: 1}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if got := countReadyAgentTasks(root, "claude"); got != 1 {
+		t.Errorf("claude should see only the untargeted task, got %d", got)
+	}
+	if got := countReadyAgentTasks(root, "codex"); got != 2 {
+		t.Errorf("codex should see both tasks, got %d", got)
+	}
+	// empty queue dir / no queue → 0, and must not create the dir
+	empty := t.TempDir()
+	if got := countReadyAgentTasks(empty, "claude"); got != 0 {
+		t.Errorf("expected 0 for absent queue, got %d", got)
 	}
 }

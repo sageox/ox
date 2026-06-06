@@ -1369,6 +1369,26 @@ func countAgentTasks(gitRoot string) (ready, inProgress int) {
 	return ready, inProgress
 }
 
+// countReadyAgentTasks returns the number of ready tasks the given agent type
+// may claim. Used by prime to surface scheduled work at session start — the
+// universal delivery channel (every adapter runs prime). Best-effort and gated
+// on the queue existing so the read never materializes the directory.
+func countReadyAgentTasks(gitRoot, agentType string) int {
+	if gitRoot == "" || !agenttask.QueueExists(gitRoot) {
+		return 0
+	}
+	store, err := agenttask.NewStore(gitRoot)
+	if err != nil {
+		return 0
+	}
+	defer store.Close()
+	ready, err := store.ReadyView(agentType)
+	if err != nil {
+		return 0
+	}
+	return len(ready)
+}
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Display SageOx status and directory locations",
@@ -1608,6 +1628,12 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 	// bubbles section — additive; team_contexts/ledger mirrors below
 	// stay populated for one release per the kb plan.
 	output.Bubbles = buildBubblesJSON(bubblesSummary)
+
+	// agent-task queue summary — mirror the human one-liner; omit when empty so
+	// JSON consumers see the same "silent when empty" behavior.
+	if ready, inProgress := countAgentTasks(gitRoot); ready > 0 || inProgress > 0 {
+		output.AgentTasks = &status.AgentTasksJSON{Ready: ready, InProgress: inProgress}
+	}
 
 	// auth section
 	output.Auth = &statusAuthJSON{
