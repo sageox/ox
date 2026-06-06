@@ -77,10 +77,19 @@ func checkAgentTasksStuck(fix bool) checkResult {
 
 	if fix {
 		canceled := 0
+		failed := 0
 		for _, t := range poison {
 			if err := store.Cancel(t.ID, fmt.Sprintf("auto-canceled by doctor after %d attempts", t.Attempts)); err == nil {
 				canceled++
+			} else {
+				failed++
 			}
+		}
+		if failed > 0 {
+			// Don't claim success while poison remains — the next run retries.
+			return WarningCheck("Agent tasks",
+				fmt.Sprintf("canceled %d poison task(s); %d could not be canceled", canceled, failed),
+				"Re-run `ox doctor --fix`; if it persists, inspect the queue with `ox agent <id> tasks list`")
 		}
 		return PassedCheck("Agent tasks",
 			fmt.Sprintf("canceled %d poison task(s) past %d attempts", canceled, maxTaskAttempts))

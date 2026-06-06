@@ -19,6 +19,7 @@ func newTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 
@@ -234,13 +235,15 @@ func TestReclaimExpiredLease(t *testing.T) {
 	store := newTestStore(t)
 	_, _ = store.Add(&Task{Title: "leased"})
 
-	// claim with an already-expired lease (negative duration -> default; so
-	// claim then mutate the row directly via a tiny lease)
-	claimed, err := store.Claim(ClaimOptions{AgentID: "Oxdead", PID: os.Getpid(), Lease: time.Millisecond})
+	claimed, err := store.Claim(ClaimOptions{AgentID: "Oxdead", PID: os.Getpid(), Lease: time.Hour})
 	if err != nil || claimed == nil {
 		t.Fatalf("claim: %v %v", claimed, err)
 	}
-	time.Sleep(5 * time.Millisecond)
+	// Backdate the lease into the past deterministically (no sleep / no CI jitter).
+	if _, err := store.db.Exec(`UPDATE tasks SET lease_expires_at=? WHERE id=?`,
+		tsToDB(time.Now().Add(-time.Minute)), claimed.ID); err != nil {
+		t.Fatalf("backdate lease: %v", err)
+	}
 
 	// reconcile-on-read should flip it back to ready and bump attempts
 	ready, err := store.Ready("")
@@ -304,8 +307,9 @@ func TestExtendLease(t *testing.T) {
 	_, _ = store.Add(&Task{Title: "long"})
 	claimed, _ := store.Claim(ClaimOptions{AgentID: "Oxlong", PID: os.Getpid(), Lease: time.Minute})
 
+	// Extend by an hour vs the original one-minute lease — deterministically
+	// later without relying on a sleep to advance the clock.
 	before := claimed.LeaseExpiresAt
-	time.Sleep(2 * time.Millisecond)
 	if err := store.ExtendLease(claimed.ID, time.Hour); err != nil {
 		t.Fatalf("ExtendLease: %v", err)
 	}

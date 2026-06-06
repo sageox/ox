@@ -35,7 +35,9 @@ func TestCheckAgentTasksStuck_NoQueue(t *testing.T) {
 
 func TestCheckAgentTasksStuck_HealthyQueue(t *testing.T) {
 	root := chdirToGitRepo(t)
-	_, _ = agenttask.Enqueue(root, &agenttask.Task{Title: "ready task"})
+	if _, err := agenttask.Enqueue(root, &agenttask.Task{Title: "ready task"}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
 
 	res := checkAgentTasksStuck(false)
 	if !res.passed || res.warning {
@@ -45,8 +47,14 @@ func TestCheckAgentTasksStuck_HealthyQueue(t *testing.T) {
 
 func TestCheckAgentTasksStuck_PoisonWarns(t *testing.T) {
 	root := chdirToGitRepo(t)
-	store, _ := agenttask.NewStore(root)
-	_, _ = store.Add(&agenttask.Task{Title: "poison"})
+	store, err := agenttask.NewStore(root)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.Add(&agenttask.Task{Title: "poison"}); err != nil {
+		t.Fatalf("add task: %v", err)
+	}
 
 	// inflate attempts past the threshold: claim with a dead PID, then read so
 	// reconcile reclaims it (dead claimer); each Claim bumps attempts.
@@ -72,7 +80,10 @@ func TestCheckAgentTasksStuck_PoisonWarns(t *testing.T) {
 	if !res.passed || res.warning {
 		t.Fatalf("expected passed after fix, got %+v", res)
 	}
-	tasks, _ := store.List(true)
+	tasks, err := store.List(true)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
 	for _, tk := range tasks {
 		if !tk.IsTerminal() {
 			t.Fatalf("expected poison task canceled, still: %s", tk.Status)

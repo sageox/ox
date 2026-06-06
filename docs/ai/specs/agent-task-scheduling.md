@@ -31,7 +31,7 @@ which tracks human-facing project work. Agent tasks are ephemeral, machine
 
 One **shared, project-local** queue per repo:
 
-```
+```text
 .sageox/agent_tasks/agent_tasks.db        # embedded SQLite; gitignored, ephemeral, local-only
 .sageox/agent_tasks/agent_tasks.db-wal     # WAL sidecar
 .sageox/agent_tasks/agent_tasks.db-shm
@@ -98,13 +98,13 @@ One **shared, project-local** queue per repo:
 
 ### Lifecycle
 
-```
-        ┌─────────── claim (next) ───────────┐
-        ▼                                     │
-     ready ──claim──▶ in_progress ──done────▶ completed
-        ▲                  │      ──cancel──▶ canceled
-        │                  │
-        └── reclaim ◀──────┘  (lease expired OR claiming PID dead on same host)
+```mermaid
+stateDiagram-v2
+    [*] --> ready
+    ready --> in_progress: claim (next)
+    in_progress --> completed: done
+    in_progress --> canceled: cancel
+    in_progress --> ready: reclaim (lease expired OR claiming PID dead, same host)
 ```
 
 - **ready → in_progress**: `Claim` atomically pops the highest-priority ready

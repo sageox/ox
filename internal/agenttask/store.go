@@ -66,7 +66,13 @@ func QueueExists(projectRoot string) bool {
 		return false
 	}
 	_, err := os.Stat(QueuePath(projectRoot))
-	return err == nil
+	if err == nil {
+		return true
+	}
+	// A permission/IO fault is not "absent" — treat only true not-exist as no
+	// queue, so an operational fault surfaces rather than silently suppressing
+	// task surfacing.
+	return !errors.Is(err, os.ErrNotExist)
 }
 
 // NewStore opens (or creates) a task store for the given project root, creating
@@ -134,6 +140,19 @@ func openDB(dbPath string) (*sql.DB, error) {
 		}
 		return nil, fmt.Errorf("integrity_check: %s", integ)
 	}
+	// Schema-drift guard: a structurally-valid DB from an older schema passes
+	// integrity_check but would fail queries referencing new columns. user_version
+	// 0 = fresh/uninitialized (CreateSchema stamps it next); any other non-current
+	// value means a stale generation → error so NewStore recreates it.
+	var uv int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&uv); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if uv != 0 && uv != SchemaVersion {
+		db.Close()
+		return nil, fmt.Errorf("schema version mismatch: db=%d want=%d", uv, SchemaVersion)
+	}
 	return db, nil
 }
 
@@ -187,9 +206,13 @@ func (s *Store) Add(task *Task) (added bool, err error) {
 	if task.CreatedAt.IsZero() {
 		task.CreatedAt = time.Now()
 	}
-	if task.Status == "" {
-		task.Status = StatusReady
+	// New tasks must start ready. A caller-supplied in_progress/terminal status
+	// (with no lease) would be neither claimable nor reclaimable — permanently
+	// wedged. Producers schedule ready work; the store owns every later state.
+	if task.Status != "" && task.Status != StatusReady {
+		return false, fmt.Errorf("new tasks must start %q, got %q", StatusReady, task.Status)
 	}
+	task.Status = StatusReady
 	// Normalize the target on write so the claim filter is a plain equality.
 	target := ""
 	if task.TargetAgent != "" {
@@ -431,10 +454,13 @@ func (s *Store) terminate(id string, status Status, note string) error {
 	if cur == string(StatusCompleted) || cur == string(StatusCanceled) {
 		return nil
 	}
+	// The status guard makes the write race-safe: if a concurrent terminate (or
+	// a reclaim) wrote a terminal/changed state between the check above and this
+	// UPDATE, this affects zero rows rather than clobbering the first writer.
 	_, err = s.db.ExecContext(ctx,
 		`UPDATE tasks SET status=?, completed_at=?, result=CASE WHEN ?='' THEN result ELSE ? END,
 			claimed_by_agent_id='', claimed_by_pid=0, claimed_host='', claimed_at=0, lease_expires_at=0
-		 WHERE id=?`,
+		 WHERE id=? AND status NOT IN ('completed','canceled')`,
 		string(status), tsToDB(time.Now()), note, note, id)
 	return err
 }
@@ -460,10 +486,19 @@ func (s *Store) ExtendLease(id string, lease time.Duration) error {
 	if cur != string(StatusInProgress) {
 		return fmt.Errorf("task %s is not in progress (status=%s)", id, cur)
 	}
-	_, err = s.db.ExecContext(ctx,
+	res, err := s.db.ExecContext(ctx,
 		`UPDATE tasks SET lease_expires_at=? WHERE id=? AND status='in_progress'`,
 		tsToDB(time.Now().Add(lease)), id)
-	return err
+	if err != nil {
+		return err
+	}
+	// 0 rows means the lease lapsed and reconcile reset the task to ready in the
+	// window between the check and this UPDATE. Surface it: the caller must NOT
+	// keep working as if it still holds the claim (a second agent may have it).
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("task %s: lease not extended (claim lost while extending)", id)
+	}
+	return nil
 }
 
 // reconcile self-heals the queue on every read/mutation: reclaim lease-expired
@@ -512,29 +547,40 @@ func (s *Store) reclaimDeadClaimers(ctx context.Context) error {
 	if s.host == "" {
 		return nil // can't trust a PID without knowing our own host
 	}
+	// Collect (id, pid) fully and close the cursor BEFORE any liveness syscall:
+	// proc.IsAlive can block on a kill(0)/proc read, and holding an open SQLite
+	// statement handle across it is unnecessary and can stall the connection.
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, claimed_by_pid FROM tasks
 		 WHERE status='in_progress' AND claimed_host = ? AND claimed_by_pid > 0`, s.host)
 	if err != nil {
 		return err
 	}
-	var dead []string
+	type claim struct {
+		id  string
+		pid int
+	}
+	var claims []claim
 	for rows.Next() {
-		var id string
-		var pid int
-		if err := rows.Scan(&id, &pid); err != nil {
+		var c claim
+		if err := rows.Scan(&c.id, &c.pid); err != nil {
 			rows.Close()
 			return err
 		}
-		if !proc.IsAlive(pid) {
-			dead = append(dead, id)
-		}
+		claims = append(claims, c)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
 		return err
 	}
 	rows.Close()
+
+	var dead []string
+	for _, c := range claims {
+		if !proc.IsAlive(c.pid) {
+			dead = append(dead, c.id)
+		}
+	}
 
 	for _, id := range dead {
 		if _, err := s.db.ExecContext(ctx,

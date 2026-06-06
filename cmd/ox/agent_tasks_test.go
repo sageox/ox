@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -263,7 +264,7 @@ func TestCountAgentTasks(t *testing.T) {
 	if ready, inProg := countAgentTasks(root); ready != 0 || inProg != 0 {
 		t.Fatalf("expected 0,0 with no queue, got %d,%d", ready, inProg)
 	}
-	if _, err := os.Stat(filepath.Join(root, ".sageox", "agent_tasks")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, ".sageox", "agent_tasks")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("countAgentTasks must not create the queue dir on a read")
 	}
 

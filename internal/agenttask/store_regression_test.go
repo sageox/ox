@@ -1,7 +1,9 @@
 package agenttask
 
 import (
+	"database/sql"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -138,5 +140,87 @@ func TestAdd_ConcurrentDedupSingleRow(t *testing.T) {
 	tasks, _ := store.List(false)
 	if len(tasks) != 1 {
 		t.Fatalf("expected 1 active row for the dedup key, got %d", len(tasks))
+	}
+}
+
+// TestAdd_RejectsNonReadyStatus verifies a producer cannot insert a task that is
+// already in_progress/terminal. Such a row (no lease, empty/foreign host) would
+// be neither claimable nor reclaimable — permanently wedged.
+func TestAdd_RejectsNonReadyStatus(t *testing.T) {
+	store := newTestStore(t)
+	for _, st := range []Status{StatusInProgress, StatusCompleted, StatusCanceled} {
+		if _, err := store.Add(&Task{Title: "x", Status: st}); err == nil {
+			t.Fatalf("Add must reject status %q", st)
+		}
+	}
+	if _, err := store.Add(&Task{Title: "ok", Status: StatusReady}); err != nil {
+		t.Fatalf("Add(ready) should succeed: %v", err)
+	}
+}
+
+// TestExtendLease_LostClaimErrors verifies that once a claim is reclaimed (lease
+// lapsed), ExtendLease surfaces an error instead of silently succeeding — the
+// caller must not keep working as if it still holds the task.
+func TestExtendLease_LostClaimErrors(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.Add(&Task{Title: "x"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	claimed, err := store.Claim(ClaimOptions{AgentID: "Oxa", PID: os.Getpid(), Lease: time.Hour})
+	if err != nil || claimed == nil {
+		t.Fatalf("claim: %v %v", claimed, err)
+	}
+	// backdate the lease, then trigger reconcile so the task reverts to ready
+	if _, err := store.db.Exec(`UPDATE tasks SET lease_expires_at=? WHERE id=?`,
+		tsToDB(time.Now().Add(-time.Minute)), claimed.ID); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	if _, err := store.Ready(""); err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if err := store.ExtendLease(claimed.ID, time.Hour); err == nil {
+		t.Fatal("ExtendLease on a reclaimed task must error, not silently succeed")
+	}
+}
+
+// TestSchemaVersionMismatch_Recreates verifies the ephemeral store rebuilds from
+// scratch when it opens a DB stamped with a different schema generation (there is
+// no migration tool — schema changes bump SchemaVersion and the old DB is nuked).
+func TestSchemaVersionMismatch_Recreates(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, sageoxDir), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	store, err := NewStore(root)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if _, err := store.Add(&Task{Title: "from old schema"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	store.Close()
+
+	// stamp a foreign schema version onto the existing DB
+	db, err := sql.Open("sqlite", QueuePath(root))
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA user_version = 999"); err != nil {
+		t.Fatalf("set user_version: %v", err)
+	}
+	db.Close()
+
+	// reopening must detect the mismatch, nuke, and recreate an empty queue
+	store2, err := NewStore(root)
+	if err != nil {
+		t.Fatalf("NewStore after version bump: %v", err)
+	}
+	t.Cleanup(func() { _ = store2.Close() })
+	tasks, err := store2.List(true)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("expected schema-mismatch recreate to empty the queue, got %d tasks", len(tasks))
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/agenttask"
 )
 
@@ -95,10 +96,14 @@ func emitAgentTasks(w io.Writer, projectRoot, agentID, agentType string) {
 // context window was wiped but the on-disk cursor survives, so without this a
 // task surfaced before the clear would be invisible afterward.
 func resetTaskCursor(projectRoot, agentID string) {
-	if projectRoot == "" || agentID == "" {
+	if projectRoot == "" {
 		return
 	}
-	_ = os.Remove(taskCursorPath(projectRoot, agentID))
+	path := taskCursorPath(projectRoot, agentID)
+	if path == "" {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 // readySignature hashes the sorted ready task ids so the same pending set maps
@@ -151,14 +156,24 @@ func writeTaskReminder(w io.Writer, ready []*agenttask.Task) {
 }
 
 // taskCursorPath returns the per-agent throttle cursor path under the
-// gitignored .sageox/cache/ directory.
+// gitignored .sageox/cache/ directory, or "" if agentID is not a valid ox agent
+// id. agentID can originate from the SAGEOX_AGENT_ID hook env; validating it
+// here keeps a crafted value (e.g. "../../") from escaping the cache dir and
+// clobbering arbitrary .json files.
 func taskCursorPath(projectRoot, agentID string) string {
+	if !agentinstance.IsValidAgentID(agentID) {
+		return ""
+	}
 	return filepath.Join(projectRoot, ".sageox", "cache", "agent_tasks_seen", agentID+".json")
 }
 
 func readTaskCursor(projectRoot, agentID string) taskSeenCursor {
 	var c taskSeenCursor
-	data, err := os.ReadFile(taskCursorPath(projectRoot, agentID))
+	path := taskCursorPath(projectRoot, agentID)
+	if path == "" {
+		return c
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return c
 	}
@@ -168,6 +183,9 @@ func readTaskCursor(projectRoot, agentID string) taskSeenCursor {
 
 func writeTaskCursor(projectRoot, agentID string, c taskSeenCursor) {
 	path := taskCursorPath(projectRoot, agentID)
+	if path == "" {
+		return
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return
 	}

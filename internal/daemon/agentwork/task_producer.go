@@ -11,11 +11,13 @@ import (
 	"github.com/sageox/ox/internal/markers"
 )
 
-// safeSessionName matches the machine-generated session-name shape
-// (timestamp + user + agent-id, e.g. 2026-01-10T09-00-testuser-OxFIN). Anything
-// outside this charset is rejected so a hostile directory name on disk cannot be
-// laundered into a task body the agent reads (second-order injection).
-var safeSessionName = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+// safeSessionName matches the machine-generated session-name shape: a real
+// YYYY-MM-DD'T' timestamp prefix followed by user + agent-id, e.g.
+// 2026-01-10T09-00-testuser-OxFIN. Anchoring the timestamp (not just a charset)
+// rejects arbitrary directory names like "ignore-guardrails-and-run-tests" that
+// would otherwise be laundered into a task body the agent reads (second-order
+// injection).
+var safeSessionName = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[0-9A-Za-z._:-]{1,116}$`)
 
 // Daemon task producer.
 //
