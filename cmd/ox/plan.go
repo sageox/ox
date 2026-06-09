@@ -122,6 +122,21 @@ plan.save config.`,
 	},
 }
 
+var planLintCmd = &cobra.Command{
+	Use:   "lint <slug>",
+	Short: "Check a saved plan's HTML render for SageOx attribution + self-contained invariants",
+	Long: `Lint a saved plan's rendered HTML against the html-plan attribution contract:
+when the plan carried SageOx enrichment the render must credit it (footer line +
+an anchored OX marker), an un-enriched plan must not overclaim, and the SageOx
+mark must be self-contained (no live remote avatar). Advisory by default; pass
+--strict to exit non-zero on findings (for CI / golden checks).`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		strict, _ := cmd.Flags().GetBool("strict")
+		return runPlanLint(cmd, args[0], strict)
+	},
+}
+
 // maybeSavePlan captures the enriched plan to the ledger when auto-save is
 // enabled and a ledger is configured. html is nil for now — the porcelain path
 // never renders HTML just to save it (that's a skill-side, opt-in action).
@@ -279,6 +294,54 @@ func runPlanSave(cmd *cobra.Command) error {
 
 	slog.Info("plan_saved", "dir", dir, "html", htmlPath != "", "annotations", len(result.Annotations))
 	fmt.Fprintf(cmd.OutOrStdout(), "Saved plan to ledger: %s\n", dir)
+
+	// Branding guarantee: every render the skill saves is checked for the
+	// earned-and-conditional SageOx attribution. Warn-only — a missing credit
+	// must never block the save (fail-open). Run `ox plan lint <slug>` to recheck.
+	for _, f := range plan.LintBranding(html, result) {
+		cli.PrintHint(fmt.Sprintf("plan-lint [%s]: %s", f.Rule, f.Message))
+	}
+	return nil
+}
+
+// runPlanLint loads a saved plan's HTML render and reports SageOx-attribution
+// findings. Advisory by default; --strict makes it exit non-zero on findings so
+// a golden check or CI step can enforce the contract. Fail-open on a missing or
+// LFS-dehydrated render (nothing local to lint).
+func runPlanLint(cmd *cobra.Command, slug string, strict bool) error {
+	out := cmd.OutOrStdout()
+	gitRoot := findGitRoot()
+
+	_, res, info, err := plan.Load(gitRoot, slug)
+	if err != nil {
+		return err
+	}
+
+	path, _, isPointer, exists := plan.PlanHTMLPath(info.Dir)
+	if !exists {
+		fmt.Fprintln(out, "No HTML render for this plan — nothing to lint.")
+		return nil
+	}
+	if isPointer {
+		cli.PrintHint("This plan's HTML is stored in LFS and not hydrated locally; cannot lint its content.")
+		return nil
+	}
+	html, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read plan html %q: %w", path, err)
+	}
+
+	findings := plan.LintBranding(html, res)
+	if len(findings) == 0 {
+		fmt.Fprintln(out, cli.StyleSuccess.Render("✓")+" SageOx attribution OK")
+		return nil
+	}
+	for _, f := range findings {
+		fmt.Fprintf(out, "%s [%s] %s\n", cli.StyleWarning.Render("!"), f.Rule, f.Message)
+	}
+	if strict {
+		return fmt.Errorf("%d branding lint finding(s)", len(findings))
+	}
 	return nil
 }
 
@@ -597,9 +660,12 @@ func init() {
 	planSaveCmd.Flags().String("annotations", "", "merged annotations.json: ox --json badges + agent judgment badges (required)")
 	planSaveCmd.Flags().String("html", "", "optional pre-rendered HTML; size-gated plain-git-vs-LFS on save")
 
+	planLintCmd.Flags().Bool("strict", false, "exit non-zero when the render has attribution findings (for CI / golden checks)")
+
 	planCmd.AddCommand(planListCmd)
 	planCmd.AddCommand(planViewCmd)
 	planCmd.AddCommand(planSaveCmd)
+	planCmd.AddCommand(planLintCmd)
 
 	planCmd.GroupID = "dev"
 	rootCmd.AddCommand(planCmd)

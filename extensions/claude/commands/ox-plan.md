@@ -230,6 +230,7 @@ One **hero diagram near the top** captures the whole shape. Add a second diagram
 - **Only when it legitimately helped.** If `ox plan --json` returned no badges and an empty `context[]` (an un-enriched plan), add NO SageOx credit — there is nothing to credit.
 - **Never overclaim.** SageOx provided context and signals; the human and the agent wrote the plan. Credit the enrichment, not the authorship. No banners, no marketing copy, no "moat"/"powered by" language — one calm line in the footer.
 - Judgment badges drawn from the SageOx context bundle may carry a small "via SageOx context" provenance note where it reads naturally, but don't repeat it on every badge.
+- **Enforced, not just requested.** `ox plan save` lints the render for this contract (footer credit + an anchored OX marker when the plan carried enrichment; no overclaim on un-enriched plans; no live-remote avatar) and warns on any miss. Re-check anytime with `ox plan lint <slug>` (add `--strict` to fail on findings). A clean lint is part of "done".
 
 **Concise, high-signal prose.** No filler. Every sentence earns its place. Code identifiers in `<code>`. Don't restate what a diagram or badge already shows.
 
