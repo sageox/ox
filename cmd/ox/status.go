@@ -961,7 +961,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 
 	if bubblesSummary.Total > 0 || len(otherRows) > 0 {
 		b.WriteString("\n")
-		b.WriteString(statusHeaderStyle.Render("Knowledge bubbles"))
+		b.WriteString(statusHeaderStyle.Render("Knowledge Bubbles"))
 		b.WriteString("  ")
 		b.WriteString(statusMutedStyle.Render(bubblesCountSummary(bubblesSummary, len(otherRows))))
 		b.WriteString("\n")

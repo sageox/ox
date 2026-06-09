@@ -15,7 +15,6 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/kb"
-	"github.com/sageox/ox/internal/ui"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -411,7 +410,7 @@ func stripANSIBubbles(s string) string {
 func TestBubblesCountSummary(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, "13 total · 7 owners",
+	assert.Equal(t, "13 bubbles · 7 owners",
 		bubblesCountSummary(statusBubblesSummary{Total: 13}, 7))
 
 	// merger total unavailable → fall back to the rendered count alone
@@ -442,20 +441,21 @@ func TestSortOtherBubbleRows_NeedsAttentionFirst(t *testing.T) {
 	assert.Equal(t, []string{"Bravo", "Charlie", "Alpha", "Zulu"}, order)
 }
 
-// TestRenderOtherBubbleRows verifies the owner-grouped tree: each owner is a
-// parent node `@slug  (Display Name)` with its bubble nested under a tree glyph
-// as `(team)` + status. Slugs are never truncated, the shared on-disk prefix
-// prints once, private is the silent default while PUBLIC is flagged, and full
-// paths appear only under verbose.
+// TestRenderOtherBubbleRows verifies the owner-grouped listing matches the
+// native `ox status` label-column idiom: each owner is a label-row (@slug +
+// display name) with its bubble as an indented sub-field (type-as-label,
+// status-as-value), NO tree glyphs, a blank line between owners, slugs never
+// truncated, the on-disk prefix printed once, private silent / PUBLIC flagged,
+// and full paths only under verbose.
 //
-// Failure prevented: the section regresses to repeating a full path per row,
-// hides per-bubble status, truncates a slug with "…", buries the owner↔bubble
-// relationship, or clutters every row with a redundant "private" marker.
+// Failure prevented: the section regresses to a cramped, glyph-heavy block that
+// clashes with the rest of status, truncates a slug, buries the bubble type, or
+// clutters every row with a redundant "private" marker.
 func TestRenderOtherBubbleRows(t *testing.T) {
 	t.Parallel()
 
 	base := "/home/u/.local/share/sageox/sageox.ai/teams"
-	longSlug := "dry-run-ice-cream-2026-05-01" // would be truncated under a 1-line layout
+	longSlug := "dry-run-ice-cream-2026-05-01"
 	rows := []otherTeamRow{
 		{
 			name: "SageOx Internal", slug: "sageox-internal", bubbleType: "team", visibility: "private",
@@ -476,14 +476,26 @@ func TestRenderOtherBubbleRows(t *testing.T) {
 
 	out := stripANSIBubbles(renderOtherBubbleRows(rows, false, false))
 
-	// owner parent node: full @slug (never truncated) + display name in parens
-	assert.Contains(t, out, "@sageox-internal  (SageOx Internal)")
-	assert.Contains(t, out, "@"+longSlug+"  (Dry Run - Ice Cream 2026-05-01)", "slug must render in full — no ellipsis")
+	// owner label-row: full @slug (never truncated) + display name
+	assert.Contains(t, out, "@sageox-internal")
+	assert.Contains(t, out, "@"+longSlug, "slug must render in full — no ellipsis")
 	assert.NotContains(t, out, "…", "slugs are never shortened with an ellipsis")
 	assert.NotContains(t, out, "team_aaa", "opaque ids hidden unless --verbose")
 
-	// the bubble nests under the owner as (team) with a tree glyph
-	assert.Contains(t, out, ui.TreeLast+"(team)")
+	// bubble is an indented type sub-label — NO tree glyphs (foreign to the idiom)
+	assert.NotContains(t, out, "└─", "no tree glyphs — matches the label-column idiom")
+	assert.NotContains(t, out, "├─")
+	assert.Regexp(t, `(?m)^  team `, out, "bubble renders as an indented 'team' sub-field")
+
+	// display names align vertically at the shared value column
+	for _, r := range rows {
+		line := ownerLineFor(out, "@"+r.slug)
+		require.NotEmpty(t, line, "owner line present for @%s", r.slug)
+		runes := []rune(line)
+		require.GreaterOrEqual(t, len(runes), bubbleValueCol)
+		assert.Equal(t, r.name, strings.TrimRight(string(runes[bubbleValueCol:]), " "),
+			"display name for @%s must start at the shared value column", r.slug)
+	}
 
 	// shared prefix printed once as a header, never per row
 	assert.Equal(t, 1, strings.Count(out, "on disk"))
@@ -496,9 +508,23 @@ func TestRenderOtherBubbleRows(t *testing.T) {
 	assert.NotContains(t, out, "private", "private is the silent default — no marker")
 	assert.Contains(t, out, "PUBLIC", "public bubbles are flagged")
 
+	// owners separated by a blank line (cards)
+	assert.Contains(t, out, "\n\n@", "a blank line precedes each owner card")
+
 	// verbose reveals the full on-disk path
 	verbose := stripANSIBubbles(renderOtherBubbleRows(rows, false, true))
 	assert.Contains(t, verbose, base+"/team_aaa")
+}
+
+// ownerLineFor returns the (ANSI-stripped) line beginning with the given owner
+// slug prefix, or "" if not found.
+func ownerLineFor(out, prefix string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	return ""
 }
 
 // TestRenderBubbleStatus covers each status cell variant and that the freshness
