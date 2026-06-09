@@ -323,8 +323,11 @@ func renderOtherBubbleRows(rows []otherTeamRow, bootstrapping, verbose bool) str
 	}
 	var b strings.Builder
 
-	// shared on-disk prefix, printed once instead of per row
-	base := filepath.Dir(rows[0].path)
+	// shared on-disk prefix, printed once instead of per row. Derived from the
+	// directory common to ALL rows (not just rows[0], which attention-sort may
+	// reorder), so the header stays accurate if bubbles ever span different
+	// parents (e.g. teams/ and kb/).
+	base := commonBubbleBase(rows)
 	b.WriteString(statusLabelStyle.Render("  on disk"))
 	b.WriteString(statusMutedStyle.Render(shortenHome(base) + string(os.PathSeparator)))
 	b.WriteString("\n\n")
@@ -363,6 +366,38 @@ func renderOtherBubbleRows(rows []otherTeamRow, bootstrapping, verbose bool) str
 // every bubble is private, flagging only the exception is what makes it pop.
 func renderPublicFlag() string {
 	return statusPublicStyle.Bold(true).Render("PUBLIC")
+}
+
+// commonBubbleBase returns the deepest directory shared by every row's parent,
+// so the "on disk" header is truthful even when rows live under different
+// parents. With the usual single-parent case it just returns that parent.
+func commonBubbleBase(rows []otherTeamRow) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	base := filepath.Dir(rows[0].path)
+	for _, r := range rows[1:] {
+		base = commonDir(base, filepath.Dir(r.path))
+	}
+	return base
+}
+
+// commonDir returns the longest shared leading directory of a and b.
+func commonDir(a, b string) string {
+	if a == b {
+		return a
+	}
+	sep := string(os.PathSeparator)
+	as, bs := strings.Split(a, sep), strings.Split(b, sep)
+	n := len(as)
+	if len(bs) < n {
+		n = len(bs)
+	}
+	i := 0
+	for i < n && as[i] == bs[i] {
+		i++
+	}
+	return strings.Join(as[:i], sep)
 }
 
 // renderSlugRef styles a slug reference: the sigil (@ for an owner, # for a

@@ -967,7 +967,16 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString("\n")
 		b.WriteString(statusMutedStyle.Render("─────────────────"))
 		b.WriteString("\n")
-		b.WriteString(renderOtherBubbleRows(otherRows, daemonStatus.IsBootstrapping(), verbose))
+		if len(otherRows) > 0 {
+			b.WriteString(renderOtherBubbleRows(otherRows, daemonStatus.IsBootstrapping(), verbose))
+		} else {
+			// bubbles exist (e.g. personal/profile) but none are team contexts
+			// cloned locally — point at the full list rather than leave an
+			// empty block under the header.
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("no team contexts cloned locally — run 'ox kb list' to see all bubbles"))
+			b.WriteString("\n")
+		}
 	}
 
 	if !hasAnyTeams && repoTeamID == "" {

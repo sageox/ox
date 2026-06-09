@@ -516,6 +516,10 @@ func TestRenderBubbleStatus(t *testing.T) {
 	wedged := stripANSIBubbles(renderBubbleStatus(gitRepoStatus{Exists: true, RebaseInProgress: true}, true, false))
 	assert.Equal(t, "⚠ rebase wedged", wedged)
 
+	// the other IsWedged() branch: diverged (both ahead and behind)
+	diverged := stripANSIBubbles(renderBubbleStatus(gitRepoStatus{Exists: true, AheadCount: 2, BehindCount: 1}, true, false))
+	assert.Equal(t, "⚠ diverged", diverged)
+
 	notCloned := stripANSIBubbles(renderBubbleStatus(gitRepoStatus{}, false, false))
 	assert.Equal(t, "⚠ not cloned", notCloned)
 }
@@ -529,4 +533,26 @@ func TestRenderSlugRef(t *testing.T) {
 	assert.Equal(t, "@sageox", out)
 	out = stripANSIBubbles(renderSlugRef("#", "marketing"))
 	assert.Equal(t, "#marketing", out)
+}
+
+// TestCommonBubbleBase verifies the "on disk" prefix is the directory shared by
+// ALL rows, so it stays accurate if bubbles ever live under different parents
+// (e.g. teams/ and kb/) — not just the first attention-sorted row's parent.
+func TestCommonBubbleBase(t *testing.T) {
+	t.Parallel()
+
+	d := "/home/u/.local/share/sageox/sageox.ai"
+	// all under teams/ → that shared parent
+	same := []otherTeamRow{
+		{path: d + "/teams/team_a"},
+		{path: d + "/teams/team_b"},
+	}
+	assert.Equal(t, d+"/teams", commonBubbleBase(same))
+
+	// mixed teams/ and kb/ → the endpoint dir they share, not teams/
+	mixed := []otherTeamRow{
+		{path: d + "/teams/team_a"},
+		{path: d + "/kb/kb_x"},
+	}
+	assert.Equal(t, d, commonBubbleBase(mixed))
 }
