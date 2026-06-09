@@ -65,10 +65,10 @@ func TestInspectRepo(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		setup     func(t *testing.T) string
-		wantShall bool
-		wantPart  bool
+		name       string
+		setup      func(t *testing.T) string
+		wantShall  bool
+		wantPart   bool
 		wantReason string
 	}{
 		{

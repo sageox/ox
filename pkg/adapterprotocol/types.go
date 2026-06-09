@@ -304,8 +304,8 @@ type EntriesEventData struct {
 
 // Event names emitted by adapters.
 const (
-	EventEntries        = "entries"
-	EventTerminalError  = "terminal_error"
+	EventEntries       = "entries"
+	EventTerminalError = "terminal_error"
 )
 
 // TerminalErrorSource identifies how a terminal condition was detected.
@@ -335,15 +335,15 @@ const (
 // time — the UI falls back to ResetsAtRaw verbatim. Both may be empty
 // when no reset hint was present in the matched text.
 type TerminalErrorData struct {
-	Reason       string     `json:"reason"`
-	Source       string     `json:"source"` // see TerminalSource* constants
-	PatternID    string     `json:"pattern_id,omitempty"`
-	RawMessage   string     `json:"raw_message"` // capped at 512 bytes
-	ResetsAtRaw  string     `json:"resets_at_raw,omitempty"`
-	ResetsAt     *time.Time `json:"resets_at,omitempty"`
-	EntrySeq     int64      `json:"entry_seq,omitempty"`
-	DetectedAt   time.Time  `json:"detected_at"`
-	ConfirmedAt  time.Time  `json:"confirmed_at"`
+	Reason      string     `json:"reason"`
+	Source      string     `json:"source"` // see TerminalSource* constants
+	PatternID   string     `json:"pattern_id,omitempty"`
+	RawMessage  string     `json:"raw_message"` // capped at 512 bytes
+	ResetsAtRaw string     `json:"resets_at_raw,omitempty"`
+	ResetsAt    *time.Time `json:"resets_at,omitempty"`
+	EntrySeq    int64      `json:"entry_seq,omitempty"`
+	DetectedAt  time.Time  `json:"detected_at"`
+	ConfirmedAt time.Time  `json:"confirmed_at"`
 }
 
 // --- Serve mode method names ---

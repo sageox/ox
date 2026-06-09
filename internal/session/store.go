@@ -311,17 +311,17 @@ type SessionInfo struct {
 	Size            int64               `json:"size"`
 	CreatedAt       time.Time           `json:"created_at"`
 	ModTime         time.Time           `json:"mod_time"`
-	HydrationStatus lfs.HydrationStatus `json:"hydration_status,omitempty"` // hydrated/dehydrated/partial
-	Username        string              `json:"username,omitempty"`         // from meta.json
-	Title           string              `json:"title,omitempty"`            // from meta.json
-	Summary         string              `json:"summary,omitempty"`          // from meta.json
-	Recording       bool                `json:"recording,omitempty"`        // true if session is actively being recorded
-	AgentID         string              `json:"agent_id,omitempty"`         // from .recording.json when recording
-	EntryCount      int                 `json:"entry_count,omitempty"`      // from .recording.json or meta.json
-	IsSubagent      bool                `json:"is_subagent,omitempty"`      // true if spawned by a parent session
-	ParentPID       int                 `json:"parent_pid,omitempty"`       // from .recording.json for liveness detection
-	Origin          string              `json:"origin,omitempty"`           // session origin: "human", "subagent", "agent"
-	HasRawData      bool                `json:"has_raw_data,omitempty"`     // true if raw.jsonl exists with content on disk
+	HydrationStatus lfs.HydrationStatus `json:"hydration_status,omitempty"`   // hydrated/dehydrated/partial
+	Username        string              `json:"username,omitempty"`           // from meta.json
+	Title           string              `json:"title,omitempty"`              // from meta.json
+	Summary         string              `json:"summary,omitempty"`            // from meta.json
+	Recording       bool                `json:"recording,omitempty"`          // true if session is actively being recorded
+	AgentID         string              `json:"agent_id,omitempty"`           // from .recording.json when recording
+	EntryCount      int                 `json:"entry_count,omitempty"`        // from .recording.json or meta.json
+	IsSubagent      bool                `json:"is_subagent,omitempty"`        // true if spawned by a parent session
+	ParentPID       int                 `json:"parent_pid,omitempty"`         // from .recording.json for liveness detection
+	Origin          string              `json:"origin,omitempty"`             // session origin: "human", "subagent", "agent"
+	HasRawData      bool                `json:"has_raw_data,omitempty"`       // true if raw.jsonl exists with content on disk
 	StopReason      string              `json:"stop_reason,omitempty"`        // how session ended (StopReason* constants)
 	SuspendedAt     *time.Time          `json:"suspended_at,omitempty"`       // ADR-020: non-nil while session is actively paused
 	StopDetail      string              `json:"stop_detail,omitempty"`        // human-readable detail (matched message, capped 512B)

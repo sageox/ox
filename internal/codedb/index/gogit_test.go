@@ -171,7 +171,7 @@ func TestPlainOpenTolerant_AlternatesUpstreamLimitation(t *testing.T) {
 	}
 
 	cases := []struct {
-		name       string
+		name         string
 		makeRelative bool
 	}{
 		{name: "absolute_path", makeRelative: false},

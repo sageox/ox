@@ -141,8 +141,8 @@ type MetricsSnapshot struct {
 type HistogramSummary struct {
 	Count   uint64    `json:"count"`
 	SumMs   float64   `json:"sum_ms"`
-	Buckets []uint64  `json:"buckets"`           // parallel to Boundaries + overflow
-	Bounds  []float64 `json:"boundaries"`        // canonical bucket boundaries (ms)
+	Buckets []uint64  `json:"buckets"`    // parallel to Boundaries + overflow
+	Bounds  []float64 `json:"boundaries"` // canonical bucket boundaries (ms)
 }
 
 // Snapshot returns a deep copy of the metrics state. Safe to call from

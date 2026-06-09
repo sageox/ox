@@ -30,8 +30,8 @@ func initTestRepo(t *testing.T) string {
 			// scrub host gitconfig so commit.gpgsign / signingkey can't prompt
 			// for ssh/gpg passphrases during the test commit. os.DevNull keeps
 			// this portable to Windows CI (NUL there, /dev/null elsewhere).
-			"GIT_CONFIG_GLOBAL=" + os.DevNull,
-			"GIT_CONFIG_SYSTEM=" + os.DevNull,
+			"GIT_CONFIG_GLOBAL="+os.DevNull,
+			"GIT_CONFIG_SYSTEM="+os.DevNull,
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)

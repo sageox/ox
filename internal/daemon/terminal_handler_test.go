@@ -245,11 +245,11 @@ func TestProcessTerminalEvent_AuditLog(t *testing.T) {
 
 	h := newTestHandler(t, root)
 	data := adapterprotocol.TerminalErrorData{
-		Reason:     "rate_limited",
-		Source:     "regex",
-		PatternID:  "claude_code.system_error.usage_limit",
-		RawMessage: "5-hour limit reached resets 3pm",
-		DetectedAt: time.Now().UTC(),
+		Reason:      "rate_limited",
+		Source:      "regex",
+		PatternID:   "claude_code.system_error.usage_limit",
+		RawMessage:  "5-hour limit reached resets 3pm",
+		DetectedAt:  time.Now().UTC(),
 		ConfirmedAt: time.Now().UTC(),
 	}
 	if err := h.processTerminalEvent(context.Background(), "claude-code", "Ox1234", sessionPath, data, true); err != nil {

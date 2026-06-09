@@ -110,4 +110,3 @@ func TestHasAlternates(t *testing.T) {
 			"worktree must inherit main repo's alternates via rev-parse --git-common-dir")
 	})
 }
-
