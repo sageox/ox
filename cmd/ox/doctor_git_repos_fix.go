@@ -591,7 +591,12 @@ func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 	defer cancel()
 
 	if repoType == "team-context" {
-		// team contexts use shared two-phase partial clone (same code as daemon)
+		// team contexts use shared two-phase partial clone (same code as daemon).
+		// Pre-check credentials exist so we fail with a clear error rather than
+		// a generic git auth failure; but pass the BARE URL to TwoPhaseClone —
+		// it resolves the PAT via the ox credential helper. Embedding the token
+		// in the URL (BuildAuthURL) would persist it into .git/config, which
+		// ox-eeqi explicitly forbids.
 		creds, err := gitserver.LoadCredentialsForEndpoint(endpointURL)
 		if err != nil {
 			return fmt.Errorf("load credentials: %w", err)
@@ -599,11 +604,7 @@ func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 		if creds == nil {
 			return fmt.Errorf("direct clone failed: %w", gitserver.ErrNoCredentials)
 		}
-		authURL, err := gitserver.BuildAuthURL(cloneURL, creds)
-		if err != nil {
-			return fmt.Errorf("build auth URL: %w", err)
-		}
-		result, err := gitserver.TwoPhaseClone(ctx, authURL, targetPath)
+		result, err := gitserver.TwoPhaseClone(ctx, cloneURL, targetPath)
 		if err != nil {
 			return fmt.Errorf("direct clone failed: %w", err)
 		}
@@ -639,11 +640,14 @@ func cloneRepoForFix(issue repoPathIssue) error {
 	}
 
 	if fetchErr != nil {
-		// Cloud doesn't have the repo - don't delete anything
+		// Cloud doesn't have the repo (or the lookup failed) - don't delete
+		// anything. Surface the underlying reason so the user can distinguish
+		// "provisioning still pending" (status=pending) from an auth/network
+		// failure — the generic "not provisioned" message hides both.
 		if issue.repoType == "ledger" {
-			return fmt.Errorf("cloud has not provisioned ledger yet - no changes made")
+			return fmt.Errorf("ledger not available yet - no changes made: %w", fetchErr)
 		}
-		return fmt.Errorf("cloud has not provisioned team context yet - no changes made")
+		return fmt.Errorf("team context not available yet - no changes made: %w", fetchErr)
 	}
 
 	// Now that we know cloud has the repo, proceed with directory cleanup if needed

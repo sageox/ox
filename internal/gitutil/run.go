@@ -3,6 +3,7 @@ package gitutil
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -23,6 +24,13 @@ func RunGit(ctx context.Context, repoPath string, args ...string) (string, error
 	if repoPath != "" {
 		cmd.Dir = repoPath
 	}
+	// GIT_TERMINAL_PROMPT=0: ox runs git non-interactively (daemon, CLI
+	// fallbacks). Without this, a network op missing credentials prompts for
+	// a username on a TTY that isn't there and EOFs into a confusing
+	// "could not read Username ... Input/output error". Disabling the prompt
+	// makes any credential gap fail fast with a clear error. Tests already
+	// set this via internal/testenv, so their behavior is unchanged.
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.CombinedOutput()
 	sanitized := SanitizeOutput(strings.TrimSpace(string(output)))
 

@@ -224,7 +224,9 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 	fetchCtx, fetchSpan := perf.Start(ctx, "git_fetch")
 	fetchArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
 	fetchArgs = append(fetchArgs, "fetch", "--quiet")
-	fetchCmd := exec.CommandContext(fetchCtx, "git", fetchArgs...)
+	// NewNetworkCmd disables the credential prompt so a lapsed PAT fails fast
+	// instead of hanging the daemon's background sync cycle on a TTY-less prompt.
+	fetchCmd := gitutil.NewNetworkCmd(fetchCtx, fetchArgs...)
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
 		perf.RecordError(fetchSpan, err)
 		fetchSpan.End()
@@ -284,7 +286,7 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 	_, pullSpan := perf.Start(ctx, "git_pull_rebase")
 	pullArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
 	pullArgs = append(pullArgs, "pull", "--rebase", "--autostash", "--quiet")
-	pullCmd := exec.CommandContext(ctx, "git", pullArgs...)
+	pullCmd := gitutil.NewNetworkCmd(ctx, pullArgs...)
 	output, err := pullCmd.CombinedOutput()
 	if err != nil {
 		perf.RecordError(pullSpan, err)

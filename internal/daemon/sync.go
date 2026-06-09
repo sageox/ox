@@ -1886,14 +1886,10 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			_ = progress.WriteStage("cloning", "Cloning repository...")
 		}
 		// Per ox-eeqi: clone with ox-managed credential helper, not embedded
-		// URL credentials. `-c credential.helper=` empty clears inherited
-		// helpers; the second `-c` installs ours for this single invocation.
-		helperCmd := gitserver.DefaultHelperCommand()
-		preArgs := []string{
-			"-c", "credential.helper=",
-			"-c", "credential.helper=" + helperCmd,
-		}
-		cloneArgs := append(preArgs, gitHTTPTimeoutFlags()...)
+		// URL credentials. CredentialHelperArgs clears inherited helpers and
+		// installs ours for this single invocation. Shared with the
+		// team-context two-phase clone so the two paths cannot drift.
+		cloneArgs := append(gitserver.CredentialHelperArgs(), gitHTTPTimeoutFlags()...)
 		// Belt-and-suspenders hardening on the daemon's auto-clone path:
 		//   - protocol.{file,ext}.allow=never disables ext::sh:// transport (CVE-2017-1000117
 		//     class) and file:// fetch from submodules / .gitmodules, even though we already
@@ -1912,7 +1908,10 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			"-c", "protocol.ext.allow=never",
 			"clone", "--quiet", "--", cloneURL, payload.RepoPath,
 		)
-		cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)
+		// NewNetworkCmd sets GIT_TERMINAL_PROMPT=0 so a credential gap fails
+		// fast instead of EOFing on a username prompt in the daemon's TTY-less
+		// environment.
+		cloneCmd := gitutil.NewNetworkCmd(ctx, cloneArgs...)
 		// set cmd.Dir so git doesn't fail when daemon CWD has been deleted
 		if parentDir := filepath.Dir(payload.RepoPath); parentDir != "" {
 			_ = os.MkdirAll(parentDir, 0755)
@@ -2010,8 +2009,10 @@ func (s *SyncScheduler) remoteRefCheck(ctx context.Context, repoPath string) boo
 		remoteRef = "refs/heads/" + strings.TrimPrefix(upstream, "origin/")
 	}
 
-	// git ls-remote origin <ref> — single HTTP round-trip, no local locks
-	lsCmd := exec.CommandContext(lsCtx, "git", "-C", repoPath, "ls-remote", "origin", remoteRef)
+	// git ls-remote origin <ref> — single HTTP round-trip, no local locks.
+	// NewNetworkCmd disables the credential prompt so a missing/expired PAT
+	// fails fast here instead of hanging, then falls through to the full fetch.
+	lsCmd := gitutil.NewNetworkCmd(lsCtx, "-C", repoPath, "ls-remote", "origin", remoteRef)
 	lsOut, err := lsCmd.Output()
 	if err != nil {
 		s.logger.Debug("ls-remote failed, falling through to fetch", "path", repoPath, "error", err)

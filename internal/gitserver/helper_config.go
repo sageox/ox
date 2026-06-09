@@ -40,6 +40,24 @@ func DefaultHelperCommand() string {
 	return "!ox git-credential-helper"
 }
 
+// CredentialHelperArgs returns the `-c` flags that install the ox-managed
+// credential helper for a single git invocation, without touching the repo's
+// persisted .git/config. The leading empty `credential.helper=` clears any
+// inherited helpers so ours is authoritative for that one command; the second
+// installs the ox helper.
+//
+// Use this on network git operations that run before the helper has been
+// written into .git/config — notably the initial clone (the repo doesn't
+// exist yet, so InstallCredentialHelper can't be called first). Both the
+// ledger full-clone and the team-context two-phase clone build their clone
+// argv from this so the two paths cannot drift.
+func CredentialHelperArgs() []string {
+	return []string{
+		"-c", "credential.helper=",
+		"-c", "credential.helper=" + DefaultHelperCommand(),
+	}
+}
+
 // HelperConfig holds the parameters needed to install an ox-managed git
 // credential helper into a single repo's .git/config. The shell command
 // the helper invokes is produced by the cmd/ox layer (see HelperCommandString)

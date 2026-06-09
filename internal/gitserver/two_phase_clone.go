@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -41,6 +41,12 @@ var TestAllowFileTransport bool
 // This function is used by both the daemon (normal path) and the CLI
 // (doctor fallback when daemon unavailable).
 //
+// cloneURL MUST be bare (no embedded oauth2:TOKEN userinfo). Credentials are
+// resolved via the ox credential helper — installed as argv flags on the
+// phase-1 clone and persisted into .git/config afterward. Passing a
+// token-embedded URL would leak the PAT into .git/config (forbidden by
+// ox-eeqi) without changing behavior.
+//
 // TODO(investigate): go-git v6 has native support for this entire sequence:
 //   - CloneOptions.Filter, Depth, NoCheckout, SingleBranch for phase 1
 //   - CheckoutOptions.SparseCheckoutDirectories for phase 2
@@ -58,33 +64,11 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 	if err := os.MkdirAll(parentDir, 0755); err != nil {
 		return nil, fmt.Errorf("create parent dir %s: %w", parentDir, err)
 	}
-	// Hardening: `-c protocol.{file,ext}.allow=never` disables file:// and
-	// ext::sh:// transports for this invocation, in case a malicious submodule
-	// or redirect tries to coerce git into a CVE-2017-1000117-class fetch.
-	// `--` terminates option parsing so a hostile URL starting with "-" is
-	// treated as a positional, not a flag.
-	//
-	// TestAllowFileTransport is a test-only override (see its godoc); ext://
-	// hardening is always applied — no production or test code legitimately
-	// needs it.
-	cloneArgs := gitutil.GitHTTPTimeoutFlags()
-	if !TestAllowFileTransport {
-		cloneArgs = append(cloneArgs, "-c", "protocol.file.allow=never")
-	}
-	cloneArgs = append(cloneArgs,
-		"-c", "protocol.ext.allow=never",
-		"clone",
-		"--filter=blob:none",
-		"--depth=1",
-		"--sparse",
-		"--no-checkout",
-		"--single-branch",
-		"--branch", "main",
-		"--quiet",
-		"--",
-		cloneURL, repoPath,
-	)
-	cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)
+	// NewNetworkCmd sets GIT_TERMINAL_PROMPT=0 so a credential gap fails fast
+	// with a clear error instead of EOFing on a username prompt in the
+	// TTY-less daemon (and doctor fallback). Credentials are supplied via the
+	// helper flags in phaseOneCloneArgs.
+	cloneCmd := gitutil.NewNetworkCmd(ctx, phaseOneCloneArgs(cloneURL, repoPath)...)
 	cloneCmd.Dir = parentDir
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
 		sanitized := gitutil.SanitizeOutput(string(output))
@@ -92,6 +76,23 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 			return nil, fmt.Errorf("phase 1 clone failed: %s", sanitized)
 		}
 		return nil, fmt.Errorf("phase 1 clone failed: %w", err)
+	}
+
+	// Install the ox-managed credential helper into the fresh clone's
+	// .git/config so the phase-2 `fetch --unshallow` below and all later
+	// fetch/pull operations resolve credentials via the helper. The phase-1
+	// clone above carries the helper via argv (the repo didn't exist yet);
+	// from here on it lives in .git/config. Host-scoped to the clone host so
+	// it never fires for unrelated remotes. Best-effort — file:// test clones
+	// have no host and unshallow is non-fatal anyway.
+	if host := cloneHost(cloneURL); host != "" {
+		if err := InstallCredentialHelper(repoPath, HelperConfig{
+			Host:    host,
+			Command: DefaultHelperCommand(),
+		}); err != nil {
+			slog.Warn("two-phase clone: failed to install credential helper",
+				"path", repoPath, "host", host, "error", err)
+		}
 	}
 
 	// materialize only .sageox/ to read the manifest.
@@ -161,6 +162,53 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 		ManifestConfig: cfg,
 		SparsePaths:    sparsePaths,
 	}, nil
+}
+
+// phaseOneCloneArgs builds the argv for the phase-1 partial clone.
+//
+// Credential-helper flags come first so git resolves the PAT via the
+// ox-managed helper instead of prompting (the team-context clone is given a
+// bare URL — no embedded userinfo). Then protocol hardening:
+// `-c protocol.{file,ext}.allow=never` disables file:// and ext::sh://
+// transports for this invocation, in case a malicious submodule or redirect
+// tries to coerce git into a CVE-2017-1000117-class fetch. `--` terminates
+// option parsing so a hostile URL starting with "-" is treated as a
+// positional, not a flag.
+//
+// TestAllowFileTransport is a test-only override (see its godoc); ext://
+// hardening is always applied — no production or test code legitimately
+// needs it.
+func phaseOneCloneArgs(cloneURL, repoPath string) []string {
+	args := CredentialHelperArgs()
+	args = append(args, gitutil.GitHTTPTimeoutFlags()...)
+	if !TestAllowFileTransport {
+		args = append(args, "-c", "protocol.file.allow=never")
+	}
+	args = append(args,
+		"-c", "protocol.ext.allow=never",
+		"clone",
+		"--filter=blob:none",
+		"--depth=1",
+		"--sparse",
+		"--no-checkout",
+		"--single-branch",
+		"--branch", "main",
+		"--quiet",
+		"--",
+		cloneURL, repoPath,
+	)
+	return args
+}
+
+// cloneHost extracts the host from a clone URL for credential-helper scoping.
+// Returns "" for URLs without an https host (e.g. file:// test clones), in
+// which case no helper is installed.
+func cloneHost(cloneURL string) string {
+	u, err := url.Parse(cloneURL)
+	if err != nil || u.Scheme != "https" {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // ValidateTeamContextClone checks that a freshly cloned team context has
