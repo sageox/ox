@@ -50,10 +50,11 @@ const (
 	planNudgeMaxAge = 30 * time.Minute
 
 	// nonTrivialMinFilesHook / nonTrivialMinStepsHook mirror internal/plan's
-	// unexported nonTrivialMinFiles / nonTrivialMinSteps. The hook stays
-	// deliberately decoupled from the plan package (another agent owns it), so it
-	// can't import those consts — it only reads the computed signals over JSON.
-	// These local copies are used solely for wording the NonTrivial-only nudge.
+	// exported NonTrivialMinFiles / NonTrivialMinSteps. The hook stays
+	// deliberately decoupled from the plan package (it reads the computed signals
+	// over JSON, never recomputes), so these stay local copies used solely for
+	// wording the NonTrivial-only nudge. TestPlanNudgeThresholds_MatchPlanPackage
+	// asserts the copies never silently diverge from the authoritative values.
 	nonTrivialMinFilesHook = 2
 	nonTrivialMinStepsHook = 5
 

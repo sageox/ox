@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/plan"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -114,6 +115,30 @@ func TestFormatPlanNudgeLine_NonTrivialOnly(t *testing.T) {
 		assert.Contains(t, line, "HTML page")
 		assert.NotContains(t, line, "\n")
 	})
+
+	t.Run("steps only (files below threshold)", func(t *testing.T) {
+		var res planJSONResult
+		res.Signals.NonTrivial = true
+		res.Signals.Files = 1 // below nonTrivialMinFilesHook — must not be named
+		res.Signals.Steps = 7
+
+		line := formatPlanNudgeLine(res)
+		assert.Contains(t, line, "7 steps")
+		assert.NotContains(t, line, "file", "files below threshold must not be named")
+		assert.Contains(t, line, "HTML page")
+		assert.NotContains(t, line, "\n")
+	})
+}
+
+// TestPlanNudgeThresholds_MatchPlanPackage guards the deliberately-duplicated
+// non-triviality thresholds: the hook keeps local copies for wording, but they
+// must never silently diverge from internal/plan's authoritative values (a
+// divergence would make planScopePhrase mis-word the nudge with no other signal).
+// Failure prevented: the plan package changes a threshold and the hook's wording
+// gate drifts out of sync unnoticed.
+func TestPlanNudgeThresholds_MatchPlanPackage(t *testing.T) {
+	assert.Equal(t, plan.NonTrivialMinFiles, nonTrivialMinFilesHook, "hook file-threshold mirror drifted from plan package")
+	assert.Equal(t, plan.NonTrivialMinSteps, nonTrivialMinStepsHook, "hook step-threshold mirror drifted from plan package")
 }
 
 // --- C. Stash + emit roundtrip (deliver-once via UserPromptSubmit channel) ---

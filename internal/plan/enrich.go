@@ -9,11 +9,13 @@ import (
 )
 
 const (
-	// nonTrivialMinFiles: a multi-file plan (>= 2 distinct files) is non-trivial.
-	nonTrivialMinFiles = 2
-	// nonTrivialMinSteps: a ~5+ step plan is non-trivial, matching the prime
+	// NonTrivialMinFiles: a multi-file plan (>= 2 distinct files) is non-trivial.
+	// Exported as the single source of truth: the plan-exit hook mirrors these
+	// for wording and a drift test asserts the copies stay equal.
+	NonTrivialMinFiles = 2
+	// NonTrivialMinSteps: a ~5+ step plan is non-trivial, matching the prime
 	// "~5+ steps" criterion. H2 sections are the step proxy.
-	nonTrivialMinSteps = 5
+	NonTrivialMinSteps = 5
 )
 
 // registry holds the detectors and retrievers contributed by Round 2 packages.
@@ -146,7 +148,7 @@ func summarize(annotations []Annotation, in Input) SignalSummary {
 
 	s.Files = countDistinctFiles(in.Sections)
 	s.Steps = countSteps(in.Sections)
-	s.NonTrivial = s.Files >= nonTrivialMinFiles || s.Steps >= nonTrivialMinSteps
+	s.NonTrivial = s.Files >= NonTrivialMinFiles || s.Steps >= NonTrivialMinSteps
 	return s
 }
 
