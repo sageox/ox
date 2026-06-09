@@ -903,7 +903,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			slug = api.DeriveSlug(name)
 		}
 		expectedPath := paths.TeamContextDir(teamID, projectEndpoint)
-		row := otherTeamRow{name: name, slug: slug, visibility: visibility, access: access, path: expectedPath}
+		row := otherTeamRow{name: name, slug: slug, bubbleType: "team", visibility: visibility, access: access, path: expectedPath}
 		if _, err := os.Stat(filepath.Join(expectedPath, ".git")); err == nil {
 			row.cloned = true
 			var lastSync time.Time

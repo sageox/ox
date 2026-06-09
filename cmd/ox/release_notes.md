@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **`ox status` knowledge bubbles, denser and more useful** — the bubble section used to print a bare count (`9 (8 team, 1 repo)`) and then repeat every team again under "Other Team Contexts" with a full filesystem path on each row. It's now a single, scannable listing: each owner shown as `@slug` with a compact, color-coded freshness status (`✓ 2h`, `⚠ 6 uncommitted`), the shared on-disk prefix printed once instead of per row, and teams that need attention (uncommitted or wedged) sorted to the top. Add `--verbose`/`-v` to reveal the opaque IDs and full paths when you need them.
+- **`ox status` knowledge bubbles, denser and more useful** — the bubble section used to print a bare count (`9 (8 team, 1 repo)`) and then repeat every team again under "Other Team Contexts" with a full filesystem path on each row. It's now an owner-grouped tree: each owner is a parent node `@slug  (Display Name)` with its knowledge bubbles nested beneath, each carrying a compact, color-coded freshness status (`✓ 2h`, `⚠ 6 uncommitted`). The shared on-disk prefix is printed once instead of per row, owners that need attention sort to the top, and slugs are never truncated. Since nearly every bubble is private, private is the silent default and only **PUBLIC** bubbles are flagged (bold, in the public accent color). Add `--verbose`/`-v` to reveal the opaque IDs and full paths.
 
 ## [0.9.1] - 2026-06-08
 

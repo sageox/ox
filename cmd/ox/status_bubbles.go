@@ -32,6 +32,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/status"
+	"github.com/sageox/ox/internal/ui"
 )
 
 // statusBubblesMerger is the seam between status rendering and the F3
@@ -261,11 +262,14 @@ var statusBubblesMergerForRoot = func(projectRoot string) statusBubblesMerger {
 	return newDefaultStatusBubblesMerger(projectRoot)
 }
 
-// otherTeamRow is one line in the dense Knowledge-bubbles listing: a team
-// context available beyond this repo, with its locally-computed git status.
+// otherTeamRow is one entry in the dense Knowledge-bubbles listing: a bubble
+// available beyond this repo, with its locally-computed git status. Rendered
+// as a 2-line card so the full slug, type, name, visibility, and status all
+// fit without truncating the slug.
 type otherTeamRow struct {
 	name       string
 	slug       string
+	bubbleType string // kb type: "team", "personal", etc. — surfaced so the kind is obvious
 	visibility string
 	access     string
 	path       string
@@ -286,13 +290,10 @@ func sortOtherBubbleRows(rows []otherTeamRow) {
 	})
 }
 
-// column widths for the bubble listing — sized so the widest row fits 80
-// columns: 2 indent + 20 slug + 2 + 26 name + 2 + 7 vis + 2 + status(≤16) = 77.
-const (
-	bubbleSlugColW = 20
-	bubbleNameColW = 26
-	bubbleVisColW  = 7
-)
+// bubbleLabelColW is the width of the nested bubble label column ("(team)",
+// "#slug  (repo)", …) before the status column. Labels never truncate; a
+// wider label just pushes the status right.
+const bubbleLabelColW = 22
 
 // bubblesCountSummary describes the bubble totals for the section header,
 // e.g. "13 total · 7 listed". The merger total counts every bubble you can
@@ -303,15 +304,19 @@ const (
 func bubblesCountSummary(s statusBubblesSummary, others int) string {
 	if s.Unavailable || s.Total == 0 {
 		if others == 1 {
-			return "1 team context listed"
+			return "1 owner listed"
 		}
-		return fmt.Sprintf("%d team contexts listed", others)
+		return fmt.Sprintf("%d owners listed", others)
 	}
-	return fmt.Sprintf("%d total · %d listed", s.Total, others)
+	return fmt.Sprintf("%d total · %d owners", s.Total, others)
 }
 
-// renderOtherBubbleRows renders the shared on-disk prefix (once) followed by
-// one aligned, color-coded line per team. Returns "" when there are none.
+// renderOtherBubbleRows renders the shared on-disk prefix (once) followed by an
+// owner-grouped tree: each owner is a parent node `@slug  (Display Name)` with
+// its knowledge bubbles nested beneath under solid tree glyphs. The owner's own
+// context shows as `(team)`; other bubbles would read `#slug  (type)`. Today
+// every owner has exactly one context bubble, so each renders as a 2-line card —
+// the layout absorbs additional bubbles unchanged. Returns "" when empty.
 func renderOtherBubbleRows(rows []otherTeamRow, bootstrapping, verbose bool) string {
 	if len(rows) == 0 {
 		return ""
@@ -325,24 +330,39 @@ func renderOtherBubbleRows(rows []otherTeamRow, bootstrapping, verbose bool) str
 	b.WriteString("\n\n")
 
 	for _, row := range rows {
-		slug := truncateForColumn("@"+row.slug, bubbleSlugColW)
-		name := truncateForColumn(row.name, bubbleNameColW)
-		b.WriteString("  ")
-		b.WriteString(padCell(renderSlugRef(slug[:1], slug[1:]), bubbleSlugColW))
-		b.WriteString("  ")
-		b.WriteString(padCell(statusValueStyle.Render(name), bubbleNameColW))
-		b.WriteString("  ")
-		b.WriteString(padCell(renderVisibility(row.visibility), bubbleVisColW))
-		b.WriteString("  ")
-		b.WriteString(renderBubbleStatus(row.st, row.cloned, bootstrapping))
+		typeLabel := row.bubbleType
+		if typeLabel == "" {
+			typeLabel = "team"
+		}
+		// owner parent node: @slug (never truncated) + display name
+		b.WriteString(renderSlugRef("@", row.slug))
+		b.WriteString(statusMutedStyle.Render("  (" + row.name + ")"))
 		b.WriteString("\n")
+
+		// nested bubble: the owner's context. └─ because it's the only/last child.
+		b.WriteString(statusMutedStyle.Render(ui.TreeLast))
+		b.WriteString(padCell(statusMutedStyle.Render("("+typeLabel+")"), bubbleLabelColW))
+		b.WriteString(renderBubbleStatus(row.st, row.cloned, bootstrapping))
+		// visibility: private is the silent default; only PUBLIC is flagged.
+		if strings.EqualFold(row.visibility, "public") {
+			b.WriteString("  ")
+			b.WriteString(renderPublicFlag())
+		}
+		b.WriteString("\n")
+
 		if verbose {
-			b.WriteString(statusLabelStyle.Render(""))
-			b.WriteString(statusMutedStyle.Render("    " + row.path))
+			b.WriteString(statusMutedStyle.Render("   " + row.path))
 			b.WriteString("\n")
 		}
 	}
 	return b.String()
+}
+
+// renderPublicFlag renders the PUBLIC visibility marker in bold caps using the
+// public semantic token. Private bubbles render no marker at all — since nearly
+// every bubble is private, flagging only the exception is what makes it pop.
+func renderPublicFlag() string {
+	return statusPublicStyle.Bold(true).Render("PUBLIC")
 }
 
 // renderSlugRef styles a slug reference: the sigil (@ for an owner, # for a
