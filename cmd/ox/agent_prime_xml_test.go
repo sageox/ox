@@ -539,9 +539,9 @@ func TestOutputAgentPrimeXML_PlanEnrichmentGuidance(t *testing.T) {
 
 			// the HTML-render recommendation is the differentiator: full tiers
 			// recommend it; Bronze (lighter) does not.
-			hasHTML := strings.Contains(xml, "HTML plan")
+			hasHTML := strings.Contains(xml, "HTML page")
 			if tt.wantFull && !hasHTML {
-				t.Error("full-tier block must recommend rendering an HTML plan")
+				t.Error("full-tier block must recommend rendering an HTML page")
 			}
 			if !tt.wantFull {
 				if hasHTML {

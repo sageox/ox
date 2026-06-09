@@ -564,7 +564,7 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 		return
 	}
 	sb.WriteString("When you produce a plan for non-trivial work (multi-file OR architectural OR touches a hotspot/open-PR OR ~5+ steps), run `ox plan` to enrich it with team context — collisions (incl. teammates actively murmuring on these files), prior art, and expert routing.\n")
-	sb.WriteString("Unless plan.html is off, recommend rendering an enriched HTML plan for the human; render only after they confirm, unless plan.html is always.\n")
+	sb.WriteString("For non-trivial plans, render a human-review HTML page with the `html-plan` skill (it writes a self-contained file and opens it); re-open any saved render with `ox plan --open` or `ox plan view <slug> --open`. Render only after the human confirms, unless plan.html is always; skip if plan.html is off.\n")
 	sb.WriteString("</plan-enrichment-guidance>\n")
 }
 

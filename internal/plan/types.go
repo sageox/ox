@@ -97,14 +97,27 @@ type Input struct {
 	Sections []Section
 }
 
-// SignalSummary is the deterministic rollup of which signals fired. Material is
-// true when the plan warrants surfacing a nudge (any collision OR expert-route
-// OR at least one strong prior-art hit).
+// SignalSummary is the deterministic rollup of which signals fired.
+//
+// Material is the TEAM-CONTEXT axis: true when the plan warrants surfacing a
+// nudge because team context had something to say (any collision OR
+// expert-route OR at least one strong prior-art hit).
+//
+// NonTrivial is the STRUCTURAL axis, independent of team context: true when the
+// plan is substantial enough to warrant an enriched HTML render for human
+// review even on greenfield work where zero team-context signals fire —
+// multi-file (Files >= 2) OR many-step (Steps >= 5). Files counts distinct file
+// references cited across all sections; Steps counts H2 sections (excluding the
+// preamble). These mirror the prime non-triviality criteria; hotspot/open-PR is
+// already covered by Material, and "architectural" is left to agent judgment.
 type SignalSummary struct {
 	Collisions   int  `json:"collisions"`
 	PriorArt     int  `json:"prior_art"`
 	ExpertRoutes int  `json:"expert_routes"`
 	Material     bool `json:"material"`
+	Files        int  `json:"files"`
+	Steps        int  `json:"steps"`
+	NonTrivial   bool `json:"non_trivial"`
 }
 
 // Result is the full output of Enrich: deterministic annotations, the context

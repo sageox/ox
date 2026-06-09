@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sageox/ox/internal/config"
 )
 
 // Plan-exit enrichment nudge (Gold tier — Claude Code).
@@ -47,6 +49,14 @@ const (
 	// later in an unrelated context.
 	planNudgeMaxAge = 30 * time.Minute
 
+	// nonTrivialMinFilesHook / nonTrivialMinStepsHook mirror internal/plan's
+	// unexported nonTrivialMinFiles / nonTrivialMinSteps. The hook stays
+	// deliberately decoupled from the plan package (another agent owns it), so it
+	// can't import those consts — it only reads the computed signals over JSON.
+	// These local copies are used solely for wording the NonTrivial-only nudge.
+	nonTrivialMinFilesHook = 2
+	nonTrivialMinStepsHook = 5
+
 	// planSubprocessTimeout caps the `ox plan --json --persist` call. Enrichment
 	// itself is pure-local, but --persist also saves + synchronously commits and
 	// pushes a draft to the ledger (the chosen durability model), so this is
@@ -71,13 +81,18 @@ type planJSONResult struct {
 		PriorArt     int  `json:"prior_art"`
 		ExpertRoutes int  `json:"expert_routes"`
 		Material     bool `json:"material"`
+		Files        int  `json:"files"`
+		Steps        int  `json:"steps"`
+		NonTrivial   bool `json:"non_trivial"`
 	} `json:"signals"`
 }
 
 // handlePlanExit is invoked from handleAfterTool ONLY when the PostToolUse
 // event reports ToolName == "ExitPlanMode". It enriches the approved plan via
-// `ox plan --json` and, if the signals are material, stashes a one-line nudge
-// for the next UserPromptSubmit to deliver. Fail-open throughout.
+// `ox plan --json` and, if the signals are material OR the plan is structurally
+// non-trivial, stashes a one-line nudge for the next UserPromptSubmit to
+// deliver. The HTML-render recommendation is gated by plan.html (off ==> never
+// render, never nudge). Fail-open throughout.
 func handlePlanExit(ctx *HookContext, agentID string) {
 	if ctx == nil || ctx.Input == nil || agentID == "" {
 		return
@@ -93,11 +108,26 @@ func handlePlanExit(ctx *HookContext, agentID string) {
 	if !ok {
 		return
 	}
-	if !res.Signals.Material {
-		slog.Debug("hook: plan-exit no material signals",
+
+	// The render nudge fires on either axis: team-context signals (Material) or
+	// structural substance (NonTrivial). The HTML render is worth recommending on
+	// a large greenfield plan even when team context is silent.
+	if !res.Signals.Material && !res.Signals.NonTrivial {
+		slog.Debug("hook: plan-exit not material and trivial, skipping nudge",
 			"collisions", res.Signals.Collisions,
 			"prior_art", res.Signals.PriorArt,
-			"expert_routes", res.Signals.ExpertRoutes)
+			"expert_routes", res.Signals.ExpertRoutes,
+			"files", res.Signals.Files,
+			"steps", res.Signals.Steps)
+		return
+	}
+
+	// plan.html=off means "never render, never nudge" (the config enum's own
+	// definition). Suppress the recommendation. Enrichment + --persist already
+	// ran above: the draft save is durability (gated separately on plan.save) and
+	// is independent of the render recommendation, so it stands either way.
+	if config.PlanHTML(ctx.ProjectRoot) == config.PlanHTMLOff {
+		slog.Debug("hook: plan-exit plan.html=off, skipping nudge", "agent_id", agentID)
 		return
 	}
 
@@ -110,7 +140,9 @@ func handlePlanExit(ctx *HookContext, agentID string) {
 		"agent_id", agentID,
 		"collisions", res.Signals.Collisions,
 		"prior_art", res.Signals.PriorArt,
-		"expert_routes", res.Signals.ExpertRoutes)
+		"expert_routes", res.Signals.ExpertRoutes,
+		"files", res.Signals.Files,
+		"steps", res.Signals.Steps)
 }
 
 // extractExitPlanText pulls the plan markdown out of ExitPlanMode tool_input.
@@ -174,8 +206,10 @@ func runPlanEnrichment(planText string) (planJSONResult, bool) {
 	return res, true
 }
 
-// formatPlanNudgeLine builds the concise one-line nudge from material signals.
-// Single line, no multi-line noise. Only mentions signal classes that fired.
+// formatPlanNudgeLine builds the concise one-line nudge. Single line, no
+// multi-line noise (grepability invariant). When team-context signals fired it
+// leads with them (the rich line); when the plan fired only on structural
+// non-triviality it leads with the render benefit and the plan's scope.
 func formatPlanNudgeLine(res planJSONResult) string {
 	var parts []string
 	if res.Signals.Collisions > 0 {
@@ -187,11 +221,41 @@ func formatPlanNudgeLine(res planJSONResult) string {
 	if res.Signals.ExpertRoutes > 0 {
 		parts = append(parts, pluralize(res.Signals.ExpertRoutes, "expert route", "expert routes"))
 	}
-	detail := strings.Join(parts, " + ")
-	if detail == "" {
-		detail = "team-context signals"
+	if detail := strings.Join(parts, " + "); detail != "" {
+		// Material path: lead with the team-context signals.
+		return fmt.Sprintf("Your plan touches %s. Render a human-review HTML page with the `html-plan` skill (open it with `ox plan --open`).", detail)
 	}
-	return fmt.Sprintf("Your plan touches %s. Render an enriched plan for faster human review: run `ox plan`.", detail)
+
+	// NonTrivial-only path: no team-context signals fired, but the plan is
+	// structurally substantial. Lead with the render benefit and the scope.
+	return fmt.Sprintf("Your plan spans %s. Render a human-review HTML page with the `html-plan` skill (open it with `ox plan --open`).", planScopePhrase(res.Signals.Files, res.Signals.Steps))
+}
+
+// planScopePhrase describes plan scale from the structural counts, naming only
+// the dimension(s) that crossed the non-trivial threshold, with correct
+// pluralization. At least one dimension is non-zero when this is reached; the
+// fallback keeps it safe if the thresholds are ever loosened relative to the
+// firing gate.
+func planScopePhrase(files, steps int) string {
+	var parts []string
+	if files >= nonTrivialMinFilesHook {
+		parts = append(parts, pluralize(files, "file", "files"))
+	}
+	if steps >= nonTrivialMinStepsHook {
+		parts = append(parts, pluralize(steps, "step", "steps"))
+	}
+	if len(parts) == 0 {
+		if files > 0 {
+			parts = append(parts, pluralize(files, "file", "files"))
+		}
+		if steps > 0 {
+			parts = append(parts, pluralize(steps, "step", "steps"))
+		}
+	}
+	if len(parts) == 0 {
+		return "multiple files"
+	}
+	return strings.Join(parts, " / ")
 }
 
 // pluralize renders "<n> <singular|plural>" picking the form by count.

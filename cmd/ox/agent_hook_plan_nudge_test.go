@@ -82,6 +82,40 @@ func TestFormatPlanNudgeLine_SingularCollision(t *testing.T) {
 	assert.NotContains(t, line, "1 collisions")
 }
 
+// TestFormatPlanNudgeLine_NonTrivialOnly verifies the render-focused line used
+// when no team-context signals fired but the plan is structurally non-trivial.
+// Failure prevented: a large greenfield plan gets a line claiming team-context
+// signals that didn't fire, or no HTML-render framing at all.
+func TestFormatPlanNudgeLine_NonTrivialOnly(t *testing.T) {
+	t.Run("files and steps", func(t *testing.T) {
+		var res planJSONResult
+		res.Signals.NonTrivial = true
+		res.Signals.Files = 7
+		res.Signals.Steps = 6
+
+		line := formatPlanNudgeLine(res)
+		assert.Contains(t, line, "7 files")
+		assert.Contains(t, line, "6 steps")
+		assert.Contains(t, line, "HTML page")
+		assert.Contains(t, line, "ox plan")
+		assert.NotContains(t, line, "collision", "no team-context signal fired — must not be mentioned")
+		assert.NotContains(t, line, "\n", "single line — grepability invariant")
+	})
+
+	t.Run("files only (steps below threshold)", func(t *testing.T) {
+		var res planJSONResult
+		res.Signals.NonTrivial = true
+		res.Signals.Files = 4
+		res.Signals.Steps = 2 // below nonTrivialMinStepsHook — must not be named
+
+		line := formatPlanNudgeLine(res)
+		assert.Contains(t, line, "4 files")
+		assert.NotContains(t, line, "step", "steps below threshold must not be named")
+		assert.Contains(t, line, "HTML page")
+		assert.NotContains(t, line, "\n")
+	})
+}
+
 // --- C. Stash + emit roundtrip (deliver-once via UserPromptSubmit channel) ---
 
 // TestPlanNudge_StashThenEmit verifies the full deliver path: a stashed nudge is

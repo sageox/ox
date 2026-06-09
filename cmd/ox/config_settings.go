@@ -257,7 +257,7 @@ ledger.
   on  - Persist finalized plans to data/plans/ (default). Plans become
         first-class ledger artifacts: searchable, attributable, reusable.
   off - Never auto-save. 'ox plan save' (the explicit persist path used by
-        the ox-plan skill) still saves regardless of this setting.`,
+        the html-plan skill) still saves regardless of this setting.`,
 		Category:    "Plans",
 		ValidValues: []string{"on", "off"},
 		Default:     "on",

@@ -72,7 +72,13 @@ Reads the active plan from --file or stdin. Use --json for the plumbing path
 		// a concise human summary.
 		savedDir := maybeSavePlan(gitRoot, in, result)
 		plan.RecordPlanGenerated(result, savedDir != "")
-		return writePlanHuman(cmd, result, savedDir)
+		if err := writePlanHuman(cmd, result, savedDir); err != nil {
+			return err
+		}
+		if open, _ := cmd.Flags().GetBool("open"); open {
+			openSavedPlanHTML(cmd, savedDir)
+		}
+		return nil
 	},
 }
 
@@ -99,7 +105,7 @@ var planSaveCmd = &cobra.Command{
 	Short: "Persist a fully-enriched plan (merged badges + optional HTML) to the ledger",
 	Long: `Persist a fully-enriched plan to the ledger. Unlike bare 'ox plan' — which
 auto-saves only the deterministic, ox-computed annotations — 'ox plan save' is the
-explicit full-plan persist path used by the ox-plan renderer skill after it has
+explicit full-plan persist path used by the html-plan renderer skill after it has
 authored its judgment badges and (optionally) rendered the HTML.
 
   --plan        the plan markdown (source for plan.md + topic/slug derivation)
@@ -221,7 +227,7 @@ func collabCount(c *plan.CollabSignals, field string) int {
 // runPlanSave persists a fully-enriched plan to the ledger from a plan markdown
 // file, a MERGED annotations.json (deterministic + judgment badges), and an
 // optional pre-rendered HTML file. This is the explicit full-plan persist path
-// the ox-plan skill calls — it always saves (no auto-save config gate) and never
+// the html-plan skill calls — it always saves (no auto-save config gate) and never
 // renders HTML here (the skill already produced it).
 func runPlanSave(cmd *cobra.Command) error {
 	planPath, _ := cmd.Flags().GetString("plan")
@@ -322,7 +328,10 @@ func writePlanJSON(cmd *cobra.Command, result plan.Result) error {
 
 // writePlanHuman prints a concise summary: signal counts plus one line per
 // material annotation, where the plan was saved (if captured), and a hint that
-// an enriched HTML render is available via the ox-plan skill.
+// an enriched HTML render is available via the html-plan skill. The render
+// recommendation fires when EITHER team-context signals (Material) OR structural
+// substance (NonTrivial) warrant a human-review render — the same two axes the
+// ExitPlanMode nudge uses, so porcelain and hook stay consistent.
 func writePlanHuman(cmd *cobra.Command, result plan.Result, savedDir string) error {
 	out := cmd.OutOrStdout()
 	s := result.Signals
@@ -347,12 +356,39 @@ func writePlanHuman(cmd *cobra.Command, result plan.Result, savedDir string) err
 		fmt.Fprintf(&b, "\nSaved to ledger: %s\n", savedDir)
 	}
 
-	if s.Material {
-		b.WriteString("\nMaterial signals found. Render an enriched HTML plan via the ox-plan skill for faster human review.\n")
+	if s.Material || s.NonTrivial {
+		lead := "Substantial plan."
+		if s.Material {
+			lead = "Material signals found."
+		}
+		fmt.Fprintf(&b, "\n%s Render an enriched HTML plan via the html-plan skill for faster human review (open it with `ox plan --open`).\n", lead)
 	}
 
 	fmt.Fprint(out, b.String())
 	return nil
+}
+
+// openSavedPlanHTML backs `ox plan --open`: it opens the render of the plan the
+// porcelain path just saved, mirroring `ox plan view --open` but off the saved
+// directory. Best-effort — enrichment already succeeded, so a missing render or
+// a headless shell prints a hint instead of erroring.
+func openSavedPlanHTML(cmd *cobra.Command, savedDir string) {
+	if savedDir == "" {
+		cli.PrintHint("No saved plan to open (plan capture is off or no ledger is configured).")
+		return
+	}
+	path, _, _, exists := plan.PlanHTMLPath(savedDir)
+	if !exists {
+		cli.PrintHint("No HTML render yet — run the `html-plan` skill to produce one, then re-run with --open.")
+		return
+	}
+	if cli.IsHeadless() {
+		fmt.Fprintf(cmd.OutOrStdout(), "Rendered HTML: %s\n", path)
+		return
+	}
+	if err := openPlanHTML(savedDir); err != nil {
+		cli.PrintHint("Could not open the rendered plan: " + err.Error())
+	}
 }
 
 // runPlanList renders the saved plans as a table. Fail-open: outside a project
@@ -553,6 +589,7 @@ func init() {
 	planCmd.Flags().Bool("json", false, "emit the enrichment Result as JSON (plumbing path; no network/LLM call)")
 	planCmd.Flags().Bool("persist", false, "with --json, also save + commit a draft to the ledger (used by the ExitPlanMode hook)")
 	planCmd.Flags().String("file", "", "plan source file (default: stdin, else newest ~/.claude/plans/*.md)")
+	planCmd.Flags().Bool("open", false, "after enrich, open this plan's rendered HTML if one is saved")
 
 	planViewCmd.Flags().Bool("open", false, "open the rendered plan.html in your browser (if one was saved)")
 

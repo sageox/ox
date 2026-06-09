@@ -4,7 +4,16 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
+)
+
+const (
+	// nonTrivialMinFiles: a multi-file plan (>= 2 distinct files) is non-trivial.
+	nonTrivialMinFiles = 2
+	// nonTrivialMinSteps: a ~5+ step plan is non-trivial, matching the prime
+	// "~5+ steps" criterion. H2 sections are the step proxy.
+	nonTrivialMinSteps = 5
 )
 
 // registry holds the detectors and retrievers contributed by Round 2 packages.
@@ -79,7 +88,7 @@ func Enrich(ctx context.Context, in Input, gitRoot string) Result {
 	return Result{
 		Annotations: annotations,
 		Context:     items,
-		Signals:     summarize(annotations),
+		Signals:     summarize(annotations, in),
 	}
 }
 
@@ -116,11 +125,12 @@ func runRetriever(ctx context.Context, r Retriever, in Input, gitRoot string) (o
 	return items
 }
 
-// summarize counts annotations by type and decides materiality. A plan is
-// material when any collision OR expert-route fired, or when there is at least
-// one prior-art hit (the "strong prior-art" gate is refined in Round 2 once
-// prior-art scoring exists).
-func summarize(annotations []Annotation) SignalSummary {
+// summarize rolls up the two independent signal axes. Material (team-context):
+// any collision OR expert-route fired, or there is at least one prior-art hit
+// (the "strong prior-art" gate is refined in Round 2 once prior-art scoring
+// exists). NonTrivial (structural): the plan is multi-file or many-step, so an
+// enriched HTML render is worth recommending even when team context is silent.
+func summarize(annotations []Annotation, in Input) SignalSummary {
 	var s SignalSummary
 	for _, a := range annotations {
 		switch a.Type {
@@ -133,7 +143,40 @@ func summarize(annotations []Annotation) SignalSummary {
 		}
 	}
 	s.Material = s.Collisions > 0 || s.ExpertRoutes > 0 || s.PriorArt >= 1
+
+	s.Files = countDistinctFiles(in.Sections)
+	s.Steps = countSteps(in.Sections)
+	s.NonTrivial = s.Files >= nonTrivialMinFiles || s.Steps >= nonTrivialMinSteps
 	return s
+}
+
+// countDistinctFiles unions Section.Files across all sections, deduped. Each
+// section's Files is already path-validated + per-section deduped by Parse; this
+// only collapses the cross-section union so a single file cited in three
+// sections counts once, not three times.
+func countDistinctFiles(sections []Section) int {
+	seen := make(map[string]struct{})
+	for _, sec := range sections {
+		for _, f := range sec.Files {
+			seen[f] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+// countSteps counts H2-delimited sections (the plan's structural steps),
+// EXCLUDING the empty-heading preamble Parse emits for content before the first
+// H2 (it is framing, not a step). Counting it would inflate by one and push a
+// 4-section plan over the non-trivial step threshold.
+func countSteps(sections []Section) int {
+	n := 0
+	for _, sec := range sections {
+		if strings.TrimSpace(sec.Heading) == "" {
+			continue // preamble, not a step
+		}
+		n++
+	}
+	return n
 }
 
 // sortDedupeAnnotations produces a deterministic, duplicate-free ordering so the
