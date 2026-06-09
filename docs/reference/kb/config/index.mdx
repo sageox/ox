@@ -1,0 +1,47 @@
+---
+title: "ox kb config"
+description: "CLI reference for ox kb config"
+sidebar_position: 52
+---
+
+## ox kb config
+
+Inspect KB configuration values (read-only)
+
+### Synopsis
+
+Inspect the effective value of a KB configuration key across precedence layers.
+
+Layers (highest precedence first):
+  env      OX_SESSION_RECORDING (session_recording.mode only)
+  kb       .sageox/config.yaml inside the KB checkout
+  user     ~/.config/sageox/config.yaml (or ~/.sageox/config/config.yaml)
+  default  per-KB-type fallback
+
+session_recording.mode has a safety inversion: a "disabled" on either kb OR
+user layer wins regardless of precedence. `--show-origin` marks the layer
+that triggered the inversion.
+
+### Options
+
+```
+  -h, --help   help for config
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox kb](/kb)	 - Work with knowledge bubbles
+* [ox kb config get](/kb/config/get)	 - Print the effective value of a KB config key
+* [ox kb config list](/kb/config/list)	 - List effective values for all known KB config keys
+

@@ -1,7 +1,7 @@
 ---
 title: "ox query"
 description: "CLI reference for ox query"
-sidebar_position: 64
+sidebar_position: 72
 ---
 
 ## ox query
@@ -15,6 +15,7 @@ Search across team discussions, docs, session history, and local code.
 Sources:
   team      Search team discussions, docs, and session history (default)
   code      Search local code index only (queries)
+  local     Search locally-cached ledger ONLY (zero network, fast hook path)
   all       Search both team context and local code index
 
 Examples:
@@ -23,6 +24,8 @@ Examples:
   ox query "deployment process" --team team_abc123
   ox query "error handling" --source=code
   ox query "auth flow" --source=all
+  ox query "cache invalidation" --local
+  ox query "auth flow" --local --json
 
 ```
 ox query [flags]
@@ -32,10 +35,12 @@ ox query [flags]
 
 ```
   -h, --help            help for query
+      --json            emit machine-readable JSON (default in agent context)
   -k, --limit int       max results to return (default 5)
+      --local           search the locally-cached ledger only (zero network)
       --mode string     search mode: hybrid, knn, or bm25 (default "hybrid")
       --repo string     repo ID to search (default: from project config)
-      --source string   search source: team (default), code, all (default "team")
+      --source string   search source: team (default), code, local, all (default "team")
       --team string     team ID to search (default: from project config)
 ```
 
@@ -43,7 +48,6 @@ ox query [flags]
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
-      --json             output in JSON format (default: false)
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)

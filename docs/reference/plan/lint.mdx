@@ -1,0 +1,44 @@
+---
+title: "ox plan lint"
+description: "CLI reference for ox plan lint"
+sidebar_position: 68
+---
+
+## ox plan lint
+
+Check a saved plan's HTML render for SageOx attribution + self-contained invariants
+
+### Synopsis
+
+Lint a saved plan's rendered HTML against the html-plan attribution contract:
+when the plan carried SageOx enrichment the render must credit it (footer line +
+an anchored OX marker), an un-enriched plan must not overclaim, and the SageOx
+mark must be self-contained (no live remote avatar). Advisory by default; pass
+--strict to exit non-zero on findings (for CI / golden checks).
+
+```
+ox plan lint <slug> [flags]
+```
+
+### Options
+
+```
+  -h, --help     help for lint
+      --strict   exit non-zero when the render has attribution findings (for CI / golden checks)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox plan](/plan)	 - Enrich an implementation plan with SageOx team context
+

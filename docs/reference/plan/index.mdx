@@ -28,6 +28,8 @@ ox plan [flags]
       --file string   plan source file (default: stdin, else newest ~/.claude/plans/*.md)
   -h, --help          help for plan
       --json          emit the enrichment Result as JSON (plumbing path; no network/LLM call)
+      --open          after enrich, open this plan's rendered HTML if one is saved
+      --persist       with --json, also save + commit a draft to the ledger (used by the ExitPlanMode hook)
 ```
 
 ### Options inherited from parent commands
@@ -43,6 +45,7 @@ ox plan [flags]
 ### SEE ALSO
 
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox plan lint](/plan/lint)	 - Check a saved plan's HTML render for SageOx attribution + self-contained invariants
 * [ox plan list](/plan/list)	 - Browse saved ledger plans
 * [ox plan save](/plan/save)	 - Persist a fully-enriched plan (merged badges + optional HTML) to the ledger
 * [ox plan view](/plan/view)	 - Open a saved plan

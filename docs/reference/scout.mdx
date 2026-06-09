@@ -1,0 +1,55 @@
+---
+title: "ox scout"
+description: "CLI reference for ox scout"
+sidebar_position: 74
+---
+
+## ox scout
+
+Search the web for prior art related to a meeting
+
+### Synopsis
+
+Read a meeting transcript, then ask Perplexity's Agent API for prior art,
+people, and recent developments relevant to what the team discussed.
+
+Pass "-" as the path to read the transcript from stdin.
+
+Requires the PERPLEXITY_API_KEY environment variable.
+
+Examples:
+  ox scout ./meeting.md
+  cat transcript.txt | ox scout -
+  ox scout ./meeting.md --question "What open-source libraries solve this?"
+  ox scout ./meeting.md --model anthropic/claude-sonnet-4-6
+  ox scout ./meeting.md --json
+
+```
+ox scout <transcript-path> [flags]
+```
+
+### Options
+
+```
+      --citations         show the raw 'Sources' list returned by Perplexity's web search
+      --domains strings   comma-separated search domain whitelist (default: no filter, full web)
+  -h, --help              help for scout
+      --json              emit the raw Perplexity Agent API response as JSON
+      --model string      Perplexity Agent API model ID (see https://docs.perplexity.ai/docs/agent-api/models) (default "anthropic/claude-opus-4-7")
+      --question string   override the default research question
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+
