@@ -248,3 +248,31 @@ func TestEstimateTokens(t *testing.T) {
 	assert.Equal(t, 250, EstimateTokens(1000))
 	assert.Equal(t, 1, EstimateTokens(4))
 }
+
+// TestCompactAge verifies the dense freshness formatter used by the
+// knowledge-bubble listing: shortest useful unit, "now" under a minute,
+// "—" for a zero time.
+//
+// Failure prevented: the bubble status column widens (e.g. "2 hours ago")
+// and overflows the 80-column budget, or a never-synced repo renders a
+// misleading "0m" instead of an explicit unknown marker.
+func TestCompactAge(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name string
+		t    time.Time
+		want string
+	}{
+		{"zero", time.Time{}, "—"},
+		{"under a minute", now.Add(-30 * time.Second), "now"},
+		{"minutes", now.Add(-5 * time.Minute), "5m"},
+		{"hours", now.Add(-2 * time.Hour), "2h"},
+		{"days", now.Add(-3 * 24 * time.Hour), "3d"},
+		{"weeks", now.Add(-2 * 7 * 24 * time.Hour), "2w"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, CompactAge(tc.t))
+		})
+	}
+}

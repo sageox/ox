@@ -19,9 +19,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	lipgloss "charm.land/lipgloss/v2"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
@@ -255,4 +259,145 @@ func newDefaultStatusBubblesMerger(projectRoot string) statusBubblesMerger {
 // Production calls newDefaultStatusBubblesMerger; tests assign a fake.
 var statusBubblesMergerForRoot = func(projectRoot string) statusBubblesMerger {
 	return newDefaultStatusBubblesMerger(projectRoot)
+}
+
+// otherTeamRow is one line in the dense Knowledge-bubbles listing: a team
+// context available beyond this repo, with its locally-computed git status.
+type otherTeamRow struct {
+	name       string
+	slug       string
+	visibility string
+	access     string
+	path       string
+	st         gitRepoStatus
+	cloned     bool
+	attention  bool // uncommitted / wedged / not-cloned — sorts to the top
+}
+
+// sortOtherBubbleRows orders the listing needs-attention first (uncommitted /
+// wedged / not-cloned float to the top so problems are seen), then
+// alphabetically by name. Stable so equal rows keep discovery order.
+func sortOtherBubbleRows(rows []otherTeamRow) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].attention != rows[j].attention {
+			return rows[i].attention
+		}
+		return strings.ToLower(rows[i].name) < strings.ToLower(rows[j].name)
+	})
+}
+
+// column widths for the bubble listing — sized so the widest row fits 80
+// columns: 2 indent + 20 slug + 2 + 26 name + 2 + 7 vis + 2 + status(≤16) = 77.
+const (
+	bubbleSlugColW = 20
+	bubbleNameColW = 26
+	bubbleVisColW  = 7
+)
+
+// bubblesCountSummary describes the bubble totals for the section header,
+// e.g. "13 total · 7 listed". The merger total counts every bubble you can
+// reach (including kb-API and personal bubbles not shown in this team-context
+// list), so we report it as "total" and the rendered count as "listed" rather
+// than claiming a precise in-repo split the two sources can't guarantee.
+// Falls back to the rendered count alone when the merger total is unavailable.
+func bubblesCountSummary(s statusBubblesSummary, others int) string {
+	if s.Unavailable || s.Total == 0 {
+		if others == 1 {
+			return "1 team context listed"
+		}
+		return fmt.Sprintf("%d team contexts listed", others)
+	}
+	return fmt.Sprintf("%d total · %d listed", s.Total, others)
+}
+
+// renderOtherBubbleRows renders the shared on-disk prefix (once) followed by
+// one aligned, color-coded line per team. Returns "" when there are none.
+func renderOtherBubbleRows(rows []otherTeamRow, bootstrapping, verbose bool) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	var b strings.Builder
+
+	// shared on-disk prefix, printed once instead of per row
+	base := filepath.Dir(rows[0].path)
+	b.WriteString(statusLabelStyle.Render("  on disk"))
+	b.WriteString(statusMutedStyle.Render(shortenHome(base) + string(os.PathSeparator)))
+	b.WriteString("\n\n")
+
+	for _, row := range rows {
+		slug := truncateForColumn("@"+row.slug, bubbleSlugColW)
+		name := truncateForColumn(row.name, bubbleNameColW)
+		b.WriteString("  ")
+		b.WriteString(padCell(renderSlugRef(slug[:1], slug[1:]), bubbleSlugColW))
+		b.WriteString("  ")
+		b.WriteString(padCell(statusValueStyle.Render(name), bubbleNameColW))
+		b.WriteString("  ")
+		b.WriteString(padCell(renderVisibility(row.visibility), bubbleVisColW))
+		b.WriteString("  ")
+		b.WriteString(renderBubbleStatus(row.st, row.cloned, bootstrapping))
+		b.WriteString("\n")
+		if verbose {
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("    " + row.path))
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+// renderSlugRef styles a slug reference: the sigil (@ for an owner, # for a
+// bubble) is muted so the slug itself stands out — e.g. dim("@") + bright("sageox").
+func renderSlugRef(sigil, slug string) string {
+	return statusMutedStyle.Render(sigil) + statusValueStyle.Render(slug)
+}
+
+// padCell right-pads a (possibly ANSI-styled) cell to width w using its
+// visible width, so color codes don't break column alignment.
+func padCell(cell string, w int) string {
+	if gap := w - lipgloss.Width(cell); gap > 0 {
+		return cell + strings.Repeat(" ", gap)
+	}
+	return cell
+}
+
+// renderBubbleStatus renders the dense status cell for a bubble's local
+// checkout: a crisp freshness age when clean ("✓ 2h"), the actionable count
+// when dirty ("⚠ 6 uncommitted"), a red ⚠ when wedged, or a clone hint.
+func renderBubbleStatus(st gitRepoStatus, cloned, bootstrapping bool) string {
+	switch {
+	case !cloned:
+		if bootstrapping {
+			return statusMutedStyle.Render("⟳ setting up")
+		}
+		return statusWarningStyle.Render("⚠ not cloned")
+	case st.Error != "":
+		return statusErrorStyle.Render("✗ " + st.Error)
+	case st.IsWedged():
+		// ⚠ glyph in error color — wedged needs eyes like uncommitted, but is worse
+		if st.RebaseInProgress {
+			return statusErrorStyle.Render("⚠ rebase wedged")
+		}
+		return statusErrorStyle.Render("⚠ diverged")
+	case st.UncommittedCount > 0:
+		return statusWarningStyle.Render(fmt.Sprintf("⚠ %d uncommitted", st.UncommittedCount))
+	case st.HasLastSync:
+		return statusSuccessStyle.Render("✓ " + status.CompactAge(st.LastSync))
+	default:
+		return statusSuccessStyle.Render("✓ synced")
+	}
+}
+
+// shortenHome replaces the user's home directory prefix with ~ for display.
+func shortenHome(path string) string {
+	if path == "" {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if strings.HasPrefix(path, home) {
+		return "~" + strings.TrimPrefix(path, home)
+	}
+	return path
 }

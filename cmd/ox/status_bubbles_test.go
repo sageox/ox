@@ -10,6 +10,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
@@ -396,4 +397,119 @@ func stripANSIBubbles(s string) string {
 		}
 		s = s[:i] + s[i+j+1:]
 	}
+}
+
+// --- Dense knowledge-bubble listing (owner-grouped @slug tree) ---
+
+// TestBubblesCountSummary verifies the section header reports the merger
+// total and the rendered count truthfully, without claiming a precise
+// in-repo split the two data sources can't guarantee.
+//
+// Failure prevented: a "N in this repo" claim drifts from reality because
+// the merger total counts kb-API/personal bubbles the team-context list omits.
+func TestBubblesCountSummary(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "13 total · 7 listed",
+		bubblesCountSummary(statusBubblesSummary{Total: 13}, 7))
+
+	// merger total unavailable → fall back to the rendered count alone
+	assert.Equal(t, "7 team contexts listed",
+		bubblesCountSummary(statusBubblesSummary{Unavailable: true}, 7))
+	assert.Equal(t, "1 team context listed",
+		bubblesCountSummary(statusBubblesSummary{Total: 0}, 1))
+}
+
+// TestSortOtherBubbleRows_NeedsAttentionFirst verifies dirty/wedged/not-cloned
+// rows float to the top, then alphabetical by name.
+//
+// Failure prevented: a team with uncommitted work is buried mid-list where
+// the user scrolls past it.
+func TestSortOtherBubbleRows_NeedsAttentionFirst(t *testing.T) {
+	t.Parallel()
+
+	rows := []otherTeamRow{
+		{name: "Zulu", cloned: true},                      // clean
+		{name: "Alpha", cloned: true},                     // clean
+		{name: "Bravo", cloned: true, attention: true},    // dirty
+		{name: "Charlie", cloned: false, attention: true}, // not cloned
+	}
+	sortOtherBubbleRows(rows)
+
+	order := []string{rows[0].name, rows[1].name, rows[2].name, rows[3].name}
+	// attention rows first (Bravo, Charlie alphabetical), then clean (Alpha, Zulu)
+	assert.Equal(t, []string{"Bravo", "Charlie", "Alpha", "Zulu"}, order)
+}
+
+// TestRenderOtherBubbleRows verifies the dense listing: @slug identifiers, the
+// shared on-disk prefix printed exactly once, crisp freshness age for clean
+// repos, the uncommitted count for dirty ones, and full paths only under verbose.
+//
+// Failure prevented: the section regresses to repeating a full path per row
+// (the original density complaint) or hides per-bubble status.
+func TestRenderOtherBubbleRows(t *testing.T) {
+	t.Parallel()
+
+	base := "/home/u/.local/share/sageox/sageox.ai/teams"
+	rows := []otherTeamRow{
+		{
+			name: "SageOx Internal", slug: "sageox-internal", visibility: "private",
+			path: base + "/team_aaa", cloned: true, attention: true,
+			st: gitRepoStatus{Exists: true, UncommittedCount: 6},
+		},
+		{
+			name: "Ryan's Test", slug: "ryan-s-test", visibility: "private",
+			path: base + "/team_bbb", cloned: true,
+			st: gitRepoStatus{Exists: true, HasLastSync: true, LastSync: time.Now().Add(-2 * time.Hour)},
+		},
+	}
+
+	out := stripANSIBubbles(renderOtherBubbleRows(rows, false, false))
+
+	// @slug identifiers, not opaque team_ ids, in the default view
+	assert.Contains(t, out, "@sageox-internal")
+	assert.Contains(t, out, "@ryan-s-test")
+	assert.NotContains(t, out, "team_aaa", "opaque ids hidden unless --verbose")
+
+	// shared prefix printed once as a header, never per row
+	assert.Equal(t, 1, strings.Count(out, "on disk"))
+	assert.Contains(t, out, "teams/")
+
+	// per-bubble status: crisp age for clean, count for dirty
+	assert.Contains(t, out, "✓ 2h", "clean repo shows freshness age, not the word synced")
+	assert.Contains(t, out, "⚠ 6 uncommitted")
+
+	// verbose reveals the full on-disk path
+	verbose := stripANSIBubbles(renderOtherBubbleRows(rows, false, true))
+	assert.Contains(t, verbose, base+"/team_aaa")
+}
+
+// TestRenderBubbleStatus covers each status cell variant and that the freshness
+// age (not the word "synced") is the clean-repo signal.
+func TestRenderBubbleStatus(t *testing.T) {
+	t.Parallel()
+
+	clean := stripANSIBubbles(renderBubbleStatus(
+		gitRepoStatus{Exists: true, HasLastSync: true, LastSync: time.Now().Add(-3 * 24 * time.Hour)}, true, false))
+	assert.Equal(t, "✓ 3d", clean)
+
+	dirty := stripANSIBubbles(renderBubbleStatus(gitRepoStatus{Exists: true, UncommittedCount: 18}, true, false))
+	assert.Equal(t, "⚠ 18 uncommitted", dirty)
+
+	wedged := stripANSIBubbles(renderBubbleStatus(gitRepoStatus{Exists: true, RebaseInProgress: true}, true, false))
+	assert.Equal(t, "⚠ rebase wedged", wedged)
+
+	notCloned := stripANSIBubbles(renderBubbleStatus(gitRepoStatus{}, false, false))
+	assert.Equal(t, "⚠ not cloned", notCloned)
+}
+
+// TestRenderSlugRef verifies the sigil and slug are rendered as distinct
+// segments so the muted sigil + bright slug styling can apply per the design.
+func TestRenderSlugRef(t *testing.T) {
+	t.Parallel()
+
+	out := stripANSIBubbles(renderSlugRef("@", "sageox"))
+	assert.Equal(t, "@sageox", out)
+	out = stripANSIBubbles(renderSlugRef("#", "marketing"))
+	assert.Equal(t, "#marketing", out)
 }

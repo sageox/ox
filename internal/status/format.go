@@ -78,6 +78,29 @@ func FormatTimeAgo(t time.Time) string {
 	}
 }
 
+// CompactAge formats elapsed time since t in the shortest useful form:
+// "now", "5m", "2h", "3d", "2w". Used in dense status views (e.g. the
+// knowledge-bubble tree) where FormatTimeAgo ("2 hours ago") is too wide.
+// A zero time renders as "—".
+func CompactAge(t time.Time) string {
+	if t.IsZero() {
+		return "—"
+	}
+	diff := time.Since(t)
+	switch {
+	case diff < time.Minute:
+		return "now"
+	case diff < time.Hour:
+		return fmt.Sprintf("%dm", int(diff.Minutes()))
+	case diff < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(diff.Hours()))
+	case diff < 7*24*time.Hour:
+		return fmt.Sprintf("%dd", int(diff.Hours()/24))
+	default:
+		return fmt.Sprintf("%dw", int(diff.Hours()/24/7))
+	}
+}
+
 // FormatEndpointDisplay returns a shorter display name for an endpoint URL.
 // e.g., "https://api.test.sageox.ai" -> "api.test.sageox.ai"
 func FormatEndpointDisplay(endpointURL string) string {

@@ -44,9 +44,11 @@ type statusTeamContextJSON = status.TeamContextJSON
 type statusDaemonJSON = status.DaemonJSON
 
 var statusJSONFlag bool
+var statusVerboseFlag bool
 
 func init() {
 	statusCmd.Flags().BoolVar(&statusJSONFlag, "json", false, "output in JSON format")
+	statusCmd.Flags().BoolVarP(&statusVerboseFlag, "verbose", "v", false, "show opaque IDs and full on-disk paths")
 }
 
 // status command styles - Tufte-inspired minimal design with brand colors
@@ -401,7 +403,7 @@ func shortenPathViaSymlink(projectRoot, fullPath string, candidates ...string) s
 
 // Shows ledger and team contexts grouped by endpoint
 // Always renders both sections, showing "(none)" if not configured
-func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, daemonStatus *daemon.StatusData, bubblesSummary statusBubblesSummary) string {
+func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, daemonStatus *daemon.StatusData, bubblesSummary statusBubblesSummary, verbose bool) string {
 	var b strings.Builder
 
 	hasLedger := localCfg != nil && localCfg.Ledger != nil && localCfg.Ledger.Path != ""
@@ -890,29 +892,82 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString("\n")
 	}
 
-	// Knowledge bubbles summary — rendered as the last line of the
-	// project-status block, immediately above "Other Team Contexts" so the
-	// kb noun is adjacent to the team contexts it (eventually) supersedes
-	// without dominating the project-state header.
-	b.WriteString(renderBubblesLine(bubblesSummary))
-
-	// Other team contexts
-	hasOtherTCs := len(otherCloudTCs) > 0 || len(otherDetailTCs) > 0
-	if hasOtherTCs {
-		b.WriteString("\n")
-		b.WriteString(statusHeaderStyle.Render("Other Team Contexts"))
-		b.WriteString("\n")
-		b.WriteString(statusMutedStyle.Render("───────────────────"))
-		b.WriteString("\n")
-
-		for _, entry := range otherCloudTCs {
-			hasAnyTeams = true
-			renderCloudTC(entry.info)
+	// Knowledge bubbles — dense, owner-grouped listing of the team contexts
+	// available beyond this repo. Replaces the old count-only line plus the
+	// "Other Team Contexts" section, which duplicated these teams and printed
+	// a full on-disk path per row. Each owner shows as @slug with a compact,
+	// color-coded status; the shared path prefix is printed once. This-repo's
+	// ledger and primary team stay in Project Status above.
+	buildOtherRow := func(name, slug, teamID, visibility, access string) otherTeamRow {
+		if slug == "" {
+			slug = api.DeriveSlug(name)
 		}
-		for _, entry := range otherDetailTCs {
-			hasAnyTeams = true
-			renderDetailTC(entry.info)
+		expectedPath := paths.TeamContextDir(teamID, projectEndpoint)
+		row := otherTeamRow{name: name, slug: slug, visibility: visibility, access: access, path: expectedPath}
+		if _, err := os.Stat(filepath.Join(expectedPath, ".git")); err == nil {
+			row.cloned = true
+			var lastSync time.Time
+			hasSync := false
+			if ds, ok := daemonStatus.LastSyncForPath(expectedPath); ok {
+				lastSync, hasSync = ds, true
+			} else if localCfg != nil {
+				if tc := localCfg.GetTeamContext(teamID); tc != nil && tc.HasLastSync() {
+					lastSync, hasSync = tc.LastSync, true
+				}
+			}
+			row.st = getGitRepoStatus(expectedPath, lastSync, hasSync)
 		}
+		row.attention = !row.cloned || row.st.Error != "" || row.st.UncommittedCount > 0 || row.st.IsWedged()
+		return row
+	}
+
+	var otherRows []otherTeamRow
+	seenBubblePath := make(map[string]bool)
+	for _, entry := range otherCloudTCs {
+		visibility, access := "private", "member"
+		if d, ok := teamDetail[entry.info.StableID()]; ok {
+			if d.Visibility != "" {
+				visibility = d.Visibility
+			}
+			if d.AccessLevel != "" {
+				access = d.AccessLevel
+			}
+		}
+		row := buildOtherRow(entry.info.Name, entry.info.Slug, entry.info.StableID(), visibility, access)
+		if seenBubblePath[row.path] {
+			continue
+		}
+		seenBubblePath[row.path] = true
+		otherRows = append(otherRows, row)
+	}
+	for _, entry := range otherDetailTCs {
+		visibility := entry.info.Visibility
+		if visibility == "" {
+			visibility = "private"
+		}
+		row := buildOtherRow(entry.info.Name, entry.info.Slug, entry.info.StableID(), visibility, entry.info.AccessLevel)
+		if seenBubblePath[row.path] {
+			continue
+		}
+		seenBubblePath[row.path] = true
+		otherRows = append(otherRows, row)
+	}
+
+	sortOtherBubbleRows(otherRows)
+
+	if len(otherRows) > 0 {
+		hasAnyTeams = true
+	}
+
+	if bubblesSummary.Total > 0 || len(otherRows) > 0 {
+		b.WriteString("\n")
+		b.WriteString(statusHeaderStyle.Render("Knowledge bubbles"))
+		b.WriteString("  ")
+		b.WriteString(statusMutedStyle.Render(bubblesCountSummary(bubblesSummary, len(otherRows))))
+		b.WriteString("\n")
+		b.WriteString(statusMutedStyle.Render("─────────────────"))
+		b.WriteString("\n")
+		b.WriteString(renderOtherBubbleRows(otherRows, daemonStatus.IsBootstrapping(), verbose))
 	}
 
 	if !hasAnyTeams && repoTeamID == "" {
@@ -1578,7 +1633,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			// Knowledge-bubbles summary is rendered inside renderGitReposSection
 			// (just above "Other Team Contexts") so the kb line is the
 			// last line of the project-state block, not sandwiched mid-header.
-			fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus, bubblesSummary))
+			fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus, bubblesSummary, statusVerboseFlag))
 
 			// show daemon sync section
 			fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, localCfg, false, projectInitialized))
