@@ -10,7 +10,7 @@
     if(typeof mermaid==='undefined')return;
     var dark=document.documentElement.getAttribute('data-theme')!=='light';
     nodes.forEach(function(n,i){n.removeAttribute('data-processed');n.textContent=srcs[i];});
-    mermaid.initialize({startOnLoad:false,theme:'base',themeVariables:dark?darkVars:lightVars,flowchart:{nodeSpacing:34,rankSpacing:34,padding:8,useMaxWidth:true},sequence:{useMaxWidth:true},state:{useMaxWidth:true},securityLevel:'loose'});
+    mermaid.initialize({startOnLoad:false,theme:'base',themeVariables:dark?darkVars:lightVars,flowchart:{nodeSpacing:34,rankSpacing:34,padding:8,useMaxWidth:true},sequence:{useMaxWidth:true},state:{useMaxWidth:true},securityLevel:'antiscript'});
     try{mermaid.run({nodes:document.querySelectorAll('.mermaid')});}catch(e){}
   }
   var root=document.documentElement,btn=document.getElementById('themeBtn');

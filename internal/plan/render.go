@@ -252,7 +252,15 @@ func newMarkdown() goldmark.Markdown {
 	return goldmark.New(
 		goldmark.WithExtensions(extension.GFM), // tables, strikethrough, autolinks, task lists
 		goldmark.WithRendererOptions(
-			ghtml.WithUnsafe(), // pass through inline HTML (plan-authored device mockups, <details>, etc.)
+			// Pass through inline HTML so plan-authored device mockups, <details>, and
+			// the parameterized viz fragments render. TRUST BOUNDARY: the plan markdown
+			// is authored by the developer's own agent and rendered locally for that
+			// same developer (the review server binds 127.0.0.1, token-gated) — not a
+			// third-party-content surface. Mermaid is additionally pinned to
+			// securityLevel:'antiscript' (assets/scaffold.js), which strips <script>
+			// from diagram labels. If plan markdown ever ingests untrusted third-party
+			// content, add an HTML sanitizer (e.g. bluemonday) here.
+			ghtml.WithUnsafe(),
 		),
 	)
 }

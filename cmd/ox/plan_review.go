@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -112,7 +114,11 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 		return reviewStaticFallback(cmd, slug, in, res, review)
 	}
 	addr := ln.Addr().String()
-	token := randomToken()
+	token, err := randomToken()
+	if err != nil {
+		_ = ln.Close()
+		return fmt.Errorf("review server: %w", err)
+	}
 	base := "http://" + addr
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
@@ -144,7 +150,9 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 		select {
 		case n := <-rounds:
 			fmt.Fprintf(out, "\n%s %d item(s).\n", cli.StyleBold.Render("Review round —"), n)
-			printPlanReviewDigest(cmd, info.Dir)
+			if _, derr := printPlanReviewDigest(cmd, info.Dir); derr != nil {
+				cli.PrintHint("could not read review state: " + derr.Error())
+			}
 			idle.Reset(idleTimeout) // idle, not total: a live session can run long
 		case <-approved:
 			fmt.Fprintln(out, "\n"+cli.StyleSuccess.Render("✓")+" Plan approved by reviewer.")
@@ -333,8 +341,10 @@ func anchorFromBody(body []byte) (string, error) {
 
 func commitPlanBestEffort(gitRoot, planDir string) {
 	if err := commitPlanToLedger(gitRoot, planDir); err != nil {
-		// non-fatal: saved locally; the next push / doctor reconciles
-		_ = err
+		// non-fatal: the round/resolution is saved locally and the next push /
+		// `ox doctor` reconciles it — but log loudly so the deferred-commit state
+		// isn't silent (a reviewer/agent shouldn't assume Git already has it).
+		slog.Warn("plan review: feedback saved locally, ledger commit deferred", "error", err, "dir", planDir)
 	}
 }
 
@@ -410,7 +420,9 @@ func reviewStaticFallback(cmd *cobra.Command, slug string, in plan.Input, res pl
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}
-	path := fmt.Sprintf("%s/%s-review.html", os.TempDir(), slug)
+	// sanitize: slug can come from a CLI arg; never let it escape TempDir.
+	safeSlug := strings.NewReplacer("/", "_", `\`, "_", "..", "_").Replace(slug)
+	path := filepath.Join(os.TempDir(), safeSlug+"-review.html")
 	if err := os.WriteFile(path, html, 0o644); err != nil {
 		return fmt.Errorf("write render: %w", err)
 	}
@@ -423,12 +435,15 @@ func reviewStaticFallback(cmd *cobra.Command, slug string, in plan.Input, res pl
 	return nil
 }
 
-func randomToken() string {
+// randomToken returns a fresh 128-bit hex token, or an error. It FAILS CLOSED —
+// no static fallback — so the server never starts with a guessable token in the
+// exact failure mode where entropy is unavailable.
+func randomToken() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		return "ox-review-token"
+		return "", fmt.Errorf("generate review token: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
 func init() {

@@ -102,6 +102,11 @@ func renderBarChart(data []byte) (string, error) {
 	}
 	max := 0.0
 	for _, b := range d.Bars {
+		if b.Value < 0 {
+			// a negative value would compute a negative width:% and render blank;
+			// fail loud so the data gets fixed rather than silently disappearing.
+			return "", fmt.Errorf("bar-chart: %q has a negative value %s (values must be >= 0)", b.Label, fmtNum(b.Value))
+		}
 		if b.Value > max {
 			max = b.Value
 		}

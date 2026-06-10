@@ -45,19 +45,30 @@ func colorVerdictCells(html string) string {
 	})
 }
 
-// splitTLDR pulls a leading TL;DR block out of the preamble markdown so it can be
-// rendered as the decision-first hero callout. Returns ("", md) when no TL;DR
-// block is present. (blockSplit / tldrLead are defined in render.go.)
+// splitTLDR pulls a LEADING TL;DR block out of the preamble markdown so it can
+// be rendered as the decision-first hero callout. Only the first non-empty block
+// is eligible — a mid-document "TL;DR" is left in place, so its meaning isn't
+// reordered into the hero. Returns ("", md) when the lede isn't a TL;DR.
 func splitTLDR(md string) (tldr, rest string) {
 	blocks := blockSplit.Split(md, -1)
-	var kept []string
-	for _, b := range blocks {
-		if tldr == "" && tldrLead.MatchString(b) {
-			tldr = b
+	// the "lede" is the first non-empty block, skipping a leading H1 title block
+	// (the title renders separately, so a TL;DR right after it is still leading).
+	lede := -1
+	for i, b := range blocks {
+		if strings.TrimSpace(b) == "" {
 			continue
 		}
-		kept = append(kept, b)
+		if lede == -1 && h1Line.MatchString(b) {
+			continue // leading title block — keep looking for the real lede
+		}
+		lede = i
+		break
 	}
+	if lede < 0 || !tldrLead.MatchString(blocks[lede]) {
+		return "", md // the lede isn't a TL;DR — leave a mid-document one in place
+	}
+	tldr = blocks[lede]
+	kept := append(append([]string{}, blocks[:lede]...), blocks[lede+1:]...)
 	return tldr, strings.Join(kept, "\n\n")
 }
 

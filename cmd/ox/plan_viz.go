@@ -118,8 +118,7 @@ func runPlanVizOne(cmd *cobra.Command, id string, jsonOut bool) error {
 	out := cmd.OutOrStdout()
 	p, ok := plan.VizPatternByID(id)
 	if !ok {
-		cli.PrintHint(fmt.Sprintf("No visualization pattern %q. Run `ox plan viz` to list them.", id))
-		return nil
+		return fmt.Errorf("no visualization pattern %q (run `ox plan viz` to list available ids)", id)
 	}
 
 	if jsonOut {

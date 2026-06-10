@@ -108,7 +108,9 @@ func runPlanFeedbackApply(cmd *cobra.Command, slug, from string) error {
 	}
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Applied %d feedback item(s) to %s\n\n", len(set.Items), cli.StyleFile.Render(path))
-	printPlanReviewDigest(cmd, info.Dir)
+	if _, derr := printPlanReviewDigest(cmd, info.Dir); derr != nil {
+		return derr
+	}
 	return nil
 }
 
@@ -130,7 +132,11 @@ func runPlanFeedbackShow(cmd *cobra.Command, slug string, jsonOut bool) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(items)
 	}
-	if !printPlanReviewDigest(cmd, info.Dir) {
+	shown, derr := printPlanReviewDigest(cmd, info.Dir)
+	if derr != nil {
+		return derr
+	}
+	if !shown {
 		fmt.Fprintln(cmd.OutOrStdout(), "No review feedback for this plan yet.")
 	}
 	return nil
@@ -155,24 +161,26 @@ func runPlanFeedbackResolve(cmd *cobra.Command, slug, anchor, state, commit, not
 		cli.PrintHint("resolution saved locally; ledger commit deferred: " + cerr.Error())
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Marked %s as %s.\n\n", anchor, state)
-	printPlanReviewDigest(cmd, info.Dir)
+	if _, derr := printPlanReviewDigest(cmd, info.Dir); derr != nil {
+		return derr
+	}
 	return nil
 }
 
-// printPlanReviewDigest writes the merged review digest for a plan dir. Returns
-// false when there is nothing to show.
-func printPlanReviewDigest(cmd *cobra.Command, planDir string) bool {
+// printPlanReviewDigest writes the merged review digest for a plan dir. The bool
+// reports whether anything was printed; a read failure is returned as an error so
+// callers don't conflate "no feedback" with "couldn't read it".
+func printPlanReviewDigest(cmd *cobra.Command, planDir string) (bool, error) {
 	items, err := plan.AssembleReview(planDir)
 	if err != nil {
-		cli.PrintHint("could not read review state: " + err.Error())
-		return false
+		return false, fmt.Errorf("read review state: %w", err)
 	}
 	digest := plan.FeedbackDigest(items)
 	if digest == "" {
-		return false
+		return false, nil
 	}
 	fmt.Fprint(cmd.OutOrStdout(), digest)
-	return true
+	return true, nil
 }
 
 func init() {

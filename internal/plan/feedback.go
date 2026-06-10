@@ -2,6 +2,7 @@ package plan
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -175,7 +176,7 @@ func LoadAllFeedback(planDir string) ([]FeedbackSet, error) {
 	dir := filepath.Join(planDir, feedbackSubdir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read feedback dir: %w", err)
@@ -247,7 +248,7 @@ func validateAnchor(a string) error {
 func LoadResolutions(planDir string) ([]Resolution, error) {
 	b, err := os.ReadFile(filepath.Join(planDir, feedbackSubdir, resolutionsFile))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read resolutions: %w", err)

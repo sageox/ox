@@ -8,7 +8,9 @@ import (
 // enrichedResult is a Result that carries SageOx enrichment (one deterministic
 // badge). un-enriched plans use the zero Result.
 func enrichedResult() Result {
-	return Result{Annotations: []Annotation{{Type: BadgeCollision, Why: "contended"}}}
+	// a deterministic, ox-computed badge — the kind that renders an anchored OX
+	// marker (so a render without the marker is correctly flagged).
+	return Result{Annotations: []Annotation{{Kind: BadgeDeterministic, Type: BadgeCollision, Why: "contended"}}}
 }
 
 // contextOnlyResult carries enrichment via the context bundle but no badges.

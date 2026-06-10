@@ -15,7 +15,14 @@ func TestLintBranding_JudgmentOnlyAnnotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderHTML: %v", err)
 	}
-	findings := LintBranding(html, res)
-	t.Logf("findings: %+v", findings)
-	// Document whether this is a bug: judgment-only plans should not require an OX marker
+	// A judgment-only plan earns the footer credit but renders no per-element OX
+	// marker, so it must NOT trip the ox-marker finding — only deterministic
+	// badges require a marker.
+	// Failure prevented: LintBranding false-positives on skill-authored
+	// judgment-only plans, blocking a clean `ox plan lint`.
+	for _, f := range LintBranding(html, res) {
+		if f.Rule == "branding.ox-marker" {
+			t.Fatalf("judgment-only plan must not require an OX marker, got: %+v", f)
+		}
+	}
 }

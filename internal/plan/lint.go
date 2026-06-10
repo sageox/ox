@@ -19,6 +19,19 @@ type Finding struct {
 // compiling; new code should use Finding.
 type BrandingFinding = Finding
 
+// countDeterministic counts ox-computed (deterministic) annotations — the ones
+// that surface as anchored OX markers. Judgment badges are agent-authored and
+// not rendered as markers, so they don't trigger the marker requirement.
+func countDeterministic(res Result) int {
+	n := 0
+	for _, a := range res.Annotations {
+		if a.Kind == BadgeDeterministic {
+			n++
+		}
+	}
+	return n
+}
+
 // LintRender runs the full advisory contract over a rendered plan HTML: SageOx
 // attribution (LintBranding) plus diagram validity (LintMermaid). It is the
 // single entrypoint `ox plan lint` / `ox plan save` call. Fail-open: an empty
@@ -85,13 +98,14 @@ func LintBranding(html []byte, res Result) []BrandingFinding {
 		})
 	}
 
-	// OX markers anchor deterministic signals; require at least one only when
-	// such badges exist. Context-only enrichment earns the footer credit but
-	// not necessarily a per-element marker.
-	if len(res.Annotations) > 0 && !oxMarkerRe.MatchString(h) {
+	// OX markers anchor DETERMINISTIC signals; require one only when such badges
+	// exist. A judgment-only plan (e.g. a rigor badge) or context-only enrichment
+	// earns the footer credit but renders no per-element marker, so counting all
+	// annotations here would false-positive on those plans.
+	if det := countDeterministic(res); det > 0 && !oxMarkerRe.MatchString(h) {
 		findings = append(findings, BrandingFinding{
 			Rule:    "branding.ox-marker",
-			Message: fmt.Sprintf(`render has %d deterministic SageOx badge(s) but no anchored OX marker (expected a focusable <button aria-label="SageOx insight">)`, len(res.Annotations)),
+			Message: fmt.Sprintf(`render has %d deterministic SageOx badge(s) but no anchored OX marker (expected a focusable <button aria-label="SageOx insight">)`, det),
 		})
 	}
 
