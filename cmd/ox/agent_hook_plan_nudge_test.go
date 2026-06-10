@@ -70,7 +70,8 @@ func TestFormatPlanNudgeLine_MentionsOnlyFiredSignals(t *testing.T) {
 	assert.Contains(t, line, "2 collisions")
 	assert.Contains(t, line, "1 prior-art match")
 	assert.NotContains(t, line, "expert route", "expert routes did not fire — must not be mentioned")
-	assert.Contains(t, line, "ox plan")
+	assert.Contains(t, line, "ox plan render --open")
+	assert.NotContains(t, line, "ox plan --open")
 	// single line — grepability invariant
 	assert.NotContains(t, line, "\n")
 }
@@ -98,7 +99,7 @@ func TestFormatPlanNudgeLine_NonTrivialOnly(t *testing.T) {
 		assert.Contains(t, line, "7 files")
 		assert.Contains(t, line, "6 steps")
 		assert.Contains(t, line, "HTML page")
-		assert.Contains(t, line, "ox plan")
+		assert.Contains(t, line, "ox plan render --open")
 		assert.NotContains(t, line, "collision", "no team-context signal fired — must not be mentioned")
 		assert.NotContains(t, line, "\n", "single line — grepability invariant")
 	})
@@ -150,14 +151,14 @@ func TestPlanNudge_StashThenEmit(t *testing.T) {
 	projectRoot := planNudgeProject(t)
 	agentID := "Oxplan1"
 
-	require.NoError(t, stashPlanNudge(projectRoot, agentID, "Your plan touches 1 collision. Run `ox plan`."))
+	require.NoError(t, stashPlanNudge(projectRoot, agentID, "Your plan touches 1 collision. Run `ox plan render --open`."))
 
 	var buf bytes.Buffer
 	emitPlanNudge(&buf, projectRoot, agentID)
 	got := buf.String()
 	assert.Contains(t, got, "<system-reminder>")
 	assert.Contains(t, got, "[ox]")
-	assert.Contains(t, got, "ox plan")
+	assert.Contains(t, got, "ox plan render --open")
 
 	// deliver-once: file is gone, a second prompt emits nothing
 	assert.NoFileExists(t, planNudgePath(projectRoot, agentID))

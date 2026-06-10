@@ -18,7 +18,7 @@ import (
 // Package render produces a self-contained, agent-agnostic HTML plan directly
 // from the binary — NO Claude-only skill required. This is what lets Codex,
 // Gemini, Amp, Pi, and any other agent generate a SageOx-enriched HTML plan
-// from `ox plan --open`. The SageOx enrichment (deterministic badges) is
+// from `ox plan render --open`. The SageOx enrichment (deterministic badges) is
 // injected by construction, so the render always satisfies the LintBranding
 // attribution contract (footer credit + an anchored OX marker).
 //

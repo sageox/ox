@@ -98,7 +98,7 @@ func TestFeedbackDigest_ListsOpenWithAnchor(t *testing.T) {
 	if !strings.Contains(d, "(habc)") {
 		t.Errorf("open item must show its anchor id: %s", d)
 	}
-	if !strings.Contains(d, "feedback resolve") {
+	if !strings.Contains(d, "feedback resolve <slug> <anchor>") {
 		t.Errorf("digest should hint how to resolve: %s", d)
 	}
 }

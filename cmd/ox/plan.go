@@ -113,7 +113,7 @@ var planViewCmd = &cobra.Command{
 // --file/stdin (enrich first). A slug → render a saved plan (with its review
 // state). -o/--output writes to a path; --open opens in the browser. This
 // absorbs the former `ox plan --render`, `ox plan --open`, and `ox plan view
-// --open`.
+// --open` entrypoints.
 var planRenderCmd = &cobra.Command{
 	Use:   "render [slug]",
 	Short: "Render a plan to a self-contained HTML page",
@@ -542,9 +542,10 @@ func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open bool) err
 }
 
 // emitRenderedHTML writes the render to outPath (when set) and opens it (when
-// open). For opening it prefers the ledger-saved render (LFS-aware via
-// openPlanHTML), else the explicit path, else a temp file — so --open always
-// shows something. Headless prints the path instead of opening.
+// open). For opening it prefers a plain-file ledger render, else the explicit
+// path, else a temp file backed by htmlBytes — so --open always has real HTML to
+// show even when the saved ledger copy is an LFS pointer. Headless prints the
+// path instead of opening.
 func emitRenderedHTML(cmd *cobra.Command, htmlBytes []byte, savedDir, outPath string, open bool, name string) {
 	if outPath != "" {
 		if werr := os.WriteFile(outPath, htmlBytes, 0o644); werr != nil {
@@ -557,7 +558,7 @@ func emitRenderedHTML(cmd *cobra.Command, htmlBytes []byte, savedDir, outPath st
 		return
 	}
 	if savedDir != "" {
-		if _, _, _, exists := plan.PlanHTMLPath(savedDir); exists {
+		if _, _, isPointer, exists := plan.PlanHTMLPath(savedDir); exists && !isPointer {
 			openSavedPlanHTML(cmd, savedDir)
 			return
 		}
@@ -604,17 +605,53 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, cli.StyleDim.Render("SLUG\tDATE\tHTML\tAUTHORS\tTOPIC"))
+	fmt.Fprintln(tw, cli.StyleDim.Render("SLUG\tDATE\tHTML\tREVIEW\tAUTHORS\tTOPIC"))
+	anyOpen := false
 	for _, p := range plans {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+		open := openReviewCount(p.Dir)
+		if open > 0 {
+			anyOpen = true
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.Slug,
 			planDate(p.CreatedAt),
 			htmlMark(p.HasHTML),
+			reviewMark(open),
 			authorsLabel(p.Authors),
 			truncate(p.Topic, 60),
 		)
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if anyOpen {
+		cli.PrintHint("Plans with open review items — `ox plan feedback show <slug>`, address, then `ox plan feedback resolve`.")
+	}
+	return nil
+}
+
+// openReviewCount returns the number of OPEN, actionable review items for a plan
+// dir (approvals don't count). Fail-open: 0 on any read error.
+func openReviewCount(planDir string) int {
+	items, err := plan.AssembleReview(planDir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, it := range items {
+		if it.Open && it.Status != plan.FeedbackApprove {
+			n++
+		}
+	}
+	return n
+}
+
+// reviewMark renders the open-review count for the list table.
+func reviewMark(open int) string {
+	if open == 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%d open", open)
 }
 
 // runPlanView prints a saved plan's markdown plus a badge summary in the

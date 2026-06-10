@@ -356,7 +356,7 @@ func FeedbackDigest(items []MergedItem) string {
 		b.WriteByte('\n')
 	}
 	if open > 0 {
-		b.WriteString("\nResolve each: ox plan feedback resolve <anchor> --state addressed --commit <sha> --note \"…\"\n")
+		b.WriteString("\nResolve each: ox plan feedback resolve <slug> <anchor> --state addressed --commit <sha> --note \"…\"\n")
 	}
 	return b.String()
 }
