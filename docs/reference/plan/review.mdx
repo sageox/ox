@@ -6,17 +6,18 @@ sidebar_position: 71
 
 ## ox plan review
 
-Render a saved plan, collect human review in the browser, and print the feedback
+Open a live review loop for a saved plan (serve, collect, auto-reload, approve)
 
 ### Synopsis
 
-Render a saved plan and collect a round of human review.
+Open a live review loop for a saved plan.
 
-Starts a short-lived localhost server (this process owns the port), opens the
-plan in your browser, and waits while you toggle Review and mark up sections /
-risks / decisions. On Submit, the marks are written to the plan's ledger dir and
-a digest is printed here for the agent to act on. Resolve items with
-`ox plan feedback resolve`, then re-run to verify.
+Serves the plan on a short-lived localhost server (this process owns the port),
+opens your browser, and stays up across rounds. Toggle Review, mark up sections /
+risks / decisions, and Submit — each round is written to the ledger and a digest
+is printed here for the agent. As the agent addresses items and re-renders, the
+page auto-reloads so you see the updated state. Accept or Reopen individual items
+inline, and click Approve to close the loop (stamps the plan approved).
 
 With --no-serve (or in a headless shell) it writes a static HTML file and prints
 the clipboard-export instructions instead.
@@ -28,9 +29,10 @@ ox plan review <slug> [flags]
 ### Options
 
 ```
+      --file string        review an unsaved draft markdown (saved to the ledger first); used when no <slug> is given
   -h, --help               help for review
       --no-serve           render a static file + clipboard export instead of serving
-      --timeout duration   how long to wait for a submit before giving up (default 30m0s)
+      --timeout duration   idle timeout — closes the session after this long with no activity (default 30m0s)
 ```
 
 ### Options inherited from parent commands

@@ -59,6 +59,7 @@ type PlanStatus string
 
 const (
 	PlanStatusDraft       PlanStatus = "draft"
+	PlanStatusApproved    PlanStatus = "approved" // reviewer signed off via the review loop
 	PlanStatusImplemented PlanStatus = "implemented"
 	PlanStatusAbandoned   PlanStatus = "abandoned"
 	PlanStatusSuperseded  PlanStatus = "superseded"

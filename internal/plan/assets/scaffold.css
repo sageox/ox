@@ -190,4 +190,18 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .rev-pop .rev-note{width:100%;min-height:54px;background:var(--bg);border:1px solid var(--hair2);border-radius:5px;color:var(--ink);font-family:Inter,sans-serif;font-size:12.5px;padding:6px;resize:vertical}
 .rev-pop .rev-save{flex:1;background:var(--sage);border:1px solid var(--sage);color:#0c1112;border-radius:5px;padding:4px;font-size:11px;cursor:pointer}
 .rev-pop .rev-del{background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:5px;padding:4px 8px;font-size:11px;cursor:pointer}
-@media print{.rev-bar,.toggle{display:none}}
+.rev-pop .rev-cap{font-size:11.5px;color:var(--dim);margin-bottom:6px}
+.rev-pop .rev-accept{flex:1;background:var(--sage);border:1px solid var(--sage);color:#0c1112;border-radius:5px;padding:4px;font-size:11px;cursor:pointer}
+.rev-pop .rev-reopen{background:var(--panel2);border:1px solid var(--amber);color:var(--amber);border-radius:5px;padding:4px 8px;font-size:11px;cursor:pointer}
+/* top-level Approve (closes the loop) */
+.rev-bar .rev-approve{border-color:var(--sage);color:var(--sage)}
+.rev-bar .rev-approve:hover{background:var(--sage);color:#0c1112}
+/* orphaned-note banner — feedback whose anchored text changed */
+.rev-orphans{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:65;max-width:680px;background:var(--panel);border:1px solid var(--amber);border-left:3px solid var(--amber);border-radius:9px;padding:10px 14px;box-shadow:var(--shadow);font-size:13px;color:var(--dim)}
+.rev-orphans-h{color:var(--amber);font-weight:600;margin-bottom:4px}
+.rev-orphans ul{margin:.3em 0;padding-left:1.1em}
+.rev-orphans .rev-orphans-x{margin-top:6px;background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:5px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:"JetBrains Mono",monospace}
+/* first-visit discoverability bubble near the Review toggle */
+.rev-hint{position:fixed;left:96px;bottom:20px;z-index:61;background:var(--copper);color:#0c1112;border-radius:7px;padding:6px 10px;font-size:12px;font-weight:600;box-shadow:var(--shadow);animation:rev-bob 1.4s ease-in-out infinite}
+@keyframes rev-bob{0%,100%{transform:translateX(0)}50%{transform:translateX(-4px)}}
+@media print{.rev-bar,.toggle,.rev-orphans,.rev-hint{display:none}}
