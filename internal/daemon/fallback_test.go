@@ -26,6 +26,23 @@ func TestTryConnectWithRetry_NoDaemon(t *testing.T) {
 	}
 }
 
+// TestStartDaemonNoWait_DisabledIsNoOp verifies the non-blocking spawn helper
+// does nothing (and returns nil) when the daemon is disabled, so best-effort
+// callers like `ox murmur` never spawn a process they were told not to.
+func TestStartDaemonNoWait_DisabledIsNoOp(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("SAGEOX_DAEMON", "false")
+
+	start := time.Now()
+	if err := StartDaemonNoWait(); err != nil {
+		t.Errorf("StartDaemonNoWait() disabled should return nil, got %v", err)
+	}
+	// must not block on a readiness poll
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("StartDaemonNoWait() disabled should return immediately, took %v", elapsed)
+	}
+}
+
 func TestShouldUseDaemon_NoDaemonRunning(t *testing.T) {
 	t.Chdir(t.TempDir())
 

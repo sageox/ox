@@ -136,8 +136,29 @@ func EnsureDaemonAttached() error {
 	return ensureDaemonInternal()
 }
 
-// ensureDaemonInternal starts the daemon if it's not already running.
+// ensureDaemonInternal starts the daemon if it's not already running and
+// waits up to 2 seconds for it to become responsive.
 func ensureDaemonInternal() error {
+	return ensureDaemonImpl(true)
+}
+
+// StartDaemonNoWait starts the daemon if it's not already running and returns
+// immediately without waiting for it to become responsive. It is a no-op if the
+// daemon is already running, already starting, or disabled. Used by best-effort
+// callers (e.g. `ox murmur`) that must not block the foreground — the spawned
+// daemon picks up any queued work (e.g. the murmur outbox) once it boots.
+func StartDaemonNoWait() error {
+	if IsDaemonDisabled() {
+		return nil
+	}
+	return ensureDaemonImpl(false)
+}
+
+// ensureDaemonImpl starts the daemon if it's not already running. When wait is
+// true it blocks up to 2 seconds for the daemon to become responsive; when
+// false it returns as soon as the process is spawned (or a startup is already
+// in flight).
+func ensureDaemonImpl(wait bool) error {
 	if IsRunning() {
 		return nil // already running on new (repo-based) socket
 	}
@@ -146,6 +167,9 @@ func ensureDaemonInternal() error {
 	// Wait for it rather than killing it. Skip the wait if it's stuck (past the
 	// startup window) — that process needs to be killed and restarted.
 	if state := GetState(); state == DaemonStateStarting {
+		if !wait {
+			return nil // coming up — don't block, don't kill
+		}
 		for i := 0; i < 20; i++ {
 			time.Sleep(100 * time.Millisecond)
 			switch GetState() {
@@ -208,6 +232,10 @@ func ensureDaemonInternal() error {
 
 	// don't wait for the process
 	logFile.Close()
+
+	if !wait {
+		return nil // spawned — caller does not need readiness
+	}
 
 	// wait for daemon to be ready (up to 2 seconds)
 	for i := 0; i < 20; i++ {

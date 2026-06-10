@@ -22,6 +22,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1434,6 +1435,10 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		}
 	}
 
+	// write+commit any murmurs the CLI queued while the daemon was down, so they
+	// are relayed and pushed in this same cycle
+	s.drainMurmurOutbox(ctx)
+
 	// relay murmurs from ledger after pull
 	if s.murmurRelay != nil {
 		if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" {
@@ -1453,6 +1458,58 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	}
 	s.logger.Debug("pull complete", "duration", duration)
 	return nil
+}
+
+// drainMurmurOutbox writes and commits any murmurs the CLI queued locally while
+// the daemon was unavailable. It runs at the top of each ledger sync so a drained
+// murmur is relayed and pushed in the same cycle. Entries older than the murmur
+// window are dropped rather than resurfaced. Best-effort: a commit failure leaves
+// the queued file in place for the next cycle.
+//
+// Each workspace in the registry is its own allow-list entry, so the registry
+// path (not the file's stored TargetDir) is used as the trusted commit target.
+func (s *SyncScheduler) drainMurmurOutbox(ctx context.Context) {
+	if s.workspaceRegistry == nil {
+		return
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(ledger.MaxMurmurWindowHours) * time.Hour)
+	for _, ws := range s.workspaceRegistry.GetAllWorkspaces() {
+		if ws.Path == "" {
+			continue
+		}
+		entries, err := ReadOutboxMurmurs(ws.Path)
+		if err != nil {
+			s.logger.Debug("murmur outbox read failed", "path", ws.Path, "error", err)
+			continue
+		}
+		for _, e := range entries {
+			// trust the registry path, not the file's stored TargetDir
+			payload := e.payload
+			payload.TargetDir = ws.Path
+
+			// defensive traversal check on the stored RelPath
+			if err := validateMurmurRelPath(payload.TargetDir, payload.RelPath); err != nil {
+				s.logger.Warn("dropping malformed queued murmur", "path", e.path, "error", err)
+				_ = RemoveOutboxMurmur(e.path)
+				continue
+			}
+
+			// drop stale murmurs (older than the 24h window) so old WIP never resurfaces
+			var mf ledger.MurmurFile
+			if json.Unmarshal(payload.MurmurJSON, &mf) == nil && !mf.Timestamp.IsZero() && mf.Timestamp.Before(cutoff) {
+				s.logger.Debug("dropping stale queued murmur", "path", e.path, "ts", mf.Timestamp)
+				_ = RemoveOutboxMurmur(e.path)
+				continue
+			}
+
+			if err := writeAndCommitMurmur(ctx, payload.TargetDir, payload); err != nil {
+				s.logger.Warn("queued murmur commit failed (will retry)", "path", e.path, "error", err)
+				continue // leave for next cycle
+			}
+			s.logger.Debug("drained queued murmur", "path", e.path, "rel_path", payload.RelPath)
+			_ = RemoveOutboxMurmur(e.path)
+		}
+	}
 }
 
 // pushMurmurCommits pushes any local murmur commits to the ledger remote.

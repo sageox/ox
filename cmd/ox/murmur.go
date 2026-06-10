@@ -201,15 +201,33 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("marshal murmur: %w", err)
 	}
 
-	// murmurs are best-effort — if the daemon isn't running, warn and continue
-	if err := publishMurmurViaIPC(targetDir, relPath, rawContent, murmurJSON); err != nil {
-		slog.Debug("murmur not delivered", "error", err)
-		fmt.Fprintf(cmd.OutOrStdout(), "Murmur not delivered (daemon unavailable): %s\n", id.String())
-		return nil
+	payload := daemon.MurmurPayload{
+		TargetDir:  targetDir,
+		RelPath:    relPath,
+		Content:    rawContent,
+		MurmurJSON: murmurJSON,
 	}
 
-	slog.Info("murmur published", "id", id.String(), "topic", topic, "importance", importance, "scope", scope)
-	fmt.Fprintf(cmd.OutOrStdout(), "Murmur published: %s\n", id.String())
+	// Fast path: deliver to a running daemon via IPC (it owns the file write + commit).
+	if client := daemon.TryConnect(); client != nil {
+		if err := client.Murmur(payload); err == nil {
+			slog.Info("murmur published", "id", id.String(), "topic", topic, "importance", importance, "scope", scope)
+			fmt.Fprintf(cmd.OutOrStdout(), "Murmur published: %s\n", id.String())
+			return nil
+		} else {
+			slog.Debug("murmur ipc send failed, queueing to outbox", "error", err)
+		}
+	}
+
+	// Daemon unavailable: queue durably so the murmur is never lost, then kick a
+	// non-blocking daemon start. The daemon drains the outbox on its next sync.
+	if err := daemon.WriteOutboxMurmur(targetDir, payload); err != nil {
+		slog.Error("murmur outbox write failed", "id", id.String(), "error", err)
+		return fmt.Errorf("queue murmur: %w", err)
+	}
+	_ = daemon.StartDaemonNoWait() // best-effort, non-blocking
+	slog.Info("murmur queued", "id", id.String(), "topic", topic, "importance", importance, "scope", scope)
+	fmt.Fprintf(cmd.OutOrStdout(), "Murmur queued (daemon starting, will sync shortly): %s\n", id.String())
 	return nil
 }
 
@@ -274,20 +292,4 @@ func runMurmurResume(cmd *cobra.Command, _ []string) error {
 
 	fmt.Fprintf(cmd.ErrOrStderr(), "Murmuring resumed for this session (%s).\n", agentID)
 	return nil
-}
-
-// publishMurmurViaIPC sends the full murmur to the daemon via IPC.
-// The daemon writes the file to disk, git adds, and commits — the CLI does no disk I/O.
-// Returns an error if the daemon is not running or the IPC send fails.
-func publishMurmurViaIPC(targetDir, relPath, content string, murmurJSON []byte) error {
-	client := daemon.TryConnect()
-	if client == nil {
-		return fmt.Errorf("daemon not running")
-	}
-	return client.Murmur(daemon.MurmurPayload{
-		TargetDir:  targetDir,
-		RelPath:    relPath,
-		Content:    content,
-		MurmurJSON: murmurJSON,
-	})
 }

@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -227,23 +230,58 @@ func TestMurmurJSONOverridesDefaults(t *testing.T) {
 	}
 }
 
-// TestPublishMurmurViaIPCNoDaemon verifies the IPC path returns "daemon not running"
-// when no socket exists. We redirect XDG_RUNTIME_DIR to an empty temp dir so
-// SocketPath() resolves to a non-existent file and Ping() fails immediately.
-func TestPublishMurmurViaIPCNoDaemon(t *testing.T) {
-	tmp := t.TempDir()
-	// XDG mode uses XDG_RUNTIME_DIR for socket placement; pointing it at an
-	// empty temp dir guarantees no socket is present without touching real state.
-	t.Setenv("XDG_RUNTIME_DIR", tmp)
-	// Disable legacy mode so XDG_RUNTIME_DIR is actually used.
-	t.Setenv("OX_XDG_DISABLE", "")
-
-	err := publishMurmurViaIPC(tmp, "data/murmurs/test.json", "hello", []byte(`{"id":"test"}`))
-	if err == nil {
-		t.Fatal("expected error when daemon is not running")
+// TestMurmurQueuesToOutboxWhenDaemonDown verifies the durable-outbox fix: when no
+// daemon is reachable, the murmur is queued to the ledger cache (never lost) and
+// the command still succeeds. Failure prevented: the original bug where a murmur
+// emitted with the daemon down was dropped and its content gone forever.
+func TestMurmurQueuesToOutboxWhenDaemonDown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: shells git")
 	}
-	if !strings.Contains(err.Error(), "daemon not running") {
-		t.Errorf("error = %q, want %q substring", err.Error(), "daemon not running")
+
+	projectDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(projectDir, ".sageox"), 0o755); err != nil {
+		t.Fatalf("create .sageox: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", projectDir, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+
+	// ledger must exist for scope resolution; point local config at it
+	ledgerDir := t.TempDir()
+	if err := config.SaveLocalConfig(projectDir, &config.LocalConfig{
+		Ledger: &config.LedgerConfig{Path: ledgerDir},
+	}); err != nil {
+		t.Fatalf("save local config: %v", err)
+	}
+
+	t.Setenv(config.EnvProjectRoot, projectDir)
+	t.Setenv("SAGEOX_DAEMON", "false")       // StartDaemonNoWait must not spawn a daemon
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // no socket → TryConnect misses
+	t.Chdir(projectDir)                      // findGitRoot resolves the ledger path
+
+	cmd := *murmurCmd
+	// murmurCmd's flagset is shared across tests; pin scope deterministically.
+	_ = cmd.Flags().Set("scope", "ledger")
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	if err := cmd.RunE(&cmd, []string{"outbox smoke test"}); err != nil {
+		t.Fatalf("murmur should succeed (queued), got: %v", err)
+	}
+
+	if !strings.Contains(buf.String(), "queued") {
+		t.Errorf("expected 'queued' message, got: %q", buf.String())
+	}
+
+	outboxDir := filepath.Join(ledgerDir, ".sageox", "cache", "murmur-outbox")
+	entries, err := os.ReadDir(outboxDir)
+	if err != nil {
+		t.Fatalf("read outbox dir %s: %v", outboxDir, err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 queued murmur, got %d", len(entries))
 	}
 }
 
