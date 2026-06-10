@@ -1,0 +1,46 @@
+---
+title: "ox plan enrich"
+description: "CLI reference for ox plan enrich"
+sidebar_position: 68
+---
+
+## ox plan enrich
+
+Enrich an implementation plan with SageOx team context (JSON by default)
+
+### Synopsis
+
+Enrich an agent-generated implementation plan with deterministic SageOx
+signals (collision, prior-art, expert-routing) and a context bundle the agent
+can reason over. ox computes badges locally — no LLM or network call.
+
+Output is JSON by default (the agent/plumbing path). Use --text for a human
+summary. Reads the plan from --file or stdin, else the newest ~/.claude/plans/*.md.
+
+```
+ox plan enrich [flags]
+```
+
+### Options
+
+```
+      --file string   plan source file (default: stdin, else newest ~/.claude/plans/*.md)
+  -h, --help          help for enrich
+      --persist       also save + commit a draft to the ledger (used by the ExitPlanMode hook)
+      --text          human-readable summary instead of the default JSON output
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox plan](/plan)	 - Work with implementation plans (enrich, render, review)
+

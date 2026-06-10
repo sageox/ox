@@ -1,0 +1,50 @@
+---
+title: "ox plan review"
+description: "CLI reference for ox plan review"
+sidebar_position: 71
+---
+
+## ox plan review
+
+Render a saved plan, collect human review in the browser, and print the feedback
+
+### Synopsis
+
+Render a saved plan and collect a round of human review.
+
+Starts a short-lived localhost server (this process owns the port), opens the
+plan in your browser, and waits while you toggle Review and mark up sections /
+risks / decisions. On Submit, the marks are written to the plan's ledger dir and
+a digest is printed here for the agent to act on. Resolve items with
+`ox plan feedback resolve`, then re-run to verify.
+
+With --no-serve (or in a headless shell) it writes a static HTML file and prints
+the clipboard-export instructions instead.
+
+```
+ox plan review <slug> [flags]
+```
+
+### Options
+
+```
+  -h, --help               help for review
+      --no-serve           render a static file + clipboard export instead of serving
+      --timeout duration   how long to wait for a submit before giving up (default 30m0s)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox plan](/plan)	 - Work with implementation plans (enrich, render, review)
+

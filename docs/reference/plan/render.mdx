@@ -1,21 +1,24 @@
 ---
-title: "ox plan view"
-description: "CLI reference for ox plan view"
-sidebar_position: 72
+title: "ox plan render"
+description: "CLI reference for ox plan render"
+sidebar_position: 70
 ---
 
-## ox plan view
+## ox plan render
 
-Read a saved plan in the terminal
+Render a plan to a self-contained HTML page
 
 ```
-ox plan view <slug> [flags]
+ox plan render [slug] [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for view
+      --file string     plan source file when no slug is given (default: stdin, else newest ~/.claude/plans/*.md)
+  -h, --help            help for render
+      --open            open the rendered HTML in your browser
+  -o, --output string   write the rendered HTML to this path
 ```
 
 ### Options inherited from parent commands

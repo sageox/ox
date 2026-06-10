@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -19,19 +20,41 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// planCmd is a pure command group (no RunE): bare `ox plan` prints help listing
+// the human-facing verbs (enrich, render, review, list, view). Agent/CI verbs
+// (save, lint, viz, feedback) are Hidden and taught via `ox agent prime`.
 var planCmd = &cobra.Command{
 	Use:   "plan",
-	Short: "Enrich an implementation plan with SageOx team context",
+	Short: "Work with implementation plans (enrich, render, review)",
+	Long: `Work with SageOx-enriched implementation plans.
+
+  enrich   compute team-context signals for a plan (JSON for agents)
+  render   render a plan to a self-contained HTML page for human review
+  review   serve a plan and collect human review feedback (the review loop)
+  list     browse saved plans
+  view     read a saved plan in the terminal
+
+Agents: 'ox plan enrich' returns JSON team context (collision / prior-art /
+expert-routing) at zero LLM/network cost. When a human is shaping a plan,
+recommend 'ox plan render --open' to view it and 'ox plan review <slug>' for an
+inline review loop — those are human-opt-in, never auto-run.`,
+}
+
+// planEnrichCmd is the agent entry: it emits the enrichment Result as JSON BY
+// DEFAULT (the agent-facing, token-frugal, parseable output). --text switches to
+// the human summary. Deterministic + network-free.
+var planEnrichCmd = &cobra.Command{
+	Use:   "enrich",
+	Short: "Enrich an implementation plan with SageOx team context (JSON by default)",
 	Long: `Enrich an agent-generated implementation plan with deterministic SageOx
 signals (collision, prior-art, expert-routing) and a context bundle the agent
-can reason over. ox computes badges locally — it never makes an LLM or network
-call in this path.
+can reason over. ox computes badges locally — no LLM or network call.
 
-Reads the active plan from --file or stdin. Use --json for the plumbing path
-(hook/agent), which emits the full Result as JSON and nothing else.`,
+Output is JSON by default (the agent/plumbing path). Use --text for a human
+summary. Reads the plan from --file or stdin, else the newest ~/.claude/plans/*.md.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		file, _ := cmd.Flags().GetString("file")
-		jsonOut, _ := cmd.Flags().GetBool("json")
+		text, _ := cmd.Flags().GetBool("text")
 		persist, _ := cmd.Flags().GetBool("persist")
 
 		in, err := plan.Resolve(file, cmd.InOrStdin())
@@ -39,9 +62,7 @@ Reads the active plan from --file or stdin. Use --json for the plumbing path
 			return err
 		}
 
-		// No --file, no piped stdin, and nothing auto-discovered: there is no
-		// plan to enrich. Tell the human clearly instead of silently enriching
-		// an empty input (which yields a confusing all-zero summary).
+		// No plan found anywhere: a clear message beats enriching empty input.
 		if strings.TrimSpace(in.Raw) == "" {
 			fmt.Fprintln(cmd.OutOrStdout(),
 				"No plan found. Pass --file <plan.md>, pipe a plan on stdin, or save a plan-mode file to ~/.claude/plans/ first.")
@@ -51,34 +72,22 @@ Reads the active plan from --file or stdin. Use --json for the plumbing path
 		// gitRoot is best-effort: detectors are fail-open, so an empty root
 		// simply yields fewer signals rather than an error.
 		gitRoot := findGitRoot()
-
 		result := plan.Enrich(context.Background(), in, gitRoot)
 
-		// --json is the plumbing path: by default no save, no metrics side
-		// effects that could perturb stdout — emit the Result and nothing else.
-		// With --persist (the ExitPlanMode hook passes it) the path ALSO saves +
-		// commits a draft, so a plan is durable the moment the agent exits plan
-		// mode. The save writes only to logs/ledger, never to stdout, so the
-		// JSON the hook parses stays clean.
-		if jsonOut {
+		if !text {
+			// DEFAULT: JSON plumbing path — emit the Result and nothing else.
+			// With --persist (the ExitPlanMode hook) also save + commit a draft;
+			// the save writes only to logs/ledger so stdout JSON stays clean.
 			if persist && gitRoot != "" && config.PlanSave(gitRoot) {
 				savePlanWithProvenance(gitRoot, in, result, nil)
 			}
 			return writePlanJSON(cmd, result)
 		}
 
-		// Porcelain path: optionally capture the plan to the ledger, then
-		// record a local metric (including whether it was saved), then print
-		// a concise human summary.
+		// --text: human porcelain — auto-save (if enabled), metric, summary.
 		savedDir := maybeSavePlan(gitRoot, in, result)
 		plan.RecordPlanGenerated(result, savedDir != "")
-		if err := writePlanHuman(cmd, result, savedDir); err != nil {
-			return err
-		}
-		if open, _ := cmd.Flags().GetBool("open"); open {
-			openSavedPlanHTML(cmd, savedDir)
-		}
-		return nil
+		return writePlanHuman(cmd, result, savedDir)
 	},
 }
 
@@ -86,30 +95,51 @@ var planListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Browse saved ledger plans",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runPlanList(cmd)
+		jsonOut, _ := cmd.Flags().GetBool("json")
+		return runPlanList(cmd, jsonOut)
 	},
 }
 
 var planViewCmd = &cobra.Command{
 	Use:   "view <slug>",
-	Short: "Open a saved plan",
+	Short: "Read a saved plan in the terminal",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		return runPlanView(cmd, args[0])
+	},
+}
+
+// planRenderCmd is the single HTML entry point. No slug → render the plan from
+// --file/stdin (enrich first). A slug → render a saved plan (with its review
+// state). -o/--output writes to a path; --open opens in the browser. This
+// absorbs the former `ox plan --render`, `ox plan --open`, and `ox plan view
+// --open`.
+var planRenderCmd = &cobra.Command{
+	Use:   "render [slug]",
+	Short: "Render a plan to a self-contained HTML page",
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		out, _ := cmd.Flags().GetString("output")
 		open, _ := cmd.Flags().GetBool("open")
-		return runPlanView(cmd, args[0], open)
+		if len(args) == 1 {
+			return runPlanRenderSaved(cmd, args[0], out, open)
+		}
+		file, _ := cmd.Flags().GetString("file")
+		return runPlanRenderFresh(cmd, file, out, open)
 	},
 }
 
 var planSaveCmd = &cobra.Command{
-	Use:   "save",
-	Short: "Persist a fully-enriched plan (merged badges + optional HTML) to the ledger",
+	Use:    "save",
+	Hidden: true, // agent/skill tier: persist merged badges; taught via prime, not human help
+	Short:  "Persist a fully-enriched plan (merged badges + optional HTML) to the ledger",
 	Long: `Persist a fully-enriched plan to the ledger. Unlike bare 'ox plan' — which
 auto-saves only the deterministic, ox-computed annotations — 'ox plan save' is the
 explicit full-plan persist path used by the html-plan renderer skill after it has
 authored its judgment badges and (optionally) rendered the HTML.
 
   --plan        the plan markdown (source for plan.md + topic/slug derivation)
-  --annotations a MERGED annotations.json: the 'ox plan --json' Result with the
+  --annotations a MERGED annotations.json: the 'ox plan enrich --json' Result with the
                 agent-authored judgment badges appended (a full plan.Result)
   --html        optional pre-rendered HTML; size-gated plain-git-vs-LFS per store.Save
 
@@ -123,8 +153,9 @@ plan.save config.`,
 }
 
 var planLintCmd = &cobra.Command{
-	Use:   "lint <slug>",
-	Short: "Check a saved plan's HTML render for SageOx attribution + self-contained invariants",
+	Use:    "lint <slug>",
+	Hidden: true, // agent/CI tier: quality gate; taught via prime + CI docs, not human help
+	Short:  "Check a saved plan's HTML render for SageOx attribution + self-contained invariants",
 	Long: `Lint a saved plan's rendered HTML against the html-plan attribution contract:
 when the plan carried SageOx enrichment the render must credit it (footer line +
 an anchored OX marker), an un-enriched plan must not overclaim, and the SageOx
@@ -298,7 +329,7 @@ func runPlanSave(cmd *cobra.Command) error {
 	// Branding guarantee: every render the skill saves is checked for the
 	// earned-and-conditional SageOx attribution. Warn-only — a missing credit
 	// must never block the save (fail-open). Run `ox plan lint <slug>` to recheck.
-	for _, f := range plan.LintBranding(html, result) {
+	for _, f := range plan.LintRender(html, result) {
 		cli.PrintHint(fmt.Sprintf("plan-lint [%s]: %s", f.Rule, f.Message))
 	}
 	return nil
@@ -331,7 +362,7 @@ func runPlanLint(cmd *cobra.Command, slug string, strict bool) error {
 		return fmt.Errorf("read plan html %q: %w", path, err)
 	}
 
-	findings := plan.LintBranding(html, res)
+	findings := plan.LintRender(html, res)
 	if len(findings) == 0 {
 		fmt.Fprintln(out, cli.StyleSuccess.Render("✓")+" SageOx attribution OK")
 		return nil
@@ -424,14 +455,14 @@ func writePlanHuman(cmd *cobra.Command, result plan.Result, savedDir string) err
 		if s.Material {
 			lead = "Material signals found."
 		}
-		fmt.Fprintf(&b, "\n%s Render an enriched HTML plan via the html-plan skill for faster human review (open it with `ox plan --open`).\n", lead)
+		fmt.Fprintf(&b, "\n%s Render a SageOx-enriched HTML page for human review with `ox plan render --open`; for a review loop use `ox plan review <slug>`.\n", lead)
 	}
 
 	fmt.Fprint(out, b.String())
 	return nil
 }
 
-// openSavedPlanHTML backs `ox plan --open`: it opens the render of the plan the
+// openSavedPlanHTML backs `ox plan render --open`: it opens the render of the plan the
 // porcelain path just saved, mirroring `ox plan view --open` but off the saved
 // directory. Best-effort — enrichment already succeeded, so a missing render or
 // a headless shell prints a hint instead of erroring.
@@ -442,7 +473,7 @@ func openSavedPlanHTML(cmd *cobra.Command, savedDir string) {
 	}
 	path, _, _, exists := plan.PlanHTMLPath(savedDir)
 	if !exists {
-		cli.PrintHint("No HTML render yet — run the `html-plan` skill to produce one, then re-run with --open.")
+		cli.PrintHint("No HTML render yet — run `ox plan render --open` to render one.")
 		return
 	}
 	if cli.IsHeadless() {
@@ -454,9 +485,104 @@ func openSavedPlanHTML(cmd *cobra.Command, savedDir string) {
 	}
 }
 
-// runPlanList renders the saved plans as a table. Fail-open: outside a project
-// or with no plans, it prints a friendly empty-state instead of erroring.
-func runPlanList(cmd *cobra.Command) error {
+// runPlanRenderFresh renders a plan resolved from --file/stdin (enriching it
+// first), persists it to the ledger when capture is on, and writes/opens per the
+// flags. This is the cross-agent path: any agent gets the rich render here. The
+// render injects SageOx attribution by construction (passes the lint contract).
+func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open bool) error {
+	in, err := plan.Resolve(file, cmd.InOrStdin())
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(in.Raw) == "" {
+		fmt.Fprintln(cmd.OutOrStdout(),
+			"No plan found. Pass --file <plan.md>, pipe a plan on stdin, or save a plan-mode file to ~/.claude/plans/ first.")
+		return nil
+	}
+	gitRoot := findGitRoot()
+	result := plan.Enrich(context.Background(), in, gitRoot)
+
+	htmlBytes, err := plan.RenderHTMLOpts(in, result, plan.RenderOptions{Slug: plan.Slugify(planTopic(in))})
+	if err != nil {
+		return fmt.Errorf("render plan: %w", err)
+	}
+	// Surface broken/non-portable Mermaid (the page swallows render errors).
+	for _, f := range plan.LintMermaidMarkdown(in.Raw) {
+		cli.PrintHint(fmt.Sprintf("plan-diagram [%s]: %s", f.Rule, f.Message))
+	}
+	// Persist into the ledger when capture is on, so the render is re-openable.
+	savedDir := ""
+	if gitRoot != "" && config.PlanSave(gitRoot) {
+		savedDir = savePlanWithProvenance(gitRoot, in, result, htmlBytes)
+	}
+	name := "plan"
+	if in.Path != "" {
+		name = strings.TrimSuffix(filepath.Base(in.Path), filepath.Ext(in.Path))
+	}
+	emitRenderedHTML(cmd, htmlBytes, savedDir, outPath, open, name)
+	return nil
+}
+
+// runPlanRenderSaved renders a plan already in the ledger (with its review
+// state), writing/opening per the flags. It never re-persists.
+func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open bool) error {
+	gitRoot := findGitRoot()
+	planMD, res, info, err := plan.Load(gitRoot, slug)
+	if err != nil {
+		return fmt.Errorf("load plan %q: %w", slug, err)
+	}
+	in := plan.Parse(planMD)
+	review, _ := plan.AssembleReview(info.Dir)
+	htmlBytes, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: review})
+	if err != nil {
+		return fmt.Errorf("render plan: %w", err)
+	}
+	emitRenderedHTML(cmd, htmlBytes, info.Dir, outPath, open, slug)
+	return nil
+}
+
+// emitRenderedHTML writes the render to outPath (when set) and opens it (when
+// open). For opening it prefers the ledger-saved render (LFS-aware via
+// openPlanHTML), else the explicit path, else a temp file — so --open always
+// shows something. Headless prints the path instead of opening.
+func emitRenderedHTML(cmd *cobra.Command, htmlBytes []byte, savedDir, outPath string, open bool, name string) {
+	if outPath != "" {
+		if werr := os.WriteFile(outPath, htmlBytes, 0o644); werr != nil {
+			cli.PrintHint("Could not write render to " + outPath + ": " + werr.Error())
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "Rendered HTML: %s\n", outPath)
+		}
+	}
+	if !open {
+		return
+	}
+	if savedDir != "" {
+		if _, _, _, exists := plan.PlanHTMLPath(savedDir); exists {
+			openSavedPlanHTML(cmd, savedDir)
+			return
+		}
+	}
+	target := outPath
+	if target == "" {
+		target = filepath.Join(os.TempDir(), "ox-plan-"+plan.Slugify(name)+".html")
+		if werr := os.WriteFile(target, htmlBytes, 0o644); werr != nil {
+			cli.PrintHint("Could not write render: " + werr.Error())
+			return
+		}
+	}
+	if cli.IsHeadless() {
+		fmt.Fprintf(cmd.OutOrStdout(), "Rendered HTML: %s\n", target)
+		return
+	}
+	if oerr := cli.OpenInBrowser(target); oerr != nil {
+		cli.PrintHint("Could not open the rendered plan: " + oerr.Error())
+	}
+}
+
+// runPlanList renders the saved plans as a table, or JSON with --json (scripting
+// path). Fail-open: outside a project or with no plans, it prints a friendly
+// empty-state instead of erroring.
+func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 	out := cmd.OutOrStdout()
 	gitRoot := findGitRoot()
 
@@ -464,8 +590,16 @@ func runPlanList(cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("list plans: %w", err)
 	}
+	if jsonOut {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		if plans == nil {
+			plans = []plan.PlanInfo{}
+		}
+		return enc.Encode(plans)
+	}
 	if len(plans) == 0 {
-		fmt.Fprintln(out, "No saved plans yet. Run 'ox plan' on an implementation plan to capture one.")
+		fmt.Fprintln(out, "No saved plans yet. Run 'ox plan enrich --text' on an implementation plan to capture one.")
 		return nil
 	}
 
@@ -483,10 +617,10 @@ func runPlanList(cmd *cobra.Command) error {
 	return tw.Flush()
 }
 
-// runPlanView prints a saved plan's markdown plus a badge summary. When a
-// plan.html exists, it mentions the file; with --open (and a non-headless
-// terminal) it opens it in the browser, hydrating an LFS pointer first.
-func runPlanView(cmd *cobra.Command, slug string, open bool) error {
+// runPlanView prints a saved plan's markdown plus a badge summary in the
+// terminal. To open the HTML render in a browser, use `ox plan render <slug>
+// --open` (view is a pure terminal reader).
+func runPlanView(cmd *cobra.Command, slug string) error {
 	out := cmd.OutOrStdout()
 	gitRoot := findGitRoot()
 
@@ -520,15 +654,8 @@ func runPlanView(cmd *cobra.Command, slug string, open bool) error {
 	}
 
 	fmt.Fprintf(out, "\nRendered HTML: %s\n", cli.StyleFile.Render(htmlPath))
-	if !open {
-		cli.PrintHint("Re-run with --open to view the rendered plan in your browser.")
-		return nil
-	}
-	if cli.IsHeadless() {
-		cli.PrintHint("Headless environment: open the HTML file above manually.")
-		return nil
-	}
-	return openPlanHTML(info.Dir)
+	cli.PrintHint("Open it in your browser with `ox plan render " + slug + " --open`.")
+	return nil
 }
 
 // openPlanHTML opens a captured plan's plan.html in the browser. When the
@@ -649,19 +776,28 @@ func truncate(s string, n int) string {
 }
 
 func init() {
-	planCmd.Flags().Bool("json", false, "emit the enrichment Result as JSON (plumbing path; no network/LLM call)")
-	planCmd.Flags().Bool("persist", false, "with --json, also save + commit a draft to the ledger (used by the ExitPlanMode hook)")
-	planCmd.Flags().String("file", "", "plan source file (default: stdin, else newest ~/.claude/plans/*.md)")
-	planCmd.Flags().Bool("open", false, "after enrich, open this plan's rendered HTML if one is saved")
+	// enrich: JSON by default; --text for humans.
+	planEnrichCmd.Flags().String("file", "", "plan source file (default: stdin, else newest ~/.claude/plans/*.md)")
+	planEnrichCmd.Flags().Bool("text", false, "human-readable summary instead of the default JSON output")
+	planEnrichCmd.Flags().Bool("persist", false, "also save + commit a draft to the ledger (used by the ExitPlanMode hook)")
+	planEnrichCmd.Flags().Bool("json", false, "(deprecated; JSON is the default) emit the Result as JSON")
+	_ = planEnrichCmd.Flags().MarkHidden("json")
 
-	planViewCmd.Flags().Bool("open", false, "open the rendered plan.html in your browser (if one was saved)")
+	// render: single HTML entry point.
+	planRenderCmd.Flags().String("file", "", "plan source file when no slug is given (default: stdin, else newest ~/.claude/plans/*.md)")
+	planRenderCmd.Flags().StringP("output", "o", "", "write the rendered HTML to this path")
+	planRenderCmd.Flags().Bool("open", false, "open the rendered HTML in your browser")
+
+	planListCmd.Flags().Bool("json", false, "emit the plan list as JSON (scripting path)")
 
 	planSaveCmd.Flags().String("plan", "", "plan markdown file (required; source for plan.md + topic/slug)")
-	planSaveCmd.Flags().String("annotations", "", "merged annotations.json: ox --json badges + agent judgment badges (required)")
+	planSaveCmd.Flags().String("annotations", "", "merged annotations.json: enrich badges + agent judgment badges (required)")
 	planSaveCmd.Flags().String("html", "", "optional pre-rendered HTML; size-gated plain-git-vs-LFS on save")
 
 	planLintCmd.Flags().Bool("strict", false, "exit non-zero when the render has attribution findings (for CI / golden checks)")
 
+	planCmd.AddCommand(planEnrichCmd)
+	planCmd.AddCommand(planRenderCmd)
 	planCmd.AddCommand(planListCmd)
 	planCmd.AddCommand(planViewCmd)
 	planCmd.AddCommand(planSaveCmd)

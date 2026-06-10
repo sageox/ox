@@ -6,36 +6,34 @@ sidebar_position: 67
 
 ## ox plan
 
-Enrich an implementation plan with SageOx team context
+Work with implementation plans (enrich, render, review)
 
 ### Synopsis
 
-Enrich an agent-generated implementation plan with deterministic SageOx
-signals (collision, prior-art, expert-routing) and a context bundle the agent
-can reason over. ox computes badges locally — it never makes an LLM or network
-call in this path.
+Work with SageOx-enriched implementation plans.
 
-Reads the active plan from --file or stdin. Use --json for the plumbing path
-(hook/agent), which emits the full Result as JSON and nothing else.
+  enrich   compute team-context signals for a plan (JSON for agents)
+  render   render a plan to a self-contained HTML page for human review
+  review   serve a plan and collect human review feedback (the review loop)
+  list     browse saved plans
+  view     read a saved plan in the terminal
 
-```
-ox plan [flags]
-```
+Agents: 'ox plan enrich' returns JSON team context (collision / prior-art /
+expert-routing) at zero LLM/network cost. When a human is shaping a plan,
+recommend 'ox plan render --open' to view it and 'ox plan review <slug>' for an
+inline review loop — those are human-opt-in, never auto-run.
 
 ### Options
 
 ```
-      --file string   plan source file (default: stdin, else newest ~/.claude/plans/*.md)
-  -h, --help          help for plan
-      --json          emit the enrichment Result as JSON (plumbing path; no network/LLM call)
-      --open          after enrich, open this plan's rendered HTML if one is saved
-      --persist       with --json, also save + commit a draft to the ledger (used by the ExitPlanMode hook)
+  -h, --help   help for plan
 ```
 
 ### Options inherited from parent commands
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
@@ -45,8 +43,9 @@ ox plan [flags]
 ### SEE ALSO
 
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
-* [ox plan lint](/plan/lint)	 - Check a saved plan's HTML render for SageOx attribution + self-contained invariants
+* [ox plan enrich](/plan/enrich)	 - Enrich an implementation plan with SageOx team context (JSON by default)
 * [ox plan list](/plan/list)	 - Browse saved ledger plans
-* [ox plan save](/plan/save)	 - Persist a fully-enriched plan (merged badges + optional HTML) to the ledger
-* [ox plan view](/plan/view)	 - Open a saved plan
+* [ox plan render](/plan/render)	 - Render a plan to a self-contained HTML page
+* [ox plan review](/plan/review)	 - Render a saved plan, collect human review in the browser, and print the feedback
+* [ox plan view](/plan/view)	 - Read a saved plan in the terminal
 

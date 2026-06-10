@@ -496,10 +496,10 @@ func TestOutputAgentPrimeXML_ConsultFirst(t *testing.T) {
 
 // TestOutputAgentPrimeXML_PlanEnrichmentGuidance verifies the
 // <plan-enrichment-guidance> advisory renders on every prime payload and
-// scales to the agent tier: full block (with the HTML-render recommendation)
+// scales to the agent tier: full block (with the `ox plan review` loop)
 // for Gold/Silver/unknown-baseline, lighter for Bronze.
 // Failure prevented: the block silently dropping, or a Bronze agent being
-// promised an HTML-render nudge its lifecycle can't fire.
+// promised a review loop its lifecycle can't drive.
 func TestOutputAgentPrimeXML_PlanEnrichmentGuidance(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -507,10 +507,10 @@ func TestOutputAgentPrimeXML_PlanEnrichmentGuidance(t *testing.T) {
 		wantFull    bool // full block includes the HTML-render recommendation
 		wantCommand string
 	}{
-		{"gold claude-code", "claude-code", true, "ox plan"},
-		{"silver codex", "codex", true, "ox plan"},
-		{"bronze amp", "amp", false, "ox plan list"},
-		{"unknown baseline", "some-future-agent", true, "ox plan"},
+		{"gold claude-code", "claude-code", true, "`ox plan enrich`"},
+		{"silver codex", "codex", true, "`ox plan enrich`"},
+		{"bronze amp", "amp", false, "`ox plan enrich`"},
+		{"unknown baseline", "some-future-agent", true, "`ox plan enrich`"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -532,20 +532,20 @@ func TestOutputAgentPrimeXML_PlanEnrichmentGuidance(t *testing.T) {
 				t.Error("plan-enrichment-guidance block not closed")
 			}
 
-			// always routes to `ox plan` as the enrich verb
-			if !strings.Contains(xml, "`ox plan`") {
-				t.Error("plan-enrichment-guidance must mention `ox plan`")
+			// always routes to `ox plan enrich` as the (JSON-default) enrich verb
+			if !strings.Contains(xml, tt.wantCommand) {
+				t.Errorf("plan-enrichment-guidance must mention %s", tt.wantCommand)
 			}
 
-			// the HTML-render recommendation is the differentiator: full tiers
-			// recommend it; Bronze (lighter) does not.
-			hasHTML := strings.Contains(xml, "HTML page")
-			if tt.wantFull && !hasHTML {
-				t.Error("full-tier block must recommend rendering an HTML page")
+			// the review loop is the differentiator: full tiers recommend the
+			// `ox plan review` loop; Bronze (lighter) does not.
+			hasReviewLoop := strings.Contains(xml, "ox plan review")
+			if tt.wantFull && !hasReviewLoop {
+				t.Error("full-tier block must recommend the `ox plan review` loop")
 			}
 			if !tt.wantFull {
-				if hasHTML {
-					t.Error("bronze block must NOT promise HTML-render nudge")
+				if hasReviewLoop {
+					t.Error("bronze block must NOT promise the review loop")
 				}
 				if !strings.Contains(xml, "ox plan list") {
 					t.Error("bronze block must point at `ox plan list` to browse prior plans")

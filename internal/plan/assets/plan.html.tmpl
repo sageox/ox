@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>{{.Title}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<style>{{.CSS}}</style>
+</head>
+<body data-slug="{{.Slug}}" data-review-endpoint="{{.ReviewEndpoint}}" data-review-token="{{.ReviewToken}}">
+<button class="toggle" id="themeBtn" title="Toggle light/dark">◐</button>
+<div class="shell">
+<nav class="toc">
+  <div class="brand">OX · PLAN</div>
+  {{range .TOC}}<a href="#{{.ID}}"><span class="n">{{.Num}}</span>{{.Heading}}</a>
+  {{end}}
+</nav>
+<main>
+  <div class="eyebrow">SageOx · enriched plan</div>
+  <h1>{{.Title}}</h1>
+  {{if .HasSignals}}<div class="ox-enrich">
+    <button class="ox-marker" aria-label="SageOx insight" title="SageOx team-context signals">OX</button>
+    <div>
+      <strong>Team context enriched by SageOx</strong> — {{.SignalCount}} deterministic signal{{.Plural}} on this plan{{if .Sections}}, anchored to the sections they affect{{end}}.
+      {{if .Signals}}<ul>{{range .Signals}}<li><span class="ox-sig-{{.Type}}">{{.Label}}</span> — {{.Why}}{{if .Source}} <span class="src">{{.Source}}</span>{{end}}</li>
+      {{end}}</ul>{{end}}
+    </div>
+  </div>{{end}}
+  {{if .Review.HasReview}}<div class="rev-status"><span class="rev-status-tag">Review</span> <strong>{{.Review.Open}}</strong> open · {{.Review.Addressed}} addressed · {{.Review.Verified}} verified{{if .Review.Wontfix}} · {{.Review.Wontfix}} won't-fix{{end}}</div>{{end}}
+  {{if .TLDR}}<div class="tldr"><span class="tldr-tag">TL;DR</span>{{.TLDR}}</div>{{end}}
+  {{if .Preamble}}<section id="preamble">{{.Preamble}}</section>{{end}}
+  {{range .Sections}}<section id="{{.ID}}"{{if .IsRisk}} class="risk"{{end}}>
+    <h2>{{.Heading}}</h2>
+    {{if .Signals}}<div class="ox-rail">{{range .Signals}}<span class="ox-chip ox-sig-{{.Type}}"><button class="ox-marker sm" aria-label="SageOx insight" title="SageOx signal">OX</button> <strong>{{.Label}}</strong> — {{.Why}}{{if .Source}} <span class="src">{{.Source}}</span>{{end}}</span>{{end}}</div>{{end}}
+    {{.HTML}}
+  </section>
+  {{end}}
+  <div class="foot">{{if .FooterCredit}}Team context enriched by SageOx · {{end}}Rendered by <code>ox plan</code> — self-contained, agent-agnostic.</div>
+</main>
+</div>
+<script type="application/json" id="ox-review-state">{{.ReviewJSON}}</script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>{{.JS}}</script>
+<script>{{.ReviewJS}}</script>
+</body>
+</html>

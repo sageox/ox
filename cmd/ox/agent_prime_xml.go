@@ -557,14 +557,20 @@ func escapeXML(s string) string {
 // developer's own context).
 func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	sb.WriteString("\n<plan-enrichment-guidance>\n")
+	// Cross-agent mandate: planning should ALWAYS draw on SageOx conversation
+	// intelligence first, regardless of agent tier.
+	sb.WriteString("Before planning non-trivial work, consult SageOx conversation intelligence so the plan reflects the team's latest decisions: `ox query \"<topic>\"` (discussions + sessions), `ox code search` (code + git history). Plans that ignore recent team context get re-litigated.\n")
 	if prime.ClassifyAgentTier(agentType) == prime.TierBronze {
-		// lighter tier: surface the surface, don't promise nudges.
-		sb.WriteString("When you produce a plan for non-trivial work, `ox plan` enriches it with team context (collisions, prior art, expert routing). Run `ox plan list` to browse prior plans for this repo.\n")
+		// lighter tier: surface the surface, don't promise real-time nudges.
+		sb.WriteString("When you produce a plan, run `ox plan enrich` for team context (collisions, prior art, expert routing) as JSON. To show the human a rendered page, recommend `ox plan render --open`. Browse prior plans with `ox plan list`.\n")
 		sb.WriteString("</plan-enrichment-guidance>\n")
 		return
 	}
-	sb.WriteString("When you produce a plan for non-trivial work (multi-file OR architectural OR touches a hotspot/open-PR OR ~5+ steps), run `ox plan` to enrich it with team context — collisions (incl. teammates actively murmuring on these files), prior art, and expert routing.\n")
-	sb.WriteString("For non-trivial plans, render a human-review HTML page with the `html-plan` skill (it writes a self-contained file and opens it); re-open any saved render with `ox plan --open` or `ox plan view <slug> --open`. Render only after the human confirms, unless plan.html is always; skip if plan.html is off.\n")
+	sb.WriteString("When you produce a plan for non-trivial work (multi-file OR architectural OR touches a hotspot/open-PR OR ~5+ steps), run `ox plan enrich` — it returns JSON team context (collisions incl. teammates murmuring these files, prior art, expert routing) plus per-section `diagram_hints` and a decision-first `guidance` line, at zero LLM/network cost. This is your default plan-enrichment call.\n")
+	// HTML + review loop are HUMAN-opt-in: the agent recommends, the human runs.
+	sb.WriteString("The HTML render and review loop are human-opt-in — don't auto-run them; recommend them. When a human is shaping the plan, suggest: `ox plan render --open` (a self-contained SageOx-enriched page, no skill, any agent) to see it, and `ox plan review <slug>` for an inline review loop (the human marks up sections/risks in the browser; you ingest with `ox plan feedback show <slug>`, address each, record `ox plan feedback resolve <slug> <anchor> --state addressed --commit <sha>`, re-render to verify).\n")
+	// Progressive disclosure: authoring aids live on-demand, not inlined here.
+	sb.WriteString("To author the markdown well, browse `ox plan viz` (visualization patterns: sparklines, dependency graphs, swimlanes, Tufte tables, mockups). The renderer auto-styles a TL;DR block, a Risks section, and verdict cells.\n")
 	sb.WriteString("</plan-enrichment-guidance>\n")
 }
 

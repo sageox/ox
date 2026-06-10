@@ -183,7 +183,7 @@ func runPlanEnrichment(planText string) (planJSONResult, bool) {
 	// --persist: durably save + commit the draft now, so a plan exists on the
 	// ledger the moment the agent leaves plan mode (not contingent on a later
 	// `ox plan` / skill save). Enrichment output (stdout JSON) is unchanged.
-	cmd := exec.Command(oxPath, "plan", "--json", "--persist")
+	cmd := exec.Command(oxPath, "plan", "enrich", "--json", "--persist")
 	cmd.Stdin = strings.NewReader(planText)
 	cmd.Env = os.Environ()
 
@@ -224,12 +224,12 @@ func formatPlanNudgeLine(res planJSONResult) string {
 	}
 	if detail := strings.Join(parts, " + "); detail != "" {
 		// Material path: lead with the team-context signals.
-		return fmt.Sprintf("Your plan touches %s. Render a human-review HTML page with the `html-plan` skill (open it with `ox plan --open`).", detail)
+		return fmt.Sprintf("Your plan touches %s. Render a SageOx-enriched human-review HTML page with `ox plan --open` (self-contained, no skill needed).", detail)
 	}
 
 	// NonTrivial-only path: no team-context signals fired, but the plan is
 	// structurally substantial. Lead with the render benefit and the scope.
-	return fmt.Sprintf("Your plan spans %s. Render a human-review HTML page with the `html-plan` skill (open it with `ox plan --open`).", planScopePhrase(res.Signals.Files, res.Signals.Steps))
+	return fmt.Sprintf("Your plan spans %s. Render a SageOx-enriched human-review HTML page with `ox plan --open` (self-contained, no skill needed).", planScopePhrase(res.Signals.Files, res.Signals.Steps))
 }
 
 // planScopePhrase describes plan scale from the structural counts, naming only

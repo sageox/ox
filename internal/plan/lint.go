@@ -5,13 +5,28 @@ import (
 	"regexp"
 )
 
-// BrandingFinding is one SageOx-attribution lint result on a rendered plan
-// HTML. All findings are advisory (warn-level): linting NEVER blocks a render
-// or a save (fail-open agent UX). A non-empty slice means the render did not
-// honor the html-plan skill's attribution contract.
-type BrandingFinding struct {
-	Rule    string // stable id, e.g. "branding.footer-credit"
+// Finding is one advisory lint result on a rendered plan HTML — attribution
+// (branding.*) or diagram (mermaid.*). All findings are warn-level: linting
+// NEVER blocks a render or a save (fail-open agent UX). A non-empty slice means
+// the render did not honor the html-plan contract or carries a diagram that
+// will not render.
+type Finding struct {
+	Rule    string // stable id, e.g. "branding.footer-credit" / "mermaid.arrow-in-label"
 	Message string // human-readable, actionable
+}
+
+// BrandingFinding is retained as an alias so existing callers/tests keep
+// compiling; new code should use Finding.
+type BrandingFinding = Finding
+
+// LintRender runs the full advisory contract over a rendered plan HTML: SageOx
+// attribution (LintBranding) plus diagram validity (LintMermaid). It is the
+// single entrypoint `ox plan lint` / `ox plan save` call. Fail-open: an empty
+// page returns nil.
+func LintRender(htmlBytes []byte, res Result) []Finding {
+	out := LintBranding(htmlBytes, res)
+	out = append(out, LintMermaid(htmlBytes)...)
+	return out
 }
 
 var (

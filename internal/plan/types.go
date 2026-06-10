@@ -82,6 +82,32 @@ type ContextItem struct {
 	When    string  `json:"when,omitempty"`
 }
 
+// DiagramKind is a suggested diagram form for a plan section. The values are the
+// literal Mermaid diagram keyword (or "swimlane-timeline" for the hand-built CSS
+// timeline) so the agent can paste the suggestion straight into a fenced block.
+type DiagramKind string
+
+const (
+	DiagramSequence  DiagramKind = "sequenceDiagram"   // ordered call/response path
+	DiagramState     DiagramKind = "stateDiagram-v2"   // states + time-bounded transitions
+	DiagramSwimlane  DiagramKind = "swimlane-timeline" // phased/parallel work (CSS, not Mermaid)
+	DiagramTopology  DiagramKind = "flowchart-LR"      // dependency/topology graph
+	DiagramFlowchart DiagramKind = "flowchart-TB"      // branching procedure (hero default)
+)
+
+// DiagramHint is a deterministic, per-section suggestion of which diagram form
+// best captures the structure ox detected in that section. Rendering an HTML
+// plan is now deterministic and free, so the only remaining lever on diagram
+// QUALITY is the Mermaid the agent authors into the plan markdown — these hints
+// point any agent (Claude, Codex, Gemini, …) at the right diagram for THIS plan,
+// per section, instead of defaulting every section to a flowchart. Computed
+// locally with zero LLM/network calls, same lane as the badge detectors.
+type DiagramHint struct {
+	Section       string      `json:"section"`        // H2 heading the hint applies to
+	SuggestedType DiagramKind `json:"suggested_type"` // the diagram form that fits
+	Reason        string      `json:"reason"`         // what structure was detected, in one clause
+}
+
 // Section is one H2-delimited block of a plan, with any file references it cites.
 type Section struct {
 	Heading string
@@ -129,6 +155,15 @@ type Result struct {
 	Annotations   []Annotation  `json:"annotations"`
 	Context       []ContextItem `json:"context"`
 	Signals       SignalSummary `json:"signals"`
+	// DiagramHints are deterministic per-section diagram suggestions (which
+	// Mermaid/timeline form fits the structure ox detected). Empty when no
+	// section had strong enough structure to suggest one.
+	DiagramHints []DiagramHint `json:"diagram_hints,omitempty"`
+	// Guidance is a concise, cross-agent authoring contract for rendering a
+	// fantastic HTML plan (decision-first, ten-minute reader, diagrams over
+	// prose). It folds in the DiagramHints so the agent gets plan-specific
+	// direction, not a generic spec. Empty for a trivial/empty plan.
+	Guidance string `json:"guidance,omitempty"`
 }
 
 // Detector produces deterministic annotations from local data.

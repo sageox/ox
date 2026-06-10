@@ -15,7 +15,7 @@ Use when the user asks to "render the plan", "make an HTML plan", "show the enri
 
 ```mermaid
 flowchart TB
-  RUN["Run ox plan --json on the active plan"] --> DET["ox returns DETERMINISTIC badges + context bundle (0 LLM tokens)"]
+  RUN["Run ox plan enrich --json on the active plan"] --> DET["ox returns DETERMINISTIC badges + context bundle (0 LLM tokens)"]
   DET --> READ["Agent reads the context bundle: murmurs, sessions, decisions, ADRs, expert artifacts"]
   READ --> JUDGE["Agent authors JUDGMENT badges, CITED-ONLY (aligns / conflicts / expert-perspective)"]
   JUDGE --> MERGE["Merge: ox --json annotations + agent judgment badges into one annotations.json"]
@@ -28,7 +28,7 @@ flowchart TB
 1. **Get the deterministic signals + context bundle.** Run:
 
    ```bash
-   ox plan --json --file <plan-file>   # or pipe the plan on stdin
+   ox plan enrich --json --file <plan-file>   # or pipe the plan on stdin
    ```
 
    This makes **no LLM or network call**. It returns a `Result` JSON:
@@ -56,13 +56,13 @@ flowchart TB
 
 3. **Render ONE self-contained HTML file** meeting the full html-plan quality bar below PLUS the badge-native additions.
 
-4. **Persist the full plan with `ox plan save`.** Bare `ox plan` only auto-saves ox's *deterministic* badges (it cannot see your judgment badges). To persist the complete plan — your merged badges plus the render — call:
+4. **Persist the full plan with `ox plan save`.** Bare `ox plan enrich` only auto-saves ox's *deterministic* badges (it cannot see your judgment badges). To persist the complete plan — your merged badges plus the render — call:
 
    ```bash
    ox plan save --plan <plan-file> --annotations <merged.json> [--html <render.html>]
    ```
 
-   - `--annotations <merged.json>` is the **merged** annotations: take the `ox plan --json` Result and **append your judgment badges** to its `annotations[]` array (keep `signals`, `context`, and the deterministic badges intact). That merged file is what gets stored as `annotations.json`.
+   - `--annotations <merged.json>` is the **merged** annotations: take the `ox plan enrich --json` Result and **append your judgment badges** to its `annotations[]` array (keep `signals`, `context`, and the deterministic badges intact). That merged file is what gets stored as `annotations.json`.
    - `--html` is optional: pass it only when you rendered HTML this run. `ox plan save` applies the size-gated plain-git-vs-LFS rule — it never renders.
    - `ox plan save` always persists (it is an explicit save), reuses the `data/plans/YYYY-MM-DD-<slug>/` path, and prints where it saved.
 
@@ -238,7 +238,7 @@ One **hero diagram near the top** captures the whole shape. Add a second diagram
 
 ## Process
 
-1. Run `ox plan --json` to get deterministic badges + the context bundle (0 tokens, local).
+1. Run `ox plan enrich --json` to get deterministic badges + the context bundle (0 tokens, local).
 2. Read the `context[]` bundle; author judgment badges **cited-only**, degrading to "consult `<name>`" when evidence is thin.
 3. Extract from the plan: problem/why, blockers/findings, architecture/flow, concrete steps (with file refs), impact numbers, verification, risks.
 4. Choose the diagrams that compress the most (before/after, sequence, decision gates, state machine, swimlane timeline).
@@ -250,9 +250,9 @@ One **hero diagram near the top** captures the whole shape. Add a second diagram
    - Do the visuals **compress** understanding (replace prose) or just decorate?
    - Are SageOx insights **anchored OX markers with action-first popovers**, never a prose blob?
    Revise until the architect signs off that a busy principal would get full value in ten minutes. Cut anything that fails the contract.
-7. Merge your judgment badges into the `ox plan --json` annotations and persist with `ox plan save --plan ... --annotations <merged.json> --html <render.html>`.
+7. Merge your judgment badges into the `ox plan enrich --json` annotations and persist with `ox plan save --plan ... --annotations <merged.json> --html <render.html>`.
 8. Open the HTML and report the path.
 
 The goal: a $10k/hour principal reader skims the alignment strip + TL;DR + hero diagram and within ten minutes knows whether the plan aligns with team direction and whether to approve — the decision and biggest risk are up top, every badge and OX marker says where its claim comes from and what to do about it, ox-computed facts are visually separate from agent-reasoned judgment, and nothing on the page wastes the reader's time.
 
-$ox plan --json
+$ox plan enrich --json

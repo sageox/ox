@@ -87,10 +87,17 @@ func Enrich(ctx context.Context, in Input, gitRoot string) Result {
 
 	annotations = sortDedupeAnnotations(annotations)
 
+	// Diagram hints + authoring guidance are deterministic, plan-local content
+	// help (zero LLM/network): they steer the agent toward the right diagram per
+	// section and a decision-first render. Computed from the parsed input only.
+	hints := computeDiagramHints(in)
+
 	return Result{
-		Annotations: annotations,
-		Context:     items,
-		Signals:     summarize(annotations, in),
+		Annotations:  annotations,
+		Context:      items,
+		Signals:      summarize(annotations, in),
+		DiagramHints: hints,
+		Guidance:     buildGuidance(in, hints),
 	}
 }
 
