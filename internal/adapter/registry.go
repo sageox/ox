@@ -34,6 +34,10 @@ type AdapterEntry struct {
 	Repo         string   `yaml:"repo" json:"repo"`
 	Capabilities []string `yaml:"capabilities" json:"capabilities"`
 	DetectCmds   []string `yaml:"detect_commands,omitempty" json:"detect_commands,omitempty"`
+	// Curated-path integrity fields (Tag, Checksums) are planned here per
+	// ADR-022 (adapter security posture): for the short-name install path SageOx
+	// is the trust anchor, so a code-reviewed tag pin + per-platform sha256 in
+	// this registry becomes the authenticity control. Tracked in ox-5ihl.
 }
 
 // CommunityEntry describes a community-contributed adapter.

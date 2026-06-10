@@ -284,6 +284,19 @@ it to ~/.local/share/ox/adapters/.`,
 	RunE: runAdapterInstall,
 }
 
+// runAdapterInstall acquires and installs an adapter binary.
+//
+// SECURITY POSTURE (see docs/adr/ADR-022-adapter-security-posture.md):
+// Executing adapter code is the intended extension mechanism, not a vulnerability.
+// What we harden is the *moment of acquisition*, and only where SageOx is the
+// trust anchor. Two paths with different anchors:
+//   - curated short-name ("cursor"): SageOx vouches -> integrity check required
+//     (pin tag + sha256, verify-before-exec). Tracked in ox-5ihl.
+//   - arbitrary github.com/<owner>/<repo>: the user vouches -> stays frictionless.
+//
+// Once installed, an adapter runs every session as the user; installation IS the
+// trust decision. We do not sandbox an installed adapter from the user's own
+// session — that is outside the documented threat model (security/SECURITY.md).
 func runAdapterInstall(_ *cobra.Command, args []string) error {
 	source := args[0]
 
@@ -306,6 +319,9 @@ func runAdapterInstall(_ *cobra.Command, args []string) error {
 
 	// fetch latest release from GitHub API
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
+	// NOTE: resolves releases/latest with no version pin. On the curated path this
+	// is the authenticity gap (ox-5ihl, ADR-022): the GitHub API response is
+	// network input and is not yet trusted to name the exact binary SageOx curated.
 	resp, err := http.Get(apiURL) //nolint:gosec // URL constructed from trusted adapter registry
 	if err != nil {
 		return fmt.Errorf("fetch release info: %w", err)
@@ -342,6 +358,11 @@ func runAdapterInstall(_ *cobra.Command, args []string) error {
 	slog.Info("downloading adapter", "asset", assetName)
 
 	// download binary
+	// NOTE: bytes fetched here are network input and currently unverified. The
+	// integrity gate (sha256 constant-time compare against the registry pin, BEFORE
+	// chmod/exec) belongs immediately after the download completes — see ADR-022
+	// decisions 2 and 5, ox-5ihl. A download-host allowlist is deliberately NOT the
+	// control (GitHub rotates CDN hosts; checksum subsumes it — ADR-022 decision 4).
 	dlResp, err := http.Get(downloadURL) //nolint:gosec // URL from GitHub API release response
 	if err != nil {
 		return fmt.Errorf("download binary: %w", err)
@@ -390,8 +411,15 @@ func runAdapterInstall(_ *cobra.Command, args []string) error {
 // resolveAdapterSource resolves an adapter source string to owner/repo.
 // Accepts either a short name (looked up in the embedded registry) or a
 // full github.com/<owner>/<repo> URL.
+//
+// This split is the adapter trust boundary (ADR-022): a short name means
+// "install what SageOx curated under this name" (SageOx is the trust anchor, so
+// the curated path must verify authenticity), while a github.com/<owner>/<repo>
+// URL means "install this repo I explicitly named" (the user is the trust anchor,
+// so that path stays frictionless). Keep the two paths distinguishable here — do
+// not collapse them into one install flow with one trust policy.
 func resolveAdapterSource(source string) (owner, repo string, err error) {
-	// if it looks like a GitHub URL, parse directly
+	// if it looks like a GitHub URL, parse directly (user-as-trust-anchor path)
 	if strings.Contains(source, "/") {
 		return parseGitHubRepo(source)
 	}
@@ -449,6 +477,12 @@ func deriveAdapterBinaryName(assetName, platform string) string {
 }
 
 // verifyAdapterBinary runs the info subcommand to verify a binary is a valid adapter.
+//
+// IMPORTANT: this is PROTOCOL-CONFORMANCE verification, NOT provenance. It answers
+// "is this a runnable ox adapter?", never "is this the binary SageOx curated?".
+// The name has misled reviewers into reading it as an integrity check — it is not,
+// and was never intended to be (ADR-022). Provenance is the checksum gate in
+// runAdapterInstall (ox-5ihl). When that lands, rename this verifyAdapterProtocol.
 func verifyAdapterBinary(binaryPath string) error {
 	cmd := exec.Command(binaryPath, "info")
 	cmd.Env = append(os.Environ(),

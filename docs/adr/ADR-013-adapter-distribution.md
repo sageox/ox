@@ -154,3 +154,13 @@ Items deferred from initial design reviews, to revisit when the adapter ecosyste
 - **Community adapter index**: A curated index file in `sageox/ox-adapters` listing community adapters by name, repo URL, and last-verified-compliance date. Community authors submit PRs to get listed. Low ops overhead, no infrastructure.
 - **License and trademark clarity**: `CONTRIBUTING.md` in `sageox/ox-adapters` clarifying expected licenses (MIT, Apache 2.0, or commercial) and whether the `ox-adapter-*` naming convention implies any trademark grant.
 - **Release pipeline specification**: Document what triggers adapter releases, minimum protocol version policy, breaking-change freeze windows before ox major releases, and whether `registry.yaml` updates are automated or manual.
+
+## See also
+
+**ADR-022 (Adapter Security Posture)** governs the trust model for the install
+flow described here. It refines the "GitHub release integrity is sufficient while
+all adapters are first-party" assumption above: the curated short-name path (where
+SageOx is the trust anchor) requires a pinned `tag` + per-platform `sha256` in
+`registry.yaml`, verified before exec, because a compromised maintainer release can
+otherwise install a substituted binary under a trusted name. The arbitrary-repo
+path (user as trust anchor) stays frictionless. See ADR-022 for the full posture.

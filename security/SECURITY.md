@@ -283,6 +283,7 @@ flowchart LR
 - [`internal/daemon/ipc_peercred_linux.go`](../internal/daemon/ipc_peercred_linux.go) — peer-credential check
 - [`internal/daemon/ipc.go`](../internal/daemon/ipc.go) — size + connection caps, message dispatch
 - [`cmd/ox/adapter.go`](../cmd/ox/adapter.go) — adapter download + install
+- [`docs/adr/ADR-022-adapter-security-posture.md`](../docs/adr/ADR-022-adapter-security-posture.md) — adapter trust model: curated-path integrity (tag + sha256, verify-before-exec) vs frictionless arbitrary-repo install; what `verifyAdapterBinary` does and does not check
 - [`internal/gitserver/credentials.go`](../internal/gitserver/credentials.go) — keyring-backed git credentials
 - [`internal/auth/authfile.go`](../internal/auth/authfile.go) — OAuth token storage (file, NOT keyring — see open risk in [`#hunter-secrets-redaction`](#hunter-secrets-redaction))
 
