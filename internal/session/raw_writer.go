@@ -56,7 +56,10 @@ type RawWriter struct {
 // (e.g. daemon writing to a ledger session whose project isn't known
 // at write time); built-in patterns still apply.
 func NewRawWriter(path, projectRoot string) (*RawWriter, error) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	// 0600: raw.jsonl holds full conversation content (and, until the
+	// redaction stack scrubs them, any secrets in transit). Keep it
+	// owner-only — never world-readable.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("raw writer: open: %w", err)
 	}
@@ -68,7 +71,8 @@ func NewRawWriter(path, projectRoot string) (*RawWriter, error) {
 // that produce a fresh raw.jsonl rather than appending. The redaction
 // stack is identical — every byte still passes through.
 func NewRawWriterTruncate(path, projectRoot string) (*RawWriter, error) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	// 0600: owner-only, same rationale as NewRawWriter.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("raw writer: open: %w", err)
 	}

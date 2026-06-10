@@ -71,6 +71,24 @@ adapters:
     capabilities: [session_reader, hook_installer, incremental_reader, file_watcher, serve_mode]
     detect_commands: [aider]
 
+  # --- External (non-bundled) adapters ---
+  #
+  # SECURITY (ADR-022, ox-5ihl): the short-name install path treats SageOx as the
+  # trust anchor, so each external entry MUST pin a release `tag` and per-platform
+  # `checksums` before `ox adapter install <name>` will run without friction.
+  # Example:
+  #     tag: v1.2.3
+  #     checksums:
+  #       darwin_arm64:  <sha256-hex>
+  #       darwin_amd64:  <sha256-hex>
+  #       linux_amd64:   <sha256-hex>
+  # The sha256 is computed over the exact release asset for that platform.
+  #
+  # The entries below ship WITHOUT pins: no real binaries exist yet to checksum,
+  # and fake checksums are worse than none. Until a maintainer adds real pins,
+  # `ox adapter install <name>` for these FAILS CLOSED and requires
+  # --allow-unverified. This is the intended, documented transition — populating
+  # tag + checksums here restores frictionless install.
   - name: cursor
     display_name: Cursor
     description: Reads Cursor sessions

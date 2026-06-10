@@ -176,6 +176,7 @@ check-raw-writer-chokepoint: ## Ensure raw.jsonl is only opened via session.RawW
 	@# Any os.OpenFile/Create/WriteFile of a raw.jsonl path outside the
 	@# canonical chokepoint (internal/session/raw_writer.go) is a redaction
 	@# bypass risk. Test files and the chokepoint itself are allowed.
+	@# Pass 1: literal raw.jsonl path passed straight to a writer call.
 	@violations=$$(grep -rnE '(os\.OpenFile|os\.Create|os\.WriteFile)\([^)]*raw[._]?jsonl' \
 		--include='*.go' . 2>/dev/null \
 		| grep -v '_test\.go:' \
@@ -184,8 +185,24 @@ check-raw-writer-chokepoint: ## Ensure raw.jsonl is only opened via session.RawW
 		| grep -vE ':[0-9]+:[[:space:]]*//') ; \
 	if [ -n "$$violations" ] ; then \
 		echo "ERROR: raw.jsonl must be written via session.RawWriter (see internal/session/raw_writer.go)"; \
-		echo "Violations:"; \
+		echo "Violations (literal path):"; \
 		echo "$$violations"; \
+		exit 1; \
+	fi
+	@# Pass 2: variable-indirection. The raw.jsonl path is usually held in
+	@# a `rawPath` var or the `ledgerFileRaw` constant, so the literal
+	@# "raw.jsonl" string never appears at the open site. Scoped to the two
+	@# packages that record sessions (cmd/ox, internal/session) since those
+	@# are where the bypass lived; the chokepoint and tests are exempt.
+	@indirect=$$(grep -rnE '(os\.OpenFile|os\.Create|os\.WriteFile)\([^)]*(rawPath|ledgerFileRaw)' \
+		--include='*.go' cmd/ox internal/session 2>/dev/null \
+		| grep -v '_test\.go:' \
+		| grep -v 'internal/session/raw_writer\.go:' \
+		| grep -vE ':[0-9]+:[[:space:]]*//') ; \
+	if [ -n "$$indirect" ] ; then \
+		echo "ERROR: raw.jsonl path (rawPath / ledgerFileRaw) must be written via session.RawWriter"; \
+		echo "Violations (variable indirection):"; \
+		echo "$$indirect"; \
 		exit 1; \
 	fi
 

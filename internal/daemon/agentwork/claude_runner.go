@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -92,9 +93,15 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}
-	args = append(args, "-p", req.Prompt)
+	// `-p`/`--print` enables non-interactive (print) mode. The prompt itself is
+	// NOT passed as the flag value — claude reads it from stdin when -p has no
+	// argument. Keeping the (potentially sensitive) session transcript out of
+	// argv prevents same-UID processes from reading it via ps / /proc/<pid>/cmdline
+	// / sysctl kern.procargs2 (security finding #10).
+	args = append(args, "-p")
 
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
+	cmd.Stdin = strings.NewReader(req.Prompt)
 	if req.WorkDir != "" {
 		cmd.Dir = req.WorkDir
 	}

@@ -401,6 +401,17 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 		return fmt.Errorf("git clone: remote URL is empty")
 	}
 
+	// Validate the URL before it reaches git. remoteURL is sourced from the
+	// workspace registry / credentials file, which is attacker-influenceable;
+	// without this, an `ext::sh -c '...'` URL would make git fork a shell as the
+	// daemon user (RCE). Host allowlist is intentionally empty: ledgers legitimately
+	// live on github.com / gitlab.com / self-hosted forges, so we rely on scheme
+	// validation here plus HardenedCloneArgs below (two independent defenses).
+	// See ADR-022 / security/SECURITY.md (#hunter-cli-input).
+	if err := gitutil.ValidateCloneURL(remoteURL, nil); err != nil {
+		return fmt.Errorf("git clone: unsafe remote URL: %w", err)
+	}
+
 	// remove existing directory if empty
 	entries, _ := os.ReadDir(path)
 	if len(entries) == 0 {
@@ -414,15 +425,23 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 	// cloned origin URL stays bare and credentials live in the OS
 	// keychain or 0600 file store.
 	helperCmd := gitserver.DefaultHelperCommand()
-	cloneCmd := exec.Command("git",
+	gitArgs := []string{
 		"-c", "credential.helper=",
-		"-c", "credential.helper="+helperCmd,
+		"-c", "credential.helper=" + helperCmd,
+	}
+	// Disable git's ext:: / file:: transports so a hostile URL can't reach a
+	// shell or the local filesystem even if it passed validation.
+	gitArgs = append(gitArgs, gitutil.HardenedCloneArgs(gitserver.TestAllowFileTransport)...)
+	// "--" guarantees remoteURL is treated as a positional, never a flag.
+	gitArgs = append(gitArgs,
 		"clone",
 		"--filter=blob:none",
 		"--sparse",
+		"--",
 		remoteURL,
 		path,
 	)
+	cloneCmd := exec.Command("git", gitArgs...)
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git clone: %w: %s", err, output)
 	}

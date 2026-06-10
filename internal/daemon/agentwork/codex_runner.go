@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -57,9 +58,14 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	args := []string{"--full-auto", "--quiet", "-p", req.Prompt}
+	// The prompt is fed via stdin rather than as an argv element so the
+	// (potentially sensitive) session transcript does not appear in
+	// ps / /proc/<pid>/cmdline / sysctl kern.procargs2 (security finding #10).
+	// `-` as the positional prompt tells codex to read the prompt from stdin.
+	args := []string{"--full-auto", "--quiet", "-"}
 
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
+	cmd.Stdin = strings.NewReader(req.Prompt)
 	if req.WorkDir != "" {
 		cmd.Dir = req.WorkDir
 	}

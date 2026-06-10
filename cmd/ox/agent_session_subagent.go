@@ -116,7 +116,9 @@ func runAgentSessionSubagentComplete(inst *agentinstance.Instance, args []string
 		fmt.Printf("  Parent session: %s\n", parentPath)
 		fmt.Printf("  Total subagents: %d\n", subagentCount)
 		if summary != "" {
-			fmt.Printf("  Summary: %s\n", summary)
+			// summary is LLM-generated/untrusted — strip terminal escapes to
+			// prevent escape-sequence injection (security finding #11)
+			fmt.Printf("  Summary: %s\n", stripANSIEscapes(summary))
 		}
 		fmt.Println()
 		fmt.Println("--- Machine Output ---")
@@ -199,7 +201,8 @@ func runAgentSessionSubagentList(inst *agentinstance.Instance) error {
 			for i, sub := range subagents {
 				fmt.Printf("    %d. %s", i+1, sub.SubagentID)
 				if sub.Summary != "" {
-					fmt.Printf(" - %s", sub.Summary)
+					// untrusted LLM-generated summary — strip terminal escapes (finding #11)
+					fmt.Printf(" - %s", stripANSIEscapes(sub.Summary))
 				}
 				fmt.Println()
 			}
@@ -217,7 +220,8 @@ func runAgentSessionSubagentList(inst *agentinstance.Instance) error {
 		for i, sub := range subagents {
 			fmt.Printf("  %d. %s", i+1, sub.SubagentID)
 			if sub.Summary != "" {
-				fmt.Printf(" - %s", sub.Summary)
+				// untrusted LLM-generated summary — strip terminal escapes (finding #11)
+				fmt.Printf(" - %s", stripANSIEscapes(sub.Summary))
 			}
 			fmt.Println()
 		}

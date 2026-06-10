@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -65,18 +64,24 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 		"metadata": meta,
 	}
 
-	data, err := json.Marshal(header)
-	if err != nil {
-		return fmt.Errorf("marshal header: %w", err)
-	}
-	data = append(data, '\n')
-
 	if err := os.MkdirAll(filepath.Dir(rawPath), 0755); err != nil {
 		return fmt.Errorf("create raw.jsonl dir: %w", err)
 	}
 
-	if err := os.WriteFile(rawPath, data, 0644); err != nil {
+	// route the header through the RawWriter chokepoint so every byte in
+	// raw.jsonl — including this metadata line — passes the redaction
+	// stack. Truncate because the header is always the first line written
+	// at session start.
+	w, err := session.NewRawWriterTruncate(rawPath, projectRoot)
+	if err != nil {
+		return fmt.Errorf("open raw.jsonl: %w", err)
+	}
+	if err := w.WriteRaw(header); err != nil {
+		_ = w.Close()
 		return fmt.Errorf("write raw.jsonl header: %w", err)
+	}
+	if err := w.CloseAndSync(); err != nil {
+		return fmt.Errorf("sync raw.jsonl header: %w", err)
 	}
 
 	return nil

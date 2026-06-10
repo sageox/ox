@@ -1810,7 +1810,7 @@ func runAgentSessionRecord(inst *agentinstance.Instance, args []string) error {
 	}
 
 	// record entries to session file
-	recorded, err := recordEntriesToSession(state, entries)
+	recorded, err := recordEntriesToSession(projectRoot, state, entries)
 	if err != nil {
 		return fmt.Errorf("failed to record entries: %w", err)
 	}
@@ -2089,22 +2089,30 @@ func parseRecordEntries(args []string) ([]sessionRecordInput, error) {
 }
 
 // recordEntriesToSession appends entries to the raw session file.
-func recordEntriesToSession(state *session.RecordingState, entries []sessionRecordInput) (int, error) {
+//
+// All writes go through session.RawWriter — the single chokepoint that
+// gates every byte landing in raw.jsonl through the three-layer redaction
+// stack (command-allowlist, built-in regex Redactor, gitleaks extras).
+// Writing content/tool_input/tool_output verbatim here would let secrets
+// reach the team-visible LFS ledger unredacted. state.SessionPath is the
+// LOCAL recording cache (not the ledger), so routing through RawWriter is
+// consistent with cache-only design.
+//
+// WriteRaw (not WriteEntry) is used because SessionEntry carries no seq
+// field; the seq numbering (state.EntryCount + i) must survive into the
+// JSON, so we hand RawWriter the same map the legacy encoder wrote.
+func recordEntriesToSession(projectRoot string, state *session.RecordingState, entries []sessionRecordInput) (int, error) {
 	if state == nil || state.SessionPath == "" {
 		return 0, fmt.Errorf("invalid recording state")
 	}
 
-	// open raw session file for append
 	rawPath := filepath.Join(state.SessionPath, ledgerFileRaw)
-	f, err := os.OpenFile(rawPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	w, err := session.NewRawWriter(rawPath, projectRoot)
 	if err != nil {
 		return 0, fmt.Errorf("open raw session: %w", err)
 	}
-	defer f.Close()
 
-	encoder := json.NewEncoder(f)
 	recorded := 0
-
 	for i, entry := range entries {
 		// parse timestamp or use current time
 		ts := time.Now()
@@ -2132,14 +2140,15 @@ func recordEntriesToSession(state *session.RecordingState, entries []sessionReco
 			data["tool_output"] = entry.ToolOutput
 		}
 
-		if err := encoder.Encode(data); err != nil {
+		if err := w.WriteRaw(data); err != nil {
+			_ = w.Close()
 			return recorded, fmt.Errorf("write entry %d: %w", i, err)
 		}
 		recorded++
 	}
 
-	// sync to disk
-	if err := f.Sync(); err != nil {
+	// CloseAndSync flushes and fsyncs in one shot (RawWriter owns durability).
+	if err := w.CloseAndSync(); err != nil {
 		return recorded, fmt.Errorf("sync session: %w", err)
 	}
 

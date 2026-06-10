@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,10 +17,21 @@ import (
 
 	adapter "github.com/sageox/ox/internal/adapter"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/spf13/cobra"
 )
+
+// adapterDownloadHosts are the GitHub release-asset hosts permitted as a
+// defense-in-depth transport guard (ADR-022 decision 4). This is NOT the primary
+// integrity control — the checksum gate is. GitHub rotates CDN hosts, so this
+// list errs toward the known asset hosts and never substitutes for the checksum.
+var adapterDownloadHosts = map[string]bool{
+	"github.com":                           true,
+	"objects.githubusercontent.com":        true,
+	"release-assets.githubusercontent.com": true,
+}
 
 var adapterCmd = &cobra.Command{
 	Use:   "adapter",
@@ -42,6 +56,8 @@ func init() {
 	// flags
 	adapterListCmd.Flags().Bool("json", false, "output in JSON format")
 	adapterInfoCmd.Flags().Bool("json", false, "output in JSON format")
+	adapterInstallCmd.Flags().Bool("allow-unverified", false,
+		"install without a SageOx-curated checksum (required for arbitrary repos and for curated entries that lack a pinned checksum)")
 }
 
 // userLocalAdaptersDir returns the platform-specific user adapter install directory.
@@ -284,6 +300,34 @@ it to ~/.local/share/ox/adapters/.`,
 	RunE: runAdapterInstall,
 }
 
+// installPlan is the resolved intent for an adapter install: where to fetch it,
+// which release to pin, and whether SageOx vouches for the bytes via a checksum.
+type installPlan struct {
+	owner     string
+	repo      string
+	tag       string            // pinned release tag (required; never releases/latest)
+	checksum  string            // expected sha256 hex for this platform ("" => unverifiable)
+	curated   bool              // true => resolved from registry (SageOx is trust anchor)
+	platform  string            // e.g. "darwin_arm64"
+	checksums map[string]string // full per-platform map (curated only; for diagnostics)
+}
+
+// installConfig parameterizes installAdapter so it can be driven by tests against
+// an httptest server. Production fills apiBaseURL with the GitHub API root and
+// allowedHosts with adapterDownloadHosts.
+type installConfig struct {
+	plan         installPlan
+	apiBaseURL   string          // GitHub API root, e.g. https://api.github.com
+	allowedHosts map[string]bool // download-host transport guard (defense-in-depth)
+	installDir   string
+	// verify is the protocol-conformance check run AFTER the checksum gate. It is
+	// indirected so tests can assert it is never reached when the gate fails.
+	verify func(binaryPath string) error
+	// httpClient performs the API + asset GETs. nil => http.DefaultClient. Tests
+	// inject a TLS test server's client so the https transport guard still applies.
+	httpClient *http.Client
+}
+
 // runAdapterInstall acquires and installs an adapter binary.
 //
 // SECURITY POSTURE (see docs/adr/ADR-022-adapter-security-posture.md):
@@ -292,18 +336,54 @@ it to ~/.local/share/ox/adapters/.`,
 // trust anchor. Two paths with different anchors:
 //   - curated short-name ("cursor"): SageOx vouches -> integrity check required
 //     (pin tag + sha256, verify-before-exec). Tracked in ox-5ihl.
-//   - arbitrary github.com/<owner>/<repo>: the user vouches -> stays frictionless.
+//   - arbitrary github.com/<owner>/<repo>@<tag>: the user vouches -> stays
+//     frictionless, but is unverifiable by SageOx and so requires an explicit
+//     --allow-unverified opt-in (and an explicit @<tag> pin in the source).
+//
+// Install ordering is an invariant (ADR-022 decision 5): resolve -> pin tag ->
+// GET releases/tags/<tag> (asserting tag_name matches) -> select asset ->
+// validate download host -> download while hashing -> constant-time checksum
+// compare -> ONLY THEN chmod -> verifyAdapterProtocol -> atomic rename. No
+// untrusted byte is made executable or run before the checksum gate.
 //
 // Once installed, an adapter runs every session as the user; installation IS the
 // trust decision. We do not sandbox an installed adapter from the user's own
 // session — that is outside the documented threat model (security/SECURITY.md).
-func runAdapterInstall(_ *cobra.Command, args []string) error {
+func runAdapterInstall(cmd *cobra.Command, args []string) error {
 	source := args[0]
+	allowUnverified, _ := cmd.Flags().GetBool("allow-unverified")
 
-	// try registry lookup first (short name like "cursor")
-	owner, repo, err := resolveAdapterSource(source)
+	platform := fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH)
+	plan, err := resolveAdapterSource(source, platform)
 	if err != nil {
 		return err
+	}
+
+	// A curated entry with no pinned tag has no release to fetch at all (we refuse
+	// to fall back to releases/latest — that is the gap ox-5ihl closes), so even
+	// --allow-unverified cannot satisfy it. NOTE (ox-5ihl): the external entries
+	// (cursor, windsurf, copilot, cline) currently ship WITHOUT a tag/checksum, so
+	// they land here until a maintainer pins one — the intended, documented
+	// transition.
+	if plan.curated && plan.tag == "" {
+		return fmt.Errorf("adapter %q has no pinned release tag in the registry yet; "+
+			"a maintainer must pin a tag + per-platform checksum before it can be installed (ADR-022/ox-5ihl)",
+			plan.repo)
+	}
+
+	// Fail-closed gate (ADR-022 decisions 2-3): an install SageOx cannot vouch for
+	// — an arbitrary repo, or a curated entry whose registry lacks a checksum for
+	// this platform — must not silently chmod+exec untrusted bytes. Require an
+	// explicit opt-in.
+	if plan.checksum == "" && !allowUnverified {
+		if plan.curated {
+			return fmt.Errorf("adapter %q has no pinned checksum for platform %s yet; "+
+				"either wait for a checksum to be pinned in the registry, or re-run with --allow-unverified to install unverified",
+				plan.repo, platform)
+		}
+		return fmt.Errorf("installing from an arbitrary repo (%s/%s) cannot be verified by SageOx; "+
+			"re-run with --allow-unverified to install unverified",
+			plan.owner, plan.repo)
 	}
 
 	installDir, err := userLocalAdaptersDir()
@@ -314,26 +394,58 @@ func runAdapterInstall(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("create adapter directory: %w", err)
 	}
 
-	platform := fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH)
-	slog.Info("fetching latest release", "owner", owner, "repo", repo, "platform", platform)
+	if plan.checksum == "" {
+		// allow-unverified path: keep protocol conformance, drop the provenance gate.
+		cli.PrintWarning(fmt.Sprintf(
+			"installing %s/%s@%s WITHOUT integrity verification (--allow-unverified): "+
+				"SageOx cannot vouch for these bytes; you are the trust anchor",
+			plan.owner, plan.repo, plan.tag))
+	}
 
-	// fetch latest release from GitHub API
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
-	// NOTE: resolves releases/latest with no version pin. On the curated path this
-	// is the authenticity gap (ox-5ihl, ADR-022): the GitHub API response is
-	// network input and is not yet trusted to name the exact binary SageOx curated.
-	resp, err := http.Get(apiURL) //nolint:gosec // URL constructed from trusted adapter registry
+	cfg := installConfig{
+		plan:         plan,
+		apiBaseURL:   "https://api.github.com",
+		allowedHosts: adapterDownloadHosts,
+		installDir:   installDir,
+		verify:       verifyAdapterProtocol,
+	}
+	return installAdapter(cfg)
+}
+
+// installAdapter performs the integrity-gated acquisition described on
+// runAdapterInstall. It is split out so tests can drive every step (tag
+// assertion, host guard, checksum gate, verify ordering) against an httptest
+// server. The ordering here is a security invariant — do not reorder.
+func installAdapter(cfg installConfig) error {
+	plan := cfg.plan
+	if plan.tag == "" {
+		// defense in depth: resolveAdapterSource must always pin a tag.
+		return fmt.Errorf("internal: install plan has no pinned tag")
+	}
+
+	client := cfg.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	slog.Info("fetching pinned release", "owner", plan.owner, "repo", plan.repo, "tag", plan.tag, "platform", plan.platform)
+
+	// Fetch the PINNED release (releases/tags/<tag>), never releases/latest, so a
+	// retagged/swapped "latest" cannot redirect a pinned install (ADR-022).
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/releases/tags/%s", cfg.apiBaseURL, plan.owner, plan.repo, plan.tag)
+	resp, err := client.Get(apiURL) //nolint:gosec // URL built from registry-resolved owner/repo/tag
 	if err != nil {
 		return fmt.Errorf("fetch release info: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GitHub API returned %d for %s/%s (check repo exists and has releases)", resp.StatusCode, owner, repo)
+		return fmt.Errorf("GitHub API returned %d for %s/%s tag %s (check the tag exists)", resp.StatusCode, plan.owner, plan.repo, plan.tag)
 	}
 
 	var release struct {
-		Assets []struct {
+		TagName string `json:"tag_name"`
+		Assets  []struct {
 			Name               string `json:"name"`
 			BrowserDownloadURL string `json:"browser_download_url"`
 		} `json:"assets"`
@@ -342,28 +454,35 @@ func runAdapterInstall(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("decode release response: %w", err)
 	}
 
+	// Assert the response describes the tag we asked for; a mismatch means the API
+	// returned a different release than the pin and must be rejected.
+	if release.TagName != plan.tag {
+		return fmt.Errorf("release tag mismatch: requested %q but GitHub returned %q", plan.tag, release.TagName)
+	}
+
 	// find matching asset for current platform
 	var downloadURL, assetName string
 	for _, asset := range release.Assets {
-		if strings.Contains(asset.Name, platform) {
+		if strings.Contains(asset.Name, plan.platform) {
 			downloadURL = asset.BrowserDownloadURL
 			assetName = asset.Name
 			break
 		}
 	}
 	if downloadURL == "" {
-		return fmt.Errorf("no release asset found for platform %s in %s/%s", platform, owner, repo)
+		return fmt.Errorf("no release asset found for platform %s in %s/%s@%s", plan.platform, plan.owner, plan.repo, plan.tag)
 	}
 
-	slog.Info("downloading adapter", "asset", assetName)
+	// Transport guard (ADR-022 decision 4): defense-in-depth only — the checksum
+	// gate below is the real control. Reject a download URL pointing off the known
+	// asset hosts (e.g. an attacker-influenced browser_download_url).
+	if err := gitutil.ValidateHTTPSHost(downloadURL, cfg.allowedHosts); err != nil {
+		return fmt.Errorf("refusing download: %w", err)
+	}
 
-	// download binary
-	// NOTE: bytes fetched here are network input and currently unverified. The
-	// integrity gate (sha256 constant-time compare against the registry pin, BEFORE
-	// chmod/exec) belongs immediately after the download completes — see ADR-022
-	// decisions 2 and 5, ox-5ihl. A download-host allowlist is deliberately NOT the
-	// control (GitHub rotates CDN hosts; checksum subsumes it — ADR-022 decision 4).
-	dlResp, err := http.Get(downloadURL) //nolint:gosec // URL from GitHub API release response
+	slog.Info("downloading adapter", "asset", assetName, "tag", plan.tag)
+
+	dlResp, err := client.Get(downloadURL) //nolint:gosec // host validated above; bytes checksum-gated below
 	if err != nil {
 		return fmt.Errorf("download binary: %w", err)
 	}
@@ -373,30 +492,44 @@ func runAdapterInstall(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("download returned %d", dlResp.StatusCode)
 	}
 
-	// derive binary name from asset name (strip platform suffix for the installed name)
-	binaryName := deriveAdapterBinaryName(assetName, platform)
-	destPath := filepath.Join(installDir, binaryName)
+	binaryName := deriveAdapterBinaryName(assetName, plan.platform)
+	destPath := filepath.Join(cfg.installDir, binaryName)
 
 	// write to temp file then rename (atomic install)
-	tmpFile, err := os.CreateTemp(installDir, ".ox-adapter-install-*")
+	tmpFile, err := os.CreateTemp(cfg.installDir, ".ox-adapter-install-*")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath) // clean up on failure
 
-	if _, err := io.Copy(tmpFile, dlResp.Body); err != nil {
+	// Hash WHILE copying so the bytes we write are exactly the bytes we hash.
+	hasher := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmpFile, hasher), dlResp.Body); err != nil {
 		tmpFile.Close()
 		return fmt.Errorf("write binary: %w", err)
 	}
 	tmpFile.Close()
 
+	// CHECKSUM GATE (ADR-022 invariant): the file is still 0600 and never executed.
+	// On the verified path, a mismatch aborts BEFORE chmod/exec. Constant-time
+	// compare avoids leaking where the digests diverge.
+	if plan.checksum != "" {
+		got := hex.EncodeToString(hasher.Sum(nil))
+		want := strings.ToLower(plan.checksum)
+		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			return fmt.Errorf("checksum mismatch for %s: expected %s, got %s (refusing to install)", assetName, want, got)
+		}
+		slog.Info("adapter checksum verified", "asset", assetName, "sha256", got)
+	}
+
+	// Only past the gate do we make the bytes executable.
 	if err := os.Chmod(tmpPath, 0755); err != nil {
 		return fmt.Errorf("set executable permission: %w", err)
 	}
 
-	// verify the binary runs info successfully
-	if err := verifyAdapterBinary(tmpPath); err != nil {
+	// Protocol conformance (NOT provenance — provenance was the checksum gate).
+	if err := cfg.verify(tmpPath); err != nil {
 		return fmt.Errorf("installed binary failed verification: %w", err)
 	}
 
@@ -408,60 +541,98 @@ func runAdapterInstall(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-// resolveAdapterSource resolves an adapter source string to owner/repo.
-// Accepts either a short name (looked up in the embedded registry) or a
-// full github.com/<owner>/<repo> URL.
+// resolveAdapterSource resolves an adapter source string to an installPlan.
+// Accepts either a short name (looked up in the embedded registry) or a full
+// github.com/<owner>/<repo>[@<tag>] URL.
 //
 // This split is the adapter trust boundary (ADR-022): a short name means
 // "install what SageOx curated under this name" (SageOx is the trust anchor, so
-// the curated path must verify authenticity), while a github.com/<owner>/<repo>
-// URL means "install this repo I explicitly named" (the user is the trust anchor,
-// so that path stays frictionless). Keep the two paths distinguishable here — do
-// not collapse them into one install flow with one trust policy.
-func resolveAdapterSource(source string) (owner, repo string, err error) {
+// the curated path carries a registry tag pin + per-platform checksum), while a
+// github.com/<owner>/<repo>@<tag> URL means "install this repo I explicitly
+// named at this tag" (the user is the trust anchor; SageOx has no checksum, so
+// the caller must pass --allow-unverified). Keep the two paths distinguishable —
+// do not collapse them into one install flow with one trust policy.
+func resolveAdapterSource(source, platform string) (installPlan, error) {
 	// if it looks like a GitHub URL, parse directly (user-as-trust-anchor path)
 	if strings.Contains(source, "/") {
-		return parseGitHubRepo(source)
+		owner, repo, tag, err := parseGitHubRepo(source)
+		if err != nil {
+			return installPlan{}, err
+		}
+		// The arbitrary path requires an explicit @<tag>: without a pin there is
+		// nothing reproducible to install and nothing for the user to vouch for.
+		if tag == "" {
+			return installPlan{}, fmt.Errorf("installing from an arbitrary repo requires an explicit tag: use github.com/%s/%s@<tag>", owner, repo)
+		}
+		return installPlan{owner: owner, repo: repo, tag: tag, curated: false, platform: platform}, nil
 	}
 
-	// short name -- look up in registry
+	// short name -- look up in registry (curated, SageOx-as-trust-anchor path)
 	reg, loadErr := adapter.LoadEmbeddedRegistry()
 	if loadErr != nil {
-		return "", "", fmt.Errorf("registry unavailable: %w", loadErr)
+		return installPlan{}, fmt.Errorf("registry unavailable: %w", loadErr)
 	}
 
 	entry := reg.Lookup(source)
 	if entry == nil {
-		return "", "", fmt.Errorf("adapter %q not found in registry (use github.com/<owner>/<repo> for unlisted adapters)", source)
+		return installPlan{}, fmt.Errorf("adapter %q not found in registry (use github.com/<owner>/<repo>@<tag> for unlisted adapters)", source)
 	}
 
 	if entry.Bundled {
-		return "", "", fmt.Errorf("adapter %q is bundled with ox and does not need to be installed separately", source)
+		return installPlan{}, fmt.Errorf("adapter %q is bundled with ox and does not need to be installed separately", source)
 	}
 
 	parts := strings.SplitN(entry.Repo, "/", 2)
 	if len(parts) != 2 {
-		return "", "", fmt.Errorf("invalid repo %q in registry for adapter %q", entry.Repo, source)
+		return installPlan{}, fmt.Errorf("invalid repo %q in registry for adapter %q", entry.Repo, source)
 	}
-	return parts[0], parts[1], nil
+
+	plan := installPlan{
+		owner:     parts[0],
+		repo:      parts[1],
+		tag:       entry.Tag,
+		curated:   true,
+		platform:  platform,
+		checksums: entry.Checksums,
+		checksum:  entry.Checksums[platform], // "" when unpinned -> fail-closed upstream
+	}
+	// A curated entry with no tag pin cannot fetch releases/tags/<tag>; treat it as
+	// unverifiable (fail-closed unless --allow-unverified). We cannot fall back to
+	// releases/latest — that is precisely the gap ADR-022/ox-5ihl closes. When the
+	// tag is missing we leave plan.tag empty AND blank the checksum so the caller's
+	// fail-closed branch fires with a clear message rather than a tag assertion.
+	if plan.tag == "" {
+		plan.checksum = ""
+	}
+	return plan, nil
 }
 
-// parseGitHubRepo extracts owner/repo from a GitHub URL or shorthand.
-func parseGitHubRepo(source string) (owner, repo string, err error) {
+// parseGitHubRepo extracts owner, repo, and an optional @<tag> from a GitHub URL
+// or shorthand: github.com/<owner>/<repo>[@<tag>]. tag is "" when absent; the
+// caller decides whether a missing tag is acceptable (the arbitrary path requires
+// one — ADR-022).
+func parseGitHubRepo(source string) (owner, repo, tag string, err error) {
 	source = strings.TrimPrefix(source, "https://")
 	source = strings.TrimPrefix(source, "http://")
 	source = strings.TrimSuffix(source, "/")
 
 	if !strings.HasPrefix(source, "github.com/") {
-		return "", "", fmt.Errorf("must start with github.com/")
+		return "", "", "", fmt.Errorf("must start with github.com/")
 	}
 
-	parts := strings.SplitN(strings.TrimPrefix(source, "github.com/"), "/", 2)
+	rest := strings.TrimPrefix(source, "github.com/")
+	// split off an optional @<tag> suffix (on the repo segment)
+	if at := strings.LastIndex(rest, "@"); at != -1 {
+		tag = rest[at+1:]
+		rest = rest[:at]
+	}
+
+	parts := strings.SplitN(rest, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", fmt.Errorf("expected github.com/<owner>/<repo>")
+		return "", "", "", fmt.Errorf("expected github.com/<owner>/<repo>[@<tag>]")
 	}
 
-	return parts[0], parts[1], nil
+	return parts[0], parts[1], tag, nil
 }
 
 // deriveAdapterBinaryName strips platform suffix from the asset name.
@@ -476,14 +647,15 @@ func deriveAdapterBinaryName(assetName, platform string) string {
 	return name
 }
 
-// verifyAdapterBinary runs the info subcommand to verify a binary is a valid adapter.
+// verifyAdapterProtocol runs the info subcommand to verify a binary is a valid adapter.
 //
 // IMPORTANT: this is PROTOCOL-CONFORMANCE verification, NOT provenance. It answers
 // "is this a runnable ox adapter?", never "is this the binary SageOx curated?".
-// The name has misled reviewers into reading it as an integrity check — it is not,
-// and was never intended to be (ADR-022). Provenance is the checksum gate in
-// runAdapterInstall (ox-5ihl). When that lands, rename this verifyAdapterProtocol.
-func verifyAdapterBinary(binaryPath string) error {
+// The old name (verifyAdapterBinary) misled reviewers into reading it as an
+// integrity check — it is not, and was never intended to be (ADR-022 decision 5).
+// Provenance is the checksum gate in installAdapter (ox-5ihl), which runs BEFORE
+// this is ever reached on the verified path.
+func verifyAdapterProtocol(binaryPath string) error {
 	cmd := exec.Command(binaryPath, "info")
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("OX_PROTOCOL_VERSION=%d", adapterprotocol.ProtocolVersion),
@@ -580,8 +752,8 @@ func runAdapterLink(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("binary name must start with 'ox-adapter-' (got %q)", binaryName)
 	}
 
-	// verify it is a valid adapter
-	if err := verifyAdapterBinary(sourcePath); err != nil {
+	// verify it is a valid adapter (protocol conformance; dev link, not acquisition)
+	if err := verifyAdapterProtocol(sourcePath); err != nil {
 		return fmt.Errorf("binary validation failed: %w", err)
 	}
 

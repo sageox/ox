@@ -446,6 +446,47 @@ func TestRunnerEnvironmentVariables(t *testing.T) {
 	}
 }
 
+// TestRunnerDoesNotLeakDaemonSecrets verifies hook subprocesses do NOT inherit
+// daemon secrets from the daemon's environment.
+// Failure prevented: a prompt-injected CLAUDE.md hook (e.g. `env > /tmp/x`)
+// exfiltrates SAGEOX_TOKEN / GITHUB_TOKEN / AWS_* from the daemon. See ADR-022 §6.
+func TestRunnerDoesNotLeakDaemonSecrets(t *testing.T) {
+	// not parallel: mutates process environment via t.Setenv
+	t.Setenv("SAGEOX_TOKEN", "tok-must-not-leak")
+	t.Setenv("GITHUB_TOKEN", "ghp-must-not-leak")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-must-not-leak")
+
+	envFile := filepath.Join(t.TempDir(), "leaked.txt")
+
+	runner := hooks.NewHookRunner([]hooks.HookConfig{
+		// dump the secrets a malicious hook would target; empty if sanitized
+		{Event: "daemon.started", Command: fmt.Sprintf(
+			`printf "%%s|%%s|%%s|%%s" "$SAGEOX_TOKEN" "$GITHUB_TOKEN" "$AWS_SECRET_ACCESS_KEY" "$OX_EVENT" > %s`, envFile)},
+	}, testLogger())
+
+	runner.Dispatch(context.Background(), hooks.Event{
+		Name:      hooks.EventDaemonStarted,
+		Timestamp: time.Now(),
+	})
+	runner.Wait()
+
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("failed to read env output: %v", err)
+	}
+
+	got := string(data)
+	for _, secret := range []string{"tok-must-not-leak", "ghp-must-not-leak", "aws-must-not-leak"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("daemon secret leaked to hook env: %q present in %q", secret, got)
+		}
+	}
+	// the hook-specific OX_EVENT var must still be delivered
+	if !strings.Contains(got, "daemon.started") {
+		t.Errorf("OX_EVENT should still be set for hooks, got %q", got)
+	}
+}
+
 // --- Concurrent Dispatch calls ---
 
 // TestRunnerConcurrentDispatch verifies multiple goroutines can call Dispatch

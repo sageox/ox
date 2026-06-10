@@ -174,12 +174,15 @@ func TestParseGitHubRepo(t *testing.T) {
 		input     string
 		wantOwner string
 		wantRepo  string
+		wantTag   string
 		wantErr   bool
 	}{
 		{input: "github.com/sageox/ox-adapters", wantOwner: "sageox", wantRepo: "ox-adapters"},
 		{input: "https://github.com/sageox/ox-adapters", wantOwner: "sageox", wantRepo: "ox-adapters"},
 		{input: "https://github.com/sageox/ox-adapters/", wantOwner: "sageox", wantRepo: "ox-adapters"},
 		{input: "http://github.com/sageox/ox-adapters", wantOwner: "sageox", wantRepo: "ox-adapters"},
+		{input: "github.com/sageox/ox-adapters@v1.2.3", wantOwner: "sageox", wantRepo: "ox-adapters", wantTag: "v1.2.3"},
+		{input: "https://github.com/me/x@v0.1.0", wantOwner: "me", wantRepo: "x", wantTag: "v0.1.0"},
 		{input: "gitlab.com/foo/bar", wantErr: true},
 		{input: "github.com/", wantErr: true},
 		{input: "github.com/owner-only", wantErr: true},
@@ -188,7 +191,7 @@ func TestParseGitHubRepo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			owner, repo, err := parseGitHubRepo(tt.input)
+			owner, repo, tag, err := parseGitHubRepo(tt.input)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("expected error for %q", tt.input)
@@ -203,6 +206,9 @@ func TestParseGitHubRepo(t *testing.T) {
 			}
 			if repo != tt.wantRepo {
 				t.Errorf("repo = %q, want %q", repo, tt.wantRepo)
+			}
+			if tag != tt.wantTag {
+				t.Errorf("tag = %q, want %q", tag, tt.wantTag)
 			}
 		})
 	}
@@ -245,7 +251,7 @@ func TestVerifyAdapterBinary_InvalidBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := verifyAdapterBinary(badBinary)
+	err := verifyAdapterProtocol(badBinary)
 	if err == nil {
 		t.Fatal("should reject binary with invalid info response")
 	}
@@ -257,7 +263,7 @@ func TestVerifyAdapterBinary_ValidBinary(t *testing.T) {
 	dir := t.TempDir()
 	createFakeAdapter(t, dir, "valid", "1.0.0", "session")
 
-	err := verifyAdapterBinary(filepath.Join(dir, "ox-adapter-valid"))
+	err := verifyAdapterProtocol(filepath.Join(dir, "ox-adapter-valid"))
 	if err != nil {
 		t.Fatalf("should accept valid adapter: %v", err)
 	}
@@ -274,7 +280,7 @@ echo '{"protocol_version":0,"name":"old","display_name":"Old","version":"1.0.0",
 		t.Fatal(err)
 	}
 
-	err := verifyAdapterBinary(binaryPath)
+	err := verifyAdapterProtocol(binaryPath)
 	if err == nil {
 		t.Fatal("should reject adapter with old protocol version")
 	}

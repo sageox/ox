@@ -438,6 +438,34 @@ func TestGeneratedAirtableRule_KeywordIsTokenAnchor(t *testing.T) {
 	require.True(t, found, "airtable_personnal_access_token rule not found in generated detectors")
 }
 
+// TestRawWriter_FileModeIsOwnerOnly verifies raw.jsonl is created 0600,
+// not world-readable. raw.jsonl holds full conversation content (and any
+// secrets in transit before the redaction stack scrubs them); a 0644 file
+// would leak it to every local user. Covers both constructors.
+// Failure prevented: companion "raw.jsonl world-readable" finding.
+func TestRawWriter_FileModeIsOwnerOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		open func(path string) (*RawWriter, error)
+	}{
+		{"append", func(p string) (*RawWriter, error) { return NewRawWriter(p, "") }},
+		{"truncate", func(p string) (*RawWriter, error) { return NewRawWriterTruncate(p, "") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "raw.jsonl")
+			w, err := tc.open(path)
+			require.NoError(t, err)
+			require.NoError(t, w.WriteEntry(&SessionEntry{Type: EntryTypeUser, Content: "hi"}))
+			require.NoError(t, w.Close())
+
+			fi, err := os.Stat(path)
+			require.NoError(t, err)
+			assert.Equal(t, os.FileMode(0600), fi.Mode().Perm(),
+				"raw.jsonl must be owner-only (0600), got %o", fi.Mode().Perm())
+		})
+	}
+}
+
 // TestRawWriter_JSONLOutputIsValid verifies every line in the output is
 // parseable JSON. A redactor that introduces unescaped quotes or breaks
 // the wire format would create downstream parse failures.

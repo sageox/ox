@@ -34,10 +34,40 @@ type AdapterEntry struct {
 	Repo         string   `yaml:"repo" json:"repo"`
 	Capabilities []string `yaml:"capabilities" json:"capabilities"`
 	DetectCmds   []string `yaml:"detect_commands,omitempty" json:"detect_commands,omitempty"`
-	// Curated-path integrity fields (Tag, Checksums) are planned here per
-	// ADR-022 (adapter security posture): for the short-name install path SageOx
-	// is the trust anchor, so a code-reviewed tag pin + per-platform sha256 in
-	// this registry becomes the authenticity control. Tracked in ox-5ihl.
+
+	// Curated-path integrity fields (ADR-022, ox-5ihl). For the short-name
+	// install path SageOx is the trust anchor, so a code-reviewed release tag
+	// pin plus per-platform sha256 in this registry IS the authenticity control.
+	// The download is verified against these BEFORE the binary is made
+	// executable or run (see runAdapterInstall). A missing pin fails closed
+	// unless the user opts into --allow-unverified.
+	//
+	// Tag pins the exact GitHub release (e.g. "v1.2.3"); installs fetch
+	// releases/tags/<Tag>, never releases/latest. Checksums maps a platform key
+	// ("darwin_arm64") to the lowercase sha256 hex of that platform's asset.
+	Tag       string            `yaml:"tag,omitempty" json:"tag,omitempty"`
+	Checksums map[string]string `yaml:"checksums,omitempty" json:"checksums,omitempty"`
+}
+
+// RequireInstallable returns an error if a non-bundled entry lacks the curated
+// integrity pins (Tag + Checksums) that ADR-022 requires before SageOx can
+// vouch for a short-name install. Bundled adapters ship with ox and are exempt.
+//
+// Callers use this to drive fail-closed behavior on the curated install path:
+// an entry that is not installable can only be installed with an explicit
+// --allow-unverified opt-in. It is NOT called automatically at registry load,
+// so `ox adapter list`/`info` still surface entries that lack a pin.
+func (e *AdapterEntry) RequireInstallable() error {
+	if e.Bundled {
+		return nil
+	}
+	if e.Tag == "" {
+		return fmt.Errorf("adapter %q has no pinned release tag in the registry", e.Name)
+	}
+	if len(e.Checksums) == 0 {
+		return fmt.Errorf("adapter %q has no per-platform checksums in the registry", e.Name)
+	}
+	return nil
 }
 
 // CommunityEntry describes a community-contributed adapter.

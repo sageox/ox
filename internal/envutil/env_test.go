@@ -1,4 +1,4 @@
-package adapters
+package envutil
 
 import (
 	"fmt"
@@ -388,5 +388,78 @@ func TestIsAllowlisted(t *testing.T) {
 				t.Errorf("isAllowlisted(%q) = %v, want %v", tt.name, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSanitizedEnv_NamedDaemonSecretsStripped(t *testing.T) {
+	// Failure prevented: the specific high-value daemon secrets called out in
+	// ADR-022 (SAGEOX_TOKEN, GITHUB_TOKEN, AWS_*) leak into untrusted children.
+	environ := []string{
+		"HOME=/home/dev",
+		"PATH=/usr/bin",
+		"XDG_CONFIG_HOME=/home/dev/.config",
+		"OX_REPO_ID=repo-abc",
+		"SAGEOX_TOKEN=tok-abc123",
+		"GITHUB_TOKEN=ghp_abc123",
+		"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI",
+		"AWS_ACCESS_KEY_ID=AKIA...",     // matches KEY denylist substring
+		"AWS_SESSION_TOKEN=FwoGZXIv...", // matches TOKEN denylist substring
+	}
+
+	m := envMap(SanitizedEnv(environ, nil))
+
+	for _, key := range []string{"SAGEOX_TOKEN", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN"} {
+		if _, ok := m[key]; ok {
+			t.Errorf("daemon secret %s must be stripped from sanitized env", key)
+		}
+	}
+
+	for _, key := range []string{"HOME", "PATH", "XDG_CONFIG_HOME", "OX_REPO_ID"} {
+		if _, ok := m[key]; !ok {
+			t.Errorf("expected non-secret %s to survive sanitization", key)
+		}
+	}
+}
+
+func TestSanitizedEnv_DenylistWinsOverRequiredEnv(t *testing.T) {
+	// Failure prevented: a malicious adapter exfiltrates a secret by naming it in
+	// required_env. The denylist must override any requiredEnv allowlist entry.
+	environ := []string{
+		"HOME=/home/dev",
+		"GITHUB_TOKEN=ghp_abc123",
+		"MODEL_NAME=gemini-pro",
+	}
+	requiredEnv := []string{"GITHUB_TOKEN", "MODEL_NAME"}
+
+	m := envMap(SanitizedEnv(environ, requiredEnv))
+
+	if _, ok := m["GITHUB_TOKEN"]; ok {
+		t.Error("GITHUB_TOKEN must be blocked by denylist even when declared in required_env")
+	}
+	if _, ok := m["MODEL_NAME"]; !ok {
+		t.Error("non-secret MODEL_NAME declared in required_env should pass through")
+	}
+}
+
+func TestSafeCommand_PresetsSanitizedEnv(t *testing.T) {
+	// Failure prevented: SafeCommand spawns a child with the full os.Environ(),
+	// leaking whatever secrets the parent process holds.
+	t.Setenv("SAGEOX_TOKEN", "tok-leak-me")
+	t.Setenv("HOME", "/home/dev")
+
+	cmd := SafeCommand("true")
+	if cmd.Env == nil {
+		t.Fatal("SafeCommand must preset a sanitized Env, got nil")
+	}
+
+	m := envMap(cmd.Env)
+	if _, ok := m["SAGEOX_TOKEN"]; ok {
+		t.Error("SafeCommand env must not contain SAGEOX_TOKEN")
+	}
+	if _, ok := m["HOME"]; !ok {
+		t.Error("SafeCommand env should retain HOME")
+	}
+	if _, ok := m["OX_PROTOCOL_VERSION"]; !ok {
+		t.Error("SafeCommand env should inject OX_PROTOCOL_VERSION")
 	}
 }

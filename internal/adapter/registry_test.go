@@ -179,6 +179,67 @@ func TestGitHubRepo_Format(t *testing.T) {
 	}
 }
 
+// --- F2. RequireInstallable (curated-path integrity gate, ADR-022/ox-5ihl) ---
+
+// TestRequireInstallable_BundledExempt verifies bundled adapters need no pin.
+// Failure prevented: gating bundled adapters (which ship with ox) on a registry
+// checksum they will never have.
+func TestRequireInstallable_BundledExempt(t *testing.T) {
+	e := &AdapterEntry{Name: "claude-code", Bundled: true}
+	if err := e.RequireInstallable(); err != nil {
+		t.Errorf("bundled adapter should be installable without a pin, got: %v", err)
+	}
+}
+
+// TestRequireInstallable_MissingTag verifies a non-bundled entry without a tag
+// is not installable. Failure prevented: a tagless curated entry installing from
+// releases/latest with no provenance (the gap ox-5ihl closes).
+func TestRequireInstallable_MissingTag(t *testing.T) {
+	e := &AdapterEntry{Name: "cursor", Bundled: false, Checksums: map[string]string{"darwin_arm64": "abc"}}
+	if err := e.RequireInstallable(); err == nil {
+		t.Fatal("entry without a tag must not be installable")
+	}
+}
+
+// TestRequireInstallable_MissingChecksums verifies a non-bundled entry without
+// checksums is not installable. Failure prevented: installing unverified bytes
+// under a SageOx-curated name.
+func TestRequireInstallable_MissingChecksums(t *testing.T) {
+	e := &AdapterEntry{Name: "cursor", Bundled: false, Tag: "v1.0.0"}
+	if err := e.RequireInstallable(); err == nil {
+		t.Fatal("entry without checksums must not be installable")
+	}
+}
+
+// TestRequireInstallable_FullyPinned verifies a non-bundled entry with both a tag
+// and checksums is installable.
+func TestRequireInstallable_FullyPinned(t *testing.T) {
+	e := &AdapterEntry{
+		Name: "cursor", Bundled: false, Tag: "v1.0.0",
+		Checksums: map[string]string{"darwin_arm64": "deadbeef"},
+	}
+	if err := e.RequireInstallable(); err != nil {
+		t.Errorf("fully pinned entry should be installable, got: %v", err)
+	}
+}
+
+// TestExternalEntries_CurrentlyUnpinned documents the intended transition state:
+// the shipped external entries have no real checksum yet, so RequireInstallable
+// fails (install requires --allow-unverified until a maintainer pins them). If
+// this test starts failing, real pins were added — update it then.
+func TestExternalEntries_CurrentlyUnpinned(t *testing.T) {
+	reg, err := LoadEmbeddedRegistry()
+	if err != nil {
+		t.Fatalf("LoadEmbeddedRegistry() error: %v", err)
+	}
+	for _, a := range reg.ExternalAdapters() {
+		a := a
+		if err := a.RequireInstallable(); err == nil {
+			t.Errorf("external adapter %q now has a pin; update the registry-transition test", a.Name)
+		}
+	}
+}
+
 // --- G. Uniqueness constraints ---
 
 // TestAdapterNames_Unique verifies no duplicate adapter names exist.

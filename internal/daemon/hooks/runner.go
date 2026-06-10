@@ -11,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/sageox/ox/internal/envutil"
 )
 
 const (
@@ -88,7 +90,11 @@ func (r *HookRunner) run(ctx context.Context, event Event, hook HookConfig) {
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(),
+	// Hooks run arbitrary user-defined commands (e.g. from a prompt-injected
+	// CLAUDE.md `env > /tmp/x`). They must NOT inherit daemon secrets — sanitize
+	// to the default allowlist before adding the hook-specific OX_EVENT vars.
+	// See ADR-022 §6.
+	cmd.Env = append(envutil.SanitizedEnv(os.Environ(), nil),
 		"OX_EVENT="+event.Name,
 		"OX_EVENT_TIMESTAMP="+event.Timestamp.UTC().Format(time.RFC3339),
 	)

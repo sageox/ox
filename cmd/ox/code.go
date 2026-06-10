@@ -256,24 +256,85 @@ func compactSnippet(s string, maxLen int) string {
 	return result
 }
 
-// stripANSIEscapes removes ANSI escape sequences from a string.
+// stripANSIEscapes removes terminal escape sequences and bare control bytes from
+// a string so untrusted text (e.g. LLM-generated summaries) can be printed to a
+// terminal without injecting cursor moves, clipboard writes, or title changes.
+//
+// It strips:
+//   - CSI sequences: ESC [ … <final byte 0x40-0x7e>
+//   - OSC sequences: ESC ] … terminated by BEL (0x07) or ST (ESC \). The OSC 52
+//     clipboard-write payload is the motivating attack (security finding #11).
+//   - DCS (ESC P), SOS (ESC X), PM (ESC ^), APC (ESC _): … terminated by ST
+//   - other two-byte ESC sequences (ESC followed by a single byte)
+//   - bare C0 control bytes 0x00-0x1f except tab (0x09) and newline (0x0a)
+//
+// Runes are processed as bytes-safe: only ASCII control bytes are inspected; any
+// multibyte UTF-8 rune (all bytes >= 0x80) passes through unchanged.
 func stripANSIEscapes(s string) string {
 	var b strings.Builder
-	inEscape := false
-	for _, r := range s {
-		if r == '\033' {
-			inEscape = true
+	b.Grow(len(s))
+
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+
+		if r == '\033' { // ESC
+			i = skipEscapeSequence(runes, i)
 			continue
 		}
-		if inEscape {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-				inEscape = false
-			}
+
+		// drop bare C0 control bytes except tab and newline
+		if r < 0x20 && r != '\t' && r != '\n' {
 			continue
 		}
+		// drop DEL
+		if r == 0x7f {
+			continue
+		}
+
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// skipEscapeSequence consumes the escape sequence starting at runes[i] (which is
+// ESC) and returns the index of its final consumed rune, so the caller's loop
+// advances past the whole sequence. Unterminated sequences consume to end.
+func skipEscapeSequence(runes []rune, i int) int {
+	// i points at ESC; look at the byte after it
+	if i+1 >= len(runes) {
+		return i // lone trailing ESC — drop it
+	}
+	next := runes[i+1]
+
+	switch next {
+	case '[': // CSI: ESC [ … <final 0x40-0x7e>
+		j := i + 2
+		for j < len(runes) {
+			c := runes[j]
+			if c >= 0x40 && c <= 0x7e {
+				return j // final byte
+			}
+			j++
+		}
+		return len(runes) - 1
+	case ']', 'P', 'X', '^', '_': // OSC, DCS, SOS, PM, APC — string terminated by BEL or ST (ESC \)
+		j := i + 2
+		for j < len(runes) {
+			c := runes[j]
+			if c == '\a' { // BEL terminator
+				return j
+			}
+			if c == '\033' && j+1 < len(runes) && runes[j+1] == '\\' { // ST: ESC \
+				return j + 1
+			}
+			j++
+		}
+		return len(runes) - 1
+	default:
+		// other two-byte escapes (e.g. ESC c, ESC =): drop ESC + the next byte
+		return i + 1
+	}
 }
 
 // codeQueryCmd is a hidden alias for codeSearchCmd — agents try "query" as a search verb

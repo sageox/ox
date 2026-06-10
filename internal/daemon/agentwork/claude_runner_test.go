@@ -273,6 +273,46 @@ sleep 0.1
 	}
 }
 
+// TestClaudeRunner_Run_PromptViaStdin verifies the summarization prompt is
+// delivered to the claude subprocess via stdin and NEVER appears as an argv
+// element. argv is world-readable to same-UID processes (ps,
+// /proc/<pid>/cmdline, sysctl kern.procargs2); leaking the session transcript
+// there is security finding #10.
+func TestClaudeRunner_Run_PromptViaStdin(t *testing.T) {
+	tmp := t.TempDir()
+	argsFile := filepath.Join(tmp, "args.txt")
+	stdinFile := filepath.Join(tmp, "stdin.txt")
+	script := filepath.Join(tmp, "claude")
+	// Fake claude: dump argv (one per line) and stdin to files, then emit a
+	// minimal valid stream-json result. The trailing sleep defuses the same
+	// pipe-close race documented in TestClaudeRunner_Run_ModelFlag.
+	body := `#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a" >> "` + argsFile + `"; done
+cat > "` + stdinFile + `"
+printf '%s\n' '{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}'
+sleep 0.1
+`
+	require.NoError(t, os.WriteFile(script, []byte(body), 0o755))
+
+	r := &ClaudeRunner{binaryPath: script, logger: slog.Default()}
+
+	const secret = "SENSITIVE-TRANSCRIPT-CONTENT-do-not-leak"
+	_, err := r.Run(context.Background(), RunRequest{
+		Prompt: secret, TimeoutOverride: 5 * time.Second,
+	})
+	require.NoError(t, err)
+
+	argv, err := os.ReadFile(argsFile)
+	require.NoError(t, err)
+	stdin, err := os.ReadFile(stdinFile)
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(argv), secret, "prompt leaked into argv")
+	assert.Equal(t, secret, string(stdin), "prompt not delivered via stdin")
+	// -p (print mode) flag must remain
+	assert.Contains(t, strings.Split(strings.TrimSpace(string(argv)), "\n"), "-p")
+}
+
 func TestClaudeRunner_Run_ContextCancellation(t *testing.T) {
 	tmp := t.TempDir()
 	script := filepath.Join(tmp, "claude")
