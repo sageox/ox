@@ -146,17 +146,17 @@ every day. Gratitude to the teams behind them, and to the wider developer
 community.
 
 <p align="center">
-  <a href="https://socket.dev" title="Socket — supply-chain security"><img src="https://socket.dev/apple-touch-icon.png" height="44" alt="Socket"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://www.coderabbit.ai" title="CodeRabbit — AI code review"><img src="https://cdn.simpleicons.org/coderabbit" height="40" alt="CodeRabbit"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://www.greptile.com" title="Greptile — AI codebase review"><img src="https://www.greptile.com/logo.svg" height="44" alt="Greptile"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://sageox.ai" title="SageOx — agentic context infrastructure"><img src="https://sageox.ai/apple-icon.png" height="44" alt="SageOx"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://charm.sh" title="Charm — delightful tools for the command line"><img src="https://github.com/charmbracelet.png" height="44" alt="Charm"></a>
+  <a href="https://socket.dev" title="Socket — supply-chain security"><img src="docs/assets/logos/socket.svg" height="26" alt="Socket"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://sageox.ai" title="SageOx — agentic context infrastructure"><img src="docs/assets/SageOx-Wordmark.png" height="26" alt="SageOx"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://www.coderabbit.ai" title="CodeRabbit — AI code review"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/logos/coderabbit-dark.svg"><img src="docs/assets/logos/coderabbit-light.svg" height="22" alt="CodeRabbit"></picture></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://www.greptile.com" title="Greptile — AI codebase review"><img src="docs/assets/logos/greptile.svg" height="30" alt="Greptile"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://charm.sh" title="Charm — delightful tools for the command line"><img src="docs/assets/logos/charm.png" height="30" alt="Charm"></a>
 </p>
 
 <p align="center">
-  <sub><a href="https://socket.dev">Socket</a> · <a href="https://www.coderabbit.ai">CodeRabbit</a> · <a href="https://www.greptile.com">Greptile</a> · <a href="https://sageox.ai">SageOx</a> · <a href="https://charm.sh">Charm</a></sub>
+  <sub><a href="https://socket.dev">Socket</a> · <a href="https://sageox.ai">SageOx</a> · <a href="https://www.coderabbit.ai">CodeRabbit</a> · <a href="https://www.greptile.com">Greptile</a> · <a href="https://charm.sh">Charm</a></sub>
 </p>
