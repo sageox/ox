@@ -211,7 +211,7 @@ func buildGuidance(in Input, hints []DiagramHint) string {
 	b.WriteString("Render with `ox plan render --open` (self-contained, cross-agent). Author for a reviewer who has ~10 minutes: ")
 	b.WriteString("lead with the conclusion and the biggest risk; keep every file/ID/PR framed enough to stand on its own; ")
 	b.WriteString("let one hero diagram and a few tables replace prose rather than decorate it; cut anything that does not change the decision. ")
-	b.WriteString("Explore visualization patterns with `ox plan viz` (sparklines, dependency graphs, swimlane timelines, Tufte tables, device mockups) and weave in the ones that compress understanding.")
+	b.WriteString("Explore visualization patterns with `ox plan viz` (sparklines, dependency graphs, swimlane timelines, budget sequences, Tufte tables, device mockups) and weave in the ones that compress understanding.")
 	if len(hints) > 0 {
 		b.WriteString(" Diagrams that fit this plan: ")
 		parts := make([]string, 0, len(hints))

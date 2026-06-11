@@ -22,6 +22,34 @@ sequenceDiagram
   A-->>C: response
 ```
 
+## budget-sequence
+use: a latency or cost budget across an ordered call path — show where each slice of the budget goes and the lever that buys it ("warm claim under 1s p99").
+why: a bare sequence diagram shows order; budget bands (`Note over`) plus a paired stage/budget/lever table show WHERE the time goes and WHAT to pull — the reviewer approves the budget, not just the topology. Pair the diagram (the path) with the table (the levers); neither alone makes the budget reviewable.
+```mermaid
+sequenceDiagram
+  participant C as Caller
+  participant W as Workflow
+  participant R as Renderer
+  participant S as S3 plus CDN
+  C->>W: start stream
+  W->>R: claim warm slot (HRW wfid to pod)
+  Note over W,R: deterministic route, ~0ms
+  R->>R: navigate to brand-new URL (shared shell cached)
+  Note over R: route delta only, SSR paint-instant, under 600ms
+  R->>S: write first partial segment + manifest
+  Note over R,S: LL-HLS partial, under 300ms
+  S-->>C: manifest ready
+  Note over C,S: total budget under 1s p99
+```
+```text
+| stage                          | budget  | lever                                |
+|--------------------------------|---------|--------------------------------------|
+| route to warm pod              | ~0ms    | consistent-hash (ADR-040 #1)         |
+| navigate to new URL (route Δ)  | <400ms  | generic warm pool + warm shell cache |
+| first painted frame            | <300ms  | paint-instant pages                  |
+| first partial segment+manifest | <300ms  | LL-HLS partials                      |
+```
+
 ## dependency-graph
 use: topology, not order — "what depends on / connects to what", to reveal coupling, a contended boundary, or blast radius.
 why: a graph makes coupling visible at a glance; a list buries it.
@@ -46,14 +74,16 @@ stateDiagram-v2
 ```
 
 ## swimlane-timeline
-use: phases, rollout, or relative-effort sequencing across workstreams (NOT calendar dates).
-why: lanes + bars show what runs when and in parallel; the robust default for "when, in what order, how long".
+use: phases, rollout, or relative-effort sequencing across workstreams (NOT calendar dates) — a "build sequence" showing what's foundational, what unblocks the goal, and what's deferred to scale.
+why: lanes + bars show what runs when and in parallel; the robust default for "when, in what order, how long". Add a labeled gate (◆) for the milestone that matters, a bottom axis of phase columns, and a one-line caption stating the unit — that's what turns a bar chart into an at-a-glance build plan.
 ```html
 <div class="swim">
-  <div class="lane"><span class="lane-name">Backend</span><div class="track"><span class="bar" style="left:0;width:40%;background:var(--sage)">schema</span><span class="bar" style="left:42%;width:30%;background:var(--teal)">API</span></div></div>
-  <div class="lane"><span class="lane-name">Frontend</span><div class="track"><span class="bar" style="left:44%;width:46%;background:var(--copper)">UI</span></div></div>
-  <div class="lane"><span class="lane-name">Gate</span><div class="track"><span class="gate" style="left:90%" title="ship">◆</span></div></div>
+  <div class="lane"><span class="lane-name">Foundation</span><div class="track"><span class="bar" style="left:0;width:18%;background:var(--copper)">measure</span><span class="bar" style="left:20%;width:14%;background:var(--sage)">fix pool</span></div></div>
+  <div class="lane"><span class="lane-name">Claim &lt;1s</span><div class="track"><span class="bar" style="left:38%;width:18%;background:var(--teal)">pre-warm</span><span class="bar" style="left:58%;width:16%;background:var(--teal)">paint</span><span class="bar" style="left:76%;width:18%;background:var(--teal)">partials</span></div></div>
+  <div class="lane"><span class="lane-name">Scale</span><div class="track"><span class="bar" style="left:38%;width:18%;background:var(--copper)">cost dials</span><span class="bar" style="left:58%;width:16%;background:var(--copper)">deep pool</span><span class="bar" style="left:76%;width:18%;background:var(--copper)">multi-replica</span></div></div>
+  <div class="lane axis"><span class="lane-name"></span><div class="track"><span class="tick" style="left:9%">measure</span><span class="tick" style="left:27%">pool fixed</span><span class="tick" style="left:47%">claim &lt;1s ◆</span><span class="tick" style="left:66%">deep pool</span><span class="tick" style="left:85%">100k scale</span></div></div>
 </div>
+<p class="dim">Relative effort, not calendar. ◆ = the gate where the goal becomes meetable.</p>
 ```
 
 ## gantt
@@ -117,6 +147,21 @@ why: shading encodes magnitude so the hot cell pops without the reader parsing e
   <tr><td>/plan</td><td class="h1">12</td><td class="h2">40</td></tr>
   <tr><td>/render</td><td class="h2">38</td><td class="h4">210</td></tr>
 </table>
+```
+
+## cost-telemetry-table
+use: per-stage cost/telemetry where some stages are reducible — name the cost, the telemetry field it's measured by, and whether it can be cut, then pair the table with ONE callout stating the conclusion.
+why: the table establishes the numbers (and where they come from, so the reviewer can verify against prod); a leading or trailing `TL;DR` callout states the load-bearing decision ("every reducible row is reduced by not doing it on the request path") so the reviewer gets the conclusion before parsing cells. Pair the table with the callout — the table is evidence, the callout is the read.
+```html
+<table class="heat">
+  <tr><th>cold-spawn stage</th><th>~cost</th><th>telemetry field</th><th>reducible?</th></tr>
+  <tr><td>new Chromium context</td><td>500-800ms</td><td>worker-pool</td><td>yes — pre-create</td></tr>
+  <tr><td>load heavy cast page</td><td>800-1500ms</td><td>navigate_ms</td><td>yes — pre-warm + SSR</td></tr>
+  <tr><td>paint handshake</td><td>300-600ms</td><td>paint_ms</td><td>yes — paint-instant</td></tr>
+  <tr><td>ffmpeg init + first segment</td><td>300-500ms</td><td>first_frame_ms</td><td>yes — partials</td></tr>
+  <tr><td><strong>cold total</strong></td><td class="h4"><strong>2.0-3.6s</strong></td><td></td><td></td></tr>
+</table>
+<div class="tldr"><span class="tldr-tag">TL;DR</span><p>Every reducible row is reduced by <em>not doing it on the request path</em> — i.e. pre-warming. Pre-warming is the mechanism, not an optimization.</p></div>
 ```
 
 ## device-mockup

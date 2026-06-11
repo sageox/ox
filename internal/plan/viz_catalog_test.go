@@ -42,6 +42,37 @@ func TestVizCatalog_HasCorePatterns(t *testing.T) {
 	}
 }
 
+// TestVizCatalog_PairedPatternsKeepBothHalves verifies the two patterns whose
+// readability comes from PAIRING two halves ship both halves. A budget-sequence
+// is only reviewable when the diagram (the path) sits beside the stage/budget/lever
+// table (the levers); a cost-telemetry-table only delivers its read when the data
+// table sits beside the conclusion callout.
+// Failure prevented: a future edit drops one half and the pattern silently
+// regresses to "just another diagram" / "just another table".
+func TestVizCatalog_PairedPatternsKeepBothHalves(t *testing.T) {
+	bs, ok := VizPatternByID("budget-sequence")
+	if !ok {
+		t.Fatal("catalog missing budget-sequence")
+	}
+	if !strings.Contains(bs.Body, "```mermaid") {
+		t.Error("budget-sequence missing the mermaid diagram half")
+	}
+	if !strings.Contains(bs.Body, "| stage") || !strings.Contains(bs.Body, "lever") {
+		t.Error("budget-sequence missing the paired stage/budget/lever table half")
+	}
+
+	ct, ok := VizPatternByID("cost-telemetry-table")
+	if !ok {
+		t.Fatal("catalog missing cost-telemetry-table")
+	}
+	if !strings.Contains(ct.Body, `class="heat"`) {
+		t.Error("cost-telemetry-table missing the data table half")
+	}
+	if !strings.Contains(ct.Body, `class="tldr"`) {
+		t.Error("cost-telemetry-table missing the paired conclusion callout half")
+	}
+}
+
 // TestVizPatternByID_CaseInsensitiveAndMiss verifies lookup is case-insensitive
 // and a miss is handled (not a panic / false hit).
 func TestVizPatternByID_CaseInsensitiveAndMiss(t *testing.T) {

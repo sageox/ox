@@ -88,6 +88,8 @@ td.v-bad{color:var(--red);font-weight:600}
 .swim .track{position:relative;height:24px;background:var(--panel);border:1px solid var(--hair2);border-radius:6px;background-image:repeating-linear-gradient(90deg,transparent 0,transparent 9.9%,var(--hair2) 10%,var(--hair2) 10.1%)}
 .swim .bar{position:absolute;top:3px;height:18px;border-radius:4px;font-size:10.5px;color:#0c1112;display:flex;align-items:center;padding:0 6px;white-space:nowrap;overflow:hidden}
 .swim .gate{position:absolute;top:0;color:var(--copper);font-size:16px;transform:translateX(-50%)}
+.swim .axis .track{height:auto;background:none;border:none;background-image:none}
+.swim .axis .tick{position:absolute;top:0;transform:translateX(-50%);font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--dim);white-space:nowrap}
 /* sparkline + small multiples */
 .spark{display:inline-block;width:80px;height:18px;vertical-align:middle}
 .multiples{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:12px;margin:14px 0}
