@@ -31,7 +31,14 @@ import (
 // caller is relying on scheme validation + HardenedCloneArgs alone — appropriate
 // for user-owned ledger repos that may live on github.com, gitlab.com, or a
 // self-hosted forge).
-func ValidateCloneURL(cloneURL string, trustedHosts []string) error {
+//
+// allowLocal permits `file://` URLs and scheme-less local filesystem paths. In
+// production this is false (a ledger/team-context clone is always a remote https
+// repo, never a local path). Tests that clone from a local bare repo wire this to
+// the test-only override (gitserver.TestAllowFileTransport) — the same flag that
+// gates HardenedCloneArgs — so both guards relax together. The `ext::` transport
+// is rejected regardless of allowLocal: it forks a shell and is never legitimate.
+func ValidateCloneURL(cloneURL string, trustedHosts []string, allowLocal bool) error {
 	if cloneURL == "" {
 		return fmt.Errorf("clone URL is empty")
 	}
@@ -45,6 +52,15 @@ func ValidateCloneURL(cloneURL string, trustedHosts []string) error {
 	parsed, err := url.Parse(cloneURL)
 	if err != nil {
 		return fmt.Errorf("invalid clone URL %q: %w", cloneURL, err)
+	}
+
+	// Local filesystem paths (no scheme) and file:// URLs: only when explicitly
+	// allowed. ext::/git:// etc. fall through to the scheme switch and are rejected.
+	if parsed.Scheme == "" || parsed.Scheme == "file" {
+		if allowLocal {
+			return nil
+		}
+		return fmt.Errorf("local/file clone URLs are not permitted: %s", cloneURL)
 	}
 
 	host := strings.ToLower(parsed.Hostname())

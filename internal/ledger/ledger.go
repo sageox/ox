@@ -408,7 +408,7 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 	// live on github.com / gitlab.com / self-hosted forges, so we rely on scheme
 	// validation here plus HardenedCloneArgs below (two independent defenses).
 	// See ADR-022 / security/SECURITY.md (#hunter-cli-input).
-	if err := gitutil.ValidateCloneURL(remoteURL, nil); err != nil {
+	if err := gitutil.ValidateCloneURL(remoteURL, nil, gitserver.TestAllowFileTransport); err != nil {
 		return fmt.Errorf("git clone: unsafe remote URL: %w", err)
 	}
 
