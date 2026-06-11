@@ -156,6 +156,9 @@ table.riskm tr.sev-blocker{background:rgba(239,68,68,.06)}
 /* flag rollout matrix */
 table.flagm td:first-child{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--dim)}
 .foot{margin-top:48px;padding-top:18px;border-top:1px solid var(--hair);font-size:12.5px;color:var(--dim)}
+/* live-review-loop credit: a slightly stronger nod — the loop is a unique SageOx capability */
+.foot-live{color:var(--sage);font-weight:600}
+.foot-live::before{content:"●";color:var(--teal);font-size:.7em;vertical-align:middle;margin-right:5px}
 @media(max-width:1000px){.shell{grid-template-columns:1fr}nav.toc{display:none}main{padding:28px 20px 90px}section.risk{margin-left:0}}
 /* --- in-document review layer (ox plan review / feedback) --- */
 /* committed review-state strip (server-rendered, JS-independent) */

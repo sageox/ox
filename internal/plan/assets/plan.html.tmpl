@@ -37,7 +37,7 @@
     {{.HTML}}
   </section>
   {{end}}
-  <div class="foot">{{if .FooterCredit}}Team context enriched by SageOx · {{end}}Rendered by <code>ox plan</code> — self-contained, agent-agnostic.</div>
+  <div class="foot">{{if .ReviewEndpoint}}<span class="foot-live">Live review loop · powered by SageOx</span> · {{end}}{{if .FooterCredit}}Team context enriched by SageOx · {{end}}Rendered by <code>ox plan</code> · SageOx — self-contained, agent-agnostic.</div>
 </main>
 </div>
 <script type="application/json" id="ox-review-state">{{.ReviewJSON}}</script>

@@ -67,8 +67,61 @@ func TestRenderHTML_NoSignalsNoMarker(t *testing.T) {
 	if !strings.Contains(s, `<section id="sec-1"`) {
 		t.Error("sections not rendered")
 	}
+	// Every render carries a very subtle SageOx nod (a brand/tool credit, NOT an
+	// enrichment claim) — so even a greenfield plan is recognizably SageOx.
+	if !strings.Contains(s, `<code>ox plan</code> · SageOx`) {
+		t.Error("subtle always-on SageOx footer nod missing on un-enriched render")
+	}
+	// ...but the un-enriched render must NOT carry the enrichment credit (overclaim).
+	if strings.Contains(strings.ToLower(s), "enriched by sageox") {
+		t.Error("un-enriched render claims enrichment credit (overclaim)")
+	}
 	if findings := LintBranding(out, res); len(findings) != 0 {
 		t.Fatalf("no-signal render failed lint: %+v", findings)
+	}
+}
+
+// TestRenderHTML_ReviewLoopNod verifies the differentiated attribution: a page
+// SERVED by the live review loop (ReviewEndpoint set) earns a slightly stronger
+// SageOx nod, while a plain render does not — and an un-enriched live-loop page
+// still does not overclaim enrichment.
+// Failure prevented: the unique live-review-loop capability ships without the
+// extra SageOx credit, or the stronger nod leaks onto every static render.
+func TestRenderHTML_ReviewLoopNod(t *testing.T) {
+	in := sampleInput()
+	res := Result{} // un-enriched: proves the loop nod is independent of enrichment
+
+	// plain render: no live-loop nod.
+	plain, err := RenderHTML(in, res)
+	if err != nil {
+		t.Fatalf("RenderHTML: %v", err)
+	}
+	if strings.Contains(string(plain), "powered by SageOx") {
+		t.Error("live-loop nod leaked onto a plain (non-served) render")
+	}
+
+	// served-by-review-loop render: stronger nod present.
+	served, err := RenderHTMLOpts(in, res, RenderOptions{
+		Slug:           "sample-plan",
+		ReviewEndpoint: "http://127.0.0.1:54321",
+		ReviewToken:    "tok",
+	})
+	if err != nil {
+		t.Fatalf("RenderHTMLOpts: %v", err)
+	}
+	ss := string(served)
+	if !strings.Contains(ss, "Live review loop · powered by SageOx") {
+		t.Error("live-review-loop render missing the stronger SageOx nod")
+	}
+	if !strings.Contains(ss, "foot-live") {
+		t.Error("live-loop nod not styled (missing foot-live class)")
+	}
+	// even with the stronger nod, an un-enriched page must not overclaim enrichment.
+	if strings.Contains(strings.ToLower(ss), "enriched by sageox") {
+		t.Error("live-loop render overclaims enrichment on an un-enriched plan")
+	}
+	if findings := LintBranding(served, res); len(findings) != 0 {
+		t.Fatalf("un-enriched live-loop render failed lint: %+v", findings)
 	}
 }
 

@@ -72,6 +72,7 @@ func TestFormatPlanNudgeLine_MentionsOnlyFiredSignals(t *testing.T) {
 	assert.NotContains(t, line, "expert route", "expert routes did not fire — must not be mentioned")
 	assert.Contains(t, line, "ox plan render --open")
 	assert.Contains(t, line, "SageOx team-context-optimized plan")
+	assert.Contains(t, line, "ox plan review", "exit nudge must offer the live review loop")
 	assert.NotContains(t, line, "ox plan --open")
 	// single line — grepability invariant
 	assert.NotContains(t, line, "\n")

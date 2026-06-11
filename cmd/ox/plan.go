@@ -455,7 +455,7 @@ func writePlanHuman(cmd *cobra.Command, result plan.Result, savedDir string) err
 		if s.Material {
 			lead = "Material signals found."
 		}
-		fmt.Fprintf(&b, "\n%s Render a SageOx-enriched HTML page for human review with `ox plan render --open`; for a review loop use `ox plan review <slug>`.\n", lead)
+		fmt.Fprintf(&b, "\n%s Render a SageOx team-context-optimized plan with `ox plan render --open`, then start a live review loop with `ox plan review <slug>` — mark it up in the browser and your AI coworker addresses each item live.\n", lead)
 	}
 
 	fmt.Fprint(out, b.String())
@@ -556,6 +556,11 @@ func emitRenderedHTML(cmd *cobra.Command, htmlBytes []byte, savedDir, outPath st
 	}
 	if !open {
 		return
+	}
+	// Encourage the live review loop once the page is in front of a human — the
+	// slug is real only when the plan is in the ledger (capture on).
+	if savedDir != "" && !cli.IsHeadless() {
+		cli.PrintHint("Start a live review loop: `ox plan review " + filepath.Base(savedDir) + "` — mark it up in the browser, your AI coworker addresses each item live.")
 	}
 	if savedDir != "" {
 		if _, _, isPointer, exists := plan.PlanHTMLPath(savedDir); exists && !isPointer {
