@@ -138,3 +138,19 @@ SageOx reads configuration from, in order:
 - [Privacy Policy](https://sageox.ai/privacy)
 - [Terms of Service](https://sageox.ai/terms)
 - [Acceptable Use Policy](https://sageox.ai/acceptable-use)
+
+## Tools we love
+
+We build `ox` in good company. We're grateful to the developer community and to
+the tools we lean on every day — they make our work better, and they're worth
+yours.
+
+<p align="center">
+  <a href="https://socket.dev"><img src="https://img.shields.io/badge/Socket-supply--chain%20security-000000?style=for-the-badge&logo=socket&logoColor=white" alt="Socket — supply-chain security"></a>
+  &nbsp;
+  <a href="https://www.coderabbit.ai"><img src="https://img.shields.io/badge/CodeRabbit-AI%20PR%20review-FF570A?style=for-the-badge&logoColor=white" alt="CodeRabbit — AI pull-request review"></a>
+  &nbsp;
+  <a href="https://www.greptile.com"><img src="https://img.shields.io/badge/Greptile-AI%20codebase%20review-7C3AED?style=for-the-badge&logoColor=white" alt="Greptile — AI codebase review"></a>
+  &nbsp;
+  <a href="https://sageox.ai"><img src="https://img.shields.io/badge/SageOx-agentic%20context-7A8F78?style=for-the-badge&logoColor=white" alt="SageOx — agentic context infrastructure"></a>
+</p>

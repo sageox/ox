@@ -1,0 +1,10 @@
+# CodeRabbit configuration — https://docs.coderabbit.ai/guides/configure-coderabbit
+# We open PRs as drafts first (team convention), so CodeRabbit must review
+# drafts — otherwise every PR is silently skipped until manually triggered.
+language: en-US
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  auto_review:
+    enabled: true
+    drafts: true
