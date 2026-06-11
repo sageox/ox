@@ -1,5 +1,7 @@
 # Credential Redaction
 
+> For ox's security-review pipeline and threat model (contributor-facing), see [`security/`](../../security/).
+
 ox watches for credentials at every step where data crosses a trust boundary.
 This page is the operator's map: what's caught, what isn't, and what to do
 when something slips through.

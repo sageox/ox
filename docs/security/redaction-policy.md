@@ -1,5 +1,7 @@
 # Redaction Policy
 
+> For ox's security-review pipeline and threat model (contributor-facing), see [`security/`](../../security/).
+
 This document describes what sensitive data ox automatically redacts from sessions
 and other captured agent data.
 

@@ -6,6 +6,8 @@ The pipeline is a port of the [Synthesia-style 6-phase AI security review](https
 
 **Never blocks merge.** Every tier is advisory. The contributor decides.
 
+> Looking for **what ox redacts from your data before it leaves your machine**? That's the user-facing redaction reference in [`docs/security/`](../docs/security/). This directory is the contributor-facing review process and threat model.
+
 ## Two tiers, when to use which
 
 | Tier | When | How | Cost | Wallclock |
