@@ -405,6 +405,6 @@ type Output struct {
 	Timing    map[string]int64 `json:"timing,omitempty"`     // per-phase timing (ms)
 	// Ephemeral-mode hint: nil when not in ephemeral mode. When set, agents
 	// should prefer the cloud MCP server for context ops since local caches
-	// are sparse. See docs/ai/adr/adr-ephemeral-mode.md.
+	// are sparse. See docs/adr/adr-ephemeral-mode.md.
 	EphemeralHint *EphemeralHint `json:"ephemeral_hint,omitempty"`
 }

@@ -1,4 +1,3 @@
-<!-- doc-audience: preserve-voice -->
 ---
 component: timeline
 package: internal/ui

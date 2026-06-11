@@ -26,7 +26,7 @@ import (
 // losses (reset+recommit-without-recording, post-stop commits) are
 // asserted to lose. We assert the loss explicitly so that if a future
 // change accidentally starts preserving the trailer in those paths, the
-// test forces us to acknowledge it (and update docs/ai/specs/session-commit-linkage.md).
+// test forces us to acknowledge it (and update docs/specs/session-commit-linkage.md).
 
 // trailerRewriteEnv sets up a real git repo under a temp dir with .sageox/
 // initialized and a fake active recording. Returns (projectRoot,
@@ -238,7 +238,7 @@ func TestSessionTrailerLost_ResetThenRecommitWithoutRecording(t *testing.T) {
 	commitWithoutTrailer(t, projectRoot, "post-reset commit")
 
 	assert.NotContains(t, headMessage(t, projectRoot, "HEAD"), trailerKey,
-		"documented loss: commit after session-clear has no trailer (see docs/ai/specs/session-commit-linkage.md)")
+		"documented loss: commit after session-clear has no trailer (see docs/specs/session-commit-linkage.md)")
 }
 
 // TestSessionTrailerSurvives_MergeSquash documents what `git merge
@@ -273,7 +273,7 @@ func TestSessionTrailerSurvives_MergeSquash(t *testing.T) {
 	msg := headMessage(t, projectRoot, "HEAD")
 	assert.NotContains(t, msg, trailerKey,
 		"documented loss: `merge --squash` + `commit -m` drops source-commit trailers; "+
-			"GitHub squash-merge has the same loss profile (see docs/ai/specs/session-commit-linkage.md)")
+			"GitHub squash-merge has the same loss profile (see docs/specs/session-commit-linkage.md)")
 }
 
 // TestSessionTrailerLost_CommitAfterSessionStop verifies that commits made

@@ -938,7 +938,7 @@ func runDoctorChecks(parent context.Context, opts doctorOptions) []checkCategory
 	// intact (see TestDoctorSuppression_DaemonNotRunning) while still
 	// making the predicate visible. Ephemeral mode is the most common
 	// explanation for an absent daemon, but it deserves its own grouping.
-	// See docs/ai/adr/adr-ephemeral-mode.md.
+	// See docs/adr/adr-ephemeral-mode.md.
 	progress.show("Ephemeral Mode")
 	categories = append(categories, checkCategory{
 		name:   "Ephemeral Mode",

@@ -808,7 +808,7 @@ func (d *Daemon) shutdown() error {
 // We detect liveness by pinging the daemon over its Unix socket. PID file is kept
 // as a secondary safety net for recovery scenarios (kill -9 to force-stop a hung daemon).
 //
-// See: docs/ai/analysis/february-2026-ipc-analysis.md
+// See: docs/analysis/february-2026-ipc-analysis.md
 
 // writePidFile writes the daemon PID to a file.
 func (d *Daemon) writePidFile() error {

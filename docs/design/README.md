@@ -1,5 +1,3 @@
-<!-- doc-audience: preserve-voice -->
-
 # ox · Component catalog
 
 Every reusable UX primitive in the ox CLI, with anatomy, when-to-use guidance, source pointers, and a recording.

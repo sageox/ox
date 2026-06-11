@@ -1,4 +1,3 @@
-<!-- doc-audience: preserve-voice -->
 ---
 component: nav-tree
 package: internal/dashboard/panes/nav

@@ -5,7 +5,7 @@
 //   - git push: PAT embedded in remote URL (RefreshRemoteCredentials)
 //   - checkUploadAccess: OAuth-based, fail-open, kept for viewer detection only
 //
-// See docs/ai/specs/session-auth-model.md for the full auth model.
+// See docs/specs/session-auth-model.md for the full auth model.
 package main
 
 import (

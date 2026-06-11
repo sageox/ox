@@ -1,5 +1,3 @@
-<!-- doc-audience: preserve-voice -->
-
 # Pattern · `ox config` editor (full-screen TUI)
 
 How the interactive config editor composes catalog primitives.

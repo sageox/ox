@@ -90,7 +90,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// CLI delegates pull operations to daemon.
 	// This ensures consistent sync behavior and proper locking.
 	//
-	// Per IPC architecture philosophy (docs/ai/specs/ipc-architecture.md):
+	// Per IPC architecture philosophy (docs/specs/ipc-architecture.md):
 	// sync requires daemon for pull operations, but we auto-start the daemon
 	// rather than erroring - this improves UX while maintaining the architecture.
 	//

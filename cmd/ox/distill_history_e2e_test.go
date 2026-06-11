@@ -13,7 +13,7 @@
 // recipe so on-disk state cannot drift across a day boundary mid-test
 // (plan §4.3).
 //
-// See docs/ai/specs/distill-history-read-test-plan.md §1 and §3.
+// See docs/specs/distill-history-read-test-plan.md §1 and §3.
 
 package main
 

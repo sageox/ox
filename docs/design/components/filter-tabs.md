@@ -1,4 +1,3 @@
-<!-- doc-audience: preserve-voice -->
 ---
 component: filter-tabs
 package: internal/dashboard/panes/timeline

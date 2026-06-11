@@ -139,7 +139,7 @@ to drift.
 - **Cost-attribution shift.** Users now pay for summarization through
   whatever credentials their `claude`/`codex` CLI is logged into,
   rather than through the calling agent's session. Documented in
-  `docs/human/guides/`; surfaced once on first auto-detection.
+  `docs/guides/`; surfaced once on first auto-detection.
 - **Background-failure visibility.** Inline failures are loud (the
   agent sees them); daemon failures need explicit surfacing. Mitigated
   by: doctor checks, telemetry event

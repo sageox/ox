@@ -1,4 +1,3 @@
-<!-- doc-audience: human -->
 # SageOx CLI (`ox`)
 
 [![docs: ai-human-docs](https://raw.githubusercontent.com/rsnodgrass/ai-human-docs/main/badges/ai-human-docs.svg)](https://github.com/rsnodgrass/ai-human-docs)
@@ -103,9 +102,9 @@ Then just ask your AI coworker things it couldn't have known on its own:
 
 | Capability | Command | Learn more |
 |---|---|---|
-| Team context + repo memory as **Knowledge Bubbles** | `ox status`, `ox kb list` | [jit-discovery](docs/human/guides/jit-discovery.md) |
+| Team context + repo memory as **Knowledge Bubbles** | `ox status`, `ox kb list` | [jit-discovery](docs/guides/jit-discovery.md) |
 | Query past sessions, discussions, and code — across agents and machines | `ox query "..."` | [query](docs/reference/query.mdx) |
-| Auto-recorded coworker sessions (**Ledger**) | `ox agent prime`, `ox session list` | [session capture](docs/ai/architecture/session-capture-architecture.md) |
+| Auto-recorded coworker sessions (**Ledger**) | `ox agent prime`, `ox session list` | [session capture](docs/architecture/session-capture-architecture.md) |
 | Real-time coordination signals between coworkers | `ox murmur "..."` | — |
 | Team-context-enriched implementation plans | `ox plan enrich`, `ox plan render` | [plan](docs/reference/plan) |
 | Planning-relevant code insights (hotspots, contention) | `ox code insights` | — |

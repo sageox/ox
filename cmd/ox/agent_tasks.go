@@ -14,7 +14,7 @@ import (
 
 // Agent task scheduling: the daemon and other internal producers enqueue work
 // for the next available AI coworker to execute — ideally dispatched to a
-// fresh-context subagent. See docs/ai/specs/agent-task-scheduling.md.
+// fresh-context subagent. See docs/specs/agent-task-scheduling.md.
 //
 // Two entry points share the core handlers:
 //   - ox agent <id> tasks <list|next|done|cancel|extend>  (agent-facing,

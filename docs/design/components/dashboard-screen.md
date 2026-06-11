@@ -1,4 +1,3 @@
-<!-- doc-audience: preserve-voice -->
 ---
 component: dashboard-screen
 package: internal/dashboard/app

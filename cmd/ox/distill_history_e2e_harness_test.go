@@ -10,7 +10,7 @@
 // whole thing wires up live in distill_history_e2e_test.go. The JR-*
 // skeleton test cases live in the list/show/since files.
 //
-// See docs/ai/specs/distill-history-read-test-plan.md §1.
+// See docs/specs/distill-history-read-test-plan.md §1.
 
 package main
 
@@ -160,7 +160,7 @@ func findDistillHistoryProjectRoot(t *testing.T) string {
 //
 // `now` is captured once by the caller and passed through to recipes so
 // any time-relative assertions are stable across wall-clock drift (see
-// docs/ai/specs/distill-history-read-test-plan.md §4.3). The value is stored on
+// docs/specs/distill-history-read-test-plan.md §4.3). The value is stored on
 // the returned *distillHistoryE2E so time-dependent helpers (writeFakeAuth
 // today, future ones) never call time.Now() independently.
 func setupDistillHistoryE2E(t *testing.T, now time.Time) *distillHistoryE2E {

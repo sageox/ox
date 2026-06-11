@@ -28,7 +28,7 @@ func TestNoCustomerFacingOxTokenReintroduction(t *testing.T) {
 	allowlist := map[string]bool{
 		"internal/auth/env_token_test.go":   true,
 		"internal/auth/env_naming_test.go":  true,
-		"docs/ai/adr/adr-ephemeral-mode.md": true,
+		"docs/adr/adr-ephemeral-mode.md": true,
 		"cmd/ox/release_notes.md":           true,
 		"CHANGELOG.md":                      true,
 	}

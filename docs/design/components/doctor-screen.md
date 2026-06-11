@@ -1,4 +1,3 @@
-<!-- doc-audience: preserve-voice -->
 ---
 component: doctor-screen
 package: cmd/ox/doctor.go

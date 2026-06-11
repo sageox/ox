@@ -1,4 +1,3 @@
-<!-- doc-audience: preserve-voice -->
 ---
 component: status-bar
 package: internal/dashboard/panes/statusbar

@@ -1,5 +1,3 @@
-<!-- doc-audience: ai -->
-
 # ADR-019: Session Entity Lifecycle
 
 **Status**: Accepted

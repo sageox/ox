@@ -25,7 +25,7 @@
 //     populated case; empty-window semantics are covered by the unit
 //     tests in internal/distill/history/read/since_test.go.
 //
-// See docs/ai/specs/distill-history-read-test-plan.md §2 rows JR-09, JR-10,
+// See docs/specs/distill-history-read-test-plan.md §2 rows JR-09, JR-10,
 // JR-16.
 
 package main

@@ -1,5 +1,3 @@
-<!-- doc-audience: preserve-voice -->
-
 # Pattern · `ox status` dashboard
 
 ## Composition

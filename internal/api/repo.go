@@ -110,7 +110,7 @@ type ImportNotification struct {
 // SessionUploadedNotification is the POST /api/v1/sessions/{session_id}/uploaded
 // request body. Tells the server a session's content has landed in the
 // ledger and is viewable, so the (v2) GitHub App reconciler can refresh any
-// PR sticky comment. See docs/ai/specs/session-pr-issue-linkage.md (v1.5).
+// PR sticky comment. See docs/specs/session-pr-issue-linkage.md (v1.5).
 type SessionUploadedNotification struct {
 	SessionID       string   `json:"session_id"`
 	RepoID          string   `json:"repo_id"`

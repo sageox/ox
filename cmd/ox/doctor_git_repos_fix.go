@@ -538,7 +538,7 @@ func extractTeamIDFromRepoName(name string) string {
 // ┌─────────────────────────────────────────────────────────────────────────────┐
 // │ CRITICAL PATH EXCEPTION: This function has a direct clone fallback.        │
 // │                                                                             │
-// │ Per IPC architecture philosophy (docs/ai/specs/ipc-architecture.md):       │
+// │ Per IPC architecture philosophy (docs/specs/ipc-architecture.md):       │
 // │ - IPC should NEVER be required for daemon to function                       │
 // │ - Most operations should gracefully degrade when daemon unavailable         │
 // │                                                                             │

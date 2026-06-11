@@ -1,4 +1,3 @@
-<!-- doc-audience: human -->
 # Debugging Guide
 
 Quick reference for troubleshooting ox. Scan the section you need.

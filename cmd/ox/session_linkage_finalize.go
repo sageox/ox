@@ -18,7 +18,7 @@ import (
 //
 // All work is best-effort: a failed notify leaves the session in
 // notify_failed for `ox doctor` to retry, and never affects the
-// already-successful upload. See docs/ai/specs/session-pr-issue-linkage.md
+// already-successful upload. See docs/specs/session-pr-issue-linkage.md
 // (v1.5) for the state machine.
 func finalizeLinkageAfterPush(projectRoot, sessionDir string, meta *lfs.SessionMeta, sessionName string) {
 	if meta == nil {

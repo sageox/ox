@@ -2,7 +2,7 @@
 
 // distill_history_e2e_fixtures_test.go — low-level fixture stagers, date
 // helpers, and the 12 fixture recipes per
-// docs/ai/specs/distill-history-read-test-plan.md §3. The harness that wires up
+// docs/specs/distill-history-read-test-plan.md §3. The harness that wires up
 // a per-test workspace is in distill_history_e2e_harness_test.go; the
 // sanity test that exercises every recipe end-to-end is in
 // distill_history_e2e_test.go.
@@ -213,7 +213,7 @@ func defaultFactHeader(now time.Time) facts.FileHeader {
 }
 
 // ---------------------------------------------------------------------------
-// Recipes — 12 per docs/ai/specs/distill-history-read-test-plan.md §3
+// Recipes — 12 per docs/specs/distill-history-read-test-plan.md §3
 // ---------------------------------------------------------------------------
 
 // recipeMinimalDaily — one valid daily file dated today(now) with a

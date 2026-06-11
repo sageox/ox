@@ -1,4 +1,3 @@
-<!-- doc-audience: preserve-voice -->
 ---
 component: login-screen
 package: cmd/ox/login.go

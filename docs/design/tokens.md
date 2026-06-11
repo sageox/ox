@@ -1,5 +1,3 @@
-<!-- doc-audience: preserve-voice -->
-
 # Tokens
 
 Semantic color tokens are the unit of design composition in ox. Components reference tokens; tokens reference hex values. Hex values live in `internal/theme/generated.go` (synced from `sageox-design`).

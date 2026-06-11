@@ -13,7 +13,7 @@
 // lands Unit 3 (ox distill history list + distill_history_time.go), replace the Skip
 // with real assertions on the JSON envelope.
 //
-// See docs/ai/specs/distill-history-read-test-plan.md §2 rows JR-01..JR-03,
+// See docs/specs/distill-history-read-test-plan.md §2 rows JR-01..JR-03,
 // JR-11..JR-15, JR-19..JR-24.
 
 package main

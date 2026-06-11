@@ -195,7 +195,7 @@ type SessionMeta struct {
 	ProducedPlans []string `json:"produced_plans,omitempty"`
 
 	// LinkageStatus is the upload/notify lifecycle state for PR/issue
-	// linkage. See docs/ai/specs/session-pr-issue-linkage.md (v1.5) for the
+	// linkage. See docs/specs/session-pr-issue-linkage.md (v1.5) for the
 	// state machine: pending → staged → uploaded → notified, with *_failed
 	// branches retried by `ox doctor`. Empty string == legacy/unknown,
 	// treated as pre-linkage and never blocking. omitempty for round-trip.
@@ -278,7 +278,7 @@ type RedactionEntry struct {
 const MaxSummaryAttempts = 3
 
 // LinkageStatus lifecycle values for SessionMeta.LinkageStatus and
-// RecordingState.LinkageStatus. See docs/ai/specs/session-pr-issue-linkage.md
+// RecordingState.LinkageStatus. See docs/specs/session-pr-issue-linkage.md
 // (v1.5) for the full state machine. Empty string is the legacy/unknown
 // zero value and is treated as pre-linkage — never blocking.
 const (

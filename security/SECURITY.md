@@ -1,5 +1,3 @@
-<!-- doc-audience: ai -->
-
 # ox CLI — Threat Model
 
 > This file is the primary context for ox's `/security-review` pipeline. Every AI hunter and validator subagent loads it. OpenGrep rules and hunter prompts reference the `#hunter-*` anchors directly. Keep it terse, declarative, and current — if you change a security primitive in the code, update the matching section in the same PR.

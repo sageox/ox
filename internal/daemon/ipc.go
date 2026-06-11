@@ -73,7 +73,7 @@ const (
 // - Breaks piping to jq for inspection
 // - The embedded newline "problem" doesn't exist: JSON encoding escapes them
 //
-// See: docs/ai/analysis/february-2026-ipc-analysis.md
+// See: docs/analysis/february-2026-ipc-analysis.md
 
 // Message represents an IPC message.
 type Message struct {

@@ -1,4 +1,3 @@
-<!-- doc-audience: preserve-voice -->
 ---
 component: select
 package: internal/cli

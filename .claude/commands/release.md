@@ -56,7 +56,7 @@ This runs end-to-end tests against test.sageox.ai: auth, init, doctor, status, r
 
 Report pass/fail per step, OS/arch, and ox version back in Slack. Do NOT proceed to version bump until Run Walks pass.
 
-**Tip:** Run lint, test-all, smoke-test, and test-integration in parallel background tasks to save time. See `docs/human/guides/release-testing-playbook.md` for the full testing reference.
+**Tip:** Run lint, test-all, smoke-test, and test-integration in parallel background tasks to save time. See `docs/guides/release-testing-playbook.md` for the full testing reference.
 
 ### Step 2: Create Release Branch
 

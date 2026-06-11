@@ -11,7 +11,7 @@
 // failures are partial-success unless every requested ID failed (in
 // which case success:false + exit 1).
 //
-// See docs/ai/specs/distill-history-read-test-plan.md §2 rows JR-04..JR-08,
+// See docs/specs/distill-history-read-test-plan.md §2 rows JR-04..JR-08,
 // JR-17, JR-18.
 
 package main

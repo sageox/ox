@@ -553,7 +553,7 @@ func escapeXML(s string) string {
 // and `ox plan list` without promising a real-time nudge the tier can't fire.
 //
 // Token-lean by design: this ships on every prime payload (see
-// docs/ai/specs/agent-ux-principles.md — every token competes with the
+// docs/specs/agent-ux-principles.md — every token competes with the
 // developer's own context).
 func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	sb.WriteString("\n<plan-enrichment-guidance>\n")

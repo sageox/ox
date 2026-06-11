@@ -1,4 +1,3 @@
-<!-- doc-audience: preserve-voice -->
 ---
 component: status-screen
 package: cmd/ox/status.go

@@ -1760,7 +1760,7 @@ func isValidRepoPath(path string) bool {
 // ┌─────────────────────────────────────────────────────────────────────────────┐
 // │ DAEMON IPC HANDLER: checkout                                                │
 // │ Classification: CRITICAL PATH WITH FALLBACK                                 │
-// │ (see docs/ai/specs/ipc-architecture.md)                                     │
+// │ (see docs/specs/ipc-architecture.md)                                     │
 // │                                                                             │
 // │ Clone is CRITICAL for product functionality - without it, SageOx cannot     │
 // │ be initialized at all. However, IPC to this handler is NOT strictly         │

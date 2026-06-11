@@ -1,5 +1,3 @@
-<!-- doc-audience: preserve-voice -->
-
 # Pattern · `ox init` wizard (inline multi-step)
 
 How the project-initialization wizard composes catalog primitives.

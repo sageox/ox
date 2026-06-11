@@ -1,5 +1,3 @@
-<!-- doc-audience: preserve-voice -->
-
 # Pattern · Session timeline
 
 How a recorded AI coworker session renders in `ox session view` and the dashboard.

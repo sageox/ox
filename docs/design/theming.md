@@ -1,5 +1,3 @@
-<!-- doc-audience: preserve-voice -->
-
 # Theming
 
 ox's palette, themes, and light/dark behavior are owned by the [`sageox-design`](https://github.com/sageox/sageox-design) system. ox is a downstream consumer.

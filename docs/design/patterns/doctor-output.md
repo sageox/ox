@@ -1,5 +1,3 @@
-<!-- doc-audience: preserve-voice -->
-
 # Pattern · `ox doctor` output
 
 How `ox doctor` composes catalog primitives into its canonical output.

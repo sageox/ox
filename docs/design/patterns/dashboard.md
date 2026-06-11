@@ -1,5 +1,3 @@
-<!-- doc-audience: preserve-voice -->
-
 # Pattern · Dashboard (full-screen TUI)
 
 How `ox dashboard` and other bubbletea full-screen programs compose catalog primitives.

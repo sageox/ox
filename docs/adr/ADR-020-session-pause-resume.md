@@ -1,5 +1,3 @@
-<!-- doc-audience: ai -->
-
 # ADR-020: Session Pause/Resume
 
 **Status**: Accepted

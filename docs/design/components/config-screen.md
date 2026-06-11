@@ -1,4 +1,3 @@
-<!-- doc-audience: preserve-voice -->
 ---
 component: config-screen
 package: cmd/ox/config_tui.go

@@ -1,4 +1,3 @@
-<!-- doc-audience: preserve-voice -->
 ---
 component: session-list-screen
 package: cmd/ox/session_list.go

@@ -76,4 +76,4 @@ side. The CLI performs **reads via HTTP API** (team context via
 session upload + LFS Batch API). Pull-direction git operations are skipped
 entirely; the local ledger clone never exists.
 
-See `docs/ai/adr/adr-ephemeral-mode.md` for the full rationale and rollout phases.
+See `docs/adr/adr-ephemeral-mode.md` for the full rationale and rollout phases.

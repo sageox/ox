@@ -71,7 +71,7 @@ func checkSessionTrailerRatio() checkResult {
 		return PassedCheck(name, msg)
 	}
 	fix := "If a squash-merge config strips trailers or commits are landing without `ox` running, " +
-		"recent commits will not be linkable to their sessions. See docs/ai/specs/session-commit-linkage.md."
+		"recent commits will not be linkable to their sessions. See docs/specs/session-commit-linkage.md."
 	return WarningCheck(name, msg, fix)
 }
 

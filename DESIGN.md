@@ -1,5 +1,3 @@
-<!-- doc-audience: human -->
-
 # ox · Design
 
 > Calm, precise terminal output for humans and AI coworkers.
@@ -28,8 +26,8 @@ The expanded version with worked rationale lives in [`.claude/rules/design.md`](
 | Composite patterns (doctor, status, session timeline) | [`docs/design/patterns/`](docs/design/patterns/) |
 | Theming + upstream sync | [`docs/design/theming.md`](docs/design/theming.md) |
 | Semantic tokens | [`docs/design/tokens.md`](docs/design/tokens.md) |
-| AI-audience deep reference | [`docs/ai/specs/cli-design-system.md`](docs/ai/specs/cli-design-system.md) |
-| Agent UX (orthogonal — how output serves AI coworkers) | [`docs/ai/specs/agent-ux-principles.md`](docs/ai/specs/agent-ux-principles.md) |
+| Deep reference (CLI design system) | [`docs/specs/cli-design-system.md`](docs/specs/cli-design-system.md) |
+| Agent UX (orthogonal — how output serves AI coworkers) | [`docs/specs/agent-ux-principles.md`](docs/specs/agent-ux-principles.md) |
 | Generated theme code (do not edit) | `internal/theme/generated.go` |
 | Component implementations | `internal/ui/`, `internal/tui/`, `internal/cli/` |
 | Catalog registry | `internal/uicatalog/` |

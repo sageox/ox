@@ -1,5 +1,3 @@
-<!-- doc-audience: ai -->
-
 # testguard: Test Environment Isolation
 
 Tests that run `ox` as a subprocess MUST use `testguard.RunOx` or `testguard.OxCmd`. **NEVER** use `exec.Command` + `os.Environ()` to run `ox` in tests -- this leaks the developer's real auth tokens, daemon sockets, and `SAGEOX_ENDPOINT`, causing tests to hit production infrastructure.

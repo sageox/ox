@@ -99,7 +99,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	// NOTE: No OAuth gate here. Session recording only needs a Git PAT for upload
 	// (LFS + git push). OAuth is used for identity enrichment but is not required.
 	// The PAT is what actually enforces access control at push time.
-	// See docs/ai/specs/session-auth-model.md for the full auth model.
+	// See docs/specs/session-auth-model.md for the full auth model.
 
 	// ensure prime has run — team context and agent identity are critical for sessions.
 	// detection: check session marker (written by prime on success).

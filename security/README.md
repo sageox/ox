@@ -1,5 +1,3 @@
-<!-- doc-audience: human -->
-
 # `security/` — ox security review pipeline
 
 This directory holds ox's security review pipeline: the threat model the AI hunters load, the OpenGrep rule sets, and the scripts that drive the deterministic and AI tiers. ox is a local-first CLI that holds your OAuth tokens, runs a Unix-socket daemon, and downloads adapter binaries from GitHub — the threat surface is your workstation, and the pipeline is tuned to that.

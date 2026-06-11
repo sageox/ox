@@ -1,4 +1,3 @@
-<!-- doc-audience: ai -->
 # ADR-018: Index-Only Bleve — Drop Stored Content & Highlighting in CodeDB
 
 **Status**: Accepted (merged 2026-05-26 via PR #621)

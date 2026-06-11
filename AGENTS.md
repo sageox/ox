@@ -116,7 +116,7 @@ if HasOxPrimeMarker(gitRoot) { ... }
 - Ledgers: `GET /api/v1/repos/{repo_id}/ledger-status` (project-scoped)
 - These are separate APIs by design. Do not conflate them.
 
-**IPC Architecture:** See [docs/ai/specs/ipc-architecture.md](docs/ai/specs/ipc-architecture.md). IPC is never required, fire-and-forget for non-critical ops, clone has a fallback.
+**IPC Architecture:** See [docs/specs/ipc-architecture.md](docs/specs/ipc-architecture.md). IPC is never required, fire-and-forget for non-critical ops, clone has a fallback.
 
 ---
 
@@ -133,17 +133,9 @@ if HasOxPrimeMarker(gitRoot) { ... }
 
 ---
 
-## Docs
-
-Before editing docs, check line 1 for `<!-- doc-audience: ... -->`. If `human` or `preserve-voice`: DO NOT edit. If `ai`: edit freely.
-
-Human docs (`docs/human/`): concise, narrative, progressive disclosure, crafted voice. AI docs (`docs/ai/`): verbose, explicit, structured, machine-oriented. Do not force humans to read AI-oriented verbosity or vice versa.
-
----
-
 ## Development Standards
 
-See [docs/human/guides/development-philosophy.md](docs/human/guides/development-philosophy.md) for philosophy, [docs/ai/specs/go-conventions.md](docs/ai/specs/go-conventions.md) for Go conventions, [docs/ai/specs/cli-design-system.md](docs/ai/specs/cli-design-system.md) for CLI design, [docs/ai/specs/agent-ux-principles.md](docs/ai/specs/agent-ux-principles.md) for Agent UX.
+See [docs/guides/development-philosophy.md](docs/guides/development-philosophy.md) for philosophy, [docs/specs/go-conventions.md](docs/specs/go-conventions.md) for Go conventions, [docs/specs/cli-design-system.md](docs/specs/cli-design-system.md) for CLI design, [docs/specs/agent-ux-principles.md](docs/specs/agent-ux-principles.md) for Agent UX.
 
 Always confirm with human before doing a git commit or a git push in this repo.
 
@@ -175,7 +167,7 @@ Tabs for indentation. Run `make format` before committing. Pre-commit hooks enfo
 
 ### Context Efficiency (Agent UX)
 
-Every token in agent context competes with developer work. Lead with actionable instruction, not explanation. Heavy operations → subagents. See [docs/ai/specs/agent-ux-principles.md](docs/ai/specs/agent-ux-principles.md).
+Every token in agent context competes with developer work. Lead with actionable instruction, not explanation. Heavy operations → subagents. See [docs/specs/agent-ux-principles.md](docs/specs/agent-ux-principles.md).
 
 ### Reference Docs
 

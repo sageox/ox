@@ -1,5 +1,3 @@
-<!-- doc-audience: preserve-voice -->
-
 # Pattern · `ox login` flow
 
 How the OAuth login flow composes catalog primitives.

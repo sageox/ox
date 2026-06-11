@@ -5,7 +5,7 @@
 // It is deliberately NOT a beads (bd) replacement: bd tracks human-facing
 // project work, agenttask tracks ephemeral, machine-scheduled chores run on
 // behalf of the developer's live session. See
-// docs/ai/specs/agent-task-scheduling.md for the full design.
+// docs/specs/agent-task-scheduling.md for the full design.
 package agenttask
 
 import "time"

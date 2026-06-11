@@ -5,7 +5,7 @@
 // ephemeral local cache — all data is rebuildable from the ledger's murmur
 // files. If corrupt, the store auto-recovers by deleting and recreating.
 //
-// See docs/ai/specs/daemon-state-principles.md for design principles.
+// See docs/specs/daemon-state-principles.md for design principles.
 package store
 
 import (

@@ -1,5 +1,3 @@
-<!-- doc-audience: human -->
-
 # Verification — proving a closed finding stays closed
 
 When `/security-review` flags an issue and you patch it, the patch is only as good as the regression test that catches the next person reintroducing the same bug. This file is the recipe per hunter class: what to write, what to run, what to expect.
