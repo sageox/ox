@@ -74,7 +74,7 @@ func TestStripANSIEscapes(t *testing.T) {
 			// 8-bit C1 introducers: 0x9b is CSI, 0x9d is OSC. A terminal acts on
 			// these without a leading ESC, so they must be dropped too.
 			name: "C1 control bytes stripped (8-bit CSI/OSC/ST)",
-			in:   "abcd",
+			in:   "a\u009bb\u009dc\u0080d",
 			want: "abcd",
 		},
 		{
