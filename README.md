@@ -141,16 +141,20 @@ SageOx reads configuration from, in order:
 
 ## Tools we love
 
-We build `ox` in good company. We're grateful to the developer community and to
-the tools we lean on every day — they make our work better, and they're worth
-yours.
+We build `ox` in great company. These are the tools we rely on — and love —
+every day. Gratitude to the teams behind them, and to the wider developer
+community.
 
 <p align="center">
-  <a href="https://socket.dev"><img src="https://img.shields.io/badge/Socket-supply--chain%20security-000000?style=for-the-badge&logo=socket&logoColor=white" alt="Socket — supply-chain security"></a>
-  &nbsp;
-  <a href="https://www.coderabbit.ai"><img src="https://img.shields.io/badge/CodeRabbit-AI%20PR%20review-FF570A?style=for-the-badge&logoColor=white" alt="CodeRabbit — AI pull-request review"></a>
-  &nbsp;
-  <a href="https://www.greptile.com"><img src="https://img.shields.io/badge/Greptile-AI%20codebase%20review-7C3AED?style=for-the-badge&logoColor=white" alt="Greptile — AI codebase review"></a>
-  &nbsp;
-  <a href="https://sageox.ai"><img src="https://img.shields.io/badge/SageOx-agentic%20context-7A8F78?style=for-the-badge&logoColor=white" alt="SageOx — agentic context infrastructure"></a>
+  <a href="https://socket.dev" title="Socket — supply-chain security"><img src="https://socket.dev/apple-touch-icon.png" height="44" alt="Socket"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://www.coderabbit.ai" title="CodeRabbit — AI code review"><img src="https://cdn.simpleicons.org/coderabbit" height="40" alt="CodeRabbit"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://www.greptile.com" title="Greptile — AI codebase review"><img src="https://www.greptile.com/logo.svg" height="44" alt="Greptile"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://sageox.ai" title="SageOx — agentic context infrastructure"><img src="https://sageox.ai/apple-icon.png" height="44" alt="SageOx"></a>
+</p>
+
+<p align="center">
+  <sub><a href="https://socket.dev">Socket</a> · <a href="https://www.coderabbit.ai">CodeRabbit</a> · <a href="https://www.greptile.com">Greptile</a> · <a href="https://sageox.ai">SageOx</a></sub>
 </p>
