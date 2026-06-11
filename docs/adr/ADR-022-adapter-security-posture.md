@@ -53,21 +53,24 @@ flowchart TB
     B3["user IS the trust anchor"]
     B1 ~~~ B2 ~~~ B3
   end
-  A3 --> NEED["integrity check REQUIRED:<br/>does the binary match what SageOx curated?"]
-  B3 --> OPEN["frictionless by design:<br/>do not gate the engineer's own code"]
+  A3 --> NEED["SageOx-checksum gate REQUIRED:<br/>does the binary match what SageOx curated?"]
+  B3 --> OPEN["no SageOx checksum gate:<br/>one-time --allow-unverified opt-in, user vouches"]
 ```
 
 - **Curated short-name path** (`ox adapter install cursor`): the user trusts that
-  SageOx vetted what sits behind the name. Today the code resolves
-  `releases/latest` and runs whatever `browser_download_url` the GitHub API returns
+  SageOx vetted what sits behind the name. The original code resolved
+  `releases/latest` and ran whatever `browser_download_url` the GitHub API returned
   — no version pin, no checksum. A compromised maintainer release, a swapped asset,
-  or a CDN/MITM substitution can deliver a *different* binary **under a name the
+  or a CDN/MITM substitution could deliver a *different* binary **under a name the
   user was taught to trust**, with no signal. This authenticity gap is the
-  legitimate finding (`ox-5ihl`).
+  legitimate finding (`ox-5ihl`), closed by decision 3.
 - **Arbitrary-repo path** (`ox adapter install github.com/<owner>/<repo>`): the user
-  explicitly names a repo they already trust. The user is the trust anchor; a
-  SageOx-side checksum gate here would break the "anyone can build and install an
-  adapter" contract for zero security gain.
+  explicitly names a repo they already trust — the user, not SageOx, is the trust
+  anchor. "Frictionless" here means **no SageOx-side checksum gate** (we never demand
+  a hash the user cannot produce for their own code), not zero ceremony: the user
+  pins `@<tag>` and acknowledges the trust decision once with `--allow-unverified`
+  (decision 3). That one-time opt-in is deliberate friction proportional to "you are
+  vouching for this," not a curation gate.
 
 ### 3. Integrity is enforced only where SageOx is the trust anchor
 
@@ -79,14 +82,28 @@ missing pin as fail-closed. A code-reviewed tag/checksum bump becomes the contro
 
 The arbitrary-repo path requires an explicit `@<tag>` plus an explicit
 `--allow-unverified` opt-in, after which ox installs without a SageOx-side checksum.
-We do not add a checksum gate the user cannot satisfy for their own code.
+We do not add a checksum gate the user cannot satisfy for their own code. A curated
+entry that has no pinned checksum yet also fails closed until `--allow-unverified`
+is passed (the documented transition while `registry.yaml` is populated).
+Implemented in `runAdapterInstall` / `resolveAdapterSource` (`ox-5ihl`).
 
-### 4. No standalone download-host allowlist
+### 4. The download-host allowlist is defense-in-depth, never the primary control
 
-GitHub rotates release-asset CDN hosts, so a hardcoded allowlist is a maintenance
-landmine that breaks real installs, and it does not stop malicious bytes served at
-a legitimate URL. Checksum verification (decision 3) subsumes it. We do not ship a
-separate host allowlist as a control.
+Checksum verification (decision 3) is **the** integrity control: it stops malicious
+bytes regardless of which host served them. A host allowlist cannot do that (bad
+bytes at a legitimate URL pass it) and is a maintenance liability — GitHub rotates
+release-asset CDN hosts (`objects.githubusercontent.com`,
+`release-assets.githubusercontent.com`, …), so the list must be widened when a new
+one appears or curated installs break with a "host not in allowlist" error.
+
+Given that, the install path keeps only a **thin defense-in-depth transport guard**
+(`gitutil.ValidateHTTPSHost` with `adapterDownloadHosts` in `cmd/ox/adapter.go`):
+it enforces `https` and the known GitHub asset hosts so an obviously-wrong
+`browser_download_url` is rejected before bytes are fetched. It is explicitly **not**
+relied on for integrity and **must be widened or removed** the moment it causes a
+real install failure — the checksum gate is the security boundary. If the
+maintenance cost outweighs the marginal value, drop the host set and keep only the
+`https` check; nothing else depends on it.
 
 ### 5. `verifyAdapterBinary` checks conformance, not provenance
 

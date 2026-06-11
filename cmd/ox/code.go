@@ -267,9 +267,13 @@ func compactSnippet(s string, maxLen int) string {
 //   - DCS (ESC P), SOS (ESC X), PM (ESC ^), APC (ESC _): … terminated by ST
 //   - other two-byte ESC sequences (ESC followed by a single byte)
 //   - bare C0 control bytes 0x00-0x1f except tab (0x09) and newline (0x0a)
+//   - bare C1 control bytes 0x80-0x9f, which include the 8-bit forms of CSI
+//     (0x9b) and OSC (0x9d) that terminals interpret as escape introducers —
+//     stripping ESC-prefixed sequences alone would miss them. Matches
+//     sanitizeSessionText (session_list.go).
 //
-// Runes are processed as bytes-safe: only ASCII control bytes are inspected; any
-// multibyte UTF-8 rune (all bytes >= 0x80) passes through unchanged.
+// Normal text is unaffected: printable Unicode starts at U+00A0, so only the
+// control ranges (never real runes in user content) are dropped.
 func stripANSIEscapes(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -287,8 +291,9 @@ func stripANSIEscapes(s string) string {
 		if r < 0x20 && r != '\t' && r != '\n' {
 			continue
 		}
-		// drop DEL
-		if r == 0x7f {
+		// drop DEL and the C1 control range (0x80-0x9f): 0x9b/0x9d are 8-bit
+		// CSI/OSC introducers, so leaving them would reopen the injection hole.
+		if r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			continue
 		}
 

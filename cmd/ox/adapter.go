@@ -433,7 +433,7 @@ func installAdapter(cfg installConfig) error {
 	// Fetch the PINNED release (releases/tags/<tag>), never releases/latest, so a
 	// retagged/swapped "latest" cannot redirect a pinned install (ADR-022).
 	apiURL := fmt.Sprintf("%s/repos/%s/%s/releases/tags/%s", cfg.apiBaseURL, plan.owner, plan.repo, plan.tag)
-	resp, err := client.Get(apiURL) //nolint:gosec // URL built from registry-resolved owner/repo/tag
+	resp, err := client.Get(apiURL) //nolint:gosec // fixed api.github.com endpoint; owner/repo/tag from registry (curated) or validated user input (arbitrary-repo path)
 	if err != nil {
 		return fmt.Errorf("fetch release info: %w", err)
 	}

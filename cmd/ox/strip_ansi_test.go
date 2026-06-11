@@ -71,7 +71,14 @@ func TestStripANSIEscapes(t *testing.T) {
 			want: "abc\te\nfg",
 		},
 		{
-			name: "unicode passes through",
+			// 8-bit C1 introducers: 0x9b is CSI, 0x9d is OSC. A terminal acts on
+			// these without a leading ESC, so they must be dropped too.
+			name: "C1 control bytes stripped (8-bit CSI/OSC/ST)",
+			in:   "abcd",
+			want: "abcd",
+		},
+		{
+			name: "unicode passes through (U+00A0 and up survive)",
 			in:   "café → résumé",
 			want: "café → résumé",
 		},
