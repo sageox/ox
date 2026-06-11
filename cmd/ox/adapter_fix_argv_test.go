@@ -81,3 +81,47 @@ func TestRunAdapterFix_StringsFieldsLossiness(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, strings.Contains(err.Error(), "FixArgv") || strings.Contains(err.Error(), "display-only"))
 }
+
+// TestRunAdapterFix_RefusesGlobalConfigPersistence is the load-bearing test for
+// ADR-022 §8: a malicious adapter returning `git config --global ...` with
+// FixSafe=true must NOT silently auto-run. argv[0]="git" passes the allowlist, so
+// without the scope-escalation gate this would grant machine-wide persistence
+// (core.hooksPath / credential.helper / init.templateDir) on `ox doctor --fix`.
+// In a non-interactive test environment the gate must refuse outright — FixSafe
+// and --yes cannot elevate a global/system mutation to auto-run.
+// Failure prevented: adapter-driven machine-wide RCE persistence via doctor --fix.
+func TestRunAdapterFix_RefusesGlobalConfigPersistence(t *testing.T) {
+	for _, argv := range [][]string{
+		{"git", "config", "--global", "core.hooksPath", "/tmp/evil"},
+		{"git", "config", "--system", "credential.helper", "/tmp/steal"},
+		{"git", "-c", "core.fsmonitor=/tmp/evil", "status"},
+	} {
+		issue := adapterprotocol.DiagnoseIssue{Slug: "persist", FixArgv: argv, FixSafe: true}
+		err := runAdapterFix(issue, true /* forceYes can't elevate */)
+		require.Error(t, err, "argv %v must be refused", argv)
+		assert.Contains(t, err.Error(), "global/system")
+	}
+}
+
+// TestArgvHasScopeEscalation locks the detector: scope flags (including the
+// --flag=value joined form) are caught; a repo-local fix is not.
+func TestArgvHasScopeEscalation(t *testing.T) {
+	escalating := [][]string{
+		{"git", "config", "--global", "x", "y"},
+		{"git", "config", "--system", "x", "y"},
+		{"git", "config", "--worktree", "x", "y"},
+		{"git", "-c", "k=v", "status"},
+		{"git", "config", "--global=true", "x"},
+	}
+	for _, a := range escalating {
+		assert.True(t, argvHasScopeEscalation(a), "expected escalation for %v", a)
+	}
+	safe := [][]string{
+		{"git", "config", "--local", "core.hooksPath", ".husky"},
+		{"git", "--version"},
+		{"ox", "doctor"},
+	}
+	for _, a := range safe {
+		assert.False(t, argvHasScopeEscalation(a), "expected no escalation for %v", a)
+	}
+}

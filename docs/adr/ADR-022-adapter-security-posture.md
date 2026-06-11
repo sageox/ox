@@ -131,9 +131,13 @@ capability checks.
 `FixSafe=false` issues are never auto-run — but a malicious adapter can still
 return `git config --global …` to gain persistence. Because this is downstream of
 an already-installed (already-trusted, decision 6) adapter, the residual control is
-to **surface the full command to the terminal and confirm `--global`/`--system`
-mutations**, rather than maintain a losing denylist of dangerous git-config keys
-(tracked in the review as a MEDIUM, downstream of `ox-5ihl`).
+to **surface the full command to the terminal and confirm scope-escalating
+mutations** (`--global`/`--system`/`--worktree`/`-c`), rather than maintain a
+losing denylist of dangerous git-config keys. Implemented in `runAdapterFix`
+(`argvHasScopeEscalation`): any such fix is printed and requires explicit
+confirmation regardless of `FixSafe`/`--yes`, and is refused outright when ox
+cannot prompt (non-interactive). Every adapter fix is now echoed to stdout before
+it runs, so nothing executes silently.
 
 ## Consequences
 
