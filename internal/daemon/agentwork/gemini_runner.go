@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// GeminiRunner implements Runner using `gemini -p`.
+// GeminiRunner implements Runner using `gemini` with the prompt delivered via stdin.
 // It spawns Gemini CLI in non-interactive (headless) mode.
 // GeminiRunner is safe for concurrent use — each Run() call is independent.
 type GeminiRunner struct {

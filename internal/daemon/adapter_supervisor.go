@@ -505,11 +505,9 @@ func (s *AdapterSupervisor) spawnAdapterLocked(adapterType string) (*AdapterProc
 	// currently only knows adapterType + capabilities at spawn time, not the
 	// adapter's RequiredEnv (which lives in the ADR-010 InfoResponse and is not
 	// plumbed through findBinary). Wiring that through is follow-up work.
-	// OX_PROTOCOL_VERSION is appended last so the daemon's compiled version wins
-	// over any inherited value.
-	cmd.Env = append(envutil.SanitizedEnv(os.Environ(), nil),
-		fmt.Sprintf("OX_PROTOCOL_VERSION=%d", adapterprotocol.ProtocolVersion),
-	)
+	// SanitizedEnv already injects the compiled OX_PROTOCOL_VERSION as the sole,
+	// authoritative copy (it drops any inherited value), so no manual append.
+	cmd.Env = envutil.SanitizedEnv(os.Environ(), nil)
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {

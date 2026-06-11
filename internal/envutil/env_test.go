@@ -85,13 +85,16 @@ func TestSanitizedEnv_XDGPrefixMatching(t *testing.T) {
 }
 
 func TestSanitizedEnv_OXProtocolVarsAlwaysIncluded(t *testing.T) {
-	// Failure prevented: adapter doesn't receive protocol version or repo context.
+	// Failure prevented: adapter doesn't receive repo context, OR (regression for
+	// the Greptile-flagged Linux bug) inherits a STALE OX_PROTOCOL_VERSION that
+	// shadows the compiled value. OX_PROTOCOL_VERSION is owned by ox and must
+	// always be the compiled version, never whatever the parent shell exported.
 	environ := []string{
 		"HOME=/home/dev",
 		"OX_REPO_ROOT=/src/project",
 		"OX_REPO_ID=repo-abc",
 		"OX_TEAM_ID=team-xyz",
-		"OX_PROTOCOL_VERSION=1",
+		"OX_PROTOCOL_VERSION=99", // stale inherited value — must be overridden
 	}
 
 	result := SanitizedEnv(environ, nil)
@@ -101,7 +104,7 @@ func TestSanitizedEnv_OXProtocolVarsAlwaysIncluded(t *testing.T) {
 		"OX_REPO_ROOT":        "/src/project",
 		"OX_REPO_ID":          "repo-abc",
 		"OX_TEAM_ID":          "team-xyz",
-		"OX_PROTOCOL_VERSION": "1",
+		"OX_PROTOCOL_VERSION": fmt.Sprintf("%d", adapterprotocol.ProtocolVersion),
 	}
 
 	for k, v := range expected {
@@ -110,6 +113,18 @@ func TestSanitizedEnv_OXProtocolVarsAlwaysIncluded(t *testing.T) {
 		} else if got != v {
 			t.Errorf("%s = %q, want %q", k, got, v)
 		}
+	}
+
+	// Exactly one OX_PROTOCOL_VERSION entry — the stale one must be dropped, not
+	// duplicated (a second entry would shadow the fresh one via getenv on Linux).
+	count := 0
+	for _, e := range result {
+		if strings.HasPrefix(e, "OX_PROTOCOL_VERSION=") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 OX_PROTOCOL_VERSION entry, got %d", count)
 	}
 }
 

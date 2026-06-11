@@ -67,29 +67,30 @@ func SanitizedEnv(environ []string, requiredEnv []string) []string {
 
 	env := make([]string, 0, len(allowlistedEnvVars)+len(requiredEnv)+4)
 
-	// track which OX_ vars we found so we can inject defaults for missing ones
-	foundOX := make(map[string]bool)
-
 	for _, entry := range environ {
 		name, _, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue
 		}
 
+		// OX_PROTOCOL_VERSION is owned by ox, not inherited. A stale value in the
+		// daemon's own environment (e.g. exported by the parent shell) must never
+		// reach a child: drop any inherited copy so the compiled value injected
+		// below is the single, authoritative entry. On Linux/glibc getenv returns
+		// the FIRST matching envp entry, so a passed-through stale copy would
+		// shadow a later-appended fresh one — the subtle bug this guards against.
+		if name == "OX_PROTOCOL_VERSION" {
+			continue
+		}
+
 		if isAllowlisted(name) || required[name] {
 			env = append(env, entry)
 		}
-
-		// track OX_ vars we see (they pass through isAllowlisted via the OX_ prefix check)
-		if strings.HasPrefix(name, "OX_") {
-			foundOX[name] = true
-		}
 	}
 
-	// always inject OX_PROTOCOL_VERSION if not already present
-	if !foundOX["OX_PROTOCOL_VERSION"] {
-		env = append(env, fmt.Sprintf("OX_PROTOCOL_VERSION=%d", adapterprotocol.ProtocolVersion))
-	}
+	// Inject the compiled OX_PROTOCOL_VERSION unconditionally (inherited copies
+	// were dropped above, so this is always the authoritative value).
+	env = append(env, fmt.Sprintf("OX_PROTOCOL_VERSION=%d", adapterprotocol.ProtocolVersion))
 
 	return env
 }
