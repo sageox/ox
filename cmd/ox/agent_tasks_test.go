@@ -52,6 +52,20 @@ func TestRunAgentTasks_ListEmpty(t *testing.T) {
 	}
 }
 
+// TestRunAgentTasks_NoSubcommandDefaultsToList verifies that an empty subargs
+// slice defaults to "list" without panicking on args[1:].
+// Failure prevented: `ox agent <id> tasks` (no subcommand) crashes the CLI.
+func TestRunAgentTasks_NoSubcommandDefaultsToList(t *testing.T) {
+	setupTaskProject(t)
+	var buf bytes.Buffer
+	if err := runAgentTasks(&buf, testInst(), nil); err != nil {
+		t.Fatalf("no subcommand: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"type": "agent_tasks"`) {
+		t.Fatalf("expected list output, got: %s", buf.String())
+	}
+}
+
 func TestRunAgentTasks_ClaimAndComplete(t *testing.T) {
 	root := setupTaskProject(t)
 

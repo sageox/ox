@@ -104,10 +104,11 @@ func runAgentTasks(w io.Writer, inst *agentinstance.Instance, args []string) err
 	defer store.Close()
 
 	sub := "list"
+	var rest []string
 	if len(args) > 0 {
 		sub = args[0]
+		rest = args[1:]
 	}
-	rest := args[1:]
 
 	switch sub {
 	case "list":
