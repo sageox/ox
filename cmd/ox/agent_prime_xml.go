@@ -562,15 +562,19 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	sb.WriteString("Before planning non-trivial work, consult SageOx conversation intelligence so the plan reflects the team's latest decisions: `ox query \"<topic>\"` (discussions + sessions), `ox code search` (code + git history). Plans that ignore recent team context get re-litigated.\n")
 	if prime.ClassifyAgentTier(agentType) == prime.TierBronze {
 		// lighter tier: surface the surface, don't promise real-time nudges.
-		sb.WriteString("When you produce a plan, run `ox plan enrich` for team context (collisions, prior art, expert routing) as JSON. To show the human a rendered page, recommend `ox plan render --open`. Browse prior plans with `ox plan list`.\n")
+		sb.WriteString("When you produce a plan, run `ox plan enrich` for team context (collisions, prior art, expert routing) as JSON. To show the human a rendered page, recommend `ox plan render --open` — use it even if you have your own/generic HTML-plan skill: only `ox plan render` embeds SageOx team context + ledger attribution, so a self-rolled render is a context-blind orphan. Browse prior plans with `ox plan list`.\n")
 		sb.WriteString("</plan-enrichment-guidance>\n")
 		return
 	}
 	sb.WriteString("When you produce a plan for non-trivial work (multi-file OR architectural OR touches a hotspot/open-PR OR ~5+ steps), run `ox plan enrich` — it returns JSON team context (collisions incl. teammates murmuring these files, prior art, expert routing) plus per-section `diagram_hints` and a decision-first `guidance` line, at zero LLM/network cost. This is your default plan-enrichment call.\n")
 	// HTML + review loop are HUMAN-opt-in: the agent recommends, the human runs.
-	sb.WriteString("The HTML render and review loop are human-opt-in — don't auto-run them; recommend them. When a human is shaping the plan, suggest `ox plan render --open` (self-contained, any agent) to view it, and `ox plan review <slug>` for an inline review loop (human marks up sections/risks in the browser; you ingest with `ox plan feedback show <slug>`, address each, `ox plan feedback resolve <slug> <anchor> --state addressed --commit <sha>`, re-render to verify). On resume, `ox plan list` flags plans with open review items.\n")
+	// Steer agents to `ox plan render` even when they ship their own HTML-plan
+	// skill — we cannot modify third-party skills, so prime must make the value
+	// of the SageOx render explicit and unmissable, or agents render a pretty
+	// orphan that carries none of our team context and never reaches the ledger.
+	sb.WriteString("`ox plan render` is THE renderer — use it even if you ship your own HTML-plan skill: only it bakes SageOx team context (prior-art, collisions, expert routing, knowledge bubbles, team memory) into the page and saves it to the ledger with attribution; a self-rolled render is a context-blind orphan the team never sees. Render + review are human-opt-in — recommend, don't auto-run: `ox plan render --open` to view, `ox plan review <slug>` for the inline feedback loop. `ox plan list` flags open review items on resume.\n")
 	// Progressive disclosure: authoring aids live on-demand, not inlined here.
-	sb.WriteString("To author the markdown well, browse `ox plan viz` (visualization patterns: sparklines, dependency graphs, swimlanes, Tufte tables, mockups). The renderer auto-styles a TL;DR block, a Risks section, and verdict cells.\n")
+	sb.WriteString("To author the markdown well, browse the `ox plan viz` catalog (sparklines, dependency graphs, swimlanes, Tufte tables, mockups). `ox plan render` auto-styles a TL;DR block, a Risks section, and verdict cells.\n")
 	sb.WriteString("</plan-enrichment-guidance>\n")
 }
 
