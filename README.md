@@ -148,13 +148,13 @@ community.
 <p align="center">
   <a href="https://socket.dev" title="Socket — supply-chain security"><img src="docs/assets/logos/socket.svg" height="26" alt="Socket"></a>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://sageox.ai" title="SageOx — agentic context infrastructure"><img src="docs/assets/SageOx-Wordmark.png" height="26" alt="SageOx"></a>
+  <a href="https://sageox.ai" title="SageOx — agentic context infrastructure"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/logos/sageox-dark.svg"><img src="docs/assets/logos/sageox-light.svg" height="26" alt="SageOx"></picture></a>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://www.coderabbit.ai" title="CodeRabbit — AI code review"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/logos/coderabbit-dark.svg"><img src="docs/assets/logos/coderabbit-light.svg" height="22" alt="CodeRabbit"></picture></a>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://www.greptile.com" title="Greptile — AI codebase review"><img src="docs/assets/logos/greptile.svg" height="30" alt="Greptile"></a>
+  <a href="https://www.greptile.com" title="Greptile — AI codebase review"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/logos/greptile-dark.png"><img src="docs/assets/logos/greptile-light.png" height="26" alt="Greptile"></picture></a>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://charm.sh" title="Charm — delightful tools for the command line"><img src="docs/assets/logos/charm.png" height="30" alt="Charm"></a>
+  <a href="https://charm.sh" title="Charm — delightful tools for the command line"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/logos/charm-dark.svg"><img src="docs/assets/logos/charm-light.svg" height="24" alt="Charm"></picture></a>
 </p>
 
 <p align="center">
