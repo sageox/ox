@@ -103,14 +103,16 @@ func emitPlanModeHint(w io.Writer, projectRoot, agentID string, rawBytes []byte)
 		slog.Debug("hook: plan-mode hint mkdir failed", "error", err)
 		return
 	}
+	// <system-reminder> is the only tag Claude Code treats as trusted system
+	// context. Single line — grepability invariant.
+	fmt.Fprintf(w, "<system-reminder>[ox] %s</system-reminder>\n", planModeHintLine())
+
+	// Write the stamp only after a successful emit so that a failed write
+	// doesn't permanently suppress the hint for this plan-mode entry.
 	if err := os.WriteFile(stamp, []byte("1"), 0o600); err != nil {
 		slog.Debug("hook: plan-mode hint stamp write failed", "error", err)
 		return
 	}
-
-	// <system-reminder> is the only tag Claude Code treats as trusted system
-	// context. Single line — grepability invariant.
-	fmt.Fprintf(w, "<system-reminder>[ox] %s</system-reminder>\n", planModeHintLine())
 	slog.Info("hook: plan-mode hint emitted", "agent_id", agentID)
 }
 
