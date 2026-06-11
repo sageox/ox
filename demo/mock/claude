@@ -1,106 +1,95 @@
 #!/usr/bin/env bash
-# Mock Claude Code for demo recording.
-# Supports two personas:
-#   1. Ryan: starts a session with /ox-session-start
-#   2. Ajit: asks about team discussions
+# Mock Claude Code for the SageOx demo — ONE continuous agent session walking
+# through the wow moments, conversationally (no raw <system-reminder> internals):
 #
-# Which persona is used depends on how many times this script has been
-# invoked (tracked via a temp counter file).
+#   1. session recording starts automatically on prime
+#   2. "what's the team up to?" — live in-flight work from coworkers' murmurs,
+#      BEFORE any PR or commit lands
+#   3. recall of prior work across agents, machines, and teammates (query)
+#   4. a WIP murmur goes out; a teammate's murmur arrives LIVE and is surfaced in
+#      plain language; the agent adapts
+#   5. plan enrichment from team context: collisions, prior art, expert routes
 #
-# Usage: Add demo/mock/ to PATH before running demo.tape
+# Faithful to real phrasing (cmd/ox/agent.go, agent_hook_plan_nudge.go) but shows
+# the magic, not the plumbing. No /ox-session-start ritual.
+#
+# Usage (in a tape): export PATH=...demo/mock:$PATH ; claude
 
-# Colors
-RUST='\033[38;2;199;122;80m'     # warm rust (Claude Code border)
-RB='\033[1;38;2;199;122;80m'     # rust bold
-GOLD='\033[38;2;224;165;106m'    # copper gold
-GB='\033[1;38;2;224;165;106m'    # gold bold
-DM='\033[38;2;143;153;163m'      # dim gray
-B='\033[1m'                       # bold
-IT='\033[3m'                      # italic
-R='\033[0m'                       # reset
-SAGE='\033[38;2;122;143;120m'    # sage green
+RUST='\033[38;2;199;122;80m'
+RB='\033[1;38;2;199;122;80m'
+GOLD='\033[38;2;224;165;106m'
+GB='\033[1;38;2;224;165;106m'
+DM='\033[38;2;143;153;163m'
+B='\033[1m'
+R='\033[0m'
+SAGE='\033[38;2;122;143;120m'
 
-# Ignore CLI flags (e.g. --dangerously-skip-permissions)
 while [[ "${1:-}" == --* ]]; do shift; done
 
-C="$RUST"
+# --- banner + auto-prime (session recording starts here) ---
+echo ""
+printf "${RB}✻ Claude Code${R}   ${DM}sonnet · /Users/oxy/code/myproject${R}\n"
+printf "${RUST}────────────────────────────────────────────────────────────${R}\n"
+printf "  ${B}Welcome back, Oxy!${R}  🐮\n"
+echo ""
+printf "${DM}Running ${R}${GOLD}ox agent prime${R}${DM}…${R}\n"
+sleep 0.7
+printf "${SAGE}✓${R} Team context loaded · ${DM}14 prior sessions${R} · ${SAGE}recording this session${R}\n"
+echo ""
 
-# Track invocation count to switch persona
-COUNTER_FILE="/tmp/sageox-demo-claude-count"
-COUNT=$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)
-COUNT=$((COUNT + 1))
-echo "$COUNT" > "$COUNTER_FILE"
+# --- beat 1: what's the team up to, right now (pre-PR, pre-commit) ---
+printf " ${RUST}❯${R} "
+read -r q1
+echo ""
+sleep 1.2
+printf "Live from your coworkers — ${B}in-flight work, before anything's pushed${R}:\n"
+echo ""
+printf "  ${SAGE}●${R} ${B}Ravi${R}   ${GOLD}Codex${R}        rate limiting on the gateway     ${DM}murmured 8m ago${R}\n"
+printf "  ${SAGE}●${R} ${B}Mira${R}   ${GOLD}Claude Code${R}  refactoring internal/auth/session.go  ${DM}3m ago${R}\n"
+printf "  ${DM}●${R} ${B}you${R}    ${DM}—${R}            this session\n"
+echo ""
+printf "Nobody's committed, merged, or opened a PR — ${B}yet you can already see it${R}.\n"
+echo ""
 
-if [ "$COUNT" -le 1 ]; then
-    # === PERSONA 1: Ryan ===
+# --- beat 2: recall across agents, machines, teammates (query) ---
+printf " ${RUST}❯${R} "
+read -r q2
+echo ""
+sleep 1.2
+printf "SageOx surfaced prior work — ${B}across agents, machines, and teammates${R}:\n"
+echo ""
+printf "  ${DM}session${R}     rate-limiter-spike     ${GOLD}Codex${R} · Ravi's laptop · ${DM}4 days ago${R}\n"
+printf "  ${DM}session${R}     rl-followup            ${GOLD}Claude Code${R} · your session · ${DM}2 days ago${R}\n"
+printf "  ${DM}discussion${R}  \"Rate Limiting Approach\"   ${DM}Ravi + you · recorded at sageox.ai${R}\n"
+echo ""
+printf "You and Ravi landed on a ${B}token-bucket backed by Redis${R} — Ravi's Codex\n"
+printf "session already has the working middleware. I can reuse that pattern.\n"
+echo ""
 
-    echo ""
-    printf "${C}┌─${RB} Claude Code v2.1.42 ${C}────────────────────────────────────────┬─────────────────────────────┐${R}\n"
-    printf "${C}│${R}                                                              ${C}│${R} ${GB}Tips for getting started${R}    ${C}│${R}\n"
-    printf "${C}│${R}              ${B}Welcome back Ryan!${R}                              ${C}│${R} Run /init to create a       ${C}│${R}\n"
-    printf "${C}│${R}                                                              ${C}│${R} CLAUDE.md fil...            ${C}│${R}\n"
-    printf "${C}│${R}                     🐮                                       ${C}│${R}${C}─────────────────────────────${R}${C}│${R}\n"
-    printf "${C}│${R}                                                              ${C}│${R} ${GB}Recent activity${R}             ${C}│${R}\n"
-    printf "${C}│${R}  ${DM}Opus 5.0 · Claude Max · ryan@sageox.ai's${R}                    ${C}│${R} ${DM}No recent activity${R}          ${C}│${R}\n"
-    printf "${C}│${R}  ${DM}Organization${R}                                                ${C}│${R}                             ${C}│${R}\n"
-    printf "${C}│${R}                ${DM}/Users/ryan/code/myproject${R}                    ${C}│${R}                             ${C}│${R}\n"
-    printf "${C}└──────────────────────────────────────────────────────────────┴─────────────────────────────┘${R}\n"
-    echo ""
+# --- beat 3: build — murmur out, an inbound murmur arrives live, plan enrich ---
+printf " ${RUST}❯${R} "
+read -r q3
+echo ""
+sleep 1
+printf "On it — letting the team know I'm in here.\n"
+printf "${SAGE}✓${R} ${DM}Murmured:${R} \"adding rate limiting to the auth endpoints\"\n"
+echo ""
+sleep 1.8
+printf "  ${GOLD}↩ Mira just murmured${R} ${DM}— \"refactoring internal/auth/session.go right now\"${R}\n"
+echo ""
+sleep 1.5
+printf "${B}Heads up from SageOx:${R} Mira's live in that file. I'll stay clear and\n"
+printf "wire in at the handler layer so we don't collide.\n"
+echo ""
+sleep 1.5
+printf "${DM}Plan ready — SageOx enriched it from team context:${R}\n"
+echo ""
+printf "  ${GB}⚡${R} ${B}2 collisions${R} in open PRs   ${DM}handler.go (PR #1847 · Ravi), session.go (Mira)${R}\n"
+printf "  ${GB}↺${R} ${B}prior art${R}            ${DM}\"Rate Limiting Approach\" — token-bucket spec${R}\n"
+printf "  ${GB}◆${R} ${B}expert${R}               ${DM}Ravi owns rate limiting${R}\n"
+echo ""
+printf "  ${DM}Review it:${R} ${GOLD}ox plan render --open${R}\n"
+echo ""
 
-    # Prompt — expect /ox-session-start
-    printf " ${RUST}❯${R} "
-    read -r input
-
-    echo ""
-    sleep 1
-
-    # Show session start confirmation
-    printf "${SAGE}✓${R} ${B}Session recording started${R}\n"
-    echo ""
-    printf "  Recording to: ${DM}2026-02-16T11-30-ryan-Oxa7b3.jsonl${R}\n"
-    printf "  Agent:        ${DM}claude-code${R}\n"
-    echo ""
-    printf "  ${DM}Your conversation will be captured and shared with your team.${R}\n"
-    printf "  ${DM}Run${R} ${GOLD}/ox-session-stop${R} ${DM}when done.${R}\n"
-    echo ""
-
-    # Wait for /exit
-    printf " ${RUST}❯${R} "
-    read -r input 2>/dev/null || sleep 30
-
-else
-    # === PERSONA 2: Ajit ===
-
-    echo ""
-    printf "${C}┌─${RB} Claude Code v2.1.42 ${C}────────────────────────────────────────┬─────────────────────────────┐${R}\n"
-    printf "${C}│${R}                                                              ${C}│${R} ${GB}Tips for getting started${R}    ${C}│${R}\n"
-    printf "${C}│${R}              ${B}Welcome back Ajit!${R}                              ${C}│${R} Run /init to create a       ${C}│${R}\n"
-    printf "${C}│${R}                                                              ${C}│${R} CLAUDE.md fil...            ${C}│${R}\n"
-    printf "${C}│${R}                     🐮                                       ${C}│${R}${C}─────────────────────────────${R}${C}│${R}\n"
-    printf "${C}│${R}                                                              ${C}│${R} ${GB}Recent activity${R}             ${C}│${R}\n"
-    printf "${C}│${R}  ${DM}Opus 5.0 · Claude Max · ajit@sageox.ai's${R}                    ${C}│${R} ${DM}No recent activity${R}          ${C}│${R}\n"
-    printf "${C}│${R}  ${DM}Organization${R}                                                ${C}│${R}                             ${C}│${R}\n"
-    printf "${C}│${R}                ${DM}/Users/ajit/code/myproject${R}                    ${C}│${R}                             ${C}│${R}\n"
-    printf "${C}└──────────────────────────────────────────────────────────────┴─────────────────────────────┘${R}\n"
-    echo ""
-
-    # Prompt — Ajit's question
-    printf " ${RUST}❯${R} "
-    read -r question
-
-    echo ""
-    sleep 2
-
-    # Show Claude's response about team context
-    printf "The ${GB}\"First Prod Walk of 2/11/26\"${R} team has the most discussions,\n"
-    printf "including one from ${B}rsnodgrass${R}. Let me look at the discussions to\n"
-    printf "find the conversation between you and Ryan.\n"
-    echo ""
-
-    # Wait for the recording to end
-    printf " ${RUST}❯${R} "
-    read -r input 2>/dev/null || sleep 30
-
-    # Reset counter for next demo run
-    rm -f "$COUNTER_FILE"
-fi
+printf " ${RUST}❯${R} "
+read -r input 2>/dev/null || sleep 30

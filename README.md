@@ -1,19 +1,64 @@
 <!-- doc-audience: human -->
-# SageOx CLI (ox)
+# SageOx CLI (`ox`)
 
 [![docs: ai-human-docs](https://raw.githubusercontent.com/rsnodgrass/ai-human-docs/main/badges/ai-human-docs.svg)](https://github.com/rsnodgrass/ai-human-docs)
 
-SageOx is agentic context infrastructure — we call it the hivemind. It makes architectural and product intent persistent and automatically available across humans and agents.
+**The hivemind for human–agent teams.** SageOx makes your team's decisions,
+conventions, and architectural intent persistent — and loads them automatically
+into every coding session, human or AI.
 
-This initial version is intended for AI-native teams — teams that build products almost exclusively through prompts.
+Today, that context lives in scattered places: a meeting nobody recorded, a Slack
+thread three weeks deep, the head of whoever wrote the code. So humans repeat
+themselves and AI coworkers drift — rebuilding the same lost context every
+session. `ox` closes that gap. Decisions become shared memory; every session
+starts with the full picture instead of from zero.
 
-Sessions, ledgers, and team knowledge ensure your AI coworkers understand your project's patterns, security requirements, and architectural decisions from the start, making agentic engineering multiplayer by default.
+**Ask your coding agent what the team already figured out — even if it happened
+in a different agent, on a different machine, days ago.**
 
-## Demo
+![One ox session: cross-agent recall, murmurs, and a team-enriched plan](demo/demo.gif)
 
-![SageOx CLI Demo](demo/demo.gif)
+One session, every moment that matters: it **recalls** a teammate's Codex work
+and your own prior Claude Code session, **coordinates** by murmuring and noticing
+a teammate already in the same files, and proposes a plan **enriched** with
+collisions, prior art, and who owns the area. All of it because every session is
+recorded to a shared, queryable **Ledger**.
 
-## Install the CLI
+## The loop
+
+```mermaid
+flowchart LR
+    REC["Record at sageox.ai<br/>discussions, decisions"]
+    KB["Knowledge Bubbles<br/>team context plus ledger"]
+    PRIME["ox agent prime<br/>loads context"]
+    WORK["AI Coworker session"]
+    CAP["Session captured<br/>to the Ledger"]
+    REC --> KB --> PRIME --> WORK --> CAP --> KB
+```
+
+Record a discussion once. It's distilled into **Knowledge Bubbles** — your team's
+shared memory. The next time anyone primes a coding session, that context flows
+in. The session itself is captured back to the **Ledger**, so the next coworker
+inherits it too. Context compounds instead of evaporating.
+
+## Works with your coding agent
+
+`ox` is agent-agnostic. The same recorded context is primed into, and queryable
+from, whichever agent your team uses.
+
+| Agent | Prime context | Record sessions | Murmur (coordinate) | Query past work |
+|---|:---:|:---:|:---:|:---:|
+| **Claude Code** | ✅ | ✅ | ✅ | ✅ |
+| **Codex CLI** | ✅ | ✅ | ✅ | ✅ |
+| **Cursor** | ✅ | ✅ | ➖ | ✅ |
+| **Windsurf / Cline / Copilot / Aider** | ✅ | ➖ | ➖ | ✅ |
+
+✅ supported · ➖ planned. Claude Code is the primary, most-tested target.
+
+<sub>Agent names are trademarks of their respective owners; `ox` is compatible
+with, not affiliated with, them.</sub>
+
+## Install
 
 **Quick install (macOS / Linux / FreeBSD):**
 
@@ -28,91 +73,64 @@ git clone https://github.com/sageox/ox.git && cd ox
 make build && make install
 ```
 
-## Set up ox in your repo
+Verify with `ox version`.
+
+## Quickstart
 
 ```bash
-# cd into your code repo (e.g. ~/src/my-project)
-cd ~/src/my-project
-ox login
+cd ~/src/my-project     # your code repo
+ox login                # authenticate with sageox.ai
 
-# one time setup, done ONCE per repo
-ox init
-# commit the changes in your repo, e.g. git commit -a -m 'SageOx init'
+ox init                 # one-time per repo: creates .sageox/
+git add .sageox/ && git commit -m "initialize SageOx"
 
-ox doctor
-# ox doctor --fix may be needed in the alpha stage
-ox status
-# will give you the location of the team context and ledger repos
+ox doctor               # diagnose (ox doctor --fix auto-repairs)
+ox status               # setup, sync state, and your Knowledge Bubbles
 ```
 
-## 👥 Go to [sageox.ai](https://sageox.ai) - Setup team
+That's the whole setup. From here, **session capture is automatic** — when an AI
+coworker runs `ox agent prime` at the start of a session, team context loads in
+and the session is recorded to the Ledger when it ends. No manual start/stop
+ritual.
 
-Go into your newly created team in SageOx and invite your coworkers by copying the invite in the upper right, displayed in Team Overview.
+Then just ask your AI coworker things it couldn't have known on its own:
 
-<!-- TODO: add screenshot of team invite UI -->
+- *"What did we decide about the daemon design, and who worked on it?"*
+- *"Draft a plan from this week's SageOx team discussions."*
+- *"Show me an effective prompt a teammate used on this repo recently."*
 
-## 🎙️ Record discussions
+## What you get
 
-Team discussions impacting the product are captured and transcribed in the app and the context is automatically available to Claude.
+| Capability | Command | Learn more |
+|---|---|---|
+| Team context + repo memory as **Knowledge Bubbles** | `ox status`, `ox kb list` | [jit-discovery](docs/human/guides/jit-discovery.md) |
+| Query past sessions, discussions, and code — across agents and machines | `ox query "..."` | [query](docs/reference/query.mdx) |
+| Auto-recorded coworker sessions (**Ledger**) | `ox agent prime`, `ox session list` | [session capture](docs/ai/architecture/session-capture-architecture.md) |
+| Real-time coordination signals between coworkers | `ox murmur "..."` | — |
+| Team-context-enriched implementation plans | `ox plan enrich`, `ox plan render` | [plan](docs/reference/plan) |
+| Planning-relevant code insights (hotspots, contention) | `ox code insights` | — |
+| Load an expert AI coworker into context | `ox coworker load <name>` | — |
+| Diagnose and auto-fix your setup | `ox doctor --fix` | [doctor](docs/reference/doctor.mdx) |
 
-<!-- TODO: add screenshot of transcription UI -->
+## How it works
 
-## 🤖 Capture sessions
+`ox init` writes a `.sageox/` directory that ties the repo to your team. From
+then on, `ox agent prime` injects team context — conventions, security
+requirements, architectural decisions, prior sessions — into each AI coworker
+before it writes a line. Coworkers, human and AI, share that context through the
+**Team Context** and the per-repo **Ledger**.
 
-`ox-session` capture the conversation between a developer and Claude so the decisions, patterns, and reasoning become available to the rest of the team.
+The payoff is multiplayer by default. When a discussion, an implementation
+session, and the resulting code all carry the same shared context, a reviewer
+opening the PR has the full story — the original reasoning, the session that
+built it, and the diff — without chasing anyone down.
 
-```bash
-pwd
-/home/me/src/my-project
-claude
-/ox-session-start
-<implement fizz buzz>
-/ox-session-stop
-```
+## Configuration
 
-<!-- TODO: add screenshot of session viewer -->
-
-## 🚀 Just Ask
-
-Start your AI coworker in your repo and just ask:
-
-- *"What decisions were made in the last coding session on this project?"*
-- *"Create a plan of work based on the SageOx team discussions from today."*
-- *"Look at my team's SageOx coding sessions from this week and teach me a really effective prompt that was used."*
-
-## ⚙️ How it works
-
-1. **ox init** creates a `.sageox/` directory with shared team context for your project
-2. **ox integrate** sets up hooks so your AI coworker automatically loads context at session start
-3. Your AI coworker receives team context, security conventions, and architectural patterns
-4. Coworkers (human and AI) share context through ledgers and team knowledge
-
-### SageOx in Practice
-
-Here's a real example from [PR #4](https://github.com/sageox/ox/pull/4):
-
-```mermaid
-flowchart LR
-    subgraph discuss ["🎙️ Ryan and Ajit Discuss"]
-        A1["Captured in Team Context"]
-    end
-    subgraph implement ["🤖 Ajit Implements"]
-        B1["Captured in Ledger"]
-    end
-    subgraph review ["🚀 Ryan Reviews"]
-        C1["Code + Session + Transcript"]
-    end
-    discuss --> implement --> review
-```
-
-Ryan and Ajit discussed the daemon design in a recorded team discussion. Ajit then implemented it with Claude (session captured in the ledger). When Ryan reviewed the PR, he had the full picture — the original discussion audio, the implementation session, and the code.
-
-## ⚙️  Configuration
-
-SageOx looks for configuration in:
+SageOx reads configuration from, in order:
 
 1. CLI flags (`--verbose`, `--quiet`, `--json`)
-2. Environment variables (`OX_*` prefix)
+2. Environment variables
 3. Config file (`.sageox/config.yaml`)
 
 ## Legal

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-10
+
+### Added
+
+- **Cross-agent HTML plans with a human review loop** — `ox plan` renders a team-context-enriched plan as a self-contained HTML page for *any* coding agent, not just Claude Code, backed by a catalog of reusable visualizations (timelines, collision maps, sequence diagrams). A new review loop (`ox plan review`) serves the plan for inline human feedback, so a reviewer can shape the approach *before* any code is written — and the feedback is captured back to the ledger.
+
+### Changed
+
+- **Natively aligned Knowledge Bubbles in `ox status`** — the bubble listing now uses a label-column layout with owner and bubble names aligned in their own column, so the section reads as a clean table rather than ragged, variable-width rows.
+
+### Security
+
+- **Adapter integrity, a single redaction chokepoint, and environment + clone hardening (ADR-022)** — installed AI adapters are integrity-verified before use, every redaction path now funnels through one chokepoint that is far harder to bypass, and both environment-variable handling and team-context clones were hardened against credential leakage and untrusted-prompt injection.
+
+### Fixed
+
+- **`ox agent tasks` no longer panics when called with no subcommand** — invoking `tasks` bare previously sliced an empty argument list and crashed; it now guards the slice and prints usage.
+
 ## [0.9.1] - 2026-06-08
 
 ### Added

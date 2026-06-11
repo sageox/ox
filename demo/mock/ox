@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Mock ox CLI for demo recording.
-# Produces clean, success-only output matching the real ox CLI theme.
+# Reproduces current ox CLI output for the cloud-touching commands that can't be
+# run deterministically offline (login, init, doctor, status, agent prime).
+# Faithful to the real flow: session capture is automatic via `ox agent prime`,
+# there is no manual /ox-session-start ritual.
 #
-# Usage: Add demo/mock/ to PATH before running demo.tape
+# Usage: Add demo/mock/ to PATH before running a tape:
 #   export PATH="$(pwd)/demo/mock:$PATH"
 
 # Colors (ox CLI dark theme - true color)
@@ -27,19 +30,12 @@ mock_login() {
     echo "You're signed in as ox@sageox.ai"
     echo ""
     printf "${G}✓${R} Git credentials synced\n"
-    echo "Run 'ox status' to see current status of ox."
     echo ""
-    printf "${C}✦${R} Next: ${C}ox status${R} — verify your authentication and project setup\n"
+    printf "${C}✦${R} Next: ${C}ox init${R} — initialize SageOx in this repo\n"
 }
 
 mock_init() {
     printf "${DM}Using endpoint: https://sageox.ai${R}\n"
-    echo ""
-    printf "${GB}SELECT ENDPOINT${R}\n"
-    echo "Choose which SageOx endpoint to initialize with."
-    echo ""
-    sleep 0.5
-    printf "Using endpoint: ${B}sageox.ai${R}\n"
     echo ""
     printf "${GB}REPOSITORY SETUP${R}\n"
     sleep 0.2
@@ -49,19 +45,15 @@ mock_init() {
     sleep 0.1
     printf "${G}✓${R} Created .sageox/config.json\n"
     sleep 0.1
-    printf "${G}✓${R} Updated .sageox/config.json with repository metadata\n"
-    sleep 0.1
     printf "${G}✓${R} Created .sageox/README.md\n"
     sleep 0.1
     printf "${G}✓${R} Created .sageox/.gitignore\n"
-    sleep 0.1
-    printf "${G}✓${R} Added SageOx entries to .gitattributes\n"
     echo ""
     printf "${GB}AGENT INTEGRATION${R}\n"
     sleep 0.2
     printf "${G}✓${R} Injected 'ox agent prime' into AGENTS.md\n"
     sleep 0.1
-    printf "${G}✓${R} Installed 7 Claude command(s)\n"
+    printf "${G}✓${R} Installed Claude command(s)\n"
     echo ""
     printf "${GB}GIT & REGISTRATION${R}\n"
     sleep 0.2
@@ -76,16 +68,31 @@ mock_init() {
     echo "════════════════════════════════════════════════════════════"
     echo ""
     printf "${GB}NEXT STEPS${R}\n"
-    echo "  1. Start your AI coding agent (Claude Code, Cursor, etc.)"
-    printf "  2. Agent should auto-run: ${C}ox agent prime${R}\n"
+    printf "  1. Commit .sageox/:  ${C}git add .sageox/ && git commit${R}\n"
+    printf "  2. Verify setup:     ${C}ox doctor${R}\n"
     echo ""
-    echo "────────────────────────────────────────────────────────────"
-    printf "${DM}Other commands:${R}\n"
-    printf "  ${C}ox doctor${R}    – Check SageOx health\n"
-    printf "  ${C}ox view team${R} – Open team dashboard\n"
-    printf "  ${C}ox view repo${R} – Open repo dashboard\n"
+    printf "${DM}Your AI coworker auto-runs ${R}${C}ox agent prime${R}${DM} at session start.${R}\n"
+}
+
+mock_doctor() {
+    printf "${B}SageOx Doctor${R}\n"
+    printf "${DM}────────────────────${R}\n"
+    sleep 0.2
+    printf "${G}✓${R} Installation        ox 0.10.0\n"
+    sleep 0.1
+    printf "${G}✓${R} Authentication      logged in as ${G}Oxy${R} <ox@sageox.ai>\n"
+    sleep 0.1
+    printf "${G}✓${R} Project config      .sageox/ present and valid\n"
+    sleep 0.1
+    printf "${G}✓${R} Git remote          ledger reachable\n"
+    sleep 0.1
+    printf "${G}✓${R} Knowledge Bubbles   3 accessible\n"
+    sleep 0.1
+    printf "${G}✓${R} Daemon              running, syncing\n"
+    sleep 0.1
+    printf "${G}✓${R} Redaction policy    active\n"
     echo ""
-    printf "${C}✦${R} ${C}ox doctor --verbose${R} shows detailed check information\n"
+    printf "${G}All checks passed.${R} ${DM}Run ${R}${C}ox doctor --fix${R}${DM} if any check is ever red.${R}\n"
 }
 
 mock_status() {
@@ -93,46 +100,45 @@ mock_status() {
     printf "${DM}────────────────────${R}\n"
     printf "Endpoint          ${G}sageox.ai${R} (${G}✓ logged in${R})\n"
     printf "User              ${G}Oxy${R} <ox@sageox.ai>\n"
-    printf "Token expires     2026-02-11 11:33:49 PST (${DM}/Users/oxy/.config/sageox/auth.json${R})\n"
-    echo ""
-    printf "${B}Configuration${R}\n"
-    printf "${DM}────────────────────${R}\n"
-    printf "User config dir   ${G}✓${R} /Users/oxy/.config/sageox\n"
     echo ""
     printf "${B}Project Status${R}\n"
     printf "${DM}────────────────────${R}\n"
     echo "Repo directory    /Users/oxy/code/myproject"
     printf "  SageOx state    └── .sageox/ ${G}✓${R}\n"
     echo ""
-    printf "${B}Ledger${R}\n"
+    printf "${B}Knowledge Bubbles${R}\n"
     printf "${DM}────────────────────${R}\n"
-    echo "sageox.ai   /Users/oxy/code/myproject_sageox/sageox.ai/ledger"
-    printf "  Status          ${G}✓ clean${R}\n"
-    echo "  Remote          https://git.sageox.ai/sageox-team_fl0ur1sh0x/repo_019c2a28-3596-7ea9-a51e-86fc6c9a3e1f.git"
-    echo "  Branch          main"
-    echo ""
-    printf "${B}Team Context${R}\n"
-    printf "${DM}────────────────────${R}\n"
-    printf "Team              ${B}team_fl0ur1sh0x${R}\n"
-    echo "  Path            /Users/oxy/.local/share/sageox/sageox.ai/teams/team_fl0ur1sh0x"
-    printf "  Status          ${G}✓ clean${R}\n"
-    echo "  Branch          main"
+    printf "  ${B}team_fl0ur1sh0x${R}   ${DM}team${R}    ${G}✓ 2h${R}   shared decisions, conventions\n"
+    printf "  ${B}myproject${R}         ${DM}repo${R}    ${G}✓ clean${R}   ledger: sessions + murmurs\n"
+    printf "  ${B}Oxy${R}               ${DM}you${R}     ${G}✓ 1d${R}   personal notes\n"
     echo ""
     printf "${B}Daemon Sync${R}\n"
     printf "${DM}────────────────────${R}\n"
     printf "Status            ${G}✓ running, syncing${R} (pid 20966)\n"
-    echo "Total syncs       2"
-    echo ""
     printf "Syncing           ${B}2 workspace(s)${R}\n"
-    printf "  📁 ledger         ${G}✓${R} /Users/oxy/code/myproject_sageox/sageox.ai/ledger\n"
-    printf "  📁 team_fl0ur1sh0x ${G}✓${R} /Users/oxy/.local/share/sageox/sageox.ai/teams/team_fl0ur1sh0x\n"
     echo ""
-    printf "${C}✦${R} Use ${C}ox logout${R} to clear credentials when switching accounts\n"
+    printf "${C}✦${R} Ask your AI coworker about prior sessions — context loads on ${C}ox agent prime${R}\n"
+}
+
+mock_agent_prime() {
+    printf "${DM}Loading team context…${R}\n"
+    sleep 0.6
+    printf "${G}✓${R} Primed as ${B}Oxa7b3${R}\n"
+    printf "${G}✓${R} Team context loaded  ${DM}(team_fl0ur1sh0x)${R}\n"
+    printf "${G}✓${R} Ledger loaded        ${DM}14 prior sessions${R}\n"
+    printf "${G}✓${R} Session recording started\n"
 }
 
 case "${1:-}" in
     login)  mock_login ;;
     init)   mock_init ;;
+    doctor) mock_doctor ;;
     status) mock_status ;;
+    agent)
+        case "${2:-}" in
+            prime) mock_agent_prime ;;
+            *)     echo "ox agent: unknown subcommand '${2:-}'"; exit 1 ;;
+        esac
+        ;;
     *)      echo "ox: unknown command '${1:-}'"; exit 1 ;;
 esac
