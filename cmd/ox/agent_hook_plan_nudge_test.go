@@ -71,6 +71,7 @@ func TestFormatPlanNudgeLine_MentionsOnlyFiredSignals(t *testing.T) {
 	assert.Contains(t, line, "1 prior-art match")
 	assert.NotContains(t, line, "expert route", "expert routes did not fire — must not be mentioned")
 	assert.Contains(t, line, "ox plan render --open")
+	assert.Contains(t, line, "SageOx team-context-optimized plan")
 	assert.NotContains(t, line, "ox plan --open")
 	// single line — grepability invariant
 	assert.NotContains(t, line, "\n")
@@ -98,7 +99,7 @@ func TestFormatPlanNudgeLine_NonTrivialOnly(t *testing.T) {
 		line := formatPlanNudgeLine(res)
 		assert.Contains(t, line, "7 files")
 		assert.Contains(t, line, "6 steps")
-		assert.Contains(t, line, "HTML page")
+		assert.Contains(t, line, "SageOx team-context-optimized plan")
 		assert.Contains(t, line, "ox plan render --open")
 		assert.NotContains(t, line, "collision", "no team-context signal fired — must not be mentioned")
 		assert.NotContains(t, line, "\n", "single line — grepability invariant")
@@ -113,7 +114,7 @@ func TestFormatPlanNudgeLine_NonTrivialOnly(t *testing.T) {
 		line := formatPlanNudgeLine(res)
 		assert.Contains(t, line, "4 files")
 		assert.NotContains(t, line, "step", "steps below threshold must not be named")
-		assert.Contains(t, line, "HTML page")
+		assert.Contains(t, line, "SageOx team-context-optimized plan")
 		assert.NotContains(t, line, "\n")
 	})
 
@@ -126,7 +127,7 @@ func TestFormatPlanNudgeLine_NonTrivialOnly(t *testing.T) {
 		line := formatPlanNudgeLine(res)
 		assert.Contains(t, line, "7 steps")
 		assert.NotContains(t, line, "file", "files below threshold must not be named")
-		assert.Contains(t, line, "HTML page")
+		assert.Contains(t, line, "SageOx team-context-optimized plan")
 		assert.NotContains(t, line, "\n")
 	})
 }

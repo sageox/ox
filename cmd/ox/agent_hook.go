@@ -503,6 +503,16 @@ func handlePrompt(ctx *HookContext) error {
 	// begins right after the plan was approved.
 	emitPlanNudge(os.Stdout, ctx.ProjectRoot, agentID)
 
+	// While the agent is still IN plan mode (permission_mode == "plan"), steer it
+	// to fold `ox plan enrich --json` team context into the plan BEFORE presenting
+	// — once per plan-mode entry. Complements the plan-EXIT nudge above. Gold-tier
+	// only (gated on the permission mode Claude Code reports); fail-open.
+	var rawPrompt []byte
+	if ctx.Input != nil {
+		rawPrompt = ctx.Input.RawBytes
+	}
+	emitPlanModeHint(os.Stdout, ctx.ProjectRoot, agentID, rawPrompt)
+
 	emitWhispers(os.Stdout, agentID)
 
 	// Surface any scheduled agent tasks (throttled). This is the sole channel

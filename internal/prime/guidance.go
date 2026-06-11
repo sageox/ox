@@ -102,7 +102,7 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 		})
 	default: // TierGold, TierSilver, TierUnknown (baseline) — active enrich command
 		cmds = append(cmds, IntentCommand{
-			Intent:  "enrich/render your implementation plan with team context: collisions, prior art, expert routing — run when a plan touches multiple files, architecture, a hotspot/open-PR, or ~5+ steps",
+			Intent:  "plan non-trivial work (multi-file, architecture, hotspot/open-PR, or ~5+ steps): run 'ox plan enrich --json' WHILE drafting to fold in team context (collisions, prior art, expert routing) before you present; on present, render a SageOx team-context-optimized plan with 'ox plan render --open'",
 			Command: "ox plan",
 		})
 	}

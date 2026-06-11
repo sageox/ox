@@ -55,7 +55,8 @@ Agent-specific hooks (`ox integrate install --<agent>`) are *additive* — they 
 | Upload mask honoring lifecycle | Yes (adapter-agnostic) | Yes | Yes | Yes (lifecycle-only; cloud-side data not gated) | Yes |
 | **Plan enrichment** (`ox plan`) | | | | | |
 | `ox plan --json` baseline (0-token, no network) | Yes (any agent can run it) | Yes | Yes | Yes | Yes |
-| Real-time plan-exit nudge | Yes (PostToolUse on ExitPlanMode → UserPromptSubmit) | Guidance-only | Guidance-only | Guidance-only | Guidance-only |
+| Real-time in-plan-mode hint (during drafting) | Yes (UserPromptSubmit `permission_mode == plan`) | Guidance-only | Guidance-only | Guidance-only | Guidance-only |
+| Real-time plan-exit nudge (on presentation) | Yes (PostToolUse on ExitPlanMode → UserPromptSubmit) | Guidance-only | Guidance-only | Guidance-only | Guidance-only |
 | Tiered prime guidance for `ox plan` | Gold block + IntentCommand | Silver block + IntentCommand | Silver block + IntentCommand | Bronze note | Bronze note |
 
 ## Plan Enrichment (`ox plan`)
@@ -101,6 +102,40 @@ flowchart LR
     ENR -->|"signals.material"| STASH["stash one-line nudge<br/>.sageox/cache/plan-nudge"]
     UPS["next UserPromptSubmit<br/>(handlePrompt)"] --> DRAIN["drain + deliver as<br/>system-reminder, then remove"]
     STASH -.->|"deliver-once on next turn"| DRAIN
+```
+
+### The in-plan-mode hint (Gold — fires *during* drafting, not at exit)
+
+The plan-exit nudge above fires *after* the plan is presented. It is paired with
+a second Gold-only hint that fires *while the agent is still drafting*, so the
+deterministic `ox plan enrich --json` team context is folded into the plan
+**before** it reaches the human — the JSON enrich is the whole point of the
+planning cycle, not an after-the-fact decoration.
+
+The signal is Claude Code's **`permission_mode`** field on the `UserPromptSubmit`
+payload (value `"plan"` while in plan mode). `UserPromptSubmit` is already the
+only stdout-injection channel, so `handlePrompt` decodes the mode straight off
+`HookInput.RawBytes` and, on plan-mode entry, emits a one-line steer toward the
+two-beat flow (`ox plan enrich --json` while drafting → render a **SageOx
+team-context-optimized plan** with `ox plan render --open` when presenting).
+
+- **Field name:** decoded under both spellings — snake_case `permission_mode`
+  (hook stdin) and camelCase `permissionMode` (transcript) — so it is robust to
+  Claude Code's surface differences.
+- **Throttle:** exactly once per plan-mode entry. A per-agent stamp
+  (`.sageox/cache/plan-mode-hint/<agentID>.txt`) suppresses repeat prompts within
+  the same entry and is cleared the moment a non-plan prompt arrives, so
+  re-entering plan mode re-hints.
+- **Gold-only by construction:** only Claude Code reports a permission mode, so
+  for every other agent the decode returns `""` and the hint is a clean no-op —
+  no per-agent install, no new adapter capability.
+
+```mermaid
+flowchart LR
+    UPS["UserPromptSubmit<br/>(handlePrompt)"] -->|"decode permission_mode"| CHK{"== plan ?"}
+    CHK -->|"no"| CLR["clear stamp<br/>(next entry re-hints)"]
+    CHK -->|"yes, not yet stamped"| HINT["emit one-line hint<br/>run ox plan enrich --json while drafting"]
+    CHK -->|"yes, already stamped"| SUP["suppress<br/>(once per entry)"]
 ```
 
 ### Silver / Bronze degradation
