@@ -14,7 +14,6 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
-	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/ui"
@@ -863,99 +862,6 @@ func EnsureGitattributes(gitRoot string) (added bool, err error) {
 	}
 
 	return true, nil
-}
-
-// checkMarkerCachedURLs verifies that the marker file has cached URLs for validation and reconnection.
-// With fix=true, attempts to refresh URLs from git credentials or API.
-func checkMarkerCachedURLs(fix bool) checkResult {
-	repoRoot := findRepoRoot()
-	if repoRoot == "" {
-		return SkippedCheck("Cached URLs", "not in a repository", "")
-	}
-
-	sageoxDir := filepath.Join(repoRoot, ".sageox")
-	if _, err := os.Stat(sageoxDir); os.IsNotExist(err) {
-		return SkippedCheck("Cached URLs", ".sageox/ not initialized", "Run `ox init` first")
-	}
-
-	// check if marker has cached URLs
-	currentEndpoint := endpoint.Get()
-	urls, err := ReadMarkerURLs(sageoxDir, currentEndpoint)
-	if err != nil {
-		return WarningCheck("Cached URLs", "read error", err.Error())
-	}
-
-	// if URLs are present, validate them
-	if urls != nil && urls.LedgerURL != "" {
-		// check if URLs match git credentials (source of truth)
-		creds, credErr := gitserver.LoadCredentialsForEndpoint(currentEndpoint)
-		if credErr == nil && creds != nil {
-			mismatch := false
-			var mismatchDetails []string
-
-			// check team URLs
-			for _, repo := range creds.Repos {
-				if repo.Type == "team-context" {
-					teamID := strings.TrimPrefix(repo.Name, "team-")
-					if cachedURL, ok := urls.TeamURLs[teamID]; ok {
-						if cachedURL != repo.URL {
-							mismatch = true
-							mismatchDetails = append(mismatchDetails, fmt.Sprintf("team %s URL outdated", teamID))
-						}
-					} else {
-						// team exists in creds but not in marker
-						mismatch = true
-						mismatchDetails = append(mismatchDetails, fmt.Sprintf("team %s URL missing", teamID))
-					}
-				}
-			}
-
-			if mismatch {
-				if fix {
-					// update marker with current credentials
-					cfg, cfgErr := config.LoadProjectConfig(repoRoot)
-					if cfgErr != nil || cfg.RepoID == "" {
-						return WarningCheck("Cached URLs", "outdated (no repo_id)", strings.Join(mismatchDetails, ", "))
-					}
-					if err := updateMarkerWithCachedURLs(sageoxDir, cfg.RepoID, currentEndpoint); err != nil {
-						return WarningCheck("Cached URLs", "update failed", err.Error())
-					}
-					return PassedCheck("Cached URLs", "refreshed")
-				}
-				return WarningCheck("Cached URLs", "outdated",
-					strings.Join(mismatchDetails, ", ")+"\n       Run `ox doctor --fix` to refresh")
-			}
-		}
-
-		return PassedCheck("Cached URLs", "present")
-	}
-
-	// no cached URLs - check if we can populate them
-	cfg, cfgErr := config.LoadProjectConfig(repoRoot)
-	if cfgErr != nil || cfg.RepoID == "" {
-		return SkippedCheck("Cached URLs", "no repo_id", "Run `ox init` first")
-	}
-
-	if fix {
-		// try to populate from git credentials
-		if err := updateMarkerWithCachedURLs(sageoxDir, cfg.RepoID, currentEndpoint); err != nil {
-			// no credentials available - not an error, just informational
-			return WarningCheck("Cached URLs", "not available",
-				"Sign in with `ox login` to enable URL caching for offline reconnection")
-		}
-		return PassedCheck("Cached URLs", "populated")
-	}
-
-	// check if git credentials exist but URLs weren't cached
-	creds, credErr := gitserver.LoadCredentialsForEndpoint(currentEndpoint)
-	if credErr == nil && creds != nil && len(creds.Repos) > 0 {
-		return WarningCheck("Cached URLs", "missing",
-			"Run `ox doctor --fix` to cache URLs for offline reconnection")
-	}
-
-	// no credentials, no URLs - informational only
-	return SkippedCheck("Cached URLs", "no credentials",
-		"Sign in with `ox login` to enable URL caching")
 }
 
 // checkEndpointConsistency verifies that the project endpoint matches the endpoints

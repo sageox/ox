@@ -41,11 +41,9 @@ func init() {
 			arrowDefault := dim("← default")
 
 			row := func(cursor, key, value, arrow string, selected bool) string {
-				k := key
+				k := dim(key)
 				if selected {
 					k = sel(key)
-				} else {
-					k = dim(key)
 				}
 				return cursor + padRight(k, 30) + value + "  " + arrow
 			}

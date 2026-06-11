@@ -260,19 +260,6 @@ func (idx *distillIndex) distilledSources() map[string]bool {
 	return result
 }
 
-// sourceHash returns the cached source_hash for a fact file, or empty string.
-func (idx *distillIndex) sourceHash(relPath string) string {
-	if meta, ok := idx.FactMeta[relPath]; ok {
-		return meta.SourceHash
-	}
-	return ""
-}
-
-// addFactFile records a newly created fact file in the index.
-func (idx *distillIndex) addFactFile(relPath string, meta facts.FileMeta) {
-	idx.FactMeta[relPath] = meta
-}
-
 // addDailySummary records a newly created daily summary and its sources.
 func (idx *distillIndex) addDailySummary(relPath string, sources []string) {
 	idx.DailySources[relPath] = sources

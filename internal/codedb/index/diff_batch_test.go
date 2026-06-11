@@ -1,7 +1,6 @@
 package index
 
 import (
-	"database/sql"
 	"testing"
 
 	"github.com/blevesearch/bleve/v2"
@@ -128,14 +127,4 @@ func TestFlushDiffBatch_NoBatch(t *testing.T) {
 	err = st.flushDiffBatch(true)
 	assert.NoError(t, err, "closed index must be non-fatal")
 	assert.True(t, st.diffIndexFailed, "diffIndexFailed must be set after Batch() on closed index")
-}
-
-// openSQLiteForTest opens a raw SQLite connection for the store's metadata.db.
-// Used only to verify SQL data survives diff index failures.
-func openSQLiteForTest(t *testing.T, root string) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("sqlite", root+"/metadata.db")
-	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
-	return db
 }

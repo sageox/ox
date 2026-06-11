@@ -26,7 +26,7 @@ func TestProbeBleveIndex_EmptyIndexPasses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMemOnly: %v", err)
 	}
-	defer idx.Close()
+	defer func() { _ = idx.Close() }()
 
 	if err := probeBleveIndex(idx, "code"); err != nil {
 		t.Errorf("expected nil for empty index, got: %v", err)
@@ -53,7 +53,7 @@ func TestProbeBleveIndex_PopulatedIndexExercisesFST(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMemOnly: %v", err)
 	}
-	defer idx.Close()
+	defer func() { _ = idx.Close() }()
 
 	if err := idx.Index("doc1", map[string]string{"content": "hello world"}); err != nil {
 		t.Fatalf("Index: %v", err)

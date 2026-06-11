@@ -54,16 +54,6 @@ func newSessionStore() (*session.Store, string, error) {
 	return store, projectRoot, nil
 }
 
-// findSessionByFilename looks up a session by exact filename.
-// Returns user-friendly error if not found.
-func findSessionByFilename(store *session.Store, filename string) (*session.StoredSession, error) {
-	t, err := store.ReadSession(filename)
-	if err != nil {
-		return nil, fmt.Errorf("session %q not found\nRun 'ox session list' to see available sessions", filename)
-	}
-	return t, nil
-}
-
 // getAuthenticatedUsername returns the authenticated user's email local part, or "".
 // This is an AUTH QUERY — returns "" when not logged in. That is correct.
 //

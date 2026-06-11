@@ -109,11 +109,10 @@ func TestPopulateStatsFromDaemonCache(t *testing.T) {
 	// Simulate the daemonIndexing branch from codeStatusCmd
 	var totalCommits, totalBlobs, totalSymbols, totalComments, totalPRs, totalIssues int
 	type repoRow struct {
-		name       string
-		path       string
-		commits    int
-		blobs      int
-		lastCommit int64
+		name    string
+		path    string
+		commits int
+		blobs   int
 	}
 	var repos []repoRow
 

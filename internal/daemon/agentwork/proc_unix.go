@@ -12,10 +12,3 @@ import (
 func setProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
-
-// killProcessGroup sends SIGTERM to the process group.
-func killProcessGroup(cmd *exec.Cmd) {
-	if cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-	}
-}

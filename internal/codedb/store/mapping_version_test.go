@@ -54,7 +54,7 @@ func TestMappingVersion_UpgradeFromPreMarker(t *testing.T) {
 	// Open via the wrapper — must detect the v1 index and upgrade it.
 	upIdx, err := openOrCreateBleveIndex(root, codePath, "code")
 	require.NoError(t, err)
-	defer upIdx.Close()
+	defer func() { _ = upIdx.Close() }()
 
 	count, err := upIdx.DocCount()
 	require.NoError(t, err)
@@ -83,7 +83,7 @@ func TestMappingVersion_SameVersionOpenPreservesData(t *testing.T) {
 
 	idx2, err := openOrCreateBleveIndex(root, codePath, "code")
 	require.NoError(t, err)
-	defer idx2.Close()
+	defer func() { _ = idx2.Close() }()
 
 	count, err := idx2.DocCount()
 	require.NoError(t, err)

@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -97,36 +95,6 @@ func TestCheckResultConstructors(t *testing.T) {
 			assert.Equal(t, tc.wantDetail, result.detail, "detail mismatch")
 		})
 	}
-}
-
-// setupTestGitRepo creates a temporary directory and initializes it as a git repo
-func setupTestGitRepo(t *testing.T) (string, func()) {
-	t.Helper()
-
-	tmpDir := t.TempDir()
-
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	require.NoError(t, cmd.Run(), "failed to init git repo")
-
-	userCmd := exec.Command("git", "config", "user.name", "Test User")
-	userCmd.Dir = tmpDir
-	userCmd.Run()
-
-	emailCmd := exec.Command("git", "config", "user.email", "test@example.com")
-	emailCmd.Dir = tmpDir
-	emailCmd.Run()
-
-	oldDir, err := os.Getwd()
-	require.NoError(t, err, "failed to get current dir")
-
-	require.NoError(t, os.Chdir(tmpDir), "failed to change to dir %s", tmpDir)
-
-	cleanup := func() {
-		os.Chdir(oldDir)
-	}
-
-	return tmpDir, cleanup
 }
 
 // TestDoctorSuppression_DaemonNotRunning verifies that daemon-dependent checks

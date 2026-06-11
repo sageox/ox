@@ -72,7 +72,6 @@ type AdapterProcess struct {
 	respawnCount int
 	lastActivity time.Time
 	crashed      bool
-	degraded     bool // set when max respawns exceeded
 
 	// stderr ring buffer for debugging
 	stderrRing *stderrRingBuffer

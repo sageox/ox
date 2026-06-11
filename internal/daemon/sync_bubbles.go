@@ -95,19 +95,6 @@ func (s *SyncScheduler) SetKBBubbleListerFactory(f kbBubbleListerFactory) {
 	s.kbListerFactory = f
 }
 
-// kbBubbleSyncResult records what happened for a single bubble during a
-// reconciliation pass. Logged at info level so dashboards / heartbeat
-// (D4) can attribute tokens by kb_type. Not exported — internal to the
-// per-pass bookkeeping.
-type kbBubbleSyncResult struct {
-	kbID    string
-	kbType  api.KBType
-	cloned  bool
-	pulled  bool
-	skipped bool
-	err     error
-}
-
 // kbMeta is the on-disk shape for <bubble>/.sageox/meta.json. Holds the
 // fields the daemon learns from the kb API plus a last_sync stamp so
 // `ox doctor` and friends can detect stale clones without a roundtrip.

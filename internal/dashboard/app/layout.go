@@ -75,10 +75,3 @@ func ComputeLayout(w, h int, inspectorOpen bool) Layout {
 		InputBar:  Rect{0, h - inputBarHeight, w, inputBarHeight},
 	}
 }
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}

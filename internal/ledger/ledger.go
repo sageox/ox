@@ -415,7 +415,7 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 	// remove existing directory if empty
 	entries, _ := os.ReadDir(path)
 	if len(entries) == 0 {
-		os.Remove(path)
+		_ = os.Remove(path) // best-effort: git clone needs target to not exist
 	}
 
 	// Clone with the ox credential helper installed for this single

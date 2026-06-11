@@ -43,7 +43,6 @@ type ExternalAdapter struct {
 	serveMu  sync.Mutex
 	serveCmd *exec.Cmd
 	serveIn  io.WriteCloser
-	serveOut *ndjson.Scanner
 	serveEnc *ndjson.Encoder
 	serveSeq int
 

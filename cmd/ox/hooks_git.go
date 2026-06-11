@@ -242,12 +242,6 @@ func hasValidHookSection(content string, spec hookSpec) bool {
 		strings.Contains(content, spec.probe)
 }
 
-// hasValidOxHook is the legacy single-hook check kept for any callers that
-// only care whether prepare-commit-msg is installed.
-func hasValidOxHook(content string) bool {
-	return hasValidHookSection(content, allHookSpecs()[0])
-}
-
 // HasGitHooks returns true when all ox-managed git hooks are installed in
 // the resolved hooks directory. A partial install (e.g. only
 // prepare-commit-msg present from a previous ox version) returns false so

@@ -37,10 +37,6 @@ var (
 
 	murmurDimStyle = lipgloss.NewStyle().
 			Foreground(cli.ColorDim)
-
-	murmurCriticalStyle = lipgloss.NewStyle().
-				Foreground(cli.ColorError).
-				Bold(true)
 )
 
 var murmurListCmd = &cobra.Command{

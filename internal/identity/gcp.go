@@ -39,15 +39,6 @@ func getGCPIdentity() (*Identity, error) {
 	return nil, fmt.Errorf("no GCP credentials found")
 }
 
-// gcloudConfig represents the structure of gcloud config properties.
-// The config file uses INI-style format, but we parse manually since it's simple.
-type gcloudConfig struct {
-	Core struct {
-		Account string `ini:"account"`
-		Project string `ini:"project"`
-	}
-}
-
 // readGCloudConfig reads the GCP account email from gcloud CLI config.
 // The gcloud CLI stores active config at ~/.config/gcloud/configurations/config_default.
 func readGCloudConfig() *Identity {

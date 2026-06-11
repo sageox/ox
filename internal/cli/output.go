@@ -32,7 +32,6 @@ var (
 	hintStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.AnsiHint))
 	codeStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.AnsiCode))
 	tipIconStyle    = lipgloss.NewStyle().Foreground(ColorSecondary) // warm gold for ✦
-	tipTextStyle    = lipgloss.NewStyle().Foreground(ColorDim)       // muted gray
 	tipCommandStyle = lipgloss.NewStyle().Foreground(ColorPrimary)   // sage green for commands
 )
 

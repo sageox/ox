@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,27 +12,6 @@ import (
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 )
-
-// checkOxInPath checks if ox is accessible globally
-func checkOxInPath() checkResult {
-	path, err := exec.LookPath("ox")
-	if err != nil {
-		return checkResult{
-			name:    "ox in PATH",
-			passed:  true,
-			warning: true,
-			message: "not found",
-			detail:  "Add ox to PATH for global access",
-		}
-	}
-	// show the directory where ox is installed
-	dir := filepath.Base(filepath.Dir(path))
-	return checkResult{
-		name:    "ox in PATH",
-		passed:  true,
-		message: dir,
-	}
-}
 
 // checkForUpdates checks GitHub for newer releases
 func checkForUpdates() checkResult {

@@ -71,19 +71,6 @@ var ledgerSecretsScanExts = map[string]bool{
 	".vtt":   true,
 }
 
-// ledgerSecretsSkipDirs is retained for the snapshot tarball walk in
-// session_redact_history.go (which still archives the whole ledger). The
-// credential-scan path no longer uses it — that path iterates session
-// directories explicitly rather than filtering a global walk.
-var ledgerSecretsSkipDirs = map[string]bool{
-	".git":         true,
-	".dolt":        true,
-	".beads":       true,
-	".bak":         true,
-	".gc-cache":    true,
-	"node_modules": true,
-}
-
 // ledgerSecretsSizeCap matches the pre-push scanner's cap. Files bigger
 // than this are skipped with a log warning rather than scanned — a real
 // session raw.jsonl is comfortably under this even after a long agent run.

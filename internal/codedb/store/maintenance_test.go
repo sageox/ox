@@ -37,21 +37,21 @@ func TestMaintainPrunesOrphanBlobs(t *testing.T) {
 	s := openStore(t)
 
 	// insert a repo + commit + blob + file_rev (referenced blob)
-	s.Exec("INSERT INTO repos (id, name, path) VALUES (1, 'test', '/tmp/test')")
-	s.Exec("INSERT INTO commits (id, repo_id, hash, timestamp) VALUES (1, 1, 'abc123', ?)", time.Now().Unix())
-	s.Exec("INSERT INTO blobs (id, content_hash, language) VALUES (100, 'hash-referenced', 'go')")
-	s.Exec("INSERT INTO file_revs (commit_id, path, blob_id) VALUES (1, 'main.go', 100)")
+	_, _ = s.Exec("INSERT INTO repos (id, name, path) VALUES (1, 'test', '/tmp/test')")
+	_, _ = s.Exec("INSERT INTO commits (id, repo_id, hash, timestamp) VALUES (1, 1, 'abc123', ?)", time.Now().Unix())
+	_, _ = s.Exec("INSERT INTO blobs (id, content_hash, language) VALUES (100, 'hash-referenced', 'go')")
+	_, _ = s.Exec("INSERT INTO file_revs (commit_id, path, blob_id) VALUES (1, 'main.go', 100)")
 
 	// insert orphan blobs (not referenced by any file_rev)
-	s.Exec("INSERT INTO blobs (id, content_hash, language) VALUES (200, 'hash-orphan-1', 'go')")
-	s.Exec("INSERT INTO blobs (id, content_hash, language) VALUES (300, 'hash-orphan-2', 'py')")
+	_, _ = s.Exec("INSERT INTO blobs (id, content_hash, language) VALUES (200, 'hash-orphan-1', 'go')")
+	_, _ = s.Exec("INSERT INTO blobs (id, content_hash, language) VALUES (300, 'hash-orphan-2', 'py')")
 
 	// insert symbols for the orphan blob
-	s.Exec("INSERT INTO symbols (id, blob_id, name, kind, line, col) VALUES (1, 200, 'OrphanFunc', 'function', 1, 0)")
-	s.Exec("INSERT INTO symbol_refs (id, blob_id, symbol_id, ref_name, kind, line, col) VALUES (1, 200, 1, 'OrphanFunc', 'call', 10, 0)")
+	_, _ = s.Exec("INSERT INTO symbols (id, blob_id, name, kind, line, col) VALUES (1, 200, 'OrphanFunc', 'function', 1, 0)")
+	_, _ = s.Exec("INSERT INTO symbol_refs (id, blob_id, symbol_id, ref_name, kind, line, col) VALUES (1, 200, 1, 'OrphanFunc', 'call', 10, 0)")
 
 	// also add a symbol for the referenced blob (should survive)
-	s.Exec("INSERT INTO symbols (id, blob_id, name, kind, line, col) VALUES (2, 100, 'KeepFunc', 'function', 5, 0)")
+	_, _ = s.Exec("INSERT INTO symbols (id, blob_id, name, kind, line, col) VALUES (2, 100, 'KeepFunc', 'function', 5, 0)")
 
 	result := s.Maintain(context.Background())
 
@@ -67,17 +67,17 @@ func TestMaintainPrunesOrphanBlobs(t *testing.T) {
 
 	// verify referenced blob still exists
 	var count int
-	s.QueryRow("SELECT COUNT(*) FROM blobs").Scan(&count)
+	_ = s.QueryRow("SELECT COUNT(*) FROM blobs").Scan(&count)
 	if count != 1 {
 		t.Errorf("expected 1 blob remaining, got %d", count)
 	}
 
 	// verify only referenced symbol survives
-	s.QueryRow("SELECT COUNT(*) FROM symbols").Scan(&count)
+	_ = s.QueryRow("SELECT COUNT(*) FROM symbols").Scan(&count)
 	if count != 1 {
 		t.Errorf("expected 1 symbol remaining, got %d", count)
 	}
-	s.QueryRow("SELECT COUNT(*) FROM symbol_refs").Scan(&count)
+	_ = s.QueryRow("SELECT COUNT(*) FROM symbol_refs").Scan(&count)
 	if count != 0 {
 		t.Errorf("expected 0 orphan symbol_refs remaining, got %d", count)
 	}
@@ -90,26 +90,26 @@ func TestMaintainPrunesOldDiffs(t *testing.T) {
 	oldTimestamp := time.Now().Add(-120 * 24 * time.Hour).Unix() // 120 days ago
 	recentTimestamp := time.Now().Add(-30 * 24 * time.Hour).Unix()
 
-	s.Exec("INSERT INTO repos (id, name, path) VALUES (1, 'test', '/tmp/test')")
+	_, _ = s.Exec("INSERT INTO repos (id, name, path) VALUES (1, 'test', '/tmp/test')")
 
 	// old commit NOT referenced by any ref
-	s.Exec("INSERT INTO commits (id, repo_id, hash, timestamp) VALUES (1, 1, 'old-hash', ?)", oldTimestamp)
-	s.Exec("INSERT INTO blobs (id, content_hash) VALUES (1, 'blob-old')")
-	s.Exec("INSERT INTO file_revs (commit_id, path, blob_id) VALUES (1, 'old.go', 1)")
-	s.Exec("INSERT INTO diffs (commit_id, path, new_blob_id) VALUES (1, 'old.go', 1)")
+	_, _ = s.Exec("INSERT INTO commits (id, repo_id, hash, timestamp) VALUES (1, 1, 'old-hash', ?)", oldTimestamp)
+	_, _ = s.Exec("INSERT INTO blobs (id, content_hash) VALUES (1, 'blob-old')")
+	_, _ = s.Exec("INSERT INTO file_revs (commit_id, path, blob_id) VALUES (1, 'old.go', 1)")
+	_, _ = s.Exec("INSERT INTO diffs (commit_id, path, new_blob_id) VALUES (1, 'old.go', 1)")
 
 	// recent commit NOT referenced by ref
-	s.Exec("INSERT INTO commits (id, repo_id, hash, timestamp) VALUES (2, 1, 'recent-hash', ?)", recentTimestamp)
-	s.Exec("INSERT INTO blobs (id, content_hash) VALUES (2, 'blob-recent')")
-	s.Exec("INSERT INTO file_revs (commit_id, path, blob_id) VALUES (2, 'recent.go', 2)")
-	s.Exec("INSERT INTO diffs (commit_id, path, new_blob_id) VALUES (2, 'recent.go', 2)")
+	_, _ = s.Exec("INSERT INTO commits (id, repo_id, hash, timestamp) VALUES (2, 1, 'recent-hash', ?)", recentTimestamp)
+	_, _ = s.Exec("INSERT INTO blobs (id, content_hash) VALUES (2, 'blob-recent')")
+	_, _ = s.Exec("INSERT INTO file_revs (commit_id, path, blob_id) VALUES (2, 'recent.go', 2)")
+	_, _ = s.Exec("INSERT INTO diffs (commit_id, path, new_blob_id) VALUES (2, 'recent.go', 2)")
 
 	// old commit referenced by a ref (should NOT be pruned)
-	s.Exec("INSERT INTO commits (id, repo_id, hash, timestamp) VALUES (3, 1, 'old-ref-hash', ?)", oldTimestamp)
-	s.Exec("INSERT INTO blobs (id, content_hash) VALUES (3, 'blob-old-ref')")
-	s.Exec("INSERT INTO file_revs (commit_id, path, blob_id) VALUES (3, 'ref.go', 3)")
-	s.Exec("INSERT INTO diffs (commit_id, path, new_blob_id) VALUES (3, 'ref.go', 3)")
-	s.Exec("INSERT INTO refs (repo_id, name, commit_id) VALUES (1, 'refs/heads/main', 3)")
+	_, _ = s.Exec("INSERT INTO commits (id, repo_id, hash, timestamp) VALUES (3, 1, 'old-ref-hash', ?)", oldTimestamp)
+	_, _ = s.Exec("INSERT INTO blobs (id, content_hash) VALUES (3, 'blob-old-ref')")
+	_, _ = s.Exec("INSERT INTO file_revs (commit_id, path, blob_id) VALUES (3, 'ref.go', 3)")
+	_, _ = s.Exec("INSERT INTO diffs (commit_id, path, new_blob_id) VALUES (3, 'ref.go', 3)")
+	_, _ = s.Exec("INSERT INTO refs (repo_id, name, commit_id) VALUES (1, 'refs/heads/main', 3)")
 
 	result := s.Maintain(context.Background())
 
@@ -119,7 +119,7 @@ func TestMaintainPrunesOldDiffs(t *testing.T) {
 
 	// verify: recent diff and ref'd diff remain
 	var count int
-	s.QueryRow("SELECT COUNT(*) FROM diffs").Scan(&count)
+	_ = s.QueryRow("SELECT COUNT(*) FROM diffs").Scan(&count)
 	if count != 2 {
 		t.Errorf("expected 2 diffs remaining, got %d", count)
 	}
@@ -131,7 +131,7 @@ func TestMaintainVacuumsAfterLargePrune(t *testing.T) {
 
 	// insert >100 orphan blobs to trigger vacuum (no file_revs reference them)
 	for i := 1; i <= 150; i++ {
-		s.Exec("INSERT INTO blobs (content_hash, language) VALUES (?, 'go')", randomHash(i))
+		_, _ = s.Exec("INSERT INTO blobs (content_hash, language) VALUES (?, 'go')", randomHash(i))
 	}
 
 	result := s.Maintain(context.Background())
@@ -150,7 +150,7 @@ func TestMaintainNoVacuumOnSmallPrune(t *testing.T) {
 
 	// insert a few orphan blobs (below vacuum threshold of 100)
 	for i := 1; i <= 5; i++ {
-		s.Exec("INSERT INTO blobs (content_hash, language) VALUES (?, 'go')", randomHash(i))
+		_, _ = s.Exec("INSERT INTO blobs (content_hash, language) VALUES (?, 'go')", randomHash(i))
 	}
 
 	result := s.Maintain(context.Background())

@@ -293,26 +293,3 @@ func isRecentlyInitialized(gitRoot string) bool {
 	}
 	return time.Since(info.ModTime().UTC()) < bootstrapGracePeriod
 }
-
-// defaultGitignoreContent is the default content for .gitignore files in ledger and team context directories.
-// This prevents accidental commits of OS files, editor temporary files, and local configuration.
-const defaultGitignoreContent = `# OS files
-.DS_Store
-Thumbs.db
-
-# Editor files
-*.swp
-*~
-
-# Local config
-.env.local
-`
-
-// checkoutDotSageoxGitignoreContent is the default content for .sageox/.gitignore
-// inside ledger and team context checkout directories.
-// Ignores everything, then re-includes files that must be committed.
-const checkoutDotSageoxGitignoreContent = `# Ignore all daemon-written files; re-include committed files
-*
-!.gitignore
-!sync.manifest
-`

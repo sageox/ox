@@ -1007,66 +1007,6 @@ func (st *indexState) insertParentLinks(commitDBID int64, parentIDs []plumbing.H
 	return nil
 }
 
-// indexChangedFiles processes files that were added or modified in a commit.
-func (st *indexState) indexChangedFiles(commitDBID int64, childEntries, parentEntries map[string]plumbing.Hash) error {
-	for path, childBlobOID := range childEntries {
-		parentBlobOID, existsInParent := parentEntries[path]
-		if existsInParent && parentBlobOID == childBlobOID {
-			continue // unchanged
-		}
-
-		// ensureBlob returns the content it read for Bleve; reuse it in generateDiffText
-		// to avoid reading the same git object twice per changed file.
-		newBlobDBID, newText, indexed, err := st.ensureBlob(childBlobOID, path)
-		if err != nil {
-			return err
-		}
-		if indexed {
-			st.newBlobs++
-		}
-
-		var oldBlobDBID sql.NullInt64
-		var oldText string
-		if existsInParent {
-			id, text, idx, err := st.ensureBlob(parentBlobOID, path)
-			if err != nil {
-				return err
-			}
-			if idx {
-				st.newBlobs++
-			}
-			oldBlobDBID = sql.NullInt64{Int64: id, Valid: true}
-			oldText = text
-		}
-
-		if err := st.insertDiff(commitDBID, path, oldBlobDBID, newBlobDBID, parentBlobOID, childBlobOID, existsInParent, true, oldText, newText); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// indexDeletedFiles processes files that were removed in a commit.
-func (st *indexState) indexDeletedFiles(commitDBID int64, childEntries, parentEntries map[string]plumbing.Hash) error {
-	for path, parentBlobOID := range parentEntries {
-		if _, exists := childEntries[path]; exists {
-			continue
-		}
-		oldBlobDBID, oldText, indexed, err := st.ensureBlob(parentBlobOID, path)
-		if err != nil {
-			return err
-		}
-		if indexed {
-			st.newBlobs++
-		}
-
-		if err := st.insertDiff(commitDBID, path, sql.NullInt64{Int64: oldBlobDBID, Valid: true}, 0, parentBlobOID, plumbing.ZeroHash, true, false, oldText, ""); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // indexChangeEntry processes one added or modified file from a DiffTree change.
 // hasOld=false for insertions (initial commit or new file); hasOld=true for modifications.
 func (st *indexState) indexChangeEntry(commitDBID int64, path string, newOID, oldOID plumbing.Hash, hasOld bool) error {

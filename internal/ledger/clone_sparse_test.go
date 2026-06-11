@@ -45,7 +45,7 @@ func initBareRepo(t *testing.T) string {
 
 	// clone to bare
 	bare := t.TempDir()
-	os.RemoveAll(bare) // git clone needs target to not exist
+	require.NoError(t, os.RemoveAll(bare)) // git clone needs target to not exist
 	cmd = exec.Command("git", "clone", "--bare", src, bare)
 	out, err = cmd.CombinedOutput()
 	require.NoError(t, err, "bare clone: %s", out)

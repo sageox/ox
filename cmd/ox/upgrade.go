@@ -193,13 +193,6 @@ func resolveUpgradeTarget(targetFlag string) (string, error) {
 	return "latest", nil
 }
 
-// upgradeViaGoInstall preserves the original signature for callers that
-// don't have a target flag. It delegates to upgradeViaGoInstallWithTarget
-// with an empty target — i.e. "use whatever resolveUpgradeTarget returns".
-func upgradeViaGoInstall(quiet bool) error {
-	return upgradeViaGoInstallWithTarget(quiet, "")
-}
-
 func upgradeViaGoInstallWithTarget(quiet bool, targetFlag string) error {
 	target, err := resolveUpgradeTarget(targetFlag)
 	if err != nil {

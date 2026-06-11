@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/cli"
-	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/version"
@@ -150,56 +149,6 @@ func checkRecordingAdapters(projectRoot string) []checkResult {
 			"adapter binary not found for active recording",
 			detail,
 		).WithFixInfo("adapter:"+name+":missing", FixLevelCheckOnly))
-	}
-
-	return results
-}
-
-// checkAdapterProcessHealth queries the daemon's adapter supervisor status
-// and reports any adapters in crashed or degraded state. Returns nil if the
-// daemon is not running or has no adapter status.
-func checkAdapterProcessHealth(status *daemon.StatusData, verbose bool) []checkResult {
-	if status == nil || len(status.Adapters) == 0 {
-		return nil
-	}
-
-	var results []checkResult
-
-	for adapterType, as := range status.Adapters {
-		switch as.State {
-		case "degraded":
-			detail := fmt.Sprintf("respawn_count=%d, adapter has been disabled after repeated crashes", as.RespawnCount)
-			if verbose && len(as.StderrTail) > 0 {
-				detail += "\nstderr:\n  " + strings.Join(as.StderrTail, "\n  ")
-			}
-			results = append(results, WarningCheck(
-				adapterType+" adapter process",
-				"adapter degraded: max respawns exceeded",
-				detail,
-			).WithFixInfo(adapterType+":process-degraded", FixLevelCheckOnly))
-
-		case "crashed":
-			detail := fmt.Sprintf("respawn_count=%d, adapter process crashed and is awaiting respawn", as.RespawnCount)
-			if verbose && len(as.StderrTail) > 0 {
-				detail += "\nstderr:\n  " + strings.Join(as.StderrTail, "\n  ")
-			}
-			results = append(results, WarningCheck(
-				adapterType+" adapter process",
-				"adapter crashed",
-				detail,
-			).WithFixInfo(adapterType+":process-crashed", FixLevelCheckOnly))
-
-		case "running":
-			if as.RespawnCount > 0 {
-				// running but has respawned -- surface as info for awareness
-				results = append(results, InfoCheck(
-					adapterType+" adapter process",
-					fmt.Sprintf("running (respawned %d time(s))", as.RespawnCount),
-					fmt.Sprintf("pid=%d, sessions=%d", as.PID, len(as.Sessions)),
-				))
-			}
-			// healthy running adapters with no respawns are not reported to reduce noise
-		}
 	}
 
 	return results

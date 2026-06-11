@@ -337,7 +337,7 @@ func TestSyncPRs_OpenPRDoesNotGetCommits(t *testing.T) {
 	files, _ := ListGitHubDataFiles(ledgerPath, "pr")
 	data, _ := os.ReadFile(files[0])
 	var pr PRFile
-	json.Unmarshal(data, &pr)
+	_ = json.Unmarshal(data, &pr)
 
 	if len(pr.Commits) != 0 {
 		t.Errorf("open PR should have 0 commits, got %d", len(pr.Commits))

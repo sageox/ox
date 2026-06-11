@@ -57,7 +57,7 @@ func readBlobFromRepo(r *git.Repository, oid plumbing.Hash) []byte {
 	if err != nil {
 		return nil
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	content, err := io.ReadAll(io.LimitReader(reader, maxReadBlobBytes+1))
 	if err != nil {
 		return nil
@@ -89,7 +89,7 @@ func (s *Store) initBlobRepos() {
 	if err := rows.Err(); err != nil {
 		slog.Warn("blob reader: iterate repos failed", "err", err)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	for _, p := range paths {
 		repo, err := git.PlainOpen(p)

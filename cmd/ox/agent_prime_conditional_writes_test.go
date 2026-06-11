@@ -88,18 +88,3 @@ func TestWriteToAgentEnvFile_NoOpWithoutEnvVar(t *testing.T) {
 	})
 	assert.NoError(t, err, "should be a no-op without CLAUDE_ENV_FILE")
 }
-
-// listFiles returns filenames in dir, or empty slice if dir doesn't exist.
-func listFiles(t *testing.T, dir string) []string {
-	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	require.NoError(t, err)
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		names = append(names, e.Name())
-	}
-	return names
-}

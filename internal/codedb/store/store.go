@@ -183,7 +183,7 @@ func Open(root string) (*Store, error) {
 
 	codeIndex, diffIndex, commentIndex, err := openBleveIndexes(root)
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 
@@ -247,14 +247,14 @@ func openSQLite(root string) (*sql.DB, error) {
 	}
 
 	if err := checkSQLiteIntegrity(db); err != nil {
-		db.Close()
+		_ = db.Close()
 		slog.Error("sqlite corruption detected, removing database", "path", dbPath, "err", err)
 		removeSQLiteFiles(dbPath)
 		return nil, fmt.Errorf("sqlite integrity check failed: %w", ErrCorrupt)
 	}
 
 	if err := CreateSchema(db); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
 	return db, nil
@@ -389,13 +389,13 @@ func openBleveIndexes(root string) (codeIdx, diffIdx, commentIdx bleve.Index, er
 	}
 	diffIdx, err = openOrCreateBleveIndex(root, filepath.Join(bleveDir, "diff"), "diff")
 	if err != nil {
-		codeIdx.Close()
+		_ = codeIdx.Close()
 		return nil, nil, nil, fmt.Errorf("open diff index: %w", err)
 	}
 	commentIdx, err = openOrCreateBleveIndex(root, filepath.Join(bleveDir, "comment"), "comment")
 	if err != nil {
-		codeIdx.Close()
-		diffIdx.Close()
+		_ = codeIdx.Close()
+		_ = diffIdx.Close()
 		return nil, nil, nil, fmt.Errorf("open comment index: %w", err)
 	}
 	return codeIdx, diffIdx, commentIdx, nil
@@ -458,7 +458,7 @@ func (s *Store) AttachDirtyIndex(dirtyBlevePath string) error {
 func (s *Store) AttachDirtyIndexByID(id, dirtyBlevePath string) error {
 	// detach existing overlay for this ID if present
 	if existing, ok := s.dirtyCodeIndexes[id]; ok {
-		existing.Close()
+		_ = existing.Close()
 		delete(s.dirtyCodeIndexes, id)
 	}
 	dirtyIdx, err := bleve.Open(dirtyBlevePath)
@@ -475,7 +475,7 @@ func (s *Store) AttachDirtyIndexByID(id, dirtyBlevePath string) error {
 // Rebuilds the combined alias with remaining overlays.
 func (s *Store) DetachDirtyIndexByID(id string) {
 	if idx, ok := s.dirtyCodeIndexes[id]; ok {
-		idx.Close()
+		_ = idx.Close()
 		delete(s.dirtyCodeIndexes, id)
 	}
 	s.rebuildCombinedIndex()
@@ -484,7 +484,7 @@ func (s *Store) DetachDirtyIndexByID(id string) {
 // DetachDirtyOverlay closes all attached dirty overlays and resets CombinedCodeIndex.
 func (s *Store) DetachDirtyOverlay() {
 	for id, idx := range s.dirtyCodeIndexes {
-		idx.Close()
+		_ = idx.Close()
 		delete(s.dirtyCodeIndexes, id)
 	}
 	s.CombinedCodeIndex = s.CodeIndex
@@ -591,7 +591,7 @@ func probeBleveIndex(idx bleve.Index, name string) error {
 		if err != nil {
 			return err
 		}
-		defer reader.Close()
+		defer func() { _ = reader.Close() }()
 
 		probeTerm := []byte("__sageox_codedb_integrity_probe__")
 		for _, field := range fields {
@@ -812,7 +812,7 @@ func isBleveIndexCorrupt(boltPath string) bool {
 	if err != nil {
 		return false
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	storeDir := filepath.Dir(boltPath)
 	zapsOnDisk, listErr := zapFilesInDir(storeDir)
@@ -961,7 +961,7 @@ func RebuildBleveSubIndex(root, name string) error {
 	if openErr != nil {
 		return fmt.Errorf("open metadata.db for comment rebuild: %w", openErr)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if _, exErr := db.Exec(`UPDATE blobs SET comments_parsed = 0`); exErr != nil {
 		return fmt.Errorf("reset comments_parsed after comment rebuild: %w", exErr)
 	}

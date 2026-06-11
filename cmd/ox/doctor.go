@@ -547,7 +547,6 @@ type doctorProgress struct {
 	verbose     bool
 	lastStart   time.Time
 	lastName    string
-	lineCount   int
 
 	ctx         context.Context
 	currentSpan trace.Span
@@ -1393,51 +1392,6 @@ func renderFixLevelBadge(level FixLevel) string {
 // renderAgentRequiredBadge returns a styled badge for agent-required checks
 func renderAgentRequiredBadge() string {
 	return ui.WarnStyle.Render("[agent]")
-}
-
-// renderFixableSlugs displays available fix slugs grouped by fix level
-func renderFixableSlugs(cmd *cobra.Command, slugs []fixSlugInfo) {
-	if len(slugs) == 0 {
-		return
-	}
-
-	// group by fix level
-	autoFixes := []string{}
-	suggestedFixes := []string{}
-	confirmFixes := []string{}
-
-	for _, s := range slugs {
-		switch s.fixLevel {
-		case FixLevelAuto:
-			autoFixes = append(autoFixes, s.slug)
-		case FixLevelSuggested:
-			suggestedFixes = append(suggestedFixes, s.slug)
-		case FixLevelConfirm:
-			confirmFixes = append(confirmFixes, s.slug)
-		}
-	}
-
-	fmt.Fprintln(cmd.OutOrStdout())
-	fmt.Fprintln(cmd.OutOrStdout(), ui.MutedStyle.Render("Available fixes:"))
-
-	if len(autoFixes) > 0 {
-		sort.Strings(autoFixes)
-		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n",
-			renderFixLevelBadge(FixLevelAuto),
-			ui.MutedStyle.Render(strings.Join(autoFixes, ", ")))
-	}
-	if len(suggestedFixes) > 0 {
-		sort.Strings(suggestedFixes)
-		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n",
-			renderFixLevelBadge(FixLevelSuggested),
-			ui.MutedStyle.Render(strings.Join(suggestedFixes, ", ")))
-	}
-	if len(confirmFixes) > 0 {
-		sort.Strings(confirmFixes)
-		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n",
-			renderFixLevelBadge(FixLevelConfirm),
-			ui.MutedStyle.Render(strings.Join(confirmFixes, ", ")))
-	}
 }
 
 // displayPrioritySummary shows issues grouped by priority (default view)

@@ -22,12 +22,6 @@ type sessionLogOutput struct {
 	Seq     int  `json:"seq"`
 }
 
-// sessionLogErrorOutput is the JSON error output for session log.
-type sessionLogErrorOutput struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error"`
-}
-
 // validLogRoles are the allowed values for --role.
 var validLogRoles = map[string]bool{
 	"user":      true,

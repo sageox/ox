@@ -149,7 +149,7 @@ func BenchmarkSearchOverlayOnly(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer idx.Close()
+	defer func() { _ = idx.Close() }()
 
 	seedIndex(b, idx, "overlay", 100, "benchmark")
 
@@ -175,6 +175,6 @@ func openBenchStore(b *testing.B) *Store {
 	if err != nil {
 		b.Fatalf("Open(%s): %v", tmp, err)
 	}
-	b.Cleanup(func() { s.Close() })
+	b.Cleanup(func() { _ = s.Close() })
 	return s
 }

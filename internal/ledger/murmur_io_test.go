@@ -83,7 +83,7 @@ func TestWriteMurmur(t *testing.T) {
 		}
 
 		var read MurmurFile
-		json.Unmarshal(data, &read)
+		_ = json.Unmarshal(data, &read)
 		if read.SchemaVersion != "1" {
 			t.Errorf("SchemaVersion = %q, want %q", read.SchemaVersion, "1")
 		}
@@ -183,11 +183,11 @@ func TestReadMurmursInWindow(t *testing.T) {
 		// write an invalid JSON file in the same directory
 		dir := filepath.Join(baseDir, MurmurDateHourDir(now))
 		invalidPath := filepath.Join(dir, "bad-file.json")
-		os.WriteFile(invalidPath, []byte("not valid json{{{"), 0o644)
+		_ = os.WriteFile(invalidPath, []byte("not valid json{{{"), 0o644)
 
 		// write a non-JSON file (should also be skipped)
 		txtPath := filepath.Join(dir, "notes.txt")
-		os.WriteFile(txtPath, []byte("just a text file"), 0o644)
+		_ = os.WriteFile(txtPath, []byte("just a text file"), 0o644)
 
 		murmurs, err := ReadMurmursInWindow(baseDir, 1)
 		if err != nil {

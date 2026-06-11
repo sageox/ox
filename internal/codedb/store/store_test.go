@@ -35,7 +35,7 @@ func openStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("Open(%s): %v", tmp, err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -49,7 +49,7 @@ func TestOpenCreatesStructure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	// verify filesystem structure
 	for _, rel := range []string{
@@ -93,13 +93,13 @@ func TestOpenIdempotent(t *testing.T) {
 	if _, err := s1.Exec("INSERT INTO repos (name, path) VALUES ('persist', '/tmp/p')"); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	s1.Close()
+	_ = s1.Close()
 
 	s2, err := Open(tmp)
 	if err != nil {
 		t.Fatalf("second Open: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	var name string
 	if err := s2.QueryRow("SELECT name FROM repos WHERE name='persist'").Scan(&name); err != nil {
@@ -153,7 +153,7 @@ func TestOpenCorruptBleve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	s1.Close()
+	_ = s1.Close()
 
 	// corrupt the bleve code index by replacing its directory with a file
 	bleveCodeDir := filepath.Join(tmp, "bleve", "code")
@@ -169,7 +169,7 @@ func TestOpenCorruptBleve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open after bleve corruption should recover, got: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	// verify the recreated index is functional
 	if err := s2.CheckIntegrity(); err != nil {
@@ -188,7 +188,7 @@ func TestOpenMissingBleveDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	s1.Close()
+	_ = s1.Close()
 
 	// delete bleve code directory entirely
 	if err := os.RemoveAll(filepath.Join(tmp, "bleve", "code")); err != nil {
@@ -200,7 +200,7 @@ func TestOpenMissingBleveDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open with missing bleve dir should recreate, got: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	if err := s2.CheckIntegrity(); err != nil {
 		t.Errorf("integrity check failed after bleve recreation: %v", err)
@@ -225,7 +225,7 @@ func TestOpenPermissionDenied(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	// ensure cleanup can remove the directory
-	t.Cleanup(func() { os.Chmod(unwritable, 0o700) })
+	t.Cleanup(func() { _ = os.Chmod(unwritable, 0o700) })
 
 	nested := filepath.Join(unwritable, "store")
 	_, err := Open(nested)
@@ -264,7 +264,7 @@ func TestCheckIntegrity_CorruptDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initial Open: %v", err)
 	}
-	s1.Close()
+	_ = s1.Close()
 
 	// now corrupt the database on disk
 	garbage := make([]byte, 4096)
@@ -318,7 +318,7 @@ func TestReposDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	expected := filepath.Join(tmp, "repos")
 	got := s.ReposDir()
@@ -348,7 +348,7 @@ func TestConcurrentOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initial Open: %v", err)
 	}
-	s0.Close()
+	_ = s0.Close()
 
 	const goroutines = 8
 	var (
@@ -370,8 +370,8 @@ func TestConcurrentOpen(t *testing.T) {
 			}
 			// do a small read to exercise WAL concurrency
 			var count int
-			s.QueryRow("SELECT COUNT(*) FROM repos").Scan(&count)
-			s.Close()
+			_ = s.QueryRow("SELECT COUNT(*) FROM repos").Scan(&count)
+			_ = s.Close()
 		}()
 	}
 
@@ -463,7 +463,7 @@ func TestSQLConvenienceMethods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		t.Fatal("Query returned no rows")
 	}
@@ -508,7 +508,7 @@ func TestOpenCorruptBleveDiffIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	s1.Close()
+	_ = s1.Close()
 
 	// corrupt the diff index specifically
 	bleveDiffDir := filepath.Join(tmp, "bleve", "diff")
@@ -523,7 +523,7 @@ func TestOpenCorruptBleveDiffIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open after diff index corruption should recover, got: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	if err := s2.CheckIntegrity(); err != nil {
 		t.Errorf("integrity check failed after diff index recovery: %v", err)
@@ -543,7 +543,7 @@ func TestOpenNonexistentRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open with nested nonexistent path should succeed: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	if _, err := os.Stat(filepath.Join(nested, "metadata.db")); err != nil {
 		t.Errorf("metadata.db not created in nested path: %v", err)
@@ -589,7 +589,7 @@ func TestOpenOrCreateBleveIndex_LockedIndexNotNuked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create index: %v", err)
 	}
-	first.Close()
+	_ = first.Close()
 
 	boltPath := filepath.Join(indexPath, "store", "root.bolt")
 
@@ -671,7 +671,7 @@ func TestOpen_EmptyMapping_SelfHeals(t *testing.T) {
 
 	s2, err := Open(tmp)
 	require.NoError(t, err, "Open must self-heal, not fail")
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	// Self-heal evidence: marker file was written for the affected sub-index.
 	require.True(t, HasNeedsReindexMarker(tmp, "comment"),
@@ -753,7 +753,7 @@ func TestRebuildBleveSubIndex_Comment(t *testing.T) {
 	// Open + integrity must succeed post-rebuild
 	s2, err := Open(tmp)
 	require.NoError(t, err, "Open post-rebuild")
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 	require.NoError(t, s2.CheckIntegrity(), "integrity post-rebuild")
 
 	// comments_parsed must be reset so ParseComments will retry the seeded blob
@@ -792,7 +792,7 @@ func TestOpenSQLOnly_SkipsBleve_RunsSQL(t *testing.T) {
 
 	s2, err := OpenSQLOnly(tmp)
 	require.NoError(t, err, "OpenSQLOnly must succeed even when every bleve sub-index is corrupt")
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	require.Nil(t, s2.CodeIndex, "CodeIndex must be nil on SQL-only store")
 	require.Nil(t, s2.DiffIndex, "DiffIndex must be nil on SQL-only store")
@@ -863,7 +863,7 @@ func TestOpen_TruncatedMapping_SelfHeals(t *testing.T) {
 
 	s2, err := Open(tmp)
 	require.NoError(t, err, "Open must self-heal a truncated mapping the same as empty")
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	require.True(t, HasNeedsReindexMarker(tmp, "comment"),
 		"truncated mapping must trigger the same marker as empty mapping")
@@ -997,7 +997,7 @@ func TestInsights_NeverEmitsCrypticBleveError(t *testing.T) {
 		}
 	}
 	if s2 != nil {
-		s2.Close()
+		_ = s2.Close()
 	}
 }
 
@@ -1125,13 +1125,6 @@ func TestIsBleveIndexCorrupt_UnreadableStoreDir_NotFlagged(t *testing.T) {
 	// store/ will EACCES. Must NOT report corrupt.
 	require.False(t, isBleveIndexCorrupt(boltPath),
 		"unreadable store dir must not be misread as missing segments")
-}
-
-func mustModTime(t *testing.T, path string) time.Time {
-	t.Helper()
-	info, err := os.Stat(path)
-	require.NoError(t, err, "stat %s", path)
-	return info.ModTime()
 }
 
 // codeIndexFingerprint hashes file paths + mtimes + sizes under bleve/code/.

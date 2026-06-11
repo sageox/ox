@@ -124,13 +124,6 @@ func (s *AdapterSupervisor) drainTerminalQueue(agentID string, q *terminalAgentQ
 	}
 }
 
-// RLock helper for tests/callers that just want to read the handler.
-func (s *AdapterSupervisor) terminalHandlerSnapshot() TerminalErrorHandler {
-	s.terminalMu.RLock()
-	defer s.terminalMu.RUnlock()
-	return s.terminalHandler
-}
-
 type terminalAgentQueue struct {
 	ch          chan terminalDispatch
 	adapterType string

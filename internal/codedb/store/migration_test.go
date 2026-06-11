@@ -97,7 +97,7 @@ func createOldSchemaDB(t *testing.T) (*sql.DB, string) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	if _, err := db.Exec(baseSchemaV1); err != nil {
-		db.Close()
+		_ = db.Close()
 		t.Fatalf("create base schema: %v", err)
 	}
 	return db, dbPath
@@ -129,7 +129,7 @@ func TestMigrateAddTypeInfo_FromOlderSchema(t *testing.T) {
 		t.Skip("short: SQLite migration")
 	}
 	db, _ := createOldSchemaDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// V1 schema has no signature/return_type/params on symbols
 	if columnExists(t, db, "symbols", "signature") {
@@ -137,7 +137,7 @@ func TestMigrateAddTypeInfo_FromOlderSchema(t *testing.T) {
 	}
 
 	// seed data to verify parsed reset
-	db.Exec(`INSERT INTO blobs (content_hash, language, parsed) VALUES ('abc', 'go', 1)`)
+	_, _ = db.Exec(`INSERT INTO blobs (content_hash, language, parsed) VALUES ('abc', 'go', 1)`)
 
 	if err := migrateAddTypeInfo(db); err != nil {
 		t.Fatalf("migrateAddTypeInfo: %v", err)
@@ -151,7 +151,7 @@ func TestMigrateAddTypeInfo_FromOlderSchema(t *testing.T) {
 
 	// parsed blobs should be reset to 0 so they get re-parsed with type info
 	var parsed int
-	db.QueryRow(`SELECT parsed FROM blobs WHERE content_hash='abc'`).Scan(&parsed)
+	_ = db.QueryRow(`SELECT parsed FROM blobs WHERE content_hash='abc'`).Scan(&parsed)
 	if parsed != 0 {
 		t.Errorf("expected parsed=0 after migration, got %d", parsed)
 	}
@@ -163,7 +163,7 @@ func TestMigrateAddTypeInfo_Idempotent(t *testing.T) {
 		t.Skip("short: SQLite migration")
 	}
 	db, _ := createOldSchemaDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := migrateAddTypeInfo(db); err != nil {
 		t.Fatalf("first migration: %v", err)
@@ -179,7 +179,7 @@ func TestMigrateAddComments_FromOlderSchema(t *testing.T) {
 		t.Skip("short: SQLite migration")
 	}
 	db, _ := createOldSchemaDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if tableExists(t, db, "comments") {
 		t.Fatal("base schema should NOT have comments table")
@@ -213,20 +213,20 @@ func TestMigrateAddComments_Idempotent(t *testing.T) {
 		t.Skip("short: SQLite migration")
 	}
 	db, _ := createOldSchemaDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := migrateAddComments(db); err != nil {
 		t.Fatalf("first migration: %v", err)
 	}
 	// insert data so we can verify it survives
-	db.Exec(`INSERT INTO blobs (content_hash, language, parsed, comments_parsed) VALUES ('x', 'go', 1, 1)`)
+	_, _ = db.Exec(`INSERT INTO blobs (content_hash, language, parsed, comments_parsed) VALUES ('x', 'go', 1, 1)`)
 
 	if err := migrateAddComments(db); err != nil {
 		t.Fatalf("second migration should be idempotent: %v", err)
 	}
 
 	var cp int
-	db.QueryRow(`SELECT comments_parsed FROM blobs WHERE content_hash='x'`).Scan(&cp)
+	_ = db.QueryRow(`SELECT comments_parsed FROM blobs WHERE content_hash='x'`).Scan(&cp)
 	if cp != 1 {
 		t.Error("idempotent migration should not reset existing data")
 	}
@@ -238,7 +238,7 @@ func TestMigrateAddGitHubTables_FromOlderSchema(t *testing.T) {
 		t.Skip("short: SQLite migration")
 	}
 	db, _ := createOldSchemaDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	for _, tbl := range []string{"pull_requests", "pr_comments", "issues", "issue_comments", "github_file_mtimes"} {
 		if tableExists(t, db, tbl) {
@@ -273,19 +273,19 @@ func TestMigrateAddGitHubTables_Idempotent(t *testing.T) {
 		t.Skip("short: SQLite migration")
 	}
 	db, _ := createOldSchemaDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := migrateAddGitHubTables(db); err != nil {
 		t.Fatalf("first migration: %v", err)
 	}
-	db.Exec(`INSERT INTO pull_requests (number, title, state) VALUES (1, 'test', 'open')`)
+	_, _ = db.Exec(`INSERT INTO pull_requests (number, title, state) VALUES (1, 'test', 'open')`)
 
 	if err := migrateAddGitHubTables(db); err != nil {
 		t.Fatalf("second migration should be idempotent: %v", err)
 	}
 
 	var count int
-	db.QueryRow(`SELECT COUNT(*) FROM pull_requests`).Scan(&count)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM pull_requests`).Scan(&count)
 	if count != 1 {
 		t.Error("idempotent migration should not affect existing data")
 	}
@@ -297,7 +297,7 @@ func TestMigrateAddPRCommits_FromOlderSchema(t *testing.T) {
 		t.Skip("short: SQLite migration")
 	}
 	db, _ := createOldSchemaDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// run prerequisite migration first
 	if err := migrateAddGitHubTables(db); err != nil {
@@ -334,7 +334,7 @@ func TestMigrateAddPRCommits_FromOlderSchema(t *testing.T) {
 	}
 
 	var sha string
-	db.QueryRow(`SELECT sha FROM pr_commits WHERE pr_id = 1`).Scan(&sha)
+	_ = db.QueryRow(`SELECT sha FROM pr_commits WHERE pr_id = 1`).Scan(&sha)
 	if sha != "abc123" {
 		t.Errorf("expected sha 'abc123', got %q", sha)
 	}
@@ -346,7 +346,7 @@ func TestMigrateAddPRCommits_Idempotent(t *testing.T) {
 		t.Skip("short: SQLite migration")
 	}
 	db, _ := createOldSchemaDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := migrateAddGitHubTables(db); err != nil {
 		t.Fatalf("migrateAddGitHubTables: %v", err)
@@ -357,15 +357,15 @@ func TestMigrateAddPRCommits_Idempotent(t *testing.T) {
 	}
 
 	// insert data
-	db.Exec(`INSERT INTO pull_requests (number, title, state) VALUES (1, 'test', 'merged')`)
-	db.Exec(`INSERT INTO pr_commits (pr_id, sha) VALUES (1, 'sha1')`)
+	_, _ = db.Exec(`INSERT INTO pull_requests (number, title, state) VALUES (1, 'test', 'merged')`)
+	_, _ = db.Exec(`INSERT INTO pr_commits (pr_id, sha) VALUES (1, 'sha1')`)
 
 	if err := migrateAddPRCommits(db); err != nil {
 		t.Fatalf("second migration should be idempotent: %v", err)
 	}
 
 	var count int
-	db.QueryRow(`SELECT COUNT(*) FROM pr_commits`).Scan(&count)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM pr_commits`).Scan(&count)
 	if count != 1 {
 		t.Error("idempotent migration should not affect existing data")
 	}
@@ -382,7 +382,7 @@ func TestMigrateInvalidateGitHubMtimesForIssue474(t *testing.T) {
 		t.Skip("short: SQLite migration")
 	}
 	db, _ := createOldSchemaDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := migrateAddGitHubTables(db); err != nil {
 		t.Fatalf("migrateAddGitHubTables: %v", err)
@@ -457,7 +457,7 @@ func TestCreateSchema_AllMigrations(t *testing.T) {
 		t.Skip("short: SQLite migration")
 	}
 	db, _ := createOldSchemaDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// CreateSchema runs all migrations in sequence
 	if err := CreateSchema(db); err != nil {
@@ -507,15 +507,15 @@ func TestOpenExistingDB_TriggersAllMigrations(t *testing.T) {
 		t.Fatalf("create V1 schema: %v", err)
 	}
 	// seed data that should survive
-	db.Exec(`INSERT INTO repos (name, path) VALUES ('existing', '/tmp/existing')`)
-	db.Close()
+	_, _ = db.Exec(`INSERT INTO repos (name, path) VALUES ('existing', '/tmp/existing')`)
+	_ = db.Close()
 
 	// Open() via store should run all migrations
 	s, err := Open(tmp)
 	if err != nil {
 		t.Fatalf("Open existing V1 DB: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	// verify data survived
 	var name string

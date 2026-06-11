@@ -116,7 +116,7 @@ func TestAttachDirtyIndex_ValidPath(t *testing.T) {
 	if err := dirtyIdx.Index("dirty-doc", map[string]interface{}{"content": "dirty data"}); err != nil {
 		t.Fatalf("index into dirty: %v", err)
 	}
-	dirtyIdx.Close()
+	_ = dirtyIdx.Close()
 
 	if err := s.AttachDirtyIndex(dirtyDir); err != nil {
 		t.Fatalf("AttachDirtyIndex: %v", err)
@@ -187,7 +187,7 @@ func TestQueryContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QueryContext: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	if !rows.Next() {
 		t.Fatal("QueryContext returned no rows")
@@ -289,7 +289,7 @@ func TestOpenCorruptCommentIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	s1.Close()
+	_ = s1.Close()
 
 	// corrupt the comment index
 	commentDir := filepath.Join(tmp, "bleve", "comment")
@@ -305,7 +305,7 @@ func TestOpenCorruptCommentIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open after comment index corruption should recover, got: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	if err := s2.CheckIntegrity(); err != nil {
 		t.Errorf("integrity check failed after comment index recovery: %v", err)
@@ -407,7 +407,7 @@ func TestCreateSchema_FreshDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// CreateSchema on empty DB should create all tables + run all migrations
 	if err := CreateSchema(db); err != nil {
@@ -450,14 +450,14 @@ func TestCreateSchema_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := CreateSchema(db); err != nil {
 		t.Fatalf("first CreateSchema: %v", err)
 	}
 
 	// insert data
-	db.Exec("INSERT INTO repos (name, path) VALUES ('test', '/test')")
+	_, _ = db.Exec("INSERT INTO repos (name, path) VALUES ('test', '/test')")
 
 	// second call should not destroy data
 	if err := CreateSchema(db); err != nil {
@@ -465,7 +465,7 @@ func TestCreateSchema_Idempotent(t *testing.T) {
 	}
 
 	var count int
-	db.QueryRow("SELECT COUNT(*) FROM repos").Scan(&count)
+	_ = db.QueryRow("SELECT COUNT(*) FROM repos").Scan(&count)
 	if count != 1 {
 		t.Errorf("data lost after idempotent CreateSchema, count = %d", count)
 	}

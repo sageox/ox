@@ -1855,14 +1855,6 @@ var invalidLeakedTypes = map[string]bool{
 	"last-prompt":           true,
 }
 
-// validSessionEntryTypes are types the web viewer can display.
-var validSessionEntryTypes = map[string]bool{
-	"user":      true,
-	"assistant": true,
-	"system":    true,
-	"tool":      true,
-}
-
 // validateStoredEntries checks stored session entries for data quality issues.
 // Returns a list of warning strings. Logs each issue at appropriate level.
 func validateStoredEntries(entries []map[string]any, logger *slog.Logger) []string {

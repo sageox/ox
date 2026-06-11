@@ -156,16 +156,6 @@ func runAgentSessionSubagentComplete(inst *agentinstance.Instance, args []string
 	return nil
 }
 
-// subagentListOutput is the JSON output for listing subagent sessions.
-type subagentListOutput struct {
-	Success   bool                       `json:"success"`
-	Type      string                     `json:"type"` // "session_subagent_list"
-	AgentID   string                     `json:"agent_id"`
-	Count     int                        `json:"count"`
-	Subagents []*session.SubagentSummary `json:"subagents,omitempty"`
-	Summary   *session.SubagentSummary   `json:"summary,omitempty"`
-}
-
 // runAgentSessionSubagentList lists subagent sessions for the current session.
 // Usage: ox agent <id> session subagent-list
 func runAgentSessionSubagentList(inst *agentinstance.Instance) error {

@@ -27,9 +27,6 @@ type Model struct {
 	// Per-section cursor position (preserved when switching sections)
 	cursors [int(sectionCount)]int
 
-	// Per-section scroll offset
-	scrolls [int(sectionCount)]int
-
 	// Per-section list length from last render (for cursor clamping)
 	listLens *[int(sectionCount)]int
 

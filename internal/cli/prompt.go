@@ -269,11 +269,6 @@ func (m multiSelectModel) View() tea.View {
 			check = "[x]"
 		}
 
-		label := check + " " + item.Label
-		if item.Hint != "" {
-			label += " " + dimStyle.Render(item.Hint)
-		}
-
 		if item.Disabled {
 			b.WriteString(cursor + dimStyle.Render(check+" "+item.Label))
 			if item.Hint != "" {

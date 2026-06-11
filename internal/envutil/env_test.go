@@ -2,7 +2,6 @@ package envutil
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"testing"
 
@@ -17,17 +16,6 @@ func envMap(env []string) map[string]string {
 		m[k] = v
 	}
 	return m
-}
-
-// envKeys extracts sorted key names from a []string of "KEY=VALUE" pairs.
-func envKeys(env []string) []string {
-	keys := make([]string, 0, len(env))
-	for _, entry := range env {
-		k, _, _ := strings.Cut(entry, "=")
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 func TestSanitizedEnv_AllowlistedVarsPassThrough(t *testing.T) {

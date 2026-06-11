@@ -50,7 +50,7 @@ func TestStart_JWTIsolation(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+fix.JWT)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
@@ -70,7 +70,7 @@ func TestDeviceFlow_HappyPath(t *testing.T) {
 	// step 1: request device code
 	resp, err := client.Post(tw.APIURL+"/api/auth/device/code", "application/json", nil)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var codeResp map[string]any
@@ -84,7 +84,7 @@ func TestDeviceFlow_HappyPath(t *testing.T) {
 	resp2, err := client.Post(tw.APIURL+"/api/v1/device/token", "application/json",
 		jsonReader(body))
 	require.NoError(t, err)
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 	assert.Equal(t, http.StatusOK, resp2.StatusCode)
 
 	var tokenResp map[string]any
@@ -98,7 +98,7 @@ func TestDeviceFlow_HappyPath(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+sessionToken)
 	resp3, err := client.Do(req)
 	require.NoError(t, err)
-	defer resp3.Body.Close()
+	defer func() { _ = resp3.Body.Close() }()
 	assert.Equal(t, http.StatusOK, resp3.StatusCode)
 
 	var jwtResp map[string]any
@@ -111,7 +111,7 @@ func TestDeviceFlow_HappyPath(t *testing.T) {
 	req2.Header.Set("Authorization", "Bearer "+jwt)
 	resp4, err := client.Do(req2)
 	require.NoError(t, err)
-	defer resp4.Body.Close()
+	defer func() { _ = resp4.Body.Close() }()
 	assert.Equal(t, http.StatusOK, resp4.StatusCode)
 
 	var userInfo map[string]string
@@ -133,16 +133,16 @@ func TestDeviceFlow_NoUsers_Pending(t *testing.T) {
 	resp, err := client.Post(tw.APIURL+"/api/auth/device/code", "application/json", nil)
 	require.NoError(t, err)
 	var codeResp map[string]any
-	json.NewDecoder(resp.Body).Decode(&codeResp)
-	resp.Body.Close()
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&codeResp))
+	_ = resp.Body.Close()
 
 	body := fmt.Sprintf(`{"device_code":"%s"}`, codeResp["device_code"])
 	resp2, err := client.Post(tw.APIURL+"/api/v1/device/token", "application/json", jsonReader(body))
 	require.NoError(t, err)
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 
 	var tokenResp map[string]string
-	json.NewDecoder(resp2.Body).Decode(&tokenResp)
+	require.NoError(t, json.NewDecoder(resp2.Body).Decode(&tokenResp))
 	assert.Equal(t, "authorization_pending", tokenResp["error"])
 }
 
@@ -164,7 +164,7 @@ func TestJWTExchange_OrphanedSession(t *testing.T) {
 
 	resp, err := client.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 
@@ -186,7 +186,7 @@ func TestJWTExchange_InvalidSessionToken(t *testing.T) {
 
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
@@ -200,7 +200,7 @@ func TestJWTExchange_MissingAuthHeader(t *testing.T) {
 	req, _ := http.NewRequest("GET", tw.APIURL+"/api/v1/cli/auth/token", nil)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
@@ -219,7 +219,7 @@ func TestUserInfo_ValidJWT(t *testing.T) {
 
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -246,7 +246,7 @@ func TestUserInfo_ExpiredJWT(t *testing.T) {
 
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 
@@ -272,7 +272,7 @@ func TestUserInfo_OpaqueTokenRejected(t *testing.T) {
 
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
@@ -293,7 +293,7 @@ func TestTokenRefresh_HappyPath(t *testing.T) {
 		"client_id":     {"ox"},
 	})
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -320,7 +320,7 @@ func TestTokenRefresh_InvalidRefreshToken(t *testing.T) {
 		"client_id":     {"ox"},
 	})
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 
@@ -346,7 +346,7 @@ func TestTokenRefresh_OldRefreshTokenRejected(t *testing.T) {
 		"client_id":     {"ox"},
 	})
 	require.NoError(t, err)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// second refresh with OLD token fails (it was rotated)
@@ -356,7 +356,7 @@ func TestTokenRefresh_OldRefreshTokenRejected(t *testing.T) {
 		"client_id":     {"ox"},
 	})
 	require.NoError(t, err)
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 	assert.Equal(t, http.StatusUnauthorized, resp2.StatusCode)
 }
 
@@ -373,7 +373,7 @@ func TestRevoke_AlwaysReturns200(t *testing.T) {
 		"token": {"nonexistent_token"},
 	})
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
@@ -390,14 +390,14 @@ func TestRevoke_SessionInvalidated(t *testing.T) {
 		"token": {fix.SessionToken},
 	})
 	require.NoError(t, err)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// JWT exchange should now fail
 	req, _ := http.NewRequest("GET", tw.APIURL+"/api/v1/cli/auth/token", nil)
 	req.Header.Set("Authorization", "Bearer "+fix.SessionToken)
 	resp2, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 
 	assert.Equal(t, http.StatusUnauthorized, resp2.StatusCode)
 }
@@ -420,7 +420,7 @@ func TestFaultInjection_Userinfo401(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+fix.JWT)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 
@@ -431,7 +431,7 @@ func TestFaultInjection_Userinfo401(t *testing.T) {
 	req2.Header.Set("Authorization", "Bearer "+fix.JWT)
 	resp2, err := http.DefaultClient.Do(req2)
 	require.NoError(t, err)
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 
 	assert.Equal(t, http.StatusOK, resp2.StatusCode)
 }
@@ -453,7 +453,7 @@ func TestFaultInjection_AfterN(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+fix.JWT)
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return resp.StatusCode
 	}
 
@@ -478,7 +478,7 @@ func TestCallRecording(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+fix.JWT)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	tw.AssertCalled(t, "GET", "/oauth2/userinfo")
 	tw.AssertNotCalled(t, "POST", "/oauth2/token")
@@ -501,7 +501,7 @@ func TestClockAdvance_JWTExpiry(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+fix.JWT)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// advance past expiry
@@ -513,7 +513,7 @@ func TestClockAdvance_JWTExpiry(t *testing.T) {
 	req2.Header.Set("Authorization", "Bearer "+fix.JWT)
 	resp2, err := http.DefaultClient.Do(req2)
 	require.NoError(t, err)
-	resp2.Body.Close()
+	_ = resp2.Body.Close()
 	assert.Equal(t, http.StatusUnauthorized, resp2.StatusCode)
 
 	// but a fresh JWT should work
@@ -527,7 +527,7 @@ func TestClockAdvance_JWTExpiry(t *testing.T) {
 	req3.Header.Set("Authorization", "Bearer "+freshJWT)
 	resp3, err := http.DefaultClient.Do(req3)
 	require.NoError(t, err)
-	resp3.Body.Close()
+	_ = resp3.Body.Close()
 	assert.Equal(t, http.StatusOK, resp3.StatusCode)
 }
 

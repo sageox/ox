@@ -427,7 +427,7 @@ func TestLedger_PermissionDenied(t *testing.T) {
 	// make .git directory read-only to prevent git operations
 	gitDir := filepath.Join(tempDir, ".git")
 	require.NoError(t, os.Chmod(gitDir, 0444))
-	defer os.Chmod(gitDir, 0755) // restore for cleanup
+	defer func() { _ = os.Chmod(gitDir, 0755) }() // restore for cleanup
 
 	// operations requiring git write access should fail
 	err := ledger.EnableSparseCheckout()

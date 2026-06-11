@@ -154,7 +154,7 @@ func renderTable(header string, rows [][]string) string {
 		value := row[1]
 
 		// determine semantic type (optional third element or auto-detect)
-		semantic := "default"
+		var semantic string
 		if len(row) > 2 {
 			semantic = row[2]
 		} else {
@@ -348,36 +348,6 @@ func getTeamContextRemoteURL(teamID, ep string) string {
 	return teamInfo.RepoURL
 }
 
-// fetchRemoteURLs fetches remote URLs from the cloud API for ledger and team contexts
-func fetchRemoteURLs(client *api.RepoClient, teamContexts []config.TeamContext) (ledgerURL string, teamURLs map[string]string) {
-	teamURLs = make(map[string]string)
-
-	// fetch repos for ledger URL
-	repos, err := client.GetRepos()
-	if err == nil && repos != nil {
-		for _, repo := range repos.Repos {
-			if repo.Type == "ledger" {
-				ledgerURL = repo.URL
-				break
-			}
-		}
-	}
-
-	// fetch team context URLs
-	for _, tc := range teamContexts {
-		if tc.TeamID == "" {
-			continue
-		}
-		teamInfo, err := client.GetTeamInfo(tc.TeamID)
-		if err == nil && teamInfo != nil && teamInfo.RepoURL != "" {
-			teamURLs[tc.TeamID] = teamInfo.RepoURL
-		}
-	}
-
-	return ledgerURL, teamURLs
-}
-
-// renderGitReposSection renders the git repositories status section
 // shortenPathViaSymlink returns a short relative path (e.g. ".sageox/ledger")
 // if a .sageox/ symlink in projectRoot resolves to fullPath.
 // Checks candidates in order and returns the first match, or fullPath unchanged.
