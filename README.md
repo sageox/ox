@@ -153,8 +153,10 @@ community.
   <a href="https://www.greptile.com" title="Greptile — AI codebase review"><img src="https://www.greptile.com/logo.svg" height="44" alt="Greptile"></a>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://sageox.ai" title="SageOx — agentic context infrastructure"><img src="https://sageox.ai/apple-icon.png" height="44" alt="SageOx"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://charm.sh" title="Charm — delightful tools for the command line"><img src="https://github.com/charmbracelet.png" height="44" alt="Charm"></a>
 </p>
 
 <p align="center">
-  <sub><a href="https://socket.dev">Socket</a> · <a href="https://www.coderabbit.ai">CodeRabbit</a> · <a href="https://www.greptile.com">Greptile</a> · <a href="https://sageox.ai">SageOx</a></sub>
+  <sub><a href="https://socket.dev">Socket</a> · <a href="https://www.coderabbit.ai">CodeRabbit</a> · <a href="https://www.greptile.com">Greptile</a> · <a href="https://sageox.ai">SageOx</a> · <a href="https://charm.sh">Charm</a></sub>
 </p>
