@@ -1,6 +1,6 @@
-# IPC Architecture
+# IPC Architecture — Wire Protocol & Lifecycle
 
-> **Audience**: AI agents and developers working on daemon/CLI communication
+> New to IPC in ox? Start with the [overview](ipc-architecture-overview.md), then return here for the full protocol.
 
 ## Philosophy: The Independent Daemon
 

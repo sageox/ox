@@ -1,6 +1,6 @@
-# IPC Architecture
+# IPC Architecture — Overview
 
-How the CLI and daemon communicate.
+How the CLI and daemon communicate. For the full wire protocol and lifecycle, see [ipc-architecture.md](ipc-architecture.md).
 
 ## The Big Picture
 
