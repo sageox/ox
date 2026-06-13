@@ -26,7 +26,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var importFlags struct {
+type importFlagsT struct {
 	text   string
 	date   string
 	force  bool
@@ -37,6 +37,8 @@ var importFlags struct {
 	watch  bool
 	list   bool
 }
+
+var importFlags importFlagsT
 
 var importCmd = &cobra.Command{
 	Use:   "import <file|url>",

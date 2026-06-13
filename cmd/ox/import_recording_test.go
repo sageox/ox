@@ -292,14 +292,17 @@ func TestImportRecordingFile_InvalidContextType(t *testing.T) {
 
 // --- --kb flag resolution ---
 
-// withImportFlags saves and restores the package-global importFlags so tests
-// can mutate them safely.
+// withImportFlags saves and restores the entire package-global importFlags so
+// tests can mutate them safely. It resets to a clean baseline (only team/kb
+// set) rather than snapshotting just those two — runImport also reads status,
+// list, watch, title, date, text, and force, so a prior test that mutated any
+// of those could otherwise leak into routing/assertions here.
 func withImportFlags(t *testing.T, team, kb string) {
 	t.Helper()
-	savedTeam, savedKB := importFlags.team, importFlags.kb
-	importFlags.team, importFlags.kb = team, kb
+	saved := importFlags
+	importFlags = importFlagsT{team: team, kb: kb}
 	t.Cleanup(func() {
-		importFlags.team, importFlags.kb = savedTeam, savedKB
+		importFlags = saved
 	})
 }
 

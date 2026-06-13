@@ -161,7 +161,7 @@ This contract outranks any individual rule below: when a "nice to have" visual o
 
 ## html-plan quality bar (inherited — all non-negotiable)
 
-**Self-contained.** One `.html` file. No build step, no local assets. Libraries only via CDN (Mermaid from jsdelivr). Must render from `file://`.
+**Self-contained.** One `.html` file, no build step, no local asset files. The page opens from `file://`, and **all interactivity — popovers, OX markers, the SageOx avatar, theme toggle — is inlined and works fully offline**. The single permitted external dependency is the Mermaid library, loaded from the jsDelivr CDN; diagrams therefore need network to render, while everything else degrades gracefully without it. Do not add any other CDN or remote asset (e.g. a live-remote `<img src>` avatar is banned — inline it).
 
 **Diagrams do the heavy lifting.** Prefer a diagram over a paragraph wherever a relationship, flow, state machine, sequence, or before/after exists. Use **Mermaid** (`flowchart`, `sequenceDiagram`, `stateDiagram-v2`, `gantt` as fits). Every plan gets at least one "the shape in one picture" diagram near the top. Apply the **GitHub-strict Mermaid rules from CLAUDE.md**: double-quote every node label containing anything beyond `[A-Za-z0-9 ]`; never use arrow-shaped substrings (`->`, `=>`, `<->`) inside labels even when quoted — substitute `to`, `→`, or a comma; never use reserved-ish IDs (`PR`, `URL`, `IO`, `IS`, `AS`, `END` — rename to `DPR`, `DURL`, etc.); quote path-shaped labels (`/`, `*`); use `<br/>` not `\n` for line breaks. These make diagrams render everywhere, not just locally.
 
@@ -225,13 +225,13 @@ One **hero diagram near the top** captures the whole shape. Add a second diagram
 - Steps as a clean numbered list with file:line refs styled distinctly (teal, small).
 - Tables for impact/verification matrices. Color verdict cells (good/warn/bad).
 - A `Risks` section with severity-coded left borders (red = load-bearing unknown, amber = watch).
-- Footer: where the canonical plan file lives (`data/plans/<slug>/`) + key invariants.
+- Footer: where the canonical plan file lives (`data/plans/YYYY-MM-DD-<slug>/`) + key invariants.
 
 **SageOx attribution (subtle, earned, conditional).** When the plan actually carries SageOx enrichment — any deterministic badges (collision/prior-art/expert-routing) or context-bundle items were present — give SageOx quiet credit for the team context it infused: a single restrained footer line such as *"Team context enriched by SageOx"*, plus the existing `● ox-computed` marker that already tags deterministic badges as SageOx-sourced. Rules:
 - **Only when it legitimately helped.** If `ox plan --json` returned no badges and an empty `context[]` (an un-enriched plan), add NO SageOx credit — there is nothing to credit.
 - **Never overclaim.** SageOx provided context and signals; the human and the agent wrote the plan. Credit the enrichment, not the authorship. No banners, no marketing copy, no "moat"/"powered by" language — one calm line in the footer.
 - Judgment badges drawn from the SageOx context bundle may carry a small "via SageOx context" provenance note where it reads naturally, but don't repeat it on every badge.
-- **Enforced, not just requested.** `ox plan save` lints the render for this contract (footer credit + an anchored OX marker when the plan carried enrichment; no overclaim on un-enriched plans; no live-remote avatar) and warns on any miss. Re-check anytime with `ox plan lint <slug>` (add `--strict` to fail on findings). A clean lint is part of "done".
+- **Enforced, not just requested.** `ox plan save` lints the render for this contract (footer credit when the plan carried enrichment — any badges or context items; an anchored OX marker only when it carried *deterministic* badges, since markers anchor those signals; no overclaim on un-enriched plans; no live-remote avatar) and warns on any miss. Re-check anytime with `ox plan lint <slug>` (add `--strict` to fail on findings). A clean lint is part of "done".
 
 **Concise, high-signal prose.** No filler. Every sentence earns its place. Code identifiers in `<code>`. Don't restate what a diagram or badge already shows.
 
