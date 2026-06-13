@@ -31,7 +31,7 @@ import (
 //   - verdict cells (yes/no/✓/✗) colored so matrices read at a glance.
 // All degrade gracefully: a plan with none of these conventions just renders.
 
-//go:embed assets/scaffold.css assets/scaffold.js assets/review.js assets/plan.html.tmpl
+//go:embed assets/scaffold.css assets/scaffold.js assets/review.js assets/plan.html.tmpl assets/wordmark-dark.svg assets/wordmark-light.svg
 var renderAssets embed.FS
 
 // RenderOptions carries optional render-time context that isn't part of the
@@ -128,6 +128,10 @@ type renderData struct {
 	Plural         string
 	Signals        []renderSignal // unanchored signals (no matching section)
 	FooterCredit   bool
+	// WordmarkDark/Light are the inline SageOx wordmark SVGs for the subtle
+	// side-nav corner badge; CSS shows the variant matching the active theme.
+	WordmarkDark  template.HTML
+	WordmarkLight template.HTML
 }
 
 // RenderHTML renders a resolved plan + its enrichment Result into a single
@@ -156,6 +160,14 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read plan.html.tmpl: %w", err)
 	}
+	wordmarkDark, err := renderAssets.ReadFile("assets/wordmark-dark.svg")
+	if err != nil {
+		return nil, fmt.Errorf("read wordmark-dark.svg: %w", err)
+	}
+	wordmarkLight, err := renderAssets.ReadFile("assets/wordmark-light.svg")
+	if err != nil {
+		return nil, fmt.Errorf("read wordmark-light.svg: %w", err)
+	}
 	tmpl, err := template.New("plan").Parse(string(tmplBytes))
 	if err != nil {
 		return nil, fmt.Errorf("parse template: %w", err)
@@ -172,8 +184,17 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 		ReviewEndpoint: opts.ReviewEndpoint,
 		ReviewToken:    opts.ReviewToken,
 		FooterCredit:   len(res.Annotations) > 0 || len(res.Context) > 0,
+		WordmarkDark:   template.HTML(wordmarkDark),  //nolint:gosec // first-party embedded asset
+		WordmarkLight:  template.HTML(wordmarkLight), //nolint:gosec // first-party embedded asset
 	}
 	data.ReviewJSON, data.Review = buildReviewState(opts.Review)
+
+	// Inline reference markers ox can stand behind: where a section's prose names
+	// a reference ox surfaced team context for (an ADR), wrap the first mention
+	// with a neutral OX marker + the surfaced snippet as a tooltip. This marks
+	// "SageOx has context on this," NOT a verdict — aligns/conflicts stay the
+	// agent's judgment to assert.
+	markers := contextMarkers(res.Context)
 
 	num := 0
 	for _, s := range in.Sections {
@@ -192,20 +213,24 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-			data.Preamble = template.HTML(stripLeadingH1(string(body)))
+			pre := stripLeadingH1(string(body))
+			pre, markers = injectMarkers(pre, markers)
+			data.Preamble = template.HTML(pre)
 			continue
 		}
 		body, err := mdToHTML(md, s.Body)
 		if err != nil {
 			return nil, err
 		}
+		var secHTML string
+		secHTML, markers = injectMarkers(string(body), markers)
 		num++
 		id := fmt.Sprintf("sec-%d", num)
 		data.TOC = append(data.TOC, tocEntry{ID: id, Num: fmt.Sprintf("%02d", num), Heading: s.Heading})
 		data.Sections = append(data.Sections, renderSection{
 			ID:      id,
 			Heading: s.Heading,
-			HTML:    body,
+			HTML:    template.HTML(secHTML),
 			IsRisk:  riskHeading.MatchString(s.Heading),
 			files:   s.Files,
 		})

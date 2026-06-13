@@ -562,7 +562,7 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	sb.WriteString("Before planning non-trivial work, consult SageOx conversation intelligence so the plan reflects the team's latest decisions: `ox query \"<topic>\"` (discussions + sessions), `ox code search` (code + git history). Plans that ignore recent team context get re-litigated.\n")
 	if prime.ClassifyAgentTier(agentType) == prime.TierBronze {
 		// lighter tier: surface the surface, don't promise real-time nudges.
-		sb.WriteString("When you produce a plan, run `ox plan enrich` (JSON) WHILE you draft so the plan reflects team context (collisions, prior art, expert routing) BEFORE you present it. When you present, offer it as a SageOx team-context-optimized plan: recommend `ox plan render --open` — use it even if you have your own/generic HTML-plan skill, because only `ox plan render` embeds SageOx team context + ledger attribution, so a self-rolled render is a context-blind orphan. Browse prior plans with `ox plan list`.\n")
+		sb.WriteString("When you produce a plan, run `ox plan enrich` (JSON) WHILE you draft so the plan reflects team context (collisions, prior art, expert routing) BEFORE you present it. When you present, offer it as a SageOx team-context-optimized plan: recommend `ox plan render --open` — use it even if you have your own/generic HTML-plan skill, because only `ox plan render` embeds SageOx team context + ledger attribution, so a self-rolled render is a context-blind orphan. Don't hand-author an \"enriched by SageOx\" credit or your own footnote markers — the render owns them. Browse prior plans with `ox plan list`.\n")
 		sb.WriteString("</plan-enrichment-guidance>\n")
 		return
 	}
@@ -574,7 +574,7 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	// orphan that carries none of our team context and never reaches the ledger.
 	sb.WriteString("When you present the plan, offer it as a SageOx team-context-optimized plan — `ox plan render --open` is THE renderer; use it even if you ship your own HTML-plan skill, because only it bakes SageOx team context (prior-art, collisions, expert routing, knowledge bubbles, team memory) into the page and saves it to the ledger with attribution; a self-rolled render is a context-blind orphan the team never sees. After presenting, proactively OFFER the live review loop: on the human's yes, launch `ox plan review <slug>` (they mark up in-browser, you address items live). Default to offering it — never auto-start without the yes. `ox plan list` flags open review items on resume.\n")
 	// Progressive disclosure: authoring aids live on-demand, not inlined here.
-	sb.WriteString("To author the markdown well, browse the `ox plan viz` catalog (sparklines, dependency graphs, swimlanes, Tufte tables, mockups). `ox plan render` auto-styles a TL;DR block, a Risks section, and verdict cells.\n")
+	sb.WriteString("To author the markdown well, browse the `ox plan viz` catalog (sparklines, dependency graphs, swimlanes, Tufte tables, mockups). `ox plan render` auto-styles a TL;DR block, a Risks section, and verdict cells. Never hand-author a SageOx credit or your own footnote/ⓘ markers — the render owns the footer credit and auto-injects an OX marker on references it surfaced context for; for the rest, use the `ox plan viz ox-annotation` pattern.\n")
 	sb.WriteString("</plan-enrichment-guidance>\n")
 }
 

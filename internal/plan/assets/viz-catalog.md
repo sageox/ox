@@ -288,3 +288,10 @@ why: long per-lens prose paragraphs hide the ranking; an option × lens grid wit
 | native | yes | yes | no |
 | hybrid | yes | yes | yes |
 ```
+
+## ox-annotation
+use: an inline reference (an ADR, decision, PR, prior session) you want to annotate with the team context behind it — the calm SageOx way to footnote a decision in-place.
+why: a branded inline marker + hover beats inventing a circled-`i`/number glyph: it tells the reader "SageOx has context on this" without a verdict, and matches the OX marker ox already injects elsewhere — one consistent affordance instead of ad-hoc ones. Note: `ox plan render` already auto-injects this marker on references it surfaced team context for (e.g. an ADR in the bundle), so reach for this pattern only for references ox did NOT surface; never hand-author an "enriched by SageOx" credit — the render owns the footer credit.
+```html
+<span class="ox-annot" title="SageOx surfaced: ADR-051 Consent tooling — bundled voiceprint + recording consent; flagged the weaker BIPA position.">ADR-051 <svg class="ox-annot-mark" aria-hidden="true"><use href="#ox-ico-d" class="ico-d"></use><use href="#ox-ico-l" class="ico-l"></use></svg></span>
+```

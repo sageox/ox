@@ -122,7 +122,8 @@ func planModeHintLine() string {
 	return strings.Join([]string{
 		"Plan mode — run `ox plan enrich --json` WHILE you draft so the plan reflects team context",
 		"(collisions, prior art, expert routing) BEFORE you present it; then offer it as a",
-		"SageOx team-context-optimized plan via `ox plan render --open`.",
+		"SageOx team-context-optimized plan via `ox plan render --open`. The render owns the SageOx",
+		"footer credit and OX-icon markers — don't hand-author your own.",
 	}, " ")
 }
 

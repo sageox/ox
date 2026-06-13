@@ -814,7 +814,14 @@ func TestOutputAgentPrimeXML_SageoxOverheadBudget_Regression(t *testing.T) {
 	// review-loop guidance (proactively offer `ox plan review`, run on the
 	// human's yes) — the headline of that change. ~42 tokens on every Gold
 	// session, deliberately accepted for a high-value collaboration loop.
-	const sageoxOverheadCeiling = 1550
+	//
+	// Raised 1550 -> 1610 (ox-0d2a): the guidance now tells agents NOT to
+	// hand-author their own SageOx credit or footnote/ⓘ markers — `ox plan
+	// render` deterministically owns the footer credit and auto-injects an OX
+	// marker on references it surfaced context for; the rest use the
+	// `ox plan viz ox-annotation` pattern. ~51 tokens, accepted to stop agents
+	// shipping context-blind brand look-alikes that compete with ox's own.
+	const sageoxOverheadCeiling = 1610
 	sageoxTokens := budget.Get(prime.BudgetSourceSageox)
 	if sageoxTokens > sageoxOverheadCeiling {
 		t.Errorf("SageOx overhead floor for minimal prime = %d tokens, exceeds ceiling %d.\n"+
