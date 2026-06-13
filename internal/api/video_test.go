@@ -48,7 +48,7 @@ func TestImportVideoURL_Success(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server.URL)
-	resp, err := client.ImportVideoURL("team-123", &ImportVideoURLRequest{
+	resp, err := client.ImportVideoURL(ContextTypeTeam, "team-123", &ImportVideoURLRequest{
 		URL:   "https://example.com/meeting.mp4",
 		Title: "Team Standup",
 	})
@@ -68,7 +68,7 @@ func TestImportVideoURL_404_ReturnsNil(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server.URL)
-	resp, err := client.ImportVideoURL("team-123", &ImportVideoURLRequest{URL: "https://example.com/v.mp4"})
+	resp, err := client.ImportVideoURL(ContextTypeTeam, "team-123", &ImportVideoURLRequest{URL: "https://example.com/v.mp4"})
 
 	assert.NoError(t, err)
 	assert.Nil(t, resp)
@@ -83,7 +83,7 @@ func TestImportVideoURL_500_ReturnsError(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server.URL)
-	resp, err := client.ImportVideoURL("team-123", &ImportVideoURLRequest{URL: "https://example.com/v.mp4"})
+	resp, err := client.ImportVideoURL(ContextTypeTeam, "team-123", &ImportVideoURLRequest{URL: "https://example.com/v.mp4"})
 
 	require.Error(t, err)
 	assert.Nil(t, resp)
@@ -110,7 +110,7 @@ func TestGetVideoStatus_Success(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server.URL)
-	resp, err := client.GetVideoStatus("team-123", "rec_abc")
+	resp, err := client.GetVideoStatus(ContextTypeTeam, "team-123", "rec_abc")
 
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -126,7 +126,7 @@ func TestGetVideoStatus_404_ReturnsNil(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server.URL)
-	resp, err := client.GetVideoStatus("team-123", "rec_nonexistent")
+	resp, err := client.GetVideoStatus(ContextTypeTeam, "team-123", "rec_nonexistent")
 
 	assert.NoError(t, err)
 	assert.Nil(t, resp)
@@ -139,7 +139,7 @@ func TestGetVideoStatus_NetworkError_ReturnsError(t *testing.T) {
 	server.Close()
 
 	client := newTestClient(server.URL)
-	resp, err := client.GetVideoStatus("team-123", "rec_abc")
+	resp, err := client.GetVideoStatus(ContextTypeTeam, "team-123", "rec_abc")
 
 	require.Error(t, err)
 	assert.Nil(t, resp)
@@ -155,7 +155,7 @@ func TestGetVideoStatus_500_ReturnsError(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server.URL)
-	resp, err := client.GetVideoStatus("team-123", "rec_abc")
+	resp, err := client.GetVideoStatus(ContextTypeTeam, "team-123", "rec_abc")
 
 	require.Error(t, err)
 	assert.Nil(t, resp)
@@ -186,7 +186,7 @@ func TestListVideos_Success(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server.URL)
-	resp, err := client.ListVideos("team-123", 50, 0)
+	resp, err := client.ListVideos(ContextTypeTeam, "team-123", 50, 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -204,7 +204,7 @@ func TestListVideos_404_ReturnsNil(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server.URL)
-	resp, err := client.ListVideos("team-123", 50, 0)
+	resp, err := client.ListVideos(ContextTypeTeam, "team-123", 50, 0)
 
 	assert.NoError(t, err)
 	assert.Nil(t, resp)
@@ -219,7 +219,7 @@ func TestListVideos_500_ReturnsError(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server.URL)
-	resp, err := client.ListVideos("team-123", 50, 0)
+	resp, err := client.ListVideos(ContextTypeTeam, "team-123", 50, 0)
 
 	require.Error(t, err)
 	assert.Nil(t, resp)
@@ -232,7 +232,7 @@ func TestListVideos_NetworkError_ReturnsError(t *testing.T) {
 	server.Close()
 
 	client := newTestClient(server.URL)
-	resp, err := client.ListVideos("team-123", 50, 0)
+	resp, err := client.ListVideos(ContextTypeTeam, "team-123", 50, 0)
 
 	require.Error(t, err)
 	assert.Nil(t, resp)
@@ -251,7 +251,7 @@ func TestListVideos_EmptyResponse(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(server.URL)
-	resp, err := client.ListVideos("team-123", 50, 0)
+	resp, err := client.ListVideos(ContextTypeTeam, "team-123", 50, 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, resp)

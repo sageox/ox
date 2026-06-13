@@ -31,6 +31,7 @@ var importFlags struct {
 	date   string
 	force  bool
 	team   string
+	kb     string
 	title  string
 	status string
 	watch  bool
@@ -39,24 +40,29 @@ var importFlags struct {
 
 var importCmd = &cobra.Command{
 	Use:   "import <file|url>",
-	Short: "Import a document or video URL into team context",
-	Long: `Import a document or video URL into team context for onboarding and knowledge sharing.
+	Short: "Import a document, media file, or video URL into team context or a Knowledge Bubble",
+	Long: `Import a document, media file, or video URL for onboarding and knowledge sharing.
 
-File imports are stored with LFS-backed content and git-tracked metadata.
-URL imports submit a video for cloud processing (transcription, summarization).
+Team imports (default) are stored with LFS-backed content and git-tracked
+metadata in the team context repo — including media files (mp4, mov, webm,
+m4a, mp3, wav, …), which are transcribed and summarized server-side after
+import. With --kb, media files and video URLs are submitted to the cloud
+recording pipeline for the Knowledge Bubble (transcription, summarization).
 Supports Loom, Cap, and direct video URLs.
 
   ox import report.pdf --text extracted.md
   ox import notes.md --date 2026-01-15
+  ox import ./standup.mp4                       # media file into the team (git-tracked, transcribed)
+  ox import ./recording.mp4 --kb my-bubble      # media file into a Knowledge Bubble
   ox import https://www.loom.com/share/abc123 --title "Architecture Review"
   ox import https://cap.link/abc123 --title "Sprint Retro"
-  ox import https://example.com/meeting.mp4 --title "Team Standup"
   ox import --list                              # find import IDs
   ox import --status rec_01234567               # check processing once
   ox import --status rec_01234567 --watch       # wait until complete
 
-The team is auto-discovered from the current repo. Use --team to override
-or when working outside an initialized repo.
+The team is auto-discovered from the current repo. Use --team to override,
+or --kb <slug|kb_id> to target a Knowledge Bubble instead (the two are
+mutually exclusive). Document imports currently support --team only.
 
 For behavioral rules (vs. documents), see 'ox guide team-rules' — rules
 go in agents/rules/, not through ox import.`,
@@ -70,6 +76,8 @@ func init() {
 	importCmd.Flags().StringVar(&importFlags.date, "date", "", "date for filing (YYYY-MM-DD, default: auto-detect from metadata)")
 	importCmd.Flags().BoolVar(&importFlags.force, "force", false, "re-import even if content hash already exists")
 	importCmd.Flags().StringVar(&importFlags.team, "team", "", "team ID (or slug/name when inside a repo)")
+	importCmd.Flags().StringVar(&importFlags.kb, "kb", "", "Knowledge Bubble (slug or kb_id) to import into")
+	importCmd.MarkFlagsMutuallyExclusive("team", "kb")
 	importCmd.Flags().StringVar(&importFlags.title, "title", "", "display title for URL imports")
 	importCmd.Flags().StringVar(&importFlags.status, "status", "", "check processing status of a URL import (use --list to find IDs)")
 	importCmd.Flags().BoolVar(&importFlags.watch, "watch", false, "poll --status until processing completes or fails")
@@ -165,38 +173,29 @@ func runImport(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// dispatch: KB media files → cloud recording-file import. KB-only on
+	// purpose: a Knowledge Bubble has no /context/import route, so the
+	// recordings/import endpoint is its only ingestion path. Team media files
+	// deliberately fall through to the document-LFS path below — the backend's
+	// team-context-doc-import workflow already routes video/*+audio/* to
+	// transcription, and git-LFS keeps the file tracked in the team repo.
+	if importFlags.kb != "" {
+		if isMediaImportFile(srcPath) {
+			return runImportRecordingFile(cmd, srcPath, importDate, jsonOutput)
+		}
+		// KB doc import goes via MCP SaveToBubble (see docs/specs/kb-import-parity.md)
+		return fmt.Errorf("--kb supports media files and video URLs only — document import into a Knowledge Bubble is not yet available (use --team)")
+	}
+
 	// projectRoot is optional — import works outside a repo when --team is given
 	projectRoot, _ := findProjectRoot()
 
 	// resolve endpoint once, used consistently for team resolution, LFS, and push
 	ep := resolveImportEndpoint(projectRoot)
 
-	var tc *config.TeamContext
-	if importFlags.team != "" {
-		if projectRoot != "" {
-			tc = resolveTeamContext(projectRoot, importFlags.team)
-		}
-		if tc == nil {
-			// no project root or team not found via project — scan by endpoint
-			tc = resolveTeamContextByEndpoint(importFlags.team, ep)
-		}
-		if tc == nil {
-			return fmt.Errorf("team context not found: %q (use ox agent prime to see available teams)", importFlags.team)
-		}
-	} else {
-		if projectRoot != "" {
-			tc = config.FindRepoTeamContext(projectRoot)
-		}
-		if tc == nil {
-			// no project or no team in project — try single-team auto-discovery
-			tc = autoDiscoverSingleTeam(ep)
-		}
-		if tc == nil {
-			if projectRoot == "" {
-				return fmt.Errorf("no team found — use --team to specify one, or run from inside a SageOx project")
-			}
-			return fmt.Errorf("no team context configured — use --team to specify one, or run 'ox init' first")
-		}
+	tc, err := resolveImportTeam(projectRoot, ep)
+	if err != nil {
+		return err
 	}
 
 	// data/ is excluded from the team context sparse checkout (deny list in
@@ -650,53 +649,172 @@ func slugify(s string) string {
 	return strings.Trim(result, "-")
 }
 
-// resolveImportTeamAndClient resolves the team context and creates an authenticated API client.
-// Shared by URL import, status, and list operations.
-func resolveImportTeamAndClient() (*config.TeamContext, *api.RepoClient, error) {
-	projectRoot, _ := findProjectRoot()
-	ep := resolveImportEndpoint(projectRoot)
+// mediaImportExts routes a local file to the cloud recording-file import
+// instead of the document-LFS path when targeting a Knowledge Bubble (team
+// media stays on the document-LFS path). Mirrors the audio/video groups in
+// detectContentType so routing and MIME detection can never disagree.
+var mediaImportExts = map[string]bool{
+	".mp4": true, ".mov": true, ".mkv": true, ".avi": true, ".webm": true,
+	".m4a": true, ".mp3": true, ".wav": true, ".ogg": true, ".opus": true,
+	".flac": true, ".aac": true, ".wma": true,
+}
 
+// isMediaImportFile reports whether a local file is audio/video. With --kb it
+// is imported as a recording (cloud processing); for team it still goes
+// through the document path, which transcribes media server-side.
+func isMediaImportFile(path string) bool {
+	return mediaImportExts[strings.ToLower(filepath.Ext(path))]
+}
+
+// resolveImportTeam resolves the team context for an import: explicit --team
+// first (project lookup, then endpoint scan), otherwise repo-bound team or
+// single-team auto-discovery.
+func resolveImportTeam(projectRoot, ep string) (*config.TeamContext, error) {
 	var tc *config.TeamContext
 	if importFlags.team != "" {
 		if projectRoot != "" {
 			tc = resolveTeamContext(projectRoot, importFlags.team)
 		}
 		if tc == nil {
+			// no project root or team not found via project — scan by endpoint
 			tc = resolveTeamContextByEndpoint(importFlags.team, ep)
 		}
 		if tc == nil {
-			return nil, nil, fmt.Errorf("team context not found: %q (use ox agent prime to see available teams)", importFlags.team)
+			return nil, fmt.Errorf("team context not found: %q (use ox agent prime to see available teams)", importFlags.team)
 		}
+		return tc, nil
+	}
+
+	if projectRoot != "" {
+		tc = config.FindRepoTeamContext(projectRoot)
+	}
+	if tc == nil {
+		// no project or no team in project — try single-team auto-discovery
+		tc = autoDiscoverSingleTeam(ep)
+	}
+	if tc == nil {
+		if projectRoot == "" {
+			return nil, fmt.Errorf("no team found — use --team to specify one, or run from inside a SageOx project")
+		}
+		return nil, fmt.Errorf("no team context configured — use --team to specify one, or run 'ox init' first")
+	}
+	return tc, nil
+}
+
+// resolveImportContext resolves the import target (team context or Knowledge
+// Bubble) and creates an authenticated API client. Shared by media-file
+// import, URL import, status, and list operations. Exactly one context is
+// resolved: --kb wins when set, otherwise the existing team resolution runs
+// unchanged.
+func resolveImportContext(ctx context.Context) (contextType, contextID string, client *api.RepoClient, ep string, err error) {
+	// defensive double-check: cobra's MarkFlagsMutuallyExclusive enforces this
+	// for CLI invocations, but this resolver also runs in tests that set the
+	// flag globals directly
+	if importFlags.team != "" && importFlags.kb != "" {
+		return "", "", nil, "", fmt.Errorf("--team and --kb are mutually exclusive — specify exactly one")
+	}
+
+	projectRoot, _ := findProjectRoot()
+	ep = resolveImportEndpoint(projectRoot)
+
+	if importFlags.kb != "" {
+		kbID, kbErr := resolveKBInputForCmd(ctx, importFlags.kb)
+		if kbErr != nil {
+			return "", "", nil, "", fmt.Errorf("resolve --kb %q: %w", importFlags.kb, kbErr)
+		}
+		contextType, contextID = api.ContextTypeKB, kbID
 	} else {
-		if projectRoot != "" {
-			tc = config.FindRepoTeamContext(projectRoot)
+		tc, tcErr := resolveImportTeam(projectRoot, ep)
+		if tcErr != nil {
+			return "", "", nil, "", tcErr
 		}
-		if tc == nil {
-			tc = autoDiscoverSingleTeam(ep)
-		}
-		if tc == nil {
-			if projectRoot == "" {
-				return nil, nil, fmt.Errorf("no team found — use --team to specify one, or run from inside a SageOx project")
-			}
-			return nil, nil, fmt.Errorf("no team context configured — use --team to specify one, or run 'ox init' first")
-		}
+		contextType, contextID = api.ContextTypeTeam, tc.TeamID
 	}
 
 	storedToken, err := auth.GetTokenForEndpoint(ep)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read auth store: %w", err)
+		return "", "", nil, "", fmt.Errorf("failed to read auth store: %w", err)
 	}
 	if storedToken == nil || storedToken.AccessToken == "" {
-		return nil, nil, fmt.Errorf("not authenticated — run 'ox login' first")
+		return "", "", nil, "", fmt.Errorf("not authenticated — run 'ox login' first")
 	}
 
-	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(storedToken.AccessToken)
-	return tc, client, nil
+	client = api.NewRepoClientWithEndpoint(ep).WithAuthToken(storedToken.AccessToken)
+	return contextType, contextID, client, ep, nil
+}
+
+// runImportRecordingFile imports a local media file as a recording via the
+// 3-step cloud flow (POST import → presigned PUT → POST complete).
+// KB-only: team media imports use the document-LFS path, which the backend
+// already transcribes — see the dispatch in runImport.
+func runImportRecordingFile(cmd *cobra.Command, srcPath string, importDate time.Time, jsonOutput bool) error {
+	// defensive: the runImport dispatch only calls this with --kb set, but a
+	// future caller wiring this up for team would silently change the team
+	// storage model (git-LFS → S3 recording) — fail loudly instead
+	if importFlags.kb == "" {
+		return fmt.Errorf("recording-file import requires --kb — team media imports use the document import path")
+	}
+
+	contextType, contextID, client, _, err := resolveImportContext(cmd.Context())
+	if err != nil {
+		return err
+	}
+
+	filename := filepath.Base(srcPath)
+	title := importFlags.title
+	if title == "" {
+		title = inferTitle(srcPath)
+	}
+
+	// recorded_at back-dates the recording to when it actually happened
+	// (--date flag or file mtime) rather than the import time
+	recordedAt := importDate.UTC()
+	req := api.ImportRecordingFileRequest{
+		Filename:    filename,
+		ContentType: detectContentType(filename, nil),
+		Title:       title,
+		RecordedAt:  &recordedAt,
+	}
+
+	resp, err := client.ImportRecordingFile(cmd.Context(), contextType, contextID, srcPath, req)
+	if err != nil {
+		return fmt.Errorf("import failed: %w", err)
+	}
+	if resp == nil {
+		return fmt.Errorf("import endpoint not available (server may not support recording file imports yet)")
+	}
+
+	if jsonOutput {
+		out, _ := json.MarshalIndent(resp, "", "  ")
+		fmt.Fprintln(cmd.OutOrStdout(), string(out))
+		return nil
+	}
+
+	cli.PrintSuccess("Import started")
+	fmt.Fprintf(cmd.OutOrStdout(), "  ID:        %s\n", resp.RecordingID)
+	fmt.Fprintf(cmd.OutOrStdout(), "  Status:    %s\n", resp.Status)
+	if title != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "  Title:     %s\n", title)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "\n  Track progress: ox import --status %s --watch%s\n", resp.RecordingID, importContextFlagHint())
+	return nil
+}
+
+// importContextFlagHint reproduces the context flag the user passed so copy-
+// pasted follow-up commands resolve the same context.
+func importContextFlagHint() string {
+	if importFlags.kb != "" {
+		return " --kb " + importFlags.kb
+	}
+	if importFlags.team != "" {
+		return " --team " + importFlags.team
+	}
+	return ""
 }
 
 // runImportURL handles importing a video/audio by URL via the cloud API.
 func runImportURL(cmd *cobra.Command, url string, jsonOutput bool) error {
-	tc, client, err := resolveImportTeamAndClient()
+	contextType, contextID, client, _, err := resolveImportContext(cmd.Context())
 	if err != nil {
 		return err
 	}
@@ -706,7 +824,7 @@ func runImportURL(cmd *cobra.Command, url string, jsonOutput bool) error {
 		Title: importFlags.title,
 	}
 
-	resp, err := client.ImportVideoURL(tc.TeamID, req)
+	resp, err := client.ImportVideoURL(contextType, contextID, req)
 	if err != nil {
 		return fmt.Errorf("import failed: %w", err)
 	}
@@ -726,13 +844,13 @@ func runImportURL(cmd *cobra.Command, url string, jsonOutput bool) error {
 	if resp.Title != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "  Title:     %s\n", resp.Title)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "\n  Track progress: ox import --status %s --watch\n", resp.RecordingID)
+	fmt.Fprintf(cmd.OutOrStdout(), "\n  Track progress: ox import --status %s --watch%s\n", resp.RecordingID, importContextFlagHint())
 	return nil
 }
 
 // runImportStatus handles checking the processing status of a recording.
 func runImportStatus(cmd *cobra.Command, jsonOutput bool) error {
-	tc, client, err := resolveImportTeamAndClient()
+	contextType, contextID, client, _, err := resolveImportContext(cmd.Context())
 	if err != nil {
 		return err
 	}
@@ -744,7 +862,7 @@ func runImportStatus(cmd *cobra.Command, jsonOutput bool) error {
 	// (CreateVideoRecording activity). Treat 404 as status="starting" rather than
 	// an error, since the ID is known-valid.
 	for {
-		resp, err := client.GetVideoStatus(tc.TeamID, recordingID)
+		resp, err := client.GetVideoStatus(contextType, contextID, recordingID)
 		if err != nil {
 			return fmt.Errorf("status check failed: %w", err)
 		}
@@ -820,14 +938,14 @@ func printVideoStatus(cmd *cobra.Command, resp *api.VideoStatusResponse) {
 	}
 }
 
-// runImportList handles listing team recordings.
+// runImportList handles listing recordings in the resolved context.
 func runImportList(cmd *cobra.Command, jsonOutput bool) error {
-	tc, client, err := resolveImportTeamAndClient()
+	contextType, contextID, client, _, err := resolveImportContext(cmd.Context())
 	if err != nil {
 		return err
 	}
 
-	resp, err := client.ListVideos(tc.TeamID, 50, 0)
+	resp, err := client.ListVideos(contextType, contextID, 50, 0)
 	if err != nil {
 		return fmt.Errorf("list recordings failed: %w", err)
 	}

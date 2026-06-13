@@ -218,7 +218,7 @@ func TestImportVideoURL_MockServer(t *testing.T) {
 	client := api.NewRepoClientWithEndpoint(server.URL).WithAuthToken("test-token")
 
 	// test ImportVideoURL
-	resp, err := client.ImportVideoURL("team_test123", &api.ImportVideoURLRequest{
+	resp, err := client.ImportVideoURL(api.ContextTypeTeam, "team_test123", &api.ImportVideoURLRequest{
 		URL:   "https://localhost/test-video.mp4",
 		Title: "Test Video",
 	})
@@ -229,7 +229,7 @@ func TestImportVideoURL_MockServer(t *testing.T) {
 	assert.Equal(t, int32(1), importCalled.Load())
 
 	// test GetVideoStatus
-	status, err := client.GetVideoStatus("team_test123", "rec_test_001")
+	status, err := client.GetVideoStatus(api.ContextTypeTeam, "team_test123", "rec_test_001")
 	require.NoError(t, err)
 	require.NotNil(t, status)
 	assert.Equal(t, "ready", status.Status)
@@ -255,14 +255,14 @@ func TestImportVideoURL_404GracefulDegradation(t *testing.T) {
 	client := api.NewRepoClientWithEndpoint(server.URL).WithAuthToken("test-token")
 
 	// ImportVideoURL returns nil, nil on 404
-	resp, err := client.ImportVideoURL("team_test123", &api.ImportVideoURLRequest{
+	resp, err := client.ImportVideoURL(api.ContextTypeTeam, "team_test123", &api.ImportVideoURLRequest{
 		URL: "https://localhost/video.mp4",
 	})
 	assert.NoError(t, err)
 	assert.Nil(t, resp, "should return nil on 404 (endpoint not deployed)")
 
 	// GetVideoStatus returns nil, nil on 404
-	status, err := client.GetVideoStatus("team_test123", "rec_nonexistent")
+	status, err := client.GetVideoStatus(api.ContextTypeTeam, "team_test123", "rec_nonexistent")
 	assert.NoError(t, err)
 	assert.Nil(t, status, "should return nil on 404 (recording not found)")
 }
@@ -316,17 +316,17 @@ func TestImportVideoURL_StatusProgression(t *testing.T) {
 	client := api.NewRepoClientWithEndpoint(server.URL).WithAuthToken("test-token")
 
 	// first call: pending
-	s1, err := client.GetVideoStatus("team_test123", "rec_progress_001")
+	s1, err := client.GetVideoStatus(api.ContextTypeTeam, "team_test123", "rec_progress_001")
 	require.NoError(t, err)
 	assert.Equal(t, "pending", s1.Status)
 
 	// second call: processing
-	s2, err := client.GetVideoStatus("team_test123", "rec_progress_001")
+	s2, err := client.GetVideoStatus(api.ContextTypeTeam, "team_test123", "rec_progress_001")
 	require.NoError(t, err)
 	assert.Equal(t, "processing", s2.Status)
 
 	// third call: ready
-	s3, err := client.GetVideoStatus("team_test123", "rec_progress_001")
+	s3, err := client.GetVideoStatus(api.ContextTypeTeam, "team_test123", "rec_progress_001")
 	require.NoError(t, err)
 	assert.Equal(t, "ready", s3.Status)
 	assert.Len(t, s3.ProcessingSteps, 4)
@@ -363,7 +363,7 @@ func TestListVideos_MockServer(t *testing.T) {
 	}))
 
 	client := api.NewRepoClientWithEndpoint(server.URL).WithAuthToken("test-token")
-	resp, err := client.ListVideos("team_test123", 50, 0)
+	resp, err := client.ListVideos(api.ContextTypeTeam, "team_test123", 50, 0)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Len(t, resp.Recordings, 2)
@@ -381,7 +381,7 @@ func TestListVideos_404GracefulDegradation(t *testing.T) {
 	}))
 
 	client := api.NewRepoClientWithEndpoint(server.URL).WithAuthToken("test-token")
-	resp, err := client.ListVideos("team_test123", 50, 0)
+	resp, err := client.ListVideos(api.ContextTypeTeam, "team_test123", 50, 0)
 	assert.NoError(t, err)
 	assert.Nil(t, resp, "should return nil on 404")
 }
