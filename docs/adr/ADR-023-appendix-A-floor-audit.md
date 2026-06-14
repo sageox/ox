@@ -2,6 +2,10 @@
 
 > Companion to **[ADR-023 — Skill/Command Injection: The Two-Layer Model](./ADR-023-skill-injection-two-layer-model.md)**. This appendix is the verified evidence base for the epic's central claim — *a thin-relay violation IS a cross-agent gap*. It is referenced by the floor-remediation (`ox-fvjh.6`) and fat-playbooks-to-skills (`ox-fvjh.7`) tasks. (beads: `ox-fvjh.3`)
 
+> **Status (post-implementation — `ox-fvjh` shipped):** this audit is the *point-in-time evidence base* that drove the epic; the verdict table below intentionally records the **pre-remediation** state. Since the audit:
+> - **`ox-cart-start` — RESOLVED in `ox-fvjh.6`.** `runCartsStart` now emits a portable `guidance` field in its `--json` output (`cmd/ox/carts.go`, `cartStartGuidance`); regression test `cmd/ox/carts_test.go` `TestCartStartGuidancePortable` fails if it leaks a host-specific token like `/rename`. Codex/Droid now receive the naming intent.
+> - **`ox-plan.md` and `ox-session-review.md` — migrated to skills in `ox-fvjh.7`.** They now live at `extensions/claude/skills/<id>/SKILL.md`, so **2 of the 16 files below are no longer commands**. Read the table as the audit's findings, not the current on-disk layout.
+
 ## What this audits
 
 Every command file installed by the Claude adapter (`cmd/ox-adapter-claude-code`,

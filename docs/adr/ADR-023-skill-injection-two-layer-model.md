@@ -1,6 +1,6 @@
 # ADR-023: Skill/Command Injection — The Two-Layer Model
 
-**Status**: Draft (Proposed) — **awaiting Ryan's review** as brand / data-ergonomics owner. No Required-Review gate is tripped (no new `SAGEOX_*`/`OX_*` env var, no data-path or API-source-of-truth change), so this lands for review and flips to Accepted on approval.
+**Status**: Draft (Proposed) — **awaiting Ryan's review** as brand / data-ergonomics owner. No Required-Review gate is tripped (no new `SAGEOX_*`/`OX_*` env var, no data-path or API-source-of-truth change), so this lands for review and flips to Accepted on approval. **The implementation (epic `ox-fvjh`, all 10 tasks) has already landed in PR #663 ahead of formal acceptance** — the model is load-bearing in code (`internal/prime/capability_table.go`, `internal/prime/conformance_test.go`); flipping this to Accepted is Ryan's sign-off.
 **Date**: 2026-06-14
 **Deciders**: SageOx Engineering (brand / data-ergonomics sign-off owned by Ryan)
 
