@@ -172,7 +172,7 @@ func TestHandleCheckRules_UserManagedRuleNotStale(t *testing.T) {
 // agentx v0.1.10's Uninstall cannot remove the top-level ox.md because
 // ExtractCommandHash only inspects the first line, and YAML frontmatter
 // (description: ...) lives there. The adapter works around this for the
-// sageox/ namespace via looksStamped(), but the top-level file still
+// sageox/ namespace via adapterstamp.LooksStamped, but the top-level file still
 // hits the upstream bug.
 //
 // When agentx fixes the limitation upstream, this test will FAIL —
@@ -194,7 +194,7 @@ func TestHandleUninstallRules_AgentxLimitationOnTopLevelOxMd(t *testing.T) {
 
 	// the top-level ox.md is NOT in FilesRemoved — agentx still can't see
 	// past frontmatter on the first line. (The namespaced file IS removed
-	// thanks to looksStamped(); see TestHandleUninstallRules_RemovesNamespace.)
+	// thanks to adapterstamp.LooksStamped; see TestHandleUninstallRules_RemovesNamespace.)
 	for _, name := range resp.FilesRemoved {
 		if name == "ox.md" {
 			t.Fatalf("ox.md was removed — agentx may have fixed the frontmatter limitation; remove this test and update the workaround in rules.go")

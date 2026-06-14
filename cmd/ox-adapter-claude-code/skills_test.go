@@ -82,6 +82,32 @@ func TestHandleInstallSkills_Idempotent(t *testing.T) {
 	assert.True(t, r2.Installed)
 }
 
+// TestHandleInstallSkills_NoOpReportsNothingWritten is the honesty contract that
+// keeps `ox init` from claiming "Installed N skills" on an already-current repo.
+// A first install writes every embedded skill; a second install on the same
+// version writes nothing, so FilesWritten MUST be empty. init.go gates its
+// "Installed N skills" vs "skills already up to date" message on
+// len(FilesWritten), so a non-empty slice here would make init lie.
+// Failure prevented: a no-op re-install reports files written, and `ox init`
+// on a current repo falsely claims it installed skills.
+func TestHandleInstallSkills_NoOpReportsNothingWritten(t *testing.T) {
+	dir := t.TempDir()
+	params := adapterprotocol.SkillsParams{RepoRoot: dir, Version: "0.8.0"}
+
+	first, err := handleInstallSkills(params)
+	require.NoError(t, err)
+	require.True(t, first.Installed)
+	require.NotEmpty(t, first.FilesWritten,
+		"precondition: the first install must write every embedded skill")
+
+	second, err := handleInstallSkills(params)
+	require.NoError(t, err)
+	assert.True(t, second.Installed, "a no-op re-install still succeeds")
+	assert.Empty(t, second.FilesWritten,
+		"a re-install of an already-current skill set must write nothing — "+
+			"FilesWritten drives init's honest 'already up to date' message")
+}
+
 // --- B. Check lifecycle ---
 
 // TestHandleCheckSkills_FreshInstall verifies a freshly installed skill set

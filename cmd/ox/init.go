@@ -1913,10 +1913,17 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 					cli.PrintWarning(fmt.Sprintf("Could not install %s commands: %v", ea.Name(), err))
 				}
 			} else if result.Installed {
-				if !quiet {
-					cli.PrintSuccess(fmt.Sprintf("Installed %s commands", ea.Name()))
+				// FilesWritten holds only the commands actually (over)written;
+				// it's empty when every command was already current. Report the
+				// honest count instead of an unconditional "Installed".
+				if n := len(result.FilesWritten); n > 0 {
+					if !quiet {
+						cli.PrintSuccess(fmt.Sprintf("Installed %d %s commands", n, ea.Name()))
+					}
+					installedHooks = append(installedHooks, result.FilesWritten...)
+				} else if !quiet {
+					cli.PrintPreserved(fmt.Sprintf("%s commands already up to date", ea.Name()))
 				}
-				installedHooks = append(installedHooks, result.FilesWritten...)
 			}
 		}
 
@@ -1927,10 +1934,17 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 					cli.PrintWarning(fmt.Sprintf("Could not install %s skills: %v", ea.Name(), err))
 				}
 			} else if result.Installed {
-				if !quiet {
-					cli.PrintSuccess(fmt.Sprintf("Installed %s skills", ea.Name()))
+				// FilesWritten holds only the skills actually (over)written; it's
+				// empty when every skill was already current. Report the honest
+				// count instead of an unconditional "Installed".
+				if n := len(result.FilesWritten); n > 0 {
+					if !quiet {
+						cli.PrintSuccess(fmt.Sprintf("Installed %d %s skills", n, ea.Name()))
+					}
+					installedHooks = append(installedHooks, result.FilesWritten...)
+				} else if !quiet {
+					cli.PrintPreserved(fmt.Sprintf("%s skills already up to date", ea.Name()))
 				}
-				installedHooks = append(installedHooks, result.FilesWritten...)
 			}
 		}
 	}

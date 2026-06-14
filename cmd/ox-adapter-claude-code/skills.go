@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/extensions/claude"
+	"github.com/sageox/ox/internal/adapterstamp"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
@@ -23,7 +24,8 @@ import (
 // frontmatter — never on line 1. The stamp hash covers only the body that
 // follows it (the same contract extractStampAnywhere assumes for rules), so a
 // hand-edited body changes the body hash without touching the stamp, and drift
-// detection reads the stamp via extractStampAnywhere (shared with rules.go).
+// detection reads the stamp via adapterstamp.ExtractStampAnywhere (shared with
+// rules.go).
 //
 // On-disk layout written by Install:
 //
@@ -206,9 +208,9 @@ func handleInstallSkills(p adapterprotocol.SkillsParams) (*adapterprotocol.Insta
 // unstamped files are preserved), the stale command file is removed.
 //
 // This is best-effort: any error is logged and ignored, and never fails the
-// install. It detects ox-stamped files with extractStampAnywhere using the same
-// "ox" prefix the command installer stamps with — a legacy command file carries
-// "<!-- ox-hash: ... -->" on line 1, which extractStampAnywhere matches.
+// install. It detects ox-stamped files with adapterstamp.ExtractStampAnywhere
+// using the same "ox" prefix the command installer stamps with — a legacy command
+// file carries "<!-- ox-hash: ... -->" on line 1, which ExtractStampAnywhere matches.
 func cleanupLegacyCommandFilesForSkills(repoRoot string, skills []skillFile) {
 	commandsDir := filepath.Join(repoRoot, ".claude", "commands")
 	for _, sk := range skills {
@@ -218,7 +220,7 @@ func cleanupLegacyCommandFilesForSkills(repoRoot string, skills []skillFile) {
 			continue // no legacy command file (the common case) — nothing to clean
 		}
 		// only remove files ox stamped; never delete user-authored command files.
-		if hash, _, _ := extractStampAnywhere(data, oxSkillStampPrefix); hash == "" {
+		if hash, _, _ := adapterstamp.ExtractStampAnywhere(data, oxSkillStampPrefix); hash == "" {
 			continue
 		}
 		if err := os.Remove(legacyPath); err != nil {
@@ -285,7 +287,7 @@ func handleUninstallSkills(p adapterprotocol.SkillsParams) (*adapterprotocol.Uni
 			continue
 		}
 		// only remove skills we stamped (leave user-authored skills alone).
-		if hash, _, _ := extractStampAnywhere(data, oxSkillStampPrefix); hash == "" {
+		if hash, _, _ := adapterstamp.ExtractStampAnywhere(data, oxSkillStampPrefix); hash == "" {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
@@ -320,7 +322,7 @@ func shouldWriteSkill(existing []byte, sk skillFile) bool {
 	if existing == nil {
 		return true
 	}
-	stampHash, ver, body := extractStampAnywhere(existing, oxSkillStampPrefix)
+	stampHash, ver, body := adapterstamp.ExtractStampAnywhere(existing, oxSkillStampPrefix)
 	if stampHash == "" {
 		return false // user-managed — never overwrite
 	}
@@ -344,11 +346,11 @@ func shouldWriteSkill(existing []byte, sk skillFile) bool {
 }
 
 // isSkillStale reports whether an installed skill is outdated or tampered.
-// Mirrors appendFrontmatterStale's two-part rule (body tampered OR binary drift)
-// with the same version-downgrade guard. User-managed files (no stamp) are never
-// stale.
+// Mirrors adapterstamp.AppendFrontmatterStale's two-part rule (body tampered OR
+// binary drift) with the same version-downgrade guard. User-managed files (no
+// stamp) are never stale.
 func isSkillStale(existing []byte, sk skillFile) bool {
-	stampHash, ver, body := extractStampAnywhere(existing, oxSkillStampPrefix)
+	stampHash, ver, body := adapterstamp.ExtractStampAnywhere(existing, oxSkillStampPrefix)
 	if stampHash == "" {
 		return false // user-managed
 	}

@@ -166,7 +166,7 @@ func TestHandleCheckRules_UserManagedRuleNotStale(t *testing.T) {
 // agentx v0.1.10's Uninstall cannot remove the top-level ox.md because
 // ExtractCommandHash only inspects the first line, and YAML frontmatter
 // (description: ...) lives there. The adapter works around this for the
-// sageox/ namespace via looksStamped(), but the top-level file still
+// sageox/ namespace via adapterstamp.LooksStamped, but the top-level file still
 // hits the upstream bug.
 //
 // When agentx fixes the limitation upstream, this test will FAIL —
