@@ -45,6 +45,7 @@ const (
 	CapSubagentController = "subagent_controller"
 	CapRulesInstaller     = "rules_installer"
 	CapCommandsInstaller  = "commands_installer"
+	CapSkillsInstaller    = "skills_installer"
 	CapCapturePrior       = "capture_prior"
 )
 
@@ -155,6 +156,33 @@ type CheckCommandsResponse struct {
 
 // UninstallCommandsResponse is returned by `uninstall-commands`.
 type UninstallCommandsResponse struct {
+	Uninstalled  bool     `json:"uninstalled"`
+	FilesRemoved []string `json:"files_removed"`
+}
+
+// SkillsParams are passed to install-skills, check-skills, and uninstall-skills.
+type SkillsParams struct {
+	RepoRoot string `json:"repo_root"`
+	Version  string `json:"version"` // ox version for stamped content
+}
+
+// InstallSkillsResponse is returned by `install-skills`.
+type InstallSkillsResponse struct {
+	Installed    bool     `json:"installed"`
+	FilesWritten []string `json:"files_written"`
+}
+
+// CheckSkillsResponse is returned by `check-skills`.
+type CheckSkillsResponse struct {
+	Installed bool     `json:"installed"`
+	Missing   []string `json:"missing,omitempty"`
+	Stale     []string `json:"stale,omitempty"`
+	SkillsDir string   `json:"skills_dir"`
+	Total     int      `json:"total"`
+}
+
+// UninstallSkillsResponse is returned by `uninstall-skills`.
+type UninstallSkillsResponse struct {
 	Uninstalled  bool     `json:"uninstalled"`
 	FilesRemoved []string `json:"files_removed"`
 }

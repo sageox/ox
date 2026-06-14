@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -12,6 +13,23 @@ import (
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
 )
+
+// cartStartGuidance is the Layer-1 floor instruction returned with every
+// `ox carts start --json`. It travels in the CLI JSON so all coding agents
+// (Codex, Droid, Claude Code) receive the naming intent — not just Claude
+// Code, which is the only adapter that installs the ox-* command bodies.
+// The portable intent is "name this work unit after the cart title so
+// teammates can correlate it"; the host-specific mechanism for applying that
+// name (e.g. Claude Code's /rename) stays a Layer-2 note in the command body.
+const cartStartGuidance = "Name this work unit (session/branch) after the cart title in kebab-case so teammates can correlate it with the cart. Then confirm the cart ID, title, and that it is now in_progress assigned to you."
+
+// cartStartOutput wraps the started issue with Layer-1 guidance for the
+// agent. The issue is embedded so all of its existing JSON fields are emitted
+// unchanged alongside the added guidance.
+type cartStartOutput struct {
+	*carts.Issue
+	Guidance string `json:"guidance,omitempty"`
+}
 
 var cartsCmd = &cobra.Command{
 	Use:   "carts",
@@ -297,7 +315,7 @@ func runCartsStart(cmd *cobra.Command, args []string) error {
 	}
 
 	if isJSON(cmd) {
-		data, _ := carts.FormatIssueJSON(issue)
+		data, _ := json.MarshalIndent(cartStartOutput{Issue: issue, Guidance: cartStartGuidance}, "", "  ")
 		fmt.Println(string(data))
 	} else {
 		fmt.Printf("Started %s: %s (assigned to %s)\n", issue.ID, issue.Title, identity.Name)

@@ -14,6 +14,53 @@ Design principles for writing skills that agents can effectively discover and ro
 
 This insight comes from analyzing [beads PR #718](https://github.com/steveyegge/beads/pull/718), which consolidated 30 slash commands into a single SKILL.md with natural language activation.
 
+## The Thin/Thick Convention (one rule, three names)
+
+"Keep ox-* skills thin" is not three policies — it is one rule with three names. **Thin-relay == cross-agent-conformance == staleness-safety.** They describe the same boundary in the [two-layer skill-injection model](../adr/ADR-023-skill-injection-two-layer-model.md): the deterministic behavioral floor lives in **Layer 1** (the live `ox` CLI's JSON/text output, piped into agent context via the prime marker) and reaches every adapter; **Layer 2** is the agent-specific shell (Claude skills/commands, Codex hooks, Droid rules) and is strictly additive.
+
+### Governing rule
+
+> The deterministic floor lives in Layer 1 (CLI output). Agent-specific mechanisms are strictly additive — never load-bearing.
+
+### Why the three names are one boundary
+
+- **Thin-relay → cross-agent conformance.** Any behavioral guidance authored only in a Claude command/skill body is, by construction, invisible to Codex (installs hooks only, `cmd/ox-adapter-codex/main.go`) and Droid (installs hooks + rules, no commands, `cmd/ox-adapter-droid/main.go`). Those adapters install no command files, so a thin-relay violation **IS** a cross-agent gap: the Codex/Droid user silently loses behavior the Claude user gets.
+- **Layer 1 → staleness safety.** Layer 1 is always the live binary; it cannot drift from the code. Installed Layer-2 command files are copied from `extensions/claude/commands/*.md` (embedded via `extensions/claude/embed.go` `CommandFS`) and stamped with an `ox-hash`+version marker (`oxStampPrefix` in `cmd/ox-adapter-claude-code/commands.go`). A copied body **can** go stale; the binary's `guidance` **cannot**. Keeping floor behavior in Layer 1 is what the staleness stamp protects.
+
+### Author decision checklist
+
+For each piece of content you are about to author, route it by the first matching rule:
+
+- **(a) Is this floor / behavioral guidance** — use-when triggers, post-command branching, error handling, consult cues? → It belongs in **Layer 1**: the ox subcommand's JSON `guidance` field, NOT the skill body.
+- **(b) Is it behavioral AND backed by a single ox subcommand?** → **Thin relay only.** The body is a pointer to `ox <subcommand> --json` plus a one-line description. No behavioral copy in the body.
+- **(c) Is it agent-side orchestration NOT backed by a single ox subcommand** — a Claude-specific rendering spec or a multi-step flow? → **Thickness is ALLOWED, and only here.** See the sanctioned examples below.
+- **(d) Could a Codex or Droid user need this?** → Then it **MUST** reach Layer 1, regardless of (a)–(c). If it only lives in a Claude body, it is trapped floor behavior and must be moved.
+
+### Content kind → layer → mechanism
+
+| Content kind | Layer | Mechanism |
+|--------------|-------|-----------|
+| Use-when / activation triggers (behavioral) | Layer 1 | ox subcommand JSON `guidance` |
+| Post-command branching, error handling | Layer 1 | ox subcommand JSON `guidance` |
+| Consult-first cues, intent floor | Layer 1 | prime-marker reminder + `guidance` |
+| Pointer to a single ox subcommand | Layer 2 (thin) | skill body relays `ox <subcommand> --json` |
+| Claude rendering spec / multi-step flow not backed by one subcommand | Layer 2 (thick, gated) | skill body carries the orchestration |
+
+### The allowed-thickness gate
+
+A skill body may be thick **only when ALL of the following hold**:
+
+1. The content is **not backed by a single ox subcommand** (no relay would capture it).
+2. It is **Claude-specific orchestration or a rendering spec** — agent shell ergonomics, not portable behavior.
+3. It **traps no floor behavior** — nothing a Codex/Droid user would also need lives only here.
+
+Two skills are the sanctioned thick examples:
+
+- `extensions/claude/skills/ox-plan/SKILL.md` — carries the **HTML rendering spec** for the enriched plan (how to draw it), which is not command guidance.
+- `extensions/claude/skills/ox-session-review/SKILL.md` — carries the **audit + regeneration flow**, which is not backed by a single ox subcommand.
+
+Everything else is thin. If you are unsure whether content clears the gate, it does not: route it to Layer 1.
+
 ## The Routing Problem
 
 When a user says "help me with my API design", the agent must:

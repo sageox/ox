@@ -668,6 +668,24 @@ func runInit() error {
 		}
 	}
 
+	// inject ox:prime markers into all detected agent instruction files (multi-platform)
+	instrResults, instrErr := EnsureInstructionFileMarkers(gitRoot)
+	if instrErr != nil {
+		slog.Warn("failed to inject instruction file markers", "error", instrErr)
+	} else {
+		for _, r := range instrResults {
+			slog.Debug("instruction file marker", "file", r.File, "status", r.Status, "agent", r.AgentType)
+			p := filepath.Join(gitRoot, r.File)
+			switch r.Status {
+			case injectedNew:
+				tracker.trackCreatedFile(p)
+			case injectedUpdate:
+				// snapshot before modification if not already tracked
+				tracker.trackModifiedFile(p)
+			}
+		}
+	}
+
 	// detect and install agent hooks
 	installedHooks := installAgentHooks(gitRoot, true, selectedAgents) // quiet — summarized below
 	for _, hookFile := range installedHooks {
@@ -1897,6 +1915,20 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			} else if result.Installed {
 				if !quiet {
 					cli.PrintSuccess(fmt.Sprintf("Installed %s commands", ea.Name()))
+				}
+				installedHooks = append(installedHooks, result.FilesWritten...)
+			}
+		}
+
+		if ea.HasCapability(adapterprotocol.CapSkillsInstaller) {
+			result, err := ea.InstallSkills(gitRoot, version.Version)
+			if err != nil {
+				if !quiet {
+					cli.PrintWarning(fmt.Sprintf("Could not install %s skills: %v", ea.Name(), err))
+				}
+			} else if result.Installed {
+				if !quiet {
+					cli.PrintSuccess(fmt.Sprintf("Installed %s skills", ea.Name()))
 				}
 				installedHooks = append(installedHooks, result.FilesWritten...)
 			}

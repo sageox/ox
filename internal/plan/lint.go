@@ -44,7 +44,7 @@ func LintRender(htmlBytes []byte, res Result) []Finding {
 
 var (
 	// the canonical OX marker is a focusable button named for screen readers
-	// (extensions/claude/commands/ox-plan.md: `<button aria-label="SageOx insight">`).
+	// (extensions/claude/skills/ox-plan/SKILL.md: `<button aria-label="SageOx insight">`).
 	oxMarkerRe = regexp.MustCompile(`(?i)aria-label\s*=\s*["']SageOx insight["']`)
 
 	// footer credit, e.g. "Team context enriched by SageOx" — substring match,
@@ -58,7 +58,7 @@ var (
 
 // LintBranding verifies a rendered plan HTML carries the conditional SageOx
 // attribution the html-plan skill is spec'd to produce. The contract
-// (extensions/claude/commands/ox-plan.md, "SageOx attribution — subtle, earned,
+// (extensions/claude/skills/ox-plan/SKILL.md, "SageOx attribution — subtle, earned,
 // conditional"):
 //
 //   - EARNED: when the plan carried enrichment — any deterministic badges OR

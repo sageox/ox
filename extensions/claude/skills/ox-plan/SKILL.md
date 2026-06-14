@@ -1,3 +1,19 @@
+---
+name: ox-plan
+description: >-
+  Render a SageOx team-enriched implementation plan as a beautiful,
+  self-contained HTML page for human review. Forks the html-plan quality bar
+  (Mermaid diagrams, light/dark toggle, fit-to-column diagrams, CSS swimlane
+  timelines, SageOx palette, scroll-spy nav) and adds badge-native layout: a
+  per-section badge rail, an alignment-summary strip, and source links that
+  resolve to the cited ledger artifact / ADR / open PR. Use when the user asks
+  to "render the plan", "make an HTML plan", "show the enriched plan",
+  "visualize this plan with team context", runs /ox-plan, or when `ox plan`
+  reports material signals and the user confirms a render. Whether to render at
+  all is decided by the `ox plan` JSON (signals.material, guidance) plus the
+  user's confirmation / plan.html config — not by this skill.
+---
+
 <!-- Keep behavioral "when to render" guidance lean — that belongs in the
      `ox plan` JSON output (signals.material, guidance) and in the
      <plan-enrichment-guidance> block from `ox agent prime`, not duplicated here.
@@ -5,9 +21,8 @@
      enriched HTML plan (forked from html-plan) plus the badge-native layout. That
      is substantive skill content, not command guidance. Skills are agent-specific
      wrappers; ox serves all agents — keep ox-CLI behavior in the CLI. -->
-Render a SageOx team-enriched implementation plan as a beautiful, self-contained HTML page for human review. Forks the html-plan quality bar (Mermaid diagrams, light/dark toggle, fit-to-column diagrams, CSS swimlane timelines, SageOx palette, scroll-spy nav) and adds badge-native layout: a per-section badge rail, an alignment-summary strip, and source links that resolve to the cited ledger artifact / ADR / open PR.
 
-Use when the user asks to "render the plan", "make an HTML plan", "show the enriched plan", "visualize this plan with team context", runs `/ox-plan`, or when `ox plan` reports material signals and the user confirms a render. **Whether to render at all is decided by the `ox plan` JSON (`signals.material`, `guidance`) + the user's confirmation / `plan.html` config — not by this skill.** Do not nag on trivial plans; honor the command's signal.
+**Whether to render at all is decided by the `ox plan` JSON (`signals.material`, `guidance`) + the user's confirmation / `plan.html` config — not by this skill.** Do not nag on trivial plans; honor the command's signal.
 
 ---
 

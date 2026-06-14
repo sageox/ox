@@ -481,6 +481,24 @@ func TestOutputAgentPrimeXML_ConsultFirst(t *testing.T) {
 		t.Error("consult-first must route code-provenance cues to `ox code search`")
 	}
 
+	// the Layer-1 floor must stand ALONE on Codex/Droid: no Claude-only skill or
+	// slash-command references. The consult reflex is hybrid — a thin `ox-consult`
+	// skill adds Claude auto-activation ergonomics on top — but the floor block
+	// must never point at it, or a Codex/Droid agent reads a dangling reference to
+	// a surface it can't load. Assert the block carries neither "skill" nor "/ox-".
+	consultStart := strings.Index(xml, "<consult-first>")
+	consultEnd := strings.Index(xml, "</consult-first>")
+	if consultStart < 0 || consultEnd < 0 || consultEnd < consultStart {
+		t.Fatal("malformed <consult-first> block")
+	}
+	block := xml[consultStart:consultEnd]
+	if strings.Contains(block, "skill") {
+		t.Error("consult-first floor must not reference a Claude-only skill — it must stand alone on Codex/Droid")
+	}
+	if strings.Contains(block, "/ox-") {
+		t.Error("consult-first floor must not reference a /ox- slash command — it must stand alone on Codex/Droid")
+	}
+
 	// must sit in the static (cacheable) tier — above all per-session content.
 	// The cache boundary itself is a source comment (not emitted), so anchor on
 	// <session-context>, the first per-session block in the output.
@@ -560,6 +578,124 @@ func TestOutputAgentPrimeXML_PlanEnrichmentGuidance(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestConsultRoutes_NoDriftWithSkill is the conformance contract between the
+// Layer-1 <consult-first> floor reminder and the additive `ox-consult` Claude
+// skill: both render the SAME retrieval reflex, so the skill's activation
+// description must name every corpus the floor table routes to. If a future
+// edit drops a route from the skill's frontmatter (or adds one the floor
+// doesn't carry), the two reflexes diverge — the exact drift the single-source
+// capability table exists to prevent.
+// Failure prevented: the consult reflex fires twice with different cue/route
+// lists, or the skill silently stops covering a floor cue.
+func TestConsultRoutes_NoDriftWithSkill(t *testing.T) {
+	routes := consultRoutes()
+	if len(routes) == 0 {
+		t.Fatal("expected consult routes from the floor table; got none")
+	}
+
+	// read the additive skill's frontmatter description (YAML between the first
+	// two --- fences). Path resolves from cmd/ox/ → repo root → extensions/...
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	skillPath := filepath.Join(root, "extensions", "claude", "skills", "ox-consult", "SKILL.md")
+	raw, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", skillPath, err)
+	}
+	desc := skillFrontmatterDescription(t, string(raw))
+	if desc == "" {
+		t.Fatalf("ox-consult SKILL.md has no frontmatter description")
+	}
+
+	// every corpus command the floor table routes to must be named in the
+	// skill's activation description, so the skill cannot drop a floor cue.
+	// We compare on the leading `ox <subcommand>` token of each route — the
+	// stable routing key, robust to flag/phrasing differences between the
+	// (longer) floor line and the (terser) skill description.
+	for _, r := range routes {
+		corpus := leadingOxCommand(r.Command)
+		if corpus == "" {
+			t.Errorf("route %q has no leading `ox ...` corpus command in %q", r.Cue, r.Command)
+			continue
+		}
+		if !strings.Contains(desc, corpus) {
+			t.Errorf("ox-consult skill description drifted: floor routes to %q but the skill frontmatter does not name it.\n"+
+				"floor cue: %s\nskill description: %s", corpus, r.Cue, desc)
+		}
+	}
+}
+
+// skillFrontmatterDescription returns the value of the `description:` key in a
+// SKILL.md YAML frontmatter block, with folded-scalar line continuations joined
+// into a single space-separated string. Tiny purpose-built parser — avoids a
+// YAML dependency for one field in a test.
+func skillFrontmatterDescription(t *testing.T, content string) string {
+	t.Helper()
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		t.Fatalf("SKILL.md missing opening --- frontmatter fence")
+	}
+	var inDesc bool
+	var parts []string
+	for _, line := range lines[1:] {
+		if strings.TrimSpace(line) == "---" {
+			break // end of frontmatter
+		}
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "description:"):
+			inDesc = true
+			// strip key and any inline scalar marker (>- / | / quotes)
+			rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "description:"))
+			rest = strings.TrimLeft(rest, ">|-")
+			rest = strings.TrimSpace(rest)
+			if rest != "" {
+				parts = append(parts, rest)
+			}
+		case inDesc && strings.HasPrefix(line, " "):
+			// folded continuation line of the description value
+			parts = append(parts, trimmed)
+		case inDesc:
+			// a new top-level key ends the description block
+			inDesc = false
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// leadingOxCommand extracts the `ox <subcommand>` corpus token from the start of
+// a routed-command string (e.g. "`ox session list --limit 20 ...`" → "ox session
+// list"). Returns "" if the string does not begin with a backtick-quoted ox
+// command. Used to compare the floor routing table against the skill description
+// on the stable subcommand key, ignoring trailing flags/prose.
+func leadingOxCommand(command string) string {
+	command = strings.TrimSpace(command)
+	if !strings.HasPrefix(command, "`ox ") {
+		return ""
+	}
+	inner := command[1:] // drop leading backtick
+	if end := strings.IndexByte(inner, '`'); end >= 0 {
+		inner = inner[:end]
+	}
+	// keep the first three space-delimited tokens at most: `ox <verb> <noun>`
+	fields := strings.Fields(inner)
+	if len(fields) > 3 {
+		fields = fields[:3]
+	}
+	// drop a trailing token that is a flag or a quoted arg placeholder
+	for len(fields) > 2 {
+		last := fields[len(fields)-1]
+		if strings.HasPrefix(last, "-") || strings.HasPrefix(last, `"`) {
+			fields = fields[:len(fields)-1]
+			continue
+		}
+		break
+	}
+	return strings.Join(fields, " ")
 }
 
 func TestEscapeXML_AllSpecialChars(t *testing.T) {

@@ -157,6 +157,12 @@ const (
 	// Command checks
 	CheckSlugClaudeCommands = "claude-commands"
 
+	// Skill checks
+	CheckSlugClaudeSkills = "claude-skills"
+
+	// Rules checks
+	CheckSlugAdapterRules = "adapter-rules"
+
 	// Session checks
 	CheckSlugSessionCommit      = "session-commit"
 	CheckSlugSessionPush        = "session-push"

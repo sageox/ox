@@ -92,6 +92,9 @@ type Config struct {
 	InstallCommands   func(adapterprotocol.CommandsParams) (*adapterprotocol.InstallCommandsResponse, error)
 	CheckCommands     func(adapterprotocol.CommandsParams) (*adapterprotocol.CheckCommandsResponse, error)
 	UninstallCommands func(adapterprotocol.CommandsParams) (*adapterprotocol.UninstallCommandsResponse, error)
+	InstallSkills     func(adapterprotocol.SkillsParams) (*adapterprotocol.InstallSkillsResponse, error)
+	CheckSkills       func(adapterprotocol.SkillsParams) (*adapterprotocol.CheckSkillsResponse, error)
+	UninstallSkills   func(adapterprotocol.SkillsParams) (*adapterprotocol.UninstallSkillsResponse, error)
 	Serve             func(*Server)
 }
 
@@ -284,6 +287,33 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) e
 			return cfg.UninstallCommands(p)
 		})
 
+	case "install-skills":
+		p := parseSkillsParams(args[1:])
+		return runOneShot(enc, func() (any, error) {
+			if cfg.InstallSkills == nil {
+				return nil, fmt.Errorf("install-skills not implemented")
+			}
+			return cfg.InstallSkills(p)
+		})
+
+	case "check-skills":
+		p := parseSkillsParams(args[1:])
+		return runOneShot(enc, func() (any, error) {
+			if cfg.CheckSkills == nil {
+				return nil, fmt.Errorf("check-skills not implemented")
+			}
+			return cfg.CheckSkills(p)
+		})
+
+	case "uninstall-skills":
+		p := parseSkillsParams(args[1:])
+		return runOneShot(enc, func() (any, error) {
+			if cfg.UninstallSkills == nil {
+				return nil, fmt.Errorf("uninstall-skills not implemented")
+			}
+			return cfg.UninstallSkills(p)
+		})
+
 	case "--serve":
 		if cfg.Serve == nil {
 			return fmt.Errorf("serve mode not implemented")
@@ -330,6 +360,7 @@ func printUsage(cfg Config, w io.Writer) {
 	p("  info, detect, install-hooks, check-hooks, uninstall-hooks,\n")
 	p("  install-rules, check-rules, uninstall-rules,\n")
 	p("  install-commands, check-commands, uninstall-commands,\n")
+	p("  install-skills, check-skills, uninstall-skills,\n")
 	p("  read, read-metadata, diagnose, find-session, read-from-offset,\n")
 	p("  import-session, capture-prior, --serve\n")
 	p("\nTo get started with ox:\n")
@@ -453,6 +484,21 @@ func parseRulesParams(args []string) adapterprotocol.RulesParams {
 
 func parseCommandsParams(args []string) adapterprotocol.CommandsParams {
 	p := adapterprotocol.CommandsParams{}
+	for i := 0; i < len(args)-1; i++ {
+		switch args[i] {
+		case "--repo-root":
+			p.RepoRoot = args[i+1]
+			i++
+		case "--version":
+			p.Version = args[i+1]
+			i++
+		}
+	}
+	return p
+}
+
+func parseSkillsParams(args []string) adapterprotocol.SkillsParams {
+	p := adapterprotocol.SkillsParams{}
 	for i := 0; i < len(args)-1; i++ {
 		switch args[i] {
 		case "--repo-root":

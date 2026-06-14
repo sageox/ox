@@ -127,9 +127,13 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	sb.WriteString("- The user references recent or specific work they did: \"I just pushed...\", \"this request\", \"did X fix Y?\", \"is the alert gone now?\"\n")
 	sb.WriteString("- A prior decision, a prod anomaly, or a metric/cost change — anything with a before/after.\n")
 	sb.WriteString("Route the cue to the right corpus — these are DIFFERENT retrieval modes, not interchangeable:\n")
-	sb.WriteString("- Recency / \"I just did X\" → `ox session list --limit 20 --json` (chronological; the summary is in the list, not in view). A specific recent session is the likeliest source; semantic search can rank it below older fuzzy matches and miss it.\n")
-	sb.WriteString("- Conceptual / \"did we decide or discuss X?\" → `ox query \"<question>\"` (semantic; default `--source=team` covers discussions, docs, and session history). Add `--source=all` to include code.\n")
-	sb.WriteString("- \"Who or what touched this code?\" → `ox code search \"<pattern>\"` / `ox code insights`.\n")
+	// per-cue routing rows are sourced from the capability table's floor entries
+	// so the Layer-1 reminder and the additive ox-consult skill cannot drift.
+	// Rendered from the compile-time table (no per-session state) → stays in the
+	// static cache tier, byte-identical across sessions for a given binary.
+	for _, route := range consultRoutes() {
+		fmt.Fprintf(&sb, "- %s → %s\n", route.Cue, route.Command)
+	}
 	sb.WriteString("</consult-first>\n")
 
 	// rule-promotion-guidance: nudge the agent to ask whether a project-local
@@ -544,6 +548,23 @@ var xmlEscaper = strings.NewReplacer(
 
 func escapeXML(s string) string {
 	return xmlEscaper.Replace(s)
+}
+
+// consultRoutes returns the cue→corpus routing rows for the <consult-first>
+// reminder, sourced from the capability table's floor entries. The table is the
+// single source of truth: the same floor cue set feeds the additive `ox-consult`
+// skill's activation description, so the Layer-1 reminder and the skill cannot
+// drift. Returns rows from every MechanismFloor entry that carries routes (today
+// just consult-first), preserving table order.
+func consultRoutes() []prime.ConsultRoute {
+	var routes []prime.ConsultRoute
+	for _, c := range prime.OxCapabilities() {
+		if c.MechanismClass != prime.MechanismFloor {
+			continue
+		}
+		routes = append(routes, c.ConsultRoutes...)
+	}
+	return routes
 }
 
 // writePlanEnrichmentGuidance emits the <plan-enrichment-guidance> advisory

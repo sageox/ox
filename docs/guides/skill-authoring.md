@@ -98,3 +98,5 @@ Before publishing:
 ---
 
 *For detailed design rationale, see [ai/specs/skill-activation-design.md](../specs/skill-activation-design.md).*
+
+*For ox-* skills specifically — when a body must stay thin and when thickness is allowed — see [The Thin/Thick Convention (one rule, three names)](../specs/skill-activation-design.md#the-thinthick-convention-one-rule-three-names).*

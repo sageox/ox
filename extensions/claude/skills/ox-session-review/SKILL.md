@@ -1,8 +1,19 @@
+---
+name: ox-session-review
+description: >-
+  Audit every session in the project ledger for quality, then offer cleanup and
+  regeneration. Carries the operational knowledge from the 2026-04-25 cleanup
+  (the cache-only invariant and a failure-mode watch-list) that no single ox
+  subcommand backs. Use when the user asks to "review the ledger sessions",
+  "audit session quality", "clean up bad session summaries", "regenerate session
+  summaries", runs /ox-session-review, or wants to find and fix sessions with
+  missing/poor titles, empty summaries, or broken metadata.
+---
+
 <!-- Keep this file thin on behavioral guidance that belongs in `ox` CLI JSON
      output (guidance field). Skills are agent-specific wrappers; ox serves all
      agents (Codex, etc.). This skill is intentionally richer than most because
      the audit + regeneration flow is not backed by a single ox subcommand. -->
-Audit every session in the project ledger for quality, then offer cleanup and regeneration.
 
 This skill carries the operational knowledge from the 2026-04-25 cleanup
 (see PRs #559–#564 and bd ox-b917, ox-9o29, ox-4ncz, ox-1i3k). Read the

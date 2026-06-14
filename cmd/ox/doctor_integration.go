@@ -448,3 +448,40 @@ func detectAmp() bool {
 func checkAmpHooks(fix bool) checkResult {
 	return checkAgentHooks(&AmpAgent{}, "Amp", fix)
 }
+
+// checkInstructionFileMarkers checks that all detected agent instruction files
+// (beyond AGENTS.md/CLAUDE.md) have ox:prime markers injected.
+func checkInstructionFileMarkers() checkResult {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck("Instruction file markers", "not in git repo", "")
+	}
+
+	targets := DetectedInstructionFiles(gitRoot)
+	if len(targets) == 0 {
+		return SkippedCheck("Instruction file markers", "no agent instruction files detected", "")
+	}
+
+	var missing []string
+	for _, t := range targets {
+		// skip primary files — those are covered by checkAgentsIntegration
+		if primaryInstructionFiles[t.Path] {
+			continue
+		}
+		absPath := filepath.Join(gitRoot, t.Path)
+		if !fileExists(absPath) {
+			continue
+		}
+		if !HasInstructionFileMarker(absPath) {
+			missing = append(missing, t.Path)
+		}
+	}
+
+	if len(missing) == 0 {
+		return SkippedCheck("Instruction file markers", "all detected files have markers", "")
+	}
+
+	return WarningCheck("Instruction file markers",
+		fmt.Sprintf("%d file(s) missing ox:prime markers", len(missing)),
+		fmt.Sprintf("Files without markers: %s\n        → Run `ox init` to inject markers", strings.Join(missing, ", ")))
+}

@@ -86,6 +86,80 @@ func TestHandleCheckRules_Installed(t *testing.T) {
 	assert.Empty(t, resp.Stale)
 }
 
+// TestHandleCheckRules_FrontmatterBodyEdited_ReportsStale is the regression
+// test for Bug 2 (frontmatter staleness blindness) on droid's .factory/rules/.
+// Every rule we install sets Description, so agentx's buildContent prepends YAML
+// frontmatter BEFORE the stamp line; agentx.IsRuleStale only inspects line 1
+// and reports a hand-edited body fresh forever. handleCheckRules must scan all
+// lines for the stamp and detect the drift.
+// Failure prevented: a tampered/outdated .factory/rules/ox.md passes doctor
+// silently, so installed Layer-2 guidance drifts from the live binary.
+func TestHandleCheckRules_FrontmatterBodyEdited_ReportsStale(t *testing.T) {
+	dir := t.TempDir()
+	params := adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.8.0"}
+
+	_, err := handleInstallRules(params)
+	require.NoError(t, err)
+
+	clean, err := handleCheckRules(params)
+	require.NoError(t, err)
+	require.NotContains(t, clean.Stale, "ox.md", "precondition: freshly installed rule must not be stale")
+
+	// Appending to the body changes the stamped content (the stamp hash covers
+	// the body WITHOUT frontmatter) while leaving frontmatter and the stamp line
+	// intact — exactly the drift agentx's first-line check cannot see.
+	rulePath := filepath.Join(dir, ".factory", "rules", "ox.md")
+	orig, err := os.ReadFile(rulePath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(rulePath, append(orig, []byte("\n\nhand-edited drift\n")...), 0o644))
+
+	resp, err := handleCheckRules(params)
+	require.NoError(t, err)
+
+	assert.Contains(t, resp.Stale, "ox.md", "edited frontmatter'd body must be reported Stale (Bug 2)")
+	assert.False(t, resp.Installed, "Installed must be false when a rule has drifted")
+}
+
+// TestHandleCheckRules_NamespacedBodyEdited_ReportsStale verifies Bug 2 also
+// covers the namespaced sageox/use-team-context.md pointer rule on droid.
+// Failure prevented: a drifted team-context pointer rule passes doctor while
+// teaching the agent stale discovery instructions.
+func TestHandleCheckRules_NamespacedBodyEdited_ReportsStale(t *testing.T) {
+	dir := t.TempDir()
+	params := adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.8.0"}
+
+	_, err := handleInstallRules(params)
+	require.NoError(t, err)
+
+	rulePath := filepath.Join(dir, ".factory", "rules", "sageox", "use-team-context.md")
+	orig, err := os.ReadFile(rulePath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(rulePath, append(orig, []byte("\n\ndrift\n")...), 0o644))
+
+	resp, err := handleCheckRules(params)
+	require.NoError(t, err)
+
+	assert.Contains(t, resp.Stale, "sageox/use-team-context.md", "edited namespaced body must be reported Stale (Bug 2)")
+	assert.False(t, resp.Installed)
+}
+
+// TestHandleCheckRules_UserManagedRuleNotStale verifies a rule file with no
+// agentx stamp is never reported stale — we only manage files we stamped.
+// Failure prevented: a no-op --fix loop where doctor flags a user-owned file
+// forever and never converges.
+func TestHandleCheckRules_UserManagedRuleNotStale(t *testing.T) {
+	dir := t.TempDir()
+	rulesDir := filepath.Join(dir, ".factory", "rules")
+	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "ox.md"),
+		[]byte("# my own ox rule, no stamp\n"), 0o644))
+
+	resp, err := handleCheckRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.8.0"})
+	require.NoError(t, err)
+
+	assert.NotContains(t, resp.Stale, "ox.md", "unstamped user-managed file must never be flagged stale")
+}
+
 // --- C. Uninstall lifecycle ---
 
 // TestHandleUninstallRules_AgentxLimitationOnTopLevelOxMd documents that

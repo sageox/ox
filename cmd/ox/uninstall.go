@@ -689,15 +689,24 @@ func cleanupAgentFiles(gitRoot string) error {
 				slog.Warn("failed to remove rules", "adapter", ea.Name(), "error", err)
 			}
 		}
+		if ea.HasCapability(adapterprotocol.CapSkillsInstaller) {
+			if uninstallDryRun {
+				slog.Info("would remove skills", "adapter", ea.Name())
+			} else if _, err := ea.UninstallSkills(gitRoot, ""); err != nil {
+				slog.Warn("failed to remove skills", "adapter", ea.Name(), "error", err)
+			}
+		}
 	}
 
-	// TODO: implement cleanup for other agent integrations:
-	// - .claude/settings.json (project-level shared hooks, use existing hooks_claude.go helpers)
-	// - .opencode/plugin/ox-prime.ts (project-level, use existing hooks_opencode.go helpers)
-	// - .cursorrules (SageOx sections if any)
-	// - .windsurfrules (SageOx sections if any)
-	// must preserve user content, only remove SageOx additions
-	slog.Debug("cleanupAgentFiles", "git_root", gitRoot, "status", "partial implementation")
+	// remove ox:prime markers from all known agent instruction files
+	removeResults, removeErr := RemoveInstructionFileMarkers(gitRoot)
+	if removeErr != nil {
+		slog.Warn("failed to remove instruction file markers", "error", removeErr)
+	} else {
+		for _, r := range removeResults {
+			slog.Debug("instruction file marker removal", "file", r.File, "status", r.Status, "agent", r.AgentType)
+		}
+	}
 	return nil
 }
 

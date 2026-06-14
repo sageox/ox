@@ -445,8 +445,8 @@ func TestSanitizedEnv_DenylistWinsOverRequiredEnv(t *testing.T) {
 }
 
 func TestSafeCommand_PresetsSanitizedEnv(t *testing.T) {
-	// Failure prevented: SafeCommand spawns a child with the full os.Environ(),
-	// leaking whatever secrets the parent process holds.
+	// Failure prevented: SafeCommand spawns a child with the full inherited
+	// parent environment, leaking whatever secrets the parent process holds.
 	t.Setenv("SAGEOX_TOKEN", "tok-leak-me")
 	t.Setenv("HOME", "/home/dev")
 

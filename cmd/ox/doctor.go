@@ -688,6 +688,12 @@ func runDoctorChecks(parent context.Context, opts doctorOptions) []checkCategory
 	integrationChecks := []checkResult{
 		checkAgentFileExists(),
 		checkAgentsIntegrationWithFix(os.Stdout, opts.shouldFix(CheckSlugClaudeCodeHooks)),
+		checkInstructionFileMarkers(),
+	}
+	// detect adapter rules drift across all rules-installing adapters (claude, droid);
+	// runs unconditionally and is skipped gracefully when no rules adapter is present
+	if rulesCheck := checkAdapterRules(opts.shouldFix(CheckSlugAdapterRules)); !rulesCheck.skipped {
+		integrationChecks = append(integrationChecks, rulesCheck)
 	}
 	if detectClaudeCode() {
 		integrationChecks = append(integrationChecks, checkClaudeCodeHooks(opts.shouldFix(CheckSlugClaudeCodeHooks)))
@@ -718,6 +724,8 @@ func runDoctorChecks(parent context.Context, opts doctorOptions) []checkCategory
 		}
 		// verify ox-* slash commands are installed in .claude/commands/
 		integrationChecks = append(integrationChecks, checkClaudeCommands(opts.shouldFix(CheckSlugClaudeCommands)))
+		// detect installed skills drift in .claude/skills/ox-* (claude-only surface)
+		integrationChecks = append(integrationChecks, checkClaudeSkills(opts.shouldFix(CheckSlugClaudeSkills)))
 	}
 	if detectOpenCode() {
 		integrationChecks = append(integrationChecks, checkOpenCodeHooks(opts.shouldFix(CheckSlugOpenCodeHooks)))

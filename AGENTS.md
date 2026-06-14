@@ -194,7 +194,7 @@ Generated from cobra definitions: `go build -o ox-tmp ./cmd/ox && ./ox-tmp docs 
 - Follow XDG config principles for user-level settings
 - Think heavily of DX, especially around cognitive overload in UX
 - Modern 2025 TUI best practices. Let Edward Tufte inspire data visualization
-- **`ox-*` skill files** (shipped by `ox init` as wrappers for `ox` CLI commands) must be thin relays — agent behavioral guidance belongs in the command's JSON output (`guidance` field), not duplicated in the skill. Repo-local skills that don't wrap an `ox` command are not covered by this rule.
+- **`ox-*` skill files** (shipped by `ox init` as wrappers for `ox` CLI commands) must be thin relays — agent behavioral guidance belongs in the command's JSON output (`guidance` field), not duplicated in the skill. Thin-relay is one rule with three names: a thin-relay violation IS a cross-agent gap (Codex/Droid install no commands, so Claude-body-only behavior never reaches them) AND a staleness risk (the live binary's `guidance` can't drift; a copied, `ox-hash`-stamped body can). Thickness is allowed ONLY for agent-side orchestration not backed by a single `ox` subcommand — e.g. the `ox-plan` HTML rendering spec and the `ox-session-review` audit/regen flow. Details + decision checklist: [docs/specs/skill-activation-design.md](docs/specs/skill-activation-design.md). Repo-local skills that don't wrap an `ox` command are not covered by this rule.
 - Do not use Terraform tools from HashiCorp; use OpenTofu (BSL licensing)
 - Don't do git push
 - CLI docs version must always match CLI version

@@ -473,6 +473,51 @@ func (ea *ExternalAdapter) UninstallCommands(repoRoot, version string) (*adapter
 	return &result, nil
 }
 
+// InstallSkills calls the adapter's install-skills subcommand.
+func (ea *ExternalAdapter) InstallSkills(repoRoot, version string) (*adapterprotocol.InstallSkillsResponse, error) {
+	out, err := ea.execOneShot("install-skills", "--repo-root", repoRoot, "--version", version)
+	if err != nil {
+		return nil, err
+	}
+
+	var result adapterprotocol.InstallSkillsResponse
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
+	}
+
+	return &result, nil
+}
+
+// CheckSkills calls the adapter's check-skills subcommand.
+func (ea *ExternalAdapter) CheckSkills(repoRoot, version string) (*adapterprotocol.CheckSkillsResponse, error) {
+	out, err := ea.execOneShot("check-skills", "--repo-root", repoRoot, "--version", version)
+	if err != nil {
+		return nil, err
+	}
+
+	var result adapterprotocol.CheckSkillsResponse
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
+	}
+
+	return &result, nil
+}
+
+// UninstallSkills calls the adapter's uninstall-skills subcommand.
+func (ea *ExternalAdapter) UninstallSkills(repoRoot, version string) (*adapterprotocol.UninstallSkillsResponse, error) {
+	out, err := ea.execOneShot("uninstall-skills", "--repo-root", repoRoot, "--version", version)
+	if err != nil {
+		return nil, err
+	}
+
+	var result adapterprotocol.UninstallSkillsResponse
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
+	}
+
+	return &result, nil
+}
+
 // --- internal helpers ---
 
 func (ea *ExternalAdapter) callInfo() (*adapterprotocol.InfoResponse, error) {
