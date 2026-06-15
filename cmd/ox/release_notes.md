@@ -11,12 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ox installs its skills and commands into Codex and Droid, not just Claude Code** — capability injection now follows an explicit two-layer model with a cross-agent conformance test, so the portable "floor" (prime, consult-first recall, plan enrichment, session review, cart lifecycle) reaches every supported agent, and the per-agent ergonomic surfaces can no longer silently drift or orphan.
+- **`ox import --kb <slug>` brings media and video-URL import to Knowledge Bubbles** — import now reaches bubbles at parity with team contexts (mutually exclusive with `--team`), streaming large media files through a presigned upload so they never load fully into memory.
+- **`ox code prs` ranks indexed pull requests for triage** — a new deterministic view (no LLM, no live API) that surfaces the most-stalled open PRs first, each row carrying age, idle-days, comment/reviewer/discussant counts, and labels (`--sort age|activity`, `--state`). Backed by ADR-019 phase-1 resolved `symbol_edges`, which also make `ox code calls` / `calledby` more accurate.
 - **Knowledge Bubbles now appear in `ox daemon status`** — the daemon reports every bubble it has synced to disk (slug, type, freshness), plus a badge showing whether *this* daemon keeps them fresh or a sibling daemon does. Previously the daemon synced bubbles silently with no way to see what was happening.
 - **`ox doctor` gained knowledge-bubble repo health checks at parity with ledgers and team contexts** — detects bubbles the cloud lists but that were never cloned, bubbles wedged in a stuck merge/rebase (which silently block sync for every project), and bubbles whose sparse-checkout dropped `.sageox`. Repairs route through the daemon so they never collide with an in-flight sync.
 
 ### Changed
 
 - **Knowledge Bubbles are now first-class in daemon status output** — the JSON `bubbles[]` array and a human-readable "Knowledge Bubbles" section make it clear which bubbles are local, fresh, and who is responsible for syncing them.
+- **Rendered plans own their SageOx brand surfaces** — `ox plan render` now emits the OX icon, a single subtle corner wordmark, and deterministic inline reference markers itself, so agents no longer hand-roll look-alike branding that drifts or duplicates. A marker means "SageOx has context on this," never a verdict — whether a plan aligns with or amends a decision stays the agent's call.
+
+### Fixed
+
+- **`ox daemon` no longer holds one open file descriptor per tracked file** — the recursive fsnotify/kqueue watcher opened a descriptor for every tracked file *and* directory, so FD usage scaled with repo size (≈11k on a large repo — enough that a few daemons together approached half the machine's FD table). It's replaced by lightweight `git status` polling that holds zero watch descriptors, honors `.gitignore` for free, and feeds the exact same downstream change pipeline. `ox doctor` also gained an absolute FD-pressure ceiling so a watcher-class regression trips regardless of the shell's raised limit.
+- **`ox daemon status` reports garbage-collection state correctly** — GC timestamps now persist to disk, so a daemon restart no longer reads every workspace as "gc due" and needlessly reclones it once per hour. The misleading "gc in 6d ago" / "(last 3d ago ago)" wording is fixed.
 
 ## [0.10.0] - 2026-06-11
 
