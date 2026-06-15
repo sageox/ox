@@ -123,6 +123,48 @@ This ADR governs the following surfaces. Downstream tasks modify them against th
 - **Cost: a new declarative table to author and keep in sync.** This is accepted: per-adapter authoring of the agent-tuned activation string and the Claude skill body is **not** eliminated by this decision (that was the rejected content-store framing). The table carries structure, not content.
 - **Next work (separately tracked under epic `ox-fvjh`).** Audit the 16 command files for floor behavior trapped in Layer 2 (`ox-cart-start`'s claim/start guidance and `ox-session-stop`'s sync/async branching are known suspects), move trapped floor into CLI JSON, prototype the table + conformance test, and codify the thin/thick rule into the AI-editable spec. The floor audit's per-command findings live in the companion appendix: [ADR-023 Appendix A — Floor Audit](./ADR-023-appendix-A-floor-audit.md).
 
+## The ox / agentx boundary
+
+A natural question once the capability table existed: should the cross-agent capability matrix live in the shared `agentx` library (`github.com/sageox/agentx`) instead of ox? The answer is a clean seam, and naming it prevents future drift in *both* directions (ox re-implementing agentx machinery; agentx growing product-specific knowledge it has no business holding).
+
+The matrix is a **join of two halves** — generic columns owned by agentx, product-specific rows owned by ox.
+
+```mermaid
+flowchart LR
+    subgraph AX["agentx — generic MACHINERY (columns)"]
+        AXC["per-agent Capabilities flags<br/>(Hooks, MCPServers, SystemPrompt,<br/>ProjectContext, CustomCommands, Rules)"]
+        AXM["detect · registry · hooks · command<br/>and rules managers · stamp and drift"]
+    end
+    subgraph OX["ox — product CONTRACT (rows)"]
+        OXR["capability rows<br/>(consult-first, ox-plan,<br/>ox-session-review, ...)"]
+        OXF["the floor concept · adapter RPC<br/>protocol · conformance test"]
+    end
+    AXC -. "columns" .-> JOIN["capability matrix<br/>(internal/prime)"]
+    OXR -. "rows" .-> JOIN
+```
+
+- **agentx is the generic multi-agent machinery.** It supports ~17 agents (`agents/*.go` — claudecode, codex, droid, cursor, copilot, gemini, …) plus orchestrators (`orchestrators/` — openclaw, conductor, gascity), and provides: detection/registry (`agentx.CurrentAgent` in `registry.go`, the `Detector` interface in `agent.go`), lifecycle/hooks (`HookManager`, `EventPhaseMap` in `agent.go`), command/rule managers (`CommandManager`, `RulesManager` in `agent.go`), content stamping (`StampedContent`, `ContentHash`, `CompareVersions`, `DefaultStampPrefix = "agentx"` in `agent.go`), and a per-agent `Capabilities` struct of bool flags (`Hooks`, `MCPServers`, `SystemPrompt`, `ProjectContext`, `CustomCommands`, `Rules` — `agent.go:287`). So agentx **already owns the per-agent "columns"** (which surface types each agent supports) and the install/stamp/drift mechanics.
+- **ox owns the product-specific "rows" plus the conformance contract.** The table's actual entries (`consult-first`, `ox-plan`, `ox-session-review`, … in `internal/prime/capability_table.go:OxCapabilities`), the **floor** concept (Layer 1 = `ox agent prime` output, ox-branded, assembled in `cmd/ox/agent_prime_xml.go`), the adapter RPC protocol (`pkg/adapterprotocol`), and the conformance test asserting ox's surfaces map to ox's floor (`internal/prime/conformance_test.go`, `internal/prime/capability_table_test.go`). agentx knows nothing about "the floor" or "consult-first", so these correctly live in ox.
+- **The matrix is the join: ox rows × agentx columns.** The generic half (columns + mechanism) is agentx's; the product half (rows + floor + conformance) is ox's. This is why the capability table lives in `internal/prime`, not agentx.
+
+### One piece should be upstreamed
+
+`internal/adapterstamp` (`ExtractStampAnywhere` / `AppendFrontmatterStale` / `RemoveTamperedRules`) is a **workaround for an agentx limitation, not a permanent ox concern.** agentx's `ExtractCommandHash` / `ExtractStampVersion` read only the FIRST line of a file (`firstLine()` in agentx `agent.go:833`), but ox stamps rules and skills *after* YAML frontmatter — the frontmatter must be the first bytes so Claude can parse `name`/`description` — so the stamp is never on line 1 and staleness was structurally invisible. ox's own code says so: `cmd/ox-adapter-claude-code/rules.go:84` ("Drop this block when agentx fixes the first-line limitation upstream") and the same comment in `cmd/ox-adapter-droid/rules.go:69`.
+
+**Tech debt to upstream:** teach agentx's stamp extractors to be frontmatter-aware (scan for the stamp on any line, as `ExtractStampAnywhere` already does). After that lands upstream, `internal/adapterstamp` can be deleted and both adapters collapse back to calling agentx directly.
+
+## Implementation notes (lessons from ox-fvjh)
+
+Non-obvious nuances surfaced while implementing the model. Each is load-bearing — getting it wrong silently degrades the cross-agent guarantee rather than failing loudly.
+
+- **Doctor checks must be CALLED, not just registered.** `RegisterDoctorCheck` (`cmd/ox/doctor_types.go:60`) in a check's `init()` only populates `DoctorCheckRegistry` with metadata and the `shouldFix` lookup — it does NOT schedule execution. Execution requires an explicit call in `runDoctorChecks` (e.g. `checkAdapterRules(opts.shouldFix(...))` at `cmd/ox/doctor.go:695`). *Why it matters:* the rules/skills drift checks were initially dead — registered but never invoked — so drift went unreported.
+- **Rules-drift must iterate ALL rules-installing adapters, not just the first.** Both claude-code and droid declare `CapRulesInstaller` (`main.go:82` / `main.go:58`), unlike commands (claude-only). `findRulesAdapters` selects *every* such adapter and `checkAdapterRules` (`cmd/ox/doctor_rules.go:18`) runs UNCONDITIONALLY — not gated on Claude-Code detection. *Why it matters:* a droid-only repo is still covered; gating on Claude would have left droid drift invisible.
+- **Skills stamp AFTER the closing `---`.** YAML frontmatter (`name`/`description`) must be the first bytes so Claude can parse it; the `ox-hash` stamp goes on the line after the closing fence (`stampedSkillContent` / `splitFrontmatter` in `cmd/ox-adapter-claude-code/skills.go:99`). *Why it matters:* this is the *same* constraint that defeated agentx's line-1 staleness check — the workaround and the layout are two sides of one fact.
+- **Conformance is bidirectional.** table→disk (every table id resolves to a real file: `TestOxCapabilitiesIDResolves`) AND disk→table (every installed surface is a table row OR in the documented `additiveSkills` allowlist: `TestEveryOnDiskSurfaceIsAccounted`) — both in `internal/prime/capability_table_test.go`, against `OxCapabilities()` / `additiveSkills` in `internal/prime/capability_table.go`. `ox-consult` is the one allowlisted additive skill (its floor is the `consult-first` row's `ConsultRoutes`). *Why it matters:* a one-directional test lets a future un-accounted skill silently escape the contract.
+- **Honest no-op reporting.** `ox init` distinguishes "already up to date" from a false "Installed" by gating on `len(result.FilesWritten) > 0` (`cmd/ox/init.go:1919` for commands, `:1940` for skills); the install handlers populate `FilesWritten` with only the files actually written. *Why it matters:* re-running `ox init` no longer lies about having reinstalled unchanged files.
+- **Lifecycle symmetry plus self-cleanup.** `ox uninstall` removes skills (`UninstallSkills`, called at `cmd/ox/uninstall.go:695`); installing skills prunes ox-stamped legacy command files for migrated playbooks (`cleanupLegacyCommandFilesForSkills` in `cmd/ox-adapter-claude-code/skills.go:214`) — only ox-stamped files (`ExtractStampAnywhere` hash present), never user-authored ones. *Why it matters:* migrating a playbook from command to skill leaves no orphaned duplicate, and never deletes a coworker's own command file.
+- **Floor remediation pattern.** Portable intent goes in CLI JSON `guidance` (reaches all agents via Layer 1); the host-specific *mechanism* stays a Layer-2 note in the command body. Example: `cartStartGuidance` (`cmd/ox/carts.go:24`) carries the portable "name this work unit after the cart title" intent, while Claude's `/rename` is documented only in the command body. *Why it matters:* the floor reaches Codex/Droid; the Claude-only mechanism never becomes load-bearing.
+
 ## References
 
 - `~/.claude/plans/system-instruction-you-are-working-wobbly-fox.md` — the source design note this ADR distills and supersedes (retained, not deleted).
