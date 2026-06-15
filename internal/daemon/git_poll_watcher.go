@@ -8,8 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
-
-	"github.com/fsnotify/fsnotify"
 )
 
 // gitPollInterval is how often GitPollWatcher samples `git status`. Kept at or
@@ -138,7 +136,7 @@ func (w *GitPollWatcher) poll(ctx context.Context, baseline bool) {
 		}
 
 		if emit && !baseline {
-			w.accumulator.AddEvent(path, porcelainOp(ct), false)
+			w.accumulator.AddChange(path, ct, false)
 		}
 	}
 
@@ -216,21 +214,5 @@ func porcelainChangeType(code string) ChangeType {
 		return ChangeCreated
 	default:
 		return ChangeModified
-	}
-}
-
-// porcelainOp returns the fsnotify.Op whose classifyChange mapping reproduces
-// ct, so synthesized poll events flow through the accumulator's existing
-// classify/collapse logic exactly as fsnotify events did.
-func porcelainOp(ct ChangeType) fsnotify.Op {
-	switch ct {
-	case ChangeCreated:
-		return fsnotify.Create
-	case ChangeDeleted:
-		return fsnotify.Remove
-	case ChangeRenamed:
-		return fsnotify.Rename
-	default:
-		return fsnotify.Write
 	}
 }

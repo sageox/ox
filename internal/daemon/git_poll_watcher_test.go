@@ -153,31 +153,6 @@ func TestPorcelainChangeType(t *testing.T) {
 	}
 }
 
-// TestPorcelainOpRoundTrip verifies that feeding porcelainOp(ct) through the
-// accumulator's classifyChange logic yields the original ChangeType. This is the
-// contract that lets synthesized poll events reuse the fsnotify-shaped pipeline
-// unchanged.
-// Failure prevented: an op-mapping regression makes every poll event classify as
-// Modified, erasing created/deleted/renamed distinctions downstream.
-func TestPorcelainOpRoundTrip(t *testing.T) {
-	for _, ct := range []ChangeType{ChangeCreated, ChangeModified, ChangeDeleted, ChangeRenamed} {
-		t.Run(string(ct), func(t *testing.T) {
-			acc := NewChangeAccumulator(10 * time.Millisecond)
-			defer acc.Stop()
-
-			acc.AddEvent("p", porcelainOp(ct), false)
-
-			var settled []FileChange
-			require.Eventually(t, func() bool {
-				settled = acc.DrainSettled()
-				return len(settled) == 1
-			}, time.Second, 5*time.Millisecond)
-
-			assert.Equal(t, ct, settled[0].ChangeType)
-		})
-	}
-}
-
 // --- B. End-to-end against a real git repo ---
 
 // newPollWatcher wires a watcher to a fresh accumulator over a real repo at dir.

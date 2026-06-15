@@ -3,8 +3,6 @@ package daemon
 import (
 	"sync"
 	"time"
-
-	"github.com/fsnotify/fsnotify"
 )
 
 // ChangeType categorizes a filesystem change.
@@ -41,10 +39,10 @@ type FileChange struct {
 	Timestamp  time.Time
 }
 
-// ChangeAccumulator batches raw filesystem events into settled change sets.
-// Inspired by Watchman's PendingCollection + settle mechanism. Events are fed
-// in by a producer (the GitPollWatcher) via AddEvent; consumers either react to
-// the onSettled callback (dirty-overlay debouncer) or pull batches with
+// ChangeAccumulator batches classified filesystem changes into settled change
+// sets. Inspired by Watchman's PendingCollection + settle mechanism. Changes are
+// fed in by a producer (the GitPollWatcher) via AddChange; consumers either react
+// to the onSettled callback (dirty-overlay debouncer) or pull batches with
 // DrainSettled (file-change murmurs).
 type ChangeAccumulator struct {
 	mu           sync.Mutex
@@ -64,8 +62,11 @@ func NewChangeAccumulator(settlePeriod time.Duration) *ChangeAccumulator {
 	}
 }
 
-// AddEvent adds a filesystem event, collapsing with existing pending changes.
-func (a *ChangeAccumulator) AddEvent(relPath string, op fsnotify.Op, isDir bool) {
+// AddChange records a classified filesystem change, collapsing with any pending
+// change for the same path. Producers pass a ChangeType directly — e.g.
+// GitPollWatcher maps git status codes via porcelainChangeType — so the
+// accumulator no longer re-derives the type from a raw fsnotify op.
+func (a *ChangeAccumulator) AddChange(relPath string, changeType ChangeType, isDir bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -74,7 +75,6 @@ func (a *ChangeAccumulator) AddEvent(relPath string, op fsnotify.Op, isDir bool)
 	}
 
 	now := time.Now()
-	changeType := a.classifyChange(relPath, op)
 
 	existing, exists := a.pending[relPath]
 	if exists {
@@ -95,24 +95,6 @@ func (a *ChangeAccumulator) AddEvent(relPath string, op fsnotify.Op, isDir bool)
 		Timestamp:  now,
 	}
 	a.resetSettleTimer()
-}
-
-// classifyChange maps fsnotify ops to ChangeType.
-func (a *ChangeAccumulator) classifyChange(_ string, op fsnotify.Op) ChangeType {
-	switch {
-	case op&fsnotify.Create != 0:
-		return ChangeCreated
-	case op&fsnotify.Remove != 0:
-		return ChangeDeleted
-	case op&fsnotify.Rename != 0:
-		return ChangeRenamed
-	case op&fsnotify.Write != 0:
-		return ChangeModified
-	case op&fsnotify.Chmod != 0:
-		return ChangeModified
-	default:
-		return ChangeModified
-	}
 }
 
 // collapseChange applies Watchman-inspired aggregation rules.

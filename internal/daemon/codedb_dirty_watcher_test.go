@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -486,7 +485,7 @@ func TestRefreshDirtyOverlay_NoDoubleGoroutine(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "dirtyRefreshing flag not cleared after goroutine exited")
 }
 
-// --- D. End-to-end pipeline: fsnotify → settle → debounce → dirty overlay rebuilt ---
+// --- D. End-to-end pipeline: change event → settle → debounce → dirty overlay rebuilt ---
 // These tests verify the full integration pipeline that makes dirty search results
 // appear after file edits. They use real git repos and codedb indexes.
 
@@ -520,7 +519,7 @@ func initDirtyTestRepo(t *testing.T) string {
 }
 
 // TestDirtyPipeline_E2E_FsnotifyToSearchResult verifies the complete pipeline:
-// fsnotify event → ChangeAccumulator.settle() → DirtyOverlayDebouncer.OnSettled() →
+// change → ChangeAccumulator.settle() → DirtyOverlayDebouncer.OnSettled() →
 // debounce timer → RefreshDirtyOverlay() → BuildDirtyIndex() → search finds dirty file.
 // Failure prevented: wiring bug where file edits never update the dirty overlay.
 func TestDirtyPipeline_E2E_FsnotifyToSearchResult(t *testing.T) {
@@ -573,15 +572,15 @@ func TestDirtyPipeline_E2E_FsnotifyToSearchResult(t *testing.T) {
 	defer acc.Stop()
 	acc.SetOnSettled(debouncer.OnSettled)
 
-	// simulate fsnotify event for the dirty file
-	acc.AddEvent(filepath.Join(repoDir, "e2e_dirty.go"), fsnotify.Write, false)
+	// simulate a change event for the dirty file
+	acc.AddChange(filepath.Join(repoDir, "e2e_dirty.go"), ChangeModified, false)
 
 	// wait for the full pipeline to complete
 	select {
 	case <-refreshDone:
 		// pipeline fired — RefreshDirtyOverlay was called
 	case <-time.After(5 * time.Second):
-		t.Fatal("pipeline did not complete: fsnotify → settle → debounce → RefreshDirtyOverlay")
+		t.Fatal("pipeline did not complete: change → settle → debounce → RefreshDirtyOverlay")
 	}
 
 	// wait for the goroutine to finish (flag release)
@@ -601,7 +600,7 @@ func TestDirtyPipeline_E2E_FsnotifyToSearchResult(t *testing.T) {
 
 	results, err := db2.Search(context.Background(), "e2e_pipeline_dirty_sentinel_xkcd42")
 	require.NoError(t, err)
-	require.NotEmpty(t, results, "dirty file content should appear in search after full fsnotify → debounce → refresh pipeline")
+	require.NotEmpty(t, results, "dirty file content should appear in search after full change → debounce → refresh pipeline")
 	assert.Equal(t, "e2e_dirty.go", results[0].FilePath)
 }
 

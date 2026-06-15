@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -45,8 +44,8 @@ func TestPublisher_DrainAccumulatesIntoPending(t *testing.T) {
 
 	p := NewFileChangeMurmurPublisher(acc, pub, "/tmp/ledger", "/tmp/project", slogDiscard())
 
-	acc.AddEvent("src/a.go", fsnotify.Write, false)
-	acc.AddEvent("src/b.go", fsnotify.Create, false)
+	acc.AddChange("src/a.go", ChangeModified, false)
+	acc.AddChange("src/b.go", ChangeCreated, false)
 
 	require.Eventually(t, func() bool {
 		p.drain()
@@ -64,7 +63,7 @@ func TestPublisher_PublishClearsPending(t *testing.T) {
 
 	p := NewFileChangeMurmurPublisher(acc, pub, "/tmp/ledger", "/tmp/project", slogDiscard())
 
-	acc.AddEvent("src/main.go", fsnotify.Write, false)
+	acc.AddChange("src/main.go", ChangeModified, false)
 
 	require.Eventually(t, func() bool {
 		p.drain()
@@ -100,14 +99,14 @@ func TestPublisher_CollapsesDuplicatePaths(t *testing.T) {
 	p := NewFileChangeMurmurPublisher(acc, pub, "/tmp/ledger", "/tmp/project", slogDiscard())
 
 	// first batch
-	acc.AddEvent("src/main.go", fsnotify.Write, false)
+	acc.AddChange("src/main.go", ChangeModified, false)
 	require.Eventually(t, func() bool {
 		p.drain()
 		return p.PendingCount() == 1
 	}, 2*time.Second, 10*time.Millisecond)
 
 	// second batch — same file
-	acc.AddEvent("src/main.go", fsnotify.Write, false)
+	acc.AddChange("src/main.go", ChangeModified, false)
 	require.Eventually(t, func() bool {
 		p.drain()
 		return p.PendingCount() == 1
@@ -127,13 +126,13 @@ func TestPublisher_CreateThenDeleteSuppressed(t *testing.T) {
 
 	p := NewFileChangeMurmurPublisher(acc, pub, "/tmp/ledger", "/tmp/project", slogDiscard())
 
-	acc.AddEvent("tmp.go", fsnotify.Create, false)
+	acc.AddChange("tmp.go", ChangeCreated, false)
 	require.Eventually(t, func() bool {
 		p.drain()
 		return p.PendingCount() == 1
 	}, 2*time.Second, 10*time.Millisecond)
 
-	acc.AddEvent("tmp.go", fsnotify.Remove, false)
+	acc.AddChange("tmp.go", ChangeDeleted, false)
 	require.Eventually(t, func() bool {
 		p.drain()
 		return p.PendingCount() == 0

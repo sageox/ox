@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,9 +23,9 @@ func TestAccumulator_CollapseWrites(t *testing.T) {
 	acc := NewChangeAccumulator(50 * time.Millisecond)
 	defer acc.Stop()
 
-	acc.AddEvent("src/config.go", fsnotify.Write, false)
-	acc.AddEvent("src/config.go", fsnotify.Write, false)
-	acc.AddEvent("src/config.go", fsnotify.Write, false)
+	acc.AddChange("src/config.go", ChangeModified, false)
+	acc.AddChange("src/config.go", ChangeModified, false)
+	acc.AddChange("src/config.go", ChangeModified, false)
 
 	var changes []FileChange
 	require.Eventually(t, func() bool {
@@ -42,8 +41,8 @@ func TestAccumulator_CreateThenDelete(t *testing.T) {
 	acc := NewChangeAccumulator(50 * time.Millisecond)
 	defer acc.Stop()
 
-	acc.AddEvent("tmp/scratch.txt", fsnotify.Create, false)
-	acc.AddEvent("tmp/scratch.txt", fsnotify.Remove, false)
+	acc.AddChange("tmp/scratch.txt", ChangeCreated, false)
+	acc.AddChange("tmp/scratch.txt", ChangeDeleted, false)
 
 	// wait until pending events are fully settled, then verify suppression
 	require.Eventually(t, func() bool {
@@ -57,8 +56,8 @@ func TestAccumulator_DeleteThenCreate(t *testing.T) {
 	acc := NewChangeAccumulator(50 * time.Millisecond)
 	defer acc.Stop()
 
-	acc.AddEvent("src/config.go", fsnotify.Remove, false)
-	acc.AddEvent("src/config.go", fsnotify.Create, false)
+	acc.AddChange("src/config.go", ChangeDeleted, false)
+	acc.AddChange("src/config.go", ChangeCreated, false)
 
 	var changes []FileChange
 	require.Eventually(t, func() bool {
@@ -72,8 +71,8 @@ func TestAccumulator_CreateThenModify(t *testing.T) {
 	acc := NewChangeAccumulator(50 * time.Millisecond)
 	defer acc.Stop()
 
-	acc.AddEvent("src/new.go", fsnotify.Create, false)
-	acc.AddEvent("src/new.go", fsnotify.Write, false)
+	acc.AddChange("src/new.go", ChangeCreated, false)
+	acc.AddChange("src/new.go", ChangeModified, false)
 
 	var changes []FileChange
 	require.Eventually(t, func() bool {
@@ -87,7 +86,7 @@ func TestAccumulator_SettleTimer(t *testing.T) {
 	acc := NewChangeAccumulator(100 * time.Millisecond)
 	defer acc.Stop()
 
-	acc.AddEvent("src/foo.go", fsnotify.Write, false)
+	acc.AddChange("src/foo.go", ChangeModified, false)
 
 	// before settle period
 	changes := acc.DrainSettled()
@@ -104,7 +103,7 @@ func TestAccumulator_DrainClears(t *testing.T) {
 	acc := NewChangeAccumulator(50 * time.Millisecond)
 	defer acc.Stop()
 
-	acc.AddEvent("src/foo.go", fsnotify.Write, false)
+	acc.AddChange("src/foo.go", ChangeModified, false)
 
 	var changes []FileChange
 	require.Eventually(t, func() bool {
@@ -121,9 +120,9 @@ func TestAccumulator_MultipleFiles(t *testing.T) {
 	acc := NewChangeAccumulator(50 * time.Millisecond)
 	defer acc.Stop()
 
-	acc.AddEvent("src/a.go", fsnotify.Create, false)
-	acc.AddEvent("src/b.go", fsnotify.Write, false)
-	acc.AddEvent("src/c.go", fsnotify.Remove, false)
+	acc.AddChange("src/a.go", ChangeCreated, false)
+	acc.AddChange("src/b.go", ChangeModified, false)
+	acc.AddChange("src/c.go", ChangeDeleted, false)
 
 	var changes []FileChange
 	require.Eventually(t, func() bool {
@@ -144,9 +143,9 @@ func TestAccumulator_SettleResetsOnNewEvent(t *testing.T) {
 	acc := NewChangeAccumulator(100 * time.Millisecond)
 	defer acc.Stop()
 
-	acc.AddEvent("src/foo.go", fsnotify.Write, false)
-	time.Sleep(60 * time.Millisecond)                 // 60ms < 100ms settle
-	acc.AddEvent("src/bar.go", fsnotify.Write, false) // resets timer
+	acc.AddChange("src/foo.go", ChangeModified, false)
+	time.Sleep(60 * time.Millisecond)                  // 60ms < 100ms settle
+	acc.AddChange("src/bar.go", ChangeModified, false) // resets timer
 
 	// at 60ms after first event, timer was reset — should not have settled yet
 	changes := acc.DrainSettled()
@@ -178,7 +177,7 @@ func TestChangeAccumulator_OnSettledCallback(t *testing.T) {
 		}
 	})
 
-	acc.AddEvent("src/main.go", fsnotify.Write, false)
+	acc.AddChange("src/main.go", ChangeModified, false)
 
 	select {
 	case <-called:
@@ -201,7 +200,7 @@ func TestChangeAccumulator_OnSettledNotCalledAfterStop(t *testing.T) {
 		atomic.AddInt64(&count, 1)
 	})
 
-	acc.AddEvent("src/main.go", fsnotify.Write, false)
+	acc.AddChange("src/main.go", ChangeModified, false)
 	// stop before settle fires
 	time.Sleep(20 * time.Millisecond)
 	acc.Stop()
@@ -227,7 +226,7 @@ func TestChangeAccumulator_OnSettledNotCalledWhenEmpty(t *testing.T) {
 	})
 
 	// add and drain before settle
-	acc.AddEvent("src/main.go", fsnotify.Write, false)
+	acc.AddChange("src/main.go", ChangeModified, false)
 
 	// wait for first settle to fire callback
 	require.Eventually(t, func() bool {
