@@ -412,8 +412,8 @@ func TestPrune_RacesIdleClose(t *testing.T) {
 }
 
 // TestWhisperRegistry_NoFDLeak_OnIdleClose is the production-grade FD
-// regression test for the whisper subsystem, mirroring
-// TestProjectWatcher_NoFDLeak_RealWatcher_Darwin.
+// regression test for the whisper subsystem, in the same spirit as the
+// daemon-wide TestDaemon_MultiSubsystem_NoFDLeak guard.
 //
 // Failure prevented: the whisper FD bloat that shipped this fix —
 // 9 SQLite databases × 3 files each (.db + .db-shm + .db-wal) pinned

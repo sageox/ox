@@ -184,7 +184,7 @@ type Daemon struct {
 	sessionWatcher         *agentwork.SessionWatcherManager
 	whisperRegistry        *WhisperRegistry
 	murmurNudgeSource      *MurmurNudgeSource
-	projectWatcher         *ProjectWatcher
+	projectWatcher         *GitPollWatcher
 	dbMaintenance          *DBMaintenanceScheduler
 	settingsFetcher        *SettingsFetcher
 	eventBus               *hooks.EventBus
@@ -1360,19 +1360,14 @@ func (d *Daemon) startWorkers() {
 		}
 		if d.config.ProjectRoot != "" && d.config.LedgerPath != "" {
 			accumulator := NewChangeAccumulator(3 * time.Second)
-			tracker := NewGitTrackedMatcher(d.config.ProjectRoot, d.logger)
-			d.projectWatcher = NewProjectWatcher(
-				d.config.ProjectRoot, d.logger,
-				DefaultWatcherFactory, &RealFileSystem{},
-				accumulator, tracker,
-			)
+			d.projectWatcher = NewGitPollWatcher(d.config.ProjectRoot, accumulator, d.logger)
 			murmurPub := NewFileChangeMurmurPublisher(
 				accumulator, d.service,
 				d.config.LedgerPath, d.config.ProjectRoot,
 				d.logger,
 			)
 			murmurPub.SetAgentResolver(&heartbeatAgentResolver{heartbeat: d.heartbeat})
-			// wire fsnotify-triggered dirty overlay rebuilds to codedb
+			// wire poll-triggered dirty overlay rebuilds to codedb
 			if d.codedb != nil {
 				debouncer := NewDirtyOverlayDebouncer(d.codedb, d.logger)
 				debouncer.Start(d.ctx)

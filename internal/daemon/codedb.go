@@ -567,7 +567,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	}
 
 	// stage 4: build dirty overlay index for uncommitted worktree files
-	// Skip when fsnotify already rebuilt the dirty overlay recently — BuildDirtyIndex
+	// Skip when the poll watcher already rebuilt the dirty overlay recently — BuildDirtyIndex
 	// is a full tear-down-and-rebuild (git status + re-read all files + new Bleve index),
 	// so running it again here is pure waste when the overlay is already fresh.
 	var dirtyDuration time.Duration
@@ -577,7 +577,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 		m.mu.Unlock()
 
 		if dirtyFresh {
-			m.logger.Debug("codedb skipping dirty overlay in doIndex, fsnotify overlay is fresh")
+			m.logger.Debug("codedb skipping dirty overlay in doIndex, poll-built overlay is fresh")
 		} else {
 			dirtyStart := time.Now()
 			if pw != nil {
@@ -914,7 +914,7 @@ func (m *CodeDBManager) gcDirtyIndexes(dataDir string) {
 // RefreshDirtyOverlay rebuilds only the dirty file overlay index (uncommitted files).
 // Non-blocking: if a dirty refresh or full index is already running, returns immediately.
 // This is much cheaper than CheckFreshness — no git history scan, no symbol/comment parsing.
-// Called by the DirtyOverlayDebouncer when project files change via fsnotify.
+// Called by the DirtyOverlayDebouncer when the GitPollWatcher observes changes.
 func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 	m.mu.Lock()
 	if m.dirtyRefreshing || m.indexing {

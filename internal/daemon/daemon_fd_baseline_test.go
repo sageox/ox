@@ -34,9 +34,11 @@ import (
 // surfaces it before merge.
 //
 // The companion sibling tests (TestWhisperRegistry_NoFDLeak_OnIdleClose,
-// TestKBSync_NoFDLeak_AtScale, TestProjectWatcher_NoFDLeak_RealWatcher_Darwin)
-// remain valuable because they localize the regression to a specific
-// subsystem when they fail.
+// TestKBSync_NoFDLeak_AtScale) remain valuable because they localize the
+// regression to a specific subsystem when they fail. (The former
+// TestProjectWatcher_NoFDLeak_RealWatcher_Darwin was retired with the recursive
+// fsnotify watcher — GitPollWatcher holds no FDs, so its subsystem contribution
+// here is structurally zero.)
 func TestDaemon_MultiSubsystem_NoFDLeak(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("FD enumeration unavailable on Windows")
@@ -77,36 +79,24 @@ func TestDaemon_MultiSubsystem_NoFDLeak(t *testing.T) {
 		return &fakeKBLister{bubbles: kbBubbles}
 	})
 
-	// --- 3. ProjectWatcher with a tracked dir + churn cycles ---
+	// --- 3. GitPollWatcher against a real git repo + churn cycles ---
 	watchDir := t.TempDir()
+	initGitRepo(t, watchDir)
 	srcDir := filepath.Join(watchDir, "src")
 	if err := os.MkdirAll(srcDir, 0o755); err != nil {
 		t.Fatalf("mkdir srcDir: %v", err)
 	}
-	tracker := &GitTrackedMatcher{
-		projectRoot:  watchDir,
-		trackedDirs:  map[string]struct{}{"src": {}},
-		trackedFiles: map[string]struct{}{"src/main.go": {}},
-		logger:       logger,
-	}
-	pw := NewProjectWatcher(
-		watchDir, logger,
-		DefaultWatcherFactory,
-		&RealFileSystem{},
-		NewChangeAccumulator(20*time.Millisecond),
-		tracker,
-	)
+	pwAcc := NewChangeAccumulator(20 * time.Millisecond)
+	pw := NewGitPollWatcher(watchDir, pwAcc, logger)
+	pw.interval = 20 * time.Millisecond // fast poll for the test
 	watcherCtx, cancelWatcher := context.WithCancel(context.Background())
 	watcherDone := make(chan struct{})
 	go func() {
 		pw.Start(watcherCtx)
 		close(watcherDone)
 	}()
-	// Wait for watcher to register baseline directories.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && pw.WatchedDirCount() < 2 {
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Let the poller establish its baseline snapshot.
+	time.Sleep(100 * time.Millisecond)
 
 	// --- Baseline: AFTER fixture setup, BEFORE workload ---
 	// Warm up by exercising each subsystem once so any one-time allocations
@@ -145,8 +135,8 @@ func TestDaemon_MultiSubsystem_NoFDLeak(t *testing.T) {
 	s.syncBubbles(context.Background())
 	s.syncBubbles(context.Background())
 
-	// ProjectWatcher: churn a few tracked subdirs to exercise the watch
-	// add/remove path.
+	// GitPollWatcher: churn a few subdirs so the poller runs git status across
+	// many cycles, exercising the subprocess spawn/reap path that must not leak.
 	for i := 0; i < 5; i++ {
 		sub := filepath.Join(srcDir, fmt.Sprintf("churn-%02d", i))
 		if err := os.MkdirAll(sub, 0o755); err != nil {
@@ -160,10 +150,8 @@ func TestDaemon_MultiSubsystem_NoFDLeak(t *testing.T) {
 			t.Fatalf("rm churn: %v", err)
 		}
 	}
-	// Give the watcher a moment to drain Remove events back to baseline.
-	for tries := 0; tries < 50 && pw.WatchedDirCount() > 5; tries++ {
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Let the poller observe the churn across a few poll cycles.
+	time.Sleep(200 * time.Millisecond)
 
 	// --- Cleanup phase: trigger every release path ---
 
@@ -175,12 +163,12 @@ func TestDaemon_MultiSubsystem_NoFDLeak(t *testing.T) {
 		t.Errorf("expected %d teams idle-closed, got %d", numTeams, closed)
 	}
 
-	// ProjectWatcher: cancel + wait.
+	// GitPollWatcher: cancel + wait.
 	cancelWatcher()
 	select {
 	case <-watcherDone:
 	case <-time.After(2 * time.Second):
-		t.Fatal("project watcher did not exit after cancel")
+		t.Fatal("git poll watcher did not exit after cancel")
 	}
 
 	// Settle: give the runtime a beat to release any deferred FDs (sql/sqlite
@@ -225,4 +213,25 @@ func waitForFDsToSettle(t *testing.T, baseline int, timeout time.Duration) bool 
 		time.Sleep(20 * time.Millisecond)
 	}
 	return false
+}
+
+// countOpenFDs returns the number of open file descriptors for the current
+// process via /dev/fd. Shared by daemon FD-baseline and regression tests.
+func countOpenFDs(t *testing.T) int {
+	t.Helper()
+	d, err := os.Open("/dev/fd")
+	if err != nil {
+		t.Fatalf("open /dev/fd: %v", err)
+	}
+	defer d.Close()
+	names, err := d.Readdirnames(-1)
+	if err != nil {
+		t.Fatalf("enumerate /dev/fd: %v", err)
+	}
+	// Subtract 1 for the FD held by 'd' itself, closed before the next sample.
+	n := len(names) - 1
+	if n < 0 {
+		n = 0
+	}
+	return n
 }
