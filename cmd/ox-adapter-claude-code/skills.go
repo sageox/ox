@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -154,6 +155,18 @@ func splitFrontmatter(content []byte) (frontmatter, body []byte, ok bool) {
 	}
 	// no closing fence — treat as no frontmatter (defensive).
 	return nil, content, false
+}
+
+// frontmatterDiffers reports whether the YAML frontmatter of the on-disk skill
+// differs from the embedded skill — including the case where one has a
+// frontmatter block and the other doesn't. The drift stamp's hash covers only
+// the body, so name/description edits in the frontmatter are otherwise invisible
+// to staleness detection. Callers MUST gate this on the file being ox-stamped so
+// it never forces a rewrite of a user-authored unstamped SKILL.md.
+func frontmatterDiffers(existing, embedded []byte) bool {
+	existingFM, _, existingHasFM := splitFrontmatter(existing)
+	embedFM, _, embedHasFM := splitFrontmatter(embedded)
+	return existingHasFM != embedHasFM || !bytes.Equal(existingFM, embedFM)
 }
 
 func handleInstallSkills(p adapterprotocol.SkillsParams) (*adapterprotocol.InstallSkillsResponse, error) {
@@ -314,6 +327,8 @@ func handleUninstallSkills(p adapterprotocol.SkillsParams) (*adapterprotocol.Uni
 //
 //   - file doesn't exist -> write
 //   - no stamp -> skip (user-managed)
+//   - frontmatter differs from the embedded skill -> write (restore) — the stamp
+//     hash only covers the body, so name/description edits are otherwise invisible
 //   - body matches the live binary's body hash -> skip (identical)
 //   - body tampered (on-disk body != its own stamp hash) -> write (restore)
 //   - installed by a newer ox version -> skip (downgrade guard)
@@ -325,6 +340,13 @@ func shouldWriteSkill(existing []byte, sk skillFile) bool {
 	stampHash, ver, body := adapterstamp.ExtractStampAnywhere(existing, oxSkillStampPrefix)
 	if stampHash == "" {
 		return false // user-managed — never overwrite
+	}
+	// Frontmatter is NOT covered by the stamp's body hash, so a name/description
+	// edit slips past both the body-match and tamper checks below. Only ox-stamped
+	// files reach here (the no-stamp guard above already returned), so forcing a
+	// rewrite on a frontmatter diff can't clobber a user's unstamped SKILL.md.
+	if frontmatterDiffers(existing, sk.Content) {
+		return true
 	}
 	_, embedBody, _ := splitFrontmatter(sk.Content)
 	wantHash := agentx.ContentHash(embedBody)
@@ -353,6 +375,12 @@ func isSkillStale(existing []byte, sk skillFile) bool {
 	stampHash, ver, body := adapterstamp.ExtractStampAnywhere(existing, oxSkillStampPrefix)
 	if stampHash == "" {
 		return false // user-managed
+	}
+	// (0) frontmatter tampered: the stamp hash covers only the body, so a
+	// name/description edit is invisible to the body checks below. Only ox-stamped
+	// files reach here, so this never flags a user's unstamped SKILL.md.
+	if frontmatterDiffers(existing, sk.Content) {
+		return true
 	}
 	// (1) body tampered: on-disk body doesn't match its own stamp.
 	if agentx.ContentHash(body) != stampHash {

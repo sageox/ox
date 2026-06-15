@@ -176,6 +176,94 @@ func TestHandleCheckSkills_BodyEditedBelowStamp_ReportsStale(t *testing.T) {
 	assert.NotContains(t, string(restored), "hand-edited drift", "reinstall must overwrite the tampered body")
 }
 
+// TestHandleCheckSkills_FrontmatterEdited_ReportsStale guards the gap CodeRabbit
+// flagged: the drift stamp's hash covers ONLY the body below it, so editing the
+// YAML frontmatter (name/description) of a stamped skill leaves the body hash and
+// stamp line byte-identical — a body-only staleness check sees nothing wrong and
+// the agent silently reads tampered metadata forever. The check must catch a
+// frontmatter-only edit and --fix (reinstall) must restore the original.
+// Failure prevented: a hand-edited skill description drifts from the live binary
+// undetected because the stamp doesn't cover the frontmatter.
+func TestHandleCheckSkills_FrontmatterEdited_ReportsStale(t *testing.T) {
+	dir := t.TempDir()
+	name := pickSkill(t)
+	params := adapterprotocol.SkillsParams{RepoRoot: dir, Version: "0.8.0"}
+
+	_, err := handleInstallSkills(params)
+	require.NoError(t, err)
+
+	clean, err := handleCheckSkills(params)
+	require.NoError(t, err)
+	require.NotContains(t, clean.Stale, name, "precondition: fresh install must not be stale")
+
+	skillPath := filepath.Join(dir, ".claude", "skills", name, skillFileName)
+	orig, err := os.ReadFile(skillPath)
+	require.NoError(t, err)
+
+	// edit ONLY the frontmatter: inject a description line into the YAML block
+	// above the closing fence, leaving the stamp line and body untouched. The
+	// frontmatter ends at the first "\n---\n" (closing fence) of the file.
+	fence := "\n---\n"
+	fenceIdx := strings.Index(string(orig), fence)
+	require.GreaterOrEqual(t, fenceIdx, 0, "installed skill must have a closing frontmatter fence")
+	tampered := string(orig[:fenceIdx]) + "\ndescription: hand-edited frontmatter drift" + string(orig[fenceIdx:])
+	require.NotEqual(t, string(orig), tampered, "the edit must actually change the frontmatter")
+	require.NoError(t, os.WriteFile(skillPath, []byte(tampered), 0o644))
+
+	stale, err := handleCheckSkills(params)
+	require.NoError(t, err)
+	assert.Contains(t, stale.Stale, name, "a frontmatter-only edit must be reported Stale")
+	assert.False(t, stale.Installed, "Installed must be false when a skill's frontmatter drifted")
+
+	// reinstall (the --fix path) must rewrite the file and clear staleness.
+	resp, err := handleInstallSkills(params)
+	require.NoError(t, err)
+	assert.Contains(t, resp.FilesWritten, filepath.Join(name, skillFileName),
+		"--fix must rewrite a skill whose frontmatter was edited")
+
+	fixed, err := handleCheckSkills(params)
+	require.NoError(t, err)
+	assert.NotContains(t, fixed.Stale, name, "reinstall must restore the drifted frontmatter")
+	assert.True(t, fixed.Installed, "after --fix the skill set must be Installed again")
+
+	restored, err := os.ReadFile(skillPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(restored), "hand-edited frontmatter drift",
+		"reinstall must overwrite the tampered frontmatter")
+}
+
+// TestHandleCheckSkills_UnstampedFrontmatterDiff_NotOverwritten verifies the
+// frontmatter check is gated on the file being ox-stamped: a user-authored
+// (unstamped) SKILL.md whose frontmatter differs from the embedded skill must
+// NEVER be flagged stale or overwritten. Without the stamp gate, the frontmatter
+// diff would clobber a user's own skill.
+// Failure prevented: install destroys a user's unstamped skill because its
+// frontmatter happens to differ from the shipped one.
+func TestHandleCheckSkills_UnstampedFrontmatterDiff_NotOverwritten(t *testing.T) {
+	dir := t.TempDir()
+	name := pickSkill(t)
+	params := adapterprotocol.SkillsParams{RepoRoot: dir, Version: "0.8.0"}
+
+	skillDir := filepath.Join(dir, ".claude", "skills", name)
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	// deliberately different frontmatter (and no ox stamp) from the shipped skill.
+	userContent := "---\nname: " + name + "\ndescription: totally different, user-owned, no stamp\n---\nuser body\n"
+	skillPath := filepath.Join(skillDir, skillFileName)
+	require.NoError(t, os.WriteFile(skillPath, []byte(userContent), 0o644))
+
+	resp, err := handleCheckSkills(params)
+	require.NoError(t, err)
+	assert.NotContains(t, resp.Stale, name,
+		"an unstamped user skill must not be flagged stale even when its frontmatter differs")
+
+	_, err = handleInstallSkills(params)
+	require.NoError(t, err)
+	after, err := os.ReadFile(skillPath)
+	require.NoError(t, err)
+	assert.Equal(t, userContent, string(after),
+		"install must not overwrite a user-authored skill on a frontmatter diff alone")
+}
+
 // TestHandleCheckSkills_UnstampedSkillNotStale verifies a user-authored SKILL.md
 // (no ox stamp) is never flagged stale — ox only manages files it stamped.
 // Failure prevented: doctor flags a user-owned skill forever and --fix never

@@ -207,6 +207,33 @@ func TestEnsureInstructionFileMarkers_AtomicWrite(t *testing.T) {
 		"injected file should have 0644 permissions")
 }
 
+// TestEnsureInstructionFileMarkers_PreservesRestrictivePerms verifies that
+// injecting markers into a pre-existing 0600 file does not broaden its perms
+// to 0644 (a privacy regression — the atomic rename would otherwise reset mode).
+func TestEnsureInstructionFileMarkers_PreservesRestrictivePerms(t *testing.T) {
+	root := t.TempDir()
+
+	agentsPath := filepath.Join(root, "AGENTS.md")
+	require.NoError(t, os.WriteFile(agentsPath, []byte("# existing user content\n"), 0600))
+
+	_, err := EnsureInstructionFileMarkers(root)
+	require.NoError(t, err)
+
+	info, err := os.Stat(agentsPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm(),
+		"injecting markers must preserve the pre-existing 0600 permissions")
+
+	// removal must also preserve the restrictive perms
+	_, err = RemoveInstructionFileMarkers(root)
+	require.NoError(t, err)
+
+	info, err = os.Stat(agentsPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm(),
+		"removing markers must preserve the pre-existing 0600 permissions")
+}
+
 func TestEnsureInstructionFileMarkers_SizeGuard(t *testing.T) {
 	root := t.TempDir()
 

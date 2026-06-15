@@ -30,9 +30,15 @@ import (
 // capability set as declared by its handleInfo() in cmd/ox-adapter-*/main.go.
 // package main is not importable here, so we encode the cap sets locally and
 // pin them to the real binaries via the per-adapter guard tests
-// (cmd/ox-adapter-*/main_test.go), which deep-equal handleInfo().Capabilities
-// against these exact sets. If a binary's caps drift from this fixture, those
-// guard tests fail — so this fixture cannot silently rot.
+// (cmd/ox-adapter-*/main_test.go), which compare handleInfo().Capabilities
+// against these exact sets (order-insensitively, as sets). If a binary's caps
+// drift from this fixture, those guard tests fail — so this fixture cannot
+// silently rot.
+//
+// KEEP IN SYNC: each entry below must match the `want` set in the corresponding
+// cmd/ox-adapter-<name>/main_test.go pin test (claude-code / codex / droid).
+// Adding or removing a capability requires updating BOTH this fixture AND that
+// adapter's pin test.
 var adapterCaps = map[string][]string{
 	"claude-code": {
 		adapterprotocol.CapSessionReader,

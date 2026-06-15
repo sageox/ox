@@ -351,7 +351,13 @@ func ensureInstructionFileMarker(filePath, format string, exists bool) (injectSt
 			return 0, fmt.Errorf("safety check failed: modified content (%d bytes) is less than half of original (%d bytes)", len(modified), len(s))
 		}
 
-		if err := fileutil.AtomicWriteBytes(filePath, []byte(modified), 0644); err != nil {
+		// preserve the existing file's permission bits — atomic rename would
+		// otherwise broaden perms (e.g. 0600 -> 0644), a privacy regression
+		mode := os.FileMode(0644)
+		if info, statErr := os.Stat(filePath); statErr == nil {
+			mode = info.Mode().Perm()
+		}
+		if err := fileutil.AtomicWriteBytes(filePath, []byte(modified), mode); err != nil {
 			return 0, err
 		}
 		return injectedUpdate, nil
@@ -423,7 +429,12 @@ func removeInstructionFileMarker(filePath, format string) (injectStatus, error) 
 		return 0, fmt.Errorf("safety check failed: cleaned content (%d bytes) is less than half of original (%d bytes)", len(cleaned), len(s))
 	}
 
-	if err := fileutil.AtomicWriteBytes(filePath, []byte(cleaned), 0644); err != nil {
+	// preserve the existing file's permission bits when rewriting
+	mode := os.FileMode(0644)
+	if info, statErr := os.Stat(filePath); statErr == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := fileutil.AtomicWriteBytes(filePath, []byte(cleaned), mode); err != nil {
 		return 0, err
 	}
 

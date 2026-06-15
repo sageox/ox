@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -625,6 +626,27 @@ func TestConsultRoutes_NoDriftWithSkill(t *testing.T) {
 		if !strings.Contains(desc, corpus) {
 			t.Errorf("ox-consult skill description drifted: floor routes to %q but the skill frontmatter does not name it.\n"+
 				"floor cue: %s\nskill description: %s", corpus, r.Cue, desc)
+		}
+	}
+
+	// reverse direction: the skill description must not name an `ox ...` corpus
+	// the floor table doesn't carry. Without this, the skill could quietly add a
+	// retrieval route the floor reminder never fires — the two reflexes diverge
+	// in the other direction, which the forward loop above cannot catch.
+	routeCorpora := map[string]struct{}{}
+	for _, r := range routes {
+		if c := leadingOxCommand(r.Command); c != "" {
+			routeCorpora[c] = struct{}{}
+		}
+	}
+	re := regexp.MustCompile("`ox[^`]*`")
+	for _, token := range re.FindAllString(desc, -1) {
+		c := leadingOxCommand(token)
+		if c == "" {
+			continue
+		}
+		if _, ok := routeCorpora[c]; !ok {
+			t.Errorf("ox-consult skill description includes %q not present in floor consult routes", c)
 		}
 	}
 }

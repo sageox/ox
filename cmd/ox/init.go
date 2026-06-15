@@ -668,6 +668,15 @@ func runInit() error {
 		}
 	}
 
+	// snapshot pre-existing instruction files for rollback BEFORE markers mutate
+	// them — trackModifiedFile reads content eagerly, so snapshotting after
+	// EnsureInstructionFileMarkers would capture the already-modified content.
+	for _, t := range DetectedInstructionFiles(gitRoot) {
+		if t.Exists {
+			tracker.trackModifiedFile(filepath.Join(gitRoot, t.Path))
+		}
+	}
+
 	// inject ox:prime markers into all detected agent instruction files (multi-platform)
 	instrResults, instrErr := EnsureInstructionFileMarkers(gitRoot)
 	if instrErr != nil {
@@ -675,13 +684,10 @@ func runInit() error {
 	} else {
 		for _, r := range instrResults {
 			slog.Debug("instruction file marker", "file", r.File, "status", r.Status, "agent", r.AgentType)
-			p := filepath.Join(gitRoot, r.File)
-			switch r.Status {
-			case injectedNew:
-				tracker.trackCreatedFile(p)
-			case injectedUpdate:
-				// snapshot before modification if not already tracked
-				tracker.trackModifiedFile(p)
+			// only newly-created files need create-tracking; pre-existing files
+			// were already snapshotted for rollback above
+			if r.Status == injectedNew {
+				tracker.trackCreatedFile(filepath.Join(gitRoot, r.File))
 			}
 		}
 	}

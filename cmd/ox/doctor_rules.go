@@ -78,6 +78,14 @@ func checkAdapterRules(fix bool) checkResult {
 			return FailedCheck("Coworker rules", problemStr,
 				fmt.Sprintf("Fix failed: %s", strings.Join(fixErrs, "; ")))
 		}
+		// Drift was fixed, but if a sibling adapter errored during CheckRules its
+		// state is unknown — surface that as a warning rather than reporting a
+		// clean PassedCheck, which would be a false-green.
+		if len(warnings) > 0 {
+			return WarningCheck("Coworker rules",
+				fmt.Sprintf("restored rules for %d adapter(s)", fixed),
+				strings.Join(warnings, "; "))
+		}
 		return PassedCheck("Coworker rules", fmt.Sprintf("restored rules for %d adapter(s)", fixed))
 	}
 
