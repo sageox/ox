@@ -17,15 +17,17 @@ html[data-theme="light"]{
 html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,system-ui,sans-serif;font-size:15.5px;line-height:1.62;-webkit-font-smoothing:antialiased}
 .shell{display:grid;grid-template-columns:210px minmax(0,1fr);max-width:1240px;margin:0 auto}
-nav.toc{position:sticky;top:0;height:100vh;padding:26px 14px 26px 22px;border-right:1px solid var(--hair2);display:flex;flex-direction:column}
+/* bottom padding reserves the bottom-left corner for the fixed .rev-bar action
+   bar so it never masks the SageOx credit (.toc-brand) tucked above it */
+nav.toc{position:sticky;top:0;height:100vh;padding:26px 14px 62px 22px;border-right:1px solid var(--hair2);display:flex;flex-direction:column}
 nav.toc .brand{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.14em;color:var(--faint);text-transform:uppercase;margin-bottom:16px;flex:0 0 auto}
 nav.toc .toc-links{flex:1 1 auto;overflow-y:auto;min-height:0}
 /* subtle SageOx wordmark badge, tucked into the bottom-left corner of the nav */
 .toc-brand{flex:0 0 auto;margin-top:14px;padding:10px 8px 2px;display:flex;flex-direction:column;gap:3px;opacity:.4;transition:opacity .15s}
 .toc-brand:hover{opacity:.75}
 .toc-brand .wm{display:block;line-height:0}
-.toc-brand svg{width:52px;height:auto;display:block}
-.toc-brand-cap{font-family:"JetBrains Mono",monospace;font-size:8.5px;letter-spacing:.05em;color:var(--faint)}
+.toc-brand svg{width:44px;height:auto;display:block}
+.toc-brand-cap{font-family:"JetBrains Mono",monospace;font-size:7.5px;letter-spacing:.05em;color:var(--faint)}
 .toc-brand .wm-l{display:none}
 html[data-theme="light"] .toc-brand .wm-d{display:none}
 html[data-theme="light"] .toc-brand .wm-l{display:block}
