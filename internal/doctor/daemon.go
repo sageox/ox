@@ -599,13 +599,24 @@ func (c *DaemonFDPressureCheck) Category() string {
 	return "Daemon"
 }
 
-// FD-pressure thresholds, expressed as a fraction of the soft RLIMIT_NOFILE.
-// Crossing 50% warns; crossing 80% fails. Computed against the current limit
-// rather than hard-coded numbers so the check stays meaningful across very
-// different host configs (macOS default 256 vs Linux container 1M+).
+// FD-pressure thresholds. Two independent signals, most-severe-wins:
+//
+//   - Relative, as a fraction of the soft RLIMIT_NOFILE (warn 50%, fail 80%) —
+//     stays meaningful across host configs (macOS default 256 vs Linux 1M+).
+//   - Absolute FD counts (warn 1024, fail 4096) — a hard ceiling independent of
+//     the limit. The daemon holds NO per-file watch FDs (it polls git status
+//     rather than watching the tree), so a healthy steady state is dozens to
+//     low-hundreds (sqlite + WAL, bleve segments, team whisper stores, the IPC
+//     socket, log files). Thousands is anomalous regardless of the limit. This
+//     is the signal the recursive-fsnotify-watcher regression (~11k FDs) would
+//     have tripped even though the daemon inherits the shell's soft limit, which
+//     on dev machines is often raised high enough to keep the percentage — and
+//     thus the relative check — deceptively low.
 const (
 	fdPressureWarn = 0.50
 	fdPressureFail = 0.80
+	fdAbsoluteWarn = 1024
+	fdAbsoluteFail = 4096
 )
 
 // Run executes the FD-pressure check.
@@ -618,38 +629,81 @@ func (c *DaemonFDPressureCheck) Run(_ context.Context, _ bool) CheckResult {
 	if err != nil {
 		return CheckResult{Name: c.Name(), Status: StatusSkip}
 	}
-	if status.OpenFDs <= 0 {
+	return fdPressureVerdict(c.Name(), status.OpenFDs, status.OpenFDLimit)
+}
+
+// fdPressureVerdict computes the FD-pressure CheckResult from a sampled FD count
+// and the process soft limit. Pure (no daemon/IPC) so the verdict logic is
+// unit-testable without a running daemon. Returns the more severe of the
+// relative (% of limit) and absolute (raw count) signals; see the threshold
+// constants for why both exist.
+func fdPressureVerdict(name string, openFDs int, openFDLimit uint64) CheckResult {
+	if openFDs <= 0 {
 		// platform doesn't surface FD count (e.g. windows) — skip silently
-		return CheckResult{Name: c.Name(), Status: StatusSkip}
+		return CheckResult{Name: name, Status: StatusSkip}
 	}
-	if status.OpenFDLimit == 0 {
-		// no limit info — report raw count without a verdict
-		return CheckResult{
-			Name:    c.Name(),
-			Status:  StatusPass,
-			Message: fmt.Sprintf("%d FDs open (limit unknown)", status.OpenFDs),
+
+	// Absolute signal — independent of the (possibly high, possibly unknown) limit.
+	absStatus := StatusPass
+	switch {
+	case openFDs >= fdAbsoluteFail:
+		absStatus = StatusFail
+	case openFDs >= fdAbsoluteWarn:
+		absStatus = StatusWarn
+	}
+
+	// Relative signal — only when the limit is known.
+	relStatus := StatusPass
+	msg := fmt.Sprintf("%d FDs open (limit unknown)", openFDs)
+	if openFDLimit > 0 {
+		pct := float64(openFDs) / float64(openFDLimit)
+		msg = fmt.Sprintf("%d / %d open (%.0f%%)", openFDs, openFDLimit, pct*100)
+		switch {
+		case pct >= fdPressureFail:
+			relStatus = StatusFail
+		case pct >= fdPressureWarn:
+			relStatus = StatusWarn
 		}
 	}
-	pct := float64(status.OpenFDs) / float64(status.OpenFDLimit)
-	msg := fmt.Sprintf("%d / %d open (%.0f%%)", status.OpenFDs, status.OpenFDLimit, pct*100)
-	switch {
-	case pct >= fdPressureFail:
+
+	switch moreSevereStatus(absStatus, relStatus) {
+	case StatusFail:
 		return CheckResult{
-			Name:    c.Name(),
+			Name:    name,
 			Status:  StatusFail,
 			Message: msg,
-			Fix:     "Daemon is approaching its file-descriptor limit. Restart with `ox daemon restart` while we investigate the leak source.",
+			Fix:     "Daemon is holding an abnormal number of file descriptors. Restart with `ox daemon restart` and investigate the leak source (recent watcher / index / store changes).",
 		}
-	case pct >= fdPressureWarn:
+	case StatusWarn:
 		return CheckResult{
-			Name:    c.Name(),
+			Name:    name,
 			Status:  StatusWarn,
 			Message: msg,
-			Fix:     "FD count is climbing toward the soft limit. Worth monitoring; check `ox status --verbose` over the next hour.",
+			Fix:     "FD count is elevated. Worth monitoring; check `ox status --verbose` over the next hour.",
 		}
 	default:
-		return CheckResult{Name: c.Name(), Status: StatusPass, Message: msg}
+		return CheckResult{Name: name, Status: StatusPass, Message: msg}
 	}
+}
+
+// moreSevereStatus returns whichever status is more severe (Fail > Warn > Pass).
+func moreSevereStatus(a, b Status) Status {
+	rank := func(s Status) int {
+		switch s {
+		case StatusFail:
+			return 3
+		case StatusWarn:
+			return 2
+		case StatusPass:
+			return 1
+		default:
+			return 0
+		}
+	}
+	if rank(a) >= rank(b) {
+		return a
+	}
+	return b
 }
 
 // DaemonFDGrowthCheck warns when the daemon's open-FD count is climbing
