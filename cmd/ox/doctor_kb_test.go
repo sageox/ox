@@ -357,23 +357,29 @@ func TestRunKBChecks_SkipsAPIChecksWhenAPIUnavailable_RunsStaleSync(t *testing.T
 	t.Cleanup(func() { SetKBGlobalSyncReader(nil) })
 
 	results := runKBChecks(doctorOptions{fix: false})
-	// Four checks expected: orphans, provisioning, stale-sync,
-	// global-sync-owner (added in ox-6zme).
-	require.Len(t, results, 4, "all four checks must run")
+	// Seven checks expected, in order: orphans, provisioning, stale-sync,
+	// missing-clone, wedged, sparse-checkout (repo-health parity), then
+	// global-sync-owner (ox-6zme).
+	require.Len(t, results, 7, "all kb checks must run")
 
-	// orphans (idx 0) and provisioning (idx 1) must be skipped
+	// orphans (idx 0), provisioning (idx 1), missing-clone (idx 3) all depend
+	// on the kb API and must skip when it's unavailable.
 	assert.True(t, results[0].skipped, "orphans must skip when API unavailable")
 	assert.True(t, results[1].skipped, "provisioning must skip when API unavailable")
+	assert.True(t, results[3].skipped, "missing-clone must skip when API unavailable")
 
-	// stale-sync (idx 2) must still produce a real signal
+	// stale-sync (idx 2) must still produce a real signal — it's local-only.
 	assert.True(t, results[2].warning, "stale-sync must surface even without API; got %+v", results[2])
 	assert.Contains(t, results[2].message, "kb_stale")
 
-	// global-sync-owner (idx 3) is independent of the kb API; it reads
-	// the daemon registry. In this test the registry is not stubbed and
-	// will skip with "no daemons report endpoint" or "no running
-	// daemons" depending on the host. Just assert it ran (no panic).
-	assert.NotEmpty(t, results[3].name, "global-sync-owner check must run")
+	// wedged (idx 4) and sparse-checkout (idx 5) are local-only repo-health
+	// checks; with only a metadata-seeded (non-git) bubble they run cleanly.
+	assert.True(t, results[4].passed, "wedged must run locally; got %+v", results[4])
+	assert.NotEmpty(t, results[5].name, "sparse-checkout check must run")
+
+	// global-sync-owner (idx 6) is independent of the kb API; it reads the
+	// daemon registry. Just assert it ran (no panic).
+	assert.NotEmpty(t, results[6].name, "global-sync-owner check must run")
 }
 
 // TestRunKBChecks_PanicInOneCheckDoesNotCascade verifies the per-check
@@ -398,9 +404,10 @@ func TestRunKBChecks_PanicInOneCheckDoesNotCascade(t *testing.T) {
 	t.Cleanup(func() { SetKBGlobalSyncReader(nil) })
 
 	results := runKBChecks(doctorOptions{fix: false})
-	// Four checks expected: orphans, provisioning, stale-sync,
-	// global-sync-owner (added in ox-6zme).
-	require.Len(t, results, 4, "every check must run independently")
+	// Seven checks expected: orphans, provisioning, stale-sync, missing-clone,
+	// wedged, sparse-checkout, global-sync-owner. The List panic only takes
+	// down the API-backed checks; the rest run independently.
+	require.Len(t, results, 7, "every check must run independently")
 
 	// orphan check (which calls List) panicked → recovered → reported as failure
 	assert.False(t, results[0].passed, "orphan check should fail after panic")
@@ -409,6 +416,9 @@ func TestRunKBChecks_PanicInOneCheckDoesNotCascade(t *testing.T) {
 	assert.True(t, results[2].warning, "stale-sync must run even after orphan panic")
 	assert.Contains(t, results[2].message, "kb_stale")
 
-	// global-sync-owner (idx 3) is independent of the kb API panic.
-	assert.NotEmpty(t, results[3].name, "global-sync-owner check must run despite orphan panic")
+	// missing-clone (idx 3) also calls List → recovered panic → not passed.
+	assert.False(t, results[3].passed, "missing-clone should fail after List panic")
+
+	// global-sync-owner (idx 6) is independent of the kb API panic.
+	assert.NotEmpty(t, results[6].name, "global-sync-owner check must run despite orphan panic")
 }

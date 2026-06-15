@@ -689,4 +689,33 @@ func init() {
 		Description: "Migrates legacy .sageox/config.json projects to the new config.yaml binding format (ADR-017)",
 		Run:         checkKBProjectConfigMigrate,
 	})
+
+	// repo-health parity with ledger/team-context git doctoring — see
+	// doctor_kb_repo_health.go. Repairs kick the daemon (it owns kb git writes).
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugKBMissingClone,
+		Name:        "kb missing clones",
+		Category:    "Knowledge Bubbles",
+		FixLevel:    FixLevelAuto,
+		Description: "Flags bubbles the kb API lists that have no local clone; auto-fix kicks an immediate daemon sync to clone them",
+		Run:         checkKBMissingClone,
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugKBWedged,
+		Name:        "kb wedged repos",
+		Category:    "Knowledge Bubbles",
+		FixLevel:    FixLevelAuto,
+		Description: "Detects bubbles stuck in a merge/rebase (blocks the daemon's sync for every project); auto-fix kicks a daemon sync, then surfaces a manual abort if still wedged",
+		Run:         checkKBWedged,
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugKBSparseCheckout,
+		Name:        "kb sparse checkout",
+		Category:    "Knowledge Bubbles",
+		FixLevel:    FixLevelAuto,
+		Description: "Verifies .sageox stays in each bubble's sparse-checkout cone; auto-fix kicks a daemon sync to reapply sparse from the manifest",
+		Run:         checkKBSparseCheckout,
+	})
 }

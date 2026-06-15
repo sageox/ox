@@ -6,9 +6,13 @@ package daemon
 // kb_lock_test.go: in-process contention, cross-endpoint independence,
 // and a subprocess-based owner-death failover.
 //
-// All tests redirect the lease directory via t.Setenv on XDG_STATE_HOME
-// (paths.DaemonStateDir resolves under StateDir → XDG_STATE_HOME) so the
-// developer's real ~/.local/state/ox state is never touched.
+// All tests redirect the lease directory to a per-test temp dir so the
+// developer's real daemon state — and the lease their running daemons
+// actually hold — is never touched. In the default XDG mode
+// paths.DaemonStateDir resolves under StateDir → xdgRuntimeDir →
+// XDG_RUNTIME_DIR (NOT XDG_STATE_HOME), so the isolation MUST set
+// XDG_RUNTIME_DIR; setting only XDG_STATE_HOME silently no-ops and the
+// tests then contend with live daemons for the real lease.
 
 import (
 	"errors"
@@ -23,13 +27,17 @@ import (
 	"time"
 )
 
-// withIsolatedLeaseDir redirects paths.DaemonStateDir → tmp dir via
-// XDG_STATE_HOME for the duration of the test. Also resets the
-// package-level globalLeaseDirOnce so a fresh per-test directory is
-// created instead of reusing a cached one from a previous test.
+// withIsolatedLeaseDir redirects paths.DaemonStateDir → tmp dir for the
+// duration of the test. In XDG mode StateDir derives from XDG_RUNTIME_DIR,
+// so that is the env var that actually moves the lease path; XDG_STATE_HOME
+// is set too (it carries the marker-file dir in the subprocess test and
+// covers the non-XDG fallback). Also resets the package-level
+// globalLeaseDirOnce so a fresh per-test directory is created instead of
+// reusing a cached one from a previous test.
 func withIsolatedLeaseDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", dir)
 	t.Setenv("XDG_STATE_HOME", dir)
 	// reset memoized state so this test sees the redirected XDG path.
 	globalLeaseDirOnce = sync.Once{}
@@ -244,6 +252,9 @@ func TestGlobalLeaseSubprocessFailover(t *testing.T) {
 	cmd.Env = append(os.Environ(), // safe: re-execs test binary, not ox CLI
 		"OX_TEST_HOLD_LEASE=1",
 		"OX_TEST_HOLD_ENDPOINT=sageox.ai",
+		// XDG_RUNTIME_DIR moves the lease path (StateDir reads it in XDG
+		// mode); XDG_STATE_HOME carries the marker-file dir the helper writes.
+		"XDG_RUNTIME_DIR="+dir,
 		"XDG_STATE_HOME="+dir,
 	)
 	if err := cmd.Start(); err != nil {

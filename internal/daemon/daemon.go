@@ -1581,6 +1581,16 @@ func (s *daemonServiceImpl) Status() *StatusData {
 		}
 	}
 
+	// knowledge bubbles: scanned from disk so any daemon (owner or follower)
+	// reports what's synced. Only the global-sync owner actually writes these
+	// dirs (see sync.go:920-928), but the on-disk state is the shared truth.
+	if kbRows := s.d.scheduler.kbWorkspaceStatus(); len(kbRows) > 0 {
+		workspaces["kb"] = kbRows
+	}
+
+	globalSyncOwner := s.d.scheduler.IsGlobalSyncOwner()
+	globalSyncEndpoint := endpoint.NormalizeEndpoint(endpoint.GetForProject(s.d.config.ProjectRoot))
+
 	return &StatusData{
 		Running:            true,
 		Pid:                os.Getpid(),
@@ -1598,6 +1608,8 @@ func (s *daemonServiceImpl) Status() *StatusData {
 		AvgSyncTime:        stats.AvgDuration,
 		Workspaces:         workspaces,
 		ProjectTeamID:      projectTeamID,
+		GlobalSyncOwner:    globalSyncOwner,
+		GlobalSyncEndpoint: globalSyncEndpoint,
 		TeamContexts:       s.d.scheduler.TeamContextStatus(),
 		InactivityTimeout:  s.d.config.InactivityTimeout,
 		TimeSinceActivity:  s.d.timeSinceLastActivity(),

@@ -31,8 +31,15 @@ type StatusJSON struct {
 
 	Project    statusProjectGroupJSON  `json:"project"`
 	OtherTeams []statusTeamContextJSON `json:"other_teams,omitempty"`
+	Bubbles    []statusBubbleJSON      `json:"bubbles,omitempty"`
 	Issues     []statusIssueJSON       `json:"issues,omitempty"`
 	AutoExitIn string                  `json:"auto_exit_in,omitempty"`
+
+	// global-sync ownership: whether THIS daemon pulls team contexts + bubbles
+	// for its endpoint, or a sibling daemon does. Surfaced so tooling can tell
+	// an idle follower apart from a daemon that genuinely syncs nothing.
+	GlobalSyncOwner    bool   `json:"global_sync_owner"`
+	GlobalSyncEndpoint string `json:"global_sync_endpoint,omitempty"`
 }
 
 type statusSyncJSON struct {
@@ -63,6 +70,15 @@ type statusTeamContextJSON struct {
 	Path     string     `json:"path"`
 	LastSync *time.Time `json:"last_sync,omitempty"`
 	GCStatus string     `json:"gc_status,omitempty"`
+}
+
+type statusBubbleJSON struct {
+	KBID     string     `json:"kb_id"`
+	Slug     string     `json:"slug,omitempty"`
+	KBType   string     `json:"kb_type,omitempty"`
+	Status   string     `json:"status"`
+	Path     string     `json:"path"`
+	LastSync *time.Time `json:"last_sync,omitempty"`
 }
 
 type statusCodeIndexJSON struct {
@@ -159,6 +175,24 @@ func BuildStatusJSON(status *StatusData, cliVersion string) *StatusJSON {
 			continue
 		}
 		out.OtherTeams = append(out.OtherTeams, *buildTeamContextJSON(tc))
+	}
+
+	// knowledge bubbles synced to disk + which daemon owns global sync
+	out.GlobalSyncOwner = status.GlobalSyncOwner
+	out.GlobalSyncEndpoint = status.GlobalSyncEndpoint
+	for _, b := range status.Workspaces["kb"] {
+		bj := statusBubbleJSON{
+			KBID:   b.ID,
+			Slug:   b.Slug,
+			KBType: b.KBType,
+			Status: wsStatusString(b),
+			Path:   b.Path,
+		}
+		if !b.LastSync.IsZero() {
+			ls := b.LastSync
+			bj.LastSync = &ls
+		}
+		out.Bubbles = append(out.Bubbles, bj)
 	}
 
 	// issues
@@ -693,6 +727,74 @@ func formatWorkspaceGroups(status *StatusData, verbose bool) string {
 			padding := strings.Repeat(" ", alignWidth-len(name))
 			out.WriteString(styleMuted.Render("    "+branch) + name + padding + formatWSStatus(tc) + formatGCStatus(tc, verbose) + "\n")
 		}
+	}
+
+	out.WriteString(formatKBGroup(status, verbose))
+
+	return out.String()
+}
+
+// formatKBGroup renders the Knowledge Bubbles section of `ox daemon status`:
+// a header with an owner badge (this daemon syncs them vs another daemon does)
+// and one tree row per locally-synced bubble. Returns "" when no bubbles are
+// on disk. Mirrors the Other Team Contexts block — bubbles ARE the kb-era
+// successor to team contexts (see docs/specs/kb-daemon-sync.md).
+func formatKBGroup(status *StatusData, verbose bool) string {
+	bubbles := status.Workspaces["kb"]
+	if len(bubbles) == 0 {
+		return ""
+	}
+
+	var out strings.Builder
+	out.WriteString("\n")
+	out.WriteString(styleBold.Render("Knowledge Bubbles"))
+	out.WriteString(styleMuted.Render(fmt.Sprintf(" (%d)", len(bubbles))))
+	// owner badge: only the global-sync owner actually pulls these; followers
+	// read the on-disk state the owner keeps fresh.
+	if status.GlobalSyncOwner {
+		out.WriteString(styleMuted.Render(" · syncing here"))
+	} else {
+		badge := " · synced by another daemon"
+		if status.GlobalSyncEndpoint != "" {
+			badge = " · synced by another daemon (" + status.GlobalSyncEndpoint + ")"
+		}
+		out.WriteString(styleMuted.Render(badge))
+	}
+	out.WriteString("\n")
+
+	// label each bubble by slug (falling back to kb_id), tagged with its type.
+	label := func(b WorkspaceSyncStatus) string {
+		name := b.Slug
+		if name == "" {
+			name = b.ID
+		}
+		if b.KBType != "" {
+			return name + styleMuted.Render(" ("+b.KBType+")")
+		}
+		return name
+	}
+
+	alignWidth := 0
+	for _, b := range bubbles {
+		rawLen := len(stripANSI(label(b)))
+		if rawLen > alignWidth {
+			alignWidth = rawLen
+		}
+	}
+	alignWidth += 2
+
+	for i, b := range bubbles {
+		branch := "├── "
+		if i == len(bubbles)-1 {
+			branch = "└── "
+		}
+		lbl := label(b)
+		padding := strings.Repeat(" ", alignWidth-len(stripANSI(lbl)))
+		row := styleMuted.Render("    "+branch) + lbl + padding + formatWSStatus(b)
+		if verbose {
+			row += styleMuted.Render("  " + b.Path)
+		}
+		out.WriteString(row + "\n")
 	}
 
 	return out.String()

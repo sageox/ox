@@ -117,10 +117,22 @@ type StatusData struct {
 	SyncsLastHour int           `json:"syncs_last_hour,omitempty"`
 	AvgSyncTime   time.Duration `json:"avg_sync_time,omitempty"`
 
-	// workspaces being synced, keyed by type ("ledger", "team-context")
-	// each type maps to a list of workspaces of that type (ledger has 1, team-context may have many)
+	// workspaces being synced, keyed by type ("ledger", "team-context", "kb")
+	// each type maps to a list of workspaces of that type (ledger has 1,
+	// team-context and kb may have many)
 	Workspaces    map[string][]WorkspaceSyncStatus `json:"workspaces,omitempty"`
 	ProjectTeamID string                           `json:"project_team_id,omitempty"` // primary team for this project
+
+	// GlobalSyncOwner reports whether THIS daemon holds the per-endpoint
+	// flock lease that gates team-context pulls and knowledge-bubble sync.
+	// Followers (false) consume the on-disk state the owner keeps fresh — so
+	// kb rows can still be listed by any daemon, but only the owner writes them.
+	// See internal/daemon/global_lease.go (bead ox-6zme).
+	GlobalSyncOwner bool `json:"global_sync_owner,omitempty"`
+	// GlobalSyncEndpoint is the normalized endpoint this daemon's global-sync
+	// ownership applies to. Surfaced so a follower can say "synced by another
+	// daemon at <endpoint>" rather than implying nothing is syncing.
+	GlobalSyncEndpoint string `json:"global_sync_endpoint,omitempty"`
 
 	// team context sync (deprecated: use Workspaces["team-context"] instead)
 	TeamContexts []TeamContextSyncStatus `json:"team_contexts,omitempty"`
@@ -227,14 +239,16 @@ func GetExtendedStatus(s *StatusData) (ExtendedStatus, bool) {
 // WorkspaceSyncStatus represents the sync status of a workspace (ledger or team context).
 // Provides a unified view of all repos the daemon is syncing.
 type WorkspaceSyncStatus struct {
-	ID             string    `json:"id"`                         // workspace ID (e.g., "ledger", team_id)
-	Type           string    `json:"type"`                       // "ledger" or "team_context"
+	ID             string    `json:"id"`                         // workspace ID (e.g., "ledger", team_id, kb_id)
+	Type           string    `json:"type"`                       // "ledger", "team-context", or "kb"
 	Path           string    `json:"path"`                       // local filesystem path
 	CloneURL       string    `json:"clone_url,omitempty"`        // git remote URL
 	Exists         bool      `json:"exists"`                     // whether path exists locally
 	TeamID         string    `json:"team_id,omitempty"`          // team ID (for team contexts)
 	TeamName       string    `json:"team_name,omitempty"`        // team name (for team contexts)
 	TeamSlug       string    `json:"team_slug,omitempty"`        // kebab-case team slug
+	KBType         string    `json:"kb_type,omitempty"`          // bubble type (for kb: personal, team, repo, custom)
+	Slug           string    `json:"slug,omitempty"`             // bubble slug (for kb)
 	LastSync       time.Time `json:"last_sync,omitempty"`        // last successful sync
 	LastErr        string    `json:"last_error,omitempty"`       // last error message
 	Syncing        bool      `json:"syncing,omitempty"`          // currently syncing

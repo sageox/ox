@@ -526,7 +526,7 @@ func runKBChecks(opts doctorOptions) []checkResult {
 		return nil
 	}
 
-	results := make([]checkResult, 0, 4)
+	results := make([]checkResult, 0, 7)
 	for _, fn := range []struct {
 		name string
 		run  func() checkResult
@@ -534,6 +534,9 @@ func runKBChecks(opts doctorOptions) []checkResult {
 		{"orphans", func() checkResult { return checkKBOrphans(opts.shouldFix(CheckSlugKBOrphans)) }},
 		{"provisioning", func() checkResult { return checkKBFailedProvision(false) }},
 		{"stale-sync", func() checkResult { return checkKBStaleSync(opts.shouldFix(CheckSlugKBStaleSync)) }},
+		{"missing-clone", func() checkResult { return checkKBMissingClone(opts.shouldFix(CheckSlugKBMissingClone)) }},
+		{"wedged", func() checkResult { return checkKBWedged(opts.shouldFix(CheckSlugKBWedged)) }},
+		{"sparse-checkout", func() checkResult { return checkKBSparseCheckout(opts.shouldFix(CheckSlugKBSparseCheckout)) }},
 		{"global-sync-owner", func() checkResult {
 			return checkKBGlobalSyncNoOwner(opts.shouldFix(CheckSlugKBGlobalSyncNoOwner))
 		}},

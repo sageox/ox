@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-06-15
+
+### Added
+
+- **Knowledge Bubbles now appear in `ox daemon status`** — the daemon reports every bubble it has synced to disk (slug, type, freshness), plus a badge showing whether *this* daemon keeps them fresh or a sibling daemon does. Previously the daemon synced bubbles silently with no way to see what was happening.
+- **`ox doctor` gained knowledge-bubble repo health checks at parity with ledgers and team contexts** — detects bubbles the cloud lists but that were never cloned, bubbles wedged in a stuck merge/rebase (which silently block sync for every project), and bubbles whose sparse-checkout dropped `.sageox`. Repairs route through the daemon so they never collide with an in-flight sync.
+
+### Changed
+
+- **Knowledge Bubbles are now first-class in daemon status output** — the JSON `bubbles[]` array and a human-readable "Knowledge Bubbles" section make it clear which bubbles are local, fresh, and who is responsible for syncing them.
+
 ## [0.10.0] - 2026-06-11
 
 ### Added
