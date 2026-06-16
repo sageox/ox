@@ -203,12 +203,25 @@ func reasonFor(kind DiagramKind, sec Section, fileN int) string {
 // `ox plan enrich --json` (Result.Guidance). It is deliberately lean — a checklist, not
 // the 259-line skill spec — and folds in the plan-specific diagram hints so the
 // agent gets concrete direction. Returns "" for a plan with no sections.
-func buildGuidance(in Input, hints []DiagramHint) string {
+//
+// It LEADS with the plan-specific team-context evidence (sig) the agent is already
+// holding: only `ox plan render` surfaces those signals and saves the plan to the
+// ledger — a self-authored HTML render (the agent's own skill, which ox can't see
+// or control, and there may be several) structurally cannot. Specific evidence the
+// agent can verify beats a generic pitch, and wins on a capability competitors
+// lack rather than trying to out-style them.
+func buildGuidance(in Input, sig SignalSummary, hints []DiagramHint) string {
 	if len(in.Sections) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("Render with `ox plan render --open` (self-contained, cross-agent). Author for a reviewer who has ~10 minutes: ")
+	if lead := guidanceLead(sig); lead != "" {
+		b.WriteString(lead)
+		b.WriteString(" ")
+	} else {
+		b.WriteString("Render with `ox plan render --open` (self-contained, cross-agent): it folds in team context and saves the plan to the ledger where teammates find it — a self-authored HTML render does neither. ")
+	}
+	b.WriteString("Author for a reviewer who has ~10 minutes: ")
 	b.WriteString("lead with the conclusion and the biggest risk; keep every file/ID/PR framed enough to stand on its own; ")
 	b.WriteString("let one hero diagram and a few tables replace prose rather than decorate it; cut anything that does not change the decision. ")
 	b.WriteString("Explore visualization patterns with `ox plan viz` (sparklines, dependency graphs, swimlane timelines, budget sequences, Tufte tables, device mockups) and weave in the ones that compress understanding.")
@@ -222,4 +235,48 @@ func buildGuidance(in Input, hints []DiagramHint) string {
 		b.WriteString(".")
 	}
 	return b.String()
+}
+
+// guidanceLead frames the render call with the SPECIFIC team-context evidence the
+// plan triggered, so the agent reaches for `ox plan render` because it can see what
+// a self-authored render would silently drop — not because we asserted authority.
+// Returns "" when no team-context signal fired (the caller falls back to the
+// generic capability line).
+func guidanceLead(sig SignalSummary) string {
+	var parts []string
+	if n := sig.Collisions; n > 0 {
+		parts = append(parts, fmt.Sprintf("%d file%s in open PRs / active work", n, plural(n)))
+	}
+	if n := sig.ExpertRoutes; n > 0 {
+		parts = append(parts, fmt.Sprintf("%d expert route%s", n, plural(n)))
+	}
+	if n := sig.PriorArt; n > 0 {
+		parts = append(parts, fmt.Sprintf("%d prior-art hit%s", n, plural(n)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "This plan touches " + joinAnd(parts) +
+		" — `ox plan render --open` is the only renderer that surfaces them and saves the plan to the ledger; a self-authored HTML render drops all of it."
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+// joinAnd renders a human list: "a", "a and b", or "a, b, and c".
+func joinAnd(parts []string) string {
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	case 2:
+		return parts[0] + " and " + parts[1]
+	default:
+		return strings.Join(parts[:len(parts)-1], ", ") + ", and " + parts[len(parts)-1]
+	}
 }

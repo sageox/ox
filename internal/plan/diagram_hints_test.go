@@ -126,14 +126,43 @@ func TestComputeDiagramHints_CapAndOrder(t *testing.T) {
 func TestBuildGuidance_FoldsInHints(t *testing.T) {
 	in := Parse("## Request flow\n\nThe client sends a request; the API returns a response in order.\n")
 	hints := computeDiagramHints(in)
-	g := buildGuidance(in, hints)
+	g := buildGuidance(in, SignalSummary{}, hints)
 	if !strings.Contains(g, "ox plan viz") {
 		t.Error("guidance should point at the visualization catalog")
 	}
 	if !strings.Contains(g, string(DiagramSequence)) {
 		t.Error("guidance should fold in the plan-specific diagram hint")
 	}
-	if buildGuidance(Input{}, nil) != "" {
+	if buildGuidance(Input{}, SignalSummary{}, nil) != "" {
 		t.Error("empty plan should produce empty guidance")
+	}
+}
+
+// TestBuildGuidance_LeadsWithEvidence verifies the guidance LEADS with the
+// plan-specific team-context counts when signals fired (so the agent sees what a
+// self-authored render would drop), and falls back to the generic capability line
+// when nothing fired.
+// Failure prevented: the render call is buried under a generic pitch and agents
+// emit a context-blind markdown/skill orphan instead of `ox plan render`.
+func TestBuildGuidance_LeadsWithEvidence(t *testing.T) {
+	in := Parse("## Plan\n\nTouches internal/auth and cmd/ox.\n")
+	g := buildGuidance(in, SignalSummary{Collisions: 9, ExpertRoutes: 2}, nil)
+	for _, want := range []string{"9 file", "2 expert route", "drops all of it"} {
+		if !strings.Contains(g, want) {
+			t.Errorf("evidence-led guidance missing %q: %s", want, g)
+		}
+	}
+	// singular agreement: 1 collision should not read "1 files"
+	if s := buildGuidance(in, SignalSummary{Collisions: 1}, nil); strings.Contains(s, "1 files") {
+		t.Errorf("collision count should be singular: %s", s)
+	}
+	// no signals → generic capability line that still names the ledger benefit,
+	// without claiming specific dropped signals.
+	g2 := buildGuidance(in, SignalSummary{}, nil)
+	if !strings.Contains(g2, "ledger") {
+		t.Errorf("generic guidance should still name the ledger benefit: %s", g2)
+	}
+	if strings.Contains(g2, "drops all of it") {
+		t.Errorf("no-signal guidance must not claim specific dropped signals: %s", g2)
 	}
 }

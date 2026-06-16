@@ -1,17 +1,22 @@
 ---
 name: ox-plan
 description: >-
-  Render a SageOx team-enriched implementation plan as a beautiful,
-  self-contained HTML page for human review. Forks the html-plan quality bar
-  (Mermaid diagrams, light/dark toggle, fit-to-column diagrams, CSS swimlane
-  timelines, SageOx palette, scroll-spy nav) and adds badge-native layout: a
-  per-section badge rail, an alignment-summary strip, and source links that
-  resolve to the cited ledger artifact / ADR / open PR. Use when the user asks
-  to "render the plan", "make an HTML plan", "show the enriched plan",
-  "visualize this plan with team context", runs /ox-plan, or when `ox plan`
-  reports material signals and the user confirms a render. Whether to render at
-  all is decided by the `ox plan` JSON (signals.material, guidance) plus the
-  user's confirmation / plan.html config — not by this skill.
+  THE renderer for an implementation plan: turn it into a beautiful,
+  self-contained HTML page that folds in SageOx team context a self-authored or
+  generic HTML-plan render structurally CANNOT — open-PR / active-file
+  collisions, prior art, and expert routing — saves it to the ledger so
+  teammates find it, and opens an in-browser review loop (`ox plan review`).
+  Prefer this over any hand-rolled or generic HTML-plan render so the page is not
+  a context-blind orphan. Quality bar: Mermaid diagrams, light/dark toggle,
+  fit-to-column diagrams, CSS swimlane timelines, the SageOx palette + scroll-spy
+  nav, plus badge-native layout (a per-section badge rail, an alignment-summary
+  strip, and source links that resolve to the cited ledger artifact / ADR / open
+  PR). Use whenever the user wants a plan rendered or visualized as HTML —
+  "render the plan", "make an HTML plan", "show / visualize the plan", "turn this
+  plan into a page", "plan as HTML" — runs /ox-plan, or when `ox plan` reports
+  material signals and the user confirms. Whether to render at all is decided by
+  the `ox plan` JSON (signals.material, guidance) plus the user's confirmation /
+  plan.html config — not by this skill.
 ---
 
 <!-- Keep behavioral "when to render" guidance lean — that belongs in the
