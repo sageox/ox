@@ -91,6 +91,7 @@ func Enrich(ctx context.Context, in Input, gitRoot string) Result {
 	// help (zero LLM/network): they steer the agent toward the right diagram per
 	// section and a decision-first render. Computed from the parsed input only.
 	hints := computeDiagramHints(in)
+	vizHints := computeVizHints(in)
 	sum := summarize(annotations, in)
 
 	return Result{
@@ -98,9 +99,10 @@ func Enrich(ctx context.Context, in Input, gitRoot string) Result {
 		Context:      items,
 		Signals:      sum,
 		DiagramHints: hints,
+		VizHints:     vizHints,
 		// Guidance leads with the plan-specific signals (sum) so the agent sees
 		// what a self-authored render would drop — see buildGuidance.
-		Guidance: buildGuidance(in, sum, hints),
+		Guidance: buildGuidance(in, sum, hints, vizHints),
 	}
 }
 

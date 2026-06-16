@@ -126,14 +126,14 @@ func TestComputeDiagramHints_CapAndOrder(t *testing.T) {
 func TestBuildGuidance_FoldsInHints(t *testing.T) {
 	in := Parse("## Request flow\n\nThe client sends a request; the API returns a response in order.\n")
 	hints := computeDiagramHints(in)
-	g := buildGuidance(in, SignalSummary{}, hints)
+	g := buildGuidance(in, SignalSummary{}, hints, nil)
 	if !strings.Contains(g, "ox plan viz") {
 		t.Error("guidance should point at the visualization catalog")
 	}
 	if !strings.Contains(g, string(DiagramSequence)) {
 		t.Error("guidance should fold in the plan-specific diagram hint")
 	}
-	if buildGuidance(Input{}, SignalSummary{}, nil) != "" {
+	if buildGuidance(Input{}, SignalSummary{}, nil, nil) != "" {
 		t.Error("empty plan should produce empty guidance")
 	}
 }
@@ -146,23 +146,100 @@ func TestBuildGuidance_FoldsInHints(t *testing.T) {
 // emit a context-blind markdown/skill orphan instead of `ox plan render`.
 func TestBuildGuidance_LeadsWithEvidence(t *testing.T) {
 	in := Parse("## Plan\n\nTouches internal/auth and cmd/ox.\n")
-	g := buildGuidance(in, SignalSummary{Collisions: 9, ExpertRoutes: 2}, nil)
+	g := buildGuidance(in, SignalSummary{Collisions: 9, ExpertRoutes: 2}, nil, nil)
 	for _, want := range []string{"9 file", "2 expert route", "drops all of it"} {
 		if !strings.Contains(g, want) {
 			t.Errorf("evidence-led guidance missing %q: %s", want, g)
 		}
 	}
 	// singular agreement: 1 collision should not read "1 files"
-	if s := buildGuidance(in, SignalSummary{Collisions: 1}, nil); strings.Contains(s, "1 files") {
+	if s := buildGuidance(in, SignalSummary{Collisions: 1}, nil, nil); strings.Contains(s, "1 files") {
 		t.Errorf("collision count should be singular: %s", s)
 	}
 	// no signals → generic capability line that still names the ledger benefit,
 	// without claiming specific dropped signals.
-	g2 := buildGuidance(in, SignalSummary{}, nil)
+	g2 := buildGuidance(in, SignalSummary{}, nil, nil)
 	if !strings.Contains(g2, "ledger") {
 		t.Errorf("generic guidance should still name the ledger benefit: %s", g2)
 	}
 	if strings.Contains(g2, "drops all of it") {
 		t.Errorf("no-signal guidance must not claim specific dropped signals: %s", g2)
+	}
+}
+
+// TestComputeVizHints_CommonPatterns verifies the common parameterized patterns
+// get a content-aware push on their canonical section — the gap diagram_hints
+// (Mermaid-only) left open.
+// Failure prevented: an agent writing a Risks / Files-changed / cost / metrics /
+// flags section gets no suggestion and must browse the whole `ox plan viz` menu.
+func TestComputeVizHints_CommonPatterns(t *testing.T) {
+	cases := []struct{ name, md, wantID string }{
+		{"risks", "## Risks\n\nEach risk is ranked by severity with a mitigation.\n", "risk-matrix"},
+		{"files", "## Files changed\n\nNew and edited files across subsystems.\n", "file-impact-map"},
+		{"cost", "## Cost\n\nToken spend and budget per component.\n", "cost-waterfall"},
+		{"metrics", "## Metrics\n\nLatency before and after; headline numbers.\n", "stat-cards"},
+		{"flags", "## Feature flags\n\nRollout across dev, test, prod with percentages.\n", "flag-rollout-matrix"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hints := computeVizHints(Parse(c.md))
+			if len(hints) == 0 {
+				t.Fatalf("no viz hint; want %s", c.wantID)
+			}
+			if hints[0].PatternID != c.wantID {
+				t.Errorf("got %s, want %s (reason: %s)", hints[0].PatternID, c.wantID, hints[0].Reason)
+			}
+		})
+	}
+}
+
+// TestComputeVizHints_PrecisionAndNiche verifies precision (a prose call-path
+// section fires nothing) and that partition stays niche: generic "memory" prose
+// does not surface it, but explicit flash/partition language does.
+// Failure prevented: noisy false-positive pushes that erode trust in the hints.
+func TestComputeVizHints_PrecisionAndNiche(t *testing.T) {
+	if h := computeVizHints(Parse("## Approach\n\nThe client sends a request and the API returns a response.\n")); len(h) != 0 {
+		t.Errorf("prose call-path section should yield no viz hint, got %+v", h)
+	}
+	if h := computeVizHints(Parse("## Memory usage\n\nThe service uses about 200 MB of RAM at peak.\n")); len(h) != 0 {
+		t.Errorf("generic memory section must not surface partition, got %+v", h)
+	}
+	h := computeVizHints(Parse("## Flash layout\n\nOTA partitions and their offsets.\n"))
+	if len(h) == 0 || (h[0].PatternID != "partition-bar" && h[0].PatternID != "partition-map") {
+		t.Errorf("explicit flash/partition section should surface a partition pattern, got %+v", h)
+	}
+}
+
+// TestComputeVizHints_CapAndOrder verifies the cap and that hints read in section
+// order (top-to-bottom with the plan), like diagram hints.
+func TestComputeVizHints_CapAndOrder(t *testing.T) {
+	md := "## Risks\n\nrisks by severity, mitigation.\n\n" +
+		"## Files changed\n\nnew and edited files.\n\n" +
+		"## Cost\n\ntoken spend and budget.\n\n" +
+		"## Metrics\n\nlatency before and after numbers.\n"
+	h := computeVizHints(Parse(md))
+	if len(h) > maxVizHints {
+		t.Fatalf("expected <= %d hints, got %d", maxVizHints, len(h))
+	}
+	if len(h) == 0 || h[0].Section != "Risks" {
+		t.Errorf("hints should read in section order (Risks first), got %+v", h)
+	}
+}
+
+// TestBuildGuidance_FoldsVizHints verifies the guidance surfaces a data-viz hint
+// WITH its render command (collapsing select→render), and omits the clause when
+// there are none.
+// Failure prevented: the agent is told a pattern fits but not how to render it.
+func TestBuildGuidance_FoldsVizHints(t *testing.T) {
+	in := Parse("## Risks\n\nrisks by severity with mitigations.\n")
+	g := buildGuidance(in, SignalSummary{}, nil, computeVizHints(in))
+	if !strings.Contains(g, "Data visualizations that fit") {
+		t.Errorf("guidance should fold in viz hints: %s", g)
+	}
+	if !strings.Contains(g, "ox plan viz render risk-matrix --data") {
+		t.Errorf("viz hint should carry its render command: %s", g)
+	}
+	if g2 := buildGuidance(in, SignalSummary{}, nil, nil); strings.Contains(g2, "Data visualizations that fit") {
+		t.Errorf("no viz hints should omit the clause: %s", g2)
 	}
 }

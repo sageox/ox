@@ -108,6 +108,19 @@ type DiagramHint struct {
 	Reason        string      `json:"reason"`         // what structure was detected, in one clause
 }
 
+// VizHint is the data-visualization counterpart of DiagramHint: a per-section
+// suggestion of which PARAMETERIZED catalog pattern (one with a deterministic
+// `ox plan viz render` renderer — risk-matrix, file-impact-map, cost-waterfall,
+// stat-cards, flag-rollout-matrix, …) fits a section. It closes the gap that
+// DiagramHint only covers Mermaid/CSS diagram FORMS, leaving the data-viz catalog
+// invisible to content-aware matching. The match signal is DERIVED from each
+// pattern's `use:` line (no separate catalog field) — see computeVizHints.
+type VizHint struct {
+	Section   string `json:"section"`    // H2 heading the hint applies to
+	PatternID string `json:"pattern_id"` // catalog id, e.g. "risk-matrix" (renderable via `ox plan viz render`)
+	Reason    string `json:"reason"`     // the trigger terms matched, in one clause
+}
+
 // Section is one H2-delimited block of a plan, with any file references it cites.
 type Section struct {
 	Heading string
@@ -159,6 +172,11 @@ type Result struct {
 	// Mermaid/timeline form fits the structure ox detected). Empty when no
 	// section had strong enough structure to suggest one.
 	DiagramHints []DiagramHint `json:"diagram_hints,omitempty"`
+	// VizHints are deterministic per-section data-visualization suggestions
+	// (which parameterized catalog pattern fits — risk-matrix, file-impact-map,
+	// …), each renderable via `ox plan viz render <id> --data`. Empty when no
+	// section matched a pattern's use: signal strongly enough.
+	VizHints []VizHint `json:"viz_hints,omitempty"`
 	// Guidance is a concise, cross-agent authoring contract for rendering a
 	// fantastic HTML plan (decision-first, ten-minute reader, diagrams over
 	// prose). It folds in the DiagramHints so the agent gets plan-specific
