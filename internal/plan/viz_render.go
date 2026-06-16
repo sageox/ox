@@ -353,6 +353,12 @@ func renderFlagMatrix(data []byte) (string, error) {
 // Both share the {title,total,unit,partitions[]} shape so the same data renders
 // either way.
 
+// pbarLabelMinPct is the narrowest slice (% of total) that can still show its
+// label legibly inside the proportional bar. Below it the label is dropped — the
+// identity stays reachable via the hover tooltip and the paired detail table — so
+// a sub-1% slice doesn't render an unreadable clipped nub over its sliver.
+const pbarLabelMinPct = 7.0
+
 type partitionSeg struct {
 	Label    string  `json:"label"`
 	Size     float64 `json:"size"`
@@ -360,6 +366,7 @@ type partitionSeg struct {
 	Color    string  `json:"color"`    // category color (semantic whitelist)
 	Flag     string  `json:"flag"`     // small badge, e.g. "SIGNED" / "ENC"
 	Note     string  `json:"note"`     // one-line annotation
+	Group    string  `json:"group"`    // optional section label; a new value emits a divider row (partition-map only)
 	Proposed bool    `json:"proposed"` // dashed/muted, uncommitted
 }
 
@@ -445,9 +452,13 @@ func renderPartitionBar(data []byte) (string, error) {
 	b.WriteString(`<div class="pbar">`)
 	for i, p := range d.Partitions {
 		pct := p.Size / total * 100
+		lbl := ""
+		if pct >= pbarLabelMinPct {
+			lbl = `<span class="pseg-lbl">` + esc(p.Label) + `</span>`
+		}
 		fmt.Fprintf(&b,
-			`<span class="pseg" style="--i:%d;width:%.3f%%;background:%s"><span class="pseg-lbl">%s</span>%s</span>`,
-			i, pct, colorVar(p.Color), esc(p.Label), ptip(p, pct, d.Unit))
+			`<span class="pseg" style="--i:%d;width:%.3f%%;background:%s">%s%s</span>`,
+			i, pct, colorVar(p.Color), lbl, ptip(p, pct, d.Unit))
 	}
 	b.WriteString(`</div>`)
 	b.WriteString(`<table class="pbar-tab"><tr><th>partition</th><th>offset</th><th>size</th><th>share</th></tr>`)
@@ -488,6 +499,8 @@ func renderPartitionMap(data []byte) (string, error) {
 		}
 	}
 	railPct := func(sz float64) float64 {
+		// sz<=0 has no log; lmax<=lmin means a single partition (or all sizes
+		// equal) — there's nothing to differentiate, so every rail floors at 10%.
 		if sz <= 0 || lmax <= lmin {
 			return 10
 		}
@@ -495,11 +508,23 @@ func renderPartitionMap(data []byte) (string, error) {
 		return (math.Log10(sz)-lmin)/(lmax-lmin)*90 + 10
 	}
 	var b strings.Builder
-	b.WriteString(`<figure class="pmapv">`)
+	// Always emit the figcaption: the "log scale" label is a data-honesty
+	// disclosure (no false linear proportion) and must show even without a title.
+	b.WriteString(`<figure class="pmapv"><figcaption>`)
 	if d.Title != "" {
-		b.WriteString(`<figcaption>` + esc(d.Title) + ` <span class="pmapv-rk">size · log scale</span></figcaption>`)
+		b.WriteString(esc(d.Title) + ` `)
 	}
+	b.WriteString(`<span class="pmapv-rk">size · log scale</span></figcaption>`)
+	prevGroup := ""
 	for i, p := range d.Partitions {
+		// a new section label interleaves a full-width divider before its first
+		// row (e.g. committed rows, then a "PROPOSED ADDITIONS" group).
+		if g := strings.TrimSpace(p.Group); g != prevGroup {
+			if g != "" {
+				b.WriteString(`<div class="pmapv-group">` + esc(g) + `</div>`)
+			}
+			prevGroup = g
+		}
 		cls := "pmapv-row"
 		if p.Proposed {
 			cls += " proposed"

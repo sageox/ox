@@ -204,3 +204,74 @@ func TestRenderViz_PartitionMap(t *testing.T) {
 		t.Error("tiny partition rendered at 0% — log floor not applied")
 	}
 }
+
+// TestRenderViz_PartitionMapGroupDivider verifies a row's `group` interleaves one
+// section divider before the group's first row — the "PROPOSED SECURE ADDITIONS"
+// block in the canonical example.
+// Failure prevented: the divider silently vanishes (proposed rows blend into the
+// committed layout) or emits once per row instead of once per group.
+func TestRenderViz_PartitionMapGroupDivider(t *testing.T) {
+	out, err := RenderViz("partition-map", []byte(`{"unit":"KB","partitions":[{"label":"ota_0","size":6144},{"label":"a","size":4,"group":"PROPOSED","proposed":true},{"label":"b","size":2,"group":"PROPOSED","proposed":true}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(out, `class="pmapv-group"`); n != 1 {
+		t.Errorf("expected exactly 1 group divider for the 2-row group, got %d: %s", n, out)
+	}
+	if !strings.Contains(out, `class="pmapv-group">PROPOSED</div>`) {
+		t.Errorf("group divider label missing: %s", out)
+	}
+}
+
+// TestRenderViz_PartitionMapEqualSizes verifies that when every partition is the
+// same size (no log spread, lmax==lmin) each rail floors to 10% — no NaN, no panic.
+// Failure prevented: a uniform layout divides by zero in railPct and renders NaN
+// widths.
+func TestRenderViz_PartitionMapEqualSizes(t *testing.T) {
+	out, err := RenderViz("partition-map", []byte(`{"unit":"KB","partitions":[{"label":"a","size":1024},{"label":"b","size":1024},{"label":"c","size":1024}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "NaN") {
+		t.Errorf("equal sizes produced a NaN rail width: %s", out)
+	}
+	if n := strings.Count(out, "width:10.0%"); n != 3 {
+		t.Errorf("expected all 3 rails floored to 10%%, got %d: %s", n, out)
+	}
+}
+
+// TestVizRenderers_AllInCatalog is the reverse of TestVizCatalog_ParamPatternsRenderable:
+// every renderer wired into RenderViz must have a catalog entry advertising a
+// `param:` shape, so no renderer is unreachable from `ox plan viz`.
+// Failure prevented: a renderer ships with no catalog entry and agents can never
+// discover or invoke it.
+func TestVizRenderers_AllInCatalog(t *testing.T) {
+	params := map[string]bool{}
+	for _, p := range VizCatalog() {
+		if p.Param != "" {
+			params[p.ID] = true
+		}
+	}
+	for id := range vizRenderers {
+		if !params[id] {
+			t.Errorf("renderer %q has no catalog entry with a param: shape (unreachable from `ox plan viz`)", id)
+		}
+	}
+}
+
+// TestVizColors_DefinedInBothThemes guards the color whitelist against theme
+// drift: every color an agent can name in JSON must resolve in BOTH the dark
+// (:root) and light (html[data-theme="light"]) blocks of scaffold.css.
+// Failure prevented: a color added to one theme only renders wrong (or
+// transparent) in the other.
+func TestVizColors_DefinedInBothThemes(t *testing.T) {
+	css, err := renderAssets.ReadFile("assets/scaffold.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cssVar := range vizColors {
+		if n := strings.Count(string(css), cssVar+":"); n < 2 {
+			t.Errorf("color var %q defined %d time(s) in scaffold.css; expected both dark + light themes", cssVar, n)
+		}
+	}
+}
