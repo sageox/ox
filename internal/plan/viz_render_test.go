@@ -147,6 +147,8 @@ func TestVizCatalog_ParamPatternsRenderable(t *testing.T) {
 		"file-impact-map":     `{"files":[{"path":"a/b.go","change":"new"}]}`,
 		"risk-matrix":         `{"risks":[{"title":"a","severity":"high"}]}`,
 		"flag-rollout-matrix": `{"envs":["dev"],"stages":["merge"],"cells":{"dev":{"merge":"100%"}}}`,
+		"partition-bar":       `{"total":100,"unit":"KB","partitions":[{"label":"a","size":60},{"label":"b","size":40}]}`,
+		"partition-map":       `{"unit":"KB","partitions":[{"label":"a","size":60,"offset":"0x0"},{"label":"b","size":4,"proposed":true}]}`,
 	}
 	for _, p := range VizCatalog() {
 		if p.Param == "" {
@@ -160,5 +162,45 @@ func TestVizCatalog_ParamPatternsRenderable(t *testing.T) {
 		if _, err := RenderViz(p.ID, []byte(sample)); err != nil {
 			t.Errorf("param pattern %q failed to render: %v", p.ID, err)
 		}
+	}
+}
+
+// TestRenderViz_PartitionBar verifies the proportional bar computes share widths
+// and pairs a detail table.
+func TestRenderViz_PartitionBar(t *testing.T) {
+	out, err := RenderViz("partition-bar", []byte(`{"total":100,"unit":"KB","partitions":[{"label":"big","size":75,"color":"sage"},{"label":"small","size":25,"color":"teal"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "width:75.000%") {
+		t.Errorf("expected a 75%% segment, got: %s", out)
+	}
+	if !strings.Contains(out, `class="pbar-tab"`) {
+		t.Error("detail table missing")
+	}
+	if !strings.Contains(out, "75.00%") {
+		t.Error("share column missing")
+	}
+}
+
+// TestRenderViz_PartitionMap verifies the log-scaled rail keeps a tiny partition
+// visible (floored at 10%) while the largest fills it, and that proposed rows are
+// marked and "0x0" doesn't false-floor a real largest to 0.
+func TestRenderViz_PartitionMap(t *testing.T) {
+	out, err := RenderViz("partition-map", []byte(`{"title":"flash","unit":"KB","partitions":[{"label":"big","size":6144,"offset":"0x20000"},{"label":"tiny","size":4,"proposed":true}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "pmapv-row proposed") {
+		t.Error("proposed row not marked")
+	}
+	if !strings.Contains(out, "log scale") {
+		t.Error("log-scale label missing")
+	}
+	if !strings.Contains(out, "width:100.0%") {
+		t.Errorf("largest partition should fill the rail: %s", out)
+	}
+	if strings.Contains(out, "width:0.0%") {
+		t.Error("tiny partition rendered at 0% — log floor not applied")
 	}
 }

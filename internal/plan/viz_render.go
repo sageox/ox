@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"math"
 	"path"
 	"sort"
 	"strconv"
@@ -34,6 +35,8 @@ var vizRenderers = map[string]func([]byte) (string, error){
 	"file-impact-map":     renderFileImpact,
 	"risk-matrix":         renderRiskMatrix,
 	"flag-rollout-matrix": renderFlagMatrix,
+	"partition-bar":       renderPartitionBar,
+	"partition-map":       renderPartitionMap,
 }
 
 // RenderViz renders one parameterized pattern from its JSON data into an HTML
@@ -51,7 +54,7 @@ func RenderViz(pattern string, data []byte) (string, error) {
 // anything else falls back to sage so a typo can't inject arbitrary CSS.
 var vizColors = map[string]string{
 	"sage": "--sage", "copper": "--copper", "amber": "--amber",
-	"red": "--red", "teal": "--teal",
+	"red": "--red", "teal": "--teal", "slate": "--slate", "violet": "--violet",
 }
 
 func colorVar(name string) string {
@@ -333,5 +336,183 @@ func renderFlagMatrix(data []byte) (string, error) {
 		b.WriteString(`</tr>`)
 	}
 	b.WriteString(`</table>`)
+	return b.String(), nil
+}
+
+// --- partition maps (two variations of the disk/flash partition idiom) ---
+//
+// Chosen by WHAT the data is and HOW MANY partitions:
+//   partition-bar : few partitions (<=8), SHARE is the story — a 100% stacked
+//                   proportional bar + a detail table. Linear, honest about size.
+//   partition-map : many partitions / a full address-space layout where ORDER and
+//                   per-row annotation matter — vertical rows, offset-ordered, with
+//                   a LOG-scaled size rail so 4 KB partitions stay visible next to
+//                   6 MB ones (true linear would render the small ones <1px:
+//                   dishonest by omission). The rail is labeled "log scale" so no
+//                   false linear proportion is implied — use partition-bar for that.
+// Both share the {title,total,unit,partitions[]} shape so the same data renders
+// either way.
+
+type partitionSeg struct {
+	Label    string  `json:"label"`
+	Size     float64 `json:"size"`
+	Offset   string  `json:"offset"`   // e.g. "0x20000"; optional
+	Color    string  `json:"color"`    // category color (semantic whitelist)
+	Flag     string  `json:"flag"`     // small badge, e.g. "SIGNED" / "ENC"
+	Note     string  `json:"note"`     // one-line annotation
+	Proposed bool    `json:"proposed"` // dashed/muted, uncommitted
+}
+
+type partitionData struct {
+	Title      string         `json:"title"`
+	Total      float64        `json:"total"` // optional; defaults to sum of sizes
+	Unit       string         `json:"unit"`
+	Partitions []partitionSeg `json:"partitions"`
+}
+
+func partitionParse(data []byte, who string) (partitionData, float64, error) {
+	var d partitionData
+	if err := json.Unmarshal(data, &d); err != nil {
+		return d, 0, fmt.Errorf("%s data: %w", who, err)
+	}
+	if len(d.Partitions) == 0 {
+		return d, 0, fmt.Errorf("%s: no partitions", who)
+	}
+	sum := 0.0
+	for _, p := range d.Partitions {
+		if p.Size < 0 {
+			return d, 0, fmt.Errorf("%s: %q has a negative size %s (must be >= 0)", who, p.Label, fmtNum(p.Size))
+		}
+		sum += p.Size
+	}
+	total := d.Total
+	if total <= 0 {
+		total = sum
+	}
+	return d, total, nil
+}
+
+func pflag(f string) string {
+	if strings.TrimSpace(f) == "" {
+		return ""
+	}
+	return `<span class="pm-flag">` + esc(f) + `</span>`
+}
+
+func pnote(n string) string {
+	if strings.TrimSpace(n) == "" {
+		return ""
+	}
+	return `<small>` + esc(n) + `</small>`
+}
+
+// ptip builds the pure-CSS hover tooltip shown over a segment/row: the richer
+// detail the compact view can't always fit (offset, exact size + share, flag,
+// the full note even when the row ellipsizes it).
+func ptip(p partitionSeg, pct float64, unit string) string {
+	var s strings.Builder
+	s.WriteString(`<span class="pm-tip"><b>` + esc(p.Label) + `</b>`)
+	if strings.TrimSpace(p.Offset) != "" {
+		s.WriteString(`<span class="pm-tip-k">@ ` + esc(p.Offset) + `</span>`)
+	}
+	fmt.Fprintf(&s, `<span class="pm-tip-k">%s · %.1f%%</span>`, esc(fmtUnit(unit, p.Size)), pct)
+	if strings.TrimSpace(p.Flag) != "" {
+		s.WriteString(`<span class="pm-tip-flag">` + esc(p.Flag) + `</span>`)
+	}
+	if p.Proposed {
+		s.WriteString(`<span class="pm-tip-flag prop">PROPOSED</span>`)
+	}
+	if strings.TrimSpace(p.Note) != "" {
+		s.WriteString(`<span class="pm-tip-note">` + esc(p.Note) + `</span>`)
+	}
+	s.WriteString(`</span>`)
+	return s.String()
+}
+
+func renderPartitionBar(data []byte) (string, error) {
+	d, total, err := partitionParse(data, "partition-bar")
+	if err != nil {
+		return "", err
+	}
+	if total <= 0 {
+		total = 1
+	}
+	var b strings.Builder
+	b.WriteString(`<figure class="pbar-fig">`)
+	if d.Title != "" {
+		b.WriteString(`<figcaption>` + esc(d.Title) + `</figcaption>`)
+	}
+	b.WriteString(`<div class="pbar">`)
+	for i, p := range d.Partitions {
+		pct := p.Size / total * 100
+		fmt.Fprintf(&b,
+			`<span class="pseg" style="--i:%d;width:%.3f%%;background:%s"><span class="pseg-lbl">%s</span>%s</span>`,
+			i, pct, colorVar(p.Color), esc(p.Label), ptip(p, pct, d.Unit))
+	}
+	b.WriteString(`</div>`)
+	b.WriteString(`<table class="pbar-tab"><tr><th>partition</th><th>offset</th><th>size</th><th>share</th></tr>`)
+	for _, p := range d.Partitions {
+		pct := p.Size / total * 100
+		off := p.Offset
+		if off == "" {
+			off = "—"
+		}
+		fmt.Fprintf(&b,
+			`<tr><td><span class="pm-dot" style="background:%s"></span>%s%s</td><td class="pm-mono">%s</td><td class="pm-mono">%s</td><td class="pm-mono">%.2f%%</td></tr>`,
+			colorVar(p.Color), esc(p.Label), pflag(p.Flag), esc(off), esc(fmtUnit(d.Unit, p.Size)), pct)
+	}
+	b.WriteString(`</table></figure>`)
+	return b.String(), nil
+}
+
+func renderPartitionMap(data []byte) (string, error) {
+	d, total, err := partitionParse(data, "partition-map")
+	if err != nil {
+		return "", err
+	}
+	if total <= 0 {
+		total = 1
+	}
+	// Log scale for the size rail across the non-zero sizes.
+	lmin, lmax := math.MaxFloat64, -math.MaxFloat64
+	for _, p := range d.Partitions {
+		if p.Size <= 0 {
+			continue
+		}
+		l := math.Log10(p.Size)
+		if l < lmin {
+			lmin = l
+		}
+		if l > lmax {
+			lmax = l
+		}
+	}
+	railPct := func(sz float64) float64 {
+		if sz <= 0 || lmax <= lmin {
+			return 10
+		}
+		// map log(size) into 10..100% so the smallest partition is still visible
+		return (math.Log10(sz)-lmin)/(lmax-lmin)*90 + 10
+	}
+	var b strings.Builder
+	b.WriteString(`<figure class="pmapv">`)
+	if d.Title != "" {
+		b.WriteString(`<figcaption>` + esc(d.Title) + ` <span class="pmapv-rk">size · log scale</span></figcaption>`)
+	}
+	for i, p := range d.Partitions {
+		cls := "pmapv-row"
+		if p.Proposed {
+			cls += " proposed"
+		}
+		off := p.Offset
+		if off == "" {
+			off = "TBD"
+		}
+		pct := p.Size / total * 100
+		fmt.Fprintf(&b,
+			`<div class="%s" style="--i:%d"><span class="pm-dot" style="background:%s"></span><span class="pmapv-off pm-mono">%s</span><span class="pmapv-nm"><b>%s</b>%s%s</span><span class="pmapv-rail"><i style="width:%.1f%%;background:%s"></i></span><span class="pmapv-sz pm-mono">%s</span>%s</div>`,
+			cls, i, colorVar(p.Color), esc(off), esc(p.Label), pflag(p.Flag), pnote(p.Note), railPct(p.Size), colorVar(p.Color), esc(fmtUnit(d.Unit, p.Size)), ptip(p, pct, d.Unit))
+	}
+	b.WriteString(`</figure>`)
 	return b.String(), nil
 }

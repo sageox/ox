@@ -5,12 +5,14 @@
   --bg:#0f1416; --panel:#151b1e; --panel2:#1b2327; --hair:#2a3439; --hair2:#222c30;
   --ink:#e6edf0; --dim:#9fb0b6; --faint:#71868d;
   --sage:#7a8f78; --sage-bright:#aebca7; --copper:#e0a56a; --amber:#f59e0b; --red:#ef4444; --teal:#14b8a6;
+  --slate:#64748b; --violet:#a78bfa;
   --grad-a:#17211f; --grad-b:#141a1d; --shadow:0 1px 0 rgba(255,255,255,.02),0 8px 30px rgba(0,0,0,.35);
 }
 html[data-theme="light"]{
   --bg:#eef2ee; --panel:#fff; --panel2:#f5f8f4; --hair:#d8e0d8; --hair2:#e4ebe3;
   --ink:#16201c; --dim:#3f4d46; --faint:#566159;
   --sage:#56745a; --sage-bright:#3f5a43; --copper:#a8613b; --amber:#b4730c; --red:#c1352f; --teal:#0c6b62;
+  --slate:#5a6675; --violet:#7c5fd6;
   --grad-a:#e7efe7; --grad-b:#f3f7f2; --shadow:0 1px 0 rgba(0,0,0,.02),0 8px 26px rgba(40,60,45,.10);
 }
 *{box-sizing:border-box}
@@ -230,3 +232,62 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .rev-hint{position:fixed;left:96px;bottom:20px;z-index:61;background:var(--copper);color:#0c1112;border-radius:7px;padding:6px 10px;font-size:12px;font-weight:600;box-shadow:var(--shadow);animation:rev-bob 1.4s ease-in-out infinite}
 @keyframes rev-bob{0%,100%{transform:translateX(0)}50%{transform:translateX(-4px)}}
 @media print{.rev-bar,.toggle,.rev-orphans,.rev-hint{display:none}}
+
+/* partition maps — partition-bar (proportional) + partition-map (ordered, log rail).
+   Pure-CSS: staggered grow-in entrance, hover lift/brighten, and a hover tooltip
+   carrying the detail the compact view can't fit. prefers-reduced-motion honored. */
+.pm-dot{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:8px;vertical-align:middle;flex:none}
+.pm-flag{font-family:"JetBrains Mono",monospace;font-size:9px;font-weight:600;letter-spacing:.04em;color:var(--dim);border:1px solid var(--hair2);border-radius:4px;padding:1px 5px;margin-left:7px;vertical-align:middle}
+.pm-mono{font-family:"JetBrains Mono",monospace;font-size:12px}
+/* shared hover tooltip */
+.pm-tip{position:absolute;z-index:30;left:50%;bottom:calc(100% + 9px);transform:translate(-50%,4px);min-width:128px;max-width:240px;background:var(--panel2);border:1px solid var(--hair);border-radius:9px;padding:8px 10px;box-shadow:var(--shadow);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .16s ease,transform .16s ease,visibility .16s;display:flex;flex-direction:column;gap:3px;text-align:left}
+.pm-tip::after{content:"";position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:var(--hair)}
+.pm-tip b{font-size:12.5px;color:var(--ink);font-weight:600}
+.pm-tip-k{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim)}
+.pm-tip-flag{align-self:flex-start;font-family:"JetBrains Mono",monospace;font-size:9px;font-weight:600;letter-spacing:.04em;color:var(--copper);border:1px solid var(--hair2);border-radius:4px;padding:1px 5px}
+.pm-tip-flag.prop{border-style:dashed}
+.pm-tip-note{font-size:11.5px;color:var(--dim);line-height:1.4}
+/* proportional bar */
+.pbar-fig{margin:14px 0}
+.pbar-fig figcaption{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);margin-bottom:8px}
+.pbar{display:flex;height:50px;border-radius:8px}
+.pbar .pseg{position:relative;display:flex;align-items:center;justify-content:center;min-width:2px;transform-origin:left center;animation:pm-grow .55s cubic-bezier(.22,.61,.36,1) backwards;animation-delay:calc(var(--i,0)*45ms);transition:filter .15s ease,transform .15s ease}
+.pbar .pseg:first-child{border-radius:8px 0 0 8px} .pbar .pseg:last-child{border-radius:0 8px 8px 0}
+.pbar .pseg:hover{filter:brightness(1.14);transform:translateY(-2px);z-index:5}
+.pbar .pseg-lbl{font-size:11px;font-weight:600;color:#0c1112;white-space:nowrap;padding:0 5px;text-overflow:ellipsis;overflow:hidden}
+.pbar .pseg:hover .pm-tip{opacity:1;visibility:visible;transform:translate(-50%,0)}
+.pbar-tab{width:100%;border-collapse:collapse;margin-top:12px;font-size:13px}
+.pbar-tab th{text-align:left;font-family:"JetBrains Mono",monospace;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);font-weight:500;padding:6px 10px;border-bottom:1px solid var(--hair2)}
+.pbar-tab td{padding:7px 10px;border-bottom:1px solid var(--hair2)}
+.pbar-tab td.pm-mono{text-align:right;color:var(--dim)}
+.pbar-tab td:first-child{color:var(--ink)}
+.pbar-tab tr{transition:background .12s}
+.pbar-tab tr:hover{background:var(--panel)}
+/* vertical ordered map with log rail */
+.pmapv{margin:14px 0;border:1px solid var(--hair2);border-radius:10px}
+.pmapv figcaption{display:flex;justify-content:space-between;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);padding:9px 14px;background:var(--panel2);border-bottom:1px solid var(--hair2);border-radius:10px 10px 0 0}
+.pmapv-rk{color:var(--faint);text-transform:uppercase;letter-spacing:.05em;font-size:9.5px}
+.pmapv-row{position:relative;display:grid;grid-template-columns:14px 78px 1fr 130px 70px;align-items:center;gap:11px;padding:8px 14px;border-bottom:1px solid var(--hair2);animation:pm-fade .5s ease backwards;animation-delay:calc(var(--i,0)*35ms);transition:background .14s ease}
+.pmapv-row:last-child{border-bottom:none;border-radius:0 0 10px 10px}
+.pmapv-row:hover{background:var(--panel)}
+.pmapv-row .pm-dot{margin:0}
+.pmapv-off{color:var(--faint);font-size:11px}
+.pmapv-nm{min-width:0}
+.pmapv-nm b{font-weight:600;font-size:13.5px}
+.pmapv-nm small{display:block;color:var(--dim);font-size:11px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pmapv-rail{height:9px;border-radius:5px;background:var(--panel2);overflow:hidden}
+.pmapv-rail i{display:block;height:100%;border-radius:5px;transform-origin:left center;animation:pm-grow .6s cubic-bezier(.22,.61,.36,1) backwards;animation-delay:calc(var(--i,0)*35ms + 120ms);transition:filter .15s}
+.pmapv-row:hover .pmapv-rail i{filter:brightness(1.22)}
+.pmapv-sz{text-align:right;font-size:12px}
+.pmapv-row.proposed{opacity:.62;border-bottom:1px dashed var(--hair2)}
+.pmapv-row.proposed .pmapv-off{color:var(--copper)}
+.pmapv-row .pm-tip{left:auto;right:14px;bottom:calc(100% - 2px);transform:translateY(4px)}
+.pmapv-row .pm-tip::after{left:auto;right:22px}
+.pmapv-row:hover .pm-tip{opacity:1;visibility:visible;transform:translateY(0)}
+@keyframes pm-grow{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@keyframes pm-fade{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+@media(prefers-reduced-motion:reduce){.pbar .pseg,.pmapv-row,.pmapv-rail i{animation:none}}
+@media(max-width:620px){
+  .pmapv-row{grid-template-columns:14px 1fr 60px;row-gap:5px}
+  .pmapv-off,.pmapv-rail{display:none}
+}
