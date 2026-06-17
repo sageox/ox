@@ -27,9 +27,9 @@ import (
 
 // TokenFunc returns the current bearer token to attach to OTLP requests.
 // Called per-export so long-running processes (daemon) pick up rotated tokens.
-// Returning "" sends the request unauthenticated — the server JWT-gate will
-// then 401 and the batch is dropped, which is the correct behavior when the
-// user is logged out.
+// Returning "" means no bearer is available (logged out / token expired): the
+// batch is dropped client-side (see bearerRoundTripper.RoundTrip) rather than
+// sent, because the JWT-gated proxy would only 401 it anyway.
 type TokenFunc func() string
 
 type bearerRoundTripper struct {
@@ -38,11 +38,29 @@ type bearerRoundTripper struct {
 }
 
 func (rt *bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if tok := rt.tokenFunc(); tok != "" {
-		// clone to avoid mutating the caller's request (otlptracehttp may retry)
-		req = req.Clone(req.Context())
-		req.Header.Set("Authorization", "Bearer "+tok)
+	tok := rt.tokenFunc()
+	if tok == "" {
+		// No bearer available (logged out / token expired). The OTLP proxy is
+		// JWT-gated, so actually sending would just 401 and churn the server's
+		// error pipeline (the ox-w9yc5 surge). Drop client-side instead —
+		// mirrors the browser SDK's 204 no-JWT behavior in
+		// apps/web/src/lib/otel-browser.ts. A 2xx with an empty body makes the
+		// batch exporter treat the batch as delivered, so it neither retries
+		// nor logs an export error.
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Proto:      req.Proto,
+			ProtoMajor: req.ProtoMajor,
+			ProtoMinor: req.ProtoMinor,
+			Header:     make(http.Header),
+			Body:       http.NoBody,
+			Request:    req,
+		}, nil
 	}
+	// clone to avoid mutating the caller's request (otlptracehttp may retry)
+	req = req.Clone(req.Context())
+	req.Header.Set("Authorization", "Bearer "+tok)
 	return rt.base.RoundTrip(req)
 }
 
@@ -86,9 +104,10 @@ func AddSpanProcessor(p sdktrace.SpanProcessor) {
 // The daemon uses this to set client.id, client.class, os.type, etc.
 //
 // Safe to call with empty apiEndpoint or nil tokenFunc — tracing is
-// disabled (noop) or sends unauthenticated (server will 401, batch
-// dropped silently). Either is fine for tests and for users who are
-// logged out.
+// disabled (noop). When tokenFunc returns "" at export time (logged-out /
+// expired), the batch is dropped client-side (synthetic 2xx, nothing sent)
+// rather than 401'd by the server. Either is fine for tests and for users
+// who are logged out.
 func Init(ctx context.Context, serviceName, apiEndpoint string, tokenFunc TokenFunc, attrs ...attribute.KeyValue) error {
 	if apiEndpoint == "" {
 		slog.Debug("otel tracing disabled", "reason", "no endpoint")

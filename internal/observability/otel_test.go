@@ -210,10 +210,14 @@ func TestInit_NilTokenFuncSendsUnauthenticated(t *testing.T) {
 	}
 }
 
-// TestInit_EmptyTokenSkipsHeader verifies that a tokenFunc returning ""
-// (e.g. user logged out) leaves Authorization unset rather than sending
-// "Bearer ", which would be a parse error server-side.
-func TestInit_EmptyTokenSkipsHeader(t *testing.T) {
+// TestInit_EmptyTokenDropsClientSide verifies that a tokenFunc returning ""
+// (e.g. user logged out / token expired) drops the OTLP batch client-side
+// rather than sending it. The JWT-gated proxy would only 401 an
+// unauthenticated batch, so sending it just churns the server's error
+// pipeline (the ox-w9yc5 401 surge). Mirrors the browser SDK's 204 no-JWT
+// drop in apps/web/src/lib/otel-browser.ts.
+// Failure prevented: logged-out CLIs/daemons emitting 401s on every export.
+func TestInit_EmptyTokenDropsClientSide(t *testing.T) {
 	resetGlobals()
 
 	var (
@@ -235,8 +239,64 @@ func TestInit_EmptyTokenSkipsHeader(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+	assert.Empty(t, seen, "empty token must drop the batch client-side; no request should reach the server")
+}
+
+// TestInit_TokenTransitionDropsThenSends verifies the drop is evaluated
+// per-export: while logged out (token "") nothing is sent, and once a token
+// becomes available (login) the next export reaches the server with the
+// Bearer header — without re-Init. Guards the per-export contract for the
+// long-running daemon (logout → login mid-process).
+func TestInit_TokenTransitionDropsThenSends(t *testing.T) {
+	resetGlobals()
+
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	var tokenMu sync.Mutex
+	current := "" // start logged out
+	tokenFunc := func() string {
+		tokenMu.Lock()
+		defer tokenMu.Unlock()
+		return current
+	}
+
+	require.NoError(t, Init(context.Background(), "ox-cli-test", srv.URL, tokenFunc))
+
+	// logged out: export is dropped client-side
+	_, span := StartCommand(context.Background(), "ox test-cmd")
+	span.End()
+	Shutdown(context.Background())
+
+	mu.Lock()
+	require.Empty(t, seen, "logged-out export must not reach the server")
+	mu.Unlock()
+
+	// login: token now available, next export must be sent + authenticated
+	resetGlobals()
+	tokenMu.Lock()
+	current = "tok-after-login"
+	tokenMu.Unlock()
+
+	require.NoError(t, Init(context.Background(), "ox-cli-test", srv.URL, tokenFunc))
+	_, span2 := StartCommand(context.Background(), "ox test-cmd-2")
+	span2.End()
+	Shutdown(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, seen, "post-login export must reach the server")
 	for _, h := range seen {
-		assert.Empty(t, h, "empty tokenFunc value must not inject Authorization")
+		assert.Equal(t, "Bearer tok-after-login", h, "post-login export must carry the bearer")
 	}
 }
 
