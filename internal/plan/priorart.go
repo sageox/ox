@@ -194,6 +194,7 @@ type priorArtHit struct {
 	SourceID string
 	Author   string
 	Date     string // YYYY-MM-DD if derivable, else ""
+	Text     string // ledgersearch snippet around the matched term (relevance)
 }
 
 // rankHits filters raw ledger results below the threshold, sorts by score
@@ -212,6 +213,7 @@ func rankHits(results []ledgersearch.Result) []priorArtHit {
 			SourceID: r.SourceID,
 			Author:   author,
 			Date:     date,
+			Text:     r.Text,
 		})
 	}
 
@@ -277,37 +279,62 @@ func dateOnly(ts string) string {
 	return ""
 }
 
-// annotationFromHit renders a prior-art Annotation. The SourceURL carries the
-// session ref (folder name) so a human/agent can `ox session view <ref>`.
+// maxSummaryWords caps the relevance summary. The summary is the snippet from
+// the prior work where this plan's keywords matched — enough to recognize "oh,
+// that thing", not a full sentence.
+const maxSummaryWords = 10
+
+// minSummaryWords drops a summary too short to read as a phrase (a stray
+// fragment), falling the bullet back to "person · date".
+const minSummaryWords = 3
+
+// relevanceSummary cleans a ledgersearch snippet (raw session/markdown text — a
+// ~160-char window around the matched term) into a short, human-readable phrase:
+// collapse whitespace/newlines, cap to maxSummaryWords on a word boundary, and
+// trim leading/trailing markdown noise. Returns "" when too little survives.
+func relevanceSummary(text string) string {
+	fields := strings.Fields(text) // collapses every run of whitespace/newlines
+	if len(fields) > maxSummaryWords {
+		fields = fields[:maxSummaryWords]
+	}
+	// strip edge noise: markdown markers (#, >, *, backtick, list dashes, table
+	// pipes, quotes) plus the snippet's leading/trailing ellipsis and stray
+	// sentence punctuation — these land at the window boundaries, not mid-phrase.
+	cleaned := strings.Trim(strings.Join(fields, " "), "#>*`-|\"'.,;:… \t")
+	if len(strings.Fields(cleaned)) < minSummaryWords {
+		return ""
+	}
+	return cleaned
+}
+
+// annotationFromHit renders a prior-art Annotation as a crisp
+// "<person> · <date> · <relevance summary>" label. The slug is NOT shown in the
+// label — it's carried in SourceURL as the locator (so a human/agent can
+// `ox session view <ref>`, and the renderer can turn it into a SageOx link).
+// RefKind lets the renderer pick the right web-URL shape per source type.
 func annotationFromHit(h priorArtHit) Annotation {
 	who := h.Author
 	if who == "" {
 		who = "a teammate"
 	}
 
-	verb := "worked on"
-	subject := "session"
-	switch h.DocType {
-	case "murmur":
-		verb = "mentioned"
-		subject = "murmur"
-	case "plan":
-		// a saved plan is the strongest prior-art signal — someone already
-		// scoped this exact work. Phrase it as "planned this in plan <slug>".
-		verb = "planned"
-		subject = "plan"
-	}
-
-	why := who + " " + verb + " this in " + subject + " " + h.SourceID
+	summary := relevanceSummary(h.Text)
+	parts := []string{who}
 	if h.Date != "" {
-		why += " (" + h.Date + ")"
+		parts = append(parts, h.Date)
+	}
+	if summary != "" {
+		parts = append(parts, summary)
 	}
 
 	return Annotation{
 		Kind:      BadgeDeterministic,
 		Type:      BadgePriorArt,
-		Why:       why,
+		Why:       strings.Join(parts, " · "),
 		SourceURL: h.SourceID,
 		Expert:    h.Author,
+		Date:      h.Date,
+		Summary:   summary,
+		RefKind:   h.DocType,
 	}
 }

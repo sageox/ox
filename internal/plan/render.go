@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"embed"
 	"fmt"
+	"html"
 	"html/template"
 	"log/slog"
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 
+	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 	ghtml "github.com/yuin/goldmark/renderer/html"
@@ -47,6 +52,13 @@ type RenderOptions struct {
 	// with the token. Empty for a static file:// render (clipboard fallback).
 	ReviewEndpoint string
 	ReviewToken    string
+	// PriorArtURL resolves a prior-art source (its kind + ref/slug) to a SageOx
+	// web URL, opened in a new tab from the enrichment panel. Nil-safe: when nil
+	// or when it returns "", the prior-art entry renders as crisp text with no
+	// link. This is the seam that keeps internal/plan config-agnostic — the
+	// command layer builds the closure from the local project config, and
+	// `ox plan enrich --json` (no config) never embeds an environment URL.
+	PriorArtURL func(refKind, ref string) string
 }
 
 // reviewStateItem is the slim per-item shape injected into the page for the
@@ -99,6 +111,7 @@ type renderSignal struct {
 	Label  string
 	Why    string
 	Source string
+	URL    string // SageOx web URL for prior-art; empty = render as plain text
 }
 
 type reviewSummary struct {
@@ -178,7 +191,7 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 	data := renderData{
 		Title:          planTitle(in),
 		Slug:           opts.Slug,
-		CSS:            template.CSS(css),
+		CSS:            template.CSS(string(css) + highlightCSS()),
 		JS:             template.JS(js),
 		ReviewJS:       template.JS(reviewJS),
 		ReviewEndpoint: opts.ReviewEndpoint,
@@ -240,7 +253,7 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 	// signals that match no section stay in the global enrichment panel. This is
 	// the data join that replaces a single prose blob with section-anchored
 	// markers — the spec's per-section badge rail.
-	all := deterministicSignalsWithFiles(res)
+	all := deterministicSignalsWithFiles(res, opts.PriorArtURL)
 	data.HasSignals = len(all) > 0
 	data.SignalCount = len(all)
 	if data.SignalCount != 1 {
@@ -295,9 +308,108 @@ func mdToHTML(md goldmark.Markdown, src string) (template.HTML, error) {
 	if err := md.Convert([]byte(src), &buf); err != nil {
 		return "", fmt.Errorf("markdown convert: %w", err)
 	}
-	html := mermaidFence.ReplaceAllString(buf.String(), `<pre class="mermaid">$1</pre>`)
-	html = colorVerdictCells(html)
-	return template.HTML(html), nil
+	// Ordering is load-bearing: mermaid fences are rewritten to <pre class="mermaid">
+	// FIRST, so highlightFences (which scans for <pre><code class="language-X">)
+	// never sees — and never chroma-tokenizes — a mermaid block. colorVerdictCells
+	// touches table cells only, so its position is independent.
+	rendered := mermaidFence.ReplaceAllString(buf.String(), `<pre class="mermaid">$1</pre>`)
+	rendered = highlightFences(rendered)
+	rendered = colorVerdictCells(rendered)
+	return template.HTML(rendered), nil //nolint:gosec // first-party plan markdown; see newMarkdown trust note
+}
+
+// codeFence matches a goldmark-rendered fenced code block carrying a language
+// class. Non-greedy body capture mirrors mermaidFence. By the time highlightFences
+// runs, mermaid blocks are already <pre class="mermaid">, so they never match
+// here. goldmark HTML-escapes code content, so a literal "</code></pre>" inside a
+// block becomes "&lt;/code&gt;&lt;/pre&gt;" and cannot prematurely close the match.
+var codeFence = regexp.MustCompile(`(?s)<pre><code class="language-([\w+#.-]+)">(.*?)</code></pre>`)
+
+// Code highlighting renders class-based markup once (the markup is style-
+// independent), while highlightCSS() emits two theme-scoped stylesheets so the
+// colors flip with the page's [data-theme] toggle — no client JS, no CDN. The
+// palette mirrors sageox-mono's web highlighter (Shiki github-dark / github-light)
+// for cross-surface parity.
+var (
+	highlightFormatter = chromahtml.New(chromahtml.WithClasses(true), chromahtml.ClassPrefix("ox-hl-"))
+	highlightCSSOnce   sync.Once
+	highlightCSSCache  string
+	chromaBackground   = regexp.MustCompile(`background(-color)?:[^;}]*;?`)
+)
+
+// highlightFences colorizes fenced code blocks server-side with chroma. Blocks
+// with no language class don't match the regex (left monochrome); blocks with an
+// unknown language, the mermaid language, or any chroma error are returned
+// verbatim — an unknown lexer must NOT fall back to prose-tokenizing.
+func highlightFences(s string) string {
+	return codeFence.ReplaceAllStringFunc(s, func(block string) string {
+		m := codeFence.FindStringSubmatch(block)
+		if m == nil {
+			return block
+		}
+		lang := m[1]
+		if lang == "mermaid" {
+			return block // belt-and-suspenders; mermaid is handled upstream
+		}
+		lexer := lexers.Get(lang)
+		if lexer == nil {
+			return block // unknown language → leave monochrome, never panic
+		}
+		iterator, err := lexer.Tokenise(nil, html.UnescapeString(m[2])) // chroma re-escapes on output
+		if err != nil {
+			return block
+		}
+		var out bytes.Buffer
+		if err := highlightFormatter.Format(&out, styles.Get("github-dark"), iterator); err != nil {
+			return block
+		}
+		return out.String()
+	})
+}
+
+// highlightCSS builds the combined, theme-scoped chroma stylesheet (generated
+// once). github-dark applies under html[data-theme="dark"], github (light) under
+// html[data-theme="light"], so toggling the theme recolors code with zero JS.
+// chroma's baked panel background is stripped so the scaffold's var(--panel)
+// shows through.
+func highlightCSS() string {
+	highlightCSSOnce.Do(func() {
+		highlightCSSCache = "\n/* code syntax highlighting (chroma, theme-scoped) */\n" +
+			themeScopedChromaCSS(`html[data-theme="dark"]`, "github-dark") +
+			themeScopedChromaCSS(`html[data-theme="light"]`, "github")
+	})
+	return highlightCSSCache
+}
+
+// themeScopedChromaCSS emits chroma's class CSS for one style, with every rule
+// prefixed by scope (a [data-theme] selector) and all background declarations
+// stripped. WriteCSS uses the formatter's class prefix, so classes line up with
+// the markup highlightFences produces.
+func themeScopedChromaCSS(scope, styleName string) string {
+	var raw bytes.Buffer
+	if err := highlightFormatter.WriteCSS(&raw, styles.Get(styleName)); err != nil {
+		return ""
+	}
+	css := chromaBackground.ReplaceAllString(raw.String(), "")
+	var b strings.Builder
+	for _, line := range strings.Split(css, "\n") {
+		line = strings.TrimSpace(line)
+		// chroma prefixes each rule with a "/* TokenName */" comment; drop it so
+		// the scope sits flush against the selector (cleaner, and unambiguous).
+		if strings.HasPrefix(line, "/*") {
+			if end := strings.Index(line, "*/"); end >= 0 {
+				line = strings.TrimSpace(line[end+2:])
+			}
+		}
+		if line == "" || !strings.Contains(line, "{") {
+			continue
+		}
+		b.WriteString(scope)
+		b.WriteByte(' ')
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // signalWithFiles couples a projected renderSignal with the annotation's file
@@ -311,7 +423,7 @@ type signalWithFiles struct {
 // prior-art / expert-routing) into anchorable signals. Judgment badges are
 // agent-authored and not surfaced here. The presence of any signal is what makes
 // the render emit the anchored OX marker the lint contract requires.
-func deterministicSignalsWithFiles(res Result) []signalWithFiles {
+func deterministicSignalsWithFiles(res Result, priorArtURL func(refKind, ref string) string) []signalWithFiles {
 	labels := map[string]string{
 		"collision":      "Collision",
 		"prior-art":      "Prior art",
@@ -326,15 +438,19 @@ func deterministicSignalsWithFiles(res Result) []signalWithFiles {
 		if !ok {
 			continue
 		}
-		out = append(out, signalWithFiles{
-			renderSignal: renderSignal{
-				Type:   string(a.Type),
-				Label:  label,
-				Why:    a.Why,
-				Source: a.SourceURL,
-			},
-			files: a.Files,
-		})
+		sig := renderSignal{
+			Type:   string(a.Type),
+			Label:  label,
+			Why:    a.Why,
+			Source: a.SourceURL,
+		}
+		// Prior-art entries link to the SageOx web view when the command layer
+		// supplied a resolver and it can build a URL for this source kind
+		// (sessions today; plans/murmurs fall back to plain text).
+		if a.Type == BadgePriorArt && priorArtURL != nil {
+			sig.URL = priorArtURL(a.RefKind, a.SourceURL)
+		}
+		out = append(out, signalWithFiles{renderSignal: sig, files: a.Files})
 	}
 	return out
 }

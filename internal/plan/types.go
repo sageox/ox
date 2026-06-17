@@ -68,6 +68,13 @@ type Annotation struct {
 	SourceURL string    `json:"source_url,omitempty"`
 	Expert    string    `json:"expert,omitempty"`
 	Files     []string  `json:"files,omitempty"`
+	// Date, Summary, RefKind carry the structured prior-art fields the renderer
+	// composes into a crisp "person · date · summary" link. Environment-
+	// independent (no URL), so they're safe to emit in `ox plan enrich --json`;
+	// the web URL is built only at render time from the local project config.
+	Date    string `json:"date,omitempty"`
+	Summary string `json:"summary,omitempty"`
+	RefKind string `json:"ref_kind,omitempty"` // session | plan | murmur
 }
 
 // ContextItem is one ranked, pre-retrieved slice of ledger / team context / code

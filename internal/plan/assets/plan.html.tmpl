@@ -34,7 +34,7 @@
     <button class="ox-marker" aria-label="SageOx insight" title="SageOx team-context signals"><svg class="ox-ico" aria-hidden="true"><use href="#ox-ico-d" class="ico-d"></use><use href="#ox-ico-l" class="ico-l"></use></svg></button>
     <div>
       <strong>Team context enriched by SageOx</strong> — {{.SignalCount}} deterministic signal{{.Plural}} on this plan{{if .Sections}}, anchored to the sections they affect{{end}}.
-      {{if .Signals}}<ul>{{range .Signals}}<li><span class="ox-sig-{{.Type}}">{{.Label}}</span> — {{.Why}}{{if .Source}} <span class="src">{{.Source}}</span>{{end}}</li>
+      {{if .Signals}}<ul>{{range .Signals}}<li><span class="ox-sig-{{.Type}}">{{.Label}}</span> — {{if .URL}}<a class="src-link" href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Why}}</a> <a class="src-go" href="{{.URL}}" target="_blank" rel="noopener noreferrer" title="Open on SageOx">view ↗</a>{{else}}{{.Why}}{{if .Source}} <span class="src">{{.Source}}</span>{{end}}{{end}}</li>
       {{end}}</ul>{{end}}
     </div>
   </div>{{end}}
@@ -43,7 +43,7 @@
   {{if .Preamble}}<section id="preamble">{{.Preamble}}</section>{{end}}
   {{range .Sections}}<section id="{{.ID}}"{{if .IsRisk}} class="risk"{{end}}>
     <h2>{{.Heading}}</h2>
-    {{if .Signals}}<div class="ox-rail">{{range .Signals}}<span class="ox-chip ox-sig-{{.Type}}"><button class="ox-marker sm" aria-label="SageOx insight" title="SageOx signal"><svg class="ox-ico" aria-hidden="true"><use href="#ox-ico-d" class="ico-d"></use><use href="#ox-ico-l" class="ico-l"></use></svg></button> <strong>{{.Label}}</strong> — {{.Why}}{{if .Source}} <span class="src">{{.Source}}</span>{{end}}</span>{{end}}</div>{{end}}
+    {{if .Signals}}<div class="ox-rail">{{range .Signals}}<span class="ox-chip ox-sig-{{.Type}}"><button class="ox-marker sm" aria-label="SageOx insight" title="SageOx signal"><svg class="ox-ico" aria-hidden="true"><use href="#ox-ico-d" class="ico-d"></use><use href="#ox-ico-l" class="ico-l"></use></svg></button> <strong>{{.Label}}</strong> — {{if .URL}}<a class="src-link" href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Why}}</a> <a class="src-go" href="{{.URL}}" target="_blank" rel="noopener noreferrer" title="Open on SageOx">view ↗</a>{{else}}{{.Why}}{{if .Source}} <span class="src">{{.Source}}</span>{{end}}{{end}}</span>{{end}}</div>{{end}}
     {{.HTML}}
   </section>
   {{end}}

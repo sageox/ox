@@ -103,7 +103,7 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 	if noServe || cli.IsHeadless() {
 		in := plan.Parse(planMD)
 		review, _ := plan.AssembleReview(info.Dir)
-		return reviewStaticFallback(cmd, slug, in, res, review)
+		return reviewStaticFallback(cmd, gitRoot, slug, in, res, review)
 	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -111,7 +111,7 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 		cli.PrintHint("could not start review server, falling back to file export: " + err.Error())
 		in := plan.Parse(planMD)
 		review, _ := plan.AssembleReview(info.Dir)
-		return reviewStaticFallback(cmd, slug, in, res, review)
+		return reviewStaticFallback(cmd, gitRoot, slug, in, res, review)
 	}
 	addr := ln.Addr().String()
 	token, err := randomToken()
@@ -326,6 +326,7 @@ func renderLive(gitRoot, slug, base, token string) ([]byte, error) {
 	review, _ := plan.AssembleReview(info.Dir)
 	return plan.RenderHTMLOpts(in, res, plan.RenderOptions{
 		Slug: slug, Review: review, ReviewEndpoint: base, ReviewToken: token,
+		PriorArtURL: priorArtURLResolver(gitRoot),
 	})
 }
 
@@ -415,8 +416,8 @@ func (b *broadcaster) broadcast() {
 
 // reviewStaticFallback renders to a file and prints the clipboard-export path for
 // environments with no browser/server.
-func reviewStaticFallback(cmd *cobra.Command, slug string, in plan.Input, res plan.Result, review []plan.MergedItem) error {
-	html, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: review})
+func reviewStaticFallback(cmd *cobra.Command, gitRoot, slug string, in plan.Input, res plan.Result, review []plan.MergedItem) error {
+	html, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: review, PriorArtURL: priorArtURLResolver(gitRoot)})
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}

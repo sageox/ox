@@ -489,6 +489,27 @@ func openSavedPlanHTML(cmd *cobra.Command, savedDir string) {
 // first), persists it to the ledger when capture is on, and writes/opens per the
 // flags. This is the cross-agent path: any agent gets the rich render here. The
 // render injects SageOx attribution by construction (passes the lint contract).
+// priorArtURLResolver builds the closure RenderOptions.PriorArtURL uses to turn a
+// prior-art source into a SageOx web link (opened in a new tab from the enrichment
+// panel). Sessions resolve to the canonical session view; murmurs have no
+// individual web view, so they render unlinked; plans will get a web route soon
+// (see TODO). Project config is loaded once; when it's unavailable the resolver
+// yields "" and the render degrades to crisp text rather than failing.
+func priorArtURLResolver(gitRoot string) func(refKind, ref string) string {
+	cfg, _ := config.LoadProjectConfig(gitRoot)
+	return func(refKind, ref string) string {
+		switch refKind {
+		case "session":
+			return buildSessionURL(cfg, ref)
+		// TODO(plan-web-route): when SageOx ships a per-plan web view, add
+		// buildPlanURL(cfg, ref) here keyed on "plan" (bd: follow-up issue). The
+		// resolver already branches on refKind, so it's a drop-in.
+		default:
+			return ""
+		}
+	}
+}
+
 func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open bool) error {
 	in, err := plan.Resolve(file, cmd.InOrStdin())
 	if err != nil {
@@ -502,7 +523,7 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open bool) err
 	gitRoot := findGitRoot()
 	result := plan.Enrich(context.Background(), in, gitRoot)
 
-	htmlBytes, err := plan.RenderHTMLOpts(in, result, plan.RenderOptions{Slug: plan.Slugify(planTopic(in))})
+	htmlBytes, err := plan.RenderHTMLOpts(in, result, plan.RenderOptions{Slug: plan.Slugify(planTopic(in)), PriorArtURL: priorArtURLResolver(gitRoot)})
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}
@@ -533,7 +554,7 @@ func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open bool) err
 	}
 	in := plan.Parse(planMD)
 	review, _ := plan.AssembleReview(info.Dir)
-	htmlBytes, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: review})
+	htmlBytes, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: review, PriorArtURL: priorArtURLResolver(gitRoot)})
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}

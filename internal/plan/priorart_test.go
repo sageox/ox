@@ -229,14 +229,19 @@ func TestParseSessionAuthorDate(t *testing.T) {
 }
 
 func TestAnnotationFromHit(t *testing.T) {
+	// The crisp label is "person · date · summary" — the slug must NOT appear in
+	// Why (it's the locator in SourceURL and becomes the link). RefKind/Date/
+	// Summary are the structured fields the renderer composes + links.
 	tests := []struct {
-		name        string
-		hit         priorArtHit
-		wantType    BadgeType
-		wantKind    BadgeKind
-		wantExpert  string
-		wantSource  string
-		whyContains []string
+		name           string
+		hit            priorArtHit
+		wantExpert     string
+		wantSource     string
+		wantRefKind    string
+		wantDate       string
+		wantSummaryNon bool // expect a non-empty Summary
+		whyContains    []string
+		whyOmits       []string
 	}{
 		{
 			name: "session hit with author and date",
@@ -245,46 +250,65 @@ func TestAnnotationFromHit(t *testing.T) {
 				SourceID: "2026-02-13T14-56-alice-OxAb12",
 				Author:   "alice", Date: "2026-02-13",
 			},
-			wantType:    BadgePriorArt,
-			wantKind:    BadgeDeterministic,
 			wantExpert:  "alice",
 			wantSource:  "2026-02-13T14-56-alice-OxAb12",
-			whyContains: []string{"alice", "worked on", "2026-02-13"},
+			wantRefKind: "session",
+			wantDate:    "2026-02-13",
+			whyContains: []string{"alice", "2026-02-13"},
+			// the slug must not be duplicated into the label
+			whyOmits: []string{"OxAb12", "worked on"},
+		},
+		{
+			name: "session hit with relevance summary",
+			hit: priorArtHit{
+				Score: 0.9, DocType: "session",
+				SourceID: "2026-02-13T14-56-alice-OxAb12",
+				Author:   "alice", Date: "2026-02-13",
+				Text: "## the cache warming path for cold starts was added here later",
+			},
+			wantExpert:     "alice",
+			wantSource:     "2026-02-13T14-56-alice-OxAb12",
+			wantRefKind:    "session",
+			wantDate:       "2026-02-13",
+			wantSummaryNon: true,
+			whyContains:    []string{"alice", "2026-02-13", "cache warming path"},
+			// markdown header marker stripped; slug not present
+			whyOmits: []string{"##", "OxAb12"},
 		},
 		{
 			name: "murmur hit without author",
 			hit: priorArtHit{
 				Score: 0.7, DocType: "murmur", SourceID: "mid", Author: "", Date: "",
 			},
-			wantType:    BadgePriorArt,
-			wantKind:    BadgeDeterministic,
 			wantExpert:  "",
 			wantSource:  "mid",
-			whyContains: []string{"a teammate", "mentioned", "murmur"},
+			wantRefKind: "murmur",
+			whyContains: []string{"a teammate"},
+			whyOmits:    []string{"mid", "mentioned"},
 		},
 		{
-			// a saved plan is the strongest prior-art signal: "planned this in plan".
-			name: "plan hit phrases as planned",
+			name: "plan hit crisp label",
 			hit: priorArtHit{
 				Score: 0.85, DocType: "plan",
 				SourceID: "2026-05-21-cache-layer", Author: "", Date: "2026-05-21",
 			},
-			wantType:    BadgePriorArt,
-			wantKind:    BadgeDeterministic,
 			wantExpert:  "",
 			wantSource:  "2026-05-21-cache-layer",
-			whyContains: []string{"a teammate", "planned", "plan", "2026-05-21"},
+			wantRefKind: "plan",
+			wantDate:    "2026-05-21",
+			whyContains: []string{"a teammate", "2026-05-21"},
+			whyOmits:    []string{"cache-layer", "planned"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			a := annotationFromHit(tt.hit)
-			if a.Type != tt.wantType {
-				t.Errorf("Type = %q, want %q", a.Type, tt.wantType)
+			if a.Type != BadgePriorArt {
+				t.Errorf("Type = %q, want %q", a.Type, BadgePriorArt)
 			}
-			if a.Kind != tt.wantKind {
-				t.Errorf("Kind = %q, want %q", a.Kind, tt.wantKind)
+			if a.Kind != BadgeDeterministic {
+				t.Errorf("Kind = %q, want %q", a.Kind, BadgeDeterministic)
 			}
 			if a.Expert != tt.wantExpert {
 				t.Errorf("Expert = %q, want %q", a.Expert, tt.wantExpert)
@@ -292,9 +316,23 @@ func TestAnnotationFromHit(t *testing.T) {
 			if a.SourceURL != tt.wantSource {
 				t.Errorf("SourceURL = %q, want %q", a.SourceURL, tt.wantSource)
 			}
+			if a.RefKind != tt.wantRefKind {
+				t.Errorf("RefKind = %q, want %q", a.RefKind, tt.wantRefKind)
+			}
+			if a.Date != tt.wantDate {
+				t.Errorf("Date = %q, want %q", a.Date, tt.wantDate)
+			}
+			if (a.Summary != "") != tt.wantSummaryNon {
+				t.Errorf("Summary = %q, wantNonEmpty=%v", a.Summary, tt.wantSummaryNon)
+			}
 			for _, frag := range tt.whyContains {
 				if !contains(a.Why, frag) {
 					t.Errorf("Why = %q, missing %q", a.Why, frag)
+				}
+			}
+			for _, frag := range tt.whyOmits {
+				if contains(a.Why, frag) {
+					t.Errorf("Why = %q, should omit %q", a.Why, frag)
 				}
 			}
 		})
