@@ -314,7 +314,7 @@ func TestTeamSyncWithProgress_Healthy(t *testing.T) {
 	defer d.Stop()
 
 	client := daemon.NewClientForCurrentRepoWithTimeout(1 * time.Second)
-	err := client.TeamSyncWithProgress(nil)
+	_, err := client.TeamSyncWithProgress(nil)
 
 	assert.NoError(t, err)
 }
@@ -333,7 +333,7 @@ func TestTeamSyncWithProgress_AllCriticalFaults(t *testing.T) {
 			defer d.Stop()
 
 			client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
-			err := client.TeamSyncWithProgress(nil)
+			_, err := client.TeamSyncWithProgress(nil)
 
 			assert.Error(t, err, "TeamSyncWithProgress() should fail with fault: %s", tt.name)
 		})
@@ -553,7 +553,7 @@ func TestAllIPCMethods_AllCriticalFaults(t *testing.T) {
 		{"Doctor", func(c *daemon.Client) error { _, err := c.Doctor(); return err }},
 		{"RequestSync", func(c *daemon.Client) error { return c.RequestSync() }},
 		{"SyncWithProgress", func(c *daemon.Client) error { return c.SyncWithProgress(nil) }},
-		{"TeamSyncWithProgress", func(c *daemon.Client) error { return c.TeamSyncWithProgress(nil) }},
+		{"TeamSyncWithProgress", func(c *daemon.Client) error { _, err := c.TeamSyncWithProgress(nil); return err }},
 		{"Stop", func(c *daemon.Client) error { return c.Stop() }},
 		{"GetUnviewedErrors", func(c *daemon.Client) error { _, err := c.GetUnviewedErrors(); return err }},
 		{"MarkErrorsViewed", func(c *daemon.Client) error { return c.MarkErrorsViewed([]string{"test"}) }},

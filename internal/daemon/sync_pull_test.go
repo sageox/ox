@@ -186,9 +186,11 @@ func TestSyncScheduler_PullTeamContext_NotGitRepo(t *testing.T) {
 
 	scheduler := NewSyncScheduler(cfg, logger)
 
-	// pull should handle gracefully: detect invalid repo, move aside for re-clone
+	// pull should handle gracefully: detect invalid repo, move aside for re-clone.
+	// It returns an error so callers report the team context as not-usable (the
+	// path is gone until the next cycle re-clones it) rather than "synced".
 	err := scheduler.pullTeamContext(context.Background(), tcPath)
-	assert.NoError(t, err)
+	assert.Error(t, err, "moving a corrupt repo aside must surface as not-usable, not success")
 	// original path should be gone (moved to .bak)
 	assert.NoDirExists(t, tcPath)
 }

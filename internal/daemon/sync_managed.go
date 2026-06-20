@@ -94,6 +94,21 @@ type ManagedRepoPullOpts struct {
 	Logger *slog.Logger
 }
 
+// Skip reasons reported in ManagedRepoPullResult.SkipReason. Defined as
+// constants so consumers can branch on them without fragile string matching.
+const (
+	// skipReasonRebaseInProgress: the working tree is mid-rebase — UNSAFE to
+	// treat as usable (partial/inconsistent state).
+	skipReasonRebaseInProgress = "rebase in progress"
+	// skipReasonLockFilesPresent: a live git process holds lock files (typically
+	// another daemon syncing the same shared context). On-disk files stay
+	// consistent, so the context remains usable.
+	skipReasonLockFilesPresent = "lock files present"
+	// skipReasonRemoteUnchanged / skipReasonRecentlyFetched: already current.
+	skipReasonRemoteUnchanged = "remote unchanged"
+	skipReasonRecentlyFetched = "recently fetched"
+)
+
 // ManagedRepoPullResult describes what happened during pullManagedRepo.
 type ManagedRepoPullResult struct {
 	// Skipped is true if the pull was skipped (repo up-to-date, in rebase, locked, etc).
@@ -158,7 +173,7 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 	// Rebase-in-progress: skip — will resolve on its own or needs manual fix
 	if gitutil.IsRebaseInProgress(path) {
 		logger.Debug("repo in rebase state, skipping pull", "path", path)
-		return ManagedRepoPullResult{Skipped: true, SkipReason: "rebase in progress"}
+		return ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRebaseInProgress}
 	}
 
 	// Lock files: auto-remove stale ones, skip and report if still present
@@ -178,7 +193,7 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 				"path", path, "locks", strings.Join(remaining, ", "))
 			return ManagedRepoPullResult{
 				Skipped:    true,
-				SkipReason: "lock files present",
+				SkipReason: skipReasonLockFilesPresent,
 				Issue: &DaemonIssue{
 					Type:     IssueTypeGitLock,
 					Severity: SeverityWarning,
@@ -196,7 +211,7 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 
 	// ls-remote SHA check: cheapest way to skip when nothing changed
 	if s.remoteRefCheck(ctx, path) {
-		return ManagedRepoPullResult{Skipped: true, SkipReason: "remote unchanged"}
+		return ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRemoteUnchanged}
 	}
 
 	// FETCH_HEAD mtime dedup (secondary: cross-daemon coordination)
@@ -208,7 +223,7 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 		threshold := max(opts.SyncInterval/2, minAge)
 		if age < threshold {
 			logger.Debug("repo recently fetched, skipping", "path", path, "age", age)
-			return ManagedRepoPullResult{Skipped: true, SkipReason: "recently fetched"}
+			return ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRecentlyFetched}
 		}
 	}
 

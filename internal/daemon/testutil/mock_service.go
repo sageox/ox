@@ -22,7 +22,7 @@ type MockService struct {
 	// sync operations
 	SyncFunc             func() error
 	SyncWithProgressFunc func(progress *daemon.ProgressWriter) error
-	TeamSyncFunc         func(progress *daemon.ProgressWriter) error
+	TeamSyncFunc         func(progress *daemon.ProgressWriter) ([]daemon.TeamSyncResult, error)
 	SyncHistoryFunc      func() []daemon.SyncEvent
 
 	// status / query operations
@@ -79,11 +79,11 @@ func (m *MockService) SyncWithProgress(progress *daemon.ProgressWriter) error {
 	return nil
 }
 
-func (m *MockService) TeamSync(progress *daemon.ProgressWriter) error {
+func (m *MockService) TeamSync(progress *daemon.ProgressWriter) ([]daemon.TeamSyncResult, error) {
 	if m.TeamSyncFunc != nil {
 		return m.TeamSyncFunc(progress)
 	}
-	return nil
+	return nil, nil
 }
 
 func (m *MockService) SyncHistory() []daemon.SyncEvent {

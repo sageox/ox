@@ -45,8 +45,8 @@ func TestMockServiceNilFuncsReturnDefaults(t *testing.T) {
 	if err := m.SyncWithProgress(nil); err != nil {
 		t.Errorf("SyncWithProgress() = %v, want nil", err)
 	}
-	if err := m.TeamSync(nil); err != nil {
-		t.Errorf("TeamSync() = %v, want nil", err)
+	if results, err := m.TeamSync(nil); err != nil || results != nil {
+		t.Errorf("TeamSync() = (%v, %v), want (nil, nil)", results, err)
 	}
 
 	// query operations return nil/empty
@@ -272,9 +272,16 @@ func TestMockServiceOverrides(t *testing.T) {
 
 	t.Run("team sync override", func(t *testing.T) {
 		want := errors.New("team sync failed")
-		m.TeamSyncFunc = func(_ *daemon.ProgressWriter) error { return want }
-		if got := m.TeamSync(nil); !errors.Is(got, want) {
-			t.Errorf("TeamSync() = %v, want %v", got, want)
+		wantResults := []daemon.TeamSyncResult{{TeamID: "t1", Status: "error", Error: "boom"}}
+		m.TeamSyncFunc = func(_ *daemon.ProgressWriter) ([]daemon.TeamSyncResult, error) {
+			return wantResults, want
+		}
+		gotResults, got := m.TeamSync(nil)
+		if !errors.Is(got, want) {
+			t.Errorf("TeamSync() err = %v, want %v", got, want)
+		}
+		if len(gotResults) != 1 || gotResults[0].TeamID != "t1" {
+			t.Errorf("TeamSync() results = %v, want %v", gotResults, wantResults)
 		}
 	})
 

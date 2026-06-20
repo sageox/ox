@@ -109,11 +109,26 @@ func handleTeamSync(s *Server, _ Message, conn net.Conn) HandlerResult {
 	}
 
 	pw := &ProgressWriter{conn: conn}
-	var resp Response
-	if err := s.service.TeamSync(pw); err != nil {
-		resp = Response{Success: false, Error: err.Error()}
-	} else {
-		resp = Response{Success: true}
+	results, err := s.service.TeamSync(pw)
+
+	// On SUCCESS, carry a non-nil results array so the wire value is `[]`, never
+	// `null` — this lets a new CLI tell a current daemon (sends a `data` array,
+	// possibly empty) apart from a legacy pre-change daemon (sends no usable data),
+	// distinguishing "team genuinely not found" from "old daemon, can't tell".
+	//
+	// On FAILURE we must NOT coerce: a setup failure (e.g. unreadable config)
+	// produces nil results, and coercing to `[]` would let the CLI's
+	// usable-teams check pass and report blanket success despite the error. Leave
+	// results nil so the error is honored.
+	if err == nil && results == nil {
+		results = []TeamSyncResult{}
+	}
+	resp := Response{Success: err == nil}
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	if data, mErr := json.Marshal(results); mErr == nil {
+		resp.Data = data
 	}
 	return HandlerResult{Response: &resp}
 }

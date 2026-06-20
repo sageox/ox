@@ -1487,7 +1487,7 @@ func (s *daemonServiceImpl) SyncWithProgress(progress *ProgressWriter) error {
 	return s.d.scheduler.SyncWithProgress(progress)
 }
 
-func (s *daemonServiceImpl) TeamSync(progress *ProgressWriter) error {
+func (s *daemonServiceImpl) TeamSync(progress *ProgressWriter) ([]TeamSyncResult, error) {
 	return s.d.scheduler.TeamSync(progress)
 }
 

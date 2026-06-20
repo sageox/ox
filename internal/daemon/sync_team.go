@@ -37,16 +37,43 @@ func (s *SyncScheduler) pullTeamContexts(ctx context.Context) {
 	// the scheduler for minutes (the caller ctx has no deadline)
 	teamCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	s.doTeamSync(teamCtx, nil, false)
+	// background scheduler path: per-team outcomes and setup errors are
+	// recorded on the workspace registry / logged inside doTeamSync, so the
+	// return values aren't needed here.
+	_, _ = s.doTeamSync(teamCtx, nil, false)
 }
 
 // TeamSync performs an on-demand sync of all team contexts with progress updates.
-func (s *SyncScheduler) TeamSync(progress *ProgressWriter) error {
+//
+// It returns the per-team results and a non-nil error if any team failed to
+// sync, so the IPC caller (and ultimately `ox sync`) can report accurate
+// per-team status instead of inferring "synced" from the bare success of the
+// IPC round-trip.
+func (s *SyncScheduler) TeamSync(progress *ProgressWriter) ([]TeamSyncResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	s.doTeamSync(ctx, progress, true)
-	return nil
+	results, err := s.doTeamSync(ctx, progress, true)
+	if err != nil {
+		// setup failure (e.g. config load) — propagate as-is; there are no
+		// per-team results to aggregate.
+		return results, err
+	}
+
+	var failed []string
+	for _, r := range results {
+		if r.Status == "error" {
+			name := r.TeamName
+			if name == "" {
+				name = r.TeamID
+			}
+			failed = append(failed, fmt.Sprintf("%s: %s", name, r.Error))
+		}
+	}
+	if len(failed) > 0 {
+		return results, fmt.Errorf("team sync failed: %s", strings.Join(failed, "; "))
+	}
+	return results, nil
 }
 
 // doTeamSync syncs all team context repos with optional progress updates.
@@ -55,7 +82,13 @@ func (s *SyncScheduler) TeamSync(progress *ProgressWriter) error {
 // Auto-clone behavior: If a team context doesn't exist locally but has a clone URL,
 // spawns a background goroutine to clone it. This doesn't block the sync loop.
 // Note: Ledger auto-clone is handled separately in doPull() on the ledger sync ticker.
-func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter, forceSync bool) {
+// The returned error is reserved for *setup* failures that prevent the sync
+// from running at all (e.g. a config that can't be loaded) — these are real
+// failures that must not be reported as a successful no-op. "No project root"
+// and "no team contexts configured" are legitimate nothing-to-do states and
+// return (nil, nil). Per-team sync failures are NOT returned here; they are
+// carried in the result entries' Status/Error and aggregated by the caller.
+func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter, forceSync bool) ([]TeamSyncResult, error) {
 	ctx, span := perf.Start(ctx, "daemon:do_team_sync")
 	defer span.End()
 
@@ -70,16 +103,19 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		if progress != nil {
 			_ = progress.WriteStage("skipped", "No project root configured")
 		}
-		return
+		return nil, nil
 	}
 
-	// reload workspace state from config (uses cache if fresh)
+	// reload workspace state from config (uses cache if fresh). A failure here
+	// is a genuine setup error — propagate it so callers don't report a
+	// successful no-op while the real config read/parse/permission error is
+	// silently swallowed.
 	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
 		s.logger.Warn("failed to load workspace registry for team context sync", "error", err)
 		if progress != nil {
 			_ = progress.WriteMessage(fmt.Sprintf("Failed to load config: %v", err))
 		}
-		return
+		return nil, fmt.Errorf("load workspace registry: %w", err)
 	}
 
 	// get team contexts from registry
@@ -89,7 +125,21 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		if progress != nil {
 			_ = progress.WriteStage("skipped", "No team contexts configured")
 		}
-		return
+		return nil, nil
+	}
+
+	// per-team outcomes accumulated across the partition + sync phases below,
+	// returned to the IPC caller so the CLI can report accurate status.
+	outcomes := make([]TeamSyncResult, 0, len(teamContexts))
+	addResult := func(ws WorkspaceState, status, errMsg string) {
+		outcomes = append(outcomes, TeamSyncResult{
+			TeamID:   ws.TeamID,
+			TeamName: ws.TeamName,
+			TeamSlug: ws.TeamSlug,
+			Path:     ws.Path,
+			Status:   status,
+			Error:    errMsg,
+		})
 	}
 
 	s.logger.Debug("syncing team contexts", "count", len(teamContexts))
@@ -108,6 +158,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 	for _, ws := range teamContexts {
 		if ws.Path == "" {
 			s.workspaceRegistry.SetWorkspaceError(ws.ID, "no path configured")
+			addResult(ws, "error", "no path configured")
 			skippedCount++
 			continue
 		}
@@ -118,6 +169,10 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 					attempts, nextRetry := s.workspaceRegistry.GetCloneRetryInfo(ws.ID)
 					s.logger.Debug("team context clone in backoff, skipping",
 						"team", ws.TeamName, "attempts", attempts, "next_retry", nextRetry)
+					// clone-backoff is a deferred *failure*, not a benign skip: the
+					// repo isn't present and the last clone attempt failed. Report it
+					// as an error so callers don't treat the team as usable.
+					addResult(ws, "error", fmt.Sprintf("clone in backoff after %d failed attempt(s)", attempts))
 					skippedCount++
 					continue
 				}
@@ -131,18 +186,21 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 					go s.cloneInBackground(ws.CloneURL, ws.Path, "team-context", ws.ID) //nolint:gosec // G118 - intentionally uses background context; goroutine outlives request scope
 					cloningCount++
 				}
+				addResult(ws, "cloning", "")
 			} else {
 				s.workspaceRegistry.SetWorkspaceError(ws.ID, "path does not exist and no clone URL available")
 				s.logger.Debug("team context path not found and no clone URL", "team", ws.TeamName, "path", ws.Path)
 				if progress != nil {
 					_ = progress.WriteStage("skipped", fmt.Sprintf("Team %s: not cloned, no URL", ws.TeamName))
 				}
+				addResult(ws, "error", "path does not exist and no clone URL available")
 				skippedCount++
 			}
 			continue
 		}
 
 		if !s.shouldSyncOrBypass(ws.ID, forceSync) {
+			addResult(ws, "skipped", "recently synced")
 			skippedCount++
 			continue
 		}
@@ -192,6 +250,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			if progress != nil {
 				_ = progress.WriteStage("error", fmt.Sprintf("Team %s: %v", r.ws.TeamName, r.err))
 			}
+			addResult(r.ws, "error", r.err.Error())
 			continue
 		}
 
@@ -279,6 +338,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		if progress != nil {
 			_ = progress.WriteStage("synced", fmt.Sprintf("Team %s synced", r.ws.TeamName))
 		}
+		addResult(r.ws, "synced", "")
 	}
 
 	if progress != nil {
@@ -308,6 +368,8 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			s.whisperRegistry.CloseTeamStore(openTeamID)
 		}
 	}
+
+	return outcomes, nil
 }
 
 // pullTeamContext performs a git pull on a single team context repo.
@@ -355,7 +417,11 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		Logger:             s.logger,
 	})
 
-	// corrupt repo: move aside so background clone picks it up next cycle
+	// corrupt repo: move aside so background clone picks it up next cycle.
+	// The local path is now GONE, so this sync did not produce usable context —
+	// return an error (not nil) so callers report it as failed rather than
+	// "synced". The next sync cycle re-clones it (anti-entropy); until then the
+	// team context is genuinely not present.
 	if result.CorruptRepo {
 		backupPath := fmt.Sprintf("%s.bak.%d", path, time.Now().Unix())
 		s.logger.Warn("team context repo corrupt, moving aside for re-clone",
@@ -364,7 +430,7 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 			s.logger.Error("failed to move corrupt team context aside", "error", err)
 			return fmt.Errorf("corrupt team context at %s but rename failed: %w", path, err)
 		}
-		return nil
+		return fmt.Errorf("team context repo was corrupt and moved aside for re-clone; re-run after the daemon re-clones it (path: %s)", path)
 	}
 
 	// handle skip
@@ -373,6 +439,16 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 			s.issues.SetIssue(*result.Issue)
 		} else if s.issues != nil {
 			s.issues.ClearIssue(IssueTypeGitLock, repoName)
+		}
+		// A rebase in progress leaves the working tree in a partial, possibly
+		// inconsistent state — the team context is NOT safely usable, so return an
+		// error rather than letting the caller report it as "synced". The other
+		// skip reasons are benign and the on-disk context is usable: "remote
+		// unchanged"/"recently fetched" mean already current, and "lock files
+		// present" means another live daemon is actively syncing this shared
+		// context (ox's multi-daemon dedup) while the files stay consistent.
+		if result.SkipReason == skipReasonRebaseInProgress {
+			return fmt.Errorf("team context not synced: rebase in progress (resolve the rebase, then re-run)")
 		}
 		return nil
 	}

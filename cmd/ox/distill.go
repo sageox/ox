@@ -421,14 +421,53 @@ func syncBeforeDistill() error {
 		return fmt.Errorf("ledger sync failed: %w", err)
 	}
 
-	// sync team contexts
-	if err := cli.WithSpinnerNoResult("Syncing team contexts...", func() error {
+	// sync team contexts. distill only needs THIS repo's team context to be
+	// locally usable. We fail when our own team context isn't usable (failed,
+	// not-found, or still cloning — distilling on missing/stale primary context
+	// would silently hide exactly the failure this change exists to surface), or
+	// on a whole-operation failure. An unrelated secondary team's failure is just
+	// a warning and must not block distillation.
+	primaryTeamID := ""
+	if root := config.FindProjectRoot(); root != "" {
+		if pc, err := config.LoadProjectConfig(root); err == nil && pc != nil {
+			primaryTeamID = pc.TeamID
+		}
+	}
+
+	var teamResults []daemon.TeamSyncResult
+	teamSyncErr := cli.WithSpinnerNoResult("Syncing team contexts...", func() error {
 		client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
-		return client.TeamSyncWithProgress(func(stage string, percent *int, message string) {
+		var e error
+		teamResults, e = client.TeamSyncWithProgress(func(stage string, percent *int, message string) {
 			// progress handled by spinner
 		})
-	}); err != nil {
-		return fmt.Errorf("team context sync failed: %w", err)
+		return e
+	})
+
+	if primaryTeamID != "" {
+		// reuse the targeted-sync derivation so "usable" means the same thing
+		// everywhere: synced/skipped are usable; cloning/error/not_found are not;
+		// unknown (legacy daemon) is tolerated.
+		pr := resolveTeamSyncResult(primaryTeamID, teamResults, teamSyncErr)
+		switch pr.Status {
+		case "synced", "skipped":
+			if teamSyncErr != nil {
+				cli.PrintWarning(fmt.Sprintf("Team context sync incomplete: %v (unrelated team; continuing)", teamSyncErr))
+			}
+		case "unknown":
+			// legacy daemon: fail closed with the version-aware message rather
+			// than distilling on context we can't confirm is current.
+			return legacyDaemonError()
+		default: // cloning, error, not_found, ambiguous
+			return fmt.Errorf("this repo's team context (%s) is not ready: %s", primaryTeamID, pr.Status)
+		}
+	} else if teamSyncErr != nil {
+		// repo has no primary team configured: only a whole-operation failure
+		// (no per-team data) blocks distillation; otherwise warn and proceed.
+		if len(teamResults) == 0 {
+			return fmt.Errorf("team context sync failed: %w", teamSyncErr)
+		}
+		cli.PrintWarning(fmt.Sprintf("Team context sync incomplete: %v (continuing)", teamSyncErr))
 	}
 
 	// update code index

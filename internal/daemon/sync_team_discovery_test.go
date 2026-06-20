@@ -309,6 +309,185 @@ path = %q
 	assert.GreaterOrEqual(t, snap.TeamSyncCount, int64(2), "at least two team syncs should succeed")
 }
 
+// --- Test: on-demand TeamSync returns per-team results and propagates failure ---
+
+// TestTeamSync_ReturnsPerTeamResultsAndPropagatesError is the regression test for
+// the bug where `ox sync --team` reported status "synced" (with blank team_name
+// and path) regardless of the real outcome, because the IPC call only surfaced a
+// bare success/error. TeamSync must now return per-team results carrying
+// team_name/path/status, and a non-nil error when any team failed to sync.
+//
+// Failure prevented: a sync that didn't actually complete is reported as
+// "synced" to the CLI / e2e tests, masking missing team context state.
+func TestTeamSync_ReturnsPerTeamResultsAndPropagatesError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	isolateCredentials(t)
+
+	// one healthy team (real repo with a bare origin) and one that fails:
+	// its path exists but is not a git repo (simulates a wedged/failed clone).
+	goodDir := t.TempDir()
+	setupGitRepo(t, goodDir)
+	badDir := t.TempDir() // exists, but not a git repo
+
+	projectDir := setupProjectWithConfig(t, fmt.Sprintf(`
+[[team_contexts]]
+team_id = "team_good"
+team_name = "Good Team"
+path = %q
+
+[[team_contexts]]
+team_id = "team_bad"
+team_name = "Bad Team"
+path = %q
+`, goodDir, badDir))
+
+	scheduler := newTestScheduler(projectDir)
+
+	// age FETCH_HEAD so the good team's pull isn't deduped/skipped
+	fetchHead := filepath.Join(goodDir, ".git", "FETCH_HEAD")
+	oldTime := time.Now().Add(-1 * time.Hour)
+	_ = os.Chtimes(fetchHead, oldTime, oldTime)
+
+	results, err := scheduler.TeamSync(nil)
+
+	// the bad team failed, so TeamSync must report a non-nil error rather than
+	// swallowing it and implying everything synced.
+	require.Error(t, err, "TeamSync must propagate a failure when any team errors")
+	assert.Contains(t, err.Error(), "Bad Team")
+
+	// results must cover both teams with populated metadata (team_name + path),
+	// not blank fields.
+	byID := make(map[string]TeamSyncResult, len(results))
+	for _, r := range results {
+		byID[r.TeamID] = r
+	}
+	require.Len(t, results, 2, "should report a result for every configured team")
+
+	good := byID["team_good"]
+	assert.Equal(t, "synced", good.Status, "healthy team should be synced")
+	assert.Equal(t, "Good Team", good.TeamName)
+	assert.Equal(t, goodDir, good.Path)
+	assert.Empty(t, good.Error)
+
+	bad := byID["team_bad"]
+	assert.Equal(t, "error", bad.Status, "failing team should be reported as error, not synced")
+	assert.Equal(t, "Bad Team", bad.TeamName)
+	assert.Equal(t, badDir, bad.Path)
+	assert.NotEmpty(t, bad.Error)
+}
+
+// TestTeamSync_PropagatesSetupFailure verifies that a setup failure which
+// prevents the sync from running at all (here: an unparseable config.local.toml
+// that makes LoadFromConfig fail) is propagated as an error, instead of being
+// swallowed and reported as a successful no-op.
+//
+// Failure prevented: a corrupt/unreadable config silently yields IPC success
+// with zero results, so `ox sync --json` reports success with no teams while
+// the real config read/parse/permission error is hidden.
+func TestTeamSync_PropagatesSetupFailure(t *testing.T) {
+	isolateCredentials(t)
+
+	// malformed TOML: unterminated string -> toml.Unmarshal returns an error,
+	// so WorkspaceRegistry.LoadFromConfig fails.
+	projectDir := setupProjectWithConfig(t, "this is = not valid = toml [[[\n")
+
+	scheduler := newTestScheduler(projectDir)
+
+	results, err := scheduler.TeamSync(nil)
+
+	require.Error(t, err, "setup failure must propagate, not be reported as success")
+	assert.Contains(t, err.Error(), "load workspace registry")
+	assert.Empty(t, results, "no per-team results when setup fails before the sync runs")
+}
+
+// TestTeamSync_CorruptRepoReportedAsError verifies that when a team context repo
+// is corrupt and the daemon moves it aside for re-clone, the sync is reported as
+// an error rather than "synced". The local path is gone after the move, so
+// reporting success would let targeted sync / distill proceed against a team
+// context that is no longer present.
+func TestTeamSync_CorruptRepoReportedAsError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	isolateCredentials(t)
+
+	// a dir with a .git/HEAD file (so it reads as "present" and is pulled, not
+	// cloned) but invalid HEAD content (so the pull detects corruption and moves
+	// it aside). This exercises the corrupt-repo move-aside path specifically.
+	corruptDir := t.TempDir()
+	gitDir := filepath.Join(corruptDir, ".git")
+	require.NoError(t, os.MkdirAll(gitDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("not a valid ref\n"), 0644))
+
+	projectDir := setupProjectWithConfig(t, fmt.Sprintf(`
+[[team_contexts]]
+team_id = "team_corrupt"
+team_name = "Corrupt Team"
+path = %q
+`, corruptDir))
+
+	scheduler := newTestScheduler(projectDir)
+
+	results, err := scheduler.TeamSync(nil)
+
+	require.Error(t, err, "a corrupt team context must not be reported as a successful sync")
+	require.Len(t, results, 1)
+	assert.Equal(t, "team_corrupt", results[0].TeamID)
+	assert.Equal(t, "error", results[0].Status, "corrupt/moved-aside team must be error, not synced")
+
+	// prove it went through the corrupt move-aside path (the fix), not some other
+	// error path: the original dir is gone and a .bak backup exists.
+	backups, _ := filepath.Glob(corruptDir + ".bak.*")
+	assert.Len(t, backups, 1, "corrupt repo should have been moved aside for re-clone")
+}
+
+// TestTeamSync_RebaseInProgressReportedAsError verifies that a team context whose
+// repo is mid-rebase is reported as an error, not "synced". A rebase leaves the
+// working tree in a partial/inconsistent state, so the pull is skipped — but the
+// context is not safely usable and must not be claimed as synced.
+func TestTeamSync_RebaseInProgressReportedAsError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	isolateCredentials(t)
+
+	// a valid git repo (so it isn't flagged corrupt) that is mid-rebase: the
+	// presence of .git/rebase-merge makes IsRebaseInProgress() true.
+	teamDir := t.TempDir()
+	setupGitRepo(t, teamDir)
+	require.NoError(t, os.MkdirAll(filepath.Join(teamDir, ".git", "rebase-merge"), 0755))
+
+	projectDir := setupProjectWithConfig(t, fmt.Sprintf(`
+[[team_contexts]]
+team_id = "team_rebasing"
+team_name = "Rebasing Team"
+path = %q
+`, teamDir))
+
+	scheduler := newTestScheduler(projectDir)
+
+	results, err := scheduler.TeamSync(nil)
+
+	require.Error(t, err, "a team context mid-rebase must not be reported as a successful sync")
+	require.Len(t, results, 1)
+	assert.Equal(t, "team_rebasing", results[0].TeamID)
+	assert.Equal(t, "error", results[0].Status, "rebase-in-progress team must be error, not synced")
+}
+
 // --- Test: Credentials with non-team-context repos are ignored ---
 
 func TestTeamContextDiscovery_IgnoresNonTeamContextRepos(t *testing.T) {

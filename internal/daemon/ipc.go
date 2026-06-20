@@ -287,6 +287,19 @@ type CheckoutResult struct {
 	Cloned        bool   `json:"cloned"`         // true if we performed a clone
 }
 
+// TeamSyncResult is the per-team outcome of a team-context sync, returned as the
+// final IPC response payload of a TeamSync request. The CLI uses it to report
+// accurate per-team status (synced/skipped/error) and metadata (team_name, path)
+// instead of inferring "synced" from a bare success/error of the IPC call.
+type TeamSyncResult struct {
+	TeamID   string `json:"team_id"`
+	TeamName string `json:"team_name,omitempty"`
+	TeamSlug string `json:"team_slug,omitempty"` // kebab-case selector users may pass to --team
+	Path     string `json:"path,omitempty"`
+	Status   string `json:"status"` // "synced", "skipped", "cloning", "error"
+	Error    string `json:"error,omitempty"`
+}
+
 // CheckoutProgress is sent during long-running checkout operations.
 type CheckoutProgress struct {
 	Stage   string `json:"stage"`             // "connecting", "cloning", "verifying"
@@ -662,7 +675,7 @@ type DaemonService interface {
 	// sync operations
 	Sync() error
 	SyncWithProgress(progress *ProgressWriter) error
-	TeamSync(progress *ProgressWriter) error
+	TeamSync(progress *ProgressWriter) ([]TeamSyncResult, error)
 	SyncHistory() []SyncEvent
 
 	// status / query operations
@@ -705,7 +718,7 @@ type CallbackService struct {
 
 	onSync              func() error
 	onSyncWithProgress  func(progress *ProgressWriter) error
-	onTeamSync          func(progress *ProgressWriter) error
+	onTeamSync          func(progress *ProgressWriter) ([]TeamSyncResult, error)
 	onStop              func()
 	onStatus            func() *StatusData
 	onActivity          func()
@@ -753,14 +766,14 @@ func (c *CallbackService) SyncWithProgress(progress *ProgressWriter) error {
 	return nil
 }
 
-func (c *CallbackService) TeamSync(progress *ProgressWriter) error {
+func (c *CallbackService) TeamSync(progress *ProgressWriter) ([]TeamSyncResult, error) {
 	c.mu.Lock()
 	fn := c.onTeamSync
 	c.mu.Unlock()
 	if fn != nil {
 		return fn(progress)
 	}
-	return nil
+	return nil, nil
 }
 
 func (c *CallbackService) SyncHistory() []SyncEvent {
@@ -1223,7 +1236,7 @@ func (s *Server) SetSyncHandler(cb func(progress *ProgressWriter) error) {
 }
 
 // SetTeamSyncHandler sets the team context sync handler with progress support.
-func (s *Server) SetTeamSyncHandler(cb func(progress *ProgressWriter) error) {
+func (s *Server) SetTeamSyncHandler(cb func(progress *ProgressWriter) ([]TeamSyncResult, error)) {
 	svc := s.mustCallbackService("SetTeamSyncHandler")
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
@@ -2021,10 +2034,15 @@ func (c *Client) SyncWithProgress(onProgress ProgressCallback) error {
 // The onProgress callback is called for each progress update (may be nil).
 // Uses an idle timeout: the deadline resets on each progress message, so the
 // connection stays alive as long as the daemon is making progress.
-func (c *Client) TeamSyncWithProgress(onProgress ProgressCallback) error {
+//
+// It returns the per-team results carried in the final IPC response so callers
+// can report accurate per-team status and metadata. The results are returned
+// even when err is non-nil (the daemon reports a non-nil error when any team
+// failed to sync), so callers can still surface partial outcomes.
+func (c *Client) TeamSyncWithProgress(onProgress ProgressCallback) ([]TeamSyncResult, error) {
 	conn, err := c.Connect()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer conn.Close()
 
@@ -2044,7 +2062,7 @@ func (c *Client) TeamSyncWithProgress(onProgress ProgressCallback) error {
 	data, _ := json.Marshal(msg)
 	data = append(data, '\n')
 	if _, err := conn.Write(data); err != nil {
-		return fmt.Errorf("write: %w", err)
+		return nil, fmt.Errorf("write: %w", err)
 	}
 
 	// read responses until we get a final one (no progress field)
@@ -2052,12 +2070,12 @@ func (c *Client) TeamSyncWithProgress(onProgress ProgressCallback) error {
 	for {
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
-			return fmt.Errorf("read: %w", err)
+			return nil, fmt.Errorf("read: %w", err)
 		}
 
 		var resp ProgressResponse
 		if err := json.Unmarshal(line, &resp); err != nil {
-			return fmt.Errorf("unmarshal response: %w", err)
+			return nil, fmt.Errorf("unmarshal response: %w", err)
 		}
 
 		// check for progress update
@@ -2069,11 +2087,24 @@ func (c *Client) TeamSyncWithProgress(onProgress ProgressCallback) error {
 			continue // keep reading
 		}
 
-		// final response
-		if !resp.Success {
-			return errors.New(resp.Error)
+		// final response — parse per-team results (present on both success and
+		// partial-failure responses) before deciding the overall error.
+		//
+		// nil-vs-empty contract: a current daemon always sends a `data` array
+		// (possibly `[]`), so results is non-nil here. A legacy pre-change daemon
+		// sends no `data` field, leaving results nil. Callers use that distinction
+		// to tell "team genuinely not found" (non-nil, no match) apart from "old
+		// daemon, status unknown" (nil).
+		var results []TeamSyncResult
+		if len(resp.Data) > 0 {
+			if uErr := json.Unmarshal(resp.Data, &results); uErr != nil {
+				return nil, fmt.Errorf("unmarshal team sync results: %w", uErr)
+			}
 		}
-		return nil
+		if !resp.Success {
+			return results, errors.New(resp.Error)
+		}
+		return results, nil
 	}
 }
 
