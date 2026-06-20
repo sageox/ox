@@ -485,11 +485,16 @@ func (c *RepoClient) MergeRepo(repoID string, markers map[string]json.RawMessage
 // NotifyImport sends a fire-and-forget notification about a new document import.
 // Imports target a team context, so teamID identifies where the document lives.
 // The metadata argument should be JSON-marshalable (typically the docMeta struct).
-// Returns nil on network error, 404, or any non-2xx — never fails the caller's operation.
-func (c *RepoClient) NotifyImport(teamID string, metadata any) error {
+//
+// On 2xx the server may return a recording ID for media files it routes to
+// transcription; that ID is returned so callers can poll `ox import --status`.
+// The endpoint is fire-and-forget — a missing/empty body and network errors are
+// not failures: recordingID is "" and err is nil. Only a non-404 4xx/5xx is an
+// error, and even then it never invalidates the already-committed import.
+func (c *RepoClient) NotifyImport(teamID string, metadata any) (recordingID string, err error) {
 	metaBytes, err := json.Marshal(metadata)
 	if err != nil {
-		return fmt.Errorf("marshal metadata: %w", err)
+		return "", fmt.Errorf("marshal metadata: %w", err)
 	}
 
 	reqBody := ImportNotification{
@@ -499,7 +504,7 @@ func (c *RepoClient) NotifyImport(teamID string, metadata any) error {
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
+		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(gitImportPath, teamID)
@@ -509,7 +514,7 @@ func (c *RepoClient) NotifyImport(teamID string, metadata any) error {
 
 	httpReq, err := useragent.NewRequest(context.Background(), "POST", reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return "", fmt.Errorf("create request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -522,23 +527,33 @@ func (c *RepoClient) NotifyImport(teamID string, metadata any) error {
 
 	if err != nil {
 		logger.LogHTTPError("POST", reqURL, err, duration)
-		return nil // graceful degradation
+		return "", nil // graceful degradation
 	}
 	defer resp.Body.Close()
 
 	logger.LogHTTPResponse("POST", reqURL, resp.StatusCode, duration)
 
-	io.Copy(io.Discard, resp.Body)
-
 	if resp.StatusCode == http.StatusNotFound {
-		return nil // endpoint not yet deployed
+		io.Copy(io.Discard, resp.Body)
+		return "", nil // endpoint not yet deployed
 	}
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("import notification failed (%d)", resp.StatusCode)
+		io.Copy(io.Discard, resp.Body)
+		return "", fmt.Errorf("import notification failed (%d)", resp.StatusCode)
 	}
 
-	return nil
+	// 2xx: opportunistically read a recording ID if the server returns one for
+	// media routed to transcription. An empty/non-JSON body is normal (the
+	// endpoint predates this field) and must not be treated as an error.
+	var out struct {
+		RecordingID string `json:"recording_id"`
+	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if len(respBody) > 0 {
+		_ = json.Unmarshal(respBody, &out)
+	}
+	return out.RecordingID, nil
 }
 
 // NotifySessionUploaded tells the SageOx server that a session's content

@@ -125,6 +125,20 @@ type sidecar struct {
 	CreatedAt string `json:"created_at"`
 }
 
+// importResult is the --json payload for a team document import. recording_id is
+// populated only when the server routes the file to transcription and returns an
+// ID (media files); it can be fed to `ox import --status <id> --watch`.
+type importResult struct {
+	Status      string `json:"status"` // "imported" | "already_imported"
+	Title       string `json:"title,omitempty"`
+	Path        string `json:"path,omitempty"`
+	ID          string `json:"id,omitempty"` // existing doc id on already_imported
+	TeamID      string `json:"team_id,omitempty"`
+	SourceOID   string `json:"source_oid,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+	RecordingID string `json:"recording_id,omitempty"`
+}
+
 func runImport(cmd *cobra.Command, args []string) error {
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 
@@ -222,6 +236,9 @@ func runImport(cmd *cobra.Command, args []string) error {
 	// dedup: skip if this exact content was already imported
 	if !importFlags.force {
 		if existing, found := findExistingDocByOID(docsBaseDir, srcRef.OID); found {
+			if jsonOutput {
+				return emitImportJSON(cmd, importResult{Status: "already_imported", ID: existing})
+			}
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Already imported (id: %s). Use --force to reimport.\n", existing)
 			return nil
 		}
@@ -357,11 +374,37 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("commit and push: %w", err)
 	}
 
-	// fire-and-forget cloud notification — uses team_id since imports
-	// target team contexts, not project repos
-	notifyImport(tc.TeamID, ep, meta)
+	// cloud notification — uses team_id since imports target team contexts, not
+	// project repos. Returns a recording ID when the server routes the file to
+	// transcription; failures degrade silently and never fail the import.
+	recordingID := notifyImport(tc.TeamID, ep, meta)
+
+	if jsonOutput {
+		return emitImportJSON(cmd, importResult{
+			Status:      "imported",
+			Title:       title,
+			Path:        relDocDir,
+			TeamID:      tc.TeamID,
+			SourceOID:   srcRef.OID,
+			ContentType: meta.ContentType,
+			RecordingID: recordingID,
+		})
+	}
 
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Imported: %s\nPath: %s\n", title, relDocDir)
+	if recordingID != "" {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\n  Track progress: ox import --status %s --watch%s\n", recordingID, importContextFlagHint())
+	}
+	return nil
+}
+
+// emitImportJSON writes an importResult as indented JSON to stdout.
+func emitImportJSON(cmd *cobra.Command, result importResult) error {
+	out, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal import result: %w", err)
+	}
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(out))
 	return nil
 }
 
@@ -983,23 +1026,26 @@ func runImportList(cmd *cobra.Command, jsonOutput bool) error {
 	return nil
 }
 
-// notifyImport sends a fire-and-forget notification to the cloud about a new import.
-// Uses team_id since imports target team contexts, not project repos.
-// Failures are logged but never block the import.
-func notifyImport(teamID, ep string, meta docMeta) {
+// notifyImport notifies the cloud about a new import and returns the recording
+// ID the server assigns when it routes the file to transcription (empty for
+// non-media docs or older servers). Uses team_id since imports target team
+// contexts, not project repos. Failures are logged but never block the import.
+func notifyImport(teamID, ep string, meta docMeta) string {
 	if teamID == "" {
 		slog.Debug("skipping import notification, no team_id")
-		return
+		return ""
 	}
 
 	storedToken, err := auth.GetTokenForEndpoint(ep)
 	if err != nil || storedToken == nil || storedToken.AccessToken == "" {
 		slog.Debug("skipping import notification, no auth token", "error", err)
-		return
+		return ""
 	}
 
 	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(storedToken.AccessToken)
-	if err := client.NotifyImport(teamID, &meta); err != nil {
+	recordingID, err := client.NotifyImport(teamID, &meta)
+	if err != nil {
 		slog.Warn("import cloud notification failed", "error", err)
 	}
+	return recordingID
 }

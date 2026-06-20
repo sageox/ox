@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDetectContentType_EmptyContent(t *testing.T) {
@@ -319,4 +321,51 @@ func TestEnsureMetadataGitattributes_ExistingContentPreserved(t *testing.T) {
 	if !strings.Contains(s, "data/**/metadata.json !filter !diff !merge text") {
 		t.Error("metadata rule was not appended")
 	}
+}
+
+// TestEmitImportJSON_Shape verifies the --json import payload includes the
+// recording ID and omits empty optional fields. Failure prevented: agents
+// parsing import output can't find the recording_id to pass to `--status --watch`.
+func TestEmitImportJSON_Shape(t *testing.T) {
+	t.Parallel()
+
+	var buf strings.Builder
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	err := emitImportJSON(cmd, importResult{
+		Status:      "imported",
+		Title:       "Standup",
+		Path:        "data/docs/2026/06/20/standup",
+		TeamID:      "team_abc",
+		SourceOID:   "sha256:deadbeef",
+		ContentType: "video/mp4",
+		RecordingID: "rec_xyz789",
+	})
+	assert.NoError(t, err)
+
+	var got importResult
+	require.NoError(t, json.Unmarshal([]byte(buf.String()), &got))
+	assert.Equal(t, "imported", got.Status)
+	assert.Equal(t, "rec_xyz789", got.RecordingID)
+	assert.Empty(t, got.ID, "id should be omitted on a fresh import")
+}
+
+// TestEmitImportJSON_AlreadyImported verifies the dedup path emits a structured
+// already_imported result instead of plain text when --json is set.
+func TestEmitImportJSON_AlreadyImported(t *testing.T) {
+	t.Parallel()
+
+	var buf strings.Builder
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	err := emitImportJSON(cmd, importResult{Status: "already_imported", ID: "standup"})
+	assert.NoError(t, err)
+
+	var got importResult
+	require.NoError(t, json.Unmarshal([]byte(buf.String()), &got))
+	assert.Equal(t, "already_imported", got.Status)
+	assert.Equal(t, "standup", got.ID)
+	assert.Empty(t, got.RecordingID)
 }

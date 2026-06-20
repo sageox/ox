@@ -21,7 +21,8 @@ func TestMockRepoService_NilFuncsReturnZeroValues(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.NoError(t, m.NotifyUninstall("r-123", "salt"))
-	assert.NoError(t, m.NotifyImport("t-123", nil))
+	_, niErr := m.NotifyImport("t-123", nil)
+	assert.NoError(t, niErr)
 
 	mr, ri, err := m.MergeRepo("r-123", nil)
 	assert.Nil(t, mr)
@@ -160,9 +161,9 @@ func TestMockRepoService_MergeWorkflow(t *testing.T) {
 					Repo: &RedirectMapping{From: repoID, To: "repo-winner"},
 				}, nil
 		},
-		NotifyImportFunc: func(teamID string, metadata any) error {
+		NotifyImportFunc: func(teamID string, metadata any) (string, error) {
 			require.Equal(t, "team-1", teamID)
-			return nil
+			return "", nil
 		},
 	}
 
@@ -179,7 +180,7 @@ func TestMockRepoService_MergeWorkflow(t *testing.T) {
 	assert.Equal(t, "repo-winner", redirect.Repo.To)
 
 	// step 2: notify import on the winning repo's team
-	err = svc.NotifyImport("team-1", map[string]string{"source": "merge"})
+	_, err = svc.NotifyImport("team-1", map[string]string{"source": "merge"})
 	require.NoError(t, err)
 }
 

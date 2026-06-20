@@ -191,8 +191,55 @@ func TestNotifyImport_Success(t *testing.T) {
 		authToken:  "tok",
 	}
 
-	err := client.NotifyImport("team_abc", map[string]string{"file": "doc.md"})
+	recordingID, err := client.NotifyImport("team_abc", map[string]string{"file": "doc.md"})
 	assert.NoError(t, err)
+	assert.Empty(t, recordingID, "no recording_id in body → empty string")
+}
+
+// TestNotifyImport_ReturnsRecordingID verifies the recording ID is surfaced when
+// the server routes a media file to transcription and returns it in the body.
+// Failure prevented: the CLI silently discards the ID, so a team media import
+// can never be watched via `ox import --status <id> --watch`.
+func TestNotifyImport_ReturnsRecordingID(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"recording_id":"rec_xyz789"}`))
+	}))
+	defer srv.Close()
+
+	client := &RepoClient{
+		baseURL:    srv.URL,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		authToken:  "tok",
+	}
+
+	recordingID, err := client.NotifyImport("team_abc", map[string]string{"file": "standup.mp4"})
+	assert.NoError(t, err)
+	assert.Equal(t, "rec_xyz789", recordingID)
+}
+
+// TestNotifyImport_NonJSONBodyTolerated verifies a 2xx with a non-JSON body
+// (older servers that just return "OK") yields no error and an empty ID.
+func TestNotifyImport_NonJSONBodyTolerated(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	}))
+	defer srv.Close()
+
+	client := &RepoClient{
+		baseURL:    srv.URL,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+
+	recordingID, err := client.NotifyImport("team_abc", map[string]string{})
+	assert.NoError(t, err)
+	assert.Empty(t, recordingID)
 }
 
 func TestNotifyImport_404_GracefulDegradation(t *testing.T) {
@@ -208,7 +255,7 @@ func TestNotifyImport_404_GracefulDegradation(t *testing.T) {
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 
-	err := client.NotifyImport("team_abc", map[string]string{})
+	_, err := client.NotifyImport("team_abc", map[string]string{})
 	assert.NoError(t, err, "404 should be swallowed gracefully")
 }
 
@@ -225,7 +272,7 @@ func TestNotifyImport_ServerError(t *testing.T) {
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 
-	err := client.NotifyImport("team_abc", map[string]string{})
+	_, err := client.NotifyImport("team_abc", map[string]string{})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
 }
@@ -239,7 +286,7 @@ func TestNotifyImport_NetworkError(t *testing.T) {
 	}
 
 	// network errors are swallowed (graceful degradation)
-	err := client.NotifyImport("team_abc", map[string]string{})
+	_, err := client.NotifyImport("team_abc", map[string]string{})
 	assert.NoError(t, err)
 }
 

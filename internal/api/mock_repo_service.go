@@ -7,7 +7,7 @@ type MockRepoService struct {
 	RegisterRepoFunc    func(req *RepoInitRequest) (*RepoInitResponse, error)
 	GetDoctorIssuesFunc func(repoID string) (*DoctorResponse, error)
 	NotifyUninstallFunc func(repoID, repoSalt string) error
-	NotifyImportFunc    func(teamID string, metadata any) error
+	NotifyImportFunc    func(teamID string, metadata any) (string, error)
 	MergeRepoFunc       func(repoID string, markers map[string]json.RawMessage) (*MergeRepoResponse, *RedirectInfo, error)
 	EndpointFunc        func() string
 	WithAuthTokenFunc   func(token string) *RepoClient
@@ -37,11 +37,11 @@ func (m *MockRepoService) NotifyUninstall(repoID, repoSalt string) error {
 	return nil
 }
 
-func (m *MockRepoService) NotifyImport(teamID string, metadata any) error {
+func (m *MockRepoService) NotifyImport(teamID string, metadata any) (string, error) {
 	if m.NotifyImportFunc != nil {
 		return m.NotifyImportFunc(teamID, metadata)
 	}
-	return nil
+	return "", nil
 }
 
 func (m *MockRepoService) MergeRepo(repoID string, markers map[string]json.RawMessage) (*MergeRepoResponse, *RedirectInfo, error) {

@@ -430,7 +430,7 @@ func TestNotifyImport_VideoContentType(t *testing.T) {
 		Sidecars:       map[string]sidecar{},
 	}
 
-	err := client.NotifyImport("team_vid_001", &meta)
+	_, err := client.NotifyImport("team_vid_001", &meta)
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), notifyCalled.Load())
 	assert.Equal(t, "video/mp4", receivedMeta.ContentType)
