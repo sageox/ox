@@ -53,6 +53,7 @@ recording pipeline for the Knowledge Bubble (transcription, summarization).
 Supports Loom, Cap, and direct video URLs.
 
   ox import report.pdf --text extracted.md
+  ox import report.pdf --title "Q2 Review"        # override the filename-derived title
   ox import notes.md --date 2026-01-15
   ox import ./standup.mp4                       # media file into the team (git-tracked, transcribed)
   ox import ./recording.mp4 --kb my-bubble      # media file into a Knowledge Bubble
@@ -80,7 +81,7 @@ func init() {
 	importCmd.Flags().StringVar(&importFlags.team, "team", "", "team ID (or slug/name when inside a repo)")
 	importCmd.Flags().StringVar(&importFlags.kb, "kb", "", "Knowledge Bubble (slug or kb_id) to import into")
 	importCmd.MarkFlagsMutuallyExclusive("team", "kb")
-	importCmd.Flags().StringVar(&importFlags.title, "title", "", "display title for URL imports")
+	importCmd.Flags().StringVar(&importFlags.title, "title", "", "display title (defaults to filename for file imports)")
 	importCmd.Flags().StringVar(&importFlags.status, "status", "", "check processing status of a URL import (use --list to find IDs)")
 	importCmd.Flags().BoolVar(&importFlags.watch, "watch", false, "poll --status until processing completes or fails")
 	importCmd.Flags().BoolVar(&importFlags.list, "list", false, "list imports and their processing status")
@@ -244,9 +245,9 @@ func runImport(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// derive directory name from filename stem
-	dirName := inferTitle(srcPath)
-	dirSlug := slugify(dirName)
+	// derive the per-document storage slug from --title, falling back to the
+	// filename stem (see resolveImportSlug for the empty-slug guard)
+	dirSlug := resolveImportSlug(srcPath)
 
 	docDir := filepath.Join(docsBaseDir,
 		importDate.Format("2006"),
@@ -324,7 +325,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("write pointer files: %w", err)
 	}
 
-	title := inferTitle(srcPath)
+	title := resolveImportTitle(srcPath)
 
 	// build and write metadata.json (plain git, not LFS — stays readable without
 	// hydration). like pointer files, the local copy is ephemeral and cleaned up
@@ -406,6 +407,31 @@ func emitImportJSON(cmd *cobra.Command, result importResult) error {
 	}
 	_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(out))
 	return nil
+}
+
+// resolveImportTitle returns the explicit --title when set, otherwise the
+// title inferred from the filename. It backs both the metadata.json/server
+// display title and (via resolveImportSlug) the per-document storage slug.
+func resolveImportTitle(srcPath string) string {
+	if t := strings.TrimSpace(importFlags.title); t != "" {
+		return t
+	}
+	return inferTitle(srcPath)
+}
+
+// resolveImportSlug derives the per-document storage slug for the team import
+// path. It prefers the slugified --title, but a punctuation-only title (e.g.
+// "!!!") slugifies to "" — which would collapse docDir onto the date directory
+// and silently scatter metadata.json and pointer files there. In that case it
+// falls back to the filename-derived slug so storage identity always lives
+// under a per-document directory. (A pathological filename like "!!!.pdf" can
+// still produce an empty slug; that edge predates the --title feature and is
+// out of scope here.)
+func resolveImportSlug(srcPath string) string {
+	if s := slugify(resolveImportTitle(srcPath)); s != "" {
+		return s
+	}
+	return slugify(inferTitle(srcPath))
 }
 
 // inferTitle derives a human-readable title from a filename.

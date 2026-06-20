@@ -6,27 +6,33 @@ sidebar_position: 45
 
 ## ox import
 
-Import a document or video URL into team context
+Import a document, media file, or video URL into team context or a Knowledge Bubble
 
 ### Synopsis
 
-Import a document or video URL into team context for onboarding and knowledge sharing.
+Import a document, media file, or video URL for onboarding and knowledge sharing.
 
-File imports are stored with LFS-backed content and git-tracked metadata.
-URL imports submit a video for cloud processing (transcription, summarization).
+Team imports (default) are stored with LFS-backed content and git-tracked
+metadata in the team context repo — including media files (mp4, mov, webm,
+m4a, mp3, wav, …), which are transcribed and summarized server-side after
+import. With --kb, media files and video URLs are submitted to the cloud
+recording pipeline for the Knowledge Bubble (transcription, summarization).
 Supports Loom, Cap, and direct video URLs.
 
   ox import report.pdf --text extracted.md
+  ox import report.pdf --title "Q2 Review"        # override the filename-derived title
   ox import notes.md --date 2026-01-15
+  ox import ./standup.mp4                       # media file into the team (git-tracked, transcribed)
+  ox import ./recording.mp4 --kb my-bubble      # media file into a Knowledge Bubble
   ox import https://www.loom.com/share/abc123 --title "Architecture Review"
   ox import https://cap.link/abc123 --title "Sprint Retro"
-  ox import https://example.com/meeting.mp4 --title "Team Standup"
   ox import --list                              # find import IDs
   ox import --status rec_01234567               # check processing once
   ox import --status rec_01234567 --watch       # wait until complete
 
-The team is auto-discovered from the current repo. Use --team to override
-or when working outside an initialized repo.
+The team is auto-discovered from the current repo. Use --team to override,
+or --kb <slug|kb_id> to target a Knowledge Bubble instead (the two are
+mutually exclusive). Document imports currently support --team only.
 
 For behavioral rules (vs. documents), see 'ox guide team-rules' — rules
 go in agents/rules/, not through ox import.
@@ -41,11 +47,12 @@ ox import <file|url> [flags]
       --date string     date for filing (YYYY-MM-DD, default: auto-detect from metadata)
       --force           re-import even if content hash already exists
   -h, --help            help for import
+      --kb string       Knowledge Bubble (slug or kb_id) to import into
       --list            list imports and their processing status
       --status string   check processing status of a URL import (use --list to find IDs)
       --team string     team ID (or slug/name when inside a repo)
       --text string     path to pre-extracted text/markdown for indexing (optional)
-      --title string    display title for URL imports
+      --title string    display title (defaults to filename for file imports)
       --watch           poll --status until processing completes or fails
 ```
 

@@ -170,6 +170,65 @@ func TestInferTitle(t *testing.T) {
 	}
 }
 
+// TestResolveImportTitle verifies that --title overrides the filename-derived
+// title for team document/media imports, and that the filename is used as the
+// fallback when --title is empty or whitespace-only.
+// Failure prevented: --title silently ignored on the default import path, so
+// the metadata.json/server title always tracks the filename (the original bug).
+func TestResolveImportTitle(t *testing.T) {
+	orig := importFlags.title
+	t.Cleanup(func() { importFlags.title = orig })
+
+	tests := []struct {
+		name  string
+		title string
+		path  string
+		want  string
+	}{
+		{"explicit title overrides filename", "Q2 Review", "report.pdf", "Q2 Review"},
+		{"empty title falls back to filename", "", "my-doc.pdf", "my doc"},
+		{"whitespace-only title falls back to filename", "   ", "my-doc.pdf", "my doc"},
+		{"title is trimmed", "  Trimmed Title  ", "report.pdf", "Trimmed Title"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			importFlags.title = tt.title
+			assert.Equal(t, tt.want, resolveImportTitle(tt.path))
+		})
+	}
+}
+
+// TestResolveImportSlug verifies that the storage slug follows --title for
+// normal input but falls back to the filename slug when the title slugifies to
+// empty (e.g. a punctuation-only title).
+// Failure prevented: --title "!!!" yields an empty slug, collapsing docDir onto
+// the date directory and scattering metadata.json/pointer files there instead
+// of under a per-document slug.
+func TestResolveImportSlug(t *testing.T) {
+	orig := importFlags.title
+	t.Cleanup(func() { importFlags.title = orig })
+
+	tests := []struct {
+		name  string
+		title string
+		path  string
+		want  string
+	}{
+		{"title drives slug", "Q2 Review", "report.pdf", "q2-review"},
+		{"empty title uses filename", "", "my-doc.pdf", "my-doc"},
+		{"punctuation-only title falls back to filename", "!!!", "my-doc.pdf", "my-doc"},
+		{"whitespace-only title falls back to filename", "   ", "my-doc.pdf", "my-doc"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			importFlags.title = tt.title
+			assert.Equal(t, tt.want, resolveImportSlug(tt.path))
+		})
+	}
+}
+
 func TestSlugify(t *testing.T) {
 	tests := []struct {
 		input string
