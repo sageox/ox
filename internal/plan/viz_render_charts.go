@@ -400,6 +400,12 @@ func layoutStrip(row []float64, s vrect, out *[]vrect) vrect {
 		sum += a
 	}
 	if sum <= 0 {
+		// an all-zero row (zero-size items): emit a zero-area rect PER item so the
+		// result stays one-rect-per-input — callers index rects by item, so a short
+		// slice would index out of bounds. Leave the remaining space unchanged.
+		for range row {
+			*out = append(*out, vrect{s.x, s.y, 0, 0})
+		}
 		return s
 	}
 	if s.w >= s.h {

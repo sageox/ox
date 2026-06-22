@@ -99,6 +99,29 @@ func TestRenderViz_TreemapAreaProportional(t *testing.T) {
 	}
 }
 
+// TestRenderViz_TreemapZeroSizeItem verifies a zero-size item renders as a
+// zero-area cell instead of panicking, in every position.
+// Failure prevented: squarify dropped the all-zero row, returning fewer rects than
+// items, so rects[k] indexed out of bounds — a runtime panic on any treemap with a 0.
+func TestRenderViz_TreemapZeroSizeItem(t *testing.T) {
+	cases := []string{
+		`{"items":[{"label":"a","size":10},{"label":"z","size":0}]}`,                          // trailing zero
+		`{"items":[{"label":"z","size":0},{"label":"a","size":10}]}`,                          // leading zero
+		`{"items":[{"label":"a","size":10},{"label":"z","size":0},{"label":"b","size":5}]}`,   // middle zero
+		`{"items":[{"label":"a","size":10},{"label":"z1","size":0},{"label":"z2","size":0}]}`, // multiple zeros
+	}
+	for _, data := range cases {
+		out, err := RenderViz("treemap", []byte(data))
+		if err != nil {
+			t.Fatalf("treemap %s: %v", data, err)
+		}
+		// the legend lists every item, so the zero-size label must still appear.
+		if !strings.Contains(out, ">z") && !strings.Contains(out, ">z1") {
+			t.Errorf("zero-size item missing from render: %s", out)
+		}
+	}
+}
+
 // TestRenderViz_SankeyNodeHeight verifies node heights are computed from flow
 // magnitude (node value = max(in,out), height = value*scale): C carries 4, A
 // carries 3, B carries 1 — heights 188/141/47 at scale 47.
