@@ -120,6 +120,18 @@ if HasOxPrimeMarker(gitRoot) { ... }
 
 ---
 
+## Dependency Licensing Policy
+
+**NEVER add copyleft-licensed dependencies to this codebase.** This is a hard rule with no exceptions.
+
+- **Banned licenses:** GPL, LGPL, AGPL, SSPL, EUPL, OSL, CPL, EPL, CC-BY-SA
+- **Allowed licenses:** MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Unlicense, CC0, MPL-2.0, Zlib
+- **MPL-2.0 note:** Allowed because it is file-level copyleft (not project-level), but prefer MIT/Apache/BSD when alternatives exist
+
+Before adding any new `go get` dependency, verify its license. If a dependency transitively pulls in a GPL/LGPL package, find an alternative. When in doubt, check the module's LICENSE file in the Go module cache or on the project's repository.
+
+---
+
 ## Key Policies (Details in `.claude/rules/`)
 
 - **LFS independence:** ox NEVER shells out to `git-lfs` and never commits `.gitattributes` with `filter=lfs`. All LFS operations — pointer detection, parsing, upload, download, hydration — are pure Go in `internal/lfs/`. Talking to GitLab's LFS Batch API goes through `internal/lfs/client.go`, not a subprocess. If a push fails with `LFS objects are missing`, the fix is NEVER `git lfs push --all` — see `.claude/rules/lfs-no-git-lfs-binary.md`
