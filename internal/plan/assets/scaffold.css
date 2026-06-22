@@ -309,3 +309,65 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
   .pmapv-row{grid-template-columns:14px 1fr 84px 56px;row-gap:5px}
   .pmapv-off{display:none}
 }
+
+/* --- chart forms: donut / radar / quadrant / treemap / sankey / chord ---
+   Pure computed inline SVG (no Mermaid, no CDN) so they survive the CSP-safe
+   --artifact render. Geometry is computed in the binary; CSS only themes. Every
+   form pairs its color with a non-color channel (legend, value labels, line dash)
+   so it reads in grayscale / under color-vision deficiency. */
+/* shared legend swatch */
+.vsw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:7px;vertical-align:middle;flex:none}
+/* donut */
+.donut{margin:14px 0}
+.donut figcaption,.radar figcaption,.quad figcaption,.tmap figcaption,.sankey figcaption,.chord figcaption{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);margin-bottom:8px}
+.donut-body{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+.donut-svg{width:140px;height:140px;flex:none}
+.donut-ctr{fill:var(--ink);font-family:"Space Grotesk",sans-serif;font-size:18px;font-weight:600}
+.donut-leg,.radar-leg{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px;min-width:150px}
+.donut-leg li{display:flex;align-items:center;font-size:13px}
+.donut-lab{color:var(--ink)}
+.donut-val{margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--dim);padding-left:14px}
+/* radar */
+.radar{margin:14px 0}
+.radar-body{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.radar-svg{width:240px;height:232px;flex:none}
+.radar-grid{fill:none;stroke:var(--hair2);stroke-width:1}
+.radar-spoke{stroke:var(--hair2);stroke-width:1}
+.radar-axis{fill:var(--dim);font-family:"JetBrains Mono",monospace;font-size:10px}
+.radar-series{fill-opacity:.12;stroke-width:1.7;stroke-linejoin:round}
+.radar-leg li{display:flex;align-items:center;font-size:13px;color:var(--ink)}
+/* quadrant */
+.quad{margin:14px 0}
+.quad-svg{width:100%;max-width:420px;height:auto}
+.quad-box{fill:var(--panel);stroke:var(--hair2);stroke-width:1}
+.quad-mid{stroke:var(--hair2);stroke-width:1;stroke-dasharray:3 3}
+.quad-pt{stroke:var(--bg);stroke-width:1.5}
+.quad-lab{fill:var(--ink);font-size:11px}
+.quad-axl{fill:var(--dim);font-family:"JetBrains Mono",monospace;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em}
+/* treemap */
+.tmap{margin:14px 0}
+.tmap-svg{width:100%;max-width:460px;height:auto;border-radius:8px;overflow:hidden}
+.tmap-cell rect{stroke:var(--bg);stroke-width:1.5;transition:filter .14s}
+.tmap-cell:hover rect{filter:brightness(1.12)}
+.tmap-lab{fill:#0c1112;font-family:"Space Grotesk",sans-serif;font-size:11px;font-weight:600;pointer-events:none}
+.tmap-val{fill:#0c1112;opacity:.78;font-family:"JetBrains Mono",monospace;font-size:9.5px;pointer-events:none}
+.tmap-leg{list-style:none;margin:10px 0 0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:4px 14px}
+.tmap-leg li{display:flex;align-items:center;font-size:12.5px}
+.tmap-leg-lab{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tmap-leg-val{margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);padding-left:8px}
+/* sankey */
+.sankey{margin:14px 0}
+.sankey-svg{width:100%;max-width:520px;height:auto}
+.sankey-link{fill-opacity:.34;transition:fill-opacity .14s}
+.sankey-link:hover{fill-opacity:.6}
+.sankey-lab{fill:var(--ink);font-size:10.5px}
+.sankey-lab.mid{fill:var(--dim);font-size:9.5px}
+/* chord */
+.chord{margin:14px 0}
+.chord-body{display:flex;justify-content:center}
+.chord-svg{width:100%;max-width:300px;height:auto}
+.chord-rib{fill-opacity:.32;transition:fill-opacity .14s}
+.chord-rib:hover{fill-opacity:.62}
+.chord-arc{stroke:var(--bg);stroke-width:1}
+.chord-lab{fill:var(--ink);font-family:"JetBrains Mono",monospace;font-size:9.5px}
+@media(prefers-reduced-motion:reduce){.tmap-cell rect,.sankey-link,.chord-rib{transition:none}}

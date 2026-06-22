@@ -149,6 +149,12 @@ func TestVizCatalog_ParamPatternsRenderable(t *testing.T) {
 		"flag-rollout-matrix": `{"envs":["dev"],"stages":["merge"],"cells":{"dev":{"merge":"100%"}}}`,
 		"partition-bar":       `{"total":100,"unit":"KB","partitions":[{"label":"a","size":60},{"label":"b","size":40}]}`,
 		"partition-map":       `{"unit":"KB","partitions":[{"label":"a","size":60,"offset":"0x0"},{"label":"b","size":4,"proposed":true}]}`,
+		"donut":               `{"slices":[{"label":"a","value":1}]}`,
+		"radar":               `{"axes":["a","b","c"],"series":[{"label":"x","values":[1,2,3]}]}`,
+		"quadrant":            `{"points":[{"label":"a","x":1,"y":2}]}`,
+		"treemap":             `{"items":[{"label":"a","size":1}]}`,
+		"sankey":              `{"nodes":[{"name":"a"},{"name":"b"}],"links":[{"from":"a","to":"b","value":1}]}`,
+		"chord":               `{"labels":["a","b"],"matrix":[[0,1],[1,0]]}`,
 	}
 	for _, p := range VizCatalog() {
 		if p.Param == "" {

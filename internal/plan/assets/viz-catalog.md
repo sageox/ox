@@ -319,3 +319,63 @@ why: a branded inline marker + hover beats inventing a circled-`i`/number glyph:
 ```html
 <span class="ox-annot" title="SageOx surfaced: ADR-051 Consent tooling — bundled voiceprint + recording consent; flagged the weaker BIPA position.">ADR-051 <svg class="ox-annot-mark" aria-hidden="true"><use href="#ox-ico-d" class="ico-d"></use><use href="#ox-ico-l" class="ico-l"></use></svg></span>
 ```
+
+## donut
+use: a part-of-whole proportion with a few slices — cost share, test pass/fail, time split. One total, broken down.
+why: a ring reads share pre-attentively and frees the center for the headline total; a paired legend carries exact values + percentages so it survives grayscale. Keep ≤6 slices — beyond that a bar-chart reads cleaner.
+param: {"title":"test outcomes","unit":"","slices":[{"label":"pass","value":182,"color":"sage"},{"label":"fail","value":12,"color":"red"},{"label":"skip","value":24,"color":"slate"}]}
+```html
+<!-- prefer the param renderer: ox plan viz render donut --data donut.json
+     ox computes each slice's arc sweep (value/total·360) + the legend shares. -->
+<figure class="donut"><div class="donut-body"><svg class="donut-svg" viewBox="0 0 140 140"><circle cx="70" cy="70" r="54" fill="none" stroke="var(--sage)" stroke-width="26" stroke-dasharray="254 85" transform="rotate(-90 70 70)"/></svg><ul class="donut-leg"><li><span class="vsw" style="background:var(--sage)"></span><span class="donut-lab">pass</span><span class="donut-val">182 · 83.5%</span></li></ul></div></figure>
+```
+
+## radar
+use: compare a few options across multiple criteria — score each alternative on the same axes to see the shape of its strengths.
+why: overlaid polygons make "which option is strong where" a single shape comparison instead of a table scan; ≤3 series and a per-series line dash keep it legible without relying on color.
+param: {"title":"approach fit","axes":["speed","safety","cost","reuse"],"max":5,"series":[{"label":"native","values":[4,5,2,3],"color":"sage"},{"label":"hybrid","values":[3,4,4,5],"color":"copper"}]}
+```html
+<!-- prefer the param renderer: ox plan viz render radar --data radar.json
+     ox computes each axis spoke angle + the per-series polygon points. -->
+<figure class="radar"><div class="radar-body"><svg class="radar-svg" viewBox="0 0 240 232"><polygon class="radar-series" points="120,40 196,116 120,180 44,116" style="stroke:var(--sage);fill:var(--sage)"/></svg></div></figure>
+```
+
+## quadrant
+use: a two-axis tradeoff scatter — impact vs effort, value vs risk — placing each item in a quadrant so the act-now corner is obvious.
+why: a 2×2 turns "which to do first" into spatial position; the top-corner items pop without reading a single number, and labels keep it readable in grayscale.
+param: {"title":"what to build first","x_label":"effort","y_label":"impact","points":[{"label":"donut","x":2,"y":8,"color":"sage"},{"label":"sankey","x":8,"y":6,"color":"copper"}]}
+```html
+<!-- prefer the param renderer: ox plan viz render quadrant --data quad.json
+     ox normalizes x/y to the plot box and splits the 2×2 at the midlines. -->
+<figure class="quad"><svg class="quad-svg" viewBox="0 0 300 224"><rect class="quad-box" x="50" y="14" width="238" height="182"/><line class="quad-mid" x1="169" y1="14" x2="169" y2="196"/><circle class="quad-pt" cx="98" cy="50" style="fill:var(--sage)"/></svg></figure>
+```
+
+## treemap
+use: a proportional hierarchy where area encodes size — code by package, spend by category, storage by bucket. Size at a glance.
+why: a squarified treemap encodes magnitude as area (the dominant block IS the dominant cost) far denser than a bar list; a legend carries exact sizes so slivers stay readable.
+param: {"title":"repo by package","unit":"KB","items":[{"label":"internal/plan","size":120,"color":"sage"},{"label":"cmd/ox","size":80,"color":"copper"},{"label":"internal/lfs","size":40,"color":"teal"}]}
+```html
+<!-- prefer the param renderer: ox plan viz render treemap --data tmap.json
+     ox runs the squarified layout so each cell's AREA is proportional to size. -->
+<figure class="tmap"><svg class="tmap-svg" viewBox="0 0 320 200" preserveAspectRatio="none"><g class="tmap-cell"><rect x="0" y="0" width="200" height="200" style="fill:var(--sage)"/><text class="tmap-lab" x="6" y="15">internal/plan</text></g></svg></figure>
+```
+
+## sankey
+use: flow magnitude across stages — where tokens, cost, traffic, or users move and split between steps. Conserved quantity, staged.
+why: ribbon width encodes the magnitude flowing along each path, so the dominant route and the leaks read instantly; a node-and-arrow flowchart shows topology but hides the amounts.
+param: {"title":"token budget","unit":"tok","nodes":[{"name":"prompt","color":"sage"},{"name":"tools","color":"copper"},{"name":"output","color":"teal"}],"links":[{"from":"prompt","to":"tools","value":1200},{"from":"prompt","to":"output","value":800},{"from":"tools","to":"output","value":1000}]}
+```html
+<!-- prefer the param renderer: ox plan viz render sankey --data sankey.json
+     ox layers the DAG, sizes nodes by max(in,out), and sets ribbon width ∝ value. -->
+<figure class="sankey"><svg class="sankey-svg" viewBox="0 0 360 240"><path class="sankey-link" d="M67 22 C140 22 140 22 213 22 L213 70 C140 70 140 70 67 70 Z" style="fill:var(--sage)"/><rect class="sankey-node" x="56" y="22" width="11" height="94" style="fill:var(--sage)"/></svg></figure>
+```
+
+## chord
+use: symmetric coupling between entities — which modules, files, or people interact, and how strongly. Who-touches-what.
+why: arcs sized by total coupling and ribbons sized by pairwise strength reveal the tightly-bound cluster a dependency list buries; the circular layout shows mutual relationships a left-to-right graph distorts.
+param: {"title":"module coupling","labels":["api","db","auth","ui"],"matrix":[[0,8,3,2],[8,0,1,0],[3,1,0,4],[2,0,4,0]]}
+```html
+<!-- prefer the param renderer: ox plan viz render chord --data chord.json
+     ox sizes each node arc by its total coupling and each chord by pairwise strength. -->
+<figure class="chord"><div class="chord-body"><svg class="chord-svg" viewBox="0 0 260 260"><path class="chord-arc" d="M130 22 A108 108 0 0 1 226 86 L214 92 A96 96 0 0 0 130 34 Z" style="fill:var(--sage)"/></svg></div></figure>
+```

@@ -307,8 +307,9 @@ func scoreVizSection(heading, body string, cues []string) (int, []string) {
 }
 
 type vizCueSet struct {
-	id   string
-	cues []string
+	id    string
+	param string
+	cues  []string
 }
 
 // computeVizHints returns the strongest few per-section data-viz suggestions.
@@ -322,7 +323,7 @@ func computeVizHints(in Input) []VizHint {
 			continue
 		}
 		if cues := vizUseCues(p.Use); len(cues) > 0 {
-			sets = append(sets, vizCueSet{p.ID, cues})
+			sets = append(sets, vizCueSet{p.ID, p.Param, cues})
 		}
 	}
 	if len(sets) == 0 {
@@ -339,10 +340,10 @@ func computeVizHints(in Input) []VizHint {
 		if strings.TrimSpace(sec.Heading) == "" {
 			continue
 		}
-		bestID, bestScore, bestHits := "", 0, []string(nil)
+		bestID, bestParam, bestScore, bestHits := "", "", 0, []string(nil)
 		for _, s := range sets {
 			if score, hits := scoreVizSection(sec.Heading, sec.Body, s.cues); score > bestScore {
-				bestID, bestScore, bestHits = s.id, score, hits
+				bestID, bestParam, bestScore, bestHits = s.id, s.param, score, hits
 			}
 		}
 		if bestScore < minVizScore || bestID == "" {
@@ -352,6 +353,7 @@ func computeVizHints(in Input) []VizHint {
 			Section:   sec.Heading,
 			PatternID: bestID,
 			Reason:    "section names " + joinAnd(topVizCues(bestHits, 2)),
+			Param:     bestParam,
 		}})
 	}
 	if len(cands) == 0 {

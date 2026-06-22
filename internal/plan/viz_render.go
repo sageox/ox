@@ -37,17 +37,38 @@ var vizRenderers = map[string]func([]byte) (string, error){
 	"flag-rollout-matrix": renderFlagMatrix,
 	"partition-bar":       renderPartitionBar,
 	"partition-map":       renderPartitionMap,
+	"donut":               renderDonut,
+	"radar":               renderRadar,
+	"quadrant":            renderQuadrant,
+	"treemap":             renderTreemap,
+	"sankey":              renderSankey,
+	"chord":               renderChord,
 }
 
 // RenderViz renders one parameterized pattern from its JSON data into an HTML
 // fragment. Returns an error for an unknown pattern or malformed data so the
 // command layer can show an actionable message.
+//
+// On a render failure (usually a JSON-shape mismatch), the error echoes the
+// pattern's expected `param:` shape from the catalog so the caller — typically an
+// AI coworker driving ox from inside another agent — can self-correct in one shot
+// instead of guessing the schema. (Goose's Auto Visualiser, which has the agent
+// supply the full chart spec, documented exactly this failure mode with no shape
+// hint to recover from; ox supplies data only, and names the shape on a miss.)
 func RenderViz(pattern string, data []byte) (string, error) {
-	r, ok := vizRenderers[strings.ToLower(strings.TrimSpace(pattern))]
+	id := strings.ToLower(strings.TrimSpace(pattern))
+	r, ok := vizRenderers[id]
 	if !ok {
 		return "", fmt.Errorf("pattern %q does not support --data rendering; run `ox plan viz` to see which patterns are parameterized", pattern)
 	}
-	return r(data)
+	out, err := r(data)
+	if err != nil {
+		if p, ok := VizPatternByID(id); ok && p.Param != "" {
+			return "", fmt.Errorf("%w\n  expected shape: %s", err, p.Param)
+		}
+		return "", err
+	}
+	return out, nil
 }
 
 // vizColors is the whitelist of semantic color names a caller may reference;

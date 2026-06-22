@@ -122,10 +122,17 @@ type DiagramHint struct {
 // DiagramHint only covers Mermaid/CSS diagram FORMS, leaving the data-viz catalog
 // invisible to content-aware matching. The match signal is DERIVED from each
 // pattern's `use:` line (no separate catalog field) — see computeVizHints.
+//
+// Param carries the matched pattern's `param:` JSON skeleton so the agent goes
+// straight from section→pattern→fill-in-the-blanks, instead of round-tripping
+// `ox plan viz <id>` to recall the shape. This is the most "auto" an autovisualizer
+// can be from INSIDE another coding agent (Claude, Codex, …): ox can't render into a
+// host surface it doesn't own, but it can pre-stage the exact data shape to fill.
 type VizHint struct {
-	Section   string `json:"section"`    // H2 heading the hint applies to
-	PatternID string `json:"pattern_id"` // catalog id, e.g. "risk-matrix" (renderable via `ox plan viz render`)
-	Reason    string `json:"reason"`     // the trigger terms matched, in one clause
+	Section   string `json:"section"`         // H2 heading the hint applies to
+	PatternID string `json:"pattern_id"`      // catalog id, e.g. "risk-matrix" (renderable via `ox plan viz render`)
+	Reason    string `json:"reason"`          // the trigger terms matched, in one clause
+	Param     string `json:"param,omitempty"` // the pattern's `param:` JSON skeleton to fill and render
 }
 
 // Section is one H2-delimited block of a plan, with any file references it cites.
