@@ -349,8 +349,8 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .tmap-svg{width:100%;max-width:460px;height:auto;border-radius:8px;overflow:hidden}
 .tmap-cell rect{stroke:var(--bg);stroke-width:1.5;transition:filter .14s}
 .tmap-cell:hover rect{filter:brightness(1.12)}
-.tmap-lab{fill:#0c1112;font-family:"Space Grotesk",sans-serif;font-size:11px;font-weight:600;pointer-events:none}
-.tmap-val{fill:#0c1112;opacity:.78;font-family:"JetBrains Mono",monospace;font-size:9.5px;pointer-events:none}
+.tmap-lab{fill:var(--ink);font-family:"Space Grotesk",sans-serif;font-size:11px;font-weight:600;pointer-events:none}
+.tmap-val{fill:var(--ink);opacity:.78;font-family:"JetBrains Mono",monospace;font-size:9.5px;pointer-events:none}
 .tmap-leg{list-style:none;margin:10px 0 0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:4px 14px}
 .tmap-leg li{display:flex;align-items:center;font-size:12.5px}
 .tmap-leg-lab{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
