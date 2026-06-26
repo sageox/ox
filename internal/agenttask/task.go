@@ -32,6 +32,7 @@ const (
 	KindDoctor          = "doctor"
 	KindSessionFinalize = "session-finalize"
 	KindAntiEntropy     = "anti-entropy"
+	KindPlanFeedback    = "plan-feedback"
 	KindCustom          = "custom"
 )
 
@@ -39,6 +40,7 @@ var knownKinds = map[string]bool{
 	KindDoctor:          true,
 	KindSessionFinalize: true,
 	KindAntiEntropy:     true,
+	KindPlanFeedback:    true,
 	KindCustom:          true,
 }
 

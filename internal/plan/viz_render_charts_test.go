@@ -176,17 +176,88 @@ func TestRenderViz_ChordStructure(t *testing.T) {
 	}
 }
 
+// TestRenderViz_LineChartPlotsPoint verifies a data point maps to the COMPUTED
+// pixel: with the plot box (x0=52,y0=14,pw=236,ph=176), (0,0) lands bottom-left
+// and (x_max,y_max) lands top-right (y inverted so high = up).
+// Failure prevented: the line stops tracking the data — the chart's reason to exist.
+func TestRenderViz_LineChartPlotsPoint(t *testing.T) {
+	out, err := RenderViz("line-chart", []byte(`{"series":[{"label":"a","points":[{"x":0,"y":0},{"x":10,"y":100}]}]}`))
+	if err != nil {
+		t.Fatalf("RenderViz: %v", err)
+	}
+	if !strings.Contains(out, "52.00,190.00") {
+		t.Errorf("origin (0,0) not projected to the bottom-left: %s", out)
+	}
+	if !strings.Contains(out, "288.00,14.00") {
+		t.Errorf("max (x_max,y_max) not projected to the top-right: %s", out)
+	}
+}
+
+// TestRenderViz_LineChartThreshold verifies the threshold renders as a dashed
+// horizontal reference line at the computed y for its value (py(8000) of y_max
+// 20000 = 119.60).
+func TestRenderViz_LineChartThreshold(t *testing.T) {
+	out, err := RenderViz("line-chart", []byte(`{"y_max":20000,"threshold":{"at":8000,"label":"8k cap"},"series":[{"label":"a","points":[{"x":0,"y":0},{"x":1,"y":1}]}]}`))
+	if err != nil {
+		t.Fatalf("RenderViz: %v", err)
+	}
+	if !strings.Contains(out, `class="linec-thresh"`) || !strings.Contains(out, `y1="119.60"`) {
+		t.Errorf("threshold not drawn at the computed y: %s", out)
+	}
+}
+
+// TestRenderViz_LineChartSawtooth verifies a reset series keeps its drop-back
+// vertex — the same x climbing to the cap then returning to the floor — so the
+// sawtooth tooth survives, and that each series renders its own polyline + legend.
+// Failure prevented: the reset is smoothed away and the "bounded, resets" story is lost.
+func TestRenderViz_LineChartSawtooth(t *testing.T) {
+	data := `{"y_max":10000,"series":[` +
+		`{"label":"before","color":"red","points":[{"x":0,"y":0},{"x":6,"y":10000}]},` +
+		`{"label":"after","color":"sage","points":[{"x":0,"y":0},{"x":2,"y":8000},{"x":2,"y":1000},{"x":4,"y":8000}]}]}`
+	out, err := RenderViz("line-chart", []byte(data))
+	if err != nil {
+		t.Fatalf("RenderViz: %v", err)
+	}
+	if n := strings.Count(out, `class="linec-series"`); n != 2 {
+		t.Errorf("expected 2 series polylines, got %d: %s", n, out)
+	}
+	// xMax=6 (observed); px(2)=130.67. The climb to 8000 (py=49.20) and the reset to
+	// 1000 (py=172.40) at the SAME x are both present — the vertical drop is the tooth.
+	if !strings.Contains(out, "130.67,49.20") || !strings.Contains(out, "130.67,172.40") {
+		t.Errorf("sawtooth reset vertex not preserved: %s", out)
+	}
+	if !strings.Contains(out, ">before<") || !strings.Contains(out, ">after<") {
+		t.Errorf("legend missing series labels: %s", out)
+	}
+}
+
+// TestRenderViz_LineChartValidates verifies the data guards fail loud: no series,
+// a single-point series (can't draw a line), and a negative coordinate.
+func TestRenderViz_LineChartValidates(t *testing.T) {
+	bad := []string{
+		`{"series":[]}`,
+		`{"series":[{"label":"a","points":[{"x":0,"y":0}]}]}`,
+		`{"series":[{"label":"a","points":[{"x":0,"y":0},{"x":1,"y":-5}]}]}`,
+	}
+	for _, data := range bad {
+		if _, err := RenderViz("line-chart", []byte(data)); err == nil {
+			t.Errorf("expected error for invalid line-chart data: %s", data)
+		}
+	}
+}
+
 // TestRenderViz_ChartsAreArtifactSafe verifies the new SVG forms emit no <script>
 // and no external URL, so they survive the CSP-safe `--artifact` render mode (the
 // same property the sparkline relies on).
 func TestRenderViz_ChartsAreArtifactSafe(t *testing.T) {
 	cases := map[string]string{
-		"donut":    `{"slices":[{"label":"a","value":1}]}`,
-		"radar":    `{"axes":["a","b","c"],"series":[{"label":"x","values":[1,2,3]}]}`,
-		"quadrant": `{"points":[{"label":"a","x":1,"y":2}]}`,
-		"treemap":  `{"items":[{"label":"a","size":1}]}`,
-		"sankey":   `{"nodes":[{"name":"a"},{"name":"b"}],"links":[{"from":"a","to":"b","value":1}]}`,
-		"chord":    `{"labels":["a","b"],"matrix":[[0,1],[1,0]]}`,
+		"donut":      `{"slices":[{"label":"a","value":1}]}`,
+		"radar":      `{"axes":["a","b","c"],"series":[{"label":"x","values":[1,2,3]}]}`,
+		"quadrant":   `{"points":[{"label":"a","x":1,"y":2}]}`,
+		"treemap":    `{"items":[{"label":"a","size":1}]}`,
+		"sankey":     `{"nodes":[{"name":"a"},{"name":"b"}],"links":[{"from":"a","to":"b","value":1}]}`,
+		"chord":      `{"labels":["a","b"],"matrix":[[0,1],[1,0]]}`,
+		"line-chart": `{"series":[{"label":"a","points":[{"x":0,"y":0},{"x":1,"y":1}]}]}`,
 	}
 	for id, data := range cases {
 		out, err := RenderViz(id, []byte(data))

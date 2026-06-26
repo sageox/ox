@@ -150,6 +150,14 @@ type PlanInfo struct {
 	HasHTML   bool
 }
 
+// LoadMeta reads and parses a captured plan's meta.json from its plan directory
+// (PlanInfo.Dir). Exported so the cmd layer can read provenance — e.g. the
+// authoring agent id, to notify that coworker when review feedback arrives —
+// without re-deriving the on-disk path. A missing/unreadable meta is an error.
+func LoadMeta(planDir string) (Meta, error) {
+	return readMeta(planDir)
+}
+
 // Save writes a captured plan into the ledger under data/plans/<dated-slug>/.
 // It writes plan.md (from in.Raw), annotations.json (res), and meta.json as
 // plain git-tracked text. plan.html is written ONLY when html != nil: plain

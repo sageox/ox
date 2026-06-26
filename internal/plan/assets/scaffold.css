@@ -40,7 +40,7 @@ nav.toc a.active{color:var(--ink);border-left-color:var(--sage)}
 main{padding:40px 46px 120px;min-width:0}
 /* hold prose to a readable measure (~72-80ch); let wide visuals opt out */
 main>section,main>.tldr,main>.ox-enrich,main>.rev-status,main>.eyebrow,main>h1,main>.foot{max-width:780px}
-main>section .mermaid,main>section .swim,main>section .statrow,main>section .barc,main>section table.heat,main>section .multiples,main>section .pbar-fig,main>section .pmapv{max-width:none}
+main>section .mermaid,main>section .swim,main>section .statrow,main>section .barc,main>section table.heat,main>section .multiples,main>section .pbar-fig,main>section .pmapv,main>section .linec{max-width:none}
 .eyebrow{font-family:"JetBrains Mono",monospace;font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--copper)}
 h1{font-family:"Space Grotesk",sans-serif;font-weight:700;font-size:40px;line-height:1.1;letter-spacing:-.035em;margin:.2em 0 .35em}
 h2{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:23px;letter-spacing:-.02em;margin:2.2em 0 .2em;padding-bottom:.3em;border-bottom:1px solid var(--hair)}
@@ -116,6 +116,8 @@ td.v-bad{color:var(--red);font-weight:600}
 .swim .track{position:relative;height:24px;background:var(--panel);border:1px solid var(--hair2);border-radius:6px;background-image:repeating-linear-gradient(90deg,transparent 0,transparent 9.9%,var(--hair2) 10%,var(--hair2) 10.1%)}
 .swim .bar{position:absolute;top:3px;height:18px;border-radius:4px;font-size:10.5px;color:#0c1112;display:flex;align-items:center;padding:0 6px;white-space:nowrap;overflow:hidden}
 .swim .gate{position:absolute;top:0;color:var(--copper);font-size:16px;transform:translateX(-50%)}
+.swim .mark{position:absolute;top:0;line-height:24px;font-size:13px;transform:translateX(-50%);white-space:nowrap}
+.swim .anno{position:absolute;top:3px;line-height:18px;font-size:10px;color:var(--dim);white-space:nowrap}
 .swim .axis .track{height:auto;background:none;border:none;background-image:none}
 .swim .axis .tick{position:absolute;top:0;transform:translateX(-50%);font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--dim);white-space:nowrap}
 /* sparkline + small multiples */
@@ -237,7 +239,34 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 /* first-visit discoverability bubble near the Review toggle */
 .rev-hint{position:fixed;left:96px;bottom:20px;z-index:61;background:var(--copper);color:#0c1112;border-radius:7px;padding:6px 10px;font-size:12px;font-weight:600;box-shadow:var(--shadow);animation:rev-bob 1.4s ease-in-out infinite}
 @keyframes rev-bob{0%,100%{transform:translateX(0)}50%{transform:translateX(-4px)}}
-@media print{.rev-bar,.toggle,.rev-orphans,.rev-hint{display:none}}
+/* review comments rail — surfaces the note TEXT (not just a margin glyph) in the
+   right gutter; each row scroll-jumps to its anchored element. */
+.rev-rail{position:fixed;top:64px;right:18px;z-index:55;width:266px;max-height:calc(100vh - 100px);overflow-y:auto;background:var(--panel);border:1px solid var(--hair);border-radius:10px;padding:10px 12px;box-shadow:var(--shadow)}
+.rev-rail-h{font-family:"JetBrains Mono",monospace;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.rev-rail-n{background:var(--panel2);border:1px solid var(--hair2);border-radius:8px;padding:0 6px;font-size:10.5px;color:var(--faint)}
+.rev-rail-empty{color:var(--faint);font-size:12px;line-height:1.5}
+.rev-rail-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.rev-rail-item{display:flex;gap:8px;padding:7px 8px;background:var(--bg);border:1px solid var(--hair2);border-left:3px solid var(--hair);border-radius:7px;cursor:pointer}
+.rev-rail-item:hover{border-color:var(--hair);background:var(--panel2)}
+.rev-rail-item[data-status="approve"]{border-left-color:var(--sage)} .rev-rail-item[data-status="approve"] .rev-rail-glyph{color:var(--sage)}
+.rev-rail-item[data-status="request-change"]{border-left-color:var(--amber)} .rev-rail-item[data-status="request-change"] .rev-rail-glyph{color:var(--amber)}
+.rev-rail-item[data-status="flag"]{border-left-color:var(--red)} .rev-rail-item[data-status="flag"] .rev-rail-glyph{color:var(--red)}
+.rev-rail-item[data-status="comment"]{border-left-color:var(--copper)} .rev-rail-item[data-status="comment"] .rev-rail-glyph{color:var(--copper)}
+.rev-rail-glyph{flex:none;font-size:12px;line-height:1.4;color:var(--dim)}
+.rev-rail-body{min-width:0;flex:1}
+.rev-rail-sec{display:flex;align-items:center;gap:6px;margin-bottom:3px}
+.rev-rail-sec-t{flex:1;min-width:0;font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rev-rail-note{font-size:12.5px;color:var(--ink);line-height:1.45;overflow-wrap:anywhere}
+.rev-rail-note.muted{color:var(--dim)}
+.rev-rail-tag{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair2);color:var(--dim);text-transform:uppercase;letter-spacing:.02em}
+.rev-rail-tag.unsent{color:var(--copper);border-color:var(--copper)}
+.rev-rail-tag.addressed,.rev-rail-tag.verified{color:var(--sage);border-color:var(--sage)}
+.rev-rail-tag.wontfix{color:var(--faint)}
+.rev-flash{animation:rev-flash 1.2s ease-out}
+@keyframes rev-flash{0%{background:var(--amber)}100%{background:transparent}}
+/* narrow viewports: the fixed rail would cover the prose, so drop it into flow */
+@media(max-width:1400px){.rev-rail{position:static;width:auto;max-height:none;margin:24px 16px 0;right:auto;top:auto}}
+@media print{.rev-bar,.toggle,.rev-orphans,.rev-hint,.rev-rail{display:none}}
 
 /* partition maps — partition-bar (proportional) + partition-map (ordered, log rail).
    Pure-CSS: staggered grow-in entrance, hover lift/brighten, and a hover tooltip
@@ -319,7 +348,7 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .vsw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:7px;vertical-align:middle;flex:none}
 /* donut */
 .donut{margin:14px 0}
-.donut figcaption,.radar figcaption,.quad figcaption,.tmap figcaption,.sankey figcaption,.chord figcaption{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);margin-bottom:8px}
+.donut figcaption,.radar figcaption,.quad figcaption,.tmap figcaption,.sankey figcaption,.chord figcaption,.linec figcaption{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);margin-bottom:8px}
 .donut-body{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
 .donut-svg{width:140px;height:140px;flex:none}
 .donut-ctr{fill:var(--ink);font-family:"Space Grotesk",sans-serif;font-size:18px;font-weight:600}
@@ -344,6 +373,20 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .quad-pt{stroke:var(--bg);stroke-width:1.5}
 .quad-lab{fill:var(--ink);font-size:11px}
 .quad-axl{fill:var(--dim);font-family:"JetBrains Mono",monospace;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em}
+/* line chart */
+.linec{margin:14px 0}
+.linec-svg{width:100%;max-width:560px;height:auto;display:block}
+.linec-axis{stroke:var(--hair2);stroke-width:1}
+.linec-tick{stroke:var(--hair2);stroke-width:1}
+.linec-tlab{fill:var(--dim);font-family:"JetBrains Mono",monospace;font-size:9.5px}
+.linec-axl{fill:var(--dim);font-family:"JetBrains Mono",monospace;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em}
+.linec-thresh{stroke-width:1;stroke-dasharray:3 4;opacity:.85}
+.linec-thlab{font-family:"JetBrains Mono",monospace;font-size:9.5px;opacity:.9}
+.linec-series{fill:none;stroke-width:1.8;stroke-linejoin:round;stroke-linecap:round}
+.linec-dot{stroke:var(--bg);stroke-width:1}
+.linec-note{font-family:"JetBrains Mono",monospace;font-size:9.5px}
+.linec-leg{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-wrap:wrap;gap:6px 16px}
+.linec-leg li{display:flex;align-items:center;font-size:12.5px;color:var(--ink)}
 /* treemap */
 .tmap{margin:14px 0}
 .tmap-svg{width:100%;max-width:460px;height:auto;border-radius:8px;overflow:hidden}

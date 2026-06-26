@@ -24,6 +24,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// planReviewDefaultTimeout is the idle window before a review session closes.
+// Shared with `ox plan render --open <slug>`, which launches this same loop.
+const planReviewDefaultTimeout = 30 * time.Minute
+
 // plan_review.go implements `ox plan review <slug>` — the human↔agent review
 // LOOP. It serves the plan on an ephemeral localhost server (this process owns
 // the port — no shared-daemon ambiguity) and stays up across rounds: the human
@@ -253,6 +257,7 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 			return http.StatusInternalServerError, err
 		}
 		commitPlanBestEffort(gitRoot, planDir)
+		enqueuePlanFeedbackTask(gitRoot, planDir, slug, len(set.Items))
 		select {
 		case rounds <- len(set.Items):
 		default:
@@ -450,6 +455,6 @@ func randomToken() (string, error) {
 func init() {
 	planReviewCmd.Flags().String("file", "", "review an unsaved draft markdown (saved to the ledger first); used when no <slug> is given")
 	planReviewCmd.Flags().Bool("no-serve", false, "render a static file + clipboard export instead of serving")
-	planReviewCmd.Flags().Duration("timeout", 30*time.Minute, "idle timeout — closes the session after this long with no activity")
+	planReviewCmd.Flags().Duration("timeout", planReviewDefaultTimeout, "idle timeout — closes the session after this long with no activity")
 	planCmd.AddCommand(planReviewCmd)
 }

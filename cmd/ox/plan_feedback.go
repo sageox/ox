@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"time"
 
+	"github.com/sageox/ox/internal/agenttask"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/plan"
 	"github.com/spf13/cobra"
@@ -106,12 +108,45 @@ func runPlanFeedbackApply(cmd *cobra.Command, slug, from string) error {
 	if cerr := commitPlanToLedger(gitRoot, info.Dir); cerr != nil {
 		cli.PrintHint("feedback saved locally; ledger commit deferred: " + cerr.Error())
 	}
+	enqueuePlanFeedbackTask(gitRoot, info.Dir, slug, len(set.Items))
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Applied %d feedback item(s) to %s\n\n", len(set.Items), cli.StyleFile.Render(path))
 	if _, derr := printPlanReviewDigest(cmd, info.Dir); derr != nil {
 		return derr
 	}
 	return nil
+}
+
+// enqueuePlanFeedbackTask notifies the AI coworker that authored a plan that new
+// human review feedback arrived, by enqueuing a `plan-feedback` agent-task into
+// the project's task queue. The task carries NO instructions — only its kind and
+// the plan slug in the payload — so the coworker acts via the fixed agent-task
+// protocol (read `ox plan feedback show <slug>`, address, resolve), never from
+// task text. Routed to the authoring agent TYPE (the queue targets a type, not an
+// instance) and deduped per (agent, plan) so repeated rounds don't pile up.
+// Best-effort: an unlinked plan, a missing queue, or a dedup hit is a silent
+// no-op — it never blocks the feedback that already landed in the ledger.
+func enqueuePlanFeedbackTask(gitRoot, planDir, slug string, items int) {
+	if gitRoot == "" || planDir == "" || slug == "" {
+		return
+	}
+	meta, err := plan.LoadMeta(planDir)
+	if err != nil || meta.Provenance == nil || meta.Provenance.AgentID == "" {
+		return // no authoring coworker recorded → nobody to notify
+	}
+	prov := meta.Provenance
+	title := fmt.Sprintf("Review feedback on plan %q (%d item(s) this round)", slug, items)
+	if _, err := agenttask.Enqueue(gitRoot, &agenttask.Task{
+		Title:       title,
+		Kind:        agenttask.KindPlanFeedback,
+		Priority:    30, // above routine chores: a human is waiting on the response
+		Source:      "plan-review",
+		TargetAgent: prov.AgentType, // type-level routing; "" = any coworker
+		DedupKey:    "plan-feedback:" + prov.AgentID + ":" + slug,
+		Payload:     map[string]string{"plan_slug": slug},
+	}); err != nil {
+		slog.Debug("plan feedback: enqueue notify task failed", "error", err, "slug", slug)
+	}
 }
 
 func runPlanFeedbackShow(cmd *cobra.Command, slug string, jsonOut bool) error {

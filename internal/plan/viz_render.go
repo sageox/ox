@@ -43,6 +43,7 @@ var vizRenderers = map[string]func([]byte) (string, error){
 	"treemap":             renderTreemap,
 	"sankey":              renderSankey,
 	"chord":               renderChord,
+	"line-chart":          renderLineChart,
 }
 
 // RenderViz renders one parameterized pattern from its JSON data into an HTML

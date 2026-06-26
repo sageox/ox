@@ -78,8 +78,8 @@ stateDiagram-v2
 ```
 
 ## swimlane-timeline
-use: phases, rollout, or relative-effort sequencing across workstreams (NOT calendar dates) — a "build sequence" showing what's foundational, what unblocks the goal, and what's deferred to scale.
-why: lanes + bars show what runs when and in parallel; the robust default for "when, in what order, how long". Add a labeled gate (◆) for the milestone that matters, a bottom axis of phase columns, and a one-line caption stating the unit — that's what turns a bar chart into an at-a-glance build plan.
+use: phases, rollout, or relative-effort sequencing across workstreams (NOT calendar dates) — a "build sequence" showing what's foundational, what unblocks the goal, and what's deferred to scale. Also a before/after comparison of how a lifecycle behaves over time — e.g. a timeout/timer model with resets (the "two-knob clock"): one lane per scenario, abutting timer-span bars, and ↺/✂ event markers.
+why: lanes + bars show what runs when and in parallel; the robust default for "when, in what order, how long". Add a labeled gate (◆) for the milestone that matters, a bottom axis of phase columns, and a one-line caption stating the unit — that's what turns a bar chart into an at-a-glance build plan. For a comparison, give each scenario its own lane and use a `.mark` for a point event (↺ reset, ✂ kill, → continues) and an `.anno` for a one-line per-lane caption.
 ```html
 <div class="swim">
   <div class="lane"><span class="lane-name">Foundation</span><div class="track"><span class="bar" style="left:0;width:18%;background:var(--copper)">measure</span><span class="bar" style="left:20%;width:14%;background:var(--sage)">fix pool</span></div></div>
@@ -88,6 +88,17 @@ why: lanes + bars show what runs when and in parallel; the robust default for "w
   <div class="lane axis"><span class="lane-name"></span><div class="track"><span class="tick" style="left:9%">measure</span><span class="tick" style="left:27%">pool fixed</span><span class="tick" style="left:47%">claim &lt;1s ◆</span><span class="tick" style="left:66%">deep pool</span><span class="tick" style="left:85%">100k scale</span></div></div>
 </div>
 <p class="dim">Relative effort, not calendar. ◆ = the gate where the goal becomes meetable.</p>
+```
+```html
+<!-- before/after comparison: a timeout/timer lifecycle with resets (the "two-knob clock") -->
+<div class="swim">
+  <div class="lane"><span class="lane-name">Before</span><div class="track"><span class="bar" style="left:0;width:60%;background:var(--red)">one run · 6h cap</span><span class="mark" style="left:62%;color:var(--red)">✂</span><span class="anno" style="left:64%;color:var(--red)">blank · seq → 0</span></div></div>
+  <div class="lane"><span class="lane-name">After · healthy</span><div class="track"><span class="bar" style="left:0;width:30%;background:var(--sage)">run timer</span><span class="mark" style="left:31%">↺</span><span class="bar" style="left:33%;width:30%;background:var(--sage)">run timer</span><span class="mark" style="left:64%">↺</span><span class="bar" style="left:66%;width:30%;background:var(--sage)">run timer</span></div></div>
+  <div class="lane axis"><span class="lane-name"></span><div class="track"><span class="anno" style="left:0">renderer adopted across each ↺ · lives indefinitely →</span></div></div>
+  <div class="lane"><span class="lane-name">After · wedged</span><div class="track"><span class="bar" style="left:0;width:50%;background:var(--amber)">stuck run · run timer 4h</span><span class="anno" style="left:52%;color:var(--amber)">wfid clears · re-cast works</span></div></div>
+  <div class="lane axis"><span class="lane-name"></span><div class="track"><span class="tick" style="left:0">0h</span><span class="tick" style="left:25%">2h</span><span class="tick" style="left:50%">4h</span><span class="tick" style="left:75%">6h</span><span class="tick" style="left:100%">8h</span></div></div>
+</div>
+<p class="dim">One lane per scenario · ↺ reset, ✂ kill · the healthy run refreshes before its timer fires; the wedged run can't outlive it.</p>
 ```
 
 ## gantt
@@ -378,4 +389,14 @@ param: {"title":"module coupling","labels":["api","db","auth","ui"],"matrix":[[0
 <!-- prefer the param renderer: ox plan viz render chord --data chord.json
      ox sizes each node arc by its total coupling and each chord by pairwise strength. -->
 <figure class="chord"><div class="chord-body"><svg class="chord-svg" viewBox="0 0 260 260"><path class="chord-arc" d="M130 22 A108 108 0 0 1 226 86 L214 92 A96 96 0 0 0 130 34 Z" style="fill:var(--sage)"/></svg></div></figure>
+```
+
+## line-chart
+use: a quantity over a continuous axis — a trend, growth curve, or latency/throughput over time; especially a before-vs-after comparison, or a value that climbs toward a limit and resets on a cadence (a sawtooth: a bounded history/buffer/log). Reach for it when "how does it move over time, and where's the ceiling" is the question.
+why: axes plus a dashed threshold line make the limit and the headroom explicit, and overlaid series (each with its own line dash) put two regimes side by side — "before: climbs to the wall and gets cut; after: sawtooths safely under it" — in one read; a sparkline shows a trend but has no axis, no threshold, and no comparison.
+param: {"title":"workflow history growth","x_label":"hours","y_label":"history events","x_max":8,"y_max":20000,"threshold":{"at":8000,"label":"8k cap","color":"amber"},"x_ticks":[{"at":0,"label":"0h"},{"at":2,"label":"2h"},{"at":4,"label":"4h"},{"at":6,"label":"6h"},{"at":8,"label":"8h"}],"y_ticks":[{"at":8000,"label":"8k"},{"at":20000,"label":"20k"}],"series":[{"label":"before — unbounded","color":"red","marker":true,"points":[{"x":0,"y":0},{"x":6,"y":20000,"note":"✂ 6h cap"}]},{"label":"after — reset every 8k","color":"sage","marker":true,"points":[{"x":0,"y":0},{"x":2.5,"y":8000},{"x":2.5,"y":1000,"note":"↺"},{"x":5,"y":8000},{"x":5,"y":1000,"note":"↺"},{"x":7.5,"y":8000}]}]}
+```html
+<!-- prefer the param renderer: ox plan viz render line-chart --data line.json
+     ox scales both axes, projects each point to pixels, places the threshold, and draws the legend. -->
+<figure class="linec"><svg class="linec-svg" viewBox="0 0 300 224"><line class="linec-axis" x1="52" y1="14" x2="52" y2="190"/><line class="linec-axis" x1="52" y1="190" x2="288" y2="190"/><line class="linec-thresh" x1="52" y1="119.6" x2="288" y2="119.6" style="stroke:var(--amber)"/><polyline class="linec-series" points="52,190 288,14" style="stroke:var(--red)"/><polyline class="linec-series" points="52,190 126,120 126,181 199,120 199,181 273,120" style="stroke:var(--sage)" stroke-dasharray="5 3"/></svg><ul class="linec-leg"><li><span class="vsw" style="background:var(--red)"></span>before</li><li><span class="vsw" style="background:var(--sage)"></span>after</li></ul></figure>
 ```

@@ -117,13 +117,29 @@ var planViewCmd = &cobra.Command{
 var planRenderCmd = &cobra.Command{
 	Use:   "render [slug]",
 	Short: "Render a plan to a self-contained HTML page",
-	Args:  cobra.MaximumNArgs(1),
+	Long: `Render a plan to a self-contained HTML page.
+
+No slug renders the plan from --file/stdin; a slug renders a saved plan with its
+review state. With --open on a SAVED plan, ox launches the live review loop
+(` + "`ox plan review`" + `) so your marks write straight back to the ledger
+instead of a dead-end file/clipboard export — pass --static for a read-only page.
+-o/--output and --artifact always write a static file.`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		out, _ := cmd.Flags().GetString("output")
 		open, _ := cmd.Flags().GetBool("open")
 		artifact, _ := cmd.Flags().GetBool("artifact")
+		static, _ := cmd.Flags().GetBool("static")
 		if len(args) == 1 {
-			return runPlanRenderSaved(cmd, args[0], out, open, artifact)
+			slug := args[0]
+			// A human opening a SAVED plan gets the live review LOOP by default, so
+			// marks write back to the ledger instead of a dead-end file/clipboard
+			// export. --static keeps the read-only page; --artifact / -o / headless
+			// are non-interactive and stay static.
+			if open && !static && !artifact && out == "" && !cli.IsHeadless() {
+				return runPlanReview(cmd, slug, false, planReviewDefaultTimeout)
+			}
+			return runPlanRenderSaved(cmd, slug, out, open, artifact)
 		}
 		file, _ := cmd.Flags().GetString("file")
 		return runPlanRenderFresh(cmd, file, out, open, artifact)
@@ -867,6 +883,7 @@ func init() {
 	planRenderCmd.Flags().String("file", "", "plan source file when no slug is given (default: stdin, else newest ~/.claude/plans/*.md)")
 	planRenderCmd.Flags().StringP("output", "o", "", "write the rendered HTML to this path")
 	planRenderCmd.Flags().Bool("open", false, "open the rendered HTML in your browser")
+	planRenderCmd.Flags().Bool("static", false, "with --open on a saved plan, open a read-only static page instead of launching the live review loop")
 	planRenderCmd.Flags().Bool("artifact", false, "render a strictly self-contained, CSP-safe page for publishing as a Claude Code Artifact (no external fonts/scripts, no review loop; enrichment links preserved)")
 
 	planListCmd.Flags().Bool("json", false, "emit the plan list as JSON (scripting path)")

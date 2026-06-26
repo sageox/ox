@@ -876,3 +876,154 @@ func renderChord(data []byte) (string, error) {
 	b.WriteString(`</svg></div></figure>`)
 	return b.String(), nil
 }
+
+// --- line chart (trend / time-series over a continuous axis, with an optional threshold) ---
+
+type lineChartData struct {
+	Title     string  `json:"title"`
+	XLabel    string  `json:"x_label"`
+	YLabel    string  `json:"y_label"`
+	XMax      float64 `json:"x_max"` // optional; defaults to the observed max x (floor 1)
+	YMax      float64 `json:"y_max"` // optional; defaults to the observed max y (floor 1)
+	Threshold *struct {
+		At    float64 `json:"at"`
+		Label string  `json:"label"`
+		Color string  `json:"color"`
+	} `json:"threshold"`
+	XTicks []struct {
+		At    float64 `json:"at"`
+		Label string  `json:"label"`
+	} `json:"x_ticks"`
+	YTicks []struct {
+		At    float64 `json:"at"`
+		Label string  `json:"label"`
+	} `json:"y_ticks"`
+	Series []struct {
+		Label  string `json:"label"`
+		Color  string `json:"color"`
+		Marker bool   `json:"marker"`
+		Points []struct {
+			X    float64 `json:"x"`
+			Y    float64 `json:"y"`
+			Note string  `json:"note"`
+		} `json:"points"`
+	} `json:"series"`
+}
+
+// renderLineChart plots one or more series of (x,y) points on a shared 0-based axis
+// pair, with an optional dashed threshold reference line and per-point notes. The
+// agent supplies the points (a sawtooth/reset is just data); ox owns the axis
+// scaling, the pixel projection, the threshold placement, and the legend. A
+// per-series stroke dash is the redundant, color-independent channel (grayscale/CVD).
+func renderLineChart(data []byte) (string, error) {
+	var d lineChartData
+	if err := json.Unmarshal(data, &d); err != nil {
+		return "", fmt.Errorf("line-chart data: %w", err)
+	}
+	if len(d.Series) == 0 {
+		return "", fmt.Errorf("line-chart: no series")
+	}
+	if len(d.Series) > 4 {
+		return "", fmt.Errorf("line-chart: max 4 series for legibility, got %d", len(d.Series))
+	}
+	xMax, yMax := d.XMax, d.YMax
+	for _, s := range d.Series {
+		if len(s.Points) < 2 {
+			return "", fmt.Errorf("line-chart: series %q needs >= 2 points to draw a line, got %d", s.Label, len(s.Points))
+		}
+		for _, p := range s.Points {
+			if p.X < 0 || p.Y < 0 {
+				return "", fmt.Errorf("line-chart: series %q has a negative coordinate (x/y must be >= 0)", s.Label)
+			}
+			if p.X > xMax {
+				xMax = p.X
+			}
+			if p.Y > yMax {
+				yMax = p.Y
+			}
+		}
+	}
+	if d.Threshold != nil && d.Threshold.At > yMax {
+		yMax = d.Threshold.At
+	}
+	if xMax <= 0 {
+		xMax = 1
+	}
+	if yMax <= 0 {
+		yMax = 1
+	}
+	// plot area inside the viewBox, leaving room for axis ticks + labels
+	const x0, y0, pw, ph = 52.0, 14.0, 236.0, 176.0
+	px := func(x float64) float64 { return x0 + (x/xMax)*pw }
+	py := func(y float64) float64 { return y0 + (1-y/yMax)*ph } // invert: up = high
+
+	var b strings.Builder
+	b.WriteString(`<figure class="linec">`)
+	if d.Title != "" {
+		b.WriteString(`<figcaption>` + esc(d.Title) + `</figcaption>`)
+	}
+	b.WriteString(`<svg class="linec-svg" viewBox="0 0 300 224" role="img" aria-label="` + esc(d.Title) + `">`)
+	// axes (left + bottom)
+	fmt.Fprintf(&b, `<line class="linec-axis" x1="%s" y1="%s" x2="%s" y2="%s"/>`, co(x0), co(y0), co(x0), co(y0+ph))
+	fmt.Fprintf(&b, `<line class="linec-axis" x1="%s" y1="%s" x2="%s" y2="%s"/>`, co(x0), co(y0+ph), co(x0+pw), co(y0+ph))
+	// y ticks + labels
+	for _, t := range d.YTicks {
+		yy := py(t.At)
+		fmt.Fprintf(&b, `<line class="linec-tick" x1="%s" y1="%s" x2="%s" y2="%s"/>`, co(x0-3), co(yy), co(x0), co(yy))
+		fmt.Fprintf(&b, `<text class="linec-tlab" x="%s" y="%s" text-anchor="end">%s</text>`, co(x0-6), co(yy+3), esc(t.Label))
+	}
+	// x ticks + labels
+	for _, t := range d.XTicks {
+		xx := px(t.At)
+		fmt.Fprintf(&b, `<line class="linec-tick" x1="%s" y1="%s" x2="%s" y2="%s"/>`, co(xx), co(y0+ph), co(xx), co(y0+ph+3))
+		fmt.Fprintf(&b, `<text class="linec-tlab" x="%s" y="%s" text-anchor="middle">%s</text>`, co(xx), co(y0+ph+14), esc(t.Label))
+	}
+	// threshold reference line (dashed) — the limit the series is measured against
+	if d.Threshold != nil {
+		ty := py(d.Threshold.At)
+		col := colorVar(d.Threshold.Color)
+		fmt.Fprintf(&b, `<line class="linec-thresh" x1="%s" y1="%s" x2="%s" y2="%s" style="stroke:%s"/>`, co(x0), co(ty), co(x0+pw), co(ty), col)
+		if d.Threshold.Label != "" {
+			fmt.Fprintf(&b, `<text class="linec-thlab" x="%s" y="%s" text-anchor="end" style="fill:%s">%s</text>`, co(x0+pw), co(ty-3), col, esc(d.Threshold.Label))
+		}
+	}
+	// series polylines — distinct stroke dash per series so the regimes stay
+	// distinguishable in grayscale / under color-vision deficiency
+	dashes := []string{"", "5 3", "1.5 3", "6 2 1 2"}
+	for si, s := range d.Series {
+		col := paletteColor(s.Color, si)
+		pts := make([]string, 0, len(s.Points))
+		for _, p := range s.Points {
+			pts = append(pts, co(px(p.X))+","+co(py(p.Y)))
+		}
+		dash := ""
+		if dd := dashes[si%len(dashes)]; dd != "" {
+			dash = ` stroke-dasharray="` + dd + `"`
+		}
+		fmt.Fprintf(&b, `<polyline class="linec-series" points="%s" style="stroke:%s"%s/>`, strings.Join(pts, " "), col, dash)
+		for _, p := range s.Points {
+			ptx, pty := px(p.X), py(p.Y)
+			if s.Marker {
+				fmt.Fprintf(&b, `<circle class="linec-dot" cx="%s" cy="%s" r="2.6" style="fill:%s"/>`, co(ptx), co(pty), col)
+			}
+			if strings.TrimSpace(p.Note) != "" {
+				fmt.Fprintf(&b, `<text class="linec-note" x="%s" y="%s" text-anchor="middle" style="fill:%s">%s</text>`, co(ptx), co(pty-6), col, esc(p.Note))
+			}
+		}
+	}
+	// axis labels
+	if d.XLabel != "" {
+		fmt.Fprintf(&b, `<text class="linec-axl" x="%s" y="220" text-anchor="middle">%s</text>`, co(x0+pw/2), esc(d.XLabel))
+	}
+	if d.YLabel != "" {
+		fmt.Fprintf(&b, `<text class="linec-axl" x="13" y="%s" text-anchor="middle" transform="rotate(-90 13 %s)">%s</text>`, co(y0+ph/2), co(y0+ph/2), esc(d.YLabel))
+	}
+	b.WriteString(`</svg>`)
+	// legend — color-independent read (one entry per series)
+	b.WriteString(`<ul class="linec-leg">`)
+	for si, s := range d.Series {
+		fmt.Fprintf(&b, `<li><span class="vsw" style="background:%s"></span>%s</li>`, paletteColor(s.Color, si), esc(s.Label))
+	}
+	b.WriteString(`</ul></figure>`)
+	return b.String(), nil
+}

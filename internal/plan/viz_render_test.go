@@ -155,6 +155,7 @@ func TestVizCatalog_ParamPatternsRenderable(t *testing.T) {
 		"treemap":             `{"items":[{"label":"a","size":1}]}`,
 		"sankey":              `{"nodes":[{"name":"a"},{"name":"b"}],"links":[{"from":"a","to":"b","value":1}]}`,
 		"chord":               `{"labels":["a","b"],"matrix":[[0,1],[1,0]]}`,
+		"line-chart":          `{"series":[{"label":"a","points":[{"x":0,"y":0},{"x":1,"y":1}]}]}`,
 	}
 	for _, p := range VizCatalog() {
 		if p.Param == "" {

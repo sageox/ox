@@ -84,6 +84,7 @@
     renderOrphans(orphans);
     var n = Object.keys(marks).length;
     countEl.textContent = n ? (n + ' unsent') : '';
+    renderRail();
   }
 
   var orphanBar;
@@ -101,6 +102,65 @@
     orphanBar.querySelector('.rev-orphans-x').onclick = function () { orphanBar.remove(); orphanBar = null; };
   }
   function esc(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+
+  // --- comments rail: surface the note TEXT in the right gutter (not just a
+  // margin glyph), each row scroll-jumping to its anchored element on click ---
+  var rail;
+  function flashEl(el) {
+    el.classList.add('rev-flash');
+    setTimeout(function () { el.classList.remove('rev-flash'); }, 1200);
+  }
+  function railRows() {
+    // document order, so the rail reads top-to-bottom with the plan; each row
+    // carries its live element for scroll-to.
+    var rows = [];
+    document.querySelectorAll(SELECTOR).forEach(function (el) {
+      var a = anchorFor(el), m = marks[a], c = committed[a];
+      if (!m && !c) return;
+      rows.push({
+        el: el,
+        status: m ? m.status : c.status,
+        note: m ? m.note : (c ? c.note : ''),
+        section: (m && m.section) || (c && c.section) || headingOf(el),
+        label: (m && m.label) || (c && c.label) || labelFor(el),
+        state: c ? c.state : '',
+        unsent: !!m
+      });
+    });
+    return rows;
+  }
+  function renderRail() {
+    if (!rail) { rail = document.createElement('aside'); rail.className = 'rev-rail'; document.body.appendChild(rail); }
+    var rows = railRows();
+    // hidden when there's nothing to read and we're not actively reviewing.
+    if (!on && !rows.length) { rail.style.display = 'none'; rail.innerHTML = ''; return; }
+    rail.style.display = '';
+    if (!rows.length) {
+      rail.innerHTML = '<div class="rev-rail-h">Comments</div><div class="rev-rail-empty">Click any section, risk, or row to leave a comment.</div>';
+      return;
+    }
+    var html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + '</span></div><ul class="rev-rail-list">';
+    rows.forEach(function (r, i) {
+      var tag = '';
+      if (r.unsent) tag = '<span class="rev-rail-tag unsent">unsent</span>';
+      else if (r.state && r.state !== 'open') tag = '<span class="rev-rail-tag ' + esc(r.state) + '">' + esc(r.state) + '</span>';
+      var body = r.note ? '<div class="rev-rail-note">' + esc(r.note) + '</div>'
+        : '<div class="rev-rail-note muted">' + esc(r.label) + '</div>';
+      html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(r.status) + '">' +
+        '<span class="rev-rail-glyph">' + glyphFor(r.status) + '</span>' +
+        '<div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(r.section || '(plan)') + '</span>' + tag + '</div>' + body + '</div></li>';
+    });
+    html += '</ul>';
+    rail.innerHTML = html;
+    rail.querySelectorAll('.rev-rail-item').forEach(function (li) {
+      li.onclick = function () {
+        var r = rows[+li.getAttribute('data-i')];
+        if (!r || !r.el) return;
+        r.el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        flashEl(r.el);
+      };
+    });
+  }
 
   var pop;
   function closePop() {
@@ -198,6 +258,7 @@
     if (!on) closePop();
     try { localStorage.setItem('ox-plan-rev-seen', '1'); } catch (e) {}
     if (hintBubble) { hintBubble.remove(); hintBubble = null; }
+    renderRail();
   };
   bar.querySelector('.rev-submit').onclick = submit;
   if (live) bar.querySelector('.rev-approve').onclick = approve;
