@@ -297,6 +297,9 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 			return http.StatusInternalServerError, err
 		}
 		commitPlanBestEffort(gitRoot, planDir)
+		// a reopen is a fresh open item — re-notify, so feedback isn't stranded if
+		// the authoring coworker's session already ended between rounds.
+		enqueuePlanFeedbackTask(gitRoot, planDir, slug, 1)
 		select {
 		case rounds <- 1:
 		default:

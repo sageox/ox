@@ -690,19 +690,25 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 }
 
 // openReviewCount returns the number of OPEN, actionable review items for a plan
-// dir (approvals don't count). Fail-open: 0 on any read error.
+// dir (approvals don't count). Thin delegate to the ledger-side counter so the
+// list table and the discovery aggregator can't drift.
 func openReviewCount(planDir string) int {
-	items, err := plan.AssembleReview(planDir)
+	return plan.CountOpenFeedback(planDir)
+}
+
+// countOpenPlanFeedback returns how many saved plans have open human review
+// feedback — the count `ox agent prime` surfaces so a NEW session (any agent)
+// discovers waiting feedback even when the push task missed. Best-effort: 0 on
+// any error (outside a project, no ledger, unreadable plans).
+func countOpenPlanFeedback(gitRoot string) int {
+	if gitRoot == "" {
+		return 0
+	}
+	plans, err := plan.OpenFeedbackPlans(gitRoot)
 	if err != nil {
 		return 0
 	}
-	n := 0
-	for _, it := range items {
-		if it.Open && it.Status != plan.FeedbackApprove {
-			n++
-		}
-	}
-	return n
+	return len(plans)
 }
 
 // reviewMark renders the open-review count for the list table.

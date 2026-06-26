@@ -250,6 +250,28 @@ func TestOutputAgentPrimeXML_PRAttribution_UsesCorrectField(t *testing.T) {
 	}
 }
 
+// TestOutputAgentPrimeXML_SurfacesOpenPlanFeedback verifies a new session learns
+// about open human review feedback at prime — the PULL discovery path so feedback
+// isn't lost when the push task missed. A zero count emits nothing (no nag).
+func TestOutputAgentPrimeXML_SurfacesOpenPlanFeedback(t *testing.T) {
+	render := func(n int) string {
+		var buf bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&buf)
+		if _, err := outputAgentPrimeXML(cmd, agentPrimeOutput{AgentID: "a", Status: "fresh", OpenPlanFeedback: n}); err != nil {
+			t.Fatalf("outputAgentPrimeXML: %v", err)
+		}
+		return buf.String()
+	}
+	xml := render(2)
+	if !strings.Contains(xml, "open human review feedback") || !strings.Contains(xml, "ox plan feedback show") {
+		t.Errorf("prime must surface open feedback for a new session: %s", xml)
+	}
+	if strings.Contains(render(0), "open human review feedback") {
+		t.Error("zero open feedback must not surface an action (no nag)")
+	}
+}
+
 func TestOutputAgentPrimeXML_PRAttribution_DifferentValues(t *testing.T) {
 	// ensures PR line renders output.Attribution.PR, not output.Attribution.Commit
 	var buf bytes.Buffer

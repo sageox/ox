@@ -361,3 +361,57 @@ func FeedbackDigest(items []MergedItem) string {
 	}
 	return b.String()
 }
+
+// CountOpenFeedback returns the number of OPEN, actionable review items for a
+// plan dir — approvals don't count (they close, not open, the loop). Fail-open:
+// 0 on any read error, so a discovery surface never breaks on one bad plan.
+func CountOpenFeedback(planDir string) int {
+	items, err := AssembleReview(planDir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, it := range items {
+		if it.Open && it.Status != FeedbackApprove {
+			n++
+		}
+	}
+	return n
+}
+
+// OpenFeedbackSummary is one saved plan with unaddressed human review feedback
+// waiting — the unit a discovery surface (ox plan list, ox agent prime) lists so
+// the feedback is findable even when the push notification missed.
+type OpenFeedbackSummary struct {
+	Slug      string `json:"slug"`
+	Topic     string `json:"topic,omitempty"`
+	Open      int    `json:"open"`                 // open, actionable items (approvals excluded)
+	AgentType string `json:"agent_type,omitempty"` // authoring coworker type, if recorded
+	Dir       string `json:"-"`                    // absolute plan dir (local only)
+}
+
+// OpenFeedbackPlans returns every saved plan in the project's ledger that has
+// open review feedback, newest first. It is the PULL half of the feedback loop:
+// the push (a plan-feedback agent-task) can miss — wrong agent type, a failed
+// queue write, an unlinked plan, or simply a human choosing to look — so this
+// reads the ledger directly and never depends on the queue. Fail-open: an
+// unreadable plan dir is skipped, not fatal.
+func OpenFeedbackPlans(gitRoot string) ([]OpenFeedbackSummary, error) {
+	plans, err := List(gitRoot)
+	if err != nil {
+		return nil, err
+	}
+	var out []OpenFeedbackSummary
+	for _, p := range plans {
+		open := CountOpenFeedback(p.Dir)
+		if open == 0 {
+			continue
+		}
+		s := OpenFeedbackSummary{Slug: p.Slug, Topic: p.Topic, Open: open, Dir: p.Dir}
+		if meta, err := readMeta(p.Dir); err == nil && meta.Provenance != nil {
+			s.AgentType = meta.Provenance.AgentType
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}

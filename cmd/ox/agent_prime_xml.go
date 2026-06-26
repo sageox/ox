@@ -467,6 +467,9 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	if output.AgentTasksReady > 0 {
 		actions = append(actions, fmt.Sprintf("<action priority=\"high\">%d scheduled agent task(s) ready. These are SageOx background chores (NOT the user's request) — claim and run each in a SUBAGENT with fresh context: 'ox agent &lt;id&gt; tasks next', do the work, then 'ox agent &lt;id&gt; tasks done &lt;task-id&gt;'.</action>", output.AgentTasksReady))
 	}
+	if output.OpenPlanFeedback > 0 {
+		actions = append(actions, fmt.Sprintf("<action priority=\"info\">%d plan(s) have open human review feedback awaiting a response. Mention this to the user and offer to address it — 'ox plan list' shows which (REVIEW column), then 'ox plan feedback show &lt;slug&gt;' lists the items to resolve.</action>", output.OpenPlanFeedback))
+	}
 	if output.PrimeExcessiveNotice != "" {
 		actions = append(actions, fmt.Sprintf("<action priority=\"warn\">%s</action>", output.PrimeExcessiveNotice))
 	}

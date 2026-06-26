@@ -2,10 +2,15 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 
+	"github.com/sageox/ox/internal/agenttask"
 	"github.com/sageox/ox/internal/plan"
 )
 
@@ -131,4 +136,105 @@ func TestBroadcaster_FansOut(t *testing.T) {
 	b.broadcast() // would block if broadcast didn't drop on full
 	b.unsubscribe(a)
 	b.unsubscribe(c)
+}
+
+// --- the live server's notify edge: a submit reaches the authoring coworker ---
+
+// newNotifyingReviewServer wires the live handler with a real project root (so
+// the notify path can enqueue) and a plan dir stamped with an authoring agent.
+func newNotifyingReviewServer(t *testing.T) (srv *httptest.Server, gitRoot, planDir string) {
+	t.Helper()
+	gitRoot = t.TempDir()
+	planDir = filepath.Join(gitRoot, "plandir")
+	if err := os.MkdirAll(planDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestPlanMeta(t, planDir, &plan.Provenance{AgentID: "Ox#5", AgentType: "claude-code"})
+	h := liveReviewHandler(gitRoot, "p", planDir, "http://x", "secret", newBroadcaster(), make(chan int, 8), make(chan struct{}, 1))
+	srv = httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	return srv, gitRoot, planDir
+}
+
+// TestReviewLoop_FeedbackEnqueuesAuthorTask verifies a submitted round notifies
+// the authoring coworker via a plan-feedback task carrying the slug.
+// Failure prevented: feedback lands in the ledger but never reaches the agent.
+func TestReviewLoop_FeedbackEnqueuesAuthorTask(t *testing.T) {
+	srv, gitRoot, _ := newNotifyingReviewServer(t)
+	if code := reviewPOST(t, srv.URL+"/feedback", "secret", `{"items":[{"anchor":"h1","status":"request-change","note":"x"}]}`); code != http.StatusOK {
+		t.Fatalf("submit: %d", code)
+	}
+	tasks := activeTasks(t, gitRoot)
+	if len(tasks) != 1 || tasks[0].Kind != agenttask.KindPlanFeedback || tasks[0].Payload["plan_slug"] != "p" {
+		t.Errorf("submit must enqueue a plan-feedback task for slug p, got %+v", tasks)
+	}
+}
+
+// TestReviewLoop_ReopenEnqueuesAuthorTask verifies reopening an item ALSO
+// re-notifies — feedback raised after the coworker's session ended must not strand.
+func TestReviewLoop_ReopenEnqueuesAuthorTask(t *testing.T) {
+	srv, gitRoot, _ := newNotifyingReviewServer(t)
+	if code := reviewPOST(t, srv.URL+"/reopen", "secret", `{"anchor":"h1","note":"again"}`); code != http.StatusOK {
+		t.Fatalf("reopen: %d", code)
+	}
+	if n := len(activeTasks(t, gitRoot)); n != 1 {
+		t.Errorf("reopen must enqueue a notify task, got %d", n)
+	}
+}
+
+// TestReviewLoop_FeedbackPersistsWhenNotifyIsNoop verifies the round is saved and
+// signaled even when there's no authoring coworker to notify (an unlinked plan):
+// the ledger write (step N-1) survives the notify (step N) being a no-op.
+func TestReviewLoop_FeedbackPersistsWhenNotifyIsNoop(t *testing.T) {
+	gitRoot := t.TempDir()
+	planDir := filepath.Join(gitRoot, "plandir")
+	if err := os.MkdirAll(planDir, 0o755); err != nil { // NO meta.json → unlinked
+		t.Fatal(err)
+	}
+	rounds := make(chan int, 4)
+	h := liveReviewHandler(gitRoot, "p", planDir, "http://x", "secret", newBroadcaster(), rounds, make(chan struct{}, 1))
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	if code := reviewPOST(t, srv.URL+"/feedback", "secret", `{"items":[{"anchor":"h1","status":"flag","note":"y"}]}`); code != http.StatusOK {
+		t.Fatalf("submit: %d", code)
+	}
+	if sets, _ := plan.LoadAllFeedback(planDir); len(sets) != 1 {
+		t.Errorf("round must persist even with no agent to notify, got %d", len(sets))
+	}
+	select {
+	case <-rounds:
+	default:
+		t.Error("round must still signal")
+	}
+	if agenttask.QueueExists(gitRoot) {
+		t.Error("an unlinked plan must not enqueue a task")
+	}
+}
+
+// TestReviewLoop_ConcurrentFeedbackDedupes verifies a burst of simultaneous
+// submits collapses to ONE active notify task (dedup is transactional) — the
+// coworker isn't flooded with duplicate chores.
+func TestReviewLoop_ConcurrentFeedbackDedupes(t *testing.T) {
+	srv, gitRoot, planDir := newNotifyingReviewServer(t)
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body := fmt.Sprintf(`{"items":[{"anchor":"h%d","status":"comment","note":"n"}]}`, i)
+			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/feedback", bytes.NewBufferString(body))
+			req.Header.Set("X-Review-Token", "secret")
+			if resp, err := http.DefaultClient.Do(req); err == nil {
+				resp.Body.Close()
+			}
+		}(i)
+	}
+	wg.Wait()
+	if n := len(activeTasks(t, gitRoot)); n != 1 {
+		t.Errorf("concurrent submits must dedup to one task, got %d", n)
+	}
+	if sets, _ := plan.LoadAllFeedback(planDir); len(sets) < 1 {
+		t.Errorf("submits must persist their rounds, got %d", len(sets))
+	}
 }

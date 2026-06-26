@@ -378,6 +378,10 @@ type Output struct {
 	// prime` at session start, so even agents without a per-prompt push hook
 	// (the mid-session channel, claude-code/codex) still learn about queued work.
 	AgentTasksReady int `json:"agent_tasks_ready,omitempty"`
+	// Saved plans with open human review feedback (the PULL discovery path): the
+	// count ox agent prime surfaces so ANY new session — not just the authoring
+	// coworker the push task targets — learns feedback is waiting to be addressed.
+	OpenPlanFeedback int `json:"open_plan_feedback,omitempty"`
 	// Observation recording directive (behavioral, not just a tool reference)
 	ObservationDirective string `json:"observation_directive,omitempty"` // proactive instruction to record observations via ox memory put
 	// Murmur directive (behavioral — set when murmuring: "auto")

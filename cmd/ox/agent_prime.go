@@ -506,6 +506,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// queue existing so a read never materializes the directory.
 	agentTasksReady := countReadyAgentTasks(projectRoot, agentType)
 
+	// Surface plans with open human review feedback (the PULL discovery path) so
+	// ANY new session learns feedback is waiting — independent of the push task,
+	// which can miss (wrong agent type, queue write failed, unlinked plan).
+	openPlanFeedback := countOpenPlanFeedback(projectRoot)
+
 	// build intent-to-command guidance for agent consumption
 	guidance := buildGuidance(agentID, projectRoot, teamCtx, ledgerStatus, agentType)
 	timing["guidance_build"] = time.Since(phaseStart).Milliseconds()
@@ -610,6 +615,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		NeedsDoctorAgent:   needsDoctorAgent,
 		DoctorHint:         doctorHint,
 		AgentTasksReady:    agentTasksReady,
+		OpenPlanFeedback:   openPlanFeedback,
 		HooksInstalled:     hooksInstalled,
 		CurrentUserName:    currentUserName,
 		CurrentUserAliases: currentUserAliases,

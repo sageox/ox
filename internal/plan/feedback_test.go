@@ -1,6 +1,8 @@
 package plan
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -128,6 +130,120 @@ func TestRenderHTML_CarriesReviewState(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("render missing %q", want)
 		}
+	}
+}
+
+// --- B. Pull discovery: which saved plans still owe a human response ---
+
+// savePlanWithFeedback saves a plan to the temp ledger and lays one feedback
+// round on it, returning the plan dir — a small fixture so the discovery tests
+// read like the loop they exercise.
+func savePlanWithFeedback(t *testing.T, gitRoot, topic string, prov *Provenance, items []FeedbackItem) string {
+	t.Helper()
+	meta := Meta{Topic: topic, CreatedAt: time.Now().UTC(), Provenance: prov}
+	dir, err := Save(gitRoot, Input{Raw: "# " + topic}, Result{}, nil, meta)
+	if err != nil {
+		t.Fatalf("save %q: %v", topic, err)
+	}
+	if len(items) > 0 {
+		if _, err := SaveFeedback(dir, FeedbackSet{Slug: Slugify(topic), Items: items}, time.Now()); err != nil {
+			t.Fatalf("feedback %q: %v", topic, err)
+		}
+	}
+	return dir
+}
+
+// TestOpenFeedbackPlans_ListsOnlyPlansWithOpenItems verifies the PULL discovery
+// path returns exactly the plans a human still owes a response on — open
+// request-changes/flags/comments — and omits all-approved, fully-resolved, and
+// feedback-free plans, carrying the authoring coworker type.
+// Failure prevented: the discovery surface nags about settled plans or, worse,
+// hides ones that need attention.
+func TestOpenFeedbackPlans_ListsOnlyPlansWithOpenItems(t *testing.T) {
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+	const gitRoot = "/any" // ledgerResolver is overridden by withLedger
+
+	savePlanWithFeedback(t, gitRoot, "Open plan", &Provenance{AgentID: "Ox#1", AgentType: "claude-code"},
+		[]FeedbackItem{{Anchor: "a1", Status: FeedbackRequestChange, Note: "fix this"}})
+	savePlanWithFeedback(t, gitRoot, "Approved plan", nil,
+		[]FeedbackItem{{Anchor: "b1", Status: FeedbackApprove}}) // approvals close, not open
+	cDir := savePlanWithFeedback(t, gitRoot, "Resolved plan", nil,
+		[]FeedbackItem{{Anchor: "c1", Status: FeedbackRequestChange, Note: "do x"}})
+	if err := AppendResolution(cDir, Resolution{Anchor: "c1", State: ResolutionAddressed, Commit: "sha"}, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	savePlanWithFeedback(t, gitRoot, "Quiet plan", nil, nil) // no feedback at all
+
+	open, err := OpenFeedbackPlans(gitRoot)
+	if err != nil {
+		t.Fatalf("OpenFeedbackPlans: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("want exactly 1 plan with open feedback, got %d: %+v", len(open), open)
+	}
+	if got := open[0]; got.Slug != "open-plan" || got.Open != 1 || got.AgentType != "claude-code" {
+		t.Errorf("surfaced summary wrong: %+v", got)
+	}
+}
+
+// TestOpenFeedbackPlans_ReRaisedCountsAsOpen verifies a resolved item the human
+// re-raised (reopen) re-surfaces — the verify loop must not bury a re-opened item.
+func TestOpenFeedbackPlans_ReRaisedCountsAsOpen(t *testing.T) {
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+	t0 := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	dir, err := Save("/any", Input{Raw: "# P"}, Result{}, nil, Meta{Topic: "Reopen plan", CreatedAt: t0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SaveFeedback(dir, FeedbackSet{Slug: "reopen-plan", Items: []FeedbackItem{{Anchor: "h1", Status: FeedbackRequestChange, Note: "v1"}}}, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendResolution(dir, Resolution{Anchor: "h1", State: ResolutionAddressed, Commit: "sha"}, t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if n := CountOpenFeedback(dir); n != 0 {
+		t.Fatalf("addressed item should be closed, open=%d", n)
+	}
+	// reopen: a later round re-raises h1
+	if _, err := SaveFeedback(dir, FeedbackSet{Slug: "reopen-plan", Items: []FeedbackItem{{Anchor: "h1", Status: FeedbackRequestChange, Note: "still broken"}}}, t0.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if n := CountOpenFeedback(dir); n != 1 {
+		t.Errorf("re-raised item must reopen, open=%d", n)
+	}
+	if open, _ := OpenFeedbackPlans("/any"); len(open) != 1 || open[0].Slug != "reopen-plan" {
+		t.Errorf("re-raised plan must surface in discovery, got %+v", open)
+	}
+}
+
+// TestOpenFeedbackPlans_FailOpenOnCorruptPlan verifies one unreadable plan dir
+// doesn't sink the whole discovery sweep — a healthy open plan still surfaces.
+// Failure prevented: a single corrupt feedback file blinds the human to ALL
+// pending feedback.
+func TestOpenFeedbackPlans_FailOpenOnCorruptPlan(t *testing.T) {
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+	savePlanWithFeedback(t, "/any", "Good plan", nil,
+		[]FeedbackItem{{Anchor: "g1", Status: FeedbackFlag, Note: "look here"}})
+	bad, err := Save("/any", Input{Raw: "# B"}, Result{}, nil, Meta{Topic: "Bad plan", CreatedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(bad, feedbackSubdir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bad, feedbackSubdir, "round-x.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	open, err := OpenFeedbackPlans("/any")
+	if err != nil {
+		t.Fatalf("discovery must not error on a corrupt plan: %v", err)
+	}
+	if len(open) != 1 || open[0].Slug != "good-plan" {
+		t.Errorf("good plan must still surface despite a corrupt sibling, got %+v", open)
 	}
 }
 
