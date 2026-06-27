@@ -82,11 +82,20 @@ func ValidatePATLiveness(ctx context.Context, creds *GitCredentials) PATLiveness
 
 	if err != nil {
 		sanitizedLower := strings.ToLower(sanitized)
-		// auth failures show as 401/403 in the git output
-		if strings.Contains(sanitizedLower, "401") ||
-			strings.Contains(sanitizedLower, "403") ||
+		// 401/403 alone are too weak a signal — a repo path, ref name, or DNS
+		// error message can contain "401" without being an auth failure. Only
+		// treat an HTTP status as rejection when it co-occurs with an error or
+		// denial keyword, so a non-auth failure isn't misreported as a revoked PAT.
+		httpAuthReject := (strings.Contains(sanitizedLower, "401") || strings.Contains(sanitizedLower, "403")) &&
+			(strings.Contains(sanitizedLower, "error") ||
+				strings.Contains(sanitizedLower, "unauthorized") ||
+				strings.Contains(sanitizedLower, "forbidden") ||
+				strings.Contains(sanitizedLower, "denied"))
+		// these phrases are unambiguous auth failures on their own
+		if httpAuthReject ||
 			strings.Contains(sanitizedLower, "authentication failed") ||
-			strings.Contains(sanitizedLower, "could not read username") {
+			strings.Contains(sanitizedLower, "could not read username") ||
+			strings.Contains(sanitizedLower, "invalid username or password") {
 			slog.Debug("PAT liveness: rejected", "output", sanitized)
 			return PATLivenessResult{Valid: false, Reason: "PAT rejected by server (revoked or invalid)"}
 		}
@@ -183,8 +192,12 @@ func writeAskpassScript(token string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// write a minimal script that echoes the token
-	_, err = fmt.Fprintf(f, "#!/bin/sh\necho '%s'\n", strings.ReplaceAll(token, "'", "'\\''"))
+	// write a minimal script that prints the token verbatim. printf '%s' is used
+	// instead of echo because POSIX echo (e.g. dash) may interpret backslash
+	// escapes in the token and mangle it; printf leaves the argument untouched.
+	// the token is single-quoted with '\'' escaping so its value can never break
+	// out of the quotes and execute as shell.
+	_, err = fmt.Fprintf(f, "#!/bin/sh\nprintf '%%s\\n' '%s'\n", strings.ReplaceAll(token, "'", "'\\''"))
 	if err != nil {
 		f.Close()
 		os.Remove(f.Name())

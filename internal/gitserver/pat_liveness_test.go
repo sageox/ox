@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/url"
 	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,6 +117,19 @@ func TestBuildProbeURL(t *testing.T) {
 		{
 			name:    "bare URL gets https scheme",
 			repoURL: "git.sageox.ai/team/repo.git",
+			want:    "https://oauth2@git.sageox.ai/team/repo.git",
+		},
+		{
+			// an API response that embeds a password in the repo URL must not
+			// leak through the probe — buildProbeURL replaces userinfo with the
+			// bare oauth2 username (token comes via GIT_ASKPASS, never the URL)
+			name:    "drops injected userinfo password",
+			repoURL: "https://attacker:secret@git.sageox.ai/team/repo.git",
+			want:    "https://oauth2@git.sageox.ai/team/repo.git",
+		},
+		{
+			name:    "replaces pre-existing username",
+			repoURL: "https://olduser@git.sageox.ai/team/repo.git",
 			want:    "https://oauth2@git.sageox.ai/team/repo.git",
 		},
 		{
@@ -260,4 +275,128 @@ func TestWriteAskpassScript(t *testing.T) {
 	content, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Contains(t, string(content), "test-token-123")
+}
+
+// TestWriteAskpassScript_EscapesAdversarialTokens verifies the askpass script
+// treats a token as inert data: a hostile token value can neither break out of
+// the single quotes to execute shell commands nor be mangled before it reaches
+// git. The script's escaping is the only thing standing between an attacker-
+// controlled (or simply weird) token and shell execution, so it gets exercised
+// with the full range of metacharacters.
+//
+// Failure prevented: a token containing shell metacharacters ('; $(), backticks,
+// pipes) injecting command execution into the liveness probe, or echo/printf
+// corrupting the token so a valid PAT is read as rejected.
+func TestWriteAskpassScript_EscapesAdversarialTokens(t *testing.T) {
+	tokens := []struct {
+		name  string
+		token string
+	}{
+		{"quote break then injection", `'; touch PWNED; echo '`},
+		{"command substitution", `$(touch PWNED)`},
+		{"backtick substitution", "`touch PWNED`"},
+		{"and operator", `tok && touch PWNED`},
+		{"pipe operator", `tok | tee PWNED`},
+		{"embedded single quote", `ab'cd`},
+		{"real newline", "line1\nline2"},
+		{"literal backslash n", `line1\nline2`},
+		{"variable expansion", `$HOME`},
+		{"braced variable", `${PATH}`},
+		{"surrounding whitespace", `  pad  `},
+	}
+
+	for _, tt := range tokens {
+		t.Run(tt.name, func(t *testing.T) {
+			// run the script with its working dir inside a clean temp dir so an
+			// injected `touch PWNED` would land here and be detectable
+			dir := t.TempDir()
+
+			path, err := writeAskpassScript(tt.token)
+			require.NoError(t, err)
+			defer os.Remove(path)
+
+			cmd := exec.Command("/bin/sh", path)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, "askpass script must run cleanly; output: %q", string(out))
+
+			// printf adds exactly one trailing newline — strip only that
+			got := strings.TrimSuffix(string(out), "\n")
+			assert.Equal(t, tt.token, got, "token must round-trip verbatim — no injection, no mangling")
+
+			// nothing should have been created in the working dir; a stray file
+			// means a metacharacter executed as a command
+			entries, err := os.ReadDir(dir)
+			require.NoError(t, err)
+			assert.Empty(t, entries, "no side-effect files: token must not execute as shell")
+		})
+	}
+}
+
+// TestValidatePATLiveness_NonAuthFailureNotMisreadAsRejected verifies a git
+// failure that merely contains a digit string like "401" (in a repo path or a
+// DNS error) is classified as a network skip, not a revoked PAT.
+//
+// Failure prevented: ox tells the user to re-run `ox login` for a perfectly
+// valid token because the server was unreachable and the URL happened to
+// contain "401".
+func TestValidatePATLiveness_NonAuthFailureNotMisreadAsRejected(t *testing.T) {
+	// non-auth failure (DNS) whose message coincidentally contains "401"
+	installFakeGit(t, `echo "fatal: unable to access 'https://git.sageox.ai/team/project-401-archive.git/': Could not resolve host: git.sageox.ai" >&2
+exit 128`)
+
+	creds := &GitCredentials{
+		Token: "valid-token",
+		Repos: map[string]RepoEntry{"team": {URL: "https://git.sageox.ai/team/repo.git"}},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	result := ValidatePATLiveness(ctx, creds)
+	assert.True(t, result.Skipped, "non-auth failure must skip, not reject; reason: %s", result.Reason)
+	assert.False(t, result.Valid)
+}
+
+// TestValidatePATLiveness_RealAuthFailureRejected guards the other side of the
+// tightened matcher: a genuine 401 from the git server must still be reported as
+// a rejected PAT, not silently skipped.
+//
+// Failure prevented: over-tightening the auth-failure matcher so a revoked token
+// looks like a transient network blip and the user is never told to re-login.
+func TestValidatePATLiveness_RealAuthFailureRejected(t *testing.T) {
+	installFakeGit(t, `echo "fatal: unable to access 'https://git.sageox.ai/team/repo.git/': The requested URL returned error: 401" >&2
+exit 128`)
+
+	creds := &GitCredentials{
+		Token: "revoked-token",
+		Repos: map[string]RepoEntry{"team": {URL: "https://git.sageox.ai/team/repo.git"}},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	result := ValidatePATLiveness(ctx, creds)
+	assert.False(t, result.Skipped, "real 401 must not be skipped; reason: %s", result.Reason)
+	assert.False(t, result.Valid, "real 401 must be reported as rejected")
+	assert.Contains(t, result.Reason, "rejected")
+}
+
+// installFakeGit puts a fake `git` binary (running the given /bin/sh script body)
+// at the front of PATH for the duration of the test, so liveness classification
+// can be exercised against specific exit codes and messages without a real
+// network call. Mirrors the inline pattern used by
+// TestValidatePATLiveness_CredentialHelperSuppressed.
+func installFakeGit(t *testing.T, scriptBody string) {
+	t.Helper()
+	fakeGit, err := os.CreateTemp("", "fake-git-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.Remove(fakeGit.Name()) })
+
+	_, err = fakeGit.WriteString("#!/bin/sh\n" + scriptBody + "\n")
+	require.NoError(t, err)
+	require.NoError(t, fakeGit.Close())
+	require.NoError(t, os.Chmod(fakeGit.Name(), 0700))
+
+	fakeDir := t.TempDir()
+	require.NoError(t, os.Symlink(fakeGit.Name(), fakeDir+"/git"))
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
 }
