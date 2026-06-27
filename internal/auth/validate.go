@@ -15,12 +15,20 @@ import (
 	"github.com/sageox/ox/internal/useragent"
 )
 
-// ValidateTokenServerSide checks if the server accepts the given access token
-// by hitting the /oauth2/userinfo endpoint. Returns nil on success, or an error
-// describing why the token was rejected.
+// ValidateTokenServerSide checks if the server accepts the given access token.
+// PATs (oxp_…) are validated via /api/v1/auth/me; OAuth/opaque access tokens via
+// /oauth2/userinfo. Returns nil on success, or an error describing the rejection.
 func ValidateTokenServerSide(ep, accessToken string) error {
 	ep = endpoint.NormalizeEndpoint(ep)
-	url := strings.TrimSuffix(ep, "/") + UserInfoEndpoint
+	// PATs (oxp_…) carry no OAuth identity, so /oauth2/userinfo 401s them with
+	// "Token not found". Validate them via /api/v1/auth/me — the introspection
+	// route that resolves apiKey-plugin tokens to a user. OAuth/opaque access
+	// tokens still validate via /oauth2/userinfo.
+	validatePath := UserInfoEndpoint
+	if strings.HasPrefix(accessToken, PATPrefix) {
+		validatePath = AuthMeEndpoint
+	}
+	url := strings.TrimSuffix(ep, "/") + validatePath
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -78,8 +86,8 @@ func ValidateTokenServerSide(ep, accessToken string) error {
 // Use for commands that gate real work: init, doctor, status.
 
 // IsAuthenticatedForEndpoint validates that the user has a working token for the
-// given endpoint by checking both local validity and server acceptance via
-// /oauth2/userinfo.
+// given endpoint by checking both local validity and server acceptance (via
+// /api/v1/auth/me for PATs, /oauth2/userinfo otherwise).
 func IsAuthenticatedForEndpoint(ep string) (bool, error) {
 	// local credential check first (fast-fail if no token)
 	token, err := EnsureValidTokenForEndpoint(ep, 0)
