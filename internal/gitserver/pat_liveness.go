@@ -82,15 +82,18 @@ func ValidatePATLiveness(ctx context.Context, creds *GitCredentials) PATLiveness
 
 	if err != nil {
 		sanitizedLower := strings.ToLower(sanitized)
-		// 401/403 alone are too weak a signal — a repo path, ref name, or DNS
-		// error message can contain "401" without being an auth failure. Only
-		// treat an HTTP status as rejection when it co-occurs with an error or
-		// denial keyword, so a non-auth failure isn't misreported as a revoked PAT.
-		httpAuthReject := (strings.Contains(sanitizedLower, "401") || strings.Contains(sanitizedLower, "403")) &&
-			(strings.Contains(sanitizedLower, "error") ||
-				strings.Contains(sanitizedLower, "unauthorized") ||
-				strings.Contains(sanitizedLower, "forbidden") ||
-				strings.Contains(sanitizedLower, "denied"))
+		// 401/403 alone are too weak a signal — a repo path, ref name, or DNS/TLS
+		// error message can contain "401" without being an auth failure. Prefer the
+		// unambiguous git/curl phrasing; fall back to a status code only when it
+		// co-occurs with an auth-specific denial word. A bare "error" is NOT enough:
+		// a non-auth failure can carry both "error" and a stray "401".
+		httpStatusReject := strings.Contains(sanitizedLower, "returned error: 401") ||
+			strings.Contains(sanitizedLower, "returned error: 403")
+		httpAuthReject := httpStatusReject ||
+			((strings.Contains(sanitizedLower, "401") || strings.Contains(sanitizedLower, "403")) &&
+				(strings.Contains(sanitizedLower, "unauthorized") ||
+					strings.Contains(sanitizedLower, "forbidden") ||
+					strings.Contains(sanitizedLower, "denied")))
 		// these phrases are unambiguous auth failures on their own
 		if httpAuthReject ||
 			strings.Contains(sanitizedLower, "authentication failed") ||

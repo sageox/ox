@@ -341,20 +341,42 @@ func TestWriteAskpassScript_EscapesAdversarialTokens(t *testing.T) {
 // valid token because the server was unreachable and the URL happened to
 // contain "401".
 func TestValidatePATLiveness_NonAuthFailureNotMisreadAsRejected(t *testing.T) {
-	// non-auth failure (DNS) whose message coincidentally contains "401"
-	installFakeGit(t, `echo "fatal: unable to access 'https://git.sageox.ai/team/project-401-archive.git/': Could not resolve host: git.sageox.ai" >&2
+	// non-auth git failures whose output coincidentally contains a "401"/"403"
+	// (in a repo path, or alongside a generic "error") must classify as a network
+	// skip — never a revoked PAT that sends the user back through `ox login`.
+	tests := []struct {
+		name      string
+		gitStderr string
+	}{
+		{
+			name:      "dns failure with 401 in repo path",
+			gitStderr: "fatal: unable to access 'https://git.sageox.ai/team/project-401-archive.git/': Could not resolve host: git.sageox.ai",
+		},
+		{
+			// the class CodeRabbit flagged: "401" in a path PLUS a bare "error"
+			// word must not be enough to reject — only an auth-specific signal is
+			name:      "tls failure with 401 in path and generic error word",
+			gitStderr: "fatal: unable to access 'https://git.sageox.ai/team/repo-401.git/': error: SSL certificate problem: unable to get local issuer certificate",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			installFakeGit(t, `echo "`+tt.gitStderr+`" >&2
 exit 128`)
 
-	creds := &GitCredentials{
-		Token: "valid-token",
-		Repos: map[string]RepoEntry{"team": {URL: "https://git.sageox.ai/team/repo.git"}},
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+			creds := &GitCredentials{
+				Token: "valid-token",
+				Repos: map[string]RepoEntry{"team": {URL: "https://git.sageox.ai/team/repo.git"}},
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
 
-	result := ValidatePATLiveness(ctx, creds)
-	assert.True(t, result.Skipped, "non-auth failure must skip, not reject; reason: %s", result.Reason)
-	assert.False(t, result.Valid)
+			result := ValidatePATLiveness(ctx, creds)
+			assert.True(t, result.Skipped, "non-auth failure must skip, not reject; reason: %s", result.Reason)
+			assert.False(t, result.Valid)
+		})
+	}
 }
 
 // TestValidatePATLiveness_RealAuthFailureRejected guards the other side of the
