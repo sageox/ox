@@ -16,6 +16,15 @@ func RunGit(ctx context.Context, repoPath string, args ...string) (string, error
 	if repoPath != "" {
 		cmdArgs = append(cmdArgs, "-C", repoPath)
 	}
+	// commit.gpgsign=false / tag.gpgsign=false: ox only ever commits its own
+	// machine-managed repos (ledgers, team contexts, murmurs) and always does
+	// so non-interactively. If the user's git config enables SSH/GPG commit
+	// signing with a passphrase-protected key, signing prompts on a TTY that
+	// the daemon and CLI fallbacks don't have, and the commit dies with
+	// "fatal: failed to write commit object" — silently wedging ledger sync.
+	// Overriding per-invocation makes ox's commits immune regardless of the
+	// repo's persisted config. Harmless no-op for non-commit subcommands.
+	cmdArgs = append(cmdArgs, "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false")
 	cmdArgs = append(cmdArgs, args...)
 
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)

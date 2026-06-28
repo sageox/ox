@@ -134,31 +134,70 @@ func readGitConfig(repoPath, key string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// MigrateLedgerCredentials performs the one-shot migration for a single
-// ledger: strip any embedded oauth2:TOKEN from the origin URL, then install
-// the ox credential helper for the resulting bare host. Idempotent — safe
-// to invoke on every daemon startup.
+// DisableCommitSigning forces commit and tag signing OFF in a single repo's
+// .git/config. ox-managed repos (ledgers, team contexts) are committed
+// non-interactively by the daemon and CLI; if they inherit a user's global
+// commit.gpgsign=true with an SSH/GPG signing key, every commit blocks on a
+// passphrase prompt that has no TTY to answer it and dies with
+// "fatal: failed to write commit object". The result is silent: sessions
+// stage but never commit, never push, never sync.
 //
-// Returns ok=true if the migration ran (either stripped or installed or
-// both); ok=false if there was nothing to do. The error result is reserved
-// for genuine failures (git command errors, malformed origin URLs).
+// Writing the override into the repo's LOCAL config (not --global) keeps the
+// user's own repos free to sign while guaranteeing ox-managed repos never do.
+// Idempotent: skips the write when both keys already read "false".
+func DisableCommitSigning(repoPath string) (changed bool, err error) {
+	for _, key := range []string{"commit.gpgsign", "tag.gpgsign"} {
+		// readGitConfig walks all config levels, so an inherited global
+		// "true" is what we compare against — a local "false" already in
+		// place reads back as "false" and we skip.
+		if current, rerr := readGitConfig(repoPath, key); rerr == nil && current == "false" {
+			continue
+		}
+		cmd := exec.Command("git", "-C", repoPath, "config", "--local", key, "false")
+		if output, cerr := cmd.CombinedOutput(); cerr != nil {
+			return changed, fmt.Errorf("git config --local %s false: %s: %w",
+				key, strings.TrimSpace(string(output)), cerr)
+		}
+		changed = true
+	}
+	return changed, nil
+}
+
+// MigrateLedgerCredentials performs the one-shot migration for a single
+// ledger: disable commit signing, strip any embedded oauth2:TOKEN from the
+// origin URL, then install the ox credential helper for the resulting bare
+// host. Idempotent — safe to invoke on every daemon startup.
+//
+// Returns ok=true if the migration ran (signing disabled, stripped, or
+// installed); ok=false if there was nothing to do. The error result is
+// reserved for genuine failures (git command errors, malformed origin URLs).
 func MigrateLedgerCredentials(repoPath string, helperCmd string) (changed bool, err error) {
+	// 0. Disable commit/tag signing FIRST, unconditionally. This must run
+	// even for repos with no/SSH/file origin (which return early below),
+	// because a wedged signing config blocks local commits regardless of
+	// the remote. Self-heals existing repos on the next daemon sweep.
+	if signChanged, serr := DisableCommitSigning(repoPath); serr != nil {
+		return false, fmt.Errorf("disable commit signing: %w", serr)
+	} else if signChanged {
+		changed = true
+	}
+
 	// 1. Read origin URL; bail cleanly for SSH / file:// / missing remotes.
 	pat, remoteURL, err := extractPATFromRemote(repoPath)
 	if err != nil {
 		// No origin or unreadable config — nothing to migrate, but not a
 		// hard error. Callers (daemon startup) shouldn't fail because of one
-		// weird ledger.
-		return false, nil
+		// weird ledger. Preserve any signing change made above.
+		return changed, nil
 	}
 	if remoteURL == "" {
-		return false, nil
+		return changed, nil
 	}
 
 	// Only migrate https:// remotes with the ox-managed oauth2 prefix.
 	parsed, err := url.Parse(remoteURL)
 	if err != nil || parsed.Scheme != "https" {
-		return false, nil
+		return changed, nil
 	}
 
 	// 2. Strip embedded PAT if present (no-op if origin is already bare).

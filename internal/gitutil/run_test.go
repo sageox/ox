@@ -64,6 +64,34 @@ func TestRunGit(t *testing.T) {
 		assert.Contains(t, output, "git version")
 	})
 
+	t.Run("commit succeeds despite inherited signing config", func(t *testing.T) {
+		// Reproduces the ledger-wedge class: a repo whose config enables SSH
+		// commit signing with an unusable key. A bare `git commit` dies with
+		// "failed to write commit object"; RunGit must override it inline so
+		// ox's machine-managed commits never depend on a TTY passphrase prompt.
+		repo := t.TempDir()
+		setup := [][]string{
+			{"-C", repo, "init", "--quiet"},
+			{"-C", repo, "config", "--local", "user.name", "Test"},
+			{"-C", repo, "config", "--local", "user.email", "test@example.com"},
+			{"-C", repo, "config", "--local", "gpg.format", "ssh"},
+			{"-C", repo, "config", "--local", "user.signingkey", filepath.Join(repo, "nope")},
+			{"-C", repo, "config", "--local", "commit.gpgsign", "true"},
+		}
+		for _, a := range setup {
+			require.NoError(t, exec.Command("git", a...).Run())
+		}
+		require.NoError(t, os.WriteFile(filepath.Join(repo, "f.txt"), []byte("x"), 0o644))
+		require.NoError(t, exec.Command("git", "-C", repo, "add", "-A").Run())
+
+		// sanity: a raw signed commit fails in this headless env
+		require.Error(t, exec.Command("git", "-C", repo, "commit", "-m", "raw").Run())
+
+		// RunGit's injected -c commit.gpgsign=false clears the wedge
+		_, err := RunGit(context.Background(), repo, "commit", "-m", "via RunGit")
+		assert.NoError(t, err)
+	})
+
 	t.Run("output is auto-sanitized", func(t *testing.T) {
 		// create a repo with a remote that has credentials embedded
 		repo := t.TempDir()

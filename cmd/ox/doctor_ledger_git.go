@@ -810,6 +810,16 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 	// without this, git add -A will commit local-only files like sync-state.json.
 	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
 
+	// Persist commit.gpgsign=false into the ledger's local config so this
+	// commit AND every future CLI/daemon commit succeeds. A ledger that
+	// inherited the user's SSH/GPG signing config commits non-interactively
+	// and dies on the passphrase prompt; this is the root cause of a wedged,
+	// non-syncing ledger. Best-effort: the commit below also forces the flag
+	// inline, so a config-write failure doesn't block recovery.
+	if _, err := gitserver.DisableCommitSigning(ledgerPath); err != nil {
+		_ = err
+	}
+
 	// stage all changes
 	// --sparse: ledger repos use sparse-checkout
 	addCmd := exec.Command("git", "-C", ledgerPath, "add", "--sparse", "-A")
@@ -819,8 +829,11 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 			fmt.Sprintf("git add error: %s", strings.TrimSpace(string(output))))
 	}
 
-	// commit
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "-m", "ox doctor: auto-commit ledger changes")
+	// commit. -c commit.gpgsign=false guards against a signing config that
+	// DisableCommitSigning couldn't persist (read-only config, etc.).
+	commitCmd := exec.Command("git", "-C", ledgerPath,
+		"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
+		"commit", "-m", "ox doctor: auto-commit ledger changes")
 	if output, err := commitCmd.CombinedOutput(); err != nil {
 		errStr := strings.TrimSpace(string(output))
 		// "nothing to commit" is fine (race with session auto-stage)
