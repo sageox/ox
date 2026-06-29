@@ -26,11 +26,11 @@ func TestNoCustomerFacingOxTokenReintroduction(t *testing.T) {
 	// (CHANGELOG.md is a symlink to cmd/ox/release_notes.md — filepath.Walk
 	// visits the real file, so allowlist the real path).
 	allowlist := map[string]bool{
-		"internal/auth/env_token_test.go":   true,
-		"internal/auth/env_naming_test.go":  true,
-		"docs/adr/adr-ephemeral-mode.md": true,
-		"cmd/ox/release_notes.md":           true,
-		"CHANGELOG.md":                      true,
+		"internal/auth/env_token_test.go":  true,
+		"internal/auth/env_naming_test.go": true,
+		"docs/adr/adr-ephemeral-mode.md":   true,
+		"cmd/ox/release_notes.md":          true,
+		"CHANGELOG.md":                     true,
 	}
 
 	bannedPatterns := []string{`"OX_TOKEN"`, `"OX_ENDPOINT"`, "`OX_TOKEN`", "`OX_ENDPOINT`"}
