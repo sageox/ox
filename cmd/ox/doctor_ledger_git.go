@@ -810,15 +810,15 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 	// without this, git add -A will commit local-only files like sync-state.json.
 	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
 
-	// Persist commit.gpgsign=false into the ledger's local config so this
-	// commit AND every future CLI/daemon commit succeeds. A ledger that
-	// inherited the user's SSH/GPG signing config commits non-interactively
-	// and dies on the passphrase prompt; this is the root cause of a wedged,
-	// non-syncing ledger. Best-effort: the commit below also forces the flag
-	// inline, so a config-write failure doesn't block recovery.
-	if _, err := gitserver.DisableCommitSigning(ledgerPath); err != nil {
-		_ = err
-	}
+	// Persist commit.gpgsign=false into the ledger's local config so every
+	// FUTURE CLI/daemon commit succeeds too. A ledger that inherited the
+	// user's SSH/GPG signing config commits non-interactively and dies on the
+	// passphrase prompt; this is the root cause of a wedged, non-syncing
+	// ledger. The commit below routes through gitutil.RunGit (which forces the
+	// flag inline regardless), so a persistence failure doesn't block THIS
+	// recovery — but we surface it so `ox doctor --fix` doesn't report a clean
+	// repair while the durable fix silently didn't land.
+	_, signErr := gitserver.DisableCommitSigning(ledgerPath)
 
 	// stage all changes
 	// --sparse: ledger repos use sparse-checkout
@@ -829,20 +829,29 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 			fmt.Sprintf("git add error: %s", strings.TrimSpace(string(output))))
 	}
 
-	// commit. -c commit.gpgsign=false guards against a signing config that
-	// DisableCommitSigning couldn't persist (read-only config, etc.).
-	commitCmd := exec.Command("git", "-C", ledgerPath,
-		"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
+	// commit via RunGit: it owns the commit.gpgsign=false override plus the
+	// GIT_TERMINAL_PROMPT=0 / cmd.Dir safeguards, so the auto-commit can't
+	// drift from the managed-git execution contract.
+	out, err := gitutil.RunGit(context.Background(), ledgerPath,
 		"commit", "-m", "ox doctor: auto-commit ledger changes")
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		errStr := strings.TrimSpace(string(output))
-		// "nothing to commit" is fine (race with session auto-stage)
-		if strings.Contains(errStr, "nothing to commit") {
+	if err != nil {
+		// "nothing to commit" is fine (race with session auto-stage). RunGit
+		// folds git's output into the error, so check there.
+		if strings.Contains(out, "nothing to commit") || strings.Contains(err.Error(), "nothing to commit") {
 			return PassedCheck("Ledger clean workdir", "clean (already committed)")
 		}
 		return FailedCheck("Ledger clean workdir",
 			"commit failed",
-			fmt.Sprintf("git commit error: %s", errStr))
+			fmt.Sprintf("git commit error: %s", strings.TrimSpace(err.Error())))
+	}
+
+	// Commit landed, but flag a partial repair: the inline override saved this
+	// commit while the persisted local config didn't take, so future non-ox
+	// commits in this ledger could still wedge.
+	if signErr != nil {
+		return WarningCheck("Ledger clean workdir",
+			fmt.Sprintf("committed %d file(s), but could not persist commit.gpgsign=false", fileCount),
+			fmt.Sprintf("persist signing config: %v — rerun `ox doctor --fix` or set it manually: git -C %s config --local commit.gpgsign false", signErr, ledgerPath))
 	}
 
 	return PassedCheck("Ledger clean workdir",

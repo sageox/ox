@@ -92,6 +92,70 @@ func TestDisableCommitSigning_UnwedgesSignedRepo(t *testing.T) {
 	assert.False(t, changed, "second disable should be a no-op")
 }
 
+// gitRepoWithInheritedSigning builds a repo with NO local signing config whose
+// signing is enabled purely through an inherited global config (GIT_CONFIG_GLOBAL
+// pointed at a temp file) — the actual production wedge, where the user's
+// ~/.config/git/config sets commit.gpgsign=true and managed repos inherit it.
+// Returns the repo path; the caller's git subprocesses inherit the temp global
+// via t.Setenv, so DisableCommitSigning sees the inherited "true".
+func gitRepoWithInheritedSigning(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	globalCfg := filepath.Join(home, "global.gitconfig")
+	// isolate from the real machine config for every git subprocess in this test
+	t.Setenv("GIT_CONFIG_GLOBAL", globalCfg)
+	t.Setenv("GIT_CONFIG_SYSTEM", filepath.Join(home, "no-system"))
+
+	setGlobal := func(k, v string) {
+		cmd := exec.Command("git", "config", "--file", globalCfg, k, v)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git config --file: %s", out)
+	}
+	setGlobal("gpg.format", "ssh")
+	setGlobal("user.signingkey", filepath.Join(home, "nope"))
+	setGlobal("commit.gpgsign", "true")
+
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"-C", dir, "init"},
+		{"-C", dir, "config", "--local", "user.name", "Test"},
+		{"-C", dir, "config", "--local", "user.email", "test@example.com"},
+	} {
+		require.NoError(t, exec.Command("git", args...).Run())
+	}
+	return dir
+}
+
+// TestDisableCommitSigning_PersistsLocalDespiteInheritedConfig is the core
+// regression for the CodeRabbit major finding: the skip check must read the
+// repo-LOCAL value, not the merged value. With signing enabled via inherited
+// global config, DisableCommitSigning must still write a local "false" so the
+// repair is durable against a later global change. Failure prevented: a managed
+// repo left unprotected because the merged read saw an inherited value.
+func TestDisableCommitSigning_PersistsLocalDespiteInheritedConfig(t *testing.T) {
+	dir := gitRepoWithInheritedSigning(t)
+
+	// merged read sees the inherited "true"; local read sees no override yet.
+	merged, err := readGitConfig(dir, "commit.gpgsign")
+	require.NoError(t, err)
+	assert.Equal(t, "true", merged, "inherited global signing should be visible via merged read")
+	local, err := readGitConfigLocal(dir, "commit.gpgsign")
+	require.NoError(t, err)
+	assert.Empty(t, local, "repo must start with no local override")
+
+	// sanity: a raw commit fails because it inherits the (unusable) signing key
+	require.Error(t, tryCommit(t, dir), "inherited signing should fail the commit")
+
+	changed, err := DisableCommitSigning(dir)
+	require.NoError(t, err)
+	assert.True(t, changed, "must persist a local override even when merged config already reads true")
+
+	local, err = readGitConfigLocal(dir, "commit.gpgsign")
+	require.NoError(t, err)
+	assert.Equal(t, "false", local, "local override must be written so the repair survives global changes")
+	require.NoError(t, tryCommit(t, dir), "commit should succeed after local signing disabled")
+}
+
 // TestMigrateLedgerCredentials_DisablesSigningWithoutRemote proves the
 // self-heal fires for repos that have no migratable https origin (the early
 // return paths) — signing must still be disabled so a freshly-set-up or

@@ -116,6 +116,25 @@ func InstallCredentialHelper(repoPath string, cfg HelperConfig) error {
 	return nil
 }
 
+// readGitConfigLocal reads a single config value from the repo's LOCAL
+// .git/config only (ignoring global/system scopes); returns ("", nil) when the
+// key has no local override. Use this when the persistence of a repo-local
+// override matters and an inherited value must NOT count as "already set".
+func readGitConfigLocal(repoPath, key string) (string, error) {
+	cmd := exec.Command("git", "-C", repoPath, "config", "--local", "--get", key)
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		// exit 1 = key absent locally (or no local config file yet); treat as
+		// a clean "no local value" so callers persist the override.
+		if asErr(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // readGitConfig reads a single config value; returns ("", nil) when the
 // key is absent (git exits 1 with empty output in that case).
 func readGitConfig(repoPath, key string) (string, error) {
@@ -144,13 +163,16 @@ func readGitConfig(repoPath, key string) (string, error) {
 //
 // Writing the override into the repo's LOCAL config (not --global) keeps the
 // user's own repos free to sign while guaranteeing ox-managed repos never do.
-// Idempotent: skips the write when both keys already read "false".
+// Idempotent: skips the write when the key is already "false" in the repo's
+// LOCAL config specifically.
 func DisableCommitSigning(repoPath string) (changed bool, err error) {
 	for _, key := range []string{"commit.gpgsign", "tag.gpgsign"} {
-		// readGitConfig walks all config levels, so an inherited global
-		// "true" is what we compare against — a local "false" already in
-		// place reads back as "false" and we skip.
-		if current, rerr := readGitConfig(repoPath, key); rerr == nil && current == "false" {
+		// Read the repo-LOCAL value only, not the merged config. A merged
+		// "false" can come from a global/system scope while the repo has no
+		// local override at all — skipping on that would leave the managed
+		// repo unprotected, so a later global flip to "true" re-wedges it.
+		// Only a persisted local "false" means the repair is already in place.
+		if current, rerr := readGitConfigLocal(repoPath, key); rerr == nil && current == "false" {
 			continue
 		}
 		cmd := exec.Command("git", "-C", repoPath, "config", "--local", key, "false")
@@ -194,9 +216,15 @@ func MigrateLedgerCredentials(repoPath string, helperCmd string) (changed bool, 
 		return changed, nil
 	}
 
-	// Only migrate https:// remotes with the ox-managed oauth2 prefix.
+	// Only migrate https:// remotes with the ox-managed oauth2 prefix. A
+	// malformed origin URL is genuine misconfig worth surfacing (per the
+	// "genuine failures" contract above) — don't fold it into the non-HTTPS
+	// no-op, or callers like doctor never learn the remote is broken.
 	parsed, err := url.Parse(remoteURL)
-	if err != nil || parsed.Scheme != "https" {
+	if err != nil {
+		return changed, fmt.Errorf("parse origin URL %q: %w", remoteURL, err)
+	}
+	if parsed.Scheme != "https" {
 		return changed, nil
 	}
 
