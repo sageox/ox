@@ -213,9 +213,11 @@ func EnsureGitignoreBeforeCommitCtx(ctx context.Context, repoPath string) {
 
 	// untrack any .rej files committed before the ignore was in place. Pathspec
 	// '*.rej' matches at any depth; --cached preserves the local files (then
-	// gitignore keeps them out of future commits).
+	// gitignore keeps them out of future commits). --sparse is required so the
+	// removal also reaches tracked paths OUTSIDE the sparse-checkout cone
+	// (e.g. data/github/**/*.rej), which git otherwise silently skips.
 	rmRejCmd := exec.CommandContext(ctx, "git", "-C", repoPath,
-		"rm", "--cached", "--ignore-unmatch", "*.rej")
+		"rm", "--cached", "--sparse", "--ignore-unmatch", "*.rej")
 	if out, err := rmRejCmd.CombinedOutput(); err != nil {
 		slog.Debug("pre-commit .rej untrack failed", "path", repoPath, "error", err, "output", strings.TrimSpace(string(out)))
 	}
