@@ -243,6 +243,54 @@ func TestEmitPlanHint_NoTriggerResetsAfterHTMLIntent(t *testing.T) {
 	assert.Contains(t, buf3.String(), "ox plan render --open", "a later HTML-plan request must re-hint")
 }
 
+// TestEmitPlanHint_PlanModeUpgradesAfterHTMLIntent verifies the higher-value
+// plan-mode (draft-first) steer still fires when the user gets an HTML-intent
+// hint and THEN enters plan mode with no neutral prompt between — the shared
+// stamp must not swallow it. Failure prevented: the render-first html-intent
+// hint suppresses the "enrich WHILE you draft" steer for the whole episode.
+func TestEmitPlanHint_PlanModeUpgradesAfterHTMLIntent(t *testing.T) {
+	t.Setenv(config.EnvPlanHTML, config.PlanHTMLRecommend)
+	projectRoot := planNudgeProject(t)
+	agentID := "Oxupgrade"
+	htmlPrompt := []byte(`{"permission_mode":"default","prompt":"make me an html plan"}`)
+	planPrompt := []byte(`{"permission_mode":"plan","prompt":"plan it"}`)
+
+	var buf1 bytes.Buffer
+	emitPlanHint(&buf1, projectRoot, agentID, htmlPrompt)
+	require.Contains(t, buf1.String(), "Rendering an HTML plan", "html-intent hint fires first")
+
+	// enter plan mode directly, no neutral prompt between: draft-first steer upgrades
+	var buf2 bytes.Buffer
+	emitPlanHint(&buf2, projectRoot, agentID, planPrompt)
+	assert.Contains(t, buf2.String(), "Plan mode —", "plan-mode steer upgrades over an html-intent stamp")
+
+	// once upgraded, a second plan-mode prompt in the same entry is suppressed
+	var buf3 bytes.Buffer
+	emitPlanHint(&buf3, projectRoot, agentID, planPrompt)
+	assert.Empty(t, buf3.String(), "plan-mode hint fires once after the upgrade")
+}
+
+// TestEmitPlanHint_HTMLIntentDoesNotUpgradePlanMode verifies the reverse is NOT
+// an upgrade: after a plan-mode hint, an html-intent prompt in the same episode
+// stays suppressed (the plan-mode lead already covers rendering). Failure
+// prevented: an episode double-hints when the user toggles plan mode off then
+// asks to render.
+func TestEmitPlanHint_HTMLIntentDoesNotUpgradePlanMode(t *testing.T) {
+	t.Setenv(config.EnvPlanHTML, config.PlanHTMLRecommend)
+	projectRoot := planNudgeProject(t)
+	agentID := "Oxnoupgrade"
+	planPrompt := []byte(`{"permission_mode":"plan","prompt":"plan it"}`)
+	htmlPrompt := []byte(`{"permission_mode":"acceptEdits","prompt":"now render this plan as html"}`)
+
+	var buf1 bytes.Buffer
+	emitPlanHint(&buf1, projectRoot, agentID, planPrompt)
+	require.Contains(t, buf1.String(), "Plan mode —", "plan-mode hint fires first")
+
+	var buf2 bytes.Buffer
+	emitPlanHint(&buf2, projectRoot, agentID, htmlPrompt)
+	assert.Empty(t, buf2.String(), "html-intent must not re-hint after a plan-mode hint in the same episode")
+}
+
 // --- D. HTML-plan intent detection ---
 
 // TestPromptRequestsHTMLPlan covers the phrase detector that drives the any-mode
@@ -266,9 +314,11 @@ func TestPromptRequestsHTMLPlan(t *testing.T) {
 		``,
 		`not json`,
 		`{"prompt":"fix the failing test"}`,
-		`{"prompt":"plan the sprint"}`,        // plan, but no render/html cue
-		`{"prompt":"render the login page"}`,  // render, but not a plan
-		`{"prompt":"what does this html do"}`, // html, but not a plan
+		`{"prompt":"plan the sprint"}`,                 // plan, but no render/html cue
+		`{"prompt":"render the login page"}`,           // render, but not a plan
+		`{"prompt":"what does this html do"}`,          // html, but not a plan
+		`{"prompt":"render the planned route"}`,        // word boundary: "plan" != "planned"
+		`{"prompt":"visualize the planning timeline"}`, // word boundary: "plan" != "planning"
 	}
 	for _, raw := range negatives {
 		assert.False(t, promptRequestsHTMLPlan([]byte(raw)), "should NOT detect: %s", raw)

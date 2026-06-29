@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -40,10 +41,14 @@ import (
 // transcript — and the `prompt` text. We decode both defensively.
 //
 // Throttle: fire exactly once per planning episode. A per-agent stamp file marks
-// "already hinted this episode"; it is cleared the moment a prompt arrives that
-// triggers neither path, so a fresh plan-mode entry or a new HTML-plan request
-// re-hints. This avoids hinting on every prompt during a long session while
-// still re-firing on each genuine planning moment.
+// "already hinted this episode" and records WHICH trigger hinted; it is cleared
+// the moment a prompt arrives that triggers neither path, so a fresh plan-mode
+// entry or a new HTML-plan request re-hints. Plan mode is the higher-value
+// trigger (its lead steers enrich WHILE drafting), so it upgrades over an
+// earlier HTML-intent stamp in the same episode — the html-intent → plan-mode
+// transition with no neutral prompt between must not swallow the draft-first
+// steer. This avoids hinting on every prompt during a long session while still
+// re-firing on each genuine planning moment.
 //
 // Everything here is best-effort and fail-open: any decode/IO failure leaves the
 // existing hook behavior untouched. The hint is purely additive.
@@ -58,12 +63,19 @@ const (
 	// never committed. (Name retained for cache stability; the stamp now covers
 	// both the plan-mode and HTML-intent triggers.)
 	planModeHintCacheSubdir = "plan-mode-hint"
+
+	// Stamp payloads recording which trigger last hinted this episode. Plan mode
+	// outranks HTML intent, so a plan-mode hint may overwrite an html-intent
+	// stamp (an upgrade), but not vice-versa.
+	triggerPlanMode   = "plan-mode"
+	triggerHTMLIntent = "html-intent"
 )
 
 // htmlPlanIntentPhrases are the curated phrases that signal the user wants a plan
-// rendered as an HTML / visual page. Matched case-insensitively as substrings.
-// Each phrase embeds both a plan noun and a render/visual cue so it is
-// self-disambiguating; a false positive costs at most one throttled reminder.
+// rendered as an HTML / visual page. Matched case-insensitively on WORD
+// boundaries (see containsWord) so "render the plan" does not fire on "render the
+// planned route" / "visualize the planning timeline". Each phrase embeds both a
+// plan noun and a render/visual cue so it is self-disambiguating.
 var htmlPlanIntentPhrases = []string{
 	"html plan",
 	"html-plan", // covers "/html-plan" (the slash command)
@@ -107,20 +119,45 @@ func extractPermissionMode(rawBytes []byte) string {
 // promptRequestsHTMLPlan reports whether the user's prompt is asking to render a
 // plan as an HTML / visual page. Reuses extractPromptText (the same envelope the
 // recall preamble parses) so the two paths can't drift on field names.
-// Conservative substring match on a curated phrase set; returns false on any
-// extraction failure (fail-open).
+// Word-boundary match on a curated phrase set; returns false on any extraction
+// failure (fail-open).
 func promptRequestsHTMLPlan(rawBytes []byte) bool {
-	text := extractPromptText(rawBytes)
+	text := strings.ToLower(extractPromptText(rawBytes))
 	if text == "" {
 		return false
 	}
-	text = strings.ToLower(text)
 	for _, phrase := range htmlPlanIntentPhrases {
-		if strings.Contains(text, phrase) {
+		if containsWord(text, phrase) {
 			return true
 		}
 	}
 	return false
+}
+
+// containsWord reports whether phrase occurs in text bounded by a
+// non-alphanumeric character (or the string edge) on both sides — a
+// word-boundary-aware strings.Contains. Both args are assumed already
+// lowercased. ASCII-only: a multibyte rune adjacent to a match counts as a
+// boundary, which is fine for these ASCII phrases.
+func containsWord(text, phrase string) bool {
+	for from := 0; ; {
+		i := strings.Index(text[from:], phrase)
+		if i < 0 {
+			return false
+		}
+		start := from + i
+		end := start + len(phrase)
+		leftOK := start == 0 || !isASCIIAlphaNum(text[start-1])
+		rightOK := end == len(text) || !isASCIIAlphaNum(text[end])
+		if leftOK && rightOK {
+			return true
+		}
+		from = start + 1
+	}
+}
+
+func isASCIIAlphaNum(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= '0' && b <= '9'
 }
 
 // emitPlanHint writes the just-in-time plan-rendering steer to w when the agent
@@ -128,10 +165,12 @@ func promptRequestsHTMLPlan(rawBytes []byte) bool {
 // been hinted for the current planning episode.
 //
 // Called from handlePrompt (the proven UserPromptSubmit stdout-injection channel)
-// on every prompt. State machine, keyed on a per-agent stamp:
-//   - triggered, no stamp  -> emit hint, write stamp (hinted this episode)
-//   - triggered, stamp set -> suppress (already hinted this episode)
-//   - not triggered        -> clear stamp (next trigger re-hints)
+// on every prompt. State machine, keyed on a per-agent stamp that records the
+// triggering source:
+//   - triggered, no stamp          -> emit, stamp the trigger
+//   - plan-mode, stamp=html-intent -> emit (upgrade), restamp plan-mode
+//   - triggered, stamp >= trigger  -> suppress (already hinted this episode)
+//   - not triggered                -> clear stamp (next trigger re-hints)
 func emitPlanHint(w io.Writer, projectRoot, agentID string, rawBytes []byte) {
 	if projectRoot == "" || agentID == "" {
 		return
@@ -156,31 +195,45 @@ func emitPlanHint(w io.Writer, projectRoot, agentID string, rawBytes []byte) {
 		return
 	}
 
-	// triggered: hint once per episode.
-	if _, err := os.Stat(stamp); err == nil {
-		return // already hinted for this episode
+	// Pick the trigger + message. Plan mode is the higher-value lead (it steers
+	// enrich WHILE drafting); the HTML-intent lead is render-first, for the
+	// no-plan-mode case where the user is already asking to render.
+	trigger := triggerHTMLIntent
+	line := htmlPlanHintLine()
+	if inPlanMode {
+		trigger = triggerPlanMode
+		line = planModeHintLine()
 	}
+
+	// Throttle: once per episode, but a plan-mode hint may UPGRADE over an
+	// earlier html-intent stamp (the html-intent → plan-mode transition with no
+	// neutral prompt between, where the draft-first steer would otherwise be
+	// swallowed). Reading the stamp also distinguishes "absent" (proceed) from a
+	// real read error (leave state untouched rather than risk a double-hint).
+	if prev, err := os.ReadFile(stamp); err == nil {
+		if trigger != triggerPlanMode || strings.TrimSpace(string(prev)) == triggerPlanMode {
+			return // already hinted this episode for an equal-or-higher trigger
+		}
+		// stamp is html-intent and we're now in plan mode — fall through to upgrade.
+	} else if !errors.Is(err, os.ErrNotExist) {
+		slog.Debug("hook: plan hint stamp read failed", "error", err)
+		return
+	}
+
 	if err := os.MkdirAll(filepath.Dir(stamp), 0o755); err != nil {
 		slog.Debug("hook: plan hint mkdir failed", "error", err)
 		return
 	}
 
-	// Plan-mode lead wins when both triggers fire — it's the in-draft superset
-	// message ("enrich WHILE you draft, then render"). The HTML-intent lead is
-	// for the no-plan-mode case where the user is already asking to render.
 	// <system-reminder> is the only tag Claude Code treats as trusted system
-	// context. Single line — grepability invariant.
-	line := htmlPlanHintLine()
-	trigger := "html-intent"
-	if inPlanMode {
-		line = planModeHintLine()
-		trigger = "plan-mode"
+	// context. Single line — grepability invariant. Persist the stamp ONLY after
+	// a successful emit, so a broken stdout doesn't suppress a hint the model
+	// never saw.
+	if _, err := fmt.Fprintf(w, "<system-reminder>[ox] %s</system-reminder>\n", line); err != nil {
+		slog.Debug("hook: plan hint emit failed", "error", err)
+		return
 	}
-	fmt.Fprintf(w, "<system-reminder>[ox] %s</system-reminder>\n", line)
-
-	// Write the stamp only after a successful emit so that a failed write
-	// doesn't permanently suppress the hint for this episode.
-	if err := os.WriteFile(stamp, []byte("1"), 0o600); err != nil {
+	if err := os.WriteFile(stamp, []byte(trigger), 0o600); err != nil {
 		slog.Debug("hook: plan hint stamp write failed", "error", err)
 		return
 	}
