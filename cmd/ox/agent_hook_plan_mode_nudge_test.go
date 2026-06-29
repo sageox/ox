@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -48,13 +49,13 @@ func TestExtractPermissionMode_FailOpen(t *testing.T) {
 	}
 }
 
-// --- B. Hint lifecycle: once per plan-mode entry ---
+// --- B. Plan-mode trigger: hint once per plan-mode entry ---
 
-// TestEmitPlanModeHint_FiresOncePerEntry verifies the core throttle: the hint
+// TestEmitPlanHint_FiresOncePerEntry verifies the core throttle: the hint
 // fires on the first plan-mode prompt, suppresses on subsequent plan-mode
 // prompts (same entry), then re-fires after the agent leaves and re-enters plan
 // mode. Failure prevented: the hint spams every prompt, or never re-fires.
-func TestEmitPlanModeHint_FiresOncePerEntry(t *testing.T) {
+func TestEmitPlanHint_FiresOncePerEntry(t *testing.T) {
 	projectRoot := planNudgeProject(t)
 	agentID := "Oxmode1"
 	planPrompt := []byte(`{"permission_mode":"plan","prompt":"plan it"}`)
@@ -62,7 +63,7 @@ func TestEmitPlanModeHint_FiresOncePerEntry(t *testing.T) {
 
 	// 1. first plan-mode prompt: hint fires
 	var buf bytes.Buffer
-	emitPlanModeHint(&buf, projectRoot, agentID, planPrompt)
+	emitPlanHint(&buf, projectRoot, agentID, planPrompt)
 	got := buf.String()
 	assert.Contains(t, got, "<system-reminder>")
 	assert.Contains(t, got, "[ox]")
@@ -73,59 +74,203 @@ func TestEmitPlanModeHint_FiresOncePerEntry(t *testing.T) {
 
 	// 2. second plan-mode prompt, same entry: suppressed
 	var buf2 bytes.Buffer
-	emitPlanModeHint(&buf2, projectRoot, agentID, planPrompt)
+	emitPlanHint(&buf2, projectRoot, agentID, planPrompt)
 	assert.Empty(t, buf2.String(), "must not re-hint within the same plan-mode entry")
 
 	// 3. agent leaves plan mode: stamp cleared, nothing emitted
 	var buf3 bytes.Buffer
-	emitPlanModeHint(&buf3, projectRoot, agentID, normalPrompt)
+	emitPlanHint(&buf3, projectRoot, agentID, normalPrompt)
 	assert.Empty(t, buf3.String(), "non-plan prompt emits nothing")
 	assert.NoFileExists(t, planModeHintPath(projectRoot, agentID), "leaving plan mode clears the stamp")
 
 	// 4. re-enters plan mode: hint fires again
 	var buf4 bytes.Buffer
-	emitPlanModeHint(&buf4, projectRoot, agentID, planPrompt)
+	emitPlanHint(&buf4, projectRoot, agentID, planPrompt)
 	assert.Contains(t, buf4.String(), "ox plan enrich --json", "re-entering plan mode must re-hint")
 }
 
-// TestEmitPlanModeHint_NonClaudeNoOp verifies that a payload with no
-// permission-mode field (every non-Claude agent) produces no hint and writes no
-// stamp. Failure prevented: the Gold-only feature leaks to agents that can't
-// deliver it.
-func TestEmitPlanModeHint_NonClaudeNoOp(t *testing.T) {
+// TestEmitPlanHint_NonClaudeNoOpOnNeutralPrompt verifies that a payload with no
+// permission-mode field and no HTML-plan intent (the common non-Claude case)
+// produces no hint and writes no stamp. Failure prevented: the plan-mode steer
+// leaks to agents/prompts that didn't trigger it.
+func TestEmitPlanHint_NonClaudeNoOpOnNeutralPrompt(t *testing.T) {
 	projectRoot := planNudgeProject(t)
 	agentID := "Oxsilver"
 	var buf bytes.Buffer
-	emitPlanModeHint(&buf, projectRoot, agentID, []byte(`{"prompt":"do work"}`))
+	emitPlanHint(&buf, projectRoot, agentID, []byte(`{"prompt":"do work"}`))
 	assert.Empty(t, buf.String())
 	assert.NoFileExists(t, planModeHintPath(projectRoot, agentID))
 }
 
-// TestEmitPlanModeHint_EmptyArgs verifies path/emit are safe with empty inputs.
-func TestEmitPlanModeHint_EmptyArgs(t *testing.T) {
+// TestEmitPlanHint_EmptyArgs verifies path/emit are safe with empty inputs.
+func TestEmitPlanHint_EmptyArgs(t *testing.T) {
 	assert.Empty(t, planModeHintPath("", "Oxa"))
 	assert.Empty(t, planModeHintPath("/tmp", ""))
 
 	var buf bytes.Buffer
-	emitPlanModeHint(&buf, "", "Oxa", []byte(`{"permission_mode":"plan"}`))
-	emitPlanModeHint(&buf, "/tmp", "", []byte(`{"permission_mode":"plan"}`))
+	emitPlanHint(&buf, "", "Oxa", []byte(`{"permission_mode":"plan"}`))
+	emitPlanHint(&buf, "/tmp", "", []byte(`{"permission_mode":"plan"}`))
 	assert.Empty(t, buf.String())
 }
 
-// TestEmitPlanModeHint_StampPersistsAcrossEntry verifies the stamp file exists
+// TestEmitPlanHint_StampPersistsAcrossEntry verifies the stamp file exists
 // while in plan mode (so repeat prompts stay suppressed) and is keyed per agent.
-func TestEmitPlanModeHint_StampPersistsAcrossEntry(t *testing.T) {
+func TestEmitPlanHint_StampPersistsAcrossEntry(t *testing.T) {
 	projectRoot := planNudgeProject(t)
 	agentA := "OxA"
 	agentB := "OxB"
 	planPrompt := []byte(`{"permission_mode":"plan"}`)
 
 	var buf bytes.Buffer
-	emitPlanModeHint(&buf, projectRoot, agentA, planPrompt)
+	emitPlanHint(&buf, projectRoot, agentA, planPrompt)
 	require.FileExists(t, planModeHintPath(projectRoot, agentA))
 
 	// agent B is independent — its first plan-mode prompt still hints
 	var bufB bytes.Buffer
-	emitPlanModeHint(&bufB, projectRoot, agentB, planPrompt)
+	emitPlanHint(&bufB, projectRoot, agentB, planPrompt)
 	assert.Contains(t, bufB.String(), "ox plan enrich --json", "per-agent stamp must not bleed across agents")
+}
+
+// --- C. HTML-plan intent trigger (any permission mode) ---
+
+// TestEmitPlanHint_FiresOnHTMLIntentOutsidePlanMode verifies the gap fix: a user
+// asking to render an HTML plan OUTSIDE plan mode still gets the just-in-time
+// steer toward `ox plan render` + the viz catalog. Failure prevented: agents in
+// default/acceptEdits mode hand-roll context-blind orphan renders because the
+// only just-in-time steer was gated on plan mode.
+func TestEmitPlanHint_FiresOnHTMLIntentOutsidePlanMode(t *testing.T) {
+	t.Setenv(config.EnvPlanHTML, config.PlanHTMLRecommend) // deterministic: not opted out
+	projectRoot := planNudgeProject(t)
+	agentID := "Oxhtml1"
+	prompt := []byte(`{"permission_mode":"default","prompt":"make me an html plan for the auth refactor"}`)
+
+	var buf bytes.Buffer
+	emitPlanHint(&buf, projectRoot, agentID, prompt)
+	got := buf.String()
+	assert.Contains(t, got, "<system-reminder>")
+	assert.Contains(t, got, "[ox]")
+	assert.Contains(t, got, "ox plan render --open")
+	assert.Contains(t, got, "ox plan viz", "must point at the visualization catalog")
+	assert.NotContains(t, got, "Plan mode —", "outside plan mode uses the render lead, not the plan-mode lead")
+	assert.NotContains(t, got, "\n<", "hint must be a single system-reminder line")
+}
+
+// TestEmitPlanHint_HTMLIntentThrottled verifies the once-per-episode throttle on
+// the HTML-intent path. Failure prevented: the steer spams every prompt while
+// the user keeps discussing the plan.
+func TestEmitPlanHint_HTMLIntentThrottled(t *testing.T) {
+	t.Setenv(config.EnvPlanHTML, config.PlanHTMLRecommend)
+	projectRoot := planNudgeProject(t)
+	agentID := "Oxhtml2"
+	prompt := []byte(`{"permission_mode":"default","prompt":"render this plan as an html page"}`)
+
+	var buf1, buf2 bytes.Buffer
+	emitPlanHint(&buf1, projectRoot, agentID, prompt)
+	emitPlanHint(&buf2, projectRoot, agentID, prompt)
+	assert.Contains(t, buf1.String(), "ox plan render --open")
+	assert.Empty(t, buf2.String(), "must not re-hint within the same episode")
+}
+
+// TestEmitPlanHint_PlanModeLeadWinsWhenBoth verifies that when the agent is in
+// plan mode AND the prompt names an html plan, the in-draft plan-mode lead
+// (enrich WHILE drafting) wins — it's the superset message. Failure prevented:
+// the render-first lead overrides the more useful in-draft enrich steer.
+func TestEmitPlanHint_PlanModeLeadWinsWhenBoth(t *testing.T) {
+	t.Setenv(config.EnvPlanHTML, config.PlanHTMLRecommend)
+	projectRoot := planNudgeProject(t)
+	agentID := "Oxboth"
+	prompt := []byte(`{"permission_mode":"plan","prompt":"draft and render an html plan"}`)
+
+	var buf bytes.Buffer
+	emitPlanHint(&buf, projectRoot, agentID, prompt)
+	got := buf.String()
+	assert.Contains(t, got, "Plan mode —")
+	assert.Contains(t, got, "ox plan enrich --json")
+}
+
+// TestEmitPlanHint_RespectsPlanHTMLOff verifies the opt-out: a user who set
+// plan.html=off does NOT get the HTML-intent steer. Failure prevented: the steer
+// nags users who explicitly disabled HTML plan rendering.
+func TestEmitPlanHint_RespectsPlanHTMLOff(t *testing.T) {
+	t.Setenv(config.EnvPlanHTML, config.PlanHTMLOff)
+	projectRoot := planNudgeProject(t)
+	agentID := "Oxoff"
+	prompt := []byte(`{"permission_mode":"default","prompt":"make me an html plan"}`)
+
+	var buf bytes.Buffer
+	emitPlanHint(&buf, projectRoot, agentID, prompt)
+	assert.Empty(t, buf.String(), "plan.html=off must silence the HTML-intent steer")
+	assert.NoFileExists(t, planModeHintPath(projectRoot, agentID))
+}
+
+// TestEmitPlanHint_PlanModeUnaffectedByPlanHTMLOff documents the deliberate
+// asymmetry: plan.html=off silences the render-first HTML-intent steer but NOT
+// the plan-mode in-draft steer, which leads with `ox plan enrich` (team context
+// valuable regardless of whether the human renders HTML).
+func TestEmitPlanHint_PlanModeUnaffectedByPlanHTMLOff(t *testing.T) {
+	t.Setenv(config.EnvPlanHTML, config.PlanHTMLOff)
+	projectRoot := planNudgeProject(t)
+	agentID := "Oxoffplan"
+	prompt := []byte(`{"permission_mode":"plan","prompt":"plan it"}`)
+
+	var buf bytes.Buffer
+	emitPlanHint(&buf, projectRoot, agentID, prompt)
+	assert.Contains(t, buf.String(), "ox plan enrich --json", "plan-mode steer fires regardless of plan.html=off")
+}
+
+// TestEmitPlanHint_NoTriggerResetsAfterHTMLIntent verifies the stamp resets when
+// a neutral prompt follows an HTML-intent hint, so a later HTML-plan request
+// re-hints. Failure prevented: the throttle permanently suppresses after one
+// episode.
+func TestEmitPlanHint_NoTriggerResetsAfterHTMLIntent(t *testing.T) {
+	t.Setenv(config.EnvPlanHTML, config.PlanHTMLRecommend)
+	projectRoot := planNudgeProject(t)
+	agentID := "Oxreset"
+	htmlPrompt := []byte(`{"permission_mode":"default","prompt":"render this plan as html"}`)
+	neutralPrompt := []byte(`{"permission_mode":"default","prompt":"fix the failing test"}`)
+
+	var buf1 bytes.Buffer
+	emitPlanHint(&buf1, projectRoot, agentID, htmlPrompt)
+	require.Contains(t, buf1.String(), "ox plan render --open")
+
+	var buf2 bytes.Buffer
+	emitPlanHint(&buf2, projectRoot, agentID, neutralPrompt)
+	assert.Empty(t, buf2.String())
+	assert.NoFileExists(t, planModeHintPath(projectRoot, agentID), "neutral prompt clears the stamp")
+
+	var buf3 bytes.Buffer
+	emitPlanHint(&buf3, projectRoot, agentID, htmlPrompt)
+	assert.Contains(t, buf3.String(), "ox plan render --open", "a later HTML-plan request must re-hint")
+}
+
+// --- D. HTML-plan intent detection ---
+
+// TestPromptRequestsHTMLPlan covers the phrase detector that drives the any-mode
+// trigger. Failure prevented: real HTML-plan requests slip through (no steer) or
+// unrelated prompts false-fire (nagging).
+func TestPromptRequestsHTMLPlan(t *testing.T) {
+	positives := []string{
+		`{"prompt":"make me an html plan for X"}`,
+		`{"prompt":"use the /html-plan skill"}`,
+		`{"prompt":"render the plan as a page"}`,
+		`{"prompt":"render this plan please"}`,
+		`{"prompt":"can you visualize the plan"}`,
+		`{"prompt":"visualize this plan as html"}`,
+		`{"prompt":"show the PLAN AS HTML"}`, // case-insensitive
+	}
+	for _, raw := range positives {
+		assert.True(t, promptRequestsHTMLPlan([]byte(raw)), "should detect: %s", raw)
+	}
+
+	negatives := []string{
+		``,
+		`not json`,
+		`{"prompt":"fix the failing test"}`,
+		`{"prompt":"plan the sprint"}`,        // plan, but no render/html cue
+		`{"prompt":"render the login page"}`,  // render, but not a plan
+		`{"prompt":"what does this html do"}`, // html, but not a plan
+	}
+	for _, raw := range negatives {
+		assert.False(t, promptRequestsHTMLPlan([]byte(raw)), "should NOT detect: %s", raw)
+	}
 }

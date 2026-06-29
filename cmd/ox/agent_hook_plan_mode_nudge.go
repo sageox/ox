@@ -8,31 +8,42 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/config"
 )
 
-// In-plan-mode enrichment hint (Gold tier — Claude Code).
+// Just-in-time plan-rendering steer (Claude Code / Gold tier for the plan-mode
+// trigger; agent-agnostic for the HTML-intent trigger).
 //
 // The plan-exit nudge (agent_hook_plan_nudge.go) fires AFTER the plan is
-// presented. This hint fires WHILE the agent is still drafting, so the
-// deterministic `ox plan enrich --json` team context (collisions, prior art,
-// expert routing) is folded into the plan BEFORE it reaches the human — not
-// bolted on after. Prime carries the same guidance, but in a long context that
-// guidance is diluted; a crisp, just-in-time reminder at the planning moment is
-// what actually changes behavior.
+// presented. This hint fires WHILE the agent is still drafting — or the moment
+// the user asks for an HTML plan — so the deterministic `ox plan enrich --json`
+// team context (collisions, prior art, expert routing) is folded into the plan
+// BEFORE it reaches the human, and the render goes through `ox plan render`
+// instead of a hand-rolled orphan. Prime carries the same guidance, but in a
+// long context that guidance is diluted; a crisp, just-in-time reminder at the
+// planning moment is what actually changes behavior.
+//
+// Two independent triggers, one throttle:
+//   - PLAN MODE: permission_mode == "plan". Claude Code is the only agent that
+//     reports a permission mode, so this trigger is implicitly Gold-only.
+//   - HTML-PLAN INTENT: the user's prompt asks to render a plan as an HTML /
+//     visual page, in ANY permission mode. This is the gap the plan-mode-only
+//     gate missed: most HTML-plan requests ("make me an html plan for X") arrive
+//     outside plan mode, where the plan-mode trigger never fires and the agent
+//     reaches for a generic html-plan skill or hand-rolls a context-blind render.
 //
 // Delivery channel: UserPromptSubmit stdout is the ONLY channel Claude Code
 // injects into model context (see the table in agent_hook.go). Claude Code's
 // UserPromptSubmit payload carries the active permission mode — snake_case
 // `permission_mode` in the hook stdin, camelCase `permissionMode` in the
-// transcript. We decode both defensively. Value "plan" == plan mode.
+// transcript — and the `prompt` text. We decode both defensively.
 //
-// Gold-tier gating is implicit: only Claude Code sends a permission mode, so for
-// every other agent extractPermissionMode returns "" and this is a clean no-op.
-//
-// Throttle: fire exactly once per plan-mode entry. A per-agent stamp file marks
-// "already hinted this entry"; it is cleared the moment a non-plan prompt
-// arrives, so re-entering plan mode re-hints. This avoids hinting on every
-// prompt during a long plan-mode session while still re-firing on each entry.
+// Throttle: fire exactly once per planning episode. A per-agent stamp file marks
+// "already hinted this episode"; it is cleared the moment a prompt arrives that
+// triggers neither path, so a fresh plan-mode entry or a new HTML-plan request
+// re-hints. This avoids hinting on every prompt during a long session while
+// still re-firing on each genuine planning moment.
 //
 // Everything here is best-effort and fail-open: any decode/IO failure leaves the
 // existing hook behavior untouched. The hint is purely additive.
@@ -42,11 +53,32 @@ const (
 	// user is in plan mode.
 	planModeValue = "plan"
 
-	// planModeHintCacheSubdir holds the per-agent "already hinted this entry"
+	// planModeHintCacheSubdir holds the per-agent "already hinted this episode"
 	// stamp under the ledger cache (.sageox/cache/). Local-only derived data,
-	// never committed.
+	// never committed. (Name retained for cache stability; the stamp now covers
+	// both the plan-mode and HTML-intent triggers.)
 	planModeHintCacheSubdir = "plan-mode-hint"
 )
+
+// htmlPlanIntentPhrases are the curated phrases that signal the user wants a plan
+// rendered as an HTML / visual page. Matched case-insensitively as substrings.
+// Each phrase embeds both a plan noun and a render/visual cue so it is
+// self-disambiguating; a false positive costs at most one throttled reminder.
+var htmlPlanIntentPhrases = []string{
+	"html plan",
+	"html-plan", // covers "/html-plan" (the slash command)
+	"plan as html",
+	"plan as a page",
+	"plan as an html",
+	"plan as a visual",
+	"render the plan",
+	"render this plan",
+	"render that plan",
+	"render my plan",
+	"render the implementation plan",
+	"visualize this plan",
+	"visualize the plan",
+}
 
 // planModePromptInput is the minimal subset of Claude Code's UserPromptSubmit
 // stdin needed to detect plan mode. Both spellings are accepted because the hook
@@ -72,15 +104,35 @@ func extractPermissionMode(rawBytes []byte) string {
 	return in.PermissionModeCamel
 }
 
-// emitPlanModeHint writes the in-plan-mode enrichment hint to w when the agent is
-// in plan mode and has not yet been hinted for the current plan-mode entry.
+// promptRequestsHTMLPlan reports whether the user's prompt is asking to render a
+// plan as an HTML / visual page. Reuses extractPromptText (the same envelope the
+// recall preamble parses) so the two paths can't drift on field names.
+// Conservative substring match on a curated phrase set; returns false on any
+// extraction failure (fail-open).
+func promptRequestsHTMLPlan(rawBytes []byte) bool {
+	text := extractPromptText(rawBytes)
+	if text == "" {
+		return false
+	}
+	text = strings.ToLower(text)
+	for _, phrase := range htmlPlanIntentPhrases {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// emitPlanHint writes the just-in-time plan-rendering steer to w when the agent
+// is in plan mode OR the prompt asks to render an HTML plan, and it has not yet
+// been hinted for the current planning episode.
 //
 // Called from handlePrompt (the proven UserPromptSubmit stdout-injection channel)
 // on every prompt. State machine, keyed on a per-agent stamp:
-//   - mode == "plan", no stamp  -> emit hint, write stamp (hinted this entry)
-//   - mode == "plan", stamp set -> suppress (already hinted this entry)
-//   - mode != "plan"            -> clear stamp (next plan-mode entry re-hints)
-func emitPlanModeHint(w io.Writer, projectRoot, agentID string, rawBytes []byte) {
+//   - triggered, no stamp  -> emit hint, write stamp (hinted this episode)
+//   - triggered, stamp set -> suppress (already hinted this episode)
+//   - not triggered        -> clear stamp (next trigger re-hints)
+func emitPlanHint(w io.Writer, projectRoot, agentID string, rawBytes []byte) {
 	if projectRoot == "" || agentID == "" {
 		return
 	}
@@ -89,41 +141,73 @@ func emitPlanModeHint(w io.Writer, projectRoot, agentID string, rawBytes []byte)
 		return
 	}
 
-	if extractPermissionMode(rawBytes) != planModeValue {
-		// not in plan mode — reset so the next entry re-hints. Best-effort.
+	inPlanMode := extractPermissionMode(rawBytes) == planModeValue
+	htmlIntent := promptRequestsHTMLPlan(rawBytes)
+	// Honor the user's opt-out: plan.html=off (env SAGEOX_PLAN_HTML / config)
+	// silences the HTML-intent steer for users who don't want render nudges. The
+	// plan-mode steer leads with `ox plan enrich` (render-independent team
+	// context) and keeps its own permission-mode gate, so it's left untouched.
+	if htmlIntent && config.PlanHTML(projectRoot) == config.PlanHTMLOff {
+		htmlIntent = false
+	}
+	if !inPlanMode && !htmlIntent {
+		// neither trigger — reset so the next planning moment re-hints. Best-effort.
 		_ = os.Remove(stamp)
 		return
 	}
 
-	// in plan mode: hint once per entry.
+	// triggered: hint once per episode.
 	if _, err := os.Stat(stamp); err == nil {
-		return // already hinted for this plan-mode entry
+		return // already hinted for this episode
 	}
 	if err := os.MkdirAll(filepath.Dir(stamp), 0o755); err != nil {
-		slog.Debug("hook: plan-mode hint mkdir failed", "error", err)
+		slog.Debug("hook: plan hint mkdir failed", "error", err)
 		return
 	}
+
+	// Plan-mode lead wins when both triggers fire — it's the in-draft superset
+	// message ("enrich WHILE you draft, then render"). The HTML-intent lead is
+	// for the no-plan-mode case where the user is already asking to render.
 	// <system-reminder> is the only tag Claude Code treats as trusted system
 	// context. Single line — grepability invariant.
-	fmt.Fprintf(w, "<system-reminder>[ox] %s</system-reminder>\n", planModeHintLine())
+	line := htmlPlanHintLine()
+	trigger := "html-intent"
+	if inPlanMode {
+		line = planModeHintLine()
+		trigger = "plan-mode"
+	}
+	fmt.Fprintf(w, "<system-reminder>[ox] %s</system-reminder>\n", line)
 
 	// Write the stamp only after a successful emit so that a failed write
-	// doesn't permanently suppress the hint for this plan-mode entry.
+	// doesn't permanently suppress the hint for this episode.
 	if err := os.WriteFile(stamp, []byte("1"), 0o600); err != nil {
-		slog.Debug("hook: plan-mode hint stamp write failed", "error", err)
+		slog.Debug("hook: plan hint stamp write failed", "error", err)
 		return
 	}
-	slog.Info("hook: plan-mode hint emitted", "agent_id", agentID)
+	slog.Info("hook: plan hint emitted", "agent_id", agentID, "trigger", trigger)
 }
 
-// planModeHintLine is the crisp two-beat steer: enrich (JSON) WHILE drafting,
-// render (the SageOx team-context-optimized plan) when presenting.
+// planModeHintLine is the in-draft steer for plan mode: enrich (JSON) WHILE
+// drafting, render (the SageOx team-context-optimized plan) when presenting.
 func planModeHintLine() string {
 	return strings.Join([]string{
 		"Plan mode — run `ox plan enrich --json` WHILE you draft so the plan reflects team context",
 		"(collisions, prior art, expert routing) BEFORE you present it; then offer it as a",
 		"SageOx team-context-optimized plan via `ox plan render --open`. The render owns the SageOx",
 		"footer credit and OX-icon markers — don't hand-author your own.",
+	}, " ")
+}
+
+// htmlPlanHintLine is the steer for when the user asks to render an HTML plan
+// outside plan mode: lead with the renderer, push rich cognition-first visuals
+// via the viz catalog, warn off the orphan render.
+func htmlPlanHintLine() string {
+	return strings.Join([]string{
+		"Rendering an HTML plan? Use `ox plan render --open` (run `ox plan enrich --json` first) — only it folds in",
+		"SageOx team context (collisions, prior art, expert routing) and saves to the ledger. Lean into the",
+		"`ox plan viz` catalog: rich, interactive HTML+JS visuals — dependency explorers, charts, swimlane timelines,",
+		"Tufte tables — that surface the critical decisions and tradeoffs and cut the reviewer's cognitive load,",
+		"rather than burying them in prose. A hand-rolled render is a context-blind orphan; don't author the SageOx credit — the render owns it.",
 	}, " ")
 }
 
