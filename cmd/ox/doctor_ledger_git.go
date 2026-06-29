@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -29,6 +30,7 @@ const (
 	CheckSlugLedgerCleanWorkdir    = "ledger-clean-workdir"
 	CheckSlugLedgerURLAPIMatch     = "ledger-url-api-match"
 	CheckSlugLedgerCacheTracked    = "ledger-cache-tracked"
+	CheckSlugLedgerRejTracked      = "ledger-rej-tracked"
 	// CheckSlugLedgerUnmergedPaths detects an in-progress merge/rebase/cherry-pick
 	// that has left files in U-state. These wedges silently block every future
 	// commit on the ledger (push-summary, doctor auto-commit, session uploads)
@@ -112,6 +114,15 @@ func init() {
 		FixLevel:    FixLevelAuto,
 		Description: "Detects local-only cache files that were accidentally committed to the ledger",
 		Run:         func(fix bool) checkResult { return checkLedgerCacheTracked(fix) },
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugLedgerRejTracked,
+		Name:        "Ledger .rej files untracked",
+		Category:    "Ledger Git Health",
+		FixLevel:    FixLevelAuto,
+		Description: "Detects git apply --reject artifacts (.rej) swept into the ledger",
+		Run:         func(fix bool) checkResult { return checkLedgerRejTracked(fix) },
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
@@ -901,6 +912,73 @@ func checkLedgerCacheTracked(fix bool) checkResult {
 	}
 
 	return PassedCheck(name, "untracked cache files from ledger")
+}
+
+// checkLedgerRejTracked detects *.rej patch-reject artifacts tracked in the
+// ledger. These come from `git apply --reject` during blue-green GC carry and
+// are junk conflict markers, never real ledger content. With fix=true it adds
+// the *.rej ignore, untracks them (git rm --cached, local files preserved),
+// removes the working-tree copies, and commits.
+func checkLedgerRejTracked(fix bool) checkResult {
+	const name = "Ledger .rej files untracked"
+
+	ledgerPath := getLedgerPath()
+	if ledgerPath == "" {
+		return SkippedCheck(name, "no ledger found", "")
+	}
+	if !isGitRepo(ledgerPath) {
+		return SkippedCheck(name, "ledger not a git repo", "")
+	}
+
+	if !gitserver.RejFilesTracked(ledgerPath) {
+		return PassedCheck(name, "no .rej files tracked")
+	}
+
+	if !fix {
+		return WarningCheck(name,
+			".rej patch-reject artifacts are tracked in ledger git history",
+			"run `ox doctor --fix` to untrack and ignore them (local files preserved)")
+	}
+
+	// EnsureGitignoreBeforeCommit now adds the *.rej ignore and untracks any
+	// tracked .rej (git rm --cached). Run it, then delete working-tree copies so
+	// they don't linger as ignored-but-present clutter, then commit the removal.
+	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
+
+	// delete the working-tree .rej copies so they don't linger as ignored
+	// clutter (the index removal alone leaves the files on disk).
+	_ = filepath.WalkDir(ledgerPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// regular files only (skip symlinks); ledger tree is ox-managed.
+		if strings.HasSuffix(d.Name(), ".rej") && d.Type().IsRegular() {
+			_ = os.Remove(path) //nolint:gosec // G122: ox-managed ledger tree, symlinks skipped above
+		}
+		return nil
+	})
+
+	// stage the untrack + the updated .gitignore
+	addCmd := exec.Command("git", "-C", ledgerPath, "add", "--sparse", "-A")
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		return FailedCheck(name, "staging failed",
+			fmt.Sprintf("git add error: %s", strings.TrimSpace(string(out))))
+	}
+
+	out, err := gitutil.RunGit(context.Background(), ledgerPath,
+		"commit", "-m", "chore: untrack and ignore .rej patch-reject artifacts")
+	if err != nil && !strings.Contains(out, "nothing to commit") && !strings.Contains(err.Error(), "nothing to commit") {
+		return FailedCheck(name, "commit failed after untracking",
+			fmt.Sprintf("git commit error: %s", strings.TrimSpace(err.Error())))
+	}
+
+	return PassedCheck(name, "untracked .rej files from ledger")
 }
 
 // checkLedgerURLAPIMatch compares the local ledger's git remote URL path against

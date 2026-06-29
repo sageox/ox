@@ -330,3 +330,65 @@ func TestEnsureCheckoutGitignore_WithSparseCheckout(t *testing.T) {
 	assert.Empty(t, strings.TrimSpace(string(output)),
 		"gitignore should be committed, not untracked")
 }
+
+// TestEnsureGitignoreBeforeCommit_IgnoresAndUntracksRej is the regression for
+// .rej patch-reject artifacts polluting ledger history. The class: any junk a
+// broad `git add -A` can sweep in must be ignored repo-wide and untracked once
+// detected. Failure prevented: blue-green GC `git apply --reject` artifacts
+// committed into the ledger forever.
+func TestEnsureGitignoreBeforeCommit_IgnoresAndUntracksRej(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	runGit(t, dir, "init", "--initial-branch=main")
+	runGit(t, dir, "config", "user.name", "test")
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "config", "commit.gpgsign", "false")
+
+	// commit a .rej deep in a session dir, mirroring the real pollution path
+	relRej := filepath.Join("sessions", "2026-01-01T00-00-x", "meta.json.rej")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, filepath.Dir(relRej)), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, relRej), []byte("<<<<<<< reject"), 0644))
+	runGit(t, dir, "add", relRej)
+	runGit(t, dir, "commit", "-m", "oops: committed a .rej")
+
+	require.True(t, RejFilesTracked(dir), "fixture should leave a tracked .rej")
+
+	EnsureGitignoreBeforeCommit(dir)
+
+	// untracked from the index (local file may remain; doctor deletes it)
+	assert.False(t, RejFilesTracked(dir), "EnsureGitignoreBeforeCommit must untrack .rej")
+
+	// *.rej now ignored repo-wide, so future adds skip it
+	out, err := exec.Command("git", "-C", dir, "check-ignore", relRej).CombinedOutput()
+	require.NoError(t, err, "check-ignore should match: %s", out)
+	assert.Equal(t, relRej, strings.TrimSpace(string(out)))
+
+	// commit the untrack (clears the staged deletion), then drop a FRESH .rej
+	// and prove a broad `git add -A` won't sweep it back into the index.
+	runGit(t, dir, "add", "-A")
+	runGit(t, dir, "commit", "-m", "untrack .rej")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, relRej), []byte("new reject"), 0644))
+	fresh := filepath.Join("sessions", "2026-02-02T00-00-y", "session.md.rej")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, filepath.Dir(fresh)), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, fresh), []byte("another"), 0644))
+
+	runGit(t, dir, "add", "-A")
+	staged, err := exec.Command("git", "-C", dir, "diff", "--cached", "--name-only").Output()
+	require.NoError(t, err)
+	assert.NotContains(t, string(staged), ".rej", "a broad add must not stage ignored .rej")
+	assert.False(t, RejFilesTracked(dir), "no .rej should be tracked after the sweep")
+}
+
+// TestEnsureRootGitignoreEntry_Idempotent verifies the root-.gitignore writer
+// appends once and is a no-op on repeat — so repeated daemon/doctor passes
+// don't grow the file.
+func TestEnsureRootGitignoreEntry_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, ensureRootGitignoreEntry(dir, "*.rej"))
+	require.NoError(t, ensureRootGitignoreEntry(dir, "*.rej"))
+	content, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(content), "*.rej"), "entry must be written exactly once")
+}

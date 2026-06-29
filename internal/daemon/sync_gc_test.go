@@ -554,3 +554,40 @@ func TestGC_ValidateLedgerGCClone_MissingSessions(t *testing.T) {
 
 	assert.False(t, s.validateLedgerGCClone(dir))
 }
+
+// TestRemoveRejFiles_SweepsTreebutSkipsGit verifies the gc .rej cleanup that
+// runs after `git apply --reject`: every .rej under the repo is deleted (so it
+// can't be committed or block GC), while anything under .git is left untouched.
+// Failure prevented: partial-apply conflict markers polluting ledger history.
+func TestRemoveRejFiles_SweepsTreeButSkipsGit(t *testing.T) {
+	dir := t.TempDir()
+	// .rej files at various depths
+	rejPaths := []string{
+		filepath.Join(dir, "a.rej"),
+		filepath.Join(dir, "sessions", "s1", "meta.json.rej"),
+		filepath.Join(dir, "sessions", "s2", "session.md.rej"),
+	}
+	for _, p := range rejPaths {
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0755))
+		require.NoError(t, os.WriteFile(p, []byte("reject"), 0644))
+	}
+	// a .rej inside .git must NOT be touched
+	gitRej := filepath.Join(dir, ".git", "keep.rej")
+	require.NoError(t, os.MkdirAll(filepath.Dir(gitRej), 0755))
+	require.NoError(t, os.WriteFile(gitRej, []byte("internal"), 0644))
+	// a non-.rej file must survive
+	keep := filepath.Join(dir, "sessions", "s1", "meta.json")
+	require.NoError(t, os.WriteFile(keep, []byte("real"), 0644))
+
+	n := removeRejFiles(dir)
+
+	assert.Equal(t, 3, n, "should remove exactly the 3 tree .rej files")
+	for _, p := range rejPaths {
+		_, err := os.Stat(p)
+		assert.True(t, os.IsNotExist(err), "%s should be deleted", p)
+	}
+	_, err := os.Stat(gitRej)
+	assert.NoError(t, err, ".git/*.rej must be preserved")
+	_, err = os.Stat(keep)
+	assert.NoError(t, err, "non-.rej files must survive")
+}

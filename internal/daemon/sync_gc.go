@@ -767,13 +767,47 @@ func (s *SyncScheduler) gcRestoreDiff(ctx context.Context, repoPath, diffFile st
 		return nil
 	}
 
-	// fall back to --reject (applies what it can, creates .rej for conflicts)
+	// fall back to --reject (applies what it can; conflicts go to .rej files)
 	if _, err := gitutil.RunGit(ctx, repoPath, "apply", "--reject", diffFile); err != nil {
 		return fmt.Errorf("git apply failed (diff preserved at %s): %w", diffFile, err)
 	}
 
-	s.logger.Warn("gc: restored uncommitted changes with conflicts (.rej files created)", "path", repoPath)
+	// Delete the .rej artifacts immediately. They are useless conflict markers
+	// that, left in the tree, get swept into ledger history by the broad
+	// `git add -A` commit paths AND keep the checkout permanently "dirty"
+	// (blocking future GC reclone). The complete change is still recoverable
+	// from diffFile, which we surface in the log.
+	removed := removeRejFiles(repoPath)
+	s.logger.Warn("gc: restored uncommitted changes with conflicts; discarded .rej markers",
+		"path", repoPath, "rej_removed", removed, "diff_preserved_at", diffFile)
 	return nil
+}
+
+// removeRejFiles deletes every *.rej file under repoPath (excluding .git) and
+// returns the count removed. Best-effort: individual delete failures are
+// skipped so one unreadable path can't abort the sweep.
+func removeRejFiles(repoPath string) int {
+	removed := 0
+	_ = filepath.WalkDir(repoPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// only regular files (skip symlinks) to avoid following a link out of
+		// the repo; the tree is ox-managed, not adversarial input.
+		if strings.HasSuffix(d.Name(), ".rej") && d.Type().IsRegular() {
+			if os.Remove(path) == nil { //nolint:gosec // G122: ox-managed repo tree, symlinks skipped above
+				removed++
+			}
+		}
+		return nil
+	})
+	return removed
 }
 
 // gcRestoreUntracked copies previously captured untracked files back into the repo.
