@@ -181,8 +181,9 @@ why: the table establishes the numbers (and where they come from, so the reviewe
 
 ## device-mockup
 use: the plan changes something the user sees — show the resulting UI state, don't describe it.
-why: a faithful mockup conveys the experience instantly; annotate in user language, never implementation detail.
+why: a faithful mockup conveys the experience instantly; annotate in user language, never implementation detail. `.device.ios` adds an iPhone-class frame (notch + home indicator); compose a screen from `.device-statusbar`, `.device-titlebar`, `.device-row`, and an iOS share/action sheet (`.device-sheet` + `.device-actions` + `.device-action`, with `.ox` marking the single highlighted destination — one accent per view). The screen stays dark in both themes.
 ```html
+<!-- bare frame: a single status -->
 <div class="device">
   <div class="device-screen">
     <div class="eyebrow">ox plan</div>
@@ -190,6 +191,26 @@ why: a faithful mockup conveys the experience instantly; annotate in user langua
     <p class="dim">Self-contained HTML · opened in your browser</p>
   </div>
 </div>
+```
+```html
+<!-- iPhone-class screen with an iOS share sheet (one highlighted destination) -->
+<div class="device ios">
+  <div class="device-screen">
+    <div class="device-statusbar"><span>9:41</span><span class="sb-r">5G ▰▰▰ 100%</span></div>
+    <div class="device-titlebar">Voice Memos<span class="tb-action">Share</span></div>
+    <div class="device-row"><span class="dr-ic">🎙️</span><span>Team sync<span class="dr-sub">18:24 · 14.2 MB</span></span></div>
+    <div class="device-sheet">
+      <div class="sheet-title">Send to…</div>
+      <div class="device-actions">
+        <div class="device-action"><span class="da-ic">✈️</span>AirDrop</div>
+        <div class="device-action"><span class="da-ic">💬</span>Messages</div>
+        <div class="device-action ox"><span class="da-ic">◎</span>SageOx</div>
+        <div class="device-action"><span class="da-ic">✉️</span>Mail</div>
+      </div>
+    </div>
+  </div>
+</div>
+<p class="dim">Tap Share in any app → pick SageOx. Annotate in user language, never a filename.</p>
 ```
 
 ## callout

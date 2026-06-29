@@ -7,7 +7,6 @@ import (
 	"html"
 	"html/template"
 	"log/slog"
-	"path"
 	"regexp"
 	"strings"
 	"sync"
@@ -279,16 +278,25 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 	if data.SignalCount != 1 {
 		data.Plural = "s"
 	}
+	// A signal anchors to the section(s) whose files it concerns. But a signal cited
+	// across most of the plan (a broadly-shared file) would stamp the same chip on
+	// every section — the repetition curation guards against — so it rolls into the
+	// single global coordination panel instead. The cap is PROPORTIONAL, not a fixed
+	// count: a file cited in 3 of 12 sections is still section-specific and anchors,
+	// while one cited in 3 of 3 globalizes (see tooBroadToAnchor).
 	for _, sig := range all {
-		matched := false
+		var hits []int
 		for i := range data.Sections {
 			if filesIntersect(sig.files, data.Sections[i].files) {
-				data.Sections[i].Signals = append(data.Sections[i].Signals, sig.renderSignal)
-				matched = true
+				hits = append(hits, i)
 			}
 		}
-		if !matched {
+		if len(hits) == 0 || tooBroadToAnchor(len(hits), len(data.Sections)) {
 			data.Signals = append(data.Signals, sig.renderSignal)
+			continue
+		}
+		for _, i := range hits {
+			data.Sections[i].Signals = append(data.Sections[i].Signals, sig.renderSignal)
 		}
 	}
 
@@ -481,18 +489,33 @@ func deterministicSignalsWithFiles(res Result, priorArtURL func(refKind, ref str
 	}
 	var out []signalWithFiles
 	for _, a := range res.Annotations {
-		if string(a.Kind) != "deterministic" {
+		if a.Kind != BadgeDeterministic {
 			continue
 		}
 		label, ok := labels[string(a.Type)]
 		if !ok {
 			continue
 		}
+		// humanize is the DEFAULT human projection — it strips agent-only provenance
+		// from any badge's Why, including future ones that never set HumanWhy (the
+		// durable floor TestRenderHTML_NoProvenanceLeaks enforces). HumanWhy overrides
+		// only for a genuine rewrite, not a strip. The raw Why stays intact on
+		// res.Annotations for the --json/agent path.
+		why := humanize(a.Why)
+		if a.HumanWhy != "" {
+			why = a.HumanWhy
+		}
+		// Suppress a raw "commit:<sha>" source from the human view — it is agent-
+		// only provenance. A real PR / web URL is kept. --json keeps SourceURL raw.
+		src := a.SourceURL
+		if strings.HasPrefix(src, "commit:") {
+			src = ""
+		}
 		sig := renderSignal{
 			Type:   string(a.Type),
 			Label:  label,
-			Why:    a.Why,
-			Source: a.SourceURL,
+			Why:    why,
+			Source: src,
 		}
 		// Prior-art entries link to the SageOx web view when the command layer
 		// supplied a resolver and it can build a URL for this source kind
@@ -505,29 +528,66 @@ func deterministicSignalsWithFiles(res Result, priorArtURL func(refKind, ref str
 	return out
 }
 
-// filesIntersect reports whether two file-reference lists name a common file,
-// comparing both the full ref and the basename (and ignoring a :line suffix), so
-// `internal/plan/render.go` matches `render.go:42`.
+// tooBroadToAnchor reports a signal cited so widely it belongs in the global panel
+// rather than repeating its chip per section: it must hit at least 3 sections AND
+// more than half of them. The proportional test keeps a file cited in 3 of 12
+// sections section-specific (anchors) while globalizing one cited in 3 of 3; the
+// floor of 3 means a signal in one or two sections is never treated as repetition.
+func tooBroadToAnchor(hits, sections int) bool {
+	return hits >= 3 && hits*2 > sections
+}
+
+// provenanceShapes are the agent-only provenance fragments a detector Why string
+// carries for the --json path but a human chip must never show: a
+// "(N commits, last touched …)" clause, a "— touched by N workspaces …" clause,
+// and a trailing "<N>h/<N>d ago" recency stamp. humanize strips them at render
+// time; the raw Why stays intact on the annotation for the agent path.
+var provenanceShapes = []*regexp.Regexp{
+	regexp.MustCompile(`\s*\([^)]*\b\d+\s+commits?\b[^)]*\)`),
+	regexp.MustCompile(`\s*[—-]\s*touched by \d+ workspaces?[^.;]*`),
+	regexp.MustCompile(`\s+\d+[hdwmy] ago\b`),
+}
+
+// humanize projects a detector Why into decision-first chip text by stripping the
+// known provenance shapes. It is the DEFAULT human projection: every deterministic
+// badge is cleaned, including future ones that never set HumanWhy — the durable
+// floor a forgotten HumanWhy can't breach. HumanWhy stays an override for a badge
+// whose human phrasing is a genuine rewrite (collision coordinate guidance, murmur
+// present-tense), not a mechanical strip.
+func humanize(why string) string {
+	out := why
+	for _, re := range provenanceShapes {
+		out = re.ReplaceAllString(out, "")
+	}
+	return strings.TrimRight(strings.TrimSpace(out), " —-,")
+}
+
+// filesIntersect reports whether two file-reference lists name a common file. A
+// bare basename in one list matches a fuller path in the other at a path boundary
+// ("render.go:42" matches "internal/plan/render.go"), but two DIFFERENT files that
+// merely share a basename do NOT match ("internal/auth/client.go" vs
+// "internal/lfs/client.go") — the basename collision that used to inflate the
+// per-section anchor count and wrongly globalize a narrowly-cited signal.
 func filesIntersect(a, b []string) bool {
-	if len(a) == 0 || len(b) == 0 {
-		return false
-	}
-	set := make(map[string]struct{}, len(a)*2)
-	for _, f := range a {
-		n := normalizeRef(f)
-		set[n] = struct{}{}
-		set[path.Base(n)] = struct{}{}
-	}
-	for _, f := range b {
-		n := normalizeRef(f)
-		if _, ok := set[n]; ok {
-			return true
-		}
-		if _, ok := set[path.Base(n)]; ok {
-			return true
+	for _, fa := range a {
+		na := normalizeRef(fa)
+		for _, fb := range b {
+			if refMatch(na, normalizeRef(fb)) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// refMatch matches two normalized refs as equal or as a path-boundary suffix of
+// one another, so "render.go" matches ".../plan/render.go" but "auth/client.go"
+// does not match "lfs/client.go".
+func refMatch(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return a == b || strings.HasSuffix(a, "/"+b) || strings.HasSuffix(b, "/"+a)
 }
 
 var lineSuffix = regexp.MustCompile(`:\d+$`)

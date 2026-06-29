@@ -61,13 +61,19 @@ const (
 
 // Annotation is a single badge attached to a plan section.
 type Annotation struct {
-	Section   string    `json:"section,omitempty"`
-	Kind      BadgeKind `json:"kind"`
-	Type      BadgeType `json:"type"`
-	Why       string    `json:"why"`
-	SourceURL string    `json:"source_url,omitempty"`
-	Expert    string    `json:"expert,omitempty"`
-	Files     []string  `json:"files,omitempty"`
+	Section string    `json:"section,omitempty"`
+	Kind    BadgeKind `json:"kind"`
+	Type    BadgeType `json:"type"`
+	Why     string    `json:"why"`
+	// HumanWhy is the curated, decision-first phrasing used in the HTML render. It
+	// drops agent-only provenance noise that Why carries for the --json/agent path
+	// (commit SHAs, relative timestamps like "12h ago", workspace counts). The
+	// renderer prefers HumanWhy when non-empty; --json keeps the raw Why intact.
+	// Empty means "use Why" — most annotations need no separate human phrasing.
+	HumanWhy  string   `json:"human_why,omitempty"`
+	SourceURL string   `json:"source_url,omitempty"`
+	Expert    string   `json:"expert,omitempty"`
+	Files     []string `json:"files,omitempty"`
 	// Date, Summary, RefKind carry the structured prior-art fields the renderer
 	// composes into a crisp "person · date · summary" link. Environment-
 	// independent (no URL), so they're safe to emit in `ox plan enrich --json`;
@@ -191,6 +197,13 @@ type Result struct {
 	// …), each renderable via `ox plan viz render <id> --data`. Empty when no
 	// section matched a pattern's use: signal strongly enough.
 	VizHints []VizHint `json:"viz_hints,omitempty"`
+	// MockupSection is the heading of the section that changes a user-facing
+	// surface (one the reader sees on screen), or "" when the plan changes nothing
+	// visible. Detected deterministically at enrich (mockupCues, precision-gated
+	// like the diagram hints) and surfaced in Guidance so every agent is told to
+	// show a mockup pre-authoring; the render-time craft lint only checks it was
+	// realized. Environment-independent, so it's safe in `ox plan enrich --json`.
+	MockupSection string `json:"mockup_section,omitempty"`
 	// Guidance is a concise, cross-agent authoring contract for rendering a
 	// fantastic HTML plan (decision-first, ten-minute reader, diagrams over
 	// prose). It folds in the DiagramHints so the agent gets plan-specific

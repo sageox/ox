@@ -201,10 +201,11 @@ func contentionCollisions(s *store.Store, want map[string]struct{}) []Annotation
 	var annotations []Annotation
 	for _, h := range hits {
 		annotations = append(annotations, Annotation{
-			Kind:  BadgeDeterministic,
-			Type:  BadgeCollision,
-			Why:   fmt.Sprintf("%s is contended — touched by %d workspaces recently", h.path, h.count),
-			Files: []string{h.path},
+			Kind:     BadgeDeterministic,
+			Type:     BadgeCollision,
+			Why:      fmt.Sprintf("%s is contended — touched by %d workspaces recently", h.path, h.count),
+			HumanWhy: fmt.Sprintf("%s — contended with other active work; coordinate before editing", h.path),
+			Files:    []string{h.path},
 		})
 	}
 	return annotations
@@ -259,11 +260,12 @@ func matchMurmurs(murmurs []ledger.MurmurFile, files []string, headings []string
 			}
 			seen[key] = struct{}{}
 			annotations = append(annotations, Annotation{
-				Kind:   BadgeDeterministic,
-				Type:   BadgeCollision,
-				Why:    fmt.Sprintf("%s murmured editing %s %s", who, matched, ago),
-				Expert: who,
-				Files:  []string{matched},
+				Kind:     BadgeDeterministic,
+				Type:     BadgeCollision,
+				Why:      fmt.Sprintf("%s murmured editing %s %s", who, matched, ago),
+				HumanWhy: fmt.Sprintf("%s is editing %s", who, matched),
+				Expert:   who,
+				Files:    []string{matched},
 			})
 		}
 	}
@@ -289,10 +291,11 @@ func matchMurmurs(murmurs []ledger.MurmurFile, files []string, headings []string
 		who := murmurAuthor(m)
 		ago := humanizeAgo(now.Sub(m.Timestamp.UTC()))
 		annotations = append(annotations, Annotation{
-			Kind:   BadgeDeterministic,
-			Type:   BadgeCollision,
-			Why:    fmt.Sprintf("%s murmured on topic %q %s", who, m.Topic, ago),
-			Expert: who,
+			Kind:     BadgeDeterministic,
+			Type:     BadgeCollision,
+			Why:      fmt.Sprintf("%s murmured on topic %q %s", who, m.Topic, ago),
+			HumanWhy: fmt.Sprintf("%s is discussing %q", who, m.Topic),
+			Expert:   who,
 		})
 	}
 

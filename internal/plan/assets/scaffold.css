@@ -40,7 +40,7 @@ nav.toc a.active{color:var(--ink);border-left-color:var(--sage)}
 main{padding:40px 46px 120px;min-width:0}
 /* hold prose to a readable measure (~72-80ch); let wide visuals opt out */
 main>section,main>.tldr,main>.ox-enrich,main>.rev-status,main>.eyebrow,main>h1,main>.foot{max-width:780px}
-main>section .mermaid,main>section .swim,main>section .statrow,main>section .barc,main>section table.heat,main>section .multiples,main>section .pbar-fig,main>section .pmapv,main>section .linec{max-width:none}
+main>section .mermaid,main>section .swim,main>section .statrow,main>section .barc,main>section table.heat,main>section .multiples,main>section .pbar-fig,main>section .pmapv,main>section .linec,main>section .device-row-wrap{max-width:none}
 .eyebrow{font-family:"JetBrains Mono",monospace;font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--copper)}
 h1{font-family:"Space Grotesk",sans-serif;font-weight:700;font-size:40px;line-height:1.1;letter-spacing:-.035em;margin:.2em 0 .35em}
 h2{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:23px;letter-spacing:-.02em;margin:2.2em 0 .2em;padding-bottom:.3em;border-bottom:1px solid var(--hair)}
@@ -113,8 +113,10 @@ td.v-bad{color:var(--red);font-weight:600}
 .swim{display:flex;flex-direction:column;gap:6px;margin:14px 0}
 .swim .lane{display:grid;grid-template-columns:120px 1fr;align-items:center;gap:10px}
 .swim .lane-name{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);text-align:right}
-.swim .track{position:relative;height:24px;background:var(--panel);border:1px solid var(--hair2);border-radius:6px;background-image:repeating-linear-gradient(90deg,transparent 0,transparent 9.9%,var(--hair2) 10%,var(--hair2) 10.1%)}
-.swim .bar{position:absolute;top:3px;height:18px;border-radius:4px;font-size:10.5px;color:#0c1112;display:flex;align-items:center;padding:0 6px;white-space:nowrap;overflow:hidden}
+.swim .track{position:relative;height:26px;background:var(--panel);border:1px solid var(--hair2);border-radius:6px;background-image:repeating-linear-gradient(90deg,transparent 0,transparent 9.9%,var(--hair2) 10%,var(--hair2) 10.1%)}
+.swim .lane:hover .track{border-color:var(--hair)}
+.swim .bar{position:absolute;top:3px;height:20px;border-radius:4px;font-size:10.5px;font-weight:600;color:#0c1112;display:flex;align-items:center;padding:0 7px;white-space:nowrap;overflow:hidden;transition:filter .14s}
+.swim .bar:hover{filter:brightness(1.13)}
 .swim .gate{position:absolute;top:0;color:var(--copper);font-size:16px;transform:translateX(-50%)}
 .swim .mark{position:absolute;top:0;line-height:24px;font-size:13px;transform:translateX(-50%);white-space:nowrap}
 .swim .anno{position:absolute;top:3px;line-height:18px;font-size:10px;color:var(--dim);white-space:nowrap}
@@ -142,10 +144,43 @@ html[data-theme="light"] table.heat td.h2{background:rgba(168,97,59,.20)}
 html[data-theme="light"] table.heat td.h3{background:rgba(180,115,12,.24)}
 html[data-theme="light"] table.heat td.h4{background:rgba(193,53,47,.24)}
 html[data-theme="light"] ul.ftree .chg{border:1px solid var(--hair)}
-/* device mockup frame (stays dark in both themes) */
+/* device mockup frame — a primitive shell for agent-authored UI mockups; the
+   screen stays dark in both themes (a phone screen reads dark in real life). The
+   bare .device is a generic frame; .device.ios adds iPhone-class chrome (notch +
+   home indicator); .device-statusbar / -titlebar / -sheet / -actions / -row
+   compose common screens (a list, a share sheet, a notification). Author the
+   screen CONTENT inline — ox renders it verbatim. See `ox plan viz device-mockup`. */
 .device{max-width:300px;margin:14px 0;background:#0c1112;border:1px solid var(--hair);border-radius:16px;padding:10px;box-shadow:var(--shadow)}
-.device-screen{background:#11171a;border:1px solid var(--hair2);border-radius:10px;padding:18px 16px;color:#e6edf0}
+.device-screen{position:relative;background:#11171a;border:1px solid var(--hair2);border-radius:10px;padding:18px 16px;color:#e6edf0}
 .device-screen .dim{color:#9fb0b6;font-size:13px;margin:.3em 0 0}
+/* a mockup beside its caption — the wrapper opts out of the prose measure */
+.device-row-wrap{display:flex;gap:22px;align-items:flex-start;flex-wrap:wrap;margin:14px 0}
+.device-row-wrap .device{margin:0}.device-row-wrap .cap{flex:1;min-width:220px;font-size:13.5px;color:var(--dim)}
+/* iPhone-class frame: notch (dynamic island) + home indicator */
+.device.ios{max-width:300px;background:#05080a;border:1px solid #283238;border-radius:46px;padding:11px}
+.device.ios .device-screen{border-radius:36px;padding:42px 16px 30px;min-height:430px;overflow:hidden}
+.device.ios .device-screen::before{content:"";position:absolute;top:13px;left:50%;transform:translateX(-50%);width:92px;height:26px;background:#05080a;border-radius:14px}
+.device.ios .device-screen::after{content:"";position:absolute;bottom:9px;left:50%;transform:translateX(-50%);width:118px;height:4px;background:#3a464c;border-radius:3px}
+/* status bar (time left · signal/battery right) */
+.device-statusbar{display:flex;justify-content:space-between;align-items:center;font-family:"JetBrains Mono",monospace;font-size:11px;color:#cfd9dd;margin:-6px 0 12px}
+.device-statusbar .sb-r{letter-spacing:.06em}
+/* app title bar (back chevron / title / trailing action) */
+.device-titlebar{display:flex;align-items:center;gap:8px;font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:15px;color:#e6edf0;padding-bottom:10px;margin-bottom:10px;border-bottom:1px solid #222c30}
+.device-titlebar .tb-action{margin-left:auto;color:#7aaa77;font-size:13px;font-weight:500}
+/* iOS-style share / action sheet pinned to the bottom of the screen */
+.device-sheet{background:#1b2327;border:1px solid #2a3439;border-radius:16px 16px 10px 10px;padding:14px 12px;margin:16px -8px -22px}
+.device-sheet .sheet-title{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:13px;color:#e6edf0;margin-bottom:10px}
+/* horizontal row of share targets / actions */
+.device-actions{display:flex;gap:14px;overflow:hidden}
+.device-action{display:flex;flex-direction:column;align-items:center;gap:5px;font-size:9.5px;color:#9fb0b6;width:54px;flex:none}
+.device-action .da-ic{width:48px;height:48px;border-radius:13px;background:#2a3439;display:flex;align-items:center;justify-content:center;font-size:20px}
+/* the SageOx destination is the single highlighted one (one accent per view) */
+.device-action.ox{color:#e6edf0;font-weight:600}
+.device-action.ox .da-ic{background:linear-gradient(150deg,#7a8f78,#56745a);color:#05080a;box-shadow:0 0 0 2px #e0a56a}
+/* generic list row inside a screen */
+.device-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid #222c30;font-size:13px}
+.device-row .dr-ic{width:30px;height:30px;border-radius:8px;background:#263035;display:flex;align-items:center;justify-content:center;font-size:15px;flex:none}
+.device-row .dr-sub{display:block;color:#9fb0b6;font-size:11px;font-family:"JetBrains Mono",monospace}
 /* bar chart / cost waterfall */
 .barc{margin:14px 0}
 .barc figcaption{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);margin-bottom:8px}

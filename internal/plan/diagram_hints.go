@@ -398,6 +398,38 @@ func topVizCues(hits []string, n int) []string {
 	return out
 }
 
+// mockupCues mark a section that changes a user-FACING surface — one the reader
+// would see on a screen. Deliberately NARROW (distinctive surface nouns, not a
+// generic UI-word bag) so a backend plan that merely mentions a "component" or a
+// "notification service" does not trip it. The decisive precision lever is the
+// heading-double weight in scoreVizSection: a section TITLED "Onboarding screen"
+// scores 2 and fires; an incidental "screen" in body prose scores 1 and does not.
+// Kept here in the hint engine — alongside diagramCueRules / branchCues — not in
+// the render lint, so detection is a cross-agent enrich signal, not a Claude belt.
+var mockupCues = []string{
+	"mockup", "wireframe", "onboarding", "share sheet", "share-sheet",
+	"bottom sheet", "screen", "modal", "empty state", "microcopy",
+	"screenshot", "user-facing", "swipe",
+}
+
+// computeMockupExpectation returns the heading of the first section that reads as
+// a user-facing surface worth a mockup, or "" when the plan changes nothing the
+// user sees. Same precision discipline as the diagram/viz hints (minVizScore,
+// heading match counts double via scoreVizSection). Surfaced at enrich
+// (Result.MockupSection + Guidance) so EVERY agent gets it pre-authoring; the
+// render craft lint only checks whether it was realized.
+func computeMockupExpectation(in Input) string {
+	for _, sec := range in.Sections {
+		if strings.TrimSpace(sec.Heading) == "" {
+			continue
+		}
+		if score, _ := scoreVizSection(sec.Heading, sec.Body, mockupCues); score >= minVizScore {
+			return sec.Heading
+		}
+	}
+	return ""
+}
+
 // buildGuidance produces the concise, cross-agent authoring contract surfaced in
 // `ox plan enrich --json` (Result.Guidance). It is deliberately lean — a checklist, not
 // the 259-line skill spec — and folds in the plan-specific diagram hints so the
@@ -409,7 +441,7 @@ func topVizCues(hits []string, n int) []string {
 // or control, and there may be several) structurally cannot. Specific evidence the
 // agent can verify beats a generic pitch, and wins on a capability competitors
 // lack rather than trying to out-style them.
-func buildGuidance(in Input, sig SignalSummary, hints []DiagramHint, vizHints []VizHint) string {
+func buildGuidance(in Input, sig SignalSummary, hints []DiagramHint, vizHints []VizHint, mockup string) string {
 	if len(in.Sections) == 0 {
 		return ""
 	}
@@ -442,6 +474,11 @@ func buildGuidance(in Input, sig SignalSummary, hints []DiagramHint, vizHints []
 		}
 		b.WriteString(strings.Join(parts, "; "))
 		b.WriteString(".")
+	}
+	if mockup != "" {
+		// A user-facing surface — show the resulting UI state, don't describe it.
+		line := fmt.Sprintf(" This plan changes a user-facing surface (%q) — show the resulting UI state with a mockup (`ox plan viz device-mockup`), not prose.", mockup)
+		b.WriteString(line)
 	}
 	return b.String()
 }

@@ -1,6 +1,9 @@
 package plan
 
-import "log/slog"
+import (
+	"log/slog"
+	"strings"
+)
 
 // RecordPlanGenerated emits a single-line, key=value structured metric for a
 // completed `ox plan` enrichment. It is purely local observability — there is
@@ -21,5 +24,28 @@ func RecordPlanGenerated(res Result, saved bool) {
 		"annotations", len(res.Annotations),
 		"context_items", len(res.Context),
 		"saved", saved,
+	)
+}
+
+// RecordPlanCraft emits the design-craft realization metric for a rendered plan:
+// how many visual craft expectations ox produced (a diagram suggested, a
+// user-facing surface detected) and how many the render actually realized. The
+// hints_emitted vs hints_realized ratio, aggregated across the ledger, is the
+// visual-enrichment "did the agent act on the hint" rate — the tachometer for
+// whether enrichment changes what gets drawn, not just what gets suggested. No
+// plan content is recorded, only counts and the unrealized rule names. A render
+// with no craft expectation is silent (nothing to measure).
+func RecordPlanCraft(rep CraftReport) {
+	if rep.Emitted == 0 {
+		return
+	}
+	gaps := make([]string, 0, len(rep.Gaps))
+	for _, g := range rep.Gaps {
+		gaps = append(gaps, g.Rule)
+	}
+	slog.Info("plan_craft",
+		"hints_emitted", rep.Emitted,
+		"hints_realized", rep.Realized,
+		"gaps", strings.Join(gaps, ","),
 	)
 }

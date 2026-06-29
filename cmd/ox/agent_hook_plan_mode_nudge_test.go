@@ -102,6 +102,30 @@ func TestEmitPlanHint_NonClaudeNoOpOnNeutralPrompt(t *testing.T) {
 	assert.NoFileExists(t, planModeHintPath(projectRoot, agentID))
 }
 
+// TestEmitPlanHint_FiresOnBlindPlanModePrompt is the behavioral guarantee that
+// matters most: a user who NEVER mentions "ox", "SageOx", "plan", "enrich", or
+// "render" — who only enters plan mode — is still steered into the SageOx
+// enrichment workflow. The steer keys on permission_mode, not on the prompt naming
+// the tool, so an unsuspecting prompt gets the team-context on-ramp. Failure
+// prevented: enrichment only ever reaches users who already knew to ask for it.
+//
+// This is the UNIT tier — it proves the nudge fires. The true end-to-end (a real
+// agent then actually invokes `ox plan enrich` and SageOx context appears in the
+// output) lives in sageox/ox-test-harness; see .claude/rules/testing.md.
+func TestEmitPlanHint_FiresOnBlindPlanModePrompt(t *testing.T) {
+	projectRoot := planNudgeProject(t)
+	agentID := "Oxblind"
+	// No ox / SageOx / plan / enrich / render / html word anywhere in the prompt.
+	blind := []byte(`{"permission_mode":"plan","prompt":"okay, let's begin building the new feature"}`)
+
+	var buf bytes.Buffer
+	emitPlanHint(&buf, projectRoot, agentID, blind)
+	got := buf.String()
+	require.Contains(t, got, "ox plan enrich --json", "a blind plan-mode prompt must still steer to enrich")
+	assert.Contains(t, got, "Plan mode —", "must use the in-draft plan-mode lead")
+	assert.FileExists(t, planModeHintPath(projectRoot, agentID))
+}
+
 // TestEmitPlanHint_EmptyArgs verifies path/emit are safe with empty inputs.
 func TestEmitPlanHint_EmptyArgs(t *testing.T) {
 	assert.Empty(t, planModeHintPath("", "Oxa"))

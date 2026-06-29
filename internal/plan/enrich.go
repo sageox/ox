@@ -92,17 +92,19 @@ func Enrich(ctx context.Context, in Input, gitRoot string) Result {
 	// section and a decision-first render. Computed from the parsed input only.
 	hints := computeDiagramHints(in)
 	vizHints := computeVizHints(in)
+	mockup := computeMockupExpectation(in)
 	sum := summarize(annotations, in)
 
 	return Result{
-		Annotations:  annotations,
-		Context:      items,
-		Signals:      sum,
-		DiagramHints: hints,
-		VizHints:     vizHints,
+		Annotations:   annotations,
+		Context:       items,
+		Signals:       sum,
+		DiagramHints:  hints,
+		VizHints:      vizHints,
+		MockupSection: mockup,
 		// Guidance leads with the plan-specific signals (sum) so the agent sees
 		// what a self-authored render would drop — see buildGuidance.
-		Guidance: buildGuidance(in, sum, hints, vizHints),
+		Guidance: buildGuidance(in, sum, hints, vizHints, mockup),
 	}
 }
 
@@ -203,7 +205,7 @@ func sortDedupeAnnotations(annotations []Annotation) []Annotation {
 	seen := make(map[string]struct{}, len(annotations))
 	deduped := make([]Annotation, 0, len(annotations))
 	for _, a := range annotations {
-		key := a.Section + "\x00" + string(a.Type) + "\x00" + a.Why + "\x00" + a.SourceURL + "\x00" + a.Expert
+		key := a.Section + "\x00" + string(a.Type) + "\x00" + a.Why + "\x00" + a.HumanWhy + "\x00" + a.SourceURL + "\x00" + a.Expert
 		if _, ok := seen[key]; ok {
 			continue
 		}

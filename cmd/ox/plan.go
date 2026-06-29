@@ -548,6 +548,14 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact
 	for _, f := range plan.LintMermaidMarkdown(in.Raw) {
 		cli.PrintHint(fmt.Sprintf("plan-diagram [%s]: %s", f.Rule, f.Message))
 	}
+	// Cross-agent design-craft check: did the render realize the visual craft ox
+	// expected at enrich (a suggested diagram, a user-facing surface)? Record the
+	// hint→realization metric, then surface any gaps as advisory nudges — never blocks.
+	craft := plan.CraftRealization(result, htmlBytes)
+	plan.RecordPlanCraft(craft)
+	for _, f := range craft.Gaps {
+		cli.PrintHint(fmt.Sprintf("plan-craft [%s]: %s", f.Rule, f.Message))
+	}
 	// Artifact mode is a pure export target — leave the ledger's canonical
 	// (review-capable) render untouched, and check the page is CSP-clean.
 	savedDir := ""

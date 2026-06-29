@@ -165,3 +165,86 @@ func LintBranding(html []byte, res Result) []BrandingFinding {
 
 	return findings
 }
+
+// craftDeviceRe detects whether the rendered page carries a device mockup. The
+// diagram side is the broader "any visual present" predicate (vizPresenceRe).
+var craftDeviceRe = regexp.MustCompile(`class="device`)
+
+// vizPresenceRe matches ANY visual the plan renderer can emit: a Mermaid or
+// swimlane diagram, an inline SVG chart (donut/radar/line/treemap/sankey/chord/
+// sparkline all emit <svg), or a hand-authored viz container. Defined in ONE place
+// and drift-guarded by TestAnyVizPresent_CoversRenderers, so a renderer whose
+// output it can't see fails CI rather than silently re-opening the missing-diagram
+// false-positive — nagging a plan that DID visualize, just not in Mermaid.
+var vizPresenceRe = regexp.MustCompile(`<svg|class="(?:mermaid|swim|barc|linec|riskm|statrow|ftree|heat|multiples|spark|ba|pbar-fig|pmapv|donut|radar|quad|tmap|sankey|chord|device)`)
+
+// anyVizPresent reports whether the rendered page drew at least one visual.
+func anyVizPresent(html string) bool { return vizPresenceRe.MatchString(html) }
+
+// CraftReport is the realization side of the design-craft check: how many craft
+// expectations enrich produced (a diagram suggested, a user-facing surface
+// detected) and how many the rendered page realized. The render path records it as
+// the `plan_craft` metric — hints_emitted vs hints_realized, aggregated across the
+// ledger, is the "did the agent act on the visual hint" rate — and surfaces the
+// unrealized Gaps as advisory nudges.
+type CraftReport struct {
+	Emitted  int
+	Realized int
+	Gaps     []Finding
+}
+
+// CraftRealization compares what ox EXPECTED (computed at enrich, surfaced
+// cross-agent in Result.Guidance) against what the page DREW. Detection lives at
+// enrich (DiagramHints / MockupSection); this is the thin, belt-and-suspenders
+// realization check for an agent already in the ox render flow — NOT the primary
+// cross-agent lever. Fail-open: an empty page yields a zero report. Precision over
+// recall: a diagram expectation is met by ANY visual (a chart counts — "show,
+// don't tell" holds even when the form differs from the hint), so a
+// well-visualized plan is never nagged for the wrong diagram shape.
+func CraftRealization(res Result, htmlBytes []byte) CraftReport {
+	var rep CraftReport
+	if len(htmlBytes) == 0 {
+		return rep
+	}
+	h := string(htmlBytes)
+	hasViz := anyVizPresent(h)
+
+	// ox suggested a diagram somewhere — realized if the page drew any visual.
+	if len(res.DiagramHints) > 0 {
+		rep.Emitted++
+		if hasViz {
+			rep.Realized++
+		} else {
+			d := res.DiagramHints[0]
+			rep.Gaps = append(rep.Gaps, Finding{
+				Rule: "craft.missing-diagram",
+				Message: fmt.Sprintf(
+					`ox suggested a %s for "%s" (%s) but the plan drew no diagram or chart — a hero visual makes the shape readable in seconds (see `+"`ox plan viz`"+`)`,
+					d.SuggestedType, d.Section, d.Reason),
+			})
+		}
+	}
+
+	// The plan changes a user-facing surface (detected at enrich) — realized only
+	// by an actual device mockup.
+	if res.MockupSection != "" {
+		rep.Emitted++
+		if craftDeviceRe.MatchString(h) {
+			rep.Realized++
+		} else {
+			rep.Gaps = append(rep.Gaps, Finding{
+				Rule: "craft.missing-mockup",
+				Message: fmt.Sprintf(
+					`"%s" changes a user-facing surface but the plan has no mockup — show the resulting UI state inline (`+"`ox plan viz device-mockup`"+`), don't describe it in prose`,
+					res.MockupSection),
+			})
+		}
+	}
+	return rep
+}
+
+// LintCraft is the advisory view of CraftRealization — the unrealized craft gaps,
+// printed (never blocking) after a render.
+func LintCraft(res Result, htmlBytes []byte) []Finding {
+	return CraftRealization(res, htmlBytes).Gaps
+}
