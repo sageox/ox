@@ -236,6 +236,8 @@ table.flagm td:first-child{font-family:"JetBrains Mono",monospace;font-size:12px
 .rev-bar .rev-toggle.on{background:var(--sage);border-color:var(--sage);color:#0c1112}
 .rev-bar .rev-submit{border-color:var(--copper);color:var(--copper)}
 .rev-bar .rev-count{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--faint)}
+.rev-bar .rev-who{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--faint)}
+.rev-bar .rev-who:hover{color:var(--sage);border-color:var(--sage)}
 body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.rev-on tr:hover,body.rev-on .ox-chip:hover,body.rev-on .stat:hover,body.rev-on .bar-row:hover{outline:1px dashed var(--sage);outline-offset:2px;cursor:crosshair}
 /* inline mark glyph — redundant encoding: distinct GLYPH per status, color reinforces (never color alone) */
 .rev-marked,.rev-committed{position:relative;box-shadow:inset 3px 0 0 var(--hair)}
@@ -291,6 +293,7 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .rev-rail-body{min-width:0;flex:1}
 .rev-rail-sec{display:flex;align-items:center;gap:6px;margin-bottom:3px}
 .rev-rail-sec-t{flex:1;min-width:0;font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rev-rail-who{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair2);color:var(--sage);text-transform:none;letter-spacing:0;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rev-rail-note{font-size:12.5px;color:var(--ink);line-height:1.45;overflow-wrap:anywhere}
 .rev-rail-note.muted{color:var(--dim)}
 .rev-rail-tag{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair2);color:var(--dim);text-transform:uppercase;letter-spacing:.02em}

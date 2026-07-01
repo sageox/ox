@@ -74,12 +74,13 @@ type RenderOptions struct {
 // reviewStateItem is the slim per-item shape injected into the page for the
 // review layer to paint inline. state is open|addressed|verified|wontfix.
 type reviewStateItem struct {
-	Anchor  string `json:"anchor"`
-	Section string `json:"section,omitempty"`
-	Label   string `json:"label"`
-	Status  string `json:"status"`
-	State   string `json:"state"`
-	Note    string `json:"note,omitempty"`
+	Anchor   string `json:"anchor"`
+	Section  string `json:"section,omitempty"`
+	Label    string `json:"label"`
+	Status   string `json:"status"`
+	State    string `json:"state"`
+	Note     string `json:"note,omitempty"`
+	Reviewer string `json:"reviewer,omitempty"`
 }
 
 // mermaid fences come out of goldmark as <pre><code class="language-mermaid">…;

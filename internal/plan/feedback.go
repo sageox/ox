@@ -1,6 +1,8 @@
 package plan
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,18 @@ import (
 	"strings"
 	"time"
 )
+
+// randSuffix returns a short random hex tag for a round filename, so two reviewers
+// submitting in the same nanosecond never clobber each other's round. Falls back to
+// a fixed tag only if the OS entropy source fails (the timestamp still disambiguates
+// the common case); uniqueness degrades gracefully, it never errors the save.
+func randSuffix() string {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "00000000"
+	}
+	return hex.EncodeToString(b)
+}
 
 // feedback.go is the ledger side of the agent-driven plan review loop. The agent
 // renders the plan, a reviewer marks up sections / risks / decisions in the
@@ -71,11 +85,12 @@ func validResolutionState(s ResolutionState) bool {
 // itself the signal the item was addressed. Anchor doubles as the item id used
 // by `ox plan feedback resolve`.
 type FeedbackItem struct {
-	Anchor  string         `json:"anchor"`            // stable content-hash id, e.g. "h3f9a1c2"
-	Section string         `json:"section,omitempty"` // section heading the element sits under
-	Label   string         `json:"label"`             // short text of the element
-	Status  FeedbackStatus `json:"status"`            // approve | request-change | flag | comment
-	Note    string         `json:"note,omitempty"`    // the reviewer's comment
+	Anchor   string         `json:"anchor"`             // stable content-hash id, e.g. "h3f9a1c2"
+	Section  string         `json:"section,omitempty"`  // section heading the element sits under
+	Label    string         `json:"label"`              // short text of the element
+	Status   FeedbackStatus `json:"status"`             // approve | request-change | flag | comment
+	Note     string         `json:"note,omitempty"`     // the reviewer's comment
+	Reviewer string         `json:"reviewer,omitempty"` // who left this mark (multi-user); stamped from the round on save
 }
 
 // FeedbackSet is one review round (one submit from the page).
@@ -153,11 +168,21 @@ func SaveFeedback(planDir string, set FeedbackSet, now time.Time) (string, error
 	if set.CreatedAt.IsZero() {
 		set.CreatedAt = now.UTC()
 	}
+	// stamp the round's reviewer onto each item so the merge can attribute marks
+	// per-author (multi-user): two reviewers marking the same anchor are both kept.
+	for i := range set.Items {
+		if set.Items[i].Reviewer == "" {
+			set.Items[i].Reviewer = set.Reviewer
+		}
+	}
 	dir := filepath.Join(planDir, feedbackSubdir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create feedback dir: %w", err)
 	}
-	name := "round-" + now.UTC().Format("20060102-150405.000000000") + ".json"
+	// timestamp prefix keeps rounds chronologically sortable by filename; a random
+	// suffix makes concurrent multi-user submits collision-proof (two reviewers can
+	// submit in the same nanosecond).
+	name := "round-" + now.UTC().Format("20060102-150405.000000000") + "-" + randSuffix() + ".json"
 	path := filepath.Join(dir, name)
 	b, err := json.MarshalIndent(set, "", "  ")
 	if err != nil {
@@ -274,21 +299,30 @@ func AssembleReview(planDir string) ([]MergedItem, error) {
 		return nil, err
 	}
 
-	// latest mark per anchor (rounds are chronological)
-	latestItem := map[string]FeedbackItem{}
-	raisedAt := map[string]time.Time{}
-	var order []string
+	// latest mark per (anchor, reviewer): multi-user — two reviewers marking the
+	// same anchor are BOTH preserved (keying by anchor alone silently dropped one).
+	// With a single/anonymous reviewer the key collapses to per-anchor, so existing
+	// single-user behavior is unchanged.
+	type markKey struct{ anchor, reviewer string }
+	latestItem := map[markKey]FeedbackItem{}
+	raisedAt := map[markKey]time.Time{}
+	var order []markKey
 	for _, set := range sets {
 		for _, it := range set.Items {
-			if _, seen := latestItem[it.Anchor]; !seen {
-				order = append(order, it.Anchor)
+			if it.Reviewer == "" {
+				it.Reviewer = set.Reviewer // rounds saved before per-item stamping carried it on the set
 			}
-			latestItem[it.Anchor] = it
-			raisedAt[it.Anchor] = set.CreatedAt
+			k := markKey{it.Anchor, it.Reviewer}
+			if _, seen := latestItem[k]; !seen {
+				order = append(order, k)
+			}
+			latestItem[k] = it
+			raisedAt[k] = set.CreatedAt
 		}
 	}
 
-	// latest resolution per anchor
+	// latest resolution per anchor: the agent resolves the underlying element, which
+	// closes every reviewer's mark on that anchor unless a later round re-raises it.
 	latestRes := map[string]Resolution{}
 	for _, r := range resolutions {
 		if cur, ok := latestRes[r.Anchor]; !ok || r.At.After(cur.At) {
@@ -297,9 +331,9 @@ func AssembleReview(planDir string) ([]MergedItem, error) {
 	}
 
 	out := make([]MergedItem, 0, len(order))
-	for _, anchor := range order {
-		mi := MergedItem{FeedbackItem: latestItem[anchor], RaisedAt: raisedAt[anchor], Open: true}
-		if r, ok := latestRes[anchor]; ok {
+	for _, k := range order {
+		mi := MergedItem{FeedbackItem: latestItem[k], RaisedAt: raisedAt[k], Open: true}
+		if r, ok := latestRes[k.anchor]; ok {
 			rc := r
 			mi.Resolution = &rc
 			// re-raised after resolution → open again
@@ -308,6 +342,32 @@ func AssembleReview(planDir string) ([]MergedItem, error) {
 		out = append(out, mi)
 	}
 	return out, nil
+}
+
+// ContestedAnchors returns the set of anchors where OPEN reviewer verdicts conflict
+// — e.g. one reviewer approves while another requests a change. These are the marks
+// a human authorizer must reconcile before the plan is safe to execute (ADR-026).
+// Comment-only marks never contest; an approve alongside any change/flag does.
+func ContestedAnchors(items []MergedItem) map[string]bool {
+	byAnchor := map[string]map[FeedbackStatus]bool{}
+	for _, it := range items {
+		if !it.Open || it.Status == FeedbackComment {
+			continue
+		}
+		if byAnchor[it.Anchor] == nil {
+			byAnchor[it.Anchor] = map[FeedbackStatus]bool{}
+		}
+		byAnchor[it.Anchor][it.Status] = true
+	}
+	contested := map[string]bool{}
+	for anchor, verdicts := range byAnchor {
+		approve := verdicts[FeedbackApprove]
+		change := verdicts[FeedbackRequestChange] || verdicts[FeedbackFlag]
+		if approve && change {
+			contested[anchor] = true
+		}
+	}
+	return contested
 }
 
 // FeedbackDigest renders a compact, agent-readable summary from the merged view:
@@ -339,15 +399,25 @@ func FeedbackDigest(items []MergedItem) string {
 			wontfix++
 		}
 	}
+	contested := ContestedAnchors(items)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Review: %d open · %d addressed · %d verified · %d wontfix · %d approvals\n",
 		open, addressed, verified, wontfix, approvals)
+	if len(contested) > 0 {
+		fmt.Fprintf(&b, "⚠ %d contested anchor(s) — reviewers disagree; reconcile before executing.\n", len(contested))
+	}
 	for _, it := range openItems {
 		label := it.Label
 		if label == "" {
 			label = it.Anchor
 		}
 		fmt.Fprintf(&b, "  [%s] (%s) %s", it.Status, it.Anchor, label)
+		if it.Reviewer != "" {
+			fmt.Fprintf(&b, " @%s", it.Reviewer)
+		}
+		if contested[it.Anchor] {
+			b.WriteString(" ⚠contested")
+		}
 		if it.Section != "" {
 			fmt.Fprintf(&b, " · §%s", it.Section)
 		}

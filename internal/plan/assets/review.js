@@ -25,17 +25,22 @@
 
   var marks = load();
   var committed = parseCommitted();
+  var reviewer = (localStorage.getItem('ox-plan-reviewer') || '').trim(); // multi-user: who you are
   var on = false;
   var pendingReload = false;
 
   function load() { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { return {}; } }
   function save() { try { localStorage.setItem(KEY, JSON.stringify(marks)); } catch (e) {} }
   function parseCommitted() {
+    // anchor -> [mark, …]: multi-user, so several reviewers on one anchor all show.
     var el = document.getElementById('ox-review-state');
     if (!el) return {};
-    try { var a = JSON.parse(el.textContent || '[]'); var m = {}; a.forEach(function (x) { m[x.anchor] = x; }); return m; }
+    try { var a = JSON.parse(el.textContent || '[]'); var m = {}; a.forEach(function (x) { (m[x.anchor] = m[x.anchor] || []).push(x); }); return m; }
     catch (e) { return {}; }
   }
+  // repOf picks the representative mark for an anchor's inline glyph: an
+  // addressed/verified mark wins (show ✓), else the first.
+  function repOf(arr) { for (var i = 0; i < arr.length; i++) { if (arr[i].state === 'addressed' || arr[i].state === 'verified') return arr[i]; } return arr[0]; }
   function post(path, payload, ok) {
     fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Review-Token': token }, body: JSON.stringify(payload) })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); if (ok) ok(); })
@@ -53,7 +58,7 @@
   function anchorFor(el) { return 'h' + fnv1a(norm(headingOf(el)) + '\u0000' + norm(anchorText(el))); }
   function glyphFor(id) { for (var i = 0; i < STATUS.length; i++) if (STATUS[i].id === id) return STATUS[i].glyph; return '◌'; }
   function labelFor(el) { var t = (el.textContent || '').replace(/\s+/g, ' ').trim(); return t.length > 70 ? t.slice(0, 69) + '…' : t; }
-  function committedState(el) { var c = committed[anchorFor(el)]; return c ? c.state : ''; }
+  function committedState(el) { var arr = committed[anchorFor(el)] || []; return arr.length ? repOf(arr).state : ''; }
 
   function paint() {
     document.querySelectorAll('.rev-marked,.rev-committed').forEach(function (el) {
@@ -63,7 +68,8 @@
     var seen = {};
     document.querySelectorAll(SELECTOR).forEach(function (el) {
       var a = anchorFor(el);
-      var c = committed[a], m = marks[a];
+      var carr = committed[a] || [];
+      var c = carr.length ? repOf(carr) : null, m = marks[a];
       if (!c && !m) return;
       if (c) seen[a] = true;
       var status = m ? m.status : c.status;
@@ -72,7 +78,8 @@
       if (c && !m) {
         el.classList.add('rev-committed'); el.setAttribute('data-revstate', c.state);
         glyph.textContent = (c.state === 'addressed' || c.state === 'verified') ? '✓' : (c.state === 'wontfix' ? '—' : glyphFor(status));
-        glyph.title = c.state + (c.note ? (' — ' + c.note) : '');
+        var who = carr.map(function (x) { return x.reviewer || 'someone'; }).join(', ');
+        glyph.title = who + ' · ' + c.state + (carr.length > 1 ? ' (' + carr.length + ' reviewers)' : '') + (c.note ? (' — ' + c.note) : '');
       } else {
         el.classList.add('rev-marked'); el.setAttribute('data-rev', status);
         glyph.textContent = glyphFor(status);
@@ -80,7 +87,8 @@
       el.appendChild(glyph);
     });
     // orphaned committed notes: their anchored text changed, so nothing matched.
-    var orphans = Object.keys(committed).filter(function (a) { return !seen[a]; }).map(function (a) { return committed[a]; });
+    var orphans = [];
+    Object.keys(committed).forEach(function (a) { if (!seen[a]) committed[a].forEach(function (x) { orphans.push(x); }); });
     renderOrphans(orphans);
     var n = Object.keys(marks).length;
     countEl.textContent = n ? (n + ' unsent') : '';
@@ -111,21 +119,25 @@
     setTimeout(function () { el.classList.remove('rev-flash'); }, 1200);
   }
   function railRows() {
-    // document order, so the rail reads top-to-bottom with the plan; each row
-    // carries its live element for scroll-to.
+    // document order; each row carries its live element for scroll-to. Multi-user:
+    // one row per reviewer's committed mark on an element, plus your unsent local mark.
     var rows = [];
     document.querySelectorAll(SELECTOR).forEach(function (el) {
-      var a = anchorFor(el), m = marks[a], c = committed[a];
-      if (!m && !c) return;
-      rows.push({
-        el: el,
-        status: m ? m.status : c.status,
-        note: m ? m.note : (c ? c.note : ''),
-        section: (m && m.section) || (c && c.section) || headingOf(el),
-        label: (m && m.label) || (c && c.label) || labelFor(el),
-        state: c ? c.state : '',
-        unsent: !!m
+      var a = anchorFor(el), m = marks[a], carr = committed[a] || [];
+      carr.forEach(function (c) {
+        rows.push({
+          el: el, status: c.status, note: c.note,
+          section: c.section || headingOf(el), label: c.label || labelFor(el),
+          state: c.state, reviewer: c.reviewer || '', unsent: false
+        });
       });
+      if (m) {
+        rows.push({
+          el: el, status: m.status, note: m.note,
+          section: m.section || headingOf(el), label: m.label || labelFor(el),
+          state: '', reviewer: reviewer || '(you)', unsent: true
+        });
+      }
     });
     return rows;
   }
@@ -146,9 +158,10 @@
       else if (r.state && r.state !== 'open') tag = '<span class="rev-rail-tag ' + esc(r.state) + '">' + esc(r.state) + '</span>';
       var body = r.note ? '<div class="rev-rail-note">' + esc(r.note) + '</div>'
         : '<div class="rev-rail-note muted">' + esc(r.label) + '</div>';
+      var whoTag = r.reviewer ? '<span class="rev-rail-who">' + esc(r.reviewer) + '</span>' : '';
       html += '<li class="rev-rail-item" data-i="' + i + '" data-status="' + esc(r.status) + '">' +
         '<span class="rev-rail-glyph">' + glyphFor(r.status) + '</span>' +
-        '<div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(r.section || '(plan)') + '</span>' + tag + '</div>' + body + '</div></li>';
+        '<div class="rev-rail-body"><div class="rev-rail-sec"><span class="rev-rail-sec-t">' + esc(r.section || '(plan)') + '</span>' + whoTag + tag + '</div>' + body + '</div></li>';
     });
     html += '</ul>';
     rail.innerHTML = html;
@@ -219,10 +232,18 @@
     openPop(el, ev);
   }
 
+  function ensureReviewer() {
+    if (!reviewer) {
+      var n = (prompt('Your name (shown to teammates reviewing this plan):', '') || '').trim();
+      if (n) { reviewer = n; try { localStorage.setItem('ox-plan-reviewer', reviewer); } catch (e) {} if (typeof updateWho === 'function') updateWho(); }
+    }
+    return reviewer;
+  }
   function submit() {
     var items = Object.keys(marks).map(function (k) { return marks[k]; });
     if (!items.length) { alert('No marks yet. Toggle Review, click a section, leave a note.'); return; }
-    var p = { slug: slug, items: items };
+    var who = ensureReviewer();
+    var p = { slug: slug, reviewer: who, items: items };
     if (live) {
       post('/feedback', p, function () { marks = {}; save(); /* SSE reload will repaint */ });
       return;
@@ -249,10 +270,15 @@
   var bar = document.createElement('div');
   bar.className = 'rev-bar';
   bar.innerHTML = '<button class="rev-toggle" title="Toggle review mode">Review</button><span class="rev-count"></span>' +
+    (live ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : '') +
     '<button class="rev-submit" title="Send feedback to the agent">' + (live ? 'Submit' : 'Export') + '</button>' +
     (live ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : '');
   document.body.appendChild(bar);
   var countEl = bar.querySelector('.rev-count');
+  var whoEl = bar.querySelector('.rev-who');
+  function updateWho() { if (whoEl) whoEl.textContent = reviewer ? ('You: ' + reviewer) : 'Set name'; }
+  updateWho();
+  if (whoEl) whoEl.onclick = function () { var n = (prompt('Your name (shown to teammates on this plan):', reviewer) || '').trim(); if (n) { reviewer = n; try { localStorage.setItem('ox-plan-reviewer', reviewer); } catch (e) {} updateWho(); paint(); } };
   bar.querySelector('.rev-toggle').onclick = function () {
     on = !on; body.classList.toggle('rev-on', on); this.classList.toggle('on', on);
     if (!on) closePop();
