@@ -88,10 +88,11 @@ Read the current CHANGELOG.md to understand the format. Then:
 
 1. Add a new version section at the top (after the header)
 2. Group changes by: Added, Changed, Fixed, Removed
-3. Write **user-focused** descriptions (what users will notice)
-4. NO commit hashes
-5. NO technical jargon like "feat(scope):"
-6. Use today's date in YYYY-MM-DD format
+3. **Lead with customer value** — open each entry with what a coworker can now do, or the pain that's gone; benefit first, mechanism second (or dropped)
+4. NO commit hashes or PR numbers
+5. NO internal jargon — spell out the user-visible effect, never protocol/impl detail (SSE, CSP, OTLP, askpass, HTTP status codes, struct/field/signal names, file paths). Name the command and any `SAGEOX_*` env var; skip commit prefixes like "feat(scope):"
+6. Keep it crisp — one or two sentences per entry
+7. Use today's date in YYYY-MM-DD format
 
 Example format:
 ```markdown
@@ -106,6 +107,10 @@ Example format:
 ### Fixed
 - Bug that was affecting users
 ```
+
+Benefit-first vs. mechanism-first — the single most important rule:
+- ✅ **Publish a plan as a Claude Code Artifact** — a self-contained page that renders with no network access.
+- ❌ **CSP-safe artifact render** — drops the SSE loop and inlines the Mermaid CDN so the page passes Content-Security-Policy.
 
 ### Step 5: Bump Version
 
