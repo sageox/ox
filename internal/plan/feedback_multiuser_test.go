@@ -6,81 +6,146 @@ import (
 	"time"
 )
 
-// These cover the multi-user review model: distinct reviewers on the same anchor
-// are both preserved (not last-write-wins), conflicting verdicts are flagged
-// contested, and concurrent same-instant submits never clobber each other.
+// Multi-user review model: distinct reviewers on the same anchor are both
+// preserved (not last-write-wins), conflicting verdicts are flagged contested,
+// concurrent same-instant submits never clobber each other, and the ingest path
+// rejects malformed rounds before they reach the merge.
 
-func TestAssembleReview_MultiReviewerSameAnchorBothKept(t *testing.T) {
-	dir := t.TempDir()
+func openItem(anchor string, s FeedbackStatus, reviewer string) MergedItem {
+	return MergedItem{FeedbackItem: FeedbackItem{Anchor: anchor, Status: s, Reviewer: reviewer}, Open: true}
+}
+
+func closedItem(anchor string, s FeedbackStatus) MergedItem {
+	return MergedItem{FeedbackItem: FeedbackItem{Anchor: anchor, Status: s}, Open: false}
+}
+
+func TestAssembleReview_Multiuser(t *testing.T) {
 	t0 := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
-	if _, err := SaveFeedback(dir, FeedbackSet{Reviewer: "ryan", Items: []FeedbackItem{
-		{Anchor: "h1", Section: "Auth", Label: "token bucket", Status: FeedbackRequestChange, Note: "per-IP too"},
-	}}, t0); err != nil {
-		t.Fatal(err)
+	type round struct {
+		reviewer string
+		at       time.Time
+		items    []FeedbackItem
 	}
-	if _, err := SaveFeedback(dir, FeedbackSet{Reviewer: "sam", Items: []FeedbackItem{
-		{Anchor: "h1", Section: "Auth", Label: "token bucket", Status: FeedbackApprove, Note: "fine as-is"},
-	}}, t0.Add(time.Second)); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name      string
+		rounds    []round
+		wantItems int
+		wantByRev map[string]FeedbackStatus // reviewer -> expected latest status
+	}{
+		{
+			name: "two reviewers on the same anchor are both kept",
+			rounds: []round{
+				{"ryan", t0, []FeedbackItem{{Anchor: "h1", Status: FeedbackRequestChange, Note: "per-IP too"}}},
+				{"sam", t0.Add(time.Second), []FeedbackItem{{Anchor: "h1", Status: FeedbackApprove, Note: "fine"}}},
+			},
+			wantItems: 2,
+			wantByRev: map[string]FeedbackStatus{"ryan": FeedbackRequestChange, "sam": FeedbackApprove},
+		},
+		{
+			name: "single anonymous reviewer still collapses per-anchor (backward compatible)",
+			rounds: []round{
+				{"", t0, []FeedbackItem{{Anchor: "h1", Status: FeedbackFlag, Note: "first"}}},
+				{"", t0.Add(time.Second), []FeedbackItem{{Anchor: "h1", Status: FeedbackRequestChange, Note: "second"}}},
+			},
+			wantItems: 1,
+			wantByRev: map[string]FeedbackStatus{"": FeedbackRequestChange},
+		},
+		{
+			name: "same reviewer re-marking an anchor keeps only their latest",
+			rounds: []round{
+				{"ryan", t0, []FeedbackItem{{Anchor: "h1", Status: FeedbackComment}}},
+				{"ryan", t0.Add(time.Second), []FeedbackItem{{Anchor: "h1", Status: FeedbackRequestChange}}},
+			},
+			wantItems: 1,
+			wantByRev: map[string]FeedbackStatus{"ryan": FeedbackRequestChange},
+		},
+		{
+			name: "distinct anchors from distinct reviewers all survive",
+			rounds: []round{
+				{"ryan", t0, []FeedbackItem{{Anchor: "h1", Status: FeedbackRequestChange}}},
+				{"sam", t0.Add(time.Second), []FeedbackItem{{Anchor: "h2", Status: FeedbackFlag}}},
+			},
+			wantItems: 2,
+			wantByRev: map[string]FeedbackStatus{"ryan": FeedbackRequestChange, "sam": FeedbackFlag},
+		},
 	}
-	items, err := AssembleReview(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(items) != 2 {
-		t.Fatalf("want 2 items (one per reviewer on the same anchor), got %d", len(items))
-	}
-	got := map[string]FeedbackStatus{}
-	for _, it := range items {
-		if it.Reviewer == "" {
-			t.Errorf("item missing reviewer attribution: %+v", it)
-		}
-		got[it.Reviewer] = it.Status
-	}
-	if got["ryan"] != FeedbackRequestChange || got["sam"] != FeedbackApprove {
-		t.Errorf("reviewer marks not preserved distinctly: %+v", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, r := range tt.rounds {
+				if _, err := SaveFeedback(dir, FeedbackSet{Reviewer: r.reviewer, Items: r.items}, r.at); err != nil {
+					t.Fatalf("SaveFeedback: %v", err)
+				}
+			}
+			items, err := AssembleReview(dir)
+			if err != nil {
+				t.Fatalf("AssembleReview: %v", err)
+			}
+			if len(items) != tt.wantItems {
+				t.Fatalf("item count = %d, want %d (%+v)", len(items), tt.wantItems, items)
+			}
+			got := map[string]FeedbackStatus{}
+			for _, it := range items {
+				if it.Reviewer == "" && len(tt.wantByRev) > 1 {
+					t.Errorf("item missing reviewer attribution: %+v", it)
+				}
+				got[it.Reviewer] = it.Status
+			}
+			for rev, want := range tt.wantByRev {
+				if got[rev] != want {
+					t.Errorf("reviewer %q status = %q, want %q", rev, got[rev], want)
+				}
+			}
+		})
 	}
 }
 
-func TestAssembleReview_SingleReviewerStillCollapsesPerAnchor(t *testing.T) {
-	// backward compatibility: with no reviewer set, a later mark on an anchor still
-	// supersedes the earlier one (per-anchor), exactly as before multi-user.
-	dir := t.TempDir()
-	t0 := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
-	_, _ = SaveFeedback(dir, FeedbackSet{Items: []FeedbackItem{{Anchor: "h1", Status: FeedbackFlag, Note: "first"}}}, t0)
-	_, _ = SaveFeedback(dir, FeedbackSet{Items: []FeedbackItem{{Anchor: "h1", Status: FeedbackRequestChange, Note: "second"}}}, t0.Add(time.Second))
-	items, err := AssembleReview(dir)
-	if err != nil {
-		t.Fatal(err)
+func TestContestedAnchors_Table(t *testing.T) {
+	tests := []struct {
+		name  string
+		items []MergedItem
+		want  []string
+	}{
+		{"approve vs request-change is contested", []MergedItem{
+			openItem("h1", FeedbackApprove, "sam"), openItem("h1", FeedbackRequestChange, "ryan"),
+		}, []string{"h1"}},
+		{"approve vs flag is contested", []MergedItem{
+			openItem("h3", FeedbackApprove, "a"), openItem("h3", FeedbackFlag, "b"),
+		}, []string{"h3"}},
+		{"two approvals agree", []MergedItem{
+			openItem("h2", FeedbackApprove, "sam"), openItem("h2", FeedbackApprove, "ryan"),
+		}, nil},
+		{"comment never contests an approval", []MergedItem{
+			openItem("h4", FeedbackApprove, "a"), openItem("h4", FeedbackComment, "b"),
+		}, nil},
+		{"closed items never contest", []MergedItem{
+			closedItem("h5", FeedbackApprove), closedItem("h5", FeedbackRequestChange),
+		}, nil},
 	}
-	if len(items) != 1 || items[0].Status != FeedbackRequestChange || items[0].Note != "second" {
-		t.Fatalf("single-reviewer collapse broke: %+v", items)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ContestedAnchors(tt.items)
+			if len(got) != len(tt.want) {
+				t.Fatalf("contested count = %d %v, want %d %v", len(got), got, len(tt.want), tt.want)
+			}
+			for _, a := range tt.want {
+				if !got[a] {
+					t.Errorf("anchor %q should be contested", a)
+				}
+			}
+		})
 	}
 }
 
-func TestContestedAnchors_ConflictingVerdicts(t *testing.T) {
-	items := []MergedItem{
-		{FeedbackItem: FeedbackItem{Anchor: "h1", Status: FeedbackApprove, Reviewer: "sam"}, Open: true},
-		{FeedbackItem: FeedbackItem{Anchor: "h1", Status: FeedbackRequestChange, Reviewer: "ryan"}, Open: true},
-		{FeedbackItem: FeedbackItem{Anchor: "h2", Status: FeedbackApprove, Reviewer: "sam"}, Open: true},
-		{FeedbackItem: FeedbackItem{Anchor: "h2", Status: FeedbackApprove, Reviewer: "ryan"}, Open: true},
+// error path: the ingest guard rejects a malformed round before it can reach
+// SaveFeedback / the merge, so a crafted export can't inject an unknown status.
+func TestParseFeedback_RejectsUnknownStatus(t *testing.T) {
+	_, err := ParseFeedback([]byte(`{"slug":"p","items":[{"anchor":"h1","status":"bogus"}]}`))
+	if err == nil {
+		t.Fatal("expected an error for an unknown status, got nil")
 	}
-	c := ContestedAnchors(items)
-	if !c["h1"] {
-		t.Error("h1 (approve vs request-change) should be contested")
-	}
-	if c["h2"] {
-		t.Error("h2 (two approvals) should NOT be contested")
-	}
-}
-
-func TestContestedAnchors_ClosedItemsNeverContested(t *testing.T) {
-	items := []MergedItem{
-		{FeedbackItem: FeedbackItem{Anchor: "h1", Status: FeedbackApprove}, Open: false},
-		{FeedbackItem: FeedbackItem{Anchor: "h1", Status: FeedbackRequestChange}, Open: false},
-	}
-	if len(ContestedAnchors(items)) != 0 {
-		t.Error("closed items must not be contested")
+	if !strings.Contains(err.Error(), "unknown status") {
+		t.Errorf("error = %v, want it to mention the unknown status", err)
 	}
 }
 
@@ -120,7 +185,7 @@ func TestSaveFeedback_StampsReviewerOntoItems(t *testing.T) {
 
 func TestFeedbackDigest_ShowsReviewerAndContested(t *testing.T) {
 	items := []MergedItem{
-		{FeedbackItem: FeedbackItem{Anchor: "h1", Status: FeedbackApprove, Reviewer: "sam", Label: "x"}, Open: true},
+		openItem("h1", FeedbackApprove, "sam"),
 		{FeedbackItem: FeedbackItem{Anchor: "h1", Status: FeedbackRequestChange, Reviewer: "ryan", Label: "x", Note: "fix"}, Open: true},
 	}
 	d := FeedbackDigest(items)

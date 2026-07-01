@@ -38,9 +38,16 @@
     try { var a = JSON.parse(el.textContent || '[]'); var m = {}; a.forEach(function (x) { (m[x.anchor] = m[x.anchor] || []).push(x); }); return m; }
     catch (e) { return {}; }
   }
-  // repOf picks the representative mark for an anchor's inline glyph: an
-  // addressed/verified mark wins (show ✓), else the first.
-  function repOf(arr) { for (var i = 0; i < arr.length; i++) { if (arr[i].state === 'addressed' || arr[i].state === 'verified') return arr[i]; } return arr[0]; }
+  // repOf picks the representative mark for an anchor's inline glyph. Prefer a
+  // still-OPEN blocking mark (request-change/flag) so one reviewer's unresolved
+  // feedback is never painted as resolved just because another reviewer's mark on
+  // the same anchor was addressed; then any open mark; then addressed/verified.
+  function repOf(arr) {
+    for (var i = 0; i < arr.length; i++) { if (arr[i].state === 'open' && (arr[i].status === 'request-change' || arr[i].status === 'flag')) return arr[i]; }
+    for (var j = 0; j < arr.length; j++) { if (arr[j].state === 'open') return arr[j]; }
+    for (var k = 0; k < arr.length; k++) { if (arr[k].state === 'addressed' || arr[k].state === 'verified') return arr[k]; }
+    return arr[0];
+  }
   function post(path, payload, ok) {
     fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Review-Token': token }, body: JSON.stringify(payload) })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); if (ok) ok(); })
@@ -243,6 +250,7 @@
     var items = Object.keys(marks).map(function (k) { return marks[k]; });
     if (!items.length) { alert('No marks yet. Toggle Review, click a section, leave a note.'); return; }
     var who = ensureReviewer();
+    if (!who) { alert('Set your name first (the "Set name" button in the bar) — feedback is attributed per reviewer.'); return; }
     var p = { slug: slug, reviewer: who, items: items };
     if (live) {
       post('/feedback', p, function () { marks = {}; save(); /* SSE reload will repaint */ });

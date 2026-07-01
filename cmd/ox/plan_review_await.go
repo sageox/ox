@@ -38,6 +38,10 @@ prints it as JSON on stdout, and exits. The agent then addresses each item, runs
 with ` + "`ox plan render`" + ` (the reviewers' page auto-reloads over SSE), and calls await
 again — a real turn-based loop that keeps the authoring agent in context.
 
+Because this command BLOCKS (up to --timeout), CONFIRM WITH THE USER before entering
+the loop — do not silently park an autonomous ("auto") agent run waiting on a human.
+Ask first, or pass a short --timeout and poll between other work.
+
 Emits immediately if feedback is already waiting (never strands a race). Exits with
 status "timeout" if nothing arrives within --timeout, or "approved" once a reviewer
 approves the plan (the loop is done).`,
@@ -86,6 +90,14 @@ func runPlanReviewAwait(cmd *cobra.Command, slug string, timeout time.Duration) 
 	_ = os.MkdirAll(filepath.Join(planDir, "feedback"), 0o755)
 	_ = w.Add(planDir)
 	_ = w.Add(filepath.Join(planDir, "feedback"))
+
+	// Re-snapshot AFTER registering the watcher: feedback written in the gap between
+	// the first snapshot and watch registration would otherwise be seen by neither
+	// (the watcher didn't exist yet) and strand the agent until --timeout. This
+	// closes that race.
+	if res, done := awaitSnapshot(planDir); done {
+		return emitAwait(cmd, slug, res)
+	}
 
 	fmt.Fprintf(cmd.ErrOrStderr(), "Waiting for reviewer feedback on %q … (Ctrl-C to stop)\n", slug)
 
