@@ -1,12 +1,22 @@
 ---
 title: "ox plan render"
 description: "CLI reference for ox plan render"
-sidebar_position: 70
+sidebar_position: 71
 ---
 
 ## ox plan render
 
 Render a plan to a self-contained HTML page
+
+### Synopsis
+
+Render a plan to a self-contained HTML page.
+
+No slug renders the plan from --file/stdin; a slug renders a saved plan with its
+review state. With --open on a SAVED plan, ox launches the live review loop
+(`ox plan review`) so your marks write straight back to the ledger
+instead of a dead-end file/clipboard export — pass --static for a read-only page.
+-o/--output and --artifact always write a static file.
 
 ```
 ox plan render [slug] [flags]
@@ -20,6 +30,7 @@ ox plan render [slug] [flags]
   -h, --help            help for render
       --open            open the rendered HTML in your browser
   -o, --output string   write the rendered HTML to this path
+      --static          with --open on a saved plan, open a read-only static page instead of launching the live review loop
 ```
 
 ### Options inherited from parent commands

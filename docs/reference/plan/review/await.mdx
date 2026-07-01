@@ -1,0 +1,59 @@
+---
+title: "ox plan review await"
+description: "CLI reference for ox plan review await"
+sidebar_position: 73
+---
+
+## ox plan review await
+
+Block until reviewers submit feedback, then print open items as JSON (agent loop)
+
+### Synopsis
+
+Block until human reviewers submit review feedback, then emit the open items as JSON.
+
+This is the agent side of the review loop. Instead of parking the authoring agent in
+a serve loop (where it cannot act), the agent runs:
+
+    ox plan review await <slug>
+
+which blocks until there is open, unaddressed feedback from ANY reviewer (multi-user),
+prints it as JSON on stdout, and exits. The agent then addresses each item, runs
+`ox plan feedback resolve <slug> <anchor> --state addressed --commit <sha>`, re-renders
+with `ox plan render` (the reviewers' page auto-reloads over SSE), and calls await
+again — a real turn-based loop that keeps the authoring agent in context.
+
+Because this command BLOCKS (up to --timeout), CONFIRM WITH THE USER before entering
+the loop — do not silently park an autonomous ("auto") agent run waiting on a human.
+Ask first, or pass a short --timeout and poll between other work.
+
+Emits immediately if feedback is already waiting (never strands a race). Exits with
+status "timeout" if nothing arrives within --timeout, or "approved" once a reviewer
+approves the plan (the loop is done).
+
+```
+ox plan review await <slug> [flags]
+```
+
+### Options
+
+```
+  -h, --help               help for await
+      --timeout duration   block at most this long before exiting with status "timeout" (default 30m0s)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox plan review](/plan/review)	 - Open a live review loop for a saved plan (serve, collect, auto-reload, approve)
+

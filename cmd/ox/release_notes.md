@@ -5,12 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.0] - 2026-07-01
 
 ### Added
 
-- **`ox plan render --artifact` produces a CSP-safe page you can publish as a Claude Code Artifact** — a strictly self-contained variant built for the artifact's strict Content-Security-Policy (which blocks every cross-origin resource and all fetch/XHR/WebSocket). It drops the Google-Fonts link (falling back to system fonts) and the live SSE review loop, and replaces the Mermaid CDN with the vendored library inlined in place — so diagrams still render at full parity with zero network, and a diagram-free plan pays none of that weight. The SageOx enrichment references stay clickable: outbound `<a href>` navigation isn't CSP-blocked, so a published artifact remains a hub back into the Ledger — collision PRs, prior-art sessions, and expert routes one click away. Artifact mode is a pure export: the ledger's canonical, review-capable render is left untouched.
-- **`ox plan` render now enforces design-craft for every AI coworker, not just Claude** — the binary nudges any agent (Claude, Codex, Gemini) to show the right visual where prose was hiding a diagram or a UI state, and surfaces that expectation in `ox plan enrich` so it lands *before* the plan is authored rather than only at render time. Agent-only provenance (commit SHAs, "12h ago", workspace counts) is curated out of the human-facing badge chips by construction — a reviewer sees the decision, the agent's `--json` keeps the detail — and the missing-diagram nudge no longer mis-fires on a plan that visualized with a chart instead of Mermaid. A `plan_craft` signal records how often a suggested visual actually gets drawn, so the value of enrichment is measurable rather than assumed.
+- **Publish a plan as a Claude Code Artifact** — `ox plan render --artifact` exports a plan as a single self-contained page that renders right inside Claude Code with no network access: diagrams are inlined and nothing loads from a CDN. Its prior-art links still work, so a shared plan stays a jumping-off point back into your team's history.
+- **Live human review on a plan, before any code is written** — `ox plan review` now waits for your reviewers and shows their feedback the moment it lands, so an AI coworker can pause for a real decision instead of guessing. Every note is saved with the plan.
+- **Plans render charts, not just tables** — line, bar, area, and scatter charts now appear inline in a rendered plan, so a plan full of numbers shows the trend at a glance.
+- **Quicker to navigate a plan** — prior-art references (related PRs and past sessions) are clickable links back into your Ledger, and code blocks are syntax-highlighted.
+
+### Changed
+
+- **Sharper plans from every AI coworker, not just Claude** — plan rendering now coaches any agent (Claude, Codex, Gemini) to add a diagram or UI sketch where prose was hiding one, and to fold that in while the plan is being written. It also stops asking for a diagram when a chart already tells the story.
+- **HTML plans open the right way on their own** — ask for an HTML plan and ox opens the polished, team-context-aware view instead of a hand-rolled one-off (set `SAGEOX_PLAN_HTML` to opt out).
+- **Smarter visual suggestions and cleaner layouts** — the renderer points out where a visual would help based on what the plan says, and packs busy sections into tidier layouts.
+- **Full dependency license transparency** — ox now ships a `THIRD_PARTY_NOTICES.md` listing every dependency and its license.
+
+### Fixed
+
+- **Background sync no longer gets stuck on a broken rebase** — if a synced repo's git state wedges (even the rare "zombie" case git can't unwind on its own), the daemon now clears it automatically and `ox doctor` repairs it, so your team's history keeps flowing instead of silently stalling.
+- **`ox sync --team` shows accurate per-team status** — real results and details for each team, instead of one lumped-together summary.
+- **`--title` and `--json` now work when importing documents and media** — set a title on import, and get the new recording's id back in `--json` output.
+- **Clear message when an access token has expired** — token checks no longer hang or retry in silence; ox tells you to sign in again.
+- **No stray telemetry errors after you log out** — ox stops sending background telemetry (and the errors that came with it) once there's no active session.
 
 ## [0.10.1] - 2026-06-15
 
