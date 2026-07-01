@@ -73,6 +73,8 @@ func TestFormatPlanNudgeLine_MentionsOnlyFiredSignals(t *testing.T) {
 	assert.Contains(t, line, "ox plan render --open")
 	assert.Contains(t, line, "SageOx team-context-optimized plan")
 	assert.Contains(t, line, "ox plan review", "exit nudge must offer the live review loop")
+	assert.Contains(t, line, "ox plan review await", "nudge must point to the agent-side await loop")
+	assert.Contains(t, line, "confirm", "nudge must carry the ask-before-blocking guardrail")
 	assert.NotContains(t, line, "ox plan --open")
 	// single line — grepability invariant
 	assert.NotContains(t, line, "\n")
@@ -102,6 +104,8 @@ func TestFormatPlanNudgeLine_NonTrivialOnly(t *testing.T) {
 		assert.Contains(t, line, "6 steps")
 		assert.Contains(t, line, "SageOx team-context-optimized plan")
 		assert.Contains(t, line, "ox plan render --open")
+		assert.Contains(t, line, "ox plan review await", "non-trivial nudge must also point to await")
+		assert.Contains(t, line, "confirm", "ask-before-blocking guardrail on the non-trivial path too")
 		assert.NotContains(t, line, "collision", "no team-context signal fired — must not be mentioned")
 		assert.NotContains(t, line, "\n", "single line — grepability invariant")
 	})

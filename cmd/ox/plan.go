@@ -472,7 +472,7 @@ func writePlanHuman(cmd *cobra.Command, result plan.Result, savedDir string) err
 		if s.Material {
 			lead = "Material signals found."
 		}
-		fmt.Fprintf(&b, "\n%s Render a SageOx team-context-optimized plan with `ox plan render --open`, then start a live review loop with `ox plan review <slug>` — mark it up in the browser and your AI coworker addresses each item live.\n", lead)
+		fmt.Fprintf(&b, "\n%s Render a SageOx team-context-optimized plan with `ox plan render --open`, then start a live review loop with `ox plan review <slug>` — the human marks it up in the browser and the AI coworker receives it in-turn via `ox plan review await <slug>`, addressing each item live. `await` BLOCKS for feedback, so the coworker should confirm with the user before entering that loop (or use a short --timeout and poll).\n", lead)
 	}
 
 	fmt.Fprint(out, b.String())
@@ -622,7 +622,7 @@ func emitRenderedHTML(cmd *cobra.Command, htmlBytes []byte, savedDir, outPath st
 	// Encourage the live review loop once the page is in front of a human — the
 	// slug is real only when the plan is in the ledger (capture on).
 	if savedDir != "" && !cli.IsHeadless() {
-		cli.PrintHint("Start a live review loop: `ox plan review " + filepath.Base(savedDir) + "` — mark it up in the browser, your AI coworker addresses each item live.")
+		cli.PrintHint("Start a live review loop: `ox plan review " + filepath.Base(savedDir) + "` — mark it up in the browser; your AI coworker receives it via `ox plan review await " + filepath.Base(savedDir) + "` and addresses each item live (it blocks for feedback — the coworker should confirm before entering that wait).")
 	}
 	if savedDir != "" {
 		if _, _, isPointer, exists := plan.PlanHTMLPath(savedDir); exists && !isPointer {

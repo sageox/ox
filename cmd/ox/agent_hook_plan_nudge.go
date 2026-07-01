@@ -224,12 +224,12 @@ func formatPlanNudgeLine(res planJSONResult) string {
 	}
 	if detail := strings.Join(parts, " + "); detail != "" {
 		// Material path: lead with the team-context signals.
-		return fmt.Sprintf("Your plan touches %s. Render it as a SageOx team-context-optimized plan (HTML) with `ox plan render --open`, then offer to start the live review loop (`ox plan review <slug>`) so the human can mark it up in-browser — ask first.", detail)
+		return fmt.Sprintf("Your plan touches %s. Render it as a SageOx team-context-optimized plan (HTML) with `ox plan render --open`, then offer the live review loop (`ox plan review <slug>`) so the human marks it up in-browser (ask first); receive their feedback in-turn with `ox plan review await <slug>` — it BLOCKS for feedback, so confirm with the user before entering it.", detail)
 	}
 
 	// NonTrivial-only path: no team-context signals fired, but the plan is
 	// structurally substantial. Lead with the render benefit and the scope.
-	return fmt.Sprintf("Your plan spans %s. Render it as a SageOx team-context-optimized plan (HTML) with `ox plan render --open`, then offer to start the live review loop (`ox plan review <slug>`) so the human can mark it up in-browser — ask first.", planScopePhrase(res.Signals.Files, res.Signals.Steps))
+	return fmt.Sprintf("Your plan spans %s. Render it as a SageOx team-context-optimized plan (HTML) with `ox plan render --open`, then offer the live review loop (`ox plan review <slug>`) so the human marks it up in-browser (ask first); receive their feedback in-turn with `ox plan review await <slug>` — it BLOCKS for feedback, so confirm with the user before entering it.", planScopePhrase(res.Signals.Files, res.Signals.Steps))
 }
 
 // planScopePhrase describes plan scale from the structural counts, naming only
