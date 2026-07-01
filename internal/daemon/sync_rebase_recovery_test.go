@@ -33,7 +33,7 @@ func makeWedgedRebase(t *testing.T) string {
 	repo := t.TempDir()
 
 	git := func(args ...string) {
-		out, err := runGit(t, repo, args...)
+		out, err := runGitOut(t, repo, args...)
 		// Only the intentional conflicting rebase may exit non-zero; surface
 		// any other setup failure (e.g. unsupported --initial-branch) so a
 		// broken fixture fails loudly instead of masquerading as a wedge.
@@ -95,9 +95,9 @@ func gitEnv() []string {
 	)
 }
 
-// runGit runs git in dir, returning combined output and error so callers can
+// runGitOut runs git in dir, returning combined output and error so callers can
 // assert on either the result or the failure.
-func runGit(t *testing.T, dir string, args ...string) (string, error) {
+func runGitOut(t *testing.T, dir string, args ...string) (string, error) {
 	t.Helper()
 	cmd := exec.Command("git", args...) // safe: git in a temp dir, not the ox CLI
 	cmd.Dir = dir
@@ -120,7 +120,7 @@ func setupRemoteWithStuckRebase(t *testing.T) string {
 	clone := filepath.Join(root, "clone")
 
 	mustGit := func(dir string, args ...string) {
-		if out, err := runGit(t, dir, args...); err != nil {
+		if out, err := runGitOut(t, dir, args...); err != nil {
 			t.Fatalf("git %v failed: %v\n%s", args, err, out)
 		}
 	}
@@ -151,7 +151,7 @@ func setupRemoteWithStuckRebase(t *testing.T) string {
 
 	// leave the clone wedged in a rebase that stopped and was never continued
 	// (a failing -x exec halts the rebase with a clean tree, no conflict).
-	_, err := runGit(t, clone, "rebase", "-x", "exit 1", "HEAD~1")
+	_, err := runGitOut(t, clone, "rebase", "-x", "exit 1", "HEAD~1")
 	require.Error(t, err, "the failing -x exec should halt the rebase")
 	require.True(t, gitutil.IsRebaseInProgress(clone), "clone should be wedged")
 	return clone
@@ -220,7 +220,7 @@ func makeZombieWedge(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()
 	mustGit := func(args ...string) {
-		if out, err := runGit(t, repo, args...); err != nil {
+		if out, err := runGitOut(t, repo, args...); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
@@ -232,7 +232,7 @@ func makeZombieWedge(t *testing.T) string {
 	// a real autostash object, faithful to production (stash created off a
 	// dirty tree, then the tree restored clean)
 	require.NoError(t, os.WriteFile(filepath.Join(repo, "f.txt"), []byte("dirty\n"), 0o644))
-	out, err := runGit(t, repo, "stash", "create")
+	out, err := runGitOut(t, repo, "stash", "create")
 	require.NoError(t, err, "stash create: %s", out)
 	stashOID := strings.TrimSpace(out)
 	mustGit("checkout", "--", "f.txt")
@@ -277,7 +277,7 @@ func TestRecoverPreexistingRebase_StaleWedge_ApplyBackend(t *testing.T) {
 	}
 	repo := t.TempDir()
 	mustGit := func(args ...string) {
-		if out, err := runGit(t, repo, args...); err != nil && args[0] != "rebase" {
+		if out, err := runGitOut(t, repo, args...); err != nil && args[0] != "rebase" {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
@@ -331,7 +331,7 @@ func TestRecoverPreexistingRebase_RecoveryRestoresSyncProgress(t *testing.T) {
 
 	// 2. the daemon's normal pull (what pullManagedRepo runs after recovery)
 	//    now reconciles cleanly with the advanced remote.
-	if out, err := runGit(t, clone, "pull", "--rebase", "--autostash", "origin", "main"); err != nil {
+	if out, err := runGitOut(t, clone, "pull", "--rebase", "--autostash", "origin", "main"); err != nil {
 		t.Fatalf("post-recovery pull should reconcile, got: %v\n%s", err, out)
 	}
 
