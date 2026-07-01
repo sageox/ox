@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -207,6 +208,62 @@ func TestRecoverPreexistingRebase_StaleWedgeRecovered(t *testing.T) {
 	assert.False(t, stop, "stale wedge recovered → caller falls through to a clean pull")
 	assert.Nil(t, res.Issue)
 	assert.False(t, gitutil.IsRebaseInProgress(repo), "stale wedge must be aborted/recovered")
+}
+
+// makeZombieWedge injects the structurally-incomplete rebase-merge dir (only an
+// `autostash` entry, no head-name/orig-head) that a process killed mid-`pull
+// --rebase --autostash` leaves behind — the exact production wedge in bd
+// ox-j3cl. Distinct from makeWedgedRebase, which drives a REAL conflict and thus
+// leaves a COMPLETE, abortable state dir; that fixture never exercised the case
+// where `git rebase --abort` ITSELF fails, so the deadlock survived it.
+func makeZombieWedge(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	mustGit := func(args ...string) {
+		if out, err := runGit(t, repo, args...); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	mustGit("init", "--initial-branch=main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "f.txt"), []byte("base\n"), 0o644))
+	mustGit("add", "f.txt")
+	mustGit("commit", "-m", "base")
+
+	// a real autostash object, faithful to production (stash created off a
+	// dirty tree, then the tree restored clean)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "f.txt"), []byte("dirty\n"), 0o644))
+	out, err := runGit(t, repo, "stash", "create")
+	require.NoError(t, err, "stash create: %s", out)
+	stashOID := strings.TrimSpace(out)
+	mustGit("checkout", "--", "f.txt")
+
+	stateDir := filepath.Join(repo, ".git", "rebase-merge")
+	require.NoError(t, os.MkdirAll(stateDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "autostash"), []byte(stashOID+"\n"), 0o644))
+	require.True(t, gitutil.IsRebaseInProgress(repo), "zombie dir should read as rebase-in-progress")
+	return repo
+}
+
+// TestRecoverPreexistingRebase_ZombieDirRecovered is the regression for bd
+// ox-j3cl: the daemon must SELF-HEAL a structurally-incomplete rebase dir that
+// `git rebase --abort` cannot clear, instead of surfacing IssueTypeRebaseStuck
+// and re-looping forever. Pre-fix, recoverPreexistingRebase called AuditAndAbort
+// directly, abort failed on this shape, and the ledger stayed suspended for
+// weeks. This drives the actual decision path so a regression to "abort-only"
+// fails the build.
+func TestRecoverPreexistingRebase_ZombieDirRecovered(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: spawns git subprocesses to build a rebase wedge")
+	}
+	repo := makeZombieWedge(t)
+	backdateRebaseDir(t, repo, time.Hour) // older than staleRebaseThreshold
+	s := &SyncScheduler{}
+
+	stop, res := s.recoverPreexistingRebase(context.Background(), repo, "ledger", discardLogger())
+
+	assert.False(t, stop, "zombie wedge recovered → caller falls through to a clean pull")
+	assert.Nil(t, res.Issue, "must NOT surface IssueTypeRebaseStuck for a recoverable zombie")
+	assert.False(t, gitutil.IsRebaseInProgress(repo), "zombie rebase dir must be cleared")
 }
 
 // TestRecoverPreexistingRebase_StaleWedge_ApplyBackend covers the same CLASS of

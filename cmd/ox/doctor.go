@@ -863,6 +863,7 @@ func runDoctorChecks(parent context.Context, opts doctorOptions) []checkCategory
 			opts.shouldFix(CheckSlugLedgerEmbeddedCreds),
 			opts.shouldFix(CheckSlugLedgerURLAPIMatch),
 			opts.shouldFix(CheckSlugLedgerUnmergedPaths),
+			opts.shouldFix(CheckSlugLedgerStuckOperation),
 			opts.shouldFix(CheckSlugGitHubDataMigration),
 		)
 		if len(ledgerGitChecks) > 0 {
@@ -1142,8 +1143,9 @@ func enrichCheckResult(check *checkResult) {
 //   - fixEmbeddedCreds: whether to strip embedded oauth2:TOKEN from origin URL
 //   - fixURLAPIMatch: whether to repoint origin URL to the API-authoritative URL
 //   - fixUnmergedPaths: whether to auto-abort a stuck merge/rebase that left U-state files
+//   - fixStuckOp: whether to auto-clear a stuck merge/rebase/cherry-pick that left NO conflicts (incl. a corrupt rebase dir)
 //   - fixMigration: whether to migrate legacy GitHub data files
-func checkLedgerGitHealth(networkChecks bool, fixGitignore bool, fixBranch bool, fixWorkdir bool, fixEmbeddedCreds bool, fixURLAPIMatch bool, fixUnmergedPaths bool, fixMigration ...bool) []checkResult {
+func checkLedgerGitHealth(networkChecks bool, fixGitignore bool, fixBranch bool, fixWorkdir bool, fixEmbeddedCreds bool, fixURLAPIMatch bool, fixUnmergedPaths bool, fixStuckOp bool, fixMigration ...bool) []checkResult {
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
 		return nil // no ledger found, skip entire category
@@ -1166,6 +1168,12 @@ func checkLedgerGitHealth(networkChecks bool, fixGitignore bool, fixBranch bool,
 		// ledger; the previous order let the wedge hide inside the dirty-workdir
 		// counter ("3 modified") instead of producing an actionable P0.
 		checkLedgerUnmergedPaths(fixUnmergedPaths),
+		// ox-j3cl: the no-conflict twin of the wedge above. A stuck operation
+		// with NO U-state files (worst case: a corrupt rebase dir git rebase
+		// --abort cannot clear) is invisible to unmerged-paths yet blocks every
+		// pull. Runs before branch-status so the reconcile below acts on a
+		// cleared repo instead of pulling on top of the wedge.
+		checkLedgerStuckOperation(fixStuckOp),
 		checkLedgerCleanWorkdir(fixWorkdir),
 		checkLedgerBranchStatus(fixBranch),
 		// ox-eeqi: post-migration the PAT lives in the credential helper,

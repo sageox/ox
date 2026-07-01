@@ -433,7 +433,12 @@ func (s *SyncScheduler) recoverPreexistingRebase(ctx context.Context, path, repo
 	}
 	logger.Warn("recovering stale wedged rebase",
 		"op", "stale_rebase_recover", "repo", repoName, "age", age.Round(time.Second))
-	if abortErr := gitutil.AuditAndAbort(ctx, path, gitutil.AuditOpRebase, "stale wedged rebase auto-recovery", logger); abortErr != nil {
+	// AbortOrClearRebase first tries the reversible `git rebase --abort`, then
+	// escalates to `git rebase --quit` for a structurally-incomplete "zombie"
+	// state dir (a process killed mid-rebase leaving only an autostash entry, no
+	// head-name/orig-head) that --abort alone cannot clear. See
+	// gitutil.AbortOrClearRebase and bd ox-j3cl.
+	if abortErr := gitutil.AbortOrClearRebase(ctx, path, "stale wedged rebase auto-recovery", logger); abortErr != nil {
 		logger.Error("stale rebase recovery failed",
 			"op", "stale_rebase_recover_failed", "repo", repoName, "error", abortErr)
 		return true, ManagedRepoPullResult{

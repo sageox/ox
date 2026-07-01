@@ -34,6 +34,14 @@ const (
 	// commit on the ledger (push-summary, doctor auto-commit, session uploads)
 	// until cleared. See bd ox-8zd3 for the original incident.
 	CheckSlugLedgerUnmergedPaths = "ledger-unmerged-paths"
+	// CheckSlugLedgerStuckOperation detects an in-progress merge/rebase/cherry-pick
+	// that has NO unresolved conflicts — the blind spot the unmerged-paths check
+	// misses. Its worst case is a structurally-incomplete "zombie" rebase-merge
+	// dir (only an autostash entry, no head-name/orig-head) left by a process
+	// killed mid-rebase: `git rebase --abort` cannot clear it, so every ledger
+	// pull fails with "already a rebase-merge directory" until it is quit. See
+	// bd ox-j3cl for the original incident.
+	CheckSlugLedgerStuckOperation = "ledger-stuck-operation"
 )
 
 func init() {
@@ -72,6 +80,20 @@ func init() {
 		FixLevel:    FixLevelAuto,
 		Description: "Detects ledger files left in U-state by a stuck merge/rebase/cherry-pick",
 		Run:         func(fix bool) checkResult { return checkLedgerUnmergedPaths(fix) },
+	})
+
+	// Register the stuck-operation check alongside unmerged-paths: together they
+	// cover both wedge shapes — WITH conflicts (unmerged-paths) and WITHOUT
+	// conflicts (stuck-operation, incl. the zombie rebase dir that git rebase
+	// --abort cannot clear). Ordering in the doctor run is set in
+	// checkLedgerGitHealth (doctor.go).
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugLedgerStuckOperation,
+		Name:        "Ledger stuck operation",
+		Category:    "Ledger Git Health",
+		FixLevel:    FixLevelAuto,
+		Description: "Detects a stuck merge/rebase/cherry-pick (incl. a corrupt rebase dir) blocking ledger sync",
+		Run:         func(fix bool) checkResult { return checkLedgerStuckOperation(fix) },
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
@@ -591,6 +613,97 @@ func detectInProgressGitOp(ledgerPath string) (op, hint string) {
 		return "revert", "REVERT_HEAD present"
 	}
 	return "", ""
+}
+
+// checkLedgerStuckOperation detects an in-progress merge / rebase / cherry-pick
+// that has left NO unresolved conflicts — the blind spot checkLedgerUnmergedPaths
+// (gated on U-state files) misses. The worst case is a structurally-incomplete
+// "zombie" rebase-merge directory (only an autostash entry, no head-name /
+// orig-head) left by a process killed mid-rebase: git thinks a rebase is in
+// progress, `git rebase --abort` cannot clear it (nothing to reset to), and
+// every ledger pull fails with "already a rebase-merge directory" — the exact
+// production wedge in bd ox-j3cl.
+//
+// With fix=true, a rebase is cleared via gitutil.AbortOrClearRebase (abort, then
+// `--quit` for a zombie dir); a merge/cherry-pick/revert via the audited abort.
+// A fresh rebase (younger than StaleRebaseThreshold) is left alone — it's almost
+// always a live daemon pull --rebase or a human mid-operation.
+func checkLedgerStuckOperation(fix bool) checkResult {
+	const name = "Ledger stuck operation"
+
+	ledgerPath := getLedgerPath()
+	if ledgerPath == "" {
+		return SkippedCheck(name, "no ledger found", "")
+	}
+	if !isGitRepo(ledgerPath) {
+		return SkippedCheck(name, "ledger not a git repo", "")
+	}
+
+	op, hint := detectInProgressGitOp(ledgerPath)
+	if op == "" {
+		return PassedCheck(name, "no operation in progress")
+	}
+
+	// A fresh rebase is likely in flight (daemon pull --rebase or a human) —
+	// leave it alone. Only a stale one is a wedge. Non-rebase markers
+	// (MERGE_HEAD, CHERRY_PICK_HEAD) never appear during normal ox operation on
+	// the ledger, so treat their presence as a wedge regardless of age.
+	if op == "rebase" {
+		if age, ok := gitutil.RebaseAge(ledgerPath); ok && age < gitutil.StaleRebaseThreshold {
+			return PassedCheck(name, fmt.Sprintf("rebase in progress (%s, fresh)", age.Round(time.Second)))
+		}
+	}
+
+	if !fix {
+		return stuckOperationFailure(name, ledgerPath, op, hint)
+	}
+	return fixLedgerStuckOperation(ledgerPath, op, hint)
+}
+
+// stuckOperationFailure constructs the P0 surfaced when a stuck operation with
+// no unresolved conflicts is blocking ledger sync. Extracted so the message
+// shape is unit-testable without standing up a real git repo (mirrors
+// unmergedPathsFailure).
+func stuckOperationFailure(name, ledgerPath, op, hint string) checkResult {
+	detail := fmt.Sprintf(
+		"a %s is in progress at %s with no unresolved conflicts (%s).\n       "+
+			"This wedge blocks every ledger pull. Run `ox doctor --fix` to clear it.",
+		op, ledgerPath, hint,
+	)
+	// CriticalCheck — a stuck operation silently blocks all ledger sync (pull)
+	// and every future commit; it must be loud.
+	r := CriticalCheck(name, fmt.Sprintf("stuck %s blocking ledger sync", op), detail)
+	r.slug = CheckSlugLedgerStuckOperation
+	r.fixLevel = FixLevelAuto
+	return r
+}
+
+// fixLedgerStuckOperation clears a stuck operation. A rebase goes through
+// gitutil.AbortOrClearRebase (reversible `git rebase --abort`, escalating to
+// `git rebase --quit` for a structurally-incomplete zombie dir that abort
+// cannot clear). A merge/cherry-pick/revert clears via the audited abort — its
+// state is always intact enough to abort. Extracted for direct unit testing.
+func fixLedgerStuckOperation(ledgerPath, op, hint string) checkResult {
+	const name = "Ledger stuck operation"
+
+	var clearErr error
+	if op == "rebase" {
+		clearErr = gitutil.AbortOrClearRebase(context.Background(), ledgerPath, "doctor --fix stuck rebase", slog.Default())
+	} else {
+		abortCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		clearErr = gitutil.AuditAndAbort(abortCtx, ledgerPath, gitutil.AuditableOp(op), "doctor --fix stuck "+op, slog.Default())
+		cancel()
+	}
+	if clearErr != nil {
+		r := FailedCheck(name,
+			fmt.Sprintf("could not clear stuck %s", op),
+			fmt.Sprintf("error: %s\n       %s", clearErr, hint))
+		r.slug = CheckSlugLedgerStuckOperation
+		return r
+	}
+
+	slog.Info("ledger stuck-operation wedge cleared", "op", op, "ledger", ledgerPath)
+	return PassedCheck(name, fmt.Sprintf("cleared stuck %s", op))
 }
 
 // checkLedgerCleanWorkdir checks for uncommitted changes in the ledger repository.

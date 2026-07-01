@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/hooks/claude"
 	"github.com/sageox/ox/internal/lfs"
 )
@@ -52,7 +54,67 @@ func Default() *Registry {
 		BlastRadius: "single ledger; resets summary_attempts on eligible sessions so daemon re-attempts with fixed inline prompt",
 		Run:         checkSessionInlineSummaryRetry,
 	})
+	r.Register(&Check{
+		Slug:        "ledger-rebase-wedge",
+		Description: "Clear a STALE wedged rebase on the ledger — including a structurally-incomplete rebase-merge dir git rebase --abort cannot clear — so background sync resumes unattended",
+		MinInterval: 30 * time.Minute,
+		BlastRadius: "single ledger; git rebase --abort/--quit on a STALE wedge only (fresh in-flight rebases untouched); no history rewrite, HEAD unchanged",
+		Run:         checkLedgerRebaseWedge,
+	})
 	return r
+}
+
+// checkLedgerRebaseWedge is the daemon autofix twin of cmd/ox's
+// ledger-stuck-operation check (bd ox-j3cl). It runs unattended on a slow
+// ticker so a wedged ledger self-heals with no human and no `ox doctor --fix`:
+// the reported production incident sat suspended for six weeks because the only
+// recovery primitive (`git rebase --abort`) could not clear a zombie
+// rebase-merge dir left by a process killed mid-`pull --rebase --autostash`.
+//
+// Complements the daemon's in-line recoverPreexistingRebase (which fires on the
+// pull pipeline): this is an independent trigger with structured telemetry, so
+// a self-heal is visible in the field rather than silent.
+func checkLedgerRebaseWedge(ctx context.Context, repoPath string) CheckResult {
+	if repoPath == "" {
+		return CheckResult{Status: StatusClean}
+	}
+	pctx, err := config.LoadProjectContext(repoPath)
+	if err != nil || pctx == nil {
+		// uninitialized workspace or no ledger configured — nothing to do
+		return CheckResult{Status: StatusClean, Repo: repoPath}
+	}
+	ledgerPath := pctx.DefaultLedgerPath()
+	if ledgerPath == "" {
+		return CheckResult{Status: StatusClean, Repo: repoPath}
+	}
+	return repairLedgerRebaseWedge(ctx, ledgerPath, repoPath)
+}
+
+// repairLedgerRebaseWedge is the side-effect-free-on-healthy core of
+// checkLedgerRebaseWedge, split out so tests can drive it against a real repo
+// without standing up a full ProjectContext. Only a STALE rebase (older than
+// gitutil.StaleRebaseThreshold) is recovered — a fresh one is almost always the
+// daemon's own in-flight pull and must be left alone.
+func repairLedgerRebaseWedge(ctx context.Context, ledgerPath, repoPath string) CheckResult {
+	age, inProgress := gitutil.RebaseAge(ledgerPath)
+	if !inProgress {
+		return CheckResult{Status: StatusClean, Repo: repoPath}
+	}
+	if age < gitutil.StaleRebaseThreshold {
+		return CheckResult{Status: StatusClean, Repo: repoPath}
+	}
+	if err := gitutil.AbortOrClearRebase(ctx, ledgerPath, "autofix stale ledger rebase wedge", slog.Default()); err != nil {
+		return CheckResult{
+			Status:  StatusError,
+			Repo:    repoPath,
+			Summary: fmt.Sprintf("stale rebase wedge recovery failed: %v", err),
+		}
+	}
+	return CheckResult{
+		Status:  StatusFixed,
+		Repo:    repoPath,
+		Summary: fmt.Sprintf("cleared stale wedged rebase on ledger (age %s)", age.Round(time.Second)),
+	}
 }
 
 // checkInitReverted is the daemon-side counterpart of cmd/ox/doctor_init_reverted.go.
