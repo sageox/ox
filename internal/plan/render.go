@@ -35,8 +35,15 @@ import (
 //   - verdict cells (yes/no/✓/✗) colored so matrices read at a glance.
 // All degrade gracefully: a plan with none of these conventions just renders.
 
-//go:embed assets/scaffold.css assets/scaffold.js assets/review.js assets/plan.html.tmpl assets/wordmark-dark.svg assets/wordmark-light.svg assets/mermaid.min.js
+//go:embed assets/scaffold.css assets/scaffold.js assets/review.js assets/sw.js assets/plan.html.tmpl assets/wordmark-dark.svg assets/wordmark-light.svg assets/mermaid.min.js
 var renderAssets embed.FS
+
+// ReviewServiceWorkerJS returns the embedded service worker the live review
+// server exposes at /sw.js — the offline shell that keeps a rendered plan
+// readable in the browser after the server exits (review.js registers it).
+func ReviewServiceWorkerJS() ([]byte, error) {
+	return renderAssets.ReadFile("assets/sw.js")
+}
 
 // RenderOptions carries optional render-time context that isn't part of the
 // enrichment Result.

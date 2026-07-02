@@ -24,6 +24,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -262,6 +263,16 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 			}
 		} else if err := os.WriteFile(htmlPath, html, 0o644); err != nil {
 			return "", fmt.Errorf("write %s: %w", planHTMLFile, err)
+		}
+
+		// The plan's content just changed on disk — re-anchor any open review
+		// feedback whose element moved or was reworded (review feedback is
+		// sacred: an update must never silently orphan a human's marks).
+		// Fail-soft: remap trouble never blocks the plan write itself.
+		if entries, rerr := RemapFeedback(dir, html, time.Now()); rerr != nil {
+			slog.Warn("plan save: feedback remap failed", "error", rerr, "dir", dir)
+		} else if len(entries) > 0 {
+			slog.Info("plan save: re-anchored review feedback", "count", len(entries), "dir", dir)
 		}
 	}
 

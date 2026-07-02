@@ -452,3 +452,15 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .chord-arc{stroke:var(--bg);stroke-width:1}
 .chord-lab{fill:var(--ink);font-family:"JetBrains Mono",monospace;font-size:9.5px}
 @media(prefers-reduced-motion:reduce){.tmap-cell rect,.sankey-link,.chord-rib{transition:none}}
+
+/* review connection state — the page must never look live when the server is gone */
+.rev-conn{font-family:"JetBrains Mono",monospace;font-size:11px}
+.rev-conn.ok{color:var(--sage)}
+.rev-conn.off{color:var(--red);animation:rev-conn-pulse 1.6s ease-in-out infinite}
+@keyframes rev-conn-pulse{50%{opacity:.45}}
+.rev-offline-bar{position:fixed;top:0;left:0;right:0;z-index:80;background:var(--panel);border-bottom:2px solid var(--red);color:var(--ink);padding:9px 14px;font-size:13px;box-shadow:var(--shadow)}
+.rev-offline-bar code{background:var(--panel2);border:1px solid var(--hair2);border-radius:5px;padding:2px 7px;font-family:"JetBrains Mono",monospace;font-size:12px;user-select:all}
+.rev-offline-bar .rev-offline-copy{margin-left:6px;background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:5px;padding:2px 8px;font-size:11px;cursor:pointer}
+.rev-offline-bar .rev-offline-copy:hover{color:var(--ink)}
+body.rev-offline .rev-bar .rev-submit,body.rev-offline .rev-bar .rev-approve{opacity:.45;cursor:not-allowed}
+.rev-toast{position:fixed;left:16px;bottom:64px;z-index:60;background:var(--panel);border:1px solid var(--sage);color:var(--ink);border-radius:9px;padding:8px 12px;font-size:12.5px;box-shadow:var(--shadow)}

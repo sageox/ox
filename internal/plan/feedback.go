@@ -1,16 +1,20 @@
 package plan
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/sageox/ox/internal/fileutil"
 )
 
 // randSuffix returns a short random hex tag for a round filename, so two reviewers
@@ -118,6 +122,11 @@ type MergedItem struct {
 	RaisedAt   time.Time
 	Resolution *Resolution
 	Open       bool
+	// RemappedFrom is the item's original anchor when a plan update moved its
+	// content and the save-time remap rebound it (see remap.go). Empty when the
+	// mark still lives at its original address. Anchor always holds the CURRENT
+	// address — the one `ox plan feedback resolve` acts on.
+	RemappedFrom string `json:"remapped_from,omitempty"`
 }
 
 // validateSlug rejects a slug that is not a simple ledger name. Feedback JSON is
@@ -229,7 +238,11 @@ func LoadAllFeedback(planDir string) ([]FeedbackSet, error) {
 	return sets, nil
 }
 
-// AppendResolution adds one agent disposition to the append log.
+// AppendResolution adds one agent disposition to the append log. The whole
+// read-modify-write runs under an advisory flock: the reviewer's Accept (via
+// the review server) and the agent's `ox plan feedback resolve` are separate
+// processes writing the same file, and an unlocked RMW loses whichever
+// resolution lands first — a sacred-data loss, not a cosmetic race.
 func AppendResolution(planDir string, r Resolution, now time.Time) error {
 	if err := validateAnchor(r.Anchor); err != nil {
 		return err
@@ -240,20 +253,23 @@ func AppendResolution(planDir string, r Resolution, now time.Time) error {
 	if r.At.IsZero() {
 		r.At = now.UTC()
 	}
-	existing, err := LoadResolutions(planDir)
-	if err != nil {
-		return err
-	}
-	existing = append(existing, r)
 	dir := filepath.Join(planDir, feedbackSubdir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create feedback dir: %w", err)
 	}
-	b, err := json.MarshalIndent(existing, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode resolutions: %w", err)
-	}
-	return os.WriteFile(filepath.Join(dir, resolutionsFile), b, 0o644)
+	path := filepath.Join(dir, resolutionsFile)
+	return fileutil.WithFileLock(context.Background(), path, func() error {
+		existing, err := LoadResolutions(planDir)
+		if err != nil {
+			return err
+		}
+		existing = append(existing, r)
+		b, err := json.MarshalIndent(existing, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encode resolutions: %w", err)
+		}
+		return fileutil.AtomicWriteBytes(path, b, 0o644)
+	})
 }
 
 // validateAnchor keeps anchors to the page-emitted shape (no separators) so a
@@ -289,6 +305,12 @@ func LoadResolutions(planDir string) ([]Resolution, error) {
 // with its latest resolution, computing open/closed. This is the single source
 // the digest and the render read. An item is OPEN when it has no resolution, or
 // when it was re-raised after the latest resolution (supporting the verify loop).
+//
+// Anchors are CANONICALIZED through the remap chain first (see remap.go): a
+// mark whose content moved when the plan was updated is merged, resolved, and
+// rendered at its current address, with the original preserved in
+// RemappedFrom. Rounds on disk are never rewritten — the chain is applied at
+// read time.
 func AssembleReview(planDir string) ([]MergedItem, error) {
 	sets, err := LoadAllFeedback(planDir)
 	if err != nil {
@@ -298,6 +320,16 @@ func AssembleReview(planDir string) ([]MergedItem, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Remaps are DERIVED state — an unreadable remaps.json must degrade (marks
+	// reappear at their original anchors, orphaned but visible), never brick
+	// the merge: this function feeds every render, digest, and await for the
+	// plan, and the sacred inputs (rounds/resolutions) are still intact.
+	remaps, err := LoadRemaps(planDir)
+	if err != nil {
+		slog.Warn("plan feedback: remaps.json unreadable — merging without remaps", "error", err, "dir", planDir)
+		remaps = nil
+	}
+	canon := remapResolver(remaps)
 
 	// latest mark per (anchor, reviewer): multi-user — two reviewers marking the
 	// same anchor are BOTH preserved (keying by anchor alone silently dropped one).
@@ -306,33 +338,43 @@ func AssembleReview(planDir string) ([]MergedItem, error) {
 	type markKey struct{ anchor, reviewer string }
 	latestItem := map[markKey]FeedbackItem{}
 	raisedAt := map[markKey]time.Time{}
+	origAnchor := map[markKey]string{}
 	var order []markKey
 	for _, set := range sets {
 		for _, it := range set.Items {
 			if it.Reviewer == "" {
 				it.Reviewer = set.Reviewer // rounds saved before per-item stamping carried it on the set
 			}
+			orig := it.Anchor
+			it.Anchor = canon(orig)
 			k := markKey{it.Anchor, it.Reviewer}
 			if _, seen := latestItem[k]; !seen {
 				order = append(order, k)
 			}
 			latestItem[k] = it
 			raisedAt[k] = set.CreatedAt
+			if it.Anchor != orig {
+				origAnchor[k] = orig
+			} else {
+				delete(origAnchor, k) // a later round marked the element at its new address directly
+			}
 		}
 	}
 
 	// latest resolution per anchor: the agent resolves the underlying element, which
 	// closes every reviewer's mark on that anchor unless a later round re-raises it.
+	// Resolutions written before a remap follow their item to the new address.
 	latestRes := map[string]Resolution{}
 	for _, r := range resolutions {
-		if cur, ok := latestRes[r.Anchor]; !ok || r.At.After(cur.At) {
-			latestRes[r.Anchor] = r
+		a := canon(r.Anchor)
+		if cur, ok := latestRes[a]; !ok || r.At.After(cur.At) {
+			latestRes[a] = r
 		}
 	}
 
 	out := make([]MergedItem, 0, len(order))
 	for _, k := range order {
-		mi := MergedItem{FeedbackItem: latestItem[k], RaisedAt: raisedAt[k], Open: true}
+		mi := MergedItem{FeedbackItem: latestItem[k], RaisedAt: raisedAt[k], Open: true, RemappedFrom: origAnchor[k]}
 		if r, ok := latestRes[k.anchor]; ok {
 			rc := r
 			mi.Resolution = &rc
@@ -414,6 +456,11 @@ func FeedbackDigest(items []MergedItem) string {
 		fmt.Fprintf(&b, "  [%s] (%s) %s", it.Status, it.Anchor, label)
 		if it.Reviewer != "" {
 			fmt.Fprintf(&b, " @%s", it.Reviewer)
+		}
+		if it.RemappedFrom != "" {
+			// the plan changed under this mark and it was re-anchored — the agent
+			// resolves the CURRENT anchor, shown above.
+			fmt.Fprintf(&b, " (remapped from %s)", it.RemappedFrom)
 		}
 		if contested[it.Anchor] {
 			b.WriteString(" ⚠contested")

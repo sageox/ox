@@ -123,6 +123,7 @@ func Search(opts Options) ([]Result, error) {
 	results = append(results, scanSessions(opts.LedgerPath, terms, now)...)
 	results = append(results, scanMurmurs(opts.LedgerPath, terms, now)...)
 	results = append(results, scanPlans(opts.LedgerPath, terms, now)...)
+	results = append(results, scanPlanFeedback(opts.LedgerPath, terms, now)...)
 
 	// sort by score desc, ties broken by recency desc
 	sort.SliceStable(results, func(i, j int) bool {
@@ -332,6 +333,96 @@ func scanPlans(ledgerPath string, terms []string, now time.Time) []Result {
 			SourceID:   name, // dated slug — locates the plan via `ox plan view`
 			CreatedAt:  ts.Format(time.RFC3339),
 		})
+	}
+	return results
+}
+
+// scanPlanFeedback walks data/plans/<dated-slug>/feedback/round-*.json and
+// scores each human review round as its own document. Review feedback is
+// sacred-tier data — a reviewer's words on a plan must stay findable by asking
+// ("what did Sam flag on the auth plan?"), not only by opening the right plan.
+// One doc per round: reviewer, per-item status/section/label, and the notes.
+// Fail-open like every scanner here: unreadable dirs and malformed rounds are
+// skipped, never an error.
+func scanPlanFeedback(ledgerPath string, terms []string, now time.Time) []Result {
+	plansDir := filepath.Join(ledgerPath, "data", "plans")
+	entries, err := os.ReadDir(plansDir)
+	if err != nil {
+		return nil
+	}
+
+	cutoff := now.Add(-MaxPlanAge)
+	var results []Result
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		planPath := filepath.Join(plansDir, name)
+		if ts := planTimestamp(planPath, name); !ts.IsZero() && ts.Before(cutoff) {
+			continue
+		}
+		fbDir := filepath.Join(planPath, "feedback")
+		rounds, rerr := os.ReadDir(fbDir)
+		if rerr != nil {
+			continue
+		}
+		for _, r := range rounds {
+			if r.IsDir() || !strings.HasPrefix(r.Name(), "round-") || !strings.HasSuffix(r.Name(), ".json") {
+				continue
+			}
+			path := filepath.Join(fbDir, r.Name())
+			data, ferr := os.ReadFile(path)
+			if ferr != nil {
+				continue
+			}
+			var round struct {
+				Reviewer  string    `json:"reviewer"`
+				CreatedAt time.Time `json:"created_at"`
+				Items     []struct {
+					Section  string `json:"section"`
+					Label    string `json:"label"`
+					Status   string `json:"status"`
+					Note     string `json:"note"`
+					Reviewer string `json:"reviewer"`
+				} `json:"items"`
+			}
+			if jerr := json.Unmarshal(data, &round); jerr != nil {
+				continue
+			}
+			var b strings.Builder
+			if round.Reviewer != "" {
+				b.WriteString(round.Reviewer)
+				b.WriteByte('\n')
+			}
+			for _, it := range round.Items {
+				for _, f := range []string{it.Reviewer, it.Status, it.Section, it.Label, it.Note} {
+					if f != "" {
+						b.WriteString(f)
+						b.WriteByte(' ')
+					}
+				}
+				b.WriteByte('\n')
+			}
+			score, snippet := scoreContent(b.String(), terms)
+			if score <= 0 {
+				continue
+			}
+			created := ""
+			if !round.CreatedAt.IsZero() {
+				created = round.CreatedAt.Format(time.RFC3339)
+			}
+			results = append(results, Result{
+				Score:      score,
+				Text:       snippet,
+				DocType:    "plan-feedback",
+				FilePath:   path,
+				SourceType: "ledger",
+				SourceID:   name, // dated slug — `ox plan feedback show <slug>` reads the merged state
+				CreatedAt:  created,
+			})
+		}
 	}
 	return results
 }

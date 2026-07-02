@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-07-01
+
+Review feedback on plans is sacred — this release makes sure none of it can be lost, no matter what happens to the review server, the browser tab, or the plan itself.
+
+### Fixed
+
+- **The review page now tells you the moment feedback stops being saved** — if the review server exits (idle timeout, Ctrl-C, a crash), the page immediately shows a clear "offline — feedback is NOT being saved" banner with the exact restart command to copy, instead of looking live while submissions silently fail. Unsent marks stay safely in the browser and are restored on reconnect.
+- **Restarting a review picks up exactly where it left off** — `ox plan review` serves each plan at a stable address, so the tab you already had open reconnects on its own (marks intact) when you restart, and re-running the command against an already-open review reuses the running one instead of starting a stranded twin.
+- **Reloading the plan while the server is down still shows the plan** — the page keeps a local copy of itself, so a reload lands in clearly-marked disconnected mode instead of a browser error screen.
+- **Your marks follow the plan as it changes** — when an AI coworker updates a plan, open review notes are re-anchored onto the content they referred to, so a reworded heading no longer detaches your comment. Notes whose content truly disappeared stay visibly open and keep appearing in every digest — nothing is ever dropped.
+- **Ask about review feedback later** — reviewer notes on plans now appear in local search, so "what did Sam flag on the auth plan?" finds the reviewer's actual words, not just the plan.
+- **Two coworkers resolving review items at the same time no longer lose one of the updates.**
+
 ## [0.11.0] - 2026-07-01
 
 ### Added

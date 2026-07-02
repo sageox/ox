@@ -110,18 +110,59 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 		return reviewStaticFallback(cmd, gitRoot, slug, in, res, review)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		cli.PrintHint("could not start review server, falling back to file export: " + err.Error())
-		in := plan.Parse(planMD)
-		review, _ := plan.AssembleReview(info.Dir)
-		return reviewStaticFallback(cmd, gitRoot, slug, in, res, review)
+	// Bind a STABLE address for this plan (persisted last port, then the
+	// deterministic per-plan port). Stability is a durability feature, not a
+	// nicety: the page's unsent marks live in origin-scoped localStorage, so a
+	// restarted server on a fresh ephemeral port would strand them and leave the
+	// old tab unable to ever reconnect. If a live server for this same plan is
+	// already up, reuse it instead of racing it for the port.
+	dirName := filepath.Base(info.Dir)
+	state, _ := plan.LoadReviewServerState(gitRoot, dirName)
+	var ln net.Listener
+	for _, p := range reviewPortCandidates(state.Port, dirName) {
+		l, lerr := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		if lerr == nil {
+			ln = l
+			break
+		}
+		if probeReviewServer(p, dirName) {
+			url := fmt.Sprintf("http://127.0.0.1:%d/", p)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", cli.StyleBold.Render("Review loop already open:"), url)
+			cli.PrintHint("Reusing the running server — feedback keeps flowing to the same session.")
+			if oerr := cli.OpenInBrowser(url); oerr != nil {
+				cli.PrintHint("open this URL to review: " + url)
+			}
+			return nil
+		}
+	}
+	if ln == nil {
+		l, lerr := net.Listen("tcp", "127.0.0.1:0")
+		if lerr != nil {
+			cli.PrintHint("could not start review server, falling back to file export: " + lerr.Error())
+			in := plan.Parse(planMD)
+			review, _ := plan.AssembleReview(info.Dir)
+			return reviewStaticFallback(cmd, gitRoot, slug, in, res, review)
+		}
+		ln = l
+		cli.PrintHint("Stable review ports are busy — serving on an ephemeral port; a previously open tab won't auto-reconnect to this one.")
 	}
 	addr := ln.Addr().String()
-	token, err := randomToken()
-	if err != nil {
-		_ = ln.Close()
-		return fmt.Errorf("review server: %w", err)
+	// Reuse the persisted token so a tab that outlived the last server
+	// authenticates against this one without a reload (same trust domain: the
+	// token only gates loopback callers and the state file is 0600).
+	token := state.Token
+	if token == "" {
+		t, terr := randomToken()
+		if terr != nil {
+			_ = ln.Close()
+			return fmt.Errorf("review server: %w", terr)
+		}
+		token = t
+	}
+	if tcp, ok := ln.Addr().(*net.TCPAddr); ok {
+		if serr := plan.SaveReviewServerState(gitRoot, dirName, plan.ReviewServerState{Port: tcp.Port, Token: token}); serr != nil {
+			slog.Debug("plan review: could not persist server state", "error", serr)
+		}
 	}
 	base := "http://" + addr
 
@@ -163,10 +204,13 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 			return nil
 		case <-idle.C:
 			fmt.Fprintln(out, "\nReview session idle — closing.")
-			cli.PrintHint("Re-open anytime with `ox plan review " + slug + "`; feedback is saved in the ledger.")
+			cli.PrintHint("Everything submitted is saved in the ledger. The open page flips to disconnected mode; " +
+				"unsent marks stay in the browser. Re-open anytime: `ox plan review " + slug + "` (same address — the page reconnects and restores them).")
 			return nil
 		case <-ctx.Done():
 			fmt.Fprintln(out, "\nReview session closed.")
+			cli.PrintHint("Everything submitted is saved in the ledger. The open page flips to disconnected mode; " +
+				"unsent marks stay in the browser. Re-open anytime: `ox plan review " + slug + "` (same address — the page reconnects and restores them).")
 			return nil
 		}
 	}
@@ -189,7 +233,33 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// no-store: offline serving is the service worker's job — the HTTP cache
+		// must never mask a dead server with a stale page that still looks live.
+		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(html)
+	})
+
+	// /healthz: unauthenticated identity probe (loopback only). A second
+	// `ox plan review` uses it to detect this server and reuse it; the page's
+	// offline probe uses it to notice the server is back. Exposes nothing but
+	// which plan is being served.
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(reviewHealth{App: "ox-plan-review", Slug: slug, Dir: filepath.Base(planDir)})
+	})
+
+	// /sw.js: the offline shell (assets/sw.js) — keeps the plan readable on a
+	// reload after this process exits; review.js registers it.
+	mux.HandleFunc("/sw.js", func(w http.ResponseWriter, r *http.Request) {
+		js, err := plan.ReviewServiceWorkerJS()
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write(js)
 	})
 
 	// SSE: EventSource can't set headers, so the token rides as a query param.
@@ -442,6 +512,53 @@ func reviewStaticFallback(cmd *cobra.Command, gitRoot, slug string, in plan.Inpu
 		_ = cli.OpenInBrowser(path)
 	}
 	return nil
+}
+
+// reviewHealth is the /healthz body — enough for a second `ox plan review`
+// (and the page's reconnect probe) to recognize a live server for a plan.
+type reviewHealth struct {
+	App  string `json:"app"`
+	Slug string `json:"slug"`
+	Dir  string `json:"dir"`
+}
+
+// reviewPortCandidates orders the ports to try binding: the last port this
+// plan actually served on (persisted state — the origin an open tab is parked
+// on), then the plan's deterministic stable port and a few slots after it for
+// same-machine collisions. Deduped, order-preserving.
+func reviewPortCandidates(persisted int, dirName string) []int {
+	stable := plan.StableReviewPort(dirName)
+	raw := []int{persisted, stable, stable + 1, stable + 2, stable + 3, stable + 4}
+	seen := map[int]bool{}
+	var out []int
+	for _, p := range raw {
+		if p <= 0 || p > 65535 || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+// probeReviewServer reports whether a live ox review server for THIS plan is
+// already listening on port — so a second `ox plan review` reuses it instead
+// of racing it for the port or silently serving a twin.
+func probeReviewServer(port int, dirName string) bool {
+	c := &http.Client{Timeout: 700 * time.Millisecond}
+	resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/healthz", port))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var h reviewHealth
+	if jerr := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&h); jerr != nil {
+		return false
+	}
+	return h.App == "ox-plan-review" && h.Dir == dirName
 }
 
 // randomToken returns a fresh 128-bit hex token, or an error. It FAILS CLOSED —

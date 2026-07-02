@@ -28,6 +28,8 @@
   var reviewer = (localStorage.getItem('ox-plan-reviewer') || '').trim(); // multi-user: who you are
   var on = false;
   var pendingReload = false;
+  var offline = false; // live server unreachable — nothing can be saved until it returns
+  var probeTimer = null;
 
   function load() { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { return {}; } }
   function save() { try { localStorage.setItem(KEY, JSON.stringify(marks)); } catch (e) {} }
@@ -49,9 +51,16 @@
     return arr[0];
   }
   function post(path, payload, ok) {
+    if (offline) { offlineNotice(); return; }
     fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Review-Token': token }, body: JSON.stringify(payload) })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); if (ok) ok(); })
-      .catch(function (e) { alert('Request failed: ' + e.message); });
+      .catch(function (e) {
+        // a network-level failure means the server is gone — flip to
+        // disconnected mode (marks stay in localStorage; nothing is lost)
+        // rather than surfacing a raw fetch error.
+        if (e instanceof TypeError) { setOffline(true); offlineNotice(); return; }
+        alert('Request failed: ' + e.message);
+      });
   }
 
   function fnv1a(s) { var h = 0x811c9dc5; for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 0x01000193) >>> 0; } return ('0000000' + h.toString(16)).slice(-8); }
@@ -274,15 +283,83 @@
     alert('Saved ' + slug + '-feedback.json (and copied to clipboard).\nHand it to the agent, or run:\n  ox plan feedback apply ' + slug + ' --from ' + slug + '-feedback.json');
   }
 
+  // --- connection state (live mode): the page must never LOOK live when the
+  // server is gone. Offline = red pill + sticky banner + refused sends; marks
+  // keep saving to localStorage and are restored after a restart, so nothing a
+  // reviewer wrote is ever lost. ---
+  var connEl = null, offlineBar = null, toastEl = null;
+  function restartCmd() { return 'ox plan review ' + slug; }
+  function paintConn() {
+    if (!connEl) return;
+    connEl.textContent = offline ? '● offline' : '● live';
+    connEl.className = 'rev-conn ' + (offline ? 'off' : 'ok');
+    connEl.title = offline ? 'Review server unreachable — feedback is NOT being saved' : 'Connected to the review server';
+  }
+  function setOffline(down) {
+    if (offline === down) return;
+    offline = down;
+    body.classList.toggle('rev-offline', down);
+    paintConn();
+    if (down) { showOfflineBar(); startProbe(); }
+    else { hideOfflineBar(); stopProbe(); }
+  }
+  function showOfflineBar() {
+    hideOfflineBar();
+    var n = Object.keys(marks).length;
+    offlineBar = document.createElement('div');
+    offlineBar.className = 'rev-offline-bar';
+    offlineBar.innerHTML = '<strong>⚠ Review server offline</strong> — new feedback is NOT being saved. ' +
+      (n ? n + ' unsent mark(s) are' : 'Your marks are') + ' kept in this browser and restored on reconnect. Restart: ' +
+      '<code>' + esc(restartCmd()) + '</code> <button class="rev-offline-copy">copy</button>';
+    document.body.appendChild(offlineBar);
+    offlineBar.querySelector('.rev-offline-copy').onclick = function () {
+      var b = this;
+      if (navigator.clipboard) navigator.clipboard.writeText(restartCmd()).then(function () { b.textContent = 'copied ✓'; }).catch(function () {});
+    };
+  }
+  function hideOfflineBar() { if (offlineBar) { offlineBar.remove(); offlineBar = null; } }
+  function offlineNotice() {
+    var n = Object.keys(marks).length;
+    alert('The review server is offline — feedback can NOT be saved right now.\n' +
+      (n ? 'Your ' + n + ' unsent mark(s) stay in this browser and will be restored.\n' : '') +
+      'Restart the loop with:\n  ' + restartCmd());
+  }
+  function toast(msg) {
+    if (toastEl) toastEl.remove();
+    toastEl = document.createElement('div');
+    toastEl.className = 'rev-toast';
+    toastEl.textContent = msg;
+    document.body.appendChild(toastEl);
+    setTimeout(function () { if (toastEl) { toastEl.remove(); toastEl = null; } }, 8000);
+  }
+  // While offline, poll /healthz; the instant the server is back, reload —
+  // stable port + persisted token mean the same origin serves fresh state, and
+  // paint() restores unsent marks from localStorage. Covers the case where the
+  // EventSource died permanently (e.g. a 403 from a rotated token).
+  function startProbe() {
+    if (probeTimer) return;
+    probeTimer = setInterval(function () {
+      fetch(base + '/healthz', { cache: 'no-store' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (j) { if (j && j.app === 'ox-plan-review') reloadWhenIdle(); })
+        .catch(function () {});
+    }, 3000);
+  }
+  function stopProbe() { if (probeTimer) { clearInterval(probeTimer); probeTimer = null; } }
+  function reloadWhenIdle() { if (pop) { pendingReload = true; return; } location.reload(); }
+
   // controls
   var bar = document.createElement('div');
   bar.className = 'rev-bar';
-  bar.innerHTML = '<button class="rev-toggle" title="Toggle review mode">Review</button><span class="rev-count"></span>' +
+  bar.innerHTML = (live ? '<span class="rev-conn"></span>' : '') +
+    '<button class="rev-toggle" title="Toggle review mode">Review</button><span class="rev-count"></span>' +
     (live ? '<button class="rev-who" title="Set the name teammates see on your comments"></button>' : '') +
     '<button class="rev-submit" title="Send feedback to the agent">' + (live ? 'Submit' : 'Export') + '</button>' +
     (live ? '<button class="rev-approve" title="Approve and close the loop">Approve</button>' : '');
   document.body.appendChild(bar);
   var countEl = bar.querySelector('.rev-count');
+  connEl = bar.querySelector('.rev-conn');
+  paintConn();
   var whoEl = bar.querySelector('.rev-who');
   function updateWho() { if (whoEl) whoEl.textContent = reviewer ? ('You: ' + reviewer) : 'Set name'; }
   updateWho();
@@ -314,12 +391,31 @@
   if (live && window.EventSource) {
     try {
       var es = new EventSource(base + '/events?t=' + encodeURIComponent(token));
+      es.onopen = function () {
+        // recovered from a dead server: reload for fresh state (the browser
+        // repaints unsent marks from localStorage after the reload).
+        if (offline) { setOffline(false); reloadWhenIdle(); return; }
+        paintConn();
+      };
+      es.onerror = function () { setOffline(true); };
       es.onmessage = function () {
         // don't yank the page while the reviewer is mid-note; reload on close
         if (pop) { pendingReload = true; return; }
         location.reload();
       };
     } catch (e) {}
+  }
+
+  // offline shell: cache the page so a reload while the server is down still
+  // shows the plan (this layer then flips to disconnected mode instead of the
+  // browser's connection-error page).
+  if (live && 'serviceWorker' in navigator) {
+    try { navigator.serviceWorker.register('/sw.js').catch(function () {}); } catch (e) {}
+  }
+
+  // unsent marks that survived a server restart or reload — tell the reviewer.
+  if (live && Object.keys(marks).length) {
+    toast(Object.keys(marks).length + ' unsent mark(s) restored — Submit to send them.');
   }
 
   paint();
