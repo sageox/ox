@@ -59,15 +59,18 @@ func ensureRootGitignoreEntry(repoPath, entry string) error {
 	return os.WriteFile(gitignorePath, []byte(content), 0644)
 }
 
-// RejFilesTracked returns true if any *.rej patch-reject files are tracked by
-// git. Used by doctor to detect .rej artifacts swept into ledger history.
-func RejFilesTracked(repoPath string) bool {
+// RejFilesTracked reports whether any *.rej patch-reject files are tracked by
+// git. Used by doctor to detect .rej artifacts swept into ledger history. A
+// non-nil error means detection itself failed (e.g. git unavailable, not a
+// repo) — callers MUST NOT treat that as "no .rej tracked", or doctor could
+// report a clean ledger when the check never ran.
+func RejFilesTracked(repoPath string) (bool, error) {
 	cmd := exec.Command("git", "-C", repoPath, "ls-files", "*.rej")
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return false
+		return false, fmt.Errorf("git ls-files *.rej: %s: %w", strings.TrimSpace(string(out)), err)
 	}
-	return len(strings.TrimSpace(string(out))) > 0
+	return len(strings.TrimSpace(string(out))) > 0, nil
 }
 
 // EnsureCheckoutGitignore ensures .sageox/.gitignore exists in the given repo

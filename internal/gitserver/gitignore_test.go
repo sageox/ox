@@ -353,12 +353,16 @@ func TestEnsureGitignoreBeforeCommit_IgnoresAndUntracksRej(t *testing.T) {
 	runGit(t, dir, "add", relRej)
 	runGit(t, dir, "commit", "-m", "oops: committed a .rej")
 
-	require.True(t, RejFilesTracked(dir), "fixture should leave a tracked .rej")
+	tracked, err := RejFilesTracked(dir)
+	require.NoError(t, err)
+	require.True(t, tracked, "fixture should leave a tracked .rej")
 
 	EnsureGitignoreBeforeCommit(dir)
 
 	// untracked from the index (local file may remain; doctor deletes it)
-	assert.False(t, RejFilesTracked(dir), "EnsureGitignoreBeforeCommit must untrack .rej")
+	tracked, err = RejFilesTracked(dir)
+	require.NoError(t, err)
+	assert.False(t, tracked, "EnsureGitignoreBeforeCommit must untrack .rej")
 
 	// *.rej now ignored repo-wide, so future adds skip it
 	out, err := exec.Command("git", "-C", dir, "check-ignore", relRej).CombinedOutput()
@@ -378,7 +382,9 @@ func TestEnsureGitignoreBeforeCommit_IgnoresAndUntracksRej(t *testing.T) {
 	staged, err := exec.Command("git", "-C", dir, "diff", "--cached", "--name-only").Output()
 	require.NoError(t, err)
 	assert.NotContains(t, string(staged), ".rej", "a broad add must not stage ignored .rej")
-	assert.False(t, RejFilesTracked(dir), "no .rej should be tracked after the sweep")
+	tracked, err = RejFilesTracked(dir)
+	require.NoError(t, err)
+	assert.False(t, tracked, "no .rej should be tracked after the sweep")
 }
 
 // TestEnsureRootGitignoreEntry_Idempotent verifies the root-.gitignore writer

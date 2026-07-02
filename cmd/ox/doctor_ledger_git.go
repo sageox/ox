@@ -930,7 +930,12 @@ func checkLedgerRejTracked(fix bool) checkResult {
 		return SkippedCheck(name, "ledger not a git repo", "")
 	}
 
-	if !gitserver.RejFilesTracked(ledgerPath) {
+	tracked, err := gitserver.RejFilesTracked(ledgerPath)
+	if err != nil {
+		return FailedCheck(name, ".rej detection failed",
+			fmt.Sprintf("could not check tracked .rej files: %v", err))
+	}
+	if !tracked {
 		return PassedCheck(name, "no .rej files tracked")
 	}
 
@@ -976,6 +981,20 @@ func checkLedgerRejTracked(fix bool) checkResult {
 	if err != nil && !strings.Contains(out, "nothing to commit") && !strings.Contains(err.Error(), "nothing to commit") {
 		return FailedCheck(name, "commit failed after untracking",
 			fmt.Sprintf("git commit error: %s", strings.TrimSpace(err.Error())))
+	}
+
+	// re-verify before claiming success: EnsureGitignoreBeforeCommit, the
+	// deletion walk, and the commit all tolerate individual failures, so a
+	// tracked .rej could survive every step. Without this guard `ox doctor
+	// --fix` would report a clean repair while the artifacts remain in history.
+	stillTracked, err := gitserver.RejFilesTracked(ledgerPath)
+	if err != nil {
+		return FailedCheck(name, ".rej verification failed",
+			fmt.Sprintf("could not re-check tracked .rej files after commit: %v", err))
+	}
+	if stillTracked {
+		return FailedCheck(name, "fix incomplete",
+			".rej files are still tracked after untrack and commit")
 	}
 
 	return PassedCheck(name, "untracked .rej files from ledger")
