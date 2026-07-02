@@ -392,3 +392,59 @@ func TestEnsureRootGitignoreEntry_Idempotent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, strings.Count(string(content), "*.rej"), "entry must be written exactly once")
 }
+
+// TestEnsureGitignoreBeforeCommit_StagesRootGitignore is the regression for the
+// class: the guard WRITES a root .gitignore (the repo-wide *.rej ignore) that a
+// caller staging NARROWLY — an explicit pathspec, not `git add -A` — never
+// commits, so the file lingers untracked and the post-commit worktree is dirty.
+// A dirty worktree here trips the pointer-commit clean-worktree (autostash-race)
+// invariant that guards ledger sync. The guard must therefore stage what it
+// writes, symmetric with its `git rm --cached *.rej` untrack, so the caller's
+// commit tracks it regardless of how narrowly that caller stages.
+//
+// Adversarial design: this commits with a NARROW pathspec (an unrelated file),
+// deliberately NOT `git add -A`. A `-A` commit would sweep up the untracked
+// .gitignore and pass even with the fix reverted — that is exactly the theater
+// this test avoids. Neutering the fix (dropping the guard's `git add .gitignore`)
+// must turn this red at both the staged-index and clean-worktree assertions.
+func TestEnsureGitignoreBeforeCommit_StagesRootGitignore(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	runGit(t, dir, "init", "--initial-branch=main")
+	runGit(t, dir, "config", "user.name", "test")
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	// commit directly here (not via gitutil.RunGit), so neutralize any global
+	// signing config that would hang a non-interactive commit in this test.
+	runGit(t, dir, "config", "commit.gpgsign", "false")
+
+	// the caller's own artifact — staged with an explicit pathspec, mirroring
+	// commitAndPushLedger (meta.json + specific files), NOT a broad `git add -A`.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "payload.txt"), []byte("x"), 0644))
+
+	EnsureGitignoreBeforeCommit(dir)
+
+	// 1. the guard must have STAGED the root .gitignore it wrote — present in the
+	//    index, not merely sitting untracked on disk.
+	staged, err := exec.Command("git", "-C", dir, "diff", "--cached", "--name-only").Output()
+	require.NoError(t, err)
+	assert.Contains(t, strings.Split(strings.TrimSpace(string(staged)), "\n"), ".gitignore",
+		"guard must stage the root .gitignore it writes")
+
+	// 2. the caller stages ONLY its own file, then commits the index. This is the
+	//    narrow-staging path the bug lives on.
+	runGit(t, dir, "add", "--sparse", "payload.txt")
+	runGit(t, dir, "commit", "--no-verify", "-m", "narrow commit")
+
+	// 3. worktree must be clean — no `?? .gitignore` left behind.
+	out, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
+	require.NoError(t, err)
+	assert.Empty(t, strings.TrimSpace(string(out)),
+		"worktree must be clean after a narrow-pathspec commit; an untracked root .gitignore here trips the pointer-commit clean-worktree invariant, got: %s", out)
+
+	// 4. and the root .gitignore is genuinely tracked now (belt to the status check).
+	ls, err := exec.Command("git", "-C", dir, "ls-files", ".gitignore").Output()
+	require.NoError(t, err)
+	assert.NotEmpty(t, strings.TrimSpace(string(ls)), "root .gitignore must be tracked after the commit")
+}

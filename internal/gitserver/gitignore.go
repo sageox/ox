@@ -200,6 +200,21 @@ func EnsureGitignoreBeforeCommitCtx(ctx context.Context, repoPath string) {
 	// broad `git add -A`/per-session `add` paths sweep them into ledger history.
 	if err := ensureRootGitignoreEntry(repoPath, rejGitignoreEntry); err != nil {
 		slog.Debug("pre-commit .rej ignore guard failed", "path", repoPath, "error", err)
+	} else {
+		// stage the root .gitignore we just wrote so the caller's commit tracks
+		// it. Symmetric with the *.rej untrack below: both the ignore file and
+		// its untracking must land in the caller's next commit. Callers that
+		// stage narrowly (an explicit pathspec, not `git add -A` — e.g.
+		// commitAndPushLedger / commitPointerRewriteAndPush) would otherwise
+		// leave this newly-written root .gitignore untracked, so the post-commit
+		// worktree stays dirty and trips the pointer-commit clean-worktree
+		// (autostash-race) invariant. --sparse mirrors the untrack ops below
+		// (harmless when no sparse cone is set).
+		addIgnoreCmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+			"add", "--sparse", ".gitignore")
+		if out, err := addIgnoreCmd.CombinedOutput(); err != nil {
+			slog.Debug("pre-commit root .gitignore stage failed", "path", repoPath, "error", err, "output", strings.TrimSpace(string(out)))
+		}
 	}
 
 	// untrack cache files that were committed before .gitignore existed.
