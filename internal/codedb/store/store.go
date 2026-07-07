@@ -655,8 +655,11 @@ func removeSQLiteFiles(dbPath string) {
 //
 // True lock contention (another writer holds bbolt's exclusive flock) is
 // preserved as the pre-existing "lock contention" error: the corruption peek
-// uses a read-only open with 100ms timeout, so a live exclusive lock blocks
-// the peek and we stay in the safe wait-and-retry path.
+// retries a read-only open (100ms timeout per attempt) a few times before
+// giving up, so a live exclusive lock blocks the peek and we stay in the safe
+// wait-and-retry path — but a transient hold that clears within the retry
+// budget no longer permanently masks provable corruption (see
+// isBleveIndexCorrupt).
 //
 // path is the bleve sub-index dir (e.g. <root>/bleve/code); root is the
 // codedb dataDir (needed to locate the marker file).
@@ -700,9 +703,11 @@ func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 	// of JSON input` while the worktree's diff/code shards are healthy). That
 	// state is unrecoverable by waiting — the daemon will spin forever — so we
 	// peek the mapping non-blocking and self-heal when the mapping is provably
-	// empty. The peek uses a read-only open with a 100ms timeout: a real
-	// exclusive lock blocks the read, the peek bails out, and we keep the safe
-	// lock-contention behavior.
+	// empty. The peek retries a read-only open (100ms timeout per attempt,
+	// bleveCorruptionPeekAttempts tries): a real exclusive lock blocks each
+	// read attempt, but a competing writer that releases within the retry
+	// budget no longer strands the peek — only a lock held for the full
+	// budget falls through to the safe lock-contention behavior.
 	boltPath := filepath.Join(path, "store", "root.bolt")
 	if _, statErr := os.Stat(boltPath); statErr == nil {
 		if isBleveIndexCorrupt(boltPath) {
@@ -767,6 +772,20 @@ func WriteNeedsReindexMarker(root, name string) error {
 	return os.WriteFile(NeedsReindexMarkerPath(root, name), []byte(body), 0o600)
 }
 
+// bleveCorruptionPeekAttempts and bleveCorruptionPeekDelay bound how hard
+// isBleveIndexCorrupt retries its read-only peek before conceding the file is
+// genuinely, persistently locked. Overridable in tests (kept as package vars
+// rather than constants) so a test can shrink the delay for speed or use
+// bleveCorruptionPeekRetryHook to synchronize deterministically with a
+// concurrent lock holder instead of racing on wall-clock sleeps (see
+// .claude/rules/testing.md: prefer hooks over time.Sleep for concurrency
+// tests).
+var (
+	bleveCorruptionPeekAttempts  = 3
+	bleveCorruptionPeekDelay     = 150 * time.Millisecond
+	bleveCorruptionPeekRetryHook = func(attempt int) {}
+)
+
 // isBleveIndexCorrupt opens root.bolt read-only with a short timeout and
 // affirmatively checks for three on-disk failure modes that present as the
 // same opaque "error parsing mapping JSON" surface error:
@@ -782,10 +801,14 @@ func WriteNeedsReindexMarker(root, name string) error {
 //     segment is missing on disk.)
 //
 // Returns true only when we successfully read the bolt AND can prove one of
-// the three conditions. On any access error (read-only open timeout, permission,
-// unparseable bolt structure) returns false — we never flag corruption
-// without proof, so a real exclusive write lock stays in the lock-contention
-// path.
+// the three conditions. The read-only open is retried up to
+// bleveCorruptionPeekAttempts times (bleveCorruptionPeekDelay apart) so a
+// transient competing writer doesn't strand a genuinely corrupt mapping in
+// the lock-contention path — a real writer that finishes within the retry
+// budget no longer masks provable corruption. Only once every attempt fails
+// (or the bolt structure itself can't be parsed) do we return false — we
+// never flag corruption without proof, so a write lock held for the full
+// retry budget still stays in the lock-contention path.
 //
 // scorch's bbolt layout in bleve v2.5.7 (empirically verified, see
 // proposals/2026-05-17-bleve-bolt-layout/ if it gets written):
@@ -805,10 +828,21 @@ func WriteNeedsReindexMarker(root, name string) error {
 // is harder to detect reliably and survives as an empty search result rather
 // than a hard open failure.
 func isBleveIndexCorrupt(boltPath string) bool {
-	db, err := bbolt.Open(boltPath, 0600, &bbolt.Options{
-		ReadOnly: true,
-		Timeout:  100 * time.Millisecond,
-	})
+	var db *bbolt.DB
+	var err error
+	for attempt := 0; attempt < bleveCorruptionPeekAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(bleveCorruptionPeekDelay)
+		}
+		bleveCorruptionPeekRetryHook(attempt)
+		db, err = bbolt.Open(boltPath, 0600, &bbolt.Options{
+			ReadOnly: true,
+			Timeout:  100 * time.Millisecond,
+		})
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return false
 	}

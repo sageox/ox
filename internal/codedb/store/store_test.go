@@ -714,6 +714,143 @@ func readDirSize(t *testing.T, dir string) map[string]int64 {
 	return out
 }
 
+// TestIsBleveIndexCorrupt_RecoversWhenLockClearsWithinRetryBudget verifies
+// that a transient competing bbolt lock held across the FIRST corruption-peek
+// attempt no longer permanently masks provable corruption as unrecoverable
+// "lock contention" — the peek retries and self-heal fires once the lock
+// clears within the retry budget.
+//
+// Failure prevented: `ox code search` returning the cryptic "bleve index
+// appears to be in use (lock contention): error parsing mapping JSON:
+// unexpected end of JSON input" whenever a genuinely corrupt mapping happened
+// to coincide with another process briefly holding bbolt's exclusive lock
+// during the single, unretried diagnostic peek.
+func TestIsBleveIndexCorrupt_RecoversWhenLockClearsWithinRetryBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: Bleve + bbolt operations")
+	}
+
+	// Restore package-level retry knobs — other tests in this file run in a
+	// concurrent (t.Parallel) wave after all sequential tests complete, and
+	// must see the real defaults.
+	origAttempts, origDelay, origHook := bleveCorruptionPeekAttempts, bleveCorruptionPeekDelay, bleveCorruptionPeekRetryHook
+	t.Cleanup(func() {
+		bleveCorruptionPeekAttempts = origAttempts
+		bleveCorruptionPeekDelay = origDelay
+		bleveCorruptionPeekRetryHook = origHook
+	})
+	bleveCorruptionPeekDelay = time.Millisecond // timing comes from the hook, not the sleep — keep it fast
+
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "test-index")
+
+	first, err := openOrCreateBleveIndex(tmp, indexPath, "test")
+	require.NoError(t, err, "create index")
+	require.NoError(t, first.Close())
+
+	boltPath := filepath.Join(indexPath, "store", "root.bolt")
+	// Corrupting the mapping now (lock uncontended) makes the eventual
+	// safeOpenBleve call inside openOrCreateBleveIndex fail FAST rather than
+	// block: bleve's plain Open has no timeout, so if a competing lock were
+	// already held at that point it would hang forever instead of reaching
+	// the corruption-check branch at all. The competing lock below is
+	// introduced only later, from inside isBleveIndexCorrupt's retry loop —
+	// matching the field sequence (open fails fast on real corruption, THEN
+	// the diagnostic peek races a separate concurrent writer).
+	emptyMappingForLatestSnapshot(t, boltPath)
+
+	// Simulate a competing writer appearing during the diagnostic peek: the
+	// hook fires from inside isBleveIndexCorrupt's retry loop. Attempt 0
+	// acquires a real, separate exclusive lock (still uncontended at that
+	// instant, so acquisition is instant) so the loop's own read-only attempt
+	// at attempt 0 genuinely times out against it; attempt 1 releases it
+	// before the next try. No time.Sleep-timing race (see
+	// .claude/rules/testing.md: prefer hooks over sleep for concurrency tests).
+	var lockDB *bbolt.DB
+	var hookCalls int
+	bleveCorruptionPeekRetryHook = func(attempt int) {
+		hookCalls++
+		switch attempt {
+		case 0:
+			var lockErr error
+			lockDB, lockErr = bbolt.Open(boltPath, 0600, &bbolt.Options{Timeout: 2 * time.Second})
+			require.NoError(t, lockErr, "acquire competing exclusive lock")
+		case 1:
+			require.NoError(t, lockDB.Close(), "release competing exclusive lock before 2nd peek attempt")
+		}
+	}
+
+	idx, openErr := openOrCreateBleveIndex(tmp, indexPath, "test")
+	require.NoError(t, openErr, "self-heal must recover once the competing lock clears within the retry budget")
+	defer func() { _ = idx.Close() }()
+	require.GreaterOrEqual(t, hookCalls, 2, "test setup bug: retry hook did not fire for both attempts")
+
+	require.True(t, HasNeedsReindexMarker(tmp, "test"),
+		"self-heal must write the reindex marker")
+}
+
+// TestOpenOrCreateBleveIndex_SustainedLockStillReturnsContentionError verifies
+// that the corruption-peek retry does NOT turn genuinely sustained lock
+// contention into a false self-heal: a lock held for the entire retry budget
+// must still surface the pre-existing "lock contention" error unchanged, and
+// must NOT nuke the index.
+//
+// Failure prevented: a naive retry-until-success peek turning a real,
+// long-running writer (e.g. the daemon mid full-reindex) into a spurious
+// nuke-and-recreate of an index that was never actually corrupt.
+func TestOpenOrCreateBleveIndex_SustainedLockStillReturnsContentionError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: Bleve + bbolt operations")
+	}
+
+	origAttempts, origDelay, origHook := bleveCorruptionPeekAttempts, bleveCorruptionPeekDelay, bleveCorruptionPeekRetryHook
+	t.Cleanup(func() {
+		bleveCorruptionPeekAttempts = origAttempts
+		bleveCorruptionPeekDelay = origDelay
+		bleveCorruptionPeekRetryHook = origHook
+	})
+	bleveCorruptionPeekAttempts = 2
+	bleveCorruptionPeekDelay = time.Millisecond
+
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "test-index")
+
+	first, err := openOrCreateBleveIndex(tmp, indexPath, "test")
+	require.NoError(t, err, "create index")
+	require.NoError(t, first.Close())
+
+	boltPath := filepath.Join(indexPath, "store", "root.bolt")
+	// See the sibling recovery test for why the lock must NOT be held yet:
+	// bleve's plain Open (inside safeOpenBleve) has no timeout and would
+	// block forever rather than reach the corruption-check branch.
+	emptyMappingForLatestSnapshot(t, boltPath)
+
+	// Acquire a competing exclusive lock at the first peek attempt and hold
+	// it for the entire retry budget (never release it) — simulating a
+	// writer that's still genuinely active throughout, not one that happens
+	// to finish quickly.
+	var lockDB *bbolt.DB
+	bleveCorruptionPeekRetryHook = func(attempt int) {
+		if attempt == 0 {
+			var lockErr error
+			lockDB, lockErr = bbolt.Open(boltPath, 0600, &bbolt.Options{Timeout: 2 * time.Second})
+			require.NoError(t, lockErr, "acquire competing exclusive lock")
+		}
+	}
+	t.Cleanup(func() {
+		if lockDB != nil {
+			_ = lockDB.Close()
+		}
+	})
+
+	_, openErr := openOrCreateBleveIndex(tmp, indexPath, "test")
+	require.Error(t, openErr, "sustained contention must still surface an error")
+	require.Contains(t, openErr.Error(), "lock contention",
+		"sustained contention must not be misread as self-healable corruption")
+	require.False(t, HasNeedsReindexMarker(tmp, "test"),
+		"a genuinely locked (not proven corrupt) index must not trigger self-heal")
+}
+
 // TestRebuildBleveSubIndex_Comment verifies that a targeted rebuild of the
 // comment sub-index recovers Open without affecting code/diff data and
 // resets the SQL flag so ParseComments will repopulate on the next pass.
