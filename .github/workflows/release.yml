@@ -75,6 +75,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SAGEOX_CLI_PUBLIC_KEY: ${{ steps.sign.outputs.SAGEOX_CLI_PUBLIC_KEY }}
           SAGEOX_CLI_SIGNATURES: ${{ steps.sign.outputs.SAGEOX_CLI_SIGNATURES }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
       - name: Release summary
         run: |
