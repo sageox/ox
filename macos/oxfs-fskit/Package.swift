@@ -15,11 +15,16 @@ let package = Package(
     products: [
         .library(name: "OxfsCore", targets: ["OxfsCore"]),
         .executable(name: "oxfs-hello", targets: ["oxfs-hello"]),
+        .executable(name: "oxdirtest", targets: ["oxdirtest"]),
     ],
     targets: [
         .target(name: "OxfsCore"),
         .executableTarget(
             name: "oxfs-hello",
+            dependencies: ["OxfsCore"]
+        ),
+        .executableTarget(
+            name: "oxdirtest",
             dependencies: ["OxfsCore"]
         ),
         .testTarget(

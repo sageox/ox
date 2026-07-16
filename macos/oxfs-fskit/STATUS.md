@@ -25,7 +25,31 @@ make run        # oxfs-hello smoke binary
 - `import FSKit` **type-checks from the CLI** — the adapter can be written and
   compiled-checked without an Xcode project.
 
-## Done (Phase 1 + 2 + **3**) — all `make test` green (25 tests)
+## Done (Phase 1 + 2 + 3 + **4** + **5 control plane**) — all `make test` green (29 tests)
+
+### Phase 5 — `oxdirtest` select/metrics control plane (WORKING)
+`Sources/oxdirtest/main.swift` — Swift port of the Rust `oxdirtest` control
+loop. Interactive REPL: `select DIR...`, `clear`, `status`, `metrics`, `help`,
+`quit`. Indexes a local directory (`--source`), stream-hashes every file, builds
+a manifest, and applies it to a real `Workspace` (disk-backed verified cache),
+reporting `available`/`stopped` and full cache metrics — same command names and
+output shape as the NFS-v3 harness. The capacity-limited path
+(`stopped`/`WARNING`/`evict_blocked`) works. **Not yet wired:** the actual FSKit
+mount/browse (Phase 7, needs signing) — everything up to the mount is exercised.
+Run: `swift run oxdirtest --source <dir> [--state <dir>] [--cache-bytes N]`.
+
+### Phase 4 — eviction policies + differential oracle (COMPLETE)
+- `EvictionOrder` (LRU-by-selection-generation / CLOCK-second-chance / sampled-LFU)
+  in the catalog via `insert_seq`/`reference`/`frequency` columns; `touch` wired
+  through `openBytes`.
+- `CacheModel.swift` — pure Swift reference model (port of `cachesim`).
+- `OracleTests.swift` — differential oracle: same op stream through the real
+  `DiskContentCache` and the model, asserting resident-key parity every apply,
+  across all 3 policies + a distinctness meta-check. **It caught a real bug**:
+  `materializeMissingBatch` was finishing each object before reserving the next,
+  so a batch-mate could be evicted mid-batch — fixed to reserve-all-then-fetch.
+
+### Phase 1 + 2 + 3 (earlier)
 
 ### Phase 3 — disk-backed crash-safe verified cache (COMPLETE)
 - **`Catalog.swift`** — SQLite catalog via system `import SQLite3` (no dependency):
