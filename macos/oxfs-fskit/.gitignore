@@ -1,0 +1,7 @@
+# SwiftPM build products & local state — never commit
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+.DS_Store
