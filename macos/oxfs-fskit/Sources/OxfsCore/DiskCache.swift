@@ -36,7 +36,7 @@ public final class DiskContentCache: ContentCache {
         self.config = config
         try FileManager.default.createDirectory(at: root.appendingPathComponent("objects"), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: root.appendingPathComponent("tmp"), withIntermediateDirectories: true)
-        self.catalog = try Catalog(path: root.appendingPathComponent("catalog.sqlite"))
+        self.catalog = try Catalog(path: root.appendingPathComponent("catalog.sqlite"), order: config.eviction)
         try removeOrphanTemps()
         try migrateMetadataV1()
         try recoverPending()
@@ -72,6 +72,11 @@ public final class DiskContentCache: ContentCache {
 
     /// Test hook (parity with `fail_next_commit`).
     public func failNextCommit() { lock.lock(); defer { lock.unlock() }; failNextCommitFlag = true }
+
+    public func debugRows() throws -> [(key: String, seq: UInt64, ref: Bool, freq: Int)] {
+        lock.lock(); defer { lock.unlock() }; return try catalog.debugRows()
+    }
+    public func debugClockHand() -> UInt64 { lock.lock(); defer { lock.unlock() }; return catalog.debugClockHand() }
 
     // MARK: - residency (with same-size corruption healing)
 
@@ -170,10 +175,23 @@ public final class DiskContentCache: ContentCache {
     }
 
     public func materializeMissingBatch(_ references: [ContentRef]) throws -> [String] {
-        var out: [String] = []
+        lock.lock(); defer { lock.unlock() }
+        // Phase 1: reserve ALL in order (each stays state=0 pending — not an
+        // eviction candidate for its batch-mates), stopping at StorageFull. This
+        // matches the Rust batch, where reservations precede any fetch/finish, so
+        // an object admitted earlier in the batch is never evicted by a later one.
+        var reserved: [(ref: ContentRef, key: String)] = []
         for reference in references {
-            do { out.append(try materializeMissing(reference).storageKey) }
+            let key = storageKey(reference)
+            do { _ = try cacheReserveLocked(key, reference.size) }
             catch FetchError.io(let m) where m == "StorageFull" { break }
+            reserved.append((reference, key))
+        }
+        // Phase 2: fetch + verify + finish each reserved object.
+        var out: [String] = []
+        for (reference, key) in reserved {
+            do { out.append(try fetchReservedLocked(reference, key).storageKey) }
+            catch { try? catalog.release(key); throw error }
         }
         return out
     }

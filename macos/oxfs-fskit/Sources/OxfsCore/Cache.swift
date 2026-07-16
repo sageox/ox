@@ -2,9 +2,25 @@ import Foundation
 
 public let DEFAULT_CACHE_MAX_BYTES: UInt64 = 1024 * 1024 * 1024
 
+/// Cache eviction order. Port of `cache_policy::EvictionOrder`.
+public enum EvictionOrder: Sendable, Equatable {
+    /// Default: evict the least-recently-*selected* generation (by access epoch),
+    /// deterministic within a generation by key. Reads do not affect recency.
+    case leastRecentlySelectedGeneration
+    /// CLOCK second-chance: a reference bit gives a touched object one reprieve.
+    case clockSecondChance
+    /// Sampled/approximate LFU: evict the least-frequently-opened object.
+    case approxLeastFrequentlyUsed
+}
+
 public struct CacheConfig: Sendable {
     public var maxBytes: UInt64
-    public init(maxBytes: UInt64 = DEFAULT_CACHE_MAX_BYTES) { self.maxBytes = maxBytes }
+    public var eviction: EvictionOrder
+    public init(maxBytes: UInt64 = DEFAULT_CACHE_MAX_BYTES,
+                eviction: EvictionOrder = .leastRecentlySelectedGeneration) {
+        self.maxBytes = maxBytes
+        self.eviction = eviction
+    }
     public static let `default` = CacheConfig()
 }
 

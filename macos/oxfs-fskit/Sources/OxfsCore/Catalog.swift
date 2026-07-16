@@ -2,9 +2,11 @@ import Foundation
 import SQLite3
 
 // Port of `crates/oxfs/src/cache_catalog.rs::Catalog` — the crash-safe SQLite
-// catalog that is the source of truth for what is resident. This is the default
-// LRU-by-selection-generation order (`LeastRecentlySelectedGeneration`); the
-// CLOCK/LFU slot machinery is Phase 4.
+// catalog that is the source of truth for what is resident, with all three
+// eviction policies. The Rust impl stores CLOCK/LFU policy state in an in-memory
+// slot array; here we keep it in the `reference`/`frequency` columns directly,
+// which is simpler and yields the same observable residency (what the
+// differential oracle checks).
 
 let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -25,12 +27,16 @@ private let STATE_EVICTED: Int64 = 2
 
 final class Catalog {
     private var db: OpaquePointer?
+    private let order: EvictionOrder
     private var inBatch = false
     private var epoch: UInt64 = 0
     private var usedBytes: UInt64 = 0
+    private var nextInsertSeq: UInt64 = 1
+    private var clockHand: UInt64 = 0
     private var batchUsedStart: UInt64?
 
-    init(path: URL) throws {
+    init(path: URL, order: EvictionOrder = .leastRecentlySelectedGeneration) throws {
+        self.order = order
         guard sqlite3_open(path.path, &db) == SQLITE_OK else {
             throw CatalogError.sql("open: \(String(cString: sqlite3_errmsg(db)))")
         }
@@ -42,23 +48,29 @@ final class Catalog {
             CREATE TABLE IF NOT EXISTS cache_meta (
               singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
               epoch INTEGER NOT NULL,
-              used_bytes INTEGER NOT NULL
+              used_bytes INTEGER NOT NULL,
+              next_insert_seq INTEGER NOT NULL DEFAULT 1,
+              clock_hand INTEGER NOT NULL DEFAULT 0
             );
-            INSERT OR IGNORE INTO cache_meta(singleton, epoch, used_bytes) VALUES (1, 0, 0);
+            INSERT OR IGNORE INTO cache_meta(singleton, epoch, used_bytes, next_insert_seq, clock_hand)
+              VALUES (1, 0, 0, 1, 0);
             CREATE TABLE IF NOT EXISTS cache_objects (
               key TEXT PRIMARY KEY,
               size INTEGER NOT NULL CHECK (size >= 0),
               access_epoch INTEGER NOT NULL,
-              state INTEGER NOT NULL CHECK (state IN (0, 1, 2))
+              state INTEGER NOT NULL CHECK (state IN (0, 1, 2)),
+              insert_seq INTEGER NOT NULL DEFAULT 0,
+              reference INTEGER NOT NULL DEFAULT 0,
+              frequency INTEGER NOT NULL DEFAULT 0
             ) WITHOUT ROWID;
-            CREATE INDEX IF NOT EXISTS cache_objects_evict
-              ON cache_objects(state, access_epoch, key);
+            CREATE INDEX IF NOT EXISTS cache_objects_evict ON cache_objects(state, access_epoch, key);
+            CREATE INDEX IF NOT EXISTS cache_objects_clock ON cache_objects(state, insert_seq, key);
             """)
-        let stmt = try Stmt(db, "SELECT epoch, used_bytes FROM cache_meta WHERE singleton=1")
+        let stmt = try Stmt(db, "SELECT epoch, used_bytes, next_insert_seq, clock_hand FROM cache_meta WHERE singleton=1")
         defer { stmt.finalize() }
         if stmt.step() == SQLITE_ROW {
-            epoch = UInt64(stmt.int(0))
-            usedBytes = UInt64(stmt.int(1))
+            epoch = UInt64(stmt.int(0)); usedBytes = UInt64(stmt.int(1))
+            nextInsertSeq = Swift.max(1, UInt64(stmt.int(2))); clockHand = UInt64(stmt.int(3))
         }
     }
 
@@ -77,7 +89,7 @@ final class Catalog {
 
     func commit() throws {
         guard inBatch else { return }
-        try persistUsedBytes()
+        try persistMeta()
         try exec("COMMIT")
         inBatch = false
         batchUsedStart = nil
@@ -89,6 +101,10 @@ final class Catalog {
             inBatch = false
             usedBytes = batchUsedStart ?? usedBytes
             batchUsedStart = nil
+            // Reload volatile scalars the rolled-back statements may have changed.
+            let stmt = try Stmt(db, "SELECT next_insert_seq, clock_hand FROM cache_meta WHERE singleton=1")
+            defer { stmt.finalize() }
+            if stmt.step() == SQLITE_ROW { nextInsertSeq = Swift.max(1, UInt64(stmt.int(0))); clockHand = UInt64(stmt.int(1)) }
         }
     }
 
@@ -101,16 +117,12 @@ final class Catalog {
         return stmt.step() == SQLITE_ROW
     }
 
-    /// Reserve `key` for materialization, evicting LRU victims to make room.
-    /// Faithful port of the default-order path of `Catalog::reserve`.
+    /// Reserve `key` for materialization, evicting per policy to make room.
+    /// All-or-nothing: on `storageFull` no victims are consumed.
     func reserve(_ key: String, size: UInt64, capacity: UInt64) throws -> (Reservation, [Victim]) {
         let existing = try existingRow(key)
-        if let e = existing, e.state == STATE_RESIDENT, e.size == i64(size) {
-            return (.resident, [])
-        }
-        if let e = existing, e.state == STATE_PENDING, e.size == i64(size) {
-            return (.pending, [])
-        }
+        if let e = existing, e.state == STATE_RESIDENT, e.size == i64(size) { return (.resident, []) }
+        if let e = existing, e.state == STATE_PENDING, e.size == i64(size) { return (.pending, []) }
 
         var wasEvicted = existing?.state == STATE_EVICTED
         let clearExisting = existing.map { $0.state == STATE_PENDING || $0.state == STATE_RESIDENT } ?? false
@@ -127,35 +139,85 @@ final class Catalog {
         }
 
         let target = capacity >= size ? capacity - size : 0
+        var refClears: [String] = []
+        var newClockHand: UInt64?
         if plannedUsed > target {
-            let stmt = try Stmt(db, "SELECT key,size,access_epoch FROM cache_objects WHERE state=1 AND key<>?1 ORDER BY access_epoch,key")
-            defer { stmt.finalize() }
-            stmt.bindText(1, key)
-            while stmt.step() == SQLITE_ROW {
-                let vKey = stmt.text(0), vSize = UInt64(stmt.int(1)), vAccess = UInt64(stmt.int(2))
-                plannedUsed = plannedUsed >= vSize ? plannedUsed - vSize : 0
-                victims.append(Victim(key: vKey, size: vSize, access: vAccess))
-                if plannedUsed <= target { break }
-            }
+            let plan = try planVictims(incoming: key, used: plannedUsed, size: size, target: target)
+            for v in plan.victims { plannedUsed = plannedUsed >= v.size ? plannedUsed - v.size : 0 }
+            victims.append(contentsOf: plan.victims)
+            refClears = plan.refClears
+            newClockHand = plan.newClockHand
         }
-        if plannedUsed > target {
-            throw CatalogError.storageFull
-        }
+        if plannedUsed > target { throw CatalogError.storageFull }
 
-        if clearExisting {
-            try run("UPDATE cache_objects SET state=2 WHERE key=?1", text: key)
-        }
+        // Commit the plan (only reached when it fits — all-or-nothing).
+        if clearExisting { try run("UPDATE cache_objects SET state=2 WHERE key=?1", text: key) }
         for victim in victims where victim.key != key {
             try run("UPDATE cache_objects SET state=2 WHERE key=?1", text: victim.key)
         }
+        for hot in refClears { try run("UPDATE cache_objects SET reference=0 WHERE key=?1", text: hot) }
+        if let hand = newClockHand { clockHand = hand }
         usedBytes = plannedUsed
+
+        let seq = nextInsertSeq; nextInsertSeq &+= 1
         try run("""
-            INSERT INTO cache_objects(key,size,access_epoch,state) VALUES(?1,?2,?3,0)
-            ON CONFLICT(key) DO UPDATE SET size=excluded.size, access_epoch=excluded.access_epoch, state=0
-            """, text: key, i64(size), i64(epoch))
+            INSERT INTO cache_objects(key,size,access_epoch,state,insert_seq,reference,frequency)
+              VALUES(?1,?2,?3,0,?4,0,0)
+            ON CONFLICT(key) DO UPDATE SET size=excluded.size, access_epoch=excluded.access_epoch,
+              state=0, insert_seq=excluded.insert_seq, reference=0, frequency=0
+            """, text: key, i64(size), i64(epoch), i64(seq))
         usedBytes = usedBytes &+ size
-        try persistUsedIfAutocommit()
+        try persistMetaIfAutocommit()
         return (wasEvicted ? .refetch : .pending, victims)
+    }
+
+    private struct VictimPlan { let victims: [Victim]; let refClears: [String]; let newClockHand: UInt64? }
+
+    /// Compute the ordered victim prefix (excluding `incoming`) needed to fit,
+    /// under the configured policy. Pure — performs no writes.
+    private func planVictims(incoming: String, used: UInt64, size: UInt64, target: UInt64) throws -> VictimPlan {
+        struct Cand { let key: String; let size: UInt64; let access: UInt64; let insertSeq: UInt64; let reference: Bool; let frequency: Int64 }
+        var cands: [Cand] = []
+        let stmt = try Stmt(db, "SELECT key,size,access_epoch,insert_seq,reference,frequency FROM cache_objects WHERE state=1 AND key<>?1")
+        stmt.bindText(1, incoming)
+        while stmt.step() == SQLITE_ROW {
+            cands.append(Cand(key: stmt.text(0), size: UInt64(stmt.int(1)), access: UInt64(stmt.int(2)),
+                              insertSeq: UInt64(stmt.int(3)), reference: stmt.int(4) != 0, frequency: stmt.int(5)))
+        }
+        stmt.finalize()
+
+        var refClears: [String] = []
+        switch order {
+        case .leastRecentlySelectedGeneration:
+            cands.sort { ($0.access, $0.key) < ($1.access, $1.key) }
+        case .approxLeastFrequentlyUsed:
+            cands.sort { ($0.frequency, $0.insertSeq, $0.key) < ($1.frequency, $1.insertSeq, $1.key) }
+        case .clockSecondChance:
+            // Sweep from the hand: objects ahead of the hand first.
+            cands.sort {
+                let a = ($0.insertSeq < clockHand ? 1 : 0, $0.insertSeq, $0.key)
+                let b = ($1.insertSeq < clockHand ? 1 : 0, $1.insertSeq, $1.key)
+                return a < b
+            }
+            var cold: [Cand] = [], hot: [Cand] = []
+            for c in cands {
+                if c.reference { refClears.append(c.key); hot.append(c) } else { cold.append(c) }
+            }
+            cands = cold + hot
+        }
+
+        var freed: UInt64 = 0
+        var victims: [Victim] = []
+        for c in cands {
+            if used - freed <= target { break }
+            freed += c.size
+            victims.append(Victim(key: c.key, size: c.size, access: c.access))
+        }
+        var newClockHand: UInt64?
+        if order == .clockSecondChance, let last = victims.last {
+            newClockHand = (cands.first { $0.key == last.key }?.insertSeq ?? 0) &+ 1
+        }
+        return VictimPlan(victims: victims, refClears: refClears, newClockHand: newClockHand)
     }
 
     func finish(_ key: String, size: UInt64) throws {
@@ -174,7 +236,7 @@ final class Catalog {
         let size: UInt64? = stmt.step() == SQLITE_ROW ? UInt64(stmt.int(0)) : nil
         stmt.finalize()
         try run("UPDATE cache_objects SET state=2 WHERE key=?1", text: key)
-        if let size { usedBytes = usedBytes >= size ? usedBytes - size : 0; try persistUsedIfAutocommit() }
+        if let size { usedBytes = usedBytes >= size ? usedBytes - size : 0; try persistMetaIfAutocommit() }
     }
 
     func importResident(_ key: String, size: UInt64, access: UInt64) throws {
@@ -183,12 +245,31 @@ final class Catalog {
         let exists = check.step() == SQLITE_ROW
         check.finalize()
         if exists { return }
-        let inserted = try run("INSERT OR IGNORE INTO cache_objects(key,size,access_epoch,state) VALUES(?1,?2,?3,1)",
-                               text: key, i64(size), i64(access))
+        let seq = nextInsertSeq; nextInsertSeq &+= 1
+        let inserted = try run("INSERT OR IGNORE INTO cache_objects(key,size,access_epoch,state,insert_seq,reference,frequency) VALUES(?1,?2,?3,1,?4,0,0)",
+                               text: key, i64(size), i64(access), i64(seq))
         if inserted == 1 { usedBytes = usedBytes &+ size }
         epoch = Swift.max(epoch, access)
-        try run("UPDATE cache_meta SET epoch=?1, used_bytes=?2 WHERE singleton=1", i64(epoch), i64(usedBytes))
+        try run("UPDATE cache_meta SET epoch=?1, used_bytes=?2, next_insert_seq=?3 WHERE singleton=1",
+                i64(epoch), i64(usedBytes), i64(nextInsertSeq))
     }
+
+    func touch(_ key: String) throws {
+        switch order {
+        case .leastRecentlySelectedGeneration: return
+        case .clockSecondChance: try run("UPDATE cache_objects SET reference=1 WHERE key=?1 AND state=1", text: key)
+        case .approxLeastFrequentlyUsed: try run("UPDATE cache_objects SET frequency=frequency+1 WHERE key=?1 AND state=1", text: key)
+        }
+    }
+
+    func debugRows() throws -> [(key: String, seq: UInt64, ref: Bool, freq: Int)] {
+        let stmt = try Stmt(db, "SELECT key,insert_seq,reference,frequency FROM cache_objects WHERE state=1")
+        defer { stmt.finalize() }
+        var out: [(String, UInt64, Bool, Int)] = []
+        while stmt.step() == SQLITE_ROW { out.append((String(stmt.text(0).suffix(6)), UInt64(stmt.int(1)), stmt.int(2) != 0, Int(stmt.int(3)))) }
+        return out.sorted { $0.0 < $1.0 }
+    }
+    func debugClockHand() -> UInt64 { clockHand }
 
     func pendingKeys() throws -> [String] { try keys("SELECT key FROM cache_objects WHERE state=0") }
     func residentKeys() throws -> [String] { try keys("SELECT key FROM cache_objects WHERE state=1 ORDER BY key") }
@@ -199,7 +280,7 @@ final class Catalog {
         stmt.finalize()
         try exec("UPDATE cache_objects SET state=2 WHERE state=0")
         usedBytes = usedBytes >= pendingBytes ? usedBytes - pendingBytes : 0
-        try persistUsedIfAutocommit()
+        try persistMetaIfAutocommit()
     }
 
     func gauges() throws -> Gauges {
@@ -211,12 +292,8 @@ final class Catalog {
             """)
         defer { stmt.finalize() }
         guard stmt.step() == SQLITE_ROW else { return Gauges() }
-        return Gauges(residentObjects: UInt64(stmt.int(0)),
-                      residentBytes: UInt64(stmt.int(1)),
-                      pendingObjects: UInt64(stmt.int(2)))
+        return Gauges(residentObjects: UInt64(stmt.int(0)), residentBytes: UInt64(stmt.int(1)), pendingObjects: UInt64(stmt.int(2)))
     }
-
-    func touch(_ key: String) throws { /* LRU-by-generation has no per-open touch */ }
 
     // MARK: - helpers
 
@@ -237,8 +314,11 @@ final class Catalog {
         return out
     }
 
-    private func persistUsedIfAutocommit() throws { if !inBatch { try persistUsedBytes() } }
-    private func persistUsedBytes() throws { try run("UPDATE cache_meta SET used_bytes=?1 WHERE singleton=1", i64(usedBytes)) }
+    private func persistMetaIfAutocommit() throws { if !inBatch { try persistMeta() } }
+    private func persistMeta() throws {
+        try run("UPDATE cache_meta SET used_bytes=?1, next_insert_seq=?2, clock_hand=?3 WHERE singleton=1",
+                i64(usedBytes), i64(nextInsertSeq), i64(clockHand))
+    }
 
     private func i64(_ v: UInt64) -> Int64 { Int64(bitPattern: v) }
 
