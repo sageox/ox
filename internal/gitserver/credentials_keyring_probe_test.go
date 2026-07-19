@@ -1,13 +1,54 @@
 package gitserver
 
 import (
+	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zalando/go-keyring"
 )
+
+// --- keyringAvailableForErr: read the real credential slot, not a throwaway ---
+//
+// The old check did keyring.Set("sageox-keyring-probe") followed by
+// keyring.Delete on the same key, every single call. On macOS, Keychain
+// ACL "Always Allow" grants are tied to a specific item — one that's
+// created and destroyed on every check never persists long enough for any
+// grant to stick, so every call re-triggered the OS access prompt.
+// liveKeyringProbe now reads the real, persistent credential slot instead:
+// once access is granted for that one item, it stays granted. ErrNotFound
+// must be treated as "available" (the mechanism works, nothing is stored
+// yet), not as a failure — getting that backwards would make ox report the
+// keychain broken for every user who hasn't logged in yet.
+
+// TestKeyringAvailableForErr_ClassifiesOutcomes proves the classification
+// itself: a stored credential or ErrNotFound both mean the keychain is
+// available; any other error (locked, permission denied, no backend on a
+// headless box) means it isn't. This is the actual bug class from the old
+// code — nothing here touches a real OS keychain, so it runs identically
+// in CI and locally.
+func TestKeyringAvailableForErr_ClassifiesOutcomes(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"credential found", nil, true},
+		{"nothing stored yet", keyring.ErrNotFound, true},
+		{"wrapped not-found", fmt.Errorf("lookup: %w", keyring.ErrNotFound), true},
+		{"keychain locked or access denied", errors.New("User interaction is not allowed."), false},
+		{"no backend available", errors.New("exec: \"security\": executable file not found in $PATH"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, keyringAvailableForErr(tt.err))
+		})
+	}
+}
 
 // --- probeKeyringCached: avoid re-probing the OS keychain on every call ---
 //

@@ -21,18 +21,13 @@ const (
 	// keyringUser is the user identifier for the keychain entry
 	keyringUser = "git-credentials"
 
-	// keyringProbeCacheTTL bounds how long a keyring probe result is
+	// keyringProbeCacheTTL bounds how long a keyring-availability result is
 	// trusted before re-checking live. isKeyringAvailable is called from
 	// the daemon's heartbeat and sync loops (roughly once a minute) as
-	// well as most CLI commands touching git credentials — an uncached
-	// live probe on every call means a Set+Delete round-trip through OS
-	// Keychain Services on every one of those. On macOS, Keychain access
-	// grants are tied to the calling binary's code identity, so a locally
-	// rebuilt dev binary (go build/make install) looks like a new,
-	// unrecognized requester on every rebuild — any previously-granted
-	// "Always Allow" stops applying, and the next probe reprompts. Caching
-	// the result turns "a popup roughly every minute, worse after every
-	// rebuild" into "a popup at most once per TTL window."
+	// well as most CLI commands touching git credentials, and every CLI
+	// invocation is a fresh process — caching narrows the window further
+	// but can't cover process-to-process reuse on its own; liveKeyringProbe
+	// (below) is what actually removes the repeat-prompt trigger.
 	keyringProbeCacheTTL = 5 * time.Minute
 )
 
@@ -53,18 +48,34 @@ var (
 	keyringProbeFn  = liveKeyringProbe
 )
 
-// liveKeyringProbe performs the actual Set+Delete round-trip against the OS
-// keychain — the potentially prompt-triggering operation probeKeyringCached
-// exists to avoid repeating on every call.
+// liveKeyringProbe checks keychain availability by reading the real,
+// persistent credential slot (keyringService/keyringUser) instead of
+// creating and immediately deleting a throwaway probe entry.
+//
+// The previous approach did keyring.Set("sageox-keyring-probe") followed
+// by keyring.Delete on the same key, every call. On macOS, go-keyring
+// shells out to /usr/bin/security, and Keychain ACL "Always Allow" grants
+// are tied to a SPECIFIC item — an item that gets created and destroyed on
+// every single check never persists long enough for any grant to stick, so
+// every call re-triggered the access prompt. Reading the real credential
+// slot instead means: once the user grants access to that one persistent
+// item (typically the first time ox actually stores or reads real
+// credentials), the same item is reused on every subsequent check and the
+// grant holds. ErrNotFound is a normal, prompt-free outcome — it means the
+// keychain mechanism works, there just aren't credentials stored yet — not
+// a failure.
 func liveKeyringProbe() bool {
-	testKey := "sageox-keyring-probe"
-	testValue := "probe"
+	_, err := keyring.Get(keyringService, keyringUser)
+	return keyringAvailableForErr(err)
+}
 
-	if err := keyring.Set(keyringService, testKey, testValue); err != nil {
-		return false
-	}
-	_ = keyring.Delete(keyringService, testKey)
-	return true
+// keyringAvailableForErr classifies a keyring.Get error: nil (a credential
+// is stored) or ErrNotFound (mechanism works, nothing stored yet) both mean
+// the keychain is available; any other error (locked, denied, no backend)
+// means it isn't. Split out from liveKeyringProbe so this decision is
+// directly testable without a real OS keychain backend.
+func keyringAvailableForErr(err error) bool {
+	return err == nil || errors.Is(err, keyring.ErrNotFound)
 }
 
 // probeKeyringCached returns whether the OS keychain is functional,
