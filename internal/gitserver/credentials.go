@@ -20,7 +20,105 @@ const (
 	keyringService = "sageox-git"
 	// keyringUser is the user identifier for the keychain entry
 	keyringUser = "git-credentials"
+
+	// keyringProbeCacheTTL bounds how long a keyring probe result is
+	// trusted before re-checking live. isKeyringAvailable is called from
+	// the daemon's heartbeat and sync loops (roughly once a minute) as
+	// well as most CLI commands touching git credentials — an uncached
+	// live probe on every call means a Set+Delete round-trip through OS
+	// Keychain Services on every one of those. On macOS, Keychain access
+	// grants are tied to the calling binary's code identity, so a locally
+	// rebuilt dev binary (go build/make install) looks like a new,
+	// unrecognized requester on every rebuild — any previously-granted
+	// "Always Allow" stops applying, and the next probe reprompts. Caching
+	// the result turns "a popup roughly every minute, worse after every
+	// rebuild" into "a popup at most once per TTL window."
+	keyringProbeCacheTTL = 5 * time.Minute
 )
+
+// keyringProbeMu guards the cached keyring-probe result below.
+var keyringProbeMu sync.RWMutex
+
+// keyringProbeAt is when the cached result was captured (zero = never probed).
+var keyringProbeAt time.Time
+
+// keyringProbeOK is the cached probe result.
+var keyringProbeOK bool
+
+// keyringProbeNow and keyringProbeFn are swappable for tests so the cache
+// TTL boundary and call-count behavior can be verified deterministically,
+// without waiting on a real clock or touching a real OS keychain.
+var (
+	keyringProbeNow = time.Now
+	keyringProbeFn  = liveKeyringProbe
+)
+
+// liveKeyringProbe performs the actual Set+Delete round-trip against the OS
+// keychain — the potentially prompt-triggering operation probeKeyringCached
+// exists to avoid repeating on every call.
+func liveKeyringProbe() bool {
+	testKey := "sageox-keyring-probe"
+	testValue := "probe"
+
+	if err := keyring.Set(keyringService, testKey, testValue); err != nil {
+		return false
+	}
+	_ = keyring.Delete(keyringService, testKey)
+	return true
+}
+
+// probeKeyringCached returns whether the OS keychain is functional,
+// reusing a cached result for keyringProbeCacheTTL instead of re-probing
+// live on every call.
+func probeKeyringCached() bool {
+	now := keyringProbeNow()
+
+	keyringProbeMu.RLock()
+	fresh := !keyringProbeAt.IsZero() && now.Sub(keyringProbeAt) < keyringProbeCacheTTL
+	cached := keyringProbeOK
+	keyringProbeMu.RUnlock()
+	if fresh {
+		return cached
+	}
+
+	ok := keyringProbeFn()
+
+	keyringProbeMu.Lock()
+	keyringProbeOK = ok
+	keyringProbeAt = now
+	keyringProbeMu.Unlock()
+
+	return ok
+}
+
+// TestSetKeyringProbeFunc overrides the live probe function for testing.
+// Returns the previous value so it can be restored.
+func TestSetKeyringProbeFunc(fn func() bool) func() bool {
+	keyringProbeMu.Lock()
+	defer keyringProbeMu.Unlock()
+	prev := keyringProbeFn
+	keyringProbeFn = fn
+	return prev
+}
+
+// TestSetKeyringProbeNow overrides the clock used for cache TTL checks.
+// Returns the previous value so it can be restored.
+func TestSetKeyringProbeNow(fn func() time.Time) func() time.Time {
+	keyringProbeMu.Lock()
+	defer keyringProbeMu.Unlock()
+	prev := keyringProbeNow
+	keyringProbeNow = fn
+	return prev
+}
+
+// TestResetKeyringProbeCache clears the cached probe result, forcing the
+// next probeKeyringCached call to re-probe live.
+func TestResetKeyringProbeCache() {
+	keyringProbeMu.Lock()
+	defer keyringProbeMu.Unlock()
+	keyringProbeAt = time.Time{}
+	keyringProbeOK = false
+}
 
 // RepoEntry represents a single git repository from the credentials API.
 // NOTE: GET /api/v1/cli/repos only returns team-context repos, not ledgers.
@@ -132,20 +230,8 @@ func isKeyringAvailable() bool {
 		}
 	}
 
-	// test if keyring is actually functional by attempting a probe operation
-	// use a unique test key that won't conflict with real data
-	testKey := "sageox-keyring-probe"
-	testValue := "probe"
-
-	// try to set and get a value
-	if err := keyring.Set(keyringService, testKey, testValue); err != nil {
-		return false
-	}
-
-	// clean up probe value
-	_ = keyring.Delete(keyringService, testKey)
-
-	return true
+	// test if keyring is actually functional — cached, see probeKeyringCached
+	return probeKeyringCached()
 }
 
 // RemoveCredentials deletes git server credentials from all storage locations.
