@@ -7,16 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **`ox plan enrich --topic`** — consult team context before you've written a word of the plan (collision, prior-art, expert-routing), the same pre-draft pattern `ox decision enrich` already has. Add `--files` once you know which files are involved for open-PR/expert-ownership signals too.
-- **`ox session stop --current`** and **`ox session list --repo <path>`** — stop your own recording without knowing its agent ID, and list another repo's sessions without `cd`-ing there first.
-
-### Fixed
-
-- **`ox agent tasks done`/`cancel` now accepts `--result`/`--reason`** — these were documented and fully wired end to end but silently rejected by the CLI; completion and cancellation notes now actually save.
-- **Clearer errors when an agent ID looks like something else** — pasting a session name (from `ox session list`) where an agent ID belongs now says so directly, instead of a generic "unknown command."
-
 ## [0.12.0] - 2026-07-18
 
 Decision Records get first-class team context, and three real reliability gaps in sync and search are closed for good.
@@ -31,6 +21,8 @@ Decision Records get first-class team context, and three real reliability gaps i
 - **`ox doctor` catches a broken Decision Records setup** — a typo'd or invalid `decision.paths` entry used to fail silently and quietly turn off enrichment; `ox doctor` now flags it before it costs you a wasted `ox decision enrich` run.
 - **Find your team's decisions fast in code search** — `ox code search --decisions` narrows results to just this repo's ADRs/DDRs, and every decision-record hit is now labeled wherever it shows up in search so you can spot it at a glance.
 - **`ox session prune` clears out local-only sessions you no longer need** — removes finalized recordings that were never pushed to the ledger, keeping your local session store tidy. `--all` also clears paused, canceled, ghost, and orphaned sessions; `--dry-run` previews first; `--force` skips the confirmation prompt. Sessions already on the ledger are never touched — use `ox session remove <name>` for those.
+- **`ox plan enrich --topic`** — consult team context before you've written a word of the plan (collision, prior-art, expert-routing), the same pre-draft pattern `ox decision enrich` already has. Add `--files` once you know which files are involved for open-PR/expert-ownership signals too.
+- **`ox session stop --current`** and **`ox session list --repo <path>`** — stop your own recording without knowing its agent ID, and list another repo's sessions without `cd`-ing there first.
 
 ### Changed
 
@@ -45,6 +37,9 @@ Decision Records get first-class team context, and three real reliability gaps i
 - **`ox query` no longer drops you mid-session** — a background credential refresh that already covered most commands didn't cover `ox query`, so a long session could suddenly demand you log in again even though you never logged out. It refreshes the same way every other command does now.
 - **A ledger that's genuinely diverged from the team now recovers instead of staying stuck** — when your local session history and the team's have truly split (not just fallen behind), ox used to retry the same failing sync forever with no way out short of asking for help. It now recognizes the difference, warns you sooner the longer it goes unresolved, and repairs itself automatically once it's been stuck a few hours — any work it recovers along the way is left for you to review, never auto-committed.
 - **`ox distill` no longer discards a whole run over one bad day** — a single failed summary (a rate limit, a hiccup) used to throw away everything the run had already produced. It now keeps what succeeded and only reports the part that didn't.
+- **`ox doctor` now catches a PR that's missing its collaboration credit before it merges** — commits already get it automatically, but the PR description didn't, and a description becomes the permanent record once merged. A new check flags the gap while there's still time to fix it.
+- **`ox agent tasks done`/`cancel` now accepts `--result`/`--reason`** — these were documented and fully wired end to end but silently rejected by the CLI; completion and cancellation notes now actually save.
+- **Clearer errors when an agent ID looks like something else** — pasting a session name (from `ox session list`) where an agent ID belongs now says so directly, instead of a generic "unknown command."
 
 ### Security
 
