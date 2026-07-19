@@ -40,6 +40,7 @@ Decision Records get first-class team context, and three real reliability gaps i
 - **`ox doctor` now catches a PR that's missing its collaboration credit before it merges** — commits already get it automatically, but the PR description didn't, and a description becomes the permanent record once merged. A new check flags the gap while there's still time to fix it.
 - **`ox agent tasks done`/`cancel` now accepts `--result`/`--reason`** — these were documented and fully wired end to end but silently rejected by the CLI; completion and cancellation notes now actually save.
 - **Clearer errors when an agent ID looks like something else** — pasting a session name (from `ox session list`) where an agent ID belongs now says so directly, instead of a generic "unknown command."
+- **No more repeated keychain access prompts** — checking whether the OS keychain works used to create a throwaway test entry and immediately delete it, every time, which never let macOS remember your "Always Allow" choice. It now checks the real credential entry instead, so access, once granted, stays granted.
 
 ### Security
 
