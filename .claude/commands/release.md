@@ -84,33 +84,46 @@ git log $(git describe --tags --abbrev=0)..HEAD --oneline --no-merges
 
 ### Step 4: Update CHANGELOG.md
 
-Read the current CHANGELOG.md to understand the format. Then:
+Read `.claude/rules/releases.md`'s **Release Notes Guidelines** section first — it's the
+canonical source for release-note style, this step just applies it. The one question every
+bullet answers: **"As a user, what can I now do that I couldn't do before?"** Target bar:
+Conductor, Wispr Flow, Raycast, Linear, Arc — a reader understands the whole release in
+under a minute.
 
 1. Add a new version section at the top (after the header)
-2. Group changes by: Added, Changed, Fixed, Removed
-3. **Lead with customer value** — open each entry with what a coworker can now do, or the pain that's gone; benefit first, mechanism second (or dropped)
-4. NO commit hashes or PR numbers
-5. NO internal jargon — spell out the user-visible effect, never protocol/impl detail (SSE, CSP, OTLP, askpass, HTTP status codes, struct/field/signal names, file paths). Name the command and any `SAGEOX_*` env var; skip commit prefixes like "feat(scope):"
-6. Keep it crisp — one or two sentences per entry
-7. Use today's date in YYYY-MM-DD format
+2. Group changes by: `New`, `Improved`, `Fixed`, `Security` (security only when relevant)
+3. **Collapse related work into themes.** Ten engineering fixes are often one user-visible
+   improvement — merge aggressively rather than listing each one
+4. **Capability first, mechanism never** (unless it changes something the user can see) —
+   no internal architecture, algorithms, storage, migrations, daemon behavior, internal IDs
+5. NO commit hashes, PR numbers, or commit prefixes like "feat(scope):"
+6. NO internal jargon — spell out the user-visible effect, never protocol/impl detail (SSE,
+   CSP, OTLP, askpass, HTTP status codes, struct/field/signal names, file paths). Name the
+   command and any `SAGEOX_*` env var
+7. Keep it crisp — one or two sentences per entry, usually one, never a paragraph
+8. Use today's date in YYYY-MM-DD format
+9. Target roughly 3–8 New, 2–5 Improved, 3–8 Fixed. More than ~20 bullets total means it
+   hasn't been distilled enough — merge harder
 
 Example format:
 ```markdown
 ## [0.X.0] - YYYY-MM-DD
 
-### Added
-- **Feature Name**: Clear description of what users can now do
+### New
+- **Feature Name** — clear description of what users can now do
 
-### Changed
-- Description of behavior change
+### Improved
+- Description of the user-visible improvement (often merging several fixes/changes)
 
 ### Fixed
-- Bug that was affecting users
+- Bug that was affecting users, described by its user-visible effect
 ```
 
-Benefit-first vs. mechanism-first — the single most important rule:
+Capability-first vs. mechanism-first — the single most important rule:
 - ✅ **Publish a plan as a Claude Code Artifact** — a self-contained page that renders with no network access.
 - ❌ **CSP-safe artifact render** — drops the SSE loop and inlines the Mermaid CDN so the page passes Content-Security-Policy.
+- ✅ **Sync is significantly more reliable, including recovery from interrupted sessions and diverged history.**
+- ❌ "fixed sync / fixed retries / fixed divergence / fixed GPG / fixed daemon startup" (five bullets that are one user-visible theme)
 
 ### Step 5: Bump Version
 

@@ -21,24 +21,73 @@ make bump-version NEW_VERSION=0.10.0
 
 ## Release Process
 
-1. **Agent prepares release notes** — update `CHANGELOG.md`. User experience first. Group by: Added, Changed, Fixed. NO commit hashes. NO auto-generated changelogs. See v0.7.0 for gold standard.
+1. **Agent prepares release notes** — update `CHANGELOG.md`. Follow Release Notes Guidelines below. NO commit hashes. NO auto-generated changelogs.
 2. **Agent asks human for version confirmation** — always ask. Default: bump middle number.
 3. **Human creates draft release** at github.com/sageox/ox/releases/new (tag: `v0.X.0`)
 4. **Human publishes** — automation handles binaries and signing
 
 ## Release Notes Guidelines
 
-**Lead with customer value — always.** Every entry opens with what a coworker can now *do*, or the pain that's gone. The benefit is the first thing read; the mechanism comes second and stays short, or is dropped. This applies to every release, not just polished ones.
+Release notes are not commit history, not engineering documentation, not implementation
+summaries. They answer one question: **"As a user, what can I now do that I couldn't do
+before?"** Assume the reader is an engineer who uses SageOx every day — they care about
+capabilities, not implementation, unless the implementation changes behavior they can see.
 
-**Good:** "**Publish a plan as a Claude Code Artifact** — a self-contained page that renders with no network access." Benefit first, plain language.
+**Target quality bar:** Conductor, Wispr Flow, Raycast, Linear, Arc Browser. Calm, concise,
+confident, product-focused, implementation-light. A reader should understand an entire
+release in under a minute.
 
-**Bad:** "**CSP-safe artifact render** — drops the SSE loop and inlines the Mermaid CDN so the page passes Content-Security-Policy." Mechanism first, internal jargon.
+**The test for every bullet:** would a customer ever describe the feature this way? If not,
+rewrite it. Never expose internal architecture, implementation details, algorithms, storage,
+migrations, daemon behavior, or internal IDs — those belong in the PR body, commit history,
+or architecture docs, not here.
 
-**Cut internal jargon.** No protocol/implementation acronyms or symbols in customer-facing notes: SSE, CSP, OTLP, askpass, 401/403, HTTP status codes, struct/field names, signal names, file paths. Name the command and any customer-facing env var (`SAGEOX_*`); translate everything else into the effect the user sees.
+- ✅ **Every recording now gets a permanent session link from the moment it starts.**
+- ❌ "Recordings now mint their stable session ID at recording start, persisted in the raw
+  header carrier, reused after daemon restart."
+- ✅ **`ox doctor` now catches Decision Record configuration issues before they affect your
+  workflow.**
+- ❌ "`ox doctor` now validates `decision.paths`."
+- ✅ **Search is more resilient under heavy concurrent usage.**
+- ❌ "Retries index corruption before self-heal fallback."
+- ✅ **Publish a plan as a Claude Code Artifact** — a self-contained page that renders with no
+  network access.
+- ❌ "CSP-safe artifact render — drops the SSE loop and inlines the Mermaid CDN so the page
+  passes Content-Security-Policy."
 
-**Crisp.** One or two sentences per entry. If a reader can't tell why they'd care by the end of the first line, rewrite it.
+**Collapse related work into themes — ruthlessly.** Ten engineering fixes are often one
+user-visible improvement. Don't write "fixed sync / fixed retries / fixed divergence / fixed
+GPG / fixed daemon startup." Write **"Sync is significantly more reliable, including recovery
+from interrupted sessions and diverged history."** If three bullets all improve the same
+feature, make one bullet.
 
-**Agent rules:** DO write benefit-first, human-focused notes; propose the version; confirm with human. DO NOT auto-generate changelogs from commits, include hashes/PR numbers, lead with the mechanism, or create tags without approval.
+**Organize around product concepts, not internal subsystems.** Categories: `New`, `Improved`,
+`Fixed`, `Security` (security only when relevant). Users think in workflows, not packages.
+
+**Cut internal jargon.** No protocol/implementation acronyms or symbols: SSE, CSP, OTLP,
+askpass, 401/403, HTTP status codes, struct/field names, signal names, file paths. Name the
+command and any customer-facing env var (`SAGEOX_*`); translate everything else into the
+effect the user sees.
+
+**Crisp.** One or two sentences per entry, usually one. Never a paragraph bullet. If a reader
+can't tell why they'd care by the end of the first line, rewrite it.
+
+**Tone: confident and matter-of-fact, never marketing hype.** No "game changing,"
+"revolutionary," or "best ever."
+
+**Target size:** roughly 3–8 New, 2–5 Improved, 3–8 Fixed (often summarized from many
+commits), Security only when relevant. More than ~20 bullets total means it hasn't been
+distilled enough — go back and merge harder.
+
+**Editing process:** read every change → group into themes → strip implementation detail →
+rewrite each bullet from the user's perspective → merge aggressively → delete anything that
+doesn't materially affect users → read the final release in under a minute → if it still
+reads like a commit log, rewrite it again.
+
+**Agent rules:** DO write capability-first, human-focused notes that pass the "would a
+customer describe it this way" test; propose the version; confirm with human. DO NOT
+auto-generate changelogs from commits, include hashes/PR numbers, narrate mechanism or
+internal architecture, or create tags without approval.
 
 **Release infra changes:** Consult `@oss-release-engineer` subagent first.
 
