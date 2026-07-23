@@ -45,33 +45,130 @@ var readToolNames = map[string]bool{
 	"view":         true,
 }
 
-// Scan returns a turn-anchored `consulted` event for every file read whose path
-// resolves inside a SageOx root. Deterministic and pure: no I/O, no writes. The
-// event's Seq is the entry's index in the session (raw.jsonl line order).
+// shellToolNames are the tools that run a shell command — where an `ox`
+// retrieval invocation shows up as the command text.
+var shellToolNames = map[string]bool{
+	"Bash": true, "shell": true, "run_command": true, "execute_command": true,
+}
+
+// retrievalCommands maps an `ox` retrieval invocation (as it appears in a shell
+// command) to the kind of knowledge it pulls. Running one of these in a turn is
+// a consultation, even though the specific result isn't known from the command.
+var retrievalCommands = []struct{ prefix, refType string }{
+	{"ox query", "query"},
+	{"ox agent team-ctx", "team-context"},
+	{"ox code search", "code"},
+	{"ox decision enrich", "decision"},
+}
+
+// Scan returns a turn-anchored `consulted` event for every turn that pulled
+// SageOx knowledge — a file read inside a SageOx root, or an `ox` retrieval
+// command. Deterministic and pure: no I/O, no writes. The event's Seq is the
+// entry's index in the session (raw.jsonl line order).
 func Scan(entries []Entry, roots Roots) []contexttrace.Event {
 	var events []contexttrace.Event
 	for i, e := range entries {
-		if !readToolNames[e.ToolName] {
-			continue
+		switch {
+		case readToolNames[e.ToolName]:
+			path := extractPath(e.ToolInput)
+			if path == "" {
+				continue
+			}
+			root, refType := classify(path, roots)
+			if root == "" {
+				continue
+			}
+			events = append(events, contexttrace.Event{
+				Type:      contexttrace.EventConsulted,
+				Source:    contexttrace.SourceOnDemand,
+				Mechanism: contexttrace.MechanismRetrieval,
+				Seq:       i,
+				Ref:       relOrBase(root, path),
+				RefType:   refType,
+			})
+		case shellToolNames[e.ToolName]:
+			refType, query, ok := detectRetrievalCommand(e.ToolInput)
+			if !ok {
+				continue
+			}
+			events = append(events, contexttrace.Event{
+				Type:      contexttrace.EventConsulted,
+				Source:    contexttrace.SourceOnDemand,
+				Mechanism: contexttrace.MechanismRetrieval,
+				Seq:       i,
+				RefType:   refType,
+				Ref:       query,
+				Query:     query,
+			})
 		}
-		path := extractPath(e.ToolInput)
-		if path == "" {
-			continue
-		}
-		root, refType := classify(path, roots)
-		if root == "" {
-			continue
-		}
-		events = append(events, contexttrace.Event{
-			Type:      contexttrace.EventConsulted,
-			Source:    contexttrace.SourceOnDemand,
-			Mechanism: contexttrace.MechanismRetrieval,
-			Seq:       i,
-			Ref:       relOrBase(root, path),
-			RefType:   refType,
-		})
 	}
 	return events
+}
+
+// detectRetrievalCommand reports whether a shell tool input runs an `ox`
+// retrieval command, returning the knowledge kind and the query/subject text.
+func detectRetrievalCommand(toolInput string) (refType, query string, ok bool) {
+	cmd := extractCommand(toolInput)
+	if cmd == "" {
+		return "", "", false
+	}
+	for _, rc := range retrievalCommands {
+		if idx := strings.Index(cmd, rc.prefix); idx >= 0 {
+			rest := strings.TrimSpace(cmd[idx+len(rc.prefix):])
+			return rc.refType, firstQuotedOrToken(rest), true
+		}
+	}
+	return "", "", false
+}
+
+// extractCommand pulls the shell command out of a tool input (JSON object with a
+// "command"/"cmd" key, or a bare command string).
+func extractCommand(toolInput string) string {
+	s := strings.TrimSpace(toolInput)
+	if strings.HasPrefix(s, "{") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(s), &m); err == nil {
+			for _, k := range []string{"command", "cmd"} {
+				if v, ok := m[k].(string); ok && v != "" {
+					return v
+				}
+			}
+			return ""
+		}
+	}
+	return s
+}
+
+// firstQuotedOrToken returns the query/subject a retrieval command targets: the
+// first quoted string anywhere in s (queries are usually quoted, and may sit
+// after flags like --topic), else the first non-flag token. Capped so a receipt
+// stays short.
+func firstQuotedOrToken(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	for _, q := range []byte{'"', '\''} {
+		if i := strings.IndexByte(s, q); i >= 0 {
+			if end := strings.IndexByte(s[i+1:], q); end >= 0 {
+				return truncateQuery(s[i+1 : i+1+end])
+			}
+		}
+	}
+	for _, tok := range strings.Fields(s) {
+		if !strings.HasPrefix(tok, "-") {
+			return truncateQuery(tok)
+		}
+	}
+	return truncateQuery(strings.Fields(s)[0])
+}
+
+func truncateQuery(s string) string {
+	const max = 120
+	if len(s) > max {
+		return s[:max]
+	}
+	return s
 }
 
 // ScanRawFile reads a session's raw.jsonl and returns the consulted events for

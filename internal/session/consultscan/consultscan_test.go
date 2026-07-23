@@ -76,6 +76,56 @@ func TestScan_TagsSageOxReads(t *testing.T) {
 	}
 }
 
+func bashInput(cmd string) string {
+	b, _ := json.Marshal(map[string]string{"command": cmd})
+	return string(b)
+}
+
+// TestScan_TagsRetrievalCommands covers the second deterministic signal: running
+// an `ox` retrieval command in a turn is a consultation, tagged with the
+// knowledge kind and the query subject.
+// Failure prevented: research/planning turns that pulled team context via
+// `ox query` go untagged, hiding the highest-value influence path.
+func TestScan_TagsRetrievalCommands(t *testing.T) {
+	tests := []struct {
+		name    string
+		cmd     string
+		refType string
+		query   string
+	}{
+		{"ox query quoted", `ox query "token refresh contract"`, "query", "token refresh contract"},
+		{"ox code search", `ox code search "PushWithRetry"`, "code", "PushWithRetry"},
+		{"ox team-ctx", `ox agent team-ctx`, "team-context", ""},
+		{"ox decision enrich with flag", `ox decision enrich --topic "session streaming"`, "decision", "session streaming"},
+		{"unrelated command", `ls -la /tmp`, "", ""},
+		{"non-ox query", `grep query file.go`, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Scan([]Entry{{"Bash", bashInput(tt.cmd)}}, testRoots())
+			if tt.refType == "" {
+				if len(got) != 0 {
+					t.Fatalf("expected no tag, got %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("expected 1 tag, got %d", len(got))
+			}
+			ev := got[0]
+			if ev.Type != contexttrace.EventConsulted || ev.Mechanism != contexttrace.MechanismRetrieval {
+				t.Errorf("type/mechanism = %q/%q, want consulted/retrieval", ev.Type, ev.Mechanism)
+			}
+			if ev.RefType != tt.refType {
+				t.Errorf("ref_type = %q, want %q", ev.RefType, tt.refType)
+			}
+			if ev.Query != tt.query {
+				t.Errorf("query = %q, want %q", ev.Query, tt.query)
+			}
+		})
+	}
+}
+
 // TestScan_SeqAnchorsToTurn proves each tag carries the turn (entry index) it
 // happened on, even with non-read turns interleaved — the anchor recap needs to
 // tie a consult to the work in that turn.

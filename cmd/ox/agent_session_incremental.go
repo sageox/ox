@@ -157,6 +157,13 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		return result, nil
 	}
 
+	// Deterministic knowledge-flow tagging (epic ox-bcgb, tier 1): tag the turns
+	// where the agent consulted SageOx knowledge — reads of ledger/team-context
+	// files, and `ox` retrieval commands. Strictly best-effort against the LOCAL
+	// raw.jsonl (real content, per the cache-only rule); it appends to the
+	// session's context-trace and NEVER affects the recording result.
+	tagSessionConsults(projectRoot, state.SessionPath, rawPath)
+
 	// reconstruct session entries from stored raw for event generation and summary
 	sessionEntries := make([]session.Entry, 0, len(storedSession.Entries))
 	for _, rawMap := range storedSession.Entries {
