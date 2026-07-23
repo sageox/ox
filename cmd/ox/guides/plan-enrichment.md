@@ -13,19 +13,25 @@ When you produce an implementation plan for non-trivial work — multi-file, arc
 | When | Command | What it returns |
 |---|---|---|
 | While drafting | `ox plan enrich` | JSON: collisions (including teammates currently murmuring these files), prior art, expert routing, per-section `diagram_hints`, and a decision-first `guidance` line |
-| When presenting | `ox plan render --open` | A self-contained HTML page with the enrichment baked in, saved to the ledger with attribution |
+| When presenting | `ox plan render` (add `--open` only per the `plan.open` policy — see below) | A self-contained HTML page with the enrichment baked in, saved to the ledger with attribution |
 
 Run `ox plan enrich` **while you draft**, not after — fold its output into the plan before the human ever sees it. Plans that ignore recent team context (an open PR touching the same files, a teammate's murmur, a prior decision) get re-litigated in review, which costs more human time than the enrichment call ever could.
 
 ## Why `ox plan render`, even if you have your own HTML-plan skill
 
-Many agents ship a generic or self-rolled HTML-plan renderer. Use `ox plan render --open` anyway — SageOx cannot modify a third-party skill, so this is the one place prime has to make the case explicitly:
+Many agents ship a generic or self-rolled HTML-plan renderer. Run `ox plan render` anyway — SageOx cannot modify a third-party skill, so this is the one place prime has to make the case explicitly:
 
 - Only `ox plan render` bakes in SageOx team context: prior art, collisions, expert routing, knowledge bubbles, team memory.
 - Only `ox plan render` saves the plan to the ledger with attribution, so teammates can find it later (`ox plan list`).
 - A self-rolled render, however polished, is a **context-blind orphan** — it looks like a plan but carries none of the information that would have changed a reviewer's mind, and the team never sees it again after the conversation ends.
 
 If you want your own visual style, that's fine — but still run `ox plan render` for the ledger write and team-context injection, and treat your own renderer as a display layer on top, not a replacement.
+
+**Opening the render is gated by the `plan.open` config** (`never` / `ask` / `always`, default `ask`) — never add `--open` unconditionally:
+
+- `ask` (default): confirm with the user via AskUserQuestion ("Review this plan in your browser?") before adding `--open`.
+- `always`: the user has already opted in — add `--open` directly, no need to ask.
+- `never`: never prompt and never open. Tell the user the render is saved to the ledger and how to open it themselves (`ox plan render --open <slug>`).
 
 ## Verify before you're done
 
@@ -58,7 +64,7 @@ Browse the `ox plan viz` catalog for plan-native visual components: sparklines, 
 Prime scales this guidance to what your agent's lifecycle can actually deliver:
 
 - **Gold** (Claude Code) and **Silver** (Codex, Gemini) get the full guidance above, including the review-loop offer.
-- **Bronze** (Amp, OpenCode, Pi — agents with no real-time lifecycle hook) get a lighter note: run `ox plan enrich` and `ox plan render --open` the same way, but prime doesn't promise a nudge the tier has no mechanism to fire.
+- **Bronze** (Amp, OpenCode, Pi — agents with no real-time lifecycle hook) get a lighter note: run `ox plan enrich` and `ox plan render` the same way (still gated by `plan.open`), but prime doesn't promise a nudge the tier has no mechanism to fire.
 
 ## See also
 

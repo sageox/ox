@@ -120,6 +120,9 @@ func TestWriteDecisionRecordGuidance_GatedOnCorpus(t *testing.T) {
 				t.Errorf("block missing %q", want)
 			}
 		}
+		if strings.Contains(got, "<!-- SOURCE: sageox") {
+			t.Error("block must not reintroduce the inline citation example; it now lives in `ox guide decision-records`")
+		}
 	})
 	t.Run("no corpus", func(t *testing.T) {
 		newDecisionTestRepo(t, false)

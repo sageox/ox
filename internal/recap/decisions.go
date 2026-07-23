@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/sageox/ox/pkg/sessionsummary"
 )
@@ -68,9 +69,7 @@ func readSessionDecisions(ledgerPath string, s SessionFacts) []sessionsummary.De
 
 // sortByCreatedDesc orders sessions newest-first, in place.
 func sortByCreatedDesc(facts []SessionFacts) {
-	for i := 1; i < len(facts); i++ {
-		for j := i; j > 0 && facts[j].CreatedAt.After(facts[j-1].CreatedAt); j-- {
-			facts[j], facts[j-1] = facts[j-1], facts[j]
-		}
-	}
+	sort.Slice(facts, func(i, j int) bool {
+		return facts[i].CreatedAt.After(facts[j].CreatedAt)
+	})
 }

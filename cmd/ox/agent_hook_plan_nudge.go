@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -217,17 +218,13 @@ func runPlanSubprocess(planText string, args ...string) ([]byte, bool) {
 		return nil, false
 	}
 
-	cmd := exec.Command(oxPath, args...)
+	// hard timeout so a wedged subprocess never stalls the agent's turn.
+	ctx, cancel := context.WithTimeout(context.Background(), planSubprocessTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, oxPath, args...)
 	cmd.Stdin = strings.NewReader(planText)
 	cmd.Env = os.Environ()
-
-	// hard timeout so a wedged subprocess never stalls the agent's turn.
-	timer := time.AfterFunc(planSubprocessTimeout, func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-	})
-	defer timer.Stop()
 
 	out, err := cmd.Output()
 	if err != nil {

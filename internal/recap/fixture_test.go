@@ -189,7 +189,8 @@ func (f *fx) GitCommit(message string) string {
 
 func (f *fx) git(args ...string) string {
 	f.t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", f.Project}, args...)...)
+	cmd := exec.Command("git", args...)
+	cmd.Dir = f.Project
 	out, err := cmd.CombinedOutput()
 	require.NoError(f.t, err, "git %v: %s", args, out)
 	return string(out)
