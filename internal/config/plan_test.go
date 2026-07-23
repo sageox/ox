@@ -25,6 +25,13 @@ func clearPlanHTMLEnv(t *testing.T) {
 	require.NoError(t, os.Unsetenv(EnvPlanHTML))
 }
 
+// clearPlanOpenEnv ensures SAGEOX_PLAN_OPEN is not inherited from the ambient
+// environment for tests that assert config/default resolution.
+func clearPlanOpenEnv(t *testing.T) {
+	t.Helper()
+	require.NoError(t, os.Unsetenv(EnvPlanOpen))
+}
+
 // --- A. Documented defaults hold when nothing is configured ---
 // Failure prevented: a defaulted key silently returning the Go zero value
 // (false / "") because the resolver forgot the pointer-vs-default distinction.
@@ -44,6 +51,14 @@ func TestPlanHTML_DefaultsRecommend(t *testing.T) {
 	assert.Equal(t, PlanHTMLRecommend, PlanHTML(""), "empty project root")
 	assert.Equal(t, PlanHTMLRecommend, PlanHTML(t.TempDir()), "uninitialized temp project")
 	assert.Equal(t, PlanHTMLRecommend, DefaultPlanHTML, "guard: default enum is recommend")
+}
+
+func TestPlanOpen_DefaultsAsk(t *testing.T) {
+	isolateUserConfig(t)
+	clearPlanOpenEnv(t)
+	assert.Equal(t, PlanOpenAsk, PlanOpen(""), "empty project root")
+	assert.Equal(t, PlanOpenAsk, PlanOpen(t.TempDir()), "uninitialized temp project")
+	assert.Equal(t, PlanOpenAsk, DefaultPlanOpen, "guard: default enum is ask")
 }
 
 // --- B. Explicit project config overrides the default ---
@@ -99,6 +114,35 @@ func TestPlanHTML_OffSilences(t *testing.T) {
 		Plan:        &PlanConfig{HTML: StringPtr(PlanHTMLOff)},
 	})
 	assert.Equal(t, PlanHTMLOff, PlanHTML(dir), "plan.html=off must resolve to off, not the recommend default")
+}
+
+func TestPlanOpen_ProjectOverride(t *testing.T) {
+	for _, val := range []string{PlanOpenNever, PlanOpenAsk, PlanOpenAlways} {
+		t.Run(val, func(t *testing.T) {
+			isolateUserConfig(t)
+			clearPlanOpenEnv(t)
+			dir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
+				ProjectID:   "test_project",
+				WorkspaceID: "test_workspace",
+				Plan:        &PlanConfig{Open: StringPtr(val)},
+			})
+			assert.Equal(t, val, PlanOpen(dir))
+		})
+	}
+}
+
+// never must truly silence — proves the never value round-trips through
+// config and is returned verbatim (the nudge keys off this exact value to
+// suppress all open/ask instructions).
+func TestPlanOpen_NeverRoundTrips(t *testing.T) {
+	isolateUserConfig(t)
+	clearPlanOpenEnv(t)
+	dir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
+		ProjectID:   "test_project",
+		WorkspaceID: "test_workspace",
+		Plan:        &PlanConfig{Open: StringPtr(PlanOpenNever)},
+	})
+	assert.Equal(t, PlanOpenNever, PlanOpen(dir), "plan.open=never must resolve to never, not the ask default")
 }
 
 // --- C. Precedence: user config > project config > default ---
@@ -159,6 +203,34 @@ func TestPlanHTML_ProjectUsedWhenUserUnset(t *testing.T) {
 		Plan:        &PlanConfig{HTML: StringPtr(PlanHTMLOff)},
 	})
 	assert.Equal(t, PlanHTMLOff, PlanHTML(dir), "project plan.html used when user is unset")
+}
+
+func TestPlanOpen_UserBeatsProject(t *testing.T) {
+	// user=always, project=never → user wins (always).
+	userDir := t.TempDir()
+	userCfgPath := filepath.Join(userDir, "config.yaml")
+	require.NoError(t, os.WriteFile(userCfgPath, []byte("plan:\n  open: always\n"), 0644))
+	t.Setenv("OX_USER_CONFIG", userCfgPath)
+	clearPlanOpenEnv(t)
+
+	dir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
+		ProjectID:   "test_project",
+		WorkspaceID: "test_workspace",
+		Plan:        &PlanConfig{Open: StringPtr(PlanOpenNever)},
+	})
+
+	assert.Equal(t, PlanOpenAlways, PlanOpen(dir), "user plan.open must override project plan.open")
+}
+
+func TestPlanOpen_ProjectUsedWhenUserUnset(t *testing.T) {
+	isolateUserConfig(t)
+	clearPlanOpenEnv(t)
+	dir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
+		ProjectID:   "test_project",
+		WorkspaceID: "test_workspace",
+		Plan:        &PlanConfig{Open: StringPtr(PlanOpenNever)},
+	})
+	assert.Equal(t, PlanOpenNever, PlanOpen(dir), "project plan.open used when user is unset")
 }
 
 // --- D. Env override SAGEOX_PLAN_HTML is a direct enum override ---
@@ -238,6 +310,79 @@ func TestPlanHTML_EnvUnknownFallsThrough(t *testing.T) {
 	}
 }
 
+func TestPlanOpen_EnvDirectOverride(t *testing.T) {
+	// Each valid enum value, set via env, wins over a contradicting config.
+	for _, envVal := range []string{PlanOpenNever, PlanOpenAsk, PlanOpenAlways} {
+		t.Run("env="+envVal+" beats project", func(t *testing.T) {
+			isolateUserConfig(t)
+			t.Setenv(EnvPlanOpen, envVal)
+			// project says never; env should win regardless of what it says.
+			dir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
+				ProjectID:   "test_project",
+				WorkspaceID: "test_workspace",
+				Plan:        &PlanConfig{Open: StringPtr(PlanOpenNever)},
+			})
+			assert.Equal(t, envVal, PlanOpen(dir), "env enum value must win over project config")
+		})
+	}
+}
+
+func TestPlanOpen_EnvBeatsUser(t *testing.T) {
+	userDir := t.TempDir()
+	userCfgPath := filepath.Join(userDir, "config.yaml")
+	require.NoError(t, os.WriteFile(userCfgPath, []byte("plan:\n  open: never\n"), 0644))
+	t.Setenv("OX_USER_CONFIG", userCfgPath)
+	t.Setenv(EnvPlanOpen, PlanOpenAlways)
+	assert.Equal(t, PlanOpenAlways, PlanOpen(""), "env must override user config")
+}
+
+func TestPlanOpen_EnvCaseInsensitive(t *testing.T) {
+	isolateUserConfig(t)
+	t.Setenv(EnvPlanOpen, "ALWAYS")
+	assert.Equal(t, PlanOpenAlways, PlanOpen(""), "env override should normalize case")
+}
+
+func TestPlanOpen_EnvUnknownFallsThrough(t *testing.T) {
+	// An unknown or empty env value must NOT force anything — it falls through
+	// to the configured value, then the default. Proves env is validated, not
+	// blindly trusted.
+	tests := []struct {
+		name   string
+		envVal string
+		setEnv bool
+		// project config open (empty = leave Plan nil → default applies)
+		projectOpen string
+		want        string
+	}{
+		{"unset env → default", "", false, "", PlanOpenAsk},
+		{"empty env → default", "", true, "", PlanOpenAsk},
+		{"junk env → default", "yes-please", true, "", PlanOpenAsk},
+		{"junk env respects config", "yes-please", true, PlanOpenAlways, PlanOpenAlways},
+		{"junk env does not suppress never config", "true", true, PlanOpenNever, PlanOpenNever},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateUserConfig(t)
+			if tt.setEnv {
+				t.Setenv(EnvPlanOpen, tt.envVal)
+			} else {
+				require.NoError(t, os.Unsetenv(EnvPlanOpen))
+			}
+			var plan *PlanConfig
+			if tt.projectOpen != "" {
+				plan = &PlanConfig{Open: StringPtr(tt.projectOpen)}
+			}
+			dir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
+				ProjectID:   "test_project",
+				WorkspaceID: "test_workspace",
+				Plan:        plan,
+			})
+			assert.Equal(t, tt.want, PlanOpen(dir),
+				"unknown env value must fall through, never force a value")
+		})
+	}
+}
+
 // --- E. PlanConfig helpers ---
 
 func TestPlanConfig_IsEmpty(t *testing.T) {
@@ -245,4 +390,11 @@ func TestPlanConfig_IsEmpty(t *testing.T) {
 	assert.True(t, (&PlanConfig{}).IsEmpty(), "zero-value config is empty")
 	assert.False(t, (&PlanConfig{Save: boolPtr(false)}).IsEmpty(), "save set → not empty")
 	assert.False(t, (&PlanConfig{HTML: StringPtr(PlanHTMLOff)}).IsEmpty(), "html set → not empty")
+	assert.False(t, (&PlanConfig{Open: StringPtr(PlanOpenNever)}).IsEmpty(), "open set → not empty")
+}
+
+func TestPlanConfig_IsOpenSet(t *testing.T) {
+	assert.False(t, (*PlanConfig)(nil).IsOpenSet(), "nil config: not set")
+	assert.False(t, (&PlanConfig{}).IsOpenSet(), "zero-value config: not set")
+	assert.True(t, (&PlanConfig{Open: StringPtr(PlanOpenAlways)}).IsOpenSet(), "open set")
 }

@@ -111,7 +111,11 @@ func TestWriteDecisionRecordGuidance_GatedOnCorpus(t *testing.T) {
 		if !strings.Contains(got, "<decision-record-guidance>") {
 			t.Fatalf("block missing:\n%s", got)
 		}
-		for _, want := range []string{"ox decision enrich --topic", "--file", "SOURCE: sageox", "ox code search"} {
+		// The citation-format example (`<!-- SOURCE: sageox ... -->`) moved to
+		// `ox guide decision-records` when the prime preamble was compacted — the
+		// block keeps every command + the verbatim-citation rule and routes the
+		// format detail to the guide. Assert the surviving directives + that route.
+		for _, want := range []string{"ox decision enrich --topic", "--file", "ox code search", "VERBATIM", "ox guide decision-records"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("block missing %q", want)
 			}

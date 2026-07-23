@@ -205,8 +205,10 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// this is non-blocking and returns nil if not in hook context
 	hookInput := ReadAgentHookInput()
 	var agentSessionID string
+	var hookSource string // "" when invoked directly (no piped hook stdin), else startup/resume/clear/compact
 	if hookInput != nil {
 		agentSessionID = hookInput.SessionID
+		hookSource = hookInput.Source
 	}
 
 	// fallback: if no session ID from hook stdin, try agent's native env var
@@ -589,6 +591,19 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 	trackInstanceStart(inst)
 
+	// Compact re-prime tier (bd ox-32f6): a routine re-invocation of `ox
+	// agent prime` within the SAME context window the agent already primed
+	// in this session gets the compact delta instead of the full preamble.
+	// hookSource is "" for a direct re-invocation with no piped hook stdin
+	// (e.g. the CLAUDE.md BLOCKING instruction) — correctly not a force
+	// signal, since that IS the redundant same-window case this tier
+	// targets. A genuine SessionStart(source=clear|compact) hook
+	// re-invocation, or the agent's first prime for this identity
+	// (primeCallCount==1, set above), always yields compactReprime=false
+	// (full preamble). See prime.ShouldCompactReprime for the full
+	// belt-and-suspenders rationale.
+	compactReprime := prime.ShouldCompactReprime(primeCallCount, hookSource)
+
 	contentWithAttribution := withAttributionGuidance("", isLoggedIn, attribution)
 
 	output := agentPrimeOutput{
@@ -612,6 +627,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		Ledger:             ledgerStatus,
 		TeamContext:        teamCtx,
 		PrimeCallCount:     primeCallCount,
+		CompactReprime:     compactReprime,
 		NeedsDoctorAgent:   needsDoctorAgent,
 		DoctorHint:         doctorHint,
 		AgentTasksReady:    agentTasksReady,

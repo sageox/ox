@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ox recap` — the concrete answer to "what value am I getting from SageOx?"** — a personalized, receipts-not-vibes report that points at the specific team knowledge which reached your work, in prose, never a vanity dashboard. It answers on two axes: the **temporal** one that a team of one gets on day one (your own recorded sessions are now searchable memory you can reload instead of re-explaining your codebase; decisions you captured resurface instead of being re-litigated; plans SageOx enriched flagged collisions with your own open work before you wrote code), and the **social** one a team adds on top (the Constitution, glossary, and team discussions that reached your sessions, quoted by name with the session as the receipt). Every claim carries a receipt — an artifact path, a session name, a plan slug, a commit SHA — and the report never invents time-saved or dollar figures. When value is still ramping it says so plainly and prescribes the two or three moves that start generating it. Called by an AI coworker it emits a JSON evidence bundle plus guidance to narrate the prose; in a bare terminal it prints an honest summary. Read-only, offline, no LLM in the CLI.
+
+### Changed
+
+- **Priming is dramatically cheaper on re-prime without losing any steering** — `ox agent prime` is called repeatedly in a session (start, after compaction, after `/clear`), and each call used to re-inject the full ~4,460-token preamble. A returning re-prime within the same context window now emits only what changed (new murmurs, new sessions, ledger status) and skips the static instructions the agent already holds — roughly 590 tokens instead of 4,460. The full preamble is still delivered in full on the first prime and on every `/clear` or `/compact` (the exact moments the agent's context was wiped), guarded by a required-directive conformance test so no steering guidance can be silently dropped. The three longest guidance blocks were also tightened to keep their command and trigger while moving the rationale to `ox guide`, and prime now records its own injected-token cost so the budget is measurable.
+
+- **`ox plan` HTML render is offered far more assertively — and never opens a browser without your say-so** — when a plan touches real team context (collisions with open work, prior art, expert routes), leaving plan mode now renders the SageOx team-context-optimized HTML in the background immediately, so the artifact is ready the instant you want it, and the nudge leads with what a hand-authored plan would drop. Opening the browser always waits on an explicit yes via a question to you first — a structural guarantee, not a convention. Trivial plans stay silent so the prompt is never noise.
+
 ## [0.12.0] - 2026-07-18
 
 Decision Records get first-class team context, and three real reliability gaps in sync and search are closed for good.

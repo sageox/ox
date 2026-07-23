@@ -156,6 +156,7 @@ func init() {
 	queryCmd.GroupID = "knowledge"
 	scoutCmd.GroupID = "knowledge"
 	distillCmd.GroupID = "knowledge"
+	recapCmd.GroupID = "knowledge"
 
 	// team coordination — carts, cart analysis, glance, murmurs, teams alias
 	cartsCmd.GroupID = "teams"
@@ -181,6 +182,7 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(importCmd)
 	rootCmd.AddCommand(queryCmd)
+	rootCmd.AddCommand(recapCmd)
 	rootCmd.AddCommand(scoutCmd)
 	rootCmd.AddCommand(teamsCmd)
 	// agentCmd is registered in agent.go

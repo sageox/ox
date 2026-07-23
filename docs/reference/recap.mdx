@@ -1,0 +1,50 @@
+---
+title: "ox recap"
+description: "CLI reference for ox recap"
+sidebar_position: 78
+---
+
+## ox recap
+
+Show the concrete value SageOx has delivered to your work
+
+### Synopsis
+
+Answer "What value am I getting from SageOx?" with receipts, not vibes.
+
+recap mines your ledger for the specific team-context knowledge that reached
+your coding sessions — the decisions, conventions, and prior work SageOx put in
+front of you so you didn't re-derive them — and points at each by name.
+
+When called by an AI coworker it emits a JSON evidence bundle plus guidance to
+narrate a personalized, prose answer. In a bare terminal it prints an honest
+summary. If value is still ramping, it prescribes the next steps that start
+generating it. Scoped to the current project's ledger; personal by default.
+
+```
+ox recap [flags]
+```
+
+### Options
+
+```
+  -h, --help           help for recap
+      --json           structured JSON evidence bundle for AI coworkers
+      --since string   reporting window (e.g. 7d, 30d, 24h, or an ISO date) (default "30d")
+      --user string    report for a specific coworker (display name or slug); default is you
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+
