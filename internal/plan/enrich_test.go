@@ -251,7 +251,7 @@ func TestEnrich_TopicOnlySkipsDocStructuralHints(t *testing.T) {
 	if res.Guidance == "" {
 		t.Fatal("expected non-empty topic guidance")
 	}
-	if strings.Contains(res.Guidance, "Author for a reviewer who has ~10 minutes") {
+	if strings.Contains(res.Guidance, "Author in two layers") {
 		t.Errorf("topic-only guidance must not be the full-doc authoring contract: %q", res.Guidance)
 	}
 	if !strings.Contains(res.Guidance, "Draft from first principles") {
@@ -292,8 +292,8 @@ func TestEnrich_FullDocPathUnaffectedByTopicBranch(t *testing.T) {
 	if len(res.DiagramHints) == 0 {
 		t.Error("expected the full-doc path to still compute diagram hints for structured prose")
 	}
-	if res.Guidance == "" || !strings.Contains(res.Guidance, "Author for a reviewer") {
-		t.Errorf("expected the unchanged full-doc authoring guidance, got %q", res.Guidance)
+	if res.Guidance == "" || !strings.Contains(res.Guidance, "Implementation notes") {
+		t.Errorf("expected the full-doc two-layer authoring guidance (decision layer + Implementation notes), got %q", res.Guidance)
 	}
 }
 

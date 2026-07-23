@@ -1047,16 +1047,36 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	}
 
 	if disposition == session.QualityDiscard {
-		h.logger.Info("session below discard threshold, removing",
-			"session", sessionName,
-			"quality_score", summaryResp.QualityScore,
-			"threshold", h.qualityDiscardThreshold,
-			"reason", summaryResp.ScoreReason,
-		)
-		if err := os.RemoveAll(payload.SessionDir); err != nil {
-			h.logger.Warn("failed to remove low-quality session", "session", sessionName, "err", err)
+		if isGitTrackedLedgerSession(payload.SessionDir, payload.LedgerPath) {
+			// The session already lives in the ledger's git-tracked
+			// sessions/ tree — discard-by-deletion is broken both ways
+			// there: an uncommitted deletion is resurrected by the next
+			// pull/checkout (so anti-entropy re-detects it forever), and
+			// an auto-committed deletion would erase teammates' shared
+			// session history. Finalize it in place instead: keep the
+			// content, write the skip summary and a clean meta.json
+			// (SummaryStatus=ok) so every machine stops re-detecting it.
+			if strings.TrimSpace(summaryResp.Title) == "" {
+				summaryResp.Title = "Brief session" // same default as the prefilter
+			}
+			h.logger.Info("skip-quality session already on ledger, finalizing in place",
+				"session", sessionName,
+				"quality_category", summaryResp.QualityCategory,
+				"reason", summaryResp.ScoreReason,
+			)
+			disposition = session.QualityUpload
+		} else {
+			h.logger.Info("session below discard threshold, removing",
+				"session", sessionName,
+				"quality_score", summaryResp.QualityScore,
+				"threshold", h.qualityDiscardThreshold,
+				"reason", summaryResp.ScoreReason,
+			)
+			if err := os.RemoveAll(payload.SessionDir); err != nil {
+				h.logger.Warn("failed to remove low-quality session", "session", sessionName, "err", err)
+			}
+			return nil
 		}
-		return nil
 	}
 
 	// use cached session from BuildPrompt, fall back to re-reading
@@ -1353,6 +1373,23 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	}
 
 	return fileRefs, nil
+}
+
+// isGitTrackedLedgerSession reports whether sessionDir is a session
+// directory inside the ledger's git-tracked sessions/ tree — as opposed to
+// a recording cache (<ledger>/.sageox/cache/sessions/ or an XDG cache dir),
+// where deletion is a purely local operation. Sessions in the tracked tree
+// are shared team history: removing them from the working tree without a
+// committed deletion just gets reverted by the next pull/checkout.
+func isGitTrackedLedgerSession(sessionDir, ledgerPath string) bool {
+	if ledgerPath == "" {
+		return false
+	}
+	trackedDir := filepath.Join(ledgerPath, "sessions")
+	if filepath.Clean(sessionDir) == filepath.Clean(trackedDir) {
+		return false // the sessions/ root itself is not a session dir
+	}
+	return strings.HasPrefix(filepath.Clean(sessionDir)+string(filepath.Separator), filepath.Clean(trackedDir)+string(filepath.Separator))
 }
 
 // isInLedgerCacheDir reports whether sessionDir is inside the ledger's

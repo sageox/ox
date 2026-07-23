@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`ox plan` HTML render is offered far more assertively — and never opens a browser without your say-so** — when a plan touches real team context (collisions with open work, prior art, expert routes), leaving plan mode now renders the SageOx team-context-optimized HTML in the background immediately, so the artifact is ready the instant you want it, and the nudge leads with what a hand-authored plan would drop. Opening the browser always waits on an explicit yes via a question to you first — a structural guarantee, not a convention. Trivial plans stay silent so the prompt is never noise.
 
+### Improved
+
+- **Plans are written for the reader who approves them.** Every AI coworker now drafts a plan with the decision up top — the shape, the tradeoffs, and the risk you need to approve it in ten minutes — and moves the exact files, edits, and gotchas into an "Implementation notes" section at the end, for the coworker that builds it. The rendered plan collapses that detail into an appendix you never have to open, so a ten-minute review actually takes ten minutes.
+
 ## [0.12.0] - 2026-07-18
 
 Decision Records get first-class team context, and three real reliability gaps in sync and search are closed for good.

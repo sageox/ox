@@ -122,8 +122,8 @@ func ensureUserLevelMarker(filePath, agentName string) error {
 }
 
 // detectActiveAgent determines which coding agent is currently running.
-// An explicit AGENT_ENV wins over ambient detection so tests, hooks, and
-// wrapped agent launches can select the intended integration deterministically.
+// Honors the explicit AGENT_ENV hook/test override first, then falls back to
+// ambient process detection.
 func detectActiveAgent() agentx.AgentType {
 	switch strings.ToLower(os.Getenv("AGENT_ENV")) {
 	case "claude-code", "claude":
@@ -142,7 +142,6 @@ func detectActiveAgent() agentx.AgentType {
 
 	ctx := context.Background()
 	detector := agentx.NewDetector()
-
 	if agent, err := detector.Detect(ctx); err == nil && agent != nil {
 		return agent.Type()
 	}

@@ -511,8 +511,19 @@ func TestParseSummaryJSON(t *testing.T) {
 }
 
 func TestProcessResult_QualityScoreDiscard(t *testing.T) {
+	// Discard-by-deletion only applies to sessions in a recording cache —
+	// git-tracked ledger sessions are finalized in place instead (see
+	// TestProcessResult_SkipOnLedger_FinalizesInPlace). Stage the session
+	// in the ledger's gitignored cache dir.
 	ledgerPath := createTestSession(t, "test-discard", nil)
-	sessionDir := filepath.Join(ledgerPath, "sessions", "test-discard")
+	trackedDir := filepath.Join(ledgerPath, "sessions", "test-discard")
+	sessionDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", "test-discard")
+	if err := os.MkdirAll(filepath.Dir(sessionDir), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(trackedDir, sessionDir); err != nil {
+		t.Fatal(err)
+	}
 
 	handler := NewSessionFinalizeHandlerForTest(slog.Default())
 	handler.SetQualityThresholds(0.3, 0.1)
@@ -546,6 +557,109 @@ func TestProcessResult_QualityScoreDiscard(t *testing.T) {
 	if _, statErr := os.Stat(sessionDir); !os.IsNotExist(statErr) {
 		t.Error("expected session directory to be removed for quality below discard threshold")
 	}
+}
+
+// TestProcessResult_SkipOnLedger_FinalizesInPlace is the regression test for
+// the 2026-07 ledger anti-entropy incident. A session that already lives in
+// the git-tracked ledger sessions/ tree gets a skip verdict from the LLM
+// (fenced JSON, no key_actions — the exact shape the parser used to reject).
+// The daemon must NOT delete the directory (an uncommitted deletion is
+// resurrected by the next pull, so detection loops forever; a committed one
+// erases shared history). Instead it finalizes in place: skip summary
+// written, meta.json marked ok, .needs-summary marker cleared.
+func TestProcessResult_SkipOnLedger_FinalizesInPlace(t *testing.T) {
+	ledgerPath := createTestSession(t, "2026-05-12T05-59-ajit-OxSKIP", nil)
+	sessionDir := filepath.Join(ledgerPath, "sessions", "2026-05-12T05-59-ajit-OxSKIP")
+
+	// git-tracked marker, as committed by doctor auto-commit in the incident
+	markerPath := filepath.Join(sessionDir, ".needs-summary")
+	require.NoError(t, os.WriteFile(markerPath, []byte(`{"cache_dir":"`+sessionDir+`"}`), 0644))
+
+	handler := NewSessionFinalizeHandlerForTest(slog.Default())
+	handler.SetQualityThresholds(0.3, 0.1)
+
+	item := &WorkItem{
+		ID:       "test-skip-ledger",
+		Type:     sessionFinalizeType,
+		DedupKey: "session-finalize:2026-05-12T05-59-ajit-OxSKIP",
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
+			Missing:    requiredArtifacts,
+			LedgerPath: ledgerPath,
+		},
+	}
+
+	// verbatim incident shape: fenced skip JSON, no key_actions
+	result := &RunResult{
+		Output: "```json\n" +
+			`{"quality_category":"skip","score_reason":"Routine maintenance task with no broader insight or decision-making.","title":"Remove worktree and local branch"}` +
+			"\n```",
+	}
+
+	require.NoError(t, handler.ProcessResult(item, result))
+
+	// the session dir must survive — it is shared team history
+	require.DirExists(t, sessionDir, "git-tracked ledger session must not be deleted on skip")
+
+	// skip summary written with the LLM's title
+	summaryData, err := os.ReadFile(filepath.Join(sessionDir, "summary.json"))
+	require.NoError(t, err, "summary.json must be written for in-place skip finalize")
+	var summary map[string]any
+	require.NoError(t, json.Unmarshal(summaryData, &summary))
+	assert.Equal(t, "Remove worktree and local branch", summary["title"])
+	assert.Equal(t, "skip", summary["quality_category"])
+
+	// meta.json must be terminal-clean so detection and the daily
+	// inline-summary-retry autofix stop re-arming this session
+	metaData, err := os.ReadFile(filepath.Join(sessionDir, "meta.json"))
+	require.NoError(t, err, "meta.json must be written for in-place skip finalize")
+	var meta map[string]any
+	require.NoError(t, json.Unmarshal(metaData, &meta))
+	assert.Equal(t, "ok", meta["summary_status"], "meta must be marked ok, not failed_validation")
+	if ve, ok := meta["validation_error"].(string); ok {
+		assert.NotContains(t, ve, "title too short")
+	}
+
+	// marker cleared → the uncapped HasNeedsSummaryMarker branch goes quiet
+	_, statErr := os.Stat(markerPath)
+	assert.True(t, os.IsNotExist(statErr), ".needs-summary marker must be cleared")
+}
+
+// TestProcessResult_SkipTitleDefault verifies a title-less skip verdict on a
+// ledger-resident session gets the prefilter's "Brief session" default —
+// an empty title in summary.json would re-trigger shouldRetryEmptySummary
+// detection and restart the loop the in-place finalize exists to end.
+func TestProcessResult_SkipTitleDefault(t *testing.T) {
+	ledgerPath := createTestSession(t, "2026-05-12T06-00-ajit-OxSKP2", nil)
+	sessionDir := filepath.Join(ledgerPath, "sessions", "2026-05-12T06-00-ajit-OxSKP2")
+
+	handler := NewSessionFinalizeHandlerForTest(slog.Default())
+	handler.SetQualityThresholds(0.3, 0.1)
+
+	item := &WorkItem{
+		ID:       "test-skip-title",
+		Type:     sessionFinalizeType,
+		DedupKey: "session-finalize:2026-05-12T06-00-ajit-OxSKP2",
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
+			Missing:    requiredArtifacts,
+			LedgerPath: ledgerPath,
+		},
+	}
+	result := &RunResult{
+		Output: `{"quality_category":"skip","score_reason":"No substantive work."}`,
+	}
+
+	require.NoError(t, handler.ProcessResult(item, result))
+	require.DirExists(t, sessionDir)
+
+	summaryData, err := os.ReadFile(filepath.Join(sessionDir, "summary.json"))
+	require.NoError(t, err)
+	var summary map[string]any
+	require.NoError(t, json.Unmarshal(summaryData, &summary))
+	assert.Equal(t, "Brief session", summary["title"], "title-less skip must default to the prefilter title")
 }
 
 // TestProcessResult_ValidationFailure_UploadsFallbackStub pins down the
@@ -597,8 +711,19 @@ func TestProcessResult_ValidationFailure_UploadsFallbackStub(t *testing.T) {
 // as QualityUpload, causing empty "No Activity Recorded" sessions to reach the
 // team ledger.
 func TestProcessResult_EmptySessionLLMScoreZero_Discarded(t *testing.T) {
+	// The leak this guards (#525) happens on the cache→ledger upload path —
+	// discard-by-deletion applies to recording-cache sessions. Git-tracked
+	// ledger sessions are finalized in place instead (see
+	// TestProcessResult_SkipOnLedger_FinalizesInPlace).
 	ledgerPath := createTestSession(t, "test-empty-zero", nil)
-	sessionDir := filepath.Join(ledgerPath, "sessions", "test-empty-zero")
+	trackedDir := filepath.Join(ledgerPath, "sessions", "test-empty-zero")
+	sessionDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", "test-empty-zero")
+	if err := os.MkdirAll(filepath.Dir(sessionDir), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(trackedDir, sessionDir); err != nil {
+		t.Fatal(err)
+	}
 
 	handler := NewSessionFinalizeHandlerForTest(slog.Default())
 	handler.SetQualityThresholds(0.3, 0.1)

@@ -1022,7 +1022,14 @@ func TestOutputAgentPrimeXML_SageoxOverheadBudget_Regression(t *testing.T) {
 	// ~34 tokens, accepted so agents can discover the real `<slug>`-based
 	// usage instead of guessing a `--file` flag by analogy with its siblings
 	// `plan enrich`/`plan render` (both of which do take one).
-	const sageoxOverheadCeiling = 2000
+	//
+	// Raised 2000 -> 2100 (ox-r8lx): the <plan-enrichment-guidance> block now
+	// teaches the two-layer plan structure — a minutiae-free decision layer up
+	// top for the ~10-min human approver, then an "Implementation notes" section
+	// at the END for the implementing agent — so agents RELOCATE implementation
+	// detail rather than inlining it up top or deleting it. ~54 tokens, accepted:
+	// it directly cuts reviewer cognitive load on every non-trivial plan.
+	const sageoxOverheadCeiling = 2100
 	sageoxTokens := budget.Get(prime.BudgetSourceSageox)
 	if sageoxTokens > sageoxOverheadCeiling {
 		t.Errorf("SageOx overhead floor for minimal prime = %d tokens, exceeds ceiling %d.\n"+
