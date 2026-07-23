@@ -34,6 +34,7 @@ type Output struct {
 	Team             string          `json:"team,omitempty"`
 	Coverage         Coverage        `json:"coverage"`
 	ArtifactsReached []ArtifactReach `json:"artifacts_that_reached_you,omitempty"`
+	KnowledgeFlow    *KnowledgeFlow  `json:"knowledge_flow,omitempty"`
 	SettledDecisions []Decision      `json:"settled_decisions,omitempty"`
 	PlansEnriched    []PlanEnriched  `json:"plans_enriched,omitempty"`
 	YourWork         []WorkItem      `json:"your_work,omitempty"`
@@ -85,6 +86,27 @@ type ArtifactReach struct {
 	SampleWork  []string  `json:"sample_work,omitempty"` // titles of reached sessions (receipts, capped)
 	LatestReach time.Time `json:"latest_reach,omitempty"`
 	Receipt     string    `json:"receipt,omitempty"` // artifact path
+}
+
+// KnowledgeFlow is the report's most compelling axis — and the one that needs
+// instrumentation before it can carry real receipts. It describes causal
+// INFLUENCE, not mere co-occurrence:
+//   - a team decision made outside coding (a discussion) that shaped a plan or
+//     implementation,
+//   - one coworker's session that influenced another's work,
+//   - a knowledge-bubble distillation that shaped the plans and work within a
+//     session.
+//
+// None of that is captured on-disk today (no influenced/consulted events, no
+// distilled-discussion injection trace), so `Flows` is empty and `Pending`
+// carries an honest placeholder. When the consulted/influenced instrumentation
+// lands, Available flips true and Flows carries the real chains. The report
+// NEVER fabricates a flow the data doesn't have — the placeholder is the honest
+// stand-in, per the same receipts-not-vibes rule as the rest of the bundle.
+type KnowledgeFlow struct {
+	Available bool     `json:"available"`
+	Flows     []string `json:"flows,omitempty"`
+	Pending   string   `json:"pending,omitempty"`
 }
 
 // Decision is an already-settled call the user (or their agent) recorded in a
@@ -211,4 +233,7 @@ const guidanceText = "Write a tight, personal, prose answer to the user's questi
 	"path, a session name, a plan slug, a commit SHA. NEVER invent value, NEVER cite time-saved " +
 	"or dollar figures, and NEVER lead with a bare statistic about SageOx itself. If the user " +
 	"has no recorded sessions at all, lead with next_actions and say plainly the value starts " +
-	"the moment they begin."
+	"the moment they begin. knowledge_flow is the causal-influence axis (a discussion's decision " +
+	"shaping a plan, a teammate's session steering your work, a distillation influencing a " +
+	"session): if knowledge_flow.available is false, you MAY note it's coming, but NEVER invent an " +
+	"influence chain — that data isn't instrumented yet."

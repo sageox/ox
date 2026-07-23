@@ -41,6 +41,7 @@ func Build(in BuildInput) *Output {
 			TracesDehydrated: traces.tracesDehydrated,
 		},
 		ArtifactsReached: artifacts,
+		KnowledgeFlow:    knowledgeFlow(),
 		SettledDecisions: decisions,
 		PlansEnriched:    plans,
 		YourWork:         work,
@@ -61,6 +62,24 @@ func Build(in BuildInput) *Output {
 		},
 	}
 	return out
+}
+
+// knowledgeFlow returns the influence-flow section. Today it is always a
+// placeholder: the causal signals it needs (influenced/consulted context-trace
+// events, distilled-discussion injection traces, cross-session recall) are not
+// recorded on-disk yet, so there is nothing honest to show. When that
+// instrumentation lands, this function mines the real chains and flips
+// Available — until then it names the vision without faking a receipt.
+func knowledgeFlow() *KnowledgeFlow {
+	return &KnowledgeFlow{
+		Available: false,
+		Pending: "Coming: the causal chains — a team decision from a discussion that shaped " +
+			"one of your plans, a teammate's session that steered your implementation, a " +
+			"knowledge-bubble distillation that influenced the work inside a session. This is " +
+			"the most valuable view and it needs influence instrumentation (consulted/influenced " +
+			"events) that isn't recorded yet — so it's named here, never faked. Today the report " +
+			"shows what team knowledge reached you, not yet how it changed what you built.",
+	}
 }
 
 // nextActionInput carries the signal presence the prescription logic reasons

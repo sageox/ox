@@ -2,6 +2,7 @@ package recap
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	lipgloss "charm.land/lipgloss/v2"
@@ -40,6 +41,7 @@ func RenderHuman(out *Output, width int) string {
 	if len(out.ArtifactsReached) > 0 {
 		renderArtifacts(&b, out, width)
 	}
+	renderKnowledgeFlow(&b, out, width)
 	renderLedger(&b, out, width)
 	renderDecisions(&b, out, width)
 	renderPlans(&b, out, width)
@@ -49,6 +51,32 @@ func RenderHuman(out *Output, width int) string {
 	renderCoverageNote(&b, out, width)
 
 	return b.String()
+}
+
+// renderKnowledgeFlow renders the influence axis — how team knowledge changed
+// the user's work. When the instrumentation lands it shows real causal chains;
+// until then it renders a clearly-labeled placeholder rather than faking one.
+func renderKnowledgeFlow(b *strings.Builder, out *Output, width int) {
+	kf := out.KnowledgeFlow
+	if kf == nil {
+		return
+	}
+	if kf.Available && len(kf.Flows) > 0 {
+		b.WriteString(cli.StyleBold.Render("How that knowledge changed your work:"))
+		b.WriteString("\n")
+		for _, f := range kf.Flows {
+			writeWrapped(b, "· "+f, width, "  ")
+		}
+		b.WriteString("\n")
+		return
+	}
+	if kf.Pending != "" {
+		b.WriteString(cli.StyleBold.Render("How that knowledge changed your work"))
+		b.WriteString(cli.StyleDim.Render(" — coming"))
+		b.WriteString("\n")
+		writeWrapped(b, cli.StyleDim.Render(kf.Pending), width, "  ")
+		b.WriteString("\n")
+	}
 }
 
 // renderLedger tells the solo (temporal) value story: the user's own recorded
@@ -133,28 +161,78 @@ func windowLabel(out *Output) string {
 }
 
 func renderArtifacts(b *strings.Builder, out *Output, width int) {
-	b.WriteString(cli.StyleBold.Render("Your team's knowledge has been reaching your work."))
+	arts := make([]ArtifactReach, len(out.ArtifactsReached))
+	copy(arts, out.ArtifactsReached)
+	// Lead with the artifact carrying the most substance — a real quotable
+	// snippet, then reach — so the Constitution/glossary lead, not a tiny
+	// template. Richness beats a bare session count.
+	sort.SliceStable(arts, func(i, j int) bool {
+		if (len(arts[i].Snippet) > 0) != (len(arts[j].Snippet) > 0) {
+			return len(arts[i].Snippet) > 0
+		}
+		if len(arts[i].Snippet) != len(arts[j].Snippet) {
+			return len(arts[i].Snippet) > len(arts[j].Snippet)
+		}
+		return arts[i].Sessions > arts[j].Sessions
+	})
+
+	b.WriteString(cli.StyleBold.Render("Your team's judgment reached your work, not a blank page."))
 	b.WriteString("\n\n")
-	for _, a := range out.ArtifactsReached {
-		title := a.Title
-		if title == "" {
-			title = a.Doc
-		}
-		fmt.Fprintf(b, "  %s %s\n",
-			cli.StyleBrand.Render(title),
-			cli.StyleDim.Render("("+a.Doc+")"))
 
-		lead := reachLead(a)
-		if a.Snippet != "" {
-			lead += " " + quote(a.Snippet)
-		}
-		writeWrapped(b, lead, width, "    ")
-
-		if len(a.SampleWork) > 0 {
-			writeWrapped(b, cli.StyleDim.Render("Seen while you worked on: "+strings.Join(a.SampleWork, "; ")), width, "    ")
-		}
-		b.WriteString("\n")
+	// Lead artifact — full treatment, quoted.
+	lead := arts[0]
+	fmt.Fprintf(b, "  %s %s\n", cli.StyleBrand.Render(titleOr(lead)), cli.StyleDim.Render("("+lead.Doc+")"))
+	line := reachLead(lead)
+	if lead.Snippet != "" {
+		line += " " + quote(lead.Snippet)
 	}
+	writeWrapped(b, line, width, "    ")
+	b.WriteString("\n")
+
+	// The rest — compact names, no repeated snippet.
+	if len(arts) > 1 {
+		names := make([]string, 0, len(arts)-1)
+		for _, a := range arts[1:] {
+			names = append(names, titleOr(a))
+		}
+		writeWrapped(b, cli.StyleDim.Render("Also in your context: "+strings.Join(names, ", ")), width, "  ")
+	}
+
+	// Shared receipt line — the sessions this knowledge reached, ONCE (deduped
+	// across artifacts; the per-artifact repetition was noise).
+	if shared := dedupSampleWork(arts); len(shared) > 0 {
+		writeWrapped(b, cli.StyleDim.Render("Reached your work on: "+strings.Join(shared, "; ")), width, "  ")
+	}
+	b.WriteString("\n")
+}
+
+// titleOr returns the artifact's title, falling back to its doc name.
+func titleOr(a ArtifactReach) string {
+	if a.Title != "" {
+		return a.Title
+	}
+	return a.Doc
+}
+
+// dedupSampleWork returns the union of session titles the artifacts reached,
+// stable-ordered and capped — so the report names the work once instead of
+// repeating the same session list under every artifact.
+func dedupSampleWork(arts []ArtifactReach) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range arts {
+		for _, s := range a.SampleWork {
+			if s == "" || seen[s] {
+				continue
+			}
+			seen[s] = true
+			out = append(out, s)
+			if len(out) >= maxSampleWork {
+				return out
+			}
+		}
+	}
+	return out
 }
 
 // reachLead phrases the reach as a sentence — the count lives mid-sentence, so

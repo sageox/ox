@@ -116,6 +116,9 @@ func readArtifactContent(path string) (title, snippet string) {
 		if strings.HasPrefix(trimmed, "<!--") {
 			continue // HTML comments (pipeline markers) are noise
 		}
+		if strings.HasPrefix(trimmed, "|") || strings.HasPrefix(trimmed, "---") {
+			continue // markdown table rows / separators don't quote as prose
+		}
 		quoteLines = append(quoteLines, trimmed)
 		total += len(trimmed)
 		if total >= snippetMax {
