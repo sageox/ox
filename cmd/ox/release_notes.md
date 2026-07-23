@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Improved
+
+- **Plans are written for the reader who approves them.** Every AI coworker now drafts a plan with the decision up top — the shape, the tradeoffs, and the risk you need to approve it in ten minutes — and moves the exact files, edits, and gotchas into an "Implementation notes" section at the end, for the coworker that builds it. The rendered plan collapses that detail into an appendix you never have to open, so a ten-minute review actually takes ten minutes.
+
 ## [0.12.0] - 2026-07-18
 
 Decision Records get first-class team context, and three real reliability gaps in sync and search are closed for good.
