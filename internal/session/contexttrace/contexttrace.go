@@ -42,11 +42,9 @@ const (
 	// preamble, murmur/whisper) was delivered into this turn.
 	MechanismInjection Mechanism = "injection"
 	// MechanismSelfReport — agent-reported, grade B: the agent attributes a
-	// turn's decision to context it already held (no fresh retrieval).
+	// turn's decision to context it already held (no fresh retrieval). The only
+	// non-deterministic grade — there is no server-side classifier.
 	MechanismSelfReport Mechanism = "self-report"
-	// MechanismLLM — inferred, grade C: a post-hoc classifier judged this turn
-	// influenced. Always labeled; lowest precision.
-	MechanismLLM Mechanism = "llm"
 )
 
 // SourceType identifies where the context came from.
@@ -86,7 +84,7 @@ type Event struct {
 
 	// Turn-anchored influence fields (consulted/influenced events). Seq is the
 	// raw.jsonl turn this tag belongs to; Mechanism grades the evidence
-	// (retrieval/injection are provable, self-report/llm are inferred). The Ref*
+	// (retrieval/injection are provable, self-report is inferred). The Ref*
 	// fields identify what was consulted so recap can build a receipted chain.
 	Seq       int       `json:"seq,omitempty"`
 	Mechanism Mechanism `json:"mechanism,omitempty"`

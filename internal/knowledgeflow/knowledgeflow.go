@@ -7,7 +7,7 @@
 // renders the result. The cardinal rule mirrors the rest of recap: a chain is
 // rendered at exactly its evidence grade. A deterministic consult
 // (mechanism=retrieval/injection) is phrased as "you consulted X" — provable,
-// never "X caused Y". An inferred one (self-report/llm) is explicitly labeled.
+// never "X caused Y". An inferred one (self-report) is explicitly labeled.
 package knowledgeflow
 
 import (

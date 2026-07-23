@@ -44,11 +44,6 @@ func TestBuild_GradesAndKinds(t *testing.T) {
 			contexttrace.Event{Type: contexttrace.EventInfluenced, Mechanism: contexttrace.MechanismSelfReport, Ref: "principles.md", Decision: "kept the retry contract"},
 			"attribution", GradeInferred, "self-assessed",
 		},
-		{
-			"llm attribution is inferred",
-			contexttrace.Event{Type: contexttrace.EventInfluenced, Mechanism: contexttrace.MechanismLLM, Ref: "glossary.md"},
-			"attribution", GradeInferred, "self-assessed",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
