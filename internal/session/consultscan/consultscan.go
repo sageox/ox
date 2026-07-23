@@ -12,6 +12,7 @@ package consultscan
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -179,7 +180,7 @@ func truncateQuery(s string) string {
 func ScanRawFile(rawPath string, roots Roots) ([]contexttrace.Event, error) {
 	f, err := os.Open(rawPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
