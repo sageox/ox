@@ -40,6 +40,7 @@ func TestPlanCommandSurface_AudienceTiers(t *testing.T) {
 // emits JSON with no flags (no --json needed). Failure prevented: regressing to
 // human-text default, which the agent-ux principles forbid.
 func TestPlanEnrich_DefaultsToJSON(t *testing.T) {
+	newPlanEnrichTestRepo(t) // hermetic: isolate cwd/HOME so findGitRoot() can't resolve to the real ox repo
 	buf := &bytes.Buffer{}
 	planEnrichCmd.SetOut(buf)
 	planEnrichCmd.SetIn(strings.NewReader("# Title\n\n## Approach\n\nDo the thing.\n"))
