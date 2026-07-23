@@ -82,9 +82,16 @@ func runRecap(cmd *cobra.Command, _ []string) error {
 	if jsonOut || !cli.IsInteractive() {
 		out = recap.Build(in)
 	} else {
-		out, _ = cli.WithSpinner("Reading your ledger…", func() (*recap.Output, error) {
+		var spinErr error
+		out, spinErr = cli.WithSpinner("Reading your ledger…", func() (*recap.Output, error) {
 			return recap.Build(in), nil
 		})
+		// The spinner itself can fail (e.g. bubbletea program error) and hand
+		// back a nil Output; recap.Build never errors, so just build directly
+		// rather than risk a nil-deref in RenderHuman.
+		if spinErr != nil || out == nil {
+			out = recap.Build(in)
+		}
 	}
 
 	var outputBytes int

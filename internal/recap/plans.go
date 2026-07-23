@@ -19,6 +19,9 @@ func gatherPlans(projectRoot string, since, until time.Time, id Identity) []Plan
 
 	var out []PlanEnriched
 	for _, info := range infos {
+		if len(out) >= maxPlans {
+			break
+		}
 		if !inWindow(info.CreatedAt, since, until) {
 			continue
 		}

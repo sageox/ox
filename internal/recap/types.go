@@ -204,6 +204,9 @@ const (
 	maxSampleWork = 3
 	// maxDecisions caps inherited decisions.
 	maxDecisions = 8
+	// maxPlans caps enriched-plan entries (and the plan.Load calls behind them)
+	// so a window with many plans stays scannable, like every sibling miner.
+	maxPlans = 8
 	// maxWorkItems caps the "your work" list.
 	maxWorkItems = 10
 	// maxTeamArtifacts caps the team-context-built list.

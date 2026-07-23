@@ -193,14 +193,14 @@ func TestRunRecap_JSONColdStart_NoErrorStableKeys(t *testing.T) {
 	projectRoot, _ := newRecapCmdFixture(t)
 	t.Chdir(projectRoot)
 
-	cmd := *recapCmd
+	cmd := newThrowawayRecapFlags()
 	require.NoError(t, cmd.Flags().Set("json", "true"))
 	require.NoError(t, cmd.Flags().Set("since", "30d"))
 	require.NoError(t, cmd.Flags().Set("user", ""))
 
 	var runErr error
 	stdout := captureRealStdout(t, func() {
-		runErr = cmd.RunE(&cmd, nil)
+		runErr = runRecap(cmd, nil)
 	})
 	require.NoError(t, runErr, "recap must not error on a freshly initialized project with an empty ledger")
 
@@ -226,14 +226,14 @@ func TestRunRecap_UserOverride_E2E(t *testing.T) {
 	projectRoot, _ := newRecapCmdFixture(t)
 	t.Chdir(projectRoot)
 
-	cmd := *recapCmd
+	cmd := newThrowawayRecapFlags()
 	require.NoError(t, cmd.Flags().Set("json", "true"))
 	require.NoError(t, cmd.Flags().Set("since", "30d"))
 	require.NoError(t, cmd.Flags().Set("user", "alice"))
 
 	var runErr error
 	stdout := captureRealStdout(t, func() {
-		runErr = cmd.RunE(&cmd, nil)
+		runErr = runRecap(cmd, nil)
 	})
 	require.NoError(t, runErr)
 
@@ -249,14 +249,14 @@ func TestRunRecap_HumanMode_ColdStartNoError(t *testing.T) {
 	projectRoot, _ := newRecapCmdFixture(t)
 	t.Chdir(projectRoot)
 
-	cmd := *recapCmd
+	cmd := newThrowawayRecapFlags()
 	require.NoError(t, cmd.Flags().Set("json", "false"))
 	require.NoError(t, cmd.Flags().Set("since", "30d"))
 	require.NoError(t, cmd.Flags().Set("user", ""))
 
 	var runErr error
 	stdout := captureRealStdout(t, func() {
-		runErr = cmd.RunE(&cmd, nil)
+		runErr = runRecap(cmd, nil)
 	})
 	require.NoError(t, runErr)
 
