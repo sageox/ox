@@ -33,6 +33,13 @@ var planCmd = &cobra.Command{
   review   serve a plan and collect human review feedback (the review loop)
   list     browse saved plans
   view     read a saved plan in the terminal
+  status   show a saved plan's lifecycle timeline and current status
+
+Lifecycle verbs — approve, work, realize, abandon, supersede — are thin sugar
+over one event-log engine (browser Approve in 'ox plan review' and
+'ox plan approve' are the same mechanism). Each accepts --json for
+{"changed":bool,"status":...} and is idempotent: re-running an
+already-applied verb is a safe no-op.
 
 Agents: run 'ox plan enrich --topic "<subject>" [--files a,b,c]' BEFORE
 drafting a plan, and 'ox plan enrich --file <plan.md>' (or stdin) once
@@ -698,16 +705,17 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, cli.StyleDim.Render("SLUG\tDATE\tHTML\tREVIEW\tAUTHORS\tTOPIC"))
+	fmt.Fprintln(tw, cli.StyleDim.Render("SLUG\tDATE\tSTATUS\tHTML\tREVIEW\tAUTHORS\tTOPIC"))
 	anyOpen := false
 	for _, p := range plans {
 		open := openReviewCount(p.Dir)
 		if open > 0 {
 			anyOpen = true
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.Slug,
 			planDate(p.CreatedAt),
+			statusMark(p.Status),
 			htmlMark(p.HasHTML),
 			reviewMark(open),
 			authorsLabel(p.Authors),
@@ -767,6 +775,13 @@ func runPlanView(cmd *cobra.Command, slug string) error {
 
 	fmt.Fprintln(out, cli.StyleBrand.Render(info.Topic))
 	fmt.Fprintf(out, "%s  %s\n", cli.StyleDim.Render("slug:"+info.Slug), cli.StyleDim.Render(planDate(info.CreatedAt)))
+	// info.Status is the CURRENT status (plan.CurrentStatus: folded
+	// events.jsonl when present, else meta.json's Status for legacy plans) —
+	// shown on its own line, independent of meta.Collaboration below, so a
+	// plan with no collaboration signals still surfaces its status.
+	if info.Status != "" {
+		fmt.Fprintln(out, cli.StyleDim.Render("status: "+string(info.Status)))
+	}
 	if len(info.Authors) > 0 {
 		fmt.Fprintln(out, cli.StyleDim.Render("authors: "+strings.Join(info.Authors, ", ")))
 	}
@@ -856,9 +871,12 @@ func planProvenanceLine(meta plan.Meta) string {
 	return strings.Join(parts, " · ")
 }
 
-// planCollabLine renders the one-line collaboration fingerprint (status +
-// effort proxies) for a saved plan, or "" when there are no collaboration
-// signals.
+// planCollabLine renders the one-line collaboration effort fingerprint
+// (prompts/questions/tool calls/duration) for a saved plan, or "" when there
+// are no collaboration signals. Status is NOT shown here (it has its own
+// dedicated, CURRENT-status line in runPlanView) — this used to prefix
+// meta.Status directly, which could show a stale value once events.jsonl
+// diverged from meta.json's best-effort dual-write mirror.
 func planCollabLine(meta plan.Meta) string {
 	c := meta.Collaboration
 	if c == nil {
@@ -872,11 +890,7 @@ func planCollabLine(meta plan.Meta) string {
 	if c.DurationSeconds > 0 {
 		parts = append(parts, fmt.Sprintf("%ds", c.DurationSeconds))
 	}
-	prefix := ""
-	if meta.Status != "" {
-		prefix = string(meta.Status) + " · "
-	}
-	return "collaboration: " + prefix + strings.Join(parts, " · ")
+	return "collaboration: " + strings.Join(parts, " · ")
 }
 
 func planDate(t time.Time) string {
@@ -891,6 +905,16 @@ func htmlMark(has bool) string {
 		return "yes"
 	}
 	return "—"
+}
+
+// statusMark renders a plan's current lifecycle status for the list table,
+// or "—" for a plan with no recorded status at all (pre-lifecycle-feature
+// legacy plan with neither events.jsonl nor a meta.json Status).
+func statusMark(s plan.PlanStatus) string {
+	if s == "" {
+		return "—"
+	}
+	return string(s)
 }
 
 func authorsLabel(authors []string) string {
@@ -936,12 +960,31 @@ func init() {
 
 	planLintCmd.Flags().Bool("strict", false, "exit non-zero when the render has attribution findings (for CI / golden checks)")
 
+	// lifecycle verbs: thin sugar over plan.AppendPlanEvent (internal/plan/lifecycle.go).
+	planApproveCmd.Flags().Bool("json", false, `emit {"changed":...,"status":...} as JSON`)
+	planWorkCmd.Flags().String("session", "", "explicit session id (overrides the ambient live-recording session)")
+	planWorkCmd.Flags().Bool("json", false, `emit {"changed":...,"status":...} as JSON`)
+	planRealizeCmd.Flags().String("produced", "", "what shipped (a PR URL, commit, etc.)")
+	planRealizeCmd.Flags().String("session", "", "explicit session id (overrides the ambient live-recording session)")
+	planRealizeCmd.Flags().Bool("json", false, `emit {"changed":...,"status":...} as JSON`)
+	planAbandonCmd.Flags().String("reason", "", "why the plan was abandoned")
+	planAbandonCmd.Flags().Bool("json", false, `emit {"changed":...,"status":...} as JSON`)
+	planSupersedeCmd.Flags().String("by", "", "the successor plan's slug (required)")
+	planSupersedeCmd.Flags().Bool("json", false, `emit {"changed":...,"status":...} as JSON`)
+	planStatusCmd.Flags().Bool("json", false, "emit the current-state projection as JSON")
+
 	planCmd.AddCommand(planEnrichCmd)
 	planCmd.AddCommand(planRenderCmd)
 	planCmd.AddCommand(planListCmd)
 	planCmd.AddCommand(planViewCmd)
 	planCmd.AddCommand(planSaveCmd)
 	planCmd.AddCommand(planLintCmd)
+	planCmd.AddCommand(planApproveCmd)
+	planCmd.AddCommand(planWorkCmd)
+	planCmd.AddCommand(planRealizeCmd)
+	planCmd.AddCommand(planAbandonCmd)
+	planCmd.AddCommand(planSupersedeCmd)
+	planCmd.AddCommand(planStatusCmd)
 
 	planCmd.GroupID = "dev"
 	rootCmd.AddCommand(planCmd)

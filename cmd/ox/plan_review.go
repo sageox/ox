@@ -378,8 +378,20 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 	})
 
 	post("/approve", func(body []byte) (int, error) {
-		if err := plan.SetStatus(gitRoot, slug, plan.PlanStatusApproved); err != nil {
+		// Same engine `ox plan approve` uses (internal/plan/lifecycle.go) — a
+		// browser Approve click and the CLI verb are one mechanism, never two.
+		// changed is only used to gate the best-effort activity notify below;
+		// the response here always reports success regardless of its value —
+		// an already-approved plan re-approving via a stale/duplicate click
+		// must still report success, matching SetStatus's prior
+		// always-succeeds contract.
+		fields := planEventFieldsFromProvenance(gitRoot)
+		changed, err := plan.AppendPlanEvent(context.Background(), planDir, plan.EventApproved, fields)
+		if err != nil {
 			return http.StatusInternalServerError, err
+		}
+		if changed {
+			postPlanActivityBestEffort(gitRoot, planDir, plan.EventApproved)
 		}
 		commitPlanBestEffort(gitRoot, planDir)
 		select {

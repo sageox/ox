@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1396,7 +1397,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	// is committed, so backfill it + outcome=stopped onto every plan this
 	// session produced (slugs in hand — no directory scan), then commit those
 	// plan dirs. Best-effort; any miss falls to `ox doctor`.
-	reconcileProducedPlansAtStop(projectRoot, state.ProducedPlans, meta.EffectiveSessionID())
+	reconcileProducedPlansAtStop(projectRoot, state.ProducedPlans, sessionName, meta.EffectiveSessionID())
 
 	// push succeeded — now safe to replace content files with LFS pointer stubs
 	if len(meta.Files) > 0 {
@@ -1441,11 +1442,13 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 }
 
 // reconcileProducedPlansAtStop backfills the canonical session id + a
-// "stopped" outcome onto every plan a just-stopped session produced, then
-// commits each updated plan dir (data/plans/ is not covered by the session
-// commit). Slug-driven — no directory scan — and fully best-effort: any miss
-// is reconciled later by `ox doctor`.
-func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionID string) {
+// "stopped" outcome onto every plan a just-stopped session produced — both
+// on meta.json's Provenance (plan.ReconcileSessionOutcome) AND on any of the
+// session's own events.jsonl lines that still carry an empty session_id
+// (plan.BackfillSessionID) — then commits each updated plan dir (data/plans/
+// is not covered by the session commit). Slug-driven — no directory scan —
+// and fully best-effort: any miss is reconciled later by `ox doctor`.
+func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionName, sessionID string) {
 	for _, slug := range slugs {
 		if err := plan.ReconcileSessionOutcome(projectRoot, slug, sessionID, plan.SessionOutcomeStopped); err != nil {
 			slog.Debug("plan reconcile at stop failed", "slug", slug, "error", err)
@@ -1455,6 +1458,16 @@ func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionID 
 		if err != nil {
 			slog.Debug("plan reconcile load failed", "slug", slug, "error", err)
 			continue
+		}
+		// event-log backfill: this session's earlier events (created/worked/
+		// etc.) were appended before the canonical ses_ id existed, so they
+		// still carry only session_name. sessionID is only known now.
+		if sessionID != "" {
+			if n, berr := plan.BackfillSessionID(context.Background(), info.Dir, sessionName, sessionID); berr != nil {
+				slog.Debug("plan event session_id backfill failed", "slug", slug, "error", berr)
+			} else if n > 0 {
+				slog.Debug("plan event session_id backfilled", "slug", slug, "count", n)
+			}
 		}
 		if cerr := commitPlanToLedger(projectRoot, info.Dir); cerr != nil {
 			slog.Debug("plan reconcile commit failed", "slug", slug, "error", cerr)

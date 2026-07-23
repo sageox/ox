@@ -36,6 +36,7 @@ import (
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/planid"
 )
 
 const (
@@ -141,7 +142,10 @@ type Meta struct {
 }
 
 // PlanInfo is the listing-level view of a captured plan, assembled from
-// meta.json. Dir is the absolute path to the plan folder.
+// meta.json. Dir is the absolute path to the plan folder. Status is the plan's
+// CURRENT lifecycle status (see CurrentStatus): the folded events.jsonl
+// projection when the plan has recorded lifecycle events, else meta.json's
+// Status for legacy plans saved before the event log existed.
 type PlanInfo struct {
 	Slug      string
 	Topic     string
@@ -149,6 +153,7 @@ type PlanInfo struct {
 	CreatedAt time.Time
 	Authors   []string
 	HasHTML   bool
+	Status    PlanStatus
 }
 
 // LoadMeta reads and parses a captured plan's meta.json from its plan directory
@@ -165,6 +170,13 @@ func LoadMeta(planDir string) (Meta, error) {
 // when small, as an LFS pointer when it exceeds htmlLFSThreshold. Save never
 // renders HTML and never commits — it only materializes files in the working
 // tree. Returns the absolute plan directory.
+//
+// Save also appends one lifecycle event to the plan's events.jsonl (see
+// events.go) — additive, dual-write alongside meta.json: meta.json remains the
+// canonical snapshot read, events.jsonl is the append-only history a reader
+// folds to reconstruct it. The append is best-effort and never fails Save; the
+// stored plan.html's <head> is stamped with the resulting pln_ id (see
+// html_meta.go).
 //
 // gitRoot is the producing project's git root; the ledger path is resolved
 // from it via ProjectContext. Returns an error if no ledger is configured
@@ -192,6 +204,24 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 	dir := filepath.Join(paths.LedgerPlansDir(ledger), dirName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create plan dir=%s: %w", dir, err)
+	}
+
+	// Event-log foundation: resolve this plan's stable pln_ id — minted on the
+	// first save of this directory, reused on every later save — and whether
+	// this is that first save. Resolved now, before plan.html is written
+	// below, so the id can be stamped into its <head> in the same write.
+	// Best-effort: a corrupt events.jsonl must never block the save meta.json
+	// still performs below — a read failure here is logged and treated as "no
+	// prior events" (a fresh id is minted) rather than aborting Save.
+	existingEvents, evErr := LoadEvents(dir)
+	if evErr != nil {
+		slog.Warn("plan save: load existing events failed, minting a fresh id", "error", evErr, "dir", dir)
+		existingEvents = nil
+	}
+	firstSave := len(existingEvents) == 0
+	planID := planid.GeneratePlanID()
+	if !firstSave {
+		planID = existingEvents[0].PlanID
 	}
 
 	// plan.md — plain git, diffable, hydrated-by-default.
@@ -255,6 +285,10 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 	// renders stay plain so dehydrated clones read them directly; large ones
 	// become LFS pointers (pure-Go pointer write, never the git-lfs binary).
 	if html != nil {
+		// Stamp the plan's self-identifying meta tags (see html_meta.go) before
+		// either write path below, so both the plain and LFS-pointer'd copies
+		// carry the same content.
+		html = StampHTMLMeta(html, planID, meta.Slug, meta.Topic)
 		htmlPath := filepath.Join(dir, planHTMLFile)
 		if int64(len(html)) > htmlLFSThreshold {
 			ref := lfs.NewFileRef(html)
@@ -274,6 +308,36 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		} else if len(entries) > 0 {
 			slog.Info("plan save: re-anchored review feedback", "count", len(entries), "dir", dir)
 		}
+	}
+
+	// Event-log foundation: append the lifecycle event now that every other
+	// artifact above has been written successfully. Best-effort — mirrors the
+	// feedback-remap handling just above: an append failure must never discard
+	// the meta.json/plan.md/plan.html write that already succeeded. Provenance
+	// fields come straight off meta.Provenance — the caller's resolved
+	// resolvePlanProvenance() result for THIS call, never re-derived a
+	// different way. Deliberately the caller's value, not the merged one
+	// meta.json may end up with above (which can preserve an earlier session's
+	// SessionID/SessionOutcome on a re-save): each event records the specific
+	// session that performed that save, and Fold aggregates across all of them
+	// — see events.go's multi-session model. Topic is deliberately left unset:
+	// the title's source of truth is plan.html's <head> (see html_meta.go),
+	// not the event log.
+	ev := Event{PlanID: planID, Kind: EventRevised}
+	if firstSave {
+		ev.Kind = EventCreated
+		ev.Status = PlanStatusDraft
+	}
+	if meta.Provenance != nil {
+		ev.SessionID = meta.Provenance.SessionID
+		ev.SessionName = meta.Provenance.SessionName
+		ev.AgentID = meta.Provenance.AgentID
+		ev.AgentEnv = meta.Provenance.AgentType
+		ev.Model = meta.Provenance.Model
+		ev.Author = meta.Provenance.AuthorName
+	}
+	if aerr := AppendEvent(context.Background(), dir, ev); aerr != nil {
+		slog.Warn("plan save: event append failed", "error", aerr, "dir", dir, "kind", ev.Kind)
 	}
 
 	return dir, nil
@@ -482,6 +546,26 @@ func ReadPlanMeta(gitRoot, slug string) (Meta, error) {
 	return readMeta(dir)
 }
 
+// CurrentStatus returns a plan directory's current lifecycle status: the
+// folded events.jsonl projection (events.jsonl is the source of truth a
+// reader replays — see events.go) when the plan has recorded lifecycle
+// events, else meta.json's Status field for legacy plans saved before the
+// event log existed. Additive read-path convenience over AppendPlanEvent's
+// existing dual-write precedence — callers (list/view) get one call instead
+// of duplicating the fold-or-fallback decision. "" when neither source is
+// available (e.g. an unreadable plan dir), matching how an unset meta.Status
+// has always been treated by callers.
+func CurrentStatus(dir string) PlanStatus {
+	if events, err := LoadEvents(dir); err == nil && len(events) > 0 {
+		return Fold(events).Status
+	}
+	meta, err := readMeta(dir)
+	if err != nil {
+		return ""
+	}
+	return meta.Status
+}
+
 // resolvePlanDirForSlug resolves a slug to its plan directory under the ledger.
 func resolvePlanDirForSlug(gitRoot, slug string) (string, error) {
 	plansDir := paths.LedgerPlansDir(ledgerPathFor(gitRoot))
@@ -572,6 +656,7 @@ func planInfoFrom(dir, dirName string, meta Meta) PlanInfo {
 		CreatedAt: meta.CreatedAt,
 		Authors:   meta.Authors,
 		HasHTML:   hasHTML,
+		Status:    CurrentStatus(dir),
 	}
 }
 

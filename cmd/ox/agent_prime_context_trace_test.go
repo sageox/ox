@@ -1,11 +1,13 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/session/contexttrace"
 	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/internal/tokens"
 )
 
 func TestEmitProvidedContextTrace_FullContext(t *testing.T) {
@@ -51,6 +53,15 @@ func TestEmitProvidedContextTrace_FullContext(t *testing.T) {
 	// memory event
 	if events[1].Source != contexttrace.SourceTeamMemory || events[1].Doc != "MEMORY.md" {
 		t.Errorf("event[1]: source=%q, doc=%q", events[1].Source, events[1].Doc)
+	}
+	// InlineTokens must be populated (bd ox-32f6) — this was the one
+	// "provided" event that always recorded inline_tokens=0.
+	wantMemoryTokens := tokens.EstimateTokens(teamCtx.MemoryContent)
+	if events[1].InlineTokens != wantMemoryTokens {
+		t.Errorf("event[1]: inline_tokens=%d, want %d (tokens.EstimateTokens(MemoryContent))", events[1].InlineTokens, wantMemoryTokens)
+	}
+	if events[1].InlineTokens == 0 {
+		t.Error("event[1]: inline_tokens=0 for non-empty MemoryContent — the exact regression this fix prevents")
 	}
 
 	// all events should have timestamps
@@ -113,6 +124,37 @@ func TestEmitProvidedContextTrace_NoInstructions(t *testing.T) {
 	}
 	if events[0].Doc != "MEMORY.md" {
 		t.Errorf("doc = %q, want MEMORY.md", events[0].Doc)
+	}
+}
+
+// TestEmitProvidedContextTrace_MemoryInlineTokens pins the MEMORY.md event's
+// InlineTokens computation (bd ox-32f6). Before this fix, this was the one
+// "provided" event that always recorded inline_tokens=0 across every trace
+// — team memory is the most consistently-inlined content in prime output,
+// so prime effectively could not see its own injection cost. Uses the same
+// tokens.EstimateTokens heuristic as TeamInstructions.Tokens, so the two
+// "provided" events stay directly comparable.
+func TestEmitProvidedContextTrace_MemoryInlineTokens(t *testing.T) {
+	dir := t.TempDir()
+	content := strings.Repeat("word ", 100) // 500 chars, well above the len/4 rounding noise
+	teamCtx := &prime.TeamContextInfo{TeamName: "SageOx", MemoryContent: content}
+
+	emitProvidedContextTrace(dir, teamCtx, nil)
+
+	events, err := contexttrace.ReadEvents(contexttrace.NewWriter(dir).Path())
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+
+	want := tokens.EstimateTokens(content)
+	if want == 0 {
+		t.Fatal("test content must estimate to a non-zero token count — fixture bug, not a product bug")
+	}
+	if events[0].InlineTokens != want {
+		t.Errorf("InlineTokens = %d, want %d (tokens.EstimateTokens(content))", events[0].InlineTokens, want)
 	}
 }
 

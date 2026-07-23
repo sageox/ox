@@ -363,6 +363,16 @@ type Output struct {
 	// Prime call tracking
 	PrimeCallCount       int    `json:"prime_call_count,omitempty"`       // number of prime calls this session
 	PrimeExcessiveNotice string `json:"prime_excessive_notice,omitempty"` // warning if prime called excessively
+	// CompactReprime is true when this call qualifies for the compact
+	// re-prime delta (see ShouldCompactReprime): a routine re-invocation of
+	// `ox agent prime` within the SAME context window the agent already
+	// primed in this session. The XML renderer skips the static and
+	// slow-changing tiers (instructions, command reference, team knowledge)
+	// when true — content the agent already holds from its earlier prime
+	// call — and emits only the volatile per-session delta. Always false
+	// for the agent's first prime this window or a clear/compact-triggered
+	// re-prime (the context window was actually wiped). See bd ox-32f6.
+	CompactReprime bool `json:"compact_reprime,omitempty"`
 	// Cumulative context stats (from daemon, best-effort).
 	// CumulativeContextTokens is the rolled-up total; the per-source
 	// split lives in CumulativeContextTokensBySource (keyed by

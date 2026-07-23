@@ -160,7 +160,7 @@ func TestPlanEnrichCmd_FullDocPathStillWorks(t *testing.T) {
 	if res.Signals.Files != 2 {
 		t.Errorf("expected Signals.Files=2 from the parsed doc, got %d", res.Signals.Files)
 	}
-	if res.Guidance == "" || !strings.Contains(res.Guidance, "Author for a reviewer") {
-		t.Errorf("expected the full-doc authoring guidance, got %q", res.Guidance)
+	if res.Guidance == "" || !strings.Contains(res.Guidance, "Implementation notes") {
+		t.Errorf("expected the full-doc two-layer authoring guidance (decision layer + Implementation notes), got %q", res.Guidance)
 	}
 }

@@ -452,9 +452,10 @@ func buildGuidance(in Input, sig SignalSummary, hints []DiagramHint, vizHints []
 	} else {
 		b.WriteString("Render with `ox plan render --open` (self-contained, cross-agent): it folds in team context and saves the plan to the ledger where teammates find it — a self-authored HTML render does neither. ")
 	}
-	b.WriteString("Author for a reviewer who has ~10 minutes: ")
-	b.WriteString("lead with the conclusion and the biggest risk; keep every file/ID/PR framed enough to stand on its own; ")
-	b.WriteString("let one hero diagram and a few tables replace prose rather than decorate it; cut anything that does not change the decision. ")
+	b.WriteString("Author in two layers for two readers. ")
+	b.WriteString("TOP — the decision layer, for the human approving in ~10 min: lead with the conclusion, the key tradeoffs, and the biggest risk; keep every file/ID/PR framed enough to stand on its own; let one hero diagram and a few tables replace prose rather than decorate it; no file:line minutiae. ")
+	b.WriteString("BOTTOM — an \"Implementation notes\" section at the END, for the agent that implements: exact files, edit order, snippets, gotchas. ")
+	b.WriteString("Relocate detail to the bottom rather than inlining it up top or deleting it — cut only what serves neither reader. ")
 	b.WriteString("Explore visualization patterns with `ox plan viz` (sparklines, dependency graphs, swimlane timelines, budget sequences, Tufte tables, device mockups) and weave in the ones that compress understanding.")
 	if len(hints) > 0 {
 		b.WriteString(" Diagrams that fit this plan: ")

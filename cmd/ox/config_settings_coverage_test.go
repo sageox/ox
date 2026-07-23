@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -285,4 +286,43 @@ func TestAllSettings_NoTimezoneEntry(t *testing.T) {
 	for _, s := range AllSettings {
 		assert.NotEqual(t, "timezone", s.Key, "AllSettings must not contain a timezone entry")
 	}
+}
+
+// --- plan.open round trip (Ryan follow-up to ox-mj0s) -----------------------
+//
+// Proves the FULL path an agent's "Always open from now on" / "Never ask
+// again" answer takes: SetConfigValue (the same entry point `ox config set`
+// calls) through to config.PlanOpen resolving it back. A unit test on either
+// half alone would pass even if the registry wiring silently dropped the
+// setting between them. No t.Parallel() here — these tests call t.Setenv,
+// which Go's testing package forbids combining with Parallel.
+
+func TestSetConfigValue_PlanOpen_RoundTripsThroughResolver(t *testing.T) {
+	for _, val := range []string{config.PlanOpenNever, config.PlanOpenAsk, config.PlanOpenAlways} {
+		t.Run(val, func(t *testing.T) {
+			t.Setenv("OX_USER_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+			t.Setenv(config.EnvPlanOpen, "") // isolate from ambient env
+
+			require.NoError(t, SetConfigValue("plan.open", val, ConfigLevelUser, ""))
+			assert.Equal(t, val, config.PlanOpen(""), "plan.open set via SetConfigValue must resolve back through config.PlanOpen")
+		})
+	}
+}
+
+func TestSetConfigValue_PlanOpen_InvalidValue(t *testing.T) {
+	err := SetConfigValue("plan.open", "sometimes", ConfigLevelUser, "")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid value")
+	assert.Contains(t, err.Error(), "valid values")
+}
+
+func TestUnsetConfigValue_PlanOpen_FallsBackToDefault(t *testing.T) {
+	t.Setenv("OX_USER_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+	t.Setenv(config.EnvPlanOpen, "")
+
+	require.NoError(t, SetConfigValue("plan.open", config.PlanOpenNever, ConfigLevelUser, ""))
+	assert.Equal(t, config.PlanOpenNever, config.PlanOpen(""))
+
+	require.NoError(t, UnsetConfigValue("plan.open", ConfigLevelUser, ""))
+	assert.Equal(t, config.DefaultPlanOpen, config.PlanOpen(""), "unsetting plan.open must fall back to the default (ask)")
 }

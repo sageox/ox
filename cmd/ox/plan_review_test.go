@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -103,6 +104,66 @@ func TestReviewLoop_AcceptAndReopen(t *testing.T) {
 	items, _ := plan.AssembleReview(dir)
 	if len(items) != 1 || !items[0].Open {
 		t.Errorf("re-raised item must be open, got %+v", items)
+	}
+}
+
+// TestReviewLoop_ApproveReroutesThroughLifecycleEngine verifies /approve now
+// goes through plan.AppendPlanEvent — the same engine `ox plan approve` uses
+// (internal/plan/lifecycle.go) — instead of calling plan.SetStatus directly:
+// a browser Approve click and the CLI verb are one mechanism, never two. The
+// HTTP response shape and the approved-channel signal must stay identical to
+// the prior SetStatus-based behavior.
+func TestReviewLoop_ApproveReroutesThroughLifecycleEngine(t *testing.T) {
+	dir := t.TempDir()
+	seed := plan.Event{PlanID: "pln_reviewtest00000000001", Kind: plan.EventCreated, Status: plan.PlanStatusDraft}
+	if err := plan.AppendEvent(context.Background(), dir, seed); err != nil {
+		t.Fatalf("seed created event: %v", err)
+	}
+
+	srv, _, approved := newTestReviewServer(t, dir)
+	if code := reviewPOST(t, srv.URL+"/approve", "secret", ""); code != http.StatusOK {
+		t.Fatalf("approve should be 200, got %d", code)
+	}
+	select {
+	case <-approved:
+	default:
+		t.Error("approve must signal the approved channel, exactly like the prior SetStatus-based handler")
+	}
+
+	events, err := plan.LoadEvents(dir)
+	if err != nil {
+		t.Fatalf("LoadEvents: %v", err)
+	}
+	if len(events) != 2 || events[1].Kind != plan.EventApproved || events[1].Status != plan.PlanStatusApproved {
+		t.Fatalf("want an approved event appended via the lifecycle engine, got %+v", events)
+	}
+}
+
+// TestReviewLoop_ApproveTwiceStillReturns200 verifies a duplicate/stale
+// Approve click (changed:false under the hood) still reports success — the
+// handler intentionally ignores AppendPlanEvent's changed return value,
+// matching SetStatus's prior always-succeeds contract.
+func TestReviewLoop_ApproveTwiceStillReturns200(t *testing.T) {
+	dir := t.TempDir()
+	seed := plan.Event{PlanID: "pln_reviewtest00000000002", Kind: plan.EventCreated, Status: plan.PlanStatusDraft}
+	if err := plan.AppendEvent(context.Background(), dir, seed); err != nil {
+		t.Fatalf("seed created event: %v", err)
+	}
+	srv, _, _ := newTestReviewServer(t, dir)
+
+	if code := reviewPOST(t, srv.URL+"/approve", "secret", ""); code != http.StatusOK {
+		t.Fatalf("first approve should be 200, got %d", code)
+	}
+	if code := reviewPOST(t, srv.URL+"/approve", "secret", ""); code != http.StatusOK {
+		t.Fatalf("second (no-op) approve should still be 200, got %d", code)
+	}
+
+	events, err := plan.LoadEvents(dir)
+	if err != nil {
+		t.Fatalf("LoadEvents: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("a duplicate approve must not append a duplicate event: got %d events, want 2", len(events))
 	}
 }
 
