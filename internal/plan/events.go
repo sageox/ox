@@ -95,7 +95,13 @@ type Event struct {
 	Author      string     `json:"author,omitempty"`
 	Status      PlanStatus `json:"status,omitempty"`
 	Produced    string     `json:"produced,omitempty"`
-	Visibility  string     `json:"visibility,omitempty"`
+	// Reason and SupersededBy are set by the lifecycle-verb engine (see
+	// lifecycle.go): Reason on an abandoned event (the --reason text),
+	// SupersededBy on a superseded event (the successor plan's slug). No
+	// other event kind sets either.
+	Reason       string `json:"reason,omitempty"`
+	SupersededBy string `json:"superseded_by,omitempty"`
+	Visibility   string `json:"visibility,omitempty"`
 	// Topic carries the plan's topic on created/revised events, so Fold can
 	// recover it without also reading meta.json.
 	Topic string `json:"topic,omitempty"`
@@ -133,7 +139,7 @@ func AppendEvent(ctx context.Context, planDir string, ev Event) error {
 		if err != nil {
 			return fmt.Errorf("encode event: %w", err)
 		}
-		out := make([]byte, 0, len(existing)+len(line)+1)
+		var out []byte
 		out = append(out, existing...)
 		out = append(out, line...)
 		out = append(out, '\n')
@@ -171,6 +177,65 @@ func LoadEvents(planDir string) ([]Event, error) {
 		events = append(events, ev)
 	}
 	return events, nil
+}
+
+// BackfillSessionID rewrites events.jsonl lines whose SessionName matches
+// sessionName and whose SessionID is still empty, setting SessionID —
+// the same one-time id-reconciliation ReconcileSessionOutcome already
+// performs on meta.json's Provenance at session-stop (see store.go),
+// applied here to the append-only event log. events.jsonl is otherwise
+// immutable by design (see the package comment above): this is the sole,
+// narrowly-scoped exception, and it only ever WIDENS a line (fills a
+// previously-empty field) — it never changes a value a reader has already
+// observed, and only ever targets the calling session's own lines (matched
+// by SessionName, the durable pre-canonical join key). Runs under the same
+// flock AppendEvent/AppendPlanEvent use, so it can never race a concurrent
+// append. Idempotent: a line already carrying a SessionID (this session's or
+// any other's) is left untouched, so re-running after a successful backfill
+// updates nothing. Returns the number of lines changed; sessionName == "" or
+// sessionID == "" is a no-op, not an error (nothing to key off of / nothing
+// to write).
+func BackfillSessionID(ctx context.Context, planDir, sessionName, sessionID string) (int, error) {
+	if sessionName == "" || sessionID == "" {
+		return 0, nil
+	}
+
+	path := filepath.Join(planDir, eventsFile)
+	count := 0
+	err := fileutil.WithFileLock(ctx, path, func() error {
+		events, loadErr := LoadEvents(planDir)
+		if loadErr != nil {
+			return fmt.Errorf("load events: %w", loadErr)
+		}
+		if len(events) == 0 {
+			return nil // no events.jsonl yet (or empty) — nothing to backfill
+		}
+
+		for i := range events {
+			if events[i].SessionName == sessionName && events[i].SessionID == "" {
+				events[i].SessionID = sessionID
+				count++
+			}
+		}
+		if count == 0 {
+			return nil
+		}
+
+		var buf bytes.Buffer
+		for _, ev := range events {
+			line, mErr := json.Marshal(ev)
+			if mErr != nil {
+				return fmt.Errorf("encode event: %w", mErr)
+			}
+			buf.Write(line)
+			buf.WriteByte('\n')
+		}
+		return fileutil.AtomicWriteBytes(path, buf.Bytes(), 0o644)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // FoldedState is the current-state projection of a plan's events.jsonl,

@@ -39,6 +39,12 @@ const (
 	sessionUploadedPath = "/api/v1/sessions/%s/uploaded"    // %s = session_id
 	sessionStartedPath  = "/api/v1/sessions/%s/started"     // %s = session_id
 	sessionAbortedPath  = "/api/v1/sessions/%s/aborted"     // %s = session_id
+
+	// planActivityPath is the client half of the caller-driven plan_id -> plan
+	// index (bead sageox-gqgkg): the server endpoint currently accepts and
+	// drops the body (a stub) until a future change actually indexes it.
+	// %s, %s = team_id, plan_id.
+	planActivityPath = "/api/v1/teams/%s/plans/%s/activity"
 )
 
 // RepoInitRequest represents the POST /api/v1/repo/init request
@@ -671,6 +677,58 @@ func (c *RepoClient) NotifySessionStarted(n SessionStartedNotification) error {
 func (c *RepoClient) NotifySessionAborted(n SessionAbortedNotification) error {
 	_, err := c.postSessionSignal(sessionAbortedPath, n.SessionID, "session aborted", n)
 	return err
+}
+
+// PlanActivityNotification is the POST
+// /api/v1/teams/{team_id}/plans/{plan_id}/activity request body — the
+// client half of the caller-driven plan_id -> plan index (bead sageox-gqgkg).
+// Deliberately minimal (a stub): the server currently accepts and drops it
+// until a future change actually builds the index from it.
+type PlanActivityNotification struct {
+	Event  string `json:"event"`            // plan.EventKind value (approved/worked/realized/abandoned/superseded)
+	Status string `json:"status,omitempty"` // plan.PlanStatus, when the event carries one
+}
+
+// NotifyPlanActivity best-effort-reports one appended plan lifecycle event to
+// the server's caller-driven plan index (bead sageox-gqgkg). Callers treat
+// this as strictly fire-and-forget, matching NotifySessionStarted/Aborted:
+// any error here is advisory only and must never affect the local
+// events.jsonl append that already succeeded. Not built on postSessionSignal
+// because this path substitutes two ids (team_id, plan_id), not one.
+func (c *RepoClient) NotifyPlanActivity(teamID, planID string, n PlanActivityNotification) error {
+	bodyBytes, err := json.Marshal(n)
+	if err != nil {
+		return fmt.Errorf("marshal request: %w", err)
+	}
+	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(planActivityPath, teamID, planID)
+
+	logger.LogHTTPRequest("POST", reqURL)
+	start := time.Now()
+
+	httpReq, err := useragent.NewRequest(context.Background(), "POST", reqURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.authToken != "" {
+		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	duration := time.Since(start)
+	if err != nil {
+		logger.LogHTTPError("POST", reqURL, err, duration)
+		return fmt.Errorf("plan activity notification: %w", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) // drain for connection reuse; the stub response body carries nothing useful
+
+	logger.LogHTTPResponse("POST", reqURL, resp.StatusCode, duration)
+
+	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("plan activity notification failed (%d)", resp.StatusCode)
+	}
+	return nil
 }
 
 // RepoMarkerData holds parsed data from a .repo_* marker file

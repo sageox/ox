@@ -142,7 +142,10 @@ type Meta struct {
 }
 
 // PlanInfo is the listing-level view of a captured plan, assembled from
-// meta.json. Dir is the absolute path to the plan folder.
+// meta.json. Dir is the absolute path to the plan folder. Status is the plan's
+// CURRENT lifecycle status (see CurrentStatus): the folded events.jsonl
+// projection when the plan has recorded lifecycle events, else meta.json's
+// Status for legacy plans saved before the event log existed.
 type PlanInfo struct {
 	Slug      string
 	Topic     string
@@ -150,6 +153,7 @@ type PlanInfo struct {
 	CreatedAt time.Time
 	Authors   []string
 	HasHTML   bool
+	Status    PlanStatus
 }
 
 // LoadMeta reads and parses a captured plan's meta.json from its plan directory
@@ -542,6 +546,26 @@ func ReadPlanMeta(gitRoot, slug string) (Meta, error) {
 	return readMeta(dir)
 }
 
+// CurrentStatus returns a plan directory's current lifecycle status: the
+// folded events.jsonl projection (events.jsonl is the source of truth a
+// reader replays — see events.go) when the plan has recorded lifecycle
+// events, else meta.json's Status field for legacy plans saved before the
+// event log existed. Additive read-path convenience over AppendPlanEvent's
+// existing dual-write precedence — callers (list/view) get one call instead
+// of duplicating the fold-or-fallback decision. "" when neither source is
+// available (e.g. an unreadable plan dir), matching how an unset meta.Status
+// has always been treated by callers.
+func CurrentStatus(dir string) PlanStatus {
+	if events, err := LoadEvents(dir); err == nil && len(events) > 0 {
+		return Fold(events).Status
+	}
+	meta, err := readMeta(dir)
+	if err != nil {
+		return ""
+	}
+	return meta.Status
+}
+
 // resolvePlanDirForSlug resolves a slug to its plan directory under the ledger.
 func resolvePlanDirForSlug(gitRoot, slug string) (string, error) {
 	plansDir := paths.LedgerPlansDir(ledgerPathFor(gitRoot))
@@ -632,6 +656,7 @@ func planInfoFrom(dir, dirName string, meta Meta) PlanInfo {
 		CreatedAt: meta.CreatedAt,
 		Authors:   meta.Authors,
 		HasHTML:   hasHTML,
+		Status:    CurrentStatus(dir),
 	}
 }
 
