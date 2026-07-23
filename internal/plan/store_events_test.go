@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,6 +90,70 @@ func TestSave_FirstSaveWritesCreatedEvent(t *testing.T) {
 	}
 	if ev.Author != "Person A" {
 		t.Errorf("Author = %q, want Person A (from Provenance.AuthorName)", ev.Author)
+	}
+}
+
+// TestSave_ConcurrentFirstSaveMintsSinglePlanID is the regression test for the
+// planID-minting race: concurrent Save calls landing in the same fresh plan
+// directory (same Topic/CreatedAt -> same dated-slug dir) must fold to a
+// single `created` event and a single pln_ id, never one per goroutine that
+// raced the unlocked "is this the first save" read. Fails without the fix
+// (LoadEvents/firstSave/planID resolved outside the events.jsonl flock, so
+// two goroutines can both observe "no events yet" before either appends) and
+// passes with it (the whole resolve-then-append sequence is one critical
+// section under events.jsonl's flock).
+func TestSave_ConcurrentFirstSaveMintsSinglePlanID(t *testing.T) {
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+
+	const n = 8
+	in := Input{Raw: "# Concurrent First Save\n\nbody"}
+	meta := Meta{
+		Topic:     "Concurrent First Save",
+		CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC),
+	}
+
+	var wg sync.WaitGroup
+	dirs := make([]string, n)
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			dirs[i], errs[i] = Save("/g", in, sampleResult(), nil, meta)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Save[%d]: %v", i, err)
+		}
+	}
+	for i := 1; i < n; i++ {
+		if dirs[i] != dirs[0] {
+			t.Fatalf("Save calls landed in different dirs: %q vs %q", dirs[0], dirs[i])
+		}
+	}
+
+	events, err := LoadEvents(dirs[0])
+	if err != nil {
+		t.Fatalf("LoadEvents: %v", err)
+	}
+
+	planIDs := map[string]bool{}
+	createdCount := 0
+	for _, ev := range events {
+		planIDs[ev.PlanID] = true
+		if ev.Kind == EventCreated {
+			createdCount++
+		}
+	}
+	if len(planIDs) != 1 {
+		t.Errorf("events carry %d distinct plan ids after %d concurrent first-saves, want 1: %v", len(planIDs), n, planIDs)
+	}
+	if createdCount != 1 {
+		t.Errorf("got %d `created` events after %d concurrent first-saves, want exactly 1", createdCount, n)
 	}
 }
 

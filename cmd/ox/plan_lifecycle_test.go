@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/plan"
 	"github.com/spf13/cobra"
@@ -180,7 +181,7 @@ func TestRunPlanStatusOnDir_HumanTimeline(t *testing.T) {
 // --- supersede's --by guard (validated before AppendPlanEvent is ever called) ---
 
 func TestResolveSupersedeSuccessor_MissingByErrors(t *testing.T) {
-	_, err := resolveSupersedeSuccessor("/any/git/root", "")
+	_, err := resolveSupersedeSuccessor("/any/git/root", "some-slug", "")
 	if err == nil || !strings.Contains(err.Error(), "--by") {
 		t.Fatalf("want a --by required error, got %v", err)
 	}
@@ -188,9 +189,26 @@ func TestResolveSupersedeSuccessor_MissingByErrors(t *testing.T) {
 
 func TestResolveSupersedeSuccessor_UnresolvableSlugErrors(t *testing.T) {
 	newPlanEnrichTestRepo(t) // fresh temp git repo, isolated HOME — no ledger, so any slug is unresolvable
-	_, err := resolveSupersedeSuccessor(findGitRoot(), "does-not-exist")
+	_, err := resolveSupersedeSuccessor(findGitRoot(), "some-slug", "does-not-exist")
 	if err == nil {
 		t.Fatal("want an error when --by does not resolve to a real plan")
+	}
+}
+
+// TestResolveSupersedeSuccessor_SelfSupersedeErrors is the regression test for
+// the self-supersede guard: `ox plan supersede foo --by foo` must error before
+// recording anything, not silently record SupersededBy pointing at itself.
+func TestResolveSupersedeSuccessor_SelfSupersedeErrors(t *testing.T) {
+	root := newPlanStatusTestRepo(t)
+	meta := plan.Meta{Topic: "Self Supersede Guard", CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)}
+	if _, err := plan.Save(root, plan.Input{Raw: "# Self Supersede Guard\n"}, plan.Result{}, nil, meta); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	slug := plan.Slugify(meta.Topic)
+
+	_, err := resolveSupersedeSuccessor(root, slug, slug)
+	if err == nil || !strings.Contains(err.Error(), "cannot be the plan being superseded") {
+		t.Fatalf("want a self-supersede error, got %v", err)
 	}
 }
 

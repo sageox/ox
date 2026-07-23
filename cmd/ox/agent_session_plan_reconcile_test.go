@@ -100,3 +100,40 @@ func TestReconcileProducedPlansAtStop_SecondCallIsNoOp(t *testing.T) {
 		t.Fatalf("second stop must not duplicate events: got %d, want 2: %+v", len(got), got)
 	}
 }
+
+// TestReconcileProducedPlansAtStop_ContinuesPastBrokenSlug verifies the
+// error-path behavior of the per-slug loop: a slug that can't be resolved
+// (plan.Load fails, e.g. it was never saved or its dir is gone) must not
+// stop reconciliation for the other slugs in the same stop call — each
+// failure is independently debug-logged and skipped via `continue`.
+func TestReconcileProducedPlansAtStop_ContinuesPastBrokenSlug(t *testing.T) {
+	root := newPlanStatusTestRepo(t)
+
+	meta := plan.Meta{Topic: "Valid Alongside Broken", CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)}
+	dir, err := plan.Save(root, plan.Input{Raw: "# Valid Alongside Broken\n"}, plan.Result{}, nil, meta)
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	events, err := plan.LoadEvents(dir)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("LoadEvents after Save: err=%v n=%d", err, len(events))
+	}
+	if err := plan.AppendEvent(context.Background(), dir, plan.Event{
+		PlanID: events[0].PlanID, Kind: plan.EventWorked, SessionName: "2026-07-01-person-a-Oxab12",
+	}); err != nil {
+		t.Fatalf("seed worked event: %v", err)
+	}
+
+	// "does-not-exist" precedes the valid slug so a bug that aborts the loop
+	// on the first failure (instead of continuing) would be caught.
+	slugs := []string{"does-not-exist", "valid-alongside-broken"}
+	reconcileProducedPlansAtStop(root, slugs, "2026-07-01-person-a-Oxab12", "ses_mixedslugs01")
+
+	got, err := plan.LoadEvents(dir)
+	if err != nil {
+		t.Fatalf("LoadEvents after reconcile: %v", err)
+	}
+	if len(got) != 2 || got[1].Kind != plan.EventWorked || got[1].SessionID != "ses_mixedslugs01" {
+		t.Fatalf("valid slug must still be reconciled despite a broken slug earlier in the list: got %+v", got)
+	}
+}

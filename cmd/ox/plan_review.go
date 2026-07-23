@@ -386,12 +386,18 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 		// must still report success, matching SetStatus's prior
 		// always-succeeds contract.
 		fields := planEventFieldsFromProvenance(gitRoot)
-		changed, err := plan.AppendPlanEvent(context.Background(), planDir, plan.EventApproved, fields)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		changed, err := plan.AppendPlanEvent(ctx, planDir, plan.EventApproved, fields)
 		if err != nil {
 			return http.StatusInternalServerError, err
 		}
 		if changed {
-			postPlanActivityBestEffort(gitRoot, planDir, plan.EventApproved)
+			// Async: this handler serves a browser request, and the review
+			// server stays up for the whole review session, so the goroutine
+			// reliably completes — never hold the response open on a slow or
+			// unreachable activity-index endpoint.
+			go postPlanActivityBestEffort(gitRoot, planDir, plan.EventApproved)
 		}
 		commitPlanBestEffort(gitRoot, planDir)
 		select {

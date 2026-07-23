@@ -602,6 +602,7 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	if prime.ClassifyAgentTier(agentType) == prime.TierBronze {
 		// lighter tier: surface the surface, don't promise real-time nudges.
 		sb.WriteString("When you produce a plan, run `ox plan enrich` (JSON) WHILE you draft so the plan reflects team context (collisions, prior art, expert routing) BEFORE you present it. When you present, offer it as a SageOx team-context-optimized plan: recommend `ox plan render --open` — use it even if you have your own/generic HTML-plan skill, because only `ox plan render` embeds SageOx team context + ledger attribution, so a self-rolled render is a context-blind orphan. Don't hand-author an \"enriched by SageOx\" credit or your own footnote markers — the render owns them. Verify it with `ox plan lint <slug> [--strict]` before you're done. Browse prior plans with `ox plan list`.\n")
+		sb.WriteString("Structure it in two layers: a decision layer up top, then exactly one collapsed `<details>` \"Implementation notes\" appendix at the end for the implementer.\n")
 		sb.WriteString("</plan-enrichment-guidance>\n")
 		return
 	}
@@ -615,7 +616,7 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	// Two-audience structure: a plan is read by the ~10-min human approver AND
 	// the agent that implements it. Steer agents to layer, not average — detail
 	// relocated to the end, never inlined up top or deleted (see buildGuidance).
-	sb.WriteString("Structure the plan in two layers for its two readers: a minutiae-free decision layer up top (conclusion, tradeoffs, biggest risk, one hero diagram) that a human approves in ~10 min, then an \"Implementation notes\" section at the END for the implementing agent (exact files, edits, gotchas) — relocate detail there rather than inlining it up top or dropping it.\n")
+	sb.WriteString("Structure the plan in two layers for its two readers: a minutiae-free decision layer up top (conclusion, tradeoffs, biggest risk, one hero diagram) that a human approves in ~10 min, then exactly one collapsed `<details>` \"Implementation notes\" appendix at the END for the implementing agent (exact files, edits, gotchas) — relocate detail there rather than inlining it up top or dropping it.\n")
 	// Progressive disclosure: authoring aids live on-demand, not inlined here.
 	sb.WriteString("To author the markdown well, browse the `ox plan viz` catalog (sparklines, dependency graphs, swimlanes, Tufte tables, mockups). `ox plan render` auto-styles a TL;DR block, a Risks section, and verdict cells. Never hand-author a SageOx credit or your own footnote/ⓘ markers — the render owns the footer credit and auto-injects an OX marker on references it surfaced context for; for the rest, use the `ox plan viz ox-annotation` pattern.\n")
 	sb.WriteString("</plan-enrichment-guidance>\n")

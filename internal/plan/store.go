@@ -206,138 +206,157 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		return "", fmt.Errorf("create plan dir=%s: %w", dir, err)
 	}
 
-	// Event-log foundation: resolve this plan's stable pln_ id — minted on the
-	// first save of this directory, reused on every later save — and whether
-	// this is that first save. Resolved now, before plan.html is written
-	// below, so the id can be stamped into its <head> in the same write.
-	// Best-effort: a corrupt events.jsonl must never block the save meta.json
-	// still performs below — a read failure here is logged and treated as "no
-	// prior events" (a fresh id is minted) rather than aborting Save.
-	existingEvents, evErr := LoadEvents(dir)
-	if evErr != nil {
-		slog.Warn("plan save: load existing events failed, minting a fresh id", "error", evErr, "dir", dir)
-		existingEvents = nil
-	}
-	firstSave := len(existingEvents) == 0
-	planID := planid.GeneratePlanID()
-	if !firstSave {
-		planID = existingEvents[0].PlanID
-	}
+	// Event-log foundation: serialize the whole id-resolve -> write-artifacts
+	// -> append-event sequence under ONE flock on events.jsonl — the same
+	// lock key AppendEvent itself uses, so a concurrent Save (or a concurrent
+	// AppendPlanEvent call, e.g. `ox plan approve` racing this save) on the
+	// same plan dir can never mint conflicting pln_ ids or interleave with
+	// this critical section. LoadEvents and appendEventLocked are lock-free
+	// by contract (see events.go) — calling the exported, self-locking
+	// AppendEvent from inside this closure would self-deadlock on the same
+	// path, since fileutil.WithFileLock is not reentrant.
+	eventsPath := filepath.Join(dir, eventsFile)
+	var planID string
+	lockErr := fileutil.WithFileLock(context.Background(), eventsPath, func() error {
+		// resolve this plan's stable pln_ id — minted on the first save of
+		// this directory, reused on every later save — and whether this is
+		// that first save. Resolved now, before plan.html is written below,
+		// so the id can be stamped into its <head> in the same write.
+		// Best-effort: a corrupt events.jsonl must never block the rest of
+		// Save — a read failure here is logged and treated as "no prior
+		// events" (a fresh id is minted) rather than aborting.
+		existingEvents, evErr := LoadEvents(dir)
+		if evErr != nil {
+			slog.Warn("plan save: load existing events failed, minting a fresh id", "error", evErr, "dir", dir)
+			existingEvents = nil
+		}
+		firstSave := len(existingEvents) == 0
+		planID = planid.GeneratePlanID()
+		if !firstSave {
+			planID = existingEvents[0].PlanID
+		}
 
-	// plan.md — plain git, diffable, hydrated-by-default.
-	if err := os.WriteFile(filepath.Join(dir, planMDFile), []byte(in.Raw), 0o644); err != nil {
-		return "", fmt.Errorf("write %s: %w", planMDFile, err)
-	}
+		// plan.md — plain git, diffable, hydrated-by-default.
+		if err := os.WriteFile(filepath.Join(dir, planMDFile), []byte(in.Raw), 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", planMDFile, err)
+		}
 
-	// annotations.json — the searchable badge data (Result).
-	annotations, err := json.MarshalIndent(res, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("marshal annotations: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, annotationsFile), annotations, 0o644); err != nil {
-		return "", fmt.Errorf("write %s: %w", annotationsFile, err)
-	}
+		// annotations.json — the searchable badge data (Result).
+		annotations, err := json.MarshalIndent(res, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal annotations: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, annotationsFile), annotations, 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", annotationsFile, err)
+		}
 
-	// meta.json — plain git descriptor, written under the flock with a
-	// READ-MERGE so a re-save never resets lifecycle. Re-running `ox plan` on
-	// the same dated-slug dir (e.g. the hook draft, then the skill's full save)
-	// must preserve a manually-set Status, the system-reconciled SessionOutcome,
-	// and the original CreatedAt, while refreshing the rest. Routing through
-	// MutatePlanMeta also serializes against a concurrent session-stop/doctor
-	// outcome write to the same file.
-	if err := MutatePlanMeta(context.Background(), dir, func(existing *Meta) (*Meta, error) {
-		merged := meta
-		if existing != nil {
-			if existing.Status != "" {
-				merged.Status = existing.Status
-			}
-			if !existing.CreatedAt.IsZero() {
-				merged.CreatedAt = existing.CreatedAt
-			}
-			// SessionID and SessionOutcome are system-managed (backfilled /
-			// reconciled at stop), never set by a save-time caller — preserve
-			// them across a re-save even when the caller supplies fresh
-			// provenance for the other (snapshot) fields.
-			if existing.Provenance != nil {
-				if existing.Provenance.SessionID != "" || existing.Provenance.SessionOutcome != "" {
-					if merged.Provenance == nil {
-						merged.Provenance = &Provenance{}
-					}
-					if existing.Provenance.SessionID != "" {
-						merged.Provenance.SessionID = existing.Provenance.SessionID
-					}
-					if existing.Provenance.SessionOutcome != "" {
-						merged.Provenance.SessionOutcome = existing.Provenance.SessionOutcome
+		// meta.json — plain git descriptor, written under its own flock (a
+		// different lock key than events.jsonl, so no deadlock with the lock
+		// this closure already holds) with a READ-MERGE so a re-save never
+		// resets lifecycle. Re-running `ox plan` on the same dated-slug dir
+		// (e.g. the hook draft, then the skill's full save) must preserve a
+		// manually-set Status, the system-reconciled SessionOutcome, and the
+		// original CreatedAt, while refreshing the rest. Routing through
+		// MutatePlanMeta also serializes against a concurrent session-stop/
+		// doctor outcome write to the same file.
+		if err := MutatePlanMeta(context.Background(), dir, func(existing *Meta) (*Meta, error) {
+			merged := meta
+			if existing != nil {
+				if existing.Status != "" {
+					merged.Status = existing.Status
+				}
+				if !existing.CreatedAt.IsZero() {
+					merged.CreatedAt = existing.CreatedAt
+				}
+				// SessionID and SessionOutcome are system-managed (backfilled /
+				// reconciled at stop), never set by a save-time caller — preserve
+				// them across a re-save even when the caller supplies fresh
+				// provenance for the other (snapshot) fields.
+				if existing.Provenance != nil {
+					if existing.Provenance.SessionID != "" || existing.Provenance.SessionOutcome != "" {
+						if merged.Provenance == nil {
+							merged.Provenance = &Provenance{}
+						}
+						if existing.Provenance.SessionID != "" {
+							merged.Provenance.SessionID = existing.Provenance.SessionID
+						}
+						if existing.Provenance.SessionOutcome != "" {
+							merged.Provenance.SessionOutcome = existing.Provenance.SessionOutcome
+						}
 					}
 				}
 			}
-		}
-		if merged.Status == "" {
-			merged.Status = PlanStatusDraft
-		}
-		merged.SchemaVersion = SchemaVersion
-		return &merged, nil
-	}); err != nil {
-		return "", fmt.Errorf("write %s: %w", planMetaFile, err)
-	}
-
-	// plan.html — only when a render was already produced. Size-gated: small
-	// renders stay plain so dehydrated clones read them directly; large ones
-	// become LFS pointers (pure-Go pointer write, never the git-lfs binary).
-	if html != nil {
-		// Stamp the plan's self-identifying meta tags (see html_meta.go) before
-		// either write path below, so both the plain and LFS-pointer'd copies
-		// carry the same content.
-		html = StampHTMLMeta(html, planID, meta.Slug, meta.Topic)
-		htmlPath := filepath.Join(dir, planHTMLFile)
-		if int64(len(html)) > htmlLFSThreshold {
-			ref := lfs.NewFileRef(html)
-			if err := lfs.WritePointerFile(htmlPath, ref); err != nil {
-				return "", fmt.Errorf("write plan.html LFS pointer: %w", err)
+			if merged.Status == "" {
+				merged.Status = PlanStatusDraft
 			}
-		} else if err := os.WriteFile(htmlPath, html, 0o644); err != nil {
-			return "", fmt.Errorf("write %s: %w", planHTMLFile, err)
+			merged.SchemaVersion = SchemaVersion
+			return &merged, nil
+		}); err != nil {
+			return fmt.Errorf("write %s: %w", planMetaFile, err)
 		}
 
-		// The plan's content just changed on disk — re-anchor any open review
-		// feedback whose element moved or was reworded (review feedback is
-		// sacred: an update must never silently orphan a human's marks).
-		// Fail-soft: remap trouble never blocks the plan write itself.
-		if entries, rerr := RemapFeedback(dir, html, time.Now()); rerr != nil {
-			slog.Warn("plan save: feedback remap failed", "error", rerr, "dir", dir)
-		} else if len(entries) > 0 {
-			slog.Info("plan save: re-anchored review feedback", "count", len(entries), "dir", dir)
-		}
-	}
+		// plan.html — only when a render was already produced. Size-gated: small
+		// renders stay plain so dehydrated clones read them directly; large ones
+		// become LFS pointers (pure-Go pointer write, never the git-lfs binary).
+		if html != nil {
+			// Stamp the plan's self-identifying meta tags (see html_meta.go) before
+			// either write path below, so both the plain and LFS-pointer'd copies
+			// carry the same content.
+			html = StampHTMLMeta(html, planID, meta.Slug, meta.Topic)
+			htmlPath := filepath.Join(dir, planHTMLFile)
+			if int64(len(html)) > htmlLFSThreshold {
+				ref := lfs.NewFileRef(html)
+				if err := lfs.WritePointerFile(htmlPath, ref); err != nil {
+					return fmt.Errorf("write plan.html LFS pointer: %w", err)
+				}
+			} else if err := os.WriteFile(htmlPath, html, 0o644); err != nil {
+				return fmt.Errorf("write %s: %w", planHTMLFile, err)
+			}
 
-	// Event-log foundation: append the lifecycle event now that every other
-	// artifact above has been written successfully. Best-effort — mirrors the
-	// feedback-remap handling just above: an append failure must never discard
-	// the meta.json/plan.md/plan.html write that already succeeded. Provenance
-	// fields come straight off meta.Provenance — the caller's resolved
-	// resolvePlanProvenance() result for THIS call, never re-derived a
-	// different way. Deliberately the caller's value, not the merged one
-	// meta.json may end up with above (which can preserve an earlier session's
-	// SessionID/SessionOutcome on a re-save): each event records the specific
-	// session that performed that save, and Fold aggregates across all of them
-	// — see events.go's multi-session model. Topic is deliberately left unset:
-	// the title's source of truth is plan.html's <head> (see html_meta.go),
-	// not the event log.
-	ev := Event{PlanID: planID, Kind: EventRevised}
-	if firstSave {
-		ev.Kind = EventCreated
-		ev.Status = PlanStatusDraft
-	}
-	if meta.Provenance != nil {
-		ev.SessionID = meta.Provenance.SessionID
-		ev.SessionName = meta.Provenance.SessionName
-		ev.AgentID = meta.Provenance.AgentID
-		ev.AgentEnv = meta.Provenance.AgentType
-		ev.Model = meta.Provenance.Model
-		ev.Author = meta.Provenance.AuthorName
-	}
-	if aerr := AppendEvent(context.Background(), dir, ev); aerr != nil {
-		slog.Warn("plan save: event append failed", "error", aerr, "dir", dir, "kind", ev.Kind)
+			// The plan's content just changed on disk — re-anchor any open review
+			// feedback whose element moved or was reworded (review feedback is
+			// sacred: an update must never silently orphan a human's marks).
+			// Fail-soft: remap trouble never blocks the plan write itself.
+			if entries, rerr := RemapFeedback(dir, html, time.Now()); rerr != nil {
+				slog.Warn("plan save: feedback remap failed", "error", rerr, "dir", dir)
+			} else if len(entries) > 0 {
+				slog.Info("plan save: re-anchored review feedback", "count", len(entries), "dir", dir)
+			}
+		}
+
+		// append the lifecycle event now that every other artifact above has
+		// been written successfully. Best-effort — mirrors the feedback-remap
+		// handling just above: an append failure must never discard the
+		// meta.json/plan.md/plan.html write that already succeeded. Provenance
+		// fields come straight off meta.Provenance — the caller's resolved
+		// resolvePlanProvenance() result for THIS call, never re-derived a
+		// different way. Deliberately the caller's value, not the merged one
+		// meta.json may end up with above (which can preserve an earlier session's
+		// SessionID/SessionOutcome on a re-save): each event records the specific
+		// session that performed that save, and Fold aggregates across all of them
+		// — see events.go's multi-session model. Topic is deliberately left unset:
+		// the title's source of truth is plan.html's <head> (see html_meta.go),
+		// not the event log.
+		ev := Event{PlanID: planID, Kind: EventRevised}
+		if firstSave {
+			ev.Kind = EventCreated
+			ev.Status = PlanStatusDraft
+		}
+		if meta.Provenance != nil {
+			ev.SessionID = meta.Provenance.SessionID
+			ev.SessionName = meta.Provenance.SessionName
+			ev.AgentID = meta.Provenance.AgentID
+			ev.AgentEnv = meta.Provenance.AgentType
+			ev.Model = meta.Provenance.Model
+			ev.Author = meta.Provenance.AuthorName
+		}
+		if aerr := appendEventLocked(eventsPath, ev); aerr != nil {
+			slog.Warn("plan save: event append failed", "error", aerr, "dir", dir, "kind", ev.Kind)
+		}
+		return nil
+	})
+	if lockErr != nil {
+		return "", lockErr
 	}
 
 	return dir, nil

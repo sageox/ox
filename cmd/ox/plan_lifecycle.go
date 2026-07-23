@@ -84,7 +84,7 @@ is recorded.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		by, _ := cmd.Flags().GetString("by")
-		successorSlug, err := resolveSupersedeSuccessor(findGitRoot(), by)
+		successorSlug, err := resolveSupersedeSuccessor(findGitRoot(), args[0], by)
 		if err != nil {
 			return err
 		}
@@ -93,17 +93,22 @@ is recorded.`,
 }
 
 // resolveSupersedeSuccessor validates --by is set and resolves it to a real
-// saved plan (via plan.Load), returning the successor's canonical slug to
-// record as SupersededBy. Split out from planSupersedeCmd's RunE so both
-// guards — missing --by, and a --by that doesn't resolve — run (and are
-// testable) BEFORE runPlanLifecycleVerb ever calls AppendPlanEvent.
-func resolveSupersedeSuccessor(gitRoot, by string) (string, error) {
+// saved plan (via plan.Load) other than slug itself, returning the
+// successor's canonical slug to record as SupersededBy. Split out from
+// planSupersedeCmd's RunE so all three guards — missing --by, a --by that
+// doesn't resolve, and a --by that resolves back to the plan being
+// superseded — run (and are testable) BEFORE runPlanLifecycleVerb ever calls
+// AppendPlanEvent.
+func resolveSupersedeSuccessor(gitRoot, slug, by string) (string, error) {
 	if by == "" {
 		return "", fmt.Errorf("--by <successor-slug> is required")
 	}
 	_, _, successor, err := plan.Load(gitRoot, by)
 	if err != nil {
 		return "", fmt.Errorf("resolve --by successor %q: %w", by, err)
+	}
+	if successor.Slug == slug {
+		return "", fmt.Errorf("--by %q cannot be the plan being superseded", by)
 	}
 	return successor.Slug, nil
 }

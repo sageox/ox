@@ -122,29 +122,40 @@ func AppendEvent(ctx context.Context, planDir string, ev Event) error {
 	if !validEventKind(ev.Kind) {
 		return fmt.Errorf("append event: invalid kind %q", ev.Kind)
 	}
-	if ev.Timestamp.IsZero() {
-		ev.Timestamp = time.Now().UTC()
-	}
 	if err := os.MkdirAll(planDir, 0o755); err != nil {
 		return fmt.Errorf("create plan dir: %w", err)
 	}
 
 	path := filepath.Join(planDir, eventsFile)
 	return fileutil.WithFileLock(ctx, path, func() error {
-		existing, err := os.ReadFile(path)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("read events: %w", err)
-		}
-		line, err := json.Marshal(ev)
-		if err != nil {
-			return fmt.Errorf("encode event: %w", err)
-		}
-		var out []byte
-		out = append(out, existing...)
-		out = append(out, line...)
-		out = append(out, '\n')
-		return fileutil.AtomicWriteBytes(path, out, 0o644)
+		return appendEventLocked(path, ev)
 	})
+}
+
+// appendEventLocked performs the read-modify-write append, assuming the
+// caller already holds path's flock. Used directly (without a nested
+// fileutil.WithFileLock) by AppendEvent's own closure above, and by Save
+// (store.go), which folds this same append into a larger critical section
+// that also resolves the plan's id — fileutil.WithFileLock gates on a
+// process-wide named mutex with no reentrancy, so a second WithFileLock call
+// on the same path from within an already-held lock would self-deadlock.
+func appendEventLocked(path string, ev Event) error {
+	if ev.Timestamp.IsZero() {
+		ev.Timestamp = time.Now().UTC()
+	}
+	existing, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read events: %w", err)
+	}
+	line, err := json.Marshal(ev)
+	if err != nil {
+		return fmt.Errorf("encode event: %w", err)
+	}
+	var out []byte
+	out = append(out, existing...)
+	out = append(out, line...)
+	out = append(out, '\n')
+	return fileutil.AtomicWriteBytes(path, out, 0o644)
 }
 
 // LoadEvents reads a plan's events.jsonl, oldest first (append order). A
