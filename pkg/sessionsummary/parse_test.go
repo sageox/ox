@@ -97,6 +97,48 @@ func TestParseSummaryJSON_MissingKeyActionsRejected(t *testing.T) {
 	}
 }
 
+// TestParseSummaryJSON_SkipShapeAccepted pins the skip-shape contract at the
+// parse layer: a quality_category="skip" response legitimately carries no
+// key_actions (nothing was accomplished), and must parse so it can flow to
+// EvaluateQualityCategory instead of the unparsable-output fallback. The
+// pre-fix behavior — rejecting skip shapes for missing key_actions — put
+// every skip-worthy session into a permanent "title too short" failure-stub
+// loop (2026-07 ledger anti-entropy incident).
+func TestParseSummaryJSON_SkipShapeAccepted(t *testing.T) {
+	cases := map[string]string{
+		"raw skip, title + reason": `{"quality_category":"skip","score_reason":"Routine maintenance, no insight.","title":"Remove worktree"}`,
+		"raw skip, reason only":    `{"quality_category":"skip","score_reason":"Single Q&A, no work performed."}`,
+		"fenced skip (incident shape)": "```json\n" +
+			`{"quality_category":"skip","score_reason":"Task assignment only; no review work performed.","title":"Security Review Task Assignment"}` +
+			"\n```",
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			resp, err := ParseSummaryJSON(input)
+			require.NoError(t, err, "skip-shaped response must parse without key_actions")
+			require.Equal(t, QualityCategorySkip, resp.QualityCategory)
+		})
+	}
+}
+
+// TestParseSummaryJSON_SkipShapeStillGated verifies the skip exception does
+// not reopen the incidental-fenced-text hole the gate exists for: a skip
+// category with neither title nor score_reason is still rejected, and
+// non-skip responses still require key_actions.
+func TestParseSummaryJSON_SkipShapeStillGated(t *testing.T) {
+	cases := map[string]string{
+		"skip with no title or reason":      `{"quality_category":"skip"}`,
+		"skip with whitespace-only fields":  `{"quality_category":"skip","score_reason":"  ","title":"\n"}`,
+		"non-skip category, no key_actions": `{"quality_category":"share","title":"Real Title","summary":"x","outcome":"success"}`,
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseSummaryJSON(input)
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestEntriesFromRaw(t *testing.T) {
 	ts := "2026-03-24T10:00:00.000Z"
 	raw := []map[string]any{

@@ -65,7 +65,22 @@ func ParseSummaryJSON(output string) (*SummarizeResponse, error) {
 // least one entry — both fields are explicitly requested by
 // BuildSummaryPrompt, so their absence indicates the LLM did not
 // actually summarize.
+//
+// Skip-shape exception (mirrors ValidateSummaryContent's skip contract):
+// when the LLM judges a session quality_category "skip", it legitimately
+// has no key_actions — nothing was accomplished — and may carry only a
+// title and score_reason. Rejecting that shape here funneled every skip
+// verdict into the unparsable-output branch, which fabricated a blank
+// stub that then failed validation with "title too short (0 chars)" —
+// a permanent, daily-retried failure-stub state for trivial sessions
+// (the 2026-07 ledger anti-entropy incident). A skip response is
+// accepted when it carries a non-empty score_reason or title, so
+// incidental fenced text that merely round-trips the struct still
+// fails the gate.
 func summaryHasContent(r *SummarizeResponse) bool {
+	if r.QualityCategory == QualityCategorySkip {
+		return strings.TrimSpace(r.ScoreReason) != "" || strings.TrimSpace(r.Title) != ""
+	}
 	if strings.TrimSpace(r.Title) == "" {
 		return false
 	}
