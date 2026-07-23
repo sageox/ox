@@ -207,6 +207,8 @@ const (
 	// maxPlans caps enriched-plan entries (and the plan.Load calls behind them)
 	// so a window with many plans stays scannable, like every sibling miner.
 	maxPlans = 8
+	// maxFlows caps knowledge-flow chains in the influence section.
+	maxFlows = 8
 	// maxWorkItems caps the "your work" list.
 	maxWorkItems = 10
 	// maxTeamArtifacts caps the team-context-built list.
