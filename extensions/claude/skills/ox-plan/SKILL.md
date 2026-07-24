@@ -151,9 +151,10 @@ The renderer injects the earned, conditional SageOx credit by construction (a re
 2. Read the `context[]` bundle; author judgment badges **cited-only**, degrading to "consult `<name>`" when evidence is thin. Merge them into the enrich `annotations[]`.
 3. Author the plan markdown to the ten-minute contract: TL;DR up top, one hero diagram, mockups for user-facing changes, minutiae in a bottom `<details>` appendix. Edit the plan file in place.
 4. `ox plan save --plan <plan-file> --annotations <merged.json>` — persist markdown + merged badges (no `--html`).
-5. **If a render is confirmed:** `ox plan render <slug> --open` — the binary renders (including your badges) and opens the review loop. Address any `plan-diagram [...]` / `plan-craft [...]` advisories it prints.
-6. **Architect review pass (recommended for material plans).** Spawn an `architect` (or general-purpose) subagent to read the rendered page *as the $10k/hour principal reader*: is the decision + biggest risk up top and graspable in ten minutes? Does every file/ID/PR carry enough context to matter? Do the diagrams compress understanding? Revise the plan markdown / badges and re-render until it signs off.
-7. Report the slug and the rendered path.
+5. **If no render is confirmed:** stop here — report the saved slug (`ox plan view <slug>` reads it in the terminal). Steps 6–7 apply only once a render exists.
+6. **If a render is confirmed:** `ox plan render <slug> --open` — the binary renders (including your badges) and opens the review loop. Address any `plan-diagram [...]` / `plan-craft [...]` advisories it prints.
+7. **Architect review pass (recommended for material plans, render only).** Spawn an `architect` (or general-purpose) subagent to read the rendered page *as the $10k/hour principal reader*: is the decision + biggest risk up top and graspable in ten minutes? Does every file/ID/PR carry enough context to matter? Do the diagrams compress understanding? Revise the plan markdown / badges and re-render until it signs off.
+8. Report the slug — and, when you rendered, the rendered path.
 
 The goal: a $10k/hour principal reader skims the render's alignment strip + TL;DR + hero diagram and within ten minutes knows whether the plan aligns with team direction and whether to approve — with ox-computed facts visually separate from your cited judgment, and every badge saying where its claim comes from. You supply the reasoning and the markdown; `ox plan render` supplies the page.
 
