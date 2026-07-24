@@ -21,8 +21,10 @@ package prime
 
 import (
 	"sort"
+	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/claude"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
@@ -250,4 +252,119 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Required-directive manifest (bd ox-32f6): a related but distinct
+// guarantee from the cross-agent floor conformance above. Where the tests
+// above prove a capability REACHES every adapter, these prove a capability
+// SURVIVES prime's compact re-prime tier — i.e. that trimming prime's
+// static preamble on a routine re-invocation (see ShouldCompactReprime)
+// never quietly drops a directive that steers agent behavior on the FULL
+// prime path. The manifest itself lives in directives.go so cmd/ox can
+// import it too; the actual rendered-XML assertion lives in
+// cmd/ox/agent_prime_xml_test.go since rendering only happens there. These
+// tests validate the manifest's integrity and cross-check the entries that
+// ARE reachable from pure prime-package functions.
+// ════════════════════════════════════════════════════════════════════════
+
+// TestRequiredFullPrimeDirectives_WellFormed guards the manifest itself:
+// every entry has a name and marker, and no two entries share a name. A
+// malformed manifest (empty marker, duplicate name masking a missing
+// check) would silently stop proving anything.
+func TestRequiredFullPrimeDirectives_WellFormed(t *testing.T) {
+	directives := RequiredFullPrimeDirectives()
+	if len(directives) == 0 {
+		t.Fatal("expected a non-empty required-directive manifest")
+	}
+	seenNames := make(map[string]struct{}, len(directives))
+	for _, d := range directives {
+		if d.Name == "" {
+			t.Errorf("directive with marker %q has empty Name", d.Marker)
+		}
+		if d.Marker == "" {
+			t.Errorf("directive %q has empty Marker", d.Name)
+		}
+		if _, dup := seenNames[d.Name]; dup {
+			t.Errorf("duplicate directive name %q", d.Name)
+		}
+		seenNames[d.Name] = struct{}{}
+	}
+}
+
+// TestRequiredFullPrimeDirectives_ConsultFirstReachable proves the
+// "consult-first query routing" manifest entry corresponds to a real route
+// in OxCapabilities()'s consult-first floor entry — not a marker that was
+// copied once and now never matches because the source text drifted.
+func TestRequiredFullPrimeDirectives_ConsultFirstReachable(t *testing.T) {
+	var routes []ConsultRoute
+	for _, c := range OxCapabilities() {
+		if c.MechanismClass == MechanismFloor && c.ID == "consult-first" {
+			routes = c.ConsultRoutes
+		}
+	}
+	if len(routes) == 0 {
+		t.Fatal("expected the consult-first floor capability to carry ConsultRoutes")
+	}
+
+	for _, d := range RequiredFullPrimeDirectives() {
+		if d.Name != "consult-first query routing" {
+			continue
+		}
+		found := false
+		for _, r := range routes {
+			if contains(r.Command, d.Marker) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("manifest directive %q (marker %q) does not appear in any consult-first route command", d.Name, d.Marker)
+		}
+	}
+}
+
+// TestRequiredFullPrimeDirectives_CommandTableReachable proves every
+// "command table: *" manifest entry corresponds to a real IntentCommand row
+// BuildGuidance produces when every gated feature is available (team
+// context, ledger, code index, coworkers, murmuring, memory). A maximal
+// GuidanceParams fixture mirrors a fully-loaded real session — the shape
+// cmd/ox/agent_prime_xml.go renders into the <commands> table.
+// Failure prevented: a manifest entry that documents a command row which
+// BuildGuidance no longer actually produces (renamed intent, dropped gate).
+func TestRequiredFullPrimeDirectives_CommandTableReachable(t *testing.T) {
+	params := GuidanceParams{
+		AgentID:  "test-agent",
+		RepoSlug: "org/repo",
+		TeamCtx: &TeamContextInfo{
+			TeamID:               "team-1",
+			TeamName:             "Test Team",
+			Coworkers:            []claude.Agent{{Name: "reviewer", Description: "reviews code"}},
+			ObservationGuideHint: "/team/memory/GUIDE.md",
+		},
+		Ledger:           &LedgerInfo{Exists: true},
+		CodeDBExists:     true,
+		MemoryEnabled:    true,
+		MurmuringEnabled: true,
+		AgentType:        "claude-code",
+	}
+	guidance := BuildGuidance(params)
+
+	var commandBlob strings.Builder
+	for _, c := range guidance.Commands {
+		commandBlob.WriteString(c.Intent)
+		commandBlob.WriteByte(' ')
+		commandBlob.WriteString(c.Command)
+		commandBlob.WriteByte('\n')
+	}
+	blob := commandBlob.String()
+
+	for _, d := range RequiredFullPrimeDirectives() {
+		if !strings.HasPrefix(d.Name, "command table:") {
+			continue
+		}
+		if !contains(blob, d.Marker) {
+			t.Errorf("manifest directive %q (marker %q) not found in a maximally-populated BuildGuidance() output:\n%s", d.Name, d.Marker, blob)
+		}
+	}
 }

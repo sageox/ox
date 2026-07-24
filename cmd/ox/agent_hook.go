@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/kb"
+	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -263,7 +264,12 @@ func handleStart(ctx *HookContext) error {
 	if ctx.Input != nil {
 		source = ctx.Input.Source
 	}
-	forceReprime := source == "clear" || source == "compact"
+	// prime.IsForceReprimeSource is the single source of truth for this
+	// gate — agent_prime.go's compact-re-prime decision (ShouldCompactReprime)
+	// re-derives the identical boolean from the same source value so the
+	// two call sites can never disagree about what counts as "context was
+	// just wiped." See bd ox-32f6.
+	forceReprime := prime.IsForceReprimeSource(source)
 
 	if ctx.Marker != nil && !forceReprime {
 		// already primed — ensure recording is started (idempotent)

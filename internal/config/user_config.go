@@ -677,16 +677,27 @@ func GetUserConfigDir() string {
 // Uses atomic write (temp file + rename) to prevent corruption from
 // concurrent writes or crashes mid-write.
 func SaveUserConfig(cfg *UserConfig) error {
-	configDir := GetUserConfigDir()
-	if configDir == "" {
-		return os.ErrNotExist
+	// OX_USER_CONFIG overrides all path discovery — for CI/ephemeral/test
+	// environments. This MUST mirror LoadUserConfig, which honors the same env:
+	// if writes ignored it, a set-then-read under OX_USER_CONFIG would silently
+	// land in two different files (the write in ~/.sageox, the read in the env
+	// path) and the round-trip would break.
+	configPath := ""
+	if envPath := os.Getenv(EnvUserConfig); envPath != "" {
+		configPath = envPath
+	} else {
+		configDir := GetUserConfigDir()
+		if configDir == "" {
+			return os.ErrNotExist
+		}
+		configPath = filepath.Join(configDir, "config.yaml")
 	}
 
 	// 0700 dir / 0600 file: this is the same directory that holds auth.json and
 	// git-credentials.json (see paths.ConfigDir). A 0755/0644 write here would
 	// silently loosen the 0700 invariant auth.authfile relies on, because
 	// MkdirAll never tightens an existing directory.
-	if err := os.MkdirAll(configDir, 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
 		return fmt.Errorf("creating config dir: %w", err)
 	}
 
@@ -695,7 +706,6 @@ func SaveUserConfig(cfg *UserConfig) error {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
 
-	configPath := filepath.Join(configDir, "config.yaml")
 	tempPath := configPath + ".tmp"
 
 	if err := os.WriteFile(tempPath, data, 0600); err != nil {

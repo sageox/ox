@@ -33,4 +33,11 @@ const (
 	// SAGEOX_* namespace (ADR-047).
 	// Consumed by: PlanHTML()
 	EnvPlanHTML = "SAGEOX_PLAN_HTML"
+
+	// EnvPlanOpen directly overrides the plan.open browser-open policy. It
+	// must be one of the enum values never | ask | always; any other value
+	// falls through to config/default. Customer-facing, so it uses the
+	// canonical SAGEOX_* namespace (ADR-047) — mirrors EnvPlanHTML exactly.
+	// Consumed by: PlanOpen()
+	EnvPlanOpen = "SAGEOX_PLAN_OPEN"
 )

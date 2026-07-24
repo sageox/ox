@@ -269,15 +269,44 @@ ledger.
 		LongDescription: `Controls when 'ox plan' renders an enriched HTML plan for human review.
 
   off       - Never render, never nudge.
-  recommend - Prime nudges for a render on complex/material plans; the
-              render happens only after you confirm. (default)
-  always    - Auto-render without a confirm step.
+  recommend - Prime nudges for a render on complex/material plans; a MATERIAL
+              plan (real team-context signals) is also rendered to HTML in
+              the background automatically. (default)
+  always    - Currently identical to recommend.
+
+This setting governs RENDERING only. Whether the nudge may then instruct
+OPENING that render in a browser is the separate 'plan.open' setting.
 
 Override per-invocation with the SAGEOX_PLAN_HTML env var (same three
 values).`,
 		Category:    "Plans",
 		ValidValues: []string{config.PlanHTMLOff, config.PlanHTMLRecommend, config.PlanHTMLAlways},
 		Default:     config.DefaultPlanHTML,
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
+	},
+	{
+		Key:         "plan.open",
+		Description: "Browser-open policy for rendered plans",
+		LongDescription: `Controls whether the plan-exit nudge may instruct opening a rendered
+plan in a browser. Independent of 'plan.html' (which controls rendering) —
+this setting only matters once a render/nudge would already happen; 'plan.html
+off' always wins and suppresses both.
+
+  never  - No open or ask instruction, ever. The agent is told (at most) that
+           a render exists and its slug — nothing more.
+  ask    - The nudge directs the agent to confirm via AskUserQuestion before
+           opening anything; opens only on an explicit yes. (default)
+  always - You've opted in to auto-open: the nudge instructs opening
+           directly, no confirmation step.
+
+The AskUserQuestion posed in 'ask' mode offers "Always open from now on" and
+"Never ask again" options, which set this value for you.
+
+Override per-invocation with the SAGEOX_PLAN_OPEN env var (same three
+values).`,
+		Category:    "Plans",
+		ValidValues: []string{config.PlanOpenNever, config.PlanOpenAsk, config.PlanOpenAlways},
+		Default:     config.DefaultPlanOpen,
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
 	},
 	// NOTE: attribution.plan and attribution.session are intentionally not exposed
@@ -579,6 +608,14 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.RepoVal = *repoCfg.Plan.HTML
 		}
 
+	case "plan.open":
+		if userCfg != nil && userCfg.Plan.IsOpenSet() {
+			cv.UserVal = *userCfg.Plan.Open
+		}
+		if repoCfg != nil && repoCfg.Plan.IsOpenSet() {
+			cv.RepoVal = *repoCfg.Plan.Open
+		}
+
 	}
 
 	// determine effective value and source (User > Repo > Team > Default)
@@ -790,6 +827,12 @@ func setUserConfig(key, value string) error {
 		}
 		cfg.Plan.HTML = config.StringPtr(value)
 
+	case "plan.open":
+		if cfg.Plan == nil {
+			cfg.Plan = &config.PlanConfig{}
+		}
+		cfg.Plan.Open = config.StringPtr(value)
+
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)
 	}
@@ -865,6 +908,12 @@ func setRepoConfig(key, value, projectRoot string) error {
 			cfg.Plan = &config.PlanConfig{}
 		}
 		cfg.Plan.HTML = config.StringPtr(value)
+
+	case "plan.open":
+		if cfg.Plan == nil {
+			cfg.Plan = &config.PlanConfig{}
+		}
+		cfg.Plan.Open = config.StringPtr(value)
 
 	default:
 		return fmt.Errorf("setting %s not supported at repo level", key)
@@ -1010,6 +1059,14 @@ func unsetUserConfig(key string) error {
 			}
 		}
 
+	case "plan.open":
+		if cfg.Plan != nil {
+			cfg.Plan.Open = nil
+			if cfg.Plan.IsEmpty() {
+				cfg.Plan = nil
+			}
+		}
+
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)
 	}
@@ -1086,6 +1143,14 @@ func unsetRepoConfig(key, projectRoot string) error {
 	case "plan.html":
 		if cfg.Plan != nil {
 			cfg.Plan.HTML = nil
+			if cfg.Plan.IsEmpty() {
+				cfg.Plan = nil
+			}
+		}
+
+	case "plan.open":
+		if cfg.Plan != nil {
+			cfg.Plan.Open = nil
 			if cfg.Plan.IsEmpty() {
 				cfg.Plan = nil
 			}

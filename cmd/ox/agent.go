@@ -1144,6 +1144,18 @@ func traceWhisperDelivery(projectRoot, agentID string, entries []whisperstore.Wh
 			Source: source,
 			From:   e.AgentID,
 			Topic:  e.Topic,
+			// Injection provenance (epic ox-bcgb, tier 1): a delivered whisper is
+			// SageOx context injected into the turn. Mechanism grades it as
+			// deterministic; WhisperID joins it back to its murmur; Seq anchors it
+			// to the turn it landed at (the recording's entry count so far) so
+			// recap can place "teammate's murmur reached your work" on the right
+			// turn. Additive — the event stays a `provided` whisper for existing
+			// consumers.
+			Mechanism: contexttrace.MechanismInjection,
+			WhisperID: e.ID,
+			Ref:       e.ID,
+			RefType:   "murmur",
+			Seq:       state.EntryCount,
 		})
 	}
 }

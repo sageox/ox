@@ -18,8 +18,33 @@ type EventType string
 const (
 	// EventProvided is emitted when context becomes available to the agent.
 	EventProvided EventType = "provided"
+	// EventConsulted is emitted when the agent demonstrably pulls or receives a
+	// specific piece of SageOx context during a turn — a retrieval command, a
+	// read of a ledger/team-context file, or a mid-session recall/whisper
+	// delivery. Anchored to the turn (Seq) it happened on. This is provable
+	// consultation-provenance, distinct from the (inferred) EventInfluenced.
+	EventConsulted EventType = "consulted"
 	// EventInfluenced is emitted when the agent attributes a decision to specific context.
 	EventInfluenced EventType = "influenced"
+)
+
+// Mechanism records HOW a consulted/influenced tag was established — i.e. the
+// grade of evidence behind it. Consumers (recap) MUST preserve this so a
+// deterministic retrieval is never rendered as proven causation, and an
+// inferred attribution is never rendered as provable.
+type Mechanism string
+
+const (
+	// MechanismRetrieval — deterministic, grade A: the agent ran a SageOx
+	// retrieval command or read a ledger/team-context file in this turn.
+	MechanismRetrieval Mechanism = "retrieval"
+	// MechanismInjection — deterministic, grade A: SageOx context (recall
+	// preamble, murmur/whisper) was delivered into this turn.
+	MechanismInjection Mechanism = "injection"
+	// MechanismSelfReport — agent-reported, grade B: the agent attributes a
+	// turn's decision to context it already held (no fresh retrieval). The only
+	// non-deterministic grade — there is no server-side classifier.
+	MechanismSelfReport Mechanism = "self-report"
 )
 
 // SourceType identifies where the context came from.
@@ -56,6 +81,18 @@ type Event struct {
 	// influenced: what mattered
 	Decision string `json:"decision,omitempty"`
 	PlanStep int    `json:"plan_step,omitempty"`
+
+	// Turn-anchored influence fields (consulted/influenced events). Seq is the
+	// raw.jsonl turn this tag belongs to; Mechanism grades the evidence
+	// (retrieval/injection are provable, self-report is inferred). The Ref*
+	// fields identify what was consulted so recap can build a receipted chain.
+	Seq       int       `json:"seq,omitempty"`
+	Mechanism Mechanism `json:"mechanism,omitempty"`
+	Ref       string    `json:"ref,omitempty"`        // session name, doc/file path, plan slug, murmur id
+	RefType   string    `json:"ref_type,omitempty"`   // session|discussion|doc|file|murmur|plan|kb
+	Query     string    `json:"query,omitempty"`      // the query text, for retrieval-command consults
+	Score     float64   `json:"score,omitempty"`      // retrieval score, when applicable
+	WhisperID string    `json:"whisper_id,omitempty"` // joins a whisper delivery to its murmur
 }
 
 // Now returns the current time formatted for context-trace timestamps.

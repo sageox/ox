@@ -95,303 +95,331 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	var sb strings.Builder
 	bk := newBookkeeper(&sb)
 
-	sb.WriteString("<ox-prime>\n")
+	// Compact re-prime tier (bd ox-32f6): a routine re-invocation of `ox
+	// agent prime` inside the SAME context window the agent already primed
+	// in. runAgentPrime sets output.CompactReprime via
+	// prime.ShouldCompactReprime when PrimeCallCount > 1 AND the
+	// triggering source is NOT clear/compact — i.e. the agent still holds
+	// the static preamble from its earlier prime call this window, so
+	// repeating it is pure waste, not steering. This is DEDUP, not
+	// removal: the static + slow-changing tiers below are simply skipped,
+	// never altered. Every agent's first prime this window, and every
+	// clear/compact-triggered re-prime (context actually wiped), always
+	// get compact=false — see prime.ShouldCompactReprime for the full
+	// belt-and-suspenders rationale.
+	compact := output.CompactReprime
+
+	if compact {
+		fmt.Fprintf(&sb, "<ox-prime mode=\"compact\" prime_call_count=\"%d\">\n", output.PrimeCallCount)
+		sb.WriteString("\n<!-- compact re-prime: you were already primed earlier in this context window. Static instructions, the command reference, and team knowledge from that earlier prime still apply and are intentionally not repeated here. Only what changed follows. -->\n")
+	} else {
+		sb.WriteString("<ox-prime>\n")
+	}
 
 	// ════════════════════════════════════════════════════════════
 	// cache-tier: static — identical across all sessions for this repo+team
+	// SKIPPED ENTIRELY on a compact re-prime — this whole tier, through
+	// <other-teams> below, was already delivered on the agent's earlier
+	// prime call this window. DEDUP, not removal (see `compact` above).
 	// ════════════════════════════════════════════════════════════
+	if !compact {
 
-	// instructions: core orientation for the agent
-	sb.WriteString("\n<instructions>\n")
-	sb.WriteString("You are connected to SageOx, which provides team context and session recording.\n")
-	sb.WriteString("SageOx has two SEPARATE knowledge sources:\n")
-	sb.WriteString("(1) TEAM CONTEXT: team-wide meetings, architecture decisions, conventions (shared across ALL repos)\n")
-	sb.WriteString("(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions (THIS repo only)\n")
-	sb.WriteString("These are unrelated — sessions are NOT discussions, and the ledger is NOT team context.\n")
-	sb.WriteString("When you find relevant prior sessions or discussions, attribute insights to teammates by name:\n")
-	sb.WriteString("- \"SageOx found [name]'s session on [topic] — they solved a similar problem by...\"\n")
-	sb.WriteString("- \"SageOx surfaced a discussion where [name] and [name] decided on [approach]...\"\n")
-	sb.WriteString("Use `ox session list` and `ox query` to find related work from teammates.\n")
-	sb.WriteString("Your user's identity is in the you= and you_aliases= attributes below.\n")
-	sb.WriteString("Match against ALL aliases — the same person may appear as different names across sessions,\n")
-	sb.WriteString("murmurs, and discussions. Do NOT credit them as a teammate — say \"Building on your earlier session...\" instead.\n")
-	sb.WriteString("</instructions>\n")
+		// instructions: core orientation for the agent
+		sb.WriteString("\n<instructions>\n")
+		sb.WriteString("You are connected to SageOx, which provides team context and session recording.\n")
+		sb.WriteString("SageOx has two SEPARATE knowledge sources:\n")
+		sb.WriteString("(1) TEAM CONTEXT: team-wide meetings, architecture decisions, conventions (shared across ALL repos)\n")
+		sb.WriteString("(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions (THIS repo only)\n")
+		sb.WriteString("These are unrelated — sessions are NOT discussions, and the ledger is NOT team context.\n")
+		sb.WriteString("When you find relevant prior sessions or discussions, attribute insights to teammates by name:\n")
+		sb.WriteString("- \"SageOx found [name]'s session on [topic] — they solved a similar problem by...\"\n")
+		sb.WriteString("- \"SageOx surfaced a discussion where [name] and [name] decided on [approach]...\"\n")
+		sb.WriteString("Use `ox session list` and `ox query` to find related work from teammates.\n")
+		sb.WriteString("Your user's identity is in the you= and you_aliases= attributes below.\n")
+		sb.WriteString("Match against ALL aliases — the same person may appear as different names across sessions,\n")
+		sb.WriteString("murmurs, and discussions. Do NOT credit them as a teammate — say \"Building on your earlier session...\" instead.\n")
+		sb.WriteString("</instructions>\n")
 
-	// consult-first: the root failure SageOx exists to prevent is an agent
-	// reasoning from first principles when the answer already lives in team
-	// memory — and getting it backwards. This block names the cues that must
-	// trigger a search BEFORE reasoning, and routes each cue to the right
-	// corpus (chronological vs semantic vs code are different retrieval modes).
-	// Static (no per-session/per-team variance) so it's fully cacheable.
-	sb.WriteString("\n<consult-first>\n")
-	sb.WriteString("Before answering from first-principles reasoning, check whether SageOx already has the answer.\n")
-	sb.WriteString("A confident answer that prior work contradicts is worse than a slow one. These cues mean STOP and search first:\n")
-	sb.WriteString("- The user references recent or specific work they did: \"I just pushed...\", \"this request\", \"did X fix Y?\", \"is the alert gone now?\"\n")
-	sb.WriteString("- A prior decision, a prod anomaly, or a metric/cost change — anything with a before/after.\n")
-	sb.WriteString("Route the cue to the right corpus — these are DIFFERENT retrieval modes, not interchangeable:\n")
-	// per-cue routing rows are sourced from the capability table's floor entries
-	// so the Layer-1 reminder and the additive ox-consult skill cannot drift.
-	// Rendered from the compile-time table (no per-session state) → stays in the
-	// static cache tier, byte-identical across sessions for a given binary.
-	for _, route := range consultRoutes() {
-		fmt.Fprintf(&sb, "- %s → %s\n", route.Cue, route.Command)
-	}
-	sb.WriteString("</consult-first>\n")
-
-	// rule-promotion-guidance: nudge the agent to ask whether a project-local
-	// rule should also become a team rule when one looks generally applicable.
-	// Static (no per-session/per-team variance) so it's fully cacheable.
-	sb.WriteString("\n<rule-promotion-guidance>\n")
-	sb.WriteString("When the user adds or edits a project-local rule (CLAUDE.md, AGENTS.md, .claude/rules/*.md, .cursorrules, .windsurfrules, etc.) that looks generally applicable — not specific to this repo's code, paths, or services — ask: \"This looks like it could apply to your whole team. Want me to also publish it to your SageOx team context as agents/rules/<name>.md?\" If yes, run `ox guide team-rules` for the file format and current manual workflow. Default to asking; do not silently publish. Skip the prompt for repo-specific rules (paths, services, schemas unique to this codebase).\n")
-	sb.WriteString("Team rules apply to every supported AI coding agent (Claude, Codex, Amp, etc.) used by teammates running ox — but only for teammates running ox. Project-local .claude/rules/ only reaches Claude users.\n")
-	sb.WriteString("</rule-promotion-guidance>\n")
-
-	// plan-enrichment-guidance: when the agent produces a plan for non-trivial
-	// work, nudge it to enrich the plan with team context via `ox plan` and
-	// recommend an HTML render. Tier-aware (Gold/Silver/Bronze) so we only
-	// promise what the agent can deliver — Bronze agents have no real-time
-	// hook, so they get a lighter note. Parallels <rule-promotion-guidance>.
-	writePlanEnrichmentGuidance(&sb, output.AgentType)
-
-	// decision-record-guidance: consult-and-credit contract for Decision
-	// Records. Gated on a corpus actually existing (config or conventional
-	// dirs) so repos without DRs pay zero prime tokens for it.
-	writeDecisionRecordGuidance(&sb)
-
-	// code-search: behavioral instruction to prefer ox code search over built-in tools
-	if output.CodeDBAvailable {
-		sb.WriteString("\n<code-search status=\"indexed\">\n")
-		sb.WriteString("This repo has a live code search index. PREFER `ox code search \"&lt;query&gt;\"` over Grep/Glob/ripgrep for:\n")
-		sb.WriteString("- Cross-file symbol search, function lookup, type definitions\n")
-		sb.WriteString("- Git history, diffs, and blame queries\n")
-		sb.WriteString("- Exploratory searches where you don't know the exact file\n")
-		sb.WriteString("Use `ox code insights` before planning multi-file changes (shows hotspots, contention, open PRs).\n")
-		if root := findGitRoot(); decision.CorpusDetected(root) && config.DecisionEnrichEnabled(root) {
-			sb.WriteString("Decision Records are in this index too: hits under docs/adr etc. carry doc_type:\"decision\"; add --decisions to search only them.\n")
+		// consult-first: the root failure SageOx exists to prevent is an agent
+		// reasoning from first principles when the answer already lives in team
+		// memory — and getting it backwards. This block names the cues that must
+		// trigger a search BEFORE reasoning, and routes each cue to the right
+		// corpus (chronological vs semantic vs code are different retrieval modes).
+		// Static (no per-session/per-team variance) so it's fully cacheable.
+		sb.WriteString("\n<consult-first>\n")
+		sb.WriteString("Before answering from first-principles reasoning, check whether SageOx already has the answer.\n")
+		sb.WriteString("A confident answer that prior work contradicts is worse than a slow one. These cues mean STOP and search first:\n")
+		sb.WriteString("- The user references recent or specific work they did: \"I just pushed...\", \"this request\", \"did X fix Y?\", \"is the alert gone now?\"\n")
+		sb.WriteString("- A prior decision, a prod anomaly, or a metric/cost change — anything with a before/after.\n")
+		sb.WriteString("Route the cue to the right corpus — these are DIFFERENT retrieval modes, not interchangeable:\n")
+		// per-cue routing rows are sourced from the capability table's floor entries
+		// so the Layer-1 reminder and the additive ox-consult skill cannot drift.
+		// Rendered from the compile-time table (no per-session state) → stays in the
+		// static cache tier, byte-identical across sessions for a given binary.
+		for _, route := range consultRoutes() {
+			fmt.Fprintf(&sb, "- %s → %s\n", route.Cue, route.Command)
 		}
-		sb.WriteString("Reserve Grep/Glob for: exact-string matches in a known file, or when ox code search returns no results.\n")
-		sb.WriteString("</code-search>\n")
-	}
+		sb.WriteString("</consult-first>\n")
 
-	// commands: intent-to-command lookup table
-	if output.Guidance != nil && len(output.Guidance.Commands) > 0 {
-		sb.WriteString("\n<commands")
-		if output.Guidance.Hint != "" {
-			fmt.Fprintf(&sb, " hint=%q", output.Guidance.Hint)
+		// rule-promotion-guidance: nudge the agent to ask whether a project-local
+		// rule should also become a team rule when one looks generally applicable.
+		// Static (no per-session/per-team variance) so it's fully cacheable.
+		// Trimmed to command + trigger (bd ox-32f6): the full rationale (why
+		// team rules matter, the manual publish workflow) moved to `ox guide
+		// team-rules` — read once, on demand, instead of paid on every prime.
+		sb.WriteString("\n<rule-promotion-guidance>\n")
+		sb.WriteString("When the user adds/edits a project-local rule (.claude/rules/*.md, CLAUDE.md, AGENTS.md, etc.) that looks team-wide rather than repo-specific, ask whether to also publish it to agents/rules/<name>.md in SageOx team context. Default to asking; never silent-publish; skip repo-specific rules. Run `ox guide team-rules` for the file format and workflow.\n")
+		sb.WriteString("Team rules reach every supported AI coding agent (Claude, Codex, Amp, etc.) for teammates running ox; project-local .claude/rules/ reaches only Claude users on this machine.\n")
+		sb.WriteString("</rule-promotion-guidance>\n")
+
+		// plan-enrichment-guidance: when the agent produces a plan for non-trivial
+		// work, nudge it to enrich the plan with team context via `ox plan` and
+		// recommend an HTML render. Tier-aware (Gold/Silver/Bronze) so we only
+		// promise what the agent can deliver — Bronze agents have no real-time
+		// hook, so they get a lighter note. Parallels <rule-promotion-guidance>.
+		writePlanEnrichmentGuidance(&sb, output.AgentType)
+
+		// decision-record-guidance: consult-and-credit contract for Decision
+		// Records. Gated on a corpus actually existing (config or conventional
+		// dirs) so repos without DRs pay zero prime tokens for it.
+		writeDecisionRecordGuidance(&sb)
+
+		// code-search: behavioral instruction to prefer ox code search over built-in tools
+		if output.CodeDBAvailable {
+			sb.WriteString("\n<code-search status=\"indexed\">\n")
+			sb.WriteString("This repo has a live code search index. PREFER `ox code search \"&lt;query&gt;\"` over Grep/Glob/ripgrep for:\n")
+			sb.WriteString("- Cross-file symbol search, function lookup, type definitions\n")
+			sb.WriteString("- Git history, diffs, and blame queries\n")
+			sb.WriteString("- Exploratory searches where you don't know the exact file\n")
+			sb.WriteString("Use `ox code insights` before planning multi-file changes (shows hotspots, contention, open PRs).\n")
+			if root := findGitRoot(); decision.CorpusDetected(root) && config.DecisionEnrichEnabled(root) {
+				sb.WriteString("Decision Records are in this index too: hits under docs/adr etc. carry doc_type:\"decision\"; add --decisions to search only them.\n")
+			}
+			sb.WriteString("Reserve Grep/Glob for: exact-string matches in a known file, or when ox code search returns no results.\n")
+			sb.WriteString("</code-search>\n")
 		}
-		sb.WriteString(">\n")
-		sb.WriteString("| Intent | Command |\n")
-		sb.WriteString("|--------|---------|\n")
-		for _, ic := range output.Guidance.Commands {
-			fmt.Fprintf(&sb, "| %s | `%s` |\n", ic.Intent, ic.Command)
+
+		// commands: intent-to-command lookup table
+		if output.Guidance != nil && len(output.Guidance.Commands) > 0 {
+			sb.WriteString("\n<commands")
+			if output.Guidance.Hint != "" {
+				fmt.Fprintf(&sb, " hint=%q", output.Guidance.Hint)
+			}
+			sb.WriteString(">\n")
+			sb.WriteString("| Intent | Command |\n")
+			sb.WriteString("|--------|---------|\n")
+			for _, ic := range output.Guidance.Commands {
+				fmt.Fprintf(&sb, "| %s | `%s` |\n", ic.Intent, ic.Command)
+			}
+			sb.WriteString("</commands>\n")
 		}
-		sb.WriteString("</commands>\n")
-	}
 
-	// attribution: how to credit SageOx in commits/PRs
-	sb.WriteString("\n<attribution>\n")
-	sb.WriteString("When SageOx guidance influences your approach, attribute it:\n")
-	sb.WriteString("- \"Based on SageOx domain guidance, I'll...\"\n")
-	sb.WriteString("- \"Following SageOx best practices for [topic]...\"\n")
-	sb.WriteString("\nWhen a teammate's contribution influences your approach, credit BOTH the person AND SageOx:\n")
-	sb.WriteString("- \"SageOx surfaced [name]'s discussion about [topic] — I'll follow that approach\"\n")
-	sb.WriteString("- \"Thanks to SageOx, I found [name]'s earlier session that solved a similar problem\"\n")
-	sb.WriteString("- \"SageOx delivered context from [name]'s [discussion title] — applying their pattern here\"\n")
-	sb.WriteString("Prefer naming teammates when you can trace the insight to a specific person. SageOx is the enabler.\n")
-	sb.WriteString("\nIMPORTANT: The you= and you_aliases= attributes identify the current user.\n")
-	sb.WriteString("Match against ALL aliases (the same person appears under different names in different contexts).\n")
-	sb.WriteString("Do NOT credit the current user as a \"teammate\" — that is their own prior work.\n")
-	sb.WriteString("For their own prior sessions/discussions: \"Building on your earlier work on [topic]...\"\n")
-	sb.WriteString("For actual teammates: \"SageOx surfaced [name]'s discussion about [topic]...\"\n")
-	sb.WriteString("\nPlan footer (required for team-guided plans):\n")
-	sb.WriteString("> Guided by SageOx\n")
-	if output.Attribution.Commit != "" {
-		sb.WriteString("\nSageOx contribution score (required when commit attribution is configured):\n")
-		sb.WriteString("Score reflects how much SageOx team context shaped your work — NOT that a session was recorded.\n")
-		sb.WriteString("Categories:\n")
-		sb.WriteString("  none         — no influence, worked independently of team context\n")
-		sb.WriteString("  minor        — confirmed an approach you already planned\n")
-		sb.WriteString("  moderate     — team context guided decisions\n")
-		sb.WriteString("  significant  — domain knowledge you would not have had otherwise\n")
-		sb.WriteString("  critical     — team context entirely shaped the approach\n")
-		sb.WriteString("Report: `ox session score --score &lt;category&gt; --reason \"&lt;detailed paragraph&gt;\"`\n")
-		sb.WriteString("Reason must cite specific sources: SOUL.md sections, meeting titles, team-ctx slugs, prior sessions.\n")
-		fmt.Fprintf(&sb, "Score >= %g earns commit attribution.\n", output.Attribution.ScoreThreshold)
-		sb.WriteString("The commit hook adds the trailer automatically — do NOT add it manually.\n")
-	}
-	if output.Attribution.PR != "" {
-		fmt.Fprintf(&sb, "\nPR attribution: check `git log` for `%s` trailers.\n", escapeXML(output.Attribution.Commit))
-		fmt.Fprintf(&sb, "If any commit has one, add as last line of PR body: `%s`\n", escapeXML(output.Attribution.PR))
-	}
-	sb.WriteString("</attribution>\n")
-
-	// charge: everything above is SageOx framing/instructions/commands/attribution
-	bk.charge(prime.BudgetSourceSageox)
-
-	// project guidance: AGENTS.md from the project root
-	if output.ProjectGuidance != nil && !output.ProjectGuidance.Skipped && output.ProjectGuidance.Content != "" {
-		fmt.Fprintf(&sb, "\n<project-guidance source=%q>\n", output.ProjectGuidance.Source)
-		bk.charge(prime.BudgetSourceSageox) // <project-guidance> tag is our framing
-		sb.WriteString(output.ProjectGuidance.Content)
-		if !strings.HasSuffix(output.ProjectGuidance.Content, "\n") {
-			sb.WriteString("\n")
+		// attribution: how to credit SageOx in commits/PRs
+		sb.WriteString("\n<attribution>\n")
+		sb.WriteString("When SageOx guidance influences your approach, attribute it:\n")
+		sb.WriteString("- \"Based on SageOx domain guidance, I'll...\"\n")
+		sb.WriteString("- \"Following SageOx best practices for [topic]...\"\n")
+		sb.WriteString("\nWhen a teammate's contribution influences your approach, credit BOTH the person AND SageOx:\n")
+		sb.WriteString("- \"SageOx surfaced [name]'s discussion about [topic] — I'll follow that approach\"\n")
+		sb.WriteString("- \"Thanks to SageOx, I found [name]'s earlier session that solved a similar problem\"\n")
+		sb.WriteString("- \"SageOx delivered context from [name]'s [discussion title] — applying their pattern here\"\n")
+		sb.WriteString("Prefer naming teammates when you can trace the insight to a specific person. SageOx is the enabler.\n")
+		sb.WriteString("\nIMPORTANT: The you= and you_aliases= attributes identify the current user.\n")
+		sb.WriteString("Match against ALL aliases (the same person appears under different names in different contexts).\n")
+		sb.WriteString("Do NOT credit the current user as a \"teammate\" — that is their own prior work.\n")
+		sb.WriteString("For their own prior sessions/discussions: \"Building on your earlier work on [topic]...\"\n")
+		sb.WriteString("For actual teammates: \"SageOx surfaced [name]'s discussion about [topic]...\"\n")
+		sb.WriteString("\nPlan footer (required for team-guided plans):\n")
+		sb.WriteString("> Guided by SageOx\n")
+		if output.Attribution.Commit != "" {
+			sb.WriteString("\nSageOx contribution score (required when commit attribution is configured):\n")
+			sb.WriteString("Score reflects how much SageOx team context shaped your work — NOT that a session was recorded.\n")
+			sb.WriteString("Categories:\n")
+			sb.WriteString("  none         — no influence, worked independently of team context\n")
+			sb.WriteString("  minor        — confirmed an approach you already planned\n")
+			sb.WriteString("  moderate     — team context guided decisions\n")
+			sb.WriteString("  significant  — domain knowledge you would not have had otherwise\n")
+			sb.WriteString("  critical     — team context entirely shaped the approach\n")
+			sb.WriteString("Report: `ox session score --score &lt;category&gt; --reason \"&lt;detailed paragraph&gt;\"`\n")
+			sb.WriteString("Reason must cite specific sources: SOUL.md sections, meeting titles, team-ctx slugs, prior sessions.\n")
+			fmt.Fprintf(&sb, "Score >= %g earns commit attribution.\n", output.Attribution.ScoreThreshold)
+			sb.WriteString("The commit hook adds the trailer automatically — do NOT add it manually.\n")
 		}
-		bk.charge(prime.BudgetSourceProject) // body comes from the repo's AGENTS.md
-		sb.WriteString("</project-guidance>\n")
-		bk.charge(prime.BudgetSourceSageox)
-	}
+		if output.Attribution.PR != "" {
+			fmt.Fprintf(&sb, "\nPR attribution: check `git log` for `%s` trailers.\n", escapeXML(output.Attribution.Commit))
+			fmt.Fprintf(&sb, "If any commit has one, add as last line of PR body: `%s`\n", escapeXML(output.Attribution.PR))
+		}
+		sb.WriteString("</attribution>\n")
 
-	// ════════════════════════════════════════════════════════════
-	// cache-tier: slow — changes on team context sync, not per-session
-	// NOTE: No dynamic attributes on these tags. Team name, sync status,
-	// etc. are bound in the per-session block below to maximize prefix
-	// cache hits.
-	// ════════════════════════════════════════════════════════════
-
-	if output.TeamContext != nil {
-		sb.WriteString("\n<team-knowledge>\n")
+		// charge: everything above is SageOx framing/instructions/commands/attribution
 		bk.charge(prime.BudgetSourceSageox)
 
-		// team instructions (AGENTS.md / CLAUDE.md from team context root)
-		if output.TeamInstructions != nil && output.TeamInstructions.Content != "" {
-			sb.WriteString("\n<team-instructions>\n")
-			bk.charge(prime.BudgetSourceSageox)
-			sb.WriteString(output.TeamInstructions.Content)
-			if !strings.HasSuffix(output.TeamInstructions.Content, "\n") {
+		// project guidance: AGENTS.md from the project root
+		if output.ProjectGuidance != nil && !output.ProjectGuidance.Skipped && output.ProjectGuidance.Content != "" {
+			fmt.Fprintf(&sb, "\n<project-guidance source=%q>\n", output.ProjectGuidance.Source)
+			bk.charge(prime.BudgetSourceSageox) // <project-guidance> tag is our framing
+			sb.WriteString(output.ProjectGuidance.Content)
+			if !strings.HasSuffix(output.ProjectGuidance.Content, "\n") {
 				sb.WriteString("\n")
 			}
-			bk.charge(prime.BudgetSourceTeam)
-			sb.WriteString("</team-instructions>\n")
+			bk.charge(prime.BudgetSourceProject) // body comes from the repo's AGENTS.md
+			sb.WriteString("</project-guidance>\n")
 			bk.charge(prime.BudgetSourceSageox)
 		}
 
-		// agents-level AGENTS.md (coworkers/agents/AGENTS.md)
-		if output.TeamContext.AgentsAgentsMDContent != "" {
-			sb.WriteString("\n<coworker-instructions>\n")
-			bk.charge(prime.BudgetSourceSageox)
-			sb.WriteString(output.TeamContext.AgentsAgentsMDContent)
-			if !strings.HasSuffix(output.TeamContext.AgentsAgentsMDContent, "\n") {
-				sb.WriteString("\n")
-			}
-			bk.charge(prime.BudgetSourceTeam)
-			sb.WriteString("</coworker-instructions>\n")
-			bk.charge(prime.BudgetSourceSageox)
-		}
+		// ════════════════════════════════════════════════════════════
+		// cache-tier: slow — changes on team context sync, not per-session
+		// NOTE: No dynamic attributes on these tags. Team name, sync status,
+		// etc. are bound in the per-session block below to maximize prefix
+		// cache hits.
+		// ════════════════════════════════════════════════════════════
 
-		// coworkers catalog: framing is ours, rows are team data
-		if len(output.TeamContext.Coworkers) > 0 {
-			sb.WriteString("\n<coworkers>\n")
-			sb.WriteString("| Name | Specialty | Model |\n")
-			sb.WriteString("|------|-----------|-------|\n")
+		if output.TeamContext != nil {
+			sb.WriteString("\n<team-knowledge>\n")
 			bk.charge(prime.BudgetSourceSageox)
-			for _, cw := range output.TeamContext.Coworkers {
-				desc := cw.Description
-				if desc == "" {
-					desc = "(no description)"
+
+			// team instructions (AGENTS.md / CLAUDE.md from team context root)
+			if output.TeamInstructions != nil && output.TeamInstructions.Content != "" {
+				sb.WriteString("\n<team-instructions>\n")
+				bk.charge(prime.BudgetSourceSageox)
+				sb.WriteString(output.TeamInstructions.Content)
+				if !strings.HasSuffix(output.TeamInstructions.Content, "\n") {
+					sb.WriteString("\n")
 				}
-				model := cw.Model
-				if model == "" {
-					model = "inherit"
+				bk.charge(prime.BudgetSourceTeam)
+				sb.WriteString("</team-instructions>\n")
+				bk.charge(prime.BudgetSourceSageox)
+			}
+
+			// agents-level AGENTS.md (coworkers/agents/AGENTS.md)
+			if output.TeamContext.AgentsAgentsMDContent != "" {
+				sb.WriteString("\n<coworker-instructions>\n")
+				bk.charge(prime.BudgetSourceSageox)
+				sb.WriteString(output.TeamContext.AgentsAgentsMDContent)
+				if !strings.HasSuffix(output.TeamContext.AgentsAgentsMDContent, "\n") {
+					sb.WriteString("\n")
 				}
-				fmt.Fprintf(&sb, "| %s | %s | %s |\n", cw.Name, desc, model)
+				bk.charge(prime.BudgetSourceTeam)
+				sb.WriteString("</coworker-instructions>\n")
+				bk.charge(prime.BudgetSourceSageox)
 			}
-			bk.charge(prime.BudgetSourceTeam)
-			sb.WriteString("\nLoad: `ox coworker load <name>`\n")
-			sb.WriteString("</coworkers>\n")
-			bk.charge(prime.BudgetSourceSageox)
-		}
 
-		// team commands: framing is ours, rows are team data
-		if len(output.TeamContext.CoworkerCommands) > 0 {
-			sb.WriteString("\n<team-commands>\n")
-			sb.WriteString("| Command | Trigger | Description |\n")
-			sb.WriteString("|---------|---------|-------------|\n")
-			bk.charge(prime.BudgetSourceSageox)
-			for _, tcmd := range output.TeamContext.CoworkerCommands {
-				desc := tcmd.Description
-				if desc == "" {
-					desc = "(no description)"
+			// coworkers catalog: framing is ours, rows are team data
+			if len(output.TeamContext.Coworkers) > 0 {
+				sb.WriteString("\n<coworkers>\n")
+				sb.WriteString("| Name | Specialty | Model |\n")
+				sb.WriteString("|------|-----------|-------|\n")
+				bk.charge(prime.BudgetSourceSageox)
+				for _, cw := range output.TeamContext.Coworkers {
+					desc := cw.Description
+					if desc == "" {
+						desc = "(no description)"
+					}
+					model := cw.Model
+					if model == "" {
+						model = "inherit"
+					}
+					fmt.Fprintf(&sb, "| %s | %s | %s |\n", cw.Name, desc, model)
 				}
-				fmt.Fprintf(&sb, "| %s | %s | %s |\n", tcmd.Name, tcmd.Trigger, desc)
+				bk.charge(prime.BudgetSourceTeam)
+				sb.WriteString("\nLoad: `ox coworker load <name>`\n")
+				sb.WriteString("</coworkers>\n")
+				bk.charge(prime.BudgetSourceSageox)
 			}
-			bk.charge(prime.BudgetSourceTeam)
-			sb.WriteString("</team-commands>\n")
-			bk.charge(prime.BudgetSourceSageox)
-		}
 
-		// docs catalog (progressive disclosure — paths only, not content)
-		if len(output.TeamContext.TeamDocs) > 0 {
-			sb.WriteString("\n<docs hint=\"read on demand, not preloaded\">\n")
-			sb.WriteString("| Name | When to Read |\n")
-			sb.WriteString("|------|--------------|\n")
-			bk.charge(prime.BudgetSourceSageox)
-			for _, doc := range output.TeamContext.TeamDocs {
-				title := doc.Title
-				if title == "" {
-					title = doc.Name
+			// team commands: framing is ours, rows are team data
+			if len(output.TeamContext.CoworkerCommands) > 0 {
+				sb.WriteString("\n<team-commands>\n")
+				sb.WriteString("| Command | Trigger | Description |\n")
+				sb.WriteString("|---------|---------|-------------|\n")
+				bk.charge(prime.BudgetSourceSageox)
+				for _, tcmd := range output.TeamContext.CoworkerCommands {
+					desc := tcmd.Description
+					if desc == "" {
+						desc = "(no description)"
+					}
+					fmt.Fprintf(&sb, "| %s | %s | %s |\n", tcmd.Name, tcmd.Trigger, desc)
 				}
-				when := doc.When
-				if when == "" {
-					when = title
+				bk.charge(prime.BudgetSourceTeam)
+				sb.WriteString("</team-commands>\n")
+				bk.charge(prime.BudgetSourceSageox)
+			}
+
+			// docs catalog (progressive disclosure — paths only, not content)
+			if len(output.TeamContext.TeamDocs) > 0 {
+				sb.WriteString("\n<docs hint=\"read on demand, not preloaded\">\n")
+				sb.WriteString("| Name | When to Read |\n")
+				sb.WriteString("|------|--------------|\n")
+				bk.charge(prime.BudgetSourceSageox)
+				for _, doc := range output.TeamContext.TeamDocs {
+					title := doc.Title
+					if title == "" {
+						title = doc.Name
+					}
+					when := doc.When
+					if when == "" {
+						when = title
+					}
+					fmt.Fprintf(&sb, "| %s | %s |\n", doc.Name, when)
 				}
-				fmt.Fprintf(&sb, "| %s | %s |\n", doc.Name, when)
+				bk.charge(prime.BudgetSourceTeam)
+				if output.TeamContext.ReadCommand != "" {
+					fmt.Fprintf(&sb, "\nRead: `%s`\n", output.TeamContext.ReadCommand)
+				}
+				sb.WriteString("</docs>\n")
+				bk.charge(prime.BudgetSourceSageox)
 			}
-			bk.charge(prime.BudgetSourceTeam)
-			if output.TeamContext.ReadCommand != "" {
-				fmt.Fprintf(&sb, "\nRead: `%s`\n", output.TeamContext.ReadCommand)
+
+			// team rules: framing is ours, bodies and rows are team data.
+			// emitTeamRules charges its own buckets through the bookkeeper.
+			if len(output.TeamContext.TeamRules) > 0 {
+				emitTeamRules(&sb, bk, output.TeamContext.TeamRules)
 			}
-			sb.WriteString("</docs>\n")
+
+			// team memory (inlined content): framing ours, body is team's
+			if output.TeamContext.MemoryContent != "" {
+				sb.WriteString("\n<memory>\n")
+				bk.charge(prime.BudgetSourceSageox)
+				sb.WriteString(output.TeamContext.MemoryContent)
+				if !strings.HasSuffix(output.TeamContext.MemoryContent, "\n") {
+					sb.WriteString("\n")
+				}
+				bk.charge(prime.BudgetSourceTeam)
+				sb.WriteString("</memory>\n")
+				bk.charge(prime.BudgetSourceSageox)
+			}
+
+			sb.WriteString("\n</team-knowledge>\n")
 			bk.charge(prime.BudgetSourceSageox)
 		}
 
-		// team rules: framing is ours, bodies and rows are team data.
-		// emitTeamRules charges its own buckets through the bookkeeper.
-		if len(output.TeamContext.TeamRules) > 0 {
-			emitTeamRules(&sb, bk, output.TeamContext.TeamRules)
+		// ledger info
+		if output.Ledger != nil && output.Ledger.Exists {
+			sb.WriteString("\n<ledger>\n")
+			sb.WriteString("Repo-specific archive of prior AI coworker coding sessions.\n")
+			sb.WriteString("NOT team context. Use `ox session list` to browse, `ox session view <name> --text` to view.\n")
+			sb.WriteString("Do not read ledger files directly (LFS stubs).\n")
+			sb.WriteString("</ledger>\n")
 		}
 
-		// team memory (inlined content): framing ours, body is team's
-		if output.TeamContext.MemoryContent != "" {
-			sb.WriteString("\n<memory>\n")
-			bk.charge(prime.BudgetSourceSageox)
-			sb.WriteString(output.TeamContext.MemoryContent)
-			if !strings.HasSuffix(output.TeamContext.MemoryContent, "\n") {
-				sb.WriteString("\n")
+		// other teams
+		if output.OtherTeams != nil && len(output.OtherTeams.Teams) > 0 {
+			sb.WriteString("\n<other-teams hint=\"Only read when user asks about a specific team by name\">\n")
+			sb.WriteString("| Slug | Age |\n")
+			sb.WriteString("|------|-----|\n")
+			for _, t := range output.OtherTeams.Teams {
+				age := t.Age
+				if age == "" {
+					age = "unknown"
+				}
+				fmt.Fprintf(&sb, "| %s | %s |\n", t.Slug, age)
 			}
-			bk.charge(prime.BudgetSourceTeam)
-			sb.WriteString("</memory>\n")
-			bk.charge(prime.BudgetSourceSageox)
+			sb.WriteString("\nList all: `ox teams`\n")
+			sb.WriteString("Read: `ox agent team-ctx <slug>`\n")
+			sb.WriteString("</other-teams>\n")
 		}
 
-		sb.WriteString("\n</team-knowledge>\n")
-		bk.charge(prime.BudgetSourceSageox)
-	}
-
-	// ledger info
-	if output.Ledger != nil && output.Ledger.Exists {
-		sb.WriteString("\n<ledger>\n")
-		sb.WriteString("Repo-specific archive of prior AI coworker coding sessions.\n")
-		sb.WriteString("NOT team context. Use `ox session list` to browse, `ox session view <name> --text` to view.\n")
-		sb.WriteString("Do not read ledger files directly (LFS stubs).\n")
-		sb.WriteString("</ledger>\n")
-	}
-
-	// other teams
-	if output.OtherTeams != nil && len(output.OtherTeams.Teams) > 0 {
-		sb.WriteString("\n<other-teams hint=\"Only read when user asks about a specific team by name\">\n")
-		sb.WriteString("| Slug | Age |\n")
-		sb.WriteString("|------|-----|\n")
-		for _, t := range output.OtherTeams.Teams {
-			age := t.Age
-			if age == "" {
-				age = "unknown"
-			}
-			fmt.Fprintf(&sb, "| %s | %s |\n", t.Slug, age)
-		}
-		sb.WriteString("\nList all: `ox teams`\n")
-		sb.WriteString("Read: `ox agent team-ctx <slug>`\n")
-		sb.WriteString("</other-teams>\n")
-	}
+	} // !compact — end of the static + slow-changing tier (see top of function)
 
 	// ════════════════════════════════════════════════════════════
 	// CACHE BOUNDARY — everything below here is unique per session.
@@ -400,6 +428,11 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	// for every user on every session start.
 	// ════════════════════════════════════════════════════════════
 	// cache-tier: session — unique every session
+	//
+	// This tier ALWAYS renders, compact or full: it's the volatile,
+	// per-session delta that changes even within the same context window
+	// (session status, notices, immediate actions) — exactly what a
+	// compact re-prime exists to deliver. See `compact` above.
 
 	// session context: binds all per-session dynamic values
 	sb.WriteString("\n<session-context")
@@ -504,8 +537,11 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		sb.WriteString("</immediate-actions>\n")
 	}
 
-	// capture-prior: instructions for capturing planning history (session-specific)
-	if output.CapturePrior != nil {
+	// capture-prior: instructions for capturing planning history
+	// (session-specific). Only relevant once — the moment recording starts
+	// — so skip on a compact re-prime; the agent already saw this on its
+	// earlier prime call this window if it was ever going to.
+	if !compact && output.CapturePrior != nil {
 		fmt.Fprintf(&sb, "\n<capture-prior agent_id=%q>\n", output.AgentID)
 		sb.WriteString(output.CapturePrior.Description)
 		sb.WriteString("\n")
@@ -593,20 +629,24 @@ func consultRoutes() []prime.ConsultRoute {
 //
 // Token-lean by design: this ships on every prime payload (see
 // docs/specs/agent-ux-principles.md — every token competes with the
-// developer's own context).
+// developer's own context). Trimmed to command + trigger (bd ox-32f6): the
+// full rationale (why `ox plan render` over a self-rolled HTML-plan skill,
+// the footnote/credit rules, the `ox plan viz` catalog) moved to
+// `ox guide plan-enrichment` — read once, on demand, instead of paid on
+// every prime. The commands themselves (the actual steering) stay inline.
 func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	sb.WriteString("\n<plan-enrichment-guidance>\n")
 	// Cross-agent mandate: planning should ALWAYS draw on SageOx conversation
 	// intelligence first, regardless of agent tier.
-	sb.WriteString("Before planning non-trivial work, consult SageOx conversation intelligence so the plan reflects the team's latest decisions: `ox query \"<topic>\"` (discussions + sessions), `ox code search` (code + git history). Plans that ignore recent team context get re-litigated.\n")
+	sb.WriteString("Before planning non-trivial work, consult SageOx conversation intelligence: `ox query \"<topic>\"` (discussions+sessions), `ox code search` (code+history) — plans ignoring recent team context get re-litigated.\n")
 	if prime.ClassifyAgentTier(agentType) == prime.TierBronze {
 		// lighter tier: surface the surface, don't promise real-time nudges.
-		sb.WriteString("When you produce a plan, run `ox plan enrich` (JSON) WHILE you draft so the plan reflects team context (collisions, prior art, expert routing) BEFORE you present it. When you present, offer it as a SageOx team-context-optimized plan: recommend `ox plan render --open` — use it even if you have your own/generic HTML-plan skill, because only `ox plan render` embeds SageOx team context + ledger attribution, so a self-rolled render is a context-blind orphan. Don't hand-author an \"enriched by SageOx\" credit or your own footnote markers — the render owns them. Verify it with `ox plan lint <slug> [--strict]` before you're done. Browse prior plans with `ox plan list`.\n")
+		sb.WriteString("When you produce a plan: run `ox plan enrich` (JSON) WHILE drafting. When you present, recommend `ox plan render --open` — only it embeds SageOx team context + ledger attribution; a self-rolled render is a context-blind orphan. Verify with `ox plan lint <slug> [--strict]`. Browse prior plans: `ox plan list`. Run `ox guide plan-enrichment` for the full workflow.\n")
 		sb.WriteString("Structure it in two layers: a decision layer up top, then exactly one collapsed `<details>` \"Implementation notes\" appendix at the end for the implementer.\n")
 		sb.WriteString("</plan-enrichment-guidance>\n")
 		return
 	}
-	sb.WriteString("When you plan non-trivial work (multi-file OR architectural OR touches a hotspot/open-PR OR ~5+ steps), run `ox plan enrich` WHILE you draft (fold it in BEFORE presenting) — it returns JSON team context (collisions incl. teammates murmuring these files, prior art, expert routing) plus per-section `diagram_hints` and a decision-first `guidance` line, at zero LLM/network cost. This is your default plan-enrichment call.\n")
+	sb.WriteString("Plan non-trivial work (multi-file OR architectural OR hotspot/open-PR OR ~5+ steps): run `ox plan enrich` WHILE drafting — JSON team context (collisions, prior art, expert routing) at zero LLM/network cost. This is your default plan-enrichment call.\n")
 	// HTML + review loop are HUMAN-opt-in: the agent recommends, the human runs.
 	// Steer agents to `ox plan render` even when they ship their own HTML-plan
 	// skill — we cannot modify third-party skills, so prime must make the value
@@ -627,7 +667,10 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 // Records. Emitted ONLY when a decision corpus is detected for this repo
 // (committed decision.paths config or a conventional ADR dir), so repos
 // without DRs spend zero prime tokens here. Static once emitted (no
-// per-session variance) → stays in the cacheable static tier.
+// per-session variance) → stays in the cacheable static tier. Trimmed to
+// command + trigger (bd ox-32f6): the full rationale (credit subtlety,
+// amendment conventions, the aligns/amends/supersedes judgment call) moved
+// to `ox guide decision-records` — read once, on demand.
 func writeDecisionRecordGuidance(sb *strings.Builder) {
 	gitRoot := findGitRoot()
 	if !decision.CorpusDetected(gitRoot) || !config.DecisionEnrichEnabled(gitRoot) {
@@ -635,10 +678,9 @@ func writeDecisionRecordGuidance(sb *strings.Builder) {
 	}
 	sb.WriteString("\n<decision-record-guidance>\n")
 	sb.WriteString("This repo keeps Decision Records (ADRs/DDRs) — permanent team memory; consult before touching one.\n")
-	sb.WriteString("New DR: `ox decision enrich --topic \"<subject>\"` BEFORE drafting — related decisions, next number, template conventions, ready-to-paste citations (zero LLM cost). Editing: `ox decision enrich --file <path>` — drift, amendment anchors, refs that no longer resolve; re-run after editing (a citation you cannot resolve is a citation you delete; a gap admitted beats a citation invented).\n")
-	sb.WriteString("Credit teammates by name and date in prose and paste the matching `&lt;!-- SOURCE: sageox ... --&gt;` comment VERBATIM — never compose refs by hand. Aligns/amends/supersedes is YOUR judgment; ox surfaces candidates only. Amend Accepted DRs with dated markers, never silent rewrites.\n")
-	sb.WriteString("Mid-implementation, before a nontrivial design choice: check whether a standing decision already constrains it — `ox code search \"<topic>\" --decisions`.\n")
-	sb.WriteString("SageOx credit stays subtle: the scored commit trailer; a visible credit only for genuinely decision-changing context, max 2 per DR.\n")
+	sb.WriteString("New DR: `ox decision enrich --topic \"<subject>\"` before drafting. Editing: `ox decision enrich --file <path>`. Both are zero-cost JSON: related decisions, numbering, ready-to-paste citations — re-run after editing (a citation you can't resolve should be deleted, not left dangling).\n")
+	sb.WriteString("Mid-implementation, before a nontrivial design choice: check for a standing constraint first — `ox code search \"<topic>\" --decisions`.\n")
+	sb.WriteString("Paste citation comments VERBATIM, never hand-composed. Run `ox guide decision-records` for the credit and amendment rules.\n")
 	sb.WriteString("</decision-record-guidance>\n")
 }
 

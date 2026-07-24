@@ -5,6 +5,7 @@ import (
 
 	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/tokens"
 )
 
 // emitProvidedContextTrace writes "provided" events to context-trace.jsonl
@@ -37,14 +38,19 @@ func emitProvidedContextTrace(sessionDir string, teamCtx *prime.TeamContextInfo,
 		return
 	}
 
-	// team memory (MEMORY.md inlined)
+	// team memory (MEMORY.md inlined). InlineTokens uses the same len/4
+	// heuristic as everywhere else prime estimates cost (tokens.EstimateTokens,
+	// also what TeamInstructions.Tokens and prime's <context-budget> use) —
+	// this was the one "provided" event still recording inline_tokens=0
+	// across every trace, per the ox-32f6 audit.
 	if teamCtx.MemoryContent != "" {
 		ev := contexttrace.Event{
-			Type:      contexttrace.EventProvided,
-			Timestamp: ts,
-			Source:    contexttrace.SourceTeamMemory,
-			Team:      teamCtx.TeamName,
-			Doc:       "MEMORY.md",
+			Type:         contexttrace.EventProvided,
+			Timestamp:    ts,
+			Source:       contexttrace.SourceTeamMemory,
+			Team:         teamCtx.TeamName,
+			Doc:          "MEMORY.md",
+			InlineTokens: tokens.EstimateTokens(teamCtx.MemoryContent),
 		}
 		if err := w.Append(ev); err != nil {
 			slog.Debug("context-trace: memory", "error", err)
