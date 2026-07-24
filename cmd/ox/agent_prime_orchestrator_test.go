@@ -13,20 +13,52 @@ import (
 // ORCHESTRATOR_ENV=buzz. This is what lets `ox agent prime` stamp
 // X-Orchestrator: buzz (cmd/ox/agent_prime.go).
 //
-// Uses DetectByType (not OrchestratorType) on purpose: it targets the Buzz
-// agent directly, so the assertion stays deterministic even on a host that also
+// Uses DetectByType (not OrchestratorType) on purpose: it targets a specific
+// agent type, so the assertion stays deterministic even on a host that also
 // sets another orchestrator's env vars (e.g. CONDUCTOR_WORKSPACE_NAME), where
 // the global DetectOrchestrator winner would be registry-iteration-order
-// dependent. DetectByType also returns an error if Buzz was never registered,
-// so this catches a dropped setup.go registration too.
+// dependent. DetectByType also returns an error for an unregistered type, so the
+// unregistered-type row both documents that contract and proves the buzz row's
+// no-error result is a meaningful registration signal (not a vacuous pass).
 func TestBuzzOrchestratorRegistered(t *testing.T) {
-	t.Setenv("ORCHESTRATOR_ENV", "buzz")
-
-	detected, err := agentx.NewDetector().DetectByType(context.Background(), agentx.AgentTypeBuzz)
-	if err != nil {
-		t.Fatalf("DetectByType(buzz) errored — Buzz orchestrator not registered? %v", err)
+	tests := []struct {
+		name         string
+		agentType    agentx.AgentType
+		orchestrator string
+		wantErr      bool
+		wantDetected bool
+	}{
+		{
+			name:         "buzz registered and detects ORCHESTRATOR_ENV=buzz",
+			agentType:    agentx.AgentTypeBuzz,
+			orchestrator: "buzz",
+			wantDetected: true,
+		},
+		{
+			name:         "unregistered type returns not-registered error",
+			agentType:    agentx.AgentType("definitely-not-an-orchestrator"),
+			orchestrator: "buzz",
+			wantErr:      true,
+		},
 	}
-	if !detected {
-		t.Fatal("Buzz orchestrator did not detect ORCHESTRATOR_ENV=buzz after agentx v0.1.11 bump")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ORCHESTRATOR_ENV", tt.orchestrator)
+
+			detected, err := agentx.NewDetector().DetectByType(context.Background(), tt.agentType)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("DetectByType(%q) = nil error, want a not-registered error", tt.agentType)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DetectByType(%q) errored — Buzz orchestrator not registered? %v", tt.agentType, err)
+			}
+			if detected != tt.wantDetected {
+				t.Fatalf("DetectByType(%q) detected = %v, want %v", tt.agentType, detected, tt.wantDetected)
+			}
+		})
 	}
 }
