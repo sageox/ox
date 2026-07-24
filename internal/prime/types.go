@@ -397,6 +397,10 @@ type Output struct {
 	ObservationDirective string `json:"observation_directive,omitempty"` // proactive instruction to record observations via ox memory put
 	// Murmur directive (behavioral — set when murmuring: "auto")
 	MurmurDirective string `json:"murmur_directive,omitempty"` // proactive instruction to publish WIP status via ox murmur
+	// Orchestrator directive (behavioral — set when the session runs under an
+	// orchestrator whose runtime changes how ox coordination reaches the agent,
+	// e.g. Buzz, where lifecycle hooks don't fire so push-whispers must be pulled)
+	OrchestratorDirective string `json:"orchestrator_directive,omitempty"`
 	// Current user identity (so agents can distinguish self vs teammate)
 	// Multiple aliases because sessions, murmurs, and discussions each use different name forms.
 	// This is local-only context (not persisted to ledger), so full name is safe here.

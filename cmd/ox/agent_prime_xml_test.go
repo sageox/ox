@@ -272,6 +272,33 @@ func TestOutputAgentPrimeXML_SurfacesOpenPlanFeedback(t *testing.T) {
 	}
 }
 
+// TestOutputAgentPrimeXML_OrchestratorDirective verifies the buzz-conditional
+// coordination guidance is emitted into prime output when set, and is a clean
+// no-op when empty.
+// Failure prevented: OrchestratorDirective is populated for a Buzz session but
+// the XML writer silently drops it, so the agent never learns push-whispers are
+// off and must be pulled with `ox agent <id> whisper`.
+func TestOutputAgentPrimeXML_OrchestratorDirective(t *testing.T) {
+	render := func(directive string) string {
+		var buf bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&buf)
+		if _, err := outputAgentPrimeXML(cmd, agentPrimeOutput{
+			AgentID: "a", Status: "fresh", OrchestratorDirective: directive,
+		}); err != nil {
+			t.Fatalf("outputAgentPrimeXML: %v", err)
+		}
+		return buf.String()
+	}
+	xml := render("Running under Buzz (buzz-acp): push-whispers do not fire; pull with ox agent a whisper")
+	if !strings.Contains(xml, "Running under Buzz") || !strings.Contains(xml, "ox agent a whisper") {
+		t.Errorf("orchestrator directive must be emitted verbatim, got:\n%s", xml)
+	}
+	if strings.Contains(render(""), "Running under Buzz") {
+		t.Error("an empty orchestrator directive must emit nothing")
+	}
+}
+
 func TestOutputAgentPrimeXML_PRAttribution_DifferentValues(t *testing.T) {
 	// ensures PR line renders output.Attribution.PR, not output.Attribution.Commit
 	var buf bytes.Buffer

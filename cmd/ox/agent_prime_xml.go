@@ -492,6 +492,11 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		sb.WriteString(escapeXML(output.MurmurDirective))
 		sb.WriteString("\n")
 	}
+	// orchestrator directive — runtime-specific coordination guidance (e.g. Buzz: pull whispers by hand)
+	if output.OrchestratorDirective != "" {
+		sb.WriteString(escapeXML(output.OrchestratorDirective))
+		sb.WriteString("\n")
+	}
 	sb.WriteString("</session-context>\n")
 
 	// user notices: messages that agents must relay to the user (upgrade, restart, support)

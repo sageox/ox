@@ -777,6 +777,17 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			"Run your first murmur NOW: describe what the user asked and which code areas you expect to touch."
 	}
 
+	// orchestrator directive — Buzz (block/buzz) spawns the agent through its
+	// buzz-acp ACP harness, which does not fire the lifecycle hooks SageOx uses
+	// to PUSH whispers into a turn. So under Buzz the agent must PULL them, and
+	// publish its own status, by hand. Gated on the detected orchestrator; a
+	// clean no-op for every other environment.
+	if useragent.OrchestratorType() == string(agentx.AgentTypeBuzz) {
+		output.OrchestratorDirective = "Running under Buzz (buzz-acp): SageOx push-whispers rely on agent lifecycle hooks that Buzz does not fire, so teammates' signals will NOT arrive automatically here. Stay in sync by hand:\n" +
+			fmt.Sprintf("  • Pull teammates' murmurs yourself — run `ox agent %s whisper` periodically (e.g. every ~20 tool calls)\n", agentID) +
+			"  • Publish your own WIP so teammates see it — ox murmur --topic=wip \"concise description (≤500 bytes)\""
+	}
+
 	// build pre-assembled notification for JSON-consuming agents.
 	// this duplicates the logic in outputAgentPrimeText so JSON consumers
 	// don't have to assemble the notification from individual fields.
