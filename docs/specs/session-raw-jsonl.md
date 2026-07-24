@@ -2,6 +2,19 @@
 
 The `raw.jsonl` file is the primary session recording format produced by `ox session start/stop`. Each line is a valid JSON object. The file captures an agent-to-human conversation session with full provenance for replay, summarization, and auditing.
 
+## Machine-Readable Schema
+
+A published JSON Schema for a single `raw.jsonl` line lives at
+[`schema/v1/raw-jsonl.schema.json`](../../schema/v1/raw-jsonl.schema.json)
+(`$id`: `https://sageox.ai/schemas/session/v1/raw-jsonl.schema.json`, MIT).
+It is validated in CI against this repo's session fixtures **and** against live
+`SessionWriter` output, so it describes what ox actually writes rather than what
+this document wishes were true.
+
+This document stays normative for everything a per-line schema cannot express:
+line ordering, completeness, secret redaction, and the PII boundary on
+`username`. Where the two disagree, that is a bug — please file it.
+
 ## Completeness Requirement
 
 **`raw.jsonl` MUST contain the complete, unfiltered output from the coding agent.** Every conversation turn — user messages, assistant responses, tool calls, tool results, and system messages — must be included verbatim. Do not summarize, truncate, or selectively omit entries.
@@ -51,12 +64,14 @@ The header identifies the session and provides provenance metadata.
 | `agent_type` | string | yes | Agent identifier (e.g., `"claude-code"`) |
 | `agent_version` | string | no | Version of the coding agent (e.g., `"1.0.3"`) |
 | `model` | string | no | LLM model used (e.g., `"claude-sonnet-4-20250514"`) |
-| `username` | string | no | Authenticated SageOx username (email) |
+| `username` | string | no | Privacy-safe display name, via `identity.AttributionDisplayName()`. **NOT an email** — `raw.jsonl` is committed to a ledger repo, so writers must never put a contactable address here. Also accepted on read as `ox_username`. |
 | `repo_id` | string | no | SageOx repo ID for provenance |
+| `session_id` | string | no | The `ses_` recording identity minted at session start. The header is its **crash-safe carrier**: `.recording.json` is deleted at stop/abort, so an orphan-finalize can only recover this ID from here. Only `ses_`-prefixed values are accepted into this field — see the caution below. |
+| `ox_version` | string | no | Version of ox that created the session |
 
 Example:
 ```json
-{"type":"header","metadata":{"version":"1.0","created_at":"2026-01-06T14:32:00Z","agent_id":"Ox7f3a","agent_type":"claude-code","agent_version":"1.0.3","model":"claude-sonnet-4-20250514","username":"dev@example.com","repo_id":"repo_01JEYQ9Z8X"}}
+{"type":"header","metadata":{"version":"1.0","created_at":"2026-01-06T14:32:00Z","agent_id":"Ox7f3a","agent_type":"claude-code","agent_version":"1.0.3","model":"claude-sonnet-4-20250514","username":"testdev","repo_id":"repo_01JEYQ9Z8X"}}
 ```
 
 ### Alternative Header Format
@@ -65,6 +80,15 @@ The reader also accepts the `_meta` wrapper format (used by capture-prior/import
 ```json
 {"_meta":{"schema_version":"1","agent_type":"claude-code","session_id":"Ox7f3a","started_at":"2026-01-06T14:32:00Z",...}}
 ```
+
+> **Caution — `session_id` means two different things.** In this dialect it is an
+> agent-supplied identifier (`"Ox7f3a"` above). In the native header's `metadata`
+> it is the `ses_` recording identity. `ParseStoreMeta` keeps them apart by
+> accepting only `ses_`-prefixed values into the recording-identity field; a
+> consumer that conflates them attributes a session to the wrong recording.
+>
+> The reader also accepts `started_at` as an alias for `created_at`, and
+> `ox_username` as an alias for `username`.
 
 See [Capture-Prior Format](#capture-prior-format) for details.
 
@@ -80,16 +104,17 @@ Each entry represents a conversation turn or tool invocation. Entries are writte
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `type` | string | yes | Entry type (see below) |
-| `content` | string | yes | Message text or tool output |
-| `timestamp` | ISO8601 | yes | When the entry was recorded (auto-added if missing) |
-| `seq` | integer | yes | Zero-based sequence number (auto-added if missing) |
+| `type` | string | yes | Entry type. **Open vocabulary** — see below |
+| `content` | string | no | Message text or tool output. Absent on some tool entries, which carry everything in `tool_*` |
+| `timestamp` | ISO8601 | yes | When the entry was recorded (auto-added if missing). Import dialect uses **`ts`** |
+| `seq` | integer | yes | Sequence number (auto-added if missing). ox writes **zero-based**; the import dialect is **one-based**. Ordering only, never an identity |
 | `eid` | string | yes | Unique 5-char alphanumeric entry identifier (auto-generated if missing) |
-| `tool_name` | string | no | Tool name (only for `tool` entries) |
-| `tool_input` | string | no | Tool input (only for `tool` entries) |
-| `tool_output` | string | no | Tool output (only for `tool` entries) |
+| `tool_name` | string | no | Tool name (only for `tool` entries). Import dialect uses **`tool`** |
+| `tool_input` | string **or object** | no | Tool input. ox writes a string (often itself JSON); the import dialect writes a decoded object. A reader that checks only for a string silently drops every imported tool call's arguments |
+| `tool_output` | string **or object** | no | Tool output. Same string-or-object split as `tool_input` |
 | `coworker_name` | string | no | Coworker/subagent name if applicable |
 | `coworker_model` | string | no | Coworker model tier (sonnet, opus, haiku) |
+| `data` | object | no | Nested payload written by `WriteEntry()` (as opposed to the flat `WriteRaw()` shape). Typically carries `role` and `content` |
 
 **Entry ID (`eid`):** Each entry gets a unique 5-character identifier from `[0-9A-Za-z]` (62^5 ≈ 916M possibilities). Generated automatically by `WriteRaw()` if not provided by the caller. Provides stable references for deduplication, cross-referencing from derived artifacts, and audit trails. Sessions recorded before this field was added will have entries without `eid` — readers should tolerate missing values.
 
@@ -101,6 +126,29 @@ Each entry represents a conversation turn or tool invocation. Entries are writte
 | `assistant` | AI agent response |
 | `system` | System message (context injection, framework content, coworker load) |
 | `tool` | Tool call or result (bash, read, write, edit, grep, glob) |
+
+**The vocabulary is open, and wider than those four.** `WriteRaw()` takes a
+`map[string]any` and writes whatever `type` the caller supplies, so values
+including `message`, `tool_call`, and `tool_result` also occur in real sessions.
+`header` and `footer` are the only reserved values. **A reader MUST preserve an
+entry whose `type` it does not recognize rather than dropping or rejecting it** —
+that is why the published schema does not enumerate this field.
+
+### Dialects
+
+`raw.jsonl` is not one shape. Three occur in practice, and a reader has to
+handle all three:
+
+| Dialect | Written by | Header | Entries |
+|---|---|---|---|
+| **Flat** (this document's default) | `SessionWriter.WriteRaw()` | `type:"header"` + `metadata` | flat keys, `timestamp`, zero-based `seq`, `eid` |
+| **Nested** | `SessionWriter.WriteEntry()` | same | `{type, timestamp, seq, eid, data:{role, content}}` |
+| **Import** | `ox agent <id> session capture-prior`, importers | `_meta` wrapper | `ts`, one-based `seq`, `tool`, object-valued `tool_input`, no `eid` |
+
+Convergence on one shape is desirable but not scheduled; until then, treat the
+aliases in the field table above as required reading, and validate against the
+[published schema](../../schema/v1/raw-jsonl.schema.json) rather than assuming
+one dialect.
 
 ### Adapter-Layer Entry Classification
 
@@ -169,7 +217,7 @@ The footer provides session summary statistics.
 ## Complete Example
 
 ```jsonl
-{"type":"header","metadata":{"version":"1.0","created_at":"2026-01-06T14:32:00Z","agent_id":"Ox7f3a","agent_type":"claude-code","model":"claude-sonnet-4-20250514","username":"dev@example.com"}}
+{"type":"header","metadata":{"version":"1.0","created_at":"2026-01-06T14:32:00Z","agent_id":"Ox7f3a","agent_type":"claude-code","model":"claude-sonnet-4-20250514","username":"testdev"}}
 {"type":"user","content":"Fix the failing test in auth_test.go","timestamp":"2026-01-06T14:32:01Z","seq":0,"eid":"aB3xZ"}
 {"type":"assistant","content":"I'll look at the test file to understand the failure.","timestamp":"2026-01-06T14:32:03Z","seq":1,"eid":"k9Qm2"}
 {"type":"tool","content":"","tool_name":"read","tool_input":"/path/to/auth_test.go","timestamp":"2026-01-06T14:32:04Z","seq":2,"eid":"Tn4pL"}

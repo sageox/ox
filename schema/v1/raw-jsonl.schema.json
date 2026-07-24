@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sageox.ai/schemas/session/v1/raw-jsonl.schema.json",
+  "title": "SageOx session raw.jsonl line",
+  "description": "One line of a SageOx `raw.jsonl` session recording. A raw.jsonl file is JSON Lines: every line is an independent JSON object validating against this schema. Conventionally the first line is a header and the last is a footer, but neither is guaranteed for imported or in-progress sessions, so file-level ordering is NOT expressed here (see $comment for the prose spec). Licensed MIT, same as the ox CLI — copy it into your own validator freely.",
+  "$comment": "Prose spec: https://github.com/sageox/ox/blob/main/docs/specs/session-raw-jsonl.md — it is normative for the rules JSON Schema cannot express (line ordering, redaction, completeness).",
+
+  "oneOf": [
+    { "$ref": "#/$defs/header" },
+    { "$ref": "#/$defs/importHeader" },
+    { "$ref": "#/$defs/footer" },
+    { "$ref": "#/$defs/entry" }
+  ],
+
+  "$defs": {
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?([Zz]|[+-][0-9]{2}:[0-9]{2})$",
+      "description": "RFC3339 timestamp. Either Z or a numeric offset — ox writes header times in UTC but stamps entries with the machine's local offset.",
+      "$comment": "The pattern is deliberately redundant with `format`. Most validators treat `format` as an annotation rather than an assertion by default, so a published schema that relies on `format` alone enforces nothing for the third parties it exists to serve."
+    },
+
+    "header": {
+      "title": "Header line (native)",
+      "description": "Written by ox at session start via SessionWriter.WriteHeader.",
+      "type": "object",
+      "required": ["type", "metadata"],
+      "properties": {
+        "type": { "const": "header" },
+        "metadata": { "$ref": "#/$defs/storeMeta" }
+      }
+    },
+
+    "importHeader": {
+      "title": "Header line (import dialect)",
+      "description": "Emitted by `ox agent <id> session capture-prior` and other importers. Carries `_meta` instead of `type`+`metadata`. Accepted by the reader; not written by ox itself.",
+      "type": "object",
+      "required": ["_meta"],
+      "not": { "required": ["type"] },
+      "properties": {
+        "_meta": {
+          "type": "object",
+          "properties": {
+            "schema_version": { "type": "string" },
+            "agent_type": { "type": "string" },
+            "session_id": {
+              "type": "string",
+              "description": "CAUTION — in THIS dialect `session_id` is an agent-supplied identifier, NOT the ses_ recording identity that the native header's metadata.session_id carries. One key, two meanings, split by dialect. ox's reader keeps them apart by only accepting ses_-prefixed values into the recording-identity field; a consumer that conflates them will attribute a session to the wrong recording."
+            },
+            "started_at": { "$ref": "#/$defs/rfc3339" },
+            "username": { "$ref": "#/$defs/username" }
+          }
+        }
+      }
+    },
+
+    "storeMeta": {
+      "title": "Session header metadata",
+      "description": "Mirrors session.StoreMeta. Field set is open: readers MUST preserve unknown keys.",
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string",
+          "description": "Header metadata format version. Currently \"1.0\". Distinct from this schema's version and from adapterprotocol.EntrySchemaVersion."
+        },
+        "created_at": { "$ref": "#/$defs/rfc3339" },
+        "started_at": {
+          "$ref": "#/$defs/rfc3339",
+          "description": "Accepted as an alias for created_at by the reader; prefer created_at when writing."
+        },
+        "agent_id": { "type": "string", "description": "Short agent id, e.g. \"Ox7f3a\"." },
+        "session_id": {
+          "type": "string",
+          "pattern": "^ses_",
+          "description": "The ses_ recording identity minted at session start. The header is its crash-safe carrier: the on-disk recording-state file is deleted at stop/abort, so an orphan-finalize can only recover this id from here. See the import dialect's _meta.session_id, which overloads the same key with a DIFFERENT meaning."
+        },
+        "agent_type": { "type": "string", "description": "Coding agent identifier, e.g. \"claude-code\"." },
+        "agent_version": { "type": "string", "description": "Version of the coding agent." },
+        "model": { "type": "string", "description": "LLM model identifier." },
+        "username": { "$ref": "#/$defs/username" },
+        "ox_username": {
+          "$ref": "#/$defs/username",
+          "description": "Accepted as an alias for username by the reader; prefer username when writing."
+        },
+        "repo_id": { "type": "string", "description": "SageOx repo id, for provenance." },
+        "ox_version": { "type": "string", "description": "Version of ox that created the session." }
+      }
+    },
+
+    "username": {
+      "type": "string",
+      "description": "Privacy-safe display name, resolved via identity.AttributionDisplayName. NOT an email address and NOT a contactable identifier — do not treat it as one.",
+      "$comment": "PII boundary: raw.jsonl is committed to a ledger repo. Writers MUST NOT put an email address here."
+    },
+
+    "footer": {
+      "title": "Footer line",
+      "description": "Written at session close. Absent from imported and in-progress sessions.",
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "footer" },
+        "closed_at": { "$ref": "#/$defs/rfc3339" },
+        "entry_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Entries written, excluding header and footer. Not emitted by every writer; readers MUST tolerate its absence."
+        }
+      }
+    },
+
+    "entry": {
+      "title": "Entry line",
+      "description": "One conversation turn or tool invocation. `type` carries an OPEN vocabulary — values observed in the wild include user, assistant, system, tool, message, tool_call, tool_result. Readers MUST tolerate an unrecognized type by preserving the line rather than failing.",
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "not": { "enum": ["header", "footer"] },
+          "description": "Entry kind. Open vocabulary; see this subschema's description for observed values."
+        },
+        "content": { "type": "string", "description": "Message text or tool output." },
+        "timestamp": {
+          "$ref": "#/$defs/rfc3339",
+          "description": "When the entry was recorded. Injected by WriteRaw if the caller omits it."
+        },
+        "ts": {
+          "$ref": "#/$defs/rfc3339",
+          "description": "Import-dialect alias for timestamp. Prefer timestamp when writing."
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Ordering hint within the file. ox writes zero-based; the import dialect is one-based. Ordering only — never an identity."
+        },
+        "eid": {
+          "type": "string",
+          "pattern": "^[0-9A-Za-z]{5}$",
+          "description": "Entry identifier, 5 chars from [0-9A-Za-z]. Injected by WriteRaw. Absent on sessions recorded before eid existed and on the import dialect."
+        },
+        "tool_name": { "type": "string", "description": "Tool invoked. The import dialect uses `tool` for the same thing." },
+        "tool": { "type": "string", "description": "Import-dialect alias for tool_name. Prefer tool_name when writing." },
+        "tool_input": {
+          "type": ["string", "object"],
+          "description": "Tool arguments. ox writes a string (often itself JSON); the import dialect writes a decoded object. Readers MUST handle both — checking only for a string silently drops every imported tool call's arguments."
+        },
+        "tool_output": {
+          "type": ["string", "object"],
+          "description": "Tool result. Same string-or-object split as tool_input."
+        },
+        "coworker_name": { "type": "string", "description": "Coworker/subagent name, when the entry is attributable to one." },
+        "coworker_model": { "type": "string", "description": "Coworker model tier." },
+        "data": {
+          "type": "object",
+          "description": "Nested payload written by SessionWriter.WriteEntry (as opposed to the flat WriteRaw shape). Typically carries role and content."
+        }
+      }
+    }
+  }
+}

@@ -91,6 +91,7 @@ The following components are licensed under the Apache License, Version 2.0:
 - github.com/opencontainers/go-digest - Copyright (c) Open Container Initiative
 - github.com/opencontainers/image-spec - Copyright (c) Open Container Initiative
 - github.com/pjbgf/sha1cd - Copyright (c) Paulo Gomes
+- github.com/santhosh-tekuri/jsonschema - Copyright (c) Santhosh Kumar Tekuri
 - github.com/spf13/cobra - Copyright (c) Steve Francia
 - go.opentelemetry.io/auto/sdk - Copyright (c) OpenTelemetry Authors
 - go.opentelemetry.io/contrib - Copyright (c) OpenTelemetry Authors
