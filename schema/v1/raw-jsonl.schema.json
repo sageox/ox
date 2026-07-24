@@ -59,6 +59,8 @@
       "title": "Session header metadata",
       "description": "Mirrors session.StoreMeta. Field set is open: readers MUST preserve unknown keys.",
       "type": "object",
+      "required": ["version", "created_at"],
+      "$comment": "Only these two are required, because only these two lack `omitempty` on the Go struct and are therefore always serialized by the native writer. agent_id and agent_type carry omitempty and are genuinely optional, notwithstanding what the prose spec claimed before this schema existed.",
       "properties": {
         "version": {
           "type": "string",

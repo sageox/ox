@@ -60,8 +60,8 @@ The header identifies the session and provides provenance metadata.
 |-------|------|----------|-------------|
 | `version` | string | yes | Schema version. Currently `"1.0"` |
 | `created_at` | ISO8601 | yes | When the session file was created |
-| `agent_id` | string | yes | Short agent ID (e.g., `"Ox7f3a"`) |
-| `agent_type` | string | yes | Agent identifier (e.g., `"claude-code"`) |
+| `agent_id` | string | no | Short agent ID (e.g., `"Ox7f3a"`). Carries `omitempty` — absent when unset |
+| `agent_type` | string | no | Agent identifier (e.g., `"claude-code"`). Carries `omitempty` — absent when unset |
 | `agent_version` | string | no | Version of the coding agent (e.g., `"1.0.3"`) |
 | `model` | string | no | LLM model used (e.g., `"claude-sonnet-4-20250514"`) |
 | `username` | string | no | Privacy-safe display name, via `identity.AttributionDisplayName()`. **NOT an email** — `raw.jsonl` is committed to a ledger repo, so writers must never put a contactable address here. Also accepted on read as `ox_username`. |
@@ -106,15 +106,20 @@ Each entry represents a conversation turn or tool invocation. Entries are writte
 |-------|------|----------|-------------|
 | `type` | string | yes | Entry type. **Open vocabulary** — see below |
 | `content` | string | no | Message text or tool output. Absent on some tool entries, which carry everything in `tool_*` |
-| `timestamp` | ISO8601 | yes | When the entry was recorded (auto-added if missing). Import dialect uses **`ts`** |
-| `seq` | integer | yes | Sequence number (auto-added if missing). ox writes **zero-based**; the import dialect is **one-based**. Ordering only, never an identity |
-| `eid` | string | yes | Unique 5-char alphanumeric entry identifier (auto-generated if missing) |
+| `timestamp` | ISO8601 | no | When the entry was recorded. Auto-added by `WriteRaw()`/`WriteEntry()` when absent; the import dialect uses **`ts`** instead |
+| `seq` | integer | no | Sequence number. Auto-added when absent. ox writes **zero-based**; the import dialect is **one-based**. Ordering only, never an identity |
+| `eid` | string | no | Unique 5-char alphanumeric entry identifier. Auto-generated when absent; missing entirely on pre-`eid` sessions and on the import dialect |
 | `tool_name` | string | no | Tool name (only for `tool` entries). Import dialect uses **`tool`** |
 | `tool_input` | string **or object** | no | Tool input. ox writes a string (often itself JSON); the import dialect writes a decoded object. A reader that checks only for a string silently drops every imported tool call's arguments |
 | `tool_output` | string **or object** | no | Tool output. Same string-or-object split as `tool_input` |
 | `coworker_name` | string | no | Coworker/subagent name if applicable |
 | `coworker_model` | string | no | Coworker model tier (sonnet, opus, haiku) |
 | `data` | object | no | Nested payload written by `WriteEntry()` (as opposed to the flat `WriteRaw()` shape). Typically carries `role` and `content` |
+
+**`type` is the only field an entry is guaranteed to have.** Everything else is
+optional, aliased, or auto-injected — so a reader must not assume presence. Only
+`version` and `created_at` are guaranteed in a native header's `metadata`; they
+are the two fields on `StoreMeta` without `omitempty`.
 
 **Entry ID (`eid`):** Each entry gets a unique 5-character identifier from `[0-9A-Za-z]` (62^5 ≈ 916M possibilities). Generated automatically by `WriteRaw()` if not provided by the caller. Provides stable references for deduplication, cross-referencing from derived artifacts, and audit trails. Sessions recorded before this field was added will have entries without `eid` — readers should tolerate missing values.
 

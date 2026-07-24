@@ -194,6 +194,11 @@ func TestRawJSONLSchema_RejectsMalformedLines(t *testing.T) {
 		{"negative seq", `{"type":"user","content":"hi","seq":-1}`},
 		{"timestamp not RFC3339", `{"type":"user","content":"hi","timestamp":"last tuesday"}`},
 		{"footer entry_count not an integer", `{"type":"footer","entry_count":"42"}`},
+		// version and created_at are the only StoreMeta fields without
+		// omitempty, so the native writer always emits them; a header missing
+		// them is truncated or hand-rolled, not merely sparse.
+		{"native header with empty metadata", `{"type":"header","metadata":{}}`},
+		{"native header missing created_at", `{"type":"header","metadata":{"version":"1.0"}}`},
 		// The dialect-overload guard: in a NATIVE header, session_id is the
 		// ses_ recording identity. The import dialect overloads the same key
 		// as an agent identifier, and conflating them misattributes a session
