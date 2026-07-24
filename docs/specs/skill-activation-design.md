@@ -56,7 +56,7 @@ A skill body may be thick **only when ALL of the following hold**:
 
 Two skills are the sanctioned thick examples:
 
-- `extensions/claude/skills/ox-plan/SKILL.md` — carries the **HTML rendering spec** for the enriched plan (how to draw it), which is not command guidance.
+- `extensions/claude/skills/ox-plan/SKILL.md` — carries the **judgment-badge authoring flow**: reasoning the `ox plan enrich` context bundle into cited, section-anchored badges, plus authoring the plan markdown the renderer draws. (The HTML itself is produced by `ox plan render` in the binary — that part is NOT skill content; the skill must not hand-author HTML.)
 - `extensions/claude/skills/ox-session-review/SKILL.md` — carries the **audit + regeneration flow**, which is not backed by a single ox subcommand.
 
 Everything else is thin. If you are unsure whether content clears the gate, it does not: route it to Layer 1.
