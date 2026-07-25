@@ -135,6 +135,10 @@ type Meta struct {
 
 	// Status is the plan's lifecycle. Missing == "draft" for legacy plans.
 	Status PlanStatus `json:"status,omitempty"`
+	// Companions lists the basenames of rich HTML companion artifacts stored
+	// under the plan dir's companions/ subdir (see companion.go). Rendered as
+	// prominent links on the plan page and served by `ox plan review`.
+	Companions []string `json:"companions,omitempty"`
 	// Provenance links the plan to its producing session/agent/repo (forward).
 	Provenance *Provenance `json:"provenance,omitempty"`
 	// Collaboration holds the deterministic collaboration-effort counts.
@@ -267,6 +271,12 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 				}
 				if !existing.CreatedAt.IsZero() {
 					merged.CreatedAt = existing.CreatedAt
+				}
+				// Companions are recorded by the render path after Save (see
+				// RecordCompanions); a re-save that doesn't carry them must not
+				// wipe the already-bundled list.
+				if len(merged.Companions) == 0 {
+					merged.Companions = existing.Companions
 				}
 				// SessionID and SessionOutcome are system-managed (backfilled /
 				// reconciled at stop), never set by a save-time caller — preserve

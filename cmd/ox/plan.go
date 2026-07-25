@@ -573,7 +573,16 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact
 	gitRoot := findGitRoot()
 	result := plan.Enrich(context.Background(), in, gitRoot)
 
-	htmlBytes, err := plan.RenderHTMLOpts(in, result, plan.RenderOptions{Slug: plan.Slugify(planTopic(in)), PriorArtURL: priorArtURLResolver(gitRoot), Artifact: artifact, SessionURL: liveSessionConversationURL(gitRoot)})
+	// Companion artifacts: explicit --companion flags plus relative .html links
+	// in the plan markdown (a hand-crafted interactive page linked from the plan
+	// travels WITH it instead of dying as a broken relative href in a temp file).
+	companions := gatherCompanions(cmd, in)
+	var companionNames []string
+	for _, c := range companions {
+		companionNames = append(companionNames, c.Name)
+	}
+
+	htmlBytes, err := plan.RenderHTMLOpts(in, result, plan.RenderOptions{Slug: plan.Slugify(planTopic(in)), PriorArtURL: priorArtURLResolver(gitRoot), Artifact: artifact, SessionURL: liveSessionConversationURL(gitRoot), Companions: plan.CompanionRefs(companionNames)})
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}
@@ -591,21 +600,67 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact
 	}
 	// Artifact mode is a pure export target — leave the ledger's canonical
 	// (review-capable) render untouched, and check the page is CSP-clean.
+	// Companions are dropped too: an artifact is one self-contained page.
 	savedDir := ""
 	if artifact {
+		companions = nil
 		for _, f := range plan.LintArtifact(htmlBytes) {
 			cli.PrintHint(fmt.Sprintf("plan-artifact [%s]: %s", f.Rule, f.Message))
 		}
 	} else if gitRoot != "" && config.PlanSave(gitRoot) {
 		// Persist into the ledger when capture is on, so the render is re-openable.
 		savedDir = savePlanWithProvenance(gitRoot, in, result, htmlBytes)
+		// Bundle companions into the saved plan dir + meta so the plan CARRIES
+		// its interactive deep-dives (re-opens, review loop, teammate clones).
+		if savedDir != "" && len(companions) > 0 {
+			if names, cerr := plan.CopyCompanions(companions, savedDir); cerr != nil {
+				cli.PrintHint("could not bundle companion(s): " + cerr.Error())
+			} else if rerr := plan.RecordCompanions(savedDir, names); rerr != nil {
+				cli.PrintHint("could not record companion(s) in plan meta: " + rerr.Error())
+			}
+		}
 	}
 	name := "plan"
 	if in.Path != "" {
 		name = strings.TrimSuffix(filepath.Base(in.Path), filepath.Ext(in.Path))
 	}
-	emitRenderedHTML(cmd, htmlBytes, savedDir, outPath, open, name)
+	emitRenderedHTML(cmd, htmlBytes, savedDir, outPath, open, name, companions)
 	return nil
+}
+
+// gatherCompanions resolves the companion HTML artifacts for a fresh render:
+// explicit --companion flags first, then relative .html links auto-detected in
+// the plan markdown (resolved against the plan file's directory — a stdin plan
+// has no directory, so only explicit flags apply there). Deduped by stored
+// basename, flag order preserved.
+func gatherCompanions(cmd *cobra.Command, in plan.Input) []plan.CompanionFile {
+	explicit, _ := cmd.Flags().GetStringSlice("companion")
+	var srcs []string
+	for _, p := range explicit {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			continue
+		}
+		if info, serr := os.Stat(abs); serr != nil || info.IsDir() {
+			cli.PrintHint("companion not found (skipped): " + p)
+			continue
+		}
+		srcs = append(srcs, abs)
+	}
+	if in.Path != "" {
+		srcs = append(srcs, plan.DetectCompanionLinks(in.Raw, filepath.Dir(in.Path))...)
+	}
+	seen := make(map[string]struct{}, len(srcs))
+	var out []plan.CompanionFile
+	for _, s := range srcs {
+		name := plan.CompanionName(s)
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, plan.CompanionFile{Name: name, SrcPath: s})
+	}
+	return out
 }
 
 // runPlanRenderSaved renders a plan already in the ledger (with its review
@@ -618,34 +673,75 @@ func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open, artifact
 	}
 	in := plan.Parse(planMD)
 	review, _ := plan.AssembleReview(info.Dir)
-	htmlBytes, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: review, PriorArtURL: priorArtURLResolver(gitRoot), Artifact: artifact})
+	companions := savedCompanionFiles(info.Dir)
+	var companionNames []string
+	for _, c := range companions {
+		companionNames = append(companionNames, c.Name)
+	}
+	htmlBytes, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: review, PriorArtURL: priorArtURLResolver(gitRoot), Artifact: artifact, Companions: plan.CompanionRefs(companionNames)})
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}
 	// Artifact mode is a pure export of the CSP-safe bytes — never open the
 	// ledger's canonical (non-artifact) plan.html in its place, so pass no
 	// savedDir and let emitRenderedHTML serve the artifact bytes directly.
+	// Companions are dropped too: an artifact is one self-contained page.
 	savedDir := info.Dir
 	if artifact {
 		savedDir = ""
+		companions = nil
 		for _, f := range plan.LintArtifact(htmlBytes) {
 			cli.PrintHint(fmt.Sprintf("plan-artifact [%s]: %s", f.Rule, f.Message))
 		}
 	}
-	emitRenderedHTML(cmd, htmlBytes, savedDir, outPath, open, slug)
+	emitRenderedHTML(cmd, htmlBytes, savedDir, outPath, open, slug, companions)
 	return nil
+}
+
+// savedCompanionFiles lists a saved plan's bundled companions (meta.json
+// Companions ∩ files actually present under companions/) as copyable refs.
+func savedCompanionFiles(planDir string) []plan.CompanionFile {
+	meta, err := plan.LoadMeta(planDir)
+	if err != nil {
+		return nil
+	}
+	var out []plan.CompanionFile
+	for _, n := range meta.Companions {
+		if n == "" || n != filepath.Base(n) {
+			continue
+		}
+		p := filepath.Join(planDir, plan.CompanionsDir, n)
+		if info, serr := os.Stat(p); serr != nil || info.IsDir() {
+			continue
+		}
+		out = append(out, plan.CompanionFile{Name: n, SrcPath: p})
+	}
+	return out
 }
 
 // emitRenderedHTML writes the render to outPath (when set) and opens it (when
 // open). For opening it prefers a plain-file ledger render, else the explicit
 // path, else a temp file backed by htmlBytes — so --open always has real HTML to
 // show even when the saved ledger copy is an LFS pointer. Headless prints the
-// path instead of opening.
-func emitRenderedHTML(cmd *cobra.Command, htmlBytes []byte, savedDir, outPath string, open bool, name string) {
+// path instead of opening. companions are placed in a companions/ subdir next
+// to every emitted copy so the page's relative "companions/<name>" card links
+// resolve wherever the page lands (the card, not the plan's own inline link,
+// is the sanctioned surface — a bare-basename prose link still needs the
+// original file beside the page).
+func emitRenderedHTML(cmd *cobra.Command, htmlBytes []byte, savedDir, outPath string, open bool, name string, companions []plan.CompanionFile) {
+	placeCompanions := func(dir string) {
+		if len(companions) == 0 || dir == "" {
+			return
+		}
+		if _, cerr := plan.CopyCompanions(companions, dir); cerr != nil {
+			cli.PrintHint("could not place companion(s) next to the render: " + cerr.Error())
+		}
+	}
 	if outPath != "" {
 		if werr := os.WriteFile(outPath, htmlBytes, 0o644); werr != nil {
 			cli.PrintHint("Could not write render to " + outPath + ": " + werr.Error())
 		} else {
+			placeCompanions(filepath.Dir(outPath))
 			fmt.Fprintf(cmd.OutOrStdout(), "Rendered HTML: %s\n", outPath)
 		}
 	}
@@ -670,6 +766,7 @@ func emitRenderedHTML(cmd *cobra.Command, htmlBytes []byte, savedDir, outPath st
 			cli.PrintHint("Could not write render: " + werr.Error())
 			return
 		}
+		placeCompanions(filepath.Dir(target))
 	}
 	if cli.IsHeadless() {
 		fmt.Fprintf(cmd.OutOrStdout(), "Rendered HTML: %s\n", target)
@@ -951,6 +1048,7 @@ func init() {
 	planRenderCmd.Flags().Bool("open", false, "open the rendered HTML in your browser")
 	planRenderCmd.Flags().Bool("static", false, "with --open on a saved plan, open a read-only static page instead of launching the live review loop")
 	planRenderCmd.Flags().Bool("artifact", false, "render a strictly self-contained, CSP-safe page for publishing as a Claude Code Artifact (no external fonts/scripts, no review loop; enrichment links preserved)")
+	planRenderCmd.Flags().StringSlice("companion", nil, "bundle a rich self-contained HTML companion with the plan (repeatable; relative .html links in the plan markdown are auto-detected)")
 
 	planListCmd.Flags().Bool("json", false, "emit the plan list as JSON (scripting path)")
 

@@ -43,6 +43,53 @@ func reviewPOST(t *testing.T, url, token, body string) int {
 	return resp.StatusCode
 }
 
+// TestReviewLoop_ServesAllowlistedCompanions verifies the /companions/ route:
+// a companion listed in meta.json is served byte-for-byte, while an unlisted
+// file in the same subdir and any non-basename path 404 — the allowlist is
+// meta.Companions, never a directory listing. Failure prevented: the review
+// loop rendering a companion card whose link dead-ends, or the route serving
+// arbitrary plan-dir files.
+func TestReviewLoop_ServesAllowlistedCompanions(t *testing.T) {
+	planDir := t.TempDir()
+	compDir := filepath.Join(planDir, plan.CompanionsDir)
+	if err := os.MkdirAll(compDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(compDir, "deep-dive.html"), []byte("<html>rich</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(compDir, "unlisted.html"), []byte("<html>no</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// meta.json allowlists only deep-dive.html
+	if err := os.WriteFile(filepath.Join(planDir, "meta.json"),
+		[]byte(`{"topic":"t","slug":"p","companions":["deep-dive.html"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, _, _ := newTestReviewServer(t, planDir)
+
+	get := func(path string) (int, string) {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(resp.Body)
+		return resp.StatusCode, buf.String()
+	}
+
+	if code, body := get("/companions/deep-dive.html"); code != http.StatusOK || body != "<html>rich</html>" {
+		t.Errorf("allowlisted companion: code=%d body=%q", code, body)
+	}
+	for _, path := range []string{"/companions/unlisted.html", "/companions/", "/companions/../meta.json"} {
+		if code, _ := get(path); code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", path, code)
+		}
+	}
+}
+
 // TestReviewLoop_FeedbackEndpointTokenGated verifies a round POST is token-gated,
 // persisted, and signaled. Failure prevented: any local process posting feedback,
 // or a submit lost instead of reaching the agent.

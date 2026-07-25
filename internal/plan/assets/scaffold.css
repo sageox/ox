@@ -1,17 +1,18 @@
 /* ox plan — portable HTML scaffold. Generic, agent-agnostic, self-contained.
-   Palette + layout mirror the SageOx design register (Apple x Linear x Tufte).
+   Palette + layout mirror the SageOx design register (Apple x Linear x Tufte):
+   dark-first green-black (#0b0d0b canvas / #111411 surface / #99c693 accent).
    Inline plan-authored HTML (device mockups, etc.) passes through unchanged. */
 :root{
-  --bg:#0f1416; --panel:#151b1e; --panel2:#1b2327; --hair:#2a3439; --hair2:#222c30;
-  --ink:#e6edf0; --dim:#9fb0b6; --faint:#71868d;
-  --sage:#7a8f78; --sage-bright:#aebca7; --copper:#e0a56a; --amber:#f59e0b; --red:#ef4444; --teal:#14b8a6;
+  --bg:#0b0d0b; --panel:#111411; --panel2:#171b17; --hair:#252c24; --hair2:#1b211a;
+  --ink:#e8ede7; --dim:#a8b3a5; --faint:#6f7a6d;
+  --sage:#99c693; --sage-bright:#b7d4b2; --sage-deep:#4e7d4c; --copper:#e0a56a; --amber:#f59e0b; --red:#ef4444; --teal:#14b8a6;
   --slate:#64748b; --violet:#a78bfa;
-  --grad-a:#17211f; --grad-b:#141a1d; --shadow:0 1px 0 rgba(255,255,255,.02),0 8px 30px rgba(0,0,0,.35);
+  --grad-a:#131813; --grad-b:#101410; --shadow:0 1px 0 rgba(255,255,255,.02),0 8px 30px rgba(0,0,0,.35);
 }
 html[data-theme="light"]{
   --bg:#eef2ee; --panel:#fff; --panel2:#f5f8f4; --hair:#d8e0d8; --hair2:#e4ebe3;
   --ink:#16201c; --dim:#3f4d46; --faint:#566159;
-  --sage:#56745a; --sage-bright:#3f5a43; --copper:#a8613b; --amber:#b4730c; --red:#c1352f; --teal:#0c6b62;
+  --sage:#56745a; --sage-bright:#3f5a43; --sage-deep:#3f5a43; --copper:#a8613b; --amber:#b4730c; --red:#c1352f; --teal:#0c6b62;
   --slate:#5a6675; --violet:#7c5fd6;
   --grad-a:#e7efe7; --grad-b:#f3f7f2; --shadow:0 1px 0 rgba(0,0,0,.02),0 8px 26px rgba(40,60,45,.10);
 }
@@ -22,39 +23,39 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,system-ui,
 /* bottom padding reserves the bottom-left corner for the fixed .rev-bar action
    bar so it never masks the SageOx credit (.toc-brand) tucked above it */
 nav.toc{position:sticky;top:0;height:100vh;padding:26px 14px 62px 22px;border-right:1px solid var(--hair2);display:flex;flex-direction:column}
-nav.toc .brand{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.14em;color:var(--faint);text-transform:uppercase;margin-bottom:16px;flex:0 0 auto}
+nav.toc .brand{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px;letter-spacing:.14em;color:var(--faint);text-transform:uppercase;margin-bottom:16px;flex:0 0 auto}
 nav.toc .toc-links{flex:1 1 auto;overflow-y:auto;min-height:0}
 /* subtle SageOx wordmark badge, tucked into the bottom-left corner of the nav */
 .toc-brand{flex:0 0 auto;margin-top:14px;padding:10px 8px 2px;display:flex;flex-direction:column;gap:3px;opacity:.4;transition:opacity .15s}
 .toc-brand:hover{opacity:.75}
 .toc-brand .wm{display:block;line-height:0}
 .toc-brand svg{width:44px;height:auto;display:block}
-.toc-brand-cap{font-family:"JetBrains Mono",monospace;font-size:7.5px;letter-spacing:.05em;color:var(--faint)}
+.toc-brand-cap{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:7.5px;letter-spacing:.05em;color:var(--faint)}
 .toc-brand .wm-l{display:none}
 html[data-theme="light"] .toc-brand .wm-d{display:none}
 html[data-theme="light"] .toc-brand .wm-l{display:block}
-nav.toc a{display:block;font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--dim);text-decoration:none;padding:5px 8px;border-left:2px solid transparent;line-height:1.4}
+nav.toc a{display:block;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11.5px;color:var(--dim);text-decoration:none;padding:5px 8px;border-left:2px solid transparent;line-height:1.4}
 nav.toc a .n{color:var(--faint);margin-right:7px}
 nav.toc a:hover{color:var(--ink)}
 nav.toc a.active{color:var(--ink);border-left-color:var(--sage)}
 main{padding:40px 46px 120px;min-width:0}
 /* hold prose to a readable measure (~72-80ch); let wide visuals opt out */
 main>section,main>.tldr,main>.ox-enrich,main>.rev-status,main>.eyebrow,main>h1,main>.foot{max-width:780px}
-main>section .mermaid,main>section .swim,main>section .statrow,main>section .barc,main>section table.heat,main>section .multiples,main>section .pbar-fig,main>section .pmapv,main>section .linec,main>section .device-row-wrap{max-width:none}
-.eyebrow{font-family:"JetBrains Mono",monospace;font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--copper)}
+main>section .mermaid,main>section .swim,main>section .statrow,main>section .barc,main>section table.heat,main>section .multiples,main>section .pbar-fig,main>section .pmapv,main>section .linec,main>section .device-row-wrap,main>section .compare,main>section .interactive-block{max-width:none}
+.eyebrow{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--copper)}
 h1{font-family:"Space Grotesk",sans-serif;font-weight:700;font-size:40px;line-height:1.1;letter-spacing:-.035em;margin:.2em 0 .35em}
 h2{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:23px;letter-spacing:-.02em;margin:2.2em 0 .2em;padding-bottom:.3em;border-bottom:1px solid var(--hair)}
-h3{font-family:"JetBrains Mono",monospace;font-weight:500;font-size:12.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--copper);margin:1.7em 0 .5em}
+h3{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-weight:500;font-size:12.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--copper);margin:1.7em 0 .5em}
 p{margin:.7em 0}
 a{color:var(--teal)}
 strong{color:var(--ink);font-weight:600}
-code{font-family:"JetBrains Mono",monospace;font-size:.86em;background:var(--panel2);border:1px solid var(--hair2);border-radius:4px;padding:.06em .36em;color:var(--sage-bright)}
+code{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:.86em;background:var(--panel2);border:1px solid var(--hair2);border-radius:4px;padding:.06em .36em;color:var(--sage-bright)}
 pre{background:var(--panel);border:1px solid var(--hair);border-radius:8px;padding:12px 14px;overflow-x:auto}
 pre code{background:none;border:none;padding:0;color:var(--ink)}
 blockquote{border-left:3px solid var(--hair);margin:1em 0;padding:.2em 0 .2em 14px;color:var(--dim)}
 table{width:100%;border-collapse:collapse;margin:.9em 0;font-size:13.5px}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--hair2);vertical-align:top}
-th{font-family:"JetBrains Mono",monospace;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-weight:500}
+th{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-weight:500}
 ul,ol{margin:.5em 0;padding-left:1.2em}li{margin:.25em 0}
 .mermaid{margin:14px 0;background:var(--panel);border:1px solid var(--hair);border-radius:10px;padding:14px;overflow-x:auto}
 .mermaid svg{max-width:100%!important;max-height:78vh!important;height:auto!important;width:auto!important}
@@ -73,12 +74,12 @@ html[data-theme="light"] .ico-l{display:inline}
 .ox-annot-mark{width:.86em;height:.86em;vertical-align:-.13em;margin-left:1px;opacity:.85}
 .ox-enrich ul{margin:.4em 0 0;padding-left:1.1em;font-size:14px}
 .ox-enrich li{margin:.28em 0}
-.ox-enrich .src{color:var(--teal);font-family:"JetBrains Mono",monospace;font-size:.82em}
+.ox-enrich .src{color:var(--teal);font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:.82em}
 /* prior-art links: the crisp "person · date · summary" label is a subtle link
    (underline only on hover); the trailing "view ↗" is the explicit click-through */
 .src-link{color:inherit;text-decoration:none;border-bottom:1px dotted var(--faint)}
 .src-link:hover{color:var(--teal);border-bottom-color:var(--teal)}
-.src-go{color:var(--faint);text-decoration:none;font-family:"JetBrains Mono",monospace;font-size:.78em;white-space:nowrap}
+.src-go{color:var(--faint);text-decoration:none;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:.78em;white-space:nowrap}
 .src-go:hover{color:var(--teal)}
 /* Fixed semantic color map (one meaning per hue; never color alone — pair with a
    text label or shape glyph): sage=good/aligns · copper=expert · amber=collision/
@@ -89,7 +90,7 @@ html[data-theme="light"] .ico-l{display:inline}
 .ox-sig-expert-routing{color:var(--copper)}
 /* TL;DR hero callout — the decision-first lede */
 .tldr{position:relative;background:linear-gradient(135deg,var(--grad-a),var(--grad-b));border:1px solid var(--hair);border-left:3px solid var(--copper);border-radius:10px;padding:16px 18px 16px 20px;margin:14px 0 8px;box-shadow:var(--shadow)}
-.tldr-tag{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.14em;color:var(--copper);text-transform:uppercase;margin-bottom:6px}
+.tldr-tag{display:inline-block;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.14em;color:var(--copper);text-transform:uppercase;margin-bottom:6px}
 .tldr>p:first-of-type,.tldr blockquote{margin-top:0}
 .tldr blockquote{border:none;padding:0;color:var(--ink)}
 /* Per-section anchored signal rail */
@@ -99,11 +100,41 @@ html[data-theme="light"] .ico-l{display:inline}
 .ox-chip.ox-sig-prior-art{border-left-color:var(--teal)}
 .ox-chip.ox-sig-expert-routing{border-left-color:var(--copper)}
 .ox-chip strong{color:var(--ink)}
-.ox-chip .src{color:var(--teal);font-family:"JetBrains Mono",monospace;font-size:.8em}
+.ox-chip .src{color:var(--teal);font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:.8em}
 .ox-marker.sm{width:22px;height:22px;padding:3px;border-radius:5px;flex:0 0 auto;align-self:center}
 /* Risk section — severity accent */
 section.risk{border-left:3px solid var(--amber);padding-left:16px;margin-left:-19px}
 section.risk h2{border-bottom-color:var(--amber)}
+/* Companion cards — a bundled interactive deep-dive is a first-class artifact,
+   surfaced right under the title (never a footnote). */
+.companions{display:flex;flex-wrap:wrap;gap:12px;margin:14px 0 6px;max-width:780px}
+.companion-card{flex:1 1 280px;display:flex;flex-direction:column;gap:3px;background:linear-gradient(135deg,var(--grad-a),var(--grad-b));border:1px solid var(--hair);border-left:3px solid var(--sage);border-radius:10px;padding:13px 16px;text-decoration:none;color:var(--ink);box-shadow:var(--shadow);transition:border-color .15s}
+.companion-card:hover{border-color:var(--sage)}
+.companion-tag{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--sage)}
+.companion-name{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-weight:600;font-size:14px;overflow-wrap:anywhere}
+.companion-cap{font-size:12px;color:var(--dim)}
+/* Tabbed section views (>3 H2s) — sticky top tab bar, one view at a time.
+   Hiding is gated on body.tabs-on (added by scaffold.js) so a no-JS open
+   degrades to the full single scroll. */
+.tabbar{position:sticky;top:0;z-index:40;display:flex;gap:2px;flex-wrap:wrap;margin:18px 0 6px;padding:6px 0 0;max-width:780px;background:rgba(11,13,11,.88);backdrop-filter:blur(14px);border-bottom:1px solid var(--hair2)}
+html[data-theme="light"] .tabbar{background:rgba(238,242,238,.88)}
+.tabbar button{font:inherit;font-size:12.5px;font-weight:500;color:var(--faint);background:none;border:none;border-bottom:2px solid transparent;padding:9px 13px;cursor:pointer;transition:color .13s,border-color .13s;letter-spacing:.005em}
+.tabbar button:hover{color:var(--dim)}
+.tabbar button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--sage)}
+.tabbar button .n{color:var(--faint);font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10.5px;margin-right:6px}
+body.tabs-on main>section[id^="sec-"]{display:none}
+body.tabs-on main>section[id^="sec-"].on{display:block;animation:view-fade .22s ease}
+body.tabs-on main>section.on h2{margin-top:.6em}
+@keyframes view-fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){body.tabs-on main>section[id^="sec-"].on{animation:none}}
+/* Comparison panes — the compare marker renders adjacent blocks side by side */
+.compare{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin:14px 0}
+.compare-pane{background:var(--panel);border:1px solid var(--hair2);border-top:2px solid var(--sage-deep);border-radius:10px;padding:4px 14px 10px;min-width:0;overflow-x:auto}
+.compare-pane>h3:first-child{margin-top:.8em}
+.compare-pane table{margin:.5em 0}
+/* Plan-authored interactivity (```html-interactive fences) */
+.interactive-block{margin:14px 0}
+.interactive-omitted{background:var(--panel2);border:1px dashed var(--hair);border-radius:8px;padding:10px 14px;margin:14px 0;font-size:13px;color:var(--faint);font-style:italic}
 /* Verdict table cells */
 td.v-good{color:var(--sage-bright);font-weight:600}
 td.v-warn{color:var(--amber);font-weight:600}
@@ -112,7 +143,7 @@ td.v-bad{color:var(--red);font-weight:600}
 /* swimlane timeline */
 .swim{display:flex;flex-direction:column;gap:6px;margin:14px 0}
 .swim .lane{display:grid;grid-template-columns:120px 1fr;align-items:center;gap:10px}
-.swim .lane-name{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);text-align:right}
+.swim .lane-name{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px;color:var(--dim);text-align:right}
 .swim .track{position:relative;height:26px;background:var(--panel);border:1px solid var(--hair2);border-radius:6px;background-image:repeating-linear-gradient(90deg,transparent 0,transparent 9.9%,var(--hair2) 10%,var(--hair2) 10.1%)}
 .swim .lane:hover .track{border-color:var(--hair)}
 .swim .bar{position:absolute;top:3px;height:20px;border-radius:4px;font-size:10.5px;font-weight:600;color:#0c1112;display:flex;align-items:center;padding:0 7px;white-space:nowrap;overflow:hidden;transition:filter .14s}
@@ -121,17 +152,17 @@ td.v-bad{color:var(--red);font-weight:600}
 .swim .mark{position:absolute;top:0;line-height:24px;font-size:13px;transform:translateX(-50%);white-space:nowrap}
 .swim .anno{position:absolute;top:3px;line-height:18px;font-size:10px;color:var(--dim);white-space:nowrap}
 .swim .axis .track{height:auto;background:none;border:none;background-image:none}
-.swim .axis .tick{position:absolute;top:0;transform:translateX(-50%);font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--dim);white-space:nowrap}
+.swim .axis .tick{position:absolute;top:0;transform:translateX(-50%);font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10px;color:var(--dim);white-space:nowrap}
 /* sparkline + small multiples */
 .spark{display:inline-block;width:80px;height:18px;vertical-align:middle}
 .multiples{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:12px;margin:14px 0}
 .multiples figure{margin:0;background:var(--panel);border:1px solid var(--hair2);border-radius:8px;padding:8px 10px}
-.multiples figcaption{font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--dim);margin-bottom:4px}
+.multiples figcaption{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10.5px;color:var(--dim);margin-bottom:4px}
 .multiples .spark{width:100%}
 /* before / after */
 .ba{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
 .ba-col{background:var(--panel);border:1px solid var(--hair2);border-radius:8px;padding:10px 12px}
-.ba-col h4{margin:.1em 0 .5em;font-family:"JetBrains Mono",monospace;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint)}
+.ba-col h4{margin:.1em 0 .5em;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint)}
 /* heatmap table — shading encodes magnitude */
 table.heat td.h1{background:rgba(122,143,120,.14)}
 table.heat td.h2{background:rgba(224,165,106,.18)}
@@ -162,7 +193,7 @@ html[data-theme="light"] ul.ftree .chg{border:1px solid var(--hair)}
 .device.ios .device-screen::before{content:"";position:absolute;top:13px;left:50%;transform:translateX(-50%);width:92px;height:26px;background:#05080a;border-radius:14px}
 .device.ios .device-screen::after{content:"";position:absolute;bottom:9px;left:50%;transform:translateX(-50%);width:118px;height:4px;background:#3a464c;border-radius:3px}
 /* status bar (time left · signal/battery right) */
-.device-statusbar{display:flex;justify-content:space-between;align-items:center;font-family:"JetBrains Mono",monospace;font-size:11px;color:#cfd9dd;margin:-6px 0 12px}
+.device-statusbar{display:flex;justify-content:space-between;align-items:center;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px;color:#cfd9dd;margin:-6px 0 12px}
 .device-statusbar .sb-r{letter-spacing:.06em}
 /* app title bar (back chevron / title / trailing action) */
 .device-titlebar{display:flex;align-items:center;gap:8px;font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:15px;color:#e6edf0;padding-bottom:10px;margin-bottom:10px;border-bottom:1px solid #222c30}
@@ -180,21 +211,21 @@ html[data-theme="light"] ul.ftree .chg{border:1px solid var(--hair)}
 /* generic list row inside a screen */
 .device-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid #222c30;font-size:13px}
 .device-row .dr-ic{width:30px;height:30px;border-radius:8px;background:#263035;display:flex;align-items:center;justify-content:center;font-size:15px;flex:none}
-.device-row .dr-sub{display:block;color:#9fb0b6;font-size:11px;font-family:"JetBrains Mono",monospace}
+.device-row .dr-sub{display:block;color:#9fb0b6;font-size:11px;font-family:"Spline Sans Mono","JetBrains Mono",monospace}
 /* bar chart / cost waterfall */
 .barc{margin:14px 0}
-.barc figcaption{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);margin-bottom:8px}
+.barc figcaption{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px;color:var(--dim);margin-bottom:8px}
 .bar-row{display:grid;grid-template-columns:140px 1fr 72px;align-items:center;gap:10px;margin:5px 0}
 .bar-row .bl{font-size:12.5px;color:var(--dim);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bar-row .bt{background:var(--panel);border:1px solid var(--hair2);border-radius:5px;height:18px;overflow:hidden}
 .bar-row .bf{display:block;height:100%;border-radius:5px 0 0 5px}
-.bar-row .bv{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--ink)}
+.bar-row .bv{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:12px;color:var(--ink)}
 /* stat cards */
 .statrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:14px 0}
 .stat{background:var(--panel);border:1px solid var(--hair2);border-left:3px solid var(--hair);border-radius:9px;padding:12px 14px}
 .stat .sv{font-family:"Space Grotesk",sans-serif;font-size:26px;font-weight:600;line-height:1}
 .stat .sl{font-size:12px;color:var(--dim);margin-top:4px}
-.stat .sd{font-family:"JetBrains Mono",monospace;font-size:11.5px;margin-top:6px}
+.stat .sd{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11.5px;margin-top:6px}
 .stat.good{border-left-color:var(--sage)}.stat.good .sd{color:var(--sage-bright)}
 .stat.bad{border-left-color:var(--red)}.stat.bad .sd{color:var(--red)}
 .stat.warn{border-left-color:var(--amber)}.stat.warn .sd{color:var(--amber)}
@@ -202,14 +233,14 @@ html[data-theme="light"] ul.ftree .chg{border:1px solid var(--hair)}
 /* file-impact tree */
 ul.ftree,ul.ftree ul{list-style:none;margin:.3em 0;padding-left:14px}
 ul.ftree{margin:14px 0;padding-left:0}
-ul.ftree .grp{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--faint)}
+ul.ftree .grp{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:12px;color:var(--faint)}
 ul.ftree li{margin:3px 0;font-size:13.5px}
-ul.ftree .chg{font-family:"JetBrains Mono",monospace;font-size:10px;text-transform:uppercase;padding:1px 5px;border-radius:4px;margin-right:6px}
+ul.ftree .chg{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10px;text-transform:uppercase;padding:1px 5px;border-radius:4px;margin-right:6px}
 ul.ftree .chg.new{background:rgba(122,143,120,.18);color:var(--sage-bright)}
 ul.ftree .chg.edit{background:rgba(224,165,106,.18);color:var(--copper)}
 ul.ftree .chg.del{background:rgba(239,68,68,.18);color:var(--red)}
 ul.ftree .chg.read{background:var(--panel2);color:var(--dim)}
-ul.ftree .sc{font-family:"JetBrains Mono",monospace;font-size:9.5px;color:var(--faint);border:1px solid var(--hair2);border-radius:3px;padding:0 4px;margin-left:4px}
+ul.ftree .sc{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:9.5px;color:var(--faint);border:1px solid var(--hair2);border-radius:3px;padding:0 4px;margin-left:4px}
 ul.ftree .fnote{color:var(--dim);font-size:12px}
 /* risk matrix */
 table.riskm td:first-child{font-weight:500;color:var(--ink)}
@@ -219,7 +250,7 @@ table.riskm tr.sev-medium td:nth-child(2){color:var(--copper)}
 table.riskm tr.sev-low td:nth-child(2){color:var(--dim)}
 table.riskm tr.sev-blocker{background:rgba(239,68,68,.06)}
 /* flag rollout matrix */
-table.flagm td:first-child{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--dim)}
+table.flagm td:first-child{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:12px;color:var(--dim)}
 .foot{margin-top:48px;padding-top:18px;border-top:1px solid var(--hair);font-size:12.5px;color:var(--dim)}
 /* live-review-loop credit: a slightly stronger nod — the loop is a unique SageOx capability */
 .foot-live{color:var(--sage);font-weight:600}
@@ -228,14 +259,14 @@ table.flagm td:first-child{font-family:"JetBrains Mono",monospace;font-size:12px
 /* --- in-document review layer (ox plan review / feedback) --- */
 /* committed review-state strip (server-rendered, JS-independent) */
 .rev-status{background:var(--panel2);border:1px solid var(--hair2);border-left:3px solid var(--copper);border-radius:9px;padding:10px 14px;margin:12px 0 6px;font-size:13.5px;color:var(--dim)}
-.rev-status-tag{font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--copper);margin-right:8px}
+.rev-status-tag{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--copper);margin-right:8px}
 .rev-status strong{color:var(--ink)}
 .rev-bar{position:fixed;left:16px;bottom:16px;z-index:60;display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--hair);border-radius:9px;padding:6px 8px;box-shadow:var(--shadow)}
-.rev-bar button{background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;font-family:"JetBrains Mono",monospace}
+.rev-bar button{background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;font-family:"Spline Sans Mono","JetBrains Mono",monospace}
 .rev-bar button:hover{color:var(--ink)}
 .rev-bar .rev-toggle.on{background:var(--sage);border-color:var(--sage);color:#0c1112}
 .rev-bar .rev-submit{border-color:var(--copper);color:var(--copper)}
-.rev-bar .rev-count{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--faint)}
+.rev-bar .rev-count{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px;color:var(--faint)}
 .rev-bar .rev-who{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--faint)}
 .rev-bar .rev-who:hover{color:var(--sage);border-color:var(--sage)}
 body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.rev-on tr:hover,body.rev-on .ox-chip:hover,body.rev-on .stat:hover,body.rev-on .bar-row:hover{outline:1px dashed var(--sage);outline-offset:2px;cursor:crosshair}
@@ -253,7 +284,7 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .rev-committed[data-revstate="wontfix"] .rev-glyph{color:var(--faint)}
 .rev-pop{position:absolute;z-index:70;width:280px;background:var(--panel);border:1px solid var(--hair);border-radius:9px;padding:10px;box-shadow:var(--shadow)}
 .rev-pop .rev-row{display:flex;flex-wrap:wrap;gap:5px;margin:4px 0}
-.rev-pop .rev-s{flex:1 1 auto;background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:5px;padding:3px 6px;font-size:10.5px;cursor:pointer;font-family:"JetBrains Mono",monospace}
+.rev-pop .rev-s{flex:1 1 auto;background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:5px;padding:3px 6px;font-size:10.5px;cursor:pointer;font-family:"Spline Sans Mono","JetBrains Mono",monospace}
 /* control color PREDICTS the resulting mark color */
 .rev-pop .rev-s[data-s="approve"].on{background:var(--sage);border-color:var(--sage);color:#0c1112}
 .rev-pop .rev-s[data-s="request-change"].on{background:var(--amber);border-color:var(--amber);color:#0c1112}
@@ -272,14 +303,14 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .rev-orphans{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:65;max-width:680px;background:var(--panel);border:1px solid var(--amber);border-left:3px solid var(--amber);border-radius:9px;padding:10px 14px;box-shadow:var(--shadow);font-size:13px;color:var(--dim)}
 .rev-orphans-h{color:var(--amber);font-weight:600;margin-bottom:4px}
 .rev-orphans ul{margin:.3em 0;padding-left:1.1em}
-.rev-orphans .rev-orphans-x{margin-top:6px;background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:5px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:"JetBrains Mono",monospace}
+.rev-orphans .rev-orphans-x{margin-top:6px;background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:5px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:"Spline Sans Mono","JetBrains Mono",monospace}
 /* first-visit discoverability bubble near the Review toggle */
 .rev-hint{position:fixed;left:96px;bottom:20px;z-index:61;background:var(--copper);color:#0c1112;border-radius:7px;padding:6px 10px;font-size:12px;font-weight:600;box-shadow:var(--shadow);animation:rev-bob 1.4s ease-in-out infinite}
 @keyframes rev-bob{0%,100%{transform:translateX(0)}50%{transform:translateX(-4px)}}
 /* review comments rail — surfaces the note TEXT (not just a margin glyph) in the
    right gutter; each row scroll-jumps to its anchored element. */
 .rev-rail{position:fixed;top:64px;right:18px;z-index:55;width:266px;max-height:calc(100vh - 100px);overflow-y:auto;background:var(--panel);border:1px solid var(--hair);border-radius:10px;padding:10px 12px;box-shadow:var(--shadow)}
-.rev-rail-h{font-family:"JetBrains Mono",monospace;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.rev-rail-h{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:8px;display:flex;align-items:center;gap:6px}
 .rev-rail-n{background:var(--panel2);border:1px solid var(--hair2);border-radius:8px;padding:0 6px;font-size:10.5px;color:var(--faint)}
 .rev-rail-empty{color:var(--faint);font-size:12px;line-height:1.5}
 .rev-rail-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
@@ -292,7 +323,7 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .rev-rail-glyph{flex:none;font-size:12px;line-height:1.4;color:var(--dim)}
 .rev-rail-body{min-width:0;flex:1}
 .rev-rail-sec{display:flex;align-items:center;gap:6px;margin-bottom:3px}
-.rev-rail-sec-t{flex:1;min-width:0;font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rev-rail-sec-t{flex:1;min-width:0;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rev-rail-who{flex:none;font-size:9px;border-radius:6px;padding:0 5px;border:1px solid var(--hair2);color:var(--sage);text-transform:none;letter-spacing:0;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rev-rail-note{font-size:12.5px;color:var(--ink);line-height:1.45;overflow-wrap:anywhere}
 .rev-rail-note.muted{color:var(--dim)}
@@ -310,19 +341,19 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
    Pure-CSS: staggered grow-in entrance, hover lift/brighten, and a hover tooltip
    carrying the detail the compact view can't fit. prefers-reduced-motion honored. */
 .pm-dot{display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:8px;vertical-align:middle;flex:none}
-.pm-flag{font-family:"JetBrains Mono",monospace;font-size:9px;font-weight:600;letter-spacing:.04em;color:var(--dim);border:1px solid var(--hair2);border-radius:4px;padding:1px 5px;margin-left:7px;vertical-align:middle}
-.pm-mono{font-family:"JetBrains Mono",monospace;font-size:12px}
+.pm-flag{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:9px;font-weight:600;letter-spacing:.04em;color:var(--dim);border:1px solid var(--hair2);border-radius:4px;padding:1px 5px;margin-left:7px;vertical-align:middle}
+.pm-mono{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:12px}
 /* shared hover tooltip */
 .pm-tip{position:absolute;z-index:30;left:50%;bottom:calc(100% + 9px);transform:translate(-50%,4px);min-width:128px;max-width:240px;background:var(--panel2);border:1px solid var(--hair);border-radius:9px;padding:8px 10px;box-shadow:var(--shadow);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .16s ease,transform .16s ease,visibility .16s;display:flex;flex-direction:column;gap:3px;text-align:left}
 .pm-tip::after{content:"";position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:var(--hair)}
 .pm-tip b{font-size:12.5px;color:var(--ink);font-weight:600}
-.pm-tip-k{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim)}
-.pm-tip-flag{align-self:flex-start;font-family:"JetBrains Mono",monospace;font-size:9px;font-weight:600;letter-spacing:.04em;color:var(--copper);border:1px solid var(--hair2);border-radius:4px;padding:1px 5px}
+.pm-tip-k{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px;color:var(--dim)}
+.pm-tip-flag{align-self:flex-start;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:9px;font-weight:600;letter-spacing:.04em;color:var(--copper);border:1px solid var(--hair2);border-radius:4px;padding:1px 5px}
 .pm-tip-flag.prop{border-style:dashed}
 .pm-tip-note{font-size:11.5px;color:var(--dim);line-height:1.4}
 /* proportional bar */
 .pbar-fig{margin:14px 0}
-.pbar-fig figcaption{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);margin-bottom:8px}
+.pbar-fig figcaption{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px;color:var(--dim);margin-bottom:8px}
 .pbar{display:flex;height:50px;border-radius:8px}
 .pbar .pseg{position:relative;display:flex;align-items:center;justify-content:center;min-width:2px;transform-origin:left center;animation:pm-grow .55s cubic-bezier(.22,.61,.36,1) backwards;animation-delay:calc(var(--i,0)*45ms);transition:filter .15s ease,transform .15s ease}
 .pbar .pseg:first-child{border-radius:8px 0 0 8px} .pbar .pseg:last-child{border-radius:0 8px 8px 0}
@@ -338,7 +369,7 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .pbar .pseg:last-child:hover .pm-tip{transform:translate(0,0)}
 .pbar .pseg:last-child .pm-tip::after{left:auto;right:20px}
 .pbar-tab{width:100%;border-collapse:collapse;margin-top:12px;font-size:13px}
-.pbar-tab th{text-align:left;font-family:"JetBrains Mono",monospace;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);font-weight:500;padding:6px 10px;border-bottom:1px solid var(--hair2)}
+.pbar-tab th{text-align:left;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);font-weight:500;padding:6px 10px;border-bottom:1px solid var(--hair2)}
 .pbar-tab td{padding:7px 10px;border-bottom:1px solid var(--hair2)}
 .pbar-tab td.pm-mono{text-align:right;color:var(--dim)}
 .pbar-tab td:first-child{color:var(--ink)}
@@ -346,10 +377,10 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .pbar-tab tr:hover{background:var(--panel)}
 /* vertical ordered map with log rail */
 .pmapv{margin:14px 0;border:1px solid var(--hair2);border-radius:10px}
-.pmapv figcaption{display:flex;justify-content:space-between;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);padding:9px 14px;background:var(--panel2);border-bottom:1px solid var(--hair2);border-radius:10px 10px 0 0}
+.pmapv figcaption{display:flex;justify-content:space-between;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px;color:var(--dim);padding:9px 14px;background:var(--panel2);border-bottom:1px solid var(--hair2);border-radius:10px 10px 0 0}
 .pmapv-rk{color:var(--faint);text-transform:uppercase;letter-spacing:.05em;font-size:9.5px}
 /* interleaved section divider (e.g. "PROPOSED SECURE ADDITIONS") between row groups */
-.pmapv-group{font-family:"JetBrains Mono",monospace;font-size:9.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--copper);padding:11px 14px 5px;border-bottom:1px solid var(--hair2);background:var(--panel2)}
+.pmapv-group{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:9.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--copper);padding:11px 14px 5px;border-bottom:1px solid var(--hair2);background:var(--panel2)}
 .pmapv-row{position:relative;display:grid;grid-template-columns:14px 78px 1fr 130px 70px;align-items:center;gap:11px;padding:8px 14px;border-bottom:1px solid var(--hair2);animation:pm-fade .5s ease backwards;animation-delay:calc(var(--i,0)*35ms);transition:background .14s ease}
 .pmapv-row:last-child{border-bottom:none;border-radius:0 0 10px 10px}
 .pmapv-row:hover{background:var(--panel)}
@@ -386,21 +417,21 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .vsw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:7px;vertical-align:middle;flex:none}
 /* donut */
 .donut{margin:14px 0}
-.donut figcaption,.radar figcaption,.quad figcaption,.tmap figcaption,.sankey figcaption,.chord figcaption,.linec figcaption{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);margin-bottom:8px}
+.donut figcaption,.radar figcaption,.quad figcaption,.tmap figcaption,.sankey figcaption,.chord figcaption,.linec figcaption{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px;color:var(--dim);margin-bottom:8px}
 .donut-body{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
 .donut-svg{width:140px;height:140px;flex:none}
 .donut-ctr{fill:var(--ink);font-family:"Space Grotesk",sans-serif;font-size:18px;font-weight:600}
 .donut-leg,.radar-leg{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px;min-width:150px}
 .donut-leg li{display:flex;align-items:center;font-size:13px}
 .donut-lab{color:var(--ink)}
-.donut-val{margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--dim);padding-left:14px}
+.donut-val{margin-left:auto;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11.5px;color:var(--dim);padding-left:14px}
 /* radar */
 .radar{margin:14px 0}
 .radar-body{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 .radar-svg{width:240px;height:232px;flex:none}
 .radar-grid{fill:none;stroke:var(--hair2);stroke-width:1}
 .radar-spoke{stroke:var(--hair2);stroke-width:1}
-.radar-axis{fill:var(--dim);font-family:"JetBrains Mono",monospace;font-size:10px}
+.radar-axis{fill:var(--dim);font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10px}
 .radar-series{fill-opacity:.12;stroke-width:1.7;stroke-linejoin:round}
 .radar-leg li{display:flex;align-items:center;font-size:13px;color:var(--ink)}
 /* quadrant */
@@ -410,19 +441,19 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .quad-mid{stroke:var(--hair2);stroke-width:1;stroke-dasharray:3 3}
 .quad-pt{stroke:var(--bg);stroke-width:1.5}
 .quad-lab{fill:var(--ink);font-size:11px}
-.quad-axl{fill:var(--dim);font-family:"JetBrains Mono",monospace;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em}
+.quad-axl{fill:var(--dim);font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em}
 /* line chart */
 .linec{margin:14px 0}
 .linec-svg{width:100%;max-width:560px;height:auto;display:block}
 .linec-axis{stroke:var(--hair2);stroke-width:1}
 .linec-tick{stroke:var(--hair2);stroke-width:1}
-.linec-tlab{fill:var(--dim);font-family:"JetBrains Mono",monospace;font-size:9.5px}
-.linec-axl{fill:var(--dim);font-family:"JetBrains Mono",monospace;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em}
+.linec-tlab{fill:var(--dim);font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:9.5px}
+.linec-axl{fill:var(--dim);font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em}
 .linec-thresh{stroke-width:1;stroke-dasharray:3 4;opacity:.85}
-.linec-thlab{font-family:"JetBrains Mono",monospace;font-size:9.5px;opacity:.9}
+.linec-thlab{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:9.5px;opacity:.9}
 .linec-series{fill:none;stroke-width:1.8;stroke-linejoin:round;stroke-linecap:round}
 .linec-dot{stroke:var(--bg);stroke-width:1}
-.linec-note{font-family:"JetBrains Mono",monospace;font-size:9.5px}
+.linec-note{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:9.5px}
 .linec-leg{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-wrap:wrap;gap:6px 16px}
 .linec-leg li{display:flex;align-items:center;font-size:12.5px;color:var(--ink)}
 /* treemap */
@@ -431,11 +462,11 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .tmap-cell rect{stroke:var(--bg);stroke-width:1.5;transition:filter .14s}
 .tmap-cell:hover rect{filter:brightness(1.12)}
 .tmap-lab{fill:var(--ink);font-family:"Space Grotesk",sans-serif;font-size:11px;font-weight:600;pointer-events:none}
-.tmap-val{fill:var(--ink);opacity:.78;font-family:"JetBrains Mono",monospace;font-size:9.5px;pointer-events:none}
+.tmap-val{fill:var(--ink);opacity:.78;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:9.5px;pointer-events:none}
 .tmap-leg{list-style:none;margin:10px 0 0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:4px 14px}
 .tmap-leg li{display:flex;align-items:center;font-size:12.5px}
 .tmap-leg-lab{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tmap-leg-val{margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);padding-left:8px}
+.tmap-leg-val{margin-left:auto;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px;color:var(--dim);padding-left:8px}
 /* sankey */
 .sankey{margin:14px 0}
 .sankey-svg{width:100%;max-width:520px;height:auto}
@@ -450,16 +481,16 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .chord-rib{fill-opacity:.32;transition:fill-opacity .14s}
 .chord-rib:hover{fill-opacity:.62}
 .chord-arc{stroke:var(--bg);stroke-width:1}
-.chord-lab{fill:var(--ink);font-family:"JetBrains Mono",monospace;font-size:9.5px}
+.chord-lab{fill:var(--ink);font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:9.5px}
 @media(prefers-reduced-motion:reduce){.tmap-cell rect,.sankey-link,.chord-rib{transition:none}}
 
 /* review connection state — the page must never look live when the server is gone */
-.rev-conn{font-family:"JetBrains Mono",monospace;font-size:11px}
+.rev-conn{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px}
 .rev-conn.ok{color:var(--sage)}
 .rev-conn.off{color:var(--red);animation:rev-conn-pulse 1.6s ease-in-out infinite}
 @keyframes rev-conn-pulse{50%{opacity:.45}}
 .rev-offline-bar{position:fixed;top:0;left:0;right:0;z-index:80;background:var(--panel);border-bottom:2px solid var(--red);color:var(--ink);padding:9px 14px;font-size:13px;box-shadow:var(--shadow)}
-.rev-offline-bar code{background:var(--panel2);border:1px solid var(--hair2);border-radius:5px;padding:2px 7px;font-family:"JetBrains Mono",monospace;font-size:12px;user-select:all}
+.rev-offline-bar code{background:var(--panel2);border:1px solid var(--hair2);border-radius:5px;padding:2px 7px;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:12px;user-select:all}
 .rev-offline-bar .rev-offline-copy{margin-left:6px;background:var(--panel2);border:1px solid var(--hair2);color:var(--dim);border-radius:5px;padding:2px 8px;font-size:11px;cursor:pointer}
 .rev-offline-bar .rev-offline-copy:hover{color:var(--ink)}
 body.rev-offline .rev-bar .rev-submit,body.rev-offline .rev-bar .rev-approve{opacity:.45;cursor:not-allowed}

@@ -80,8 +80,15 @@ type RenderOptions struct {
 	// place (only when the plan carries a diagram), so diagrams render at full
 	// parity with zero network. The SageOx enrichment reference links are
 	// preserved — top-level <a href> navigation is not CSP-blocked, so a published
-	// artifact stays a hub back into the Ledger.
+	// artifact stays a hub back into the Ledger. Companion cards and
+	// ```html-interactive blocks are omitted/stripped in this mode: an artifact
+	// is one self-contained page with no sibling files and no author scripting.
 	Artifact bool
+	// Companions are rich self-contained HTML artifacts bundled with the plan
+	// (see companion.go), linked prominently near the top of the rendered page.
+	// The Href is context-resolved by the caller (relative companions/<name>
+	// for file renders; the same path against the review server's route).
+	Companions []Companion
 }
 
 // reviewStateItem is the slim per-item shape injected into the page for the
@@ -174,6 +181,14 @@ type renderData struct {
 	// Artifact toggles the CSP-safe variant: the template drops the Google-Fonts
 	// link, the Mermaid CDN script, and the SSE review layer when set.
 	Artifact bool
+	// Companions render as a prominent card row under the title (never in
+	// artifact mode — a self-contained page must not carry sibling-file links).
+	Companions []Companion
+	// Tabbed switches the section layout from one long scroll to tabbed views
+	// with a sticky top tab bar (the comparison-page register). Enabled when
+	// the plan has more than 3 H2 sections; smaller plans keep the single
+	// scroll, which reads better at that size.
+	Tabbed bool
 	// WordmarkDark/Light are the inline SageOx wordmark SVGs for the subtle
 	// side-nav corner badge; CSS shows the variant matching the active theme.
 	WordmarkDark  template.HTML
@@ -235,6 +250,9 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 		WordmarkDark:   template.HTML(wordmarkDark),  //nolint:gosec // first-party embedded asset
 		WordmarkLight:  template.HTML(wordmarkLight), //nolint:gosec // first-party embedded asset
 	}
+	if !opts.Artifact {
+		data.Companions = opts.Companions
+	}
 	data.ReviewJSON, data.Review = buildReviewState(opts.Review)
 
 	// Inline reference markers ox can stand behind: where a section's prose names
@@ -251,13 +269,13 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 			// template renders the title) and lift any TL;DR into its own callout.
 			tldr, rest := splitTLDR(s.Body)
 			if strings.TrimSpace(tldr) != "" {
-				tldrHTML, err := mdToHTML(md, tldr)
+				tldrHTML, err := mdToHTML(md, tldr, opts.Artifact)
 				if err != nil {
 					return nil, err
 				}
 				data.TLDR = template.HTML(stripLeadingTLDRLabel(string(tldrHTML)))
 			}
-			body, err := mdToHTML(md, rest)
+			body, err := mdToHTML(md, rest, opts.Artifact)
 			if err != nil {
 				return nil, err
 			}
@@ -266,7 +284,7 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 			data.Preamble = template.HTML(pre)
 			continue
 		}
-		body, err := mdToHTML(md, s.Body)
+		body, err := mdToHTML(md, s.Body, opts.Artifact)
 		if err != nil {
 			return nil, err
 		}
@@ -283,6 +301,12 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 			files:   s.Files,
 		})
 	}
+
+	// Tabbed layout: with more than 3 H2 sections the single scroll buries the
+	// later sections; tabs (sticky top bar, one view at a time) keep every
+	// section one click away. Smaller plans keep the scroll — a tab bar with 2
+	// entries is chrome without information.
+	data.Tabbed = len(data.Sections) > 3
 
 	// Anchor each deterministic signal to the section(s) whose files it concerns;
 	// signals that match no section stay in the global enrichment panel. This is
@@ -377,19 +401,115 @@ func newMarkdown() goldmark.Markdown {
 	)
 }
 
-func mdToHTML(md goldmark.Markdown, src string) (template.HTML, error) {
+func mdToHTML(md goldmark.Markdown, src string, artifact bool) (template.HTML, error) {
 	var buf bytes.Buffer
 	if err := md.Convert([]byte(src), &buf); err != nil {
 		return "", fmt.Errorf("markdown convert: %w", err)
 	}
 	// Ordering is load-bearing: mermaid fences are rewritten to <pre class="mermaid">
-	// FIRST, so highlightFences (which scans for <pre><code class="language-X">)
-	// never sees — and never chroma-tokenizes — a mermaid block. colorVerdictCells
-	// touches table cells only, so its position is independent.
+	// FIRST, then ```html-interactive fences pass through raw — both BEFORE
+	// highlightFences (which scans for <pre><code class="language-X">) so neither
+	// is ever chroma-tokenized. colorVerdictCells touches table cells only, so its
+	// position is independent; compareContainers rewrites paragraph markers only.
 	rendered := mermaidFence.ReplaceAllString(buf.String(), `<pre class="mermaid">$1</pre>`)
+	rendered = interactiveFences(rendered, artifact)
 	rendered = highlightFences(rendered)
 	rendered = colorVerdictCells(rendered)
+	rendered = compareContainers(rendered)
 	return template.HTML(rendered), nil //nolint:gosec // first-party plan markdown; see newMarkdown trust note
+}
+
+// interactiveFence matches a goldmark-rendered ```html-interactive fenced block.
+// The fence is the SANCTIONED channel for plan-authored interactivity (tab
+// logic, field inspectors, animated figures): unlike a raw markdown HTML block
+// — which goldmark splits at the first blank line for non-script tags — a
+// fence's content survives verbatim to the closing fence, so multi-element
+// interactive fragments arrive intact.
+var interactiveFence = regexp.MustCompile(`(?s)<pre><code class="language-html-interactive">(.*?)</code></pre>`)
+
+// interactiveFences rewrites ```html-interactive fences into raw HTML
+// (entities un-escaped back to the authored markup) wrapped in a neutral
+// container. TRUST BOUNDARY: same as newMarkdown's WithUnsafe — the plan is
+// the developer's own local content rendered locally for that developer, so
+// author scripting is a feature, not an injection surface. In artifact mode
+// the block is REPLACED by a static placeholder: the artifact CSP posture is
+// "no author scripting", and stripping here keeps that contract strict.
+func interactiveFences(s string, artifact bool) string {
+	return interactiveFence.ReplaceAllStringFunc(s, func(block string) string {
+		if artifact {
+			return `<div class="interactive-omitted">Interactive block omitted from the self-contained artifact export — open the full render for the live version.</div>`
+		}
+		m := interactiveFence.FindStringSubmatch(block)
+		if m == nil {
+			return block
+		}
+		return `<div class="interactive-block">` + html.UnescapeString(m[1]) + `</div>`
+	})
+}
+
+// comparePair matches a `:::compare` opener paragraph, its content, and the
+// closing `:::` paragraph. Rewritten pairwise; an unbalanced marker is left
+// visible in the output (author feedback beats silent structural damage).
+var comparePair = regexp.MustCompile(`(?s)<p>:::compare</p>\s*(.*?)\s*<p>:::</p>`)
+
+// compareContainers turns `:::compare … :::` blocks into side-by-side panes —
+// the comparison-pane register the hand-built pages use, expressible from
+// plain markdown: two tables, or two blocks each under its own H3.
+func compareContainers(s string) string {
+	return comparePair.ReplaceAllStringFunc(s, func(block string) string {
+		m := comparePair.FindStringSubmatch(block)
+		if m == nil {
+			return block
+		}
+		var b strings.Builder
+		b.WriteString(`<div class="compare">`)
+		for _, pane := range splitComparePanes(m[1]) {
+			b.WriteString(`<div class="compare-pane">`)
+			b.WriteString(pane)
+			b.WriteString(`</div>`)
+		}
+		b.WriteString(`</div>`)
+		return b.String()
+	})
+}
+
+// splitComparePanes divides a compare block's inner HTML into panes: at each
+// <h3> when the block carries two or more (heading-titled panes), else at
+// each <table> (the bare two-tables case), else the whole block as a single
+// pane (degrades to one full-width panel rather than breaking layout).
+func splitComparePanes(inner string) []string {
+	for _, marker := range []string{"<h3", "<table"} {
+		if strings.Count(inner, marker) >= 2 {
+			return splitAtMarker(inner, marker)
+		}
+	}
+	return []string{inner}
+}
+
+// splitAtMarker splits s at each occurrence of marker; content before the
+// first occurrence (a lede paragraph) becomes its own leading pane.
+func splitAtMarker(s, marker string) []string {
+	var out []string
+	rest := s
+	for {
+		i := strings.Index(rest, marker)
+		if i < 0 {
+			if trimmed := strings.TrimSpace(rest); trimmed != "" {
+				out = append(out, trimmed)
+			}
+			return out
+		}
+		if lead := strings.TrimSpace(rest[:i]); lead != "" {
+			out = append(out, lead)
+		}
+		j := strings.Index(rest[i+len(marker):], marker)
+		if j < 0 {
+			out = append(out, strings.TrimSpace(rest[i:]))
+			return out
+		}
+		out = append(out, strings.TrimSpace(rest[i:i+len(marker)+j]))
+		rest = rest[i+len(marker)+j:]
+	}
 }
 
 // codeFence matches a goldmark-rendered fenced code block carrying a language
