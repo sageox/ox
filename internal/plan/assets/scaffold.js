@@ -67,11 +67,17 @@
       tr.addEventListener('click',function(){
         [].slice.call(t.querySelectorAll('tr.lit')).forEach(function(r){r.classList.remove('lit');});
         tr.classList.add('lit');
-        var html='';
-        [].slice.call(tr.children).forEach(function(c,i){
-          html+='<div class="inspect-f"><span class="inspect-k">'+(heads[i]||('field '+(i+1)))+'</span><span class="inspect-v">'+c.innerHTML+'</span></div>';
-        });
-        if(body)body.innerHTML=html;
+        if(body){
+          body.textContent='';
+          [].slice.call(tr.children).forEach(function(c,i){
+            var row=document.createElement('div');row.className='inspect-f';
+            var k=document.createElement('span');k.className='inspect-k';
+            k.textContent=heads[i]||('field '+(i+1));
+            var v=document.createElement('span');v.className='inspect-v';
+            v.innerHTML=c.innerHTML; // first-party rendered cell markup
+            row.appendChild(k);row.appendChild(v);body.appendChild(row);
+          });
+        }
         var hint=dock.querySelector('.inspect-dock-hint');
         if(hint)hint.remove();
         dock.hidden=false;

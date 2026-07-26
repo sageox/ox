@@ -23,6 +23,7 @@ package plan
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -137,7 +138,7 @@ func CopyCompanions(files []CompanionFile, destDir string) ([]string, error) {
 				if _, err := os.Stat(dst); err == nil {
 					names = append(names, f.Name)
 					continue
-				} else if !os.IsNotExist(err) {
+				} else if !errors.Is(err, os.ErrNotExist) {
 					return names, fmt.Errorf("stat companion link %q: %w", f.RelPath, err)
 				}
 				if err := os.WriteFile(dst, data, 0o644); err != nil {

@@ -264,7 +264,18 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 		for _, n := range meta.Companions {
 			if n == name {
 				w.Header().Set("Cache-Control", "no-store")
-				http.ServeFile(w, r, filepath.Join(planDir, plan.CompanionsDir, name))
+				f, err := os.Open(filepath.Join(planDir, plan.CompanionsDir, n))
+				if err != nil {
+					http.NotFound(w, r)
+					return
+				}
+				defer f.Close()
+				info, err := f.Stat()
+				if err != nil || info.IsDir() {
+					http.NotFound(w, r)
+					return
+				}
+				http.ServeContent(w, r, n, info.ModTime(), f)
 				return
 			}
 		}

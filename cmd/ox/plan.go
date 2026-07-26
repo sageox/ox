@@ -884,7 +884,7 @@ func runPlanRenderSavedHTML(cmd *cobra.Command, gitRoot, slug string, info plan.
 	}))
 	// savedDir stays "" so the emitted bytes (WITH chrome) are what opens — the
 	// stored plan.html is the authored page and has no chrome by design.
-	emitRenderedHTML(cmd, injected, "", outPath, open, slug, nil)
+	emitRenderedHTML(cmd, injected, "", outPath, open, slug, savedCompanionFiles(info.Dir))
 	return nil
 }
 
@@ -1235,7 +1235,7 @@ func init() {
 	planRenderCmd.Flags().StringP("output", "o", "", "write the rendered HTML to this path")
 	planRenderCmd.Flags().Bool("open", false, "open the rendered HTML in your browser")
 	planRenderCmd.Flags().Bool("static", false, "with --open on a saved plan, open a read-only static page instead of launching the live review loop")
-	planRenderCmd.Flags().Bool("artifact", false, "render a strictly self-contained, CSP-safe page for publishing as a Claude Code Artifact (no external fonts/scripts, no review loop; enrichment links preserved)")
+	planRenderCmd.Flags().Bool("artifact", false, "render a self-contained page for publishing as a Claude Code Artifact (no external fonts/scripts, no review loop; enrichment links preserved)")
 	planRenderCmd.Flags().StringSlice("companion", nil, "bundle a rich self-contained HTML companion with the plan (repeatable; relative .html links in the plan markdown are auto-detected)")
 
 	planListCmd.Flags().Bool("json", false, "emit the plan list as JSON (scripting path)")

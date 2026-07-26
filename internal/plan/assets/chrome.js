@@ -37,7 +37,18 @@
     'aligns': 'Aligns', 'conflicts': 'Conflicts', 'expert-perspective': 'Expert view'
   };
 
-  function esc(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+  function safeURL(u) {
+    var raw = String(u || '').trim();
+    return /^https?:\/\//i.test(raw) ? esc(raw) : '';
+  }
 
   // floating "OX" toggle + panel: collision / prior-art / expert-routing /
   // aligns / conflicts / expert-perspective chips, plus the surfaced context
@@ -63,7 +74,8 @@
       var type = s && s.type ? String(s.type) : '';
       var label = esc((s && s.label) || TYPE_LABEL[type] || type);
       var why = esc(s && s.why);
-      var link = s && s.url ? ' <a href="' + esc(s.url) + '" target="_blank" rel="noopener noreferrer">view ↗</a>' : '';
+      var href = s ? safeURL(s.url) : '';
+      var link = href ? ' <a href="' + href + '" target="_blank" rel="noopener noreferrer">view ↗</a>' : '';
       html += '<div class="ox-chrome-chip" data-type="' + esc(type) + '"><b>' + label + '</b><span>' + why + '</span>' + link + '</div>';
     });
     if (context.length) {
@@ -93,7 +105,8 @@
   function buildFooter() {
     var parts = [];
     if (data.footer_credit) parts.push('Team context enriched by SageOx');
-    if (data.session_url) parts.push('<a href="' + esc(data.session_url) + '" target="_blank" rel="noopener noreferrer">View session</a>');
+    var sessionHref = safeURL(data.session_url);
+    if (sessionHref) parts.push('<a href="' + sessionHref + '" target="_blank" rel="noopener noreferrer">View session</a>');
     parts.push('Rendered by <code>ox plan</code> · SageOx');
     var foot = document.createElement('div');
     foot.className = 'ox-chrome-foot';

@@ -206,7 +206,7 @@ func InjectChrome(authored []byte, data ChromeData) []byte {
 		insertAt = loc[len(loc)-1][0]
 	}
 
-	out := make([]byte, 0, len(stripped)+len(bundle))
+	out := make([]byte, 0, len(stripped))
 	out = append(out, stripped[:insertAt]...)
 	out = append(out, bundle...)
 	out = append(out, stripped[insertAt:]...)

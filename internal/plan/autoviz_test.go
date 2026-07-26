@@ -165,16 +165,16 @@ func TestRenderHTML_ContextStripAndJudgment(t *testing.T) {
 	}
 }
 
-// TestRenderHTML_QuietZeroSignalLine pins the silence-vs-never-ran rule: a
-// zero-signal render carries an explicit quiet line, so an empty rail is
-// readable as "checked, clean" rather than "enrichment never ran".
+// TestRenderHTML_QuietZeroSignalLine pins the silence-vs-never-ran rule: an
+// un-enriched render does not claim enrichment ran, so a missing rail stays
+// readable as "no enrichment input" rather than "checked, clean".
 func TestRenderHTML_QuietZeroSignalLine(t *testing.T) {
 	out, err := RenderHTML(sampleInput(), Result{})
 	if err != nil {
 		t.Fatalf("RenderHTML: %v", err)
 	}
-	if !strings.Contains(string(out), "no collisions or prior art surfaced") {
-		t.Error("zero-signal render missing the quiet footer line")
+	if strings.Contains(string(out), "no collisions or prior art surfaced") {
+		t.Error("zero-signal un-enriched render claimed enrichment ran")
 	}
 }
 

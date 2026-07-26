@@ -399,7 +399,7 @@ func flattenInline(n *html.Node) string {
 				if text == "" {
 					continue
 				}
-				if href != "" && !strings.HasPrefix(href, "#") && !strings.HasPrefix(strings.ToLower(href), "javascript:") {
+				if href != "" && !strings.HasPrefix(href, "#") && !unsafeLinkScheme(href) {
 					b.WriteString("[" + text + "](" + href + ")")
 				} else {
 					b.WriteString(text)
@@ -410,6 +410,18 @@ func flattenInline(n *html.Node) string {
 		}
 	}
 	return b.String()
+}
+
+// unsafeLinkScheme reports whether href uses a scheme that must never survive
+// into derived markdown as a clickable link.
+func unsafeLinkScheme(href string) bool {
+	h := strings.ToLower(strings.TrimSpace(href))
+	for _, scheme := range []string{"javascript:", "data:", "vbscript:"} {
+		if strings.HasPrefix(h, scheme) {
+			return true
+		}
+	}
+	return false
 }
 
 // inlineWrap trims/collapses s and wraps it in pre/suf, or returns "" for

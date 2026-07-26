@@ -184,6 +184,33 @@ func TestExtractMarkdown_Deterministic(t *testing.T) {
 	}
 }
 
+// TestExtractMarkdown_DropsUnsafeLinkSchemes pins the markdown projection's
+// link safety floor: schemes browsers can execute as active content degrade to
+// plain text instead of becoming live anchors when plan.md is rendered later.
+func TestExtractMarkdown_DropsUnsafeLinkSchemes(t *testing.T) {
+	const html = `<html><body><p>
+		<a href=" javascript:alert(1)">js</a>
+		<a href="DATA:text/html,evil">data</a>
+		<a href="vbscript:evil">vb</a>
+		<a href="https://example.com/ok">ok</a>
+	</p></body></html>`
+
+	md := ExtractMarkdown([]byte(html))
+	for _, bad := range []string{"javascript:", "DATA:", "vbscript:"} {
+		if strings.Contains(md, bad) {
+			t.Fatalf("unsafe href survived into markdown: %q\n--- output ---\n%s", bad, md)
+		}
+	}
+	if !strings.Contains(md, "[ok](https://example.com/ok)") {
+		t.Fatalf("safe http link missing from markdown\n--- output ---\n%s", md)
+	}
+	for _, want := range []string{"js", "data", "vb"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("rejected link text %q should remain as plain text\n--- output ---\n%s", want, md)
+		}
+	}
+}
+
 // hasBlock reports whether md contains a block (a "\n\n"-delimited unit)
 // whose trimmed content equals want exactly — stronger than strings.Contains
 // alone, which would also pass if want only ever showed up as a substring of

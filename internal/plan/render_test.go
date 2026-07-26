@@ -76,8 +76,31 @@ func TestRenderHTML_NoSignalsNoMarker(t *testing.T) {
 	if strings.Contains(strings.ToLower(s), "enriched by sageox") {
 		t.Error("un-enriched render claims enrichment credit (overclaim)")
 	}
+	if strings.Contains(s, "enrichment ran") {
+		t.Error("un-enriched render claims enrichment ran")
+	}
 	if findings := LintBranding(out, res); len(findings) != 0 {
 		t.Fatalf("no-signal render failed lint: %+v", findings)
+	}
+}
+
+// TestRenderHTML_QuietFooterRequiresEnrichment distinguishes two otherwise
+// similar outcomes: no deterministic signals because enrichment found only
+// context, versus no signals because enrichment never ran / found nothing.
+func TestRenderHTML_QuietFooterRequiresEnrichment(t *testing.T) {
+	in := sampleInput()
+	res := Result{Context: []ContextItem{{Kind: "adr", Title: "ADR-001", Score: 1}}}
+
+	out, err := RenderHTML(in, res)
+	if err != nil {
+		t.Fatalf("RenderHTML: %v", err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "Team context enriched by SageOx") {
+		t.Fatal("context-only enrichment should earn footer credit")
+	}
+	if !strings.Contains(s, "enrichment ran") {
+		t.Fatal("context-only enrichment with no signals should show the quiet no-signal note")
 	}
 }
 

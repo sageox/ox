@@ -55,7 +55,7 @@
     {{.HTML}}
   </section>
   {{end}}
-  <div class="foot">{{if .ReviewEndpoint}}<span class="foot-live">Live review loop · powered by SageOx</span> · {{end}}{{if .FooterCredit}}Team context enriched by SageOx · {{end}}{{if not .HasSignals}}<span class="foot-quiet">enrichment ran — no collisions or prior art surfaced</span> · {{end}}{{if .SessionURL}}<a href="{{.SessionURL}}" target="_blank" rel="noopener noreferrer">Session recording</a> · {{end}}Rendered by <code>ox plan</code> · SageOx — self-contained, agent-agnostic.</div>
+  <div class="foot">{{if .ReviewEndpoint}}<span class="foot-live">Live review loop · powered by SageOx</span> · {{end}}{{if .FooterCredit}}Team context enriched by SageOx · {{end}}{{if and .FooterCredit (not .HasSignals)}}<span class="foot-quiet">enrichment ran — no collisions or prior art surfaced</span> · {{end}}{{if .SessionURL}}<a href="{{.SessionURL}}" target="_blank" rel="noopener noreferrer">Session recording</a> · {{end}}Rendered by <code>ox plan</code> · SageOx — self-contained, agent-agnostic.</div>
 </main>
 </div>
 {{if not .Artifact}}<script type="application/json" id="ox-review-state">{{.ReviewJSON}}</script>

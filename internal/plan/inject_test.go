@@ -255,3 +255,22 @@ func TestInjectChrome_ZeroEnrichmentStillInjectsReview(t *testing.T) {
 		t.Errorf("signals/context should default to empty arrays, not null: %s", chromeIsland)
 	}
 }
+
+// TestChromeJS_EscapesAttributesAndFiltersLinks guards the standalone injected
+// script's XSS boundary. The script builds small HTML strings at runtime, so it
+// must escape attribute delimiters and only emit clickable http(s) links.
+func TestChromeJS_EscapesAttributesAndFiltersLinks(t *testing.T) {
+	js := string(mustChromeAsset("assets/chrome.js"))
+	for _, want := range []string{
+		`.replace(/"/g, '&quot;')`,
+		`.replace(/'/g, '&#39;')`,
+		`function safeURL`,
+		`/^https?:\/\//i.test(raw)`,
+		`var href = s ? safeURL(s.url) : '';`,
+		`var sessionHref = safeURL(data.session_url);`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("chrome.js missing safety guard %q", want)
+		}
+	}
+}
