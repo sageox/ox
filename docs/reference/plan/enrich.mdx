@@ -1,7 +1,7 @@
 ---
 title: "ox plan enrich"
 description: "CLI reference for ox plan enrich"
-sidebar_position: 71
+sidebar_position: 73
 ---
 
 ## ox plan enrich
@@ -14,8 +14,13 @@ Enrich an agent-generated implementation plan with deterministic SageOx
 signals (collision, prior-art, expert-routing) and a context bundle the agent
 can reason over. ox computes badges locally — no LLM or network call.
 
-Output is JSON by default (the agent/plumbing path). Use --text for a human
-summary. Reads the plan from --file or stdin, else the newest ~/.claude/plans/*.md.
+Input modes (precedence order):
+  --topic "<subject>" [--files a,b,c]   consult BEFORE drafting a plan
+  --file <plan.md>                      an existing plan document
+  stdin                                 a plan piped from another tool
+  (none of the above)                   auto-discover the newest ~/.claude/plans/*.md
+
+Output is JSON by default (the agent/plumbing path). Use --text for a human summary.
 
 ```
 ox plan enrich [flags]
@@ -24,10 +29,12 @@ ox plan enrich [flags]
 ### Options
 
 ```
-      --file string   plan source file (default: stdin, else newest ~/.claude/plans/*.md)
-  -h, --help          help for enrich
-      --persist       also save + commit a draft to the ledger (used by the ExitPlanMode hook)
-      --text          human-readable summary instead of the default JSON output
+      --file string     plan source file (default: stdin, else newest ~/.claude/plans/*.md)
+      --files strings   comma-separated repo-relative files the topic touches (optional, with --topic)
+  -h, --help            help for enrich
+      --persist         also save + commit a draft to the ledger (used by the ExitPlanMode hook)
+      --text            human-readable summary instead of the default JSON output
+      --topic string    consult mode: the plan subject, before drafting
 ```
 
 ### Options inherited from parent commands

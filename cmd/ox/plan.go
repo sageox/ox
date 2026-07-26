@@ -77,6 +77,13 @@ Output is JSON by default (the agent/plumbing path). Use --text for a human summ
 		if err != nil {
 			return err
 		}
+		// An authored HTML plan enriches via its DERIVED markdown — the
+		// detectors are section/file-keyed and must never parse raw HTML.
+		if plan.LooksLikeHTML(in.Raw) {
+			p := plan.Parse(plan.ExtractMarkdown([]byte(in.Raw)))
+			p.Path = in.Path
+			in = p
+		}
 
 		// No plan found anywhere: a clear message beats enriching empty input.
 		if in.Topic == "" && strings.TrimSpace(in.Raw) == "" {
@@ -133,7 +140,15 @@ var planViewCmd = &cobra.Command{
 var planRenderCmd = &cobra.Command{
 	Use:   "render [slug]",
 	Short: "Render a plan to a self-contained HTML page",
-	Long: `Render a plan to a self-contained HTML page.
+	Long: `Render a plan.
+
+PREFERRED input is an authored, self-contained HTML page — the plan of record
+(docs/specs/plan-authoring-html.md): ox derives searchable markdown from it,
+computes team-context enrichment, and serves the page with the ox chrome
+INJECTED (enrichment overlay + review loop appended before </body>; the
+author's markup is never rewritten). --artifact emits the authored page
+VERBATIM. Markdown input remains the quick-plan path and renders through the
+built-in template (tabs, TL;DR hero, auto-visualizations).
 
 No slug renders the plan from --file/stdin; a slug renders a saved plan with its
 review state. With --open on a SAVED plan, ox launches the live review loop
@@ -165,21 +180,27 @@ instead of a dead-end file/clipboard export — pass --static for a read-only pa
 var planSaveCmd = &cobra.Command{
 	Use:    "save",
 	Hidden: true, // agent/skill tier: persist merged badges; taught via prime, not human help
-	Short:  "Persist a fully-enriched plan (merged badges + optional HTML) to the ledger",
-	Long: `Persist a fully-enriched plan to the ledger. Unlike bare 'ox plan' — which
-auto-saves only the deterministic, ox-computed annotations — 'ox plan save' is the
-explicit full-plan persist path used by the html-plan renderer skill after it has
-authored its judgment badges and (optionally) rendered the HTML.
+	Short:  "Persist a plan to the ledger — an authored HTML page (preferred) or markdown",
+	Long: `Persist a plan to the ledger.
 
-  --plan        the plan markdown (source for plan.md + topic/slug derivation)
-  --annotations a MERGED annotations.json: the 'ox plan enrich --json' Result with the
-                agent-authored judgment badges appended (a full plan.Result)
-  --html        optional pre-rendered HTML; size-gated plain-git-vs-LFS per store.Save
+PREFERRED — HTML as the plan of record:
+  --file <plan.html>   an authored, self-contained interactive page. ox stores it
+                       as the canonical artifact (meta primary=html), DERIVES
+                       plan.md from it (regenerated on save — never hand-edit),
+                       and computes deterministic enrichment itself when no
+                       --annotations are passed. Contract + quality bar:
+                       docs/specs/plan-authoring-html.md
 
-This command never renders HTML and never makes an LLM/network call — it only
-materializes the already-produced artifacts into the ledger working tree. It
-always saves (the skill is deliberately persisting), independent of the
-plan.save config.`,
+Quick plans:
+  --file <plan.md>     markdown-primary; annotations optional (self-enriches)
+
+Legacy skill path:
+  --plan        the plan markdown (with --annotations, required together)
+  --annotations a MERGED annotations.json (deterministic + judgment badges)
+  --html        optional pre-rendered HTML; size-gated plain-git-vs-LFS
+
+This command never makes an LLM/network call — enrichment is deterministic and
+local. It always saves, independent of the plan.save config.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runPlanSave(cmd)
 	},
@@ -221,8 +242,23 @@ func maybeSavePlan(gitRoot string, in plan.Input, result plan.Result) string {
 // saved directory, or "" on any failure (capture is best-effort and never
 // aborts the command the agent is waiting on).
 func savePlanWithProvenance(gitRoot string, in plan.Input, result plan.Result, html []byte) string {
+	return savePlanArtifacts(gitRoot, in, result, html, "")
+}
+
+// savePlanArtifacts is savePlanWithProvenance with an explicit primary artifact
+// kind: "" = markdown-primary (html, if any, is a generated render), plan.
+// PrimaryHTML = the html IS the authored plan of record and in.Raw is the
+// DERIVED markdown (ExtractMarkdown). An HTML-primary page may declare its own
+// slug via <meta name="ox-plan-slug"> (the authoring contract), which then
+// wins over the title-derived one.
+func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html []byte, primary string) string {
 	topic := planTopic(in)
 	slug := plan.Slugify(topic)
+	if primary == plan.PrimaryHTML {
+		if s := plan.AuthoredSlug(html); s != "" {
+			slug = s
+		}
+	}
 
 	prov, recState := resolvePlanProvenance(gitRoot)
 	collab := deriveCollabSignals(recState)
@@ -233,6 +269,7 @@ func savePlanWithProvenance(gitRoot string, in plan.Input, result plan.Result, h
 		Authors:        planAuthors(gitRoot),
 		CreatedAt:      time.Now().UTC(),
 		SourcePlanPath: in.Path,
+		Primary:        primary,
 		Provenance:     prov,
 		Collaboration:  collab,
 	}
@@ -313,11 +350,19 @@ func runPlanSave(cmd *cobra.Command) error {
 	annPath, _ := cmd.Flags().GetString("annotations")
 	htmlPath, _ := cmd.Flags().GetString("html")
 
+	// --file: the plan-of-record path. An authored .html page saves as
+	// HTML-primary (markdown derived, annotations optional — ox self-enriches
+	// when none are passed); a .md file is the quick-plan path with the same
+	// optional-annotations relaxation.
+	if filePath, _ := cmd.Flags().GetString("file"); filePath != "" {
+		return runPlanSaveFile(cmd, filePath, annPath)
+	}
+
 	if planPath == "" {
-		return fmt.Errorf("--plan is required: pass the plan markdown file")
+		return fmt.Errorf("pass --file <plan.html|plan.md> (preferred), or the legacy --plan <md> + --annotations pair")
 	}
 	if annPath == "" {
-		return fmt.Errorf("--annotations is required: pass the merged annotations.json")
+		return fmt.Errorf("--annotations is required with --plan: pass the merged annotations.json (or use --file, which self-enriches)")
 	}
 
 	// The plan markdown drives plan.md + topic/slug derivation.
@@ -372,6 +417,60 @@ func runPlanSave(cmd *cobra.Command) error {
 			cli.PrintHint(fmt.Sprintf("plan-lint [%s]: %s", f.Rule, f.Message))
 		}
 	}
+	return nil
+}
+
+// runPlanSaveFile is the plan-of-record save path (`ox plan save --file …`).
+// An authored HTML page becomes the canonical artifact (meta.primary=html,
+// plan.md DERIVED via ExtractMarkdown); a markdown file saves md-primary.
+// annotations.json is OPTIONAL on this path — when absent ox computes the
+// deterministic enrichment itself, so a single command turns an authored page
+// into a saved, enriched, reviewable plan.
+func runPlanSaveFile(cmd *cobra.Command, filePath, annPath string) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read plan %q: %w", filePath, err)
+	}
+	gitRoot := findGitRoot()
+	out := cmd.OutOrStdout()
+
+	loadResult := func(in plan.Input) plan.Result {
+		if annPath != "" {
+			if b, rerr := os.ReadFile(annPath); rerr == nil {
+				var r plan.Result
+				if json.Unmarshal(b, &r) == nil {
+					return r
+				}
+			}
+			cli.PrintHint("could not read --annotations; computing deterministic enrichment instead")
+		}
+		return plan.Enrich(context.Background(), in, gitRoot)
+	}
+
+	if plan.LooksLikeHTML(string(data)) {
+		derived := plan.ExtractMarkdown(data)
+		mdIn := plan.Parse(derived)
+		mdIn.Path = filePath
+		result := loadResult(mdIn)
+		dir := savePlanArtifacts(gitRoot, mdIn, result, data, plan.PrimaryHTML)
+		if dir == "" {
+			return fmt.Errorf("save plan: no ledger configured for %q or write failed", gitRoot)
+		}
+		slog.Info("plan_saved", "dir", dir, "primary", "html", "annotations", len(result.Annotations))
+		fmt.Fprintf(out, "Saved HTML-primary plan to ledger: %s\n", dir)
+		cli.PrintHint("plan.md was DERIVED from the page (regenerated on save — never hand-edit it). Open the live review loop: `ox plan review " + filepath.Base(dir) + "`.")
+		return nil
+	}
+
+	in := plan.Parse(string(data))
+	in.Path = filePath
+	result := loadResult(in)
+	dir := savePlanArtifacts(gitRoot, in, result, nil, "")
+	if dir == "" {
+		return fmt.Errorf("save plan: no ledger configured for %q or write failed", gitRoot)
+	}
+	slog.Info("plan_saved", "dir", dir, "primary", "md", "annotations", len(result.Annotations))
+	fmt.Fprintf(out, "Saved plan to ledger: %s\n", dir)
 	return nil
 }
 
@@ -567,8 +666,13 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact
 	}
 	if strings.TrimSpace(in.Raw) == "" {
 		fmt.Fprintln(cmd.OutOrStdout(),
-			"No plan found. Pass --file <plan.md>, pipe a plan on stdin, or save a plan-mode file to ~/.claude/plans/ first.")
+			"No plan found. Pass --file <plan.html> (or .md), pipe a plan on stdin, or save a plan-mode file to ~/.claude/plans/ first.")
 		return nil
+	}
+	// HTML-primary: an authored page is the plan of record — derive markdown,
+	// enrich via the derived sections, inject chrome (never wrap/re-render).
+	if plan.LooksLikeHTML(in.Raw) {
+		return runPlanRenderFreshHTML(cmd, in, outPath, open, artifact)
 	}
 	gitRoot := findGitRoot()
 	result := plan.Enrich(context.Background(), in, gitRoot)
@@ -628,6 +732,53 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact
 	return nil
 }
 
+// runPlanRenderFreshHTML is the HTML-primary render path: the authored page IS
+// the plan of record. ox derives markdown from it (terminal view / search /
+// enrichment sections), computes team-context signals over the derived
+// sections, persists the authored page as the canonical artifact
+// (meta.primary=html), and emits the page with the ox chrome INJECTED —
+// enrichment overlay + footer credit + review layer appended before </body>,
+// author markup untouched. --artifact emits the authored bytes VERBATIM.
+func runPlanRenderFreshHTML(cmd *cobra.Command, in plan.Input, outPath string, open, artifact bool) error {
+	authored := []byte(in.Raw)
+	name := "plan"
+	if in.Path != "" {
+		name = strings.TrimSuffix(filepath.Base(in.Path), filepath.Ext(in.Path))
+	}
+	if artifact {
+		// verbatim contract: no injection, no chrome, the author's exact bytes.
+		emitRenderedHTML(cmd, authored, "", outPath, open, name, nil)
+		return nil
+	}
+
+	derived := plan.ExtractMarkdown(authored)
+	mdIn := plan.Parse(derived)
+	mdIn.Path = in.Path
+	gitRoot := findGitRoot()
+	result := plan.Enrich(context.Background(), mdIn, gitRoot)
+
+	slug := plan.Slugify(planTopic(mdIn))
+	if s := plan.AuthoredSlug(authored); s != "" {
+		slug = s
+	}
+	injected := plan.InjectChrome(authored, plan.BuildChromeData(result, plan.RenderOptions{
+		Slug:        slug,
+		PriorArtURL: priorArtURLResolver(gitRoot),
+		SessionURL:  liveSessionConversationURL(gitRoot),
+	}))
+
+	if gitRoot != "" && config.PlanSave(gitRoot) {
+		// The AUTHORED bytes are canonical in the ledger (plan.md is the derived
+		// projection); chrome is injected per render/serve, never stored — that
+		// is what keeps injection idempotent and --artifact verbatim.
+		if dir := savePlanArtifacts(gitRoot, mdIn, result, authored, plan.PrimaryHTML); dir != "" {
+			cli.PrintHint("Saved HTML-primary plan (markdown derived from the page) — live review loop: `ox plan review " + filepath.Base(dir) + "`.")
+		}
+	}
+	emitRenderedHTML(cmd, injected, "", outPath, open, name, nil)
+	return nil
+}
+
 // gatherCompanions resolves the companion HTML artifacts for a fresh render:
 // explicit --companion flags first, then relative .html links auto-detected in
 // the plan markdown (resolved against the plan file's directory — a stdin plan
@@ -635,7 +786,7 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact
 // basename, flag order preserved.
 func gatherCompanions(cmd *cobra.Command, in plan.Input) []plan.CompanionFile {
 	explicit, _ := cmd.Flags().GetStringSlice("companion")
-	var srcs []string
+	var candidates []plan.CompanionFile
 	for _, p := range explicit {
 		abs, err := filepath.Abs(p)
 		if err != nil {
@@ -645,20 +796,22 @@ func gatherCompanions(cmd *cobra.Command, in plan.Input) []plan.CompanionFile {
 			cli.PrintHint("companion not found (skipped): " + p)
 			continue
 		}
-		srcs = append(srcs, abs)
+		candidates = append(candidates, plan.CompanionFile{Name: plan.CompanionName(abs), SrcPath: abs})
 	}
 	if in.Path != "" {
-		srcs = append(srcs, plan.DetectCompanionLinks(in.Raw, filepath.Dir(in.Path))...)
+		candidates = append(candidates, plan.DetectCompanionFiles(in.Raw, filepath.Dir(in.Path))...)
 	}
-	seen := make(map[string]struct{}, len(srcs))
+	seen := make(map[string]struct{}, len(candidates))
 	var out []plan.CompanionFile
-	for _, s := range srcs {
-		name := plan.CompanionName(s)
-		if _, ok := seen[name]; ok {
+	for _, c := range candidates {
+		if c.Name == "" {
+			c.Name = plan.CompanionName(c.SrcPath)
+		}
+		if _, ok := seen[c.Name]; ok {
 			continue
 		}
-		seen[name] = struct{}{}
-		out = append(out, plan.CompanionFile{Name: name, SrcPath: s})
+		seen[c.Name] = struct{}{}
+		out = append(out, c)
 	}
 	return out
 }
@@ -670,6 +823,11 @@ func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open, artifact
 	planMD, res, info, err := plan.Load(gitRoot, slug)
 	if err != nil {
 		return fmt.Errorf("load plan %q: %w", slug, err)
+	}
+	// HTML-primary plan: serve the AUTHORED page (chrome injected; verbatim in
+	// artifact mode) — never re-render it through the markdown template.
+	if meta, merr := plan.LoadMeta(info.Dir); merr == nil && meta.Primary == plan.PrimaryHTML {
+		return runPlanRenderSavedHTML(cmd, gitRoot, slug, info, res, outPath, open, artifact)
 	}
 	in := plan.Parse(planMD)
 	review, _ := plan.AssembleReview(info.Dir)
@@ -695,6 +853,38 @@ func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open, artifact
 		}
 	}
 	emitRenderedHTML(cmd, htmlBytes, savedDir, outPath, open, slug, companions)
+	return nil
+}
+
+// runPlanRenderSavedHTML serves a saved HTML-primary plan: the authored
+// plan.html bytes with the ox chrome injected fresh (current enrichment +
+// review state), or VERBATIM in artifact mode. It never re-persists.
+func runPlanRenderSavedHTML(cmd *cobra.Command, gitRoot, slug string, info plan.PlanInfo, res plan.Result, outPath string, open, artifact bool) error {
+	path, _, isPointer, exists := plan.PlanHTMLPath(info.Dir)
+	if !exists {
+		return fmt.Errorf("HTML-primary plan %q has no plan.html in %s", slug, info.Dir)
+	}
+	if isPointer {
+		cli.PrintHint("This plan's authored HTML is stored in LFS and not hydrated locally. Hydrate the ledger to view it.")
+		return nil
+	}
+	authored, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read authored plan %q: %w", path, err)
+	}
+	if artifact {
+		emitRenderedHTML(cmd, authored, "", outPath, open, slug, nil)
+		return nil
+	}
+	review, _ := plan.AssembleReview(info.Dir)
+	injected := plan.InjectChrome(authored, plan.BuildChromeData(res, plan.RenderOptions{
+		Slug:        slug,
+		Review:      review,
+		PriorArtURL: priorArtURLResolver(gitRoot),
+	}))
+	// savedDir stays "" so the emitted bytes (WITH chrome) are what opens — the
+	// stored plan.html is the authored page and has no chrome by design.
+	emitRenderedHTML(cmd, injected, "", outPath, open, slug, nil)
 	return nil
 }
 
@@ -724,10 +914,8 @@ func savedCompanionFiles(planDir string) []plan.CompanionFile {
 // path, else a temp file backed by htmlBytes — so --open always has real HTML to
 // show even when the saved ledger copy is an LFS pointer. Headless prints the
 // path instead of opening. companions are placed in a companions/ subdir next
-// to every emitted copy so the page's relative "companions/<name>" card links
-// resolve wherever the page lands (the card, not the plan's own inline link,
-// is the sanctioned surface — a bare-basename prose link still needs the
-// original file beside the page).
+// to every emitted copy for card links, and auto-detected markdown links also
+// preserve their original relative paths beside the render.
 func emitRenderedHTML(cmd *cobra.Command, htmlBytes []byte, savedDir, outPath string, open bool, name string, companions []plan.CompanionFile) {
 	placeCompanions := func(dir string) {
 		if len(companions) == 0 || dir == "" {
@@ -1052,7 +1240,8 @@ func init() {
 
 	planListCmd.Flags().Bool("json", false, "emit the plan list as JSON (scripting path)")
 
-	planSaveCmd.Flags().String("plan", "", "plan markdown file (required; source for plan.md + topic/slug)")
+	planSaveCmd.Flags().String("file", "", "the plan of record: an authored self-contained .html page (preferred; saved as canonical, markdown derived) or a .md quick plan; annotations optional (ox self-enriches)")
+	planSaveCmd.Flags().String("plan", "", "legacy: plan markdown file (with --annotations; prefer --file)")
 	planSaveCmd.Flags().String("annotations", "", "merged annotations.json: enrich badges + agent judgment badges (required)")
 	planSaveCmd.Flags().String("html", "", "optional pre-rendered HTML; size-gated plain-git-vs-LFS on save")
 

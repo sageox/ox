@@ -185,6 +185,38 @@ func discoverActivePlanFile(dir string) string {
 	return newest
 }
 
+// PrimaryHTML is the Meta.Primary value for a plan whose authored HTML page is
+// the plan of record (markdown derived; see store.go Meta.Primary).
+const PrimaryHTML = "html"
+
+// LooksLikeHTML reports whether a resolved plan source is an authored HTML
+// document rather than markdown — the switch that routes --file plan.html into
+// the HTML-primary pipeline (extract → enrich → inject) instead of the
+// markdown template. Sniffs the document head only: a markdown plan that
+// merely EMBEDS html (an ```html-interactive fence, an inline <div>) never
+// STARTS with a doctype/<html> tag, so it is not misrouted.
+func LooksLikeHTML(raw string) bool {
+	head := strings.ToLower(strings.TrimSpace(raw))
+	if len(head) > 256 {
+		head = head[:256]
+	}
+	return strings.HasPrefix(head, "<!doctype html") || strings.HasPrefix(head, "<html")
+}
+
+// oxSlugMetaRe matches the authoring contract's explicit slug override,
+// <meta name="ox-plan-slug" content="…"> (docs/specs/plan-authoring-html.md).
+var oxSlugMetaRe = regexp.MustCompile(`(?i)<meta\s+name=["']ox-plan-slug["']\s+content=["']([^"']+)["']`)
+
+// AuthoredSlug returns the slug an authored HTML plan declares via the
+// optional <meta name="ox-plan-slug"> tag, slugified, or "" when the page
+// doesn't carry one (the title-derived slug is used instead).
+func AuthoredSlug(htmlBytes []byte) string {
+	if m := oxSlugMetaRe.FindSubmatch(htmlBytes); m != nil {
+		return Slugify(string(m[1]))
+	}
+	return ""
+}
+
 // Parse splits markdown into Sections on "## " H2 headings and extracts the file
 // references cited in each section. Content before the first H2 becomes a
 // preamble Section with an empty Heading (only emitted when it has content).

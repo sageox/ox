@@ -16,19 +16,20 @@ func manySectionInput(n int) Input {
 	return Parse(b.String())
 }
 
-// TestRenderHTML_TabbedOverThreeSections verifies the raised ceiling: a plan
-// with more than 3 H2 sections renders the sticky tab bar (one button per
-// section, comparison-page register), while sections keep their ids so hash
-// deep links still resolve. Failure prevented: a long plan rendering as one
-// undifferentiated scroll — the "much worse customer experience" complaint.
-func TestRenderHTML_TabbedOverThreeSections(t *testing.T) {
+// TestRenderHTML_SectionJumpsOverThreeSections verifies the raised ceiling: a
+// plan with more than 3 H2 sections renders the sticky jump bar (one button per
+// section, comparison-page register), while sections stay in the document flow
+// with ids so hash/review deep links still resolve. Failure prevented: a long
+// plan either rendering as one undifferentiated scroll or hiding most sections
+// behind a tab state the reviewer/comment rail can miss.
+func TestRenderHTML_SectionJumpsOverThreeSections(t *testing.T) {
 	out, err := RenderHTML(manySectionInput(6), Result{})
 	if err != nil {
 		t.Fatalf("RenderHTML: %v", err)
 	}
 	s := string(out)
 	for _, want := range []string{
-		`class="tabbar" role="tablist"`,
+		`class="tabbar" aria-label="Plan sections"`,
 		`data-tab="sec-1"`,
 		`data-tab="sec-6"`,
 		`<section id="sec-6"`,
@@ -37,8 +38,11 @@ func TestRenderHTML_TabbedOverThreeSections(t *testing.T) {
 			t.Errorf("tabbed render missing %q", want)
 		}
 	}
-	if got := strings.Count(s, `role="tab"`); got != 6 {
-		t.Errorf("expected 6 tab buttons, got %d", got)
+	if got := strings.Count(s, `data-tab="sec-`); got != 6 {
+		t.Errorf("expected 6 section jump buttons, got %d", got)
+	}
+	if strings.Contains(s, `role="tab"`) || strings.Contains(s, `role="tablist"`) {
+		t.Error("section jumps must not advertise hidden tab semantics")
 	}
 }
 

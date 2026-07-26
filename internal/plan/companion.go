@@ -47,6 +47,7 @@ type Companion struct {
 type CompanionFile struct {
 	Name    string // sanitized basename, e.g. "deep-dive.html"
 	SrcPath string // absolute path of the file to copy
+	RelPath string // optional sanitized markdown href path to preserve beside renders
 }
 
 // mdLinkRe matches inline markdown links [text](target). Targets are then
@@ -60,17 +61,32 @@ var mdLinkRe = regexp.MustCompile(`\[[^\]]*\]\(([^()\s]+\.html?)\)`)
 // is prose, not a companion. Returns absolute paths, deduped, in document
 // order. baseDir == "" (stdin plans have no directory) yields nil.
 func DetectCompanionLinks(raw, baseDir string) []string {
+	var out []string
+	for _, f := range DetectCompanionFiles(raw, baseDir) {
+		out = append(out, f.SrcPath)
+	}
+	return out
+}
+
+// DetectCompanionFiles is DetectCompanionLinks with the original markdown href
+// path retained, so emitted renders can preserve both the companion card link
+// and the author's inline relative link.
+func DetectCompanionFiles(raw, baseDir string) []CompanionFile {
 	if baseDir == "" {
 		return nil
 	}
 	seen := make(map[string]struct{})
-	var out []string
+	var out []CompanionFile
 	for _, m := range mdLinkRe.FindAllStringSubmatch(raw, -1) {
 		target := m[1]
 		if strings.Contains(target, "://") || strings.HasPrefix(target, "/") || strings.HasPrefix(target, "#") {
 			continue
 		}
-		abs := filepath.Join(baseDir, filepath.FromSlash(target))
+		rel := filepath.Clean(filepath.FromSlash(target))
+		if rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." || filepath.IsAbs(rel) {
+			continue
+		}
+		abs := filepath.Join(baseDir, rel)
 		if info, err := os.Stat(abs); err != nil || info.IsDir() {
 			continue
 		}
@@ -78,7 +94,7 @@ func DetectCompanionLinks(raw, baseDir string) []string {
 			continue
 		}
 		seen[abs] = struct{}{}
-		out = append(out, abs)
+		out = append(out, CompanionFile{Name: CompanionName(abs), SrcPath: abs, RelPath: filepath.ToSlash(rel)})
 	}
 	return out
 }
@@ -110,6 +126,24 @@ func CopyCompanions(files []CompanionFile, destDir string) ([]string, error) {
 		}
 		if err := os.WriteFile(filepath.Join(dir, f.Name), data, 0o644); err != nil {
 			return names, fmt.Errorf("write companion %q: %w", f.Name, err)
+		}
+		if f.RelPath != "" && f.RelPath != CompanionsDir+"/"+f.Name {
+			rel := filepath.Clean(filepath.FromSlash(f.RelPath))
+			if rel != "." && !filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				dst := filepath.Join(destDir, rel)
+				if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+					return names, fmt.Errorf("create companion link dir %q: %w", f.RelPath, err)
+				}
+				if _, err := os.Stat(dst); err == nil {
+					names = append(names, f.Name)
+					continue
+				} else if !os.IsNotExist(err) {
+					return names, fmt.Errorf("stat companion link %q: %w", f.RelPath, err)
+				}
+				if err := os.WriteFile(dst, data, 0o644); err != nil {
+					return names, fmt.Errorf("write companion link %q: %w", f.RelPath, err)
+				}
+			}
 		}
 		names = append(names, f.Name)
 	}

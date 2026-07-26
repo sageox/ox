@@ -17,8 +17,17 @@ Work with SageOx-enriched implementation plans.
   review   serve a plan and collect human review feedback (the review loop)
   list     browse saved plans
   view     read a saved plan in the terminal
+  status   show a saved plan's lifecycle timeline and current status
 
-Agents: 'ox plan enrich' returns JSON team context (collision / prior-art /
+Lifecycle verbs — approve, work, realize, abandon, supersede — are thin sugar
+over one event-log engine (browser Approve in 'ox plan review' and
+'ox plan approve' are the same mechanism). Each accepts --json for
+{"changed":bool,"status":...} and is idempotent: re-running an
+already-applied verb is a safe no-op.
+
+Agents: run 'ox plan enrich --topic "<subject>" [--files a,b,c]' BEFORE
+drafting a plan, and 'ox plan enrich --file <plan.md>' (or stdin) once
+drafted — both return JSON team context (collision / prior-art /
 expert-routing) at zero LLM/network cost. When a human is shaping a plan,
 recommend 'ox plan render --open' to view it and 'ox plan review <slug>' for an
 inline review loop — those are human-opt-in, never auto-run.
@@ -43,9 +52,15 @@ inline review loop — those are human-opt-in, never auto-run.
 ### SEE ALSO
 
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox plan abandon](/plan/abandon)	 - Mark a saved plan abandoned
+* [ox plan approve](/plan/approve)	 - Mark a saved plan approved
 * [ox plan enrich](/plan/enrich)	 - Enrich an implementation plan with SageOx team context (JSON by default)
 * [ox plan list](/plan/list)	 - Browse saved ledger plans
+* [ox plan realize](/plan/realize)	 - Mark a saved plan realized (its intent was carried out)
 * [ox plan render](/plan/render)	 - Render a plan to a self-contained HTML page
 * [ox plan review](/plan/review)	 - Open a live review loop for a saved plan (serve, collect, auto-reload, approve)
+* [ox plan status](/plan/status)	 - Show a saved plan's lifecycle timeline and current status
+* [ox plan supersede](/plan/supersede)	 - Mark a saved plan superseded by a successor plan
 * [ox plan view](/plan/view)	 - Read a saved plan in the terminal
+* [ox plan work](/plan/work)	 - Record that a coding session worked on a saved plan
 

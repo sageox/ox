@@ -40,8 +40,8 @@ func runPlanSaveWith(t *testing.T, args ...string) (string, error) {
 func TestPlanSave_RequiresPlanAndAnnotations(t *testing.T) {
 	t.Run("missing --plan", func(t *testing.T) {
 		_, err := runPlanSaveWith(t, "--annotations", "ann.json")
-		if err == nil || !strings.Contains(err.Error(), "--plan is required") {
-			t.Fatalf("want --plan required error, got %v", err)
+		if err == nil || !strings.Contains(err.Error(), "--file <plan.html|plan.md>") {
+			t.Fatalf("want the pass---file guidance error, got %v", err)
 		}
 	})
 

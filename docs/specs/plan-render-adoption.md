@@ -4,15 +4,20 @@
 
 ## The problem
 
-`ox plan render` turns an implementation plan into a self-contained HTML page that
+`ox plan render` serves an implementation plan as a self-contained HTML page that
 folds in SageOx team context — open-PR / active-file collisions, prior art, expert
-routing — and saves it to the ledger where teammates find it. None of that is
-reproducible by an agent rendering HTML on its own: the enrichment lives **behind
-the SageOx API**.
+routing — and `ox plan save` persists it to the ledger where teammates find it.
+Since the HTML-first inversion ([plan-authoring-html.md](plan-authoring-html.md)),
+the primary path is an *authored* page (`--file plan.html`) into which ox injects
+its chrome; the binary still renders the page itself on the quick markdown path.
+Either way, none of the enrichment is reproducible by an agent on its own: it
+lives **behind the SageOx API**.
 
-Yet agents often **don't** use it. They emit a plain-markdown plan, or reach for
-their **own** HTML-rendering skill, producing a *context-blind orphan*: a page that
-carries none of the team context and never reaches the ledger.
+Yet agents often **don't** use it. They emit a plain-markdown plan, or author an
+HTML page and stop there — never passing it through `ox plan save` / `ox plan
+render` — producing a *context-blind orphan*: a page that carries none of the
+team context, gets no review loop, and never reaches the ledger. Authoring the
+page is now the sanctioned default; **bypassing ox** is the failure mode.
 
 Three hard constraints shape every fix:
 

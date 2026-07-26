@@ -1,28 +1,33 @@
 ---
-title: "ox plan view"
-description: "CLI reference for ox plan view"
-sidebar_position: 81
+title: "ox plan abandon"
+description: "CLI reference for ox plan abandon"
+sidebar_position: 71
 ---
 
-## ox plan view
+## ox plan abandon
 
-Read a saved plan in the terminal
+Mark a saved plan abandoned
+
+### Synopsis
+
+Mark a saved plan abandoned. --reason records why, for the status timeline.
 
 ```
-ox plan view <slug> [flags]
+ox plan abandon <slug> [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for view
+  -h, --help            help for abandon
+      --json            emit {"changed":...,"status":...} as JSON
+      --reason string   why the plan was abandoned
 ```
 
 ### Options inherited from parent commands
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
-      --json             output in JSON format (default: false)
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)

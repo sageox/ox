@@ -1,28 +1,34 @@
 ---
-title: "ox plan view"
-description: "CLI reference for ox plan view"
-sidebar_position: 81
+title: "ox plan approve"
+description: "CLI reference for ox plan approve"
+sidebar_position: 72
 ---
 
-## ox plan view
+## ox plan approve
 
-Read a saved plan in the terminal
+Mark a saved plan approved
+
+### Synopsis
+
+Mark a saved plan approved — the same action a reviewer's Approve button
+in 'ox plan review' takes (both go through the same event-log engine).
+Idempotent: approving an already-approved plan is a no-op (changed:false).
 
 ```
-ox plan view <slug> [flags]
+ox plan approve <slug> [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for view
+  -h, --help   help for approve
+      --json   emit {"changed":...,"status":...} as JSON
 ```
 
 ### Options inherited from parent commands
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
-      --json             output in JSON format (default: false)
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)

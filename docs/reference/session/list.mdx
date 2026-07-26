@@ -1,7 +1,7 @@
 ---
 title: "ox session list"
 description: "CLI reference for ox session list"
-sidebar_position: 83
+sidebar_position: 90
 ---
 
 ## ox session list
@@ -18,10 +18,18 @@ Sessions are sorted by date with newest first.
 By default, only shows sessions from the last 7 days for performance.
 Use --all to show all sessions regardless of age.
 
+Use --repo to list another repo's sessions by filesystem path instead of
+the current directory. The path must be the repo root (.sageox/config.json
+must exist directly there — subdirectories are not walked up). Local
+session data reflects the --repo target, but ledger-merged sessions still
+come from the CURRENT directory's configured ledger — this only matters
+if the two repos use different team ledgers.
+
 Examples:
   ox session list              # show last 10 from past 7 days
   ox session list --limit 20   # show last 20 from past 7 days
   ox session list --all        # show all sessions (may be slow)
+  ox session list --repo /path/to/other/repo  # list a different repo's sessions
 
 ```
 ox session list [flags]
@@ -30,9 +38,10 @@ ox session list [flags]
 ### Options
 
 ```
-      --all         show all sessions regardless of age (may be slow)
-  -h, --help        help for list
-      --limit int   maximum sessions to show (0 for no limit) (default 10)
+      --all           show all sessions regardless of age (may be slow)
+  -h, --help          help for list
+      --limit int     maximum sessions to show (0 for no limit) (default 10)
+      --repo string   list sessions for a different repo by filesystem path (must be the repo root; default: current repo)
 ```
 
 ### Options inherited from parent commands

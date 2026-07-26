@@ -94,6 +94,13 @@ func reviewSaveDraft(cmd *cobra.Command, file string) (string, error) {
 	if dir == "" {
 		return "", fmt.Errorf("could not save draft to the ledger")
 	}
+	if companions := gatherCompanions(cmd, in); len(companions) > 0 {
+		if names, cerr := plan.CopyCompanions(companions, dir); cerr != nil {
+			cli.PrintHint("could not bundle companion(s): " + cerr.Error())
+		} else if rerr := plan.RecordCompanions(dir, names); rerr != nil {
+			cli.PrintHint("could not record companion(s) in plan meta: " + rerr.Error())
+		}
+	}
 	return plan.Slugify(planTopic(in)), nil
 }
 
@@ -443,10 +450,28 @@ func renderLive(gitRoot, slug, base, token string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	in := plan.Parse(planMD)
 	review, _ := plan.AssembleReview(info.Dir)
+	meta, merr := plan.LoadMeta(info.Dir)
+
+	// HTML-primary plan: serve the AUTHORED page with the ox chrome injected
+	// live (enrichment overlay + review layer wired to this server). Falls
+	// through to the generated render only if the authored page is unreadable
+	// (LFS pointer, missing file) — the review loop must still function.
+	if merr == nil && meta.Primary == plan.PrimaryHTML {
+		if path, _, isPointer, exists := plan.PlanHTMLPath(info.Dir); exists && !isPointer {
+			if authored, rerr := os.ReadFile(path); rerr == nil {
+				return plan.InjectChrome(authored, plan.BuildChromeData(res, plan.RenderOptions{
+					Slug: slug, Review: review, ReviewEndpoint: base, ReviewToken: token,
+					PriorArtURL: priorArtURLResolver(gitRoot),
+				})), nil
+			}
+		}
+		cli.PrintHint("authored plan.html unavailable (LFS pointer or unreadable) — serving the generated render of the derived markdown")
+	}
+
+	in := plan.Parse(planMD)
 	var companionNames []string
-	if meta, merr := plan.LoadMeta(info.Dir); merr == nil {
+	if merr == nil {
 		companionNames = meta.Companions
 	}
 	return plan.RenderHTMLOpts(in, res, plan.RenderOptions{

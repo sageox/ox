@@ -135,6 +135,14 @@ type Meta struct {
 
 	// Status is the plan's lifecycle. Missing == "draft" for legacy plans.
 	Status PlanStatus `json:"status,omitempty"`
+	// Primary records which stored artifact is the plan of record: "html"
+	// (PrimaryHTML) when an authored HTML page is canonical — plan.md is then
+	// DERIVED via ExtractMarkdown, regenerated on save, never hand-edited —
+	// or "" when the markdown is primary (legacy + quick plans; plan.html is a
+	// generated render). Render/review branch on this: an HTML-primary plan is
+	// served as the authored page with ox chrome INJECTED (inject.go), never
+	// re-rendered through the markdown template.
+	Primary string `json:"primary,omitempty"`
 	// Companions lists the basenames of rich HTML companion artifacts stored
 	// under the plan dir's companions/ subdir (see companion.go). Rendered as
 	// prominent links on the plan page and served by `ox plan review`.
@@ -277,6 +285,12 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 				// wipe the already-bundled list.
 				if len(merged.Companions) == 0 {
 					merged.Companions = existing.Companions
+				}
+				// Primary sticks: a later markdown-shaped re-save (the hook
+				// draft, a lifecycle write) must not demote an HTML-primary
+				// plan back to markdown-primary.
+				if merged.Primary == "" {
+					merged.Primary = existing.Primary
 				}
 				// SessionID and SessionOutcome are system-managed (backfilled /
 				// reconciled at stop), never set by a save-time caller — preserve

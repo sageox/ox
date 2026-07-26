@@ -38,6 +38,16 @@ Also [the same again](deep-dive.html), [a URL](https://example.com/x.html),
 			t.Errorf("link[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
+	files := DetectCompanionFiles(raw, dir)
+	wantRel := []string{"deep-dive.html", "viz/timeline.html"}
+	if len(files) != len(wantRel) {
+		t.Fatalf("DetectCompanionFiles = %+v, want %d files", files, len(wantRel))
+	}
+	for i := range wantRel {
+		if files[i].RelPath != wantRel[i] {
+			t.Errorf("file[%d].RelPath = %q, want %q", i, files[i].RelPath, wantRel[i])
+		}
+	}
 
 	if got := DetectCompanionLinks(raw, ""); got != nil {
 		t.Errorf("empty baseDir (stdin plan) must detect nothing, got %v", got)
@@ -52,7 +62,7 @@ func TestCopyCompanions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	names, err := CopyCompanions([]CompanionFile{{Name: "a.html", SrcPath: a}}, dst)
+	names, err := CopyCompanions([]CompanionFile{{Name: "a.html", SrcPath: a, RelPath: "docs/a.html"}}, dst)
 	if err != nil {
 		t.Fatalf("CopyCompanions: %v", err)
 	}
@@ -65,6 +75,13 @@ func TestCopyCompanions(t *testing.T) {
 	}
 	if string(b) != "<html>A</html>" {
 		t.Errorf("companion content rewritten: %q", b)
+	}
+	inline, err := os.ReadFile(filepath.Join(dst, "docs", "a.html"))
+	if err != nil {
+		t.Fatalf("inline companion link copy unreadable: %v", err)
+	}
+	if string(inline) != "<html>A</html>" {
+		t.Errorf("inline companion content rewritten: %q", inline)
 	}
 }
 

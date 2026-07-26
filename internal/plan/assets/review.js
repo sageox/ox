@@ -21,7 +21,7 @@
     { id: 'flag', glyph: '⚑' },
     { id: 'comment', glyph: '◌' }
   ];
-  var SELECTOR = 'section[id], li, tr, .ox-chip, .stat, .bar-row';
+  var SELECTOR = window.OX_REVIEW_SELECTOR || 'section[id], li, tr, .ox-chip, .stat, .bar-row';
 
   var marks = load();
   var committed = parseCommitted();
@@ -65,7 +65,7 @@
 
   function fnv1a(s) { var h = 0x811c9dc5; for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h * 0x01000193) >>> 0; } return ('0000000' + h.toString(16)).slice(-8); }
   function norm(s) { return (s || '').replace(/\s+/g, ' ').trim().toLowerCase(); }
-  function headingOf(el) { var sec = el.closest('section[id]'); if (!sec) return ''; var h = sec.querySelector('h2'); return h ? h.textContent : sec.id; }
+  function headingOf(el) { var sec = el.closest('section[id], [data-ox-section]'); if (!sec) return ''; var ds = sec.getAttribute && sec.getAttribute('data-ox-section'); if (ds) return ds; var h = sec.querySelector('h2, h3'); return h ? h.textContent : (sec.id || ''); }
   function anchorText(el) {
     var clone = el.cloneNode(true);
     clone.querySelectorAll('.rev-glyph').forEach(function (g) { g.remove(); });

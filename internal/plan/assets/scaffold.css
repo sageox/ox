@@ -4,7 +4,7 @@
    Inline plan-authored HTML (device mockups, etc.) passes through unchanged. */
 :root{
   --bg:#0b0d0b; --panel:#111411; --panel2:#171b17; --hair:#252c24; --hair2:#1b211a;
-  --ink:#e8ede7; --dim:#a8b3a5; --faint:#6f7a6d;
+  --ink:#e8ede7; --dim:#a8b3a5; --faint:#7b857a;
   --sage:#99c693; --sage-bright:#b7d4b2; --sage-deep:#4e7d4c; --copper:#e0a56a; --amber:#f59e0b; --red:#ef4444; --teal:#14b8a6;
   --slate:#64748b; --violet:#a78bfa;
   --grad-a:#131813; --grad-b:#101410; --shadow:0 1px 0 rgba(255,255,255,.02),0 8px 30px rgba(0,0,0,.35);
@@ -12,8 +12,8 @@
 html[data-theme="light"]{
   --bg:#eef2ee; --panel:#fff; --panel2:#f5f8f4; --hair:#d8e0d8; --hair2:#e4ebe3;
   --ink:#16201c; --dim:#3f4d46; --faint:#566159;
-  --sage:#56745a; --sage-bright:#3f5a43; --sage-deep:#3f5a43; --copper:#a8613b; --amber:#b4730c; --red:#c1352f; --teal:#0c6b62;
-  --slate:#5a6675; --violet:#7c5fd6;
+  --sage:#56745a; --sage-bright:#3f5a43; --sage-deep:#3f5a43; --copper:#9f5c38; --amber:#9a620a; --red:#c1352f; --teal:#0c6b62;
+  --slate:#5a6675; --violet:#755acb;
   --grad-a:#e7efe7; --grad-b:#f3f7f2; --shadow:0 1px 0 rgba(0,0,0,.02),0 8px 26px rgba(40,60,45,.10);
 }
 *{box-sizing:border-box}
@@ -37,15 +37,15 @@ html[data-theme="light"] .toc-brand .wm-l{display:block}
 nav.toc a{display:block;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11.5px;color:var(--dim);text-decoration:none;padding:5px 8px;border-left:2px solid transparent;line-height:1.4}
 nav.toc a .n{color:var(--faint);margin-right:7px}
 nav.toc a:hover{color:var(--ink)}
-nav.toc a.active{color:var(--ink);border-left-color:var(--sage)}
+nav.toc a.active{color:var(--ink);border-left-color:var(--ink)}
 main{padding:40px 46px 120px;min-width:0}
 /* hold prose to a readable measure (~72-80ch); let wide visuals opt out */
 main>section,main>.tldr,main>.ox-enrich,main>.rev-status,main>.eyebrow,main>h1,main>.foot{max-width:780px}
 main>section .mermaid,main>section .swim,main>section .statrow,main>section .barc,main>section table.heat,main>section .multiples,main>section .pbar-fig,main>section .pmapv,main>section .linec,main>section .device-row-wrap,main>section .compare,main>section .interactive-block{max-width:none}
-.eyebrow{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--copper)}
+.eyebrow{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint)}
 h1{font-family:"Space Grotesk",sans-serif;font-weight:700;font-size:40px;line-height:1.1;letter-spacing:-.035em;margin:.2em 0 .35em}
 h2{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:23px;letter-spacing:-.02em;margin:2.2em 0 .2em;padding-bottom:.3em;border-bottom:1px solid var(--hair)}
-h3{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-weight:500;font-size:12.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--copper);margin:1.7em 0 .5em}
+h3{font-family:Inter,system-ui,sans-serif;font-weight:600;font-size:14px;text-transform:uppercase;letter-spacing:.03em;color:var(--faint);margin:1.7em 0 .5em}
 p{margin:.7em 0}
 a{color:var(--teal)}
 strong{color:var(--ink);font-weight:600}
@@ -87,10 +87,10 @@ html[data-theme="light"] .ico-l{display:inline}
    the positive verdict cell so it doesn't double as "expert". */
 .ox-sig-collision{color:var(--amber)}
 .ox-sig-prior-art{color:var(--teal)}
-.ox-sig-expert-routing{color:var(--copper)}
+.ox-sig-expert-routing{color:var(--violet)}
 /* TL;DR hero callout — the decision-first lede */
-.tldr{position:relative;background:linear-gradient(135deg,var(--grad-a),var(--grad-b));border:1px solid var(--hair);border-left:3px solid var(--copper);border-radius:10px;padding:16px 18px 16px 20px;margin:14px 0 8px;box-shadow:var(--shadow)}
-.tldr-tag{display:inline-block;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.14em;color:var(--copper);text-transform:uppercase;margin-bottom:6px}
+.tldr{position:relative;background:linear-gradient(135deg,var(--grad-a),var(--grad-b));border:1px solid var(--hair);border-left:3px solid #5b605a;border-radius:10px;padding:16px 18px 16px 20px;margin:14px 0 8px;box-shadow:var(--shadow)}
+.tldr-tag{display:inline-block;font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.14em;color:var(--dim);text-transform:uppercase;margin-bottom:6px}
 .tldr>p:first-of-type,.tldr blockquote{margin-top:0}
 .tldr blockquote{border:none;padding:0;color:var(--ink)}
 /* Per-section anchored signal rail */
@@ -98,7 +98,7 @@ html[data-theme="light"] .ico-l{display:inline}
 .ox-chip{display:flex;align-items:baseline;gap:8px;font-size:13px;color:var(--dim);background:var(--panel2);border:1px solid var(--hair2);border-left:2px solid var(--hair);border-radius:7px;padding:7px 11px}
 .ox-chip.ox-sig-collision{border-left-color:var(--amber)}
 .ox-chip.ox-sig-prior-art{border-left-color:var(--teal)}
-.ox-chip.ox-sig-expert-routing{border-left-color:var(--copper)}
+.ox-chip.ox-sig-expert-routing{border-left-color:var(--violet)}
 .ox-chip strong{color:var(--ink)}
 .ox-chip .src{color:var(--teal);font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:.8em}
 .ox-marker.sm{width:22px;height:22px;padding:3px;border-radius:5px;flex:0 0 auto;align-self:center}
@@ -113,20 +113,16 @@ section.risk h2{border-bottom-color:var(--amber)}
 .companion-tag{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--sage)}
 .companion-name{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-weight:600;font-size:14px;overflow-wrap:anywhere}
 .companion-cap{font-size:12px;color:var(--dim)}
-/* Tabbed section views (>3 H2s) — sticky top tab bar, one view at a time.
-   Hiding is gated on body.tabs-on (added by scaffold.js) so a no-JS open
-   degrades to the full single scroll. */
-.tabbar{position:sticky;top:0;z-index:40;display:flex;gap:2px;flex-wrap:wrap;margin:18px 0 6px;padding:6px 0 0;max-width:780px;background:rgba(11,13,11,.88);backdrop-filter:blur(14px);border-bottom:1px solid var(--hair2)}
+/* Long-plan section jumps (>3 H2s) — sticky top row, continuous scroll.
+   The whole plan stays visible so reviewers keep context and comment anchors
+   from the review rail always have a visible target. */
+.tabbar{position:sticky;top:0;z-index:40;display:flex;gap:2px;flex-wrap:nowrap;overflow-x:auto;margin:18px 0 12px;padding:6px 0 0;max-width:780px;background:rgba(11,13,11,.88);backdrop-filter:blur(14px);border-bottom:1px solid var(--hair2);scrollbar-width:thin}
 html[data-theme="light"] .tabbar{background:rgba(238,242,238,.88)}
-.tabbar button{font:inherit;font-size:12.5px;font-weight:500;color:var(--faint);background:none;border:none;border-bottom:2px solid transparent;padding:9px 13px;cursor:pointer;transition:color .13s,border-color .13s;letter-spacing:.005em}
+.tabbar button{font:inherit;font-size:12.5px;font-weight:500;color:var(--faint);background:none;border:none;border-bottom:2px solid transparent;padding:9px 13px;cursor:pointer;transition:color .13s,border-color .13s;letter-spacing:.005em;white-space:nowrap;flex:0 0 auto}
 .tabbar button:hover{color:var(--dim)}
-.tabbar button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--sage)}
+.tabbar button[aria-current="true"]{color:var(--ink);border-bottom-color:var(--ink)}
 .tabbar button .n{color:var(--faint);font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10.5px;margin-right:6px}
-body.tabs-on main>section[id^="sec-"]{display:none}
-body.tabs-on main>section[id^="sec-"].on{display:block;animation:view-fade .22s ease}
-body.tabs-on main>section.on h2{margin-top:.6em}
-@keyframes view-fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
-@media(prefers-reduced-motion:reduce){body.tabs-on main>section[id^="sec-"].on{animation:none}}
+main>section[id^="sec-"]{scroll-margin-top:72px}
 /* Comparison panes — the compare marker renders adjacent blocks side by side */
 .compare{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin:14px 0}
 .compare-pane{background:var(--panel);border:1px solid var(--hair2);border-top:2px solid var(--sage-deep);border-radius:10px;padding:4px 14px 10px;min-width:0;overflow-x:auto}
@@ -148,7 +144,7 @@ td.v-bad{color:var(--red);font-weight:600}
 .swim .lane:hover .track{border-color:var(--hair)}
 .swim .bar{position:absolute;top:3px;height:20px;border-radius:4px;font-size:10.5px;font-weight:600;color:#0c1112;display:flex;align-items:center;padding:0 7px;white-space:nowrap;overflow:hidden;transition:filter .14s}
 .swim .bar:hover{filter:brightness(1.13)}
-.swim .gate{position:absolute;top:0;color:var(--copper);font-size:16px;transform:translateX(-50%)}
+.swim .gate{position:absolute;top:0;color:var(--ink);font-size:16px;transform:translateX(-50%)}
 .swim .mark{position:absolute;top:0;line-height:24px;font-size:13px;transform:translateX(-50%);white-space:nowrap}
 .swim .anno{position:absolute;top:3px;line-height:18px;font-size:10px;color:var(--dim);white-space:nowrap}
 .swim .axis .track{height:auto;background:none;border:none;background-image:none}
@@ -495,3 +491,48 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .rev-offline-bar .rev-offline-copy:hover{color:var(--ink)}
 body.rev-offline .rev-bar .rev-submit,body.rev-offline .rev-bar .rev-approve{opacity:.45;cursor:not-allowed}
 .rev-toast{position:fixed;left:16px;bottom:64px;z-index:60;background:var(--panel);border:1px solid var(--sage);color:var(--ink);border-radius:9px;padding:8px 12px;font-size:12.5px;box-shadow:var(--shadow)}
+
+/* Judgment signal colors (agent-authored, cited): aligns=positive, conflicts=
+   blocker, expert view=copper — same one-meaning-per-hue map as above. */
+.ox-sig-aligns{color:var(--sage)}
+.ox-sig-conflicts{color:var(--red)}
+.ox-sig-expert-perspective{color:var(--violet)}
+.ox-chip.ox-sig-aligns{border-left-color:var(--sage)}
+.ox-chip.ox-sig-conflicts{border-left-color:var(--red)}
+.ox-chip.ox-sig-expert-perspective{border-left-color:var(--violet)}
+/* Alignment strip — surfaced context bundle inside the enrichment panel */
+.ox-ctx{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;margin-top:9px;font-size:12.5px;color:var(--dim)}
+.ox-ctx-cap{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+.ox-ctx-kind{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10px;border:1px solid var(--hair2);border-radius:4px;padding:0 4px;color:var(--teal);margin-right:2px}
+/* Auto-inspector — comparison tables become click-to-inspect: the clicked row
+   lights and its fields project into a docked explainer (scaffold.js). */
+table.inspect tbody tr{cursor:pointer;transition:background .12s}
+table.inspect tbody tr:hover{background:var(--panel)}
+table.inspect tbody tr.lit{background:rgba(153,198,147,.13);box-shadow:inset 2px 0 0 var(--sage)}
+.inspect-dock{position:sticky;bottom:12px;z-index:20;background:var(--panel2);border:1px solid var(--hair);border-left:3px solid var(--sage);border-radius:10px;padding:12px 16px;margin:10px 0;box-shadow:var(--shadow)}
+.inspect-dock-hint{font-size:12px;color:var(--faint);font-style:italic}
+.inspect-f{margin:4px 0;font-size:13.5px;color:var(--ink)}
+.inspect-k{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);margin-right:8px}
+.auto-swim{margin:14px 0}
+.auto-swim figcaption{font-family:"Spline Sans Mono","JetBrains Mono",monospace;font-size:11px;color:var(--dim);margin-bottom:8px}
+/* Hero stat chips — first-30-seconds numbers derived from plan structure */
+.hero-stats{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 4px;max-width:780px}
+.hstat{display:inline-flex;align-items:baseline;gap:7px;background:var(--panel);border:1px solid var(--hair2);border-radius:8px;padding:8px 13px;min-height:44px;box-sizing:border-box}
+.hstat-v{font-size:20px;font-weight:600;color:var(--ink);line-height:1}
+.hstat-l{font-size:11px;color:var(--dim)}
+.hstat-teal{border-left:3px solid var(--teal)}
+.hstat-amber{border-left:3px solid var(--amber)}
+.hstat-copper{border-left:3px solid var(--copper)}
+.hstat-red{border-left:3px solid var(--red)}
+/* quiet zero-signal footer note — silence must be distinguishable from never-ran */
+.foot-quiet{color:var(--faint);font-style:italic}
+/* Long-plan mode: the sticky jump bar is the ONE nav — the left TOC would
+   duplicate it (scaffold.js adds has-tabbar when the bar exists) */
+body.has-tabbar .shell{grid-template-columns:1fr}
+body.has-tabbar nav.toc{display:none}
+/* type scale per design review: compact Inter title, calmer H2 */
+h1{font-family:Inter,system-ui,sans-serif;font-weight:700;font-size:30px;letter-spacing:-.015em;line-height:1.15}
+h2{font-family:Inter,system-ui,sans-serif;font-weight:600;font-size:22px;letter-spacing:-.01em;line-height:1.25}
+body{font-size:16px;line-height:1.6}
+/* prose measure: ~66ch ideal (Butterick); tables/visuals keep the wide column */
+main>section p,main>section ul,main>section ol,main>section blockquote{max-width:66ch}

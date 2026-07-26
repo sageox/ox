@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -153,6 +154,25 @@ type reviewSummary struct {
 	HasReview bool
 }
 
+// statChip is one hero stat (value + label), emitted from plan structure so
+// the first 30 seconds carry numbers, not prose. Class picks the accent.
+type statChip struct {
+	Value string
+	Label string
+	Class string // neutral | copper | amber | red | teal
+	Href  string // scroll-jump target ("" = inert)
+}
+
+// renderContext is one surfaced context-bundle item shown in the enrichment
+// panel's alignment strip. Retrieved context used to reach the page ONLY when
+// the prose happened to name it (inline markers); the strip closes that
+// plumbing gap — retrieved ADRs/sessions/decisions are visible enrichment
+// even when no marker anchors.
+type renderContext struct {
+	Kind  string
+	Title string
+}
+
 type renderData struct {
 	Title string
 	Slug  string
@@ -175,7 +195,9 @@ type renderData struct {
 	HasSignals     bool
 	SignalCount    int
 	Plural         string
-	Signals        []renderSignal // unanchored signals (no matching section)
+	Signals        []renderSignal  // unanchored signals (no matching section)
+	ContextItems   []renderContext // surfaced context bundle (alignment strip)
+	Stats          []statChip      // hero stat chips (structure-derived numbers)
 	FooterCredit   bool
 	SessionURL     string // /c/ conversation link of the producing recording ("" = omit)
 	// Artifact toggles the CSP-safe variant: the template drops the Google-Fonts
@@ -290,6 +312,9 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 		}
 		var secHTML string
 		secHTML, markers = injectMarkers(string(body), markers)
+		// structure-driven auto-visualization: gated-track tables gain a
+		// swimlane, comparison tables become click-to-inspect (autoviz.go).
+		secHTML = autoVisualize(secHTML, s.Heading)
 		num++
 		id := fmt.Sprintf("sec-%d", num)
 		data.TOC = append(data.TOC, tocEntry{ID: id, Num: fmt.Sprintf("%02d", num), Heading: s.Heading})
@@ -308,11 +333,38 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 	// entries is chrome without information.
 	data.Tabbed = len(data.Sections) > 3
 
-	// Anchor each deterministic signal to the section(s) whose files it concerns;
-	// signals that match no section stay in the global enrichment panel. This is
-	// the data join that replaces a single prose blob with section-anchored
+	// TL;DR hero, ALWAYS: a page must open on a plain-language lede, never on
+	// status blocks or insider jargon. When the plan carries no explicit TL;DR
+	// marker, the first plain paragraph (preamble first, else the first
+	// section) is LIFTED into the hero — moved, not copied, so it never reads
+	// twice.
+	if strings.TrimSpace(string(data.TLDR)) == "" {
+		if para, rest, ok := liftLede(string(data.Preamble)); ok {
+			data.TLDR = template.HTML("<p>" + para + "</p>") //nolint:gosec // first-party rendered fragment
+			data.Preamble = template.HTML(rest)              //nolint:gosec // first-party rendered fragment
+		} else if len(data.Sections) > 0 {
+			if para, rest, ok := liftLede(string(data.Sections[0].HTML)); ok {
+				data.TLDR = template.HTML("<p>" + para + "</p>") //nolint:gosec // first-party rendered fragment
+				data.Sections[0].HTML = template.HTML(rest)      //nolint:gosec // first-party rendered fragment
+			}
+		}
+	}
+
+	// Alignment strip: surface the retrieved context bundle (top items by
+	// score) so enrichment is visible even when no inline marker anchors and
+	// no badge fired — the retrieved ADR/session IS team context on the plan.
+	data.ContextItems = topContextItems(res.Context, 5)
+
+	// Hero stat chips: the first-30-seconds numbers (sections, files, team
+	// signals, open review items), each only when non-zero. Two chips minimum
+	// or none — a single lonely chip is noise, not a dashboard.
+	data.Stats = heroStats(res, len(data.Sections), data.Review)
+
+	// Anchor each signal to the section(s) whose files it concerns; signals
+	// that match no section stay in the global enrichment panel. This is the
+	// data join that replaces a single prose blob with section-anchored
 	// markers — the spec's per-section badge rail.
-	all := deterministicSignalsWithFiles(res, opts.PriorArtURL)
+	all := signalsWithFiles(res, opts.PriorArtURL)
 	data.HasSignals = len(all) > 0
 	data.SignalCount = len(all)
 	if data.SignalCount != 1 {
@@ -613,19 +665,29 @@ type signalWithFiles struct {
 	files []string
 }
 
-// deterministicSignalsWithFiles projects the ox-computed badges (collision /
-// prior-art / expert-routing) into anchorable signals. Judgment badges are
-// agent-authored and not surfaced here. The presence of any signal is what makes
-// the render emit the anchored OX marker the lint contract requires.
-func deterministicSignalsWithFiles(res Result, priorArtURL func(refKind, ref string) string) []signalWithFiles {
+// signalsWithFiles projects badges into anchorable signals: the ox-computed
+// deterministic ones (collision / prior-art / expert-routing) AND the
+// agent-authored, cited judgment ones (aligns / conflicts / expert
+// perspective) — a saved plan's merged annotations.json carries both, and
+// dropping judgment badges left the alignment layer invisible in real output.
+// rigor stays excluded: it is a collaboration meta-signal, not plan content.
+// The presence of any signal is what makes the render emit the anchored OX
+// marker the lint contract requires.
+func signalsWithFiles(res Result, priorArtURL func(refKind, ref string) string) []signalWithFiles {
 	labels := map[string]string{
-		"collision":      "Collision",
-		"prior-art":      "Prior art",
-		"expert-routing": "Expert",
+		"collision":          "Collision",
+		"prior-art":          "Prior art",
+		"expert-routing":     "Expert",
+		"aligns":             "Aligns",
+		"conflicts":          "Conflicts",
+		"expert-perspective": "Expert view",
 	}
 	var out []signalWithFiles
 	for _, a := range res.Annotations {
-		if a.Kind != BadgeDeterministic {
+		if a.Kind != BadgeDeterministic && a.Kind != BadgeJudgment {
+			continue
+		}
+		if a.Type == BadgeRigor {
 			continue
 		}
 		label, ok := labels[string(a.Type)]
@@ -660,6 +722,89 @@ func deterministicSignalsWithFiles(res Result, priorArtURL func(refKind, ref str
 			sig.URL = priorArtURL(a.RefKind, a.SourceURL)
 		}
 		out = append(out, signalWithFiles{renderSignal: sig, files: a.Files})
+	}
+	return out
+}
+
+// firstParaRe matches the first <p> block of a rendered fragment; leadingJunk
+// guards liftLede against reaching INTO a wrapper (a compare pane, a figure,
+// a list) to steal a nested paragraph — lifting is only safe when the
+// paragraph is the fragment's actual opening block.
+var (
+	firstParaRe = regexp.MustCompile(`(?s)<p>(.*?)</p>`)
+	// only a fragment that OPENS with a bare paragraph lifts — an opening
+	// blockquote (a status banner) or table is not a lede, and lifting the
+	// <p> nested inside it would gut its wrapper.
+	leadingTags = regexp.MustCompile(`^\s*<p>`)
+)
+
+// liftLede lifts the opening paragraph out of a rendered HTML fragment,
+// returning (paragraph inner HTML, remaining fragment, ok). ok is false when
+// the fragment doesn't OPEN with plain prose (a table, figure, or heading
+// first) — synthesizing a hero from mid-document content would misrepresent
+// the plan, so the hero is skipped instead.
+func liftLede(html string) (string, string, bool) {
+	if !leadingTags.MatchString(html) {
+		return "", html, false
+	}
+	m := firstParaRe.FindStringSubmatchIndex(html)
+	if m == nil {
+		return "", html, false
+	}
+	para := strings.TrimSpace(html[m[2]:m[3]])
+	if para == "" {
+		return "", html, false
+	}
+	rest := strings.TrimSpace(html[:m[0]] + html[m[1]:])
+	return para, rest, true
+}
+
+// heroStats derives the hero chip row from plan structure + enrichment: each
+// chip only when its number is non-zero, and fewer than two chips yields none
+// (one lonely number is noise). Signals chip is teal (source-colored), open
+// review amber (needs attention), the rest neutral.
+func heroStats(res Result, sections int, review reviewSummary) []statChip {
+	var out []statChip
+	if sections > 0 {
+		out = append(out, statChip{Value: fmt.Sprintf("%d", sections), Label: "sections", Class: "neutral"})
+	}
+	if res.Signals.Files > 0 {
+		out = append(out, statChip{Value: fmt.Sprintf("%d", res.Signals.Files), Label: "files touched", Class: "neutral"})
+	}
+	if n := res.Signals.Collisions + res.Signals.PriorArt + res.Signals.ExpertRoutes; n > 0 {
+		out = append(out, statChip{Value: fmt.Sprintf("%d", n), Label: "team signals", Class: "teal"})
+	}
+	if review.Open > 0 {
+		out = append(out, statChip{Value: fmt.Sprintf("%d", review.Open), Label: "open review", Class: "amber"})
+	}
+	if len(out) < 2 {
+		return nil
+	}
+	return out
+}
+
+// topContextItems projects the retrieved context bundle into the alignment
+// strip: highest-scored first (stable on ties), capped so the strip stays a
+// glance, not a dump.
+func topContextItems(items []ContextItem, limit int) []renderContext {
+	idx := make([]int, len(items))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return items[idx[a]].Score > items[idx[b]].Score })
+	var out []renderContext
+	for _, i := range idx {
+		if len(out) == limit {
+			break
+		}
+		title := strings.TrimSpace(items[i].Title)
+		if title == "" {
+			title = items[i].Ref
+		}
+		if title == "" {
+			continue
+		}
+		out = append(out, renderContext{Kind: items[i].Kind, Title: title})
 	}
 	return out
 }

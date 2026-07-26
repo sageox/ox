@@ -1,28 +1,35 @@
 ---
-title: "ox plan view"
-description: "CLI reference for ox plan view"
-sidebar_position: 81
+title: "ox plan supersede"
+description: "CLI reference for ox plan supersede"
+sidebar_position: 80
 ---
 
-## ox plan view
+## ox plan supersede
 
-Read a saved plan in the terminal
+Mark a saved plan superseded by a successor plan
+
+### Synopsis
+
+Mark a saved plan superseded by a successor plan. --by <successor-slug> is
+required and must resolve to another saved plan — validated before anything
+is recorded.
 
 ```
-ox plan view <slug> [flags]
+ox plan supersede <slug> [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for view
+      --by string   the successor plan's slug (required)
+  -h, --help        help for supersede
+      --json        emit {"changed":...,"status":...} as JSON
 ```
 
 ### Options inherited from parent commands
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
-      --json             output in JSON format (default: false)
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
