@@ -290,8 +290,17 @@ func rebaseStepIsEmpty(ctx context.Context, repoPath string) bool {
 // runRebaseStep runs a `git rebase <arg>` with the editor disabled so git never
 // blocks waiting for a commit message, and with the C locale pinned so any
 // diagnostic we do read is stable regardless of the user's language settings.
+//
+// commit.gpgsign=false / tag.gpgsign=false mirror RunGit's hardening (run.go).
+// `--continue` COMMITS, so a repo whose config enables passphrase-protected
+// signing makes it hang or die on a TTY-less daemon. The rebase is then left
+// halted with a clean, conflict-free index — indistinguishable from the
+// upstream-equivalent-commit halt that advanceNonConflictRebaseStep skips, and
+// skipping it would discard a resolution that was staged but never recorded.
+// Matters more now that this runs in a loop that can fire hundreds of times.
 func runRebaseStep(ctx context.Context, repoPath, arg string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rebase", arg)
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+		"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "rebase", arg)
 	cmd.Dir = repoPath
 	cmd.Env = append(cmd.Environ(), "GIT_EDITOR=true", "LC_ALL=C", "LANG=C")
 	out, err := cmd.CombinedOutput()
