@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Plans are written for the reader who approves them.** Every AI coworker now drafts a plan with the decision up top — the shape, the tradeoffs, and the risk you need to approve it in ten minutes — and moves the exact files, edits, and gotchas into an "Implementation notes" section at the end, for the coworker that builds it. The rendered plan collapses that detail into an appendix you never have to open, so a ten-minute review actually takes ten minutes.
 
+- **`ox doctor` now flags a recording whose session link disagrees with the recording itself** — the one state that silently breaks links already written into your commits and pull requests. Reported, never repaired automatically: which link is correct depends on what has already been shared, so doctor names the conflict and leaves the call to you.
+
+### Fixed
+
+- **Every recording keeps one permanent session link, even when its upload has to be retried.** A retried or recovered upload could assign a second link to a session that already had one, so the references written into commit trailers, pull requests, and plans stopped resolving — and two copies of the same session could disagree about which one it was.
+
+- **Ledger sync no longer stalls on machines that sign git commits.** If your git config requires a passphrase to sign, sync could stop partway with no terminal available to answer the prompt, leaving work stranded locally.
+
 ## [0.12.0] - 2026-07-18
 
 Decision Records get first-class team context, and three real reliability gaps in sync and search are closed for good.
