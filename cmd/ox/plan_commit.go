@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/sageox/ox/internal/config"
@@ -98,9 +99,7 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 		}
 	}
 
-	addPaths := make([]string, 0, len(touchedPlanDirs)+len(touchedSessionDirs))
-	addPaths = append(addPaths, touchedPlanDirs...)
-	addPaths = append(addPaths, touchedSessionDirs...)
+	addPaths := slices.Concat(touchedPlanDirs, touchedSessionDirs)
 	if len(addPaths) > 0 {
 		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, addPaths...)
 		if out, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
