@@ -33,7 +33,7 @@ ox plan render [slug] [flags]
 ### Options
 
 ```
-      --artifact            render a self-contained page for publishing as a Claude Code Artifact (no external fonts/scripts, no review loop; enrichment links preserved)
+      --artifact            render a strictly self-contained, CSP-safe page for publishing as a Claude Code Artifact (no external fonts/scripts, no review loop; enrichment links preserved)
       --companion strings   bundle a rich self-contained HTML companion with the plan (repeatable; relative .html links in the plan markdown are auto-detected)
       --file string         plan source file when no slug is given (default: stdin, else newest ~/.claude/plans/*.md)
   -h, --help                help for render

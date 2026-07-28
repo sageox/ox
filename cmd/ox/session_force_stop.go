@@ -19,7 +19,7 @@ Use 'ox session status' to see active recordings and their agent IDs.
 
 Examples:
   ox session stop --agent-id OxzAbc    # stop a specific session
-  ox session stop --current             # stop the calling agent's own recording
+  ox session stop --current             # stop the calling AI coworker's own recording
   ox session stop                       # lists active recordings if no agent ID given`,
 	RunE: runSessionForceStop,
 }
@@ -27,7 +27,7 @@ Examples:
 func init() {
 	sessionCmd.AddCommand(sessionForceStopCmd)
 	sessionForceStopCmd.Flags().String("agent-id", "", "agent ID of the session to stop")
-	sessionForceStopCmd.Flags().Bool("current", false, "stop the calling agent's own recording (uses SAGEOX_AGENT_ID)")
+	sessionForceStopCmd.Flags().Bool("current", false, "stop the calling AI coworker's own recording (uses SAGEOX_AGENT_ID)")
 }
 
 func runSessionForceStop(cmd *cobra.Command, args []string) error {

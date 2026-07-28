@@ -40,9 +40,9 @@ description: >-
 ```mermaid
 flowchart TB
   RUN["Run ox plan enrich --json on the topic or draft"] --> DET["ox returns DETERMINISTIC badges + context bundle (0 LLM tokens)"]
-  DET --> READ["Agent reads the context bundle: murmurs, sessions, decisions, ADRs, expert artifacts"]
-  READ --> PAGE["Agent authors plan.html: tabs, inspectors, data-driven viz, dark design register"]
-  READ --> JUDGE["Optional: agent authors JUDGMENT badges, CITED-ONLY (aligns / conflicts / expert-perspective)"]
+  DET --> READ["AI coworker reads the context bundle: murmurs, sessions, decisions, ADRs, expert artifacts"]
+  READ --> PAGE["AI coworker authors plan.html: tabs, inspectors, data-driven viz, dark design register"]
+  READ --> JUDGE["Optional: AI coworker authors JUDGMENT badges, CITED-ONLY (aligns / conflicts / expert-perspective)"]
   PAGE --> SAVE["ox plan save --file plan.html  (ox derives plan.md + deterministic badges; --annotations optional)"]
   JUDGE --> SAVE
   SAVE --> GATE{"Render confirmed? (user asked OR plan.html recommend + confirm)"}
@@ -58,7 +58,7 @@ flowchart TB
 
    This makes **no LLM or network call**. It returns a `Result` JSON:
    - `annotations[]` — deterministic, ox-computed badges: `collision`, `prior-art`, `expert-routing`. Each carries `{section, kind:"deterministic", type, why, source_url, expert, files}`. These are **factual** — keep them as-is, do not second-guess them. On save, ox computes these itself; you never re-author them.
-   - `context[]` — the pre-retrieved bundle the agent reasons over: `{kind: murmur|session|decision|adr|commit|discussion, title, ref, snippet, score, author, when}`.
+   - `context[]` — the pre-retrieved bundle the AI coworker reasons over: `{kind: murmur|session|decision|adr|commit|discussion, title, ref, snippet, score, author, when}`.
    - `signals` — `{collisions, prior_art, expert_routes, material}`. `material` is ox's call on whether a render is worth recommending.
 
 2. **Author the page (the main event — see "Authoring the page" below).** Build the rich, self-contained `plan.html` that carries the plan's whole argument: tabbed views, interactive inspectors, data-driven visualizations, the dark design register.
@@ -95,7 +95,7 @@ flowchart TB
    ox plan render --file plan.html --open
    ```
 
-   ox serves your authored page with the chrome injected — the enrichment overlay (collision / prior-art / expert-routing chips, **including your judgment badges**), the footer credit, and the live review loop (click any element to attach a mark; content-hash anchored, so it works on your arbitrary markup). `--open` launches `ox plan review <slug>` so the human's marks write back to the ledger. On a headless shell it prints the path. `--artifact` exports the authored page verbatim, zero injection.
+   ox serves your authored page with the chrome injected — the enrichment overlay (collision / prior-art / expert-routing chips, **including your judgment badges**), the footer credit, and the live review loop (click any element to attach a mark; content-hash anchored, so it works on your arbitrary markup). `--open` launches `ox plan review <slug>` so the reviewer's marks write back to the ledger. On a headless shell it prints the path. `--artifact` exports the authored page verbatim, zero injection.
 
 ---
 
@@ -111,7 +111,7 @@ You are writing for a **senior / principal engineer or EM whose time is worth ~$
 
 - **Lead with the conclusion**, the decision needed, and the biggest risk — not the backstory. The opening view is a tight TL;DR (problem, approach, cost, biggest risk).
 - **The plan stands on its own.** Never reference a symbol, file, ID, or PR without enough context to understand *why it matters* — a reader who hasn't opened the codebase still follows the argument.
-- **No minutiae up top.** Interaction is your relocation tool: exact `file:line` steps and code trivia live in a collapsed "Implementation notes" view — essential to the implementing agent, invisible to the ten-minute approver.
+- **No minutiae up top.** Interaction is your relocation tool: exact `file:line` steps and code trivia live in a collapsed "Implementation notes" view — essential to the implementing AI coworker, invisible to the ten-minute approver.
 - **Every element earns its pixels.** Interactivity that compresses understanding (an inspector, a toggleable timeline) is the point; interactivity as decoration is noise.
 
 ### Visualizations do the heavy lifting
@@ -144,7 +144,7 @@ The chrome injects the earned, conditional SageOx credit by construction (a rest
 4. `ox plan save --file plan.html [--annotations <judgment.json>]` — ox stores the page, derives the markdown, computes deterministic badges, prints the slug.
 5. **If no render is confirmed:** stop here — report the saved slug (`ox plan view <slug>` reads the derived markdown in the terminal). Steps 6–7 apply only once a render exists.
 6. **If a render is confirmed:** `ox plan render --file plan.html --open` — ox injects the chrome and opens the review loop (`ox plan review <slug>`).
-7. **Architect review pass (recommended for material plans, render only).** Spawn an `architect` (or general-purpose) subagent to read the served page *as the $10k/hour principal reader*: is the decision + biggest risk up top and graspable in ten minutes? Does every file/ID/PR carry enough context to matter? Do the views compress understanding? Revise the page / badges and re-render until it signs off.
+7. **Architect review pass (recommended for material plans, render only).** Spawn an `architect` (or general-purpose) reviewer AI coworker to read the served page *as the $10k/hour principal reader*: is the decision + biggest risk up top and graspable in ten minutes? Does every file/ID/PR carry enough context to matter? Do the views compress understanding? Revise the page / badges and re-render until it signs off.
 8. Report the slug — and, when you rendered, the served/exported path.
 
 The goal: a $10k/hour principal reader opens the page, skims the TL;DR view + the enrichment overlay, and within ten minutes knows whether the plan aligns with team direction and whether to approve — with ox-computed facts visually separate from your cited judgment, and every badge saying where its claim comes from. You supply the page and the reasoning; ox supplies the chrome, the derived markdown, and the ledger.

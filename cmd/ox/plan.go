@@ -28,7 +28,7 @@ var planCmd = &cobra.Command{
 	Short: "Work with implementation plans (enrich, render, review)",
 	Long: `Work with SageOx-enriched implementation plans.
 
-  enrich   compute team-context signals for a plan (JSON for agents)
+  enrich   compute team-context signals for a plan (JSON for AI coworkers)
   render   render a plan to a self-contained HTML page for human review
   review   serve a plan and collect human review feedback (the review loop)
   list     browse saved plans
@@ -41,7 +41,7 @@ over one event-log engine (browser Approve in 'ox plan review' and
 {"changed":bool,"status":...} and is idempotent: re-running an
 already-applied verb is a safe no-op.
 
-Agents: run 'ox plan enrich --topic "<subject>" [--files a,b,c]' BEFORE
+AI coworkers: run 'ox plan enrich --topic "<subject>" [--files a,b,c]' BEFORE
 drafting a plan, and 'ox plan enrich --file <plan.md>' (or stdin) once
 drafted — both return JSON team context (collision / prior-art /
 expert-routing) at zero LLM/network cost. When a human is shaping a plan,
@@ -65,7 +65,7 @@ Input modes (precedence order):
   stdin                                 a plan piped from another tool
   (none of the above)                   auto-discover the newest ~/.claude/plans/*.md
 
-Output is JSON by default (the agent/plumbing path). Use --text for a human summary.`,
+Output is JSON by default (the AI-coworker/plumbing path). Use --text for a human summary.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		topic, _ := cmd.Flags().GetString("topic")
 		files, _ := cmd.Flags().GetStringSlice("files")
@@ -747,6 +747,13 @@ func runPlanRenderFreshHTML(cmd *cobra.Command, in plan.Input, outPath string, o
 	gitRoot := findGitRoot()
 	result := plan.Enrich(context.Background(), mdIn, gitRoot)
 
+	// Companion artifacts travel with an authored page too: explicit --companion
+	// flags plus relative .html links, scanned on the DERIVED markdown (extract
+	// rewrites the page's <a href> links into markdown links, so one detector
+	// serves both paths). Bundled into the saved plan dir + meta below, and
+	// placed beside -o/temp output so the page's own relative hrefs resolve.
+	companions := gatherCompanions(cmd, mdIn)
+
 	slug := plan.Slugify(planTopic(mdIn))
 	if s := plan.AuthoredSlug(authored); s != "" {
 		slug = s
@@ -763,9 +770,16 @@ func runPlanRenderFreshHTML(cmd *cobra.Command, in plan.Input, outPath string, o
 		// is what keeps injection idempotent and --artifact verbatim.
 		if dir := savePlanArtifacts(gitRoot, mdIn, result, authored, plan.PrimaryHTML); dir != "" {
 			cli.PrintHint("Saved HTML-primary plan (markdown derived from the page) — live review loop: `ox plan review " + filepath.Base(dir) + "`.")
+			if len(companions) > 0 {
+				if names, cerr := plan.CopyCompanions(companions, dir); cerr != nil {
+					cli.PrintHint("could not bundle companion(s): " + cerr.Error())
+				} else if rerr := plan.RecordCompanions(dir, names); rerr != nil {
+					cli.PrintHint("could not record companion(s) in plan meta: " + rerr.Error())
+				}
+			}
 		}
 	}
-	emitRenderedHTML(cmd, injected, "", outPath, open, name, nil)
+	emitRenderedHTML(cmd, injected, "", outPath, open, name, companions)
 	return nil
 }
 
@@ -1225,14 +1239,14 @@ func init() {
 	planRenderCmd.Flags().StringP("output", "o", "", "write the rendered HTML to this path")
 	planRenderCmd.Flags().Bool("open", false, "open the rendered HTML in your browser")
 	planRenderCmd.Flags().Bool("static", false, "with --open on a saved plan, open a read-only static page instead of launching the live review loop")
-	planRenderCmd.Flags().Bool("artifact", false, "render a self-contained page for publishing as a Claude Code Artifact (no external fonts/scripts, no review loop; enrichment links preserved)")
+	planRenderCmd.Flags().Bool("artifact", false, "render a strictly self-contained, CSP-safe page for publishing as a Claude Code Artifact (no external fonts/scripts, no review loop; enrichment links preserved)")
 	planRenderCmd.Flags().StringSlice("companion", nil, "bundle a rich self-contained HTML companion with the plan (repeatable; relative .html links in the plan markdown are auto-detected)")
 
 	planListCmd.Flags().Bool("json", false, "emit the plan list as JSON (scripting path)")
 
 	planSaveCmd.Flags().String("file", "", "the plan of record: an authored self-contained .html page (preferred; saved as canonical, markdown derived) or a .md quick plan; annotations optional (ox self-enriches)")
 	planSaveCmd.Flags().String("plan", "", "legacy: plan markdown file (with --annotations; prefer --file)")
-	planSaveCmd.Flags().String("annotations", "", "merged annotations.json: enrich badges + agent judgment badges (required)")
+	planSaveCmd.Flags().String("annotations", "", "merged annotations.json: enrich badges + AI-coworker judgment badges (required with --plan; optional with --file, which self-enriches)")
 	planSaveCmd.Flags().String("html", "", "optional pre-rendered HTML; size-gated plain-git-vs-LFS on save")
 
 	planLintCmd.Flags().Bool("strict", false, "exit non-zero when the render has attribution findings (for CI / golden checks)")

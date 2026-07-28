@@ -37,7 +37,7 @@ page that set the standard for what a plan can feel like:
 - **Side-by-side comparison panes** and **verdict cards**.
 - **Design-system dark palette**: canvas `#0b0d0b`, surface `#111411`, accent
   `#99c693`, Inter + Spline Sans Mono.
-- **Self-contained local page** — inline CSS/JS, no external dependencies.
+- **Self-contained single file** — inline CSS/JS, no external dependencies.
 
 A plan page that merely reformats prose has missed the point; the page should do
 work a document cannot.
@@ -68,8 +68,7 @@ and to ungrouped review anchors.
   via `ox plan review <slug>`.
 - Injection is **idempotent and append-only** — re-rendering replaces the marker
   block and never touches authored markup.
-- `--artifact` serves/writes the authored page **verbatim**, zero injection; any
-  inline CSS/JS already present in the authored file remains part of that file.
+- `--artifact` serves/writes the authored page **verbatim**, zero injection.
 
 ## What ox derives — the markdown contract
 
@@ -119,6 +118,8 @@ Good for a small plan; it approximates. A material plan gets an authored page.
 The plan is the developer's **own local content rendered locally for that
 developer**: the review server binds `127.0.0.1` and is token-gated, so author
 scripting is a feature, not a threat — the interactivity is the point.
-`--artifact` is the self-contained export for when the page needs to travel
-beyond the local loop; it does not add external dependencies or ox review
-scripts, and it does not rewrite authored inline assets.
+`--artifact` is the strict export for when the page needs to travel beyond the
+local loop: a fully self-contained page — no external fonts, scripts, or
+network fetches; CSS and JS inline. Self-contained is the whole claim: there is
+no CSP nonce/hash handling, so a strict host CSP that disallows
+`unsafe-inline` will still block the page's inline styles and scripts.

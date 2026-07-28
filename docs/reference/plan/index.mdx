@@ -12,7 +12,7 @@ Work with implementation plans (enrich, render, review)
 
 Work with SageOx-enriched implementation plans.
 
-  enrich   compute team-context signals for a plan (JSON for agents)
+  enrich   compute team-context signals for a plan (JSON for AI coworkers)
   render   render a plan to a self-contained HTML page for human review
   review   serve a plan and collect human review feedback (the review loop)
   list     browse saved plans
@@ -25,7 +25,7 @@ over one event-log engine (browser Approve in 'ox plan review' and
 {"changed":bool,"status":...} and is idempotent: re-running an
 already-applied verb is a safe no-op.
 
-Agents: run 'ox plan enrich --topic "<subject>" [--files a,b,c]' BEFORE
+AI coworkers: run 'ox plan enrich --topic "<subject>" [--files a,b,c]' BEFORE
 drafting a plan, and 'ox plan enrich --file <plan.md>' (or stdin) once
 drafted — both return JSON team context (collision / prior-art /
 expert-routing) at zero LLM/network cost. When a human is shaping a plan,
