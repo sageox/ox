@@ -419,6 +419,37 @@ func TestWriteToAgentEnvFile_NeverLoosensPermissions(t *testing.T) {
 	})
 }
 
+// isolateSessionMarkerDir gives the calling test a private SessionMarkerDir.
+//
+// SessionMarkerDir() is paths.TempDir()/sessions — ONE global directory
+// shared by the whole package (and with the developer's real ox install).
+// FindSessionMarkerByPID scans it and returns the FIRST marker matching the
+// queried PID, in os.ReadDir order. Every test that writes a marker with
+// ParentPID: os.Getpid() therefore competes for the same key, and which one
+// a PID query resolves to comes down to filename ordering — several test
+// files do exactly that (agent_hook_test.go, session_force_stop_test.go,
+// agent_prime_id_reuse_test.go).
+//
+// Failure prevented: a PID-query test intermittently asserting against
+// another test's marker. Reproduced deterministically by planting a
+// same-PID marker whose session ID sorts earlier — the query then returns
+// the competitor rather than the marker under test.
+//
+// paths.TempDir() derives the directory from $USER (then $USERNAME on
+// Windows), so overriding those per test isolates the namespace without
+// touching production code. t.Setenv restores them automatically and marks
+// the test non-parallel, which is required here anyway. Any future test
+// that queries markers by PID should call this rather than hope it wins the
+// ordering race.
+func isolateSessionMarkerDir(t *testing.T) {
+	t.Helper()
+	unique := "oxtest-" + strings.ReplaceAll(t.Name(), "/", "_")
+	t.Setenv("USER", unique)
+	t.Setenv("USERNAME", unique)
+	require.NoError(t, os.MkdirAll(SessionMarkerDir(), 0700))
+	t.Cleanup(func() { _ = os.RemoveAll(SessionMarkerDir()) })
+}
+
 // TestFindSessionMarkerByPID_MatchesParentPID is the #527/#529 regression
 // guard for PID-based marker fallback: a second prime call that lacks a
 // native agent_session_id (e.g. invoked from a CLAUDE.md BLOCKING
@@ -429,7 +460,10 @@ func TestWriteToAgentEnvFile_NeverLoosensPermissions(t *testing.T) {
 //
 // Uses the current test process PID so the proc.IsAlive liveness gate
 // passes — a recycled/dead PID is specifically what the gate filters out.
+// That PID is shared with every other test in the package, so the marker
+// namespace is isolated first; see isolateSessionMarkerDir.
 func TestFindSessionMarkerByPID_MatchesParentPID(t *testing.T) {
+	isolateSessionMarkerDir(t)
 	agentPID := os.Getpid()
 	sessionID := "findbyPIDtest_" + time.Now().Format("20060102150405.000")
 
@@ -466,6 +500,7 @@ func TestFindSessionMarkerByPID_IgnoresDeadParentPID(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test requires POSIX `true` to spawn-and-reap a guaranteed-dead PID")
 	}
+	isolateSessionMarkerDir(t)
 
 	cmd := exec.Command("true")
 	require.NoError(t, cmd.Start())
@@ -490,6 +525,7 @@ func TestFindSessionMarkerByPID_IgnoresDeadParentPID(t *testing.T) {
 // strict: unrelated markers on the system must not be returned for a PID
 // they don't reference.
 func TestFindSessionMarkerByPID_IgnoresNonMatchingPID(t *testing.T) {
+	isolateSessionMarkerDir(t)
 	sessionID := "findbyPIDnomatch_" + time.Now().Format("20060102150405.000")
 	marker := &SessionMarker{
 		AgentID:        "OxOther",
@@ -509,6 +545,53 @@ func TestFindSessionMarkerByPID_IgnoresNonMatchingPID(t *testing.T) {
 // placeholder / unset PID values (0, negative) against a stored marker
 // that happens to record PID 0 from an earlier buggy write.
 func TestFindSessionMarkerByPID_RejectsInvalidPID(t *testing.T) {
+	isolateSessionMarkerDir(t)
 	assert.Nil(t, FindSessionMarkerByPID(0))
 	assert.Nil(t, FindSessionMarkerByPID(-1))
+}
+
+// TestFindSessionMarkerByPID_IgnoresMarkerFromAnotherTestsDir is the
+// regression guard for isolateSessionMarkerDir itself. It reconstructs the
+// exact conditions that made this suite flaky: a marker sitting in the
+// SHARED global dir carrying the same ParentPID (os.Getpid(), which every
+// test in the package shares) under a session ID that sorts EARLIER, so an
+// un-isolated os.ReadDir scan reaches it first.
+//
+// Failure prevented: the flake returning. Remove the isolateSessionMarkerDir
+// call below and this fails deterministically with AgentID "OxForeign" —
+// which is how the original intermittent failure was diagnosed. Note that a
+// test which merely writes one marker and reads it back would keep passing
+// throughout, which is why the flake survived this long.
+func TestFindSessionMarkerByPID_IgnoresMarkerFromAnotherTestsDir(t *testing.T) {
+	agentPID := os.Getpid()
+
+	// Plant BEFORE isolating, so it lands in the shared dir that other tests
+	// in this package really do write to. "aaa" sorts ahead of "own".
+	foreignID := "aaa_foreign_marker_from_another_test"
+	require.NoError(t, WriteSessionMarker(&SessionMarker{
+		AgentID:        "OxForeign",
+		AgentSessionID: foreignID,
+		PrimedAt:       time.Now().Truncate(time.Second),
+		ParentPID:      agentPID,
+	}))
+	// capture the absolute path now: once USER is overridden below,
+	// markerPath resolves somewhere else entirely and could not clean this up
+	foreignPath := markerPath(foreignID)
+	t.Cleanup(func() { _ = os.Remove(foreignPath) })
+
+	isolateSessionMarkerDir(t)
+
+	ownID := "own_marker_under_test"
+	require.NoError(t, WriteSessionMarker(&SessionMarker{
+		AgentID:        "OxOwn",
+		AgentSessionID: ownID,
+		PrimedAt:       time.Now().Truncate(time.Second),
+		ParentPID:      agentPID,
+	}))
+	t.Cleanup(func() { DeleteSessionMarker(ownID) })
+
+	found := FindSessionMarkerByPID(agentPID)
+	require.NotNil(t, found, "the isolated dir's own marker must still be found")
+	assert.Equal(t, "OxOwn", found.AgentID,
+		"a same-PID marker in the shared global dir must not leak into an isolated test")
 }
