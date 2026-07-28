@@ -257,17 +257,26 @@ func TestInjectChrome_ZeroEnrichmentStillInjectsReview(t *testing.T) {
 }
 
 // TestChromeJS_EscapesAttributesAndFiltersLinks guards the standalone injected
-// script's XSS boundary. The script builds small HTML strings at runtime, so it
-// must escape attribute delimiters and only emit clickable http(s) links.
+// script's XSS boundary. The script builds small HTML strings at runtime from
+// annotation values, so it must escape attribute delimiters and route every
+// href through the scheme ALLOWLIST — a denylist would miss the next
+// executable scheme. The JS has no runtime harness, so the source is the
+// contract.
 func TestChromeJS_EscapesAttributesAndFiltersLinks(t *testing.T) {
 	js := string(mustChromeAsset("assets/chrome.js"))
 	for _, want := range []string{
+		// attribute context: quotes neutralized, apostrophe as the numeric
+		// entity (&apos; is XML, not HTML4)
 		`.replace(/"/g, '&quot;')`,
 		`.replace(/'/g, '&#39;')`,
 		`function safeURL`,
-		`/^https?:\/\//i.test(raw)`,
-		`var href = s ? safeURL(s.url) : '';`,
-		`var sessionHref = safeURL(data.session_url);`,
+		// allowlist, not a javascript:-only denylist
+		`scheme === 'http' || scheme === 'https' || scheme === 'mailto'`,
+		// both link builders route through it, and escape the survivor
+		`safeURL(s && s.url)`,
+		`safeURL(data.session_url)`,
+		`esc(url)`,
+		`esc(sessionURL)`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("chrome.js missing safety guard %q", want)

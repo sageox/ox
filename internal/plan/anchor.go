@@ -135,7 +135,11 @@ func extractReviewTargets(htmlBytes []byte) ([]reviewTarget, error) {
 	var walk func(n *html.Node, section *html.Node)
 	walk = func(n *html.Node, section *html.Node) {
 		if n.Type == html.ElementNode {
-			if n.DataAtom == atom.Section && attrVal(n, "id") != "" {
+			// scope mirrors review.js headingOf()'s
+			// closest('section[id], [data-ox-section]'): the NEAREST
+			// ancestor-or-self matching either — authored pages anchor sections
+			// with data-ox-section, generated pages with section[id].
+			if (n.DataAtom == atom.Section && attrVal(n, "id") != "") || hasAttr(n, "data-ox-section") {
 				section = n
 			}
 			if matchesReviewSelector(n) {
@@ -158,12 +162,17 @@ func extractReviewTargets(htmlBytes []byte) ([]reviewTarget, error) {
 }
 
 // matchesReviewSelector mirrors review.js SELECTOR:
-// 'section[id], li, tr, .ox-chip, .stat, .bar-row'.
+// 'section[id], li, tr, .ox-chip, .stat, .bar-row' — plus [data-ox-section],
+// the authored-page anchor container chrome.js adds to the page-side selector
+// (a mark on one must resolve to the same anchor server-side).
 func matchesReviewSelector(n *html.Node) bool {
 	switch n.DataAtom {
 	case atom.Section:
 		return attrVal(n, "id") != ""
 	case atom.Li, atom.Tr:
+		return true
+	}
+	if hasAttr(n, "data-ox-section") {
 		return true
 	}
 	for _, c := range strings.Fields(attrVal(n, "class")) {
@@ -174,29 +183,57 @@ func matchesReviewSelector(n *html.Node) bool {
 	return false
 }
 
-// sectionHeading mirrors review.js headingOf(): the first <h2> descendant's
-// text, else the section's id, else "" when the element sits outside any
-// section[id].
+// sectionHeading mirrors review.js headingOf() exactly: a non-empty
+// data-ox-section attribute wins; else the first <h2> OR <h3> descendant in
+// document order (querySelector('h2, h3')); else the scope's id; "" when the
+// element sits outside any scope.
 func sectionHeading(section *html.Node) string {
 	if section == nil {
 		return ""
 	}
-	if h2 := firstDescendant(section, atom.H2); h2 != nil {
-		return textContent(h2)
+	if ds := attrVal(section, "data-ox-section"); ds != "" {
+		return ds
+	}
+	if h := firstDescendantAny(section, atom.H2, atom.H3); h != nil {
+		return textContent(h)
 	}
 	return attrVal(section, "id")
 }
 
+// firstDescendant returns the first descendant with the given atom in document
+// order (extract.go uses it for body/head/title lookup).
 func firstDescendant(n *html.Node, a atom.Atom) *html.Node {
+	return firstDescendantAny(n, a)
+}
+
+// firstDescendantAny returns the first descendant matching ANY of the atoms in
+// document order — the querySelector('h2, h3') semantics (document order, not
+// per-atom priority).
+func firstDescendantAny(n *html.Node, atoms ...atom.Atom) *html.Node {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if c.Type == html.ElementNode && c.DataAtom == a {
-			return c
+		if c.Type == html.ElementNode {
+			for _, a := range atoms {
+				if c.DataAtom == a {
+					return c
+				}
+			}
 		}
-		if hit := firstDescendant(c, a); hit != nil {
+		if hit := firstDescendantAny(c, atoms...); hit != nil {
 			return hit
 		}
 	}
 	return nil
+}
+
+// hasAttr reports attribute PRESENCE (the CSS [attr] selector semantics —
+// present-but-empty still matches).
+func hasAttr(n *html.Node, key string) bool {
+	for _, a := range n.Attr {
+		if a.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 // textContent mirrors DOM textContent: the concatenation of every text node in

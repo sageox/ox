@@ -15,6 +15,7 @@ package plan
 // of record, and this output only needs to be good enough to search and skim.
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -394,13 +395,12 @@ func flattenInline(n *html.Node) string {
 			case atom.Em, atom.I:
 				b.WriteString(inlineWrap("*", flattenInline(c), "*"))
 			case atom.A:
-				href := attrVal(c, "href")
 				text := collapseSpace(flattenInline(c))
 				if text == "" {
 					continue
 				}
-				if href != "" && !strings.HasPrefix(href, "#") && !unsafeLinkScheme(href) {
-					b.WriteString("[" + text + "](" + href + ")")
+				if dest := markdownLinkDest(attrVal(c, "href")); dest != "" {
+					b.WriteString("[" + text + "](" + dest + ")")
 				} else {
 					b.WriteString(text)
 				}
@@ -412,16 +412,42 @@ func flattenInline(n *html.Node) string {
 	return b.String()
 }
 
-// unsafeLinkScheme reports whether href uses a scheme that must never survive
-// into derived markdown as a clickable link.
-func unsafeLinkScheme(href string) bool {
-	h := strings.ToLower(strings.TrimSpace(href))
-	for _, scheme := range []string{"javascript:", "data:", "vbscript:"} {
-		if strings.HasPrefix(h, scheme) {
-			return true
+// linkSchemeRe matches an RFC 3986 scheme prefix (ALPHA *(ALPHA/DIGIT/+/-/.)
+// then ":"). Deliberately strict: a bare "render.go:42" href parses as scheme
+// "render.go" (browsers agree) and is dropped — degrading a weird link to
+// plain text is always safe; letting a scheme sneak past never is. Path-ish
+// refs with a slash ("internal/plan/render.go:42") contain "/" before the ":"
+// so they don't scheme-match and stay linkable as relative refs.
+var linkSchemeRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*:`)
+
+// markdownLinkDest validates and formats an authored href for the derived
+// markdown, returning "" when the link must degrade to plain text. The scheme
+// check is an ALLOWLIST (relative, http, https, mailto) — the old javascript:
+// denylist let data:/vbscript: (and any future scheme) flow into derived
+// markdown that gets re-rendered as HTML. Fragment-only refs are dropped (the
+// derived document has different anchors), and hrefs that would break the
+// []() syntax are angle-bracketed or dropped.
+func markdownLinkDest(href string) string {
+	href = strings.TrimSpace(href)
+	if href == "" || strings.HasPrefix(href, "#") {
+		return ""
+	}
+	if m := linkSchemeRe.FindString(href); m != "" {
+		switch strings.ToLower(strings.TrimSuffix(m, ":")) {
+		case "http", "https", "mailto":
+		default:
+			return "" // unlisted scheme — degrade to plain text
 		}
 	}
-	return false
+	// CommonMark: <> in a destination always breaks; parens/whitespace break
+	// the bare form but survive the angle-bracket form (newlines never do).
+	if strings.ContainsAny(href, "<>\n") {
+		return ""
+	}
+	if strings.ContainsAny(href, "() \t") {
+		return "<" + href + ">"
+	}
+	return href
 }
 
 // inlineWrap trims/collapses s and wraps it in pre/suf, or returns "" for

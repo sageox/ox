@@ -37,6 +37,9 @@
     'aligns': 'Aligns', 'conflicts': 'Conflicts', 'expert-perspective': 'Expert view'
   };
 
+  // full HTML escape: output lands inside double-quoted attributes via
+  // innerHTML, so quotes MUST be neutralized too — signal urls/types and
+  // session_url come from annotations, which are untrusted input here.
   function esc(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;')
@@ -45,9 +48,16 @@
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
   }
+  // href allowlist: relative URLs, http(s), and mailto only — anything else
+  // (javascript:, data:, vbscript:, …) is dropped rather than rendered. The
+  // caller escapes the survivor; safeURL only rules on the scheme.
   function safeURL(u) {
-    var raw = String(u || '').trim();
-    return /^https?:\/\//i.test(raw) ? esc(raw) : '';
+    var raw = String(u == null ? '' : u).trim();
+    if (!raw) return '';
+    var m = raw.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/);
+    if (!m) return raw; // no scheme — relative, safe
+    var scheme = m[1].toLowerCase();
+    return (scheme === 'http' || scheme === 'https' || scheme === 'mailto') ? raw : '';
   }
 
   // floating "OX" toggle + panel: collision / prior-art / expert-routing /
@@ -74,8 +84,8 @@
       var type = s && s.type ? String(s.type) : '';
       var label = esc((s && s.label) || TYPE_LABEL[type] || type);
       var why = esc(s && s.why);
-      var href = s ? safeURL(s.url) : '';
-      var link = href ? ' <a href="' + href + '" target="_blank" rel="noopener noreferrer">view ↗</a>' : '';
+      var url = safeURL(s && s.url);
+      var link = url ? ' <a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">view ↗</a>' : '';
       html += '<div class="ox-chrome-chip" data-type="' + esc(type) + '"><b>' + label + '</b><span>' + why + '</span>' + link + '</div>';
     });
     if (context.length) {
@@ -105,8 +115,8 @@
   function buildFooter() {
     var parts = [];
     if (data.footer_credit) parts.push('Team context enriched by SageOx');
-    var sessionHref = safeURL(data.session_url);
-    if (sessionHref) parts.push('<a href="' + sessionHref + '" target="_blank" rel="noopener noreferrer">View session</a>');
+    var sessionURL = safeURL(data.session_url);
+    if (sessionURL) parts.push('<a href="' + esc(sessionURL) + '" target="_blank" rel="noopener noreferrer">View session</a>');
     parts.push('Rendered by <code>ox plan</code> · SageOx');
     var foot = document.createElement('div');
     foot.className = 'ox-chrome-foot';

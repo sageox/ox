@@ -252,7 +252,10 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 	// listing) and basename-only (no traversal).
 	mux.HandleFunc("/companions/", func(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, "/companions/")
-		if name == "" || name != filepath.Base(name) {
+		// "." and ".." survive the Base() identity check (filepath.Base("..")
+		// == ".."); reject them explicitly so the handler stays self-defending
+		// even if ServeMux's path-cleaning is ever bypassed by a wrapper.
+		if name == "" || name == "." || name == ".." || name != filepath.Base(name) {
 			http.NotFound(w, r)
 			return
 		}
