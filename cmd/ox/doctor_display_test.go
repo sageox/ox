@@ -467,6 +467,15 @@ func TestRunDoctorChecks_CategoryStructure(t *testing.T) {
 
 // TestRunDoctorChecks_WithFixFlag verifies fix flag is passed through
 func TestRunDoctorChecks_WithFixFlag(t *testing.T) {
+	// Not part of the fast tier. This drives a REAL doctor pass with fix=true —
+	// network probes (the ledger connectivity check alone allows 10s), API calls,
+	// and git operations — and it cannot be cached because it has side effects.
+	// In isolation it takes ~5s; under `-parallel 32` contention it measured
+	// 192s, roughly half the entire `make test` wall clock for this one test.
+	// It still runs in `make test-all` and CI, which is where it belongs.
+	if testing.Short() {
+		t.Skip("short: drives a real doctor --fix pass with network probes")
+	}
 	t.Parallel()
 	// run with fix=true (can't cache this since it may have side effects)
 	categoriesWithFix := runDoctorChecks(context.Background(), doctorOptions{fix: true})

@@ -172,6 +172,7 @@ func (f *ledgerFixture) fileContent(rel string) string {
 // escalation — and the repair loop "succeeding" every cycle while making no
 // progress at all.
 func TestWedge_SessionsMetaConflict_SelfHeals(t *testing.T) {
+	t.Parallel()
 	f := newLedgerFixture(t)
 	const meta = "sessions/s1/meta.json"
 
@@ -201,6 +202,7 @@ func TestWedge_SessionsMetaConflict_SelfHeals(t *testing.T) {
 // commits and green exit codes on every cycle while never converging — it reads
 // as recovery and is not.
 func TestWedge_RepairIsIdempotent_NoInfinitePingPong(t *testing.T) {
+	t.Parallel()
 	f := newLedgerFixture(t)
 	const meta = "sessions/s1/meta.json"
 
@@ -229,6 +231,7 @@ func TestWedge_RepairIsIdempotent_NoInfinitePingPong(t *testing.T) {
 // — a permanent repo-wide wedge strictly worse than the one being fixed
 // (.claude/rules/cache-only-design.md, 2026-04-25 incident).
 func TestWedge_PointerNeverLosesToHydratedContent(t *testing.T) {
+	t.Parallel()
 	pointer := lfsPointer("aa11bb22cc33dd44ee55ff6677889900aabbccddeeff00112233445566778899", 8192)
 	hydrated := "# Agent Session\n\nhydrated bytes that must never be committed\n"
 
@@ -258,6 +261,7 @@ func TestWedge_PointerNeverLosesToHydratedContent(t *testing.T) {
 // enumerated, and the push pre-flight only ever REPORTED locks while the pull
 // path swept them.
 func TestWedge_StaleLockBlocksPushForever(t *testing.T) {
+	t.Parallel()
 	for _, lock := range []string{"index.lock", "next-index-13088.lock", "shallow.lock"} {
 		t.Run(lock, func(t *testing.T) {
 			f := newLedgerFixture(t)
@@ -283,6 +287,7 @@ func TestWedge_StaleLockBlocksPushForever(t *testing.T) {
 // TestWedge_StaleRebaseDirBlocksEveryPull covers the abandoned rebase — every
 // subsequent pull fails with "already a rebase-merge directory" until cleared.
 func TestWedge_StaleRebaseDirBlocksEveryPull(t *testing.T) {
+	t.Parallel()
 	f := newLedgerFixture(t)
 	f.diverge("sessions/s1/meta.json", `{"s":"local"}`, `{"s":"cloud"}`)
 
@@ -321,6 +326,7 @@ func TestWedge_StaleRebaseDirBlocksEveryPull(t *testing.T) {
 // that yanks a rebase out from under the daemon's own in-flight pull corrupts
 // live work — a self-inflicted wedge.
 func TestWedge_FreshRebaseIsNeverAborted(t *testing.T) {
+	t.Parallel()
 	f := newLedgerFixture(t)
 	f.diverge("sessions/s1/meta.json", `{"s":"local"}`, `{"s":"cloud"}`)
 	f.gitAllowFail(f.local, "pull", "--rebase", "--autostash")
@@ -338,6 +344,7 @@ func TestWedge_FreshRebaseIsNeverAborted(t *testing.T) {
 // end: detection must fire, and the repair must actually reach 0/0 rather than
 // merely returning success.
 func TestWedge_DivergenceDetectedAndConverges(t *testing.T) {
+	t.Parallel()
 	f := newLedgerFixture(t)
 	f.diverge("sessions/s1/meta.json", `{"s":"local"}`, `{"s":"cloud"}`)
 
@@ -358,6 +365,7 @@ func TestWedge_DivergenceDetectedAndConverges(t *testing.T) {
 // resolves one conflict per pass and effectively never finishes on a ledger
 // carrying hundreds of them — the real one had 281.
 func TestWedge_ManyConflictsConvergeInBoundedRounds(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: drives many real git commits")
 	}
@@ -389,6 +397,7 @@ func TestWedge_ManyConflictsConvergeInBoundedRounds(t *testing.T) {
 // auto-resolve set to sessions/ did not quietly make human-authored content
 // last-writer-wins too.
 func TestWedge_NonSessionConflictsStillRefuseAutoResolve(t *testing.T) {
+	t.Parallel()
 	for _, path := range []string{"AGENTS.md", "docs/architecture.md", "MEMORY.md"} {
 		t.Run(path, func(t *testing.T) {
 			f := newLedgerFixture(t)
@@ -413,6 +422,7 @@ func TestWedge_NonSessionConflictsStillRefuseAutoResolve(t *testing.T) {
 // conflicting commit, which is exactly why single-commit fixtures passed while
 // a 344-commit ledger stayed stuck for 13 days.
 func TestWedge_SequentiallyConflictingCommits(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: drives many real git commits")
 	}
@@ -452,6 +462,7 @@ func TestWedge_SequentiallyConflictingCommits(t *testing.T) {
 // NO unmerged files, wanting `--skip`. A resolver that only understands
 // conflicts must not mistake that for a failure worth aborting over.
 func TestWedge_ReplayedCommitBecomesEmpty(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: drives real git commits")
 	}

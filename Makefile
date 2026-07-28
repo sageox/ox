@@ -206,7 +206,18 @@ check-raw-writer-chokepoint: ## Ensure raw.jsonl is only opened via session.RawW
 		exit 1; \
 	fi
 
-test-preflight: lint check-no-git-lfs-shell check-raw-writer-chokepoint test-all test-slow ## Pre-PR quality gate: lint + all unit tests + slow tests
+test-preflight: check-no-git-lfs-shell check-raw-writer-chokepoint ## Pre-PR quality gate: lint + all unit tests + slow tests (lint/test-all/test-slow run concurrently)
+	$(call say,"Running lint, full tests, and slow tests concurrently...")
+	@# lint and the test binaries don't share any output file (test-all writes
+	@# coverage.out; test-slow and lint don't touch it), so running them
+	@# concurrently via a sub-make -j is safe and turns a lint(2-4min) + test-all
+	@# + test-slow SUM into a max() — lint's cost is absorbed into the test
+	@# wall time instead of adding to it. On failure, already-started sibling
+	@# jobs are allowed to finish (standard `make -j` behavior); only launching
+	@# NEW prerequisites stops. Output may interleave under -j with GNU Make
+	@# <4.0 (macOS system `make`); install `brew install make` (gmake) and use
+	@# `--output-sync=target` if that's confusing.
+	@$(MAKE) -j 3 lint test-all test-slow
 
 test-digital-twin: test-ledger-twin test-kb-twin ## Digital twin tests (team_context_twin pending, see ox-au5)
 
@@ -308,7 +319,12 @@ smoke-test: build ## Run smoke tests against SageOx cloud (requires SAGEOX_CI_PA
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
 lint: lint-test-env ## Run golangci-lint
 	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/usage/install/" && exit 1)
-	@golangci-lint run -c .config/golangci.yml ./...
+	@# --allow-parallel-runners: multiple AI coding agent sessions routinely run
+	@# `make lint` at the same time in this repo. golangci-lint's default file
+	@# lock turns that into a hard failure ("parallel golangci-lint is running")
+	@# instead of just queuing or racing harmlessly — each invocation has its
+	@# own in-memory analysis, so concurrent runs don't corrupt shared state.
+	@golangci-lint run -c .config/golangci.yml --allow-parallel-runners ./...
 
 lint-test-env: ## Check that test files use testguard instead of os.Environ()
 	$(call say,"Checking for os.Environ() in test files...")

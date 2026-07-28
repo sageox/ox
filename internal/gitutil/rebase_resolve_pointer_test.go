@@ -38,6 +38,7 @@ func itoa(n int) string {
 // and every subsequent push is rejected with "LFS objects are missing" — a
 // permanent, repo-wide wedge strictly worse than the one being fixed.
 func TestPointerWins_HydratedNeverBeatsPointer(t *testing.T) {
+	t.Parallel()
 	const (
 		sessionFile = "sessions/2026-07-01T00-00-ryan-Oxtest/session.md"
 		pointerOID  = "3bdb5928692a4ce4bb0ec3ad2a2f0e1d9c8b7a65432109876543210fedcba9876"
@@ -97,6 +98,7 @@ func TestPointerWins_HydratedNeverBeatsPointer(t *testing.T) {
 // TestPointerWinsStage_Classification pins the decision function itself, so a
 // future refactor cannot silently invert it.
 func TestPointerWinsStage_Classification(t *testing.T) {
+	t.Parallel()
 	const f = "sessions/s1/session.md"
 	pointer := lfsPointer("abc123def4567890abc123def4567890abc123def4567890abc123def4567890", 100)
 	content := "# not a pointer\n"
