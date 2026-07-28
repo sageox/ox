@@ -253,12 +253,22 @@ func readHeaderSessionIDStrict(rawPath string) (string, error) {
 	if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 		return "", fmt.Errorf("invalid JSON on header line: %w", err)
 	}
-	// mirror the two header shapes session.ReadHeaderSessionID recognizes
-	// (type=="header"+metadata, or the alternative _meta format used by
-	// imported/manual sessions) — anything else is not a header at all.
-	_, hasMetadata := entry["metadata"]
-	_, hasMeta := entry["_meta"]
-	if !hasMetadata && !hasMeta {
+	// Mirror session.ReadHeaderSessionID's acceptance condition EXACTLY:
+	// (metadata is an object AND type=="header") OR (_meta is an object).
+	//
+	// Bare key-presence is not enough, and the gap is not cosmetic. A first
+	// line that merely HAS a "metadata" key — an ordinary entry, or a header
+	// whose metadata is a string rather than an object — would pass a
+	// presence check, then ReadHeaderSessionID (which does assert the type
+	// and the "header" tag) returns "". The scan reads that empty ID as
+	// "legacy session, predates ID-at-start" and skips it silently. That is
+	// precisely the corruption-swallowed-as-fine outcome this check exists
+	// to prevent, so a shape the reader would reject must surface as
+	// unreadable here.
+	_, metadataIsObj := entry["metadata"].(map[string]any)
+	_, metaIsObj := entry["_meta"].(map[string]any)
+	isNativeHeader := metadataIsObj && entry["type"] == "header"
+	if !isNativeHeader && !metaIsObj {
 		return "", fmt.Errorf("first line is not a recognizable session header")
 	}
 

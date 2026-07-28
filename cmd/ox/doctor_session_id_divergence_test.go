@@ -254,6 +254,44 @@ func TestScanSessionIDDivergence_UnrecognizedHeaderShapeReportedUnreadable(t *te
 	assert.Contains(t, result.unreadable[0], "weird-shape")
 }
 
+// TestScanSessionIDDivergence_HeaderShapeMustMatchTheReader covers the gap a
+// bare key-presence check leaves open. Each of these first lines CONTAINS a
+// "metadata" or "_meta" key, so a presence check waves it through — but
+// session.ReadHeaderSessionID rejects every one of them (it requires an
+// object AND, for the native shape, type=="header"), returning "".
+//
+// Failure prevented: that empty ID reads as "legacy session, predates
+// ID-at-start" and the session is skipped SILENTLY. A corrupt header would
+// then be indistinguishable from a pre-rollout one — the precise
+// corruption-swallowed-as-fine outcome this whole check exists to catch.
+func TestScanSessionIDDivergence_HeaderShapeMustMatchTheReader(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first string
+	}{
+		{"metadata present but not an object", `{"type":"header","metadata":"not-an-object"}`},
+		{"metadata object without the header tag", `{"metadata":{"session_id":"ses_x"}}`},
+		{"metadata object on an ordinary entry", `{"type":"message","metadata":{"session_id":"ses_x"}}`},
+		{"_meta present but not an object", `{"_meta":"not-an-object"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			sessionsDir := filepath.Join(tmp, "sessions")
+			dir := filepath.Join(sessionsDir, "bad-header")
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			writeTestSessionMeta(t, sessionsDir, "bad-header", sessionid.GenerateSessionID())
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(tc.first+"\n"), 0o644))
+
+			result, err := scanSessionIDDivergence(sessionsDir)
+			require.NoError(t, err)
+			require.Len(t, result.unreadable, 1,
+				"a shape the reader rejects must surface as unreadable, not be skipped as legacy")
+			assert.Contains(t, result.unreadable[0], "bad-header")
+			assert.Empty(t, result.diverged)
+		})
+	}
+}
+
 // TestScanSessionIDDivergence_DehydratedRawSkipped verifies a raw.jsonl
 // that is an LFS pointer stub (dehydrated clone — no local content) is
 // skipped, never reported as corrupt or diverged: the header genuinely
