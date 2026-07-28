@@ -518,28 +518,18 @@ func runPlanLint(cmd *cobra.Command, slug string, strict bool) error {
 	return nil
 }
 
-// planTopic derives a human title for the plan: the --topic consult subject if
-// set, else the first H1/H2 heading, else the first non-empty line, else a
-// fallback. Used for the slug and meta.Topic — checking in.Topic first matters
-// for a topic-only consult saved via --persist/--text (in.Sections carries only
-// the synthetic preamble section, whose Heading is deliberately empty and whose
-// Raw is empty, so both later fallbacks would otherwise miss the real subject).
+// planTopic derives a human title for the plan: the --topic consult subject
+// if set, else plan.Title(in) (the H1, falling back to the first non-empty
+// section heading, falling back to "Implementation Plan"). Used for the slug
+// and meta.Topic — checking in.Topic first matters for a topic-only consult
+// saved via --persist/--text, where no document exists yet (in.Raw is empty
+// and in.Sections carries only the synthetic pre-draft section — see
+// newTopicInput), so plan.Title would have nothing to derive from.
 func planTopic(in plan.Input) string {
 	if t := strings.TrimSpace(in.Topic); t != "" {
 		return t
 	}
-	for _, s := range in.Sections {
-		if h := strings.TrimSpace(s.Heading); h != "" {
-			return h
-		}
-	}
-	for _, line := range strings.Split(in.Raw, "\n") {
-		line = strings.TrimSpace(strings.TrimLeft(line, "# "))
-		if line != "" {
-			return line
-		}
-	}
-	return "untitled plan"
+	return plan.Title(in)
 }
 
 // planAuthors returns the capturing coworker's display name (privacy-safe, not

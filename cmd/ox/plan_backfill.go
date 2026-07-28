@@ -1,0 +1,227 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"log/slog"
+	"path/filepath"
+	"strings"
+	"text/tabwriter"
+
+	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/plan"
+	"github.com/spf13/cobra"
+)
+
+// plan_backfill.go implements `ox plan backfill-titles` — the one-off repair
+// pass for plans saved by the pre-ox-1tjj.8 planTopic (which read the first
+// H2 heading instead of the document's H1; see internal/plan/title.go). It
+// re-derives every saved plan's topic/slug from plan.md via plan.Title +
+// plan.Slugify — the compute half lives in internal/plan/backfill.go
+// (ComputeBackfill, ComputeProducedPlansRewrite), so it is fully unit-tested
+// without needing a real git repo; this file owns the CLI porcelain (table
+// output, flags) and the git orchestration (mv/add/commit/push, in
+// plan_commit.go's commitPlanBackfillToLedger).
+//
+// Before any of that, preflightPlanBackfill (plan_backfill_preflight.go)
+// runs two safety guards: the working tree must have at least as many plan
+// dirs as origin/main (an incomplete sparse-checkout cone would otherwise
+// make this scan a fraction of the real corpus and report a false-clean
+// summary), and the ledger must not be diverged from origin/main unless
+// --allow-diverged says that's expected. Both guards run before the table
+// is printed, in dry-run and real mode alike.
+var planBackfillTitlesCmd = &cobra.Command{
+	Use:    "backfill-titles",
+	Hidden: true, // maintenance/CI tier — a one-off repair pass, taught via docs/prime, not human help
+	Short:  "Re-derive title/slug for every saved plan from its plan.md H1 (repair pass)",
+	Long: `Repairs plans saved by the pre-fix planTopic, which read the first H2
+heading rather than the document's H1 (ox-1tjj.8: Parse splits markdown on H2
+only, so an H1 followed by a "1. Context — Why Now" or "TL;DR" H2 saved to the
+ledger under the H2's text). For every saved plan this re-derives topic/slug
+via plan.Title/plan.Slugify, rewrites meta.json + re-stamps plan.html + appends
+a 'revised' event, and renames the plan directory to the corrected slug WHILE
+KEEPING ITS ORIGINAL DATE PREFIX — the plan's identity, not today's date. Any
+sessions/*/meta.json produced_plans entry pointing at an old slug is rewritten
+too, so 'ox agent stop' reconciliation keeps resolving it.
+
+Always run --dry-run first: it prints the full retitle/rename table and
+touches nothing — that table is the reviewable artifact before a real run.
+Idempotent: a plan already matching its correct title/slug is a no-op (no
+event, no rename, no commit). A single broken/unreadable plan dir is skipped
+with a logged reason; it never aborts the batch.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		allowDiverged, _ := cmd.Flags().GetBool("allow-diverged")
+		gitRoot := findGitRoot()
+		ctx, err := config.LoadProjectContext(gitRoot)
+		if err != nil || ctx == nil {
+			return fmt.Errorf("no project context for %q: cannot backfill plans", gitRoot)
+		}
+		ledgerPath := ctx.DefaultLedgerPath()
+		if ledgerPath == "" {
+			return fmt.Errorf("no ledger configured for %q: cannot backfill plans", gitRoot)
+		}
+		return runPlanBackfillTitlesOnLedger(cmd, ledgerPath, dryRun, allowDiverged)
+	},
+}
+
+func init() {
+	planBackfillTitlesCmd.Flags().Bool("dry-run", false, "print the retitle/rename table; touch nothing")
+	// --allow-diverged: escape hatch for Guard 2 (preflightPlanBackfill). Only
+	// pass this when the ahead/behind state vs origin/main is already known and
+	// expected — the guard exists because a mass directory rename landed on top
+	// of an UNEXPECTED divergence turns a routine repair into a manual rebase.
+	planBackfillTitlesCmd.Flags().Bool("allow-diverged", false, "skip the divergence preflight guard; only use when the ledger's divergence from origin/main is known and intentional")
+	planCmd.AddCommand(planBackfillTitlesCmd)
+}
+
+// runPlanBackfillTitlesOnLedger is the testable core: it takes an already-
+// resolved ledger path directly (no findGitRoot/config lookup) so tests can
+// point it at a temp fixture. Runs preflightPlanBackfill's two safety guards
+// FIRST — before any scan, before the table is printed, in both dry-run and
+// real mode — then computes the full plan (and, when a slug actually
+// changes, the produced_plans fix-up), prints the table, and — only when
+// dryRun is false — applies every change and lands one batch commit.
+func runPlanBackfillTitlesOnLedger(cmd *cobra.Command, ledgerPath string, dryRun, allowDiverged bool) error {
+	out := cmd.OutOrStdout()
+	ctx := cmd.Context()
+	plansDir := paths.LedgerPlansDir(ledgerPath)
+
+	if err := preflightPlanBackfill(ctx, out, ledgerPath, allowDiverged); err != nil {
+		return err
+	}
+
+	candidates, err := plan.ComputeBackfill(plansDir)
+	if err != nil {
+		return fmt.Errorf("compute backfill: %w", err)
+	}
+
+	// Only a SLUG change invalidates a sessions/*/meta.json produced_plans
+	// entry (it's resolved by slug — see resolvePlanDir) — a topic-only
+	// correction with no slug change leaves that reference valid.
+	renamed := make(map[string]string, len(candidates))
+	for _, c := range candidates {
+		if c.SkipReason == "" && c.SlugChanged {
+			renamed[c.OldSlug] = c.NewSlug
+		}
+	}
+	sessionRewrites, err := plan.ComputeProducedPlansRewrite(filepath.Join(ledgerPath, "sessions"), renamed)
+	if err != nil {
+		return fmt.Errorf("compute produced_plans rewrite: %w", err)
+	}
+
+	writeBackfillTable(out, candidates, sessionRewrites)
+
+	total, retitled, renamedCount, skipped := backfillCounts(candidates)
+	if dryRun {
+		slog.Info("plan_backfill_titles_dry_run", "total", total, "retitled", retitled, "renamed", renamedCount, "skipped", skipped, "sessions_to_fix", len(sessionRewrites))
+		fmt.Fprintf(out, "\nDry run — nothing written. total=%d retitled=%d renamed=%d skipped=%d sessions_to_fix=%d\n",
+			total, retitled, renamedCount, skipped, len(sessionRewrites))
+		return nil
+	}
+
+	var renames [][2]string      // (old, new) absolute paths for git mv
+	var touchedPlanDirs []string // topic-only correction, no rename: plain git add
+	for _, c := range candidates {
+		if !c.Changed() {
+			continue
+		}
+		if err := plan.ApplyBackfillMeta(ctx, c.OldDir, c.NewTopic, c.NewSlug); err != nil {
+			// A single plan's write failure must never abort the batch — log
+			// and continue, matching ComputeBackfill's own skip-and-continue
+			// contract for a broken source dir.
+			slog.Warn("plan backfill: apply failed, skipping", "dir", c.OldDir, "error", err)
+			continue
+		}
+		if c.NewDir != "" {
+			renames = append(renames, [2]string{c.OldDir, c.NewDir})
+		} else {
+			touchedPlanDirs = append(touchedPlanDirs, c.OldDir)
+		}
+	}
+
+	var touchedSessionDirs []string
+	for _, r := range sessionRewrites {
+		if err := plan.ApplyProducedPlansRewrite(ctx, r.SessionDir, renamed); err != nil {
+			slog.Warn("plan backfill: produced_plans rewrite failed, skipping", "dir", r.SessionDir, "error", err)
+			continue
+		}
+		touchedSessionDirs = append(touchedSessionDirs, r.SessionDir)
+	}
+
+	if len(renames) == 0 && len(touchedPlanDirs) == 0 && len(touchedSessionDirs) == 0 {
+		fmt.Fprintln(out, "Nothing to backfill — every saved plan already matches its post-fix title/slug.")
+		return nil
+	}
+
+	// Best-effort push, same contract as commitPlanToLedger/savePlanArtifacts:
+	// a push failure leaves the local commit for the next push / `ox doctor`
+	// rather than failing the whole command — the mv/edit/commit work already
+	// landed locally and re-running the command would otherwise redo it.
+	if err := commitPlanBackfillToLedger(ledgerPath, renames, touchedPlanDirs, touchedSessionDirs); err != nil {
+		slog.Warn("plan backfill: commit/push failed, deferring to next push/doctor", "error", err)
+		cli.PrintHint("commit/push failed (see log) — the local commit stands; retry with `ox doctor --fix` or a plain push.")
+	}
+
+	slog.Info("plan_backfill_titles", "total", total, "retitled", retitled, "renamed", renamedCount, "skipped", skipped, "sessions_fixed", len(touchedSessionDirs))
+	fmt.Fprintf(out, "\nBackfilled: total=%d retitled=%d renamed=%d skipped=%d sessions_fixed=%d\n",
+		total, retitled, renamedCount, skipped, len(touchedSessionDirs))
+	return nil
+}
+
+// writeBackfillTable prints the full old->new retitle/rename table — the
+// artifact a human reviews before allowing a real run — plus, when any
+// exist, the sessions whose produced_plans need fixing.
+func writeBackfillTable(out io.Writer, candidates []plan.BackfillPlan, sessionRewrites []plan.ProducedPlansRewrite) {
+	tw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "OLD SLUG\tNEW SLUG\tOLD TOPIC\tNEW TOPIC\tACTION")
+	for _, c := range candidates {
+		if c.SkipReason != "" {
+			fmt.Fprintf(tw, "%s\t—\t—\t—\tSKIPPED: %s\n", filepath.Base(c.OldDir), c.SkipReason)
+			continue
+		}
+		action := "unchanged"
+		switch {
+		case c.Changed() && c.NewDir != "":
+			action = "retitled + renamed"
+		case c.Changed():
+			action = "retitled"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			c.OldSlug, c.NewSlug, truncate(c.OldTopic, 40), truncate(c.NewTopic, 40), action)
+	}
+	_ = tw.Flush()
+
+	if len(sessionRewrites) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "\nSessions with stale produced_plans to fix:")
+	tw2 := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw2, "SESSION\tSTALE SLUGS")
+	for _, r := range sessionRewrites {
+		fmt.Fprintf(tw2, "%s\t%s\n", filepath.Base(r.SessionDir), strings.Join(r.OldSlugs, ", "))
+	}
+	_ = tw2.Flush()
+}
+
+// backfillCounts summarizes a computed batch for the printed/logged totals:
+// total scanned, how many need a topic/slug correction, how many of those
+// also need a directory rename, and how many were unreadable and skipped.
+func backfillCounts(candidates []plan.BackfillPlan) (total, retitled, renamed, skipped int) {
+	for _, c := range candidates {
+		total++
+		if c.SkipReason != "" {
+			skipped++
+			continue
+		}
+		if c.Changed() {
+			retitled++
+		}
+		if c.NewDir != "" {
+			renamed++
+		}
+	}
+	return total, retitled, renamed, skipped
+}

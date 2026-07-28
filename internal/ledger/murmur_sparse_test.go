@@ -117,11 +117,13 @@ func TestConfigureSparseCheckout_MurmurDoesNotBreakExisting(t *testing.T) {
 		t.Errorf("expected %d GitHub data paths, got %d (murmur integration may have broken GitHub paths)", DefaultGitHubDataWindowDays, githubCount)
 	}
 
-	// total should be base dirs (.sageox, .sync, sessions, audit) + GitHub + murmur
-	expectedTotal := 4 + DefaultGitHubDataWindowDays + DefaultMurmurWindowHours
+	// total should be base dirs + GitHub + murmur. Derived from baseSparseDirs
+	// rather than hardcoded: adding a base dir is a legitimate change, and what
+	// this assertion actually guards is the windows not clobbering the bases.
+	expectedTotal := len(baseSparseDirs) + DefaultGitHubDataWindowDays + DefaultMurmurWindowHours
 	if len(lines) != expectedTotal {
-		t.Errorf("expected %d total sparse checkout entries (4 base + %d GitHub + %d murmur), got %d",
-			expectedTotal, DefaultGitHubDataWindowDays, DefaultMurmurWindowHours, len(lines))
+		t.Errorf("expected %d total sparse checkout entries (%d base + %d GitHub + %d murmur), got %d",
+			expectedTotal, len(baseSparseDirs), DefaultGitHubDataWindowDays, DefaultMurmurWindowHours, len(lines))
 	}
 }
 

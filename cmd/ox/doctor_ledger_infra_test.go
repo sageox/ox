@@ -4,7 +4,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -13,24 +12,89 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// writeSparseCheckout writes a ledger's .git/info/sparse-checkout file.
+func writeSparseCheckout(t *testing.T, ledgerDir, content string) {
+	t.Helper()
+	sparseDir := filepath.Join(ledgerDir, ".git", "info")
+	require.NoError(t, os.MkdirAll(sparseDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sparseDir, "sparse-checkout"), []byte(content), 0o644))
+}
+
 // TestCheckLedgerSparseCheckout_WithSageox verifies that a ledger repo
-// with .sageox in the sparse-checkout file passes the check.
+// carrying every required cone entry passes the check.
 func TestCheckLedgerSparseCheckout_WithSageox(t *testing.T) {
 	t.Parallel()
 
 	ledgerDir := initBareGitRepo(t)
-	sparseDir := filepath.Join(ledgerDir, ".git", "info")
-	require.NoError(t, os.MkdirAll(sparseDir, 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(sparseDir, "sparse-checkout"),
-		[]byte("/*\n!/*/\n.sageox\nsessions\n"),
-		0o644,
-	))
+	writeSparseCheckout(t, ledgerDir, "/*\n!/*/\n.sageox\nsessions\ndata/plans\n")
 
-	result := checkLedgerSparseCheckoutAtPath(ledgerDir)
+	result := checkLedgerSparseCheckoutAtPath(ledgerDir, false)
 
-	assert.True(t, result.passed, "should pass when .sageox is in sparse-checkout")
+	assert.True(t, result.passed, "should pass when every required dir is in sparse-checkout")
 	assert.False(t, result.skipped)
+}
+
+// TestCheckLedgerSparseCheckout_ConeModeSlashFormat is the regression for the
+// format the check actually meets in the wild. `git sparse-checkout set` in
+// cone mode writes entries as "/.sageox/" — slashes on both sides — so the
+// original exact-string comparison against ".sageox" never matched a single
+// real ledger, and the check reported a false failure on every one of them.
+func TestCheckLedgerSparseCheckout_ConeModeSlashFormat(t *testing.T) {
+	t.Parallel()
+
+	ledgerDir := initBareGitRepo(t)
+	writeSparseCheckout(t, ledgerDir,
+		"/*\n!/*/\n/data/\n!/data/*/\n/data/plans/\n/.sageox/\n/.sync/\n")
+
+	result := checkLedgerSparseCheckoutAtPath(ledgerDir, false)
+
+	assert.True(t, result.passed, "cone-mode entries like /.sageox/ must satisfy the check")
+}
+
+// TestCheckLedgerSparseCheckout_MissingDataPlans covers the cone every existing
+// machine has baked in: correct in every respect except data/plans, which git
+// then deletes from the working tree on the sync scheduler's next refresh.
+func TestCheckLedgerSparseCheckout_MissingDataPlans(t *testing.T) {
+	t.Parallel()
+
+	ledgerDir := initBareGitRepo(t)
+	writeSparseCheckout(t, ledgerDir, "/*\n!/*/\n/.sageox/\n/.sync/\n/sessions/\n")
+
+	result := checkLedgerSparseCheckoutAtPath(ledgerDir, false)
+
+	assert.False(t, result.passed, "should fail when data/plans is missing")
+	assert.Contains(t, result.detail, "data/plans", "detail should name the missing dir and its impact")
+}
+
+// TestMissingSparseConeDirs covers the pure matcher directly — the surrounding
+// check is mostly path resolution.
+func TestMissingSparseConeDirs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{"bare names", ".sageox\ndata/plans\n", nil},
+		{"cone-mode slashes", "/.sageox/\n/data/plans/\n", nil},
+		{"empty file", "", []string{".sageox", "data/plans"}},
+		{"only sageox", "/.sageox/\n", []string{"data/plans"}},
+		{"only plans", "/data/plans/\n", []string{".sageox"}},
+		{
+			// A negation line must not be read as the directory it mentions.
+			"negation lines are not matches",
+			"/*\n!/*/\n/data/\n!/data/*/\n",
+			[]string{".sageox", "data/plans"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, missingSparseConeDirs(tt.content))
+		})
+	}
 }
 
 // TestCheckLedgerSparseCheckout_MissingSageox verifies that a ledger repo
@@ -47,7 +111,7 @@ func TestCheckLedgerSparseCheckout_MissingSageox(t *testing.T) {
 		0o644,
 	))
 
-	result := checkLedgerSparseCheckoutAtPath(ledgerDir)
+	result := checkLedgerSparseCheckoutAtPath(ledgerDir, false)
 
 	assert.False(t, result.passed, "should fail when .sageox missing from sparse-checkout")
 	assert.False(t, result.skipped)
@@ -59,7 +123,7 @@ func TestCheckLedgerSparseCheckout_MissingSageox(t *testing.T) {
 func TestCheckLedgerSparseCheckout_NoLedger(t *testing.T) {
 	t.Parallel()
 
-	result := checkLedgerSparseCheckoutAtPath("")
+	result := checkLedgerSparseCheckoutAtPath("", false)
 
 	assert.True(t, result.skipped, "should skip when no ledger path provided")
 }
@@ -103,37 +167,6 @@ func initBareGitRepo(t *testing.T) string {
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git init failed: %s", string(out))
 	return dir
-}
-
-// checkLedgerSparseCheckoutAtPath is a testable helper that checks
-// sparse-checkout at a given ledger path, bypassing config resolution.
-func checkLedgerSparseCheckoutAtPath(ledgerPath string) checkResult {
-	if ledgerPath == "" {
-		return SkippedCheck("Ledger sparse checkout", "no ledger path", "")
-	}
-
-	if !isGitRepo(ledgerPath) {
-		return SkippedCheck("Ledger sparse checkout", "not a git repo", "")
-	}
-
-	sparseFile := filepath.Join(ledgerPath, ".git", "info", "sparse-checkout")
-	content, err := os.ReadFile(sparseFile)
-	if err != nil {
-		return SkippedCheck("Ledger sparse checkout", "sparse-checkout not enabled", "")
-	}
-
-	lines := strings.Split(string(content), "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == ".sageox" || trimmed == ".sageox/" {
-			return PassedCheck("Ledger sparse checkout", ".sageox in sparse-checkout cone")
-		}
-	}
-
-	return FailedCheck("Ledger sparse checkout",
-		".sageox missing from sparse-checkout cone",
-		"Without .sageox in the cone, codedb cache gets wiped on sparse-checkout set.\n"+
-			"        Run `ox doctor` to auto-fix")
 }
 
 // checkCodeDBConsistencyAtDir is a testable helper that checks codedb

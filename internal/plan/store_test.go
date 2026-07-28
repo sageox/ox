@@ -262,23 +262,42 @@ func TestLoad_NotFound(t *testing.T) {
 
 func TestSlugify(t *testing.T) {
 	tests := []struct {
+		name string
 		in   string
 		want string
 	}{
-		{"Plan capture to ledger", "plan-capture-to-ledger"},
-		{"One Two", "one-two"},
-		{"  Trim   Me  ", "trim-me"},
-		{"A/B: C.d, E!", "a-b-c-d"},
-		{"Five Six Seven Eight Nine", "five-six-seven-eight"},
-		{"Single", "single"},
-		{"", "untitled-plan"},
-		{"!!!", "untitled-plan"},
-		{"CamelCase Words", "camelcase-words"},
+		{"basic phrase", "Plan capture to ledger", "plan-capture-to-ledger"},
+		{"two words", "One Two", "one-two"},
+		{"trims whitespace", "  Trim   Me  ", "trim-me"},
+		{"strips punctuation", "A/B: C.d, E!", "a-b-c-d-e"},
+		{"single word", "Single", "single"},
+		{"empty input", "", "untitled-plan"},
+		{"punctuation only", "!!!", "untitled-plan"},
+		{"preserves case-folded compounds", "CamelCase Words", "camelcase-words"},
+		// slugWordCap raised 4 -> 6 (ox-1tjj.8): a title with 5-6 words no
+		// longer gets silently truncated.
+		{"six-word cap keeps all six", "One Two Three Four Five Six", "one-two-three-four-five-six"},
+		{"five words, under the new cap", "Five Six Seven Eight Nine", "five-six-seven-eight-nine"},
+		{"seven words still caps at six", "One Two Three Four Five Six Seven", "one-two-three-four-five-six"},
+		// trailing-stopword trim: a cap (or a title that just ends on a
+		// function word) landing on "the"/"for"/etc. reads as a cut-off
+		// mid-sentence, not a title.
+		{"trims a single trailing stopword", "My Cool Plan For", "my-cool-plan"},
+		{"trims a run of trailing stopwords", "Fix The Bug In The", "fix-the-bug"},
+		{"cap truncation landing on a stopword gets trimmed", "One Two Three Four Five The Six", "one-two-three-four-five"},
+		{"cap truncation NOT landing on a stopword keeps all six", "Add support for the new thing", "add-support-for-the-new-thing"},
+		{"all-stopword input falls back", "The Of For", "untitled-plan"},
+		// interior stopwords are NEVER stripped — only a trailing run.
+		{"preserves interior stopwords", "Fix the bug in the parser", "fix-the-bug-in-the-parser"},
+		{"conversation model update em-dash the execution plan", "Conversation model update — the execution plan", "conversation-model-update-the-execution-plan"},
 	}
 	for _, tc := range tests {
-		if got := Slugify(tc.in); got != tc.want {
-			t.Errorf("Slugify(%q) = %q, want %q", tc.in, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := Slugify(tc.in); got != tc.want {
+				t.Errorf("Slugify(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -412,13 +431,16 @@ func TestSave_ReadMergePreservesLifecycle(t *testing.T) {
 func TestReconcileSessionOutcome_BackfillsSessionID(t *testing.T) {
 	ledger := t.TempDir()
 	withLedger(t, ledger)
-	if _, err := Save("/g", Input{Raw: "# Topic A\n"}, sampleResult(), nil, Meta{Topic: "Topic A", CreatedAt: time.Now().UTC()}); err != nil {
+	// "Topic Alpha", not "Topic A" — a trailing single-letter "A" would be
+	// trimmed as the stopword "a" (Slugify's trailing-stopword trim), which is
+	// incidental to what this test actually exercises (SessionID backfill).
+	if _, err := Save("/g", Input{Raw: "# Topic Alpha\n"}, sampleResult(), nil, Meta{Topic: "Topic Alpha", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	if err := ReconcileSessionOutcome("/g", "topic-a", "ses_7", SessionOutcomeAborted); err != nil {
+	if err := ReconcileSessionOutcome("/g", "topic-alpha", "ses_7", SessionOutcomeAborted); err != nil {
 		t.Fatalf("ReconcileSessionOutcome: %v", err)
 	}
-	got, _ := ReadPlanMeta("/g", "topic-a")
+	got, _ := ReadPlanMeta("/g", "topic-alpha")
 	if got.Provenance == nil || got.Provenance.SessionID != "ses_7" || got.Provenance.SessionOutcome != SessionOutcomeAborted {
 		t.Errorf("backfill failed: %+v", got.Provenance)
 	}

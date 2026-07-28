@@ -35,10 +35,10 @@ func sampleProvenance() *Provenance {
 }
 
 // TestSave_FirstSaveWritesCreatedEvent verifies the first save of a fresh plan
-// directory mints a pln_ id, writes a single `created` event carrying the
-// resolved provenance and a draft status, and leaves Topic unset — the
-// title's source of truth is plan.html's <head> (see html_meta.go), not the
-// event log.
+// directory mints a pln_ id and writes a single `created` event carrying the
+// resolved provenance, a draft status, and the plan's topic — denormalized
+// from meta.Topic so a reader of events.jsonl alone (the cloud fold,
+// `ox plan status`) has a title without fetching plan.html.
 func TestSave_FirstSaveWritesCreatedEvent(t *testing.T) {
 	ledger := t.TempDir()
 	withLedger(t, ledger)
@@ -73,8 +73,8 @@ func TestSave_FirstSaveWritesCreatedEvent(t *testing.T) {
 	if ev.Status != PlanStatusDraft {
 		t.Errorf("Status = %q, want %q", ev.Status, PlanStatusDraft)
 	}
-	if ev.Topic != "" {
-		t.Errorf("Topic = %q, want empty (title lives in plan.html, not the event log)", ev.Topic)
+	if ev.Topic != meta.Topic {
+		t.Errorf("Topic = %q, want %q (denormalized from meta.Topic for the cloud-side title fold)", ev.Topic, meta.Topic)
 	}
 	if ev.SessionID != "ses_test0001" || ev.SessionName != "2026-07-01-person-a-Oxab12" {
 		t.Errorf("session fields = (%q,%q), want provenance's", ev.SessionID, ev.SessionName)
@@ -201,6 +201,9 @@ func TestSave_SecondSaveAppendsRevisedEventSamePlanID(t *testing.T) {
 	}
 	if events[1].PlanID != events[0].PlanID {
 		t.Errorf("PlanID drifted across saves: %q != %q, want stable", events[1].PlanID, events[0].PlanID)
+	}
+	if events[0].Topic != "Stable plan id" || events[1].Topic != "Stable plan id" {
+		t.Errorf("Topic = (%q, %q), want %q on both created and revised events", events[0].Topic, events[1].Topic, "Stable plan id")
 	}
 }
 

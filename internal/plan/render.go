@@ -110,8 +110,6 @@ type reviewStateItem struct {
 // reads — so no un-escaping is needed here.
 var mermaidFence = regexp.MustCompile(`(?s)<pre><code class="language-mermaid">(.*?)</code></pre>`)
 
-var h1Line = regexp.MustCompile(`(?m)^#\s+(.+?)\s*$`)
-
 // riskHeading flags a section whose heading is about risks, so it can carry
 // severity styling.
 var riskHeading = regexp.MustCompile(`(?i)\brisks?\b`)
@@ -259,7 +257,7 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 	md := newMarkdown()
 
 	data := renderData{
-		Title:          planTitle(in),
+		Title:          Title(in),
 		Slug:           opts.Slug,
 		CSS:            template.CSS(string(css) + highlightCSS()),
 		JS:             template.JS(js),
@@ -875,18 +873,6 @@ var lineSuffix = regexp.MustCompile(`:\d+$`)
 
 func normalizeRef(s string) string {
 	return lineSuffix.ReplaceAllString(strings.TrimSpace(s), "")
-}
-
-func planTitle(in Input) string {
-	if m := h1Line.FindStringSubmatch(in.Raw); m != nil {
-		return strings.TrimSpace(m[1])
-	}
-	for _, s := range in.Sections {
-		if strings.TrimSpace(s.Heading) != "" {
-			return s.Heading
-		}
-	}
-	return "Implementation Plan"
 }
 
 var leadingH1 = regexp.MustCompile(`(?s)^\s*<h1[^>]*>.*?</h1>`)

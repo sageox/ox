@@ -52,3 +52,70 @@ func commitPlanToLedger(gitRoot, planDir string) error {
 
 	return pushLedger(context.Background(), ledgerPath)
 }
+
+// commitPlanBackfillToLedger stages every backfilled plan rename, in-place
+// plan edit, and session produced_plans fix into ONE commit and pushes it —
+// the batch counterpart to commitPlanToLedger (which commits a single saved
+// plan). A repair run can touch hundreds of plans; landing that as one
+// reviewable commit beats one commit per directory. Mirrors
+// commitPlanToLedger's pattern (--sparse, --no-verify, pushLedger with
+// pull-rebase retry) rather than hand-rolling new git plumbing.
+//
+// renames are (oldAbsPath, newAbsPath) pairs applied via `git mv --sparse`.
+// touchedPlanDirs/touchedSessionDirs are absolute paths edited in-place
+// (topic-only correction with no slug change; a session's produced_plans
+// fix) that need a plain `git add`.
+//
+// Each rename is `git mv` followed by an explicit `git add` of the NEW path.
+// `git mv` alone is NOT enough here: it only restages the move of whatever
+// content is already in the index (HEAD) — a file mutated on disk but never
+// `git add`'d before the mv (exactly ApplyBackfillMeta's write, which happens
+// before this function is ever called) rides along as a rename of the OLD
+// content, leaving the just-mutated bytes as an uncommitted diff on the NEW
+// path immediately after the commit. Confirmed against git 2.55 directly —
+// `git status --porcelain` shows "RM" (rename + pending modify), not a clean
+// rename, when the source was dirty. The follow-up `git add` stages the
+// current working-tree content at the new path in the same pass.
+func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedPlanDirs, touchedSessionDirs []string) error {
+	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
+
+	for _, pair := range renames {
+		oldRel, err := filepath.Rel(ledgerPath, pair[0])
+		if err != nil {
+			return fmt.Errorf("relativize %q: %w", pair[0], err)
+		}
+		newRel, err := filepath.Rel(ledgerPath, pair[1])
+		if err != nil {
+			return fmt.Errorf("relativize %q: %w", pair[1], err)
+		}
+		mvArgs := []string{"-C", ledgerPath, "mv", "--sparse", oldRel, newRel}
+		if out, err := exec.Command("git", mvArgs...).CombinedOutput(); err != nil {
+			return fmt.Errorf("git mv %s -> %s failed: %s: %w", oldRel, newRel, string(out), err)
+		}
+		addArgs := []string{"-C", ledgerPath, "add", "--sparse", newRel}
+		if out, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
+			return fmt.Errorf("git add %s (post-mv content) failed: %s: %w", newRel, string(out), err)
+		}
+	}
+
+	addPaths := make([]string, 0, len(touchedPlanDirs)+len(touchedSessionDirs))
+	addPaths = append(addPaths, touchedPlanDirs...)
+	addPaths = append(addPaths, touchedSessionDirs...)
+	if len(addPaths) > 0 {
+		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, addPaths...)
+		if out, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
+			return fmt.Errorf("git add failed: %s: %w", string(out), err)
+		}
+	}
+
+	commitMsg := fmt.Sprintf("plan: backfill %d title(s)", len(renames)+len(touchedPlanDirs))
+	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
+	if out, err := commitCmd.CombinedOutput(); err != nil {
+		if strings.Contains(string(out), "nothing to commit") {
+			return nil // idempotent: re-run with nothing left to change
+		}
+		return fmt.Errorf("%s: %w", wrapCommitError(string(out), err), err)
+	}
+
+	return pushLedger(context.Background(), ledgerPath)
+}

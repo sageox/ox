@@ -358,10 +358,16 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		// meta.json may end up with above (which can preserve an earlier session's
 		// SessionID/SessionOutcome on a re-save): each event records the specific
 		// session that performed that save, and Fold aggregates across all of them
-		// — see events.go's multi-session model. Topic is deliberately left unset:
-		// the title's source of truth is plan.html's <head> (see html_meta.go),
-		// not the event log.
-		ev := Event{PlanID: planID, Kind: EventRevised}
+		// — see events.go's multi-session model. Topic IS carried here (denormalized
+		// from meta.Topic, the same value just written to meta.json above):
+		// plan.html's <head> (sageox:plan-title, see html_meta.go) remains the
+		// source of truth for a STANDALONE copy of the render — a page downloaded,
+		// emailed, or pasted into a chat thread with no ledger context at hand — but
+		// a reader with only events.jsonl (the cloud fold, `ox plan status`) needs a
+		// title without fetching/parsing the render. This mirrors the AgentType/
+		// Model/AuthorName snapshot fields on Provenance above: duplication is the
+		// feature, not a smell.
+		ev := Event{PlanID: planID, Kind: EventRevised, Topic: meta.Topic}
 		if firstSave {
 			ev.Kind = EventCreated
 			ev.Status = PlanStatusDraft
@@ -624,10 +630,30 @@ func resolvePlanDirForSlug(gitRoot, slug string) (string, error) {
 // slugWordRe splits on any run of non-alphanumeric characters.
 var slugWordRe = regexp.MustCompile(`[^a-z0-9]+`)
 
-// Slugify derives a 2-4 word kebab-case slug from a topic/title. Lowercases,
-// strips punctuation, and keeps the first 2-4 meaningful words. An empty or
-// punctuation-only input yields "untitled-plan" so a directory name is always
-// well-formed.
+// slugWordCap bounds how many words Slugify keeps. 6, not 4 (ox-1tjj.8): a
+// 4-word cap collided distinct plans onto the same generic slug often enough
+// to be a real problem (two plans both starting "Add support for the..."),
+// and — separately — a cap landing exactly on a stopword read as a
+// truncation bug ("...update-the"), not a title. 6 gives enough words to stay
+// distinctive without producing an unwieldy directory name.
+const slugWordCap = 6
+
+// slugStopWords are common English function words trimmed from the END of a
+// derived slug only — never from the interior (see Slugify's doc comment). A
+// trailing article/preposition ("...update-the") reads as a cut-off
+// mid-sentence, not a title; the same word in the middle of a slug still
+// carries grammatical information a reader would otherwise have to infer, so
+// stripping it there would cost more readability than the terseness is worth.
+var slugStopWords = map[string]bool{
+	"a": true, "an": true, "the": true, "of": true, "to": true,
+	"and": true, "for": true, "in": true, "on": true, "with": true,
+}
+
+// Slugify derives a kebab-case slug from a topic/title. Lowercases, strips
+// punctuation, keeps the first slugWordCap meaningful words, then trims any
+// trailing stopword(s) — interior stopwords are left alone. An empty,
+// punctuation-only, or all-stopword input yields "untitled-plan" so a
+// directory name is always well-formed.
 func Slugify(topic string) string {
 	words := slugWordRe.Split(strings.ToLower(strings.TrimSpace(topic)), -1)
 
@@ -637,9 +663,13 @@ func Slugify(topic string) string {
 			continue
 		}
 		kept = append(kept, w)
-		if len(kept) == 4 {
+		if len(kept) == slugWordCap {
 			break
 		}
+	}
+
+	for len(kept) > 0 && slugStopWords[kept[len(kept)-1]] {
+		kept = kept[:len(kept)-1]
 	}
 
 	if len(kept) == 0 {

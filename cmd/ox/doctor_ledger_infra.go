@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,9 +13,45 @@ import (
 	"github.com/sageox/ox/internal/ledger"
 )
 
+// requiredSparseCone are the cone entries a ledger cannot function without.
+// Both failures are silent and destructive — the cone doesn't just hide these
+// paths, `git sparse-checkout set` DELETES them from the working tree — so
+// doctor checks them explicitly rather than trusting ConfigureSparseCheckout
+// to have been run by a build that knew about them.
+var requiredSparseCone = []struct{ dir, impact string }{
+	{".sageox", "codedb cache is wiped on every sparse-checkout set"},
+	{"data/plans", "saved plans are deleted from the working tree ~60s after `ox plan save`"},
+}
+
+// normalizeConeEntry strips the surrounding slashes cone mode writes ("/.sageox/")
+// so an entry compares equal to the bare directory name ConfigureSparseCheckout
+// asks for (".sageox"). Without this the comparison never matches a real
+// cone-mode file and every ledger reports a false failure.
+func normalizeConeEntry(line string) string {
+	return strings.Trim(strings.TrimSpace(line), "/")
+}
+
+// missingSparseConeDirs returns the requiredSparseCone entries absent from a
+// sparse-checkout file's contents, preserving requiredSparseCone's order.
+func missingSparseConeDirs(content string) []string {
+	present := make(map[string]bool)
+	for _, line := range strings.Split(content, "\n") {
+		present[normalizeConeEntry(line)] = true
+	}
+
+	var missing []string
+	for _, req := range requiredSparseCone {
+		if !present[req.dir] {
+			missing = append(missing, req.dir)
+		}
+	}
+	return missing
+}
+
 // checkLedgerSparseCheckout verifies that the ledger repo's sparse-checkout
-// cone includes .sageox. Without it, the codedb cache directory gets wiped
-// on every sparse-checkout set operation.
+// cone includes every requiredSparseCone entry. A missing entry means git
+// deletes that path from the working tree on the sync scheduler's next
+// ~60s refresh.
 func checkLedgerSparseCheckout(fix bool) checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
@@ -41,6 +78,19 @@ func checkLedgerSparseCheckout(fix bool) checkResult {
 		ledgerPath = defaultPath
 	}
 
+	return checkLedgerSparseCheckoutAtPath(ledgerPath, fix)
+}
+
+// checkLedgerSparseCheckoutAtPath is checkLedgerSparseCheckout with the ledger
+// already resolved. Split out so tests exercise THIS logic rather than a
+// reimplementation of it — the test file previously carried its own copy of
+// the cone matching, which meant a production-side change (like adding
+// data/plans to requiredSparseCone) could not fail a single test.
+func checkLedgerSparseCheckoutAtPath(ledgerPath string, fix bool) checkResult {
+	if ledgerPath == "" {
+		return SkippedCheck("Ledger sparse checkout", "no ledger path", "")
+	}
+
 	if !isGitRepo(ledgerPath) {
 		return SkippedCheck("Ledger sparse checkout", "ledger not a git repo", "")
 	}
@@ -52,29 +102,32 @@ func checkLedgerSparseCheckout(fix bool) checkResult {
 		return SkippedCheck("Ledger sparse checkout", "sparse-checkout not enabled", "")
 	}
 
-	// look for .sageox in the cone entries
-	lines := strings.Split(string(content), "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == ".sageox" || trimmed == ".sageox/" {
-			return PassedCheck("Ledger sparse checkout", ".sageox in sparse-checkout cone")
-		}
+	missing := missingSparseConeDirs(string(content))
+	if len(missing) == 0 {
+		return PassedCheck("Ledger sparse checkout", "required dirs in sparse-checkout cone")
 	}
 
-	// .sageox missing from sparse-checkout
+	missingList := strings.Join(missing, ", ")
 	if fix {
 		if repairErr := ledger.ConfigureSparseCheckout(ledgerPath); repairErr != nil {
 			return FailedCheck("Ledger sparse checkout",
-				".sageox missing from cone, repair failed",
+				fmt.Sprintf("%s missing from cone, repair failed", missingList),
 				fmt.Sprintf("error: %v", repairErr))
 		}
-		return PassedCheck("Ledger sparse checkout", "repaired: .sageox added to sparse-checkout cone")
+		return PassedCheck("Ledger sparse checkout",
+			fmt.Sprintf("repaired: %s added to sparse-checkout cone", missingList))
+	}
+
+	var impacts strings.Builder
+	for _, req := range requiredSparseCone {
+		if slices.Contains(missing, req.dir) {
+			fmt.Fprintf(&impacts, "        Without %s: %s.\n", req.dir, req.impact)
+		}
 	}
 
 	return FailedCheck("Ledger sparse checkout",
-		".sageox missing from sparse-checkout cone",
-		"Without .sageox in the cone, codedb cache gets wiped on sparse-checkout set.\n"+
-			"        Run `ox doctor` to auto-fix")
+		fmt.Sprintf("%s missing from sparse-checkout cone", missingList),
+		impacts.String()+"        Run `ox doctor --fix` to auto-fix")
 }
 
 // checkCodeDBConsistency detects when codedb was previously indexed but the

@@ -461,8 +461,29 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 	return nil
 }
 
+// baseSparseDirs are the ledger directories checked out in full, always —
+// as opposed to the data/github and data/murmurs siblings, which are added as
+// rolling windows.
+//
+// data/plans is deliberately unwindowed. Plans are durable artifacts every
+// local read path needs (`ox plan list/view/render/backfill-titles`), and they
+// are tiny: plan.md + annotations.json + events.jsonl, with the only large
+// member (plan.html) LFS-gated above 256 KB. Omitting it made plans
+// effectively WRITE-ONLY — `ox plan save` wrote and pushed a plan directory,
+// then the sync scheduler's ~60s ConfigureSparseCheckout refresh deleted it
+// from the working tree again, leaving ledgers with dozens of plans on
+// origin/main and none on disk. Only dirtyDirsOutsideCone kept a save alive
+// long enough to commit at all.
+var baseSparseDirs = []string{
+	".sageox",
+	".sync",
+	"sessions",
+	"audit",
+	"data/plans",
+}
+
 // ConfigureSparseCheckout sets up sparse checkout for the ledger.
-// Includes: .sync/, sessions/, audit/, a sliding window of recent GitHub data,
+// Includes: baseSparseDirs, a sliding window of recent GitHub data,
 // and a rolling window of recent murmur data (hourly granularity).
 // Excludes: assets/ (large files), older data outside the windows.
 //
@@ -490,12 +511,7 @@ func ConfigureSparseCheckout(path string) error {
 	}
 
 	// base directories always included
-	dirs := []string{
-		".sageox",
-		".sync",
-		"sessions",
-		"audit",
-	}
+	dirs := append([]string{}, baseSparseDirs...)
 
 	// add sliding window of recent GitHub data (last N days, default 30)
 	// keeps local disk usage small; older data lives in git history
