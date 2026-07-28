@@ -401,3 +401,79 @@ func TestWedge_NonSessionConflictsStillRefuseAutoResolve(t *testing.T) {
 		})
 	}
 }
+
+// TestWedge_SequentiallyConflictingCommits is the case every earlier fixture
+// missed, and the one the real ledger actually hit.
+//
+// Failure prevented: a rebase replays commits ONE AT A TIME, so
+// `git rebase --continue` exits non-zero every time it commits the current step
+// and halts on the next conflicting commit. Treating that exit code as failure
+// made the caller abort the rebase, restore the pre-rebase state, and re-wedge
+// the ledger on every attempt — forever. It cannot reproduce with a single
+// conflicting commit, which is exactly why single-commit fixtures passed while
+// a 344-commit ledger stayed stuck for 13 days.
+func TestWedge_SequentiallyConflictingCommits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: drives many real git commits")
+	}
+	f := newLedgerFixture(t)
+
+	// Each local commit must conflict on its OWN file, so the replay halts at
+	// EVERY step rather than collapsing into one. This is the real ledger's
+	// shape: both sides edited many different sessions over the same period.
+	const chain = 10
+	for i := 0; i < chain; i++ {
+		f.write(f.cloud, fmt.Sprintf("sessions/c%d/meta.json", i), fmt.Sprintf(`{"s":"cloud","n":%d}`, i))
+	}
+	f.commitAll(f.cloud, "cloud touches all sessions")
+	f.git(f.cloud, "push", "origin", "main")
+
+	for i := 0; i < chain; i++ {
+		f.write(f.local, fmt.Sprintf("sessions/c%d/meta.json", i), fmt.Sprintf(`{"s":"local","n":%d}`, i))
+		f.commitAll(f.local, fmt.Sprintf("local step %d", i))
+	}
+	f.git(f.local, "fetch", "origin")
+
+	f.gitAllowFail(f.local, "pull", "--rebase", "--autostash")
+	require.True(t, IsRebaseInProgress(f.local), "fixture must genuinely conflict")
+
+	// ONE call must carry the rebase all the way through every halting step.
+	err := ResolveRebaseAcceptTheirs(context.Background(), f.local, []string{"sessions/"})
+	require.NoError(t, err,
+		"halting on the next conflicting commit is PROGRESS; treating it as failure re-wedges the ledger")
+	assert.False(t, IsRebaseInProgress(f.local),
+		"the rebase must be fully finished, not parked on a later step")
+
+	f.assertMakesProgress()
+}
+
+// TestWedge_ReplayedCommitBecomesEmpty covers the adjacent shape: a replayed
+// commit whose changes are already upstream. git halts with a non-zero exit and
+// NO unmerged files, wanting `--skip`. A resolver that only understands
+// conflicts must not mistake that for a failure worth aborting over.
+func TestWedge_ReplayedCommitBecomesEmpty(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: drives real git commits")
+	}
+	f := newLedgerFixture(t)
+	const meta = "sessions/s1/meta.json"
+	const dup = "sessions/s2/meta.json"
+
+	f.write(f.local, dup, `{"s":"identical"}`)
+	f.commitAll(f.local, "local adds s2")
+	f.cloudWrites(dup, `{"s":"identical"}`, "cloud adds the same s2")
+	f.cloudWrites(meta, `{"s":"cloud"}`, "cloud update")
+	f.write(f.local, meta, `{"s":"local"}`)
+	f.commitAll(f.local, "local update")
+	f.git(f.local, "fetch", "origin")
+
+	f.gitAllowFail(f.local, "pull", "--rebase", "--autostash")
+	require.True(t, IsRebaseInProgress(f.local), "fixture must genuinely start a rebase")
+
+	err := ResolveRebaseAcceptTheirs(context.Background(), f.local, []string{"sessions/"})
+	require.NoError(t, err,
+		"an emptied replayed commit must not abort the rebase and re-wedge the ledger")
+	assert.False(t, IsRebaseInProgress(f.local), "the rebase must run to completion")
+
+	f.assertMakesProgress()
+}

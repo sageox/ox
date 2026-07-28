@@ -28,7 +28,40 @@ import (
 // Returns nil if the rebase was successfully continued after resolution.
 // Returns an error if any conflicted file fails the safety check (the
 // rebase is NOT aborted — caller should abort if needed).
+// A rebase replays commits one at a time, so `rebase --continue` stops at EVERY
+// conflicting commit in the range. maxResolvePasses bounds the resulting loop.
+// A ledger that has been wedged for weeks can carry hundreds of conflicting
+// commits (the production incident had 344 replayed commits, 281 conflicts), so
+// this must be generous — but still finite, because a pass that resolves nothing
+// would otherwise spin forever.
+const maxResolvePasses = 5000
+
 func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixes []string, denyPrefixes ...[]string) error {
+	// Resolve every conflicting commit in the replay range, not just the first.
+	//
+	// `git rebase --continue` exits NON-ZERO when it commits the current step and
+	// then halts on the next conflicting commit. That is progress, not failure —
+	// but treating it as an error made the caller abort the rebase, restoring the
+	// pre-rebase state and re-wedging the ledger on every single attempt. It only
+	// reproduces with multiple SEQUENTIALLY conflicting commits, which is why a
+	// single-commit fixture never caught it.
+	for pass := 0; ; pass++ {
+		if pass >= maxResolvePasses {
+			return fmt.Errorf("rebase did not converge after %d resolve passes", maxResolvePasses)
+		}
+		done, err := resolveOneRebaseStep(ctx, repoPath, safePrefixes, denyPrefixes...)
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+	}
+}
+
+// resolveOneRebaseStep resolves the conflicts of the current rebase step and
+// continues. Returns done=true when the whole rebase has finished.
+func resolveOneRebaseStep(ctx context.Context, repoPath string, safePrefixes []string, denyPrefixes ...[]string) (done bool, err error) {
 	var denies []string
 	if len(denyPrefixes) > 0 {
 		denies = denyPrefixes[0]
@@ -37,10 +70,10 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 	// list all unmerged files from the index (handles content, rename, and delete conflicts)
 	entries, err := listUnmergedEntries(ctx, repoPath)
 	if err != nil {
-		return fmt.Errorf("list unmerged entries: %w", err)
+		return false, fmt.Errorf("list unmerged entries: %w", err)
 	}
 	if len(entries) == 0 {
-		return fmt.Errorf("no conflicted files found")
+		return false, fmt.Errorf("no conflicted files found")
 	}
 
 	// collect all unique file paths across all stages
@@ -52,7 +85,7 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 	// verify all conflicted files are under safe prefixes and not denied
 	for path := range allPaths {
 		if !matchesSafePrefix(path, safePrefixes, denies) {
-			return fmt.Errorf("conflicted file %q is not under safe auto-resolve prefixes %v", path, safePrefixes)
+			return false, fmt.Errorf("conflicted file %q is not under safe auto-resolve prefixes %v", path, safePrefixes)
 		}
 	}
 
@@ -121,11 +154,11 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 	if len(toCheckoutTheirs) > 0 {
 		checkoutArgs := append([]string{"checkout", "--theirs", "--"}, toCheckoutTheirs...)
 		if _, err := RunGit(ctx, repoPath, checkoutArgs...); err != nil {
-			return fmt.Errorf("checkout --theirs: %w", err)
+			return false, fmt.Errorf("checkout --theirs: %w", err)
 		}
 		addArgs := append([]string{"add", "--"}, toCheckoutTheirs...)
 		if _, err := RunGit(ctx, repoPath, addArgs...); err != nil {
-			return fmt.Errorf("git add after checkout --theirs: %w", err)
+			return false, fmt.Errorf("git add after checkout --theirs: %w", err)
 		}
 	}
 
@@ -135,11 +168,11 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 	if len(toCheckoutOurs) > 0 {
 		checkoutArgs := append([]string{"checkout", "--ours", "--"}, toCheckoutOurs...)
 		if _, err := RunGit(ctx, repoPath, checkoutArgs...); err != nil {
-			return fmt.Errorf("checkout --ours (pointer wins): %w", err)
+			return false, fmt.Errorf("checkout --ours (pointer wins): %w", err)
 		}
 		addArgs := append([]string{"add", "--"}, toCheckoutOurs...)
 		if _, err := RunGit(ctx, repoPath, addArgs...); err != nil {
-			return fmt.Errorf("git add after checkout --ours: %w", err)
+			return false, fmt.Errorf("git add after checkout --ours: %w", err)
 		}
 	}
 
@@ -147,7 +180,7 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 	if len(toRemove) > 0 {
 		rmArgs := append([]string{"rm", "--cached", "--quiet", "--"}, toRemove...)
 		if _, err := RunGit(ctx, repoPath, rmArgs...); err != nil {
-			return fmt.Errorf("git rm --cached: %w", err)
+			return false, fmt.Errorf("git rm --cached: %w", err)
 		}
 	}
 
@@ -155,7 +188,7 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 	if len(toAdd) > 0 {
 		addArgs := append([]string{"add", "--"}, toAdd...)
 		if _, err := RunGit(ctx, repoPath, addArgs...); err != nil {
-			return fmt.Errorf("git add resolved files: %w", err)
+			return false, fmt.Errorf("git add resolved files: %w", err)
 		}
 	}
 
@@ -164,12 +197,27 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 	cmd.Dir = repoPath
 	// GIT_EDITOR=true prevents git from opening an editor for the commit message
 	cmd.Env = append(cmd.Environ(), "GIT_EDITOR=true")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("rebase --continue: %s: %w", strings.TrimSpace(string(output)), err)
-	}
+	output, contErr := cmd.CombinedOutput()
 
-	return nil
+	// A non-zero exit here does NOT imply failure. git returns non-zero when it
+	// commits this step and then halts on the NEXT conflicting commit. The only
+	// reliable signal is the repo state: if the rebase is over, we are done; if
+	// it is still running, there is another step to resolve.
+	if !IsRebaseInProgress(repoPath) {
+		return true, nil
+	}
+	if contErr == nil {
+		return false, nil // advanced cleanly to the next step
+	}
+	// Still mid-rebase AND continue errored: only real progress if the next step
+	// presented fresh conflicts for us to resolve. Otherwise git is stuck on
+	// something we cannot act on (e.g. it wants a manual edit), and looping would
+	// spin without converging.
+	next, listErr := listUnmergedEntries(ctx, repoPath)
+	if listErr == nil && len(next) > 0 {
+		return false, nil
+	}
+	return false, fmt.Errorf("rebase --continue: %s: %w", SanitizeOutput(strings.TrimSpace(string(output))), contErr)
 }
 
 // lfsPointerPrefix is the first line of every Git LFS pointer file.
