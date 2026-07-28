@@ -93,3 +93,13 @@ jobs:
         with:
           version: v2.11.4
           args: -c .config/golangci.yml
+          # Only MAIN may write the lint cache. PR runs are cancellable (see the
+          # concurrency block above), and a run killed mid-analysis persists a
+          # TRUNCATED cache that every later run then restores — which surfaces
+          # as a wall of bogus SA5011 "possible nil pointer dereference" hits in
+          # files the PR never touched, reproducible on no developer machine.
+          # Diagnosed the hard way: same golangci-lint version, same Go version,
+          # clean locally, red in CI, and `gh run rerun` restores the same bad
+          # cache so it looks deterministic. PR runs still RESTORE the cache, so
+          # they keep the speedup; they just can't corrupt it.
+          skip-save-cache: ${{ github.ref != 'refs/heads/main' }}
