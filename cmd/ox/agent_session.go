@@ -1327,7 +1327,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	// constructed so sessionMetaBase always receives the final ID.
 	preservedID, err := lfs.PreservedSessionID(sessionDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("preserve existing SessionID for %s: %w", sessionName, err)
 	}
 	sessionID := session.ResolveOrMintSessionID(preservedID, state.SessionID)
 

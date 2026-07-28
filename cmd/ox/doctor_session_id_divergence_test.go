@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -319,7 +320,7 @@ func TestScanSessionIDDivergence_NoSessionsDirReturnsNotExist(t *testing.T) {
 	tmp := t.TempDir()
 	_, err := scanSessionIDDivergence(filepath.Join(tmp, "sessions"))
 	require.Error(t, err)
-	assert.True(t, os.IsNotExist(err))
+	assert.True(t, errors.Is(err, os.ErrNotExist))
 }
 
 // --- B. checkSessionIDDivergence: the doctor-check wrapper ---

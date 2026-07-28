@@ -38,15 +38,28 @@ func TestNewNetworkCmd_DisablesCommitSigning(t *testing.T) {
 	// asserted across the whole surface, not just the pull path: the point of
 	// the chokepoint is that a future network command that commits inherits
 	// the hardening rather than having to remember it.
-	for _, args := range [][]string{
-		{"pull", "--rebase", "--autostash"},
-		{"-C", "/tmp/example", "fetch", "--quiet"},
-		{"ls-remote", "origin"},
+	// Asserts the COMPLETE argv, not just membership: `-c` is positional and
+	// must immediately precede its key=value, so a slices.Contains check would
+	// still pass on an unpaired or misordered flag that git silently rejects.
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{
+			args: []string{"pull", "--rebase", "--autostash"},
+			want: []string{"git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "pull", "--rebase", "--autostash"},
+		},
+		{
+			args: []string{"-C", "/tmp/example", "fetch", "--quiet"},
+			want: []string{"git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-C", "/tmp/example", "fetch", "--quiet"},
+		},
+		{
+			args: []string{"ls-remote", "origin"},
+			want: []string{"git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "ls-remote", "origin"},
+		},
 	} {
-		cmd := NewNetworkCmd(context.Background(), args...)
-		assert.True(t, slices.Contains(cmd.Args, "commit.gpgsign=false"),
-			"commit signing must be disabled for %v", args)
-		assert.True(t, slices.Contains(cmd.Args, "tag.gpgsign=false"),
-			"tag signing must be disabled for %v", args)
+		cmd := NewNetworkCmd(context.Background(), tc.args...)
+		assert.Equal(t, tc.want, cmd.Args,
+			"signing must be disabled ahead of the caller's verbatim args for %v", tc.args)
 	}
 }

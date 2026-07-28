@@ -441,9 +441,14 @@ func TestWriteToAgentEnvFile_NeverLoosensPermissions(t *testing.T) {
 // the test non-parallel, which is required here anyway. Any future test
 // that queries markers by PID should call this rather than hope it wins the
 // ordering race.
+// t.Name() alone is NOT enough: two concurrent `go test` processes run the
+// same test name, would derive the same directory, and the Cleanup below
+// would delete the other process's markers — reintroducing the shared-key
+// collision at process scope instead of test scope. t.TempDir()'s basename
+// is unique per test AND per process, so it closes that last gap.
 func isolateSessionMarkerDir(t *testing.T) {
 	t.Helper()
-	unique := "oxtest-" + strings.ReplaceAll(t.Name(), "/", "_")
+	unique := "oxtest-" + filepath.Base(t.TempDir()) + "-" + strings.ReplaceAll(t.Name(), "/", "_")
 	t.Setenv("USER", unique)
 	t.Setenv("USERNAME", unique)
 	require.NoError(t, os.MkdirAll(SessionMarkerDir(), 0700))
