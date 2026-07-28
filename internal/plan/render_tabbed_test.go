@@ -29,10 +29,18 @@ func TestRenderHTML_SectionJumpsOverThreeSections(t *testing.T) {
 	}
 	s := string(out)
 	for _, want := range []string{
-		`class="tabbar" aria-label="Plan sections"`,
+		`class="tabbar jump-bar" aria-label="Plan sections"`,
 		`data-tab="sec-1"`,
 		`data-tab="sec-6"`,
 		`<section id="sec-6"`,
+		// the jump bar carries the keyboard map and the semantic color legend
+		`class="kbd-map"`,
+		`<kbd>1</kbd>`,
+		`<kbd>[</kbd>`,
+		`<kbd>r</kbd>`,
+		`<kbd>t</kbd>`,
+		`class="legend"`,
+		`class="lg-dot sage"`,
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("tabbed render missing %q", want)

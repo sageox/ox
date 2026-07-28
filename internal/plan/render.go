@@ -282,6 +282,11 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 	// agent's judgment to assert.
 	markers := contextMarkers(res.Context)
 
+	// Structure facts: prose-shaped tracks/gates/shipped/holds/risks parsed from
+	// the plan source (planfacts.go) drive the swimlane, the hero chips, and the
+	// bead chips — the primitives a table-only detector never fires on.
+	facts := parsePlanFacts(in)
+
 	num := 0
 	for _, s := range in.Sections {
 		if strings.TrimSpace(s.Heading) == "" {
@@ -310,9 +315,15 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 		}
 		var secHTML string
 		secHTML, markers = injectMarkers(string(body), markers)
-		// structure-driven auto-visualization: gated-track tables gain a
-		// swimlane, comparison tables become click-to-inspect (autoviz.go).
-		secHTML = autoVisualize(secHTML, s.Heading)
+		// structure-driven auto-visualization: track subsections/gated tables
+		// gain a swimlane, risk tables the severity register, bead maps chips,
+		// comparison tables click-to-inspect (autoviz.go / planfacts.go).
+		secHTML = autoVisualize(secHTML, sectionViz{
+			Heading: s.Heading,
+			Lanes:   parseTracks(s.Body, facts.shipped),
+			IsRisk:  riskHeading.MatchString(s.Heading),
+			Beads:   facts.beadRe,
+		})
 		num++
 		id := fmt.Sprintf("sec-%d", num)
 		data.TOC = append(data.TOC, tocEntry{ID: id, Num: fmt.Sprintf("%02d", num), Heading: s.Heading})
@@ -353,10 +364,11 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 	// no badge fired — the retrieved ADR/session IS team context on the plan.
 	data.ContextItems = topContextItems(res.Context, 5)
 
-	// Hero stat chips: the first-30-seconds numbers (sections, files, team
-	// signals, open review items), each only when non-zero. Two chips minimum
-	// or none — a single lonely chip is noise, not a dashboard.
-	data.Stats = heroStats(res, len(data.Sections), data.Review)
+	// Hero stat chips: the first-30-seconds numbers (tracks/gates/shipped/
+	// holds/risks from structure, then files, team signals, open review), each
+	// only when non-zero. Two chips minimum or none — a single lonely chip is
+	// noise, not a dashboard.
+	data.Stats = heroStats(res, len(data.Sections), data.Review, facts)
 
 	// Anchor each signal to the section(s) whose files it concerns; signals
 	// that match no section stay in the global enrichment panel. This is the
@@ -413,7 +425,9 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 	if err := tmpl.Execute(&out, data); err != nil {
 		return nil, fmt.Errorf("execute template: %w", err)
 	}
-	return out.Bytes(), nil
+	// Tree-shake: styling for primitive families this page never drew is
+	// non-data-ink — drop it (treeshake.go; opt-in families, keep-on-doubt).
+	return shakeUnusedCSS(out.Bytes()), nil
 }
 
 // renderHasMermaid reports whether the rendered body contains a Mermaid block
@@ -759,11 +773,13 @@ func liftLede(html string) (string, string, bool) {
 
 // heroStats derives the hero chip row from plan structure + enrichment: each
 // chip only when its number is non-zero, and fewer than two chips yields none
-// (one lonely number is noise). Signals chip is teal (source-colored), open
-// review amber (needs attention), the rest neutral.
-func heroStats(res Result, sections int, review reviewSummary) []statChip {
-	var out []statChip
-	if sections > 0 {
+// (one lonely number is noise). Structure chips (tracks/gates/shipped/holds/
+// risks) lead when the plan has tracks — they carry more decision signal than
+// a raw section count, which is then dropped as redundant. Signals chip is
+// teal (source-colored), open review amber (needs attention).
+func heroStats(res Result, sections int, review reviewSummary, facts planFacts) []statChip {
+	out := structureStats(facts)
+	if len(out) == 0 && sections > 0 {
 		out = append(out, statChip{Value: fmt.Sprintf("%d", sections), Label: "sections", Class: "neutral"})
 	}
 	if res.Signals.Files > 0 {

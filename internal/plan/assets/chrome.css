@@ -26,10 +26,10 @@
 .ox-chrome-chip a:hover{text-decoration:underline}
 .ox-chrome-chip[data-type="collision"]{border-left-color:var(--amber, #f59e0b)}
 .ox-chrome-chip[data-type="prior-art"]{border-left-color:var(--teal, #14b8a6)}
-.ox-chrome-chip[data-type="expert-routing"]{border-left-color:var(--violet, #a78bfa)}
+.ox-chrome-chip[data-type="expert-routing"]{border-left-color:var(--copper, #e0a56a)}
 .ox-chrome-chip[data-type="aligns"]{border-left-color:var(--sage, #99c693)}
 .ox-chrome-chip[data-type="conflicts"]{border-left-color:var(--red, #ef4444)}
-.ox-chrome-chip[data-type="expert-perspective"]{border-left-color:var(--violet, #a78bfa)}
+.ox-chrome-chip[data-type="expert-perspective"]{border-left-color:var(--copper, #e0a56a)}
 .ox-chrome-context-h{font:600 10.5px/1 "Spline Sans Mono","JetBrains Mono",monospace;text-transform:uppercase;letter-spacing:.06em;color:var(--faint, #6f7a6d);margin:12px 0 6px}
 .ox-chrome-context-item{font-size:12px;color:var(--dim, #a8b3a5);padding:5px 0;border-top:1px solid var(--hair, #252c24)}
 .ox-chrome-context-item:first-child{border-top:none}

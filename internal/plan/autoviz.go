@@ -16,14 +16,19 @@ package plan
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
 
 var (
 	tableBlockRe = regexp.MustCompile(`(?s)<table>.*?</table>`)
-	headerCellRe = regexp.MustCompile(`(?s)<th[^>]*>(.*?)</th>`)
+	// `<th(?:\s…)?>` — NOT `<th[^>]*>`, which also matches `<thead>` and
+	// swallows everything up to the first real `</th>`. goldmark always wraps
+	// header rows in <thead>, so the sloppier form corrupts header parsing on
+	// every real-world table (the original reason table detectors misfired).
+	headerCellRe = regexp.MustCompile(`(?s)<th(?:\s[^>]*)?>(.*?)</th>`)
 	rowRe        = regexp.MustCompile(`(?s)<tr>.*?</tr>`)
-	cellRe       = regexp.MustCompile(`(?s)<td[^>]*>(.*?)</td>`)
+	cellRe       = regexp.MustCompile(`(?s)<td(?:\s[^>]*)?>(.*?)</td>`)
 	tagStripRe   = regexp.MustCompile(`<[^>]*>`)
 
 	trackHeaderRe = regexp.MustCompile(`(?i)\b(track|phase|wave|workstream|stage)\b`)
@@ -36,11 +41,37 @@ var (
 // own accent hexes.
 var swimPalette = []string{"#99c693", "#e0a56a", "#14b8a6", "#a78bfa", "#64748b", "#f59e0b"}
 
+// sectionViz carries the per-section context the structure-driven passes key
+// off: the H2 heading, the prose-parsed track lanes (planfacts.go), whether
+// the section is a risk section, and the detected bead-ref namespace.
+type sectionViz struct {
+	Heading string
+	Lanes   []trackLane    // >=2 → the section gets the track swimlane
+	IsRisk  bool           // risk-heading section → riskm table upgrade
+	Beads   *regexp.Regexp // bead-map section → chip styling (nil = off)
+}
+
+// beadHeading flags a section that maps work items to beads.
+var beadHeading = regexp.MustCompile(`(?i)\bbeads?\b`)
+
 // autoVisualize runs the structure-driven passes over one rendered section.
-// heading is the section's H2 text (comparison detection keys off it).
-func autoVisualize(sectionHTML, heading string) string {
-	out := autoSwimlane(sectionHTML)
-	if compareHeadRe.MatchString(heading) {
+func autoVisualize(sectionHTML string, v sectionViz) string {
+	out := sectionHTML
+	if len(v.Lanes) >= 2 {
+		// tracks-as-H3-subsections: the swimlane leads the section; the prose
+		// stays as the detail record. The table-shaped swimlane pass is skipped
+		// so a section never draws two competing timelines.
+		out = buildTrackSwim(v.Lanes) + out
+	} else {
+		out = autoSwimlane(out)
+	}
+	if v.IsRisk {
+		out = autoRiskTable(out)
+	}
+	if v.Beads != nil && beadHeading.MatchString(v.Heading) {
+		out = autoBeadChips(out, v.Beads)
+	}
+	if compareHeadRe.MatchString(v.Heading) {
 		out = autoInspector(out)
 	}
 	return out
@@ -122,6 +153,144 @@ func buildSwimlane(lanes [][2]string) string {
 func htmlEscape(s string) string {
 	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;")
 	return r.Replace(s)
+}
+
+// --- risk-matrix table upgrade ---
+
+// severityColRe matches a header cell that already carries severity.
+var severityColRe = regexp.MustCompile(`(?i)\bsever|priorit|impact`)
+
+// Severity inference tiers for risk tables that ship no severity column (the
+// common real-world shape: Risk | Mitigation). Keyed on the row's own wording;
+// the rendered caption discloses that severity is inferred, not authored.
+var (
+	sevBlockerRe = regexp.MustCompile(`(?i)data loss|unrecoverable|irreversible|\blegal\b|compliance|corrupt`)
+	sevHighRe    = regexp.MustCompile(`(?i)customer|migrat|stall|block|deadline|outage|security`)
+	sevLowRe     = regexp.MustCompile(`(?i)cosmetic|docs-only|polish|nice[- ]to[- ]have`)
+)
+
+func inferSeverity(rowText string) string {
+	switch {
+	case sevBlockerRe.MatchString(rowText):
+		return "blocker"
+	case sevHighRe.MatchString(rowText):
+		return "high"
+	case sevLowRe.MatchString(rowText):
+		return "low"
+	default:
+		return "medium"
+	}
+}
+
+// canonSeverity normalizes an authored severity cell to the riskm vocabulary.
+func canonSeverity(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "blocker", "critical", "crit":
+		return "blocker"
+	case "high", "severe":
+		return "high"
+	case "medium", "med", "moderate":
+		return "medium"
+	case "low", "minor":
+		return "low"
+	}
+	return ""
+}
+
+// autoRiskTable upgrades the first table of a risk section to the riskm
+// severity register: every row gains a glyph+word severity cell (column 2 — the
+// scaffold's riskm styling keys on it), rows sort blocker-first, and the
+// figcaption discloses when severity was inferred from wording rather than
+// authored. In-place upgrade, not additive: the output carries every original
+// cell, so keeping the source table too would only duplicate it.
+func autoRiskTable(sectionHTML string) string {
+	converted := false
+	return tableBlockRe.ReplaceAllStringFunc(sectionHTML, func(table string) string {
+		if converted {
+			return table
+		}
+		headers := headerCellRe.FindAllStringSubmatch(table, -1)
+		if len(headers) < 2 {
+			return table
+		}
+		sevCol := -1
+		for i, h := range headers {
+			if severityColRe.MatchString(stripTags(h[1])) {
+				sevCol = i
+				break
+			}
+		}
+		type riskRow struct {
+			cells []string
+			sev   string
+		}
+		var rows []riskRow
+		for _, row := range rowRe.FindAllString(table, -1) {
+			cells := cellRe.FindAllStringSubmatch(row, -1)
+			if len(cells) < 2 {
+				continue // header row (th) or ragged row
+			}
+			var inner []string
+			for _, c := range cells {
+				inner = append(inner, c[1])
+			}
+			sev := ""
+			if sevCol >= 0 && sevCol < len(inner) {
+				sev = canonSeverity(stripTags(inner[sevCol]))
+			}
+			if sev == "" {
+				sev = inferSeverity(stripTags(strings.Join(inner, " ")))
+			}
+			rows = append(rows, riskRow{cells: inner, sev: sev})
+		}
+		if len(rows) < 2 {
+			return table
+		}
+		converted = true
+		sort.SliceStable(rows, func(i, j int) bool { return rank(rows[i].sev) < rank(rows[j].sev) })
+
+		caption := "Risks — sorted by severity"
+		if sevCol < 0 {
+			caption += " (severity inferred from wording)"
+		}
+		var b strings.Builder
+		b.WriteString(`<figure class="riskm-fig"><figcaption>` + caption + `</figcaption>`)
+		b.WriteString(`<table class="riskm"><thead><tr><th>` + headers[0][1] + `</th><th>Severity</th>`)
+		for i, h := range headers[1:] {
+			if i+1 == sevCol {
+				continue // severity moved to column 2
+			}
+			b.WriteString(`<th>` + h[1] + `</th>`)
+		}
+		b.WriteString(`</tr></thead><tbody>`)
+		for _, r := range rows {
+			// title-case the severity word beside its shape glyph (shape survives
+			// grayscale/CVD — never color alone)
+			word := strings.ToUpper(r.sev[:1]) + r.sev[1:]
+			fmt.Fprintf(&b, `<tr class="sev-%s"><td>%s</td><td class="sev">%s%s</td>`, r.sev, r.cells[0], severityGlyph[r.sev], word)
+			for i, c := range r.cells[1:] {
+				if i+1 == sevCol {
+					continue
+				}
+				b.WriteString(`<td>` + c + `</td>`)
+			}
+			b.WriteString(`</tr>`)
+		}
+		b.WriteString(`</tbody></table></figure>`)
+		return b.String()
+	})
+}
+
+// --- bead-map chips ---
+
+// autoBeadChips styles a bead-map section's work-item refs as chips: each
+// namespaced `<code>` ref becomes an ox-chip, [HUMAN …] hold markers get the
+// amber hold chip, and the section's table is tagged for the compact bead-map
+// column styling. Purely presentational — no text is added or removed.
+func autoBeadChips(sectionHTML string, beadRe *regexp.Regexp) string {
+	out := beadRe.ReplaceAllString(sectionHTML, `<span class="ox-chip bead"><code>$1</code></span>`)
+	out = humanMarkRe.ReplaceAllString(out, `<span class="ox-chip bead hold">$0</span>`)
+	return strings.Replace(out, "<table>", `<table class="bead-map">`, 1)
 }
 
 // autoInspector upgrades comparison tables (>=3 columns, >=3 data rows) to the
