@@ -44,6 +44,54 @@ func TestStartRecording_MintsSessionIDAtBirth(t *testing.T) {
 	assert.Equal(t, state.SessionID, reloaded.SessionID)
 }
 
+// TestStartRecording_EveryRecordingGetsItsOwnID verifies the other half of
+// the birth contract: the ID is minted PER RECORDING, never shared or carried
+// over. TestStartRecording_MintsSessionIDAtBirth only proves one recording
+// gets a valid ID — a StartRecording that returned a package-level constant,
+// or reused whatever the previous recording left on disk, would still pass it.
+//
+// Failure prevented: two distinct recordings resolving to one /c/<ses_id>
+// conversation. Every consumer treats the ID as a unique key — the server-side
+// dedup key, the SageOx-Session commit trailer, plan provenance — so a
+// collision silently merges two unrelated sessions rather than erroring.
+func TestStartRecording_EveryRecordingGetsItsOwnID(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := setupRecordingTest(t, cacheDir)
+
+	sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+	require.NoError(t, os.WriteFile(sessionFile, []byte("{}\n"), 0644))
+
+	// The repeated OxSaMe entries are the case that matters: a single agent
+	// recording, stopping, and recording again. Session directory names are
+	// minute-granular and include the agent ID, so consecutive starts by one
+	// agent can land on the SAME directory name — the shape most likely to
+	// carry an identity forward. (Two concurrent recordings for one agent are
+	// already impossible; StartRecording rejects that outright.)
+	seen := make(map[string]string)
+	for _, agentID := range []string{"OxSaMe", "OxOthr", "OxSaMe", "OxSaMe"} {
+		state, err := StartRecording(projectRoot, StartRecordingOptions{
+			AgentID:     agentID,
+			AdapterName: "claude-code",
+			SessionFile: sessionFile,
+			Username:    "testuser",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, state)
+		require.True(t, sessionid.IsValidSessionID(state.SessionID),
+			"every recording must mint a valid ses_ ID, got %q", state.SessionID)
+
+		prior, dup := seen[state.SessionID]
+		require.False(t, dup,
+			"recording for agent %s reused the ID minted for agent %s: %s",
+			agentID, prior, state.SessionID)
+		seen[state.SessionID] = agentID
+
+		_, err = StopRecording(projectRoot, agentID)
+		require.NoError(t, err)
+	}
+	assert.Len(t, seen, 4, "each StartRecording must contribute a distinct ID")
+}
+
 // TestRecordingState_LegacyJSONWithoutSessionID verifies recordings started
 // under an older binary (no session_id field) load with an empty ID so every
 // emitter falls back to the name-based URL instead of crashing or inventing
