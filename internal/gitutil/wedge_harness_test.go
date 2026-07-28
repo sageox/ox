@@ -488,3 +488,58 @@ func TestWedge_ReplayedCommitBecomesEmpty(t *testing.T) {
 
 	f.assertMakesProgress()
 }
+
+// TestWedge_RebaseHaltsWithNothingToResolve covers the path a code review
+// caught that no fixture reached: a rebase that halts with ZERO unmerged
+// entries.
+//
+// Failure prevented: the resolver used to return "no conflicted files found"
+// whenever the index had no conflicts. During an ACTIVE rebase that is not an
+// error at all — git halts this way when a replayed commit's changes are
+// already upstream (rebase.empty=stop, and the default on older git). Returning
+// an error made the caller abort, restoring the pre-rebase state and re-wedging
+// the ledger. Modern git auto-drops empty commits, which is exactly why the
+// end-to-end fixtures passed while the code path stayed broken — so this test
+// forces the state directly instead of hoping git produces it.
+func TestWedge_RebaseHaltsWithNothingToResolve(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: drives real git commits")
+	}
+	f := newLedgerFixture(t)
+	const meta = "sessions/s1/meta.json"
+
+	f.diverge(meta, `{"s":"local"}`, `{"s":"cloud"}`)
+	f.gitAllowFail(f.local, "pull", "--rebase", "--autostash")
+	require.True(t, IsRebaseInProgress(f.local), "fixture must halt on a conflict")
+
+	// Resolve and stage by hand so the index is CLEAN while the rebase is still
+	// running — the exact shape an empty replayed commit produces.
+	f.git(f.local, "checkout", "--theirs", "--", meta)
+	f.git(f.local, "add", "--", meta)
+	require.Empty(t, f.git(f.local, "ls-files", "--unmerged"),
+		"precondition: mid-rebase with nothing left to resolve")
+	require.True(t, IsRebaseInProgress(f.local))
+
+	// The resolver must ADVANCE this, not report "no conflicted files found".
+	err := ResolveRebaseAcceptTheirs(context.Background(), f.local, []string{"sessions/"})
+	require.NoError(t, err,
+		"a rebase halted with nothing to resolve must be advanced, not treated as an error")
+	assert.False(t, IsRebaseInProgress(f.local), "the rebase must run to completion")
+
+	f.assertMakesProgress()
+}
+
+// TestResolveRebase_NoConflictsOutsideRebaseStillErrors keeps the original
+// contract intact: called on a repo that is NOT mid-rebase, "no conflicted
+// files found" is still the right answer. Without this, the fix above could
+// silently turn a caller's programming error into a no-op.
+func TestResolveRebase_NoConflictsOutsideRebaseStillErrors(t *testing.T) {
+	t.Parallel()
+	f := newLedgerFixture(t)
+	require.False(t, IsRebaseInProgress(f.local))
+
+	err := ResolveRebaseAcceptTheirs(context.Background(), f.local, []string{"sessions/"})
+	require.Error(t, err, "no rebase in progress and no conflicts is a caller error")
+	assert.Contains(t, err.Error(), "no conflicted files found")
+}

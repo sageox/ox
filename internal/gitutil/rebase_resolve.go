@@ -73,6 +73,17 @@ func resolveOneRebaseStep(ctx context.Context, repoPath string, safePrefixes []s
 		return false, fmt.Errorf("list unmerged entries: %w", err)
 	}
 	if len(entries) == 0 {
+		// No conflicts. If a rebase is still running, it halted for some reason
+		// OTHER than a conflict — most commonly a replayed commit that became
+		// empty because its changes are already upstream (git stops here when
+		// rebase.empty=stop, and older git versions stop by default).
+		//
+		// Returning an error here would be wrong: the caller aborts on error,
+		// which restores the pre-rebase state and re-wedges the ledger. There is
+		// nothing to resolve, so advance the rebase instead.
+		if IsRebaseInProgress(repoPath) {
+			return advanceNonConflictRebaseStep(ctx, repoPath)
+		}
 		return false, fmt.Errorf("no conflicted files found")
 	}
 
@@ -193,11 +204,7 @@ func resolveOneRebaseStep(ctx context.Context, repoPath string, safePrefixes []s
 	}
 
 	// continue the rebase
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rebase", "--continue")
-	cmd.Dir = repoPath
-	// GIT_EDITOR=true prevents git from opening an editor for the commit message
-	cmd.Env = append(cmd.Environ(), "GIT_EDITOR=true")
-	output, contErr := cmd.CombinedOutput()
+	_, contErr := runRebaseStep(ctx, repoPath, "--continue")
 
 	// A non-zero exit here does NOT imply failure. git returns non-zero when it
 	// commits this step and then halts on the NEXT conflicting commit. The only
@@ -209,15 +216,64 @@ func resolveOneRebaseStep(ctx context.Context, repoPath string, safePrefixes []s
 	if contErr == nil {
 		return false, nil // advanced cleanly to the next step
 	}
-	// Still mid-rebase AND continue errored: only real progress if the next step
-	// presented fresh conflicts for us to resolve. Otherwise git is stuck on
-	// something we cannot act on (e.g. it wants a manual edit), and looping would
-	// spin without converging.
+	// Still mid-rebase AND continue errored: fresh conflicts mean real progress.
 	next, listErr := listUnmergedEntries(ctx, repoPath)
 	if listErr == nil && len(next) > 0 {
 		return false, nil
 	}
-	return false, fmt.Errorf("rebase --continue: %s: %w", SanitizeOutput(strings.TrimSpace(string(output))), contErr)
+	// Halted with nothing to resolve (e.g. the step became empty) — let the
+	// non-conflict advancer decide between --continue and --skip rather than
+	// erroring out, which would make the caller abort and re-wedge the ledger.
+	return advanceNonConflictRebaseStep(ctx, repoPath)
+}
+
+// advanceNonConflictRebaseStep moves a rebase past a step that halted with
+// nothing to resolve — normally a replayed commit whose changes are already
+// upstream, so replaying it would produce an empty commit.
+//
+// It tries `--continue` first and only escalates to `--skip` when git itself
+// says the step is empty. It deliberately never skips blindly: `--skip` DROPS
+// the current commit, so guessing here would silently discard a real session.
+func advanceNonConflictRebaseStep(ctx context.Context, repoPath string) (done bool, err error) {
+	contOut, contErr := runRebaseStep(ctx, repoPath, "--continue")
+	if !IsRebaseInProgress(repoPath) {
+		return true, nil
+	}
+	if contErr == nil {
+		return false, nil // advanced to the next step
+	}
+
+	// git refuses --continue on an empty step and names the remedy. Only then
+	// is dropping the commit the correct (and git-sanctioned) action.
+	lower := strings.ToLower(contOut)
+	emptyStep := strings.Contains(lower, "--skip") ||
+		strings.Contains(lower, "nothing to commit") ||
+		strings.Contains(lower, "patch is empty") ||
+		strings.Contains(lower, "previous cherry-pick is now empty")
+	if !emptyStep {
+		return false, fmt.Errorf("rebase halted with nothing to resolve: %s",
+			SanitizeOutput(strings.TrimSpace(contOut)))
+	}
+
+	skipOut, skipErr := runRebaseStep(ctx, repoPath, "--skip")
+	if !IsRebaseInProgress(repoPath) {
+		return true, nil
+	}
+	if skipErr != nil {
+		return false, fmt.Errorf("rebase --skip: %s: %w",
+			SanitizeOutput(strings.TrimSpace(skipOut)), skipErr)
+	}
+	return false, nil
+}
+
+// runRebaseStep runs a `git rebase <arg>` with the editor disabled so git never
+// blocks waiting for a commit message.
+func runRebaseStep(ctx context.Context, repoPath, arg string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rebase", arg)
+	cmd.Dir = repoPath
+	cmd.Env = append(cmd.Environ(), "GIT_EDITOR=true")
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 // lfsPointerPrefix is the first line of every Git LFS pointer file.
