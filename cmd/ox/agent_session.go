@@ -1319,10 +1319,22 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
 
+	// durable ID precedence via the shared resolver: a preserved meta.json
+	// ID (prior stop attempt, e.g. LFS upload failed and we're retrying)
+	// beats the start-minted state ID; only mints fresh when neither exists
+	// (recordings started under an older binary). Non-NotExist read errors
+	// are fatal — see PreservedSessionID doc. Resolved before the builder is
+	// constructed so sessionMetaBase always receives the final ID.
+	preservedID, err := lfs.PreservedSessionID(sessionDir)
+	if err != nil {
+		return err
+	}
+	sessionID := session.ResolveOrMintSessionID(preservedID, state.SessionID)
+
 	// write meta.json first (before LFS upload) to preserve session metadata even if LFS fails
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 	displayName := identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName())
-	metaBuilder := sessionMetaBase(sessionName, displayName, state.AgentID, state.AdapterName, state.StartedAt, projectRoot).
+	metaBuilder := sessionMetaBase(sessionName, displayName, state.AgentID, state.AdapterName, state.StartedAt, projectRoot, sessionID).
 		Model(result.Model).
 		Title(state.Title).
 		EntryCount(result.EntryCount).
@@ -1345,19 +1357,6 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		metaBuilder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason)
 	}
 	_ = session.CleanupSageoxScore(state.AgentID)
-
-	// durable ID precedence via the shared resolver: a preserved meta.json
-	// ID (prior stop attempt, e.g. LFS upload failed and we're retrying)
-	// beats the start-minted state ID; empty → the builder's fresh mint
-	// stands (recordings started under an older binary). Non-NotExist read
-	// errors are fatal — see PreservedSessionID doc.
-	preservedID, err := lfs.PreservedSessionID(sessionDir)
-	if err != nil {
-		return err
-	}
-	if resolved := session.ResolveSessionID(preservedID, state.SessionID); resolved != "" {
-		metaBuilder = metaBuilder.SessionID(resolved)
-	}
 
 	meta := metaBuilder.Build()
 	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {

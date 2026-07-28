@@ -21,7 +21,6 @@ import (
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
-	"github.com/sageox/ox/internal/sessionid"
 	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/sageox/ox/pkg/summaryeval"
 )
@@ -1248,10 +1247,7 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	if stored.Meta != nil {
 		headerID = stored.Meta.SessionID
 	}
-	sessionIDForMeta := session.ResolveSessionID(preservedSessionID, headerID)
-	if sessionIDForMeta == "" {
-		sessionIDForMeta = sessionid.GenerateSessionID()
-	}
+	sessionIDForMeta := session.ResolveOrMintSessionID(preservedSessionID, headerID)
 
 	// Failure-stub retry cap. Pre-fix, the daemon would re-finalize a
 	// session on every anti-entropy cycle whenever its title was empty,
@@ -2019,15 +2015,25 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 
 	enc := json.NewEncoder(f)
 
-	// write header
+	// write header. state.SessionID (when present — post rollout, minted at
+	// StartRecording) MUST be carried into the reconstructed header: this
+	// raw.jsonl is the crash-safe carrier every later finalize path reads
+	// via ReadHeaderSessionID/ParseStoreMeta. Dropping it here would make
+	// writeMetaAndUploadLFS treat the session as having no durable ID and
+	// mint a fresh one, rotating away from an identity that may already be
+	// circulated (commit trailers, PR bodies) or cached server-side.
+	metaFields := map[string]any{
+		"schema_version": "1",
+		"agent_id":       state.AgentID,
+		"agent_type":     state.AdapterName,
+		"started_at":     state.StartedAt,
+		"recovered":      true,
+	}
+	if state.SessionID != "" {
+		metaFields["session_id"] = state.SessionID
+	}
 	header := map[string]any{
-		"_meta": map[string]any{
-			"schema_version": "1",
-			"agent_id":       state.AgentID,
-			"agent_type":     state.AdapterName,
-			"started_at":     state.StartedAt,
-			"recovered":      true,
-		},
+		"_meta": metaFields,
 	}
 	if err := enc.Encode(header); err != nil {
 		logger.Warn("recovery: failed to write header", "err", err)

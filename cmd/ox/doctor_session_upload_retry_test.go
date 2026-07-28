@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/sessionid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -779,4 +780,132 @@ func TestRetrySessionUpload_ContentFilesNotPointers_OnLFSFailure(t *testing.T) {
 		assert.False(t, lfs.IsPointerFile(fPath),
 			"%s must remain real content after a failed upload (bug #291 regression)", f)
 	}
+}
+
+// --- resolveOrphanSessionID: ox-5n8e regression coverage ---
+//
+// Production evidence: the same session (identical session_name, username,
+// agent_id, created_at, entry_count, and per-file LFS OIDs) ended up with
+// two different session_id values in meta.json on two replicas of the same
+// ledger. Root cause: retrySessionUpload only ever consulted a preserved
+// meta.json ID and, when none was present yet (true for every orphan by
+// construction — findOrphanedSessions already filters out sessions with an
+// existing ledger meta.json), silently minted a brand new ID instead of
+// falling back to the ID already carried in the orphan's raw.jsonl header
+// (orphan.Meta.SessionID). Any session retried more than once before its
+// first successful push — a stale/reset local ledger clone, a second
+// developer machine, a repeated `ox doctor` run — got a different random ID
+// each time.
+
+// TestResolveOrphanSessionID_HeaderIDPreservedWhenNoLedgerMetaYet is the
+// direct regression test for the bug: this is the exact state every orphan
+// is in on its first (and any subsequent, still-failing) retry attempt —
+// no meta.json in the ledger session dir — which is precisely where the
+// header-carried ID must NOT be discarded.
+func TestResolveOrphanSessionID_HeaderIDPreservedWhenNoLedgerMetaYet(t *testing.T) {
+	sessionDir := filepath.Join(t.TempDir(), "sessions", "2026-05-08T19-25-ajit-OxF9dp")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+	// no meta.json written — mirrors every orphan retrySessionUpload sees
+
+	const headerID = "ses_019f633e-29f3-7566-9ab4-a3da5b666fe5"
+	orphan := orphanedSession{
+		SessionName: "2026-05-08T19-25-ajit-OxF9dp",
+		Meta:        &session.StoreMeta{AgentID: "OxF9dp", SessionID: headerID},
+	}
+
+	got, err := resolveOrphanSessionID(sessionDir, orphan)
+	require.NoError(t, err)
+	assert.Equal(t, headerID, got, "must preserve the header-carried SessionID, not mint a new one")
+}
+
+// TestResolveOrphanSessionID_PreservedMetaWinsOverHeader verifies the
+// documented precedence: a meta.json already written to the ledger session
+// dir (an earlier retry that got as far as the write before the push
+// failed) outranks the header ID.
+func TestResolveOrphanSessionID_PreservedMetaWinsOverHeader(t *testing.T) {
+	sessionDir := t.TempDir()
+	const preservedID = "ses_019f63cb-97ff-761e-ab36-e7a967b4438f"
+	require.NoError(t, lfs.WriteSessionMeta(sessionDir, &lfs.SessionMeta{
+		Version:     "1.0",
+		SessionName: "2026-05-08T19-25-ajit-OxF9dp",
+		SessionID:   preservedID,
+		CreatedAt:   time.Now(),
+	}))
+
+	orphan := orphanedSession{
+		SessionName: "2026-05-08T19-25-ajit-OxF9dp",
+		Meta:        &session.StoreMeta{AgentID: "OxF9dp", SessionID: "ses_019f633e-29f3-7566-9ab4-a3da5b666fe5"},
+	}
+
+	got, err := resolveOrphanSessionID(sessionDir, orphan)
+	require.NoError(t, err)
+	assert.Equal(t, preservedID, got, "preserved meta.json ID must win over the header-carried ID")
+}
+
+// TestResolveOrphanSessionID_CorruptMetaRefusesToMint mirrors the
+// unreadable-events-never-mints-new-id shape from the plan backfill
+// hardening (PR #723): a meta.json that exists but cannot be parsed must
+// abort with an error, never silently fall through to minting a fresh
+// SessionID that would rotate away from an ID we simply failed to read.
+func TestResolveOrphanSessionID_CorruptMetaRefusesToMint(t *testing.T) {
+	sessionDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "meta.json"), []byte("{not valid json"), 0644))
+
+	orphan := orphanedSession{
+		SessionName: "corrupt-meta-session",
+		Meta:        &session.StoreMeta{AgentID: "OxBAD1", SessionID: "ses_019f633e-29f3-7566-9ab4-a3da5b666fe5"},
+	}
+
+	got, err := resolveOrphanSessionID(sessionDir, orphan)
+	require.Error(t, err, "corrupt meta.json must refuse to resolve, not mint a fresh ID")
+	assert.Empty(t, got)
+}
+
+// TestResolveOrphanSessionID_NoIDAnywhereMintsExactlyOne covers the
+// genuinely-legacy case: no ledger meta.json and no header SessionID (a
+// recording from before SessionID-at-birth minting). Minting is the only
+// correct behavior here, and it must produce a valid, well-formed ID.
+func TestResolveOrphanSessionID_NoIDAnywhereMintsExactlyOne(t *testing.T) {
+	sessionDir := t.TempDir()
+	orphan := orphanedSession{
+		SessionName: "legacy-session",
+		Meta:        &session.StoreMeta{AgentID: "OxLEG1"}, // no SessionID
+	}
+
+	got, err := resolveOrphanSessionID(sessionDir, orphan)
+	require.NoError(t, err)
+	assert.True(t, sessionid.IsValidSessionID(got), "must mint a valid ses_<UUIDv7> when no ID exists anywhere, got %q", got)
+}
+
+// TestResolveOrphanSessionID_RegisteredTwiceYieldsOneID reproduces the
+// exact production shape: the same session_name/created_at is retried
+// twice (e.g. the first retry wrote meta.json locally but the push failed,
+// and a later `ox doctor` run retries again). Both calls must resolve to
+// the SAME session_id.
+func TestResolveOrphanSessionID_RegisteredTwiceYieldsOneID(t *testing.T) {
+	sessionDir := t.TempDir()
+	orphan := orphanedSession{
+		SessionName: "2026-05-08T19-25-ajit-OxF9dp",
+		Meta:        &session.StoreMeta{AgentID: "OxF9dp"}, // legacy: no header ID either
+	}
+
+	// first registration: nothing anywhere yet — mints ID_A and (as
+	// retrySessionUpload does in production) writes it to meta.json before
+	// attempting the push.
+	first, err := resolveOrphanSessionID(sessionDir, orphan)
+	require.NoError(t, err)
+	require.True(t, sessionid.IsValidSessionID(first))
+	require.NoError(t, lfs.WriteSessionMeta(sessionDir, &lfs.SessionMeta{
+		Version:     "1.0",
+		SessionName: orphan.SessionName,
+		SessionID:   first,
+		CreatedAt:   time.Now(),
+	}))
+
+	// second registration: same session, same cache content, retried again
+	// (push failed the first time). Must return the SAME id, not mint a
+	// second one.
+	second, err := resolveOrphanSessionID(sessionDir, orphan)
+	require.NoError(t, err)
+	assert.Equal(t, first, second, "retrying the same session must yield one durable session_id, not two")
 }

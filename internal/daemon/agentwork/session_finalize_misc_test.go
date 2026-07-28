@@ -295,6 +295,77 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 		}
 	})
 
+	// TestRecoverRawFromSessionFile carries_forward_session_id_from_state
+	// guards the ox-5n8e root cause: .recording.json's SessionID (minted at
+	// StartRecording, post rollout) is the crash-safe carrier every later
+	// finalize path reads back out of the raw.jsonl header via
+	// ReadHeaderSessionID/ParseStoreMeta. If the reconstructed header drops
+	// it, writeMetaAndUploadLFS sees an empty headerID and — when no
+	// meta.json exists yet either — mints a brand new SessionID, rotating
+	// away from an identity that may already be circulated (commit
+	// trailers, PR bodies) or cached server-side. Two independent
+	// finalize attempts for the SAME session (e.g. two developer clones
+	// that both pull the orphaned raw.jsonl before either pushes a
+	// meta.json) would then each mint a different ID for identical content
+	// — exactly the two-session_id-values-for-one-session bug observed in
+	// production.
+	t.Run("carries_forward_session_id_from_state", func(t *testing.T) {
+		sessionDir := t.TempDir()
+		recPath := filepath.Join(sessionDir, recordingMarker)
+		rawPath := filepath.Join(sessionDir, artifactRaw)
+
+		sourceFile := filepath.Join(t.TempDir(), "session.jsonl")
+		startedAt := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+		writeSimpleJSONL(t, sourceFile, []time.Time{startedAt.Add(1 * time.Minute)})
+
+		const durableID = "ses_01890a5d-ac96-774b-bcce-b302099a8057"
+		writeRecordingState(t, recPath, session.RecordingState{
+			AgentID:     "OxSID1",
+			AdapterName: "test-mock",
+			SessionFile: sourceFile,
+			StartedAt:   startedAt,
+			SessionID:   durableID,
+		})
+
+		if !recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath) {
+			t.Fatal("expected recovery to succeed")
+		}
+
+		got := session.ReadHeaderSessionID(rawPath)
+		if got != durableID {
+			t.Errorf("reconstructed header lost the durable SessionID: want %q, got %q", durableID, got)
+		}
+	})
+
+	t.Run("no_session_id_in_state_yields_no_header_id", func(t *testing.T) {
+		// legacy recording (predates SessionID-at-birth minting): state has
+		// no SessionID, so the reconstructed header correctly carries none
+		// — nothing to preserve, and this must not error or invent one.
+		sessionDir := t.TempDir()
+		recPath := filepath.Join(sessionDir, recordingMarker)
+		rawPath := filepath.Join(sessionDir, artifactRaw)
+
+		sourceFile := filepath.Join(t.TempDir(), "session.jsonl")
+		startedAt := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+		writeSimpleJSONL(t, sourceFile, []time.Time{startedAt.Add(1 * time.Minute)})
+
+		writeRecordingState(t, recPath, session.RecordingState{
+			AgentID:     "OxSID0",
+			AdapterName: "test-mock",
+			SessionFile: sourceFile,
+			StartedAt:   startedAt,
+			// SessionID intentionally empty
+		})
+
+		if !recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath) {
+			t.Fatal("expected recovery to succeed")
+		}
+
+		if got := session.ReadHeaderSessionID(rawPath); got != "" {
+			t.Errorf("expected no header SessionID for a legacy state with none, got %q", got)
+		}
+	})
+
 	t.Run("no_entries_after_start_time", func(t *testing.T) {
 		sessionDir := t.TempDir()
 		recPath := filepath.Join(sessionDir, recordingMarker)

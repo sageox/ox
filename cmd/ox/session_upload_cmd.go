@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -153,12 +154,21 @@ func buildSessionMeta(sessionPath, sessionName, projectRoot string, fileRefs map
 		}
 		return meta, nil
 	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		// meta.json exists but couldn't be read/parsed — refuse to proceed.
+		// Silently falling through to "construct from directory name" here
+		// would mint a fresh SessionID and rotate away from whatever
+		// identity the unreadable file held. See PreservedSessionID doc.
+		return nil, fmt.Errorf("read existing meta.json (refusing to silently rotate SessionID): %w", err)
+	}
 
 	// no existing meta.json — construct from directory name
 	ts, username, agentID := parseSessionDirName(sessionName)
 
+	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
+
 	// count entries in raw.jsonl if present
-	entryCount := countJSONLLines(filepath.Join(sessionPath, ledgerFileRaw))
+	entryCount := countJSONLLines(rawPath)
 
 	// read summary if present
 	summary := readFileString(filepath.Join(sessionPath, ledgerFileSummaryMD))
@@ -168,8 +178,13 @@ func buildSessionMeta(sessionPath, sessionName, projectRoot string, fileRefs map
 		fileRefs = make(map[string]lfs.FileRef)
 	}
 
+	// durable ID via the shared resolver: no preserved meta.json exists (the
+	// read above returned NotExist), so the raw-header carrier is the only
+	// possible source before minting fresh.
+	sessionID := session.ResolveOrMintSessionID("", session.ReadHeaderSessionID(rawPath))
+
 	ep := endpoint.GetForProject(projectRoot)
-	return sessionMetaBase(sessionName, firstNonEmpty(username, identity.AttributionDisplayName(ep, config.GetDisplayName()), "unknown"), agentID, "unknown", ts, projectRoot).
+	return sessionMetaBase(sessionName, firstNonEmpty(username, identity.AttributionDisplayName(ep, config.GetDisplayName()), "unknown"), agentID, "unknown", ts, projectRoot, sessionID).
 		EntryCount(entryCount).
 		Summary(summary).
 		WithFiles(fileRefs).

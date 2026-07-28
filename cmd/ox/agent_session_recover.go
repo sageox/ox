@@ -216,24 +216,26 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 					slog.Warn("read existing meta.json failed during recovery; skipping write to avoid SessionID rotation", "error", preserveErr)
 					_ = doctor.SetNeedsDoctorAgent(projectRoot)
 				} else {
+					// durable ID via the shared resolver: preserved meta.json ID
+					// wins; start-minted comes from state, falling back to the
+					// raw-header carrier (state may predate the SessionID field
+					// after a mid-recording binary upgrade). Only mints fresh
+					// when neither source has one. Resolved before the builder
+					// is constructed so sessionMetaBase always receives the
+					// final ID.
+					startMinted := state.SessionID
+					if startMinted == "" {
+						startMinted = session.ReadHeaderSessionID(rawPath)
+					}
+					sessionID := session.ResolveOrMintSessionID(preservedID, startMinted)
+
 					displayName := identity.AttributionDisplayName(endpoint.GetForProject(projectRoot), config.GetDisplayName())
-					metaBuilder := sessionMetaBase(sessionName, displayName, state.AgentID, state.AdapterName, state.StartedAt, projectRoot).
+					metaBuilder := sessionMetaBase(sessionName, displayName, state.AgentID, state.AdapterName, state.StartedAt, projectRoot, sessionID).
 						EntryCount(entryCount).
 						StopReason(session.StopReasonRecovered).
 						ProducedCommits(state.ProducedCommits).
 						ProducedPlans(state.ProducedPlans).
 						WithFiles(fileRefs)
-					// durable ID via the shared resolver: preserved meta.json ID
-					// wins; start-minted comes from state, falling back to the
-					// raw-header carrier (state may predate the SessionID field
-					// after a mid-recording binary upgrade)
-					startMinted := state.SessionID
-					if startMinted == "" {
-						startMinted = session.ReadHeaderSessionID(rawPath)
-					}
-					if resolved := session.ResolveSessionID(preservedID, startMinted); resolved != "" {
-						metaBuilder = metaBuilder.SessionID(resolved)
-					}
 					meta := metaBuilder.Build()
 					if err := lfs.WriteSessionMeta(ledgerSessionDir, meta); err != nil {
 						slog.Warn("write meta.json failed", "error", err)

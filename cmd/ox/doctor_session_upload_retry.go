@@ -250,6 +250,34 @@ func readCacheSessionMeta(rawPath string) (*session.StoreMeta, int, error) {
 	return meta, entryCount, nil
 }
 
+// resolveOrphanSessionID picks the durable ses_ ID for a retried orphan
+// upload. Precedence, via the shared session.ResolveOrMintSessionID
+// resolver: a preserved meta.json ID (a prior retry attempt already wrote
+// meta.json to sessionDir before crashing on push) beats the ID already
+// carried in the orphan's raw.jsonl header (orphan.Meta.SessionID, parsed
+// by findOrphanedSessions); a fresh ID is minted only when neither exists
+// (legacy recordings with no session_id anywhere).
+//
+// This must never be bypassed in favor of an inline mint: doing so is
+// exactly the bug this function fixes (ox-5n8e) — every retry of a still-
+// failing orphan silently rotated to a brand new SessionID because the
+// header-carried one was never consulted, so a later successful push could
+// commit a different ID than a locally stranded prior attempt, producing
+// two meta.json states for the same session.
+//
+// Non-NotExist meta.json read errors are fatal — see PreservedSessionID doc.
+func resolveOrphanSessionID(sessionDir string, orphan orphanedSession) (string, error) {
+	preservedID, err := lfs.PreservedSessionID(sessionDir)
+	if err != nil {
+		return "", fmt.Errorf("preserve existing SessionID: %w", err)
+	}
+	headerID := ""
+	if orphan.Meta != nil {
+		headerID = orphan.Meta.SessionID
+	}
+	return session.ResolveOrMintSessionID(preservedID, headerID), nil
+}
+
 // retrySessionUpload copies session files from cache to ledger, uploads to LFS,
 // writes meta.json, and commits+pushes. This is the recovery path for sessions
 // where phase 2 (ledger upload) failed during session stop. The cache always has
@@ -296,6 +324,14 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 		}
 	}
 
+	// durable ID via the shared resolver, resolved before the network round
+	// trip so a corrupt pre-existing meta.json aborts fast rather than after
+	// a wasted LFS upload. See resolveOrphanSessionID doc.
+	sessionID, err := resolveOrphanSessionID(sessionDir, orphan)
+	if err != nil {
+		return err
+	}
+
 	// upload to LFS
 	fileRefs, err := uploadSessionLFS(projectRoot, sessionDir)
 	if err != nil {
@@ -304,22 +340,11 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 
 	// build and write meta.json; use WriteSessionMetaOnly so content files
 	// remain intact until after the push (pointer stubs + no remote = unrecoverable)
-	//
-	// preserve any pre-existing ses_<UUIDv7> on retry: a prior orphan
-	// publish attempt may have written meta.json before crashing on push.
-	// Non-NotExist read errors are fatal — see PreservedSessionID doc.
-	preservedID, err := lfs.PreservedSessionID(sessionDir)
-	if err != nil {
-		return fmt.Errorf("preserve existing SessionID: %w", err)
-	}
-	metaBuilder := sessionMetaBase(orphan.SessionName, orphan.Meta.Username, orphan.Meta.AgentID, orphan.Meta.AgentType, orphan.Meta.CreatedAt, projectRoot).
+	metaBuilder := sessionMetaBase(orphan.SessionName, orphan.Meta.Username, orphan.Meta.AgentID, orphan.Meta.AgentType, orphan.Meta.CreatedAt, projectRoot, sessionID).
 		Model(orphan.Meta.Model).
 		EntryCount(orphan.EntryCount).
 		StopReason(session.StopReasonRecovered).
 		WithFiles(fileRefs)
-	if preservedID != "" {
-		metaBuilder = metaBuilder.SessionID(preservedID)
-	}
 	meta := metaBuilder.Build()
 	if err := lfs.WriteSessionMetaOnly(sessionDir, meta); err != nil {
 		return fmt.Errorf("write meta.json: %w", err)

@@ -954,6 +954,22 @@ func ResolveSessionID(preserved, startMinted string) string {
 	return startMinted
 }
 
+// ResolveOrMintSessionID applies ResolveSessionID precedence and mints a
+// fresh ses_<UUIDv7> only when neither a preserved nor a start-minted ID
+// exists (a legacy recording with no durable identity anywhere). This is
+// the single chokepoint for "mint as last resort" — every meta.json writer
+// (CLI stop, CLI recover, doctor retry-upload, manual upload, daemon
+// finalize) must resolve its SessionID through this function rather than
+// minting inline, so a call site can never accidentally skip past a
+// preserved or header-carried ID and rotate an identity that already
+// exists.
+func ResolveOrMintSessionID(preserved, startMinted string) string {
+	if resolved := ResolveSessionID(preserved, startMinted); resolved != "" {
+		return resolved
+	}
+	return sessionid.GenerateSessionID()
+}
+
 // ReadHeaderSessionID returns the ses_ ID carried in the first-line header
 // of the raw.jsonl at path, or "" for legacy/foreign/absent headers. This is
 // the crash-safe-carrier read for paths where .recording.json is already
