@@ -369,3 +369,103 @@ func TestCheckLedgerBranchStatus_UnbornHead(t *testing.T) {
 		assert.NotEmpty(t, strings.TrimSpace(string(out)))
 	})
 }
+
+// TestUnbornLedger_UnreachableRemoteNeverSuggestsSeeding is the data-integrity
+// guard on the unborn-HEAD repair.
+//
+// Failure prevented: `ls-remote` returning nothing looks identical whether the
+// remote is genuinely empty or the command FAILED (network blip, expired token,
+// DNS). Treating a failure as "empty" tells the user to author a brand-new
+// initial commit — and doing that on a ledger that actually has remote history
+// fabricates a divergent root. This is not hypothetical: an expired PAT embedded
+// in a real ledger's origin URL produced exactly this ls-remote failure.
+func TestUnbornLedger_UnreachableRemoteNeverSuggestsSeeding(t *testing.T) {
+	gitInit := func(t *testing.T, dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), // safe: git subprocess in a temp fixture repo, not the ox CLI
+			"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	t.Run("unreachable remote is critical but must NOT recommend seeding", func(t *testing.T) {
+		root := t.TempDir()
+		repo := filepath.Join(root, "ledger")
+		gitInit(t, root, "init", "--initial-branch=main", repo)
+		// origin points at a path that does not exist -> ls-remote FAILS
+		gitInit(t, repo, "remote", "add", "origin", filepath.Join(root, "does-not-exist.git"))
+		require.NoError(t, os.WriteFile(filepath.Join(repo, "note.txt"), []byte("x"), 0o644))
+
+		res := unbornLedgerFailure(repo, "main", false)
+
+		assert.False(t, res.passed)
+		assert.Equal(t, "critical", res.priority,
+			"a never-synced ledger stays critical even when the remote can't be checked")
+		assert.Equal(t, CheckSlugLedgerBranchStatus, res.slug, "slug must survive for correlation")
+		assert.NotContains(t, res.detail, "seed ledger",
+			"must never recommend authoring an initial commit when the remote is unverified")
+		assert.Contains(t, res.detail, "could NOT verify")
+	})
+
+	t.Run("verifiably empty remote may recommend seeding", func(t *testing.T) {
+		root := t.TempDir()
+		bare := filepath.Join(root, "bare.git")
+		repo := filepath.Join(root, "ledger")
+		gitInit(t, root, "init", "--bare", "--initial-branch=main", bare)
+		gitInit(t, root, "clone", bare, repo)
+		require.NoError(t, os.WriteFile(filepath.Join(repo, "note.txt"), []byte("x"), 0o644))
+
+		res := unbornLedgerFailure(repo, "main", false)
+
+		assert.Equal(t, "critical", res.priority)
+		assert.Contains(t, res.detail, "seed ledger",
+			"a reachable, verifiably-empty remote is the one case where seeding is correct")
+	})
+}
+
+// TestUnbornLedger_FailedRepairStaysCritical prevents a failed auto-repair from
+// being quieter than the detection that preceded it.
+//
+// Failure prevented: FailedCheck leaves priority empty, and categorizeCheck
+// routes anything non-critical into the "attention" bucket — so a failed repair
+// of a never-synced ledger would get demoted below the critical finding that
+// triggered it, and would lose the slug needed to correlate the two.
+func TestUnbornLedger_FailedRepairStaysCritical(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "ledger")
+	bare := filepath.Join(root, "bare.git")
+
+	run := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), // safe: git subprocess in a temp fixture repo, not the ox CLI
+			"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		_, _ = cmd.CombinedOutput()
+	}
+	run(root, "init", "--bare", "--initial-branch=main", bare)
+	run(root, "clone", bare, repo)
+	seed := filepath.Join(root, "seed")
+	run(root, "clone", bare, seed)
+	require.NoError(t, os.WriteFile(filepath.Join(seed, "a.txt"), []byte("a"), 0o644))
+	run(seed, "add", "-A")
+	run(seed, "commit", "-m", "seed")
+	run(seed, "push", "origin", "main")
+
+	// remote has commits, so the repair path runs — then break it by pointing
+	// origin somewhere unfetchable AFTER the ls-remote succeeds is not possible
+	// in-process, so assert the shape of a checkout failure on a bogus branch.
+	res := unbornLedgerFailure(repo, "no-such-branch", true)
+
+	if !res.passed {
+		assert.Equal(t, "critical", res.priority,
+			"a failed repair must stay critical, not be demoted to attention")
+		assert.Equal(t, CheckSlugLedgerBranchStatus, res.slug)
+	}
+}

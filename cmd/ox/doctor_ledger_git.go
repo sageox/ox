@@ -333,12 +333,15 @@ func checkLedgerBranchStatus(fix bool) checkResult {
 // the team. A real ledger sat this way with 184 uncommitted files while doctor
 // reported it "skipped".
 //
-// Two distinct shapes, and they need different answers:
+// THREE outcomes, and conflating any two of them is dangerous:
 //   - remote has commits → the local clone lost its branch (interrupted clone).
 //     Recoverable automatically: fetch and check the branch back out.
-//   - remote is empty too → the ledger was never provisioned or its first push
-//     never landed. Committing here would define the repo's initial history, so
-//     it is surfaced for a human rather than guessed at.
+//   - remote verifiably empty → never provisioned, or the first push never
+//     landed. Committing here would define the repo's initial history, so it is
+//     surfaced for a human rather than guessed at.
+//   - remote UNREACHABLE → we cannot tell which of the above it is, so we must
+//     not suggest seeding. Seeding a ledger that actually has remote history
+//     fabricates a divergent root commit.
 func unbornLedgerFailure(ledgerPath, branch string, fix bool) checkResult {
 	const name = "Ledger branch status"
 
@@ -349,41 +352,63 @@ func unbornLedgerFailure(ledgerPath, branch string, fix bool) checkResult {
 		}
 	}
 
-	remoteHasCommits := false
-	if out, err := exec.Command("git", "-C", ledgerPath, "ls-remote", "--heads", "origin").Output(); err == nil {
-		remoteHasCommits = strings.TrimSpace(string(out)) != ""
+	// critical marks a result as critical AND tags it with the slug. FailedCheck
+	// leaves priority empty, and categorizeCheck routes anything non-critical to
+	// the "attention" bucket — so a FAILED REPAIR of a never-synced ledger would
+	// otherwise be quieter than the detection that preceded it, and would lose
+	// the slug needed to correlate the two.
+	critical := func(r checkResult) checkResult {
+		r.priority = "critical"
+		r.slug = CheckSlugLedgerBranchStatus
+		return r
 	}
 
-	if remoteHasCommits {
+	// Three outcomes, not two. "ls-remote failed" must NEVER be conflated with
+	// "remote is genuinely empty": the empty case tells the user to author a
+	// brand-new initial commit, and doing that on a ledger that actually has
+	// remote history fabricates a divergent root. A transient network blip or an
+	// expired token is enough to trigger it — an expired PAT on a real ledger
+	// produced exactly this ls-remote failure in the field.
+	lsOut, lsErr := exec.Command("git", "-C", ledgerPath, "ls-remote", "--heads", "origin").CombinedOutput()
+	if lsErr != nil {
+		return critical(FailedCheck(name,
+			fmt.Sprintf("branch %q has no commits and the remote could not be reached", branch),
+			fmt.Sprintf("%d uncommitted file(s) have never synced, but we could NOT verify whether the "+
+				"remote has history.\n       Do not seed this ledger until the remote is reachable — "+
+				"seeding one that already has history creates a divergent root commit.\n       "+
+				"Check connectivity and credentials (`ox doctor`, `ox login`), then re-run.\n       "+
+				"ls-remote: %s",
+				untracked, gitutil.SanitizeOutput(strings.TrimSpace(string(lsOut))))))
+	}
+
+	if strings.TrimSpace(string(lsOut)) != "" {
+		// Remote has history: the local clone lost its branch. Safe to restore.
 		if !fix {
-			r := CriticalCheck(name,
+			r := critical(CriticalCheck(name,
 				fmt.Sprintf("branch %q has no commits (remote does)", branch),
 				fmt.Sprintf("The local clone lost its branch — %d uncommitted file(s) have never synced.\n       "+
-					"Run `ox doctor --fix` to restore it from the remote.", untracked))
-			r.slug = CheckSlugLedgerBranchStatus
+					"Run `ox doctor --fix` to restore it from the remote.", untracked)))
 			r.fixLevel = FixLevelAuto
 			return r
 		}
 		if out, err := exec.Command("git", "-C", ledgerPath, "fetch", "origin").CombinedOutput(); err != nil {
-			return FailedCheck(name, "fetch failed", gitutil.SanitizeOutput(strings.TrimSpace(string(out))))
+			return critical(FailedCheck(name, "fetch failed", gitutil.SanitizeOutput(strings.TrimSpace(string(out)))))
 		}
 		if out, err := exec.Command("git", "-C", ledgerPath, "checkout", branch).CombinedOutput(); err != nil {
-			return FailedCheck(name, "checkout failed", gitutil.SanitizeOutput(strings.TrimSpace(string(out))))
+			return critical(FailedCheck(name, "checkout failed", gitutil.SanitizeOutput(strings.TrimSpace(string(out)))))
 		}
 		return PassedCheck(name, fmt.Sprintf("restored branch %q from remote", branch))
 	}
 
-	// Remote is empty as well. Do NOT auto-commit: this would author the
+	// Remote verifiably has zero heads. Do NOT auto-commit: this would author the
 	// ledger's initial history from whatever happens to be on disk.
-	r := CriticalCheck(name,
+	return critical(CriticalCheck(name,
 		fmt.Sprintf("ledger has zero commits and %d uncommitted file(s) — nothing has ever synced", untracked),
 		fmt.Sprintf("The remote is empty too, so this ledger was never provisioned or its first "+
 			"push never landed.\n       Every session recorded here exists only on this machine.\n       "+
 			"Verify the ledger is provisioned (`ox status`), then seed it:\n       "+
 			"  git -C %s add -A && git -C %s commit -m 'seed ledger' && git -C %s push -u origin %s",
-			ledgerPath, ledgerPath, ledgerPath, branch))
-	r.slug = CheckSlugLedgerBranchStatus
-	return r
+			ledgerPath, ledgerPath, ledgerPath, branch)))
 }
 
 // fixLedgerBranchAhead pushes local ledger commits to remote.
