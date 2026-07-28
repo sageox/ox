@@ -3,12 +3,13 @@ package plan
 // backfill.go computes and applies the one-off repair pass for plans saved by
 // the pre-ox-1tjj.8 planTopic (which read the first H2 heading, not the
 // document's H1 — see title.go). It is deliberately split into a read-only
-// COMPUTE half (ComputeBackfill, ComputeProducedPlansRewrite — safe to run
-// any number of times, used directly by `ox plan backfill-titles --dry-run`)
-// and an APPLY half (ApplyBackfillMeta, ApplyProducedPlansRewrite) that
-// mutates one plan/session at a time. The cmd/ox layer owns git (mv/add/
-// commit/push) and orchestrates: compute -> print -> (if not dry-run) apply
-// each -> git mv -> one batch commit.
+// COMPUTE half (ComputeBackfill, BackfillRenameMap, ComputeProducedPlansRewrite
+// — safe to run any number of times, used directly by
+// `ox plan backfill-titles --dry-run`) and an APPLY half (ApplyBackfillMeta,
+// ApplyProducedPlansRewrite) that mutates one plan/session at a time. The
+// cmd/ox layer owns git (mv/add/commit/push) and orchestrates: compute ->
+// print -> (if not dry-run) apply each -> derive BackfillRenameMap from
+// what actually applied -> git mv -> one batch commit.
 
 import (
 	"context"
@@ -18,6 +19,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
 	"github.com/sageox/ox/internal/fileutil"
@@ -147,6 +149,62 @@ func nextAvailableName(taken map[string]bool, datePrefix, slug string) (finalSlu
 	}
 }
 
+// BackfillRenameMap derives the old-slug -> new-slug rewrite map a
+// sessions/*/meta.json produced_plans fix-up needs, from whatever set of
+// candidates the caller supplies. It is deliberately fed two different
+// inputs by the two callers: `--dry-run` passes every non-skipped candidate
+// (a projection of what WOULD happen, since nothing is written), and a real
+// run passes only the candidates ApplyBackfillMeta + the directory rename
+// actually succeeded for (see runPlanBackfillTitlesOnLedger) — never the
+// full candidate list. That distinction matters: a candidate whose apply
+// failed was never renamed on disk, so redirecting a session's
+// produced_plans entry to its computed-but-never-applied NewSlug would
+// point at a directory that doesn't exist.
+//
+// Only a SLUG change invalidates a produced_plans entry (it's resolved by
+// slug — see resolvePlanDir); a topic-only correction with no slug change
+// leaves that reference valid, so unchanged/topic-only candidates are
+// skipped here same as skipped ones.
+//
+// plan directories are "YYYY-MM-DD-<slug>", so two plans on DIFFERENT dates
+// can legitimately share the same bare OldSlug while deriving different
+// NewSlugs (ComputeBackfill's collision suffixing dedupes on the full
+// dir name including the date prefix, not the bare slug — see
+// nextAvailableName). produced_plans stores only the bare slug, so an old
+// slug that resolves to more than one distinct new slug is genuinely
+// UNRESOLVABLE from this data alone: there is no way to tell which session
+// meant which plan. Rather than guess (and silently corrupt one of the two
+// references), such an old slug is dropped from the returned map entirely
+// and reported back via ambiguous for the caller to warn about and print —
+// those need a human to resolve by hand.
+func BackfillRenameMap(candidates []BackfillPlan) (renamed map[string]string, ambiguous map[string][]string) {
+	renamed = make(map[string]string)
+	ambiguous = make(map[string][]string)
+	for _, c := range candidates {
+		if c.SkipReason != "" || !c.SlugChanged {
+			continue
+		}
+		if targets, isAmbiguous := ambiguous[c.OldSlug]; isAmbiguous {
+			// already-flagged old slug: keep collecting every competing
+			// target for the operator report, but never re-resolve it.
+			if !slices.Contains(targets, c.NewSlug) {
+				ambiguous[c.OldSlug] = append(targets, c.NewSlug)
+			}
+			continue
+		}
+		if existing, ok := renamed[c.OldSlug]; ok {
+			if existing == c.NewSlug {
+				continue // same target from a second candidate — not a conflict
+			}
+			delete(renamed, c.OldSlug)
+			ambiguous[c.OldSlug] = []string{existing, c.NewSlug}
+			continue
+		}
+		renamed[c.OldSlug] = c.NewSlug
+	}
+	return renamed, ambiguous
+}
+
 // ApplyBackfillMeta rewrites one plan's meta.json (topic+slug only — every
 // other field, including provenance and collaboration signals, is left
 // exactly as originally recorded, since this is a title repair, not a
@@ -187,19 +245,30 @@ func ApplyBackfillMeta(ctx context.Context, dir, newTopic, newSlug string) error
 
 // appendBackfillRevisedEvent appends a lifecycle event carrying the corrected
 // topic, under the same events.jsonl flock Save/AppendEvent use. It mints a
-// fresh pln_ id only for a plan dir with NO prior events at all (a legacy
-// plan saved before the event-log foundation shipped) and records that as a
-// `created` event, exactly mirroring Save()'s own firstSave/reuse decision —
-// so a legacy plan ends up in the same state a fresh post-fix Save would have
-// left it in. Returns the resolved (or minted) id for StampHTMLMeta to reuse.
+// fresh pln_ id only for a plan dir with a genuinely EMPTY events.jsonl (a
+// legacy plan saved before the event-log foundation shipped) and records
+// that as a `created` event — the same firstSave/reuse decision Save() makes
+// for a brand-new directory (store.go).
+//
+// A LoadEvents ERROR is deliberately NOT treated the same as "empty",
+// despite Save() doing exactly that on its own read failure: Save is
+// creating a directory that may have no history yet, so "couldn't read
+// events, assume none" is a safe default. This function is REPAIRING a
+// directory that, in the common case, already has real history — treating
+// an unreadable (as opposed to empty) events.jsonl as "no prior events"
+// would mint a second pln_ id for a plan that already has one, forking its
+// identity across two ids in the same log. So a read error is returned
+// as-is: the caller's apply-and-skip contract (runPlanBackfillTitlesOnLedger)
+// logs it and moves on to the next plan, same as any other apply failure,
+// and never invents an identity for history it simply couldn't read.
+// Returns the resolved (or minted) id for StampHTMLMeta to reuse.
 func appendBackfillRevisedEvent(ctx context.Context, dir, newTopic string) (string, error) {
 	eventsPath := filepath.Join(dir, eventsFile)
 	var planID string
 	err := fileutil.WithFileLock(ctx, eventsPath, func() error {
 		existing, lerr := LoadEvents(dir)
 		if lerr != nil {
-			slog.Warn("plan backfill: load existing events failed, minting a fresh id", "error", lerr, "dir", dir)
-			existing = nil
+			return fmt.Errorf("load existing events: %w", lerr)
 		}
 		ev := Event{Kind: EventRevised, Topic: newTopic}
 		if len(existing) == 0 {

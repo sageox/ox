@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -292,6 +293,92 @@ func TestBackfill_Idempotent(t *testing.T) {
 	}
 }
 
+// TestAppendBackfillRevisedEvent_UnreadableEventsNeverMintsNewID is the
+// finding-5 regression: a plan dir with real prior history whose
+// events.jsonl becomes unreadable (here, a malformed trailing line) must
+// fail the append rather than treat "unreadable" the same as "no prior
+// events" — that used to mint a fresh pln_ id and record a SECOND `created`
+// event on top of the plan's real history, forking its identity.
+func TestAppendBackfillRevisedEvent_UnreadableEventsNeverMintsNewID(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	seedID := "pln_original0000000000001"
+	if err := AppendEvent(ctx, dir, Event{PlanID: seedID, Kind: EventCreated, Status: PlanStatusDraft, Topic: "Old Topic"}); err != nil {
+		t.Fatalf("seed created event: %v", err)
+	}
+	eventsPath := filepath.Join(dir, eventsFile)
+	before, err := os.ReadFile(eventsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeLines := strings.Count(strings.TrimRight(string(before), "\n"), "\n") + 1
+
+	// Corrupt the log with one malformed line — LoadEvents fails to parse
+	// it, exactly the "momentarily unreadable" scenario the fix targets.
+	f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("not valid json\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	gotID, err := appendBackfillRevisedEvent(ctx, dir, "New Topic")
+	if err == nil {
+		t.Fatalf("appendBackfillRevisedEvent succeeded despite unreadable events.jsonl; minted id=%q", gotID)
+	}
+
+	after, err := os.ReadFile(eventsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterLines := strings.Count(strings.TrimRight(string(after), "\n"), "\n") + 1
+	// beforeLines (1 seed line) + 1 injected corrupt line = 2. A buggy
+	// implementation appends a THIRD line (the minted `created` event) here.
+	if afterLines != beforeLines+1 {
+		t.Errorf("events.jsonl grew from %d to %d lines on a failed append (want unchanged at %d): %s",
+			beforeLines, afterLines, beforeLines+1, after)
+	}
+	if strings.Contains(string(after), "New Topic") {
+		t.Errorf("a revised/created event carrying the new topic was appended despite the load failure: %s", after)
+	}
+}
+
+// TestAppendBackfillRevisedEvent_EmptyEventsStillMints is the companion
+// positive case: a plan dir with a genuinely EMPTY (not corrupt, not
+// missing-and-erroring) events.jsonl is the legacy pre-event-log plan the
+// minting path exists for, and must still mint — the finding-5 fix only
+// changes the ERROR case, not this one.
+func TestAppendBackfillRevisedEvent_EmptyEventsStillMints(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	// No events.jsonl at all: LoadEvents returns (nil, nil), matching a
+	// legacy plan saved before the event-log foundation shipped.
+
+	gotID, err := appendBackfillRevisedEvent(ctx, dir, "New Topic")
+	if err != nil {
+		t.Fatalf("appendBackfillRevisedEvent on a legacy (no events.jsonl) plan: %v", err)
+	}
+	if gotID == "" {
+		t.Fatal("no id minted for a legacy plan with no prior events")
+	}
+
+	events, err := LoadEvents(dir)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("LoadEvents after mint: err=%v n=%d", err, len(events))
+	}
+	if events[0].Kind != EventCreated {
+		t.Errorf("Kind = %q, want %q for the minted event", events[0].Kind, EventCreated)
+	}
+	if events[0].PlanID != gotID {
+		t.Errorf("recorded PlanID = %q, want the returned %q", events[0].PlanID, gotID)
+	}
+}
+
 // --- produced_plans rewrite ---
 
 func writeTestSessionMeta(t *testing.T, sessionsDir, name string, producedPlans []string) string {
@@ -324,6 +411,122 @@ func TestComputeProducedPlansRewrite_FindsStaleSlug(t *testing.T) {
 	}
 	if got := rewrites[0].OldSlugs; len(got) != 1 || got[0] != "1-context-why-now" {
 		t.Errorf("OldSlugs = %v, want [1-context-why-now]", got)
+	}
+}
+
+// --- BackfillRenameMap ---
+
+// TestBackfillRenameMap covers the produced_plans rewrite map derivation in
+// isolation from ComputeBackfill/ApplyBackfillMeta: given a hand-built set
+// of candidates, which old slugs make it into the map and which get
+// excluded.
+func TestBackfillRenameMap(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		candidates    []BackfillPlan
+		wantRenamed   map[string]string
+		wantAmbiguous map[string][]string
+	}{
+		{
+			name: "slug change is included",
+			candidates: []BackfillPlan{
+				{OldSlug: "old-a", NewSlug: "new-a", SlugChanged: true},
+			},
+			wantRenamed:   map[string]string{"old-a": "new-a"},
+			wantAmbiguous: map[string][]string{},
+		},
+		{
+			name: "topic-only change (no slug change) is excluded",
+			candidates: []BackfillPlan{
+				{OldSlug: "same-slug", NewSlug: "same-slug", SlugChanged: false, TopicChanged: true},
+			},
+			wantRenamed:   map[string]string{},
+			wantAmbiguous: map[string][]string{},
+		},
+		{
+			name: "a skipped (unreadable) candidate is excluded even if fields look like a slug change",
+			candidates: []BackfillPlan{
+				{OldSlug: "old-a", NewSlug: "new-a", SlugChanged: true, SkipReason: "unreadable meta.json: boom"},
+			},
+			wantRenamed:   map[string]string{},
+			wantAmbiguous: map[string][]string{},
+		},
+		{
+			name: "same old slug, same new slug from two dirs is not ambiguous",
+			candidates: []BackfillPlan{
+				{OldDir: "/plans/2026-05-01-dup", OldSlug: "dup", NewSlug: "target", SlugChanged: true},
+				{OldDir: "/plans/2026-06-01-dup", OldSlug: "dup", NewSlug: "target", SlugChanged: true},
+			},
+			wantRenamed:   map[string]string{"dup": "target"},
+			wantAmbiguous: map[string][]string{},
+		},
+		{
+			// The exact scenario finding 2 describes: two plans on different
+			// dates share a bare old slug (ComputeBackfill's collision
+			// suffixing dedupes on the full dir name INCLUDING the date
+			// prefix, so this is a legitimate, expected input — not
+			// corruption) but derive different new slugs. produced_plans
+			// stores only the bare slug, so there is no way to tell which
+			// session meant which plan: the old slug must be dropped from
+			// the rewrite map entirely rather than guessed.
+			name: "same old slug, different new slugs is ambiguous and excluded",
+			candidates: []BackfillPlan{
+				{OldDir: "/plans/2026-05-01-dup", OldSlug: "dup", NewSlug: "target-a", SlugChanged: true},
+				{OldDir: "/plans/2026-06-01-dup", OldSlug: "dup", NewSlug: "target-b", SlugChanged: true},
+				{OldDir: "/plans/2026-07-01-clean", OldSlug: "clean", NewSlug: "clean-target", SlugChanged: true},
+			},
+			wantRenamed:   map[string]string{"clean": "clean-target"},
+			wantAmbiguous: map[string][]string{"dup": {"target-a", "target-b"}},
+		},
+		{
+			// Three-way collision: the third candidate must still be folded
+			// into the same ambiguous entry, not treated as a fresh conflict.
+			name: "three candidates sharing an old slug all land in one ambiguous entry",
+			candidates: []BackfillPlan{
+				{OldDir: "/plans/2026-05-01-dup", OldSlug: "dup", NewSlug: "target-a", SlugChanged: true},
+				{OldDir: "/plans/2026-06-01-dup", OldSlug: "dup", NewSlug: "target-b", SlugChanged: true},
+				{OldDir: "/plans/2026-07-01-dup", OldSlug: "dup", NewSlug: "target-c", SlugChanged: true},
+			},
+			wantRenamed:   map[string]string{},
+			wantAmbiguous: map[string][]string{"dup": {"target-a", "target-b", "target-c"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotRenamed, gotAmbiguous := BackfillRenameMap(tt.candidates)
+
+			if len(gotRenamed) != len(tt.wantRenamed) {
+				t.Fatalf("renamed = %v, want %v", gotRenamed, tt.wantRenamed)
+			}
+			for k, v := range tt.wantRenamed {
+				if gotRenamed[k] != v {
+					t.Errorf("renamed[%q] = %q, want %q", k, gotRenamed[k], v)
+				}
+			}
+
+			if len(gotAmbiguous) != len(tt.wantAmbiguous) {
+				t.Fatalf("ambiguous = %v, want %v", gotAmbiguous, tt.wantAmbiguous)
+			}
+			for k, want := range tt.wantAmbiguous {
+				got := append([]string(nil), gotAmbiguous[k]...)
+				sort.Strings(got)
+				wantSorted := append([]string(nil), want...)
+				sort.Strings(wantSorted)
+				if len(got) != len(wantSorted) {
+					t.Errorf("ambiguous[%q] = %v, want %v", k, got, wantSorted)
+					continue
+				}
+				for i := range got {
+					if got[i] != wantSorted[i] {
+						t.Errorf("ambiguous[%q] = %v, want %v", k, got, wantSorted)
+						break
+					}
+				}
+			}
+		})
 	}
 }
 

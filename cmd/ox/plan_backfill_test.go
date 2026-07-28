@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
 	"github.com/spf13/cobra"
 )
@@ -251,5 +252,136 @@ func TestRunPlanBackfillTitlesOnLedger_RealRunIdempotent(t *testing.T) {
 	after := gitLog()
 	if before != after {
 		t.Errorf("a no-op second run created a new commit:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+// writeBackfillSessionFixture hand-writes a sessions/<name>/meta.json with
+// the given produced_plans, the on-disk shape ComputeProducedPlansRewrite /
+// ApplyProducedPlansRewrite read and write.
+func writeBackfillSessionFixture(t *testing.T, ledgerPath, name string, producedPlans []string) string {
+	t.Helper()
+	dir := filepath.Join(ledgerPath, "sessions", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := lfs.NewSessionMeta(name, "Person A", "Ox0001", "claude-code", time.Now().UTC()).
+		ProducedPlans(producedPlans).
+		Build()
+	if err := lfs.WriteSessionMetaOnly(dir, meta); err != nil {
+		t.Fatalf("write session meta: %v", err)
+	}
+	return dir
+}
+
+// corruptEventsLog appends a malformed line to dir/events.jsonl so a
+// subsequent LoadEvents call fails to parse it — the trigger
+// appendBackfillRevisedEvent's finding-5 fix reacts to.
+func corruptEventsLog(t *testing.T, dir string) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(dir, "events.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("not valid json\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunPlanBackfillTitlesOnLedger_FailedApplyExcludesSlugFromSessionRewrite
+// is the finding-1 regression: when ApplyBackfillMeta fails for one
+// candidate in a batch (here: a corrupted events.jsonl makes
+// appendBackfillRevisedEvent fail), that plan is never renamed on disk — and
+// a session's produced_plans entry naming its OLD slug must NOT be rewritten
+// to the NewSlug it was never actually renamed to. A sibling candidate in
+// the same batch that DOES apply cleanly must still get its own session
+// reference fixed, proving the exclusion is targeted, not a batch-wide bail.
+func TestRunPlanBackfillTitlesOnLedger_FailedApplyExcludesSlugFromSessionRewrite(t *testing.T) {
+	ledger := t.TempDir()
+
+	goodDir := writeBackfillPlanFixture(t, ledger, "2026-05-01-1-context-why-now", backfillTestRaw, "1. Context — Why Now", time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC))
+	const goodNewSlug = "conversation-model-update-the-execution-plan"
+
+	brokenRaw := "# Add Login Support\n\n## TL;DR\n\nShip it.\n\n## Approach\n\ndo it.\n"
+	brokenDir := writeBackfillPlanFixture(t, ledger, "2026-05-02-tl-dr", brokenRaw, "TL;DR", time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC))
+	corruptEventsLog(t, brokenDir)
+
+	sessionDir := writeBackfillSessionFixture(t, ledger, "2026-05-03-sess-Ox0001", []string{"1-context-why-now", "tl-dr"})
+
+	initGitLedger(t, ledger)
+
+	if _, err := runBackfillForTest(t, ledger, false); err != nil {
+		t.Fatalf("real run: %v", err)
+	}
+
+	// goodDir got renamed; brokenDir's apply failed, so it must be left at
+	// its ORIGINAL path — never renamed, despite ComputeBackfill proposing
+	// a NewDir for it same as any other slug-changing candidate.
+	if _, statErr := os.Stat(goodDir); !os.IsNotExist(statErr) {
+		t.Errorf("goodDir still exists at its old path after a successful apply: stat err=%v", statErr)
+	}
+	if _, statErr := os.Stat(brokenDir); statErr != nil {
+		t.Errorf("brokenDir was renamed/removed despite its apply failing: %v", statErr)
+	}
+
+	got, err := lfs.ReadSessionMeta(sessionDir)
+	if err != nil {
+		t.Fatalf("ReadSessionMeta: %v", err)
+	}
+	if len(got.ProducedPlans) != 2 {
+		t.Fatalf("ProducedPlans = %v, want 2 entries", got.ProducedPlans)
+	}
+	want := map[string]bool{goodNewSlug: false, "tl-dr": false}
+	for _, slug := range got.ProducedPlans {
+		if _, ok := want[slug]; !ok {
+			t.Errorf("unexpected produced_plans entry %q (got %v)", slug, got.ProducedPlans)
+			continue
+		}
+		want[slug] = true
+	}
+	if !want[goodNewSlug] {
+		t.Errorf("produced_plans missing the rewritten slug %q for the successfully applied plan: got %v", goodNewSlug, got.ProducedPlans)
+	}
+	if !want["tl-dr"] {
+		t.Errorf("produced_plans no longer contains the stale slug %q — it must stay untouched since that plan's apply failed: got %v", "tl-dr", got.ProducedPlans)
+	}
+}
+
+// TestRunPlanBackfillTitlesOnLedger_PreCommitFailureFailsCommandAndSkipsSummary
+// is the finding-3/6 regression: a failure at or before `git commit` (here:
+// every git operation is blocked by a stale .git/index.lock, so `git mv` —
+// the FIRST git call the real run makes — fails before anything is
+// committed) must make the command return a non-nil error and must NOT
+// print the "Backfilled: ..." success summary. Contrast with
+// TestRunPlanBackfillTitlesOnLedger_RealRunRenamesAndCommits, where a
+// push-only failure (no remote configured) still returns nil and prints the
+// summary — this is the case that must NOT be treated the same way.
+func TestRunPlanBackfillTitlesOnLedger_PreCommitFailureFailsCommandAndSkipsSummary(t *testing.T) {
+	ledger := t.TempDir()
+	writeBackfillPlanFixture(t, ledger, "2026-05-01-1-context-why-now", backfillTestRaw, "1. Context — Why Now", time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC))
+	initGitLedger(t, ledger)
+
+	lockPath := filepath.Join(ledger, ".git", "index.lock")
+	if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runBackfillForTest(t, ledger, false)
+	if rmErr := os.Remove(lockPath); rmErr != nil && !os.IsNotExist(rmErr) {
+		t.Fatalf("cleanup index.lock: %v", rmErr)
+	}
+
+	if err == nil {
+		t.Fatalf("expected a non-nil error when every git operation is blocked; output:\n%s", out)
+	}
+	if strings.Contains(out, "Backfilled:") {
+		t.Errorf("output printed the success summary despite the commit never landing:\n%s", out)
+	}
+
+	logOut := runGitInDir(t, ledger, "log", "--oneline")
+	if strings.Count(strings.TrimSpace(logOut), "\n") != 0 {
+		t.Errorf("expected only the init commit (nothing landed), got:\n%s", logOut)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,17 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
 )
+
+// errBackfillCommitFailed marks a commitPlanBackfillToLedger failure at or
+// before `git commit` — the ledger working tree is left with renames/edits
+// (ApplyBackfillMeta and any git mv that got that far already ran) that were
+// never captured in a commit. That is a materially worse, inconsistent state
+// than a push-only failure, which leaves a complete, durable local commit for
+// the next push to pick up — so the two must never be handled the same way.
+// runPlanBackfillTitlesOnLedger uses errors.Is against this sentinel to route
+// a pre-commit failure into a hard, non-zero-exit command failure instead of
+// the best-effort warning a push failure gets.
+var errBackfillCommitFailed = errors.New("backfill commit failed before landing locally")
 
 // commitPlanToLedger durably commits a captured plan directory to the ledger
 // and pushes it. This closes a real gap: plan.Save only materializes files into
@@ -62,6 +74,12 @@ func commitPlanToLedger(gitRoot, planDir string) error {
 // commitPlanToLedger's pattern (--sparse, --no-verify, pushLedger with
 // pull-rebase retry) rather than hand-rolling new git plumbing.
 //
+// Only the final push is best-effort. Every git op at or before `git
+// commit` (mv, add, commit itself) returns an error wrapped in
+// errBackfillCommitFailed on failure — unlike a push failure, those leave
+// the working tree in a half-mutated state with nothing to anchor it, so
+// the caller must treat that as a hard failure, not a warning.
+//
 // renames are (oldAbsPath, newAbsPath) pairs applied via `git mv --sparse`.
 // touchedPlanDirs/touchedSessionDirs are absolute paths edited in-place
 // (topic-only correction with no slug change; a session's produced_plans
@@ -91,11 +109,11 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 		}
 		mvArgs := []string{"-C", ledgerPath, "mv", "--sparse", oldRel, newRel}
 		if out, err := exec.Command("git", mvArgs...).CombinedOutput(); err != nil {
-			return fmt.Errorf("git mv %s -> %s failed: %s: %w", oldRel, newRel, string(out), err)
+			return fmt.Errorf("%w: git mv %s -> %s failed: %s: %w", errBackfillCommitFailed, oldRel, newRel, string(out), err)
 		}
 		addArgs := []string{"-C", ledgerPath, "add", "--sparse", newRel}
 		if out, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
-			return fmt.Errorf("git add %s (post-mv content) failed: %s: %w", newRel, string(out), err)
+			return fmt.Errorf("%w: git add %s (post-mv content) failed: %s: %w", errBackfillCommitFailed, newRel, string(out), err)
 		}
 	}
 
@@ -103,7 +121,7 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 	if len(addPaths) > 0 {
 		addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, addPaths...)
 		if out, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
-			return fmt.Errorf("git add failed: %s: %w", string(out), err)
+			return fmt.Errorf("%w: git add failed: %s: %w", errBackfillCommitFailed, string(out), err)
 		}
 	}
 
@@ -113,8 +131,11 @@ func commitPlanBackfillToLedger(ledgerPath string, renames [][2]string, touchedP
 		if strings.Contains(string(out), "nothing to commit") {
 			return nil // idempotent: re-run with nothing left to change
 		}
-		return fmt.Errorf("%s: %w", wrapCommitError(string(out), err), err)
+		return fmt.Errorf("%w: %s: %w", errBackfillCommitFailed, wrapCommitError(string(out), err), err)
 	}
 
+	// Everything from here down is push-only: the commit above already
+	// landed locally, so a failure past this point must NOT match
+	// errBackfillCommitFailed — see the caller's best-effort push contract.
 	return pushLedger(context.Background(), ledgerPath)
 }
