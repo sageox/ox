@@ -29,8 +29,19 @@ import (
 // git's output to classify failures (non-fast-forward, LFS, auth), which
 // breaks silently on a host whose locale renders git's messages translated.
 // See RunGit's comment in run.go for the full rationale.
+//
+// commit.gpgsign=false / tag.gpgsign=false: also matches RunGit (run.go).
+// Most network commands never commit, so this reads like a no-op — but
+// `git pull --rebase` does (internal/daemon/sync_managed.go), and a signing
+// prompt on the daemon's TTY-less environment kills that commit. The rebase
+// then sits halted with a CLEAN, conflict-free index: byte-identical to the
+// upstream-equivalent-commit halt that ResolveRebaseAcceptTheirs skips.
+// Skipping it would silently discard content that was resolved but never
+// recorded. Applied here rather than at the one committing call site so a
+// future network command that commits inherits the hardening by default.
 func NewNetworkCmd(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	gitArgs := append([]string{"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"}, args...)
+	cmd := exec.CommandContext(ctx, "git", gitArgs...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
 	return cmd
 }
