@@ -65,6 +65,20 @@ linters:
           - errorlint
           - sloglint
 
+      # SA5011 false-positives in tests. The pattern
+      #   x := f(); if x == nil { t.Fatal(...) }; x.Field
+      # is provably safe, but staticcheck only knows t.Fatal terminates when it
+      # has complete type info for the package. On a COLD golangci-lint cache in
+      # CI that inference is lost and it reports a wall of bogus "possible nil
+      # pointer dereference" hits across untouched files — reproducible on no
+      # developer machine, and it moves between packages run to run. main was
+      # only green because a warm cache masked it; the first cold run after any
+      # cache eviction would have hit this.
+      - path: _test\.go
+        text: "SA5011"
+        linters:
+          - staticcheck
+
       # Generated files - exclude all linters
       - path: _generated\.go
         linters:

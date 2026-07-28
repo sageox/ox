@@ -243,14 +243,16 @@ func advanceNonConflictRebaseStep(ctx context.Context, repoPath string) (done bo
 		return false, nil // advanced to the next step
 	}
 
-	// git refuses --continue on an empty step and names the remedy. Only then
-	// is dropping the commit the correct (and git-sanctioned) action.
-	lower := strings.ToLower(contOut)
-	emptyStep := strings.Contains(lower, "--skip") ||
-		strings.Contains(lower, "nothing to commit") ||
-		strings.Contains(lower, "patch is empty") ||
-		strings.Contains(lower, "previous cherry-pick is now empty")
-	if !emptyStep {
+	// Decide "is this step empty?" STRUCTURALLY, not by reading git's prose.
+	// Message matching would break the moment git is running under a non-English
+	// locale (or rewords a hint), and the failure mode is silent: we would report
+	// "nothing to resolve", the caller would abort, and the ledger would re-wedge.
+	// runRebaseStep pins LC_ALL=C so the text is stable, but the structural check
+	// is what we actually trust; the text is only a fallback for odd git builds.
+	//
+	// A replayed commit is empty exactly when nothing is staged and nothing is
+	// conflicted: git has already applied the changes and found no delta.
+	if !rebaseStepIsEmpty(ctx, repoPath) && !mentionsEmptyStep(contOut) {
 		return false, fmt.Errorf("rebase halted with nothing to resolve: %s",
 			SanitizeOutput(strings.TrimSpace(contOut)))
 	}
@@ -266,12 +268,39 @@ func advanceNonConflictRebaseStep(ctx context.Context, repoPath string) (done bo
 	return false, nil
 }
 
+// rebaseStepIsEmpty reports whether the halted rebase step would produce an
+// empty commit: nothing staged AND nothing conflicted. Language-independent.
+func rebaseStepIsEmpty(ctx context.Context, repoPath string) bool {
+	if unmerged, err := listUnmergedEntries(ctx, repoPath); err != nil || len(unmerged) > 0 {
+		return false
+	}
+	// `diff --cached --quiet` exits 0 when the index matches HEAD (nothing to
+	// commit) and 1 when there are staged changes.
+	_, err := RunGit(ctx, repoPath, "diff", "--cached", "--quiet")
+	return err == nil
+}
+
+// mentionsEmptyStep is a best-effort fallback for git builds whose exit codes or
+// index state don't match the structural check. Only consulted when
+// rebaseStepIsEmpty says no, so a mistranslation can never be the sole reason we
+// drop a commit.
+func mentionsEmptyStep(out string) bool {
+	lower := strings.ToLower(out)
+	for _, marker := range []string{"--skip", "nothing to commit", "patch is empty", "previous cherry-pick is now empty"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // runRebaseStep runs a `git rebase <arg>` with the editor disabled so git never
-// blocks waiting for a commit message.
+// blocks waiting for a commit message, and with the C locale pinned so any
+// diagnostic we do read is stable regardless of the user's language settings.
 func runRebaseStep(ctx context.Context, repoPath, arg string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rebase", arg)
 	cmd.Dir = repoPath
-	cmd.Env = append(cmd.Environ(), "GIT_EDITOR=true")
+	cmd.Env = append(cmd.Environ(), "GIT_EDITOR=true", "LC_ALL=C", "LANG=C")
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
