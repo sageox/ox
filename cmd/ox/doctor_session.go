@@ -91,6 +91,12 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 		results = append(results, incompleteResult)
 	}
 
+	// identity integrity: meta.json session_id vs raw.jsonl header
+	// session_id. Detect-only (see checkSessionIDDivergence doc comment
+	// for why); always shown rather than filtered on a boring-pass
+	// message, since a genuine divergence is meant to be rare and loud.
+	results = append(results, checkSessionIDDivergence())
+
 	// linkage soft signals: trailer coverage on recent commits, reachability
 	// of closed-session ProducedCommits SHAs, and PR-body attribution
 	// coverage. None block; all are diagnostic.
