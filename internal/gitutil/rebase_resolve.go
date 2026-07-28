@@ -252,7 +252,14 @@ func advanceNonConflictRebaseStep(ctx context.Context, repoPath string) (done bo
 	//
 	// A replayed commit is empty exactly when nothing is staged and nothing is
 	// conflicted: git has already applied the changes and found no delta.
-	if !rebaseStepIsEmpty(ctx, repoPath) && !mentionsEmptyStep(contOut) {
+	//
+	// This is the ONLY signal. An earlier revision also accepted git's prose as a
+	// fallback, which was strictly unsafe: a pre-commit hook that rejects
+	// --continue while real changes are still staged can easily emit "--skip" or
+	// "nothing to commit" in its own output, and that would have overridden the
+	// structural check and silently dropped a genuine commit. `--skip` DISCARDS
+	// work, so the only tolerable error direction here is refusing to skip.
+	if !rebaseStepIsEmpty(ctx, repoPath) {
 		return false, fmt.Errorf("rebase halted with nothing to resolve: %s",
 			SanitizeOutput(strings.TrimSpace(contOut)))
 	}
@@ -278,20 +285,6 @@ func rebaseStepIsEmpty(ctx context.Context, repoPath string) bool {
 	// commit) and 1 when there are staged changes.
 	_, err := RunGit(ctx, repoPath, "diff", "--cached", "--quiet")
 	return err == nil
-}
-
-// mentionsEmptyStep is a best-effort fallback for git builds whose exit codes or
-// index state don't match the structural check. Only consulted when
-// rebaseStepIsEmpty says no, so a mistranslation can never be the sole reason we
-// drop a commit.
-func mentionsEmptyStep(out string) bool {
-	lower := strings.ToLower(out)
-	for _, marker := range []string{"--skip", "nothing to commit", "patch is empty", "previous cherry-pick is now empty"} {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 // runRebaseStep runs a `git rebase <arg>` with the editor disabled so git never

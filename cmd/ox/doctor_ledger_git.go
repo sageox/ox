@@ -391,8 +391,18 @@ func unbornLedgerFailure(ledgerPath, branch string, fix bool) checkResult {
 			r.fixLevel = FixLevelAuto
 			return r
 		}
-		if out, err := exec.Command("git", "-C", ledgerPath, "fetch", "origin").CombinedOutput(); err != nil {
-			return critical(FailedCheck(name, "fetch failed", gitutil.SanitizeOutput(strings.TrimSpace(string(out)))))
+		// Try the checkout FIRST. A clone that merely lost its branch ref almost
+		// always still has the objects, so this usually succeeds with no network
+		// at all — which keeps `ox doctor --fix` out of the daemon's fetch lane
+		// (.claude/rules/daemon-git.md: daemon reads, CLI writes) and avoids
+		// contending with a concurrent daemon ref update.
+		if _, err := exec.Command("git", "-C", ledgerPath, "checkout", branch).CombinedOutput(); err == nil {
+			return PassedCheck(name, fmt.Sprintf("restored branch %q from local objects", branch))
+		}
+		// Objects genuinely missing — one narrow fetch is the only way back, and
+		// a ledger that has never synced is worth it.
+		if fetchOut, fetchErr := exec.Command("git", "-C", ledgerPath, "fetch", "origin", branch).CombinedOutput(); fetchErr != nil {
+			return critical(FailedCheck(name, "fetch failed", gitutil.SanitizeOutput(strings.TrimSpace(string(fetchOut)))))
 		}
 		if out, err := exec.Command("git", "-C", ledgerPath, "checkout", branch).CombinedOutput(); err != nil {
 			return critical(FailedCheck(name, "checkout failed", gitutil.SanitizeOutput(strings.TrimSpace(string(out)))))

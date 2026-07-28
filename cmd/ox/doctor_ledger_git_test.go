@@ -439,33 +439,39 @@ func TestUnbornLedger_FailedRepairStaysCritical(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "ledger")
 	bare := filepath.Join(root, "bare.git")
+	seed := filepath.Join(root, "seed")
 
 	run := func(dir string, args ...string) {
+		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), // safe: git subprocess in a temp fixture repo, not the ox CLI
 			"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
 			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
 			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
-		_, _ = cmd.CombinedOutput()
+		out, err := cmd.CombinedOutput()
+		// Fail fixture setup loudly. Silently discarding git errors here would
+		// let the test run against a repo in an unintended state and "pass".
+		require.NoError(t, err, "fixture git %v failed: %s", args, out)
 	}
 	run(root, "init", "--bare", "--initial-branch=main", bare)
 	run(root, "clone", bare, repo)
-	seed := filepath.Join(root, "seed")
 	run(root, "clone", bare, seed)
 	require.NoError(t, os.WriteFile(filepath.Join(seed, "a.txt"), []byte("a"), 0o644))
 	run(seed, "add", "-A")
 	run(seed, "commit", "-m", "seed")
 	run(seed, "push", "origin", "main")
 
-	// remote has commits, so the repair path runs — then break it by pointing
-	// origin somewhere unfetchable AFTER the ls-remote succeeds is not possible
-	// in-process, so assert the shape of a checkout failure on a bogus branch.
+	// Remote has commits, so the repair path runs — but the branch does not
+	// exist anywhere, so both the local checkout and the fetch must fail.
 	res := unbornLedgerFailure(repo, "no-such-branch", true)
 
-	if !res.passed {
-		assert.Equal(t, "critical", res.priority,
-			"a failed repair must stay critical, not be demoted to attention")
-		assert.Equal(t, CheckSlugLedgerBranchStatus, res.slug)
-	}
+	// Assert unconditionally. Guarding these behind `if !res.passed` would let
+	// the regression pass vacuously if the repair were ever skipped and returned
+	// success (see .claude/rules/testing.md on conditional assertions).
+	require.False(t, res.passed, "repairing a branch that exists nowhere must fail")
+	assert.Equal(t, "critical", res.priority,
+		"a failed repair must stay critical, not be demoted to the attention bucket")
+	assert.Equal(t, CheckSlugLedgerBranchStatus, res.slug,
+		"slug must survive so the failure correlates with the original check")
 }
