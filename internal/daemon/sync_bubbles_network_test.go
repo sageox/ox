@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -76,9 +77,9 @@ func TestSyncBubbles_Network_UnreachableRemoteIsContained(t *testing.T) {
 	}
 
 	// the unreachable bubble is not cloned.
-	assert.NoDirExists(t, filepath.Join(paths.KBDir(bad.KBID), ".git"))
+	assert.NoDirExists(t, filepath.Join(paths.KBDir(endpoint.Get(), bad.KBID), ".git"))
 	// the good bubble must still land.
-	assert.DirExists(t, filepath.Join(paths.KBDir(good.KBID), ".git"))
+	assert.DirExists(t, filepath.Join(paths.KBDir(endpoint.Get(), good.KBID), ".git"))
 }
 
 // TestSyncBubbles_Network_APIListTimeout verifies the kb API list call
@@ -306,7 +307,7 @@ func TestSyncBubbles_Network_RepeatedPassesIdempotentUnderFlapping(t *testing.T)
 
 	// the bubble should be cloned exactly once — not duplicated, not
 	// repeatedly torn down.
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	assert.DirExists(t, filepath.Join(target, ".git"))
 	parent := filepath.Dir(target)
 	entries, err := os.ReadDir(parent)

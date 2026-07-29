@@ -59,6 +59,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -80,7 +81,7 @@ func TestKBGC_ReListedAfterTriage_TrashLeftAlone(t *testing.T) {
 	kbGCEnv(t)
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 
 	// pre-existing recent trash entry for kb_returning
 	trashDir := filepath.Join(root, kbTrashDirName)
@@ -101,7 +102,7 @@ func TestKBGC_ReListedAfterTriage_TrashLeftAlone(t *testing.T) {
 	assert.Equal(t, "from-grace", string(data), "trash entry contents must remain bit-identical")
 
 	// canonical dir: NOT created by GC (clone is sync's job, not GC's)
-	canonical := paths.KBDir("kb_returning")
+	canonical := paths.KBDir(endpoint.Get(), "kb_returning")
 	_, err = os.Stat(canonical)
 	assert.True(t, os.IsNotExist(err),
 		"GC must not auto-restore from trash — canonical dir creation is the sync loop's job")
@@ -124,7 +125,7 @@ func TestKBGC_ReListedAfterTriage_FreshCloneCoexists(t *testing.T) {
 	kbGCEnv(t)
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 
 	// stale trash entry from a prior pass
 	trashDir := filepath.Join(root, kbTrashDirName)
@@ -166,7 +167,7 @@ func TestKBGC_ReListedAfterGracePeriod_FreshCloneClean(t *testing.T) {
 	kbGCEnv(t)
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 
 	// trash entry beyond grace (reapable)
 	trashDir := filepath.Join(root, kbTrashDirName)
@@ -242,7 +243,7 @@ func TestKBGC_ConcurrentReList_DuringReap_SafeUnderRace(t *testing.T) {
 	ctx := context.Background()
 
 	makeKBDir(t, "kb_flapping", "x")
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -261,7 +262,7 @@ func TestKBGC_ConcurrentReList_DuringReap_SafeUnderRace(t *testing.T) {
 	// the kb_flapping dir is in EXACTLY ONE place: canonical or trash,
 	// never both, never neither.
 	canonicalExists := false
-	if _, err := os.Stat(paths.KBDir("kb_flapping")); err == nil {
+	if _, err := os.Stat(paths.KBDir(endpoint.Get(), "kb_flapping")); err == nil {
 		canonicalExists = true
 	}
 

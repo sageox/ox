@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -89,7 +90,7 @@ func TestSyncBubbles_ConcurrentPasses_NoPanic(t *testing.T) {
 		"every goroutine must complete its pass")
 
 	// after all goroutines, the bubble must be in a usable state.
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	assert.DirExists(t, filepath.Join(target, ".git"))
 
 	// meta.json must be valid JSON (not torn by a half-finished write).
@@ -138,7 +139,7 @@ func TestSyncBubbles_RapidSequentialPasses(t *testing.T) {
 		})
 	}
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 
 	// no .bak.* siblings should accumulate from rapid passes — the
@@ -200,7 +201,7 @@ func TestSyncBubbles_TwoSchedulers_SameEndpoint_NoCorruption(t *testing.T) {
 		t.Fatal("two schedulers on the same kb dir deadlocked")
 	}
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	assert.DirExists(t, filepath.Join(target, ".git"))
 
 	// no leftover index.lock from a torn concurrent fetch.

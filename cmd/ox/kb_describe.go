@@ -101,7 +101,7 @@ func runKBDescribe(cmd *cobra.Command, args []string) error {
 		return handleKBDescribeError(cmd.OutOrStdout(), err, input, jsonOutput)
 	}
 
-	localPath := paths.KBDir(bubble.KBID)
+	localPath := paths.KBDir(ep, bubble.KBID)
 
 	if jsonOutput {
 		return outputJSON(cmd.OutOrStdout(), kbDescribeOutput{KB: bubble, LocalPath: localPath})

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -62,7 +63,7 @@ func TestSyncBubbles_LocalCommitsRebaseOnPull(t *testing.T) {
 
 	// first pass: clone the bubble.
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 
 	// add a local commit inside the kb checkout (simulates the daemon
@@ -135,7 +136,7 @@ func TestSyncBubbles_ForcePushedRemote_DivergenceDetected(t *testing.T) {
 
 	// initial clone — local is now at the original commit.
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 
 	// force-push a rewritten history. The bare repo's main branch
@@ -206,7 +207,7 @@ func TestSyncBubbles_ListErrorPreservesExistingClones(t *testing.T) {
 	})
 	s.syncBubbles(context.Background())
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"), "precondition: bubble cloned")
 
 	// pass 2: list errors with a transient non-sentinel error. The

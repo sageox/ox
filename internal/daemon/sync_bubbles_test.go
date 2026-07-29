@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
@@ -149,7 +150,7 @@ func TestSyncBubbles_InitialClone(t *testing.T) {
 		return &fakeKBLister{bubbles: []api.KB{bubble}}
 	})
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.NoDirExists(t, target, "precondition: target shouldn't exist yet")
 
 	s.syncBubbles(context.Background())
@@ -198,7 +199,7 @@ func TestSyncBubbles_IncrementalPull(t *testing.T) {
 
 	// first pass: clone
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 
 	// push a new commit and run another pass
@@ -236,7 +237,7 @@ func TestSyncBubbles_KBAPIUnavailable_NoOp(t *testing.T) {
 	s.syncBubbles(context.Background())
 	assert.Equal(t, 1, called, "lister factory still invoked")
 
-	base := paths.KBDir("")
+	base := paths.KBDir(endpoint.Get(), "")
 	if entries, err := os.ReadDir(base); err == nil {
 		assert.Empty(t, entries, "kb dir must remain empty when API unavailable")
 	}
@@ -280,13 +281,13 @@ func TestSyncBubbles_PerBubbleFailureIsolation(t *testing.T) {
 	s.syncBubbles(context.Background())
 
 	// the bad bubble should not have a populated checkout
-	badTarget := paths.KBDir(bad.KBID)
+	badTarget := paths.KBDir(endpoint.Get(), bad.KBID)
 	if _, err := os.Stat(filepath.Join(badTarget, ".git")); err == nil {
 		t.Fatalf("bad bubble unexpectedly succeeded at %s", badTarget)
 	}
 
 	// the good bubble must still be cloned despite the earlier failure
-	goodTarget := paths.KBDir(good.KBID)
+	goodTarget := paths.KBDir(endpoint.Get(), good.KBID)
 	assert.DirExists(t, filepath.Join(goodTarget, ".git"), "good bubble must clone even when an earlier one failed")
 	assert.FileExists(t, filepath.Join(goodTarget, ".sageox", "meta.json"))
 }
@@ -327,7 +328,7 @@ func TestSyncBubbles_MetaJSONFields(t *testing.T) {
 	before := time.Now().Add(-time.Second)
 	s.syncBubbles(context.Background())
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	raw, err := os.ReadFile(filepath.Join(target, ".sageox", "meta.json"))
 	require.NoError(t, err)
 

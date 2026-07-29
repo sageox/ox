@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,7 +41,7 @@ func kbGCEnv(t *testing.T) string {
 // place).
 func makeKBDir(t *testing.T, kbID, marker string) string {
 	t.Helper()
-	dir := paths.KBDir(kbID)
+	dir := paths.KBDir(endpoint.Get(), kbID)
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "marker.txt"), []byte(marker), 0o644))
 	return dir
@@ -161,7 +162,7 @@ func TestKBGC_Reap_ExpiredEntryRemoved(t *testing.T) {
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
 
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 	trashDir := filepath.Join(root, kbTrashDirName)
 	require.NoError(t, os.MkdirAll(trashDir, 0o755))
 
@@ -188,7 +189,7 @@ func TestKBGC_Reap_RecentEntryKept(t *testing.T) {
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
 
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 	trashDir := filepath.Join(root, kbTrashDirName)
 	require.NoError(t, os.MkdirAll(trashDir, 0o755))
 
@@ -212,7 +213,7 @@ func TestKBGC_Reap_BadTimestampNeverDeletes(t *testing.T) {
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
 
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 	trashDir := filepath.Join(root, kbTrashDirName)
 	require.NoError(t, os.MkdirAll(trashDir, 0o755))
 
@@ -363,7 +364,7 @@ func TestKBGC_ConcurrentPasses_SafeUnderRename(t *testing.T) {
 	}
 	wg.Wait()
 
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 	// every orphan should be in .trash/, none in the root
 	entries, err := os.ReadDir(root)
 	require.NoError(t, err)

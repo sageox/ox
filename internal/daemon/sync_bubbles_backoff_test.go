@@ -34,6 +34,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,7 +72,7 @@ func TestSyncBubbles_Backoff_NoStickyState(t *testing.T) {
 	})
 	s.syncBubbles(context.Background())
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	if _, err := os.Stat(filepath.Join(target, ".git")); err == nil {
 		t.Fatalf("bubble was unexpectedly cloned despite list error")
 	}
@@ -151,7 +152,7 @@ func TestSyncBubbles_Backoff_RateLimitedThenRecovers(t *testing.T) {
 			s.syncBubbles(context.Background())
 		})
 	}
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	if _, err := os.Stat(filepath.Join(target, ".git")); err == nil {
 		t.Fatal("bubble cloned despite back-to-back rate-limit responses")
 	}
@@ -201,7 +202,7 @@ func TestSyncBubbles_Backoff_FailedBubbleSucceedsOnLaterPass(t *testing.T) {
 
 	// pass 1: clone fails.
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	if _, err := os.Stat(filepath.Join(target, ".git")); err == nil {
 		t.Fatal("expected clone to fail when the bare repo does not exist")
 	}
@@ -254,7 +255,7 @@ func TestSyncBubbles_Backoff_UnauthorizedSurfacedDistinctly(t *testing.T) {
 
 	// no kb dirs should have been created — the list call failed
 	// before the per-bubble loop ran.
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 	if entries, err := os.ReadDir(root); err == nil {
 		assert.Empty(t, entries, "401 must not produce any on-disk side effects")
 	}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
@@ -73,7 +74,7 @@ func TestSyncBubbles_Clone_AllKinds(t *testing.T) {
 
 			s.syncBubbles(context.Background())
 
-			target := paths.KBDir(bubble.KBID)
+			target := paths.KBDir(endpoint.Get(), bubble.KBID)
 			require.DirExists(t, filepath.Join(target, ".git"), "%s: .git must exist after clone", tc.name)
 			seeded := filepath.Join(target, tc.seedFile)
 			body, err := os.ReadFile(seeded)
@@ -131,7 +132,7 @@ func TestSyncBubbles_Clone_EndpointScoping(t *testing.T) {
 		})
 		s.syncBubbles(context.Background())
 
-		stagingTarget = paths.KBDir(bubble.KBID)
+		stagingTarget = paths.KBDir(endpoint.Get(), bubble.KBID)
 		body, err := os.ReadFile(filepath.Join(stagingTarget, "f.md"))
 		require.NoError(t, err)
 		assert.Equal(t, "A\n", string(body), "staging endpoint must clone A's content")
@@ -157,7 +158,7 @@ func TestSyncBubbles_Clone_EndpointScoping(t *testing.T) {
 		})
 		s.syncBubbles(context.Background())
 
-		target := paths.KBDir(bubble.KBID)
+		target := paths.KBDir(endpoint.Get(), bubble.KBID)
 		require.NotEmpty(t, target)
 		body, err := os.ReadFile(filepath.Join(target, "f.md"))
 		require.NoError(t, err)
@@ -205,14 +206,14 @@ func TestSyncBubbles_Clone_EmptyRepoURL_NoClone(t *testing.T) {
 	s.syncBubbles(context.Background())
 
 	// unprovisioned bubble has no checkout.
-	assert.NoDirExists(t, filepath.Join(paths.KBDir(unprovisioned.KBID), ".git"))
+	assert.NoDirExists(t, filepath.Join(paths.KBDir(endpoint.Get(), unprovisioned.KBID), ".git"))
 	// the bubble after must still be cloned.
-	assert.DirExists(t, filepath.Join(paths.KBDir(good.KBID), ".git"))
+	assert.DirExists(t, filepath.Join(paths.KBDir(endpoint.Get(), good.KBID), ".git"))
 }
 
 // TestSyncBubbles_Clone_EmptyKBID_Skipped is the kb-side equivalent of
 // the team-context "skip when team_id is missing" guard. An empty kb_id
-// must never produce a checkout — paths.KBDir("") would otherwise resolve
+// must never produce a checkout — paths.KBDir(ep, "") would otherwise resolve
 // to the kb base dir itself, which is a destructive write target.
 //
 // Failure prevented: an API regression returning blank kb_id rows
@@ -235,7 +236,7 @@ func TestSyncBubbles_Clone_EmptyKBID_Skipped(t *testing.T) {
 		s.syncBubbles(context.Background())
 	})
 	// no top-level git dir should appear at the kb root.
-	if entries, err := os.ReadDir(paths.KBDir("")); err == nil {
+	if entries, err := os.ReadDir(paths.KBDir(endpoint.Get(), "")); err == nil {
 		for _, e := range entries {
 			assert.NotEqual(t, ".git", e.Name(), "kb root must not become a git repo")
 		}
@@ -271,7 +272,7 @@ func TestSyncBubbles_Clone_BadURL_LeavesNoPartialCheckout(t *testing.T) {
 
 	s.syncBubbles(context.Background())
 
-	target := paths.KBDir(bad.KBID)
+	target := paths.KBDir(endpoint.Get(), bad.KBID)
 	// either the dir is absent OR present but with no .git — never both.
 	if _, err := os.Stat(filepath.Join(target, ".git")); err == nil {
 		t.Fatalf(".git dir created from a failing clone — partial state left behind at %s", target)
@@ -309,7 +310,7 @@ func TestSyncBubbles_Clone_PostCloneMergeAttrsInstalled(t *testing.T) {
 
 	s.syncBubbles(context.Background())
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	attrs, err := os.ReadFile(filepath.Join(target, ".git", "info", "attributes"))
 	require.NoError(t, err, "info/attributes must exist after clone")
 	got := string(attrs)
@@ -351,7 +352,7 @@ func TestSyncBubbles_Clone_Idempotent(t *testing.T) {
 
 	// first pass: clone.
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 
 	// drop a local untracked marker file. If the next pass re-clones
@@ -397,7 +398,7 @@ func TestSyncBubbles_Clone_RestoresAfterManualGitDirRemoval(t *testing.T) {
 
 	// initial clone.
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 
 	// manually remove .git as if a user did `rm -rf .git`.
@@ -447,7 +448,7 @@ func TestSyncBubbles_Clone_ShallowAndPartialFilter(t *testing.T) {
 
 	s.syncBubbles(context.Background())
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 
 	// blob:none filter must be recorded on the remote config so subsequent
@@ -515,7 +516,7 @@ func TestSyncBubbles_Clone_HasGitignoreEntries(t *testing.T) {
 
 	s.syncBubbles(context.Background())
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	gitignoreBytes, err := os.ReadFile(filepath.Join(target, ".sageox", ".gitignore"))
 	require.NoError(t, err, ".sageox/.gitignore must exist after clone")
 	contents := string(gitignoreBytes)
@@ -594,7 +595,7 @@ resolve auto data/
 
 	// first pass: clone — manifest should ship into the local checkout.
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 	require.FileExists(t, filepath.Join(target, ".sageox", "sync.manifest"))
 

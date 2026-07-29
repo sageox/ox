@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -62,7 +63,7 @@ func TestSyncBubbles_Pull_FastForward(t *testing.T) {
 	})
 
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 
 	pushExtraCommit(t, bareDir, "AGENTS.md", "v2\n")
@@ -109,7 +110,7 @@ func TestSyncBubbles_Pull_DedupSkipsWhenFetchRecent(t *testing.T) {
 	})
 
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	fetchHead := filepath.Join(target, ".git", "FETCH_HEAD")
 
 	// `git clone` doesn't create FETCH_HEAD — only `git fetch` does. To
@@ -170,7 +171,7 @@ func TestSyncBubbles_Pull_CorruptRepoMovedAside(t *testing.T) {
 
 	// initial clone.
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 
 	// corrupt the repo: leave .git as an empty dir so isValidGitRepo fails.
@@ -227,7 +228,7 @@ func TestSyncBubbles_Pull_NotGitRepoBecomesClonedOnNextPass(t *testing.T) {
 	})
 
 	// stage the pre-existing directory: present, contains a file, no .git.
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.NoError(t, os.MkdirAll(target, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(target, "stale.txt"), []byte("leftover"), 0o644))
 
@@ -275,7 +276,7 @@ func TestSyncBubbles_Pull_PreservesUntrackedFiles(t *testing.T) {
 	})
 
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	notes := filepath.Join(target, "scratch.md")
 	require.NoError(t, os.WriteFile(notes, []byte("WIP\n"), 0o644))
 
@@ -322,7 +323,7 @@ func TestSyncBubbles_Pull_PreservesUncommittedTrackedChanges(t *testing.T) {
 	})
 
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 
 	// uncommitted local edit to a tracked file (NOT colliding with
 	// the upstream change we'll push next).
@@ -376,7 +377,7 @@ func TestSyncBubbles_Pull_RebaseInProgressIsSkipped(t *testing.T) {
 	})
 
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 
 	// fake rebase-merge state.
 	rebaseDir := filepath.Join(target, ".git", "rebase-merge")
@@ -426,7 +427,7 @@ func TestSyncBubbles_Pull_LockFilesSkipPull(t *testing.T) {
 	})
 
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 
 	// plant a "fresh" lock so the auto-cleaner won't reap it.
 	lockPath := filepath.Join(target, ".git", "index.lock")

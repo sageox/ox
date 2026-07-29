@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -60,7 +61,7 @@ func assertExpectedState(t *testing.T, dctx kbDiagContext, expected ExpectedStat
 // assertExpectedKB checks a single bubble's on-disk state.
 func assertExpectedKB(t *testing.T, dctx kbDiagContext, kbID string, ek ExpectedKB) {
 	t.Helper()
-	target := paths.KBDir(kbID)
+	target := paths.KBDir(endpoint.Get(), kbID)
 	gitDir := filepath.Join(target, ".git")
 
 	_, gitErr := os.Stat(gitDir)
@@ -173,7 +174,7 @@ func assertExpectedSymlink(t *testing.T, dctx kbDiagContext, sl ExpectedSymlink,
 		t.Errorf("%sreadlink %s: %v", dctx.prefix(), link, err)
 		return
 	}
-	want := paths.KBDir(sl.TargetKBID)
+	want := paths.KBDir(endpoint.Get(), sl.TargetKBID)
 	if got != want {
 		t.Errorf("%ssymlink %s -> %s, want %s",
 			dctx.prefix(), link, got, want)
@@ -185,7 +186,7 @@ func assertExpectedSymlink(t *testing.T, dctx kbDiagContext, sl ExpectedSymlink,
 // presence so changes to the suffix format don't ripple here.
 func assertExpectedTrash(t *testing.T, dctx kbDiagContext, tr ExpectedTrash) {
 	t.Helper()
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 	trashDir := filepath.Join(root, ".trash")
 	entries, err := os.ReadDir(trashDir)
 	if err != nil && !os.IsNotExist(err) {
@@ -227,7 +228,7 @@ func sortedKeys(m map[string]string) []string {
 // but this guard is cheap and intent-revealing.)
 func requireFreshKBRoot(t *testing.T) {
 	t.Helper()
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 	if root == "" {
 		require.Fail(t, "paths.KBDir resolution failed — endpoint not set?")
 		return

@@ -22,7 +22,7 @@ func TestKBDir_EndpointScopedUnderDataHome(t *testing.T) {
 	os.Setenv("XDG_DATA_HOME", tmp)
 	os.Setenv("SAGEOX_ENDPOINT", "https://api.sageox.ai")
 
-	dir := KBDir("kb_abc123")
+	dir := KBDir("https://api.sageox.ai", "kb_abc123")
 	want := filepath.Join(tmp, "sageox", "sageox.ai", "kb", "kb_abc123")
 	if dir != want {
 		t.Errorf("KBDir(kb_abc123) = %q, want %q", dir, want)
@@ -42,10 +42,10 @@ func TestKBDir_EndpointIsolation(t *testing.T) {
 	os.Setenv("XDG_DATA_HOME", t.TempDir())
 
 	os.Setenv("SAGEOX_ENDPOINT", "https://staging.sageox.ai")
-	staging := KBDir("kb_xyz")
+	staging := KBDir("https://staging.sageox.ai", "kb_xyz")
 
 	os.Setenv("SAGEOX_ENDPOINT", "https://api.sageox.ai")
-	prod := KBDir("kb_xyz")
+	prod := KBDir("https://api.sageox.ai", "kb_xyz")
 
 	if staging == prod {
 		t.Fatalf("KBDir for staging and prod must differ; both = %q", staging)
@@ -73,7 +73,7 @@ func TestKBDir_EmptyKBIDReturnsBase(t *testing.T) {
 	os.Setenv("XDG_DATA_HOME", t.TempDir())
 	os.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
 
-	dir := KBDir("")
+	dir := KBDir("https://sageox.ai", "")
 	if !strings.HasSuffix(dir, filepath.Join("sageox.ai", "kb")) {
 		t.Errorf("KBDir('') = %q, want suffix sageox.ai/kb", dir)
 	}
@@ -95,7 +95,7 @@ func TestKBDir_KBIDSanitization(t *testing.T) {
 	os.Setenv("XDG_DATA_HOME", t.TempDir())
 	os.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
 
-	dir := KBDir("../../etc/passwd")
+	dir := KBDir("https://sageox.ai", "../../etc/passwd")
 	if strings.Contains(dir, "..") {
 		t.Errorf("KBDir traversal not sanitized: %q", dir)
 	}
@@ -117,8 +117,8 @@ func TestKBCacheDir_UsesCacheNotDataDir(t *testing.T) {
 	os.Setenv("XDG_DATA_HOME", dataRoot)
 	os.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
 
-	cache := KBCacheDir("kb_abc")
-	data := KBDir("kb_abc")
+	cache := KBCacheDir("https://sageox.ai", "kb_abc")
+	data := KBDir("https://sageox.ai", "kb_abc")
 
 	wantCache := filepath.Join(cacheRoot, "sageox", "sageox.ai", "kb", "kb_abc")
 	if cache != wantCache {
@@ -145,10 +145,10 @@ func TestKBCacheDir_EndpointIsolation(t *testing.T) {
 	os.Setenv("XDG_CACHE_HOME", t.TempDir())
 
 	os.Setenv("SAGEOX_ENDPOINT", "https://staging.sageox.ai")
-	staging := KBCacheDir("kb_xyz")
+	staging := KBCacheDir("https://staging.sageox.ai", "kb_xyz")
 
 	os.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
-	prod := KBCacheDir("kb_xyz")
+	prod := KBCacheDir("https://sageox.ai", "kb_xyz")
 
 	if staging == prod {
 		t.Fatalf("KBCacheDir for staging and prod must differ; both = %q", staging)
@@ -228,7 +228,7 @@ func TestKBDir_XDGDataHomeOverride(t *testing.T) {
 	os.Setenv("XDG_DATA_HOME", custom)
 	os.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
 
-	dir := KBDir("kb_abc")
+	dir := KBDir("https://sageox.ai", "kb_abc")
 	if !strings.HasPrefix(dir, custom) {
 		t.Errorf("KBDir = %q, want prefix %q (XDG_DATA_HOME override)", dir, custom)
 	}
@@ -246,7 +246,7 @@ func TestKBCacheDir_XDGCacheHomeOverride(t *testing.T) {
 	os.Setenv("XDG_CACHE_HOME", custom)
 	os.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
 
-	dir := KBCacheDir("kb_abc")
+	dir := KBCacheDir("https://sageox.ai", "kb_abc")
 	if !strings.HasPrefix(dir, custom) {
 		t.Errorf("KBCacheDir = %q, want prefix %q (XDG_CACHE_HOME override)", dir, custom)
 	}
@@ -265,7 +265,7 @@ func TestKBDir_LegacyXDGDisable(t *testing.T) {
 	os.Setenv("OX_XDG_DISABLE", "1")
 	os.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
 
-	dir := KBDir("kb_abc")
+	dir := KBDir("https://sageox.ai", "kb_abc")
 	// legacy mode: ~/.sageox/data/<endpoint>/kb/<kb_id>
 	if !strings.Contains(dir, filepath.Join(".sageox", "data", "sageox.ai", "kb", "kb_abc")) {
 		t.Errorf("KBDir under OX_XDG_DISABLE = %q, want path under .sageox/data/sageox.ai/kb/kb_abc", dir)

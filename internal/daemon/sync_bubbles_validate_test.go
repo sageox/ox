@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,7 +64,7 @@ func TestSyncBubbles_Validate_UnknownKBType_StillSyncs(t *testing.T) {
 
 	s.syncBubbles(context.Background())
 
-	target := paths.KBDir(unk.KBID)
+	target := paths.KBDir(endpoint.Get(), unk.KBID)
 	assert.DirExists(t, filepath.Join(target, ".git"),
 		"KBTypeUnknown must still clone — forward-compat per ADR-036")
 
@@ -117,7 +118,7 @@ func TestSyncBubbles_Validate_MetaJSONIsAtomicWrite(t *testing.T) {
 		s.syncBubbles(context.Background())
 	}
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	metaDir := filepath.Join(target, ".sageox")
 	entries, err := os.ReadDir(metaDir)
 	require.NoError(t, err)
@@ -168,7 +169,7 @@ func TestSyncBubbles_Validate_PreExistingCorruptMeta_Recovered(t *testing.T) {
 
 	// pass 1: clone + write meta.json.
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	metaPath := filepath.Join(target, ".sageox", "meta.json")
 	require.FileExists(t, metaPath)
 
@@ -219,7 +220,7 @@ func TestSyncBubbles_Validate_ListErrorLeavesDiskUntouched(t *testing.T) {
 		return &fakeKBLister{bubbles: []api.KB{bubble}}
 	})
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 
 	// snapshot meta.json bytes.

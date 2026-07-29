@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -99,7 +100,7 @@ func TestReconcileProjectSymlinks_InitialCreate(t *testing.T) {
 	// targets resolve to canonical KBDir paths
 	target, err := os.Readlink(filepath.Join(kbDir, "team", "platform"))
 	require.NoError(t, err)
-	assert.Equal(t, paths.KBDir("kb_team"), target)
+	assert.Equal(t, paths.KBDir(endpoint.Get(), "kb_team"), target)
 }
 
 // TestReconcileProjectSymlinks_Idempotent verifies running the
@@ -174,7 +175,7 @@ func TestReconcileProjectSymlinks_KBRevoked_PrunesLinkButNotTarget(t *testing.T)
 	s := newSymlinkTestScheduler(t, projectRoot)
 
 	// pre-create the canonical target so the symlink resolves.
-	target := paths.KBDir("kb_p")
+	target := paths.KBDir(endpoint.Get(), "kb_p")
 	require.NoError(t, os.MkdirAll(target, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(target, "marker.txt"), []byte("present"), 0o644))
 
@@ -210,7 +211,7 @@ func TestReconcileProjectSymlinks_FlatLayoutMigration(t *testing.T) {
 
 	// simulate the old flat layout: a symlink directly under .sageox/kb/
 	// pointing at the bubble's canonical dir.
-	target := paths.KBDir("kb_team")
+	target := paths.KBDir(endpoint.Get(), "kb_team")
 	require.NoError(t, os.MkdirAll(target, 0o755))
 	flatLink := filepath.Join(kbDir, "platform")
 	require.NoError(t, os.Symlink(target, flatLink))
@@ -526,7 +527,7 @@ func TestReconcileProjectSymlinks_TargetRelocated(t *testing.T) {
 	s := newSymlinkTestScheduler(t, projectRoot)
 
 	bubbles := []api.KB{{KBID: "kb_p", KBType: api.KBTypePersonal, Slug: "personal-abc"}}
-	target := paths.KBDir("kb_p")
+	target := paths.KBDir(endpoint.Get(), "kb_p")
 	require.NoError(t, os.MkdirAll(target, 0o755))
 
 	// first pass — link points at the canonical target

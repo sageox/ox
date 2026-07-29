@@ -114,7 +114,7 @@ func (s *SyncScheduler) kbGCRoot() (root string, err error) {
 			root = ""
 		}
 	}()
-	root = paths.KBDir("")
+	root = paths.KBDir(s.kbEndpoint(), "")
 	if root == "" {
 		return "", errors.New("kb root unresolved")
 	}

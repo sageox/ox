@@ -148,7 +148,9 @@ func kbHookLogger() *slog.Logger {
 	return slog.Default()
 }
 
-// defaultKBDoctorRoot resolves the canonical kb root for the active endpoint,
+// defaultKBDoctorRoot resolves the canonical kb root for the project's
+// endpoint (same resolution as defaultKBDoctorList, so the orphan check
+// compares the API list against the store that list actually populates),
 // recovering paths.KBDir's panic so an unconfigured endpoint becomes a
 // returned error rather than an aborted doctor run.
 func defaultKBDoctorRoot() (root string, err error) {
@@ -158,7 +160,11 @@ func defaultKBDoctorRoot() (root string, err error) {
 			err = fmt.Errorf("kb root resolution panicked: %v", r)
 		}
 	}()
-	root = paths.KBDir("")
+	ep := endpoint.GetForProject(findGitRoot())
+	if ep == "" {
+		ep = endpoint.Get()
+	}
+	root = paths.KBDir(ep, "")
 	if root == "" {
 		return "", errors.New("kb root unresolved")
 	}

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,7 +65,7 @@ func TestSyncBubbles_State_PersistsAcrossSchedulerRestart(t *testing.T) {
 	})
 	s1.syncBubbles(context.Background())
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	metaPath := filepath.Join(target, ".sageox", "meta.json")
 	require.FileExists(t, metaPath)
 	beforeRaw, err := os.ReadFile(metaPath)
@@ -149,7 +150,7 @@ func TestSyncBubbles_State_UpdatesAfterPull(t *testing.T) {
 
 	// pass 1: clone + write meta (last_sync = T1).
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	metaPath := filepath.Join(target, ".sageox", "meta.json")
 	raw, err := os.ReadFile(metaPath)
 	require.NoError(t, err)
@@ -211,7 +212,7 @@ func TestSyncBubbles_State_ManualMetaDeletion_Recovered(t *testing.T) {
 
 	// pass 1: clone + meta.
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	metaPath := filepath.Join(target, ".sageox", "meta.json")
 	require.FileExists(t, metaPath)
 
@@ -263,7 +264,7 @@ func TestSyncBubbles_State_MetaSurvivesScheduler_Without_Project(t *testing.T) {
 	})
 	s1.syncBubbles(context.Background())
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	metaPath := filepath.Join(target, ".sageox", "meta.json")
 	require.FileExists(t, metaPath)
 	beforeRaw, err := os.ReadFile(metaPath)

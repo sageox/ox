@@ -24,7 +24,7 @@ import (
 // when the kb store doesn't exist yet or the endpoint is unresolved — a
 // daemon with no bubbles on disk simply has no kb rows to report.
 func (s *SyncScheduler) kbWorkspaceStatus() []WorkspaceSyncStatus {
-	root := kbRootSafe()
+	root := kbRootSafe(s.kbEndpoint())
 	if root == "" {
 		return nil
 	}
@@ -71,16 +71,16 @@ func (s *SyncScheduler) kbWorkspaceStatus() []WorkspaceSyncStatus {
 	return rows
 }
 
-// kbRootSafe returns paths.KBDir(""), recovering the panic KBDir raises when
-// no endpoint is configured (tests with no SAGEOX_ENDPOINT, fresh installs)
+// kbRootSafe returns paths.KBDir(ep, ""), recovering the panic KBDir raises
+// when the endpoint is empty (tests with no SAGEOX_ENDPOINT, fresh installs)
 // so a status query degrades to "no bubbles" instead of crashing the daemon.
-func kbRootSafe() (root string) {
+func kbRootSafe(ep string) (root string) {
 	defer func() {
 		if recover() != nil {
 			root = ""
 		}
 	}()
-	return paths.KBDir("")
+	return paths.KBDir(ep, "")
 }
 
 // kbHasGitDir reports whether <kbPath>/.git exists — the same "is this a real

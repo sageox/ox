@@ -30,6 +30,7 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/paths"
 )
@@ -282,7 +283,7 @@ func pokePastFetchHead(bubbles []api.KB) {
 		if b.KBID == "" {
 			continue
 		}
-		fetchHead := filepath.Join(paths.KBDir(b.KBID), ".git", "FETCH_HEAD")
+		fetchHead := filepath.Join(paths.KBDir(endpoint.Get(), b.KBID), ".git", "FETCH_HEAD")
 		info, err := os.Stat(fetchHead)
 		if err != nil {
 			continue // no FETCH_HEAD yet, nothing to backdate
@@ -363,7 +364,7 @@ func TestKBTwin_MultiEndpoint(t *testing.T) {
 			sched.SyncBubblesForTest(ctx)
 
 			// resolve KBDir under THIS endpoint and confirm the clone landed.
-			target := paths.KBDir("kb_shared_id")
+			target := paths.KBDir(endpoint.Get(), "kb_shared_id")
 			if _, err := os.Stat(filepath.Join(target, ".git")); err != nil {
 				t.Fatalf("expected clone at %s for endpoint %s: %v", target, ep, err)
 			}
@@ -401,7 +402,7 @@ func TestKBTwin_APIUnavailable_NoSideEffects(t *testing.T) {
 		return nil, api.ErrKBAPIUnavailable
 	})
 
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 	entries, err := os.ReadDir(root)
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("read kb root %s: %v", root, err)
@@ -454,7 +455,7 @@ func TestKBTwin_MetaJSONShape(t *testing.T) {
 	defer cancel()
 	sched.SyncBubblesForTest(ctx)
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	raw, err := os.ReadFile(filepath.Join(target, ".sageox", "meta.json"))
 	if err != nil {
 		t.Fatalf("read meta: %v", err)

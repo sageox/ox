@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -68,7 +69,7 @@ func TestSyncBubbles_NewlyAppearing_ClonedOnNextPass(t *testing.T) {
 
 	// pass 1: empty list. No clones expected.
 	s.syncBubbles(context.Background())
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 	if entries, err := os.ReadDir(root); err == nil {
 		assert.Empty(t, entries, "no bubbles should exist before the API surfaces any")
 	}
@@ -86,7 +87,7 @@ func TestSyncBubbles_NewlyAppearing_ClonedOnNextPass(t *testing.T) {
 	// pass 2: must clone the new bubble.
 	s.syncBubbles(context.Background())
 
-	target := paths.KBDir(newBubble.KBID)
+	target := paths.KBDir(endpoint.Get(), newBubble.KBID)
 	assert.DirExists(t, filepath.Join(target, ".git"),
 		"newly-listed bubble must be cloned on the next pass")
 	assert.FileExists(t, filepath.Join(target, "AGENTS.md"))
@@ -135,7 +136,7 @@ func TestSyncBubbles_DisappearingBubble_NotTouchedBySync(t *testing.T) {
 
 	// pass 1: clone.
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 
 	// API drops the bubble.
@@ -187,7 +188,7 @@ func TestSyncBubbles_Discovery_Flapping(t *testing.T) {
 
 	// pass 1: present → clone.
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 
 	// pass 2: gone → no-op.
@@ -241,7 +242,7 @@ func TestSyncBubbles_NewBubbleAlongsideExisting(t *testing.T) {
 
 	// pass 1: clone bubbleA.
 	s.syncBubbles(context.Background())
-	targetA := paths.KBDir(bubbleA.KBID)
+	targetA := paths.KBDir(endpoint.Get(), bubbleA.KBID)
 	require.DirExists(t, filepath.Join(targetA, ".git"))
 	metaPathA := filepath.Join(targetA, ".sageox", "meta.json")
 	preStat, err := os.Stat(metaPathA)
@@ -260,7 +261,7 @@ func TestSyncBubbles_NewBubbleAlongsideExisting(t *testing.T) {
 	// pass 2: bubbleB clones, bubbleA must remain intact.
 	s.syncBubbles(context.Background())
 
-	targetB := paths.KBDir(bubbleB.KBID)
+	targetB := paths.KBDir(endpoint.Get(), bubbleB.KBID)
 	assert.DirExists(t, filepath.Join(targetB, ".git"), "newcomer must clone")
 	assert.FileExists(t, filepath.Join(targetB, "b.md"))
 

@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
@@ -70,7 +71,7 @@ func TestSyncBubbles_MergeAttrs_AppliedAtCloneTime(t *testing.T) {
 
 	s.syncBubbles(context.Background())
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	got := readKBAttrs(t, target)
 	for _, want := range kb.MergeUnionPaths {
 		assert.Contains(t, got, want, "expected merge rule for %s", want)
@@ -112,7 +113,7 @@ func TestSyncBubbles_MergeAttrs_NotInWorkingTree(t *testing.T) {
 
 	s.syncBubbles(context.Background())
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	if _, err := os.Stat(filepath.Join(target, ".gitattributes")); !os.IsNotExist(err) {
 		t.Fatalf("kb sync must NOT create a tracked .gitattributes; got err=%v", err)
 	}
@@ -150,7 +151,7 @@ func TestSyncBubbles_MergeAttrs_IdempotentAcrossPasses(t *testing.T) {
 	})
 
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	first := readKBAttrs(t, target)
 
 	// trigger a real pull on the second pass — push upstream + age FETCH_HEAD.
@@ -197,7 +198,7 @@ func TestSyncBubbles_MergeAttrs_PreservesUserAuthoredLines(t *testing.T) {
 
 	// initial clone — installs the managed block.
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 
 	// user appends a custom rule outside the managed markers.
 	attrsPath := filepath.Join(target, ".git", "info", "attributes")
@@ -246,7 +247,7 @@ func TestSyncBubbles_MergeAttrs_RecoversTruncatedManagedBlock(t *testing.T) {
 	})
 
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	attrsPath := filepath.Join(target, ".git", "info", "attributes")
 
 	// corrupt to a truncated block: header but no footer.
@@ -298,7 +299,7 @@ func TestSyncBubbles_MergeAttrs_ThreeWayUnionConcatenates(t *testing.T) {
 	})
 
 	s.syncBubbles(context.Background())
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	gitConfig(t, target)
 
 	// remote writes a divergent line.

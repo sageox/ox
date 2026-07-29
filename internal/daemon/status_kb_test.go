@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/require"
 )
@@ -21,7 +22,7 @@ import (
 // an optional .git marker and meta.json, matching what reconcileBubble writes.
 func writeBubbleOnDisk(t *testing.T, kbID string, hasGit bool, meta *kbMeta) {
 	t.Helper()
-	dir := paths.KBDir(kbID)
+	dir := paths.KBDir(endpoint.Get(), kbID)
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".sageox"), 0o755))
 	if hasGit {
 		require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git"), 0o755))
@@ -101,7 +102,7 @@ func TestKBWorkspaceStatus_SkipsDotDirsAndNonClones(t *testing.T) {
 	s, _ := kbTestScheduler(t)
 
 	// .trash/ must be skipped
-	require.NoError(t, os.MkdirAll(filepath.Join(paths.KBDir(""), ".trash", "kb_old"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(paths.KBDir(endpoint.Get(), ""), ".trash", "kb_old"), 0o755))
 	// a dir with no .git is a partial clone — listed but Exists=false
 	writeBubbleOnDisk(t, "kb_partial_1", false, &kbMeta{Type: api.KBTypeRepo, Slug: "half"})
 

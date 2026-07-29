@@ -543,16 +543,17 @@ func LedgersDataDir(repoID, ep string) string {
 // Endpoint-scoped (mandatory) so staging and production bubbles never collide.
 // Keyed by kb_id (immutable per ADR-036), not slug (renameable).
 //
+// IMPORTANT: ep is REQUIRED. Use endpoint.GetForProject(projectRoot) to get
+// the correct endpoint for a project context. Only use endpoint.Get() during
+// login or other flows with no project context. Passing the wrong endpoint
+// files a bubble under the wrong slug — a test.sageox.ai project's bubbles
+// must never land in the production sageox.ai store.
+//
 // Empty kb_id returns the base kb directory for that endpoint (matches the
 // LedgersDataDir(...) convention so callers can list all bubbles).
-func KBDir(kbID string) string {
-	// endpoint.Get() (not GetForProject) is correct here: KBDir is keyed by the
-	// immutable kb_id and is not project-bound. The KB store is per-machine,
-	// per-endpoint; a kb_id collides only if the user logs into multiple
-	// endpoints, in which case the endpoint subdir disambiguates.
-	ep := endpoint.Get()
+func KBDir(ep, kbID string) string {
 	if ep == "" {
-		panic("KBDir: endpoint is required - endpoint.Get() returned empty")
+		panic("KBDir: endpoint is required - use endpoint.GetForProject(projectRoot) not empty string")
 	}
 
 	slug := endpoint.NormalizeSlug(ep)
@@ -575,12 +576,12 @@ func KBDir(kbID string) string {
 // Endpoint-scoped, kb_id-keyed — same invariants as KBDir but rooted under
 // the XDG cache home rather than the data home.
 //
+// IMPORTANT: ep is REQUIRED — same contract as KBDir.
+//
 // Empty kb_id returns the base kb cache directory for that endpoint.
-func KBCacheDir(kbID string) string {
-	// see KBDir for the endpoint.Get() rationale.
-	ep := endpoint.Get()
+func KBCacheDir(ep, kbID string) string {
 	if ep == "" {
-		panic("KBCacheDir: endpoint is required - endpoint.Get() returned empty")
+		panic("KBCacheDir: endpoint is required - use endpoint.GetForProject(projectRoot) not empty string")
 	}
 
 	slug := endpoint.NormalizeSlug(ep)

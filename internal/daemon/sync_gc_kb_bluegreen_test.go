@@ -35,6 +35,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -59,7 +60,7 @@ func TestKBGC_StaleBakDir_FromCorruptRecovery_Triaged(t *testing.T) {
 	kbGCEnv(t)
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 
 	// authorized current bubble
 	keep := makeKBDir(t, "kb_keep", "live")
@@ -98,7 +99,7 @@ func TestKBGC_MultipleStaleBakDirs_AllTriaged(t *testing.T) {
 	kbGCEnv(t)
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 
 	keep := makeKBDir(t, "kb_keep", "live")
 	for i, ts := range []int64{1700000000, 1700000100, 1700000200} {
@@ -135,10 +136,10 @@ func TestKBGC_PartiallyClonedDir_NotInAPI_StillTriaged(t *testing.T) {
 	kbGCEnv(t)
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 
 	// directory exists but is empty — simulates an interrupted clone
-	partial := paths.KBDir("kb_dead_clone")
+	partial := paths.KBDir(endpoint.Get(), "kb_dead_clone")
 	require.NoError(t, os.MkdirAll(partial, 0o755))
 
 	// API doesn't know about it — confirmed dead
@@ -166,7 +167,7 @@ func TestKBGC_RespectsCloneInFlight_DoesNotTriageActiveClone(t *testing.T) {
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
 
-	active := paths.KBDir("kb_being_cloned")
+	active := paths.KBDir(endpoint.Get(), "kb_being_cloned")
 	require.NoError(t, os.MkdirAll(active, 0o755))
 	// Mark clone as in-flight via the kb-specific sync.Map maintained by
 	// cloneBubble. The deferred clear ensures other tests don't see the
@@ -200,7 +201,7 @@ func TestKBGC_CrashMidTriage_LeavesNoHalfState(t *testing.T) {
 	kbGCEnv(t)
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 
 	// orphan A: will fail to move (parent path made read-only)
 	orphanA := makeKBDir(t, "kb_will_fail", "a")
@@ -251,7 +252,7 @@ func TestKBGC_TriageFailure_DoesNotBlockReaper(t *testing.T) {
 	kbGCEnv(t)
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 
 	// healthy trash with one expired entry
 	trashDir := filepath.Join(root, kbTrashDirName)

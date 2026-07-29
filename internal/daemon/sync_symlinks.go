@@ -159,7 +159,7 @@ func (s *SyncScheduler) reconcileProjectSymlinksWithOps(ctx context.Context, pro
 
 		// 1. create/replace links present in desired.
 		for rel, kbID := range desired {
-			target := paths.KBDir(kbID)
+			target := paths.KBDir(s.kbEndpoint(), kbID)
 			if target == "" {
 				continue
 			}

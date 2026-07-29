@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
@@ -97,16 +98,16 @@ func TestSyncBubblesIntegration_FullFlow_MultipleBubbles(t *testing.T) {
 
 	// both bubbles materialize.
 	for _, kb := range []api.KB{a, b} {
-		target := paths.KBDir(kb.KBID)
+		target := paths.KBDir(endpoint.Get(), kb.KBID)
 		assert.DirExists(t, filepath.Join(target, ".git"), "%s: .git", kb.Slug)
 		assert.FileExists(t, filepath.Join(target, ".sageox", "meta.json"), "%s: meta.json", kb.Slug)
 	}
-	assert.FileExists(t, filepath.Join(paths.KBDir(a.KBID), "AGENTS.md"))
-	assert.FileExists(t, filepath.Join(paths.KBDir(b.KBID), "notes.md"))
+	assert.FileExists(t, filepath.Join(paths.KBDir(endpoint.Get(), a.KBID), "AGENTS.md"))
+	assert.FileExists(t, filepath.Join(paths.KBDir(endpoint.Get(), b.KBID), "notes.md"))
 
 	// CLI read-back via the same KB type used by `ox kb list`.
 	for _, kb := range []api.KB{a, b} {
-		raw, err := os.ReadFile(filepath.Join(paths.KBDir(kb.KBID), ".sageox", "meta.json"))
+		raw, err := os.ReadFile(filepath.Join(paths.KBDir(endpoint.Get(), kb.KBID), ".sageox", "meta.json"))
 		require.NoError(t, err)
 		var meta kbMeta
 		require.NoError(t, json.Unmarshal(raw, &meta))
@@ -151,7 +152,7 @@ func TestSyncBubblesIntegration_APIMockToOnDisk(t *testing.T) {
 
 	s.syncBubbles(context.Background())
 
-	target := paths.KBDir(row.KBID)
+	target := paths.KBDir(endpoint.Get(), row.KBID)
 	body, err := os.ReadFile(filepath.Join(target, "AGENTS.md"))
 	require.NoError(t, err)
 	assert.Equal(t, "from-mock\n", string(body))
@@ -202,7 +203,7 @@ func TestSyncBubblesIntegration_EndpointSwitchMidFlight(t *testing.T) {
 		return &fakeKBLister{bubbles: []api.KB{bubble1}}
 	})
 	s1.syncBubbles(context.Background())
-	stagingTarget := paths.KBDir(bubble1.KBID)
+	stagingTarget := paths.KBDir(endpoint.Get(), bubble1.KBID)
 	stagingBody, err := os.ReadFile(filepath.Join(stagingTarget, "f.md"))
 	require.NoError(t, err)
 	assert.Equal(t, "from-staging\n", string(stagingBody))
@@ -226,7 +227,7 @@ func TestSyncBubblesIntegration_EndpointSwitchMidFlight(t *testing.T) {
 		return &fakeKBLister{bubbles: []api.KB{bubble2}}
 	})
 	s2.syncBubbles(context.Background())
-	prodTarget := paths.KBDir(bubble2.KBID)
+	prodTarget := paths.KBDir(endpoint.Get(), bubble2.KBID)
 	prodBody, err := os.ReadFile(filepath.Join(prodTarget, "f.md"))
 	require.NoError(t, err)
 	assert.Equal(t, "from-prod\n", string(prodBody))
@@ -276,7 +277,7 @@ func TestSyncBubblesIntegration_RepeatedSyncIsIdempotent(t *testing.T) {
 		s.syncBubbles(context.Background())
 	}
 
-	target := paths.KBDir(bubble.KBID)
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 
 	// exactly one meta.json. No tmp leftovers.
@@ -340,10 +341,10 @@ func TestSyncBubblesIntegration_BubbleAddedSecondPass(t *testing.T) {
 	})
 
 	s.syncBubbles(context.Background())
-	assert.DirExists(t, filepath.Join(paths.KBDir(a.KBID), ".git"))
-	assert.NoDirExists(t, filepath.Join(paths.KBDir(b.KBID), ".git"))
+	assert.DirExists(t, filepath.Join(paths.KBDir(endpoint.Get(), a.KBID), ".git"))
+	assert.NoDirExists(t, filepath.Join(paths.KBDir(endpoint.Get(), b.KBID), ".git"))
 
 	s.syncBubbles(context.Background())
-	assert.DirExists(t, filepath.Join(paths.KBDir(a.KBID), ".git"))
-	assert.DirExists(t, filepath.Join(paths.KBDir(b.KBID), ".git"), "newly-added bubble must clone on the next pass")
+	assert.DirExists(t, filepath.Join(paths.KBDir(endpoint.Get(), a.KBID), ".git"))
+	assert.DirExists(t, filepath.Join(paths.KBDir(endpoint.Get(), b.KBID), ".git"), "newly-added bubble must clone on the next pass")
 }

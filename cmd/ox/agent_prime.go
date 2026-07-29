@@ -2356,7 +2356,7 @@ func buildPrimeKBEnvelope(ctx context.Context, projectRoot string) ([]prime.KBIn
 		if infos[i].KBID == "" {
 			continue
 		}
-		dir := kbDirSafe(infos[i].KBID)
+		dir := kbDirSafe(ep, infos[i].KBID)
 		if dir == "" {
 			continue
 		}
@@ -2369,15 +2369,15 @@ func buildPrimeKBEnvelope(ctx context.Context, projectRoot string) ([]prime.KBIn
 	return infos, reachable
 }
 
-// kbDirSafe wraps paths.KBDir, which panics when no endpoint is
-// configured — prime must degrade, not crash, in that state.
-func kbDirSafe(kbID string) (dir string) {
+// kbDirSafe wraps paths.KBDir, which panics when the endpoint is
+// empty — prime must degrade, not crash, in that state.
+func kbDirSafe(ep, kbID string) (dir string) {
 	defer func() {
 		if r := recover(); r != nil {
 			dir = ""
 		}
 	}()
-	return paths.KBDir(kbID)
+	return paths.KBDir(ep, kbID)
 }
 
 // enrichKBTokensFromInstance fills KBInfo.Tokens for kbInfos using the

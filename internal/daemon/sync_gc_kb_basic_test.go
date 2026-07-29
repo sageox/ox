@@ -60,6 +60,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -86,7 +87,7 @@ func TestKBGC_FullCycle_MixedAuthorizedAndOrphans(t *testing.T) {
 	keep2 := makeKBDir(t, "kb_keep_2", "beta")
 	orphan1 := makeKBDir(t, "kb_orphan_1", "gone")
 	orphan2 := makeKBDir(t, "kb_orphan_2", "also-gone")
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 
 	s.runKBGC(ctx, stubListFn("kb_keep_1", "kb_keep_2"))
 
@@ -119,7 +120,7 @@ func TestKBGC_FullCycle_TriageThenReap_SamePass(t *testing.T) {
 	kbGCEnv(t)
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 
 	// pre-seed an expired trash entry from a prior pass
 	trashDir := filepath.Join(root, kbTrashDirName)
@@ -160,9 +161,9 @@ func TestKBGC_KBRootMissing_NoPanic(t *testing.T) {
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
 
-	// kb root has not been created — paths.KBDir("") resolves but the
+	// kb root has not been created — paths.KBDir(ep, "") resolves but the
 	// directory itself is absent.
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 	_, err := os.Stat(root)
 	require.True(t, os.IsNotExist(err), "precondition: root must not exist")
 
@@ -210,7 +211,7 @@ func TestKBGC_PreExistingTrash_NewOrphansAddedAlongside(t *testing.T) {
 	kbGCEnv(t)
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 	trashDir := filepath.Join(root, kbTrashDirName)
 
 	// pre-existing recent trash entry (within grace, must survive)
@@ -270,7 +271,7 @@ func TestKBGC_TriageMovesEntireDir_IncludingUntrackedFiles(t *testing.T) {
 	assert.NoDirExists(t, dir)
 
 	// all four file paths survive intact under .trash/
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 	trashEntries, err := os.ReadDir(filepath.Join(root, kbTrashDirName))
 	require.NoError(t, err)
 	require.Len(t, trashEntries, 1)
@@ -305,7 +306,7 @@ func TestKBGC_NonDirEntriesIgnored(t *testing.T) {
 
 	// seed both a kb dir (orphan) and a stray top-level file
 	makeKBDir(t, "kb_orphan", "x")
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 	stray := filepath.Join(root, "stray-file")
 	require.NoError(t, os.WriteFile(stray, []byte("not-a-bubble"), 0o644))
 
@@ -329,7 +330,7 @@ func TestKBGC_DotPrefixedDirsIgnored(t *testing.T) {
 	kbGCEnv(t)
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
-	root := paths.KBDir("")
+	root := paths.KBDir(endpoint.Get(), "")
 
 	require.NoError(t, os.MkdirAll(root, 0o755))
 	dotDir := filepath.Join(root, ".future-state")

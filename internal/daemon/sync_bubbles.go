@@ -233,6 +233,14 @@ func (s *SyncScheduler) projectTeamIDForKB() string {
 	return s.workspaceRegistry.ProjectTeamID()
 }
 
+// kbEndpoint resolves the endpoint that scopes this daemon's KB store
+// paths (paths.KBDir / trash / symlink targets). Project-bound: a
+// test.sageox.ai project's bubbles must land under the test.sageox.ai
+// slug, never the production default (see bead ox-651l).
+func (s *SyncScheduler) kbEndpoint() string {
+	return endpoint.GetForProject(s.config.ProjectRoot)
+}
+
 // buildKBLister resolves a KBBubbleLister using the test factory if set,
 // otherwise constructs a real api.KBClient bound to the project's
 // endpoint and the heartbeat-cached auth token.
@@ -271,7 +279,7 @@ func (s *SyncScheduler) reconcileBubble(ctx context.Context, b api.KB) {
 		return
 	}
 
-	target := paths.KBDir(b.KBID)
+	target := paths.KBDir(s.kbEndpoint(), b.KBID)
 	if target == "" {
 		s.logger.Warn("kb_sync target path empty, skipping", "kb_id", b.KBID, "type", string(b.KBType))
 		return
