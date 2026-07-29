@@ -242,6 +242,21 @@ func bubbleScopeRank(scopeType string) int {
 	return 1
 }
 
+// kbLifecycleProvisioning is the lifecycle_state for a bubble whose
+// server-side repo is still being created. The failed counterpart
+// (kbLifecycleProvisionFailed) is declared in doctor_kb.go; "active" and
+// unknown/empty values are treated as cloneable.
+const kbLifecycleProvisioning = "provisioning"
+
+// bubbleCloneable reports whether an unmounted bubble can actually be
+// cloned — i.e. the server has (or should have) a repo for it. While
+// provisioning is in flight or has failed there is nothing for
+// `ox doctor --fix` to clone, so the repair hint must not appear.
+func bubbleCloneable(b kb.Bubble) bool {
+	return b.LifecycleState != kbLifecycleProvisioning &&
+		b.LifecycleState != kbLifecycleProvisionFailed
+}
+
 // renderBubblesSection renders the full knowledge-bubbles block: the
 // summary line, then one card per bubble in the Ledger / Team Context
 // card style — name, type + slug, mount path, and sync status, with the
@@ -284,7 +299,17 @@ func renderBubblesSection(s statusBubblesSummary, daemonStatus *daemon.StatusDat
 		}
 
 		b.WriteString(statusLabelStyle.Render("  Status"))
-		b.WriteString(renderBubbleStatus(r.Git, r.Cloned, bootstrapping))
+		switch {
+		case !r.Cloned && bub.LifecycleState == kbLifecycleProvisioning:
+			// no checkout AND the server hasn't finished provisioning the
+			// repo — a clone hint would send doctor after a repo that does
+			// not exist yet.
+			b.WriteString(statusMutedStyle.Render("⟳ provisioning"))
+		case !r.Cloned && bub.LifecycleState == kbLifecycleProvisionFailed:
+			b.WriteString(statusErrorStyle.Render("✗ provisioning failed"))
+		default:
+			b.WriteString(renderBubbleStatus(r.Git, r.Cloned, bootstrapping))
+		}
 		b.WriteString("\n")
 
 		if r.Cloned {
@@ -295,7 +320,7 @@ func renderBubblesSection(s statusBubblesSummary, daemonStatus *daemon.StatusDat
 				b.WriteString(statusWarningStyle.Render(fmt.Sprintf("⚠ stale (last sync %s)", status.FormatTimeAgo(syncState.LastSync))))
 				b.WriteString("\n")
 			}
-		} else if !bootstrapping {
+		} else if !bootstrapping && bubbleCloneable(bub) {
 			if bub.RepoURL != "" {
 				b.WriteString(statusLabelStyle.Render("  Remote"))
 				b.WriteString(statusMutedStyle.Render(bub.RepoURL))
@@ -339,9 +364,16 @@ func buildBubblesJSON(s statusBubblesSummary) *status.BubblesJSON {
 		rows := collectBubbleRows(s, nil)
 		out.Bubbles = make([]status.BubbleJSON, 0, len(rows))
 		for _, r := range rows {
-			syncStatus := "not cloned"
-			if r.Cloned {
+			var syncStatus string
+			switch {
+			case r.Cloned:
 				syncStatus, _ = status.FormatGitRepoStatus(r.Git)
+			case r.Bubble.LifecycleState == kbLifecycleProvisioning:
+				syncStatus = "provisioning"
+			case r.Bubble.LifecycleState == kbLifecycleProvisionFailed:
+				syncStatus = "provision failed"
+			default:
+				syncStatus = "not cloned"
 			}
 			out.Bubbles = append(out.Bubbles, status.BubbleJSON{
 				KBID:       r.Bubble.KBID,

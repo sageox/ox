@@ -509,6 +509,63 @@ func TestRenderBubblesSection_CardsShowPathAndStatus(t *testing.T) {
 	assert.Less(t, meIdx, engIdx, "personal-scope card must render before the team-scope card")
 }
 
+// TestRenderBubblesSection_ProvisioningSuppressesCloneHint verifies that
+// unmounted bubbles still being provisioned (or whose provisioning
+// failed) do NOT show the "Run 'ox doctor --fix' to clone" hint — there
+// is no repo to clone yet, so the hint would send the user (and doctor)
+// after a repo that does not exist.
+//
+// Failure prevented: a provisioning bubble renders the misleading clone
+// hint; the user runs doctor, the clone fails, and the failure looks
+// like an ox bug instead of an in-flight server operation.
+func TestRenderBubblesSection_ProvisioningSuppressesCloneHint(t *testing.T) {
+	fakeKBStore(t)
+
+	s := summarizeBubbles(kb.ListResult{
+		Bubbles: []kb.Bubble{
+			{KBID: "kb_prov", Type: api.KBTypeTeam, Slug: "prov", Name: "Provisioning Bubble",
+				ScopeType: "team", LifecycleState: "provisioning"},
+			{KBID: "kb_dead", Type: api.KBTypeTeam, Slug: "dead", Name: "Failed Bubble",
+				ScopeType: "team", LifecycleState: "provision-failed"},
+		},
+	})
+	clean := stripANSIBubbles(renderBubblesSection(s, nil))
+
+	assert.Contains(t, clean, "⟳ provisioning")
+	assert.Contains(t, clean, "✗ provisioning failed")
+	assert.NotContains(t, clean, "Run 'ox doctor --fix' to clone",
+		"clone hint must be suppressed while there is no repo to clone")
+	assert.NotContains(t, clean, "not cloned")
+}
+
+// TestBuildBubblesJSON_LifecycleSyncStatus verifies the JSON sync_status
+// distinguishes provisioning states from a plain missing clone.
+//
+// Failure prevented: scriptable consumers treat an in-flight provisioning
+// bubble as a broken mount and trigger spurious repair automation.
+func TestBuildBubblesJSON_LifecycleSyncStatus(t *testing.T) {
+	fakeKBStore(t)
+
+	s := summarizeBubbles(kb.ListResult{
+		Bubbles: []kb.Bubble{
+			{KBID: "kb_prov", Type: api.KBTypeTeam, Slug: "prov", ScopeType: "team", LifecycleState: "provisioning"},
+			{KBID: "kb_dead", Type: api.KBTypeTeam, Slug: "dead", ScopeType: "team", LifecycleState: "provision-failed"},
+			{KBID: "kb_gone", Type: api.KBTypeTeam, Slug: "gone", ScopeType: "team", LifecycleState: "active"},
+		},
+	})
+	js := buildBubblesJSON(s)
+	require.NotNil(t, js)
+	require.Len(t, js.Bubbles, 3)
+
+	byID := map[string]string{}
+	for _, b := range js.Bubbles {
+		byID[b.KBID] = b.SyncStatus
+	}
+	assert.Equal(t, "provisioning", byID["kb_prov"])
+	assert.Equal(t, "provision failed", byID["kb_dead"])
+	assert.Equal(t, "not cloned", byID["kb_gone"])
+}
+
 // TestRenderBubblesSection_NoCardsWhenEmptyOrUnavailable verifies the
 // degraded cases stay a single line — no stray card scaffolding.
 //
