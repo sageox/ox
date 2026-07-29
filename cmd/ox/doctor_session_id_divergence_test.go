@@ -254,6 +254,72 @@ func TestScanSessionIDDivergence_UnrecognizedHeaderShapeReportedUnreadable(t *te
 	assert.Contains(t, result.unreadable[0], "weird-shape")
 }
 
+// TestScanSessionIDDivergence_NativeHeaderInvalidIDIsUnreadable covers the
+// layer below the shape check: the header shape is fine, but the session_id
+// VALUE is corrupt. ParseStoreMeta only admits ses_-prefixed strings into
+// StoreMeta.SessionID, so a malformed value reads back as "" — identical to a
+// legacy header that never carried the field.
+//
+// Failure prevented: a corrupted identity carrier silently classified as
+// "legacy, predates ID-at-start" and omitted from ox doctor entirely, which is
+// the same swallow-corruption-as-fine failure as the shape gap, one level down.
+func TestScanSessionIDDivergence_NativeHeaderInvalidIDIsUnreadable(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header string
+	}{
+		{"missing ses_ prefix", `{"type":"header","metadata":{"agent_id":"OxAbc1","session_id":"019f9478-022c-7f2a-a5cd-9e7f23679a4e"}}`},
+		{"not a UUID at all", `{"type":"header","metadata":{"agent_id":"OxAbc1","session_id":"ses_garbage"}}`},
+		{"wrong type entirely", `{"type":"header","metadata":{"agent_id":"OxAbc1","session_id":12345}}`},
+		{"empty string", `{"type":"header","metadata":{"agent_id":"OxAbc1","session_id":""}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			sessionsDir := filepath.Join(tmp, "sessions")
+			dir := filepath.Join(sessionsDir, "corrupt-id")
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			writeTestSessionMeta(t, sessionsDir, "corrupt-id", sessionid.GenerateSessionID())
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(tc.header+"\n"), 0o644))
+
+			result, err := scanSessionIDDivergence(sessionsDir)
+			require.NoError(t, err)
+			require.Len(t, result.unreadable, 1,
+				"a corrupt session_id must be reported, not skipped as legacy")
+			assert.Contains(t, result.unreadable[0], "corrupt-id")
+		})
+	}
+}
+
+// TestScanSessionIDDivergence_ImportHeaderNonSesIDStaysQuiet is the
+// false-positive guard for the check above. The alternative _meta format
+// OVERLOADS session_id as an agent identifier — ParseStoreMeta falls it back
+// to StoreMeta.AgentID precisely when it is not ses_-prefixed, and the
+// documented import format in .claude/rules/session-capture.md ships
+// `"session_id":"manual"`.
+//
+// Failure prevented: applying the native-header validity rule to _meta would
+// report every imported and adapter-produced session as unreadable — turning
+// a corruption detector into a wall of noise that gets ignored.
+func TestScanSessionIDDivergence_ImportHeaderNonSesIDStaysQuiet(t *testing.T) {
+	for _, header := range []string{
+		`{"_meta":{"schema_version":"1","agent_type":"claude-code","session_id":"manual"}}`,
+		`{"_meta":{"schema_version":"1","agent_type":"cursor","session_id":"some-agent-uuid"}}`,
+	} {
+		tmp := t.TempDir()
+		sessionsDir := filepath.Join(tmp, "sessions")
+		dir := filepath.Join(sessionsDir, "imported")
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		writeTestSessionMeta(t, sessionsDir, "imported", sessionid.GenerateSessionID())
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(header+"\n"), 0o644))
+
+		result, err := scanSessionIDDivergence(sessionsDir)
+		require.NoError(t, err)
+		assert.Empty(t, result.unreadable,
+			"the _meta agent-identifier overload is not corruption: %s", header)
+		assert.Empty(t, result.diverged)
+	}
+}
+
 // TestScanSessionIDDivergence_HeaderShapeMustMatchTheReader covers the gap a
 // bare key-presence check leaves open. Each of these first lines CONTAINS a
 // "metadata" or "_meta" key, so a presence check waves it through — but

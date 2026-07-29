@@ -13,6 +13,7 @@ import (
 
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/sessionid"
 )
 
 // doctor_session_id_divergence.go detects a session whose durable identity
@@ -265,11 +266,32 @@ func readHeaderSessionIDStrict(rawPath string) (string, error) {
 	// precisely the corruption-swallowed-as-fine outcome this check exists
 	// to prevent, so a shape the reader would reject must surface as
 	// unreadable here.
-	_, metadataIsObj := entry["metadata"].(map[string]any)
+	metadataObj, metadataIsObj := entry["metadata"].(map[string]any)
 	_, metaIsObj := entry["_meta"].(map[string]any)
 	isNativeHeader := metadataIsObj && entry["type"] == "header"
 	if !isNativeHeader && !metaIsObj {
 		return "", fmt.Errorf("first line is not a recognizable session header")
+	}
+
+	// A native ox header carries session_id as the ses_ recording identity,
+	// alongside a separate agent_id. ParseStoreMeta only admits ses_-prefixed
+	// values into StoreMeta.SessionID, so a present-but-malformed one reads
+	// back as "" — indistinguishable from a legacy header that never had the
+	// field, and therefore skipped silently. Present-but-invalid is corruption
+	// of the identity carrier itself; say so.
+	//
+	// Deliberately NOT applied to the _meta shape. That format overloads
+	// session_id as an AGENT identifier (store.go's StoreMeta note and
+	// ParseStoreMeta's agent_id fallback), and the documented import format
+	// ships values like "manual". Rejecting non-ses_ values there would report
+	// every imported and adapter-produced session as unreadable.
+	if isNativeHeader {
+		if raw, present := metadataObj["session_id"]; present {
+			id, isString := raw.(string)
+			if !isString || !sessionid.IsValidSessionID(id) {
+				return "", fmt.Errorf("header session_id is present but not a valid ses_ ID")
+			}
+		}
 	}
 
 	return session.ReadHeaderSessionID(rawPath), nil
