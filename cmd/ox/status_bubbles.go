@@ -371,7 +371,9 @@ func buildBubblesJSON(s statusBubblesSummary) *status.BubblesJSON {
 			case r.Bubble.LifecycleState == kbLifecycleProvisioning:
 				syncStatus = "provisioning"
 			case r.Bubble.LifecycleState == kbLifecycleProvisionFailed:
-				syncStatus = "provision failed"
+				// same wording as the human card ("✗ provisioning failed")
+				// minus the glyph — one status vocabulary across formats.
+				syncStatus = "provisioning failed"
 			default:
 				syncStatus = "not cloned"
 			}

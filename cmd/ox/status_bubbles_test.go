@@ -562,7 +562,8 @@ func TestBuildBubblesJSON_LifecycleSyncStatus(t *testing.T) {
 		byID[b.KBID] = b.SyncStatus
 	}
 	assert.Equal(t, "provisioning", byID["kb_prov"])
-	assert.Equal(t, "provision failed", byID["kb_dead"])
+	assert.Equal(t, "provisioning failed", byID["kb_dead"],
+		"JSON must use the same status vocabulary as the human card")
 	assert.Equal(t, "not cloned", byID["kb_gone"])
 }
 
