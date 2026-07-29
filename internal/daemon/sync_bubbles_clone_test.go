@@ -235,11 +235,16 @@ func TestSyncBubbles_Clone_EmptyKBID_Skipped(t *testing.T) {
 	assert.NotPanics(t, func() {
 		s.syncBubbles(context.Background())
 	})
-	// no top-level git dir should appear at the kb root.
-	if entries, err := os.ReadDir(paths.KBDir(endpoint.Get(), "")); err == nil {
-		for _, e := range entries {
-			assert.NotEqual(t, ".git", e.Name(), "kb root must not become a git repo")
-		}
+	// no top-level git dir should appear at the kb root. An absent root is
+	// fine (nothing was cloned); any other ReadDir error must fail loudly
+	// rather than skip the assertions below.
+	entries, err := os.ReadDir(paths.KBDir(endpoint.Get(), ""))
+	if err != nil {
+		require.ErrorIs(t, err, os.ErrNotExist, "kb root must be readable or absent")
+		return
+	}
+	for _, e := range entries {
+		assert.NotEqual(t, ".git", e.Name(), "kb root must not become a git repo")
 	}
 }
 

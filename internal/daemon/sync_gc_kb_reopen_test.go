@@ -264,6 +264,8 @@ func TestKBGC_ConcurrentReList_DuringReap_SafeUnderRace(t *testing.T) {
 	canonicalExists := false
 	if _, err := os.Stat(paths.KBDir(endpoint.Get(), "kb_flapping")); err == nil {
 		canonicalExists = true
+	} else {
+		require.ErrorIs(t, err, os.ErrNotExist, "canonical kb dir must be statable or absent")
 	}
 
 	trashCount := 0
