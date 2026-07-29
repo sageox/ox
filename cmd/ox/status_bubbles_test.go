@@ -9,6 +9,8 @@ package main
 
 import (
 	"context"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -415,6 +417,147 @@ func TestRenderBubbleStatus(t *testing.T) {
 
 	notCloned := stripANSIBubbles(renderBubbleStatus(gitRepoStatus{}, false, false))
 	assert.Equal(t, "⚠ not cloned", notCloned)
+}
+
+// fakeKBStore redirects statusKBDirForBubble at a temp dir for the duration
+// of the test and returns it. Tests using it must NOT be parallel — the seam
+// is a package global.
+func fakeKBStore(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	orig := statusKBDirForBubble
+	statusKBDirForBubble = func(kbID string) string {
+		return filepath.Join(dir, kbID)
+	}
+	t.Cleanup(func() { statusKBDirForBubble = orig })
+	return dir
+}
+
+// gitInitKB creates a real (empty) git repo at dir/kbID so getGitRepoStatus
+// exercises the actual clone-detection path, not a stubbed .git marker.
+func gitInitKB(t *testing.T, dir, kbID string) string {
+	t.Helper()
+	path := filepath.Join(dir, kbID)
+	cmd := exec.Command("git", "init", "-q", path)
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	return path
+}
+
+// TestCollectBubbleRows_PathAndSortOrder verifies each row resolves its
+// canonical checkout path from the kb_id, detects clone state from a real
+// git repo, and that personal-scope rows sort ahead of team-scope ones.
+//
+// Failure prevented: the section lists a team bubble first (burying the
+// user's own bubbles), points Path at the wrong directory, or reports a
+// cloned bubble as missing after a path-resolution refactor.
+func TestCollectBubbleRows_PathAndSortOrder(t *testing.T) {
+	store := fakeKBStore(t)
+	clonedPath := gitInitKB(t, store, "kb_team")
+
+	s := summarizeBubbles(kb.ListResult{
+		Bubbles: []kb.Bubble{
+			{KBID: "kb_team", Type: api.KBTypeTeam, Slug: "eng", ScopeType: "team"},
+			{KBID: "kb_me", Type: api.KBTypePersonal, Slug: "me", ScopeType: "user"},
+		},
+	})
+	rows := collectBubbleRows(s, nil)
+	require.Len(t, rows, 2)
+
+	assert.Equal(t, "kb_me", rows[0].Bubble.KBID, "personal-scope bubble must sort first")
+	assert.False(t, rows[0].Cloned)
+	assert.Equal(t, filepath.Join(store, "kb_me"), rows[0].Path)
+
+	assert.Equal(t, "kb_team", rows[1].Bubble.KBID)
+	assert.True(t, rows[1].Cloned, "a real git checkout must be detected as cloned")
+	assert.Equal(t, clonedPath, rows[1].Path)
+}
+
+// TestRenderBubblesSection_CardsShowPathAndStatus verifies the human
+// output: the summary line stays, and each bubble gets a card with name,
+// type + slug, mount path, and a sync-status cell — with the doctor hint
+// and remote URL on not-cloned rows.
+//
+// Failure prevented: the section regresses to the count-only line, or a
+// not-cloned bubble renders without the repair path users need.
+func TestRenderBubblesSection_CardsShowPathAndStatus(t *testing.T) {
+	store := fakeKBStore(t)
+	gitInitKB(t, store, "kb_team")
+
+	s := summarizeBubbles(kb.ListResult{
+		Bubbles: []kb.Bubble{
+			{KBID: "kb_team", Type: api.KBTypeTeam, Slug: "eng", Name: "Engineering Bubble", ScopeType: "team"},
+			{KBID: "kb_me", Type: api.KBTypePersonal, Slug: "me", Name: "My Bubble", ScopeType: "user",
+				RepoURL: "https://git.sageox.ai/kb/kb_me.git"},
+		},
+	})
+	clean := stripANSIBubbles(renderBubblesSection(s, nil))
+
+	assert.Contains(t, clean, "Knowledge bubbles", "summary line must survive the section expansion")
+	assert.Contains(t, clean, "Engineering Bubble")
+	assert.Contains(t, clean, "#eng")
+	assert.Contains(t, clean, filepath.Join(store, "kb_team"))
+	assert.Contains(t, clean, "✓", "cloned clean bubble must show a success cell")
+
+	assert.Contains(t, clean, "My Bubble")
+	assert.Contains(t, clean, "⚠ not cloned")
+	assert.Contains(t, clean, "https://git.sageox.ai/kb/kb_me.git")
+	assert.Contains(t, clean, "Run 'ox doctor --fix' to clone")
+
+	meIdx := strings.Index(clean, "My Bubble")
+	engIdx := strings.Index(clean, "Engineering Bubble")
+	assert.Less(t, meIdx, engIdx, "personal-scope card must render before the team-scope card")
+}
+
+// TestRenderBubblesSection_NoCardsWhenEmptyOrUnavailable verifies the
+// degraded cases stay a single line — no stray card scaffolding.
+//
+// Failure prevented: an unavailable fetch or empty list renders orphaned
+// "KB"/"Status" labels under the summary line.
+func TestRenderBubblesSection_NoCardsWhenEmptyOrUnavailable(t *testing.T) {
+	t.Parallel()
+
+	empty := stripANSIBubbles(renderBubblesSection(statusBubblesSummary{}, nil))
+	assert.NotContains(t, empty, "Type")
+	assert.NotContains(t, empty, "Status")
+
+	unavail := stripANSIBubbles(renderBubblesSection(statusBubblesSummary{Unavailable: true}, nil))
+	assert.Contains(t, unavail, "(unavailable)")
+	assert.NotContains(t, unavail, "Status")
+}
+
+// TestBuildBubblesJSON_PopulatesRows verifies the JSON envelope carries
+// per-bubble rows mirroring the human cards: identity, path, cloned flag,
+// and a sync-status string ("not cloned" when there is no checkout).
+//
+// Failure prevented: scriptable consumers only ever see counts and cannot
+// locate a bubble's checkout or detect an unmounted one.
+func TestBuildBubblesJSON_PopulatesRows(t *testing.T) {
+	store := fakeKBStore(t)
+	gitInitKB(t, store, "kb_team")
+
+	s := summarizeBubbles(kb.ListResult{
+		Bubbles: []kb.Bubble{
+			{KBID: "kb_team", Type: api.KBTypeTeam, Slug: "eng", ScopeType: "team"},
+			{KBID: "kb_me", Type: api.KBTypePersonal, Slug: "me", ScopeType: "user"},
+		},
+	})
+	js := buildBubblesJSON(s)
+	require.NotNil(t, js)
+	require.Len(t, js.Bubbles, 2)
+
+	me := js.Bubbles[0]
+	assert.Equal(t, "kb_me", me.KBID)
+	assert.Equal(t, "personal", me.Type)
+	assert.False(t, me.Cloned)
+	assert.Equal(t, "not cloned", me.SyncStatus)
+	assert.Equal(t, filepath.Join(store, "kb_me"), me.Path)
+
+	team := js.Bubbles[1]
+	assert.Equal(t, "kb_team", team.KBID)
+	assert.True(t, team.Cloned)
+	assert.NotEmpty(t, team.SyncStatus)
+	assert.NotEqual(t, "not cloned", team.SyncStatus)
 }
 
 // TestRenderSlugRef verifies the sigil and slug are rendered as distinct

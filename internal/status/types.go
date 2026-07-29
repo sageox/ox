@@ -38,7 +38,23 @@ type AgentTasksJSON struct {
 type BubblesJSON struct {
 	Total    int                 `json:"total"`
 	ByType   map[string]int      `json:"by_type,omitempty"`
+	Bubbles  []BubbleJSON        `json:"bubbles,omitempty"`
 	Warnings []BubbleWarningJSON `json:"warnings,omitempty"`
+}
+
+// BubbleJSON is one knowledge-bubble row in `ox status --json`, mirroring
+// the per-bubble cards in the human output: identity plus the local mount
+// path and its sync state. Defined in internal/status (not internal/kb)
+// for the same dependency reason as BubbleWarningJSON.
+type BubbleJSON struct {
+	KBID       string `json:"kb_id,omitempty"`
+	Type       string `json:"type"`
+	Slug       string `json:"slug,omitempty"`
+	Name       string `json:"name,omitempty"`
+	ScopeType  string `json:"scope_type,omitempty"`
+	Path       string `json:"path,omitempty"`
+	Cloned     bool   `json:"cloned"`
+	SyncStatus string `json:"sync_status,omitempty"`
 }
 
 // BubbleWarningJSON mirrors kb.Warning for JSON output. Defined

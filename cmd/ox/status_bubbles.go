@@ -1,24 +1,27 @@
 package main
 
-// status_bubbles.go — `ox status` knowledge-bubbles summary line.
+// status_bubbles.go — `ox status` knowledge-bubbles section.
 //
-// One scannable line sourced from the KB API (the only source of bubble
-// rows under ox ADR-028). Team contexts and ledgers are conversation
-// stores with their own status sections — they are not bubbles and do
-// not appear in this count.
+// Sourced from the KB API (the only source of bubble rows under ox
+// ADR-028). Team contexts and ledgers are conversation stores with their
+// own status sections — they are not bubbles and do not appear here.
 //
-// Format:
+// The section opens with a scannable summary line:
 //
 //	Knowledge bubbles: <total> (<n> personal, <n> profile, <n> team, <n> repo[, <n> custom][, <n> unknown])
 //
-// Zero buckets are omitted. Total=0 collapses to `Knowledge bubbles: 0`
-// (no parens). Fetch errors degrade gracefully to `(unavailable)` so the
-// rest of `ox status` still renders.
+// followed by one card per bubble (personal-scope rows first, then the
+// project team's) showing the local mount path (paths.KBDir) and its sync
+// status, mirroring the Ledger / Team Context cards. Zero buckets are
+// omitted from the summary. Total=0 collapses to `Knowledge bubbles: 0`
+// (no parens, no cards). Fetch errors degrade gracefully to
+// `(unavailable)` so the rest of `ox status` still renders.
 
 import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -26,7 +29,9 @@ import (
 	lipgloss "charm.land/lipgloss/v2"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/kb"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/status"
 )
 
@@ -40,6 +45,11 @@ type statusBubblesSummary struct {
 	// non-zero buckets appear so order-of-iteration callers can skip the
 	// is-zero check.
 	ByType map[string]int
+
+	// Bubbles are the raw fetched rows, kept so the section renderer and
+	// JSON emitter can show per-bubble cards (path + sync status), not
+	// just counts.
+	Bubbles []kb.Bubble
 
 	// Warnings are non-fatal errors from the KB fetch.
 	Warnings []kb.Warning
@@ -84,6 +94,7 @@ func summarizeBubbles(res kb.ListResult) statusBubblesSummary {
 	return statusBubblesSummary{
 		Total:    len(res.Bubbles),
 		ByType:   by,
+		Bubbles:  res.Bubbles,
 		Warnings: res.Warnings,
 	}
 }
@@ -171,6 +182,133 @@ func renderBubblesLine(s statusBubblesSummary) string {
 	return b.String()
 }
 
+// statusBubbleRow is one bubble plus its derived local state: where the
+// checkout lives (canonical paths.KBDir keyed by kb_id) and what git says
+// about it. Computed once so the human renderer and JSON emitter agree.
+type statusBubbleRow struct {
+	Bubble kb.Bubble
+	Path   string
+	Cloned bool
+	Git    gitRepoStatus
+}
+
+// statusKBDirForBubble resolves a bubble's canonical checkout directory.
+// Seam variable so tests can point rows at a temp dir without endpoint
+// plumbing; production is paths.KBDir.
+var statusKBDirForBubble = func(kbID string) string {
+	return paths.KBDir(kbID)
+}
+
+// collectBubbleRows derives per-bubble local state from a summary. Sync
+// times layer the same way as the team-context cards: daemon (freshest)
+// via LastSyncForPath, else none. Rows sort personal-scope first, then by
+// type priority, then slug, so a user's own bubbles lead the section.
+// Safe with a nil daemonStatus (JSON path).
+func collectBubbleRows(s statusBubblesSummary, daemonStatus *daemon.StatusData) []statusBubbleRow {
+	rows := make([]statusBubbleRow, 0, len(s.Bubbles))
+	for _, bub := range s.Bubbles {
+		row := statusBubbleRow{Bubble: bub, Path: bub.LocalPath}
+		if row.Path == "" && bub.KBID != "" {
+			row.Path = statusKBDirForBubble(bub.KBID)
+		}
+		if row.Path != "" {
+			if _, err := os.Stat(filepath.Join(row.Path, ".git")); err == nil {
+				row.Cloned = true
+				lastSync, hasSync := daemonStatus.LastSyncForPath(row.Path)
+				row.Git = getGitRepoStatus(row.Path, lastSync, hasSync)
+			}
+		}
+		rows = append(rows, row)
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		bi, bj := rows[i].Bubble, rows[j].Bubble
+		if ri, rj := bubbleScopeRank(bi.ScopeType), bubbleScopeRank(bj.ScopeType); ri != rj {
+			return ri < rj
+		}
+		if pi, pj := kbTypePriority(bi.Type), kbTypePriority(bj.Type); pi != pj {
+			return pi < pj
+		}
+		return bi.Slug < bj.Slug
+	})
+	return rows
+}
+
+// bubbleScopeRank orders personal-scope ("user") bubbles ahead of
+// team-scope ones. Unknown scope types trail with team.
+func bubbleScopeRank(scopeType string) int {
+	if scopeType == "user" {
+		return 0
+	}
+	return 1
+}
+
+// renderBubblesSection renders the full knowledge-bubbles block: the
+// summary line, then one card per bubble in the Ledger / Team Context
+// card style — name, type + slug, mount path, and sync status, with the
+// same staleness warning and not-cloned repair hint the team-context
+// cards show.
+func renderBubblesSection(s statusBubblesSummary, daemonStatus *daemon.StatusData) string {
+	var b strings.Builder
+	b.WriteString(renderBubblesLine(s))
+	if s.Unavailable || len(s.Bubbles) == 0 {
+		return b.String()
+	}
+
+	bootstrapping := daemonStatus.IsBootstrapping()
+	for _, r := range collectBubbleRows(s, daemonStatus) {
+		bub := r.Bubble
+		name := bub.Name
+		if name == "" {
+			name = bub.Slug
+		}
+		if name == "" {
+			name = bub.KBID
+		}
+		b.WriteString("\n")
+		b.WriteString(statusLabelStyle.Render("KB"))
+		b.WriteString(statusValueStyle.Render(name))
+		b.WriteString("\n")
+
+		b.WriteString(statusLabelStyle.Render("  Type"))
+		b.WriteString(statusValueStyle.Render(formatKBType(bub.Type)))
+		if bub.Slug != "" {
+			b.WriteString(" ")
+			b.WriteString(renderSlugRef("#", bub.Slug))
+		}
+		b.WriteString("\n")
+
+		if r.Path != "" {
+			b.WriteString(statusLabelStyle.Render("  Path"))
+			b.WriteString(statusMutedStyle.Render(shortenHome(r.Path)))
+			b.WriteString("\n")
+		}
+
+		b.WriteString(statusLabelStyle.Render("  Status"))
+		b.WriteString(renderBubbleStatus(r.Git, r.Cloned, bootstrapping))
+		b.WriteString("\n")
+
+		if r.Cloned {
+			// staleness warning, same threshold as the team-context cards
+			syncState := daemon.LoadSyncState(r.Path)
+			if syncState.IsStale(daemon.DefaultStalenessThreshold) && !syncState.LastSync.IsZero() {
+				b.WriteString(statusLabelStyle.Render(""))
+				b.WriteString(statusWarningStyle.Render(fmt.Sprintf("⚠ stale (last sync %s)", status.FormatTimeAgo(syncState.LastSync))))
+				b.WriteString("\n")
+			}
+		} else if !bootstrapping {
+			if bub.RepoURL != "" {
+				b.WriteString(statusLabelStyle.Render("  Remote"))
+				b.WriteString(statusMutedStyle.Render(bub.RepoURL))
+				b.WriteString("\n")
+			}
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("Run 'ox doctor --fix' to clone"))
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
 // buildBubblesJSON converts a summary into the BubblesJSON payload. Uses
 // status.BubblesJSON directly so the shape stays in sync with the type
 // declared in internal/status/types.go.
@@ -193,6 +331,28 @@ func buildBubblesJSON(s statusBubblesSummary) *status.BubblesJSON {
 		out.ByType = make(map[string]int, len(s.ByType))
 		for k, v := range s.ByType {
 			out.ByType[k] = v
+		}
+	}
+	if len(s.Bubbles) > 0 {
+		// nil daemonStatus: JSON reports git-derived state; the freshest
+		// daemon sync time only refines the human status cell.
+		rows := collectBubbleRows(s, nil)
+		out.Bubbles = make([]status.BubbleJSON, 0, len(rows))
+		for _, r := range rows {
+			syncStatus := "not cloned"
+			if r.Cloned {
+				syncStatus, _ = status.FormatGitRepoStatus(r.Git)
+			}
+			out.Bubbles = append(out.Bubbles, status.BubbleJSON{
+				KBID:       r.Bubble.KBID,
+				Type:       jsonTypeForBubble(r.Bubble.Type),
+				Slug:       r.Bubble.Slug,
+				Name:       r.Bubble.Name,
+				ScopeType:  r.Bubble.ScopeType,
+				Path:       r.Path,
+				Cloned:     r.Cloned,
+				SyncStatus: syncStatus,
+			})
 		}
 	}
 	if len(s.Warnings) > 0 {

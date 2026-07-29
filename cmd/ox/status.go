@@ -871,10 +871,11 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString("\n")
 	}
 
-	// Knowledge bubbles — count-only summary of real KB-API rows. Team
-	// contexts are conversation stores, not bubbles (ox ADR-028), and render
-	// in their own section below.
-	b.WriteString(renderBubblesLine(bubblesSummary))
+	// Knowledge bubbles — summary line plus one card per KB-API row with
+	// its mount path and sync status. Team contexts are conversation
+	// stores, not bubbles (ox ADR-028), and render in their own section
+	// below.
+	b.WriteString(renderBubblesSection(bubblesSummary, daemonStatus))
 
 	// Other team contexts — restored under ox ADR-028 (epic ox-gmkd) after
 	// the bubble-listing detour. Cards reuse renderCloudTC/renderDetailTC
