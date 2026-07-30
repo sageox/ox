@@ -31,7 +31,6 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/kb"
-	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/status"
 )
 
@@ -57,6 +56,12 @@ type statusBubblesSummary struct {
 	// Unavailable reports that the fetch could not run at all. Renderers
 	// show "(unavailable)" and skip the breakdown.
 	Unavailable bool
+
+	// Endpoint is the API endpoint the rows were fetched from. Carried on
+	// the summary because the canonical KB store is endpoint-scoped
+	// (paths.KBDir) — resolving a bubble's mount path under any other
+	// endpoint would point the card at a different store's directory.
+	Endpoint string
 }
 
 // statusBubblesTypeOrder is the canonical render order for the by-type
@@ -192,12 +197,16 @@ type statusBubbleRow struct {
 	Git    gitRepoStatus
 }
 
-// statusKBDirForBubble resolves a bubble's canonical checkout directory.
+// statusKBDirForBubble resolves a bubble's canonical checkout directory
+// under the endpoint its row was fetched from. The KB store is
+// endpoint-scoped, so ep is load-bearing, not decorative: passing the
+// endpoint.Get() default instead of the project's would point a
+// test.sageox.ai project's cards at the production store.
+//
 // Seam variable so tests can point rows at a temp dir without endpoint
-// plumbing; production is paths.KBDir.
-var statusKBDirForBubble = func(kbID string) string {
-	return paths.KBDir(kbID)
-}
+// plumbing; production is kbDirSafe, which degrades to "" rather than
+// letting paths.KBDir's empty-endpoint panic abort the whole status run.
+var statusKBDirForBubble = kbDirSafe
 
 // collectBubbleRows derives per-bubble local state from a summary. Sync
 // times layer the same way as the team-context cards: daemon (freshest)
@@ -209,7 +218,7 @@ func collectBubbleRows(s statusBubblesSummary, daemonStatus *daemon.StatusData) 
 	for _, bub := range s.Bubbles {
 		row := statusBubbleRow{Bubble: bub, Path: bub.LocalPath}
 		if row.Path == "" && bub.KBID != "" {
-			row.Path = statusKBDirForBubble(bub.KBID)
+			row.Path = statusKBDirForBubble(s.Endpoint, bub.KBID)
 		}
 		if row.Path != "" {
 			if _, err := os.Stat(filepath.Join(row.Path, ".git")); err == nil {
@@ -401,13 +410,18 @@ func buildBubblesJSON(s statusBubblesSummary) *status.BubblesJSON {
 // collectBubblesSummary fetches bubbles with a short timeout and returns a
 // summary. Fetch problems never propagate upward — `ox status` must keep
 // rendering the rest of the report.
-func collectBubblesSummary(fetch statusBubblesFetch) statusBubblesSummary {
+//
+// ep is the endpoint the fetch targeted; it rides along on the summary so
+// mount-path resolution uses the same endpoint that produced the rows.
+func collectBubblesSummary(fetch statusBubblesFetch, ep string) statusBubblesSummary {
 	if fetch == nil {
 		return statusBubblesSummary{Unavailable: true}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return summarizeBubbles(fetch(ctx))
+	s := summarizeBubbles(fetch(ctx))
+	s.Endpoint = ep
+	return s
 }
 
 // statusBubblesFetch is the seam between status rendering and the KB fetch,
@@ -417,12 +431,17 @@ type statusBubblesFetch func(ctx context.Context) kb.ListResult
 // statusBubblesFetchForRoot is the production wiring: same client
 // construction as `ox kb list` so the two surfaces cannot disagree.
 // Tests assign a fake.
-var statusBubblesFetchForRoot = func(projectRoot string) statusBubblesFetch {
+//
+// Returns the resolved project endpoint alongside the fetch. One
+// resolution, two consumers (the API client and the KB store path) — a
+// second independent lookup is how the fetched rows and the rendered
+// mount paths would drift onto different endpoints.
+var statusBubblesFetchForRoot = func(projectRoot string) (statusBubblesFetch, string) {
 	source, ep := newDefaultKBListSource(projectRoot)
 	scopes := ambientKBScopes(projectRoot)
 	return func(ctx context.Context) kb.ListResult {
 		return kb.FetchBubbles(ctx, source, ep, scopes)
-	}
+	}, ep
 }
 
 // commonDir returns the longest shared leading directory of a and b.
