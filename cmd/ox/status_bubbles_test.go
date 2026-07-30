@@ -486,10 +486,22 @@ func TestCollectBubbleRows_PathAndSortOrder(t *testing.T) {
 // bubbles resolving to the wrong directory (mounted bubbles reported "not
 // cloned", and vice versa), never as an error.
 func TestCollectBubbleRows_ResolvesPathUnderSummaryEndpoint(t *testing.T) {
-	// not parallel: reads the package-global statusKBDirForBubble seam
-	// other tests in this file swap out.
+	// not parallel: t.Setenv, plus this reads the package-global
+	// statusKBDirForBubble seam other tests in this file swap out.
 	const projectEP = "https://api.test.sageox.ai"
 	const defaultEP = "https://api.sageox.ai"
+
+	// Pin the XDG data root to a temp dir. Keeping the production resolver
+	// is the point of this test, but letting it resolve into the real
+	// ~/.local/share/sageox is not: test.sageox.ai is the staging slug, so a
+	// SageOx developer plausibly has a genuine kb_x checkout there. That
+	// would make Cloned/Git non-deterministic and run git against a real
+	// repo. OX_XDG_DISABLE is cleared so the root is honored either way.
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	// Decoy ambient endpoint — it must never leak into the explicit-ep
+	// path. Same guard internal/paths/paths_kb_test.go uses.
+	t.Setenv("SAGEOX_ENDPOINT", "https://decoy.example.invalid")
 
 	s := summarizeBubbles(kb.ListResult{
 		Bubbles: []kb.Bubble{{KBID: "kb_x", Type: api.KBTypeTeam, Slug: "eng", ScopeType: "team"}},
@@ -503,6 +515,10 @@ func TestCollectBubbleRows_ResolvesPathUnderSummaryEndpoint(t *testing.T) {
 		"mount path must be scoped by the project endpoint's slug")
 	assert.NotEqual(t, paths.KBDir(defaultEP, "kb_x"), rows[0].Path,
 		"resolving under the endpoint.Get() default reintroduces the #734 bug")
+	assert.NotContains(t, rows[0].Path, "decoy.example.invalid",
+		"the ambient SAGEOX_ENDPOINT must not leak into an explicitly-scoped path")
+	// Deterministic now that the data root is empty: nothing is on disk.
+	assert.False(t, rows[0].Cloned, "temp data root must contain no checkout")
 }
 
 // TestCollectBubbleRows_EmptyEndpointDegrades verifies an unresolved
