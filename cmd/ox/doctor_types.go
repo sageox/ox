@@ -172,6 +172,7 @@ const (
 	CheckSlugSessionUncommitted = "session-uncommitted"
 	CheckSlugSessionOrphaned    = "session-orphaned"
 	CheckSlugSessionManifest    = "session-manifest"
+	CheckSlugSessionDehydrated  = "session-dehydrated"
 	// CheckSlugSessionIDDivergence is co-located with its impl in
 	// doctor_session_id_divergence.go to keep the check + its detect-only
 	// rationale self-contained (mirrors CheckSlugSessionIDsBackfilled).

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/sageox/ox/internal/lfs"
 )
 
 // SessionStatus represents the lifecycle state of a session.
@@ -192,15 +194,46 @@ func isPIDAlive(pid int) bool {
 	return proc.Signal(syscall.Signal(0)) == nil
 }
 
-// HasSubstantiveEntries returns true if a raw.jsonl file has at least one entry
-// beyond the metadata header line. A header-only file (1 line) has no real session
-// content and should not be uploaded or finalized.
+// RawKind classifies what a raw.jsonl path actually holds.
 //
-// This is the canonical check — use it everywhere instead of inline line counting.
-func HasSubstantiveEntries(rawPath string) bool {
+// The distinction that matters is RawPointerStub vs RawSubstantive.
+// A content-store pointer is ~130 bytes over 3 lines, so a naive
+// "more than one line means real content" test reports it as a
+// full transcript — which is exactly how GH #710 started: the
+// summarizer was handed a pointer file, produced an empty title,
+// failed validation, and retried forever.
+type RawKind int
+
+const (
+	// RawMissing: the file does not exist or cannot be read.
+	RawMissing RawKind = iota
+	// RawHeaderOnly: exists, but holds only the metadata header line —
+	// a recording that never captured anything.
+	RawHeaderOnly
+	// RawSubstantive: real transcript content, safe to summarize.
+	RawSubstantive
+	// RawPointerStub: an LFS pointer. The transcript is real but lives
+	// in the content store; this file is only a reference to it.
+	// Ledger clones are dehydrated by design, so this is the NORMAL
+	// steady state for a synced session — it is not corruption, and it
+	// must never be treated as content.
+	RawPointerStub
+)
+
+// ClassifyRawFile reports what rawPath holds. Prefer this over
+// HasSubstantiveEntries anywhere the pointer case needs distinct
+// handling — several callers must treat a stub as "has data elsewhere"
+// rather than "has no data", and collapsing the two is destructive.
+func ClassifyRawFile(rawPath string) RawKind {
+	// Pointer detection first: it is a cheap stat + small read, and a
+	// pointer would otherwise be miscounted as multi-line content.
+	if lfs.IsPointerFile(rawPath) {
+		return RawPointerStub
+	}
+
 	f, err := os.Open(rawPath)
 	if err != nil {
-		return false
+		return RawMissing
 	}
 	defer f.Close()
 
@@ -211,10 +244,23 @@ func HasSubstantiveEntries(rawPath string) bool {
 	for scanner.Scan() {
 		lineCount++
 		if lineCount >= 2 {
-			return true // at least one line beyond header
+			return RawSubstantive // at least one line beyond header
 		}
 	}
-	return false
+	return RawHeaderOnly
+}
+
+// HasSubstantiveEntries returns true if a raw.jsonl file holds at least one
+// entry beyond the metadata header line. A header-only file (1 line) has no
+// real session content and should not be uploaded or finalized.
+//
+// A content-store pointer stub is NOT substantive: the bytes present are a
+// reference, not a transcript. Callers that need to distinguish "no data"
+// from "data lives in the content store" must use ClassifyRawFile.
+//
+// This is the canonical check — use it everywhere instead of inline line counting.
+func HasSubstantiveEntries(rawPath string) bool {
+	return ClassifyRawFile(rawPath) == RawSubstantive
 }
 
 // CountSubstantiveEntries counts lines in a raw.jsonl that are actual session

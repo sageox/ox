@@ -82,9 +82,18 @@ Example:
 			return fmt.Errorf("build meta.json: %w", err)
 		}
 
-		// guard: never upload a session with zero substantive entries
-		if !session.HasSubstantiveEntries(rawPath) {
+		// guard: never upload a session with zero substantive entries.
+		// A pointer stub gets its own message — telling someone their
+		// already-uploaded session "has no substantive entries" is actively
+		// misleading, since the transcript exists and is simply not local.
+		switch session.ClassifyRawFile(rawPath) {
+		case session.RawPointerStub:
+			return fmt.Errorf("session %s is already uploaded — its content lives in the ledger content store, "+
+				"not on disk. Run `ox session download %s` if you need a local copy", sessionName, sessionName)
+		case session.RawMissing, session.RawHeaderOnly:
 			return fmt.Errorf("session %s has no substantive entries (only metadata header) — nothing to upload", sessionName)
+		case session.RawSubstantive:
+			// ok to upload
 		}
 
 		if err := lfs.WriteSessionMeta(sessionPath, meta); err != nil {

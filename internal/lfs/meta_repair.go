@@ -3,6 +3,7 @@ package lfs
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -112,6 +113,21 @@ func RecoverEmptyTitleMeta(sessionDir string, dryRun bool) MetaRepairOutcome {
 // ledger cache so the daemon can read actual content for summarization.
 //
 // Returns true if the session was reset, false if not eligible.
+//
+// # The reset is gated on the session actually being summarizable (GH #710)
+//
+// This used to clear the status/attempts/error FIRST and hydrate second,
+// resetting even when hydration was impossible. Because a doctor autofix
+// runs it daily, that re-armed the MaxSummaryAttempts cap every 24 hours
+// — so a session whose raw.jsonl is an unhydratable content-store stub
+// never settled into a terminal state. It burned three LLM calls a day,
+// forever, each one emitting a fresh "finalize session" commit. That is
+// how the #710 reporter accumulated 21 duplicate commits across 5
+// sessions and, downstream, an unpushable ledger.
+//
+// Now: verify the transcript can actually be read before clearing the
+// terminal state, and never write a .needs-summary marker pointing at a
+// file that is still a pointer.
 func ResetInlineSummaryEligible(sessionDir string, dryRun bool, client *Client, ledgerPath string) (reset bool) {
 	meta, err := ReadSessionMeta(sessionDir)
 	if err != nil {
@@ -122,6 +138,32 @@ func ResetInlineSummaryEligible(sessionDir string, dryRun bool, client *Client, 
 		strings.Contains(meta.ValidationError, "title too short")
 	if !eligible {
 		return false
+	}
+
+	// Resolve a readable transcript BEFORE touching the meta. A session we
+	// cannot read is a session we cannot summarize, and clearing its
+	// terminal state would just re-enter the loop on the next daemon pass.
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	markerDir := sessionDir
+	if IsPointerFile(rawPath) {
+		sessionName := filepath.Base(sessionDir)
+		cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
+		cachePath := filepath.Join(cacheDir, "raw.jsonl")
+
+		if info, statErr := os.Stat(cachePath); statErr == nil && info.Size() > 0 {
+			// already hydrated by an earlier pass
+			rawPath, markerDir = cachePath, cacheDir
+		} else {
+			hydrated, hydrateErr := HydrateRawToCacheErr(client, sessionDir, ledgerPath)
+			if hydrateErr != nil || hydrated == "" {
+				// Leave the terminal status intact. Retryable failures get
+				// another shot on the next pass because the meta still
+				// matches the eligibility filter; ErrNoLFSManifest never
+				// will, which is correct — that content is gone.
+				return false
+			}
+			rawPath, markerDir = hydrated, cacheDir
+		}
 	}
 
 	if dryRun {
@@ -135,20 +177,7 @@ func ResetInlineSummaryEligible(sessionDir string, dryRun bool, client *Client, 
 		return false
 	}
 
-	// if raw.jsonl is an LFS pointer, hydrate to cache so daemon can read it
-	rawPath := filepath.Join(sessionDir, "raw.jsonl")
-	if client != nil && IsPointerFile(rawPath) {
-		sessionName := filepath.Base(sessionDir)
-		cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
-		cachePath := HydrateRawToCache(client, sessionDir, ledgerPath)
-		if cachePath != "" {
-			rawPath = cachePath
-			writeNeedsSummaryMarker(cacheDir, rawPath, sessionDir)
-			return true
-		}
-	}
-
-	writeNeedsSummaryMarker(sessionDir, rawPath, sessionDir)
+	writeNeedsSummaryMarker(markerDir, rawPath, sessionDir)
 	return true
 }
 
@@ -173,61 +202,98 @@ func writeNeedsSummaryMarker(dir, rawPath, ledgerSessionDir string) {
 //
 // Returns the cache path on success, empty string on failure.
 func HydrateRawToCache(client *Client, sessionDir, ledgerPath string) string {
-	meta, err := ReadSessionMeta(sessionDir)
-	if err != nil {
-		return ""
-	}
+	path, _ := HydrateRawToCacheErr(client, sessionDir, ledgerPath)
+	return path
+}
 
-	rawRef, ok := meta.Files["raw.jsonl"]
-	if !ok || rawRef.OID == "" {
-		return ""
-	}
+// ErrNoLFSManifest reports that a session's meta.json carries no usable
+// content-store reference for raw.jsonl — no "raw.jsonl" entry, or one
+// with an empty OID.
+//
+// This is the ONE hydration failure that is permanent. It means the
+// transcript was never uploaded, so no amount of retrying will produce
+// it, and callers should mark the session terminal rather than loop.
+//
+// Every OTHER failure — auth, transport, 4xx/5xx, disk — is retryable and
+// must NOT be treated as terminal. Getting this distinction backwards is
+// costly in both directions: condemning on a transient 503 throws away a
+// recoverable session, while retrying on ErrNoLFSManifest recreates the
+// unbounded loop GH #710 was filed about.
+var ErrNoLFSManifest = errors.New("session meta.json has no content-store reference for raw.jsonl")
 
+// HydrateRawToCacheErr is HydrateRawToCache with a diagnosable failure.
+//
+// The string-only version returns "" on nine distinct failure paths, all
+// indistinguishable, which is why the daemon could neither report why a
+// session would not hydrate nor decide whether retrying was worthwhile.
+// New callers should use this; HydrateRawToCache remains as a thin
+// wrapper so existing ones keep compiling.
+func HydrateRawToCacheErr(client *Client, sessionDir, ledgerPath string) (string, error) {
 	sessionName := filepath.Base(sessionDir)
 	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
 	cachePath := filepath.Join(cacheDir, "raw.jsonl")
 
-	// skip if already cached
+	// Already cached — checked FIRST, before touching meta.json or
+	// requiring a client. An earlier pass may have hydrated this, and
+	// demanding credentials to hand back a file already on disk would
+	// fail offline for no reason.
 	if info, err := os.Stat(cachePath); err == nil && info.Size() > 0 {
-		return cachePath
+		return cachePath, nil
+	}
+
+	meta, err := ReadSessionMeta(sessionDir)
+	if err != nil {
+		return "", fmt.Errorf("read meta.json: %w", err)
+	}
+
+	rawRef, ok := meta.Files["raw.jsonl"]
+	if !ok || rawRef.OID == "" {
+		return "", ErrNoLFSManifest
+	}
+
+	if client == nil {
+		return "", errors.New("no content-store client (not authenticated, or ledger has no remote)")
 	}
 
 	bareOID := rawRef.BareOID()
 	resp, err := client.BatchDownload([]BatchObject{{OID: bareOID, Size: rawRef.Size}})
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("LFS batch download: %w", err)
 	}
 	if len(resp.Objects) == 0 {
-		return ""
+		return "", fmt.Errorf("LFS batch returned no objects for %s", bareOID)
 	}
 	obj := resp.Objects[0]
-	if obj.Error != nil || obj.Actions == nil || obj.Actions.Download == nil {
-		return ""
+	if obj.Error != nil {
+		return "", fmt.Errorf("LFS object error for %s: %s", bareOID, obj.Error.Message)
+	}
+	if obj.Actions == nil || obj.Actions.Download == nil {
+		return "", fmt.Errorf("LFS batch returned no download action for %s", bareOID)
 	}
 
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-		return ""
+		return "", fmt.Errorf("create cache dir: %w", err)
 	}
 
 	tmpPath := cachePath + ".tmp"
 	f, err := os.Create(tmpPath)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("create temp file: %w", err)
 	}
 
 	if err := DownloadToFile(obj.Actions.Download, f, true, bareOID); err != nil {
 		f.Close()
 		os.Remove(tmpPath)
-		return ""
+		return "", fmt.Errorf("download %s: %w", bareOID, err)
 	}
 	f.Close()
 
 	if err := os.Rename(tmpPath, cachePath); err != nil {
 		os.Remove(tmpPath)
-		return ""
+		return "", fmt.Errorf("install cached copy: %w", err)
 	}
 
-	return cachePath
+	return cachePath, nil
 }
 
 // readSummaryJSONTitle returns a trimmed, non-leaky title from

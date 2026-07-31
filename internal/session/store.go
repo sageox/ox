@@ -472,10 +472,20 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var hasRawData bool
 
 		if info, err := os.Stat(rawPath); err == nil {
-			// raw.jsonl exists (hydrated or recording in progress)
+			// raw.jsonl exists (hydrated, pointer stub, or recording in progress)
 			filePath = rawPath
 			fileSize = info.Size()
-			hasRawData = HasSubstantiveEntries(rawPath)
+			// A pointer stub HAS raw data — it just lives in the content
+			// store. Reporting false would make `ox session list` claim every
+			// synced session is empty, since dehydrated is the normal state
+			// for a ledger clone. HasSubstantiveEntries excludes pointers as
+			// of GH #710, so classify explicitly here.
+			switch ClassifyRawFile(rawPath) {
+			case RawSubstantive, RawPointerStub:
+				hasRawData = true
+			case RawMissing, RawHeaderOnly:
+				hasRawData = false
+			}
 			modTime = info.ModTime()
 			if createdAt.IsZero() {
 				createdAt = info.ModTime()

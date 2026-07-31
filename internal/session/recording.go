@@ -665,15 +665,27 @@ func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
 			continue
 		}
 
-		// parent is dead — check if there's any real data beyond the header line.
-		// Use HasSubstantiveEntries (2+ lines) rather than RawJSONLHasData (size > 0)
-		// because writeRawHeader always writes a 1-line metadata header at session start.
-		// A header-only file has no recoverable session content and should be cleaned up.
+		// parent is dead — check if there's any recoverable data. Classify
+		// rather than calling HasSubstantiveEntries, because "no substantive
+		// entries" and "nothing to recover" are NOT the same thing here.
+		//
+		// Only a header-only or missing raw.jsonl is a ghost. A pointer stub
+		// is a session whose transcript lives in the content store, so it has
+		// very much got recoverable data — deleting it (and, via
+		// removeEmptyDir below, its whole session directory) would destroy a
+		// synced session. HasSubstantiveEntries reports false for pointers as
+		// of GH #710, so this must not be collapsed back into that call.
 		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
-		if HasSubstantiveEntries(rawPath) {
+		switch ClassifyRawFile(rawPath) {
+		case RawSubstantive:
 			// has session entries — this is an orphan, not a ghost.
 			// don't delete: it has recoverable data.
 			continue
+		case RawPointerStub:
+			// content lives in the content store; never a ghost.
+			continue
+		case RawMissing, RawHeaderOnly:
+			// fall through to ghost cleanup
 		}
 
 		// ghost confirmed: dead PID, no meaningful data
