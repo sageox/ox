@@ -1,6 +1,7 @@
 package agentwork
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -471,26 +472,30 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 				continue
 			}
 
-			// Truly finalized. If this session is in the ledger cache
-			// but not yet in the git-tracked sessions/ dir, it needs to be pushed.
+			// Truly finalized. Presence in the ledger cache IS the pending marker:
+			// processUploadOnly prunes the cache dir only after a verified commit
+			// and push, so anything still here has not landed.
+			//
+			// This used to also require sessions/<name>/meta.json to be absent,
+			// which made completion depend on a file whose write is not tied to a
+			// successful push. A session whose commit landed but whose push failed
+			// would then look complete and never be retried — the cache prune is
+			// the only signal that actually means "it reached the remote".
 			if isInLedgerCacheDir(sessionDir, ledgerPath) {
-				ledgerMeta := filepath.Join(ledgerPath, "sessions", name, "meta.json")
-				if _, statErr := os.Stat(ledgerMeta); os.IsNotExist(statErr) {
-					h.logger.Info("session needs upload (fully finalized, not pushed)",
-						"session", name,
-					)
-					items = append(items, &WorkItem{
-						Type:     sessionFinalizeType,
-						Priority: sessionFinalizePriority,
-						DedupKey: sessionFinalizeType + ":" + name,
-						Payload: &SessionFinalizePayload{
-							SessionDir: sessionDir,
-							RawPath:    rawPath,
-							LedgerPath: ledgerPath,
-							UploadOnly: true,
-						},
-					})
-				}
+				h.logger.Info("session needs upload (fully finalized, not pushed)",
+					"session", name,
+				)
+				items = append(items, &WorkItem{
+					Type:     sessionFinalizeType,
+					Priority: sessionFinalizePriority,
+					DedupKey: sessionFinalizeType + ":" + name,
+					Payload: &SessionFinalizePayload{
+						SessionDir: sessionDir,
+						RawPath:    rawPath,
+						LedgerPath: ledgerPath,
+						UploadOnly: true,
+					},
+				})
 			}
 			continue
 		}
@@ -1514,12 +1519,18 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 					if err := lfs.MutateSessionMeta(context.Background(), payload.SessionDir,
 						func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 							if current == nil {
-								return nil, nil // no meta.json to update — nothing to do
+								// No meta.json on disk. Detect() cannot mark this
+								// session landed without one, so bailing here (as
+								// this used to) left it re-queued every cycle
+								// forever. Seed one — there is nothing to preserve
+								// when the file is absent, so seeding strips
+								// nothing.
+								current = h.synthesizeMeta(payload.SessionDir, sessionName)
 							}
 							// merge, never replace: UploadSessionFiles omits
 							// summary.json, so assigning the LFS list wholesale
 							// would drop its Storage=git registration — the same
-							// field-stripping class this PR exists to fix.
+							// field-stripping class GH #710 exists to fix.
 							current.Files = h.mergeFileRefs(current.Files, fileRefs, sessionName)
 							return current, nil
 						}); err != nil {
@@ -1528,6 +1539,25 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 				}
 			}
 		}
+	}
+
+	// A session must reach git carrying a meta.json, whatever happened above: it
+	// is the record of what the session WAS, and the LFS branch that writes one
+	// is skipped whenever LFS is disabled or produced no refs.
+	//
+	// Goes through MutateSessionMeta under the same lock as every other writer,
+	// and seeds ONLY when the file is genuinely absent — it never rebuilds an
+	// existing one, which is the field-stripping class GH #710 fixed.
+	if err := lfs.MutateSessionMeta(context.Background(), payload.SessionDir,
+		func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+			if current != nil {
+				return nil, nil // already present; leave every field alone
+			}
+			seeded := h.synthesizeMeta(payload.SessionDir, sessionName)
+			seeded.Files = h.mergeFileRefs(nil, fileRefs, sessionName)
+			return seeded, nil
+		}); err != nil {
+		h.logger.Warn("upload-only: meta.json seed failed", "session", sessionName, "err", err)
 	}
 
 	sessionsDir := filepath.Dir(payload.SessionDir)
@@ -1554,9 +1584,14 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 			h.logger.Debug("upload-only: prune cache", "dir", origCacheDir, "err", err)
 		}
 		h.logger.Info("session uploaded via anti-entropy (upload-only)", "session", sessionName)
+		return nil
 	}
 
-	return nil
+	// Report the failure. Returning nil here made the manager log
+	// "agent work complete status=success" for 897 consecutive failed commits in
+	// a single day, which is why the wedge stayed invisible while the backlog
+	// grew to ~3,000 sessions.
+	return fmt.Errorf("upload-only: session %s not committed or pushed", sessionName)
 }
 
 // gitCommitAndPush stages, commits, and pushes the finalized session.
@@ -1590,11 +1625,38 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		return false
 	}
 
-	// git commit
-	msg := fmt.Sprintf("finalize session %s", sessionName)
-	if err := h.runGit(ledgerPath, "commit", "-m", msg); err != nil {
-		h.logger.Warn("git commit failed", "err", err)
+	// A zero-delta stage is the NORMAL outcome for a session whose files already
+	// match HEAD — stageSessionInLedger copies the cache over an already-committed
+	// sessions/<name>/, so git has nothing to record and `git commit` exits 1.
+	// Treating that as failure made the caller skip the cache prune, which left the
+	// session in .sageox/cache/ for Detect() to re-enqueue five minutes later,
+	// forever. The content is in git either way; that is what the caller needs.
+	//
+	// Ask git what is staged rather than parsing the commit's message: the wording
+	// varies with the rest of the tree ("working tree clean" vs "untracked files
+	// present"), so an unrelated stray file in the ledger would resurrect the loop.
+	staged, err := h.hasStagedChanges(ledgerPath)
+	if err != nil {
+		h.logger.Warn("could not inspect staged changes", "err", err)
 		return false
+	}
+
+	msg := fmt.Sprintf("finalize session %s", sessionName)
+	switch {
+	case !staged:
+		// Fall through to the push: the commit may exist locally from an earlier
+		// cycle and still be unpushed.
+		h.logger.Debug("session already committed, nothing new to stage", "session", sessionName)
+	default:
+		if err := h.runGit(ledgerPath, "commit", "-m", msg); err != nil {
+			// A concurrent committer (a second daemon on the same ledger) can empty
+			// the index between the check above and this commit.
+			if !isNothingToCommit(err) {
+				h.logger.Warn("git commit failed", "err", err)
+				return false
+			}
+			h.logger.Debug("session committed concurrently", "session", sessionName)
+		}
 	}
 
 	// push with retry (best-effort — failures are non-fatal)
@@ -1673,6 +1735,54 @@ func (h *SessionFinalizeHandler) gitCommitPointerRewrite(payload *SessionFinaliz
 	})
 }
 
+// synthesizeMeta builds a minimal meta.json from the raw.jsonl header for a
+// session that has none.
+//
+// Callers must already hold the meta lock and must only use this when meta.json
+// is absent — it deliberately does not read the existing file, so using it as a
+// base for a present one would strip every field it does not set.
+//
+// The upload-only path has no summarizer output to draw on, so the result
+// carries identity and provenance only — never a fabricated title or summary.
+// An absent summary is honest; an invented one would be indistinguishable from a
+// real one downstream.
+func (h *SessionFinalizeHandler) synthesizeMeta(sessionDir, sessionName string) *lfs.SessionMeta {
+	var agentID, agentType, username string
+	var createdAt time.Time
+	if stored, err := session.ReadSessionFromPath(filepath.Join(sessionDir, "raw.jsonl")); err == nil && stored != nil && stored.Meta != nil {
+		agentID = stored.Meta.AgentID
+		agentType = stored.Meta.AgentType
+		username = stored.Meta.Username
+		createdAt = stored.Meta.CreatedAt
+	}
+	// session names are YYYY-MM-DDTHH-MM-<username>-<agentID>
+	parts := strings.Split(sessionName, "-")
+	if agentID == "" && len(parts) >= 2 {
+		agentID = parts[len(parts)-1]
+	}
+	if username == "" && len(parts) >= 3 {
+		username = parts[len(parts)-2]
+	}
+
+	return lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).
+		SessionID(session.ResolveOrMintSessionID("", "")).
+		StopReason(session.StopReasonRecovered).
+		Build()
+}
+
+// hasStagedChanges reports whether the index differs from HEAD. Used to tell a
+// no-op finalize (content already at HEAD) from a real commit failure without
+// depending on git's human-readable output.
+func (h *SessionFinalizeHandler) hasStagedChanges(repoPath string) (bool, error) {
+	cmd := exec.Command("git", "-C", repoPath, "diff", "--cached", "--name-only")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git diff --cached: %w", err)
+	}
+	return len(bytes.TrimSpace(out)) > 0, nil
+}
+
 // runGit executes a git command in the ledger directory.
 func (h *SessionFinalizeHandler) runGit(repoPath string, args ...string) error {
 	fullArgs := append([]string{"-C", repoPath}, args...)
@@ -1687,6 +1797,17 @@ func (h *SessionFinalizeHandler) runGit(repoPath string, args ...string) error {
 }
 
 // --- helpers ---
+
+// isNothingToCommit reports whether a git commit failed because the index held
+// no changes. Only a fallback for the concurrent-committer race — the primary
+// check is hasStagedChanges, which does not depend on git's wording.
+func isNothingToCommit(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "nothing to commit") || strings.Contains(msg, "no changes added to commit")
+}
 
 // copySessionFile copies src to dst, creating dst if it doesn't exist.
 func copySessionFile(src, dst string) error {

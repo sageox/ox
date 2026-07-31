@@ -60,10 +60,21 @@ func TestDetect_FullyFinalizedInCache_NotPushed(t *testing.T) {
 	}
 }
 
-// TestDetect_FullyFinalizedInCache_AlreadyPushed verifies that Detect() skips sessions
-// that are in the cache AND already present in ledger/sessions/ (already uploaded).
-// Failure prevented: re-uploading a session that was already pushed would create duplicates.
-func TestDetect_FullyFinalizedInCache_AlreadyPushed(t *testing.T) {
+// TestDetect_FullyFinalizedInCache_StaleLedgerMetaStillDetected verifies that a
+// session sitting in the cache is detected even when ledger/sessions/<name>/meta.json
+// already exists.
+//
+// This test previously asserted the opposite, on the theory that a ledger
+// meta.json proves the session was pushed and that re-detecting it would create
+// duplicates. Neither holds. meta.json is written before the commit, so it is
+// present on sessions whose push failed — and that combination (cache dir plus
+// ledger meta.json) is exactly the wedged state ~3,000 sessions were stranded in,
+// invisible to anti-entropy precisely because of this rule.
+//
+// Re-detection is safe: processUploadOnly stages by copy, a no-op commit is
+// recognized as such, and the cache prune ends the loop after one pass. The
+// prune is the only signal that means "it reached the remote".
+func TestDetect_FullyFinalizedInCache_StaleLedgerMetaStillDetected(t *testing.T) {
 	handler := NewSessionFinalizeHandler(slog.Default())
 	ledgerPath := t.TempDir()
 
@@ -94,8 +105,15 @@ func TestDetect_FullyFinalizedInCache_AlreadyPushed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Detect failed: %v", err)
 	}
-	if len(items) != 0 {
-		t.Fatalf("expected 0 items (already uploaded), got %d", len(items))
+	if len(items) != 1 {
+		t.Fatalf("expected the cache-resident session to be detected, got %d items", len(items))
+	}
+	payload, ok := items[0].Payload.(*SessionFinalizePayload)
+	if !ok {
+		t.Fatalf("unexpected payload type %T", items[0].Payload)
+	}
+	if !payload.UploadOnly {
+		t.Error("a fully-finalized cache session should be queued as upload-only, not for re-summarization")
 	}
 }
 
@@ -456,12 +474,83 @@ func TestProcessResult_UploadOnly_CachePreservedOnPushFail(t *testing.T) {
 		},
 	}
 
-	if err := handler.ProcessResult(item, &RunResult{}); err != nil {
-		t.Fatalf("ProcessResult returned unexpected error: %v", err)
+	// The failure must be reported, not swallowed. Returning nil here is what let
+	// 897 failed commits in a single day log "agent work complete status=success".
+	if err := handler.ProcessResult(item, &RunResult{}); err == nil {
+		t.Error("ProcessResult returned nil after a failed push — the failure must reach the manager")
 	}
 
 	// CRITICAL: cache must survive push failure
 	if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
 		t.Error("DATALOSS: upload-only cache removed after push failure — session content irrecoverable")
+	}
+}
+
+// TestProcessResult_UploadOnly_AlreadyCommitted_PrunesCache reproduces the wedge
+// that pinned four ox daemons at ~100% CPU on every 5-minute doctor tick.
+//
+// When a session's files are already committed at HEAD, stageSessionInLedger
+// copies the cache over identical content and `git commit` exits 1 with
+// "nothing to commit, working tree clean". Treating that as failure left the
+// cache dir in place, so Detect() re-queued the same session every cycle,
+// forever: 897 failed commits and 43,996 queue-full rejections in one day,
+// against a backlog that grew to ~3,000 sessions.
+func TestProcessResult_UploadOnly_AlreadyCommitted_PrunesCache(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	_, clonePath := setupBareAndCloneLedger(t)
+
+	sessionName := "2026-01-15T14-00-testuser-OxDUP"
+	cacheDir := filepath.Join(clonePath, ".sageox", "cache", "sessions", sessionName)
+	ledgerDir := filepath.Join(clonePath, "sessions", sessionName)
+	for _, dir := range []string{cacheDir, ledgerDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(testRawContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range requiredArtifacts {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("artifact content"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// the session is already committed and pushed — this is the steady state that
+	// made every subsequent finalize a no-op commit
+	runGitCmd(t, clonePath, "add", "sessions/"+sessionName)
+	runGitCmd(t, clonePath, "commit", "--no-verify", "-m", "finalize session "+sessionName)
+	runGitCmd(t, clonePath, "push")
+
+	handler := NewSessionFinalizeHandler(slog.Default())
+	handler.skipLFS = true
+	handler.skipGit = false
+	handler.ledgerMu = &sync.Mutex{}
+
+	item := &WorkItem{
+		ID:   "test-upload-already-committed",
+		Type: sessionFinalizeType,
+		Payload: &SessionFinalizePayload{
+			SessionDir: cacheDir,
+			RawPath:    filepath.Join(cacheDir, "raw.jsonl"),
+			LedgerPath: clonePath,
+			UploadOnly: true,
+		},
+	}
+
+	if err := handler.ProcessResult(item, &RunResult{}); err != nil {
+		t.Fatalf("ProcessResult failed on an already-committed session: %v", err)
+	}
+
+	// the cache prune is what breaks the loop: Detect() keys on isInLedgerCacheDir,
+	// so a surviving cache dir means the same session is re-queued in 5 minutes
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Error("cache dir survived an already-committed session — Detect() will re-queue it forever")
 	}
 }

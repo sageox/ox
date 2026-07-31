@@ -84,6 +84,7 @@ type WorkQueue struct {
 	items      itemHeap
 	queued     map[string]struct{} // dedup keys currently in the queue
 	inProgress map[string]struct{} // dedup keys currently being processed
+	rejected   int                 // capacity rejections since the last TakeRejected
 	logger     *slog.Logger
 }
 
@@ -109,7 +110,12 @@ func (q *WorkQueue) Enqueue(item *WorkItem) bool {
 	defer q.mu.Unlock()
 
 	if q.items.Len() >= maxQueueDepth {
-		q.logger.Warn("enqueue skipped: queue full", "depth", q.items.Len(), "max", maxQueueDepth, "dedup_key", item.DedupKey)
+		// Rejection is expected whenever the backlog exceeds the cap — the item is
+		// re-detected next cycle. Counting here and letting the caller emit one
+		// summary line keeps a large backlog from writing a log line per item per
+		// cycle (43,996 WARNs in one day on a 5,400-session backlog).
+		q.rejected++
+		q.logger.Debug("enqueue skipped: queue full", "depth", q.items.Len(), "max", maxQueueDepth, "dedup_key", item.DedupKey)
 		return false
 	}
 
@@ -137,6 +143,17 @@ func (q *WorkQueue) Enqueue(item *WorkItem) bool {
 	}
 	q.logger.Debug("enqueued work item", "id", item.ID, "type", item.Type, "priority", item.Priority, "dedup_key", item.DedupKey)
 	return true
+}
+
+// TakeRejected returns the number of items rejected for capacity since the last
+// call and resets the counter. Callers report it once per detection cycle rather
+// than logging each rejection.
+func (q *WorkQueue) TakeRejected() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	n := q.rejected
+	q.rejected = 0
+	return n
 }
 
 // Dequeue removes and returns the highest-priority item, or nil if the queue
