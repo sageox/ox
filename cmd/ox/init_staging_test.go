@@ -136,16 +136,23 @@ func TestGitAdd_UsesGitRootNotProcessCwd(t *testing.T) {
 }
 
 // TestStageAll_StagesNonClaudeInstructionFiles covers the second half of
-// root cause B: init can write markers into GEMINI.md, .cursorrules and
-// friends, but stageAll only ever knew about AGENTS.md and CLAUDE.md.
+// root cause B: init writes ox:prime markers into GEMINI.md, .cursorrules
+// and friends, but stageAll only ever knew about AGENTS.md and CLAUDE.md,
+// so those users' modified files were never committed.
+//
+// runInit registers each file it actually wrote via trackForceStage (see
+// the EnsureInstructionFileMarkers loop) — staging by *detection* was
+// rejected because presence doesn't imply ox touched it.
 func TestStageAll_StagesNonClaudeInstructionFiles(t *testing.T) {
 	repo := testGitRepo(t)
-	// .gemini/ presence is what makes GEMINI.md a detected target.
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".gemini"), 0o755))
-	writeFileAt(t, repo, "GEMINI.md", "# instructions\n")
-	writeFileAt(t, repo, "AGENTS.md", "# instructions\n")
+	gemini := writeFileAt(t, repo, "GEMINI.md", "# instructions\n")
+	agents := writeFileAt(t, repo, "AGENTS.md", "# instructions\n")
 
 	tracker := newInitTracker(repo)
+	// what the marker-injection loop does for each file it wrote
+	tracker.trackForceStage(gemini)
+	tracker.trackForceStage(agents)
 	tracker.stageAll()
 
 	staged := stagedFiles(t, repo)
@@ -298,4 +305,67 @@ func TestStageAll_RepoRootEntryDoesNotStageEverything(t *testing.T) {
 	assert.Contains(t, staged, ".claude/settings.json")
 	assert.NotContains(t, staged, "src/work_in_progress.go",
 		"a rogue adapter entry must never sweep the user's unrelated work into the commit")
+}
+
+// TestStageAll_DoesNotStageUntouchedInstructionFiles — a file merely
+// EXISTING says nothing about whether ox changed it. Staging every
+// detected instruction file would sweep a user's own uncommitted edits to
+// GEMINI.md / .cursorrules into the init commit.
+func TestStageAll_DoesNotStageUntouchedInstructionFiles(t *testing.T) {
+	repo := testGitRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".gemini"), 0o755))
+	writeFileAt(t, repo, "GEMINI.md", "# the user's own in-progress edit\n")
+	touched := writeFileAt(t, repo, "AGENTS.md", "# ox wrote a marker here\n")
+
+	tracker := newInitTracker(repo)
+	// only the file ox actually wrote to is registered for staging
+	tracker.trackForceStage(touched)
+	tracker.stageAll()
+
+	staged := stagedFiles(t, repo)
+	assert.Contains(t, staged, "AGENTS.md", "the file ox wrote must be staged")
+	assert.NotContains(t, staged, "GEMINI.md",
+		"a detected-but-untouched instruction file must not be staged — those are the user's edits")
+}
+
+// TestRollback_UnstagesEverythingItStaged — rollback restores file CONTENT,
+// but stageAll runs before API registration, so without unstaging the
+// user's next `git commit` silently includes changes they were just told
+// were rolled back. The root .gitignore cleanup is the sharp case: a
+// pre-existing tracked file that ox modified.
+func TestRollback_UnstagesEverythingItStaged(t *testing.T) {
+	repo := testGitRepo(t)
+
+	// a tracked file with committed content
+	gitignore := filepath.Join(repo, ".gitignore")
+	require.NoError(t, os.WriteFile(gitignore, []byte("node_modules/\n.sageox/kb/\n"), 0o644))
+	for _, args := range [][]string{{"add", ".gitignore"}, {"commit", "-m", "baseline"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		require.NoError(t, cmd.Run(), "git %v", args)
+	}
+
+	tracker := newInitTracker(repo)
+	// ox modifies it (the #732 cleanup), snapshotting first
+	tracker.trackModifiedFile(gitignore)
+	require.NoError(t, os.WriteFile(gitignore, []byte("node_modules/\n"), 0o644))
+	tracker.trackForceStage(gitignore)
+
+	// ...and creates a new file
+	created := writeFileAt(t, repo, ".claude/settings.json", "{}")
+	tracker.trackCreatedFile(created)
+	tracker.trackForceStage(created)
+
+	tracker.stageAll()
+	require.NotEmpty(t, stagedFiles(t, repo), "precondition: something is staged")
+
+	tracker.rollback(true)
+
+	assert.Empty(t, stagedFiles(t, repo),
+		"rollback must leave a clean index — restoring content while leaving the edit "+
+			"staged means the next commit silently ships it")
+
+	body, err := os.ReadFile(gitignore)
+	require.NoError(t, err)
+	assert.Equal(t, "node_modules/\n.sageox/kb/\n", string(body), "content restored too")
 }

@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -699,6 +701,13 @@ func runInit() error {
 			// were already snapshotted for rollback above
 			if r.Status == injectedNew {
 				tracker.trackCreatedFile(filepath.Join(gitRoot, r.File))
+			}
+			// Stage ONLY the instruction files ox actually wrote to. Staging
+			// every *detected* file would sweep in a user's own uncommitted
+			// edits to e.g. GEMINI.md that ox never touched — the same
+			// over-staging hazard as accepting a repo-root pathspec.
+			if r.Status == injectedNew || r.Status == injectedUpgrade {
+				tracker.trackForceStage(filepath.Join(gitRoot, r.File))
 			}
 		}
 	}
@@ -1708,30 +1717,14 @@ func (t *initTracker) stageAll() {
 		cli.PrintWarning(fmt.Sprintf("Could not stage .sageox files: %v", err))
 	}
 
-	// Stage every instruction file ox may have written a marker into —
-	// not just AGENTS.md/CLAUDE.md. EnsureInstructionFileMarkers also
-	// touches GEMINI.md, .cursorrules, .windsurfrules,
-	// .github/copilot-instructions.md, .kiro/steering/ox.md and .clinerules
-	// (see InstructionFileRegistry), and until GH #731 a Gemini or Cursor
-	// user's ox-modified file was never staged at all.
-	var agentFiles []string
-	seen := make(map[string]bool)
-	for _, target := range DetectedInstructionFiles(t.gitRoot) {
-		abs := filepath.Join(t.gitRoot, target.Path)
-		if seen[abs] {
-			continue
-		}
-		if _, err := os.Lstat(abs); err != nil {
-			continue
-		}
-		seen[abs] = true
-		agentFiles = append(agentFiles, abs)
-	}
-	if len(agentFiles) > 0 {
-		if err := gitAddFiles(t.gitRoot, agentFiles); err != nil {
-			cli.PrintWarning(fmt.Sprintf("Could not stage agent instruction files: %v", err))
-		}
-	}
+	// Instruction files (AGENTS.md, CLAUDE.md, GEMINI.md, .cursorrules,
+	// .windsurfrules, .github/copilot-instructions.md, .kiro/steering/ox.md,
+	// .clinerules) are staged from t.forceStage, registered at the injection
+	// site for exactly the files ox wrote a marker into.
+	//
+	// Deliberately NOT staged by detection: a file merely being *present*
+	// says nothing about whether ox changed it, and staging it would sweep
+	// a user's own uncommitted edits into the init commit.
 
 	// stage .gitattributes if it exists
 	gitattrsPath := filepath.Join(t.gitRoot, ".gitattributes")
@@ -1806,6 +1799,56 @@ func (t *initTracker) rollback(quiet bool) {
 			}
 		} else if !quiet {
 			cli.PrintWarning(fmt.Sprintf("Directory %s/ not empty, skipping removal", filepath.Base(dir)))
+		}
+	}
+
+	t.unstageAll(quiet)
+}
+
+// unstageAll removes everything stageAll put in the index.
+//
+// Restoring a file's CONTENT is not enough: stageAll runs before API
+// registration, so on a registration failure the index still holds the
+// staged versions. For a pre-existing file that ox modified — the root
+// .gitignore cleanup being the sharp case — rollback would rewrite the
+// file on disk while leaving ox's edit staged, so the user's very next
+// `git commit` silently includes a change they were just told was rolled
+// back.
+//
+// Reset each path back to HEAD's version. Paths absent from HEAD (files
+// ox created, now deleted) are dropped from the index instead, since
+// `git reset HEAD -- <path>` on an unknown path is an error rather than
+// a no-op on some git versions.
+func (t *initTracker) unstageAll(quiet bool) {
+	if !isGitRepo(t.gitRoot) {
+		return
+	}
+
+	var paths []string
+	seen := make(map[string]bool)
+	for _, p := range slices.Concat(t.createdFiles, t.forceStage, slices.Collect(maps.Keys(t.modifiedFiles))) {
+		rel, err := filepath.Rel(t.gitRoot, p)
+		if err != nil || seen[rel] {
+			continue
+		}
+		seen[rel] = true
+		paths = append(paths, rel)
+	}
+	if len(paths) == 0 {
+		return
+	}
+
+	for _, rel := range paths {
+		cmd := exec.Command("git", "reset", "-q", "HEAD", "--", rel)
+		cmd.Dir = t.gitRoot
+		if err := cmd.Run(); err == nil {
+			continue
+		}
+		// not in HEAD (a file ox created): drop it from the index entirely.
+		rm := exec.Command("git", "rm", "-q", "--cached", "--ignore-unmatch", "--", rel)
+		rm.Dir = t.gitRoot
+		if err := rm.Run(); err != nil && !quiet {
+			cli.PrintWarning(fmt.Sprintf("Could not unstage %s: %v", rel, err))
 		}
 	}
 }
