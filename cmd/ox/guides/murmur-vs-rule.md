@@ -37,7 +37,7 @@ Murmurs are great for "don't pick up this code right now" or "I'm changing a con
 
 ## Team rules
 
-A team rule is a markdown file in `<team-context>/agents/rules/<topic>.md` that loads (or is cataloged) into every teammate's AI coworker session via `ox agent prime`. It persists indefinitely and applies to every supported coding agent (Claude Code, Codex, Gemini, Droid, OpenCode, Amp, etc.) that any teammate uses.
+A team rule is a markdown file in `<team-context>/agents/rules/<topic>.md` that loads (or is cataloged) into every teammate's AI coworker session via `ox agent prime`. It persists indefinitely and applies to every supported AI coworker (Claude Code, Codex, Gemini, Droid, OpenCode, Amp, etc.) that any teammate uses.
 
 ```bash
 # clone or update your team-context repo

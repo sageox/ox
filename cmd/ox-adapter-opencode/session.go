@@ -57,7 +57,7 @@ func openDB() (*sql.DB, error) {
 		return nil, fmt.Errorf("opencode.db not found at %s", dbPath)
 	}
 	// open read-only with WAL mode for safe concurrent access
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_pragma=journal_mode(WAL)&_pragma=busy_timeout(3000)")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=journal_mode(WAL)&_pragma=busy_timeout(3000)")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open opencode.db: %w", err)
 	}

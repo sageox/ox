@@ -6,7 +6,7 @@ audience: both
 
 # Getting Started
 
-SageOx makes your team's architectural decisions, conventions, and prior session history automatically available to every AI coworker on the team — Claude Code, Codex, Gemini, Droid, OpenCode, Amp, Pi, Aider, Goose, and any other supported coding agent. Every coding session starts with the full picture, not from zero.
+SageOx makes your team's architectural decisions, conventions, and prior session history automatically available to every AI coworker on the team — Claude Code, Codex, Gemini, Droid, OpenCode, Amp, Pi, Aider, Goose, and any other supported AI coworker. Every coding session starts with the full picture, not from zero.
 
 ## Setup (one-time)
 

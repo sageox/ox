@@ -35,6 +35,7 @@ func main() {
 		FindSession:    handleFindSession,
 		Read:           handleRead,
 		ReadMetadata:   handleReadMetadata,
+		ReadFromOffset: handleReadFromOffset,
 		InstallHooks:   handleInstallHooks,
 		CheckHooks:     handleCheckHooks,
 		UninstallHooks: handleUninstallHooks,

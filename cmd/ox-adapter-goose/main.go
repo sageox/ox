@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -117,7 +118,10 @@ func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotoco
 		return nil, fmt.Errorf("reading session: %w", err)
 	}
 
-	meta, _ := readMetadata(db, p.SessionID)
+	meta, metaErr := readMetadata(db, p.SessionID)
+	if metaErr != nil {
+		slog.Warn("reading goose session metadata", "session_id", p.SessionID, "err", metaErr)
+	}
 
 	return &adapterprotocol.ImportSessionResult{
 		Metadata: meta,

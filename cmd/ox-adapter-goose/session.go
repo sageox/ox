@@ -91,7 +91,7 @@ func openDB() (*sql.DB, error) {
 	}
 	// Read-only with WAL so an in-flight Goose session is never blocked or
 	// corrupted by our reads.
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_pragma=journal_mode(WAL)&_pragma=busy_timeout(3000)")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=journal_mode(WAL)&_pragma=busy_timeout(3000)")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open goose sessions.db: %w", err)
 	}
@@ -329,7 +329,13 @@ func readMessages(db *sql.DB, sessionID string, afterID int64) ([]adapterprotoco
 			return nil, afterID, fmt.Errorf("scan message row for session %s: %w", sessionID, err)
 		}
 
-		ts := time.Unix(createdTS, 0).UTC()
+		// Goose migrated from Unix seconds to milliseconds; detect by magnitude.
+		var ts time.Time
+		if createdTS > 10_000_000_000 {
+			ts = time.UnixMilli(createdTS).UTC()
+		} else {
+			ts = time.Unix(createdTS, 0).UTC()
+		}
 		entries = append(entries, parseContentBlocks(role, contentJSON, ts)...)
 		lastID = rowID
 	}

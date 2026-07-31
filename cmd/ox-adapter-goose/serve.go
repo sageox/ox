@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
@@ -19,7 +20,7 @@ func handleServe(srv *adapterruntime.Server) {
 	srv.OnFindSession(func(ctx context.Context, p adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error) {
 		result, err := handleFindSession(p)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("find Goose session: %w", err)
 		}
 
 		store.Set(p.AgentID, gooseSessionState{
@@ -40,7 +41,7 @@ func handleServe(srv *adapterruntime.Server) {
 
 		result, err := handleReadFromOffset(p)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read Goose session from offset: %w", err)
 		}
 
 		store.Set(p.AgentID, gooseSessionState{sessionID: state.sessionID, offset: result.NewOffset})

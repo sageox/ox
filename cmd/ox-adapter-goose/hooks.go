@@ -114,30 +114,62 @@ func shellQuote(s string) string {
 
 // --- paths ---
 
-// pluginDir resolves the plugin directory for a scope.
-//
-// The error return is load-bearing: uninstall calls os.RemoveAll on this path.
-// If the scope root were ever empty — an unset RepoRoot, or a failing
-// os.UserHomeDir — filepath.Join would yield the RELATIVE path
-// ".agents/plugins/sageox", and uninstall would delete whatever happens to sit
-// under the adapter's current working directory. Refuse to produce a path we
-// cannot anchor absolutely.
-func pluginDir(repoRoot, scope string) (string, error) {
-	root := repoRoot
+// scopeRoot returns the absolute filesystem root for the given scope.
+// The error return is load-bearing: callers that derive paths from this root
+// (including os.RemoveAll) must not proceed with a relative or empty path.
+func scopeRoot(repoRoot, scope string) (string, error) {
 	if scope == scopeUser {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("cannot resolve home directory for user scope: %w", err)
 		}
-		root = home
+		return home, nil
 	}
-	if root == "" {
+	if repoRoot == "" {
 		return "", fmt.Errorf("empty scope root for scope %q: refusing to resolve a relative plugin path", scope)
 	}
-	if !filepath.IsAbs(root) {
-		return "", fmt.Errorf("scope root %q is not absolute", root)
+	if !filepath.IsAbs(repoRoot) {
+		return "", fmt.Errorf("scope root %q is not absolute", repoRoot)
+	}
+	return repoRoot, nil
+}
+
+// pluginDir resolves the plugin directory for a scope.
+func pluginDir(repoRoot, scope string) (string, error) {
+	root, err := scopeRoot(repoRoot, scope)
+	if err != nil {
+		return "", err
 	}
 	return filepath.Join(root, ".agents", "plugins", pluginName), nil
+}
+
+// verifyNoSymlinks ensures no path component between scopeRoot and path is a
+// symlink. A repo-controlled symlink could redirect hook file writes to
+// locations outside the repository. Components that don't exist yet are
+// skipped — os.MkdirAll will create them freshly without following symlinks.
+func verifyNoSymlinks(scopeRoot, path string) error {
+	rel, err := filepath.Rel(scopeRoot, path)
+	if err != nil {
+		return fmt.Errorf("cannot relativize %q from %q: %w", path, scopeRoot, err)
+	}
+	current := scopeRoot
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		fi, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // path doesn't exist yet — nothing to follow
+			}
+			return fmt.Errorf("lstat %q: %w", current, err)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%q is a symlink — refusing to write hook files to avoid redirecting outside the repository", current)
+		}
+	}
+	return nil
 }
 
 func hooksFilePath(repoRoot, scope string) (string, error) {
@@ -163,6 +195,11 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 		return nil, fmt.Errorf("--repo-root is required for project scope")
 	}
 
+	root, err := scopeRoot(p.RepoRoot, p.Scope)
+	if err != nil {
+		return nil, err
+	}
+
 	hooksPath, err := hooksFilePath(p.RepoRoot, p.Scope)
 	if err != nil {
 		return nil, err
@@ -170,6 +207,22 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 	manifestPath, err := manifestFilePath(p.RepoRoot, p.Scope)
 	if err != nil {
 		return nil, err
+	}
+
+	// Symlink check: a repo-controlled symlink could redirect writes outside
+	// the repository boundary.
+	if err := verifyNoSymlinks(root, manifestPath); err != nil {
+		return nil, fmt.Errorf("install-hooks: %w", err)
+	}
+	if err := verifyNoSymlinks(root, hooksPath); err != nil {
+		return nil, fmt.Errorf("install-hooks: %w", err)
+	}
+
+	// Refuse to overwrite a manifest another tool created. Our uninstall uses
+	// x-ox-managed to decide whether to RemoveAll the plugin directory; if we
+	// stamp a foreign manifest it would later delete their plugin's assets too.
+	if _, statErr := os.Stat(manifestPath); statErr == nil && !manifestIsOurs(manifestPath) {
+		return nil, fmt.Errorf("plugin directory %q already contains a manifest ox did not create; remove it before installing", filepath.Dir(manifestPath))
 	}
 
 	hf := loadHooksFile(hooksPath)

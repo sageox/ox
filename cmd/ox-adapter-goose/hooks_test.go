@@ -393,6 +393,77 @@ func TestUninstallHooks_DoesNotTouchCwd(t *testing.T) {
 	}
 }
 
+// TestInstallHooks_RefusesForeignManifest guards the destructive arm of
+// uninstall: install stamps x-ox-managed=true, which uninstall uses to decide
+// whether to RemoveAll the plugin directory. Overwriting a foreign manifest
+// would cause a later uninstall to delete that tool's assets.
+func TestInstallHooks_RefusesForeignManifest(t *testing.T) {
+	root := t.TempDir()
+
+	manifestPath := filepath.Join(root, ".agents", "plugins", "sageox", "plugin.json")
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	foreign := map[string]any{"name": "sageox", "description": "not ours"}
+	data, _ := json.Marshal(foreign)
+	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
+		t.Fatalf("write foreign manifest: %v", err)
+	}
+
+	_, err := handleInstallHooks(projectParams(root))
+	if err == nil {
+		t.Fatal("install must refuse to overwrite a foreign manifest")
+	}
+
+	// Foreign manifest must be untouched.
+	got, _ := os.ReadFile(manifestPath)
+	if !strings.Contains(string(got), `"not ours"`) {
+		t.Error("install overwrote the foreign manifest")
+	}
+}
+
+// TestInstallHooks_RefusesSymlinkedDir verifies that a symlinked .agents
+// directory causes install to error rather than redirect writes outside the repo.
+func TestInstallHooks_RefusesSymlinkedDir(t *testing.T) {
+	root := t.TempDir()
+	external := t.TempDir()
+
+	agentsDir := filepath.Join(root, ".agents")
+	if err := os.Symlink(external, agentsDir); err != nil {
+		t.Skipf("cannot create symlink (OS limitation): %v", err)
+	}
+
+	_, err := handleInstallHooks(projectParams(root))
+	if err == nil {
+		t.Fatal("install must refuse to write through a symlinked .agents directory")
+	}
+}
+
+// TestInstallHooks_RefusesSymlinkedFile verifies that a symlinked plugin.json
+// causes install to error rather than overwrite the symlink target.
+func TestInstallHooks_RefusesSymlinkedFile(t *testing.T) {
+	root := t.TempDir()
+	external := t.TempDir()
+
+	plugDir := filepath.Join(root, ".agents", "plugins", "sageox")
+	if err := os.MkdirAll(plugDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	target := filepath.Join(external, "plugin.json")
+	if err := os.WriteFile(target, []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(plugDir, "plugin.json")); err != nil {
+		t.Skipf("cannot create symlink (OS limitation): %v", err)
+	}
+
+	_, err := handleInstallHooks(projectParams(root))
+	if err == nil {
+		t.Fatal("install must refuse to write through a symlinked plugin.json")
+	}
+}
+
 // TestInstallHooks_PreservesUnrelatedEvents — a user may add their own rules for
 // events ox does not manage; install must merge, not overwrite.
 func TestInstallHooks_PreservesUnrelatedEvents(t *testing.T) {

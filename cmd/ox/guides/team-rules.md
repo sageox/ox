@@ -13,7 +13,7 @@ Team rules are conventions, policies, and decisions that apply to **every AI cow
 A SageOx team rule applies to:
 
 - **All teammates who run `ox`** in a repo associated with the team. Teammates who don't use `ox` will not see it (same as `.claude/rules/` only reaching Claude users).
-- **All coding agents those teammates use** — Claude Code, Codex, Gemini, Droid, OpenCode, Amp, etc. SageOx is agent-agnostic; the rule loads via `ox agent prime` regardless of which coding tool is connected.
+- **All AI coworkers those teammates use** — Claude Code, Codex, Gemini, Droid, OpenCode, Amp, etc. SageOx works regardless of which AI coworker tool is connected; the rule loads via `ox agent prime`.
 
 ## When to use a team rule vs. a project-local rule
 
