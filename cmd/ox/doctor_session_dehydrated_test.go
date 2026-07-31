@@ -160,10 +160,12 @@ func TestDehydratedWarning_TruncatesLongLists(t *testing.T) {
 	assert.NotContains(t, result.detail, "session-11")
 }
 
-// TestCheckSessionDehydrated_QuietOnHealthyLedger — a ledger full of
-// properly summarized dehydrated sessions is the common case and must
-// produce no output at all.
-func TestCheckSessionDehydrated_QuietOnHealthyLedger(t *testing.T) {
+// TestSessionNeedsHydration_QuietOnHealthyLedger — a ledger full of
+// properly summarized dehydrated sessions is the common case, and none of
+// them may be flagged. Exercises the per-session predicate across a whole
+// ledger rather than checkSessionDehydrated itself, which needs a resolved
+// ledger path and a live content-store client.
+func TestSessionNeedsHydration_QuietOnHealthyLedger(t *testing.T) {
 	ledgerPath := t.TempDir()
 	for i := range 50 {
 		name := fmt.Sprintf("2026-05-01T20-%02d-testuser-OxOK%02d", i, i)
@@ -212,4 +214,38 @@ func TestMarkSessionUnrecoverable_PreservesOtherFields(t *testing.T) {
 	assert.Equal(t, []string{"sageox/ox#710"}, got.LinkedPRs)
 	assert.False(t, lfs.IsLeakySummaryString(got.ValidationError),
 		"the diagnostic must pass the leak validator or WriteSessionMetaOnly rejects it")
+}
+
+// TestDehydratedPermanentLoss_IsNotAPass — a session whose transcript was
+// never uploaded is gone for good. Reporting that as "downloaded 0
+// transcripts, all good" would hide real data loss behind a green check.
+func TestDehydratedPermanentLoss_IsNotAPass(t *testing.T) {
+	lost := []dehydratedSession{
+		{Name: "2026-05-01T20-04-testuser-OxGONE", Permanent: true},
+	}
+
+	result := dehydratedPermanentLoss(lost, 3)
+
+	assert.True(t, result.warning, "permanent loss must surface, not pass silently")
+	assert.False(t, result.passed)
+	assert.Contains(t, result.message, "permanently unavailable")
+	assert.Contains(t, result.detail, "OxGONE", "name the affected sessions")
+	assert.Contains(t, result.detail, "will not be retried",
+		"say it is terminal so this reads as a one-time report, not a recurring nag")
+	assert.Contains(t, result.detail, "Recovered 3", "still credit what did succeed")
+
+	full := result.name + result.message + result.detail
+	for _, banned := range []string{"git-lfs", "git lfs", ".gitattributes"} {
+		assert.NotContains(t, strings.ToLower(full), banned)
+	}
+}
+
+// TestMarkSessionUnrecoverable_ReportsFailure — the caller decides
+// between "settled" and "still broken" based on this error, so swallowing
+// it would let a session be reported as resolved when nothing was written.
+func TestMarkSessionUnrecoverable_ReportsFailure(t *testing.T) {
+	// no meta.json on disk: the mutator returns nil (nothing to write),
+	// which must not be reported as an error either.
+	require.NoError(t, markSessionUnrecoverable(t.TempDir()),
+		"a session with no meta.json is a no-op, not a failure")
 }

@@ -286,7 +286,14 @@ func HydrateRawToCacheErr(client *Client, sessionDir, ledgerPath string) (string
 		os.Remove(tmpPath)
 		return "", fmt.Errorf("download %s: %w", bareOID, err)
 	}
-	f.Close()
+	// Check Close: a write buffered by the OS can fail at flush time (ENOSPC,
+	// EIO). Ignoring it would rename a silently truncated transcript into the
+	// cache, where it reads as legitimate content and produces a wrong summary
+	// — far worse than reporting a retryable failure.
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("flush cached copy: %w", err)
+	}
 
 	if err := os.Rename(tmpPath, cachePath); err != nil {
 		os.Remove(tmpPath)

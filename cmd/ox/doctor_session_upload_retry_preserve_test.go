@@ -198,3 +198,15 @@ func TestWriteRetryUploadMeta_HonorsResolvedSessionID(t *testing.T) {
 	assert.Equal(t, testSessionID, second.SessionID,
 		"session_id must be stable across retries")
 }
+
+// TestWriteRetryUploadMeta_NilMetaIsAnErrorNotAPanic — a corrupt raw.jsonl
+// yields an orphan with no header metadata. Dereferencing it would panic
+// inside a doctor sweep, taking down the whole run over one bad session.
+func TestWriteRetryUploadMeta_NilMetaIsAnErrorNotAPanic(t *testing.T) {
+	orphan := orphanedSession{SessionName: "2026-05-01T20-04-testuser-OxNIL", Meta: nil}
+
+	_, err := writeRetryUploadMeta(t.TempDir(), t.TempDir(), orphan, testSessionID, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no header metadata")
+}

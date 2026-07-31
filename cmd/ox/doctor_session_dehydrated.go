@@ -175,7 +175,7 @@ func hydrateStrandedSessions(stranded []dehydratedSession, ledgerPath string) ch
 	budget := min(len(stranded), dehydratedFixBudget)
 
 	var recovered int
-	var remaining []dehydratedSession
+	var remaining, lost []dehydratedSession
 	for i, s := range stranded {
 		if i >= budget {
 			remaining = append(remaining, s)
@@ -193,23 +193,61 @@ func hydrateStrandedSessions(stranded []dehydratedSession, ledgerPath string) ch
 			// The transcript was never uploaded. Mark it terminal so the
 			// daemon stops retrying and this check stops reporting it —
 			// otherwise it is flagged forever with no possible remedy.
-			markSessionUnrecoverable(s.Dir)
+			if err := markSessionUnrecoverable(s.Dir); err != nil {
+				// couldn't record the terminal state, so it is NOT settled:
+				// report it rather than claiming a clean pass.
+				s.Reason = fmt.Sprintf("%s (and could not mark it unrecoverable: %v)", s.Reason, err)
+				remaining = append(remaining, s)
+				continue
+			}
+			lost = append(lost, s)
 			continue
 		}
 		remaining = append(remaining, s)
 	}
 
-	if len(remaining) == 0 {
-		return PassedCheck(dehydratedCheckName, fmt.Sprintf("downloaded %d session transcript(s)", recovered))
+	if len(remaining) > 0 {
+		return dehydratedWarning(remaining, nil)
 	}
-	return dehydratedWarning(remaining, nil)
+	if len(lost) > 0 {
+		// Permanently gone is NOT a clean pass — the user has sessions whose
+		// transcripts no longer exist anywhere, and silently reporting
+		// success would hide that. They are marked terminal so this is a
+		// one-time report, not a recurring nag.
+		return dehydratedPermanentLoss(lost, recovered)
+	}
+	return PassedCheck(dehydratedCheckName, fmt.Sprintf("downloaded %d session transcript(s)", recovered))
+}
+
+// dehydratedPermanentLoss reports sessions whose transcript was never
+// uploaded and therefore cannot be recovered by anyone.
+func dehydratedPermanentLoss(lost []dehydratedSession, recovered int) checkResult {
+	var sb strings.Builder
+	sb.WriteString("These sessions have no transcript in the content store — it was never uploaded, ")
+	sb.WriteString("so it cannot be recovered. They are now marked unrecoverable and will not be retried.\n")
+	shown := min(len(lost), 5)
+	for _, s := range lost[:shown] {
+		fmt.Fprintf(&sb, "  %s\n", s.Name)
+	}
+	if len(lost) > shown {
+		fmt.Fprintf(&sb, "  ... and %d more\n", len(lost)-shown)
+	}
+	if recovered > 0 {
+		fmt.Fprintf(&sb, "\nRecovered %d other session transcript(s) in this run.", recovered)
+	}
+	return checkResult{
+		name:    dehydratedCheckName,
+		warning: true,
+		message: fmt.Sprintf("%d transcript(s) permanently unavailable", len(lost)),
+		detail:  sb.String(),
+	}
 }
 
 // markSessionUnrecoverable records that a session's transcript is gone.
 // Goes through MutateSessionMeta so it cannot strip the other fields —
 // see GH #710 and `make check-session-meta-rmw`.
-func markSessionUnrecoverable(sessionDir string) {
-	_ = lfs.MutateSessionMeta(context.Background(), sessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+func markSessionUnrecoverable(sessionDir string) error {
+	return lfs.MutateSessionMeta(context.Background(), sessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 		if current == nil {
 			return nil, nil
 		}

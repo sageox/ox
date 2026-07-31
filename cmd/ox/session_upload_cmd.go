@@ -90,7 +90,9 @@ Example:
 		case session.RawPointerStub:
 			return fmt.Errorf("session %s is already uploaded — its content lives in the ledger content store, "+
 				"not on disk. Run `ox session download %s` if you need a local copy", sessionName, sessionName)
-		case session.RawMissing, session.RawHeaderOnly:
+		case session.RawMissing:
+			return fmt.Errorf("session %s has no readable %s — nothing to upload", sessionName, ledgerFileRaw)
+		case session.RawHeaderOnly:
 			return fmt.Errorf("session %s has no substantive entries (only metadata header) — nothing to upload", sessionName)
 		case session.RawSubstantive:
 			// ok to upload

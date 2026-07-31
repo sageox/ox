@@ -33,8 +33,11 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 	// Quiet on the overwhelmingly common healthy case — dehydration is the
 	// normal steady state, so only surface sessions that actually need
 	// their transcript and cannot get it.
+	// Only surface a real finding: a skipped result (no ledger, no sessions
+	// dir) has passed=false too, and including it would put a permanent
+	// "skipped" line in doctor output for every user without a ledger.
 	dehydratedResult := checkSessionDehydrated(opts.shouldFix(CheckSlugSessionDehydrated))
-	if !dehydratedResult.passed || dehydratedResult.warning {
+	if !dehydratedResult.skipped && (!dehydratedResult.passed || dehydratedResult.warning) {
 		results = append(results, dehydratedResult)
 	}
 

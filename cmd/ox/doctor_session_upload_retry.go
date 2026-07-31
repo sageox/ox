@@ -399,6 +399,16 @@ func writeRetryUploadMeta(
 	sessionID string,
 	fileRefs map[string]lfs.FileRef,
 ) (*lfs.SessionMeta, error) {
+	// Meta carries the raw.jsonl header fields this function reads.
+	// findOrphanedSessions never produces a nil one, but the guard belongs
+	// here rather than at the top of retrySessionUpload: an earlier check
+	// would preempt the more specific "raw.jsonl validation failed"
+	// diagnostic for a corrupt session, which is the case that actually
+	// produces a nil Meta.
+	if orphan.Meta == nil {
+		return nil, fmt.Errorf("session %s has no header metadata; cannot rebuild meta.json", orphan.SessionName)
+	}
+
 	var meta *lfs.SessionMeta
 	if err := lfs.MutateSessionMeta(context.Background(), sessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 		next := current

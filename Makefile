@@ -1,5 +1,6 @@
 # Makefile for ox CLI tool
 
+.PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw
 .PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-all test-slow test-integration test-preflight test-digital-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
 
 # Variables
@@ -176,7 +177,15 @@ check-session-meta-rmw: ## Ensure sessions/*/meta.json is only rewritten via lfs
 	@# ALLOWLIST below = the remaining ox-q42i sites, each a first-write or
 	@# an interactive single-writer path. Do not add to it without closing
 	@# that ticket's reasoning; the correct fix is lfs.MutateSessionMeta.
-	@violations=$$(grep -rnE 'lfs\.WriteSessionMeta(Only)?\(' --include='*.go' . 2>/dev/null \
+	@# Fail CLOSED on a scanner error: grep exits 0 (match), 1 (no match —
+	@# the healthy case), or >1 (real error). Swallowing >1 would turn a
+	@# broken scan into a silent pass, which is worse than no guard at all.
+	@raw=$$(grep -rnE 'lfs\.WriteSessionMeta(Only)?\(' --include='*.go' .); rc=$$?; \
+	if [ $$rc -gt 1 ]; then \
+		echo "ERROR: check-session-meta-rmw scan failed (grep exit $$rc) — refusing to report success"; \
+		exit 1; \
+	fi; \
+	violations=$$(printf '%s\n' "$$raw" | grep -v '^$$' \
 		| grep -v '_test\.go:' | grep -v 'vendor/' \
 		| grep -vE ':[0-9]+:[[:space:]]*//' \
 		| grep -vE '^\./(cmd/ox/agent_session\.go|cmd/ox/agent_session_recover\.go|cmd/ox/session_regenerate\.go|cmd/ox/session_upload_cmd\.go|cmd/ox/session_repair_meta_summary\.go|cmd/ox/session_push_summary\.go):'); \
