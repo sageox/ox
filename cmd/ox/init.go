@@ -677,6 +677,15 @@ func runInit() error {
 				if r.status == injectedNew || r.status == symlinkCreated {
 					tracker.trackCreatedFile(p)
 				}
+				// Stage everything this pass actually wrote. The later marker
+				// pass cannot cover these: it sees AGENTS.md / CLAUDE.md as
+				// alreadyPresent (this pass just put the marker there), so
+				// gating staging on the marker results alone left the two
+				// primary instruction files out of the init commit entirely —
+				// the GH #731 symptom, for the files it matters most for.
+				if r.status != alreadyPresent {
+					tracker.trackForceStage(p)
+				}
 			}
 		}
 	}
@@ -1887,9 +1896,17 @@ func (t *initTracker) unstageAll(quiet bool) {
 		// their own edits to this path, resetting to HEAD silently discards
 		// that staged work while leaving the working tree alone.
 		if recorded && entry != "" {
+			// Clear the current entry BEFORE replaying the recorded one.
+			// stageAll's `git add --force` collapses a path to a single
+			// stage-0 entry; feeding back stages 1-3 without first removing
+			// stage 0 leaves BOTH in the index, so a previously-conflicted
+			// path comes back as unmerged (`git status` shows UU) instead of
+			// restored. A zero-mode line is update-index's delete directive.
+			input := fmt.Sprintf("0 %s\t%s\n", strings.Repeat("0", 40), rel) + entry + "\n"
+
 			restore := exec.Command("git", "update-index", "--index-info")
 			restore.Dir = t.gitRoot
-			restore.Stdin = strings.NewReader(entry + "\n")
+			restore.Stdin = strings.NewReader(input)
 			if err := restore.Run(); err == nil {
 				continue
 			}

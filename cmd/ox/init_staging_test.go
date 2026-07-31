@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -421,4 +422,80 @@ func TestRollback_PreservesPreExistingStagedChanges(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "# committed\n# the user's staged work\n", string(body),
 		"working tree restored to the user's content, not HEAD's")
+}
+
+// TestUnstageAll_RestoresConflictStagesWithoutLeavingUnmerged covers the
+// index-restore path for a path that was ALREADY CONFLICTED when init ran.
+//
+// stageAll's `git add --force` collapses such a path to a single stage-0
+// entry. Replaying the recorded stages 1-3 without first clearing stage 0
+// leaves both in the index, so rollback hands the user an unmerged path
+// (`git status` shows UU) rather than the conflict they started with.
+func TestUnstageAll_RestoresConflictStagesWithoutLeavingUnmerged(t *testing.T) {
+	repo := testGitRepo(t)
+	rel := "conflicted.txt"
+	abs := writeFileAt(t, repo, rel, "working copy\n")
+
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+		return string(out)
+	}
+
+	// Build three real blobs and install them as conflict stages 1/2/3.
+	stage := func(n int, content string) string {
+		h := exec.Command("git", "hash-object", "-w", "--stdin")
+		h.Dir = repo
+		h.Stdin = strings.NewReader(content)
+		out, err := h.Output()
+		require.NoError(t, err)
+		sha := strings.TrimSpace(string(out))
+		return fmt.Sprintf("100644 %s %d\t%s", sha, n, rel)
+	}
+	conflict := strings.Join([]string{stage(1, "base\n"), stage(2, "ours\n"), stage(3, "theirs\n")}, "\n")
+
+	install := exec.Command("git", "update-index", "--index-info")
+	install.Dir = repo
+	install.Stdin = strings.NewReader(conflict + "\n")
+	require.NoError(t, install.Run())
+	require.Contains(t, git("status", "--porcelain"), "UU "+rel, "precondition: path must start out conflicted")
+
+	// init records the pre-existing index entry, then stages over it.
+	tracker := newInitTracker(repo)
+	tracker.trackForceStage(abs)
+	tracker.stageAll()
+	require.NotContains(t, git("status", "--porcelain"), "UU "+rel,
+		"precondition: git add --force must have collapsed the conflict to stage 0")
+
+	tracker.unstageAll(true)
+
+	assert.Contains(t, git("status", "--porcelain"), "UU "+rel,
+		"rollback must restore the conflict exactly as it was, not leave a half-merged index")
+	assert.Equal(t, 3, strings.Count(git("ls-files", "--stage", "--", rel), rel),
+		"exactly stages 1-3 should remain — a leftover stage 0 means the index is still unmerged")
+}
+
+// TestStageAll_StagesClaudePrimaryInstructionFiles is the regression test
+// for the files ox writes via injectOxPrime. The later marker pass reports
+// them as alreadyPresent (injectOxPrime just wrote the marker), so gating
+// staging on marker results alone dropped AGENTS.md and CLAUDE.md from the
+// init commit — the GH #731 symptom for the two files it matters most for.
+func TestStageAll_StagesClaudePrimaryInstructionFiles(t *testing.T) {
+	repo := testGitRepo(t)
+	writeFileAt(t, repo, "AGENTS.md", "# instructions\n")
+	writeFileAt(t, repo, "CLAUDE.md", "# instructions\n")
+
+	tracker := newInitTracker(repo)
+	// what runInit records for a non-alreadyPresent injection result
+	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+		tracker.trackForceStage(filepath.Join(repo, name))
+	}
+	tracker.stageAll()
+
+	staged := stagedFiles(t, repo)
+	assert.Contains(t, staged, "AGENTS.md")
+	assert.Contains(t, staged, "CLAUDE.md")
 }
