@@ -266,5 +266,9 @@ func TestDehydratedWarning_ReportsLostAlongsideRetryable(t *testing.T) {
 		"the permanently-lost one must be reported on this same pass — it is marked "+
 			"terminal, so no later run will collect it")
 	assert.Contains(t, result.detail, "cannot be recovered")
-	assert.Contains(t, result.message, "permanently lost", "the headline must say both counts")
+	// Assert BOTH counts with their numbers. Checking only the "permanently
+	// lost" phrase would still pass if the retryable count — or either
+	// number — were dropped from the headline.
+	assert.Contains(t, result.message, "1 not available locally")
+	assert.Contains(t, result.message, "1 permanently lost")
 }
