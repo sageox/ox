@@ -134,7 +134,7 @@ func TestDehydratedWarning_NeverMentionsGitLFS(t *testing.T) {
 		{Name: "2026-05-02T09-11-testuser-OxDH2", Reason: "unauthorized"},
 	}
 
-	result := dehydratedWarning(stranded, fmt.Errorf("boom"))
+	result := dehydratedWarning(stranded, nil, fmt.Errorf("boom"))
 	full := result.name + " " + result.message + " " + result.detail
 
 	for _, banned := range []string{"git-lfs", "git lfs", ".gitattributes", "filter=lfs", "install git"} {
@@ -153,7 +153,7 @@ func TestDehydratedWarning_TruncatesLongLists(t *testing.T) {
 		stranded = append(stranded, dehydratedSession{Name: fmt.Sprintf("session-%02d", i)})
 	}
 
-	result := dehydratedWarning(stranded, nil)
+	result := dehydratedWarning(stranded, nil, nil)
 
 	assert.Contains(t, result.message, "12")
 	assert.Contains(t, result.detail, "and 7 more", "long lists must be truncated, not dumped")
@@ -248,4 +248,23 @@ func TestMarkSessionUnrecoverable_ReportsFailure(t *testing.T) {
 	// which must not be reported as an error either.
 	require.NoError(t, markSessionUnrecoverable(t.TempDir()),
 		"a session with no meta.json is a no-op, not a failure")
+}
+
+// TestDehydratedWarning_ReportsLostAlongsideRetryable — permanently-lost
+// sessions are marked terminal, so the pass that detects them is the ONLY
+// pass that will ever collect them. Reporting just the retryable ones
+// would drop the loss report on the floor for good.
+func TestDehydratedWarning_ReportsLostAlongsideRetryable(t *testing.T) {
+	retryable := []dehydratedSession{{Name: "2026-05-01T20-04-testuser-OxRETRY", Reason: "connection refused"}}
+	lost := []dehydratedSession{{Name: "2026-05-01T20-04-testuser-OxGONE", Permanent: true}}
+
+	result := dehydratedWarning(retryable, lost, nil)
+
+	assert.True(t, result.warning)
+	assert.Contains(t, result.detail, "OxRETRY", "the retryable one is still reported")
+	assert.Contains(t, result.detail, "OxGONE",
+		"the permanently-lost one must be reported on this same pass — it is marked "+
+			"terminal, so no later run will collect it")
+	assert.Contains(t, result.detail, "cannot be recovered")
+	assert.Contains(t, result.message, "permanently lost", "the headline must say both counts")
 }

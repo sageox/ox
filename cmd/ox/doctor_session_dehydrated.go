@@ -115,7 +115,7 @@ func checkSessionDehydrated(fix bool) checkResult {
 	}
 
 	if !fix {
-		return dehydratedWarning(stranded, nil)
+		return dehydratedWarning(stranded, nil, nil)
 	}
 	return hydrateStrandedSessions(stranded, ledgerPath)
 }
@@ -169,7 +169,7 @@ func hydrateStrandedSessions(stranded []dehydratedSession, ledgerPath string) ch
 	projectRoot := findGitRoot()
 	client, err := lfs.NewClientFromLedger(ledgerPath, endpoint.GetForProject(projectRoot))
 	if err != nil {
-		return dehydratedWarning(stranded, fmt.Errorf("cannot reach the content store: %w", err))
+		return dehydratedWarning(stranded, nil, fmt.Errorf("cannot reach the content store: %w", err))
 	}
 
 	budget := min(len(stranded), dehydratedFixBudget)
@@ -206,8 +206,12 @@ func hydrateStrandedSessions(stranded []dehydratedSession, ledgerPath string) ch
 		remaining = append(remaining, s)
 	}
 
+	// Permanent loss must be reported on the SAME pass it is detected.
+	// Marking those sessions terminal means they will never be collected
+	// again, so returning only the retryable warning here would drop the
+	// loss report on the floor permanently.
 	if len(remaining) > 0 {
-		return dehydratedWarning(remaining, nil)
+		return dehydratedWarning(remaining, lost, nil)
 	}
 	if len(lost) > 0 {
 		// Permanently gone is NOT a clean pass — the user has sessions whose
@@ -266,7 +270,7 @@ func markSessionUnrecoverable(sessionDir string) error {
 // and the remedy is an ox command, never a git-lfs one. Sending someone
 // down the git-lfs path is what turned GH #710 from an empty summary into
 // a corrupted shared ledger. Asserted in doctor_session_dehydrated_test.go.
-func dehydratedWarning(stranded []dehydratedSession, clientErr error) checkResult {
+func dehydratedWarning(stranded, lost []dehydratedSession, clientErr error) checkResult {
 	var sb strings.Builder
 	sb.WriteString("Session transcripts live in the ledger content store; clones are content-free by design.\n")
 	if clientErr != nil {
@@ -289,10 +293,27 @@ func dehydratedWarning(stranded []dehydratedSession, clientErr error) checkResul
 	sb.WriteString("\nRun `ox doctor --fix` to download them, ")
 	sb.WriteString("or `ox session download <name>` for one.")
 
+	// Fold in any permanently-lost sessions. They are marked terminal, so
+	// this is the only pass that will ever collect them — reporting the
+	// retryable ones alone would drop the loss report for good.
+	msg := fmt.Sprintf("%d transcript(s) not available locally", len(stranded))
+	if len(lost) > 0 {
+		fmt.Fprintf(&sb, "\n\n%d further transcript(s) were never uploaded and cannot be recovered; "+
+			"they are now marked unrecoverable:\n", len(lost))
+		lostShown := min(len(lost), 5)
+		for _, s := range lost[:lostShown] {
+			fmt.Fprintf(&sb, "  %s\n", s.Name)
+		}
+		if len(lost) > lostShown {
+			fmt.Fprintf(&sb, "  ... and %d more\n", len(lost)-lostShown)
+		}
+		msg = fmt.Sprintf("%d not available locally, %d permanently lost", len(stranded), len(lost))
+	}
+
 	return checkResult{
 		name:    dehydratedCheckName,
 		warning: true,
-		message: fmt.Sprintf("%d transcript(s) not available locally", len(stranded)),
+		message: msg,
 		detail:  sb.String(),
 	}
 }
