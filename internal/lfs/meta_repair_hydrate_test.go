@@ -199,3 +199,54 @@ func TestResetInlineSummaryEligible_IneligibleUntouched(t *testing.T) {
 	assert.False(t, ResetInlineSummaryEligible(sessionDir, false, nil, t.TempDir()),
 		"a healthy session must never be reset")
 }
+
+// TestHydrateRawToCacheErr_FallsBackToOnDiskPointer — the manifest is not
+// the only place the OID lives. A meta.json rebuilt by one of the
+// pre-GH#710 builder paths lost its Files map entirely, but the committed
+// pointer file still carries the OID.
+//
+// ErrNoLFSManifest is the ONE error callers treat as terminal, so a false
+// positive here permanently condemns a session whose transcript is sitting
+// in the content store, perfectly recoverable.
+func TestHydrateRawToCacheErr_FallsBackToOnDiskPointer(t *testing.T) {
+	ledgerPath := t.TempDir()
+	sessionName := "2026-05-01T20-04-testuser-OxPTR"
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+
+	// meta.json with NO Files map — the pre-#710 stripped shape
+	meta := NewSessionMeta(sessionName, "u", "a", "claude-code", time.Now().UTC()).Build()
+	require.NoError(t, WriteSessionMetaOnly(sessionDir, meta))
+
+	// ...but a valid pointer on disk, carrying the OID
+	require.NoError(t, WritePointerFile(filepath.Join(sessionDir, "raw.jsonl"),
+		FileRef{OID: "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", Size: 4242}))
+
+	// nil client, so this gets as far as needing the network and no further —
+	// what matters is that it is NOT the terminal sentinel.
+	_, err := HydrateRawToCacheErr(nil, sessionDir, ledgerPath)
+
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrNoLFSManifest,
+		"the OID is recoverable from the pointer file — condemning this session would lose it")
+}
+
+// TestHydrateRawToCacheErr_TerminalOnlyWhenNeitherSourceHasAnOID keeps the
+// sentinel meaningful: with no manifest entry AND no usable pointer, the
+// content really is unreferenced.
+func TestHydrateRawToCacheErr_TerminalOnlyWhenNeitherSourceHasAnOID(t *testing.T) {
+	ledgerPath := t.TempDir()
+	sessionDir := filepath.Join(ledgerPath, "sessions", "2026-05-01T20-04-testuser-OxNON")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+
+	meta := NewSessionMeta("s", "u", "a", "claude-code", time.Now().UTC()).Build()
+	require.NoError(t, WriteSessionMetaOnly(sessionDir, meta))
+	// raw.jsonl present but real content, not a pointer — nothing to hydrate from
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"),
+		[]byte("header\nnot a pointer\n"), 0o644))
+
+	_, err := HydrateRawToCacheErr(&Client{}, sessionDir, ledgerPath)
+
+	assert.ErrorIs(t, err, ErrNoLFSManifest,
+		"neither the manifest nor the on-disk file yields an OID — genuinely terminal")
+}

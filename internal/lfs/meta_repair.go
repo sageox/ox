@@ -248,7 +248,21 @@ func HydrateRawToCacheErr(client *Client, sessionDir, ledgerPath string) (string
 
 	rawRef, ok := meta.Files["raw.jsonl"]
 	if !ok || rawRef.OID == "" {
-		return "", ErrNoLFSManifest
+		// The manifest is not the only place the OID lives — the on-disk
+		// pointer file carries it too, and the two can disagree (a partial
+		// write, or a meta.json rebuilt by one of the pre-#710 builder
+		// paths that dropped Files). Fall back to the pointer before
+		// declaring the content gone.
+		//
+		// This matters because ErrNoLFSManifest is the ONE error callers
+		// treat as terminal: a false positive here permanently condemns a
+		// session whose transcript is sitting in the content store,
+		// perfectly recoverable.
+		if ref, perr := ReadPointerFile(filepath.Join(sessionDir, "raw.jsonl")); perr == nil && ref.OID != "" {
+			rawRef = ref
+		} else {
+			return "", ErrNoLFSManifest
+		}
 	}
 
 	if client == nil {
