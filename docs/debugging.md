@@ -109,6 +109,7 @@ cat $XDG_RUNTIME_DIR/sageox/daemon/registry.json 2>/dev/null || \
 | Variable | Purpose |
 |----------|---------|
 | `SAGEOX_ENDPOINT` | Override endpoint URL |
+| `SAGEOX_NO_DEVICE_LABEL=1` | Don't send a `user@host` device label with `ox login` |
 | `OX_XDG_DISABLE=1` | Legacy path mode (`~/.sageox/` instead of XDG) |
 | `OX_PROJECT_ROOT` | Override project root discovery (for CI/devroot) |
 | `OX_SESSION_RECORDING` | Override session recording mode (`auto`/`manual`/`disabled`) |

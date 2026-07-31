@@ -13,6 +13,7 @@ Three env vars solve the most common CI challenges:
 | `OX_PROJECT_ROOT` | Point to the project when cwd isn't inside it | `/workspace/my-repo` |
 | `OX_SESSION_RECORDING` | Force session recording mode without config files | `auto`, `manual`, `disabled` |
 | `OX_USER_CONFIG` | Load user config from an explicit file path | `/etc/sageox/config.yaml` |
+| `SAGEOX_NO_DEVICE_LABEL` | Don't attach a `user@host` label to tokens minted by `ox login` | `1` |
 
 ### `OX_PROJECT_ROOT`
 

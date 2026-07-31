@@ -256,14 +256,27 @@ type TokenRequest struct {
 	GrantType  string `json:"grant_type"`
 	DeviceCode string `json:"device_code"`
 	ClientID   string `json:"client_id"`
+
+	// DeviceLabel identifies the machine minting this token (e.g.
+	// "ryan@laptop"), so the account's CLI-sessions list shows which
+	// device a session belongs to instead of a bare timestamp. See
+	// deviceLabel() for the privacy rationale and the opt-out.
+	//
+	// omitempty is LOAD-BEARING: when the user opts out, or nothing
+	// usable resolves, the key is absent and the request body is
+	// byte-identical to what ox sent before this field existed. Older
+	// and current backends ignore unknown fields, so this is purely
+	// additive — the CLI reads nothing new off the response.
+	DeviceLabel string `json:"device_label,omitempty"`
 }
 
 // pollToken attempts to exchange the device code for an access token
 func pollToken(client *http.Client, endpoint, deviceCode string) (*TokenResponse, error) {
 	reqBody := TokenRequest{
-		GrantType:  "urn:ietf:params:oauth:grant-type:device_code",
-		DeviceCode: deviceCode,
-		ClientID:   ClientID,
+		GrantType:   "urn:ietf:params:oauth:grant-type:device_code",
+		DeviceCode:  deviceCode,
+		ClientID:    ClientID,
+		DeviceLabel: deviceLabel(),
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
