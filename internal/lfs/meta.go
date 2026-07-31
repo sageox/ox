@@ -131,19 +131,30 @@ type SessionMeta struct {
 	// read-modify-write call sites that bypass MutateSessionMeta and
 	// call WriteSessionMetaOnly / WriteSessionMeta directly:
 	//
-	//   - cmd/ox/session_push_summary.go     (Files update)
-	//   - cmd/ox/session_regenerate.go       (Files update)
-	//   - cmd/ox/session_upload_cmd.go       (Files update)
-	//   - cmd/ox/agent_session.go            (initial write + Files update)
-	//   - internal/daemon/agentwork/session_finalize.go
+	//   - cmd/ox/session_push_summary.go        (Files update)
+	//   - cmd/ox/session_regenerate.go          (Files update)
+	//   - cmd/ox/session_upload_cmd.go          (Files update)
+	//   - cmd/ox/agent_session.go               (initial write + Files update)
+	//   - cmd/ox/agent_session_recover.go       (Files update)
+	//   - cmd/ox/session_repair_meta_summary.go (summary fields)
 	//
-	// Each of those races with concurrent writers and can lose
+	// FIXED in GH #710 — these two were the worst offenders because they
+	// rebuilt meta from a builder rather than mutating what was on disk,
+	// so they dropped fields outright rather than merely racing:
+	//
+	//   - internal/daemon/agentwork/session_finalize.go
+	//   - cmd/ox/doctor_session_upload_retry.go
+	//
+	// Each remaining site races with concurrent writers and can lose
 	// updates — including new Redactions entries written by
 	// ox session redact between the racing reader's read and write.
 	// The risk is bounded today because redact-history runs are
 	// operator-initiated and the daemon doesn't run during them in
 	// practice, but the invariant is fragile. Tracked separately so
 	// the cleanup lands in a focused PR.
+	//
+	// `make check-session-meta-rmw` fails the build on any NEW bypass; the
+	// list above is its allowlist.
 	//
 	// omitempty so legacy meta.json files keep round-tripping and
 	// older readers ignore the new field.

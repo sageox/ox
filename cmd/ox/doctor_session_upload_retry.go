@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,7 +11,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 )
@@ -338,16 +341,9 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 		return fmt.Errorf("LFS upload: %w", err)
 	}
 
-	// build and write meta.json; use WriteSessionMetaOnly so content files
-	// remain intact until after the push (pointer stubs + no remote = unrecoverable)
-	metaBuilder := sessionMetaBase(orphan.SessionName, orphan.Meta.Username, orphan.Meta.AgentID, orphan.Meta.AgentType, orphan.Meta.CreatedAt, projectRoot, sessionID).
-		Model(orphan.Meta.Model).
-		EntryCount(orphan.EntryCount).
-		StopReason(session.StopReasonRecovered).
-		WithFiles(fileRefs)
-	meta := metaBuilder.Build()
-	if err := lfs.WriteSessionMetaOnly(sessionDir, meta); err != nil {
-		return fmt.Errorf("write meta.json: %w", err)
+	meta, err := writeRetryUploadMeta(sessionDir, projectRoot, orphan, sessionID, fileRefs)
+	if err != nil {
+		return err
 	}
 
 	// ensure .gitignore
@@ -375,6 +371,74 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 	}
 
 	return nil
+}
+
+// writeRetryUploadMeta records a retry-upload's results into meta.json,
+// updating only the fields this path owns and preserving everything else.
+//
+// Uses WriteSessionMetaOnly semantics (via MutateSessionMeta) so content
+// files stay intact until after the push — pointer stubs with no remote
+// would be unrecoverable.
+//
+// # Why read-modify-write and not a fresh builder (GH #710)
+//
+// This used to rebuild meta.json from sessionMetaBase(...).Build(), which
+// never sets summary_status, validation_error or summary_attempts. All
+// three are `omitempty`, so they did not merely go stale — they vanished
+// from the file. `ox doctor: auto-commit ledger changes` then committed
+// the stripped version while origin still carried the fields, and both
+// sides had edited the same lines. That is the exact conflict hunk the
+// #710 reporter pasted, reproducing on the same 6 files on every single
+// rebase until their ledger could no longer push at all.
+//
+// The same applies to redactions (an audit record), produced_commits,
+// produced_plans, linked_prs, linked_issues and linkage_status.
+func writeRetryUploadMeta(
+	sessionDir, projectRoot string,
+	orphan orphanedSession,
+	sessionID string,
+	fileRefs map[string]lfs.FileRef,
+) (*lfs.SessionMeta, error) {
+	var meta *lfs.SessionMeta
+	if err := lfs.MutateSessionMeta(context.Background(), sessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		next := current
+		if next == nil {
+			// first write for this session — nothing on disk to preserve.
+			next = sessionMetaBase(orphan.SessionName, orphan.Meta.Username,
+				orphan.Meta.AgentID, orphan.Meta.AgentType, orphan.Meta.CreatedAt,
+				projectRoot, sessionID).Build()
+		} else {
+			// identity fields are backfilled only when absent: a value
+			// already on disk was resolved when more context was available
+			// than a doctor sweep has.
+			if next.UserID == "" {
+				next.UserID = auth.GetUserID(endpoint.GetForProject(projectRoot))
+			}
+			if next.RepoID == "" {
+				next.RepoID = getRepoIDOrDefault(projectRoot)
+			}
+		}
+		// sessionID is already resolved by resolveOrphanSessionID, which
+		// prefers a preserved meta.json id over minting a new one — so it
+		// is authoritative and never rotates across retries.
+		next.SessionID = sessionID
+
+		// fields this retry actually owns
+		next.Model = orphan.Meta.Model
+		next.EntryCount = orphan.EntryCount
+		next.Files = fileRefs
+		// preserve-if-set: don't stomp a real terminal stop reason with the
+		// generic "recovered" just because doctor re-uploaded the content.
+		if next.StopReason == "" {
+			next.StopReason = session.StopReasonRecovered
+		}
+
+		meta = next
+		return next, nil
+	}); err != nil {
+		return nil, fmt.Errorf("write meta.json: %w", err)
+	}
+	return meta, nil
 }
 
 // validateRawJSONLHeader checks that raw.jsonl has a valid header line with a metadata key.

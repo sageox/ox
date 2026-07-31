@@ -165,6 +165,28 @@ check-no-git-lfs-shell: ## Ensure no code shells out to git-lfs binary (see .cla
 		exit 1; \
 	fi
 
+check-session-meta-rmw: ## Ensure sessions/*/meta.json is only rewritten via lfs.MutateSessionMeta (ox-q42i, GH #710)
+	@# Rebuilding meta.json from a builder, or reading/marshalling it without
+	@# the flock, silently drops every field the writer doesn't set —
+	@# summary_status, validation_error, summary_attempts, redactions,
+	@# produced_commits, linked_prs, linkage_status. Because the ledger
+	@# auto-resolves sessions/ conflicts to the LOCAL side, that stripping
+	@# then propagates to origin and erases the fields for the whole team.
+	@#
+	@# ALLOWLIST below = the remaining ox-q42i sites, each a first-write or
+	@# an interactive single-writer path. Do not add to it without closing
+	@# that ticket's reasoning; the correct fix is lfs.MutateSessionMeta.
+	@violations=$$(grep -rnE 'lfs\.WriteSessionMeta(Only)?\(' --include='*.go' . 2>/dev/null \
+		| grep -v '_test\.go:' | grep -v 'vendor/' \
+		| grep -vE ':[0-9]+:[[:space:]]*//' \
+		| grep -vE '^\./(cmd/ox/agent_session\.go|cmd/ox/agent_session_recover\.go|cmd/ox/session_regenerate\.go|cmd/ox/session_upload_cmd\.go|cmd/ox/session_repair_meta_summary\.go|cmd/ox/session_push_summary\.go):'); \
+	if [ -n "$$violations" ]; then \
+		echo "$$violations"; \
+		echo "ERROR: rewrite sessions/*/meta.json via lfs.MutateSessionMeta, not WriteSessionMeta[Only]."; \
+		echo "       A fresh-built or unlocked write drops fields it does not set (GH #710, ox-q42i)."; \
+		exit 1; \
+	fi
+
 sync-gitleaks-rules: ## Regenerate the gitleaks-derived detector catalog from a pinned gitleaks.toml
 	@echo "Regenerating internal/session/gitleaks_generated.go..."
 	@cd internal/session/cmd/gitleaks-port && go run . \
@@ -206,7 +228,7 @@ check-raw-writer-chokepoint: ## Ensure raw.jsonl is only opened via session.RawW
 		exit 1; \
 	fi
 
-test-preflight: check-no-git-lfs-shell check-raw-writer-chokepoint ## Pre-PR quality gate: lint + all unit tests + slow tests (lint/test-all/test-slow run concurrently)
+test-preflight: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw ## Pre-PR quality gate: lint + all unit tests + slow tests (lint/test-all/test-slow run concurrently)
 	$(call say,"Running lint, full tests, and slow tests concurrently...")
 	@# lint and the test binaries don't share any output file (test-all writes
 	@# coverage.out; test-slow and lint don't touch it), so running them

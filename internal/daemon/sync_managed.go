@@ -358,12 +358,20 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 			// capture conflicted paths before AuditAndAbort discards rebase
 			// state — a sessions/*/meta.json conflict gets its own issue
 			// type (IssueTypeSessionConflictWedge) instead of the generic
-			// IssueTypeDiverged below, since sessions/ is hard-denied from
-			// auto-resolve by design (internal/manifest/auto_resolve.go):
-			// the abort clears the rebase mechanics but never resolves the
-			// underlying content, so the next cycle hits the identical
-			// conflict. Distinguishing it lets sync.go escalate severity by
-			// elapsed time instead of treating it like ordinary lag.
+			// IssueTypeDiverged below: the abort clears the rebase mechanics
+			// but never resolves the underlying content, so the next cycle
+			// hits the identical conflict. Distinguishing it lets sync.go
+			// escalate severity by elapsed time instead of treating it like
+			// ordinary lag.
+			//
+			// NB: an earlier version of this comment claimed sessions/ is
+			// "hard-denied from auto-resolve by design". That is true of
+			// manifest-parsed repos (internal/manifest/auto_resolve.go) but
+			// NOT of the ledger, which appends its own {Auto, "sessions/"}
+			// rule and never runs it through ValidateResolveRules — see
+			// internal/ledger/ledger.go. So the ledger DOES auto-resolve
+			// sessions/, to the local side. Anything that reaches here is a
+			// conflict auto-resolve could not handle.
 			conflictedSessionPaths := sessionConflictPaths(ctx, path)
 
 			// AuditAndAbort: structured pre/post logs capture HEAD SHA,

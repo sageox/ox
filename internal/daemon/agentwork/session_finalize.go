@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1257,54 +1258,106 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	// flip to "unrecoverable" so the work-no-longer-needed gate stops
 	// the loop. A successful run (any non-stub status) resets the
 	// counter via the else branch below.
-	statusToWrite := summaryResp.SummaryStatus
-	attempts := 0
-	if priorMeta, _ := lfs.ReadSessionMeta(payload.SessionDir); priorMeta != nil {
-		attempts = priorMeta.SummaryAttempts
-	}
-	if statusToWrite == sessionsummary.SummaryStatusFailedValidation {
-		attempts++
-		if attempts >= lfs.MaxSummaryAttempts {
-			h.logger.Warn("session summary unrecoverable after max attempts; will not retry",
-				"session", sessionName,
-				"attempts", attempts,
-				"max", lfs.MaxSummaryAttempts,
-				"last_error", summaryResp.ValidationError,
-			)
-			statusToWrite = sessionsummary.SummaryStatusUnrecoverable
-		}
-	} else {
-		// success or non-failure shape — clear the counter so a future
-		// anti-entropy pass after a regression won't inherit a stale
-		// retry budget.
-		attempts = 0
-	}
-
-	metaBuilder := lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).
-		SessionID(sessionIDForMeta).
-		Title(summaryResp.Title).
-		Summary(summaryResp.Summary).
-		EntryCount(len(stored.Entries)).
-		StopReason(session.StopReasonRecovered).
-		SummaryStatus(statusToWrite).
-		ValidationError(summaryResp.ValidationError).
-		SummaryAttempts(attempts)
-
-	// inject sageox contribution score from cache file (matches synchronous path),
-	// then clean up to prevent stale scores leaking into future sessions
+	// sageox contribution score from the cache file (matches the synchronous
+	// path). Read before the mutation so the closure stays side-effect free,
+	// and clean up after so a stale score can't leak into a future session.
+	var score *session.ScoreFile
 	if agentID != "" {
-		if scoreFile, _ := session.ReadSageoxScore(agentID); scoreFile != nil {
-			metaBuilder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason)
-		}
-		_ = session.CleanupSageoxScore(agentID)
+		score, _ = session.ReadSageoxScore(agentID)
 	}
 
-	meta := metaBuilder.Build()
+	// Write meta.json as a locked READ-MODIFY-WRITE, touching only the
+	// fields this path owns.
+	//
+	// Until GH #710 this rebuilt meta.json from a fresh builder, which
+	// silently dropped every field the daemon does not set: repo_id, model,
+	// user_id, redactions, produced_commits, produced_plans, linked_prs,
+	// linked_issues, linkage_status and the whole stop_* group. That is not
+	// merely a local loss — the ledger auto-resolves sessions/ conflicts to
+	// the local side (internal/ledger/ledger.go), so the stripped copy wins
+	// the next rebase and erases those fields from the shared history for
+	// every teammate.
+	var meta *lfs.SessionMeta
+	if err := lfs.MutateSessionMeta(context.Background(), payload.SessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		next := current
+		if next == nil {
+			// no meta.json yet — seed one; there is nothing to preserve.
+			next = lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).Build()
+		}
 
-	// write meta.json (without LFS refs initially)
-	if err := lfs.WriteSessionMetaOnly(payload.SessionDir, meta); err != nil {
+		// Failure-stub retry cap. Pre-fix, the daemon would re-finalize a
+		// session on every anti-entropy cycle whenever its title was empty,
+		// burning tokens forever on a structurally-broken raw.jsonl or a
+		// model that consistently can't summarize this session. Now: count
+		// how many failure stubs we've produced, and after MaxSummaryAttempts
+		// flip to "unrecoverable" so the work-no-longer-needed gate stops
+		// the loop.
+		//
+		// Counted from `current` INSIDE the lock. Reading it from a separate
+		// unlocked ReadSessionMeta (as this used to) races a concurrent
+		// writer and can silently drop a bump, re-arming the loop.
+		statusToWrite := summaryResp.SummaryStatus
+		attempts := next.SummaryAttempts
+		if statusToWrite == sessionsummary.SummaryStatusFailedValidation {
+			attempts++
+			if attempts >= lfs.MaxSummaryAttempts {
+				h.logger.Warn("session summary unrecoverable after max attempts; will not retry",
+					"session", sessionName,
+					"attempts", attempts,
+					"max", lfs.MaxSummaryAttempts,
+					"last_error", summaryResp.ValidationError,
+				)
+				statusToWrite = sessionsummary.SummaryStatusUnrecoverable
+			}
+		} else {
+			// success or non-failure shape — clear the counter so a future
+			// anti-entropy pass after a regression won't inherit a stale
+			// retry budget.
+			attempts = 0
+		}
+
+		// identity — safe to (re)assert; these describe the recording itself.
+		next.SessionName = sessionName
+		next.Username = username
+		next.AgentID = agentID
+		next.AgentType = agentType
+		next.SessionID = sessionIDForMeta
+
+		// Daemon-owned summary fields, assigned UNCONDITIONALLY. Writing ""
+		// on a successful run is the intended clear; applying
+		// preserve-if-empty here would make a past failure permanently
+		// sticky, which is the opposite bug.
+		next.Title = summaryResp.Title
+		next.Summary = summaryResp.Summary
+		next.EntryCount = len(stored.Entries)
+		next.SummaryStatus = statusToWrite
+		next.ValidationError = summaryResp.ValidationError
+		next.SummaryAttempts = attempts
+
+		// StopReason is preserve-if-set: "recovered" is our fallback for a
+		// session nobody stopped cleanly. If the CLI already recorded a real
+		// terminal reason (plus stop_detail / stop_source / stop_pattern_id /
+		// stop_resets_at), overwriting it destroys that record.
+		if next.StopReason == "" {
+			next.StopReason = session.StopReasonRecovered
+		}
+
+		if score != nil {
+			s := score.Score
+			next.SageoxScore = &s
+			next.SageoxScoreCategory = string(score.Category)
+			next.SageoxScoreReason = score.Reason
+		}
+
+		meta = next
+		return next, nil
+	}); err != nil {
 		h.logger.Warn("meta.json write failed", "session", sessionName, "err", err)
 		return nil, nil
+	}
+
+	if agentID != "" {
+		_ = session.CleanupSageoxScore(agentID)
 	}
 
 	// attempt LFS upload (best-effort)
@@ -1331,37 +1384,17 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	// whichever process writes second clobbers the other's mutation. See
 	// ox-e1ot for the failure mode this prevents.
 	if err := lfs.MutateSessionMeta(context.Background(), payload.SessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
-		// Prefer the just-written meta as the base; if a CLI writer has
-		// added entries to Files between our first write and now, merge
-		// rather than replace so we don't drop their git-stored refs.
-		base := meta
-		if current != nil && len(current.Files) > 0 {
-			merged := make(map[string]lfs.FileRef, len(current.Files)+len(fileRefs))
-			for k, v := range current.Files {
-				merged[k] = v
-			}
-			for k, v := range fileRefs {
-				// LFS-safety guard: never demote a Storage=git entry
-				// to Storage=lfs. The CLI's session_upload registers
-				// small JSON artifacts (summary.json) as Storage=git
-				// because their bytes live directly in the git tree;
-				// if a daemon-side merge replaced that with an LFS
-				// pointer, WritePointerFiles would overwrite the
-				// real summary.json with a 130-byte pointer stub —
-				// silent data loss the user has explicitly flagged
-				// as a worry. Storage=git wins for shared keys.
-				if existing, ok := merged[k]; ok && existing.IsGit() && v.IsLFS() {
-					h.logger.Warn("rejecting LFS overwrite of git-stored entry",
-						"session", sessionName, "file", k,
-						"existing_size", existing.Size, "incoming_oid", v.OID)
-					continue
-				}
-				merged[k] = v
-			}
-			base.Files = merged
-		} else {
-			base.Files = fileRefs
+		// Base on what is on disk NOW, not on the struct we built a moment
+		// ago: a CLI writer may have mutated meta.json between the two
+		// locks, and using our stale copy would silently revert them. Fall
+		// back to our copy only when the file has gone missing. (Pre-#710
+		// this always based on the freshly-built struct, which re-stripped
+		// whatever the first write had just preserved.)
+		base := current
+		if base == nil {
+			base = meta
 		}
+		base.Files = h.mergeFileRefs(base.Files, fileRefs, sessionName)
 		return base, nil
 	}); err != nil {
 		h.logger.Warn("meta.json update with LFS refs failed", "session", sessionName, "err", err)
@@ -1472,17 +1505,25 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 				h.logger.Warn("upload-only: LFS upload failed, committing raw content", "session", sessionName, "err", err)
 			} else {
 				fileRefs = refs
-				// update meta.json with LFS refs
+				// update meta.json with LFS refs. Goes through
+				// MutateSessionMeta so it serializes against the CLI's
+				// concurrent artifact registration — the unlocked
+				// read/unmarshal/write this replaced could lose whichever
+				// mutation landed first.
 				if len(fileRefs) > 0 {
-					metaPath := filepath.Join(payload.SessionDir, "meta.json")
-					if metaData, readErr := os.ReadFile(metaPath); readErr == nil {
-						var meta lfs.SessionMeta
-						if jsonErr := json.Unmarshal(metaData, &meta); jsonErr == nil {
-							meta.Files = fileRefs
-							if writeErr := lfs.WriteSessionMetaOnly(payload.SessionDir, &meta); writeErr != nil {
-								h.logger.Warn("upload-only: meta.json LFS update failed", "session", sessionName, "err", writeErr)
+					if err := lfs.MutateSessionMeta(context.Background(), payload.SessionDir,
+						func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+							if current == nil {
+								return nil, nil // no meta.json to update — nothing to do
 							}
-						}
+							// merge, never replace: UploadSessionFiles omits
+							// summary.json, so assigning the LFS list wholesale
+							// would drop its Storage=git registration — the same
+							// field-stripping class this PR exists to fix.
+							current.Files = h.mergeFileRefs(current.Files, fileRefs, sessionName)
+							return current, nil
+						}); err != nil {
+						h.logger.Warn("upload-only: meta.json LFS update failed", "session", sessionName, "err", err)
 					}
 				}
 			}
@@ -2276,4 +2317,41 @@ func (h *SessionFinalizeHandler) emitSummarizationTelemetry(sessionName, mode st
 	}
 
 	h.telemetry.Record("summarization", props)
+}
+
+// mergeFileRefs merges freshly-uploaded LFS refs into an existing
+// meta.json manifest, preserving entries the upload didn't produce.
+//
+// Two invariants, both learned the hard way:
+//
+//  1. MERGE, never replace. lfs.UploadSessionFiles returns only the files
+//     it uploaded to the content store — it deliberately omits
+//     summary.json, which the CLI registers as Storage=git because its
+//     bytes live directly in the git tree. Assigning the returned map
+//     wholesale drops those entries, which is the same field-stripping
+//     class GH #710 is about.
+//
+//  2. Storage=git WINS for a shared key. Demoting a git-stored entry to
+//     an LFS ref would make WritePointerFiles overwrite the real
+//     summary.json with a ~130-byte pointer stub — silent data loss.
+func (h *SessionFinalizeHandler) mergeFileRefs(
+	existing, incoming map[string]lfs.FileRef,
+	sessionName string,
+) map[string]lfs.FileRef {
+	if len(existing) == 0 {
+		return incoming
+	}
+
+	merged := make(map[string]lfs.FileRef, len(existing)+len(incoming))
+	maps.Copy(merged, existing)
+	for k, v := range incoming {
+		if prior, ok := merged[k]; ok && prior.IsGit() && v.IsLFS() {
+			h.logger.Warn("rejecting LFS overwrite of git-stored entry",
+				"session", sessionName, "file", k,
+				"existing_size", prior.Size, "incoming_oid", v.OID)
+			continue
+		}
+		merged[k] = v
+	}
+	return merged
 }
