@@ -23,6 +23,7 @@ import (
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/sageoxignore"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/ui"
@@ -587,22 +588,32 @@ func runInit() error {
 		}
 	}
 
-	// ensure the project's *root* .gitignore excludes .sageox/kb/.
-	// This is where the daemon materializes per-project knowledge-bubble
-	// symlinks (one slug-keyed link per relevant kb pointing at
-	// paths.KBDir(kb_id)). Symlinks are derived state — never committed.
-	// Idempotent: only appends the line when missing, never modifies
-	// other entries. Track the file with the init rollback tracker so a
-	// later API failure undoes our gitignore mutation alongside the rest
-	// of the staged files.
+	// GH #732: ox used to append `.sageox/kb/` to the project's *root*
+	// .gitignore. That rule now lives in .sageox/.gitignore as `kb/`,
+	// written moments ago by the block above. Clean the stale line out of
+	// the file the developer owns.
+	//
+	// The removal is behavior-preserving by construction, which is the
+	// whole safety argument: it is gated on the replacement being
+	// verifiably present, and `kb/` in .sageox/.gitignore ignores exactly
+	// the paths `.sageox/kb/` ignored from the root. Not one previously
+	// ignored path becomes tracked. Only an exact match is removed, so
+	// hand-added entries and every other `.sageox/*` rule survive.
+	//
+	// Snapshot BEFORE the write: trackModifiedFile captures current
+	// content eagerly, so tracking afterwards would make rollback restore
+	// the polluted version rather than the original.
 	rootGitignore := filepath.Join(gitRoot, ".gitignore")
-	switch action, err := ensureProjectGitignoreKBLine(gitRoot); {
-	case err != nil:
-		cli.PrintWarning(fmt.Sprintf("Could not update project .gitignore: %v", err))
-	case action == kbGitignoreCreated:
-		tracker.trackCreatedFile(rootGitignore)
-	case action == kbGitignoreModified:
+	if sageoxGitignoreHasKBRule(gitRoot) {
 		tracker.trackModifiedFile(rootGitignore)
+		switch removed, err := sageoxignore.RemoveLine(rootGitignore, sageoxignore.LegacyRootKBLine); {
+		case err != nil:
+			cli.PrintWarning(fmt.Sprintf("Could not clean up project .gitignore: %v", err))
+		case removed:
+			// we modified a file the user very likely tracks — stage it
+			// so the cleanup actually lands in their commit.
+			tracker.trackForceStage(rootGitignore)
+		}
 	}
 
 	// add SageOx entries to .gitattributes
@@ -693,10 +704,15 @@ func runInit() error {
 	}
 
 	// detect and install agent hooks
+	// installAgentHooks returns absolute, existence-verified paths inside
+	// gitRoot — do NOT re-join against gitRoot here. Doing so was half of
+	// GH #731: adapters that already returned absolute paths became
+	// <root><root>/.codex/hooks.json, and one such entry failed the whole
+	// `git add`, leaving even .claude/settings.json unstaged.
 	installedHooks := installAgentHooks(gitRoot, true, selectedAgents) // quiet — summarized below
 	for _, hookFile := range installedHooks {
-		tracker.trackCreatedFile(filepath.Join(gitRoot, hookFile))
-		tracker.trackForceStage(filepath.Join(gitRoot, hookFile))
+		tracker.trackCreatedFile(hookFile)
+		tracker.trackForceStage(hookFile)
 	}
 
 	// commands and rules are installed by external adapters via CapCommandsInstaller/CapRulesInstaller
@@ -1195,74 +1211,20 @@ func createSageoxGitignore(path string) error {
 	return os.WriteFile(path, []byte(sageoxGitignoreContent), 0644)
 }
 
-// projectGitignoreKBLine is the single entry appended to the project's
-// root .gitignore so daemon-managed knowledge-bubble symlinks
-// (.sageox/kb/<slug>) never end up tracked. The daemon uses the same
-// constant in internal/daemon/sync_symlinks.go to repair existing
-// projects on first reconciliation.
-const projectGitignoreKBLine = ".sageox/kb/"
-
-// ensureProjectGitignoreKBLine appends `.sageox/kb/` to <gitRoot>/.gitignore
-// exactly once. Idempotent: re-reads the file each call and only appends
-// when the line is genuinely absent. Creates the file with just the entry
-// if it does not already exist.
-// kbGitignoreAction reports what ensureProjectGitignoreKBLine actually
-// did to the project's .gitignore so the init tracker can register the
-// path for rollback + staging in the same way other init-modified files
-// are handled.
-type kbGitignoreAction int
-
-const (
-	kbGitignoreUnchanged kbGitignoreAction = iota
-	kbGitignoreCreated
-	kbGitignoreModified
-)
-
-func ensureProjectGitignoreKBLine(gitRoot string) (kbGitignoreAction, error) {
-	gitignorePath := filepath.Join(gitRoot, ".gitignore")
-	existed := true
-	existing, err := os.ReadFile(gitignorePath)
+// sageoxGitignoreHasKBRule reports whether <gitRoot>/.sageox/.gitignore
+// carries the `kb/` rule.
+//
+// This is the safety gate for the GH #732 cleanup: the stale
+// `.sageox/kb/` line is only removed from the project's root .gitignore
+// once its replacement is verifiably in place, so the removal can never
+// cause a previously ignored path to start being tracked. Absent or
+// unreadable file means "not verified" — leave the root alone.
+func sageoxGitignoreHasKBRule(gitRoot string) bool {
+	data, err := os.ReadFile(filepath.Join(gitRoot, ".sageox", ".gitignore"))
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return kbGitignoreUnchanged, fmt.Errorf("read .gitignore: %w", err)
-		}
-		existed = false
-		existing = nil
+		return false
 	}
-	if hasGitignoreEntry(string(existing), projectGitignoreKBLine) {
-		return kbGitignoreUnchanged, nil
-	}
-	var out string
-	if len(existing) > 0 {
-		out = string(existing)
-		if !strings.HasSuffix(out, "\n") {
-			out += "\n"
-		}
-	}
-	out += projectGitignoreKBLine + "\n"
-	if err := os.WriteFile(gitignorePath, []byte(out), 0644); err != nil {
-		return kbGitignoreUnchanged, err
-	}
-	if existed {
-		return kbGitignoreModified, nil
-	}
-	return kbGitignoreCreated, nil
-}
-
-// hasGitignoreEntry reports whether `content` already has `entry` as a
-// non-comment, non-blank line. Comment-aware so a documentary
-// "# .sageox/kb/" line doesn't make us skip the real append.
-func hasGitignoreEntry(content, entry string) bool {
-	for _, raw := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if trimmed == entry {
-			return true
-		}
-	}
-	return false
+	return sageoxignore.HasEntry(string(data), sageoxignore.KBEntry)
 }
 
 // GetSageoxReadmeContent returns the standard README content for .sageox/README.md.
@@ -1590,17 +1552,95 @@ func findGitRoot() string {
 	return strings.TrimSpace(string(output))
 }
 
-func gitAddFiles(files []string) error {
-	args := append([]string{"add"}, files...)
-	cmd := exec.Command("git", args...)
-	return cmd.Run()
+// gitAddChunkSize bounds how many pathspecs go into one `git add`. A full
+// install (settings + commands + skills + rules across several agents) can
+// run to a few hundred paths; chunking keeps us clear of ARG_MAX.
+const gitAddChunkSize = 100
+
+func gitAddFiles(gitRoot string, files []string) error {
+	return gitAdd(gitRoot, files, false)
 }
 
 // gitAddFilesForce stages files using --force to bypass .gitignore
-func gitAddFilesForce(files []string) error {
-	args := append([]string{"add", "--force"}, files...)
-	cmd := exec.Command("git", args...)
-	return cmd.Run()
+func gitAddFilesForce(gitRoot string, files []string) error {
+	return gitAdd(gitRoot, files, true)
+}
+
+// gitAdd stages files, degrading to per-file staging when a batch fails.
+//
+// # Why this is not just `git add <all>`
+//
+// git validates every pathspec before staging any of them, and exits
+// non-zero on the first one that matches nothing. The old implementation
+// ran a single batched `git add` and discarded both the error detail and
+// the partial progress, so ONE bad path meant nothing was staged at all.
+// That is the mechanism behind GH #731: a fresh `ox init` wrote the whole
+// .claude/ tree, handed git one malformed pathspec alongside it, and
+// committed none of it — silently, because cmd.Run() threw away git's
+// "did not match any files" message.
+//
+// So: try the batch (the fast path, one process, and what happens on every
+// healthy install), and only if it fails retry each path individually to
+// salvage the good ones. The returned error names the paths that genuinely
+// could not be staged, with git's own message attached.
+//
+// Also sets cmd.Dir explicitly rather than relying on the process working
+// directory, so relative pathspecs resolve against the repo we mean.
+func gitAdd(gitRoot string, files []string, force bool) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	run := func(paths []string) (string, error) {
+		args := []string{"add"}
+		if force {
+			args = append(args, "--force")
+		}
+		// `--` stops a path that looks like a flag from being parsed as one.
+		args = append(args, "--")
+		args = append(args, paths...)
+		cmd := exec.Command("git", args...)
+		cmd.Dir = gitRoot
+		out, err := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+
+	var failures []string
+	for start := 0; start < len(files); start += gitAddChunkSize {
+		end := min(start+gitAddChunkSize, len(files))
+		chunk := files[start:end]
+
+		if _, err := run(chunk); err == nil {
+			continue
+		}
+
+		// degrade: stage what we can, and report precisely what we can't.
+		for _, path := range chunk {
+			out, err := run([]string{path})
+			if err == nil {
+				continue
+			}
+			detail := firstLine(out)
+			if detail == "" {
+				detail = err.Error()
+			}
+			failures = append(failures, fmt.Sprintf("%s (%s)", path, detail))
+		}
+	}
+
+	if len(failures) > 0 {
+		return fmt.Errorf("could not stage %d file(s): %s", len(failures), strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+// firstLine returns s up to the first newline. git's diagnostics put the
+// useful part first and the advice block after.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return strings.TrimSpace(s)
 }
 
 // initTracker centralizes tracking of files created and modified during ox init.
@@ -1621,7 +1661,13 @@ func newInitTracker(gitRoot string) *initTracker {
 	}
 }
 
-// trackCreatedFile records a newly created file for rollback and staging.
+// trackCreatedFile records a newly created file for ROLLBACK ONLY.
+//
+// It does not stage anything — stageAll never reads createdFiles. Call
+// trackForceStage as well if the file also needs to reach the index. The
+// absence of this sentence is why a comment elsewhere in init claimed the
+// tracker handled "rollback + staging" for the root .gitignore when it
+// only ever did the first half (GH #731).
 func (t *initTracker) trackCreatedFile(absPath string) {
 	t.createdFiles = append(t.createdFiles, absPath)
 }
@@ -1633,6 +1679,10 @@ func (t *initTracker) trackCreatedDir(absPath string) {
 
 // trackModifiedFile snapshots a file's current content before modification.
 // No-op if the file was already snapshotted or doesn't exist.
+//
+// ROLLBACK ONLY — see trackCreatedFile. Also note the snapshot is taken
+// EAGERLY, at call time: call this BEFORE writing, or rollback will
+// faithfully restore the already-modified content.
 func (t *initTracker) trackModifiedFile(absPath string) {
 	if _, alreadyTracked := t.modifiedFiles[absPath]; alreadyTracked {
 		return
@@ -1658,31 +1708,45 @@ func (t *initTracker) stageAll() {
 		cli.PrintWarning(fmt.Sprintf("Could not stage .sageox files: %v", err))
 	}
 
-	// stage AGENTS.md and CLAUDE.md if they exist
+	// Stage every instruction file ox may have written a marker into —
+	// not just AGENTS.md/CLAUDE.md. EnsureInstructionFileMarkers also
+	// touches GEMINI.md, .cursorrules, .windsurfrules,
+	// .github/copilot-instructions.md, .kiro/steering/ox.md and .clinerules
+	// (see InstructionFileRegistry), and until GH #731 a Gemini or Cursor
+	// user's ox-modified file was never staged at all.
 	var agentFiles []string
-	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
-		if _, err := os.Lstat(filepath.Join(t.gitRoot, name)); err == nil {
-			agentFiles = append(agentFiles, filepath.Join(t.gitRoot, name))
+	seen := make(map[string]bool)
+	for _, target := range DetectedInstructionFiles(t.gitRoot) {
+		abs := filepath.Join(t.gitRoot, target.Path)
+		if seen[abs] {
+			continue
 		}
+		if _, err := os.Lstat(abs); err != nil {
+			continue
+		}
+		seen[abs] = true
+		agentFiles = append(agentFiles, abs)
 	}
 	if len(agentFiles) > 0 {
-		if err := gitAddFiles(agentFiles); err != nil {
-			cli.PrintWarning(fmt.Sprintf("Could not stage agent files: %v", err))
+		if err := gitAddFiles(t.gitRoot, agentFiles); err != nil {
+			cli.PrintWarning(fmt.Sprintf("Could not stage agent instruction files: %v", err))
 		}
 	}
 
 	// stage .gitattributes if it exists
 	gitattrsPath := filepath.Join(t.gitRoot, ".gitattributes")
 	if _, err := os.Lstat(gitattrsPath); err == nil {
-		if err := gitAddFiles([]string{gitattrsPath}); err != nil {
+		if err := gitAddFiles(t.gitRoot, []string{gitattrsPath}); err != nil {
 			cli.PrintWarning(fmt.Sprintf("Could not stage .gitattributes: %v", err))
 		}
 	}
 
-	// force-stage files that may be gitignored (hooks, commands)
+	// force-stage files that may be gitignored (hooks, commands, skills,
+	// rules) plus anything else explicitly registered for staging.
 	if len(t.forceStage) > 0 {
-		if err := gitAddFilesForce(t.forceStage); err != nil {
-			cli.PrintWarning(fmt.Sprintf("Could not stage hook/command files: %v", err))
+		if err := gitAddFilesForce(t.gitRoot, t.forceStage); err != nil {
+			// name the paths — the old generic warning told nobody anything.
+			cli.PrintWarning(fmt.Sprintf("Could not stage all agent files: %v", err))
 		}
 	}
 }
@@ -1838,7 +1902,11 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 
 // installAgentHooks installs project-level hooks for selected AI coding agents.
 // Only agents present in selectedAgents are installed.
-// Returns a list of relative paths to hook files that were created.
+//
+// Returns ABSOLUTE paths to files that exist inside gitRoot, normalized by
+// normalizeAdapterFilesWritten. Adapters report FilesWritten in whatever
+// convention they like (see the contract in pkg/adapterprotocol); callers
+// of this function get one that is safe to hand to git.
 func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]bool) []string {
 	var installedHooks []string
 
@@ -1970,7 +2038,67 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 		}
 	}
 
-	return installedHooks
+	return normalizeAdapterFilesWritten(gitRoot, installedHooks)
+}
+
+// normalizeAdapterFilesWritten turns adapter-reported FilesWritten entries
+// into absolute paths that exist inside gitRoot, dropping anything else.
+//
+// This is the defensive half of the GH #731 fix. Adapters are separate
+// binaries resolved from disk at runtime, so ox can document the
+// FilesWritten contract (pkg/adapterprotocol) but cannot enforce it — a
+// stale or third-party adapter can always hand back something else. A
+// contract you can't enforce at the boundary is a comment.
+//
+// What made #731 so damaging is that `git add` validates every pathspec
+// up front and fails the entire invocation on the first bad one. So a
+// single junk entry meant NOTHING got staged — not the junk, and not the
+// perfectly good `.claude/settings.json` next to it. Filtering here plus
+// the degrade-to-per-file retry in gitAddFilesForce makes that
+// impossible.
+//
+// Deliberately no path guessing: an entry that doesn't resolve is dropped
+// and logged, not searched for under plausible parents. Guessing trades a
+// loud failure for a quiet wrong answer.
+func normalizeAdapterFilesWritten(gitRoot string, raw []string) []string {
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]bool, len(raw))
+
+	for _, entry := range raw {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		candidate := filepath.FromSlash(trimmed)
+		if filepath.IsAbs(candidate) {
+			candidate = filepath.Clean(candidate)
+		} else {
+			candidate = filepath.Join(gitRoot, candidate)
+		}
+
+		// containment: kills both the double-join corruption from
+		// adapters that already returned absolute paths, and legitimate
+		// user-scope paths (~/.codex/hooks.json) that git cannot stage.
+		rel, err := filepath.Rel(gitRoot, candidate)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			slog.Debug("init: dropping adapter file outside repo", "entry", entry, "resolved", candidate)
+			continue
+		}
+
+		// Lstat, not Stat: some installed assets are symlinks, and a
+		// broken symlink is still a real thing git can stage.
+		if _, err := os.Lstat(candidate); err != nil {
+			slog.Debug("init: dropping adapter file that does not exist", "entry", entry, "resolved", candidate)
+			continue
+		}
+
+		if seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		out = append(out, candidate)
+	}
+	return out
 }
 
 // detectExistingRepoMarkers scans .sageox/ for existing .repo_* marker files

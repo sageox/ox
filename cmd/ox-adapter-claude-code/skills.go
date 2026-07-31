@@ -196,8 +196,12 @@ func handleInstallSkills(p adapterprotocol.SkillsParams) (*adapterprotocol.Insta
 		if err := os.WriteFile(dstPath, stamped, 0o644); err != nil {
 			return nil, fmt.Errorf("write skill file %s: %w", sk.Name, err)
 		}
-		// report the SKILL.md path relative to the skills dir (e.g. ox-plan/SKILL.md).
-		written = append(written, filepath.Join(sk.Name, skillFileName))
+		// report repo-relative (e.g. .claude/skills/ox-plan/SKILL.md) per the
+		// FilesWritten contract. Reporting it relative to the skills dir —
+		// as this did until GH #731 — made ox resolve it to <root>/ox-plan/
+		// SKILL.md, which does not exist, and one bad pathspec fails the
+		// whole `git add`, so nothing at all got staged.
+		written = append(written, dstPath)
 	}
 
 	// Command→skill migration cleanup: when a surface moves from a slash command
@@ -210,7 +214,7 @@ func handleInstallSkills(p adapterprotocol.SkillsParams) (*adapterprotocol.Insta
 
 	return &adapterprotocol.InstallSkillsResponse{
 		Installed:    true,
-		FilesWritten: written,
+		FilesWritten: adapterprotocol.RepoRelativePaths(p.RepoRoot, dir, written),
 	}, nil
 }
 

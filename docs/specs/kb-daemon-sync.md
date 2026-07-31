@@ -39,6 +39,24 @@ handles that sync so the model isn't re-derived every time someone touches it.
 `paths.KBDir(kb_id)` is the canonical path; `paths.KBDir("")` is the per-endpoint
 root. Bubbles are keyed by the **immutable** `kb_id`, never the renameable slug.
 
+### Keeping the symlinks out of git
+
+Per-project bubble symlinks under `<project>/.sageox/kb/` are derived state and
+must never be committed. The ignore rule lives in **`<project>/.sageox/.gitignore`
+as `kb/`** — a file ox already owns, writes, and commits.
+
+It is deliberately **not** in the project's root `.gitignore`. Earlier versions
+wrote `.sageox/kb/` there on the theory that a top-level rule is more visible to
+humans browsing the repo; GH #732 established that developers do not want ox
+editing the file at the top of their repo, and that visibility was not worth the
+intrusion. Patterns in a nested `.gitignore` resolve relative to their own
+directory, so `kb/` covers exactly the same paths.
+
+Both `ox init` and the daemon reconciler write the rule (via
+`internal/sageoxignore`); only the foreground commands (`ox init`, `ox doctor
+--fix`) will *remove* a stale `.sageox/kb/` line from a root `.gitignore`, and
+only once the replacement is verifiably present.
+
 ---
 
 ## Who syncs bubbles — leader-gated, exactly like team context

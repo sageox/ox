@@ -25,7 +25,8 @@ func TestHandleInstallRules_CreatesFile(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.True(t, resp.Installed)
-	assert.Contains(t, resp.FilesWritten, "ox.md")
+	// repo-relative per the adapterprotocol FilesWritten contract — see GH #731.
+	assert.Contains(t, resp.FilesWritten, filepath.Join(".claude", "rules", "ox.md"))
 
 	ruleFile := filepath.Join(dir, ".claude", "rules", "ox.md")
 	data, err := os.ReadFile(ruleFile)
@@ -238,18 +239,22 @@ func TestHandleInstallRules_InstallsNamespacedRules(t *testing.T) {
 	_, err = os.Stat(top)
 	require.NoError(t, err, ".claude/rules/ox.md should still be installed at top level")
 
-	// FilesWritten should reference both
-	var sawTop, sawNS bool
-	for _, name := range resp.FilesWritten {
-		if name == "ox.md" {
-			sawTop = true
-		}
-		if name == "sageox/use-team-context.md" {
-			sawNS = true
-		}
+	// FilesWritten must reference both, REPO-relative — not relative to the
+	// rules dir. agentx returns rules-dir-relative names; reporting those
+	// verbatim made ox resolve `ox.md` to <root>/ox.md, which does not
+	// exist, and one bad pathspec failed the whole `git add` so nothing at
+	// all was staged (GH #731).
+	assert.Contains(t, resp.FilesWritten, filepath.Join(".claude", "rules", "ox.md"),
+		"got %v", resp.FilesWritten)
+	assert.Contains(t, resp.FilesWritten, filepath.Join(".claude", "rules", "sageox", "use-team-context.md"),
+		"got %v", resp.FilesWritten)
+
+	// and every entry must actually resolve inside the repo, or ox drops it.
+	for _, rel := range resp.FilesWritten {
+		assert.False(t, filepath.IsAbs(rel), "%s should be repo-relative", rel)
+		_, statErr := os.Stat(filepath.Join(dir, rel))
+		assert.NoError(t, statErr, "%s must resolve to a real file under RepoRoot", rel)
 	}
-	assert.True(t, sawTop, "FilesWritten should include ox.md, got %v", resp.FilesWritten)
-	assert.True(t, sawNS, "FilesWritten should include sageox/use-team-context.md, got %v", resp.FilesWritten)
 }
 
 // TestHandleCheckRules_NamespacedRulesMissing verifies that check reports

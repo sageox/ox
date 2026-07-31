@@ -84,6 +84,7 @@ const (
 	CheckSlugInitReverted    = "init-reverted"
 	CheckSlugClaudeHooksFmt  = "claude-hooks-format"
 	CheckSlugGitignore       = "gitignore"
+	CheckSlugRootKBGitignore = "root-kb-gitignore"
 	CheckSlugGitattributes   = "gitattributes"
 	CheckSlugSageoxGitignore = "sageox-gitignore"
 	CheckSlugReadme          = "readme"

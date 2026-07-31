@@ -83,24 +83,16 @@ discovered.jsonl
 	assert.Contains(t, result, "!discovered.jsonl", "required entry '!discovered.jsonl' should be present")
 }
 
+// allRequiredEntries renders every required entry as gitignore content.
+// Derived from requiredGitignoreEntries rather than hand-listed so that
+// adding a rule (e.g. kb/ for GH #732) can't silently rot these fixtures
+// into asserting the opposite of what they mean.
+func allRequiredEntries() string {
+	return strings.Join(requiredGitignoreEntries, "\n")
+}
+
 func TestMergeGitignoreEntries_PreservesCommentsInContent(t *testing.T) {
-	content := `# User comment
-logs/
-# Another comment
-cache/
-session.jsonl
-sessions/
-.needs-doctor
-.needs-doctor-agent
-agent_instances/
-agent_tasks/
-config.local.toml
-ledger
-teams/
-!README.md
-!config.json
-!discovered.jsonl
-!offline/`
+	content := "# User comment\n" + allRequiredEntries() + "\n# Another comment"
 
 	result, changed := mergeGitignoreEntries(content)
 	assert.False(t, changed, "expected changed=false when all required entries present")
@@ -110,24 +102,7 @@ teams/
 }
 
 func TestMergeGitignoreEntries_PreservesUserEntriesInContent(t *testing.T) {
-	content := `logs/
-cache/
-session.jsonl
-sessions/
-.needs-doctor
-.needs-doctor-agent
-agent_instances/
-agent_tasks/
-config.local.toml
-ledger
-teams/
-!README.md
-!config.json
-!discovered.jsonl
-!offline/
-# user's custom entries
-*.swp
-.DS_Store`
+	content := allRequiredEntries() + "\n# user's custom entries\n*.swp\n.DS_Store"
 
 	result, changed := mergeGitignoreEntries(content)
 	assert.False(t, changed, "expected changed=false when all required entries present")

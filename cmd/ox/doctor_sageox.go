@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/sageoxignore"
 	"github.com/sageox/ox/internal/ui"
 )
 
@@ -39,6 +40,10 @@ agent_tasks/
 config.local.toml
 
 # Ignore local symlinks to user-directory data
+# kb/ holds daemon-materialized knowledge-bubble symlinks (GH #732 moved
+# this rule here from the project's root .gitignore — derived state, and
+# not ox's business to declare in a file the developer owns).
+kb/
 ledger
 teams/
 
@@ -60,6 +65,7 @@ var requiredGitignoreEntries = []string{
 	"agent_instances/",
 	"agent_tasks/",
 	"config.local.toml",
+	sageoxignore.KBEntry,
 	"ledger",
 	"teams/",
 	"!README.md",

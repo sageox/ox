@@ -89,7 +89,11 @@ type HookParams struct {
 
 // InstallHooksResponse is returned by `install-hooks`.
 type InstallHooksResponse struct {
-	Installed    bool     `json:"installed"`
+	Installed bool `json:"installed"`
+	// FilesWritten lists the files this install wrote. Each entry MUST be
+	// absolute or relative to RepoRoot — see the contract in
+	// fileswritten.go. Entries that don't resolve inside the repo are
+	// dropped by ox and never staged.
 	FilesWritten []string `json:"files_written"`
 	Hooks        []string `json:"hooks"`
 }
@@ -115,7 +119,11 @@ type RulesParams struct {
 
 // InstallRulesResponse is returned by `install-rules`.
 type InstallRulesResponse struct {
-	Installed    bool     `json:"installed"`
+	Installed bool `json:"installed"`
+	// FilesWritten lists the files this install wrote. Each entry MUST be
+	// absolute or relative to RepoRoot — see the contract in
+	// fileswritten.go. Entries that don't resolve inside the repo are
+	// dropped by ox and never staged.
 	FilesWritten []string `json:"files_written"`
 }
 
@@ -141,7 +149,11 @@ type CommandsParams struct {
 
 // InstallCommandsResponse is returned by `install-commands`.
 type InstallCommandsResponse struct {
-	Installed    bool     `json:"installed"`
+	Installed bool `json:"installed"`
+	// FilesWritten lists the files this install wrote. Each entry MUST be
+	// absolute or relative to RepoRoot — see the contract in
+	// fileswritten.go. Entries that don't resolve inside the repo are
+	// dropped by ox and never staged.
 	FilesWritten []string `json:"files_written"`
 }
 
@@ -168,7 +180,11 @@ type SkillsParams struct {
 
 // InstallSkillsResponse is returned by `install-skills`.
 type InstallSkillsResponse struct {
-	Installed    bool     `json:"installed"`
+	Installed bool `json:"installed"`
+	// FilesWritten lists the files this install wrote. Each entry MUST be
+	// absolute or relative to RepoRoot — see the contract in
+	// fileswritten.go. Entries that don't resolve inside the repo are
+	// dropped by ox and never staged.
 	FilesWritten []string `json:"files_written"`
 }
 

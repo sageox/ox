@@ -117,6 +117,15 @@ func init() {
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugRootKBGitignore,
+		Name:        rootKBGitignoreCheckName,
+		Category:    "Git Status",
+		FixLevel:    FixLevelSuggested,
+		Description: "Removes the legacy .sageox/kb/ entry from the project's root .gitignore (GH #732)",
+		Run:         checkRootKBGitignoreLine,
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugGitattributes,
 		Name:        ".gitattributes",
 		Category:    "Git Status",

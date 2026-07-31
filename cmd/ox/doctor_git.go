@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/sageoxignore"
 )
 
 // sageoxCommittableFiles lists the files in .sageox/ that should be tracked in VCS.
@@ -333,5 +334,107 @@ func checkGitignore(fix bool) checkResult {
 		name:    ".gitignore",
 		passed:  true,
 		message: "not ignored",
+	}
+}
+
+// rootKBGitignoreCheckName is shared between the check and its registry
+// entry — enrichWithFixMetadata matches checks by name, so the two must
+// not drift.
+const rootKBGitignoreCheckName = ".gitignore (kb rule)"
+
+// checkRootKBGitignoreLine removes the legacy `.sageox/kb/` entry from
+// the project's root .gitignore (GH #732).
+//
+// ox used to write that rule into the file at the top of the developer's
+// repo. It now lives in .sageox/.gitignore as `kb/`, which ox owns and
+// commits. This check cleans up installs created before the move.
+//
+// # Why this is safe to remove
+//
+// Removal is gated on the replacement being verifiably present. Patterns
+// in a nested .gitignore are relative to that file's directory, so `kb/`
+// in .sageox/.gitignore ignores exactly what `.sageox/kb/` ignored from
+// the root. Under the gate, deleting the root line cannot cause a single
+// previously ignored path to become tracked — the user's intent is fully
+// preserved, whether ox wrote the line or they did. Matching is exact, so
+// `.sageox/`, `.sageox/kb` (no slash), `/.sageox/kb/`, `!.sageox/kb/` and
+// a commented `# .sageox/kb/` are all left alone.
+//
+// Registered at FixLevelSuggested, not FixLevelAuto: editing a file the
+// developer owns without being asked is the exact complaint that opened
+// #732, and this fix should not re-commit the sin to clean up after it.
+// `ox init` does remove it, because that is a foreground command the user
+// invoked and which is already writing to their repo.
+func checkRootKBGitignoreLine(fix bool) checkResult {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return checkResult{
+			name:    rootKBGitignoreCheckName,
+			skipped: true,
+			message: "not in git repo",
+		}
+	}
+
+	gitignorePath := filepath.Join(gitRoot, ".gitignore")
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		// no root .gitignore at all — nothing ox could have polluted.
+		return checkResult{
+			name:    rootKBGitignoreCheckName,
+			passed:  true,
+			message: "clean",
+		}
+	}
+
+	if !sageoxignore.HasEntry(string(content), sageoxignore.LegacyRootKBLine) {
+		return checkResult{
+			name:    rootKBGitignoreCheckName,
+			passed:  true,
+			message: "clean",
+		}
+	}
+
+	// safety gate. checkSageoxGitignore is FixLevelAuto and runs in the
+	// Project Structure category, i.e. before this one, so on a repo
+	// missing the rule it gets added and the next doctor run cleans up.
+	if !sageoxGitignoreHasKBRule(gitRoot) {
+		return checkResult{
+			name:    rootKBGitignoreCheckName,
+			skipped: true,
+			message: "waiting on .sageox/.gitignore",
+			detail:  "Run `ox doctor` again once .sageox/.gitignore carries the kb/ rule",
+		}
+	}
+
+	if !fix {
+		return checkResult{
+			name:    rootKBGitignoreCheckName,
+			warning: true,
+			message: "stale `.sageox/kb/` in root .gitignore",
+			detail:  "Superseded by kb/ in .sageox/.gitignore — run `ox doctor --fix` to remove it",
+		}
+	}
+
+	removed, err := sageoxignore.RemoveLine(gitignorePath, sageoxignore.LegacyRootKBLine)
+	if err != nil {
+		return checkResult{
+			name:    rootKBGitignoreCheckName,
+			passed:  false,
+			message: "fix failed",
+			detail:  err.Error(),
+		}
+	}
+	if !removed {
+		return checkResult{
+			name:    rootKBGitignoreCheckName,
+			passed:  true,
+			message: "clean",
+		}
+	}
+	return checkResult{
+		name:    rootKBGitignoreCheckName,
+		passed:  true,
+		message: "removed stale `.sageox/kb/`",
+		detail:  "The rule now lives in .sageox/.gitignore — commit both files",
 	}
 }

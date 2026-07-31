@@ -22,5 +22,6 @@ config.local.toml
 !offline/
 
 # SageOx required entries
+kb/
 ledger
 teams/

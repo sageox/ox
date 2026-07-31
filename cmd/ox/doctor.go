@@ -827,6 +827,7 @@ func runDoctorChecks(parent context.Context, opts doctorOptions) []checkCategory
 		checkGitStatus(),
 		checkSageoxFilesTracked(opts.shouldFix(CheckSlugGitignore)),
 		convertDoctorResult(gitignoreCheck.Run(ctx, opts.shouldFix(CheckSlugGitignore))),
+		checkRootKBGitignoreLine(opts.shouldFix(CheckSlugRootKBGitignore)),
 		checkGitattributes(opts.shouldFix(CheckSlugGitattributes)),
 	}
 	// only show sageox remote check if .sageox is its own git repo

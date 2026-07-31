@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/sageoxignore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -255,37 +256,71 @@ func TestReconcileProjectSymlinks_FlatLayoutStrayFileSurvives(t *testing.T) {
 	assert.FileExists(t, filepath.Join(kbDir, "team", "platform"))
 }
 
-// TestEnsureProjectGitignoreEntry_Idempotent verifies that appending
-// the .sageox/kb/ gitignore line is a no-op when already present, and
-// never duplicates the entry.
+// sageoxGitignorePath returns <root>/.sageox/.gitignore, creating the
+// .sageox directory. In production the kb file lock already guarantees
+// .sageox/ exists before ensureProjectGitignoreEntry runs.
+func sageoxGitignorePath(t *testing.T, root string) string {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".sageox"), 0o755))
+	return filepath.Join(root, ".sageox", ".gitignore")
+}
+
+// TestEnsureProjectGitignoreEntry_Idempotent verifies that appending the
+// kb/ ignore rule is a no-op when already present, and never duplicates
+// the entry.
 //
 // Failure prevented: every daemon tick appends the line again, growing
 // .gitignore unboundedly.
 func TestEnsureProjectGitignoreEntry_Idempotent(t *testing.T) {
 	root := t.TempDir()
+	path := sageoxGitignorePath(t, root)
 
 	// first call: file absent — must create with the line.
 	require.NoError(t, ensureProjectGitignoreEntry(root))
-	body, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	body, err := os.ReadFile(path)
 	require.NoError(t, err)
-	assert.Contains(t, string(body), projectGitignoreLine)
+	assert.Contains(t, string(body), sageoxignore.KBEntry)
 
 	// second call: file present with the line — must not change anything.
 	first := string(body)
 	require.NoError(t, ensureProjectGitignoreEntry(root))
-	body2, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	body2, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, first, string(body2), "second call must be a true no-op")
 
 	// third call after an unrelated entry: must preserve existing entries
 	// and add ours exactly once.
-	require.NoError(t, os.WriteFile(filepath.Join(root, ".gitignore"), []byte("node_modules/\n"), 0o644))
+	require.NoError(t, os.WriteFile(path, []byte("cache/\n"), 0o644))
 	require.NoError(t, ensureProjectGitignoreEntry(root))
-	body3, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	body3, err := os.ReadFile(path)
 	require.NoError(t, err)
 	s := string(body3)
-	assert.Contains(t, s, "node_modules/")
-	assert.Equal(t, 1, countOccurrences(s, projectGitignoreLine), "must add the line exactly once")
+	assert.Contains(t, s, "cache/")
+	assert.Equal(t, 1, countOccurrences(s, sageoxignore.KBEntry), "must add the line exactly once")
+}
+
+// TestEnsureProjectGitignoreEntry_NeverTouchesRootGitignore is the guard
+// against the GH #732 regression. The reconciler used to write
+// `.sageox/kb/` into the developer's root .gitignore; fixing only ox init
+// would have left the daemon to put it straight back on the next sync
+// pass, so this asserts the daemon never touches that file at all.
+func TestEnsureProjectGitignoreEntry_NeverTouchesRootGitignore(t *testing.T) {
+	root := t.TempDir()
+	sageoxGitignorePath(t, root)
+	rootGitignore := filepath.Join(root, ".gitignore")
+
+	// case 1: no root .gitignore — the daemon must not create one.
+	require.NoError(t, ensureProjectGitignoreEntry(root))
+	_, err := os.Stat(rootGitignore)
+	assert.True(t, os.IsNotExist(err), "daemon must not create the project's root .gitignore")
+
+	// case 2: a root .gitignore the developer owns — byte-identical after.
+	original := "# my rules\nnode_modules/\ndist/\n"
+	require.NoError(t, os.WriteFile(rootGitignore, []byte(original), 0o644))
+	require.NoError(t, ensureProjectGitignoreEntry(root))
+	got, err := os.ReadFile(rootGitignore)
+	require.NoError(t, err)
+	assert.Equal(t, original, string(got), "daemon must leave the root .gitignore byte-identical")
 }
 
 // countOccurrences counts non-overlapping occurrences of substr in s.
@@ -606,17 +641,18 @@ func TestReconcileProjectSymlinks_PerProjectFailureIsolation(t *testing.T) {
 // every daemon tick.
 func TestEnsureProjectGitignoreEntry_AlreadyContainsLine(t *testing.T) {
 	root := t.TempDir()
+	path := sageoxGitignorePath(t, root)
 
 	// pre-populate with the line, surrounded by other content + comments
-	preset := "# common deny list\nnode_modules/\n.sageox/kb/\nbuild/\n"
-	require.NoError(t, os.WriteFile(filepath.Join(root, ".gitignore"), []byte(preset), 0o644))
+	preset := "# ox-managed\ncache/\nkb/\nlogs/\n"
+	require.NoError(t, os.WriteFile(path, []byte(preset), 0o644))
 
 	require.NoError(t, ensureProjectGitignoreEntry(root))
 
-	got, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	got, err := os.ReadFile(path)
 	require.NoError(t, err)
-	assert.Equal(t, preset, string(got), "existing .sageox/kb/ entry must not be rewritten or duplicated")
-	assert.Equal(t, 1, countOccurrences(string(got), projectGitignoreLine), "exactly one occurrence")
+	assert.Equal(t, preset, string(got), "existing kb/ entry must not be rewritten or duplicated")
+	assert.Equal(t, 1, countOccurrences(string(got), sageoxignore.KBEntry), "exactly one occurrence")
 }
 
 // TestEnsureProjectGitignoreEntry_FileDoesNotExist verifies the
@@ -629,7 +665,7 @@ func TestEnsureProjectGitignoreEntry_AlreadyContainsLine(t *testing.T) {
 func TestEnsureProjectGitignoreEntry_FileDoesNotExist(t *testing.T) {
 	root := t.TempDir()
 
-	gitignorePath := filepath.Join(root, ".gitignore")
+	gitignorePath := sageoxGitignorePath(t, root)
 	_, err := os.Stat(gitignorePath)
 	require.True(t, os.IsNotExist(err), "precondition: .gitignore must not exist")
 
@@ -637,7 +673,7 @@ func TestEnsureProjectGitignoreEntry_FileDoesNotExist(t *testing.T) {
 
 	got, err := os.ReadFile(gitignorePath)
 	require.NoError(t, err)
-	assert.Equal(t, projectGitignoreLine+"\n", string(got), "file must be created with exactly one line")
+	assert.Equal(t, sageoxignore.KBEntry+"\n", string(got), "file must be created with exactly one line")
 }
 
 // TestReconcileProjectSymlinks_ManyBubblesScale exercises the reconciler

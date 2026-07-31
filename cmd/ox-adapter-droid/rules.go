@@ -45,9 +45,11 @@ func handleInstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.Install
 		return nil, err
 	}
 
+	// agentx returns names relative to the rules dir; the FilesWritten
+	// contract is repo-relative. See GH #731.
 	return &adapterprotocol.InstallRulesResponse{
 		Installed:    true,
-		FilesWritten: written,
+		FilesWritten: adapterprotocol.RepoRelativePaths(p.RepoRoot, rulesDir, written),
 	}, nil
 }
 

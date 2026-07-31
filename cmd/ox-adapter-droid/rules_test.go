@@ -25,7 +25,8 @@ func TestHandleInstallRules_CreatesFile(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.True(t, resp.Installed)
-	assert.Contains(t, resp.FilesWritten, "ox.md")
+	// repo-relative per the adapterprotocol FilesWritten contract — see GH #731.
+	assert.Contains(t, resp.FilesWritten, filepath.Join(".factory", "rules", "ox.md"))
 
 	ruleFile := filepath.Join(dir, ".factory", "rules", "ox.md")
 	data, err := os.ReadFile(ruleFile)

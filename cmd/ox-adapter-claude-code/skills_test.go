@@ -41,8 +41,8 @@ func TestHandleInstallSkills_StampPlacement(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.True(t, resp.Installed)
-	assert.Contains(t, resp.FilesWritten, filepath.Join(name, skillFileName),
-		"FilesWritten must reference <name>/SKILL.md")
+	assert.Contains(t, resp.FilesWritten, filepath.Join(".claude", "skills", name, skillFileName),
+		"FilesWritten must be repo-relative per the adapterprotocol contract")
 
 	data, err := os.ReadFile(filepath.Join(dir, ".claude", "skills", name, skillFileName))
 	require.NoError(t, err, "SKILL.md must exist on disk after install")
@@ -218,7 +218,7 @@ func TestHandleCheckSkills_FrontmatterEdited_ReportsStale(t *testing.T) {
 	// reinstall (the --fix path) must rewrite the file and clear staleness.
 	resp, err := handleInstallSkills(params)
 	require.NoError(t, err)
-	assert.Contains(t, resp.FilesWritten, filepath.Join(name, skillFileName),
+	assert.Contains(t, resp.FilesWritten, filepath.Join(".claude", "skills", name, skillFileName),
 		"--fix must rewrite a skill whose frontmatter was edited")
 
 	fixed, err := handleCheckSkills(params)

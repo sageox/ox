@@ -56,12 +56,8 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/sageoxignore"
 )
-
-// projectGitignoreLine is the single entry the reconciler appends to a
-// project's root .gitignore so per-project bubble symlinks never leak
-// into a commit. Idempotent: appended only when missing.
-const projectGitignoreLine = ".sageox/kb/"
 
 // kbTeamScopeDir is the scope subdirectory under <project>/.sageox/kb/
 // that holds team-scope bubble symlinks. Mirrors the server's
@@ -141,8 +137,8 @@ func (s *SyncScheduler) reconcileProjectSymlinksWithOps(ctx context.Context, pro
 	defer cancel()
 
 	err := fileutil.WithFileLock(lockCtx, lockTarget, func() error {
-		// ensure project's root .gitignore excludes .sageox/kb/. Done
-		// inside the lock so two daemons don't both append the line.
+		// ensure .sageox/.gitignore excludes kb/. Done inside the lock
+		// so two daemons don't both append the line.
 		if err := ensureProjectGitignoreEntry(projectRoot); err != nil {
 			s.logger.Warn("kb_symlink gitignore update failed", "project", projectRoot, "error", err)
 			// non-fatal — symlink reconciliation continues.
@@ -332,48 +328,33 @@ func tmpSuffix() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
 
-// ensureProjectGitignoreEntry appends `.sageox/kb/` to the project's
-// root `.gitignore` exactly once. Idempotent: re-reads the file each
+// ensureProjectGitignoreEntry appends `kb/` to the project's
+// `.sageox/.gitignore` exactly once, so daemon-materialized bubble
+// symlinks never leak into a commit. Idempotent: re-reads the file each
 // call and only appends when the line is genuinely missing.
 //
-// Why touch the project's root .gitignore (and not just .sageox/.gitignore):
-// The existing .sageox/.gitignore already excludes most cache content
-// nested under the dir, but the bead spec is explicit: write to the
-// project's root .gitignore. This keeps the rule visible to humans
-// browsing the repo from the top.
+// # Why .sageox/.gitignore and not the project's root .gitignore
+//
+// This reverses an earlier decision (recorded here as "the bead spec is
+// explicit: write to the project's root .gitignore ... visible to humans
+// browsing the repo from the top"). GH #732: developers do not want a
+// background process editing the .gitignore at the top of their repo, and
+// visibility was never worth the intrusion. Patterns in a nested
+// .gitignore are relative to its own directory, so `kb/` here covers
+// exactly what `.sageox/kb/` covered from the root — same paths, inside a
+// file ox already owns, writes, and commits.
+//
+// The daemon deliberately does NOT remove a pre-existing `.sageox/kb/`
+// line from the root .gitignore. Silently deleting lines from a
+// developer's file in a background pass is the very behavior #732
+// objected to; that cleanup is foreground-only (`ox init`, `ox doctor`).
+//
+// Callers reach this inside the kb file lock, and the lock target lives
+// under .sageox/, so the directory is guaranteed to exist by this point.
 func ensureProjectGitignoreEntry(projectRoot string) error {
-	gitignorePath := filepath.Join(projectRoot, ".gitignore")
-	existing, err := os.ReadFile(gitignorePath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read .gitignore: %w", err)
+	gitignorePath := filepath.Join(projectRoot, ".sageox", ".gitignore")
+	if _, _, err := sageoxignore.EnsureEntry(gitignorePath, sageoxignore.KBEntry); err != nil {
+		return err
 	}
-	if hasGitignoreLine(string(existing), projectGitignoreLine) {
-		return nil
-	}
-	// preserve trailing newline expectations: append on its own line
-	// even if the existing file didn't end with one.
-	var buf strings.Builder
-	buf.Write(existing)
-	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
-		buf.WriteString("\n")
-	}
-	buf.WriteString(projectGitignoreLine)
-	buf.WriteString("\n")
-	return os.WriteFile(gitignorePath, []byte(buf.String()), 0o644)
-}
-
-// hasGitignoreLine reports whether `content` already lists `line` as
-// a non-comment, non-blank entry. Comment-aware so a line buried in a
-// `# .sageox/kb/` comment doesn't fool us into skipping the append.
-func hasGitignoreLine(content, line string) bool {
-	for _, raw := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if trimmed == line {
-			return true
-		}
-	}
-	return false
+	return nil
 }

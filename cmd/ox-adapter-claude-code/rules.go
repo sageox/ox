@@ -60,9 +60,13 @@ func handleInstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.Install
 		return nil, err
 	}
 
+	// agentx returns names relative to the rules dir (ox.md,
+	// sageox/use-team-context.md). The FilesWritten contract is
+	// repo-relative — see GH #731, where handing ox `ox.md` made it stage
+	// nothing at all.
 	return &adapterprotocol.InstallRulesResponse{
 		Installed:    true,
-		FilesWritten: written,
+		FilesWritten: adapterprotocol.RepoRelativePaths(p.RepoRoot, rulesDir, written),
 	}, nil
 }
 
