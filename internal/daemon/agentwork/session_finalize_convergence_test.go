@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -231,4 +232,64 @@ func readMetaForTest(path string) (*lfs.SessionMeta, error) {
 		return nil, err
 	}
 	return &meta, nil
+}
+
+// TestGitCommitAndPush_IgnoresOtherSessionsStagedFiles pins the pathspec scoping
+// of the staged-changes check.
+//
+// The git index is shared across every session this process finalizes. If an
+// earlier finalize staged another session's files and then failed to commit for
+// any reason other than an empty stage, those files are still staged. An
+// unscoped `git diff --cached` would see them, conclude this session has work to
+// commit, and fold the other session's files into a commit titled
+// "finalize session <this one>" — attributing files to the wrong session.
+func TestGitCommitAndPush_IgnoresOtherSessionsStagedFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	_, clonePath := setupBareAndCloneLedger(t)
+
+	// the session under test: already committed, so its own stage is empty
+	target := "2026-01-15T19-00-testuser-OxSCOPE"
+	targetDir := filepath.Join(clonePath, "sessions", target)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range append([]string{"raw.jsonl", "meta.json"}, requiredArtifacts...) {
+		if err := os.WriteFile(filepath.Join(targetDir, name), []byte("content"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGitCmd(t, clonePath, "add", "sessions/"+target)
+	runGitCmd(t, clonePath, "commit", "--no-verify", "-m", "finalize session "+target)
+
+	// a DIFFERENT session's file, left staged by an earlier failed finalize
+	other := "2026-01-15T19-30-testuser-OxOTHER"
+	otherDir := filepath.Join(clonePath, "sessions", other)
+	if err := os.MkdirAll(otherDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(otherDir, "raw.jsonl"), []byte("other session"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCmd(t, clonePath, "add", "sessions/"+other)
+
+	handler := newGitBackedHandler()
+	handler.gitCommitAndPush(&SessionFinalizePayload{
+		SessionDir: targetDir,
+		LedgerPath: clonePath,
+	})
+
+	// the other session's file must still be staged and uncommitted
+	committed := gitOutput(t, clonePath, "log", "-1", "--name-only", "--pretty=format:")
+	if strings.Contains(committed, other) {
+		t.Errorf("finalizing %s committed %s's files:\n%s", target, other, committed)
+	}
+	if staged := gitOutput(t, clonePath, "diff", "--cached", "--name-only"); !strings.Contains(staged, other) {
+		t.Errorf("%s's staged file went missing; still expected in the index, got %q", other, staged)
+	}
 }

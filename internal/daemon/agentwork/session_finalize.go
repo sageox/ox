@@ -1635,7 +1635,7 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	// Ask git what is staged rather than parsing the commit's message: the wording
 	// varies with the rest of the tree ("working tree clean" vs "untracked files
 	// present"), so an unrelated stray file in the ledger would resurrect the loop.
-	staged, err := h.hasStagedChanges(ledgerPath)
+	staged, err := h.hasStagedChanges(ledgerPath, relDir+"/")
 	if err != nil {
 		h.logger.Warn("could not inspect staged changes", "err", err)
 		return false
@@ -1782,11 +1782,19 @@ func (h *SessionFinalizeHandler) synthesizeMeta(sessionDir, sessionName string) 
 		Build()
 }
 
-// hasStagedChanges reports whether the index differs from HEAD. Used to tell a
-// no-op finalize (content already at HEAD) from a real commit failure without
-// depending on git's human-readable output.
-func (h *SessionFinalizeHandler) hasStagedChanges(repoPath string) (bool, error) {
-	cmd := exec.Command("git", "-C", repoPath, "diff", "--cached", "--name-only")
+// hasStagedChanges reports whether the index differs from HEAD for pathspec.
+// Used to tell a no-op finalize (content already at HEAD) from a real commit
+// failure without depending on git's human-readable output.
+//
+// Scoped to the session's own path on purpose. The index is shared: if an
+// earlier finalize staged another session's files and then failed to commit for
+// some reason other than an empty stage, those files are still staged. An
+// unscoped check would see them, take the ordinary commit path, and fold that
+// session's files into this one's "finalize session <name>" commit. Nothing is
+// lost — the other session's next cycle finds nothing staged and simply pushes —
+// but the history would attribute files to the wrong session.
+func (h *SessionFinalizeHandler) hasStagedChanges(repoPath, pathspec string) (bool, error) {
+	cmd := exec.Command("git", "-C", repoPath, "diff", "--cached", "--name-only", "--", pathspec)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	out, err := cmd.Output()
 	if err != nil {
@@ -1796,10 +1804,14 @@ func (h *SessionFinalizeHandler) hasStagedChanges(repoPath string) (bool, error)
 }
 
 // runGit executes a git command in the ledger directory.
+//
+// Pins the locale: isNothingToCommit matches git's English wording as a fallback
+// for the concurrent-committer race, and under a translated locale that match
+// would silently never fire.
 func (h *SessionFinalizeHandler) runGit(repoPath string, args ...string) error {
 	fullArgs := append([]string{"-C", repoPath}, args...)
 	cmd := exec.Command("git", fullArgs...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
