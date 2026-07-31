@@ -360,15 +360,27 @@ the distinction is the scope of that rule, not an exception to it:
 | Audience | SageOx, aggregated across users | The user, on their own account page |
 | Purpose | Product analytics | Identifying a credential to revoke |
 | Identity | Deliberately anonymous | Already authenticated — the server knows who |
-| Risk of a machine id | **Correlates an anonymous user's sessions** | None; identity is already established |
+| Risk of a machine id | **Correlates an anonymous user's sessions** | Low; identity is already established, so it adds no linkability |
 
 A stable machine identifier is banned in telemetry precisely because it
 de-anonymizes an otherwise anonymous stream. That hazard does not exist for
 metadata attached to a credential the user is knowingly creating, stored on
-their own account, and displayed back to them. The label answers *which
-machine*, never *who*. Every comparable product (GitHub, Google, 1Password,
-Slack) ships this, because the alternative is a device list of
-indistinguishable rows and no safe way to revoke one.
+their own account, and displayed back to them. Every comparable product
+(GitHub, Google, 1Password, Slack) ships this, because the alternative is a
+device list of indistinguishable rows and no safe way to revoke one.
+
+**Be precise about what it contains.** The label is `user@host`, where `user`
+is the **local OS account name**. So it identifies the machine *and* the
+account on it — which for a single-user laptop is a person. It is not
+anonymous, and this section does not claim otherwise.
+
+What makes that acceptable here, and not in telemetry, is that the request is
+already authenticated: the server knows exactly who is logging in before the
+label arrives. The label therefore reveals nothing about *identity* it did not
+already have; it only adds *which device*. The residual disclosure is the local
+account name itself — e.g. that `r.snodgrass` rather than `ryan` is the account
+on this host — which is why the opt-out exists and why the hostname is reduced
+to its first DNS label.
 
 **Opt-out**, per principle 4:
 
@@ -399,4 +411,4 @@ what ox sent before device labels existed.
 | Guidance sync | None (download only) | `--offline` flag |
 | Prompt delivery | None (download only) | `--offline` flag |
 | Version check | ox version, OS | `ox config set check_updates false` |
-| Device label (`ox login`) | `user@host`, shown only to that user | `SAGEOX_NO_DEVICE_LABEL=1` |
+| Device label (`ox login`) | `user@host` — local OS account + short hostname, shown only to that user | `SAGEOX_NO_DEVICE_LABEL=1` |

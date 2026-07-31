@@ -34,9 +34,18 @@ const (
 //
 // `/settings/security` lists every PAT minted by `ox login` with nothing
 // but timestamps. Someone with a laptop, a desktop, a devcontainer and a
-// CI runner cannot tell which row to revoke. The label answers "which
-// machine", not "who" — the server already knows who, from the token it
-// is about to mint.
+// CI runner cannot tell which row to revoke.
+//
+// # What it actually contains
+//
+// The local OS account name plus the short hostname. That identifies the
+// machine AND the account on it — for a single-user laptop, a person. It
+// is not anonymous. What makes it acceptable is that the device-flow
+// exchange is already authenticated: the server knows who is logging in
+// before the label arrives, so the label adds "which device" without
+// adding any linkability it did not already have. The residual
+// disclosure is the account name itself, which is what the opt-out and
+// the first-DNS-label reduction exist to bound.
 //
 // # Privacy
 //
