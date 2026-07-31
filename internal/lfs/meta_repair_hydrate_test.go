@@ -255,3 +255,45 @@ func TestHydrateRawToCacheErr_TerminalOnlyWhenNeitherSourceHasAnOID(t *testing.T
 	assert.ErrorIs(t, err, ErrNoLFSManifest,
 		"neither the manifest nor the on-disk file yields an OID — genuinely terminal")
 }
+
+// TestResetInlineSummaryEligible_MissingTranscriptDoesNotReset closes the
+// branch the pointer gate misses. IsPointerFile is false for an ABSENT
+// raw.jsonl, so an eligible session with no transcript at all used to fall
+// straight through: terminal state cleared, and a .needs-summary marker
+// written pointing at a file that does not exist. The next daemon pass
+// then tries to summarize content that cannot be read — the same unbounded
+// loop as the pointer case, one branch over.
+func TestResetInlineSummaryEligible_MissingTranscriptDoesNotReset(t *testing.T) {
+	ledgerPath := t.TempDir()
+	sessionDir := filepath.Join(ledgerPath, "sessions", "2026-05-01T20-04-testuser-OxMISS")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+
+	eligibleMeta(t, sessionDir)
+	// deliberately NO raw.jsonl at all
+
+	before, err := os.ReadFile(filepath.Join(sessionDir, "meta.json"))
+	require.NoError(t, err)
+
+	assert.False(t, ResetInlineSummaryEligible(sessionDir, false, nil, ledgerPath),
+		"a session with no transcript can never be summarized — clearing its terminal state re-arms the loop")
+
+	after, err := os.ReadFile(filepath.Join(sessionDir, "meta.json"))
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "meta.json must be byte-identical")
+	assert.NoFileExists(t, filepath.Join(sessionDir, ".needs-summary"),
+		"a marker pointing at a nonexistent transcript is a lie the daemon will act on")
+}
+
+// TestResetInlineSummaryEligible_EmptyTranscriptDoesNotReset — a
+// zero-byte raw.jsonl is equally unsummarizable.
+func TestResetInlineSummaryEligible_EmptyTranscriptDoesNotReset(t *testing.T) {
+	ledgerPath := t.TempDir()
+	sessionDir := filepath.Join(ledgerPath, "sessions", "2026-05-01T20-04-testuser-OxEMPT")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+
+	eligibleMeta(t, sessionDir)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), nil, 0o644))
+
+	assert.False(t, ResetInlineSummaryEligible(sessionDir, false, nil, ledgerPath))
+	assert.NoFileExists(t, filepath.Join(sessionDir, ".needs-summary"))
+}

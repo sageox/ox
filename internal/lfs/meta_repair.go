@@ -166,6 +166,19 @@ func ResetInlineSummaryEligible(sessionDir string, dryRun bool, client *Client, 
 		}
 	}
 
+	// Whatever path we landed on must actually be readable. A pointer that
+	// hydrated gets here with the cache path; a real transcript gets here
+	// unchanged; but a MISSING or empty raw.jsonl reaches here too —
+	// IsPointerFile is false for it, so the branch above never ran.
+	//
+	// Without this, an absent transcript would clear the terminal state and
+	// get a .needs-summary marker pointing at a file that does not exist,
+	// sending the daemon straight back into the loop this function exists
+	// to stop — the same failure as the pointer case, one branch over.
+	if info, err := os.Stat(rawPath); err != nil || info.Size() == 0 {
+		return false
+	}
+
 	if dryRun {
 		return true
 	}

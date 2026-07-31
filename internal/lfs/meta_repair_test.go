@@ -183,6 +183,16 @@ func TestRecoverEmptyTitleMeta_DryRunWritesNothing(t *testing.T) {
 //
 // Failure prevented: 40+ sessions stuck permanently in "unrecoverable"
 // state even after the daemon is fixed to use inline prompts.
+// writeTestTranscript gives a session a readable raw.jsonl. Eligible
+// sessions in production always have one (a pointer or real content);
+// ResetInlineSummaryEligible refuses to clear terminal state without it,
+// because a session with no transcript can never be summarized.
+func writeTestTranscript(t *testing.T, dir string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"),
+		[]byte(`{"metadata":{},"type":"header"}`+"\n"+`{"type":"user","content":"hi"}`+"\n"), 0o644))
+}
+
 func TestResetInlineSummaryEligible_ResetsFileReadBugSessions(t *testing.T) {
 	dir := t.TempDir()
 	writeTestMeta(t, dir, &SessionMeta{
@@ -191,6 +201,7 @@ func TestResetInlineSummaryEligible_ResetsFileReadBugSessions(t *testing.T) {
 		SummaryAttempts: MaxSummaryAttempts,
 		ValidationError: "content validation failed: title too short (0 chars, minimum 3)",
 	})
+	writeTestTranscript(t, dir)
 
 	reset := ResetInlineSummaryEligible(dir, false, nil, "")
 	assert.True(t, reset)
@@ -240,6 +251,7 @@ func TestResetInlineSummaryEligible_DryRun(t *testing.T) {
 		SummaryAttempts: MaxSummaryAttempts,
 		ValidationError: "content validation failed: title too short (0 chars, minimum 3)",
 	})
+	writeTestTranscript(t, dir)
 
 	reset := ResetInlineSummaryEligible(dir, true, nil, "")
 	assert.True(t, reset)
