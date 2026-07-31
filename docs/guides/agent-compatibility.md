@@ -15,12 +15,12 @@ ox works with multiple AI coding agents. Support depth varies by agent — here'
 
 | Feature | Claude Code | Codex | Gemini | Droid | OpenCode | Amp | Pi | Aider | Goose |
 |---------|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| Tier | Gold | Silver | Silver | Silver | Bronze | Bronze | Bronze | Bronze | Marker only |
+| Tier | Gold | Silver | Silver | Silver | Bronze | Bronze | Bronze | Bronze | Silver |
 | Context prime | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Session recording | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| Auto-prime at session start | ✅ | ✅ | — | — | ✅ | — | — | — | — |
-| Lifecycle hooks | ✅ | ✅ | ✅ | ✅ | plugin | plugin | — | — | — |
-| Whisper push | ✅ | ✅ | fallback | fallback | — | — | — | — | — |
+| Session recording | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Auto-prime at session start | ✅ | ✅ | — | — | ✅ | — | — | — | ✅ |
+| Lifecycle hooks | ✅ | ✅ | ✅ | ✅ | plugin | plugin | — | — | ✅ |
+| Whisper push | ✅ | ✅ | fallback | fallback | — | — | — | — | ✅ |
 | Team rules install | ✅ | — | — | ✅ | — | — | — | — | — |
 | Skills / commands install | ✅ | — | — | — | — | — | — | — | — |
 | Anti-entropy recovery | ✅ | — | — | — | — | — | — | — | — |
@@ -44,6 +44,7 @@ the next prompt. Every agent can pull explicitly with `ox agent <id> whisper`.
 | Amp | `~/.cache/amp/ox-sessions/<thread>.jsonl` (written by the ox plugin) |
 | Pi | `~/.pi/agent/sessions/<dir>/*.jsonl` |
 | Aider | `.aider.chat.history.md` |
+| Goose | `~/.local/share/goose/sessions/sessions.db` (SQLite) |
 
 ## Quick Start by Agent
 
@@ -109,18 +110,30 @@ marker goes there rather than in `AGENTS.md`.
 ### Goose
 ```bash
 ox init
+ox adapter install goose
 ```
-Goose loads `AGENTS.md` before `.goosehints`, hierarchically from the working
-directory up to the repo root, so `ox init` alone is enough to prime it. There is
-no Goose adapter yet, so sessions are not recorded — see below.
+Installs an [Open Plugins](https://open-plugins.com/agent-builders/components/hooks)
+plugin directory at `.agents/plugins/sageox/` — a `plugin.json` manifest plus
+`hooks/hooks.json`. Goose ignores a plugin directory with no manifest, so both
+files are required.
+
+ox installs seven of Goose's eleven hook events. The four it skips
+(`BeforeReadFile`, `AfterFileEdit`, `BeforeShellExecution`, `AfterShellExecution`)
+are each a strict subset of `PreToolUse`/`PostToolUse` — reading a file and
+running a shell command are both tool calls — so installing them would spawn
+`ox agent hook` twice per tool call for no signal ox does not already have.
+`PostToolUseFailure` **is** installed: Goose fires `PostToolUse` only on success,
+so without it a failed turn stays invisible until the next success or `Stop`.
+
+Goose also loads `AGENTS.md` before `.goosehints`, hierarchically from the working
+directory up to the repo root, so context primes even before hooks are installed.
 
 ## Known Limitations
 
-- **Goose**: no adapter, so no session recording. Goose does have a full hooks
-  system (`SessionStart`, `SessionEnd`, `Stop`, `UserPromptSubmit`, tool events)
-  and a SQLite session store, so an adapter is tractable. It has **no compaction
-  event**, which means team context primed at session start is lost when Goose
-  compacts — a limitation ox cannot work around.
+- **Goose**: has **no compaction event**, so team context primed at session start
+  is lost when Goose compacts. ox cannot work around this. Goose also sends
+  `working_dir` only on *tool* events, so the project-scope hook command pins
+  `OX_PROJECT_ROOT` to the absolute repo root rather than relying on the cwd walk.
 - **Gemini, Droid**: no `SessionStart` hook, so priming depends on the instruction
   file marker rather than firing automatically.
 - **Codex**: no `SessionEnd` hook, so sessions do not auto-finalize; they close on

@@ -213,7 +213,7 @@ var adapterAliases = map[string]string{
 	"cody":            "generic",
 	"continue":        "generic",
 	"cline":           "generic",
-	"goose":           "generic",
+	"goose":           "goose",
 	"kiro":            "generic",
 	"droid":           "droid",
 }

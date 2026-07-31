@@ -15,6 +15,7 @@ var SupportedAgents = map[string]bool{
 	string(agentx.AgentTypeGemini):     true,
 	string(agentx.AgentTypeAmp):        true,
 	string(agentx.AgentTypePi):         true,
+	string(agentx.AgentTypeGoose):      true,
 }
 
 // CanonicalAgentType normalizes display names and legacy aliases to canonical agent type slugs.
@@ -33,6 +34,8 @@ func CanonicalAgentType(agentType string) string {
 		return string(agentx.AgentTypeAmp)
 	case "pi", "pi-coding-agent", "pi agent":
 		return string(agentx.AgentTypePi)
+	case "goose":
+		return string(agentx.AgentTypeGoose)
 	}
 
 	// If the input is a display name from registry (e.g., "Cursor"), map to slug.
@@ -73,7 +76,11 @@ func ClassifyAgentTier(agentType string) AgentTier {
 	switch CanonicalAgentType(agentType) {
 	case string(agentx.AgentTypeClaudeCode):
 		return TierGold
-	case string(agentx.AgentTypeCodex), string(agentx.AgentTypeGemini):
+	// Goose is Silver on the same basis as Codex: it installs real lifecycle
+	// hooks. It is strictly ahead of Codex on SessionEnd (which Codex lacks) and
+	// strictly behind everything else here on compaction — Goose fires no
+	// compaction event, so primed context does not survive a Goose compaction.
+	case string(agentx.AgentTypeCodex), string(agentx.AgentTypeGemini), string(agentx.AgentTypeGoose):
 		return TierSilver
 	case string(agentx.AgentTypeAmp), string(agentx.AgentTypeOpenCode), string(agentx.AgentTypePi):
 		return TierBronze

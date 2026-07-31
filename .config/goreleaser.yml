@@ -244,6 +244,24 @@ builds:
     ldflags:
       - -s -w
 
+  - id: ox-adapter-goose
+    main: ./cmd/ox-adapter-goose
+    binary: ox-adapter-goose
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: freebsd
+        goarch: arm64
+    ldflags:
+      - -s -w
+
 archives:
   - id: ox-archive
     formats:
@@ -281,7 +299,7 @@ release:
 
     Pre-compiled binaries for Linux, macOS (Intel & Apple Silicon), and FreeBSD.
 
-    Each tarball includes ox and bundled adapters (claude-code, gemini, codex, amp, opencode, pi, aider, droid).
+    Each tarball includes ox and bundled adapters (claude-code, gemini, codex, amp, opencode, pi, aider, droid, goose).
 
     ### Installation
 
@@ -314,6 +332,7 @@ brews:
       bin.install "ox-adapter-pi"
       bin.install "ox-adapter-aider"
       bin.install "ox-adapter-droid"
+      bin.install "ox-adapter-goose"
 
 announce:
   skip: true

@@ -83,7 +83,7 @@ func TestBundledAdapters_Present(t *testing.T) {
 		t.Fatalf("LoadEmbeddedRegistry() error: %v", err)
 	}
 
-	expected := []string{"claude-code", "gemini", "codex", "amp", "opencode", "pi", "aider"}
+	expected := []string{"claude-code", "gemini", "codex", "amp", "opencode", "pi", "aider", "droid", "goose"}
 	for _, name := range expected {
 		entry := reg.Lookup(name)
 		if entry == nil {

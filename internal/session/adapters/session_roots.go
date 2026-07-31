@@ -98,4 +98,5 @@ var adapterSessionRoots = map[string][]string{
 	"pi":       {".sageox/cache/sessions", ".cache/sageox/sessions"},
 	"aider":    {".sageox/cache/sessions", ".cache/sageox/sessions"},
 	"droid":    {".sageox/cache/sessions", ".cache/sageox/sessions"},
+	"goose":    {".sageox/cache/sessions", ".cache/sageox/sessions", ".local/share/goose/sessions"},
 }

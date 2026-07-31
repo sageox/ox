@@ -1339,10 +1339,10 @@ ox init
 
 SageOx integrates with the AI coworkers developers already use:
 
-- **Claude Code, Codex, Gemini CLI, Droid** — Automatic via lifecycle hooks
+- **Claude Code, Codex, Gemini CLI, Droid, Goose** — Automatic via lifecycle hooks
 - **OpenCode** — Automatic via a plugin
 - **Amp** — Plugin records the session; ` + "`AGENTS.md`" + ` primes it
-- **Pi, Aider, Goose** — Via the ` + "`ox agent prime`" + ` marker in their instruction file
+- **Pi, Aider** — Via the ` + "`ox agent prime`" + ` marker in their instruction file
 - **Cursor, Windsurf, Cline, Copilot, Kiro** — Via the marker in ` + "`.cursorrules`" + `, ` + "`.windsurfrules`" + `, and equivalents
 - **Any AI coworker** — Manual ` + "`ox agent prime`" + ` injection
 

@@ -252,7 +252,7 @@ func TestCanonicalAdapterName(t *testing.T) {
 		{"cody", "generic"},
 		{"continue", "generic"},
 		{"cline", "generic"},
-		{"goose", "generic"},
+		{"goose", "goose"},
 		{"kiro", "generic"},
 		{"opencode", "opencode"},
 		{"pi", "pi"},

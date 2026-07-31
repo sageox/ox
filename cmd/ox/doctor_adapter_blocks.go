@@ -211,7 +211,7 @@ func scanAdapterBlocks(content string) adapterBlockFinding {
 		}
 		// look inside the block for a hardcoded AGENT_ENV=<adapter>
 		body := content[startIdx:endIdx]
-		for _, lit := range []string{"AGENT_ENV=pi", "AGENT_ENV=amp", "AGENT_ENV=aider", "AGENT_ENV=codex", "AGENT_ENV=gemini", "AGENT_ENV=droid", "AGENT_ENV=opencode"} {
+		for _, lit := range []string{"AGENT_ENV=pi", "AGENT_ENV=amp", "AGENT_ENV=aider", "AGENT_ENV=codex", "AGENT_ENV=gemini", "AGENT_ENV=droid", "AGENT_ENV=opencode", "AGENT_ENV=goose"} {
 			if strings.Contains(body, lit) {
 				f.hasAgentEnv = true
 				break

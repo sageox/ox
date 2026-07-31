@@ -20,7 +20,7 @@ NC='\033[0m' # No Color
 REPO="sageox/ox"
 BINARY="ox"
 # bundled adapter binaries shipped alongside ox in the release tarball
-ADAPTER_BINARIES="ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode"
+ADAPTER_BINARIES="ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-aider ox-adapter-droid ox-adapter-goose"
 LAST_INSTALL_PATH=""
 
 log_info() {

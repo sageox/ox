@@ -30,7 +30,7 @@ require (
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
-	github.com/sageox/agentx v0.1.12
+	github.com/sageox/agentx v0.1.13
 	github.com/sageox/frictionax v0.1.2
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/spf13/cobra v1.10.2

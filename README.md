@@ -55,7 +55,7 @@ from, whichever agent your team uses.
 | **Amp** | ✅ | ✅ | plugin records; `AGENTS.md` primes |
 | **Pi** | ✅ | ✅ | `AGENTS.md` |
 | **Aider** | ✅ | ✅ | `CONVENTIONS.md` |
-| **Goose** | ✅ | ➖ | `AGENTS.md` |
+| **Goose** | ✅ | ✅ | hooks — session, prompt, tool, and tool-failure |
 | Cursor · Windsurf · Cline · Copilot · Kiro | ✅ | ➖ | instruction file |
 
 ✅ shipped · ➖ planned. Claude Code is the primary, most-tested target; see

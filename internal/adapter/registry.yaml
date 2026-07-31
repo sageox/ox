@@ -71,6 +71,28 @@ adapters:
     capabilities: [session_reader, hook_installer, incremental_reader, file_watcher, serve_mode]
     detect_commands: [aider]
 
+  - name: droid
+    display_name: Droid
+    description: Reads Factory Droid sessions, installs Droid hooks and team rules
+    type: session
+    bundled: true
+    binary: ox-adapter-droid
+    repo: sageox/ox
+    capabilities: [session_reader, hook_installer, rules_installer, incremental_reader, file_watcher, serve_mode, session_importer]
+    detect_commands: [droid]
+
+  # Goose declares no file_watcher: sessions live in SQLite behind a virtual
+  # "goose:<id>" handle, so there is no path for fsnotify to watch.
+  - name: goose
+    display_name: Goose
+    description: Reads Goose sessions from SQLite, installs Goose plugin hooks
+    type: session
+    bundled: true
+    binary: ox-adapter-goose
+    repo: sageox/ox
+    capabilities: [session_reader, hook_installer, incremental_reader, serve_mode, session_importer, capture_prior]
+    detect_commands: [goose]
+
   # --- External (non-bundled) adapters ---
   #
   # SECURITY (ADR-022, ox-5ihl): the short-name install path treats SageOx as the
