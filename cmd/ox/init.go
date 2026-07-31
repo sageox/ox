@@ -1661,11 +1661,23 @@ type initTracker struct {
 	modifiedFiles map[string][]byte // absolute path -> original content (for restore)
 	forceStage    []string          // absolute paths that need --force staging (may be gitignored)
 	isFreshInit   bool              // true if .sageox/ didn't exist before
+
+	// indexEntries records each touched path's git INDEX entry as it was
+	// before init ran, keyed by repo-relative path. A recorded "" means
+	// the path was not in the index at all.
+	//
+	// The working-tree snapshot in modifiedFiles is not sufficient: a user
+	// may have already `git add`ed their own edits to a file ox is about
+	// to touch. Resetting that path to HEAD on rollback would silently
+	// throw their staged work away — the exact class of "ox touched
+	// something it wasn't asked to" this PR exists to stop.
+	indexEntries map[string]string
 }
 
 func newInitTracker(gitRoot string) *initTracker {
 	return &initTracker{
 		gitRoot:       gitRoot,
+		indexEntries:  make(map[string]string),
 		modifiedFiles: make(map[string][]byte),
 	}
 }
@@ -1678,6 +1690,7 @@ func newInitTracker(gitRoot string) *initTracker {
 // tracker handled "rollback + staging" for the root .gitignore when it
 // only ever did the first half (GH #731).
 func (t *initTracker) trackCreatedFile(absPath string) {
+	t.snapshotIndexEntry(absPath)
 	t.createdFiles = append(t.createdFiles, absPath)
 }
 
@@ -1693,6 +1706,7 @@ func (t *initTracker) trackCreatedDir(absPath string) {
 // EAGERLY, at call time: call this BEFORE writing, or rollback will
 // faithfully restore the already-modified content.
 func (t *initTracker) trackModifiedFile(absPath string) {
+	t.snapshotIndexEntry(absPath)
 	if _, alreadyTracked := t.modifiedFiles[absPath]; alreadyTracked {
 		return
 	}
@@ -1703,7 +1717,34 @@ func (t *initTracker) trackModifiedFile(absPath string) {
 
 // trackForceStage records a file that needs --force to stage (may be gitignored).
 func (t *initTracker) trackForceStage(absPath string) {
+	t.snapshotIndexEntry(absPath)
 	t.forceStage = append(t.forceStage, absPath)
+}
+
+// snapshotIndexEntry records a path's git index entry before ox touches
+// it, so rollback can put the index back exactly as the user left it —
+// including any changes they had already staged themselves.
+//
+// Records "" when the path is not in the index. Idempotent: the FIRST
+// snapshot wins, since later calls happen after ox has already staged.
+func (t *initTracker) snapshotIndexEntry(absPath string) {
+	rel, err := filepath.Rel(t.gitRoot, absPath)
+	if err != nil {
+		return
+	}
+	if _, seen := t.indexEntries[rel]; seen {
+		return
+	}
+	if !isGitRepo(t.gitRoot) {
+		return
+	}
+	cmd := exec.Command("git", "ls-files", "--stage", "--", rel)
+	cmd.Dir = t.gitRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return // can't read the index; leave the path unrecorded
+	}
+	t.indexEntries[rel] = strings.TrimRight(string(out), "\n")
 }
 
 // stageAll stages all tracked files in git.
@@ -1839,12 +1880,25 @@ func (t *initTracker) unstageAll(quiet bool) {
 	}
 
 	for _, rel := range paths {
-		cmd := exec.Command("git", "reset", "-q", "HEAD", "--", rel)
-		cmd.Dir = t.gitRoot
-		if err := cmd.Run(); err == nil {
-			continue
+		entry, recorded := t.indexEntries[rel]
+
+		// Restore the EXACT pre-init index entry when we have one. A plain
+		// `git reset HEAD` would be wrong: if the user had already staged
+		// their own edits to this path, resetting to HEAD silently discards
+		// that staged work while leaving the working tree alone.
+		if recorded && entry != "" {
+			restore := exec.Command("git", "update-index", "--index-info")
+			restore.Dir = t.gitRoot
+			restore.Stdin = strings.NewReader(entry + "\n")
+			if err := restore.Run(); err == nil {
+				continue
+			}
+			if !quiet {
+				cli.PrintWarning(fmt.Sprintf("Could not restore index entry for %s", rel))
+			}
 		}
-		// not in HEAD (a file ox created): drop it from the index entirely.
+
+		// Not in the index before init (or unreadable): drop it.
 		rm := exec.Command("git", "rm", "-q", "--cached", "--ignore-unmatch", "--", rel)
 		rm.Dir = t.gitRoot
 		if err := rm.Run(); err != nil && !quiet {

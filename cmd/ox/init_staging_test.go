@@ -369,3 +369,56 @@ func TestRollback_UnstagesEverythingItStaged(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "node_modules/\n.sageox/kb/\n", string(body), "content restored too")
 }
+
+// TestRollback_PreservesPreExistingStagedChanges — a user may have already
+// `git add`ed their own edits to a file ox is about to touch. Rollback
+// restores the working tree from a content snapshot, but the INDEX needs
+// its own snapshot: a plain `git reset HEAD` would silently throw the
+// user's staged work away while leaving the working tree untouched.
+func TestRollback_PreservesPreExistingStagedChanges(t *testing.T) {
+	repo := testGitRepo(t)
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		require.NoError(t, cmd.Run(), "git %v", args)
+	}
+
+	agents := filepath.Join(repo, "AGENTS.md")
+	require.NoError(t, os.WriteFile(agents, []byte("# committed\n"), 0o644))
+	git("add", "AGENTS.md")
+	git("commit", "-m", "baseline")
+
+	// the user stages their OWN edit, before ox runs
+	require.NoError(t, os.WriteFile(agents, []byte("# committed\n# the user's staged work\n"), 0o644))
+	git("add", "AGENTS.md")
+
+	stagedBlob := func() string {
+		cmd := exec.Command("git", "ls-files", "--stage", "--", "AGENTS.md")
+		cmd.Dir = repo
+		out, err := cmd.Output()
+		require.NoError(t, err)
+		return strings.TrimSpace(string(out))
+	}
+	before := stagedBlob()
+	require.NotEmpty(t, before)
+
+	// ox now modifies and stages the same file, then rolls back
+	tracker := newInitTracker(repo)
+	tracker.trackModifiedFile(agents)
+	require.NoError(t, os.WriteFile(agents, []byte("# committed\n# ox marker\n"), 0o644))
+	tracker.trackForceStage(agents)
+	tracker.stageAll()
+	require.NotEqual(t, before, stagedBlob(), "precondition: ox changed the index entry")
+
+	tracker.rollback(true)
+
+	assert.Equal(t, before, stagedBlob(),
+		"the user's pre-existing staged edit must survive rollback — resetting to HEAD "+
+			"would destroy work ox was never asked to touch")
+
+	body, err := os.ReadFile(agents)
+	require.NoError(t, err)
+	assert.Equal(t, "# committed\n# the user's staged work\n", string(body),
+		"working tree restored to the user's content, not HEAD's")
+}
