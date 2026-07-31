@@ -21,7 +21,7 @@ func TestDetectedInstructionFiles_EmptyDir(t *testing.T) {
 
 	targets := DetectedInstructionFiles(root)
 
-	// agents with nil DetectFn (Codex, OpenCode, Amp, Aider) always pass detection,
+	// agents with nil DetectFn (Codex, OpenCode, Amp, Goose) always pass detection,
 	// so AGENTS.md appears via them even in an empty dir
 	names := targetRelPaths(targets)
 	assert.Contains(t, names, "AGENTS.md", "AGENTS.md should appear (shared by nil-DetectFn agents)")
@@ -98,7 +98,7 @@ func TestDetectedInstructionFiles_DeduplicatesSharedFiles(t *testing.T) {
 
 	targets := DetectedInstructionFiles(root)
 
-	// AGENTS.md is listed by Claude Code, Codex, OpenCode, Amp, and Aider.
+	// AGENTS.md is listed by Claude Code, Codex, OpenCode, Amp, and Goose.
 	// Dedup should ensure it appears only once.
 	names := targetRelPaths(targets)
 	count := 0
@@ -613,6 +613,27 @@ func TestInstructionFileRegistry_GooseSharesAgentsMd(t *testing.T) {
 	assert.Equal(t, markerFormatMarkdown, goose.MarkerFormat)
 	assert.Nil(t, goose.DetectFn, "Goose shares AGENTS.md; gating on detection would suppress the marker")
 	assert.False(t, goose.Creatable, "AGENTS.md is a primary file; Creatable would be redundant")
+}
+
+// TestInstructionFileRegistry_AiderIsAdapterOwned pins Aider OUT of this
+// registry. Aider loads only what .aider.conf.yml's `read:` names —
+// CONVENTIONS.md by default — so an AGENTS.md entry marked a file Aider never
+// reads while README.md and docs/guides/agent-compatibility.md both promised
+// CONVENTIONS.md. ox-adapter-aider owns CONVENTIONS.md end to end under its own
+// ox:prime:aider markers, so a CONVENTIONS.md entry here is equally wrong: it
+// would stack a second, differently-marked prime block on the adapter's.
+//
+// Failure prevented (the general class, not just Aider): a registry spec that
+// names an instruction file its agent does not actually load, or that the
+// agent's own adapter already owns — either way ox reports the agent as primed
+// when it is not, or double-primes it.
+func TestInstructionFileRegistry_AiderIsAdapterOwned(t *testing.T) {
+	for _, spec := range InstructionFileRegistry {
+		assert.NotEqual(t, "aider", spec.AgentType,
+			"Aider must not be in the instruction-file registry — ox-adapter-aider owns CONVENTIONS.md")
+		assert.NotContains(t, spec.ProjectFiles, "CONVENTIONS.md",
+			"spec %s lists CONVENTIONS.md, which ox-adapter-aider already writes under its own markers", spec.AgentType)
+	}
 }
 
 func TestInstructionFileRegistry_PrimaryFilesAreMarkdown(t *testing.T) {

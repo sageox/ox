@@ -6,7 +6,7 @@ audience: both
 
 # AGENTS.md and CLAUDE.md
 
-AI coding agents read instruction files at session start to learn project conventions. Different tools historically named these files differently — `CLAUDE.md` (Claude Code), `.cursorrules` (Cursor), `.windsurfrules` (Windsurf), `GEMINI.md` (Gemini CLI), `CONVENTIONS.md` (Aider). The cross-tool convention has converged on **AGENTS.md at the repo root**, which Codex, OpenCode, Amp, Pi, Goose, and Gemini CLI all read.
+AI coding agents read instruction files at session start to learn project conventions. Different tools historically named these files differently — `CLAUDE.md` (Claude Code), `.cursorrules` (Cursor), `.windsurfrules` (Windsurf), `GEMINI.md` (Gemini CLI), `CONVENTIONS.md` (Aider). The cross-tool convention has converged on **AGENTS.md at the repo root**, which Codex, OpenCode, Amp, Pi, Goose, and the OpenAI Agents SDK all read.
 
 SageOx supports both `AGENTS.md` and `CLAUDE.md` and follows the convention of treating them as siblings — typically `CLAUDE.md` is a symlink to `AGENTS.md` so both work without duplication.
 

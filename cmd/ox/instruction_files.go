@@ -21,7 +21,6 @@ const (
 	agentCline      = "cline"
 	agentOpenCode   = "opencode"
 	agentAmp        = "amp"
-	agentAider      = "aider"
 	agentGoose      = "goose"
 )
 
@@ -160,13 +159,13 @@ var InstructionFileRegistry = []InstructionFileSpec{
 		MarkerFormat: markerFormatMarkdown,
 		DetectFn:     nil, // shares AGENTS.md
 	},
-	{
-		AgentType:    agentAider,
-		DisplayName:  "Aider",
-		ProjectFiles: []string{"AGENTS.md"},
-		MarkerFormat: markerFormatMarkdown,
-		DetectFn:     nil, // shares AGENTS.md
-	},
+	// Aider is deliberately absent. It reads whatever .aider.conf.yml's `read:`
+	// points at — CONVENTIONS.md by default — never AGENTS.md, so an AGENTS.md
+	// entry here marked a file Aider does not load while the docs promised
+	// CONVENTIONS.md. ox-adapter-aider owns CONVENTIONS.md end to end (install,
+	// check, uninstall, diagnose) under its own ox:prime:aider markers; adding a
+	// CONVENTIONS.md entry here would stack a second, differently-marked copy of
+	// the same prime instruction on top of the adapter's block. See ox-fbrm.
 	{
 		AgentType:   agentGoose,
 		DisplayName: "Goose",
