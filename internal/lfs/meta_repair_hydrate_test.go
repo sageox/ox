@@ -229,6 +229,11 @@ func TestHydrateRawToCacheErr_FallsBackToOnDiskPointer(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrNoLFSManifest,
 		"the OID is recoverable from the pointer file — condemning this session would lose it")
+	// Assert the SPECIFIC error, not merely "not the sentinel": otherwise
+	// this test would pass if the function bailed for some unrelated reason
+	// before it ever consulted the pointer.
+	assert.Contains(t, err.Error(), "no content-store client",
+		"must have got past the manifest check and reached the network step")
 }
 
 // TestHydrateRawToCacheErr_TerminalOnlyWhenNeitherSourceHasAnOID keeps the
