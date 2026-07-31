@@ -14,6 +14,15 @@ func projectParams(repoRoot string) adapterprotocol.HookParams {
 	return adapterprotocol.HookParams{RepoRoot: repoRoot, Scope: "project"}
 }
 
+func hooksPathFor(t *testing.T, root string) string {
+	t.Helper()
+	p, err := hooksFilePath(root, "project")
+	if err != nil {
+		t.Fatalf("hooksFilePath: %v", err)
+	}
+	return p
+}
+
 func readHooks(t *testing.T, path string) hooksFile {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -155,7 +164,7 @@ func TestInstallHooks_EventCoverage(t *testing.T) {
 
 func TestInstallHooks_Idempotent(t *testing.T) {
 	root := t.TempDir()
-	hooksPath := filepath.Join(root, ".agents", "plugins", "sageox", "hooks", "hooks.json")
+	hooksPath := hooksPathFor(t, root)
 
 	for i := 0; i < 3; i++ {
 		if _, err := handleInstallHooks(projectParams(root)); err != nil {
@@ -247,7 +256,7 @@ func TestUninstallHooks_PreservesForeignRules(t *testing.T) {
 		t.Fatalf("install: %v", err)
 	}
 
-	hooksPath := filepath.Join(root, ".agents", "plugins", "sageox", "hooks", "hooks.json")
+	hooksPath := hooksPathFor(t, root)
 	hf := readHooks(t, hooksPath)
 	hf.Hooks["SessionStart"] = append(hf.Hooks["SessionStart"], hookRule{
 		Hooks: []hookAction{{Type: "command", Command: "echo someone-elses-hook"}},
@@ -309,11 +318,86 @@ func TestInstallHooks_ProjectScopeRequiresRepoRoot(t *testing.T) {
 	}
 }
 
+// TestPluginDir_RefusesRelativePaths is the guard on a destructive operation.
+// Uninstall calls os.RemoveAll on this path. If an unresolvable scope root ever
+// produced a relative ".agents/plugins/sageox", uninstall would delete whatever
+// happened to sit under the adapter's current working directory.
+func TestPluginDir_RefusesRelativePaths(t *testing.T) {
+	tests := []struct {
+		name     string
+		repoRoot string
+		scope    string
+	}{
+		{"empty project root", "", "project"},
+		{"relative project root", "some/relative/path", "project"},
+		{"dot project root", ".", "project"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := pluginDir(tt.repoRoot, tt.scope)
+			if err == nil {
+				t.Fatalf("pluginDir(%q, %q) = %q, want an error — os.RemoveAll would target a relative path",
+					tt.repoRoot, tt.scope, got)
+			}
+			if got != "" {
+				t.Errorf("pluginDir returned %q alongside an error; callers must not receive a usable path", got)
+			}
+		})
+	}
+}
+
+// TestHandlers_RejectUnanchoredScopeRoot proves the guard is wired into every
+// handler, not just the helper. check and uninstall previously had no
+// repo-root requirement at all.
+func TestHandlers_RejectUnanchoredScopeRoot(t *testing.T) {
+	bad := adapterprotocol.HookParams{RepoRoot: "", Scope: "project"}
+
+	if _, err := handleInstallHooks(bad); err == nil {
+		t.Error("install must reject an unanchored scope root")
+	}
+	if _, err := handleCheckHooks(bad); err == nil {
+		t.Error("check must reject an unanchored scope root")
+	}
+	if _, err := handleUninstallHooks(bad); err == nil {
+		t.Error("uninstall must reject an unanchored scope root — it calls os.RemoveAll")
+	}
+}
+
+// TestUninstallHooks_DoesNotTouchCwd is the end-to-end version of the same
+// property: run uninstall with a bad scope root from inside a directory that
+// contains a real .agents/plugins/sageox, and confirm it survives.
+func TestUninstallHooks_DoesNotTouchCwd(t *testing.T) {
+	root := t.TempDir()
+	if _, err := handleInstallHooks(projectParams(root)); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	// Empty RepoRoot: the pre-fix code would have joined to a relative path and
+	// removed the plugin directory sitting in the cwd.
+	if _, err := handleUninstallHooks(adapterprotocol.HookParams{RepoRoot: "", Scope: "project"}); err == nil {
+		t.Error("expected an error for an unanchored scope root")
+	}
+
+	if _, err := os.Stat(filepath.Join(root, ".agents", "plugins", "sageox", "plugin.json")); err != nil {
+		t.Errorf("cwd plugin directory was destroyed by an unanchored uninstall: %v", err)
+	}
+}
+
 // TestInstallHooks_PreservesUnrelatedEvents — a user may add their own rules for
 // events ox does not manage; install must merge, not overwrite.
 func TestInstallHooks_PreservesUnrelatedEvents(t *testing.T) {
 	root := t.TempDir()
-	hooksPath := filepath.Join(root, ".agents", "plugins", "sageox", "hooks", "hooks.json")
+	hooksPath := hooksPathFor(t, root)
 
 	seed := hooksFile{Hooks: map[string][]hookRule{
 		"AfterFileEdit": {{Hooks: []hookAction{{Type: "command", Command: "gofmt -w ."}}}},

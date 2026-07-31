@@ -114,21 +114,46 @@ func shellQuote(s string) string {
 
 // --- paths ---
 
-func pluginDir(repoRoot, scope string) string {
+// pluginDir resolves the plugin directory for a scope.
+//
+// The error return is load-bearing: uninstall calls os.RemoveAll on this path.
+// If the scope root were ever empty — an unset RepoRoot, or a failing
+// os.UserHomeDir — filepath.Join would yield the RELATIVE path
+// ".agents/plugins/sageox", and uninstall would delete whatever happens to sit
+// under the adapter's current working directory. Refuse to produce a path we
+// cannot anchor absolutely.
+func pluginDir(repoRoot, scope string) (string, error) {
 	root := repoRoot
 	if scope == scopeUser {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot resolve home directory for user scope: %w", err)
+		}
 		root = home
 	}
-	return filepath.Join(root, ".agents", "plugins", pluginName)
+	if root == "" {
+		return "", fmt.Errorf("empty scope root for scope %q: refusing to resolve a relative plugin path", scope)
+	}
+	if !filepath.IsAbs(root) {
+		return "", fmt.Errorf("scope root %q is not absolute", root)
+	}
+	return filepath.Join(root, ".agents", "plugins", pluginName), nil
 }
 
-func hooksFilePath(repoRoot, scope string) string {
-	return filepath.Join(pluginDir(repoRoot, scope), "hooks", "hooks.json")
+func hooksFilePath(repoRoot, scope string) (string, error) {
+	dir, err := pluginDir(repoRoot, scope)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "hooks", "hooks.json"), nil
 }
 
-func manifestFilePath(repoRoot, scope string) string {
-	return filepath.Join(pluginDir(repoRoot, scope), "plugin.json")
+func manifestFilePath(repoRoot, scope string) (string, error) {
+	dir, err := pluginDir(repoRoot, scope)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "plugin.json"), nil
 }
 
 // --- install / check / uninstall ---
@@ -138,8 +163,14 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 		return nil, fmt.Errorf("--repo-root is required for project scope")
 	}
 
-	hooksPath := hooksFilePath(p.RepoRoot, p.Scope)
-	manifestPath := manifestFilePath(p.RepoRoot, p.Scope)
+	hooksPath, err := hooksFilePath(p.RepoRoot, p.Scope)
+	if err != nil {
+		return nil, err
+	}
+	manifestPath, err := manifestFilePath(p.RepoRoot, p.Scope)
+	if err != nil {
+		return nil, err
+	}
 
 	hf := loadHooksFile(hooksPath)
 
@@ -171,8 +202,14 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 }
 
 func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooksResponse, error) {
-	hooksPath := hooksFilePath(p.RepoRoot, p.Scope)
-	manifestPath := manifestFilePath(p.RepoRoot, p.Scope)
+	hooksPath, err := hooksFilePath(p.RepoRoot, p.Scope)
+	if err != nil {
+		return nil, err
+	}
+	manifestPath, err := manifestFilePath(p.RepoRoot, p.Scope)
+	if err != nil {
+		return nil, err
+	}
 
 	files := []string{manifestPath, hooksPath}
 
@@ -182,8 +219,8 @@ func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooks
 		return &adapterprotocol.CheckHooksResponse{Installed: false, Scope: p.Scope, HookFiles: files}, nil
 	}
 
-	data, err := os.ReadFile(hooksPath) //nolint:gosec // path derived from repo root + fixed plugin name
-	if err != nil {
+	data, readErr := os.ReadFile(hooksPath) //nolint:gosec // path derived from repo root + fixed plugin name
+	if readErr != nil {
 		return &adapterprotocol.CheckHooksResponse{Installed: false, Scope: p.Scope, HookFiles: files}, nil
 	}
 
@@ -202,10 +239,13 @@ func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooks
 }
 
 func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.UninstallHooksResponse, error) {
-	hooksPath := hooksFilePath(p.RepoRoot, p.Scope)
-
-	data, err := os.ReadFile(hooksPath) //nolint:gosec // path derived from repo root + fixed plugin name
+	hooksPath, err := hooksFilePath(p.RepoRoot, p.Scope)
 	if err != nil {
+		return nil, err
+	}
+
+	data, readErr := os.ReadFile(hooksPath) //nolint:gosec // path derived from repo root + fixed plugin name
+	if readErr != nil {
 		// Nothing installed is a successful uninstall.
 		return &adapterprotocol.UninstallHooksResponse{Uninstalled: true}, nil
 	}
@@ -232,8 +272,15 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 	// If nothing of ours is left AND the manifest is ours, take the whole
 	// directory. If the manifest is someone else's, leave their plugin intact
 	// and only drop the hooks we added — .agents/plugins/ is shared ground.
-	if len(hf.Hooks) == 0 && manifestIsOurs(manifestFilePath(p.RepoRoot, p.Scope)) {
-		dir := pluginDir(p.RepoRoot, p.Scope)
+	manifestPath, err := manifestFilePath(p.RepoRoot, p.Scope)
+	if err != nil {
+		return nil, err
+	}
+	if len(hf.Hooks) == 0 && manifestIsOurs(manifestPath) {
+		dir, err := pluginDir(p.RepoRoot, p.Scope)
+		if err != nil {
+			return nil, err
+		}
 		if err := os.RemoveAll(dir); err != nil {
 			return nil, fmt.Errorf("failed to remove plugin dir: %w", err)
 		}

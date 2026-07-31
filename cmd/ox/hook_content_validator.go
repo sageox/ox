@@ -105,6 +105,11 @@ type hookValidationFinding struct {
 //   - <gitRoot>/.git/hooks/* — git-level hooks (prepare-commit-msg, etc.)
 //   - <gitRoot>/.claude/hooks/* — Claude Code adapter hooks
 //   - <gitRoot>/.gemini/, .codex/, .opencode/, .amp/ — other adapters
+//   - <gitRoot>/.agents/plugins/*/{hooks,scripts} — Open Plugins directories
+//     (Goose). Unlike the per-agent paths above, this one is a SHARED
+//     namespace: any tool may drop a plugin there, and Goose executes whatever
+//     the plugin's hooks.json names via `sh -c`. Scanning every plugin — not
+//     just ox's own — is the point.
 //
 // Missing directories are silently skipped. Per ox-9y4k this is best-
 // effort detection, not a security boundary.
@@ -121,6 +126,7 @@ func validateInstalledHooks(gitRoot string) ([]hookValidationFinding, error) {
 		filepath.Join(gitRoot, ".opencode", "hooks"),
 		filepath.Join(gitRoot, ".amp", "hooks"),
 	}
+	hookDirs = append(hookDirs, openPluginHookDirs(gitRoot)...)
 
 	var findings []hookValidationFinding
 	for _, dir := range hookDirs {
@@ -154,6 +160,30 @@ func validateInstalledHooks(gitRoot string) ([]hookValidationFinding, error) {
 		}
 	}
 	return findings, nil
+}
+
+// openPluginHookDirs enumerates the per-plugin hook and script directories
+// under <gitRoot>/.agents/plugins/. Every installed plugin is scanned, not just
+// ox's own: the directory is a shared namespace, and a hostile or careless
+// plugin's command runs with the same privileges as ours.
+func openPluginHookDirs(gitRoot string) []string {
+	pluginsRoot := filepath.Join(gitRoot, ".agents", "plugins")
+	entries, err := os.ReadDir(pluginsRoot)
+	if err != nil {
+		return nil // no plugins installed
+	}
+
+	var dirs []string
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		dirs = append(dirs,
+			filepath.Join(pluginsRoot, ent.Name(), "hooks"),
+			filepath.Join(pluginsRoot, ent.Name(), "scripts"),
+		)
+	}
+	return dirs
 }
 
 // checkHookContentIntegrity is the doctor.Run for ox-9y4k. Reports

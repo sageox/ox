@@ -218,7 +218,7 @@ func TestReadMessages_OffsetIsExclusive(t *testing.T) {
 	id1 := insertMessage(t, db, "s1", "user", `[{"type":"text","text":"first"}]`)
 	insertMessage(t, db, "s1", "assistant", `[{"type":"text","text":"second"}]`)
 
-	all, err := readMessages(db, "s1", 0)
+	all, _, err := readMessages(db, "s1", 0)
 	if err != nil {
 		t.Fatalf("readMessages: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestReadMessages_OffsetIsExclusive(t *testing.T) {
 		t.Fatalf("full read = %d entries, want 2", len(all))
 	}
 
-	rest, err := readMessages(db, "s1", id1)
+	rest, _, err := readMessages(db, "s1", id1)
 	if err != nil {
 		t.Fatalf("readMessages from offset: %v", err)
 	}
@@ -288,10 +288,10 @@ func TestMaxMessageID_UsesRowidNotCount(t *testing.T) {
 		t.Fatalf("fixture count = %d, want 2", count)
 	}
 
-	if replayed, _ := readMessages(db, "s1", count); len(replayed) != 1 {
+	if replayed, _, _ := readMessages(db, "s1", count); len(replayed) != 1 {
 		t.Errorf("count-based watermark should replay 1 entry (that is the bug), got %d", len(replayed))
 	}
-	if fresh, _ := readMessages(db, "s1", got); len(fresh) != 0 {
+	if fresh, _, _ := readMessages(db, "s1", got); len(fresh) != 0 {
 		t.Errorf("rowid watermark must replay nothing, got %d", len(fresh))
 	}
 }
@@ -346,6 +346,126 @@ func TestResolveSessionID_ExplicitIDWins(t *testing.T) {
 
 	if _, err := resolveSessionID(db, "does-not-exist", "/repo", ""); err == nil {
 		t.Error("an unknown explicit session ID must error, not silently fall back")
+	}
+}
+
+// TestResolveSessionID_EscapesLikeWildcards — `_` and `%` are LIKE wildcards and
+// both are ordinary characters in real repo paths. Unescaped, `/repo/my_app`
+// also matches `/repo/myXapp/...`, and another repo's transcript would be
+// attributed to this Ledger.
+func TestResolveSessionID_EscapesLikeWildcards(t *testing.T) {
+	db := newFixtureDB(t)
+	// Decoy is NEWER, so if the wildcard leaks it wins on the ORDER BY.
+	insertSession(t, db, "decoy", filepath.Join("/repo", "myXapp", "sub"), "2026-07-30 23:00:00")
+
+	_, err := resolveSessionID(db, "", filepath.Join("/repo", "my_app"), "")
+	if err == nil {
+		t.Fatal("`_` leaked as a LIKE wildcard: matched a different repo's session")
+	}
+
+	// The real subdirectory match must still work with the escape in place.
+	insertSession(t, db, "mine", filepath.Join("/repo", "my_app", "internal"), "2026-07-30 10:00:00")
+	got, err := resolveSessionID(db, "", filepath.Join("/repo", "my_app"), "")
+	if err != nil {
+		t.Fatalf("escaped prefix broke legitimate subdirectory matching: %v", err)
+	}
+	if got != "mine" {
+		t.Errorf("resolveSessionID = %q, want mine", got)
+	}
+}
+
+func TestEscapeLike(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"/repo/plain", "/repo/plain"},
+		{"/repo/my_app", `/repo/my\_app`},
+		{"/repo/100%", `/repo/100\%`},
+		{`/repo/back\slash`, `/repo/back\\slash`},
+	}
+	for _, tt := range tests {
+		if got := escapeLike(tt.in); got != tt.want {
+			t.Errorf("escapeLike(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestReadFromOffset_WatermarkComesFromRowsRead is the durability property.
+// Goose writes to this database while ox reads it. If the watermark were a
+// separate MAX(id) query, a row inserted between the two queries would not be
+// in the returned entries but the watermark would move past it — that turn
+// would be dropped from the Ledger permanently.
+func TestReadFromOffset_WatermarkComesFromRowsRead(t *testing.T) {
+	db := newFixtureDB(t)
+	insertSession(t, db, "s1", "/repo", "2026-07-30 10:00:00")
+
+	id1 := insertMessage(t, db, "s1", "user", `[{"type":"text","text":"first"}]`)
+
+	entries, watermark, err := readMessages(db, "s1", 0)
+	if err != nil {
+		t.Fatalf("readMessages: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if watermark != id1 {
+		t.Fatalf("watermark = %d, want %d (the last row actually read)", watermark, id1)
+	}
+
+	// Simulate the concurrent write that lands after the SELECT.
+	id2 := insertMessage(t, db, "s1", "assistant", `[{"type":"text","text":"second"}]`)
+
+	// A MAX(id) watermark would already be id2 here, skipping the message.
+	maxNow, err := maxMessageID(db, "s1")
+	if err != nil {
+		t.Fatalf("maxMessageID: %v", err)
+	}
+	if maxNow != id2 {
+		t.Fatalf("fixture setup wrong: maxMessageID = %d, want %d", maxNow, id2)
+	}
+
+	// Reading from the row-derived watermark still returns the concurrent write.
+	rest, _, err := readMessages(db, "s1", watermark)
+	if err != nil {
+		t.Fatalf("readMessages from watermark: %v", err)
+	}
+	if len(rest) != 1 {
+		t.Fatalf("concurrent write was lost: got %d entries from watermark %d, want 1", len(rest), watermark)
+	}
+	if !strings.Contains(entryText(rest[0]), "second") {
+		t.Errorf("entry = %q, want the concurrently inserted message", entryText(rest[0]))
+	}
+}
+
+// TestReadMessages_EmptyReadKeepsWatermark — a drain with nothing new must not
+// reset the caller's position to zero.
+func TestReadMessages_EmptyReadKeepsWatermark(t *testing.T) {
+	db := newFixtureDB(t)
+	insertSession(t, db, "s1", "/repo", "2026-07-30 10:00:00")
+	id1 := insertMessage(t, db, "s1", "user", `[{"type":"text","text":"only"}]`)
+
+	entries, watermark, err := readMessages(db, "s1", id1)
+	if err != nil {
+		t.Fatalf("readMessages: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("got %d entries, want 0", len(entries))
+	}
+	if watermark != id1 {
+		t.Errorf("watermark = %d, want %d preserved across an empty read", watermark, id1)
+	}
+}
+
+// TestParseContentBlocks_ToolResponseWithoutPayload — a missing or renamed
+// toolResult field would otherwise emit an entry with empty output and no
+// CallID, which cannot be correlated back to its request.
+func TestParseContentBlocks_ToolResponseWithoutPayload(t *testing.T) {
+	ts := time.Unix(1_700_000_000, 0).UTC()
+
+	got := parseContentBlocks("assistant", `[{"type":"toolResponse","id":"c1"}]`, ts)
+	if len(got) != 0 {
+		t.Errorf("toolResponse with no payload should yield no entry, got %d: %+v", len(got), got)
 	}
 }
 

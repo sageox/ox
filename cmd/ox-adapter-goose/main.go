@@ -112,7 +112,7 @@ func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotoco
 		return nil, fmt.Errorf("querying session: %w", err)
 	}
 
-	entries, err := readMessages(db, p.SessionID, 0)
+	entries, _, err := readMessages(db, p.SessionID, 0)
 	if err != nil {
 		return nil, fmt.Errorf("reading session: %w", err)
 	}
@@ -148,7 +148,15 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 	}
 
 	if p.RepoRoot != "" {
-		hooksPath := hooksFilePath(p.RepoRoot, "project")
+		hooksPath, pathErr := hooksFilePath(p.RepoRoot, "project")
+		if pathErr != nil {
+			return nil, pathErr
+		}
+		manifestPath, pathErr := manifestFilePath(p.RepoRoot, "project")
+		if pathErr != nil {
+			return nil, pathErr
+		}
+
 		if _, err := os.Stat(hooksPath); os.IsNotExist(err) {
 			issues = append(issues, adapterprotocol.DiagnoseIssue{
 				Slug:     "hooks-missing",
@@ -162,7 +170,7 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 			// Goose plugin discovery keys on the plugin directory; a hooks.json
 			// with no sibling plugin.json is silently ignored, which looks
 			// identical to "hooks installed" from the filesystem alone.
-			if _, err := os.Stat(manifestFilePath(p.RepoRoot, "project")); os.IsNotExist(err) {
+			if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
 				issues = append(issues, adapterprotocol.DiagnoseIssue{
 					Slug:     "manifest-missing",
 					Severity: "warning",

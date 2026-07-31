@@ -145,8 +145,13 @@ func resolveSessionID(db *sql.DB, agentSessionID, repoRoot, since string) (strin
 	if repoRoot != "" {
 		// Exact working_dir first, then any subdirectory of the repo — Goose
 		// records the cwd it was launched from, which may be below the root.
-		where = append(where, "(working_dir = ? OR working_dir LIKE ?)")
-		args = append(args, repoRoot, repoRoot+string(os.PathSeparator)+"%")
+		//
+		// The prefix MUST be escaped: `_` and `%` are LIKE wildcards and both
+		// are ordinary characters in real paths. Unescaped, `/home/u/my_repo`
+		// also matches `/home/u/myXrepo/...`, which would attribute another
+		// repo's transcript to this Ledger.
+		where = append(where, `(working_dir = ? OR working_dir LIKE ? ESCAPE '\')`)
+		args = append(args, repoRoot, escapeLike(repoRoot)+string(os.PathSeparator)+"%")
 	}
 
 	if since != "" {
@@ -173,6 +178,13 @@ func resolveSessionID(db *sql.DB, agentSessionID, repoRoot, since string) (strin
 		return "", fmt.Errorf("query sessions: %w", err)
 	}
 	return id, nil
+}
+
+// escapeLike escapes the SQL LIKE wildcards so a literal path can be used as a
+// prefix pattern. Backslash is the ESCAPE character, so it is escaped first.
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
 
 // maxMessageID returns the highest message rowid for the session, which is the
@@ -202,7 +214,7 @@ func handleRead(p adapterprotocol.ReadParams) (*adapterprotocol.ReadResult, erro
 	}
 	defer func() { _ = db.Close() }()
 
-	entries, err := readMessages(db, sessionID, 0)
+	entries, _, err := readMessages(db, sessionID, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -245,19 +257,12 @@ func handleReadFromOffset(p adapterprotocol.ReadFromOffsetParams) (*adapterproto
 	}
 	defer func() { _ = db.Close() }()
 
-	entries, err := readMessages(db, sessionID, p.Offset)
+	// The watermark is the highest rowid actually read, NOT a fresh MAX(id).
+	// Goose writes concurrently; a row inserted between the two queries would
+	// otherwise be skipped past and lost from the Ledger forever.
+	entries, newOffset, err := readMessages(db, sessionID, p.Offset)
 	if err != nil {
 		return nil, err
-	}
-
-	newOffset, err := maxMessageID(db, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	// Never move the watermark backwards. MAX(id) can only drop if rows were
-	// deleted, and re-reading from a lower watermark would duplicate entries.
-	if newOffset < p.Offset {
-		newOffset = p.Offset
 	}
 
 	return &adapterprotocol.ReadFromOffsetResult{
@@ -278,7 +283,7 @@ func handleCapturePrior(p adapterprotocol.CapturePriorParams) (*adapterprotocol.
 		return nil, err
 	}
 
-	entries, err := readMessages(db, sessionID, 0)
+	entries, _, err := readMessages(db, sessionID, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -295,32 +300,44 @@ func handleCapturePrior(p adapterprotocol.CapturePriorParams) (*adapterprotocol.
 
 // --- parsing ---
 
-// readMessages reads messages with rowid > afterID, oldest first.
-func readMessages(db *sql.DB, sessionID string, afterID int64) ([]adapterprotocol.RawEntry, error) {
+// readMessages reads messages with rowid > afterID, oldest first. It also
+// returns the highest rowid it actually read.
+//
+// The caller MUST use that returned rowid as the next watermark rather than
+// re-querying MAX(id). Goose writes to this database while ox reads it, so a
+// row inserted between the SELECT and a separate MAX(id) query would not be in
+// entries, yet the watermark would move past it — that turn would be dropped
+// from the Ledger permanently.
+func readMessages(db *sql.DB, sessionID string, afterID int64) ([]adapterprotocol.RawEntry, int64, error) {
 	rows, err := db.Query(
-		"SELECT role, content_json, created_timestamp FROM messages WHERE session_id = ? AND id > ? ORDER BY id ASC",
+		"SELECT id, role, content_json, created_timestamp FROM messages WHERE session_id = ? AND id > ? ORDER BY id ASC",
 		sessionID, afterID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("query messages: %w", err)
+		return nil, afterID, fmt.Errorf("query messages: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	var entries []adapterprotocol.RawEntry
+	lastID := afterID
 
 	for rows.Next() {
+		var rowID, createdTS int64
 		var role, contentJSON string
-		var createdTS int64
 
-		if err := rows.Scan(&role, &contentJSON, &createdTS); err != nil {
-			return nil, fmt.Errorf("scan message row for session %s: %w", sessionID, err)
+		if err := rows.Scan(&rowID, &role, &contentJSON, &createdTS); err != nil {
+			return nil, afterID, fmt.Errorf("scan message row for session %s: %w", sessionID, err)
 		}
 
 		ts := time.Unix(createdTS, 0).UTC()
 		entries = append(entries, parseContentBlocks(role, contentJSON, ts)...)
+		lastID = rowID
 	}
 
-	return entries, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, afterID, err
+	}
+	return entries, lastID, nil
 }
 
 // readMetadata extracts the model from the session row. Goose stores it as a
@@ -389,6 +406,12 @@ func parseContentBlocks(role, contentJSON string, ts time.Time) []adapterprotoco
 			entries = append(entries, adapterruntime.ToolUseWithID(ts, name, args, b.ID))
 
 		case "toolResponse":
+			if b.ToolResp == nil {
+				// No payload — a renamed or missing field in a future Goose
+				// version. Emitting an entry here would produce empty output
+				// with no CallID, uncorrelatable to its request.
+				continue
+			}
 			content, isErr := toolResponseFields(b)
 			entries = append(entries, adapterruntime.ToolResultWithID(ts, content, isErr, b.ID))
 
