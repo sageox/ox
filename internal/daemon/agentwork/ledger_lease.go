@@ -74,12 +74,18 @@ func acquireLedgerLease(ledgerPath string) (*ledgerLease, error) {
 }
 
 // Release drops the lock. Idempotent.
+//
+// A failed release is still a release: both platform backends close the
+// underlying file before returning an error, and closing the fd is what drops
+// the kernel's flock. Restoring held=1 to "allow a retry" would be wrong twice
+// over — the retry could only ever fail with EBADF on the closed fd, and
+// meanwhile this process would claim a lease the kernel has already handed on.
+// The error is reported; ownership is not reasserted.
 func (l *ledgerLease) Release() error {
 	if l == nil || !l.held.CompareAndSwap(1, 0) {
 		return nil
 	}
 	if err := platformReleaseLedgerLease(l.file); err != nil {
-		l.held.Store(1) // let the caller retry rather than stranding ownership
 		return fmt.Errorf("release ledger lease: %w", err)
 	}
 	return nil

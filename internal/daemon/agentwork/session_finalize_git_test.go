@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -186,4 +187,17 @@ func runGitCmd(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %v in %s failed: %s\n%s", args, dir, err, out)
 	}
+}
+
+// gitOutput runs a git command and returns its trimmed stdout, failing the test
+// on error. Companion to runGitCmd for assertions that need to read state back.
+func gitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v in %s failed: %s", args, dir, err)
+	}
+	return strings.TrimSpace(string(out))
 }

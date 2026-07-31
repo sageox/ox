@@ -136,6 +136,33 @@ func TestManager_UnpushableSession_SurfacesAsFailure(t *testing.T) {
 const leaseHelperEnv = "OX_TEST_HOLD_LEDGER_LEASE"
 
 // TestHelperHoldsLedgerLease is not a test. It is the subprocess half of
+// startLeaseHolder re-executes this test binary as a subprocess that acquires
+// the ledger lease and then blocks. It returns once the subprocess is confirmed
+// holding the lease; callers own killing it.
+func startLeaseHolder(t *testing.T, ledger string) *exec.Cmd {
+	t.Helper()
+
+	helper := exec.Command(os.Args[0], "-test.run=TestHelperHoldsLedgerLease", "-test.timeout=90s")
+	helper.Env = append(os.Environ(), leaseHelperEnv+"="+ledger)
+	if err := helper.Start(); err != nil {
+		t.Fatalf("start helper: %v", err)
+	}
+
+	readyFile := filepath.Join(ledger, "helper-ready")
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, err := os.Stat(readyFile); err == nil {
+			return helper
+		}
+		if time.Now().After(deadline) {
+			_ = helper.Process.Kill()
+			_ = helper.Wait()
+			t.Fatal("helper never acquired the lease")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // TestOwnsLedgerAntiEntropy_DeniedWhileAnotherProcessHolds: it takes the lease,
 // signals readiness, and blocks until killed.
 func TestHelperHoldsLedgerLease(t *testing.T) {
@@ -165,27 +192,11 @@ func TestHelperHoldsLedgerLease(t *testing.T) {
 func TestOwnsLedgerAntiEntropy_DeniedWhileAnotherProcessHolds(t *testing.T) {
 	ledger := t.TempDir()
 
-	helper := exec.Command(os.Args[0], "-test.run=TestHelperHoldsLedgerLease", "-test.timeout=90s")
-	helper.Env = append(os.Environ(), leaseHelperEnv+"="+ledger)
-	if err := helper.Start(); err != nil {
-		t.Fatalf("start helper: %v", err)
-	}
+	helper := startLeaseHolder(t, ledger)
 	t.Cleanup(func() {
 		_ = helper.Process.Kill()
 		_ = helper.Wait()
 	})
-
-	readyFile := filepath.Join(ledger, "helper-ready")
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		if _, err := os.Stat(readyFile); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("helper never acquired the lease")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
 
 	m, _ := newTestManager(NewMockRunner(true), func() *config.AgentWorkerConfig {
 		return enabledConfigWith(1, 10)
@@ -204,24 +215,7 @@ func TestOwnsLedgerAntiEntropy_DeniedWhileAnotherProcessHolds(t *testing.T) {
 func TestOwnsLedgerAntiEntropy_TakesOverAfterHolderExits(t *testing.T) {
 	ledger := t.TempDir()
 
-	helper := exec.Command(os.Args[0], "-test.run=TestHelperHoldsLedgerLease", "-test.timeout=90s")
-	helper.Env = append(os.Environ(), leaseHelperEnv+"="+ledger)
-	if err := helper.Start(); err != nil {
-		t.Fatalf("start helper: %v", err)
-	}
-
-	readyFile := filepath.Join(ledger, "helper-ready")
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		if _, err := os.Stat(readyFile); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			_ = helper.Process.Kill()
-			t.Fatal("helper never acquired the lease")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	helper := startLeaseHolder(t, ledger)
 
 	// kill -9: the kernel, not the process, must release the flock
 	if err := helper.Process.Kill(); err != nil {

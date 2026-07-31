@@ -289,6 +289,10 @@ func (m *Manager) detectAndEnqueue(cfg *config.AgentWorkerConfig) {
 	m.runSessionCleanup()
 
 	if cfg == nil || !isEffectivelyEnabled(cfg) {
+		// Hand the lease back. A daemon that acquired it in an earlier cycle and
+		// then had its worker disabled would otherwise hold it until process exit,
+		// blocking every other daemon on this ledger from ever running detection.
+		m.releaseLedgerAntiEntropy()
 		return
 	}
 
@@ -390,13 +394,21 @@ func (m *Manager) ownsLedgerAntiEntropy() bool {
 }
 
 // releaseLedgerAntiEntropy drops the lease so another daemon can take over
-// without waiting for this process to die.
+// without waiting for this process to die. Safe to call when no lease is held.
+//
+// The reference is cleared unconditionally, including when Release reports an
+// error: the fd is closed either way, so the kernel has already dropped the
+// flock. Retaining it for a retry would only let this Manager believe it still
+// owns a lease another process can now hold.
 func (m *Manager) releaseLedgerAntiEntropy() {
 	m.mu.Lock()
 	lease := m.ledgerLease
 	m.ledgerLease = nil
 	m.mu.Unlock()
 
+	if lease == nil {
+		return
+	}
 	if err := lease.Release(); err != nil {
 		m.logger.Warn("failed to release ledger anti-entropy lease", "error", err)
 	}

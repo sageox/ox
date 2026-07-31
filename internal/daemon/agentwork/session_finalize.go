@@ -1747,14 +1747,23 @@ func (h *SessionFinalizeHandler) gitCommitPointerRewrite(payload *SessionFinaliz
 // An absent summary is honest; an invented one would be indistinguishable from a
 // real one downstream.
 func (h *SessionFinalizeHandler) synthesizeMeta(sessionDir, sessionName string) *lfs.SessionMeta {
-	var agentID, agentType, username string
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+
+	var agentID, agentType, username, headerSessionID string
 	var createdAt time.Time
-	if stored, err := session.ReadSessionFromPath(filepath.Join(sessionDir, "raw.jsonl")); err == nil && stored != nil && stored.Meta != nil {
+	if stored, err := session.ReadSessionFromPath(rawPath); err == nil && stored != nil && stored.Meta != nil {
 		agentID = stored.Meta.AgentID
 		agentType = stored.Meta.AgentType
 		username = stored.Meta.Username
 		createdAt = stored.Meta.CreatedAt
+		headerSessionID = stored.Meta.SessionID
 	}
+	// Crash-safe carrier read: a recording written by an older writer can fail
+	// to parse into StoreMeta while its raw first line still carries the ID.
+	if headerSessionID == "" {
+		headerSessionID = session.ReadHeaderSessionID(rawPath)
+	}
+
 	// session names are YYYY-MM-DDTHH-MM-<username>-<agentID>
 	parts := strings.Split(sessionName, "-")
 	if agentID == "" && len(parts) >= 2 {
@@ -1764,8 +1773,11 @@ func (h *SessionFinalizeHandler) synthesizeMeta(sessionDir, sessionName string) 
 		username = parts[len(parts)-2]
 	}
 
+	// Resolve through the chokepoint WITH the header-carried ID. Passing empty
+	// arguments mints a fresh ses_ on every synthesis, rotating an identity the
+	// recording already had — exactly what ResolveOrMintSessionID exists to stop.
 	return lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).
-		SessionID(session.ResolveOrMintSessionID("", "")).
+		SessionID(session.ResolveOrMintSessionID("", headerSessionID)).
 		StopReason(session.StopReasonRecovered).
 		Build()
 }

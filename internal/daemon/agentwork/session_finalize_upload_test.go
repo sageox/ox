@@ -522,6 +522,18 @@ func TestProcessResult_UploadOnly_AlreadyCommitted_PrunesCache(t *testing.T) {
 		}
 	}
 
+	// meta.json goes into the LEDGER copy only, never the cache copy. Without it
+	// the handler synthesizes one during ProcessResult — a genuinely new file, so
+	// `git add` stages a real diff and the run takes the ordinary commit path.
+	// The no-op branch this test exists to guard would never execute and the
+	// assertions below would pass for the wrong reason. Keeping it out of the
+	// cache dir matters too: stageSessionInLedger copies cache over ledger, so a
+	// cache-side meta.json would overwrite this one and reintroduce a diff.
+	if err := os.WriteFile(filepath.Join(ledgerDir, "meta.json"),
+		[]byte(`{"version":"1.0","session_name":"`+sessionName+`"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	// the session is already committed and pushed — this is the steady state that
 	// made every subsequent finalize a no-op commit
 	runGitCmd(t, clonePath, "add", "sessions/"+sessionName)
@@ -544,8 +556,22 @@ func TestProcessResult_UploadOnly_AlreadyCommitted_PrunesCache(t *testing.T) {
 		},
 	}
 
+	headBefore := gitOutput(t, clonePath, "rev-parse", "HEAD")
+
 	if err := handler.ProcessResult(item, &RunResult{}); err != nil {
 		t.Fatalf("ProcessResult failed on an already-committed session: %v", err)
+	}
+
+	// Guard the guard: this test is only meaningful if the run actually took the
+	// zero-delta path. If some future change makes the staged diff non-empty
+	// (a synthesized file, a new artifact), the ordinary commit path runs, the
+	// assertions below still pass, and the no-op regression this test exists to
+	// catch would sail through unnoticed. An unchanged HEAD proves no commit was
+	// created, which is only true on the branch under test.
+	if headAfter := gitOutput(t, clonePath, "rev-parse", "HEAD"); headAfter != headBefore {
+		t.Fatalf("a commit was created (%s to %s) — this run did not exercise the "+
+			"zero-delta path, so it does not test what it claims",
+			headBefore[:8], headAfter[:8])
 	}
 
 	// the cache prune is what breaks the loop: Detect() keys on isInLedgerCacheDir,
