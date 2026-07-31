@@ -293,3 +293,59 @@ func TestGitCommitAndPush_IgnoresOtherSessionsStagedFiles(t *testing.T) {
 		t.Errorf("%s's staged file went missing; still expected in the index, got %q", other, staged)
 	}
 }
+
+// TestGitCommitAndPush_CommitExcludesOtherSessionsWhenStaged covers the case the
+// scoping test above does not: the target session has real staged changes, so
+// the commit actually runs.
+//
+// Scoping only the hasStagedChanges CHECK is not enough — `git commit -m` writes
+// the whole index, so another session's staged files ride along under this
+// session's commit message. The commit itself must carry the pathspec.
+func TestGitCommitAndPush_CommitExcludesOtherSessionsWhenStaged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	_, clonePath := setupBareAndCloneLedger(t)
+
+	// target session: NOT yet committed, so finalizing it stages a real diff
+	target := "2026-01-15T20-00-testuser-OxBOTH"
+	targetDir := filepath.Join(clonePath, "sessions", target)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range append([]string{"raw.jsonl", "meta.json"}, requiredArtifacts...) {
+		if err := os.WriteFile(filepath.Join(targetDir, name), []byte("target content"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// another session's file, left staged by an earlier failed finalize
+	other := "2026-01-15T20-30-testuser-OxSTRAY"
+	otherDir := filepath.Join(clonePath, "sessions", other)
+	if err := os.MkdirAll(otherDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(otherDir, "raw.jsonl"), []byte("stray"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCmd(t, clonePath, "add", "sessions/"+other)
+
+	handler := newGitBackedHandler()
+	handler.gitCommitAndPush(&SessionFinalizePayload{
+		SessionDir: targetDir,
+		LedgerPath: clonePath,
+	})
+
+	committed := gitOutput(t, clonePath, "log", "-1", "--name-only", "--pretty=format:")
+	if !strings.Contains(committed, target) {
+		t.Errorf("the target session's own files were not committed:\n%s", committed)
+	}
+	if strings.Contains(committed, other) {
+		t.Errorf("%s's files rode along in %s's commit — `git commit` wrote the whole index:\n%s",
+			other, target, committed)
+	}
+}

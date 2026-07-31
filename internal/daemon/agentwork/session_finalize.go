@@ -1648,7 +1648,12 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		// cycle and still be unpushed.
 		h.logger.Debug("session already committed, nothing new to stage", "session", sessionName)
 	default:
-		if err := h.runGit(ledgerPath, "commit", "-m", msg); err != nil {
+		// Commit ONLY this session's path. A bare `git commit -m` writes the whole
+		// index, so any files another session left staged after a failed finalize
+		// would ride along under this session's message. Scoping the staged-changes
+		// check alone is not enough — that decides WHETHER to commit; this decides
+		// WHAT gets committed.
+		if err := h.runGit(ledgerPath, "commit", "-m", msg, "--", relDir); err != nil {
 			// A concurrent committer (a second daemon on the same ledger) can empty
 			// the index between the check above and this commit.
 			if !isNothingToCommit(err) {
