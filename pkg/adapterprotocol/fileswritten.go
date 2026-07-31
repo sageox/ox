@@ -1,6 +1,9 @@
 package adapterprotocol
 
-import "path/filepath"
+import (
+	"path/filepath"
+	"strings"
+)
 
 // FilesWritten contract
 //
@@ -39,9 +42,15 @@ import "path/filepath"
 // RepoRelativePaths converts names that are relative to baseDir into
 // paths relative to repoRoot, satisfying the FilesWritten contract.
 //
-// baseDir may be absolute or relative to repoRoot. Any name that cannot
-// be expressed relative to repoRoot is returned unchanged as an absolute
-// path, which the contract also permits.
+// baseDir may be absolute or relative to repoRoot.
+//
+// A path that does not live under repoRoot is returned ABSOLUTE, not as a
+// `../..` traversal. Both forms are technically valid per the contract,
+// but the absolute form is unambiguous and survives being resolved from
+// any working directory — whereas a traversal only means the right thing
+// relative to repoRoot, and ox's staging boundary drops it either way
+// (git cannot stage a file outside the repo). User-scope installs like
+// ~/.codex/hooks.json are the real case here.
 func RepoRelativePaths(repoRoot, baseDir string, names []string) []string {
 	if !filepath.IsAbs(baseDir) {
 		baseDir = filepath.Join(repoRoot, baseDir)
@@ -52,11 +61,12 @@ func RepoRelativePaths(repoRoot, baseDir string, names []string) []string {
 		if !filepath.IsAbs(abs) {
 			abs = filepath.Join(baseDir, name)
 		}
-		if rel, err := filepath.Rel(repoRoot, abs); err == nil {
-			out = append(out, rel)
+		rel, err := filepath.Rel(repoRoot, abs)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			out = append(out, filepath.Clean(abs))
 			continue
 		}
-		out = append(out, abs)
+		out = append(out, rel)
 	}
 	return out
 }

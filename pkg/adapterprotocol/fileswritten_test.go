@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRepoRelativePaths(t *testing.T) {
@@ -66,21 +67,32 @@ func TestRepoRelativePaths(t *testing.T) {
 
 // TestRepoRelativePaths_OutsideRepoStaysAbsolute documents the escape
 // hatch: user-scope installs genuinely live outside the repo, and the
-// contract permits absolute paths. ox drops them at the staging boundary
-// rather than the adapter having to know it can't stage them.
+// contract permits absolute paths.
+//
+// It must stay ABSOLUTE rather than degrade to a `../..` traversal — the
+// absolute form is unambiguous from any working directory, while a
+// traversal only means the right thing relative to repoRoot.
 func TestRepoRelativePaths_OutsideRepoStaysAbsolute(t *testing.T) {
 	repo := filepath.FromSlash("/tmp/repo")
 	outside := filepath.FromSlash("/home/someone/.codex/hooks.json")
 
 	got := RepoRelativePaths(repo, filepath.Join(repo, ".codex"), []string{outside})
 
-	// filepath.Rel can express this as ../.., which is still a valid
-	// answer; what matters is that it round-trips back to the same file.
-	assert.Len(t, got, 1)
-	resolved := got[0]
-	if !filepath.IsAbs(resolved) {
-		resolved = filepath.Join(repo, resolved)
-	}
-	assert.Equal(t, outside, filepath.Clean(resolved),
-		"the entry must still identify the same file, wherever it lives")
+	require.Len(t, got, 1)
+	assert.True(t, filepath.IsAbs(got[0]), "must not become a ../.. traversal; got %q", got[0])
+	assert.Equal(t, outside, got[0])
+}
+
+// TestRepoRelativePaths_SiblingOfRepoStaysAbsolute covers the near-miss:
+// a path that shares a parent with the repo resolves to a short `../x`
+// traversal, which is exactly the case a naive filepath.Rel accepts.
+func TestRepoRelativePaths_SiblingOfRepoStaysAbsolute(t *testing.T) {
+	repo := filepath.FromSlash("/tmp/repo")
+	sibling := filepath.FromSlash("/tmp/other/hooks.json")
+
+	got := RepoRelativePaths(repo, repo, []string{sibling})
+
+	require.Len(t, got, 1)
+	assert.True(t, filepath.IsAbs(got[0]), "got %q", got[0])
+	assert.Equal(t, sibling, got[0])
 }

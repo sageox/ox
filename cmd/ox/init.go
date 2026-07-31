@@ -2084,11 +2084,31 @@ func normalizeAdapterFilesWritten(gitRoot string, raw []string) []string {
 			slog.Debug("init: dropping adapter file outside repo", "entry", entry, "resolved", candidate)
 			continue
 		}
+		// Reject the repo root itself. An adapter reporting "." (or gitRoot
+		// absolute) passes both containment and Lstat, and `git add --force --
+		// <root>` stages the ENTIRE worktree — sweeping in every unrelated
+		// change the user had in progress. That is the exact outcome init's
+		// own next-steps note warns against, so it must never come from a
+		// third-party adapter's return value.
+		if rel == "." {
+			slog.Debug("init: dropping adapter entry resolving to the repo root", "entry", entry)
+			continue
+		}
 
 		// Lstat, not Stat: some installed assets are symlinks, and a
 		// broken symlink is still a real thing git can stage.
-		if _, err := os.Lstat(candidate); err != nil {
+		info, err := os.Lstat(candidate)
+		if err != nil {
 			slog.Debug("init: dropping adapter file that does not exist", "entry", entry, "resolved", candidate)
+			continue
+		}
+		// FilesWritten means files. Staging a directory pathspec pulls in
+		// everything beneath it, including files ox never wrote — same
+		// over-staging hazard as the repo-root case above, just narrower.
+		// Lstat reports a symlink as ModeSymlink rather than ModeDir, so
+		// symlinked assets still pass.
+		if info.IsDir() {
+			slog.Debug("init: dropping adapter entry that is a directory", "entry", entry, "resolved", candidate)
 			continue
 		}
 

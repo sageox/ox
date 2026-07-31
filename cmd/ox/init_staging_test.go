@@ -245,3 +245,57 @@ func TestNormalizeAdapterFilesWritten_KeepsGoodEntriesAlongsideBadOnes(t *testin
 	assert.Equal(t, []string{settings, command}, got,
 		"the two real files survive; only the junk is dropped")
 }
+
+// TestNormalizeAdapterFilesWritten_RejectsRepoRootAndDirs covers the
+// over-staging hazard. An adapter entry of "." — or gitRoot absolute —
+// passes both containment and Lstat, and `git add --force -- <root>`
+// stages the ENTIRE worktree, sweeping in every unrelated change the user
+// had in progress. That is the exact outcome init's own next-steps note
+// warns against, so it must never come from an adapter's return value.
+func TestNormalizeAdapterFilesWritten_RejectsRepoRootAndDirs(t *testing.T) {
+	repo := testGitRepo(t)
+	settings := writeFileAt(t, repo, ".claude/settings.json", "{}")
+
+	tests := []struct {
+		name  string
+		entry string
+		why   string
+	}{
+		{"dot", ".", "resolves to the repo root"},
+		{"dot-slash", "./", "same, trailing separator"},
+		{"absolute root", repo, "adapter returned gitRoot itself"},
+		{"nested directory", ".claude", "staging a dir pulls in files ox never wrote"},
+		{"deep directory", ".claude/skills", "same, one level down"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Empty(t, normalizeAdapterFilesWritten(repo, []string{tt.entry}), tt.why)
+		})
+	}
+
+	// and a mixed list must still keep the legitimate file
+	got := normalizeAdapterFilesWritten(repo, []string{".", ".claude", ".claude/settings.json"})
+	assert.Equal(t, []string{settings}, got,
+		"rejecting the root and the dir must not take the real file with them")
+}
+
+// TestStageAll_RepoRootEntryDoesNotStageEverything is the end-to-end
+// version: an adapter reporting "." must not cause init to stage a file
+// the user was independently working on.
+func TestStageAll_RepoRootEntryDoesNotStageEverything(t *testing.T) {
+	repo := testGitRepo(t)
+	writeFileAt(t, repo, ".claude/settings.json", "{}")
+	// an unrelated in-progress edit the user has NOT asked to commit
+	writeFileAt(t, repo, "src/work_in_progress.go", "package main\n")
+
+	tracker := newInitTracker(repo)
+	for _, p := range normalizeAdapterFilesWritten(repo, []string{".", ".claude/settings.json"}) {
+		tracker.trackForceStage(p)
+	}
+	tracker.stageAll()
+
+	staged := stagedFiles(t, repo)
+	assert.Contains(t, staged, ".claude/settings.json")
+	assert.NotContains(t, staged, "src/work_in_progress.go",
+		"a rogue adapter entry must never sweep the user's unrelated work into the commit")
+}
