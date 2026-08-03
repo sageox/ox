@@ -413,14 +413,27 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 			}
 			sb.WriteString("| Slug | Name | Topics | Mounted at |\n")
 			sb.WriteString("|------|------|--------|------------|\n")
+			anyMounted := false
 			for _, b := range output.KB {
 				topics := strings.Join(b.Topics, ", ")
 				path := b.Path
 				if path == "" {
 					path = "(not mounted yet)"
+				} else {
+					anyMounted = true
 				}
 				fmt.Fprintf(&sb, "| #%s | %s | %s | %s |\n",
 					escapeXML(b.Slug), escapeXML(b.Name), escapeXML(topics), escapeXML(path))
+			}
+			// The guidance above tells the agent to read AGENTS.md at the
+			// bubble's local path. With nothing mounted that is a dead end,
+			// so say why rather than let it discover the empty dir. The
+			// commands stay listed: both are API-backed and work unmounted —
+			// `ox kb describe` is exactly how you learn where a bubble will
+			// land once the daemon finishes cloning.
+			if !anyMounted {
+				sb.WriteString("No bubble is checked out locally yet — the daemon clones them in the background. ")
+				sb.WriteString("`ox kb list` / `ox kb describe` work now; the on-disk files appear once a clone lands.\n")
 			}
 			sb.WriteString("</knowledge-bubbles>\n")
 			bk.charge(prime.BudgetSourceSageox)

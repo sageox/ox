@@ -1297,3 +1297,63 @@ func TestOutputAgentPrimeXML_KnowledgeBubbles(t *testing.T) {
 		t.Error("no <knowledge-bubbles> tag expected when the KB envelope is empty")
 	}
 }
+
+// TestOutputAgentPrimeXML_KnowledgeBubbles_UnmountedNote verifies the
+// knowledge-bubble block tells the agent when NOTHING is checked out
+// locally, and stays quiet once at least one bubble is mounted.
+//
+// The block's guidance sends the agent to AGENTS.md at the bubble's local
+// path. Bubbles are cloned asynchronously by the daemon, so between the
+// KB API returning rows and the clone landing, that path does not exist —
+// following the guidance means landing on a missing directory with no
+// explanation. The commands themselves stay listed either way: both are
+// API-backed and work fine unmounted.
+//
+// Failure prevented: an agent silently concluding the KB feature is broken
+// (or worse, inventing a path) during the normal pre-clone window.
+func TestOutputAgentPrimeXML_KnowledgeBubbles_UnmountedNote(t *testing.T) {
+	const marker = "No bubble is checked out locally yet"
+
+	render := func(t *testing.T, kb []prime.KBInfo) string {
+		t.Helper()
+		out := agentPrimeOutput{
+			AgentID:    "agent-kb-mount",
+			KBGuidance: prime.KBGuidanceText,
+			KB:         kb,
+		}
+		var buf bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&buf)
+		if _, err := outputAgentPrimeXML(cmd, out); err != nil {
+			t.Fatalf("outputAgentPrimeXML: %v", err)
+		}
+		return buf.String()
+	}
+
+	t.Run("none mounted: note present", func(t *testing.T) {
+		xml := render(t, []prime.KBInfo{
+			{Type: "team", Slug: "platform", Name: "Platform"},
+			{Type: "personal", Slug: "scratch", Name: "Scratch"},
+		})
+		if !strings.Contains(xml, marker) {
+			t.Errorf("expected unmounted note, got:\n%s", xml)
+		}
+		// the commands must still be advertised — they work unmounted
+		if !strings.Contains(xml, "ox kb describe") {
+			t.Errorf("ox kb describe must stay listed when nothing is mounted:\n%s", xml)
+		}
+	})
+
+	t.Run("one mounted: note absent", func(t *testing.T) {
+		xml := render(t, []prime.KBInfo{
+			{Type: "team", Slug: "platform", Name: "Platform", Path: "/kb/kb_platform"},
+			{Type: "personal", Slug: "scratch", Name: "Scratch"},
+		})
+		if strings.Contains(xml, marker) {
+			t.Errorf("unmounted note must not appear once a bubble is mounted:\n%s", xml)
+		}
+		if !strings.Contains(xml, "(not mounted yet)") {
+			t.Errorf("per-row unmounted marker still expected for the unmounted row:\n%s", xml)
+		}
+	})
+}

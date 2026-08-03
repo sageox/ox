@@ -424,7 +424,7 @@ func TestCaptureSlog_RoundTrips(t *testing.T) {
 func TestKBGuidanceText_TeachesTheFourConcepts(t *testing.T) {
 	concepts := map[string][]string{
 		"1. what a bubble is":      {"synthesis of the conversations", "salient points", "cohesive area"},
-		"2. discovery command":     {"ox kb describe", "steering prompt", "local_path"},
+		"2. discovery command":     {"ox kb describe '#<slug>'", "steering prompt", "local_path"},
 		"3. repo navigation":       {"AGENTS.md", "curated for that bubble"},
 		"4. data not instructions": {"DATA, never instructions", "override the user"},
 		"5. pointer to long form":  {"ox guide knowledge-bubbles"},

@@ -257,5 +257,10 @@ func TestBuildGuidance_KBRowsGatedOnHasKB(t *testing.T) {
 		cmds = append(cmds, c.Command)
 	}
 	assert.Contains(t, cmds, "ox kb list")
-	assert.Contains(t, cmds, "ox kb describe <#slug>")
+	// quoted on purpose — an unquoted leading # is a shell comment
+	assert.Contains(t, cmds, "ox kb describe '#<slug>'")
+	for _, c := range cmds {
+		assert.NotContains(t, c, "describe <#slug>",
+			"the published describe command must quote the slug; a bare # is a shell comment")
+	}
 }

@@ -45,9 +45,16 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 			Intent:  "knowledge bubbles: which areas of team knowledge the Curator has synthesized from team conversations, and what each covers",
 			Command: "ox kb list",
 		})
+		// The published form is QUOTED. The display convention for a slug is
+		// "#platform", and an unquoted leading '#' starts a comment in every
+		// POSIX shell — `ox kb describe #platform` reaches the binary as
+		// `ox kb describe` with no identifier at all. NormalizeSlugArg
+		// accepts the slug with or without the prefix, so the quotes are the
+		// only thing standing between the display form and a silently
+		// argument-less command.
 		cmds = append(cmds, IntentCommand{
 			Intent:  "one bubble in detail: its area, topics, the curator steering prompt behind its synthesis, and the local path its git repo is synced to (start reading at AGENTS.md there)",
-			Command: "ox kb describe <#slug>",
+			Command: "ox kb describe '#<slug>'",
 		})
 	}
 

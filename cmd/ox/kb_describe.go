@@ -194,6 +194,11 @@ func handleKBDescribeError(w io.Writer, err error, input string, jsonOutput bool
 	return err
 }
 
+// kbRowKeyWidth is the padded key column in the describe view.
+// Continuation lines of a multi-line value indent to match, so untrusted
+// free text can never reach the key column and pose as a row of its own.
+const kbRowKeyWidth = 17
+
 // renderKBDescribe prints the human-readable view: a small key/value table
 // with two-space indent and dim keys. This view shows ~10 fields; table
 // styling would be over-engineered.
@@ -201,15 +206,28 @@ func renderKBDescribe(w io.Writer, bubble *api.KB, localPath, ep string) {
 	keyStyle := lipgloss.NewStyle().Foreground(cli.ColorDim)
 	valStyle := lipgloss.NewStyle().Foreground(cli.ColorPrimary)
 
+	// Every value below is server-provided free text. Sanitize at the point
+	// of render so a hostile or compromised bubble cannot repaint the
+	// terminal, forge rows, or smuggle an OSC hyperlink/clipboard write
+	// through `ox kb describe`. Sanitizing the value only — the key is ours
+	// and carries the lipgloss styling.
 	row := func(key, val string) {
-		if val == "" {
+		lines := cli.SanitizeTerminalLines(val)
+		if len(lines) == 0 {
 			return
 		}
-		fmt.Fprintf(w, "  %s %s\n", keyStyle.Render(fmt.Sprintf("%-17s", key+":")), val)
+		fmt.Fprintf(w, "  %s %s\n", keyStyle.Render(fmt.Sprintf("%-*s", kbRowKeyWidth, key+":")), lines[0])
+		// Continuations are indented under the value column, never emitted
+		// at column zero — free-text fields like steering are multi-line in
+		// practice, and an unindented continuation reads as a new label or
+		// a standalone instruction rather than as part of this row.
+		for _, line := range lines[1:] {
+			fmt.Fprintf(w, "  %s %s\n", strings.Repeat(" ", kbRowKeyWidth), line)
+		}
 	}
 
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  %s %s\n", keyStyle.Render(fmt.Sprintf("%-17s", "kb_id:")), valStyle.Render(bubble.KBID))
+	fmt.Fprintf(w, "  %s %s\n", keyStyle.Render(fmt.Sprintf("%-17s", "kb_id:")), valStyle.Render(cli.SanitizeTerminalText(bubble.KBID)))
 	row("type", string(bubble.KBType))
 	if bubble.Slug != "" {
 		row("slug", cli.FormatKBSlug(bubble.Slug))

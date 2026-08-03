@@ -186,7 +186,8 @@ func EnsurePersonalKBPresent(kbInfos []KBInfo, kbSourceReachable bool) []KBInfo 
 const KBGuidanceText = "A knowledge bubble is the Curator's synthesis of the conversations this " +
 	"team has — distilled into salient points, decisions, and topics. One bubble per cohesive " +
 	"area of team knowledge; read-only.\n" +
-	"`ox kb describe <#slug>` → the bubble's topics, its curator steering prompt (what shaped " +
+	"`ox kb describe '#<slug>'` (quote it — a bare leading # is a shell comment) → the " +
+	"bubble's topics, its curator steering prompt (what shaped " +
 	"the synthesis — read it to judge what the bubble will and will not know), and " +
 	"`local_path`, where its git repo is synced. Start reading at AGENTS.md in that root; each " +
 	"bubble's layout is curated for that bubble, so don't assume one from another.\n" +

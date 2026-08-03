@@ -31,8 +31,10 @@ ox kb list
 Prints the catalog: slug, name, topics, and where each bubble is mounted.
 
 ```bash
-ox kb describe <#slug>
+ox kb describe '#<slug>'
 ```
+
+Quote it. The `#` is a display convention and `ox` accepts the slug with or without it — but an unquoted leading `#` starts a comment in every POSIX shell, so `ox kb describe #platform` reaches the binary with no identifier at all. `ox kb describe platform` works too.
 
 Prints one bubble in full. Four fields carry most of the value:
 
