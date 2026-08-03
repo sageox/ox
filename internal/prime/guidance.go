@@ -16,6 +16,7 @@ type GuidanceParams struct {
 	MemoryEnabled    bool             // true if memory feature is enabled
 	MurmuringEnabled bool             // true if murmuring: "auto" is set for this project
 	AgentType        string           // detected/claimed agent type; drives plan-enrichment tiering
+	HasKB            bool             // true if at least one knowledge bubble is mounted for this caller
 }
 
 // BuildGuidance constructs state-aware command guidance for agent consumption.
@@ -35,12 +36,27 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 		})
 	}
 
+	// knowledge bubbles — only when the caller has at least one mounted.
+	// Two rows: the catalog, and the per-bubble detail read that carries the
+	// steering prompt + the local mount path. (The matching behavioral block
+	// is <knowledge-bubbles> in agent_prime_xml.go.)
+	if p.HasKB {
+		cmds = append(cmds, IntentCommand{
+			Intent:  "knowledge bubbles: which areas of team knowledge the Curator has synthesized from team conversations, and what each covers",
+			Command: "ox kb list",
+		})
+		cmds = append(cmds, IntentCommand{
+			Intent:  "one bubble in detail: its area, topics, the curator steering prompt behind its synthesis, and the local path its git repo is synced to (start reading at AGENTS.md there)",
+			Command: "ox kb describe <#slug>",
+		})
+	}
+
 	// bundled guides — always available; teaches users + agents about ox
 	// concepts (team rules, AGENTS.md, team context, murmur vs. rule). Listed
 	// early so agents see it before falling back to file exploration when
 	// asked "how do I...?" questions.
 	cmds = append(cmds, IntentCommand{
-		Intent:  "learn how to do something in ox: team rules, AGENTS.md, team context, getting started — bundled topical guides",
+		Intent:  "learn how to do something in ox: team rules, AGENTS.md, team context, knowledge bubbles, getting started — bundled topical guides",
 		Command: "ox guide [topic]",
 	})
 

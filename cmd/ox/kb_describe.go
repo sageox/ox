@@ -222,6 +222,12 @@ func renderKBDescribe(w io.Writer, bubble *api.KB, localPath, ep string) {
 	if len(bubble.Topics) > 0 {
 		row("topics", strings.Join(bubble.Topics, ", "))
 	}
+	// The curator steering prompt — what shaped the synthesis of team
+	// conversations into this bubble. Load-bearing for an AI coworker
+	// deciding whether a bubble is likely to know something, so it is
+	// shown in full rather than truncated. Empty ⇒ opted out of curator
+	// routing (ADR-097 C9), and the row elides itself.
+	row("steering", bubble.Steering)
 	row("lifecycle_state", bubble.LifecycleState)
 	row("viewer_role", bubble.ViewerRole)
 	// "admin" is the bubble-admin label (ADR-073 §2) — the human in charge,

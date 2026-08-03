@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/sageox/ox/internal/prime"
 )
 
 func TestDiscoverGuides_BundledTopicsPresent(t *testing.T) {
@@ -61,5 +63,46 @@ func TestReadGuideFrontmatter_ExtractsTitleAndDescription(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(title), "team rules") {
 		t.Errorf("expected team-rules title to mention 'team rules', got %q", title)
+	}
+}
+
+// TestGuideTopicsReferencedByPrime_Exist verifies every `ox guide <topic>`
+// pointer embedded in prime's steering text resolves to a bundled guide.
+//
+// Prime's knowledge-bubble block is deliberately compressed and defers its
+// long form to `ox guide knowledge-bubbles`; if that guide is renamed or
+// dropped, the compression turns into a dead end — the agent is told where
+// to read the detail and finds "unknown topic". This test is the only
+// cross-check between the two packages (internal/prime cannot import
+// cmd/ox), so it must live here.
+func TestGuideTopicsReferencedByPrime_Exist(t *testing.T) {
+	guides, err := discoverGuides()
+	if err != nil {
+		t.Fatalf("discoverGuides: %v", err)
+	}
+
+	bundled := make(map[string]bool, len(guides))
+	for _, g := range guides {
+		bundled[g.Topic] = true
+	}
+
+	// topic -> the prime text that points at it
+	referenced := map[string]string{
+		"knowledge-bubbles": "prime.KBGuidanceText (the <knowledge-bubbles> block)",
+	}
+
+	for topic, source := range referenced {
+		if !bundled[topic] {
+			t.Errorf("guide %q is referenced by %s but not bundled in cmd/ox/guides/", topic, source)
+		}
+	}
+}
+
+// TestKBGuidancePointsAtBundledGuide pins the pointer itself: prime's KB
+// block must keep telling agents where the long form lives. Dropping the
+// line would strand every detail migrated out of prime into the guide.
+func TestKBGuidancePointsAtBundledGuide(t *testing.T) {
+	if !strings.Contains(prime.KBGuidanceText, "ox guide knowledge-bubbles") {
+		t.Errorf("prime KB guidance must point at `ox guide knowledge-bubbles`, got:\n%s", prime.KBGuidanceText)
 	}
 }

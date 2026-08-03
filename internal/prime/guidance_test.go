@@ -231,3 +231,31 @@ func TestBuildCapturePriorGuidance(t *testing.T) {
 	}
 	assert.True(t, found, "instructions should contain agent ID")
 }
+
+// TestBuildGuidance_KBRowsGatedOnHasKB verifies the `ox kb` rows appear only
+// when the caller actually has a mounted bubble — an account with the KB
+// feature off must pay zero tokens for commands that would return nothing.
+//
+// Failure prevented: ungating the rows (every prime carries dead commands)
+// or dropping them (agents never learn `ox kb describe` exists, and the
+// <knowledge-bubbles> block's instruction to run it dangles).
+func TestBuildGuidance_KBRowsGatedOnHasKB(t *testing.T) {
+	base := GuidanceParams{AgentID: "a1", RepoSlug: "test/repo"}
+
+	off := BuildGuidance(base)
+	for _, c := range off.Commands {
+		assert.NotContains(t, c.Command, "ox kb",
+			"no ox kb row expected when the caller has no bubbles")
+	}
+
+	withKB := base
+	withKB.HasKB = true
+	on := BuildGuidance(withKB)
+
+	var cmds []string
+	for _, c := range on.Commands {
+		cmds = append(cmds, c.Command)
+	}
+	assert.Contains(t, cmds, "ox kb list")
+	assert.Contains(t, cmds, "ox kb describe <#slug>")
+}

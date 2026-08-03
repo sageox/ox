@@ -439,7 +439,7 @@ func TestBuildGuidance_MemoryPut(t *testing.T) {
 			t.Setenv("FEATURE_MEMORY", tt.featureEnv)
 
 			projectRoot := t.TempDir()
-			g := buildGuidance("test-agent", projectRoot, tt.teamCtx, nil, "claude-code")
+			g := buildGuidance("test-agent", projectRoot, tt.teamCtx, nil, "claude-code", false)
 
 			found := false
 			for _, cmd := range g.Commands {

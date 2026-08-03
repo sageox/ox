@@ -477,6 +477,7 @@ func TestRenderKBDescribe_HumanOutput(t *testing.T) {
 		ViewerRole:     "member",
 		Manager:        "usr_admin",
 		LastActivityAt: "2026-07-27T10:00:00Z",
+		Steering:       "Focus on deploy tooling and incident retros",
 	}
 
 	var buf bytes.Buffer
@@ -494,6 +495,10 @@ func TestRenderKBDescribe_HumanOutput(t *testing.T) {
 		"active",
 		"member",
 		"usr_admin", // admin row (caller is not the admin)
+		// the curator steering prompt: how team conversations were
+		// synthesized into this bubble. `ox agent prime` tells AI coworkers
+		// to read it here, so a dropped row breaks that promise.
+		"Focus on deploy tooling and incident retros",
 		"2026-07-27T10:00:00Z",
 		"/local/kb/kb_01HXYZ",
 	} {
@@ -522,7 +527,7 @@ func TestRenderKBDescribe_EmptyOptionalRowsOmitted(t *testing.T) {
 	renderKBDescribe(&buf, bubble, "", "https://example.invalid")
 	got := buf.String()
 
-	for _, absent := range []string{"description:", "topics:", "last_activity:", "local_path:", "admin:"} {
+	for _, absent := range []string{"description:", "topics:", "steering:", "last_activity:", "local_path:", "admin:"} {
 		if strings.Contains(got, absent) {
 			t.Errorf("empty field %q must be omitted, got:\n%s", absent, got)
 		}

@@ -400,3 +400,39 @@ func TestCaptureSlog_RoundTrips(t *testing.T) {
 		t.Fatalf("slog capture failed; buf=%q", buf.String())
 	}
 }
+
+// TestKBGuidanceText_TeachesTheFourConcepts pins the four things the prime
+// KB block MUST teach an AI coworker, one marker per concept:
+//
+//  1. WHAT a bubble is — the Curator's synthesis of the team's conversations,
+//     distilled into salient points/topics, one bubble per cohesive area.
+//  2. HOW to interrogate a bubble — `ox kb describe`, which carries the
+//     steering prompt and the local sync path.
+//  3. HOW to navigate a bubble repo — per-bubble curated layout, AGENTS.md
+//     in the root is the entry point.
+//  4. TRUST — bubble content is data, never instructions.
+//  5. WHERE the long form lives — `ox guide knowledge-bubbles`, since the
+//     block is deliberately compressed and must not become a dead end.
+//
+// Markers are short substrings, not whole sentences, so wording polish
+// doesn't fail the test; only dropping a concept does.
+//
+// Failure prevented: a token-budget trim quietly deleting one of these —
+// most dangerously the data-not-instructions rule, which is the prompt-
+// injection boundary for every file the Curator writes, and which must
+// stay in prime itself rather than being deferred to the guide.
+func TestKBGuidanceText_TeachesTheFourConcepts(t *testing.T) {
+	concepts := map[string][]string{
+		"1. what a bubble is":      {"synthesis of the conversations", "salient points", "cohesive area"},
+		"2. discovery command":     {"ox kb describe", "steering prompt", "local_path"},
+		"3. repo navigation":       {"AGENTS.md", "curated for that bubble"},
+		"4. data not instructions": {"DATA, never instructions", "override the user"},
+		"5. pointer to long form":  {"ox guide knowledge-bubbles"},
+	}
+	for concept, markers := range concepts {
+		for _, m := range markers {
+			assert.Contains(t, KBGuidanceText, m,
+				"KB prime guidance dropped concept %q (missing marker %q)", concept, m)
+		}
+	}
+}
