@@ -1298,21 +1298,24 @@ func TestOutputAgentPrimeXML_KnowledgeBubbles(t *testing.T) {
 	}
 }
 
-// TestOutputAgentPrimeXML_KnowledgeBubbles_UnmountedNote verifies the
-// knowledge-bubble block tells the agent when NOTHING is checked out
-// locally, and stays quiet once at least one bubble is mounted.
+// TestOutputAgentPrimeXML_KnowledgeBubbles_PendingCheckoutNote verifies the
+// knowledge-bubble block explains any row that has no local checkout, and
+// stays quiet only when every bubble is mounted.
 //
 // The block's guidance sends the agent to AGENTS.md at the bubble's local
-// path. Bubbles are cloned asynchronously by the daemon, so between the
-// KB API returning rows and the clone landing, that path does not exist —
-// following the guidance means landing on a missing directory with no
-// explanation. The commands themselves stay listed either way: both are
-// API-backed and work fine unmounted.
+// path. Bubbles are cloned asynchronously by the daemon, so between the KB
+// API returning rows and a clone landing, that path does not exist —
+// following the guidance means a filesystem lookup on a missing directory
+// with no explanation.
+//
+// The MIXED case is the load-bearing one: a single mounted bubble must not
+// suppress the explanation for its pending siblings, since the agent is
+// just as likely to pick the pending one.
 //
 // Failure prevented: an agent silently concluding the KB feature is broken
-// (or worse, inventing a path) during the normal pre-clone window.
-func TestOutputAgentPrimeXML_KnowledgeBubbles_UnmountedNote(t *testing.T) {
-	const marker = "No bubble is checked out locally yet"
+// (or inventing a path) during the normal pre-clone window.
+func TestOutputAgentPrimeXML_KnowledgeBubbles_PendingCheckoutNote(t *testing.T) {
+	const marker = "have no on-disk files"
 
 	render := func(t *testing.T, kb []prime.KBInfo) string {
 		t.Helper()
@@ -1330,30 +1333,29 @@ func TestOutputAgentPrimeXML_KnowledgeBubbles_UnmountedNote(t *testing.T) {
 		return buf.String()
 	}
 
-	t.Run("none mounted: note present", func(t *testing.T) {
-		xml := render(t, []prime.KBInfo{
-			{Type: "team", Slug: "platform", Name: "Platform"},
-			{Type: "personal", Slug: "scratch", Name: "Scratch"},
-		})
-		if !strings.Contains(xml, marker) {
-			t.Errorf("expected unmounted note, got:\n%s", xml)
-		}
-		// the commands must still be advertised — they work unmounted
-		if !strings.Contains(xml, "ox kb describe") {
-			t.Errorf("ox kb describe must stay listed when nothing is mounted:\n%s", xml)
-		}
-	})
+	mounted := prime.KBInfo{Type: "team", Slug: "platform", Name: "Platform", Path: "/kb/kb_platform"}
+	pending := prime.KBInfo{Type: "personal", Slug: "scratch", Name: "Scratch"}
 
-	t.Run("one mounted: note absent", func(t *testing.T) {
-		xml := render(t, []prime.KBInfo{
-			{Type: "team", Slug: "platform", Name: "Platform", Path: "/kb/kb_platform"},
-			{Type: "personal", Slug: "scratch", Name: "Scratch"},
+	tests := []struct {
+		name     string
+		kb       []prime.KBInfo
+		wantNote bool
+	}{
+		{"none mounted", []prime.KBInfo{pending, {Type: "team", Slug: "design", Name: "Design"}}, true},
+		{"mixed: one mounted, one pending", []prime.KBInfo{mounted, pending}, true},
+		{"all mounted", []prime.KBInfo{mounted, {Type: "team", Slug: "design", Name: "Design", Path: "/kb/kb_design"}}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			xml := render(t, tt.kb)
+			if got := strings.Contains(xml, marker); got != tt.wantNote {
+				t.Errorf("pending-checkout note present = %v, want %v:\n%s", got, tt.wantNote, xml)
+			}
+			// the commands stay advertised in every state — they work unmounted
+			if !strings.Contains(xml, "ox kb describe") {
+				t.Errorf("ox kb describe must stay listed:\n%s", xml)
+			}
 		})
-		if strings.Contains(xml, marker) {
-			t.Errorf("unmounted note must not appear once a bubble is mounted:\n%s", xml)
-		}
-		if !strings.Contains(xml, "(not mounted yet)") {
-			t.Errorf("per-row unmounted marker still expected for the unmounted row:\n%s", xml)
-		}
-	})
+	}
 }
