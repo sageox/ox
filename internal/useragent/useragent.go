@@ -24,6 +24,7 @@ var (
 	agentVersion     string
 	orchestratorType string
 	repoID           string
+	daemonMode       bool
 	cached           string
 	daemonStr        string
 )
@@ -112,6 +113,35 @@ func RepoID() string {
 	return repoID
 }
 
+// SetDaemonMode marks this process as the SageOx daemon, so every request
+// built through NewRequest / SetHeaders identifies as unattended background
+// traffic rather than an interactive CLI invocation.
+//
+// This is process-global on purpose. The server excludes daemon traffic from
+// human CLI activity metrics by matching the "ox-daemon/" User-Agent prefix,
+// which makes the UA load-bearing: any daemon request that slips through with
+// the interactive UA is silently counted as a human running ox. Marking the
+// process once, at the point where it becomes the daemon, means no client
+// type, no method, and no future call site has to remember to opt in.
+//
+// Safe because the daemon's work only ever runs in the daemon process:
+// NewSyncScheduler is constructed solely by daemon.New, which is called solely
+// by the `ox daemon start --foreground` entry point. No CLI command runs the
+// scheduler in-process, so this can never mislabel human traffic.
+func SetDaemonMode() {
+	mu.Lock()
+	defer mu.Unlock()
+	daemonMode = true
+	cached = ""
+}
+
+// IsDaemonMode reports whether this process has been marked as the daemon.
+func IsDaemonMode() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	return daemonMode
+}
+
 // SetOrchestratorType records the detected orchestrator (e.g. "conductor", "openclaw").
 // Thread-safe. First write wins; subsequent calls are no-ops.
 func SetOrchestratorType(ot string) {
@@ -131,6 +161,7 @@ func SetOrchestratorType(ot string) {
 // With agent:    "ox/0.17.0 (claude-code/1.0.26; darwin; arm64)"
 // Without ver:   "ox/0.17.0 (claude-code; darwin; arm64)"
 // No agent:      "ox/0.17.0 (darwin; arm64)"
+// Daemon mode:   "ox-daemon/0.17.0 (darwin; arm64)"
 func String() string {
 	mu.RLock()
 	if cached != "" {
@@ -143,6 +174,14 @@ func String() string {
 	mu.Lock()
 	defer mu.Unlock()
 	if cached != "" {
+		return cached
+	}
+
+	// In the daemon, every request is background traffic regardless of which
+	// coding agent happened to spawn the process, so the agent tokens below
+	// are deliberately not applied.
+	if daemonMode {
+		cached = daemonStr
 		return cached
 	}
 
@@ -246,5 +285,6 @@ func ResetForTesting() {
 	agentVersion = ""
 	orchestratorType = ""
 	repoID = ""
+	daemonMode = false
 	cached = ""
 }

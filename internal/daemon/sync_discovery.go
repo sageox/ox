@@ -63,7 +63,7 @@ func (s *SyncScheduler) refreshCredentialsIfNeeded() {
 	}
 
 	// fetch fresh credentials from API using project endpoint
-	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken).WithDaemonUserAgent()
+	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
 	reposResp, err := client.GetRepos()
 	if err != nil {
 		s.logger.Warn("failed to fetch repos for credential refresh", "error", err)
@@ -136,7 +136,7 @@ func (s *SyncScheduler) discoverTeams() {
 		return
 	}
 
-	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken).WithDaemonUserAgent()
+	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
 	reposResp, err := client.GetRepos()
 	if err != nil {
 		s.logger.Warn("failed to fetch repos for team discovery", "error", err)
@@ -237,7 +237,7 @@ func (s *SyncScheduler) fetchLedgerURLFromAPI() {
 
 	// prefer GetRepoDetail (returns ledger + team contexts in one call)
 	// fall back to GetLedgerStatus if server hasn't implemented new endpoint (404 -> nil)
-	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken).WithDaemonUserAgent()
+	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
 
 	detail, detailErr := client.GetRepoDetail(repoID)
 	if detailErr != nil {

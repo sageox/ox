@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -355,6 +356,13 @@ func init() {
 
 // runDaemonForeground runs the daemon in the foreground.
 func runDaemonForeground(ledgerPath string) error {
+	// This process IS the daemon from here on. Mark it before anything can
+	// issue a request, so every outbound call — whatever client builds it —
+	// identifies as background traffic. The server keys its "exclude daemon
+	// polling from human CLI activity" rule off this User-Agent, so a request
+	// that escapes with the interactive UA is silently counted as a human.
+	useragent.SetDaemonMode()
+
 	cfg := daemon.DefaultConfig()
 	cfg.LedgerPath = ledgerPath
 	cfg.ProjectRoot = findGitRoot() // required for team context syncing

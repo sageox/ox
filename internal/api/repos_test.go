@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -335,7 +336,58 @@ func TestGetRepos_UserAgentHeader(t *testing.T) {
 	assert.Equal(t, expectedUA, receivedUserAgent)
 }
 
-func TestGetRepos_DaemonUserAgent(t *testing.T) {
+// TestDaemonMode_AllMethodsSendDaemonUserAgent covers every request method on
+// the client, not just the ones a per-call-site opt-in happened to reach.
+//
+// The server excludes background polling from human CLI activity by matching
+// the "ox-daemon/" User-Agent prefix, which makes the UA load-bearing: any
+// daemon request that escapes with the interactive UA is silently counted as a
+// human running ox. Marking the process once means no method can be missed.
+//
+// Failure prevented: reintroducing a per-method opt-in. GetLedgerStatus in
+// particular had no daemon handling under the old scheme — it is only harmless
+// today because its route sits outside the group the server tracks, which is a
+// coincidence of routing, not a property of the client.
+func TestDaemonMode_AllMethodsSendDaemonUserAgent(t *testing.T) {
+	useragent.ResetForTesting()
+	t.Cleanup(useragent.ResetForTesting)
+
+	var mu sync.Mutex
+	seen := map[string]string{}
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.URL.Path] = r.UserAgent()
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"token":"t","server_url":"s","repos":{}}`))
+	}))
+	defer mockServer.Close()
+
+	useragent.SetDaemonMode()
+
+	client := NewRepoClientWithEndpoint(mockServer.URL).WithAuthToken("tok")
+	_, _ = client.GetRepos()                //nolint:errcheck // only the UA matters
+	_, _ = client.GetRepoDetail("repo_1")   //nolint:errcheck
+	_, _ = client.GetCLISettings()          //nolint:errcheck
+	_, _ = client.GetTeamInfo("team_1")     //nolint:errcheck
+	_, _ = client.GetLedgerStatus("repo_1") //nolint:errcheck
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, seen, "no requests reached the server")
+	for path, ua := range seen {
+		assert.Equal(t, useragent.DaemonString(), ua,
+			"%s must identify as daemon traffic — the server's activity filter keys off this", path)
+	}
+}
+
+// TestDaemonMode_DoesNotLeakIntoCLIRequests is the other half: an ordinary CLI
+// process must keep the interactive identity, or every human invocation would
+// vanish from activity metrics.
+func TestDaemonMode_DoesNotLeakIntoCLIRequests(t *testing.T) {
+	useragent.ResetForTesting()
+	t.Cleanup(useragent.ResetForTesting)
+
 	var receivedUserAgent string
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedUserAgent = r.UserAgent()
@@ -344,11 +396,12 @@ func TestGetRepos_DaemonUserAgent(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	client := NewRepoClientWithEndpoint(mockServer.URL).WithDaemonUserAgent()
-	_, err := client.GetRepos()
+	_, err := NewRepoClientWithEndpoint(mockServer.URL).GetRepos()
 
 	require.NoError(t, err)
-	assert.Equal(t, useragent.DaemonString(), receivedUserAgent)
+	assert.True(t, strings.HasPrefix(receivedUserAgent, "ox/"),
+		"CLI requests must keep the interactive UA, got %q", receivedUserAgent)
+	assert.NotEqual(t, useragent.DaemonString(), receivedUserAgent)
 }
 
 func TestGetRepos_EmptyResponseBody(t *testing.T) {

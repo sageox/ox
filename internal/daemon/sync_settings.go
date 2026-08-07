@@ -56,7 +56,7 @@ func (f *SettingsFetcher) Fetch(ctx context.Context) {
 		return
 	}
 
-	client := api.NewRepoClientWithEndpoint(f.endpoint).WithAuthToken(token).WithDaemonUserAgent()
+	client := api.NewRepoClientWithEndpoint(f.endpoint).WithAuthToken(token)
 
 	fetchCtx, cancel := context.WithTimeout(ctx, flags.CLISettingsFetchTimeout)
 	defer cancel()
