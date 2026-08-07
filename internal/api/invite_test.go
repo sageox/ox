@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -33,11 +34,17 @@ import (
 // Captured server-side so assertions are on the bytes that were actually
 // transmitted, not on what the caller intended to transmit.
 type capturedRequest struct {
-	Method   string
-	Path     string
-	RawQuery string
-	Headers  http.Header
-	Body     []byte
+	Method string
+	// Path is the DECODED path. Convenient to assert against, but it cannot
+	// distinguish an escaped %2F from a literal '/', so a ref that escaped into
+	// one segment looks identical to one that split into two.
+	Path string
+	// EscapedPath is what actually went over the wire. Segment-containment
+	// assertions must use this one.
+	EscapedPath string
+	RawQuery    string
+	Headers     http.Header
+	Body        []byte
 }
 
 // recorder collects every request a test's server receives. Guarded because
@@ -53,11 +60,12 @@ func (rec *recorder) record(r *http.Request) {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	rec.requests = append(rec.requests, capturedRequest{
-		Method:   r.Method,
-		Path:     r.URL.Path,
-		RawQuery: r.URL.RawQuery,
-		Headers:  r.Header.Clone(),
-		Body:     body,
+		Method:      r.Method,
+		Path:        r.URL.Path,
+		EscapedPath: r.URL.EscapedPath(),
+		RawQuery:    r.URL.RawQuery,
+		Headers:     r.Header.Clone(),
+		Body:        body,
 	})
 }
 
@@ -986,18 +994,16 @@ func TestCreateTeamInvite_BaseURLTrailingSlash(t *testing.T) {
 // TestCreateTeamInvite_TeamRefIsPathEscaped checks that a team ref is confined
 // to one path segment.
 //
-// KNOWN BUG (this test is expected to FAIL): teamRef is interpolated into the
-// URL with fmt.Sprintf and never escaped, so a ref containing '?' or '#'
-// terminates the path early. The "/invites" suffix is dropped from the
-// request entirely and the POST lands on a different route — for '?' the
-// remainder even becomes a query string. The resulting 404 is then reported as
-// ErrInviteUnsupported ("this SageOx server does not support CLI invitations
-// yet"), so a malformed --team value is diagnosed as a server capability gap.
-// teamRef reaches here verbatim from the --team flag (cmd/ox/invite.go:390,
-// where an unrecognized team is deliberately passed through to the server).
+// teamRef is escaped with url.PathEscape, so it occupies exactly one segment
+// whatever the user typed after --team — and an unrecognized team is
+// deliberately passed through verbatim to let the server resolve it.
 //
-// Failure prevented: any user-supplied ref silently retargeting the request.
-// Fix: url.PathEscape(teamRef) before interpolation.
+// Failure prevented: dropping the escaping lets a ref containing '?' or '#'
+// terminate the path early. The "/invites" suffix vanishes, the POST lands on
+// another route, and the resulting 404 — which carries no JSON body — is
+// reported as ErrInviteUnsupported ("this SageOx server does not support CLI
+// invitations yet"). A typo'd team name would abort the whole batch with a
+// diagnosis pointing at the server instead of at the flag.
 func TestCreateTeamInvite_TeamRefIsPathEscaped(t *testing.T) {
 	t.Parallel()
 
@@ -1049,7 +1055,7 @@ func TestCreateTeamInvite_TeamRefIsPathEscaped(t *testing.T) {
 func TestCreateTeamInvite_TeamRefNeverLandsOnAnotherRoute(t *testing.T) {
 	t.Parallel()
 
-	for _, ref := range []string{"acme?role=owner", "acme#fragment", "acme%zz", "a/b", ".."} {
+	for _, ref := range []string{"acme?role=owner", "acme#fragment", "acme%zz", "a/b"} {
 		t.Run(ref, func(t *testing.T) {
 			t.Parallel()
 			srv, rec := staticServer(t, http.StatusCreated, `{"id":"inv_01"}`)
@@ -1060,10 +1066,21 @@ func TestCreateTeamInvite_TeamRefNeverLandsOnAnotherRoute(t *testing.T) {
 			require.NoError(t, err)
 
 			got := rec.last(t)
-			assert.True(t, strings.HasSuffix(got.Path, "/invites"),
-				"the request must still target an invites collection, got %q", got.Path)
-			assert.Equal(t, "/api/v1/teams/"+ref+"/invites", got.Path,
-				"the ref must occupy exactly one path segment")
+
+			// Assert on the ESCAPED path. The decoded Path cannot tell an
+			// escaped %2F from a real '/', so "a/b" would look correctly
+			// contained there even if it had split the path in two.
+			assert.Equal(t, "/api/v1/teams/"+url.PathEscape(ref)+"/invites", got.EscapedPath,
+				"the ref must occupy exactly one wire path segment")
+
+			// Exactly four segments: api, v1, teams, <ref>, invites. Counting
+			// on the escaped form is what catches a ref that added a segment.
+			segs := strings.Split(strings.TrimPrefix(got.EscapedPath, "/"), "/")
+			assert.Len(t, segs, 5, "ref must not add or remove a path segment: %q", got.EscapedPath)
+			assert.Equal(t, "invites", segs[len(segs)-1])
+
+			assert.Empty(t, got.RawQuery,
+				"nothing from the team ref may leak into the query string")
 		})
 	}
 }
@@ -1117,4 +1134,51 @@ func TestCreateTeamInvite_RedirectMustNotForgeSuccess(t *testing.T) {
 		t.Errorf("KNOWN BUG: reported a created invite (%+v) although no POST ever "+
 			"reached a handler that creates one", invite)
 	}
+}
+
+// TestCreateTeamInvite_DotSegmentTeamRefIsRefused covers the one class of ref
+// that escaping cannot make safe.
+//
+// url.PathEscape leaves "." and ".." untouched (dots are unreserved), so a ref
+// of ".." builds ".../teams/../invites" — which any normalizing proxy or server
+// collapses to ".../invites", a different endpoint. The 404 that follows has no
+// JSON body and would be reported to the user as "this server does not support
+// CLI invitations".
+//
+// Failure prevented: a team ref silently retargeting the request at a route the
+// user never asked for, diagnosed as a server capability gap.
+func TestCreateTeamInvite_DotSegmentTeamRefIsRefused(t *testing.T) {
+	t.Parallel()
+
+	for _, ref := range []string{".", "..", "  ..  ", ""} {
+		t.Run(fmt.Sprintf("%q", ref), func(t *testing.T) {
+			t.Parallel()
+			srv, rec := staticServer(t, http.StatusCreated, `{"id":"inv_01"}`)
+
+			invite, err := api.NewRepoClientWithEndpoint(srv.URL).
+				WithAuthToken("tok").
+				CreateTeamInvite(context.Background(), ref, validRequest())
+
+			require.ErrorIs(t, err, api.ErrInvalidTeamRef)
+			assert.Nil(t, invite)
+			assert.Empty(t, rec.all(), "a ref that cannot be placed safely must never be sent")
+		})
+	}
+}
+
+// The same guard must cover every invite operation, not just create — --list
+// and --cancel take the identical user-supplied --team value.
+func TestListAndRevoke_RefuseDotSegmentTeamRef(t *testing.T) {
+	t.Parallel()
+
+	srv, rec := staticServer(t, http.StatusOK, `{"invites":[],"total":0}`)
+	client := api.NewRepoClientWithEndpoint(srv.URL).WithAuthToken("tok")
+
+	_, listErr := client.ListTeamInvites(context.Background(), "..")
+	require.ErrorIs(t, listErr, api.ErrInvalidTeamRef)
+
+	revokeErr := client.RevokeTeamInvite(context.Background(), "..", "inv_01")
+	require.ErrorIs(t, revokeErr, api.ErrInvalidTeamRef)
+
+	assert.Empty(t, rec.all(), "neither operation may reach the network with an unsafe ref")
 }

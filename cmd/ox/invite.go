@@ -103,10 +103,10 @@ type inviteResult struct {
 // counts returns sent / already-pending / failed for the summary line.
 func (r inviteResult) counts() (sent, pending, failed int) {
 	for _, o := range r.Outcomes {
-		switch {
-		case o.Status == statusSent:
+		switch o.Status {
+		case statusSent:
 			sent++
-		case o.Status == statusAlreadyInvited:
+		case statusAlreadyInvited:
 			pending++
 		default:
 			failed++
@@ -130,8 +130,9 @@ var inviteCmd = &cobra.Command{
 	Long: `Invite one or more people to a SageOx team.
 
 Addresses may be comma-, semicolon-, or space-separated, and repeated as
-separate arguments. Each person receives an email with a link to join.
-Invitations expire after 7 days.
+separate arguments. SageOx then sends each person a link to join. Delivery is
+best-effort and happens after the invitation is created, so a reported
+invitation is not proof an email arrived. Invitations expire after 7 days.
 
 With no --team, the invitation targets this repository's team. Whether you
 may invite, list, or cancel is decided by the server and reported back.
@@ -224,7 +225,7 @@ func runInvite(cmd *cobra.Command, args []string) error {
 	emails := splitEmails(args)
 	if len(emails) == 0 {
 		if jsonOutput || !cli.IsInteractive() {
-			return fmt.Errorf("no email addresses given — usage: ox invite <email>...")
+			return fmt.Errorf("give at least one email address, for example: ox invite alice@acme.com")
 		}
 		emails, err = promptForEmails()
 		if err != nil {
@@ -255,19 +256,7 @@ func runInvite(cmd *cobra.Command, args []string) error {
 
 	res, err := sendInvites(ctx, client, target, role, emails)
 	if err != nil {
-		// A batch can be partially applied before it aborts. Anyone already
-		// invited really was invited, and dropping that makes a half-applied
-		// batch indistinguishable from one that never started — the user would
-		// re-run and be told those people are already invited.
-		if len(res.Outcomes) > 0 {
-			if rerr := renderInviteResult(out, res, jsonOutput); rerr != nil {
-				return rerr
-			}
-			if !jsonOutput {
-				fmt.Fprintln(out)
-			}
-		}
-		return renderInviteAbort(out, err, jsonOutput)
+		return renderInvitePartialAbort(out, res, err, jsonOutput)
 	}
 
 	if err := renderInviteResult(out, res, jsonOutput); err != nil {
@@ -606,6 +595,8 @@ type inviteJSONOutput struct {
 	Role     string          `json:"role"`
 	Results  []inviteOutcome `json:"results"`
 	Summary  inviteJSONSum   `json:"summary"`
+	Error    string          `json:"error,omitempty"`
+	Message  string          `json:"message,omitempty"`
 	Guidance string          `json:"guidance"`
 }
 
@@ -859,6 +850,68 @@ func renderInviteAbort(w io.Writer, err error, jsonOutput bool) error {
 	return err
 }
 
+// renderInvitePartialAbort preserves the record of any invitations that were
+// already attempted before a team-level/auth/version abort stopped the batch.
+// Text output can print a report followed by the abort explanation; JSON output
+// must be a single document, so partial results and abort metadata share one
+// envelope.
+func renderInvitePartialAbort(w io.Writer, res inviteResult, err error, jsonOutput bool) error {
+	if len(res.Outcomes) == 0 {
+		return renderInviteAbort(w, err, jsonOutput)
+	}
+
+	if !jsonOutput {
+		if rerr := renderInviteResult(w, res, false); rerr != nil {
+			return rerr
+		}
+		fmt.Fprintln(w)
+		return renderInviteAbort(w, err, false)
+	}
+
+	code, message, abortGuidance, ok := inviteAbortJSONDetails(err)
+	if !ok {
+		return err
+	}
+	sent, pending, failed := res.counts()
+	guidance := inviteGuidance(res, sent, pending, failed)
+	if guidance != "" {
+		guidance += " "
+	}
+	guidance += abortGuidance
+
+	if jerr := writeJSONIndent(w, inviteJSONOutput{
+		Team:     inviteJSONTeam{TeamID: res.Team.ID, Name: res.Team.Name, Slug: res.Team.Slug},
+		Role:     res.Role,
+		Results:  res.Outcomes,
+		Summary:  inviteJSONSum{Sent: sent, AlreadyInvited: pending, Failed: failed},
+		Error:    code,
+		Message:  message,
+		Guidance: guidance,
+	}); jerr != nil {
+		return jerr
+	}
+	return cli.ErrSilent
+}
+
+func inviteAbortJSONDetails(err error) (code, message, guidance string, ok bool) {
+	switch {
+	case errors.Is(err, api.ErrInviteUnsupported):
+		return "unsupported", api.ErrInviteUnsupported.Error(),
+			"This SageOx server has no CLI invite endpoint. Invite from the dashboard with 'ox view team'.", true
+	case errors.Is(err, api.ErrPersonalTeam):
+		return string(statusPersonalTeam), api.ErrPersonalTeam.Error(),
+			"This is a private per-user team; it is single-member by design and cannot take invitations from anyone. Choose a shared team — run 'ox teams' to see them — and retry with --team <slug>.", true
+	case errors.Is(err, api.ErrUnauthorized):
+		return "unauthenticated", "not authenticated",
+			"Run 'ox login' first, then retry 'ox invite'.", true
+	case errors.Is(err, api.ErrVersionUnsupported):
+		return "version_unsupported", api.ErrVersionUnsupported.Error(),
+			"Upgrade ox, then retry 'ox invite'.", true
+	default:
+		return "", "", "", false
+	}
+}
+
 // renderPersonalTeamRefusal explains that a private per-user team cannot take
 // invitations — a property of the team, so no address and no role would help.
 func renderPersonalTeamRefusal(w io.Writer, jsonOutput bool) error {
@@ -873,7 +926,8 @@ func renderPersonalTeamRefusal(w io.Writer, jsonOutput bool) error {
 		return cli.ErrSilent
 	}
 	fmt.Fprintf(w, "%s %s\n\n", inviteErrStyle.Render("✗"), "That's a private team — it can't take invitations.")
-	fmt.Fprintf(w, "  %s\n\n", cli.StyleDim.Render("Private per-user teams are single-member by design, so no address or role will work."))
+	fmt.Fprintf(w, "  %s\n", cli.StyleDim.Render("Private per-user teams are single-member by design, so no"))
+	fmt.Fprintf(w, "  %s\n\n", cli.StyleDim.Render("address and no role will work."))
 	fmt.Fprintf(w, "  %s %s\n", cli.StyleCallout.Render("★ ox teams"), cli.StyleDim.Render("Pick a shared team instead"))
 	return cli.ErrSilent
 }
@@ -985,40 +1039,74 @@ func renderInviteList(w io.Writer, target inviteTarget, invites []api.PendingInv
 		return nil
 	}
 
-	emailW, roleW, expW := len("EMAIL"), len("ROLE"), len("EXPIRES")
+	// Every column here is server-supplied and therefore attacker-influenced —
+	// an invitation can be addressed to anything, and role/id are echoed back
+	// from the same response. Sanitize before measuring so the widths match
+	// what is actually printed, and so a crafted value cannot repaint the list
+	// into misrepresenting which invitations exist.
+	type listRow struct{ email, role, expires, id string }
+	rows := make([]listRow, 0, len(entries))
 	for _, e := range entries {
-		if len(e.Email) > emailW {
-			emailW = len(e.Email)
+		expires := e.ExpiresIn
+		if expires == "" {
+			expires = "unknown"
 		}
-		if len(e.Role) > roleW {
-			roleW = len(e.Role)
+		rows = append(rows, listRow{
+			email:   inviteCell(e.Email),
+			role:    inviteCell(e.Role),
+			expires: inviteCell(expires),
+			id:      inviteCell(e.InviteID),
+		})
+	}
+
+	emailW, roleW, expW, idW := len("EMAIL"), len("ROLE"), len("EXPIRES"), 0
+	for _, r := range rows {
+		if l := lipgloss.Width(r.email); l > emailW {
+			emailW = l
 		}
-		if len(e.ExpiresIn) > expW {
-			expW = len(e.ExpiresIn)
+		if l := lipgloss.Width(r.role); l > roleW {
+			roleW = l
+		}
+		if l := lipgloss.Width(r.expires); l > expW {
+			expW = l
+		}
+		if l := lipgloss.Width(r.id); l > idW {
+			idW = l
 		}
 	}
 
-	fmt.Fprintf(w, "  %s  %s  %s  %s\n",
+	// An invite id is a full UUID (36 columns) and MUST be shown whole — it is
+	// what --cancel takes, so a truncated one is useless. Next to a long
+	// corporate address that cannot also fit in 80 columns, so the id moves to
+	// its own indented line rather than wrapping the table (design rule 12).
+	inline := 2 + emailW + 2 + roleW + 2 + expW + 2 + idW
+	idInline := inline <= inviteMaxWidth
+
+	header := fmt.Sprintf("  %s  %s  %s",
 		inviteLabelStyle.Render(padInviteCell("EMAIL", emailW)),
 		inviteLabelStyle.Render(padInviteCell("ROLE", roleW)),
-		inviteLabelStyle.Render(padInviteCell("EXPIRES", expW)),
-		inviteLabelStyle.Render("INVITE ID"),
-	)
-	for _, e := range entries {
-		expiry := e.ExpiresIn
-		if expiry == "" {
-			expiry = "unknown"
-		}
+		inviteLabelStyle.Render(padInviteCell("EXPIRES", expW)))
+	if idInline {
+		header += "  " + inviteLabelStyle.Render("INVITE ID")
+	}
+	fmt.Fprintln(w, strings.TrimRight(header, " "))
+
+	for i, r := range rows {
 		expiryStyle := inviteValueStyle
-		if e.HasExpired {
+		if entries[i].HasExpired {
 			expiryStyle = inviteWarnStyle
 		}
-		fmt.Fprintf(w, "  %s  %s  %s  %s\n",
-			padInviteCell(e.Email, emailW),
-			inviteValueStyle.Render(padInviteCell(e.Role, roleW)),
-			expiryStyle.Render(padInviteCell(expiry, expW)),
-			inviteValueStyle.Render(e.InviteID),
-		)
+		row := fmt.Sprintf("  %s  %s  %s",
+			padInviteCell(r.email, emailW),
+			inviteValueStyle.Render(padInviteCell(r.role, roleW)),
+			expiryStyle.Render(padInviteCell(r.expires, expW)))
+		if idInline {
+			row += "  " + inviteValueStyle.Render(r.id)
+		}
+		fmt.Fprintln(w, strings.TrimRight(row, " "))
+		if !idInline {
+			fmt.Fprintf(w, "    %s\n", inviteValueStyle.Render(r.id))
+		}
 	}
 
 	fmt.Fprintln(w)
@@ -1032,12 +1120,31 @@ func renderInviteList(w io.Writer, target inviteTarget, invites []api.PendingInv
 
 // humanizeExpiry renders the time left on an invitation, or how long ago it
 // lapsed. Invitations live 7 days, so day/hour granularity is the useful scale.
+//
+// Deliberately does NOT use formatAge: that helper formats an AGE and appends
+// its own "ago", which yields "in 5d ago" and "expired 2d ago ago" when the
+// value is a remaining duration rather than an elapsed one.
 func humanizeExpiry(expires, now time.Time) string {
-	d := expires.Sub(now)
-	if d <= 0 {
-		return "expired " + formatAge(-d) + " ago"
+	if d := expires.Sub(now); d > 0 {
+		return "in " + formatInviteDuration(d)
+	} else {
+		return "expired " + formatInviteDuration(-d) + " ago"
 	}
-	return "in " + formatAge(d)
+}
+
+// formatInviteDuration renders a bare duration — no "in", no "ago" — at the
+// coarsest unit that still says something useful.
+func formatInviteDuration(d time.Duration) string {
+	switch {
+	case d >= 24*time.Hour:
+		return fmt.Sprintf("%dd", int(d.Hours())/24)
+	case d >= time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	case d >= time.Minute:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return "under a minute"
+	}
 }
 
 func inviteListGuidance(target inviteTarget, entries []inviteListEntry) string {
@@ -1056,7 +1163,7 @@ func inviteListGuidance(target inviteTarget, entries []inviteListEntry) string {
 	}
 	msg := fmt.Sprintf("%d outstanding invitation(s) for %s. Cancel one with 'ox invite --cancel <invite_id> --team %s' using the invite_id field, not the invite link.", len(entries), target.displayName(), ref)
 	if expired > 0 {
-		msg += fmt.Sprintf(" %d has already lapsed and can be cancelled to tidy the list.", expired)
+		msg += fmt.Sprintf(" %d has already lapsed and can be canceled to tidy the list.", expired)
 	}
 	return msg
 }
@@ -1087,11 +1194,11 @@ func runInviteCancel(ctx context.Context, out io.Writer, l inviteLister, target 
 		return writeJSONIndent(out, map[string]any{
 			"team":      inviteJSONTeam{TeamID: target.ID, Name: target.Name, Slug: target.Slug},
 			"invite_id": inviteID,
-			"status":    "cancelled",
-			"guidance":  "The invitation was cancelled. Its link no longer works. Run 'ox invite --list' to see what remains.",
+			"status":    "canceled",
+			"guidance":  "The invitation was canceled. Its link no longer works. Run 'ox invite --list' to see what remains.",
 		})
 	}
-	fmt.Fprintf(out, "%s Invitation cancelled.\n\n", inviteOKStyle.Render("✓"))
+	fmt.Fprintf(out, "%s Invitation canceled.\n\n", inviteOKStyle.Render("✓"))
 	fmt.Fprintf(out, "  %s\n", inviteValueStyle.Render("Its link no longer works."))
 	return nil
 }

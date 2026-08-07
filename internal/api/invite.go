@@ -210,6 +210,30 @@ func parseInviteError(status int, body []byte) error {
 	return fmt.Errorf("HTTP %d", status)
 }
 
+// ErrInvalidTeamRef is a team reference that cannot be placed in a URL path
+// safely. Only dot segments qualify: everything else is escaped and handed to
+// the server, which is the authority on whether a team exists.
+var ErrInvalidTeamRef = errors.New("invalid team reference")
+
+// validateTeamRef rejects the refs that survive escaping and still change which
+// route the request reaches.
+//
+// url.PathEscape leaves "." and ".." untouched — dots are unreserved — so a
+// ref of ".." builds ".../teams/../invites", which any normalizing proxy or
+// server collapses to ".../invites": a different endpoint entirely. The
+// resulting 404 would be reported to the user as "this server does not support
+// CLI invitations". No team id or slug is ever a dot segment, so refusing them
+// costs nothing.
+func validateTeamRef(ref string) error {
+	switch strings.TrimSpace(ref) {
+	case "":
+		return fmt.Errorf("%w: empty", ErrInvalidTeamRef)
+	case ".", "..":
+		return fmt.Errorf("%w: %q is a path segment, not a team", ErrInvalidTeamRef, ref)
+	}
+	return nil
+}
+
 // inviteURL builds the create/list URL for a team reference.
 //
 // teamRef is escaped as a single path segment. It reaches here verbatim from
@@ -253,6 +277,9 @@ func (c *RepoClient) noRedirectClient() *http.Client {
 // delivered: the server dispatches the mail asynchronously and a send failure
 // never fails the request.
 func (c *RepoClient) CreateTeamInvite(ctx context.Context, teamRef string, req CreateInviteRequest) (*InviteResponse, error) {
+	if err := validateTeamRef(teamRef); err != nil {
+		return nil, err
+	}
 	reqURL := c.inviteURL(teamRef)
 
 	bodyBytes, err := json.Marshal(req)
@@ -328,6 +355,9 @@ type PendingInvite struct {
 // Whether the caller is allowed to see them is the server's decision; a
 // refusal comes back as ErrInviteForbidden carrying the server's own reason.
 func (c *RepoClient) ListTeamInvites(ctx context.Context, teamRef string) ([]PendingInvite, error) {
+	if err := validateTeamRef(teamRef); err != nil {
+		return nil, err
+	}
 	body, err := c.inviteRequest(ctx, "GET", c.inviteURL(teamRef), nil)
 	if err != nil {
 		return nil, err
@@ -346,6 +376,9 @@ func (c *RepoClient) ListTeamInvites(ctx context.Context, teamRef string) ([]Pen
 // RevokeTeamInvite cancels a single pending invitation by its id — the id
 // shown by ListTeamInvites, not the invite token. Answers 204 with no body.
 func (c *RepoClient) RevokeTeamInvite(ctx context.Context, teamRef, inviteID string) error {
+	if err := validateTeamRef(teamRef); err != nil {
+		return err
+	}
 	_, err := c.inviteRequest(ctx, "DELETE", c.inviteIDURL(teamRef, inviteID), nil)
 	return err
 }

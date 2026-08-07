@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -998,6 +999,26 @@ func TestRenderInviteResult_TextNeverEmitsRawControlBytes(t *testing.T) {
 	}
 }
 
+func TestRenderInviteList_TextNeverEmitsRawControlBytes(t *testing.T) {
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	invites := []api.PendingInvite{
+		{
+			ID:        "inv_1\n  ✓ forged@example.com sent",
+			Email:     "\x1b[2J\x1b[Hmallory@example.com",
+			Role:      "member\r  ✓ forged@example.com sent",
+			ExpiresAt: now.Add(24 * time.Hour).Format(time.RFC3339),
+		},
+	}
+
+	var buf bytes.Buffer
+	require.NoError(t, renderInviteList(&buf, testTarget, invites, now, false))
+
+	for _, injected := range []string{"\x1b[2J", "\x1b[H", "\r", "\n  ✓ forged@example.com sent"} {
+		assert.NotContains(t, buf.String(), injected,
+			"attacker-influenced pending invite text reached the terminal verbatim; rendered:\n%q", buf.String())
+	}
+}
+
 // TestRenderInviteResult_TextRowCountIsExactlyOnePerRecipient proves a newline
 // smuggled into a server message cannot forge a table row.
 //
@@ -1537,7 +1558,7 @@ func TestRunInvite_NoAddressesInNonInteractiveModeFailsFast(t *testing.T) {
 
 	err := runInvite(inviteCmd, nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no email addresses")
+	assert.Contains(t, err.Error(), "email address")
 	assert.Empty(t, log.emails())
 }
 
@@ -1707,6 +1728,44 @@ func TestRunInvite_MidBatchAuthLossStillReportsWhatWasAlreadySent(t *testing.T) 
 
 	assert.Contains(t, stripANSI(buf.String()), "alice@acme.com",
 		"alice's invitation was actually created; dropping that fact makes a partially-applied batch indistinguishable from a failed one")
+}
+
+func TestRunInvite_PartialAbortJSONIsSingleEnvelope(t *testing.T) {
+	buf, log := newInviteCommandHarness(t, []inviteReply{
+		{status: http.StatusCreated, body: createdInviteBody},
+		{status: http.StatusUnauthorized, body: `{"success":false,"error":"token revoked"}`},
+	})
+	require.NoError(t, inviteCmd.Flags().Set("team", "acme"))
+	require.NoError(t, rootCmd.PersistentFlags().Set("json", "true"))
+
+	err := runInvite(inviteCmd, []string{"alice@acme.com", "bob@acme.com"})
+
+	require.Error(t, err, "the abort still has to exit non-zero")
+	assert.True(t, cli.IsSilent(err), "the explanation is already rendered; got %v", err)
+	assert.Equal(t, []string{"alice@acme.com", "bob@acme.com"}, log.emails())
+
+	dec := json.NewDecoder(strings.NewReader(buf.String()))
+	var out struct {
+		Error   string          `json:"error"`
+		Message string          `json:"message"`
+		Results []inviteOutcome `json:"results"`
+		Summary struct {
+			Sent           int `json:"sent"`
+			AlreadyInvited int `json:"already_invited"`
+			Failed         int `json:"failed"`
+		} `json:"summary"`
+	}
+	require.NoError(t, dec.Decode(&out), "first JSON document must parse: %s", buf.String())
+	assert.Equal(t, "unauthenticated", out.Error)
+	assert.NotEmpty(t, out.Message)
+	require.Len(t, out.Results, 1, "only the invitation created before the abort should be reported as a result")
+	assert.Equal(t, "alice@acme.com", out.Results[0].Email)
+	assert.Equal(t, statusSent, out.Results[0].Status)
+	assert.Equal(t, 1, out.Summary.Sent)
+
+	var extra map[string]any
+	require.ErrorIs(t, dec.Decode(&extra), io.EOF,
+		"partial abort JSON must be one top-level document, not a result document followed by an error document; output:\n%s", buf.String())
 }
 
 // TestRunInvite_ModeFlagsNeverSilentlySwallowAddresses guards the mode split.

@@ -143,7 +143,9 @@ func startLeaseHolder(t *testing.T, ledger string) *exec.Cmd {
 	t.Helper()
 
 	helper := exec.Command(os.Args[0], "-test.run=TestHelperHoldsLedgerLease", "-test.timeout=90s")
-	helper.Env = append(os.Environ(), leaseHelperEnv+"="+ledger)
+	// The child needs the parent's environment intact (GOCACHE, TMPDIR, the
+	// -test.* plumbing) to run at all; only leaseHelperEnv is added.
+	helper.Env = append(os.Environ(), leaseHelperEnv+"="+ledger) // safe: re-executes THIS test binary, not the ox CLI, so testguard.RunOx does not apply
 	if err := helper.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)
 	}
