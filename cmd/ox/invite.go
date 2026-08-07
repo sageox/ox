@@ -786,7 +786,7 @@ func inviteStatusLabel(s inviteStatus) string {
 }
 
 // inviteSummaryLine is the one line that answers "did this work?". Each count
-// carries the same colour as the rows it summarises, so the verdict is legible
+// carries the same color as the rows it summarizes, so the verdict is legible
 // without reading the table — and stays legible under NO_COLOR, where the
 // words alone still say it.
 func inviteSummaryLine(sent, pending, failed int) string {
@@ -864,7 +864,7 @@ func renderInviteAbort(w io.Writer, err error, jsonOutput bool) error {
 			return cli.ErrSilent
 		}
 		fmt.Fprintf(w, "%s %s\n\n", inviteWarnStyle.Render("⚠"), api.ErrInviteUnsupported.Error())
-		fmt.Fprintf(w, "  %s %s\n", cli.StyleCallout.Render("★ ox view team"), cli.StyleDim.Render("Invite from the dashboard"))
+		cli.PrintActionHintTo(w, "ox view team", "Invite from the dashboard")
 		return cli.ErrSilent
 	case errors.Is(err, api.ErrPersonalTeam):
 		return renderPersonalTeamRefusal(w, jsonOutput)
@@ -952,7 +952,7 @@ func renderPersonalTeamRefusal(w io.Writer, jsonOutput bool) error {
 	fmt.Fprintf(w, "%s %s\n\n", inviteErrStyle.Render("✗"), "That's a private team — it can't take invitations.")
 	fmt.Fprintf(w, "  %s\n", cli.StyleDim.Render("Private per-user teams are single-member by design, so no"))
 	fmt.Fprintf(w, "  %s\n\n", cli.StyleDim.Render("address and no role will work."))
-	fmt.Fprintf(w, "  %s %s\n", cli.StyleCallout.Render("★ ox teams"), cli.StyleDim.Render("Pick a shared team instead"))
+	cli.PrintActionHintTo(w, "ox teams", "Pick a shared team instead")
 	return cli.ErrSilent
 }
 
@@ -968,7 +968,7 @@ func errInviteNotAuthenticated(w io.Writer, jsonOutput bool) error {
 		return cli.ErrSilent
 	}
 	fmt.Fprintf(w, "%s %s\n\n", inviteErrStyle.Render("✗"), "Not authenticated.")
-	fmt.Fprintf(w, "  %s %s\n", cli.StyleCallout.Render("★ ox login"), cli.StyleDim.Render("Sign in to SageOx"))
+	cli.PrintActionHintTo(w, "ox login", "Sign in to SageOx")
 	return cli.ErrSilent
 }
 
@@ -985,8 +985,8 @@ func errInviteNoTeam(w io.Writer, jsonOutput bool) error {
 	}
 	fmt.Fprintf(w, "%s %s\n\n", inviteErrStyle.Render("✗"), "No team to invite to.")
 	fmt.Fprintf(w, "  %s\n\n", cli.StyleDim.Render("This directory isn't linked to a team, and --team wasn't given."))
-	fmt.Fprintf(w, "  %s %s\n", cli.StyleCallout.Render("★ ox teams"), cli.StyleDim.Render("List teams you belong to"))
-	fmt.Fprintf(w, "  %s %s\n", cli.StyleCallout.Render("★ ox invite <email> --team <slug>"), cli.StyleDim.Render("Name the team explicitly"))
+	cli.PrintActionHintTo(w, "ox teams", "List teams you belong to")
+	cli.PrintActionHintTo(w, "ox invite <email> --team <slug>", "Name the team explicitly")
 	return cli.ErrSilent
 }
 
@@ -1114,7 +1114,7 @@ func renderInviteList(w io.Writer, target inviteTarget, invites []api.PendingInv
 	header := fmt.Sprintf("  %s  %s  %s",
 		inviteLabelStyle.Render(padInviteCell("EMAIL", emailW)),
 		inviteLabelStyle.Render(padInviteCell("ROLE", roleW)),
-		inviteLabelStyle.Render(padInviteCell("EXPIRES", expW)))
+		inviteLabelStyle.Render("EXPIRES"))
 	if idInline {
 		header += "  " + inviteLabelStyle.Render("INVITE ID")
 	}
@@ -1141,9 +1141,7 @@ func renderInviteList(w io.Writer, target inviteTarget, invites []api.PendingInv
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  %s\n", inviteValueStyle.Render(
 		fmt.Sprintf("%d outstanding · %s", len(entries), target.displayName())))
-	fmt.Fprintf(w, "  %s %s\n",
-		cli.StyleCallout.Render("★ ox invite --cancel <invite id>"),
-		cli.StyleDim.Render("Cancel one of these"))
+	cli.PrintActionHintTo(w, "ox invite --cancel <invite id>", "Cancel one of these")
 	return nil
 }
 
@@ -1250,7 +1248,7 @@ func renderInviteOpAbort(w io.Writer, err error, jsonOutput bool, verb string) e
 			return cli.ErrSilent
 		}
 		fmt.Fprintf(w, "%s %s\n\n", inviteErrStyle.Render("✗"), err.Error())
-		fmt.Fprintf(w, "  %s %s\n", cli.StyleCallout.Render("★ ox teams"), cli.StyleDim.Render("List teams you belong to"))
+		cli.PrintActionHintTo(w, "ox teams", "List teams you belong to")
 		return cli.ErrSilent
 	case errors.Is(err, api.ErrInviteForbidden):
 		reason := api.InviteForbiddenReason(err)

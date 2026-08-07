@@ -235,6 +235,22 @@ func PrintActionHint(command, description string, step int) {
 	fmt.Fprintf(os.Stdout, "%s%s  %s%s\n", star, cmd, desc, stepSuffix)
 }
 
+// PrintActionHintTo is PrintActionHint against an explicit writer.
+//
+// The package-level variant hardcodes os.Stdout, which makes it unusable from
+// renderers that take an io.Writer so they can be unit-tested. Every other
+// Print* helper here already has a *To twin; this closes the one gap, so
+// commands no longer hand-roll the ★ hint and drift from the canonical styling.
+func PrintActionHintTo(w io.Writer, command, description string) {
+	if jsonMode {
+		return
+	}
+	fmt.Fprintf(w, "%s%s  %s\n",
+		StyleCallout.Render("★ "),
+		StyleCalloutBold.Render(command),
+		StyleCallout.Render(description))
+}
+
 // Styles exposes lipgloss styles for use in commands
 var Styles = struct {
 	Success   lipgloss.Style
