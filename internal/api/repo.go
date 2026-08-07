@@ -190,6 +190,7 @@ type RepoClient struct {
 	httpClient *http.Client
 	authToken  string
 	version    string
+	daemon     bool
 }
 
 // NewRepoClient creates a new repo API client using the global default endpoint.
@@ -233,6 +234,21 @@ func NewRepoClientWithEndpoint(baseURL string) *RepoClient {
 func (c *RepoClient) WithAuthToken(token string) *RepoClient {
 	c.authToken = token
 	return c
+}
+
+// WithDaemonUserAgent marks requests from this client as unattended daemon
+// traffic. The server deliberately excludes these requests from human CLI
+// activity metrics, so daemon callers must opt in instead of inheriting the
+// interactive CLI identity from useragent.NewRequest.
+func (c *RepoClient) WithDaemonUserAgent() *RepoClient {
+	c.daemon = true
+	return c
+}
+
+func (c *RepoClient) applyUserAgent(req *http.Request) {
+	if c.daemon {
+		req.Header.Set("User-Agent", useragent.DaemonString())
+	}
 }
 
 // Endpoint returns the base URL this client is configured for

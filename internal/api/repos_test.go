@@ -335,6 +335,22 @@ func TestGetRepos_UserAgentHeader(t *testing.T) {
 	assert.Equal(t, expectedUA, receivedUserAgent)
 }
 
+func TestGetRepos_DaemonUserAgent(t *testing.T) {
+	var receivedUserAgent string
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedUserAgent = r.UserAgent()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"token":"t","server_url":"s","repos":{}}`))
+	}))
+	defer mockServer.Close()
+
+	client := NewRepoClientWithEndpoint(mockServer.URL).WithDaemonUserAgent()
+	_, err := client.GetRepos()
+
+	require.NoError(t, err)
+	assert.Equal(t, useragent.DaemonString(), receivedUserAgent)
+}
+
 func TestGetRepos_EmptyResponseBody(t *testing.T) {
 	t.Parallel()
 	// server returns 200 but empty body

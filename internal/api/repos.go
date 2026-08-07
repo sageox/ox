@@ -186,6 +186,7 @@ func (c *RepoClient) GetRepos() (*ReposResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+	c.applyUserAgent(httpReq)
 
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
@@ -250,6 +251,7 @@ func (c *RepoClient) GetTeamInfo(teamID string) (*TeamInfoResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+	c.applyUserAgent(httpReq)
 
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
@@ -327,6 +329,7 @@ func (c *RepoClient) GetRepoDetail(repoID string) (*RepoDetailResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+	c.applyUserAgent(httpReq)
 
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
@@ -405,6 +408,7 @@ func (c *RepoClient) GetCLISettings() (json.RawMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
+	c.applyUserAgent(httpReq)
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}

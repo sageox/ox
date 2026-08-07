@@ -37,6 +37,13 @@ var daemonStartCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the background daemon",
 	Long:  "Starts the SageOx daemon in the background for automatic ledger sync.",
+	// With --foreground this invocation IS the daemon: it blocks until the
+	// daemon exits, which can be days later. Without it, the command spawns a
+	// child and returns in milliseconds. Only the former is a service, and
+	// only the former must be kept out of command-latency instrumentation.
+	Annotations: map[string]string{
+		cli.AnnotationLongRunning: "flag:foreground",
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		foreground, _ := cmd.Flags().GetBool("foreground")
 

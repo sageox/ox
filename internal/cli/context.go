@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/perf"
 	"github.com/sageox/ox/internal/signature"
 	"github.com/sageox/ox/internal/telemetry"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/attribute"
@@ -39,6 +40,13 @@ type Context struct {
 
 	// Ctx provides the Go context for cancellation and timeouts
 	Ctx context.Context
+
+	// LongRunning is true when this invocation is a service process rather
+	// than a discrete command (e.g. `ox daemon start --foreground`).
+	// Command-scoped instrumentation — duration telemetry and the wall-clock
+	// OTel root span — is suppressed for these, because it would report the
+	// service lifetime as command latency. See IsLongRunning.
+	LongRunning bool
 }
 
 // NewContext creates a new CLI context from a Cobra command.
@@ -48,6 +56,7 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	cliCtx := &Context{
 		CommandStartTime: time.Now(),
 		Ctx:              cmd.Context(),
+		LongRunning:      IsLongRunning(cmd),
 	}
 
 	// if no context set, use background
@@ -94,12 +103,40 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	}
 	cliCtx.TelemetryClient.Start()
 
+	// Tag outbound SageOx API requests with the repo this invocation is
+	// working in, so server-side CLI activity can be attributed to a repo on
+	// routes whose URL does not name one. Set before any request is made.
+	//
+	// Deliberately skipped for service processes: the daemon serves every
+	// workspace on the machine from one process, so a process-global repo ID
+	// would misattribute all its traffic to whichever repo it started in.
+	// Leaving it unset keeps daemon rows honestly repo-less.
+	if !cliCtx.LongRunning && projectRoot != "" {
+		useragent.SetRepoID(config.GetRepoID(projectRoot))
+	}
+
 	// check signature and warn if unsigned/invalid (non-blocking)
 	signature.CheckAndWarn()
 
 	// set global output mode
 	SetJSONMode(cfg.JSON)
 	SetNoInteractive(cfg.NoInteractive)
+
+	// A long-running service process (`ox daemon start --foreground`) is not a
+	// command invocation. Cobra's post-run hooks fire at service *shutdown*, so
+	// a root span opened here would cover the daemon's entire lifetime — a
+	// multi-day "daemon start" span landing in the same latency aggregates as
+	// real commands. The daemon installs its own tracing once it is up
+	// (service ox-daemon, see internal/daemon.Start), which is the honest place
+	// to measure its work, so nothing is lost by skipping the CLI bootstrap.
+	//
+	// Skipping Init here also avoids clobbering: the daemon's own Init would
+	// otherwise replace this TracerProvider — orphaning it unflushed — and
+	// inherit the CLI's perf span processor, rendering CLI-shaped timing trees
+	// to the daemon's stderr for the rest of the process's life.
+	if cliCtx.LongRunning {
+		return cliCtx, nil
+	}
 
 	// initialize OTel tracing — one trace per command invocation
 	// uses project endpoint if available, falls back to global endpoint
@@ -210,6 +247,13 @@ func (c *Context) TrackCommandCompletion(cmd *cobra.Command) {
 		return
 	}
 
+	// A service process reaches here only when it shuts down, so the elapsed
+	// time is its lifetime, not the latency of any command. Emitting it would
+	// poison every command-duration percentile. See IsLongRunning.
+	if c.LongRunning {
+		return
+	}
+
 	duration := time.Since(c.CommandStartTime)
 
 	// build full command path (e.g., "agent prime" not just "prime")
@@ -224,6 +268,12 @@ func (c *Context) TrackCommandCompletion(cmd *cobra.Command) {
 // TrackCommandError tracks a command error via telemetry
 func (c *Context) TrackCommandError(cmd *cobra.Command, err error) {
 	if c.TelemetryClient == nil || cmd == nil {
+		return
+	}
+
+	// Same as TrackCommandCompletion: a daemon that dies after three days
+	// would otherwise report a three-day "failed command".
+	if c.LongRunning {
 		return
 	}
 
