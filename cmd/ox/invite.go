@@ -634,17 +634,18 @@ func renderInviteResult(w io.Writer, res inviteResult, jsonOutput bool) error {
 	fmt.Fprintln(w, inviteHeaderStyle.Render("Invitations"))
 	fmt.Fprintln(w, inviteLabelStyle.Render(strings.Repeat("─", len("Invitations"))))
 
+	// The address column is sized to the rows that will actually sit in it.
+	// Addresses longer than the cap get a line of their own, so letting them
+	// set the width would pad every short row out to an emptiness no row uses.
 	emailW := 0
 	for _, o := range res.Outcomes {
-		if l := lipgloss.Width(inviteCell(o.Email)); l > emailW {
+		l := lipgloss.Width(inviteCell(o.Email))
+		if l > inviteEmailCap {
+			continue
+		}
+		if l > emailW {
 			emailW = l
 		}
-	}
-	// Cap the shared column. Without it, one 78-character corporate address
-	// sets the width for everybody and every short row inherits the wide
-	// layout — the table stops being scannable because of a single outlier.
-	if emailW > inviteEmailCap {
-		emailW = inviteEmailCap
 	}
 	statusW := 0
 	for _, o := range res.Outcomes {
@@ -668,29 +669,41 @@ func renderInviteResult(w io.Writer, res inviteResult, jsonOutput bool) error {
 			msg = inviteCell(o.Message)
 		}
 
-		// The glyph column NEVER moves — it is the thing the eye scans down to
-		// find the failures, so it stays at a fixed offset on every row.
-		head := fmt.Sprintf("  %s  %s", glyph,
-			padInviteCell(truncateInviteMessage(email, inviteEmailCap), emailW))
-		headW := 2 + 1 + 2 + emailW
+		// The glyph column NEVER moves — it is what the eye scans down to find
+		// the failures, so it sits at a fixed offset on every row.
+		//
+		// Layout is decided PER ROW, never from the batch-wide maximum:
+		// otherwise a single long address drags every short row into the wide
+		// layout with it. Wrapping is never an option — a wrapped row
+		// misaligns every column, exactly when it matters most, on a batch
+		// that partly failed. So the status and reason give way, never the
+		// address: which address failed is the one thing the row exists to say.
+		emailWidth := lipgloss.Width(email)
+		detail := label
+		if msg != "" {
+			detail += "  " + msg
+		}
 
-		// Two layouts, decided per row (never from the batch-wide maximum —
-		// otherwise one long address drags every short row into the wide
-		// layout with it). Wrapping is never acceptable: a wrapped row
-		// misaligns every column, exactly when it matters most on a batch that
-		// partly failed. So the reason drops to its own line rather than the
-		// address being sacrificed.
-		if headW+2+statusW+2+lipgloss.Width(msg) <= inviteMaxWidth {
-			line := head + "  " + padInviteCell(label, statusW)
+		switch {
+		case emailWidth > emailW:
+			// Longer than the whole column. Give it a line to itself, in full,
+			// and hang the verdict beneath it.
+			fmt.Fprintf(w, "  %s  %s\n", glyph, truncateInviteMessage(email, inviteMaxWidth-5))
+			fmt.Fprintf(w, "%s%s\n", inviteDetailIndent,
+				inviteValueStyle.Render(truncateInviteMessage(detail, inviteMaxWidth-len(inviteDetailIndent))))
+
+		case 2+1+2+emailW+2+statusW+2+lipgloss.Width(msg) <= inviteMaxWidth:
+			line := fmt.Sprintf("  %s  %s  %s", glyph,
+				padInviteCell(email, emailW), padInviteCell(label, statusW))
 			if msg != "" {
 				line += "  " + inviteValueStyle.Render(msg)
 			}
 			fmt.Fprintln(w, strings.TrimRight(line, " "))
-			continue
-		}
 
-		fmt.Fprintln(w, strings.TrimRight(head+"  "+label, " "))
-		if msg != "" {
+		default:
+			// Address and status fit; only the reason has to drop down.
+			fmt.Fprintln(w, strings.TrimRight(fmt.Sprintf("  %s  %s  %s", glyph,
+				padInviteCell(email, emailW), padInviteCell(label, statusW)), " "))
 			fmt.Fprintf(w, "%s%s\n", inviteDetailIndent,
 				inviteValueStyle.Render(truncateInviteMessage(msg, inviteMaxWidth-len(inviteDetailIndent))))
 		}
