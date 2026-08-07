@@ -164,6 +164,7 @@ func init() {
 	glanceCmd.GroupID = "teams"
 	murmurCmd.GroupID = "teams"
 	teamsCmd.GroupID = "teams"
+	inviteCmd.GroupID = "teams"
 
 	// auth commands
 	loginCmd.GroupID = "auth"
@@ -185,6 +186,7 @@ func init() {
 	rootCmd.AddCommand(recapCmd)
 	rootCmd.AddCommand(scoutCmd)
 	rootCmd.AddCommand(teamsCmd)
+	rootCmd.AddCommand(inviteCmd)
 	// agentCmd is registered in agent.go
 
 	// auth commands

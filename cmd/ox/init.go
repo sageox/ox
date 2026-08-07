@@ -982,17 +982,17 @@ func runInit() error {
 		fmt.Printf("  %d. Run %s to confirm everything is working properly\n", step, cli.StyleCommand.Render("ox doctor"))
 		step++
 
-		// step N: invite teammates (show dashboard URL if team info available)
-		if cfg.TeamID != "" && cfg.Endpoint != "" {
-			teamDashURL := strings.TrimSuffix(cfg.Endpoint, "/") + "/team/" + cfg.TeamID
+		// step N: invite teammates — ox invite sends the invitations directly,
+		// so this no longer sends people to the dashboard to copy a link.
+		if cfg.TeamID != "" {
 			teamLabel := cfg.TeamName
 			if teamLabel == "" {
 				teamLabel = cfg.TeamID
 			}
 			fmt.Printf("  %d. Invite teammates (%s):\n", step, teamLabel)
-			fmt.Printf("     Run %s or visit %s to get invite link\n", cli.StyleCommand.Render("ox view team"), teamDashURL)
+			fmt.Printf("     Run %s\n", cli.StyleCommand.Render("ox invite alice@example.com,bob@example.com"))
 		} else {
-			fmt.Printf("  %d. Invite teammates from your team dashboard\n", step)
+			fmt.Printf("  %d. Invite teammates with %s\n", step, cli.StyleCommand.Render("ox invite <email>..."))
 		}
 		step++
 

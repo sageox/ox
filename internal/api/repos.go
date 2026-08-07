@@ -42,6 +42,41 @@ type TeamMembership struct {
 	Name string `json:"name"`           // display name
 	Slug string `json:"slug,omitempty"` // kebab-case team slug
 	Role string `json:"role"`           // "owner", "admin", "member"
+
+	// Personal marks a private per-user team. These are structurally
+	// single-member and can never receive invitations.
+	Personal bool `json:"personal,omitempty"`
+
+	// CanInvite is the SERVER's answer to "may this user invite anyone to this
+	// team right now". The CLI must not re-derive it from Role: invite policy
+	// lives on the server and can change, and a locally-computed answer would
+	// be confidently wrong the day it does.
+	//
+	// Older servers omit the field, which decodes as false. Treat "false with
+	// no reason given" as unknown rather than as a refusal — see
+	// InviteCapabilityKnown.
+	CanInvite bool `json:"can_invite,omitempty"`
+
+	// InviteBlockedReason explains a false CanInvite: "personal_team" or
+	// "insufficient_role". Empty when CanInvite is true, and also empty on
+	// servers that predate this field.
+	InviteBlockedReason string `json:"invite_blocked_reason,omitempty"`
+}
+
+// Invite-capability reasons reported by the server.
+const (
+	InviteBlockedPersonalTeam = "personal_team"
+	InviteBlockedRole         = "insufficient_role"
+)
+
+// InviteCapabilityKnown reports whether the server actually told us about this
+// team's invite capability.
+//
+// A server that predates the field sends neither can_invite nor a reason, which
+// is indistinguishable from "refused" if read naively. Callers use this to stay
+// quiet instead of wrongly announcing that a team cannot be invited to.
+func (t TeamMembership) InviteCapabilityKnown() bool {
+	return t.CanInvite || t.InviteBlockedReason != ""
 }
 
 // ReposResponse represents the GET /api/v1/cli/repos response.
