@@ -1819,3 +1819,168 @@ func TestRunInvite_TeamRefIsWhatLandsInTheRequestURL(t *testing.T) {
 	require.Len(t, log.paths, 1)
 	assert.Equal(t, "/api/v1/teams/some-other-team/invites", log.paths[0])
 }
+
+// ---------------------------------------------------------------------------
+// --list / --cancel
+// ---------------------------------------------------------------------------
+
+// fakeLister records what --list/--cancel asked the server for.
+type fakeLister struct {
+	invites  []api.PendingInvite
+	listErr  error
+	revErr   error
+	revoked  []string
+	listedAs []string
+}
+
+func (f *fakeLister) ListTeamInvites(_ context.Context, teamRef string) ([]api.PendingInvite, error) {
+	f.listedAs = append(f.listedAs, teamRef)
+	return f.invites, f.listErr
+}
+
+func (f *fakeLister) RevokeTeamInvite(_ context.Context, _, inviteID string) error {
+	f.revoked = append(f.revoked, inviteID)
+	return f.revErr
+}
+
+// fixedNow is the clock every --list assertion is measured against, so the
+// relative expiry column is deterministic instead of depending on wall time.
+var fixedNow = time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+
+func pendingFixture() []api.PendingInvite {
+	return []api.PendingInvite{
+		{ID: "0198f3c2-6c1a-7e40-9a0b-2f8c4d5e6f70", Email: "alice@acme.com", Role: "member",
+			ExpiresAt: fixedNow.Add(5 * 24 * time.Hour).Format(time.RFC3339)},
+		{ID: "0198f3c2-8e3c-7e40-9d2e-4b0f6a7c8d92", Email: "carol@acme.com", Role: "admin",
+			ExpiresAt: fixedNow.Add(-2 * 24 * time.Hour).Format(time.RFC3339)},
+	}
+}
+
+// TestRenderInviteList_ShowsWhoIsOutstandingAndWhenItLapses is the whole point
+// of --list: a person and a deadline.
+//
+// Failure prevented: the expiry column silently rendering an AGE ("in 5d ago")
+// instead of a remaining duration — the exact bug real output caught — or the
+// invite id being truncated, which would make it useless for --cancel.
+func TestRenderInviteList_ShowsWhoIsOutstandingAndWhenItLapses(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, renderInviteList(&buf, testTarget, pendingFixture(), fixedNow, false))
+	out := buf.String()
+
+	assert.Contains(t, out, "alice@acme.com")
+	assert.Contains(t, out, "in 5d", "a live invite must show time REMAINING")
+	assert.Contains(t, out, "expired 2d ago", "a lapsed invite must say so")
+	assert.NotContains(t, out, "in 5d ago", "remaining time must not be formatted as an age")
+	assert.NotContains(t, out, "ago ago")
+
+	// The id is --cancel's operand, so it must appear complete and copyable.
+	assert.Contains(t, out, "0198f3c2-6c1a-7e40-9a0b-2f8c4d5e6f70")
+	assert.NotContains(t, out, "…0198", "a truncated id cannot be pasted into --cancel")
+}
+
+// Failure prevented: an empty list rendering as a bare header, leaving the user
+// unsure whether the command worked or the team simply has no invitations.
+func TestRenderInviteList_EmptyStateSaysSoPlainly(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, renderInviteList(&buf, testTarget, nil, fixedNow, false))
+	assert.Contains(t, strings.ToLower(buf.String()), "no outstanding invitations")
+}
+
+// Failure prevented: a long address wrapping the row. --list had no width cap
+// at all, and the id-on-its-own-line fallback cannot help — it only sheds the id.
+func TestRenderInviteList_FitsIn80Columns(t *testing.T) {
+	long := []api.PendingInvite{{
+		ID:        "0198f3c2-6c1a-7e40-9a0b-2f8c4d5e6f70",
+		Email:     "firstname.lastname+project-onboarding@engineering.subsidiary.example-corp.com",
+		Role:      "member",
+		ExpiresAt: fixedNow.Add(72 * time.Hour).Format(time.RFC3339),
+	}}
+	var buf bytes.Buffer
+	require.NoError(t, renderInviteList(&buf, testTarget, long, fixedNow, false))
+
+	for i, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		assert.LessOrEqual(t, lipgloss.Width(line), 80,
+			"line %d is %d columns and will wrap: %q", i+1, lipgloss.Width(line), line)
+	}
+}
+
+// Failure prevented: --json drifting from the documented shape that AI
+// coworkers parse, or the expiry being reported without the machine-readable
+// timestamp alongside the human one.
+func TestRenderInviteList_JSONCarriesIDsAndExpiry(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, renderInviteList(&buf, testTarget, pendingFixture(), fixedNow, true))
+
+	var got struct {
+		Total   int `json:"total"`
+		Invites []struct {
+			InviteID   string `json:"invite_id"`
+			Email      string `json:"email"`
+			ExpiresAt  string `json:"expires_at"`
+			HasExpired bool   `json:"has_expired"`
+		} `json:"invites"`
+		Guidance string `json:"guidance"`
+	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+
+	require.Len(t, got.Invites, 2)
+	assert.Equal(t, 2, got.Total)
+	assert.Equal(t, "0198f3c2-6c1a-7e40-9a0b-2f8c4d5e6f70", got.Invites[0].InviteID)
+	assert.False(t, got.Invites[0].HasExpired)
+	assert.True(t, got.Invites[1].HasExpired, "a lapsed invite must be flagged for an agent too")
+	assert.NotEmpty(t, got.Invites[0].ExpiresAt)
+	assert.Contains(t, got.Guidance, "--cancel", "guidance must name the way to act on this list")
+}
+
+// Failure prevented: --cancel silently accepting an email address, sending it
+// as an id, and surfacing the server's opaque 400 instead of naming the real
+// mistake — which is the likeliest way to get this flag wrong.
+func TestRunInviteCancel_RejectsAnEmailBeforeCallingTheServer(t *testing.T) {
+	f := &fakeLister{}
+	var buf bytes.Buffer
+
+	err := runInviteCancel(context.Background(), &buf, f, testTarget, "alice@acme.com", false, true)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invite id")
+	assert.Empty(t, f.revoked, "an address must never be sent as an invite id")
+}
+
+// Failure prevented: --cancel with no value reaching the network and deleting
+// something unintended, or failing with an unhelpful server error.
+func TestRunInviteCancel_RequiresAnID(t *testing.T) {
+	f := &fakeLister{}
+	var buf bytes.Buffer
+
+	err := runInviteCancel(context.Background(), &buf, f, testTarget, "   ", false, true)
+
+	require.Error(t, err)
+	assert.Empty(t, f.revoked)
+}
+
+// Failure prevented: a cancel that reports success without the revoke actually
+// happening, or that fails to tell the user the link is now dead.
+func TestRunInviteCancel_RevokesAndConfirms(t *testing.T) {
+	f := &fakeLister{}
+	var buf bytes.Buffer
+
+	const id = "0198f3c2-6c1a-7e40-9a0b-2f8c4d5e6f70"
+	require.NoError(t, runInviteCancel(context.Background(), &buf, f, testTarget, id, false, true))
+
+	assert.Equal(t, []string{id}, f.revoked)
+	assert.Contains(t, strings.ToLower(buf.String()), "canceled")
+}
+
+// Failure prevented: a refusal to list being reported as "no invitations",
+// which would tell the user the team is empty when it may be full.
+func TestRunInviteList_ForbiddenIsNotRenderedAsAnEmptyList(t *testing.T) {
+	f := &fakeLister{listErr: &api.ForbiddenError{Reason: "access denied"}}
+	var buf bytes.Buffer
+
+	err := runInviteList(context.Background(), &buf, f, testTarget, false)
+
+	require.Error(t, err)
+	out := strings.ToLower(buf.String())
+	assert.NotContains(t, out, "no outstanding invitations")
+	assert.Contains(t, out, "access denied", "the server's own reason must be shown")
+}
