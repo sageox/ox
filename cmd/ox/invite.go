@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/mail"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -428,8 +427,6 @@ func outcomeForError(email string, err error) inviteOutcome {
 	switch {
 	case errors.Is(err, api.ErrInviteExists):
 		return inviteOutcome{Email: email, Status: statusAlreadyInvited, Message: "still pending"}
-	case errors.Is(err, api.ErrPersonalTeam):
-		return inviteOutcome{Email: email, Status: statusPersonalTeam, Message: api.ErrPersonalTeam.Error()}
 	case errors.Is(err, api.ErrInviteForbidden):
 		// Show the server's own reason. Who may invite is server policy and can
 		// change; a message composed here would be wrong the day it does.
@@ -472,14 +469,14 @@ func resolveInviteTarget(ctx context.Context, client *api.RepoClient, projectRoo
 		return inviteTarget{}, errInviteNoTeam(out, jsonOutput)
 	}
 
-	return pickInviteTeam(ctx, client, projectRoot)
+	return pickInviteTeam(ctx, out, client, projectRoot)
 }
 
 // pickInviteTeam shows the team chooser. The list comes from the API rather
 // than the local disk scan behind `ox teams`, because only the API carries
 // each membership's role — and the role is what tells a person, before they
 // commit, which teams they can actually invite into.
-func pickInviteTeam(ctx context.Context, client *api.RepoClient, projectRoot string) (inviteTarget, error) {
+func pickInviteTeam(ctx context.Context, w io.Writer, client *api.RepoClient, projectRoot string) (inviteTarget, error) {
 	teams, err := fetchInviteTeams(client)
 	if err != nil || len(teams) == 0 {
 		// Fall back to the offline view rather than dead-ending on a network
@@ -499,10 +496,10 @@ func pickInviteTeam(ctx context.Context, client *api.RepoClient, projectRoot str
 		return inviteTarget{Ref: local[idx].TeamID, ID: local[idx].TeamID, Name: local[idx].Name, Slug: local[idx].Slug}, nil
 	}
 
-	fmt.Println()
-	fmt.Println(ui.RenderCategory("Invite to Team"))
-	fmt.Println(cli.StyleDim.Render("Choose which team to invite people to."))
-	fmt.Println()
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, ui.RenderCategory("Invite to Team"))
+	fmt.Fprintln(w, cli.StyleDim.Render("Choose which team to invite people to."))
+	fmt.Fprintln(w)
 
 	options := make([]string, len(teams))
 	for i, t := range teams {
@@ -519,7 +516,7 @@ func pickInviteTeam(ctx context.Context, client *api.RepoClient, projectRoot str
 	// rather than sending a request that is certain to be refused.
 	if sel.InviteCapabilityKnown() && !sel.CanInvite {
 		if sel.InviteBlockedReason == api.InviteBlockedPersonalTeam {
-			return inviteTarget{}, renderPersonalTeamRefusal(os.Stdout, false)
+			return inviteTarget{}, renderPersonalTeamRefusal(w, false)
 		}
 		return inviteTarget{}, fmt.Errorf("you can't invite people to %s — ask a team owner or admin", sel.Name)
 	}
@@ -809,7 +806,7 @@ func inviteSummaryLine(sent, pending, failed int) string {
 // behavior belongs, so every agent gets it, not just Claude Code.
 func inviteGuidance(res inviteResult, sent, pending, failed int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d invitation(s) sent", sent)
+	fmt.Fprintf(&b, "%s sent", pluralizeInvitations(sent))
 	if pending > 0 {
 		fmt.Fprintf(&b, "; %d already had a pending invite (no action needed)", pending)
 	}
@@ -1271,4 +1268,14 @@ func renderInviteOpAbort(w io.Writer, err error, jsonOutput bool, verb string) e
 		return cli.ErrSilent
 	}
 	return err
+}
+
+// pluralizeInvitations renders a count with the right noun. The "(s)" form was
+// leaking into agent-facing guidance, which AI coworkers quote back to humans
+// verbatim.
+func pluralizeInvitations(n int) string {
+	if n == 1 {
+		return "1 invitation"
+	}
+	return fmt.Sprintf("%d invitations", n)
 }

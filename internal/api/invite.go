@@ -178,10 +178,7 @@ func parseInviteError(status int, body []byte) error {
 	case http.StatusForbidden:
 		// Carry the server's wording through verbatim — it is the only
 		// authority on why this was refused.
-		if msg := se.message(); msg != "" {
-			return fmt.Errorf("%w: %s", ErrInviteForbidden, msg)
-		}
-		return ErrInviteForbidden
+		return &ForbiddenError{Reason: se.message()}
 
 	case http.StatusNotFound:
 		// A deliberate "you are not a member" 404 carries a JSON error body.
@@ -400,15 +397,35 @@ func (c *RepoClient) inviteRequest(ctx context.Context, method, reqURL string, b
 	return respBody, nil
 }
 
-// InviteForbiddenReason extracts the server's own explanation from a 403.
+// ForbiddenError is a 403 that carries the server's own explanation.
 //
-// The CLI shows this instead of composing its own sentence, because only the
-// server knows the current policy. Returns "" when the server sent no message,
-// letting the caller fall back to something generic rather than a guess.
-func InviteForbiddenReason(err error) string {
-	if err == nil || !errors.Is(err, ErrInviteForbidden) {
-		return ""
+// The reason is held as a field rather than being formatted into the message
+// and parsed back out: string round-tripping would break the moment the
+// wrapping text changed, and silently — the caller would just start showing a
+// generic sentence instead of the server's.
+//
+// It satisfies errors.Is(err, ErrInviteForbidden) so existing callers that
+// only care about the class keep working.
+type ForbiddenError struct {
+	Reason string
+}
+
+func (e *ForbiddenError) Error() string {
+	if e.Reason == "" {
+		return ErrInviteForbidden.Error()
 	}
-	msg := strings.TrimPrefix(err.Error(), ErrInviteForbidden.Error())
-	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(msg), ":"))
+	return ErrInviteForbidden.Error() + ": " + e.Reason
+}
+
+func (e *ForbiddenError) Is(target error) bool { return target == ErrInviteForbidden }
+
+// InviteForbiddenReason returns the server's own explanation for a 403, or ""
+// when it sent none — letting the caller fall back to something generic rather
+// than inventing a policy claim.
+func InviteForbiddenReason(err error) string {
+	var fe *ForbiddenError
+	if errors.As(err, &fe) {
+		return fe.Reason
+	}
+	return ""
 }
