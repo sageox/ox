@@ -280,53 +280,17 @@ func (c *RepoClient) CreateTeamInvite(ctx context.Context, teamRef string, req C
 	if err := validateTeamRef(teamRef); err != nil {
 		return nil, err
 	}
-	reqURL := c.inviteURL(teamRef)
 
-	bodyBytes, err := json.Marshal(req)
+	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	logger.LogHTTPRequest("POST", reqURL)
-	// intentionally skip LogHTTPRequestBody — the body carries a recipient's
-	// email address (PII); matches the RegisterRepo/MergeRepo precedent for
-	// bodies holding sensitive material.
-	start := time.Now()
-
-	httpReq, err := useragent.NewRequest(ctx, "POST", reqURL, bytes.NewReader(bodyBytes))
+	respBody, err := c.inviteRequest(ctx, "POST", c.inviteURL(teamRef), body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if c.authToken != "" {
-		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
+		return nil, err
 	}
 
-	resp, err := c.noRedirectClient().Do(httpReq)
-	duration := time.Since(start)
-	if err != nil {
-		logger.LogHTTPError("POST", reqURL, err, duration)
-		return nil, fmt.Errorf("network error: %w", err)
-	}
-	defer resp.Body.Close()
-
-	logger.LogHTTPResponse("POST", reqURL, resp.StatusCode, duration)
-
-	if CheckVersionResponse(resp) {
-		return nil, ErrVersionUnsupported
-	}
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, parseInviteError(resp.StatusCode, respBody)
-	}
-
-	// intentionally skip LogHTTPResponseBody — the 201 carries the plaintext
-	// invite token, which must not reach a log file.
 	var invite InviteResponse
 	if err := json.Unmarshal(respBody, &invite); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
@@ -384,9 +348,14 @@ func (c *RepoClient) RevokeTeamInvite(ctx context.Context, teamRef, inviteID str
 }
 
 // inviteRequest performs a request against the invite endpoints and returns
-// the 2xx body. Shares the redirect policy, version check, and dual-envelope
-// error mapping with CreateTeamInvite so every invite operation reports
-// failures the same way.
+// the 2xx body. Every invite operation goes through here, so the redirect
+// policy, version check, and dual-envelope error mapping are applied uniformly
+// and cannot drift between create, list, and revoke.
+//
+// It deliberately logs NEITHER the request body nor the response body. The
+// request carries a recipient's email address (PII) and the create response
+// carries a live invite token; both would otherwise land in a log file. This
+// matches the same deliberate omission in RegisterRepo and MergeRepo.
 func (c *RepoClient) inviteRequest(ctx context.Context, method, reqURL string, body []byte) ([]byte, error) {
 	logger.LogHTTPRequest(method, reqURL)
 	start := time.Now()

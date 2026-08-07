@@ -159,11 +159,15 @@ func init() {
 // invite styles — mirrors the Tufte-ish pattern in teams.go/status.go.
 var (
 	inviteHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(cli.ColorPrimary)
-	inviteLabelStyle  = lipgloss.NewStyle().Foreground(cli.ColorDim)
-	inviteValueStyle  = lipgloss.NewStyle().Foreground(cli.ColorDim)
-	inviteOKStyle     = lipgloss.NewStyle().Foreground(cli.ColorSuccess)
-	inviteWarnStyle   = lipgloss.NewStyle().Foreground(cli.ColorWarning)
-	inviteErrStyle    = lipgloss.NewStyle().Foreground(cli.ColorError)
+	// Label recedes, value does not. These were the same style, which put
+	// column headers, body values and boilerplate on one visual tier — the
+	// failure reason read no louder than the evergreen footer. Mirrors the
+	// statusLabelStyle/statusValueStyle split already used by ox status.
+	inviteLabelStyle = lipgloss.NewStyle().Foreground(cli.ColorDim)
+	inviteValueStyle = lipgloss.NewStyle()
+	inviteOKStyle    = lipgloss.NewStyle().Foreground(cli.ColorSuccess)
+	inviteWarnStyle  = lipgloss.NewStyle().Foreground(cli.ColorWarning)
+	inviteErrStyle   = lipgloss.NewStyle().Foreground(cli.ColorError)
 )
 
 func runInvite(cmd *cobra.Command, args []string) error {
@@ -324,7 +328,7 @@ func splitEmails(args []string) []string {
 // confuse the server, so a bare address with a dotted domain is required.
 func isValidEmail(s string) bool {
 	s = strings.TrimSpace(s)
-	if s == "" || s != strings.TrimSpace(s) {
+	if s == "" {
 		return false
 	}
 	addr, err := mail.ParseAddress(s)
@@ -379,7 +383,7 @@ func sendInvites(ctx context.Context, s inviteSender, target inviteTarget, role 
 			res.Outcomes = append(res.Outcomes, inviteOutcome{
 				Email:   email,
 				Status:  statusInvalidEmail,
-				Message: "not a valid email address; not sent",
+				Message: "not sent",
 			})
 			continue
 		}
@@ -628,13 +632,19 @@ func renderInviteResult(w io.Writer, res inviteResult, jsonOutput bool) error {
 	}
 
 	fmt.Fprintln(w, inviteHeaderStyle.Render("Invitations"))
-	fmt.Fprintln(w, inviteHeaderStyle.Render(strings.Repeat("─", len("Invitations"))))
+	fmt.Fprintln(w, inviteLabelStyle.Render(strings.Repeat("─", len("Invitations"))))
 
 	emailW := 0
 	for _, o := range res.Outcomes {
 		if l := lipgloss.Width(inviteCell(o.Email)); l > emailW {
 			emailW = l
 		}
+	}
+	// Cap the shared column. Without it, one 78-character corporate address
+	// sets the width for everybody and every short row inherits the wide
+	// layout — the table stops being scannable because of a single outlier.
+	if emailW > inviteEmailCap {
+		emailW = inviteEmailCap
 	}
 	statusW := 0
 	for _, o := range res.Outcomes {
@@ -658,52 +668,41 @@ func renderInviteResult(w io.Writer, res inviteResult, jsonOutput bool) error {
 			msg = inviteCell(o.Message)
 		}
 
-		// Width is measured on the display text: the styles wrap it in ANSI,
-		// which costs bytes but no columns.
-		//
-		// Three layouts, chosen by what fits in 80 (design rule 12). Long
-		// corporate addresses are entirely legitimate, so the address is never
-		// what gets sacrificed — the status and reason move to their own line
-		// instead. Wrapping is never acceptable: a wrapped row misaligns every
-		// column and makes the result unreadable exactly when it matters, on a
-		// batch that partly failed.
-		oneLine := 2 + 1 + 2 + emailW + 2 + lipgloss.Width(label)
-		switch {
-		case oneLine+2+lipgloss.Width(msg) <= inviteMaxWidth:
-			line := fmt.Sprintf("  %s  %s  %s", glyph,
-				padInviteCell(email, emailW), padInviteCell(label, statusW))
+		// The glyph column NEVER moves — it is the thing the eye scans down to
+		// find the failures, so it stays at a fixed offset on every row.
+		head := fmt.Sprintf("  %s  %s", glyph,
+			padInviteCell(truncateInviteMessage(email, inviteEmailCap), emailW))
+		headW := 2 + 1 + 2 + emailW
+
+		// Two layouts, decided per row (never from the batch-wide maximum —
+		// otherwise one long address drags every short row into the wide
+		// layout with it). Wrapping is never acceptable: a wrapped row
+		// misaligns every column, exactly when it matters most on a batch that
+		// partly failed. So the reason drops to its own line rather than the
+		// address being sacrificed.
+		if headW+2+statusW+2+lipgloss.Width(msg) <= inviteMaxWidth {
+			line := head + "  " + padInviteCell(label, statusW)
 			if msg != "" {
 				line += "  " + inviteValueStyle.Render(msg)
 			}
 			fmt.Fprintln(w, strings.TrimRight(line, " "))
+			continue
+		}
 
-		case oneLine <= inviteMaxWidth:
-			// Address and status fit; only the reason has to drop down.
-			fmt.Fprintln(w, strings.TrimRight(fmt.Sprintf("  %s  %s  %s", glyph,
-				padInviteCell(email, emailW), padInviteCell(label, statusW)), " "))
-			fmt.Fprintf(w, "     %s\n", inviteValueStyle.Render(
-				truncateInviteMessage(msg, inviteMaxWidth-5)))
-
-		default:
-			// The address alone dominates the row. Give it its own line at a
-			// minimal indent so it survives intact.
-			fmt.Fprintf(w, "  %s\n", truncateInviteMessage(email, inviteMaxWidth-2))
-			detail := label
-			if msg != "" {
-				detail += "  " + msg
-			}
-			fmt.Fprintf(w, "    %s %s\n", glyph,
-				inviteValueStyle.Render(truncateInviteMessage(detail, inviteMaxWidth-6)))
+		fmt.Fprintln(w, strings.TrimRight(head+"  "+label, " "))
+		if msg != "" {
+			fmt.Fprintf(w, "%s%s\n", inviteDetailIndent,
+				inviteValueStyle.Render(truncateInviteMessage(msg, inviteMaxWidth-len(inviteDetailIndent))))
 		}
 	}
 
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  %s\n", inviteValueStyle.Render(inviteSummaryLine(sent, pending, failed)))
+	fmt.Fprintf(w, "  %s\n", inviteSummaryLine(sent, pending, failed))
 	if sent > 0 {
-		fmt.Fprintf(w, "  %s\n", inviteValueStyle.Render(
-			"SageOx emails each person a link to join. Delivery is best-effort — if"))
-		fmt.Fprintf(w, "  %s\n", inviteValueStyle.Render(
-			"someone doesn't get it, resend from the team page."))
+		// One line, at the moment it is relevant. The same caveat is NOT
+		// repeated in --help: saying it three times taught nobody anything.
+		fmt.Fprintf(w, "  %s\n", inviteLabelStyle.Render(
+			"Delivery is best-effort — resend from the team page if it doesn't arrive."))
 	}
 	return nil
 }
@@ -711,6 +710,14 @@ func renderInviteResult(w io.Writer, res inviteResult, jsonOutput bool) error {
 // inviteMaxWidth is the column budget every invite screen renders within.
 // Design rule 12: nothing may wrap at 80 columns.
 const inviteMaxWidth = 80
+
+// inviteEmailCap bounds the address column. Email addresses are unbounded and
+// a single long one would otherwise dictate the layout of every other row.
+const inviteEmailCap = 46
+
+// inviteDetailIndent aligns a dropped-down reason under the address column,
+// so a continuation line reads as belonging to the row above it.
+const inviteDetailIndent = "     "
 
 // truncateInviteMessage keeps a server-supplied reason inside the width budget.
 // Server messages are unbounded, so a long one must be cut rather than allowed
@@ -765,17 +772,21 @@ func inviteStatusLabel(s inviteStatus) string {
 	}
 }
 
+// inviteSummaryLine is the one line that answers "did this work?". Each count
+// carries the same colour as the rows it summarises, so the verdict is legible
+// without reading the table — and stays legible under NO_COLOR, where the
+// words alone still say it.
 func inviteSummaryLine(sent, pending, failed int) string {
-	parts := []string{fmt.Sprintf("%d sent", sent)}
+	parts := []string{inviteOKStyle.Render(fmt.Sprintf("%d sent", sent))}
 	if pending > 0 {
-		parts = append(parts, fmt.Sprintf("%d already pending", pending))
+		parts = append(parts, inviteWarnStyle.Render(fmt.Sprintf("%d already pending", pending)))
 	}
 	if failed > 0 {
-		parts = append(parts, fmt.Sprintf("%d failed", failed))
+		parts = append(parts, inviteErrStyle.Render(fmt.Sprintf("%d failed", failed)))
 	}
-	line := strings.Join(parts, " · ")
+	line := strings.Join(parts, inviteLabelStyle.Render(" · "))
 	if sent > 0 {
-		line += " · they expire in 7 days"
+		line += inviteLabelStyle.Render(" · they expire in 7 days")
 	}
 	return line
 }
@@ -1031,7 +1042,7 @@ func renderInviteList(w io.Writer, target inviteTarget, invites []api.PendingInv
 	}
 
 	fmt.Fprintln(w, inviteHeaderStyle.Render("Pending Invitations"))
-	fmt.Fprintln(w, inviteHeaderStyle.Render(strings.Repeat("─", len("Pending Invitations"))))
+	fmt.Fprintln(w, inviteLabelStyle.Render(strings.Repeat("─", len("Pending Invitations"))))
 
 	if len(entries) == 0 {
 		fmt.Fprintf(w, "  %s\n", inviteValueStyle.Render(
@@ -1060,8 +1071,13 @@ func renderInviteList(w io.Writer, target inviteTarget, invites []api.PendingInv
 	}
 
 	emailW, roleW, expW, idW := len("EMAIL"), len("ROLE"), len("EXPIRES"), 0
-	for _, r := range rows {
-		if l := lipgloss.Width(r.email); l > emailW {
+	for i, r := range rows {
+		// Same cap as the send table, and for the same reason: an address is
+		// unbounded, and without this a single long one wraps the row — which
+		// happens BEFORE the id-on-its-own-line fallback can help, since that
+		// only sheds the id.
+		rows[i].email = truncateInviteMessage(r.email, inviteEmailCap)
+		if l := lipgloss.Width(rows[i].email); l > emailW {
 			emailW = l
 		}
 		if l := lipgloss.Width(r.role); l > roleW {
