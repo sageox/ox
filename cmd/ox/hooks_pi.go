@@ -32,6 +32,11 @@ const piLegacyGenericMarkerEnd = "<!-- ox:prime:end -->"
 // piPrimeBlock is the content injected into AGENTS.md for Pi.
 // Pi auto-loads AGENTS.md from the project root on every session.
 //
+// This must stay byte-identical to piPrimeBlock in cmd/ox-adapter-pi/hooks.go.
+// The two paths (ox integrate install --pi vs ox init) write the same file, and
+// when the text diverges an upgrade appends a second block instead of matching
+// the first.
+//
 // NOTE: the prime command is intentionally adapter-agnostic — no hardcoded
 // AGENT_ENV=<adapter> prefix. AGENTS.md is often shared across agents (e.g.
 // via a CLAUDE.md symlink), so any block that mis-routes AGENT_ENV poisons
@@ -47,11 +52,6 @@ var piPrimeBlock = piPrimeMarkerStart + "\n" +
 	"```\n" +
 	"\n" +
 	"This provides architectural decisions, coding conventions, and session history from your team.\n" +
-	"\n" +
-	"For full lifecycle integration (whispers, session recording, auto-prime), install the SageOx Pi extension:\n" +
-	"```bash\n" +
-	"pi install npm:@sageox/pi-ox\n" +
-	"```\n" +
 	piPrimeMarkerEnd
 
 // piBlockAlreadyPresent reports whether AGENTS.md already carries a Pi

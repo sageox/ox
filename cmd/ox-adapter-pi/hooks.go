@@ -23,6 +23,13 @@ const piPrimeMarkerEnd = "<!-- ox:prime:pi:end -->"
 const piLegacyPrimeMarkerStart = "<!-- ox:prime:start -->"
 const piLegacyPrimeMarkerEnd = "<!-- ox:prime:end -->"
 
+// piLegacyInProcessMarkerStart / End are the pre-#527 markers that only the
+// in-process installer (cmd/ox/hooks_pi.go) ever emitted. This adapter did not
+// recognize them, so a repo installed the old way got a SECOND block appended
+// on upgrade and kept an orphan block after uninstall.
+const piLegacyInProcessMarkerStart = "<!-- ox:pi-prime:start -->"
+const piLegacyInProcessMarkerEnd = "<!-- ox:pi-prime:end -->"
+
 // piPrimeBlock is the content injected into AGENTS.md for Pi coding agent.
 // Pi auto-loads AGENTS.md from the project root and parent directories on every session.
 //
@@ -49,7 +56,8 @@ var piPrimeBlock = piPrimeMarkerStart + "\n" +
 // "installed" and we don't stack a second block on top of them.
 func piBlockAlreadyPresent(content string) bool {
 	return strings.Contains(content, piPrimeMarkerStart) ||
-		strings.Contains(content, piLegacyPrimeMarkerStart)
+		strings.Contains(content, piLegacyPrimeMarkerStart) ||
+		strings.Contains(content, piLegacyInProcessMarkerStart)
 }
 
 func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallHooksResponse, error) {
@@ -139,6 +147,7 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 	// pair that we no longer emit.
 	cleaned := removePrimeBlock(content, piPrimeMarkerStart, piPrimeMarkerEnd)
 	cleaned = removePrimeBlock(cleaned, piLegacyPrimeMarkerStart, piLegacyPrimeMarkerEnd)
+	cleaned = removePrimeBlock(cleaned, piLegacyInProcessMarkerStart, piLegacyInProcessMarkerEnd)
 
 	if cleaned == content {
 		// nothing to uninstall

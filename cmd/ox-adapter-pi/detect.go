@@ -2,6 +2,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,21 +57,63 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 
 	if p.RepoRoot != "" {
 		agentsPath := filepath.Join(p.RepoRoot, "AGENTS.md")
-		if data, err := os.ReadFile(agentsPath); err == nil {
-			// accept either the current or legacy Pi marker — a pre-#527
-			// install is still considered "installed" for diagnosis purposes
-			if !piBlockAlreadyPresent(string(data)) {
-				issues = append(issues, adapterprotocol.DiagnoseIssue{
-					Slug:     "pi:hooks-missing",
-					Severity: "warning",
-					Title:    "Pi hooks not installed",
-					Detail:   "AGENTS.md does not contain ox prime marker.",
-					Fix:      "ox-adapter-pi install-hooks --repo-root " + p.RepoRoot + " --scope project",
-					FixSafe:  true,
-				})
+		// a missing AGENTS.md is a missing hook, not a reason to stay quiet —
+		// install-hooks creates the file
+		data, err := os.ReadFile(agentsPath)
+		// accept either the current or legacy Pi marker — a pre-#527
+		// install is still considered "installed" for diagnosis purposes
+		if err != nil || !piBlockAlreadyPresent(string(data)) {
+			detail := "AGENTS.md does not contain ox prime marker."
+			if err != nil {
+				detail = "AGENTS.md not found at " + agentsPath + "."
 			}
+			issues = append(issues, adapterprotocol.DiagnoseIssue{
+				Slug:     "pi:hooks-missing",
+				Severity: "warning",
+				Title:    "Pi hooks not installed",
+				Detail:   detail,
+				Fix:      "ox-adapter-pi install-hooks --repo-root " + p.RepoRoot + " --scope project",
+				FixSafe:  true,
+			})
 		}
 	}
 
+	if detail := checkTranscriptFormat(p.RepoRoot); detail != "" {
+		// a reader that silently yields zero entries looks identical to an
+		// idle session; say so instead
+		issues = append(issues, adapterprotocol.DiagnoseIssue{
+			Slug:     "pi:format-unsupported",
+			Severity: "error",
+			Title:    "Pi transcript format is not supported",
+			Detail:   detail,
+		})
+	}
+
 	return &adapterprotocol.DiagnoseResult{OK: len(issues) == 0, Issues: issues}, nil
+}
+
+// checkTranscriptFormat reports a mismatch between the newest transcript's
+// session-header version and what parsePiLine understands.
+func checkTranscriptFormat(repoRoot string) string {
+	path, err := findPiSession(repoRoot, "", "", "")
+	if err != nil {
+		return "" // no transcripts yet — nothing to judge
+	}
+
+	meta := extractPiMetadata(path)
+	if meta == nil || meta.AgentVersion == "" {
+		return ""
+	}
+
+	var version int
+	if _, err := fmt.Sscanf(meta.AgentVersion, "pi-v%d", &version); err != nil {
+		return ""
+	}
+	if piSupportedVersions[version] {
+		return ""
+	}
+
+	return fmt.Sprintf(
+		"%s is session format version %d; this adapter reads version 3. Sessions will record as empty until the reader is updated.",
+		path, version)
 }

@@ -1,180 +1,364 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
+
+	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
-func TestParseMessageParts_Text(t *testing.T) {
-	ts := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
-	partsJSON := `[{"type":"text","data":{"text":"hello world"}}]`
+// The DDL below is copied from a real ~/.local/share/opencode/opencode.db
+// (sqlite_master). Fixtures that encode a schema we invented are how the
+// previous reader shipped querying tables OpenCode never had — so these tests
+// build the real thing and read from it.
+const fixtureDDL = `
+CREATE TABLE session (
+	id text PRIMARY KEY,
+	project_id text NOT NULL,
+	parent_id text,
+	directory text NOT NULL,
+	title text NOT NULL,
+	version text NOT NULL,
+	model text,
+	time_created integer NOT NULL,
+	time_updated integer NOT NULL
+);
+CREATE TABLE message (
+	id text PRIMARY KEY,
+	session_id text NOT NULL,
+	time_created integer NOT NULL,
+	time_updated integer NOT NULL,
+	data text NOT NULL
+);
+CREATE TABLE part (
+	id text PRIMARY KEY,
+	message_id text NOT NULL,
+	session_id text NOT NULL,
+	time_created integer NOT NULL,
+	time_updated integer NOT NULL,
+	data text NOT NULL
+);
+`
 
-	entries := parseMessageParts("user", partsJSON, ts)
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(entries))
+const (
+	fixtureSessionID = "ses_096fdea05ffeagb7OGYpJCte6a"
+	fixtureCreatedMS = 1784173172218
+	fixtureDirectory = "/Users/dev/project"
+)
+
+// newFixtureDB builds a database with the real OpenCode schema and one
+// two-turn conversation: a user message with text, and an assistant message
+// with text plus a completed tool call.
+func newFixtureDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "opencode.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open fixture db: %v", err)
 	}
-	if entries[0].Role != "user" {
-		t.Errorf("expected role user, got %s", entries[0].Role)
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(fixtureDDL); err != nil {
+		t.Fatalf("create fixture schema: %v", err)
 	}
-	if entries[0].Content != "hello world" {
-		t.Errorf("expected content 'hello world', got %q", entries[0].Content)
+
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(query, args...); err != nil {
+			t.Fatalf("seed fixture (%s): %v", query, err)
+		}
+	}
+
+	exec(`INSERT INTO session (id, project_id, parent_id, directory, title, version, model, time_created, time_updated)
+		VALUES (?, 'global', NULL, ?, 'Fixture session', '1.18.15', ?, ?, ?)`,
+		fixtureSessionID, fixtureDirectory,
+		`{"id":"claude-opus-5","providerID":"anthropic"}`,
+		fixtureCreatedMS, fixtureCreatedMS)
+
+	exec(`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)`,
+		"msg_001", fixtureSessionID, fixtureCreatedMS, fixtureCreatedMS,
+		`{"role":"user","time":{"created":1784173172218}}`)
+	exec(`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)`,
+		"prt_001", "msg_001", fixtureSessionID, fixtureCreatedMS, fixtureCreatedMS,
+		`{"type":"text","text":"deploy the reporting agent"}`)
+
+	exec(`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)`,
+		"msg_002", fixtureSessionID, fixtureCreatedMS+1000, fixtureCreatedMS+1000,
+		`{"role":"assistant","time":{"created":1784173173218},"modelID":"claude-opus-5","providerID":"anthropic"}`)
+	exec(`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)`,
+		"prt_002", "msg_002", fixtureSessionID, fixtureCreatedMS+1000, fixtureCreatedMS+1000,
+		`{"type":"step-start","snapshot":"abc123"}`)
+	exec(`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)`,
+		"prt_003", "msg_002", fixtureSessionID, fixtureCreatedMS+1000, fixtureCreatedMS+1000,
+		`{"type":"text","text":"I'll deploy it now."}`)
+	exec(`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)`,
+		"prt_004", "msg_002", fixtureSessionID, fixtureCreatedMS+1000, fixtureCreatedMS+1000,
+		`{"type":"tool","callID":"tooluse_abc","tool":"bash","state":{"status":"completed","input":{"command":"make deploy"},"output":"deployed","title":"Deploy"}}`)
+	exec(`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)`,
+		"prt_005", "msg_002", fixtureSessionID, fixtureCreatedMS+1000, fixtureCreatedMS+1000,
+		`{"type":"reasoning","text":"the user wants a deploy"}`)
+
+	return db
+}
+
+// TestReadMessages_RealSchema is the gate: a database shaped like OpenCode's
+// must yield the conversation. The previous reader returned a SQL error here.
+func TestReadMessages_RealSchema(t *testing.T) {
+	db := newFixtureDB(t)
+
+	entries, rowsRead, err := readMessages(db, fixtureSessionID, 0)
+	if err != nil {
+		t.Fatalf("readMessages: %v", err)
+	}
+
+	// 5 joined rows: 1 user part + 4 assistant parts
+	if rowsRead != 5 {
+		t.Errorf("rowsRead = %d, want 5", rowsRead)
+	}
+
+	// step-start and reasoning are dropped; the tool part yields call + result
+	want := []struct {
+		role    string
+		content string
+		tool    string
+	}{
+		{role: "user", content: "deploy the reporting agent"},
+		{role: "assistant", content: "I'll deploy it now."},
+		{role: "tool", tool: "bash"},
+		{role: "tool"},
+	}
+
+	if len(entries) != len(want) {
+		t.Fatalf("got %d entries, want %d: %+v", len(entries), len(want), entries)
+	}
+	for i, w := range want {
+		if entries[i].Role != w.role {
+			t.Errorf("entry %d role = %q, want %q", i, entries[i].Role, w.role)
+		}
+		if w.content != "" && entries[i].Content != w.content {
+			t.Errorf("entry %d content = %q, want %q", i, entries[i].Content, w.content)
+		}
+		if w.tool != "" && entries[i].ToolName != w.tool {
+			t.Errorf("entry %d tool = %q, want %q", i, entries[i].ToolName, w.tool)
+		}
 	}
 }
 
-func TestParseMessageParts_AssistantText(t *testing.T) {
-	ts := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
-	partsJSON := `[{"type":"text","data":{"text":"I'll help you with that."}}]`
+func TestReadMessages_ToolCallAndResultPairing(t *testing.T) {
+	db := newFixtureDB(t)
 
-	entries := parseMessageParts("assistant", partsJSON, ts)
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(entries))
+	entries, _, err := readMessages(db, fixtureSessionID, 0)
+	if err != nil {
+		t.Fatalf("readMessages: %v", err)
 	}
-	if entries[0].Role != "assistant" {
-		t.Errorf("expected role assistant, got %s", entries[0].Role)
+
+	call, result := entries[2], entries[3]
+
+	if call.CallID != "tooluse_abc" || result.CallID != "tooluse_abc" {
+		t.Errorf("call/result ids = %q/%q, want both tooluse_abc", call.CallID, result.CallID)
+	}
+	// input is forwarded verbatim as OpenCode stored it
+	var input map[string]any
+	if err := json.Unmarshal([]byte(call.ToolInput), &input); err != nil {
+		t.Fatalf("tool input is not the raw JSON OpenCode stored: %q", call.ToolInput)
+	}
+	if input["command"] != "make deploy" {
+		t.Errorf("tool input command = %v, want 'make deploy'", input["command"])
+	}
+	if result.ToolOutput != "deployed" {
+		t.Errorf("tool output = %q, want 'deployed'", result.ToolOutput)
+	}
+	if result.IsError {
+		t.Error("completed tool marked as error")
 	}
 }
 
-func TestParseMessageParts_ToolCall(t *testing.T) {
-	ts := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
-	partsJSON := `[{"type":"tool_call","data":{"id":"tc_1","name":"Bash","input":"{\"command\":\"ls\"}"}}]`
+func TestReadMessages_TimestampsAreMilliseconds(t *testing.T) {
+	db := newFixtureDB(t)
 
-	entries := parseMessageParts("assistant", partsJSON, ts)
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(entries))
+	entries, _, err := readMessages(db, fixtureSessionID, 0)
+	if err != nil {
+		t.Fatalf("readMessages: %v", err)
 	}
-	if entries[0].Role != "tool" {
-		t.Errorf("expected role tool, got %s", entries[0].Role)
+
+	ts, err := time.Parse(time.RFC3339, entries[0].Timestamp)
+	if err != nil {
+		t.Fatalf("parse entry timestamp %q: %v", entries[0].Timestamp, err)
 	}
-	if entries[0].ToolName != "Bash" {
-		t.Errorf("expected tool name Bash, got %s", entries[0].ToolName)
-	}
-	if entries[0].CallID != "tc_1" {
-		t.Errorf("expected call ID tc_1, got %s", entries[0].CallID)
-	}
-	if entries[0].ToolInput != `{"command":"ls"}` {
-		t.Errorf("unexpected tool input: %s", entries[0].ToolInput)
+	// RawEntry timestamps are second-precision RFC3339, so compare seconds —
+	// treating the millisecond field as seconds lands ~54,000 years out
+	if got, want := ts.Unix(), int64(fixtureCreatedMS)/1000; got != want {
+		t.Errorf("timestamp = %d (unix s), want %d — millisecond field misread?", got, want)
 	}
 }
 
-func TestParseMessageParts_ToolResult(t *testing.T) {
-	ts := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
-	partsJSON := `[{"type":"tool_result","data":{"tool_call_id":"tc_1","name":"Bash","content":"file.txt\ndir/","is_error":false}}]`
+// TestReadMessages_OffsetIsPartGranular pins the incremental contract: a poll
+// that resumes at the previous offset must not re-emit what it already read.
+func TestReadMessages_OffsetIsPartGranular(t *testing.T) {
+	db := newFixtureDB(t)
 
-	entries := parseMessageParts("tool", partsJSON, ts)
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(entries))
+	total, err := countRows(db, fixtureSessionID)
+	if err != nil {
+		t.Fatalf("countRows: %v", err)
 	}
-	if entries[0].ToolOutput != "file.txt\ndir/" {
-		t.Errorf("unexpected tool output: %q", entries[0].ToolOutput)
+	if total != 5 {
+		t.Fatalf("countRows = %d, want 5", total)
 	}
-	if entries[0].IsError {
-		t.Error("expected is_error=false")
-	}
-	if entries[0].CallID != "tc_1" {
-		t.Errorf("expected call ID tc_1, got %s", entries[0].CallID)
-	}
-}
 
-func TestParseMessageParts_ToolResultError(t *testing.T) {
-	ts := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
-	partsJSON := `[{"type":"tool_result","data":{"tool_call_id":"tc_2","name":"Bash","content":"command not found","is_error":true}}]`
-
-	entries := parseMessageParts("tool", partsJSON, ts)
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(entries))
+	// resume after the user turn (1 row) — the assistant turn is 4 more rows
+	entries, rowsRead, err := readMessages(db, fixtureSessionID, 1)
+	if err != nil {
+		t.Fatalf("readMessages: %v", err)
 	}
-	if !entries[0].IsError {
-		t.Error("expected is_error=true")
+	if rowsRead != 4 {
+		t.Errorf("rowsRead = %d, want 4", rowsRead)
 	}
-}
+	for _, e := range entries {
+		if e.Role == "user" {
+			t.Errorf("offset read re-emitted the user turn: %+v", e)
+		}
+	}
 
-func TestParseMessageParts_SkipsReasoning(t *testing.T) {
-	ts := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
-	partsJSON := `[{"type":"reasoning","data":{"thinking":"let me think..."}}]`
-
-	entries := parseMessageParts("assistant", partsJSON, ts)
-	if len(entries) != 0 {
-		t.Errorf("expected 0 entries for reasoning, got %d", len(entries))
+	// resuming at the end yields nothing
+	entries, rowsRead, err = readMessages(db, fixtureSessionID, total)
+	if err != nil {
+		t.Fatalf("readMessages at end: %v", err)
+	}
+	if rowsRead != 0 || len(entries) != 0 {
+		t.Errorf("read at end returned %d rows / %d entries, want 0/0", rowsRead, len(entries))
 	}
 }
 
-func TestParseMessageParts_SkipsFinish(t *testing.T) {
-	ts := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
-	partsJSON := `[{"type":"finish","data":{"reason":"end_turn","time":1234567890}}]`
+func TestReadMetadata_ModelFromSessionRow(t *testing.T) {
+	db := newFixtureDB(t)
 
-	entries := parseMessageParts("assistant", partsJSON, ts)
-	if len(entries) != 0 {
-		t.Errorf("expected 0 entries for finish, got %d", len(entries))
+	meta, err := readMetadata(db, fixtureSessionID)
+	if err != nil {
+		t.Fatalf("readMetadata: %v", err)
+	}
+	if meta == nil || meta.Model != "claude-opus-5" {
+		t.Fatalf("metadata = %+v, want model claude-opus-5", meta)
 	}
 }
 
-func TestParseMessageParts_MixedParts(t *testing.T) {
-	ts := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
-	partsJSON := `[
-		{"type":"text","data":{"text":"Let me run that."}},
-		{"type":"tool_call","data":{"id":"tc_1","name":"Bash","input":"ls"}},
-		{"type":"reasoning","data":{"thinking":"analyzing output"}},
-		{"type":"finish","data":{"reason":"end_turn","time":1234567890}}
-	]`
+func TestResolveSessionID_PrefersMatchingDirectory(t *testing.T) {
+	db := newFixtureDB(t)
 
-	entries := parseMessageParts("assistant", partsJSON, ts)
+	// a newer session in a different directory must not win when the caller
+	// told us which repo it cares about
+	if _, err := db.Exec(`INSERT INTO session (id, project_id, parent_id, directory, title, version, model, time_created, time_updated)
+		VALUES ('ses_other', 'global', NULL, '/Users/dev/elsewhere', 'Other', '1.18.15', NULL, ?, ?)`,
+		fixtureCreatedMS+99999, fixtureCreatedMS+99999); err != nil {
+		t.Fatalf("seed second session: %v", err)
+	}
+
+	got, err := resolveSessionID(db, adapterprotocol.FindSessionParams{RepoRoot: fixtureDirectory})
+	if err != nil {
+		t.Fatalf("resolveSessionID: %v", err)
+	}
+	if got != fixtureSessionID {
+		t.Errorf("resolved %q, want %q", got, fixtureSessionID)
+	}
+
+	// with no repo scope, newest wins
+	got, err = resolveSessionID(db, adapterprotocol.FindSessionParams{})
+	if err != nil {
+		t.Fatalf("resolveSessionID unscoped: %v", err)
+	}
+	if got != "ses_other" {
+		t.Errorf("unscoped resolved %q, want ses_other", got)
+	}
+}
+
+func TestResolveSessionID_FallsBackWhenRepoHasNoSession(t *testing.T) {
+	db := newFixtureDB(t)
+
+	got, err := resolveSessionID(db, adapterprotocol.FindSessionParams{RepoRoot: "/Users/dev/never-used"})
+	if err != nil {
+		t.Fatalf("resolveSessionID: %v", err)
+	}
+	if got != fixtureSessionID {
+		t.Errorf("resolved %q, want fallback to %q", got, fixtureSessionID)
+	}
+}
+
+func TestResolveSessionID_SkipsChildSessions(t *testing.T) {
+	db := newFixtureDB(t)
+
+	if _, err := db.Exec(`INSERT INTO session (id, project_id, parent_id, directory, title, version, model, time_created, time_updated)
+		VALUES ('ses_child', 'global', ?, ?, 'Child', '1.18.15', NULL, ?, ?)`,
+		fixtureSessionID, fixtureDirectory, fixtureCreatedMS+50000, fixtureCreatedMS+50000); err != nil {
+		t.Fatalf("seed child session: %v", err)
+	}
+
+	got, err := resolveSessionID(db, adapterprotocol.FindSessionParams{RepoRoot: fixtureDirectory})
+	if err != nil {
+		t.Fatalf("resolveSessionID: %v", err)
+	}
+	if got != fixtureSessionID {
+		t.Errorf("resolved %q, want the root session %q", got, fixtureSessionID)
+	}
+}
+
+func TestParsePart_ErroredTool(t *testing.T) {
+	ts := time.Unix(0, 0).UTC()
+	entries := parsePart("assistant",
+		`{"type":"tool","callID":"c1","tool":"bash","state":{"status":"error","error":"exit 1"}}`, ts)
+
 	if len(entries) != 2 {
-		t.Fatalf("expected 2 entries (text + tool_call), got %d", len(entries))
+		t.Fatalf("got %d entries, want call + result", len(entries))
 	}
-	if entries[0].Role != "assistant" {
-		t.Errorf("first entry: expected role assistant, got %s", entries[0].Role)
-	}
-	if entries[1].ToolName != "Bash" {
-		t.Errorf("second entry: expected tool Bash, got %s", entries[1].ToolName)
+	if !entries[1].IsError || entries[1].ToolOutput != "exit 1" {
+		t.Errorf("result = %+v, want IsError with 'exit 1'", entries[1])
 	}
 }
 
-func TestParseMessageParts_EmptyText(t *testing.T) {
-	ts := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
-	partsJSON := `[{"type":"text","data":{"text":""}}]`
+func TestParsePart_RunningToolHasNoResultYet(t *testing.T) {
+	ts := time.Unix(0, 0).UTC()
+	entries := parsePart("assistant",
+		`{"type":"tool","callID":"c1","tool":"bash","state":{"status":"running","input":{"command":"sleep 1"}}}`, ts)
 
-	entries := parseMessageParts("user", partsJSON, ts)
-	if len(entries) != 0 {
-		t.Errorf("expected 0 entries for empty text, got %d", len(entries))
-	}
-}
-
-func TestParseMessageParts_InvalidJSON(t *testing.T) {
-	ts := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
-
-	// plain text fallback for user messages
-	entries := parseMessageParts("user", "not json", ts)
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 fallback entry, got %d", len(entries))
-	}
-	if entries[0].Content != "not json" {
-		t.Errorf("expected fallback content, got %q", entries[0].Content)
+		t.Fatalf("got %d entries, want only the call: %+v", len(entries), entries)
 	}
 }
 
-func TestParseMessageParts_EmptyArray(t *testing.T) {
-	ts := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
-	entries := parseMessageParts("user", "[]", ts)
-	if len(entries) != 0 {
-		t.Errorf("expected 0 entries for empty array, got %d", len(entries))
+func TestParsePart_SkippedTypes(t *testing.T) {
+	ts := time.Unix(0, 0).UTC()
+	for _, raw := range []string{
+		`{"type":"step-start","snapshot":"x"}`,
+		`{"type":"step-finish","reason":"tool-calls"}`,
+		`{"type":"patch","hash":"x","files":[]}`,
+		`{"type":"reasoning","text":"thinking"}`,
+		`{"type":"text","text":""}`,
+		`not json`,
+	} {
+		if entries := parsePart("assistant", raw, ts); len(entries) != 0 {
+			t.Errorf("parsePart(%s) = %+v, want no entries", raw, entries)
+		}
 	}
 }
 
 func TestExtractSessionID(t *testing.T) {
 	tests := []struct {
-		input string
-		want  string
+		in   string
+		want string
 	}{
 		{"opencode:abc123", "abc123"},
 		{"opencode:", ""},
 		{"other:abc123", ""},
 		{"", ""},
-		{"opencode:01JXYZ123456789", "01JXYZ123456789"},
+		{"opencode:" + fixtureSessionID, fixtureSessionID},
 	}
 	for _, tt := range tests {
-		got := extractSessionID(tt.input)
-		if got != tt.want {
-			t.Errorf("extractSessionID(%q) = %q, want %q", tt.input, got, tt.want)
+		if got := extractSessionID(tt.in); got != tt.want {
+			t.Errorf("extractSessionID(%q) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 }

@@ -3,218 +3,229 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
 // --- A. Line parsing ---
+//
+// Fixtures here are copied verbatim from transcripts that a real `pi` binary
+// wrote (testdata/session-v3.jsonl, anonymized paths only). Hand-authored
+// fixtures are what let this adapter ship a parser for a format Pi never
+// emitted: every real line was dropped and every test still passed.
 
-// TestParsePiLine_User verifies user messages parse into RawEntry.
-// Failure prevented: user messages silently dropped from sessions.
-func TestParsePiLine_User(t *testing.T) {
-	line := []byte(`{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"hello"}`)
-	entry := parsePiLine(line)
-	if entry == nil {
-		t.Fatal("expected entry, got nil")
+// TestParsePiLine_UserMessage verifies Pi's nested message envelope parses.
+// Failure prevented: every user turn silently dropped from the recording.
+func TestParsePiLine_UserMessage(t *testing.T) {
+	line := []byte(`{"type":"message","id":"m1","timestamp":"2026-04-04T01:03:14.337Z","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}`)
+
+	entries := parsePiLine(line)
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1: %+v", len(entries), entries)
 	}
-	if entry.Role != adapterprotocol.RoleUser {
-		t.Errorf("role = %q, want %s", entry.Role, adapterprotocol.RoleUser)
+	if entries[0].Role != "user" {
+		t.Errorf("role = %q, want user", entries[0].Role)
 	}
-	if entry.Content != "hello" {
-		t.Errorf("content = %q, want hello", entry.Content)
+	if entries[0].Content != "hello" {
+		t.Errorf("content = %q, want hello", entries[0].Content)
 	}
 }
 
-// TestParsePiLine_Assistant verifies assistant messages parse correctly.
-// Failure prevented: assistant responses missing from session playback.
-func TestParsePiLine_Assistant(t *testing.T) {
-	line := []byte(`{"type":"assistant","timestamp":"2024-01-15T10:00:01Z","content":"hi there"}`)
-	entry := parsePiLine(line)
-	if entry == nil {
-		t.Fatal("expected entry, got nil")
+// TestParsePiLine_AssistantDropsThinking verifies an assistant turn keeps its
+// text and discards reasoning.
+// Failure prevented: thinking blocks leaking into the shared team ledger.
+func TestParsePiLine_AssistantDropsThinking(t *testing.T) {
+	line := []byte(`{"type":"message","timestamp":"2026-04-04T01:03:15.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"internal reasoning"},{"type":"text","text":"visible answer"}]}}`)
+
+	entries := parsePiLine(line)
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1: %+v", len(entries), entries)
 	}
-	if entry.Role != adapterprotocol.RoleAssistant {
-		t.Errorf("role = %q, want %s", entry.Role, adapterprotocol.RoleAssistant)
+	if entries[0].Content != "visible answer" {
+		t.Errorf("content = %q, want the text block only", entries[0].Content)
 	}
-	if entry.Content != "hi there" {
-		t.Errorf("content = %q, want 'hi there'", entry.Content)
+	if strings.Contains(entries[0].Content, "internal reasoning") {
+		t.Error("thinking block leaked into the entry")
 	}
 }
 
-// TestParsePiLine_ToolCall verifies tool_call entries with name, input, call_id.
-// Failure prevented: tool usage not captured in session data.
+// TestParsePiLine_ToolCall verifies Pi's toolCall block becomes a tool entry.
+// Failure prevented: tool use invisible in recorded sessions.
 func TestParsePiLine_ToolCall(t *testing.T) {
-	line := []byte(`{"type":"tool_call","timestamp":"2024-01-15T10:00:02Z","name":"read_file","input":"path.go","call_id":"call-1"}`)
-	entry := parsePiLine(line)
-	if entry == nil {
-		t.Fatal("expected entry, got nil")
+	line := []byte(`{"type":"message","timestamp":"2026-04-04T01:03:15.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"toolu_01","name":"read","arguments":{"path":"AGENTS.md"}}]}}`)
+
+	entries := parsePiLine(line)
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1: %+v", len(entries), entries)
 	}
-	if entry.Role != adapterprotocol.RoleTool {
-		t.Errorf("role = %q, want %s", entry.Role, adapterprotocol.RoleTool)
+	e := entries[0]
+	if e.Role != "tool" || e.ToolName != "read" || e.CallID != "toolu_01" {
+		t.Errorf("entry = %+v, want tool/read/toolu_01", e)
 	}
-	if entry.ToolName != "read_file" {
-		t.Errorf("tool_name = %q, want read_file", entry.ToolName)
-	}
-	if entry.ToolInput != "path.go" {
-		t.Errorf("tool_input = %q, want path.go", entry.ToolInput)
-	}
-	if entry.CallID != "call-1" {
-		t.Errorf("call_id = %q, want call-1", entry.CallID)
+	if !strings.Contains(e.ToolInput, `"path":"AGENTS.md"`) {
+		t.Errorf("tool input = %q, want the raw arguments object", e.ToolInput)
 	}
 }
 
-// TestParsePiLine_ToolResultError verifies error tool results are captured.
-// Failure prevented: error signals from tools silently swallowed.
+// TestParsePiLine_MultipleToolCallsInOneTurn verifies one message can yield
+// several entries.
+// Failure prevented: only the first tool call of a parallel batch recorded.
+func TestParsePiLine_MultipleToolCallsInOneTurn(t *testing.T) {
+	line := []byte(`{"type":"message","timestamp":"2026-04-04T01:03:15.000Z","message":{"role":"assistant","content":[{"type":"text","text":"reading both"},{"type":"toolCall","id":"t1","name":"read","arguments":{}},{"type":"toolCall","id":"t2","name":"bash","arguments":{}}]}}`)
+
+	entries := parsePiLine(line)
+	if len(entries) != 3 {
+		t.Fatalf("got %d entries, want 3 (text + 2 tool calls): %+v", len(entries), entries)
+	}
+	if entries[1].CallID != "t1" || entries[2].CallID != "t2" {
+		t.Errorf("call ids = %q/%q, want t1/t2", entries[1].CallID, entries[2].CallID)
+	}
+}
+
+// TestParsePiLine_ToolResult verifies the standalone toolResult message shape.
+// Failure prevented: tool output missing, breaking call/result pairing.
+func TestParsePiLine_ToolResult(t *testing.T) {
+	line := []byte(`{"type":"message","timestamp":"2026-04-04T01:03:16.000Z","message":{"role":"toolResult","toolCallId":"toolu_01","toolName":"read","isError":false,"content":[{"type":"text","text":"file contents"}]}}`)
+
+	entries := parsePiLine(line)
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1: %+v", len(entries), entries)
+	}
+	e := entries[0]
+	if e.ToolOutput != "file contents" || e.CallID != "toolu_01" || e.IsError {
+		t.Errorf("entry = %+v, want output/toolu_01/no-error", e)
+	}
+}
+
+// TestParsePiLine_ToolResultError verifies isError propagates.
+// Failure prevented: failed tool calls recorded as successes.
 func TestParsePiLine_ToolResultError(t *testing.T) {
-	line := []byte(`{"type":"tool_result","timestamp":"2024-01-15T10:00:03Z","content":"file not found","is_error":true,"call_id":"call-1"}`)
-	entry := parsePiLine(line)
-	if entry == nil {
-		t.Fatal("expected entry, got nil")
-	}
-	if entry.ToolOutput != "file not found" {
-		t.Errorf("tool_output = %q, want 'file not found'", entry.ToolOutput)
-	}
-	if !entry.IsError {
-		t.Error("is_error = false, want true")
-	}
-	if entry.CallID != "call-1" {
-		t.Errorf("call_id = %q, want call-1", entry.CallID)
+	line := []byte(`{"type":"message","timestamp":"2026-04-04T01:03:16.000Z","message":{"role":"toolResult","toolCallId":"t1","toolName":"bash","isError":true,"content":[{"type":"text","text":"exit status 1"}]}}`)
+
+	entries := parsePiLine(line)
+	if len(entries) != 1 || !entries[0].IsError {
+		t.Fatalf("entries = %+v, want one error result", entries)
 	}
 }
 
-// TestParsePiLine_ToolResultSuccess verifies successful tool results are captured.
-// Failure prevented: successful tool outputs missing from session data.
-func TestParsePiLine_ToolResultSuccess(t *testing.T) {
-	line := []byte(`{"type":"tool_result","timestamp":"2024-01-15T10:00:03Z","content":"success output","is_error":false,"call_id":"call-2"}`)
-	entry := parsePiLine(line)
-	if entry == nil {
-		t.Fatal("expected entry, got nil")
-	}
-	if entry.ToolOutput != "success output" {
-		t.Errorf("tool_output = %q, want 'success output'", entry.ToolOutput)
-	}
-	if entry.IsError {
-		t.Error("is_error = true, want false")
-	}
-	if entry.CallID != "call-2" {
-		t.Errorf("call_id = %q, want call-2", entry.CallID)
+// TestParsePiLine_NonMessageRecords verifies Pi's bookkeeping lines are skipped.
+// Failure prevented: header records surfacing as conversation turns.
+func TestParsePiLine_NonMessageRecords(t *testing.T) {
+	for _, line := range []string{
+		`{"type":"session","version":3,"id":"s1","timestamp":"2026-04-04T01:03:14.337Z","cwd":"/tmp/fixture/project"}`,
+		`{"type":"model_change","provider":"anthropic","modelId":"claude-haiku-4-5-20251001"}`,
+		`{"type":"thinking_level_change","thinkingLevel":"medium"}`,
+		`{"type":"message"}`,
+		`not json`,
+	} {
+		if entries := parsePiLine([]byte(line)); len(entries) != 0 {
+			t.Errorf("parsePiLine(%s) = %+v, want no entries", line, entries)
+		}
 	}
 }
 
-// TestParsePiLine_System verifies system messages parse correctly.
-// Failure prevented: system context missing from session data.
-func TestParsePiLine_System(t *testing.T) {
-	line := []byte(`{"type":"system","timestamp":"2024-01-15T10:00:04Z","content":"context loaded"}`)
-	entry := parsePiLine(line)
-	if entry == nil {
-		t.Fatal("expected entry, got nil")
-	}
-	if entry.Role != adapterprotocol.RoleSystem {
-		t.Errorf("role = %q, want %s", entry.Role, adapterprotocol.RoleSystem)
-	}
-	if entry.Content != "context loaded" {
-		t.Errorf("content = %q, want 'context loaded'", entry.Content)
+// TestParsePiLine_EmptyTextBlockSkipped keeps blank turns out of the ledger.
+func TestParsePiLine_EmptyTextBlockSkipped(t *testing.T) {
+	line := []byte(`{"type":"message","timestamp":"2026-04-04T01:03:14.337Z","message":{"role":"user","content":[{"type":"text","text":""}]}}`)
+	if entries := parsePiLine(line); len(entries) != 0 {
+		t.Errorf("got %+v, want no entries for an empty text block", entries)
 	}
 }
 
-// TestParsePiLine_EmptyContent verifies empty-content messages return nil.
-// Failure prevented: empty entries polluting session data.
-func TestParsePiLine_EmptyContent(t *testing.T) {
-	tests := []struct {
-		name string
-		line string
-	}{
-		{
-			name: "user empty content",
-			line: `{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":""}`,
-		},
-		{
-			name: "assistant empty content",
-			line: `{"type":"assistant","timestamp":"2024-01-15T10:00:01Z","content":""}`,
-		},
-		{
-			name: "system empty content",
-			line: `{"type":"system","timestamp":"2024-01-15T10:00:02Z","content":""}`,
-		},
-	}
+func TestParsePiLine_TimestampPreserved(t *testing.T) {
+	line := []byte(`{"type":"message","timestamp":"2026-04-04T01:03:14.337Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}`)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			entry := parsePiLine([]byte(tt.line))
-			if entry != nil {
-				t.Error("expected nil for empty content")
-			}
-		})
+	entries := parsePiLine(line)
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	ts, err := time.Parse(time.RFC3339, entries[0].Timestamp)
+	if err != nil {
+		t.Fatalf("parse timestamp %q: %v", entries[0].Timestamp, err)
+	}
+	if ts.Year() != 2026 || ts.Month() != time.April {
+		t.Errorf("timestamp = %s, want the record's 2026-04 value", ts)
 	}
 }
 
-// TestParsePiLine_InvalidJSON verifies malformed lines return nil.
-// Failure prevented: panic on corrupt session data.
-func TestParsePiLine_InvalidJSON(t *testing.T) {
-	entry := parsePiLine([]byte(`not json`))
-	if entry != nil {
-		t.Error("expected nil for invalid JSON")
-	}
-}
+// --- B. Whole-file reading ---
 
-// TestParsePiLine_SessionHeader verifies session headers are skipped.
-// Failure prevented: metadata entries appearing as conversation content.
-func TestParsePiLine_SessionHeader(t *testing.T) {
-	line := []byte(`{"type":"session","id":"test-session","version":1,"model":"claude-3"}`)
-	entry := parsePiLine(line)
-	if entry != nil {
-		t.Error("expected nil for session header")
-	}
-}
+const fixtureTranscript = "testdata/session-v3.jsonl"
 
-// TestParsePiLine_UnknownType verifies unknown types return nil gracefully.
-// Failure prevented: panic on new/unknown message types.
-func TestParsePiLine_UnknownType(t *testing.T) {
-	line := []byte(`{"type":"unknown","timestamp":"2024-01-15T10:00:00Z","content":"test"}`)
-	entry := parsePiLine(line)
-	if entry != nil {
-		t.Error("expected nil for unknown type")
-	}
-}
-
-// --- B. File reading ---
-
-// TestReadPiFile reads a multi-line JSONL file and verifies all entries parsed.
-// Failure prevented: partial session reads on multi-entry files.
-func TestReadPiFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "session.jsonl")
-
-	content := `{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"first"}
-{"type":"assistant","timestamp":"2024-01-15T10:00:01Z","content":"second"}
-{"type":"user","timestamp":"2024-01-15T10:00:02Z","content":"third"}
-`
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	entries, err := readPiFile(path)
+// TestReadPiFile_RealTranscript is the gate: a transcript a real pi wrote must
+// produce a real conversation. The previous parser returned zero entries here.
+func TestReadPiFile_RealTranscript(t *testing.T) {
+	entries, err := readPiFile(fixtureTranscript)
 	if err != nil {
 		t.Fatalf("readPiFile: %v", err)
 	}
-	if len(entries) != 3 {
-		t.Errorf("got %d entries, want 3", len(entries))
+	if len(entries) == 0 {
+		t.Fatal("real pi transcript produced zero entries — the parser does not match Pi's format")
+	}
+
+	var roles []string
+	for _, e := range entries {
+		roles = append(roles, e.Role)
+	}
+	for _, want := range []string{"user", "assistant", "tool"} {
+		if !contains(roles, want) {
+			t.Errorf("no %q entry in %v — round trip incomplete", want, roles)
+		}
 	}
 }
 
-// TestReadPiFile_SkipsEmptyLinesAndHeaders reads file with empty lines and session headers.
-// Failure prevented: empty lines or metadata causing parsing failures.
-func TestReadPiFile_SkipsEmptyLinesAndHeaders(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "session.jsonl")
+// TestReadPiFile_ToolCallResultPairing verifies call ids match across the two
+// separate records Pi writes.
+// Failure prevented: orphaned tool results with no call to attach to.
+func TestReadPiFile_ToolCallResultPairing(t *testing.T) {
+	entries, err := readPiFile(fixtureTranscript)
+	if err != nil {
+		t.Fatalf("readPiFile: %v", err)
+	}
 
-	content := `{"type":"session","id":"test-session","version":1}
+	calls := map[string]bool{}
+	for _, e := range entries {
+		if e.ToolName != "" {
+			calls[e.CallID] = true
+		}
+	}
+	if len(calls) == 0 {
+		t.Fatal("no tool calls found in the fixture")
+	}
 
-{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"hello"}
+	var matched int
+	for _, e := range entries {
+		if e.ToolOutput != "" && calls[e.CallID] {
+			matched++
+		}
+	}
+	if matched == 0 {
+		t.Errorf("no tool result matched a recorded call id (calls: %v)", calls)
+	}
+}
 
-{"type":"assistant","timestamp":"2024-01-15T10:00:01Z","content":"response"}
+func TestExtractPiMetadata_RealTranscript(t *testing.T) {
+	meta := extractPiMetadata(fixtureTranscript)
+	if meta == nil {
+		t.Fatal("no metadata extracted from a real transcript")
+	}
+	if meta.AgentVersion != "pi-v3" {
+		t.Errorf("agent version = %q, want pi-v3 (real transcripts are version 3)", meta.AgentVersion)
+	}
+	// the model lives on model_change, not on the session header
+	if meta.Model == "" {
+		t.Error("model not extracted — model_change record ignored?")
+	}
+}
+
+func TestReadPiFile_SkipsEmptyLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	content := `{"type":"session","version":3,"id":"s1"}
+
+{"type":"message","timestamp":"2026-04-04T01:03:14.337Z","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}
+
+{"type":"message","timestamp":"2026-04-04T01:03:15.337Z","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}
 `
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -225,60 +236,54 @@ func TestReadPiFile_SkipsEmptyLinesAndHeaders(t *testing.T) {
 		t.Fatalf("readPiFile: %v", err)
 	}
 	if len(entries) != 2 {
-		t.Errorf("got %d entries, want 2 (should skip session header and empty lines)", len(entries))
+		t.Errorf("got %d entries, want 2 (header and blank lines skipped)", len(entries))
 	}
 }
 
-// TestReadPiFromOffset reads from a byte offset and returns new entries.
-// Failure prevented: duplicate entries on incremental reads.
+// TestReadPiFromOffset verifies incremental reads don't replay old turns.
+// Failure prevented: duplicate entries on every daemon poll.
 func TestReadPiFromOffset(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "session.jsonl")
+	path := filepath.Join(t.TempDir(), "session.jsonl")
 
-	line1 := `{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"first"}` + "\n"
-	line2 := `{"type":"assistant","timestamp":"2024-01-15T10:00:01Z","content":"second"}` + "\n"
+	line1 := `{"type":"message","timestamp":"2026-04-04T01:03:14.337Z","message":{"role":"user","content":[{"type":"text","text":"first"}]}}` + "\n"
+	line2 := `{"type":"message","timestamp":"2026-04-04T01:03:15.337Z","message":{"role":"assistant","content":[{"type":"text","text":"second"}]}}` + "\n"
 
 	if err := os.WriteFile(path, []byte(line1+line2), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// read from offset past first line
-	offset := int64(len(line1))
-	entries, newOffset, err := readPiFromOffset(path, offset)
+	entries, newOffset, err := readPiFromOffset(path, int64(len(line1)))
 	if err != nil {
 		t.Fatalf("readPiFromOffset: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Errorf("got %d entries from offset, want 1", len(entries))
+	if len(entries) != 1 || entries[0].Content != "second" {
+		t.Fatalf("entries = %+v, want only the second turn", entries)
 	}
-	if newOffset <= offset {
-		t.Errorf("newOffset %d should be > offset %d", newOffset, offset)
+	if newOffset != int64(len(line1)+len(line2)) {
+		t.Errorf("newOffset = %d, want %d", newOffset, len(line1)+len(line2))
 	}
 }
 
-// TestReadPiFromOffset_ZeroOffset reads entire file when offset is 0.
-// Failure prevented: initial read missing content when offset is explicitly 0.
-func TestReadPiFromOffset_ZeroOffset(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "session.jsonl")
-
-	content := `{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"first"}
-{"type":"assistant","timestamp":"2024-01-15T10:00:01Z","content":"second"}
-`
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	entries, newOffset, err := readPiFromOffset(path, 0)
+func TestReadPiFromOffset_ZeroOffsetReadsAll(t *testing.T) {
+	entries, newOffset, err := readPiFromOffset(fixtureTranscript, 0)
 	if err != nil {
 		t.Fatalf("readPiFromOffset: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Errorf("got %d entries from zero offset, want 2", len(entries))
+	if len(entries) == 0 {
+		t.Error("zero offset returned no entries")
 	}
 	if newOffset == 0 {
-		t.Error("newOffset should be > 0 after reading content")
+		t.Error("newOffset should advance past the file")
 	}
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // --- C. Session discovery ---

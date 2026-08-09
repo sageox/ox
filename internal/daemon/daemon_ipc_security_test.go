@@ -302,6 +302,12 @@ func TestSessionWatchStart_RejectsArbitrarySessionFile(t *testing.T) {
 			"gemini", "/home/victim/.gemini/sessions/abc.json", true},
 		{"happy: claude-code alias resolves",
 			"claude", "/home/victim/.claude/projects/x/y.jsonl", true},
+		// Pi has no lifecycle hooks, so ox tails the transcript where Pi
+		// writes it. Omitting this root silently rejected every Pi recording.
+		{"happy: pi under .pi/agent/sessions",
+			"pi", "/home/victim/.pi/agent/sessions/--home--victim--proj/2026-08-09T00-00-00-000Z_abc.jsonl", true},
+		{"happy: pi-coding-agent alias resolves",
+			"pi-coding-agent", "/home/victim/.pi/agent/sessions/x/y.jsonl", true},
 
 		{"reject: ~/.ssh exfil for claude-code",
 			"claude-code", "/home/victim/.ssh/id_rsa", false},
@@ -321,6 +327,8 @@ func TestSessionWatchStart_RejectsArbitrarySessionFile(t *testing.T) {
 			"claude-code", "", false},
 		{"reject: prefix-collision (.claude/projects-evil)",
 			"claude-code", "/home/victim/.claude/projects-evil/x.jsonl", false},
+		{"reject: pi outside its sessions dir (~/.pi/agent/auth.json)",
+			"pi", "/home/victim/.pi/agent/auth.json", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

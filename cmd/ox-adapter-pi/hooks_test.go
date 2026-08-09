@@ -100,3 +100,86 @@ func TestUninstall_RemovesCurrentAndLegacyBlocks(t *testing.T) {
 		assert.NotContains(t, got, piLegacyPrimeMarkerStart)
 	}
 }
+
+// TestInstall_IdempotentForLegacyInProcessMarker covers the marker that only
+// cmd/ox/hooks_pi.go ever wrote. The adapter did not recognize it, so `ox init`
+// on a repo previously set up with `ox integrate install --pi` appended a
+// second block.
+// Failure prevented: duplicate SageOx blocks stacking in AGENTS.md on upgrade.
+func TestInstall_IdempotentForLegacyInProcessMarker(t *testing.T) {
+	dir := t.TempDir()
+	agentsPath := filepath.Join(dir, "AGENTS.md")
+
+	legacy := piLegacyInProcessMarkerStart + "\n## SageOx Team Context\n\nold body\n" + piLegacyInProcessMarkerEnd + "\n"
+	if err := os.WriteFile(agentsPath, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	data, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if strings.Contains(content, piPrimeMarkerStart) {
+		t.Error("adapter appended a second block on top of the legacy in-process one")
+	}
+	if !strings.Contains(content, piLegacyInProcessMarkerStart) {
+		t.Error("legacy block was destroyed; doctor owns that migration")
+	}
+}
+
+// TestUninstall_RemovesLegacyInProcessBlock verifies the orphan is cleaned up.
+// Failure prevented: uninstall leaving a stale SageOx block in AGENTS.md.
+func TestUninstall_RemovesLegacyInProcessBlock(t *testing.T) {
+	dir := t.TempDir()
+	agentsPath := filepath.Join(dir, "AGENTS.md")
+
+	content := "# Project\n\n" +
+		piLegacyInProcessMarkerStart + "\nold body\n" + piLegacyInProcessMarkerEnd + "\n"
+	if err := os.WriteFile(agentsPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := handleUninstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"}); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+
+	data, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("AGENTS.md should survive — it had non-ox content: %v", err)
+	}
+	if strings.Contains(string(data), piLegacyInProcessMarkerStart) {
+		t.Errorf("legacy in-process block survived uninstall: %q", data)
+	}
+	if !strings.Contains(string(data), "# Project") {
+		t.Error("uninstall destroyed unrelated content")
+	}
+}
+
+// TestPiPrimeBlock_MatchesInProcessInstaller pins the two installers together.
+// Failure prevented: divergent block text making the idempotency check miss.
+func TestPiPrimeBlock_MatchesInProcessInstaller(t *testing.T) {
+	// mirrors cmd/ox/hooks_pi.go:piPrimeBlock — if you change one, change both
+	want := piPrimeMarkerStart + "\n" +
+		"## SageOx Team Context\n" +
+		"\n" +
+		"This project uses [SageOx](https://sageox.ai) for team context. Run the following command at the start of every session to load team knowledge:\n" +
+		"\n" +
+		"```bash\n" +
+		"ox agent prime\n" +
+		"```\n" +
+		"\n" +
+		"This provides architectural decisions, coding conventions, and session history from your team.\n" +
+		piPrimeMarkerEnd
+
+	if piPrimeBlock != want {
+		t.Errorf("piPrimeBlock drifted from the in-process installer:\ngot:  %q\nwant: %q", piPrimeBlock, want)
+	}
+	if strings.Contains(piPrimeBlock, "@sageox/pi-ox") {
+		t.Error("block advertises @sageox/pi-ox, which is not a published package")
+	}
+}

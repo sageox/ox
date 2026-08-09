@@ -95,8 +95,11 @@ var adapterSessionRoots = map[string][]string{
 	"generic":  {".sageox/cache/sessions", ".cache/sageox/sessions"},
 	"amp":      {".sageox/cache/sessions", ".cache/sageox/sessions"},
 	"opencode": {".sageox/cache/sessions", ".cache/sageox/sessions"},
-	"pi":       {".sageox/cache/sessions", ".cache/sageox/sessions"},
-	"aider":    {".sageox/cache/sessions", ".cache/sageox/sessions"},
-	"droid":    {".sageox/cache/sessions", ".cache/sageox/sessions"},
-	"goose":    {".sageox/cache/sessions", ".cache/sageox/sessions", ".local/share/goose/sessions"},
+	// Pi has no lifecycle hooks, so ox tails its transcript in place; the
+	// adapter hands back a path under ~/.pi/agent/sessions and the daemon
+	// rejected every one of them until this root was listed.
+	"pi":    {".sageox/cache/sessions", ".cache/sageox/sessions", ".pi/agent/sessions"},
+	"aider": {".sageox/cache/sessions", ".cache/sageox/sessions"},
+	"droid": {".sageox/cache/sessions", ".cache/sageox/sessions"},
+	"goose": {".sageox/cache/sessions", ".cache/sageox/sessions", ".local/share/goose/sessions"},
 }

@@ -1,10 +1,17 @@
 // session.go handles OpenCode session reading from SQLite.
 //
-// OpenCode stores sessions in ~/.local/share/opencode/opencode.db with two
-// tables: sessions (id, title, created_at, updated_at) and messages (id,
-// session_id, role, parts JSON, model, created_at). The parts column is a
-// JSON array of {type, data} wrappers where type is one of: text, tool_call,
-// tool_result, reasoning, finish.
+// OpenCode stores sessions in ~/.local/share/opencode/opencode.db across three
+// tables (all singular):
+//
+//	session(id, project_id, parent_id, directory, title, version, model JSON,
+//	        time_created, time_updated, ...)
+//	message(id, session_id, time_created, time_updated, data JSON)
+//	part   (id, message_id, session_id, time_created, time_updated, data JSON)
+//
+// A message row carries only envelope fields (role, timestamps, model) in its
+// data JSON; the conversation content lives in the part rows that reference it.
+// Part data is a discriminated union on "type": text, tool, reasoning,
+// step-start, step-finish, patch.
 package main
 
 import (
@@ -14,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // +1.9MB to binary; pure-Go SQLite needed because OpenCode stores sessions in SQLite
@@ -24,27 +32,54 @@ import (
 
 // --- OpenCode message schema ---
 
-type ocPartWrapper struct {
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data"`
+// ocMessageData is the JSON stored in message.data. OpenCode omits id and
+// sessionID there because both are already columns.
+type ocMessageData struct {
+	Role string `json:"role"`
+	Time struct {
+		Created int64 `json:"created"` // Unix milliseconds
+	} `json:"time"`
+	ModelID    string `json:"modelID,omitempty"`
+	ProviderID string `json:"providerID,omitempty"`
 }
 
-type ocTextContent struct {
-	Text string `json:"text"`
+// ocPartData is the JSON stored in part.data, a union discriminated on Type.
+type ocPartData struct {
+	Type   string       `json:"type"`
+	Text   string       `json:"text,omitempty"`
+	CallID string       `json:"callID,omitempty"`
+	Tool   string       `json:"tool,omitempty"`
+	State  *ocToolState `json:"state,omitempty"`
 }
 
-type ocToolCall struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	Input string `json:"input"`
+// ocToolState is the tool part's execution state. Input stays raw because
+// OpenCode types it per-tool; ox forwards it verbatim.
+type ocToolState struct {
+	Status string          `json:"status"`
+	Input  json.RawMessage `json:"input,omitempty"`
+	Output string          `json:"output,omitempty"`
+	Error  string          `json:"error,omitempty"`
 }
 
-type ocToolResult struct {
-	ToolCallID string `json:"tool_call_id"`
-	Name       string `json:"name"`
-	Content    string `json:"content"`
-	IsError    bool   `json:"is_error"`
+// ocSessionModel is the JSON stored in session.model.
+type ocSessionModel struct {
+	ID         string `json:"id"`
+	ProviderID string `json:"providerID"`
 }
+
+// rowQuery pairs every message with each of its parts. LEFT JOIN keeps
+// part-less messages visible so the offset stays aligned with what a reader
+// has actually seen.
+const rowQuery = `SELECT m.data, p.data
+	FROM message m
+	LEFT JOIN part p ON p.message_id = m.id
+	WHERE m.session_id = ?
+	ORDER BY m.time_created ASC, m.id ASC, p.id ASC`
+
+const rowCountQuery = `SELECT COUNT(*)
+	FROM message m
+	LEFT JOIN part p ON p.message_id = m.id
+	WHERE m.session_id = ?`
 
 // --- database helpers ---
 
@@ -56,8 +91,11 @@ func openDB() (*sql.DB, error) {
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, fmt.Errorf("opencode.db not found at %s", dbPath)
 	}
-	// open read-only with WAL mode for safe concurrent access
-	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=journal_mode(WAL)&_pragma=busy_timeout(3000)")
+	// read-only, and deliberately without a journal_mode pragma: journal mode
+	// is a property of the database, not the connection, and setting it on a
+	// read-only handle fails with "attempt to write a readonly database" —
+	// which then masquerades as a schema problem in diagnose
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(3000)")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open opencode.db: %w", err)
 	}
@@ -81,53 +119,100 @@ func handleFindSession(p adapterprotocol.FindSessionParams) (*adapterprotocol.Fi
 	}
 	defer func() { _ = db.Close() }()
 
-	var sessionID string
-
-	if p.AgentSessionID != "" {
-		// direct lookup by session ID
-		err = db.QueryRow("SELECT id FROM sessions WHERE id = ? LIMIT 1", p.AgentSessionID).Scan(&sessionID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("session %s not found", p.AgentSessionID)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("query session: %w", err)
-		}
-	} else {
-		// find most recent session, optionally filtered by time
-		query := "SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at DESC LIMIT 1"
-		args := []any{}
-
-		if p.Since != "" {
-			t, err := time.Parse(time.RFC3339, p.Since)
-			if err != nil {
-				return nil, fmt.Errorf("invalid since %q: %w", p.Since, err)
-			}
-			query = "SELECT id FROM sessions WHERE parent_session_id IS NULL AND created_at >= ? ORDER BY created_at DESC LIMIT 1"
-			args = append(args, t.Unix())
-		}
-
-		err = db.QueryRow(query, args...).Scan(&sessionID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("no opencode sessions found")
-		}
-		if err != nil {
-			return nil, fmt.Errorf("query sessions: %w", err)
-		}
+	sessionID, err := resolveSessionID(db, p)
+	if err != nil {
+		return nil, err
 	}
 
-	// for offset-based reading, count current messages as offset
-	var msgCount int64
-	if err := db.QueryRow("SELECT COUNT(*) FROM messages WHERE session_id = ?", sessionID).Scan(&msgCount); err != nil {
-		return nil, fmt.Errorf("count messages for session %s: %w", sessionID, err)
+	// start reading where the session currently ends
+	offset, err := countRows(db, sessionID)
+	if err != nil {
+		return nil, err
 	}
 
-	// session file is the DB path + session ID (virtual path for the protocol)
-	sessionFile := fmt.Sprintf("opencode:%s", sessionID)
-
+	// session file is a virtual handle — the rows live in SQLite, not on disk
 	return &adapterprotocol.FindSessionResult{
-		SessionFile: sessionFile,
-		Offset:      msgCount,
+		SessionFile: fmt.Sprintf("opencode:%s", sessionID),
+		Offset:      offset,
 	}, nil
+}
+
+// resolveSessionID picks the session to read: an explicit id when the caller
+// knows it, otherwise the newest root session, preferring one whose working
+// directory matches the repo we were asked about.
+func resolveSessionID(db *sql.DB, p adapterprotocol.FindSessionParams) (string, error) {
+	if p.AgentSessionID != "" {
+		var id string
+		err := db.QueryRow("SELECT id FROM session WHERE id = ? LIMIT 1", p.AgentSessionID).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("session %s not found", p.AgentSessionID)
+		}
+		if err != nil {
+			return "", fmt.Errorf("query session: %w", err)
+		}
+		return id, nil
+	}
+
+	var sinceMS int64
+	if p.Since != "" {
+		t, err := time.Parse(time.RFC3339, p.Since)
+		if err != nil {
+			return "", fmt.Errorf("invalid since %q: %w", p.Since, err)
+		}
+		sinceMS = t.UnixMilli()
+	}
+
+	// scoping by directory disambiguates concurrent OpenCode sessions; fall
+	// back to the global newest when this repo has no session of its own
+	if p.RepoRoot != "" {
+		id, err := queryLatestSession(db, p.RepoRoot, sinceMS)
+		if err != nil {
+			return "", err
+		}
+		if id != "" {
+			return id, nil
+		}
+	}
+
+	id, err := queryLatestSession(db, "", sinceMS)
+	if err != nil {
+		return "", err
+	}
+	if id == "" {
+		return "", fmt.Errorf("no opencode sessions found")
+	}
+	return id, nil
+}
+
+// queryLatestSession returns the newest root session, or "" when none match.
+func queryLatestSession(db *sql.DB, directory string, sinceMS int64) (string, error) {
+	var conds []string
+	var args []any
+
+	if directory != "" {
+		conds = append(conds, "directory = ?")
+		args = append(args, directory)
+	}
+	if sinceMS > 0 {
+		conds = append(conds, "time_created >= ?")
+		args = append(args, sinceMS)
+	}
+
+	query := "SELECT id FROM session WHERE parent_id IS NULL"
+	if len(conds) > 0 {
+		query += " AND " + strings.Join(conds, " AND ")
+	}
+	query += " ORDER BY time_created DESC LIMIT 1"
+
+	var id string
+	err := db.QueryRow(query, args...).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("query sessions: %w", err)
+	}
+	return id, nil
 }
 
 // --- full session read ---
@@ -144,7 +229,7 @@ func handleRead(p adapterprotocol.ReadParams) (*adapterprotocol.ReadResult, erro
 	}
 	defer func() { _ = db.Close() }()
 
-	entries, err := readMessages(db, sessionID, 0)
+	entries, _, err := readMessages(db, sessionID, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +260,9 @@ func handleReadMetadata(p adapterprotocol.ReadParams) (*adapterprotocol.ReadMeta
 	}, nil
 }
 
-// handleReadFromOffset reads messages added since the last offset (message count).
+// handleReadFromOffset reads rows added since the last offset. The offset is a
+// count of message-part rows, not messages — a single assistant turn emits many
+// parts, and a message-granular offset would re-emit them on every poll.
 func handleReadFromOffset(p adapterprotocol.ReadFromOffsetParams) (*adapterprotocol.ReadFromOffsetResult, error) {
 	sessionID := extractSessionID(p.SessionFile)
 	if sessionID == "" {
@@ -188,28 +275,24 @@ func handleReadFromOffset(p adapterprotocol.ReadFromOffsetParams) (*adapterproto
 	}
 	defer func() { _ = db.Close() }()
 
-	entries, err := readMessages(db, sessionID, p.Offset)
+	entries, rowsRead, err := readMessages(db, sessionID, p.Offset)
 	if err != nil {
 		return nil, err
 	}
 
-	// new offset = old offset + new entries read
-	var totalMsgs int64
-	if err := db.QueryRow("SELECT COUNT(*) FROM messages WHERE session_id = ?", sessionID).Scan(&totalMsgs); err != nil {
-		return nil, fmt.Errorf("count messages for session %s: %w", sessionID, err)
-	}
-
 	return &adapterprotocol.ReadFromOffsetResult{
 		Entries:   entries,
-		NewOffset: totalMsgs,
+		NewOffset: p.Offset + rowsRead,
 	}, nil
 }
 
 // --- internal helpers ---
 
-// readMessages reads messages from the database, optionally skipping the first `offset` rows.
-func readMessages(db *sql.DB, sessionID string, offset int64) ([]adapterprotocol.RawEntry, error) {
-	query := "SELECT role, parts, model, created_at FROM messages WHERE session_id = ? ORDER BY id ASC"
+// readMessages reads message/part rows, skipping the first `offset` of them.
+// It returns the parsed entries and the number of rows consumed, which is what
+// the caller advances its offset by.
+func readMessages(db *sql.DB, sessionID string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
+	query := rowQuery
 	args := []any{sessionID}
 
 	if offset > 0 {
@@ -219,86 +302,115 @@ func readMessages(db *sql.DB, sessionID string, offset int64) ([]adapterprotocol
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query messages: %w", err)
+		return nil, 0, fmt.Errorf("query messages: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	var entries []adapterprotocol.RawEntry
+	var rowsRead int64
 
 	for rows.Next() {
-		var role, partsJSON string
-		var model sql.NullString
-		var createdAt int64
+		var messageJSON string
+		var partJSON sql.NullString
 
-		if err := rows.Scan(&role, &partsJSON, &model, &createdAt); err != nil {
-			return nil, fmt.Errorf("scan message row for session %s: %w", sessionID, err)
+		if err := rows.Scan(&messageJSON, &partJSON); err != nil {
+			return nil, 0, fmt.Errorf("scan message row for session %s: %w", sessionID, err)
+		}
+		rowsRead++
+
+		var msg ocMessageData
+		if err := json.Unmarshal([]byte(messageJSON), &msg); err != nil {
+			continue // unparseable envelope — the part carries no usable role
+		}
+		if !partJSON.Valid {
+			continue // message with no parts yet
 		}
 
-		ts := time.Unix(createdAt, 0).UTC()
-		parsed := parseMessageParts(role, partsJSON, ts)
-		entries = append(entries, parsed...)
+		ts := time.UnixMilli(msg.Time.Created).UTC()
+		entries = append(entries, parsePart(msg.Role, partJSON.String, ts)...)
 	}
 
-	return entries, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return entries, rowsRead, nil
 }
 
-// readMetadata extracts model from the most recent assistant message.
+// countRows reports how many message-part rows a session currently has.
+func countRows(db *sql.DB, sessionID string) (int64, error) {
+	var n int64
+	if err := db.QueryRow(rowCountQuery, sessionID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count rows for session %s: %w", sessionID, err)
+	}
+	return n, nil
+}
+
+// readMetadata extracts the model recorded on the session row.
 func readMetadata(db *sql.DB, sessionID string) (*adapterprotocol.SessionMetadata, error) {
-	var model sql.NullString
-	err := db.QueryRow(
-		"SELECT model FROM messages WHERE session_id = ? AND model IS NOT NULL AND model != '' ORDER BY created_at DESC LIMIT 1",
-		sessionID,
-	).Scan(&model)
-	if err != nil || !model.Valid {
+	var modelJSON sql.NullString
+	err := db.QueryRow("SELECT model FROM session WHERE id = ? LIMIT 1", sessionID).Scan(&modelJSON)
+	if err != nil {
 		return nil, err
 	}
-	return &adapterprotocol.SessionMetadata{Model: model.String}, nil
+	if !modelJSON.Valid || modelJSON.String == "" {
+		return nil, nil
+	}
+
+	var m ocSessionModel
+	if err := json.Unmarshal([]byte(modelJSON.String), &m); err != nil || m.ID == "" {
+		return nil, nil
+	}
+	return &adapterprotocol.SessionMetadata{Model: m.ID}, nil
 }
 
-// parseMessageParts converts OpenCode's parts JSON into ox RawEntry slice.
-// A single OpenCode message can produce multiple entries (e.g., text + tool calls).
-func parseMessageParts(role, partsJSON string, ts time.Time) []adapterprotocol.RawEntry {
-	var parts []ocPartWrapper
-	if err := json.Unmarshal([]byte(partsJSON), &parts); err != nil {
-		// fallback: treat as plain text
-		if role == "user" || role == "assistant" {
-			e := makeEntry(role, ts, partsJSON)
-			return []adapterprotocol.RawEntry{e}
-		}
+// parsePart converts one OpenCode part into ox entries. A completed tool part
+// yields two — the call and its result — because ox records them separately.
+func parsePart(role, partJSON string, ts time.Time) []adapterprotocol.RawEntry {
+	var part ocPartData
+	if err := json.Unmarshal([]byte(partJSON), &part); err != nil {
 		return nil
 	}
 
-	var entries []adapterprotocol.RawEntry
-
-	for _, p := range parts {
-		switch p.Type {
-		case "text":
-			var tc ocTextContent
-			if json.Unmarshal(p.Data, &tc) == nil && tc.Text != "" {
-				entries = append(entries, makeEntry(role, ts, tc.Text))
-			}
-
-		case "tool_call":
-			var tc ocToolCall
-			if json.Unmarshal(p.Data, &tc) == nil {
-				e := adapterruntime.ToolUseWithID(ts, tc.Name, tc.Input, tc.ID)
-				entries = append(entries, e)
-			}
-
-		case "tool_result":
-			var tr ocToolResult
-			if json.Unmarshal(p.Data, &tr) == nil {
-				e := adapterruntime.ToolResultWithID(ts, tr.Content, tr.IsError, tr.ToolCallID)
-				entries = append(entries, e)
-			}
-
-		case "reasoning":
-			// reasoning/thinking content — skip, not user-visible
-
-		case "finish":
-			// session end marker — skip
+	switch part.Type {
+	case "text":
+		if part.Text == "" {
+			return nil
 		}
+		return []adapterprotocol.RawEntry{makeEntry(role, ts, part.Text)}
+
+	case "tool":
+		return parseToolPart(part, ts)
+
+	case "reasoning":
+		// thinking content — not user-visible, skip
+		return nil
+
+	default:
+		// step-start, step-finish, patch, and any future part type
+		return nil
 	}
+}
+
+func parseToolPart(part ocPartData, ts time.Time) []adapterprotocol.RawEntry {
+	if part.State == nil {
+		return nil
+	}
+
+	entries := []adapterprotocol.RawEntry{
+		adapterruntime.ToolUseWithID(ts, part.Tool, string(part.State.Input), part.CallID),
+	}
+
+	switch part.State.Status {
+	case "completed":
+		entries = append(entries, adapterruntime.ToolResultWithID(ts, part.State.Output, false, part.CallID))
+	case "error":
+		output := part.State.Error
+		if output == "" {
+			output = part.State.Output
+		}
+		entries = append(entries, adapterruntime.ToolResultWithID(ts, output, true, part.CallID))
+	}
+	// pending/running tools have no result yet — the next poll picks it up
 
 	return entries
 }

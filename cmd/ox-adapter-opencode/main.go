@@ -102,7 +102,7 @@ func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotoco
 
 	// verify session exists
 	var id string
-	err = db.QueryRow("SELECT id FROM sessions WHERE id = ? LIMIT 1", p.SessionID).Scan(&id)
+	err = db.QueryRow("SELECT id FROM session WHERE id = ? LIMIT 1", p.SessionID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("session %q not found", p.SessionID)
 	}
@@ -111,7 +111,7 @@ func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotoco
 	}
 
 	// read all messages from offset 0
-	entries, err := readMessages(db, p.SessionID, 0)
+	entries, _, err := readMessages(db, p.SessionID, 0)
 	if err != nil {
 		return nil, fmt.Errorf("reading session: %w", err)
 	}
@@ -146,6 +146,15 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 			Title:    "OpenCode database not found",
 			Detail:   "opencode.db not found — session reading unavailable until OpenCode is used.",
 		})
+	} else if detail := checkSchema(); detail != "" {
+		// a diagnose that passes while the reader cannot read is how the
+		// sessions/messages schema drift shipped unnoticed
+		issues = append(issues, adapterprotocol.DiagnoseIssue{
+			Slug:     "schema-mismatch",
+			Severity: "error",
+			Title:    "OpenCode database schema is not readable",
+			Detail:   detail,
+		})
 	}
 
 	// check hooks
@@ -164,6 +173,72 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 	}
 
 	return &adapterprotocol.DiagnoseResult{OK: len(issues) == 0, Issues: issues}, nil
+}
+
+// requiredColumns lists what the session reader actually selects. If OpenCode
+// moves its storage again, this is what tells us — loudly, and by name.
+var requiredColumns = map[string][]string{
+	"session": {"id", "parent_id", "directory", "model", "time_created"},
+	"message": {"id", "session_id", "time_created", "data"},
+	"part":    {"id", "message_id", "session_id", "data"},
+}
+
+// checkSchema returns a human-readable description of the first schema
+// mismatch it finds, or "" when the database is readable.
+func checkSchema() string {
+	db, err := openDB()
+	if err != nil {
+		return err.Error()
+	}
+	defer func() { _ = db.Close() }()
+
+	for _, table := range []string{"session", "message", "part"} {
+		cols, err := tableColumns(db, table)
+		if err != nil {
+			return fmt.Sprintf("cannot inspect table %q: %v", table, err)
+		}
+		if len(cols) == 0 {
+			return fmt.Sprintf("table %q is missing from opencode.db%s", table, observedVersion(db))
+		}
+		for _, want := range requiredColumns[table] {
+			if !cols[want] {
+				return fmt.Sprintf("table %q is missing column %q%s", table, want, observedVersion(db))
+			}
+		}
+	}
+	return ""
+}
+
+func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%q)", table))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return nil, err
+		}
+		cols[name] = true
+	}
+	return cols, rows.Err()
+}
+
+// observedVersion reports the OpenCode version that last wrote a session, so
+// the mismatch message names the release that moved the schema.
+func observedVersion(db *sql.DB) string {
+	var version sql.NullString
+	err := db.QueryRow("SELECT version FROM session ORDER BY time_created DESC LIMIT 1").Scan(&version)
+	if err != nil || !version.Valid || version.String == "" {
+		return ""
+	}
+	return fmt.Sprintf(" (database written by OpenCode %s)", version.String)
 }
 
 // openCodeDataDir returns the default OpenCode data directory.
