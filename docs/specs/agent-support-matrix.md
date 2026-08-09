@@ -21,9 +21,9 @@ Agent-specific hooks (`ox integrate install --<agent>`) are *additive* — they 
 | Capability | Claude Code | Gemini CLI | Codex CLI | Amp CLI | OpenCode |
 |-----------|:-----------:|:----------:|:---------:|:-------:|:--------:|
 | **Bronze: Session Recording** | | | | | |
-| Session adapter | Full (JSONL TailWatcher) | Full (monolithic JSON) | Full (JSONL TailWatcher) | Partial (generic) | None (SQLite storage) |
+| Session adapter | Full (JSONL TailWatcher) | Full (monolithic JSON) | Full (JSONL TailWatcher) | Partial (generic) | Partial (SQLite reader — correct schema, no real-time tail) |
 | `ox session start/stop` | Yes | Yes | Yes | Yes | Yes |
-| Real-time tail (daemon) | Yes (fsnotify) | Yes (fsnotify, full re-read) | Yes (fsnotify) | No (cloud-first) | No (needs SQLite adapter) |
+| Real-time tail (daemon) | Yes (fsnotify) | Yes (fsnotify, full re-read) | Yes (fsnotify) | No (cloud-first) | No (adapter reads the `session`/`message`/`part` tables correctly; the virtual `opencode:<id>` session handle isn't a real file, so the daemon's generic fsnotify watch can't attach to it) |
 | Offset persistence / catch-up | Yes (byte offset) | Yes (entry count) | Yes (byte offset) | N/A | N/A |
 | **Bronze: Whispers** | | | | | |
 | Push whispers (stdout injection) | Yes (UserPromptSubmit) | Yes (BeforeAgent) | No | No | Possible (tui.prompt.append) |
@@ -162,20 +162,31 @@ was added.
 | **Gemini CLI** | **Silver** | E2E integration tests with real Gemini CLI; agentx module needs `AgentTypeGemini` |
 | **Codex CLI** | **Silver** | E2E integration tests with real Codex CLI |
 | **Amp CLI** | **Bronze** | No native hooks (only 2 experimental tool events); no headless CLI mode for daemon worker; cloud-first sessions |
-| **OpenCode** | **Bronze** | Session adapter (SQLite-based), expand plugin to use more events (session.compacted, tool.execute.after, message.updated), OpenCodeRunner, checkOpenCodeUsability |
+| **OpenCode** | **Bronze** | Real-time SQLite tailing (session adapter itself now reads the `session`/`message`/`part` schema correctly), expand plugin to use more events (session.compacted, tool.execute.after, message.updated), OpenCodeRunner, checkOpenCodeUsability |
 
 ## OpenCode Upgrade Path to Silver
 
 OpenCode has rich plugin capabilities (27+ events) that ox significantly underutilizes. Current ox integration only uses `session.created`. Key gaps and how to close them:
 
-### Session Adapter (Bronze blocker)
+### Session Adapter (Bronze blocker) — reading is fixed; real-time tail is still open
 
-OpenCode stores sessions in SQLite (`~/.local/share/opencode/opencode.db`), not files. Approach:
+OpenCode stores sessions in SQLite (`~/.local/share/opencode/opencode.db`) across three
+singular tables — `session`, `message`, `part` — not the `sessions`/`messages` tables this
+section originally assumed. `cmd/ox-adapter-opencode/session.go` now reads that schema
+correctly and offsets by message-part row count via `ServeMode` + `ReadFromOffset`.
 
-1. **SQLite TailWatcher**: fsnotify watch on `.db-wal` file triggers `SELECT` for new messages using ULID cursor
+Still open — real-time triggering:
+
+1. **SQLite TailWatcher**: fsnotify watch on `.db-wal` file would trigger a poll via the
+   already-working `ReadFromOffset` path, instead of requiring an external caller to poll
+   on its own schedule
 2. ox already depends on `modernc.org/sqlite` — no new dependency
-3. Offset = last message ULID (similar to Gemini's entry-count offset pattern)
-4. Fits existing `Adapter` interface: `Watch()` returns `<-chan RawEntry`, `ReadFromOffset()` uses ULID cursor
+3. The offset is a row count of message+part rows, not a ULID cursor — Gemini's
+   entry-count pattern, not a ULID one
+4. Fits the existing `Adapter` interface, but `Watch()`'s generic
+   `fsnotify.Add(sessionPath)` can't attach to the virtual `opencode:<session-id>` handle
+   returned today — it would need to translate that handle into a watch on the real
+   `opencode.db-wal` file
 
 ### Expanded Plugin Events
 
@@ -223,7 +234,7 @@ No per-agent configuration is required in `.sageox/config.json` — that file is
 | Claude Code | JSONL (append-only) | `~/.claude/projects/<hash>/sessions/<id>.jsonl` | fsnotify + line reader |
 | Gemini CLI | Monolithic JSON (rewritten per turn) | `~/.gemini/tmp/<hash>/chats/session-*.json` | fsnotify + full re-read, entry-count offset |
 | Codex CLI | JSONL (append-only) | Similar to Claude Code | fsnotify + line reader |
-| OpenCode | SQLite (WAL mode) | `~/.local/share/opencode/opencode.db` | fsnotify on .db-wal + SQL query, ULID offset |
+| OpenCode | SQLite (WAL mode) | `~/.local/share/opencode/opencode.db` | Poll-based via `ServeMode` + `ReadFromOffset`, row-count offset — no fsnotify WAL watch yet (see Upgrade Path above) |
 | Amp CLI | Cloud-first | ampcode.com/threads | No local tailing; export-based |
 
 ### Known Limitations

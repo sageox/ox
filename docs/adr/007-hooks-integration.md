@@ -1,6 +1,24 @@
 # ADR-007: Hooks Integration Pattern
 
-**Status:** Accepted
+> ⚠️ **PARTIALLY SUPERSEDED (2026-08-09):** The OpenCode hook design below —
+> hooks configured in `.opencode/config.json`
+> (`{"hooks": {"session_start": "ox agent prime --format opencode"}}`) and a
+> dedicated `ox agent prime --format opencode` output mode — was never
+> implemented. OpenCode's real extension point is a plugin directory, not a
+> hooks config block: `ox integrate install --opencode` installs a
+> TypeScript plugin at `.opencode/plugin/ox-prime.ts` that subscribes to
+> OpenCode's `session.created` event and calls the plain `ox agent prime`
+> (no `--format` flag — that flag was never implemented for any agent; prime
+> output is plain text captured from stdout by whichever hook or plugin runs
+> it). Canonical source: [`cmd/ox-adapter-opencode/hooks.go`](../../cmd/ox-adapter-opencode/hooks.go).
+> OpenCode exposes 27+ plugin events; ox subscribes to exactly one
+> (`session.created`) today — see
+> [docs/specs/agent-support-matrix.md](../specs/agent-support-matrix.md).
+> The Claude Code and Gemini CLI hook designs documented below shipped as
+> written and are unaffected by this note. This ADR's original text is
+> otherwise left unmodified below as a historical record.
+
+**Status:** Accepted (OpenCode hook design superseded — see note above)
 **Date:** 2025-12-22
 **Deciders:** SageOx Engineering
 

@@ -17,7 +17,7 @@ ox works with multiple AI coding agents. Support depth varies by agent — here'
 |---------|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
 | Tier | Gold | Silver | Silver | Silver | Bronze | Bronze | Bronze | Bronze | Silver |
 | Context prime | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Session recording | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Session recording | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅* | ✅ | ✅ |
 | Auto-prime at session start | ✅ | ✅ | — | — | ✅ | — | — | — | ✅ |
 | Lifecycle hooks | ✅ | ✅ | ✅ | ✅ | plugin | plugin | — | — | ✅ |
 | Whisper push | ✅ | ✅ | fallback | fallback | — | — | — | — | ✅ |
@@ -32,6 +32,9 @@ priming relies on the agent obeying the blocking marker in its instruction file.
 only install tool and stop hooks, so whispers arrive on the next tool call rather than
 the next prompt. Every agent can pull explicitly with `ox agent <id> whisper`.
 
+\* Pi session recording reads transcript format version 3 only — see
+[Known Limitations](#known-limitations) below for the v4 caveat.
+
 ## Where each agent's sessions come from
 
 | Agent | Session store |
@@ -42,7 +45,7 @@ the next prompt. Every agent can pull explicitly with `ox agent <id> whisper`.
 | Droid | `~/.factory/projects/<slug>/<uuid>.jsonl` |
 | OpenCode | `~/.local/share/opencode/opencode.db` (SQLite) |
 | Amp | `~/.cache/amp/ox-sessions/<thread>.jsonl` (written by the ox plugin) |
-| Pi | `~/.pi/agent/sessions/<dir>/*.jsonl` |
+| Pi | `~/.pi/agent/sessions/--<mangled-cwd>--/<timestamp>_<uuid>.jsonl` |
 | Aider | `.aider.chat.history.md` |
 | Goose | `~/.local/share/goose/sessions/sessions.db` (SQLite) |
 
@@ -97,7 +100,11 @@ transcripts itself, so the plugin is what makes recording possible.
 ox init
 ox integrate install --pi
 ```
-Pi reads `AGENTS.md`, `CLAUDE.md`, and `SYSTEM.md` natively.
+Pi reads `AGENTS.md`, `CLAUDE.md`, and `SYSTEM.md` natively. Install or upgrade with
+`npm install -g @earendil-works/pi-coding-agent` — the old `@mariozechner/pi-coding-agent`
+package is deprecated (frozen at 0.73.1). The binary is still `pi` and the config
+directory is still `~/.pi`. See [Known Limitations](#known-limitations) for the
+transcript-format caveat.
 
 ### Aider
 ```bash
@@ -138,7 +145,11 @@ directory up to the repo root, so context primes even before hooks are installed
   file marker rather than firing automatically.
 - **Codex**: no `SessionEnd` hook, so sessions do not auto-finalize; they close on
   the next `ox agent <id> session stop` or daemon sweep.
-- **Pi, Aider**: instruction-file marker only. No lifecycle hooks.
+- **Pi**: instruction-file marker only, no lifecycle hooks. Session recording also only
+  understands transcript format version 3. Pi 0.84+ introduced a v4 lane-based session
+  model that ox does not yet parse — `ox doctor` reports `pi:format-unsupported` when it
+  sees a newer format, and those sessions record as empty until the reader is updated.
+- **Aider**: instruction-file marker only. No lifecycle hooks.
 - **Cursor, Windsurf, Cline, Copilot, Kiro**: marker only. ox writes the prime
   marker into `.cursorrules`, `.windsurfrules`, `.clinerules`,
   `.github/copilot-instructions.md`, and `.kiro/steering/ox.md` respectively.
