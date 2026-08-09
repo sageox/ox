@@ -175,6 +175,18 @@ func repairSessionMetaSummary(sessionDir string, dryRun bool) repairOutcome {
 		return oc
 	}
 
+	// A draft placeholder legitimately has an empty title — it is a marker for
+	// a LIVE recording, not a session whose summarization failed (ADR-029).
+	// Without this skip a draft satisfies emptyTitleNeedsRepair below, this
+	// tool tries to stamp summary_status=failed_validation and bump
+	// SummaryAttempts on it, and the write is then rejected by the draft
+	// writer-invariant — so every live draft is reported as an error. Same
+	// guard RecoverEmptyTitleMeta carries; this is its near-duplicate.
+	if meta.IsDraft() {
+		oc.Skipped = true
+		return oc
+	}
+
 	titleLeaky := lfs.IsLeakySummaryString(meta.Title)
 	summaryLeaky := lfs.IsLeakySummaryString(meta.Summary)
 

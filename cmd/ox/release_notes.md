@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Your session link works while the session is still running** — an AI coworker puts `SageOx-Session: https://<endpoint>/c/<id>` in the pull request it opens, but until now that link pointed at nothing until the session ended. A correctly wired setup was indistinguishable from a broken one, at exactly the moment you were most likely to check. ox now publishes a placeholder for the session a couple of turns in, so the link resolves right away and shows the session in progress. The placeholder carries **no conversation content whatsoever** — only the session id, which agent is running, and a turn counter that ticks up so you can see recording is alive. It is replaced by the real recording when the session ends. `ox session status` gained `draft_state` and the conversation URL, so if a link ever doesn't resolve you can tell whether the placeholder published or failed instead of guessing. Turn it off with `ox config set session.draft off`.
+
+- **Aborting a session now removes its published placeholder too** — `/ox-session-abort` previously only discarded local data. It now also removes the placeholder from the Ledger, so the session stops being advertised to teammates, and it tells you plainly what remains: no conversation content was ever published, but the placeholder's identity record stays in git history like any other commit. A session that exists *only* as a stranded placeholder — because the agent crashed, or an earlier abort couldn't reach the remote — is now abortable too, and `ox doctor` finds and retracts placeholders whose recording is long gone.
+
 - **`ox invite` brings teammates aboard without leaving the terminal** — `ox invite alice@acme.com,bob@acme.com` invites several people at once, defaults to this repo's team, and takes `--team` and `--role`. Each address gets its own line in the result, so one typo never hides everyone else's outcome.
 
 - **See and cancel invitations you've already sent** — `ox invite --list` shows who's still outstanding and when each invitation runs out, and `ox invite --cancel <invite id>` withdraws one.

@@ -455,6 +455,23 @@ func clearNeedsSummaryMarkerForSession(sessionName string) {
 // raw.jsonl was still in cache). By push-summary time, raw.jsonl may be an LFS
 // stub, so re-computing is not reliable.
 func preserveComputedFields(summaryPath string, newSummary *session.SummarizeResponse) {
+	// Never carry computed fields forward from a DRAFT-era summary.json.
+	// While meta.draft is true, any summary.json in that directory was authored
+	// against a zero-turn placeholder — by the SageOx server, or pulled in by a
+	// finalize-time rebase — so its files_changed and chapters describe nothing.
+	//
+	// Scope, stated honestly: this fires when push-summary runs against a
+	// directory that is STILL a draft (a regenerate or a manual invocation on a
+	// live session). It does NOT cover the narrow window where a server-authored
+	// summary.json arrives via the rebase inside the finalize push, because by
+	// then the meta is already finalized. Closing that window needs a signal
+	// carried across the purge rather than re-derived after it; the primary
+	// defense there is the wholesale purge in supersedeDraftForFinalize.
+	sessionDir := filepath.Dir(summaryPath)
+	if meta, metaErr := lfs.ReadSessionMeta(sessionDir); metaErr == nil && meta.IsDraft() {
+		return
+	}
+
 	existingData, err := os.ReadFile(summaryPath)
 	if err != nil {
 		return

@@ -45,6 +45,7 @@ post-mortem'd in the 2026-04-25 Phase 2 incident:
 | `commitAndPushLedger` style globbing | OK only when raw.jsonl in-place is unchanged from HEAD |
 | Recording a NEW session (locally-authored) | Writes to `state.SessionPath` (xdg / project cache), uploads bytes to LFS, commits POINTER to ledger |
 | `--redact` mode (intentional overwrite-then-reupload) | Allowed because it's a controlled write-then-upload-new-OID cycle that updates meta.json |
+| Draft placeholder (ADR-029) | `meta.json` ONLY. Never raw.jsonl, never any content file. `lfs.WriteDraftSessionMeta` refuses a directory that already holds raw.jsonl; `validateDraftShape` refuses a draft meta with a populated `files` manifest; `sessionArtifactsToStage` returns nothing for a draft so its empty manifest cannot fall through to the glob |
 
 ## Canonical helpers
 
@@ -111,6 +112,34 @@ banned patterns above and fail the build if any reappear, similar to
 `make check-no-git-lfs-shell`. For now, code review and the
 `TestResolveContentPath_CacheOnlyDesign` / `TestOpenSessionContent_*`
 tests in `cmd/ox/` are the enforcement.
+
+## Ledger index mutation must be guarded, not just pushes
+
+Every ledger index writer in the CLI used to be followed by `pushLedger` →
+`gitutil.PushWithRetry` → `IsSafeForGitOps`, so the mid-rebase guard rode
+along for free. Draft placeholders were the first writer that deliberately
+does NOT push, and they fell straight through it.
+
+The failure is silent and team-wide. During a conflicted `git pull --rebase`
+on `sessions/<name>/meta.json`, an unguarded `git add` **marks the conflict
+resolved** and `git commit -- <pathspec>` **succeeds on the detached rebase
+HEAD, consuming the replay step**. The next `rebase --continue` reports
+success and the commit being replayed is gone — a teammate's finalize, a
+murmur, a plan, imported team data.
+
+**Any new code path that mutates the ledger index MUST check
+`gitutil.IsRebaseInProgress` / `IsSafeForGitOps` first, whether or not it
+pushes.** In `cmd/ox` the chokepoint is `prepareDraftLedgerWrite`.
+
+Two related traps in the same area:
+
+- `git commit -- <pathspec>` commits the **working tree**, not the index.
+  Anything that rewrote those paths between `git add` and `git commit` gets
+  committed under your message. Re-verify before committing.
+- `deriveLedgerPath` returns `filepath.Dir` for ANY path whose parent is
+  named `sessions` — including the XDG cache and the legacy in-repo fallback,
+  where the "ledger" is the user's own project root. Validate the derived
+  path against the project's configured ledger before running git on it.
 
 ## Related
 

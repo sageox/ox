@@ -317,6 +317,16 @@ func commitAndPushLedgerWithExtras(ledgerPath, sessionName string, includeSummar
 // All returned paths are absolute (joined with sessionDir).
 func sessionArtifactsToStage(sessionDir string) []string {
 	meta, err := lfs.ReadSessionMeta(sessionDir)
+	// A draft placeholder contains ONLY meta.json, which every caller stages
+	// explicitly. Returning early matters because a draft's Files map is
+	// legitimately empty, which would otherwise fall through to the glob
+	// fallback below and stage any *.jsonl / *.md in the directory — including
+	// a server-authored summary.md, or real raw.jsonl bytes committed as a git
+	// blob, which breaks LFS linkage for every future push
+	// (.claude/rules/cache-only-design.md).
+	if err == nil && meta.IsDraft() {
+		return nil
+	}
 	if err == nil && len(meta.Files) > 0 {
 		paths := make([]string, 0, len(meta.Files))
 		for name := range meta.Files {

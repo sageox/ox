@@ -29,7 +29,7 @@ func TestBuildSessionRecordingEntry_PropagatesSuspendedFields(t *testing.T) {
 		InheritedFromSession: "2026-05-28-prev-session",
 	}
 
-	got := buildSessionRecordingEntry(state, nil, "unknown")
+	got := buildSessionRecordingEntry(state, nil, "unknown", draftStatusContext{})
 
 	assert.True(t, got.Suspended, "Suspended must be true when SuspendedAt is set")
 	assert.NotEmpty(t, got.SuspendedAt, "SuspendedAt RFC3339 must be populated")
@@ -51,7 +51,7 @@ func TestBuildSessionRecordingEntry_ActiveSessionHasNoSuspendFields(t *testing.T
 		// SuspendedAt intentionally nil
 	}
 
-	got := buildSessionRecordingEntry(state, nil, "alive")
+	got := buildSessionRecordingEntry(state, nil, "alive", draftStatusContext{})
 
 	assert.False(t, got.Suspended)
 	assert.Empty(t, got.SuspendedAt)

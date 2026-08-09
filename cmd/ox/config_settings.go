@@ -174,6 +174,30 @@ Override per-invocation with --html, --text, or --json flags.`,
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
+		Key:         "session.draft",
+		Category:    "Sessions",
+		Description: "Publish an early placeholder so /c/<id> resolves mid-session (on/off)",
+		LongDescription: `Controls whether ox commits an early placeholder for a recording.
+
+  on  — At turn 2, ox commits a metadata-only placeholder to the ledger so
+        https://<endpoint>/c/<session_id> resolves while the session is still
+        running. Agents put that link in PR bodies during a session; without
+        the placeholder it stays a dead link until session stop, which makes a
+        working setup look broken. The placeholder carries NO conversation
+        data — only the session id, the agent, and a turn counter — and is
+        replaced wholesale by the real recording at session stop.
+        **Default.**
+
+  off — Never publish a placeholder. The /c/ link stays unresolvable until
+        session stop.
+
+Aborting a session (/ox-session-abort) deletes any published placeholder from
+the ledger.`,
+		ValidValues: config.ValidSessionDraftModes,
+		Default:     config.SessionDraftOn,
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
 		Key:         "agent.summarizer",
 		Description: "Who runs the session-stop summarization (inline/delegated)",
 		LongDescription: `Selects who runs the LLM call that summarizes a session at stop.
@@ -544,6 +568,11 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.UserVal = config.NormalizeAgentSummarizer(userCfg.AgentSummarizer)
 		}
 
+	case "session.draft":
+		if userCfg != nil && userCfg.SessionDraft != "" {
+			cv.UserVal = config.NormalizeSessionDraft(userCfg.SessionDraft)
+		}
+
 	case "attribution.commit":
 		if userCfg != nil && userCfg.Attribution != nil && userCfg.Attribution.IsCommitSet() {
 			if v := userCfg.Attribution.GetCommit(); v == "" {
@@ -781,6 +810,12 @@ func setUserConfig(key, value string) error {
 		}
 		cfg.AgentSummarizer = value
 
+	case "session.draft":
+		if !config.IsValidSessionDraft(value) {
+			return fmt.Errorf("session.draft must be one of: on, off")
+		}
+		cfg.SessionDraft = value
+
 	case "attribution.commit":
 		if cfg.Attribution == nil {
 			cfg.Attribution = &config.Attribution{}
@@ -1007,6 +1042,9 @@ func unsetUserConfig(key string) error {
 
 	case "agent.summarizer":
 		cfg.AgentSummarizer = ""
+
+	case "session.draft":
+		cfg.SessionDraft = ""
 
 	case "attribution.commit":
 		if cfg.Attribution != nil {

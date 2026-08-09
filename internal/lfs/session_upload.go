@@ -185,6 +185,16 @@ func FindPointerStubsWithMissingBlobs(client *Client, sessionPath string, logger
 // modify/delete conflict that resolves in favor of the local modification and
 // resurrects a marker the cloud already retired. Excluding it deletes the whole
 // conflict class rather than merging it forever.
+//
+// It also excludes .recording.json for a stronger reason than tidiness. That
+// marker is machine-local live-recording state (absolute paths, a local PID),
+// and committing one into a git-tracked session directory arms a kill chain:
+// the daemon's anti-entropy treats a stale .recording.json beside a missing
+// raw.jsonl as a recovery opportunity and writes REAL transcript bytes to the
+// git-tracked <ledger>/sessions/<name>/raw.jsonl — which breaks LFS linkage and
+// makes the ledger reject every subsequent push, team-wide. Draft placeholders
+// make that directory a live working area for the first time, so the marker
+// only has to land there once. Excluding it removes the whole chain.
 func EnsureSessionsGitignore(sessionsDir string) error {
 	gitignorePath := filepath.Join(sessionsDir, ".gitignore")
 
@@ -194,7 +204,12 @@ func EnsureSessionsGitignore(sessionsDir string) error {
 		"\n" +
 		"# Machine-local summarization marker: holds absolute local paths and is\n" +
 		"# deleted by the cloud summarizer, so it can never merge cleanly.\n" +
-		".needs-summary\n"
+		".needs-summary\n" +
+		"\n" +
+		"# Machine-local recording state (absolute paths, local PID). Committing one\n" +
+		"# into a tracked session dir lets daemon anti-entropy recover real transcript\n" +
+		"# bytes onto the tracked raw.jsonl, breaking LFS linkage for the whole team.\n" +
+		".recording.json\n"
 
 	existing, _ := os.ReadFile(gitignorePath)
 	if string(existing) == newContent {

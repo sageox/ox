@@ -319,7 +319,7 @@ func TestAbortGuidance_CountermandsSessionTrailer(t *testing.T) {
 	t.Cleanup(func() { cfg = prevCfg })
 
 	var buf bytes.Buffer
-	require.NoError(t, emitAbortOutput(&buf, "OxAB01", "2026-01-01T00-00-user-OxAB01"))
+	require.NoError(t, emitAbortOutput(&buf, "OxAB01", "2026-01-01T00-00-user-OxAB01", false, ""))
 
 	var out sessionAbortOutput
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &out))

@@ -772,6 +772,12 @@ func handleStop(ctx *HookContext) error {
 	if err := handleAfterTool(ctx); err != nil {
 		slog.Debug("hook: stop drain failed", "error", err)
 	}
+	// Turn counting and the early draft placeholder live HERE and nowhere
+	// else. PhaseStop fires once per completed response turn; handleAfterTool
+	// also fires on PostToolUse, so incrementing there would count tool calls.
+	// Best-effort by contract — it never returns an error and never fails the
+	// turn.
+	maybePublishSessionDraft(ctx)
 	return nil
 }
 

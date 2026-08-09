@@ -146,6 +146,44 @@ type RecordingState struct {
 	HookInvocations int        `json:"hook_invocations,omitempty"` // total afterTool hook calls since recording started
 	LastHookStatus  string     `json:"last_hook_status,omitempty"` // stable reason code from last afterTool: "ok", "session-file-not-found", "read-error", etc.
 	LastHookAt      *time.Time `json:"last_hook_at,omitempty"`     // timestamp of last afterTool invocation
+
+	// TurnCount is the number of agent response turns observed for this
+	// recording. Incremented exactly once per Stop-hook invocation: the Stop
+	// phase means "the agent finished responding" and fires once per completed
+	// turn, which makes it the only real turn signal ox has.
+	//
+	// It is NOT EntryCount. EntryCount counts raw.jsonl JSONL entries, of which
+	// a single turn can produce dozens. It is also NOT HookInvocations, which
+	// counts afterTool calls (i.e. tool uses). Conflating any two of these
+	// three produces a draft that publishes on the wrong turn.
+	//
+	// The increment MUST live in the Stop handler and never in the afterTool
+	// handler: afterTool also runs on PostToolUse, so counting there counts
+	// tool calls. omitempty so .recording.json files written by older binaries
+	// round-trip unchanged.
+	TurnCount int `json:"turn_count,omitempty"`
+
+	// DraftPublishedAt is set only after a draft placeholder has actually been
+	// handed off — the daemon accepted the IPC, or the local commit landed.
+	// Nil alongside a non-zero DraftPublishedTurn is the "we tried and it
+	// failed" signal that `ox doctor` reports; without the pair, a silently
+	// failed publish is indistinguishable from a server that is merely behind.
+	DraftPublishedAt *time.Time `json:"draft_published_at,omitempty"`
+
+	// DraftPublishedTurn is the TurnCount at the last SUCCESSFUL publish or
+	// refresh. The refresh cadence is measured from it, so a failed refresh
+	// does not reset the interval.
+	DraftPublishedTurn int `json:"draft_published_turn,omitempty"`
+
+	// DraftAttemptTurn is the TurnCount at the last publish or refresh ATTEMPT,
+	// successful or not. Kept separate from DraftPublishedTurn because the two
+	// answer different questions and conflating them hid a real failure:
+	// DraftPublishedAt is only ever set, never cleared, so a session whose
+	// first publish succeeded and whose every later refresh fails would report
+	// itself as healthy forever. AttemptTurn > PublishedTurn is the durable
+	// "the most recent attempt did not land" signal that `ox doctor` and
+	// `ox session status` report.
+	DraftAttemptTurn int `json:"draft_attempt_turn,omitempty"`
 }
 
 // Duration returns how long the recording has been running.

@@ -291,6 +291,13 @@ func loadUploadedKeys(ledgerPath string) (map[string]bool, error) {
 	}
 
 	for _, ls := range ledgerSessions {
+		// A draft placeholder is not an upload. Counting it here would make
+		// shouldPrune refuse forever ("uploaded" is never a prune target), so
+		// the local cache copy of every drafted session would become
+		// permanently unprunable even after the session is aborted.
+		if ls.Draft {
+			continue
+		}
 		keys[sessionMergeKey(ls)] = true
 	}
 	return keys, nil

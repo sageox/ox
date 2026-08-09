@@ -170,6 +170,8 @@ const (
 	CheckSlugSessionIncomplete  = "session-incomplete"
 	CheckSlugSessionAutoStage   = "session-auto-stage"
 	CheckSlugSessionUploadRetry = "session-upload-retry"
+	// CheckSlugSessionDraftOrphan finds draft placeholders whose recording is gone.
+	CheckSlugSessionDraftOrphan = "session-draft-orphan"
 	CheckSlugSessionUncommitted = "session-uncommitted"
 	CheckSlugSessionOrphaned    = "session-orphaned"
 	CheckSlugSessionManifest    = "session-manifest"

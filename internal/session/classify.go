@@ -58,6 +58,17 @@ const (
 	StatusLocal     SessionStatus = "local"     // exists locally, not uploaded (may have been recovered from orphan)
 	StatusUploaded  SessionStatus = "uploaded"  // committed to ledger
 	StatusCanceled  SessionStatus = "canceled"  // user explicitly discarded session (terminal — data deleted)
+
+	// StatusDraft: the ledger holds a meta.json-only placeholder published
+	// early so /c/<session_id> resolves for links already circulating in PR
+	// bodies. No turn data has been committed. Derived, never persisted — the
+	// only persisted signal is lfs.SessionMeta.Draft.
+	//
+	// This exists because the alternative is worse, not because the vocabulary
+	// needed another entry: without it, a draft directory in the ledger reads
+	// as StatusUploaded, which reports live recordings as finished and makes
+	// `ox session abort <name>` refuse with "already uploaded".
+	StatusDraft SessionStatus = "draft"
 )
 
 // ghostHeuristicAge is the minimum age before a session with no PID is labeled ghost.
@@ -141,6 +152,13 @@ func ClassifySession(info SessionInfo, isUploaded bool) SessionStatus {
 		// check stop reason for terminal states
 		if info.StopReason == StopReasonCanceled {
 			return StatusCanceled
+		}
+		// A ledger directory holding only a draft placeholder is NOT an
+		// uploaded session — no turn data has been committed. Checked before
+		// isUploaded because callers derive isUploaded from "a directory
+		// exists in the ledger", which a draft satisfies.
+		if info.Draft {
+			return StatusDraft
 		}
 		if isUploaded {
 			return StatusUploaded

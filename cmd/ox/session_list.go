@@ -210,8 +210,13 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 				ledgerSessions, _ = ledgerStore.ListSessions()
 			}
 
-			// mark ledger sessions as uploaded using merge key
+			// mark ledger sessions as uploaded using merge key.
+			// Drafts are excluded: a meta.json-only placeholder means the
+			// session is still recording, not that its turn data landed.
 			for _, ls := range ledgerSessions {
+				if ls.Draft {
+					continue
+				}
 				uploadedSessions[sessionMergeKey(ls)] = true
 			}
 
@@ -432,6 +437,12 @@ func printSessionRow(t session.SessionInfo, uploaded bool, localUser string) {
 	case session.StatusUploaded:
 		statusStr = "✓ uploaded"
 		statusStyle = "uploaded"
+	case session.StatusDraft:
+		// A placeholder is published, but no turn data has landed. Rendered
+		// distinctly from "uploaded" so a live session is never mistaken for
+		// a finished one.
+		statusStr = "◌ draft"
+		statusStyle = "local"
 	case session.StatusCanceled:
 		statusStr = "✗ canceled"
 		statusStyle = "ghost" // dim — discarded
@@ -682,17 +693,34 @@ func sessionMergeKey(s session.SessionInfo) string {
 // mergeSessionSources deduplicates sessions by merge key.
 // Primary sessions take precedence over additional sessions.
 // Returns merged sessions sorted newest-first by CreatedAt.
+//
+// One exception to primary-wins: a DRAFT placeholder loses to any non-draft
+// row for the same session. The ledger's git-tracked sessions/ is merged as
+// primary, ahead of the ledger cache where live recordings actually live — so
+// without this, a draft published at turn 2 shadows its own live recording and
+// every active session renders as finished, with no title and no turn count.
+// A draft carries strictly less information than the row it would displace.
 func mergeSessionSources(primary, additional []session.SessionInfo) []session.SessionInfo {
-	existing := make(map[string]bool, len(primary))
+	index := make(map[string]int, len(primary))
 	result := make([]session.SessionInfo, 0, len(primary)+len(additional))
 	for _, s := range primary {
-		existing[sessionMergeKey(s)] = true
+		k := sessionMergeKey(s)
+		if _, dup := index[k]; dup {
+			continue
+		}
+		index[k] = len(result)
 		result = append(result, s)
 	}
 	for _, s := range additional {
-		if k := sessionMergeKey(s); !existing[k] {
-			existing[k] = true
+		k := sessionMergeKey(s)
+		at, seen := index[k]
+		if !seen {
+			index[k] = len(result)
 			result = append(result, s)
+			continue
+		}
+		if result[at].Draft && !s.Draft {
+			result[at] = s
 		}
 	}
 	sort.Slice(result, func(i, j int) bool {

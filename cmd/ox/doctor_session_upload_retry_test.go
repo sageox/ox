@@ -813,7 +813,7 @@ func TestResolveOrphanSessionID_HeaderIDPreservedWhenNoLedgerMetaYet(t *testing.
 		Meta:        &session.StoreMeta{AgentID: "OxF9dp", SessionID: headerID},
 	}
 
-	got, err := resolveOrphanSessionID(sessionDir, orphan)
+	got, err := resolveOrphanSessionID(sessionDir, orphan, "")
 	require.NoError(t, err)
 	assert.Equal(t, headerID, got, "must preserve the header-carried SessionID, not mint a new one")
 }
@@ -837,7 +837,7 @@ func TestResolveOrphanSessionID_PreservedMetaWinsOverHeader(t *testing.T) {
 		Meta:        &session.StoreMeta{AgentID: "OxF9dp", SessionID: "ses_019f633e-29f3-7566-9ab4-a3da5b666fe5"},
 	}
 
-	got, err := resolveOrphanSessionID(sessionDir, orphan)
+	got, err := resolveOrphanSessionID(sessionDir, orphan, "")
 	require.NoError(t, err)
 	assert.Equal(t, preservedID, got, "preserved meta.json ID must win over the header-carried ID")
 }
@@ -856,7 +856,7 @@ func TestResolveOrphanSessionID_CorruptMetaRefusesToMint(t *testing.T) {
 		Meta:        &session.StoreMeta{AgentID: "OxBAD1", SessionID: "ses_019f633e-29f3-7566-9ab4-a3da5b666fe5"},
 	}
 
-	got, err := resolveOrphanSessionID(sessionDir, orphan)
+	got, err := resolveOrphanSessionID(sessionDir, orphan, "")
 	require.Error(t, err, "corrupt meta.json must refuse to resolve, not mint a fresh ID")
 	assert.Empty(t, got)
 }
@@ -872,7 +872,7 @@ func TestResolveOrphanSessionID_NoIDAnywhereMintsExactlyOne(t *testing.T) {
 		Meta:        &session.StoreMeta{AgentID: "OxLEG1"}, // no SessionID
 	}
 
-	got, err := resolveOrphanSessionID(sessionDir, orphan)
+	got, err := resolveOrphanSessionID(sessionDir, orphan, "")
 	require.NoError(t, err)
 	assert.True(t, sessionid.IsValidSessionID(got), "must mint a valid ses_<UUIDv7> when no ID exists anywhere, got %q", got)
 }
@@ -892,7 +892,7 @@ func TestResolveOrphanSessionID_RegisteredTwiceYieldsOneID(t *testing.T) {
 	// first registration: nothing anywhere yet — mints ID_A and (as
 	// retrySessionUpload does in production) writes it to meta.json before
 	// attempting the push.
-	first, err := resolveOrphanSessionID(sessionDir, orphan)
+	first, err := resolveOrphanSessionID(sessionDir, orphan, "")
 	require.NoError(t, err)
 	require.True(t, sessionid.IsValidSessionID(first))
 	require.NoError(t, lfs.WriteSessionMeta(sessionDir, &lfs.SessionMeta{
@@ -905,7 +905,7 @@ func TestResolveOrphanSessionID_RegisteredTwiceYieldsOneID(t *testing.T) {
 	// second registration: same session, same cache content, retried again
 	// (push failed the first time). Must return the SAME id, not mint a
 	// second one.
-	second, err := resolveOrphanSessionID(sessionDir, orphan)
+	second, err := resolveOrphanSessionID(sessionDir, orphan, "")
 	require.NoError(t, err)
 	assert.Equal(t, first, second, "retrying the same session must yield one durable session_id, not two")
 }

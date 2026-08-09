@@ -1308,14 +1308,6 @@ func finalizeModeForSessionStop(userPrefersAsync bool) session.FinalizeDispatchM
 // If this fails, the session data is safe in the local cache and doctor can retry.
 // ledgerPath and sessionName are pre-computed by the caller.
 func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string) error {
-	// copy raw.jsonl + secondary artifacts to ledger dir
-	if err := pipeline.CopySessionToLedger(pipeline.OSFileSystem{}, result, ledgerPath, sessionName); err != nil {
-		return err
-	}
-	if result.EntryCount == 0 {
-		return nil // CopySessionToLedger already skipped
-	}
-
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
 
@@ -1325,10 +1317,40 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	// (recordings started under an older binary). Non-NotExist read errors
 	// are fatal — see PreservedSessionID doc. Resolved before the builder is
 	// constructed so sessionMetaBase always receives the final ID.
-	preservedID, err := lfs.PreservedSessionID(sessionDir)
+	//
+	// Read BEFORE the draft purge below, and before CopySessionToLedger: a
+	// draft placeholder is an extra durable carrier of the ses_ id (it
+	// survives .recording.json being cleared), and the purge deletes the very
+	// meta.json that carries it. Reading in the wrong order would rotate an id
+	// already circulating in PR bodies and commit trailers.
+	// Supersede any draft placeholder wholesale (ADR-029). While meta.draft is
+	// true every file in that directory is provisional — including a
+	// summary.json/summary.md the SageOx server may have authored against the
+	// zero-turn draft and pushed, which a finalize-time `git pull --rebase`
+	// folds into our working tree. Those describe nothing and must never
+	// survive into the finalized session as if an LLM had read the transcript.
+	preservedID, wasDraft, err := supersedeDraftForFinalize(ledgerPath, sessionName)
 	if err != nil {
 		return fmt.Errorf("preserve existing SessionID for %s: %w", sessionName, err)
 	}
+
+	// copy raw.jsonl + secondary artifacts to ledger dir
+	if err := pipeline.CopySessionToLedger(pipeline.OSFileSystem{}, result, ledgerPath, sessionName); err != nil {
+		return err
+	}
+	if result.EntryCount == 0 {
+		// CopySessionToLedger already skipped. If a draft was purged above the
+		// deletion is staged but uncommitted; land it, or the /c/ page claims
+		// "in progress" forever and the next unrelated commit sweeps up a
+		// staged deletion under the wrong message.
+		if wasDraft {
+			if retractErr := commitDraftRetraction(ledgerPath, sessionName); retractErr != nil {
+				slog.Warn("draft retraction failed", "session", sessionName, "error", retractErr)
+			}
+		}
+		return nil
+	}
+
 	sessionID := session.ResolveOrMintSessionID(preservedID, state.SessionID)
 
 	// write meta.json first (before LFS upload) to preserve session metadata even if LFS fails

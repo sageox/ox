@@ -1511,6 +1511,13 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		}
 	}
 
+	// push any unpushed session-draft commits (batched by sync cycle).
+	// Not gated on whisperRegistry — drafts are unrelated to murmurs, and a
+	// repo with whispers disabled still needs its /c/ links to resolve.
+	if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
+		s.pushSessionDraftCommits(ctx, l.Path)
+	}
+
 	if progress != nil {
 		_ = progress.WriteStage("complete", "Pull complete")
 	}
@@ -1600,6 +1607,112 @@ func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string
 		},
 	}); err != nil {
 		s.logger.Warn("murmur push failed (non-fatal)", "error", err)
+	}
+}
+
+// pushSessionDraftCommits pushes local session-draft commits to the ledger
+// remote, batched onto the sync cycle (~60s) exactly like pushMurmurCommits.
+//
+// Why the daemon and not the CLI: the draft commit is made by a Stop hook, on a
+// turn boundary. pushLedger is a pre-push secret scan plus a credential refresh
+// plus an LFS reconcile plus a three-attempt pull-rebase loop — seconds of
+// latency the user would feel on every publish. Deferring the push here keeps
+// the hook at a local `git commit` (tens of milliseconds) while still getting
+// the placeholder to the server, which is the entire point of drafts. The CLI
+// still owns the write; only the push is batched.
+//
+// Detection is by commit SUBJECT, deliberately NOT by a pathspec on sessions/.
+// A pathspec would also match session FINALIZE commits, and pushing one of
+// those before the CLI has uploaded its LFS blobs is rejected by the ledger's
+// pre-receive hook ("LFS objects are missing"). The CLI owns that ordering.
+//
+// # Why this refuses to push when ANY non-draft commit is unpushed
+//
+// `git push` moves the whole branch, so a draft commit sitting on top of an
+// unpushed CLI commit would carry that commit along. The CLI's pushLedger runs
+// a pre-push secret gate and an LFS reconcile before every push; this path runs
+// neither. Pushing here would therefore ship a commit the CLI may have
+// deliberately REFUSED to push — including one the secret scanner rejected for
+// containing a credential — and would ship a finalize commit before its LFS
+// blobs are uploaded, which the ledger's pre-receive hook rejects anyway.
+//
+// So the rule is: push only when every unpushed commit is a draft commit.
+// Otherwise leave it entirely to the CLI, which has the full gate stack. This
+// is strictly narrower than the murmur equivalent, deliberately — drafts fire
+// far more often, and this path is not gated on any feature registry.
+// sessionDraftCommitPrefix is the commit-subject marker the CLI writes for
+// every draft-placeholder commit (publish, refresh, supersede, retract,
+// discard). The daemon uses it to decide whether an unpushed branch consists
+// exclusively of draft commits.
+const sessionDraftCommitPrefix = "session-draft: "
+
+// shouldPushSessionDrafts decides whether an unpushed commit set is safe for
+// the daemon to push, given the newline-separated commit subjects.
+//
+// Extracted as a pure function on purpose. This is the single security
+// property of the draft-push path — it is what stands between the daemon and
+// pushing a commit the CLI's pre-push secret gate refused — and the push itself
+// goes through gitutil.PushWithRetry, which is not injectable. Left inline, a
+// test could only observe "one git call happened" either way, which
+// distinguishes nothing.
+//
+// Returns (blockingSubject, false) when a non-draft commit is present, so the
+// caller can say WHICH commit blocked it; ("", false) when there is nothing to
+// push at all.
+func shouldPushSessionDrafts(logOutput string) (blockingSubject string, ok bool) {
+	trimmed := strings.TrimSpace(logOutput)
+	if trimmed == "" {
+		return "", false
+	}
+	sawDraft := false
+	for _, subject := range strings.Split(trimmed, "\n") {
+		subject = strings.TrimSpace(subject)
+		if subject == "" {
+			continue
+		}
+		if !strings.HasPrefix(subject, sessionDraftCommitPrefix) {
+			return subject, false
+		}
+		sawDraft = true
+	}
+	return "", sawDraft
+}
+
+func (s *SyncScheduler) pushSessionDraftCommits(ctx context.Context, ledgerPath string) {
+	ctx, span := perf.Start(ctx, "daemon:push_session_drafts")
+	defer span.End()
+
+	// Subjects of every unpushed commit, one per line.
+	out, err := s.git.RunGit(ctx, ledgerPath, "log", "--format=%s", "@{upstream}..HEAD")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return
+	}
+
+	if blocker, ok := shouldPushSessionDrafts(out); !ok {
+		if blocker != "" {
+			s.logger.Debug("skipping session-draft push: a non-draft commit is unpushed",
+				"path", ledgerPath, "blocking_subject", blocker)
+		}
+		return
+	}
+
+	s.logger.Debug("pushing unpushed session-draft commits", "path", ledgerPath)
+
+	s.ledgerMu.Lock()
+	defer s.ledgerMu.Unlock()
+
+	ep := s.workspaceRegistry.GetEndpoint()
+	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
+		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
+		Logger:              s.logger,
+		PrePush: func(repoPath string) error {
+			if ep != "" {
+				return gitserver.RefreshRemoteCredentials(repoPath, ep)
+			}
+			return nil
+		},
+	}); err != nil {
+		s.logger.Warn("session-draft push failed (non-fatal)", "error", err)
 	}
 }
 

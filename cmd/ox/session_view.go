@@ -144,6 +144,13 @@ func runSessionView(cmd *cobra.Command, args []string) error {
 							if err != nil {
 								return fmt.Errorf("read session after download: %w", err)
 							}
+						} else if msg := draftViewNotice(sessionName); msg != "" {
+							// A draft placeholder is published but no turn
+							// data has landed yet. Erroring "not found" here
+							// while `ox session list` happily shows the row is
+							// actively misleading — say what is actually true.
+							fmt.Fprintln(cmd.OutOrStdout(), msg)
+							return nil
 						} else {
 							return fmt.Errorf("session %q not found\nRun 'ox session list' to see available sessions", args[0])
 						}

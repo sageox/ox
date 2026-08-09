@@ -338,6 +338,13 @@ type SessionInfo struct {
 	StopPatternID   string              `json:"stop_pattern_id,omitempty"`    // which adapter pattern fired (for telemetry / drift detection)
 	StopResetsAtRaw string              `json:"stop_resets_at_raw,omitempty"` // raw reset-time substring as matched
 	StopResetsAt    *time.Time          `json:"stop_resets_at,omitempty"`     // parsed absolute reset time, may be nil even when raw populated
+
+	// Draft reports that this row came from a meta.json-only draft placeholder
+	// published mid-recording, NOT a finalized session. Load-bearing for
+	// classification: a ledger directory holding only a draft must not be
+	// reported as uploaded, or `ox session list` shows live recordings as
+	// finished and `ox session abort <name>` refuses to run.
+	Draft bool `json:"draft,omitempty"`
 }
 
 // ListSessions returns session files from the last 7 days, sorted by date descending.
@@ -407,6 +414,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var hydrationStatus lfs.HydrationStatus
 		var username, title, summary string
 		var createdAt time.Time
+		var isDraft bool
 		meta, metaErr := lfs.ReadSessionMeta(sessionPath)
 		if metaErr == nil && meta != nil {
 			cachePath := filepath.Join(s.cacheBasePath, name)
@@ -415,6 +423,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			title = meta.Title
 			summary = meta.Summary
 			createdAt = meta.CreatedAt
+			isDraft = meta.IsDraft()
 		}
 
 		// prefer timestamp from directory name
@@ -544,6 +553,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			StopPatternID:   stopMetaString(meta, func(m *lfs.SessionMeta) string { return m.StopPatternID }),
 			StopResetsAtRaw: stopMetaString(meta, func(m *lfs.SessionMeta) string { return m.StopResetsAtRaw }),
 			StopResetsAt:    stopMetaTime(meta),
+			Draft:           isDraft,
 		})
 	}
 

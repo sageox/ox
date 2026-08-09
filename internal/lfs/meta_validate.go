@@ -63,11 +63,52 @@ func ValidateUserVisible(meta *SessionMeta) error {
 	return nil
 }
 
+// validateDraftShape enforces the draft structural invariant at the writer
+// boundary: a draft placeholder names NO artifacts in its manifest and carries
+// NO summary text. If any future code path tries to persist a draft that
+// violates that, the write is refused rather than producing a meta.json that
+// lies to every downstream consumer about what is in the directory.
+//
+// Both halves are load-bearing:
+//
+//   - A draft with a populated Files manifest claims LFS OIDs that were never
+//     uploaded. Committing that reference makes the ledger's pre-receive hook
+//     reject every subsequent push with "LFS objects are missing" — for the
+//     whole team, not just the author.
+//   - A draft with summary text is a summary of a zero-turn session. The
+//     ABSENCE of summary artifacts is the load-bearing "summary still owed"
+//     signal that IsStubSummary and the daemon's anti-entropy both depend on;
+//     a draft that fills it in makes every consumer believe the session is
+//     already summarized.
+//
+// Same "encode the cross-layer invariant at the writer" pattern
+// ValidateUserVisible established for leaked validator strings (ox-qqka),
+// where every per-layer test passed while the invariant was violated because
+// no test asserted the invariant itself.
+func validateDraftShape(meta *SessionMeta) error {
+	if !meta.IsDraft() {
+		return nil
+	}
+	if len(meta.Files) > 0 {
+		return fmt.Errorf("draft meta.json must not name artifacts in files (found %d); a draft directory contains only meta.json — see .claude/rules/cache-only-design.md", len(meta.Files))
+	}
+	if strings.TrimSpace(meta.Summary) != "" {
+		return fmt.Errorf("draft meta.json must not carry summary text; drafts are counters-only and are purged wholesale at finalize")
+	}
+	if strings.TrimSpace(meta.SummaryStatus) != "" {
+		return fmt.Errorf("draft meta.json must not carry summary_status %q; the absence of a summary is the signal that one is still owed", meta.SummaryStatus)
+	}
+	return nil
+}
+
 // Validate runs the full structural invariant check on a SessionMeta.
-// Today that's just ValidateUserVisible; if more invariants are added,
-// this is where they go.
+// Every writer goes through WriteSessionMetaOnly, which calls this — including
+// MutateSessionMeta — so adding an invariant here covers every write path.
 func (m *SessionMeta) Validate() error {
-	return ValidateUserVisible(m)
+	if err := ValidateUserVisible(m); err != nil {
+		return err
+	}
+	return validateDraftShape(m)
 }
 
 // IsLeakySummaryString reports whether s matches one of the known

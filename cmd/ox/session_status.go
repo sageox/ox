@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
@@ -136,6 +137,19 @@ type sessionStatusOutput struct {
 	PauseCount           int    `json:"pause_count,omitempty"`            // monotonic counter
 	InheritedPause       bool   `json:"inherited_pause,omitempty"`        // started suspended via /clear marker
 	InheritedFromSession string `json:"inherited_from_session,omitempty"` // session that finalized at /clear
+
+	// ADR-029 draft-placeholder surface.
+	//
+	// Without these, "the /c/ link in my PR doesn't resolve" is
+	// indistinguishable from "the placeholder published fine and the server is
+	// behind" — which is the whole reason the git-backed channel was added
+	// alongside the already-silent started-notification. ConversationURL is
+	// included so an agent never has to reconstruct the link; reconstruction
+	// is the confabulation vector sessionLinkOutputs exists to close.
+	TurnCount        int    `json:"turn_count,omitempty"`
+	DraftState       string `json:"draft_state,omitempty"`        // disabled | pending | published | stale | failed
+	DraftPublishedAt string `json:"draft_published_at,omitempty"` // RFC3339
+	ConversationURL  string `json:"conversation_url,omitempty"`   // https://<endpoint>/c/<session_id>
 }
 
 // sessionRecordingEntry represents one active recording in the multi-session output.
@@ -166,13 +180,21 @@ type sessionRecordingEntry struct {
 	PauseCount           int    `json:"pause_count,omitempty"`
 	InheritedPause       bool   `json:"inherited_pause,omitempty"`
 	InheritedFromSession string `json:"inherited_from_session,omitempty"`
+
+	// ADR-029 draft surface — kept in sync with sessionStatusOutput for the
+	// same reason the pause fields are: multi-session consumers need to tell
+	// a session whose placeholder published from one whose publish is failing.
+	TurnCount        int    `json:"turn_count,omitempty"`
+	DraftState       string `json:"draft_state,omitempty"`
+	DraftPublishedAt string `json:"draft_published_at,omitempty"`
+	ConversationURL  string `json:"conversation_url,omitempty"`
 }
 
 // buildSessionRecordingEntry maps a RecordingState into the multi-session
 // JSON row, including ADR-020 pause-state fields. Extracted from
 // runSessionStatus so the mapping can be unit-tested without setting up
 // the full multi-recording fixture on disk.
-func buildSessionRecordingEntry(s *session.RecordingState, alive *bool, status string) sessionRecordingEntry {
+func buildSessionRecordingEntry(s *session.RecordingState, alive *bool, status string, draftCtx draftStatusContext) sessionRecordingEntry {
 	d := s.Duration()
 	entry := sessionRecordingEntry{
 		AgentID:       s.AgentID,
@@ -202,7 +224,91 @@ func buildSessionRecordingEntry(s *session.RecordingState, alive *bool, status s
 		entry.InheritedPause = s.InheritedPause
 		entry.InheritedFromSession = s.InheritedFromSession
 	}
+	draftCtx.applyTo(s, &entry.TurnCount, &entry.DraftState, &entry.DraftPublishedAt, &entry.ConversationURL)
 	return entry
+}
+
+// draftStateFor classifies where this recording is in the draft-placeholder
+// lifecycle (ADR-029).
+//
+// The distinction that matters is published vs failed. DraftPublishedTurn is
+// stamped on every ATTEMPT while DraftPublishedAt is stamped only on success,
+// so the (turn set, time nil) pair is the durable record of "we tried and it
+// did not land" — the state that otherwise looks identical to a healthy
+// session whose server page is merely lagging.
+func draftStateFor(resolved *config.ResolvedSessionDraft, s *session.RecordingState) string {
+	if s == nil {
+		return ""
+	}
+	if resolved == nil || !resolved.Enabled {
+		return "disabled"
+	}
+	// Order matters: check the FAILED shape before the published shape.
+	// DraftPublishedAt is only ever set, never cleared, so a session whose
+	// first publish succeeded and whose later refreshes are all failing would
+	// otherwise report "published" forever — hiding exactly the breakage this
+	// field exists to surface. DraftPublishedTurn is stamped on every attempt,
+	// so an attempt newer than the last success means the latest one failed.
+	if s.DraftPublishedAt != nil {
+		if s.DraftAttemptTurn > s.DraftPublishedTurn {
+			return "stale"
+		}
+		return "published"
+	}
+	if s.DraftAttemptTurn > 0 {
+		return "failed"
+	}
+	return "pending"
+}
+
+// conversationURLForState builds the durable /c/<session_id> link for a
+// recording, or "" when one cannot be derived. Best-effort: this is a status
+// display, and a missing project config must not fail the command.
+//
+// Gated on the attribution.session toggle, like every other session-link
+// surface. sessionLinkOutputs documents the invariant: an empty toggle must
+// disable them ALL together. Emitting the link here regardless would hand a
+// /c/ URL to users who deliberately turned session attribution off.
+//
+// projectCfg is passed in rather than loaded per call: this runs once per
+// active recording row, and ten agents in a repo would otherwise mean ten
+// redundant project-config reads for one status invocation.
+func conversationURLForState(projectCfg *config.ProjectConfig, attributionOn bool, s *session.RecordingState) string {
+	if !attributionOn || projectCfg == nil || s == nil || s.SessionID == "" {
+		return ""
+	}
+	return buildConversationURL(projectCfg, s.SessionID)
+}
+
+// draftStatusContext is the per-invocation config snapshot shared by every
+// recording row, so `ox session status` reads each config file once rather than
+// once per active agent.
+type draftStatusContext struct {
+	resolved      *config.ResolvedSessionDraft
+	projectCfg    *config.ProjectConfig
+	attributionOn bool
+}
+
+func newDraftStatusContext() draftStatusContext {
+	projectCfg, _ := config.LoadProjectConfig("")
+	return draftStatusContext{
+		resolved:      config.ResolveSessionDraft(),
+		projectCfg:    projectCfg,
+		attributionOn: loadResolvedAttribution().Session != "",
+	}
+}
+
+// applyTo fills the draft observability fields on any row-like target.
+func (c draftStatusContext) applyTo(s *session.RecordingState, turnCount *int, state *string, publishedAt *string, url *string) {
+	if s == nil {
+		return
+	}
+	*turnCount = s.TurnCount
+	*state = draftStateFor(c.resolved, s)
+	if s.DraftPublishedAt != nil {
+		*publishedAt = s.DraftPublishedAt.Format("2006-01-02T15:04:05Z07:00")
+	}
+	*url = conversationURLForState(c.projectCfg, c.attributionOn, s)
 }
 
 func init() {
@@ -316,6 +422,10 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 				output.InheritedFromSession = state.InheritedFromSession
 				output.Guidance = "Recording is SUSPENDED. Resume with `ox session resume` or stop with `ox session stop`."
 			}
+			// ADR-029: surface draft-placeholder state so "my /c/ link 404s"
+			// is diagnosable rather than a guess.
+			newDraftStatusContext().applyTo(state, &output.TurnCount, &output.DraftState,
+				&output.DraftPublishedAt, &output.ConversationURL)
 			return outputJSON(cmd.OutOrStdout(), output)
 		}
 
@@ -372,10 +482,12 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 
 	// multiple recordings
 	if jsonOutput {
+		// Loaded once for the whole invocation, not per row.
+		draftCtx := newDraftStatusContext()
 		var entries []sessionRecordingEntry
 		for _, s := range states {
 			alive, status := agentLivenessFor(agentAlive, s.AgentID)
-			entries = append(entries, buildSessionRecordingEntry(s, alive, status))
+			entries = append(entries, buildSessionRecordingEntry(s, alive, status, draftCtx))
 		}
 		return outputJSON(cmd.OutOrStdout(), sessionStatusOutput{
 			Recording: true,

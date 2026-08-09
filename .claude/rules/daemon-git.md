@@ -15,11 +15,26 @@ paths:
 | `git clone` | daemon | Initial setup / anti-entropy |
 | `git fetch` | daemon | Background sync timer |
 | `git pull --rebase --autostash` | daemon | Background sync timer |
-| `git add --sparse` | CLI | Session upload, import, doctor |
-| `git commit` | CLI | Session upload pipeline |
-| `git push` | CLI | Session upload pipeline |
+| `git add --sparse` | CLI | Session upload, import, doctor, session drafts |
+| `git commit` | CLI | Session upload pipeline, session drafts |
+| `git push` | CLI **and** daemon | CLI: session upload pipeline. Daemon: batched push of its OWN narrow, pathspec-scoped commits (murmurs, session finalize, session drafts) |
 
-The daemon only performs git pull (read) operations. The CLI performs add/commit/push (write) operations directly on the ledger.
+The CLI owns the session-upload write path end to end. The daemon writes only
+on narrow, pathspec-scoped, daemon-owned paths and batches their pushes onto
+its sync cycle.
+
+**The daemon push is deliberately narrower than the CLI's.** `pushLedger` runs
+a pre-push secret gate and an LFS reconcile; the daemon's batched pushes run
+neither, and `git push` moves the whole branch. So
+`pushSessionDraftCommits` refuses to push when ANY unpushed commit is not a
+draft commit — otherwise it could ship a commit the CLI deliberately refused
+(a secret-gate rejection), or a finalize commit before its LFS blobs exist.
+Any future daemon-side push must apply the same restriction or run the gate.
+
+**Mid-rebase safety belongs at index-mutation time, not push time.** See
+`.claude/rules/cache-only-design.md` — an unguarded `git add` during a
+conflicted rebase marks the conflict resolved and the following commit
+consumes the replay step, silently destroying whatever was being replayed.
 
 **Why this split:** Minimal IPC surface, CLI writes don't depend on daemon, daemon stays simple. Conflicts are extremely unlikely (unique path per session with random suffix). Push failure after 3 CLI retries is acceptable — best-effort, not transactional.
 

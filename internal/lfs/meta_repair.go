@@ -54,6 +54,20 @@ func RecoverEmptyTitleMeta(sessionDir string, dryRun bool) MetaRepairOutcome {
 		return out
 	}
 
+	// A draft placeholder legitimately has no title (ADR-029): it is a
+	// meta.json-only marker for a LIVE recording, not a session whose
+	// summarization failed. Without this skip, every autofix tick would treat
+	// the empty title as a fault, bump SummaryAttempts, and at
+	// MaxSummaryAttempts stamp summary_status="unrecoverable" into a session
+	// that is still being recorded — which the daemon's finalize (a
+	// preserve-unowned-fields RMW) would then carry into the finished session,
+	// permanently marking real work as unsummarizable. It would also dirty the
+	// ledger worktree mid-recording for a file the CLI is about to purge.
+	if meta.IsDraft() {
+		out.Skipped = true
+		return out
+	}
+
 	// Healthy or terminal — nothing to do. We treat any non-empty
 	// trimmed title as "healthy" because that's what the web UI will
 	// render; we don't second-guess whether the title is good.

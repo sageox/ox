@@ -211,7 +211,12 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 				// publish stamped one and crashed mid-push), reuse that
 				// SessionID rather than minting a fresh one. Non-NotExist
 				// read errors are fatal — see PreservedSessionID doc.
-				preservedID, preserveErr := lfs.PreservedSessionID(ledgerSessionDir)
+				// Also supersedes a draft placeholder if one was published
+				// for this session before the agent died: the recovered
+				// upload is authoritative, and a surviving draft-era artifact
+				// (e.g. a server-authored summary of the zero-turn draft)
+				// must not ride along. Reads the id before purging.
+				preservedID, _, preserveErr := supersedeDraftForFinalize(ledgerPath, sessionName)
 				if preserveErr != nil {
 					slog.Warn("read existing meta.json failed during recovery; skipping write to avoid SessionID rotation", "error", preserveErr)
 					_ = doctor.SetNeedsDoctorAgent(projectRoot)

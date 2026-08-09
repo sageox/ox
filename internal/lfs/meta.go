@@ -212,7 +212,95 @@ type SessionMeta struct {
 	// treated as pre-linkage and never blocking. omitempty for round-trip.
 	LinkageStatus string `json:"linkage_status,omitempty"`
 
+	// Draft marks this meta.json as an EARLY PLACEHOLDER published while the
+	// recording is still in progress — not a finalized session record. It
+	// exists so https://<endpoint>/c/<session_id> resolves for links already
+	// circulating in PR bodies and commit trailers, long before session stop.
+	//
+	// A draft directory contains meta.json and NOTHING ELSE. In particular it
+	// contains no raw.jsonl: writing real transcript bytes to the git-tracked
+	// <ledger>/sessions/<name>/raw.jsonl breaks LFS linkage (the ledger then
+	// rejects every future push, for every teammate, with "LFS objects are
+	// missing") and defeats the daemon's pointer-stub skip in
+	// session_finalize.go, causing re-finalize and clobber. See
+	// .claude/rules/cache-only-design.md and the 2026-04-25 Phase 2 incident.
+	// That structural emptiness is also the privacy guarantee: a draft cannot
+	// contain turn data, by construction, so aborting one cannot leak.
+	//
+	// # Provisionality invariant (LOAD-BEARING)
+	//
+	// While Draft is true, EVERY file in that session directory is provisional
+	// and is purged wholesale at finalize. The SageOx server may author
+	// summary.json / summary.md against the zero-turn draft and push them; a
+	// finalize-time `git pull --rebase` folds those into the working tree, and
+	// they MUST NOT survive into the finalized session as if an LLM had read
+	// the transcript. A whitelist of "files we know the server might write"
+	// rots the first time the server writes something new; deleting the whole
+	// directory cannot.
+	//
+	// Every consumer that treats "sessions/<name>/meta.json exists" as "this
+	// session is real" MUST branch on IsDraft() first — never read this field
+	// directly.
+	//
+	// Back-compat: an absent key means "not a draft". omitempty keeps every
+	// existing meta.json byte-identical and older readers unaffected. Version
+	// is deliberately NOT bumped — additive optional field, same policy as
+	// SessionID.
+	Draft bool `json:"draft,omitempty"`
+
+	// TurnCount is the number of agent response turns observed when this
+	// meta.json was written. Drafts set it (and refresh it periodically) purely
+	// so the server's in-progress /c/ page can show forward motion — a climbing
+	// counter is the signal that distinguishes "recording is working" from
+	// "recording is silently broken". Counters only, never content.
+	//
+	// Finalize clears it: EntryCount is the authoritative measure of a finished
+	// session, and leaving both would invite consumers to disagree about which
+	// one means "size".
+	TurnCount int `json:"turn_count,omitempty"`
+
+	// UpdatedAt is when this meta.json was last rewritten. Only drafts set it,
+	// so the server can distinguish a live draft from one whose agent died
+	// mid-session. Finalize clears it, leaving CreatedAt as the only timestamp
+	// on a finished session.
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+
 	Files map[string]FileRef `json:"files"` // OID manifest: filename -> ref
+}
+
+// IsDraft reports whether this meta.json is an in-progress draft placeholder
+// rather than a finalized session record. Nil-safe: a nil meta is not a draft.
+//
+// All consumers MUST go through this helper rather than reading m.Draft, so
+// the nil-safety and the "absent key == not a draft" back-compat rule live in
+// exactly one place. Reading m.Draft directly on a nil meta panics, and every
+// consumer here is on a path where an unreadable meta.json is normal.
+//
+// Fail-safe direction: an unreadable meta.json yields a nil *SessionMeta and
+// therefore reports NOT a draft. That is deliberate. "Treat as draft" is the
+// destructive direction — it makes doctor skip a session whose upload failed,
+// and makes abort delete a directory it should refuse to touch.
+func (m *SessionMeta) IsDraft() bool { return m != nil && m.Draft }
+
+// ClearDraft removes every draft-only marker. MUST be called by any finalize
+// path that MUTATES an existing meta.json in place rather than rebuilding it
+// from a builder.
+//
+// This is not belt-and-suspenders. The daemon's finalize does `next := current`
+// inside MutateSessionMeta — it deliberately preserves every field it does not
+// own, which is correct for redactions / produced_commits / linkage but would
+// silently carry Draft=true through finalization, leaving a fully-finalized
+// session that every consumer keeps treating as provisional (and that doctor
+// keeps refusing to repair). The CLI path rebuilds from sessionMetaBase and
+// clears these implicitly; calling ClearDraft explicitly in both makes the two
+// paths agree by construction instead of by coincidence.
+func (m *SessionMeta) ClearDraft() {
+	if m == nil {
+		return
+	}
+	m.Draft = false
+	m.TurnCount = 0
+	m.UpdatedAt = nil
 }
 
 // RedactionPass records a single end-to-end pass of the redactor against
@@ -948,17 +1036,32 @@ func (f FileRef) BareOID() string {
 // don't know whether it had a SessionID we'd overwrite. Refusing to
 // proceed is the only conservative choice.
 func PreservedSessionID(sessionDir string) (string, error) {
+	id, _, err := PreservedSessionIDAndDraft(sessionDir)
+	return id, err
+}
+
+// PreservedSessionIDAndDraft returns the ses_ id stamped in an existing
+// meta.json plus whether that meta is a draft placeholder. Same three return
+// shapes and the same strict "unreadable is fatal" rule as PreservedSessionID,
+// which delegates here.
+//
+// Finalize paths need both facts from ONE read, and they need them BEFORE they
+// touch the directory: superseding a draft deletes the very meta.json that
+// carries the id. A draft is an extra durable carrier of the ses_ id (it
+// survives .recording.json being cleared), so reading it in the wrong order
+// would rotate an id already circulating in PR bodies and commit trailers.
+func PreservedSessionIDAndDraft(sessionDir string) (string, bool, error) {
 	existing, err := ReadSessionMeta(sessionDir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", nil // genuinely first publish — caller mints fresh
+		return "", false, nil // genuinely first publish — caller mints fresh
 	}
 	if err != nil {
-		return "", fmt.Errorf("read existing meta.json (refusing to silently rotate SessionID): %w", err)
+		return "", false, fmt.Errorf("read existing meta.json (refusing to silently rotate SessionID): %w", err)
 	}
 	if existing == nil {
-		return "", nil
+		return "", false, nil
 	}
-	return existing.SessionID, nil
+	return existing.SessionID, existing.IsDraft(), nil
 }
 
 // EffectiveSessionID returns the canonical "ses_"-prefixed identifier for

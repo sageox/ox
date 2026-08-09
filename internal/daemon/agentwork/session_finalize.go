@@ -63,6 +63,14 @@ type SessionFinalizePayload struct {
 	// the session just needs to be staged in ledger/sessions/ and pushed.
 	UploadOnly bool `json:"upload_only,omitempty"`
 
+	// PreservedSessionID carries the ses_ id read off a DRAFT placeholder in
+	// the ledger before stageSessionInLedger purged it (ADR-029). A draft's
+	// meta.json is an extra durable carrier of that id — and the only carrier
+	// for a recording whose raw.jsonl header predates the SessionID field — so
+	// it has to be captured before the purge deletes it and threaded to the
+	// meta write. Empty when no draft was superseded.
+	PreservedSessionID string `json:"preserved_session_id,omitempty"`
+
 	// storedSession is populated by BuildPrompt and reused by ProcessResult
 	// to avoid reading raw.jsonl twice.
 	storedSession *session.StoredSession `json:"-"`
@@ -361,6 +369,26 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		sessionDir := filepath.Join(sessionsDir, name)
 		rawPath := filepath.Join(sessionDir, artifactRaw)
 
+		// Never touch a draft placeholder (ADR-029). It is an in-progress
+		// marker for a live recording, not an unfinished session awaiting
+		// anti-entropy: it has no raw.jsonl to summarize and no artifacts to
+		// repair, and every work class below would either no-op noisily or
+		// write a failure stub into a directory the CLI is about to purge.
+		//
+		// The !hasRaw guard further down would also skip a well-formed draft
+		// today, but only incidentally. Making it explicit means the safety
+		// survives a future change to that guard, and gives the regression
+		// test something real to assert against.
+		// Fails CLOSED. An unreadable meta.json here (torn write, rebase
+		// conflict markers) must SKIP, not fall through: falling through
+		// reaches recoverRawFromSessionFile, which writes real transcript
+		// bytes onto the git-tracked raw.jsonl and breaks LFS linkage for the
+		// whole team. Skipping only defers finalization to a human.
+		if _, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir); isDraft || metaErr != nil {
+			h.logger.Debug("skipping draft or unclassifiable session", "session", name, "err", metaErr)
+			continue
+		}
+
 		// raw.jsonl must exist and be committed/pushed to the ledger.
 		// Without it there is nothing to summarize. For stale recordings
 		// missing raw.jsonl, recovery is attempted from the adapter source file.
@@ -576,6 +604,17 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			}
 
 			sessionDir := filepath.Join(sessionsDir, name)
+
+			// Never treat a draft placeholder as an orphan to recover, and fail
+			// CLOSED on an unreadable meta.json. This is the other detection
+			// path that can reach recoverRawFromSessionFile, which would write
+			// real transcript bytes onto the git-tracked raw.jsonl and break
+			// LFS linkage for the whole team. detectInDir got this guard; this
+			// function is scanned by the same directories and needs it too.
+			if _, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir); isDraft || metaErr != nil {
+				continue
+			}
+
 			recPath := filepath.Join(sessionDir, recordingMarker)
 
 			// read .recording.json to check agent ID
@@ -1246,6 +1285,12 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		// read.
 		return nil, fmt.Errorf("preserve existing SessionID for %s: %w", sessionName, err)
 	}
+	// A draft placeholder superseded by stageSessionInLedger held the id before
+	// it was purged. It outranks nothing that is already here — this only fills
+	// the gap where the staged dir carries no id of its own.
+	if preservedSessionID == "" && payload.PreservedSessionID != "" {
+		preservedSessionID = payload.PreservedSessionID
+	}
 	// start-minted ID carried in the raw.jsonl header so conversation URLs
 	// circulated during the live session (commit trailers, PR bodies) keep
 	// resolving after a daemon-side finalize
@@ -1328,6 +1373,17 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		next.AgentType = agentType
 		next.SessionID = sessionIDForMeta
 
+		// Clear the draft placeholder markers (ADR-029). MANDATORY on this
+		// path, not defensive: `next := current` above deliberately preserves
+		// every field the daemon does not own, which is correct for
+		// redactions / produced_commits / linkage but would carry draft=true
+		// straight through finalization. The result would be a fully
+		// finalized session that every consumer keeps treating as
+		// provisional — doctor refuses to repair it, abort offers to delete
+		// it, and the writer-side draft invariant then rejects this very
+		// write because a finalized meta has a populated Files manifest.
+		next.ClearDraft()
+
 		// Daemon-owned summary fields, assigned UNCONDITIONALLY. Writing ""
 		// on a successful run is the intended clear; applying
 		// preserve-if-empty here would make a past failure permanently
@@ -1399,6 +1455,12 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		if base == nil {
 			base = meta
 		}
+		// Same preserve-everything shape as the first mutation, so it needs the
+		// same draft clear. Without it, a base that is still a draft on disk
+		// gets a populated Files manifest — which validateDraftShape refuses,
+		// so the write is rejected, the LFS refs are silently dropped, and the
+		// content lands as raw git blobs with no pointer files.
+		base.ClearDraft()
 		base.Files = h.mergeFileRefs(base.Files, fileRefs, sessionName)
 		return base, nil
 	}); err != nil {
@@ -1444,6 +1506,35 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 
 	sessionName := filepath.Base(payload.SessionDir)
 	destDir := filepath.Join(payload.LedgerPath, "sessions", sessionName)
+
+	// Supersede any draft placeholder wholesale before copying (ADR-029).
+	// This loop copies every file from the cache dir over the destination, but
+	// a copy is not a purge: a server-authored summary.json sitting in the
+	// draft directory has no counterpart in the cache, so it would survive the
+	// copy and be picked up by missingArtifacts as if it were a real summary
+	// of the transcript. While meta.draft is true, everything in that
+	// directory is provisional.
+	//
+	// Best-effort: the copy below rewrites everything this path owns anyway,
+	// so a purge failure degrades to the pre-draft behavior rather than
+	// blocking finalization.
+	if draftID, wasDraft, err := lfs.PreservedSessionIDAndDraft(destDir); err == nil && wasDraft {
+		// Capture the draft's ses_ id BEFORE deleting the file that carries it.
+		// The draft is an extra durable carrier of that id, and it is the only
+		// carrier for a recording whose raw.jsonl header predates the field
+		// (legacy or imported). Purging first and resolving later would mint a
+		// fresh id and 404 a /c/ link already published in a PR body.
+		if draftID != "" {
+			payload.PreservedSessionID = draftID
+		}
+		if rmErr := h.runGit(payload.LedgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--",
+			filepath.ToSlash(filepath.Join("sessions", sessionName))); rmErr != nil {
+			h.logger.Warn("draft purge (git rm) failed; staging over the draft", "session", sessionName, "err", rmErr)
+		}
+		if rmErr := os.RemoveAll(destDir); rmErr != nil {
+			h.logger.Warn("draft purge (worktree) failed; staging over the draft", "session", sessionName, "err", rmErr)
+		}
+	}
 
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return fmt.Errorf("create ledger session dir: %w", err)

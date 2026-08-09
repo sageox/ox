@@ -167,10 +167,26 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 			continue
 		}
 
-		// skip if already uploaded (meta.json exists in ledger)
+		// skip if already uploaded (meta.json exists in ledger).
+		//
+		// A DRAFT placeholder does not count as uploaded. It is a
+		// meta.json-only marker published mid-recording (ADR-029) and carries
+		// no turn data, so treating it as "already uploaded" would make this
+		// orphan sweep skip the session permanently — and this check runs at
+		// FixLevelAuto, so a session whose upload failed after a draft was
+		// published would silently never be retried and its only copy would
+		// rot in the cache until pruned.
+		//
+		// Fail-safe direction: an UNREADABLE ledger meta.json is treated as
+		// "uploaded" (skip), matching the pre-draft behavior. Retrying an
+		// upload we cannot classify risks clobbering a finalized session;
+		// skipping it only defers recovery to a human running `ox doctor`.
 		ledgerSessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
 		if _, err := os.Stat(filepath.Join(ledgerSessionDir, "meta.json")); err == nil {
-			continue
+			ledgerMeta, metaErr := lfs.ReadSessionMeta(ledgerSessionDir)
+			if metaErr != nil || !ledgerMeta.IsDraft() {
+				continue
+			}
 		}
 
 		// parse header metadata
@@ -269,10 +285,23 @@ func readCacheSessionMeta(rawPath string) (*session.StoreMeta, int, error) {
 // two meta.json states for the same session.
 //
 // Non-NotExist meta.json read errors are fatal — see PreservedSessionID doc.
-func resolveOrphanSessionID(sessionDir string, orphan orphanedSession) (string, error) {
+func resolveOrphanSessionID(sessionDir string, orphan orphanedSession, draftPreservedID string) (string, error) {
 	preservedID, err := lfs.PreservedSessionID(sessionDir)
 	if err != nil {
 		return "", fmt.Errorf("preserve existing SessionID: %w", err)
+	}
+	// A draft placeholder that was just purged held the id; the file it lived in
+	// is gone by now, so the caller had to read it beforehand and hand it in.
+	//
+	// It slots in at PRESERVED precedence, not below the raw-header carrier, and
+	// that ordering is deliberate: ResolveSessionID's contract is
+	// preserved-beats-start-minted because preserved means "already written to
+	// meta.json", and a draft's meta.json has additionally been PUSHED — it is
+	// the id teammates' /c/ links and any commit trailers already reference.
+	// The header id is start-minted. On the rare occasion they disagree, the
+	// published one is the one that must survive.
+	if preservedID == "" {
+		preservedID = draftPreservedID
 	}
 	headerID := ""
 	if orphan.Meta != nil {
@@ -296,14 +325,27 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, orphan.SessionName)
 
-	if err := os.MkdirAll(sessionDir, 0755); err != nil {
-		return fmt.Errorf("create session dir: %w", err)
-	}
-
-	// validate raw.jsonl integrity before uploading — skip corrupted files
+	// Validate BEFORE mutating the ledger. Purging first and then bailing on a
+	// corrupt raw.jsonl would leave a staged deletion in the shared index that
+	// nothing commits — and the next unrelated bare `git commit` sweeps it up
+	// under the wrong message.
 	rawSrc := filepath.Join(orphan.CachePath, ledgerFileRaw)
 	if err := validateRawJSONLHeader(rawSrc); err != nil {
 		return fmt.Errorf("%s validation failed (skipping corrupt session): %w", ledgerFileRaw, err)
+	}
+
+	// Supersede a draft placeholder if one was published before the agent died,
+	// capturing its ses_ id first — the draft meta.json is a durable carrier of
+	// that id, and for a recording whose raw.jsonl header predates the SessionID
+	// field it is the ONLY carrier. Losing it here mints a fresh id and 404s a
+	// /c/ link already published in a PR body.
+	draftPreservedID, _, err := supersedeDraftForFinalize(ledgerPath, orphan.SessionName)
+	if err != nil {
+		return fmt.Errorf("classify existing ledger meta for %s: %w", orphan.SessionName, err)
+	}
+
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		return fmt.Errorf("create session dir: %w", err)
 	}
 
 	// raw.jsonl is the critical source of truth — copy it first and fail fast if missing.
@@ -330,7 +372,7 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 	// durable ID via the shared resolver, resolved before the network round
 	// trip so a corrupt pre-existing meta.json aborts fast rather than after
 	// a wasted LFS upload. See resolveOrphanSessionID doc.
-	sessionID, err := resolveOrphanSessionID(sessionDir, orphan)
+	sessionID, err := resolveOrphanSessionID(sessionDir, orphan, draftPreservedID)
 	if err != nil {
 		return err
 	}

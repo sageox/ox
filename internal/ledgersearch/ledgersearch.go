@@ -173,6 +173,34 @@ func tokenize(q string) []string {
 	return out
 }
 
+// isDraftSession reports whether a ledger session directory holds a draft
+// placeholder (ADR-029) rather than a finalized recording.
+//
+// A draft has no summary.md or session.md of its own, so skipping it is usually
+// a no-op — but the SageOx server may author a summary against the zero-turn
+// draft and push it, and indexing that would make a fabricated summary of an
+// empty session searchable and citable as team knowledge. Finalize purges those;
+// this keeps them out of results in the meantime.
+//
+// Decoded locally rather than via lfs.ReadSessionMeta, matching planTimestamp
+// below: this runs on the UserPromptSubmit hook latency path, and the package
+// deliberately carries no ox-internal dependencies. Fail-open — an unreadable
+// or absent meta.json is not a draft, so a malformed file can never make a real
+// session invisible to search.
+func isDraftSession(sessionPath string) bool {
+	data, err := os.ReadFile(filepath.Join(sessionPath, "meta.json"))
+	if err != nil {
+		return false
+	}
+	var meta struct {
+		Draft bool `json:"draft"`
+	}
+	if json.Unmarshal(data, &meta) != nil {
+		return false
+	}
+	return meta.Draft
+}
+
 // scanSessions walks sessions/<session-name>/ and scores summary/meta hits.
 // Reads only summary.md and meta.json — skips raw.jsonl (large, low signal,
 // often dehydrated to LFS pointer files).
@@ -196,6 +224,10 @@ func scanSessions(ledgerPath string, terms []string, now time.Time) []Result {
 			continue
 		}
 		sessionPath := filepath.Join(sessionsDir, name)
+
+		if isDraftSession(sessionPath) {
+			continue
+		}
 
 		// scan summary.md first (highest signal), fall back to session.md
 		for _, candidate := range []string{"summary.md", "session.md"} {

@@ -340,6 +340,12 @@ type UserConfig struct {
 	// internal/config/agent_summarizer.go and ADR-016.
 	AgentSummarizer string `yaml:"agent_summarizer,omitempty"`
 
+	// SessionDraft controls whether a meta.json-only draft placeholder is
+	// committed to the ledger partway through a recording, so the session's
+	// /c/<session_id> link resolves before session stop. "on" (default) or
+	// "off". See internal/config/session_draft.go and ADR-029.
+	SessionDraft string `yaml:"session_draft,omitempty"`
+
 	// Hooks holds per-hook-event policy switches. Today only carries the
 	// UserPromptSubmit cloud_query opt-in; see HooksConfig for rationale.
 	Hooks *HooksConfig `yaml:"hooks,omitempty"`

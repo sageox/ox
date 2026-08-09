@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -71,6 +72,15 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 		ledgerSessionDir = filepath.Join(ledgerPath, "sessions", sessionName)
 		if info, statErr := os.Stat(ledgerSessionDir); statErr == nil && info.IsDir() {
 			ledgerExists = true
+			// A draft placeholder in the ledger means the recording is very
+			// likely still LIVE (ADR-029). `session delete` is for removing a
+			// finished, uploaded session; deleting a live one here would take
+			// out the running recording's local copy too. Refuse and point at
+			// abort, which is the command that handles a live session and
+			// removes the placeholder as part of discarding it.
+			if meta, metaErr := lfs.ReadSessionMeta(ledgerSessionDir); metaErr == nil && meta.IsDraft() {
+				return fmt.Errorf("session %q is still recording (only a draft placeholder is published)\nUse 'ox agent %s session abort %s --force' to discard it", sessionName, inst.AgentID, sessionName)
+			}
 		}
 	}
 

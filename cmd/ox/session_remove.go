@@ -148,6 +148,17 @@ func removeSessionByPattern(store *session.Store, pattern string, force bool) er
 				if !strings.Contains(name, pattern) {
 					continue
 				}
+				// A draft placeholder is not a removable session (ADR-029) —
+				// it belongs to a recording that is very likely still LIVE.
+				// Before drafts, a pattern could not match a live session in
+				// the ledger at all; now it can, and removing it would delete
+				// the running recording's local copy alongside the placeholder.
+				// `ox agent session abort` is the command for discarding a
+				// live session, and it removes the placeholder itself.
+				if ls.Draft {
+					slog.Debug("skip_draft_placeholder", "session", name)
+					continue
+				}
 				if existing, ok := matchMap[name]; ok {
 					existing.isLedger = true
 					existing.ledgerPath = ledgerPath
