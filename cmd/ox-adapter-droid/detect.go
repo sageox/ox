@@ -24,24 +24,32 @@ func handleDetect() (*adapterprotocol.DetectResponse, error) {
 		}, nil
 	}
 
-	projectsDir := filepath.Join(factoryDir, "projects")
-	if _, err := os.Stat(projectsDir); os.IsNotExist(err) {
+	// shares droidSessionsDir with session discovery (session.go) so the two
+	// code paths cannot drift onto different directory names again.
+	sessionsDir, err := droidSessionsDir()
+	if err != nil {
 		return &adapterprotocol.DetectResponse{
 			Detected: false,
-			Reason:   "~/.factory/projects/ directory not found",
+			Reason:   "cannot determine home directory",
+		}, nil
+	}
+	if _, err := os.Stat(sessionsDir); os.IsNotExist(err) {
+		return &adapterprotocol.DetectResponse{
+			Detected: false,
+			Reason:   "~/.factory/sessions/ directory not found",
 		}, nil
 	}
 
-	entries, err := os.ReadDir(projectsDir)
+	entries, err := os.ReadDir(sessionsDir)
 	if err != nil || len(entries) == 0 {
 		return &adapterprotocol.DetectResponse{
 			Detected: false,
-			Reason:   "~/.factory/projects/ is empty",
+			Reason:   "~/.factory/sessions/ is empty",
 		}, nil
 	}
 
 	return &adapterprotocol.DetectResponse{
 		Detected: true,
-		Reason:   "found ~/.factory/projects/ with session data",
+		Reason:   "found ~/.factory/sessions/ with session data",
 	}, nil
 }

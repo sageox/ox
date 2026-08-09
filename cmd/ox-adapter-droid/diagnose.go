@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -19,6 +20,18 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 			Severity: "warning",
 			Title:    "Factory Droid not detected",
 			Detail:   "~/.factory directory not found. Factory Droid may not be installed.",
+		})
+	} else if detail := checkSessionStore(); detail != "" {
+		// the droid binary is on PATH but the session store this adapter reads
+		// is missing — either the user has never run droid, or Factory moved
+		// the store again (it moved at least once: projects/ -> sessions/).
+		// Either way, silent zero-entry recording looks identical to an idle
+		// session, so this must be loud.
+		issues = append(issues, adapterprotocol.DiagnoseIssue{
+			Slug:     "droid:store-missing",
+			Severity: "error",
+			Title:    "Factory Droid session store not found",
+			Detail:   detail,
 		})
 	}
 
@@ -77,4 +90,28 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 		OK:     len(issues) == 0,
 		Issues: issues,
 	}, nil
+}
+
+// checkSessionStore reports a detail message when ~/.factory exists (droid
+// has been used before) but the session store this adapter reads from is
+// missing while the droid binary is still on PATH. This is exactly the
+// failure mode that shipped broken once already: the store moved from
+// ~/.factory/projects/ to ~/.factory/sessions/ and every discovery path
+// silently produced nothing. If Factory relocates it again, this makes the
+// next relocation loud instead of a silent zero-entry recording that looks
+// identical to an idle session.
+func checkSessionStore() string {
+	sessionsDir, err := droidSessionsDir()
+	if err != nil {
+		return ""
+	}
+	if _, err := os.Stat(sessionsDir); err == nil {
+		return ""
+	}
+	if _, err := exec.LookPath("droid"); err != nil {
+		return ""
+	}
+	return "droid is installed but ~/.factory/sessions/ does not exist. " +
+		"Factory may have relocated the session store; session recording " +
+		"will silently produce nothing until this adapter is updated."
 }

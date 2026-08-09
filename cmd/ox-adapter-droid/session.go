@@ -1,7 +1,9 @@
 // session.go handles Factory Droid session reading, parsing, and discovery.
 //
-// Droid stores sessions as JSONL in ~/.factory/projects/<project-slug>/<uuid>.jsonl.
-// Each JSONL line has a top-level "type" field:
+// Droid stores sessions as JSONL in ~/.factory/sessions/<project-slug>/<uuid>.jsonl
+// (confirmed against a real droid 0.126.0 install; NOT ~/.factory/projects/,
+// which does not exist on a real machine). Each JSONL line has a top-level
+// "type" field:
 //   - "session_start": first line, contains session metadata (id, title, cwd)
 //   - "message": all subsequent lines, wraps a nested "message" object with
 //     role (user/assistant) and content (array of blocks: text, thinking,
@@ -9,8 +11,12 @@
 //
 // Companion metadata lives in <uuid>.settings.json alongside the JSONL file.
 //
-// The project slug algorithm is not publicly documented, so we scan all project
-// directories and match on the session_start entry's "cwd" field.
+// The project slug is a "-"-joined form of the cwd (e.g. cwd
+// "/Users/dev/project" -> slug "-Users-dev-project"), confirmed by inspecting
+// real session_start.cwd values against their containing directory names. The
+// algorithm is not documented by Factory, so this adapter does not reconstruct
+// it: it scans project directories and matches on the session_start entry's
+// "cwd" field, which is robust even if the slug scheme changes.
 //
 // Format reference: https://docs.factory.ai
 package main
@@ -177,16 +183,27 @@ func readFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int6
 	return entries, newOffset, nil
 }
 
+// droidSessionsDir returns the base sessions directory for Droid. It is a
+// function (not an inlined join) so tests can exercise the real lookup path
+// against a fixture tree via t.Setenv("HOME", ...) instead of only testing
+// helpers like projectDirMatchesRepo in isolation — the gap that let this
+// adapter ship pointed at a directory ("projects") Droid never wrote.
+func droidSessionsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	return filepath.Join(home, ".factory", "sessions"), nil
+}
+
 // findSessionFile locates a Droid session file for the given repo.
 // Since the project slug algorithm is undocumented, we scan all project
 // directories and match on the session_start cwd field.
 func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, int64, error) {
-	home, err := os.UserHomeDir()
+	projectsDir, err := droidSessionsDir()
 	if err != nil {
-		return "", 0, fmt.Errorf("cannot determine home directory: %w", err)
+		return "", 0, err
 	}
-
-	projectsDir := filepath.Join(home, ".factory", "projects")
 
 	// direct lookup via session UUID across all project dirs
 	if agentSessionID != "" {

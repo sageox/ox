@@ -1,6 +1,7 @@
 // ox-adapter-droid is the external adapter binary for Factory Droid sessions.
 //
-// Factory Droid stores sessions as JSONL in ~/.factory/projects/<project-slug>/.
+// Factory Droid stores sessions as JSONL in ~/.factory/sessions/<project-slug>/
+// (confirmed against a real droid 0.126.0 install).
 // Each line has a top-level "type" field: "session_start" (first line, metadata)
 // or "message" (all subsequent lines). Message entries wrap a nested "message"
 // object with "role" (user/assistant) and "content" (array of content blocks).

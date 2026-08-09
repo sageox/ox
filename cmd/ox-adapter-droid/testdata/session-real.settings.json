@@ -1,0 +1,27 @@
+{
+  "assistantActiveTimeMs": 44416,
+  "model": "custom:qwen3:30b-[Ollama]-0",
+  "reasoningEffort": "none",
+  "interactionMode": "auto",
+  "autonomyLevel": "off",
+  "autonomyMode": "normal",
+  "tokenUsage": {
+    "inputTokens": 27931,
+    "outputTokens": 1096,
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 0,
+    "thinkingTokens": 0,
+    "factoryCredits": 0
+  },
+  "childInclusiveTokenUsageBySessionId": {},
+  "inclusiveTokenUsage": {
+    "inputTokens": 27931,
+    "outputTokens": 1096,
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 0,
+    "thinkingTokens": 0,
+    "factoryCredits": 0
+  },
+  "providerLock": "generic-chat-completion-api",
+  "providerLockTimestamp": "2026-05-15T15:37:01.043Z"
+}
