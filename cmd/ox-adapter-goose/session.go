@@ -73,10 +73,33 @@ type gooseToolCallBody struct {
 }
 
 // gooseToolResp mirrors gooseToolCall for the response side.
+//
+// Value's shape varies: for MCP-style tool results it is a
+// gooseToolResultValue object; for simpler built-in tools it can be a bare
+// JSON scalar. It stays json.RawMessage here and is parsed on demand in
+// toolResponseFields, which tries the structured shape first and falls back
+// to treating Value as an opaque blob.
 type gooseToolResp struct {
 	Status string          `json:"status"`
 	Value  json.RawMessage `json:"value"`
 	Error  string          `json:"error"`
+}
+
+// gooseToolResultValue is the nested envelope Goose puts inside
+// toolResult.value for MCP-style tool responses. Its isError is the real
+// failure signal: Goose keeps the outer toolResult.status as "success" even
+// when the underlying command failed, so status alone cannot be trusted.
+type gooseToolResultValue struct {
+	Content []gooseTextBlock `json:"content"`
+	IsError bool             `json:"isError"`
+}
+
+// gooseTextBlock is one element of gooseToolResultValue.Content. Only the
+// text type contributes to the human-readable tool output; other content
+// block types (e.g. images) are not represented here and are skipped.
+type gooseTextBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 // --- database helpers ---
@@ -442,12 +465,33 @@ func toolRequestFields(b gooseBlock) (name, args string) {
 	return b.ToolCall.Value.Name, string(b.ToolCall.Value.Arguments)
 }
 
-// toolResponseFields returns the response body and whether it represents a
-// failure. Goose marks failure with a non-"success" status.
+// toolResponseFields returns the human-readable response text and whether it
+// represents a failure.
+//
+// value.isError is the authoritative failure signal: in every observed real
+// failed-command response, Goose leaves the outer toolResult.status as
+// "success" and nests the actual failure at toolResult.value.isError instead.
+// The outer status is only consulted as a fallback, for responses whose value
+// is absent or does not parse as the structured envelope (e.g. a bare JSON
+// scalar from a simpler built-in tool).
 func toolResponseFields(b gooseBlock) (content string, isError bool) {
 	if b.ToolResp == nil {
 		return "", false
 	}
+
+	if len(b.ToolResp.Value) > 0 {
+		var v gooseToolResultValue
+		if err := json.Unmarshal(b.ToolResp.Value, &v); err == nil {
+			text := joinTextBlocks(v.Content)
+			if text == "" {
+				// No extractable text (e.g. a content-less or non-text
+				// payload) — preserve the raw JSON rather than lose it.
+				text = string(b.ToolResp.Value)
+			}
+			return text, v.IsError
+		}
+	}
+
 	if b.ToolResp.Status != "" && b.ToolResp.Status != "success" {
 		if b.ToolResp.Error != "" {
 			return b.ToolResp.Error, true
@@ -455,6 +499,20 @@ func toolResponseFields(b gooseBlock) (content string, isError bool) {
 		return string(b.ToolResp.Value), true
 	}
 	return string(b.ToolResp.Value), false
+}
+
+// joinTextBlocks concatenates the text of every "text"-typed content block,
+// in order. Goose sometimes splits one response into several blocks (e.g. a
+// command's output plus a separate truncation notice); joining preserves
+// both rather than keeping only the first.
+func joinTextBlocks(blocks []gooseTextBlock) string {
+	var texts []string
+	for _, blk := range blocks {
+		if blk.Type == "text" && blk.Text != "" {
+			texts = append(texts, blk.Text)
+		}
+	}
+	return strings.Join(texts, "\n\n")
 }
 
 func makeEntry(role string, ts time.Time, content string) adapterprotocol.RawEntry {
