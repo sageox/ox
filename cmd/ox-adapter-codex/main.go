@@ -89,11 +89,12 @@ func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotoco
 	if err != nil {
 		return nil, fmt.Errorf("reading session: %w", err)
 	}
+	merged := mergeToolEntries(entries, nil)
 
 	meta := extractCodexMetadata(path)
 
 	return &adapterprotocol.ImportSessionResult{
 		Metadata: meta,
-		Entries:  entries,
+		Entries:  merged,
 	}, nil
 }

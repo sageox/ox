@@ -3,9 +3,11 @@
 // Codex CLI stores sessions as JSONL in ~/.codex/sessions/<session-id>.jsonl.
 // Each line is a JSON object with "type" field: "user", "assistant",
 // "function_call", "function_call_output". Tool entries have "name",
-// "arguments" (JSON string), and "call_id" for correlation. Multiple
-// function_call/function_call_output pairs may appear consecutively and are
-// merged into single tool entries by mergeToolEntries().
+// "arguments" (JSON string), and "call_id" for correlation. Real sessions
+// routinely fire several function_calls before any of their
+// function_call_outputs return (parallel/back-to-back tool use), so pairs
+// are rarely adjacent in the stream. mergeToolEntries() pairs them by
+// call_id regardless of distance.
 //
 // Format reference: https://github.com/openai/codex
 package main
@@ -65,7 +67,7 @@ func handleRead(p adapterprotocol.ReadParams) (*adapterprotocol.ReadResult, erro
 	if err != nil {
 		return nil, err
 	}
-	merged := mergeToolEntries(entries)
+	merged := mergeToolEntries(entries, nil)
 
 	// extract metadata
 	meta := extractCodexMetadata(p.SessionFile)
@@ -271,26 +273,86 @@ func isCodexToolError(output string) bool {
 	return false
 }
 
-func mergeToolEntries(entries []adapterprotocol.RawEntry) []adapterprotocol.RawEntry {
-	if len(entries) < 2 {
+// mergeToolEntries pairs function_call / function_call_output entries by
+// call_id regardless of how far apart they land in the parsed stream. Codex
+// routinely fires several tool calls before any of their results return, so
+// requiring strict adjacency (the previous implementation) missed most pairs
+// in real sessions — a call kept tool_name/tool_input with no output, and
+// its result surfaced later as an orphan entry with output but no name.
+//
+// pending carries call entries that have not yet seen a matching result, so
+// a call read in one incremental window and its result read in a later
+// window (see pendingCallStore in serve.go, which reuses this function for
+// the daemon's live tail-watch path) still merge instead of the result
+// surfacing as a nameless orphan. Pass nil for one-shot reads (handleRead,
+// ImportSession) where the whole file is already in entries and there is no
+// later window to carry state into.
+func mergeToolEntries(entries []adapterprotocol.RawEntry, pending map[string]adapterprotocol.RawEntry) []adapterprotocol.RawEntry {
+	if len(entries) == 0 {
 		return entries
 	}
+
+	// Index every call and result present in this batch by call_id so pairs
+	// merge regardless of distance. Entries without a call_id are excluded
+	// from the index — merging on an empty key would pair unrelated entries
+	// instead of leaving them alone.
+	callIdx := make(map[string]int, len(entries))
+	resultIdx := make(map[string]int, len(entries))
+	for i, e := range entries {
+		if e.Role != adapterprotocol.RoleTool || e.CallID == "" {
+			continue
+		}
+		if e.ToolName != "" {
+			if _, exists := callIdx[e.CallID]; !exists {
+				callIdx[e.CallID] = i
+			}
+		} else if _, exists := resultIdx[e.CallID]; !exists {
+			resultIdx[e.CallID] = i
+		}
+	}
+
 	result := make([]adapterprotocol.RawEntry, 0, len(entries))
-	i := 0
-	for i < len(entries) {
-		e := entries[i]
-		if e.Role == "tool" && e.ToolName != "" && e.CallID != "" && i+1 < len(entries) {
-			next := entries[i+1]
-			if next.Role == "tool" && next.ToolOutput != "" && next.CallID == e.CallID {
-				e.ToolOutput = next.ToolOutput
-				e.IsError = next.IsError
-				result = append(result, e)
-				i += 2
-				continue
+	for _, e := range entries {
+		if e.Role != adapterprotocol.RoleTool || e.CallID == "" {
+			result = append(result, e)
+			continue
+		}
+
+		if e.ToolName != "" {
+			// tool call: absorb its result if one landed in this same batch.
+			if ri, ok := resultIdx[e.CallID]; ok {
+				r := entries[ri]
+				e.ToolOutput = r.ToolOutput
+				e.IsError = r.IsError
+				if pending != nil {
+					delete(pending, e.CallID)
+				}
+			} else if pending != nil {
+				// no result yet in this batch — remember the call so a
+				// later batch can label its result when it arrives.
+				pending[e.CallID] = e
+			}
+			result = append(result, e)
+			continue
+		}
+
+		// tool result: ToolName == "" here (function_call_output never sets it).
+		if _, ok := callIdx[e.CallID]; ok {
+			// its call is in this same batch and already carries the
+			// output from the block above — drop the now-redundant
+			// standalone result.
+			continue
+		}
+		if pending != nil {
+			if call, ok := pending[e.CallID]; ok {
+				// call arrived in an earlier batch — label the result from
+				// it instead of letting it surface nameless.
+				e.ToolName = call.ToolName
+				e.ToolInput = call.ToolInput
+				delete(pending, e.CallID)
 			}
 		}
 		result = append(result, e)
-		i++
 	}
 	return result
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"sync"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
@@ -15,15 +16,52 @@ type codexSessionState struct {
 	offset      int64
 }
 
+// pendingCallStore carries mergeToolEntries' pending-call state across
+// incremental reads, keyed by session file. A tool call read in one window
+// (fsnotify batch or an OnReadFromOffset poll) commonly has its result land
+// in a later window — the ReadFunc callback FileWatcher invokes only knows
+// the file path, not an agent ID, so file path is the shared key both the
+// watcher and OnReadFromOffset use below. Locking wraps the whole merge so
+// two reads of the same file can't interleave their pending-map mutations.
+type pendingCallStore struct {
+	mu      sync.Mutex
+	pending map[string]map[string]adapterprotocol.RawEntry // sessionFile -> call_id -> call entry
+}
+
+func newPendingCallStore() *pendingCallStore {
+	return &pendingCallStore{pending: make(map[string]map[string]adapterprotocol.RawEntry)}
+}
+
+func (s *pendingCallStore) merge(sessionFile string, entries []adapterprotocol.RawEntry) []adapterprotocol.RawEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.pending[sessionFile]
+	if !ok {
+		p = make(map[string]adapterprotocol.RawEntry)
+		s.pending[sessionFile] = p
+	}
+	return mergeToolEntries(entries, p)
+}
+
+// forget drops pending-call state for a session file once it's no longer
+// being watched, so a long-running daemon doesn't accumulate state for
+// sessions that have ended.
+func (s *pendingCallStore) forget(sessionFile string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.pending, sessionFile)
+}
+
 func handleServe(srv *adapterruntime.Server) {
 	store := adapterruntime.NewSessionStore[*codexSessionState]()
+	pendingCalls := newPendingCallStore()
 
 	fw, err := adapterruntime.NewFileWatcher(srv.Writer(), func(file string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
 		entries, newOffset, err := readCodexFromOffset(file, offset)
 		if err != nil {
 			return nil, offset, err
 		}
-		return mergeToolEntries(entries), newOffset, nil
+		return pendingCalls.merge(file, entries), newOffset, nil
 	})
 	if err != nil {
 		log.Printf("file watcher unavailable: %v", err)
@@ -65,7 +103,7 @@ func handleServe(srv *adapterruntime.Server) {
 			return nil, err
 		}
 
-		merged := mergeToolEntries(entries)
+		merged := pendingCalls.merge(state.sessionFile, entries)
 		state.offset = newOffset
 
 		return &adapterprotocol.ReadFromOffsetResult{Entries: merged, NewOffset: newOffset}, nil
@@ -74,6 +112,9 @@ func handleServe(srv *adapterruntime.Server) {
 	srv.OnEndSession(func(ctx context.Context, p adapterprotocol.EndSessionParams) error {
 		if fw != nil {
 			fw.Unwatch(p.AgentID)
+		}
+		if state, ok := store.Get(p.AgentID); ok {
+			pendingCalls.forget(state.sessionFile)
 		}
 		store.Delete(p.AgentID)
 		return nil
