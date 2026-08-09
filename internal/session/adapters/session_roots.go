@@ -100,6 +100,8 @@ var adapterSessionRoots = map[string][]string{
 	// rejected every one of them until this root was listed.
 	"pi":    {".sageox/cache/sessions", ".cache/sageox/sessions", ".pi/agent/sessions"},
 	"aider": {".sageox/cache/sessions", ".cache/sageox/sessions"},
-	"droid": {".sageox/cache/sessions", ".cache/sageox/sessions"},
+	// Droid writes transcripts to ~/.factory/sessions/<project-slug>/<uuid>.jsonl
+	// and ox tails them in place, same as pi.
+	"droid": {".sageox/cache/sessions", ".cache/sageox/sessions", ".factory/sessions"},
 	"goose": {".sageox/cache/sessions", ".cache/sageox/sessions", ".local/share/goose/sessions"},
 }
