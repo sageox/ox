@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -292,6 +293,87 @@ func TestResolveSessionID_ScopedRepoWithNoSession_DoesNotLeakOtherProject(t *tes
 	_, err := resolveSessionID(db, adapterprotocol.FindSessionParams{RepoRoot: "/Users/dev/never-used"})
 	if err == nil {
 		t.Fatal("expected a not-found error — the fixture session belongs to a different repo and must never be attributed to this one")
+	}
+}
+
+// TestResolveSessionID_MatchesSubdirectory verifies a session started in a
+// subdirectory of the repo still resolves for a repo-root-scoped query.
+// Failure prevented: a repo scoped by its root never finding sessions
+// OpenCode recorded from a subdirectory, because "directory = ?" required
+// byte-for-byte equality.
+func TestResolveSessionID_MatchesSubdirectory(t *testing.T) {
+	db := newFixtureDB(t)
+
+	subdir := filepath.Join(fixtureDirectory, "services", "api")
+	if _, err := db.Exec(`INSERT INTO session (id, project_id, parent_id, directory, title, version, model, time_created, time_updated)
+		VALUES ('ses_subdir', 'global', NULL, ?, 'Subdir', '1.18.15', NULL, ?, ?)`,
+		subdir, fixtureCreatedMS+99999, fixtureCreatedMS+99999); err != nil {
+		t.Fatalf("seed subdirectory session: %v", err)
+	}
+
+	got, err := resolveSessionID(db, adapterprotocol.FindSessionParams{RepoRoot: fixtureDirectory})
+	if err != nil {
+		t.Fatalf("resolveSessionID: %v", err)
+	}
+	if got != "ses_subdir" {
+		t.Errorf("resolved %q, want the newer subdirectory session %q", got, "ses_subdir")
+	}
+}
+
+// TestResolveSessionID_TrailingSeparatorNormalized verifies a RepoRoot with a
+// trailing separator still matches a session directory without one.
+// Failure prevented: a trailing slash on the caller's RepoRoot silently
+// turning a real match into a false "no sessions found."
+func TestResolveSessionID_TrailingSeparatorNormalized(t *testing.T) {
+	db := newFixtureDB(t)
+
+	got, err := resolveSessionID(db, adapterprotocol.FindSessionParams{RepoRoot: fixtureDirectory + "/"})
+	if err != nil {
+		t.Fatalf("resolveSessionID: %v", err)
+	}
+	if got != fixtureSessionID {
+		t.Errorf("resolved %q, want %q", got, fixtureSessionID)
+	}
+}
+
+// TestResolveSessionID_ResolvesSymlinkedRepoRoot verifies a RepoRoot reached
+// through a symlink still matches a session whose recorded directory is the
+// canonical (symlink-resolved) path — the concrete case CodeRabbit called
+// out: /Users/... vs /private/... on macOS never compared equal.
+// Failure prevented: a repo whose path traverses a symlink (a symlinked
+// $HOME, /tmp vs /private/tmp, ...) never finding its own sessions.
+func TestResolveSessionID_ResolvesSymlinkedRepoRoot(t *testing.T) {
+	db := newFixtureDB(t)
+
+	parent := t.TempDir()
+	real := filepath.Join(parent, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatalf("mkdir real dir: %v", err)
+	}
+	resolvedReal, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(real): %v", err)
+	}
+
+	link := filepath.Join(parent, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	// OpenCode recorded the canonical, symlink-resolved directory...
+	if _, err := db.Exec(`INSERT INTO session (id, project_id, parent_id, directory, title, version, model, time_created, time_updated)
+		VALUES ('ses_symlinked', 'global', NULL, ?, 'Symlinked', '1.18.15', NULL, ?, ?)`,
+		resolvedReal, fixtureCreatedMS, fixtureCreatedMS); err != nil {
+		t.Fatalf("seed symlinked session: %v", err)
+	}
+
+	// ...but the caller passes the symlinked, unresolved path.
+	got, err := resolveSessionID(db, adapterprotocol.FindSessionParams{RepoRoot: link})
+	if err != nil {
+		t.Fatalf("resolveSessionID: %v", err)
+	}
+	if got != "ses_symlinked" {
+		t.Errorf("resolved %q, want %q", got, "ses_symlinked")
 	}
 }
 

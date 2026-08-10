@@ -169,7 +169,11 @@ func resolveSessionID(db *sql.DB, p adapterprotocol.FindSessionParams) (string, 
 	// wrong Ledger. Only a genuinely unscoped query (RepoRoot == "") searches
 	// across every directory.
 	if p.RepoRoot != "" {
-		id, err := queryLatestSession(db, p.RepoRoot, sinceMS)
+		root := filepath.Clean(p.RepoRoot)
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			root = resolved
+		}
+		id, err := queryLatestSession(db, root, sinceMS)
 		if err != nil {
 			return "", err
 		}
@@ -189,35 +193,57 @@ func resolveSessionID(db *sql.DB, p adapterprotocol.FindSessionParams) (string, 
 	return id, nil
 }
 
-// queryLatestSession returns the newest root session, or "" when none match.
+// queryLatestSession returns the newest root session whose directory is
+// `directory` itself or a subdirectory beneath it, or "" when none match. An
+// empty `directory` matches every session. The directory comparison happens
+// in Go rather than SQL LIKE/wildcard concatenation, because a directory
+// containing a literal '%' or '_' would otherwise be misread as a wildcard.
 func queryLatestSession(db *sql.DB, directory string, sinceMS int64) (string, error) {
 	var conds []string
 	var args []any
 
-	if directory != "" {
-		conds = append(conds, "directory = ?")
-		args = append(args, directory)
-	}
 	if sinceMS > 0 {
 		conds = append(conds, "time_created >= ?")
 		args = append(args, sinceMS)
 	}
 
-	query := "SELECT id FROM session WHERE parent_id IS NULL"
+	query := "SELECT id, directory FROM session WHERE parent_id IS NULL"
 	if len(conds) > 0 {
 		query += " AND " + strings.Join(conds, " AND ")
 	}
-	query += " ORDER BY time_created DESC LIMIT 1"
+	query += " ORDER BY time_created DESC"
 
-	var id string
-	err := db.QueryRow(query, args...).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return "", fmt.Errorf("query sessions: %w", err)
 	}
-	return id, nil
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var id, dir string
+		if err := rows.Scan(&id, &dir); err != nil {
+			return "", fmt.Errorf("scan session row: %w", err)
+		}
+		if directory == "" || underRoot(dir, directory) {
+			return id, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("query sessions: %w", err)
+	}
+	return "", nil
+}
+
+// underRoot reports whether dir is root itself or a subdirectory beneath it,
+// after cleaning both. root is expected to already be cleaned (and, where
+// possible, symlink-resolved) by the caller; dir comes straight from
+// OpenCode's database and is cleaned here.
+func underRoot(dir, root string) bool {
+	dir = filepath.Clean(dir)
+	if dir == root {
+		return true
+	}
+	return strings.HasPrefix(dir, root+string(filepath.Separator))
 }
 
 // --- full session read ---
