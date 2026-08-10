@@ -101,45 +101,25 @@ func readAmpFile(path string) ([]adapterprotocol.RawEntry, error) {
 	return entries, nil
 }
 
+// readAmpFromOffset resumes a tail read of the ox-bridge JSONL sidecar at
+// offset. Delegates to the shared adapterruntime.TailJSONL rather than a
+// private seek-and-scan loop: the private version this replaced advanced
+// the offset to the file's current size even when the final line was a
+// partial write-in-progress, silently losing the rest of that turn once
+// the agent finished writing it. TailJSONL stops at the last complete
+// newline instead.
 func readAmpFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, offset, fmt.Errorf("failed to open session file: %w", err)
+	return adapterruntime.TailJSONL(path, offset, parseAmpJSONLLine)
+}
+
+// parseAmpJSONLLine adapts parseAmpLine (single entry-or-nil, no error) to
+// adapterruntime.LineParser's (zero-or-more entries, error) shape.
+func parseAmpJSONLLine(line []byte) ([]adapterprotocol.RawEntry, error) {
+	entry := parseAmpLine(line)
+	if entry == nil {
+		return nil, nil
 	}
-	defer f.Close()
-
-	if offset > 0 {
-		if _, err := f.Seek(offset, 0); err != nil {
-			return nil, offset, fmt.Errorf("failed to seek: %w", err)
-		}
-	}
-
-	var entries []adapterprotocol.RawEntry
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		parsed := parseAmpLine(line)
-		if parsed != nil {
-			entries = append(entries, *parsed)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return entries, offset, fmt.Errorf("error reading session file: %w", err)
-	}
-
-	newOffset := offset
-	if info, err := f.Stat(); err == nil {
-		newOffset = info.Size()
-	}
-
-	return entries, newOffset, nil
+	return []adapterprotocol.RawEntry{*entry}, nil
 }
 
 func parseTS(s string) time.Time {
