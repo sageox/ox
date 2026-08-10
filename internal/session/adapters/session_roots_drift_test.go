@@ -66,6 +66,45 @@ var realHandles = []handleCase{
 		sessionFile: "goose:20260602_3",
 		captured:    "ox-adapter-goose find-session --repo-root <repo>",
 	},
+	// Amp has no lifecycle hooks, so ox's own embedded plugin writes this
+	// sidecar and ox tails it in place. The allow-list covered neither the
+	// plugin's directory nor the legacy one.
+	{
+		adapter:     "amp",
+		sessionFile: "~/.cache/amp/ox-sessions/T-a1b2c3d4.jsonl",
+		captured:    "cmd/ox-adapter-amp/plugin/ox-bridge.ts writes join(homedir(), '.cache', 'amp', 'ox-sessions')",
+	},
+	{
+		adapter:     "amp",
+		sessionFile: "~/.amp/sessions/T-a1b2c3d4.jsonl",
+		captured:    "cmd/ox-adapter-amp/main.go: legacy path for pre-2026 Amp installs",
+	},
+}
+
+// TestAllowList_AiderIsStructurallyUngovernable records a gap the table above
+// cannot express.
+//
+// Aider writes .aider.chat.history.md into the PROJECT ROOT, but every root in
+// adapterSessionRoots is home-relative — KnownSessionRoots joins each onto
+// homeDir. So no aider transcript can be allow-listed unless the repository
+// happens to sit inside one of those home paths, and the daemon rejects every
+// aider session it is handed.
+//
+// Fixing it means letting an adapter declare a project-relative session file
+// and giving the daemon the repo root to check against, which widens the trust
+// boundary the allow-list exists to hold. That is a deliberate design decision,
+// not a data fix, so this test asserts the CURRENT behavior and names the gap
+// rather than quietly papering over it.
+func TestAllowList_AiderIsStructurallyUngovernable(t *testing.T) {
+	const home = "/Users/someone"
+	projectTranscript := "/Users/someone/src/project/.aider.chat.history.md"
+
+	if IsSessionFileAllowed("aider", projectTranscript, home) {
+		t.Fatal("aider transcripts are now allow-listed — delete this test and add aider to realHandles above")
+	}
+	t.Log("KNOWN GAP: aider writes .aider.chat.history.md into the project root, " +
+		"but the allow-list is home-relative, so the daemon rejects every aider session. " +
+		"Needs a project-relative declaration and a repo root on SessionWatchStartPayload.")
 }
 
 func TestAllowList_AcceptsWhatAdaptersActuallyReturn(t *testing.T) {

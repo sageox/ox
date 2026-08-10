@@ -206,8 +206,15 @@ var adapterSessionRoots = map[string][]string{
 	"gemini":      {".gemini/tmp", ".gemini/sessions"},
 	// Generic / non-deep adapters store recordings inside the ox cache directory
 	// under the user's home — same fail-closed root as the deep adapters.
-	"generic":  {".sageox/cache/sessions", ".cache/sageox/sessions"},
-	"amp":      {".sageox/cache/sessions", ".cache/sageox/sessions"},
+	"generic": {".sageox/cache/sessions", ".cache/sageox/sessions"},
+	// Amp has no lifecycle hooks, so ox's embedded ox-bridge.ts plugin writes
+	// a per-thread JSONL sidecar and ox tails it in place. Neither of those
+	// paths was listed, so the daemon rejected every amp session it found.
+	"amp": {
+		".sageox/cache/sessions", ".cache/sageox/sessions",
+		".cache/amp/ox-sessions", // written by cmd/ox-adapter-amp/plugin/ox-bridge.ts
+		".amp/sessions",          // pre-2026 Amp installs
+	},
 	"opencode": {".sageox/cache/sessions", ".cache/sageox/sessions"},
 	// Pi has no lifecycle hooks, so ox tails its transcript in place; the
 	// adapter hands back a path under ~/.pi/agent/sessions and the daemon
