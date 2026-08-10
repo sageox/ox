@@ -16,10 +16,6 @@ import (
 	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
-// offsetWarning keeps the handle-adapter resume caveat to one log line per
-// daemon process — it is a standing limitation, not a per-batch event.
-var offsetWarning sync.Once
-
 // ErrSessionFileShape is returned when a session file is neither an absolute
 // path nor a well-formed opaque handle.
 //
@@ -362,6 +358,24 @@ func (m *SessionWatcherManager) runWatcher(
 		}
 	}
 
+	// Handle-based adapters (opencode, goose) have no file to watch — they read
+	// from a database, and their offset is a row count only the adapter can
+	// compute. Polling their own incremental reader is the only way this loop
+	// can hold an offset that actually advances; adapter.Watch emits entries
+	// with no cursor, so persisting anything alongside it was guesswork, and
+	// persisting the START offset meant a restart re-read every live entry and
+	// appended it a second time.
+	if adapters.IsOpaqueSessionHandle(aw.adapterName, aw.sessionFile) {
+		reader, ok := adapter.(adapters.IncrementalReader)
+		if !ok {
+			m.logger.Error("handle-based adapter has no incremental reader; cannot record",
+				"session", aw.sessionName, "adapter", aw.adapterName)
+			return
+		}
+		m.pollHandleSession(ctx, aw, reader, rw)
+		return
+	}
+
 	// live tail: watch for new entries from current EOF onward
 	ch, err := adapter.Watch(ctx, aw.sessionFile)
 	if err != nil {
@@ -390,19 +404,69 @@ func (m *SessionWatcherManager) runWatcher(
 		// the trailing partial record, which yields nothing until it is
 		// complete.
 		//
-		// Handle-based adapters have no file to size. Their offset is a row
-		// count owned by the adapter, so os.Stat fails and there is nothing
-		// honest to persist here; the entry count still advances. Say so once
-		// rather than failing silently, which is how the opencode and goose
-		// breakage stayed invisible in the first place.
-		if adapters.IsOpaqueSessionHandle(aw.adapterName, aw.sessionFile) {
-			m.persistOffset(aw, aw.startOffset, len(converted))
-			offsetWarning.Do(func() {
-				m.logger.Warn("resume offset is not tracked for handle-based adapters; a daemon restart re-reads from the last catch-up offset",
-					"adapter", aw.adapterName, "session", aw.sessionName)
-			})
-		} else if boundary, boundaryErr := adapterruntime.LastRecordBoundary(aw.sessionFile); boundaryErr == nil {
+		if boundary, boundaryErr := adapterruntime.LastRecordBoundary(aw.sessionFile); boundaryErr == nil {
 			m.persistOffset(aw, boundary, len(converted))
+		}
+	}
+}
+
+// handlePollInterval is how often a database-backed session is re-read. These
+// adapters have no filesystem event to wake on, so this is a straight poll.
+const handlePollInterval = 2 * time.Second
+
+// pollHandleSession records a database-backed session (opencode, goose) by
+// repeatedly asking the adapter for everything after the cursor it last
+// returned.
+//
+// The cursor comes from the adapter on every pass, so it always reflects what
+// was actually consumed. That is the whole point: the previous code persisted
+// the offset the watcher STARTED with, so a daemon restart re-read every entry
+// written during the live phase and appended each one a second time.
+func (m *SessionWatcherManager) pollHandleSession(
+	ctx context.Context, aw *activeWatcher,
+	reader adapters.IncrementalReader, rw *session.RawWriter,
+) {
+	offset := aw.startOffset
+	ticker := time.NewTicker(handlePollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		entries, newOffset, err := reader.ReadFromOffset(aw.sessionFile, offset)
+		if err != nil {
+			m.logger.Warn("handle-based session read failed",
+				"session", aw.sessionName, "adapter", aw.adapterName, "offset", offset, "error", err)
+			continue
+		}
+		if len(entries) == 0 {
+			// nothing new; do NOT persist, so a cursor that went backwards or
+			// stalled cannot be written over a good one
+			continue
+		}
+
+		converted := session.ConvertRawEntries(entries)
+		for i := range converted {
+			if writeErr := rw.WriteEntry(&converted[i]); writeErr != nil {
+				m.logger.Warn("failed to write entry to raw.jsonl",
+					"session", aw.sessionName, "error", writeErr)
+			}
+		}
+
+		// only advance on forward progress — an adapter that reports a cursor
+		// at or behind where we asked would otherwise make the next poll
+		// re-emit the same rows forever
+		if newOffset > offset {
+			offset = newOffset
+			m.persistOffset(aw, offset, len(converted))
+		} else {
+			m.logger.Warn("handle-based adapter returned entries without advancing its cursor",
+				"session", aw.sessionName, "adapter", aw.adapterName,
+				"offset", offset, "returned", newOffset, "entries", len(entries))
 		}
 	}
 }
