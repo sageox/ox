@@ -242,6 +242,37 @@ func TestCheck_CatchesBackwardsOffset(t *testing.T) {
 		"an offset that moves backwards makes the next poll re-read what it already emitted")
 }
 
+// TestCheck_CatchesAResumeThatReturnsNothing covers a reader that stops
+// producing entries partway through. An empty slice is a suffix of any list, so
+// the suffix comparison alone accepts it — and whether it does depends on
+// whether the adapter returns nil or a pre-allocated empty slice, which is an
+// allocation detail rather than a behavior.
+func TestCheck_CatchesAResumeThatReturnsNothing(t *testing.T) {
+	full := goodTranscript()
+	empty := func(offset int64) ([]adapterprotocol.RawEntry, int64, error) {
+		if offset == 0 {
+			return full, int64(len(full)), nil
+		}
+		return []adapterprotocol.RawEntry{}, int64(len(full)), nil // non-nil, empty
+	}
+	assertFires(t, incrementalSuite(empty), RuleResumeExact,
+		"a reader that returns nothing mid-transcript stops the recording and looks healthy")
+}
+
+// TestCheck_CatchesAStalledOffset covers the duplication case: correct entries,
+// but the offset never advances, so every poll re-emits them.
+func TestCheck_CatchesAStalledOffset(t *testing.T) {
+	full := goodTranscript()
+	stalled := func(offset int64) ([]adapterprotocol.RawEntry, int64, error) {
+		if offset >= int64(len(full)) {
+			return nil, offset, nil
+		}
+		return full[offset:], offset, nil // right tail, offset never moves
+	}
+	assertFires(t, incrementalSuite(stalled), RuleResumeExact,
+		"an offset that never advances makes the ledger duplicate every turn on every poll")
+}
+
 func TestCheck_CatchesResumeReadError(t *testing.T) {
 	failing := func(int64) ([]adapterprotocol.RawEntry, int64, error) {
 		return nil, 0, errors.New("seek past end of file")

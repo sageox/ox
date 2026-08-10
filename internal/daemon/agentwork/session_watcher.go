@@ -3,6 +3,7 @@ package agentwork
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,6 +18,14 @@ import (
 // offsetWarning keeps the handle-adapter resume caveat to one log line per
 // daemon process — it is a standing limitation, not a per-batch event.
 var offsetWarning sync.Once
+
+// ErrSessionFileShape is returned when a session file is neither an absolute
+// path nor a well-formed opaque handle.
+//
+// A sentinel, not a message: tests that match on error TEXT cannot tell a
+// rejection-for-the-right-reason from an unrelated failure, so they stay green
+// when the check they guard is deleted. errors.Is against this is decidable.
+var ErrSessionFileShape = errors.New("session file is neither an absolute path nor an opaque handle")
 
 // SessionWatcherManager manages TailWatchers for active tail-mode recordings.
 // It runs watchers that tail agent session files and write entries to raw.jsonl.
@@ -65,10 +74,17 @@ func NewSessionWatcherManager(logger *slog.Logger) *SessionWatcherManager {
 	}
 }
 
-// homeDir is the root the session-file allow-list is resolved against. Held on
-// the manager rather than read at each call so tests can point it at a temp
-// directory instead of the developer's real home.
+// homeDir is the root the session-file allow-list is resolved against.
 func (m *SessionWatcherManager) homeDir() string { return m.home }
+
+// SetHomeDirForTest points the allow-list at a controlled home so a test can
+// plant files under an adapter's real root layout without touching the
+// developer's actual home directory.
+func (m *SessionWatcherManager) SetHomeDirForTest(home string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.home = home
+}
 
 // StartWatch begins tailing a session file and writing entries to raw.jsonl.
 // Called directly from IPC handler (bypasses work queue for fast startup).
@@ -103,7 +119,8 @@ func (m *SessionWatcherManager) startWatchAt(
 	// rejected both of those outright, so recording never started for them
 	// however correct their readers were.
 	if !filepath.IsAbs(sessionFile) && !adapters.IsOpaqueSessionHandle(adapterName, sessionFile) {
-		return fmt.Errorf("session file must be an absolute path or an opaque handle for %s: %q", adapterName, sessionFile)
+		return fmt.Errorf("%w: %s gave %q, which is neither an absolute path nor an opaque handle",
+			ErrSessionFileShape, adapterName, sessionFile)
 	}
 
 	// Both entry points funnel through here — IPC via StartWatch and doctor
@@ -112,10 +129,13 @@ func (m *SessionWatcherManager) startWatchAt(
 	// check cannot see a symlink inside an allowed root pointing somewhere it
 	// should not; the tail loop below opens this path and uploads what it
 	// reads. Resolve before trusting.
-	sessionFile, err := adapters.SafeSessionFilePath(adapterName, sessionFile, m.homeDir())
+	// keep the requested path for the error message — SafeSessionFilePath
+	// returns "" on refusal, and "refusing to watch \"\"" tells nobody anything
+	safePath, err := adapters.SafeSessionFilePath(adapterName, sessionFile, m.homeDir())
 	if err != nil {
 		return fmt.Errorf("refusing to watch %q for %s: %w", sessionFile, adapterName, err)
 	}
+	sessionFile = safePath
 
 	adapter, err := resolveAdapter(adapterName)
 	if err != nil {

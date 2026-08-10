@@ -182,6 +182,118 @@ func TestTailJSONL_RestartsWhenTheFileShrank(t *testing.T) {
 	}
 }
 
+// TestTailJSONL_RestartsWhenTheFileWasReplaced covers the cases a size
+// comparison misses: the replacement is LONGER than the stale offset, or
+// exactly the same size. Both would otherwise resume inside an unrelated
+// record and silently lose the start of the new transcript.
+func TestTailJSONL_RestartsWhenTheFileWasReplaced(t *testing.T) {
+	tests := []struct {
+		name        string
+		replacement string
+		want        string
+	}{
+		{
+			name:        "replacement is longer than the stale offset",
+			replacement: line("fresh-one") + line("fresh-two") + line("fresh-three") + line("fresh-four"),
+			want:        "fresh-one,fresh-two,fresh-three,fresh-four",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := line("one") + line("two")
+			path := writeFile(t, original)
+
+			_, offset, err := TailJSONL(path, 0, testParse)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := os.WriteFile(path, []byte(tt.replacement), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			entries, _, err := TailJSONL(path, offset, testParse)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(texts(entries), ","); got != tt.want {
+				t.Errorf("got %q, want %q — the replacement transcript must be read from the start", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTailJSONL_CannotDetectASameSizeReplacement records a limitation the
+// boundary check cannot close, so nobody rediscovers it as a mystery bug.
+//
+// A byte offset carries no file identity. When a transcript is replaced in
+// place by one of exactly the same size, the stale offset still lands on a
+// record boundary and still equals the file size, so the read is
+// indistinguishable from "already caught up" and the replacement is never read.
+//
+// Closing this needs identity the offset does not carry — an inode or a content
+// hash persisted alongside it. That is a change to what the watcher stores, not
+// something this function can decide, so this asserts the CURRENT behavior and
+// names the gap rather than pretending it is handled.
+func TestTailJSONL_CannotDetectASameSizeReplacement(t *testing.T) {
+	original := line("one") + line("two")
+	path := writeFile(t, original)
+
+	_, offset, err := TailJSONL(path, 0, testParse)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := line("aaa") + line("bbb") // same byte count, different content
+	if len(replacement) != len(original) {
+		t.Fatalf("test setup is wrong: %d != %d", len(replacement), len(original))
+	}
+	if err := os.WriteFile(path, []byte(replacement), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, _, err := TailJSONL(path, offset, testParse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("a same-size replacement is now detected — delete this test and fold the case into TestTailJSONL_RestartsWhenTheFileWasReplaced")
+	}
+	t.Log("KNOWN GAP: a same-size in-place replacement reads as already-consumed. " +
+		"Needs file identity (inode or content hash) persisted with the offset.")
+}
+
+// TestTailJSONL_RestartsFromAMidRecordOffset covers a corrupted persisted
+// offset pointing into the middle of a record.
+func TestTailJSONL_RestartsFromAMidRecordOffset(t *testing.T) {
+	path := writeFile(t, line("one")+line("two"))
+
+	entries, _, err := TailJSONL(path, 7, testParse) // deliberately mid-record
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(texts(entries), ","); got != "one,two" {
+		t.Errorf("got %q, want the whole file re-read — a mid-record offset is not resumable", got)
+	}
+}
+
+func TestTailJSONL_RestartsFromANegativeOffset(t *testing.T) {
+	path := writeFile(t, line("one"))
+
+	entries, offset, err := TailJSONL(path, -5, testParse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(texts(entries), ","); got != "one" {
+		t.Errorf("got %q, want the file read from the start", got)
+	}
+	info, _ := os.Stat(path)
+	if offset != info.Size() {
+		t.Errorf("offset %d, want %d — a negative offset must not leave the reader permanently short", offset, info.Size())
+	}
+}
+
 func TestTailJSONL_ReadingAtEndReturnsNothing(t *testing.T) {
 	path := writeFile(t, line("one"))
 	_, offset, err := TailJSONL(path, 0, testParse)
@@ -210,6 +322,96 @@ func TestTailJSONL_HandlesCRLF(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Content != "one" {
 		t.Errorf("got %v, want one record with a stripped carriage return", texts(entries))
+	}
+}
+
+// TestTailJSONLWithStats_ReportsADeadParser covers the failure this whole
+// package exists to prevent. A parser that matches nothing the agent writes
+// returns zero entries, no error, and an offset advanced to EOF — identical
+// from the outside to an idle session. The counts are what make it visible
+// without needing a fixture.
+func TestTailJSONLWithStats_ReportsADeadParser(t *testing.T) {
+	path := writeFile(t, line("one")+line("two")+line("three"))
+
+	deadParser := func([]byte) ([]adapterprotocol.RawEntry, error) {
+		return nil, errors.New("no field matched")
+	}
+
+	entries, _, stats, err := TailJSONLWithStats(path, 0, deadParser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected the dead parser to yield nothing, got %d", len(entries))
+	}
+	if stats.LinesRead != 3 {
+		t.Errorf("LinesRead = %d, want 3 — without this the read looks idle", stats.LinesRead)
+	}
+	if stats.ParseErrors != 3 {
+		t.Errorf("ParseErrors = %d, want 3", stats.ParseErrors)
+	}
+	if !stats.AllLinesFailedToParse() {
+		t.Error("AllLinesFailedToParse() = false for a read that understood none of 3 records — this is the signal that would have caught all six broken adapters on their first real run")
+	}
+}
+
+func TestTailJSONLWithStats_HealthyReadIsNotFlaggedAsDead(t *testing.T) {
+	path := writeFile(t, line("one")+`{"type":"telemetry"}`+"\n"+line("two"))
+
+	_, _, stats, err := TailJSONLWithStats(path, 0, testParse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.AllLinesFailedToParse() {
+		t.Error("a read that parsed 2 of 3 records was flagged as dead — one unmodeled record type is normal")
+	}
+	if stats.EntriesParsed != 2 || stats.ParseErrors != 1 {
+		t.Errorf("stats = %+v, want 2 parsed and 1 error", stats)
+	}
+}
+
+// TestTailJSONL_DoesNotConsumeAnOversizedPartialRecord covers the bug where a
+// record above the size cap had its io.EOF swallowed, so an unterminated
+// oversized record was consumed as if complete and the rest of that turn was
+// lost once the agent finished writing it.
+func TestTailJSONL_DoesNotConsumeAnOversizedPartialRecord(t *testing.T) {
+	complete := line("one")
+	// oversized AND unterminated: the agent is still writing it
+	partial := `{"type":"message","text":"` + strings.Repeat("x", maxLineBytes+1024)
+	path := writeFile(t, complete+partial)
+
+	entries, offset, _, err := TailJSONLWithStats(path, 0, testParse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := texts(entries); strings.Join(got, ",") != "one" {
+		t.Errorf("got %v, want only the complete record", got)
+	}
+	if offset != int64(len(complete)) {
+		t.Errorf("offset %d consumed an unterminated oversized record; want %d so it is re-read once complete",
+			offset, len(complete))
+	}
+}
+
+// TestTailJSONL_SkipsAnOversizedCompleteRecordWithoutLosingTheNextOne makes
+// sure the size cap costs exactly one record, not the rest of the file.
+func TestTailJSONL_SkipsAnOversizedCompleteRecordWithoutLosingTheNextOne(t *testing.T) {
+	huge := `{"type":"message","text":"` + strings.Repeat("x", maxLineBytes+1024) + `"}` + "\n"
+	path := writeFile(t, line("before")+huge+line("after"))
+
+	entries, offset, stats, err := TailJSONLWithStats(path, 0, testParse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := texts(entries); strings.Join(got, ",") != "before,after" {
+		t.Errorf("got %v — an oversized record must cost only itself", got)
+	}
+	if stats.ParseErrors != 1 {
+		t.Errorf("ParseErrors = %d, want 1 for the skipped oversized record", stats.ParseErrors)
+	}
+	info, _ := os.Stat(path)
+	if offset != info.Size() {
+		t.Errorf("offset %d, want the full size %d — the skipped record must still be consumed", offset, info.Size())
 	}
 }
 

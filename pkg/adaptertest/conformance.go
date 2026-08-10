@@ -369,6 +369,16 @@ func checkResume(s Suite, full []adapterprotocol.RawEntry) []Problem {
 			add("resume point %d (offset %d) failed: %v", i, offset, err)
 			continue
 		}
+		// An empty result is a suffix of anything, so the DeepEqual below
+		// accepts it whenever the reader returns a non-nil empty slice — and
+		// whether it does is an allocation detail, not a behavior. A reader
+		// that returns nothing at every offset stops recording after the first
+		// chunk and looks perfectly healthy. Reject it explicitly.
+		if len(got) == 0 {
+			add("resume point %d (offset %d) returned nothing — a live poll would never see the rest of the transcript", i, offset)
+			continue
+		}
+
 		// a mid-transcript resume point must skip something; a reader that
 		// replays the whole transcript would otherwise pass the suffix check
 		// below trivially, because the whole list is a suffix of itself
@@ -382,8 +392,12 @@ func checkResume(s Suite, full []adapterprotocol.RawEntry) []Problem {
 			add("resume point %d (offset %d) did not return the tail of the full read — entries are duplicated or skipped\n  got:  %s\n  want: %s",
 				i, offset, summarize(got), summarize(want))
 		}
-		if newOffset < offset {
-			add("resume point %d moved the offset backwards (%d -> %d)", i, offset, newOffset)
+		// A stalled offset hurts more than a backwards one: the reader returns
+		// the correct tail and reports the same position, so every subsequent
+		// poll re-emits those entries and the ledger duplicates without bound.
+		if newOffset <= offset {
+			add("resume point %d returned %d entries but did not advance the offset (%d -> %d) — every later poll re-emits them",
+				i, len(got), offset, newOffset)
 		}
 	}
 

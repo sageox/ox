@@ -124,11 +124,8 @@ func SafeSessionFilePath(adapterName, sessionFile, homeDir string) (string, erro
 
 	resolved, err := filepath.EvalSymlinks(sessionFile)
 	if err != nil {
-		// a session file that does not exist yet is normal on a fresh start;
-		// the lexical check already passed, so let the caller proceed and fail
-		// on the open if it never appears
 		if os.IsNotExist(err) {
-			return sessionFile, nil
+			return pendingSessionFilePath(adapterName, sessionFile, homeDir)
 		}
 		return "", err
 	}
@@ -140,6 +137,39 @@ func SafeSessionFilePath(adapterName, sessionFile, homeDir string) (string, erro
 		return "", ErrSessionFileEscapes
 	}
 	return resolved, nil
+}
+
+// pendingSessionFilePath handles the case where EvalSymlinks reported that
+// something on the path does not exist.
+//
+// A fresh recording names its transcript before the agent creates it, so this
+// has to succeed for the ordinary case. But EvalSymlinks reports IsNotExist for
+// a DANGLING SYMLINK too, and treating that as "not created yet" hands the
+// caller an unresolved link: a peer plants
+// ~/.pi/agent/sessions/notes.jsonl -> ~/.aws/credentials, which does not exist
+// yet, gets it accepted, then creates the target and the daemon follows the
+// link for the life of the session. No race needed.
+//
+// So: refuse anything whose final component is already a symlink, and prove the
+// PARENT directory is contained — a parent that resolves outside the root is
+// the same escape one level up.
+func pendingSessionFilePath(adapterName, sessionFile, homeDir string) (string, error) {
+	if li, err := os.Lstat(sessionFile); err == nil && li.Mode()&os.ModeSymlink != 0 {
+		// it exists and is a link; EvalSymlinks failed because its TARGET is
+		// missing, which is a plant, not a pending transcript
+		return "", ErrSessionFileEscapes
+	}
+
+	parent, err := filepath.EvalSymlinks(filepath.Dir(sessionFile))
+	if err != nil {
+		// the directory is missing too — nothing to validate against, so the
+		// containment claim cannot be made
+		return "", ErrSessionFileEscapes
+	}
+	if !isUnderResolvedRoot(adapterName, parent, homeDir) {
+		return "", ErrSessionFileEscapes
+	}
+	return filepath.Join(parent, filepath.Base(sessionFile)), nil
 }
 
 func isUnderResolvedRoot(adapterName, resolvedFile, homeDir string) bool {

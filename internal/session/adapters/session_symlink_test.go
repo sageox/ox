@@ -124,18 +124,78 @@ func TestSafeSessionFilePath_AcceptsASymlinkedHome(t *testing.T) {
 	}
 }
 
-func TestSafeSessionFilePath_AllowsAMissingFile(t *testing.T) {
+func TestSafeSessionFilePath_AllowsAMissingFileInARealDirectory(t *testing.T) {
 	home, sessions := piSessionsRoot(t)
 
 	// a fresh recording names the transcript before the agent creates it;
 	// rejecting that would break every first-run session
-	notYet := filepath.Join(sessions, "project", "brand-new.jsonl")
+	dir := filepath.Join(sessions, "project")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notYet := filepath.Join(dir, "brand-new.jsonl")
+
 	got, err := SafeSessionFilePath("pi", notYet, home)
 	if err != nil {
-		t.Errorf("a not-yet-created transcript was rejected: %v", err)
+		t.Fatalf("a not-yet-created transcript was rejected: %v", err)
 	}
-	if got != notYet {
-		t.Errorf("got %q, want the unresolved path %q", got, notYet)
+	resolvedDir, _ := filepath.EvalSymlinks(dir)
+	if want := filepath.Join(resolvedDir, "brand-new.jsonl"); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestSafeSessionFilePath_RejectsADanglingSymlink is the bypass that hid behind
+// "the file does not exist yet".
+//
+// EvalSymlinks reports IsNotExist for a dangling symlink exactly as it does for
+// a missing file. Treating both as pending handed back the unresolved link, so
+// a peer could plant a link to a file that does not exist, get it accepted, then
+// create the target and have the daemon read through it. No race required.
+func TestSafeSessionFilePath_RejectsADanglingSymlink(t *testing.T) {
+	home, sessions := piSessionsRoot(t)
+
+	target := filepath.Join(home, ".aws", "credentials") // deliberately not created
+	planted := filepath.Join(sessions, "notes.jsonl")
+	if err := os.Symlink(target, planted); err != nil {
+		t.Skipf("cannot create symlink on this platform: %v", err)
+	}
+
+	got, err := SafeSessionFilePath("pi", planted, home)
+	if !errors.Is(err, ErrSessionFileEscapes) {
+		t.Fatalf("a dangling symlink was accepted (got=%q err=%v) — creating %s afterwards would make the daemon read it",
+			got, err, target)
+	}
+
+	// and it must still be refused once the target appears
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SafeSessionFilePath("pi", planted, home); !errors.Is(err, ErrSessionFileEscapes) {
+		t.Errorf("after the target was created the link was accepted: %v", err)
+	}
+}
+
+// TestSafeSessionFilePath_RejectsAPendingFileInAnEscapingDirectory covers the
+// same escape one level up: the file does not exist, but its parent is a
+// symlink pointing out of the root.
+func TestSafeSessionFilePath_RejectsAPendingFileInAnEscapingDirectory(t *testing.T) {
+	home, sessions := piSessionsRoot(t)
+
+	outside := filepath.Join(home, "elsewhere")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(sessions, "project")); err != nil {
+		t.Skipf("cannot create symlink on this platform: %v", err)
+	}
+
+	pending := filepath.Join(sessions, "project", "not-yet.jsonl")
+	if _, err := SafeSessionFilePath("pi", pending, home); !errors.Is(err, ErrSessionFileEscapes) {
+		t.Errorf("a pending file inside a symlinked-out directory was accepted: %v", err)
 	}
 }
 
