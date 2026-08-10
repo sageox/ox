@@ -50,15 +50,27 @@ func KnownSessionRootsForCurrentUser(adapterName string) []string {
 	return KnownSessionRoots(adapterName, home)
 }
 
-// IsSessionFileAllowed reports whether sessionFile is under one of the
-// recorded roots for the named adapter. sessionFile must be an absolute
-// path; relative paths are rejected outright (no implicit home expansion
-// — IPC peers send absolute paths in practice).
+// IsSessionFileAllowed reports whether sessionFile is something the named
+// adapter may legitimately hand the daemon: either a path under one of that
+// adapter's recorded roots, or an opaque handle for the adapters that do not
+// tail a file at all (see IsOpaqueSessionHandle).
+//
+// Paths must be absolute; relative paths are rejected outright (no implicit
+// home expansion — IPC peers send absolute paths in practice).
 //
 // Returns false when the adapter is unknown, the path is not absolute, or
 // the path falls outside every allowed root.
 func IsSessionFileAllowed(adapterName, sessionFile, homeDir string) bool {
-	if sessionFile == "" || !filepath.IsAbs(sessionFile) {
+	if sessionFile == "" {
+		return false
+	}
+	// opencode and goose read from a SQLite database, so their find-session
+	// returns an id, not a path. Rejecting those as "not absolute" silently
+	// killed recording for both agents.
+	if IsOpaqueSessionHandle(adapterName, sessionFile) {
+		return true
+	}
+	if !filepath.IsAbs(sessionFile) {
 		return false
 	}
 	roots := KnownSessionRoots(adapterName, homeDir)
@@ -76,6 +88,42 @@ func IsSessionFileAllowed(adapterName, sessionFile, homeDir string) bool {
 		}
 	}
 	return false
+}
+
+// IsOpaqueSessionHandle reports whether sessionFile is a well-formed opaque
+// handle for the named adapter — the "<adapter>:<id>" form used by adapters
+// that read from a database rather than tailing a file on disk.
+//
+// The allow-list exists to stop a same-UID IPC peer naming an arbitrary file
+// for the daemon to read and upload. An opaque handle is safe from that by
+// construction: it is resolved by the adapter's own reader and is never opened
+// as a path. That safety depends entirely on the id being unable to express a
+// path, so anything that could be — a separator, a parent reference, a null
+// byte — is rejected here rather than trusted downstream.
+func IsOpaqueSessionHandle(adapterName, sessionFile string) bool {
+	prefix, ok := adapterSessionHandles[CanonicalAdapterName(adapterName)]
+	if !ok {
+		return false
+	}
+	id, found := strings.CutPrefix(sessionFile, prefix)
+	if !found || id == "" {
+		return false
+	}
+	// no separators (either platform's), no traversal, no NUL smuggling
+	if strings.ContainsAny(id, `/\`+"\x00") || strings.Contains(id, "..") {
+		return false
+	}
+	return true
+}
+
+// adapterSessionHandles declares the adapters whose find-session returns an
+// opaque "<adapter>:<id>" handle instead of a path, and the exact prefix each
+// one emits. An adapter absent from this map may only supply paths.
+var adapterSessionHandles = map[string]string{
+	// stores sessions in ~/.local/share/opencode/opencode.db
+	"opencode": "opencode:",
+	// stores sessions in ~/.local/share/goose/sessions/sessions.db
+	"goose": "goose:",
 }
 
 // adapterSessionRoots is the canonical map of adapter name → ~-relative path

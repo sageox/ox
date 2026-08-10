@@ -14,6 +14,10 @@ import (
 	"github.com/sageox/ox/internal/session/adapters"
 )
 
+// offsetWarning keeps the handle-adapter resume caveat to one log line per
+// daemon process — it is a standing limitation, not a per-batch event.
+var offsetWarning sync.Once
+
 // SessionWatcherManager manages TailWatchers for active tail-mode recordings.
 // It runs watchers that tail agent session files and write entries to raw.jsonl.
 //
@@ -80,9 +84,13 @@ func (m *SessionWatcherManager) startWatchAt(
 		return nil
 	}
 
-	// basic path validation: session file must be an absolute path
-	if !filepath.IsAbs(sessionFile) {
-		return fmt.Errorf("session file must be absolute path: %q", sessionFile)
+	// basic validation: a session file is either an absolute path to tail, or
+	// an opaque "<adapter>:<id>" handle for the adapters that read from a
+	// database instead of a file (opencode, goose). Requiring a path here
+	// rejected both of those outright, so recording never started for them
+	// however correct their readers were.
+	if !filepath.IsAbs(sessionFile) && !adapters.IsOpaqueSessionHandle(adapterName, sessionFile) {
+		return fmt.Errorf("session file must be an absolute path or an opaque handle for %s: %q", adapterName, sessionFile)
 	}
 
 	adapter, err := resolveAdapter(adapterName)
@@ -332,7 +340,19 @@ func (m *SessionWatcherManager) runWatcher(
 		// File size >= bytes consumed, so worst case we over-estimate
 		// slightly; a catch-up read from the over-estimated offset
 		// returns 0 entries on restart — no data loss or duplication.
-		if fi, statErr := os.Stat(aw.sessionFile); statErr == nil {
+		//
+		// Handle-based adapters have no file to size. Their offset is a row
+		// count owned by the adapter, so os.Stat fails and there is nothing
+		// honest to persist here; the entry count still advances. Say so once
+		// rather than failing silently, which is how the opencode and goose
+		// breakage stayed invisible in the first place.
+		if adapters.IsOpaqueSessionHandle(aw.adapterName, aw.sessionFile) {
+			m.persistOffset(aw, aw.startOffset, len(converted))
+			offsetWarning.Do(func() {
+				m.logger.Warn("resume offset is not tracked for handle-based adapters; a daemon restart re-reads from the last catch-up offset",
+					"adapter", aw.adapterName, "session", aw.sessionName)
+			})
+		} else if fi, statErr := os.Stat(aw.sessionFile); statErr == nil {
 			m.persistOffset(aw, fi.Size(), len(converted))
 		}
 	}
