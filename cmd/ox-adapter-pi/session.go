@@ -111,42 +111,18 @@ func readPiFile(path string) ([]adapterprotocol.RawEntry, error) {
 	return entries, nil
 }
 
+// readPiFromOffset resumes a Pi transcript at a byte offset using the shared
+// JSONL tail reader (pkg/adapterruntime.TailJSONL). The hand-rolled version
+// this replaced advanced the offset to the file's current size on every
+// call, which acknowledges bytes that were never parsed: Pi writes its
+// transcript incrementally, so the final line read mid-write is frequently
+// partial, and advancing past it silently drops the rest of that turn once
+// Pi finishes writing it. TailJSONL stops at the last complete newline
+// instead.
 func readPiFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, offset, fmt.Errorf("failed to open session file: %w", err)
-	}
-	defer f.Close()
-
-	if offset > 0 {
-		if _, err := f.Seek(offset, 0); err != nil {
-			return nil, offset, fmt.Errorf("failed to seek: %w", err)
-		}
-	}
-
-	var entries []adapterprotocol.RawEntry
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		entries = append(entries, parsePiLine(line)...)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return entries, offset, fmt.Errorf("error reading session file: %w", err)
-	}
-
-	newOffset := offset
-	if info, err := f.Stat(); err == nil {
-		newOffset = info.Size()
-	}
-
-	return entries, newOffset, nil
+	return adapterruntime.TailJSONL(path, offset, func(line []byte) ([]adapterprotocol.RawEntry, error) {
+		return parsePiLine(line), nil
+	})
 }
 
 func parseTS(s string) time.Time {
@@ -265,17 +241,20 @@ func findPiSession(repoRoot, agentID, since, agentSessionID string) (string, err
 		}
 	}
 
-	// if repoRoot is provided, look in the specific project subdirectory first
+	// A project-scoped query (repoRoot set) is confined to that project's own
+	// directory — never falling back to "newest session anywhere" — because
+	// Ledgers are per-repo and shared with teammates; attributing another
+	// project's transcript to this repo would leak its conversation content
+	// into the wrong Ledger. Only a genuinely unscoped query (repoRoot == "")
+	// searches every subdirectory.
 	var searchDirs []string
 	if repoRoot != "" {
 		projectDir := filepath.Join(baseDir, cwdToDirName(repoRoot))
-		if info, err := os.Stat(projectDir); err == nil && info.IsDir() {
-			searchDirs = append(searchDirs, projectDir)
+		if info, err := os.Stat(projectDir); err != nil || !info.IsDir() {
+			return "", fmt.Errorf("no pi sessions found for %s", repoRoot)
 		}
-	}
-
-	// fall back to searching all subdirectories
-	if len(searchDirs) == 0 {
+		searchDirs = append(searchDirs, projectDir)
+	} else {
 		subdirs, err := os.ReadDir(baseDir)
 		if err != nil {
 			return "", fmt.Errorf("failed to read sessions dir: %w", err)
@@ -312,6 +291,9 @@ func findPiSession(repoRoot, agentID, since, agentSessionID string) (string, err
 	}
 
 	if len(candidates) == 0 {
+		if repoRoot != "" {
+			return "", fmt.Errorf("no pi sessions found for %s", repoRoot)
+		}
 		return "", fmt.Errorf("no pi sessions found")
 	}
 

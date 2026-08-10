@@ -144,8 +144,9 @@ func TestParsePiLine_TimestampPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse timestamp %q: %v", entries[0].Timestamp, err)
 	}
-	if ts.Year() != 2026 || ts.Month() != time.April {
-		t.Errorf("timestamp = %s, want the record's 2026-04 value", ts)
+	want := time.Date(2026, time.April, 4, 1, 3, 14, 0, time.UTC)
+	if !ts.Equal(want) {
+		t.Errorf("timestamp = %s, want %s — a parser that truncates milliseconds or shifts the day/time/offset must fail here", ts, want)
 	}
 }
 
@@ -321,6 +322,68 @@ func TestFindPiSession_MostRecent(t *testing.T) {
 	}
 	if got != newer {
 		t.Errorf("got %q, want %q (most recent)", got, newer)
+	}
+}
+
+// TestFindPiSession_ScopedRepoWithNoSessions_DoesNotLeakOtherProject is the
+// regression gate for a cross-project data leak: a project-scoped lookup for
+// a repo with no session directory of its own must return "not found", not
+// silently fall back to the newest session anywhere on disk. Ledgers are
+// shared with teammates, so returning a foreign project's transcript here
+// would write one repo's conversation content into a different repo's
+// ledger.
+//
+// Failure prevented: findPiSession("/repo-a", ...) returning a transcript
+// that belongs to "/repo-b" because "/repo-a"'s mangled-cwd directory
+// doesn't exist yet and the code fell through to a global newest-file scan.
+func TestFindPiSession_ScopedRepoWithNoSessions_DoesNotLeakOtherProject(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Only repo B has a session directory. Repo A's mangled-cwd directory
+	// does not exist at all.
+	repoB := "/Users/dev/repo-b"
+	projectDirB := filepath.Join(home, ".pi", "agent", "sessions", cwdToDirName(repoB))
+	if err := os.MkdirAll(projectDirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := `{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"repo b conversation"}` + "\n"
+	if err := os.WriteFile(filepath.Join(projectDirB, "session-b.jsonl"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	repoA := "/Users/dev/repo-a"
+	got, err := findPiSession(repoA, "", "", "")
+	if err == nil {
+		t.Fatalf("findPiSession(%q) = %q, want a not-found error — repo B's transcript must never be attributed to repo A", repoA, got)
+	}
+}
+
+// TestFindPiSession_UnscopedFallsBackToNewestAnywhere pins the one case where
+// scanning every subdirectory IS correct: no repoRoot was supplied at all
+// (an unscoped query), which callers exercise via handleDetect's format-check
+// path and a bare CapturePrior call. Losing this fallback would break that
+// case while fixing the scoped-leak bug above.
+func TestFindPiSession_UnscopedFallsBackToNewestAnywhere(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	projectDir := filepath.Join(home, ".pi", "agent", "sessions", "--some--project")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionFile := filepath.Join(projectDir, "session.jsonl")
+	data := `{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"test"}` + "\n"
+	if err := os.WriteFile(sessionFile, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := findPiSession("", "", "", "")
+	if err != nil {
+		t.Fatalf("findPiSession(\"\"): %v", err)
+	}
+	if got != sessionFile {
+		t.Errorf("got %q, want %q", got, sessionFile)
 	}
 }
 

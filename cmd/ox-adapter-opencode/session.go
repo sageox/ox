@@ -162,16 +162,21 @@ func resolveSessionID(db *sql.DB, p adapterprotocol.FindSessionParams) (string, 
 		sinceMS = t.UnixMilli()
 	}
 
-	// scoping by directory disambiguates concurrent OpenCode sessions; fall
-	// back to the global newest when this repo has no session of its own
+	// A project-scoped query (RepoRoot set) is confined to that project's own
+	// sessions — never falling back to "newest session anywhere" — because
+	// Ledgers are per-repo and shared with teammates; attaching another
+	// project's session here would leak its conversation content into the
+	// wrong Ledger. Only a genuinely unscoped query (RepoRoot == "") searches
+	// across every directory.
 	if p.RepoRoot != "" {
 		id, err := queryLatestSession(db, p.RepoRoot, sinceMS)
 		if err != nil {
 			return "", err
 		}
-		if id != "" {
-			return id, nil
+		if id == "" {
+			return "", fmt.Errorf("no opencode sessions found for %s", p.RepoRoot)
 		}
+		return id, nil
 	}
 
 	id, err := queryLatestSession(db, "", sinceMS)

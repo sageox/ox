@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -60,9 +61,14 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 		// a missing AGENTS.md is a missing hook, not a reason to stay quiet —
 		// install-hooks creates the file
 		data, err := os.ReadFile(agentsPath)
-		// accept either the current or legacy Pi marker — a pre-#527
-		// install is still considered "installed" for diagnosis purposes
-		if err != nil || !piBlockAlreadyPresent(string(data)) {
+		switch {
+		case err == nil && piBlockAlreadyPresent(string(data)):
+			// accept either the current or legacy Pi marker — a pre-#527
+			// install is still considered "installed" for diagnosis purposes
+		case err == nil, errors.Is(err, os.ErrNotExist):
+			// the file is readable and just lacks the marker, or doesn't
+			// exist yet — both are repairable by writing/appending the
+			// block, which install-hooks does safely and idempotently.
 			detail := "AGENTS.md does not contain ox prime marker."
 			if err != nil {
 				detail = "AGENTS.md not found at " + agentsPath + "."
@@ -72,8 +78,27 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 				Severity: "warning",
 				Title:    "Pi hooks not installed",
 				Detail:   detail,
-				Fix:      "ox-adapter-pi install-hooks --repo-root " + p.RepoRoot + " --scope project",
-				FixSafe:  true,
+				Fix:      "ox integrate install --pi",
+				// "ox" is the only allowlisted argv[0] for the doctor
+				// auto-fix path (ox-adapter-pi itself is rejected by
+				// adapterFixArgvAllowlist), so route through the in-process
+				// `ox integrate install --pi` command rather than the
+				// external adapter binary.
+				FixArgv: []string{"ox", "integrate", "install", "--pi"},
+				FixSafe: true,
+			})
+		default:
+			// anything else (permission denied, a symlink loop, an I/O
+			// error) means we can't even tell whether the marker is
+			// present, let alone safely write over it — surface this as
+			// unreadable rather than silently offering an auto-fix that
+			// might clobber content we never verified.
+			issues = append(issues, adapterprotocol.DiagnoseIssue{
+				Slug:     "pi:agents-md-unreadable",
+				Severity: "error",
+				Title:    "AGENTS.md could not be read",
+				Detail:   fmt.Sprintf("%s: %v — check file permissions and ownership.", agentsPath, err),
+				FixSafe:  false,
 			})
 		}
 	}

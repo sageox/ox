@@ -276,15 +276,22 @@ func TestResolveSessionID_PrefersMatchingDirectory(t *testing.T) {
 	}
 }
 
-func TestResolveSessionID_FallsBackWhenRepoHasNoSession(t *testing.T) {
+// TestResolveSessionID_ScopedRepoWithNoSession_DoesNotLeakOtherProject is the
+// regression gate for a cross-project data leak: a project-scoped lookup for
+// a repo with no session of its own must return "not found", not silently
+// fall back to the newest session anywhere in the database. Ledgers are
+// shared with teammates, so returning a foreign repo's session here would
+// write that repo's conversation content into this repo's Ledger.
+//
+// Failure prevented: resolveSessionID(RepoRoot: "/repo-a") returning a
+// session that belongs to "/repo-b" because "/repo-a" has no session row and
+// the code fell through to a global newest-session query.
+func TestResolveSessionID_ScopedRepoWithNoSession_DoesNotLeakOtherProject(t *testing.T) {
 	db := newFixtureDB(t)
 
-	got, err := resolveSessionID(db, adapterprotocol.FindSessionParams{RepoRoot: "/Users/dev/never-used"})
-	if err != nil {
-		t.Fatalf("resolveSessionID: %v", err)
-	}
-	if got != fixtureSessionID {
-		t.Errorf("resolved %q, want fallback to %q", got, fixtureSessionID)
+	_, err := resolveSessionID(db, adapterprotocol.FindSessionParams{RepoRoot: "/Users/dev/never-used"})
+	if err == nil {
+		t.Fatal("expected a not-found error — the fixture session belongs to a different repo and must never be attributed to this one")
 	}
 }
 

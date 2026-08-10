@@ -77,6 +77,48 @@ func TestFindCodexSession_DirectLookup_InvalidFallsBack(t *testing.T) {
 	}
 }
 
+// --- C. Tool error detection ---
+
+// TestIsCodexToolError_RealExecCommandFormat is the regression gate for a
+// failed command being silently reported as successful. Real
+// exec_command/write_stdin output embeds "Process exited with code N" as one
+// line inside a multi-line block ("Command: ...\nChunk ID: ...\nWall time:
+// ...\nProcess exited with code N\n..."), never as a prefix of the whole
+// string — a strict HasPrefix check against the entire output therefore
+// never matched, and every real failed command surfaced with IsError false.
+// Failure prevented: a failed tool call recorded as successful misleads
+// every later reader of the Ledger.
+func TestIsCodexToolError_RealExecCommandFormat(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "real exec_command failure",
+			output: "Command: /bin/zsh -lc 'ox agent prime'\nChunk ID: 510c80\nWall time: 0.0000 seconds\nProcess exited with code 1\nOriginal token count: 180\nOutput:\nwarning: session recording failed to start\n",
+			want:   true,
+		},
+		{
+			name:   "real exec_command success",
+			output: "Command: /bin/zsh -lc \"sed -n '1,220p' AGENTS.md\"\nChunk ID: 82a950\nWall time: 0.2035 seconds\nProcess exited with code 0\nOriginal token count: 241\nOutput:\n# Project\n",
+			want:   false,
+		},
+		{name: "bare legacy failure", output: "Process exited with code 1", want: true},
+		{name: "bare legacy success", output: "Process exited with code 0", want: false},
+		{name: "empty output", output: "", want: false},
+		{name: "no exit-code line", output: "some other tool output\nwith no exit code"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCodexToolError(tc.output); got != tc.want {
+				t.Errorf("isCodexToolError(%q) = %v, want %v", tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
 // --- B. Timestamp-based fallback (existing behavior) ---
 
 // TestFindCodexSession_TimestampFallback verifies that an empty agent session ID

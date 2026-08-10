@@ -11,6 +11,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// legacyPrimeMarkerStart / End and legacyInProcessMarkerStart / End pin the
+// pre-#527 marker bytes literally, rather than referencing
+// piLegacyPrimeMarkerStart/piLegacyInProcessMarkerStart from hooks.go. A test
+// that builds its "legacy" fixture from the same constant the implementation
+// uses can never detect a change to that constant — it moves with the code
+// instead of pinning the historical value it exists to guard.
+const (
+	legacyPrimeMarkerStart     = "<!-- ox:prime:start -->"
+	legacyPrimeMarkerEnd       = "<!-- ox:prime:end -->"
+	legacyInProcessMarkerStart = "<!-- ox:pi-prime:start -->"
+	legacyInProcessMarkerEnd   = "<!-- ox:pi-prime:end -->"
+)
+
 // --- Marker uniqueness ---
 
 // TestPiMarkers_AreUniqueToPi guards the #527 fix: the current Pi marker
@@ -59,7 +72,7 @@ func TestInstall_IdempotentForLegacyGenericMarker(t *testing.T) {
 
 	// seed with the pre-#527 generic marker pair that the external
 	// adapter used to emit
-	seed := piLegacyPrimeMarkerStart + "\nold block\n" + piLegacyPrimeMarkerEnd + "\n"
+	seed := legacyPrimeMarkerStart + "\nold block\n" + legacyPrimeMarkerEnd + "\n"
 	require.NoError(t, os.WriteFile(agentsPath, []byte(seed), 0644))
 
 	_, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"})
@@ -68,8 +81,10 @@ func TestInstall_IdempotentForLegacyGenericMarker(t *testing.T) {
 	data, err := os.ReadFile(agentsPath)
 	require.NoError(t, err)
 	content := string(data)
-	assert.Contains(t, content, piLegacyPrimeMarkerStart,
-		"legacy block should be preserved; doctor is responsible for cleanup")
+	// full-file equality, not just Contains: a legacy block already present
+	// must make install a complete no-op, byte for byte.
+	assert.Equal(t, seed, content,
+		"installing over an existing legacy block must not modify the file at all")
 	assert.NotContains(t, content, piPrimeMarkerStart,
 		"legacy presence must prevent adding a second (current-marker) block")
 }
@@ -87,18 +102,19 @@ func TestUninstall_RemovesCurrentAndLegacyBlocks(t *testing.T) {
 	// seed with both a current and a legacy block adjacent — simulating
 	// a repo that was installed pre-fix and then again post-fix
 	content := piPrimeMarkerStart + "\ncurrent\n" + piPrimeMarkerEnd + "\n\n" +
-		piLegacyPrimeMarkerStart + "\nlegacy\n" + piLegacyPrimeMarkerEnd + "\n"
+		legacyPrimeMarkerStart + "\nlegacy\n" + legacyPrimeMarkerEnd + "\n"
 	require.NoError(t, os.WriteFile(agentsPath, []byte(content), 0644))
 
 	_, err := handleUninstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"})
 	require.NoError(t, err)
 
-	// file may be removed entirely since all content was our blocks
-	if data, readErr := os.ReadFile(agentsPath); readErr == nil {
-		got := string(data)
-		assert.NotContains(t, got, piPrimeMarkerStart)
-		assert.NotContains(t, got, piLegacyPrimeMarkerStart)
-	}
+	// the seed file was entirely our two blocks with nothing else, so
+	// removing both must leave nothing behind — assert the file is gone
+	// rather than only conditionally checking its content if it happens
+	// to still exist.
+	_, readErr := os.ReadFile(agentsPath)
+	require.Error(t, readErr, "AGENTS.md should have been removed — it contained only our blocks")
+	assert.True(t, os.IsNotExist(readErr), "expected a not-exist error, got %v", readErr)
 }
 
 // TestInstall_IdempotentForLegacyInProcessMarker covers the marker that only
@@ -110,7 +126,7 @@ func TestInstall_IdempotentForLegacyInProcessMarker(t *testing.T) {
 	dir := t.TempDir()
 	agentsPath := filepath.Join(dir, "AGENTS.md")
 
-	legacy := piLegacyInProcessMarkerStart + "\n## SageOx Team Context\n\nold body\n" + piLegacyInProcessMarkerEnd + "\n"
+	legacy := legacyInProcessMarkerStart + "\n## SageOx Team Context\n\nold body\n" + legacyInProcessMarkerEnd + "\n"
 	if err := os.WriteFile(agentsPath, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -124,11 +140,11 @@ func TestInstall_IdempotentForLegacyInProcessMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(data)
-	if strings.Contains(content, piPrimeMarkerStart) {
-		t.Error("adapter appended a second block on top of the legacy in-process one")
-	}
-	if !strings.Contains(content, piLegacyInProcessMarkerStart) {
-		t.Error("legacy block was destroyed; doctor owns that migration")
+	// full-file equality: a legacy in-process block already present must
+	// make install a complete no-op, byte for byte — not merely "the new
+	// marker is absent somewhere in a longer file."
+	if content != legacy {
+		t.Errorf("install over an existing legacy in-process block must not modify the file at all:\ngot:  %q\nwant: %q", content, legacy)
 	}
 }
 
@@ -139,7 +155,7 @@ func TestUninstall_RemovesLegacyInProcessBlock(t *testing.T) {
 	agentsPath := filepath.Join(dir, "AGENTS.md")
 
 	content := "# Project\n\n" +
-		piLegacyInProcessMarkerStart + "\nold body\n" + piLegacyInProcessMarkerEnd + "\n"
+		legacyInProcessMarkerStart + "\nold body\n" + legacyInProcessMarkerEnd + "\n"
 	if err := os.WriteFile(agentsPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -152,11 +168,11 @@ func TestUninstall_RemovesLegacyInProcessBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AGENTS.md should survive — it had non-ox content: %v", err)
 	}
-	if strings.Contains(string(data), piLegacyInProcessMarkerStart) {
-		t.Errorf("legacy in-process block survived uninstall: %q", data)
-	}
-	if !strings.Contains(string(data), "# Project") {
-		t.Error("uninstall destroyed unrelated content")
+	// full-file equality: only the legacy block should be gone, and nothing
+	// else about the surrounding content should shift.
+	want := "# Project\n"
+	if string(data) != want {
+		t.Errorf("uninstall left unexpected content:\ngot:  %q\nwant: %q", data, want)
 	}
 }
 
