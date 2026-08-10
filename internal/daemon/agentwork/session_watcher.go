@@ -333,26 +333,36 @@ func (m *SessionWatcherManager) runWatcher(
 	}
 	defer rw.Close()
 
-	// catch-up: read entries between persisted offset and current EOF
-	if reader, ok := adapter.(adapters.IncrementalReader); ok && aw.startOffset > 0 {
-		entries, newOffset, readErr := reader.ReadFromOffset(aw.sessionFile, aw.startOffset)
-		if readErr != nil {
-			m.logger.Warn("catch-up read failed, starting from EOF",
-				"session", aw.sessionName, "offset", aw.startOffset, "error", readErr)
-		} else if len(entries) > 0 {
+	// cursor is where recording resumes from. It starts at the persisted
+	// offset and must be carried through catch-up into the poll loop —
+	// re-deriving it from aw.startOffset later would re-read and duplicate
+	// everything catch-up just recovered.
+	cursor := aw.startOffset
+
+	// catch-up: read entries between the persisted offset and now
+	if reader, ok := adapter.(adapters.IncrementalReader); ok && cursor > 0 {
+		entries, newOffset, readErr := reader.ReadFromOffset(aw.sessionFile, cursor)
+		switch {
+		case readErr != nil:
+			m.logger.Warn("catch-up read failed; continuing from the persisted offset",
+				"session", aw.sessionName, "offset", cursor, "error", readErr)
+		case len(entries) > 0:
 			converted := session.ConvertRawEntries(entries)
-			for i := range converted {
-				if encErr := rw.WriteEntry(&converted[i]); encErr != nil {
-					m.logger.Warn("failed to write catch-up entry to raw.jsonl",
-						"session", aw.sessionName, "error", encErr)
-				}
+			if writeErr := writeEntries(rw, converted); writeErr != nil {
+				// the cursor must NOT advance past entries that never reached
+				// the ledger: doing so marks them consumed and they are gone
+				// for good. Leaving it where it is costs a re-read.
+				m.logger.Error("catch-up write failed; leaving the cursor in place so the entries can be recovered",
+					"session", aw.sessionName, "offset", cursor, "error", writeErr)
+				return
 			}
-			m.persistOffset(aw, newOffset, len(converted))
+			cursor = newOffset
+			m.persistOffset(aw, cursor, len(converted))
 			m.logger.Info("catch-up read recovered entries",
 				"session", aw.sessionName,
 				"entries", len(entries),
 				"from_offset", aw.startOffset,
-				"to_offset", newOffset,
+				"to_offset", cursor,
 			)
 		}
 	}
@@ -370,7 +380,7 @@ func (m *SessionWatcherManager) runWatcher(
 	// ReadFromOffset returns the cursor it actually consumed to, so there is
 	// nothing to infer.
 	if reader, ok := adapter.(adapters.IncrementalReader); ok {
-		m.pollSession(ctx, aw, reader, rw)
+		m.pollSession(ctx, aw, reader, rw, cursor)
 		return
 	}
 
@@ -413,9 +423,9 @@ const pollInterval = 2 * time.Second
 // written during the live phase and appended each one a second time.
 func (m *SessionWatcherManager) pollSession(
 	ctx context.Context, aw *activeWatcher,
-	reader adapters.IncrementalReader, rw *session.RawWriter,
+	reader adapters.IncrementalReader, rw *session.RawWriter, startCursor int64,
 ) {
-	offset := aw.startOffset
+	offset := startCursor
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
@@ -452,16 +462,32 @@ func (m *SessionWatcherManager) pollSession(
 		}
 
 		converted := session.ConvertRawEntries(entries)
-		for i := range converted {
-			if writeErr := rw.WriteEntry(&converted[i]); writeErr != nil {
-				m.logger.Warn("failed to write entry to raw.jsonl",
-					"session", aw.sessionName, "error", writeErr)
-			}
+		if writeErr := writeEntries(rw, converted); writeErr != nil {
+			// Advancing here would mark entries consumed that never reached
+			// the ledger, and the adapter would resume past them — they are
+			// unrecoverable. Stop with the cursor where it is so a restart
+			// re-reads them; a duplicated batch is visible and fixable, a
+			// silently dropped one is not.
+			m.logger.Error("write to raw.jsonl failed; stopping this recording with the cursor unadvanced so the entries can be recovered",
+				"session", aw.sessionName, "adapter", aw.adapterName, "offset", offset, "error", writeErr)
+			return
 		}
 
 		offset = newOffset
 		m.persistOffset(aw, offset, len(converted))
 	}
+}
+
+// writeEntries writes every entry, returning the first failure. A partial batch is
+// reported as a failure so the caller can decline to advance its cursor past
+// entries the ledger never received.
+func writeEntries(rw *session.RawWriter, entries []session.Entry) error {
+	for i := range entries {
+		if err := rw.WriteEntry(&entries[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // persistOffset updates SourceOffset and EntryCount in .recording.json.

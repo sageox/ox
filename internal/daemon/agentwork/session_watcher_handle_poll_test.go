@@ -101,7 +101,7 @@ func runPoll(t *testing.T, reader adapters.IncrementalReader, startOffset int64)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		m.pollSession(ctx, aw, reader, rw)
+		m.pollSession(ctx, aw, reader, rw, startOffset)
 	}()
 
 	return rawPath, recPath, func() {
@@ -209,6 +209,49 @@ func TestPollSession_RestartDoesNotReplay(t *testing.T) {
 	time.Sleep(2 * pollInterval)
 	if n := countOccurrences(t, rawPath2, "alpha"); n != 0 {
 		t.Errorf("restart replayed %d already-recorded entries — the ledger would double-count them", n)
+	}
+}
+
+// failingWriterReader returns rows normally; the test pairs it with a closed
+// writer so every WriteEntry fails.
+type failingWriterReader struct{ fakeHandleReader }
+
+// TestPollSession_DoesNotAdvancePastEntriesTheLedgerNeverReceived covers a
+// write failure. Advancing the cursor there marks entries consumed that were
+// never written, and the adapter resumes past them — they are gone. Leaving the
+// cursor costs a re-read, which is visible and fixable.
+func TestPollSession_DoesNotAdvancePastEntriesTheLedgerNeverReceived(t *testing.T) {
+	reader := &failingWriterReader{}
+	reader.append("lost-if-acknowledged")
+
+	cache := t.TempDir()
+	recPath := filepath.Join(cache, ".recording.json")
+	state := session.RecordingState{WatchMode: "tail", AdapterName: "opencode", SessionFile: "opencode:ses_x"}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rw, err := session.NewRawWriter(filepath.Join(cache, "raw.jsonl"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// close it so every write fails, standing in for a full disk or a
+	// permissions change mid-session
+	_ = rw.Close()
+
+	m := NewSessionWatcherManager(slog.New(slog.DiscardHandler))
+	aw := &activeWatcher{sessionName: "s", adapterName: "opencode", sessionFile: "opencode:ses_x", cachePath: cache}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*pollInterval)
+	defer cancel()
+	m.pollSession(ctx, aw, reader, rw, 0)
+
+	if got := persistedOffset(t, recPath); got != 0 {
+		t.Errorf("cursor advanced to %d after the write failed — those entries are marked consumed and can never be recovered", got)
 	}
 }
 
