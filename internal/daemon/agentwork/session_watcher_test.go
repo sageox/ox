@@ -86,8 +86,26 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func newTestWatcherManager() *SessionWatcherManager {
-	return NewSessionWatcherManager(slog.Default())
+// newTestWatcherManager returns a manager whose session-file allow-list is
+// rooted at a temp home, so these tests run through the real path validation in
+// startWatchAt rather than around it. Disabling that check for tests would
+// defeat its purpose: it is the guard that stops the daemon tailing a file the
+// adapter does not own.
+func newTestWatcherManager(t *testing.T) *SessionWatcherManager {
+	t.Helper()
+	m := NewSessionWatcherManager(slog.Default())
+	m.SetHomeDirForTest(t.TempDir())
+	return m
+}
+
+// codexSessionPath returns a path inside codex's real session root under this
+// manager's test home, creating the directory. Session files must live where
+// the adapter actually stores them or the allow-list rejects them.
+func (m *SessionWatcherManager) codexSessionPath(t *testing.T, name string) string {
+	t.Helper()
+	dir := filepath.Join(m.homeDir(), ".codex", "sessions")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	return filepath.Join(dir, name)
 }
 
 // --- A. Lifecycle ---
@@ -100,11 +118,11 @@ func TestSessionWatcherManager_StartWatch_Idempotent(t *testing.T) {
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	defer mgr.StopAll()
 
 	dir := t.TempDir()
-	sessionFile := filepath.Join(dir, "session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
 
 	err := mgr.StartWatch("test-session", sessionFile, "codex", "/ledger", dir)
@@ -125,11 +143,11 @@ func TestSessionWatcherManager_StopWatch_RemovesWatcher(t *testing.T) {
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	defer mgr.StopAll()
 
 	dir := t.TempDir()
-	sessionFile := filepath.Join(dir, "session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
 
 	require.NoError(t, mgr.StartWatch("s1", sessionFile, "codex", "/ledger", dir))
@@ -143,7 +161,7 @@ func TestSessionWatcherManager_StopWatch_RemovesWatcher(t *testing.T) {
 // session doesn't panic.
 // Failure prevented: daemon crashes when IPC stop arrives for unknown session.
 func TestSessionWatcherManager_StopWatch_NoOp(t *testing.T) {
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	mgr.StopWatch("nonexistent") // must not panic
 }
 
@@ -154,11 +172,11 @@ func TestSessionWatcherManager_StopAll_CleansUp(t *testing.T) {
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 
 	dir := t.TempDir()
 	for _, name := range []string{"s1", "s2", "s3"} {
-		f := filepath.Join(dir, name+".jsonl")
+		f := mgr.codexSessionPath(t, name+".jsonl")
 		require.NoError(t, os.WriteFile(f, []byte{}, 0644))
 		require.NoError(t, mgr.StartWatch(name, f, "codex", "/ledger", dir))
 	}
@@ -168,7 +186,7 @@ func TestSessionWatcherManager_StopAll_CleansUp(t *testing.T) {
 	assert.Empty(t, mgr.ActiveSessions())
 
 	// StartWatch must fail after StopAll
-	err := mgr.StartWatch("s4", filepath.Join(dir, "s4.jsonl"), "codex", "/ledger", dir)
+	err := mgr.StartWatch("s4", mgr.codexSessionPath(t, "s4.jsonl"), "codex", "/ledger", dir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "stopped")
 }
@@ -209,7 +227,7 @@ func TestResolveAdapter_UnknownReturnsError(t *testing.T) {
 // prevents watcher start.
 // Failure prevented: watcher goroutine started with nil adapter.
 func TestSessionWatcherManager_StartWatch_UnknownAdapter(t *testing.T) {
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	err := mgr.StartWatch("s1", "/file", "nonexistent", "/ledger", "/cache")
 	require.Error(t, err)
 	assert.Empty(t, mgr.ActiveSessions())
@@ -225,7 +243,7 @@ func TestSessionWatcherManager_DetectAndRestart_FindsTailRecordings(t *testing.T
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	defer mgr.StopAll()
 
 	ledgerDir := t.TempDir()
@@ -235,7 +253,7 @@ func TestSessionWatcherManager_DetectAndRestart_FindsTailRecordings(t *testing.T
 	sessionDir := filepath.Join(sessionsDir, "2026-03-31T10-00-test")
 	require.NoError(t, os.MkdirAll(sessionDir, 0755))
 
-	sessionFile := filepath.Join(t.TempDir(), "agent-session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "agent-session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
 
 	state := session.RecordingState{
@@ -255,7 +273,7 @@ func TestSessionWatcherManager_DetectAndRestart_FindsTailRecordings(t *testing.T
 // recordings are not picked up by detection.
 // Failure prevented: daemon starts duplicate watcher for hook-driven sessions.
 func TestSessionWatcherManager_DetectAndRestart_SkipsHookMode(t *testing.T) {
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	ledgerDir := t.TempDir()
 	sessionsDir := filepath.Join(ledgerDir, "sessions")
 
@@ -274,7 +292,7 @@ func TestSessionWatcherManager_DetectAndRestart_SkipsHookMode(t *testing.T) {
 // tail recordings are not restarted (left for session_finalize).
 // Failure prevented: daemon restarts watcher for session that's being finalized.
 func TestSessionWatcherManager_DetectAndRestart_SkipsStopped(t *testing.T) {
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	ledgerDir := t.TempDir()
 	sessionsDir := filepath.Join(ledgerDir, "sessions")
 
@@ -300,7 +318,7 @@ func TestSessionWatcherManager_DetectAndRestart_SkipsStopped(t *testing.T) {
 // Failure prevented: daemon restarts watcher for agent that already exited,
 // causing a goroutine to tail a file that will never grow.
 func TestSessionWatcherManager_DetectAndRestart_SkipsDeadPID(t *testing.T) {
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	ledgerDir := t.TempDir()
 	sessionsDir := filepath.Join(ledgerDir, "sessions")
 
@@ -328,14 +346,14 @@ func TestSessionWatcherManager_DetectAndRestart_SkipsAlreadyWatched(t *testing.T
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 
 	ledgerDir := t.TempDir()
 	sessionsDir := filepath.Join(ledgerDir, "sessions")
 	sessionDir := filepath.Join(sessionsDir, "active-session")
 	require.NoError(t, os.MkdirAll(sessionDir, 0755))
 
-	sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
 
 	state := session.RecordingState{
@@ -365,7 +383,7 @@ func TestSessionWatcherManager_DetectAndRestart_SkipsAlreadyWatched(t *testing.T
 // sessions directory doesn't error.
 // Failure prevented: daemon panics on fresh ledger with no sessions.
 func TestSessionWatcherManager_DetectAndRestart_NoSessionsDir(t *testing.T) {
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	started := mgr.DetectAndRestart(t.TempDir())
 	assert.Equal(t, 0, started)
 }
@@ -381,7 +399,7 @@ func TestSessionWatcherManager_DetectAndRestart_CatchUpFromPersistedOffset(t *te
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	defer mgr.StopAll()
 
 	ledgerDir := t.TempDir()
@@ -391,7 +409,7 @@ func TestSessionWatcherManager_DetectAndRestart_CatchUpFromPersistedOffset(t *te
 
 	// create a Codex session file with two entries:
 	// entry1 (already processed before daemon crash) + entry2 (written while daemon was down)
-	sessionFile := filepath.Join(t.TempDir(), "codex-session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "codex-session.jsonl")
 	entry1 := `{"timestamp":"2026-03-31T10:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first message"}]}}` + "\n"
 	entry2 := `{"timestamp":"2026-03-31T10:01:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"second message"}]}}` + "\n"
 	require.NoError(t, os.WriteFile(sessionFile, []byte(entry1+entry2), 0644))
@@ -454,7 +472,7 @@ func TestSessionWatcherManager_WritePath_RedactsCredentials(t *testing.T) {
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	defer mgr.StopAll()
 
 	ledgerDir := t.TempDir()
@@ -469,7 +487,7 @@ func TestSessionWatcherManager_WritePath_RedactsCredentials(t *testing.T) {
 	gitlabCanary := "glpat-AbCdEfGhIjKlMnOpQrSt"
 	bearerLine := `Authorization: Bearer ya29.thisIsATokenValue1234567890abc`
 
-	sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	entry1 := `aws_access_key_id=` + awsCanary + "\n"
 	entry2 := gitlabCanary + " " + bearerLine + "\n"
 	require.NoError(t, os.WriteFile(sessionFile, []byte(entry1+entry2), 0644))
@@ -542,7 +560,7 @@ func TestSessionWatcherManager_WritePath_WholeOutputRedactsAwsSso(t *testing.T) 
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	defer mgr.StopAll()
 
 	ledgerDir := t.TempDir()
@@ -558,7 +576,7 @@ func TestSessionWatcherManager_WritePath_WholeOutputRedactsAwsSso(t *testing.T) 
 	canarySecret := "ASIATESTTESTTESTTEST"
 	preamble := "X"
 	awsLine := `aws_credentials="ASIATESTTESTTESTTEST + wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"` + "\n"
-	sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte(preamble+awsLine), 0644))
 
 	state := session.RecordingState{
@@ -596,11 +614,11 @@ func TestSessionWatcherManager_LiveTail_RedactsCredentials(t *testing.T) {
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	defer mgr.StopAll()
 
 	cacheDir := t.TempDir()
-	sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
 
 	state := session.RecordingState{WatchMode: "tail", EntryCount: 0}
@@ -639,7 +657,7 @@ func TestSessionWatcherManager_LiveTail_RedactsCredentials(t *testing.T) {
 // persistOffset writes SourceOffset to .recording.json.
 // Failure prevented: daemon crash loses offset, causing full re-read on restart.
 func TestSessionWatcherManager_PersistOffset_UpdatesRecordingState(t *testing.T) {
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 
 	dir := t.TempDir()
 	aw := &activeWatcher{cachePath: dir}
@@ -669,11 +687,11 @@ func TestSessionWatcherManager_LiveTail_EntryCountLinear(t *testing.T) {
 		t.Skip("short: fsnotify watcher test with file I/O timing")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	defer mgr.StopAll()
 
 	dir := t.TempDir()
-	sessionFile := filepath.Join(dir, "session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
 
 	// write initial .recording.json with EntryCount=0
@@ -736,7 +754,7 @@ func TestSessionWatcherManager_LiveTail_EntryCountLinear(t *testing.T) {
 // uses atomic write (temp + rename) so concurrent readers never see partial JSON.
 // Failure prevented: CLI reads truncated .recording.json during daemon write.
 func TestSessionWatcherManager_PersistOffset_AtomicWrite(t *testing.T) {
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 
 	dir := t.TempDir()
 	aw := &activeWatcher{cachePath: dir, sessionName: "atomic-test"}
@@ -785,7 +803,7 @@ func TestSessionWatcherManager_PersistOffset_AtomicWrite(t *testing.T) {
 // other fields written by the CLI (e.g., StoppedAt, SessionFile).
 // Failure prevented: daemon overwrites CLI-set StoppedAt, causing watcher to never stop.
 func TestSessionWatcherManager_PersistOffset_PreservesCLIFields(t *testing.T) {
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 
 	dir := t.TempDir()
 	aw := &activeWatcher{cachePath: dir}
@@ -832,11 +850,11 @@ func TestSessionWatcherManager_Cleanup_StopsStopped(t *testing.T) {
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	defer mgr.StopAll()
 
 	dir := t.TempDir()
-	sessionFile := filepath.Join(dir, "session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
 	require.NoError(t, mgr.StartWatch("s1", sessionFile, "codex", "/ledger", dir))
 
@@ -861,11 +879,11 @@ func TestSessionWatcherManager_Cleanup_StopsOrphaned(t *testing.T) {
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	defer mgr.StopAll()
 
 	dir := t.TempDir()
-	sessionFile := filepath.Join(dir, "session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
 	require.NoError(t, mgr.StartWatch("s1", sessionFile, "codex", "/ledger", dir))
 
@@ -885,10 +903,10 @@ func TestSessionWatcherManager_Cleanup_SkipsCorruptRecording(t *testing.T) {
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 
 	dir := t.TempDir()
-	sessionFile := filepath.Join(dir, "session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
 	require.NoError(t, mgr.StartWatch("s1", sessionFile, "codex", "/ledger", dir))
 
@@ -909,7 +927,7 @@ func TestSessionWatcherManager_Cleanup_SkipsCorruptRecording(t *testing.T) {
 // StartWatch rejects a relative session file path.
 // Failure prevented: watcher started with relative path breaks path logic downstream.
 func TestSessionWatcherManager_StartWatch_RejectsRelativePath(t *testing.T) {
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 
 	err := mgr.StartWatch("s1", "relative/path.jsonl", "codex", "/ledger", "/cache")
 	require.Error(t, err)
@@ -921,7 +939,7 @@ func TestSessionWatcherManager_StartWatch_RejectsRelativePath(t *testing.T) {
 // DetectAndRestart returns 0 when the ledger has no sessions directory at all.
 // Failure prevented: daemon panics scanning a ledger that has never recorded a session.
 func TestSessionWatcherManager_DetectAndRestart_NonExistentSessionsDir(t *testing.T) {
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 	ledgerDir := t.TempDir()
 	// no "sessions" subdirectory created
 
@@ -938,7 +956,7 @@ func TestSessionWatcherManager_DetectAndRestart_OffsetBeyondEOF(t *testing.T) {
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 
 	ledgerDir := t.TempDir()
 	sessionsDir := filepath.Join(ledgerDir, "sessions")
@@ -946,7 +964,7 @@ func TestSessionWatcherManager_DetectAndRestart_OffsetBeyondEOF(t *testing.T) {
 	require.NoError(t, os.MkdirAll(sessionDir, 0755))
 
 	// small session file — only a few bytes
-	sessionFile := filepath.Join(t.TempDir(), "small-session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "small-session.jsonl")
 	smallContent := `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}` + "\n"
 	require.NoError(t, os.WriteFile(sessionFile, []byte(smallContent), 0644))
 
@@ -980,7 +998,7 @@ func TestSessionWatcherManager_CatchUpReadFailure_LiveTailStillStarts(t *testing
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 
 	ledgerDir := t.TempDir()
 	sessionsDir := filepath.Join(ledgerDir, "sessions")
@@ -991,7 +1009,7 @@ func TestSessionWatcherManager_CatchUpReadFailure_LiveTailStillStarts(t *testing
 	// SourceOffset > 0 means catch-up read will try to read from a position
 	// that has no data — the ReadFromOffset call will either return an error
 	// or return zero entries, but the watcher should still start
-	sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
 
 	state := session.RecordingState{
@@ -1022,10 +1040,10 @@ func TestSessionWatcherManager_PersistOffset_MissingRecordingJSON(t *testing.T) 
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 
 	dir := t.TempDir()
-	sessionFile := filepath.Join(dir, "session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
 
 	// write a valid .recording.json so StartWatch succeeds
@@ -1062,10 +1080,10 @@ func TestSessionWatcherManager_PersistOffset_CorruptRecordingJSON(t *testing.T) 
 		t.Skip("short: fsnotify watcher test")
 	}
 
-	mgr := newTestWatcherManager()
+	mgr := newTestWatcherManager(t)
 
 	dir := t.TempDir()
-	sessionFile := filepath.Join(dir, "session.jsonl")
+	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
 
 	// write a valid .recording.json so StartWatch succeeds
