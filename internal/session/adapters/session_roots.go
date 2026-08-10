@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,71 @@ func IsSessionFileAllowed(adapterName, sessionFile, homeDir string) bool {
 			return true
 		}
 		if strings.HasPrefix(clean, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// Errors returned by SafeSessionFilePath so callers can tell "not allowed"
+// from "could not be checked" and log accordingly.
+var (
+	ErrSessionFileNotAllowed = errors.New("session file is outside the adapter's allowed roots")
+	ErrSessionFileEscapes    = errors.New("session file resolves outside the adapter's allowed roots")
+)
+
+// SafeSessionFilePath validates sessionFile and returns the path a caller
+// should actually open.
+//
+// IsSessionFileAllowed is lexical, but the tail loop opens the path with
+// os.Open, which follows symlinks. A symlink planted inside an allowed root —
+// say ~/.pi/agent/sessions/notes.jsonl pointing at ~/.ssh/id_rsa — passes a
+// lexical check and then gets read and uploaded through the session pipeline.
+// Resolving the path and re-checking closes that.
+//
+// Opaque handles are returned unchanged: they are not paths and are never
+// opened, so there is nothing to resolve.
+//
+// This narrows the window but does not close it entirely — a symlink swapped
+// between this check and the open still wins. Callers that need that
+// guarantee must open with O_NOFOLLOW and validate the descriptor. Tracked
+// separately; this function is the containment check, not a TOCTOU defense.
+func SafeSessionFilePath(adapterName, sessionFile, homeDir string) (string, error) {
+	if IsOpaqueSessionHandle(adapterName, sessionFile) {
+		return sessionFile, nil
+	}
+	if !IsSessionFileAllowed(adapterName, sessionFile, homeDir) {
+		return "", ErrSessionFileNotAllowed
+	}
+
+	resolved, err := filepath.EvalSymlinks(sessionFile)
+	if err != nil {
+		// a session file that does not exist yet is normal on a fresh start;
+		// the lexical check already passed, so let the caller proceed and fail
+		// on the open if it never appears
+		if os.IsNotExist(err) {
+			return sessionFile, nil
+		}
+		return "", err
+	}
+
+	// The roots themselves may sit behind a symlink (a symlinked $HOME is
+	// common on managed machines), so compare resolved against resolved
+	// rather than declaring every such setup an escape.
+	if !isUnderResolvedRoot(adapterName, resolved, homeDir) {
+		return "", ErrSessionFileEscapes
+	}
+	return resolved, nil
+}
+
+func isUnderResolvedRoot(adapterName, resolvedFile, homeDir string) bool {
+	for _, root := range KnownSessionRoots(adapterName, homeDir) {
+		resolvedRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			continue // a root that does not exist cannot contain anything
+		}
+		if resolvedFile == resolvedRoot ||
+			strings.HasPrefix(resolvedFile, filepath.Clean(resolvedRoot)+string(filepath.Separator)) {
 			return true
 		}
 	}

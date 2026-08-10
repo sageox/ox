@@ -35,6 +35,7 @@ type SessionWatcherManager struct {
 	wg       sync.WaitGroup
 	watchers map[string]*activeWatcher // keyed by session name
 	stopped  bool                      // set by StopAll to prevent new watchers and defer re-insertion
+	home     string                    // root for the session-file allow-list; see homeDir
 }
 
 // activeWatcher tracks a running TailWatcher goroutine.
@@ -51,11 +52,23 @@ type activeWatcher struct {
 
 // NewSessionWatcherManager creates a manager for tail-mode session watchers.
 func NewSessionWatcherManager(logger *slog.Logger) *SessionWatcherManager {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// an empty home makes every root empty, so SafeSessionFilePath
+		// rejects everything — fail closed rather than watch unchecked paths
+		logger.Warn("cannot determine home directory; session watching will reject all paths", "error", err)
+	}
 	return &SessionWatcherManager{
 		logger:   logger,
 		watchers: make(map[string]*activeWatcher),
+		home:     home,
 	}
 }
+
+// homeDir is the root the session-file allow-list is resolved against. Held on
+// the manager rather than read at each call so tests can point it at a temp
+// directory instead of the developer's real home.
+func (m *SessionWatcherManager) homeDir() string { return m.home }
 
 // StartWatch begins tailing a session file and writing entries to raw.jsonl.
 // Called directly from IPC handler (bypasses work queue for fast startup).
@@ -91,6 +104,17 @@ func (m *SessionWatcherManager) startWatchAt(
 	// however correct their readers were.
 	if !filepath.IsAbs(sessionFile) && !adapters.IsOpaqueSessionHandle(adapterName, sessionFile) {
 		return fmt.Errorf("session file must be an absolute path or an opaque handle for %s: %q", adapterName, sessionFile)
+	}
+
+	// Both entry points funnel through here — IPC via StartWatch and doctor
+	// via DetectAndRestart — so this is the one place that has to hold. The
+	// daemon's IPC handler already ran the lexical allow-list check, but that
+	// check cannot see a symlink inside an allowed root pointing somewhere it
+	// should not; the tail loop below opens this path and uploads what it
+	// reads. Resolve before trusting.
+	sessionFile, err := adapters.SafeSessionFilePath(adapterName, sessionFile, m.homeDir())
+	if err != nil {
+		return fmt.Errorf("refusing to watch %q for %s: %w", sessionFile, adapterName, err)
 	}
 
 	adapter, err := resolveAdapter(adapterName)

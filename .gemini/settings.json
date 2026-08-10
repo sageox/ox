@@ -1,7 +1,53 @@
 {
   "hooks": {
-    "PostToolUse": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=gemini ox agent hook PostToolUse 2\u003e\u00261 || true; fi",
-    "PreToolUse": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=gemini ox agent hook PreToolUse 2\u003e\u00261 || true; fi",
-    "Stop": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=gemini ox agent hook Stop 2\u003e\u00261 || true; fi"
+    "AfterTool": [
+      {
+        "hooks": [
+          {
+            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=gemini ox agent hook AfterTool 2\u003e/dev/null || true; fi",
+            "name": "ox-AfterTool",
+            "timeout": 10000,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "hooks": [
+          {
+            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=gemini ox agent hook BeforeAgent 2\u003e/dev/null || true; fi",
+            "name": "ox-BeforeAgent",
+            "timeout": 10000,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=gemini ox agent hook SessionEnd 2\u003e/dev/null || true; fi",
+            "name": "ox-SessionEnd",
+            "timeout": 10000,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=gemini ox agent hook SessionStart 2\u003e/dev/null || true; fi",
+            "name": "ox-SessionStart",
+            "timeout": 10000,
+            "type": "command"
+          }
+        ]
+      }
+    ]
   }
 }
