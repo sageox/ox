@@ -259,12 +259,25 @@ func ListEndpoints() ([]string, error) {
 // GetLoggedInEndpoints returns all endpoints with valid (non-expired) tokens.
 // Returns nil if no valid tokens exist.
 func GetLoggedInEndpoints() []string {
-	authPath, err := GetAuthFilePath()
-	if err != nil {
-		return nil
+	var endpoints []string
+
+	// An env-supplied token (SAGEOX_TOKEN — a PAT in CI, a cloud agent, or a
+	// container) is a real, usable credential; it simply never touches
+	// auth.json. Reading only the file made `ox status` print "not logged in"
+	// in a shell where every API call succeeded — the most misleading thing a
+	// status command can do, and the reason a working PAT read as a broken
+	// one. tokenFromEnv() owns the endpoint-binding rules (see env_token.go);
+	// we ask it rather than re-deriving them here.
+	envEP := envTokenEndpoint()
+	if tokenFromEnv(envEP) != nil {
+		endpoints = append(endpoints, envEP)
 	}
 
-	var endpoints []string
+	authPath, err := GetAuthFilePath()
+	if err != nil {
+		return endpoints
+	}
+
 	_ = withAuthFileRLocked(authPath, func(h *authFileHandle) error {
 		store, loadErr := h.load()
 		if loadErr != nil {
@@ -272,8 +285,15 @@ func GetLoggedInEndpoints() []string {
 		}
 		now := time.Now()
 		for ep, token := range store.Tokens {
+			normalized := endpoint.NormalizeEndpoint(ep)
+			// The env token SHADOWS a disk token for the same endpoint
+			// (GetTokenForEndpoint returns the env one first), so listing both
+			// would report two logins where the process can only ever use one.
+			if normalized == envEP && len(endpoints) > 0 {
+				continue
+			}
 			if token != nil && token.AccessToken != "" && token.ExpiresAt.After(now) {
-				endpoints = append(endpoints, endpoint.NormalizeEndpoint(ep))
+				endpoints = append(endpoints, normalized)
 			}
 		}
 		return nil

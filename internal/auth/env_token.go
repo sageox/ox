@@ -18,6 +18,15 @@ const EnvVarToken = "SAGEOX_TOKEN"
 // triggering refresh paths.
 const envTokenTTL = 24 * time.Hour
 
+// IsEnvTokenEndpoint reports whether the credential in play for ep came from
+// SAGEOX_TOKEN rather than auth.json. Display code needs this because an
+// env-sourced token carries no UserInfo — there was no login to learn a name or
+// email from — so a renderer that assumes those fields are populated prints a
+// blank identity next to a green check.
+func IsEnvTokenEndpoint(ep string) bool {
+	return tokenFromEnv(ep) != nil
+}
+
 // isEnvToken reports whether the given token was sourced from the environment.
 // Env tokens have no refresh credential and the server returning 401 is the
 // source of truth for invalidation — callers must never attempt to refresh one.

@@ -1855,16 +1855,67 @@ func renderAuthStatus(authFile string) string {
 			b.WriteString("\n")
 		}
 
+		// A SAGEOX_TOKEN credential (a PAT in CI, a cloud agent, a container)
+		// never went through a login, so it carries no UserInfo. Printing the
+		// usual "User <name> <email>" line for one renders an empty name and
+		// an empty <> next to a green check — worse than saying nothing.
+		// Name the credential source instead; that IS the useful fact here.
+		envSourced := auth.IsEnvTokenEndpoint(ep)
+
+		// AN ENV TOKEN'S PRESENCE IS NOT EVIDENCE THAT IT WORKS. A disk token
+		// was written by a completed login, so "it exists" carries real weight;
+		// SAGEOX_TOKEN is just a string someone exported, and a typo'd or
+		// revoked one is indistinguishable from a good one without asking the
+		// server. Reporting "logged in" for any non-empty value would replace
+		// the old lie (a working PAT reported as not-logged-in) with the more
+		// dangerous opposite — CI that reports healthy auth right up until the
+		// first real call 401s. So: validate this one, once, before claiming
+		// anything. ValidateTokenServerSide already routes an oxp_ token to
+		// /api/v1/auth/me (PATs carry no OAuth identity, so userinfo 401s them)
+		// and caps itself at 5s.
+		envValid := true
+		var envValidErr error
+		if envSourced && epToken != nil {
+			envValidErr = auth.ValidateTokenServerSide(ep, epToken.AccessToken)
+			envValid = envValidErr == nil
+		}
+
 		b.WriteString(statusLabelStyle.Render("Endpoint"))
 		b.WriteString(statusHighlightStyle.Render(epSlug))
-		b.WriteString(statusSuccessStyle.Render(" (✓ logged in)"))
+		if envSourced && !envValid {
+			// Must read as a NEGATIVE auth verdict — this is the line a human
+			// (and the BDD status parser) reads to decide whether the CLI is
+			// usable at all.
+			b.WriteString(statusErrorStyle.Render(" (✗ not authenticated)"))
+		} else {
+			b.WriteString(statusSuccessStyle.Render(" (✓ logged in)"))
+		}
 		b.WriteString("\n")
 
-		if epToken != nil {
-			b.WriteString(statusLabelStyle.Render("User"))
-			b.WriteString(statusHighlightStyle.Render(epToken.UserInfo.Name))
-			b.WriteString(statusMutedStyle.Render(" <" + epToken.UserInfo.Email + ">"))
+		if envSourced && !envValid {
+			b.WriteString(statusLabelStyle.Render("Credential"))
+			b.WriteString(statusErrorStyle.Render("SAGEOX_TOKEN (env) rejected"))
+			b.WriteString(statusMutedStyle.Render(" — " + envValidErr.Error()))
 			b.WriteString("\n")
+			b.WriteString(statusMutedStyle.Render("  the value in SAGEOX_TOKEN is not a credential this endpoint accepts;"))
+			b.WriteString("\n")
+			b.WriteString(statusMutedStyle.Render("  mint a fresh PAT at /settings/tokens, or unset it to use ox login"))
+			b.WriteString("\n")
+			continue
+		}
+
+		if epToken != nil {
+			if envSourced && epToken.UserInfo.Name == "" && epToken.UserInfo.Email == "" {
+				b.WriteString(statusLabelStyle.Render("Credential"))
+				b.WriteString(statusHighlightStyle.Render("SAGEOX_TOKEN (env)"))
+				b.WriteString(statusMutedStyle.Render(" — identity resolved server-side per request"))
+				b.WriteString("\n")
+			} else {
+				b.WriteString(statusLabelStyle.Render("User"))
+				b.WriteString(statusHighlightStyle.Render(epToken.UserInfo.Name))
+				b.WriteString(statusMutedStyle.Render(" <" + epToken.UserInfo.Email + ">"))
+				b.WriteString("\n")
+			}
 
 			// Auth status. The OAuth access token expires every ~hour and
 			// is rotated silently via the refresh token (or Better-Auth
@@ -1876,7 +1927,16 @@ func renderAuthStatus(authFile string) string {
 			// and only surface a timestamp when re-login is genuinely
 			// needed (no refresh token at all).
 			hasRefresh := epToken.EffectiveRefreshToken() != ""
-			if hasRefresh {
+			if envSourced {
+				// An env token deliberately has no refresh credential — the
+				// server returning 401 is what invalidates it (env_token.go).
+				// The generic no-refresh branch below would tell the user to
+				// "ox login" before a synthetic 24h expiry that means nothing,
+				// which is advice that would break their CI.
+				b.WriteString(statusLabelStyle.Render("Session"))
+				b.WriteString(statusSuccessStyle.Render("✓ env-supplied; no refresh needed"))
+				b.WriteString(statusMutedStyle.Render(" (unset SAGEOX_TOKEN to fall back to " + authFile + ")"))
+			} else if hasRefresh {
 				b.WriteString(statusLabelStyle.Render("Session"))
 				b.WriteString(statusSuccessStyle.Render("✓ auto-refresh enabled"))
 				if i == 0 {
