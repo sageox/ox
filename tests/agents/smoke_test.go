@@ -37,11 +37,12 @@ import (
 type agentCase struct {
 	// adapter is the ox adapter name.
 	adapter string
-	// bin is the binary to invoke. Resolved against PATH unless absolute.
+	// bin is the binary to invoke, resolved against PATH.
 	//
-	// Some of these are deliberately absolute: on a dev machine `pi` in PATH
-	// is commonly an ipython symlink, and running that instead of the coding
-	// agent would produce a confusing pass.
+	// Watch out for name collisions: on a dev machine `pi` in PATH is commonly
+	// an ipython symlink rather than the coding agent, and PATH order decides
+	// which one wins. The run logs the resolved path for exactly this reason —
+	// check it before trusting a result.
 	bin string
 	// args builds a one-shot invocation for prompt. sessionDir is a writable
 	// temp directory for agents that can be told where to keep sessions.
@@ -61,8 +62,7 @@ type agentCase struct {
 var cases = []agentCase{
 	{
 		adapter: "pi",
-		// /opt/homebrew/bin/pi, not PATH's `pi` — see bin's doc comment
-		bin: "pi",
+		bin:     "pi", // see the collision warning on bin
 		args: func(prompt, sessionDir string) []string {
 			return []string{"--print", "--session-dir", sessionDir, prompt}
 		},
@@ -93,6 +93,16 @@ func TestAgentWritesATranscriptOxCanRead(t *testing.T) {
 	repoRoot := repoRoot(t)
 	binDir := t.TempDir()
 
+	// A gate that skips every case and exits 0 reports "real agents verified"
+	// when nothing ran at all — the same false green this whole PR is about.
+	var ran int
+	t.Cleanup(func() {
+		if ran == 0 {
+			t.Errorf("OX_TEST_REAL_AGENTS=1 was set but no agent case actually ran: none of %d agents was installed, authenticated, and had a confirmed invocation. "+
+				"Nothing was verified; do not read this run as a pass.", len(cases))
+		}
+	})
+
 	for _, tc := range cases {
 		t.Run(tc.adapter, func(t *testing.T) {
 			if tc.verified == "" {
@@ -118,13 +128,26 @@ func TestAgentWritesATranscriptOxCanRead(t *testing.T) {
 			sessionFile := findSession(t, adapterBin, workdir, sessionDir)
 			entries := readEntries(t, adapterBin, sessionFile)
 
+			ran++
+
 			if len(entries) == 0 {
 				t.Fatalf("%s: the agent just wrote a transcript and ox read zero entries from it — the reader does not match the installed agent's format",
 					tc.adapter)
 			}
-			if !containsMarker(entries, marker) {
-				t.Errorf("%s: ox read %d entries from the transcript but none contained the marker %q the agent was asked to echo — the reader is dropping conversation content\n%s",
+			// The marker has to come back from BOTH sides. It is in the prompt,
+			// so a reader that handles user turns and drops every assistant
+			// turn would satisfy a plain "is the marker anywhere" check — and
+			// that is exactly the shape of several of the bugs this PR fixes,
+			// where user content is a bare string and assistant content is an
+			// array of blocks.
+			roles := rolesContainingMarker(entries, marker)
+			if !roles["user"] {
+				t.Errorf("%s: the prompt did not survive extraction — ox read %d entries and none of the user turns contained %q\n%s",
 					tc.adapter, len(entries), marker, summarize(entries))
+			}
+			if !roles["assistant"] {
+				t.Errorf("%s: ox read %d entries but the agent's REPLY is not among them — assistant turns are being dropped\n%s",
+					tc.adapter, len(entries), summarize(entries))
 			}
 		})
 	}
@@ -194,15 +217,20 @@ func readEntries(t *testing.T, adapterBin, sessionFile string) []map[string]any 
 	return res.Entries
 }
 
-func containsMarker(entries []map[string]any, marker string) bool {
+// rolesContainingMarker reports which roles carried the marker through
+// extraction, so the caller can require both sides of the exchange rather than
+// accepting whichever one happened to survive.
+func rolesContainingMarker(entries []map[string]any, marker string) map[string]bool {
+	roles := map[string]bool{}
 	for _, e := range entries {
+		role, _ := e["role"].(string)
 		for _, field := range []string{"content", "tool_output"} {
 			if s, ok := e[field].(string); ok && strings.Contains(s, marker) {
-				return true
+				roles[role] = true
 			}
 		}
 	}
-	return false
+	return roles
 }
 
 func summarize(entries []map[string]any) string {

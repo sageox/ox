@@ -13,7 +13,6 @@ import (
 
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
-	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
 // ErrSessionFileShape is returned when a session file is neither an absolute
@@ -358,31 +357,35 @@ func (m *SessionWatcherManager) runWatcher(
 		}
 	}
 
-	// Handle-based adapters (opencode, goose) have no file to watch — they read
-	// from a database, and their offset is a row count only the adapter can
-	// compute. Polling their own incremental reader is the only way this loop
-	// can hold an offset that actually advances; adapter.Watch emits entries
-	// with no cursor, so persisting anything alongside it was guesswork, and
-	// persisting the START offset meant a restart re-read every live entry and
-	// appended it a second time.
-	if adapters.IsOpaqueSessionHandle(aw.adapterName, aw.sessionFile) {
-		reader, ok := adapter.(adapters.IncrementalReader)
-		if !ok {
-			m.logger.Error("handle-based adapter has no incremental reader; cannot record",
-				"session", aw.sessionName, "adapter", aw.adapterName)
-			return
-		}
-		m.pollHandleSession(ctx, aw, reader, rw)
+	// Record through the adapter's own incremental reader whenever it has one.
+	//
+	// The alternative, adapter.Watch, delivers entries with NO cursor, so any
+	// resume offset has to be inferred from the file afterwards — and both
+	// ways of being wrong lose data. Infer high (file size, or a boundary
+	// scanned after the write) and a record the agent appended in between is
+	// marked consumed but never written. Infer low and a restart re-reads and
+	// duplicates. Database-backed adapters cannot even infer: their offset is
+	// a row count nothing outside the adapter can compute.
+	//
+	// ReadFromOffset returns the cursor it actually consumed to, so there is
+	// nothing to infer.
+	if reader, ok := adapter.(adapters.IncrementalReader); ok {
+		m.pollSession(ctx, aw, reader, rw)
 		return
 	}
 
-	// live tail: watch for new entries from current EOF onward
+	// Fallback for an adapter with no incremental reader: tail for entries and
+	// accept that the session cannot be resumed. Every shipped adapter now
+	// implements ReadFromOffset (enforced by tests/adapters), so this path is
+	// for third-party adapters only.
 	ch, err := adapter.Watch(ctx, aw.sessionFile)
 	if err != nil {
 		m.logger.Error("failed to start tail watcher",
 			"session", aw.sessionName, "error", err)
 		return
 	}
+	m.logger.Warn("adapter has no incremental reader; this session cannot resume after a daemon restart",
+		"session", aw.sessionName, "adapter", aw.adapterName)
 
 	for entry := range ch {
 		converted := session.ConvertRawEntries([]adapters.RawEntry{entry})
@@ -392,42 +395,28 @@ func (m *SessionWatcherManager) runWatcher(
 					"session", aw.sessionName, "error", encErr)
 			}
 		}
-
-		// persist offset after each batch so daemon restart can resume.
-		//
-		// It must be the end of the last COMPLETE record, not the file size.
-		// The agent appends while we read, so EOF is frequently the middle of
-		// a record it is still writing; persisting that lands the next resume
-		// inside a record, TailJSONL refuses the non-boundary offset and
-		// restarts from zero, and the whole transcript is appended a second
-		// time. Rounding down to the last newline costs at most a re-read of
-		// the trailing partial record, which yields nothing until it is
-		// complete.
-		//
-		if boundary, boundaryErr := adapterruntime.LastRecordBoundary(aw.sessionFile); boundaryErr == nil {
-			m.persistOffset(aw, boundary, len(converted))
-		}
+		// no offset is persisted: Watch delivers entries with no cursor, and
+		// every way of guessing one from the file loses data in one direction
+		// or the other — see pollSession
 	}
 }
 
-// handlePollInterval is how often a database-backed session is re-read. These
-// adapters have no filesystem event to wake on, so this is a straight poll.
-const handlePollInterval = 2 * time.Second
+// pollInterval is how often a session is re-read to advance its resume cursor.
+const pollInterval = 2 * time.Second
 
-// pollHandleSession records a database-backed session (opencode, goose) by
-// repeatedly asking the adapter for everything after the cursor it last
-// returned.
+// pollSession records a session by repeatedly asking the adapter for
+// everything after the cursor it last returned.
 //
 // The cursor comes from the adapter on every pass, so it always reflects what
 // was actually consumed. That is the whole point: the previous code persisted
 // the offset the watcher STARTED with, so a daemon restart re-read every entry
 // written during the live phase and appended each one a second time.
-func (m *SessionWatcherManager) pollHandleSession(
+func (m *SessionWatcherManager) pollSession(
 	ctx context.Context, aw *activeWatcher,
 	reader adapters.IncrementalReader, rw *session.RawWriter,
 ) {
 	offset := aw.startOffset
-	ticker := time.NewTicker(handlePollInterval)
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	for {
@@ -449,6 +438,19 @@ func (m *SessionWatcherManager) pollHandleSession(
 			continue
 		}
 
+		// Check the cursor BEFORE writing. An adapter that returns rows without
+		// advancing would otherwise have those rows appended to raw.jsonl on
+		// every single poll — the duplication is in the ledger, not just in
+		// the persisted offset, and refusing to persist afterwards does not
+		// undo it. Nothing this loop can do makes such an adapter usable, so
+		// stop rather than accumulate garbage.
+		if newOffset <= offset {
+			m.logger.Error("adapter returned entries without advancing its cursor; stopping this recording to avoid duplicating them",
+				"session", aw.sessionName, "adapter", aw.adapterName,
+				"offset", offset, "returned", newOffset, "entries", len(entries))
+			return
+		}
+
 		converted := session.ConvertRawEntries(entries)
 		for i := range converted {
 			if writeErr := rw.WriteEntry(&converted[i]); writeErr != nil {
@@ -457,17 +459,8 @@ func (m *SessionWatcherManager) pollHandleSession(
 			}
 		}
 
-		// only advance on forward progress — an adapter that reports a cursor
-		// at or behind where we asked would otherwise make the next poll
-		// re-emit the same rows forever
-		if newOffset > offset {
-			offset = newOffset
-			m.persistOffset(aw, offset, len(converted))
-		} else {
-			m.logger.Warn("handle-based adapter returned entries without advancing its cursor",
-				"session", aw.sessionName, "adapter", aw.adapterName,
-				"offset", offset, "returned", newOffset, "entries", len(entries))
-		}
+		offset = newOffset
+		m.persistOffset(aw, offset, len(converted))
 	}
 }
 

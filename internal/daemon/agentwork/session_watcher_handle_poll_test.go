@@ -101,7 +101,7 @@ func runPoll(t *testing.T, reader adapters.IncrementalReader, startOffset int64)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		m.pollHandleSession(ctx, aw, reader, rw)
+		m.pollSession(ctx, aw, reader, rw)
 	}()
 
 	return rawPath, recPath, func() {
@@ -151,10 +151,10 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// TestPollHandleSession_AdvancesTheCursorAcrossBatches is the regression: after
+// TestPollSession_AdvancesTheCursorAcrossBatches is the regression: after
 // two live batches the persisted offset must reflect everything consumed, not
 // the offset the watcher started with.
-func TestPollHandleSession_AdvancesTheCursorAcrossBatches(t *testing.T) {
+func TestPollSession_AdvancesTheCursorAcrossBatches(t *testing.T) {
 	reader := &fakeHandleReader{}
 	reader.append("first")
 
@@ -185,9 +185,9 @@ func TestPollHandleSession_AdvancesTheCursorAcrossBatches(t *testing.T) {
 	}
 }
 
-// TestPollHandleSession_RestartDoesNotReplay simulates the restart directly:
+// TestPollSession_RestartDoesNotReplay simulates the restart directly:
 // a second loop started from the persisted offset must record nothing new.
-func TestPollHandleSession_RestartDoesNotReplay(t *testing.T) {
+func TestPollSession_RestartDoesNotReplay(t *testing.T) {
 	reader := &fakeHandleReader{}
 	reader.append("alpha")
 	reader.append("beta")
@@ -206,23 +206,31 @@ func TestPollHandleSession_RestartDoesNotReplay(t *testing.T) {
 	rawPath2, _, stop2 := runPoll(t, reader, resumeFrom)
 	defer stop2()
 
-	time.Sleep(2 * handlePollInterval)
+	time.Sleep(2 * pollInterval)
 	if n := countOccurrences(t, rawPath2, "alpha"); n != 0 {
 		t.Errorf("restart replayed %d already-recorded entries — the ledger would double-count them", n)
 	}
 }
 
-// TestPollHandleSession_RefusesToPersistAStalledCursor covers an adapter that
-// returns rows but reports the same offset. Persisting that would make every
-// later poll re-emit the same rows forever.
-func TestPollHandleSession_RefusesToPersistAStalledCursor(t *testing.T) {
+// TestPollSession_StopsOnAStalledCursor covers an adapter that returns rows but
+// reports the same offset.
+//
+// Checking the cursor only AFTER writing would append those rows to raw.jsonl
+// on every poll: the duplication lands in the ledger, and declining to persist
+// the offset afterwards does not undo it. Nothing the loop can do makes such an
+// adapter usable, so it stops instead of accumulating copies.
+func TestPollSession_StopsOnAStalledCursor(t *testing.T) {
 	reader := &fakeHandleReader{stall: true}
 	reader.append("only")
 
-	_, recPath, stop := runPoll(t, reader, 0)
+	rawPath, recPath, stop := runPoll(t, reader, 0)
 	defer stop()
 
-	time.Sleep(3 * handlePollInterval)
+	time.Sleep(3 * pollInterval)
+
+	if n := countOccurrences(t, rawPath, "only"); n != 0 {
+		t.Errorf("a stalled adapter wrote %d copies of its rows to raw.jsonl, want 0 — each poll would add another", n)
+	}
 	if got := persistedOffset(t, recPath); got != 0 {
 		t.Errorf("persisted offset = %d, want 0 — a cursor that did not advance must not be written over a good one", got)
 	}

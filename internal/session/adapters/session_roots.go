@@ -124,7 +124,7 @@ func SafeSessionFilePath(adapterName, sessionFile, homeDir string) (string, erro
 
 	resolved, err := filepath.EvalSymlinks(sessionFile)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return pendingSessionFilePath(adapterName, sessionFile, homeDir)
 		}
 		return "", err
