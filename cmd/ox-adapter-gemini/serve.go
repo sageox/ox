@@ -40,6 +40,23 @@ func geminiReadFromOffset(file string, offset int64) ([]adapterprotocol.RawEntry
 	return allEntries[int(offset):], total, nil
 }
 
+// handleReadFromOffset is the one-shot mode handler for read-from-offset. The
+// serve-mode handler is srv.OnReadFromOffset below — one-shot and serve mode
+// are separate registrations, and only the serve-mode one was wired, so every
+// one-shot invocation (e.g. the daemon's catch-up read on restart) returned
+// "read-from-offset not implemented" and silently dropped every turn written
+// since the last persisted offset.
+func handleReadFromOffset(p adapterprotocol.ReadFromOffsetParams) (*adapterprotocol.ReadFromOffsetResult, error) {
+	if p.SessionFile == "" {
+		return nil, fmt.Errorf("--session-file is required")
+	}
+	entries, newOffset, err := geminiReadFromOffset(p.SessionFile, p.Offset)
+	if err != nil {
+		return nil, err
+	}
+	return &adapterprotocol.ReadFromOffsetResult{Entries: entries, NewOffset: newOffset}, nil
+}
+
 func handleServe(srv *adapterruntime.Server) {
 	store := adapterruntime.NewSessionStore[*geminiSessionState]()
 

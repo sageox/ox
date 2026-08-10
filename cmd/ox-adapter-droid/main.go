@@ -28,22 +28,43 @@ const (
 )
 
 func main() {
-	adapterruntime.Run(adapterruntime.Config{
-		Info:           handleInfo,
-		Detect:         handleDetect,
-		InstallHooks:   handleInstallHooks,
-		CheckHooks:     handleCheckHooks,
-		UninstallHooks: handleUninstallHooks,
-		Read:           handleRead,
-		ReadMetadata:   handleReadMetadata,
-		Diagnose:       handleDiagnose,
-		InstallRules:   handleInstallRules,
-		CheckRules:     handleCheckRules,
-		UninstallRules: handleUninstallRules,
-		FindSession:    handleFindSession,
-		ImportSession:  handleImportSession,
-		Serve:          handleServe,
-	})
+	adapterruntime.Run(adapterConfig)
+}
+
+// adapterConfig is the one-shot/serve dispatch table for this binary. It is a
+// package-level var (rather than inlined in main) so tests can drive it
+// through adapterruntime.RunWithArgs the same way the real CLI dispatch
+// does — exercising the actual wiring, not just the handler functions in
+// isolation. See TestReadFromOffset_WiredInOneShotMode.
+var adapterConfig = adapterruntime.Config{
+	Info:           handleInfo,
+	Detect:         handleDetect,
+	InstallHooks:   handleInstallHooks,
+	CheckHooks:     handleCheckHooks,
+	UninstallHooks: handleUninstallHooks,
+	Read:           handleRead,
+	ReadMetadata:   handleReadMetadata,
+	Diagnose:       handleDiagnose,
+	InstallRules:   handleInstallRules,
+	CheckRules:     handleCheckRules,
+	UninstallRules: handleUninstallRules,
+	FindSession:    handleFindSession,
+	ReadFromOffset: handleReadFromOffset,
+	ImportSession:  handleImportSession,
+	Serve:          handleServe,
+}
+
+// handleReadFromOffset is the one-shot mode handler for read-from-offset. The
+// serve-mode handler lives in serve.go (srv.OnReadFromOffset) — one-shot and
+// serve mode are separate registrations. This one was missing, so every
+// one-shot invocation (e.g. the daemon's catch-up read on restart) returned
+// "read-from-offset not implemented" and silently dropped every turn written
+// since the last persisted offset.
+func handleReadFromOffset(p adapterprotocol.ReadFromOffsetParams) (*adapterprotocol.ReadFromOffsetResult, error) {
+	if p.SessionFile == "" {
+		return nil, fmt.Errorf("--session-file is required")
+	}
+	return adapterruntime.ReadFromOffsetJSONL(p, parseLine)
 }
 
 func handleInfo() (*adapterprotocol.InfoResponse, error) {

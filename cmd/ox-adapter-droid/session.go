@@ -141,46 +141,15 @@ func readSessionFile(path string) ([]adapterprotocol.RawEntry, *adapterprotocol.
 	return entries, meta, nil
 }
 
+// readFromOffset resumes a droid transcript at a byte offset using the shared
+// JSONL tail reader (pkg/adapterruntime.TailJSONL). The hand-rolled version
+// this replaced advanced the offset to the file's current size on every call,
+// which acknowledges bytes that were never parsed: droid writes its transcript
+// incrementally, so the final line read mid-write is frequently partial, and
+// advancing past it silently drops the rest of that turn once droid finishes
+// writing it. TailJSONL stops at the last complete newline instead.
 func readFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, offset, fmt.Errorf("failed to open session file: %w", err)
-	}
-	defer f.Close()
-
-	if offset > 0 {
-		if _, err := f.Seek(offset, 0); err != nil {
-			return nil, offset, fmt.Errorf("failed to seek: %w", err)
-		}
-	}
-
-	var entries []adapterprotocol.RawEntry
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		parsed, err := parseLine(line)
-		if err != nil {
-			continue
-		}
-		entries = append(entries, parsed...)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, offset, fmt.Errorf("error reading session file: %w", err)
-	}
-
-	newOffset := offset
-	if info, err := f.Stat(); err == nil {
-		newOffset = info.Size()
-	}
-
-	return entries, newOffset, nil
+	return adapterruntime.TailJSONL(path, offset, parseLine)
 }
 
 // droidSessionsDir returns the base sessions directory for Droid. It is a

@@ -218,3 +218,71 @@ func containsRole(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// --- Incremental resume ---
+//
+// readFromOffset used to be a hand-rolled bufio.Scanner loop that advanced
+// newOffset to the file's current size on every call, regardless of whether
+// the last line scanned was complete. Droid writes its transcript
+// incrementally, so a read that lands mid-write sees a partial trailing line;
+// advancing past it acknowledges bytes that were never parsed, and the rest
+// of that turn is silently lost forever once droid finishes writing it. The
+// fix routes through adapterruntime.TailJSONL, which stops at the last
+// complete newline instead.
+
+// TestReadFromOffset_PartialTrailingLineNotConsumed is the regression test
+// for that class of bug: a read landing mid-write must not advance the
+// offset past the incomplete line, and completing the write later must
+// produce that turn's entry exactly once — not corrupted, not dropped.
+// Failure prevented: a turn written while the daemon's catch-up read is
+// in-flight vanishes from the ledger permanently.
+func TestReadFromOffset_PartialTrailingLineNotConsumed(t *testing.T) {
+	sessionStart := `{"type":"session_start","id":"s1","cwd":"/tmp/x","version":2}` + "\n"
+	line2 := `{"type":"message","id":"m2","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":[{"type":"text","text":"line two complete"}]}}` + "\n"
+	line3Full := `{"type":"message","id":"m3","timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"line three complete"}]}}` + "\n"
+	line3Partial := line3Full[:40] // cut mid-JSON, no trailing newline — simulates a write in flight
+
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte(sessionStart+line2+line3Partial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entries1, offset1, err := readFromOffset(path, 0)
+	if err != nil {
+		t.Fatalf("readFromOffset (partial write in flight): %v", err)
+	}
+	if len(entries1) != 1 || entries1[0].Content != "line two complete" {
+		t.Fatalf("got %d entries %+v, want exactly the line-2 entry", len(entries1), entries1)
+	}
+	wantOffset1 := int64(len(sessionStart) + len(line2))
+	if offset1 != wantOffset1 {
+		t.Fatalf("offset after partial write = %d, want %d (must stop before the incomplete line, not advance to file size %d)",
+			offset1, wantOffset1, len(sessionStart)+len(line2)+len(line3Partial))
+	}
+
+	// the write completes: the rest of line 3 is appended directly after the
+	// partial bytes, exactly as droid would finish writing it
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(line3Full[len(line3Partial):]); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	entries2, offset2, err := readFromOffset(path, offset1)
+	if err != nil {
+		t.Fatalf("readFromOffset (resumed after completion): %v", err)
+	}
+	if len(entries2) != 1 || entries2[0].Content != "line three complete" {
+		t.Fatalf("got %d entries %+v, want exactly the now-complete line-3 entry — the old implementation lost this turn permanently",
+			len(entries2), entries2)
+	}
+	wantOffset2 := offset1 + int64(len(line3Full))
+	if offset2 != wantOffset2 {
+		t.Fatalf("offset after resume = %d, want %d", offset2, wantOffset2)
+	}
+}

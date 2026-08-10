@@ -20,19 +20,27 @@ const (
 )
 
 func main() {
-	adapterruntime.Run(adapterruntime.Config{
-		Info:           handleInfo,
-		Detect:         handleDetect,
-		InstallHooks:   handleInstallHooks,
-		CheckHooks:     handleCheckHooks,
-		UninstallHooks: handleUninstallHooks,
-		FindSession:    handleFindSession,
-		Read:           handleRead,
-		ReadMetadata:   handleReadMetadata,
-		Diagnose:       handleDiagnose,
-		ImportSession:  handleImportSession,
-		Serve:          handleServe,
-	})
+	adapterruntime.Run(adapterConfig)
+}
+
+// adapterConfig is the one-shot/serve dispatch table for this binary. It is a
+// package-level var (rather than inlined in main) so tests can drive it
+// through adapterruntime.RunWithArgs the same way the real CLI dispatch
+// does — exercising the actual wiring, not just the handler functions in
+// isolation. See TestReadFromOffset_WiredInOneShotMode.
+var adapterConfig = adapterruntime.Config{
+	Info:           handleInfo,
+	Detect:         handleDetect,
+	InstallHooks:   handleInstallHooks,
+	CheckHooks:     handleCheckHooks,
+	UninstallHooks: handleUninstallHooks,
+	FindSession:    handleFindSession,
+	Read:           handleRead,
+	ReadMetadata:   handleReadMetadata,
+	Diagnose:       handleDiagnose,
+	ReadFromOffset: handleReadFromOffset,
+	ImportSession:  handleImportSession,
+	Serve:          handleServe,
 }
 
 func handleInfo() (*adapterprotocol.InfoResponse, error) {
