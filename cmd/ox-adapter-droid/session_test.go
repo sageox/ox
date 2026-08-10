@@ -150,9 +150,11 @@ func TestFindSessionFile_NoSessionsDir(t *testing.T) {
 
 // --- Real transcript round trip ---
 //
-// testdata/session-real.jsonl is copied verbatim from a transcript a real
-// droid 0.126.0 binary wrote under ~/.factory/sessions/, with the cwd,
-// session id, and owner username anonymized — nothing else changed. Hand
+// testdata/session-real.jsonl preserves the record types, field names,
+// nesting, and block ordering of a transcript a real droid 0.126.0 binary
+// wrote under ~/.factory/sessions/ — but the real conversation, environment,
+// and reasoning content has been replaced with neutral placeholders. See
+// testdata/PROVENANCE.md for exactly what was replaced and why. Hand
 // -authored fixtures are exactly what let this adapter ship pointed at a
 // directory ("projects") droid never wrote to: every real line was silently
 // dropped and every test still passed.
@@ -186,7 +188,10 @@ func TestReadSessionFile_RealTranscript(t *testing.T) {
 		}
 	}
 
-	if meta == nil || meta.AgentVersion == "" {
+	if meta == nil {
+		t.Fatal("no metadata extracted from a real session_start record")
+	}
+	if meta.AgentVersion == "" {
 		t.Error("no agent version extracted from a real session_start record")
 	}
 	if meta.Model == "" {

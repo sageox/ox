@@ -11,11 +11,13 @@ import (
 
 // TestConformance runs the shared adapter conformance suite against a real
 // droid transcript. realFixture and its provenance are documented in
-// session_test.go — cwd, session id, and owner username anonymized, nothing
-// else changed.
+// testdata/PROVENANCE.md — the record shape (types, field names, nesting,
+// block ordering) is byte-faithful to a real droid 0.126.0 capture; the
+// conversation, environment, and reasoning content was replaced with
+// placeholders.
 //
-// The fixture's six lines break down as: 1 session_start (produces no
-// entry), 3 user turns, 2 assistant turns — 5 entries total. ResumePoints
+// The fixture's four lines break down as: 1 session_start (produces no
+// entry), 2 user turns, 1 assistant turn — 3 entries total. ResumePoints
 // below are computed from the fixture's real line lengths (via lineOffset)
 // rather than hardcoded, so a re-capture of the fixture can't silently
 // desync the resume points from real line boundaries.
@@ -23,8 +25,8 @@ func TestConformance(t *testing.T) {
 	adaptertest.Run(t, adaptertest.Suite{
 		Adapter: "droid",
 		Provenance: "captured from a real droid 0.126.0 install, " +
-			"~/.factory/sessions/<project-slug>/<uuid>.jsonl, cwd/session id/owner " +
-			"anonymized — nothing else changed (see session_test.go)",
+			"~/.factory/sessions/<project-slug>/<uuid>.jsonl; record shape byte-faithful, " +
+			"content replaced with placeholders (see testdata/PROVENANCE.md)",
 
 		ReadAll: func() ([]adapterprotocol.RawEntry, error) {
 			entries, _, err := readSessionFile(realFixture)
@@ -45,9 +47,9 @@ func TestConformance(t *testing.T) {
 
 		ResumePoints: func() ([]int64, error) {
 			return []int64{
-				lineOffset(t, realFixture, 3), // skips the line-2 entry
-				lineOffset(t, realFixture, 5), // skips the line 2-4 entries
-				// line 6 is the fixture's last line, so an offset there
+				lineOffset(t, realFixture, 2), // skips the line-2 entry
+				lineOffset(t, realFixture, 3), // skips the line 2-3 entries
+				// line 4 is the fixture's last line, so an offset there
 				// equals EndOffset — already covered by the dedicated
 				// EndOffset check in checkResume, and reflect.DeepEqual
 				// would otherwise compare a nil slice against an empty
@@ -57,9 +59,9 @@ func TestConformance(t *testing.T) {
 		},
 
 		Want: adaptertest.Want{
-			MinEntries:     5,
-			UserTurns:      3,
-			AssistantTurns: 2,
+			MinEntries:     3,
+			UserTurns:      2,
+			AssistantTurns: 1,
 
 			Unproven: []string{
 				"tool calls and tool results — none of the real droid transcripts " +

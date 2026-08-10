@@ -221,15 +221,30 @@ func findPiSession(repoRoot, agentID, since, agentSessionID string) (string, err
 		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
 			return "", err
 		}
-		// search across all subdirectories for this session ID
-		subdirs, _ := os.ReadDir(baseDir)
-		for _, d := range subdirs {
-			if !d.IsDir() {
-				continue
-			}
-			direct := filepath.Join(baseDir, d.Name(), agentSessionID+".jsonl")
+
+		if repoRoot != "" {
+			// Same project-scoping rule as the fallback search below: a
+			// project-scoped query must never reach into another project's
+			// directory, even when the caller also supplies a session ID.
+			// Ledgers are shared with teammates, so returning another
+			// repo's session here would upload its conversation into the
+			// wrong Ledger.
+			direct := filepath.Join(baseDir, cwdToDirName(repoRoot), agentSessionID+".jsonl")
 			if _, err := os.Stat(direct); err == nil {
 				return direct, nil
+			}
+		} else {
+			// unscoped query: search across all subdirectories for this
+			// session ID
+			subdirs, _ := os.ReadDir(baseDir)
+			for _, d := range subdirs {
+				if !d.IsDir() {
+					continue
+				}
+				direct := filepath.Join(baseDir, d.Name(), agentSessionID+".jsonl")
+				if _, err := os.Stat(direct); err == nil {
+					return direct, nil
+				}
 			}
 		}
 	}

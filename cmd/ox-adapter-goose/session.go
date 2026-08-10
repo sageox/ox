@@ -472,24 +472,23 @@ func toolRequestFields(b gooseBlock) (name, args string) {
 // failed-command response, Goose leaves the outer toolResult.status as
 // "success" and nests the actual failure at toolResult.value.isError instead.
 // The outer status is only consulted as a fallback, for responses whose value
-// is absent or does not parse as the structured envelope (e.g. a bare JSON
-// scalar from a simpler built-in tool).
+// is absent, `null`, does not parse as the structured envelope (e.g. a bare
+// JSON scalar from a simpler built-in tool), or parses as an object carrying
+// neither "content" nor "isError" — none of those are the envelope, and
+// treating them as one would silently read a failed call as isError:false.
 func toolResponseFields(b gooseBlock) (content string, isError bool) {
 	if b.ToolResp == nil {
 		return "", false
 	}
 
-	if len(b.ToolResp.Value) > 0 {
-		var v gooseToolResultValue
-		if err := json.Unmarshal(b.ToolResp.Value, &v); err == nil {
-			text := joinTextBlocks(v.Content)
-			if text == "" {
-				// No extractable text (e.g. a content-less or non-text
-				// payload) — preserve the raw JSON rather than lose it.
-				text = string(b.ToolResp.Value)
-			}
-			return text, v.IsError
+	if v, ok := parseGooseToolResultValue(b.ToolResp.Value); ok {
+		text := joinTextBlocks(v.Content)
+		if text == "" {
+			// No extractable text (e.g. a content-less or non-text
+			// payload) — preserve the raw JSON rather than lose it.
+			text = string(b.ToolResp.Value)
 		}
+		return text, v.IsError
 	}
 
 	if b.ToolResp.Status != "" && b.ToolResp.Status != "success" {
@@ -499,6 +498,41 @@ func toolResponseFields(b gooseBlock) (content string, isError bool) {
 		return string(b.ToolResp.Value), true
 	}
 	return string(b.ToolResp.Value), false
+}
+
+// parseGooseToolResultValue reports whether raw is genuinely the structured
+// envelope Goose writes for MCP-style tool responses — a JSON object
+// carrying at least a "content" or "isError" key.
+//
+// json.Unmarshal into a struct succeeds without error for `null` and for any
+// object missing all of the struct's fields, in both cases leaving the
+// struct at its zero value (IsError: false). Treating that success as "is
+// the envelope" is the bug: a `null` value or a non-envelope object would be
+// read as a successful response even when the outer toolResult carries a
+// real failure. Requiring at least one recognized key before trusting the
+// unmarshal is what makes the envelope check authoritative only when the
+// envelope is actually present.
+func parseGooseToolResultValue(raw json.RawMessage) (gooseToolResultValue, bool) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return gooseToolResultValue{}, false
+	}
+
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return gooseToolResultValue{}, false
+	}
+	if _, hasContent := probe["content"]; !hasContent {
+		if _, hasIsError := probe["isError"]; !hasIsError {
+			return gooseToolResultValue{}, false
+		}
+	}
+
+	var v gooseToolResultValue
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return gooseToolResultValue{}, false
+	}
+	return v, true
 }
 
 // joinTextBlocks concatenates the text of every "text"-typed content block,

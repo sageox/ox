@@ -208,6 +208,54 @@ func TestToolResponseFields_ErrorStatus(t *testing.T) {
 	}
 }
 
+// TestToolResponseFields_NullValueFallsBackToOuterStatus is the regression
+// test for the outer-status fallback: a `null` value unmarshals into
+// gooseToolResultValue's zero value (IsError: false) without error, so
+// treating "unmarshaled without error" as "is the envelope" silently reports
+// a failed tool call as a success. A `null` value must fall back to the
+// outer toolResult.status instead of being read as a structured envelope.
+func TestToolResponseFields_NullValueFallsBackToOuterStatus(t *testing.T) {
+	b := gooseBlock{
+		Type: "toolResponse",
+		ToolResp: &gooseToolResp{
+			Status: "error",
+			Error:  "boom",
+			Value:  []byte("null"),
+		},
+	}
+	content, isErr := toolResponseFields(b)
+	if !isErr {
+		t.Error("a null value must fall back to the outer status, not be read as a successful envelope")
+	}
+	if content != "boom" {
+		t.Errorf("content = %q, want the outer error text", content)
+	}
+}
+
+// TestToolResponseFields_NonEnvelopeObjectFallsBackToOuterStatus covers the
+// other shape that unmarshals into the envelope's zero value without error:
+// a JSON object present but carrying neither "content" nor "isError". That
+// is not the structured envelope Goose writes for MCP-style responses, so it
+// must fall back to the outer toolResult.status rather than being read as an
+// isError:false success.
+func TestToolResponseFields_NonEnvelopeObjectFallsBackToOuterStatus(t *testing.T) {
+	b := gooseBlock{
+		Type: "toolResponse",
+		ToolResp: &gooseToolResp{
+			Status: "error",
+			Error:  "boom",
+			Value:  []byte(`{"foo":"bar"}`),
+		},
+	}
+	content, isErr := toolResponseFields(b)
+	if !isErr {
+		t.Error("an object without content or isError must fall back to the outer status, not be read as a successful envelope")
+	}
+	if content != "boom" {
+		t.Errorf("content = %q, want the outer error text", content)
+	}
+}
+
 // TestReadMessages_OffsetIsExclusive is the core incremental-read contract:
 // reading from a watermark must return only rows ABOVE it. An off-by-one here
 // either duplicates the last entry on every hook or silently drops one.

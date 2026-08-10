@@ -359,6 +359,53 @@ func TestFindPiSession_ScopedRepoWithNoSessions_DoesNotLeakOtherProject(t *testi
 	}
 }
 
+// TestFindPiSession_DirectIDLookupScopedToRepo is the same defect class as
+// the leak above, on the OTHER lookup path: when both repoRoot and
+// agentSessionID are set, the direct by-ID lookup must be confined to
+// repoRoot's own project directory, not scan every project directory on
+// disk. A session recorded under a different project must never be returned
+// just because its filename happens to match the requested ID — Ledgers are
+// shared with teammates, so that would upload another repo's conversation
+// into the wrong Ledger.
+//
+// Failure prevented: findPiSession("/repo-a", "", "", sharedID) returning
+// "/repo-b"'s session file because the direct-ID search walked every
+// subdirectory under ~/.pi/agent/sessions instead of only repo A's.
+func TestFindPiSession_DirectIDLookupScopedToRepo(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	baseDir := filepath.Join(home, ".pi", "agent", "sessions")
+
+	// Repo A has a project directory but no sessions in it.
+	repoA := "/Users/dev/repo-a"
+	if err := os.MkdirAll(filepath.Join(baseDir, cwdToDirName(repoA)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Repo B has a session file whose name happens to match the ID repo A's
+	// lookup will ask for.
+	repoB := "/Users/dev/repo-b"
+	projectDirB := filepath.Join(baseDir, cwdToDirName(repoB))
+	if err := os.MkdirAll(projectDirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const sharedID = "22222222-2222-2222-2222-222222222222"
+	leakedSession := filepath.Join(projectDirB, sharedID+".jsonl")
+	data := `{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"repo b conversation"}` + "\n"
+	if err := os.WriteFile(leakedSession, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := findPiSession(repoA, "", "", sharedID)
+	if got == leakedSession {
+		t.Fatalf("findPiSession(%q, ..., %q) returned repo B's session %q — cross-project leak via the direct-ID lookup", repoA, sharedID, leakedSession)
+	}
+	if err == nil {
+		t.Fatalf("findPiSession(%q, ..., %q) = %q, want a not-found error — repo A has no session with that ID and must not fall back to another project's", repoA, sharedID, got)
+	}
+}
+
 // TestFindPiSession_UnscopedFallsBackToNewestAnywhere pins the one case where
 // scanning every subdirectory IS correct: no repoRoot was supplied at all
 // (an unscoped query), which callers exercise via handleDetect's format-check
