@@ -1,7 +1,7 @@
 # Makefile for ox CLI tool
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw
-.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-all test-slow test-integration test-preflight test-digital-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
+.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-all test-slow test-integration test-agents test-preflight test-digital-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
 
 # Variables
 GO := go
@@ -156,7 +156,12 @@ test-slow: ## Run slow tests (build tag: slow) — requires real ox binary, no C
 
 test-integration: ## Integration tests live in sageox/ox-test-harness
 	@echo "Coding agent integration tests are in sageox/ox-test-harness."
+	@echo "For an in-repo real-agent smoke gate, run: make test-agents"
 	@exit 1
+
+test-agents: ## Drive real coding agents and read their transcripts back through ox (opt-in, costs API calls)
+	$(call say,"Driving real coding agents — requires each agent installed and authenticated...")
+	@OX_TEST_REAL_AGENTS=1 $(GO) test -tags=agents -count=1 -v -timeout=20m ./tests/agents/
 
 check-no-git-lfs-shell: ## Ensure no code shells out to git-lfs binary (see .claude/rules/lfs-no-git-lfs-binary.md)
 	@if grep -r --include='*.go' -nE 'exec\.(Command|CommandContext)\("git",\s*"lfs"|exec\.(Command|CommandContext)\("git-lfs"|LookPath\("git-lfs"\)' . 2>/dev/null \
