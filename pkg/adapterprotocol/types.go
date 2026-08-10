@@ -212,6 +212,17 @@ type ReadParams struct {
 type ReadResult struct {
 	Entries  []RawEntry       `json:"entries"`
 	Metadata *SessionMetadata `json:"metadata,omitempty"`
+
+	// Skipped counts source records the adapter understood and deliberately
+	// did not emit — reasoning blocks, binary payloads, agent bookkeeping.
+	//
+	// Without it, "this transcript contains nothing worth recording" and "this
+	// parser matched nothing in the transcript" produce identical output: zero
+	// entries and no error. That ambiguity is what let six adapters ship
+	// readers for formats their agent never wrote. A session that reports
+	// read 38, emitted 34, skipped 4 is healthy; one reporting emitted 0,
+	// skipped 0 against a non-empty transcript is broken, and now says so.
+	Skipped int `json:"skipped,omitempty"`
 }
 
 // ReadMetadataResult is returned by `read-metadata`.

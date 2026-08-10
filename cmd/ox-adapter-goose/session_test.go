@@ -141,7 +141,7 @@ func TestParseContentBlocks_AllBlockTypes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := parseContentBlocks(tt.role, tt.content, ts)
+			got, _ := parseContentBlocks(tt.role, tt.content, ts)
 			if len(got) != tt.wantEntries {
 				t.Fatalf("got %d entries, want %d: %+v", len(got), tt.wantEntries, got)
 			}
@@ -158,7 +158,7 @@ func TestParseContentBlocks_AllBlockTypes(t *testing.T) {
 func TestParseContentBlocks_MalformedKeepsTurn(t *testing.T) {
 	ts := time.Unix(1_700_000_000, 0).UTC()
 
-	got := parseContentBlocks("user", `this is not json`, ts)
+	got, _ := parseContentBlocks("user", `this is not json`, ts)
 	if len(got) != 1 {
 		t.Fatalf("got %d entries, want 1 — a malformed turn must not vanish", len(got))
 	}
@@ -167,7 +167,7 @@ func TestParseContentBlocks_MalformedKeepsTurn(t *testing.T) {
 	}
 
 	// A system role with malformed content has no user-visible turn to save.
-	if got := parseContentBlocks("tool", `not json`, ts); len(got) != 0 {
+	if got, _ := parseContentBlocks("tool", `not json`, ts); len(got) != 0 {
 		t.Errorf("non-conversational role should yield no entry, got %d", len(got))
 	}
 }
@@ -179,7 +179,7 @@ func TestToolRequestFields_FailedCallIsSkipped(t *testing.T) {
 	ts := time.Unix(1_700_000_000, 0).UTC()
 
 	content := `[{"type":"toolRequest","id":"c1","toolCall":{"status":"error","error":"tool not found"}}]`
-	if got := parseContentBlocks("assistant", content, ts); len(got) != 0 {
+	if got, _ := parseContentBlocks("assistant", content, ts); len(got) != 0 {
 		t.Errorf("failed tool request should yield no entry, got %d: %+v", len(got), got)
 	}
 }
@@ -511,7 +511,7 @@ func TestReadMessages_EmptyReadKeepsWatermark(t *testing.T) {
 func TestParseContentBlocks_ToolResponseWithoutPayload(t *testing.T) {
 	ts := time.Unix(1_700_000_000, 0).UTC()
 
-	got := parseContentBlocks("assistant", `[{"type":"toolResponse","id":"c1"}]`, ts)
+	got, _ := parseContentBlocks("assistant", `[{"type":"toolResponse","id":"c1"}]`, ts)
 	if len(got) != 0 {
 		t.Errorf("toolResponse with no payload should yield no entry, got %d: %+v", len(got), got)
 	}
@@ -586,4 +586,62 @@ func TestExtractSessionID(t *testing.T) {
 // entryText pulls the human-readable payload out of a RawEntry for assertions.
 func entryText(e adapterprotocol.RawEntry) string {
 	return e.Content
+}
+
+// A block type goose understands but deliberately does not record — reasoning,
+// binary payloads — used to vanish without trace. That made "this turn held
+// nothing worth recording" indistinguishable from "the parser matched nothing",
+// which is precisely the ambiguity that let broken readers ship looking healthy.
+func TestParseContentBlocks_CountsWhatItDeliberatelyDropped(t *testing.T) {
+	ts := time.Unix(1700000000, 0).UTC()
+
+	tests := []struct {
+		name        string
+		content     string
+		wantEntries int
+		wantSkipped int
+	}{
+		{
+			name:        "reasoning is never recorded",
+			content:     `[{"type":"thinking","thinking":"internal reasoning"}]`,
+			wantEntries: 0,
+			wantSkipped: 1,
+		},
+		{
+			name:        "binary payloads are not recorded",
+			content:     `[{"type":"image","data":"..."}]`,
+			wantEntries: 0,
+			wantSkipped: 1,
+		},
+		{
+			name:        "text alongside a dropped block still records",
+			content:     `[{"type":"thinking","thinking":"x"},{"type":"text","text":"the answer"}]`,
+			wantEntries: 1,
+			wantSkipped: 1,
+		},
+		{
+			name:        "an unmodeled block type counts rather than vanishing",
+			content:     `[{"type":"somethingGooseAddedLater"}]`,
+			wantEntries: 0,
+			wantSkipped: 1,
+		},
+		{
+			name:        "a fully recorded turn skips nothing",
+			content:     `[{"type":"text","text":"hello"}]`,
+			wantEntries: 1,
+			wantSkipped: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entries, skipped := parseContentBlocks("assistant", tt.content, ts)
+			if len(entries) != tt.wantEntries {
+				t.Errorf("got %d entries, want %d", len(entries), tt.wantEntries)
+			}
+			if skipped != tt.wantSkipped {
+				t.Errorf("got skipped=%d, want %d — an uncounted drop is an invisible one", skipped, tt.wantSkipped)
+			}
+		})
+	}
 }

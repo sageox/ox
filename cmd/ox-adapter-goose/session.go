@@ -237,14 +237,14 @@ func handleRead(p adapterprotocol.ReadParams) (*adapterprotocol.ReadResult, erro
 	}
 	defer func() { _ = db.Close() }()
 
-	entries, _, err := readMessages(db, sessionID, 0)
+	entries, _, skipped, err := readMessagesWithStats(db, sessionID, 0)
 	if err != nil {
 		return nil, err
 	}
 
 	meta, _ := readMetadata(db, sessionID)
 
-	return &adapterprotocol.ReadResult{Entries: entries, Metadata: meta}, nil
+	return &adapterprotocol.ReadResult{Entries: entries, Metadata: meta, Skipped: skipped}, nil
 }
 
 func handleReadMetadata(p adapterprotocol.ReadParams) (*adapterprotocol.ReadMetadataResult, error) {
@@ -331,25 +331,36 @@ func handleCapturePrior(p adapterprotocol.CapturePriorParams) (*adapterprotocol.
 // row inserted between the SELECT and a separate MAX(id) query would not be in
 // entries, yet the watermark would move past it — that turn would be dropped
 // from the Ledger permanently.
+// readMessages is readMessagesWithStats without the skip count, for the many
+// callers that do not need it.
 func readMessages(db *sql.DB, sessionID string, afterID int64) ([]adapterprotocol.RawEntry, int64, error) {
+	entries, lastID, _, err := readMessagesWithStats(db, sessionID, afterID)
+	return entries, lastID, err
+}
+
+// readMessagesWithStats also reports how many source blocks were understood and
+// deliberately not emitted, so a session that records nothing can be told apart
+// from a parser that matches nothing.
+func readMessagesWithStats(db *sql.DB, sessionID string, afterID int64) ([]adapterprotocol.RawEntry, int64, int, error) {
 	rows, err := db.Query(
 		"SELECT id, role, content_json, created_timestamp FROM messages WHERE session_id = ? AND id > ? ORDER BY id ASC",
 		sessionID, afterID,
 	)
 	if err != nil {
-		return nil, afterID, fmt.Errorf("query messages: %w", err)
+		return nil, afterID, 0, fmt.Errorf("query messages: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	var entries []adapterprotocol.RawEntry
 	lastID := afterID
+	skipped := 0
 
 	for rows.Next() {
 		var rowID, createdTS int64
 		var role, contentJSON string
 
 		if err := rows.Scan(&rowID, &role, &contentJSON, &createdTS); err != nil {
-			return nil, afterID, fmt.Errorf("scan message row for session %s: %w", sessionID, err)
+			return nil, afterID, 0, fmt.Errorf("scan message row for session %s: %w", sessionID, err)
 		}
 
 		// Goose migrated from Unix seconds to milliseconds; detect by magnitude.
@@ -359,14 +370,16 @@ func readMessages(db *sql.DB, sessionID string, afterID int64) ([]adapterprotoco
 		} else {
 			ts = time.Unix(createdTS, 0).UTC()
 		}
-		entries = append(entries, parseContentBlocks(role, contentJSON, ts)...)
+		parsed, dropped := parseContentBlocks(role, contentJSON, ts)
+		entries = append(entries, parsed...)
+		skipped += dropped
 		lastID = rowID
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, afterID, err
+		return nil, afterID, 0, err
 	}
-	return entries, lastID, nil
+	return entries, lastID, skipped, nil
 }
 
 // readMetadata extracts the model from the session row. Goose stores it as a
@@ -408,28 +421,32 @@ func readMetadata(db *sql.DB, sessionID string) (*adapterprotocol.SessionMetadat
 
 // parseContentBlocks converts one Goose message's content_json into ox entries.
 // A single message can yield several entries (text plus tool calls).
-func parseContentBlocks(role, contentJSON string, ts time.Time) []adapterprotocol.RawEntry {
+func parseContentBlocks(role, contentJSON string, ts time.Time) ([]adapterprotocol.RawEntry, int) {
 	var blocks []gooseBlock
 	if err := json.Unmarshal([]byte(contentJSON), &blocks); err != nil {
 		// Malformed or unexpected shape: keep the turn rather than dropping it.
 		if role == "user" || role == "assistant" {
-			return []adapterprotocol.RawEntry{makeEntry(role, ts, contentJSON)}
+			return []adapterprotocol.RawEntry{makeEntry(role, ts, contentJSON)}, 0
 		}
-		return nil
+		return nil, 0
 	}
 
 	var entries []adapterprotocol.RawEntry
+	skipped := 0
 
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
-			if b.Text != "" {
-				entries = append(entries, makeEntry(role, ts, b.Text))
+			if b.Text == "" {
+				skipped++
+				continue
 			}
+			entries = append(entries, makeEntry(role, ts, b.Text))
 
 		case "toolRequest":
 			name, args := toolRequestFields(b)
 			if name == "" {
+				skipped++
 				continue
 			}
 			entries = append(entries, adapterruntime.ToolUseWithID(ts, name, args, b.ID))
@@ -439,20 +456,31 @@ func parseContentBlocks(role, contentJSON string, ts time.Time) []adapterprotoco
 				// No payload — a renamed or missing field in a future Goose
 				// version. Emitting an entry here would produce empty output
 				// with no CallID, uncorrelatable to its request.
+				skipped++
 				continue
 			}
 			content, isErr := toolResponseFields(b)
 			entries = append(entries, adapterruntime.ToolResultWithID(ts, content, isErr, b.ID))
 
 		case "thinking":
-			// Reasoning content — not user-visible, and not part of the record.
+			// Reasoning content is deliberately never recorded, for any agent.
+			// It is where a model quotes its own system prompt back, and a
+			// Ledger is shared with teammates. Counted, not emitted.
+			skipped++
 
 		case "image":
 			// Binary payload; nothing useful to put in a text transcript.
+			skipped++
+
+		default:
+			// a block type this adapter does not model — count it so a future
+			// Goose format change shows up as a rising skip count rather than
+			// a quietly shrinking transcript
+			skipped++
 		}
 	}
 
-	return entries
+	return entries, skipped
 }
 
 // toolRequestFields pulls the tool name and arguments out of the status/value

@@ -468,6 +468,13 @@ func parseAssistantMessage(raw *droidEntry) ([]adapterprotocol.RawEntry, error) 
 			if block.Content != "" {
 				entries = append(entries, adapterruntime.ToolResultEntry(ts, block.Content, block.IsError))
 			}
+		case "thinking":
+			// Reasoning is deliberately never recorded, for any agent — it is
+			// where a model quotes its own system prompt back, and a Ledger is
+			// shared with teammates. This case exists so the drop is a decision
+			// rather than a block type nobody happened to handle: droidBlock
+			// parses Thinking, so the next reader of this switch would
+			// reasonably assume it was an oversight.
 		}
 	}
 
