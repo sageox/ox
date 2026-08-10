@@ -13,6 +13,7 @@ import (
 
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
 // offsetWarning keeps the handle-adapter resume caveat to one log line per
@@ -379,11 +380,15 @@ func (m *SessionWatcherManager) runWatcher(
 		}
 
 		// persist offset after each batch so daemon restart can resume.
-		// We use file size rather than TailWatcher's internal byte offset
-		// because the watcher reads up to EOF on each debounce tick.
-		// File size >= bytes consumed, so worst case we over-estimate
-		// slightly; a catch-up read from the over-estimated offset
-		// returns 0 entries on restart — no data loss or duplication.
+		//
+		// It must be the end of the last COMPLETE record, not the file size.
+		// The agent appends while we read, so EOF is frequently the middle of
+		// a record it is still writing; persisting that lands the next resume
+		// inside a record, TailJSONL refuses the non-boundary offset and
+		// restarts from zero, and the whole transcript is appended a second
+		// time. Rounding down to the last newline costs at most a re-read of
+		// the trailing partial record, which yields nothing until it is
+		// complete.
 		//
 		// Handle-based adapters have no file to size. Their offset is a row
 		// count owned by the adapter, so os.Stat fails and there is nothing
@@ -396,8 +401,8 @@ func (m *SessionWatcherManager) runWatcher(
 				m.logger.Warn("resume offset is not tracked for handle-based adapters; a daemon restart re-reads from the last catch-up offset",
 					"adapter", aw.adapterName, "session", aw.sessionName)
 			})
-		} else if fi, statErr := os.Stat(aw.sessionFile); statErr == nil {
-			m.persistOffset(aw, fi.Size(), len(converted))
+		} else if boundary, boundaryErr := adapterruntime.LastRecordBoundary(aw.sessionFile); boundaryErr == nil {
+			m.persistOffset(aw, boundary, len(converted))
 		}
 	}
 }

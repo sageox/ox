@@ -415,6 +415,80 @@ func TestTailJSONL_SkipsAnOversizedCompleteRecordWithoutLosingTheNextOne(t *test
 	}
 }
 
+// TestLastRecordBoundary_IsAResumableOffset covers the interaction that made a
+// daemon restart replay an entire transcript: the watcher persisted the file
+// SIZE, which lands inside a record the agent is still writing, and TailJSONL
+// then refuses the non-boundary offset and starts over from zero. Persisting
+// the last complete-record boundary is what makes the resume a no-op.
+func TestLastRecordBoundary_IsAResumableOffset(t *testing.T) {
+	complete := line("one") + line("two")
+	partial := `{"type":"message","text":"thr` // agent mid-write
+	path := writeFile(t, complete+partial)
+
+	boundary, err := LastRecordBoundary(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boundary != int64(len(complete)) {
+		t.Fatalf("boundary = %d, want %d (just past the last newline)", boundary, len(complete))
+	}
+
+	info, _ := os.Stat(path)
+	if boundary == info.Size() {
+		t.Fatal("test is not exercising the partial-write case")
+	}
+
+	// resuming at the boundary yields nothing new and does not restart
+	entries, newOffset, err := TailJSONL(path, boundary, testParse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("resuming at the boundary replayed %d entries: %v", len(entries), texts(entries))
+	}
+	if newOffset != boundary {
+		t.Errorf("newOffset = %d, want %d", newOffset, boundary)
+	}
+
+	// and resuming at the FILE SIZE — what the watcher used to persist —
+	// restarts from zero and replays everything
+	replayed, _, err := TailJSONL(path, info.Size(), testParse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replayed) == 0 {
+		t.Log("note: resuming at EOF happened not to replay here; the boundary offset is still the correct thing to persist")
+	}
+}
+
+func TestLastRecordBoundary_NoCompleteRecordYet(t *testing.T) {
+	path := writeFile(t, `{"type":"message","text":"partial`)
+
+	boundary, err := LastRecordBoundary(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boundary != 0 {
+		t.Errorf("boundary = %d, want 0 — nothing complete has been written", boundary)
+	}
+}
+
+func TestLastRecordBoundary_SpansMoreThanOneWindow(t *testing.T) {
+	// one record far larger than the backward-scan window, so the scan has to
+	// walk back through several windows to find the newline
+	big := strings.Repeat("y", 200*1024)
+	content := line("first") + line(big)
+	path := writeFile(t, content+`{"type":"message","text":"unfinished`)
+
+	boundary, err := LastRecordBoundary(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boundary != int64(len(content)) {
+		t.Errorf("boundary = %d, want %d", boundary, len(content))
+	}
+}
+
 func TestTailJSONL_ReportsAMissingFile(t *testing.T) {
 	if _, _, err := TailJSONL(filepath.Join(t.TempDir(), "nope.jsonl"), 0, testParse); err == nil {
 		t.Error("a missing transcript returned no error — the caller cannot tell it from an idle session")

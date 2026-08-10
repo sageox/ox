@@ -134,6 +134,53 @@ func TailJSONLWithStats(path string, offset int64, parse LineParser) ([]adapterp
 	return entries, consumed, stats, nil
 }
 
+// LastRecordBoundary returns the offset just past the last complete record in
+// a JSONL file — that is, one byte after its final newline.
+//
+// Callers that persist a resume offset must persist THIS, not the file size.
+// An agent appends while ox reads, so the end of the file is frequently the
+// middle of a record it is still writing. Persisting the file size records a
+// position inside that record; TailJSONL then refuses it as a non-boundary and
+// restarts from zero, re-reading and re-appending the whole transcript.
+//
+// Returns 0 when the file holds no complete record yet.
+func LastRecordBoundary(path string) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+
+	// scan backwards a window at a time; a complete record is almost always
+	// within the first window, so this reads 64 KiB once in the normal case
+	const window = 64 * 1024
+	end := info.Size()
+	buf := make([]byte, window)
+
+	for end > 0 {
+		start := end - window
+		if start < 0 {
+			start = 0
+		}
+		n, readErr := f.ReadAt(buf[:end-start], start)
+		if readErr != nil && n == 0 {
+			return 0, readErr
+		}
+		for i := n - 1; i >= 0; i-- {
+			if buf[i] == '\n' {
+				return start + int64(i) + 1, nil
+			}
+		}
+		end = start
+	}
+	return 0, nil
+}
+
 // endsRecordBoundary reports whether offset sits immediately after a newline,
 // which is the only position a resume can safely start from.
 func endsRecordBoundary(f *os.File, offset int64) bool {
