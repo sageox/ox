@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/pkg/adapterprotocol"
+	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
 // --- A. Direct lookup via agent_session_id ---
@@ -74,6 +77,55 @@ func TestFindCodexSession_DirectLookup_InvalidFallsBack(t *testing.T) {
 	}
 	if got != sessionFile {
 		t.Errorf("got %q, want %q (fallback)", got, sessionFile)
+	}
+}
+
+// --- C2. mergeToolEntries cross-batch pairing ---
+
+// TestMergeToolEntries_CrossBatchPairing is the regression gate for the
+// actual historical bug (see the package doc comment and commit
+// "fix(codex): pair tool results to their calls across non-adjacent lines"):
+// a call read in one incremental window and its result read in a LATER
+// window must still pair, via the pending map serve.go's pendingCallStore
+// carries across ReadFromOffset polls. The old merge required strict
+// adjacency within a single read, so a call/result split across two
+// fsnotify batches surfaced as a nameless orphan result forever.
+//
+// Failure prevented: the daemon's live tail-watch path silently drops the
+// tool name off any call whose result arrives in a later poll than its call
+// — most real sessions, since Codex routinely fires several tool calls
+// before any of their results return.
+func TestMergeToolEntries_CrossBatchPairing(t *testing.T) {
+	ts := time.Now()
+	call := adapterruntime.ToolUseWithID(ts, "bash", `{"cmd":"ls"}`, "call-1")
+	result := adapterruntime.ToolResultWithID(ts, "ls output", false, "call-1")
+
+	pending := map[string]adapterprotocol.RawEntry{}
+
+	// window 1: only the call arrives.
+	batch1 := mergeToolEntries([]adapterprotocol.RawEntry{call}, pending)
+	if len(batch1) != 1 || batch1[0].ToolName != "bash" || batch1[0].ToolOutput != "" {
+		t.Fatalf("window 1 = %+v, want the call unresolved (no output yet)", batch1)
+	}
+	if _, ok := pending["call-1"]; !ok {
+		t.Fatal("call-1 should be recorded as pending after window 1")
+	}
+
+	// window 2: only the result arrives, in a LATER, separate call to
+	// mergeToolEntries — reusing the SAME pending map, exactly like
+	// pendingCallStore.merge does across two ReadFromOffset polls.
+	batch2 := mergeToolEntries([]adapterprotocol.RawEntry{result}, pending)
+	if len(batch2) != 1 {
+		t.Fatalf("window 2 = %+v, want exactly one (labeled) result entry", batch2)
+	}
+	if batch2[0].ToolName != "bash" {
+		t.Errorf("window 2 result ToolName = %q, want %q — the call from an earlier window must label it", batch2[0].ToolName, "bash")
+	}
+	if batch2[0].ToolOutput != "ls output" {
+		t.Errorf("window 2 result ToolOutput = %q, want %q", batch2[0].ToolOutput, "ls output")
+	}
+	if _, ok := pending["call-1"]; ok {
+		t.Error("call-1 should be cleared from pending once its result labels it")
 	}
 }
 

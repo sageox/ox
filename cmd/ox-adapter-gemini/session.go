@@ -378,9 +378,10 @@ func (c *geminiToolCall) outcome() (output string, isError bool, ok bool) {
 	}
 
 	// any status other than "success" is a failure. Gemini's status enum
-	// (read out of the 0.36.0 bundle) includes "error" and "cancelled";
-	// treating unknown values as failures is the safe direction, because a
-	// failed tool recorded as a success misleads every later reader.
+	// (read out of the 0.36.0 bundle) includes "error" and the British
+	// spelling it actually emits; treating unknown values as failures is the
+	// safe direction, because a failed tool recorded as a success misleads
+	// every later reader.
 	if c.Status != "" && c.Status != "success" {
 		isError = true
 	}

@@ -178,10 +178,11 @@ func TestParseGeminiSession_EmptySessionIsNotAnError(t *testing.T) {
 	}
 }
 
-// TestToolCallOutcome covers the failure signalling that the real fixture
-// cannot prove — every captured tool call succeeded. The status values come
-// from gemini 0.36.0's own enum ("success", "error", "cancelled") and the
-// response.error key documented in its bundled docs/hooks/reference.md.
+// TestToolCallOutcome covers the failure signaling that the real fixture
+// cannot prove — every captured tool call succeeded. The status values are
+// gemini 0.36.0's own enum, reproduced verbatim below because they are the
+// agent's tokens, not our prose; plus the response.error key documented in its
+// bundled docs/hooks/reference.md.
 func TestToolCallOutcome(t *testing.T) {
 	t.Parallel()
 
@@ -207,7 +208,8 @@ func TestToolCallOutcome(t *testing.T) {
 			wantOutput: "boom", wantErr: true, wantOK: true,
 		},
 		{
-			name: "cancelled status",
+			name: "canceled status",
+			//nolint:misspell // gemini's own enum value, reproduced verbatim — Americanizing it would stop matching what the agent writes
 			call: geminiToolCall{Status: "cancelled", Result: []geminiToolResult{{
 				FunctionResponse: &geminiFunctionResponse{Response: map[string]any{"output": "stopped"}},
 			}}},

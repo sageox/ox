@@ -207,9 +207,12 @@ func queryLatestSession(db *sql.DB, directory string, sinceMS int64) (string, er
 		args = append(args, sinceMS)
 	}
 
+	// Every element of conds is a compile-time constant declared above, and
+	// every value is bound as a parameter in args — nothing user-supplied is
+	// ever concatenated into the SQL text.
 	query := "SELECT id, directory FROM session WHERE parent_id IS NULL"
 	if len(conds) > 0 {
-		query += " AND " + strings.Join(conds, " AND ")
+		query += " AND " + strings.Join(conds, " AND ") //nolint:gosec // G202: conds holds only literals; values are bound parameters
 	}
 	query += " ORDER BY time_created DESC"
 
