@@ -23,22 +23,33 @@ import (
 // resolvePlanProvenance builds the forward link for a plan being saved in
 // gitRoot. Returns the provenance to stamp and the live recording state (so the
 // caller can derive collaboration signals from the same load). Returns
-// (nil, nil) when no agent context is detected — the plan is then unlinked,
-// which renders fine.
+// (nil, nil) only when NOTHING resolved — the plan is then unlinked, which
+// renders fine.
+//
+// Agent detection is NOT a precondition. It used to be: an `agentID == ""`
+// early return here discarded the author, the repo id, and the session too,
+// even though none of the three needs an agent — AttributionDisplayName falls
+// back through OAuth token, git config, and OS username to a literal
+// "anonymous" and so can never come back empty, and RecordingState has a
+// workspace-scoped loader. The cost was permanent, not cosmetic: with
+// SessionName blank, plan.BackfillSessionID (which matches on SessionName) can
+// never attach the canonical ses_ id afterwards, so those plans stayed
+// unattributed forever. Measured over 233 real plans, author was populated on
+// 5.2% and session_id on 4.7% — one failure, not two.
 func resolvePlanProvenance(gitRoot string) (*plan.Provenance, *session.RecordingState) {
 	agentID, agentType := detectAgentContext()
-	if agentID == "" {
-		return nil, nil
-	}
 
 	prov := &plan.Provenance{AgentID: agentID, AgentType: agentType}
 
-	// instance store: authoritative agent type + model snapshot.
-	if inst, err := resolveInstance(agentID); err == nil && inst != nil {
-		if inst.AgentType != "" {
-			prov.AgentType = inst.AgentType
+	// instance store: authoritative agent type + model snapshot. The only
+	// genuinely agent-keyed lookup in this function.
+	if agentID != "" {
+		if inst, err := resolveInstance(agentID); err == nil && inst != nil {
+			if inst.AgentType != "" {
+				prov.AgentType = inst.AgentType
+			}
+			prov.Model = inst.Model
 		}
-		prov.Model = inst.Model
 	}
 
 	// repo id + author snapshot (denormalized so the plan renders standalone).
@@ -54,23 +65,47 @@ func resolvePlanProvenance(gitRoot string) (*plan.Provenance, *session.Recording
 	// live recording → session name + start-minted ses_ SessionID (both
 	// available now) + active outcome. Stop-time reconciliation remains the
 	// backstop for recordings started under an older binary (empty ID here).
-	var st *session.RecordingState
-	if rs, err := session.LoadRecordingStateForAgent(gitRoot, agentID); err == nil && rs != nil {
-		// subagent: prefer the parent session so provenance matches the
-		// footer link (liveSessionConversationURL parent-prefers too) —
-		// otherwise LintSessionLink false-warns on every subagent render
-		if rs.ParentAgentID != "" {
-			if parentState, _ := session.LoadRecordingStateForAgent(gitRoot, rs.ParentAgentID); parentState != nil {
-				rs = parentState
-			}
-		}
-		st = rs
-		prov.SessionName = session.GetSessionName(rs.SessionPath)
-		prov.SessionID = rs.SessionID
+	st := loadPlanRecordingState(gitRoot, agentID)
+	if st != nil {
+		prov.SessionName = session.GetSessionName(st.SessionPath)
+		prov.SessionID = st.SessionID
 		prov.SessionOutcome = plan.SessionOutcomeActive
 	}
 
+	// Nothing resolved at all — keep the historical unlinked-plan contract so
+	// callers that branch on a nil provenance behave as before.
+	if prov.AgentID == "" && prov.RepoID == "" && prov.AuthorName == "" && prov.SessionName == "" {
+		return nil, nil
+	}
 	return prov, st
+}
+
+// loadPlanRecordingState resolves the live recording backing a plan save.
+// Mirrors liveSessionConversationURL's resolution exactly — including the
+// workspace-scoped fallback when no agent id is present, which is the whole
+// reason a plan saved outside a detected agent can still carry its session.
+// Keeping the two in step matters: LintSessionLink compares the provenance
+// session against the URL that function stamps into the rendered artifact, so
+// if they disagree every render false-warns.
+func loadPlanRecordingState(gitRoot, agentID string) *session.RecordingState {
+	var st *session.RecordingState
+	if agentID != "" {
+		st, _ = session.LoadRecordingStateForAgent(gitRoot, agentID)
+	} else {
+		st, _ = session.LoadRecordingStateForWorkspace(gitRoot, gitRoot)
+	}
+	if st == nil {
+		return nil
+	}
+	// subagent: prefer the parent session so provenance matches the footer
+	// link (liveSessionConversationURL parent-prefers too) — otherwise
+	// LintSessionLink false-warns on every subagent render.
+	if st.ParentAgentID != "" {
+		if parentState, _ := session.LoadRecordingStateForAgent(gitRoot, st.ParentAgentID); parentState != nil {
+			return parentState
+		}
+	}
+	return st
 }
 
 // liveSessionConversationURL returns the /c/ conversation link of the current
@@ -153,15 +188,21 @@ func deriveCollabSignals(st *session.RecordingState) *plan.CollabSignals {
 	return sig
 }
 
-// appendProducedPlan records the plan slug on the agent's live recording state
-// (the reverse-link accumulator folded into session meta at stop). Dedups by
-// slug. Best-effort: no live recording → no-op.
-func appendProducedPlan(projectRoot, agentID, slug string) error {
-	if agentID == "" || slug == "" {
-		return nil
-	}
-	st, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
-	if err != nil || st == nil {
+// appendProducedPlan records the plan slug on the live recording state (the
+// reverse-link accumulator folded into session meta at stop). Dedups by slug.
+// Best-effort: no live recording → no-op.
+//
+// Takes the RecordingState the caller already resolved rather than re-loading
+// it by agent id. The old signature re-derived the state via
+// LoadRecordingStateForAgent, which meant this reverse link was gated on agent
+// detection a second time even after resolvePlanProvenance had successfully
+// found the session by workspace — so the accumulator stayed empty on exactly
+// the saves the provenance fix is meant to rescue. Reusing the caller's state
+// also guarantees the forward link (Provenance.SessionName) and the reverse
+// link land on the SAME session; two independent loads could disagree for a
+// subagent, whose parent-preference only one of them applied.
+func appendProducedPlan(projectRoot string, st *session.RecordingState, slug string) error {
+	if st == nil || slug == "" {
 		return nil
 	}
 	for _, existing := range st.ProducedPlans {

@@ -280,16 +280,26 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	}
 
 	// reverse link: record the slug on the live recording so it folds into the
-	// session's meta.json at stop (no-op if there's no live recording).
-	if prov != nil && prov.SessionName != "" {
-		_ = appendProducedPlan(gitRoot, prov.AgentID, slug)
-	}
+	// session's meta.json at stop (no-op if there's no live recording). Passes
+	// the state resolved alongside the provenance so both links name the same
+	// session — see appendProducedPlan.
+	_ = appendProducedPlan(gitRoot, recState, slug)
 
 	// durability: commit + push the plan dir now (sync). Best-effort — a push
 	// failure leaves the local commit for the next push / `ox doctor`.
 	if err := commitPlanToLedger(gitRoot, dir); err != nil {
 		slog.Warn("plan: commit/push failed, deferring to next push/doctor", "error", err, "dir", dir)
 	}
+
+	// Tell the server a plan changed so it can index this one now rather than
+	// waiting for its periodic ledger sweep — the console's plan list is a
+	// cache of the ledger, and a save that never notifies is invisible there
+	// until the next tick. Previously only the lifecycle verbs
+	// (approve/realize/abandon/supersede) notified, so create and revise — the
+	// overwhelmingly common events, and the only ones most plans ever get —
+	// notified nothing. Best-effort and non-blocking by contract; see
+	// postPlanActivityBestEffort.
+	postPlanActivityBestEffort(gitRoot, dir, planSaveEventKind(dir))
 
 	slog.Info("plan_saved_provenance",
 		"slug", slug,
@@ -301,6 +311,20 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 		"duration_s", collabCount(collab, "duration_seconds"))
 
 	return dir
+}
+
+// planSaveEventKind reports which event plan.Save just appended — created for
+// a plan's first save, revised for every later one (store.go picks between the
+// two the same way). Read back from the log rather than recomputed, so this can
+// never disagree with what was actually written; falls back to revised on a
+// read error, the conservative choice since a spurious "created" would misreport
+// a plan's age to the server.
+func planSaveEventKind(planDir string) plan.EventKind {
+	events, err := plan.LoadEvents(planDir)
+	if err != nil || len(events) == 0 {
+		return plan.EventRevised
+	}
+	return events[len(events)-1].Kind
 }
 
 // provSessionLabel / provAgentLabel render provenance fields for structured

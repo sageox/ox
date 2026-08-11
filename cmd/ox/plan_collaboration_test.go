@@ -74,15 +74,74 @@ func TestDeriveCollabSignals_NoSignalSources(t *testing.T) {
 }
 
 // TestAppendProducedPlan_NoRecordingNoOp verifies the reverse-link append is a
-// safe no-op when there is no live recording for the agent.
+// safe no-op when there is no live recording.
 // Failure prevented: a plan saved outside a recording errors instead of just
 // skipping the reverse link.
 func TestAppendProducedPlan_NoRecordingNoOp(t *testing.T) {
-	if err := appendProducedPlan(t.TempDir(), "Oxnope", "some-slug"); err != nil {
+	// no recording state at all — the "saved outside a session" case.
+	if err := appendProducedPlan(t.TempDir(), nil, "some-slug"); err != nil {
 		t.Errorf("expected no-op nil, got %v", err)
 	}
-	// empty agent / slug are also no-ops.
-	if err := appendProducedPlan(t.TempDir(), "", "s"); err != nil {
-		t.Errorf("empty agent: %v", err)
+	// empty slug is a no-op even with live state.
+	if err := appendProducedPlan(t.TempDir(), &session.RecordingState{SessionPath: t.TempDir()}, ""); err != nil {
+		t.Errorf("empty slug: %v", err)
+	}
+}
+
+// TestAppendProducedPlan_RecordsAndDedups pins the behavior the old
+// agent-id-keyed signature could not express: the caller hands in the session
+// it already resolved (possibly found by workspace, with no agent id anywhere),
+// and the slug still lands on the accumulator.
+// Failure prevented: the reverse link silently stays empty for every plan saved
+// without SAGEOX_AGENT_ID set — which is how produced_plans ended up unset on
+// all 2887 sessions in the real ledger.
+func TestAppendProducedPlan_RecordsAndDedups(t *testing.T) {
+	root := t.TempDir()
+	st := &session.RecordingState{SessionPath: filepath.Join(root, "sessions", "s1")}
+
+	if err := appendProducedPlan(root, st, "my-plan"); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	if len(st.ProducedPlans) != 1 || st.ProducedPlans[0] != "my-plan" {
+		t.Fatalf("want [my-plan], got %v", st.ProducedPlans)
+	}
+
+	// same slug again must not duplicate.
+	if err := appendProducedPlan(root, st, "my-plan"); err != nil {
+		t.Fatalf("dedup append: %v", err)
+	}
+	if len(st.ProducedPlans) != 1 {
+		t.Errorf("dedup failed, got %v", st.ProducedPlans)
+	}
+}
+
+// TestResolvePlanProvenance_AuthorSurvivesMissingAgentID is the regression gate
+// for the provenance early return: agent detection must not be a precondition
+// for facts that do not come from the agent.
+//
+// Failure prevented: `if agentID == "" { return nil, nil }` at the top of
+// resolvePlanProvenance discarded the author, the repo id AND the session on
+// every plan saved without SAGEOX_AGENT_ID exported. Because the resulting
+// event line also carried no SessionName, plan.BackfillSessionID — which
+// matches on SessionName — could never repair it afterwards, so the loss was
+// permanent. Measured over 233 real plans: author populated on 5.2%.
+//
+// AttributionDisplayName cannot legitimately return empty (it falls through
+// OAuth token → git config → OS username → the literal "anonymous"), so an
+// empty AuthorName here means something is gating it again.
+func TestResolvePlanProvenance_AuthorSurvivesMissingAgentID(t *testing.T) {
+	t.Setenv("SAGEOX_AGENT_ID", "")
+
+	prov, _ := resolvePlanProvenance(t.TempDir())
+	if prov == nil {
+		t.Fatal("provenance is nil with no agent id: author was resolvable and got discarded")
+	}
+	if prov.AuthorName == "" {
+		t.Error("AuthorName empty: attribution does not need an agent and has an unconditional fallback")
+	}
+	// The agent-keyed fields SHOULD be empty here — this asserts the fix kept
+	// the honest answer rather than inventing an agent to keep the struct full.
+	if prov.AgentID != "" {
+		t.Errorf("AgentID = %q, want empty with SAGEOX_AGENT_ID unset", prov.AgentID)
 	}
 }
