@@ -921,17 +921,7 @@ func runDoctorChecks(parent context.Context, opts doctorOptions) []checkCategory
 			},
 		})
 	} else {
-		ledgerGitChecks := checkLedgerGitHealth(
-			opts.fix,
-			opts.shouldFix(CheckSlugGitignoreMissing),
-			opts.shouldFix(CheckSlugLedgerBranchStatus),
-			opts.shouldFix(CheckSlugLedgerCleanWorkdir),
-			opts.shouldFix(CheckSlugLedgerEmbeddedCreds),
-			opts.shouldFix(CheckSlugLedgerURLAPIMatch),
-			opts.shouldFix(CheckSlugLedgerUnmergedPaths),
-			opts.shouldFix(CheckSlugLedgerStuckOperation),
-			opts.shouldFix(CheckSlugGitHubDataMigration),
-		)
+		ledgerGitChecks := checkLedgerGitHealth(opts)
 		if len(ledgerGitChecks) > 0 {
 			categories = append(categories, checkCategory{
 				name:   "Ledger Git Health",
@@ -1199,19 +1189,64 @@ func enrichCheckResult(check *checkResult) {
 	}
 }
 
-// checkLedgerGitHealth runs all ledger git health checks.
-// Returns a slice of check results, or empty slice if no ledger exists.
-// Parameters:
-//   - networkChecks: whether to run network checks (git ls-remote); only with --fix
-//   - fixGitignore: whether to fix .sageox/.gitignore issues in checkouts
-//   - fixBranch: whether to auto-sync branch (push/pull)
-//   - fixWorkdir: whether to auto-commit dirty workdir
-//   - fixEmbeddedCreds: whether to strip embedded oauth2:TOKEN from origin URL
-//   - fixURLAPIMatch: whether to repoint origin URL to the API-authoritative URL
-//   - fixUnmergedPaths: whether to auto-abort a stuck merge/rebase that left U-state files
-//   - fixStuckOp: whether to auto-clear a stuck merge/rebase/cherry-pick that left NO conflicts (incl. a corrupt rebase dir)
-//   - fixMigration: whether to migrate legacy GitHub data files
-func checkLedgerGitHealth(networkChecks bool, fixGitignore bool, fixBranch bool, fixWorkdir bool, fixEmbeddedCreds bool, fixURLAPIMatch bool, fixUnmergedPaths bool, fixStuckOp bool, fixMigration ...bool) []checkResult {
+// ledgerGitHealthOrder is the execution order for the "Ledger Git Health"
+// category. Order is load-bearing (see the ox-8zd3 / ox-j3cl notes below), so it
+// stays explicit here rather than falling out of map iteration.
+//
+// ox-3vl6: this list governs ORDER ONLY. Coverage is enforced against the
+// registry by TestLedgerGitHealthOrderCoversRegistry — a check registered in this
+// category and missing from this list fails the build instead of silently never
+// running. Before that test existed, checkLedgerGitHealth carried a hand-written
+// call list plus one positional bool per check, and four registered checks
+// (ledger-cache-tracked, ledger-rej-tracked, ledger-sparse-checkout,
+// session-ids-backfilled) had drifted out of it: they looked covered while being
+// dead on the default `ox doctor` path.
+var ledgerGitHealthOrder = []string{
+	// network check (git ls-remote); runs only under --fix to avoid slow I/O.
+	CheckSlugLedgerRemoteReachable,
+	// ox-akab: MUST be the first mutating check. Commits reachable only from
+	// HEAD have to be given a branch BEFORE anything downstream can move HEAD —
+	// the unmerged-paths and stuck-operation fixes both abort in-progress
+	// operations, and branch-status reconciles. Any of those running first turns
+	// stranded commits into unreferenced ones, which is precisely how ~6 weeks
+	// of sessions were lost track of. Rescue first, then clear.
+	CheckSlugLedgerStrandedCommits,
+	// ox-8zd3: unmerged paths must surface BEFORE clean-workdir. A stuck
+	// merge/rebase/cherry-pick silently blocks every future commit on the
+	// ledger; the previous order let the wedge hide inside the dirty-workdir
+	// counter ("3 modified") instead of producing an actionable P0.
+	CheckSlugLedgerUnmergedPaths,
+	// ox-j3cl: the no-conflict twin of the wedge above. A stuck operation with
+	// NO U-state files (worst case: a corrupt rebase dir git rebase --abort
+	// cannot clear) is invisible to unmerged-paths yet blocks every pull. Runs
+	// before branch-status so the reconcile below acts on a cleared repo
+	// instead of pulling on top of the wedge.
+	CheckSlugLedgerStuckOperation,
+	CheckSlugLedgerCleanWorkdir,
+	CheckSlugLedgerBranchStatus,
+	// ox-eeqi: post-migration the PAT lives in the credential helper, not the
+	// origin URL. Flags + strips any leftover oauth2:TOKEN@ that survived from a
+	// pre-eeqi clone, and catches the silent-success trap of a bare origin URL
+	// with no helper installed (auth fails at the first push).
+	CheckSlugLedgerEmbeddedCreds,
+	// catches a ledger whose origin still points at a stale/incorrect URL —
+	// authenticates fine but writes to the wrong repository.
+	CheckSlugLedgerURLAPIMatch,
+	// local-only artifacts that should never have been committed.
+	CheckSlugLedgerCacheTracked,
+	CheckSlugLedgerRejTracked,
+	CheckSlugLedgerSparseCheckout,
+	// checkout .gitignore (protects checkout.json from being committed). The
+	// registered Run covers both the ledger and team-context checkouts.
+	CheckSlugGitignoreMissing,
+	CheckSlugSessionIDsBackfilled,
+	CheckSlugGitHubDataMigration,
+}
+
+// checkLedgerGitHealth runs every check registered in the "Ledger Git Health"
+// category, in ledgerGitHealthOrder, resolving each check's fix flag through
+// opts.shouldFix(slug). Returns nil when there is no ledger to check.
+func checkLedgerGitHealth(opts doctorOptions) []checkResult {
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
 		return nil // no ledger found, skip entire category
@@ -1221,56 +1256,27 @@ func checkLedgerGitHealth(networkChecks bool, fixGitignore bool, fixBranch bool,
 		return nil // ledger not a git repo, skip entire category
 	}
 
-	var checks []checkResult
-	// network checks (git ls-remote) only run with --fix to avoid slow network I/O
-	if networkChecks {
-		checks = append(checks, checkLedgerRemoteReachable())
-	} else {
-		checks = append(checks, SkippedCheck("Ledger remote connectivity", "use --fix for network checks", ""))
-	}
-	checks = append(checks,
-		// ox-8zd3: unmerged paths must surface BEFORE clean-workdir. A stuck
-		// merge/rebase/cherry-pick silently blocks every future commit on the
-		// ledger; the previous order let the wedge hide inside the dirty-workdir
-		// counter ("3 modified") instead of producing an actionable P0.
-		checkLedgerUnmergedPaths(fixUnmergedPaths),
-		// ox-j3cl: the no-conflict twin of the wedge above. A stuck operation
-		// with NO U-state files (worst case: a corrupt rebase dir git rebase
-		// --abort cannot clear) is invisible to unmerged-paths yet blocks every
-		// pull. Runs before branch-status so the reconcile below acts on a
-		// cleared repo instead of pulling on top of the wedge.
-		checkLedgerStuckOperation(fixStuckOp),
-		checkLedgerCleanWorkdir(fixWorkdir),
-		checkLedgerBranchStatus(fixBranch),
-		// ox-eeqi: post-migration the PAT lives in the credential helper,
-		// not the origin URL. This check flags + strips any leftover
-		// oauth2:TOKEN@ that survived from a pre-eeqi clone, and it also
-		// catches the silent-success trap of a bare origin URL with no
-		// helper installed (auth will fail at the first push).
-		checkLedgerEmbeddedCreds(fixEmbeddedCreds),
-		// catches a ledger whose origin still points at a stale/incorrect
-		// URL — authenticates fine but writes to the wrong repository.
-		// Cheap when the API is reachable; gracefully Skipped otherwise.
-		checkLedgerURLAPIMatch(fixURLAPIMatch),
-	)
+	checks := make([]checkResult, 0, len(ledgerGitHealthOrder))
+	for _, slug := range ledgerGitHealthOrder {
+		check := DoctorCheckRegistry[slug]
+		if check == nil {
+			continue // registration removed; the coverage test catches the reverse
+		}
 
-	// add checkout .gitignore checks (protects checkout.json from being committed)
-	ledgerGitignoreCheck := checkLedgerCheckoutGitignore(fixGitignore)
-	if !ledgerGitignoreCheck.skipped {
-		checks = append(checks, ledgerGitignoreCheck)
-	}
+		// network checks only run with --fix to avoid slow network I/O
+		if slug == CheckSlugLedgerRemoteReachable && !opts.fix {
+			checks = append(checks, SkippedCheck("Ledger remote connectivity", "use --fix for network checks", ""))
+			continue
+		}
 
-	teamGitignoreCheck := checkTeamContextCheckoutGitignore(fixGitignore)
-	if !teamGitignoreCheck.skipped {
-		checks = append(checks, teamGitignoreCheck)
+		result := check.Run(opts.shouldFix(slug))
+		// the checkout .gitignore check reports "skipped" when no checkout
+		// exists; that is not a finding worth a row.
+		if result.skipped && slug == CheckSlugGitignoreMissing {
+			continue
+		}
+		checks = append(checks, result)
 	}
-
-	// check for legacy/corrupted GitHub data files
-	doMigration := networkChecks // default: follows global --fix
-	if len(fixMigration) > 0 {
-		doMigration = fixMigration[0]
-	}
-	checks = append(checks, checkGitHubDataMigration(doMigration))
 
 	return checks
 }
