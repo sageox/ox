@@ -51,38 +51,60 @@ func TestSave_ReturnsCreatedThenRevised(t *testing.T) {
 	}
 }
 
-// TestSave_ReturnedKindDescribesThisSaveNotTheLog is the case the old
-// read-back could not get right. A lifecycle verb appends `approved`, then the
-// plan is saved again: the log's last entry is now `approved`, but this save
-// performed a revision and must say so.
+// TestSave_ReturnedKindIsImmuneToLaterLogMutation pins the property that makes
+// returning the kind safer than re-reading it: once Save hands the value back,
+// nothing that happens to events.jsonl afterwards can change what this save
+// reports. A lifecycle verb lands an `approved` event immediately after the
+// save — the window the caller's read used to sit in, since it happened after
+// Save released its flock — and the captured kind must still say `revised`.
 //
-// Red-first: re-derive the kind with `events[len(events)-1].Kind` after Save and
-// this returns "approved" — reporting a plan as freshly approved to the server's
-// activity index every time someone edits it.
-func TestSave_ReturnedKindDescribesThisSaveNotTheLog(t *testing.T) {
+// Red-first: move the kind derivation to AFTER this AppendEvent (i.e. re-read
+// `events[len-1].Kind` where the caller used to) and the value becomes
+// "approved" — reporting a plan as freshly approved every time someone edits it.
+//
+// HONEST LIMIT, stated rather than implied: the other divergence — Save's event
+// append failing, leaving the log's last entry stale — is NOT covered by a test.
+// appendEventLocked goes through fileutil.AtomicWriteBytes (temp file + rename),
+// so an append failure cannot be induced from outside without adding a fault
+// seam to production code for one advisory notification. That case is closed
+// STRUCTURALLY instead: the caller no longer performs a second read, so there is
+// no second value that can disagree. A bug with no way to be constructed needs
+// no test — but the reason has to be written down, not assumed.
+func TestSave_ReturnedKindIsImmuneToLaterLogMutation(t *testing.T) {
 	withLedger(t, t.TempDir())
 
-	meta := Meta{Topic: "Approved then revised", CreatedAt: time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)}
+	meta := Meta{Topic: "Revised then approved", CreatedAt: time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)}
 
-	dir, _, err := Save("/g", Input{Raw: "# Approved then revised\n"}, sampleResult(), nil, meta)
+	dir, _, err := Save("/g", Input{Raw: "# Revised then approved\n"}, sampleResult(), nil, meta)
 	if err != nil {
 		t.Fatalf("first Save: %v", err)
 	}
+	_, kind, err := Save("/g", Input{Raw: "# Revised then approved\n\nv2"}, sampleResult(), nil, meta)
+	if err != nil {
+		t.Fatalf("second Save: %v", err)
+	}
+
 	events, err := LoadEvents(dir)
 	if err != nil || len(events) == 0 {
 		t.Fatalf("LoadEvents: err=%v n=%d", err, len(events))
 	}
+	// The concurrent lifecycle verb lands in the caller's old read window.
 	if err := AppendEvent(context.Background(), dir, Event{
 		PlanID: events[0].PlanID, Kind: EventApproved, Status: PlanStatusApproved,
 	}); err != nil {
 		t.Fatalf("AppendEvent approved: %v", err)
 	}
 
-	_, kind, err := Save("/g", Input{Raw: "# Approved then revised\n\nv2"}, sampleResult(), nil, meta)
-	if err != nil {
-		t.Fatalf("Save after approve: %v", err)
-	}
 	if kind != EventRevised {
-		t.Errorf("Save returned %q, want %q — the kind must describe THIS save, not the log's last line", kind, EventRevised)
+		t.Errorf("captured kind = %q, want %q", kind, EventRevised)
+	}
+	// Fixture self-check: if the log's last entry still matched the returned
+	// kind, this test would prove nothing about divergence at all.
+	after, err := LoadEvents(dir)
+	if err != nil {
+		t.Fatalf("LoadEvents after append: %v", err)
+	}
+	if last := after[len(after)-1].Kind; last == kind {
+		t.Fatalf("fixture did not create a divergence: log's last kind is still %q — the test cannot distinguish the two approaches", last)
 	}
 }

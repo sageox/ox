@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -66,6 +67,51 @@ func newPlanActivityRepo(t *testing.T, teamID string, authenticated bool) (strin
 		}
 	}
 	return root, &hits
+}
+
+// newPlanActivityEventRepo is newPlanActivityRepo with a server that records the
+// "event" field of every notification body, in order. Returns the repo root and
+// an accessor for the recorded kinds.
+func newPlanActivityEventRepo(t *testing.T, teamID string) (string, func() []string) {
+	t.Helper()
+	root := newPlanCaptureTestRepo(t)
+
+	var mu sync.Mutex
+	var events []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Event string `json:"event"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		events = append(events, body.Event)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg, err := json.Marshal(map[string]any{
+		"config_version": "2",
+		"repo_id":        captureTestRepoID,
+		"endpoint":       srv.URL,
+		"team_id":        teamID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".sageox", "config.json"), cfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.SaveTokenForEndpoint(srv.URL, &auth.StoredToken{AccessToken: "test-token"}); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	return root, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), events...)
+	}
 }
 
 // seedPlanWithEvents saves a real plan so LoadEvents/Fold can resolve a plan id.
@@ -137,5 +183,41 @@ func TestPostPlanActivityBestEffort_ConfiguredProjectNotifies(t *testing.T) {
 
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("server received %d request(s), want exactly 1 — the gates are supposed to be OPEN here", got)
+	}
+}
+
+// TestSavePlanArtifacts_NotifiesCreatedThenRevised is the end-to-end proof that
+// the third defect is fixed and correctly wired: a plan save reaches the
+// server's activity index at all (it previously did not — only the lifecycle
+// verbs notified), and the event it reports is the one this save performed.
+//
+// Asserts the request BODY, not just a count: reporting every revision as a
+// creation would misstate every plan's age to the index while a
+// count-only assertion stayed green.
+//
+// Red-first: delete the postPlanActivityBestEffort call in savePlanArtifacts →
+// zero requests; thread plan.EventCreated unconditionally → the second body
+// says "created".
+func TestSavePlanArtifacts_NotifiesCreatedThenRevised(t *testing.T) {
+	root, kinds := newPlanActivityEventRepo(t, "team_abc")
+	t.Setenv("SAGEOX_AGENT_ID", "")
+
+	in := plan.Input{Raw: "# Notify Kind Wiring\n"}
+	if dir := savePlanArtifacts(root, in, plan.Result{}, nil, ""); dir == "" {
+		t.Fatal("first save produced no plan dir")
+	}
+	if dir := savePlanArtifacts(root, in, plan.Result{}, nil, ""); dir == "" {
+		t.Fatal("second save produced no plan dir")
+	}
+
+	got := kinds()
+	want := []string{"created", "revised"}
+	if len(got) != len(want) {
+		t.Fatalf("notified events = %v, want %v — a plan save that notifies nothing is invisible in the console until the next ledger sweep", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("notification %d event = %q, want %q", i, got[i], want[i])
+		}
 	}
 }

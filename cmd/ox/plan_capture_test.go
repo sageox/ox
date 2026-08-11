@@ -288,29 +288,47 @@ func TestResolvePlanProvenance_SessionSurvivesMissingAgentID(t *testing.T) {
 // TestResolvePlanProvenance_SubagentPrefersParentAndAgreesWithRenderLink pins
 // the three-way contract: the session stamped into provenance, the session the
 // reverse link lands on, and the /c/ id embedded in the rendered artifact must
-// all name ONE session. Two implementations kept in step by a comment had
-// already drifted — parent-preference applied to both branches in one and only
-// the agent branch in the other — which makes LintSessionLink warn on every
-// subagent render resolved by workspace.
+// all name ONE session.
 //
-// Red-first: give liveSessionConversationURL its own resolution again with
-// parent-preference only under `agentID != ""` → the ids disagree.
+// FIXTURE ORDERING IS LOAD-BEARING. LoadRecordingStateForWorkspace returns the
+// FIRST directory matching the workspace, in name order, and session dirs are
+// timestamp-prefixed. So the subagent is seeded with the EARLIER timestamp: the
+// workspace lookup then hands back the child, and parent-preference is the only
+// thing that can produce the parent. With the parent seeded first the lookup
+// returns it directly and the test passes without exercising the branch at all
+// — which is exactly how the first version of this test passed under a mutation
+// that deleted parent-preference outright.
+//
+// Red-first: delete the ParentAgentID block in loadPlanRecordingState → the
+// provenance session id becomes the subagent's.
+//
+// The link-agreement assertion below is deliberately a STRUCTURAL guard, not a
+// behavioral one: liveSessionConversationURL is now a two-line wrapper over the
+// same resolver, so the ids cannot disagree by construction. It fails only if
+// someone reintroduces a second resolution path — which is the drift that made
+// LintSessionLink false-warn in the first place.
 func TestResolvePlanProvenance_SubagentPrefersParentAndAgreesWithRenderLink(t *testing.T) {
 	root := newPlanCaptureTestRepo(t)
 	t.Setenv("SAGEOX_AGENT_ID", "")
 
 	ctxPath := session.GetContextPath(captureTestRepoID)
-	parent := startFakeRecording(t, root, session.RecordingState{
-		AgentID:     "Oxpar1",
-		SessionID:   "ses_01920000-0000-7000-8000-0000000parent",
-		SessionPath: filepath.Join(ctxPath, "sessions", "2026-08-10T09-00-person-a-Oxpar1"),
-	})
 	startFakeRecording(t, root, session.RecordingState{
 		AgentID:       "Oxsub1",
 		ParentAgentID: "Oxpar1",
 		SessionID:     "ses_01920000-0000-7000-8000-00000000sub1",
-		SessionPath:   filepath.Join(ctxPath, "sessions", "2026-08-10T09-30-person-a-Oxsub1"),
+		SessionPath:   filepath.Join(ctxPath, "sessions", "2026-08-10T09-00-person-a-Oxsub1"),
 	})
+	parent := startFakeRecording(t, root, session.RecordingState{
+		AgentID:     "Oxpar1",
+		SessionID:   "ses_01920000-0000-7000-8000-0000000parent",
+		SessionPath: filepath.Join(ctxPath, "sessions", "2026-08-10T09-30-person-a-Oxpar1"),
+	})
+
+	// Fixture self-check: if the workspace lookup already returns the parent,
+	// parent-preference is never exercised and this test proves nothing.
+	if direct, _ := session.LoadRecordingStateForWorkspace(root, root); direct == nil || direct.AgentID != "Oxsub1" {
+		t.Fatalf("fixture broken: workspace lookup returned %+v, want the SUBAGENT first so parent-preference is load-bearing", direct)
+	}
 
 	prov, _ := resolvePlanProvenance(root)
 	if prov == nil {
@@ -325,5 +343,40 @@ func TestResolvePlanProvenance_SubagentPrefersParentAndAgreesWithRenderLink(t *t
 	if linkID != prov.SessionID {
 		t.Errorf("render link id %q != provenance session id %q — LintSessionLink compares exactly these two, so any gap false-warns on every render",
 			linkID, prov.SessionID)
+	}
+}
+
+// TestPlanSessionLink_DisabledAttributionExpectsNoLink is the false-warn fix.
+//
+// Provenance records the session for the ledger regardless, but when session
+// attribution is turned off the render carries no /c/ link — and the save-path
+// lint must therefore not run. Gating that lint on the stamped provenance
+// instead of on this resolver is what made `plan-lint [session.link-missing]`
+// print on every save once provenance started resolving without an agent id:
+// a warning about a missing link that was never supposed to be there.
+//
+// Red-first: delete the `attr.Session == ""` gate in planSessionLink → a link id
+// comes back for a user who disabled session attribution.
+func TestPlanSessionLink_DisabledAttributionExpectsNoLink(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	t.Setenv("SAGEOX_AGENT_ID", "")
+
+	cfg := `{"config_version":"2","repo_id":"` + captureTestRepoID + `","attribution":{"session":""}}`
+	if err := os.WriteFile(filepath.Join(root, ".sageox", "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := startFakeRecording(t, root, session.RecordingState{
+		AgentID:   "Oxnolink",
+		SessionID: "ses_01920000-0000-7000-8000-000000nolink",
+	})
+
+	// Provenance still records the session — the ledger link is not the page link.
+	prov, _ := resolvePlanProvenance(root)
+	if prov == nil || prov.SessionID != rec.SessionID {
+		t.Fatalf("provenance should still carry the session for the ledger, got %+v", prov)
+	}
+
+	if id, url := planSessionLink(root); id != "" || url != "" {
+		t.Errorf("planSessionLink = (%q, %q), want empty — no link is expected in the render, so the save-path lint must not run and warn about its absence", id, url)
 	}
 }
