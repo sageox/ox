@@ -43,6 +43,50 @@ func TestDaemonStart_LongRunningClassification(t *testing.T) {
 	}
 }
 
+// TestDecideDaemonStart pins the full truth table, because the interesting cell
+// is the one that used to be wrong in a way that looked like success.
+//
+// Failure prevented: `ox daemon start --foreground` returning nil when a daemon
+// already holds the workspace. That flag is how a SUPERVISED service is started
+// — a container execs it as PID 1 — so returning 0 tells the supervisor the
+// service finished, and it restarts, finds the same incumbent, and returns 0
+// again. Observed in the field as 624 restarts across two days with exitCode=0
+// on every one of them (sageox-monorepo#2608). A no-op is correct ONLY for a
+// background spawn.
+func TestDecideDaemonStart(t *testing.T) {
+	tests := []struct {
+		name           string
+		alreadyRunning bool
+		foreground     bool
+		want           daemonStartAction
+	}{
+		{"idle workspace, background spawn", false, false, daemonStartSpawn},
+		{"idle workspace, we become the daemon", false, true, daemonStartForeground},
+		{"incumbent holds it, background spawn is a no-op", true, false, daemonStartNoop},
+		// The regression cell. Anything but takeover here is the crashloop.
+		{"incumbent holds it, foreground takes over", true, true, daemonStartTakeover},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, decideDaemonStart(tt.alreadyRunning, tt.foreground))
+		})
+	}
+}
+
+// TestDecideDaemonStart_ForegroundNeverNoops states the invariant directly
+// rather than leaving it implicit in the table above: whatever else changes,
+// --foreground must never resolve to the branch whose RunE arm returns nil
+// without running a daemon.
+func TestDecideDaemonStart_ForegroundNeverNoops(t *testing.T) {
+	for _, alreadyRunning := range []bool{false, true} {
+		got := decideDaemonStart(alreadyRunning, true)
+		assert.NotEqualf(t, daemonStartNoop, got,
+			"--foreground must never no-op (alreadyRunning=%v): a supervised entrypoint that exits 0 is restarted forever",
+			alreadyRunning)
+	}
+}
+
 // TestOrdinaryCommandsAreMeasured guards the default: only commands that
 // explicitly opt out are excluded from latency telemetry.
 //

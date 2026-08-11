@@ -34,6 +34,70 @@ It handles:
   - Debouncing rapid changes to avoid excessive commits`,
 }
 
+// How long to wait for a stopped daemon to actually release the workspace.
+// Stop() is an IPC request, not a kill: the incumbent still has to finish its
+// current sync tick and unlink its socket. Bounded so a wedged incumbent
+// surfaces as an error instead of hanging a container start forever.
+const (
+	daemonStopWaitAttempts = 20
+	daemonStopWaitInterval = 100 * time.Millisecond
+)
+
+// daemonStartAction is what `ox daemon start` should do, given whether a daemon
+// already holds this workspace and whether this invocation is meant to BE the
+// daemon (--foreground) rather than spawn one.
+type daemonStartAction int
+
+const (
+	daemonStartSpawn      daemonStartAction = iota // nothing holds it: spawn a background child
+	daemonStartNoop                                // something holds it and we were only asked to spawn
+	daemonStartForeground                          // nothing holds it: become the daemon
+	daemonStartTakeover                            // something holds it, but the caller wants to BE the daemon
+)
+
+// decideDaemonStart is split out of RunE so the takeover case is unit-testable
+// without a live daemon and a socket.
+//
+// The takeover case is the entire reason this is a function. `--foreground` is
+// how a SUPERVISED service is started — a container execs it as PID 1 and
+// expects it to run until killed. A supervised process that returns 0 is read
+// by its supervisor as "the service finished", so it gets restarted, finds the
+// same incumbent, and returns 0 again. Nothing in that loop looks like an
+// error: it ran 624 times in one pod over two days, reporting exitCode=0 every
+// time, and the only visible symptom was a sidecar that was never up
+// (sageox-monorepo#2608). So "already running" may be a no-op for a background
+// spawn, and must NEVER be one for --foreground.
+func decideDaemonStart(alreadyRunning, foreground bool) daemonStartAction {
+	switch {
+	case alreadyRunning && foreground:
+		return daemonStartTakeover
+	case alreadyRunning:
+		return daemonStartNoop
+	case foreground:
+		return daemonStartForeground
+	default:
+		return daemonStartSpawn
+	}
+}
+
+// stopRunningDaemonAndWait stops the daemon holding this workspace and blocks
+// until it has actually released it. Shared by `restart` and by `start
+// --foreground`'s takeover — both would otherwise race a half-dead incumbent
+// for the socket.
+func stopRunningDaemonAndWait() error {
+	client := daemon.NewClientForCurrentRepo()
+	if err := client.Stop(); err != nil {
+		return fmt.Errorf("failed to stop daemon: %w", err)
+	}
+	for i := 0; i < daemonStopWaitAttempts; i++ {
+		if !daemon.IsRunning() {
+			return nil
+		}
+		time.Sleep(daemonStopWaitInterval)
+	}
+	return fmt.Errorf("daemon did not stop within %s", daemonStopWaitAttempts*daemonStopWaitInterval)
+}
+
 var daemonStartCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the background daemon",
@@ -48,11 +112,16 @@ var daemonStartCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		foreground, _ := cmd.Flags().GetBool("foreground")
 
-		// check if already running
-		if daemon.IsRunning() {
+		switch decideDaemonStart(daemon.IsRunning(), foreground) {
+		case daemonStartNoop:
 			cli.PrintInfo("Daemon is already running")
 			cli.PrintHint("  Run 'ox daemon status' to see details")
 			return nil
+		case daemonStartTakeover:
+			cli.PrintInfo("Daemon already running — stopping it to take over in the foreground")
+			if err := stopRunningDaemonAndWait(); err != nil {
+				return err
+			}
 		}
 
 		// kill any stale daemon for this workspace before starting a new one
@@ -104,21 +173,8 @@ var daemonRestartCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// stop if running
 		if daemon.IsRunning() {
-			client := daemon.NewClientForCurrentRepo()
-			if err := client.Stop(); err != nil {
-				return fmt.Errorf("failed to stop daemon: %w", err)
-			}
-			// wait for daemon to fully stop (max 2 seconds)
-			stopped := false
-			for i := 0; i < 20; i++ {
-				if !daemon.IsRunning() {
-					stopped = true
-					break
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-			if !stopped {
-				return fmt.Errorf("daemon did not stop within timeout")
+			if err := stopRunningDaemonAndWait(); err != nil {
+				return err
 			}
 		}
 
