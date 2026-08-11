@@ -50,7 +50,7 @@ func TestSave_FirstSaveWritesCreatedEvent(t *testing.T) {
 		Provenance: sampleProvenance(),
 	}
 
-	dir, err := Save("/g", in, sampleResult(), nil, meta)
+	dir, _, err := Save("/g", in, sampleResult(), nil, meta)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestSave_ConcurrentFirstSaveMintsSinglePlanID(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			dirs[i], errs[i] = Save("/g", in, sampleResult(), nil, meta)
+			dirs[i], _, errs[i] = Save("/g", in, sampleResult(), nil, meta)
 		}(i)
 	}
 	wg.Wait()
@@ -169,14 +169,14 @@ func TestSave_SecondSaveAppendsRevisedEventSamePlanID(t *testing.T) {
 	in := Input{Raw: "# Stable plan id\n\nv1"}
 	meta := Meta{Topic: "Stable plan id", CreatedAt: created, Provenance: sampleProvenance()}
 
-	dir, err := Save("/g", in, sampleResult(), nil, meta)
+	dir, _, err := Save("/g", in, sampleResult(), nil, meta)
 	if err != nil {
 		t.Fatalf("Save v1: %v", err)
 	}
 
 	// Second save: same topic/slug/day, so Save() computes the same
 	// dated-slug directory (the real "agent revises the plan" path).
-	if _, err := Save("/g", Input{Raw: "# Stable plan id\n\nv2"}, sampleResult(), nil, meta); err != nil {
+	if _, _, err := Save("/g", Input{Raw: "# Stable plan id\n\nv2"}, sampleResult(), nil, meta); err != nil {
 		t.Fatalf("Save v2: %v", err)
 	}
 
@@ -215,7 +215,7 @@ func TestSave_MetaJSONStillWrittenAlongsideEvents(t *testing.T) {
 	withLedger(t, ledger)
 
 	meta := Meta{Topic: "Dual write check", CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC), Provenance: sampleProvenance()}
-	dir, err := Save("/g", Input{Raw: "# Dual write check\n"}, sampleResult(), nil, meta)
+	dir, _, err := Save("/g", Input{Raw: "# Dual write check\n"}, sampleResult(), nil, meta)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestSave_StampsPlanHTMLMetaTags(t *testing.T) {
 	html := []byte(`<!doctype html><html><head><title>x</title></head><body>hi</body></html>`)
 	meta := Meta{Topic: "Html Meta Tags", CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC), Provenance: sampleProvenance()}
 
-	dir, err := Save("/g", Input{Raw: "# Html Meta Tags\n"}, sampleResult(), html, meta)
+	dir, _, err := Save("/g", Input{Raw: "# Html Meta Tags\n"}, sampleResult(), html, meta)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestSave_CorruptEventsLogDoesNotBlockSave(t *testing.T) {
 	}
 
 	meta := Meta{Topic: "Corrupt log", Slug: "corrupt-log", CreatedAt: created}
-	if _, err := Save("/g", Input{Raw: "# Corrupt log\n"}, sampleResult(), nil, meta); err != nil {
+	if _, _, err := Save("/g", Input{Raw: "# Corrupt log\n"}, sampleResult(), nil, meta); err != nil {
 		t.Fatalf("Save must not fail on a corrupt events.jsonl: %v", err)
 	}
 
@@ -315,7 +315,7 @@ func TestSave_NoProvenanceOmitsEventProvenanceFields(t *testing.T) {
 	withLedger(t, ledger)
 
 	meta := Meta{Topic: "No provenance", CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)}
-	dir, err := Save("/g", Input{Raw: "# No provenance\n"}, sampleResult(), nil, meta)
+	dir, _, err := Save("/g", Input{Raw: "# No provenance\n"}, sampleResult(), nil, meta)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}

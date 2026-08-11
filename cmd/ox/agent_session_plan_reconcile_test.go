@@ -21,7 +21,7 @@ func TestReconcileProducedPlansAtStop_BackfillsEventSessionID(t *testing.T) {
 	root := newPlanStatusTestRepo(t)
 
 	meta := plan.Meta{Topic: "Stop-time backfill", CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)}
-	dir, err := plan.Save(root, plan.Input{Raw: "# Stop-time backfill\n"}, plan.Result{}, nil, meta)
+	dir, _, err := plan.Save(root, plan.Input{Raw: "# Stop-time backfill\n"}, plan.Result{}, nil, meta)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestReconcileProducedPlansAtStop_SecondCallIsNoOp(t *testing.T) {
 	root := newPlanStatusTestRepo(t)
 
 	meta := plan.Meta{Topic: "Idempotent stop backfill", CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)}
-	dir, err := plan.Save(root, plan.Input{Raw: "# Idempotent stop backfill\n"}, plan.Result{}, nil, meta)
+	dir, _, err := plan.Save(root, plan.Input{Raw: "# Idempotent stop backfill\n"}, plan.Result{}, nil, meta)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestReconcileProducedPlansAtStop_ContinuesPastBrokenSlug(t *testing.T) {
 	root := newPlanStatusTestRepo(t)
 
 	meta := plan.Meta{Topic: "Valid Alongside Broken", CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)}
-	dir, err := plan.Save(root, plan.Input{Raw: "# Valid Alongside Broken\n"}, plan.Result{}, nil, meta)
+	dir, _, err := plan.Save(root, plan.Input{Raw: "# Valid Alongside Broken\n"}, plan.Result{}, nil, meta)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}

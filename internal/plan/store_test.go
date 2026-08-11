@@ -47,7 +47,7 @@ func TestSaveListLoad_RoundTrip(t *testing.T) {
 		CreatedAt: created,
 	}
 
-	dir, err := Save("/fake/git/root", in, res, nil, meta)
+	dir, _, err := Save("/fake/git/root", in, res, nil, meta)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestSave_HTMLSizeGating(t *testing.T) {
 			in := Input{Raw: "# H\n"}
 			meta := Meta{Topic: "Size gate", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 
-			dir, err := Save("/g", in, sampleResult(), html, meta)
+			dir, _, err := Save("/g", in, sampleResult(), html, meta)
 			if err != nil {
 				t.Fatalf("Save: %v", err)
 			}
@@ -246,7 +246,7 @@ func TestList_FailOpen(t *testing.T) {
 
 func TestSave_NoLedgerErrors(t *testing.T) {
 	withLedger(t, "")
-	_, err := Save("/g", Input{Raw: "# x"}, sampleResult(), nil, Meta{Topic: "x"})
+	_, _, err := Save("/g", Input{Raw: "# x"}, sampleResult(), nil, Meta{Topic: "x"})
 	if err == nil {
 		t.Fatal("Save with no ledger should error so the porcelain path can treat it as 'nothing to save'")
 	}
@@ -306,7 +306,7 @@ func TestSave_DefaultsSlugAndTimestamp(t *testing.T) {
 	withLedger(t, ledger)
 
 	// empty Slug and zero CreatedAt should be derived/defaulted.
-	dir, err := Save("/g", Input{Raw: "# x"}, sampleResult(), nil, Meta{Topic: "Derive My Slug"})
+	dir, _, err := Save("/g", Input{Raw: "# x"}, sampleResult(), nil, Meta{Topic: "Derive My Slug"})
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -353,7 +353,7 @@ func TestSave_StampsProvenanceStatusAndCollab(t *testing.T) {
 		Collaboration: &CollabSignals{UserPrompts: 5, AgentQuestions: 3, ToolCalls: 12, DurationSeconds: 600},
 	}
 
-	if _, err := Save("/g", in, sampleResult(), nil, meta); err != nil {
+	if _, _, err := Save("/g", in, sampleResult(), nil, meta); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -383,7 +383,7 @@ func TestSave_ReadMergePreservesLifecycle(t *testing.T) {
 
 	orig := time.Date(2026, 6, 4, 8, 0, 0, 0, time.UTC)
 	in := Input{Path: "P.md", Raw: "# My plan\n\nv1"}
-	if _, err := Save("/g", in, sampleResult(), nil, Meta{Topic: "My plan", CreatedAt: orig}); err != nil {
+	if _, _, err := Save("/g", in, sampleResult(), nil, Meta{Topic: "My plan", CreatedAt: orig}); err != nil {
 		t.Fatalf("Save v1: %v", err)
 	}
 
@@ -396,7 +396,7 @@ func TestSave_ReadMergePreservesLifecycle(t *testing.T) {
 	}
 
 	// re-save (e.g. skill's full save) with a later CreatedAt and fresh result.
-	if _, err := Save("/g", Input{Path: "P.md", Raw: "# My plan\n\nv2"}, sampleResult(), nil,
+	if _, _, err := Save("/g", Input{Path: "P.md", Raw: "# My plan\n\nv2"}, sampleResult(), nil,
 		Meta{Topic: "My plan", CreatedAt: orig.Add(2 * time.Hour)}); err != nil {
 		t.Fatalf("Save v2: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestReconcileSessionOutcome_BackfillsSessionID(t *testing.T) {
 	// "Topic Alpha", not "Topic A" — a trailing single-letter "A" would be
 	// trimmed as the stopword "a" (Slugify's trailing-stopword trim), which is
 	// incidental to what this test actually exercises (SessionID backfill).
-	if _, err := Save("/g", Input{Raw: "# Topic Alpha\n"}, sampleResult(), nil, Meta{Topic: "Topic Alpha", CreatedAt: time.Now().UTC()}); err != nil {
+	if _, _, err := Save("/g", Input{Raw: "# Topic Alpha\n"}, sampleResult(), nil, Meta{Topic: "Topic Alpha", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	if err := ReconcileSessionOutcome("/g", "topic-alpha", "ses_7", SessionOutcomeAborted); err != nil {

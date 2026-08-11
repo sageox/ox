@@ -39,7 +39,7 @@ func TestSave_HTMLPrimaryRoundTrip(t *testing.T) {
 		CreatedAt: time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC),
 	}
 
-	dir, err := Save("/fake/git/root", in, Result{}, authored, meta)
+	dir, _, err := Save("/fake/git/root", in, Result{}, authored, meta)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestSave_HTMLPrimaryRoundTrip(t *testing.T) {
 	}
 
 	// a markdown-shaped re-save (hook draft) must not demote Primary
-	if _, err := Save("/fake/git/root", in, Result{}, nil, Meta{Topic: "Turn model rollout", Slug: "turn-model-rollout", CreatedAt: meta.CreatedAt}); err != nil {
+	if _, _, err := Save("/fake/git/root", in, Result{}, nil, Meta{Topic: "Turn model rollout", Slug: "turn-model-rollout", CreatedAt: meta.CreatedAt}); err != nil {
 		t.Fatalf("re-Save: %v", err)
 	}
 	got2, _ := LoadMeta(dir)

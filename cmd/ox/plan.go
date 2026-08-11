@@ -274,7 +274,7 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 		Collaboration:  collab,
 	}
 
-	dir, err := plan.Save(gitRoot, in, result, html, meta)
+	dir, savedKind, err := plan.Save(gitRoot, in, result, html, meta)
 	if err != nil {
 		return ""
 	}
@@ -283,7 +283,14 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	// session's meta.json at stop (no-op if there's no live recording). Passes
 	// the state resolved alongside the provenance so both links name the same
 	// session — see appendProducedPlan.
-	_ = appendProducedPlan(gitRoot, recState, slug)
+	//
+	// Logged, not discarded. This write failing is precisely how produced_plans
+	// ended up unset on 2887 sessions, and a `_ =` here meant a recurrence would
+	// again be completely silent — while the structurally identical best-effort
+	// call twelve lines down logs at Warn.
+	if err := appendProducedPlan(gitRoot, recState, slug); err != nil {
+		slog.Warn("plan: reverse link (produced_plans) failed", "error", err, "slug", slug)
+	}
 
 	// durability: commit + push the plan dir now (sync). Best-effort — a push
 	// failure leaves the local commit for the next push / `ox doctor`.
@@ -297,10 +304,25 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	// until the next tick. Previously only the lifecycle verbs
 	// (approve/realize/abandon/supersede) notified, so create and revise — the
 	// overwhelmingly common events, and the only ones most plans ever get —
-	// notified nothing. Best-effort and non-blocking by contract; see
-	// postPlanActivityBestEffort.
-	postPlanActivityBestEffort(gitRoot, dir, planSaveEventKind(dir))
+	// notified nothing.
+	//
+	// savedKind comes back from plan.Save rather than being re-read off
+	// events.jsonl: the append is best-effort, so the log's last entry after a
+	// failed append is a stale event from some earlier lifecycle verb, and the
+	// read would happen after Save released its flock. Either way we would
+	// report a kind that disagrees with this save.
+	postPlanActivityBestEffort(gitRoot, dir, savedKind)
 
+	// The one line that carries the evidence. Split by outcome on purpose:
+	// unattributed saves log at Warn, which is the DEFAULT level, because the
+	// original failure ran for three months at 95% precisely because its only
+	// signal was an Info line that the default level filtered out. The happy
+	// path stays at Info and costs nothing.
+	if prov == nil || (prov.AuthorName == "" && prov.SessionName == "") {
+		slog.Warn("plan_saved_unattributed",
+			"slug", slug,
+			"hint", "no author and no live session resolved; run `ox agent prime` or `ox login` to attribute plans")
+	}
 	slog.Info("plan_saved_provenance",
 		"slug", slug,
 		"session", provSessionLabel(prov),
@@ -311,20 +333,6 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 		"duration_s", collabCount(collab, "duration_seconds"))
 
 	return dir
-}
-
-// planSaveEventKind reports which event plan.Save just appended — created for
-// a plan's first save, revised for every later one (store.go picks between the
-// two the same way). Read back from the log rather than recomputed, so this can
-// never disagree with what was actually written; falls back to revised on a
-// read error, the conservative choice since a spurious "created" would misreport
-// a plan's age to the server.
-func planSaveEventKind(planDir string) plan.EventKind {
-	events, err := plan.LoadEvents(planDir)
-	if err != nil || len(events) == 0 {
-		return plan.EventRevised
-	}
-	return events[len(events)-1].Kind
 }
 
 // provSessionLabel / provAgentLabel render provenance fields for structured
@@ -436,8 +444,15 @@ func runPlanSave(cmd *cobra.Command) error {
 	}
 	// Session-link guarantee: an agent-authored render saved from a live
 	// recording should link back to its /c/ conversation page.
-	if prov, _ := resolvePlanProvenance(gitRoot); prov != nil && prov.SessionID != "" {
-		for _, f := range plan.LintSessionLink(html, prov.SessionID) {
+	//
+	// Gated on planSessionLink, NOT on the stamped provenance. Provenance
+	// records the session for the ledger even when no link belongs in the page
+	// (attribution disabled, project not linked), so gating on it warns "the
+	// render carries no /c/ link" about renders that were never meant to carry
+	// one. planSessionLink is the same resolution that produced the URL, so the
+	// gate and the stamp cannot disagree.
+	if sessionID, _ := planSessionLink(gitRoot); sessionID != "" {
+		for _, f := range plan.LintSessionLink(html, sessionID) {
 			cli.PrintHint(fmt.Sprintf("plan-lint [%s]: %s", f.Rule, f.Message))
 		}
 	}
@@ -526,10 +541,20 @@ func runPlanLint(cmd *cobra.Command, slug string, strict bool) error {
 	}
 
 	findings := plan.LintRender(html, res)
+	sessionChecked := false
 	if meta, metaErr := plan.LoadMeta(info.Dir); metaErr == nil && meta.Provenance != nil && meta.Provenance.SessionID != "" {
+		sessionChecked = true
 		findings = append(findings, plan.LintSessionLink(html, meta.Provenance.SessionID)...)
 	}
 	if len(findings) == 0 {
+		// Absence of a check is not a pass. For three months this printed the
+		// green checkmark on every plan that had LOST its attribution, because
+		// the session check is gated on the very field the loss emptied — an
+		// active false negative, and the reason nobody went looking.
+		if !sessionChecked {
+			fmt.Fprintln(out, cli.StyleSuccess.Render("✓")+" render checks OK — no session recorded for this plan, so its session link was not checked")
+			return nil
+		}
 		fmt.Fprintln(out, cli.StyleSuccess.Render("✓")+" SageOx attribution OK")
 		return nil
 	}

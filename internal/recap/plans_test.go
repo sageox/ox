@@ -36,7 +36,7 @@ func newPlanFixture(t *testing.T) (projectRoot string, id Identity) {
 // shape plan.List/Load expect.
 func savePlan(t *testing.T, projectRoot, topic string, createdAt time.Time, authors []string, signals plan.SignalSummary) {
 	t.Helper()
-	_, err := plan.Save(
+	_, _, err := plan.Save(
 		projectRoot,
 		plan.Input{Raw: "# " + topic + "\n\nplan body\n", Topic: topic},
 		plan.Result{Signals: signals},

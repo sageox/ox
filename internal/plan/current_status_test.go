@@ -91,7 +91,7 @@ func TestPlanInfoStatus_FoldedWinsOverStaleMeta(t *testing.T) {
 	withLedger(t, ledger)
 
 	meta := Meta{Topic: "Status divergence", CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)}
-	dir, err := Save("/g", Input{Raw: "# Status divergence\n"}, sampleResult(), nil, meta)
+	dir, _, err := Save("/g", Input{Raw: "# Status divergence\n"}, sampleResult(), nil, meta)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}

@@ -25,6 +25,7 @@ package main
 
 import (
 	"log/slog"
+	"time"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
@@ -32,6 +33,10 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/plan"
 )
+
+// planActivityTimeout bounds the advisory activity notification. See the
+// client construction below for why it is not the 10s client default.
+const planActivityTimeout = 2 * time.Second
 
 // postPlanActivityBestEffort reports the just-appended lifecycle event kind
 // to the server's plan-activity index. Resolves team_id (project config),
@@ -58,7 +63,14 @@ func postPlanActivityBestEffort(gitRoot, planDir string, kind plan.EventKind) {
 		return
 	}
 
-	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
+	// Short timeout, deliberately far below the client default of 10s. This runs
+	// synchronously on the plan-save path, which an AI coworker's turn blocks
+	// on — and that path already does a network git push. Stalling a coworker
+	// for 10s to deliver an advisory index hint is strictly worse than not
+	// delivering it; the server's periodic ledger sweep is the backstop.
+	client := api.NewRepoClientWithEndpoint(ep).
+		WithAuthToken(token.AccessToken).
+		WithTimeout(planActivityTimeout)
 	n := api.PlanActivityNotification{Event: string(kind), Status: string(folded.Status)}
 	if err := client.NotifyPlanActivity(cfg.TeamID, folded.PlanID, n); err != nil {
 		slog.Debug("plan activity notify failed", "error", err, "plan_id", folded.PlanID, "kind", kind)

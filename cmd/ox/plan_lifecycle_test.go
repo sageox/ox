@@ -201,7 +201,7 @@ func TestResolveSupersedeSuccessor_UnresolvableSlugErrors(t *testing.T) {
 func TestResolveSupersedeSuccessor_SelfSupersedeErrors(t *testing.T) {
 	root := newPlanStatusTestRepo(t)
 	meta := plan.Meta{Topic: "Self Supersede Guard", CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)}
-	if _, err := plan.Save(root, plan.Input{Raw: "# Self Supersede Guard\n"}, plan.Result{}, nil, meta); err != nil {
+	if _, _, err := plan.Save(root, plan.Input{Raw: "# Self Supersede Guard\n"}, plan.Result{}, nil, meta); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	slug := plan.Slugify(meta.Topic)

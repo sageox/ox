@@ -22,7 +22,7 @@ func savePlanWithBuggyTopic(t *testing.T, ledger, raw, buggyTopic string, create
 	t.Helper()
 	withLedger(t, ledger)
 	meta := Meta{Topic: buggyTopic, Slug: Slugify(buggyTopic), CreatedAt: createdAt}
-	dir, err := Save("/g", Input{Raw: raw}, sampleResult(), nil, meta)
+	dir, _, err := Save("/g", Input{Raw: raw}, sampleResult(), nil, meta)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestComputeBackfill_AlreadyCorrectPlanIsUnchanged(t *testing.T) {
 	// A plan saved by the FIXED code: meta.Topic already matches the H1.
 	raw := "# Already Correct Plan\n\n## Approach\n\ndo it.\n"
 	meta := Meta{Topic: "Already Correct Plan", Slug: Slugify("Already Correct Plan"), CreatedAt: time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)}
-	dir, err := Save("/g", Input{Raw: raw}, sampleResult(), nil, meta)
+	dir, _, err := Save("/g", Input{Raw: raw}, sampleResult(), nil, meta)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}

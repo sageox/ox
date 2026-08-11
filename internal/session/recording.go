@@ -417,6 +417,65 @@ func ClearRecordingStateForAgent(projectRoot, agentID string) error {
 	return nil
 }
 
+// AppendProducedPlan records a plan slug on the recording at sessionPath — the
+// reverse-direction index folded into SessionMeta.ProducedPlans at stop. Dedups
+// by slug. Best-effort by contract: a session whose recording has already been
+// stopped is a no-op, not an error.
+//
+// Keyed on sessionPath rather than an agent id so a caller that resolved its
+// recording by workspace (no SAGEOX_AGENT_ID) can still record the link, and so
+// the forward and reverse links always name the same session.
+//
+// The load happens HERE, immediately before the write, and that placement is
+// load-bearing twice over:
+//
+//   - Resurrection. SaveRecordingState does an unconditional MkdirAll+write, so
+//     handing it a state captured earlier RECREATES a .recording.json that
+//     `ox session stop` deleted in the meantime. The revived recording is
+//     permanent — ghost cleanup skips sessions whose raw.jsonl is an LFS
+//     pointer, which is exactly what a finalized session has — and StartRecording
+//     then refuses that agent forever with ErrAlreadyRecording. Reading the file
+//     first and treating "not there" as done makes that unrepresentable.
+//   - Lost update. .recording.json is a whole-file JSON rewrite shared with the
+//     hook path (EntryCount, SourceOffset, TurnCount, ProducedCommits, LinkedPRs).
+//     Writing back a struct loaded before an intervening plan save reverts every
+//     field a concurrent hook touched, and because the ledger auto-resolves
+//     sessions/ conflicts to the local side, that stripping propagates to origin
+//     and erases the fields for the whole team — the failure `make
+//     check-session-meta-rmw` already guards against on sessions/*/meta.json
+//     (ox-q42i, GH #710). Reload-then-write keeps the window at ~0, matching
+//     UpdateRecordingStateForAgent and every other writer in the codebase.
+func AppendProducedPlan(projectRoot, sessionPath, slug string) error {
+	if projectRoot == "" {
+		return fmt.Errorf("%w: project root", ErrEmptyPath)
+	}
+	if sessionPath == "" || slug == "" {
+		return nil
+	}
+
+	statePath := recordingStatePath(sessionPath)
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // recording already stopped — do NOT recreate it
+		}
+		return fmt.Errorf("read recording state file=%s: %w", statePath, err)
+	}
+
+	var state RecordingState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return fmt.Errorf("parse recording state file=%s: %w", statePath, err)
+	}
+
+	for _, existing := range state.ProducedPlans {
+		if existing == slug {
+			return nil // already recorded
+		}
+	}
+	state.ProducedPlans = append(state.ProducedPlans, slug)
+	return SaveRecordingState(projectRoot, &state)
+}
+
 // ClearRecordingState removes the recording state file from the session folder.
 // Note: returns first-match state. Use ClearRecordingStateForAgent in agent-context
 // code to avoid clearing another concurrent agent's recording.

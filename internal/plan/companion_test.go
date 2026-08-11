@@ -106,7 +106,7 @@ func TestSavePreservesCompanionsOnResave(t *testing.T) {
 	in := Input{Raw: "# Companion plan\n\nBody."}
 	meta := Meta{Topic: "Companion plan", CreatedAt: created}
 
-	dir, err := Save("/fake/git/root", in, Result{}, nil, meta)
+	dir, _, err := Save("/fake/git/root", in, Result{}, nil, meta)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestSavePreservesCompanionsOnResave(t *testing.T) {
 		t.Fatalf("RecordCompanions (2nd): %v", err)
 	}
 
-	if _, err := Save("/fake/git/root", in, Result{}, nil, meta); err != nil {
+	if _, _, err := Save("/fake/git/root", in, Result{}, nil, meta); err != nil {
 		t.Fatalf("re-Save: %v", err)
 	}
 	got, err := LoadMeta(dir)

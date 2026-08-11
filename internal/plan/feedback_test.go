@@ -141,7 +141,7 @@ func TestRenderHTML_CarriesReviewState(t *testing.T) {
 func savePlanWithFeedback(t *testing.T, gitRoot, topic string, prov *Provenance, items []FeedbackItem) string {
 	t.Helper()
 	meta := Meta{Topic: topic, CreatedAt: time.Now().UTC(), Provenance: prov}
-	dir, err := Save(gitRoot, Input{Raw: "# " + topic}, Result{}, nil, meta)
+	dir, _, err := Save(gitRoot, Input{Raw: "# " + topic}, Result{}, nil, meta)
 	if err != nil {
 		t.Fatalf("save %q: %v", topic, err)
 	}
@@ -193,7 +193,7 @@ func TestOpenFeedbackPlans_ReRaisedCountsAsOpen(t *testing.T) {
 	ledger := t.TempDir()
 	withLedger(t, ledger)
 	t0 := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
-	dir, err := Save("/any", Input{Raw: "# P"}, Result{}, nil, Meta{Topic: "Reopen plan", CreatedAt: t0})
+	dir, _, err := Save("/any", Input{Raw: "# P"}, Result{}, nil, Meta{Topic: "Reopen plan", CreatedAt: t0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestOpenFeedbackPlans_FailOpenOnCorruptPlan(t *testing.T) {
 	withLedger(t, ledger)
 	savePlanWithFeedback(t, "/any", "Good plan", nil,
 		[]FeedbackItem{{Anchor: "g1", Status: FeedbackFlag, Note: "look here"}})
-	bad, err := Save("/any", Input{Raw: "# B"}, Result{}, nil, Meta{Topic: "Bad plan", CreatedAt: time.Now()})
+	bad, _, err := Save("/any", Input{Raw: "# B"}, Result{}, nil, Meta{Topic: "Bad plan", CreatedAt: time.Now()})
 	if err != nil {
 		t.Fatal(err)
 	}

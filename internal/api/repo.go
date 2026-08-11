@@ -235,6 +235,15 @@ func (c *RepoClient) WithAuthToken(token string) *RepoClient {
 	return c
 }
 
+// WithTimeout overrides the default 10s HTTP timeout. Use it for advisory,
+// fire-and-forget notifications that sit on a path a human or agent is waiting
+// on — 10s of stall to deliver a best-effort hint is a worse outcome than not
+// delivering it.
+func (c *RepoClient) WithTimeout(d time.Duration) *RepoClient {
+	c.httpClient = &http.Client{Timeout: d}
+	return c
+}
+
 // Endpoint returns the base URL this client is configured for
 func (c *RepoClient) Endpoint() string {
 	return c.baseURL

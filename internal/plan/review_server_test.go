@@ -99,7 +99,7 @@ func TestSave_RemapsOpenFeedbackOnUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render v1: %v", err)
 	}
-	dir, err := Save("/repo", Input{Raw: v1}, Result{}, html1, meta)
+	dir, _, err := Save("/repo", Input{Raw: v1}, Result{}, html1, meta)
 	if err != nil {
 		t.Fatalf("save v1: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestSave_RemapsOpenFeedbackOnUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render v2: %v", err)
 	}
-	if _, err := Save("/repo", Input{Raw: v2}, Result{}, html2, meta); err != nil {
+	if _, _, err := Save("/repo", Input{Raw: v2}, Result{}, html2, meta); err != nil {
 		t.Fatalf("save v2: %v", err)
 	}
 

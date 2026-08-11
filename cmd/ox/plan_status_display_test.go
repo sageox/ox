@@ -65,7 +65,7 @@ func TestPlanListView_RealizedEventShowsEvenWithStaleMeta(t *testing.T) {
 	root := newPlanStatusTestRepo(t)
 
 	meta := plan.Meta{Topic: "Realized despite stale meta", CreatedAt: time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)}
-	dir, err := plan.Save(root, plan.Input{Raw: "# Realized despite stale meta\n"}, plan.Result{}, nil, meta)
+	dir, _, err := plan.Save(root, plan.Input{Raw: "# Realized despite stale meta\n"}, plan.Result{}, nil, meta)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}

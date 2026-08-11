@@ -70,6 +70,23 @@ type Attribution struct {
 	DisplayName string
 }
 
+// IsAnonymous reports whether attribution fell all the way through to step 5,
+// the absolute fallback — i.e. no OAuth identity, no git identity, and no OS
+// username was available.
+//
+// Exists because DisplayName is documented "always non-empty", which makes
+// `DisplayName != ""` useless as a did-this-resolve test: a genuine name and a
+// total resolution failure are both non-empty strings. Callers that write
+// attribution into shared, later-queried artifacts (plan meta, session meta)
+// need to tell those apart — otherwise "% of plans with an author" counts the
+// failures as successes and stops measuring anything.
+//
+// Deliberately checks the underlying sources rather than string-matching
+// "Anonymous", so a user genuinely named that is not misclassified.
+func (a Attribution) IsAnonymous() bool {
+	return a.Email == "" && a.Username == "anonymous"
+}
+
 // ResolveAttribution determines user attribution from all available sources.
 // Never fails — always returns a valid Attribution with non-empty Username,
 // Name, and DisplayName.

@@ -194,10 +194,21 @@ func LoadMeta(planDir string) (Meta, error) {
 // from it via ProjectContext. Returns an error if no ledger is configured
 // (the caller decides whether that is fatal — the porcelain path treats it as
 // "nothing to save").
-func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string, error) {
+//
+// The returned EventKind is the kind Save actually appended — EventCreated on a
+// plan's first save, EventRevised on every later one. It is returned rather
+// than left for the caller to re-derive because re-reading events.jsonl to
+// learn what we just wrote is not equivalent: the append is best-effort, so on
+// failure the log's last entry is a STALE event (possibly an `approved` from a
+// lifecycle verb, a kind a save never produces), and the read happens after
+// this function's flock is released, so a concurrent AppendPlanEvent can land
+// in between. Both make the caller report a kind that disagrees with this save.
+// On an append failure the returned kind is still the kind this save decided —
+// callers reporting it to a server are describing the save, not the file.
+func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string, EventKind, error) {
 	ledger := ledgerPathFor(gitRoot)
 	if ledger == "" {
-		return "", fmt.Errorf("no ledger configured for %q: cannot save plan", gitRoot)
+		return "", "", fmt.Errorf("no ledger configured for %q: cannot save plan", gitRoot)
 	}
 
 	if meta.CreatedAt.IsZero() {
@@ -215,7 +226,7 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 	dirName := fmt.Sprintf("%s-%s", meta.CreatedAt.UTC().Format("2006-01-02"), meta.Slug)
 	dir := filepath.Join(paths.LedgerPlansDir(ledger), dirName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("create plan dir=%s: %w", dir, err)
+		return "", "", fmt.Errorf("create plan dir=%s: %w", dir, err)
 	}
 
 	// Event-log foundation: serialize the whole id-resolve -> write-artifacts
@@ -229,6 +240,9 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 	// path, since fileutil.WithFileLock is not reentrant.
 	eventsPath := filepath.Join(dir, eventsFile)
 	var planID string
+	// savedKind is the kind this save decided, captured inside the lock and
+	// returned to the caller — never re-derived from the file afterwards.
+	savedKind := EventRevised
 	lockErr := fileutil.WithFileLock(context.Background(), eventsPath, func() error {
 		// resolve this plan's stable pln_ id — minted on the first save of
 		// this directory, reused on every later save — and whether this is
@@ -372,6 +386,7 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 			ev.Kind = EventCreated
 			ev.Status = PlanStatusDraft
 		}
+		savedKind = ev.Kind
 		if meta.Provenance != nil {
 			ev.SessionID = meta.Provenance.SessionID
 			ev.SessionName = meta.Provenance.SessionName
@@ -386,10 +401,10 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		return nil
 	})
 	if lockErr != nil {
-		return "", lockErr
+		return "", "", lockErr
 	}
 
-	return dir, nil
+	return dir, savedKind, nil
 }
 
 // List enumerates captured plans under <ledger>/data/plans/, parsing each
