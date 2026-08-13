@@ -637,6 +637,33 @@ func TestOutputAgentPrimeXML_PlanEnrichmentGuidance(t *testing.T) {
 	}
 }
 
+func TestOutputAgentPrimeXML_VisualizationGuidanceIsArtifactNeutral(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+	if _, err := outputAgentPrimeXML(cmd, agentPrimeOutput{AgentID: "a", Status: "fresh", AgentType: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	xml := buf.String()
+	start := strings.Index(xml, "<visualization-guidance>")
+	end := strings.Index(xml, "</visualization-guidance>")
+	if start < 0 || end < start {
+		t.Fatal("prime output is missing visualization-guidance")
+	}
+	block := xml[start:end]
+	for _, want := range []string{"ox viz suggest", "ox viz render", "ox viz lint", "docs", "PRs", "reports"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("visualization guidance missing %q: %s", want, block)
+		}
+	}
+	if strings.Contains(block, "ox plan viz") {
+		t.Error("artifact-neutral guidance must use canonical top-level ox viz")
+	}
+	if session := strings.Index(xml, "<session-context"); session >= 0 && start > session {
+		t.Error("visualization guidance must be in the cacheable static tier")
+	}
+}
+
 // TestConsultRoutes_NoDriftWithSkill is the conformance contract between the
 // Layer-1 <consult-first> floor reminder and the additive `ox-consult` Claude
 // skill: both render the SAME retrieval reflex, so the skill's activation
@@ -1033,7 +1060,7 @@ func TestOutputAgentPrimeXML_SageoxOverheadBudget_Regression(t *testing.T) {
 	// hand-author their own SageOx credit or footnote/ⓘ markers — `ox plan
 	// render` deterministically owns the footer credit and auto-injects an OX
 	// marker on references it surfaced context for; the rest use the
-	// `ox plan viz ox-annotation` pattern. ~51 tokens, accepted to stop agents
+	// `ox viz ox-annotation` pattern. ~51 tokens, accepted to stop AI coworkers
 	// shipping context-blind brand look-alikes that compete with ox's own.
 	//
 	// Raised 1610 -> 1950 (ox decision v1): the <decision-record-guidance>

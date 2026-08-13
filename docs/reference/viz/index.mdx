@@ -1,0 +1,47 @@
+---
+title: "ox viz"
+description: "CLI reference for ox viz"
+sidebar_position: 101
+---
+
+## ox viz
+
+Choose, author, render, and lint visual explanations
+
+### Synopsis
+
+Use a shared visualization vocabulary in plans, documentation, pull
+requests, reports, and design notes.
+
+Run with no argument to browse the catalog; pass an id to get its cognitive
+payoff and authoring recipe. 'ox viz suggest' ranks patterns for an intent,
+'ox viz render' computes parameterized visuals from JSON, and 'ox viz lint'
+checks portable SVG/HTML output. All selection is deterministic and local.
+
+```
+ox viz [id] [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for viz
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox viz lint](/viz/lint)	 - Check a visual fragment for accessibility, portability, and editorial quality
+* [ox viz render](/viz/render)	 - Render a parameterized visualization from JSON data
+* [ox viz suggest](/viz/suggest)	 - Suggest visual patterns for what you need to explain

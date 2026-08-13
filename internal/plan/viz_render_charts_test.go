@@ -293,7 +293,7 @@ func TestRenderViz_ShapeEchoOnError(t *testing.T) {
 // TestComputeVizHints_CarriesParamSkeleton verifies a fired viz hint carries the
 // matched pattern's param skeleton (Improvement B) so the agent goes straight to
 // fill-in-the-blanks.
-// Failure prevented: hints name a pattern but force a second `ox plan viz <id>`
+// Failure prevented: hints name a pattern but force a second `ox viz <id>`
 // round-trip to recall the data shape.
 func TestComputeVizHints_CarriesParamSkeleton(t *testing.T) {
 	in := Input{Sections: []Section{{Heading: "Files changed", Body: "new and edited files across the renderer"}}}

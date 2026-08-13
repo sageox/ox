@@ -154,16 +154,34 @@ func scoreSection(order int, sec Section) (hintCandidate, bool) {
 			reason = "phased rollout with blocking dependencies — a dependency DAG shows the critical path"
 		}
 		return hintCandidate{order, bestScore, DiagramHint{
-			Section: sec.Heading, SuggestedType: bestKind, Reason: reason,
+			Section: sec.Heading, SuggestedType: bestKind, CatalogID: catalogIDForDiagram(bestKind), Reason: reason,
 		}}, true
 	case scoreCues(lc, branchCues) >= minCueScore:
 		// branching procedure with no richer structure → the hero flowchart
 		return hintCandidate{order, minCueScore, DiagramHint{
 			Section: sec.Heading, SuggestedType: DiagramFlowchart,
-			Reason: "section describes a branching procedure with decisions/gates",
+			CatalogID: "flowchart",
+			Reason:    "section describes a branching procedure with decisions/gates",
 		}}, true
 	default:
 		return hintCandidate{}, false
+	}
+}
+
+func catalogIDForDiagram(kind DiagramKind) string {
+	switch kind {
+	case DiagramSequence:
+		return "sequence-diagram"
+	case DiagramState:
+		return "state-machine"
+	case DiagramSwimlane:
+		return "swimlane-timeline"
+	case DiagramTopology:
+		return "dependency-graph"
+	case DiagramFlowchart:
+		return "flowchart"
+	default:
+		return ""
 	}
 }
 
@@ -199,18 +217,16 @@ func reasonFor(kind DiagramKind, sec Section, fileN int) string {
 	}
 }
 
-// --- data-visualization hints (the parameterized catalog, derived from use:) ---
+// --- data-visualization hints (the parameterized catalog, matched by tags) ---
 //
 // computeDiagramHints covers Mermaid/CSS FORMS. computeVizHints covers the
 // PARAMETERIZED data-viz catalog (risk-matrix, file-impact-map, cost-waterfall,
 // stat-cards, flag-rollout-matrix, …) so a Risks / Files-changed / cost / metrics
 // section gets a content-aware push, not just a menu it has to browse.
 //
-// The match signal is DERIVED from each pattern's `use:` line — there is no
-// separate cue field in the catalog (that would duplicate `use:` and drift). The
-// only code-side knobs are a shared stopword/generic list and the scoring weights
-// (heading match counts double), mirroring how diagram_hints keeps its cues in
-// code rather than in the catalog.
+// The match signal comes from reviewed catalog tags shared with `ox viz
+// suggest`; prose edits cannot silently change retrieval behavior. Heading
+// matches count double, mirroring the diagram-hint precision policy.
 
 const maxVizHints = 3
 
@@ -218,72 +234,6 @@ const maxVizHints = 3
 // distinct body-term matches. Precision over recall — a wrong push is worse than
 // none, same discipline as minCueScore.
 const minVizScore = 2
-
-// vizStopwords drops grammar, catalog-meta shape words, and domain-generic terms
-// so cue derivation from a `use:` line keeps only DISTINCTIVE triggers (e.g.
-// "memory"/"disk"/"layout" are too ambiguous to fire partition on their own —
-// "flash"/"partition"/"offset" carry it).
-var vizStopwords = map[string]bool{
-	// grammar
-	"and": true, "the": true, "for": true, "are": true, "its": true, "with": true,
-	"per": true, "where": true, "when": true, "that": true, "each": true, "than": true,
-	"more": true, "not": true, "just": true, "into": true, "from": true, "out": true,
-	// catalog-meta / generic shape words
-	"use": true, "show": true, "story": true, "section": true, "list": true,
-	"flat": true, "full": true, "few": true, "many": true, "handful": true,
-	"layout": true, "share": true, "takes": true, "step": true, "steps": true,
-	"thing": true, "things": true, "kind": true, "matter": true, "matters": true,
-	"some": true, "which": true, "what": true,
-	// domain-generic (too ambiguous to trigger on alone)
-	"memory": true, "disk": true, "data": true, "component": true, "subsystem": true,
-}
-
-// vizUseCues derives distinctive trigger terms from a pattern's `use:` line. It
-// reads only the LEAD clause (before the em-dash): the catalog convention is
-// "use: <trigger> — <elaboration / contrast>", and the contrast ("instead of a
-// flat list") would otherwise pollute the cues. Hyphenated tokens also yield their
-// parts, and plural nouns their singular stem, so "Files changed" matches "files"
-// and "Feature flags" matches the "flag" from "feature-flag".
-func vizUseCues(use string) []string {
-	lead := use
-	if i := strings.Index(lead, "—"); i >= 0 {
-		lead = lead[:i]
-	}
-	var sb strings.Builder
-	for _, r := range strings.ToLower(lead) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-			sb.WriteRune(r)
-		} else {
-			sb.WriteRune(' ')
-		}
-	}
-	seen := map[string]bool{}
-	var cues []string
-	add := func(tok string) {
-		tok = strings.Trim(tok, "-")
-		if len(tok) < 3 || vizStopwords[tok] || seen[tok] {
-			return
-		}
-		seen[tok] = true
-		cues = append(cues, tok)
-	}
-	for _, tok := range strings.Fields(sb.String()) {
-		tok = strings.Trim(tok, "-")
-		if tok == "" {
-			continue
-		}
-		add(tok)
-		if strings.Contains(tok, "-") { // feature-flag → feature, flag
-			for _, part := range strings.Split(tok, "-") {
-				add(part)
-			}
-		}
-		if strings.HasSuffix(tok, "s") && len(tok) >= 5 { // risks → risk, files → file
-			add(strings.TrimSuffix(tok, "s"))
-		}
-	}
-	return cues
-}
 
 // scoreVizSection scores one section against a pattern's cues. A heading match
 // counts double (the agent TITLED the section that — a strong signal); a body
@@ -315,14 +265,16 @@ type vizCueSet struct {
 // computeVizHints returns the strongest few per-section data-viz suggestions.
 // Fail-open: it only reads the already-parsed Input and the embedded catalog, and
 // never errors. Only patterns with a deterministic renderer (Param != "") are
-// candidates — every hint is therefore actionable via `ox plan viz render`.
+// candidates — every hint is therefore actionable via `ox viz render`.
 func computeVizHints(in Input) []VizHint {
 	var sets []vizCueSet
 	for _, p := range VizCatalog() {
 		if p.Param == "" {
 			continue
 		}
-		if cues := vizUseCues(p.Use); len(cues) > 0 {
+		// Reviewed catalog tags are the retrieval contract. Scoring prose made
+		// harmless words such as "notes" accidentally select unrelated charts.
+		if cues := p.Tags; len(cues) > 0 {
 			sets = append(sets, vizCueSet{p.ID, p.Param, cues})
 		}
 	}
@@ -456,7 +408,7 @@ func buildGuidance(in Input, sig SignalSummary, hints []DiagramHint, vizHints []
 	b.WriteString("TOP — the decision layer, for the human approving in ~10 min: lead with the conclusion, the key tradeoffs, and the biggest risk; keep every file/ID/PR framed enough to stand on its own; let one hero diagram and a few tables replace prose rather than decorate it; no file:line minutiae. ")
 	b.WriteString("BOTTOM — exactly one collapsed `<details>` appendix named \"Implementation notes\" at the END, for the agent that implements: exact files, edit order, snippets, gotchas. ")
 	b.WriteString("Relocate detail to the bottom rather than inlining it up top or deleting it — cut only what serves neither reader. ")
-	b.WriteString("Explore visualization patterns with `ox plan viz` (sparklines, dependency graphs, swimlane timelines, budget sequences, Tufte tables, device mockups) and weave in the ones that compress understanding.")
+	b.WriteString("Explore visualization patterns with `ox viz suggest \"<what needs explaining>\"` (architecture, flows, state, charts, layouts, and mockups) and weave in the ones that compress understanding — the catalog applies to plans, docs, PRs, and reports.")
 	if len(hints) > 0 {
 		b.WriteString(" Diagrams that fit this plan: ")
 		parts := make([]string, 0, len(hints))
@@ -471,14 +423,14 @@ func buildGuidance(in Input, sig SignalSummary, hints []DiagramHint, vizHints []
 		b.WriteString(" Data visualizations that fit this plan: ")
 		parts := make([]string, 0, len(vizHints))
 		for _, v := range vizHints {
-			parts = append(parts, fmt.Sprintf("%q → %s (`ox plan viz render %s --data`)", v.Section, v.PatternID, v.PatternID))
+			parts = append(parts, fmt.Sprintf("%q → %s (`ox viz render %s --data`)", v.Section, v.PatternID, v.PatternID))
 		}
 		b.WriteString(strings.Join(parts, "; "))
 		b.WriteString(".")
 	}
 	if mockup != "" {
 		// A user-facing surface — show the resulting UI state, don't describe it.
-		line := fmt.Sprintf(" This plan changes a user-facing surface (%q) — show the resulting UI state with a mockup (`ox plan viz device-mockup`), not prose.", mockup)
+		line := fmt.Sprintf(" This plan changes a user-facing surface (%q) — show the resulting UI state with a mockup (`ox viz device-mockup`), not prose.", mockup)
 		b.WriteString(line)
 	}
 	return b.String()

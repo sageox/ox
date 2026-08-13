@@ -116,7 +116,7 @@ You are writing for a **senior / principal engineer or EM whose time is worth ~$
 
 ### Visualizations do the heavy lifting
 
-Prefer a visualization over a paragraph wherever a relationship, flow, state machine, sequence, comparison, or before/after exists — and in an authored page you are not limited to static diagrams: build the inspector, animate the timeline, wire the hover states. `ox plan viz` remains a useful snippet catalog (swimlanes, risk matrices, device mockups) to adapt into the page. For user-facing changes, show the resulting UI state — don't describe it in prose.
+Prefer a visualization over a paragraph wherever a relationship, flow, state machine, sequence, comparison, or before/after exists — and in an authored page you are not limited to static diagrams: build the inspector, animate the timeline, wire the hover states. `ox viz suggest "<what needs explaining>"` is the shared catalog (architecture, flows, swimlanes, risk matrices, device mockups) to adapt into the page or any other artifact. For user-facing changes, show the resulting UI state — don't describe it in prose.
 
 ### What you do NOT author
 

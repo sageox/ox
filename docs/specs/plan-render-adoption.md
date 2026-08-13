@@ -96,20 +96,19 @@ three tiers of disclosure, cheap to expensive:
 | Tier | Surface | Cost | Answers |
 |---|---|---|---|
 | **Push** | `ox plan enrich` → `diagram_hints` + `viz_hints` | 0 — ox computed it | *"Your 'Risks' section → `risk-matrix`"* |
-| **Pull-menu** | `ox plan viz` | ~600 tok for **all** patterns | one `use:` line each — scan and self-match |
-| **Pull-detail** | `ox plan viz <id>` → `render <id> --data` | one pattern only | full snippet + `param:` + correct-by-construction HTML |
+| **Pull-menu** | `ox viz` | ~600 tok for **all** patterns | one `use:` line each — scan and self-match |
+| **Pull-detail** | `ox viz <id>` → `render <id> --data` | one pattern only | full snippet + `param:` + correct-by-construction HTML |
 
 The push tier used to cover only Mermaid/CSS diagram **forms** (`diagram_hints`). It now
 also covers the **parameterized data-viz catalog** via `viz_hints` (`computeVizHints`),
 so a Risks / Files-changed / cost / metrics / flags section gets a content-aware push to
 `risk-matrix` / `file-impact-map` / `cost-waterfall` / `stat-cards` / `flag-rollout-matrix`,
-each carrying its exact `ox plan viz render <id> --data` command (select→render in one step).
+each carrying its exact `ox viz render <id> --data` command (select→render in one step).
 
-**The match signal is derived from each pattern's `use:` line — there is no separate
-`cues:` field.** A second when-to-use field would duplicate `use:` and drift; instead the
-matcher reads the `use:` lead (the catalog convention is `use: <trigger> — <rationale>`),
-and the only code-side knobs are a shared stopword/generic list and heading-weighted
-scoring — mirroring how `diagram_hints` keeps its cues in code, not in the catalog.
+**The match signal uses each pattern's reviewed `tags` metadata, not prose.** Tags are
+the stable retrieval contract shared by `ox viz suggest` and plan enrichment; changing
+editorial copy cannot silently change matching behavior. Heading matches remain weighted
+more strongly than incidental body mentions.
 Partition stays niche: its distinctive cues (`flash` / `partition` / `offset`) fire only on
 explicit layout language, never on generic "memory" prose (precision over recall — a wrong
 push is worse than none).
@@ -131,7 +130,7 @@ push is worse than none).
 |---|---|---|
 | L1 | **Shipped** — `ox-plan` skill description leads with the capability (team context + ledger + review loop) and wins plan-render intent | `extensions/claude/skills/ox-plan/SKILL.md` |
 | L2 | **Shipped** — `buildGuidance` leads with the computed collision / expert-route / prior-art counts | `internal/plan/diagram_hints.go` (`guidanceLead`) |
-| Push tier | **Shipped** — content-aware viz suggestion now covers the parameterized catalog (`viz_hints`), not just Mermaid; derived from `use:`, no new catalog field | `internal/plan/diagram_hints.go` (`computeVizHints`) |
+| Push tier | **Shipped** — content-aware viz suggestion now covers the parameterized catalog (`viz_hints`), not just Mermaid; matched by reviewed catalog tags shared with `ox viz suggest` | `internal/plan/diagram_hints.go` (`computeVizHints`) |
 | L4 | **Shipped** — capability line in the prime advisory | `cmd/ox/agent_prime_xml.go` (`writePlanEnrichmentGuidance`) |
 | L3 | **Partial** — the exit-plan nudge already quotes signals; an explicit "presented without rendering" recovery is future work | `cmd/ox/agent_hook_plan_nudge.go` |
 | L0 | **Design only (this doc)** — the review-loop flywheel is the highest-leverage and biggest piece; it needs its own implementation pass (measure render-vs-orphan rate; invest in the `ox plan review` experience users reward) | — |

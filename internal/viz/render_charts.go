@@ -1,4 +1,4 @@
-package plan
+package viz
 
 import (
 	"encoding/json"

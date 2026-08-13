@@ -258,7 +258,7 @@ func htmlPlanHintLine() string {
 	return strings.Join([]string{
 		"Rendering an HTML plan? Use `ox plan render --open` (run `ox plan enrich --json` first) — only it folds in",
 		"SageOx team context (collisions, prior art, expert routing) and saves to the ledger. Lean into the",
-		"`ox plan viz` catalog: rich, interactive HTML+JS visuals — dependency explorers, charts, swimlane timelines,",
+		"`ox viz` catalog: rich, interactive HTML+JS visuals — dependency explorers, charts, swimlane timelines,",
 		"Tufte tables — that surface the critical decisions and tradeoffs and cut the reviewer's cognitive load,",
 		"rather than burying them in prose. A hand-rolled render is a context-blind orphan; don't author the SageOx credit — the render owns it.",
 	}, " ")

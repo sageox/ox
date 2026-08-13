@@ -1,0 +1,41 @@
+---
+title: "ox viz render"
+description: "CLI reference for ox viz render"
+sidebar_position: 103
+---
+
+## ox viz render
+
+Render a parameterized visualization from JSON data
+
+### Synopsis
+
+Render a parameterized catalog pattern from JSON into an HTML/SVG
+fragment. ox computes geometry; the AI coworker supplies only data. Inspect the
+required shape with 'ox viz <id>'.
+
+```
+ox viz render <id> [flags]
+```
+
+### Options
+
+```
+      --data string   JSON data file for the pattern (use - for stdin)
+  -h, --help          help for render
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox viz](/viz)	 - Choose, author, render, and lint visual explanations

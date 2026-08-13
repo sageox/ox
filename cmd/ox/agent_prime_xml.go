@@ -179,6 +179,10 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		// hook, so they get a lighter note. Parallels <rule-promotion-guidance>.
 		writePlanEnrichmentGuidance(&sb, output.AgentType)
 
+		// visualization-guidance: the artifact-neutral diagram catalog is useful
+		// in plans, docs, PRs, reports, and any other technical explanation.
+		writeVisualizationGuidance(&sb)
+
 		// decision-record-guidance: consult-and-credit contract for Decision
 		// Records. Gated on a corpus actually existing (config or conventional
 		// dirs) so repos without DRs pay zero prime tokens for it.
@@ -675,7 +679,7 @@ func consultRoutes() []prime.ConsultRoute {
 // docs/specs/agent-ux-principles.md — every token competes with the
 // developer's own context). Trimmed to command + trigger (bd ox-32f6): the
 // full rationale (why `ox plan render` over a self-rolled HTML-plan skill,
-// the footnote/credit rules, the `ox plan viz` catalog) moved to
+// the footnote/credit rules, the `ox viz` catalog) moved to
 // `ox guide plan-enrichment` — read once, on demand, instead of paid on
 // every prime. The commands themselves (the actual steering) stay inline.
 func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
@@ -702,8 +706,16 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	// relocated to the end, never inlined up top or deleted (see buildGuidance).
 	sb.WriteString("Structure the plan in two layers for its two readers: a minutiae-free decision layer up top (conclusion, tradeoffs, biggest risk, one hero diagram) that a human approves in ~10 min, then exactly one collapsed `<details>` \"Implementation notes\" appendix at the END for the implementing agent (exact files, edits, gotchas) — relocate detail there rather than inlining it up top or dropping it.\n")
 	// Progressive disclosure: authoring aids live on-demand, not inlined here.
-	sb.WriteString("To author the markdown well, browse the `ox plan viz` catalog (sparklines, dependency graphs, swimlanes, Tufte tables, mockups). `ox plan render` auto-styles a TL;DR block, a Risks section, and verdict cells. Never hand-author a SageOx credit or your own footnote/ⓘ markers — the render owns the footer credit and auto-injects an OX marker on references it surfaced context for; for the rest, use the `ox plan viz ox-annotation` pattern.\n")
+	sb.WriteString("To author the markdown well, use `ox viz suggest \"<what needs explaining>\"` for diagrams, charts, layouts, and mockups. `ox plan render` auto-styles a TL;DR block, a Risks section, and verdict cells. Never hand-author a SageOx credit or your own footnote/ⓘ markers — the render owns the footer credit and auto-injects an OX marker on references it surfaced context for; for the rest, use the `ox viz ox-annotation` pattern.\n")
 	sb.WriteString("</plan-enrichment-guidance>\n")
+}
+
+// writeVisualizationGuidance gives every AI coworker the same portable visual
+// vocabulary, independent of whether it uses SageOx enriched plans.
+func writeVisualizationGuidance(sb *strings.Builder) {
+	sb.WriteString("\n<visualization-guidance>\n")
+	sb.WriteString("When architecture, flow, state, sequence, comparison, chronology, or quantitative shape would explain the work faster than prose, consult `ox viz suggest \"<what needs explaining>\"`. The catalog is for every artifact — plans, docs, PRs, reports, and design notes. Pull one recipe with `ox viz <id>`, render data-driven fragments with `ox viz render`, and check authored SVG/HTML with `ox viz lint`.\n")
+	sb.WriteString("</visualization-guidance>\n")
 }
 
 // writeDecisionRecordGuidance emits the <decision-record-guidance> advisory

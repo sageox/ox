@@ -123,6 +123,11 @@ func OxCapabilities() []Capability {
 			Layer1Source:   "agent prime",
 		},
 		{
+			ID:             "visualization-guidance",
+			MechanismClass: MechanismFloor,
+			Layer1Source:   "agent prime",
+		},
+		{
 			ID:             "decision-record-guidance",
 			MechanismClass: MechanismFloor,
 			Layer1Source:   "agent prime",

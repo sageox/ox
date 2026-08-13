@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/sageox/ox/internal/viz"
 )
 
 // Finding is one advisory lint result on a rendered plan HTML — attribution
@@ -54,6 +56,9 @@ func LintRender(htmlBytes []byte, res Result) []Finding {
 	out = append(out, LintMermaid(htmlBytes)...)
 	out = append(out, lintMermaidFontRace(htmlBytes)...)
 	out = append(out, lintWordmark(htmlBytes, res)...)
+	for _, f := range viz.Lint(htmlBytes, viz.LintOptions{TaggedOnly: true}) {
+		out = append(out, Finding{Rule: f.Rule, Message: f.Message})
+	}
 	return out
 }
 
@@ -70,7 +75,7 @@ func lintWordmark(html []byte, res Result) []Finding {
 		return nil
 	}
 	// Match the emitted marker, not prose. `data-ox-wordmark` is stamped on the
-	// lockup by both the Go template and the `ox plan viz wordmark` snippet;
+	// lockup by both the Go template and the `ox viz wordmark` snippet;
 	// matching the SVG <title> text instead would let a page that merely
 	// mentions "SageOx Wordmark" satisfy the rule, and would fail a correctly
 	// placed mark whose SVG was minified or title-stripped.
@@ -79,7 +84,7 @@ func lintWordmark(html []byte, res Result) []Finding {
 	}
 	return []Finding{{
 		Rule:    "branding.wordmark-missing",
-		Message: "enriched plan render carries no SageOx wordmark — add the bottom-left mark via `ox plan viz wordmark` (both theme variants, inline SVG)",
+		Message: "enriched plan render carries no SageOx wordmark — add the bottom-left mark via `ox viz wordmark` (both theme variants, inline SVG)",
 	}}
 }
 
@@ -342,7 +347,7 @@ func CraftRealization(res Result, htmlBytes []byte) CraftReport {
 			rep.Gaps = append(rep.Gaps, Finding{
 				Rule: "craft.missing-diagram",
 				Message: fmt.Sprintf(
-					`ox suggested a %s for "%s" (%s) but the plan drew no diagram or chart — a hero visual makes the shape readable in seconds (see `+"`ox plan viz`"+`)`,
+					`ox suggested a %s for "%s" (%s) but the plan drew no diagram or chart — a hero visual makes the shape readable in seconds (see `+"`ox viz`"+`)`,
 					d.SuggestedType, d.Section, d.Reason),
 			})
 		}
@@ -358,7 +363,7 @@ func CraftRealization(res Result, htmlBytes []byte) CraftReport {
 			rep.Gaps = append(rep.Gaps, Finding{
 				Rule: "craft.missing-mockup",
 				Message: fmt.Sprintf(
-					`"%s" changes a user-facing surface but the plan has no mockup — show the resulting UI state inline (`+"`ox plan viz device-mockup`"+`), don't describe it in prose`,
+					`"%s" changes a user-facing surface but the plan has no mockup — show the resulting UI state inline (`+"`ox viz device-mockup`"+`), don't describe it in prose`,
 					res.MockupSection),
 			})
 		}

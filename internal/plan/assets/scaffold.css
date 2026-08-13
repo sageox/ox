@@ -135,7 +135,7 @@ main>section[id^="sec-"]{scroll-margin-top:72px}
 td.v-good{color:var(--sage-bright);font-weight:600}
 td.v-warn{color:var(--amber);font-weight:600}
 td.v-bad{color:var(--red);font-weight:600}
-/* --- Visualization catalog primitives (see `ox plan viz`) --- */
+/* --- Visualization catalog primitives (see `ox viz`) --- */
 /* swimlane timeline */
 .swim{display:flex;flex-direction:column;gap:6px;margin:14px 0}
 .swim .lane{display:grid;grid-template-columns:120px 1fr;align-items:center;gap:10px}
@@ -182,7 +182,7 @@ html[data-theme="light"] ul.ftree .chg{border:1px solid var(--hair)}
    bare .device is a generic frame; .device.ios adds iPhone-class chrome (notch +
    home indicator); .device-statusbar / -titlebar / -sheet / -actions / -row
    compose common screens (a list, a share sheet, a notification). Author the
-   screen CONTENT inline — ox renders it verbatim. See `ox plan viz device-mockup`. */
+   screen CONTENT inline — ox renders it verbatim. See `ox viz device-mockup`. */
 .device{max-width:300px;margin:14px 0;background:#0c1112;border:1px solid var(--hair);border-radius:16px;padding:10px;box-shadow:var(--shadow)}
 .device-screen{position:relative;background:#11171a;border:1px solid var(--hair2);border-radius:10px;padding:18px 16px;color:#e6edf0}
 .device-screen .dim{color:#9fb0b6;font-size:13px;margin:.3em 0 0}

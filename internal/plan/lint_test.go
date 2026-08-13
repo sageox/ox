@@ -103,6 +103,30 @@ func TestLintBranding_EmptyHTMLNoFindings(t *testing.T) {
 	}
 }
 
+func TestLintRender_IncludesTaggedOxVizFindings(t *testing.T) {
+	html := []byte(`<svg data-ox-viz="architecture"><title>Architecture</title></svg>`)
+	findings := LintRender(html, Result{})
+	for _, rule := range []string{"viz.a11y.role", "viz.a11y.desc", "viz.a11y.labelledby"} {
+		found := false
+		for _, f := range findings {
+			if f.Rule == rule {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("plan lint missing %s from ox viz integration: %+v", rule, findings)
+		}
+	}
+
+	// Legacy/unowned SVGs are outside the ox viz contract and remain fail-open.
+	for _, f := range LintRender([]byte(`<svg><title>Legacy</title></svg>`), Result{}) {
+		if strings.HasPrefix(f.Rule, "viz.") {
+			t.Errorf("plan lint should ignore untagged SVG, got %+v", f)
+		}
+	}
+}
+
 // assertRules checks the finding rule-ids match exactly (order-independent).
 func assertRules(t *testing.T, got []BrandingFinding, want []string) {
 	t.Helper()

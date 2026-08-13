@@ -16,6 +16,7 @@ The following components are licensed under the MIT License:
 - github.com/AlexanderGrooff/mermaid-ascii - Copyright (c) Alexander Grooff
 - github.com/Microsoft/go-winio - Copyright (c) Microsoft Corporation
 - github.com/alecthomas/chroma - Copyright (c) Alec Thomas
+- github.com/cathrynlavery/diagram-design - Copyright (c) 2025 Cathryn Lavery
 - github.com/cenkalti/backoff - Copyright (c) Cenk Alti
 - github.com/charmbracelet/colorprofile - Copyright (c) Charmbracelet, Inc.
 - github.com/charmbracelet/ultraviolet - Copyright (c) Charmbracelet, Inc.

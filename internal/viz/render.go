@@ -1,4 +1,4 @@
-package plan
+package viz
 
 import (
 	"encoding/json"
@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// viz_render.go turns structured data into a self-contained HTML/SVG fragment for
+// render.go turns structured data into a self-contained HTML/SVG fragment for
 // the data-shaped visualization patterns (bar charts, stat cards, file-impact
 // trees, risk matrices, …).
 //
@@ -24,7 +24,7 @@ import (
 // string building — no network, no LLM.
 
 // vizRenderers maps a catalog pattern id to its parameterized renderer. It is
-// the single source of which patterns support `ox plan viz render --data`; the
+// the single source of which patterns support `ox viz render --data`; the
 // catalog↔renderer drift test enumerates it against the `param:` entries in
 // viz-catalog.md so the two can't diverge. Adding a parameterized pattern = one
 // entry here + the catalog `param:` line + the CSS.
@@ -60,7 +60,7 @@ func RenderViz(pattern string, data []byte) (string, error) {
 	id := strings.ToLower(strings.TrimSpace(pattern))
 	r, ok := vizRenderers[id]
 	if !ok {
-		return "", fmt.Errorf("pattern %q does not support --data rendering; run `ox plan viz` to see which patterns are parameterized", pattern)
+		return "", fmt.Errorf("pattern %q does not support --data rendering; run `ox viz` to see which patterns are parameterized", pattern)
 	}
 	out, err := r(data)
 	if err != nil {
@@ -70,6 +70,26 @@ func RenderViz(pattern string, data []byte) (string, error) {
 		return "", err
 	}
 	return out, nil
+}
+
+func Render(pattern string, data []byte) (string, error) { return RenderViz(pattern, data) }
+
+// RendererIDs and ColorCSSVars expose read-only copies for drift tests and
+// compatibility shims without exporting renderer implementation details.
+func RendererIDs() map[string]struct{} {
+	out := make(map[string]struct{}, len(vizRenderers))
+	for id := range vizRenderers {
+		out[id] = struct{}{}
+	}
+	return out
+}
+
+func ColorCSSVars() map[string]string {
+	out := make(map[string]string, len(vizColors))
+	for name, cssVar := range vizColors {
+		out[name] = cssVar
+	}
+	return out
 }
 
 // vizColors is the whitelist of semantic color names a caller may reference;
@@ -310,24 +330,30 @@ func renderRiskMatrix(data []byte) (string, error) {
 	}
 	// sort by severity (blocker first), stable on input order within a tier
 	sort.SliceStable(d.Risks, func(i, j int) bool {
-		return rank(d.Risks[i].Severity) < rank(d.Risks[j].Severity)
+		return SeverityRank(d.Risks[i].Severity) < SeverityRank(d.Risks[j].Severity)
 	})
 	var b strings.Builder
 	b.WriteString(`<table class="riskm"><tr><th>Risk</th><th>Severity</th><th>Category</th><th>Mitigation</th></tr>`)
 	for _, r := range d.Risks {
 		sev := strings.ToLower(strings.TrimSpace(r.Severity))
 		fmt.Fprintf(&b, `<tr class="sev-%s"><td>%s</td><td>%s%s</td><td>%s</td><td>%s</td></tr>`,
-			esc(sev), esc(r.Title), severityGlyph[sev], esc(r.Severity), esc(r.Category), esc(r.Mitigation))
+			esc(sev), esc(r.Title), SeverityGlyph(sev), esc(r.Severity), esc(r.Category), esc(r.Mitigation))
 	}
 	b.WriteString(`</table>`)
 	return b.String(), nil
 }
 
-func rank(sev string) int {
+// SeverityRank returns the stable display order for a risk severity.
+func SeverityRank(sev string) int {
 	if r, ok := severityRank[strings.ToLower(strings.TrimSpace(sev))]; ok {
 		return r
 	}
 	return 99
+}
+
+// SeverityGlyph returns the redundant shape encoding for a risk severity.
+func SeverityGlyph(sev string) string {
+	return severityGlyph[strings.ToLower(strings.TrimSpace(sev))]
 }
 
 // --- feature-flag rollout matrix ---

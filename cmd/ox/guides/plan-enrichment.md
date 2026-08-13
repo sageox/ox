@@ -53,11 +53,11 @@ On the human's yes, this launches an in-browser review: they mark up the rendere
 
 ## Credit and footnote rules
 
-`ox plan render` owns the plan's credit footer and auto-injects an OX marker on any reference it surfaced context for. Do not hand-author your own "enriched by SageOx" credit or footnote/ⓘ markers — a self-authored credit competes with, and looks like, the real one. For any other in-plan annotation you want to add, use the `ox plan viz ox-annotation` pattern instead of inventing your own marker style.
+`ox plan render` owns the plan's credit footer and auto-injects an OX marker on any reference it surfaced context for. Do not hand-author your own "enriched by SageOx" credit or footnote/ⓘ markers — a self-authored credit competes with, and looks like, the real one. For any other in-plan annotation you want to add, use the `ox viz ox-annotation` pattern instead of inventing your own marker style.
 
 ## Authoring aids
 
-Browse the `ox plan viz` catalog for plan-native visual components: sparklines, dependency graphs, swimlanes, Tufte-style tables, and device mockups. `ox plan render` auto-styles a TL;DR block, a Risks section, and verdict cells from conventional markdown structure — you don't need to hand-roll these.
+Use `ox viz suggest "<what needs explaining>"` for architecture and flow diagrams, sparklines, dependency graphs, swimlanes, Tufte-style tables, and device mockups. The catalog works in plans, docs, PRs, reports, and design notes. `ox plan render` auto-styles a TL;DR block, a Risks section, and verdict cells from conventional markdown structure — you don't need to hand-roll these.
 
 ## Tier-aware guidance
 

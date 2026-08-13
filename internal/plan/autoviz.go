@@ -18,6 +18,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/sageox/ox/internal/viz"
 )
 
 var (
@@ -247,7 +249,9 @@ func autoRiskTable(sectionHTML string) string {
 			return table
 		}
 		converted = true
-		sort.SliceStable(rows, func(i, j int) bool { return rank(rows[i].sev) < rank(rows[j].sev) })
+		sort.SliceStable(rows, func(i, j int) bool {
+			return viz.SeverityRank(rows[i].sev) < viz.SeverityRank(rows[j].sev)
+		})
 
 		caption := "Risks — sorted by severity"
 		if sevCol < 0 {
@@ -267,7 +271,7 @@ func autoRiskTable(sectionHTML string) string {
 			// title-case the severity word beside its shape glyph (shape survives
 			// grayscale/CVD — never color alone)
 			word := strings.ToUpper(r.sev[:1]) + r.sev[1:]
-			fmt.Fprintf(&b, `<tr class="sev-%s"><td>%s</td><td class="sev">%s%s</td>`, r.sev, r.cells[0], severityGlyph[r.sev], word)
+			fmt.Fprintf(&b, `<tr class="sev-%s"><td>%s</td><td class="sev">%s%s</td>`, r.sev, r.cells[0], viz.SeverityGlyph(r.sev), word)
 			for i, c := range r.cells[1:] {
 				if i+1 == sevCol {
 					continue

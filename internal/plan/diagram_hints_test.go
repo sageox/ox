@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -14,36 +15,42 @@ func TestComputeDiagramHints_RulesFire(t *testing.T) {
 		heading string
 		body    string
 		want    DiagramKind
+		catalog string
 	}{
 		{
 			name:    "ordered call path -> sequence",
 			heading: "Request flow",
 			body:    "The client sends a request to the API, which then the DB returns rows in response.",
 			want:    DiagramSequence,
+			catalog: "sequence-diagram",
 		},
 		{
 			name:    "lifecycle -> state machine",
 			heading: "Connection lifecycle",
 			body:    "On timeout we retry with backoff; the pending state transitions to expired.",
 			want:    DiagramState,
+			catalog: "state-machine",
 		},
 		{
 			name:    "phases -> swimlane",
 			heading: "Rollout",
 			body:    "Phase 1 ships the backend; phase 2 the UI runs in parallel across the milestone.",
 			want:    DiagramSwimlane,
+			catalog: "swimlane-timeline",
 		},
 		{
 			name:    "many files -> topology",
 			heading: "Wiring",
 			body:    "Touches `internal/plan/render.go`, `internal/plan/enrich.go`, and `cmd/ox/plan.go`.",
 			want:    DiagramTopology,
+			catalog: "dependency-graph",
 		},
 		{
 			name:    "branching -> flowchart fallback",
 			heading: "Decision",
 			body:    "If the flag is set, take the gate; otherwise fall back to the else branch.",
 			want:    DiagramFlowchart,
+			catalog: "flowchart",
 		},
 	}
 	for _, tc := range cases {
@@ -56,7 +63,25 @@ func TestComputeDiagramHints_RulesFire(t *testing.T) {
 			if hints[0].SuggestedType != tc.want {
 				t.Errorf("got %q, want %q (reason: %s)", hints[0].SuggestedType, tc.want, hints[0].Reason)
 			}
+			if hints[0].CatalogID != tc.catalog {
+				t.Errorf("catalog_id = %q, want %q", hints[0].CatalogID, tc.catalog)
+			}
 		})
+	}
+}
+
+func TestDiagramHintJSONAddsCatalogIDWithoutRenamingFields(t *testing.T) {
+	raw, err := json.Marshal(DiagramHint{
+		Section: "Flow", SuggestedType: DiagramFlowchart, CatalogID: "flowchart", Reason: "branches",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	for _, field := range []string{`"section"`, `"suggested_type"`, `"reason"`, `"catalog_id"`} {
+		if !strings.Contains(got, field) {
+			t.Errorf("serialized DiagramHint lost %s: %s", field, got)
+		}
 	}
 }
 
@@ -127,7 +152,7 @@ func TestBuildGuidance_FoldsInHints(t *testing.T) {
 	in := Parse("## Request flow\n\nThe client sends a request; the API returns a response in order.\n")
 	hints := computeDiagramHints(in)
 	g := buildGuidance(in, SignalSummary{}, hints, nil, "")
-	if !strings.Contains(g, "ox plan viz") {
+	if !strings.Contains(g, "ox viz") {
 		t.Error("guidance should point at the visualization catalog")
 	}
 	if !strings.Contains(g, string(DiagramSequence)) {
@@ -171,7 +196,7 @@ func TestBuildGuidance_LeadsWithEvidence(t *testing.T) {
 // get a content-aware push on their canonical section — the gap diagram_hints
 // (Mermaid-only) left open.
 // Failure prevented: an agent writing a Risks / Files-changed / cost / metrics /
-// flags section gets no suggestion and must browse the whole `ox plan viz` menu.
+// flags section gets no suggestion and must browse the whole `ox viz` menu.
 func TestComputeVizHints_CommonPatterns(t *testing.T) {
 	cases := []struct{ name, md, wantID string }{
 		{"risks", "## Risks\n\nEach risk is ranked by severity with a mitigation.\n", "risk-matrix"},
@@ -236,7 +261,7 @@ func TestBuildGuidance_FoldsVizHints(t *testing.T) {
 	if !strings.Contains(g, "Data visualizations that fit") {
 		t.Errorf("guidance should fold in viz hints: %s", g)
 	}
-	if !strings.Contains(g, "ox plan viz render risk-matrix --data") {
+	if !strings.Contains(g, "ox viz render risk-matrix --data") {
 		t.Errorf("viz hint should carry its render command: %s", g)
 	}
 	if g2 := buildGuidance(in, SignalSummary{}, nil, nil, ""); strings.Contains(g2, "Data visualizations that fit") {

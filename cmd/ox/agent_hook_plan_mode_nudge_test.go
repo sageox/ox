@@ -174,7 +174,7 @@ func TestEmitPlanHint_FiresOnHTMLIntentOutsidePlanMode(t *testing.T) {
 	assert.Contains(t, got, "<system-reminder>")
 	assert.Contains(t, got, "[ox]")
 	assert.Contains(t, got, "ox plan render --open")
-	assert.Contains(t, got, "ox plan viz", "must point at the visualization catalog")
+	assert.Contains(t, got, "ox viz", "must point at the visualization catalog")
 	assert.NotContains(t, got, "Plan mode —", "outside plan mode uses the render lead, not the plan-mode lead")
 	assert.NotContains(t, got, "\n<", "hint must be a single system-reminder line")
 }

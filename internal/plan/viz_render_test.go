@@ -136,7 +136,7 @@ func TestRenderViz_UnknownPattern(t *testing.T) {
 
 // TestVizCatalog_ParamPatternsRenderable verifies every catalog entry that
 // advertises a `param:` shape is actually wired into RenderViz — the catalog and
-// the renderer cannot drift. Failure prevented: `ox plan viz` tells the agent a
+// the renderer cannot drift. Failure prevented: `ox viz` tells the AI coworker a
 // pattern is parameterized but `render` errors.
 func TestVizCatalog_ParamPatternsRenderable(t *testing.T) {
 	// minimal valid data per parameterized pattern
@@ -249,7 +249,7 @@ func TestRenderViz_PartitionMapEqualSizes(t *testing.T) {
 
 // TestVizRenderers_AllInCatalog is the reverse of TestVizCatalog_ParamPatternsRenderable:
 // every renderer wired into RenderViz must have a catalog entry advertising a
-// `param:` shape, so no renderer is unreachable from `ox plan viz`.
+// `param:` shape, so no renderer is unreachable from `ox viz`.
 // Failure prevented: a renderer ships with no catalog entry and agents can never
 // discover or invoke it.
 func TestVizRenderers_AllInCatalog(t *testing.T) {
@@ -261,7 +261,7 @@ func TestVizRenderers_AllInCatalog(t *testing.T) {
 	}
 	for id := range vizRenderers {
 		if !params[id] {
-			t.Errorf("renderer %q has no catalog entry with a param: shape (unreachable from `ox plan viz`)", id)
+			t.Errorf("renderer %q has no catalog entry with a param: shape (unreachable from `ox viz`)", id)
 		}
 	}
 }

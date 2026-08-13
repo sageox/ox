@@ -1,13 +1,13 @@
-<!-- ox plan visualization catalog. One pattern per "## <id>" block.
+<!-- ox visualization catalog. One pattern per "## <id>" block.
      Each block: a `use:` line (when to reach for it), a `why:` line (the
      cognitive payoff — what it lets the reader grasp faster), then one or more
      copy-paste snippets. Snippets use the scaffold's CSS variables / classes
      (assets/scaffold.css) so they render design-faithfully and theme with the
-     page. Surfaced progressively via `ox plan viz [id]` — the agent lists the
+     page. Surfaced progressively via `ox viz [id]` — the AI coworker lists the
      catalog cheaply, then pulls only the patterns it needs. Goal: aid human
      understanding and cut cognitive load (Tufte: maximize data-ink, minimize
      chrome). Keep snippets minimal and self-contained — no external JS.
-     Compose/extend freely: stack snippets in the plan markdown to frame a base
+     Compose/extend freely: stack snippets in the target artifact to frame a base
      widget — e.g. a heading above a `partition-map` and a `callout` below it. The
      renderers own the widget body; you own the surrounding layout, so the base
      components extend without any renderer change. -->
@@ -24,21 +24,27 @@
      Vary the form section to section. Good textbooks alternate modes of
      comprehension on purpose — a diagram for structure, a table for exact
      values, a pull-quote for the sentence that must not be skimmed, a worked
-     example for feel. A plan is teaching a decision, so pace it the same way.
+     example for feel. A technical artifact teaches a decision, so pace it the same way.
      Two consecutive sections in the same form is a smell; three is a bug. -->
 
 ## sequence-diagram
 use: an ordered call/response path that crosses components, services, or async boundaries — when "in what order, how many round-trips" is the question.
-why: shows ordering and latency a flowchart can't; ≤4-5 participants keeps it legible.
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant A as API
-  participant D as DB
-  C->>A: request
-  A->>D: query
-  D-->>A: rows
-  A-->>C: response
+why: shows ordering and latency a flowchart can't; use 2–5 participants, explicit return paths, and one copper focal exchange. Static editorial SVG is the default; Mermaid remains a quick fallback for throwaway work.
+```html
+<svg data-ox-viz="sequence-diagram" class="oxv-seq" viewBox="0 0 960 600" role="img" aria-labelledby="seq-title seq-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#e8ede7)">
+  <title id="seq-title">Request and response sequence</title>
+  <desc id="seq-desc">The client calls the API, which queries the database before returning a response.</desc>
+  <defs><marker id="seq-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 8 3 0 6Z" fill="var(--dim,#a8b3a5)"/></marker><marker id="seq-focus-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 8 3 0 6Z" fill="var(--copper,#e0a56a)"/></marker></defs>
+  <style>.oxv-seq text{font-family:Inter,system-ui,sans-serif;fill:currentColor}.oxv-seq .name{font-weight:600;font-size:16px}.oxv-seq .msg{font:12px "Spline Sans Mono",monospace;fill:var(--dim,#a8b3a5)}.oxv-seq .life{stroke:var(--hair,#252c24);stroke-dasharray:5 5}.oxv-seq .edge{stroke:var(--dim,#a8b3a5);stroke-width:2;fill:none;marker-end:url(#seq-arrow)}.oxv-seq .focus{stroke:var(--copper,#e0a56a);marker-end:url(#seq-focus-arrow)}.oxv-seq .node{fill:var(--bg,#0b0d0b);stroke:var(--hair,#252c24);stroke-width:2}</style>
+  <g data-ox-node><rect class="node" x="80" y="48" width="200" height="64" rx="6"/><text class="name" x="180" y="86" text-anchor="middle">Client</text></g>
+  <g data-ox-node data-ox-focus><rect x="380" y="48" width="200" height="64" rx="6" fill="var(--copper,#e0a56a)" fill-opacity=".12" stroke="var(--copper,#e0a56a)" stroke-width="2"/><text class="name" x="480" y="86" text-anchor="middle">API</text></g>
+  <g data-ox-node><rect class="node" x="680" y="48" width="200" height="64" rx="6"/><text class="name" x="780" y="86" text-anchor="middle">Database</text></g>
+  <line data-ox-connector class="life" x1="180" y1="112" x2="180" y2="540"/><line data-ox-connector class="life" x1="480" y1="112" x2="480" y2="540"/><line data-ox-connector class="life" x1="780" y1="112" x2="780" y2="540"/>
+  <path data-ox-connector class="edge focus" d="M180 190H480"/><text class="msg" x="330" y="178" text-anchor="middle">request</text>
+  <path data-ox-connector class="edge" d="M480 280H780"/><text class="msg" x="630" y="268" text-anchor="middle">query</text>
+  <path data-ox-connector class="edge" stroke-dasharray="6 4" d="M780 370H480"/><text class="msg" x="630" y="358" text-anchor="middle">rows</text>
+  <path data-ox-connector class="edge" stroke-dasharray="6 4" d="M480 460H180"/><text class="msg" x="330" y="448" text-anchor="middle">response</text>
+</svg>
 ```
 
 ## budget-sequence
@@ -82,14 +88,20 @@ flowchart LR
 
 ## state-machine
 use: a lifecycle, connection/session model, or retry/backoff — anything with modes and time-bounded transitions.
-why: states + labeled transitions compress a paragraph of "if in X then Y after Zs" into one picture.
-```mermaid
-stateDiagram-v2
-  [*] --> Open
-  Open --> InProgress: claim
-  InProgress --> Open: drop
-  InProgress --> Done: complete
-  Done --> [*]
+why: states plus labeled guards compress a paragraph of conditional behavior into one picture. Keep ≤7 states; terminal states and the transition under review are the only focal elements.
+```html
+<svg data-ox-viz="state-machine" class="oxv-state" viewBox="0 0 960 600" role="img" aria-labelledby="state-title state-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#e8ede7)">
+  <title id="state-title">Work item lifecycle</title><desc id="state-desc">An open item can be claimed, dropped back to open, or completed.</desc>
+  <defs><marker id="state-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 8 3 0 6Z" fill="var(--dim,#a8b3a5)"/></marker></defs>
+  <style>.oxv-state text{font-family:Inter,system-ui,sans-serif;fill:currentColor}.oxv-state .node{fill:var(--bg,#0b0d0b);stroke:var(--hair,#252c24);stroke-width:2}.oxv-state .name{font-size:16px;font-weight:600}.oxv-state .guard{font:12px "Spline Sans Mono",monospace;fill:var(--dim,#a8b3a5)}.oxv-state .edge{fill:none;stroke:var(--dim,#a8b3a5);stroke-width:2;marker-end:url(#state-arrow)}</style>
+  <circle cx="80" cy="300" r="12" fill="var(--ink,#e8ede7)"/>
+  <g data-ox-node><rect class="node" x="140" y="250" width="190" height="100" rx="8"/><text class="name" x="235" y="306" text-anchor="middle">Open</text></g>
+  <g data-ox-node data-ox-focus><rect x="410" y="250" width="190" height="100" rx="8" fill="var(--copper,#e0a56a)" fill-opacity=".12" stroke="var(--copper,#e0a56a)" stroke-width="2"/><text class="name" x="505" y="306" text-anchor="middle">In progress</text></g>
+  <g data-ox-node><rect x="680" y="250" width="190" height="100" rx="8" fill="var(--sage,#99c693)" fill-opacity=".12" stroke="var(--sage,#99c693)" stroke-width="2"/><text class="name" x="775" y="306" text-anchor="middle">Done</text></g>
+  <path data-ox-connector class="edge" d="M92 300H140"/><path data-ox-connector class="edge" d="M330 300H410"/><text class="guard" x="370" y="286" text-anchor="middle">claim</text>
+  <path data-ox-connector class="edge" d="M600 300H680"/><text class="guard" x="640" y="286" text-anchor="middle">complete</text>
+  <path data-ox-connector class="edge" d="M505 350V430Q505 450 485 450H255Q235 450 235 430V350"/><text class="guard" x="370" y="474" text-anchor="middle">drop / retry</text>
+</svg>
 ```
 
 ## swimlane-timeline
@@ -154,7 +166,7 @@ why: adjacency makes the delta obvious; the reader diffs with their eyes, not by
 ```html
 <div class="ba">
   <div class="ba-col"><h4>Before</h4><pre><code>render: skill-only (Claude)</code></pre></div>
-  <div class="ba-col"><h4>After</h4><pre><code>render: ox binary (any agent)</code></pre></div>
+  <div class="ba-col"><h4>After</h4><pre><code>render: ox binary (any AI coworker)</code></pre></div>
 </div>
 ```
 
@@ -252,7 +264,7 @@ use: the "files changed" section — show scope, change type (new/edit/delete), 
 why: a flat `| file | change |` table hides scope and blast radius; grouping by subsystem with color-coded change type lets the reviewer judge "are we touching auth AND db AND web — is that the right footprint?" in seconds.
 param: {"files":[{"path":"internal/plan/render.go","change":"new|edit|delete|read","scope":"sm|md|lg","note":"…"}]}
 ```html
-<!-- generate with: ox plan viz render file-impact-map --data files.json -->
+<!-- generate with: ox viz render file-impact-map --data files.json -->
 <ul class="ftree">
   <li class="grp">internal/plan
     <ul><li><span class="chg new">new</span> render.go <span class="sc lg">lg</span></li>
@@ -265,7 +277,7 @@ use: a Risks section — rank risks by severity with the mitigation, instead of 
 why: scattered "do NOT…" / "watch out…" prose buries the load-bearing unknown; a severity-sorted, color-coded matrix puts the blocker on top and pairs each risk with its mitigation so the reviewer knows what to watch.
 param: {"risks":[{"title":"…","severity":"blocker|high|medium|low","category":"data|perf|security|ux","mitigation":"…"}]}
 ```html
-<!-- generate with: ox plan viz render risk-matrix --data risks.json -->
+<!-- generate with: ox viz render risk-matrix --data risks.json -->
 <table class="riskm">
   <tr><th>Risk</th><th>Sev</th><th>Mitigation</th></tr>
   <tr class="sev-blocker"><td>CDN unreachable at view time</td><td>■ blocker</td><td>vendor mermaid locally</td></tr>
@@ -277,7 +289,7 @@ use: headline metrics or before→after numbers — token budget, latency, size,
 why: a row of big-number cards with a delta and an up/down trend makes the impact land instantly; numbers buried in prose ("~60KB, down from 120KB") don't.
 param: {"cards":[{"label":"render size","value":"44KB","delta":"-63%","trend":"down","intent":"good|bad|warn|neutral"}]}
 ```html
-<!-- generate with: ox plan viz render stat-cards --data stats.json -->
+<!-- generate with: ox viz render stat-cards --data stats.json -->
 <div class="statrow">
   <div class="stat good"><div class="sv">44KB</div><div class="sl">render size</div><div class="sd">▼ -63%</div></div>
 </div>
@@ -288,7 +300,7 @@ use: compare a handful of labeled magnitudes — cost per component, calls per m
 why: bars encode magnitude pre-attentively; a column of numbers does not. Use ONE color for the series — length is the channel; a rainbow fights the "which is biggest" read. Set a bar's `color` only to flag the outlier/over-budget one. Keep ≤8 bars.
 param: {"title":"cost / hr","unit":"$","bars":[{"label":"topic detector","value":0.036},{"label":"refresher","value":0.012,"color":"red"}]}
 ```html
-<!-- generate with: ox plan viz render bar-chart --data bars.json -->
+<!-- generate with: ox viz render bar-chart --data bars.json -->
 <div class="barc"><div class="bar-row"><span class="bl">topic detector</span><span class="bt"><span class="bf" style="width:90%;background:var(--sage)"></span></span><span class="bv">$0.036</span></div></div>
 ```
 
@@ -297,7 +309,7 @@ use: a memory / disk / flash layout with a FEW partitions (≤8) where the SHARE
 why: a 100%-wide stacked bar encodes share pre-attentively — the dominant slices read instantly; a paired table carries the exact offsets/sizes the bar can't. Linear and honest about size. One color per category, not a rainbow. Segments grow in (staggered) and reveal a hover tooltip; for MANY partitions, or when offset-order / per-row annotation matters more than share, use `partition-map`.
 param: {"title":"16 MB flash","total":16384,"unit":"KB","partitions":[{"label":"ota_0","size":6144,"offset":"0x20000","color":"sage","flag":"SIGNED"},{"label":"ota_1","size":6144,"offset":"0x620000","color":"sage"},{"label":"spiffs","size":2944,"offset":"0xD20000","color":"teal"},{"label":"model","size":1024,"offset":"0xC20000","color":"violet"},{"label":"system","size":128,"color":"slate"}]}
 ```html
-<!-- prefer the param renderer: ox plan viz render partition-bar --data parts.json
+<!-- prefer the param renderer: ox viz render partition-bar --data parts.json
      (--i staggers the grow-in; .pm-tip is the hover tooltip — both pure CSS) -->
 <figure class="pbar-fig"><figcaption>16 MB flash</figcaption><div class="pbar"><span class="pseg" style="--i:0;width:37.5%;background:var(--sage)"><span class="pseg-lbl">ota_0</span><span class="pm-tip"><b>ota_0</b><span class="pm-tip-k">6144 KB · 37.5%</span><span class="pm-tip-flag">SIGNED</span></span></span><span class="pseg" style="--i:1;width:18%;background:var(--teal)"><span class="pseg-lbl">spiffs</span><span class="pm-tip"><b>spiffs</b><span class="pm-tip-k">2944 KB · 18%</span></span></span></div></figure>
 ```
@@ -307,7 +319,7 @@ use: a full memory / disk / flash layout with MANY partitions, or when OFFSET OR
 why: rows in offset order mirror the address space; a LOG-scaled size rail keeps 4 KB partitions visible next to 6 MB ones (true linear would render the small ones <1px — dishonest by omission) while the big ones still read as dominant. The rail is labeled "log" so no false linear proportion is implied — use `partition-bar` for true share. Per-row offset + flags + a one-line note annotate without crowding; hover reveals a tooltip with the full note + share; `"proposed":true` dashes/mutes an uncommitted row. Set a row's `"group"` to interleave a section divider (e.g. committed rows, then a "PROPOSED SECURE ADDITIONS" block). Frame the whole figure by stacking a heading above and a `callout` below — the renderer owns the rows, you compose the chrome.
 param: {"title":"Rev B flash","unit":"KB","partitions":[{"label":"bootloader","size":32,"offset":"0x000000","color":"slate","flag":"SIGNED","note":"Secure Boot root"},{"label":"nvs","size":20,"offset":"0x009000","color":"slate","note":"WiFi creds, pairing"},{"label":"ota_0","size":6144,"offset":"0x020000","color":"sage","flag":"SIGNED","note":"firmware slot A · frozen at 0x20000"},{"label":"ota_1","size":6144,"offset":"0x620000","color":"sage","note":"rollback target"},{"label":"model","size":1024,"offset":"0xC20000","color":"teal","note":"wake-word model"},{"label":"spiffs","size":2944,"offset":"0xD20000","color":"teal"},{"label":"ds_key","size":4,"color":"violet","note":"encrypted device key","group":"PROPOSED SECURE ADDITIONS","proposed":true}]}
 ```html
-<!-- prefer the param renderer: ox plan viz render partition-map --data parts.json
+<!-- prefer the param renderer: ox viz render partition-map --data parts.json
      (--i staggers the row fade-in + rail fill; .pm-tip is the hover tooltip — pure CSS) -->
 <figure class="pmapv"><figcaption>Rev B flash <span class="pmapv-rk">size · log scale</span></figcaption><div class="pmapv-row" style="--i:0"><span class="pm-dot" style="background:var(--sage)"></span><span class="pmapv-off pm-mono">0x020000</span><span class="pmapv-nm"><b>ota_0</b><span class="pm-flag">SIGNED</span><small>firmware slot A</small></span><span class="pmapv-rail"><i style="width:100%;background:var(--sage)"></i></span><span class="pmapv-sz pm-mono">6144 KB</span><span class="pm-tip"><b>ota_0</b><span class="pm-tip-k">@ 0x20000</span><span class="pm-tip-k">6144 KB · 37.5%</span><span class="pm-tip-note">firmware slot A</span></span></div><div class="pmapv-group">PROPOSED SECURE ADDITIONS</div><div class="pmapv-row proposed" style="--i:1"><span class="pm-dot" style="background:var(--violet)"></span><span class="pmapv-off pm-mono">TBD</span><span class="pmapv-nm"><b>ds_key</b><small>encrypted device key</small></span><span class="pmapv-rail"><i style="width:10%;background:var(--violet)"></i></span><span class="pmapv-sz pm-mono">4 KB</span><span class="pm-tip"><b>ds_key</b><span class="pm-tip-flag prop">PROPOSED</span><span class="pm-tip-note">encrypted device key</span></span></div></figure>
 ```
@@ -337,7 +349,7 @@ use: a feature-flag rollout — env × stage with the percentage at each step.
 why: flag posture ("dev-on, test-100%, prod-0% until review") scattered in prose is error-prone; an env × stage grid shows the whole rollout arc and the gates in one view.
 param: {"envs":["dev","test","prod"],"stages":["merge","dogfood","ramp"],"cells":{"prod":{"merge":"0%","dogfood":"0%","ramp":"10→100%"}}}
 ```html
-<!-- generate with: ox plan viz render flag-rollout-matrix --data flags.json -->
+<!-- generate with: ox viz render flag-rollout-matrix --data flags.json -->
 <table class="heat"><tr><th>env</th><th>merge</th><th>ramp</th></tr><tr><td>prod</td><td class="h1">0%</td><td class="h3">10→100%</td></tr></table>
 ```
 
@@ -346,7 +358,7 @@ use: a per-action cost/budget that accumulates — token spend, $/hr by componen
 why: a stacked/segmented bar with a running total shows where the cost concentrates and which lever to pull, better than line-item arithmetic in prose.
 param: {"unit":"$/hr","items":[{"name":"topic detector","value":0.036},{"name":"refresher","value":0.001}]}
 ```html
-<!-- generate with: ox plan viz render cost-waterfall --data cost.json -->
+<!-- generate with: ox viz render cost-waterfall --data cost.json -->
 <div class="barc"><div class="bar-row"><span class="bl">topic detector</span><span class="bt"><span class="bf" style="width:97%;background:var(--copper)"></span></span><span class="bv">$0.036</span></div></div>
 ```
 
@@ -372,7 +384,7 @@ use: a part-of-whole proportion with a few slices — cost share, test pass/fail
 why: a ring reads share pre-attentively and frees the center for the headline total; a paired legend carries exact values + percentages so it survives grayscale. Keep ≤6 slices — beyond that a bar-chart reads cleaner.
 param: {"title":"test outcomes","unit":"","slices":[{"label":"pass","value":182,"color":"sage"},{"label":"fail","value":12,"color":"red"},{"label":"skip","value":24,"color":"slate"}]}
 ```html
-<!-- prefer the param renderer: ox plan viz render donut --data donut.json
+<!-- prefer the param renderer: ox viz render donut --data donut.json
      ox computes each slice's arc sweep (value/total·360) + the legend shares. -->
 <figure class="donut"><div class="donut-body"><svg class="donut-svg" viewBox="0 0 140 140"><circle cx="70" cy="70" r="54" fill="none" stroke="var(--sage)" stroke-width="26" stroke-dasharray="254 85" transform="rotate(-90 70 70)"/></svg><ul class="donut-leg"><li><span class="vsw" style="background:var(--sage)"></span><span class="donut-lab">pass</span><span class="donut-val">182 · 83.5%</span></li></ul></div></figure>
 ```
@@ -382,7 +394,7 @@ use: compare a few options across multiple criteria — score each alternative o
 why: overlaid polygons make "which option is strong where" a single shape comparison instead of a table scan; ≤3 series and a per-series line dash keep it legible without relying on color.
 param: {"title":"approach fit","axes":["speed","safety","cost","reuse"],"max":5,"series":[{"label":"native","values":[4,5,2,3],"color":"sage"},{"label":"hybrid","values":[3,4,4,5],"color":"copper"}]}
 ```html
-<!-- prefer the param renderer: ox plan viz render radar --data radar.json
+<!-- prefer the param renderer: ox viz render radar --data radar.json
      ox computes each axis spoke angle + the per-series polygon points. -->
 <figure class="radar"><div class="radar-body"><svg class="radar-svg" viewBox="0 0 240 232"><polygon class="radar-series" points="120,40 196,116 120,180 44,116" style="stroke:var(--sage);fill:var(--sage)"/></svg></div></figure>
 ```
@@ -392,7 +404,7 @@ use: a two-axis tradeoff scatter — impact vs effort, value vs risk — placing
 why: a 2×2 turns "which to do first" into spatial position; the top-corner items pop without reading a single number, and labels keep it readable in grayscale.
 param: {"title":"what to build first","x_label":"effort","y_label":"impact","points":[{"label":"donut","x":2,"y":8,"color":"sage"},{"label":"sankey","x":8,"y":6,"color":"copper"}]}
 ```html
-<!-- prefer the param renderer: ox plan viz render quadrant --data quad.json
+<!-- prefer the param renderer: ox viz render quadrant --data quad.json
      ox normalizes x/y to the plot box and splits the 2×2 at the midlines. -->
 <figure class="quad"><svg class="quad-svg" viewBox="0 0 300 224"><rect class="quad-box" x="50" y="14" width="238" height="182"/><line class="quad-mid" x1="169" y1="14" x2="169" y2="196"/><circle class="quad-pt" cx="98" cy="50" style="fill:var(--sage)"/></svg></figure>
 ```
@@ -402,7 +414,7 @@ use: a proportional hierarchy where area encodes size — code by package, spend
 why: a squarified treemap encodes magnitude as area (the dominant block IS the dominant cost) far denser than a bar list; a legend carries exact sizes so slivers stay readable.
 param: {"title":"repo by package","unit":"KB","items":[{"label":"internal/plan","size":120,"color":"sage"},{"label":"cmd/ox","size":80,"color":"copper"},{"label":"internal/lfs","size":40,"color":"teal"}]}
 ```html
-<!-- prefer the param renderer: ox plan viz render treemap --data tmap.json
+<!-- prefer the param renderer: ox viz render treemap --data tmap.json
      ox runs the squarified layout so each cell's AREA is proportional to size. -->
 <figure class="tmap"><svg class="tmap-svg" viewBox="0 0 320 200" preserveAspectRatio="none"><g class="tmap-cell"><rect x="0" y="0" width="200" height="200" style="fill:var(--sage)"/><text class="tmap-lab" x="6" y="15">internal/plan</text></g></svg></figure>
 ```
@@ -412,7 +424,7 @@ use: flow magnitude across stages — where tokens, cost, traffic, or users move
 why: ribbon width encodes the magnitude flowing along each path, so the dominant route and the leaks read instantly; a node-and-arrow flowchart shows topology but hides the amounts.
 param: {"title":"token budget","unit":"tok","nodes":[{"name":"prompt","color":"sage"},{"name":"tools","color":"copper"},{"name":"output","color":"teal"}],"links":[{"from":"prompt","to":"tools","value":1200},{"from":"prompt","to":"output","value":800},{"from":"tools","to":"output","value":1000}]}
 ```html
-<!-- prefer the param renderer: ox plan viz render sankey --data sankey.json
+<!-- prefer the param renderer: ox viz render sankey --data sankey.json
      ox layers the DAG, sizes nodes by max(in,out), and sets ribbon width ∝ value. -->
 <figure class="sankey"><svg class="sankey-svg" viewBox="0 0 360 240"><path class="sankey-link" d="M67 22 C140 22 140 22 213 22 L213 70 C140 70 140 70 67 70 Z" style="fill:var(--sage)"/><rect class="sankey-node" x="56" y="22" width="11" height="94" style="fill:var(--sage)"/></svg></figure>
 ```
@@ -422,7 +434,7 @@ use: symmetric coupling between entities — which modules, files, or people int
 why: arcs sized by total coupling and ribbons sized by pairwise strength reveal the tightly-bound cluster a dependency list buries; the circular layout shows mutual relationships a left-to-right graph distorts.
 param: {"title":"module coupling","labels":["api","db","auth","ui"],"matrix":[[0,8,3,2],[8,0,1,0],[3,1,0,4],[2,0,4,0]]}
 ```html
-<!-- prefer the param renderer: ox plan viz render chord --data chord.json
+<!-- prefer the param renderer: ox viz render chord --data chord.json
      ox sizes each node arc by its total coupling and each chord by pairwise strength. -->
 <figure class="chord"><div class="chord-body"><svg class="chord-svg" viewBox="0 0 260 260"><path class="chord-arc" d="M130 22 A108 108 0 0 1 226 86 L214 92 A96 96 0 0 0 130 34 Z" style="fill:var(--sage)"/></svg></div></figure>
 ```
@@ -432,7 +444,7 @@ use: a quantity over a continuous axis — a trend, growth curve, or latency/thr
 why: axes plus a dashed threshold line make the limit and the headroom explicit, and overlaid series (each with its own line dash) put two regimes side by side — "before: climbs to the wall and gets cut; after: sawtooths safely under it" — in one read; a sparkline shows a trend but has no axis, no threshold, and no comparison.
 param: {"title":"workflow history growth","x_label":"hours","y_label":"history events","x_max":8,"y_max":20000,"threshold":{"at":8000,"label":"8k cap","color":"amber"},"x_ticks":[{"at":0,"label":"0h"},{"at":2,"label":"2h"},{"at":4,"label":"4h"},{"at":6,"label":"6h"},{"at":8,"label":"8h"}],"y_ticks":[{"at":8000,"label":"8k"},{"at":20000,"label":"20k"}],"series":[{"label":"before — unbounded","color":"red","marker":true,"points":[{"x":0,"y":0},{"x":6,"y":20000,"note":"✂ 6h cap"}]},{"label":"after — reset every 8k","color":"sage","marker":true,"points":[{"x":0,"y":0},{"x":2.5,"y":8000},{"x":2.5,"y":1000,"note":"↺"},{"x":5,"y":8000},{"x":5,"y":1000,"note":"↺"},{"x":7.5,"y":8000}]}]}
 ```html
-<!-- prefer the param renderer: ox plan viz render line-chart --data line.json
+<!-- prefer the param renderer: ox viz render line-chart --data line.json
      ox scales both axes, projects each point to pixels, places the threshold, and draws the legend. -->
 <figure class="linec"><svg class="linec-svg" viewBox="0 0 300 224"><line class="linec-axis" x1="52" y1="14" x2="52" y2="190"/><line class="linec-axis" x1="52" y1="190" x2="288" y2="190"/><line class="linec-thresh" x1="52" y1="119.6" x2="288" y2="119.6" style="stroke:var(--amber)"/><polyline class="linec-series" points="52,190 288,14" style="stroke:var(--red)"/><polyline class="linec-series" points="52,190 126,120 126,181 199,120 199,181 273,120" style="stroke:var(--sage)" stroke-dasharray="5 3"/></svg><ul class="linec-leg"><li><span class="vsw" style="background:var(--red)"></span>before</li><li><span class="vsw" style="background:var(--sage)"></span>after</li></ul></figure>
 ```
@@ -509,4 +521,101 @@ why: progressive disclosure for risks: the ten-minute reader scans four rows; th
 ```
 ```js
 document.querySelectorAll('.riskreg tr.rrow').forEach(r=>{const t=()=>{const open=!r.classList.contains('open');r.classList.toggle('open',open);r.setAttribute('aria-expanded',String(open));const d=r.nextElementSibling;if(d)d.classList.toggle('show',open);};r.addEventListener('click',t);r.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();t();}});});
+```
+
+## architecture
+use: components, trust boundaries, and connections in a system — when the reader asks "what exists, where does it live, and what may talk to what?"
+why: zones and orthogonal connections expose ownership, coupling, and forbidden ingress faster than a box inventory. Keep the hero view to ≤7 nodes; split detail rather than shrinking type.
+```html
+<svg data-ox-viz="architecture" class="oxv-arch" viewBox="0 0 960 600" role="img" aria-labelledby="arch-title arch-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#e8ede7)">
+  <title id="arch-title">Service architecture</title><desc id="arch-desc">A client enters through the API boundary, which calls a worker and database while telemetry leaves through a separate path.</desc>
+  <defs><marker id="arch-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 8 3 0 6Z" fill="var(--dim,#a8b3a5)"/></marker></defs>
+  <style>.oxv-arch text{font-family:Inter,system-ui,sans-serif;fill:currentColor}.oxv-arch .zone{fill:var(--bg,#0b0d0b);stroke:var(--hair,#252c24);stroke-width:2;stroke-dasharray:6 5}.oxv-arch .node{fill:var(--panel,#111411);stroke:var(--hair,#252c24);stroke-width:2}.oxv-arch .name{font-size:16px;font-weight:600}.oxv-arch .tag{font:11px "Spline Sans Mono",monospace;fill:var(--dim,#a8b3a5)}.oxv-arch .edge{fill:none;stroke:var(--dim,#a8b3a5);stroke-width:2;marker-end:url(#arch-arrow)}</style>
+  <rect class="zone" x="300" y="70" width="590" height="430" rx="8"/><text class="tag" x="324" y="100">TRUSTED SERVICE BOUNDARY</text>
+  <g data-ox-node><rect class="node" x="70" y="220" width="170" height="84" rx="6"/><text class="name" x="155" y="270" text-anchor="middle">Client</text></g>
+  <g data-ox-node data-ox-focus><rect x="350" y="180" width="180" height="96" rx="6" fill="var(--copper,#e0a56a)" fill-opacity=".12" stroke="var(--copper,#e0a56a)" stroke-width="2"/><text class="name" x="440" y="236" text-anchor="middle">API boundary</text></g>
+  <g data-ox-node><rect class="node" x="650" y="150" width="180" height="84" rx="6"/><text class="name" x="740" y="200" text-anchor="middle">Worker</text></g>
+  <g data-ox-node><path d="M650 340H830V418Q740 452 650 418Z" fill="var(--sage,#99c693)" fill-opacity=".10" stroke="var(--sage,#99c693)" stroke-width="2"/><text class="name" x="740" y="392" text-anchor="middle">Database</text></g>
+  <g data-ox-node><rect class="node" x="350" y="380" width="180" height="70" rx="6"/><text class="name" x="440" y="422" text-anchor="middle">Telemetry</text></g>
+  <path data-ox-connector class="edge" d="M240 262H300Q320 262 320 242V228H350"/><path data-ox-connector class="edge" d="M530 228H650"/><path data-ox-connector class="edge" d="M740 234V340"/><path data-ox-connector class="edge" stroke="var(--teal,#14b8a6)" d="M650 192H590Q570 192 570 212V415H530"/>
+</svg>
+```
+
+## flowchart
+use: branching decision logic with gates, retries, or fallbacks — when the reader needs to know which path executes under each condition.
+why: a top-to-bottom decision spine makes the happy path and exceptional exits independently traceable. Use verbs for actions and questions for diamonds; cap at three branch points.
+```html
+<svg data-ox-viz="flowchart" class="oxv-flow" viewBox="0 0 960 600" role="img" aria-labelledby="flow-title flow-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#e8ede7)">
+  <title id="flow-title">Validation flow</title><desc id="flow-desc">Input is validated; valid input is applied while invalid input returns an actionable error.</desc>
+  <defs><marker id="flow-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 8 3 0 6Z" fill="var(--dim,#a8b3a5)"/></marker></defs>
+  <style>.oxv-flow text{font-family:Inter,system-ui,sans-serif;fill:currentColor}.oxv-flow .node{fill:var(--bg,#0b0d0b);stroke:var(--hair,#252c24);stroke-width:2}.oxv-flow .name{font-size:16px;font-weight:600}.oxv-flow .edge{fill:none;stroke:var(--dim,#a8b3a5);stroke-width:2;marker-end:url(#flow-arrow)}.oxv-flow .label{font:12px "Spline Sans Mono",monospace;fill:var(--dim,#a8b3a5)}</style>
+  <g data-ox-node><rect class="node" x="380" y="40" width="200" height="70" rx="6"/><text class="name" x="480" y="82" text-anchor="middle">Receive input</text></g>
+  <g data-ox-node data-ox-focus><polygon points="480,160 610,240 480,320 350,240" fill="var(--copper,#e0a56a)" fill-opacity=".12" stroke="var(--copper,#e0a56a)" stroke-width="2"/><text class="name" x="480" y="246" text-anchor="middle">Valid?</text></g>
+  <g data-ox-node><rect x="120" y="390" width="220" height="82" rx="6" fill="var(--bg,#0b0d0b)" stroke="var(--amber,#f59e0b)" stroke-width="2"/><text class="name" x="230" y="438" text-anchor="middle">Return useful error</text></g>
+  <g data-ox-node><rect x="620" y="390" width="220" height="82" rx="6" fill="var(--sage,#99c693)" fill-opacity=".12" stroke="var(--sage,#99c693)" stroke-width="2"/><text class="name" x="730" y="438" text-anchor="middle">Apply change</text></g>
+  <path data-ox-connector class="edge" d="M480 110V160"/><path data-ox-connector class="edge" d="M350 240H230V390"/><text class="label" x="285" y="226">no</text><path data-ox-connector class="edge" d="M610 240H730V390"/><text class="label" x="666" y="226">yes</text>
+</svg>
+```
+
+## data-flow
+use: data moving from sources through transformations to stores or consumers — when lineage, responsibility, and handoff shape matter more than control flow.
+why: a role-scoped pipeline shows what changes at each boundary and where state becomes durable. Use plain verbs on edges and reserve copper for the transformation under review.
+```html
+<svg data-ox-viz="data-flow" class="oxv-data" viewBox="0 0 960 600" role="img" aria-labelledby="data-title data-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#e8ede7)">
+  <title id="data-title">Context data flow</title><desc id="data-desc">Loose inputs are normalized, enriched, stored, and then consumed by AI coworkers.</desc>
+  <defs><marker id="data-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 8 3 0 6Z" fill="var(--dim,#a8b3a5)"/></marker></defs>
+  <style>.oxv-data text{font-family:Inter,system-ui,sans-serif;fill:currentColor}.oxv-data .node{fill:var(--bg,#0b0d0b);stroke:var(--hair,#252c24);stroke-width:2}.oxv-data .name{font-size:15px;font-weight:600}.oxv-data .sub{font:11px "Spline Sans Mono",monospace;fill:var(--dim,#a8b3a5)}.oxv-data .edge{fill:none;stroke:var(--dim,#a8b3a5);stroke-width:2;marker-end:url(#data-arrow)}</style>
+  <g data-ox-node><rect class="node" x="40" y="230" width="160" height="100" rx="6"/><text class="name" x="120" y="274" text-anchor="middle">Discussions</text><text class="sub" x="120" y="300" text-anchor="middle">loose input</text></g>
+  <g data-ox-node data-ox-focus><rect x="265" y="210" width="180" height="140" rx="6" fill="var(--copper,#e0a56a)" fill-opacity=".12" stroke="var(--copper,#e0a56a)" stroke-width="2"/><text class="name" x="355" y="270" text-anchor="middle">Normalize</text><text class="sub" x="355" y="296" text-anchor="middle">structure + identity</text></g>
+  <g data-ox-node><rect class="node" x="510" y="230" width="160" height="100" rx="6"/><text class="name" x="590" y="274" text-anchor="middle">Ledger</text><text class="sub" x="590" y="300" text-anchor="middle">durable state</text></g>
+  <g data-ox-node><rect class="node" x="735" y="230" width="180" height="100" rx="6"/><text class="name" x="825" y="274" text-anchor="middle">AI coworkers</text><text class="sub" x="825" y="300" text-anchor="middle">context consumer</text></g>
+  <path data-ox-connector class="edge" d="M200 280H265"/><path data-ox-connector class="edge" d="M445 280H510"/><path data-ox-connector class="edge" stroke="var(--teal,#14b8a6)" d="M670 280H735"/>
+</svg>
+```
+
+## layer-stack
+use: stacked abstractions, enforcement surfaces, or compensating defenses — when vertical order and responsibility explain the system.
+why: a layer stack makes boundaries and residual-risk propagation visible without drawing redundant connectors. Keep 3–6 layers and label what each owns, not its implementation inventory.
+```html
+<svg data-ox-viz="layer-stack" class="oxv-layer" viewBox="0 0 960 600" role="img" aria-labelledby="layer-title layer-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#e8ede7)">
+  <title id="layer-title">Responsibility layers</title><desc id="layer-desc">AI coworker guidance sits above deterministic CLI contracts, local data access, and durable team context.</desc>
+  <style>.oxv-layer text{font-family:Inter,system-ui,sans-serif;fill:currentColor}.oxv-layer .band{fill:var(--bg,#0b0d0b);stroke:var(--hair,#252c24);stroke-width:2}.oxv-layer .name{font-size:17px;font-weight:600}.oxv-layer .sub{font:12px "Spline Sans Mono",monospace;fill:var(--dim,#a8b3a5)}</style>
+  <g data-ox-node><rect class="band" x="120" y="70" width="720" height="90" rx="6"/><text class="name" x="160" y="112">AI coworker judgment</text><text class="sub" x="160" y="138">selects the visual · writes the explanation</text></g>
+  <g data-ox-node data-ox-focus><rect x="100" y="180" width="760" height="100" rx="6" fill="var(--copper,#e0a56a)" fill-opacity=".12" stroke="var(--copper,#e0a56a)" stroke-width="2"/><text class="name" x="140" y="226">ox viz contract</text><text class="sub" x="140" y="252">catalog · deterministic rendering · lint</text></g>
+  <g data-ox-node><rect class="band" x="80" y="300" width="800" height="90" rx="6"/><text class="name" x="120" y="342">Local context and code</text><text class="sub" x="120" y="368">zero-network retrieval · repository truth</text></g>
+  <g data-ox-node><rect class="band" x="60" y="410" width="840" height="100" rx="6"/><text class="name" x="100" y="456">Ledger and Team Context</text><text class="sub" x="100" y="482">durable memory · attribution · shared decisions</text></g>
+</svg>
+```
+
+## timeline
+use: events positioned on a real or relative time axis — when chronology, inflection points, and before/after periods are the story.
+why: one strong axis preserves temporal truth while annotations explain only the events that changed direction. Use 3–7 events; use a swimlane when actors or parallel workstreams matter.
+```html
+<svg data-ox-viz="timeline" class="oxv-time" viewBox="0 0 960 600" role="img" aria-labelledby="time-title time-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#e8ede7)">
+  <title id="time-title">Delivery timeline</title><desc id="time-desc">Discovery leads to a prototype, review, and release, with review as the focal inflection point.</desc>
+  <style>.oxv-time text{font-family:Inter,system-ui,sans-serif;fill:currentColor}.oxv-time .axis{stroke:var(--hair,#252c24);stroke-width:4}.oxv-time .stem{stroke:var(--dim,#a8b3a5);stroke-width:2}.oxv-time .name{font-size:15px;font-weight:600}.oxv-time .date{font:11px "Spline Sans Mono",monospace;fill:var(--dim,#a8b3a5)}</style>
+  <line data-ox-connector class="axis" x1="100" y1="300" x2="860" y2="300"/>
+  <g data-ox-node><line data-ox-connector class="stem" x1="160" y1="300" x2="160" y2="210"/><circle cx="160" cy="300" r="9" fill="var(--sage,#99c693)"/><text class="name" x="160" y="178" text-anchor="middle">Discover</text><text class="date" x="160" y="198" text-anchor="middle">day 0</text></g>
+  <g data-ox-node><line data-ox-connector class="stem" x1="380" y1="300" x2="380" y2="390"/><circle cx="380" cy="300" r="9" fill="var(--sage,#99c693)"/><text class="name" x="380" y="430" text-anchor="middle">Prototype</text><text class="date" x="380" y="450" text-anchor="middle">day 2</text></g>
+  <g data-ox-node data-ox-focus><line data-ox-connector x1="600" y1="300" x2="600" y2="210" stroke="var(--copper,#e0a56a)" stroke-width="2"/><circle cx="600" cy="300" r="12" fill="var(--copper,#e0a56a)"/><text class="name" x="600" y="178" text-anchor="middle">Human review</text><text class="date" x="600" y="198" text-anchor="middle">decision gate</text></g>
+  <g data-ox-node><line data-ox-connector class="stem" x1="820" y1="300" x2="820" y2="390"/><circle cx="820" cy="300" r="9" fill="var(--sage,#99c693)"/><text class="name" x="820" y="430" text-anchor="middle">Release</text><text class="date" x="820" y="450" text-anchor="middle">after approval</text></g>
+</svg>
+```
+
+## loop
+use: a reinforcing cycle or flywheel where the final step feeds the first and a shared hub accumulates state.
+why: stations around a hub distinguish forward motion from the durable memory that makes each turn better. Use 3–6 stations, one directional loop, and dashed write-backs into the hub.
+```html
+<svg data-ox-viz="loop" class="oxv-loop" viewBox="0 0 960 600" role="img" aria-labelledby="loop-title loop-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#e8ede7)">
+  <title id="loop-title">Team context flywheel</title><desc id="loop-desc">Work creates sessions, sessions enrich team context, and that context improves the next piece of work.</desc>
+  <defs><marker id="loop-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 8 3 0 6Z" fill="var(--dim,#a8b3a5)"/></marker></defs>
+  <style>.oxv-loop text{font-family:Inter,system-ui,sans-serif;fill:currentColor}.oxv-loop .node{fill:var(--bg,#0b0d0b);stroke:var(--hair,#252c24);stroke-width:2}.oxv-loop .name{font-size:15px;font-weight:600}.oxv-loop .sub{font:11px "Spline Sans Mono",monospace;fill:var(--dim,#a8b3a5)}.oxv-loop .edge{fill:none;stroke:var(--dim,#a8b3a5);stroke-width:2;marker-end:url(#loop-arrow)}.oxv-loop .write{fill:none;stroke:var(--teal,#14b8a6);stroke-width:2;stroke-dasharray:6 5}</style>
+  <g data-ox-node><rect class="node" x="390" y="50" width="180" height="74" rx="6"/><text class="name" x="480" y="94" text-anchor="middle">Build</text></g>
+  <g data-ox-node><rect class="node" x="690" y="245" width="180" height="74" rx="6"/><text class="name" x="780" y="289" text-anchor="middle">Record</text></g>
+  <g data-ox-node><rect class="node" x="390" y="460" width="180" height="74" rx="6"/><text class="name" x="480" y="504" text-anchor="middle">Enrich</text></g>
+  <g data-ox-node><rect class="node" x="90" y="245" width="180" height="74" rx="6"/><text class="name" x="180" y="289" text-anchor="middle">Plan next</text></g>
+  <g data-ox-node data-ox-focus><circle cx="480" cy="290" r="92" fill="var(--copper,#e0a56a)" fill-opacity=".12" stroke="var(--copper,#e0a56a)" stroke-width="2"/><text class="name" x="480" y="282" text-anchor="middle">Team Context</text><text class="sub" x="480" y="308" text-anchor="middle">shared memory</text></g>
+  <path data-ox-connector class="edge" d="M570 87C690 90 780 140 780 245"/><path data-ox-connector class="edge" d="M780 319C780 430 660 497 570 497"/><path data-ox-connector class="edge" d="M390 497C270 497 180 420 180 319"/><path data-ox-connector class="edge" d="M180 245C180 140 300 87 390 87"/>
+  <path data-ox-connector class="write" d="M690 282H572"/><path data-ox-connector class="write" d="M480 460V382"/>
+</svg>
 ```

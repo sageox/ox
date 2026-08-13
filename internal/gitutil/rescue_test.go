@@ -15,7 +15,7 @@ func gitIn(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	full := append([]string{"-C", dir}, args...)
 	cmd := exec.Command("git", full...)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(os.Environ(), // safe: git needs PATH; identity and writes are isolated to dir.
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid",
 	)
