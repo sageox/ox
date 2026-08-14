@@ -3,6 +3,7 @@ package attest
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -76,6 +77,12 @@ func checkFreshness(repoRoot string, a *Attestation, currentSpecFingerprint stri
 		// it. Saying so is the correct answer — guessing "fresh" is not.
 		return Freshness{Unknown: true, Reason: "subject scheme " + a.Subject.Scheme + " is not resolvable by git"}
 	}
+	if a.SpecFingerprint == "" {
+		return Freshness{Unknown: true, Reason: "record has no spec fingerprint — specification drift cannot be ruled out"}
+	}
+	if currentSpecFingerprint == "" {
+		return Freshness{Unknown: true, Reason: "current spec fingerprint is unavailable — specification drift cannot be ruled out"}
+	}
 
 	// Half 1: is the proof's tree an ancestor of where we are now?
 	if _, err := git(repoRoot, "merge-base", "--is-ancestor", a.Subject.Value, "HEAD"); err != nil {
@@ -90,15 +97,16 @@ func checkFreshness(repoRoot string, a *Attestation, currentSpecFingerprint stri
 	}
 
 	// Half 2a: did the specification itself move?
-	if a.SpecFingerprint != "" && currentSpecFingerprint != "" {
-		f.SpecStale = a.SpecFingerprint != currentSpecFingerprint
-	}
+	f.SpecStale = a.SpecFingerprint != currentSpecFingerprint
 
 	// Half 2b: did the product move underneath it?
 	//
 	// `git diff --name-only <subject>` with no second ref compares against the
 	// WORKING TREE, so an uncommitted edit counts. That is the point.
-	changed, err := git(repoRoot, "diff", "--name-only", a.Subject.Value)
+	// Disable rename detection so both the old and new path are emitted. A
+	// record observes the old path; accepting only a rename destination would
+	// let that observed surface disappear without registering as drift.
+	changed, err := git(repoRoot, "diff", "--name-only", "--no-renames", a.Subject.Value)
 	if err != nil {
 		return Freshness{
 			Reachable: f.Reachable, SpecStale: f.SpecStale,
@@ -108,11 +116,26 @@ func checkFreshness(repoRoot string, a *Attestation, currentSpecFingerprint stri
 	changedSet := map[string]struct{}{}
 	for _, p := range strings.Split(changed, "\n") {
 		if p = strings.TrimSpace(p); p != "" {
-			changedSet[p] = struct{}{}
+			changedSet[normalizeRepoPath(p)] = struct{}{}
+		}
+	}
+	// `git diff` intentionally omits untracked files. They still matter when a
+	// dirty-tree record names one as an observed surface, so fold them into the
+	// same changed set rather than silently declaring the proof current.
+	untracked, err := git(repoRoot, "ls-files", "--others", "--exclude-standard")
+	if err != nil {
+		return Freshness{
+			Reachable: f.Reachable, SpecStale: f.SpecStale,
+			Unknown: true, Reason: "could not inspect untracked files",
+		}
+	}
+	for _, p := range strings.Split(untracked, "\n") {
+		if p = strings.TrimSpace(p); p != "" {
+			changedSet[normalizeRepoPath(p)] = struct{}{}
 		}
 	}
 	for _, s := range a.ObservedSurface.Surfaces {
-		if _, hit := changedSet[s.SurfaceID]; hit {
+		if _, hit := changedSet[normalizeRepoPath(s.SurfaceID)]; hit {
 			f.ProductDrift = append(f.ProductDrift, s.SurfaceID)
 		}
 	}
@@ -129,6 +152,11 @@ func checkFreshness(repoRoot string, a *Attestation, currentSpecFingerprint stri
 
 	f.Current = f.Reachable && !f.SpecStale && len(f.ProductDrift) == 0
 	return f
+}
+
+func normalizeRepoPath(path string) string {
+	path = filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
+	return strings.TrimPrefix(path, "./")
 }
 
 // Summary is a one-line human verdict.

@@ -42,6 +42,9 @@ const (
 	// behind it. The stamp names a run id that resolves to nothing anyone else
 	// can open.
 	VerdictStamped Verdict = "stamped"
+	// VerdictStale — a clean proof record exists, but it cannot be trusted to
+	// describe the current specification and working tree.
+	VerdictStale Verdict = "stale"
 	// VerdictAttested — a committed record carrying a clean red-first proof.
 	VerdictAttested Verdict = "attested"
 )
@@ -52,6 +55,7 @@ var VerdictOrder = []Verdict{
 	VerdictSkipped,
 	VerdictUnproven,
 	VerdictStamped,
+	VerdictStale,
 	VerdictAttested,
 }
 
@@ -67,6 +71,8 @@ func (v Verdict) Meaning() string {
 		return "dispatches, never stamped green"
 	case VerdictStamped:
 		return "stamped green, but no record backs the claim"
+	case VerdictStale:
+		return "a clean proof exists, but is stale or its freshness is unknown"
 	case VerdictAttested:
 		return "a committed record with a red-first proof"
 	default:
@@ -95,6 +101,26 @@ type Assessment struct {
 	NoPlan bool `json:"no_plan"`
 	// Record is the attestation backing this capability, when one exists.
 	Record *Attestation `json:"record,omitempty"`
+	// Freshness records whether that proof still describes the current working
+	// tree. It is attached by callers with repository context via WithFreshness
+	// or Report.ApplyFreshness.
+	Freshness *Freshness `json:"freshness,omitempty"`
+}
+
+// WithFreshness attaches a working-tree freshness verdict to an assessment.
+// A clean record is attested only while it is current; stale and unknown
+// records occupy their own rung rather than masquerading as either a current
+// proof or a claim with no record.
+func (a Assessment) WithFreshness(f Freshness) Assessment {
+	a.Freshness = &f
+	if a.Verdict == VerdictAttested || a.Verdict == VerdictStale {
+		if f.Current {
+			a.Verdict = VerdictAttested
+		} else {
+			a.Verdict = VerdictStale
+		}
+	}
+	return a
 }
 
 // Assess computes the verdict for one capability against the compiled plans and
@@ -117,7 +143,7 @@ func Assess(cap Capability, plans *Plans, records *Records) Assessment {
 
 	for i := range cap.Scenarios {
 		s := &cap.Scenarios[i]
-		if hasPlan && plan.Dispatches(s.Name) {
+		if hasPlan && plan.DispatchesScenario(cap.Rule, *s) {
 			a.Dispatching++
 		}
 		if s.Validated {
@@ -185,15 +211,15 @@ type ScenarioTotals struct {
 // BuildReport assesses every capability in a corpus.
 func BuildReport(corpus *Corpus, plans *Plans, records *Records) *Report {
 	r := &Report{
-		Root:         corpus.Root,
-		Files:        corpus.Files,
-		Plans:        plans.Count,
-		Records:      records.Count,
+		Root:           corpus.Root,
+		Files:          corpus.Files,
+		Plans:          plans.Count,
+		Records:        records.Count,
 		InvalidRecords: records.Invalid,
-		Capabilities: len(corpus.Capabilities),
-		Domains:      corpus.Domains(),
-		Counts:       map[Verdict]int{},
-		ByDomain:     map[string][]Assessment{},
+		Capabilities:   len(corpus.Capabilities),
+		Domains:        corpus.Domains(),
+		Counts:         map[Verdict]int{},
+		ByDomain:       map[string][]Assessment{},
 	}
 	for _, v := range VerdictOrder {
 		r.Counts[v] = 0
@@ -209,6 +235,30 @@ func BuildReport(corpus *Corpus, plans *Plans, records *Records) *Report {
 		r.ByDomain[cap.Domain] = append(r.ByDomain[cap.Domain], a)
 	}
 	return r
+}
+
+// ApplyFreshness attaches current working-tree freshness to every assessment
+// with a record and rebuilds the report's derived verdict indexes. The caller
+// supplies the checker because only the CLI knows which repository/worktree is
+// being inspected.
+func (r *Report) ApplyFreshness(check func(Capability, *Attestation) Freshness) {
+	if r == nil || check == nil {
+		return
+	}
+	r.Counts = map[Verdict]int{}
+	for _, verdict := range VerdictOrder {
+		r.Counts[verdict] = 0
+	}
+	r.ByDomain = map[string][]Assessment{}
+	for i := range r.Assessments {
+		a := r.Assessments[i]
+		if a.Record != nil {
+			a = a.WithFreshness(check(a.Capability, a.Record))
+		}
+		r.Assessments[i] = a
+		r.Counts[a.Verdict]++
+		r.ByDomain[a.Capability.Domain] = append(r.ByDomain[a.Capability.Domain], a)
+	}
 }
 
 // Weakest returns up to n assessments ordered worst-first — the answer to

@@ -25,13 +25,14 @@ import (
 // Flags is the fully resolved set of feature flags for the current process.
 // All fields have safe defaults via [Defaults].
 type Flags struct {
-	// Feature gates — default true for authenticated users.
-	// A server-side kill switch or env override can set these false.
+	// Feature gates. Mature capabilities default on; experimental capabilities
+	// default off until a server rollout or environment override enables them.
 	CodeDBEnabled  bool
 	WhisperEnabled bool
 	DistillEnabled bool
 	AutoDistill    bool
 	TUIEnabled     bool
+	AttestEnabled  bool
 
 	// Kill switches — default false (not activated).
 	// Any source setting these true disables the capability.
@@ -53,6 +54,7 @@ type Patch struct {
 	DistillEnabled *bool
 	AutoDistill    *bool
 	TUIEnabled     *bool
+	AttestEnabled  *bool
 
 	DisableFileDeleteTools *bool
 	DisableShellExecTools  *bool
@@ -89,7 +91,7 @@ type Provider interface {
 }
 
 // Defaults returns the baseline Flags used when no provider has an opinion.
-// Feature gates are on; kill switches are off; string fields are empty.
+// Experimental gates and kill switches are off; string fields are empty.
 func Defaults() Flags {
 	return Flags{
 		CodeDBEnabled:  true,
@@ -97,6 +99,7 @@ func Defaults() Flags {
 		DistillEnabled: true,
 		AutoDistill:    false, // off until remote settings explicitly enables it
 		TUIEnabled:     false, // off until remote settings explicitly enables it
+		AttestEnabled:  false, // experimental; hidden and unregistered until enabled
 	}
 }
 

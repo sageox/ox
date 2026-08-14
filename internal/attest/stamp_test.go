@@ -157,7 +157,7 @@ func TestScanCorpus_ValidatedInProseIsNotAClaim(t *testing.T) {
 		"sharing/links.feature": `Feature: Links
 
   # Deliberately: nothing here is tagged @validated until it runs on Tilt.
-  Rule: Share links honour an expiry window
+  Rule: Share links honor an expiry window
     # This scenario is not yet @validated — see the note above.
     Scenario: It expires
       Given a link

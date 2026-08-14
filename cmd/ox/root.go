@@ -219,6 +219,8 @@ func init() {
 
 // Execute runs the root command
 func Execute() error {
+	initFeatureFlags(rootCmd)
+	syncFeatureGatedCommands(rootCmd)
 	return rootCmd.Execute()
 }
 
@@ -516,6 +518,30 @@ func initFeatureFlags(cmd *cobra.Command) {
 	}
 
 	flags.Init(ctx, daemonProvider, flags.EnvProvider{})
+}
+
+// syncFeatureGatedCommands registers experimental commands only after the
+// layered feature flags have been resolved. Cobra resolves commands and renders
+// help before PersistentPreRunE, so a RunE-only guard would still advertise the
+// command and a Hidden-only guard would still allow direct execution.
+func syncFeatureGatedCommands(root *cobra.Command) {
+	setCommandRegistered(root, attestCmd, flags.Get().AttestEnabled)
+}
+
+func setCommandRegistered(root, command *cobra.Command, enabled bool) {
+	registered := false
+	for _, child := range root.Commands() {
+		if child == command {
+			registered = true
+			break
+		}
+	}
+	if enabled && !registered {
+		root.AddCommand(command)
+	}
+	if !enabled && registered {
+		root.RemoveCommand(command)
+	}
 }
 
 // printCommandEntry renders a command with contextual highlighting based on user state

@@ -45,6 +45,9 @@ catalog, and it keeps the layout portable to any object store.`,
 			return err
 		}
 		report := attest.BuildReport(ctx.Corpus, ctx.Plans, ctx.Records)
+		report.ApplyFreshness(func(cap attest.Capability, record *attest.Attestation) attest.Freshness {
+			return attest.CheckFreshness(ctx.RepoRoot, record, currentSpecFingerprint(ctx, cap))
+		})
 		runs, err := attest.ReferencedRunResults(ctx.RepoRoot, ctx.Records)
 		if err != nil {
 			return err
@@ -54,6 +57,9 @@ catalog, and it keeps the layout portable to any object store.`,
 		if repoKey == "" {
 			repoKey = defaultRepoKey(ctx.RepoRoot)
 		}
+		if err := validateRepoKey(repoKey); err != nil {
+			return err
+		}
 
 		res, err := attest.WriteBundle(dest, repoKey, report, ctx.Records, runs, time.Now())
 		if err != nil {
@@ -61,7 +67,7 @@ catalog, and it keeps the layout portable to any object store.`,
 		}
 
 		jsonOut, agentID := wantJSON(cmd)
-		return emit(jsonOut, agentID, res, renderPublish(res, report, repoKey, dest), "attest publish")
+		return emit(cmd, jsonOut, agentID, res, renderPublish(res, report, repoKey, dest), "attest publish")
 	},
 }
 

@@ -59,7 +59,7 @@ func TestScanCorpus_MultipleRulesBecomeSeparateCapabilities(t *testing.T) {
     Scenario: A revoked link 410s
       Given a revoked link
 
-  Rule: Share links honour a max-uses cap
+  Rule: Share links honor a max-uses cap
     Scenario: The cap is enforced
       Given a link with a cap
     Scenario: The cap is reported
@@ -74,7 +74,7 @@ func TestScanCorpus_MultipleRulesBecomeSeparateCapabilities(t *testing.T) {
 	if got := len(revoked.Scenarios); got != 1 {
 		t.Errorf("first Rule scenarios = %d, want 1", got)
 	}
-	cap2 := findCap(t, c, "sharing/share-links#share-links-honour-a-max-uses-cap")
+	cap2 := findCap(t, c, "sharing/share-links#share-links-honor-a-max-uses-cap")
 	if got := len(cap2.Scenarios); got != 2 {
 		t.Errorf("second Rule scenarios = %d, want 2", got)
 	}
@@ -137,6 +137,54 @@ func TestScanCorpus_ExamplesTableIsNotAScenario(t *testing.T) {
 	}
 	if cap.Scenarios[0].Name != "A member views <surface>" {
 		t.Errorf("scenario name = %q", cap.Scenarios[0].Name)
+	}
+}
+
+func TestScanCorpus_ExamplesTagsDoNotLeakIntoNextScenario(t *testing.T) {
+	c := scan(t, map[string]string{
+		"repository/browse.feature": `Feature: Browse
+
+  Rule: A member can browse
+    Scenario Outline: A member views <surface>
+      Given a member
+      @validated
+      Examples: common surfaces
+        | surface |
+        | overview |
+
+    Scenario: A member views settings
+      Given a member
+`,
+	})
+
+	cap := findCap(t, c, "repository/browse#a-member-can-browse")
+	if got := len(cap.Scenarios); got != 2 {
+		t.Fatalf("scenarios = %d, want 2", got)
+	}
+	if cap.Scenarios[1].HasTag(TagValidated) {
+		t.Fatalf("Examples tag leaked into the following scenario: %v", cap.Scenarios[1].Tags)
+	}
+}
+
+func TestScanCorpus_ScenarioIndexIsFeatureWideAcrossRules(t *testing.T) {
+	c := scan(t, map[string]string{
+		"devices/pairing.feature": `Feature: Pairing
+
+  Rule: Phones pair
+    Scenario: A device pairs
+      Given a phone
+
+  Rule: Tablets pair
+    Scenario: A device pairs
+      Given a tablet
+`,
+	})
+
+	if got := c.Capabilities[0].Scenarios[0].Index; got != 0 {
+		t.Errorf("first scenario index = %d, want 0", got)
+	}
+	if got := c.Capabilities[1].Scenarios[0].Index; got != 1 {
+		t.Errorf("second scenario index = %d, want 1", got)
 	}
 }
 

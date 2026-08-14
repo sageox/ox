@@ -4,11 +4,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
+	"unicode"
+
+	"github.com/google/uuid"
 )
 
 // LayoutVersion is in the KEY PATH, not a field.
@@ -82,7 +87,8 @@ type PublishResult struct {
 //
 //		attest/v1/status/<repo-key>/<YYYY>/<MM>/<DD>/<stamp>/report.json
 //		attest/v1/status/<repo-key>/<YYYY>/<MM>/<DD>/<stamp>/manifest.json
-//		attest/v1/attestations/<repo-key>/<capability-slug>.v1.json
+//		attest/v1/status/<repo-key>/<YYYY>/<MM>/<DD>/<stamp>/attestations/<capability>.v1.json
+//		attest/v1/status/<repo-key>/<YYYY>/<MM>/<DD>/<stamp>/runs/<run>.json
 //		attest/v1/index/<repo-key>/<stamp>.json
 //
 //	 1. The index is ONE IMMUTABLE OBJECT PER PUBLISH, not an appended JSONL file.
@@ -95,11 +101,19 @@ type PublishResult struct {
 //	    boundary is immutable once written and a local-time publisher would
 //	    silently scatter a day across two prefixes.
 func WriteBundle(dest, repoKey string, report *Report, records *Records, runs []RunResult, now time.Time) (*PublishResult, error) {
+	if report == nil {
+		return nil, errors.New("publish attest bundle: report is nil")
+	}
+	if records == nil {
+		return nil, errors.New("publish attest bundle: records are nil")
+	}
+	if err := validateRepoKey(repoKey); err != nil {
+		return nil, fmt.Errorf("publish attest bundle: invalid repo key: %w", err)
+	}
 	utc := now.UTC()
-	// A second-resolution key could overwrite an immutable publication when an
-	// operator corrects and republishes immediately. Nanoseconds keep distinct
-	// local publishes distinct without making the portable layout AWS-specific.
-	stamp := utc.Format("20060102T150405.000000000Z")
+	// The timestamp keeps publishes naturally sortable. The UUID keeps two
+	// publishers using the same clock instant from sharing any mutable path.
+	stamp := utc.Format("20060102T150405.000000000Z") + "-" + uuid.Must(uuid.NewV7()).String()
 	base := filepath.Join(dest, "attest", LayoutVersion)
 	runDir := filepath.Join(base, "status", repoKey,
 		utc.Format("2006"), utc.Format("01"), utc.Format("02"), stamp)
@@ -117,19 +131,18 @@ func WriteBundle(dest, repoKey string, report *Report, records *Records, runs []
 	}
 	result := &PublishResult{Root: base}
 
-	bundle := Bundle{PublishedAt: manifest.PublishedAt, RepoKey: repoKey, Report: report}
+	bundle := Bundle{PublishedAt: manifest.PublishedAt, RepoKey: repoKey, Report: publishedReport(report)}
 	mf, err := writeJSON(filepath.Join(runDir, "report.json"), bundle, base, "report")
 	if err != nil {
 		return nil, err
 	}
 	manifest.Files = append(manifest.Files, mf)
 
-	// Attestations are published under their own prefix rather than inside the
-	// dated directory: a record is current-state, not a point-in-time snapshot,
-	// and burying it in a timestamp would make "what is proven now?" require a
-	// listing to answer.
-	attDir := filepath.Join(base, "attestations", repoKey)
-	if records.Count > 0 {
+	// Records and run summaries belong to this immutable snapshot. Sharing these
+	// objects across publishes would let a later publish overwrite bytes named
+	// by an older manifest, retroactively breaking that manifest's integrity.
+	attDir := filepath.Join(runDir, "attestations")
+	if len(records.byCapability) > 0 {
 		if err := os.MkdirAll(attDir, 0o755); err != nil {
 			return nil, fmt.Errorf("create attestations dir: %w", err)
 		}
@@ -140,7 +153,7 @@ func WriteBundle(dest, repoKey string, report *Report, records *Records, runs []
 	}
 	sort.Strings(ids) // deterministic manifest ordering
 	for _, id := range ids {
-		name := fmt.Sprintf("%s.v%d.json", slugify(id), AttestationVersion)
+		name := recordFilename(id)
 		f, werr := writeJSON(filepath.Join(attDir, name), records.byCapability[id], base, "attestation")
 		if werr != nil {
 			return nil, werr
@@ -152,12 +165,13 @@ func WriteBundle(dest, repoKey string, report *Report, records *Records, runs []
 	// runner reports can contain screenshots and diagnostics, neither of which
 	// belongs in a broadly readable team artifact by default.
 	if len(runs) > 0 {
-		runsDir := filepath.Join(base, "runs", repoKey)
+		runsDir := filepath.Join(runDir, "runs")
 		if err := os.MkdirAll(runsDir, 0o755); err != nil {
 			return nil, fmt.Errorf("create runs dir: %w", err)
 		}
 		for _, run := range runs {
-			f, werr := writeJSON(filepath.Join(runsDir, slugify(run.RunID)+".json"), run, base, "run-summary")
+			name := "run-" + encodedPathSegment(run.RunID) + ".json"
+			f, werr := writeJSON(filepath.Join(runsDir, name), run, base, "run-summary")
 			if werr != nil {
 				return nil, werr
 			}
@@ -202,6 +216,74 @@ func WriteBundle(dest, repoKey string, report *Report, records *Records, runs []
 	}
 	result.IndexPath = indexPath
 	return result, nil
+}
+
+func validateRepoKey(repoKey string) error {
+	if repoKey == "" {
+		return errors.New("must not be empty")
+	}
+	if strings.TrimSpace(repoKey) != repoKey {
+		return errors.New("must not have leading or trailing whitespace")
+	}
+	if repoKey == "." || repoKey == ".." || filepath.IsAbs(repoKey) {
+		return errors.New("must be a relative path segment")
+	}
+	if strings.ContainsAny(repoKey, `/\\<>:"|?*`) {
+		return errors.New("must not contain path separators or filesystem-reserved characters")
+	}
+	if strings.TrimRight(repoKey, " .") != repoKey {
+		return errors.New("must not end in a space or dot")
+	}
+	for _, r := range repoKey {
+		if unicode.IsControl(r) {
+			return errors.New("must not contain control characters")
+		}
+	}
+	return nil
+}
+
+// publishedReport removes machine-local paths without mutating the report used
+// by the caller for local rendering. Record paths within the corpus remain
+// useful as portable, corpus-relative keys.
+func publishedReport(report *Report) *Report {
+	projection := *report
+	projection.Root = "."
+	projection.InvalidRecords = make(map[string]string, len(report.InvalidRecords))
+
+	keys := make([]string, 0, len(report.InvalidRecords))
+	for path := range report.InvalidRecords {
+		keys = append(keys, path)
+	}
+	sort.Strings(keys)
+	for _, path := range keys {
+		key := publishedRecordPath(report.Root, path)
+		if _, exists := projection.InvalidRecords[key]; exists {
+			sum := sha256.Sum256([]byte(path))
+			key += "-" + hex.EncodeToString(sum[:6])
+		}
+		reason := report.InvalidRecords[path]
+		if report.Root != "" {
+			reason = strings.ReplaceAll(reason, report.Root, ".")
+		}
+		reason = strings.ReplaceAll(reason, path, key)
+		projection.InvalidRecords[key] = reason
+	}
+	return &projection
+}
+
+func publishedRecordPath(root, path string) string {
+	clean := filepath.Clean(path)
+	if root != "" {
+		if rel, err := filepath.Rel(filepath.Clean(root), clean); err == nil && rel != ".." &&
+			!strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return filepath.ToSlash(rel)
+		}
+	}
+	if !filepath.IsAbs(clean) && clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return filepath.ToSlash(clean)
+	}
+	sum := sha256.Sum256([]byte(clean))
+	return "external/" + hex.EncodeToString(sum[:6]) + "-" + filepath.Base(clean)
 }
 
 // writeJSON writes an object and returns its manifest entry.

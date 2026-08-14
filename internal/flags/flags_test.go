@@ -32,6 +32,9 @@ func TestDefaults(t *testing.T) {
 	if d.TUIEnabled {
 		t.Error("TUIEnabled should default false")
 	}
+	if d.AttestEnabled {
+		t.Error("AttestEnabled should default false")
+	}
 	if d.DisableFileDeleteTools {
 		t.Error("DisableFileDeleteTools should default false")
 	}
@@ -54,6 +57,7 @@ func TestResolveNoProviders(t *testing.T) {
 func TestEnvProviderUnset(t *testing.T) {
 	os.Unsetenv("FEATURE_MEMORY")
 	os.Unsetenv("FEATURE_TUI")
+	os.Unsetenv("FEATURE_ATTEST")
 
 	f := flags.Resolve(context.Background(), flags.EnvProvider{})
 	// unset env vars should not change defaults
@@ -62,6 +66,9 @@ func TestEnvProviderUnset(t *testing.T) {
 	}
 	if f.TUIEnabled {
 		t.Error("TUIEnabled should remain false when FEATURE_TUI unset")
+	}
+	if f.AttestEnabled {
+		t.Error("AttestEnabled should remain false when FEATURE_ATTEST unset")
 	}
 }
 
@@ -80,6 +87,15 @@ func TestEnvProviderEnablesFeature(t *testing.T) {
 	f := flags.Resolve(context.Background(), flags.EnvProvider{})
 	if !f.TUIEnabled {
 		t.Error("TUIEnabled should be true when FEATURE_TUI=true")
+	}
+}
+
+func TestEnvProviderEnablesAttest(t *testing.T) {
+	t.Setenv("FEATURE_ATTEST", "yes")
+
+	f := flags.Resolve(context.Background(), flags.EnvProvider{})
+	if !f.AttestEnabled {
+		t.Error("AttestEnabled should be true when FEATURE_ATTEST=yes")
 	}
 }
 
@@ -136,6 +152,7 @@ func TestDaemonProviderFreshCache(t *testing.T) {
 			CodeDB:  bp(false), // server disabled codedb
 			Whisper: bp(true),
 			Distill: bp(true),
+			Attest:  bp(true),
 		},
 		Killswitches: flags.CLIKillswitches{
 			DisableFileDeleteTools: true,
@@ -147,6 +164,9 @@ func TestDaemonProviderFreshCache(t *testing.T) {
 	f := flags.Resolve(context.Background(), p)
 	if f.CodeDBEnabled {
 		t.Error("CodeDBEnabled should be false per remote settings")
+	}
+	if !f.AttestEnabled {
+		t.Error("AttestEnabled should be true per remote settings")
 	}
 	if !f.DisableFileDeleteTools {
 		t.Error("DisableFileDeleteTools kill switch should be active")
@@ -185,6 +205,9 @@ func TestRemoteSettingsOmittedFieldsPreserveDefaults(t *testing.T) {
 	if patch.TUIEnabled != nil {
 		t.Error("TUIEnabled should be nil for omitted field")
 	}
+	if patch.AttestEnabled != nil {
+		t.Error("AttestEnabled should be nil for omitted field")
+	}
 
 	// resolve should preserve defaults for omitted fields
 	f := flags.Resolve(context.Background(), flags.DaemonProvider{
@@ -198,6 +221,22 @@ func TestRemoteSettingsOmittedFieldsPreserveDefaults(t *testing.T) {
 	}
 	if !f.DistillEnabled {
 		t.Error("DistillEnabled should remain default true (omitted)")
+	}
+	if f.AttestEnabled {
+		t.Error("AttestEnabled should remain default false (omitted)")
+	}
+}
+
+func TestEnvProviderOverridesRemoteAttestRollout(t *testing.T) {
+	t.Setenv("FEATURE_ATTEST", "false")
+	remote := flags.DaemonProvider{CachedSettings: &flags.CLISettingsResponse{
+		Features:  flags.CLIFeatures{Attest: bp(true)},
+		FetchedAt: time.Now(),
+	}}
+
+	f := flags.Resolve(context.Background(), remote, flags.EnvProvider{})
+	if f.AttestEnabled {
+		t.Error("FEATURE_ATTEST=false should override a server-side enable")
 	}
 }
 

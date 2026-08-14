@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/sageox/ox/internal/attest"
 	"github.com/sageox/ox/internal/repotools"
@@ -69,6 +72,14 @@ the same change that earns the stamp.
 		if breakDesc == "" {
 			return errors.New("--break is required: a record with no break describes no proof")
 		}
+		surfaces, _, err = normalizeAttestSurfaces(ctx.RepoRoot, surfaces)
+		if err != nil {
+			return err
+		}
+		breakDigest, err := diffDigest(cmd)
+		if err != nil {
+			return err
+		}
 		if verdict == "" {
 			// Derive rather than default: a red that landed away from the step
 			// naming the claim is ambiguous BY CONSTRUCTION, and making the
@@ -81,6 +92,9 @@ the same change that earns the stamp.
 				verdict = attest.ProofInconclusive
 			}
 		}
+		if err := validateAttestProofInputs(verdict, redRun, greenRun, stepIndex, stepText); err != nil {
+			return err
+		}
 
 		commit, err := attest.HeadCommit(ctx.RepoRoot)
 		if err != nil {
@@ -88,6 +102,16 @@ the same change that earns the stamp.
 		}
 		if repoKey == "" {
 			repoKey = defaultRepoKey(ctx.RepoRoot)
+		}
+		if err := validateRepoKey(repoKey); err != nil {
+			return err
+		}
+		if err := requireCleanAttestTree(ctx.RepoRoot); err != nil {
+			return err
+		}
+		specFingerprint, err := liveSpecFingerprint(ctx, *cap)
+		if err != nil {
+			return fmt.Errorf("fingerprint current specification: %w", err)
 		}
 
 		rec := &attest.Attestation{
@@ -102,7 +126,7 @@ the same change that earns the stamp.
 				Verdict: verdict,
 				Break: attest.Break{
 					Description:    breakDesc,
-					DiffDigest:     diffDigest(cmd),
+					DiffDigest:     breakDigest,
 					TargetSurfaces: surfaces,
 				},
 				ObservedRed: attest.ObservedRed{
@@ -114,7 +138,7 @@ the same change that earns the stamp.
 				RedRunID:   redRun,
 				GreenRunID: greenRun,
 			},
-			SpecFingerprint: currentSpecFingerprint(ctx, *cap),
+			SpecFingerprint: specFingerprint,
 			ObservedSurface: attest.ObservedSurface{
 				Granularity: "route",
 				Surfaces:    toSurfaces(surfaces),
@@ -127,7 +151,7 @@ the same change that earns the stamp.
 				return err
 			}
 			jsonOut, agentID := wantJSON(cmd)
-			return emit(jsonOut, agentID, rec, renderRecordPreview(rec, ""), "attest record")
+			return emit(cmd, jsonOut, agentID, rec, renderRecordPreview(rec, ""), "attest record")
 		}
 
 		path, err := attest.WriteRecord(ctx.CorpusRoot, rec)
@@ -135,7 +159,7 @@ the same change that earns the stamp.
 			return err
 		}
 		jsonOut, agentID := wantJSON(cmd)
-		return emit(jsonOut, agentID,
+		return emit(cmd, jsonOut, agentID,
 			map[string]any{"path": path, "attestation": rec},
 			renderRecordPreview(rec, path), "attest record")
 	},
@@ -157,24 +181,64 @@ func readVerbatim(cmd *cobra.Command) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("read --red-verbatim-file: %w", err)
 		}
-		return strings.TrimRight(string(raw), "\n"), nil
+		return string(raw), nil
 	}
 	return inline, nil
 }
 
 // diffDigest hashes the applied patch so the record can prove a break existed.
 // Without it "we broke it and it went red" is an unfalsifiable assertion.
-func diffDigest(cmd *cobra.Command) string {
+func diffDigest(cmd *cobra.Command) (string, error) {
 	path, _ := cmd.Flags().GetString("break-diff-file")
 	if path == "" {
-		return ""
+		return "", nil
 	}
 	raw, err := os.ReadFile(path) //nolint:gosec // an operator-supplied path is the point
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("read --break-diff-file: %w", err)
 	}
 	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func validateAttestRunIDs(redRun, greenRun string) error {
+	if redRun == "" {
+		return errors.New("--red-run is required: a red-first proof must identify the failing run")
+	}
+	if strings.TrimSpace(redRun) != redRun {
+		return errors.New("--red-run cannot have leading or trailing whitespace")
+	}
+	if greenRun == "" {
+		return errors.New("--green-run is required: a proof must identify the passing run")
+	}
+	if strings.TrimSpace(greenRun) != greenRun {
+		return errors.New("--green-run cannot have leading or trailing whitespace")
+	}
+	if redRun == greenRun {
+		return errors.New("--red-run and --green-run must identify different runs")
+	}
+	return nil
+}
+
+func validateAttestProofInputs(verdict, redRun, greenRun string, stepIndex int, stepText string) error {
+	switch verdict {
+	case attest.ProofClean, attest.ProofAmbiguous, attest.ProofInconclusive:
+	default:
+		return fmt.Errorf("--verdict %q is not one of clean, ambiguous, inconclusive", verdict)
+	}
+	if err := validateAttestRunIDs(redRun, greenRun); err != nil {
+		return err
+	}
+	if verdict == attest.ProofInconclusive {
+		return nil
+	}
+	if stepIndex < 1 {
+		return errors.New("--step must be a positive 1-indexed step for a red verdict")
+	}
+	if strings.TrimSpace(stepText) == "" {
+		return errors.New("--step-text is required for a red verdict")
+	}
+	return nil
 }
 
 func toSurfaces(ids []string) []attest.Surface {
@@ -200,8 +264,117 @@ func defaultRepoKey(repoRoot string) string {
 	if main, err := repotools.FindMainRepoRoot(repotools.VCSGit); err == nil && main != "" {
 		repoRoot = main
 	}
-	parts := strings.Split(strings.TrimRight(repoRoot, "/"), "/")
-	return parts[len(parts)-1]
+	return repoKeyFromRoot(repoRoot)
+}
+
+func repoKeyFromRoot(repoRoot string) string {
+	return filepath.Base(filepath.Clean(repoRoot))
+}
+
+// validateRepoKey keeps the opaque key to one portable path segment. The
+// publisher uses it in object paths, so separators and traversal components
+// are never valid identifiers.
+func validateRepoKey(repoKey string) error {
+	if repoKey == "" {
+		return errors.New("invalid --repo-key: use one non-empty path segment")
+	}
+	if strings.TrimSpace(repoKey) != repoKey {
+		return fmt.Errorf("invalid --repo-key %q: leading or trailing whitespace is not allowed", repoKey)
+	}
+	if repoKey == "." || repoKey == ".." || filepath.IsAbs(repoKey) {
+		return fmt.Errorf("invalid --repo-key %q: use one relative path segment", repoKey)
+	}
+	if strings.ContainsAny(repoKey, `/\\<>:"|?*`) {
+		return fmt.Errorf("invalid --repo-key %q: path separators and filesystem-reserved characters are not allowed", repoKey)
+	}
+	if strings.TrimRight(repoKey, " .") != repoKey {
+		return fmt.Errorf("invalid --repo-key %q: a key cannot end in a space or dot", repoKey)
+	}
+	for _, r := range repoKey {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("invalid --repo-key %q: control characters are not allowed", repoKey)
+		}
+	}
+	return nil
+}
+
+// normalizeAttestSurfaces canonicalizes file surfaces to repo-relative slash
+// paths, which is the form emitted by git. Route identifiers stay untouched.
+// Prefixes are available when an otherwise ambiguous identifier needs an
+// explicit classification: file:<path> or route:<id>.
+func normalizeAttestSurfaces(repoRoot string, ids []string) ([]string, []string, error) {
+	normalized := make([]string, 0, len(ids))
+	files := make([]string, 0, len(ids))
+	for _, id := range ids {
+		value, isFile, err := normalizeAttestSurface(repoRoot, id)
+		if err != nil {
+			return nil, nil, err
+		}
+		normalized = append(normalized, value)
+		if isFile {
+			files = append(files, value)
+		}
+	}
+	return normalized, files, nil
+}
+
+func normalizeAttestSurface(repoRoot, id string) (string, bool, error) {
+	if id == "" {
+		return "", false, errors.New("--surface cannot be empty")
+	}
+	if strings.HasPrefix(id, "route:") {
+		routeID := strings.TrimPrefix(id, "route:")
+		if routeID == "" {
+			return "", false, errors.New("--surface route: identifier cannot be empty")
+		}
+		return routeID, false, nil
+	}
+
+	explicitFile := strings.HasPrefix(id, "file:")
+	if explicitFile {
+		id = strings.TrimPrefix(id, "file:")
+		if id == "" {
+			return "", false, errors.New("--surface file: path cannot be empty")
+		}
+	}
+
+	pathID := filepath.FromSlash(strings.ReplaceAll(id, `\`, "/"))
+	candidate := pathID
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(repoRoot, candidate)
+	}
+	_, statErr := os.Stat(candidate)
+	looksLikeFile := explicitFile || strings.HasPrefix(id, "./") || strings.HasPrefix(id, "../") || statErr == nil ||
+		(!filepath.IsAbs(pathID) && !strings.Contains(id, "://") && filepath.Ext(pathID) != "")
+	if !looksLikeFile {
+		return id, false, nil
+	}
+
+	rel, err := filepath.Rel(repoRoot, filepath.Clean(candidate))
+	if err != nil {
+		return "", false, fmt.Errorf("normalize --surface %q: %w", id, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false, fmt.Errorf("--surface file %q is outside the repository", id)
+	}
+	return filepath.ToSlash(rel), true, nil
+}
+
+// requireCleanAttestTree prevents binding evidence from a dirty green run to
+// HEAD. Checking only declared surfaces is insufficient: surfaces are optional,
+// and an omitted dirty product file would otherwise produce a record that says
+// the clean commit was tested when the working tree was what actually ran.
+func requireCleanAttestTree(repoRoot string) error {
+	cmd := exec.Command("git", "-C", repoRoot, "status", "--porcelain=v1", "--untracked-files=all") //nolint:gosec // fixed git arguments; repository root is caller-resolved
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("check attestation tree against HEAD: %w", err)
+	}
+	if len(out) != 0 {
+		return errors.New("cannot record an attestation from a dirty working tree\n" +
+			"  commit or remove every tracked and untracked change, rerun the green proof on that commit, then record it")
+	}
+	return nil
 }
 
 func renderRecordPreview(rec *attest.Attestation, path string) string {
@@ -228,7 +401,7 @@ func renderRecordPreview(rec *attest.Attestation, path string) string {
 	fmt.Fprintf(&b, "  subject %s %s\n", rec.Subject.Scheme, shortRef(rec.Subject.Value))
 	if len(rec.ObservedSurface.Surfaces) == 0 {
 		fmt.Fprintf(&b, "  %s\n", ui.RenderWarn(
-			"no --surface given: freshness can never rule out product drift for this record"))
+			"no --surface given: freshness remains unknown because product drift cannot be ruled out"))
 	}
 	fmt.Fprintln(&b)
 	return b.String()
@@ -245,7 +418,7 @@ func init() {
 	attestRecordCmd.Flags().Int("step", 0, "1-indexed step the failure landed on")
 	attestRecordCmd.Flags().String("step-text", "", "text of the step the failure landed on")
 	attestRecordCmd.Flags().Bool("landed-on-claim-step", false, "the red landed on the step naming the behavior")
-	attestRecordCmd.Flags().StringArray("surface", nil, "a file or route the run exercised (repeatable)")
+	attestRecordCmd.Flags().StringArray("surface", nil, "a file or route the run exercised; prefix ambiguous values with file: or route: (repeatable)")
 	attestRecordCmd.Flags().String("verdict", "", "override the derived verdict (clean|ambiguous|inconclusive)")
 	attestRecordCmd.Flags().String("repo-key", "", "opaque repo key (default: the repo directory name)")
 	attestRecordCmd.Flags().Bool("dry-run", false, "validate and print without writing")

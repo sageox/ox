@@ -82,11 +82,11 @@ func TestParseAttestation_LandedOffClaimStepCannotBeClean(t *testing.T) {
 		t.Errorf("error = %v, want ErrAmbiguousMislabeled", err)
 	}
 
-	// The same record labelled honestly must parse.
+	// The same record labeled honestly must parse.
 	rec.Proof.Verdict = ProofAmbiguous
 	got, err := ParseAttestation(mustJSON(t, rec))
 	if err != nil {
-		t.Fatalf("an honestly-labelled ambiguous record must parse: %v", err)
+		t.Fatalf("an honestly-labeled ambiguous record must parse: %v", err)
 	}
 	if got.IsProof() {
 		t.Error("an ambiguous record must NOT count as a proof")
@@ -123,12 +123,26 @@ func TestValidate_RejectsIncompleteRecords(t *testing.T) {
 		name   string
 		mutate func(*Attestation)
 	}{
+		{"wrong version", func(a *Attestation) { a.Version = 0 }},
+		{"no attestation id", func(a *Attestation) { a.AttestationID = "" }},
 		{"no capability", func(a *Attestation) { a.CapabilityID = "" }},
 		{"no claim", func(a *Attestation) { a.Claim = "" }},
+		{"no repo key", func(a *Attestation) { a.RepoKey = "" }},
+		{"unsafe repo key", func(a *Attestation) { a.RepoKey = "../../outside" }},
 		{"no subject", func(a *Attestation) { a.Subject.Value = "" }},
 		{"unknown subject scheme", func(a *Attestation) { a.Subject.Scheme = "svn-rev" }},
+		{"no minted time", func(a *Attestation) { a.MintedAt = "" }},
+		{"malformed minted time", func(a *Attestation) { a.MintedAt = "yesterday" }},
 		{"unknown verdict", func(a *Attestation) { a.Proof.Verdict = "probably-fine" }},
+		{"no break description", func(a *Attestation) { a.Proof.Break.Description = "" }},
+		{"no red run", func(a *Attestation) { a.Proof.RedRunID = "" }},
+		{"red run with whitespace", func(a *Attestation) { a.Proof.RedRunID = " run_red" }},
+		{"no green run", func(a *Attestation) { a.Proof.GreenRunID = "" }},
+		{"green run with whitespace", func(a *Attestation) { a.Proof.GreenRunID = "run_green " }},
+		{"same red and green run", func(a *Attestation) { a.Proof.GreenRunID = a.Proof.RedRunID }},
 		{"red verdict with no verbatim failure", func(a *Attestation) { a.Proof.ObservedRed.Verbatim = "" }},
+		{"red verdict with no failure step", func(a *Attestation) { a.Proof.ObservedRed.StepIndex = 0 }},
+		{"red verdict with no failure step text", func(a *Attestation) { a.Proof.ObservedRed.StepText = "" }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,6 +152,15 @@ func TestValidate_RejectsIncompleteRecords(t *testing.T) {
 				t.Fatalf("Validate accepted a record with: %s", tc.name)
 			}
 		})
+	}
+}
+
+func TestValidate_InconclusiveProofKeepsHonestUnknownRepresentable(t *testing.T) {
+	rec := validRecord()
+	rec.Proof.Verdict = ProofInconclusive
+	rec.Proof.ObservedRed = ObservedRed{}
+	if err := rec.Validate(); err != nil {
+		t.Fatalf("inconclusive proof with a run pair but no observed failure must remain valid: %v", err)
 	}
 }
 
@@ -182,6 +205,73 @@ func TestWriteAndLoadRecords(t *testing.T) {
 	}
 	if got.Claim != rec.Claim {
 		t.Errorf("Claim = %q", got.Claim)
+	}
+}
+
+func TestRecordPath_IsStableReversibleAndCollisionFree(t *testing.T) {
+	root := t.TempDir()
+	ids := []string{"foo/bar#baz", "foo-bar#baz"}
+	paths := make(map[string]string, len(ids))
+	for _, id := range ids {
+		path := RecordPath(root, id)
+		if path != RecordPath(root, id) {
+			t.Fatalf("RecordPath(%q) is not stable", id)
+		}
+		got, ok := capabilityIDFromRecordFilename(filepath.Base(path))
+		if !ok || got != id {
+			t.Fatalf("record filename %q decoded as %q, %v; want %q", filepath.Base(path), got, ok, id)
+		}
+		paths[id] = path
+	}
+	if paths[ids[0]] == paths[ids[1]] {
+		t.Fatalf("distinct capability ids collide at %q", paths[ids[0]])
+	}
+}
+
+func TestLoadRecords_ReadsLegacyFilenameAndPrefersCanonicalDuplicate(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, attestationsSubdir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	legacy := validRecord()
+	legacy.Claim = "legacy copy"
+	if err := os.WriteFile(filepath.Join(dir, slugify(legacy.CapabilityID)+".v1.json"), mustJSON(t, legacy), 0o600); err != nil {
+		t.Fatalf("write legacy record: %v", err)
+	}
+	canonical := validRecord()
+	canonical.Claim = "canonical copy"
+	if err := os.WriteFile(RecordPath(root, canonical.CapabilityID), mustJSON(t, canonical), 0o600); err != nil {
+		t.Fatalf("write canonical record: %v", err)
+	}
+
+	recs, err := LoadRecords(root)
+	if err != nil {
+		t.Fatalf("LoadRecords: %v", err)
+	}
+	if recs.Count != 1 {
+		t.Fatalf("Count = %d, want one unique capability", recs.Count)
+	}
+	got, ok := recs.For(canonical.CapabilityID)
+	if !ok || got.Claim != canonical.Claim {
+		t.Fatalf("loaded record = %#v, %v; want canonical copy", got, ok)
+	}
+}
+
+func TestRecordsAll_IsSortedAndIncludesOrphans(t *testing.T) {
+	a := validRecord()
+	a.CapabilityID = "z/orphan#last"
+	b := validRecord()
+	b.CapabilityID = "a/current#first"
+	recs := &Records{byCapability: map[string]*Attestation{a.CapabilityID: a, b.CapabilityID: b}, Count: 2}
+
+	got := recs.All()
+	if len(got) != 2 || got[0] != b || got[1] != a {
+		t.Fatalf("All() = %#v, want records sorted by capability id", got)
+	}
+	if got := (*Records)(nil).All(); got != nil {
+		t.Fatalf("nil Records.All() = %#v, want nil", got)
 	}
 }
 

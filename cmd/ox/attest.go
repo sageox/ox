@@ -92,7 +92,12 @@ func wantJSON(cmd *cobra.Command) (bool, string) {
 
 // emit writes either indented JSON or the rendered human text, and records the
 // context cost when an agent is on the other end.
-func emit(jsonOut bool, agentID string, payload any, human string, label string) error {
+func emit(cmd *cobra.Command, jsonOut bool, agentID string, payload any, human string, label string) error {
+	quiet, _ := cmd.Flags().GetBool("quiet")
+	if quiet || (cfg != nil && cfg.Quiet) {
+		return nil
+	}
+
 	var outputBytes int
 	if jsonOut {
 		var buf bytes.Buffer
@@ -102,10 +107,10 @@ func emit(jsonOut bool, agentID string, payload any, human string, label string)
 			return err
 		}
 		outputBytes = buf.Len()
-		fmt.Print(buf.String())
+		fmt.Fprint(cmd.OutOrStdout(), buf.String())
 	} else {
 		outputBytes = len(human)
-		fmt.Print(human)
+		fmt.Fprint(cmd.OutOrStdout(), human)
 	}
 	if agentID != "" {
 		slog.Debug(label+" context cost", "agent_id", agentID, "bytes", outputBytes)
@@ -128,12 +133,31 @@ var attestStatusCmd = &cobra.Command{
 			return err
 		}
 		report := attest.BuildReport(ctx.Corpus, ctx.Plans, ctx.Records)
+		report.ApplyFreshness(func(cap attest.Capability, record *attest.Attestation) attest.Freshness {
+			return attest.CheckFreshness(ctx.RepoRoot, record, currentSpecFingerprint(ctx, cap))
+		})
 
 		jsonOut, agentID := wantJSON(cmd)
 		domain, _ := cmd.Flags().GetString("domain")
 		weakest, _ := cmd.Flags().GetInt("weakest")
-		return emit(jsonOut, agentID, report, renderAttestStatus(report, domain, weakest), "attest status")
+		return emit(cmd, jsonOut, agentID, filterAttestReport(report, domain, weakest), renderAttestStatus(report, domain, weakest), "attest status")
 	},
+}
+
+// filterAttestReport applies the same assessment selection to structured output
+// that the human renderer applies. Corpus-wide summary totals remain intact;
+// Assessments is the list selected by --domain and --weakest.
+func filterAttestReport(report *attest.Report, domain string, weakest int) *attest.Report {
+	filtered := *report
+	if domain != "" {
+		filtered.Assessments = append([]attest.Assessment(nil), report.ByDomain[domain]...)
+		if weakest > 0 && len(filtered.Assessments) > weakest {
+			filtered.Assessments = filtered.Assessments[:weakest]
+		}
+	} else {
+		filtered.Assessments = report.Weakest(weakest)
+	}
+	return &filtered
 }
 
 // verdictGlyph carries shape as well as color, so a verdict survives being read
@@ -145,6 +169,8 @@ func verdictGlyph(v attest.Verdict) string {
 		return "✓"
 	case attest.VerdictStamped:
 		return "◌"
+	case attest.VerdictStale:
+		return "◑"
 	case attest.VerdictUnproven:
 		return "◉"
 	case attest.VerdictSkipped:
@@ -160,7 +186,7 @@ func renderVerdict(v attest.Verdict, text string) string {
 	switch v {
 	case attest.VerdictAttested:
 		return ui.RenderPass(text)
-	case attest.VerdictStamped, attest.VerdictUnproven:
+	case attest.VerdictStamped, attest.VerdictStale, attest.VerdictUnproven:
 		return ui.RenderWarn(text)
 	case attest.VerdictSkipped, attest.VerdictUntested:
 		return ui.RenderFail(text)
@@ -205,7 +231,7 @@ func renderAttestStatus(r *attest.Report, domain string, weakest int) string {
 		fmt.Fprintf(&b, "  %s\n", ui.RenderFail(fmt.Sprintf("unreadable record %s: %s", filepath.Base(path), reason)))
 	}
 
-	if r.Counts[attest.VerdictAttested] == 0 {
+	if r.Records == 0 && len(r.InvalidRecords) == 0 {
 		fmt.Fprintf(&b, "\n  %s\n",
 			ui.RenderWarn("no attestation records yet — a stamp names a run id that nothing here can open"))
 	}
@@ -244,6 +270,9 @@ func renderAttestStatus(r *attest.Report, domain string, weakest int) string {
 			if a.Record != nil {
 				detail += " · proof " + a.Record.Proof.Verdict
 			}
+			if a.Freshness != nil {
+				detail += " · " + a.Freshness.Summary()
+			}
 			fmt.Fprintf(&b, "       %s\n", ui.RenderMuted(detail))
 		}
 	}
@@ -260,5 +289,4 @@ func init() {
 
 	attestCmd.AddCommand(attestStatusCmd)
 	attestCmd.GroupID = "dev"
-	rootCmd.AddCommand(attestCmd)
 }

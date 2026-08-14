@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -28,9 +29,14 @@ Advisory. Always exits 0: this reports, it never blocks.`,
 			return err
 		}
 
-		result := attestCheckResult{}
+		result := attestCheckResult{
+			RecordCount:    ctx.Records.Count,
+			InvalidRecords: ctx.Records.Invalid,
+		}
+		knownCapabilities := make(map[string]struct{}, len(ctx.Corpus.Capabilities))
 		for i := range ctx.Corpus.Capabilities {
 			cap := ctx.Corpus.Capabilities[i]
+			knownCapabilities[cap.ID] = struct{}{}
 			a := attest.Assess(cap, ctx.Plans, ctx.Records)
 
 			if a.Record == nil {
@@ -58,10 +64,19 @@ Advisory. Always exits 0: this reports, it never blocks.`,
 				result.Invalidated = append(result.Invalidated, entry)
 			}
 		}
+		for _, record := range ctx.Records.All() {
+			if _, ok := knownCapabilities[record.CapabilityID]; ok {
+				continue
+			}
+			result.Orphaned = append(result.Orphaned, attestCheckOrphan{
+				CapabilityID: record.CapabilityID,
+				Claim:        record.Claim,
+			})
+		}
 		sort.Strings(result.StampedNoRecord)
 
 		jsonOut, agentID := wantJSON(cmd)
-		return emit(jsonOut, agentID, result, renderAttestCheck(result), "attest check")
+		return emit(cmd, jsonOut, agentID, result, renderAttestCheck(result), "attest check")
 	},
 }
 
@@ -71,10 +86,18 @@ type attestCheckEntry struct {
 	Freshness    attest.Freshness `json:"freshness"`
 }
 
+type attestCheckOrphan struct {
+	CapabilityID string `json:"capability_id"`
+	Claim        string `json:"claim"`
+}
+
 type attestCheckResult struct {
-	Invalidated []attestCheckEntry `json:"invalidated"`
-	Unaffected  []attestCheckEntry `json:"unaffected"`
-	Unknown     []attestCheckEntry `json:"unknown"`
+	RecordCount    int                 `json:"record_count"`
+	InvalidRecords map[string]string   `json:"invalid_records,omitempty"`
+	Orphaned       []attestCheckOrphan `json:"orphaned"`
+	Invalidated    []attestCheckEntry  `json:"invalidated"`
+	Unaffected     []attestCheckEntry  `json:"unaffected"`
+	Unknown        []attestCheckEntry  `json:"unknown"`
 	// StampedNoRecord are capabilities somebody claimed green with no record —
 	// this diff may have broken them and nothing here can tell.
 	StampedNoRecord []string `json:"stamped_no_record"`
@@ -84,7 +107,7 @@ func renderAttestCheck(r attestCheckResult) string {
 	var b strings.Builder
 	fmt.Fprintln(&b)
 
-	if len(r.Invalidated) == 0 && len(r.Unknown) == 0 && len(r.Unaffected) == 0 {
+	if r.RecordCount == 0 && len(r.InvalidRecords) == 0 {
 		fmt.Fprintf(&b, "  %s\n", ui.RenderMuted("no attestation records in this repo — nothing to invalidate"))
 		if len(r.StampedNoRecord) > 0 {
 			fmt.Fprintf(&b, "  %s\n", ui.RenderWarn(fmt.Sprintf(
@@ -93,6 +116,28 @@ func renderAttestCheck(r attestCheckResult) string {
 		}
 		fmt.Fprintln(&b)
 		return b.String()
+	}
+
+	if len(r.InvalidRecords) > 0 {
+		fmt.Fprintf(&b, "  %s\n", ui.RenderWarn(fmt.Sprintf("? %d attestation record(s) could not be read", len(r.InvalidRecords))))
+		paths := make([]string, 0, len(r.InvalidRecords))
+		for path := range r.InvalidRecords {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		for _, path := range paths {
+			fmt.Fprintf(&b, "    %s\n", ui.RenderMuted(filepath.Base(path)+" · "+r.InvalidRecords[path]))
+		}
+		fmt.Fprintln(&b)
+	}
+
+	if len(r.Orphaned) > 0 {
+		fmt.Fprintf(&b, "  %s\n", ui.RenderWarn(fmt.Sprintf("? %d attestation record(s) no longer match the capability corpus", len(r.Orphaned))))
+		for _, orphan := range r.Orphaned {
+			fmt.Fprintf(&b, "    %s\n", orphan.Claim)
+			fmt.Fprintf(&b, "      %s\n", ui.RenderMuted(orphan.CapabilityID+" · capability was removed or renamed"))
+		}
+		fmt.Fprintln(&b)
 	}
 
 	if len(r.Invalidated) > 0 {

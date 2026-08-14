@@ -23,6 +23,7 @@ func TestSettingsFetcher_Fetch_CachesResult(t *testing.T) {
 		resp := flags.CLISettingsResponse{
 			Features: flags.CLIFeatures{
 				CodeDB: boolPtr(true),
+				Attest: boolPtr(true),
 			},
 		}
 		json.NewEncoder(w).Encode(resp)
@@ -45,6 +46,9 @@ func TestSettingsFetcher_Fetch_CachesResult(t *testing.T) {
 	}
 	if cached.Features.CodeDB == nil || !*cached.Features.CodeDB {
 		t.Error("expected CodeDB=true in cached settings")
+	}
+	if cached.Features.Attest == nil || !*cached.Features.Attest {
+		t.Error("expected Attest=true in cached settings")
 	}
 }
 

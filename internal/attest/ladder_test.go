@@ -50,8 +50,8 @@ func TestAssess_LadderRungs(t *testing.T) {
 		SchemaVersion: 1,
 		Feature:       "features/d/ladder.feature",
 		Scenarios: []PlanScenario{
-			{Name: "Stamped one", Rule: "Dispatches and is stamped"},
-			{Name: "Unstamped one", Rule: "Dispatches but was never stamped"},
+			{Name: "Stamped one", Index: 0, Rule: "Dispatches and is stamped"},
+			{Name: "Unstamped one", Index: 1, Rule: "Dispatches but was never stamped"},
 		},
 		Excluded: []PlanExcluded{{Name: "Excluded one", Tags: []string{"@pending"}, Reason: "tag"}},
 	})
@@ -134,8 +134,8 @@ func TestBuildReport_TotalsAndWeakestOrdering(t *testing.T) {
 		SchemaVersion: 1,
 		Feature:       "features/d/ladder.feature",
 		Scenarios: []PlanScenario{
-			{Name: "Stamped one"},
-			{Name: "Unstamped one"},
+			{Name: "Stamped one", Index: 0, Rule: "Dispatches and is stamped"},
+			{Name: "Unstamped one", Index: 1, Rule: "Dispatches but was never stamped"},
 		},
 	})
 	corpus, _ := ScanCorpus(root, root)
@@ -169,6 +169,107 @@ func TestBuildReport_TotalsAndWeakestOrdering(t *testing.T) {
 	if weakest[len(weakest)-1].Verdict != VerdictStamped {
 		t.Errorf("weakest[last] = %q, want the strongest present rung %q",
 			weakest[len(weakest)-1].Verdict, VerdictStamped)
+	}
+}
+
+func TestAssess_DuplicateScenarioNamesUseCompilerIdentity(t *testing.T) {
+	root := writeCorpus(t, map[string]string{
+		"d/duplicates.feature": `Feature: Duplicates
+
+  Rule: First capability
+    Scenario: Same display name
+      Given the first thing
+
+  Rule: Second capability
+    Scenario: Same display name
+      Given the second thing
+`,
+	})
+	writePlan(t, root, CompiledPlan{
+		SchemaVersion: 1,
+		Feature:       "features/d/duplicates.feature",
+		Scenarios: []PlanScenario{
+			{Name: "Same display name", Index: 1, Rule: "Second capability"},
+		},
+		Excluded: []PlanExcluded{
+			{Name: "Same display name", Index: 0, Reason: "tag"},
+		},
+	})
+
+	corpus, err := ScanCorpus(root, root)
+	if err != nil {
+		t.Fatalf("ScanCorpus: %v", err)
+	}
+	plans, err := LoadPlans(root)
+	if err != nil {
+		t.Fatalf("LoadPlans: %v", err)
+	}
+
+	first := Assess(corpus.Capabilities[0], plans, &Records{})
+	second := Assess(corpus.Capabilities[1], plans, &Records{})
+	if first.Dispatching != 0 || first.Verdict != VerdictSkipped {
+		t.Errorf("excluded duplicate assessment = %+v, want skipped", first)
+	}
+	if second.Dispatching != 1 || second.Verdict != VerdictUnproven {
+		t.Errorf("selected duplicate assessment = %+v, want unproven", second)
+	}
+}
+
+func TestReportApplyFreshness_StaleAndUnknownProofsAreNotAttested(t *testing.T) {
+	tests := []struct {
+		name      string
+		freshness Freshness
+	}{
+		{name: "stale", freshness: Freshness{Reachable: true, SpecStale: true}},
+		{name: "unknown", freshness: Freshness{Unknown: true, Reason: "current fingerprint unavailable"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := writeCorpus(t, map[string]string{
+				"d/proof.feature": `Feature: Proof
+
+  Rule: A clean proof exists
+    Scenario: It works
+      Given a thing
+`,
+			})
+			writePlan(t, root, CompiledPlan{
+				SchemaVersion: 1,
+				Feature:       "features/d/proof.feature",
+				Scenarios: []PlanScenario{
+					{Name: "It works", Index: 0, Rule: "A clean proof exists"},
+				},
+			})
+			corpus, _ := ScanCorpus(root, root)
+			plans, _ := LoadPlans(root)
+			record := validRecord()
+			record.CapabilityID = corpus.Capabilities[0].ID
+			records := &Records{
+				byCapability: map[string]*Attestation{record.CapabilityID: record},
+				Count:        1,
+			}
+
+			report := BuildReport(corpus, plans, records)
+			if report.Counts[VerdictAttested] != 1 {
+				t.Fatalf("precondition: attested count = %d, want 1", report.Counts[VerdictAttested])
+			}
+			report.ApplyFreshness(func(Capability, *Attestation) Freshness { return tc.freshness })
+
+			assessment := report.Assessments[0]
+			if assessment.Verdict != VerdictStale {
+				t.Errorf("verdict = %q, want %q", assessment.Verdict, VerdictStale)
+			}
+			if assessment.Freshness == nil || assessment.Freshness.Current {
+				t.Errorf("Freshness = %+v, want attached non-current verdict", assessment.Freshness)
+			}
+			if report.Counts[VerdictAttested] != 0 || report.Counts[VerdictStale] != 1 {
+				t.Errorf("counts = %v, want stale=1 attested=0", report.Counts)
+			}
+			if got := report.ByDomain["d"][0].Verdict; got != VerdictStale {
+				t.Errorf("ByDomain verdict = %q, want %q", got, VerdictStale)
+			}
+		})
 	}
 }
 

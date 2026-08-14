@@ -66,6 +66,11 @@ func (c Capability) Title() string {
 type Scenario struct {
 	Name string `json:"name"`
 	Line int    `json:"line"`
+	// Index is the zero-based scenario position in the feature. The compiler
+	// carries the same identity in its selected/excluded arrays, which lets us
+	// distinguish duplicate scenario names (including duplicates under
+	// different Rule blocks) without guessing from display text.
+	Index int `json:"index"`
 	// Tags is the merged set: feature ∪ rule ∪ scenario, which is the set the
 	// Attest compiler applies when deciding whether a scenario dispatches.
 	Tags []string `json:"tags"`
@@ -132,6 +137,7 @@ var (
 	reFeature  = regexp.MustCompile(`^\s*Feature:\s*(.*)$`)
 	reRule     = regexp.MustCompile(`^\s*Rule:\s*(.*)$`)
 	reScenario = regexp.MustCompile(`^\s*(?:Scenario Outline|Scenario Template|Scenario|Example):\s*(.*)$`)
+	reExamples = regexp.MustCompile(`^\s*Examples(?:\s+[^:]*)?:`)
 	reTag      = regexp.MustCompile(`@[^\s@]+`)
 	reNonSlug  = regexp.MustCompile(`[^a-z0-9]+`)
 )
@@ -213,6 +219,7 @@ func scanFile(repoRoot, featuresDir, path string) ([]Capability, error) {
 		pendingStmp *Stamp   // `# validated:` comment seen since the last keyword
 		current     *Capability
 		lineNo      int
+		scenarioIdx int
 		// slugCounts disambiguates two Rules with identical text in one file:
 		// the second becomes `<slug>-2`. Without this their ids collide and one
 		// capability silently shadows the other.
@@ -291,11 +298,19 @@ func scanFile(repoRoot, featuresDir, path string) ([]Capability, error) {
 			s := Scenario{
 				Name:  name,
 				Line:  lineNo,
+				Index: scenarioIdx,
 				Tags:  tags,
 				Stamp: pendingStmp,
 			}
+			scenarioIdx++
 			s.Validated = s.HasTag(TagValidated)
 			cap.Scenarios = append(cap.Scenarios, s)
+			pending, pendingStmp = nil, nil
+
+		case reExamples.MatchString(line):
+			// Tags before an Examples table belong to that table. Examples are
+			// deliberately not represented as scenarios here, but their tags
+			// must still be consumed or they leak into the next Scenario.
 			pending, pendingStmp = nil, nil
 		}
 	}

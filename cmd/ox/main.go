@@ -133,6 +133,11 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 	rootCmd.ResetFlags()
 	// Re-register persistent flags after ResetFlags() clears them
 	registerPersistentFlags()
+	// Resolve cached/env feature flags before Cobra parses the command. This is
+	// required for default-off commands: help and command lookup both happen
+	// before PersistentPreRunE.
+	initFeatureFlags(rootCmd)
+	syncFeatureGatedCommands(rootCmd)
 	rootCmd.SetArgs(args)
 
 	// mark retry attempts to avoid telemetry double-counting

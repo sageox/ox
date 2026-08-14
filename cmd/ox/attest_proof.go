@@ -38,6 +38,7 @@ substring of one.`,
 		if assessment.Record != nil {
 			f := attest.CheckFreshness(ctx.RepoRoot, assessment.Record, currentSpecFingerprint(ctx, *match))
 			fresh = &f
+			assessment = assessment.WithFreshness(f)
 		}
 
 		payload := struct {
@@ -46,7 +47,7 @@ substring of one.`,
 		}{assessment, fresh}
 
 		jsonOut, agentID := wantJSON(cmd)
-		return emit(jsonOut, agentID, payload, renderProof(assessment, fresh), "attest proof")
+		return emit(cmd, jsonOut, agentID, payload, renderProof(assessment, fresh), "attest proof")
 	},
 }
 
@@ -89,15 +90,20 @@ func resolveCapability(ctx *attestContext, query string) (*attest.Capability, er
 	}
 }
 
-// currentSpecFingerprint returns the compiled plan's fingerprint for a
-// capability's feature as it stands NOW, for comparison against the value the
-// record pinned at mint time.
+// currentSpecFingerprint hashes the compiled plan's source inputs as they exist
+// in the working tree now. An unavailable input returns an empty fingerprint,
+// which CheckFreshness reports as unknown rather than falsely current.
 func currentSpecFingerprint(ctx *attestContext, cap attest.Capability) string {
+	fingerprint, _ := liveSpecFingerprint(ctx, cap)
+	return fingerprint
+}
+
+func liveSpecFingerprint(ctx *attestContext, cap attest.Capability) (string, error) {
 	plan, ok := ctx.Plans.For(cap.Path)
 	if !ok {
-		return ""
+		return "", nil
 	}
-	return attest.FingerprintDigest(plan.Fingerprint)
+	return attest.LiveFingerprint(ctx.CorpusRoot, plan.Fingerprint)
 }
 
 func renderProof(a attest.Assessment, f *attest.Freshness) string {
@@ -132,12 +138,15 @@ func renderProof(a attest.Assessment, f *attest.Freshness) string {
 		fmt.Fprintf(&b, "  %s\n", ui.RenderMuted(fmt.Sprintf(
 			"step %d — %s", rec.Proof.ObservedRed.StepIndex, rec.Proof.ObservedRed.StepText)))
 	}
-	// The single most important line on this screen: whether the red landed
-	// where the claim lives. Without it, a red anywhere reads as a proof.
-	if rec.Proof.ObservedRed.LandedOnClaimStep {
+	// The single most important line on this screen: the stored proof verdict.
+	// Without it, any observed red can read as a clean proof.
+	switch rec.Proof.Verdict {
+	case attest.ProofClean:
 		fmt.Fprintf(&b, "  %s\n\n", ui.RenderPass("landed on the step that names the behavior · clean proof"))
-	} else {
-		fmt.Fprintf(&b, "  %s\n\n", ui.RenderWarn("landed away from the step that names the behavior · NOT a clean proof"))
+	case attest.ProofAmbiguous:
+		fmt.Fprintf(&b, "  %s\n\n", ui.RenderWarn("ambiguous verdict · this is NOT a clean proof"))
+	default:
+		fmt.Fprintf(&b, "  %s\n\n", ui.RenderWarn("inconclusive · the break produced no failure, so this is NOT a clean proof"))
 	}
 
 	fmt.Fprintf(&b, "  %s\n  red %s · green %s · %s %s\n",

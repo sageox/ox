@@ -1,6 +1,7 @@
 package attest
 
 import (
+	"crypto/sha1" //nolint:gosec // Attest fingerprints intentionally use Git's SHA-1 blob format.
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -71,6 +72,56 @@ func FingerprintDigest(fp PlanFingerprint) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// LiveFingerprint re-hashes the fingerprint's source files as they exist in
+// the working tree now. Hashing the stored fingerprint again would only prove
+// that the compiled plan has not been edited; it would miss changes to the
+// feature and L2 sources from which the plan was compiled.
+//
+// Fingerprint paths are corpus-relative by compiler contract. The blob OID is
+// computed in-process with the same byte formula as `git hash-object`, so dirty
+// and untracked source files are handled without depending on Git's index.
+func LiveFingerprint(corpusRoot string, fp PlanFingerprint) (string, error) {
+	if len(fp.Inputs) == 0 {
+		return "", nil
+	}
+
+	live := PlanFingerprint{Inputs: make([]FingerprintInput, 0, len(fp.Inputs))}
+	for _, input := range fp.Inputs {
+		path, err := fingerprintInputPath(corpusRoot, input.Path)
+		if err != nil {
+			return "", err
+		}
+		raw, err := os.ReadFile(path) //nolint:gosec // path is constrained to the caller-supplied corpus root.
+		if err != nil {
+			return "", fmt.Errorf("read fingerprint input %s: %w", input.Path, err)
+		}
+		h := sha1.New() //nolint:gosec // Git blob OIDs and the compiler contract require SHA-1.
+		_, _ = fmt.Fprintf(h, "blob %d%c", len(raw), byte(0))
+		_, _ = h.Write(raw)
+		live.Inputs = append(live.Inputs, FingerprintInput{
+			Path: input.Path,
+			OID:  hex.EncodeToString(h.Sum(nil)),
+		})
+	}
+	return FingerprintDigest(live), nil
+}
+
+func fingerprintInputPath(corpusRoot, inputPath string) (string, error) {
+	if inputPath == "" || filepath.IsAbs(filepath.FromSlash(inputPath)) {
+		return "", fmt.Errorf("invalid fingerprint input path %q", inputPath)
+	}
+	root, err := filepath.Abs(corpusRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve corpus root: %w", err)
+	}
+	path := filepath.Join(root, filepath.FromSlash(inputPath))
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("fingerprint input path %q escapes corpus root", inputPath)
+	}
+	return path, nil
+}
+
 // PlanScenario is a scenario the compiler selected — it dispatches.
 type PlanScenario struct {
 	Name  string   `json:"name"`
@@ -81,8 +132,8 @@ type PlanScenario struct {
 
 // PlanExcluded is a scenario the compiler refused to dispatch, and why.
 //
-// Note it carries no Rule, so attribution back to a capability is by scenario
-// NAME against the corpus scan — see Plans.Dispatches.
+// It carries no Rule, but its feature-wide Index still distinguishes duplicate
+// display names when selected and excluded scenarios are joined to the corpus.
 type PlanExcluded struct {
 	Name   string   `json:"name"`
 	Index  int      `json:"index"`
@@ -161,33 +212,19 @@ func (p *Plans) For(capabilityPath string) (*CompiledPlan, bool) {
 	return nil, false
 }
 
-// Dispatches reports whether a named scenario in this plan actually dispatches.
-//
-// Matched by name because `excluded[]` carries no rule and both arrays index
-// independently from zero, so the scenario NAME is the only stable join key
-// between the compiled artifact and the corpus scan.
-func (plan *CompiledPlan) Dispatches(scenarioName string) bool {
+// DispatchesScenario reports whether this exact corpus scenario dispatches.
+// The compiler keys scenarios by their feature-wide (index, name) pair and
+// also records the enclosing Rule for selected scenarios. Matching all three
+// prevents one duplicate name from promoting a different Rule's capability.
+func (plan *CompiledPlan) DispatchesScenario(rule string, scenario Scenario) bool {
 	if plan == nil {
 		return false
 	}
-	for _, s := range plan.Scenarios {
-		if s.Name == scenarioName {
+	for _, compiled := range plan.Scenarios {
+		if compiled.Index == scenario.Index && compiled.Name == scenario.Name &&
+			(compiled.Rule == "" || compiled.Rule == rule) {
 			return true
 		}
 	}
 	return false
-}
-
-// ExclusionReason returns why a named scenario was excluded ("tag",
-// "unmatched-step", ...), or "" when the plan does not mention it.
-func (plan *CompiledPlan) ExclusionReason(scenarioName string) string {
-	if plan == nil {
-		return ""
-	}
-	for _, e := range plan.Excluded {
-		if e.Name == scenarioName {
-			return e.Reason
-		}
-	}
-	return ""
 }

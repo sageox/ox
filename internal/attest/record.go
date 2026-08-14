@@ -2,13 +2,16 @@ package attest
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -78,8 +81,8 @@ type Attestation struct {
 	// RepoKey is opaque and project-configured. No SageOx identifiers.
 	RepoKey string `json:"repoKey"`
 	// Subject is the tree this proof is valid for.
-	Subject TreeRef `json:"subject"`
-	MintedAt string `json:"mintedAt"`
+	Subject  TreeRef `json:"subject"`
+	MintedAt string  `json:"mintedAt"`
 
 	Proof Proof `json:"proof"`
 
@@ -236,13 +239,25 @@ func ParseAttestation(raw []byte) (*Attestation, error) {
 
 // Validate enforces the invariants that make a record trustworthy.
 func (a *Attestation) Validate() error {
-	if a.CapabilityID == "" {
+	if a == nil {
+		return errors.New("attestation is nil")
+	}
+	if a.Version != AttestationVersion {
+		return fmt.Errorf("attestation version is %d, want %d", a.Version, AttestationVersion)
+	}
+	if strings.TrimSpace(a.AttestationID) == "" {
+		return errors.New("attestation has no attestationId")
+	}
+	if strings.TrimSpace(a.CapabilityID) == "" {
 		return errors.New("attestation has no capabilityId")
 	}
-	if a.Claim == "" {
+	if strings.TrimSpace(a.Claim) == "" {
 		return errors.New("attestation has no claim")
 	}
-	if a.Subject.Value == "" {
+	if err := validateRepoKey(a.RepoKey); err != nil {
+		return fmt.Errorf("attestation repoKey: %w", err)
+	}
+	if strings.TrimSpace(a.Subject.Value) == "" {
 		return errors.New("attestation has no subject — a proof not bound to a tree proves nothing")
 	}
 	switch a.Subject.Scheme {
@@ -251,14 +266,44 @@ func (a *Attestation) Validate() error {
 		return fmt.Errorf("attestation subject scheme %q is not one of %q, %q",
 			a.Subject.Scheme, SchemeGitCommit, SchemeLoreCID)
 	}
+	if a.MintedAt == "" {
+		return errors.New("attestation has no mintedAt")
+	}
+	if _, err := time.Parse(time.RFC3339, a.MintedAt); err != nil {
+		return fmt.Errorf("attestation mintedAt is not RFC3339: %w", err)
+	}
 	switch a.Proof.Verdict {
 	case ProofClean, ProofAmbiguous, ProofInconclusive:
 	default:
 		return fmt.Errorf("attestation verdict %q is not one of %q, %q, %q",
 			a.Proof.Verdict, ProofClean, ProofAmbiguous, ProofInconclusive)
 	}
+	if strings.TrimSpace(a.Proof.Break.Description) == "" {
+		return errors.New("attestation proof has no break description")
+	}
+	if strings.TrimSpace(a.Proof.RedRunID) == "" {
+		return errors.New("attestation proof has no redRunId")
+	}
+	if strings.TrimSpace(a.Proof.RedRunID) != a.Proof.RedRunID {
+		return errors.New("attestation proof redRunId has leading or trailing whitespace")
+	}
+	if strings.TrimSpace(a.Proof.GreenRunID) == "" {
+		return errors.New("attestation proof has no greenRunId")
+	}
+	if strings.TrimSpace(a.Proof.GreenRunID) != a.Proof.GreenRunID {
+		return errors.New("attestation proof greenRunId has leading or trailing whitespace")
+	}
+	if a.Proof.RedRunID == a.Proof.GreenRunID {
+		return errors.New("attestation proof redRunId and greenRunId must identify different runs")
+	}
 	if a.Proof.Verdict != ProofInconclusive && a.Proof.ObservedRed.Verbatim == "" {
 		return errors.New("attestation records a red verdict with no verbatim failure text")
+	}
+	if a.Proof.Verdict != ProofInconclusive && a.Proof.ObservedRed.StepIndex < 1 {
+		return errors.New("attestation records a red verdict with no 1-indexed failure step")
+	}
+	if a.Proof.Verdict != ProofInconclusive && strings.TrimSpace(a.Proof.ObservedRed.StepText) == "" {
+		return errors.New("attestation records a red verdict with no failure step text")
 	}
 	// THE rule. Enforced here so it cannot be honored inconsistently by callers.
 	if !a.Proof.ObservedRed.LandedOnClaimStep && a.Proof.Verdict == ProofClean {
@@ -276,7 +321,9 @@ func (a *Attestation) IsProof() bool {
 // Records is every attestation in a corpus, keyed by capability id.
 type Records struct {
 	byCapability map[string]*Attestation
-	// Count is how many records were loaded.
+	// Count is how many unique capability records were loaded. During the
+	// filename migration a legacy slug file and its canonical encoded file may
+	// coexist; the canonical record wins and the pair counts once.
 	Count int
 	// Invalid maps a file path to the reason it could not be read. Surfaced
 	// rather than swallowed: a record we cannot parse is a capability whose
@@ -292,6 +339,7 @@ type Records struct {
 // failure to answer.
 func LoadRecords(corpusRoot string) (*Records, error) {
 	recs := &Records{byCapability: map[string]*Attestation{}, Invalid: map[string]string{}}
+	canonical := map[string]bool{}
 	dir := filepath.Join(corpusRoot, attestationsSubdir)
 	if _, err := os.Stat(dir); err != nil {
 		if os.IsNotExist(err) {
@@ -300,7 +348,7 @@ func LoadRecords(corpusRoot string) (*Records, error) {
 		return nil, fmt.Errorf("read attestations: %w", err)
 	}
 
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error { //nolint:gosec // local corpus scan; parse/validation remains the trust boundary
 		if err != nil {
 			return err
 		}
@@ -317,13 +365,18 @@ func LoadRecords(corpusRoot string) (*Records, error) {
 			recs.Invalid[path] = parseErr.Error()
 			return nil
 		}
-		recs.byCapability[a.CapabilityID] = a
-		recs.Count++
+		_, isCanonical := capabilityIDFromRecordFilename(d.Name())
+		isCanonical = isCanonical && d.Name() == recordFilename(a.CapabilityID)
+		if _, exists := recs.byCapability[a.CapabilityID]; !exists || isCanonical || !canonical[a.CapabilityID] {
+			recs.byCapability[a.CapabilityID] = a
+			canonical[a.CapabilityID] = isCanonical
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	recs.Count = len(recs.byCapability)
 	return recs, nil
 }
 
@@ -336,14 +389,60 @@ func (r *Records) For(capabilityID string) (*Attestation, bool) {
 	return a, ok
 }
 
+// All returns every valid record ordered by capability id. Callers that need
+// to detect records whose capability left the current corpus must not have to
+// reach into the internal index or silently lose those orphaned records.
+func (r *Records) All() []*Attestation {
+	if r == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(r.byCapability))
+	for id := range r.byCapability {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	out := make([]*Attestation, 0, len(ids))
+	for _, id := range ids {
+		if a := r.byCapability[id]; a != nil {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // RecordPath is where a capability's record lives: one file per capability,
-// current record only.
+// current record only. The capability id is raw-URL-base64 encoded, making the
+// mapping reversible and collision-free while keeping it one safe path segment.
 //
 // The path carries NO attestation id. History is git's job — duplicating it in
 // the path defeats `git log --follow` and grows the tree without bound.
 func RecordPath(corpusRoot, capabilityID string) string {
-	return filepath.Join(corpusRoot, attestationsSubdir,
-		fmt.Sprintf("%s.v%d.json", slugify(capabilityID), AttestationVersion))
+	return filepath.Join(corpusRoot, attestationsSubdir, recordFilename(capabilityID))
+}
+
+const recordFilenamePrefix = "cap-"
+
+func recordFilename(capabilityID string) string {
+	encoded := encodedPathSegment(capabilityID)
+	return fmt.Sprintf("%s%s.v%d.json", recordFilenamePrefix, encoded, AttestationVersion)
+}
+
+func encodedPathSegment(value string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(value))
+}
+
+func capabilityIDFromRecordFilename(name string) (string, bool) {
+	suffix := fmt.Sprintf(".v%d.json", AttestationVersion)
+	if !strings.HasPrefix(name, recordFilenamePrefix) || !strings.HasSuffix(name, suffix) {
+		return "", false
+	}
+	encoded := strings.TrimSuffix(strings.TrimPrefix(name, recordFilenamePrefix), suffix)
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(raw) == 0 {
+		return "", false
+	}
+	return string(raw), true
 }
 
 // WriteRecord validates then writes a record, creating parent directories.

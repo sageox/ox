@@ -23,7 +23,7 @@ var attestResultsCmd = &cobra.Command{
 			return err
 		}
 		jsonOut, agentID := wantJSON(cmd)
-		return emit(jsonOut, agentID, results, renderAttestResults(results), "attest results")
+		return emit(cmd, jsonOut, agentID, results, renderAttestResults(results), "attest results")
 	},
 }
 
