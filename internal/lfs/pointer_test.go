@@ -42,6 +42,20 @@ func TestParsePointerRoundTrip(t *testing.T) {
 	}
 }
 
+func TestNestedPointer(t *testing.T) {
+	inner := FileRef{Storage: StorageLFS, OID: "sha256:inner", Size: 9914}
+	content := []byte(FormatPointer(inner.OID, inner.Size))
+	outer := FileRef{Storage: StorageLFS, OID: "sha256:outer", Size: int64(len(content))}
+
+	got, ok := NestedPointer(outer, content)
+	require.True(t, ok)
+	assert.Equal(t, inner, got)
+
+	outer.Size++
+	_, ok = NestedPointer(outer, content)
+	assert.False(t, ok, "a size mismatch is not evidence of nested LFS data")
+}
+
 func TestParsePointerErrors(t *testing.T) {
 	tests := []struct {
 		name    string

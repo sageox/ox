@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/flags"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSettingsFetcher_Fetch_CachesResult(t *testing.T) {
@@ -150,6 +151,21 @@ func TestSettingsFetcher_Fetch_HandlesServerError(t *testing.T) {
 	if f.CachedSettings() != nil {
 		t.Error("expected nil cached settings after server error")
 	}
+}
+
+func TestSettingsFetcher_Fetch_404UsesDefaultsWithoutError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	f := NewSettingsFetcher(logger, srv.URL)
+	f.SetAuthTokenGetter(func() string { return "test-token" })
+	f.Fetch(context.Background())
+
+	require.Nil(t, f.CachedSettings())
+	require.NoError(t, f.lastErr)
 }
 
 func TestSettingsFetcher_Fetch_FetchedAtIsSet(t *testing.T) {

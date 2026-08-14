@@ -55,6 +55,8 @@ type WorkspaceState struct {
 	// sync (fetch/pull) retry state — backoff on consecutive failures
 	SyncFailures    int       `json:"sync_failures,omitempty"`     // consecutive failed sync attempts
 	NextSyncAttempt time.Time `json:"next_sync_attempt,omitempty"` // when to retry sync (exponential backoff)
+	SyncSuspended   bool      `json:"sync_suspended,omitempty"`    // repeated identical dirty-tree failure; requires a change or explicit sync
+	FailedTreeHash  string    `json:"-"`                           // hash of the dirty tree from the most recent failed pull
 
 	// manifest-derived settings (from .sageox/sync.manifest in the team context repo)
 	SyncIntervalMin int       `json:"sync_interval_min,omitempty"` // minutes between syncs (0 = use default)
@@ -894,6 +896,31 @@ func (r *WorkspaceRegistry) RecordSyncFailure(id string) {
 	ws.NextSyncAttempt = time.Now().Add(exponentialBackoff(ws.SyncFailures, time.Minute, syncBackoffMax))
 }
 
+// RecordSyncFailureFingerprint records a failed pull and permanently suspends
+// background retries when the same dirty tree has already failed once. This
+// prevents git pull --rebase --autostash from creating an unbounded stash pile
+// against a deterministic local checkout failure. The fingerprint is a hash,
+// never the worktree paths or contents themselves.
+func (r *WorkspaceRegistry) RecordSyncFailureFingerprint(id, fingerprint string) (suspended bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	ws := r.workspaces[id]
+	if ws == nil {
+		ws = &WorkspaceState{ID: id}
+		r.workspaces[id] = ws
+	}
+	if fingerprint != "" && ws.SyncFailures > 0 && ws.FailedTreeHash == fingerprint {
+		ws.SyncSuspended = true
+		ws.NextSyncAttempt = time.Time{}
+		return true
+	}
+	ws.FailedTreeHash = fingerprint
+	ws.SyncFailures++
+	ws.NextSyncAttempt = time.Now().Add(exponentialBackoff(ws.SyncFailures, time.Minute, syncBackoffMax))
+	return false
+}
+
 // ClearSyncFailures resets sync retry state after a successful sync.
 func (r *WorkspaceRegistry) ClearSyncFailures(id string) {
 	r.mu.Lock()
@@ -905,6 +932,8 @@ func (r *WorkspaceRegistry) ClearSyncFailures(id string) {
 	}
 	ws.SyncFailures = 0
 	ws.NextSyncAttempt = time.Time{}
+	ws.SyncSuspended = false
+	ws.FailedTreeHash = ""
 }
 
 // ShouldSync checks if enough time has passed since the last sync failure to retry.
@@ -917,10 +946,22 @@ func (r *WorkspaceRegistry) ShouldSync(id string) bool {
 	if ws == nil {
 		return true
 	}
+	if ws.SyncSuspended {
+		return false
+	}
 	if ws.SyncFailures == 0 || ws.NextSyncAttempt.IsZero() {
 		return true
 	}
 	return time.Now().After(ws.NextSyncAttempt)
+}
+
+// IsSyncSuspended reports whether repeated identical failed pulls have stopped
+// background retries for the workspace.
+func (r *WorkspaceRegistry) IsSyncSuspended(id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ws := r.workspaces[id]
+	return ws != nil && ws.SyncSuspended
 }
 
 // GetSyncRetryInfo returns the current sync retry state for a workspace.

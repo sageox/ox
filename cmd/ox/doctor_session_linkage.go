@@ -83,16 +83,18 @@ func checkSessionTrailerRatio() checkResult {
 	if ratio >= trailerRatioWarnThreshold {
 		return PassedCheck(name, msg)
 	}
-	fix := "If a squash-merge config strips trailers or commits are landing without `ox` running, " +
-		"recent commits will not be linkable to their sessions. See docs/specs/session-commit-linkage.md."
+	fix := "Informational only: historical commits cannot be updated safely. New commits created while a session is recording receive trailers automatically. " +
+		"If new commits are missing trailers, check the commit hook and squash-merge configuration. See docs/specs/session-commit-linkage.md."
 	return WarningCheck(name, msg, fix)
 }
 
 // scanTrailerRatio returns (totalCommits, withTrailer, err) for the last
 // `limit` commits on HEAD. Pure: only reads git state.
 func scanTrailerRatio(gitRoot string, limit int) (int, int, error) {
-	// %H + %B per commit, separated by NUL to survive newlines in messages
-	out, err := runGitLinkage(gitRoot, "log", fmt.Sprintf("-%d", limit), "--format=%H%n%B%x00")
+	// %P + %B per commit, separated by NUL to survive newlines in messages.
+	// Merge commits are excluded: they commonly predate session recording and
+	// cannot be retrofitted without rewriting shared history.
+	out, err := runGitLinkage(gitRoot, "log", fmt.Sprintf("-%d", limit), "--format=%P%x1f%B%x00")
 	if err != nil {
 		return 0, 0, err
 	}
@@ -103,8 +105,12 @@ func scanTrailerRatio(gitRoot string, limit int) (int, int, error) {
 		if rec == "" {
 			continue
 		}
+		parts := strings.SplitN(rec, "\x1f", 2)
+		if len(parts) != 2 || len(strings.Fields(parts[0])) > 1 {
+			continue
+		}
 		total++
-		if strings.Contains(rec, "SageOx-Session:") {
+		if strings.Contains(parts[1], "SageOx-Session:") {
 			with++
 		}
 	}

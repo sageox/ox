@@ -432,6 +432,9 @@ func (c *RepoClient) GetCLISettings() (json.RawMessage, error) {
 		if resp.StatusCode == http.StatusUnauthorized {
 			return nil, ErrUnauthorized
 		}
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, ErrCLISettingsUnsupported
+		}
 		errMsg := strings.TrimSpace(string(bodyBytes))
 		if errMsg == "" {
 			return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, reqURL)

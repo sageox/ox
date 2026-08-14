@@ -381,6 +381,16 @@ common issues, or --fix-slug to target specific checks.`,
 	},
 }
 
+var gcCmd = &cobra.Command{
+	Use:          "gc",
+	Short:        "Reclone eligible managed repositories safely",
+	Args:         cobra.NoArgs,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		return runGC(cmd)
+	},
+}
+
 // getAvailableSlugs returns a sorted list of all registered check slugs.
 func getAvailableSlugs() []string {
 	var slugs []string

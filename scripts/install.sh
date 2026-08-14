@@ -172,23 +172,52 @@ install_from_release() {
         fi
     fi
 
-    # Verify checksum if available
+    # Verify the archive before extracting or replacing any installed binary.
+    # A missing or unverifiable checksum is a hard failure: this script is
+    # commonly run through curl, so integrity must not be advisory.
     local checksums_url="https://github.com/$REPO/releases/download/${version}/checksums.txt"
     if command -v curl &> /dev/null; then
-        curl -fsSL -o checksums.txt "$checksums_url" 2>/dev/null || true
+        if ! curl -fsSL -o checksums.txt "$checksums_url"; then
+            log_error "Failed to download release checksums; refusing to install unverified binaries"
+            cd - > /dev/null || cd "$HOME"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
     elif command -v wget &> /dev/null; then
-        wget -q -O checksums.txt "$checksums_url" 2>/dev/null || true
+        if ! wget -q -O checksums.txt "$checksums_url"; then
+            log_error "Failed to download release checksums; refusing to install unverified binaries"
+            cd - > /dev/null || cd "$HOME"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
     fi
 
-    if [[ -f checksums.txt ]]; then
-        log_info "Verifying checksum..."
-        if command -v sha256sum &> /dev/null; then
-            sha256sum -c checksums.txt --ignore-missing --quiet 2>/dev/null || log_warning "Checksum verification failed (continuing anyway)"
-        elif command -v shasum &> /dev/null; then
-            shasum -a 256 -c checksums.txt --ignore-missing --quiet 2>/dev/null || log_warning "Checksum verification failed (continuing anyway)"
-        else
-            log_warning "No sha256sum or shasum available, skipping verification"
+    if ! grep -E "(^|[[:space:]*])${archive_name}$" checksums.txt > archive-checksum.txt; then
+        log_error "Release checksums do not include $archive_name; refusing to install"
+        cd - > /dev/null || cd "$HOME"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    log_info "Verifying checksum..."
+    if command -v sha256sum &> /dev/null; then
+        if ! sha256sum -c archive-checksum.txt --quiet; then
+            log_error "Checksum verification failed; refusing to install"
+            cd - > /dev/null || cd "$HOME"
+            rm -rf "$tmp_dir"
+            return 1
         fi
+    elif command -v shasum &> /dev/null; then
+        if ! shasum -a 256 -c archive-checksum.txt --quiet; then
+            log_error "Checksum verification failed; refusing to install"
+            cd - > /dev/null || cd "$HOME"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
+    else
+        log_error "No SHA-256 verification tool found; refusing to install"
+        cd - > /dev/null || cd "$HOME"
+        rm -rf "$tmp_dir"
+        return 1
     fi
 
     # Extract archive

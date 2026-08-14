@@ -66,6 +66,25 @@ func ParsePointer(content string) (oid string, size int64, err error) {
 	return oid, size, nil
 }
 
+// NestedPointer reports whether content is a valid LFS pointer stored as the
+// object referenced by outer. That shape is never valid content for an
+// LFS-tracked artifact: checkout resolves outer to another pointer, leaving the
+// worktree permanently dirty against the index.
+//
+// The outer size check is deliberate. It prevents a caller from treating an
+// arbitrary small pointer-shaped payload as evidence about an unrelated LFS
+// object.
+func NestedPointer(outer FileRef, content []byte) (FileRef, bool) {
+	if !outer.IsLFS() || outer.Size != int64(len(content)) || len(content) > maxPointerSize {
+		return FileRef{}, false
+	}
+	oid, size, err := ParsePointer(string(content))
+	if err != nil {
+		return FileRef{}, false
+	}
+	return FileRef{Storage: StorageLFS, OID: oid, Size: size}, true
+}
+
 // --- File I/O layer (clean / dehydrate / detect) ---
 //
 // These functions implement the "clean" side of git-lfs (replacing content

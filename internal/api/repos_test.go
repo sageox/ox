@@ -109,6 +109,19 @@ func TestGetRepos_HTTP401_Unauthorized(t *testing.T) {
 	assert.Contains(t, err.Error(), "ox login")
 }
 
+func TestGetCLISettings_HTTP404_IsCapabilityGap(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/cli/settings", r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client := &RepoClient{baseURL: server.URL, httpClient: server.Client(), authToken: "test-token"}
+	_, err := client.GetCLISettings()
+	require.ErrorIs(t, err, ErrCLISettingsUnsupported)
+}
+
 func TestGetRepos_HTTP403_Forbidden(t *testing.T) {
 	t.Parallel()
 	// 403 = user doesn't have required permissions

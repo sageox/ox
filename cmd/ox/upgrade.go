@@ -90,6 +90,11 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 
 	// perform upgrade based on install method
 	target, _ := cmd.Flags().GetString("target")
+	if err := validateUpgradeTarget(method, target); err != nil {
+		result.Status = "failed"
+		result.Message = err.Error()
+		return outputUpgradeResult(cmd, result, jsonOutput)
+	}
 	var err error
 	switch method {
 	case installHomebrew:
@@ -118,6 +123,16 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	result.Status = "upgraded"
 	result.Message = fmt.Sprintf("Upgraded to v%s", vResult.LatestVersion)
 	return outputUpgradeResult(cmd, result, jsonOutput)
+}
+
+// validateUpgradeTarget rejects installation paths that cannot honor a pinned
+// release. Accepting --target and then installing an arbitrary latest version
+// is worse than failing: it creates a false compatibility guarantee.
+func validateUpgradeTarget(method installMethod, target string) error {
+	if target == "" || method == installGoInstall {
+		return nil
+	}
+	return fmt.Errorf("--target is supported only for go-install installations; %s upgrades cannot safely honor a pinned release", method)
 }
 
 func outputUpgradeResult(cmd *cobra.Command, result upgradeResult, jsonOutput bool) error {

@@ -654,6 +654,21 @@ func TestWorkspaceRegistry_ClearSyncFailures_ResetsBackoff(t *testing.T) {
 	assert.True(t, reg.ShouldSync(id))
 }
 
+func TestWorkspaceRegistry_RepeatedDirtyTreeSuspendsSync(t *testing.T) {
+	reg := newTestWorkspaceRegistry(t)
+	const id = "team-test"
+	reg.workspaces[id] = &WorkspaceState{ID: id}
+
+	assert.False(t, reg.RecordSyncFailureFingerprint(id, "same-tree"))
+	assert.True(t, reg.RecordSyncFailureFingerprint(id, "same-tree"))
+	assert.True(t, reg.IsSyncSuspended(id))
+	assert.False(t, reg.ShouldSync(id), "a deterministic dirty tree must not keep retrying in the background")
+
+	reg.ClearSyncFailures(id)
+	assert.False(t, reg.IsSyncSuspended(id))
+	assert.True(t, reg.ShouldSync(id))
+}
+
 func TestWorkspaceRegistry_ShouldSync_UnknownWorkspace(t *testing.T) {
 	t.Parallel()
 	reg := &WorkspaceRegistry{

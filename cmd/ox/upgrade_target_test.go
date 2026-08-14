@@ -34,3 +34,27 @@ func TestResolveUpgradeTarget_RequirePinAcceptsExplicit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "v1.0.0", target)
 }
+
+func TestValidateUpgradeTarget(t *testing.T) {
+	tests := []struct {
+		method installMethod
+		target string
+		want   bool
+	}{
+		{installGoInstall, "v0.42.0", false},
+		{installBinary, "v0.42.0", true},
+		{installHomebrew, "v0.42.0", true},
+		{installSource, "v0.42.0", true},
+		{installBinary, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.method)+tt.target, func(t *testing.T) {
+			err := validateUpgradeTarget(tt.method, tt.target)
+			if tt.want {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}

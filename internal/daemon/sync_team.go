@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -243,9 +245,13 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 
 		if r.err != nil {
 			s.workspaceRegistry.SetWorkspaceError(r.ws.ID, r.err.Error())
-			s.workspaceRegistry.RecordSyncFailure(r.ws.ID)
+			fingerprint, fpErr := worktreeFingerprint(ctx, r.ws.Path)
+			suspended := fpErr == nil && s.workspaceRegistry.RecordSyncFailureFingerprint(r.ws.ID, fingerprint)
+			if fpErr != nil {
+				s.workspaceRegistry.RecordSyncFailure(r.ws.ID)
+			}
 			s.recordSyncStateFailure(r.ws.Path)
-			s.logger.Debug("team context pull failed", "team", r.ws.TeamName, "error", r.err)
+			s.logger.Debug("team context pull failed", "team", r.ws.TeamName, "error", r.err, "suspended", suspended)
 			s.metrics.RecordTeamSyncError()
 			if progress != nil {
 				_ = progress.WriteStage("error", fmt.Sprintf("Team %s: %v", r.ws.TeamName, r.err))
@@ -370,6 +376,19 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 	}
 
 	return outcomes, nil
+}
+
+// worktreeFingerprint returns a content-independent identifier for the
+// worktree state that caused a failed sync. It deliberately hashes porcelain
+// output so logs and status never expose local filenames or data.
+func worktreeFingerprint(ctx context.Context, repoPath string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "status", "--porcelain=v1", "--untracked-files=all")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(out)
+	return fmt.Sprintf("%x", sum), nil
 }
 
 // pullTeamContext performs a git pull on a single team context repo.

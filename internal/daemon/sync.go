@@ -1183,6 +1183,18 @@ func (s *SyncScheduler) shouldSyncOrBypass(id string, forceSync bool) bool {
 		s.workspaceRegistry.ClearSyncFailures(id)
 		return true
 	}
+	if s.workspaceRegistry.IsSyncSuspended(id) {
+		s.logger.Warn("sync suspended after repeated identical dirty tree", "id", id)
+		if s.issues != nil {
+			s.issues.SetIssue(DaemonIssue{
+				Type:     IssueTypeSyncBackoff,
+				Severity: SeverityWarning,
+				Repo:     id,
+				Summary:  "Sync suspended after the same local changes failed twice; run `ox doctor` or `ox sync` after resolving the checkout",
+			})
+		}
+		return false
+	}
 	failures, nextRetry := s.workspaceRegistry.GetSyncRetryInfo(id)
 	s.logger.Warn("sync in backoff, skipping", "id", id, "failures", failures, "next_retry", nextRetry)
 	if s.issues != nil {

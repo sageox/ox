@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -64,6 +65,12 @@ func (f *SettingsFetcher) Fetch(ctx context.Context) {
 
 	rawJSON, err := client.GetCLISettings()
 	if err != nil {
+		if errors.Is(err, api.ErrCLISettingsUnsupported) {
+			// Version-skew is expected during rolling server deployments. Keep
+			// defaults/cached settings without emitting an operator-facing warning.
+			f.logger.Debug("cli settings endpoint unsupported; using cached/default settings", "endpoint", f.endpoint)
+			return
+		}
 		f.mu.Lock()
 		f.lastErr = err
 		f.mu.Unlock()

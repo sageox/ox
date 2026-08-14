@@ -12,6 +12,7 @@ import (
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/tokens"
 )
@@ -47,6 +48,11 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 		check := checkSingleTeamContext(tc, opts)
 		checks = append(checks, check)
 
+		pointerCheck := checkDoubleEncodedLFSPointers(tc, opts)
+		if pointerCheck.warning || !pointerCheck.passed {
+			checks = append(checks, pointerCheck)
+		}
+
 		// check AGENTS.md for each team context (separate check)
 		agentsMDCheck := checkTeamAgentsMD(tc)
 		if agentsMDCheck.warning || !agentsMDCheck.passed {
@@ -73,6 +79,97 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 	}
 
 	return checks
+}
+
+// checkDoubleEncodedLFSPointers detects the only worktree shape caused by an
+// LFS object containing a second LFS pointer. Git LFS smudges the outer pointer
+// into the inner one, which can never match the index and makes every checkout
+// permanently dirty. The check is fully local: it compares the index pointer
+// with the corresponding worktree pointer and makes no network request.
+func checkDoubleEncodedLFSPointers(tc config.TeamContext, opts doctorOptions) checkResult {
+	name := "Team LFS integrity"
+	if tc.TeamName != "" {
+		name += ": " + tc.TeamName
+	}
+	if tc.Path == "" || !isGitRepo(tc.Path) {
+		return SkippedCheck(name, "team context unavailable", "")
+	}
+
+	paths, err := findDoubleEncodedLFSPointerPaths(tc.Path)
+	if err != nil {
+		return WarningCheck(name, "could not inspect LFS pointers", err.Error())
+	}
+	if len(paths) == 0 {
+		return PassedCheck(name, "no nested LFS pointers")
+	}
+
+	if opts.fix {
+		if err := restoreRawLFSPointers(tc.Path, paths); err != nil {
+			return FailedCheck(name, "nested LFS pointers found; restore failed", err.Error())
+		}
+		return PassedCheck(name, fmt.Sprintf("restored %d nested LFS pointer(s) as raw stubs", len(paths)))
+	}
+
+	return WarningCheck(name, fmt.Sprintf("%d nested LFS pointer(s) leave checkout permanently dirty", len(paths)),
+		"Paths: "+strings.Join(paths, ", ")+". Run `ox doctor --fix` to restore raw stubs locally; wait for the owning service to repair the remote content.")
+}
+
+func findDoubleEncodedLFSPointerPaths(repoPath string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "ls-files", "-z")
+	indexed, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list tracked files: %w", err)
+	}
+
+	var found []string
+	for _, rel := range strings.Split(string(indexed), "\x00") {
+		if rel == "" || lfs.ValidateRelativePath(rel) != nil {
+			continue
+		}
+		worktreePath := filepath.Join(repoPath, filepath.FromSlash(rel))
+		innerBytes, err := os.ReadFile(worktreePath)
+		if err != nil || len(innerBytes) > 200 {
+			continue
+		}
+		if _, _, err := lfs.ParsePointer(string(innerBytes)); err != nil {
+			continue
+		}
+
+		show := exec.CommandContext(ctx, "git", "-C", repoPath, "show", ":"+rel)
+		outerBytes, err := show.Output()
+		if err != nil {
+			return nil, fmt.Errorf("read index pointer %q: %w", rel, err)
+		}
+		oid, size, err := lfs.ParsePointer(string(outerBytes))
+		if err != nil {
+			continue
+		}
+		if _, ok := lfs.NestedPointer(lfs.FileRef{Storage: lfs.StorageLFS, OID: oid, Size: size}, innerBytes); ok {
+			found = append(found, rel)
+		}
+	}
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("scan LFS pointers: %w", ctx.Err())
+	}
+	return found, nil
+}
+
+// restoreRawLFSPointers disables Git LFS smudging for this checkout only, so
+// the raw index pointer replaces the inner pointer. It is intentionally used
+// only after findDoubleEncodedLFSPointerPaths proves the exact corruption.
+func restoreRawLFSPointers(repoPath string, paths []string) error {
+	args := []string{"-C", repoPath, "-c", "filter.lfs.smudge=cat", "-c", "filter.lfs.process=", "-c", "filter.lfs.required=false", "checkout", "--"}
+	args = append(args, paths...)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("restore raw LFS stubs: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }
 
 // checkSingleTeamContext validates a single team context.
