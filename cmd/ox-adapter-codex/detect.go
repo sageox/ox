@@ -2,6 +2,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -54,7 +55,28 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 				Severity: "warning",
 				Title:    "ox hooks not installed for Codex CLI",
 				Detail:   "Codex CLI hooks are not configured for this project.",
-				Fix:      "ox-adapter-codex install-hooks --repo-root " + p.RepoRoot + " --scope project",
+				Fix:      "ox integrate install --codex",
+				FixArgv:  []string{"ox", "integrate", "install", "--codex"},
+				FixSafe:  true,
+			})
+		}
+
+		legacyFeatureFlag, err := hasLegacyFeatureFlag(p.RepoRoot, p.Scope)
+		if err != nil {
+			issues = append(issues, adapterprotocol.DiagnoseIssue{
+				Slug:     "codex:legacy-hooks-feature-unreadable",
+				Severity: "warning",
+				Title:    "Codex legacy hook feature could not be checked",
+				Detail:   fmt.Sprintf("failed to read Codex config: %v", err),
+			})
+		} else if legacyFeatureFlag {
+			issues = append(issues, adapterprotocol.DiagnoseIssue{
+				Slug:     "codex:legacy-hooks-feature",
+				Severity: "warning",
+				Title:    "Codex deprecated hook feature is configured",
+				Detail:   "features.codex_hooks is deprecated; Codex hooks are stable and enabled by default.",
+				Fix:      "ox integrate install --codex",
+				FixArgv:  []string{"ox", "integrate", "install", "--codex"},
 				FixSafe:  true,
 			})
 		}

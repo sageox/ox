@@ -125,6 +125,7 @@ func TestCodexLifecycleNotification(t *testing.T) {
 				assert.Empty(t, got)
 			} else {
 				assert.Contains(t, got, "hooks via .codex/hooks.json")
+				assert.NotContains(t, got, "codex_hooks")
 			}
 		})
 	}

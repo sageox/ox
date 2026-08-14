@@ -125,5 +125,5 @@ func CodexLifecycleNotification(agentType string) string {
 		return ""
 	}
 
-	return "Codex supports hooks via .codex/hooks.json (enable with `codex features enable codex_hooks`). Run `ox integrate install --codex` to install hooks. Session recording via `ox agent <id> session start` and `ox agent <id> session stop`."
+	return "Codex supports hooks via .codex/hooks.json. Run `ox integrate install --codex` to install hooks. Session recording via `ox agent <id> session start` and `ox agent <id> session stop`."
 }

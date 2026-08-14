@@ -70,9 +70,11 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 		return nil, err
 	}
 
-	// enable the codex_hooks feature flag
-	if err := ensureFeatureFlag(p.RepoRoot, p.Scope); err != nil {
-		return nil, fmt.Errorf("hooks.json written but failed to enable feature flag: %w", err)
+	// Codex hooks are stable and enabled by default. Clean up the legacy
+	// codex_hooks alias that older ox versions installed, but never create or
+	// change the current features.hooks setting.
+	if _, err := removeLegacyFeatureFlag(p.RepoRoot, p.Scope); err != nil {
+		return nil, fmt.Errorf("hooks.json written but failed to remove legacy feature flag: %w", err)
 	}
 
 	return &adapterprotocol.InstallHooksResponse{
@@ -148,11 +150,6 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 
 	if !changed {
 		return &adapterprotocol.UninstallHooksResponse{Uninstalled: true}, nil
-	}
-
-	// remove feature flag if no ox hooks remain
-	if len(hooksMap) == 0 {
-		_ = removeFeatureFlag(p.RepoRoot, p.Scope)
 	}
 
 	// if file is now empty, remove it
@@ -310,66 +307,36 @@ func isOxCommand(cmd string) bool {
 	return strings.Contains(cmd, "ox agent hook") || strings.Contains(cmd, "ox agent prime")
 }
 
-// --- config.toml feature flag ---
+// --- config.toml legacy feature migration ---
 
-func ensureFeatureFlag(repoRoot, scope string) error {
-	path := resolveConfigPath(repoRoot, scope)
-
-	var config map[string]any
-	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-		if err := toml.Unmarshal(data, &config); err != nil {
-			return fmt.Errorf("failed to parse %s: %w", path, err)
-		}
-	}
-	if config == nil {
-		config = make(map[string]any)
-	}
-
-	features, ok := config["features"].(map[string]any)
-	if !ok {
-		features = make(map[string]any)
-	}
-
-	if features["codex_hooks"] == true {
-		return nil
-	}
-
-	features["codex_hooks"] = true
-	config["features"] = features
-
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	data, err := toml.Marshal(config)
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
-	}
-
-	perm := os.FileMode(0644)
-	if scope == "user" {
-		perm = 0600
-	}
-	return os.WriteFile(path, data, perm)
-}
-
-func removeFeatureFlag(repoRoot, scope string) error {
+// removeLegacyFeatureFlag removes only SageOx's deprecated
+// features.codex_hooks setting. It never creates config.toml and leaves all
+// other user configuration, including an explicit features.hooks choice,
+// untouched.
+func removeLegacyFeatureFlag(repoRoot, scope string) (bool, error) {
 	path := resolveConfigPath(repoRoot, scope)
 
 	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
 	if err != nil {
-		return nil
+		return false, err
+	}
+	if len(data) == 0 {
+		return false, nil
 	}
 
 	var config map[string]any
 	if err := toml.Unmarshal(data, &config); err != nil {
-		return nil
+		return false, fmt.Errorf("failed to parse %s: %w", path, err)
 	}
-
 	features, ok := config["features"].(map[string]any)
 	if !ok {
-		return nil
+		return false, nil
+	}
+	if _, ok := features["codex_hooks"]; !ok {
+		return false, nil
 	}
 
 	delete(features, "codex_hooks")
@@ -380,17 +347,37 @@ func removeFeatureFlag(repoRoot, scope string) error {
 	}
 
 	if len(config) == 0 {
-		return os.Remove(path)
+		return true, os.Remove(path)
 	}
 
 	out, err := toml.Marshal(config)
 	if err != nil {
-		return err
+		return false, fmt.Errorf("failed to marshal %s: %w", path, err)
+	}
+	return true, os.WriteFile(path, out, 0o600)
+}
+
+func hasLegacyFeatureFlag(repoRoot, scope string) (bool, error) {
+	path := resolveConfigPath(repoRoot, scope)
+
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) || len(data) == 0 {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
 	}
 
-	perm := os.FileMode(0644)
-	if scope == "user" {
-		perm = 0600
+	var config map[string]any
+	if err := toml.Unmarshal(data, &config); err != nil {
+		return false, fmt.Errorf("failed to parse %s: %w", path, err)
 	}
-	return os.WriteFile(path, out, perm)
+
+	features, ok := config["features"].(map[string]any)
+	if !ok {
+		return false, nil
+	}
+
+	_, ok = features["codex_hooks"]
+	return ok, nil
 }

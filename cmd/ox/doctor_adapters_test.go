@@ -176,6 +176,20 @@ func TestShouldFixAdapterSlug(t *testing.T) {
 			fixSafe: true,
 			want:    false,
 		},
+		{
+			name:    "safe automatic Codex migration",
+			opts:    doctorOptions{},
+			slug:    "codex:codex:legacy-hooks-feature",
+			fixSafe: true,
+			want:    true,
+		},
+		{
+			name:    "unsafe Codex migration is not automatic",
+			opts:    doctorOptions{},
+			slug:    "codex:codex:legacy-hooks-feature",
+			fixSafe: false,
+			want:    false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

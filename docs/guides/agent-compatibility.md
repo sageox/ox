@@ -62,7 +62,6 @@ No extra setup needed — Claude Code is the reference implementation.
 ```bash
 ox init
 ox integrate install --codex
-codex features enable codex_hooks  # enable hook support in Codex
 ```
 
 ### Gemini CLI
