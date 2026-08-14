@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
@@ -309,10 +310,11 @@ func isOxCommand(cmd string) bool {
 
 // --- config.toml legacy feature migration ---
 
-// removeLegacyFeatureFlag removes only SageOx's deprecated
-// features.codex_hooks setting. It never creates config.toml and leaves all
-// other user configuration, including an explicit features.hooks choice,
-// untouched.
+var legacyFeatureFlagAssignment = regexp.MustCompile(`^codex_hooks\s*=\s*(?:true|false)\s*(?:#.*)?$`)
+
+// removeLegacyFeatureFlag removes only the single-line legacy assignment that
+// older SageOx versions wrote under [features]. It never creates config.toml,
+// re-marshals the user's TOML, or changes an explicit features.hooks choice.
 func removeLegacyFeatureFlag(repoRoot, scope string) (bool, error) {
 	path := resolveConfigPath(repoRoot, scope)
 
@@ -327,32 +329,19 @@ func removeLegacyFeatureFlag(repoRoot, scope string) (bool, error) {
 		return false, nil
 	}
 
-	var config map[string]any
-	if err := toml.Unmarshal(data, &config); err != nil {
+	legacyFeatureFlag, err := hasLegacyFeatureFlagInConfig(data)
+	if err != nil {
 		return false, fmt.Errorf("failed to parse %s: %w", path, err)
 	}
-	features, ok := config["features"].(map[string]any)
-	if !ok {
-		return false, nil
-	}
-	if _, ok := features["codex_hooks"]; !ok {
+	if !legacyFeatureFlag {
 		return false, nil
 	}
 
-	delete(features, "codex_hooks")
-	if len(features) == 0 {
-		delete(config, "features")
-	} else {
-		config["features"] = features
-	}
-
-	if len(config) == 0 {
-		return true, os.Remove(path)
-	}
-
-	out, err := toml.Marshal(config)
-	if err != nil {
-		return false, fmt.Errorf("failed to marshal %s: %w", path, err)
+	out, changed := removeLegacyFeatureFlagAssignment(data)
+	if !changed {
+		// Only the [features] assignment produced by older SageOx installers
+		// is safe to edit automatically. Do not rewrite other TOML encodings.
+		return false, nil
 	}
 	return true, os.WriteFile(path, out, 0o600)
 }
@@ -368,11 +357,23 @@ func hasLegacyFeatureFlag(repoRoot, scope string) (bool, error) {
 		return false, err
 	}
 
-	var config map[string]any
-	if err := toml.Unmarshal(data, &config); err != nil {
+	legacyFeatureFlag, err := hasLegacyFeatureFlagInConfig(data)
+	if err != nil {
 		return false, fmt.Errorf("failed to parse %s: %w", path, err)
 	}
+	if !legacyFeatureFlag {
+		return false, nil
+	}
 
+	_, removable := removeLegacyFeatureFlagAssignment(data)
+	return removable, nil
+}
+
+func hasLegacyFeatureFlagInConfig(data []byte) (bool, error) {
+	var config map[string]any
+	if err := toml.Unmarshal(data, &config); err != nil {
+		return false, err
+	}
 	features, ok := config["features"].(map[string]any)
 	if !ok {
 		return false, nil
@@ -380,4 +381,31 @@ func hasLegacyFeatureFlag(repoRoot, scope string) (bool, error) {
 
 	_, ok = features["codex_hooks"]
 	return ok, nil
+}
+
+// removeLegacyFeatureFlagAssignment strips only the old SageOx-generated
+// codex_hooks boolean from a plain [features] table. It preserves every other
+// byte in config.toml, including comments, whitespace, quote choices, and
+// unrelated tables.
+func removeLegacyFeatureFlagAssignment(data []byte) ([]byte, bool) {
+	lines := strings.SplitAfter(string(data), "\n")
+	var out strings.Builder
+	out.Grow(len(data))
+	inFeaturesTable := false
+	changed := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			header := strings.TrimSpace(strings.SplitN(trimmed, "#", 2)[0])
+			inFeaturesTable = header == "[features]"
+		}
+		if inFeaturesTable && legacyFeatureFlagAssignment.MatchString(trimmed) {
+			changed = true
+			continue
+		}
+		out.WriteString(line)
+	}
+
+	return []byte(out.String()), changed
 }

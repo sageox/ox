@@ -55,6 +55,40 @@ model = "gpt-5-codex"
 	}
 }
 
+func TestHandleInstallHooks_PreservesTOMLFormattingDuringLegacyMigration(t *testing.T) {
+	repoRoot := t.TempDir()
+	configPath := filepath.Join(repoRoot, codexProjectPath, codexConfigFile)
+	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o755))
+	config := []byte(`# User-owned Codex configuration
+model = 'gpt-5' # Preserve quote style and comments.
+
+[features]
+# This comment describes the old SageOx setting.
+codex_hooks = true # Remove only this line.
+hooks = false # Explicit opt-out must remain.
+
+[profiles.work]
+model = 'gpt-5-codex'
+`)
+	want := []byte(`# User-owned Codex configuration
+model = 'gpt-5' # Preserve quote style and comments.
+
+[features]
+# This comment describes the old SageOx setting.
+hooks = false # Explicit opt-out must remain.
+
+[profiles.work]
+model = 'gpt-5-codex'
+`)
+	require.NoError(t, os.WriteFile(configPath, config, 0o600))
+
+	_, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: repoRoot, Scope: "project"})
+	require.NoError(t, err)
+	got, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
 func TestHandleInstallHooks_DoesNotCreateConfigWithoutLegacyFlag(t *testing.T) {
 	repoRoot := t.TempDir()
 	configPath := filepath.Join(repoRoot, codexProjectPath, codexConfigFile)
