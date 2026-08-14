@@ -139,6 +139,12 @@ type RecordingState struct {
 	// into SessionMeta.LinkageStatus at stop. omitempty for round-trip.
 	LinkageStatus string `json:"linkage_status,omitempty"`
 
+	// LifecycleRegistrationState distinguishes a server-confirmed /c link from
+	// a locally minted identifier. Recording remains local-first, but callers
+	// must not circulate a link the server rejected or never observed.
+	LifecycleRegistrationState string `json:"lifecycle_registration_state,omitempty"` // confirmed | pending
+	LifecycleRegistrationError string `json:"lifecycle_registration_error,omitempty"`
+
 	// Hook observability: lets `ox session status` show whether hooks are firing
 	// and why they're skipping. Without these, a broken recording path (e.g.
 	// adapter binary missing, session file not discoverable) looks identical to

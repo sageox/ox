@@ -98,7 +98,7 @@ func TestNotifySessionStartedAndAborted(t *testing.T) {
 	}))
 	defer notFound.Close()
 	old := NewRepoClientWithEndpoint(notFound.URL)
-	assert.NoError(t, old.NotifySessionStarted(SessionStartedNotification{SessionID: "ses_x"}), "old server 404 = accepted")
+	assert.Error(t, old.NotifySessionStarted(SessionStartedNotification{SessionID: "ses_x"}), "a missing start endpoint must leave the link unconfirmed")
 	assert.NoError(t, old.NotifySessionAborted(SessionAbortedNotification{SessionID: "ses_x"}), "old server 404 = accepted")
 }
 
@@ -162,13 +162,14 @@ func TestSessionNotificationWireKeys(t *testing.T) {
 		{
 			name: "started",
 			wantKeys: []string{
-				"session_id", "repo_id", "session_name", "agent_id", "branch", "started_at",
+				"session_id", "repo_id", "session_name", "agent_id", "agent_type", "branch", "started_at",
 			},
 			wantValues: map[string]any{
 				"session_id":   "ses_s1",
 				"repo_id":      "repo_s1",
 				"session_name": "2026-01-01T00-00-user-OxS1",
 				"agent_id":     "agent_42",
+				"agent_type":   "claude-code",
 				"branch":       "dev/feature-x",
 				"started_at":   "2026-01-01T00:00:00Z",
 			},
@@ -178,6 +179,7 @@ func TestSessionNotificationWireKeys(t *testing.T) {
 					RepoID:      "repo_s1",
 					SessionName: "2026-01-01T00-00-user-OxS1",
 					AgentID:     "agent_42",
+					AgentType:   "claude-code",
 					Branch:      "dev/feature-x",
 					StartedAt:   "2026-01-01T00:00:00Z",
 				})

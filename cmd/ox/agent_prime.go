@@ -694,6 +694,12 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				// parent session not found; fall back to own session
 				state, _ = session.LoadRecordingStateForAgent(projectRoot, agentID)
 			}
+			if state != nil && state.LifecycleRegistrationState == "pending" {
+				// Prime is the first reliable post-start interaction for many
+				// short-lived CLI invocations. Retrying here makes an expired or
+				// offline start recover without ever blocking the local recorder.
+				notifySessionStartedAsync(projectRoot, state)
+			}
 			output.Session.SessionURL, output.Session.PRDirective = sessionLinkOutputs(projCfg, state, attribution.Session)
 		}
 	}

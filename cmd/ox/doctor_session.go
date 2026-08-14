@@ -29,6 +29,11 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 		results = append(results, uploadRetryResult)
 	}
 
+	registrationRetryResult := checkSessionLifecycleRegistrationRetry(gitRoot)
+	if !registrationRetryResult.passed || registrationRetryResult.message != "no pending registrations" {
+		results = append(results, registrationRetryResult)
+	}
+
 	// transcripts stranded in the content store with no local copy (GH #710).
 	// Quiet on the overwhelmingly common healthy case — dehydration is the
 	// normal steady state, so only surface sessions that actually need

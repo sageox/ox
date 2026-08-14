@@ -139,6 +139,7 @@ type SessionStartedNotification struct {
 	RepoID      string `json:"repo_id"`
 	SessionName string `json:"session_name,omitempty"`
 	AgentID     string `json:"agent_id,omitempty"`
+	AgentType   string `json:"agent_type,omitempty"`
 	Branch      string `json:"branch,omitempty"`
 	StartedAt   string `json:"started_at,omitempty"` // RFC3339
 }
@@ -613,7 +614,7 @@ func (c *RepoClient) NotifyImport(teamID string, metadata any) (recordingID stri
 // NotifyImport: 404 (endpoint not yet deployed) and 409 (already recorded —
 // idempotent) return (nil, nil) so callers proceed without retry thrash;
 // network errors, 429, and 5xx return an error for the caller's retry policy.
-func (c *RepoClient) postSessionSignal(pathTmpl, sessionID, label string, body any) ([]byte, error) {
+func (c *RepoClient) postSessionSignal(pathTmpl, sessionID, label string, body any, tolerateNotFound bool) ([]byte, error) {
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
@@ -644,7 +645,10 @@ func (c *RepoClient) postSessionSignal(pathTmpl, sessionID, label string, body a
 	logger.LogHTTPResponse("POST", reqURL, resp.StatusCode, duration)
 
 	switch {
-	case resp.StatusCode == http.StatusNotFound, resp.StatusCode == http.StatusConflict:
+	case resp.StatusCode == http.StatusConflict:
+		io.Copy(io.Discard, resp.Body)
+		return nil, nil
+	case resp.StatusCode == http.StatusNotFound && tolerateNotFound:
 		io.Copy(io.Discard, resp.Body)
 		return nil, nil
 	case resp.StatusCode >= 400:
@@ -663,7 +667,7 @@ func (c *RepoClient) postSessionSignal(pathTmpl, sessionID, label string, body a
 // caller surfaces as agent repair tasks. An empty or non-JSON body is
 // normal (older servers) and yields no misses.
 func (c *RepoClient) NotifySessionUploaded(n SessionUploadedNotification) ([]PRLinkMiss, error) {
-	respBody, err := c.postSessionSignal(sessionUploadedPath, n.SessionID, "session uploaded", n)
+	respBody, err := c.postSessionSignal(sessionUploadedPath, n.SessionID, "session uploaded", n, true)
 	if err != nil || len(respBody) == 0 {
 		return nil, err
 	}
@@ -675,16 +679,17 @@ func (c *RepoClient) NotifySessionUploaded(n SessionUploadedNotification) ([]PRL
 }
 
 // NotifySessionStarted registers a just-started recording so /c/<session_id>
-// resolves immediately. Callers treat this as strictly fire-and-forget.
+// resolves immediately. Unlike terminal notifications, a 404 is an error: the
+// caller must not advertise a URL the server has not confirmed.
 func (c *RepoClient) NotifySessionStarted(n SessionStartedNotification) error {
-	_, err := c.postSessionSignal(sessionStartedPath, n.SessionID, "session started", n)
+	_, err := c.postSessionSignal(sessionStartedPath, n.SessionID, "session started", n, false)
 	return err
 }
 
 // NotifySessionAborted marks a registered recording as discarded. Callers
 // treat this as strictly fire-and-forget.
 func (c *RepoClient) NotifySessionAborted(n SessionAbortedNotification) error {
-	_, err := c.postSessionSignal(sessionAbortedPath, n.SessionID, "session aborted", n)
+	_, err := c.postSessionSignal(sessionAbortedPath, n.SessionID, "session aborted", n, true)
 	return err
 }
 

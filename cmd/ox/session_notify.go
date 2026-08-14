@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -21,11 +22,9 @@ import (
 const sessionSignalWait = 750 * time.Millisecond
 
 // notifySessionStartedAsync registers a just-started recording with the
-// server so its /c/<session_id> conversation link resolves to an
-// "in progress" page from t=0. Fire-and-forget per the IPC architecture:
-// never blocks the start path beyond sessionSignalWait, all failures are
-// silent (debug log only), and it no-ops for recordings without a
-// start-minted ID or without the session-attribution toggle enabled.
+// server so its /c/<session_id> conversation link resolves from t=0. The
+// recording remains local-first, but the persisted outcome prevents later
+// output from presenting a remote URL after authentication/network failure.
 func notifySessionStartedAsync(projectRoot string, state *session.RecordingState) {
 	if state == nil || state.SessionID == "" {
 		return
@@ -34,16 +33,28 @@ func notifySessionStartedAsync(projectRoot string, state *session.RecordingState
 	if attr.Session == "" {
 		return
 	}
-	runSessionSignal("started", func(client *api.RepoClient, repoID string) error {
+	err := runSessionSignal("started", func(client *api.RepoClient, repoID string) error {
 		return client.NotifySessionStarted(api.SessionStartedNotification{
 			SessionID:   state.SessionID,
 			RepoID:      repoID,
 			SessionName: session.GetSessionName(state.SessionPath),
 			AgentID:     state.AgentID,
+			AgentType:   state.AgentType,
 			Branch:      state.Branch,
 			StartedAt:   state.StartedAt.Format(time.RFC3339),
 		})
 	}, projectRoot)
+	if err != nil {
+		state.LifecycleRegistrationState = "pending"
+		state.LifecycleRegistrationError = err.Error()
+		slog.Debug("session registration pending", "session_id", state.SessionID, "error", err)
+	} else {
+		state.LifecycleRegistrationState = "confirmed"
+		state.LifecycleRegistrationError = ""
+	}
+	if saveErr := session.SaveRecordingState(projectRoot, state); saveErr != nil {
+		slog.Debug("session registration status save failed", "session_id", state.SessionID, "error", saveErr)
+	}
 }
 
 // notifySessionAbortedAsync flips a registered recording to "discarded" so
@@ -61,31 +72,30 @@ func notifySessionAbortedAsync(projectRoot, sessionID string) {
 	}, projectRoot)
 }
 
-// runSessionSignal resolves config/auth and runs send in a goroutine,
-// waiting at most sessionSignalWait. Missing config or credentials are a
-// silent no-op — these signals are never load-bearing.
-func runSessionSignal(label string, send func(client *api.RepoClient, repoID string) error, projectRoot string) {
+// runSessionSignal resolves config/auth and runs send in a goroutine, waiting
+// at most sessionSignalWait. Its error is deliberately advisory to recording,
+// but callers persist it so a dead link never looks server-confirmed.
+func runSessionSignal(label string, send func(client *api.RepoClient, repoID string) error, projectRoot string) error {
 	cfg, err := config.LoadProjectConfig(projectRoot)
 	if err != nil || cfg == nil || cfg.RepoID == "" {
-		return
+		return fmt.Errorf("project configuration unavailable")
 	}
 	ep := endpoint.GetForProject(projectRoot)
 	token, err := auth.GetTokenForEndpoint(ep)
 	if err != nil || token == nil || token.AccessToken == "" {
-		return
+		return fmt.Errorf("authentication required")
 	}
 	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
 
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		defer close(done)
-		if err := send(client, cfg.RepoID); err != nil {
-			slog.Debug("session signal failed", "signal", label, "error", err)
-		}
+		done <- send(client, cfg.RepoID)
 	}()
 	select {
-	case <-done:
+	case err := <-done:
+		return err
 	case <-time.After(sessionSignalWait):
 		slog.Debug("session signal timed out", "signal", label, "wait_ms", sessionSignalWait.Milliseconds())
+		return fmt.Errorf("server confirmation timed out")
 	}
 }

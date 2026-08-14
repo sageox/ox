@@ -65,6 +65,12 @@ func sessionLinkOutputs(projCfg *config.ProjectConfig, state *session.RecordingS
 	if attrSession == "" || state == nil {
 		return "", ""
 	}
+	if state.LifecycleRegistrationState == "pending" {
+		// A locally minted id is not evidence that the remote resolver knows
+		// it. Keep the link out of commit/PR guidance until a retry or upload
+		// makes it server-visible.
+		return "", ""
+	}
 	sessionURL = buildConversationURL(projCfg, state.SessionID)
 	if sessionURL == "" {
 		sessionURL = buildSessionURL(projCfg, session.GetSessionName(state.SessionPath))
