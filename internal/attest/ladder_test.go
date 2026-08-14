@@ -74,7 +74,7 @@ func TestAssess_LadderRungs(t *testing.T) {
 		"d/ladder#exists-but-is-switched-off":       VerdictSkipped,
 	}
 	for _, cap := range corpus.Capabilities {
-		a := Assess(cap, plans)
+		a := Assess(cap, plans, &Records{})
 		if got := a.Verdict; got != want[cap.ID] {
 			t.Errorf("%s verdict = %q, want %q", cap.ID, got, want[cap.ID])
 		}
@@ -99,7 +99,7 @@ func TestAssess_NoCompiledPlanIsSkippedAndSaysSo(t *testing.T) {
 	}
 
 	for _, cap := range corpus.Capabilities {
-		a := Assess(cap, plans)
+		a := Assess(cap, plans, &Records{})
 		if a.Verdict != VerdictSkipped {
 			t.Errorf("%s verdict = %q, want %q with no compiled plan", cap.ID, a.Verdict, VerdictSkipped)
 		}
@@ -123,7 +123,7 @@ func TestAssess_CapabilityWithNoScenariosIsUntested(t *testing.T) {
 	if len(corpus.Capabilities) != 1 {
 		t.Fatalf("capabilities = %d, want 1", len(corpus.Capabilities))
 	}
-	if a := Assess(corpus.Capabilities[0], &Plans{}); a.Verdict != VerdictUntested {
+	if a := Assess(corpus.Capabilities[0], &Plans{}, &Records{}); a.Verdict != VerdictUntested {
 		t.Errorf("verdict = %q, want %q", a.Verdict, VerdictUntested)
 	}
 }
@@ -140,7 +140,7 @@ func TestBuildReport_TotalsAndWeakestOrdering(t *testing.T) {
 	})
 	corpus, _ := ScanCorpus(root, root)
 	plans, _ := LoadPlans(root)
-	r := BuildReport(corpus, plans)
+	r := BuildReport(corpus, plans, &Records{})
 
 	if r.Capabilities != 3 {
 		t.Errorf("capabilities = %d, want 3", r.Capabilities)

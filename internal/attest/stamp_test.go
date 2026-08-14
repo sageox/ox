@@ -139,7 +139,7 @@ func TestScanCorpus_ValidatedTagWithoutStampIsCountedSeparately(t *testing.T) {
 		t.Errorf("second scenario has no provenance comment, got Stamp=%+v", without.Stamp)
 	}
 
-	a := Assess(cap, &Plans{})
+	a := Assess(cap, &Plans{}, &Records{})
 	if a.Stamped != 2 {
 		t.Errorf("Stamped = %d, want 2 (both carry the tag)", a.Stamped)
 	}
@@ -168,7 +168,7 @@ func TestScanCorpus_ValidatedInProseIsNotAClaim(t *testing.T) {
 	if cap.Scenarios[0].Validated {
 		t.Fatal("@validated appearing in a comment was counted as a claim")
 	}
-	if a := Assess(cap, &Plans{}); a.Stamped != 0 {
+	if a := Assess(cap, &Plans{}, &Records{}); a.Stamped != 0 {
 		t.Errorf("Stamped = %d, want 0", a.Stamped)
 	}
 }

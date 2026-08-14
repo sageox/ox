@@ -21,70 +21,118 @@ var attestCmd = &cobra.Command{
 
 The unit is the CAPABILITY — a Gherkin ` + "`Rule:`" + ` block, a claim a customer
 would recognize — not the test. Reads committed files only: no Node toolchain,
-no network, no SageOx account required.`,
+no network, no SageOx account required.
+
+  ox attest status                 the capability ladder for this repo
+  ox attest proof <capability>     the claim, the break, and the verbatim failure
+  ox attest check                  what does my working diff invalidate
+  ox attest record                 mint an attestation from a red/green run pair
+  ox attest results                run reports on this machine
+  ox attest publish                write the layout to a directory or bucket`,
+}
+
+// attestContext is everything the read commands need, loaded once.
+type attestContext struct {
+	RepoRoot   string
+	CorpusRoot string
+	Corpus     *attest.Corpus
+	Plans      *attest.Plans
+	Records    *attest.Records
+}
+
+// resolveCorpusRoot honors --corpus, absolute or repo-relative, and otherwise
+// falls back to the Attest convention.
+func resolveCorpusRoot(cmd *cobra.Command, repoRoot string) string {
+	corpusFlag, _ := cmd.Flags().GetString("corpus")
+	if corpusFlag == "" {
+		return filepath.Join(repoRoot, attest.DefaultCorpusDir)
+	}
+	if filepath.IsAbs(corpusFlag) {
+		return corpusFlag
+	}
+	return filepath.Join(repoRoot, corpusFlag)
+}
+
+// loadAttestContext resolves the repo, the corpus, and every committed artifact.
+func loadAttestContext(cmd *cobra.Command) (*attestContext, error) {
+	root, err := repotools.FindRepoRoot(repotools.VCSGit)
+	if err != nil {
+		return nil, fmt.Errorf("not in a git repository")
+	}
+	corpusRoot := resolveCorpusRoot(cmd, root)
+
+	corpus, err := attest.ScanCorpus(root, corpusRoot)
+	if err != nil {
+		return nil, fmt.Errorf("%w\n  hint: pass --corpus <dir> if this project keeps its Attest corpus elsewhere", err)
+	}
+	plans, err := attest.LoadPlans(corpusRoot)
+	if err != nil {
+		return nil, err
+	}
+	records, err := attest.LoadRecords(corpusRoot)
+	if err != nil {
+		return nil, err
+	}
+	return &attestContext{
+		RepoRoot: root, CorpusRoot: corpusRoot,
+		Corpus: corpus, Plans: plans, Records: records,
+	}, nil
+}
+
+// wantJSON resolves the --json flag, defaulting to ON when an agent is calling.
+// Agents parse; humans read. Mirrors `ox code insights`.
+func wantJSON(cmd *cobra.Command) (bool, string) {
+	jsonOut, _ := cmd.Flags().GetBool("json")
+	agentID, _ := detectAgentContext()
+	if agentID != "" && !cmd.Flags().Changed("json") {
+		jsonOut = true
+	}
+	return jsonOut, agentID
+}
+
+// emit writes either indented JSON or the rendered human text, and records the
+// context cost when an agent is on the other end.
+func emit(jsonOut bool, agentID string, payload any, human string, label string) error {
+	var outputBytes int
+	if jsonOut {
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(payload); err != nil {
+			return err
+		}
+		outputBytes = buf.Len()
+		fmt.Print(buf.String())
+	} else {
+		outputBytes = len(human)
+		fmt.Print(human)
+	}
+	if agentID != "" {
+		slog.Debug(label+" context cost", "agent_id", agentID, "bytes", outputBytes)
+		trackContextBytes(int64(outputBytes))
+	}
+	return nil
+}
+
+// addCorpusFlag registers the corpus override shared by every subcommand.
+func addCorpusFlag(cmd *cobra.Command) {
+	cmd.Flags().String("corpus", "", "corpus directory relative to the repo root (default tests/acceptance)")
 }
 
 var attestStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "The capability ladder for this repo",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		root, err := repotools.FindRepoRoot(repotools.VCSGit)
-		if err != nil {
-			return fmt.Errorf("not in a git repository")
-		}
-
-		corpusFlag, _ := cmd.Flags().GetString("corpus")
-		corpusRoot := filepath.Join(root, attest.DefaultCorpusDir)
-		if corpusFlag != "" {
-			if filepath.IsAbs(corpusFlag) {
-				corpusRoot = corpusFlag
-			} else {
-				corpusRoot = filepath.Join(root, corpusFlag)
-			}
-		}
-
-		corpus, err := attest.ScanCorpus(root, corpusRoot)
-		if err != nil {
-			return fmt.Errorf("%w\n  hint: pass --corpus <dir> if this project keeps its Attest corpus elsewhere", err)
-		}
-		plans, err := attest.LoadPlans(corpusRoot)
+		ctx, err := loadAttestContext(cmd)
 		if err != nil {
 			return err
 		}
-		report := attest.BuildReport(corpus, plans)
+		report := attest.BuildReport(ctx.Corpus, ctx.Plans, ctx.Records)
 
-		jsonOut, _ := cmd.Flags().GetBool("json")
-		// Auto-detect: default to JSON when an agent is calling, matching
-		// `ox code insights`. Agents parse; humans read.
-		agentID, _ := detectAgentContext()
-		if agentID != "" && !cmd.Flags().Changed("json") {
-			jsonOut = true
-		}
-
+		jsonOut, agentID := wantJSON(cmd)
 		domain, _ := cmd.Flags().GetString("domain")
 		weakest, _ := cmd.Flags().GetInt("weakest")
-
-		var outputBytes int
-		if jsonOut {
-			var buf bytes.Buffer
-			enc := json.NewEncoder(&buf)
-			enc.SetIndent("", "  ")
-			if err := enc.Encode(report); err != nil {
-				return err
-			}
-			outputBytes = buf.Len()
-			fmt.Print(buf.String())
-		} else {
-			rendered := renderAttestStatus(report, domain, weakest)
-			outputBytes = len(rendered)
-			fmt.Print(rendered)
-		}
-
-		if agentID != "" {
-			slog.Debug("attest status context cost", "agent_id", agentID, "bytes", outputBytes)
-			trackContextBytes(int64(outputBytes))
-		}
-		return nil
+		return emit(jsonOut, agentID, report, renderAttestStatus(report, domain, weakest), "attest status")
 	},
 }
 
@@ -124,11 +172,10 @@ func renderVerdict(v attest.Verdict, text string) string {
 func renderAttestStatus(r *attest.Report, domain string, weakest int) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "\n%s  %d capabilities · %d feature files · %d domains · %d compiled plans\n\n",
-		ui.RenderAccent("Attest"), r.Capabilities, r.Files, len(r.Domains), r.Plans)
+	fmt.Fprintf(&b, "\n%s  %d capabilities · %d feature files · %d domains · %d compiled plans · %d records\n\n",
+		ui.RenderAccent("Attest"), r.Capabilities, r.Files, len(r.Domains), r.Plans, r.Records)
 
-	// Ladder, worst last so the eye lands on the strongest claim first, and the
-	// count column is right-aligned so the distribution is readable as a shape.
+	// Ladder, worst last so the eye lands on the strongest claim first.
 	for i := len(attest.VerdictOrder) - 1; i >= 0; i-- {
 		v := attest.VerdictOrder[i]
 		label := fmt.Sprintf("%s %-9s", verdictGlyph(v), string(v))
@@ -147,10 +194,16 @@ func renderAttestStatus(r *attest.Report, domain string, weakest int) string {
 
 	// The honest caveat, printed every time rather than buried in docs: this
 	// denominator is the capabilities somebody AUTHORED, not the product's real
-	// surface area. A capability nobody has written a Rule for cannot appear
-	// here at all, so a full bar is not the same as a defended product.
+	// surface area. A capability nobody wrote a Rule for cannot appear here at
+	// all, so a full bar is not the same as a defended product.
 	fmt.Fprintf(&b, "  %s\n",
 		ui.RenderMuted("denominator is authored capabilities, not the product's full surface"))
+
+	// An unreadable record is a proof that silently vanishes — it must never be
+	// quietly absent from the counts.
+	for path, reason := range r.InvalidRecords {
+		fmt.Fprintf(&b, "  %s\n", ui.RenderFail(fmt.Sprintf("unreadable record %s: %s", filepath.Base(path), reason)))
+	}
 
 	if r.Counts[attest.VerdictAttested] == 0 {
 		fmt.Fprintf(&b, "\n  %s\n",
@@ -188,6 +241,9 @@ func renderAttestStatus(r *attest.Report, domain string, weakest int) string {
 			if a.NewestStamp != nil && a.NewestStamp.Date != "" {
 				detail += " · stamped " + a.NewestStamp.Date
 			}
+			if a.Record != nil {
+				detail += " · proof " + a.Record.Proof.Verdict
+			}
 			fmt.Fprintf(&b, "       %s\n", ui.RenderMuted(detail))
 		}
 	}
@@ -198,9 +254,9 @@ func renderAttestStatus(r *attest.Report, domain string, weakest int) string {
 
 func init() {
 	attestStatusCmd.Flags().Bool("json", false, "structured JSON output for agents")
-	attestStatusCmd.Flags().String("corpus", "", "corpus directory relative to the repo root (default tests/acceptance)")
 	attestStatusCmd.Flags().String("domain", "", "list capabilities from one domain instead of the weakest overall")
 	attestStatusCmd.Flags().Int("weakest", 10, "how many capabilities to list (0 for all)")
+	addCorpusFlag(attestStatusCmd)
 
 	attestCmd.AddCommand(attestStatusCmd)
 	attestCmd.GroupID = "dev"

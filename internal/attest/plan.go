@@ -1,11 +1,14 @@
 package attest
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -47,6 +50,25 @@ type PlanFingerprint struct {
 type FingerprintInput struct {
 	Path string `json:"path"`
 	OID  string `json:"oid"`
+}
+
+// FingerprintDigest collapses a plan fingerprint to one comparable string.
+//
+// Sorted before hashing so the digest depends on the SET of (path, oid) pairs
+// and not on the compiler's emission order — otherwise a cosmetic reordering
+// would read as spec drift and send someone re-proving a capability that never
+// changed.
+func FingerprintDigest(fp PlanFingerprint) string {
+	if len(fp.Inputs) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(fp.Inputs))
+	for _, in := range fp.Inputs {
+		parts = append(parts, in.Path+"@"+in.OID)
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:])
 }
 
 // PlanScenario is a scenario the compiler selected — it dispatches.

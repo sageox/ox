@@ -93,15 +93,18 @@ type Assessment struct {
 	// materially different cause of `skipped` than "every scenario is tagged
 	// off", and one a reader needs in order to know which fix applies.
 	NoPlan bool `json:"no_plan"`
+	// Record is the attestation backing this capability, when one exists.
+	Record *Attestation `json:"record,omitempty"`
 }
 
-// Assess computes the verdict for one capability against the compiled plans.
+// Assess computes the verdict for one capability against the compiled plans and
+// the committed attestation records.
 //
-// `attested` is unreachable until attestation records exist; that is deliberate
-// and it is the honest reading. Until a record can be pointed at, the strongest
-// thing any corpus can truthfully say about a capability is that someone
-// stamped it.
-func Assess(cap Capability, plans *Plans) Assessment {
+// Until a record can be pointed at, the strongest thing any corpus can
+// truthfully say about a capability is that somebody stamped it — and a record
+// whose proof is ambiguous or inconclusive does NOT promote it, because those
+// are findings rather than proofs.
+func Assess(cap Capability, plans *Plans, records *Records) Assessment {
 	a := Assessment{Capability: cap}
 
 	if len(cap.Scenarios) == 0 {
@@ -128,15 +131,22 @@ func Assess(cap Capability, plans *Plans) Assessment {
 		}
 	}
 
+	if rec, ok := records.For(cap.ID); ok {
+		a.Record = rec
+	}
+
 	switch {
 	case a.Dispatching == 0:
 		a.Verdict = VerdictSkipped
-	case a.Stamped == 0:
+	case a.Record != nil && a.Record.IsProof():
+		// The only rung that renders as done, and it requires a CLEAN proof.
+		// An ambiguous record deliberately leaves the capability at `stamped`:
+		// it went red somewhere other than the step naming the claim, so it
+		// proves something else.
+		a.Verdict = VerdictAttested
+	case a.Stamped == 0 && a.Record == nil:
 		a.Verdict = VerdictUnproven
 	default:
-		// The ladder stops here in v1. When a record exists for this capability
-		// and carries a clean proof, this becomes VerdictAttested — the ONLY
-		// rung that should ever render as done.
 		a.Verdict = VerdictStamped
 	}
 	return a
@@ -144,15 +154,20 @@ func Assess(cap Capability, plans *Plans) Assessment {
 
 // Report is a whole corpus assessed.
 type Report struct {
-	Root         string                 `json:"root"`
-	Files        int                    `json:"files"`
-	Plans        int                    `json:"plans"`
-	Capabilities int                    `json:"capabilities"`
-	Domains      []string               `json:"domains"`
-	Counts       map[Verdict]int        `json:"counts"`
-	Scenarios    ScenarioTotals         `json:"scenarios"`
-	Assessments  []Assessment           `json:"assessments"`
-	ByDomain     map[string][]Assessment `json:"-"`
+	Root         string   `json:"root"`
+	Files        int      `json:"files"`
+	Plans        int      `json:"plans"`
+	Records      int      `json:"records"`
+	Capabilities int      `json:"capabilities"`
+	Domains      []string `json:"domains"`
+	// InvalidRecords maps a path to why it could not be read. Reported rather
+	// than swallowed: an unreadable record is a proof that silently vanishes,
+	// which looks exactly like never having been proven.
+	InvalidRecords map[string]string       `json:"invalid_records,omitempty"`
+	Counts         map[Verdict]int         `json:"counts"`
+	Scenarios      ScenarioTotals          `json:"scenarios"`
+	Assessments    []Assessment            `json:"assessments"`
+	ByDomain       map[string][]Assessment `json:"-"`
 }
 
 // ScenarioTotals are the corpus-wide scenario numbers, reported alongside the
@@ -168,11 +183,13 @@ type ScenarioTotals struct {
 }
 
 // BuildReport assesses every capability in a corpus.
-func BuildReport(corpus *Corpus, plans *Plans) *Report {
+func BuildReport(corpus *Corpus, plans *Plans, records *Records) *Report {
 	r := &Report{
 		Root:         corpus.Root,
 		Files:        corpus.Files,
 		Plans:        plans.Count,
+		Records:      records.Count,
+		InvalidRecords: records.Invalid,
 		Capabilities: len(corpus.Capabilities),
 		Domains:      corpus.Domains(),
 		Counts:       map[Verdict]int{},
@@ -182,7 +199,7 @@ func BuildReport(corpus *Corpus, plans *Plans) *Report {
 		r.Counts[v] = 0
 	}
 	for _, cap := range corpus.Capabilities {
-		a := Assess(cap, plans)
+		a := Assess(cap, plans, records)
 		r.Counts[a.Verdict]++
 		r.Scenarios.Authored += len(cap.Scenarios)
 		r.Scenarios.Dispatching += a.Dispatching
