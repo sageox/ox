@@ -392,9 +392,18 @@ func removeLegacyFeatureFlagAssignment(data []byte) ([]byte, bool) {
 	var out strings.Builder
 	out.Grow(len(data))
 	inFeaturesTable := false
+	multilineDelimiter := ""
 	changed := false
 
 	for _, line := range lines {
+		if multilineDelimiter != "" {
+			if countUnescapedMultilineDelimiters(line, multilineDelimiter)%2 == 1 {
+				multilineDelimiter = ""
+			}
+			out.WriteString(line)
+			continue
+		}
+
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "[") {
 			header := strings.TrimSpace(strings.SplitN(trimmed, "#", 2)[0])
@@ -405,7 +414,90 @@ func removeLegacyFeatureFlagAssignment(data []byte) ([]byte, bool) {
 			continue
 		}
 		out.WriteString(line)
+
+		if delimiter := multilineStringDelimiter(line); delimiter != "" &&
+			countUnescapedMultilineDelimiters(line, delimiter)%2 == 1 {
+			multilineDelimiter = delimiter
+		}
 	}
 
 	return []byte(out.String()), changed
+}
+
+// multilineStringDelimiter returns the delimiter for a TOML multiline value
+// that starts on line. A delimiter must immediately follow the assignment's
+// equals sign, which avoids interpreting comments and ordinary strings as
+// multiline TOML content.
+func multilineStringDelimiter(line string) string {
+	value, ok := tomlAssignmentValue(line)
+	if !ok {
+		return ""
+	}
+	switch {
+	case strings.HasPrefix(value, `"""`):
+		return `"""`
+	case strings.HasPrefix(value, `'''`):
+		return `'''`
+	default:
+		return ""
+	}
+}
+
+// tomlAssignmentValue returns the value portion of a single-line TOML
+// assignment. It skips quoted key content, so an equals sign in a quoted key
+// cannot prevent multiline-string detection.
+func tomlAssignmentValue(line string) (string, bool) {
+	var quote byte
+	escaped := false
+	for index := 0; index < len(line); index++ {
+		char := line[index]
+		if quote != 0 {
+			if quote == '"' && char == '\\' && !escaped {
+				escaped = true
+				continue
+			}
+			if char == quote && !escaped {
+				quote = 0
+			}
+			escaped = false
+			continue
+		}
+
+		switch char {
+		case '#':
+			return "", false
+		case '"', '\'':
+			quote = char
+		case '=':
+			return strings.TrimSpace(line[index+1:]), true
+		}
+	}
+	return "", false
+}
+
+// countUnescapedMultilineDelimiters counts a delimiter's occurrences in one
+// physical line. TOML basic strings can escape quote characters; literal
+// strings cannot. An odd count toggles the multiline-string state.
+func countUnescapedMultilineDelimiters(line, delimiter string) int {
+	count := 0
+	for index := 0; index <= len(line)-len(delimiter); {
+		next := strings.Index(line[index:], delimiter)
+		if next == -1 {
+			break
+		}
+		position := index + next
+		if delimiter != `"""` || !hasOddBackslashPrefix(line, position) {
+			count++
+		}
+		index = position + len(delimiter)
+	}
+	return count
+}
+
+func hasOddBackslashPrefix(s string, position int) bool {
+	backslashes := 0
+	for index := position - 1; index >= 0 && s[index] == '\\'; index-- {
+		backslashes++
+	}
+	return backslashes%2 == 1
 }

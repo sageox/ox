@@ -89,6 +89,34 @@ model = 'gpt-5-codex'
 	assert.Equal(t, want, got)
 }
 
+func TestHandleInstallHooks_PreservesMultilineTOMLContentDuringLegacyMigration(t *testing.T) {
+	repoRoot := t.TempDir()
+	configPath := filepath.Join(repoRoot, codexProjectPath, codexConfigFile)
+	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o755))
+	config := []byte(`[features]
+"notes=internal" = """
+codex_hooks = false
+codex_hooks = true
+"""
+codex_hooks = true
+hooks = false
+`)
+	want := []byte(`[features]
+"notes=internal" = """
+codex_hooks = false
+codex_hooks = true
+"""
+hooks = false
+`)
+	require.NoError(t, os.WriteFile(configPath, config, 0o600))
+
+	_, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: repoRoot, Scope: "project"})
+	require.NoError(t, err)
+	got, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
 func TestHandleInstallHooks_DoesNotCreateConfigWithoutLegacyFlag(t *testing.T) {
 	repoRoot := t.TempDir()
 	configPath := filepath.Join(repoRoot, codexProjectPath, codexConfigFile)
