@@ -28,7 +28,7 @@ no network, no SageOx account required.
   ox attest check                  what does my working diff invalidate
   ox attest record                 mint an attestation from a red/green run pair
   ox attest results                run reports on this machine
-  ox attest publish                write the layout to a directory or bucket`,
+  ox attest publish                write the portable layout to a directory`,
 }
 
 // attestContext is everything the read commands need, loaded once.

@@ -24,7 +24,7 @@ adding a cloud SDK to it for an internal experiment would buy a large dependency
 and an AWS-shaped assumption in exchange for a step that is already one line:
 
   ox attest publish --to .attest-publish
-  aws s3 sync .attest-publish/ s3://sageox-static-test/ --delete
+  # upload payloads, then manifest, then index (never use --delete)
 
 That is the same pattern the dev portal already uses to serve its design
 catalog, and it keeps the layout portable to any object store.`,
@@ -37,7 +37,7 @@ catalog, and it keeps the layout portable to any object store.`,
 			return fmt.Errorf("--to takes a directory, not a bucket URL\n" +
 				"  write locally then sync:\n" +
 				"    ox attest publish --to .attest-publish\n" +
-				"    aws s3 sync .attest-publish/ <your-bucket-url>/ --delete")
+				"    # use an uploader that sends payloads, manifest, then index; never --delete")
 		}
 
 		ctx, err := loadAttestContext(cmd)
@@ -45,13 +45,17 @@ catalog, and it keeps the layout portable to any object store.`,
 			return err
 		}
 		report := attest.BuildReport(ctx.Corpus, ctx.Plans, ctx.Records)
+		runs, err := attest.ReferencedRunResults(ctx.RepoRoot, ctx.Records)
+		if err != nil {
+			return err
+		}
 
 		repoKey, _ := cmd.Flags().GetString("repo-key")
 		if repoKey == "" {
 			repoKey = defaultRepoKey(ctx.RepoRoot)
 		}
 
-		res, err := attest.WriteBundle(dest, repoKey, report, ctx.Records, time.Now())
+		res, err := attest.WriteBundle(dest, repoKey, report, ctx.Records, runs, time.Now())
 		if err != nil {
 			return err
 		}
@@ -74,7 +78,7 @@ func renderPublish(res *attest.PublishResult, r *attest.Report, repoKey, dest st
 			"no attestation records — this bundle publishes the ladder, but no proofs"))
 	}
 	fmt.Fprintf(&b, "\n  %s\n    %s\n\n", ui.RenderMuted("host it with"),
-		fmt.Sprintf("aws s3 sync %s/ s3://<bucket>/ --delete", strings.TrimSuffix(dest, "/")))
+		fmt.Sprintf("upload %s/ with payloads first, then manifest, then index (never --delete)", strings.TrimSuffix(dest, "/")))
 	return b.String()
 }
 

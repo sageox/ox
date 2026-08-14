@@ -53,7 +53,7 @@ func TestWriteBundle_ManifestPathsAreValidObjectKeys(t *testing.T) {
 	report, recs := publishFixture(t)
 	dest := t.TempDir()
 
-	if _, err := WriteBundle(dest, "acme", report, recs, time.Now()); err != nil {
+	if _, err := WriteBundle(dest, "acme", report, recs, nil, time.Now()); err != nil {
 		t.Fatalf("WriteBundle: %v", err)
 	}
 	m := readManifest(t, dest)
@@ -80,7 +80,7 @@ func TestWriteBundle_ManifestPathsAreValidObjectKeys(t *testing.T) {
 func TestWriteBundle_ManifestDigestsMatchTheBytes(t *testing.T) {
 	report, recs := publishFixture(t)
 	dest := t.TempDir()
-	if _, err := WriteBundle(dest, "acme", report, recs, time.Now()); err != nil {
+	if _, err := WriteBundle(dest, "acme", report, recs, nil, time.Now()); err != nil {
 		t.Fatalf("WriteBundle: %v", err)
 	}
 	base := filepath.Join(dest, "attest", LayoutVersion)
@@ -113,7 +113,7 @@ func TestWriteBundle_PartitionsByUTC(t *testing.T) {
 	zone := time.FixedZone("UTC-8", -8*3600)
 	local := time.Date(2026, 8, 2, 1, 30, 0, 0, time.UTC).In(zone)
 
-	if _, err := WriteBundle(dest, "acme", report, recs, local); err != nil {
+	if _, err := WriteBundle(dest, "acme", report, recs, nil, local); err != nil {
 		t.Fatalf("WriteBundle: %v", err)
 	}
 	want := filepath.Join(dest, "attest", LayoutVersion, "status", "acme", "2026", "08", "02")
@@ -132,7 +132,7 @@ func TestWriteBundle_IndexIsOneObjectPerPublish(t *testing.T) {
 	first := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
 	second := first.Add(time.Hour)
 	for _, when := range []time.Time{first, second} {
-		if _, err := WriteBundle(dest, "acme", report, recs, when); err != nil {
+		if _, err := WriteBundle(dest, "acme", report, recs, nil, when); err != nil {
 			t.Fatalf("WriteBundle: %v", err)
 		}
 	}
@@ -149,7 +149,7 @@ func TestWriteBundle_IndexIsOneObjectPerPublish(t *testing.T) {
 func TestWriteBundle_ManifestCarriesTotals(t *testing.T) {
 	report, recs := publishFixture(t)
 	dest := t.TempDir()
-	if _, err := WriteBundle(dest, "acme", report, recs, time.Now()); err != nil {
+	if _, err := WriteBundle(dest, "acme", report, recs, nil, time.Now()); err != nil {
 		t.Fatalf("WriteBundle: %v", err)
 	}
 	m := readManifest(t, dest)
@@ -161,5 +161,22 @@ func TestWriteBundle_ManifestCarriesTotals(t *testing.T) {
 	}
 	if m.Attestations != recs.Count {
 		t.Errorf("Attestations = %d, want %d", m.Attestations, recs.Count)
+	}
+}
+
+func TestWriteBundle_PublishesOnlyNormalizedReferencedRunSummaries(t *testing.T) {
+	report, recs := publishFixture(t)
+	dest := t.TempDir()
+	runs := []RunResult{{RunID: "red-run", Source: "orchestrator", Status: "complete", FinalizeStatus: "failed"}}
+	if _, err := WriteBundle(dest, "acme", report, recs, runs, time.Now()); err != nil {
+		t.Fatalf("WriteBundle: %v", err)
+	}
+
+	base := filepath.Join(dest, "attest", LayoutVersion)
+	if _, err := os.Stat(filepath.Join(base, "runs", "acme", "red-run.json")); err != nil {
+		t.Fatalf("normalized run summary missing: %v", err)
+	}
+	if matches, err := filepath.Glob(filepath.Join(base, "**", "*.png")); err != nil || len(matches) != 0 {
+		t.Errorf("published screenshots = %v, err %v; summaries must not publish raw diagnostics", matches, err)
 	}
 }

@@ -71,6 +71,7 @@ type ManifestFile struct {
 type PublishResult struct {
 	Root         string `json:"root"`
 	ManifestPath string `json:"manifest_path"`
+	IndexPath    string `json:"index_path"`
 	Files        int    `json:"files"`
 	Bytes        int64  `json:"bytes"`
 }
@@ -79,23 +80,26 @@ type PublishResult struct {
 //
 // Layout, with the two corrections that came out of design review:
 //
-//	attest/v1/status/<repo-key>/<YYYY>/<MM>/<DD>/<stamp>/report.json
-//	attest/v1/status/<repo-key>/<YYYY>/<MM>/<DD>/<stamp>/manifest.json
-//	attest/v1/attestations/<repo-key>/<capability-slug>.v1.json
-//	attest/v1/index/<repo-key>/<stamp>.json
+//		attest/v1/status/<repo-key>/<YYYY>/<MM>/<DD>/<stamp>/report.json
+//		attest/v1/status/<repo-key>/<YYYY>/<MM>/<DD>/<stamp>/manifest.json
+//		attest/v1/attestations/<repo-key>/<capability-slug>.v1.json
+//		attest/v1/index/<repo-key>/<stamp>.json
 //
-//  1. The index is ONE IMMUTABLE OBJECT PER PUBLISH, not an appended JSONL file.
-//     Standard object storage has no append operation, so "append a line" is a
-//     read-modify-write of the whole object — a lost-update race between two
-//     concurrent publishers, and flatly incompatible with write-once retention.
-//     An index is a derived compaction over these objects, computed by whoever
-//     wants one.
-//  2. Date partitioning is by UTC, stated rather than implied, because the
-//     boundary is immutable once written and a local-time publisher would
-//     silently scatter a day across two prefixes.
-func WriteBundle(dest, repoKey string, report *Report, records *Records, now time.Time) (*PublishResult, error) {
+//	 1. The index is ONE IMMUTABLE OBJECT PER PUBLISH, not an appended JSONL file.
+//	    Standard object storage has no append operation, so "append a line" is a
+//	    read-modify-write of the whole object — a lost-update race between two
+//	    concurrent publishers, and flatly incompatible with write-once retention.
+//	    An index is a derived compaction over these objects, computed by whoever
+//	    wants one.
+//	 2. Date partitioning is by UTC, stated rather than implied, because the
+//	    boundary is immutable once written and a local-time publisher would
+//	    silently scatter a day across two prefixes.
+func WriteBundle(dest, repoKey string, report *Report, records *Records, runs []RunResult, now time.Time) (*PublishResult, error) {
 	utc := now.UTC()
-	stamp := utc.Format("20060102T150405Z")
+	// A second-resolution key could overwrite an immutable publication when an
+	// operator corrects and republishes immediately. Nanoseconds keep distinct
+	// local publishes distinct without making the portable layout AWS-specific.
+	stamp := utc.Format("20060102T150405.000000000Z")
 	base := filepath.Join(dest, "attest", LayoutVersion)
 	runDir := filepath.Join(base, "status", repoKey,
 		utc.Format("2006"), utc.Format("01"), utc.Format("02"), stamp)
@@ -144,6 +148,23 @@ func WriteBundle(dest, repoKey string, report *Report, records *Records, now tim
 		manifest.Files = append(manifest.Files, f)
 	}
 
+	// Only publish the normalized summaries referenced by an attestation. Raw
+	// runner reports can contain screenshots and diagnostics, neither of which
+	// belongs in a broadly readable team artifact by default.
+	if len(runs) > 0 {
+		runsDir := filepath.Join(base, "runs", repoKey)
+		if err := os.MkdirAll(runsDir, 0o755); err != nil {
+			return nil, fmt.Errorf("create runs dir: %w", err)
+		}
+		for _, run := range runs {
+			f, werr := writeJSON(filepath.Join(runsDir, slugify(run.RunID)+".json"), run, base, "run-summary")
+			if werr != nil {
+				return nil, werr
+			}
+			manifest.Files = append(manifest.Files, f)
+		}
+	}
+
 	// The index entry: one small object naming this publish, so a reader can
 	// find the newest without listing a deep date tree.
 	idxDir := filepath.Join(base, "index", repoKey)
@@ -159,10 +180,6 @@ func WriteBundle(dest, repoKey string, report *Report, records *Records, now tim
 		"statusPath": filepath.ToSlash(filepath.Join("status", repoKey,
 			utc.Format("2006"), utc.Format("01"), utc.Format("02"), stamp)),
 	}
-	if _, err := writeJSON(filepath.Join(idxDir, stamp+".json"), idxEntry, base, "index"); err != nil {
-		return nil, err
-	}
-
 	for _, f := range manifest.Files {
 		result.Bytes += f.Bytes
 	}
@@ -176,6 +193,14 @@ func WriteBundle(dest, repoKey string, report *Report, records *Records, now tim
 		return nil, err
 	}
 	result.ManifestPath = manifestPath
+	// The index is written after the completion marker. Object-store readers
+	// discover a publish from its index, so this ordering makes a torn upload
+	// invisible instead of advertising a report whose manifest is not ready.
+	indexPath := filepath.Join(idxDir, stamp+".json")
+	if _, err := writeJSON(indexPath, idxEntry, base, "index"); err != nil {
+		return nil, err
+	}
+	result.IndexPath = indexPath
 	return result, nil
 }
 
