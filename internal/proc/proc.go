@@ -7,6 +7,7 @@
 package proc
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -102,4 +103,23 @@ func IsAlive(pid int) bool {
 		return false
 	}
 	return isAliveProc(proc)
+}
+
+// Terminate asks the process with the given PID to shut down.
+//
+// On Unix this is SIGINT, giving the target a chance to close resources and
+// release locks. Windows has no deliverable equivalent — os.Process.Signal
+// supports only os.Kill there and returns syscall.EWINDOWS for os.Interrupt, so
+// a caller that "sent an interrupt" on Windows silently did nothing — so the
+// process is terminated outright. Callers that need a clean shutdown on Windows
+// must arrange it another way (e.g. an RPC the target listens for).
+func Terminate(pid int) error {
+	if pid <= 0 {
+		return fmt.Errorf("terminate: invalid pid %d", pid)
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("terminate: find process %d: %w", pid, err)
+	}
+	return terminateProc(proc)
 }

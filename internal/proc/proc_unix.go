@@ -43,3 +43,9 @@ func isAliveProc(proc *os.Process) bool {
 	err := proc.Signal(syscall.Signal(0))
 	return err == nil
 }
+
+// terminateProc sends SIGINT, letting the target close resources and release any
+// locks it holds before exiting.
+func terminateProc(proc *os.Process) error {
+	return proc.Signal(os.Interrupt)
+}

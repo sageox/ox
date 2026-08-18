@@ -2,7 +2,9 @@ package proc
 
 import (
 	"os"
+	"os/exec"
 	"testing"
+	"time"
 )
 
 func TestFindAgentAncestorPID_ReturnsLiveProcess(t *testing.T) {
@@ -65,5 +67,59 @@ func TestMatchesAgent(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("matchesAgent(%q, %q, ...) = %v, want %v", tc.name, tc.hint, got, tc.want)
 		}
+	}
+}
+
+// IsAlive must distinguish live from dead. On Windows isAliveProc returned
+// `proc != nil`, and os.FindProcess never fails there, so IsAlive was always
+// true — a caller using it to decide whether to restart something would trust a
+// dead record forever. These assertions hold on every platform.
+func TestIsAlive(t *testing.T) {
+	if !IsAlive(os.Getpid()) {
+		t.Error("the running test process should report as alive")
+	}
+	for _, pid := range []int{0, -1} {
+		if IsAlive(pid) {
+			t.Errorf("IsAlive(%d) should be false", pid)
+		}
+	}
+
+	// A reaped child: the PID is valid but names nothing running.
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("spawn no-op helper: %v", err)
+	}
+	if IsAlive(cmd.Process.Pid) {
+		t.Errorf("reaped pid %d should report as dead", cmd.Process.Pid)
+	}
+}
+
+func TestTerminateRejectsInvalidPID(t *testing.T) {
+	for _, pid := range []int{0, -1} {
+		if err := Terminate(pid); err == nil {
+			t.Errorf("Terminate(%d) should error rather than signal something arbitrary", pid)
+		}
+	}
+}
+
+func TestTerminateStopsAProcess(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^$", "-test.timeout=60s")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn helper: %v", err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_, _ = cmd.Process.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+
+	if err := Terminate(cmd.Process.Pid); err != nil {
+		t.Fatalf("Terminate: %v", err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Error("expected the process to exit after Terminate")
 	}
 }
