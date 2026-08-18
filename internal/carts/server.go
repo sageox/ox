@@ -241,7 +241,16 @@ func waitForServer(host string, port int, timeout time.Duration) error {
 	return fmt.Errorf("timeout waiting for dolt server on port %d", port)
 }
 
-// StopServer stops a running dolt server for the given carts directory.
+// StopServer stops the dolt server recorded for the given carts directory.
+//
+// A recorded PID is NOT sufficient authority to signal it. runningServerPort
+// already refuses to REUSE a record without probing the endpoint, because a
+// crash can leave a stale record while the OS reassigns that PID to an unrelated
+// process. Stopping needs the same proof for a stronger reason: reusing a wrong
+// record fails a carts command, whereas signalling a wrong PID kills a process
+// that has nothing to do with ox.
+//
+// Stale records are still cleared, so a bad record cannot wedge future starts.
 func StopServer(cartsDir string) error {
 	pidData, err := os.ReadFile(filepath.Join(cartsDir, pidFileName))
 	if err != nil {
@@ -249,15 +258,38 @@ func StopServer(cartsDir string) error {
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
 	if err != nil {
+		clearServerState(cartsDir)
 		return nil
 	}
-	proc, err := os.FindProcess(pid)
+
+	portData, err := os.ReadFile(filepath.Join(cartsDir, portFileName))
 	if err != nil {
+		clearServerState(cartsDir)
 		return nil
 	}
-	_ = proc.Signal(os.Interrupt)
-	// Clean up state files
-	os.Remove(filepath.Join(cartsDir, pidFileName))
-	os.Remove(filepath.Join(cartsDir, portFileName))
+	port, err := strconv.Atoi(strings.TrimSpace(string(portData)))
+	if err != nil {
+		clearServerState(cartsDir)
+		return nil
+	}
+
+	// Bind the PID to a live dolt server on the recorded port before signalling.
+	if !proc.IsAlive(pid) || pingEndpoint(serverHost, port, endpointCheckTimeout) != nil {
+		clearServerState(cartsDir)
+		return nil
+	}
+
+	if err := proc.Terminate(pid); err != nil {
+		// Leave the record: the server is still running and still discoverable,
+		// which beats orphaning it behind deleted state.
+		return fmt.Errorf("stop carts dolt server %d: %w", pid, err)
+	}
+	clearServerState(cartsDir)
 	return nil
+}
+
+// clearServerState removes the recorded pid/port pair.
+func clearServerState(cartsDir string) {
+	_ = os.Remove(filepath.Join(cartsDir, pidFileName))
+	_ = os.Remove(filepath.Join(cartsDir, portFileName))
 }
