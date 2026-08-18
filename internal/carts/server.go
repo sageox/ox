@@ -247,7 +247,7 @@ func waitForServer(host string, port int, timeout time.Duration) error {
 // already refuses to REUSE a record without probing the endpoint, because a
 // crash can leave a stale record while the OS reassigns that PID to an unrelated
 // process. Stopping needs the same proof for a stronger reason: reusing a wrong
-// record fails a carts command, whereas signalling a wrong PID kills a process
+// record fails a carts command, whereas signaling a wrong PID kills a process
 // that has nothing to do with ox.
 //
 // Stale records are still cleared, so a bad record cannot wedge future starts.
@@ -273,7 +273,7 @@ func StopServer(cartsDir string) error {
 		return nil
 	}
 
-	// Bind the PID to a live dolt server on the recorded port before signalling.
+	// Bind the PID to a live dolt server on the recorded port before signaling.
 	if !proc.IsAlive(pid) || pingEndpoint(serverHost, port, endpointCheckTimeout) != nil {
 		clearServerState(cartsDir)
 		return nil

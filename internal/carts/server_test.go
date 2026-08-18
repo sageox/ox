@@ -81,14 +81,14 @@ func TestRunningServerPort(t *testing.T) {
 // TestStopServer covers the decision to SIGNAL a recorded PID, which needs the
 // same proof reuse does — for a stronger reason.
 //
-// Failure prevented: StopServer signalled whatever PID the state file named. A
+// Failure prevented: StopServer signaled whatever PID the state file named. A
 // crash leaves a stale record behind while the OS is free to reassign that PID,
 // so `ox carts` stopping its server could interrupt an unrelated process. Reuse
-// of a bad record merely fails a command; signalling one kills a stranger.
+// of a bad record merely fails a command; signaling one kills a stranger.
 func TestStopServer(t *testing.T) {
 	// livingHelper starts a child that stays up until the test ends. It returns
 	// the PID and a channel closed once the child has exited AND been reaped:
-	// proc.IsAlive alone would report a signalled-but-unreaped child as alive,
+	// proc.IsAlive alone would report a signaled-but-unreaped child as alive,
 	// because a zombie still answers.
 	livingHelper := func(t *testing.T) (int, <-chan struct{}) {
 		t.Helper()
@@ -125,7 +125,7 @@ func TestStopServer(t *testing.T) {
 		}
 		select {
 		case <-exited:
-			t.Fatal("signalled an unrelated process on the strength of a stale record")
+			t.Fatal("signaled an unrelated process on the strength of a stale record")
 		case <-time.After(500 * time.Millisecond):
 		}
 		assertStateCleared(t, dir)
