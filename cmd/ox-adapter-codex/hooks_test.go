@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	toml "github.com/pelletier/go-toml/v2"
@@ -184,6 +185,10 @@ func TestHandleUninstallHooks_LeavesCodexConfigUntouched(t *testing.T) {
 
 func TestHandleDiagnose_ReportsDeprecatedHookFeature(t *testing.T) {
 	repoRoot := t.TempDir()
+	home := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".codex", "sessions"), 0o755))
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	configPath := filepath.Join(repoRoot, codexProjectPath, codexConfigFile)
 	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o755))
 	require.NoError(t, os.WriteFile(configPath, []byte("[features]\ncodex_hooks = true\n"), 0o600))
@@ -198,4 +203,70 @@ func TestHandleDiagnose_ReportsDeprecatedHookFeature(t *testing.T) {
 		}
 	}
 	t.Fatal("deprecated Codex hook feature was not reported")
+}
+
+func TestHandleDiagnose_CodexAbsentSkipsHookDiagnostics(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("PATH", t.TempDir())
+
+	repoRoot := t.TempDir()
+	result, err := handleDiagnose(adapterprotocol.DiagnoseParams{RepoRoot: repoRoot, Scope: "project"})
+	require.NoError(t, err)
+	require.Len(t, result.Issues, 1)
+	assert.Equal(t, "codex:not-installed", result.Issues[0].Slug)
+	assert.NotContains(t, result.Issues[0].Detail, "hooks")
+	assert.NoFileExists(t, filepath.Join(repoRoot, codexProjectPath, codexHooksFileName))
+}
+
+// fakeCodexOnPath puts an executable named `codex` on PATH and points HOME at
+// an empty dir, so detection succeeds via the CLI alone — the state every user
+// with Codex installed is in, for every repo on their machine.
+func fakeCodexOnPath(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake binaries require unix")
+	}
+	binDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\n"), 0o755))
+	t.Setenv("PATH", binDir)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
+
+// TestHandleDiagnose_CodexOnPathWithoutProjectConfig verifies that a Codex CLI
+// merely installed on the machine produces no hook diagnostics for a repo that
+// never opted into Codex.
+//
+// Failure prevented: `ox doctor` warns about Codex in every repo on the
+// machine, and `ox doctor --fix` creates .codex/hooks.json in repos that don't
+// use Codex — contradicting doctor's core check, which stays silent for
+// "CLI detected, no project config".
+func TestHandleDiagnose_CodexOnPathWithoutProjectConfig(t *testing.T) {
+	fakeCodexOnPath(t)
+
+	repoRoot := t.TempDir()
+	result, err := handleDiagnose(adapterprotocol.DiagnoseParams{RepoRoot: repoRoot, Scope: "project"})
+	require.NoError(t, err)
+	assert.True(t, result.OK)
+	assert.Empty(t, result.Issues)
+	assert.NoDirExists(t, filepath.Join(repoRoot, codexProjectPath))
+}
+
+// TestHandleDiagnose_CodexProjectMissingHooks is the positive control for the
+// test above: once a repo opts into Codex, missing hooks ARE reported. Without
+// it, the silence assertion would pass even if hook diagnostics were deleted.
+func TestHandleDiagnose_CodexProjectMissingHooks(t *testing.T) {
+	fakeCodexOnPath(t)
+
+	repoRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, codexProjectPath), 0o755))
+
+	result, err := handleDiagnose(adapterprotocol.DiagnoseParams{RepoRoot: repoRoot, Scope: "project"})
+	require.NoError(t, err)
+	require.Len(t, result.Issues, 1)
+	assert.Equal(t, "codex:hooks-missing", result.Issues[0].Slug)
+	assert.True(t, result.Issues[0].FixSafe)
 }

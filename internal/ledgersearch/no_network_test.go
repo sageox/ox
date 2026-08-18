@@ -43,14 +43,22 @@ func TestSearch_NoNetworkCalls(t *testing.T) {
 	// path. If Search ever introduces network I/O, the dialer hook above
 	// fires and fails the test.
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "sessions", "2026-05-20T10-15-ryan-OxTest"), 0o755); err != nil {
+	fixtureTime := time.Date(2026, 5, 20, 10, 15, 0, 0, time.UTC)
+	sessionPath := filepath.Join(dir, "sessions", fixtureTime.Format("2006-01-02T15-04")+"-ryan-OxTest")
+	if err := os.MkdirAll(sessionPath, 0o755); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "sessions", "2026-05-20T10-15-ryan-OxTest", "summary.md"), []byte("the term widget matches"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(sessionPath, "summary.md"), []byte("the term widget matches"), 0o644); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 
-	results, err := Search(Options{LedgerPath: dir, Query: "widget", Now: time.Now()})
+	// Keep the clock near the fixed fixture timestamp. This test covers the
+	// zero-network path, not the 90-day session-retention boundary.
+	results, err := Search(Options{
+		LedgerPath: dir,
+		Query:      "widget",
+		Now:        fixtureTime.Add(24 * time.Hour),
+	})
 	if err != nil {
 		t.Fatalf("Search returned err (should be fail-open): %v", err)
 	}

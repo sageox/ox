@@ -1945,8 +1945,8 @@ func displayPath(absPath string) string {
 }
 
 // selectAgentsForInit discovers available adapters and prompts the user to
-// choose which ones to configure. Claude Code defaults to selected; all
-// others default to off. Returns adapter names the user selected.
+// choose which ones to configure. Detected agents default to selected.
+// Returns adapter names the user selected.
 func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 	selected := map[string]bool{}
 
@@ -1961,9 +1961,19 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 		return selected, nil
 	}
 
-	// non-interactive: Claude Code only
+	// Non-interactive callers cannot answer the selection prompt. Configure
+	// every detected agent so `ox init` keeps its hook-installation promise
+	// when invoked from an AI coworker or CI.
 	if !cli.IsInteractive() {
 		selected["claude-code"] = true
+		for _, ea := range adapters.DiscoverExternalAdapters() {
+			if ea.Detect() {
+				selected[ea.Name()] = true
+			}
+		}
+		if _, err := os.Stat(filepath.Join(gitRoot, ".opencode")); err == nil {
+			selected["opencode"] = true
+		}
 		return selected, nil
 	}
 
@@ -1987,8 +1997,9 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 			label = info.DisplayName
 		}
 		options = append(options, cli.MultiSelectOption{
-			Label: label,
-			Value: ea.Name(),
+			Label:    label,
+			Value:    ea.Name(),
+			Selected: true,
 		})
 	}
 
@@ -1996,8 +2007,9 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 	openCodeDir := filepath.Join(gitRoot, ".opencode")
 	if _, err := os.Stat(openCodeDir); err == nil {
 		options = append(options, cli.MultiSelectOption{
-			Label: "OpenCode",
-			Value: "opencode",
+			Label:    "OpenCode",
+			Value:    "opencode",
+			Selected: true,
 		})
 	}
 

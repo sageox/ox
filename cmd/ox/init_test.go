@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/repotools"
@@ -307,6 +308,43 @@ func TestStringSlicesEqual_OneNilOneNonEmpty(t *testing.T) {
 
 	result := stringSlicesEqual(a, b)
 	assert.False(t, result, "expected nil and non-empty slice to be unequal")
+}
+
+func TestSelectAgentsForInit_NonInteractiveIncludesDetectedAdapters(t *testing.T) {
+	cli.SetNoInteractive(true)
+	t.Cleanup(func() { cli.SetNoInteractive(false) })
+
+	previousAgentsFlag := initAgentsFlag
+	initAgentsFlag = ""
+	t.Cleanup(func() { initAgentsFlag = previousAgentsFlag })
+
+	adapterDir := t.TempDir()
+	createFakeAdapterWithHooks(t, adapterDir, "codex", "0.1.0", "session", ".codex")
+	t.Setenv("OX_ADAPTER_PATH", adapterDir)
+	t.Setenv("HOME", t.TempDir())
+
+	selected, err := selectAgentsForInit(t.TempDir())
+	require.NoError(t, err)
+	assert.True(t, selected["claude-code"])
+	assert.True(t, selected["codex"], "detected Codex must be configured when init cannot prompt")
+}
+
+func TestSelectAgentsForInit_NonInteractiveSkipsUndetectedAdapters(t *testing.T) {
+	cli.SetNoInteractive(true)
+	t.Cleanup(func() { cli.SetNoInteractive(false) })
+
+	previousAgentsFlag := initAgentsFlag
+	initAgentsFlag = ""
+	t.Cleanup(func() { initAgentsFlag = previousAgentsFlag })
+
+	adapterDir := t.TempDir()
+	createFakeAdapter(t, adapterDir, "codex", "0.1.0", "session")
+	t.Setenv("OX_ADAPTER_PATH", adapterDir)
+	t.Setenv("HOME", t.TempDir())
+
+	selected, err := selectAgentsForInit(t.TempDir())
+	require.NoError(t, err)
+	assert.False(t, selected["codex"], "undetected Codex must not create project integration files")
 }
 
 func TestSelectTeam_NoTeams(t *testing.T) {

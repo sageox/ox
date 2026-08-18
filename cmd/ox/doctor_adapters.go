@@ -202,10 +202,13 @@ func adapterErrorToCheckResult(adapterName string, err error, _ string) checkRes
 // shouldFixAdapterSlug checks whether an adapter-namespaced slug should be
 // fixed. Adapter slugs are not in the DoctorCheckRegistry, so we handle them
 // separately from core slugs.
+//
+// A bare `ox doctor` never repairs an adapter issue: writing requires --fix or
+// an explicit --fix-slug, matching the core checks (see checkCodexHooks). There
+// used to be an autoFixAdapterSlugs allowlist that bypassed this gate, but every
+// Codex fix runs `ox integrate install --codex`, which creates .codex/hooks.json
+// in the repo — a read-only diagnostic command must not do that.
 func (opts doctorOptions) shouldFixAdapterSlug(slug string, fixSafe bool) bool {
-	if autoFixAdapterSlugs[slug] && fixSafe {
-		return true
-	}
 	// check if this specific slug was requested via --fix-slug
 	for _, s := range opts.fixSlugs {
 		if s == slug {
@@ -228,13 +231,6 @@ func (opts doctorOptions) shouldFixAdapterSlug(slug string, fixSafe bool) bool {
 var adapterFixArgvAllowlist = map[string]bool{
 	"git": true,
 	"ox":  true,
-}
-
-// autoFixAdapterSlugs lists adapter diagnostics that are safe enough to repair
-// during every doctor run. Adapter diagnostics do not participate in the core
-// DoctorCheckRegistry, so their auto-fix policy lives here.
-var autoFixAdapterSlugs = map[string]bool{
-	"codex:codex:legacy-hooks-feature": true,
 }
 
 // gitScopeEscalationFlags are argv tokens that escalate a fix beyond the current

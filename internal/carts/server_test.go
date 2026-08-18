@@ -93,7 +93,7 @@ func TestStopServer(t *testing.T) {
 	livingHelper := func(t *testing.T) (int, <-chan struct{}) {
 		t.Helper()
 		cmd := exec.Command(os.Args[0], "-test.run=TestSleepHelper")
-		cmd.Env = append(os.Environ(), "OX_CARTS_SLEEP_HELPER=1")
+		cmd.Env = append(os.Environ(), "OX_CARTS_SLEEP_HELPER=1") // safe: re-execs this test binary as a sleep helper, not ox
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("spawn sleep helper: %v", err)
 		}

@@ -177,16 +177,48 @@ func TestShouldFixAdapterSlug(t *testing.T) {
 			want:    false,
 		},
 		{
-			name:    "safe automatic Codex migration",
+			// Every Codex fix shells out to `ox integrate install --codex`,
+			// which writes .codex/hooks.json. A bare `ox doctor` must not.
+			name:    "safe Codex migration is not repaired without --fix",
 			opts:    doctorOptions{},
+			slug:    "codex:codex:legacy-hooks-feature",
+			fixSafe: true,
+			want:    false,
+		},
+		{
+			name:    "safe Codex migration is repaired with --fix",
+			opts:    doctorOptions{fix: true},
 			slug:    "codex:codex:legacy-hooks-feature",
 			fixSafe: true,
 			want:    true,
 		},
 		{
-			name:    "unsafe Codex migration is not automatic",
+			// A bare `ox doctor` must never create Codex project config —
+			// the adapter reports hooks-missing on CLI-on-PATH alone.
+			name:    "missing Codex hooks are not repaired without --fix",
 			opts:    doctorOptions{},
+			slug:    "codex:codex:hooks-missing",
+			fixSafe: true,
+			want:    false,
+		},
+		{
+			name:    "missing Codex hooks are repaired with --fix",
+			opts:    doctorOptions{fix: true},
+			slug:    "codex:codex:hooks-missing",
+			fixSafe: true,
+			want:    true,
+		},
+		{
+			name:    "unsafe Codex migration is not fixed even with --fix",
+			opts:    doctorOptions{fix: true},
 			slug:    "codex:codex:legacy-hooks-feature",
+			fixSafe: false,
+			want:    false,
+		},
+		{
+			name:    "unsafe missing Codex hooks are not fixed even with --fix",
+			opts:    doctorOptions{fix: true},
+			slug:    "codex:codex:hooks-missing",
 			fixSafe: false,
 			want:    false,
 		},

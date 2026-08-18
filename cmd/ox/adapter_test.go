@@ -326,6 +326,9 @@ case "$1" in
   info)
     echo '{"protocol_version":1,"name":"%s","display_name":"%s","version":"%s","type":"%s","capabilities":["session_reader","hook_installer"]}'
     ;;
+  detect)
+    echo '{"detected":true,"reason":"test adapter"}'
+    ;;
   install-hooks)
     repo_root=""
     shift
