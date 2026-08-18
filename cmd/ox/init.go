@@ -2084,7 +2084,12 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 		if !selectedAgents[ea.Name()] {
 			continue
 		}
-		if ea.HasCapability(adapterprotocol.CapHookInstaller) {
+		// OpenCode hooks are already installed above: InstallProjectOpenCodeHooks
+		// resolves this same adapter and calls InstallHooks on it, so running the
+		// generic path too would repeat the identical call and double-report the
+		// plugin in installedHooks. Rules/commands/skills below are not installed
+		// by the built-in helper, so they still run for opencode.
+		if ea.HasCapability(adapterprotocol.CapHookInstaller) && ea.Name() != "opencode" {
 			result, err := ea.InstallHooks(gitRoot, "project")
 			if err != nil {
 				if !quiet {
