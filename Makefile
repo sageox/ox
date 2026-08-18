@@ -481,8 +481,12 @@ catalog-casts: build-ox ## Record asciinema .cast for animated components
 		echo "  ⚠ asciinema not installed; .cast recordings skipped"; \
 		echo "    install: brew install asciinema"; \
 	else \
+		# COLORTERM=truecolor is required, not decorative: asciinema records through a
+		# pty, so stdout IS a terminal and theme.Profile trusts terminal detection
+		# rather than the forced-renderer branch. Without it the cast bakes in ANSI256
+		# permanently. Matches the freeze invocation in catalog-build above.
 		for name in $$(./bin/$(BINARY_NAME) dev catalog --json | jq -r '.components[] | select(.renderer=="asciinema") | .name'); do \
-			CLICOLOR_FORCE=1 FORCE_COLOR=1 asciinema rec --quiet --overwrite --cols=80 --rows=24 \
+			CLICOLOR_FORCE=1 FORCE_COLOR=1 COLORTERM=truecolor asciinema rec --quiet --overwrite --cols=80 --rows=24 \
 				--command="./bin/$(BINARY_NAME) dev catalog --component=$$name" \
 				$(CATALOG_ASSETS)/$$name.cast 2>/dev/null \
 				&& echo "  asciinema: $$name.cast" || true; \
