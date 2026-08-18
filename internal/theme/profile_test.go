@@ -123,3 +123,53 @@ func TestParseProfile(t *testing.T) {
 		assert.False(t, ok, "%q should not parse", in)
 	}
 }
+
+// TestDetectProfile_ForcedColorToNonTTY covers the CLICOLOR_FORCE precedence
+// ladder. The regression it guards: `CLICOLOR_FORCE=1 ox --help > file` emitted
+// 125 truecolor sequences before this file existed and 0 after, because
+// colorprofile floors a non-TTY at 4-bit ANSI unless COLORTERM is also set. The
+// catalog build sets it; the asciinema demo recording does not.
+//
+// A test binary's stdout is never a TTY, so these exercise the non-TTY branch
+// directly.
+func TestDetectProfile_ForcedColorToNonTTY(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want colorprofile.Profile
+	}{
+		{
+			name: "forced color to a renderer keeps full fidelity",
+			env:  map[string]string{"CLICOLOR_FORCE": "1"},
+			want: colorprofile.TrueColor,
+		},
+		{
+			name: "NO_COLOR outranks CLICOLOR_FORCE",
+			env:  map[string]string{"CLICOLOR_FORCE": "1", "NO_COLOR": "1"},
+			want: colorprofile.ASCII,
+		},
+		{
+			name: "explicit override outranks CLICOLOR_FORCE",
+			env:  map[string]string{"CLICOLOR_FORCE": "1", "OX_COLOR_PROFILE": "ansi256"},
+			want: colorprofile.ANSI256,
+		},
+		{
+			name: "plain pipe stays colorless",
+			env:  nil,
+			want: colorprofile.NoTTY,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Clear every input so cases don't inherit the ambient environment.
+			for _, k := range []string{"CLICOLOR_FORCE", "CLICOLOR", "NO_COLOR", "OX_COLOR_PROFILE", "COLORTERM", "TERM"} {
+				t.Setenv(k, "")
+			}
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			assert.Equal(t, tt.want, detectProfile())
+		})
+	}
+}

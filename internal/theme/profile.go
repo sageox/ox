@@ -3,10 +3,12 @@ package theme
 import (
 	"image/color"
 	"os"
+	"strconv"
 	"strings"
 
 	lipgloss "charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
+	"github.com/mattn/go-isatty"
 )
 
 // Profile is the terminal's color capability, resolved once at package init.
@@ -48,7 +50,47 @@ func detectProfile() colorprofile.Profile {
 	if forced, ok := parseProfile(os.Getenv("OX_COLOR_PROFILE")); ok {
 		return forced
 	}
+	if noColorRequested() {
+		// colorprofile only clamps NO_COLOR when stdout is a TTY, so
+		// `NO_COLOR=1 CLICOLOR_FORCE=1 ox > file` slips through as 4-bit ANSI.
+		// NO_COLOR wins over CLICOLOR_FORCE (https://no-color.org) and this
+		// repo treats it as sacred, so clamp it here regardless of stream type.
+		return colorprofile.ASCII
+	}
+	if forcingColorToARenderer() {
+		return colorprofile.TrueColor
+	}
 	return colorprofile.Detect(os.Stdout, os.Environ())
+}
+
+func noColorRequested() bool {
+	noColor, _ := strconv.ParseBool(os.Getenv("NO_COLOR"))
+	return noColor
+}
+
+// forcingColorToARenderer reports whether CLICOLOR_FORCE is asking for color on
+// a stream that is not a terminal.
+//
+// That combination means the consumer is a *renderer*, not a terminal:
+// charmbracelet/freeze turning `ox dev catalog` into the catalog SVGs, or
+// asciinema recording the demo casts (Makefile `catalog-build` / `demo-record`).
+// Their fidelity ceiling is the source, not any terminal's capability, so
+// TrueColor is the correct answer and anything less bakes a permanent downgrade
+// into published assets.
+//
+// colorprofile.Detect cannot reach that conclusion on its own — with no TTY to
+// interrogate it floors CLICOLOR_FORCE at 4-bit ANSI unless COLORTERM happens to
+// be set too. `catalog-build` does set it; `demo-record` does not, and lost all
+// 24-bit color the first time this file existed without this branch.
+//
+// Deliberately narrow: when stdout *is* a terminal we trust detection, because
+// upgrading a real 256-color terminal to TrueColor would reintroduce the exact
+// unreadable-background bug this file exists to prevent.
+func forcingColorToARenderer() bool {
+	if force, _ := strconv.ParseBool(os.Getenv("CLICOLOR_FORCE")); !force {
+		return false
+	}
+	return !isatty.IsTerminal(os.Stdout.Fd()) && !isatty.IsCygwinTerminal(os.Stdout.Fd())
 }
 
 // parseProfile maps an OX_COLOR_PROFILE value to a profile. Unrecognized values

@@ -35,7 +35,9 @@ It's overwritten by `npm run sync`. Edits silently disappear on the next sync.
 
 ### 3. Use semantic styles, not raw colors
 
-Never `lipgloss.Color(…)` or ANSI escapes outside Bubble Tea code. Use `StyleSuccess`, `StyleError`, `StyleAccent`, etc. from `internal/cli/styles.go` and `internal/ui/styles.go`; when you genuinely need a new one, build it from `theme.Color(hex)` / `theme.Adapt(token)`. Raw hex only lives in `internal/theme/generated.go`.
+Never construct `lipgloss.Color(…)` directly, and never hand-write ANSI escapes, outside Bubble Tea code.
+
+In order of preference: reach for an existing semantic style (`StyleSuccess`, `StyleError`, `StyleAccent`, … in `internal/cli/styles.go` and `internal/ui/styles.go`); failing that, build one from a generated token via `theme.Adapt(theme.ColorX)`. A literal passed through `theme.Color("#…")` is permitted for a genuine one-off, but a color used more than once is a missing token — add it in `sageox-design` and re-sync, don't copy the hex. Net-new palette values still land in `internal/theme/generated.go` by sync, never by hand.
 
 This is a correctness rule, not a tidiness one. lipgloss v2's `Style.Render()` always emits 24-bit color, and ox prints past any `colorprofile.Writer`, so a raw `lipgloss.Color` reaches a 256-color terminal as `38;2;R;G;B` — which it misparses into a **background** color, painting whole columns unreadable. `theme.Color` / `theme.Adapt` degrade first. See [docs/design/theming.md § Color depth](../../docs/design/theming.md#color-depth).
 

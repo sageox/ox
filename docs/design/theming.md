@@ -57,7 +57,7 @@ lipgloss v1 downsampled inside `Style.Render()`. **lipgloss v2 does not** — `R
 
 Skipping that step is not a cosmetic downgrade. A terminal without 24-bit support — macOS Terminal.app, or anything reporting `TERM=xterm-256color` with no `COLORTERM` — does not ignore an unrecognized `38;2;…`; it parses the parameters as independent SGR codes. Any channel landing in 100–107 becomes a **background** color:
 
-```
+```text
 #E0A56A  →  ESC[38;2;224;165;106m  →  224, 165, and 106 read separately
                                        106 = bright-cyan background
 ```

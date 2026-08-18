@@ -9,6 +9,7 @@ import (
 
 	"github.com/sageox/ox/internal/theme"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestVariantColor pins the variant→token mapping. It runs at TrueColor because
@@ -37,7 +38,9 @@ func TestVariantColor(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := variantColor(tt.variant)
-			assert.NotNil(t, got, "variantColor should never return nil at TrueColor")
+			// require, not assert: a nil here must halt the subtest, or
+			// assertSameColor panics on the nil deref instead of failing cleanly.
+			require.NotNil(t, got, "variantColor should never return nil at TrueColor")
 			assertSameColor(t, tt.want, got)
 		})
 	}
