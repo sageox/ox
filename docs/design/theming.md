@@ -73,7 +73,14 @@ That is how brand copper turned the `ox --help` command column and the login dis
 
 Detection is `colorprofile.Detect(os.Stdout, os.Environ())`, honoring `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `COLORTERM`, `TERM`, terminfo, and tmux. Mechanism and init-ordering notes live in [`internal/theme/profile.go`](../../internal/theme/profile.go).
 
-**Bubble Tea is the one exemption.** Bubble Tea v2 downsamples its own frames, so TUI code (`internal/dashboard/**`, the tea models in `cmd/ox`) uses `lipgloss.Color` directly. `TestNoRawLipglossColorOutsideTUI` enforces the boundary.
+**Two exemptions**, both enforced by `TestNoRawLipglossColorOutsideTUI`:
+
+| Exempt | Why |
+|---|---|
+| Any file importing Bubble Tea, plus all of `internal/dashboard/**` | Bubble Tea v2 downsamples its own frames. The whole `dashboard` tree renders into one Bubble Tea frame, including leaf renderers that import only lipgloss. |
+| `internal/theme/**` | It *is* the adapter, and `generated.go` is where raw token hexes legitimately live (the `ColorPrimary` snippet above is one). |
+
+Everything else must go through `theme.Color` / `theme.Adapt`.
 
 ### Reproducing another terminal's rendering
 
@@ -92,7 +99,7 @@ Accepts `truecolor`, `ansi256`, `ansi`, `ascii`, `notty`. An unrecognized value 
 ## Forbidden patterns
 
 - Hand-editing `internal/theme/generated.go` (overwritten by sync).
-- `lipgloss.Color(…)` in any non-Bubble-Tea file — use `theme.Color` / `theme.Adapt`, or the semantic styles in `internal/cli/styles.go` and `internal/ui/styles.go`.
+- `lipgloss.Color(…)` outside the two exemptions above — use `theme.Color` / `theme.Adapt`, or the semantic styles in `internal/cli/styles.go` and `internal/ui/styles.go`.
 - ANSI escape sequences in command implementations (`\033[…`, `\x1b[…`).
 - New tokens added directly to `internal/dashboard/theme/tokens.go` without an upstream `sageox-design` PR.
 
