@@ -1971,7 +1971,7 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 				selected[ea.Name()] = true
 			}
 		}
-		if _, err := os.Stat(filepath.Join(gitRoot, ".opencode")); err == nil {
+		if info, err := os.Stat(filepath.Join(gitRoot, ".opencode")); err == nil && info.IsDir() {
 			selected["opencode"] = true
 		}
 		return selected, nil
@@ -2005,7 +2005,7 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 
 	// check for OpenCode separately (built-in detection)
 	openCodeDir := filepath.Join(gitRoot, ".opencode")
-	if _, err := os.Stat(openCodeDir); err == nil {
+	if info, err := os.Stat(openCodeDir); err == nil && info.IsDir() {
 		options = append(options, cli.MultiSelectOption{
 			Label:    "OpenCode",
 			Value:    "opencode",
