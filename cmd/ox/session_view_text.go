@@ -9,13 +9,14 @@ import (
 	lipgloss "charm.land/lipgloss/v2"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/theme"
 	"github.com/sageox/ox/internal/ui"
 )
 
 var (
 	viewTextRecordingBanner = lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#000000")).
+		Foreground(theme.Color("#000000")).
 		Background(cli.ColorWarning).
 		Padding(0, 1)
 )

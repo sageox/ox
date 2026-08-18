@@ -5,13 +5,15 @@ import (
 	"os"
 
 	lipgloss "charm.land/lipgloss/v2"
+
+	"github.com/sageox/ox/internal/theme"
 )
 
 // WarningMessage is the standard warning for unsigned/invalid SAGEOX.md
 const WarningMessage = "Warning: SAGEOX.md has not been signed by SageOx, unable to verify it has not been tampered with. See https://sageox.ai/i/signed for more info."
 
 // warning style using lipgloss
-var warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+var warningStyle = lipgloss.NewStyle().Foreground(theme.Color("214"))
 
 // EmitWarning prints the warning message to stderr with yellow color
 // Only emits if SAGEOX.md exists but is not verified

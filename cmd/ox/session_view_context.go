@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/theme"
 )
 
 // semantic styles for context trace (aligned with murmur list palette)
@@ -32,10 +33,10 @@ var (
 				Foreground(cli.ColorDim)
 
 	ctxDocNameStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#CCCCCC"))
+			Foreground(theme.Color("#CCCCCC"))
 
 	ctxDecisionStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#CCCCCC"))
+				Foreground(theme.Color("#CCCCCC"))
 
 	ctxTokenStyle = lipgloss.NewStyle().
 			Foreground(cli.ColorInfo)

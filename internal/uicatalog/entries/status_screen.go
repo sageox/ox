@@ -30,7 +30,7 @@ func init() {
 			brand := cli.StyleBrand.Render
 			sect := cli.StyleSecondary.Bold(true).Render
 			label := cli.StyleDim.Render
-			val := lipgloss.NewStyle().Foreground(theme.ColorAccent).Render
+			val := lipgloss.NewStyle().Foreground(theme.Adapt(theme.ColorAccent)).Render
 			ok := cli.StyleSuccess.Render
 			warn := cli.StyleWarning.Render
 			dim := cli.StyleDim.Render

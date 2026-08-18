@@ -19,6 +19,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/theme"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/spf13/cobra"
 )
@@ -408,12 +409,14 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 
 	// display a fun welcome message
 	fmt.Fprintln(out)
+	// theme.Color, not lipgloss.Color: this prints via fmt.Fprintf rather than
+	// through Bubble Tea, so nothing downstream downsamples it.
 	welcomeStyle := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("212"))
+		Foreground(theme.Color("212"))
 	nameStyle := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("86"))
+		Foreground(theme.Color("86"))
 
 	// extract first name or use email prefix
 	displayName := token.UserInfo.Name

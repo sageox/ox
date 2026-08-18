@@ -20,8 +20,8 @@ func init() {
 		WhenNotTo: "Single-line status (use `StyleSuccess` directly) or tabular history " +
 			"(use Columns). Timelines are vertical; horizontal scans want tables.",
 		Render: func() string {
-			pass := lipgloss.NewStyle().Foreground(theme.ColorSuccess)
-			warn := lipgloss.NewStyle().Foreground(theme.ColorWarning)
+			pass := lipgloss.NewStyle().Foreground(theme.Adapt(theme.ColorSuccess))
+			warn := lipgloss.NewStyle().Foreground(theme.Adapt(theme.ColorWarning))
 			nodes := []ui.TimelineNode{
 				{
 					Title:   "Auth",

@@ -9,6 +9,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/sageox/ox/internal/theme"
 	"github.com/sageox/ox/internal/tui"
 )
 
@@ -295,10 +296,10 @@ func buildCodeIndexJSON(cs *CodeDBStats) *statusCodeIndexJSON {
 
 var (
 	// semantic colors for status
-	colorHealthy  = lipgloss.Color("2") // green
-	colorWarning  = lipgloss.Color("3") // yellow
-	colorCritical = lipgloss.Color("1") // red
-	colorMuted    = lipgloss.Color("8") // gray
+	colorHealthy  = theme.Color("2") // green
+	colorWarning  = theme.Color("3") // yellow
+	colorCritical = theme.Color("1") // red
+	colorMuted    = theme.Color("8") // gray
 
 	// styles
 	styleHealthy  = lipgloss.NewStyle().Foreground(colorHealthy).Bold(true)

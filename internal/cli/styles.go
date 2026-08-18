@@ -15,18 +15,23 @@ import (
 // Colors are sourced from the sageox-design system.
 // See: internal/theme/generated.go
 
-// Re-export theme colors for backward compatibility
+// Re-export theme colors for backward compatibility.
+//
+// theme.Adapt downgrades each adaptive color to the terminal's real color
+// depth. The generated tokens are 24-bit, and Style.Render() no longer degrades
+// them in lipgloss v2 — see internal/theme/profile.go for what that does to a
+// 256-color terminal.
 var (
-	ColorPrimary   = theme.ColorPrimary
-	ColorSecondary = theme.ColorSecondary
-	ColorAccent    = theme.ColorAccent
-	ColorSuccess   = theme.ColorSuccess
-	ColorWarning   = theme.ColorWarning
-	ColorError     = theme.ColorError
-	ColorInfo      = theme.ColorInfo
-	ColorDim       = theme.ColorDim
-	ColorPublic    = theme.ColorPublic
-	ColorPrivate   = theme.ColorPrivate
+	ColorPrimary   = theme.Adapt(theme.ColorPrimary)
+	ColorSecondary = theme.Adapt(theme.ColorSecondary)
+	ColorAccent    = theme.Adapt(theme.ColorAccent)
+	ColorSuccess   = theme.Adapt(theme.ColorSuccess)
+	ColorWarning   = theme.Adapt(theme.ColorWarning)
+	ColorError     = theme.Adapt(theme.ColorError)
+	ColorInfo      = theme.Adapt(theme.ColorInfo)
+	ColorDim       = theme.Adapt(theme.ColorDim)
+	ColorPublic    = theme.Adapt(theme.ColorPublic)
+	ColorPrivate   = theme.Adapt(theme.ColorPrivate)
 )
 
 // Text styles
@@ -97,7 +102,7 @@ var (
 
 // Wordmark returns the two-tone "SageOx" brand wordmark as a rendered string.
 func Wordmark() string {
-	sage := lipgloss.NewStyle().Foreground(theme.ColorWordmarkSage).Bold(true)
-	ox := lipgloss.NewStyle().Foreground(theme.ColorWordmarkOx).Bold(true)
+	sage := lipgloss.NewStyle().Foreground(theme.Adapt(theme.ColorWordmarkSage)).Bold(true)
+	ox := lipgloss.NewStyle().Foreground(theme.Adapt(theme.ColorWordmarkOx)).Bold(true)
 	return sage.Render("Sage") + ox.Render("Ox")
 }

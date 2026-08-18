@@ -30,24 +30,28 @@ const (
 	HexPrivate = theme.HexPrivate
 )
 
+// Every color here goes through theme.Color, which downgrades the hex to what
+// the terminal can render. Raw lipgloss.Color would emit 24-bit sequences that
+// non-truecolor terminals misparse into background colors — see
+// internal/theme/profile.go.
 var (
 	// Brand primary - the core SageOx identity color
-	ColorPrimary = lipgloss.Color(HexPrimary) // sage green - brand identity
+	ColorPrimary = theme.Color(HexPrimary) // sage green - brand identity
 
 	// Semantic status colors (aligned with brand)
-	ColorPass   = lipgloss.Color(HexPass)   // sage green - brand success
-	ColorWarn   = lipgloss.Color(HexWarn)   // copper gold - brand warning
-	ColorFail   = lipgloss.Color(HexFail)   // ox red - brand error
-	ColorMuted  = lipgloss.Color(HexMuted)  // charcoal gray - recessive
-	ColorAccent = lipgloss.Color(HexAccent) // info blue - brand accent
+	ColorPass   = theme.Color(HexPass)   // sage green - brand success
+	ColorWarn   = theme.Color(HexWarn)   // copper gold - brand warning
+	ColorFail   = theme.Color(HexFail)   // ox red - brand error
+	ColorMuted  = theme.Color(HexMuted)  // charcoal gray - recessive
+	ColorAccent = theme.Color(HexAccent) // info blue - brand accent
 
 	// Text colors
-	ColorText    = lipgloss.Color(HexText)    // soft gray-white - dark terminal optimized
-	ColorTextDim = lipgloss.Color(HexTextDim) // dim text - pairs with sage/charcoal
+	ColorText    = theme.Color(HexText)    // soft gray-white - dark terminal optimized
+	ColorTextDim = theme.Color(HexTextDim) // dim text - pairs with sage/charcoal
 
 	// Visibility colors (from sageox-mono public/private semantic tokens)
-	ColorPublic  = lipgloss.Color(HexPublic)  // teal - public visibility
-	ColorPrivate = lipgloss.Color(HexPrivate) // amber - private visibility
+	ColorPublic  = theme.Color(HexPublic)  // teal - public visibility
+	ColorPrivate = theme.Color(HexPrivate) // amber - private visibility
 )
 
 // Status styles - consistent across all commands

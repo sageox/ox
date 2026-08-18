@@ -27,7 +27,7 @@ func init() {
 			dim := cli.StyleDim.Render
 			ok := cli.StyleSuccess.Render
 			warn := cli.StyleWarning.Render
-			val := lipgloss.NewStyle().Foreground(theme.ColorAccent).Render
+			val := lipgloss.NewStyle().Foreground(theme.Adapt(theme.ColorAccent)).Render
 			sec := cli.StyleSecondary.Render
 
 			pad := func(s string, w int) string {

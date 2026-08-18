@@ -49,14 +49,50 @@ ColorPrimary = compat.AdaptiveColor{
 
 When the user toggles their terminal between light and dark, the next ox invocation renders with the matching variant. The published catalog page at [sageox-design.netlify.app/catalog/cli/](https://sageox-design.netlify.app/catalog/cli/) shows both variants per token, with the active variant outlined according to the page's Mode toggle.
 
+## Color depth
+
+Light vs dark picks *which* variant. Color **depth** decides how that variant is written to the terminal, and it is a separate mechanism that ox has to run itself.
+
+lipgloss v1 downsampled inside `Style.Render()`. **lipgloss v2 does not** — `Render()` always emits 24-bit `38;2;R;G;B` and expects the caller to degrade at the output layer (`colorprofile.Writer`, `lipgloss.Println`). ox has ~300 `fmt.Print(style.Render(…))` call sites that write straight to `os.Stdout`, so there is no output layer to hook. ox therefore degrades **at the color**: `theme.Color(hex)` and `theme.Adapt(c)` convert to the detected profile before the color ever reaches a `Style`.
+
+Skipping that step is not a cosmetic downgrade. A terminal without 24-bit support — macOS Terminal.app, or anything reporting `TERM=xterm-256color` with no `COLORTERM` — does not ignore an unrecognized `38;2;…`; it parses the parameters as independent SGR codes. Any channel landing in 100–107 becomes a **background** color:
+
+```
+#E0A56A  →  ESC[38;2;224;165;106m  →  224, 165, and 106 read separately
+                                       106 = bright-cyan background
+```
+
+That is how brand copper turned the `ox --help` command column and the login disclaimer into unreadable grey-on-cyan blocks. Other tokens sit one step from the same trap (`#2DD4BF` starts `0x2D` = 45 = magenta background), so the fix is the conversion, not a safer hex.
+
+| Profile | Emits | Typical terminal |
+|---|---|---|
+| TrueColor | `38;2;R;G;B` | iTerm2, Ghostty, WezTerm, Kitty, VS Code (`COLORTERM=truecolor`) |
+| ANSI256 | `38;5;N` | macOS Terminal.app, `TERM=xterm-256color` |
+| ANSI | 4-bit `9x`/`3x` | `TERM=xterm-color`, old emulators |
+| ASCII / NoTTY | no color, attributes only | `NO_COLOR=1`, pipes, CI |
+
+Detection is `colorprofile.Detect(os.Stdout, os.Environ())`, honoring `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `COLORTERM`, `TERM`, terminfo, and tmux. Mechanism and init-ordering notes live in [`internal/theme/profile.go`](../../internal/theme/profile.go).
+
+**Bubble Tea is the one exemption.** Bubble Tea v2 downsamples its own frames, so TUI code (`internal/dashboard/**`, the tea models in `cmd/ox`) uses `lipgloss.Color` directly. `TestNoRawLipglossColorOutsideTUI` enforces the boundary.
+
+### Reproducing another terminal's rendering
+
+`OX_COLOR_PROFILE` forces a profile, so a report from a 256-color terminal is reproducible on any machine:
+
+```bash
+OX_COLOR_PROFILE=ansi256 ox --help
+```
+
+Accepts `truecolor`, `ansi256`, `ansi`, `ascii`, `notty`. An unrecognized value falls through to normal detection rather than erroring. Inspect the raw bytes with `script -q /dev/null ox --help | cat -v`.
+
 ## NO_COLOR
 
-[`NO_COLOR=1`](https://no-color.org/) strips all ANSI escapes. lipgloss handles this natively — no per-component code is needed. Test new components with `NO_COLOR=1 ox dev catalog`.
+[`NO_COLOR=1`](https://no-color.org/) strips color while leaving text attributes (bold, underline) intact — it resolves to the ASCII profile above. Test new components with `NO_COLOR=1 ox dev catalog`.
 
 ## Forbidden patterns
 
 - Hand-editing `internal/theme/generated.go` (overwritten by sync).
-- `lipgloss.Color("#…")` literals in `cmd/ox/**` (use semantic styles instead).
+- `lipgloss.Color(…)` in any non-Bubble-Tea file — use `theme.Color` / `theme.Adapt`, or the semantic styles in `internal/cli/styles.go` and `internal/ui/styles.go`.
 - ANSI escape sequences in command implementations (`\033[…`, `\x1b[…`).
 - New tokens added directly to `internal/dashboard/theme/tokens.go` without an upstream `sageox-design` PR.
 

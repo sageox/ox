@@ -1,36 +1,67 @@
 package ui
 
 import (
+	"image/color"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/colorprofile"
 
 	"github.com/sageox/ox/internal/theme"
 	"github.com/stretchr/testify/assert"
 )
 
+// TestVariantColor pins the variant→token mapping. It runs at TrueColor because
+// variantColor returns the terminal-adapted color, and a test binary's stdout is
+// never a TTY — under the ambient NoTTY profile every variant correctly collapses
+// to nil (no color), which would make the mapping untestable. Not parallel: it
+// swaps the package-level theme.Profile.
 func TestVariantColor(t *testing.T) {
-	t.Parallel()
+	prevProfile := theme.Profile
+	theme.Profile = colorprofile.TrueColor
+	t.Cleanup(func() { theme.Profile = prevProfile })
 
 	tests := []struct {
 		name    string
 		variant BoxVariant
-		want    string // hex color to check against theme
+		want    color.Color
 	}{
-		{"BoxDefault returns dim color", BoxDefault, theme.HexMuted},
-		{"BoxInfo returns info color", BoxInfo, theme.HexInfo},
-		{"BoxWarning returns warning color", BoxWarning, theme.HexWarn},
-		{"BoxError returns error color", BoxError, theme.HexFail},
-		{"BoxSuccess returns success color", BoxSuccess, theme.HexPass},
-		{"unknown variant defaults to dim", BoxVariant(99), theme.HexMuted},
+		{"BoxDefault returns dim color", BoxDefault, theme.ColorDim},
+		{"BoxInfo returns info color", BoxInfo, theme.ColorInfo},
+		{"BoxWarning returns warning color", BoxWarning, theme.ColorWarning},
+		{"BoxError returns error color", BoxError, theme.ColorError},
+		{"BoxSuccess returns success color", BoxSuccess, theme.ColorSuccess},
+		{"unknown variant defaults to dim", BoxVariant(99), theme.ColorDim},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := variantColor(tt.variant)
-			assert.NotNil(t, got, "variantColor should never return nil")
+			assert.NotNil(t, got, "variantColor should never return nil at TrueColor")
+			assertSameColor(t, tt.want, got)
 		})
 	}
+}
+
+// TestVariantColor_NoColorTerminal documents the other half of the contract:
+// on a terminal that cannot render color, every variant yields nil, which
+// lipgloss treats as "unset" — the box still renders, just uncolored.
+func TestVariantColor_NoColorTerminal(t *testing.T) {
+	prevProfile := theme.Profile
+	theme.Profile = colorprofile.NoTTY
+	t.Cleanup(func() { theme.Profile = prevProfile })
+
+	for _, v := range []BoxVariant{BoxDefault, BoxInfo, BoxWarning, BoxError, BoxSuccess} {
+		assert.Nil(t, variantColor(v))
+	}
+	assert.Contains(t, RenderBox("Title", "body", BoxInfo), "body")
+}
+
+func assertSameColor(t *testing.T, want, got color.Color) {
+	t.Helper()
+	wr, wg, wb, _ := want.RGBA()
+	gr, gg, gb, _ := got.RGBA()
+	assert.Equal(t, [3]uint32{wr, wg, wb}, [3]uint32{gr, gg, gb})
 }
 
 func TestRenderBox(t *testing.T) {

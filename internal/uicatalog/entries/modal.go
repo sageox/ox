@@ -23,7 +23,7 @@ func init() {
 		Render: func() string {
 			border := lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(theme.ColorAccent).
+				BorderForeground(theme.Adapt(theme.ColorAccent)).
 				Padding(1, 3)
 
 			title := cli.StyleBrand.Render("⌘  Command palette")

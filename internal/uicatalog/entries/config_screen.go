@@ -25,13 +25,13 @@ func init() {
 		Render: func() string {
 			frame := lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(theme.ColorDim).
+				BorderForeground(theme.Adapt(theme.ColorDim)).
 				Padding(0, 1).
 				Width(76)
 
 			title := cli.StyleBrand.Bold(true).Render(" ox config ")
 			cat := cli.StyleSecondary.Bold(true).Render
-			sel := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorAccent).Render
+			sel := lipgloss.NewStyle().Bold(true).Foreground(theme.Adapt(theme.ColorAccent)).Render
 			dim := cli.StyleDim.Render
 			val := cli.StyleAccent.Render
 			def := cli.StyleDim.Render

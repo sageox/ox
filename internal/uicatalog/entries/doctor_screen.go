@@ -21,8 +21,8 @@ func init() {
 		WhenNotTo: "Pipeline commands — the wordmark earns its vertical space only " +
 			"when the command is a destination. Don't print it from automation paths.",
 		Render: func() string {
-			pass := lipgloss.NewStyle().Foreground(theme.ColorSuccess)
-			warn := lipgloss.NewStyle().Foreground(theme.ColorWarning)
+			pass := lipgloss.NewStyle().Foreground(theme.Adapt(theme.ColorSuccess))
+			warn := lipgloss.NewStyle().Foreground(theme.Adapt(theme.ColorWarning))
 
 			header := ui.RenderWordmark("0.9.0", false)
 

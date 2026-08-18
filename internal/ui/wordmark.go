@@ -28,9 +28,9 @@ const wordmarkSplit = 12
 // Sage half uses theme.ColorWordmarkSage; Ox half uses theme.ColorWordmarkOx.
 // Both adapt to light/dark terminals via lipgloss.
 func RenderWordmark(version string, fixMode bool) string {
-	sageStyle := lipgloss.NewStyle().Foreground(theme.ColorWordmarkSage)
-	oxStyle := lipgloss.NewStyle().Foreground(theme.ColorWordmarkOx)
-	dimStyle := lipgloss.NewStyle().Foreground(theme.ColorDim)
+	sageStyle := lipgloss.NewStyle().Foreground(theme.Adapt(theme.ColorWordmarkSage))
+	oxStyle := lipgloss.NewStyle().Foreground(theme.Adapt(theme.ColorWordmarkOx))
+	dimStyle := lipgloss.NewStyle().Foreground(theme.Adapt(theme.ColorDim))
 
 	var b strings.Builder
 	for _, line := range wordmarkLines {

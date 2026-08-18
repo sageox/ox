@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/kb"
+	"github.com/sageox/ox/internal/theme"
 	"github.com/spf13/cobra"
 )
 
@@ -247,7 +248,7 @@ var (
 			Foreground(cli.ColorPrimary)
 
 	kbListNameStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#CCCCCC"))
+			Foreground(theme.Color("#CCCCCC"))
 
 	kbListWarnStyle = lipgloss.NewStyle().
 			Foreground(cli.ColorWarning)

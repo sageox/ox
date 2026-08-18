@@ -24,13 +24,13 @@ import (
 // Colors are sourced from the sageox-design system.
 // See: internal/theme/generated.go
 var (
-	successStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.AnsiSuccess)).Bold(true)
-	preservedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.AnsiPreserved)).Bold(true) // cyan for preserved/kept
-	errorStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.AnsiError)).Bold(true)
-	warningStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.AnsiWarning)).Bold(true)
-	infoStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.AnsiInfo))
-	hintStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.AnsiHint))
-	codeStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.AnsiCode))
+	successStyle    = lipgloss.NewStyle().Foreground(theme.Color(theme.AnsiSuccess)).Bold(true)
+	preservedStyle  = lipgloss.NewStyle().Foreground(theme.Color(theme.AnsiPreserved)).Bold(true) // cyan for preserved/kept
+	errorStyle      = lipgloss.NewStyle().Foreground(theme.Color(theme.AnsiError)).Bold(true)
+	warningStyle    = lipgloss.NewStyle().Foreground(theme.Color(theme.AnsiWarning)).Bold(true)
+	infoStyle       = lipgloss.NewStyle().Foreground(theme.Color(theme.AnsiInfo))
+	hintStyle       = lipgloss.NewStyle().Foreground(theme.Color(theme.AnsiHint))
+	codeStyle       = lipgloss.NewStyle().Foreground(theme.Color(theme.AnsiCode))
 	tipIconStyle    = lipgloss.NewStyle().Foreground(ColorSecondary) // warm gold for ✦
 	tipCommandStyle = lipgloss.NewStyle().Foreground(ColorPrimary)   // sage green for commands
 )

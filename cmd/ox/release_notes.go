@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	lipgloss "charm.land/lipgloss/v2"
+	"github.com/sageox/ox/internal/theme"
 	"github.com/spf13/cobra"
 )
 
@@ -202,8 +203,8 @@ func highlightCode(text string) string {
 var (
 	releaseNoteBoldStyle   = lipgloss.NewStyle().Bold(true)
 	releaseNoteDimStyle    = lipgloss.NewStyle().Faint(true)
-	releaseNoteCyanStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("36"))
-	releaseNoteGreenStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
-	releaseNoteYellowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	releaseNoteBlueStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	releaseNoteCyanStyle   = lipgloss.NewStyle().Foreground(theme.Color("36"))
+	releaseNoteGreenStyle  = lipgloss.NewStyle().Foreground(theme.Color("82"))
+	releaseNoteYellowStyle = lipgloss.NewStyle().Foreground(theme.Color("214"))
+	releaseNoteBlueStyle   = lipgloss.NewStyle().Foreground(theme.Color("39"))
 )

@@ -39,7 +39,7 @@ func init() {
 			// Post-auth state — what the user sees after success.
 			postBox := lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(theme.ColorSuccess).
+				BorderForeground(theme.Adapt(theme.ColorSuccess)).
 				Padding(0, 2).
 				Render(ok("✓") + " Authenticated as " + cli.StyleAccent.Render("ryan+ox@sageox.ai") + "\n" +
 					"  Endpoint: " + cli.StyleAccent.Render("sageox.ai") + "\n" +

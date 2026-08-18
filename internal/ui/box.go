@@ -14,26 +14,26 @@ import (
 type BoxVariant int
 
 const (
-	BoxDefault BoxVariant = iota // border: theme.ColorDim
-	BoxInfo                      // border: theme.ColorInfo
-	BoxWarning                   // border: theme.ColorWarning
-	BoxError                     // border: theme.ColorError
-	BoxSuccess                   // border: theme.ColorSuccess
+	BoxDefault BoxVariant = iota // border: theme.Adapt(theme.ColorDim)
+	BoxInfo                      // border: theme.Adapt(theme.ColorInfo)
+	BoxWarning                   // border: theme.Adapt(theme.ColorWarning)
+	BoxError                     // border: theme.Adapt(theme.ColorError)
+	BoxSuccess                   // border: theme.Adapt(theme.ColorSuccess)
 )
 
 // variantColor returns the theme color for a given variant.
 func variantColor(v BoxVariant) color.Color {
 	switch v {
 	case BoxInfo:
-		return theme.ColorInfo
+		return theme.Adapt(theme.ColorInfo)
 	case BoxWarning:
-		return theme.ColorWarning
+		return theme.Adapt(theme.ColorWarning)
 	case BoxError:
-		return theme.ColorError
+		return theme.Adapt(theme.ColorError)
 	case BoxSuccess:
-		return theme.ColorSuccess
+		return theme.Adapt(theme.ColorSuccess)
 	default:
-		return theme.ColorDim
+		return theme.Adapt(theme.ColorDim)
 	}
 }
 

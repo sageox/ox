@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/theme"
 	"github.com/spf13/cobra"
 )
 
@@ -33,7 +34,7 @@ var (
 				Foreground(cli.ColorSecondary)
 
 	murmurContentStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#CCCCCC"))
+				Foreground(theme.Color("#CCCCCC"))
 
 	murmurDimStyle = lipgloss.NewStyle().
 			Foreground(cli.ColorDim)
