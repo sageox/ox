@@ -91,11 +91,18 @@ func runExport(cmd *cobra.Command, _ []string) error {
 
 	// --sync: ensure everything is checked out and fresh before we print paths.
 	// A sync failure is surfaced but never blocks the docs — the user still
-	// deserves to see where their data lives and how to reach it.
+	// deserves to see where their data lives and how to reach it. Report the
+	// sync we ACTUALLY completed, not the one requested: a failed refresh must
+	// not claim synced=true in JSON, and must keep showing the refresh tip.
+	syncSucceeded := false
 	if doSync {
-		if err := runExportSync(projectRoot, jsonOutput); err != nil && !jsonOutput {
-			cli.PrintWarning(fmt.Sprintf("Sync incomplete: %v", err))
-			cli.PrintHint("Showing current on-disk locations anyway.")
+		if err := runExportSync(projectRoot, jsonOutput); err != nil {
+			if !jsonOutput {
+				cli.PrintWarning(fmt.Sprintf("Sync incomplete: %v", err))
+				cli.PrintHint("Showing current on-disk locations anyway.")
+			}
+		} else {
+			syncSucceeded = true
 		}
 	}
 
@@ -105,10 +112,10 @@ func runExport(cmd *cobra.Command, _ []string) error {
 	if jsonOutput {
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
-		return enc.Encode(buildExportOutput(ledgers, teams, doSync))
+		return enc.Encode(buildExportOutput(ledgers, teams, syncSucceeded))
 	}
 
-	renderExportHuman(out, ledgers, teams, doSync)
+	renderExportHuman(out, ledgers, teams, syncSucceeded)
 	return nil
 }
 

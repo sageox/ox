@@ -194,7 +194,7 @@ func shortRef(v string) string {
 }
 
 func init() {
-	attestProofCmd.Flags().Bool("json", false, "structured JSON output for agents")
+	attestProofCmd.Flags().Bool("json", false, "structured JSON output for AI coworkers")
 	addCorpusFlag(attestProofCmd)
 	attestCmd.AddCommand(attestProofCmd)
 }

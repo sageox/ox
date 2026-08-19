@@ -178,7 +178,7 @@ func renderAttestCheck(r attestCheckResult) string {
 }
 
 func init() {
-	attestCheckCmd.Flags().Bool("json", false, "structured JSON output for agents")
+	attestCheckCmd.Flags().Bool("json", false, "structured JSON output for AI coworkers")
 	addCorpusFlag(attestCheckCmd)
 	attestCmd.AddCommand(attestCheckCmd)
 }

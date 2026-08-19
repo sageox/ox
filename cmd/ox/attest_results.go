@@ -49,7 +49,7 @@ func renderAttestResults(results []attest.RunResult) string {
 
 func init() {
 	attestResultsCmd.Flags().String("runs-root", "", "run artifacts directory relative to the repo root (default tests/bdd/runs)")
-	attestResultsCmd.Flags().Bool("json", false, "structured JSON output for agents")
+	attestResultsCmd.Flags().Bool("json", false, "structured JSON output for AI coworkers")
 	addCorpusFlag(attestResultsCmd)
 	attestCmd.AddCommand(attestResultsCmd)
 }

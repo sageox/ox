@@ -15,7 +15,7 @@ var attestInstallCmd = &cobra.Command{
 
 This installs customer-journey BDD creation and evidence-recording guidance.
 It does not install lifecycle hooks: use 'ox integrate install' for those.
-The Attest CLI itself remains available on every supported agent.`,
+The Attest CLI itself remains available on every supported AI coworker.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repoRoot, err := repotools.FindRepoRoot(repotools.VCSGit)
 		if err != nil {

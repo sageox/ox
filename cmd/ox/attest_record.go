@@ -422,7 +422,7 @@ func init() {
 	attestRecordCmd.Flags().String("verdict", "", "override the derived verdict (clean|ambiguous|inconclusive)")
 	attestRecordCmd.Flags().String("repo-key", "", "opaque repo key (default: the repo directory name)")
 	attestRecordCmd.Flags().Bool("dry-run", false, "validate and print without writing")
-	attestRecordCmd.Flags().Bool("json", false, "structured JSON output for agents")
+	attestRecordCmd.Flags().Bool("json", false, "structured JSON output for AI coworkers")
 	addCorpusFlag(attestRecordCmd)
 	attestCmd.AddCommand(attestRecordCmd)
 }

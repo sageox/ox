@@ -296,7 +296,7 @@ func renderAttestStatus(r *attest.Report, domain string, weakest int) string {
 }
 
 func init() {
-	attestStatusCmd.Flags().Bool("json", false, "structured JSON output for agents")
+	attestStatusCmd.Flags().Bool("json", false, "structured JSON output for AI coworkers")
 	attestStatusCmd.Flags().String("domain", "", "list capabilities from one domain instead of the weakest overall")
 	attestStatusCmd.Flags().Int("weakest", 10, "how many capabilities to list (0 for all)")
 	addCorpusFlag(attestStatusCmd)

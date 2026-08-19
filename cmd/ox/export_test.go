@@ -50,6 +50,27 @@ func TestBuildExportOutput_CarriesPhilosophyAndGuidance(t *testing.T) {
 	}
 }
 
+// TestBuildExportOutput_ReportsCompletedSyncNotRequested verifies the payload
+// reports the sync that ACTUALLY completed. runExport passes syncSucceeded
+// (true only when runExportSync returned nil), so a failed `--sync` refresh must
+// surface synced=false rather than claiming success.
+func TestBuildExportOutput_ReportsCompletedSyncNotRequested(t *testing.T) {
+	// sync requested but failed → caller passes false → payload must not lie
+	failed := buildExportOutput(nil, nil, false)
+	if failed.Synced {
+		t.Error("synced must be false when the refresh did not complete")
+	}
+	if failed.Note == "" {
+		t.Error("note should still explain --sync scope")
+	}
+
+	// sync completed → true is preserved
+	ok := buildExportOutput(nil, nil, true)
+	if !ok.Synced {
+		t.Error("synced must be true when the refresh completed")
+	}
+}
+
 // TestRenderExportHuman_TeachesLocationAndAccess verifies the human output
 // leads with the ownership philosophy, shows each repo's on-disk location, and
 // teaches plain-git access — the whole point of the command.

@@ -91,7 +91,7 @@ func renderPublish(res *attest.PublishResult, r *attest.Report, repoKey, dest st
 func init() {
 	attestPublishCmd.Flags().String("to", "", "destination directory (required)")
 	attestPublishCmd.Flags().String("repo-key", "", "opaque repo key (default: the repo directory name)")
-	attestPublishCmd.Flags().Bool("json", false, "structured JSON output for agents")
+	attestPublishCmd.Flags().Bool("json", false, "structured JSON output for AI coworkers")
 	addCorpusFlag(attestPublishCmd)
 	attestCmd.AddCommand(attestPublishCmd)
 }
