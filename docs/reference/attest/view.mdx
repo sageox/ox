@@ -1,28 +1,31 @@
 ---
-title: "ox carts start"
-description: "CLI reference for ox carts start"
-sidebar_position: 24
+title: "ox attest view"
+description: "CLI reference for ox attest view"
+sidebar_position: 20
 ---
 
-## ox carts start
+## ox attest view
 
-Claim a cart and start working on it
+View a hosted Attest publication
 
 ```
-ox carts start ID [flags]
+ox attest view <attpub_id> | --latest [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for start
+  -h, --help     help for view
+      --json     emit structured JSON
+      --latest   select the newest complete hosted publication
+      --text     render a compact terminal summary
+      --web      open the stable SageOx Attest page
 ```
 
 ### Options inherited from parent commands
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
-      --json             output in JSON format (default: false)
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
@@ -31,5 +34,5 @@ ox carts start ID [flags]
 
 ### SEE ALSO
 
-* [ox carts](/carts)	 - Manage carts — trackable work items backed by DoltDB
+* [ox attest](/attest)	 - What this repo can actually demonstrate
 

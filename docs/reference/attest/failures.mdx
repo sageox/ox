@@ -1,28 +1,30 @@
 ---
-title: "ox carts show"
-description: "CLI reference for ox carts show"
-sidebar_position: 23
+title: "ox attest failures"
+description: "CLI reference for ox attest failures"
+sidebar_position: 13
 ---
 
-## ox carts show
+## ox attest failures
 
-Show cart details
+Read the verified failure index from a hosted publication
 
 ```
-ox carts show ID [flags]
+ox attest failures <attpub_id> | --latest [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for show
+  -h, --help     help for failures
+      --json     emit structured JSON
+      --latest   select the newest complete hosted publication
+      --text     render a compact terminal summary
 ```
 
 ### Options inherited from parent commands
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
-      --json             output in JSON format (default: false)
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
@@ -31,5 +33,5 @@ ox carts show ID [flags]
 
 ### SEE ALSO
 
-* [ox carts](/carts)	 - Manage carts — trackable work items backed by DoltDB
+* [ox attest](/attest)	 - What this repo can actually demonstrate
 

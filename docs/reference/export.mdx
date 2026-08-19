@@ -1,0 +1,54 @@
+---
+title: "ox export"
+description: "CLI reference for ox export"
+sidebar_position: 36
+---
+
+## ox export
+
+Show where your data lives and how to take it with you
+
+### Synopsis
+
+Show where all your SageOx data lives on disk and how to access it locally.
+
+SageOx is not a walled garden. Everything an AI coworker learns about your
+work is stored in ordinary git repositories that you fully own and control:
+
+  Ledger        this repo's history of work, decisions, and coding sessions
+  Team Context  your team's shared knowledge: norms, conventions, decisions
+
+Both are plain git repos on your machine. You can cd into them, run git log,
+git pull, copy them elsewhere, or push them to a remote you control. There is
+no proprietary format and no lock-in — your context is yours.
+
+This command shows the exact on-disk location of each repo and how to reach
+it. With --sync it first checks out and refreshes every team context and this
+repo's ledger, so a copy you make right now is complete and current.
+
+```
+ox export [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for export
+      --json   output as JSON
+      --sync   check out and refresh all team contexts and this repo's ledger before printing
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+

@@ -1,25 +1,29 @@
 ---
-title: "ox carts create"
-description: "CLI reference for ox carts create"
+title: "ox attest install"
+description: "CLI reference for ox attest install"
 sidebar_position: 14
 ---
 
-## ox carts create
+## ox attest install
 
-Create a new cart
+Install optional Attest skills for AI coworkers
+
+### Synopsis
+
+Install the optional Attest playbooks for supported AI coworkers.
+
+This installs customer-journey BDD creation and evidence-recording guidance.
+It does not install lifecycle hooks: use 'ox integrate install' for those.
+The Attest CLI itself remains available on every supported agent.
 
 ```
-ox carts create TITLE [flags]
+ox attest install [flags]
 ```
 
 ### Options
 
 ```
-  -a, --assignee string      Assign to a team member
-  -d, --description string   Description
-  -h, --help                 help for create
-  -p, --priority int         Priority: 0 (critical) to 4 (backlog) (default 2)
-  -t, --type string          Cart type: bug, task, feature, epic, chore (default "task")
+  -h, --help   help for install
 ```
 
 ### Options inherited from parent commands
@@ -35,5 +39,5 @@ ox carts create TITLE [flags]
 
 ### SEE ALSO
 
-* [ox carts](/carts)	 - Manage carts — trackable work items backed by DoltDB
+* [ox attest](/attest)	 - What this repo can actually demonstrate
 

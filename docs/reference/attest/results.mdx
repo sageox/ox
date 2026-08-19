@@ -1,28 +1,30 @@
 ---
-title: "ox carts done"
-description: "CLI reference for ox carts done"
+title: "ox attest results"
+description: "CLI reference for ox attest results"
 sidebar_position: 18
 ---
 
-## ox carts done
+## ox attest results
 
-Mark cart(s) as completed
+List local BDD run outcomes
 
 ```
-ox carts done ID [ID...] [flags]
+ox attest results [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for done
+      --corpus string      corpus directory relative to the repo root (default tests/acceptance)
+  -h, --help               help for results
+      --json               structured JSON output for agents
+      --runs-root string   run artifacts directory relative to the repo root (default tests/bdd/runs)
 ```
 
 ### Options inherited from parent commands
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
-      --json             output in JSON format (default: false)
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
@@ -31,5 +33,5 @@ ox carts done ID [ID...] [flags]
 
 ### SEE ALSO
 
-* [ox carts](/carts)	 - Manage carts — trackable work items backed by DoltDB
+* [ox attest](/attest)	 - What this repo can actually demonstrate
 
