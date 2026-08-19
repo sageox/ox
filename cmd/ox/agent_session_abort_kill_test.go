@@ -236,7 +236,7 @@ func TestAbort_PartialNameNeverKillsTeammateFinalizedSession(t *testing.T) {
 }
 
 // TestAbort_KillsCommittedThenFinalizedSessionAndAllSummarizedData is the union
-// lifecycle: the session the customer actually aborts has already travelled the
+// lifecycle: the session the customer actually aborts has already traveled the
 // full road — committed to the Ledger BECAUSE N turns passed (an ADR-029 draft
 // placeholder), THEN finalized with its whole summarized artifact set
 // superseding that draft. Aborting it by exact name must leave nothing behind:
