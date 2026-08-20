@@ -182,12 +182,16 @@ func TestRenderKBQueryResult_HitHintOnlyWithHits(t *testing.T) {
 		t.Errorf("hint missing when a hit exists\n---\n%s", withHits.String())
 	}
 
+	// kb_ok_empty is contract-violating (ok always carries ≥1 hit) but pins
+	// that the hint keys on hits, not on status alone.
 	hitless := &api.KBSearchResponse{Groups: []api.KBSearchGroup{
+		{KBID: "kb_ok_empty", Status: api.KBSearchStatusOK, Hits: []api.KBSearchHit{}},
 		{KBID: "kb_empty", Status: api.KBSearchStatusEmpty, Hits: []api.KBSearchHit{}},
 		{KBID: "kb_new", Status: api.KBSearchStatusNotIndexed, Hits: []api.KBSearchHit{}},
 		{KBID: "kb_bad", Status: api.KBSearchStatusError, ErrorClass: "backend", Hits: []api.KBSearchHit{}},
 	}}
 	targets := []kbQueryTarget{
+		{Input: "ok-empty", KBID: "kb_ok_empty"},
 		{Input: "empty", KBID: "kb_empty"},
 		{Input: "new", KBID: "kb_new"},
 		{Input: "bad", KBID: "kb_bad"},
