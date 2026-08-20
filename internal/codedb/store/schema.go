@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 
 	sqlite "modernc.org/sqlite"
@@ -30,7 +31,20 @@ func isDuplicateColumnError(err error, column string) bool {
 	if !errors.As(err, &sqErr) || sqErr.Code() != sqlite3.SQLITE_ERROR {
 		return false
 	}
-	return strings.Contains(sqErr.Error(), "duplicate column name: "+column)
+	// SQLite formats this as "duplicate column name: <col>" (modernc appends a
+	// trailing " (code)"). Compare the column exactly — a substring check would
+	// let "sign" match "signature".
+	const marker = "duplicate column name: "
+	msg := sqErr.Error()
+	idx := strings.Index(msg, marker)
+	if idx < 0 {
+		return false
+	}
+	reported := msg[idx+len(marker):]
+	if end := strings.IndexAny(reported, " \t\r\n"); end >= 0 {
+		reported = reported[:end]
+	}
+	return reported == column
 }
 
 // columnDDL pairs a column name with the ALTER statement that adds it.
@@ -55,35 +69,42 @@ type columnDDL struct {
 // The check-then-ALTER is not atomic, so two openers can both observe a column
 // missing and both ALTER; the loser's "duplicate column name" is success, not
 // failure (see isDuplicateColumnError and #758).
-func addColumnsIfMissing(db *sql.DB, table string, cols []columnDDL) error {
+// addColumnsIfMissing reports whether it added any column (added), which callers
+// use to gate one-shot backfills that must run only when the migration did real
+// work — not on every reopen of an already-current schema.
+func addColumnsIfMissing(db *sql.DB, table string, cols []columnDDL) (added bool, err error) {
 	existing, err := existingColumns(db, table)
 	if err != nil {
-		return err
+		return false, err
 	}
 	for _, c := range cols {
 		if existing[c.name] {
 			continue
 		}
+		// A column observed missing here is being applied by this call, whether
+		// our own ALTER wins or a concurrent caller's does; either way the
+		// migration is doing real work.
+		added = true
 		addColumnRaceHook(c.name)
-		if _, err := db.Exec(c.ddl); err != nil && !isDuplicateColumnError(err, c.name) {
-			return err
+		if _, execErr := db.Exec(c.ddl); execErr != nil && !isDuplicateColumnError(execErr, c.name) {
+			return added, fmt.Errorf("add column %s.%s: %w", table, c.name, execErr)
 		}
 	}
-	return nil
+	return added, nil
 }
 
 // existingColumns returns the set of column names currently defined on table.
 func existingColumns(db *sql.DB, table string) (map[string]bool, error) {
 	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read columns of %s: %w", table, err)
 	}
 	defer func() { _ = rows.Close() }()
 	cols := make(map[string]bool)
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan column of %s: %w", table, err)
 		}
 		cols[name] = true
 	}
@@ -338,7 +359,7 @@ func CreateSchema(db *sql.DB) error {
 // current resolver version after edges are populated, and ParseSymbols stamps
 // new blobs at the current version inline.
 func migrateAddEdgeVersion(db *sql.DB) error {
-	if err := addColumnsIfMissing(db, "blobs", []columnDDL{
+	if _, err := addColumnsIfMissing(db, "blobs", []columnDDL{
 		{"edge_version", `ALTER TABLE blobs ADD COLUMN edge_version INTEGER NOT NULL DEFAULT 0`},
 	}); err != nil {
 		return err
@@ -355,17 +376,26 @@ func migrateAddTypeInfo(db *sql.DB) error {
 	// migration is resumable: the previous single-guard-on-signature form left
 	// return_type/params permanently absent if a process died (or was an older
 	// ox) after only the first ALTER landed.
-	if err := addColumnsIfMissing(db, "symbols", []columnDDL{
+	added, err := addColumnsIfMissing(db, "symbols", []columnDDL{
 		{"signature", `ALTER TABLE symbols ADD COLUMN signature TEXT`},
 		{"return_type", `ALTER TABLE symbols ADD COLUMN return_type TEXT`},
 		{"params", `ALTER TABLE symbols ADD COLUMN params TEXT`},
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
-	// Idempotent regardless of race/resume outcome: re-marking already-reset rows
-	// as unparsed is a no-op, so concurrent callers stepping on this is harmless.
-	_, err := db.Exec(`UPDATE blobs SET parsed = 0 WHERE language IS NOT NULL`)
-	return err
+	// Invalidate parsed state only when a type-info column was actually added
+	// (first migration, or a resumed partial one) so existing blobs get reparsed
+	// to populate it. CreateSchema runs on every Open/OpenSQLOnly, so doing this
+	// unconditionally would reset parsed=0 for every language blob on each
+	// reopen and force a needless full reparse.
+	if !added {
+		return nil
+	}
+	if _, err := db.Exec(`UPDATE blobs SET parsed = 0 WHERE language IS NOT NULL`); err != nil {
+		return fmt.Errorf("invalidate parsed blobs after type-info migration: %w", err)
+	}
+	return nil
 }
 
 // migrateAddComments creates the comments table and adds the comments_parsed
@@ -399,7 +429,7 @@ func migrateAddComments(db *sql.DB) error {
 	}
 
 	// add comments_parsed column to blobs if missing
-	if err := addColumnsIfMissing(db, "blobs", []columnDDL{
+	if _, err := addColumnsIfMissing(db, "blobs", []columnDDL{
 		{"comments_parsed", `ALTER TABLE blobs ADD COLUMN comments_parsed INTEGER NOT NULL DEFAULT 0`},
 	}); err != nil {
 		return err

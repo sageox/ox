@@ -760,24 +760,73 @@ func TestIsDuplicateColumnError(t *testing.T) {
 	if dupErr == nil {
 		t.Fatal("expected a duplicate-column error on the second ALTER")
 	}
-
-	if !isDuplicateColumnError(dupErr, "signature") {
-		t.Errorf("duplicate on signature should match column=signature, got err=%v", dupErr)
-	}
-	if isDuplicateColumnError(dupErr, "return_type") {
-		t.Error("must NOT swallow a duplicate reported for signature when adding return_type")
-	}
-	if isDuplicateColumnError(nil, "signature") {
-		t.Error("nil is not a duplicate-column error")
-	}
-
-	// A different sqlite error (same generic SQLITE_ERROR code, different
-	// message) must not be mistaken for a duplicate-column error.
-	_, otherErr := db.Exec(`ALTER TABLE definitely_no_such_table ADD COLUMN x TEXT`)
-	if otherErr == nil {
+	// A different sqlite error (same generic SQLITE_ERROR code, different message)
+	// must not be mistaken for a duplicate-column error.
+	_, missingTableErr := db.Exec(`ALTER TABLE definitely_no_such_table ADD COLUMN x TEXT`)
+	if missingTableErr == nil {
 		t.Fatal("expected an error for a missing table")
 	}
-	if isDuplicateColumnError(otherErr, "x") {
-		t.Errorf("a non-duplicate error must not be treated as duplicate-column: %v", otherErr)
+
+	cases := []struct {
+		name   string
+		err    error
+		column string
+		want   bool
+	}{
+		{"matches the exact column", dupErr, "signature", true},
+		{"rejects a different column", dupErr, "return_type", false},
+		// "sign" is a prefix of "signature": a substring match would wrongly
+		// accept it, silently swallowing a real duplicate on another column.
+		{"rejects a column that is a prefix of the real one", dupErr, "sign", false},
+		{"rejects nil", nil, "signature", false},
+		{"rejects a non-duplicate sqlite error", missingTableErr, "x", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isDuplicateColumnError(tc.err, tc.column); got != tc.want {
+				t.Errorf("isDuplicateColumnError(%v, %q) = %v, want %v", tc.err, tc.column, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMigrateAddTypeInfo_PreservesParsedOnReopen guards the parsed-state
+// invalidation against firing on every open. migrateAddTypeInfo resets parsed=0
+// to force a reparse when it first adds the type-info columns; it must NOT do so
+// when the schema is already current, because CreateSchema runs on every
+// Open/OpenSQLOnly — otherwise each reopen wipes parsed state and triggers a
+// full, needless reparse.
+//
+// Failure prevented: simply reopening a codedb silently invalidates every parsed
+// language blob.
+func TestMigrateAddTypeInfo_PreservesParsedOnReopen(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
+
+	db, _ := createOldSchemaDB(t)
+	defer func() { _ = db.Close() }()
+
+	// First migration adds the columns and (correctly) invalidates parsed.
+	if err := migrateAddTypeInfo(db); err != nil {
+		t.Fatalf("first migrate: %v", err)
+	}
+
+	// Mark a language blob parsed, as a completed indexing pass would.
+	if _, err := db.Exec(`INSERT INTO blobs (content_hash, language, parsed) VALUES ('h', 'go', 1)`); err != nil {
+		t.Fatalf("seed parsed blob: %v", err)
+	}
+
+	// Reopen path: run the migration again against the now-current schema.
+	if err := migrateAddTypeInfo(db); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+
+	var parsed int
+	if err := db.QueryRow(`SELECT parsed FROM blobs WHERE content_hash='h'`).Scan(&parsed); err != nil {
+		t.Fatalf("read parsed: %v", err)
+	}
+	if parsed != 1 {
+		t.Errorf("parsed reset to %d on a no-op reopen; must stay 1", parsed)
 	}
 }
