@@ -141,6 +141,7 @@ func runConcurrentCreateSchema(t *testing.T, dbPath string, runners int) {
 	t.Helper()
 	var wg sync.WaitGroup
 	errs := make([]error, runners)
+	ready := make(chan struct{}, runners)
 	begin := make(chan struct{})
 	for i := range runners {
 		wg.Add(1)
@@ -152,12 +153,20 @@ func runConcurrentCreateSchema(t *testing.T, dbPath string, runners int) {
 			db, err := sql.Open("sqlite", rawDSN(dbPath))
 			if err != nil {
 				errs[i] = err
+				ready <- struct{}{} // still report ready so the barrier below completes
 				return
 			}
 			defer func() { _ = db.Close() }()
-			<-begin // release together to maximize overlap
+			ready <- struct{}{} // opened and parked at the barrier
+			<-begin             // released together to maximize overlap
 			errs[i] = createSchemaWithRetry(db)
 		}(i)
+	}
+	// Wait until every worker has opened and is parked before releasing, so the
+	// openers actually start CreateSchema together instead of trickling in while
+	// close(begin) races their sql.Open.
+	for range runners {
+		<-ready
 	}
 	close(begin)
 	wg.Wait()
