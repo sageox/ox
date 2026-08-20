@@ -49,7 +49,7 @@ func TestValidateKBQueryInput(t *testing.T) {
 		{name: "empty query", ids: []string{"kb_x"}, query: "", mode: "hybrid", wantErr: true, wantSubstr: "query text required"},
 		{name: "query at byte cap passes", ids: []string{"kb_x"}, query: strings.Repeat("a", 1024), mode: "hybrid"},
 		{name: "query over byte cap", ids: []string{"kb_x"}, query: strings.Repeat("a", 1025), mode: "hybrid", wantErr: true, wantSubstr: "1024 bytes"},
-		// 400 runes of 'é' (2 bytes each) = 800 chars but 800... use 600 runes = 1200 bytes > 1024.
+		// 600 runes of 'é' (2 bytes each) = 1200 bytes > the 1024-byte cap.
 		{name: "multi-byte query counted in bytes", ids: []string{"kb_x"}, query: strings.Repeat("é", 600), mode: "hybrid", wantErr: true, wantSubstr: "bytes"},
 		{name: "too many bubbles", ids: manyIDs, query: "q", mode: "hybrid", wantErr: true, wantSubstr: "limit is 20"},
 		{name: "bad mode", ids: []string{"kb_x"}, query: "q", mode: "knn", wantErr: true, wantSubstr: "invalid --mode"},

@@ -22,13 +22,16 @@ mount (see 'ox kb describe' for the path). A bubble you cannot read, one
 that does not exist, and one whose type is not indexed for search are all
 reported the same way, without revealing which it is.
 
-Examples:
+```
+ox kb query <#slug|kb_id> [#slug|kb_id ...] "<question>" [flags]
+```
+
+### Examples
+
+```
   ox kb query '#engineering' "how do we batch relay spans"
   ox kb query '#engineering' '#platform' "relay span batching" -k 5
   ox kb query kb_01HXYZ... "retry policy" --path docs/ --json
-
-```
-ox kb query <#slug|kb_id> [#slug|kb_id ...] "<question>" [flags]
 ```
 
 ### Options

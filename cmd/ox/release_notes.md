@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### New
 
-- **`ox kb query` — search files across knowledge bubbles** — one question, ranked file hits grouped per bubble: `ox kb query '#engineering' '#platform' "how do we batch relay spans"`. Honest per-bubble outcomes (no matches vs. never indexed vs. failed), `--mode`/`-k`/`--path` controls, and `--json` with agent guidance. Requires KB file search enabled server-side.
+- **`ox kb query` — search files across knowledge bubbles** — one question, ranked file hits grouped per bubble: `ox kb query '#engineering' '#platform' "how do we batch relay spans"`. Honest per-bubble outcomes (no matches vs. never indexed vs. failed), `--mode`/`-k`/`--path` controls, and `--json` with AI coworker guidance. Requires KB file search enabled server-side.
 
 - **`ox export` — take your data with you** — shows exactly where your Ledger and Team Contexts live on disk and how to reach them with plain git, because SageOx is not a walled garden; `--sync` checks out and refreshes every team context and this repo's ledger first.
 - **Reviewer-first pull-request visuals** — `ox viz pr` selects prose, GitHub-safe Mermaid, or a rich attachment from the reviewer question; rich recipes now include construction-ready visual contracts, lightweight PNG checks, and personal, repository, and team preferences.

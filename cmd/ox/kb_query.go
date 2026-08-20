@@ -56,10 +56,8 @@ Results are ranked FILE hits, grouped per bubble in the order you named
 them — search finds the file, then you read it from the bubble's local
 mount (see 'ox kb describe' for the path). A bubble you cannot read, one
 that does not exist, and one whose type is not indexed for search are all
-reported the same way, without revealing which it is.
-
-Examples:
-  ox kb query '#engineering' "how do we batch relay spans"
+reported the same way, without revealing which it is.`,
+	Example: `  ox kb query '#engineering' "how do we batch relay spans"
   ox kb query '#engineering' '#platform' "relay span batching" -k 5
   ox kb query kb_01HXYZ... "retry policy" --path docs/ --json`,
 	Args: cobra.MinimumNArgs(2),
@@ -102,11 +100,12 @@ func runKBQuery(cmd *cobra.Command, args []string) error {
 		client = client.WithAuthToken(token.AccessToken)
 	}
 
-	// One budget covers the slug resolutions plus the search itself; the
-	// search call embeds the query and fans out per bubble server-side, so it
-	// is slower than the describe-style 15s reads.
-	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-	defer cancel()
+	// Resolution and search carry separate budgets: up to 20 sequential slug
+	// resolutions must not be able to starve the search call, which embeds
+	// the query and fans out per bubble server-side and would otherwise
+	// inherit whatever sliver of a shared deadline the resolutions left.
+	resolveCtx, cancelResolve := context.WithTimeout(cmd.Context(), 15*time.Second)
+	defer cancelResolve()
 
 	targets := make([]kbQueryTarget, 0, len(identifiers))
 	for _, raw := range identifiers {
@@ -114,7 +113,7 @@ func runKBQuery(cmd *cobra.Command, args []string) error {
 		if input == "" {
 			return fmt.Errorf("empty bubble identifier\nUsage: ox kb query <#slug|kb_id> [#slug|kb_id ...] \"<question>\"")
 		}
-		kbID, err := resolveKBIdentifier(ctx, client, input, scopeFlag, projectRoot)
+		kbID, err := resolveKBIdentifier(resolveCtx, client, input, scopeFlag, projectRoot)
 		if err != nil {
 			if !jsonOutput && looksLikeProse(input) {
 				cli.PrintHint(fmt.Sprintf("If %q was part of your question, quote the whole question — the last argument is the query.", input))
@@ -127,7 +126,9 @@ func runKBQuery(cmd *cobra.Command, args []string) error {
 	// Never log the query text (it can quote anything); lengths and counts only.
 	slog.Info("kb query", "bubbles", len(targets), "mode", modeFlag, "k", kFlag, "query_len", len(query))
 
-	resp, err := client.SearchFiles(ctx, api.KBSearchRequest{
+	searchCtx, cancelSearch := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancelSearch()
+	resp, err := client.SearchFiles(searchCtx, api.KBSearchRequest{
 		Query:      query,
 		KBs:        kbQueryTargetIDs(targets),
 		Mode:       modeFlag,
