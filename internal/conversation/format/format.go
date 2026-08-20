@@ -17,7 +17,10 @@
 //     served; atoms are bi-temporal and default to projected-current.
 //
 // The package owns no I/O policy beyond reading the paths it is handed, and
-// never touches the network.
+// never touches the network. Every read goes through an os.Root opened over
+// the discussion root (openat-style, no-follow component resolution), so a
+// symlink committed into the customer-writable tree can never pull content
+// from outside the root: within-root links resolve, escaping links error.
 package format
 
 import (
@@ -26,6 +29,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 )
 
 // InvalidRecord surfaces one malformed or otherwise unusable record that a
@@ -45,17 +49,46 @@ func (r InvalidRecord) String() string {
 	return fmt.Sprintf("%s: %s", r.Path, r.Reason)
 }
 
-// readOptionalFile reads path and returns (nil, nil) when the file does not
-// exist. Every lenient loader in this package goes through it.
-func readOptionalFile(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
+// openOptionalRoot opens dir as an os.Root and returns (nil, nil) when the
+// directory does not exist — a missing discussion root means every optional
+// file inside it is absent, which is data, not an error. All confinement
+// guarantees of this package hang off the returned root: every subsequent
+// path component resolves no-follow relative to it.
+func openOptionalRoot(dir string) (*os.Root, error) {
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("open %s: %w", dir, err)
+	}
+	return root, nil
+}
+
+// readOptionalFileIn reads rel from root and returns (nil, nil) when the file
+// does not exist. Every lenient loader in this package goes through it. A
+// symlink escaping the root is an error (never followed), reported with the
+// display path for context.
+func readOptionalFileIn(root *os.Root, rel string) ([]byte, error) {
+	data, err := root.ReadFile(rel)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", filepath.Join(root.Name(), rel), err)
 	}
 	return data, nil
+}
+
+// readOptionalFile is the one-shot form: it opens dir as a root, reads rel
+// through it, and treats a missing dir or file as (nil, nil).
+func readOptionalFile(dir, rel string) ([]byte, error) {
+	root, err := openOptionalRoot(dir)
+	if err != nil || root == nil {
+		return nil, err
+	}
+	defer root.Close()
+	return readOptionalFileIn(root, rel)
 }
 
 // decodeJSON unmarshals data into v, wrapping the error with the source path.

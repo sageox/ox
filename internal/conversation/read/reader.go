@@ -11,7 +11,9 @@
 package read
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -101,21 +103,38 @@ func (r *Reader) loadRows() (rows []row, totalIndexed int, err *Error) {
 	if loadErr != nil {
 		return nil, 0, newError(ErrCodeReadError, fmt.Sprintf("load %s: %v", format.IndexFileName, loadErr))
 	}
+	if len(entries) == 0 {
+		return nil, 0, nil
+	}
+	// One os.Root over the discussions root anchors every per-entry check to
+	// the same directory descriptor: names resolve openat-style with no
+	// follow-through on the entry itself (Lstat), so a symlinked entry is
+	// dropped without ever being opened.
+	root, rootErr := os.OpenRoot(r.discussionsRoot)
+	if rootErr != nil {
+		if errors.Is(rootErr, fs.ErrNotExist) {
+			return nil, len(entries), nil // root vanished under us: every entry is phantom
+		}
+		return nil, 0, newError(ErrCodeReadError, fmt.Sprintf("open discussions root: %v", rootErr))
+	}
+	defer root.Close()
+
 	rows = make([]row, 0, len(entries))
 	for _, e := range entries {
-		path, guardErr := joinDiscussion(r.discussionsRoot, e.Folder)
-		if guardErr != nil {
+		if guardErr := validateFolderName(e.Folder); guardErr != nil {
 			continue // hostile or corrupt folder name: never joined, never served
 		}
-		info, statErr := os.Stat(path)
+		info, statErr := root.Lstat(e.Folder)
 		if statErr != nil || !info.IsDir() {
-			continue // phantom entry: folder deleted after indexing
+			// Phantom entry (folder deleted after indexing) or a symlinked
+			// entry (Lstat reports the link itself, never the target).
+			continue
 		}
 		rows = append(rows, row{
 			entry:           e,
-			path:            path,
+			path:            filepath.Join(r.discussionsRoot, e.Folder),
 			recordedAt:      deriveRecordedAt(e),
-			hasDistillation: statHasDistillation(path),
+			hasDistillation: statHasDistillation(root, e.Folder),
 		})
 	}
 	return rows, len(entries), nil
@@ -142,13 +161,16 @@ func (r *Reader) lookup(recordingID string) (row, *Error) {
 			if guardErr != nil {
 				return row{}, guardErr
 			}
-			if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
-				return row{
-					entry:           format.IndexEntry{Folder: folder, RecordingID: recordingID},
-					path:            path,
-					recordedAt:      deriveRecordedAt(format.IndexEntry{RecordingID: recordingID}),
-					hasDistillation: statHasDistillation(path),
-				}, nil
+			if root, rootErr := os.OpenRoot(r.discussionsRoot); rootErr == nil {
+				defer root.Close()
+				if info, statErr := root.Lstat(folder); statErr == nil && info.IsDir() {
+					return row{
+						entry:           format.IndexEntry{Folder: folder, RecordingID: recordingID},
+						path:            path,
+						recordedAt:      deriveRecordedAt(format.IndexEntry{RecordingID: recordingID}),
+						hasDistillation: statHasDistillation(root, folder),
+					}, nil
+				}
 			}
 		}
 	}
@@ -157,9 +179,12 @@ func (r *Reader) lookup(recordingID string) (row, *Error) {
 }
 
 // statHasDistillation checks distillation/distillation.jsonl under a guarded
-// folder path (derived list field — the real index has no has_distillation).
-func statHasDistillation(folderPath string) bool {
-	info, err := os.Stat(filepath.Join(folderPath, format.DistillationDirName, format.DistillationFileName))
+// folder, through the discussions root (derived list field — the real index
+// has no has_distillation). Root.Stat resolves every component no-follow
+// against the root descriptor, so a symlinked path can never point the probe
+// outside the discussions tree.
+func statHasDistillation(root *os.Root, folder string) bool {
+	info, err := root.Stat(filepath.Join(folder, format.DistillationDirName, format.DistillationFileName))
 	return err == nil && info.Mode().IsRegular()
 }
 

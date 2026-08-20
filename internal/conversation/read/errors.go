@@ -50,9 +50,11 @@ func (e *Error) Error() string {
 	return e.Code + ": " + e.Message
 }
 
-// newError builds a non-retryable typed error.
+// newError builds a typed error. read_error is the only retryable code (a
+// transient filesystem or parse failure may clear on retry); every other
+// code is a stable fact about the request or the data.
 func newError(code, message string) *Error {
-	return &Error{Code: code, Message: message}
+	return &Error{Code: code, Message: message, Retryable: code == ErrCodeReadError}
 }
 
 // errorGuidance names the next step for a typed error code. D15 promises

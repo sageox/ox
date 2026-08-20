@@ -134,7 +134,7 @@ type Distillation struct {
 // the producer's strict/lenient split).
 func LoadDistillation(discussionRoot string) (*Distillation, error) {
 	path := filepath.Join(discussionRoot, DistillationDirName, DistillationFileName)
-	data, err := readOptionalFile(path)
+	data, err := readOptionalFile(discussionRoot, distillationRelBase)
 	if err != nil || data == nil {
 		return nil, err
 	}
@@ -248,6 +248,14 @@ func LoadEdits(discussionRoot string) ([]EditRecord, []InvalidRecord, error) {
 		default:
 			return fmt.Errorf("unknown edit action %q", e.Action)
 		}
+		// A live edit without a timestamp cannot be folded: a zero-time
+		// reject would tombstone its atom at year 0001, hiding it from the
+		// current view and emitting an invalid valid_to under
+		// --include-superseded. Retired redact lines stay accepted — they
+		// are no-ops by contract and legacy data omits at.
+		if e.Action != EditActionRedact && e.At.IsZero() {
+			return fmt.Errorf("edit record missing at timestamp")
+		}
 		edits = append(edits, e)
 		return nil
 	})
@@ -283,6 +291,12 @@ func LoadFinalize(discussionRoot string) ([]FinalizeRecord, []InvalidRecord, err
 func LoadTTLExtends(discussionRoot string) ([]TTLExtendRecord, []InvalidRecord, error) {
 	var records []TTLExtendRecord
 	invalid, err := loadJSONLines(discussionRoot, TTLExtendsFileName, ttlExtendsRelBase, func(raw []byte) error {
+		// json.Unmarshal accepts a literal null into a struct without
+		// error; a null line must not count as a +30m extension. Only a
+		// JSON object is a well-formed marker.
+		if len(raw) == 0 || raw[0] != '{' {
+			return fmt.Errorf("ttl extend record is not a JSON object")
+		}
 		var r TTLExtendRecord
 		if err := json.Unmarshal(raw, &r); err != nil {
 			return err
@@ -301,7 +315,7 @@ func LoadTTLExtends(discussionRoot string) ([]TTLExtendRecord, []InvalidRecord, 
 // any decode error surfaced as an InvalidRecord rather than failing the load.
 func loadJSONLines(discussionRoot, fileName, relPath string, decode func(raw []byte) error) ([]InvalidRecord, error) {
 	path := filepath.Join(discussionRoot, DistillationDirName, fileName)
-	data, err := readOptionalFile(path)
+	data, err := readOptionalFile(discussionRoot, relPath)
 	if err != nil || data == nil {
 		return nil, err
 	}

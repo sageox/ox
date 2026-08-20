@@ -66,11 +66,17 @@ func LoadManifest(discussionRoot string) (m *Manifest, warnings []string, err er
 	layersPath := filepath.Join(discussionRoot, ManifestNameLayers)
 	convPath := filepath.Join(discussionRoot, ManifestNameConversation)
 
-	layersData, err := readOptionalFile(layersPath)
+	root, err := openOptionalRoot(discussionRoot)
+	if err != nil || root == nil {
+		return nil, nil, err
+	}
+	defer root.Close()
+
+	layersData, err := readOptionalFileIn(root, ManifestNameLayers)
 	if err != nil {
 		return nil, nil, err
 	}
-	convData, err := readOptionalFile(convPath)
+	convData, err := readOptionalFileIn(root, ManifestNameConversation)
 	if err != nil {
 		return nil, nil, err
 	}

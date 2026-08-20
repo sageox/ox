@@ -188,3 +188,102 @@ func TestLoadTTLExtendsCountsWellFormedLines(t *testing.T) {
 		t.Errorf("invalid = %+v, want the malformed line surfaced", invalid)
 	}
 }
+
+// writeSidecar stages one distillation sidecar file under root.
+func writeSidecar(t *testing.T, root, fileName, content string) {
+	t.Helper()
+	dir := filepath.Join(root, DistillationDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, fileName), []byte(content+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLoadEditsRejectsMissingAt verifies a live edit record whose at
+// timestamp is null or omitted is surfaced as invalid, never returned for
+// folding. Failure prevented: a zero-time reject tombstones its atom at year
+// 0001 — the atom silently vanishes from the current view and an invalid
+// valid_to is emitted under --include-superseded. Retired redact records
+// stay accepted as no-ops: legacy data omits at.
+func TestLoadEditsRejectsMissingAt(t *testing.T) {
+	tests := []struct {
+		name      string
+		line      string
+		wantEdits int
+	}{
+		{name: "reject with null at", line: `{"edit_id":"e1","action":"reject","atom_id":"at1","at":null}`},
+		{name: "reject with missing at", line: `{"edit_id":"e1","action":"reject","atom_id":"at1"}`},
+		{name: "edit with missing at", line: `{"edit_id":"e1","action":"edit","atom_id":"at1","field":"text","value":"x"}`},
+		{name: "add with missing at", line: `{"edit_id":"e1","action":"add","atom":{"id":"at9","text":"y"}}`},
+		{name: "reject with valid at", line: `{"edit_id":"e1","action":"reject","atom_id":"at1","at":"2026-08-15T03:02:00Z"}`, wantEdits: 1},
+		{name: "legacy redact without at is a no-op record", line: `{"edit_id":"e1","action":"redact","atom_id":"at1"}`, wantEdits: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeSidecar(t, root, EditsFileName, tt.line)
+			edits, invalid, err := LoadEdits(root)
+			if err != nil {
+				t.Fatalf("LoadEdits: %v", err)
+			}
+			if len(edits) != tt.wantEdits {
+				t.Fatalf("edits = %+v, want %d records", edits, tt.wantEdits)
+			}
+			wantInvalid := 1 - tt.wantEdits
+			if len(invalid) != wantInvalid {
+				t.Fatalf("invalid = %+v, want %d records", invalid, wantInvalid)
+			}
+			if wantInvalid == 1 && !strings.Contains(invalid[0].Reason, "missing at") {
+				t.Errorf("invalid reason = %q, want it to name the missing at timestamp", invalid[0].Reason)
+			}
+		})
+	}
+}
+
+// TestLoadTTLExtendsRejectsNonObjectLines verifies null and other non-object
+// JSON lines in ttl_extends.jsonl are surfaced as invalid and never counted.
+// Failure prevented: json.Unmarshal accepts a literal null into a struct
+// without error, so a null line silently counted as a +30m TTL extension.
+func TestLoadTTLExtendsRejectsNonObjectLines(t *testing.T) {
+	root := t.TempDir()
+	writeSidecar(t, root, TTLExtendsFileName,
+		"null\n"+`{"actor":"user","at":"2026-08-15T02:30:00Z"}`+"\n"+`"extend"`+"\n"+"42\n[]")
+	recs, invalid, err := LoadTTLExtends(root)
+	if err != nil {
+		t.Fatalf("LoadTTLExtends: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("records = %+v, want exactly the one object line", recs)
+	}
+	if len(invalid) != 4 {
+		t.Fatalf("invalid = %+v, want the 4 non-object lines surfaced", invalid)
+	}
+	for _, inv := range invalid {
+		if !strings.Contains(inv.Reason, "not a JSON object") {
+			t.Errorf("invalid reason = %q, want it to name the non-object shape", inv.Reason)
+		}
+	}
+}
+
+// TestProjectedTTLIgnoresNullExtendLines proves the projection end of the
+// same bug: a ttl_extends.jsonl holding only a null line yields the base
+// 1-hour TTL, not 1h30m, and the defect is surfaced on the projected view.
+func TestProjectedTTLIgnoresNullExtendLines(t *testing.T) {
+	root := t.TempDir()
+	writeDistillation(t, root,
+		`{"type":"episode","id":"ep1","status":"finalized","provenance":{"extracted_at":"2026-08-15T02:00:00Z"}}`)
+	writeSidecar(t, root, TTLExtendsFileName, "null")
+	p, err := LoadProjectedDistillation(root)
+	if err != nil {
+		t.Fatalf("LoadProjectedDistillation: %v", err)
+	}
+	want := p.ExtractedAt.Add(ttlBase)
+	if !p.TTLExpiresAt.Equal(want) {
+		t.Fatalf("TTLExpiresAt = %v, want base %v (null line must not extend)", p.TTLExpiresAt, want)
+	}
+	if len(p.Invalid) != 1 || !strings.Contains(p.Invalid[0].Reason, "not a JSON object") {
+		t.Fatalf("Invalid = %+v, want the null line surfaced", p.Invalid)
+	}
+}

@@ -1,9 +1,10 @@
 package format
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -133,12 +134,24 @@ func parseLayerName(base string) (parsedLayerName, bool) {
 // surfaced as invalid, parse failures surfaced as invalid, deterministic
 // order. A folder with no layers/ directory at all returns an empty result
 // (D5). Sidecar .jsonl files and unrecognized names are ignored.
+//
+// Every read happens through an os.Root over discussionRoot: a symlinked
+// layers/ directory, envelope file, or layer.json pointing outside the root
+// is never followed — it surfaces as an error or an invalid record.
 func DiscoverLayers(discussionRoot string) (*LayerDiscovery, error) {
-	layersDir := filepath.Join(discussionRoot, LayersDirName)
 	result := &LayerDiscovery{}
 
+	root, err := openOptionalRoot(discussionRoot)
+	if err != nil {
+		return nil, err
+	}
+	if root == nil {
+		return result, nil
+	}
+	defer root.Close()
+
 	var candidates []DiscoveredLayer
-	if err := walkLayerCandidates(layersDir, LayersDirName, result, &candidates); err != nil {
+	if err := walkLayerCandidates(root, LayersDirName, result, &candidates); err != nil {
 		return nil, err
 	}
 
@@ -177,34 +190,34 @@ func DiscoverLayers(discussionRoot string) (*LayerDiscovery, error) {
 	return result, nil
 }
 
-// walkLayerCandidates recursively lists dir, classifying folder-form and
-// flat-form layer artifacts. relDir is dir expressed relative to the
-// discussion root with forward slashes. Entries whose names fail the
-// parse-time confinement checks are ignored (a hostile name never becomes a
-// path join).
-func walkLayerCandidates(dir, relDir string, result *LayerDiscovery, out *[]DiscoveredLayer) error {
-	entries, err := os.ReadDir(dir)
+// walkLayerCandidates recursively lists relDir inside root, classifying
+// folder-form and flat-form layer artifacts. relDir is expressed relative to
+// the discussion root with forward slashes and is read through the root, so
+// no component of it can follow a symlink out of the discussion folder.
+// Entries whose names fail the parse-time confinement checks are ignored (a
+// hostile name never becomes a path join).
+func walkLayerCandidates(root *os.Root, relDir string, result *LayerDiscovery, out *[]DiscoveredLayer) error {
+	entries, err := fs.ReadDir(root.FS(), relDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("list %s: %w", dir, err)
+		return fmt.Errorf("list %s: %w", relDir, err)
 	}
 	for _, entry := range entries {
 		name := entry.Name()
 		if strings.ContainsAny(name, "/\\") || name == "." || name == ".." {
 			continue // defense in depth: never join a traversal-capable name
 		}
-		childPath := filepath.Join(dir, name)
 		childRel := relDir + "/" + name
 
 		if entry.IsDir() {
 			if parsed, ok := parseLayerName(name); ok {
-				loadLayerEnvelope(filepath.Join(childPath, layerFileName), childRel+"/"+layerFileName, parsed, LayoutFolder, result, out)
+				loadLayerEnvelope(root, childRel+"/"+layerFileName, parsed, LayoutFolder, result, out)
 			}
 			// Recurse regardless: a non-recursive scan silently misses
 			// folder-form layers, and nested trees have been observed.
-			if err := walkLayerCandidates(childPath, childRel, result, out); err != nil {
+			if err := walkLayerCandidates(root, childRel, result, out); err != nil {
 				return err
 			}
 			continue
@@ -217,16 +230,17 @@ func walkLayerCandidates(dir, relDir string, result *LayerDiscovery, out *[]Disc
 		if !ok {
 			continue
 		}
-		loadLayerEnvelope(childPath, childRel, parsed, LayoutFlat, result, out)
+		loadLayerEnvelope(root, childRel, parsed, LayoutFlat, result, out)
 	}
 	return nil
 }
 
-// loadLayerEnvelope reads and validates one candidate envelope file,
-// appending to out on success and to result.Invalid on any defect. A missing
-// layer.json inside a layer-shaped directory is surfaced as invalid.
-func loadLayerEnvelope(path, relPath string, parsed parsedLayerName, layout LayerLayout, result *LayerDiscovery, out *[]DiscoveredLayer) {
-	data, err := readOptionalFile(path)
+// loadLayerEnvelope reads and validates one candidate envelope file through
+// the discussion root, appending to out on success and to result.Invalid on
+// any defect. A missing layer.json inside a layer-shaped directory is
+// surfaced as invalid, and so is a symlinked envelope that escapes the root.
+func loadLayerEnvelope(root *os.Root, relPath string, parsed parsedLayerName, layout LayerLayout, result *LayerDiscovery, out *[]DiscoveredLayer) {
+	data, err := readOptionalFileIn(root, relPath)
 	if err != nil {
 		result.Invalid = append(result.Invalid, InvalidRecord{Path: relPath, Reason: err.Error()})
 		return

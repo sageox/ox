@@ -38,7 +38,7 @@ type IndexEntry struct {
 // skipped and surfaced as InvalidRecords, never fatal for their siblings.
 func LoadIndex(discussionsRoot string) ([]IndexEntry, []InvalidRecord, error) {
 	path := filepath.Join(discussionsRoot, IndexFileName)
-	data, err := readOptionalFile(path)
+	data, err := readOptionalFile(discussionsRoot, IndexFileName)
 	if err != nil {
 		return nil, nil, err
 	}

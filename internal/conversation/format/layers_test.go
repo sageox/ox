@@ -1,6 +1,7 @@
 package format
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -163,6 +164,94 @@ func FuzzParseLayerName(f *testing.F) {
 		prefix := filepath.Clean(filepath.Join(root, LayersDirName)) + string(filepath.Separator)
 		if !strings.HasPrefix(joined, prefix) {
 			t.Fatalf("name %q (id %s) escapes root: %s", base, parsed.id, joined)
+		}
+	})
+}
+
+// mustSymlink creates a symlink or skips the test on platforms without
+// symlink support.
+func mustSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create symlinks on this platform: %v", err)
+	}
+}
+
+// TestDiscoverLayersNeverFollowsEscapingSymlinks verifies every read of the
+// discovery walk happens through the discussion root with no-follow
+// semantics. Failure prevented: a symlink committed into the
+// customer-writable, git-synced team context — a symlinked layers/
+// directory, flat envelope file, or layer.json — passes the lexical name
+// checks and reads layer metadata from outside the discussion root
+// (read-escape / exfiltration).
+func TestDiscoverLayersNeverFollowsEscapingSymlinks(t *testing.T) {
+	const layerID = "clyr_019ff500-0000-7000-8000-000000000001"
+	envelope := `{"layer_id":"` + layerID + `","kind":"transcript","revision":3}`
+
+	// Outside tree the symlinks point at: real, well-formed layer content
+	// that must never be served.
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(outside, "layers", "transcript."+layerID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{
+		filepath.Join(outside, "layers", "transcript."+layerID, "layer.json"),
+		filepath.Join(outside, "layers", "transcript."+layerID+".json"),
+		filepath.Join(outside, "layer.json"),
+		filepath.Join(outside, "flat.json"),
+	} {
+		if err := os.WriteFile(p, []byte(envelope), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("symlinked layers dir", func(t *testing.T) {
+		root := t.TempDir()
+		mustSymlink(t, filepath.Join(outside, "layers"), filepath.Join(root, LayersDirName))
+		d, err := DiscoverLayers(root)
+		if err == nil {
+			if len(d.Layers) != 0 {
+				t.Fatalf("layers served through a symlinked layers/ dir: %+v", d.Layers)
+			}
+			t.Fatal("symlinked layers/ dir silently ignored, want an error or invalid record")
+		}
+	})
+
+	t.Run("symlinked flat envelope", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, LayersDirName), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mustSymlink(t, filepath.Join(outside, "flat.json"),
+			filepath.Join(root, LayersDirName, "transcript."+layerID+".json"))
+		d, err := DiscoverLayers(root)
+		if err != nil {
+			t.Fatalf("DiscoverLayers: %v", err)
+		}
+		if len(d.Layers) != 0 {
+			t.Fatalf("layers served through a symlinked flat envelope: %+v", d.Layers)
+		}
+		if len(d.Invalid) != 1 {
+			t.Fatalf("Invalid = %+v, want the symlinked envelope surfaced", d.Invalid)
+		}
+	})
+
+	t.Run("symlinked layer.json", func(t *testing.T) {
+		root := t.TempDir()
+		dir := filepath.Join(root, LayersDirName, "transcript."+layerID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mustSymlink(t, filepath.Join(outside, "layer.json"), filepath.Join(dir, layerFileName))
+		d, err := DiscoverLayers(root)
+		if err != nil {
+			t.Fatalf("DiscoverLayers: %v", err)
+		}
+		if len(d.Layers) != 0 {
+			t.Fatalf("layers served through a symlinked layer.json: %+v", d.Layers)
+		}
+		if len(d.Invalid) != 1 {
+			t.Fatalf("Invalid = %+v, want the symlinked layer.json surfaced", d.Invalid)
 		}
 	})
 }

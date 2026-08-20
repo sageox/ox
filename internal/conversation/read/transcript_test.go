@@ -248,3 +248,43 @@ func stageLongTranscript(t *testing.T, n int) string {
 	}
 	return root
 }
+
+// TestTranscriptNeverFollowsSymlinkedPayload verifies the transcript read
+// goes through an os.Root over the discussion folder. Failure prevented: an
+// otherwise-clean discussion folder committed into the customer-writable,
+// git-synced team context carries a symlink at transcript.vtt pointing
+// outside the discussions root — a bare os.ReadFile would follow it and
+// serve arbitrary file content as cues (read-escape / exfiltration).
+func TestTranscriptNeverFollowsSymlinkedPayload(t *testing.T) {
+	base := t.TempDir()
+	outside := filepath.Join(base, "outside.vtt")
+	if err := os.WriteFile(outside, []byte("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nsecret outside content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, "discussions")
+	folder := filepath.Join(root, "2026-08-11-22-32-evil")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	index := fmt.Sprintf(`[{"folder":"2026-08-11-22-32-evil","recording_id":%q,"title":"Evil"}]`, fullRec)
+	if err := os.WriteFile(filepath.Join(root, "INDEX.json"), []byte(index), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(folder, format.TranscriptFileName)); err != nil {
+		t.Skipf("cannot create symlinks on this platform: %v", err)
+	}
+
+	env := New(root, time.Time{}).Transcript(fullCnv, TranscriptOptions{})
+	if env.Success {
+		t.Fatalf("symlinked transcript.vtt served: %+v", env.Data)
+	}
+	if env.Error.Code != ErrCodeReadError {
+		t.Fatalf("code = %s, want %s (escape is a read failure, not a typed absence)", env.Error.Code, ErrCodeReadError)
+	}
+	if !env.Error.Retryable {
+		t.Errorf("read_error must be retryable per the package contract")
+	}
+	if strings.Contains(env.Error.Message, "secret outside content") {
+		t.Errorf("outside content leaked into the error message: %q", env.Error.Message)
+	}
+}

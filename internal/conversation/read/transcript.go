@@ -1,9 +1,9 @@
 package read
 
 import (
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
 	"time"
 
 	"github.com/sageox/ox/internal/conversation/format"
@@ -112,11 +112,13 @@ func (r *Reader) Transcript(rawID string, opts TranscriptOptions) *Envelope {
 		warnings = append(warnings, fmt.Sprintf("citation pins transcript revision %d but revision %d is current; cue numbers may have drifted (D8: the requested range is still served)", data.RevisionRequested, revisionCurrent))
 	}
 
-	// The transcript itself, at its fixed root path (D7).
-	vttPath := filepath.Join(rw.path, format.TranscriptFileName)
-	raw, readErr := os.ReadFile(vttPath)
+	// The transcript itself, at its fixed root path (D7), read through an
+	// os.Root over the discussion folder so a symlinked transcript.vtt
+	// committed into the customer-writable tree can never pull content from
+	// outside the folder: within-root links resolve, escaping links error.
+	raw, readErr := readDiscussionFile(rw.path, format.TranscriptFileName)
 	if readErr != nil {
-		if os.IsNotExist(readErr) {
+		if errors.Is(readErr, fs.ErrNotExist) {
 			return r.finishError(start, newError(ErrCodeTranscriptNotAvailable,
 				fmt.Sprintf("%s has no %s yet; transcripts land before summaries, so a fresh recording may still be syncing", id.ConversationID, format.TranscriptFileName)), warnings)
 		}

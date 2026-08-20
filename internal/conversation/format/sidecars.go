@@ -29,7 +29,7 @@ type Metadata struct {
 // (nil, nil).
 func LoadMetadata(discussionRoot string) (*Metadata, error) {
 	path := filepath.Join(discussionRoot, MetadataFileName)
-	data, err := readOptionalFile(path)
+	data, err := readOptionalFile(discussionRoot, MetadataFileName)
 	if err != nil || data == nil {
 		return nil, err
 	}
@@ -76,7 +76,7 @@ func (s *Summary) ParticipantNames() []string {
 // (nil, nil) — a missing summary is data (not_yet_generated), not an error.
 func LoadSummary(discussionRoot string) (*Summary, error) {
 	path := filepath.Join(discussionRoot, SummaryFileName)
-	data, err := readOptionalFile(path)
+	data, err := readOptionalFile(discussionRoot, SummaryFileName)
 	if err != nil || data == nil {
 		return nil, err
 	}
@@ -90,5 +90,5 @@ func LoadSummary(discussionRoot string) (*Summary, error) {
 // LoadSummaryMarkdown reads the pre-JSON summary.md fallback. Missing file is
 // (nil, nil).
 func LoadSummaryMarkdown(discussionRoot string) ([]byte, error) {
-	return readOptionalFile(filepath.Join(discussionRoot, SummaryMarkdownFileName))
+	return readOptionalFile(discussionRoot, SummaryMarkdownFileName)
 }
