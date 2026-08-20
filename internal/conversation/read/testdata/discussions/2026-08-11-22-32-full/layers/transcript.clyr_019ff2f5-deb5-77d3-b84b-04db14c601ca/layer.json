@@ -1,0 +1,21 @@
+{
+  "$schema_version": 1,
+  "layer_id": "clyr_019ff2f5-deb5-77d3-b84b-04db14c601ca",
+  "conversation_id": "cnv_019ff2f5-2079-7be1-b05e-8caad2772e61",
+  "kind": "transcript",
+  "modality": "text",
+  "mime": "text/vtt",
+  "language": null,
+  "label": "Transcript",
+  "origin": "derived",
+  "spec": "sageox://layer-spec/transcript/1",
+  "revision": 2,
+  "status": "active",
+  "supersedes": null,
+  "lineage": [],
+  "clock": {"t0": ""},
+  "content": {
+    "kind": "transcript",
+    "refs": [{"ref": "git-file", "path": "transcript.vtt", "mime": "text/vtt"}]
+  }
+}

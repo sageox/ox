@@ -156,6 +156,12 @@ func OxCapabilities() []Capability {
 		{ID: "ox-plan", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
 		{ID: "ox-session-review", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
 		{ID: "ox-recap", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
+		// ox-conversation's id also names its slash-relay command file at
+		// extensions/claude/commands/ox-conversation.md — one surface id, two
+		// on-disk affordances, both accounted by this single row (the
+		// deterministic floor for citation-walking is prime's KB guidance,
+		// which names `ox conversation` for every adapter).
+		{ID: "ox-conversation", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
 	}
 }
 

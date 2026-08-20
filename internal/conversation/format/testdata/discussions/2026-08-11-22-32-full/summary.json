@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "recording_id": "rec_019ff2f5-2079-7be1-b05e-8caad2772e61",
+  "title": "Full Fixture Discussion",
+  "human_summary": "A fixture discussion exercising every layer layout.",
+  "participants": [
+    {
+      "name": "Galex Yen",
+      "role": "Speaker"
+    },
+    {
+      "name": "",
+      "role": "Ghost"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "ch-1",
+      "title": "ignored"
+    }
+  ]
+}

@@ -29,7 +29,7 @@ type Bundle struct {
 // Catalog is intentionally a slice: declaration order is the human-facing
 // order, while selection below remains deterministic and duplicate-safe.
 var Catalog = []Bundle{
-	{ID: "core", Description: "Everyday SageOx workflows and skill manager", Default: true, SkillIDs: []string{"ox-consult", "ox-decision", "ox-plan", "ox-recap", "ox-session-review", "ox-skill-manager", "ox-viz"}},
+	{ID: "core", Description: "Everyday SageOx workflows and skill manager", Default: true, SkillIDs: []string{"ox-consult", "ox-conversation", "ox-decision", "ox-plan", "ox-recap", "ox-session-review", "ox-skill-manager", "ox-viz"}},
 	{ID: "attest", Description: "Optional Attest BDD and evidence playbooks", SkillIDs: []string{"ox-attest-goal", "ox-attest-create"}},
 }
 
