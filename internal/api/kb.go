@@ -201,6 +201,17 @@ func (c *KBClient) WithAuthToken(token string) *KBClient {
 	return c
 }
 
+// WithHTTPTimeout overrides the transport-level timeout and returns the
+// client for fluent chaining. The default 10s suits the fast reads
+// (list/detail/resolve); a caller whose request does real server-side work —
+// search embeds the query and fans out per bubble — must raise this to at
+// least its per-call context budget, or the transport cap silently becomes
+// the effective limit.
+func (c *KBClient) WithHTTPTimeout(d time.Duration) *KBClient {
+	c.httpClient = &http.Client{Timeout: d}
+	return c
+}
+
 // Endpoint returns the base URL this client is configured for.
 func (c *KBClient) Endpoint() string {
 	return c.baseURL

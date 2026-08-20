@@ -43,6 +43,12 @@ const (
 	kbQueryMaxQueryBytes = 1024
 )
 
+// kbQuerySearchTimeout bounds the search call — it embeds the query and fans
+// out per bubble server-side, so it gets more headroom than the fast reads.
+// Used for BOTH the search context and the client's transport timeout: the
+// transport cap is the effective limit when it is lower than the context.
+const kbQuerySearchTimeout = 30 * time.Second
+
 var kbQueryCmd = &cobra.Command{
 	Use:   "query <#slug|kb_id> [#slug|kb_id ...] \"<question>\"",
 	Short: "Search files across knowledge bubbles",
@@ -95,7 +101,7 @@ func runKBQuery(cmd *cobra.Command, args []string) error {
 	projectRoot, _ := findProjectRoot()
 	ep := resolveKBEndpoint(projectRoot)
 
-	client := api.NewKBClientWithEndpoint(ep)
+	client := api.NewKBClientWithEndpoint(ep).WithHTTPTimeout(kbQuerySearchTimeout)
 	if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil && token.AccessToken != "" {
 		client = client.WithAuthToken(token.AccessToken)
 	}
@@ -124,7 +130,7 @@ func runKBQuery(cmd *cobra.Command, args []string) error {
 	// Never log the query text (it can quote anything); lengths and counts only.
 	slog.Info("kb query", "bubbles", len(targets), "mode", modeFlag, "k", kFlag, "query_len", len(query))
 
-	searchCtx, cancelSearch := context.WithTimeout(cmd.Context(), 30*time.Second)
+	searchCtx, cancelSearch := context.WithTimeout(cmd.Context(), kbQuerySearchTimeout)
 	defer cancelSearch()
 	resp, err := client.SearchFiles(searchCtx, api.KBSearchRequest{
 		Query:      query,
