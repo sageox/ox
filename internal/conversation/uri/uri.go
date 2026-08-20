@@ -397,7 +397,10 @@ func parseCanonicalUint(s string) (int64, error) {
 			return 0, errors.New("not a decimal number")
 		}
 	}
-	return strconv.ParseInt(s, 10, 64)
+	// bitSize 32: the MaxOrdinalDigits cap already bounds values to
+	// 999,999,999 < 2^31-1, so callers may narrow to int safely on any
+	// platform.
+	return strconv.ParseInt(s, 10, 32)
 }
 
 // Encode renders the canonical spelling of the address: selectors ordered
