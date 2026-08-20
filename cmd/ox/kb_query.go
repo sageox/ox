@@ -227,7 +227,9 @@ func handleKBSearchError(w io.Writer, err error, jsonOutput bool) error {
 	if errors.Is(err, api.ErrUnauthorized) {
 		return fmt.Errorf("not authenticated — run 'ox login'")
 	}
-	return err
+	// Wrap so an unclassified failure (e.g. a bare context deadline) names
+	// which call failed; errors.Is/As still see the cause.
+	return fmt.Errorf("kb file search: %w", err)
 }
 
 // kbQueryJSONOutput is the --json envelope: the wire response verbatim plus
@@ -294,8 +296,13 @@ func renderKBQueryResult(w io.Writer, resp *api.KBSearchResponse, targets []kbQu
 		renderKBQueryGroup(w, group, dimStyle, warnStyle)
 		fmt.Fprintln(w)
 	}
-	if len(resp.Groups) > 0 {
-		cli.PrintHintTo(w, "Hits are files, not answers — read one from the bubble's local mount ('ox kb describe' shows the path).")
+	// The read-the-file hint only makes sense when there is a file to read —
+	// groups alone don't imply hits (empty/not_indexed/error groups have none).
+	for _, group := range resp.Groups {
+		if group.Status == api.KBSearchStatusOK && len(group.Hits) > 0 {
+			cli.PrintHintTo(w, "Hits are files, not answers — read one from the bubble's local mount ('ox kb describe' shows the path).")
+			break
+		}
 	}
 	return nil
 }

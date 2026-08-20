@@ -163,6 +163,44 @@ func TestRenderKBQueryResult_StatusHonesty(t *testing.T) {
 	}
 }
 
+// TestRenderKBQueryResult_HitHintOnlyWithHits asserts the "Hits are files"
+// hint prints only when at least one ok group actually carries a hit —
+// groups alone (empty/not_indexed/error) must not trigger it.
+//
+// Failure prevented: telling a coworker to go read a file when the result
+// contains no file to read.
+func TestRenderKBQueryResult_HitHintOnlyWithHits(t *testing.T) {
+	t.Parallel()
+
+	const hint = "Hits are files"
+
+	var withHits bytes.Buffer
+	if err := renderKBQueryResult(&withHits, kbQueryFixtureResponse(), kbQueryFixtureTargets(), false); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(withHits.String(), hint) {
+		t.Errorf("hint missing when a hit exists\n---\n%s", withHits.String())
+	}
+
+	hitless := &api.KBSearchResponse{Groups: []api.KBSearchGroup{
+		{KBID: "kb_empty", Status: api.KBSearchStatusEmpty, Hits: []api.KBSearchHit{}},
+		{KBID: "kb_new", Status: api.KBSearchStatusNotIndexed, Hits: []api.KBSearchHit{}},
+		{KBID: "kb_bad", Status: api.KBSearchStatusError, ErrorClass: "backend", Hits: []api.KBSearchHit{}},
+	}}
+	targets := []kbQueryTarget{
+		{Input: "empty", KBID: "kb_empty"},
+		{Input: "new", KBID: "kb_new"},
+		{Input: "bad", KBID: "kb_bad"},
+	}
+	var noHits bytes.Buffer
+	if err := renderKBQueryResult(&noHits, hitless, targets, false); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if strings.Contains(noHits.String(), hint) {
+		t.Errorf("hint printed with zero hits\n---\n%s", noHits.String())
+	}
+}
+
 // TestRenderKBQueryResult_SanitizesServerText embeds ANSI/OSC escapes in the
 // snippet, title, and path — indexed file content, the most hostile text
 // this command renders — and asserts they are neutralized.
