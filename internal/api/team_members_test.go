@@ -190,6 +190,50 @@ func TestListTeamRoster_OversizedBody(t *testing.T) {
 	assert.False(t, errors.Is(err, ErrTeamRosterUnavailable), "oversized is a misbehaving server, not an unreachable one")
 }
 
+// TestListTeamRoster_OversizedServerError — Failure prevented: a 5xx whose error
+// body exceeds the cap is rejected as "too large" instead of degrading to the
+// graceful unavailable sentinel (status must be classified before the body read).
+func TestListTeamRoster_OversizedServerError(t *testing.T) {
+	t.Parallel()
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write(make([]byte, maxRosterBodyBytes+1))
+	}))
+	defer mockServer.Close()
+
+	client := &RepoClient{
+		baseURL:    mockServer.URL,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		version:    "test-version",
+		authToken:  "test-token",
+	}
+	resp, err := client.ListTeamRoster(context.Background(), "team_abc")
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.True(t, errors.Is(err, ErrTeamRosterUnavailable), "a 5xx must degrade regardless of body size, got %v", err)
+	assert.NotContains(t, err.Error(), "too large", "5xx must be classified before the body read")
+}
+
+// TestListTeamRoster_RejectsDotSegments — Failure prevented: a "." / ".." / path
+// -separator team ref reaches the wire, where a normalizing proxy can rewrite the
+// route and the 404 masquerades as "roster unavailable".
+func TestListTeamRoster_RejectsDotSegments(t *testing.T) {
+	t.Parallel()
+	client := &RepoClient{
+		baseURL:    "http://127.0.0.1:1", // must never be dialed — validation rejects first
+		httpClient: &http.Client{Timeout: 2 * time.Second},
+		version:    "test-version",
+		authToken:  "test-token",
+	}
+	for _, ref := range []string{".", "..", "a/b", "team\\x"} {
+		resp, err := client.ListTeamRoster(context.Background(), ref)
+		require.Error(t, err, "ref %q must be rejected", ref)
+		assert.Nil(t, resp)
+		assert.Contains(t, err.Error(), "invalid team reference", "ref %q", ref)
+		assert.False(t, errors.Is(err, ErrTeamRosterUnavailable), "ref %q must not look like an availability failure", ref)
+	}
+}
+
 // TestListTeamRoster_EmptyRef — Failure prevented: an empty team ref silently
 // issues a request to /api/v1/teams//roster.
 func TestListTeamRoster_EmptyRef(t *testing.T) {

@@ -82,6 +82,13 @@ func (c *RepoClient) ListTeamRoster(ctx context.Context, teamRef string) (*TeamR
 	if teamRef == "" {
 		return nil, fmt.Errorf("team is required")
 	}
+	// Reject dot-segments and separators up front. url.PathEscape leaves "." and
+	// ".." unchanged, so a normalizing proxy could rewrite /teams/./roster or
+	// /teams/../roster before routing and the resulting 404 would masquerade as
+	// "roster unavailable". A real team id/slug never contains these.
+	if teamRef == "." || teamRef == ".." || strings.ContainsAny(teamRef, "/\\") {
+		return nil, fmt.Errorf("invalid team reference %q", teamRef)
+	}
 
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(teamRosterPath, url.PathEscape(teamRef))
 
@@ -103,7 +110,7 @@ func (c *RepoClient) ListTeamRoster(ctx context.Context, teamRef string) (*TeamR
 		// refused, or timeout. Map to the graceful "unavailable" sentinel so the
 		// command degrades instead of erroring hard on a reachability blip.
 		logger.LogHTTPError("GET", reqURL, err, duration)
-		return nil, fmt.Errorf("%w: %v", ErrTeamRosterUnavailable, err)
+		return nil, fmt.Errorf("%w: %w", ErrTeamRosterUnavailable, err)
 	}
 	defer resp.Body.Close()
 
@@ -113,39 +120,41 @@ func (c *RepoClient) ListTeamRoster(ctx context.Context, teamRef string) (*TeamR
 		return nil, ErrVersionUnsupported
 	}
 
-	// Cap the read: a roster is a few KB. Read one byte past the cap so we can
-	// DETECT (not silently truncate) an oversized body — io.LimitReader alone
-	// returns EOF at the limit, indistinguishable from a body that just fit, so
-	// truncation would surface as a confusing JSON decode error. Rejecting keeps
-	// a malicious or MITM'd server from OOMing the CLI (the 30s timeout bounds
-	// time, not memory).
+	// Classify status BEFORE reading the body, so a hostile or huge error body
+	// can't turn a degradable failure (e.g. a 5xx) into an "oversize" error.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		switch {
+		case resp.StatusCode == http.StatusNotFound:
+			return nil, ErrTeamRosterUnsupported
+		case resp.StatusCode == http.StatusUnauthorized:
+			return nil, ErrUnauthorized
+		case resp.StatusCode == http.StatusForbidden:
+			return nil, ErrForbidden
+		case resp.StatusCode >= 500:
+			// Server is up but failing — a reachability/availability problem;
+			// degrade gracefully rather than erroring hard.
+			return nil, fmt.Errorf("%w: server returned %d", ErrTeamRosterUnavailable, resp.StatusCode)
+		}
+		// Other 4xx: read a capped body for a diagnostic message.
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxRosterBodyBytes))
+		errMsg := strings.TrimSpace(string(errBody))
+		if errMsg == "" {
+			errMsg = resp.Status
+		}
+		return nil, fmt.Errorf("team roster fetch failed: status=%d body=%s", resp.StatusCode, errMsg)
+	}
+
+	// Success: read one byte past the cap so an oversized body is DETECTED, not
+	// silently truncated — io.LimitReader returns EOF at the limit,
+	// indistinguishable from a body that just fit, so truncation would surface as
+	// a confusing JSON decode error. This keeps a malicious or MITM'd server from
+	// OOMing the CLI (the 30s timeout bounds time, not memory).
 	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxRosterBodyBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 	if int64(len(bodyBytes)) > maxRosterBodyBytes {
 		return nil, fmt.Errorf("roster response too large (exceeds %d bytes)", maxRosterBodyBytes)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		switch resp.StatusCode {
-		case http.StatusNotFound:
-			return nil, ErrTeamRosterUnsupported
-		case http.StatusUnauthorized:
-			return nil, ErrUnauthorized
-		case http.StatusForbidden:
-			return nil, ErrForbidden
-		}
-		if resp.StatusCode >= 500 {
-			// Server is up but failing — treat as a reachability/availability
-			// problem and degrade gracefully rather than erroring hard.
-			return nil, fmt.Errorf("%w: server returned %d", ErrTeamRosterUnavailable, resp.StatusCode)
-		}
-		errMsg := strings.TrimSpace(string(bodyBytes))
-		if errMsg == "" {
-			errMsg = resp.Status
-		}
-		return nil, fmt.Errorf("team roster fetch failed: status=%d body=%s", resp.StatusCode, errMsg)
 	}
 
 	var out TeamRosterResponse
