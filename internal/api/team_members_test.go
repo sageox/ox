@@ -124,9 +124,9 @@ func TestListTeamRoster_MalformedJSON(t *testing.T) {
 	assert.Nil(t, resp)
 }
 
-// TestListTeamRoster_ServerError — Failure prevented: a 5xx is silently treated
-// as the graceful ErrTeamRosterUnsupported sentinel and reported as "feature
-// unavailable, exit 0" instead of a real error.
+// TestListTeamRoster_ServerError — Failure prevented: a 5xx (server up but
+// failing) is reported as a hard error or as the "route doesn't exist" sentinel,
+// instead of the graceful "server unreachable" tier the command degrades on.
 func TestListTeamRoster_ServerError(t *testing.T) {
 	t.Parallel()
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,7 +144,50 @@ func TestListTeamRoster_ServerError(t *testing.T) {
 	resp, err := client.ListTeamRoster(context.Background(), "team_abc")
 	require.Error(t, err)
 	assert.Nil(t, resp)
-	assert.False(t, errors.Is(err, ErrTeamRosterUnsupported), "5xx must not be swallowed as unsupported")
+	assert.True(t, errors.Is(err, ErrTeamRosterUnavailable), "5xx must map to the graceful unavailable sentinel, got %v", err)
+	assert.False(t, errors.Is(err, ErrTeamRosterUnsupported), "5xx is not the same as a missing route")
+}
+
+// TestListTeamRoster_ServerDown — Failure prevented: a server that is down /
+// unreachable (connection refused, DNS failure, timeout) surfaces as a raw
+// "network error" hard failure instead of the graceful unavailable sentinel.
+func TestListTeamRoster_ServerDown(t *testing.T) {
+	t.Parallel()
+	client := &RepoClient{
+		baseURL:    "http://127.0.0.1:1", // nothing listening → connection refused
+		httpClient: &http.Client{Timeout: 2 * time.Second},
+		version:    "test-version",
+		authToken:  "test-token",
+	}
+	resp, err := client.ListTeamRoster(context.Background(), "team_abc")
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.True(t, errors.Is(err, ErrTeamRosterUnavailable), "an unreachable server must map to the graceful unavailable sentinel, got %v", err)
+}
+
+// TestListTeamRoster_OversizedBody — Failure prevented: a body larger than the
+// cap is silently truncated by io.LimitReader and then fails to decode with a
+// confusing JSON error, instead of being rejected explicitly as too large.
+func TestListTeamRoster_OversizedBody(t *testing.T) {
+	t.Parallel()
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// One byte over the cap is enough to trip detection.
+		_, _ = w.Write(make([]byte, maxRosterBodyBytes+1))
+	}))
+	defer mockServer.Close()
+
+	client := &RepoClient{
+		baseURL:    mockServer.URL,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		version:    "test-version",
+		authToken:  "test-token",
+	}
+	resp, err := client.ListTeamRoster(context.Background(), "team_abc")
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Contains(t, err.Error(), "too large", "oversized body must be rejected explicitly")
+	assert.False(t, errors.Is(err, ErrTeamRosterUnavailable), "oversized is a misbehaving server, not an unreachable one")
 }
 
 // TestListTeamRoster_EmptyRef — Failure prevented: an empty team ref silently

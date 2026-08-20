@@ -38,6 +38,13 @@ const maxRosterBodyBytes = 4 << 20
 // capability as unavailable and exit 0 rather than treating it as a failure.
 var ErrTeamRosterUnsupported = errors.New("team roster endpoint not available (feature not enabled, or server too old)")
 
+// ErrTeamRosterUnavailable is the sentinel for a server that is down or
+// unreachable: a transport failure (DNS/refused/timeout) or a 5xx. Distinct from
+// ErrTeamRosterUnsupported (the route doesn't exist) — this means the route may
+// exist but the server can't answer right now. Callers degrade gracefully: the
+// roster is informational, so a blip shouldn't be a hard failure.
+var ErrTeamRosterUnavailable = errors.New("team roster temporarily unavailable (could not reach the server)")
+
 // TeamMember is one coworker in a team roster — a human (usr_) or an AI coworker
 // (agt_). Its fields are the identity attributes the server exposes for a
 // roster: display name, type, role, and the handles the coworker is known by.
@@ -67,8 +74,10 @@ type TeamRosterResponse struct {
 //
 // teamRef is a team id or slug (the server resolves both). Returns
 // ErrTeamRosterUnsupported on 404 (flag off / not deployed — caller degrades),
-// ErrUnauthorized on 401, ErrForbidden on 403, and ErrVersionUnsupported when
-// the server rejects the CLI version.
+// ErrTeamRosterUnavailable on a transport failure or 5xx (server down/unreachable
+// — caller degrades), ErrUnauthorized on 401, ErrForbidden on 403, and
+// ErrVersionUnsupported when the server rejects the CLI version. An oversized
+// body (> maxRosterBodyBytes) is rejected with a plain error.
 func (c *RepoClient) ListTeamRoster(ctx context.Context, teamRef string) (*TeamRosterResponse, error) {
 	if teamRef == "" {
 		return nil, fmt.Errorf("team is required")
@@ -90,8 +99,11 @@ func (c *RepoClient) ListTeamRoster(ctx context.Context, teamRef string) (*TeamR
 	resp, err := c.httpClient.Do(httpReq)
 	duration := time.Since(start)
 	if err != nil {
+		// Transport failure — server down, DNS/host doesn't resolve, connection
+		// refused, or timeout. Map to the graceful "unavailable" sentinel so the
+		// command degrades instead of erroring hard on a reachability blip.
 		logger.LogHTTPError("GET", reqURL, err, duration)
-		return nil, fmt.Errorf("network error: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrTeamRosterUnavailable, err)
 	}
 	defer resp.Body.Close()
 
@@ -101,12 +113,18 @@ func (c *RepoClient) ListTeamRoster(ctx context.Context, teamRef string) (*TeamR
 		return nil, ErrVersionUnsupported
 	}
 
-	// Cap the read: a roster is a few KB. LimitReader keeps a malicious or
-	// MITM'd server from OOMing the CLI with an unbounded body (the 30s timeout
-	// bounds time, not memory). Matches repo.go's capped-read precedent.
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxRosterBodyBytes))
+	// Cap the read: a roster is a few KB. Read one byte past the cap so we can
+	// DETECT (not silently truncate) an oversized body — io.LimitReader alone
+	// returns EOF at the limit, indistinguishable from a body that just fit, so
+	// truncation would surface as a confusing JSON decode error. Rejecting keeps
+	// a malicious or MITM'd server from OOMing the CLI (the 30s timeout bounds
+	// time, not memory).
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxRosterBodyBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	if int64(len(bodyBytes)) > maxRosterBodyBytes {
+		return nil, fmt.Errorf("roster response too large (exceeds %d bytes)", maxRosterBodyBytes)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -117,6 +135,11 @@ func (c *RepoClient) ListTeamRoster(ctx context.Context, teamRef string) (*TeamR
 			return nil, ErrUnauthorized
 		case http.StatusForbidden:
 			return nil, ErrForbidden
+		}
+		if resp.StatusCode >= 500 {
+			// Server is up but failing — treat as a reachability/availability
+			// problem and degrade gracefully rather than erroring hard.
+			return nil, fmt.Errorf("%w: server returned %d", ErrTeamRosterUnavailable, resp.StatusCode)
 		}
 		errMsg := strings.TrimSpace(string(bodyBytes))
 		if errMsg == "" {

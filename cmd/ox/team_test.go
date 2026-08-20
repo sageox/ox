@@ -127,6 +127,25 @@ func TestFetchAndRenderRoster_UnsupportedDegrades(t *testing.T) {
 	assert.Equal(t, false, env["available"])
 }
 
+// TestFetchAndRenderRoster_UnavailableDegrades — a down/unreachable server (or a
+// 5xx) degrades gracefully (no error, exit 0) with a "couldn't reach the server"
+// message, and JSON mode reports available:false — not a hard crash.
+func TestFetchAndRenderRoster_UnavailableDegrades(t *testing.T) {
+	lister := fakeMemberLister{err: api.ErrTeamRosterUnavailable}
+
+	var buf bytes.Buffer
+	err := fetchAndRenderRoster(context.Background(), &buf, lister, "team_abc", "Acme", false)
+	require.NoError(t, err, "an unreachable server must degrade gracefully, not error")
+	assert.Contains(t, strings.ToLower(buf.String()), "couldn't reach")
+
+	var jbuf bytes.Buffer
+	err = fetchAndRenderRoster(context.Background(), &jbuf, lister, "team_abc", "Acme", true)
+	require.NoError(t, err)
+	var env map[string]any
+	require.NoError(t, json.Unmarshal(jbuf.Bytes(), &env))
+	assert.Equal(t, false, env["available"])
+}
+
 // TestFetchAndRenderRoster_AuthErrorSurfaces — a 401 is a real error the caller
 // must see (to prompt `ox login`), not a graceful degrade.
 func TestFetchAndRenderRoster_AuthErrorSurfaces(t *testing.T) {

@@ -134,15 +134,20 @@ func runTeamMembers(cmd *cobra.Command, args []string) error {
 func fetchAndRenderRoster(ctx context.Context, w io.Writer, lister memberLister, teamRef, label string, jsonMode bool) error {
 	resp, err := lister.ListTeamRoster(ctx, teamRef)
 	if err != nil {
-		if errors.Is(err, api.ErrTeamRosterUnsupported) {
-			// 404: feature flag off, route not deployed, or team not found —
-			// degrade gracefully, exit 0. The message names both plausible
-			// causes rather than asserting an undeployed flag is the only one.
+		// Degrade gracefully (exit 0) when the roster can't be served: either the
+		// feature/route doesn't exist (404) or the server is down/unreachable
+		// (transport failure or 5xx). The roster is informational — a missing
+		// feature or a reachability blip shouldn't be a hard failure. Auth,
+		// forbidden, and version errors still surface: those need user action.
+		if errors.Is(err, api.ErrTeamRosterUnsupported) || errors.Is(err, api.ErrTeamRosterUnavailable) {
 			if jsonMode {
 				return writeRosterJSON(w, nil, false)
 			}
-			fmt.Fprintf(w, "%s Team roster is unavailable (feature not enabled on this server, or team not found).\n",
-				cli.Styles.Info.Render("ℹ"))
+			msg := "Team roster is unavailable (feature not enabled on this server, or team not found)."
+			if errors.Is(err, api.ErrTeamRosterUnavailable) {
+				msg = "Team roster is unavailable right now — couldn't reach the server."
+			}
+			fmt.Fprintf(w, "%s %s\n", cli.Styles.Info.Render("ℹ"), msg)
 			return nil
 		}
 		// ErrUnauthorized / ErrForbidden / ErrVersionUnsupported / other → real error
