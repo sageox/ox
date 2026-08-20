@@ -2,35 +2,111 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
+
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // isDuplicateColumnError reports whether err is SQLite's "duplicate column
-// name" error — the signature a losing `ALTER TABLE ADD COLUMN` gets when a
-// concurrent caller already added the same column. SQLite has no `ADD COLUMN
-// IF NOT EXISTS`, so every migration below checks column existence and then
-// ALTERs in two separate statements; on a brand-new database two openers
-// (e.g. `ox index code` racing another `Open`/`OpenSQLOnly` of the same
-// freshly created codedb — see #758) can both observe the column missing and
-// both attempt the ALTER. The loser's failure here does not mean anything is
-// wrong — it means the column exists now, which is exactly what was wanted —
-// so it must not fail the whole CreateSchema call.
-func isDuplicateColumnError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "duplicate column name")
+// name: <column>" error for the exact column just attempted — the signature a
+// losing `ALTER TABLE ADD COLUMN` gets when a concurrent caller already added
+// that column. SQLite has no `ADD COLUMN IF NOT EXISTS`, so every migration
+// checks column existence and then ALTERs in two separate statements; on a
+// brand-new database two openers (e.g. `ox index code` racing another
+// `Open`/`OpenSQLOnly` of the same freshly created codedb — see #758) can both
+// observe the column missing and both attempt the ALTER. The loser's failure
+// here means the column exists now, which is exactly what was wanted, so it must
+// not fail the whole CreateSchema call.
+//
+// The match is deliberately narrow: a typed *sqlite.Error carrying the generic
+// SQLITE_ERROR code whose message names the column we tried to add. Requiring
+// the column name stops a duplicate on some *other* column (a real schema bug)
+// from being silently swallowed; the type+code check stops an unrelated error
+// whose text merely contains the phrase from slipping through.
+func isDuplicateColumnError(err error, column string) bool {
+	var sqErr *sqlite.Error
+	if !errors.As(err, &sqErr) || sqErr.Code() != sqlite3.SQLITE_ERROR {
+		return false
+	}
+	return strings.Contains(sqErr.Error(), "duplicate column name: "+column)
 }
 
-// testAddColumnRaceHook, when non-nil, is invoked by each ALTER-based
-// migration immediately after it observes a column as missing and before it
-// attempts the ALTER. Production code always leaves this nil (zero-cost).
-// Tests use it to force the #758 race window deterministically — pausing N
-// goroutines right after they've all observed "missing" and releasing them
-// together — rather than betting on goroutine scheduling to hit a
-// microsecond-wide window on its own.
-var testAddColumnRaceHook func()
+// columnDDL pairs a column name with the ALTER statement that adds it.
+type columnDDL struct {
+	name string
+	ddl  string
+}
 
-func addColumnRaceHook() {
+// addColumnsIfMissing adds each of cols to table that is not already present.
+// It reads the current column set once, then issues ALTERs only for the columns
+// still missing. This makes a multi-column migration resumable: a process that
+// crashed (or an older ox) after adding only some of its columns adds the rest
+// on the next run, instead of a single guard column short-circuiting the whole
+// migration and leaving the schema permanently partial.
+//
+// The single up-front read is deliberate. Checking each column immediately
+// before its own ALTER interleaves schema reads with the concurrent ALTERs of
+// other openers on a fresh codedb, and that contention corrupted a 16-way
+// fresh-open race in testing. Reading once keeps the hot path as cheap as the
+// original single guarded check while still recovering a partial schema.
+//
+// The check-then-ALTER is not atomic, so two openers can both observe a column
+// missing and both ALTER; the loser's "duplicate column name" is success, not
+// failure (see isDuplicateColumnError and #758).
+func addColumnsIfMissing(db *sql.DB, table string, cols []columnDDL) error {
+	existing, err := existingColumns(db, table)
+	if err != nil {
+		return err
+	}
+	for _, c := range cols {
+		if existing[c.name] {
+			continue
+		}
+		addColumnRaceHook(c.name)
+		if _, err := db.Exec(c.ddl); err != nil && !isDuplicateColumnError(err, c.name) {
+			return err
+		}
+	}
+	return nil
+}
+
+// existingColumns returns the set of column names currently defined on table.
+func existingColumns(db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	cols := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		cols[name] = true
+	}
+	return cols, rows.Err()
+}
+
+// testAddColumnRaceHook, when non-nil, is invoked by addColumnsIfMissing
+// immediately before it attempts the ALTER for a still-missing column, passed
+// that column's name. Production always leaves this nil
+// (a lock-free read of a package global, effectively zero cost). Tests use it to
+// force the #758 race window deterministically — pausing N goroutines right
+// after they have all observed "missing" and releasing them together — rather
+// than betting on goroutine scheduling to hit a microsecond-wide window.
+//
+// It MUST only ever be set from a test that does NOT call t.Parallel():
+// production reads this global lock-free from concurrent migration goroutines,
+// so a parallel test that writes it while another test's migrations read it is a
+// data race on this variable.
+var testAddColumnRaceHook func(column string)
+
+func addColumnRaceHook(column string) {
 	if testAddColumnRaceHook != nil {
-		testAddColumnRaceHook()
+		testAddColumnRaceHook(column)
 	}
 }
 
@@ -262,49 +338,33 @@ func CreateSchema(db *sql.DB) error {
 // current resolver version after edges are populated, and ParseSymbols stamps
 // new blobs at the current version inline.
 func migrateAddEdgeVersion(db *sql.DB) error {
-	var exists bool
-	err := db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('blobs') WHERE name='edge_version'`).Scan(&exists)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-	addColumnRaceHook()
-	if _, err := db.Exec(`ALTER TABLE blobs ADD COLUMN edge_version INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumnError(err) {
+	if err := addColumnsIfMissing(db, "blobs", []columnDDL{
+		{"edge_version", `ALTER TABLE blobs ADD COLUMN edge_version INTEGER NOT NULL DEFAULT 0`},
+	}); err != nil {
 		return err
 	}
 	// Index supports the backfill scan: find blobs needing edges fast.
-	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_blobs_edge_version ON blobs(edge_version)`)
+	_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_blobs_edge_version ON blobs(edge_version)`)
 	return err
 }
 
 // migrateAddTypeInfo adds signature, return_type, and params columns to the
 // symbols table for databases created before those columns existed.
 func migrateAddTypeInfo(db *sql.DB) error {
-	var exists bool
-	err := db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('symbols') WHERE name='signature'`).Scan(&exists)
-	if err != nil {
+	// Each column is added independently (see addColumnsIfMissing) so the
+	// migration is resumable: the previous single-guard-on-signature form left
+	// return_type/params permanently absent if a process died (or was an older
+	// ox) after only the first ALTER landed.
+	if err := addColumnsIfMissing(db, "symbols", []columnDDL{
+		{"signature", `ALTER TABLE symbols ADD COLUMN signature TEXT`},
+		{"return_type", `ALTER TABLE symbols ADD COLUMN return_type TEXT`},
+		{"params", `ALTER TABLE symbols ADD COLUMN params TEXT`},
+	}); err != nil {
 		return err
 	}
-	if exists {
-		return nil
-	}
-	addColumnRaceHook()
-
-	alters := []string{
-		`ALTER TABLE symbols ADD COLUMN signature TEXT`,
-		`ALTER TABLE symbols ADD COLUMN return_type TEXT`,
-		`ALTER TABLE symbols ADD COLUMN params TEXT`,
-	}
-	for _, s := range alters {
-		if _, err := db.Exec(s); err != nil && !isDuplicateColumnError(err) {
-			return err
-		}
-	}
-	// Idempotent regardless of race outcome: re-marking already-reset rows as
-	// unparsed is a no-op, so concurrent callers stepping on this is harmless.
-	_, err = db.Exec(`UPDATE blobs SET parsed = 0 WHERE language IS NOT NULL`)
+	// Idempotent regardless of race/resume outcome: re-marking already-reset rows
+	// as unparsed is a no-op, so concurrent callers stepping on this is harmless.
+	_, err := db.Exec(`UPDATE blobs SET parsed = 0 WHERE language IS NOT NULL`)
 	return err
 }
 
@@ -339,16 +399,10 @@ func migrateAddComments(db *sql.DB) error {
 	}
 
 	// add comments_parsed column to blobs if missing
-	var colExists bool
-	err = db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('blobs') WHERE name='comments_parsed'`).Scan(&colExists)
-	if err != nil {
+	if err := addColumnsIfMissing(db, "blobs", []columnDDL{
+		{"comments_parsed", `ALTER TABLE blobs ADD COLUMN comments_parsed INTEGER NOT NULL DEFAULT 0`},
+	}); err != nil {
 		return err
-	}
-	if !colExists {
-		addColumnRaceHook()
-		if _, err := db.Exec(`ALTER TABLE blobs ADD COLUMN comments_parsed INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumnError(err) {
-			return err
-		}
 	}
 
 	// index for fast unparsed-comments lookups

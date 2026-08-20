@@ -640,10 +640,16 @@ func TestAddColumnMigrations_ConcurrentRace(t *testing.T) {
 		migrate func(*sql.DB) error
 		table   string
 		columns []string
+		// syncColumn is the one column each racer parks on to force the race.
+		// migrateAddTypeInfo adds three columns via addColumnIfMissing, so the
+		// hook fires once per column; parking on only the first keeps the
+		// bounded ready channel from overflowing while still guaranteeing all
+		// racers hit the check-then-ALTER window together.
+		syncColumn string
 	}{
-		{"edge_version", migrateAddEdgeVersion, "blobs", []string{"edge_version"}},
-		{"type_info", migrateAddTypeInfo, "symbols", []string{"signature", "return_type", "params"}},
-		{"comments_parsed", migrateAddComments, "blobs", []string{"comments_parsed"}},
+		{"edge_version", migrateAddEdgeVersion, "blobs", []string{"edge_version"}, "edge_version"},
+		{"type_info", migrateAddTypeInfo, "symbols", []string{"signature", "return_type", "params"}, "signature"},
+		{"comments_parsed", migrateAddComments, "blobs", []string{"comments_parsed"}, "comments_parsed"},
 	}
 
 	for _, tc := range cases {
@@ -655,7 +661,10 @@ func TestAddColumnMigrations_ConcurrentRace(t *testing.T) {
 			ready := make(chan struct{}, racers)
 			release := make(chan struct{})
 
-			testAddColumnRaceHook = func() {
+			testAddColumnRaceHook = func(column string) {
+				if column != tc.syncColumn {
+					return
+				}
 				ready <- struct{}{}
 				<-release
 			}
@@ -691,5 +700,84 @@ func TestAddColumnMigrations_ConcurrentRace(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMigrateAddTypeInfo_ResumesPartialMigration proves migrateAddTypeInfo is
+// resumable. It adds three columns (signature, return_type, params); the older
+// form guarded all three behind a single existence check on signature, so a
+// database left with signature but not the other two — a process that crashed
+// between ALTERs, or an older ox that only ever added signature — would
+// short-circuit on the guard and never gain return_type/params.
+//
+// Failure prevented: symbols.return_type / symbols.params silently never exist,
+// and every type-info query returns empty forever with no error to flag it.
+func TestMigrateAddTypeInfo_ResumesPartialMigration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
+
+	db, _ := createOldSchemaDB(t)
+	defer func() { _ = db.Close() }()
+
+	// Simulate a migration that died after the first ALTER: signature landed,
+	// return_type and params did not.
+	if _, err := db.Exec(`ALTER TABLE symbols ADD COLUMN signature TEXT`); err != nil {
+		t.Fatalf("seed partial migration: %v", err)
+	}
+
+	if err := migrateAddTypeInfo(db); err != nil {
+		t.Fatalf("migrateAddTypeInfo on partially migrated schema: %v", err)
+	}
+
+	for _, col := range []string{"signature", "return_type", "params"} {
+		if !columnExists(t, db, "symbols", col) {
+			t.Errorf("symbols.%s missing after resuming a partial migration", col)
+		}
+	}
+}
+
+// TestIsDuplicateColumnError pins the precision of the duplicate-column guard:
+// it must swallow a duplicate ONLY for the exact column being added, so a
+// genuine schema bug that reports a duplicate on a different column, or any
+// other error, still fails the migration loudly.
+//
+// Failure prevented: an over-broad match (e.g. plain substring on the message)
+// silently eating a real error and leaving a half-built schema.
+func TestIsDuplicateColumnError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
+
+	db, _ := createOldSchemaDB(t)
+	defer func() { _ = db.Close() }()
+
+	// Provoke a real "duplicate column name: signature" from the driver.
+	if _, err := db.Exec(`ALTER TABLE symbols ADD COLUMN signature TEXT`); err != nil {
+		t.Fatalf("seed column: %v", err)
+	}
+	_, dupErr := db.Exec(`ALTER TABLE symbols ADD COLUMN signature TEXT`)
+	if dupErr == nil {
+		t.Fatal("expected a duplicate-column error on the second ALTER")
+	}
+
+	if !isDuplicateColumnError(dupErr, "signature") {
+		t.Errorf("duplicate on signature should match column=signature, got err=%v", dupErr)
+	}
+	if isDuplicateColumnError(dupErr, "return_type") {
+		t.Error("must NOT swallow a duplicate reported for signature when adding return_type")
+	}
+	if isDuplicateColumnError(nil, "signature") {
+		t.Error("nil is not a duplicate-column error")
+	}
+
+	// A different sqlite error (same generic SQLITE_ERROR code, different
+	// message) must not be mistaken for a duplicate-column error.
+	_, otherErr := db.Exec(`ALTER TABLE definitely_no_such_table ADD COLUMN x TEXT`)
+	if otherErr == nil {
+		t.Fatal("expected an error for a missing table")
+	}
+	if isDuplicateColumnError(otherErr, "x") {
+		t.Errorf("a non-duplicate error must not be treated as duplicate-column: %v", otherErr)
 	}
 }
