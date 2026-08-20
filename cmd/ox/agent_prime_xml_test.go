@@ -612,6 +612,13 @@ func TestOutputAgentPrimeXML_PlanEnrichmentGuidance(t *testing.T) {
 				t.Error("plan-enrichment-guidance must mention `ox plan lint` in every tier")
 			}
 
+			// the plan creed is primed on every tier — the north star every plan
+			// is authored against (bd ox-ysur). Failure prevented: the priming
+			// surfaces carry the mechanics of planning but not its point.
+			if !strings.Contains(xml, "delight them, educate them visually and crisply") {
+				t.Error("plan-enrichment-guidance must prime the plan creed on every tier")
+			}
+
 			// the review loop is the differentiator: full tiers recommend the
 			// `ox plan review` loop; Bronze (lighter) does not.
 			hasReviewLoop := strings.Contains(xml, "ox plan review")
@@ -1083,7 +1090,15 @@ func TestOutputAgentPrimeXML_SageoxOverheadBudget_Regression(t *testing.T) {
 	// at the END for the implementing agent — so agents RELOCATE implementation
 	// detail rather than inlining it up top or deleting it. ~54 tokens, accepted:
 	// it directly cuts reviewer cognitive load on every non-trivial plan.
-	const sageoxOverheadCeiling = 2100
+	//
+	// Raised 2100 -> 2150 (ox-ysur): the block now primes the plan creed — "don't
+	// waste human attention, delight them, educate them visually and crisply" — as
+	// the one-line north star every plan is authored against, on every tier. ~20
+	// tokens, a deliberate override of the keep-rationale-out-of-prime rule
+	// (agent_prime_xml.go:~680) for the creed specifically: the point of a plan,
+	// not its mechanics. The rationale still lives on demand in `ox guide
+	// plan-enrichment`.
+	const sageoxOverheadCeiling = 2150
 	sageoxTokens := budget.Get(prime.BudgetSourceSageox)
 	if sageoxTokens > sageoxOverheadCeiling {
 		t.Errorf("SageOx overhead floor for minimal prime = %d tokens, exceeds ceiling %d.\n"+

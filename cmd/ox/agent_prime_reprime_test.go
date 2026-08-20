@@ -95,11 +95,17 @@ func renderXMLBudget(t *testing.T, out agentPrimeOutput) *prime.ContextBudget {
 // are regression guards, NOT specs: if one trips, prime bloated — trim it, or
 // raise the ceiling deliberately with justification in the PR.
 func TestPrimeTokenBudget_FullAndCompactStayUnderCeiling(t *testing.T) {
-	// Measured sageox budget on the fully-loaded fixture (full ~2669, compact
+	// Measured sageox budget on the fully-loaded fixture (full ~2683, compact
 	// ~263) plus ~20-50% headroom — enough to absorb legitimate small growth,
 	// tight enough to catch a preamble regrowth.
+	//
+	// fullCeiling raised 3200 -> 3260 (ox-ysur): the <plan-enrichment-guidance>
+	// block now primes the plan creed ("don't waste human attention, delight
+	// them, educate them visually and crisply") as a one-line north star on every
+	// tier. ~14 tokens, a deliberate override of keep-rationale-out-of-prime for
+	// the creed specifically; depth stays on demand in `ox guide plan-enrichment`.
 	const (
-		fullCeiling    = 3200
+		fullCeiling    = 3260
 		compactCeiling = 400
 	)
 

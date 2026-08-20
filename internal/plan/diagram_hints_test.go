@@ -163,6 +163,20 @@ func TestBuildGuidance_FoldsInHints(t *testing.T) {
 	}
 }
 
+// TestBuildGuidance_PrimesCreed verifies the cross-agent floor carries the plan
+// creed's delight/educate half AND a cross-repo-safe pointer to the quality bar.
+// Failure prevented: skill-less agents (Codex/Droid, Layer-1 only) get the
+// attention-thrift half but never the delight/visual-quality bar.
+func TestBuildGuidance_PrimesCreed(t *testing.T) {
+	in := Parse("## Request flow\n\nThe client sends a request; the API returns a response in order.\n")
+	g := buildGuidance(in, SignalSummary{}, computeDiagramHints(in), nil, "")
+	for _, want := range []string{"delight", "educate", "ox guide plan-enrichment"} {
+		if !strings.Contains(g, want) {
+			t.Errorf("floor guidance missing creed element %q: %s", want, g)
+		}
+	}
+}
+
 // TestBuildGuidance_LeadsWithEvidence verifies the guidance LEADS with the
 // plan-specific team-context counts when signals fired, then keeps the authored
 // page as the single ledger source instead of offering a competing renderer.

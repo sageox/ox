@@ -684,6 +684,9 @@ func consultRoutes() []prime.ConsultRoute {
 // every prime. The commands themselves (the actual steering) stay inline.
 func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	sb.WriteString("\n<plan-enrichment-guidance>\n")
+	// The plan creed — the north star every plan is authored against, primed on
+	// every tier (bd ox-ysur). Depth lives on demand in `ox guide plan-enrichment`.
+	sb.WriteString("A plan follows a creed: don't waste human attention, delight them, educate them visually and crisply.\n")
 	// Cross-agent mandate: planning should ALWAYS draw on SageOx conversation
 	// intelligence first, regardless of agent tier.
 	sb.WriteString("Before planning non-trivial work, consult SageOx conversation intelligence: `ox query \"<topic>\"` (discussions+sessions), `ox code search` (code+history) — plans ignoring recent team context get re-litigated.\n")

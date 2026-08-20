@@ -28,6 +28,25 @@ For material work, author a purpose-built visual `plan.html`; then pass that pag
 Never use the rejected legacy `--plan + --html` pair. It creates two candidate
 sources of truth and historically allowed review to discard the authored page.
 
+## The authoring philosophy
+
+Every plan is authored against one creed:
+
+> **Don't waste human attention. Delight them. Educate them visually and crisply.**
+
+- **Don't waste human attention.** The approver's time is the scarce resource — lead with
+  the decision, relocate depth, never make them read the implementer's notes to approve.
+- **Delight them.** A plan that does work a document cannot — an inspector, a toggleable
+  timeline, a verdict card — in the warm SageOx register, reads as a first-class surface,
+  not a generic dev-tool doc. Delight is what makes reviewers *want* the ox-rendered plan.
+- **Educate them visually.** Teach the decision with a hero visualization (topology,
+  sequence, state, comparison), not a wall of prose. Show the shape; don't describe it.
+- **…crisply.** Conclusion and biggest risk first; every element earns its pixels.
+
+The quality bar and the design register that make this concrete live in
+`docs/specs/plan-authoring-html.md` (in the ox repo). Author against the creed, then verify
+with `ox plan lint`.
+
 ## Two readers, two layers
 
 The visible page is a decision surface: conclusion, trade-offs, biggest risk,

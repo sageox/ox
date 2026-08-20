@@ -25,10 +25,33 @@ around.
 | `meta.json` | ox | Records `"primary": "html"` |
 | ox chrome | ox, injected at render/serve time | Enrichment overlay + footer credit + live review loop |
 
+## The authoring philosophy
+
+Every plan is authored against one creed:
+
+> **Don't waste human attention. Delight them. Educate them visually and crisply.**
+
+Each clause is enforced by a section below — this doc is the creed made concrete:
+
+- **Don't waste human attention** → *The human-attention contract*: two layers, the
+  approver never pays for the implementer's depth.
+- **Delight them** → *The quality bar* and *The design register*: a page that does work
+  a document cannot, in the same warm register as every other SageOx surface — not a
+  generic dev-tool doc.
+- **Educate them visually** → the hero visualization: teach the decision with topology,
+  sequence, state, or comparison, not a wall of prose.
+- **…crisply** → lead with the conclusion and the biggest risk; every element earns its
+  pixels.
+
+The clauses are not decoration. A plan that informs without delighting or educating has
+met the letter of the contract and missed its point.
+
 ## The quality bar
 
 The bar is the **SageOx conversation-format comparison page** — the hand-built
-page that set the standard for what a plan can feel like:
+page that set the standard for what a plan can feel like. A plan should not just
+inform the approver; it should **delight** them and **educate** them — teach the
+decision, don't just state it:
 
 - **Tabbed views** behind a sticky nav.
 - **Interactive field inspectors** — hover or click a field, its counterpart

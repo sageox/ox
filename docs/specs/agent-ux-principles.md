@@ -17,6 +17,14 @@ Ryan Snodgrass evolved these ideas into a comprehensive framework while building
 3. **Progressive disclosure** - Just-in-time information delivery
 4. **Actionable guidance** - Clear next steps, not just information
 
+**But delight is not out of scope — it just moves.** The four goals above govern the
+surface an agent *consumes* (JSON, CLI output). The artifacts an agent *authors for a
+human* — plans, reports, PR descriptions — are human UX, and there comprehension and
+delight are first-class targets. A plan the agent renders is held to the creed *"don't
+waste human attention, delight them, educate them visually and crisply"* — see
+[plan-authoring-html.md](plan-authoring-html.md). Thrift for what the agent reads;
+delight for what the agent writes for a person.
+
 ---
 
 ## Core Principles

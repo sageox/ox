@@ -244,6 +244,7 @@ func emitPlanHint(w io.Writer, projectRoot, agentID string, rawBytes []byte) {
 // authored HTML as the single source when presenting a material plan.
 func planModeHintLine() string {
 	return strings.Join([]string{
+		"A plan follows a creed: don't waste human attention, delight them, educate them visually and crisply.",
 		"Plan mode — run `ox plan enrich --json` WHILE you draft so the plan reflects team context",
 		"(collisions, prior art, expert routing) BEFORE you present it. For material work author a visual",
 		"`plan.html`, save it canonically with `ox plan save --file plan.html`, then offer",
@@ -256,6 +257,7 @@ func planModeHintLine() string {
 // visuals, then pass that page through ox for context and review chrome.
 func htmlPlanHintLine() string {
 	return strings.Join([]string{
+		"A plan follows a creed: don't waste human attention, delight them, educate them visually and crisply.",
 		"Rendering an HTML plan? Run `ox plan enrich --json`, author the visual `plan.html`, save it as the single",
 		"source with `ox plan save --file plan.html`, then use `ox plan render --open --file plan.html` to inject",
 		"SageOx team context without replacing the page. Lean into the",

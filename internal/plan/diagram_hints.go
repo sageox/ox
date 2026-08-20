@@ -406,6 +406,7 @@ func buildGuidance(in Input, sig SignalSummary, hints []DiagramHint, vizHints []
 	b.WriteString("BOTTOM — exactly one collapsed `<details>` appendix named \"Implementation notes\" at the END, for the agent that implements: exact files, edit order, snippets, gotchas. ")
 	b.WriteString("Relocate detail to the bottom rather than inlining it up top or deleting it — cut only what serves neither reader. ")
 	b.WriteString("Explore visualization patterns with `ox viz suggest \"<what needs explaining>\"` (architecture, flows, state, charts, layouts, and mockups) and weave in the ones that compress understanding — the catalog applies to plans, docs, PRs, and reports.")
+	b.WriteString(" The creed: don't just inform — delight and educate. Teach the decision visually and crisply so the page reads like a SageOx surface, not a generic dev-tool doc; see `ox guide plan-enrichment` for the quality bar and design register.")
 	if len(hints) > 0 {
 		b.WriteString(" Diagrams that fit this plan: ")
 		parts := make([]string, 0, len(hints))

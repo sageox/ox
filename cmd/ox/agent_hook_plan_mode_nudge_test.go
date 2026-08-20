@@ -9,6 +9,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestPlanHintLines_PrimeCreed verifies both plan-mention steers lead with the
+// plan creed. Failure prevented: the nudge primes the mechanics of planning but
+// not its point — delight and education — so agents optimize for thrift alone.
+func TestPlanHintLines_PrimeCreed(t *testing.T) {
+	const creed = "delight them, educate them visually and crisply"
+	assert.Contains(t, planModeHintLine(), creed, "plan-mode steer must prime the creed")
+	assert.Contains(t, htmlPlanHintLine(), creed, "html steer must prime the creed")
+}
+
 // --- A. permission_mode extraction from UserPromptSubmit stdin ---
 
 // TestExtractPermissionMode_BothSpellings verifies both the hook-stdin spelling
