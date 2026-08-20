@@ -112,6 +112,7 @@ func runKBQuery(cmd *cobra.Command, args []string) error {
 	// context-deadline failure (search starved by resolutions, or a later
 	// slug starved by an earlier slow resolution).
 	targets := make([]kbQueryTarget, 0, len(identifiers))
+	seenKBIDs := make(map[string]bool, len(identifiers))
 	for _, raw := range identifiers {
 		input := strings.TrimSpace(kb.NormalizeSlugArg(raw))
 		if input == "" {
@@ -124,6 +125,14 @@ func runKBQuery(cmd *cobra.Command, args []string) error {
 			}
 			return handleKBDescribeError(cmd.OutOrStdout(), err, input, jsonOutput)
 		}
+		// Dedupe on the RESOLVED id, not the typed form: the same bubble can
+		// be named twice ("#eng" and its kb_id, or a slug and its rename
+		// alias), and a duplicate would both waste a server bubble slot and
+		// collapse the per-bubble group rendering, which keys on kb_id.
+		if seenKBIDs[kbID] {
+			continue
+		}
+		seenKBIDs[kbID] = true
 		targets = append(targets, kbQueryTarget{Input: input, KBID: kbID})
 	}
 

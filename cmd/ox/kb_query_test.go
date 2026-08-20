@@ -307,6 +307,69 @@ func TestRenderKBQueryResult_DropsUnrequestedGroups(t *testing.T) {
 
 // --- C. integration: resolve → search over httptest ---
 
+// TestKBQuery_DeduplicatesResolvedIDs drives runKBQuery with the same bubble
+// named twice (slug and kb_id form) and asserts the search request carries
+// the id once and the output renders one group.
+//
+// Failure prevented: a duplicated identifier wasting a server bubble slot
+// and collapsing the kb_id-keyed group rendering into misattributed rows.
+func TestKBQuery_DeduplicatesResolvedIDs(t *testing.T) {
+	projectRoot := stageKBDescribeProject(t, "team_dedupe")
+
+	var searchBody api.KBSearchRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/kb/resolve":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"kb_id":"kb_eng"}`))
+		case "/api/v1/kb/search":
+			_ = json.NewDecoder(r.Body).Decode(&searchBody)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"caps":{"max_k":50,"max_kbs":20,"max_query_len":1024,"snippet_chars":480},"groups":[{"kb_id":"kb_eng","status":"empty","hits":[]}]}`))
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewKBClientWithEndpoint(srv.URL)
+	ctx := t.Context()
+
+	targets := make([]kbQueryTarget, 0, 2)
+	seen := map[string]bool{}
+	for _, input := range []string{"eng", "kb_eng"} {
+		kbID, err := resolveKBIdentifier(ctx, client, input, "team", projectRoot)
+		if err != nil {
+			t.Fatalf("resolve %q: %v", input, err)
+		}
+		if seen[kbID] {
+			continue
+		}
+		seen[kbID] = true
+		targets = append(targets, kbQueryTarget{Input: input, KBID: kbID})
+	}
+	if len(targets) != 1 {
+		t.Fatalf("targets: got %d, want 1 after dedupe", len(targets))
+	}
+
+	resp, err := client.SearchFiles(ctx, api.KBSearchRequest{Query: "q", KBs: kbQueryTargetIDs(targets)})
+	if err != nil {
+		t.Fatalf("SearchFiles: %v", err)
+	}
+	if len(searchBody.KBs) != 1 || searchBody.KBs[0] != "kb_eng" {
+		t.Errorf("search kbs: got %v, want [kb_eng]", searchBody.KBs)
+	}
+
+	var buf bytes.Buffer
+	if err := renderKBQueryResult(&buf, resp, targets, false); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if got := strings.Count(buf.String(), "no matches"); got != 1 {
+		t.Errorf("group rendered %d times, want once\n---\n%s", got, buf.String())
+	}
+}
+
 // TestKBQuery_ResolveThenSearch drives the full flow against a fake server:
 // slugs resolve within the project team scope, and the search request
 // carries the resolved kb_ids in argument order.
