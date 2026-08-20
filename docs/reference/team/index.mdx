@@ -1,42 +1,43 @@
 ---
-title: "ox status"
-description: "CLI reference for ox status"
-sidebar_position: 94
+title: "ox team"
+description: "CLI reference for ox team"
+sidebar_position: 96
 ---
 
-## ox status
+## ox team
 
-Display SageOx status and directory locations
+Inspect your team
 
 ### Synopsis
 
-Display current authentication status, configuration, and data locations.
+Inspect your team.
 
-Shows authentication state, project initialization, ledger/team context sync status,
-daemon health, and a tree view of all SageOx directory locations.
+Commands:
+  members   List the team's coworkers (humans and AI coworkers)
 
 ```
-ox status [flags]
+ox team [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help      help for status
-      --json      output in JSON format
-  -v, --verbose   show opaque IDs and full on-disk paths
+  -h, --help   help for team
 ```
 
 ### Options inherited from parent commands
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
 ```
 
 ### SEE ALSO
 
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox team members](/team/members)	 - List the team's coworkers (humans and AI coworkers)
 

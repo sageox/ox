@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -219,7 +220,7 @@ func (c *KBClient) ListBubbles(ctx context.Context, scope KBScope) ([]KB, error)
 	q.Set("scope_id", scope.ID)
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + kbListPath + "?" + q.Encode()
 
-	bodyBytes, err := c.do(ctx, "GET", reqURL)
+	bodyBytes, err := c.do(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +252,7 @@ func (c *KBClient) GetBubble(ctx context.Context, kbID string) (*KB, error) {
 
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(kbDetailPath, url.PathEscape(kbID))
 
-	bodyBytes, err := c.do(ctx, "GET", reqURL)
+	bodyBytes, err := c.do(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +280,7 @@ func (c *KBClient) ResolveSlug(ctx context.Context, scope KBScope, slug string) 
 	q.Set("slug", slug)
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + kbResolvePath + "?" + q.Encode()
 
-	bodyBytes, err := c.do(ctx, "GET", reqURL)
+	bodyBytes, err := c.do(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -296,14 +297,22 @@ func (c *KBClient) ResolveSlug(ctx context.Context, scope KBScope, slug string) 
 
 // do issues the HTTP request, applies standard auth+UA headers, and returns
 // the response body bytes on 2xx. Non-2xx and network/version errors are
-// translated into the package's typed errors.
-func (c *KBClient) do(ctx context.Context, method, reqURL string) ([]byte, error) {
+// translated into the package's typed errors. A non-nil body is sent as a
+// JSON request body (Content-Type: application/json).
+func (c *KBClient) do(ctx context.Context, method, reqURL string, body []byte) ([]byte, error) {
 	logger.LogHTTPRequest(method, reqURL)
 	start := time.Now()
 
-	httpReq, err := useragent.NewRequest(ctx, method, reqURL, nil)
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+	httpReq, err := useragent.NewRequest(ctx, method, reqURL, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	if body != nil {
+		httpReq.Header.Set("Content-Type", "application/json")
 	}
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))

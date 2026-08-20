@@ -56,6 +56,14 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 			Intent:  "one bubble in detail: its area, topics, the curator steering prompt behind its synthesis, and the local path its git repo is synced to (start reading at AGENTS.md there)",
 			Command: "ox kb describe '#<slug>'",
 		})
+		// Same quoting rationale as describe: the slug's '#' display prefix
+		// must be quoted, and here the question must be too — the LAST
+		// argument is the query, so an unquoted question is consumed as
+		// bubble names.
+		cmds = append(cmds, IntentCommand{
+			Intent:  "search named bubbles' curated files with one question: ranked file hits per bubble (read a hit from the bubble's local mount)",
+			Command: "ox kb query '#<slug>' \"<question>\"",
+		})
 	}
 
 	// bundled guides — always available; teaches users + agents about ox
