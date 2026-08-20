@@ -1,6 +1,7 @@
 package format
 
 import (
+	"os"
 	"time"
 )
 
@@ -186,19 +187,32 @@ func applyTopicEdit(t *Topic, field, value string) {
 // (nil, nil). Sidecar files are each optional; their surfaced invalid lines
 // are aggregated into Projected.Invalid.
 func LoadProjectedDistillation(discussionRoot string) (*Projected, error) {
-	d, err := LoadDistillation(discussionRoot)
+	root, err := openOptionalRoot(discussionRoot)
+	if err != nil || root == nil {
+		return nil, err
+	}
+	defer root.Close()
+	return LoadProjectedDistillationIn(root)
+}
+
+// LoadProjectedDistillationIn is LoadProjectedDistillation over an
+// already-open discussion-folder root, for callers that hold the folder open
+// (derived from a validated discussions root) and must not re-open it by
+// absolute path.
+func LoadProjectedDistillationIn(root *os.Root) (*Projected, error) {
+	d, err := LoadDistillationIn(root)
 	if err != nil || d == nil {
 		return nil, err
 	}
-	edits, editsInvalid, err := LoadEdits(discussionRoot)
+	edits, editsInvalid, err := LoadEditsIn(root)
 	if err != nil {
 		return nil, err
 	}
-	finalize, finalizeInvalid, err := LoadFinalize(discussionRoot)
+	finalize, finalizeInvalid, err := LoadFinalizeIn(root)
 	if err != nil {
 		return nil, err
 	}
-	extends, extendsInvalid, err := LoadTTLExtends(discussionRoot)
+	extends, extendsInvalid, err := LoadTTLExtendsIn(root)
 	if err != nil {
 		return nil, err
 	}

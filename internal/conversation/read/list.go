@@ -2,6 +2,7 @@ package read
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"time"
 
@@ -48,7 +49,14 @@ type ListData struct {
 // dropped.
 func (r *Reader) List(opts ListOptions) *Envelope {
 	start := r.now()
-	rows, totalIndexed, err := r.loadRows()
+	root, rootErr := r.openDiscussionsRoot()
+	if rootErr != nil {
+		return r.finishError(start, rootErr, nil)
+	}
+	if root != nil {
+		defer root.Close()
+	}
+	rows, totalIndexed, err := r.loadRows(root)
 	if err != nil {
 		return r.finishError(start, err, nil)
 	}
@@ -79,19 +87,25 @@ func (r *Reader) List(opts ListOptions) *Envelope {
 
 	out := make([]ConversationRow, 0, len(kept))
 	for _, rw := range kept {
-		out = append(out, r.listRow(rw))
+		out = append(out, r.listRow(root, rw))
 	}
 	data := &ListData{Conversations: out, TotalIndexed: totalIndexed, Truncated: truncated}
 	return r.finishSuccess(start, data, "ox conversation show <cnv_id> for the summary.", nil)
 }
 
 // listRow projects one live index row to its envelope shape, applying the
-// D13 title fallback chain (INDEX.json → metadata.json → folder name).
-func (r *Reader) listRow(rw row) ConversationRow {
+// D13 title fallback chain (INDEX.json → metadata.json → folder name). The
+// metadata probe derives its folder handle from the held discussions root —
+// never an absolute-path re-open — and stays best-effort: any failure just
+// falls through to the folder-name title.
+func (r *Reader) listRow(root *os.Root, rw row) ConversationRow {
 	title := rw.entry.Title
-	if title == "" {
-		if meta, err := format.LoadMetadata(rw.path); err == nil && meta != nil && meta.Title != "" {
-			title = meta.Title
+	if title == "" && root != nil {
+		if droot, derr := openDiscussion(root, rw.entry.Folder); derr == nil && droot != nil {
+			if meta, err := format.LoadMetadataIn(droot); err == nil && meta != nil && meta.Title != "" {
+				title = meta.Title
+			}
+			droot.Close()
 		}
 	}
 	if title == "" {

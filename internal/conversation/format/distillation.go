@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -133,8 +134,20 @@ type Distillation struct {
 // leniently: malformed lines are skipped and surfaced, never fatal (mirroring
 // the producer's strict/lenient split).
 func LoadDistillation(discussionRoot string) (*Distillation, error) {
-	path := filepath.Join(discussionRoot, DistillationDirName, DistillationFileName)
-	data, err := readOptionalFile(discussionRoot, distillationRelBase)
+	root, err := openOptionalRoot(discussionRoot)
+	if err != nil || root == nil {
+		return nil, err
+	}
+	defer root.Close()
+	return LoadDistillationIn(root)
+}
+
+// LoadDistillationIn is LoadDistillation over an already-open
+// discussion-folder root, for callers that hold the folder open (derived from
+// a validated discussions root) and must not re-open it by absolute path.
+func LoadDistillationIn(root *os.Root) (*Distillation, error) {
+	path := filepath.Join(root.Name(), DistillationDirName, DistillationFileName)
+	data, err := readOptionalFileIn(root, distillationRelBase)
 	if err != nil || data == nil {
 		return nil, err
 	}
@@ -237,8 +250,18 @@ type TTLExtendRecord struct {
 // LoadEdits reads distillation/edits.jsonl leniently. Missing file is
 // (nil, nil, nil); malformed or unrecognized lines are skipped and surfaced.
 func LoadEdits(discussionRoot string) ([]EditRecord, []InvalidRecord, error) {
+	root, err := openOptionalRoot(discussionRoot)
+	if err != nil || root == nil {
+		return nil, nil, err
+	}
+	defer root.Close()
+	return LoadEditsIn(root)
+}
+
+// LoadEditsIn is LoadEdits over an already-open discussion-folder root.
+func LoadEditsIn(root *os.Root) ([]EditRecord, []InvalidRecord, error) {
 	var edits []EditRecord
-	invalid, err := loadJSONLines(discussionRoot, EditsFileName, editsRelBase, func(raw []byte) error {
+	invalid, err := loadJSONLines(root, EditsFileName, editsRelBase, func(raw []byte) error {
 		var e EditRecord
 		if err := json.Unmarshal(raw, &e); err != nil {
 			return err
@@ -268,8 +291,18 @@ func LoadEdits(discussionRoot string) ([]EditRecord, []InvalidRecord, error) {
 // LoadFinalize reads distillation/finalize.jsonl leniently. A well-formed
 // marker is a JSON object with a parseable, non-zero at timestamp.
 func LoadFinalize(discussionRoot string) ([]FinalizeRecord, []InvalidRecord, error) {
+	root, err := openOptionalRoot(discussionRoot)
+	if err != nil || root == nil {
+		return nil, nil, err
+	}
+	defer root.Close()
+	return LoadFinalizeIn(root)
+}
+
+// LoadFinalizeIn is LoadFinalize over an already-open discussion-folder root.
+func LoadFinalizeIn(root *os.Root) ([]FinalizeRecord, []InvalidRecord, error) {
 	var records []FinalizeRecord
-	invalid, err := loadJSONLines(discussionRoot, FinalizeFileName, finalizeRelBase, func(raw []byte) error {
+	invalid, err := loadJSONLines(root, FinalizeFileName, finalizeRelBase, func(raw []byte) error {
 		var f FinalizeRecord
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return err
@@ -289,8 +322,19 @@ func LoadFinalize(discussionRoot string) ([]FinalizeRecord, []InvalidRecord, err
 // LoadTTLExtends reads distillation/ttl_extends.jsonl leniently. Every
 // well-formed JSON-object line counts as one 30-minute extension.
 func LoadTTLExtends(discussionRoot string) ([]TTLExtendRecord, []InvalidRecord, error) {
+	root, err := openOptionalRoot(discussionRoot)
+	if err != nil || root == nil {
+		return nil, nil, err
+	}
+	defer root.Close()
+	return LoadTTLExtendsIn(root)
+}
+
+// LoadTTLExtendsIn is LoadTTLExtends over an already-open discussion-folder
+// root.
+func LoadTTLExtendsIn(root *os.Root) ([]TTLExtendRecord, []InvalidRecord, error) {
 	var records []TTLExtendRecord
-	invalid, err := loadJSONLines(discussionRoot, TTLExtendsFileName, ttlExtendsRelBase, func(raw []byte) error {
+	invalid, err := loadJSONLines(root, TTLExtendsFileName, ttlExtendsRelBase, func(raw []byte) error {
 		// json.Unmarshal accepts a literal null into a struct without
 		// error; a null line must not count as a +30m extension. Only a
 		// JSON object is a well-formed marker.
@@ -313,9 +357,9 @@ func LoadTTLExtends(discussionRoot string) ([]TTLExtendRecord, []InvalidRecord, 
 // loadJSONLines is the shared lenient JSONL sidecar reader: missing file is
 // no records, blank lines skipped, each non-blank line handed to decode, and
 // any decode error surfaced as an InvalidRecord rather than failing the load.
-func loadJSONLines(discussionRoot, fileName, relPath string, decode func(raw []byte) error) ([]InvalidRecord, error) {
-	path := filepath.Join(discussionRoot, DistillationDirName, fileName)
-	data, err := readOptionalFile(discussionRoot, relPath)
+func loadJSONLines(root *os.Root, fileName, relPath string, decode func(raw []byte) error) ([]InvalidRecord, error) {
+	path := filepath.Join(root.Name(), DistillationDirName, fileName)
+	data, err := readOptionalFileIn(root, relPath)
 	if err != nil || data == nil {
 		return nil, err
 	}

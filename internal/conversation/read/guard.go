@@ -17,7 +17,10 @@ const maxFolderNameLen = 255
 // one plain path element — no separators (either slash), no traversal, not
 // absolute, no NUL, bounded length. Every discussion folder name — from
 // INDEX.json today, from a server resolve response in the future — passes
-// through here before it is used against the filesystem.
+// through here before it is used against the filesystem. The single-element
+// guarantee also means no name ever reaches an os.Root method with a
+// trailing separator (CVE-2026-39822: a final symlink component with a
+// trailing slash must never be handed to Root path resolution).
 func validateFolderName(folder string) *Error {
 	if folder == "" {
 		return newError(ErrCodeReadError, "discussion folder name is empty")
@@ -39,85 +42,64 @@ func validateFolderName(folder string) *Error {
 	return nil
 }
 
-// rejectSymlinkedFolder refuses a discussions/<folder> entry that is itself a
-// symlink. The name resolves openat-style under the root's descriptor
-// (Root.Lstat never follows the final component), so the check cannot be
-// redirected by a component swap the way a bare os.Lstat on a joined path
-// could. A clean single element can still be a symlink committed into the
-// (customer-writable, git-synced) team context, pointing anywhere on disk —
-// reject it outright. A missing entry passes: the caller's own read reports
-// the typed absence.
-func rejectSymlinkedFolder(root *os.Root, folder string) *Error {
-	info, err := root.Lstat(folder)
-	switch {
-	case err == nil && info.Mode()&os.ModeSymlink != 0:
-		return newError(ErrCodeReadError, fmt.Sprintf("discussion folder %q is a symlink; symlinked discussion entries are not read", truncateID(folder)))
-	case err == nil, errors.Is(err, fs.ErrNotExist):
-		return nil
-	default:
-		return newError(ErrCodeReadError, fmt.Sprintf("inspect discussion folder %q: %v", truncateID(folder), err))
-	}
-}
-
-// joinDiscussion is the single path-join guard (D16): every discussion
-// folder path passes through here before it touches the filesystem, and the
-// result is confined to the team's discussions/ root.
+// openDiscussion is the single open guard (D16): it derives an open handle on
+// one discussion folder from the held discussions-root *os.Root. The name is
+// validated lexically, probed no-follow (Root.Lstat never follows the final
+// component), and opened with Root.OpenRoot — every step resolves
+// openat-style against the same directory descriptor, and the folder is
+// never re-opened by absolute path after validation. That is the structural
+// TOCTOU fix: os.OpenRoot follows symlinks while resolving its initial path
+// argument, so a folder swapped for a symlink between validation and an
+// absolute-path open could otherwise redirect reads outside the discussions
+// root. Root.OpenRoot cannot escape the root even if the entry changes
+// between the probe and the open.
 //
-// The name is validated lexically, the joined result is re-verified to sit
-// strictly inside the root (defense in depth — with the element checks the
-// verification cannot fail, but the guard holds even if the checks drift),
-// and the entry is probed no-follow through an os.Root over the discussions
-// root so a symlinked entry is rejected. The returned path is only the
-// display/join form: actual content reads go through os.Root as well (the
-// format loaders open their own root over it), so symlinks below the folder
-// can never escape either.
-func joinDiscussion(discussionsRoot, folder string) (string, *Error) {
+// Returns (nil, nil) for an absent entry and for a symlinked or
+// non-directory entry — both are deliberately never served, and the caller
+// reports its typed absence. Every other filesystem failure is a retryable
+// read_error, never conflated with absence.
+func openDiscussion(root *os.Root, folder string) (*os.Root, *Error) {
 	if verr := validateFolderName(folder); verr != nil {
-		return "", verr
+		return nil, verr
 	}
-
-	joined := filepath.Join(discussionsRoot, folder)
-	rel, err := filepath.Rel(discussionsRoot, joined)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", newError(ErrCodeReadError, fmt.Sprintf("discussion folder name %q escapes the discussions root", truncateID(folder)))
+	info, statErr := root.Lstat(folder)
+	switch {
+	case errors.Is(statErr, fs.ErrNotExist):
+		return nil, nil
+	case statErr != nil:
+		return nil, newError(ErrCodeReadError, fmt.Sprintf("inspect discussion folder %q: %v", truncateID(folder), statErr))
+	case !info.IsDir():
+		// Symlinked entry (Lstat reports the link itself, never the target)
+		// or a stray plain file: deliberately skipped, same as the index
+		// pass. A symlink committed into the customer-writable, git-synced
+		// team context can point anywhere on disk — never read through it.
+		return nil, nil
 	}
-
-	root, rootErr := os.OpenRoot(discussionsRoot)
-	if rootErr != nil {
-		if errors.Is(rootErr, fs.ErrNotExist) {
-			// No discussions root at all: the entry is missing, and the
-			// caller's own read reports the typed absence.
-			return joined, nil
-		}
-		return "", newError(ErrCodeReadError, fmt.Sprintf("open discussions root: %v", rootErr))
+	droot, err := root.OpenRoot(folder)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil // vanished between probe and open: phantom
+	case err != nil:
+		// Includes the entry being swapped for an escaping symlink between
+		// the probe and the open: Root.OpenRoot refuses to resolve outside
+		// the discussions root.
+		return nil, newError(ErrCodeReadError, fmt.Sprintf("open discussion folder %q: %v", truncateID(folder), err))
 	}
-	defer root.Close()
-	if serr := rejectSymlinkedFolder(root, folder); serr != nil {
-		return "", serr
-	}
-	return joined, nil
+	return droot, nil
 }
 
-// readDiscussionFile reads one well-known file from a guarded discussion
-// folder through an os.Root, so no path component — including the file
-// itself — can follow a symlink out of the folder. A missing folder reads as
-// a missing file: both surface fs.ErrNotExist, which callers map to their
-// typed absence; every other failure is wrapped with context.
-func readDiscussionFile(folderPath, name string) ([]byte, error) {
-	root, err := os.OpenRoot(folderPath)
+// readDiscussionFile reads one well-known file from an open discussion-folder
+// handle, so no path component — including the file itself — can follow a
+// symlink out of the folder. A missing file surfaces fs.ErrNotExist, which
+// callers map to their typed absence; every other failure is wrapped with the
+// file's name for context.
+func readDiscussionFile(droot *os.Root, name string) ([]byte, error) {
+	data, err := droot.ReadFile(name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, err
 		}
-		return nil, fmt.Errorf("open %s: %w", folderPath, err)
-	}
-	defer root.Close()
-	data, err := root.ReadFile(name)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("read %s: %w", filepath.Join(folderPath, name), err)
+		return nil, fmt.Errorf("read %s: %w", name, err)
 	}
 	return data, nil
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"time"
 
 	"github.com/sageox/ox/internal/conversation/format"
@@ -78,22 +79,23 @@ func (r *Reader) Transcript(rawID string, opts TranscriptOptions) *Envelope {
 	if selErr := validateSelectors(opts); selErr != nil {
 		return r.finishError(start, selErr, nil)
 	}
-	rw, lookErr := r.lookup(id.RecordingID)
+	_, droot, lookErr := r.lookup(id.RecordingID)
 	if lookErr != nil {
 		return r.finishError(start, lookErr, nil)
 	}
+	defer droot.Close()
 
 	var warnings []string
 
 	// Manifest + layer metadata (D7: metadata only — content reads go to the
 	// fixed root path). Both manifest names accepted; the D6 anomaly reports
 	// through warnings.
-	manifest, manifestWarnings, manErr := format.LoadManifest(rw.path)
+	manifest, manifestWarnings, manErr := format.LoadManifestIn(droot)
 	warnings = append(warnings, manifestWarnings...)
 	if manErr != nil {
 		warnings = append(warnings, "conversation manifest unreadable: "+manErr.Error())
 	}
-	revisionCurrent := r.currentTranscriptRevision(rw.path, id, &warnings)
+	revisionCurrent := r.currentTranscriptRevision(droot, id, &warnings)
 
 	data := &TranscriptData{RevisionCurrent: revisionCurrent}
 	if id.Address != nil && id.Address.Revision > 0 {
@@ -112,11 +114,12 @@ func (r *Reader) Transcript(rawID string, opts TranscriptOptions) *Envelope {
 		warnings = append(warnings, fmt.Sprintf("citation pins transcript revision %d but revision %d is current; cue numbers may have drifted (D8: the requested range is still served)", data.RevisionRequested, revisionCurrent))
 	}
 
-	// The transcript itself, at its fixed root path (D7), read through an
-	// os.Root over the discussion folder so a symlinked transcript.vtt
+	// The transcript itself, at its fixed root path (D7), read through the
+	// open discussion-folder handle (derived from the validated discussions
+	// root — never an absolute-path re-open) so a symlinked transcript.vtt
 	// committed into the customer-writable tree can never pull content from
 	// outside the folder: within-root links resolve, escaping links error.
-	raw, readErr := readDiscussionFile(rw.path, format.TranscriptFileName)
+	raw, readErr := readDiscussionFile(droot, format.TranscriptFileName)
 	if readErr != nil {
 		if errors.Is(readErr, fs.ErrNotExist) {
 			return r.finishError(start, newError(ErrCodeTranscriptNotAvailable,
@@ -247,8 +250,8 @@ func manifestT0(m *format.Manifest) (time.Time, bool) {
 // citation names a layer, that exact layer is consulted; otherwise the
 // highest-revision transcript layer stands in. 0 = unknown (no manifests on
 // disk — ordinary for older folders).
-func (r *Reader) currentTranscriptRevision(folderPath string, id *ID, warnings *[]string) int {
-	discovery, err := format.DiscoverLayers(folderPath)
+func (r *Reader) currentTranscriptRevision(droot *os.Root, id *ID, warnings *[]string) int {
+	discovery, err := format.DiscoverLayersIn(droot)
 	if err != nil {
 		*warnings = append(*warnings, "layer discovery failed: "+err.Error())
 		return 0

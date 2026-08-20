@@ -82,8 +82,6 @@ func (r *Reader) SetFallback(f FolderResolver) { r.fallback = f }
 // real INDEX.json lacks (recorded_at, has_distillation).
 type row struct {
 	entry format.IndexEntry
-	// path is the guarded absolute folder path.
-	path string
 	// recordedAt is derived — UUIDv7 timestamp in recording_id first, index
 	// recorded_at next, folder-name date last; zero when nothing yields.
 	recordedAt time.Time
@@ -92,47 +90,59 @@ type row struct {
 	hasDistillation bool
 }
 
-// loadRows reads INDEX.json (D1: the primary source — no folder enumeration)
-// and returns the live rows: every entry passes the path guard and a folder
-// existence check in one pass; phantom entries (folder deleted after
-// indexing) and guard-rejected entries are dropped. totalIndexed counts the
-// parseable index entries before the drop, so callers can report index size
-// honestly.
-func (r *Reader) loadRows() (rows []row, totalIndexed int, err *Error) {
-	entries, _, loadErr := format.LoadIndex(r.discussionsRoot)
+// openDiscussionsRoot opens the trusted discussions root once per query.
+// Every per-discussion validation and read for that query derives from the
+// returned root (Root.Lstat, Root.OpenRoot, root-relative reads) — a folder
+// is never re-opened by absolute path after validation, so a folder swapped
+// for a symlink cannot redirect a later open outside the root (TOCTOU). A
+// missing root is (nil, nil): no discussions tree on disk yet is data, not an
+// error.
+func (r *Reader) openDiscussionsRoot() (*os.Root, *Error) {
+	root, err := os.OpenRoot(r.discussionsRoot)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, newError(ErrCodeReadError, fmt.Sprintf("open discussions root: %v", err))
+	}
+	return root, nil
+}
+
+// loadRows reads INDEX.json through the held discussions root (D1: the
+// primary source — no folder enumeration) and returns the live rows: every
+// entry passes the name guard and a no-follow folder existence check against
+// the same root descriptor; phantom entries (folder deleted after indexing),
+// symlinked entries, and guard-rejected entries are dropped. Any other
+// filesystem failure — permissions, I/O — is a retryable read_error, never
+// conflated with absence. totalIndexed counts the parseable index entries
+// before the drop, so callers can report index size honestly. A nil root
+// (no discussions tree on disk) has no entries at all.
+func (r *Reader) loadRows(root *os.Root) (rows []row, totalIndexed int, err *Error) {
+	if root == nil {
+		return nil, 0, nil
+	}
+	entries, _, loadErr := format.LoadIndexIn(root)
 	if loadErr != nil {
 		return nil, 0, newError(ErrCodeReadError, fmt.Sprintf("load %s: %v", format.IndexFileName, loadErr))
 	}
-	if len(entries) == 0 {
-		return nil, 0, nil
-	}
-	// One os.Root over the discussions root anchors every per-entry check to
-	// the same directory descriptor: names resolve openat-style with no
-	// follow-through on the entry itself (Lstat), so a symlinked entry is
-	// dropped without ever being opened.
-	root, rootErr := os.OpenRoot(r.discussionsRoot)
-	if rootErr != nil {
-		if errors.Is(rootErr, fs.ErrNotExist) {
-			return nil, len(entries), nil // root vanished under us: every entry is phantom
-		}
-		return nil, 0, newError(ErrCodeReadError, fmt.Sprintf("open discussions root: %v", rootErr))
-	}
-	defer root.Close()
-
 	rows = make([]row, 0, len(entries))
 	for _, e := range entries {
 		if guardErr := validateFolderName(e.Folder); guardErr != nil {
 			continue // hostile or corrupt folder name: never joined, never served
 		}
 		info, statErr := root.Lstat(e.Folder)
-		if statErr != nil || !info.IsDir() {
-			// Phantom entry (folder deleted after indexing) or a symlinked
-			// entry (Lstat reports the link itself, never the target).
-			continue
+		switch {
+		case errors.Is(statErr, fs.ErrNotExist):
+			continue // phantom entry (folder deleted after indexing)
+		case statErr != nil:
+			// Permission or I/O failure is not absence: surface it retryable
+			// instead of silently reporting the conversation as unindexed.
+			return nil, 0, newError(ErrCodeReadError, fmt.Sprintf("inspect discussion folder %q: %v", truncateID(e.Folder), statErr))
+		case !info.IsDir():
+			continue // symlinked entry (Lstat reports the link itself) or stray file
 		}
 		rows = append(rows, row{
 			entry:           e,
-			path:            filepath.Join(r.discussionsRoot, e.Folder),
 			recordedAt:      deriveRecordedAt(e),
 			hasDistillation: statHasDistillation(root, e.Folder),
 		})
@@ -141,40 +151,55 @@ func (r *Reader) loadRows() (rows []row, totalIndexed int, err *Error) {
 }
 
 // lookup resolves a normalized rec_ id to its live row (D16: INDEX.json keys
-// by recording_id). A miss consults the fallback seam when installed, then
-// hard-fails with the typed not_indexed error (D3) — clear copy, no local
-// scan crutch.
-func (r *Reader) lookup(recordingID string) (row, *Error) {
-	rows, _, err := r.loadRows()
+// by recording_id) plus an open handle on its discussion folder. The handle
+// is derived from the same discussions-root *os.Root the row was validated
+// against (never re-opened by absolute path — the TOCTOU guard); the caller
+// owns it and must Close it. A miss consults the fallback seam when
+// installed, then hard-fails with the typed not_indexed error (D3) — clear
+// copy, no local scan crutch.
+func (r *Reader) lookup(recordingID string) (row, *os.Root, *Error) {
+	root, rootErr := r.openDiscussionsRoot()
+	if rootErr != nil {
+		return row{}, nil, rootErr
+	}
+	if root != nil {
+		defer root.Close()
+	}
+	rows, _, err := r.loadRows(root)
 	if err != nil {
-		return row{}, err
+		return row{}, nil, err
 	}
 	for _, rw := range rows {
-		if rw.entry.RecordingID == recordingID {
-			return rw, nil
+		if rw.entry.RecordingID != recordingID {
+			continue
+		}
+		droot, derr := openDiscussion(root, rw.entry.Folder)
+		if derr != nil {
+			return row{}, nil, derr
+		}
+		if droot == nil {
+			break // replaced or removed between validation and open: phantom
+		}
+		return rw, droot, nil
+	}
+	if r.fallback != nil && root != nil {
+		if folder, fbErr := r.fallback.ResolveFolder(recordingID); fbErr == nil {
+			// The returned name is untrusted and passes the same guard and
+			// derived open as an INDEX.json entry.
+			droot, derr := openDiscussion(root, folder)
+			if derr != nil {
+				return row{}, nil, derr
+			}
+			if droot != nil {
+				return row{
+					entry:           format.IndexEntry{Folder: folder, RecordingID: recordingID},
+					recordedAt:      deriveRecordedAt(format.IndexEntry{RecordingID: recordingID}),
+					hasDistillation: statHasDistillation(root, folder),
+				}, droot, nil
+			}
 		}
 	}
-	if r.fallback != nil {
-		folder, fbErr := r.fallback.ResolveFolder(recordingID)
-		if fbErr == nil {
-			path, guardErr := joinDiscussion(r.discussionsRoot, folder)
-			if guardErr != nil {
-				return row{}, guardErr
-			}
-			if root, rootErr := os.OpenRoot(r.discussionsRoot); rootErr == nil {
-				defer root.Close()
-				if info, statErr := root.Lstat(folder); statErr == nil && info.IsDir() {
-					return row{
-						entry:           format.IndexEntry{Folder: folder, RecordingID: recordingID},
-						path:            path,
-						recordedAt:      deriveRecordedAt(format.IndexEntry{RecordingID: recordingID}),
-						hasDistillation: statHasDistillation(root, folder),
-					}, nil
-				}
-			}
-		}
-	}
-	return row{}, newError(ErrCodeNotIndexed,
+	return row{}, nil, newError(ErrCodeNotIndexed,
 		fmt.Sprintf("%s is not indexed yet in this team's %s; the index is written when summarization completes — try again after the next sync", recordingID, format.IndexFileName))
 }
 

@@ -139,16 +139,22 @@ func parseLayerName(base string) (parsedLayerName, bool) {
 // layers/ directory, envelope file, or layer.json pointing outside the root
 // is never followed — it surfaces as an error or an invalid record.
 func DiscoverLayers(discussionRoot string) (*LayerDiscovery, error) {
-	result := &LayerDiscovery{}
-
 	root, err := openOptionalRoot(discussionRoot)
 	if err != nil {
 		return nil, err
 	}
 	if root == nil {
-		return result, nil
+		return &LayerDiscovery{}, nil
 	}
 	defer root.Close()
+	return DiscoverLayersIn(root)
+}
+
+// DiscoverLayersIn is DiscoverLayers over an already-open discussion-folder
+// root, for callers that hold the folder open (derived from a validated
+// discussions root) and must not re-open it by absolute path.
+func DiscoverLayersIn(root *os.Root) (*LayerDiscovery, error) {
+	result := &LayerDiscovery{}
 
 	var candidates []DiscoveredLayer
 	if err := walkLayerCandidates(root, LayersDirName, result, &candidates); err != nil {

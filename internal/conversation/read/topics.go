@@ -2,6 +2,7 @@ package read
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/sageox/ox/internal/conversation/format"
@@ -42,11 +43,12 @@ func (r *Reader) Topics(rawID string) *Envelope {
 	if idErr != nil {
 		return r.finishError(start, idErr, nil)
 	}
-	rw, lookErr := r.lookup(id.RecordingID)
+	_, droot, lookErr := r.lookup(id.RecordingID)
 	if lookErr != nil {
 		return r.finishError(start, lookErr, nil)
 	}
-	projected, warnings, projErr := r.loadProjected(rw, id)
+	defer droot.Close()
+	projected, warnings, projErr := r.loadProjected(droot, id)
 	if projErr != nil {
 		return r.finishError(start, projErr, warnings)
 	}
@@ -76,11 +78,13 @@ func (r *Reader) Topics(rawID string) *Envelope {
 	return r.finishSuccess(start, data, guidance, warnings)
 }
 
-// loadProjected loads and folds the distillation for one live row (D10). A
-// folder without a distillation is the typed no_distillation error; invalid
-// records surfaced by the fold become a single advisory warning.
-func (r *Reader) loadProjected(rw row, id *ID) (*format.Projected, []string, *Error) {
-	projected, err := format.LoadProjectedDistillation(rw.path)
+// loadProjected loads and folds the distillation through the open
+// discussion-folder handle (D10) — derived from the validated discussions
+// root, never an absolute-path re-open. A folder without a distillation is
+// the typed no_distillation error; invalid records surfaced by the fold
+// become a single advisory warning.
+func (r *Reader) loadProjected(droot *os.Root, id *ID) (*format.Projected, []string, *Error) {
+	projected, err := format.LoadProjectedDistillationIn(droot)
 	if err != nil {
 		return nil, nil, newError(ErrCodeReadError, fmt.Sprintf("load distillation: %v", err))
 	}

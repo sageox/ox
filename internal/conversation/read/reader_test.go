@@ -2,6 +2,11 @@ package read
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -196,6 +201,107 @@ func TestFallbackSeam(t *testing.T) {
 			t.Fatalf("failing fallback envelope = %+v, want not_indexed", env)
 		}
 	})
+}
+
+// swapResolver is the controlled-replacement seam for the fallback lookup
+// path: at the instant it resolves (after the reader loaded and validated the
+// index against its held discussions root), it swaps the resolved folder —
+// until now a real directory — for a symlink escaping the discussions root.
+type swapResolver struct {
+	t         *testing.T
+	folderAbs string
+	outside   string
+	folder    string
+}
+
+func (s swapResolver) ResolveFolder(string) (string, error) {
+	s.t.Helper()
+	if err := os.Remove(s.folderAbs); err != nil {
+		s.t.Fatal(err)
+	}
+	if err := os.Symlink(s.outside, s.folderAbs); err != nil {
+		s.t.Skipf("cannot create symlinks on this platform: %v", err)
+	}
+	return s.folder, nil
+}
+
+// TestFallbackLookupRefusesFolderSwappedDuringResolve is the controlled
+// TOCTOU replacement for the fallback lookup path. Failure prevented:
+// re-opening the resolved folder by absolute path after validation
+// (os.OpenRoot follows symlinks while resolving its initial path argument)
+// would follow the swapped-in link and serve files outside the discussions
+// root as discussion content (read-escape / exfiltration).
+func TestFallbackLookupRefusesFolderSwappedDuringResolve(t *testing.T) {
+	base := t.TempDir()
+	rootDir := filepath.Join(base, "discussions")
+	const folder = "2026-08-18-03-00-fallback"
+	if err := os.MkdirAll(filepath.Join(rootDir, folder), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootDir, "INDEX.json"), []byte("[]"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "summary.json"),
+		[]byte(`{"human_summary":"secret outside content"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := New(rootDir, time.Time{})
+	r.SetFallback(swapResolver{t: t, folderAbs: filepath.Join(rootDir, folder), outside: outside, folder: folder})
+	env := r.Show(unknownCnv)
+	if env.Success {
+		t.Fatalf("swapped fallback folder served content: %+v", env.Data)
+	}
+	if env.Error.Code != ErrCodeNotIndexed && env.Error.Code != ErrCodeReadError {
+		t.Fatalf("code = %s, want not_indexed or read_error", env.Error.Code)
+	}
+	if strings.Contains(env.Error.Message, "secret outside content") {
+		t.Errorf("outside content leaked into the error message: %q", env.Error.Message)
+	}
+}
+
+// TestLookupPermissionFailureIsReadError verifies a filesystem failure on a
+// live, indexed discussion folder surfaces as the retryable read_error, never
+// as not_indexed. Failure prevented: a permission or I/O failure reported as
+// "not indexed yet" steers agents to wait for a sync that will never repair
+// it, instead of retrying or running ox doctor.
+func TestLookupPermissionFailureIsReadError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permission-bit semantics required")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission bits do not bite")
+	}
+	base := t.TempDir()
+	rootDir := filepath.Join(base, "discussions")
+	const folder = "2026-08-18-04-00-denied"
+	folderAbs := filepath.Join(rootDir, folder)
+	if err := os.MkdirAll(folderAbs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	index := fmt.Sprintf(`[{"folder":%q,"recording_id":%q,"title":"Denied"}]`, folder, fullRec)
+	if err := os.WriteFile(filepath.Join(rootDir, "INDEX.json"), []byte(index), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(folderAbs, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(folderAbs, 0o755) })
+
+	env := New(rootDir, time.Time{}).Show(fullCnv)
+	if env.Success {
+		t.Skip("folder opened despite mode 000 (permissive filesystem); nothing to assert")
+	}
+	if env.Error.Code != ErrCodeReadError {
+		t.Fatalf("code = %s, want %s (an I/O failure is not absence)", env.Error.Code, ErrCodeReadError)
+	}
+	if !env.Error.Retryable {
+		t.Error("read_error must be retryable per the package contract")
+	}
 }
 
 func TestListMissingIndexIsEmpty(t *testing.T) {

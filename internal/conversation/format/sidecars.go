@@ -1,7 +1,10 @@
 package format
 
 import (
-	"path/filepath"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
 )
 
 // Well-known root files of a discussion folder (D5, D7). transcript.vtt is
@@ -12,6 +15,21 @@ const (
 	SummaryMarkdownFileName = "summary.md"
 	TranscriptFileName      = "transcript.vtt"
 )
+
+// readSidecar reads one optional well-known file through the folder root:
+// absence is (nil, nil) — data, not an error — and every other read failure
+// is wrapped with the sidecar's file name, so a caller's warning names the
+// file that actually failed instead of a bare I/O message.
+func readSidecar(root *os.Root, name string) ([]byte, error) {
+	data, err := root.ReadFile(name)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", name, err)
+	}
+	return data, nil
+}
 
 // Metadata is metadata.json at a discussion-folder root. Empty titles are
 // valid (D13) — the pre-existing strict metadata loader that rejects them is
@@ -28,13 +46,27 @@ type Metadata struct {
 // LoadMetadata reads metadata.json from a discussion folder. Missing file is
 // (nil, nil).
 func LoadMetadata(discussionRoot string) (*Metadata, error) {
-	path := filepath.Join(discussionRoot, MetadataFileName)
-	data, err := readOptionalFile(discussionRoot, MetadataFileName)
+	root, err := openOptionalRoot(discussionRoot)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", MetadataFileName, err)
+	}
+	if root == nil {
+		return nil, nil
+	}
+	defer root.Close()
+	return LoadMetadataIn(root)
+}
+
+// LoadMetadataIn is LoadMetadata over an already-open discussion-folder root,
+// for callers that hold the folder open (derived from a validated discussions
+// root) and must not re-open it by absolute path.
+func LoadMetadataIn(root *os.Root) (*Metadata, error) {
+	data, err := readSidecar(root, MetadataFileName)
 	if err != nil || data == nil {
 		return nil, err
 	}
 	var m Metadata
-	if err := decodeJSON(path, data, &m); err != nil {
+	if err := decodeJSON(MetadataFileName, data, &m); err != nil {
 		return nil, err
 	}
 	return &m, nil
@@ -75,13 +107,25 @@ func (s *Summary) ParticipantNames() []string {
 // LoadSummary reads summary.json from a discussion folder. Missing file is
 // (nil, nil) — a missing summary is data (not_yet_generated), not an error.
 func LoadSummary(discussionRoot string) (*Summary, error) {
-	path := filepath.Join(discussionRoot, SummaryFileName)
-	data, err := readOptionalFile(discussionRoot, SummaryFileName)
+	root, err := openOptionalRoot(discussionRoot)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", SummaryFileName, err)
+	}
+	if root == nil {
+		return nil, nil
+	}
+	defer root.Close()
+	return LoadSummaryIn(root)
+}
+
+// LoadSummaryIn is LoadSummary over an already-open discussion-folder root.
+func LoadSummaryIn(root *os.Root) (*Summary, error) {
+	data, err := readSidecar(root, SummaryFileName)
 	if err != nil || data == nil {
 		return nil, err
 	}
 	var s Summary
-	if err := decodeJSON(path, data, &s); err != nil {
+	if err := decodeJSON(SummaryFileName, data, &s); err != nil {
 		return nil, err
 	}
 	return &s, nil
@@ -90,5 +134,19 @@ func LoadSummary(discussionRoot string) (*Summary, error) {
 // LoadSummaryMarkdown reads the pre-JSON summary.md fallback. Missing file is
 // (nil, nil).
 func LoadSummaryMarkdown(discussionRoot string) ([]byte, error) {
-	return readOptionalFile(discussionRoot, SummaryMarkdownFileName)
+	root, err := openOptionalRoot(discussionRoot)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", SummaryMarkdownFileName, err)
+	}
+	if root == nil {
+		return nil, nil
+	}
+	defer root.Close()
+	return LoadSummaryMarkdownIn(root)
+}
+
+// LoadSummaryMarkdownIn is LoadSummaryMarkdown over an already-open
+// discussion-folder root.
+func LoadSummaryMarkdownIn(root *os.Root) ([]byte, error) {
+	return readSidecar(root, SummaryMarkdownFileName)
 }

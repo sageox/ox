@@ -88,6 +88,48 @@ func TestLoadSummaryMarkdown(t *testing.T) {
 	}
 }
 
+// TestSidecarReadErrorsNameTheFile verifies a sidecar read failure is wrapped
+// with the sidecar's file name. Failure prevented: a bare I/O error surfaces
+// in a show/list warning without saying which of the folder's files failed,
+// leaving the user (and ox doctor) nothing actionable.
+func TestSidecarReadErrorsNameTheFile(t *testing.T) {
+	tests := []struct {
+		name     string
+		fileName string
+		load     func(dir string) error
+	}{
+		{name: "metadata", fileName: MetadataFileName, load: func(dir string) error {
+			_, err := LoadMetadata(dir)
+			return err
+		}},
+		{name: "summary", fileName: SummaryFileName, load: func(dir string) error {
+			_, err := LoadSummary(dir)
+			return err
+		}},
+		{name: "summary markdown", fileName: SummaryMarkdownFileName, load: func(dir string) error {
+			_, err := LoadSummaryMarkdown(dir)
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// A directory where the sidecar file should be forces a non-absent
+			// read failure on every platform.
+			if err := os.Mkdir(filepath.Join(dir, tt.fileName), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			err := tt.load(dir)
+			if err == nil {
+				t.Fatalf("reading a directory as %s did not error", tt.fileName)
+			}
+			if want := "read " + tt.fileName + ":"; !strings.HasPrefix(err.Error(), want) {
+				t.Fatalf("error = %q, want prefix %q (the failing file must be named)", err, want)
+			}
+		})
+	}
+}
+
 func TestInvalidRecordString(t *testing.T) {
 	withLine := InvalidRecord{Path: "a.jsonl", Line: 3, Reason: "bad"}
 	if got := withLine.String(); got != "a.jsonl:3: bad" {

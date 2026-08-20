@@ -2,6 +2,7 @@ package format
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 )
 
@@ -37,8 +38,20 @@ type IndexEntry struct {
 // non-array index is unexpected corruption). Individual malformed entries are
 // skipped and surfaced as InvalidRecords, never fatal for their siblings.
 func LoadIndex(discussionsRoot string) ([]IndexEntry, []InvalidRecord, error) {
-	path := filepath.Join(discussionsRoot, IndexFileName)
-	data, err := readOptionalFile(discussionsRoot, IndexFileName)
+	root, err := openOptionalRoot(discussionsRoot)
+	if err != nil || root == nil {
+		return nil, nil, err
+	}
+	defer root.Close()
+	return LoadIndexIn(root)
+}
+
+// LoadIndexIn is LoadIndex over an already-open discussions root, so a caller
+// that validates entries against a held *os.Root reads the index through the
+// same directory descriptor instead of re-opening the path.
+func LoadIndexIn(root *os.Root) ([]IndexEntry, []InvalidRecord, error) {
+	path := filepath.Join(root.Name(), IndexFileName)
+	data, err := readOptionalFileIn(root, IndexFileName)
 	if err != nil {
 		return nil, nil, err
 	}

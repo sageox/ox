@@ -80,17 +80,6 @@ func readOptionalFileIn(root *os.Root, rel string) ([]byte, error) {
 	return data, nil
 }
 
-// readOptionalFile is the one-shot form: it opens dir as a root, reads rel
-// through it, and treats a missing dir or file as (nil, nil).
-func readOptionalFile(dir, rel string) ([]byte, error) {
-	root, err := openOptionalRoot(dir)
-	if err != nil || root == nil {
-		return nil, err
-	}
-	defer root.Close()
-	return readOptionalFileIn(root, rel)
-}
-
 // decodeJSON unmarshals data into v, wrapping the error with the source path.
 func decodeJSON(path string, data []byte, v any) error {
 	if err := json.Unmarshal(data, v); err != nil {

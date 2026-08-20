@@ -2,6 +2,7 @@ package format
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 )
 
@@ -63,14 +64,20 @@ type Manifest struct {
 // An explicit "$schema_version": 0 is invalid and returns an error; an
 // absent $schema_version is legacy-legal. Empty titles are valid (D13).
 func LoadManifest(discussionRoot string) (m *Manifest, warnings []string, err error) {
-	layersPath := filepath.Join(discussionRoot, ManifestNameLayers)
-	convPath := filepath.Join(discussionRoot, ManifestNameConversation)
-
 	root, err := openOptionalRoot(discussionRoot)
 	if err != nil || root == nil {
 		return nil, nil, err
 	}
 	defer root.Close()
+	return LoadManifestIn(root)
+}
+
+// LoadManifestIn is LoadManifest over an already-open discussion-folder root,
+// for callers that hold the folder open (derived from a validated discussions
+// root) and must not re-open it by absolute path.
+func LoadManifestIn(root *os.Root) (m *Manifest, warnings []string, err error) {
+	layersPath := filepath.Join(root.Name(), ManifestNameLayers)
+	convPath := filepath.Join(root.Name(), ManifestNameConversation)
 
 	layersData, err := readOptionalFileIn(root, ManifestNameLayers)
 	if err != nil {

@@ -42,10 +42,11 @@ func (r *Reader) Show(rawID string) *Envelope {
 	if idErr != nil {
 		return r.finishError(start, idErr, nil)
 	}
-	rw, lookErr := r.lookup(id.RecordingID)
+	rw, droot, lookErr := r.lookup(id.RecordingID)
 	if lookErr != nil {
 		return r.finishError(start, lookErr, nil)
 	}
+	defer droot.Close()
 
 	var warnings []string
 	data := &ShowData{
@@ -58,7 +59,7 @@ func (r *Reader) Show(rawID string) *Envelope {
 		data.RecordedAt = rw.recordedAt.UTC().Format(time.RFC3339)
 	}
 
-	meta, metaErr := format.LoadMetadata(rw.path)
+	meta, metaErr := format.LoadMetadataIn(droot)
 	if metaErr != nil {
 		warnings = append(warnings, "metadata.json unreadable: "+metaErr.Error())
 	}
@@ -69,7 +70,7 @@ func (r *Reader) Show(rawID string) *Envelope {
 		data.Title = rw.entry.Folder
 	}
 
-	summary, sumErr := format.LoadSummary(rw.path)
+	summary, sumErr := format.LoadSummaryIn(droot)
 	switch {
 	case sumErr != nil:
 		warnings = append(warnings, "summary.json unreadable: "+sumErr.Error())
@@ -80,7 +81,7 @@ func (r *Reader) Show(rawID string) *Envelope {
 			data.Participants = names // D12: summary participants, unjoined
 		}
 	default:
-		md, mdErr := format.LoadSummaryMarkdown(rw.path)
+		md, mdErr := format.LoadSummaryMarkdownIn(droot)
 		if mdErr != nil {
 			warnings = append(warnings, "summary.md unreadable: "+mdErr.Error())
 		}

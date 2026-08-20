@@ -62,11 +62,12 @@ func (r *Reader) Topic(rawID, topicID string, includeSuperseded bool) *Envelope 
 	if tpErr := ValidateTopicID(topicID); tpErr != nil {
 		return r.finishError(start, tpErr, nil)
 	}
-	rw, lookErr := r.lookup(id.RecordingID)
+	_, droot, lookErr := r.lookup(id.RecordingID)
 	if lookErr != nil {
 		return r.finishError(start, lookErr, nil)
 	}
-	projected, warnings, projErr := r.loadProjected(rw, id)
+	defer droot.Close()
+	projected, warnings, projErr := r.loadProjected(droot, id)
 	if projErr != nil {
 		return r.finishError(start, projErr, warnings)
 	}
