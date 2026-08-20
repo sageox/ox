@@ -100,20 +100,18 @@ func runKBQuery(cmd *cobra.Command, args []string) error {
 		client = client.WithAuthToken(token.AccessToken)
 	}
 
-	// Resolution and search carry separate budgets: up to 20 sequential slug
-	// resolutions must not be able to starve the search call, which embeds
-	// the query and fans out per bubble server-side and would otherwise
-	// inherit whatever sliver of a shared deadline the resolutions left.
-	resolveCtx, cancelResolve := context.WithTimeout(cmd.Context(), 15*time.Second)
-	defer cancelResolve()
-
+	// Every network call carries its OWN budget — per-resolution and then a
+	// fresh one for the search. A shared deadline in either position lets a
+	// slow-but-valid early call starve a later one into a bare
+	// context-deadline failure (search starved by resolutions, or a later
+	// slug starved by an earlier slow resolution).
 	targets := make([]kbQueryTarget, 0, len(identifiers))
 	for _, raw := range identifiers {
 		input := strings.TrimSpace(kb.NormalizeSlugArg(raw))
 		if input == "" {
 			return fmt.Errorf("empty bubble identifier\nUsage: ox kb query <#slug|kb_id> [#slug|kb_id ...] \"<question>\"")
 		}
-		kbID, err := resolveKBIdentifier(resolveCtx, client, input, scopeFlag, projectRoot)
+		kbID, err := resolveOneKBIdentifier(cmd.Context(), client, input, scopeFlag, projectRoot)
 		if err != nil {
 			if !jsonOutput && looksLikeProse(input) {
 				cli.PrintHint(fmt.Sprintf("If %q was part of your question, quote the whole question — the last argument is the query.", input))
@@ -181,6 +179,16 @@ func looksLikeProse(input string) bool {
 		}
 	}
 	return true
+}
+
+// resolveOneKBIdentifier resolves a single identifier under its own bounded
+// context (a helper rather than an inline WithTimeout so the loop doesn't
+// stack deferred cancels). kb_id inputs pass through without any network
+// call; slugs get the same per-read budget describe's flow uses.
+func resolveOneKBIdentifier(parent context.Context, client *api.KBClient, input, scopeFlag, projectRoot string) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+	defer cancel()
+	return resolveKBIdentifier(ctx, client, input, scopeFlag, projectRoot)
 }
 
 func kbQueryTargetIDs(targets []kbQueryTarget) []string {
