@@ -27,9 +27,13 @@ import (
 // Multiple openRawDB handles to one path model independent ox openers racing the
 // same codedb, so these tests must use the same connection config production
 // does or they measure a contention profile ox never sees.
+func rawDSN(dbPath string) string {
+	return dbPath + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)"
+}
+
 func openRawDB(t *testing.T, dbPath string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)")
+	db, err := sql.Open("sqlite", rawDSN(dbPath))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -142,7 +146,14 @@ func runConcurrentCreateSchema(t *testing.T, dbPath string, runners int) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			db := openRawDB(t, dbPath)
+			// Open inline (not via the t.Fatalf-ing openRawDB): testing.T.FailNow
+			// must run on the test goroutine, so failures here are routed through
+			// errs and reported by the caller below.
+			db, err := sql.Open("sqlite", rawDSN(dbPath))
+			if err != nil {
+				errs[i] = err
+				return
+			}
 			defer func() { _ = db.Close() }()
 			<-begin // release together to maximize overlap
 			errs[i] = createSchemaWithRetry(db)
