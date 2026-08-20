@@ -270,6 +270,41 @@ func TestRenderKBQueryResult_JSONEnvelope(t *testing.T) {
 	}
 }
 
+// TestRenderKBQueryResult_DropsUnrequestedGroups asserts a response group
+// whose kb_id was never a resolved target is omitted from both output modes.
+//
+// Failure prevented: a malformed or compromised service response smuggling
+// another bubble's identifiers, paths, and snippets through the CLI.
+func TestRenderKBQueryResult_DropsUnrequestedGroups(t *testing.T) {
+	t.Parallel()
+
+	resp := &api.KBSearchResponse{Groups: []api.KBSearchGroup{
+		{KBID: "kb_ok", Status: api.KBSearchStatusOK, Hits: []api.KBSearchHit{{
+			Path: "knowledge/relay.md", Rank: 1, Snippet: "legit",
+		}}},
+		{KBID: "kb_rogue", Status: api.KBSearchStatusOK, Hits: []api.KBSearchHit{{
+			Path: "secrets/other-team.md", Rank: 1, Snippet: "smuggled content",
+		}}},
+	}}
+	targets := []kbQueryTarget{{Input: "engineering", KBID: "kb_ok"}}
+
+	for _, jsonMode := range []bool{false, true} {
+		var buf bytes.Buffer
+		if err := renderKBQueryResult(&buf, resp, targets, jsonMode); err != nil {
+			t.Fatalf("render (json=%v): %v", jsonMode, err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "knowledge/relay.md") {
+			t.Errorf("json=%v: requested group missing\n---\n%s", jsonMode, out)
+		}
+		for _, leaked := range []string{"kb_rogue", "secrets/other-team.md", "smuggled content"} {
+			if strings.Contains(out, leaked) {
+				t.Errorf("json=%v: unrequested group leaked %q\n---\n%s", jsonMode, leaked, out)
+			}
+		}
+	}
+}
+
 // --- C. integration: resolve → search over httptest ---
 
 // TestKBQuery_ResolveThenSearch drives the full flow against a fake server:

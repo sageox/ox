@@ -257,15 +257,22 @@ func renderKBQueryResult(w io.Writer, resp *api.KBSearchResponse, targets []kbQu
 	}
 
 	if jsonOutput {
-		groups := resp.Groups
-		if groups == nil {
-			groups = []api.KBSearchGroup{}
+		// Scope the output to the request: only groups whose kb_id was a
+		// resolved target are serialized, in request order. A malformed or
+		// hostile response must not be able to smuggle another bubble's
+		// paths and snippets through this CLI. (The human path is scoped
+		// the same way by construction — it iterates targets.)
+		groups := make([]api.KBSearchGroup, 0, len(targets))
+		for _, t := range targets {
+			if group, ok := byID[t.KBID]; ok {
+				groups = append(groups, *group)
+			}
 		}
 		return outputJSON(w, kbQueryJSONOutput{
 			Caps:     resp.Caps,
 			Groups:   groups,
 			Missing:  missing,
-			Guidance: kbQueryGuidance(resp, missing),
+			Guidance: kbQueryGuidance(groups, missing),
 		})
 	}
 
@@ -297,9 +304,11 @@ func renderKBQueryResult(w io.Writer, resp *api.KBSearchResponse, targets []kbQu
 		fmt.Fprintln(w)
 	}
 	// The read-the-file hint only makes sense when there is a file to read —
-	// groups alone don't imply hits (empty/not_indexed/error groups have none).
-	for _, group := range resp.Groups {
-		if group.Status == api.KBSearchStatusOK && len(group.Hits) > 0 {
+	// groups alone don't imply hits (empty/not_indexed/error groups have
+	// none), and only requested groups count (same scoping as the output).
+	for _, t := range targets {
+		group, ok := byID[t.KBID]
+		if ok && group.Status == api.KBSearchStatusOK && len(group.Hits) > 0 {
 			cli.PrintHintTo(w, "Hits are files, not answers — read one from the bubble's local mount ('ox kb describe' shows the path).")
 			break
 		}
@@ -349,7 +358,7 @@ func renderKBQueryGroup(w io.Writer, group *api.KBSearchGroup, dimStyle, warnSty
 // are restated because they are load-bearing: collapsing empty/not_indexed
 // into "no results" is exactly the misreport this command is designed to
 // prevent.
-func kbQueryGuidance(resp *api.KBSearchResponse, missing []kbQueryTarget) string {
+func kbQueryGuidance(groups []api.KBSearchGroup, missing []kbQueryTarget) string {
 	var b strings.Builder
 	b.WriteString("Hits are ranked FILES, not answers: read a hit via its path from the bubble's local mount ('ox kb describe <kb_id>' shows local_path); compare content_rev if the exact indexed version matters. ")
 	b.WriteString("Per-bubble status is load-bearing: 'empty' means the bubble is indexed and matched nothing; 'not_indexed' means it was never indexed — do not report either as \"the bubble knows nothing\" interchangeably; 'error' groups can be retried. ")
@@ -360,7 +369,7 @@ func kbQueryGuidance(resp *api.KBSearchResponse, missing []kbQueryTarget) string
 		}
 		fmt.Fprintf(&b, "Requested but absent from the response: %s — each may not exist, may not be readable by this account, or may be a bubble type that isn't indexed; the server deliberately does not say which. ", strings.Join(names, ", "))
 	}
-	if len(resp.Groups) == 0 {
+	if len(groups) == 0 {
 		b.WriteString("No requested bubble was searchable. Run 'ox kb list' to see the bubbles this account can access. ")
 	}
 	b.WriteString("Results are grouped per bubble and ranks are not comparable across bubbles.")
