@@ -22,7 +22,9 @@
 // So the line is built from the primitives that survive: a <blockquote> card
 // (left accent bar + subtle tint — the one card-like chrome GitHub allows), a
 // theme-adaptive <picture> wordmark (the only mechanism that swaps by
-// prefers-color-scheme), <a>, <sub>, <b>, <br>, and &nbsp;/&middot; entities.
+// prefers-color-scheme), <a>, <sub>, <b>, <br>, and &nbsp;/&middot; entities. Two
+// dividers carry meaning: a slash joins the wordmark to the team name (the
+// owner/team breadcrumb — containment), a middle dot divides the peer links.
 // The wordmark is an <img>, so it can link to the team page AND keep its brand
 // color — a text <a> cannot, since GitHub forces every link to its own blue, so
 // the team name stays plain <b> text and the actionable Session/Plan links are
@@ -165,9 +167,11 @@ func Render(in Input) string {
 
 	// Team name as plain muted <b> text, not a link: a reviewer reads it as chrome
 	// and the wordmark already routes to the team page. Non-breaking so it never
-	// wraps mid-name.
+	// wraps mid-name. Joined to the wordmark by a SLASH, not the peer dot: the
+	// team lives *within* the brand (the owner/team breadcrumb), while the links
+	// that follow are peers.
 	if showTeam {
-		row.WriteString(sep())
+		row.WriteString(hierSep())
 		row.WriteString("<b>")
 		row.WriteString(noWrap(escapeHTML(teamName)))
 		row.WriteString("</b>")
@@ -196,9 +200,16 @@ func Render(in Input) string {
 	return b.String()
 }
 
-// sep is the calm category divider — a non-breaking middle dot, the Linear/Apple
-// separator, never a shields.io pipe.
+// sep is the calm PEER divider — a non-breaking middle dot, the Linear/Apple
+// separator, never a shields.io pipe. It divides sibling categories: the team,
+// the sessions, the plans.
 func sep() string { return "&nbsp;&middot;&nbsp;" }
+
+// hierSep is the CONTAINMENT divider — a non-breaking slash, the owner/team
+// breadcrumb every reviewer already reads (GitHub org/repo, Linear Team/Project).
+// It joins the wordmark to the team name so "SageOx / SageOx Internal" reads as
+// one unit — the team within the brand — distinct from the peer links after it.
+func hierSep() string { return "&nbsp;/&nbsp;" }
 
 // wordmark builds the theme-adaptive <picture>, wrapped in an <a> to the team
 // page when one is known. An unlinked wordmark (teamURL == "") still renders.

@@ -47,7 +47,7 @@ func TestRender_full(t *testing.T) {
 		`<source media="(prefers-color-scheme: dark)" srcset="https://sageox.ai/sageox-wordmark-dark.png">`,
 		`src="https://sageox.ai/sageox-wordmark-light.png"`,
 		`<a href="https://sageox.ai/t/sageox-internal">`, // wordmark links to the team page
-		"<b>SageOx&nbsp;Internal</b>",                    // team name is muted text, not a link
+		"&nbsp;/&nbsp;<b>SageOx&nbsp;Internal</b>",       // wordmark->team joined by a SLASH (containment breadcrumb)
 		`<a href="https://sageox.ai/c/ses_9f2a3c">Session&nbsp;1</a>`,
 		`<a href="https://sageox.ai/c/ses_7c1b8d">Session&nbsp;2</a>`,
 		`<a href="https://sageox.ai/plan/pln_4d8e2f">Plan</a>`, // one plan => unnumbered
@@ -57,7 +57,10 @@ func TestRender_full(t *testing.T) {
 	mustNotContain(t, got,
 		`<a href="https://sageox.ai/t/sageox-internal"><b>`,
 		"Guided&nbsp;by&nbsp;SageOx", "prior&nbsp;art", "collision", "expert",
+		"&middot;&nbsp;<b>SageOx", // team is slash-joined now, not middot-joined
 	)
+	// Peer links keep the middle dot (whisper caption divides its stats with it too).
+	mustContain(t, got, "&middot;")
 	// Sessions grouped by whitespace, not a divider.
 	mustContain(t, got, "Session&nbsp;1</a>&nbsp;&nbsp;<a")
 	// Markers wrap the whole thing on their own lines.
@@ -76,7 +79,8 @@ func TestRender_dedupBrandTeamName(t *testing.T) {
 		in.TeamName = name
 		got := Render(in)
 		mustContain(t, got, "<picture>", `<a href="https://sageox.ai/c/ses_9f2a3c">`)
-		mustNotContain(t, got, "<b>") // team-name text omitted entirely
+		mustNotContain(t, got, "<b>")           // team-name text omitted entirely
+		mustNotContain(t, got, "&nbsp;/&nbsp;") // ...and no orphan hierarchy slash
 	}
 	// A team whose name merely CONTAINS the brand still renders (not an exact match).
 	in := baseInput()
