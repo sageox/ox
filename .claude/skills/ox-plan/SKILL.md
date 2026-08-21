@@ -13,13 +13,12 @@ description: >-
   judgment badges (optional, via --annotations). Markdown-first survives only as
   the quick path for small, low-stakes plans. Use whenever the user wants a plan
   rendered or visualized as HTML — "render the plan", "make an HTML plan",
-  "show / visualize the plan", "turn this plan into a page", "plan as HTML" —
-  runs /ox-plan, or when `ox plan` reports material signals and the user
+  "show / visualize the plan", "turn this plan into a page", "plan as HTML",
+  or when `ox plan` reports material signals and the user
   confirms. Whether to render at all is decided by the `ox plan` JSON
   (signals.material, guidance) plus the user's confirmation / the `plan.html`
   config setting — not by this skill.
 ---
-<!-- ox-hash: cce2611c9d4a ver: 0.13.0 -->
 
 <!-- Keep behavioral "when to render" guidance lean — that belongs in the
      `ox plan` JSON output (signals.material, guidance) and in the

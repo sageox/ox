@@ -1,0 +1,19 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:04.000
+<v usr_a1b2c3d4e5f6a7b8c9d0e1f2>Hello team, thanks for joining the planning discussion this morning.
+
+00:00:04.000 --> 00:00:09.000
+<v usr_a1b2c3d4e5f6a7b8c9d0e1f2>Today we need to decide whether the reader trusts the index file completely.
+
+00:00:09.000 --> 00:00:15.500
+<v usr_9f8e7d6c5b4a39281706f5e4>I think we should trust it and treat every gap as a server problem to repair.
+
+00:00:15.500 --> 00:00:21.000
+<v usr_a1b2c3d4e5f6a7b8c9d0e1f2>Agreed, so the command line never walks the folder tree looking for strays.
+
+00:00:21.000 --> 00:00:27.250
+<v usr_9f8e7d6c5b4a39281706f5e4>Then we should hire a forward deployed engineer to help teams adopt the workflow.
+
+00:00:27.250 --> 00:00:33.000
+<v usr_a1b2c3d4e5f6a7b8c9d0e1f2>Good, let us write that decision down and move on to the citation format.

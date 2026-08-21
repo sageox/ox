@@ -1,0 +1,6 @@
+{"edit_id": "e1", "action": "edit", "atom_id": "at_019ff500-0000-7000-8000-00000000at01", "field": "text", "value": "Edited text.", "actor": "user", "at": "2026-08-15T03:00:00Z"}
+{"edit_id": "e2", "action": "edit", "field": "takeaway", "value": "Edited takeaway.", "actor": "user", "at": "2026-08-15T03:01:00Z", "topic_id": "tp_019ff500-0000-7000-8000-00000000tp01"}
+{"edit_id": "e3", "action": "reject", "atom_id": "at_019ff500-0000-7000-8000-00000000at02", "actor": "user", "at": "2026-08-15T03:02:00Z"}
+{"edit_id": "e4", "action": "redact", "atom_id": "at_019ff500-0000-7000-8000-00000000at01", "actor": "user", "at": "2026-08-15T03:03:00Z"}
+{"edit_id": "e5", "action": "add", "actor": "user", "at": "2026-08-15T03:04:00Z", "atom": {"id": "at_019ff500-0000-7000-8000-00000000at03", "kind": "learning", "signal": "medium", "text": "Added atom.", "topic_id": "tp_019ff500-0000-7000-8000-00000000tp01", "source": {"uris": []}, "confidence": 0.7}}
+{"edit_id": "e6", "action": "transmogrify", "at": "2026-08-15T03:05:00Z"}

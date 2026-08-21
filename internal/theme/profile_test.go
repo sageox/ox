@@ -73,7 +73,9 @@ func TestAdapt_TrueColorIsPassthrough(t *testing.T) {
 func TestAdapt_AdaptiveTokensDegrade(t *testing.T) {
 	withProfile(t, colorprofile.ANSI256)
 
-	for name, c := range map[string]interface{ RGBA() (uint32, uint32, uint32, uint32) }{
+	for name, c := range map[string]interface {
+		RGBA() (uint32, uint32, uint32, uint32)
+	}{
 		"Primary":   ColorPrimary,
 		"Secondary": ColorSecondary,
 		"Warning":   ColorWarning,

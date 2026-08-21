@@ -1,0 +1,67 @@
+[
+  {
+    "folder": "2026-08-11-22-32-full",
+    "recording_id": "rec_019ff2f5-2079-7be1-b05e-8caad2772e61",
+    "title": "",
+    "participants": ["Galex Yen"],
+    "decision_count": 1,
+    "action_item_count": 0,
+    "has_keyframes": false
+  },
+  {
+    "folder": "2026-08-12-01-00-legacy",
+    "recording_id": "rec_019ff370-e195-7d1c-a727-39a1a85823f2",
+    "title": "Legacy Era Discussion",
+    "participants": ["Casey"],
+    "decision_count": 0,
+    "action_item_count": 0,
+    "has_keyframes": false,
+    "topics": ["legacy"]
+  },
+  {
+    "folder": "2026-08-14-01-00-both-manifests",
+    "recording_id": "rec_019ffc00-0000-7000-8000-000000000004",
+    "title": "Both Manifests",
+    "participants": [],
+    "decision_count": 0,
+    "action_item_count": 0,
+    "has_keyframes": false
+  },
+  {
+    "folder": "2026-08-16-01-00-skipped",
+    "recording_id": "rec_019ffd00-0000-7000-8000-000000000005",
+    "title": "Skipped Episode",
+    "participants": [],
+    "decision_count": 0,
+    "action_item_count": 0,
+    "has_keyframes": false
+  },
+  {
+    "folder": "2026-08-17-01-00-no-transcript",
+    "recording_id": "rec_019ffe00-0000-7000-8000-000000000006",
+    "title": "",
+    "participants": [],
+    "decision_count": 0,
+    "action_item_count": 0,
+    "has_keyframes": false
+  },
+  {
+    "folder": "2026-01-01-00-00-phantom",
+    "recording_id": "rec_019f0000-0000-7000-8000-000000000009",
+    "title": "Deleted Folder",
+    "participants": [],
+    "decision_count": 0,
+    "action_item_count": 0,
+    "has_keyframes": false
+  },
+  {
+    "folder": "../escape",
+    "recording_id": "rec_019f1111-0000-7000-8000-000000000010",
+    "title": "Hostile Folder Name",
+    "decision_count": 0,
+    "action_item_count": 0,
+    "has_keyframes": false
+  },
+  "not an object",
+  {"title": "no folder or recording id"}
+]

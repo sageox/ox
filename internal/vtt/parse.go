@@ -3,12 +3,16 @@ package vtt
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Cue represents a single WebVTT cue with optional speaker attribution.
 type Cue struct {
-	Speaker string // e.g., "Speaker 1" or empty
-	Text    string // cue text content
+	Speaker string        // e.g., "Speaker 1" or empty
+	Text    string        // cue text content
+	Index   int           // 1-based ordinal within the parsed file
+	Start   time.Duration // media-clock start; zero when the timestamp was malformed
+	End     time.Duration // media-clock end (exclusive); zero when the timestamp was malformed
 }
 
 // Parse extracts cues from WebVTT data.
@@ -24,15 +28,28 @@ func Parse(data []byte) ([]Cue, error) {
 
 	var cues []Cue
 	var currentText []string
+	var curStart, curEnd time.Duration
 	inCue := false
+
+	emit := func() {
+		cue := parseCueText(currentText)
+		cue.Index = len(cues) + 1
+		cue.Start = curStart
+		cue.End = curEnd
+		cues = append(cues, cue)
+	}
 
 	for i := 1; i < len(lines); i++ {
 		line := strings.TrimRight(lines[i], "\r")
 
-		// blank line ends a cue
+		// blank line ends a cue. A body-less cue (timestamp line with no
+		// text) still emits, with its parsed interval and empty text: cue
+		// ordinals are the addressing key for cue-range selectors and
+		// cue_ref citations, so Index must track true file position — a
+		// silently dropped cue would shift every later cue's ordinal.
 		if strings.TrimSpace(line) == "" {
-			if inCue && len(currentText) > 0 {
-				cues = append(cues, parseCueText(currentText))
+			if inCue {
+				emit()
 				currentText = nil
 			}
 			inCue = false
@@ -43,6 +60,12 @@ func Parse(data []byte) ([]Cue, error) {
 		if strings.Contains(line, "-->") {
 			inCue = true
 			currentText = nil
+			// Malformed timestamps leave a zero (empty) interval: the cue
+			// stays cue-addressable but never matches a time window.
+			curStart, curEnd = 0, 0
+			if s, e, err := parseTimestampPair(line); err == nil {
+				curStart, curEnd = s, e
+			}
 			continue
 		}
 
@@ -55,9 +78,10 @@ func Parse(data []byte) ([]Cue, error) {
 		currentText = append(currentText, line)
 	}
 
-	// flush last cue if file doesn't end with blank line
-	if inCue && len(currentText) > 0 {
-		cues = append(cues, parseCueText(currentText))
+	// flush last cue if file doesn't end with blank line (body-less
+	// included — see the blank-line handler above)
+	if inCue {
+		emit()
 	}
 
 	return cues, nil

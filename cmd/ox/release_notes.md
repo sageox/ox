@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### New
 
 - **`ox export` — take your data with you** — shows exactly where your Ledger and Team Contexts live on disk and how to reach them with plain git, because SageOx is not a walled garden; `--sync` checks out and refreshes every team context and this repo's ledger first.
+- **Read recorded team conversations locally** — the new `ox conversation` family (`list`, `show`, `topics`, `topic`, `transcript`) browses the active team's recorded discussions straight from the team-context checkout on disk: summaries, distilled topics with their salient points, and transcript slices. A `sageox://` citation copied from any distilled claim retrieves its exact transcript slice in one command, with an honest pinning status when the transcript has since been corrected. Works fully logged out; output discloses progressively so nothing floods an AI coworker's context. `ox guide conversations` teaches the workflow, and the knowledge-bubbles guide now points citation-followers at the new commands.
 - **Reviewer-first pull-request visuals** — `ox viz pr` selects prose, GitHub-safe Mermaid, or a rich attachment from the reviewer question; rich recipes now include construction-ready visual contracts, lightweight PNG checks, and personal, repository, and team preferences.
 
 ### Changed
