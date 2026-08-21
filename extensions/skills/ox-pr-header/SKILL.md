@@ -58,9 +58,13 @@ both (they serve different readers: the header a human, the trailer the reconcil
 - **Paste verbatim.** Do not edit the emitted markup, retitle the links, or add
   the plan/session titles — the `/c/` and `/plan/` URLs are deliberately opaque
   so nothing about the work leaks into a public PR body.
-- **Only link server-visible artifacts.** A session/plan URL can 404 until it is
-  upload-confirmed. The command already withholds an unconfirmed session; only
-  pass `--allow-unconfirmed` when you knowingly accept a possible 404.
+- **Only link artifacts you know resolve.** ox verifies just the auto-linked
+  current session (from local recording state) and withholds it until it is
+  server-visible. Explicit `--session`/`--plan` ids you pass are included **as
+  given** — ox cannot check an arbitrary id, so pass only ids you know exist or a
+  reviewer may hit a 404; the command prints a stderr note when you do. Pass
+  `--allow-unconfirmed` to accept possibly-unresolved links (the pending current
+  session and explicit refs) and silence the note.
 - **Honest enrichment only.** Pass the real `ox plan enrich` counts. The stats
   render only when a signal actually fired AND a plan is linked (so a reviewer can
   verify them) — never inflate them.

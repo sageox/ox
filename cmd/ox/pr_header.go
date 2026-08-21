@@ -62,7 +62,7 @@ func init() {
 	f.Int("collisions", 0, "enrichment: concurrent edits flagged")
 	f.Bool("no-stat", false, "suppress the enrichment whisper")
 	f.String("style", "", "whisper render: text | image | auto (default: pr_visuals.style)")
-	f.Bool("allow-unconfirmed", false, "include the current session even if not yet server-visible (may 404)")
+	f.Bool("allow-unconfirmed", false, "accept links that may not be server-visible yet — the current session before upload, and explicit --session/--plan refs — without a warning (may 404)")
 }
 
 // prHeaderResponse is the --json shape for agent consumption: the paste-ready
@@ -101,9 +101,12 @@ func runPRHeader(cmd *cobra.Command, _ []string) error {
 
 	// Sessions: explicit flags win; otherwise auto-link the current live session
 	// (only when server-visible, unless --allow-unconfirmed).
-	sessionArgs := flagStringArray(cmd, "session")
+	allowUnconfirmed := flagBool(cmd, "allow-unconfirmed")
+	sessionFlags := flagStringArray(cmd, "session")
+	planFlags := flagStringArray(cmd, "plan")
+	sessionArgs := sessionFlags
 	if len(sessionArgs) == 0 {
-		if u, unconfirmed := autoSessionURL(gitRoot, flagBool(cmd, "allow-unconfirmed")); u != "" {
+		if u, unconfirmed := autoSessionURL(gitRoot, allowUnconfirmed); u != "" {
 			sessionArgs = []string{u}
 		} else if unconfirmed {
 			// A real local session exists but the server has not confirmed it —
@@ -121,11 +124,22 @@ func runPRHeader(cmd *cobra.Command, _ []string) error {
 	}
 
 	planURLs := make([]string, 0)
-	for _, p := range flagStringArray(cmd, "plan") {
+	for _, p := range planFlags {
 		if u := artifactURL(ep, p, "/plan/", "pln_"); u != "" {
 			in.Plans = append(in.Plans, prheader.Plan{URL: u})
 			planURLs = append(planURLs, u)
 		}
+	}
+
+	// Explicit --session/--plan refs are the caller's assertion. Unlike the auto
+	// current session (whose local recording state ox can check), an arbitrary id
+	// carries no local signal — and ox will not add a per-id network round-trip to
+	// a render command that must never fail on an unreachable remote. So explicit
+	// refs are included AS GIVEN, but never SILENTLY: a typo'd or not-yet-uploaded
+	// ref would 404 for a reviewer, so warn (stderr only, never in the PR markdown).
+	// --allow-unconfirmed means "I accept a possible 404" and silences it.
+	if !allowUnconfirmed && (len(sessionFlags) > 0 || len(planFlags) > 0) {
+		fmt.Fprintln(cmd.ErrOrStderr(), "note: explicit --session/--plan links are included as given and not verified against the server — confirm they resolve or a reviewer may hit a 404 (pass --allow-unconfirmed to accept and silence)")
 	}
 
 	// Enrichment signals come from the agent (it holds the ox plan enrich

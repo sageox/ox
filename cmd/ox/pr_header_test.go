@@ -225,6 +225,33 @@ func TestPRHeaderCommand_WithholdsUnconfirmedSession(t *testing.T) {
 	require.Contains(t, out2.String(), "https://sageox.ai/c/"+pendingID, "opt-in links the unconfirmed session")
 }
 
+// TestPRHeaderCommand_ExplicitRefsWarnUnlessAllowed proves the honest-but-not-
+// silent contract for explicit refs: ox cannot verify an arbitrary --session/--plan
+// id, so it includes it AS GIVEN and prints a stderr note; --allow-unconfirmed
+// accepts the risk and silences the note. The link is emitted either way — an
+// unverifiable ref is never silently dropped, nor silently trusted.
+// Failure prevented: a typo'd/unuploaded explicit ref lands in a PR with no signal
+// to the author that a reviewer may hit a 404.
+func TestPRHeaderCommand_ExplicitRefsWarnUnlessAllowed(t *testing.T) {
+	prHeaderProject(t, true)
+
+	// Without --allow-unconfirmed: link included, note on stderr.
+	c, out, errb := buildPRHeaderCmd()
+	require.NoError(t, c.Flags().Set("plan", "pln_unuploaded"))
+	require.NoError(t, runPRHeader(c, nil))
+	require.Contains(t, out.String(), "https://sageox.ai/plan/pln_unuploaded", "explicit ref is included as given")
+	require.Contains(t, errb.String(), "not verified against the server", "explicit ref triggers a stderr note")
+	require.Contains(t, errb.String(), "--allow-unconfirmed", "note points to the escape hatch")
+
+	// With --allow-unconfirmed: same link, no note.
+	c2, out2, errb2 := buildPRHeaderCmd()
+	require.NoError(t, c2.Flags().Set("plan", "pln_unuploaded"))
+	require.NoError(t, c2.Flags().Set("allow-unconfirmed", "true"))
+	require.NoError(t, runPRHeader(c2, nil))
+	require.Contains(t, out2.String(), "https://sageox.ai/plan/pln_unuploaded", "link still included")
+	require.NotContains(t, errb2.String(), "not verified against the server", "--allow-unconfirmed silences the note")
+}
+
 // TestPRHeaderCommand_LoneWordmarkEmitsNothing proves the degenerate state: with
 // no team, no session, no plan, and no enrichment, the command emits nothing on
 // stdout rather than a bare wordmark stamped onto a PR body.
