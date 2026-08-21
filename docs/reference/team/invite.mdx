@@ -1,10 +1,10 @@
 ---
-title: "ox invite"
-description: "CLI reference for ox invite"
-sidebar_position: 51
+title: "ox team invite"
+description: "CLI reference for ox team invite"
+sidebar_position: 86
 ---
 
-## ox invite
+## ox team invite
 
 Invite people to a team by email
 
@@ -21,15 +21,15 @@ With no --team, the invitation targets this repository's team. Whether you
 may invite, list, or cancel is decided by the server and reported back.
 
 Examples:
-  ox invite alice@acme.com
-  ox invite alice@acme.com,bob@acme.com
-  ox invite alice@acme.com --team sageox --role admin
-  ox invite --list
-  ox invite --cancel 0198f3c2-6c1a-7e40-9a0b-2f8c4d5e6f70
-  ox invite alice@acme.com --json
+  ox team invite alice@acme.com
+  ox team invite alice@acme.com,bob@acme.com
+  ox team invite alice@acme.com --team sageox --role admin
+  ox team invite --list
+  ox team invite --cancel 0198f3c2-6c1a-7e40-9a0b-2f8c4d5e6f70
+  ox team invite alice@acme.com --json
 
 ```
-ox invite <email>... [flags]
+ox team invite [email]... [flags]
 ```
 
 ### Options
@@ -56,5 +56,5 @@ ox invite <email>... [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox team](/team)	 - Work with your teams and coworkers
 

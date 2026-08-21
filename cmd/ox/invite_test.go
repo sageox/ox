@@ -1213,7 +1213,7 @@ func TestInviteGuidance_TellsAnAgentWhatToDoNext(t *testing.T) {
 		contains []string
 	}{
 		{"invalid address names the address and the retry", inviteOutcome{Email: "dave@acme", Status: statusInvalidEmail},
-			[]string{"dave@acme", "ox invite"}},
+			[]string{"dave@acme", "ox team invite"}},
 		{"refused role names WHO was refused", inviteOutcome{Email: "eve@acme.com", Status: statusNotPermitted, Message: "you can't invite at that role"},
 			[]string{"eve@acme.com"}},
 		{"personal team points at ox teams", inviteOutcome{Email: "a@x.com", Status: statusPersonalTeam},

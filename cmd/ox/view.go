@@ -17,12 +17,19 @@ var viewEndpointFlag string
 var viewCmd = &cobra.Command{
 	Use:   "view",
 	Short: "Open SageOx dashboard in browser",
-	Long: `Open the SageOx web dashboard for your team.
+	Long: `Open the SageOx web dashboard.
 
-Examples:
-  ox view team    # Open team dashboard`,
+To open your team dashboard, use 'ox team open'.`,
+	// A bare `ox view` prints help. A stray token like `ox view team` returns an
+	// error in cobra's native "unknown command" form so the friction catalog
+	// recognizes it and redirects to `ox team open` — a parent with subcommands
+	// but no RunE would instead swallow the arg into Help and never redirect
+	// (the same trap `ox teams members` used to hit).
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return cmd.Help()
+		if len(args) == 0 {
+			return cmd.Help()
+		}
+		return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
 	},
 }
 
@@ -75,54 +82,6 @@ var viewRepoCmd = &cobra.Command{
 	},
 }
 
-var viewTeamCmd = &cobra.Command{
-	Use:   "team",
-	Short: "Open team dashboard in browser",
-	Long:  `Opens the SageOx dashboard for your team.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		// normalize endpoint flag before use
-		normalizedEndpoint := endpoint.NormalizeEndpoint(viewEndpointFlag)
-
-		// find git root
-		gitRoot, err := repotools.FindRepoRoot(repotools.VCSGit)
-		if err != nil {
-			return fmt.Errorf("not in a git repository: %w", err)
-		}
-
-		// load project config
-		cfg, err := config.LoadProjectConfig(gitRoot)
-		if err != nil {
-			return fmt.Errorf("failed to load project config: %w", err)
-		}
-
-		// check for team_id
-		if cfg.TeamID == "" {
-			fmt.Println("No team_id found. Run 'ox init' first to register this repository.")
-			return nil
-		}
-
-		// get endpoint, potentially prompting for selection if multiple exist
-		endpointURL, err := resolveEndpoint(gitRoot, cfg.GetEndpoint(), normalizedEndpoint)
-		if err != nil {
-			return err
-		}
-
-		// build URL and open
-		url := fmt.Sprintf("%s/team/%s", endpointURL, cfg.TeamID)
-		fmt.Printf("Opening %s\n", url)
-
-		if err := cli.OpenInBrowser(url); err != nil {
-			if errors.Is(err, cli.ErrHeadless) {
-				fmt.Printf("Visit: %s\n", url)
-				return nil
-			}
-			fmt.Printf("%s Could not open browser. Visit: %s\n", cli.StyleWarning.Render("!"), url)
-		}
-
-		return nil
-	},
-}
-
 // resolveEndpoint handles endpoint selection when multiple endpoints exist in .sageox/.
 // If flagEndpoint is provided, it is used directly (after validation).
 // If multiple endpoints exist and no flag is provided, prompts the user to select.
@@ -156,9 +115,7 @@ func resolveEndpoint(gitRoot, defaultEndpoint, flagEndpoint string) (string, err
 func init() {
 	// add --endpoint flag to view subcommands
 	viewRepoCmd.Flags().StringVar(&viewEndpointFlag, "endpoint", "", "SageOx endpoint URL (for multi-endpoint repos)")
-	viewTeamCmd.Flags().StringVar(&viewEndpointFlag, "endpoint", "", "SageOx endpoint URL (for multi-endpoint repos)")
 
 	viewCmd.AddCommand(viewRepoCmd)
-	viewCmd.AddCommand(viewTeamCmd)
 	rootCmd.AddCommand(viewCmd)
 }

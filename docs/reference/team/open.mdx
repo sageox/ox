@@ -1,29 +1,30 @@
 ---
-title: "ox attest install"
-description: "CLI reference for ox attest install"
-sidebar_position: 14
+title: "ox team open"
+description: "CLI reference for ox team open"
+sidebar_position: 89
 ---
 
-## ox attest install
+## ox team open
 
-Install optional Attest skills for AI coworkers
+Open a team's dashboard in the browser
 
 ### Synopsis
 
-Install the optional Attest playbooks for supported AI coworkers.
+Open the SageOx web dashboard for a team.
 
-This installs customer-journey BDD creation and evidence-recording guidance.
-It does not install lifecycle hooks: use 'ox integrate install' for those.
-The Attest CLI itself remains available on every supported AI coworker.
+Name the team as a positional argument or with --team; with neither, opens this
+repo's team.
 
 ```
-ox attest install [flags]
+ox team open [team] [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for install
+      --endpoint string   SageOx endpoint URL (for multi-endpoint repos)
+  -h, --help              help for open
+      --team string       Team ID or slug to open (defaults to this repo's team)
 ```
 
 ### Options inherited from parent commands
@@ -39,5 +40,5 @@ ox attest install [flags]
 
 ### SEE ALSO
 
-* [ox attest](/attest)	 - What this repo can actually demonstrate
+* [ox team](/team)	 - Work with your teams and coworkers
 
