@@ -309,23 +309,92 @@ type stagedBinary struct {
 	isOx     bool
 }
 
-// stageBinaries extracts the ox binary and any adapter binaries that already
-// exist in installDir from the tarball, writing each to a sibling temp file.
-// Adapters not already installed are skipped so an ox-only install does not
-// suddenly sprout adapter binaries.
+// stageBinaries writes the ox binary — and any adapter already installed
+// alongside it — from the tarball into sibling temp files ready to rename.
+//
+// Zip-slip safety by construction: the archive's entry names are used ONLY as
+// map keys to look up file *content*; every filesystem path written here is
+// built from an install-target name that comes from the local filesystem
+// (os.ReadDir) or the literal "ox", never from the archive. An archive entry
+// named "../../etc/whatever" therefore cannot influence any path — it simply
+// never matches an install target.
 func stageBinaries(ctx context.Context, tarball []byte, installDir string) ([]stagedBinary, error) {
+	contents, err := readArchiveBinaries(ctx, tarball)
+	if err != nil {
+		return nil, err
+	}
+	// the ox binary itself must be present: an adapter-only archive must never
+	// replace adapters while leaving ox on the old version.
+	if _, ok := contents["ox"]; !ok {
+		return nil, errors.New("release tarball contains no ox binary")
+	}
+
+	cleanInstallDir := filepath.Clean(installDir)
+	var staged []stagedBinary
+	for _, name := range installTargets(cleanInstallDir) {
+		data, ok := contents[name]
+		if !ok {
+			continue // installed here but not shipped in this release
+		}
+		// name is a trusted install-target ("ox" literal or an os.ReadDir
+		// entry), so this path is not archive-derived.
+		destPath := filepath.Join(cleanInstallDir, name)
+		tmp, err := os.CreateTemp(cleanInstallDir, ".ox-upgrade-*")
+		if err != nil {
+			return nil, fmt.Errorf("stage %s: %w", name, err)
+		}
+		if _, err := tmp.Write(data); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			return nil, fmt.Errorf("stage %s: %w", name, err)
+		}
+		if err := tmp.Chmod(0o755); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			return nil, fmt.Errorf("chmod %s: %w", name, err)
+		}
+		if err := tmp.Close(); err != nil {
+			_ = os.Remove(tmp.Name())
+			return nil, err
+		}
+		staged = append(staged, stagedBinary{destPath: destPath, tmpPath: tmp.Name(), isOx: name == "ox"})
+	}
+	return staged, nil
+}
+
+// installTargets returns the binaries to replace: ox (always, as the running
+// binary) plus any ox-adapter-* already present in installDir. Names come from
+// the local filesystem, never the archive.
+func installTargets(installDir string) []string {
+	targets := []string{"ox"}
+	entries, err := os.ReadDir(installDir)
+	if err != nil {
+		return targets
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if name := e.Name(); strings.HasPrefix(name, "ox-adapter-") {
+			targets = append(targets, name)
+		}
+	}
+	return targets
+}
+
+// readArchiveBinaries reads the ox and ox-adapter-* regular files from the
+// tarball into memory, keyed by basename. Entry names are used only as map
+// keys (never as filesystem paths), and decompression is bounded per-entry and
+// in total to cap a decompression bomb.
+func readArchiveBinaries(ctx context.Context, tarball []byte) (map[string][]byte, error) {
 	gz, err := gzip.NewReader(bytes.NewReader(tarball))
 	if err != nil {
 		return nil, fmt.Errorf("open gzip: %w", err)
 	}
 	defer func() { _ = gz.Close() }()
 
-	cleanInstallDir := filepath.Clean(installDir)
-	var (
-		staged     []stagedBinary
-		sawOx      bool
-		totalBytes int64
-	)
+	out := make(map[string][]byte)
+	var totalBytes int64
 	tr := tar.NewReader(gz)
 	for {
 		// bound extraction by the caller's deadline: a decompression-heavy
@@ -343,74 +412,27 @@ func stageBinaries(ctx context.Context, tarball []byte, installDir string) ([]st
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
-		// bound decompression: reject an oversized single entry and cap the
-		// whole archive's declared decompressed size (a bomb whose expanded
-		// bytes dwarf the compressed download).
 		if hdr.Size < 0 || hdr.Size > maxEntryBytes {
-			return nil, fmt.Errorf("archive entry %s has invalid size %d", filepath.Base(hdr.Name), hdr.Size)
+			return nil, fmt.Errorf("archive entry has invalid size %d", hdr.Size)
 		}
 		totalBytes += hdr.Size
 		if totalBytes > maxTotalBytes {
 			return nil, fmt.Errorf("archive exceeds %d bytes decompressed", maxTotalBytes)
 		}
 
-		// filepath.Base strips every directory component from the archive
-		// entry, so a "../" or absolute name collapses to a bare filename that
-		// can only land in installDir.
 		base := filepath.Base(hdr.Name)
-		isOx := base == "ox"
-		isAdapter := strings.HasPrefix(base, "ox-adapter-")
-		if !isOx && !isAdapter {
+		if base != "ox" && !strings.HasPrefix(base, "ox-adapter-") {
 			continue // LICENSE, README, CHANGELOG, etc.
 		}
-		destPath := filepath.Join(cleanInstallDir, base)
-		// belt-and-suspenders barrier: the resolved path must stay within
-		// installDir. Base already guarantees this; the explicit HasPrefix
-		// check is the form the archive-extraction taint analysis recognizes,
-		// and it guards every os.Stat/os.Rename on destPath below.
-		if destPath != cleanInstallDir && !strings.HasPrefix(destPath, cleanInstallDir+string(os.PathSeparator)) {
-			return nil, fmt.Errorf("refusing archive entry outside install dir: %q", hdr.Name)
-		}
-		if isAdapter {
-			if _, err := os.Stat(destPath); err != nil {
-				continue // adapter not installed here; leave it alone
-			}
-		}
-
-		// temp file uses a FIXED name pattern so no archive-derived string
-		// reaches a filesystem path.
-		tmp, err := os.CreateTemp(cleanInstallDir, ".ox-upgrade-*")
+		// hdr.Size <= maxEntryBytes was checked above, so this reads the whole
+		// entry rather than truncating a large binary.
+		data, err := io.ReadAll(io.LimitReader(tr, hdr.Size))
 		if err != nil {
-			return nil, fmt.Errorf("stage %s: %w", base, err)
-		}
-		// hdr.Size <= maxEntryBytes was checked above, so LimitReader reads the
-		// full entry rather than silently truncating a large binary.
-		if _, err := io.Copy(tmp, io.LimitReader(tr, maxEntryBytes)); err != nil {
-			_ = tmp.Close()
-			_ = os.Remove(tmp.Name())
 			return nil, fmt.Errorf("extract %s: %w", base, err)
 		}
-		if err := tmp.Chmod(0o755); err != nil {
-			_ = tmp.Close()
-			_ = os.Remove(tmp.Name())
-			return nil, fmt.Errorf("chmod %s: %w", base, err)
-		}
-		if err := tmp.Close(); err != nil {
-			_ = os.Remove(tmp.Name())
-			return nil, err
-		}
-		if isOx {
-			sawOx = true
-		}
-		staged = append(staged, stagedBinary{destPath: destPath, tmpPath: tmp.Name(), isOx: isOx})
+		out[base] = data
 	}
-
-	// the ox binary itself must be present: an adapter-only archive must never
-	// replace adapters while leaving ox on the old version.
-	if !sawOx {
-		return nil, errors.New("release tarball contains no ox binary")
-	}
-	return staged, nil
+	return out, nil
 }
 
 // fetchChecksums downloads and parses a GoReleaser checksums.txt (lines of
