@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Improved
+
+- **`ox upgrade` now updates direct installs in place** — if you installed ox with the quick-install script, `ox upgrade` downloads and swaps in the new version for you (verified before it is applied) instead of just printing instructions. Homebrew and `go install` installs upgrade as before.
+- **You hear about new versions even without the background service running** — `ox status` checks for a newer ox on its own and offers to upgrade on the spot.
+
 ## [0.14.0] - 2026-08-20
 
 Give every AI coworker the right skills, keep plans intact through review, and put your team's data, conversations, and the evidence behind your software in your hands, not locked away.

@@ -1,0 +1,227 @@
+package upgrade
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+const (
+	testVer  = "9.9.9"
+	testOS   = "testos"
+	testArch = "testarch"
+)
+
+// makeTarball builds an in-memory .tar.gz from name->content, each a 0755 file.
+func makeTarball(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for name, content := range files {
+		hdr := &tar.Header{Name: name, Mode: 0o755, Size: int64(len(content)), Typeflag: tar.TypeReg}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("write header %s: %v", name, err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatalf("write body %s: %v", name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func sha256hex(b []byte) string {
+	s := sha256.Sum256(b)
+	return hex.EncodeToString(s[:])
+}
+
+// releaseServer serves a fake GitHub release: /v<ver>/checksums.txt and the
+// platform tarball. checksumOverride, when non-empty, replaces the real
+// tarball hash so the mismatch path can be exercised.
+func releaseServer(t *testing.T, tarball []byte, checksumOverride string) *httptest.Server {
+	t.Helper()
+	asset := AssetName(testVer, testOS, testArch)
+	sum := sha256hex(tarball)
+	if checksumOverride != "" {
+		sum = checksumOverride
+	}
+	checksums := fmt.Sprintf("%s  %s\n%s  %s\n", sum, asset, sha256hex([]byte("other")), "ox_9.9.9_other_arch.tar.gz")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v"+testVer+"/checksums.txt", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(checksums))
+	})
+	mux.HandleFunc("/v"+testVer+"/"+asset, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(tarball)
+	})
+	return httptest.NewServer(mux)
+}
+
+func baseConfig(installDir, releaseBase string) Config {
+	return Config{
+		Version:         testVer,
+		OS:              testOS,
+		Arch:            testArch,
+		ReleaseBase:     releaseBase,
+		InstallDir:      installDir,
+		DisableCodesign: true,
+	}
+}
+
+func TestReplaceRunningBinary_HappyPath(t *testing.T) {
+	dir := t.TempDir()
+	// pre-existing install: ox + one adapter. A second adapter is NOT installed.
+	writeFile(t, filepath.Join(dir, "ox"), "OLD-ox")
+	writeFile(t, filepath.Join(dir, "ox-adapter-claude-code"), "OLD-adapter")
+
+	tarball := makeTarball(t, map[string]string{
+		"ox":                     "NEW-ox",
+		"ox-adapter-claude-code": "NEW-adapter",
+		"ox-adapter-gemini":      "NEW-gemini", // not installed => must be skipped
+		"README.md":              "docs",       // non-binary => ignored
+	})
+	srv := releaseServer(t, tarball, "")
+	defer srv.Close()
+
+	if err := ReplaceRunningBinary(context.Background(), baseConfig(dir, srv.URL)); err != nil {
+		t.Fatalf("ReplaceRunningBinary: %v", err)
+	}
+
+	if got := readFile(t, filepath.Join(dir, "ox")); got != "NEW-ox" {
+		t.Errorf("ox not replaced: got %q", got)
+	}
+	if got := readFile(t, filepath.Join(dir, "ox-adapter-claude-code")); got != "NEW-adapter" {
+		t.Errorf("installed adapter not replaced: got %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ox-adapter-gemini")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("uninstalled adapter should not have been created")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "README.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("non-binary file should not have been extracted")
+	}
+	// no stray temp files left behind
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if len(e.Name()) > 0 && e.Name()[0] == '.' {
+			t.Errorf("leftover temp file: %s", e.Name())
+		}
+	}
+}
+
+func TestReplaceRunningBinary_ChecksumMismatch(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ox"), "OLD-ox")
+
+	tarball := makeTarball(t, map[string]string{"ox": "EVIL-ox"})
+	// serve a wrong checksum for the asset
+	srv := releaseServer(t, tarball, sha256hex([]byte("not-the-tarball")))
+	defer srv.Close()
+
+	err := ReplaceRunningBinary(context.Background(), baseConfig(dir, srv.URL))
+	if err == nil {
+		t.Fatal("expected checksum-mismatch error, got nil")
+	}
+	if got := readFile(t, filepath.Join(dir, "ox")); got != "OLD-ox" {
+		t.Errorf("ox must be untouched on checksum mismatch: got %q", got)
+	}
+}
+
+func TestReplaceRunningBinary_MissingPlatformAsset(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ox"), "OLD-ox")
+
+	tarball := makeTarball(t, map[string]string{"ox": "NEW-ox"})
+	srv := releaseServer(t, tarball, "")
+	defer srv.Close()
+
+	// ask for an arch that has no checksum entry
+	cfg := baseConfig(dir, srv.URL)
+	cfg.Arch = "no-such-arch"
+	if err := ReplaceRunningBinary(context.Background(), cfg); err == nil {
+		t.Fatal("expected error for unsupported platform asset")
+	}
+	if got := readFile(t, filepath.Join(dir, "ox")); got != "OLD-ox" {
+		t.Errorf("ox must be untouched when asset missing: got %q", got)
+	}
+}
+
+func TestReplaceRunningBinary_NotWritable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ox"), "OLD-ox")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer os.Chmod(dir, 0o700) //nolint:errcheck // best-effort cleanup
+
+	tarball := makeTarball(t, map[string]string{"ox": "NEW-ox"})
+	srv := releaseServer(t, tarball, "")
+	defer srv.Close()
+
+	err := ReplaceRunningBinary(context.Background(), baseConfig(dir, srv.URL))
+	if !errors.Is(err, ErrNotWritable) {
+		t.Fatalf("expected ErrNotWritable, got %v", err)
+	}
+}
+
+// A crafted --target must never reach the network: it is validated and
+// rejected before any URL is built. Asserts on the specific validation error
+// so removing the guard (which would instead produce a network error) turns
+// this test red.
+func TestReplaceRunningBinary_RejectsMalformedVersion(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ox"), "OLD-ox")
+
+	for _, bad := range []string{"../../evil", "https://evil.example/x", "1.2", "1.2.3/../x", "1.2.3 ", "v1.2.3"} {
+		cfg := baseConfig(dir, "http://127.0.0.1:1")
+		cfg.Version = bad
+		err := ReplaceRunningBinary(context.Background(), cfg)
+		if err == nil || !strings.Contains(err.Error(), "invalid target version") {
+			t.Errorf("version %q: want invalid-target-version rejection, got %v", bad, err)
+		}
+	}
+	if got := readFile(t, filepath.Join(dir, "ox")); got != "OLD-ox" {
+		t.Errorf("ox must be untouched: got %q", got)
+	}
+}
+
+func TestAssetName(t *testing.T) {
+	if got := AssetName("0.14.0", "darwin", "arm64"); got != "ox_0.14.0_darwin_arm64.tar.gz" {
+		t.Errorf("AssetName = %q", got)
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
+}

@@ -1,7 +1,7 @@
 # Makefile for ox CLI tool
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw
-.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-timings test-all test-slow test-browser test-integration test-agents test-preflight test-digital-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
+.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-timings test-all test-slow test-browser test-integration test-agents test-preflight test-digital-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
 GO := go
@@ -600,6 +600,9 @@ bump-version: ## Bump version across all files (usage: make bump-version NEW_VER
 
 verify-version: ## Verify all version files are in sync
 	@./scripts/check-versions.sh
+
+check-release-drift: ## Check version.go isn't ahead of the latest published GitHub release (needs network + gh auth)
+	@bash scripts/check-release-drift.sh
 
 # Help
 help: ## Display available targets

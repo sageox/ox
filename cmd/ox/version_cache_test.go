@@ -99,6 +99,27 @@ func TestWriteVersionCacheFromDoctor_PreservesETag(t *testing.T) {
 	assert.Equal(t, `"preserve-me"`, cached.ETag, "doctor must not clobber daemon's ETag")
 }
 
+// A fresh cache must NOT trigger a live GitHub refetch. Proven with a sentinel
+// version (v99.0.0) that could never come from the real API: if a refetch
+// happened it would overwrite the cache with the real latest and the sentinel
+// update would vanish. Also keeps the test hermetic (no network).
+func TestRefreshVersionCacheIfStale_FreshCacheSkipsNetwork(t *testing.T) {
+	useTestCacheDir(t)
+	writeTestVersionCache(t, &versionCacheData{
+		LatestVersion: "v99.0.0",
+		CheckedAt:     time.Now(),
+	})
+
+	result := refreshVersionCacheIfStale(6 * time.Hour)
+	require.NotNil(t, result)
+	assert.Equal(t, "99.0.0", result.LatestVersion, "fresh cache must be used verbatim, not refetched")
+
+	// the on-disk sentinel must be untouched (no write occurred)
+	cached := readVersionCache()
+	require.NotNil(t, cached)
+	assert.Equal(t, "v99.0.0", cached.LatestVersion)
+}
+
 // corrupt cache must not crash prime — graceful degradation
 func TestCheckVersionFromCache_CorruptFile(t *testing.T) {
 	useTestCacheDir(t)

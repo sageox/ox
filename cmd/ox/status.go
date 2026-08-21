@@ -1620,12 +1620,25 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			fmt.Print(renderAgentTasksSection(gitRoot))
 		}
 
-		// show version update notice if available
-		if vResult := checkVersionFromCache(); vResult != nil {
+		// show version update notice if available. refreshVersionCacheIfStale
+		// does a bounded live check so the notice reaches coworkers who never
+		// run the daemon (the daemon is otherwise the only cache writer).
+		if vResult := refreshVersionCacheIfStale(6 * time.Hour); vResult != nil {
 			fmt.Printf("\n%s  %s\n",
 				statusWarningStyle.Render("Update available"),
-				fmt.Sprintf("v%s → v%s — run 'ox upgrade' to update", vResult.CurrentVersion, vResult.LatestVersion),
+				fmt.Sprintf("v%s → v%s", vResult.CurrentVersion, vResult.LatestVersion),
 			)
+			// make the notice actionable rather than a dead string: offer to
+			// run the upgrade right here when we're at an interactive terminal.
+			if cli.IsInteractive() && !cfg.Quiet {
+				if cli.ConfirmYesNo("Upgrade ox now?", false) {
+					_ = runUpgrade(upgradeCmd, nil)
+				} else {
+					fmt.Printf("%s\n", cli.StyleDim.Render("Run 'ox upgrade' when you're ready."))
+				}
+			} else {
+				fmt.Printf("%s\n", cli.StyleDim.Render("Run 'ox upgrade' to update."))
+			}
 		}
 
 		// show contextual tip
@@ -1824,10 +1837,11 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 		}
 	}
 
-	// version section
+	// version section — refresh the cache lazily (bounded live check) so
+	// daemon-less coworkers still see update availability in JSON output.
 	currentVersion := strings.TrimPrefix(version.Version, "v")
 	vJSON := &statusVersionJSON{Current: currentVersion}
-	if vResult := checkVersionFromCache(); vResult != nil {
+	if vResult := refreshVersionCacheIfStale(6 * time.Hour); vResult != nil {
 		vJSON.Latest = vResult.LatestVersion
 		vJSON.UpdateAvailable = true
 	}
