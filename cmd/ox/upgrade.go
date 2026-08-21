@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/upgrade"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -35,7 +40,7 @@ type upgradeResult struct {
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
 	Short: "Upgrade ox to the latest version",
-	Long:  "Detect how ox was installed and upgrade using the appropriate method (Homebrew, go install, or manual download).",
+	Long:  "Detect how ox was installed and upgrade using the appropriate method: Homebrew, go install, or an in-place download that verifies and replaces the binary.",
 	RunE:  runUpgrade,
 }
 
@@ -106,9 +111,11 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		result.Message = "Dev build detected. Use 'make build && make install' to upgrade."
 		return outputUpgradeResult(cmd, result, jsonOutput)
 	case installBinary:
-		result.Status = "manual"
-		result.Message = "Download the latest release or run:\n  curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash"
-		return outputUpgradeResult(cmd, result, jsonOutput)
+		upgradeVersion := vResult.LatestVersion
+		if target != "" {
+			upgradeVersion = strings.TrimPrefix(target, "v")
+		}
+		err = upgradeViaSelfReplace(jsonOutput, upgradeVersion)
 	}
 
 	if err != nil {
@@ -129,10 +136,13 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 // release. Accepting --target and then installing an arbitrary latest version
 // is worse than failing: it creates a false compatibility guarantee.
 func validateUpgradeTarget(method installMethod, target string) error {
-	if target == "" || method == installGoInstall {
+	// go-install and direct-binary (self-replace) installs can both honor a
+	// pinned version — one via go install @tag, the other by downloading that
+	// tag's release tarball. Homebrew and dev/source builds cannot.
+	if target == "" || method == installGoInstall || method == installBinary {
 		return nil
 	}
-	return fmt.Errorf("--target is supported only for go-install installations; %s upgrades cannot safely honor a pinned release", method)
+	return fmt.Errorf("--target is supported only for go-install and binary installations; %s upgrades cannot safely honor a pinned release", method)
 }
 
 func outputUpgradeResult(cmd *cobra.Command, result upgradeResult, jsonOutput bool) error {
@@ -161,6 +171,30 @@ func outputUpgradeResult(cmd *cobra.Command, result upgradeResult, jsonOutput bo
 	}
 
 	return nil
+}
+
+// upgradeViaSelfReplace downloads the release tarball for a directly-installed
+// (install.sh / manual binary) ox and atomically replaces the running binary
+// and any bundled adapters in place. The tarball's SHA-256 is verified against
+// the release checksums before anything is overwritten.
+func upgradeViaSelfReplace(quiet bool, targetVersion string) error {
+	if !quiet {
+		fmt.Printf("%s downloading ox v%s (%s/%s) and verifying checksum...\n",
+			cli.StyleDim.Render("Running:"), targetVersion, runtime.GOOS, runtime.GOARCH)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	err := upgrade.ReplaceRunningBinary(ctx, upgrade.Config{
+		Version: targetVersion,
+		OS:      runtime.GOOS,
+		Arch:    runtime.GOARCH,
+	})
+	if errors.Is(err, upgrade.ErrNotWritable) {
+		return fmt.Errorf("%w\n  Re-run with elevated permissions: sudo ox upgrade", err)
+	}
+	return err
 }
 
 func upgradeViaHomebrew(quiet bool) error {

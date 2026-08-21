@@ -640,10 +640,16 @@ func TestAddColumnMigrations_ConcurrentRace(t *testing.T) {
 		migrate func(*sql.DB) error
 		table   string
 		columns []string
+		// syncColumn is the one column each racer parks on to force the race.
+		// migrateAddTypeInfo adds three columns via addColumnIfMissing, so the
+		// hook fires once per column; parking on only the first keeps the
+		// bounded ready channel from overflowing while still guaranteeing all
+		// racers hit the check-then-ALTER window together.
+		syncColumn string
 	}{
-		{"edge_version", migrateAddEdgeVersion, "blobs", []string{"edge_version"}},
-		{"type_info", migrateAddTypeInfo, "symbols", []string{"signature", "return_type", "params"}},
-		{"comments_parsed", migrateAddComments, "blobs", []string{"comments_parsed"}},
+		{"edge_version", migrateAddEdgeVersion, "blobs", []string{"edge_version"}, "edge_version"},
+		{"type_info", migrateAddTypeInfo, "symbols", []string{"signature", "return_type", "params"}, "signature"},
+		{"comments_parsed", migrateAddComments, "blobs", []string{"comments_parsed"}, "comments_parsed"},
 	}
 
 	for _, tc := range cases {
@@ -655,7 +661,10 @@ func TestAddColumnMigrations_ConcurrentRace(t *testing.T) {
 			ready := make(chan struct{}, racers)
 			release := make(chan struct{})
 
-			testAddColumnRaceHook = func() {
+			testAddColumnRaceHook = func(column string) {
+				if column != tc.syncColumn {
+					return
+				}
 				ready <- struct{}{}
 				<-release
 			}
@@ -691,5 +700,133 @@ func TestAddColumnMigrations_ConcurrentRace(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMigrateAddTypeInfo_ResumesPartialMigration proves migrateAddTypeInfo is
+// resumable. It adds three columns (signature, return_type, params); the older
+// form guarded all three behind a single existence check on signature, so a
+// database left with signature but not the other two — a process that crashed
+// between ALTERs, or an older ox that only ever added signature — would
+// short-circuit on the guard and never gain return_type/params.
+//
+// Failure prevented: symbols.return_type / symbols.params silently never exist,
+// and every type-info query returns empty forever with no error to flag it.
+func TestMigrateAddTypeInfo_ResumesPartialMigration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
+
+	db, _ := createOldSchemaDB(t)
+	defer func() { _ = db.Close() }()
+
+	// Simulate a migration that died after the first ALTER: signature landed,
+	// return_type and params did not.
+	if _, err := db.Exec(`ALTER TABLE symbols ADD COLUMN signature TEXT`); err != nil {
+		t.Fatalf("seed partial migration: %v", err)
+	}
+
+	if err := migrateAddTypeInfo(db); err != nil {
+		t.Fatalf("migrateAddTypeInfo on partially migrated schema: %v", err)
+	}
+
+	for _, col := range []string{"signature", "return_type", "params"} {
+		if !columnExists(t, db, "symbols", col) {
+			t.Errorf("symbols.%s missing after resuming a partial migration", col)
+		}
+	}
+}
+
+// TestIsDuplicateColumnError pins the precision of the duplicate-column guard:
+// it must swallow a duplicate ONLY for the exact column being added, so a
+// genuine schema bug that reports a duplicate on a different column, or any
+// other error, still fails the migration loudly.
+//
+// Failure prevented: an over-broad match (e.g. plain substring on the message)
+// silently eating a real error and leaving a half-built schema.
+func TestIsDuplicateColumnError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
+
+	db, _ := createOldSchemaDB(t)
+	defer func() { _ = db.Close() }()
+
+	// Provoke a real "duplicate column name: signature" from the driver.
+	if _, err := db.Exec(`ALTER TABLE symbols ADD COLUMN signature TEXT`); err != nil {
+		t.Fatalf("seed column: %v", err)
+	}
+	_, dupErr := db.Exec(`ALTER TABLE symbols ADD COLUMN signature TEXT`)
+	if dupErr == nil {
+		t.Fatal("expected a duplicate-column error on the second ALTER")
+	}
+	// A different sqlite error (same generic SQLITE_ERROR code, different message)
+	// must not be mistaken for a duplicate-column error.
+	_, missingTableErr := db.Exec(`ALTER TABLE definitely_no_such_table ADD COLUMN x TEXT`)
+	if missingTableErr == nil {
+		t.Fatal("expected an error for a missing table")
+	}
+
+	cases := []struct {
+		name   string
+		err    error
+		column string
+		want   bool
+	}{
+		{"matches the exact column", dupErr, "signature", true},
+		{"rejects a different column", dupErr, "return_type", false},
+		// "sign" is a prefix of "signature": a substring match would wrongly
+		// accept it, silently swallowing a real duplicate on another column.
+		{"rejects a column that is a prefix of the real one", dupErr, "sign", false},
+		{"rejects nil", nil, "signature", false},
+		{"rejects a non-duplicate sqlite error", missingTableErr, "x", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isDuplicateColumnError(tc.err, tc.column); got != tc.want {
+				t.Errorf("isDuplicateColumnError(%v, %q) = %v, want %v", tc.err, tc.column, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMigrateAddTypeInfo_PreservesParsedOnReopen guards the parsed-state
+// invalidation against firing on every open. migrateAddTypeInfo resets parsed=0
+// to force a reparse when it first adds the type-info columns; it must NOT do so
+// when the schema is already current, because CreateSchema runs on every
+// Open/OpenSQLOnly — otherwise each reopen wipes parsed state and triggers a
+// full, needless reparse.
+//
+// Failure prevented: simply reopening a codedb silently invalidates every parsed
+// language blob.
+func TestMigrateAddTypeInfo_PreservesParsedOnReopen(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
+
+	db, _ := createOldSchemaDB(t)
+	defer func() { _ = db.Close() }()
+
+	// First migration adds the columns and (correctly) invalidates parsed.
+	if err := migrateAddTypeInfo(db); err != nil {
+		t.Fatalf("first migrate: %v", err)
+	}
+
+	// Mark a language blob parsed, as a completed indexing pass would.
+	if _, err := db.Exec(`INSERT INTO blobs (content_hash, language, parsed) VALUES ('h', 'go', 1)`); err != nil {
+		t.Fatalf("seed parsed blob: %v", err)
+	}
+
+	// Reopen path: run the migration again against the now-current schema.
+	if err := migrateAddTypeInfo(db); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+
+	var parsed int
+	if err := db.QueryRow(`SELECT parsed FROM blobs WHERE content_hash='h'`).Scan(&parsed); err != nil {
+		t.Fatalf("read parsed: %v", err)
+	}
+	if parsed != 1 {
+		t.Errorf("parsed reset to %d on a no-op reopen; must stay 1", parsed)
 	}
 }

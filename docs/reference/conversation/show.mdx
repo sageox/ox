@@ -1,0 +1,41 @@
+---
+title: "ox conversation show"
+description: "CLI reference for ox conversation show"
+sidebar_position: 20
+---
+
+## ox conversation show
+
+Show one conversation's metadata and human summary
+
+### Synopsis
+
+Metadata plus the human summary of one conversation. A conversation without a summary yet is data, not an error: the summary block reports available=false with a typed reason. Accepts cnv_<uuidv7>, rec_<uuidv7>, or a sageox:// citation URI.
+
+```
+ox conversation show <id> [flags]
+```
+
+### Options
+
+```
+      --format string   output format: json|text (default "json")
+  -h, --help            help for show
+      --text            shorthand for --format text
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox conversation](/conversation)	 - Read recorded team conversations from the local Team Context
+

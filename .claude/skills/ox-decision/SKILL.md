@@ -10,15 +10,14 @@ description: >-
   conventions, drift, and ready-to-paste citations at zero LLM cost. Follow the
   returned `guidance`.
 ---
-<!-- ox-hash: f62197a45b10 ver: 0.12.0 -->
 
 <!-- Thin by design. The authoritative DR contract — consult-before-drafting,
      the crediting rules (paste SOURCE refs verbatim, never compose by hand,
      SageOx credit subtle and capped), amendment semantics, and ref
      verification — lives in the <decision-record-guidance> block of
      `ox agent prime` (Layer-1 floor) and in the `guidance` field of
-     `ox decision enrich` JSON, which reach Claude, Codex, and Droid alike.
-     This skill adds ONLY Claude-specific auto-activation ergonomics; it
+     `ox decision enrich` JSON, which reach every primed AI coworker.
+     This native skill adds discovery and activation ergonomics; it
      duplicates no behavior. Do not grow this body. -->
 
 ## Use when

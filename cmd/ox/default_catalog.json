@@ -319,7 +319,7 @@
       "has_regex": false,
       "auto_execute": true,
       "confidence": 0.95,
-      "description": "Missing subcommand: team-ctx -> agent team-ctx"
+      "description": "Missing subcommand: team-ctx -> agent team-ctx (the agent-consumption surface)"
     },
     {
       "pattern": "agent murmur",
@@ -336,6 +336,22 @@
       "auto_execute": true,
       "confidence": 0.95,
       "description": "Typo: git-credentials-helper -> git-credential-helper (singular; the real command is only ever invoked programmatically by git via .git/config, never typed, so this is safe to auto-execute)"
+    },
+    {
+      "pattern": "view team",
+      "target": "team open",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.95,
+      "description": "Moved: view team -> team open (team dashboard now lives under ox team)"
+    },
+    {
+      "pattern": "invite",
+      "target": "team invite",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.90,
+      "description": "Moved: invite -> team invite (bare form only; the hidden ox invite alias carries emails and --cancel <id> across the rename)"
     }
   ],
   "tokens": [

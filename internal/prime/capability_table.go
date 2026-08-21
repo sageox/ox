@@ -156,6 +156,12 @@ func OxCapabilities() []Capability {
 		{ID: "ox-plan", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
 		{ID: "ox-session-review", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
 		{ID: "ox-recap", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
+		// ox-conversation's id also names its slash-relay command file at
+		// extensions/claude/commands/ox-conversation.md — one surface id, two
+		// on-disk affordances, both accounted by this single row (the
+		// deterministic floor for citation-walking is prime's KB guidance,
+		// which names `ox conversation` for every adapter).
+		{ID: "ox-conversation", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
 	}
 }
 
@@ -179,4 +185,5 @@ var additiveSkills = map[string]string{
 	"ox-attest-goal":   "opt-in Attest BDD authoring + drive-to-green playbook; it sharpens customer-journey judgment and pursues the capability to proven without becoming a portable product requirement",
 	"ox-attest-create": "opt-in Attest evidence-recording playbook; the attestation CLI remains usable without the Claude-specific skill",
 	"ox-viz":           "additive Layer-2 ergonomics; its deterministic floor is the visualization-guidance entry and the live ox viz pr output, so it is not a separate conformance surface",
+	"ox-pr-header":     "additive Layer-2 ergonomics; its deterministic floor is the `ox pr header` command output plus the PR-header pointer in the prime attribution guidance, so the skill itself is not a separate conformance surface",
 }

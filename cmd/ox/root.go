@@ -157,14 +157,15 @@ func init() {
 	scoutCmd.GroupID = "knowledge"
 	distillCmd.GroupID = "knowledge"
 	recapCmd.GroupID = "knowledge"
+	conversationCmd.GroupID = "knowledge"
 
-	// team coordination — carts, cart analysis, glance, murmurs, teams alias
+	// team coordination — carts, cart analysis, glance, murmurs.
+	// teamCmd (and its `teams` alias) sets its own GroupID in team.go; `ox invite`
+	// is now a subcommand of teamCmd (canonical `ox team invite`).
 	cartsCmd.GroupID = "teams"
 	cartAnalyzeCmd.GroupID = "teams"
 	glanceCmd.GroupID = "teams"
 	murmurCmd.GroupID = "teams"
-	teamsCmd.GroupID = "teams"
-	inviteCmd.GroupID = "teams"
 
 	// auth commands
 	loginCmd.GroupID = "auth"
@@ -186,8 +187,7 @@ func init() {
 	rootCmd.AddCommand(queryCmd)
 	rootCmd.AddCommand(recapCmd)
 	rootCmd.AddCommand(scoutCmd)
-	rootCmd.AddCommand(teamsCmd)
-	rootCmd.AddCommand(inviteCmd)
+	// teamCmd is registered in team.go (with its `teams` alias + `invite` subcommand)
 	// agentCmd is registered in agent.go
 
 	// auth commands

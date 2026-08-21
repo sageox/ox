@@ -1,0 +1,18 @@
+{
+  "$schema_version": 1,
+  "id": "cnv_019ff2f5-2079-7be1-b05e-8caad2772e61",
+  "type": "recording",
+  "context_type": "team",
+  "context_id": "team_fixture01",
+  "title": "",
+  "started_at": "2026-08-11T22:32:58Z",
+  "ended_at": null,
+  "finalized_at": null,
+  "sealed_at": null,
+  "boundary_ref": "",
+  "clock": {
+    "t0": "2026-08-11T22:32:58Z",
+    "clock_class": "recording-local",
+    "pauses": []
+  }
+}

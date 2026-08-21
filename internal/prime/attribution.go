@@ -53,6 +53,12 @@ func WithAttributionGuidance(content string, loggedIn bool, attr config.Resolved
 	sb.WriteString("> Guided by SageOx\n>\n")
 	sb.WriteString("> ⚠️ SageOx is currently for expert skiers only who are comfortable running large swarms of agentic AI agents updating their code.\n")
 
+	// PR header credit line (always-on pointer). The human-facing top-of-body
+	// counterpart to the SageOx-Session: trailer; rendered by the CLI so the
+	// agent never hand-writes the sanitizer-fragile markup.
+	sb.WriteString("\n**PR Header (paste at the TOP of a PR body):**\n")
+	sb.WriteString("When you open a PR for this work, run `ox pr header` (add `--plan <pln_id>` for each plan and `--prior-art/--collisions N` for enrichment) and paste its output as the FIRST lines of the PR description, above your summary. It renders a thin, on-brand credit line linking the session(s) and plan(s). Keep the `SageOx-Session:` trailer at the bottom. See the `ox-pr-header` skill.\n")
+
 	// SageOx contribution score (always-on when commit attribution is configured)
 	if attr.Commit != "" {
 		sb.WriteString("\n**SageOx Contribution Score (Required):**\n")

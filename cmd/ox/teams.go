@@ -64,21 +64,9 @@ var (
 				Foreground(cli.ColorSecondary)
 )
 
-var teamsCmd = &cobra.Command{
-	Use:   "teams",
-	Short: "List teams you belong to",
-	Long: `List teams you belong to and their team contexts.
-
-A team context is the team's permanent conversation store — recordings,
-discussions, sessions, and shared memory. It is not a knowledge bubble
-(` + "`ox kb list`" + ` lists those; see ox ADR-028 for the distinction).`,
-	RunE: runTeams,
-}
-
-func init() {
-	teamsCmd.Flags().Bool("json", false, "Output as JSON")
-}
-
+// runTeams lists the teams you belong to. It backs `ox team list` and a bare
+// `ox team`/`ox teams` (see team.go); its `--json` flag is registered on those
+// commands, not here.
 func runTeams(cmd *cobra.Command, args []string) error {
 	jsonMode, _ := cmd.Flags().GetBool("json")
 	out := cmd.OutOrStdout()
@@ -119,7 +107,7 @@ func runTeams(cmd *cobra.Command, args []string) error {
 		output := teamsOutput{
 			PrimaryTeam: primaryTeamID,
 			Teams:       entries,
-			Guidance:    "Use 'ox agent team-ctx <slug>' to read a team's context.",
+			Guidance:    "Use 'ox team show <slug>' for one team's details, or 'ox team members' for its coworkers.",
 		}
 		encoder := json.NewEncoder(out)
 		encoder.SetIndent("", "  ")
@@ -213,8 +201,12 @@ func runTeams(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(out, "\n  %s %s\n", teamsLabelStyle.Render("Path:"), teamsPathStyle.Render(rootDir+"/<team_id>"))
 	}
 	fmt.Fprintf(out, "  %s %s\n",
-		teamsHintStyle.Render("Read:"),
-		teamsCommandStyle.Render("ox agent team-ctx <slug>"),
+		teamsHintStyle.Render("Details:"),
+		teamsCommandStyle.Render("ox team show <slug>"),
+	)
+	fmt.Fprintf(out, "  %s %s\n",
+		teamsHintStyle.Render("Coworkers:"),
+		teamsCommandStyle.Render("ox team members"),
 	)
 
 	return nil

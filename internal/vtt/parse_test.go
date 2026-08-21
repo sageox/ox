@@ -110,6 +110,75 @@ How are you
 	}
 }
 
+// TestParseBodylessCueKeepsOrdinals verifies a cue with a timestamp line but
+// no text body still emits (empty text, parsed interval) so Index tracks true
+// file position. Failure prevented: a dropped body-less cue shifts every
+// later cue's ordinal, so cue-range selectors (--cues N-M) and cue_ref
+// citations authored against the file's numbering resolve to the wrong cue.
+func TestParseBodylessCueKeepsOrdinals(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []struct {
+			index int
+			text  string
+		}
+	}{
+		{
+			name: "body-less cue mid-file",
+			input: `WEBVTT
+
+00:00:00.000 --> 00:00:01.000
+Alpha
+
+00:00:01.000 --> 00:00:02.000
+
+00:00:02.000 --> 00:00:03.000
+Gamma
+`,
+			want: []struct {
+				index int
+				text  string
+			}{{1, "Alpha"}, {2, ""}, {3, "Gamma"}},
+		},
+		{
+			name: "body-less final cue without trailing blank line",
+			input: `WEBVTT
+
+00:00:00.000 --> 00:00:01.000
+Alpha
+
+00:00:01.000 --> 00:00:02.000`,
+			want: []struct {
+				index int
+				text  string
+			}{{1, "Alpha"}, {2, ""}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cues, err := Parse([]byte(tt.input))
+			if err != nil {
+				t.Fatalf("Parse failed: %v", err)
+			}
+			if len(cues) != len(tt.want) {
+				t.Fatalf("got %d cues, want %d: %+v", len(cues), len(tt.want), cues)
+			}
+			for i, w := range tt.want {
+				if cues[i].Index != w.index || cues[i].Text != w.text {
+					t.Errorf("cue %d = {Index:%d Text:%q}, want {Index:%d Text:%q}",
+						i, cues[i].Index, cues[i].Text, w.index, w.text)
+				}
+			}
+			// The body-less cue keeps its parsed interval so time-window
+			// selectors still see it.
+			if cues[1].Start == 0 && cues[1].End == 0 {
+				t.Errorf("body-less cue lost its timing: %+v", cues[1])
+			}
+		})
+	}
+}
+
 func TestParseSpeakerExtraction(t *testing.T) {
 	input := `WEBVTT
 

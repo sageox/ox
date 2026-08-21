@@ -1,0 +1,12 @@
+{
+  "schema_version": 2,
+  "recording_id": "rec_019ff2f5-2079-7be1-b05e-8caad2772e61",
+  "title": "Full Fixture Discussion",
+  "human_summary": "The team agreed to trust the index file as the only lookup source and to hire a forward deployed engineer.",
+  "participants": [
+    {"name": "Galex Yen", "role": "Speaker"},
+    {"name": "Ryan", "role": "Speaker"},
+    {"name": "", "role": "Ghost"}
+  ],
+  "chapters": [{"id": "ch-1", "title": "ignored by show"}]
+}

@@ -1,0 +1,29 @@
+{
+  "$schema_version": 1,
+  "layer_id": "clyr_019ff2f6-029d-7d89-8653-6d8df20ac203",
+  "conversation_id": "cnv_019ff2f5-2079-7be1-b05e-8caad2772e61",
+  "kind": "annotation",
+  "modality": "text",
+  "mime": "text/vtt",
+  "language": null,
+  "label": "Annotation",
+  "origin": "derived",
+  "spec": "sageox://layer-spec/annotation/1",
+  "revision": 1,
+  "status": "active",
+  "supersedes": null,
+  "lineage": [],
+  "clock": {
+    "t0": ""
+  },
+  "content": {
+    "kind": "annotation",
+    "refs": [
+      {
+        "ref": "git-file",
+        "path": "transcript.vtt",
+        "mime": "text/vtt"
+      }
+    ]
+  }
+}

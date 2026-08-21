@@ -1,0 +1,119 @@
+name: Release Drift Check
+
+# Scheduled-only by design: a version-bump PR legitimately precedes its
+# release, so a pull_request/push gate here would be wrong. This checks
+# whether a bump that landed on main was ever actually tagged/published.
+on:
+  schedule:
+    - cron: '17 14 * * *'  # daily, off-peak UTC
+  workflow_dispatch: {}
+
+# Serialize runs so two concurrent invocations can't both find no open
+# drift issue and both create one.
+concurrency:
+  group: release-drift
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-drift:
+    if: github.repository == 'sageox/ox'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Check for release drift
+        id: drift
+        run: |
+          if OUTPUT=$(bash scripts/check-release-drift.sh --json); then
+            STATUS=0
+          else
+            STATUS=$?
+          fi
+
+          echo "Raw output: $OUTPUT"
+
+          # STATUS 0 = in sync, STATUS 1 = drift detected -- both are
+          # expected outcomes handled below. STATUS >= 2 is a real script
+          # error (bad gh auth, unparsable version.go, etc.) and should
+          # fail loudly rather than being silently treated as "no drift".
+          if [ "$STATUS" -ge 2 ]; then
+            echo "::error::check-release-drift.sh errored (exit $STATUS): $OUTPUT"
+            exit "$STATUS"
+          fi
+
+          CURRENT=$(echo "$OUTPUT" | jq -r '.current')
+          # '// empty' so a null latest (no releases yet) doesn't become the
+          # literal string "null" and get posted as "vnull" downstream.
+          LATEST=$(echo "$OUTPUT" | jq -r '.latest // empty')
+          DRIFT=$(echo "$OUTPUT" | jq -r '.drift')
+
+          {
+            echo "current=$CURRENT"
+            echo "latest=$LATEST"
+            echo "drift=$DRIFT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Ensure release-drift label exists
+        if: steps.drift.outputs.drift == 'true'
+        run: |
+          gh label create release-drift \
+            --color B60205 \
+            --description "version.go on main is ahead of the latest published GitHub release" \
+            --repo "$GITHUB_REPOSITORY" || true
+
+      - name: Open or refresh drift tracking issue
+        if: steps.drift.outputs.drift == 'true'
+        env:
+          CURRENT: ${{ steps.drift.outputs.current }}
+          LATEST: ${{ steps.drift.outputs.latest }}
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --label release-drift --state open --json number --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" \
+              --body "Still drifted as of $TODAY: internal/version/version.go says $CURRENT, latest published release is v$LATEST."
+          else
+            # Built with printf (not a heredoc) so every line stays inside
+            # this step's YAML block-scalar indentation.
+            BODY=$(printf '%s\n' \
+              "internal/version/version.go on \`main\` says **$CURRENT**, but the latest published GitHub release is **v$LATEST**." \
+              "" \
+              "A version bump was merged to \`main\` without a corresponding tagged, published release, so \`releases/latest\` (and the update-notify chain that reads it) is still pointing at the old version." \
+              "" \
+              "**To fix:** create the git tag \`v$CURRENT\` and publish a GitHub release for it. Publishing fires \`.github/workflows/release.yml\`, which builds and uploads the release artifacts." \
+              "" \
+              "This issue was opened automatically by \`.github/workflows/release-drift.yml\` and will close automatically once the release is published.")
+
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "Release drift: v$CURRENT merged but not published" \
+              --label release-drift \
+              --body "$BODY"
+          fi
+
+          echo "::error::Release drift detected: version.go ($CURRENT) is ahead of the latest published release (v$LATEST)"
+          exit 1
+
+      - name: Close stale drift issue
+        if: steps.drift.outputs.drift == 'false'
+        env:
+          CURRENT: ${{ steps.drift.outputs.current }}
+          LATEST: ${{ steps.drift.outputs.latest }}
+        run: |
+          for NUM in $(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --label release-drift --state open --json number --jq '.[].number'); do
+            gh issue comment "$NUM" --repo "$GITHUB_REPOSITORY" \
+              --body "Resolved: version.go ($CURRENT) <= latest release (v$LATEST)."
+            gh issue close "$NUM" --repo "$GITHUB_REPOSITORY"
+          done

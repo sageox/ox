@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "source": {
+    "kind": "builtin",
+    "revision": "fb8f98f38e6c8cdf",
+    "version": "0.14.0"
+  },
+  "desired": {
+    "bundles": [
+      "core"
+    ],
+    "targets": [
+      "claude-project"
+    ]
+  },
+  "targets": [
+    {
+      "key": "claude-project",
+      "root": ".claude/skills",
+      "format": "agent-skills/v1",
+      "scope": "project",
+      "link_policy": "reject"
+    }
+  ],
+  "managed_files": [
+    {
+      "target": "claude-project",
+      "path": ".claude/skills/ox-consult/SKILL.md",
+      "digest": "sha256:4f281f6f07cb5854ab2c3fc27ae445faf4a7d123e785c447bc74c5415a2631f1",
+      "mode": "0644"
+    },
+    {
+      "target": "claude-project",
+      "path": ".claude/skills/ox-decision/SKILL.md",
+      "digest": "sha256:126f75ee2faaa217b617774f6571aa0ac598e6b62eae3019f8082e105e2efe8d",
+      "mode": "0644"
+    },
+    {
+      "target": "claude-project",
+      "path": ".claude/skills/ox-plan/SKILL.md",
+      "digest": "sha256:d3ef61460eacd9a94f75c270b4aa815e82003d1763bbe887b19afbe2aeefb1b9",
+      "mode": "0644"
+    },
+    {
+      "target": "claude-project",
+      "path": ".claude/skills/ox-recap/SKILL.md",
+      "digest": "sha256:30d9700a52855d218ab8f8390faa2f4d6b6435e4788fa8b5e15498b2531175a7",
+      "mode": "0644"
+    },
+    {
+      "target": "claude-project",
+      "path": ".claude/skills/ox-session-review/SKILL.md",
+      "digest": "sha256:53ac0ccefe01e887b17b03db679323e3571f37955a79419ad26ca10032cfc99f",
+      "mode": "0644"
+    },
+    {
+      "target": "claude-project",
+      "path": ".claude/skills/ox-skill-manager/SKILL.md",
+      "digest": "sha256:79637ffd24cf081c56cba369716e3fd36db76f911b8e08acf929a0a58ebd5010",
+      "mode": "0644"
+    },
+    {
+      "target": "claude-project",
+      "path": ".claude/skills/ox-viz/SKILL.md",
+      "digest": "sha256:9e1a0b0679c00caa98f3836e9b4b33e80b22b749415ba3618c25afbba6c86f9f",
+      "mode": "0644"
+    }
+  ]
+}

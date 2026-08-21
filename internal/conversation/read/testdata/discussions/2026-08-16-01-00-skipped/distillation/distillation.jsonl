@@ -1,0 +1,1 @@
+{"type": "episode", "schema_version": 2, "id": "ep_019ff600-0000-7000-8000-000000000e02", "status": "skipped", "recording_uri": "sageox://cnv_019ffd00-0000-7000-8000-000000000005", "provenance": {"extracted_at": "2026-08-16T01:10:00Z", "extracted_by_run_id": "run3", "llm_model": "m", "prompt_version": "engine-v2", "backstop_version": 1}, "skipped_reason": "cluster_exhausted_v2"}

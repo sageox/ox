@@ -124,7 +124,7 @@ func (r inviteResult) hasFailure() bool {
 }
 
 var inviteCmd = &cobra.Command{
-	Use:   "invite <email>...",
+	Use:   "invite [email]...",
 	Short: "Invite people to a team by email",
 	Long: `Invite one or more people to a SageOx team.
 
@@ -137,22 +137,44 @@ With no --team, the invitation targets this repository's team. Whether you
 may invite, list, or cancel is decided by the server and reported back.
 
 Examples:
-  ox invite alice@acme.com
-  ox invite alice@acme.com,bob@acme.com
-  ox invite alice@acme.com --team sageox --role admin
-  ox invite --list
-  ox invite --cancel 0198f3c2-6c1a-7e40-9a0b-2f8c4d5e6f70
-  ox invite alice@acme.com --json`,
+  ox team invite alice@acme.com
+  ox team invite alice@acme.com,bob@acme.com
+  ox team invite alice@acme.com --team sageox --role admin
+  ox team invite --list
+  ox team invite --cancel 0198f3c2-6c1a-7e40-9a0b-2f8c4d5e6f70
+  ox team invite alice@acme.com --json`,
 	Args: cobra.ArbitraryArgs,
 	RunE: runInvite,
 }
 
+// inviteAliasCmd keeps `ox invite …` working after the command's canonical home
+// moved to `ox team invite`. It is hidden (the visible surface is `ox team
+// invite`) and shares runInvite, so every flag and argument — including
+// `--cancel <id>`, which the friction catalog cannot carry across the rename —
+// keeps its exact behavior. The `invite -> team invite` catalog entry documents
+// the move; this alias is what actually preserves it.
+var inviteAliasCmd = &cobra.Command{
+	Use:    "invite [email]...",
+	Short:  "Invite people to a team by email",
+	Hidden: true,
+	Args:   cobra.ArbitraryArgs,
+	RunE:   runInvite,
+}
+
+// addInviteFlags registers the invite flag set. It runs for both the canonical
+// `ox team invite` and the hidden `ox invite` alias so the two stay identical.
+func addInviteFlags(c *cobra.Command) {
+	c.Flags().String("team", "", "team slug, id, or name (defaults to the repo's active team)")
+	c.Flags().String("role", api.RoleMember, "role to grant: member, admin, or owner")
+	c.Flags().BoolP("yes", "y", false, "skip the confirmation prompt")
+	c.Flags().Bool("list", false, "list invitations that are still outstanding")
+	c.Flags().String("cancel", "", "cancel a pending invitation by its id (from --list)")
+}
+
 func init() {
-	inviteCmd.Flags().String("team", "", "team slug, id, or name (defaults to the repo's active team)")
-	inviteCmd.Flags().String("role", api.RoleMember, "role to grant: member, admin, or owner")
-	inviteCmd.Flags().BoolP("yes", "y", false, "skip the confirmation prompt")
-	inviteCmd.Flags().Bool("list", false, "list invitations that are still outstanding")
-	inviteCmd.Flags().String("cancel", "", "cancel a pending invitation by its id (from --list)")
+	addInviteFlags(inviteCmd)
+	addInviteFlags(inviteAliasCmd)
+	rootCmd.AddCommand(inviteAliasCmd)
 }
 
 // invite styles — mirrors the Tufte-ish pattern in teams.go/status.go.
@@ -228,7 +250,7 @@ func runInvite(cmd *cobra.Command, args []string) error {
 	emails := splitEmails(args)
 	if len(emails) == 0 {
 		if jsonOutput || !cli.IsInteractive() {
-			return fmt.Errorf("give at least one email address, for example: ox invite alice@acme.com")
+			return fmt.Errorf("give at least one email address, for example: ox team invite alice@acme.com")
 		}
 		emails, err = promptForEmails()
 		if err != nil {
@@ -819,7 +841,7 @@ func inviteGuidance(res inviteResult, sent, pending, failed int) string {
 	for _, o := range res.Outcomes {
 		switch o.Status {
 		case statusInvalidEmail:
-			fmt.Fprintf(&b, " %s was rejected as malformed — correct it and re-run 'ox invite <email> --team %s'.", o.Email, teamRef)
+			fmt.Fprintf(&b, " %s was rejected as malformed — correct it and re-run 'ox team invite <email> --team %s'.", o.Email, teamRef)
 		case statusNotPermitted:
 			// Quote the server rather than diagnosing: who may invite is server
 			// policy and can change without this client changing, so a fix
@@ -853,7 +875,7 @@ func renderInviteAbort(w io.Writer, err error, jsonOutput bool) error {
 			if jerr := writeJSONIndent(w, map[string]string{
 				"error":    "unsupported",
 				"message":  api.ErrInviteUnsupported.Error(),
-				"guidance": "This SageOx server has no CLI invite endpoint. Invite from the dashboard with 'ox view team'.",
+				"guidance": "This SageOx server has no CLI invite endpoint. Invite from the dashboard with 'ox team open'.",
 			}); jerr != nil {
 				return jerr
 			}
@@ -861,7 +883,7 @@ func renderInviteAbort(w io.Writer, err error, jsonOutput bool) error {
 			return cli.ErrSilent
 		}
 		fmt.Fprintf(w, "%s %s\n\n", inviteWarnStyle.Render("⚠"), api.ErrInviteUnsupported.Error())
-		cli.PrintActionHintTo(w, "ox view team", "Invite from the dashboard")
+		cli.PrintActionHintTo(w, "ox team open", "Invite from the dashboard")
 		return cli.ErrSilent
 	case errors.Is(err, api.ErrPersonalTeam):
 		return renderPersonalTeamRefusal(w, jsonOutput)
@@ -918,16 +940,16 @@ func inviteAbortJSONDetails(err error) (code, message, guidance string, ok bool)
 	switch {
 	case errors.Is(err, api.ErrInviteUnsupported):
 		return "unsupported", api.ErrInviteUnsupported.Error(),
-			"This SageOx server has no CLI invite endpoint. Invite from the dashboard with 'ox view team'.", true
+			"This SageOx server has no CLI invite endpoint. Invite from the dashboard with 'ox team open'.", true
 	case errors.Is(err, api.ErrPersonalTeam):
 		return string(statusPersonalTeam), api.ErrPersonalTeam.Error(),
 			"This is a private per-user team; it is single-member by design and cannot take invitations from anyone. Choose a shared team — run 'ox teams' to see them — and retry with --team <slug>.", true
 	case errors.Is(err, api.ErrUnauthorized):
 		return "unauthenticated", "not authenticated",
-			"Run 'ox login' first, then retry 'ox invite'.", true
+			"Run 'ox login' first, then retry 'ox team invite'.", true
 	case errors.Is(err, api.ErrVersionUnsupported):
 		return "version_unsupported", api.ErrVersionUnsupported.Error(),
-			"Upgrade ox, then retry 'ox invite'.", true
+			"Upgrade ox, then retry 'ox team invite'.", true
 	default:
 		return "", "", "", false
 	}
@@ -958,7 +980,7 @@ func errInviteNotAuthenticated(w io.Writer, jsonOutput bool) error {
 		if jerr := writeJSONIndent(w, map[string]string{
 			"error":    "unauthenticated",
 			"message":  "not authenticated",
-			"guidance": "Run 'ox login' first, then retry 'ox invite'.",
+			"guidance": "Run 'ox login' first, then retry 'ox team invite'.",
 		}); jerr != nil {
 			return jerr
 		}
@@ -983,7 +1005,7 @@ func errInviteNoTeam(w io.Writer, jsonOutput bool) error {
 	fmt.Fprintf(w, "%s %s\n\n", inviteErrStyle.Render("✗"), "No team to invite to.")
 	fmt.Fprintf(w, "  %s\n\n", cli.StyleDim.Render("This directory isn't linked to a team, and --team wasn't given."))
 	cli.PrintActionHintTo(w, "ox teams", "List teams you belong to")
-	cli.PrintActionHintTo(w, "ox invite <email> --team <slug>", "Name the team explicitly")
+	cli.PrintActionHintTo(w, "ox team invite <email> --team <slug>", "Name the team explicitly")
 	return cli.ErrSilent
 }
 
@@ -1138,7 +1160,7 @@ func renderInviteList(w io.Writer, target inviteTarget, invites []api.PendingInv
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  %s\n", inviteValueStyle.Render(
 		fmt.Sprintf("%d outstanding · %s", len(entries), target.displayName())))
-	cli.PrintActionHintTo(w, "ox invite --cancel <invite id>", "Cancel one of these")
+	cli.PrintActionHintTo(w, "ox team invite --cancel <invite id>", "Cancel one of these")
 	return nil
 }
 
@@ -1177,7 +1199,7 @@ func inviteListGuidance(target inviteTarget, entries []inviteListEntry) string {
 		ref = target.Ref
 	}
 	if len(entries) == 0 {
-		return fmt.Sprintf("No outstanding invitations for %s. Send one with 'ox invite <email> --team %s'.", target.displayName(), ref)
+		return fmt.Sprintf("No outstanding invitations for %s. Send one with 'ox team invite <email> --team %s'.", target.displayName(), ref)
 	}
 	var expired int
 	for _, e := range entries {
@@ -1185,7 +1207,7 @@ func inviteListGuidance(target inviteTarget, entries []inviteListEntry) string {
 			expired++
 		}
 	}
-	msg := fmt.Sprintf("%d outstanding invitation(s) for %s. Cancel one with 'ox invite --cancel <invite_id> --team %s' using the invite_id field, not the invite link.", len(entries), target.displayName(), ref)
+	msg := fmt.Sprintf("%d outstanding invitation(s) for %s. Cancel one with 'ox team invite --cancel <invite_id> --team %s' using the invite_id field, not the invite link.", len(entries), target.displayName(), ref)
 	if expired > 0 {
 		msg += fmt.Sprintf(" %d has already lapsed and can be canceled to tidy the list.", expired)
 	}
@@ -1195,12 +1217,12 @@ func inviteListGuidance(target inviteTarget, entries []inviteListEntry) string {
 func runInviteCancel(ctx context.Context, out io.Writer, l inviteLister, target inviteTarget, inviteID string, jsonOutput, skipConfirm bool) error {
 	inviteID = strings.TrimSpace(inviteID)
 	if inviteID == "" {
-		return fmt.Errorf("--cancel needs an invite id (see 'ox invite --list')")
+		return fmt.Errorf("--cancel needs an invite id (see 'ox team invite --list')")
 	}
 	// An email address here is the most likely mistake, and the server would
 	// answer with an opaque 400. Name the actual problem instead.
 	if strings.Contains(inviteID, "@") {
-		return fmt.Errorf("--cancel takes an invite id, not an email address — run 'ox invite --list' to find it")
+		return fmt.Errorf("--cancel takes an invite id, not an email address — run 'ox team invite --list' to find it")
 	}
 
 	if !skipConfirm && !jsonOutput && cli.IsInteractive() {
@@ -1219,7 +1241,7 @@ func runInviteCancel(ctx context.Context, out io.Writer, l inviteLister, target 
 			"team":      inviteJSONTeam{TeamID: target.ID, Name: target.Name, Slug: target.Slug},
 			"invite_id": inviteID,
 			"status":    "canceled",
-			"guidance":  "The invitation was canceled. Its link no longer works. Run 'ox invite --list' to see what remains.",
+			"guidance":  "The invitation was canceled. Its link no longer works. Run 'ox team invite --list' to see what remains.",
 		})
 	}
 	fmt.Fprintf(out, "%s Invitation canceled.\n\n", inviteOKStyle.Render("✓"))

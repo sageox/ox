@@ -85,7 +85,7 @@ var agentGeneralTips = []string{
 var primeUserTips = []string{
 	`Try asking %s: "Tell me recent major decisions from our SageOx team discussions"`,
 	"Sessions are auto-recorded and shared with your team. To disable: `ox config set session_recording disabled`",
-	"View your team's knowledge base in the browser with `ox view team`",
+	"View your team's knowledge base in the browser with `ox team open`",
 	"SageOx team context updates automatically — decisions from one session inform every future session",
 	"Record team discussions at sageox.ai to give all AI coworkers shared context",
 	`Launch %s and ask: "Based on the SageOx team context, what would be the next task that would bring all the recent work of the team into better alignment?"`,

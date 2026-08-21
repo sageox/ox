@@ -9,9 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### New
 
-- **`ox export` — take your data with you** — shows exactly where your Ledger and Team Contexts live on disk and how to reach them with plain git, because SageOx is not a walled garden; `--sync` checks out and refreshes every team context and this repo's ledger first.
-- **SageOx Files is detected as a read path** — where the macOS Files app has mounted your team's drive, `ox status` now says so on the team card. Set `OX_FILES_MOUNT=1` and `ox agent prime` reads team documents from the mount instead of the git checkout: it hydrates from the server on access, so it answers where a checkout that missed a `ox sync` would be stale or missing entirely. Off by default, falls back to the checkout whenever the mount is absent, unreadable, or does not carry the team, and never writes to it.
-- **Reviewer-first pull-request visuals** — `ox viz pr` selects prose, GitHub-safe Mermaid, or a rich attachment from the reviewer question; rich recipes now include construction-ready visual contracts, lightweight PNG checks, and personal, repository, and team preferences.
+- **SageOx Files joins your team context as a second source** — where the macOS Files app has mounted your team's drive, `ox status` now says so on the team card. Set `SAGEOX_FILES_MOUNT=1` and `ox agent prime` reads that drive *alongside* your git checkout rather than in place of it: the checkout stays authoritative wherever both carry the same document, and the drive fills the gaps — a doc that has not synced yet, or a team this machine never cloned. Off by default, never written to, and a drive that is absent or unreachable takes nothing away from what your checkout already had.
+
+### Improved
+
+- **`ox upgrade` now updates direct installs in place** — if you installed ox with the quick-install script, `ox upgrade` downloads and swaps in the new version for you (verified before it is applied) instead of just printing instructions. Homebrew and `go install` installs upgrade as before.
+- **You hear about new versions even without the background service running** — `ox status` checks for a newer ox on its own and offers to upgrade on the spot.
+
+## [0.14.0] - 2026-08-20
+
+Give every AI coworker the right skills, keep plans intact through review, and put your team's data, conversations, and the evidence behind your software in your hands, not locked away.
+
+### New
+
+- **Skills work where your AI coworkers already look** — Claude, Codex, and Gemini can use the same project skills without a separate setup for each tool.
+- **Know what your repository can demonstrate** — `ox attest` gives you an honest view of documented capabilities and their evidence, so you can see what is verified, stale, or still unproven — and get guided help closing the gaps.
+- **Share evidence, not just test claims** — publish attestation results for the team to inspect, including verified failures that need attention.
+- **Visual plans remain the plan of record** — save an interactive plan page, enrich it with team context, and review the same page without losing the author's work. Saving now also renders a shareable preview poster summarizing the plan at a glance.
+- **Reviewer-first pull-request visuals** — `ox viz pr` selects prose, GitHub-safe Mermaid, or a rich attachment from the reviewer's question; rich recipes include construction-ready visual contracts, lightweight checks, and personal, repository, and team preferences.
+- **`ox export` — take your data with you** — shows exactly where your Ledger and Team Contexts live on disk and how to reach them with plain git, because SageOx is not a walled garden; `--sync` checks out and refreshes every Team Context and this repo's Ledger first.
+- **Read recorded team conversations locally** — the new `ox conversation` family (`list`, `show`, `topics`, `topic`, `transcript`) browses your team's recorded discussions straight from disk, and a `sageox://` citation copied from any distilled claim retrieves its exact transcript slice in one command.
+- **See your team roster from the terminal** — `ox team members` lists everyone on your team without leaving the command line.
+- **OMP joins the list of supported AI coworkers** — sessions record and team context primes automatically.
+
+### Improved
+
+- **AI coworkers receive richer collaboration context** — recent meeting details can travel with team updates, making handoffs and follow-up work more informed.
+- **Plans are clearer to review** — SageOx preserves the author's visual structure while adding the team context and review tools that help people make decisions quickly.
+- **Every AI coworker follows the same plan standards** — the plan-authoring principles are now primed automatically, so plans stay consistent no matter which coworker writes them.
+- **Answers point back to exactly where they came from** — team-knowledge citations now resolve to the precise source, so a coworker's claim can be checked, not just trusted.
 
 ### Changed
 
@@ -19,29 +45,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Your skill customizations stay safe** — updates preserve edits and report conflicts instead of overwriting work you made locally.
+- **Skill setup recovers cleanly** — interrupted changes can be repaired, and SageOx remembers the AI coworkers you chose for a project.
+- **Codex integration works with its current hook system** — existing SageOx workflows continue to run as Codex evolves.
+- **Projects recover more reliably** — SageOx keeps recovery work scoped to the right project so one workspace's trouble does not affect another.
+- **`ox session abort` now removes a session completely** — including ones that already finished recording, not just drafts or ones still in progress.
+- **Session recording identifies your AI coworker more reliably** — known coworkers are matched by name instead of guessed from behavior, cutting down on misattributed sessions.
+- **Readable output on every terminal** — SageOx colors now degrade correctly on terminals without full truecolor support, instead of rendering unreadable combinations.
 - **Reliable carts Dolt server reuse** — ox now validates that a recorded server actually answers before reusing it (rejecting a stale port left by a crashed server whose PID was recycled), serializes startup with an advisory lock so concurrent invocations can't spawn duplicate servers, and publishes the server's pid/port only after it accepts connections.
 
-## [0.14.0] - 2026-08-15
+### Security
 
-Skills now reach each AI coworker through its native discovery mechanism, while SageOx keeps project-scoped installations safe, consistent, and repairable.
-
-### New
-
-- **Native skill management across Claude, Codex, and Gemini** — each AI coworker receives skills in the project directory it already knows how to discover.
-- **Project-scoped skill ownership** — `.sageox/skills.lock.json` records selected targets, bundles, revisions, and managed file digests so updates and removal are precise.
-
-### Improved
-
-- **One shared installation for Codex and Gemini** — their common `.agents/skills` target is reconciled once, eliminating duplicate work and misleading counts.
-- **`ox doctor` checks the complete skill tree** — scripts, references, and assets are verified alongside `SKILL.md`, and `ox doctor --fix` applies the same deterministic plan.
-- **Portable skills stay portable** — content installed in `.agents/skills` no longer depends on Claude-only wording or invocation syntax.
-
-### Fixed
-
-- **User edits and collisions are preserved** — SageOx updates or removes only files whose digest still matches the last managed version, reporting conflicts instead of overwriting them.
-- **Interrupted updates recover safely** — managed files are staged and validated before the ownership lockfile is committed last, so the next reconciliation converges cleanly.
-- **Selected AI coworker targets persist after `ox init`** — Doctor no longer installs skills for detected but unselected targets.
-- **Deterministic repair no longer consumes an AI task** — skill reconciliation runs during explicit lifecycle commands instead of a daily daemon-scheduled coworker job.
+- **Malformed `SAGEOX_TOKEN` values are caught immediately** — login and every command now fail closed with a clear error instead of silently falling back to a broken session, and `ox status` reports the problem directly.
 
 ## [0.13.0] - 2026-08-11
 
