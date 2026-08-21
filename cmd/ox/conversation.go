@@ -22,7 +22,7 @@ import (
 var conversationCmd = &cobra.Command{
 	Use:     "conversation",
 	Aliases: []string{"conv"},
-	Short:   "Read recorded team conversations from the local team context",
+	Short:   "Read recorded team conversations from the local Team Context",
 	Long: `Read-only commands for browsing recorded team conversations locally:
 summaries, transcript slices, and distillation topics, served from the
 team-context checkout the daemon keeps synced. Works fully logged out.
