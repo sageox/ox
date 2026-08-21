@@ -1996,21 +1996,33 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 		ReadCommand: "ox agent team-ctx", // not quoted: this is a machine-parsed command field
 	}
 
+	// Read team documents from the mounted drive when one carries this team.
+	// It hydrates from the Drive API on access rather than at the last sync, so
+	// it answers where a checkout that missed a pull would be stale — or absent.
+	//
+	// Only reads move. info.Path, sync state, and everything that writes stay on
+	// the checkout: the mount refuses every write at the OS boundary.
+	readRoot := tc.Path
+	if mounted, ok := mountedTeamRoot(tc.TeamID); ok {
+		readRoot = mounted
+		info.ReadFromMount = mounted
+	}
+
 	// if team context directory hasn't synced yet, return partial info
 	// so agents still see the "team context available" section
-	if _, err := os.Stat(tc.Path); os.IsNotExist(err) {
+	if _, err := os.Stat(readRoot); os.IsNotExist(err) {
 		return info
 	}
 
 	// check for human escalation roster
-	escalationPath := filepath.Join(tc.Path, "capabilities", "team", "index.md")
+	escalationPath := filepath.Join(readRoot, "capabilities", "team", "index.md")
 	if _, err := os.Stat(escalationPath); err == nil {
 		info.Escalation = "capabilities/team/index.md"
 	}
 
 	// discover coworker customizations from coworkers/
 	// agents in coworkers/agents/, commands in coworkers/commands/
-	customizations, err := claude.DiscoverAll(tc.Path)
+	customizations, err := claude.DiscoverAll(readRoot)
 	if err == nil && customizations != nil && customizations.HasAnyCustomizations() {
 		// populate instruction file paths
 		if customizations.HasInstructionFiles() {
@@ -2054,7 +2066,7 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 	// frontmatter is a markdown convention, and token estimation is
 	// trivial for text. Non-markdown assets need entirely different
 	// disclosure mechanisms and are out of scope for this catalog.
-	if docs, _ := teamdocs.DiscoverDocs(tc.Path); len(docs) > 0 {
+	if docs, _ := teamdocs.DiscoverDocs(readRoot); len(docs) > 0 {
 		info.TeamDocs = docs
 	}
 
@@ -2068,12 +2080,12 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 	// of these rules out to .claude/sageox-team-<slug>/rules/ inside the
 	// current repo so Claude's native paths:-scoped lazy loading kicks in
 	// for free. See cmd/ox/guides/team-rules.md for the rationale.
-	if rules, _ := teamdocs.DiscoverRules(tc.Path, repoSlug); len(rules) > 0 {
+	if rules, _ := teamdocs.DiscoverRules(readRoot, repoSlug); len(rules) > 0 {
 		info.TeamRules = rules
 	}
 
 	// v4 team memory loading
-	loadTeamMemory(info, tc.Path)
+	loadTeamMemory(info, readRoot)
 
 	// sync health: check staleness
 	syncState := daemon.LoadSyncState(tc.Path)
@@ -2089,7 +2101,7 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 
 	// check for agent-context/distilled-discussions.md
 	agentContextRelPath := filepath.Join("agent-context", "distilled-discussions.md")
-	agentContextPath := filepath.Join(tc.Path, agentContextRelPath)
+	agentContextPath := filepath.Join(readRoot, agentContextRelPath)
 	if content, err := os.ReadFile(agentContextPath); err == nil {
 		info.HasAgentContext = true
 		info.AgentContextPath = agentContextPath

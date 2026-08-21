@@ -737,6 +737,25 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			b.WriteString("\n")
 		}
 
+		// SageOx Files carries this team in Finder. Reported whether or not the
+		// session reads from it, because "it is mounted but ox is not using it"
+		// is the state someone turning the flag on needs to see first.
+		if mounted, ok := discoverMountedTeamRoot(cloudTC.StableID()); ok {
+			b.WriteString(statusLabelStyle.Render("  Files"))
+			if filesMountEnabled() {
+				b.WriteString(statusValueStyle.Render("mounted, reading from it"))
+			} else {
+				b.WriteString(statusValueStyle.Render(
+					"mounted, not in use (set " + filesMountEnv + "=1 to read from it)"))
+			}
+			b.WriteString("\n")
+			if showPath {
+				b.WriteString(statusLabelStyle.Render("  Files path"))
+				b.WriteString(statusMutedStyle.Render(mounted))
+				b.WriteString("\n")
+			}
+		}
+
 		gitDir := filepath.Join(expectedPath, ".git")
 		if _, err := os.Stat(gitDir); err == nil {
 			// layered sync time: prefer daemon (freshest), fall back to config file (persistent)

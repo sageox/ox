@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### New
 
 - **`ox export` — take your data with you** — shows exactly where your Ledger and Team Contexts live on disk and how to reach them with plain git, because SageOx is not a walled garden; `--sync` checks out and refreshes every team context and this repo's ledger first.
+- **SageOx Files is detected as a read path** — where the macOS Files app has mounted your team's drive, `ox status` now says so on the team card. Set `OX_FILES_MOUNT=1` and `ox agent prime` reads team documents from the mount instead of the git checkout: it hydrates from the server on access, so it answers where a checkout that missed a `ox sync` would be stale or missing entirely. Off by default, falls back to the checkout whenever the mount is absent, unreadable, or does not carry the team, and never writes to it.
 - **Reviewer-first pull-request visuals** — `ox viz pr` selects prose, GitHub-safe Mermaid, or a rich attachment from the reviewer question; rich recipes now include construction-ready visual contracts, lightweight PNG checks, and personal, repository, and team preferences.
 
 ### Changed

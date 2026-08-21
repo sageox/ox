@@ -65,12 +65,16 @@ type CapturePriorGuidance struct {
 // soul/team hints, memory) is NOT a deprecated mirror of Output.KB and
 // never migrates into it.
 type TeamContextInfo struct {
-	TeamID     string   `json:"team_id"`
-	TeamName   string   `json:"team_name,omitempty"`
-	IsRepoTeam bool     `json:"is_repo_team"`
-	Path       string   `json:"path"`
-	Agents     []string `json:"agents,omitempty"`     // discovered agent names
-	Escalation string   `json:"escalation,omitempty"` // path to human escalation roster if exists
+	TeamID     string `json:"team_id"`
+	TeamName   string `json:"team_name,omitempty"`
+	IsRepoTeam bool   `json:"is_repo_team"`
+	Path       string `json:"path"`
+	// ReadFromMount names the SageOx Files folder these documents were read
+	// from, empty when they came from the git checkout at Path. Path stays the
+	// checkout either way: it is where writes and sync go.
+	ReadFromMount string   `json:"read_from_mount,omitempty"`
+	Agents        []string `json:"agents,omitempty"`     // discovered agent names
+	Escalation    string   `json:"escalation,omitempty"` // path to human escalation roster if exists
 
 	// Coworker customizations from coworkers/
 	CoworkerInstructions  *TeamCoworkerInstructions `json:"coworker_instructions,omitempty"`
