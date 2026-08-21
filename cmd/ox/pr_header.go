@@ -1,0 +1,286 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"strings"
+
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/prheader"
+	"github.com/spf13/cobra"
+)
+
+// prCmd groups pull-request authoring helpers. It is distinct from `ox code prs`
+// (which LISTS indexed PRs for triage): `ox pr` AUTHORS content that goes INTO a
+// PR — today, the SageOx credit line.
+var prCmd = &cobra.Command{
+	Use:   "pr",
+	Short: "Author SageOx content for pull requests",
+	Long: `Author SageOx content that goes into a pull request.
+
+Distinct from 'ox code prs', which lists indexed PRs for triage.`,
+}
+
+var prHeaderCmd = &cobra.Command{
+	Use:   "header",
+	Short: "Emit the SageOx credit line for the top of a PR description",
+	Long: `Emit a thin, on-brand credit line to paste at the very TOP of a pull-request
+description body — the human-facing counterpart to the 'SageOx-Session:' trailer.
+
+It names the team, links the session(s) and plan(s) that produced the change,
+and whispers a subtle enrichment stat. Paste the output above your description;
+keep the 'SageOx-Session:' trailer at the bottom.
+
+The line is built from the primitives that survive GitHub's PR-body sanitizer
+(a theme-adaptive <picture> wordmark, real <a> links, a <sub> caption) and
+degrades cleanly: no session, no plan, and no enrichment each still render.
+
+Examples:
+  # Auto-link the current session; no enrichment
+  ox pr header
+
+  # Link two plans the session produced, with enrichment counts
+  ox pr header --plan pln_4d8e2f --plan pln_1a6b9c --prior-art 2 --collisions 1
+
+  # Write straight into a PR body file (never a heredoc — it mangles the markup)
+  ox pr header > body.md && cat description.md >> body.md
+  gh pr create --body-file body.md`,
+	RunE: runPRHeader,
+}
+
+func init() {
+	prCmd.GroupID = "dev" // sits with `ox plan`, `ox session`, `ox code`
+	prCmd.AddCommand(prHeaderCmd)
+	rootCmd.AddCommand(prCmd)
+
+	f := prHeaderCmd.Flags()
+	f.StringArray("session", nil, "session URL or ses_ id to link (repeatable; defaults to the current session)")
+	f.StringArray("plan", nil, "plan URL or pln_ id to link (repeatable)")
+	f.Int("prior-art", 0, "enrichment: prior-art hits found")
+	f.Int("collisions", 0, "enrichment: teammate work collisions found")
+	f.Int("expert-routes", 0, "enrichment: expert routes surfaced")
+	f.Bool("no-stat", false, "suppress the enrichment whisper")
+	f.String("style", "", "whisper render: text | image | auto (default: pr_visuals.style)")
+	f.Bool("allow-unconfirmed", false, "include the current session even if not yet server-visible (may 404)")
+}
+
+// prHeaderResponse is the --json shape for agent consumption: the paste-ready
+// markdown plus the resolved inputs, so an agent can verify what it will paste.
+type prHeaderResponse struct {
+	Markdown string           `json:"markdown"`
+	Tier     string           `json:"tier"` // "text" | "image"
+	Team     string           `json:"team,omitempty"`
+	Sessions []string         `json:"sessions,omitempty"`
+	Plans    []string         `json:"plans,omitempty"`
+	Signals  prheader.Signals `json:"signals"`
+}
+
+func runPRHeader(cmd *cobra.Command, _ []string) error {
+	gitRoot := findGitRoot()
+
+	// Respect a team/user opt-out. A disabled header no-ops with a hint rather
+	// than emitting an empty block into a PR body.
+	if !config.PRVisualsHeader(gitRoot) {
+		fmt.Fprintln(cmd.ErrOrStderr(), "pr_visuals.header is off — enable with: ox config set pr_visuals.header on")
+		return nil
+	}
+
+	cfg, _ := config.LoadProjectConfig(gitRoot)
+	ep := prResolveEndpoint(cfg)
+
+	in := prheader.Input{
+		ShowStat: !flagBool(cmd, "no-stat"),
+	}
+	if cfg != nil {
+		in.TeamName = cfg.TeamName
+		if slug := strings.TrimSpace(cfg.Team); slug != "" {
+			in.TeamURL = ep + "/t/" + url.PathEscape(slug)
+		}
+	}
+
+	// Sessions: explicit flags win; otherwise auto-link the current live session
+	// (only when server-visible, unless --allow-unconfirmed).
+	sessionArgs := flagStringArray(cmd, "session")
+	if len(sessionArgs) == 0 {
+		if u := autoSessionURL(gitRoot, flagBool(cmd, "allow-unconfirmed")); u != "" {
+			sessionArgs = []string{u}
+		}
+	}
+	sessionURLs := make([]string, 0, len(sessionArgs))
+	for _, s := range sessionArgs {
+		if u := artifactURL(ep, s, "/c/", "ses_"); u != "" {
+			in.Sessions = append(in.Sessions, prheader.Session{URL: u})
+			sessionURLs = append(sessionURLs, u)
+		}
+	}
+
+	planURLs := make([]string, 0)
+	for _, p := range flagStringArray(cmd, "plan") {
+		if u := artifactURL(ep, p, "/plan/", "pln_"); u != "" {
+			in.Plans = append(in.Plans, prheader.Plan{URL: u})
+			planURLs = append(planURLs, u)
+		}
+	}
+
+	// Enrichment signals come from the agent (it holds the ox plan enrich
+	// counts). Material is derived — we only whisper when a signal actually
+	// fired, never on an empty set.
+	in.Signals = prheader.Signals{
+		PriorArt:     flagInt(cmd, "prior-art"),
+		Collisions:   flagInt(cmd, "collisions"),
+		ExpertRoutes: flagInt(cmd, "expert-routes"),
+	}
+	in.Signals.Material = in.Signals.PriorArt > 0 || in.Signals.Collisions > 0 || in.Signals.ExpertRoutes > 0
+
+	// Tier B (baked floated strip) only when style allows AND a whisper is
+	// warranted AND an uploader can host it. Any failure falls back to Tier A
+	// text — the header must never fail because the image path is unreachable.
+	tier := "text"
+	if style := resolvePRStyle(cmd, gitRoot); style != config.PRVisualsStyleText && in.ShowStat && in.Signals.Material {
+		if strip, err := prheader.UploadStrip(resolveStripUploader(gitRoot), in.Signals); err == nil {
+			in.Strip = strip
+			tier = "image"
+		}
+	}
+
+	markup := prheader.Render(in)
+
+	if flagBool(cmd, "json") {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(prHeaderResponse{
+			Markdown: markup,
+			Tier:     tier,
+			Team:     in.TeamName,
+			Sessions: sessionURLs,
+			Plans:    planURLs,
+			Signals:  in.Signals,
+		})
+	}
+	// Render returns "" when the line would carry no payload (no team, session,
+	// plan, or whisper). Emit nothing to stdout rather than a bare wordmark.
+	if markup == "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "no team, session, or plan to credit — nothing to paste")
+		return nil
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), markup)
+	return nil
+}
+
+// prResolveEndpoint returns the normalized web endpoint, tolerating a nil config
+// (falls back to the environment/default) so the command still works with
+// fully-explicit flags outside a SageOx repo.
+func prResolveEndpoint(cfg *config.ProjectConfig) string {
+	if cfg != nil {
+		if ep := endpoint.NormalizeEndpoint(cfg.GetEndpoint()); ep != "" {
+			return ep
+		}
+	}
+	return endpoint.NormalizeEndpoint(endpoint.Get())
+}
+
+// autoSessionURL returns the current live session's /c/ URL, or "" when no link
+// is expected (no recording, attribution off, or a not-yet-server-visible
+// session unless the caller opts into unconfirmed links).
+func autoSessionURL(gitRoot string, allowUnconfirmed bool) string {
+	if u := liveSessionConversationURL(gitRoot); u != "" {
+		return u
+	}
+	if !allowUnconfirmed {
+		return ""
+	}
+	// --allow-unconfirmed: fall back to the raw live session id even before the
+	// remote resolver confirms it (the link may 404 until upload completes).
+	cfg, err := config.LoadProjectConfig(gitRoot)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	agentID, _ := detectAgentContext()
+	state := loadPlanRecordingState(gitRoot, agentID)
+	if state == nil || state.SessionID == "" {
+		return ""
+	}
+	return buildConversationURL(cfg, state.SessionID)
+}
+
+// artifactURL maps a flag value — either a full http(s) URL or a bare id — to a
+// web URL. A full URL passes through; a bare id becomes {ep}{pathPrefix}{id},
+// tolerating a missing type prefix so both "pln_abc" and "abc" resolve. A bare
+// id that names a DIFFERENT type (e.g. a "ses_" id passed to a --plan slot) is
+// rejected rather than resolved into a plausible-but-wrong 404 URL.
+func artifactURL(ep, raw, pathPrefix, idPrefix string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		return raw
+	}
+	if p := idTypePrefix(raw); p != "" && p != idPrefix {
+		return ""
+	}
+	if ep == "" {
+		return ""
+	}
+	return ep + pathPrefix + url.PathEscape(raw)
+}
+
+// idTypePrefix returns the leading "<type>_" token of a bare id (e.g. "pln_" for
+// "pln_4d8e2f"), or "" when the id carries no such prefix ("4d8e2f"). Only a
+// lowercase-letter run followed by an underscore counts, so an id whose body
+// merely contains underscores is treated as prefix-less.
+func idTypePrefix(raw string) string {
+	i := strings.IndexByte(raw, '_')
+	if i <= 0 {
+		return ""
+	}
+	for _, r := range raw[:i] {
+		if r < 'a' || r > 'z' {
+			return ""
+		}
+	}
+	return raw[:i+1]
+}
+
+// resolvePRStyle resolves the whisper style: the --style flag overrides the
+// config; an unknown flag value is ignored in favor of the config default.
+func resolvePRStyle(cmd *cobra.Command, gitRoot string) string {
+	if v := strings.TrimSpace(flagString(cmd, "style")); v != "" {
+		switch v {
+		case config.PRVisualsStyleText, config.PRVisualsStyleImage, config.PRVisualsStyleAuto:
+			return v
+		}
+	}
+	return config.PRVisualsStyle(gitRoot)
+}
+
+// resolveStripUploader returns the Uploader for the Tier-B baked strip. It is a
+// stub today: ox has no public-asset upload path yet (see the plan / bd
+// follow-up), so this returns nil and every style resolves to Tier A text. When
+// a SageOx cloud-image endpoint (or a credentialed CDN uploader) lands, wire it
+// here — the rest of the flow (render, fallback, tests) already handles Tier B.
+func resolveStripUploader(_ string) prheader.Uploader {
+	return nil
+}
+
+// Small flag accessors keep runPRHeader readable; cobra's error returns are safe
+// to drop here because every flag is registered with a default above.
+func flagBool(cmd *cobra.Command, name string) bool {
+	v, _ := cmd.Flags().GetBool(name)
+	return v
+}
+
+func flagInt(cmd *cobra.Command, name string) int {
+	v, _ := cmd.Flags().GetInt(name)
+	return v
+}
+
+func flagString(cmd *cobra.Command, name string) string {
+	v, _ := cmd.Flags().GetString(name)
+	return v
+}
+
+func flagStringArray(cmd *cobra.Command, name string) []string {
+	v, _ := cmd.Flags().GetStringArray(name)
+	return v
+}
