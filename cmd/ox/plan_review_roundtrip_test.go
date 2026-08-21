@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -33,6 +35,19 @@ func browserSubmit(t *testing.T, srvURL, reviewer, anchor, section, status, note
 		reviewer, anchor, section, section, status, note,
 	)
 	return reviewPOST(t, srvURL+"/feedback", "secret", body)
+}
+
+// drainUntilQuiet consumes broadcast signals until none arrive for `quiet` — used
+// to swallow the trailing, debounced watch-broadcast from a prior file write so a
+// later assertion observes only the signal it cares about.
+func drainUntilQuiet(ch <-chan struct{}, quiet time.Duration) {
+	for {
+		select {
+		case <-ch:
+		case <-time.After(quiet):
+			return
+		}
+	}
 }
 
 // TestBrowserRoundTrip_FeedbackReachesAuthoringAgent proves Rule 1: a mark Devon
@@ -127,13 +142,28 @@ func TestBrowserRoundTrip_AgentResolveShowsAddressedAndBroadcasts(t *testing.T) 
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
+	// The REAL notify path: watchPlanDir broadcasts a live reload whenever the plan
+	// dir changes — this is what turns an agent's out-of-band resolve into a
+	// reviewer-page reload, exactly as `ox plan review` wires it at runtime. Without
+	// it, "the reviewer sees it resolve live" would be asserted only as the state a
+	// reload WOULD read, never that a reload is actually triggered.
+	// Pre-create feedback/ so the watcher covers it from the start (it only Adds the
+	// subdir once, at launch — a subdir that appears later can be missed).
+	if err := os.MkdirAll(filepath.Join(dir, "feedback"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go watchPlanDir(ctx, dir, bc)
+
 	if code := browserSubmit(t, srv.URL, "Devon", "hopen1", "Risks", "request-change", "fix this"); code != http.StatusOK {
 		t.Fatalf("submit: %d", code)
 	}
-	// a submit repaints every open tab (including other reviewers')
+	// a submit repaints every open tab (including other reviewers') — the POST
+	// handler broadcasts synchronously before it returns 200
 	select {
 	case <-sub:
-	default:
+	case <-time.After(2 * time.Second):
 		t.Error("a submit must broadcast a live reload to open pages")
 	}
 
@@ -143,12 +173,27 @@ func TestBrowserRoundTrip_AgentResolveShowsAddressedAndBroadcasts(t *testing.T) 
 		t.Fatalf("item must be open before the agent addresses it, got %+v", before)
 	}
 
+	// Fresh subscription, drained to quiet, so the next signal we observe is caused
+	// by the resolve — not by the submit's own file-write still working through the
+	// watcher's debounce.
+	resolveSub := bc.subscribe()
+	t.Cleanup(func() { bc.unsubscribe(resolveSub) })
+	drainUntilQuiet(resolveSub, 400*time.Millisecond)
+
 	// Avery addresses it and records the disposition, exactly as
 	// `ox plan feedback resolve … --state addressed` does
 	if err := plan.AppendResolution(dir, plan.Resolution{
 		Anchor: "hopen1", State: plan.ResolutionAddressed, Commit: "abc1234", Note: "handled",
 	}, time.Now()); err != nil {
 		t.Fatalf("agent resolve: %v", err)
+	}
+
+	// the running watcher sees the resolution and tells the reviewer's page to
+	// reload — the "reviewer sees it resolve live" beat, driven end to end
+	select {
+	case <-resolveSub:
+	case <-time.After(3 * time.Second):
+		t.Fatal("resolving an item must broadcast a live reload to the reviewer's page")
 	}
 
 	// the state the reloaded page reads now shows it addressed, not open
@@ -181,9 +226,21 @@ func TestBrowserRoundTrip_AcceptClearsAndReopenReturnsToAgent(t *testing.T) {
 		t.Fatalf("resolve: %v", err)
 	}
 
-	// Devon accepts the fix — it stops being open
+	// Devon accepts the fix — a verified resolution is recorded (asserted first and
+	// unconditionally: the addressed resolution above already cleared open, so an
+	// open-count check alone would pass even if /accept persisted nothing).
 	if code := reviewPOST(t, srv.URL+"/accept", "secret", `{"anchor":"hitem1"}`); code != http.StatusOK {
 		t.Fatalf("accept: %d", code)
+	}
+	resns, _ := plan.LoadResolutions(planDir)
+	verified := false
+	for _, r := range resns {
+		if r.Anchor == "hitem1" && r.State == plan.ResolutionVerified {
+			verified = true
+		}
+	}
+	if !verified {
+		t.Fatalf("accept must record a verified resolution for the item, got %+v", resns)
 	}
 	if _, done := awaitSnapshot(planDir); done {
 		t.Error("an accepted item must not remain open work for the agent")
