@@ -380,7 +380,7 @@ line — the human-facing counterpart to the SageOx-Session: trailer. It links t
 session(s) and plan(s) that produced the change, names the team, and whispers a
 subtle enrichment stat.
 
-  on  - Emit the credit line for AI-coworker PRs. (default)
+  on  - Emit the credit line for AI coworker PRs. (default)
   off - Do not emit it; ox pr header no-ops with a hint.
 
 Set at team, repository, or personal scope. Personal choices override a

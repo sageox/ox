@@ -1,6 +1,9 @@
 package prheader
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // ErrUploadUnavailable is returned by an Uploader that cannot host an asset in
 // the current environment (no credentials, no configured endpoint). The command
@@ -30,19 +33,19 @@ func UploadStrip(u Uploader, s Signals) (*StripURLs, error) {
 	base := stripContentName(s)
 	light, err := RenderStripSVG(s, "light")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("prheader: render light strip: %w", err)
 	}
 	dark, err := RenderStripSVG(s, "dark")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("prheader: render dark strip: %w", err)
 	}
 	lightURL, err := u.Upload(base+"-light.svg", light)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("prheader: upload light strip: %w", err)
 	}
 	darkURL, err := u.Upload(base+"-dark.svg", dark)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("prheader: upload dark strip: %w", err)
 	}
 	return &StripURLs{Light: lightURL, Dark: darkURL}, nil
 }

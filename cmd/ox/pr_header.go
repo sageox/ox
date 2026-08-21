@@ -104,8 +104,13 @@ func runPRHeader(cmd *cobra.Command, _ []string) error {
 	// (only when server-visible, unless --allow-unconfirmed).
 	sessionArgs := flagStringArray(cmd, "session")
 	if len(sessionArgs) == 0 {
-		if u := autoSessionURL(gitRoot, flagBool(cmd, "allow-unconfirmed")); u != "" {
+		if u, unconfirmed := autoSessionURL(gitRoot, flagBool(cmd, "allow-unconfirmed")); u != "" {
 			sessionArgs = []string{u}
+		} else if unconfirmed {
+			// A real local session exists but the server has not confirmed it —
+			// withhold the link (it would 404) and tell the coworker how to
+			// proceed, honoring the "no link a reviewer cannot open" promise.
+			fmt.Fprintln(cmd.ErrOrStderr(), "current session is not yet server-visible — link withheld; re-run once it uploads, or pass --allow-unconfirmed to link it now (may 404)")
 		}
 	}
 	sessionURLs := make([]string, 0, len(sessionArgs))
@@ -179,28 +184,41 @@ func prResolveEndpoint(cfg *config.ProjectConfig) string {
 	return endpoint.NormalizeEndpoint(endpoint.Get())
 }
 
-// autoSessionURL returns the current live session's /c/ URL, or "" when no link
-// is expected (no recording, attribution off, or a not-yet-server-visible
-// session unless the caller opts into unconfirmed links).
-func autoSessionURL(gitRoot string, allowUnconfirmed bool) string {
-	if u := liveSessionConversationURL(gitRoot); u != "" {
-		return u
+// autoSessionURL resolves the current live session's /c/ link for auto-linking
+// into a PR header. It returns the URL to link (or "") and whether a real local
+// session was WITHHELD because the server has not confirmed it yet.
+//
+// A locally minted id is not evidence the remote resolver knows it, so a pending
+// session is withheld by default (unconfirmed == true) and the caller explains
+// the link will appear once upload completes; allowUnconfirmed links it anyway —
+// the coworker has accepted a possible 404. No live session at all, session
+// attribution turned off, or a recording predating start-minted ids yields
+// ("", false): nothing to link and nothing to withhold.
+//
+// This deliberately does NOT route through liveSessionConversationURL, which
+// omits the pending check (it stamps plan artifacts, a different contract) and
+// would link an unconfirmed session into a public PR body.
+func autoSessionURL(gitRoot string, allowUnconfirmed bool) (url string, unconfirmed bool) {
+	if attr := loadResolvedAttribution(); attr.Session == "" {
+		return "", false // session attribution disabled — no link expected
 	}
-	if !allowUnconfirmed {
-		return ""
-	}
-	// --allow-unconfirmed: fall back to the raw live session id even before the
-	// remote resolver confirms it (the link may 404 until upload completes).
 	cfg, err := config.LoadProjectConfig(gitRoot)
 	if err != nil || cfg == nil {
-		return ""
+		return "", false
 	}
 	agentID, _ := detectAgentContext()
 	state := loadPlanRecordingState(gitRoot, agentID)
 	if state == nil || state.SessionID == "" {
-		return ""
+		return "", false
 	}
-	return buildConversationURL(cfg, state.SessionID)
+	u := buildConversationURL(cfg, state.SessionID)
+	if u == "" {
+		return "", false // no valid ses_ id (older binary) — nothing to link
+	}
+	if state.LifecycleRegistrationState == "pending" && !allowUnconfirmed {
+		return "", true // server has not observed it — withhold, signal the caller
+	}
+	return u, false
 }
 
 // artifactURL maps a flag value — either a full http(s) URL or a bare id — to a

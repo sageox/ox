@@ -6,7 +6,7 @@ description: >-
   `ox pr header` at PR-creation time; it renders a thin, on-brand, dark/light-aware
   line linking the session(s) and plan(s) that produced the change, naming the
   team, and whispering a subtle enrichment stat. The CLI owns the sanitizer-fragile
-  markup — you never hand-author it. Use when opening a PR for AI-coworker work, or
+  markup — you never hand-author it. Use when opening a PR for AI coworker work, or
   when the user says "add the SageOx header", "credit the session on the PR", or
   "/ox-pr-header".
 ---
@@ -19,7 +19,7 @@ vanished wordmark. Run the command and paste its output verbatim.
 
 ## When
 
-At PR-creation time, for any PR that carries AI-coworker work. The header is the
+At PR-creation time, for any PR that carries AI coworker work. The header is the
 **top** of the body; the `SageOx-Session:` trailer stays the **last** line — keep
 both (they serve different readers: the header a human, the trailer the reconciler).
 

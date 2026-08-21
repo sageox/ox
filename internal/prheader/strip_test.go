@@ -1,6 +1,7 @@
 package prheader
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -100,7 +101,7 @@ func TestUploadStrip_success(t *testing.T) {
 
 func TestUploadStrip_nilUploaderUnavailable(t *testing.T) {
 	urls, err := UploadStrip(nil, Signals{Material: true})
-	if err != ErrUploadUnavailable {
+	if !errors.Is(err, ErrUploadUnavailable) {
 		t.Errorf("err = %v, want ErrUploadUnavailable", err)
 	}
 	if urls != nil {
@@ -111,7 +112,11 @@ func TestUploadStrip_nilUploaderUnavailable(t *testing.T) {
 func TestUploadStrip_propagatesError(t *testing.T) {
 	f := &fakeUploader{failOn: "enrich-0-0-0-light.svg", failErr: ErrUploadUnavailable}
 	urls, err := UploadStrip(f, Signals{Material: true})
-	if err == nil || urls != nil {
-		t.Errorf("expected error + nil urls, got urls=%+v err=%v", urls, err)
+	if urls != nil {
+		t.Errorf("expected nil urls on error, got %+v", urls)
+	}
+	// The %w wrap must preserve the sentinel so callers keep using errors.Is.
+	if !errors.Is(err, ErrUploadUnavailable) {
+		t.Errorf("err = %v, want wrapped ErrUploadUnavailable", err)
 	}
 }

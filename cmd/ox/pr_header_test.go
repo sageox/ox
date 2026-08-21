@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
@@ -102,6 +103,10 @@ func prHeaderProject(t *testing.T, withTeam bool) string {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("OX_USER_CONFIG", filepath.Join(home, "user-config.yaml"))
 	t.Setenv("SAGEOX_ENDPOINT", "")
+	// The test process inherits the ambient session's SAGEOX_AGENT_ID; clear it so
+	// session discovery falls back to the workspace lookup our fixtures seed,
+	// rather than an agent lookup that never matches the temp project.
+	t.Setenv("SAGEOX_AGENT_ID", "")
 	t.Chdir(root)
 	return root
 }
@@ -183,6 +188,42 @@ func TestPRHeaderCommand_NoEnrichmentNoWhisper(t *testing.T) {
 
 	require.Contains(t, out.String(), "Acme&nbsp;Rockets", "still renders the team")
 	require.NotContains(t, out.String(), "Guided by SageOx", "no whisper when nothing fired")
+}
+
+// TestPRHeaderCommand_WithholdsUnconfirmedSession proves the "reviewer never gets
+// a link that cannot open" promise: a live session the server has not confirmed
+// yet is NOT linked, the team still renders, and ox explains the link will appear
+// once it uploads (and how to force it). Then --allow-unconfirmed opts in and the
+// same session IS linked.
+// Failure prevented: a PR body ships a /c/ link that 404s until upload catches
+// up. Red-first: drop the pending check in autoSessionURL and the withheld
+// assertion (no /c/ link, guidance on stderr) fails.
+func TestPRHeaderCommand_WithholdsUnconfirmedSession(t *testing.T) {
+	root := prHeaderProject(t, true)
+	// A real local recording with a valid ses_ id the resolver has NOT confirmed.
+	// SessionPath under root/sessions is the legacy search path, discoverable by
+	// LoadRecordingStateForWorkspace via the WorkspacePath startFakeRecording sets.
+	const pendingID = "ses_01920000-0000-7000-8000-0000000000ab"
+	startFakeRecording(t, root, session.RecordingState{
+		SessionPath:                filepath.Join(root, "sessions", "2026-08-20T10-00-devon-Oxpend1"),
+		SessionID:                  pendingID,
+		LifecycleRegistrationState: "pending",
+	})
+
+	// Default: unconfirmed session is withheld and explained.
+	c, out, errb := buildPRHeaderCmd()
+	require.NoError(t, runPRHeader(c, nil))
+	require.NotContains(t, out.String(), "/c/ses_", "an unconfirmed session must not be linked")
+	require.Contains(t, out.String(), "Acme&nbsp;Rockets", "the team still renders")
+	require.Contains(t, errb.String(), "not yet server-visible", "explains the link is withheld")
+	require.Contains(t, errb.String(), "--allow-unconfirmed", "tells the coworker how to link it anyway")
+
+	// --allow-unconfirmed: the coworker opts into a possible 404 and the session
+	// IS linked.
+	c2, out2, _ := buildPRHeaderCmd()
+	require.NoError(t, c2.Flags().Set("allow-unconfirmed", "true"))
+	require.NoError(t, runPRHeader(c2, nil))
+	require.Contains(t, out2.String(), "https://sageox.ai/c/"+pendingID, "opt-in links the unconfirmed session")
 }
 
 // TestPRHeaderCommand_LoneWordmarkEmitsNothing proves the degenerate state: with
