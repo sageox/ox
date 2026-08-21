@@ -120,6 +120,33 @@ func TestRefreshVersionCacheIfStale_FreshCacheSkipsNetwork(t *testing.T) {
 	assert.Equal(t, "v99.0.0", cached.LatestVersion)
 }
 
+// A stale cache must trigger a refetch and adopt the newly fetched version,
+// without touching the network in the test (fetcher is injected).
+func TestRefreshVersionCacheIfStale_StaleCacheRefetches(t *testing.T) {
+	useTestCacheDir(t)
+	writeTestVersionCache(t, &versionCacheData{
+		LatestVersion: "v0.0.1", // older than current; would report no update
+		CheckedAt:     time.Now().Add(-24 * time.Hour),
+	})
+
+	oldFetcher := latestReleaseFetcher
+	fetched := false
+	latestReleaseFetcher = func() (string, error) {
+		fetched = true
+		return "v99.0.0", nil
+	}
+	t.Cleanup(func() { latestReleaseFetcher = oldFetcher })
+
+	result := refreshVersionCacheIfStale(6 * time.Hour)
+	assert.True(t, fetched, "stale cache must trigger a refetch")
+	require.NotNil(t, result, "refetched newer version should report an update")
+	assert.Equal(t, "99.0.0", result.LatestVersion)
+
+	cached := readVersionCache()
+	require.NotNil(t, cached)
+	assert.Equal(t, "v99.0.0", cached.LatestVersion, "cache must be rewritten with the fetched version")
+}
+
 // corrupt cache must not crash prime — graceful degradation
 func TestCheckVersionFromCache_CorruptFile(t *testing.T) {
 	useTestCacheDir(t)

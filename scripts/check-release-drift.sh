@@ -121,6 +121,19 @@ version_gt() {
   [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
 }
 
+# Validate both values against the release-version grammar before comparing or
+# emitting JSON: a malformed value could make `sort -V` report the wrong drift
+# state, and a value with JSON-significant characters could corrupt --json.
+VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$'
+if ! [[ "$CURRENT" =~ $VERSION_RE ]]; then
+  echo "Error: current version '$CURRENT' is not a valid release version" >&2
+  exit 2
+fi
+if [ -n "$LATEST" ] && ! [[ "$LATEST" =~ $VERSION_RE ]]; then
+  echo "Error: latest release '$LATEST' is not a valid release version" >&2
+  exit 2
+fi
+
 DRIFT=false
 if [ -n "$LATEST" ] && version_gt "$CURRENT" "$LATEST"; then
   DRIFT=true

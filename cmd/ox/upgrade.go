@@ -40,7 +40,7 @@ type upgradeResult struct {
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
 	Short: "Upgrade ox to the latest version",
-	Long:  "Detect how ox was installed and upgrade using the appropriate method (Homebrew, go install, or manual download).",
+	Long:  "Detect how ox was installed and upgrade using the appropriate method: Homebrew, go install, or an in-place download that verifies and replaces the binary.",
 	RunE:  runUpgrade,
 }
 
@@ -192,7 +192,7 @@ func upgradeViaSelfReplace(quiet bool, targetVersion string) error {
 		Arch:    runtime.GOARCH,
 	})
 	if errors.Is(err, upgrade.ErrNotWritable) {
-		return fmt.Errorf("%v\n  Re-run with elevated permissions: sudo ox upgrade", err)
+		return fmt.Errorf("%w\n  Re-run with elevated permissions: sudo ox upgrade", err)
 	}
 	return err
 }

@@ -8,6 +8,12 @@ on:
     - cron: '17 14 * * *'  # daily, off-peak UTC
   workflow_dispatch: {}
 
+# Serialize runs so two concurrent invocations can't both find no open
+# drift issue and both create one.
+concurrency:
+  group: release-drift
+  cancel-in-progress: false
+
 permissions:
   contents: read
   issues: write
@@ -45,7 +51,9 @@ jobs:
           fi
 
           CURRENT=$(echo "$OUTPUT" | jq -r '.current')
-          LATEST=$(echo "$OUTPUT" | jq -r '.latest')
+          # '// empty' so a null latest (no releases yet) doesn't become the
+          # literal string "null" and get posted as "vnull" downstream.
+          LATEST=$(echo "$OUTPUT" | jq -r '.latest // empty')
           DRIFT=$(echo "$OUTPUT" | jq -r '.drift')
 
           {

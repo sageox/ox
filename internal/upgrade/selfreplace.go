@@ -55,6 +55,19 @@ const defaultReleaseBase = "https://github.com/sageox/ox/releases/download"
 // malicious or misbehaving server streaming unbounded data.
 const maxDownloadBytes = 256 << 20 // 256 MiB
 
+// maxEntryBytes caps a single decompressed archive entry, and maxTotalBytes
+// caps the whole archive's declared decompressed size. Together they bound a
+// decompression bomb whose expanded contents dwarf the compressed download.
+// Vars (not consts) only so tests can lower them to exercise the guard.
+var (
+	maxEntryBytes int64 = 256 << 20 // 256 MiB per entry
+	maxTotalBytes int64 = 512 << 20 // 512 MiB total decompressed
+)
+
+// renameFunc is os.Rename, indirected so tests can force a rename failure and
+// exercise the all-or-nothing rollback path.
+var renameFunc = os.Rename
+
 // Config controls a self-replace operation. Network endpoints and the install
 // directory are injectable so the flow is testable without touching the real
 // binary or reaching the real GitHub.
@@ -185,21 +198,74 @@ func ReplaceRunningBinary(ctx context.Context, cfg Config) error {
 		}
 	}
 
-	// commit: adapters first, ox last.
+	// commit all-or-nothing: adapters first, ox last, so a partial failure
+	// never leaves a version-skewed ox/adapter set. Each replaced binary is
+	// backed up first; any failure rolls back every completed rename.
+	return commitStaged(orderAdaptersFirst(staged))
+}
+
+// orderAdaptersFirst returns staged binaries with adapters before ox, so ox —
+// the running binary — is the last thing swapped.
+func orderAdaptersFirst(staged []stagedBinary) []stagedBinary {
+	ordered := make([]stagedBinary, 0, len(staged))
 	for _, s := range staged {
-		if s.isOx {
-			continue
-		}
-		if err := os.Rename(s.tmpPath, s.destPath); err != nil {
-			return fmt.Errorf("replace %s: %w", filepath.Base(s.destPath), err)
+		if !s.isOx {
+			ordered = append(ordered, s)
 		}
 	}
 	for _, s := range staged {
-		if !s.isOx {
-			continue
+		if s.isOx {
+			ordered = append(ordered, s)
 		}
-		if err := os.Rename(s.tmpPath, s.destPath); err != nil {
-			return fmt.Errorf("replace ox: %w", err)
+	}
+	return ordered
+}
+
+// commitStaged atomically swaps each staged binary into place, backing up the
+// prior file first. If any rename fails, every already-committed rename is
+// rolled back (originals restored, new files removed) so the install is either
+// fully upgraded or fully unchanged.
+func commitStaged(ordered []stagedBinary) error {
+	type commit struct {
+		destPath, backupPath string
+		hadOriginal          bool
+	}
+	var done []commit
+
+	rollback := func() {
+		for i := len(done) - 1; i >= 0; i-- {
+			c := done[i]
+			_ = os.Remove(c.destPath) // drop the newly placed binary
+			if c.hadOriginal {
+				_ = renameFunc(c.backupPath, c.destPath) // restore the original
+			}
+		}
+	}
+
+	for _, s := range ordered {
+		backupPath := s.tmpPath + ".bak" // unique + on the same filesystem
+		hadOriginal := false
+		if _, err := os.Stat(s.destPath); err == nil {
+			if err := renameFunc(s.destPath, backupPath); err != nil {
+				rollback()
+				return fmt.Errorf("back up %s: %w", filepath.Base(s.destPath), err)
+			}
+			hadOriginal = true
+		}
+		if err := renameFunc(s.tmpPath, s.destPath); err != nil {
+			if hadOriginal {
+				_ = renameFunc(backupPath, s.destPath) // undo this one's backup
+			}
+			rollback()
+			return fmt.Errorf("replace %s: %w", filepath.Base(s.destPath), err)
+		}
+		done = append(done, commit{destPath: s.destPath, backupPath: backupPath, hadOriginal: hadOriginal})
+	}
+
+	// success: drop the backups.
+	for _, c := range done {
+		if c.hadOriginal {
+			_ = os.Remove(c.backupPath)
 		}
 	}
 	return nil
@@ -254,7 +320,12 @@ func stageBinaries(ctx context.Context, tarball []byte, installDir string) ([]st
 	}
 	defer func() { _ = gz.Close() }()
 
-	var staged []stagedBinary
+	cleanInstallDir := filepath.Clean(installDir)
+	var (
+		staged     []stagedBinary
+		sawOx      bool
+		totalBytes int64
+	)
 	tr := tar.NewReader(gz)
 	for {
 		// bound extraction by the caller's deadline: a decompression-heavy
@@ -272,24 +343,44 @@ func stageBinaries(ctx context.Context, tarball []byte, installDir string) ([]st
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
+		// bound decompression: reject an oversized single entry and cap the
+		// whole archive's declared decompressed size (a bomb whose expanded
+		// bytes dwarf the compressed download).
+		if hdr.Size < 0 || hdr.Size > maxEntryBytes {
+			return nil, fmt.Errorf("archive entry %s has invalid size %d", filepath.Base(hdr.Name), hdr.Size)
+		}
+		totalBytes += hdr.Size
+		if totalBytes > maxTotalBytes {
+			return nil, fmt.Errorf("archive exceeds %d bytes decompressed", maxTotalBytes)
+		}
+
 		base := filepath.Base(hdr.Name)
 		isOx := base == "ox"
 		isAdapter := strings.HasPrefix(base, "ox-adapter-")
 		if !isOx && !isAdapter {
 			continue // LICENSE, README, CHANGELOG, etc.
 		}
-		destPath := filepath.Join(installDir, base)
+		destPath := filepath.Join(cleanInstallDir, base)
+		// zip-slip guard: the resolved path must stay within installDir.
+		// filepath.Base already strips any directory, so this can only trip on
+		// a pathological entry — but assert it explicitly with the HasPrefix
+		// barrier the archive-extraction taint check recognizes.
+		if destPath != cleanInstallDir && !strings.HasPrefix(destPath, cleanInstallDir+string(os.PathSeparator)) {
+			return nil, fmt.Errorf("refusing archive entry outside install dir: %q", hdr.Name)
+		}
 		if isAdapter {
 			if _, err := os.Stat(destPath); err != nil {
 				continue // adapter not installed here; leave it alone
 			}
 		}
 
-		tmp, err := os.CreateTemp(installDir, "."+base+".tmp-*")
+		tmp, err := os.CreateTemp(cleanInstallDir, "."+base+".tmp-*")
 		if err != nil {
 			return nil, fmt.Errorf("stage %s: %w", base, err)
 		}
-		if _, err := io.Copy(tmp, io.LimitReader(tr, maxDownloadBytes)); err != nil {
+		// hdr.Size <= maxEntryBytes was checked above, so LimitReader reads the
+		// full entry rather than silently truncating a large binary.
+		if _, err := io.Copy(tmp, io.LimitReader(tr, maxEntryBytes)); err != nil {
 			_ = tmp.Close()
 			_ = os.Remove(tmp.Name())
 			return nil, fmt.Errorf("extract %s: %w", base, err)
@@ -303,11 +394,16 @@ func stageBinaries(ctx context.Context, tarball []byte, installDir string) ([]st
 			_ = os.Remove(tmp.Name())
 			return nil, err
 		}
+		if isOx {
+			sawOx = true
+		}
 		staged = append(staged, stagedBinary{destPath: destPath, tmpPath: tmp.Name(), isOx: isOx})
 	}
 
-	if len(staged) == 0 {
-		return nil, errors.New("no ox binary found in release tarball")
+	// the ox binary itself must be present: an adapter-only archive must never
+	// replace adapters while leaving ox on the old version.
+	if !sawOx {
+		return nil, errors.New("release tarball contains no ox binary")
 	}
 	return staged, nil
 }

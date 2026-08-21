@@ -204,6 +204,95 @@ func TestReplaceRunningBinary_RejectsMalformedVersion(t *testing.T) {
 	}
 }
 
+// An archive with no ox binary must be refused outright — it must never
+// replace installed adapters while leaving ox on the old version.
+func TestReplaceRunningBinary_AdapterOnlyArchiveRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ox"), "OLD-ox")
+	writeFile(t, filepath.Join(dir, "ox-adapter-claude-code"), "OLD-adapter")
+
+	// tarball contains only an (installed) adapter, no ox.
+	tarball := makeTarball(t, map[string]string{"ox-adapter-claude-code": "NEW-adapter"})
+	srv := releaseServer(t, tarball, "")
+	defer srv.Close()
+
+	err := ReplaceRunningBinary(context.Background(), baseConfig(dir, srv.URL))
+	if err == nil || !strings.Contains(err.Error(), "no ox binary") {
+		t.Fatalf("want no-ox-binary rejection, got %v", err)
+	}
+	if got := readFile(t, filepath.Join(dir, "ox-adapter-claude-code")); got != "OLD-adapter" {
+		t.Errorf("adapter must be untouched when ox is absent: got %q", got)
+	}
+}
+
+// A single archive entry larger than the per-entry cap must be rejected, not
+// silently truncated into place.
+func TestReplaceRunningBinary_OversizedEntryRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ox"), "OLD-ox")
+
+	oldMax := maxEntryBytes
+	maxEntryBytes = 4
+	t.Cleanup(func() { maxEntryBytes = oldMax })
+
+	tarball := makeTarball(t, map[string]string{"ox": "NEW-ox-way-too-big"})
+	srv := releaseServer(t, tarball, "")
+	defer srv.Close()
+
+	if err := ReplaceRunningBinary(context.Background(), baseConfig(dir, srv.URL)); err == nil {
+		t.Fatal("expected oversized-entry rejection")
+	}
+	if got := readFile(t, filepath.Join(dir, "ox")); got != "OLD-ox" {
+		t.Errorf("ox must be untouched when an entry is oversized: got %q", got)
+	}
+}
+
+// If a late rename fails mid-commit, every already-committed rename must roll
+// back so the install is fully unchanged rather than version-skewed.
+func TestReplaceRunningBinary_RollsBackOnLateRenameFailure(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ox"), "OLD-ox")
+	writeFile(t, filepath.Join(dir, "ox-adapter-claude-code"), "OLD-adapter")
+
+	// fail the first rename that targets the ox binary (ox commits last, after
+	// the adapter is already swapped), then behave normally so rollback works.
+	oldRename := renameFunc
+	failed := false
+	renameFunc = func(oldPath, newPath string) error {
+		if !failed && filepath.Base(newPath) == "ox" {
+			failed = true
+			return errors.New("injected rename failure")
+		}
+		return oldRename(oldPath, newPath)
+	}
+	t.Cleanup(func() { renameFunc = oldRename })
+
+	tarball := makeTarball(t, map[string]string{
+		"ox":                     "NEW-ox",
+		"ox-adapter-claude-code": "NEW-adapter",
+	})
+	srv := releaseServer(t, tarball, "")
+	defer srv.Close()
+
+	if err := ReplaceRunningBinary(context.Background(), baseConfig(dir, srv.URL)); err == nil {
+		t.Fatal("expected error from injected rename failure")
+	}
+	// both binaries must be back to their originals — no partial upgrade.
+	if got := readFile(t, filepath.Join(dir, "ox")); got != "OLD-ox" {
+		t.Errorf("ox must be rolled back: got %q", got)
+	}
+	if got := readFile(t, filepath.Join(dir, "ox-adapter-claude-code")); got != "OLD-adapter" {
+		t.Errorf("adapter must be rolled back after ox rename failed: got %q", got)
+	}
+	// no backup/temp litter left behind.
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			t.Errorf("leftover temp/backup file: %s", e.Name())
+		}
+	}
+}
+
 func TestAssetName(t *testing.T) {
 	if got := AssetName("0.14.0", "darwin", "arm64"); got != "ox_0.14.0_darwin_arm64.tar.gz" {
 		t.Errorf("AssetName = %q", got)

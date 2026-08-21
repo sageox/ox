@@ -81,12 +81,16 @@ func writeVersionCacheFromDoctor(latestVersion string) {
 func refreshVersionCacheIfStale(maxAge time.Duration) *versionCheckResult {
 	cached := readVersionCache()
 	if cached == nil || time.Since(cached.CheckedAt) > maxAge {
-		if tag, err := getLatestGitHubRelease(); err == nil && tag != "" {
+		if tag, err := latestReleaseFetcher(); err == nil && tag != "" {
 			writeVersionCacheFromDoctor(tag)
 		}
 	}
 	return checkVersionFromCache()
 }
+
+// latestReleaseFetcher fetches the latest release tag; indirected so tests can
+// exercise the stale-cache refetch path without reaching GitHub.
+var latestReleaseFetcher = getLatestGitHubRelease
 
 // checkVersionFromCache reads the version cache and returns an update result
 // if a newer version is available. Returns nil if no cache exists or no
