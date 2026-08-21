@@ -6,14 +6,13 @@ description: >-
   (the cache-only invariant and a failure-mode watch-list) that no single ox
   subcommand backs. Use when the user asks to "review the ledger sessions",
   "audit session quality", "clean up bad session summaries", "regenerate session
-  summaries", runs /ox-session-review, or wants to find and fix sessions with
+  summaries", invokes the session-review workflow, or wants to find and fix sessions with
   missing/poor titles, empty summaries, or broken metadata.
 ---
-<!-- ox-hash: 1bff4687effe ver: 0.11.1 -->
 
 <!-- Keep this file thin on behavioral guidance that belongs in `ox` CLI JSON
-     output (guidance field). Skills are agent-specific wrappers; ox serves all
-     agents (Codex, etc.). This skill is intentionally richer than most because
+     output (guidance field). Native skills are portable wrappers; ox serves all
+     AI coworkers. This skill is intentionally richer than most because
      the audit + regeneration flow is not backed by a single ox subcommand. -->
 
 This skill carries the operational knowledge from the 2026-04-25 cleanup
@@ -80,8 +79,7 @@ break LFS linkage. Stop and investigate before pushing.
 ### Removal Candidates
 - `entry_count` is `0` or missing AND `files` manifest is empty/missing.
 - Session outcome is `"failed"` AND `entry_count < 5`.
-- Only skill-wrapper activity with nothing between (`/ox-session-start`
-  → `/ox-session-stop`).
+- Only skill-wrapper activity with nothing between session start and stop.
 - Phantom-OID sessions surfaced during a previous Phase 4 run (track
   these — they cannot be regenerated).
 
@@ -304,7 +302,7 @@ When asked to review a different ledger, lead with:
 > Audit every session in this project's ledger for quality.
 > Read `.claude/rules/cache-only-design.md` and
 > `.claude/rules/lfs-no-git-lfs-binary.md` first — both invariants
-> apply during this audit. Run the `/ox-session-review` skill flow:
+> apply during this audit. Run the session-review skill flow:
 > scan read-only, report by bucket, confirm with me before any
 > removals or regenerations, and run the post-batch invariant check
 > before pushing.
