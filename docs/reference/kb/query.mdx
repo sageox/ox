@@ -1,0 +1,61 @@
+---
+title: "ox kb query"
+description: "CLI reference for ox kb query"
+sidebar_position: 50
+---
+
+## ox kb query
+
+Search files across knowledge bubbles
+
+### Synopsis
+
+Search the curated files of one or more knowledge bubbles.
+
+The LAST argument is the search text — quote it. Every argument before it
+names a bubble: a kb_id (starts with 'kb_') or a slug (with or without the
+display '#' prefix), resolved within one scope like 'ox kb describe'.
+
+Results are ranked FILE hits, grouped per bubble in the order you named
+them — search finds the file, then you read it from the bubble's local
+mount (see 'ox kb describe' for the path). A bubble you cannot read, one
+that does not exist, and one whose type is not indexed for search are all
+reported the same way, without revealing which it is.
+
+```
+ox kb query <#slug|kb_id> [#slug|kb_id ...] "<question>" [flags]
+```
+
+### Examples
+
+```
+  ox kb query '#engineering' "how do we batch relay spans"
+  ox kb query '#engineering' '#platform' "relay span batching" -k 5
+  ox kb query kb_01HXYZ... "retry policy" --path docs/ --json
+```
+
+### Options
+
+```
+  -h, --help           help for query
+  -k, --k int          files per bubble (0 = server default; over-cap values are clamped)
+      --mode string    retrieval mode: hybrid|bm25|vector (bm25 skips the embedding step) (default "hybrid")
+      --path string    only return files under this repo-relative path prefix
+      --scope string   scope to resolve slugs in: team|personal (personal is not yet available) (default "team")
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox kb](/kb)	 - Work with knowledge bubbles
+

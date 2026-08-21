@@ -87,10 +87,8 @@ identity fields the server exposes.
 
 The roster is feature-flag gated on the server. When the flag is off (or the
 server is older), the command reports that the capability is unavailable rather
-than failing.
-
-Example:
-  ox team members
+than failing.`,
+	Example: `  ox team members
   ox team members --team acme
   ox team members --json`,
 	RunE: runTeamMembers,

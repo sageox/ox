@@ -1,7 +1,7 @@
 ---
 title: "ox team members"
 description: "CLI reference for ox team members"
-sidebar_position: 93
+sidebar_position: 94
 ---
 
 ## ox team members
@@ -20,13 +20,16 @@ The roster is feature-flag gated on the server. When the flag is off (or the
 server is older), the command reports that the capability is unavailable rather
 than failing.
 
-Example:
+```
+ox team members [flags]
+```
+
+### Examples
+
+```
   ox team members
   ox team members --team acme
   ox team members --json
-
-```
-ox team members [flags]
 ```
 
 ### Options
