@@ -50,6 +50,30 @@ func drainUntilQuiet(ch <-chan struct{}, quiet time.Duration) {
 	}
 }
 
+// awaitWatcherReady deterministically confirms watchPlanDir has registered and is
+// delivering fsnotify events for feedbackDir. It pokes the dir until a broadcast
+// comes back, so a later write (the resolution under test) can never race ahead
+// of the asynchronously-started watcher's registration.
+func awaitWatcherReady(t *testing.T, bc *broadcaster, feedbackDir string) {
+	t.Helper()
+	probeCh := bc.subscribe()
+	defer bc.unsubscribe(probeCh)
+	probe := filepath.Join(feedbackDir, ".watch-probe")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
+			t.Fatalf("watcher probe write: %v", err)
+		}
+		select {
+		case <-probeCh:
+			_ = os.Remove(probe)
+			return
+		case <-time.After(300 * time.Millisecond): // not delivering yet — poke again
+		}
+	}
+	t.Fatal("watchPlanDir never became ready (no event delivered for the feedback dir)")
+}
+
 // TestBrowserRoundTrip_FeedbackReachesAuthoringAgent proves Rule 1: a mark Devon
 // leaves on the served page reaches Avery with its section and note intact,
 // without Devon copying anything anywhere. The agent-side read is the exact one
@@ -134,10 +158,7 @@ func TestBrowserRoundTrip_MultiMarkRoundArrivesIntact(t *testing.T) {
 // never learns, or still shows it unresolved.
 func TestBrowserRoundTrip_AgentResolveShowsAddressedAndBroadcasts(t *testing.T) {
 	dir := t.TempDir()
-	// explicit broadcaster so we can prove the reviewer's tab is told to reload
 	bc := newBroadcaster()
-	sub := bc.subscribe()
-	t.Cleanup(func() { bc.unsubscribe(sub) })
 	h := liveReviewHandler("", "p", dir, "http://x", "secret", bc, make(chan int, 8), make(chan struct{}, 1))
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
@@ -149,18 +170,24 @@ func TestBrowserRoundTrip_AgentResolveShowsAddressedAndBroadcasts(t *testing.T) 
 	// reload WOULD read, never that a reload is actually triggered.
 	// Pre-create feedback/ so the watcher covers it from the start (it only Adds the
 	// subdir once, at launch — a subdir that appears later can be missed).
-	if err := os.MkdirAll(filepath.Join(dir, "feedback"), 0o755); err != nil {
+	feedbackDir := filepath.Join(dir, "feedback")
+	if err := os.MkdirAll(feedbackDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go watchPlanDir(ctx, dir, bc)
+	// watchPlanDir starts asynchronously; confirm it is registered and delivering
+	// events before any write we expect it to catch, so the resolution below can
+	// never race ahead of watch registration.
+	awaitWatcherReady(t, bc, feedbackDir)
 
+	// a submit repaints every open tab — the POST handler broadcasts synchronously
+	sub := bc.subscribe()
+	t.Cleanup(func() { bc.unsubscribe(sub) })
 	if code := browserSubmit(t, srv.URL, "Devon", "hopen1", "Risks", "request-change", "fix this"); code != http.StatusOK {
 		t.Fatalf("submit: %d", code)
 	}
-	// a submit repaints every open tab (including other reviewers') — the POST
-	// handler broadcasts synchronously before it returns 200
 	select {
 	case <-sub:
 	case <-time.After(2 * time.Second):
