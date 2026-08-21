@@ -2108,7 +2108,7 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 	// drive carries and it does not.
 	loadTeamMemory(info, tc.Path)
 	if mount != nil {
-		mount.Memory = fillTeamMemoryGapsFromMount(info, sources.mount)
+		mount.Memory = fillTeamMemoryGapsFromMount(info, sources)
 	}
 
 	// sync health: check staleness
@@ -2125,16 +2125,13 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 
 	// check for agent-context/distilled-discussions.md
 	agentContextRelPath := filepath.Join("agent-context", "distilled-discussions.md")
-	if root, ok := firstRootWith(sources, agentContextRelPath); ok {
-		agentContextPath := filepath.Join(root, agentContextRelPath)
-		if content, err := os.ReadFile(agentContextPath); err == nil { //nolint:gosec // path is a team-context root plus a fixed relative name
-			info.HasAgentContext = true
-			info.AgentContextPath = agentContextPath
-			info.AgentContextRelPath = agentContextRelPath
-			// compute hash for context deduplication
-			hash := sha256.Sum256(content)
-			info.AgentContextHash = fmt.Sprintf("%x", hash[:4])
-		}
+	if root, content, ok := readFileAcross(sources, agentContextRelPath); ok {
+		info.HasAgentContext = true
+		info.AgentContextPath = filepath.Join(root, agentContextRelPath)
+		info.AgentContextRelPath = agentContextRelPath
+		// compute hash for context deduplication
+		hash := sha256.Sum256(content)
+		info.AgentContextHash = fmt.Sprintf("%x", hash[:4])
 	}
 
 	return info

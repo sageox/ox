@@ -3,7 +3,11 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/sageox/ox/internal/prime"
 )
 
 // writeTeamFile creates rel under root with content, making parents as needed.
@@ -30,10 +34,90 @@ func rule(name, description string) string {
 }
 
 // twoSources returns a checkout and a mount, wired as read sources.
+//
+// No mountDeadline: these are temp directories, not a File Provider mount, so
+// there is nothing to wait on and a budget would only add flake. The bounded
+// path is exercised separately below.
 func twoSources(t *testing.T) (sources teamReadSources, checkout, mount string) {
 	t.Helper()
 	checkout, mount = t.TempDir(), t.TempDir()
 	return teamReadSources{checkout: checkout, mount: mount}, checkout, mount
+}
+
+// The drive is not local, and the reads that follow discovery are the expensive
+// ones. A drive that never answers must cost a prime the budget once — not
+// forever, and not once per document category.
+func TestASpentBudgetDropsTheMountAndKeepsTheCheckout(t *testing.T) {
+	sources, checkout, mount := twoSources(t)
+	writeTeamFile(t, checkout, "docs/principles.md", doc("Principles"))
+	writeTeamFile(t, mount, "docs/onboarding.md", doc("Onboarding"))
+	writeTeamFile(t, mount, "MEMORY.md", "drive memory\n")
+	sources.mountDeadline = time.Now().Add(-time.Second)
+
+	docs, fromMount := discoverTeamDocsAcross(sources)
+	if len(docs) != 1 || docs[0].Name != "principles.md" {
+		t.Fatalf("docs = %v, want the checkout's alone", docs)
+	}
+	if fromMount != 0 {
+		t.Errorf("mount contribution = %d, want 0 past the budget", fromMount)
+	}
+
+	info := &teamContextInfo{}
+	if added := fillTeamMemoryGapsFromMount(info, sources); added != 0 || info.MemoryContent != "" {
+		t.Errorf("memory read past the budget: added=%d content=%q", added, info.MemoryContent)
+	}
+	if _, ok := firstRootWith(sources, "MEMORY.md"); ok {
+		t.Error("a stat against the drive ran past the budget")
+	}
+}
+
+// A read that outlasts the budget is dropped, and the caller still gets the
+// checkout — the property that makes the blunt bound safe.
+func TestASlowMountDoesNotOutlastItsBudget(t *testing.T) {
+	sources, _, _ := twoSources(t)
+	sources.mountDeadline = time.Now().Add(50 * time.Millisecond)
+
+	start := time.Now()
+	value, ok := readMounted(sources, func(string) string {
+		time.Sleep(5 * time.Second)
+		return "the drive eventually answered"
+	})
+	elapsed := time.Since(start)
+
+	if ok || value != "" {
+		t.Fatalf("a read past the deadline was used: ok=%v value=%q", ok, value)
+	}
+	if elapsed > time.Second {
+		t.Errorf("waited %s, want the budget to cut it off", elapsed)
+	}
+}
+
+// Production has to actually set the budget; the zero value only means
+// "unbounded" for directly-constructed values like the fixtures above.
+func TestNewTeamReadSourcesBoundsTheMount(t *testing.T) {
+	mountHome(t, "team_abc")
+	t.Setenv(filesMountEnv, "1")
+
+	sources := newTeamReadSources(t.TempDir(), "team_abc")
+	if sources.mount == "" {
+		t.Fatal("the mounted team was not resolved")
+	}
+	if sources.mountDeadline.IsZero() {
+		t.Fatal("a mounted source was built without a read budget")
+	}
+}
+
+// A drive that adds nothing must not spend an agent's tokens saying so.
+func TestMountSummaryIsSilentWhenTheDriveAddedNothing(t *testing.T) {
+	echoing := &prime.TeamMountSource{Path: "/Users/x/SageOx/team"}
+	if got := echoing.Summary(); got != "" {
+		t.Errorf("summary = %q, want silence when the checkout was complete", got)
+	}
+
+	contributing := &prime.TeamMountSource{Path: "/Users/x/SageOx/team", Docs: 2}
+	if got := contributing.Summary(); !strings.Contains(got, "2 docs") {
+		t.Errorf("summary = %q, want it to name what was added", got)
+	}
 }
 
 // The whole point of the change: the drive adds, it does not displace. A
@@ -144,13 +228,13 @@ func TestCustomizationsTakeInstructionFilesFromTheDriveWhenTheCheckoutLacksThem(
 }
 
 func TestMemoryContentPrefersTheCheckout(t *testing.T) {
-	_, checkout, mount := twoSources(t)
+	sources, checkout, mount := twoSources(t)
 	writeTeamFile(t, checkout, "MEMORY.md", "checkout memory\n")
 	writeTeamFile(t, mount, "MEMORY.md", "drive memory\n")
 
 	info := &teamContextInfo{}
 	loadTeamMemory(info, checkout)
-	fillTeamMemoryGapsFromMount(info, mount)
+	fillTeamMemoryGapsFromMount(info, sources)
 
 	if got := info.MemoryContent; got != "checkout memory" {
 		t.Errorf("memory = %q, want the checkout's copy", got)
@@ -160,14 +244,14 @@ func TestMemoryContentPrefersTheCheckout(t *testing.T) {
 // A day of team history the checkout is missing is history that would otherwise
 // be silently absent, so timelines union rather than pick a winner.
 func TestMemoryTimelinesUnionAndStayReverseChronological(t *testing.T) {
-	_, checkout, mount := twoSources(t)
+	sources, checkout, mount := twoSources(t)
 	writeTeamFile(t, checkout, "memory/daily/2026-08-01.md", "older\n")
 	writeTeamFile(t, checkout, "memory/daily/2026-08-03.md", "newer\n")
 	writeTeamFile(t, mount, "memory/daily/2026-08-02.md", "only on the drive\n")
 
 	info := &teamContextInfo{}
 	loadTeamMemory(info, checkout)
-	added := fillTeamMemoryGapsFromMount(info, mount)
+	added := fillTeamMemoryGapsFromMount(info, sources)
 
 	want := []string{"2026-08-03.md", "2026-08-02.md", "2026-08-01.md"}
 	if len(info.MemoryDaily) != len(want) {
@@ -198,7 +282,7 @@ func TestAnUnreadableMountCostsTheCheckoutNothing(t *testing.T) {
 	rules, _ := discoverTeamRulesAcross(sources, "any-repo")
 	info := &teamContextInfo{}
 	loadTeamMemory(info, checkout)
-	fillTeamMemoryGapsFromMount(info, sources.mount)
+	fillTeamMemoryGapsFromMount(info, sources)
 
 	if len(docs) != 1 || len(rules) != 1 || info.MemoryContent == "" {
 		t.Fatalf("an unreachable mount degraded the checkout: %d docs, %d rules, memory=%q",
