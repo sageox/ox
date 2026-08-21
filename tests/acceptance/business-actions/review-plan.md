@@ -17,4 +17,5 @@ This stub will be expanded to a full Actor / Goal / Steps / Expected Outcome /
 Variations narrative in a follow-up PR.
 
 See: plan-enrichment/review-loop.feature
+See: plan-enrichment/browser-review-roundtrip.feature
 See: plan-enrichment/render-and-present.feature
