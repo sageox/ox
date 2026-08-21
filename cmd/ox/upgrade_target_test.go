@@ -42,7 +42,9 @@ func TestValidateUpgradeTarget(t *testing.T) {
 		want   bool
 	}{
 		{installGoInstall, "v0.42.0", false},
-		{installBinary, "v0.42.0", true},
+		// binary (self-replace) installs can now honor a pinned tag by
+		// downloading that release's tarball — no longer an error.
+		{installBinary, "v0.42.0", false},
 		{installHomebrew, "v0.42.0", true},
 		{installSource, "v0.42.0", true},
 		{installBinary, "", false},

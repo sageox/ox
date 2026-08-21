@@ -99,6 +99,54 @@ func TestWriteVersionCacheFromDoctor_PreservesETag(t *testing.T) {
 	assert.Equal(t, `"preserve-me"`, cached.ETag, "doctor must not clobber daemon's ETag")
 }
 
+// A fresh cache must NOT trigger a live GitHub refetch. Proven with a sentinel
+// version (v99.0.0) that could never come from the real API: if a refetch
+// happened it would overwrite the cache with the real latest and the sentinel
+// update would vanish. Also keeps the test hermetic (no network).
+func TestRefreshVersionCacheIfStale_FreshCacheSkipsNetwork(t *testing.T) {
+	useTestCacheDir(t)
+	writeTestVersionCache(t, &versionCacheData{
+		LatestVersion: "v99.0.0",
+		CheckedAt:     time.Now(),
+	})
+
+	result := refreshVersionCacheIfStale(6 * time.Hour)
+	require.NotNil(t, result)
+	assert.Equal(t, "99.0.0", result.LatestVersion, "fresh cache must be used verbatim, not refetched")
+
+	// the on-disk sentinel must be untouched (no write occurred)
+	cached := readVersionCache()
+	require.NotNil(t, cached)
+	assert.Equal(t, "v99.0.0", cached.LatestVersion)
+}
+
+// A stale cache must trigger a refetch and adopt the newly fetched version,
+// without touching the network in the test (fetcher is injected).
+func TestRefreshVersionCacheIfStale_StaleCacheRefetches(t *testing.T) {
+	useTestCacheDir(t)
+	writeTestVersionCache(t, &versionCacheData{
+		LatestVersion: "v0.0.1", // older than current; would report no update
+		CheckedAt:     time.Now().Add(-24 * time.Hour),
+	})
+
+	oldFetcher := latestReleaseFetcher
+	fetched := false
+	latestReleaseFetcher = func() (string, error) {
+		fetched = true
+		return "v99.0.0", nil
+	}
+	t.Cleanup(func() { latestReleaseFetcher = oldFetcher })
+
+	result := refreshVersionCacheIfStale(6 * time.Hour)
+	assert.True(t, fetched, "stale cache must trigger a refetch")
+	require.NotNil(t, result, "refetched newer version should report an update")
+	assert.Equal(t, "99.0.0", result.LatestVersion)
+
+	cached := readVersionCache()
+	require.NotNil(t, cached)
+	assert.Equal(t, "v99.0.0", cached.LatestVersion, "cache must be rewritten with the fetched version")
+}
+
 // corrupt cache must not crash prime — graceful degradation
 func TestCheckVersionFromCache_CorruptFile(t *testing.T) {
 	useTestCacheDir(t)

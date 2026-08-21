@@ -72,6 +72,26 @@ func writeVersionCacheFromDoctor(latestVersion string) {
 	_ = os.Rename(tmpPath, cachePath)
 }
 
+// refreshVersionCacheIfStale ensures the version cache is reasonably fresh
+// WITHOUT depending on the daemon. If the cache is missing or older than
+// maxAge, it performs one bounded live GitHub check (getLatestGitHubRelease
+// caps itself at 1s) and rewrites the cache. Any network failure is silent —
+// callers fall back to whatever the cache already holds. This closes the gap
+// where a coworker who never runs the daemon never learns an update exists.
+func refreshVersionCacheIfStale(maxAge time.Duration) *versionCheckResult {
+	cached := readVersionCache()
+	if cached == nil || time.Since(cached.CheckedAt) > maxAge {
+		if tag, err := latestReleaseFetcher(); err == nil && tag != "" {
+			writeVersionCacheFromDoctor(tag)
+		}
+	}
+	return checkVersionFromCache()
+}
+
+// latestReleaseFetcher fetches the latest release tag; indirected so tests can
+// exercise the stale-cache refetch path without reaching GitHub.
+var latestReleaseFetcher = getLatestGitHubRelease
+
 // checkVersionFromCache reads the version cache and returns an update result
 // if a newer version is available. Returns nil if no cache exists or no
 // update is available.

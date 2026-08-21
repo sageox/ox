@@ -10,13 +10,12 @@ description: >-
   recency to `ox session list`, conceptual to `ox query`, code-provenance to
   `ox code search`, decision-record work to `ox decision enrich`.
 ---
-<!-- ox-hash: 1db18042d6cb ver: 0.12.0 -->
 
 <!-- Thin by design. The authoritative consult-first reflex — the cues, the
      "confident-wrong is worse than slow" reasoning, and the routing rationale —
      lives in the <consult-first> block of `ox agent prime` (Layer-1 floor), which
-     reaches Claude, Codex, and Droid alike. This skill adds ONLY Claude-specific
-     auto-activation ergonomics; it duplicates no reasoning. Every command it
+     reaches every primed AI coworker. This native skill adds discovery and
+     activation ergonomics; it duplicates no reasoning. Every command it
      names is already reachable from the floor, so removing this skill loses
      ergonomics but never the floor. Do not grow this body. -->
 
