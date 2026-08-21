@@ -282,6 +282,15 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 			sb.WriteString("\n<team-knowledge>\n")
 			bk.charge(prime.BudgetSourceSageox)
 
+			// Provenance, only when it changed the answer. The git checkout is
+			// the primary source and normally carries everything; this line
+			// appears when a mounted SageOx Files drive filled a gap, which is
+			// the evidence for whether that second source is earning its place.
+			if summary := output.TeamContext.Mount.Summary(); summary != "" {
+				fmt.Fprintf(&sb, "\n<!-- %s -->\n", summary)
+				bk.charge(prime.BudgetSourceSageox)
+			}
+
 			// team instructions (AGENTS.md / CLAUDE.md from team context root)
 			if output.TeamInstructions != nil && output.TeamInstructions.Content != "" {
 				sb.WriteString("\n<team-instructions>\n")
