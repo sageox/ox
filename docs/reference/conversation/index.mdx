@@ -1,0 +1,58 @@
+---
+title: "ox conversation"
+description: "CLI reference for ox conversation"
+sidebar_position: 18
+---
+
+## ox conversation
+
+Read recorded team conversations from the local Team Context
+
+### Synopsis
+
+Read-only commands for browsing recorded team conversations locally:
+summaries, transcript slices, and distillation topics, served from the
+team-context checkout the daemon keeps synced. Works fully logged out.
+
+Commands disclose progressively: list -> show -> topics -> topic -> transcript.
+Each JSON envelope's guidance field names the next step, and token_estimate
+reports what reading the payload costs. With no subcommand, behaves like
+`ox conversation list`.
+
+Accepted ids: cnv_<uuidv7>, rec_<uuidv7>, or a full sageox:// citation URI
+copied from a distillation atom.
+
+```
+ox conversation [flags]
+```
+
+### Options
+
+```
+      --format string   output format: json|text (default "json")
+  -h, --help            help for conversation
+      --limit int       cap the number of conversations returned (default 20)
+      --since string    only conversations recorded on or after this instant (RFC3339 or YYYY-MM-DD)
+      --text            shorthand for --format text
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox conversation list](/conversation/list)	 - List the active team's recorded conversations
+* [ox conversation show](/conversation/show)	 - Show one conversation's metadata and human summary
+* [ox conversation topic](/conversation/topic)	 - Show one distillation topic's atoms
+* [ox conversation topics](/conversation/topics)	 - List a conversation's distillation topics
+* [ox conversation transcript](/conversation/transcript)	 - Read a transcript slice by cue range or time window
+

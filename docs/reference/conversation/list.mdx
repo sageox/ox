@@ -1,0 +1,43 @@
+---
+title: "ox conversation list"
+description: "CLI reference for ox conversation list"
+sidebar_position: 19
+---
+
+## ox conversation list
+
+List the active team's recorded conversations
+
+### Synopsis
+
+Browse the active team's conversations from the local team-context index — newest first, capped at --limit. Each row carries the ids, title, date, participants, and counts an agent needs to decide whether to descend a rung.
+
+```
+ox conversation list [flags]
+```
+
+### Options
+
+```
+      --format string   output format: json|text (default "json")
+  -h, --help            help for list
+      --limit int       cap the number of conversations returned (default 20)
+      --since string    only conversations recorded on or after this instant (RFC3339 or YYYY-MM-DD)
+      --text            shorthand for --format text
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox conversation](/conversation)	 - Read recorded team conversations from the local Team Context
+

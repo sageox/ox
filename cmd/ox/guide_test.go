@@ -89,6 +89,7 @@ func TestGuideTopicsReferencedByPrime_Exist(t *testing.T) {
 	// topic -> the prime text that points at it
 	referenced := map[string]string{
 		"knowledge-bubbles": "prime.KBGuidanceText (the <knowledge-bubbles> block)",
+		"conversations":     "prime.KBGuidanceText (the citation-walking pointer)",
 	}
 
 	for topic, source := range referenced {
@@ -104,5 +105,17 @@ func TestGuideTopicsReferencedByPrime_Exist(t *testing.T) {
 func TestKBGuidancePointsAtBundledGuide(t *testing.T) {
 	if !strings.Contains(prime.KBGuidanceText, "ox guide knowledge-bubbles") {
 		t.Errorf("prime KB guidance must point at `ox guide knowledge-bubbles`, got:\n%s", prime.KBGuidanceText)
+	}
+}
+
+// TestKBGuidanceNamesConversationVerb pins the citation-walking verb in the
+// Layer-1 floor: prime's KB block is the only surface reaching non-Claude
+// agents, so it must name `ox conversation` (and the conversations guide) or
+// those agents are left with citations they have no tool for.
+func TestKBGuidanceNamesConversationVerb(t *testing.T) {
+	for _, want := range []string{"ox conversation", "ox guide conversations"} {
+		if !strings.Contains(prime.KBGuidanceText, want) {
+			t.Errorf("prime KB guidance must name %q, got:\n%s", want, prime.KBGuidanceText)
+		}
 	}
 }

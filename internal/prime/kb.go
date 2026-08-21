@@ -199,7 +199,9 @@ const KBGuidanceText = "A knowledge bubble is the Curator's synthesis of the con
 	"Claims in bubble files may carry `sageox://` citations naming the distilled topic a claim " +
 	"came from; the topic's salient points in turn cite transcript spans, so a claim can be " +
 	"walked back to what the team actually said. Following a citation is optional; do it when " +
-	"the nuance or provenance behind a claim matters.\n" +
+	"the nuance or provenance behind a claim matters. `ox conversation` walks it locally — " +
+	"`show <cnv_id>` for the summary, `topics`/`topic` for the distilled claims, and " +
+	"`transcript '<sageox:// URI>'` for the cited cues (workflow: `ox guide conversations`).\n" +
 	"Full detail, including how to read and follow citations: `ox guide knowledge-bubbles`."
 
 // KBSourceReachable reports whether the fetch returned at least one row

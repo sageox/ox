@@ -157,6 +157,7 @@ func init() {
 	scoutCmd.GroupID = "knowledge"
 	distillCmd.GroupID = "knowledge"
 	recapCmd.GroupID = "knowledge"
+	conversationCmd.GroupID = "knowledge"
 
 	// team coordination — carts, cart analysis, glance, murmurs.
 	// teamCmd (and its `teams` alias) sets its own GroupID in team.go; `ox invite`

@@ -1,0 +1,18 @@
+{
+  "$schema_version": 1,
+  "id": "cnv_019ff394-7db1-7473-bf86-0667a3816c30",
+  "type": "recording",
+  "context_type": "team",
+  "context_id": "team_fixture01",
+  "title": "Spec-Name Manifest",
+  "started_at": "2026-08-13T01:00:00Z",
+  "ended_at": null,
+  "finalized_at": null,
+  "sealed_at": null,
+  "boundary_ref": "",
+  "clock": {
+    "t0": "2026-08-13T01:00:00Z",
+    "clock_class": "recording-local",
+    "pauses": null
+  }
+}
