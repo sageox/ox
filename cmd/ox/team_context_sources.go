@@ -59,9 +59,14 @@ func (s teamReadSources) roots() []string {
 // A team whose checkout has not cloned yet but whose drive is mounted still has
 // context to offer, and the reverse is the ordinary case on a machine with no
 // drive. Only when neither answers is the team genuinely unavailable.
+//
+// "Missing" means IsNotExist and nothing else, matching what the single-root
+// read did: a permission or I/O error is a reason to try reading and let each
+// document report its own failure, not a reason to declare the whole team
+// absent.
 func (s teamReadSources) anyExists() bool {
 	for _, root := range s.roots() {
-		if _, err := os.Stat(root); err == nil {
+		if _, err := os.Stat(root); !os.IsNotExist(err) {
 			return true
 		}
 	}
