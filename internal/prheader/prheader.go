@@ -19,12 +19,17 @@
 //     .markdown-body CSS forces width:max-content + 1px cell borders/padding and
 //     beats width="100%", rendering a bordered spreadsheet row pinned left.
 //
-// So the line is built from the primitives that survive: <picture> (the only
-// theme-adaptive mechanism — swaps two image URLs by prefers-color-scheme),
-// <img>, <a>, <sub>, <b>, and &nbsp;/&middot;/&emsp; entities. "Off to the right"
-// is earned by trailing + receding (<sub>), or — in Tier B — a floated
-// <img align="right">, the one primitive that hard-pins to the container edge
-// without table chrome.
+// So the line is built from the primitives that survive: a <blockquote> card
+// (left accent bar + subtle tint — the one card-like chrome GitHub allows), a
+// theme-adaptive <picture> wordmark (the only mechanism that swaps by
+// prefers-color-scheme), <a>, <sub>, <b>, <br>, and &nbsp;/&middot; entities.
+// The wordmark is an <img>, so it can link to the team page AND keep its brand
+// color — a text <a> cannot, since GitHub forces every link to its own blue, so
+// the team name stays plain <b> text and the actionable Session/Plan links are
+// the only blue. A small "guided by" kicker sits above the wordmark (its
+// attribution), so the brand name is the mark itself, never repeated as text.
+// Enrichment stats recede to a second line in <sub>, or — in Tier B — a floated
+// <img align="right"> that hard-pins to the container edge without table chrome.
 package prheader
 
 import (
@@ -49,6 +54,10 @@ const (
 	// The Tier-B floated enrichment strip sits slightly smaller than the wordmark
 	// so it reads as subordinate — a whisper, not a second anchor.
 	stripHeight = "16"
+	// brandName is the wordmark's own name. The team-name segment is suppressed
+	// when it equals this (case-insensitively), so a team literally named "SageOx"
+	// (the dogfood team) doesn't render the brand twice — mark then bold text.
+	brandName = "SageOx"
 )
 
 // Idempotency markers so a future server-side reconciler (see
@@ -63,16 +72,19 @@ const (
 // Signals is the enrichment summary a header can whisper. It mirrors the
 // client-side plan.Signals shape (internal/plan) so the command maps one to the
 // other without this package importing plan. Material gates the whole whisper:
-// we only ever CLAIM "Guided by SageOx" when enrichment materially fired.
+// stats render only when enrichment materially fired AND a Plan link exists to
+// verify them (see Input.wantsWhisper).
 type Signals struct {
-	Collisions   int  `json:"collisions"`
-	PriorArt     int  `json:"prior_art"`
-	ExpertRoutes int  `json:"expert_routes"`
-	Material     bool `json:"material"`
+	Collisions int  `json:"collisions"`
+	PriorArt   int  `json:"prior_art"`
+	Material   bool `json:"material"`
 }
 
-// hasWhisper reports whether an enrichment whisper should render at all.
-func (s Signals) hasWhisper() bool { return s.Material }
+// hasWhisper reports whether there is any enrichment stat worth rendering. It is
+// content-based (not just Material) so a Material flag with zero specific counts
+// can never emit an empty caption — there is no longer a brand-name fallback line,
+// that attribution now lives in the "guided by" kicker.
+func (s Signals) hasWhisper() bool { return s.PriorArt > 0 || s.Collisions > 0 }
 
 // Session and Plan carry a single pre-built, server-visible web URL. Link TEXT
 // is a generic label chosen by this package ("Session 1", "Plan") — never a
@@ -106,56 +118,82 @@ type Input struct {
 	Strip    *StripURLs // non-nil => Tier B floated image whisper
 }
 
-// Render returns the paste-ready, GitHub-safe credit-line block, wrapped in the
-// idempotency markers. It never errors on content — every field degrades
-// independently — so it returns only a string; the signature keeps a value
-// receiver-free pure shape for the callers and tests.
+// WantsWhisper reports whether the enrichment stats should render: the caller
+// asked for them (ShowStat), a signal materially fired, AND a Plan link is
+// present so a reviewer has somewhere to verify the claim. Exported as the one
+// source of the rule so the command (which also decides whether to upload a Tier-B
+// strip) and Render can't drift.
+func (in Input) WantsWhisper() bool {
+	return in.ShowStat && in.Signals.hasWhisper() && len(in.Plans) > 0
+}
+
+// Render returns the paste-ready, GitHub-safe credit-line block: a <blockquote>
+// card wrapped in the idempotency markers. It never errors on content — every
+// field degrades independently — so it returns only a string; the signature keeps
+// a value-receiver-free pure shape for the callers and tests.
 func Render(in Input) string {
-	whisper := in.ShowStat && in.Signals.hasWhisper()
+	whisper := in.WantsWhisper()
 	tierB := whisper && in.Strip != nil && in.Strip.Light != "" && in.Strip.Dark != ""
 
-	// A lone wordmark carries no information — no team, no links, no whisper.
+	// Suppress the team name when it only repeats the brand the wordmark already
+	// shows — the dogfood team is literally "SageOx", so mark + name would read
+	// "SageOx · SageOx".
+	teamName := strings.TrimSpace(in.TeamName)
+	showTeam := teamName != "" && !strings.EqualFold(teamName, brandName)
+
+	// A lone wordmark carries no information — no team, no links, no stats.
 	// Return "" so the caller emits nothing rather than stamping a bare logo
-	// onto a PR body. (A named team alone is still payload and renders.)
-	if strings.TrimSpace(in.TeamName) == "" && len(in.Sessions) == 0 && len(in.Plans) == 0 && !whisper {
+	// onto a PR body.
+	if !showTeam && len(in.Sessions) == 0 && len(in.Plans) == 0 && !whisper {
 		return ""
 	}
 
-	var b strings.Builder
-
-	// Tier B: the floated strip MUST come first in source order so it floats onto
-	// the same line as the text that follows it.
+	// Identity row (inside the card). Tier B's floated strip MUST come first in
+	// source order so it floats onto the same line as the text that follows.
+	var row strings.Builder
 	if tierB {
-		b.WriteString(floatedStrip(in.Strip.Light, in.Strip.Dark, whisperAlt(in.Signals)))
+		row.WriteString(floatedStrip(in.Strip.Light, in.Strip.Dark, whisperAlt(in.Signals)))
 	}
 
-	// Anchor: the wordmark <picture>, optionally linked to the team page. This is
-	// the one brand-colored, theme-adaptive element.
-	b.WriteString(wordmark(in.TeamURL))
+	// "guided by" kicker on its own small line above the wordmark: the attribution,
+	// so the brand name is the mark itself and never repeated as plain text.
+	row.WriteString("<sub>guided&nbsp;by</sub><br>")
 
-	// Team name in <b> — the "whose" of the PR. Non-breaking so it never wraps
-	// mid-name.
-	if name := strings.TrimSpace(in.TeamName); name != "" {
-		b.WriteString(sep())
-		b.WriteString("<b>")
-		b.WriteString(noWrap(escapeHTML(name)))
-		b.WriteString("</b>")
+	// Anchor: the theme-adaptive wordmark <picture>, linked (as an image, so it
+	// keeps its brand color) to the team page.
+	row.WriteString(wordmark(in.TeamURL))
+
+	// Team name as plain muted <b> text, not a link: a reviewer reads it as chrome
+	// and the wordmark already routes to the team page. Non-breaking so it never
+	// wraps mid-name.
+	if showTeam {
+		row.WriteString(sep())
+		row.WriteString("<b>")
+		row.WriteString(noWrap(escapeHTML(teamName)))
+		row.WriteString("</b>")
 	}
 
-	// Sessions and plans: live text links, grouped within a category by whitespace
-	// (Tufte grouping), categories divided by a middle dot.
-	writeLinks(&b, numberedLabels("Session", len(in.Sessions)), sessionSlice(in.Sessions))
-	writeLinks(&b, numberedLabels("Plan", len(in.Plans)), planSlice(in.Plans))
+	// Sessions and plans: the actionable links, grouped within a category by
+	// whitespace (Tufte grouping), categories divided by a middle dot.
+	writeLinks(&row, numberedLabels("Session", len(in.Sessions)), sessionSlice(in.Sessions))
+	writeLinks(&row, numberedLabels("Plan", len(in.Plans)), planSlice(in.Plans))
 
-	// Tier A whisper: trailing, receded into <sub>. Skipped entirely under Tier B
-	// (the floated image carries it) or when not warranted.
+	var b strings.Builder
+	b.WriteString(markerStart)
+	b.WriteString("\n> ")
+	b.WriteString(row.String())
+
+	// Enrichment stats recede to a second line inside the card. Tier B bakes them
+	// into the floated image instead, so the text row is skipped there.
 	if whisper && !tierB {
-		b.WriteString("&emsp;<sub>")
+		b.WriteString("\n>\n> <sub>")
 		b.WriteString(whisperMarkup(in.Signals))
 		b.WriteString("</sub>")
 	}
 
-	return markerStart + "\n" + b.String() + "\n" + markerEnd
+	b.WriteString("\n")
+	b.WriteString(markerEnd)
+	return b.String()
 }
 
 // sep is the calm category divider — a non-breaking middle dot, the Linear/Apple
@@ -167,7 +205,7 @@ func sep() string { return "&nbsp;&middot;&nbsp;" }
 func wordmark(teamURL string) string {
 	pic := "<picture>" +
 		`<source media="(prefers-color-scheme: dark)" srcset="` + escapeHTML(wordmarkDarkURL) + `">` +
-		`<img alt="SageOx" height="` + wordmarkHeight + `" align="middle" src="` + escapeHTML(wordmarkLightURL) + `">` +
+		`<img alt="` + escapeHTML(brandName) + `" height="` + wordmarkHeight + `" align="middle" src="` + escapeHTML(wordmarkLightURL) + `">` +
 		"</picture>"
 	if strings.TrimSpace(teamURL) == "" {
 		return pic

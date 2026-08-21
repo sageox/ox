@@ -27,8 +27,8 @@ both (they serve different readers: the header a human, the trailer the reconcil
 
 1. Gather what the PR credits (you already hold this from your session):
    - the plan ids you saved (`pln_…`), if any;
-   - the enrichment counts from `ox plan enrich` (prior art / collisions / expert
-     routes), if any.
+   - the enrichment counts from `ox plan enrich` (related sessions / concurrent
+     edits), if any.
 2. Run the command — the current session is auto-linked; add plans + enrichment:
 
    ```bash
@@ -61,8 +61,9 @@ both (they serve different readers: the header a human, the trailer the reconcil
 - **Only link server-visible artifacts.** A session/plan URL can 404 until it is
   upload-confirmed. The command already withholds an unconfirmed session; only
   pass `--allow-unconfirmed` when you knowingly accept a possible 404.
-- **Honest enrichment only.** Pass the real `ox plan enrich` counts. The whisper
-  ("Guided by SageOx") renders only when a signal actually fired — never inflate it.
+- **Honest enrichment only.** Pass the real `ox plan enrich` counts. The stats
+  render only when a signal actually fired AND a plan is linked (so a reviewer can
+  verify them) — never inflate them.
 - **Respect config.** If `pr_visuals.header` is off (team/user opt-out) the command
   no-ops with a hint; don't force a header in that case.
 - **Keep the trailer.** The header does not replace `SageOx-Session:` — that line

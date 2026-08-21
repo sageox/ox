@@ -1,7 +1,6 @@
 package prheader
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -11,15 +10,14 @@ func TestWhisperParts_orderSkipZeroPlural(t *testing.T) {
 		sig  Signals
 		want []string
 	}{
-		{"material only", Signals{Material: true}, []string{"Guided by SageOx"}},
-		{"prior art singular", Signals{PriorArt: 1, Material: true}, []string{"Guided by SageOx", "1 prior art"}},
+		{"no specific counts => empty", Signals{Material: true}, nil},
+		{"prior art singular", Signals{PriorArt: 1, Material: true}, []string{"1 related session"}},
 		{
-			"all three, order prior->collision->route",
-			Signals{PriorArt: 2, Collisions: 1, ExpertRoutes: 3, Material: true},
-			[]string{"Guided by SageOx", "2 prior art", "1 collision", "3 expert routes"},
+			"both, order prior->collision",
+			Signals{PriorArt: 2, Collisions: 1, Material: true},
+			[]string{"2 related sessions", "1 concurrent edit flagged"},
 		},
-		{"collision plural", Signals{Collisions: 2, Material: true}, []string{"Guided by SageOx", "2 collisions"}},
-		{"expert route singular", Signals{ExpertRoutes: 1, Material: true}, []string{"Guided by SageOx", "1 expert route"}},
+		{"collision plural", Signals{Collisions: 2, Material: true}, []string{"2 concurrent edits flagged"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -38,20 +36,21 @@ func TestWhisperParts_orderSkipZeroPlural(t *testing.T) {
 
 func TestWhisperAlt_plainSentence(t *testing.T) {
 	got := whisperAlt(Signals{PriorArt: 2, Collisions: 1, Material: true})
-	want := "Guided by SageOx · 2 prior art · 1 collision"
+	want := "2 related sessions · 1 concurrent edit flagged"
 	if got != want {
 		t.Errorf("alt = %q, want %q", got, want)
 	}
 }
 
-func TestWhisperMarkup_nonBreaking(t *testing.T) {
-	got := whisperMarkup(Signals{PriorArt: 2, Material: true})
-	// No raw spaces — every space is a non-breaking entity so the caption never
-	// wraps mid-token.
-	if strings.Contains(got, " ") {
-		t.Errorf("whisper markup contains a raw space: %q", got)
-	}
-	mustContain(t, got, "Guided&nbsp;by&nbsp;SageOx", "2&nbsp;prior&nbsp;art", "&nbsp;&middot;&nbsp;")
+// TestWhisperMarkup_atomicFragmentsBreakableBetween verifies each stat is atomic
+// (internal spaces non-breaking) but the caption can wrap BETWEEN stats, so a
+// narrow (mobile) PR view reflows instead of overflowing.
+// Failure prevented: an all-non-breaking caption overflows the container on phones.
+func TestWhisperMarkup_atomicFragmentsBreakableBetween(t *testing.T) {
+	got := whisperMarkup(Signals{PriorArt: 2, Collisions: 1, Material: true})
+	mustContain(t, got, "2&nbsp;related&nbsp;sessions", "1&nbsp;concurrent&nbsp;edit&nbsp;flagged", " &middot; ")
+	// The brand attribution is NOT repeated in the stats — it lives in the kicker.
+	mustNotContain(t, got, "Guided", "SageOx")
 }
 
 func TestPlural(t *testing.T) {

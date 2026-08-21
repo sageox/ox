@@ -121,7 +121,6 @@ func buildPRHeaderCmd() (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 	f.StringArray("plan", nil, "")
 	f.Int("prior-art", 0, "")
 	f.Int("collisions", 0, "")
-	f.Int("expert-routes", 0, "")
 	f.Bool("no-stat", false, "")
 	f.String("style", "", "")
 	f.Bool("allow-unconfirmed", false, "")

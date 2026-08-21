@@ -115,5 +115,5 @@ func RenderStripSVG(s Signals, theme string) ([]byte, error) {
 // signals + theme => identical bytes => identical URL, no per-PR churn for the
 // same numbers). The caller appends the theme + extension.
 func stripContentName(s Signals) string {
-	return "enrich-" + strconv.Itoa(s.PriorArt) + "-" + strconv.Itoa(s.Collisions) + "-" + strconv.Itoa(s.ExpertRoutes)
+	return "enrich-" + strconv.Itoa(s.PriorArt) + "-" + strconv.Itoa(s.Collisions)
 }

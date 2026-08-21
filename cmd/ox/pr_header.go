@@ -58,9 +58,8 @@ func init() {
 	f := prHeaderCmd.Flags()
 	f.StringArray("session", nil, "session URL or ses_ id to link (repeatable; defaults to the current session)")
 	f.StringArray("plan", nil, "plan URL or pln_ id to link (repeatable)")
-	f.Int("prior-art", 0, "enrichment: prior-art hits found")
-	f.Int("collisions", 0, "enrichment: teammate work collisions found")
-	f.Int("expert-routes", 0, "enrichment: expert routes surfaced")
+	f.Int("prior-art", 0, "enrichment: related sessions surfaced")
+	f.Int("collisions", 0, "enrichment: concurrent edits flagged")
 	f.Bool("no-stat", false, "suppress the enrichment whisper")
 	f.String("style", "", "whisper render: text | image | auto (default: pr_visuals.style)")
 	f.Bool("allow-unconfirmed", false, "include the current session even if not yet server-visible (may 404)")
@@ -133,17 +132,17 @@ func runPRHeader(cmd *cobra.Command, _ []string) error {
 	// counts). Material is derived — we only whisper when a signal actually
 	// fired, never on an empty set.
 	in.Signals = prheader.Signals{
-		PriorArt:     flagInt(cmd, "prior-art"),
-		Collisions:   flagInt(cmd, "collisions"),
-		ExpertRoutes: flagInt(cmd, "expert-routes"),
+		PriorArt:   flagInt(cmd, "prior-art"),
+		Collisions: flagInt(cmd, "collisions"),
 	}
-	in.Signals.Material = in.Signals.PriorArt > 0 || in.Signals.Collisions > 0 || in.Signals.ExpertRoutes > 0
+	in.Signals.Material = in.Signals.PriorArt > 0 || in.Signals.Collisions > 0
 
-	// Tier B (baked floated strip) only when style allows AND a whisper is
-	// warranted AND an uploader can host it. Any failure falls back to Tier A
-	// text — the header must never fail because the image path is unreachable.
+	// Tier B (baked floated strip) only when a whisper is actually warranted (real
+	// stats + a Plan link to verify them) AND the style allows AND an uploader can
+	// host it. Any failure falls back to Tier A text — the header must never fail
+	// because the image path is unreachable.
 	tier := "text"
-	if style := resolvePRStyle(cmd, gitRoot); style != config.PRVisualsStyleText && in.ShowStat && in.Signals.Material {
+	if in.WantsWhisper() && resolvePRStyle(cmd, gitRoot) != config.PRVisualsStyleText {
 		if strip, err := prheader.UploadStrip(resolveStripUploader(gitRoot), in.Signals); err == nil {
 			in.Strip = strip
 			tier = "image"

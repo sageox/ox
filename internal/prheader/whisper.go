@@ -5,40 +5,34 @@ import (
 	"strings"
 )
 
-// whisperLead is the honest, Material-gated claim. It is the whole whisper when
-// every count is zero (Material can be true on a signal this package doesn't
-// enumerate), and the lead-in otherwise. We never claim it unless Signals.Material.
-const whisperLead = "Guided by SageOx"
-
-// whisperParts returns the ordered, zero-skipped, correctly-pluralized phrase
-// fragments of the enrichment whisper as PLAIN text (real spaces, no entities).
-// Order — prior art → collisions → expert routes — puts the "someone already did
-// this" signal first, since that is the one most likely to change a reviewer's
-// read of the PR. The two rendered forms (markup and alt) both build on this so
-// they can never drift.
+// whisperParts returns the ordered, zero-skipped, correctly-pluralized enrichment
+// fragments as PLAIN text (real spaces, no entities), in reviewer-facing language.
+// Order — prior art → collisions — puts the "someone already did this" signal
+// first, since that is the one most likely to change a reviewer's read of the PR.
+// The brand attribution lives in the "guided by" kicker on the wordmark, so it is
+// deliberately NOT repeated here. The two rendered forms (markup and alt) both
+// build on this so they can never drift.
 func whisperParts(s Signals) []string {
-	parts := []string{whisperLead}
+	var parts []string
 	if s.PriorArt > 0 {
-		parts = append(parts, strconv.Itoa(s.PriorArt)+" prior art")
+		parts = append(parts, strconv.Itoa(s.PriorArt)+" related session"+plural(s.PriorArt))
 	}
 	if s.Collisions > 0 {
-		parts = append(parts, strconv.Itoa(s.Collisions)+" collision"+plural(s.Collisions))
-	}
-	if s.ExpertRoutes > 0 {
-		parts = append(parts, strconv.Itoa(s.ExpertRoutes)+" expert route"+plural(s.ExpertRoutes))
+		parts = append(parts, strconv.Itoa(s.Collisions)+" concurrent edit"+plural(s.Collisions)+" flagged")
 	}
 	return parts
 }
 
-// whisperMarkup renders the Tier-A whisper for inside a <sub>: every part is
-// non-breaking and parts are divided by a non-breaking middle dot, matching the
-// line's category separator so the whole thing reads as one calm caption.
+// whisperMarkup renders the stats for inside a <sub>: each fragment is
+// non-breaking (atomic, never splits mid-phrase), but fragments are joined by a
+// breakable space + middle dot so the caption can wrap between stats on a narrow
+// (mobile) viewport instead of overflowing the container.
 func whisperMarkup(s Signals) string {
 	parts := whisperParts(s)
 	for i, p := range parts {
 		parts[i] = noWrap(escapeHTML(p))
 	}
-	return strings.Join(parts, "&nbsp;&middot;&nbsp;")
+	return strings.Join(parts, " &middot; ")
 }
 
 // whisperAlt renders the same content as a plain-text sentence for the Tier-B
