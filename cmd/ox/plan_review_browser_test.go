@@ -168,7 +168,11 @@ func TestBrowser_ReviewRoundTripInRealChrome(t *testing.T) {
 
 	// The submit reached the ledger as a round carrying the section + note the
 	// reviewer left. Poll: the fetch is async after the click returns.
-	anchor := waitForOneRound(t, planDir, 15*time.Second)
+	it := waitForOneRound(t, planDir, 15*time.Second)
+	if it.Section != "Risks" || !strings.Contains(it.Note, "bound the blast radius") || it.Reviewer != "Devon" {
+		t.Fatalf("browser mark lost its context in transit: %+v", it)
+	}
+	anchor := it.Anchor
 
 	// The authoring coworker's `await` read surfaces it — proof it reached the agent.
 	if res, done := awaitSnapshot(planDir); !done || len(res.Open) != 1 || res.Open[0].Section != "Risks" || res.Open[0].Reviewer != "Devon" {
@@ -192,29 +196,111 @@ func TestBrowser_ReviewRoundTripInRealChrome(t *testing.T) {
 	}
 }
 
+// TestBrowser_UnsentMarkSurvivesReconnect proves the Quinn continuity beat: a mark
+// saved in the browser but NOT yet submitted survives a dropped-and-restored
+// connection (a page reload) and can then be submitted, reaching the authoring
+// workflow. This is pure client-side draft persistence (localStorage in
+// review.js) — only a real browser exercises it; a regression in save/restore
+// would pass every hermetic test, which POST already-submitted feedback.
+// Failure prevented: a reviewer loses in-progress feedback when the review server
+// blips and the page reloads.
+func TestBrowser_UnsentMarkSurvivesReconnect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: launches a real headless Chrome")
+	}
+	chromePath := findChromePath()
+	if chromePath == "" {
+		t.Skip("no Chrome/Chromium binary found — skipping real-browser E2E")
+	}
+
+	base, planDir, _ := serveLivePlanReview(t)
+
+	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.ExecPath(chromePath))
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocOpts...)
+	t.Cleanup(cancelAlloc)
+	ctx, cancelCtx := chromedp.NewContext(allocCtx)
+	t.Cleanup(cancelCtx)
+	ctx, cancelTimeout := context.WithTimeout(ctx, 45*time.Second)
+	t.Cleanup(cancelTimeout)
+
+	const note = "draft that must survive a reconnect"
+	var seeded bool
+	var unsentBefore, unsentAfter, draftAfter string
+
+	// Mark a section but DO NOT submit — the mark lives only in the browser.
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(base+"/"),
+		chromedp.WaitVisible(".rev-toggle", chromedp.ByQuery),
+		chromedp.Evaluate(`(function(){try{localStorage.setItem('ox-plan-reviewer','Quinn');localStorage.setItem('ox-plan-rev-seen','1');return true;}catch(e){return false;}})()`, &seeded),
+		chromedp.Reload(),
+		chromedp.WaitVisible(".rev-toggle", chromedp.ByQuery),
+		chromedp.Click(".rev-toggle", chromedp.ByQuery),
+		chromedp.Click("section#sec-1", chromedp.ByQuery),
+		chromedp.WaitVisible(".rev-pop .rev-save", chromedp.ByQuery),
+		chromedp.SendKeys(".rev-pop .rev-note", note, chromedp.ByQuery),
+		chromedp.Click(".rev-pop .rev-save", chromedp.ByQuery), // saved as an unsent draft, NOT submitted
+		chromedp.Text(".rev-count", &unsentBefore, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("browser draft interaction failed: %v", err)
+	}
+	if !seeded {
+		t.Fatal("could not seed reviewer identity in the browser")
+	}
+	if !strings.Contains(unsentBefore, "unsent") {
+		t.Fatalf("a saved mark must show as an unsent draft, counter=%q", unsentBefore)
+	}
+	// nothing has reached the ledger — it is only a local draft
+	if sets, _ := plan.LoadAllFeedback(planDir); len(sets) != 0 {
+		t.Fatalf("an unsent draft must not reach the ledger, got %d round(s)", len(sets))
+	}
+
+	// The connection drops and returns: reload the page (same stable origin).
+	if err := chromedp.Run(ctx,
+		chromedp.Reload(),
+		chromedp.WaitVisible(".rev-toggle", chromedp.ByQuery),
+		chromedp.Text(".rev-count", &unsentAfter, chromedp.ByQuery),
+		chromedp.Evaluate(`(localStorage.getItem('ox-plan-fb:'+(document.body.getAttribute('data-slug')||''))||'')`, &draftAfter),
+	); err != nil {
+		t.Fatalf("reload after reconnect failed: %v", err)
+	}
+	// the unsent draft is restored — the counter still shows it and localStorage
+	// kept the note through the reload
+	if !strings.Contains(unsentAfter, "unsent") {
+		t.Fatalf("the unsent mark must be restored after a reconnect, counter=%q", unsentAfter)
+	}
+	if !strings.Contains(draftAfter, note) {
+		t.Fatalf("the restored draft lost its note: %q", draftAfter)
+	}
+
+	// Back online, the reviewer submits the restored draft and the authoring
+	// workflow receives it.
+	if err := chromedp.Run(ctx,
+		chromedp.Click(".rev-submit", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("submit after reconnect failed: %v", err)
+	}
+	it := waitForOneRound(t, planDir, 15*time.Second)
+	if !strings.Contains(it.Note, note) || it.Reviewer != "Quinn" {
+		t.Fatalf("the restored-then-submitted draft lost its content: %+v", it)
+	}
+	if res, done := awaitSnapshot(planDir); !done || len(res.Open) != 1 || res.Open[0].Anchor != it.Anchor {
+		t.Fatalf("the submitted draft must reach the agent, done=%v %+v", done, res.Open)
+	}
+}
+
 // waitForOneRound polls the plan dir until exactly one review round with one item
-// has landed, then returns that item's browser-computed anchor. Fails if nothing
-// arrives — a submit that never reached the ledger is the failure this guards.
-func waitForOneRound(t *testing.T, planDir string, within time.Duration) string {
+// has landed, then returns that item. Fails if nothing arrives — a submit that
+// never reached the ledger is the failure this guards.
+func waitForOneRound(t *testing.T, planDir string, within time.Duration) plan.FeedbackItem {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
 		sets, _ := plan.LoadAllFeedback(planDir)
 		if len(sets) == 1 && len(sets[0].Items) == 1 {
-			it := sets[0].Items[0]
-			if it.Section != "Risks" {
-				t.Errorf("browser mark lost its section: got %q", it.Section)
-			}
-			if !strings.Contains(it.Note, "bound the blast radius") {
-				t.Errorf("browser mark lost its note: got %q", it.Note)
-			}
-			if it.Reviewer != "Devon" {
-				t.Errorf("browser mark lost its reviewer: got %q", it.Reviewer)
-			}
-			return it.Anchor
+			return sets[0].Items[0]
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("browser Submit never reached the ledger")
-	return ""
+	return plan.FeedbackItem{}
 }
