@@ -51,16 +51,12 @@ func extractLatestVersion(content string) string {
 	lines := strings.Split(content, "\n")
 	var result strings.Builder
 	inVersion := false
-	versionCount := 0
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 
-		// version header (## [0.0.1])
-		if strings.HasPrefix(trimmed, "## [") {
-			versionCount++
-			if versionCount > 1 {
-				// stop at second version header
+		if isReleaseVersionHeader(trimmed) {
+			if inVersion {
 				break
 			}
 			inVersion = true
@@ -73,6 +69,16 @@ func extractLatestVersion(content string) string {
 	}
 
 	return strings.TrimSpace(result.String())
+}
+
+func isReleaseVersionHeader(line string) bool {
+	const prefix = "## ["
+	if !strings.HasPrefix(line, prefix) {
+		return false
+	}
+
+	version := strings.TrimPrefix(line, prefix)
+	return len(version) > 0 && version[0] >= '0' && version[0] <= '9'
 }
 
 func renderReleaseNotes(w io.Writer, content string) {

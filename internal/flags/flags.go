@@ -91,7 +91,7 @@ type Provider interface {
 }
 
 // Defaults returns the baseline Flags used when no provider has an opinion.
-// Experimental gates and kill switches are off; string fields are empty.
+// Opt-in features and kill switches are off; string fields are empty.
 func Defaults() Flags {
 	return Flags{
 		CodeDBEnabled:  true,
@@ -99,7 +99,7 @@ func Defaults() Flags {
 		DistillEnabled: true,
 		AutoDistill:    false, // off until remote settings explicitly enables it
 		TUIEnabled:     false, // off until remote settings explicitly enables it
-		AttestEnabled:  false, // experimental; hidden and unregistered until enabled
+		AttestEnabled:  true,
 	}
 }
 

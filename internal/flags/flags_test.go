@@ -32,8 +32,8 @@ func TestDefaults(t *testing.T) {
 	if d.TUIEnabled {
 		t.Error("TUIEnabled should default false")
 	}
-	if d.AttestEnabled {
-		t.Error("AttestEnabled should default false")
+	if !d.AttestEnabled {
+		t.Error("AttestEnabled should default true")
 	}
 	if d.DisableFileDeleteTools {
 		t.Error("DisableFileDeleteTools should default false")
@@ -67,8 +67,8 @@ func TestEnvProviderUnset(t *testing.T) {
 	if f.TUIEnabled {
 		t.Error("TUIEnabled should remain false when FEATURE_TUI unset")
 	}
-	if f.AttestEnabled {
-		t.Error("AttestEnabled should remain false when FEATURE_ATTEST unset")
+	if !f.AttestEnabled {
+		t.Error("AttestEnabled should remain true when FEATURE_ATTEST unset")
 	}
 }
 
@@ -222,8 +222,8 @@ func TestRemoteSettingsOmittedFieldsPreserveDefaults(t *testing.T) {
 	if !f.DistillEnabled {
 		t.Error("DistillEnabled should remain default true (omitted)")
 	}
-	if f.AttestEnabled {
-		t.Error("AttestEnabled should remain default false (omitted)")
+	if !f.AttestEnabled {
+		t.Error("AttestEnabled should remain default true (omitted)")
 	}
 }
 
