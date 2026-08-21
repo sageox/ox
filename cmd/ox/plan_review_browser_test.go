@@ -169,7 +169,7 @@ func TestBrowser_ReviewRoundTripInRealChrome(t *testing.T) {
 	// The submit reached the ledger as a round carrying the section + note the
 	// reviewer left. Poll: the fetch is async after the click returns.
 	it := waitForOneRound(t, planDir, 15*time.Second)
-	if it.Section != "Risks" || !strings.Contains(it.Note, "bound the blast radius") || it.Reviewer != "Devon" {
+	if it.Section != "Risks" || it.Note != note || it.Reviewer != "Devon" {
 		t.Fatalf("browser mark lost its context in transit: %+v", it)
 	}
 	anchor := it.Anchor
@@ -246,11 +246,15 @@ func TestBrowser_UnsentMarkSurvivesReconnect(t *testing.T) {
 	if !seeded {
 		t.Fatal("could not seed reviewer identity in the browser")
 	}
-	if !strings.Contains(unsentBefore, "unsent") {
-		t.Fatalf("a saved mark must show as an unsent draft, counter=%q", unsentBefore)
+	if strings.TrimSpace(unsentBefore) != "1 unsent" {
+		t.Fatalf("a saved mark must show as exactly one unsent draft, counter=%q", unsentBefore)
 	}
 	// nothing has reached the ledger — it is only a local draft
-	if sets, _ := plan.LoadAllFeedback(planDir); len(sets) != 0 {
+	sets, err := plan.LoadAllFeedback(planDir)
+	if err != nil {
+		t.Fatalf("read feedback: %v", err)
+	}
+	if len(sets) != 0 {
 		t.Fatalf("an unsent draft must not reach the ledger, got %d round(s)", len(sets))
 	}
 
@@ -265,8 +269,8 @@ func TestBrowser_UnsentMarkSurvivesReconnect(t *testing.T) {
 	}
 	// the unsent draft is restored — the counter still shows it and localStorage
 	// kept the note through the reload
-	if !strings.Contains(unsentAfter, "unsent") {
-		t.Fatalf("the unsent mark must be restored after a reconnect, counter=%q", unsentAfter)
+	if strings.TrimSpace(unsentAfter) != "1 unsent" {
+		t.Fatalf("exactly one unsent mark must be restored after a reconnect, counter=%q", unsentAfter)
 	}
 	if !strings.Contains(draftAfter, note) {
 		t.Fatalf("the restored draft lost its note: %q", draftAfter)
@@ -280,7 +284,7 @@ func TestBrowser_UnsentMarkSurvivesReconnect(t *testing.T) {
 		t.Fatalf("submit after reconnect failed: %v", err)
 	}
 	it := waitForOneRound(t, planDir, 15*time.Second)
-	if !strings.Contains(it.Note, note) || it.Reviewer != "Quinn" {
+	if it.Note != note || it.Reviewer != "Quinn" {
 		t.Fatalf("the restored-then-submitted draft lost its content: %+v", it)
 	}
 	if res, done := awaitSnapshot(planDir); !done || len(res.Open) != 1 || res.Open[0].Anchor != it.Anchor {
@@ -294,13 +298,16 @@ func TestBrowser_UnsentMarkSurvivesReconnect(t *testing.T) {
 func waitForOneRound(t *testing.T, planDir string, within time.Duration) plan.FeedbackItem {
 	t.Helper()
 	deadline := time.Now().Add(within)
+	var lastErr error
 	for time.Now().Before(deadline) {
-		sets, _ := plan.LoadAllFeedback(planDir)
-		if len(sets) == 1 && len(sets[0].Items) == 1 {
+		sets, err := plan.LoadAllFeedback(planDir)
+		if err != nil {
+			lastErr = err
+		} else if len(sets) == 1 && len(sets[0].Items) == 1 {
 			return sets[0].Items[0]
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatal("browser Submit never reached the ledger")
+	t.Fatalf("browser Submit never reached the ledger (last read error: %v)", lastErr)
 	return plan.FeedbackItem{}
 }
