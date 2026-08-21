@@ -354,6 +354,9 @@ func stageBinaries(ctx context.Context, tarball []byte, installDir string) ([]st
 			return nil, fmt.Errorf("archive exceeds %d bytes decompressed", maxTotalBytes)
 		}
 
+		// filepath.Base strips every directory component from the archive
+		// entry, so a "../" or absolute name collapses to a bare filename that
+		// can only land in installDir.
 		base := filepath.Base(hdr.Name)
 		isOx := base == "ox"
 		isAdapter := strings.HasPrefix(base, "ox-adapter-")
@@ -361,10 +364,10 @@ func stageBinaries(ctx context.Context, tarball []byte, installDir string) ([]st
 			continue // LICENSE, README, CHANGELOG, etc.
 		}
 		destPath := filepath.Join(cleanInstallDir, base)
-		// zip-slip guard: the resolved path must stay within installDir.
-		// filepath.Base already strips any directory, so this can only trip on
-		// a pathological entry — but assert it explicitly with the HasPrefix
-		// barrier the archive-extraction taint check recognizes.
+		// belt-and-suspenders barrier: the resolved path must stay within
+		// installDir. Base already guarantees this; the explicit HasPrefix
+		// check is the form the archive-extraction taint analysis recognizes,
+		// and it guards every os.Stat/os.Rename on destPath below.
 		if destPath != cleanInstallDir && !strings.HasPrefix(destPath, cleanInstallDir+string(os.PathSeparator)) {
 			return nil, fmt.Errorf("refusing archive entry outside install dir: %q", hdr.Name)
 		}
@@ -374,7 +377,9 @@ func stageBinaries(ctx context.Context, tarball []byte, installDir string) ([]st
 			}
 		}
 
-		tmp, err := os.CreateTemp(cleanInstallDir, "."+base+".tmp-*")
+		// temp file uses a FIXED name pattern so no archive-derived string
+		// reaches a filesystem path.
+		tmp, err := os.CreateTemp(cleanInstallDir, ".ox-upgrade-*")
 		if err != nil {
 			return nil, fmt.Errorf("stage %s: %w", base, err)
 		}
