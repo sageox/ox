@@ -68,6 +68,10 @@ var (
 // exercise the all-or-nothing rollback path.
 var renameFunc = os.Rename
 
+// afterStageHook, when non-nil, runs after each binary is staged; a test uses
+// it to fail mid-staging and verify the temp-file cleanup defer.
+var afterStageHook func(name string) error
+
 // Config controls a self-replace operation. Network endpoints and the install
 // directory are injectable so the flow is testable without touching the real
 // binary or reaching the real GitHub.
@@ -359,7 +363,14 @@ func stageBinaries(ctx context.Context, tarball []byte, installDir string) (stag
 	}()
 
 	cleanInstallDir := filepath.Clean(installDir)
-	for _, name := range installTargets(cleanInstallDir) {
+	// error returns below are bare so the named `staged` result survives for
+	// the deferred cleanup — `return nil, err` would blank it and leak temps.
+	targets, err := installTargets(cleanInstallDir)
+	if err != nil {
+		retErr = err
+		return
+	}
+	for _, name := range targets {
 		data, ok := contents[name]
 		if !ok {
 			continue // installed here but not shipped in this release
@@ -369,36 +380,48 @@ func stageBinaries(ctx context.Context, tarball []byte, installDir string) (stag
 		destPath := filepath.Join(cleanInstallDir, name)
 		tmp, err := os.CreateTemp(cleanInstallDir, ".ox-upgrade-*")
 		if err != nil {
-			return nil, fmt.Errorf("stage %s: %w", name, err)
+			retErr = fmt.Errorf("stage %s: %w", name, err)
+			return
 		}
 		if _, err := tmp.Write(data); err != nil {
 			_ = tmp.Close()
 			_ = os.Remove(tmp.Name())
-			return nil, fmt.Errorf("stage %s: %w", name, err)
+			retErr = fmt.Errorf("stage %s: %w", name, err)
+			return
 		}
 		if err := tmp.Chmod(0o755); err != nil {
 			_ = tmp.Close()
 			_ = os.Remove(tmp.Name())
-			return nil, fmt.Errorf("chmod %s: %w", name, err)
+			retErr = fmt.Errorf("chmod %s: %w", name, err)
+			return
 		}
 		if err := tmp.Close(); err != nil {
 			_ = os.Remove(tmp.Name())
-			return nil, err
+			retErr = err
+			return
 		}
 		staged = append(staged, stagedBinary{destPath: destPath, tmpPath: tmp.Name(), isOx: name == "ox"})
+		if afterStageHook != nil {
+			if err := afterStageHook(name); err != nil {
+				retErr = err
+				return
+			}
+		}
 	}
 	return staged, nil
 }
 
 // installTargets returns the binaries to replace: ox (always, as the running
 // binary) plus any ox-adapter-* already present in installDir. Names come from
-// the local filesystem, never the archive.
-func installTargets(installDir string) []string {
-	targets := []string{"ox"}
+// the local filesystem, never the archive. A directory-read failure is an
+// error, not a silent fallback to ox-only — that would upgrade ox while
+// leaving installed adapters behind, skewing their protocol versions.
+func installTargets(installDir string) ([]string, error) {
 	entries, err := os.ReadDir(installDir)
 	if err != nil {
-		return targets
+		return nil, fmt.Errorf("list install dir %s: %w", installDir, err)
 	}
+	targets := []string{"ox"}
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -407,7 +430,7 @@ func installTargets(installDir string) []string {
 			targets = append(targets, name)
 		}
 	}
-	return targets
+	return targets, nil
 }
 
 // readArchiveBinaries reads the ox and ox-adapter-* regular files from the

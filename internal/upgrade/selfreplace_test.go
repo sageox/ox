@@ -332,6 +332,83 @@ func TestReplaceRunningBinary_RollbackFailureIsSurfaced(t *testing.T) {
 	}
 }
 
+// If adapter discovery (os.ReadDir) fails, the upgrade must abort rather than
+// silently replace ox alone and skew adapter versions.
+func TestReplaceRunningBinary_ReadDirFailureAborts(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ox"), "OLD-ox")
+	writeFile(t, filepath.Join(dir, "ox-adapter-claude-code"), "OLD-adapter")
+	// 0o300 = write+execute, NO read: checkWritable's CreateTemp still works,
+	// but os.ReadDir fails — the exact "discovery fails after writable check"
+	// case.
+	if err := os.Chmod(dir, 0o300); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	tarball := makeTarball(t, map[string]string{
+		"ox":                     "NEW-ox",
+		"ox-adapter-claude-code": "NEW-adapter",
+	})
+	srv := releaseServer(t, tarball, "")
+	defer srv.Close()
+
+	err := ReplaceRunningBinary(context.Background(), baseConfig(dir, srv.URL))
+	if err == nil {
+		t.Fatal("expected error when adapter discovery fails")
+	}
+	// restore read access to inspect: ox must be untouched (not upgraded alone).
+	_ = os.Chmod(dir, 0o700)
+	if got := readFile(t, filepath.Join(dir, "ox")); got != "OLD-ox" {
+		t.Errorf("ox must not be upgraded when discovery fails: got %q", got)
+	}
+}
+
+// A staging failure after at least one binary is staged must clean up the
+// already-written temp files (the named-return defer must see the populated
+// slice, not a nil'd one).
+func TestReplaceRunningBinary_PartialStagingCleansTemps(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ox"), "OLD-ox")
+	writeFile(t, filepath.Join(dir, "ox-adapter-claude-code"), "OLD-adapter")
+
+	// fail staging on the second binary (after one is already staged).
+	oldHook := afterStageHook
+	count := 0
+	afterStageHook = func(string) error {
+		count++
+		if count == 2 {
+			return errors.New("injected staging failure")
+		}
+		return nil
+	}
+	t.Cleanup(func() { afterStageHook = oldHook })
+
+	tarball := makeTarball(t, map[string]string{
+		"ox":                     "NEW-ox",
+		"ox-adapter-claude-code": "NEW-adapter",
+	})
+	srv := releaseServer(t, tarball, "")
+	defer srv.Close()
+
+	if err := ReplaceRunningBinary(context.Background(), baseConfig(dir, srv.URL)); err == nil {
+		t.Fatal("expected staging failure")
+	}
+	// both originals untouched (nothing was committed) and no temp litter.
+	if got := readFile(t, filepath.Join(dir, "ox")); got != "OLD-ox" {
+		t.Errorf("ox must be untouched: got %q", got)
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".ox-upgrade-") {
+			t.Errorf("leftover staged temp file: %s", e.Name())
+		}
+	}
+}
+
 func TestAssetName(t *testing.T) {
 	if got := AssetName("0.14.0", "darwin", "arm64"); got != "ox_0.14.0_darwin_arm64.tar.gz" {
 		t.Errorf("AssetName = %q", got)
