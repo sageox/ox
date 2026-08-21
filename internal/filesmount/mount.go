@@ -79,9 +79,14 @@ type Mount struct {
 // TeamPath returns the absolute directory holding a team's context, and whether
 // this mount carries that team at all.
 //
-// The returned path is confirmed to exist and to stay inside the mount, so a
-// caller can read from it directly.
-func (m Mount) TeamPath(teamID string) (string, bool) {
+// The returned path is confirmed to exist, to be a directory, and to stay
+// inside the mount after symlinks are resolved, so a caller can read from it
+// directly.
+//
+// Every filesystem call here is bounded by ctx. On a dataless File Provider
+// mount even a stat reaches the network, and a caller that budgeted for the
+// checkout fallback has to actually get to use it.
+func (m Mount) TeamPath(ctx context.Context, teamID string) (string, bool) {
 	if teamID == "" {
 		return "", false
 	}
@@ -89,11 +94,12 @@ func (m Mount) TeamPath(teamID string) (string, bool) {
 		if team.TeamID != teamID {
 			continue
 		}
-		resolved, err := resolveInside(m.Root, team.Path)
+		joined, err := resolveInside(m.Root, team.Path)
 		if err != nil {
 			return "", false
 		}
-		if !isDir(resolved) {
+		resolved, err := realDirInside(ctx, m.Root, joined)
+		if err != nil {
 			return "", false
 		}
 		return resolved, true
@@ -139,7 +145,7 @@ func Discover(ctx context.Context) []Mount {
 // a directory to read from or a clear "not mounted".
 func FindTeam(ctx context.Context, teamID string) (string, bool) {
 	for _, mount := range Discover(ctx) {
-		if path, ok := mount.TeamPath(teamID); ok {
+		if path, ok := mount.TeamPath(ctx, teamID); ok {
 			return path, true
 		}
 	}
@@ -194,29 +200,51 @@ func readSentinel(ctx context.Context, root string) (Sentinel, error) {
 }
 
 // readFileWithin reads a file, giving up after d.
-//
-// os.ReadFile cannot be canceled, so the read runs on its own goroutine and
-// the deadline abandons it. The goroutine ends when the syscall returns; the
-// buffered channel keeps it from blocking on a send nobody is waiting for.
 func readFileWithin(ctx context.Context, path string, d time.Duration) ([]byte, error) {
+	return callWithin(ctx, d, path, func() ([]byte, error) {
+		return os.ReadFile(path) //nolint:gosec // path is built from the user's own home directory
+	})
+}
+
+// callWithin runs one blocking filesystem call against the mount, giving up
+// after d.
+//
+// Filesystem syscalls cannot be canceled, so the call runs on its own goroutine
+// and the deadline abandons it. The goroutine ends when the syscall returns;
+// the buffered channel keeps it from blocking on a send nobody is waiting for.
+//
+// Cancellation is checked before the call starts and again before a finished
+// result is returned. Without those checks a context that expired during the
+// call leaves both select cases ready at once, and the same input yields a
+// value or an error depending on which one the scheduler picks.
+func callWithin[T any](ctx context.Context, d time.Duration, path string, call func() (T, error)) (T, error) {
+	var zero T
+
 	ctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
 
+	if err := ctx.Err(); err != nil {
+		return zero, fmt.Errorf("filesmount: reading %s: %w", path, err)
+	}
+
 	type result struct {
-		data []byte
-		err  error
+		value T
+		err   error
 	}
 	done := make(chan result, 1)
 	go func() {
-		data, err := os.ReadFile(path) //nolint:gosec // path is built from the user's own home directory
-		done <- result{data: data, err: err}
+		value, err := call()
+		done <- result{value: value, err: err}
 	}()
 
 	select {
 	case r := <-done:
-		return r.data, r.err
+		if err := ctx.Err(); err != nil {
+			return zero, fmt.Errorf("filesmount: reading %s: %w", path, err)
+		}
+		return r.value, r.err
 	case <-ctx.Done():
-		return nil, fmt.Errorf("filesmount: reading %s: %w", path, ctx.Err())
+		return zero, fmt.Errorf("filesmount: reading %s: %w", path, ctx.Err())
 	}
 }
 
@@ -236,13 +264,56 @@ func resolveInside(root, rel string) (string, error) {
 	joined := filepath.Join(root, rel)
 	// filepath.Join cleans the result, so a traversal shows up as a path that
 	// is no longer under root.
-	if joined != root && !strings.HasPrefix(joined, root+string(os.PathSeparator)) {
+	if !isInside(root, joined) {
 		return "", fmt.Errorf("filesmount: team path %q escapes the mount", rel)
 	}
 	return joined, nil
 }
 
-func isDir(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
+// realDirInside resolves symlinks on a candidate team directory and confirms
+// what they point at is a directory still inside the mount.
+//
+// resolveInside only checks the path text, and the text is not the whole story:
+// the drive supplies the path AND the bytes it names, so a team entry that is a
+// symlink — "SageOx Internal" -> "/Users/me/.ssh" — passes the text check and
+// would turn a team lookup into a read of somewhere else on this machine.
+// Resolving first and re-checking containment closes that.
+//
+// The mount root is resolved too, not assumed: a caller can construct a Mount
+// directly, and on macOS a path under /var already resolves to /private/var.
+func realDirInside(ctx context.Context, root, candidate string) (string, error) {
+	realRoot, err := callWithin(ctx, readTimeout, root, func() (string, error) {
+		return filepath.EvalSymlinks(root)
+	})
+	if err != nil {
+		return "", err
+	}
+	realCandidate, err := callWithin(ctx, readTimeout, candidate, func() (string, error) {
+		return filepath.EvalSymlinks(candidate)
+	})
+	if err != nil {
+		return "", err
+	}
+	if !isInside(realRoot, realCandidate) {
+		return "", fmt.Errorf("filesmount: team path %q resolves outside the mount", candidate)
+	}
+	isDir, err := callWithin(ctx, readTimeout, realCandidate, func() (bool, error) {
+		info, err := os.Stat(realCandidate)
+		if err != nil {
+			return false, err
+		}
+		return info.IsDir(), nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if !isDir {
+		return "", fmt.Errorf("filesmount: team path %q is not a directory", realCandidate)
+	}
+	return realCandidate, nil
+}
+
+// isInside reports whether path is root itself or sits below it.
+func isInside(root, path string) bool {
+	return path == root || strings.HasPrefix(path, root+string(os.PathSeparator))
 }

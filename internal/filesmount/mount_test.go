@@ -3,6 +3,7 @@ package filesmount
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -234,7 +235,7 @@ func TestFindTeamRefusesAnAbsolutePath(t *testing.T) {
 func TestTeamPathIgnoresAnEmptyTeamID(t *testing.T) {
 	mount := Mount{Root: t.TempDir(), Sentinel: Sentinel{Teams: []Team{{TeamID: "", Path: "x"}}}}
 
-	if _, ok := mount.TeamPath(""); ok {
+	if _, ok := mount.TeamPath(context.Background(), ""); ok {
 		t.Fatal("an empty team id matched an entry")
 	}
 }
@@ -260,8 +261,53 @@ func TestReadFileWithinReturnsTheDeadlineError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := readFileWithin(ctx, path, time.Second); err == nil {
-		t.Fatal("a canceled read reported success")
+	// Asserting the cancellation error, not merely "an error": a permission or
+	// missing-file failure would pass a bare err != nil without proving the
+	// deadline is what won, which is the whole property this bounds.
+	if _, err := readFileWithin(ctx, path, time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context cancellation", err)
+	}
+}
+
+// The drive supplies both the team path and what that path names, so a team
+// entry that is a symlink out of the mount reads as in-bounds to a text-only
+// check. Resolving before accepting is what stops a team lookup from becoming a
+// read of somewhere else on this machine.
+func TestFindTeamRefusesATeamFolderThatSymlinksOutOfTheMount(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	home, drive := homeWithDrive(t, validSentinel())
+	_ = home
+	if err := os.Symlink(outside, filepath.Join(drive, "SageOx Internal")); err != nil {
+		t.Fatal(err)
+	}
+
+	if path, ok := FindTeam(context.Background(), testTeamID); ok {
+		t.Fatalf("a team folder symlinked to %q was accepted as %q", outside, path)
+	}
+}
+
+// A symlink that stays inside the drive is ordinary: File Provider layouts and
+// the ~/SageOx shortcut are both symlinks, so containment has to be the test,
+// not "is a symlink".
+func TestFindTeamAcceptsASymlinkThatStaysInsideTheMount(t *testing.T) {
+	sentinel := validSentinel()
+	sentinel.Teams[0].Path = "link"
+	_, drive := homeWithDrive(t, sentinel, "real")
+
+	if err := os.Symlink(filepath.Join(drive, "real"), filepath.Join(drive, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	path, ok := FindTeam(context.Background(), testTeamID)
+	if !ok {
+		t.Fatal("an in-bounds symlink was refused")
+	}
+	if want := resolved(t, filepath.Join(drive, "real")); path != want {
+		t.Errorf("resolved %q, want %q", path, want)
 	}
 }
 
@@ -272,4 +318,36 @@ func resolved(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return out
+}
+
+// A caller that is already out of budget must not touch the mount at all.
+//
+// This is the check before the call, and it is worth more than tidiness: the
+// filesystem call it guards is the one that reaches the Drive API. Starting it
+// with no budget left means abandoning a syscall that can block for as long as
+// the network takes, on a mount ox has already decided not to wait for.
+//
+// (The matching re-check before returning a finished result is deliberate but
+// not observable from here: when a context expires mid-call both select cases
+// go ready and Go picks at random, so no test can force the branch that check
+// exists for. It stays because a value returned past the deadline would be a
+// silently ignored budget, not because a test caught it.)
+func TestCallWithinDoesNotTouchTheMountWithNoBudgetLeft(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	started := make(chan struct{})
+	_, err := callWithin(ctx, time.Second, "path", func() (int, error) {
+		close(started)
+		return 42, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context cancellation", err)
+	}
+
+	select {
+	case <-started:
+		t.Fatal("the mount was read despite an expired budget")
+	case <-time.After(200 * time.Millisecond):
+	}
 }
