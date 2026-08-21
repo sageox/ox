@@ -293,6 +293,45 @@ func TestReplaceRunningBinary_RollsBackOnLateRenameFailure(t *testing.T) {
 	}
 }
 
+// When rollback itself cannot restore an original, the failure must be
+// surfaced (with the preserved backup path) rather than swallowed behind the
+// primary error — otherwise a stranded binary is invisible to the user.
+func TestReplaceRunningBinary_RollbackFailureIsSurfaced(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ox"), "OLD-ox")
+	writeFile(t, filepath.Join(dir, "ox-adapter-claude-code"), "OLD-adapter")
+
+	// every rename that targets ox fails: the ox swap fails AND its backup
+	// cannot be restored, so rollback is incomplete for ox.
+	oldRename := renameFunc
+	renameFunc = func(oldPath, newPath string) error {
+		if filepath.Base(newPath) == "ox" {
+			return errors.New("injected ox rename failure")
+		}
+		return oldRename(oldPath, newPath)
+	}
+	t.Cleanup(func() { renameFunc = oldRename })
+
+	tarball := makeTarball(t, map[string]string{
+		"ox":                     "NEW-ox",
+		"ox-adapter-claude-code": "NEW-adapter",
+	})
+	srv := releaseServer(t, tarball, "")
+	defer srv.Close()
+
+	err := ReplaceRunningBinary(context.Background(), baseConfig(dir, srv.URL))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "rollback incomplete") {
+		t.Errorf("error must surface the incomplete rollback, got: %v", err)
+	}
+	// the adapter (whose renames don't target ox) must still be rolled back.
+	if got := readFile(t, filepath.Join(dir, "ox-adapter-claude-code")); got != "OLD-adapter" {
+		t.Errorf("adapter must be rolled back: got %q", got)
+	}
+}
+
 func TestAssetName(t *testing.T) {
 	if got := AssetName("0.14.0", "darwin", "arm64"); got != "ox_0.14.0_darwin_arm64.tar.gz" {
 		t.Errorf("AssetName = %q", got)

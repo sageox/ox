@@ -232,14 +232,24 @@ func commitStaged(ordered []stagedBinary) error {
 	}
 	var done []commit
 
-	rollback := func() {
+	// rollback undoes every recorded rename and returns any restore failures.
+	// A failed restore is reported (with the backup path) rather than swallowed,
+	// so the caller can point the user at a recoverable original instead of
+	// silently stranding it.
+	rollback := func() []string {
+		var problems []string
 		for i := len(done) - 1; i >= 0; i-- {
 			c := done[i]
-			_ = os.Remove(c.destPath) // drop the newly placed binary
+			if err := os.Remove(c.destPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				problems = append(problems, fmt.Sprintf("remove %s: %v", c.destPath, err))
+			}
 			if c.hadOriginal {
-				_ = renameFunc(c.backupPath, c.destPath) // restore the original
+				if err := renameFunc(c.backupPath, c.destPath); err != nil {
+					problems = append(problems, fmt.Sprintf("restore %s (original preserved at %s): %v", c.destPath, c.backupPath, err))
+				}
 			}
 		}
+		return problems
 	}
 
 	for _, s := range ordered {
@@ -247,17 +257,15 @@ func commitStaged(ordered []stagedBinary) error {
 		hadOriginal := false
 		if _, err := os.Stat(s.destPath); err == nil {
 			if err := renameFunc(s.destPath, backupPath); err != nil {
-				rollback()
-				return fmt.Errorf("back up %s: %w", filepath.Base(s.destPath), err)
+				return withRollbackProblems(fmt.Errorf("back up %s: %w", filepath.Base(s.destPath), err), rollback())
 			}
 			hadOriginal = true
 		}
 		if err := renameFunc(s.tmpPath, s.destPath); err != nil {
-			if hadOriginal {
-				_ = renameFunc(backupPath, s.destPath) // undo this one's backup
-			}
-			rollback()
-			return fmt.Errorf("replace %s: %w", filepath.Base(s.destPath), err)
+			// record this entry so rollback restores its just-made backup too,
+			// then unwind everything committed so far.
+			done = append(done, commit{destPath: s.destPath, backupPath: backupPath, hadOriginal: hadOriginal})
+			return withRollbackProblems(fmt.Errorf("replace %s: %w", filepath.Base(s.destPath), err), rollback())
 		}
 		done = append(done, commit{destPath: s.destPath, backupPath: backupPath, hadOriginal: hadOriginal})
 	}
@@ -269,6 +277,17 @@ func commitStaged(ordered []stagedBinary) error {
 		}
 	}
 	return nil
+}
+
+// withRollbackProblems attaches any rollback restore failures to the primary
+// error so a partially-unwound install surfaces the stranded backups instead
+// of hiding them behind the original failure.
+func withRollbackProblems(primary error, problems []string) error {
+	if len(problems) == 0 {
+		return primary
+	}
+	return fmt.Errorf("%w; rollback incomplete, manual recovery may be needed: %s",
+		primary, strings.Join(problems, "; "))
 }
 
 // resolveInstallDir returns the directory holding the ox binary. When override
@@ -318,7 +337,7 @@ type stagedBinary struct {
 // (os.ReadDir) or the literal "ox", never from the archive. An archive entry
 // named "../../etc/whatever" therefore cannot influence any path — it simply
 // never matches an install target.
-func stageBinaries(ctx context.Context, tarball []byte, installDir string) ([]stagedBinary, error) {
+func stageBinaries(ctx context.Context, tarball []byte, installDir string) (staged []stagedBinary, retErr error) {
 	contents, err := readArchiveBinaries(ctx, tarball)
 	if err != nil {
 		return nil, err
@@ -329,8 +348,17 @@ func stageBinaries(ctx context.Context, tarball []byte, installDir string) ([]st
 		return nil, errors.New("release tarball contains no ox binary")
 	}
 
+	// if staging fails partway, remove the temp files already written so a
+	// partial run leaves no .ox-upgrade-* litter behind.
+	defer func() {
+		if retErr != nil {
+			for _, s := range staged {
+				_ = os.Remove(s.tmpPath)
+			}
+		}
+	}()
+
 	cleanInstallDir := filepath.Clean(installDir)
-	var staged []stagedBinary
 	for _, name := range installTargets(cleanInstallDir) {
 		data, ok := contents[name]
 		if !ok {
