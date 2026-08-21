@@ -244,10 +244,10 @@ func TestBrowserRoundTrip_BrowserApproveClosesReview(t *testing.T) {
 }
 
 // TestBrowserRoundTrip_UntrustedSubmissionRejected proves Rule 3's permission
-// beat: only feedback left on the served page is accepted. A submit without the
-// page's review token is refused and nothing reaches the agent.
+// beat: only feedback carrying the served page's review token is accepted. A
+// submit without that token is refused and nothing reaches the agent.
 // Failure prevented: any other local process posting feedback into a reviewer's
-// plan as if it came from the served page.
+// plan without the token the review page was handed.
 func TestBrowserRoundTrip_UntrustedSubmissionRejected(t *testing.T) {
 	dir := t.TempDir()
 	srv, _, _ := newTestReviewServer(t, dir)

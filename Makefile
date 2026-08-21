@@ -169,7 +169,7 @@ test-slow: ## Run slow tests (build tag: slow) — requires real ox binary, no C
 
 test-browser: ## Run real-browser E2E (build tag: browser) — drives headless Chrome; skips if no Chrome installed
 	$(call say,"Running real-browser E2E (requires Chrome/Chromium)...")
-	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -tags=browser -run TestBrowser -timeout=5m ./cmd/ox/...
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -tags=browser -run TestBrowser -count=1 -timeout=5m ./cmd/ox/...
 
 test-integration: ## Integration tests live in sageox/ox-test-harness
 	@echo "Coding agent integration tests are in sageox/ox-test-harness."

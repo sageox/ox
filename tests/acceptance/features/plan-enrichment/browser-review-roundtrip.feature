@@ -4,9 +4,9 @@ Feature: The Browser Review Round-Trip
   and those exact marks reach Avery without Devon copying anything into a chat.
   Avery addresses each item and Devon's open page updates to show it resolved,
   so the whole back-and-forth happens on a live page. The loop only accepts
-  feedback left on the served page, keeps every reviewer's marks attributed to
-  them, and holds a reviewer's in-progress marks safe across a dropped
-  connection.
+  feedback that carries the valid review token the served page was handed, keeps
+  every reviewer's marks attributed to them, and holds a reviewer's in-progress
+  marks safe across a dropped connection.
 
   See also: business-actions/review-plan.md
   See also: plan-enrichment/review-loop.feature
@@ -63,8 +63,8 @@ Feature: The Browser Review Round-Trip
 
   Rule: The browser review loop is trustworthy and attributable
 
-    Scenario: Feedback that did not come from the served page is refused
-      Given someone tries to submit feedback that did not come from Devon's review page
+    Scenario: Feedback without the served page's review token is refused
+      Given someone tries to submit feedback without the review token Devon's page was handed
       When the submission is made
       Then ox refuses it
       And no feedback reaches Avery from that submission
