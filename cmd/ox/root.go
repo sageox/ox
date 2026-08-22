@@ -186,7 +186,8 @@ func init() {
 	rootCmd.AddCommand(importCmd)
 	rootCmd.AddCommand(queryCmd)
 	rootCmd.AddCommand(recapCmd)
-	rootCmd.AddCommand(scoutCmd)
+	// scoutCmd is feature-gated; registered dynamically in syncFeatureGatedCommands
+	// when FEATURE_SCOUT is enabled (off by default).
 	// teamCmd is registered in team.go (with its `teams` alias + `invite` subcommand)
 	// agentCmd is registered in agent.go
 
@@ -528,6 +529,7 @@ func initFeatureFlags(cmd *cobra.Command) {
 // command and a Hidden-only guard would still allow direct execution.
 func syncFeatureGatedCommands(root *cobra.Command) {
 	setCommandRegistered(root, attestCmd, flags.Get().AttestEnabled)
+	setCommandRegistered(root, scoutCmd, auth.IsScoutEnabled())
 }
 
 func setCommandRegistered(root, command *cobra.Command, enabled bool) {
