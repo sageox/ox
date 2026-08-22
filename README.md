@@ -23,22 +23,9 @@ a teammate already in the same files, and proposes a plan **enriched** with
 collisions, prior art, and who owns the area. All of it because every session is
 recorded to a shared, queryable **Ledger**.
 
-## The loop
+## Latest Project Activity
 
-```mermaid
-flowchart LR
-    REC["Record at sageox.ai<br/>discussions, decisions"]
-    KB["Knowledge Bubbles<br/>team context plus ledger"]
-    PRIME["ox agent prime<br/>loads context"]
-    WORK["AI Coworker session"]
-    CAP["Session captured<br/>to the Ledger"]
-    REC --> KB --> PRIME --> WORK --> CAP --> KB
-```
-
-Record a discussion once. It's distilled into **Knowledge Bubbles** — your team's
-shared memory. The next time anyone primes a coding session, that context flows
-in. The session itself is captured back to the **Ledger**, so the next coworker
-inherits it too. Context compounds instead of evaporating.
+![SageOx — latest project activity](https://www.sageox.ai/api/v1/public/mural/vio0F88wcSd9grV3piwmisVtNA_rWF-ta8gpGJ_tf1g)
 
 ## Works with your coding agent
 
