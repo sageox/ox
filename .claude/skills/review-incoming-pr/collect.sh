@@ -30,15 +30,16 @@ out=".context/review-incoming-pr/$slug"
 mkdir -p "$out"
 rf=(--repo "$REPO")
 
-# --- parallel gather (each writes its own artifact; wait joins them) ---
+# --- parallel gather (each writes its own artifact; we capture every PID and wait
+# on each so a failed background fetch is caught, never masked by a bare `wait`) ---
 gh pr view "$PR" "${rf[@]}" \
   --json number,title,author,isDraft,mergeable,mergeStateStatus,reviewDecision,baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner,maintainerCanModify,additions,deletions,changedFiles,url,body,labels \
-  > "$out/view.json" 2>"$out/.view.err" &
-gh pr diff  "$PR" "${rf[@]}"             > "$out/diff.patch"  2>/dev/null &
-gh pr diff  "$PR" "${rf[@]}" --name-only > "$out/files.txt"   2>/dev/null &
-gh pr checks "$PR" "${rf[@]}"            > "$out/checks.txt"   2>/dev/null &
+  > "$out/view.json" 2>"$out/.view.err" &                       p_view=$!
+gh pr diff  "$PR" "${rf[@]}"             > "$out/diff.patch"  2>/dev/null & p_diff=$!
+gh pr diff  "$PR" "${rf[@]}" --name-only > "$out/files.txt"   2>/dev/null & p_files=$!
+gh pr checks "$PR" "${rf[@]}"            > "$out/checks.txt"   2>/dev/null & p_checks=$!
 gh pr view  "$PR" "${rf[@]}" --json commits \
-  --jq '.commits[] | "\(.oid[0:9]) \(.messageHeadline)"'      > "$out/commits.txt" 2>/dev/null &
+  --jq '.commits[] | "\(.oid[0:9]) \(.messageHeadline)"'      > "$out/commits.txt" 2>/dev/null & p_commits=$!
 # every review thread with its resolution + outdated state (the batch-triage input).
 # --paginate walks past the first 100 threads; owner/name/pr are bound as typed
 # variables rather than string-interpolated into the query.
@@ -47,15 +48,22 @@ gh api graphql --paginate \
   -f query='query($owner:String!,$name:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{isResolved isOutdated path line comments(first:1){nodes{author{login} body}}} pageInfo{hasNextPage endCursor}}}}}' \
   -F owner="$owner" -F name="$name" -F pr="$PR" \
   --jq '.data.repository.pullRequest.reviewThreads.nodes[] | "\(if .isResolved then "RESOLVED" else "OPEN" end) \(if .isOutdated then "OUTDATED" else "current" end) \(.path):\(.line) [\(.comments.nodes[0].author.login)] \(.comments.nodes[0].body|split("\n")[0]|.[0:100])"' \
-  > "$out/threads.txt" 2>/dev/null &
-wait
+  > "$out/threads.txt" 2>/dev/null &                            p_threads=$!
 
-# fail closed: view.json is the spine of the SUMMARY. `wait` does not surface a
-# failed child, so a broken primary fetch would otherwise print a reassuring
-# SUMMARY over fallback values. Refuse instead of handing the reviewer partial
-# evidence. (An empty diff/threads set is legitimate, so only the spine is fatal.)
-if ! jq -e '.number' "$out/view.json" >/dev/null 2>&1; then
-  echo "ERROR: failed to fetch PR metadata for $REPO#$PR; refusing to emit a partial SUMMARY" >&2
+# Fail closed on ANY required-fetch failure, not just the spine. A successful-but-
+# empty artifact (no diff, no review threads) is legitimate and stays empty; a
+# nonzero *exit* means the fetch itself failed and the evidence is incomplete.
+# `gh pr checks` is excluded — it exits nonzero for failing/pending checks (a state,
+# not a collection failure) and is read as text below.
+fetch_fail=""
+wait "$p_view"    || fetch_fail+=" pr-metadata"
+wait "$p_diff"    || fetch_fail+=" diff"
+wait "$p_files"   || fetch_fail+=" file-list"
+wait "$p_commits" || fetch_fail+=" commits"
+wait "$p_threads" || fetch_fail+=" review-threads"
+wait "$p_checks"  || true
+if [[ -n "$fetch_fail" ]] || ! jq -e '.number' "$out/view.json" >/dev/null 2>&1; then
+  echo "ERROR: PR evidence collection failed for $REPO#$PR (failed:${fetch_fail:- pr-metadata}); refusing to emit a partial SUMMARY" >&2
   [[ -s "$out/.view.err" ]] && sed 's/^/  /' "$out/.view.err" >&2
   exit 2
 fi
@@ -84,11 +92,11 @@ tier="standard"; [[ -n "$hits" ]] && tier="SENSITIVE"
 
 # injection-signal scan (agentic-team hardening): the PR's own text is untrusted
 # input to the AI reviewer. Pre-flag hidden/bidi Unicode + instruction-override
-# phrases across ALL attacker-controlled metadata (title, body, diff, commit
-# headlines) so Step 3a treats them as an attack. Fail closed: a scan that cannot
-# run reports UNKNOWN, never a falsely reassuring "none".
+# phrases across ALL attacker-controlled text the reviewer will consume (title, body,
+# diff, commit headlines, AND review-thread comments) so Step 3a treats them as an
+# attack. Fail closed: a scan that cannot run reports UNKNOWN, never a false "none".
 if command -v python3 >/dev/null 2>&1; then
-  inj="$(python3 - "$out/view.json" "$out/diff.patch" "$out/commits.txt" 2>/dev/null <<'PY'
+  inj="$(python3 - "$out/view.json" "$out/diff.patch" "$out/commits.txt" "$out/threads.txt" 2>/dev/null <<'PY'
 import json, re, sys, pathlib
 hits = []
 def is_bad(c):
@@ -110,17 +118,25 @@ def scan(label, text):
         m = re.search(p, text, re.I)
         if m:
             hits.append("%s: injection phrase '%s'" % (label, m.group(0)[:60]))
-def read(path):
-    try: return pathlib.Path(path).read_text(errors='replace')
-    except Exception: return ''
+def read_required(path):
+    # a MISSING required input is fail-closed (exit 3 -> UNKNOWN); an existing but
+    # empty file is legitimate (nothing to scan).
+    p = pathlib.Path(path)
+    if not p.exists():
+        sys.exit(3)
+    try:
+        return p.read_text(errors='replace')
+    except Exception:
+        sys.exit(3)
 try:
-    v = json.loads(read(sys.argv[1]) or '{}')
+    v = json.loads(read_required(sys.argv[1]) or '{}')
 except Exception:
     sys.exit(3)  # view.json unreadable -> fail closed, not a false "none"
 scan('title', v.get('title') or '')
 scan('body', v.get('body') or '')
-scan('diff', read(sys.argv[2]))
-scan('commit-msgs', read(sys.argv[3]))
+scan('diff', read_required(sys.argv[2]))
+scan('commit-msgs', read_required(sys.argv[3]))
+scan('review-comments', read_required(sys.argv[4]))
 print('\n'.join(hits))
 PY
 )"; injrc=$?
