@@ -32,6 +32,11 @@ var ContentFiles = pipeline.LedgerContentFiles
 //  3. Call LFS batch API to get upload actions
 //  4. Upload all blobs in parallel
 //  5. Return filename->FileRef map for meta.json
+//
+// The returned manifest is a filename->FileRef map (not UploadedRef) because it
+// flows straight into meta.json merge logic that is FileRef-shaped. Its blobs
+// ARE uploaded on a nil-error return, so callers wrap it in AssertUploadedManifest
+// at the WritePointerFiles boundary — the one audited place upload is asserted.
 func UploadSessionFiles(client *Client, sessionPath string, logger *slog.Logger) (map[string]FileRef, error) {
 	if logger == nil {
 		logger = slog.Default()

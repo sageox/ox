@@ -15,17 +15,26 @@ import (
 
 // ReconcileResult describes what ReconcileUnpushedPointers found and fixed.
 type ReconcileResult struct {
-	ScannedPointers int      // total pointer files found in sessions/
+	ScannedPointers int      // total pointer files found across the scanned trees
 	MissingOnRemote int      // pointers whose LFS OIDs are not in the remote store
 	Replaced        int      // pointers replaced with empty stubs
 	Squashed        bool     // whether unpushed history was squashed
 	ReplacedFiles   []string // relative paths of replaced files
 }
 
-// ReconcileUnpushedPointers scans the working tree under sessions/ for LFS pointer
-// files whose backing blobs are missing from the remote LFS store, replaces them
-// with empty stubs, and squashes all unpushed commits into one so the poisoned
-// pointer blobs no longer appear in the push pack.
+// ReconcileUnpushedPointers scans the working tree under sessions/ AND data/plans/
+// for LFS pointer files whose backing blobs are missing from the remote LFS store,
+// replaces them with empty stubs, and squashes all unpushed commits into one so the
+// poisoned pointer blobs no longer appear in the push pack.
+//
+// data/plans/ is included because a poisoned PLAN pointer wedges the push exactly
+// like a session one — GitLab's pre-receive scans the whole pack — and pushLedger
+// auto-runs this reconcile on a rejected push. Without the plan walk, a plan.html
+// pointer whose blob was never uploaded (the pre-fix GH #810 bug) stalls the ledger
+// with no self-heal, which is precisely how one such ledger sat unpushable for 43
+// commits. Post-fix the plan path never commits an un-uploaded pointer; this walk
+// heals the ones that predate the fix (their bytes are gone, so blanking to unblock
+// is the only recovery) and backstops any future regression.
 //
 // This is the repair mechanism for ledgers whose push is blocked by
 // "GitLab: LFS objects are missing" — regardless of HOW the bad pointer got
@@ -45,10 +54,11 @@ func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL stri
 
 	result := &ReconcileResult{}
 
-	// find all pointer files under sessions/
-	sessionsDir := filepath.Join(ledgerPath, "sessions")
-	if _, err := os.Stat(sessionsDir); os.IsNotExist(err) {
-		return result, nil
+	// find all pointer files under the pointer-bearing trees: session artifacts
+	// and captured plans. Either can poison the shared push.
+	roots := []string{
+		filepath.Join(ledgerPath, "sessions"),
+		filepath.Join(ledgerPath, "data", "plans"),
 	}
 
 	type pointerEntry struct {
@@ -57,23 +67,28 @@ func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL stri
 	}
 	var pointers []pointerEntry
 
-	err := filepath.Walk(sessionsDir, func(absPath string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || info.Size() > maxPointerSize {
-			return nil
+	for _, root := range roots {
+		if _, err := os.Stat(root); os.IsNotExist(err) {
+			continue
 		}
-		if !IsPointerFile(absPath) {
+		err := filepath.Walk(root, func(absPath string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() || info.Size() > maxPointerSize {
+				return nil
+			}
+			if !IsPointerFile(absPath) {
+				return nil
+			}
+			ref, parseErr := ReadPointerFile(absPath)
+			if parseErr != nil {
+				return nil
+			}
+			relPath, _ := filepath.Rel(ledgerPath, absPath)
+			pointers = append(pointers, pointerEntry{relPath: relPath, ref: ref})
 			return nil
+		})
+		if err != nil {
+			return result, fmt.Errorf("walk %s: %w", root, err)
 		}
-		ref, parseErr := ReadPointerFile(absPath)
-		if parseErr != nil {
-			return nil
-		}
-		relPath, _ := filepath.Rel(ledgerPath, absPath)
-		pointers = append(pointers, pointerEntry{relPath: relPath, ref: ref})
-		return nil
-	})
-	if err != nil {
-		return result, fmt.Errorf("walk sessions/: %w", err)
 	}
 
 	result.ScannedPointers = len(pointers)

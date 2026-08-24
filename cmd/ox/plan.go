@@ -15,7 +15,9 @@ import (
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/identity"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
 	"github.com/spf13/cobra"
 )
@@ -249,6 +251,26 @@ func savePlanWithProvenance(gitRoot string, in plan.Input, result plan.Result, h
 	return savePlanArtifacts(gitRoot, in, result, html, "")
 }
 
+// planLFSClient builds an LFS client for the project's ledger, or nil when one
+// can't be resolved (not logged in, offline, no configured remote). A nil client
+// makes plan.DehydrateHTML leave plan.html plain — safe, and never fatal to a
+// save: the plain render is still retrievable and pushable.
+func planLFSClient(gitRoot string) *lfs.Client {
+	ctx, err := config.LoadProjectContext(gitRoot)
+	if err != nil || ctx == nil {
+		return nil
+	}
+	ledgerPath := ctx.DefaultLedgerPath()
+	if ledgerPath == "" {
+		return nil
+	}
+	client, err := lfs.NewClientFromLedger(ledgerPath, endpoint.GetForProject(gitRoot))
+	if err != nil {
+		return nil
+	}
+	return client
+}
+
 // savePlanArtifacts is savePlanWithProvenance with an explicit primary artifact
 // kind: "" = markdown-primary (html, if any, is a generated render), plan.
 // PrimaryHTML = the html IS the authored plan of record and in.Raw is the
@@ -309,6 +331,21 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	// call twelve lines down logs at Warn.
 	if err := appendProducedPlan(gitRoot, recState, slug); err != nil {
 		slog.Warn("plan: reverse link (produced_plans) failed", "error", err, "slug", slug)
+	}
+
+	// Dehydrate a large plan.html to an LFS pointer BEFORE committing, so the
+	// commit carries a pointer and dehydrated clones stay lean — but only after
+	// the blob is uploaded, so a pointer whose object is missing never reaches the
+	// remote (the GH #810 wedge). Best-effort: on any failure the plain plan.html
+	// Save wrote stays on disk and is committed as-is (retrievable and pushable),
+	// deferring dehydration to a later save / doctor. Small renders and offline
+	// saves stay plain by design.
+	if html != nil {
+		if pointerized, derr := plan.DehydrateHTML(dir, html, planLFSClient(gitRoot)); derr != nil {
+			slog.Warn("plan: plan.html LFS dehydration failed, committing plain", "error", derr, "dir", dir)
+		} else if pointerized {
+			slog.Debug("plan: plan.html dehydrated to LFS pointer", "dir", dir)
+		}
 	}
 
 	// durability: commit + push the plan dir now (sync). Best-effort — a push

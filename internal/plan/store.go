@@ -13,8 +13,10 @@ package plan
 //	plan.md          # always plain git (Input.Raw)
 //	annotations.json # always plain git (the Result — searchable badge data)
 //	meta.json        # always plain git (topic, slug, authors, timestamps, …)
-//	plan.html        # only if a render was passed in; plain git if small,
-//	                 # LFS pointer (internal/lfs.WritePointerFile) if large.
+//	plan.html        # only if a render was passed in. Save writes it PLAIN;
+//	                 # a large render is dehydrated to an LFS pointer by the CLI
+//	                 # caller (DehydrateHTML) AFTER its blob is uploaded, never
+//	                 # before — see the GH #810 note at the plan.html write below.
 //
 // CLI WRITES files into the ledger working tree (daemon-git split): we never
 // commit inline and never discard uncommitted changes — same as session
@@ -178,10 +180,11 @@ func LoadMeta(planDir string) (Meta, error) {
 
 // Save writes a captured plan into the ledger under data/plans/<dated-slug>/.
 // It writes plan.md (from in.Raw), annotations.json (res), and meta.json as
-// plain git-tracked text. plan.html is written ONLY when html != nil: plain
-// when small, as an LFS pointer when it exceeds htmlLFSThreshold. Save never
-// renders HTML and never commits — it only materializes files in the working
-// tree. Returns the absolute plan directory.
+// plain git-tracked text. plan.html is written ONLY when html != nil, and always
+// as PLAIN bytes — dehydration of a large render to an LFS pointer is the CLI
+// caller's job (DehydrateHTML), post-upload. Save never renders HTML, never
+// uploads, and never commits — it only materializes files in the working tree.
+// Returns the absolute plan directory.
 //
 // Save also appends one lifecycle event to the plan's events.jsonl (see
 // events.go) — additive, dual-write alongside meta.json: meta.json remains the
@@ -333,21 +336,24 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 			return fmt.Errorf("write %s: %w", planMetaFile, err)
 		}
 
-		// plan.html — only when a render was already produced. Size-gated: small
-		// renders stay plain so dehydrated clones read them directly; large ones
-		// become LFS pointers (pure-Go pointer write, never the git-lfs binary).
+		// plan.html — only when a render was already produced. ALWAYS written
+		// plain here. Save is the no-network storage layer: it can hash content
+		// but cannot upload it, and a pointer whose blob was never uploaded is
+		// exactly GH #810 — the render is lost AND the poisoned pointer makes the
+		// remote reject every future push, wedging the whole team's ledger.
+		// Dehydration of a large render to an LFS pointer happens in the CLI
+		// caller (savePlanArtifacts → DehydrateHTML) AFTER a confirmed upload, and
+		// only overwrites this plain file once the blob is provably in the store.
+		// If that step is skipped or the store is unreachable, the plan stays
+		// plain: larger in git, but retrievable and pushable — never lost, never
+		// poisoned. That is the structural property the size-gate-here design
+		// lacked.
 		if html != nil {
-			// Stamp the plan's self-identifying meta tags (see html_meta.go) before
-			// either write path below, so both the plain and LFS-pointer'd copies
-			// carry the same content.
+			// Stamp the plan's self-identifying meta tags (see html_meta.go) so the
+			// stored copy carries them regardless of later dehydration.
 			html = StampHTMLMeta(html, planID, meta.Slug, meta.Topic)
 			htmlPath := filepath.Join(dir, planHTMLFile)
-			if int64(len(html)) > htmlLFSThreshold {
-				ref := lfs.NewFileRef(html)
-				if err := lfs.WritePointerFile(htmlPath, ref); err != nil {
-					return fmt.Errorf("write plan.html LFS pointer: %w", err)
-				}
-			} else if err := os.WriteFile(htmlPath, html, 0o644); err != nil {
+			if err := os.WriteFile(htmlPath, html, 0o644); err != nil {
 				return fmt.Errorf("write %s: %w", planHTMLFile, err)
 			}
 

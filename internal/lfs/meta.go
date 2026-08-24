@@ -663,9 +663,11 @@ func WriteSessionMeta(sessionPath string, meta *SessionMeta) error {
 		return err
 	}
 
-	// replace content files with LFS pointer files for GC protection
+	// replace content files with LFS pointer files for GC protection.
+	// AssertUploaded: meta.Files is the persisted manifest of blobs already in
+	// the store (WriteSessionMeta's callers upload before persisting it).
 	if len(meta.Files) > 0 {
-		if _, err := WritePointerFiles(sessionPath, meta.Files); err != nil {
+		if _, err := WritePointerFiles(sessionPath, AssertUploadedManifest(meta.Files)); err != nil {
 			slog.Warn("LFS pointer file write failed", "error", err, "path", sessionPath)
 		}
 	}
@@ -996,8 +998,10 @@ func UpdateMetaSummary(sessionPath, title string) error {
 	// Replace content files with LFS pointer files for GC protection.
 	// Best-effort, matches WriteSessionMeta's prior behavior; pointer
 	// write failures don't invalidate the meta.json update.
+	// AssertUploaded: pointerFiles is a snapshot of the persisted meta manifest,
+	// whose blobs were uploaded before this metadata mutation.
 	if len(pointerFiles) > 0 {
-		if _, err := WritePointerFiles(sessionPath, pointerFiles); err != nil {
+		if _, err := WritePointerFiles(sessionPath, AssertUploadedManifest(pointerFiles)); err != nil {
 			slog.Warn("LFS pointer file write failed", "error", err, "path", sessionPath)
 		}
 	}

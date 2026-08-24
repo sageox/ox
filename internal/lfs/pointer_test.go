@@ -87,7 +87,7 @@ func TestWritePointerFile(t *testing.T) {
 	ref := FileRef{OID: "sha256:abc123def456", Size: 9876}
 	path := filepath.Join(dir, "raw.jsonl")
 
-	err := WritePointerFile(path, ref)
+	err := WritePointerFile(path, AssertUploaded(ref))
 	require.NoError(t, err)
 
 	got, err := os.ReadFile(path)
@@ -102,7 +102,7 @@ func TestWritePointerFiles(t *testing.T) {
 		"summary.md": {OID: "sha256:ccc", Size: 300},
 	}
 
-	paths, err := WritePointerFiles(dir, files)
+	paths, err := WritePointerFiles(dir, AssertUploadedManifest(files))
 	require.NoError(t, err)
 	assert.Len(t, paths, 2)
 
@@ -121,13 +121,13 @@ func TestWritePointerFiles(t *testing.T) {
 }
 
 func TestWritePointerFiles_EmptyMap(t *testing.T) {
-	paths, err := WritePointerFiles(t.TempDir(), map[string]FileRef{})
+	paths, err := WritePointerFiles(t.TempDir(), AssertUploadedManifest(map[string]FileRef{}))
 	assert.NoError(t, err)
 	assert.Nil(t, paths)
 }
 
 func TestWritePointerFiles_NilMap(t *testing.T) {
-	paths, err := WritePointerFiles(t.TempDir(), nil)
+	paths, err := WritePointerFiles(t.TempDir(), AssertUploadedManifest(nil))
 	assert.NoError(t, err)
 	assert.Nil(t, paths)
 }
@@ -153,7 +153,7 @@ func TestWritePointerFiles_SkipsGitStorage(t *testing.T) {
 		"summary.json": NewGitFileRef(int64(len(realJSON))), // Storage=git
 	}
 
-	paths, err := WritePointerFiles(dir, files)
+	paths, err := WritePointerFiles(dir, AssertUploadedManifest(files))
 	require.NoError(t, err)
 	// only the LFS entry should produce a pointer file path
 	assert.Len(t, paths, 1)
@@ -181,7 +181,7 @@ func TestIsPointerFile(t *testing.T) {
 
 	// write a valid pointer file
 	pointerPath := filepath.Join(dir, "raw.jsonl")
-	require.NoError(t, WritePointerFile(pointerPath, FileRef{OID: "sha256:abc", Size: 100}))
+	require.NoError(t, WritePointerFile(pointerPath, AssertUploaded(FileRef{OID: "sha256:abc", Size: 100})))
 
 	// write a real content file (too large to be a pointer)
 	contentPath := filepath.Join(dir, "content.jsonl")
@@ -202,7 +202,7 @@ func TestReadPointerFile(t *testing.T) {
 	ref := FileRef{OID: "sha256:deadbeef1234", Size: 42}
 	path := filepath.Join(dir, "test.jsonl")
 
-	require.NoError(t, WritePointerFile(path, ref))
+	require.NoError(t, WritePointerFile(path, AssertUploaded(ref)))
 
 	got, err := ReadPointerFile(path)
 	require.NoError(t, err)
@@ -307,7 +307,7 @@ func TestWritePointerFile_OverwritesLargeContent(t *testing.T) {
 	// every FileRef as "sha256:"+ComputeOID(content)), and it is what proves the
 	// bytes reached the LFS store before we drop the local copy.
 	ref := FileRef{OID: "sha256:" + ComputeOID(largeContent), Size: int64(len(largeContent))}
-	require.NoError(t, WritePointerFile(path, ref))
+	require.NoError(t, WritePointerFile(path, AssertUploaded(ref)))
 
 	// verify file is now a pointer (small)
 	info, err := os.Stat(path)
@@ -340,7 +340,7 @@ func TestWritePointerFile_RefusesToClobberMismatchedContent(t *testing.T) {
 		content := []byte(`{"type":"header"}` + "\n")
 		require.NoError(t, os.WriteFile(path, content, 0644))
 
-		err := WritePointerFile(path, FileRef{OID: "sha256:deadbeef", Size: int64(len(content))})
+		err := WritePointerFile(path, AssertUploaded(FileRef{OID: "sha256:deadbeef", Size: int64(len(content))}))
 		require.Error(t, err, "must refuse rather than destroy the only local copy")
 		assert.Equal(t, string(content), readBack(t, path), "content must survive untouched")
 	})
@@ -349,10 +349,10 @@ func TestWritePointerFile_RefusesToClobberMismatchedContent(t *testing.T) {
 		// A redaction pass legitimately installs a new OID over the old pointer.
 		// Nothing is lost — the old bytes were never on disk to begin with.
 		path := filepath.Join(dir, "redacted.jsonl")
-		require.NoError(t, WritePointerFile(path, FileRef{OID: "sha256:" + ComputeOID([]byte("v1")), Size: 2}))
+		require.NoError(t, WritePointerFile(path, AssertUploaded(FileRef{OID: "sha256:" + ComputeOID([]byte("v1")), Size: 2})))
 
 		newRef := FileRef{OID: "sha256:" + ComputeOID([]byte("v2")), Size: 2}
-		require.NoError(t, WritePointerFile(path, newRef))
+		require.NoError(t, WritePointerFile(path, AssertUploaded(newRef)))
 
 		oid, _, err := ParsePointer(readBack(t, path))
 		require.NoError(t, err)
@@ -361,7 +361,7 @@ func TestWritePointerFile_RefusesToClobberMismatchedContent(t *testing.T) {
 
 	t.Run("writing into a fresh path always succeeds", func(t *testing.T) {
 		path := filepath.Join(dir, "brand-new.jsonl")
-		require.NoError(t, WritePointerFile(path, FileRef{OID: "sha256:abc123", Size: 7}))
+		require.NoError(t, WritePointerFile(path, AssertUploaded(FileRef{OID: "sha256:abc123", Size: 7})))
 		assert.True(t, IsPointerFile(path))
 	})
 }
@@ -373,7 +373,7 @@ func TestNewFileRef_EndToEnd_RoundTrip(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "raw.jsonl")
-	require.NoError(t, WritePointerFile(path, ref))
+	require.NoError(t, WritePointerFile(path, AssertUploaded(ref)))
 
 	got, err := ReadPointerFile(path)
 	require.NoError(t, err)
@@ -394,7 +394,7 @@ func TestWritePointerFiles_PartialFailure(t *testing.T) {
 		"nonexistent/bad.jsonl": {OID: "sha256:bbb", Size: 200},
 	}
 
-	paths, err := WritePointerFiles(dir, files)
+	paths, err := WritePointerFiles(dir, AssertUploadedManifest(files))
 	// map iteration is random, so we might get the error on either file
 	// at least one file should fail because the subdirectory doesn't exist
 	if err != nil {

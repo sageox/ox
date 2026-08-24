@@ -92,8 +92,9 @@ func migrateSessionToLFS(projectRoot, ledgerPath, sessionPath, sessionName strin
 		return fmt.Errorf("no files uploaded")
 	}
 
-	// replace content files with LFS pointer files
-	_, err = lfs.WritePointerFiles(sessionPath, fileRefs)
+	// replace content files with LFS pointer files.
+	// AssertUploaded: uploadSessionLFS uploaded these blobs at line above.
+	_, err = lfs.WritePointerFiles(sessionPath, lfs.AssertUploadedManifest(fileRefs))
 	if err != nil {
 		return fmt.Errorf("write pointer files: %w", err)
 	}

@@ -139,21 +139,35 @@ func TestSaveListLoad_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestSave_HTMLSizeGating(t *testing.T) {
+// TestSave_AlwaysWritesRetrievablePlainHTML pins the GH #810 invariant: a
+// successful Save leaves plan.html RETRIEVABLE, at EVERY size — including above
+// htmlLFSThreshold, which is exactly where the bug lived.
+//
+// Failure prevented: Save wrote a large render as an LFS pointer WITHOUT
+// uploading the blob, so the content named by the pointer existed nowhere — lost,
+// and the poisoned pointer wedged the ledger push. Save is the no-network layer
+// now, so it writes plain at every size; pointerizing a large render is the CLI
+// caller's job (DehydrateHTML), only AFTER a confirmed upload.
+//
+// The old test asserted the LARGE case produced a pointer with the right OID —
+// which the bug produced too. That is test theater: it passed while the content
+// was being discarded. This asserts the bytes come back.
+func TestSave_AlwaysWritesRetrievablePlainHTML(t *testing.T) {
 	tests := []struct {
-		name        string
-		size        int
-		wantPointer bool
+		name string
+		size int
 	}{
-		{"small html stays plain git", 1024, false},
-		{"large html becomes LFS pointer", htmlLFSThreshold + 1, true},
+		{"small render stays plain", 1024},
+		{"large render crosses the old LFS threshold", htmlLFSThreshold + 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ledger := t.TempDir()
 			withLedger(t, ledger)
 
-			html := bytes.Repeat([]byte("a"), tc.size)
+			// distinctive payload so a silently-discarded render can't masquerade
+			// as an empty-but-present file.
+			html := bytes.Repeat([]byte("PRESERVE-ME "), tc.size/12+1)[:tc.size]
 			in := Input{Raw: "# H\n"}
 			meta := Meta{Topic: "Size gate", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 
@@ -163,35 +177,20 @@ func TestSave_HTMLSizeGating(t *testing.T) {
 			}
 
 			htmlPath := filepath.Join(dir, "plan.html")
-			isPointer := lfs.IsPointerFile(htmlPath)
-			if isPointer != tc.wantPointer {
-				t.Fatalf("plan.html IsPointer = %v, want %v (size=%d)", isPointer, tc.wantPointer, tc.size)
+			if lfs.IsPointerFile(htmlPath) {
+				t.Fatalf("Save wrote plan.html as an LFS pointer (size=%d); it must write plain — "+
+					"pointerizing without an upload is GH #810", tc.size)
+			}
+			got, err := os.ReadFile(htmlPath)
+			if err != nil {
+				t.Fatalf("read plan.html: %v", err)
+			}
+			// StampHTMLMeta may rewrite tag-bearing HTML; this payload has no tags,
+			// so the bytes must round-trip exactly.
+			if !bytes.Equal(got, html) {
+				t.Fatalf("plan.html not retrievable: got %d bytes, want %d", len(got), len(html))
 			}
 
-			if tc.wantPointer {
-				// pointer references the correct OID/size
-				ref, err := lfs.ReadPointerFile(htmlPath)
-				if err != nil {
-					t.Fatalf("ReadPointerFile: %v", err)
-				}
-				if ref.Size != int64(len(html)) {
-					t.Errorf("pointer size = %d, want %d", ref.Size, len(html))
-				}
-				if ref.OID != "sha256:"+lfs.ComputeOID(html) {
-					t.Errorf("pointer OID = %q, want sha256:%s", ref.OID, lfs.ComputeOID(html))
-				}
-			} else {
-				// plain bytes survive verbatim
-				got, err := os.ReadFile(htmlPath)
-				if err != nil {
-					t.Fatalf("read plain html: %v", err)
-				}
-				if !bytes.Equal(got, html) {
-					t.Errorf("plain html bytes differ from input")
-				}
-			}
-
-			// List reflects HasHTML in both cases.
 			plans, err := List("/g")
 			if err != nil || len(plans) != 1 {
 				t.Fatalf("List: %v (n=%d)", err, len(plans))

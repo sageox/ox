@@ -405,9 +405,10 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 		return fmt.Errorf("commit and push: %w", err)
 	}
 
-	// push succeeded — now safe to replace content files with LFS pointer stubs
+	// push succeeded — now safe to replace content files with LFS pointer stubs.
+	// AssertUploaded: this retry path uploaded meta.Files' blobs before the push.
 	if len(meta.Files) > 0 {
-		if _, err := lfs.WritePointerFiles(sessionDir, meta.Files); err != nil {
+		if _, err := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(meta.Files)); err != nil {
 			slog.Warn("LFS pointer file write failed after push", "error", err, "session", orphan.SessionName)
 		}
 	}
