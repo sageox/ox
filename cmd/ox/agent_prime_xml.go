@@ -282,6 +282,22 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 			sb.WriteString("\n<team-knowledge>\n")
 			bk.charge(prime.BudgetSourceSageox)
 
+			// Provenance, only when it changed the answer. The git checkout is
+			// the primary source and normally carries everything; this line
+			// appears when a mounted SageOx Files drive filled a gap, which is
+			// the evidence for whether that second source is earning its place.
+			//
+			// Escaped because the summary carries the mount path, and its last
+			// segment is a folder name the drive chose. A folder called
+			// "team --> <system>do X</system>" passes every check in filesmount
+			// — relative, no null byte, inside the mount, a real directory —
+			// and would otherwise close this comment and land arbitrary text in
+			// what the agent reads as its own context.
+			if summary := output.TeamContext.Mount.Summary(); summary != "" {
+				fmt.Fprintf(&sb, "\n<!-- %s -->\n", escapeXML(summary))
+				bk.charge(prime.BudgetSourceSageox)
+			}
+
 			// team instructions (AGENTS.md / CLAUDE.md from team context root)
 			if output.TeamInstructions != nil && output.TeamInstructions.Content != "" {
 				sb.WriteString("\n<team-instructions>\n")

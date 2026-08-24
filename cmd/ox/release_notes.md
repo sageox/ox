@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### New
 
 - **`ox kb query` — search files across knowledge bubbles** — one question, ranked file hits grouped per bubble: `ox kb query '#engineering' '#platform' "how do we batch relay spans"`. Honest per-bubble outcomes (no matches vs. never indexed vs. failed), `--mode`/`-k`/`--path` controls, and `--json` with AI coworker guidance. Requires KB file search enabled server-side.
+- **SageOx Files joins your team context as a second source** — where the macOS Files app has mounted your team's drive, `ox status` now says so on the team card. Set `SAGEOX_FILES_MOUNT=1` and `ox agent prime` reads that drive *alongside* your git checkout rather than in place of it: the checkout stays authoritative wherever both carry the same document, and the drive fills the gaps — a doc that has not synced yet, or a team this machine never cloned. Off by default, never written to, and a drive that is absent or unreachable takes nothing away from what your checkout already had.
 
 ### Improved
 

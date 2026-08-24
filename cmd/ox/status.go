@@ -374,6 +374,37 @@ func shortenPathViaSymlink(projectRoot, fullPath string, candidates ...string) s
 
 // Shows ledger and team contexts grouped by endpoint
 // Always renders both sections, showing "(none)" if not configured
+// renderFilesRow reports whether SageOx Files carries a team on this machine.
+//
+// Shown whether or not the session reads the drive, because "it is mounted and
+// ox is not using it" is the state someone deciding whether to opt in needs to
+// see first — and shown on every team card, cloud-listed or detail-only, since
+// which list a team arrives in says nothing about whether it is on the drive.
+//
+// The wording says "second source" rather than "in use" on purpose: turning the
+// flag on adds a source, it does not move anything off the git checkout.
+func renderFilesRow(b *strings.Builder, mounts *filesMountScan, teamID string, showPath bool) {
+	mounted, ok := mounts.teamRoot(teamID)
+	if !ok {
+		return
+	}
+
+	b.WriteString(statusLabelStyle.Render("  Files"))
+	if filesMountEnabled() {
+		b.WriteString(statusValueStyle.Render("mounted, read as a second source"))
+	} else {
+		b.WriteString(statusValueStyle.Render(
+			"mounted, not in use (set " + filesMountEnv + "=1 to also read it)"))
+	}
+	b.WriteString("\n")
+
+	if showPath {
+		b.WriteString(statusLabelStyle.Render("  Files path"))
+		b.WriteString(statusMutedStyle.Render(mounted))
+		b.WriteString("\n")
+	}
+}
+
 func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, daemonStatus *daemon.StatusData, bubblesSummary statusBubblesSummary, verbose bool) string {
 	var b strings.Builder
 
@@ -701,6 +732,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		}
 	}
 
+	// One discovery pass for every card below. Both renderers resolve their
+	// team from it, so a signed-out drive costs the budget once for the command
+	// rather than once per team context rendered.
+	filesMounts := scanFilesMounts()
+	defer filesMounts.close()
+
 	// helper: render a single cloud team context entry. showPath gates the
 	// Path row: always shown for this repo's primary team, gated behind
 	// --verbose for the Other Team Contexts cards (restored under ox
@@ -736,6 +773,8 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			b.WriteString(statusMutedStyle.Render(shortenPathViaSymlink(projectRoot, expectedPath, ".sageox/teams/primary", ".sageox/teams/"+cloudTC.StableID())))
 			b.WriteString("\n")
 		}
+
+		renderFilesRow(&b, filesMounts, cloudTC.StableID(), showPath)
 
 		gitDir := filepath.Join(expectedPath, ".git")
 		if _, err := os.Stat(gitDir); err == nil {
@@ -816,6 +855,8 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			b.WriteString(statusMutedStyle.Render(shortenPathViaSymlink(projectRoot, expectedPath, ".sageox/teams/primary", ".sageox/teams/"+detailTC.StableID())))
 			b.WriteString("\n")
 		}
+
+		renderFilesRow(&b, filesMounts, detailTC.StableID(), showPath)
 
 		gitDir := filepath.Join(expectedPath, ".git")
 		if _, err := os.Stat(gitDir); err == nil {

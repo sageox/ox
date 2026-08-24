@@ -36,7 +36,6 @@ import (
 	"github.com/sageox/ox/internal/runtime"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
-	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/tokens"
@@ -1997,22 +1996,46 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 		ReadCommand: "ox agent team-ctx", // not quoted: this is a machine-parsed command field
 	}
 
-	// if team context directory hasn't synced yet, return partial info
+	// Read the team's documents from every source that carries them, checkout
+	// first.
+	//
+	// A mounted SageOx Files drive is a SECOND source, not a replacement. It
+	// hydrates from the Drive API on access rather than at the last sync, so it
+	// answers where a checkout that missed a pull would be stale — or, on a
+	// machine that never cloned, missing entirely. It does not get to overrule
+	// the checkout on the way there: where both carry a document, the checkout's
+	// copy is the one that ships.
+	//
+	// Reading both is what keeps either from hiding the other. A stale checkout
+	// cannot hide a document the drive has; an unreachable drive cannot hide a
+	// document the checkout has, so a mounted read that fails costs nothing that
+	// was not already going to be missing.
+	//
+	// Only reads gain a source. info.Path, sync state, the ledger, and
+	// everything that writes stay on the checkout — the mount refuses every
+	// write at the OS boundary.
+	sources := newTeamReadSources(tc.Path, tc.TeamID)
+	mount := sources.mountSource()
+	info.Mount = mount
+
+	// if no source carries the team yet, return partial info
 	// so agents still see the "team context available" section
-	if _, err := os.Stat(tc.Path); os.IsNotExist(err) {
+	if !sources.anyExists() {
 		return info
 	}
 
 	// check for human escalation roster
-	escalationPath := filepath.Join(tc.Path, "capabilities", "team", "index.md")
-	if _, err := os.Stat(escalationPath); err == nil {
+	if _, ok := firstRootWith(sources, filepath.Join("capabilities", "team", "index.md")); ok {
 		info.Escalation = "capabilities/team/index.md"
 	}
 
 	// discover coworker customizations from coworkers/
 	// agents in coworkers/agents/, commands in coworkers/commands/
-	customizations, err := claude.DiscoverAll(tc.Path)
-	if err == nil && customizations != nil && customizations.HasAnyCustomizations() {
+	customizations, mountAgents, mountCommands := discoverCustomizationsAcross(sources)
+	if mount != nil {
+		mount.Agents, mount.Commands = mountAgents, mountCommands
+	}
+	if customizations != nil && customizations.HasAnyCustomizations() {
 		// populate instruction file paths
 		if customizations.HasInstructionFiles() {
 			info.CoworkerInstructions = &teamCoworkerInstructions{
@@ -2055,8 +2078,12 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 	// frontmatter is a markdown convention, and token estimation is
 	// trivial for text. Non-markdown assets need entirely different
 	// disclosure mechanisms and are out of scope for this catalog.
-	if docs, _ := teamdocs.DiscoverDocs(tc.Path); len(docs) > 0 {
+	docs, mountDocs := discoverTeamDocsAcross(sources)
+	if len(docs) > 0 {
 		info.TeamDocs = docs
+	}
+	if mount != nil {
+		mount.Docs = mountDocs
 	}
 
 	// discover team rules from agents/rules/ (preferred) and coworkers/rules/
@@ -2069,12 +2096,20 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 	// of these rules out to .claude/sageox-team-<slug>/rules/ inside the
 	// current repo so Claude's native paths:-scoped lazy loading kicks in
 	// for free. See cmd/ox/guides/team-rules.md for the rationale.
-	if rules, _ := teamdocs.DiscoverRules(tc.Path, repoSlug); len(rules) > 0 {
+	rules, mountRules := discoverTeamRulesAcross(sources, repoSlug)
+	if len(rules) > 0 {
 		info.TeamRules = rules
 	}
+	if mount != nil {
+		mount.Rules = mountRules
+	}
 
-	// v4 team memory loading
+	// v4 team memory loading: the checkout first, then only what the mounted
+	// drive carries and it does not.
 	loadTeamMemory(info, tc.Path)
+	if mount != nil {
+		mount.Memory = fillTeamMemoryGapsFromMount(info, sources)
+	}
 
 	// sync health: check staleness
 	syncState := daemon.LoadSyncState(tc.Path)
@@ -2090,10 +2125,9 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 
 	// check for agent-context/distilled-discussions.md
 	agentContextRelPath := filepath.Join("agent-context", "distilled-discussions.md")
-	agentContextPath := filepath.Join(tc.Path, agentContextRelPath)
-	if content, err := os.ReadFile(agentContextPath); err == nil {
+	if root, content, ok := readFileAcross(sources, agentContextRelPath); ok {
 		info.HasAgentContext = true
-		info.AgentContextPath = agentContextPath
+		info.AgentContextPath = filepath.Join(root, agentContextRelPath)
 		info.AgentContextRelPath = agentContextRelPath
 		// compute hash for context deduplication
 		hash := sha256.Sum256(content)

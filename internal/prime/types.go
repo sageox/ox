@@ -1,6 +1,9 @@
 package prime
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/sageox/ox/internal/claude"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/teamdocs"
@@ -65,12 +68,17 @@ type CapturePriorGuidance struct {
 // soul/team hints, memory) is NOT a deprecated mirror of Output.KB and
 // never migrates into it.
 type TeamContextInfo struct {
-	TeamID     string   `json:"team_id"`
-	TeamName   string   `json:"team_name,omitempty"`
-	IsRepoTeam bool     `json:"is_repo_team"`
-	Path       string   `json:"path"`
-	Agents     []string `json:"agents,omitempty"`     // discovered agent names
-	Escalation string   `json:"escalation,omitempty"` // path to human escalation roster if exists
+	TeamID     string `json:"team_id"`
+	TeamName   string `json:"team_name,omitempty"`
+	IsRepoTeam bool   `json:"is_repo_team"`
+	// Path is the git team-context checkout: the primary source, and the only
+	// writable one. It stays the checkout whether or not a drive was mounted.
+	Path string `json:"path"`
+	// Mount records a SageOx Files drive read as a SECOND source alongside the
+	// checkout, nil when none was read. See TeamMountSource.
+	Mount      *TeamMountSource `json:"mount,omitempty"`
+	Agents     []string         `json:"agents,omitempty"`     // discovered agent names
+	Escalation string           `json:"escalation,omitempty"` // path to human escalation roster if exists
 
 	// Coworker customizations from coworkers/
 	CoworkerInstructions  *TeamCoworkerInstructions `json:"coworker_instructions,omitempty"`
@@ -129,6 +137,65 @@ type OtherTeamEntry struct {
 	Name string `json:"name"`          // display name
 	Dir  string `json:"dir"`           // subdirectory under root
 	Age  string `json:"age,omitempty"` // content freshness from git log
+}
+
+// TeamMountSource records a SageOx Files drive that was read alongside the git
+// checkout, and what that drive actually added.
+//
+// The mount is a secondary source. TeamContextInfo.Path stays the checkout,
+// writes and sync stay on the checkout, and wherever both carry the same
+// document the checkout wins — a newer copy does not outrank a proven one until
+// someone has watched the two agree.
+//
+// The counts exist so that watching is possible. All zero means the checkout
+// was already complete and the drive changed nothing about this prime; a
+// non-zero count names exactly what would have been missing without it. That is
+// the evidence for whether this path is worth promoting.
+type TeamMountSource struct {
+	Path     string `json:"path"`               // the mounted team folder
+	Docs     int    `json:"docs,omitempty"`     // team docs only the mount carried
+	Rules    int    `json:"rules,omitempty"`    // team rules only the mount carried
+	Agents   int    `json:"agents,omitempty"`   // coworker agents only the mount carried
+	Commands int    `json:"commands,omitempty"` // coworker commands only the mount carried
+	Memory   int    `json:"memory,omitempty"`   // memory timeline files only the mount carried
+}
+
+// Summary names what the drive supplied that the checkout did not, for a
+// provenance line in prime output. Empty when it supplied nothing.
+//
+// Kept to one line and emitted only when non-empty: on a healthy machine the
+// checkout is complete, the drive changes nothing, and plumbing should not cost
+// an agent tokens to be told so.
+func (m *TeamMountSource) Summary() string {
+	if !m.Contributed() {
+		return ""
+	}
+	var parts []string
+	for _, item := range []struct {
+		count int
+		label string
+	}{
+		{m.Docs, "docs"},
+		{m.Rules, "rules"},
+		{m.Agents, "coworker agents"},
+		{m.Commands, "coworker commands"},
+		{m.Memory, "memory files"},
+	} {
+		if item.count > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", item.count, item.label))
+		}
+	}
+	return fmt.Sprintf(
+		"SageOx Files (secondary source, %s) supplied %s the git checkout did not carry",
+		m.Path, strings.Join(parts, ", "))
+}
+
+// Contributed reports whether the drive supplied anything the checkout did not.
+func (m *TeamMountSource) Contributed() bool {
+	if m == nil {
+		return false
+	}
+	return m.Docs > 0 || m.Rules > 0 || m.Agents > 0 || m.Commands > 0 || m.Memory > 0
 }
 
 // TeamCoworkerInstructions holds paths to team instruction files.
