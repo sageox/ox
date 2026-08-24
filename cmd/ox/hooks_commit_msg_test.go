@@ -56,6 +56,56 @@ func TestRunHooksCommitMsg_NoopWhenNotInitialized(t *testing.T) {
 	assert.Equal(t, "test commit\n", string(content))
 }
 
+// TestRunHooksCommitMsg_UnscoredAgentGetsNoTrailer drives the REAL commit-msg hook end to end
+// (initialized repo + configured commit attribution + agent id + no score) and asserts the
+// commit message gains no SageOx trailer. This guards the #809 flip through the actual wiring
+// (attr.Commit gate → shouldAttributeCommit → trailer edit), not just the helper in isolation.
+// Failure prevented: an agent that never scored silently gets Co-Authored-By: SageOx on every
+// commit — fabricated attribution. Red-first: revert shouldAttributeCommit's unscored branch
+// to `return true` and this test fails (the trailer appears).
+func TestRunHooksCommitMsg_UnscoredAgentGetsNoTrailer(t *testing.T) {
+	prevSource, prevFile := hooksCommitMsgSource, hooksCommitMsgFile
+	t.Cleanup(func() {
+		hooksCommitMsgSource = prevSource
+		hooksCommitMsgFile = prevFile
+	})
+
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".sageox"), 0755))
+	commit := "Co-Authored-By: SageOx <ox@sageox.ai>"
+	cfg := &config.ProjectConfig{
+		RepoID:      "repo_test809",
+		Endpoint:    "https://sageox.ai",
+		Attribution: &config.Attribution{Commit: &commit},
+	}
+	require.NoError(t, config.SaveProjectConfig(root, cfg))
+	require.True(t, config.IsInitialized(root), "precondition: project must be initialized")
+
+	// isolate user config + score cache so no real score file leaks in
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("SAGEOX_AGENT_ID", "OxUnscored809") // agent with NO score file
+
+	origDir, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	require.NoError(t, os.Chdir(root))
+
+	msgFile := filepath.Join(root, "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(msgFile, []byte("feat: thing\n"), 0644))
+	hooksCommitMsgSource = ""
+	hooksCommitMsgFile = msgFile
+
+	require.NoError(t, runHooksCommitMsg(nil, nil))
+
+	got, err := os.ReadFile(msgFile)
+	require.NoError(t, err)
+	assert.NotContains(t, string(got), "Co-Authored-By: SageOx",
+		"unscored agent must not receive the SageOx commit trailer (#809)")
+	assert.Equal(t, "feat: thing\n", string(got), "message must be unchanged when nothing is attributed")
+}
+
 func TestBuildSessionURL(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -113,15 +163,16 @@ func TestShouldAttributeCommit_HumanCommit(t *testing.T) {
 	assert.True(t, shouldAttributeCommit("", attr))
 }
 
-// TestShouldAttributeCommit_NoScoreFile verifies backward compatibility: agents
-// that haven't reported a score get unconditional attribution.
-// Failure prevented: old agents or agents before first ox session score lose attribution.
+// TestShouldAttributeCommit_NoScoreFile verifies that an agent which never reported a
+// contribution score does NOT receive attribution — an unscored agent has no established
+// SageOx influence, so stamping Co-Authored-By: SageOx would be fabricated attribution (#809).
+// Failure prevented: silent SageOx trailer on commits SageOx never actually influenced.
 func TestShouldAttributeCommit_NoScoreFile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
 	attr := config.ResolvedAttribution{ScoreThreshold: 0.5}
-	assert.True(t, shouldAttributeCommit("OxNONE", attr))
+	assert.False(t, shouldAttributeCommit("OxNONE", attr))
 }
 
 // TestShouldAttributeCommit_ScoreThreshold verifies the conditional attribution
@@ -158,10 +209,11 @@ func TestShouldAttributeCommit_ScoreThreshold(t *testing.T) {
 	}
 }
 
-// TestShouldAttributeCommit_ReadErrorFallsBackToUnconditional verifies that
-// a corrupt score file doesn't block attribution (safe fallback).
-// Failure prevented: corrupt cache file permanently suppresses attribution.
-func TestShouldAttributeCommit_ReadErrorFallsBackToUnconditional(t *testing.T) {
+// TestShouldAttributeCommit_CorruptScoreDoesNotAttribute verifies that an unreadable score
+// file is treated as "no established influence" and does NOT attribute — fail closed rather
+// than fabricate unearned attribution (#809).
+// Failure prevented: a corrupt cache file silently grants SageOx attribution that was never earned.
+func TestShouldAttributeCommit_CorruptScoreDoesNotAttribute(t *testing.T) {
 	cacheDir := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", cacheDir)
@@ -172,7 +224,7 @@ func TestShouldAttributeCommit_ReadErrorFallsBackToUnconditional(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(scoresDir, "OxCorrupt.json"), []byte("{bad json"), 0600))
 
 	attr := config.ResolvedAttribution{ScoreThreshold: 0.5}
-	assert.True(t, shouldAttributeCommit("OxCorrupt", attr), "corrupt score file should fall back to unconditional attribution")
+	assert.False(t, shouldAttributeCommit("OxCorrupt", attr), "corrupt score file must not grant unearned attribution")
 }
 
 // TestSessionLookupUsesAgentID verifies that when SAGEOX_AGENT_ID is set,

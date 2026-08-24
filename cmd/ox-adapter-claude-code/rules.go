@@ -257,6 +257,9 @@ Your team has expert coworker agents for deep domain knowledge:
 
 ### Credit Your Sources
 When SageOx guidance shapes your approach:
+
+Attribution is **conditional**: attribute to SageOx only when SageOx-delivered team context measurably changed what you did. If it did not, add nothing — no note, no footer, and report the score as ` + "`none`" + `. Fabricating attribution is worse than omitting it.
+
 - In responses: "SageOx found [name]'s session on [topic]..."
 - Commit footer: ` + "`Co-Authored-By: SageOx <ox@sageox.ai>`" + `
 - PR body: ` + "`Co-Authored-By: [SageOx](https://github.com/SageOx)`" + `

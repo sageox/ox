@@ -151,7 +151,10 @@ func runHooksCommitMsg(cmd *cobra.Command, args []string) error {
 //
 // Decision logic:
 //   - No agent ID (human commit): attribute unconditionally (they opted in via ox init)
-//   - No score file (old agent or not yet reported): attribute unconditionally (backward compat)
+//   - Agent with no score reported: do NOT attribute. An agent that never ran `ox session
+//     score` has no established SageOx influence, so stamping the trailer anyway is the
+//     fabricated-attribution failure mode reported in #809. Scoring is how an agent earns
+//     the trailer; unscored means `none`.
 //   - Score file exists: attribute only when score >= threshold
 func shouldAttributeCommit(agentID string, attr config.ResolvedAttribution) bool {
 	if agentID == "" {
@@ -160,7 +163,7 @@ func shouldAttributeCommit(agentID string, attr config.ResolvedAttribution) bool
 
 	scoreFile, _ := session.ReadSageoxScore(agentID)
 	if scoreFile == nil {
-		return true // no score reported — backward compat: unconditional
+		return false // agent never reported a score — no established influence, so no trailer (#809)
 	}
 
 	return scoreFile.Score >= attr.ScoreThreshold

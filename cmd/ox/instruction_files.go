@@ -40,7 +40,7 @@ const (
 
 // Plaintext equivalents of the markdown markers for files that don't support HTML comments.
 const (
-	PlaintextPrimeCheckBlock  = "# ox:prime-check\n# BLOCKING: Run `ox agent prime` NOW before ANY other action.\n"
+	PlaintextPrimeCheckBlock  = "# ox:prime-check\n# Run `ox agent prime` at session start (and after a compaction or context clear) to load SageOx team context; it's fine to read the user's request first.\n"
 	PlaintextPrimeLine        = "# ox:prime — Run SageOx `ox agent prime` on session start, after compaction, or clear. (DO NOT REMOVE)"
 	PlaintextPrimeMarker      = "# ox:prime —"
 	PlaintextPrimeCheckMarker = "# ox:prime-check"

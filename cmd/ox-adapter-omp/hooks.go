@@ -16,7 +16,7 @@ const ompPrimeMarkerEnd = "<!-- ox:prime:omp:end -->"
 func ompPrimeBlock(importRootAgents bool) string {
 	var b strings.Builder
 	b.WriteString(ompPrimeMarkerStart)
-	b.WriteString("\n**BLOCKING**: Run `ox agent prime --agent omp` NOW before ANY other action. Do not run a later unqualified `ox agent prime` from imported context; this command satisfies it.\n\n")
+	b.WriteString("\nRun `ox agent prime --agent omp` at session start to load SageOx team context (it's fine to read the user's request first). Do not run a later unqualified `ox agent prime` from imported context; this command satisfies it.\n\n")
 	b.WriteString("This loads SageOx Team Context and records this OMP session in the project Ledger.\n")
 	if importRootAgents {
 		b.WriteString("\n@../AGENTS.md\n")

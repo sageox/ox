@@ -27,10 +27,11 @@ func TestWithAttributionGuidance(t *testing.T) {
 			contains: []string{
 				"base content",
 				"SageOx Attribution",
+				"Attribution is **conditional**",
 				"Real-Time Insight Attribution",
 				"Plan Footer",
-				"Contribution Score (Required)",
-				"Commit Attribution (Automatic)",
+				"SageOx Contribution Score (report only when commit attribution is configured; `none` is a valid, common answer)",
+				"Commit Attribution (conditional — the hook adds it only when your reported score meets the threshold)",
 				"PR Attribution (Conditional)",
 				"ox session score",
 				// the Co-Authored-By trailer must slot ABOVE the per-session

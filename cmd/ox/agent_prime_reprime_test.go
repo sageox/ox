@@ -104,8 +104,17 @@ func TestPrimeTokenBudget_FullAndCompactStayUnderCeiling(t *testing.T) {
 	// them, educate them visually and crisply") as a one-line north star on every
 	// tier. ~14 tokens, a deliberate override of keep-rationale-out-of-prime for
 	// the creed specifically; depth stays on demand in `ox guide plan-enrichment`.
+	//
+	// Raised 3260 -> 3340 (#809): the <attribution> block now LEADS with the
+	// conditional / anti-fabrication gate ("credit SageOx only when it measurably
+	// changed what you did … Fabricating attribution is worse than omitting it"),
+	// and <instructions> adds a one-line self-verification pointer ("verify with
+	// `ox status` / `git log`"). ~70 tokens, a deliberate correctness cost: agents
+	// read the old "Required/Automatic" wording as "always attribute" and fabricated
+	// provenance, and the imperative tone re-triggered prompt-injection suspicion
+	// every session. The follow-on prime-slimming work (S1) brings this back down.
 	const (
-		fullCeiling    = 3260
+		fullCeiling    = 3340
 		compactCeiling = 400
 	)
 

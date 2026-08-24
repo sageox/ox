@@ -43,6 +43,9 @@ func checkAgentsIntegrationWithFix(w io.Writer, fix bool) checkResult {
 
 	// primary check: both header and footer markers must exist
 	if HasBothPrimeMarkers(gitRoot) {
+		// note: a stale prime-check body (e.g. the old BLOCKING wording) is refreshed in
+		// place by EnsureOxPrimeMarker on the prime path (runs on every `ox agent prime`),
+		// so doctor's canonical branch stays read-only here.
 		// determine which file has it for reporting
 		files := []string{"AGENTS.md", "CLAUDE.md"}
 		for _, file := range files {

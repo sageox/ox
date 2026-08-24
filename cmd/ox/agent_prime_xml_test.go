@@ -248,6 +248,26 @@ func TestOutputAgentPrimeXML_PRAttribution_UsesCorrectField(t *testing.T) {
 	if !strings.Contains(xml, "commit hook adds the trailer automatically") {
 		t.Error("commit hook instruction missing")
 	}
+
+	// #809 regression: the attribution block must state the conditional / anti-fabrication
+	// gate up front, so an agent cannot read it as "always attribute".
+	if !strings.Contains(xml, "Fabricating attribution is worse than omitting it") {
+		t.Error("attribution anti-fabrication gate missing — #809 regression")
+	}
+	// #809 D2 regression: the consult-first reflex must not use imperative "STOP" framing,
+	// and the softened replacement must be present (so deleting the block also fails, not just
+	// renaming the phrase).
+	if strings.Contains(xml, "STOP and search first") {
+		t.Error("consult-first still uses imperative 'STOP and search first' tone — #809 D2 regression")
+	}
+	if !strings.Contains(xml, "searching SageOx first usually beats reasoning from scratch") {
+		t.Error("softened consult-first phrasing missing — #809 D2 regression")
+	}
+	// #809 regression: the old unconditional attribution label must be gone, so a botched
+	// edit that leaves both the old and new wording present fails the guard.
+	if strings.Contains(xml, "(required when commit attribution is configured)") {
+		t.Error("old unconditional 'required when commit attribution is configured' label still present — #809")
+	}
 }
 
 // TestOutputAgentPrimeXML_SurfacesOpenPlanFeedback verifies a new session learns
@@ -1098,7 +1118,13 @@ func TestOutputAgentPrimeXML_SageoxOverheadBudget_Regression(t *testing.T) {
 	// (agent_prime_xml.go:~680) for the creed specifically: the point of a plan,
 	// not its mechanics. The rationale still lives on demand in `ox guide
 	// plan-enrichment`.
-	const sageoxOverheadCeiling = 2150
+	//
+	// Raised 2150 -> 2190 (#809): the static-tier <attribution> conditional/anti-
+	// fabrication gate plus the <instructions> self-verification pointer add ~32
+	// tokens to the minimal floor. Same #809 correctness rationale as the full-prime
+	// ceiling (see agent_prime_reprime_test.go); the prime-slimming follow-up (S1)
+	// brings it back down.
+	const sageoxOverheadCeiling = 2190
 	sageoxTokens := budget.Get(prime.BudgetSourceSageox)
 	if sageoxTokens > sageoxOverheadCeiling {
 		t.Errorf("SageOx overhead floor for minimal prime = %d tokens, exceeds ceiling %d.\n"+

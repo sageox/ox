@@ -22,11 +22,103 @@ const OxPrimeLine = "<!-- ox:prime --> Run SageOx `ox agent prime` on session st
 const OxPrimeCheckMarker = "<!-- ox:prime-check -->"
 
 // OxPrimeCheckBlock is the header block injected at line 1.
-// BLOCKING directive: agents must run prime BEFORE responding to the user.
-// Strong wording is intentional — without it, LLMs treat the user's question as higher priority.
+// It nudges the agent to prime early WITHOUT preempting the user's request. An imperative,
+// primacy-grabbing block ("BLOCKING … NOW … Do NOT respond to the user first") reads as a
+// prompt-injection attack to a wary agent and re-triggers distrust every session (#809/#778),
+// so it is phrased as an offered capability plus a self-verification pointer instead.
+// Prior wordings are refreshed in place on existing repos — see legacyPrimeCheckBodies.
 const OxPrimeCheckBlock = `<!-- ox:prime-check -->
-**BLOCKING**: Run ` + "`ox agent prime`" + ` NOW before ANY other action. Do NOT respond to the user first. Enables SageOx queries.
+Run ` + "`ox agent prime`" + ` at session start to load SageOx team context — it's fine to read the user's request first.
 `
+
+// legacyPrimeCheckBodies are prior versions of the OxPrimeCheckBlock body (the line that
+// follows the OxPrimeCheckMarker). They are refreshed in place with the current body on
+// existing repos. The primacy-grabbing "BLOCKING … NOW … Do NOT respond to the user first"
+// wording read as a prompt-injection attack to wary agents (#809/#778); replacing our own
+// known block body is safe under the additive-only invariant (user content is untouched).
+var legacyPrimeCheckBodies = []string{
+	"**BLOCKING**: Run `ox agent prime` NOW before ANY other action. Do NOT respond to the user first. Enables SageOx queries.",
+}
+
+// currentPrimeCheckBody returns the OxPrimeCheckBlock body line (without the marker line or
+// the trailing newline) — the string a legacy body is rewritten into.
+func currentPrimeCheckBody() string {
+	body := strings.TrimPrefix(OxPrimeCheckBlock, OxPrimeCheckMarker+"\n")
+	return strings.TrimRight(body, "\n")
+}
+
+// refreshStalePrimeCheckBlock rewrites an out-of-date prime-check header body to the current
+// one in place, preserving all surrounding content. Returns the (possibly updated) content
+// and whether a change was made.
+//
+// The replacement is ANCHORED to the OxPrimeCheckMarker: a legacy body is rewritten ONLY when
+// it immediately follows a `<!-- ox:prime-check -->` line. This is load-bearing — a bare
+// whole-file match would corrupt user prose that merely quotes the old block (e.g. docs that
+// say "earlier ox injected BLOCKING…"), rewriting the user's sentence instead of the header.
+// Every marker occurrence is visited, so a duplicate/second stale block is migrated too.
+func refreshStalePrimeCheckBlock(content string) (string, bool) {
+	marker := OxPrimeCheckMarker + "\n"
+	newBody := currentPrimeCheckBody()
+	var b strings.Builder
+	changed := false
+	rest := content
+	for {
+		i := strings.Index(rest, marker)
+		if i < 0 {
+			b.WriteString(rest)
+			break
+		}
+		// emit everything up to and including this marker line, then examine the body
+		// that immediately follows it (the header position — never user prose).
+		b.WriteString(rest[:i+len(marker)])
+		rest = rest[i+len(marker):]
+		for _, oldBody := range legacyPrimeCheckBodies {
+			if strings.HasPrefix(rest, oldBody) {
+				b.WriteString(newBody)
+				rest = rest[len(oldBody):]
+				changed = true
+				break
+			}
+		}
+	}
+	return b.String(), changed
+}
+
+// refreshPrimeCheckBlockInFile applies refreshStalePrimeCheckBlock to a single file, writing
+// atomically only when the body actually changed. Missing files are a no-op.
+func refreshPrimeCheckBlockInFile(filePath string) (bool, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	updated, changed := refreshStalePrimeCheckBlock(string(content))
+	if !changed {
+		return false, nil
+	}
+	// additive-only floor: refuse a write that would drop a large chunk of the file,
+	// protecting user content if a future legacyPrimeCheckBodies entry is mis-specified.
+	if len(updated) < len(content)/2 && len(content) > 100 {
+		return false, fmt.Errorf("prime-check refresh aborted: result %d bytes < half of original %d", len(updated), len(content))
+	}
+	// Preserve the file's mode and skip read-only files. An atomic temp+rename would
+	// otherwise broaden perms (e.g. 0600 -> 0644, a privacy regression) or silently
+	// overwrite a file the user deliberately made read-only. This best-effort self-heal
+	// declines rather than fights the user — mirrors ensureInstructionFileMarker.
+	mode := os.FileMode(0644)
+	if info, statErr := os.Stat(filePath); statErr == nil {
+		if info.Mode().Perm()&0o200 == 0 {
+			return false, nil // read-only: leave it for the user / doctor to resolve
+		}
+		mode = info.Mode().Perm()
+	}
+	if err := fileutil.AtomicWriteBytes(filePath, []byte(updated), mode); err != nil {
+		return false, err
+	}
+	return true, nil
+}
 
 // HasOxPrimeMarker checks if the ox:prime footer marker exists in AGENTS.md or CLAUDE.md.
 // Designed for frequent anti-entropy calls - minimal I/O, fast return on first match.
@@ -111,9 +203,21 @@ func EnsureOxPrimeMarker(gitRoot string) (bool, error) {
 	agentsPath := filepath.Join(gitRoot, "AGENTS.md")
 	claudePath := filepath.Join(gitRoot, "CLAUDE.md")
 
-	// fast path: both markers already present in either file → nothing to do.
+	// anti-entropy: refresh a stale prime-check header body (e.g. the old BLOCKING wording)
+	// in place. Runs before the fast path so a repo that already has both markers still
+	// upgrades to the current, non-preemptive block (#809/#778).
+	refreshed := false
+	for _, p := range []string{agentsPath, claudePath} {
+		if changed, err := refreshPrimeCheckBlockInFile(p); err != nil {
+			return false, err
+		} else if changed {
+			refreshed = true
+		}
+	}
+
+	// fast path: both markers already present in either file → nothing to inject.
 	if HasOxPrimeMarker(gitRoot) && HasOxPrimeCheckMarker(gitRoot) {
-		return false, nil
+		return refreshed, nil
 	}
 
 	// try AGENTS.md first (primary file)
