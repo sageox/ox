@@ -47,32 +47,29 @@ func currentPrimeCheckBody() string {
 	return strings.TrimRight(body, "\n")
 }
 
-// refreshStalePrimeCheckBlock rewrites an out-of-date prime-check header body to the current
-// one in place, preserving all surrounding content. Returns the (possibly updated) content
-// and whether a change was made.
+// refreshStaleCheckBody rewrites an out-of-date check-block body to newBody, anchored to the
+// line immediately following markerLine (which must include its trailing "\n"). Generic over
+// the markdown (`<!-- ox:prime-check -->`) and plaintext (`# ox:prime-check`) marker formats.
 //
-// The replacement is ANCHORED to the OxPrimeCheckMarker: a legacy body is rewritten ONLY when
-// it immediately follows a `<!-- ox:prime-check -->` line. This is load-bearing — a bare
-// whole-file match would corrupt user prose that merely quotes the old block (e.g. docs that
-// say "earlier ox injected BLOCKING…"), rewriting the user's sentence instead of the header.
-// Every marker occurrence is visited, so a duplicate/second stale block is migrated too.
-func refreshStalePrimeCheckBlock(content string) (string, bool) {
-	marker := OxPrimeCheckMarker + "\n"
-	newBody := currentPrimeCheckBody()
+// The anchoring is load-bearing: a legacy body is rewritten ONLY when it immediately follows a
+// marker line. A bare whole-file match would corrupt user prose that merely quotes the old
+// block (e.g. docs that say "earlier ox injected BLOCKING…"), rewriting the user's sentence
+// instead of the header. Every marker occurrence is visited, so a duplicate stale block migrates too.
+func refreshStaleCheckBody(content, markerLine, newBody string, legacyBodies []string) (string, bool) {
 	var b strings.Builder
 	changed := false
 	rest := content
 	for {
-		i := strings.Index(rest, marker)
+		i := strings.Index(rest, markerLine)
 		if i < 0 {
 			b.WriteString(rest)
 			break
 		}
 		// emit everything up to and including this marker line, then examine the body
 		// that immediately follows it (the header position — never user prose).
-		b.WriteString(rest[:i+len(marker)])
-		rest = rest[i+len(marker):]
-		for _, oldBody := range legacyPrimeCheckBodies {
+		b.WriteString(rest[:i+len(markerLine)])
+		rest = rest[i+len(markerLine):]
+		for _, oldBody := range legacyBodies {
 			if strings.HasPrefix(rest, oldBody) {
 				b.WriteString(newBody)
 				rest = rest[len(oldBody):]
@@ -82,6 +79,12 @@ func refreshStalePrimeCheckBlock(content string) (string, bool) {
 		}
 	}
 	return b.String(), changed
+}
+
+// refreshStalePrimeCheckBlock rewrites an out-of-date markdown prime-check header body to the
+// current one in place, preserving all surrounding content.
+func refreshStalePrimeCheckBlock(content string) (string, bool) {
+	return refreshStaleCheckBody(content, OxPrimeCheckMarker+"\n", currentPrimeCheckBody(), legacyPrimeCheckBodies)
 }
 
 // refreshPrimeCheckBlockInFile applies refreshStalePrimeCheckBlock to a single file, writing

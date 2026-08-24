@@ -104,3 +104,63 @@ func TestInstallHooksRejectsUserScope(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, resp.Installed)
 }
+
+// TestInstallHooksRefreshesStaleBlock verifies that an existing .omp/AGENTS.md carrying the OLD
+// imperative "BLOCKING … NOW" wording is regenerated in place on the next install — install
+// previously no-op'd whenever the marker was present, so existing OMP users kept the old wording
+// forever (#809). User content outside the markers and the file mode are preserved.
+func TestInstallHooksRefreshesStaleBlock(t *testing.T) {
+	repo := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".omp"), 0o755))
+	staleBlock := ompPrimeMarkerStart +
+		"\n**BLOCKING**: Run `ox agent prime --agent omp` NOW before ANY other action. Do not run a later unqualified `ox agent prime` from imported context; this command satisfies it.\n\n" +
+		"This loads SageOx Team Context and records this OMP session in the project Ledger.\n" +
+		ompPrimeMarkerEnd
+	userNote := "\n\n# my own omp notes\n"
+	ompPath := filepath.Join(repo, ".omp", "AGENTS.md")
+	require.NoError(t, os.WriteFile(ompPath, []byte(staleBlock+userNote), 0o600))
+
+	_, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: repo, Scope: "project"})
+	require.NoError(t, err)
+
+	content := readFile(t, ompPath)
+	assert.NotContains(t, content, "**BLOCKING**", "stale imperative wording must be refreshed")
+	assert.Contains(t, content, "at session start to load SageOx team context", "new wording must be present")
+	assert.Contains(t, content, "# my own omp notes", "user content outside the markers must be preserved")
+	assert.Equal(t, 1, strings.Count(content, ompPrimeMarkerStart), "no duplicate block")
+	info, _ := os.Stat(ompPath)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "mode must not be broadened")
+}
+
+// TestRefreshOMPPrimeBlock verifies the pure refresh: no-op when current, preserves the
+// @../AGENTS.md import decision while updating wording, and leaves an orphan marker untouched.
+func TestRefreshOMPPrimeBlock(t *testing.T) {
+	current := ompPrimeBlock(false)
+	if out, changed := refreshOMPPrimeBlock(current); changed || out != current {
+		t.Error("expected no change when block already current")
+	}
+
+	staleWithImport := ompPrimeMarkerStart + "\nOLD WORDING\n\n@../AGENTS.md\n" + ompPrimeMarkerEnd
+	out, changed := refreshOMPPrimeBlock(staleWithImport)
+	if !changed {
+		t.Fatal("expected refresh of stale block")
+	}
+	if !strings.Contains(out, "@../AGENTS.md") {
+		t.Error("the @../AGENTS.md import decision must be preserved")
+	}
+	if strings.Contains(out, "OLD WORDING") {
+		t.Error("stale wording must be replaced")
+	}
+
+	orphan := ompPrimeMarkerStart + "\nsomething\n"
+	if out, changed := refreshOMPPrimeBlock(orphan); changed || out != orphan {
+		t.Error("orphan start marker (no end) must be left untouched")
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return string(data)
+}

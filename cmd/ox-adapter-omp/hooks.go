@@ -39,6 +39,23 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 	}
 	content := string(existing)
 	if strings.Contains(content, ompPrimeMarkerStart) {
+		// marker present: refresh the block in place if its wording drifted (e.g. the old
+		// imperative "BLOCKING … NOW" text), preserving the original @../AGENTS.md import
+		// decision and everything outside the markers. Skip read-only files.
+		refreshed, changed := refreshOMPPrimeBlock(content)
+		if !changed {
+			return &adapterprotocol.InstallHooksResponse{Installed: true, FilesWritten: []string{agentsPath}}, nil
+		}
+		mode := os.FileMode(0o644)
+		if info, statErr := os.Stat(agentsPath); statErr == nil {
+			if info.Mode().Perm()&0o200 == 0 {
+				return &adapterprotocol.InstallHooksResponse{Installed: true, FilesWritten: []string{agentsPath}}, nil
+			}
+			mode = info.Mode().Perm()
+		}
+		if err := fileutil.AtomicWriteBytes(agentsPath, []byte(refreshed), mode); err != nil {
+			return nil, fmt.Errorf("failed to refresh .omp/AGENTS.md: %w", err)
+		}
 		return &adapterprotocol.InstallHooksResponse{Installed: true, FilesWritten: []string{agentsPath}}, nil
 	}
 
@@ -120,6 +137,30 @@ func resolveOMPAgentsMDPath(repoRoot string) string {
 		repoRoot, _ = os.Getwd()
 	}
 	return filepath.Join(repoRoot, ".omp", "AGENTS.md")
+}
+
+// refreshOMPPrimeBlock regenerates the omp prime block between its markers when the on-disk
+// content has drifted from the desired block (e.g. the old imperative "BLOCKING … NOW"
+// wording), preserving the original @../AGENTS.md import decision and all content outside the
+// markers. Returns the (possibly updated) content and whether a change was made. An orphan
+// start marker is left untouched rather than risking data loss.
+func refreshOMPPrimeBlock(content string) (string, bool) {
+	start := strings.Index(content, ompPrimeMarkerStart)
+	if start < 0 {
+		return content, false
+	}
+	relEnd := strings.Index(content[start+len(ompPrimeMarkerStart):], ompPrimeMarkerEnd)
+	if relEnd < 0 {
+		return content, false
+	}
+	end := start + len(ompPrimeMarkerStart) + relEnd + len(ompPrimeMarkerEnd)
+	currentBlock := content[start:end]
+	importRootAgents := strings.Contains(currentBlock, "@../AGENTS.md")
+	desired := ompPrimeBlock(importRootAgents)
+	if currentBlock == desired {
+		return content, false
+	}
+	return content[:start] + desired + content[end:], true
 }
 
 // removePrimeBlock removes one complete marker block and preserves all content

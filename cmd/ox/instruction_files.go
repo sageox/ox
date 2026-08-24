@@ -46,6 +46,28 @@ const (
 	PlaintextPrimeCheckMarker = "# ox:prime-check"
 )
 
+// legacyPlaintextPrimeCheckBodies are prior PlaintextPrimeCheckBlock body lines (the line
+// following PlaintextPrimeCheckMarker) that the self-heal refreshes in place on existing files.
+var legacyPlaintextPrimeCheckBodies = []string{
+	"# BLOCKING: Run `ox agent prime` NOW before ANY other action.",
+}
+
+// currentPlaintextPrimeCheckBody returns the current PlaintextPrimeCheckBlock body line
+// (without the marker line or the trailing newline).
+func currentPlaintextPrimeCheckBody() string {
+	body := strings.TrimPrefix(PlaintextPrimeCheckBlock, PlaintextPrimeCheckMarker+"\n")
+	return strings.TrimRight(body, "\n")
+}
+
+// bodiesForFormat returns the current check-block body and the legacy bodies to refresh for a
+// marker format — the inputs to refreshStaleCheckBody.
+func bodiesForFormat(format string) (newBody string, legacy []string) {
+	if format == markerFormatPlaintext {
+		return currentPlaintextPrimeCheckBody(), legacyPlaintextPrimeCheckBodies
+	}
+	return currentPrimeCheckBody(), legacyPrimeCheckBodies
+}
+
 // InstructionFileSpec describes how a coding agent reads project-level instructions.
 type InstructionFileSpec struct {
 	AgentType    string
@@ -342,11 +364,17 @@ func ensureInstructionFileMarker(filePath, format string, exists bool) (injectSt
 
 		hasHeader := strings.Contains(s, checkMarker)
 		hasFooter := strings.Contains(s, primeMarker)
-		if hasHeader && hasFooter {
-			return alreadyPresent, nil
-		}
 
 		modified := s
+
+		// refresh a stale check-block body in place (anchored to checkMarker), so existing
+		// files migrate off the old imperative wording — not just newly-created ones.
+		if hasHeader {
+			newBody, legacy := bodiesForFormat(format)
+			if refreshed, ok := refreshStaleCheckBody(s, checkMarker+"\n", newBody, legacy); ok {
+				modified = refreshed
+			}
+		}
 
 		if !hasHeader {
 			modified = headerBlock + "\n" + modified
@@ -354,6 +382,10 @@ func ensureInstructionFileMarker(filePath, format string, exists bool) (injectSt
 
 		if !hasFooter {
 			modified = strings.TrimRight(modified, "\n\t ") + "\n\n" + footerLine + "\n"
+		}
+
+		if modified == s {
+			return alreadyPresent, nil // both markers present and the body already current
 		}
 
 		// safety: modified content must be >= 50% of original (only meaningful for large files)
