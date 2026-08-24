@@ -53,6 +53,11 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 			}
 			mode = info.Mode().Perm()
 		}
+		// guard against a lost update: if the file changed since we read it, skip the refresh
+		// rather than clobber the newer content — the next reconcile retries.
+		if cur, rerr := os.ReadFile(agentsPath); rerr != nil || string(cur) != content {
+			return &adapterprotocol.InstallHooksResponse{Installed: true, FilesWritten: []string{agentsPath}}, nil
+		}
 		if err := fileutil.AtomicWriteBytes(agentsPath, []byte(refreshed), mode); err != nil {
 			return nil, fmt.Errorf("failed to refresh .omp/AGENTS.md: %w", err)
 		}
@@ -139,15 +144,29 @@ func resolveOMPAgentsMDPath(repoRoot string) string {
 	return filepath.Join(repoRoot, ".omp", "AGENTS.md")
 }
 
+// ompLegacyBlockSignatures identify a prior (imperative) omp block that should be regenerated.
+// Gating on a known-legacy signature — rather than "any drift" — avoids rewriting a block a
+// NEWER binary wrote (version-skew flip-flop in mixed-version teams) or a user-customized
+// block. It mirrors the legacy-allowlist the markdown/plaintext self-heal paths use.
+var ompLegacyBlockSignatures = []string{"**BLOCKING**"}
+
 // refreshOMPPrimeBlock regenerates the omp prime block between its markers when the on-disk
-// content has drifted from the desired block (e.g. the old imperative "BLOCKING … NOW"
-// wording), preserving the original @../AGENTS.md import decision and all content outside the
-// markers. Returns the (possibly updated) content and whether a change was made. An orphan
-// start marker is left untouched rather than risking data loss.
+// content is a KNOWN-legacy block (e.g. the old imperative "BLOCKING … NOW" wording),
+// preserving the original @../AGENTS.md import decision and all content outside the markers.
+// The start marker must occupy a complete line (start of file or after a newline) so a quoted
+// marker in user prose is never touched. An orphan start marker is left untouched. Returns the
+// (possibly updated) content and whether a change was made.
 func refreshOMPPrimeBlock(content string) (string, bool) {
-	start := strings.Index(content, ompPrimeMarkerStart)
-	if start < 0 {
-		return content, false
+	var start int
+	switch {
+	case strings.HasPrefix(content, ompPrimeMarkerStart):
+		start = 0
+	default:
+		i := strings.Index(content, "\n"+ompPrimeMarkerStart)
+		if i < 0 {
+			return content, false // marker absent or not at a line start (e.g. quoted)
+		}
+		start = i + 1 // skip the anchoring "\n"
 	}
 	relEnd := strings.Index(content[start+len(ompPrimeMarkerStart):], ompPrimeMarkerEnd)
 	if relEnd < 0 {
@@ -155,6 +174,18 @@ func refreshOMPPrimeBlock(content string) (string, bool) {
 	}
 	end := start + len(ompPrimeMarkerStart) + relEnd + len(ompPrimeMarkerEnd)
 	currentBlock := content[start:end]
+
+	isLegacy := false
+	for _, sig := range ompLegacyBlockSignatures {
+		if strings.Contains(currentBlock, sig) {
+			isLegacy = true
+			break
+		}
+	}
+	if !isLegacy {
+		return content, false // current or user-customized block — leave it
+	}
+
 	importRootAgents := strings.Contains(currentBlock, "@../AGENTS.md")
 	desired := ompPrimeBlock(importRootAgents)
 	if currentBlock == desired {

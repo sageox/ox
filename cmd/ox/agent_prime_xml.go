@@ -246,7 +246,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 			fmt.Fprintf(&sb, "Only a score of `moderate` or above (>= %g) earns a commit trailer.\n", output.Attribution.ScoreThreshold)
 			sb.WriteString("When it applies, the commit hook adds the trailer automatically — do NOT add it manually.\n")
 		}
-		if output.Attribution.PR != "" {
+		if output.Attribution.PR != "" && output.Attribution.Commit != "" {
 			fmt.Fprintf(&sb, "\nPR attribution (only if a commit actually carries the trailer): check `git log` for `%s`.\n", escapeXML(output.Attribution.Commit))
 			fmt.Fprintf(&sb, "If a commit has one, add as last line of PR body: `%s`. If none do, omit it.\n", escapeXML(output.Attribution.PR))
 		}

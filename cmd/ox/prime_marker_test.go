@@ -584,6 +584,42 @@ func TestRefreshStalePrimeCheckBlock_MigratesEveryMarker(t *testing.T) {
 	}
 }
 
+// TestRefreshStaleCheckBody_LineAnchoredAndCRLF verifies the generic refresh matches the marker
+// only as a COMPLETE line (not a substring), and handles CRLF line endings.
+// Failure prevented: a user heading like "## ox:prime-check" or a longer line containing the
+// marker gets its next line rewritten (#809 review — CodeRabbit major); and CRLF files silently
+// bypass the migration (#809 review — greptile CRLF).
+func TestRefreshStaleCheckBody_LineAnchoredAndCRLF(t *testing.T) {
+	marker, newBody, legacy := "# ox:prime-check", "NEW", []string{"OLDBODY"}
+
+	// (a) "## ox:prime-check" heading contains "# ox:prime-check" as a substring but is not the
+	// marker LINE → its following line must NOT be rewritten.
+	heading := "## ox:prime-check\nOLDBODY\nkeep\n"
+	if out, changed := refreshStaleCheckBody(heading, marker, newBody, legacy); changed || out != heading {
+		t.Errorf("'## ox:prime-check' heading must not match the marker line (changed=%v)", changed)
+	}
+
+	// (b) a longer line ending with the marker text is not a marker line either.
+	prefixed := "prefix # ox:prime-check\nOLDBODY\n"
+	if out, changed := refreshStaleCheckBody(prefixed, marker, newBody, legacy); changed || out != prefixed {
+		t.Error("marker as a substring of a longer line must not trigger a rewrite")
+	}
+
+	// (c) the real marker line followed by the legacy body → rewritten, surrounding intact.
+	real := "# ox:prime-check\nOLDBODY\nkeep\n"
+	out, changed := refreshStaleCheckBody(real, marker, newBody, legacy)
+	if !changed || !strings.Contains(out, "\nNEW\n") || strings.Contains(out, "OLDBODY") || !strings.Contains(out, "keep") {
+		t.Errorf("real header body must be rewritten with surroundings intact, got %q", out)
+	}
+
+	// (d) CRLF marker + body → rewritten, CRLF terminator preserved.
+	crlf := "# ox:prime-check\r\nOLDBODY\r\nkeep\r\n"
+	out, changed = refreshStaleCheckBody(crlf, marker, newBody, legacy)
+	if !changed || !strings.Contains(out, "NEW\r\n") || strings.Contains(out, "OLDBODY") {
+		t.Errorf("CRLF header body must be rewritten with CRLF preserved, got %q", out)
+	}
+}
+
 // TestRefreshPrimeCheckBlock_PreservesModeAndSkipsReadOnly verifies the self-heal write does
 // not broaden file permissions and declines to touch a read-only file.
 // Failure prevented: an atomic rewrite silently turns a user's 0600 AGENTS.md into 0644 (a

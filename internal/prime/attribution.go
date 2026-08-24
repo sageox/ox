@@ -37,7 +37,7 @@ func WithAttributionGuidance(content string, loggedIn bool, attr config.Resolved
 	sb.WriteString("\n**Real-Time Insight Attribution:**\n")
 	sb.WriteString("When SageOx guidance influences your approach, explicitly attribute it in your responses. If it did not, say nothing — do not manufacture an attribution:\n")
 	sb.WriteString("- \"Based on SageOx domain guidance, I'll...\"\n")
-	sb.WriteString("- \"Team patterns shared through SageOx suggests...\"\n")
+	sb.WriteString("- \"Team patterns shared through SageOx suggest...\"\n")
 	sb.WriteString("- \"Following SageOx best practices for [topic]...\"\n")
 	sb.WriteString("- \"SageOx guidance on [domain] indicates...\"\n")
 	sb.WriteString("\n**Teammate Attribution (credit both the person AND SageOx, when it applies):**\n")
@@ -63,11 +63,11 @@ func WithAttributionGuidance(content string, loggedIn bool, attr config.Resolved
 	sb.WriteString("> Guided by SageOx\n>\n")
 	sb.WriteString("> ⚠️ SageOx is currently for expert skiers only who are comfortable running large swarms of agentic AI agents updating their code.\n")
 
-	// PR header credit line (always-on pointer). The human-facing top-of-body
-	// counterpart to the SageOx-Session: trailer; rendered by the CLI so the
-	// agent never hand-writes the sanitizer-fragile markup.
-	sb.WriteString("\n**PR Header (paste at the TOP of a PR body):**\n")
-	sb.WriteString("When you open a PR for this work, run `ox pr header` (add `--plan <pln_id>` for each plan and `--prior-art/--collisions N` for enrichment) and paste its output as the FIRST lines of the PR description, above your summary. It renders a thin, on-brand credit line linking the session(s) and plan(s). Keep the `SageOx-Session:` trailer at the bottom. See the `ox-pr-header` skill.\n")
+	// PR header credit line — conditional. The human-facing top-of-body counterpart to the
+	// SageOx-Session: trailer; rendered by the CLI so the agent never hand-writes the
+	// sanitizer-fragile markup.
+	sb.WriteString("\n**PR Header (only when SageOx shaped the work — paste at the TOP of a PR body):**\n")
+	sb.WriteString("When SageOx team context genuinely shaped this work (your score is not `none`) and you open a PR, run `ox pr header` (add `--plan <pln_id>` for each plan and `--prior-art/--collisions N` for enrichment) and paste its output as the FIRST lines of the PR description, above your summary. It renders a thin, on-brand credit line linking the session(s) and plan(s). If SageOx did not shape the work, skip it. Keep the `SageOx-Session:` trailer at the bottom. See the `ox-pr-header` skill.\n")
 
 	// SageOx contribution score — rendered only when commit attribution is configured
 	if attr.Commit != "" {

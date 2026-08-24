@@ -371,7 +371,7 @@ func ensureInstructionFileMarker(filePath, format string, exists bool) (injectSt
 		// files migrate off the old imperative wording — not just newly-created ones.
 		if hasHeader {
 			newBody, legacy := bodiesForFormat(format)
-			if refreshed, ok := refreshStaleCheckBody(s, checkMarker+"\n", newBody, legacy); ok {
+			if refreshed, ok := refreshStaleCheckBody(s, checkMarker, newBody, legacy); ok {
 				modified = refreshed
 			}
 		}
@@ -391,6 +391,12 @@ func ensureInstructionFileMarker(filePath, format string, exists bool) (injectSt
 		// safety: modified content must be >= 50% of original (only meaningful for large files)
 		if len(modified) < len(s)/2 && len(s) > 100 {
 			return 0, fmt.Errorf("safety check failed: modified content (%d bytes) is less than half of original (%d bytes)", len(modified), len(s))
+		}
+
+		// guard against a lost update: if the file changed since we read it (a concurrent
+		// editor save), skip rather than clobber the newer content — the next reconcile retries.
+		if cur, rerr := os.ReadFile(filePath); rerr != nil || string(cur) != s {
+			return alreadyPresent, nil
 		}
 
 		// preserve the existing file's permission bits — atomic rename would

@@ -47,44 +47,43 @@ func currentPrimeCheckBody() string {
 	return strings.TrimRight(body, "\n")
 }
 
-// refreshStaleCheckBody rewrites an out-of-date check-block body to newBody, anchored to the
-// line immediately following markerLine (which must include its trailing "\n"). Generic over
-// the markdown (`<!-- ox:prime-check -->`) and plaintext (`# ox:prime-check`) marker formats.
+// refreshStaleCheckBody rewrites an out-of-date check-block body to newBody. Generic over the
+// markdown (`<!-- ox:prime-check -->`) and plaintext (`# ox:prime-check`) marker formats.
 //
-// The anchoring is load-bearing: a legacy body is rewritten ONLY when it immediately follows a
-// marker line. A bare whole-file match would corrupt user prose that merely quotes the old
-// block (e.g. docs that say "earlier ox injected BLOCKING…"), rewriting the user's sentence
-// instead of the header. Every marker occurrence is visited, so a duplicate stale block migrates too.
-func refreshStaleCheckBody(content, markerLine, newBody string, legacyBodies []string) (string, bool) {
-	var b strings.Builder
+// Anchoring is load-bearing and LINE-based: the marker must occupy a COMPLETE line (start of
+// file or after a newline, ending at the line boundary) AND the legacy body must be the ENTIRE
+// next line. So a user heading like `## ox:prime-check`, a quoted marker, or prose that merely
+// mentions the old body is never rewritten — only the real header body is. CRLF and LF line
+// endings are both matched and preserved. Every marker occurrence is visited, so a duplicate
+// stale block migrates too. `marker` is the bare token, WITHOUT a trailing newline.
+func refreshStaleCheckBody(content, marker, newBody string, legacyBodies []string) (string, bool) {
+	lines := strings.SplitAfter(content, "\n") // keeps each line's trailing "\n"
 	changed := false
-	rest := content
-	for {
-		i := strings.Index(rest, markerLine)
-		if i < 0 {
-			b.WriteString(rest)
-			break
+	for i := 0; i+1 < len(lines); i++ {
+		if strings.TrimRight(lines[i], "\r\n") != marker {
+			continue // not a complete marker line
 		}
-		// emit everything up to and including this marker line, then examine the body
-		// that immediately follows it (the header position — never user prose).
-		b.WriteString(rest[:i+len(markerLine)])
-		rest = rest[i+len(markerLine):]
+		bodyLine := lines[i+1]
+		body := strings.TrimRight(bodyLine, "\r\n")
 		for _, oldBody := range legacyBodies {
-			if strings.HasPrefix(rest, oldBody) {
-				b.WriteString(newBody)
-				rest = rest[len(oldBody):]
+			if body == oldBody {
+				term := bodyLine[len(body):] // preserve the line terminator ("\r\n" / "\n" / "")
+				lines[i+1] = newBody + term
 				changed = true
 				break
 			}
 		}
 	}
-	return b.String(), changed
+	if !changed {
+		return content, false
+	}
+	return strings.Join(lines, ""), true
 }
 
 // refreshStalePrimeCheckBlock rewrites an out-of-date markdown prime-check header body to the
 // current one in place, preserving all surrounding content.
 func refreshStalePrimeCheckBlock(content string) (string, bool) {
-	return refreshStaleCheckBody(content, OxPrimeCheckMarker+"\n", currentPrimeCheckBody(), legacyPrimeCheckBodies)
+	return refreshStaleCheckBody(content, OxPrimeCheckMarker, currentPrimeCheckBody(), legacyPrimeCheckBodies)
 }
 
 // refreshPrimeCheckBlockInFile applies refreshStalePrimeCheckBlock to a single file, writing
@@ -116,6 +115,11 @@ func refreshPrimeCheckBlockInFile(filePath string) (bool, error) {
 			return false, nil // read-only: leave it for the user / doctor to resolve
 		}
 		mode = info.Mode().Perm()
+	}
+	// guard against a lost update: if the file changed since we read it (a concurrent editor
+	// save), skip rather than clobber the newer content — the next prime retries the refresh.
+	if cur, rerr := os.ReadFile(filePath); rerr != nil || string(cur) != string(content) {
+		return false, nil
 	}
 	if err := fileutil.AtomicWriteBytes(filePath, []byte(updated), mode); err != nil {
 		return false, err

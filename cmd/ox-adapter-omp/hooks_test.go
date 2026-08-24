@@ -132,27 +132,44 @@ func TestInstallHooksRefreshesStaleBlock(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "mode must not be broadened")
 }
 
-// TestRefreshOMPPrimeBlock verifies the pure refresh: no-op when current, preserves the
-// @../AGENTS.md import decision while updating wording, and leaves an orphan marker untouched.
+// TestRefreshOMPPrimeBlock verifies the pure refresh: it regenerates only a KNOWN-legacy
+// block, preserves the @../AGENTS.md import decision, and leaves current/customized blocks,
+// orphan markers, and quoted (non-line-start) markers untouched.
 func TestRefreshOMPPrimeBlock(t *testing.T) {
+	// no-op when the block is already current (contains no legacy signature)
 	current := ompPrimeBlock(false)
 	if out, changed := refreshOMPPrimeBlock(current); changed || out != current {
 		t.Error("expected no change when block already current")
 	}
 
-	staleWithImport := ompPrimeMarkerStart + "\nOLD WORDING\n\n@../AGENTS.md\n" + ompPrimeMarkerEnd
+	// a KNOWN-legacy block (**BLOCKING**) is regenerated; the @import decision is preserved
+	staleWithImport := ompPrimeMarkerStart + "\n**BLOCKING**: Run `ox agent prime --agent omp` NOW before ANY other action.\n\n@../AGENTS.md\n" + ompPrimeMarkerEnd
 	out, changed := refreshOMPPrimeBlock(staleWithImport)
 	if !changed {
-		t.Fatal("expected refresh of stale block")
+		t.Fatal("expected refresh of known-legacy block")
 	}
 	if !strings.Contains(out, "@../AGENTS.md") {
 		t.Error("the @../AGENTS.md import decision must be preserved")
 	}
-	if strings.Contains(out, "OLD WORDING") {
-		t.Error("stale wording must be replaced")
+	if strings.Contains(out, "**BLOCKING**") {
+		t.Error("legacy wording must be replaced")
 	}
 
-	orphan := ompPrimeMarkerStart + "\nsomething\n"
+	// a NEWER / user-customized block (no legacy signature) is left untouched — avoids
+	// version-skew flip-flop and clobbering user edits between the ox markers.
+	custom := ompPrimeMarkerStart + "\nMy own customized omp guidance.\n" + ompPrimeMarkerEnd
+	if out, changed := refreshOMPPrimeBlock(custom); changed || out != custom {
+		t.Error("a block without a legacy signature must be left untouched")
+	}
+
+	// a quoted marker (not at a line start) must not be treated as the block
+	quoted := "> " + ompPrimeMarkerStart + "\n**BLOCKING**: old\n> " + ompPrimeMarkerEnd + "\n"
+	if out, changed := refreshOMPPrimeBlock(quoted); changed || out != quoted {
+		t.Error("a quoted (non-line-start) marker must be left untouched")
+	}
+
+	// orphan start marker (no end) is left untouched
+	orphan := ompPrimeMarkerStart + "\n**BLOCKING**: something\n"
 	if out, changed := refreshOMPPrimeBlock(orphan); changed || out != orphan {
 		t.Error("orphan start marker (no end) must be left untouched")
 	}
