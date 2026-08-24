@@ -19,9 +19,13 @@ vanished wordmark. Run the command and paste its output verbatim.
 
 ## When
 
-At PR-creation time, for any PR that carries AI coworker work. The header is the
-**top** of the body; the `SageOx-Session:` trailer stays the **last** line — keep
-both (they serve different readers: the header a human, the trailer the reconciler).
+At PR-creation time, **only when SageOx-delivered team context measurably shaped the
+work** (your contribution score is not `none`). If SageOx did not shape it, omit both
+the header and the `SageOx-Session:` trailer — publishing SageOx credit for work it
+did not influence is the fabrication #809 guards against. When it did shape the work,
+the header is the **top** of the body and the `SageOx-Session:` trailer stays the
+**last** line (they serve different readers: the header a human, the trailer the
+reconciler).
 
 ## How
 
@@ -70,5 +74,7 @@ both (they serve different readers: the header a human, the trailer the reconcil
   verify them) — never inflate them.
 - **Respect config.** If `pr_visuals.header` is off (team/user opt-out) the command
   no-ops with a hint; don't force a header in that case.
-- **Keep the trailer.** The header does not replace `SageOx-Session:` — that line
-  stays at the bottom as the machine linkage.
+- **Keep the trailer (only when attribution is non-`none`).** When SageOx shaped the
+  work, the header does not replace `SageOx-Session:` — that line stays at the bottom
+  as the machine linkage. If the work is unscored or scored `none`, emit neither the
+  header nor the trailer.

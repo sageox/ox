@@ -50,7 +50,7 @@
     {
       "target": "claude-project",
       "path": ".claude/skills/ox-pr-header/SKILL.md",
-      "digest": "sha256:2d08873a303e5ce2d6d2388cd81ba3d96afc28972a06d9aca562ab8712a978fa",
+      "digest": "sha256:47113031b1f2eb032f7abf35e5d7bc5d528a410e09f4c9dc823a789f8d217e86",
       "mode": "0644"
     },
     {

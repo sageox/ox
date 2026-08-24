@@ -168,6 +168,18 @@ func TestRefreshOMPPrimeBlock(t *testing.T) {
 		t.Error("a quoted (non-line-start) marker must be left untouched")
 	}
 
+	// a start marker with trailing text on the same line is not a complete marker line
+	prefixed := ompPrimeMarkerStart + " and more\n**BLOCKING**: old\n" + ompPrimeMarkerEnd + "\n"
+	if out, changed := refreshOMPPrimeBlock(prefixed); changed || out != prefixed {
+		t.Error("a start marker with trailing text must not be treated as the block start")
+	}
+
+	// an end marker embedded mid-line (no standalone end line) leaves the block unterminated
+	suffixed := ompPrimeMarkerStart + "\n**BLOCKING**: old " + ompPrimeMarkerEnd + " trailing\n"
+	if out, changed := refreshOMPPrimeBlock(suffixed); changed || out != suffixed {
+		t.Error("an end marker embedded mid-line must not close the block")
+	}
+
 	// orphan start marker (no end) is left untouched
 	orphan := ompPrimeMarkerStart + "\n**BLOCKING**: something\n"
 	if out, changed := refreshOMPPrimeBlock(orphan); changed || out != orphan {

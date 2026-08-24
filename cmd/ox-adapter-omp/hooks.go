@@ -157,22 +157,25 @@ var ompLegacyBlockSignatures = []string{"**BLOCKING**"}
 // marker in user prose is never touched. An orphan start marker is left untouched. Returns the
 // (possibly updated) content and whether a change was made.
 func refreshOMPPrimeBlock(content string) (string, bool) {
-	var start int
-	switch {
-	case strings.HasPrefix(content, ompPrimeMarkerStart):
-		start = 0
-	default:
-		i := strings.Index(content, "\n"+ompPrimeMarkerStart)
-		if i < 0 {
-			return content, false // marker absent or not at a line start (e.g. quoted)
+	// locate the block by whole-line matching of BOTH markers — a marker embedded in a
+	// longer line (prefix/suffix/quote) is never treated as the block boundary.
+	lines := strings.SplitAfter(content, "\n")
+	off, start, end := 0, -1, -1
+	for i := range lines {
+		line := strings.TrimRight(lines[i], "\r\n")
+		if start < 0 {
+			if line == ompPrimeMarkerStart {
+				start = off
+			}
+		} else if line == ompPrimeMarkerEnd {
+			end = off + len(ompPrimeMarkerEnd) // block ends at the marker, before its line terminator
+			break
 		}
-		start = i + 1 // skip the anchoring "\n"
+		off += len(lines[i])
 	}
-	relEnd := strings.Index(content[start+len(ompPrimeMarkerStart):], ompPrimeMarkerEnd)
-	if relEnd < 0 {
-		return content, false
+	if start < 0 || end < 0 {
+		return content, false // start/end markers not both present as complete lines
 	}
-	end := start + len(ompPrimeMarkerStart) + relEnd + len(ompPrimeMarkerEnd)
 	currentBlock := content[start:end]
 
 	isLegacy := false
