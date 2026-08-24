@@ -50,6 +50,16 @@ gh api graphql --paginate \
   > "$out/threads.txt" 2>/dev/null &
 wait
 
+# fail closed: view.json is the spine of the SUMMARY. `wait` does not surface a
+# failed child, so a broken primary fetch would otherwise print a reassuring
+# SUMMARY over fallback values. Refuse instead of handing the reviewer partial
+# evidence. (An empty diff/threads set is legitimate, so only the spine is fatal.)
+if ! jq -e '.number' "$out/view.json" >/dev/null 2>&1; then
+  echo "ERROR: failed to fetch PR metadata for $REPO#$PR; refusing to emit a partial SUMMARY" >&2
+  [[ -s "$out/.view.err" ]] && sed 's/^/  /' "$out/.view.err" >&2
+  exit 2
+fi
+
 # --- derive fields + print bounded summary ---
 j() { jq -r "$1" "$out/view.json" 2>/dev/null; }
 title="$(j .title)"; author="$(j .author.login)"; headOwner="$(j .headRepositoryOwner.login)"
