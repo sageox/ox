@@ -11,6 +11,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 )
 
 // errBackfillCommitFailed marks a commitPlanBackfillToLedger failure at or
@@ -43,6 +44,16 @@ func commitPlanToLedger(gitRoot, planDir string) error {
 	ledgerPath := ctx.DefaultLedgerPath()
 	if ledgerPath == "" {
 		return fmt.Errorf("no ledger configured for %q: cannot commit plan", gitRoot)
+	}
+
+	// Mid-rebase safety belongs at index-mutation time, not just push time. An
+	// unguarded `git add` during a conflicted rebase marks the conflict resolved,
+	// and the following commit consumes the replay step — silently destroying
+	// whatever was being replayed (see .claude/rules/cache-only-design.md).
+	// pushLedger guards its own push, but the add+commit below mutate the index
+	// BEFORE that guard runs, so a plan save mid-rebase needs this check here.
+	if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+		return fmt.Errorf("ledger not safe for plan commit (%s): %w", ledgerPath, err)
 	}
 
 	// ensure .gitignore is in place before any commit to prevent cache leakage

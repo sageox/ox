@@ -1592,13 +1592,63 @@ func (s *SyncScheduler) drainMurmurOutbox(ctx context.Context) {
 // pushMurmurCommits pushes any local murmur commits to the ledger remote.
 // Called during the ledger sync cycle for natural batching (~60s).
 // Non-fatal: failures are logged but don't block the sync cycle.
+// murmurCommitPrefix is the commit-subject marker for every daemon-written
+// murmur commit (see daemon.go's "murmur: %s" / "murmur: delete %s"). The daemon
+// uses it to decide whether an unpushed branch consists exclusively of murmur
+// commits before batching a push.
+const murmurCommitPrefix = "murmur: "
+
+// shouldPushMurmurs decides whether an unpushed commit set is safe for the daemon
+// to batch-push, given the newline-separated commit subjects. Mirrors
+// shouldPushSessionDrafts and enforces the same rule daemon-git.md mandates for
+// every daemon push: `git push` moves the WHOLE branch, and this path runs
+// neither pushLedger's pre-push secret gate nor its LFS reconcile. So pushing
+// when any non-murmur commit is unpushed could ship a commit the CLI deliberately
+// refused (a secret-gate rejection) or a pointer whose LFS blob is not yet
+// uploaded — the GH #810 wedge, but smuggled via the murmur path. Only push when
+// every unpushed commit is a murmur; otherwise defer entirely to the CLI, which
+// has the full gate stack.
+//
+// Returns (blockingSubject, false) when a non-murmur commit is present so the
+// caller can log which one blocked; ("", false) when there is nothing to push.
+func shouldPushMurmurs(logOutput string) (blockingSubject string, ok bool) {
+	trimmed := strings.TrimSpace(logOutput)
+	if trimmed == "" {
+		return "", false
+	}
+	sawMurmur := false
+	for _, subject := range strings.Split(trimmed, "\n") {
+		subject = strings.TrimSpace(subject)
+		if subject == "" {
+			continue
+		}
+		if !strings.HasPrefix(subject, murmurCommitPrefix) {
+			return subject, false
+		}
+		sawMurmur = true
+	}
+	return "", sawMurmur
+}
+
 func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string) {
 	ctx, span := perf.Start(ctx, "daemon:push_murmurs")
 	defer span.End()
 
-	// check for unpushed murmur commits
-	out, err := s.git.RunGit(ctx, ledgerPath, "log", "--oneline", "origin/main..HEAD", "--", "data/murmurs/")
+	// Subjects of every unpushed commit, one per line. Detection is by subject,
+	// NOT a data/murmurs/ pathspec: a pathspec finds murmur commits but is blind
+	// to a NON-murmur commit sitting unpushed underneath them, which the
+	// whole-branch push would carry along without any gate. shouldPushMurmurs
+	// refuses in that case.
+	out, err := s.git.RunGit(ctx, ledgerPath, "log", "--format=%s", "@{upstream}..HEAD")
 	if err != nil || strings.TrimSpace(out) == "" {
+		return
+	}
+
+	if blocker, ok := shouldPushMurmurs(out); !ok {
+		if blocker != "" {
+			s.logger.Debug("skipping murmur push: a non-murmur commit is unpushed",
+				"path", ledgerPath, "blocking_subject", blocker)
+		}
 		return
 	}
 

@@ -23,10 +23,10 @@ import (
 // ox commits for a synced session.
 func writePointerStub(t *testing.T, path string) {
 	t.Helper()
-	require.NoError(t, lfs.WritePointerFile(path, lfs.FileRef{
+	require.NoError(t, lfs.WritePointerFile(path, lfs.AssertUploaded(lfs.FileRef{
 		OID:  "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
 		Size: 4242,
-	}))
+	})))
 }
 
 func TestClassifyRawFile(t *testing.T) {

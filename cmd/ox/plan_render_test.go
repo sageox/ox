@@ -147,7 +147,7 @@ func TestEmitRenderedHTML_FallsBackFromPointerToFreshBytes(t *testing.T) {
 	savedDir := t.TempDir()
 	htmlPath := filepath.Join(savedDir, "plan.html")
 	ref := lfs.NewFileRef([]byte(strings.Repeat("x", 400_000)))
-	if err := lfs.WritePointerFile(htmlPath, ref); err != nil {
+	if err := lfs.WritePointerFile(htmlPath, lfs.AssertUploaded(ref)); err != nil {
 		t.Fatalf("write pointer: %v", err)
 	}
 

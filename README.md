@@ -1,7 +1,5 @@
 # SageOx CLI (`ox`)
 
-[![docs: ai-human-docs](https://raw.githubusercontent.com/rsnodgrass/ai-human-docs/main/badges/ai-human-docs.svg)](https://github.com/rsnodgrass/ai-human-docs)
-
 **The hivemind for human–agent teams.** SageOx makes your team's decisions,
 conventions, and architectural intent persistent — and loads them automatically
 into every coding session, human or AI.

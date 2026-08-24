@@ -937,7 +937,7 @@ func TestDraftLifecycle_EndToEnd_ManifestMatchesTree(t *testing.T) {
 
 	require.NoError(t, commitAndPushLedger(f.ledgerPath, sessionName))
 	// Content becomes pointers only after the push succeeds.
-	_, err = lfs.WritePointerFiles(sessionDir, refs)
+	_, err = lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(refs))
 	require.NoError(t, err)
 	require.NoError(t, commitPointerRewriteAndPush(f.ledgerPath, sessionName,
 		[]string{filepath.Join("sessions", sessionName, "raw.jsonl"),

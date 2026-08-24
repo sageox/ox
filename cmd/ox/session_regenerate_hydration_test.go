@@ -41,10 +41,10 @@ func TestResolveContentPath_CacheOnlyDesign(t *testing.T) {
 		sess := t.TempDir()
 		cache := t.TempDir()
 		// in-place: LFS pointer
-		if err := lfs.WritePointerFile(filepath.Join(sess, "raw.jsonl"), lfs.FileRef{
+		if err := lfs.WritePointerFile(filepath.Join(sess, "raw.jsonl"), lfs.AssertUploaded(lfs.FileRef{
 			OID:  "deadbeef" + "1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
 			Size: 1024,
-		}); err != nil {
+		})); err != nil {
 			t.Fatal(err)
 		}
 		// cache: real content
@@ -61,10 +61,10 @@ func TestResolveContentPath_CacheOnlyDesign(t *testing.T) {
 	t.Run("in-place pointer + no cache returns empty (caller must hydrate)", func(t *testing.T) {
 		sess := t.TempDir()
 		cache := t.TempDir()
-		if err := lfs.WritePointerFile(filepath.Join(sess, "raw.jsonl"), lfs.FileRef{
+		if err := lfs.WritePointerFile(filepath.Join(sess, "raw.jsonl"), lfs.AssertUploaded(lfs.FileRef{
 			OID:  "feedface" + "1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
 			Size: 2048,
-		}); err != nil {
+		})); err != nil {
 			t.Fatal(err)
 		}
 		got := lfs.ResolveContentPath(sess, cache, "raw.jsonl")

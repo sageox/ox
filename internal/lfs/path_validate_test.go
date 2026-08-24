@@ -84,7 +84,7 @@ func TestWritePointerFiles_RejectsPathTraversal(t *testing.T) {
 	files := map[string]FileRef{
 		"../escape.txt": {Storage: StorageLFS, OID: "sha256:abc", Size: 100},
 	}
-	_, err := WritePointerFiles(dir, files)
+	_, err := WritePointerFiles(dir, AssertUploadedManifest(files))
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unsafe pointer filename")
 }

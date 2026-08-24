@@ -302,7 +302,8 @@ func runImport(cmd *cobra.Command, args []string) error {
 	if hasText {
 		pointerFiles["extracted.md"] = textRef
 	}
-	if _, err := lfs.WritePointerFiles(docDir, pointerFiles); err != nil {
+	// AssertUploaded: srcRef/textRef blobs were uploaded via BatchUpload/UploadAll above.
+	if _, err := lfs.WritePointerFiles(docDir, lfs.AssertUploadedManifest(pointerFiles)); err != nil {
 		return fmt.Errorf("write pointer files: %w", err)
 	}
 

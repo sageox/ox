@@ -1427,7 +1427,9 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		// the first failure). Always commit whatever pointers DID land — any
 		// rewritten pointer left uncommitted re-opens the autostash race for
 		// that file, even if other files in the same call failed.
-		written, writeErr := lfs.WritePointerFiles(sessionDir, meta.Files)
+		// AssertUploaded: meta.Files is the persisted manifest whose blobs were
+		// uploaded before the push that just succeeded above.
+		written, writeErr := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(meta.Files))
 		if len(written) > 0 {
 			// Commit the pointer rewrite so it doesn't sit dirty in the worktree.
 			// A dirty worktree here races against the daemon's sync-timer pull:

@@ -71,7 +71,7 @@ func TestPointerRewrite_CommittedAfterPush(t *testing.T) {
 	runGitCmd(t, clonePath, "push")
 
 	// now write pointer files and commit them (the code under test)
-	written, err := lfs.WritePointerFiles(sessionDir, fileRefs)
+	written, err := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(fileRefs))
 	if err != nil {
 		t.Fatalf("WritePointerFiles: %v", err)
 	}

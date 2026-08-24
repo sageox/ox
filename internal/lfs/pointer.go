@@ -95,9 +95,15 @@ func NestedPointer(outer FileRef, content []byte) (FileRef, bool) {
 // auto-hydrate these files — hydration is handled by our own download path.
 
 // WritePointerFile writes a standard LFS pointer file at path.
-// Refuses to replace real content that does not match ref.OID — see
+//
+// It takes an UploadedRef, not a bare FileRef: a pointer may only be written for
+// a blob whose upload is proven (see uploaded.go). This makes GH #810 — a
+// pointer minted for content that was never uploaded — a compile error.
+//
+// Refuses to replace real content that does not match the ref OID — see
 // guardPointerOverwrite.
-func WritePointerFile(path string, ref FileRef) error {
+func WritePointerFile(path string, uploaded UploadedRef) error {
+	ref := uploaded.ref
 	if err := guardPointerOverwrite(path, ref); err != nil {
 		return err
 	}
@@ -147,21 +153,21 @@ func guardPointerOverwrite(path string, ref FileRef) error {
 // are skipped — writing a pointer file there would clobber the real content
 // with empty bytes. Legacy entries (no Storage field) are treated as LFS
 // per FileRef.EffectiveStorage().
-func WritePointerFiles(dir string, files map[string]FileRef) ([]string, error) {
+func WritePointerFiles(dir string, files map[string]UploadedRef) ([]string, error) {
 	if len(files) == 0 {
 		return nil, nil
 	}
 
 	var paths []string
-	for name, ref := range files {
-		if !ref.IsLFS() {
+	for name, uploaded := range files {
+		if !uploaded.ref.IsLFS() {
 			continue // Storage=git: real content stays in place
 		}
 		if err := ValidateRelativePath(name); err != nil {
 			return paths, fmt.Errorf("unsafe pointer filename: %w", err)
 		}
 		p := filepath.Join(dir, name)
-		if err := WritePointerFile(p, ref); err != nil {
+		if err := WritePointerFile(p, uploaded); err != nil {
 			return paths, fmt.Errorf("write pointer %s: %w", name, err)
 		}
 		paths = append(paths, p)

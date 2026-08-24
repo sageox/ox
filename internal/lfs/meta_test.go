@@ -515,11 +515,11 @@ func TestCheckHydrationStatus_WithPointers(t *testing.T) {
 	// write pointer files (not real content)
 	require.NoError(t, WritePointerFile(
 		filepath.Join(sessionDir, "raw.jsonl"),
-		FileRef{OID: "sha256:abc", Size: 100},
+		AssertUploaded(FileRef{OID: "sha256:abc", Size: 100}),
 	))
 	require.NoError(t, WritePointerFile(
 		filepath.Join(sessionDir, "summary.md"),
-		FileRef{OID: "sha256:def", Size: 200},
+		AssertUploaded(FileRef{OID: "sha256:def", Size: 200}),
 	))
 
 	meta := &SessionMeta{
@@ -542,7 +542,7 @@ func TestCheckHydrationStatus_MixedPointerAndContent(t *testing.T) {
 	// one pointer file, one real content file
 	require.NoError(t, WritePointerFile(
 		filepath.Join(sessionDir, "raw.jsonl"),
-		FileRef{OID: "sha256:abc", Size: 100},
+		AssertUploaded(FileRef{OID: "sha256:abc", Size: 100}),
 	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(sessionDir, "summary.md"),
@@ -573,11 +573,11 @@ func TestCheckHydrationStatusWithCache_AllInCache(t *testing.T) {
 	// pointer files in session dir
 	require.NoError(t, WritePointerFile(
 		filepath.Join(sessionDir, "raw.jsonl"),
-		FileRef{OID: "sha256:abc", Size: 100},
+		AssertUploaded(FileRef{OID: "sha256:abc", Size: 100}),
 	))
 	require.NoError(t, WritePointerFile(
 		filepath.Join(sessionDir, "summary.md"),
-		FileRef{OID: "sha256:def", Size: 200},
+		AssertUploaded(FileRef{OID: "sha256:def", Size: 200}),
 	))
 
 	// real content in cache
@@ -630,7 +630,7 @@ func TestCheckHydrationStatusWithCache_PartialCacheOnly(t *testing.T) {
 	// pointer in session dir, nothing else
 	require.NoError(t, WritePointerFile(
 		filepath.Join(sessionDir, "raw.jsonl"),
-		FileRef{OID: "sha256:abc", Size: 100},
+		AssertUploaded(FileRef{OID: "sha256:abc", Size: 100}),
 	))
 	// only summary in cache, raw.jsonl missing from cache too
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "summary.md"), []byte("# Cached summary"), 0644))
@@ -654,7 +654,7 @@ func TestCheckHydrationStatusWithCache_EmptyCache(t *testing.T) {
 
 	require.NoError(t, WritePointerFile(
 		filepath.Join(sessionDir, "raw.jsonl"),
-		FileRef{OID: "sha256:abc", Size: 100},
+		AssertUploaded(FileRef{OID: "sha256:abc", Size: 100}),
 	))
 
 	meta := &SessionMeta{

@@ -626,6 +626,6 @@ func writePointerForContent(t *testing.T, sessionDir, filename string, content [
 	refs := map[string]FileRef{filename: NewFileRef(content)}
 	// write a temporary content file so WritePointerFiles can replace it
 	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, filename), content, 0644))
-	_, err := WritePointerFiles(sessionDir, refs)
+	_, err := WritePointerFiles(sessionDir, AssertUploadedManifest(refs))
 	require.NoError(t, err)
 }

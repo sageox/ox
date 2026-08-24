@@ -1208,7 +1208,9 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	// push succeeded — now safe to replace content files with LFS pointer stubs
 	// and commit the pointer rewrite so the remote ledger has pointers (not blobs)
 	if pushed && len(fileRefs) > 0 {
-		written, err := lfs.WritePointerFiles(payload.SessionDir, fileRefs)
+		// AssertUploaded: fileRefs' blobs were uploaded to LFS by UploadSessionFiles
+		// and the pointer rewrite happens only after a successful push.
+		written, err := lfs.WritePointerFiles(payload.SessionDir, lfs.AssertUploadedManifest(fileRefs))
 		if err != nil {
 			h.logger.Warn("LFS pointer file write failed after push", "session", sessionName, "err", err)
 		} else if len(written) > 0 {
@@ -1662,7 +1664,9 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 	// on failure the cache is the only surviving copy of the session content
 	if pushed {
 		if len(fileRefs) > 0 {
-			written, err := lfs.WritePointerFiles(payload.SessionDir, fileRefs)
+			// AssertUploaded: fileRefs' blobs were uploaded by UploadSessionFiles;
+			// pointer rewrite is gated on the successful push above.
+			written, err := lfs.WritePointerFiles(payload.SessionDir, lfs.AssertUploadedManifest(fileRefs))
 			if err != nil {
 				h.logger.Warn("upload-only: LFS pointer write failed after push", "session", sessionName, "err", err)
 			} else if len(written) > 0 {
