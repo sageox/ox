@@ -74,15 +74,34 @@ func checkPlanPointersMissing(fix bool) checkResult {
 		return SkippedCheck(planPointersCheckName, "cannot reach the content store to verify plan blobs", err.Error())
 	}
 
+	return evaluatePlanPointers(client, pointers, fix, func() (*lfs.ReconcileResult, error) {
+		return lfs.ReconcileUnpushedPointers(context.Background(), ledgerPath, endpoint.GetForProject(findGitRoot()), slog.Default())
+	})
+}
+
+// evaluatePlanPointers is the client-injectable core: classify the pointers, warn
+// on missing blobs, and (under --fix) run the injected reconcile to clear them.
+// Split out so the warn/fix wiring is testable with a fake LFS client and a fake
+// reconcile, without a live ledger remote.
+func evaluatePlanPointers(client *lfs.Client, pointers []planPointer, fix bool, reconcile func() (*lfs.ReconcileResult, error)) checkResult {
 	missing := planPointersMissingOnRemote(client, pointers)
 	if len(missing) == 0 {
 		return PassedCheck(planPointersCheckName, fmt.Sprintf("all %d plan pointer(s) backed by the store", len(pointers)))
 	}
-
 	if !fix {
 		return planPointersWarning(missing)
 	}
-	return repairPlanPointers(ledgerPath, missing)
+	res, err := reconcile()
+	if err != nil {
+		return checkResult{
+			name:    planPointersCheckName,
+			warning: true,
+			message: fmt.Sprintf("%d plan pointer(s) missing; reconcile failed", len(missing)),
+			detail:  err.Error(),
+		}
+	}
+	return PassedCheck(planPointersCheckName,
+		fmt.Sprintf("reconciled %d orphaned pointer(s); ledger push unblocked", res.Replaced))
 }
 
 // collectPlanHTMLPointers finds every data/plans/<dir>/plan.html that is an LFS
@@ -177,20 +196,4 @@ func planPointersWarning(missing []planPointer) checkResult {
 		message: fmt.Sprintf("%d plan render(s) missing from the store (push blocked)", len(missing)),
 		detail:  sb.String(),
 	}
-}
-
-// repairPlanPointers runs the plan-aware reconcile, which blanks the orphaned
-// pointers and squashes them out of the unpushed pack so the push can proceed.
-func repairPlanPointers(ledgerPath string, missing []planPointer) checkResult {
-	res, err := lfs.ReconcileUnpushedPointers(context.Background(), ledgerPath, endpoint.GetForProject(findGitRoot()), slog.Default())
-	if err != nil {
-		return checkResult{
-			name:    planPointersCheckName,
-			warning: true,
-			message: fmt.Sprintf("%d plan pointer(s) missing; reconcile failed", len(missing)),
-			detail:  err.Error(),
-		}
-	}
-	return PassedCheck(planPointersCheckName,
-		fmt.Sprintf("reconciled %d orphaned pointer(s); ledger push unblocked", res.Replaced))
 }

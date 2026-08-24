@@ -97,3 +97,79 @@ func TestCollectPlanHTMLPointers_SkipsPlainAndNonPlans(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, "2026-08-24-ptr", got[0].Name)
 }
+
+// newFakeDownloadServer serves the batch DOWNLOAD op with per-OID HTTP codes
+// (0 == present).
+func newFakeDownloadServer(t *testing.T, codeByOID map[string]int) *lfs.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Objects []struct {
+				OID  string `json:"oid"`
+				Size int64  `json:"size"`
+			} `json:"objects"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		type oerr struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		}
+		type obj struct {
+			OID   string `json:"oid"`
+			Size  int64  `json:"size"`
+			Error *oerr  `json:"error,omitempty"`
+		}
+		resp := struct {
+			Transfer string `json:"transfer"`
+			Objects  []obj  `json:"objects"`
+		}{Transfer: "basic"}
+		for _, o := range req.Objects {
+			ob := obj{OID: o.OID, Size: o.Size}
+			if code := codeByOID[o.OID]; code != 0 {
+				ob.Error = &oerr{Code: code, Message: "x"}
+			}
+			resp.Objects = append(resp.Objects, ob)
+		}
+		w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(srv.Close)
+	return lfs.NewClient(srv.URL, "oauth2", "token")
+}
+
+// TestEvaluatePlanPointers_WarnThenFix pins the doctor warn/fix wiring: the
+// non-fix path warns and never reconciles; the fix path invokes the reconcile and
+// reports its result. Guards against a regression that reconciles on a bare
+// `ox doctor` (destructive without --fix) or that swallows the reconcile outcome.
+func TestEvaluatePlanPointers_WarnThenFix(t *testing.T) {
+	ledger := t.TempDir()
+	planDir := filepath.Join(ledger, "data", "plans", "2026-08-24-p")
+	require.NoError(t, os.MkdirAll(planDir, 0o755))
+	htmlPath := filepath.Join(planDir, "plan.html")
+	oid := lfs.ComputeOID([]byte("gone-render"))
+	require.NoError(t, os.WriteFile(htmlPath, []byte(lfs.FormatPointer("sha256:"+oid, 999)), 0o644))
+
+	pointers := collectPlanHTMLPointers(filepath.Join(ledger, "data", "plans"), ledger)
+	require.Len(t, pointers, 1)
+
+	client := newFakeDownloadServer(t, map[string]int{oid: http.StatusNotFound})
+
+	// warn path (no --fix): reconcile must NOT be called.
+	warn := evaluatePlanPointers(client, pointers, false, func() (*lfs.ReconcileResult, error) {
+		t.Fatal("reconcile invoked on the non-fix warn path")
+		return nil, nil
+	})
+	assert.True(t, warn.warning, "missing blobs must warn")
+	assert.Contains(t, warn.message, "1")
+
+	// fix path: reconcile is invoked and its result is reported as a pass.
+	called := false
+	fix := evaluatePlanPointers(client, pointers, true, func() (*lfs.ReconcileResult, error) {
+		called = true
+		require.NoError(t, os.WriteFile(htmlPath, []byte{}, 0o644)) // simulate the blank
+		return &lfs.ReconcileResult{Replaced: 1}, nil
+	})
+	assert.True(t, called, "the --fix path must invoke the reconcile")
+	assert.False(t, fix.warning, "a successful reconcile is a passed result")
+	assert.Contains(t, fix.message, "reconciled")
+}

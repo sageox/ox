@@ -48,6 +48,17 @@ type ReconcileResult struct {
 // committing on top is not sufficient — the old commits still reference the
 // missing OIDs.
 func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL string, logger *slog.Logger) (*ReconcileResult, error) {
+	return reconcileUnpushedPointers(ctx, ledgerPath, logger, func() (*Client, error) {
+		return NewClientFromLedger(ledgerPath, endpointURL)
+	})
+}
+
+// reconcileUnpushedPointers is the client-injectable core of
+// ReconcileUnpushedPointers. newClient is invoked ONLY when orphan candidates are
+// found, preserving the "no pointers → no client, no error" behavior that clean
+// ledgers with no configured remote rely on. Tests inject a fake-LFS-server
+// client to exercise the destructive blank-and-squash path.
+func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *slog.Logger, newClient func() (*Client, error)) (*ReconcileResult, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -97,7 +108,7 @@ func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL stri
 	}
 
 	// batch-check which OIDs exist in the remote LFS store
-	client, err := NewClientFromLedger(ledgerPath, endpointURL)
+	client, err := newClient()
 	if err != nil {
 		return result, fmt.Errorf("lfs client: %w", err)
 	}

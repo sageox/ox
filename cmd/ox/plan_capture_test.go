@@ -17,10 +17,12 @@ package main
 // clock. Each assertion names the specific loss it pins.
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/plan"
@@ -378,5 +380,42 @@ func TestPlanSessionLink_DisabledAttributionExpectsNoLink(t *testing.T) {
 
 	if id, url := planSessionLink(root); id != "" || url != "" {
 		t.Errorf("planSessionLink = (%q, %q), want empty — no link is expected in the render, so the save-path lint must not run and warn about its absence", id, url)
+	}
+}
+
+// TestSavePlanArtifacts_LargeRenderStaysPlainWhenLFSUnreachable is the #810
+// composition-root fail-safe: driving the REAL savePlanArtifacts path (Save →
+// DehydrateHTML → commit) with a >256KB render and no reachable LFS client, the
+// committed plan.html must be PLAIN — retrievable and pushable, never a poisoned
+// pointer. This test ledger has no configured remote/credentials, so planLFSClient
+// resolves to nil and dehydration falls back to plain, exactly as an offline save.
+//
+// Failure prevented: a regression where the composition root writes (or leaves) a
+// pointer with no uploaded blob — the wedge #810 was about — at the layer where
+// the original bug actually shipped.
+func TestSavePlanArtifacts_LargeRenderStaysPlainWhenLFSUnreachable(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+
+	body := strings.Repeat("PRESERVE-ME ", 30000) // well over the 256KB threshold
+	html := []byte("<html><head></head><body>" + body + "</body></html>")
+
+	dir := savePlanArtifacts(root, plan.Input{Raw: "# Big render\n"}, plan.Result{}, html, plan.PrimaryHTML)
+	if dir == "" {
+		t.Fatal("savePlanArtifacts returned empty dir — the large plan was not saved")
+	}
+
+	path, _, isPointer, exists := plan.PlanHTMLPath(dir)
+	if !exists {
+		t.Fatalf("plan.html missing at %s", path)
+	}
+	if isPointer {
+		t.Fatalf("large render was committed as an LFS pointer with no reachable store — a poisoned pointer (GH #810)")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read plan.html: %v", err)
+	}
+	if !bytes.Contains(got, []byte("PRESERVE-ME")) {
+		t.Fatalf("plan.html does not contain the render content — not retrievable")
 	}
 }
