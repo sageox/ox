@@ -2,7 +2,7 @@
   "schema_version": 1,
   "source": {
     "kind": "builtin",
-    "revision": "fb8f98f38e6c8cdf",
+    "revision": "caba9068d4af4f70",
     "version": "0.14.0"
   },
   "desired": {
@@ -31,6 +31,12 @@
     },
     {
       "target": "claude-project",
+      "path": ".claude/skills/ox-conversation/SKILL.md",
+      "digest": "sha256:dda0aa9a473a7c798259b162c41e0a98df04ef2fc35d8cf19f64f45f864bffeb",
+      "mode": "0644"
+    },
+    {
+      "target": "claude-project",
       "path": ".claude/skills/ox-decision/SKILL.md",
       "digest": "sha256:126f75ee2faaa217b617774f6571aa0ac598e6b62eae3019f8082e105e2efe8d",
       "mode": "0644"
@@ -39,6 +45,12 @@
       "target": "claude-project",
       "path": ".claude/skills/ox-plan/SKILL.md",
       "digest": "sha256:d3ef61460eacd9a94f75c270b4aa815e82003d1763bbe887b19afbe2aeefb1b9",
+      "mode": "0644"
+    },
+    {
+      "target": "claude-project",
+      "path": ".claude/skills/ox-pr-header/SKILL.md",
+      "digest": "sha256:2d08873a303e5ce2d6d2388cd81ba3d96afc28972a06d9aca562ab8712a978fa",
       "mode": "0644"
     },
     {
