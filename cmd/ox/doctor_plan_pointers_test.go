@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -172,4 +173,13 @@ func TestEvaluatePlanPointers_WarnThenFix(t *testing.T) {
 	assert.True(t, called, "the --fix path must invoke the reconcile")
 	assert.False(t, fix.warning, "a successful reconcile is a passed result")
 	assert.Contains(t, fix.message, "reconciled")
+
+	// reconcile-failure path: a reconcile error must surface as a warning (with
+	// the count preserved), never be swallowed into a passing result.
+	failed := evaluatePlanPointers(client, pointers, true, func() (*lfs.ReconcileResult, error) {
+		return nil, fmt.Errorf("batch check inconclusive: HTTP 401")
+	})
+	assert.True(t, failed.warning, "a reconcile error must warn, not pass")
+	assert.Contains(t, failed.message, "reconcile failed")
+	assert.Contains(t, failed.message, "1", "the missing count is preserved in the failure message")
 }

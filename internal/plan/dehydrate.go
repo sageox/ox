@@ -1,7 +1,9 @@
 package plan
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -40,24 +42,29 @@ import (
 func DehydrateHTML(dir string, client *lfs.Client) (bool, error) {
 	htmlPath := filepath.Join(dir, planHTMLFile)
 
-	info, err := os.Stat(htmlPath)
-	if err != nil {
-		return false, nil // no render on disk (or unreadable) — nothing to dehydrate
-	}
-	if info.Size() <= htmlLFSThreshold {
-		return false, nil // small enough to keep plain
-	}
 	if lfs.IsPointerFile(htmlPath) {
 		return false, nil // already dehydrated
+	}
+
+	// Read the file FIRST and gate on what we actually read — never on a separate
+	// os.Stat. A concurrent Save can rewrite plan.html between a stat and a read,
+	// so sizing one snapshot and uploading another risks pointerizing a now-small
+	// file (or skipping a now-large one). The uploaded blob's OID must describe the
+	// exact bytes we sized.
+	content, err := os.ReadFile(htmlPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil // no render on disk — nothing to dehydrate
+		}
+		return false, fmt.Errorf("read plan.html for dehydration: %w", err)
+	}
+	if int64(len(content)) <= htmlLFSThreshold {
+		return false, nil // small enough to keep plain
 	}
 	if client == nil {
 		return false, nil // no store reachable — stays plain, safe
 	}
 
-	content, err := os.ReadFile(htmlPath)
-	if err != nil {
-		return false, fmt.Errorf("read plan.html for dehydration: %w", err)
-	}
 	uploaded, err := lfs.UploadBlob(client, content)
 	if err != nil {
 		return false, fmt.Errorf("upload plan.html blob: %w", err)

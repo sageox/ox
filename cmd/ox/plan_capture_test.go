@@ -415,7 +415,11 @@ func TestSavePlanArtifacts_LargeRenderStaysPlainWhenLFSUnreachable(t *testing.T)
 	if err != nil {
 		t.Fatalf("read plan.html: %v", err)
 	}
-	if !bytes.Contains(got, []byte("PRESERVE-ME")) {
-		t.Fatalf("plan.html does not contain the render content — not retrievable")
+	// The FULL render must survive, not just a stray marker: the body repeats the
+	// marker 30000 times and every one must be on disk, plain. dehydrate rewrites
+	// plan.html BEFORE commitPlanToLedger stages the working tree, so this on-disk
+	// file is exactly what a commit would carry.
+	if n := bytes.Count(got, []byte("PRESERVE-ME")); n != 30000 {
+		t.Fatalf("plan.html retained %d of 30000 markers — the render was truncated or replaced", n)
 	}
 }

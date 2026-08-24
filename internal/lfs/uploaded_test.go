@@ -2,6 +2,7 @@ package lfs
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -66,8 +67,10 @@ func TestNoAssertUploadedOfFreshFileRef(t *testing.T) {
 
 	var offenders []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		// Propagate traversal errors — an unwalkable subtree could hide a
+		// prohibited call, so failing loud beats scanning a partial tree.
 		if err != nil {
-			return nil
+			return fmt.Errorf("walk %s: %w", path, err)
 		}
 		if d.IsDir() {
 			if name := d.Name(); name == "vendor" || name == ".git" || name == "node_modules" {
@@ -80,7 +83,9 @@ func TestNoAssertUploadedOfFreshFileRef(t *testing.T) {
 		}
 		data, rerr := os.ReadFile(path)
 		if rerr != nil {
-			return nil
+			// An unreadable production file must fail the scan, not pass it
+			// vacuously — it could contain the very call this test forbids.
+			return fmt.Errorf("read %s: %w", path, rerr)
 		}
 		if bad.Match(data) {
 			rel, _ := filepath.Rel(root, path)
