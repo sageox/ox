@@ -341,7 +341,9 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	// deferring dehydration to a later save / doctor. Small renders and offline
 	// saves stay plain by design.
 	if html != nil {
-		if pointerized, derr := plan.DehydrateHTML(dir, html, planLFSClient(gitRoot)); derr != nil {
+		// DehydrateHTML reads the on-disk (stamped) plan.html itself, so the
+		// uploaded blob's OID matches the committed file — see its doc comment.
+		if pointerized, derr := plan.DehydrateHTML(dir, planLFSClient(gitRoot)); derr != nil {
 			slog.Warn("plan: plan.html LFS dehydration failed, committing plain", "error", derr, "dir", dir)
 		} else if pointerized {
 			slog.Debug("plan: plan.html dehydrated to LFS pointer", "dir", dir)

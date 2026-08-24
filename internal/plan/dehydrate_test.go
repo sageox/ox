@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/lfs"
 )
@@ -94,15 +95,82 @@ func fakeLFSUploadServer(t *testing.T) (*lfs.Client, *sync.Map) {
 	return lfs.NewClient(srv.URL, "oauth2", "token"), stored
 }
 
-// TestDehydrateHTML_SmallStaysPlain: a sub-threshold render is never pointerized,
-// so a dehydrated clone reads it directly.
+// largeHTMLWithHead builds a >threshold render that carries a <head>, so that
+// Save's StampHTMLMeta actually mutates it (the condition that exposed the
+// stamped-vs-unstamped bug).
+func largeHTMLWithHead() []byte {
+	body := strings.Repeat("PRESERVE-ME ", htmlLFSThreshold/12+4)
+	return []byte("<html><head></head><body>" + body + "</body></html>")
+}
+
+// TestSaveThenDehydrate_RealHeadHTML is the regression test for the stamped-vs-
+// unstamped bug: Save writes STAMPED bytes to plan.html, and DehydrateHTML must
+// upload/pointerize THOSE bytes — not a caller's pre-stamp copy.
+//
+// Failure prevented: DehydrateHTML uploads the unstamped bytes, so their OID
+// disagrees with the on-disk (stamped) file; guardPointerOverwrite refuses the
+// swap, dehydration silently never happens for any real render, and every save
+// leaks an orphaned blob. This drives the true path (Save → DehydrateHTML reading
+// on disk) with a <head>-bearing render above the threshold.
+func TestSaveThenDehydrate_RealHeadHTML(t *testing.T) {
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+
+	html := largeHTMLWithHead()
+	meta := Meta{Topic: "Real head render", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	dir, _, err := Save("/g", Input{Raw: "# H\n"}, sampleResult(), html, meta)
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// sanity: Save stamped the on-disk copy, so it differs from the raw html the
+	// CLI still holds — this is exactly the divergence the bug tripped over.
+	onDisk, err := os.ReadFile(filepath.Join(dir, planHTMLFile))
+	if err != nil {
+		t.Fatalf("read stamped plan.html: %v", err)
+	}
+	if bytes.Equal(onDisk, html) {
+		t.Fatalf("precondition: expected StampHTMLMeta to modify the <head> render")
+	}
+
+	client, stored := fakeLFSUploadServer(t)
+	pointerized, err := DehydrateHTML(dir, client)
+	if err != nil {
+		t.Fatalf("DehydrateHTML errored on a real render (the stamped/unstamped bug): %v", err)
+	}
+	if !pointerized {
+		t.Fatalf("real render was not dehydrated — the on-disk stamped bytes were not the ones uploaded")
+	}
+
+	htmlPath := filepath.Join(dir, planHTMLFile)
+	ref, err := lfs.ReadPointerFile(htmlPath)
+	if err != nil {
+		t.Fatalf("plan.html is not a valid pointer after dehydration: %v", err)
+	}
+	blob, ok := stored.Load(ref.BareOID())
+	if !ok {
+		t.Fatalf("blob %s not in the store — pointer would be poisoned", ref.BareOID())
+	}
+	// the uploaded blob is the STAMPED on-disk content, not the caller's raw html.
+	if !bytes.Equal(blob.([]byte), onDisk) {
+		t.Fatalf("uploaded blob != the stamped file Save wrote")
+	}
+	if bytes.Equal(blob.([]byte), html) {
+		t.Fatalf("uploaded blob is the UNSTAMPED html — the #810 stamped-bytes bug")
+	}
+	if lfs.ComputeOID(blob.([]byte)) != ref.BareOID() {
+		t.Fatalf("pointer OID does not match the stored blob")
+	}
+}
+
+// TestDehydrateHTML_SmallStaysPlain: a sub-threshold render is never pointerized.
 func TestDehydrateHTML_SmallStaysPlain(t *testing.T) {
 	dir := t.TempDir()
 	html := bytes.Repeat([]byte("x"), 1024)
 	writePlanHTMLPlain(t, dir, html)
 	client, _ := fakeLFSUploadServer(t)
 
-	pointerized, err := DehydrateHTML(dir, html, client)
+	pointerized, err := DehydrateHTML(dir, client)
 	if err != nil {
 		t.Fatalf("DehydrateHTML: %v", err)
 	}
@@ -119,7 +187,7 @@ func TestDehydrateHTML_NilClientStaysPlain(t *testing.T) {
 	html := bytes.Repeat([]byte("PRESERVE "), htmlLFSThreshold/8+2)
 	writePlanHTMLPlain(t, dir, html)
 
-	pointerized, err := DehydrateHTML(dir, html, nil)
+	pointerized, err := DehydrateHTML(dir, nil)
 	if err != nil {
 		t.Fatalf("DehydrateHTML: %v", err)
 	}
@@ -131,8 +199,8 @@ func TestDehydrateHTML_NilClientStaysPlain(t *testing.T) {
 
 // TestDehydrateHTML_UploadFailureLeavesPlain is the load-bearing failure-mode
 // test: when the upload fails, DehydrateHTML must NOT write a pointer. The plain
-// plan.html Save wrote stays on disk (content safe) and no poisoned pointer can
-// reach the remote. Failure prevented: reintroducing GH #810 via a failed upload.
+// plan.html on disk stays intact (content safe) and no poisoned pointer can reach
+// the remote. Failure prevented: reintroducing GH #810 via a failed upload.
 func TestDehydrateHTML_UploadFailureLeavesPlain(t *testing.T) {
 	dir := t.TempDir()
 	html := bytes.Repeat([]byte("PRESERVE "), htmlLFSThreshold/8+2)
@@ -145,7 +213,7 @@ func TestDehydrateHTML_UploadFailureLeavesPlain(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := lfs.NewClient(srv.URL, "oauth2", "token")
 
-	pointerized, err := DehydrateHTML(dir, html, client)
+	pointerized, err := DehydrateHTML(dir, client)
 	if err == nil {
 		t.Fatalf("DehydrateHTML: want error on upload failure, got nil")
 	}
@@ -155,17 +223,15 @@ func TestDehydrateHTML_UploadFailureLeavesPlain(t *testing.T) {
 	assertPlainHTML(t, dir, html) // plain render intact, no dangling pointer
 }
 
-// TestDehydrateHTML_LargeUploadsThenPointerizes proves the whole fix end to end:
-// the blob is actually uploaded to the store AND the on-disk plan.html becomes a
-// pointer to it. Order matters — the pointer's OID must be a blob the server now
-// holds.
+// TestDehydrateHTML_LargeUploadsThenPointerizes proves the plain seed → pointer
+// path: the blob is uploaded AND the on-disk plan.html becomes a pointer to it.
 func TestDehydrateHTML_LargeUploadsThenPointerizes(t *testing.T) {
 	dir := t.TempDir()
 	html := bytes.Repeat([]byte("PRESERVE-ME "), htmlLFSThreshold/12+2)
 	writePlanHTMLPlain(t, dir, html)
 	client, stored := fakeLFSUploadServer(t)
 
-	pointerized, err := DehydrateHTML(dir, html, client)
+	pointerized, err := DehydrateHTML(dir, client)
 	if err != nil {
 		t.Fatalf("DehydrateHTML: %v", err)
 	}
@@ -185,12 +251,57 @@ func TestDehydrateHTML_LargeUploadsThenPointerizes(t *testing.T) {
 	if ref.OID != wantOID {
 		t.Fatalf("pointer OID = %q, want %q", ref.OID, wantOID)
 	}
-	// the blob the pointer names must actually be in the store.
 	blob, ok := stored.Load(lfs.ComputeOID(html))
 	if !ok {
 		t.Fatalf("blob for %s not uploaded — pointer would be poisoned", wantOID)
 	}
 	if !bytes.Equal(blob.([]byte), html) {
 		t.Fatalf("uploaded blob differs from the render")
+	}
+}
+
+// TestDehydrateHTML_AlreadyPointerIsNoop: a plan.html that is already a pointer
+// (a re-save, or a synced dehydrated clone) must not be re-processed.
+func TestDehydrateHTML_AlreadyPointerIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	ref := lfs.AssertUploaded(lfs.FileRef{Storage: "lfs", OID: "sha256:" + lfs.ComputeOID([]byte("blob")), Size: 4})
+	require := func(cond bool, msg string) {
+		if !cond {
+			t.Fatal(msg)
+		}
+	}
+	if err := lfs.WritePointerFile(filepath.Join(dir, planHTMLFile), ref); err != nil {
+		t.Fatalf("seed pointer: %v", err)
+	}
+	client, _ := fakeLFSUploadServer(t)
+	pointerized, err := DehydrateHTML(dir, client)
+	require(err == nil, "DehydrateHTML on an existing pointer should not error")
+	require(!pointerized, "an existing pointer must not be re-pointerized")
+}
+
+// TestDehydrateHTML_BoundaryComparator pins the `>` (not `>=`) gate: a render of
+// exactly htmlLFSThreshold bytes stays plain.
+func TestDehydrateHTML_BoundaryComparator(t *testing.T) {
+	cases := []struct {
+		name string
+		size int
+		want bool
+	}{
+		{"exactly threshold stays plain", htmlLFSThreshold, false},
+		{"one over crosses", htmlLFSThreshold + 1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writePlanHTMLPlain(t, dir, bytes.Repeat([]byte("z"), tc.size))
+			client, _ := fakeLFSUploadServer(t)
+			got, err := DehydrateHTML(dir, client)
+			if err != nil {
+				t.Fatalf("DehydrateHTML: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("pointerized = %v, want %v (size=%d)", got, tc.want, tc.size)
+			}
+		})
 	}
 }
