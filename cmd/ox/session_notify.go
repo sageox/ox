@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/sageox/ox/internal/api"
@@ -31,6 +32,20 @@ func notifySessionStartedAsync(projectRoot string, state *session.RecordingState
 	}
 	attr := loadResolvedAttribution()
 	if attr.Session == "" {
+		return
+	}
+
+	// Don't register a session the coworker never actually used. At recording
+	// start (and on subagent primes) there is no user turn yet — registering
+	// then is what tells the server "a session started" for the ~majority of
+	// recordings that stay header-only, inflating the team's session count with
+	// sessions that never happened. Defer: mark the state so the prime retry and
+	// the per-turn draft path re-fire this exactly once a real turn exists.
+	if !session.HasUserTurn(filepath.Join(state.SessionPath, "raw.jsonl")) {
+		state.LifecycleRegistrationState = "deferred"
+		if saveErr := session.SaveRecordingState(projectRoot, state); saveErr != nil {
+			slog.Debug("session registration deferred save failed", "session_id", state.SessionID, "error", saveErr)
+		}
 		return
 	}
 	err := runSessionSignal("started", func(client *api.RepoClient, repoID string) error {

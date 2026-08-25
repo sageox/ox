@@ -593,8 +593,14 @@ func (c *SessionOrphanedCheck) Category() string {
 
 // Run executes the orphaned recording check.
 func (c *SessionOrphanedCheck) Run(_ context.Context, _ bool) CheckResult {
-	// phase 1: instant ghost cleanup using PID liveness (no time threshold)
+	// phase 1: instant ghost cleanup using PID liveness (no time threshold),
+	// plus the marker-independent orphan sweep that reclaims header-only phantom
+	// stubs the ghost cleanup structurally cannot see (marker removed at
+	// finalize, dir left behind). Sweep runs on the local cache dirs only.
 	ghostResult := session.CleanupGhostSessions(c.gitRoot)
+	orphanResult := session.CleanupOrphanedStubs(c.gitRoot)
+	ghostResult.Removed += orphanResult.Removed
+	ghostResult.Names = append(ghostResult.Names, orphanResult.Names...)
 
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
 
@@ -610,7 +616,7 @@ func (c *SessionOrphanedCheck) Run(_ context.Context, _ bool) CheckResult {
 		return CheckResult{
 			Name:    c.Name(),
 			Status:  StatusPass,
-			Message: fmt.Sprintf("cleaned %d ghost session(s)", ghostResult.Removed),
+			Message: fmt.Sprintf("cleaned %d abandoned/phantom session(s)", ghostResult.Removed),
 		}
 	}
 

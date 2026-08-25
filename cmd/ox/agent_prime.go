@@ -716,10 +716,13 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				// parent session not found; fall back to own session
 				state, _ = session.LoadRecordingStateForAgent(projectRoot, agentID)
 			}
-			if state != nil && state.LifecycleRegistrationState == "pending" {
+			if state != nil && (state.LifecycleRegistrationState == "pending" || state.LifecycleRegistrationState == "deferred") {
 				// Prime is the first reliable post-start interaction for many
 				// short-lived CLI invocations. Retrying here makes an expired or
 				// offline start recover without ever blocking the local recorder.
+				// "deferred" means start-time registration was withheld until a
+				// user turn existed; a re-prime after compaction/clear is exactly
+				// when that turn has since landed, so registration fires here too.
 				notifySessionStartedAsync(projectRoot, state)
 			}
 			output.Session.SessionURL, output.Session.PRDirective = sessionLinkOutputs(projCfg, state, attribution.Session)

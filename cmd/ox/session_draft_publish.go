@@ -53,6 +53,16 @@ func maybePublishSessionDraft(ctx *HookContext) {
 		return
 	}
 
+	// Register the /c/ link now that a real turn exists. Start-time registration
+	// is deferred (see notifySessionStartedAsync) so no-user-turn phantoms never
+	// reach the server; the Stop hook is the first reliable signal that a real
+	// turn landed. Fires at most once — only from the "deferred" state, so a
+	// failed attempt drops to "pending" and is left to the prime retry rather
+	// than re-attempted every turn.
+	if state.LifecycleRegistrationState == "deferred" {
+		notifySessionStartedAsync(ctx.ProjectRoot, state)
+	}
+
 	// Cheapest possible early-out before touching config: below the publish
 	// threshold nothing can happen regardless of how the feature is configured.
 	// DraftPublishTurn is a constant, so this costs one comparison.
@@ -149,6 +159,16 @@ func resolveDraftLedgerPath(projectRoot, sessionPath string) string {
 // `ox doctor --fix` on an ahead branch.
 func publishDraftPlaceholder(projectRoot, ledgerPath, sessionName string, state *session.RecordingState) bool {
 	if sessionName == "" || state.SessionID == "" {
+		return false
+	}
+
+	// Never git-commit a placeholder for a session with no user turn. TurnCount
+	// gates the turn count; this gates on a real coworker prompt actually
+	// existing in the transcript. A header-only recording is a phantom, and a
+	// committed draft for one is exactly the ledger/dashboard noise this guards
+	// against — the /c/ link would resolve to a session that never happened.
+	if !session.HasUserTurn(filepath.Join(state.SessionPath, "raw.jsonl")) {
+		slog.Debug("draft: skipped, no user turn", "session", sessionName)
 		return false
 	}
 

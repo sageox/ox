@@ -249,13 +249,23 @@ func (h *SessionFinalizeHandler) Type() string { return sessionFinalizeType }
 //   - ledgerPath/sessions/ — git-tracked sessions (after finalization/upload)
 //   - XDG cache paths — legacy and alternate cache locations
 func (h *SessionFinalizeHandler) Cleanup(ledgerPath string) {
-	// clean primary ledger cache (where StartRecording writes sessions)
+	// clean primary ledger cache (where StartRecording writes sessions).
+	// Ghost cleanup handles marker'd dead-PID stubs; the orphan sweep reclaims
+	// marker-less header-only phantoms (the accumulation source). The orphan
+	// sweep is safe here because this is the LOCAL CACHE dir — never run it on
+	// the git-tracked ledger dir below, where a draft placeholder is meta.json-
+	// only and would classify as a phantom.
 	ledgerCacheSessionsDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions")
 	if ghostResult := session.CleanupGhostSessionsInDir(ledgerCacheSessionsDir); ghostResult.Removed > 0 {
 		h.logger.Info("ghost cleanup (ledger cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
 	}
+	if orphanResult := session.CleanupOrphanedStubsInDir(ledgerCacheSessionsDir); orphanResult.Removed > 0 {
+		h.logger.Info("orphan cleanup (ledger cache): removed phantom stubs", "count", orphanResult.Removed, "sessions", orphanResult.Names)
+	}
 
-	// clean git-tracked ledger sessions (uploaded/finalized sessions)
+	// clean git-tracked ledger sessions (uploaded/finalized sessions). GHOST
+	// cleanup only — never the marker-independent orphan sweep: a draft
+	// placeholder here is meta.json-only and the sweep must not touch it.
 	ledgerSessionsDir := filepath.Join(ledgerPath, "sessions")
 	if ghostResult := session.CleanupGhostSessionsInDir(ledgerSessionsDir); ghostResult.Removed > 0 {
 		h.logger.Info("ghost cleanup (ledger): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
@@ -268,11 +278,17 @@ func (h *SessionFinalizeHandler) Cleanup(ledgerPath string) {
 		if ghostResult := session.CleanupGhostSessionsInDir(cacheSessionsDir); ghostResult.Removed > 0 {
 			h.logger.Info("ghost cleanup (cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
 		}
+		if orphanResult := session.CleanupOrphanedStubsInDir(cacheSessionsDir); orphanResult.Removed > 0 {
+			h.logger.Info("orphan cleanup (cache): removed phantom stubs", "count", orphanResult.Removed, "sessions", orphanResult.Names)
+		}
 
 		for _, altDir := range paths.AlternateSessionCacheDirs(repoID) {
 			altSessionsDir := filepath.Join(altDir, "sessions")
 			if ghostResult := session.CleanupGhostSessionsInDir(altSessionsDir); ghostResult.Removed > 0 {
 				h.logger.Info("ghost cleanup (alternate cache): removed abandoned recordings", "dir", altDir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
+			}
+			if orphanResult := session.CleanupOrphanedStubsInDir(altSessionsDir); orphanResult.Removed > 0 {
+				h.logger.Info("orphan cleanup (alternate cache): removed phantom stubs", "dir", altDir, "count", orphanResult.Removed, "sessions", orphanResult.Names)
 			}
 		}
 	}

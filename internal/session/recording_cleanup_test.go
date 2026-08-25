@@ -124,13 +124,18 @@ func TestCleanupStaleEmptyRecordings_KeepsRecentStubs(t *testing.T) {
 	assert.False(t, os.IsNotExist(err), ".recording.json should be preserved for recent stub")
 }
 
-func TestCleanupStaleEmptyRecordings_KeepsWithRawJSONL(t *testing.T) {
+// TestCleanupStaleEmptyRecordings_KeepsWithSubstantiveContent proves a stale
+// recording that captured real turns is preserved for recovery, not reaped.
+// Fixture is a header PLUS a user turn — the mere presence of raw.jsonl is not
+// enough, because eager writes made every abandoned session carry a header-only
+// raw.jsonl (that is the phantom removed by the sibling test below).
+func TestCleanupStaleEmptyRecordings_KeepsWithSubstantiveContent(t *testing.T) {
 	cacheDir := t.TempDir()
 	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
 	sessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxHasR")
 	require.NoError(t, os.MkdirAll(sessionPath, 0755))
 
-	// create a .recording.json with StartedAt > 48h ago AND raw.jsonl present
+	// create a .recording.json with StartedAt > 48h ago AND substantive raw.jsonl
 	state := &RecordingState{
 		AgentID:     "OxHasR",
 		StartedAt:   time.Now().Add(-72 * time.Hour),
@@ -140,13 +145,44 @@ func TestCleanupStaleEmptyRecordings_KeepsWithRawJSONL(t *testing.T) {
 	require.NoError(t, err)
 	recPath := filepath.Join(sessionPath, recordingFile)
 	require.NoError(t, os.WriteFile(recPath, data, 0600))
-	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"), []byte("{}\n"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"),
+		[]byte(`{"type":"header"}`+"\n"+`{"type":"user"}`+"\n"), 0600))
 
 	cleanupStaleEmptyRecordings(projectRoot)
 
-	// .recording.json should still exist because raw.jsonl is present
+	// .recording.json should still exist because the recording has real content
 	_, err = os.Stat(recPath)
-	assert.False(t, os.IsNotExist(err), ".recording.json should be preserved when raw.jsonl exists")
+	assert.False(t, os.IsNotExist(err), ".recording.json should be preserved when raw.jsonl has real content")
+}
+
+// TestCleanupStaleEmptyRecordings_RemovesHeaderOnlyStub is the corrected-intent
+// test: a stale header-only recording (a real coworker prompt was never
+// captured) is a phantom and must be reclaimed, whole dir and all. This is the
+// class of ~10k orphans the old "any raw.jsonl means keep it" guard preserved
+// forever.
+func TestCleanupStaleEmptyRecordings_RemovesHeaderOnlyStub(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxHdr1")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	state := &RecordingState{
+		AgentID:     "OxHdr1",
+		StartedAt:   time.Now().Add(-72 * time.Hour),
+		SessionPath: sessionPath,
+	}
+	data, err := json.Marshal(state)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+	// header-only raw.jsonl + context-trace — the exact phantom shape.
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"),
+		[]byte(`{"type":"header"}`+"\n"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "context-trace.jsonl"),
+		[]byte(`{"type":"provided"}`+"\n"), 0600))
+
+	cleanupStaleEmptyRecordings(projectRoot)
+
+	assert.NoDirExists(t, sessionPath, "a stale header-only phantom must be removed, whole dir and all")
 }
 
 func TestCleanupStaleEmptyRecordings_RemovesEmptyDir(t *testing.T) {

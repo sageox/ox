@@ -2,6 +2,7 @@ package session
 
 import (
 	"bufio"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -266,6 +267,47 @@ func ClassifyRawFile(rawPath string) RawKind {
 		}
 	}
 	return RawHeaderOnly
+}
+
+// HasUserTurn reports whether a raw.jsonl file contains at least one user turn
+// (an entry of type "user") — i.e. a real coworker prompt was recorded. The
+// metadata header and machine-generated entries (assistant/tool/system) do NOT
+// count: a recording with no user turn never happened from the coworker's point
+// of view, and must not be git-committed as a draft nor registered with the
+// server. This is the floor that keeps phantom sessions off the ledger and out
+// of the team's session count.
+//
+// A content-store pointer stub reports true: its transcript is real and already
+// passed this gate when it was finalized.
+func HasUserTurn(rawPath string) bool {
+	if lfs.IsPointerFile(rawPath) {
+		return true
+	}
+
+	f, err := os.Open(rawPath)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var entry struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(line, &entry) != nil {
+			continue
+		}
+		if entry.Type == "user" {
+			return true
+		}
+	}
+	return false
 }
 
 // HasSubstantiveEntries returns true if a raw.jsonl file holds at least one
