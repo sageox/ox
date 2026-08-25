@@ -11,6 +11,7 @@ import (
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
+	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	gh "github.com/sageox/ox/internal/github"
@@ -99,6 +100,33 @@ func indexCodeInProcess(cmd *cobra.Command, args []string, full bool) error {
 	db, err := codedb.Open(dataDir)
 	if err != nil {
 		return fmt.Errorf("open codedb: %w", err)
+	}
+
+	// codedb.Open self-heals a corrupt cache transparently: it nukes and
+	// recreates a structurally broken bleve sub-index and writes a
+	// .needs_reindex marker mid-open. The daemon acts on that marker on its
+	// next pass, but a one-shot in-process `ox index` has no next pass — if we
+	// index incrementally now, the emptied sub-index stays empty, because the
+	// commits are already in SQLite and incremental indexing skips them (silent
+	// empty code search, worse than a hard error). So when a marker is present
+	// (from this open or a prior run), escalate to a full rebuild in this same
+	// invocation. Wiping dataDir also clears the markers, so it cannot loop.
+	if !full && len(store.NeedsReindexMarkers(dataDir)) > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"codedb self-heal detected (corrupt cache recovered); rebuilding from scratch...\n")
+		if closeErr := db.Close(); closeErr != nil {
+			slog.Warn("close codedb before self-heal rebuild failed", "error", closeErr)
+		}
+		if err := os.RemoveAll(dataDir); err != nil {
+			return fmt.Errorf("wipe self-healed codedb for full reindex: %w", err)
+		}
+		if err := os.MkdirAll(dataDir, 0o755); err != nil {
+			return fmt.Errorf("recreate codedb dir after self-heal: %w", err)
+		}
+		db, err = codedb.Open(dataDir)
+		if err != nil {
+			return fmt.Errorf("reopen codedb after self-heal rebuild: %w", err)
+		}
 	}
 	defer db.Close()
 

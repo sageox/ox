@@ -20,6 +20,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
 	"go.etcd.io/bbolt"
+	bbolterrors "go.etcd.io/bbolt/errors"
 	_ "modernc.org/sqlite"
 )
 
@@ -713,6 +714,16 @@ func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 		if isBleveIndexCorrupt(boltPath) {
 			return selfHealBleveSubIndex(root, path, name, err)
 		}
+		// isBleveIndexCorrupt only proves the corruption it can SEE through a
+		// read-only peek. A bolt torn so badly bbolt cannot open it at all (a
+		// kill-9 mid-write, "invalid database") reads identically to a live
+		// exclusive lock here — both made bleve.Open fail and both defeat the
+		// read-only peek. Disambiguate with a bounded exclusive open so the
+		// unopenable-corrupt case self-heals instead of crash-looping, while a
+		// genuinely locked index is still left untouched.
+		if boltCorruptOnExclusiveOpen(boltPath) {
+			return selfHealBleveSubIndex(root, path, name, err)
+		}
 		return nil, fmt.Errorf("bleve index appears to be in use (lock contention): %w", err)
 	} else if !os.IsNotExist(statErr) && !errors.Is(statErr, syscall.ENOTDIR) {
 		// permission/IO errors are transient — nuking would cause data loss
@@ -916,6 +927,45 @@ func isBleveIndexCorrupt(boltPath string) bool {
 		return nil
 	})
 	return corrupt
+}
+
+// bleveExclusiveProbeTimeout bounds how long boltCorruptOnExclusiveOpen waits
+// to take bbolt's exclusive flock before conceding a live writer holds it.
+// Overridable in tests. A timeout only ever biases toward the safe "assume
+// locked, do not nuke" verdict, so shrinking it in tests cannot manufacture a
+// false corruption verdict.
+var bleveExclusiveProbeTimeout = 2 * time.Second
+
+// boltCorruptOnExclusiveOpen disambiguates the two states that both surface as
+// a bbolt-open failure the read-only peek (isBleveIndexCorrupt) cannot classify:
+// a bolt torn so badly bbolt rejects it (kill-9 mid-write) versus a bolt held
+// under another writer's exclusive flock. It attempts a bounded EXCLUSIVE open:
+//
+//   - bbolt.ErrTimeout: a live writer holds the exclusive lock. Return false —
+//     the caller keeps the safe lock-contention behavior and never nukes an
+//     index that is actively being written.
+//   - any other open error: the flock was taken without contention, so no live
+//     writer holds it, yet bbolt still rejects the file — proven structural
+//     corruption. Return true so the caller self-heals.
+//   - opened cleanly: the bolt itself is fine (whatever failed in bleve.Open is
+//     not a torn bolt). Close and return false — do not destroy it.
+//
+// A nuke only ever follows an ACQUIRED flock plus a rejected file, so a
+// genuinely live-locked index is never destroyed — the same "never nuke without
+// proof" guarantee isBleveIndexCorrupt provides, extended to the
+// unopenable-bolt class the read-only peek structurally cannot reach.
+func boltCorruptOnExclusiveOpen(boltPath string) bool {
+	db, err := bbolt.Open(boltPath, 0600, &bbolt.Options{Timeout: bleveExclusiveProbeTimeout})
+	if err != nil {
+		if errors.Is(err, bbolterrors.ErrTimeout) {
+			return false
+		}
+		slog.Error("bleve bolt is unopenable and unlocked; treating as corruption",
+			"path", boltPath, "err", err)
+		return true
+	}
+	_ = db.Close()
+	return false
 }
 
 // zapFilesInDir returns a set of *.zap filenames in dir for fast lookup.
