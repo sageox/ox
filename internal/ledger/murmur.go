@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -155,12 +156,25 @@ func FindMurmur(baseDir, murmurID string) (string, error) {
 // baseDir is the root of the ledger or team context checkout.
 // windowHours is clamped to MaxMurmurWindowHours (24h) — older murmurs are always ignored.
 func ReadMurmursInWindow(baseDir string, windowHours int) ([]MurmurFile, error) {
+	return readMurmursInWindow(baseDir, windowHours, false)
+}
+
+// ReadMurmursInWindowStrict is the honesty-sensitive variant used when an
+// unavailable cache must be distinguishable from a genuinely empty window.
+// Missing hourly directories remain normal; unexpected read or JSON errors are
+// returned instead of silently converted to no murmurs.
+func ReadMurmursInWindowStrict(baseDir string, windowHours int) ([]MurmurFile, error) {
+	return readMurmursInWindow(baseDir, windowHours, true)
+}
+
+func readMurmursInWindow(baseDir string, windowHours int, strict bool) ([]MurmurFile, error) {
 	if windowHours > MaxMurmurWindowHours {
 		windowHours = MaxMurmurWindowHours
 	}
 	now := time.Now().UTC()
 	cutoff := now.Add(-time.Duration(windowHours) * time.Hour)
 	var murmurs []MurmurFile
+	var readErrs []error
 
 	for i := 0; i < windowHours; i++ {
 		t := now.Add(-time.Duration(i) * time.Hour)
@@ -168,7 +182,11 @@ func ReadMurmursInWindow(baseDir string, windowHours int) ([]MurmurFile, error) 
 
 		entries, err := os.ReadDir(dir)
 		if err != nil {
-			// missing or unreadable directories are not fatal
+			if strict && !errors.Is(err, os.ErrNotExist) {
+				readErrs = append(readErrs, fmt.Errorf("read murmur directory %s: %w", dir, err))
+			}
+			// Missing hourly directories are normal in both modes; unreadable
+			// directories remain fail-open in the default mode.
 			continue
 		}
 
@@ -179,11 +197,17 @@ func ReadMurmursInWindow(baseDir string, windowHours int) ([]MurmurFile, error) 
 
 			data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 			if err != nil {
+				if strict && !errors.Is(err, os.ErrNotExist) {
+					readErrs = append(readErrs, fmt.Errorf("read murmur %s: %w", entry.Name(), err))
+				}
 				continue
 			}
 
 			var m MurmurFile
 			if err := json.Unmarshal(data, &m); err != nil {
+				if strict {
+					readErrs = append(readErrs, fmt.Errorf("parse murmur %s: %w", entry.Name(), err))
+				}
 				continue // skip invalid JSON
 			}
 
@@ -195,5 +219,5 @@ func ReadMurmursInWindow(baseDir string, windowHours int) ([]MurmurFile, error) 
 		}
 	}
 
-	return murmurs, nil
+	return murmurs, errors.Join(readErrs...)
 }

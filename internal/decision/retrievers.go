@@ -29,11 +29,13 @@ func (sessionsRetriever) Retrieve(_ context.Context, env *Env, in Input) ([]Cont
 		return nil, nil
 	}
 	results, err := ledgersearch.Search(ledgersearch.Options{
-		LedgerPath: env.LedgerPath,
-		Query:      terms,
-		Limit:      5,
+		LedgerPath:  env.LedgerPath,
+		Query:       terms,
+		Limit:       5,
+		StrictRead:  true,
+		SkipMurmurs: true,
 	})
-	if err != nil || len(results) == 0 {
+	if len(results) == 0 && err == nil {
 		return nil, nil
 	}
 
@@ -65,6 +67,9 @@ func (sessionsRetriever) Retrieve(_ context.Context, env *Env, in Input) ([]Cont
 		}
 		out = append(out, item)
 	}
+	if err != nil {
+		return out, fmt.Errorf("search prior sessions: %w", err)
+	}
 	return out, nil
 }
 
@@ -93,8 +98,8 @@ func (murmursRetriever) Retrieve(_ context.Context, env *Env, in Input) ([]Conte
 	if len(terms) == 0 || env.LedgerPath == "" {
 		return nil, nil
 	}
-	murmurs, err := ledger.ReadMurmursInWindow(env.LedgerPath, 24)
-	if err != nil || len(murmurs) == 0 {
+	murmurs, err := ledger.ReadMurmursInWindowStrict(env.LedgerPath, 24)
+	if len(murmurs) == 0 && err == nil {
 		return nil, nil
 	}
 
@@ -127,6 +132,9 @@ func (murmursRetriever) Retrieve(_ context.Context, env *Env, in Input) ([]Conte
 		if len(out) >= 3 {
 			break
 		}
+	}
+	if err != nil {
+		return out, fmt.Errorf("read recent decision murmurs: %w", err)
 	}
 	return out, nil
 }

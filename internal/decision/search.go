@@ -23,13 +23,16 @@ type RelevantDR struct {
 	Score   float64
 }
 
-// Relevant walks this repo's DR corpus fresh and returns the records most
-// relevant to query. Zero LLM/network; fail-open (empty on any miss). Exported
-// for internal/plan so `ox plan enrich` surfaces the decisions a plan builds
-// on — subtly, as context items the render turns into inline markers.
-func Relevant(gitRoot, query string, limit int) []RelevantDR {
+// Relevant walks this repo's DR corpus fresh and returns a bounded page of
+// above-floor records plus the number omitted. Ranking gives priority to the
+// earliest query prefix that provides enough evidence to clear the relevance
+// floor, then uses stable record metadata. Appending detail can therefore add
+// matches without reordering or evicting matches found by the shorter prefix
+// query. Zero LLM/network; fail-open on any miss.
+// Exported for internal/plan so both enrich commands share the same retrieval.
+func Relevant(gitRoot, query string, limit int) ([]RelevantDR, int) {
 	if gitRoot == "" || strings.TrimSpace(query) == "" || limit <= 0 {
-		return nil
+		return nil, 0
 	}
 	var cfg *config.DecisionConfig
 	if pc, err := config.LoadProjectConfig(gitRoot); err == nil && pc != nil {
@@ -37,11 +40,12 @@ func Relevant(gitRoot, query string, limit int) []RelevantDR {
 	}
 	corpus := LoadCorpus(gitRoot, cfg)
 	if len(corpus) == 0 {
-		return nil
+		return nil, 0
 	}
 	var out []RelevantDR
-	for _, s := range scoreCorpus(corpus, query) {
-		if s.score < minDRScore || len(out) >= limit {
+	matches := relevantCorpus(corpus, query)
+	for _, s := range matches {
+		if len(out) >= limit {
 			break
 		}
 		out = append(out, RelevantDR{
@@ -53,7 +57,7 @@ func Relevant(gitRoot, query string, limit int) []RelevantDR {
 			Score:   s.score,
 		})
 	}
-	return out
+	return out, len(matches) - len(out)
 }
 
 // minDRScore is the relevance floor for the DR-corpus scorer (Relevant,
@@ -77,16 +81,98 @@ type scored struct {
 	score float64
 }
 
-// droppedCandidates lists records that matched the query but scored below
-// minDRScore — the near-misses the floor discarded. Surfaced under --explain so
-// a caller can tell "no record was relevant" from "records were found and
-// dropped" (#823). Bounded so a broad query can't flood the output.
+// relevantCorpus filters to the relevance floor and orders matches so a
+// prefix query's bounded results survive when more descriptive words are
+// appended. A candidate ranks by the first query position where its cumulative
+// field evidence clears the floor; a record that needs appended evidence must
+// therefore follow every record that the original prefix already qualified.
+func relevantCorpus(corpus []Record, query string) []scored {
+	terms := tokenize(query)
+	if len(terms) == 0 {
+		return nil
+	}
+	var out []scored
+	for _, s := range scoreCorpus(corpus, query) {
+		if s.score >= minDRScore {
+			out = append(out, s)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		iPos, iWeight := qualificationRank(terms, out[i].rec, query)
+		jPos, jWeight := qualificationRank(terms, out[j].rec, query)
+		if iPos != jPos {
+			return iPos < jPos
+		}
+		if iWeight != jWeight {
+			return iWeight > jWeight
+		}
+		if out[i].rec.Date != out[j].rec.Date {
+			return out[i].rec.Date > out[j].rec.Date
+		}
+		return out[i].rec.ID < out[j].rec.ID
+	})
+	return out
+}
+
+func qualificationRank(terms []string, rec Record, query string) (int, int) {
+	if queryContainsRecordID(query, rec.ID) {
+		return -1, 3
+	}
+	title, mid, excerpt := recordFields(rec)
+	seen := make(map[string]struct{}, len(terms))
+	var cumulative float64
+	for i, term := range terms {
+		if _, duplicate := seen[term]; duplicate {
+			continue
+		}
+		seen[term] = struct{}{}
+		weight := 0
+		switch {
+		case strings.Contains(title, term):
+			weight = 3
+		case strings.Contains(mid, term):
+			weight = 2
+		case strings.Contains(excerpt, term):
+			weight = 1
+		}
+		cumulative += float64(weight)
+		if cumulative/(cumulative+fieldScoreK) >= minDRScore {
+			return i, weight
+		}
+	}
+	return len(terms), 0
+}
+
+// droppedCandidates lists records omitted by the related-annotation cap, then
+// records that matched below minDRScore. Surfaced under --explain so a caller
+// can distinguish a true miss from a bounded or thresholded result (#823).
+// The explanation itself is bounded so a broad query cannot flood output.
 func droppedCandidates(env *Env, in Input) []DroppedCandidate {
 	terms := in.Terms()
 	if strings.TrimSpace(terms) == "" || len(env.Corpus) == 0 {
 		return nil
 	}
 	var out []DroppedCandidate
+	related := 0
+	for _, s := range relevantCorpus(env.Corpus, terms) {
+		if in.Path != "" && samePath(in.Path, s.rec.Path) {
+			continue
+		}
+		related++
+		if related <= relatedCap {
+			continue
+		}
+		out = append(out, DroppedCandidate{
+			Ref:     s.rec.ID,
+			RefPath: s.rec.RelPath,
+			Title:   s.rec.Title,
+			Score:   s.score,
+			Reason:  fmt.Sprintf("cleared the relevance floor but ranked below the %d-item related-decision annotation cap", relatedCap),
+		})
+		if len(out) >= 10 {
+			return out
+		}
+	}
 	for _, s := range scoreCorpus(env.Corpus, terms) {
 		if s.score >= minDRScore {
 			continue // surfaced already, not dropped
@@ -120,7 +206,7 @@ func scoreCorpus(corpus []Record, query string) []scored {
 
 	var out []scored
 	for _, rec := range corpus {
-		if rec.ID != "" && rec.ID == normalizeLooseID(qUpper) {
+		if rec.ID != "" && (rec.ID == normalizeLooseID(qUpper) || queryContainsRecordID(query, rec.ID)) {
 			out = append(out, scored{rec: rec, score: 1.0})
 			continue
 		}
@@ -142,6 +228,21 @@ func scoreCorpus(corpus []Record, query string) []scored {
 	return out
 }
 
+func queryContainsRecordID(query, recordID string) bool {
+	if recordID == "" {
+		return false
+	}
+	if normalizeLooseID(strings.ToUpper(strings.TrimSpace(query))) == recordID {
+		return true
+	}
+	for _, match := range refTokenRe.FindAllStringSubmatch(query, -1) {
+		if normalizeRefToken(match[1], match[2]) == recordID {
+			return true
+		}
+	}
+	return false
+}
+
 // fieldScore ranks a record by how much distinctive signal the query lands on
 // its structured fields — NOT by what fraction of the query matched. The query
 // is often a whole plan or issue body, so the old coverage=matched/len(terms)
@@ -155,14 +256,7 @@ func scoreCorpus(corpus []Record, query string) []scored {
 // query can never score a record below a shorter subset query. That is exactly
 // the invariant #823 needs, and TestScoreCorpus_MonotonicInQueryLength guards it.
 func fieldScore(terms []string, rec Record) float64 {
-	title := strings.ToLower(rec.Title)
-	var anchors strings.Builder
-	for _, d := range rec.DSections {
-		anchors.WriteString(strings.ToLower(d.Heading))
-		anchors.WriteByte(' ')
-	}
-	mid := anchors.String() + strings.ToLower(rec.Status) + " " + strings.ToLower(strings.Join(rec.Deciders, " "))
-	excerpt := strings.ToLower(rec.Excerpt)
+	title, mid, excerpt := recordFields(rec)
 
 	seen := make(map[string]struct{}, len(terms))
 	matched := 0
@@ -190,6 +284,18 @@ func fieldScore(terms []string, rec Record) float64 {
 	return mw / (mw + fieldScoreK)
 }
 
+func recordFields(rec Record) (title, mid, excerpt string) {
+	title = strings.ToLower(rec.Title)
+	var anchors strings.Builder
+	for _, d := range rec.DSections {
+		anchors.WriteString(strings.ToLower(d.Heading))
+		anchors.WriteByte(' ')
+	}
+	mid = anchors.String() + strings.ToLower(rec.Status) + " " + strings.ToLower(strings.Join(rec.Deciders, " "))
+	excerpt = strings.ToLower(rec.Excerpt)
+	return title, mid, excerpt
+}
+
 // tokenize mirrors the ledgersearch tokenizer: lowercase alphanumeric terms,
 // punctuation stripped, stopword-light (short tokens dropped).
 func tokenize(q string) []string {
@@ -202,7 +308,8 @@ func tokenize(q string) []string {
 			return
 		}
 		switch t {
-		case "the", "and", "for", "with", "this", "that", "into", "over", "our":
+		case "the", "and", "for", "with", "this", "that", "into", "over", "our",
+			"about", "accepted", "decision", "need", "proposal", "record", "want":
 			return
 		}
 		out = append(out, t)

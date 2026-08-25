@@ -6,6 +6,8 @@ import (
 	"github.com/sageox/ox/internal/decision"
 )
 
+const planDecisionCap = 5
+
 // decisionRetriever ties plans back to the repo's own Decision Records: DRs
 // relevant to the plan surface as "adr" context items, which the render turns
 // into subtle inline OX markers on their prose tokens ("ADR-021") — context,
@@ -24,8 +26,9 @@ func (decisionRetriever) Retrieve(_ context.Context, in Input, gitRoot string) (
 	if query == "" || gitRoot == "" {
 		return nil, nil
 	}
+	matches, omitted := decision.Relevant(gitRoot, query, planDecisionCap)
 	var items []ContextItem
-	for _, dr := range decision.Relevant(gitRoot, query, 4) {
+	for _, dr := range matches {
 		title := dr.Title
 		if dr.ID != "" {
 			title = dr.ID + " — " + dr.Title
@@ -38,6 +41,9 @@ func (decisionRetriever) Retrieve(_ context.Context, in Input, gitRoot string) (
 			Score:   dr.Score,
 			When:    dr.Date,
 		})
+	}
+	if omitted > 0 && len(items) > 0 {
+		items[0].Omitted = omitted
 	}
 	return items, nil
 }

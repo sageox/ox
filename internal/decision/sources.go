@@ -1,9 +1,12 @@
 package decision
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -63,21 +66,47 @@ func CorpusDetected(gitRoot string) bool {
 // already exists in codedb (`ox code search` reaches these same files).
 // Fail-open throughout: unreadable files are skipped with a debug log.
 func LoadCorpus(gitRoot string, cfg *config.DecisionConfig) []Record {
+	return loadCorpus(gitRoot, cfg).records
+}
+
+type corpusLoadResult struct {
+	records  []Record
+	unparsed int
+	err      error
+}
+
+// loadCorpus is the honesty-sensitive loader used by Enrich. LoadCorpus keeps
+// its historical fail-open API for passive callers, while this variant reports
+// configured-source discovery failures, unreadable files, and markdown that is
+// clearly intended to be a DR but is too malformed to catalog. Ordinary notes,
+// templates, and README files are normal exclusions, not source failures.
+func loadCorpus(gitRoot string, cfg *config.DecisionConfig) corpusLoadResult {
 	paths := resolvePaths(gitRoot, cfg)
 	if len(paths) == 0 {
-		return nil
+		return corpusLoadResult{}
 	}
 
+	discovery := discoverFiles(gitRoot, paths, cfg != nil && !cfg.IsEmpty())
 	var records []Record
-	for _, file := range listFiles(gitRoot, paths) {
+	var loadErrs []error
+	if discovery.err != nil {
+		loadErrs = append(loadErrs, discovery.err)
+	}
+	unparsed := 0
+	for _, file := range discovery.files {
 		data, err := os.ReadFile(file)
 		if err != nil {
 			slog.Debug("decision: unreadable file skipped", "path", file, "error", err)
+			loadErrs = append(loadErrs, fmt.Errorf("read %s: %w", file, err))
+			unparsed++
 			continue
 		}
 		rec := ParseContent(file, string(data))
 		if !rec.IsRecord() {
-			continue // plain markdown, not DR-shaped
+			if likelyDecisionRecord(file, string(data)) {
+				unparsed++
+			}
+			continue
 		}
 		if fi, err := os.Stat(file); err == nil {
 			rec.Mtime = fi.ModTime().Unix()
@@ -96,14 +125,27 @@ func LoadCorpus(gitRoot string, cfg *config.DecisionConfig) []Record {
 		}
 		return records[i].RelPath < records[j].RelPath
 	})
-	return records
+	return corpusLoadResult{records: records, unparsed: unparsed, err: errors.Join(loadErrs...)}
 }
 
 // listFiles expands dirs (recursive *.md) and doublestar globs into a deduped
 // file list. README.md is excluded everywhere — corpus index tables, not DRs.
 func listFiles(gitRoot string, patterns []string) []string {
+	return discoverFiles(gitRoot, patterns, false).files
+}
+
+type fileDiscovery struct {
+	files []string
+	err   error
+}
+
+// discoverFiles is listFiles plus source-status reporting. When configured is
+// true, a literal path was explicitly promised by decision.paths, so a missing
+// or inaccessible path is an unavailable source rather than an empty corpus.
+func discoverFiles(gitRoot string, patterns []string, configured bool) fileDiscovery {
 	seen := make(map[string]struct{})
 	var out []string
+	var discoveryErrs []error
 	add := func(p string) {
 		if !strings.EqualFold(filepath.Ext(p), ".md") {
 			return
@@ -120,26 +162,65 @@ func listFiles(gitRoot string, patterns []string) []string {
 
 	for _, pat := range patterns {
 		full := filepath.Join(gitRoot, pat)
-		if fi, err := os.Stat(full); err == nil && fi.IsDir() {
-			_ = filepath.WalkDir(full, func(p string, d os.DirEntry, err error) error {
-				if err != nil || d.IsDir() {
-					return nil // fail-open per entry
+		fi, statErr := os.Stat(full)
+		if statErr == nil && fi.IsDir() {
+			walkErr := filepath.WalkDir(full, func(p string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if d.IsDir() {
+					return nil
 				}
 				add(p)
 				return nil
 			})
+			if walkErr != nil {
+				discoveryErrs = append(discoveryErrs, fmt.Errorf("walk decision path %q: %w", pat, walkErr))
+			}
+			continue
+		}
+		if statErr == nil {
+			add(full)
+			continue
+		}
+		if configured && !hasGlobMeta(pat) {
+			discoveryErrs = append(discoveryErrs, fmt.Errorf("access configured decision path %q: %w", pat, statErr))
 			continue
 		}
 		matches, err := doublestar.Glob(os.DirFS(gitRoot), pat)
 		if err != nil {
 			slog.Debug("decision: bad glob", "pattern", pat, "error", err)
+			discoveryErrs = append(discoveryErrs, fmt.Errorf("expand decision path %q: %w", pat, err))
 			continue
 		}
 		for _, m := range matches {
 			add(filepath.Join(gitRoot, m))
 		}
 	}
-	return out
+	return fileDiscovery{files: out, err: errors.Join(discoveryErrs...)}
+}
+
+func hasGlobMeta(pattern string) bool {
+	return strings.ContainsAny(pattern, `*?[{`)
+}
+
+var (
+	likelyDecisionNameRe    = regexp.MustCompile(`(?i)^(?:adr|ddr)(?:[-_]|\.md$)|^\d{1,4}[-_]`)
+	decisionSectionIntentRe = regexp.MustCompile(`(?im)^##\s+decision\b`)
+)
+
+// likelyDecisionRecord distinguishes malformed DRs from intentional Markdown
+// neighbors such as notes.md and TEMPLATE.md. Strong intent signals are a DR-
+// shaped filename/H1, explicit DR frontmatter, or a Decision section.
+func likelyDecisionRecord(path, content string) bool {
+	base := filepath.Base(path)
+	if likelyDecisionNameRe.MatchString(base) || headIDRe.MatchString(firstH1Line(content)) {
+		return true
+	}
+	lower := strings.ToLower(content)
+	return strings.Contains(lower, "\ntype: adr") ||
+		strings.Contains(lower, "\ntype: ddr") ||
+		decisionSectionIntentRe.MatchString(content)
 }
 
 // PathMatcher returns a predicate reporting whether a repo-relative path lies

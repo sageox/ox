@@ -17,18 +17,15 @@ import (
 // --- helpers ---
 
 func enabledConfigWith(maxConcurrent, maxPerHour int) *config.AgentWorkerConfig {
-	t := true
 	return &config.AgentWorkerConfig{
-		Enabled:               &t,
-		AgentType:             "claude",
+		Agent:                 "claude",
 		MaxConcurrent:         &maxConcurrent,
 		MaxInvocationsPerHour: &maxPerHour,
 	}
 }
 
 func disabledConfig() *config.AgentWorkerConfig {
-	f := false
-	return &config.AgentWorkerConfig{Enabled: &f}
+	return &config.AgentWorkerConfig{Agent: "none"}
 }
 
 // mockHandler implements WorkHandler for testing.

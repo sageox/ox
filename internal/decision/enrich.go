@@ -54,8 +54,8 @@ func snapshotRegistry() ([]Detector, []Retriever) {
 // defaults. Options are applied to the resolved Env after buildEnv.
 type EnrichOption func(*Env)
 
-// WithExplain toggles Result.Dropped population (sub-floor candidates). Off by
-// default so the agent path stays lean.
+// WithExplain toggles Result.Dropped population (cap-omitted and sub-floor
+// candidates). Off by default so the agent path stays lean.
 func WithExplain(on bool) EnrichOption {
 	return func(e *Env) { e.Explain = on }
 }
@@ -72,15 +72,15 @@ func Enrich(ctx context.Context, in Input, gitRoot string, opts ...EnrichOption)
 	}
 	ds, rs := snapshotRegistry()
 
-	degraded := env.CorpusUnparsed > 0
+	degraded := env.CorpusUnparsed > 0 || env.SourceUnavailable
 
 	var annotations []Annotation
-	// A decision dir exists but nothing in it parsed as a record — surface the
-	// format problem as a visible diagnostic, not a silent empty result.
+	// A decision dir contains markdown that did not make it into the catalog —
+	// surface the gap as a visible diagnostic, not a silent partial result.
 	if env.CorpusUnparsed > 0 {
 		annotations = append(annotations, Annotation{
 			Kind: BadgeDeterministic, Type: BadgeDiagnostic, Rule: RuleUnreadableCorpus,
-			Why: fmt.Sprintf("%d markdown file(s) in this repo's decision dir did not parse as Decision Records — a DR needs a number in its filename/H1, or a title plus a Status/Date line. Fix the format; retrieval cannot see these files, so treat 'no prior decision' as UNVERIFIED here", env.CorpusUnparsed),
+			Why: fmt.Sprintf("%d markdown file(s) in this repo's decision dir could not be cataloged (unreadable or not shaped as Decision Records) — a DR needs a number in its filename/H1, or a title plus a Status/Date line. Fix the files; retrieval cannot see them, so treat 'no prior decision' as UNVERIFIED here", env.CorpusUnparsed),
 		})
 	}
 	for _, d := range ds {
@@ -144,20 +144,29 @@ func buildEnv(gitRoot string) *Env {
 		return env
 	}
 	var cfg *config.DecisionConfig
-	if pc, _ := config.LoadProjectConfig(gitRoot); pc != nil {
+	pc, cfgErr := config.LoadProjectConfig(gitRoot)
+	if cfgErr != nil {
+		slog.Warn("decision: project config unavailable", "error", cfgErr)
+		env.SourceUnavailable = true
+	} else if pc != nil {
 		cfg = pc.Decision
-	}
-	env.Corpus = LoadCorpus(gitRoot, cfg)
-	// Corpus honesty: if a decision dir exists and holds markdown but NOTHING
-	// parsed as a record, the corpus is present-but-unreadable — a distinct
-	// state from "no corpus", and one an absence claim must not paper over.
-	if len(env.Corpus) == 0 {
-		if files := listFiles(gitRoot, resolvePaths(gitRoot, cfg)); len(files) > 0 {
-			env.CorpusUnparsed = len(files)
+		if err := config.ValidateDecisionConfig(cfg); err != nil {
+			slog.Warn("decision: invalid decision config", "error", err)
+			env.SourceUnavailable = true
 		}
+	}
+	loaded := loadCorpus(gitRoot, cfg)
+	env.Corpus = loaded.records
+	env.CorpusUnparsed = loaded.unparsed
+	if loaded.err != nil {
+		slog.Warn("decision: corpus source unavailable", "error", loaded.err)
+		env.SourceUnavailable = true
 	}
 	if pctx, err := config.LoadProjectContext(gitRoot); err == nil && pctx != nil {
 		env.LedgerPath = pctx.DefaultLedgerPath()
+	} else if err != nil {
+		slog.Warn("decision: project context unavailable", "error", err)
+		env.SourceUnavailable = true
 	}
 	return env
 }
@@ -191,7 +200,7 @@ func runRetriever(ctx context.Context, r Retriever, env *Env, in Input) (out []C
 	items, err := r.Retrieve(ctx, env, in)
 	if err != nil {
 		slog.Warn("decision retriever failed", "retriever", r.Name(), "error", err)
-		return nil, true
+		return items, true
 	}
 	return items, false
 }

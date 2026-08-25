@@ -286,7 +286,7 @@ func TestScoreCorpus(t *testing.T) {
 	}
 
 	t.Run("exact id short-circuits", func(t *testing.T) {
-		for _, q := range []string{"ADR-001", "adr 1", "001"} {
+		for _, q := range []string{"ADR-001", "adr 1", "001", "ADR-001 with appended rationale"} {
 			got := scoreCorpus(corpus, q)
 			if len(got) == 0 || got[0].rec.ID != "ADR-001" || got[0].score != 1.0 {
 				t.Errorf("query %q: %+v", q, got)
@@ -358,6 +358,56 @@ func TestScoreCorpus_MonotonicInQueryLength(t *testing.T) {
 	}
 	if sProse < minDRScore {
 		t.Errorf("#823: record fell below the floor %.2f on ordinary prose input: %.3f", minDRScore, sProse)
+	}
+}
+
+// TestRelatedDetector_MonotonicAcrossCompetingRecords guards the second half of
+// the monotonicity contract: appended terms may add stronger-scoring records,
+// but the bounded output must retain the shorter prefix query's seed match and
+// report that additional candidates were omitted.
+func TestRelatedDetector_MonotonicAcrossCompetingRecords(t *testing.T) {
+	corpus := []Record{{ID: "ADR-002", Title: "Unix Domain Socket IPC"}}
+	for i, title := range []string{
+		"Session Adapter Context",
+		"Plan Integration Lifecycle",
+		"Security Adapter Distribution",
+		"Context Session Lifecycle",
+		"Integration Security Plan",
+		"Adapter Lifecycle Context",
+	} {
+		corpus = append(corpus, Record{ID: fmt.Sprintf("ADR-%03d", i+3), Title: title})
+	}
+
+	detector := relatedDetector{}
+	containsTarget := func(topic string) (found bool, related, overflow int) {
+		anns, err := detector.Detect(context.Background(), &Env{Corpus: corpus}, Input{Topic: topic})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ann := range anns {
+			if ann.Ref == "ADR-002" {
+				found = true
+			}
+			if ann.Type == BadgeRelatedDecision {
+				related++
+			}
+			if ann.Rule == RuleRelatedOverflow {
+				overflow++
+			}
+		}
+		return found, related, overflow
+	}
+
+	if found, _, _ := containsTarget("socket"); !found {
+		t.Fatal("short query must surface ADR-002")
+	}
+	long := "socket session adapter context plan integration lifecycle security distribution"
+	if found, related, overflow := containsTarget(long); !found {
+		t.Fatalf("adding competing terms evicted ADR-002 from %d related matches", related)
+	} else if related != relatedCap {
+		t.Fatalf("related results must stay capped at %d, got %d", relatedCap, related)
+	} else if overflow != 1 {
+		t.Fatalf("bounded results must report overflow once, got %d", overflow)
 	}
 }
 
@@ -500,6 +550,9 @@ func TestEnrich_OnRealTempCorpus(t *testing.T) {
 	}
 	if !res.Signals.Material {
 		t.Error("material should be true with a related decision")
+	}
+	if res.Signals.Degraded {
+		t.Error("ordinary README/notes files must not degrade an otherwise readable corpus")
 	}
 	if res.Guidance == "" || !strings.Contains(res.Guidance, "ox code search") {
 		t.Errorf("guidance: %q", res.Guidance)
@@ -740,6 +793,60 @@ func TestEnrich_DegradedOnSourceError(t *testing.T) {
 	}
 }
 
+// TestMurmursRetriever_ReportsCorruptSource proves the production retriever,
+// not only a synthetic test double, returns an error for corrupt local data so
+// runRetriever can mark enrichment degraded.
+func TestMurmursRetriever_ReportsCorruptSource(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now().UTC()
+	dir := filepath.Join(root, "data", "murmurs", now.Format("2006-01-02"), now.Format("15"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	valid := fmt.Sprintf(`{"id":"valid","timestamp":%q,"topic":"authentication","content":"authentication authentication authentication authentication"}`, now.Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(dir, "a-valid.json"), []byte(valid), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "z-broken.json"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	items, errored := runRetriever(context.Background(), murmursRetriever{}, &Env{LedgerPath: root}, Input{Topic: "authentication"})
+	if !errored {
+		t.Fatal("corrupt production murmur source must report an error")
+	}
+	if len(items) != 1 || items[0].Ref != "valid" {
+		t.Fatalf("valid partial hits must survive a corrupt sibling: %+v", items)
+	}
+}
+
+func TestSessionsRetriever_IgnoresCorruptMurmurSibling(t *testing.T) {
+	root := t.TempDir()
+	sessionDir := filepath.Join(root, "sessions", "current-session")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "summary.md"), []byte("authentication authentication authentication authentication authentication"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	murmurDir := filepath.Join(root, "data", "murmurs", now.Format("2006-01-02"), now.Format("15"))
+	if err := os.MkdirAll(murmurDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(murmurDir, "broken.json"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := sessionsRetriever{}.Retrieve(context.Background(), &Env{LedgerPath: root}, Input{Topic: "authentication"})
+	if err != nil {
+		t.Fatalf("durable retriever must not inherit murmur source errors: %v", err)
+	}
+	if len(items) != 1 || items[0].Kind != "session" {
+		t.Fatalf("valid durable hit lost because a sibling murmur was corrupt: %+v", items)
+	}
+}
+
 // TestEnrich_CorpusPresentButUnparsed: a decision dir full of markdown that does
 // not parse as records is present-but-unreadable, NOT "no decisions". Enrich
 // must flag it (diagnostic + degraded) instead of silently returning empty.
@@ -750,8 +857,8 @@ func TestEnrich_CorpusPresentButUnparsed(t *testing.T) {
 	swapRegistry(t, nil, nil)
 	root := t.TempDir()
 	writeCorpus(t, root, map[string]string{
-		"docs/adr/thoughts.md": "# Some Title\n\nProse with no status, no date, no number.\n",
-		"docs/adr/more.md":     "# Another Thought\n\nAlso not a record.\n",
+		"docs/adr/ADR-thoughts.md": "# Some Title\n\nProse with no status, no date, no number.\n",
+		"docs/adr/DDR-more.md":     "# Another Thought\n\nAlso not a record.\n",
 	})
 	res := Enrich(context.Background(), Input{Topic: "some title"}, root)
 	if !res.Signals.Degraded {
@@ -768,6 +875,109 @@ func TestEnrich_CorpusPresentButUnparsed(t *testing.T) {
 	}
 	if strings.Contains(res.Guidance, "verifiable claim") {
 		t.Errorf("must not assert verified absence for an unreadable corpus: %q", res.Guidance)
+	}
+}
+
+// TestEnrich_CorpusPartiallyUnparsed prevents a valid neighboring DR from
+// masking a markdown file retrieval could not catalog. A query about the hidden
+// file must not be reported as a verified absence merely because another record
+// in the same directory parsed successfully.
+func TestEnrich_CorpusPartiallyUnparsed(t *testing.T) {
+	swapRegistry(t, nil, nil)
+	root := t.TempDir()
+	writeCorpus(t, root, map[string]string{
+		"docs/adr/ADR-001-visible.md": "# ADR-001: Visible Decision\n\n**Status**: Accepted\n",
+		"docs/adr/ADR-hidden.md":      "# Hidden Authentication Decision\n\nProse without DR metadata.\n",
+	})
+
+	res := Enrich(context.Background(), Input{Topic: "hidden authentication"}, root)
+	if !res.Signals.Degraded {
+		t.Fatal("a partially uncataloged corpus must mark the result degraded")
+	}
+	if res.Signals.Diagnostics != 1 {
+		t.Fatalf("want one unreadable-corpus diagnostic, got %+v", res.Annotations)
+	}
+	if strings.Contains(res.Guidance, "verifiable claim") {
+		t.Errorf("partial corpus visibility must not produce a verified-absence claim: %q", res.Guidance)
+	}
+}
+
+func TestEnrich_CorpusPartiallyUnreadable(t *testing.T) {
+	swapRegistry(t, nil, nil)
+	root := t.TempDir()
+	writeCorpus(t, root, map[string]string{
+		"docs/adr/ADR-001-visible.md": "# ADR-001: Visible Decision\n\n**Status**: Accepted\n",
+	})
+	broken := filepath.Join(root, "docs/adr/ADR-002-broken.md")
+	if err := os.Symlink(filepath.Join(root, "missing-target"), broken); err != nil {
+		t.Fatal(err)
+	}
+
+	res := Enrich(context.Background(), Input{Topic: "authentication"}, root)
+	if !res.Signals.Degraded {
+		t.Fatal("an unreadable DR beside a valid record must mark retrieval degraded")
+	}
+	if res.Signals.Diagnostics != 1 {
+		t.Fatalf("want one unreadable-corpus diagnostic, got %+v", res.Annotations)
+	}
+}
+
+// TestEnrich_InvalidDecisionConfigDegraded pins the production buildEnv path:
+// invalid configured paths are a source failure, not an empty readable corpus.
+func TestEnrich_InvalidDecisionConfigDegraded(t *testing.T) {
+	swapRegistry(t, nil, nil)
+	root := t.TempDir()
+	configDir := filepath.Join(root, ".sageox")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configBody := "config_version: \"2\"\ndecision:\n  paths:\n    - ../outside\n"
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(configBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := Enrich(context.Background(), Input{Topic: "authentication"}, root)
+	if !res.Signals.Degraded {
+		t.Fatal("an invalid decision.paths source must mark the result degraded")
+	}
+	if strings.Contains(res.Guidance, "verifiable claim") {
+		t.Errorf("invalid decision config must not produce a verified-absence claim: %q", res.Guidance)
+	}
+}
+
+func TestEnrich_MalformedGlobDegraded(t *testing.T) {
+	swapRegistry(t, nil, nil)
+	root := t.TempDir()
+	configDir := filepath.Join(root, ".sageox")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configBody := "config_version: \"2\"\ndecision:\n  paths:\n    - docs/adr/[\n"
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(configBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := Enrich(context.Background(), Input{Topic: "authentication"}, root)
+	if !res.Signals.Degraded {
+		t.Fatal("a malformed configured glob must mark retrieval degraded")
+	}
+}
+
+func TestEnrich_MissingConfiguredDirectoryDegraded(t *testing.T) {
+	swapRegistry(t, nil, nil)
+	root := t.TempDir()
+	configDir := filepath.Join(root, ".sageox")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configBody := "config_version: \"2\"\ndecision:\n  paths:\n    - docs/decisions\n"
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(configBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := Enrich(context.Background(), Input{Topic: "authentication"}, root)
+	if !res.Signals.Degraded {
+		t.Fatal("a missing explicit decision directory must mark retrieval degraded")
 	}
 }
 
@@ -796,5 +1006,23 @@ func TestEnrich_ExplainSurfacesDroppedCandidates(t *testing.T) {
 	}
 	if on.Dropped[0].Ref != "ADR-070" || on.Dropped[0].Score >= minDRScore {
 		t.Errorf("dropped candidate wrong (want ADR-070 below %.2f): %+v", minDRScore, on.Dropped[0])
+	}
+}
+
+func TestEnrich_ExplainSurfacesCapOmissions(t *testing.T) {
+	swapRegistry(t, nil, nil)
+	root := t.TempDir()
+	files := make(map[string]string)
+	for i := 1; i <= relatedCap+1; i++ {
+		files[fmt.Sprintf("docs/adr/ADR-%03d-socket.md", i)] = fmt.Sprintf("# ADR-%03d: Socket Transport %d\n\n**Status**: Accepted\n", i, i)
+	}
+	writeCorpus(t, root, files)
+
+	res := Enrich(context.Background(), Input{Topic: "socket"}, root, WithExplain(true))
+	if len(res.Dropped) != 1 {
+		t.Fatalf("want the one cap-omitted candidate explained, got %+v", res.Dropped)
+	}
+	if !strings.Contains(res.Dropped[0].Reason, "annotation cap") {
+		t.Fatalf("cap omission reason missing: %+v", res.Dropped[0])
 	}
 }

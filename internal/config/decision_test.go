@@ -19,6 +19,7 @@ func TestValidateDecisionConfig(t *testing.T) {
 		{"parent traversal", &DecisionConfig{Paths: []string{"../other/adr"}}, "traverse"},
 		{"embedded traversal", &DecisionConfig{Paths: []string{"docs/../../adr"}}, "traverse"},
 		{"bare dotdot", &DecisionConfig{Paths: []string{".."}}, "traverse"},
+		{"malformed glob", &DecisionConfig{Paths: []string{"docs/adr/["}}, "valid glob"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

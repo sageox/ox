@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 // DecisionConfig holds the `decision.*` settings namespace for `ox decision`.
@@ -72,6 +74,9 @@ func ValidateDecisionConfig(c *DecisionConfig) error {
 		}
 		if p == ".." || strings.HasPrefix(p, "../") || strings.Contains(p, "/../") {
 			return fmt.Errorf("decision.paths[%d]: %q may not traverse above the repo root", i, p)
+		}
+		if !doublestar.ValidatePattern(filepath.ToSlash(p)) {
+			return fmt.Errorf("decision.paths[%d]: %q is not a valid glob pattern", i, p)
 		}
 	}
 	return nil

@@ -49,6 +49,34 @@ func TestSearch_EmptyQuery(t *testing.T) {
 	}
 }
 
+func TestSearch_StrictReadReportsCorruptMurmur(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := ledgerSearchTestNow
+	murmurDir := filepath.Join(dir, "data", "murmurs", now.Format("2006-01-02"), now.Format("15"))
+	if err := os.MkdirAll(murmurDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(murmurDir, "broken.json"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeSession(t, dir, "2026-05-20T10-15-ryan-OxABCD", "oauth oauth oauth oauth oauth")
+
+	if _, err := Search(Options{LedgerPath: dir, Query: "anything", Now: now}); err != nil {
+		t.Fatalf("default search must remain fail-open: %v", err)
+	}
+	results, err := Search(Options{LedgerPath: dir, Query: "oauth", Now: now, StrictRead: true})
+	if err == nil {
+		t.Fatal("strict search must report corrupt source data")
+	}
+	if len(results) != 1 || results[0].DocType != "session" {
+		t.Fatalf("strict search must preserve valid partial hits: %+v", results)
+	}
+	if _, err := Search(Options{LedgerPath: dir, Query: "oauth", Now: now, StrictRead: true, SkipMurmurs: true}); err != nil {
+		t.Fatalf("durable-only search must ignore a corrupt murmur owned by another retriever: %v", err)
+	}
+}
+
 func TestSearch_SessionMatch(t *testing.T) {
 	t.Parallel()
 	dir := makeLedger(t)

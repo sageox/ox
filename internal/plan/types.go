@@ -93,6 +93,9 @@ type ContextItem struct {
 	Score   float64 `json:"score"`
 	Author  string  `json:"author,omitempty"`
 	When    string  `json:"when,omitempty"`
+	// Omitted reports additional same-source matches hidden by a local cap. It
+	// keeps the bundle bounded without making a broad query look exhaustive.
+	Omitted int `json:"omitted,omitempty"`
 }
 
 // DiagramKind is a suggested diagram form for a plan section. The values are the

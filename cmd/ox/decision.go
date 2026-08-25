@@ -123,7 +123,7 @@ func writeDecisionHuman(cmd *cobra.Command, r decision.Result) error {
 		}
 	}
 	if len(r.Dropped) > 0 {
-		fmt.Fprintln(out, "\nDropped (below relevance floor):")
+		fmt.Fprintln(out, "\nDropped candidates:")
 		for _, d := range r.Dropped {
 			label := d.Ref
 			if label == "" {
@@ -149,7 +149,7 @@ func init() {
 	decisionEnrichCmd.Flags().String("topic", "", "consult mode: the DR subject, before drafting")
 	decisionEnrichCmd.Flags().String("file", "", "an existing DR file to enrich (adds drift + ref checks)")
 	decisionEnrichCmd.Flags().Bool("text", false, "human summary instead of JSON")
-	decisionEnrichCmd.Flags().Bool("explain", false, "also list candidates dropped below the relevance floor")
+	decisionEnrichCmd.Flags().Bool("explain", false, "also list candidates omitted by result caps or the relevance floor")
 
 	decisionCmd.AddCommand(decisionEnrichCmd)
 	decisionCmd.GroupID = "dev"

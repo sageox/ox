@@ -15,15 +15,20 @@
 //     invocation and add cache-staleness logic for marginal gain at current
 //     sizes. Revisit if session count grows or queries get more complex.
 //
-// All callers MUST go through Search — the package guarantees:
+// All callers MUST go through Search — the package guarantees by default:
 //   - Zero network calls.
 //   - Fail-open: any read error or empty cache returns empty results, nil err.
 //   - Bounded scan: respects MaxSessionAge and result limit.
+//
+// Callers that must distinguish an unavailable source from an empty one set
+// Options.StrictRead. That mode reports unexpected filesystem/JSON errors while
+// still treating genuinely missing optional cache directories as empty.
 package ledgersearch
 
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -97,11 +102,18 @@ type Options struct {
 	Limit int
 	// Now is injectable for tests. Zero value uses time.Now().
 	Now time.Time
+	// StrictRead reports unexpected read/parse failures instead of silently
+	// treating them as an empty cache. Missing optional cache paths remain clean.
+	StrictRead bool
+	// SkipMurmurs excludes ephemeral murmur documents. Durable-history callers
+	// use this when murmurs are owned by a separate retriever/status signal.
+	SkipMurmurs bool
 }
 
 // Search scans the local ledger for query matches. Pure-local, no network.
-// Returns ([], nil) on any read error — this is intentional fail-open behavior
-// per the ox-m01h spec (hooks must never error out on missing cache).
+// By default it returns ([], nil) on read errors — intentional fail-open
+// behavior per the ox-m01h spec (hooks must never fail on missing cache).
+// Options.StrictRead instead reports unexpected read/parse failures.
 func Search(opts Options) ([]Result, error) {
 	query := strings.TrimSpace(opts.Query)
 	if query == "" {
@@ -124,6 +136,9 @@ func Search(opts Options) ([]Result, error) {
 			return nil, nil
 		}
 		slog.Debug("ledgersearch: ledger path stat failed", "path", opts.LedgerPath, "err", err)
+		if opts.StrictRead {
+			return nil, fmt.Errorf("stat ledger path: %w", err)
+		}
 		return nil, nil
 	}
 
@@ -133,10 +148,25 @@ func Search(opts Options) ([]Result, error) {
 	}
 
 	var results []Result
-	results = append(results, scanSessions(opts.LedgerPath, terms, now)...)
-	results = append(results, scanMurmurs(opts.LedgerPath, terms, now)...)
-	results = append(results, scanPlans(opts.LedgerPath, terms, now)...)
-	results = append(results, scanPlanFeedback(opts.LedgerPath, terms, now)...)
+	var searchErrs []error
+	for _, scan := range []struct {
+		name string
+		fn   func(string, []string, time.Time, bool) ([]Result, error)
+	}{
+		{name: "sessions", fn: scanSessions},
+		{name: "murmurs", fn: scanMurmurs},
+		{name: "plans", fn: scanPlans},
+		{name: "plan feedback", fn: scanPlanFeedback},
+	} {
+		if opts.SkipMurmurs && scan.name == "murmurs" {
+			continue
+		}
+		found, err := scan.fn(opts.LedgerPath, terms, now, opts.StrictRead)
+		results = append(results, found...)
+		if err != nil {
+			searchErrs = append(searchErrs, fmt.Errorf("scan %s: %w", scan.name, err))
+		}
+	}
 
 	// sort by score desc, ties broken by recency desc
 	sort.SliceStable(results, func(i, j int) bool {
@@ -149,7 +179,7 @@ func Search(opts Options) ([]Result, error) {
 	if len(results) > opts.Limit {
 		results = results[:opts.Limit]
 	}
-	return results, nil
+	return results, errors.Join(searchErrs...)
 }
 
 // tokenize splits a query into lowercase terms. Strips punctuation so
@@ -204,11 +234,14 @@ func isDraftSession(sessionPath string) bool {
 // scanSessions walks sessions/<session-name>/ and scores summary/meta hits.
 // Reads only summary.md and meta.json — skips raw.jsonl (large, low signal,
 // often dehydrated to LFS pointer files).
-func scanSessions(ledgerPath string, terms []string, now time.Time) []Result {
+func scanSessions(ledgerPath string, terms []string, now time.Time, strict bool) ([]Result, error) {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
-		return nil
+		if strict && !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		return nil, nil
 	}
 
 	cutoff := now.Add(-MaxSessionAge)
@@ -234,6 +267,9 @@ func scanSessions(ledgerPath string, terms []string, now time.Time) []Result {
 			path := filepath.Join(sessionPath, candidate)
 			data, rerr := os.ReadFile(path)
 			if rerr != nil {
+				if strict && !errors.Is(rerr, fs.ErrNotExist) {
+					return results, rerr
+				}
 				continue
 			}
 			score, snippet := scoreContent(string(data), terms)
@@ -252,14 +288,17 @@ func scanSessions(ledgerPath string, terms []string, now time.Time) []Result {
 			break // one hit per session
 		}
 	}
-	return results
+	return results, nil
 }
 
 // scanMurmurs walks data/murmurs/YYYY-MM-DD/HH/*.json scoring content matches.
-func scanMurmurs(ledgerPath string, terms []string, now time.Time) []Result {
+func scanMurmurs(ledgerPath string, terms []string, now time.Time, strict bool) ([]Result, error) {
 	murmursDir := filepath.Join(ledgerPath, "data", "murmurs")
 	if _, err := os.Stat(murmursDir); err != nil {
-		return nil
+		if strict && !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		return nil, nil
 	}
 
 	cutoff := now.Add(-MaxMurmurAge)
@@ -267,7 +306,10 @@ func scanMurmurs(ledgerPath string, terms []string, now time.Time) []Result {
 
 	dayEntries, err := os.ReadDir(murmursDir)
 	if err != nil {
-		return nil
+		if strict && !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		return nil, nil
 	}
 	for _, day := range dayEntries {
 		if !day.IsDir() {
@@ -278,13 +320,25 @@ func scanMurmurs(ledgerPath string, terms []string, now time.Time) []Result {
 			continue
 		}
 		dayPath := filepath.Join(murmursDir, day.Name())
-		hourEntries, _ := os.ReadDir(dayPath)
+		hourEntries, readErr := os.ReadDir(dayPath)
+		if readErr != nil {
+			if strict && !errors.Is(readErr, fs.ErrNotExist) {
+				return results, readErr
+			}
+			continue
+		}
 		for _, hour := range hourEntries {
 			if !hour.IsDir() {
 				continue
 			}
 			hourPath := filepath.Join(dayPath, hour.Name())
-			files, _ := os.ReadDir(hourPath)
+			files, readErr := os.ReadDir(hourPath)
+			if readErr != nil {
+				if strict && !errors.Is(readErr, fs.ErrNotExist) {
+					return results, readErr
+				}
+				continue
+			}
 			for _, f := range files {
 				if f.IsDir() || !strings.HasSuffix(f.Name(), ".json") {
 					continue
@@ -292,6 +346,9 @@ func scanMurmurs(ledgerPath string, terms []string, now time.Time) []Result {
 				path := filepath.Join(hourPath, f.Name())
 				data, rerr := os.ReadFile(path)
 				if rerr != nil {
+					if strict && !errors.Is(rerr, fs.ErrNotExist) {
+						return results, rerr
+					}
 					continue
 				}
 				var m struct {
@@ -301,6 +358,9 @@ func scanMurmurs(ledgerPath string, terms []string, now time.Time) []Result {
 					Content   string    `json:"content"`
 				}
 				if jerr := json.Unmarshal(data, &m); jerr != nil {
+					if strict {
+						return results, fmt.Errorf("parse %s: %w", path, jerr)
+					}
 					continue
 				}
 				if !m.Timestamp.IsZero() && m.Timestamp.Before(cutoff) {
@@ -323,7 +383,7 @@ func scanMurmurs(ledgerPath string, terms []string, now time.Time) []Result {
 			}
 		}
 	}
-	return results
+	return results, nil
 }
 
 // scanPlans walks data/plans/<YYYY-MM-DD-slug>/ and scores plan.md hits. This
@@ -332,12 +392,15 @@ func scanMurmurs(ledgerPath string, terms []string, now time.Time) []Result {
 // filter, same Result shape — but reads the canonical plan.md (always plain
 // git, never an LFS pointer) and pulls created_at from meta.json when present.
 // Fail-open: a missing data/plans/ dir yields no results, never an error.
-func scanPlans(ledgerPath string, terms []string, now time.Time) []Result {
+func scanPlans(ledgerPath string, terms []string, now time.Time, strict bool) ([]Result, error) {
 	plansDir := filepath.Join(ledgerPath, "data", "plans")
 	entries, err := os.ReadDir(plansDir)
 	if err != nil {
 		// missing dir (no plans saved yet) or unreadable — fail open.
-		return nil
+		if strict && !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		return nil, nil
 	}
 
 	cutoff := now.Add(-MaxPlanAge)
@@ -363,6 +426,9 @@ func scanPlans(ledgerPath string, terms []string, now time.Time) []Result {
 		path := filepath.Join(planPath, "plan.md")
 		data, rerr := os.ReadFile(path)
 		if rerr != nil {
+			if strict && !errors.Is(rerr, fs.ErrNotExist) {
+				return results, rerr
+			}
 			continue
 		}
 		score, snippet := scoreContent(string(data), terms)
@@ -379,7 +445,7 @@ func scanPlans(ledgerPath string, terms []string, now time.Time) []Result {
 			CreatedAt:  ts.Format(time.RFC3339),
 		})
 	}
-	return results
+	return results, nil
 }
 
 // scanPlanFeedback walks data/plans/<dated-slug>/feedback/round-*.json and
@@ -389,11 +455,14 @@ func scanPlans(ledgerPath string, terms []string, now time.Time) []Result {
 // One doc per round: reviewer, per-item status/section/label, and the notes.
 // Fail-open like every scanner here: unreadable dirs and malformed rounds are
 // skipped, never an error.
-func scanPlanFeedback(ledgerPath string, terms []string, now time.Time) []Result {
+func scanPlanFeedback(ledgerPath string, terms []string, now time.Time, strict bool) ([]Result, error) {
 	plansDir := filepath.Join(ledgerPath, "data", "plans")
 	entries, err := os.ReadDir(plansDir)
 	if err != nil {
-		return nil
+		if strict && !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		return nil, nil
 	}
 
 	cutoff := now.Add(-MaxPlanAge)
@@ -411,6 +480,9 @@ func scanPlanFeedback(ledgerPath string, terms []string, now time.Time) []Result
 		fbDir := filepath.Join(planPath, "feedback")
 		rounds, rerr := os.ReadDir(fbDir)
 		if rerr != nil {
+			if strict && !errors.Is(rerr, fs.ErrNotExist) {
+				return results, rerr
+			}
 			continue
 		}
 		for _, r := range rounds {
@@ -420,6 +492,9 @@ func scanPlanFeedback(ledgerPath string, terms []string, now time.Time) []Result
 			path := filepath.Join(fbDir, r.Name())
 			data, ferr := os.ReadFile(path)
 			if ferr != nil {
+				if strict && !errors.Is(ferr, fs.ErrNotExist) {
+					return results, ferr
+				}
 				continue
 			}
 			var round struct {
@@ -434,6 +509,9 @@ func scanPlanFeedback(ledgerPath string, terms []string, now time.Time) []Result
 				} `json:"items"`
 			}
 			if jerr := json.Unmarshal(data, &round); jerr != nil {
+				if strict {
+					return results, fmt.Errorf("parse %s: %w", path, jerr)
+				}
 				continue
 			}
 			var b strings.Builder
@@ -469,7 +547,7 @@ func scanPlanFeedback(ledgerPath string, terms []string, now time.Time) []Result
 			})
 		}
 	}
-	return results
+	return results, nil
 }
 
 // planTimestamp resolves a plan's created_at, preferring meta.json's explicit
