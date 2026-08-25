@@ -47,7 +47,7 @@ Input modes (precedence order):
   --file <dr.md>        an existing DR (adds drift + ref verification)
   stdin                 a draft to verify before presenting
 
-Output is JSON by default (the agent path). Use --text for a human summary.
+Output is JSON by default (the AI coworker path). Use --text for a human summary.
 If any configured source cannot be read, enrich emits a degraded result and
 exits non-zero so callers cannot mistake partial retrieval for a verified miss.`,
 	RunE: func(cmd *cobra.Command, args []string) error {

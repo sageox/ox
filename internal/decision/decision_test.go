@@ -154,6 +154,28 @@ func TestParseContent_Variants(t *testing.T) {
 	}
 }
 
+func TestLikelyDecisionRecord(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+		want bool
+	}{
+		{name: "descriptive malformed decision", path: "deployment-strategy.md", body: "# Deployment Strategy\n", want: true},
+		{name: "README support file", path: "README.md", body: "# ADR-000: Decision Index\n", want: false},
+		{name: "notes support file", path: "notes.md", body: "# Notes\n", want: false},
+		{name: "template support file", path: "TEMPLATE.md", body: "# ADR-000: Title\n", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := likelyDecisionRecord(tc.path, tc.body); got != tc.want {
+				t.Fatalf("likelyDecisionRecord(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadCorpus(t *testing.T) {
 	root := t.TempDir()
 	writeCorpus(t, root, defaultCorpusFiles())

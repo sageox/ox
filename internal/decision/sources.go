@@ -213,6 +213,7 @@ var (
 		"index.md":        {},
 		"notes.md":        {},
 		"process.md":      {},
+		"readme.md":       {},
 		"template.md":     {},
 	}
 )
@@ -224,11 +225,11 @@ var (
 // falsely verified absence.
 func likelyDecisionRecord(path, content string) bool {
 	base := filepath.Base(path)
-	if likelyDecisionNameRe.MatchString(base) || headIDRe.MatchString(firstH1Line(content)) {
-		return true
-	}
 	if _, excluded := decisionSupportFiles[strings.ToLower(base)]; excluded {
 		return false
+	}
+	if likelyDecisionNameRe.MatchString(base) || headIDRe.MatchString(firstH1Line(content)) {
+		return true
 	}
 	lower := strings.ToLower(content)
 	return strings.Contains(lower, "\ntype: adr") ||
