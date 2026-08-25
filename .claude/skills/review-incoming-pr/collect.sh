@@ -40,15 +40,16 @@ gh pr diff  "$PR" "${rf[@]}" --name-only > "$out/files.txt"   2>/dev/null & p_fi
 gh pr checks "$PR" "${rf[@]}"            > "$out/checks.txt"   2>/dev/null & p_checks=$!
 gh pr view  "$PR" "${rf[@]}" --json commits \
   --jq '.commits[] | "\(.oid[0:9]) \(.messageHeadline)"'      > "$out/commits.txt" 2>/dev/null & p_commits=$!
-# every review thread with its resolution + outdated state (the batch-triage input).
-# --paginate walks past the first 100 threads; owner/name/pr are bound as typed
-# variables rather than string-interpolated into the query.
+# every review thread with EVERY comment in full, as raw JSON. --paginate walks past
+# the first 100 threads; comments(first:100) captures replies too. owner/name/pr are
+# bound as typed variables. The display file (threads.txt) and the full-content scan
+# file (threads-scan.txt) are both derived from this after the fetch — the injection
+# scan must see complete, untruncated bodies, not the display-truncated summary.
 # shellcheck disable=SC2016  # $owner/$name/$pr/$endCursor are GraphQL variables, not shell
 gh api graphql --paginate \
-  -f query='query($owner:String!,$name:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{isResolved isOutdated path line comments(first:1){nodes{author{login} body}}} pageInfo{hasNextPage endCursor}}}}}' \
+  -f query='query($owner:String!,$name:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{isResolved isOutdated path line comments(first:100){nodes{author{login} body}}} pageInfo{hasNextPage endCursor}}}}}' \
   -F owner="$owner" -F name="$name" -F pr="$PR" \
-  --jq '.data.repository.pullRequest.reviewThreads.nodes[] | "\(if .isResolved then "RESOLVED" else "OPEN" end) \(if .isOutdated then "OUTDATED" else "current" end) \(.path):\(.line) [\(.comments.nodes[0].author.login)] \(.comments.nodes[0].body|split("\n")[0]|.[0:100])"' \
-  > "$out/threads.txt" 2>/dev/null &                            p_threads=$!
+  > "$out/threads.json" 2>/dev/null &                           p_threads=$!
 
 # Fail closed on ANY required-fetch failure, not just the spine. A successful-but-
 # empty artifact (no diff, no review threads) is legitimate and stays empty; a
@@ -61,12 +62,24 @@ wait "$p_diff"    || fetch_fail+=" diff"
 wait "$p_files"   || fetch_fail+=" file-list"
 wait "$p_commits" || fetch_fail+=" commits"
 wait "$p_threads" || fetch_fail+=" review-threads"
-wait "$p_checks"  || true
+wait "$p_checks"; rc_checks=$?
+# a nonzero `gh pr checks` that wrote NO rows is a retrieval failure (e.g. HTTP 503),
+# not a fail/pending check state — fail closed rather than display "failing: 0" over
+# no evidence. (A genuinely check-less PR exits 0, so it is not caught here.)
+[[ $rc_checks -ne 0 && ! -s "$out/checks.txt" ]] && fetch_fail+=" checks-unavailable"
 if [[ -n "$fetch_fail" ]] || ! jq -e '.number' "$out/view.json" >/dev/null 2>&1; then
   echo "ERROR: PR evidence collection failed for $REPO#$PR (failed:${fetch_fail:- pr-metadata}); refusing to emit a partial SUMMARY" >&2
   [[ -s "$out/.view.err" ]] && sed 's/^/  /' "$out/.view.err" >&2
   exit 2
 fi
+
+# derive the bounded DISPLAY file and the full-content SCAN file from threads.json.
+# jq -s slurps the per-page JSON docs --paginate concatenates. Display keeps the
+# first comment's first line (bounded); the scan file carries every comment in full.
+jq -rs '[.[].data.repository.pullRequest.reviewThreads.nodes[]] | .[] | "\(if .isResolved then "RESOLVED" else "OPEN" end) \(if .isOutdated then "OUTDATED" else "current" end) \(.path):\(.line) [\(.comments.nodes[0].author.login // "?")] \((.comments.nodes[0].body // "")|split("\n")[0]|.[0:100])"' \
+  "$out/threads.json" > "$out/threads.txt" 2>/dev/null
+jq -rs '[.[].data.repository.pullRequest.reviewThreads.nodes[]] | .[].comments.nodes[] | .body' \
+  "$out/threads.json" > "$out/threads-scan.txt" 2>/dev/null
 
 # --- derive fields + print bounded summary ---
 j() { jq -r "$1" "$out/view.json" 2>/dev/null; }
@@ -96,7 +109,7 @@ tier="standard"; [[ -n "$hits" ]] && tier="SENSITIVE"
 # diff, commit headlines, AND review-thread comments) so Step 3a treats them as an
 # attack. Fail closed: a scan that cannot run reports UNKNOWN, never a false "none".
 if command -v python3 >/dev/null 2>&1; then
-  inj="$(python3 - "$out/view.json" "$out/diff.patch" "$out/commits.txt" "$out/threads.txt" 2>/dev/null <<'PY'
+  inj="$(python3 - "$out/view.json" "$out/diff.patch" "$out/commits.txt" "$out/threads-scan.txt" 2>/dev/null <<'PY'
 import json, re, sys, pathlib
 hits = []
 def is_bad(c):
