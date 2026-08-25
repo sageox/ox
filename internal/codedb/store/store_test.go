@@ -617,6 +617,23 @@ func TestBoltCorruptOnExclusiveOpen_DistinguishesCorruptionFromLiveLock(t *testi
 		require.False(t, boltCorruptOnExclusiveOpen(boltPath),
 			"a live exclusive lock must read as contention, not corruption")
 	})
+
+	t.Run("unreadable bolt (permission) -> not corrupt, preserved", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses file permissions")
+		}
+		boltPath := filepath.Join(t.TempDir(), "root.bolt")
+		db, err := bbolt.Open(boltPath, 0o600, &bbolt.Options{Timeout: 2 * time.Second})
+		require.NoError(t, err)
+		require.NoError(t, db.Close())
+		// A permission failure fires BEFORE bbolt validates the meta pages — it
+		// is environmental, not corruption. Nuking a healthy index over a
+		// permission blip would be destructive data loss.
+		require.NoError(t, os.Chmod(boltPath, 0o000))
+		t.Cleanup(func() { _ = os.Chmod(boltPath, 0o600) })
+		require.False(t, boltCorruptOnExclusiveOpen(boltPath),
+			"a permission error must be preserved (not proven corruption)")
+	})
 }
 
 // TestOpenOrCreateBleveIndex_UnopenableBolt_SelfHeals is the regression for the

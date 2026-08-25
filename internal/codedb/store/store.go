@@ -936,35 +936,51 @@ func isBleveIndexCorrupt(boltPath string) bool {
 // false corruption verdict.
 var bleveExclusiveProbeTimeout = 2 * time.Second
 
-// boltCorruptOnExclusiveOpen disambiguates the two states that both surface as
-// a bbolt-open failure the read-only peek (isBleveIndexCorrupt) cannot classify:
+// boltCorruptOnExclusiveOpen disambiguates the states that surface as a
+// bbolt-open failure the read-only peek (isBleveIndexCorrupt) cannot classify:
 // a bolt torn so badly bbolt rejects it (kill-9 mid-write) versus a bolt held
-// under another writer's exclusive flock. It attempts a bounded EXCLUSIVE open:
+// under another writer's exclusive flock versus a transient/environmental
+// failure. It attempts a bounded EXCLUSIVE open and returns true (self-heal)
+// ONLY on proven on-disk structural corruption:
 //
-//   - bbolt.ErrTimeout: a live writer holds the exclusive lock. Return false —
-//     the caller keeps the safe lock-contention behavior and never nukes an
-//     index that is actively being written.
-//   - any other open error: the flock was taken without contention, so no live
-//     writer holds it, yet bbolt still rejects the file — proven structural
-//     corruption. Return true so the caller self-heals.
-//   - opened cleanly: the bolt itself is fine (whatever failed in bleve.Open is
-//     not a torn bolt). Close and return false — do not destroy it.
+//   - ErrInvalid / ErrVersionMismatch / ErrChecksum: bbolt opened the file and
+//     took the exclusive flock, then failed validating the meta pages. The
+//     file itself is structurally broken — proven corruption. Return true.
+//   - ErrTimeout: a live writer holds the exclusive lock. Return false — never
+//     nuke an index that is actively being written.
+//   - any OTHER error (permission denied, I/O error, mmap/ENOMEM resource
+//     exhaustion): these occur BEFORE meta validation and are transient or
+//     environmental, NOT corruption. Return false — nuking a possibly-healthy
+//     index on a permission blip would be destructive data loss.
+//   - opened cleanly: the bolt is fine. Close and return false.
 //
-// A nuke only ever follows an ACQUIRED flock plus a rejected file, so a
-// genuinely live-locked index is never destroyed — the same "never nuke without
+// A nuke only ever follows a *validation* failure (ErrInvalid/version/checksum)
+// on a flock we took ourselves, so neither a live-locked index nor a
+// transiently-unreadable one is ever destroyed — the same "never nuke without
 // proof" guarantee isBleveIndexCorrupt provides, extended to the
 // unopenable-bolt class the read-only peek structurally cannot reach.
 func boltCorruptOnExclusiveOpen(boltPath string) bool {
 	db, err := bbolt.Open(boltPath, 0600, &bbolt.Options{Timeout: bleveExclusiveProbeTimeout})
-	if err != nil {
-		if errors.Is(err, bbolterrors.ErrTimeout) {
-			return false
-		}
-		slog.Error("bleve bolt is unopenable and unlocked; treating as corruption",
+	if err == nil {
+		_ = db.Close()
+		return false
+	}
+	// Proven on-disk corruption: bbolt validated the meta pages and rejected
+	// them. These are the only failures that justify a destructive discard.
+	if errors.Is(err, bbolterrors.ErrInvalid) ||
+		errors.Is(err, bbolterrors.ErrVersionMismatch) ||
+		errors.Is(err, bbolterrors.ErrChecksum) {
+		slog.Error("bleve bolt failed structural validation; treating as corruption",
 			"path", boltPath, "err", err)
 		return true
 	}
-	_ = db.Close()
+	// ErrTimeout is a live writer; anything else (permission/I/O/resource) is
+	// transient or environmental. Neither proves corruption — preserve the
+	// index and let the caller fall through to the safe lock-contention path.
+	if !errors.Is(err, bbolterrors.ErrTimeout) {
+		slog.Warn("bleve bolt open failed without proving corruption; preserving index",
+			"path", boltPath, "err", err)
+	}
 	return false
 }
 
