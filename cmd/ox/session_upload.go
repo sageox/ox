@@ -313,29 +313,20 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 		return fmt.Errorf("git add failed: %s: %w", string(output), err)
 	}
 
-	// Refuse to commit if anything now staged — not just the files this call
-	// intended to add — still carries an unresolved conflict. `git commit`
-	// below has no pathspec, so it commits the WHOLE index. A concurrent
-	// daemon `pull --rebase --autostash` can leave a stash-pop conflict with
-	// no MERGE_HEAD-style marker to detect it by, and `git add` does not
-	// refuse a conflicted path on its own — it stages the markers as if
-	// resolved. See #749.
-	if conflicted, err := firstUnstageableFileInIndex(ledgerPath); err != nil {
-		return fmt.Errorf("checking for unresolved conflicts: %w", err)
-	} else if conflicted != "" {
-		return fmt.Errorf("refusing to commit %s: contains an unresolved conflict "+
-			"(likely a concurrent autostash-pop conflict; resolve it before retrying)", conflicted)
+	// Commit the index as an immutable, pre-validated tree snapshot. The old
+	// shape (validate the index, then a no-pathspec `git commit` that re-reads the
+	// WHOLE index at commit time) left a window where a concurrent daemon
+	// `pull --rebase --autostash` could stage an unchecked conflict blob between
+	// the check and the commit. commitLedgerSnapshot writes the index to an
+	// immutable tree, scans that snapshot, and commits exactly it — so a blob
+	// staged after the snapshot is neither vetted-away nor swept in. See #749 and
+	// the PR #811 review (validation↔commit TOCTOU).
+	committed, err := commitLedgerSnapshot(context.Background(), ledgerPath, fmt.Sprintf("session: %s", sessionName))
+	if err != nil {
+		return fmt.Errorf("committing ledger: %w", err)
 	}
-
-	// commit
-	commitMsg := fmt.Sprintf("session: %s", sessionName)
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		// check if nothing to commit
-		if strings.Contains(string(output), "nothing to commit") {
-			return nil
-		}
-		return fmt.Errorf("%s: %w", wrapCommitError(string(output), err), err)
+	if !committed {
+		return nil // nothing to commit
 	}
 
 	// push with pull --rebase retry (up to 3 attempts)
@@ -368,23 +359,15 @@ func commitPointerRewriteAndPush(ledgerPath, sessionName string, pointerPaths []
 		return fmt.Errorf("git add failed: %s: %w", string(output), err)
 	}
 
-	// See the identical guard in commitAndPushLedger above (#749).
-	if conflicted, err := firstUnstageableFileInIndex(ledgerPath); err != nil {
-		return fmt.Errorf("checking for unresolved conflicts: %w", err)
-	} else if conflicted != "" {
-		return fmt.Errorf("refusing to commit %s: contains an unresolved conflict "+
-			"(likely a concurrent autostash-pop conflict; resolve it before retrying)", conflicted)
+	// Same immutable-snapshot commit as commitAndPushLedger (see #749 and the
+	// PR #811 validation↔commit TOCTOU note). Distinct subject so it doesn't
+	// shadow the canonical "session: <name>" commit in git log.
+	committed, err := commitLedgerSnapshot(context.Background(), ledgerPath, fmt.Sprintf("lfs: pointerize %s", sessionName))
+	if err != nil {
+		return fmt.Errorf("committing ledger: %w", err)
 	}
-
-	// commit under a distinct subject so it doesn't shadow the canonical
-	// "session: <name>" commit in git log
-	commitMsg := fmt.Sprintf("lfs: pointerize %s", sessionName)
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(output), "nothing to commit") {
-			return nil
-		}
-		return fmt.Errorf("%s: %w", wrapCommitError(string(output), err), err)
+	if !committed {
+		return nil // nothing to commit
 	}
 
 	// push with pull --rebase retry. If the remote has independently modified

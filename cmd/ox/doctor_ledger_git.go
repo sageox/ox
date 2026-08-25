@@ -1023,20 +1023,20 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 				conflicted, ledgerPath, conflicted, conflicted, conflicted, conflicted))
 	}
 
-	// commit via RunGit: it owns the commit.gpgsign=false override plus the
-	// GIT_TERMINAL_PROMPT=0 / cmd.Dir safeguards, so the auto-commit can't
-	// drift from the managed-git execution contract.
-	out, err := gitutil.RunGit(context.Background(), ledgerPath,
-		"commit", "-m", "ox doctor: auto-commit ledger changes")
+	// Commit the validated index as an immutable tree snapshot so a concurrent
+	// daemon autostash-pop can't stage an unchecked blob between the pre-check
+	// above and the commit (PR #811 validation↔commit TOCTOU). It carries the same
+	// managed-git hardening (gpgsign off, non-interactive, cmd.Dir), runs its own
+	// snapshot scan, and refuses mid-rebase.
+	committed, err := commitLedgerSnapshot(context.Background(), ledgerPath, "ox doctor: auto-commit ledger changes")
 	if err != nil {
-		// "nothing to commit" is fine (race with session auto-stage). RunGit
-		// folds git's output into the error, so check there.
-		if strings.Contains(out, "nothing to commit") || strings.Contains(err.Error(), "nothing to commit") {
-			return PassedCheck("Ledger clean workdir", "clean (already committed)")
-		}
 		return FailedCheck("Ledger clean workdir",
 			"commit failed",
 			fmt.Sprintf("git commit error: %s", strings.TrimSpace(err.Error())))
+	}
+	if !committed {
+		// nothing to commit (race with session auto-stage) is fine.
+		return PassedCheck("Ledger clean workdir", "clean (already committed)")
 	}
 
 	// Commit landed, but flag a partial repair: the inline override saved this
