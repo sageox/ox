@@ -29,6 +29,7 @@ import (
 
 	"github.com/sageox/ox/internal/codedb/comments"
 	"github.com/sageox/ox/internal/codedb/diffformat"
+	"github.com/sageox/ox/internal/codedb/gitopen"
 	"github.com/sageox/ox/internal/codedb/language"
 	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
 	"github.com/sageox/ox/internal/codedb/store"
@@ -759,44 +760,11 @@ func resolveDefaultBranchGit(repoPath string) (refInfo, error) {
 }
 
 // resolveGitDir returns the path to open with go-git and whether it's a linked
-// worktree. For linked worktrees (where .git is a file containing "gitdir: ..."),
-// it follows the pointer to the main repo's .git directory so go-git can access
-// the shared object store. For normal repos, returns the path unchanged.
+// worktree. Thin alias over gitopen.ResolveGitDir, which is the single source of
+// truth (shared with the store package's guarded blob-repo open). See there for
+// the linked-worktree/commondir resolution.
 func resolveGitDir(repoPath string) (string, bool) {
-	dotGit := filepath.Join(repoPath, ".git")
-	info, err := os.Lstat(dotGit)
-	if err != nil || info.IsDir() {
-		return repoPath, false // normal repo or no .git
-	}
-
-	// .git is a file → linked worktree, read "gitdir: <path>"
-	content, err := os.ReadFile(dotGit)
-	if err != nil {
-		return repoPath, false
-	}
-	line := strings.TrimSpace(string(content))
-	if !strings.HasPrefix(line, "gitdir: ") {
-		return repoPath, false
-	}
-	worktreeGitDir := strings.TrimPrefix(line, "gitdir: ")
-	if !filepath.IsAbs(worktreeGitDir) {
-		worktreeGitDir = filepath.Join(repoPath, worktreeGitDir)
-	}
-
-	// read commondir to find the shared .git (e.g., "../.." → main .git)
-	commondirFile := filepath.Join(worktreeGitDir, "commondir")
-	commondirBytes, err := os.ReadFile(commondirFile)
-	if err != nil {
-		return repoPath, false
-	}
-	commondir := strings.TrimSpace(string(commondirBytes))
-	if !filepath.IsAbs(commondir) {
-		commondir = filepath.Join(worktreeGitDir, commondir)
-	}
-
-	// commondir points to the main .git dir; the repo root is its parent
-	mainRepoRoot := filepath.Dir(commondir)
-	return mainRepoRoot, true
+	return gitopen.ResolveGitDir(repoPath)
 }
 
 // walkNewCommits discovers commits reachable from tip that aren't in knownCommits.

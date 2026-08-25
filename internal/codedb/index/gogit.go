@@ -10,6 +10,8 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/cache"
 	"github.com/go-git/go-git/v6/storage/filesystem"
 	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
+
+	"github.com/sageox/ox/internal/codedb/gitopen"
 )
 
 // plainOpenTolerant opens a git repo via go-git with KeepDescriptors enabled for
@@ -17,22 +19,23 @@ import (
 // reads instead of reopening on every git object access — eliminates the dominant
 // I/O overhead when reading thousands of objects from packfiles.
 //
-// Falls back to git.PlainOpen if the custom open fails (e.g., .git is a file not
-// a directory, as in submodule checkouts).
+// Falls back to gitopen.GuardedPlainOpen if the custom open fails (e.g., .git is
+// a file not a directory, as in submodule checkouts).
 //
-// In go-git v5, this required an extensionSafeStorer workaround to strip
-// [extensions] from the in-memory config (objectformat, worktreeconfig, etc.)
-// because v5 rejected repos with any extensions it didn't recognize.
-//
-// go-git v6 handles all known extensions natively, making the workaround
-// unnecessary. TestV6_PlainOpenAcceptsKnownExtensions verifies this.
-// If a future git version adds extensions that v6 doesn't recognize,
-// the workaround can be restored from git history.
+// Both the fast path and the fallback open the source repo through a storer
+// whose config can never be persisted (gitopen.WrapReadOnlyConfig /
+// GuardedPlainOpen). This is load-bearing: go-git v6 does NOT round-trip
+// extensions.worktreeConfig, and some go-git versions rewrite [core]
+// (core.bare / core.worktree) as a side effect of opening a worktree repo.
+// codedb only READS objects here, so denying the config write is always safe
+// and prevents corrupting the user's managed .git/config — see issue #819 and
+// internal/codedb/gitopen. TestV6_PlainOpenAcceptsKnownExtensions verifies v6
+// still opens known extensions without erroring.
 func plainOpenTolerant(path string) (*git.Repository, error) {
 	if repo, err := plainOpenWithKeepDescriptors(path); err == nil {
 		return repo, nil
 	}
-	return git.PlainOpen(path)
+	return gitopen.GuardedPlainOpen(path)
 }
 
 // plainOpenWithKeepDescriptors opens a git repo using filesystem.Options{KeepDescriptors: true}.
@@ -57,7 +60,9 @@ func plainOpenWithKeepDescriptors(path string) (*git.Repository, error) {
 	s := filesystem.NewStorageWithOptions(repositoryFs, cache.NewObjectLRUDefault(), filesystem.Options{
 		KeepDescriptors: true,
 	})
-	return git.Open(s, wt)
+	// Deny config writes: go-git must never rewrite the source repo's
+	// .git/config while codedb reads its objects (issue #819).
+	return git.Open(gitopen.WrapReadOnlyConfig(s), wt)
 }
 
 // plainOpenPool opens n independent Repository handles for the same git directory.

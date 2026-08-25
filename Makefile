@@ -1,6 +1,6 @@
 # Makefile for ox CLI tool
 
-.PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw
+.PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open
 .PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-timings test-all test-slow test-browser test-integration test-agents test-preflight test-digital-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
@@ -259,7 +259,30 @@ check-raw-writer-chokepoint: ## Ensure raw.jsonl is only opened via session.RawW
 		exit 1; \
 	fi
 
-test-preflight: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw ## Pre-PR quality gate: lint + all unit tests + slow tests (lint/test-all/test-slow run concurrently)
+check-codedb-guarded-open: ## Ensure codedb opens user repos only via internal/codedb/gitopen (issue #819)
+	@# codedb indexes the managed SOURCE checkout in place. A raw git.PlainOpen /
+	@# unwrapped git.Open lets go-git rewrite that repo's .git/config (flips
+	@# core.bare, drops extensions.worktreeConfig) and break every work-tree git
+	@# command. All source-repo opens must route through gitopen.GuardedPlainOpen
+	@# or gitopen.WrapReadOnlyConfig, which deny the config write. gitopen.go
+	@# itself and tests are exempt. Fail CLOSED on a scanner error (grep >1).
+	@raw=$$(grep -rnE 'git\.(PlainOpen|Open)\(' --include='*.go' internal/codedb); rc=$$?; \
+	if [ $$rc -gt 1 ]; then \
+		echo "ERROR: check-codedb-guarded-open scan failed (grep exit $$rc) — refusing to report success"; \
+		exit 1; \
+	fi; \
+	violations=$$(printf '%s\n' "$$raw" | grep -v '^$$' \
+		| grep -v '_test\.go:' \
+		| grep -v 'internal/codedb/gitopen/gitopen\.go:' \
+		| grep -vE ':[0-9]+:[[:space:]]*//' \
+		| grep -v 'gitopen\.WrapReadOnlyConfig'); \
+	if [ -n "$$violations" ]; then \
+		echo "$$violations"; \
+		echo "ERROR: open user repos via internal/codedb/gitopen (GuardedPlainOpen / WrapReadOnlyConfig), not raw go-git — see issue #819."; \
+		exit 1; \
+	fi
+
+test-preflight: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open ## Pre-PR quality gate: lint + all unit tests + slow tests (lint/test-all/test-slow run concurrently)
 	$(call say,"Running lint, full tests, and slow tests concurrently...")
 	@# lint and the test binaries don't share any output file (test-all writes
 	@# coverage.out; test-slow and lint don't touch it), so running them
