@@ -47,6 +47,7 @@ func runDecisionEnrich(t *testing.T, args ...string) string {
 		_ = cmd.Flags().Set("topic", "")
 		_ = cmd.Flags().Set("file", "")
 		_ = cmd.Flags().Set("text", "false")
+		_ = cmd.Flags().Set("explain", "false")
 	})
 	for i := 0; i+1 < len(args); i += 2 {
 		if err := cmd.Flags().Set(args[i], args[i+1]); err != nil {
@@ -78,6 +79,84 @@ func TestDecisionEnrichCmd_TopicJSON(t *testing.T) {
 	}
 	if res.Guidance == "" {
 		t.Error("guidance empty")
+	}
+}
+
+// writeADRFile drops a single Decision Record into a repo's docs/adr corpus.
+func writeADRFile(t *testing.T, root, rel, body string) {
+	t.Helper()
+	p := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDecisionEnrichCmd_FindsRelatedADRForLongTopic is the #823 proof at the real
+// command surface: a long, real-world topic that contradicts an existing ADR must
+// surface that ADR as a related decision through `ox decision enrich`. This is the
+// silent failure the reporter hit — a full plan/issue body found nothing because
+// the old scorer diluted relevance with query length. See also
+// tests/acceptance/features/decision-records/consult-before-drafting.feature.
+func TestDecisionEnrichCmd_FindsRelatedADRForLongTopic(t *testing.T) {
+	root := newDecisionTestRepo(t, false) // git repo + chdir, no default corpus
+	writeADRFile(t, root, "docs/adr/ADR-002-feature-flags.md",
+		"# ADR-002: Feature flags are added only at explicit user request\n\n"+
+			"**Status**: Accepted\n**Date**: 2026-02-01\n\n"+
+			"## Context\n\nWe add a feature flag only when a coworker asks for one by "+
+			"name — never speculatively for staged rollouts or kill switches.\n")
+
+	longTopic := "we want to gate the new todo digest emailer behind a feature flag " +
+		"so we can stage the rollout by percentage and keep a kill switch in case the " +
+		"new sender misbehaves in production, adding two flag-shaped environment variables"
+
+	out := runDecisionEnrich(t, "topic", longTopic)
+	var res decision.Result
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	found := false
+	for _, a := range res.Annotations {
+		if a.Type == decision.BadgeRelatedDecision && a.Ref == "ADR-002" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("#823: long topic did not surface the contradicting ADR-002 at the command surface: %s", out)
+	}
+	if res.Signals.Degraded {
+		t.Errorf("a readable corpus must not report degraded: %s", out)
+	}
+}
+
+// TestDecisionEnrichCmd_ExplainSurfacesDropped proves --explain exposes sub-floor
+// candidates in the JSON so a caller can tell "nothing relevant" from "found and
+// dropped" (#823 ask 4).
+func TestDecisionEnrichCmd_ExplainSurfacesDropped(t *testing.T) {
+	root := newDecisionTestRepo(t, false)
+	writeADRFile(t, root, "docs/adr/ADR-070-widget.md",
+		"# ADR-070: Widget Rendering Pipeline\n\n**Status**: Accepted\n**Date**: 2026-02-02\n\n"+
+			"## Context\n\nThe kubernetes cluster hosts the renderer.\n")
+
+	// "kubernetes" hits only the excerpt → scores below the floor → dropped.
+	off := runDecisionEnrich(t, "topic", "kubernetes")
+	var offRes decision.Result
+	if err := json.Unmarshal([]byte(off), &offRes); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, off)
+	}
+	if len(offRes.Dropped) != 0 {
+		t.Errorf("dropped must be empty without --explain: %+v", offRes.Dropped)
+	}
+
+	on := runDecisionEnrich(t, "topic", "kubernetes", "explain", "true")
+	var onRes decision.Result
+	if err := json.Unmarshal([]byte(on), &onRes); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, on)
+	}
+	if len(onRes.Dropped) == 0 || onRes.Dropped[0].Ref != "ADR-070" {
+		t.Errorf("--explain should surface ADR-070 as a dropped candidate: %s", on)
 	}
 }
 

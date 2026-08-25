@@ -44,7 +44,7 @@ func (relatedDetector) Detect(_ context.Context, env *Env, in Input) ([]Annotati
 	}
 	var out []Annotation
 	for _, s := range scoreCorpus(env.Corpus, terms) {
-		if s.score < minBundleScore || len(out) >= relatedCap {
+		if s.score < minDRScore || len(out) >= relatedCap {
 			break
 		}
 		if in.Path != "" && samePath(in.Path, s.rec.Path) {
@@ -100,7 +100,7 @@ func (relatedRetriever) Retrieve(_ context.Context, env *Env, in Input) ([]Conte
 	}
 	var out []ContextItem
 	for _, s := range scoreCorpus(env.Corpus, terms) {
-		if s.score < minBundleScore || len(out) >= bundleCap {
+		if s.score < minDRScore || len(out) >= bundleCap {
 			break
 		}
 		if in.Path != "" && samePath(in.Path, s.rec.Path) {

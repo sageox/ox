@@ -1,6 +1,7 @@
 package decision
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -40,7 +41,7 @@ func Relevant(gitRoot, query string, limit int) []RelevantDR {
 	}
 	var out []RelevantDR
 	for _, s := range scoreCorpus(corpus, query) {
-		if s.score < minBundleScore || len(out) >= limit {
+		if s.score < minDRScore || len(out) >= limit {
 			break
 		}
 		out = append(out, RelevantDR{
@@ -55,10 +56,53 @@ func Relevant(gitRoot, query string, limit int) []RelevantDR {
 	return out
 }
 
+// minDRScore is the relevance floor for the DR-corpus scorer (Relevant,
+// relatedDetector, relatedRetriever). It is deliberately SEPARATE from
+// minBundleScore, which gates the ledgersearch/sessions path on a different
+// score scale ([0.5,1.0]). Under the saturating fieldScore (see below), a match
+// on a single title term scores ~0.43 and a two-term title match ~0.60, while a
+// lone excerpt hit scores ~0.20 — so 0.30 admits real title/anchor matches and
+// rejects excerpt-only noise. Errs toward recall by design (#823): callers can
+// see what the floor dropped via `--explain`.
+const minDRScore = 0.30
+
+// fieldScoreK is the saturation constant in fieldScore's mw/(mw+K). Larger K
+// makes scores rise more slowly with matched signal; K=4 keeps a single title
+// term below a two-term title match while both clear minDRScore.
+const fieldScoreK = 4.0
+
 // scored pairs a corpus record with its lexical relevance to the input terms.
 type scored struct {
 	rec   Record
 	score float64
+}
+
+// droppedCandidates lists records that matched the query but scored below
+// minDRScore — the near-misses the floor discarded. Surfaced under --explain so
+// a caller can tell "no record was relevant" from "records were found and
+// dropped" (#823). Bounded so a broad query can't flood the output.
+func droppedCandidates(env *Env, in Input) []DroppedCandidate {
+	terms := in.Terms()
+	if strings.TrimSpace(terms) == "" || len(env.Corpus) == 0 {
+		return nil
+	}
+	var out []DroppedCandidate
+	for _, s := range scoreCorpus(env.Corpus, terms) {
+		if s.score >= minDRScore {
+			continue // surfaced already, not dropped
+		}
+		out = append(out, DroppedCandidate{
+			Ref:     s.rec.ID,
+			RefPath: s.rec.RelPath,
+			Title:   s.rec.Title,
+			Score:   s.score,
+			Reason:  fmt.Sprintf("scored %.3f, below the relevance floor %.2f", s.score, minDRScore),
+		})
+		if len(out) >= 10 {
+			break
+		}
+	}
+	return out
 }
 
 // scoreCorpus ranks corpus records against query terms with the house lexical
@@ -98,6 +142,18 @@ func scoreCorpus(corpus []Record, query string) []scored {
 	return out
 }
 
+// fieldScore ranks a record by how much distinctive signal the query lands on
+// its structured fields — NOT by what fraction of the query matched. The query
+// is often a whole plan or issue body, so the old coverage=matched/len(terms)
+// let every off-topic word dilute a real match until the record vanished
+// (#823). Instead we sum field-weighted hits over the DISTINCT query terms
+// (title 3, anchors/status/deciders 2, excerpt 1 — best field per term) and
+// saturate: score = mw/(mw+fieldScoreK), always in [0,1).
+//
+// This is monotonic in the query: adding a term can only add a match (raising
+// mw) or match nothing (leaving mw unchanged), never remove one — so a longer
+// query can never score a record below a shorter subset query. That is exactly
+// the invariant #823 needs, and TestScoreCorpus_MonotonicInQueryLength guards it.
 func fieldScore(terms []string, rec Record) float64 {
 	title := strings.ToLower(rec.Title)
 	var anchors strings.Builder
@@ -108,44 +164,30 @@ func fieldScore(terms []string, rec Record) float64 {
 	mid := anchors.String() + strings.ToLower(rec.Status) + " " + strings.ToLower(strings.Join(rec.Deciders, " "))
 	excerpt := strings.ToLower(rec.Excerpt)
 
+	seen := make(map[string]struct{}, len(terms))
 	matched := 0
-	var raw float64
+	var mw float64
 	for _, t := range terms {
-		hit := false
-		if strings.Contains(title, t) {
-			raw += 3
-			hit = true
+		if _, dup := seen[t]; dup {
+			continue // a repeated term is one signal, not many
 		}
-		if strings.Contains(mid, t) {
-			raw += 2
-			hit = true
-		}
-		if strings.Contains(excerpt, t) {
-			raw += 1
-			hit = true
-		}
-		if hit {
+		seen[t] = struct{}{}
+		switch { // credit the strongest field the term appears in, once
+		case strings.Contains(title, t):
+			mw += 3
+			matched++
+		case strings.Contains(mid, t):
+			mw += 2
+			matched++
+		case strings.Contains(excerpt, t):
+			mw += 1
 			matched++
 		}
 	}
 	if matched == 0 {
 		return 0
 	}
-	// coverage-dominant score: fraction of terms matched, with the weighted
-	// hits as a small tiebreaker. Requiring most terms keeps AND semantics
-	// without zeroing near-misses on long titles.
-	coverage := float64(matched) / float64(len(terms))
-	if coverage < 0.5 {
-		return 0
-	}
-	return coverage*0.85 + minF(raw/float64(6*len(terms)), 1.0)*0.15
-}
-
-func minF(a, b float64) float64 {
-	if a < b {
-		return a
-	}
-	return b
+	return mw / (mw + fieldScoreK)
 }
 
 // tokenize mirrors the ledgersearch tokenizer: lowercase alphanumeric terms,

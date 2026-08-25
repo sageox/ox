@@ -2,6 +2,7 @@ package decision
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -303,14 +304,61 @@ func TestScoreCorpus(t *testing.T) {
 		}
 	})
 
-	t.Run("low coverage excluded", func(t *testing.T) {
+	t.Run("weak excerpt-only match scores below the floor", func(t *testing.T) {
+		// ADR-002 matches only in the excerpt ("socket"), so it must rank below
+		// minDRScore — excluded by the floor, NOT zeroed by query length. The
+		// distinction matters: a strong TITLE match must survive a long query
+		// (see TestScoreCorpus_MonotonicInQueryLength), a weak excerpt one need not.
 		got := scoreCorpus(corpus, "socket quantum blockchain kubernetes")
 		for _, s := range got {
-			if s.score > 0 && s.rec.ID == "ADR-002" {
-				t.Errorf("1/4 coverage should be excluded: %+v", s)
+			if s.rec.ID == "ADR-002" && s.score >= minDRScore {
+				t.Errorf("excerpt-only match should score below floor %.2f: %+v", minDRScore, s)
 			}
 		}
 	})
+}
+
+// TestScoreCorpus_MonotonicInQueryLength is the #823 regression: adding words to
+// a query must NEVER drop a record that a shorter subset query matched. The old
+// coverage=matched/len(terms) scorer zeroed a strong title match as ordinary
+// prose lengthened, so a real plan/issue body found less than a two-word probe.
+// Failure prevented: an agent passing a full plan silently loses the ADR that
+// its two-word title would have surfaced.
+func TestScoreCorpus_MonotonicInQueryLength(t *testing.T) {
+	corpus := []Record{{
+		ID: "ADR-002", Number: 2, Date: "2026-01-01",
+		Title:   "Feature flags are added only at explicit user request",
+		Excerpt: "gate rollout kill switch staged percentage",
+	}}
+
+	scoreOf := func(q string) float64 {
+		for _, s := range scoreCorpus(corpus, q) {
+			if s.rec.ID == "ADR-002" {
+				return s.score
+			}
+		}
+		return 0 // dropped entirely
+	}
+
+	// Same subject, growing query. Each is a superset of the record's own words
+	// plus increasing off-topic prose — the normal case, not an edge case.
+	short := "feature flags"
+	title := "feature flags are added only at explicit user request"
+	prose := "we want to gate the new todo digest emailer behind a feature flag " +
+		"so we can stage the rollout by percentage and keep a kill switch in " +
+		"case the new sender misbehaves in production"
+
+	sShort, sTitle, sProse := scoreOf(short), scoreOf(title), scoreOf(prose)
+
+	if sTitle < sShort {
+		t.Errorf("exact-title query scored below its two-word subset: title=%.3f short=%.3f", sTitle, sShort)
+	}
+	if sProse < sShort {
+		t.Errorf("#823: longer prose query dropped the record below the short query: short=%.3f prose=%.3f", sShort, sProse)
+	}
+	if sProse < minDRScore {
+		t.Errorf("#823: record fell below the floor %.2f on ordinary prose input: %.3f", minDRScore, sProse)
+	}
 }
 
 func TestResolveInput(t *testing.T) {
@@ -368,8 +416,24 @@ Guided by SageOx.
 }
 
 // panicDetector / stubDetector exercise the fail-open orchestrator. The
-// registry is global and additive, so these tests tolerate the built-in
-// detectors running alongside.
+// swapRegistry replaces the global detector/retriever registry for one test and
+// restores it on cleanup. The registry is package-global and additive, so a test
+// that leaves a fault-injection detector registered would silently degrade every
+// later test's Enrich — masking whether the degraded/annotation logic under test
+// actually fired. Isolating the registry keeps each test proving its own cause.
+func swapRegistry(t *testing.T, ds []Detector, rs []Retriever) {
+	t.Helper()
+	registryMu.Lock()
+	savedD, savedR := detectors, retrievers
+	detectors, retrievers = ds, rs
+	registryMu.Unlock()
+	t.Cleanup(func() {
+		registryMu.Lock()
+		detectors, retrievers = savedD, savedR
+		registryMu.Unlock()
+	})
+}
+
 type panicDetector struct{}
 
 func (panicDetector) Name() string { return "test-panic" }
@@ -385,8 +449,7 @@ func (stubDetector) Detect(context.Context, *Env, Input) ([]Annotation, error) {
 }
 
 func TestEnrich_FailOpenAndSchema(t *testing.T) {
-	RegisterDetector(panicDetector{})
-	RegisterDetector(stubDetector{})
+	swapRegistry(t, []Detector{panicDetector{}, stubDetector{}}, nil)
 
 	res := Enrich(context.Background(), Input{Topic: "anything at all"}, "")
 	if res.SchemaVersion != SchemaVersion {
@@ -400,6 +463,11 @@ func TestEnrich_FailOpenAndSchema(t *testing.T) {
 	}
 	if !found {
 		t.Error("stub detector output lost — panic in sibling detector aborted the run")
+	}
+	// a panicking detector is a failed source: the run must be marked degraded
+	// so its emptiness is never read as a verified absence (#823).
+	if !res.Signals.Degraded {
+		t.Error("a panicking detector must mark the result degraded")
 	}
 }
 
@@ -612,9 +680,121 @@ func TestGuidanceBranches(t *testing.T) {
 			t.Errorf("rich/update guidance incomplete: %q", g)
 		}
 	})
+	t.Run("degraded suppresses the verified-absence claim", func(t *testing.T) {
+		// #823: a swallowed source error must NOT be reported as a checked
+		// absence. The verifiable-claim wording is reserved for a genuine,
+		// fully-read empty result.
+		g := buildGuidance(Input{Topic: "x"}, SignalSummary{Degraded: true}, conv, nil, nil)
+		if strings.Contains(g, "verifiable claim") {
+			t.Errorf("degraded run must not present absence as verified: %q", g)
+		}
+		if !strings.Contains(g, "DEGRADED") {
+			t.Errorf("degraded run must warn the source was unreadable: %q", g)
+		}
+	})
 	// the credit cap is a standing rule in every branch
 	g := buildGuidance(Input{Topic: "x"}, SignalSummary{}, conv, nil, nil)
 	if !strings.Contains(g, "max 2 per DR") {
 		t.Errorf("credit cap missing: %q", g)
+	}
+}
+
+// --- #823: honesty (error-vs-empty) and --explain ---
+
+// errDetector always errors — exercises the degraded-source path end to end.
+type errDetector struct{}
+
+func (errDetector) Name() string { return "test-err" }
+func (errDetector) Detect(context.Context, *Env, Input) ([]Annotation, error) {
+	return nil, fmt.Errorf("simulated source failure")
+}
+
+// TestEnrich_DegradedOnSourceError: a retrieval source that errors must mark the
+// Result degraded and flip guidance away from asserting a verified absence.
+// Failure prevented (#823): a swallowed index/lookup error is otherwise reported
+// as "no prior decision found — a verifiable claim", so an agent drafts a
+// duplicate/contradicting DR with false confidence. The clean-registry arm
+// proves the flip is caused by the error, not by ambient pollution.
+func TestEnrich_DegradedOnSourceError(t *testing.T) {
+	in := Input{Topic: "gate rollout behind a flag"}
+
+	swapRegistry(t, nil, nil) // no sources at all
+	clean := Enrich(context.Background(), in, "")
+	if clean.Signals.Degraded {
+		t.Fatal("an all-clean run (no sources, no corpus) must NOT be degraded")
+	}
+	if !strings.Contains(clean.Guidance, "verifiable claim") {
+		t.Errorf("a genuinely-empty run should still state absence as verifiable: %q", clean.Guidance)
+	}
+
+	swapRegistry(t, []Detector{errDetector{}}, nil) // exactly one erroring source
+	res := Enrich(context.Background(), in, "")
+	if !res.Signals.Degraded {
+		t.Fatal("a source error must set Signals.Degraded")
+	}
+	if strings.Contains(res.Guidance, "verifiable claim") {
+		t.Errorf("degraded result must not present absence as verified: %q", res.Guidance)
+	}
+	if !strings.Contains(res.Guidance, "DEGRADED") {
+		t.Errorf("degraded result must warn: %q", res.Guidance)
+	}
+}
+
+// TestEnrich_CorpusPresentButUnparsed: a decision dir full of markdown that does
+// not parse as records is present-but-unreadable, NOT "no decisions". Enrich
+// must flag it (diagnostic + degraded) instead of silently returning empty.
+// Failure prevented (#823): a user's docs/adr whose files miss a number and a
+// Status/Date line yields related=0 that reads as a verified absence.
+// Empty registry: degraded here can ONLY come from the corpus, not a source error.
+func TestEnrich_CorpusPresentButUnparsed(t *testing.T) {
+	swapRegistry(t, nil, nil)
+	root := t.TempDir()
+	writeCorpus(t, root, map[string]string{
+		"docs/adr/thoughts.md": "# Some Title\n\nProse with no status, no date, no number.\n",
+		"docs/adr/more.md":     "# Another Thought\n\nAlso not a record.\n",
+	})
+	res := Enrich(context.Background(), Input{Topic: "some title"}, root)
+	if !res.Signals.Degraded {
+		t.Error("present-but-unparsed corpus must mark the result degraded")
+	}
+	found := false
+	for _, a := range res.Annotations {
+		if a.Rule == RuleUnreadableCorpus {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("unreadable-corpus diagnostic missing: %+v", res.Annotations)
+	}
+	if strings.Contains(res.Guidance, "verifiable claim") {
+		t.Errorf("must not assert verified absence for an unreadable corpus: %q", res.Guidance)
+	}
+}
+
+// TestEnrich_ExplainSurfacesDroppedCandidates: --explain must list records that
+// matched but fell below the floor, so a caller can tell "nothing relevant" from
+// "found and dropped". Failure prevented (#823 ask 4): a silent floor hides
+// near-misses, so a user cannot distinguish a true gap from a discarded match.
+func TestEnrich_ExplainSurfacesDroppedCandidates(t *testing.T) {
+	swapRegistry(t, nil, nil)
+	root := t.TempDir()
+	writeCorpus(t, root, map[string]string{
+		// "kubernetes" appears only in the Context excerpt, never the title —
+		// an excerpt-only match scores below minDRScore under the saturating scorer.
+		"docs/adr/ADR-070-widget.md": "# ADR-070: Widget Rendering Pipeline\n\n**Status**: Accepted\n**Date**: 2026-02-02\n\n## Context\n\nThe kubernetes cluster hosts the renderer.\n",
+	})
+	topic := "kubernetes"
+
+	off := Enrich(context.Background(), Input{Topic: topic}, root)
+	if len(off.Dropped) != 0 {
+		t.Errorf("dropped must be empty without --explain: %+v", off.Dropped)
+	}
+
+	on := Enrich(context.Background(), Input{Topic: topic}, root, WithExplain(true))
+	if len(on.Dropped) == 0 {
+		t.Fatalf("--explain should surface the sub-floor candidate: %+v", on)
+	}
+	if on.Dropped[0].Ref != "ADR-070" || on.Dropped[0].Score >= minDRScore {
+		t.Errorf("dropped candidate wrong (want ADR-070 below %.2f): %+v", minDRScore, on.Dropped[0])
 	}
 }

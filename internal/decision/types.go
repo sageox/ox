@@ -57,6 +57,9 @@ const (
 	RuleDanglingRef           = "dangling-ref"
 	RuleSupersededNoSuccessor = "superseded-no-successor"
 	RuleSageoxCreditOverflow  = "sageox-credit-overflow"
+	// RuleUnreadableCorpus: a decision dir exists and holds markdown, but none
+	// of it parsed as a Decision Record — a format problem, not an absence.
+	RuleUnreadableCorpus = "unreadable-corpus"
 
 	// RelationCandidate is the ONLY relation ox asserts (marker doctrine):
 	// related/conflicting/superseding is the agent's judgment.
@@ -135,6 +138,22 @@ type SignalSummary struct {
 	Diagnostics    int  `json:"diagnostics"`
 	UnresolvedRefs int  `json:"unresolved_refs"`
 	Material       bool `json:"material"`
+	// Degraded is true when a retrieval source could not be read (a detector or
+	// retriever errored, or a decision dir exists but nothing in it parsed as a
+	// record). A degraded run is NOT a verified "no prior decision" — guidance
+	// must never present its emptiness as a checked absence (#823).
+	Degraded bool `json:"degraded,omitempty"`
+}
+
+// DroppedCandidate is a record that matched the query but scored below the
+// relevance floor. Surfaced only under --explain so a caller can tell "nothing
+// was relevant" apart from "records were found and dropped by the floor" (#823).
+type DroppedCandidate struct {
+	Ref     string  `json:"ref,omitempty"`
+	RefPath string  `json:"ref_path,omitempty"`
+	Title   string  `json:"title,omitempty"`
+	Score   float64 `json:"score"`
+	Reason  string  `json:"reason"`
 }
 
 // Result is the `ox decision enrich` JSON payload.
@@ -146,6 +165,8 @@ type Result struct {
 	Context       []ContextItem `json:"context"`
 	Signals       SignalSummary `json:"signals"`
 	Guidance      string        `json:"guidance"`
+	// Dropped lists sub-floor candidates; populated only under --explain.
+	Dropped []DroppedCandidate `json:"dropped,omitempty"`
 }
 
 // Env is the shared, read-only environment Enrich resolves ONCE and hands to
@@ -158,6 +179,13 @@ type Env struct {
 	// LedgerPath is the local ledger checkout (sessions, murmurs). Empty when
 	// no ledger is provisioned.
 	LedgerPath string
+	// CorpusUnparsed counts markdown files found in a decision dir that did NOT
+	// parse as records — nonzero means the corpus is present but unreadable, a
+	// distinct state from "no corpus" (#823).
+	CorpusUnparsed int
+	// Explain, when set, makes Enrich populate Result.Dropped with sub-floor
+	// candidates so a caller can see what the relevance floor discarded.
+	Explain bool
 }
 
 // Detector produces deterministic annotations. Fail-open: return (nil, nil)

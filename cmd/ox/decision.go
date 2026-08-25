@@ -51,6 +51,7 @@ Output is JSON by default (the agent path). Use --text for a human summary.`,
 		topic, _ := cmd.Flags().GetString("topic")
 		file, _ := cmd.Flags().GetString("file")
 		text, _ := cmd.Flags().GetBool("text")
+		explain, _ := cmd.Flags().GetBool("explain")
 
 		in, err := decision.ResolveInput(topic, file, cmd.InOrStdin())
 		if err != nil {
@@ -65,7 +66,7 @@ Output is JSON by default (the agent path). Use --text for a human summary.`,
 		// gitRoot is best-effort: detectors are fail-open, so an empty root
 		// simply yields fewer signals rather than an error.
 		gitRoot := findGitRoot()
-		result := decision.Enrich(context.Background(), in, gitRoot)
+		result := decision.Enrich(context.Background(), in, gitRoot, decision.WithExplain(explain))
 
 		if text {
 			return writeDecisionHuman(cmd, result)
@@ -93,6 +94,9 @@ func writeDecisionHuman(cmd *cobra.Command, r decision.Result) error {
 	}
 	fmt.Fprintf(out, "Signals:  related=%d sessions=%d murmurs=%d diagnostics=%d unresolved_refs=%d\n",
 		r.Signals.Related, r.Signals.PriorSessions, r.Signals.Murmurs, r.Signals.Diagnostics, r.Signals.UnresolvedRefs)
+	if r.Signals.Degraded {
+		fmt.Fprintln(out, "          degraded=true (a source could not be read — absence is NOT verified)")
+	}
 
 	if len(r.Annotations) > 0 {
 		fmt.Fprintln(out, "\nAnnotations:")
@@ -118,6 +122,16 @@ func writeDecisionHuman(cmd *cobra.Command, r decision.Result) error {
 			fmt.Fprintf(out, "  - [%s] %s%s%s\n", c.Kind, c.Title, who, when)
 		}
 	}
+	if len(r.Dropped) > 0 {
+		fmt.Fprintln(out, "\nDropped (below relevance floor):")
+		for _, d := range r.Dropped {
+			label := d.Ref
+			if label == "" {
+				label = d.RefPath
+			}
+			fmt.Fprintf(out, "  - %s — %s (%.3f)\n", label, d.Title, d.Score)
+		}
+	}
 	if r.Guidance != "" {
 		fmt.Fprintf(out, "\nGuidance: %s\n", r.Guidance)
 	}
@@ -135,6 +149,7 @@ func init() {
 	decisionEnrichCmd.Flags().String("topic", "", "consult mode: the DR subject, before drafting")
 	decisionEnrichCmd.Flags().String("file", "", "an existing DR file to enrich (adds drift + ref checks)")
 	decisionEnrichCmd.Flags().Bool("text", false, "human summary instead of JSON")
+	decisionEnrichCmd.Flags().Bool("explain", false, "also list candidates dropped below the relevance floor")
 
 	decisionCmd.AddCommand(decisionEnrichCmd)
 	decisionCmd.GroupID = "dev"
