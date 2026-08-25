@@ -495,7 +495,7 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 // data/plans is deliberately unwindowed. Plans are durable artifacts every
 // local read path needs (`ox plan list/view/render/backfill-titles`), and they
 // are tiny: plan.md + annotations.json + events.jsonl, with the only large
-// member (plan.html) LFS-gated above 256 KB. Omitting it made plans
+// member (plan.html) LFS-gated above 1 MiB. Omitting it made plans
 // effectively WRITE-ONLY — `ox plan save` wrote and pushed a plan directory,
 // then the sync scheduler's ~60s ConfigureSparseCheckout refresh deleted it
 // from the working tree again, leaving ledgers with dozens of plans on

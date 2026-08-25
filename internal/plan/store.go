@@ -48,10 +48,14 @@ const (
 	planHTMLFile    = "plan.html"
 
 	// htmlLFSThreshold is the size above which a passed-in plan.html is stored
-	// as an LFS pointer rather than committed plain. ~256KB: base64 imagery and
-	// large rendered plans cross this; a normal text-only render stays well
-	// under it and is kept plain so a dehydrated clone reads it directly.
-	htmlLFSThreshold = 256 * 1024
+	// as an LFS pointer rather than committed plain. 1MiB: a plan is a decision
+	// record read far more often than it is written, and reading it should never
+	// require network — so word-heavy and diagram-heavy HTML plans (up to 1MiB,
+	// which covers essentially every authored plan including inline SVG/Mermaid
+	// and modest base64 imagery) are kept plain so a dehydrated clone reads them
+	// directly. Only genuinely large renders past 1MiB cross to LFS to keep the
+	// git tree from bloating.
+	htmlLFSThreshold = 1024 * 1024
 )
 
 // PlanStatus is the plan's own lifecycle, independent of the producing

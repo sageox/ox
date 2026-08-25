@@ -180,7 +180,7 @@ func planPointersMissingOnRemote(client *lfs.Client, pointers []planPointer) []p
 func planPointersWarning(missing []planPointer) checkResult {
 	var sb strings.Builder
 	sb.WriteString("These captured plans have a plan.html LFS pointer whose blob is missing from the content store.\n")
-	sb.WriteString("The bytes were never uploaded (a pre-fix `ox plan save` of a render above 256KB), so the render is ")
+	sb.WriteString("The bytes were never uploaded (a pre-fix `ox plan save` of a render above 1MiB), so the render is ")
 	sb.WriteString("unrecoverable — and the missing blob makes the ledger reject every push.\n")
 	shown := min(len(missing), 5)
 	for _, p := range missing[:shown] {

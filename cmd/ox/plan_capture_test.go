@@ -385,7 +385,7 @@ func TestPlanSessionLink_DisabledAttributionExpectsNoLink(t *testing.T) {
 
 // TestSavePlanArtifacts_LargeRenderStaysPlainWhenLFSUnreachable is the #810
 // composition-root fail-safe: driving the REAL savePlanArtifacts path (Save →
-// DehydrateHTML → commit) with a >256KB render and no reachable LFS client, the
+// DehydrateHTML → commit) with a >1MiB render and no reachable LFS client, the
 // committed plan.html must be PLAIN — retrievable and pushable, never a poisoned
 // pointer. This test ledger has no configured remote/credentials, so planLFSClient
 // resolves to nil and dehydration falls back to plain, exactly as an offline save.
@@ -396,7 +396,7 @@ func TestPlanSessionLink_DisabledAttributionExpectsNoLink(t *testing.T) {
 func TestSavePlanArtifacts_LargeRenderStaysPlainWhenLFSUnreachable(t *testing.T) {
 	root := newPlanCaptureTestRepo(t)
 
-	body := strings.Repeat("PRESERVE-ME ", 30000) // well over the 256KB threshold
+	body := strings.Repeat("PRESERVE-ME ", 100000) // ~1.2MiB, well over the 1MiB threshold
 	html := []byte("<html><head></head><body>" + body + "</body></html>")
 
 	dir := savePlanArtifacts(root, plan.Input{Raw: "# Big render\n"}, plan.Result{}, html, plan.PrimaryHTML)
@@ -416,10 +416,10 @@ func TestSavePlanArtifacts_LargeRenderStaysPlainWhenLFSUnreachable(t *testing.T)
 		t.Fatalf("read plan.html: %v", err)
 	}
 	// The FULL render must survive, not just a stray marker: the body repeats the
-	// marker 30000 times and every one must be on disk, plain. dehydrate rewrites
+	// marker 100000 times and every one must be on disk, plain. dehydrate rewrites
 	// plan.html BEFORE commitPlanToLedger stages the working tree, so this on-disk
 	// file is exactly what a commit would carry.
-	if n := bytes.Count(got, []byte("PRESERVE-ME")); n != 30000 {
-		t.Fatalf("plan.html retained %d of 30000 markers — the render was truncated or replaced", n)
+	if n := bytes.Count(got, []byte("PRESERVE-ME")); n != 100000 {
+		t.Fatalf("plan.html retained %d of 100000 markers — the render was truncated or replaced", n)
 	}
 }
