@@ -72,7 +72,7 @@ wait "$p_checks"; rc_checks=$?
 # yield empty thread files (0 threads, injection none) over no evidence. Require every
 # paginated page to carry the data path, and refuse if any thread's comments were
 # themselves truncated at the 100-comment cap (would drop unscanned untrusted text).
-if ! jq -es 'length>0 and all(.[]; .data.repository.pullRequest.reviewThreads.nodes != null)' "$out/threads.json" >/dev/null 2>&1; then
+if ! jq -es 'length>0 and all(.[]; (((.errors? // []) | length) == 0) and (.data.repository.pullRequest.reviewThreads.nodes != null))' "$out/threads.json" >/dev/null 2>&1; then
   fetch_fail+=" review-threads-invalid"
 elif jq -es '[.[].data.repository.pullRequest.reviewThreads.nodes[]?] | any(.comments.pageInfo.hasNextPage == true)' "$out/threads.json" >/dev/null 2>&1; then
   fetch_fail+=" review-thread-comments-truncated"
