@@ -591,49 +591,81 @@ func TestBoltCorruptOnExclusiveOpen_DistinguishesCorruptionFromLiveLock(t *testi
 	bleveExclusiveProbeTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { bleveExclusiveProbeTimeout = restore })
 
-	t.Run("torn bolt, no live writer -> corrupt", func(t *testing.T) {
-		boltPath := filepath.Join(t.TempDir(), "root.bolt")
-		require.NoError(t, os.WriteFile(boltPath, []byte("corrupted"), 0o600))
-		require.True(t, boltCorruptOnExclusiveOpen(boltPath),
-			"an unopenable bolt with no writer holding it is proven corruption")
-	})
-
-	t.Run("valid bolt, no live writer -> not corrupt", func(t *testing.T) {
+	// newValidBolt creates a healthy, closed bolt file and returns its path.
+	newValidBolt := func(t *testing.T) string {
+		t.Helper()
 		boltPath := filepath.Join(t.TempDir(), "root.bolt")
 		db, err := bbolt.Open(boltPath, 0o600, &bbolt.Options{Timeout: 2 * time.Second})
 		require.NoError(t, err)
 		require.NoError(t, db.Close())
-		require.False(t, boltCorruptOnExclusiveOpen(boltPath),
-			"a healthy, openable bolt must never be treated as corruption")
-	})
+		return boltPath
+	}
 
-	t.Run("live writer holds exclusive lock -> not corrupt", func(t *testing.T) {
-		boltPath := filepath.Join(t.TempDir(), "root.bolt")
-		holder, err := bbolt.Open(boltPath, 0o600, &bbolt.Options{Timeout: 2 * time.Second})
-		require.NoError(t, err, "open holder")
-		defer func() { _ = holder.Close() }()
-		// holder keeps bbolt's exclusive flock open; the probe must time out and
-		// conclude "live writer", never "corrupt" — so a live index stays safe.
-		require.False(t, boltCorruptOnExclusiveOpen(boltPath),
-			"a live exclusive lock must read as contention, not corruption")
-	})
+	tests := []struct {
+		name  string
+		skip  func(t *testing.T)
+		setup func(t *testing.T) string
+		// wantCorrupt is the verdict: true = proven corruption (self-heal),
+		// false = preserve the index (live lock or environmental error).
+		wantCorrupt bool
+	}{
+		{
+			name: "torn bolt, no live writer -> corrupt",
+			setup: func(t *testing.T) string {
+				boltPath := filepath.Join(t.TempDir(), "root.bolt")
+				require.NoError(t, os.WriteFile(boltPath, []byte("corrupted"), 0o600))
+				return boltPath
+			},
+			wantCorrupt: true,
+		},
+		{
+			name:        "valid bolt, no live writer -> preserve",
+			setup:       newValidBolt,
+			wantCorrupt: false,
+		},
+		{
+			name: "live writer holds exclusive lock -> preserve",
+			setup: func(t *testing.T) string {
+				boltPath := filepath.Join(t.TempDir(), "root.bolt")
+				holder, err := bbolt.Open(boltPath, 0o600, &bbolt.Options{Timeout: 2 * time.Second})
+				require.NoError(t, err, "open holder")
+				// Keep bbolt's exclusive flock held for the duration of the
+				// probe so it must time out and read as "live writer".
+				t.Cleanup(func() { _ = holder.Close() })
+				return boltPath
+			},
+			wantCorrupt: false,
+		},
+		{
+			name: "unreadable bolt (permission) -> preserve",
+			skip: func(t *testing.T) {
+				if os.Geteuid() == 0 {
+					t.Skip("root bypasses file permissions")
+				}
+			},
+			setup: func(t *testing.T) string {
+				boltPath := newValidBolt(t)
+				// A permission failure fires BEFORE bbolt validates the meta
+				// pages — environmental, not corruption. Nuking a healthy index
+				// over a permission blip would be destructive data loss.
+				require.NoError(t, os.Chmod(boltPath, 0o000))
+				t.Cleanup(func() { _ = os.Chmod(boltPath, 0o600) })
+				return boltPath
+			},
+			wantCorrupt: false,
+		},
+	}
 
-	t.Run("unreadable bolt (permission) -> not corrupt, preserved", func(t *testing.T) {
-		if os.Geteuid() == 0 {
-			t.Skip("root bypasses file permissions")
-		}
-		boltPath := filepath.Join(t.TempDir(), "root.bolt")
-		db, err := bbolt.Open(boltPath, 0o600, &bbolt.Options{Timeout: 2 * time.Second})
-		require.NoError(t, err)
-		require.NoError(t, db.Close())
-		// A permission failure fires BEFORE bbolt validates the meta pages — it
-		// is environmental, not corruption. Nuking a healthy index over a
-		// permission blip would be destructive data loss.
-		require.NoError(t, os.Chmod(boltPath, 0o000))
-		t.Cleanup(func() { _ = os.Chmod(boltPath, 0o600) })
-		require.False(t, boltCorruptOnExclusiveOpen(boltPath),
-			"a permission error must be preserved (not proven corruption)")
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.skip != nil {
+				tc.skip(t)
+			}
+			boltPath := tc.setup(t)
+			require.Equalf(t, tc.wantCorrupt, boltCorruptOnExclusiveOpen(boltPath),
+				"boltCorruptOnExclusiveOpen verdict wrong for %q", tc.name)
+		})
+	}
 }
 
 // TestOpenOrCreateBleveIndex_UnopenableBolt_SelfHeals is the regression for the
