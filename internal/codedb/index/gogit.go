@@ -24,11 +24,12 @@ import (
 //
 // Both the fast path and the fallback open the source repo through a storer
 // whose config can never be persisted (gitopen.WrapReadOnlyConfig /
-// GuardedPlainOpen). This is load-bearing: go-git v6 does NOT round-trip
-// extensions.worktreeConfig, and some go-git versions rewrite [core]
-// (core.bare / core.worktree) as a side effect of opening a worktree repo.
-// codedb only READS objects here, so denying the config write is always safe
-// and prevents corrupting the user's managed .git/config — see issue #819 and
+// GuardedPlainOpen). This is load-bearing: go-git re-marshals config through
+// Storer.SetConfig, and across go-git v6 alpha snapshots that has flipped
+// core.bare, dropped extensions.worktreeConfig, and (in some snapshots)
+// persisted config as a side effect of opening a worktree repo. codedb only
+// READS objects here, so denying the config write is always safe and prevents
+// corrupting the user's managed .git/config — see issue #819 and
 // internal/codedb/gitopen. TestV6_PlainOpenAcceptsKnownExtensions verifies v6
 // still opens known extensions without erroring.
 func plainOpenTolerant(path string) (*git.Repository, error) {

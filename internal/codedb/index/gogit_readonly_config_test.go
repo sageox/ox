@@ -1,6 +1,7 @@
 package index
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,7 +16,24 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/ox/internal/codedb/gitopen"
+	"github.com/sageox/ox/internal/codedb/store"
 )
+
+// gitRunner returns a helper that runs git in cwd with a deterministic identity.
+func gitRunner(t *testing.T) func(cwd string, args ...string) {
+	t.Helper()
+	env := append(os.Environ(), // safe: git in temp dir, not ox subprocess
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai")
+	return func(cwd string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = cwd
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+}
 
 // Failure prevented: the daemon rewriting a managed source repo's .git/config
 // (flipping core.bare, dropping extensions.worktreeConfig) when codedb opens it
@@ -91,8 +109,9 @@ func TestReadOnlyConfigStorer_NeverWritesSourceConfig(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, string(snapshot), string(corrupted),
 		"sanity: unguarded go-git SetConfig rewrites .git/config (the #819 hazard)")
-	assert.Contains(t, string(corrupted), "bare = true",
-		"unguarded write flips core.bare — exactly what broke the reporter's checkout")
+	require.Contains(t, string(snapshot), "bare = false", "fixture precondition")
+	assert.NotContains(t, string(corrupted), "bare = false",
+		"unguarded write flipped core.bare away from false — exactly what broke the reporter's checkout")
 }
 
 // TestPlainOpenTolerant_PreservesSourceConfig exercises the production open path
@@ -166,11 +185,12 @@ func TestGuardedOpen_LinkedWorktree_PreservesSharedConfig(t *testing.T) {
 	assertUnchanged := func(label string, open func() (*git.Repository, error)) {
 		repo, err := open()
 		require.NoError(t, err, label)
-		// drive a config write; the guard must swallow it
-		if cfg, cerr := repo.Storer.Config(); cerr == nil {
-			cfg.Core.IsBare = true
-			_ = repo.Storer.SetConfig(cfg)
-		}
+		// drive a config write; the guard must swallow it. require (not if) so a
+		// Config() error can't make this assertion pass vacuously.
+		cfg, cerr := repo.Storer.Config()
+		require.NoError(t, cerr, label)
+		cfg.Core.IsBare = true
+		require.NoError(t, repo.Storer.SetConfig(cfg), label)
 		require.NoError(t, repo.Close())
 
 		got, err := os.ReadFile(mainCfg)
@@ -191,4 +211,98 @@ func TestGuardedOpen_LinkedWorktree_PreservesSharedConfig(t *testing.T) {
 	assertUnchanged("GuardedPlainOpen(worktree)", func() (*git.Repository, error) {
 		return gitopen.GuardedPlainOpen(wtDir)
 	})
+}
+
+// TestIndexLocalRepo_PreservesWorktreeConfig drives the REAL production pipeline
+// (IndexLocalRepo over a linked worktree) and asserts it never rewrites the
+// shared .git/config or config.worktree. On the pinned go-git this open path is
+// read-only, so it is green with and without the guard — it is a sentinel that
+// fails loudly if a future go-git bump reintroduces open-time config writes on
+// the production path (the #819 class). The version-independent proof that the
+// guard itself works is TestReadOnlyConfigStorer_NeverWritesSourceConfig.
+func TestIndexLocalRepo_PreservesWorktreeConfig(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git worktree + indexing")
+	}
+	mainDir, _ := initGitRepo(t, 3)
+	worktreeDir := createLinkedWorktree(t, mainDir, "idx-cfg-branch")
+
+	runGit := gitRunner(t)
+	runGit(mainDir, "config", "core.repositoryformatversion", "1")
+	runGit(mainDir, "config", "extensions.worktreeConfig", "true")
+	runGit(worktreeDir, "config", "--worktree", "core.bare", "false")
+
+	mainCfg := filepath.Join(mainDir, ".git", "config")
+	mainSnap, err := os.ReadFile(mainCfg)
+	require.NoError(t, err)
+	wtCfg := filepath.Join(mainDir, ".git", "worktrees", filepath.Base(worktreeDir), "config.worktree")
+	wtSnap, err := os.ReadFile(wtCfg)
+	require.NoError(t, err)
+
+	dataDir := filepath.Join(t.TempDir(), "codedb")
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+	s, err := store.Open(dataDir)
+	require.NoError(t, err)
+	defer s.Close()
+
+	require.NoError(t, IndexLocalRepo(context.Background(), s, worktreeDir, IndexOptions{}))
+
+	got, err := os.ReadFile(mainCfg)
+	require.NoError(t, err)
+	assert.Equal(t, string(mainSnap), string(got), "IndexLocalRepo rewrote the shared .git/config")
+	gotWt, err := os.ReadFile(wtCfg)
+	require.NoError(t, err)
+	assert.Equal(t, string(wtSnap), string(gotWt), "IndexLocalRepo rewrote config.worktree")
+}
+
+// TestGuardedOpen_Submodule_PreservesConfig covers the .git-is-a-file submodule
+// layout: its gitdir (.git/modules/<name>) is self-contained (no commondir), so
+// ResolveGitDir does not remap it. Before the fix, GuardedPlainOpen fell through
+// to an unguarded git.PlainOpen for this shape, leaving the submodule's config
+// writable. Found by adversarial review of #819.
+func TestGuardedOpen_Submodule_PreservesConfig(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git submodule operations")
+	}
+	subSrc, _ := initGitRepo(t, 2)
+	mainDir, _ := initGitRepo(t, 1)
+
+	runGit := gitRunner(t)
+	// local-path submodules need protocol.file.allow=always on modern git
+	runGit(mainDir, "-c", "protocol.file.allow=always", "submodule", "add", subSrc, "sub")
+	runGit(mainDir, "-c", "protocol.file.allow=always", "commit", "-m", "add submodule")
+
+	subPath := filepath.Join(mainDir, "sub")
+	require.FileExists(t, filepath.Join(subPath, ".git")) // .git is a FILE for a submodule
+	subCfg := filepath.Join(mainDir, ".git", "modules", "sub", "config")
+	require.FileExists(t, subCfg)
+
+	// give the submodule config the bug shape and snapshot it
+	base, err := os.ReadFile(subCfg)
+	require.NoError(t, err)
+	aug := replaceFormatVersion(string(base)+
+		"\n[filter \"git-crypt\"]\n\tsmudge = \"git-crypt\" smudge\n", "1")
+	require.NoError(t, os.WriteFile(subCfg, []byte(aug), 0o644))
+	snap, err := os.ReadFile(subCfg)
+	require.NoError(t, err)
+
+	// sanity: this is NOT a linked worktree, so it must go through the submodule
+	// guard branch (not ResolveGitDir's remap).
+	_, isWorktree := resolveGitDir(subPath)
+	assert.False(t, isWorktree, "submodule must not be classified as a linked worktree")
+
+	repo, err := gitopen.GuardedPlainOpen(subPath)
+	require.NoError(t, err)
+	cfg, err := repo.Storer.Config()
+	require.NoError(t, err)
+	cfg.Core.IsBare = true
+	require.NoError(t, repo.Storer.SetConfig(cfg)) // denied → no-op
+	require.NoError(t, repo.Close())
+
+	after, err := os.ReadFile(subCfg)
+	require.NoError(t, err)
+	assert.Equal(t, string(snap), string(after),
+		"submodule .git/modules/<name>/config must be byte-identical (#819)")
 }
