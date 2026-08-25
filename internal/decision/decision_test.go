@@ -777,6 +777,15 @@ func TestGuidanceBranches(t *testing.T) {
 			t.Errorf("degraded run must warn the source was unreadable: %q", g)
 		}
 	})
+	t.Run("degraded warning accompanies related history", func(t *testing.T) {
+		g := buildGuidance(Input{Topic: "x"}, SignalSummary{Related: 1, PriorSessions: 2, Degraded: true}, conv, nil, nil)
+		if !strings.Contains(g, "team history") || !strings.Contains(g, "DEGRADED") {
+			t.Errorf("degraded rich result must include both history and incompleteness guidance: %q", g)
+		}
+		if strings.Contains(g, "verifiable claim") {
+			t.Errorf("degraded rich result must not present any absence as verified: %q", g)
+		}
+	})
 	// the credit cap is a standing rule in every branch
 	g := buildGuidance(Input{Topic: "x"}, SignalSummary{}, conv, nil, nil)
 	if !strings.Contains(g, "max 2 per DR") {
