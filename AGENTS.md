@@ -285,3 +285,15 @@ bd close <id>         # Complete work
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
+
+<!-- ox:prime:pi:start -->
+## SageOx Team Context
+
+This project uses [SageOx](https://sageox.ai) for team context. Run the following command at the start of every session to load team knowledge:
+
+```bash
+ox agent prime
+```
+
+This provides architectural decisions, coding conventions, and session history from your team.
+<!-- ox:prime:pi:end -->
