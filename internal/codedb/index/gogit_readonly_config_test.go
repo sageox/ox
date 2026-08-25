@@ -17,17 +17,26 @@ import (
 
 	"github.com/sageox/ox/internal/codedb/gitopen"
 	"github.com/sageox/ox/internal/codedb/store"
+	"github.com/sageox/ox/internal/testguard"
 )
 
 // gitRunner returns a helper that runs git in cwd with a deterministic identity.
+// Uses testguard.MinimalEnv (an allowlist), which strips GIT_DIR/GIT_WORK_TREE/
+// GIT_COMMON_DIR so an inherited routing var can't retarget git at a repo
+// outside the temp dir — cmd.Dir alone decides the target.
 func gitRunner(t *testing.T) func(cwd string, args ...string) {
 	t.Helper()
-	env := append(os.Environ(), // safe: git in temp dir, not ox subprocess
+	env := testguard.MinimalEnv([]string{
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
-		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai")
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
+	})
 	return func(cwd string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		// Disable commit/tag signing so tests don't depend on the developer's
+		// global git config (SSH/GPG signing key + agent, which MinimalEnv's
+		// clean env intentionally cannot reach).
+		full := append([]string{"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"}, args...)
+		cmd := exec.Command("git", full...)
 		cmd.Dir = cwd
 		cmd.Env = env
 		out, err := cmd.CombinedOutput()
@@ -154,17 +163,7 @@ func TestGuardedOpen_LinkedWorktree_PreservesSharedConfig(t *testing.T) {
 	}
 	mainDir, _ := initGitRepo(t, 1)
 
-	gitEnv := append(os.Environ(), // safe: git in temp dir, not ox subprocess
-		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
-		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai")
-	runGit := func(cwd string, args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = cwd
-		cmd.Env = gitEnv
-		out, err := cmd.CombinedOutput()
-		require.NoError(t, err, "git %v: %s", args, out)
-	}
+	runGit := gitRunner(t)
 
 	wtDir := filepath.Join(t.TempDir(), "wt")
 	runGit(mainDir, "worktree", "add", wtDir)

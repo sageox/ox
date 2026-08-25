@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sageox/ox/internal/testguard"
 )
 
 // TestReadBlob_GuardedOpen_ReadsBlobsAndPreservesConfig proves blob_reader opens
@@ -26,12 +28,18 @@ func TestReadBlob_GuardedOpen_ReadsBlobsAndPreservesConfig(t *testing.T) {
 	}
 
 	repoDir := t.TempDir()
-	env := append(os.Environ(), // safe: git in temp dir, not ox subprocess
+	// MinimalEnv (allowlist) strips GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR so an
+	// inherited routing var can't retarget git outside repoDir.
+	env := testguard.MinimalEnv([]string{
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
-		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai")
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
+	})
 	runGit := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		// Disable signing so the test is independent of the developer's global
+		// git config (MinimalEnv's clean env can't reach the signing agent).
+		full := append([]string{"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"}, args...)
+		cmd := exec.Command("git", full...)
 		cmd.Dir = repoDir
 		cmd.Env = env
 		out, err := cmd.CombinedOutput()

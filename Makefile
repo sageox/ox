@@ -266,6 +266,9 @@ check-codedb-guarded-open: ## Ensure codedb opens user repos only via internal/c
 	@# command. All source-repo opens must route through gitopen.GuardedPlainOpen
 	@# or gitopen.WrapReadOnlyConfig, which deny the config write. gitopen.go
 	@# itself and tests are exempt. Fail CLOSED on a scanner error (grep >1).
+	@# The sed strips ONLY the exact guarded form git.Open(gitopen.WrapReadOnlyConfig(
+	@# (per-call, not line-wide) then flags any surviving raw open — so a raw
+	@# git.Open sharing a line with a wrapper reference cannot slip through.
 	@raw=$$(grep -rnE 'git\.(PlainOpen|Open)\(' --include='*.go' internal/codedb); rc=$$?; \
 	if [ $$rc -gt 1 ]; then \
 		echo "ERROR: check-codedb-guarded-open scan failed (grep exit $$rc) — refusing to report success"; \
@@ -275,7 +278,8 @@ check-codedb-guarded-open: ## Ensure codedb opens user repos only via internal/c
 		| grep -v '_test\.go:' \
 		| grep -v 'internal/codedb/gitopen/gitopen\.go:' \
 		| grep -vE ':[0-9]+:[[:space:]]*//' \
-		| grep -v 'gitopen\.WrapReadOnlyConfig'); \
+		| sed 's/git\.Open(gitopen\.WrapReadOnlyConfig(/GUARDED_OPEN(/g' \
+		| grep -E 'git\.(PlainOpen|Open)\('); \
 	if [ -n "$$violations" ]; then \
 		echo "$$violations"; \
 		echo "ERROR: open user repos via internal/codedb/gitopen (GuardedPlainOpen / WrapReadOnlyConfig), not raw go-git — see issue #819."; \
