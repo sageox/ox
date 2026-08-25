@@ -47,7 +47,7 @@ gh pr view  "$PR" "${rf[@]}" --json commits \
 # scan must see complete, untruncated bodies, not the display-truncated summary.
 # shellcheck disable=SC2016  # $owner/$name/$pr/$endCursor are GraphQL variables, not shell
 gh api graphql --paginate \
-  -f query='query($owner:String!,$name:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{isResolved isOutdated path line comments(first:100){nodes{author{login} body}}} pageInfo{hasNextPage endCursor}}}}}' \
+  -f query='query($owner:String!,$name:String!,$pr:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$pr){reviewThreads(first:100,after:$endCursor){nodes{isResolved isOutdated path line comments(first:100){nodes{author{login} body} pageInfo{hasNextPage}}} pageInfo{hasNextPage endCursor}}}}}' \
   -F owner="$owner" -F name="$name" -F pr="$PR" \
   > "$out/threads.json" 2>/dev/null &                           p_threads=$!
 
@@ -67,6 +67,16 @@ wait "$p_checks"; rc_checks=$?
 # not a fail/pending check state — fail closed rather than display "failing: 0" over
 # no evidence. (A genuinely check-less PR exits 0, so it is not caught here.)
 [[ $rc_checks -ne 0 && ! -s "$out/checks.txt" ]] && fetch_fail+=" checks-unavailable"
+# `gh api graphql` can exit 0 while returning a GraphQL `errors` envelope; the later
+# jq derivations suppress their own errors, so an invalid response would silently
+# yield empty thread files (0 threads, injection none) over no evidence. Require every
+# paginated page to carry the data path, and refuse if any thread's comments were
+# themselves truncated at the 100-comment cap (would drop unscanned untrusted text).
+if ! jq -es 'length>0 and all(.[]; .data.repository.pullRequest.reviewThreads.nodes != null)' "$out/threads.json" >/dev/null 2>&1; then
+  fetch_fail+=" review-threads-invalid"
+elif jq -es '[.[].data.repository.pullRequest.reviewThreads.nodes[]?] | any(.comments.pageInfo.hasNextPage == true)' "$out/threads.json" >/dev/null 2>&1; then
+  fetch_fail+=" review-thread-comments-truncated"
+fi
 if [[ -n "$fetch_fail" ]] || ! jq -e '.number' "$out/view.json" >/dev/null 2>&1; then
   echo "ERROR: PR evidence collection failed for $REPO#$PR (failed:${fetch_fail:- pr-metadata}); refusing to emit a partial SUMMARY" >&2
   [[ -s "$out/.view.err" ]] && sed 's/^/  /' "$out/.view.err" >&2
