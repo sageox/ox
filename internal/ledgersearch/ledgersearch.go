@@ -246,6 +246,7 @@ func scanSessions(ledgerPath string, terms []string, now time.Time, strict bool)
 
 	cutoff := now.Add(-MaxSessionAge)
 	var results []Result
+	var scanErrs []error
 
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -268,7 +269,7 @@ func scanSessions(ledgerPath string, terms []string, now time.Time, strict bool)
 			data, rerr := os.ReadFile(path)
 			if rerr != nil {
 				if strict && !errors.Is(rerr, fs.ErrNotExist) {
-					return results, rerr
+					scanErrs = append(scanErrs, fmt.Errorf("read %s: %w", path, rerr))
 				}
 				continue
 			}
@@ -288,7 +289,7 @@ func scanSessions(ledgerPath string, terms []string, now time.Time, strict bool)
 			break // one hit per session
 		}
 	}
-	return results, nil
+	return results, errors.Join(scanErrs...)
 }
 
 // scanMurmurs walks data/murmurs/YYYY-MM-DD/HH/*.json scoring content matches.
@@ -303,6 +304,7 @@ func scanMurmurs(ledgerPath string, terms []string, now time.Time, strict bool) 
 
 	cutoff := now.Add(-MaxMurmurAge)
 	var results []Result
+	var scanErrs []error
 
 	dayEntries, err := os.ReadDir(murmursDir)
 	if err != nil {
@@ -323,7 +325,7 @@ func scanMurmurs(ledgerPath string, terms []string, now time.Time, strict bool) 
 		hourEntries, readErr := os.ReadDir(dayPath)
 		if readErr != nil {
 			if strict && !errors.Is(readErr, fs.ErrNotExist) {
-				return results, readErr
+				scanErrs = append(scanErrs, fmt.Errorf("read murmur day %s: %w", dayPath, readErr))
 			}
 			continue
 		}
@@ -335,7 +337,7 @@ func scanMurmurs(ledgerPath string, terms []string, now time.Time, strict bool) 
 			files, readErr := os.ReadDir(hourPath)
 			if readErr != nil {
 				if strict && !errors.Is(readErr, fs.ErrNotExist) {
-					return results, readErr
+					scanErrs = append(scanErrs, fmt.Errorf("read murmur hour %s: %w", hourPath, readErr))
 				}
 				continue
 			}
@@ -347,7 +349,7 @@ func scanMurmurs(ledgerPath string, terms []string, now time.Time, strict bool) 
 				data, rerr := os.ReadFile(path)
 				if rerr != nil {
 					if strict && !errors.Is(rerr, fs.ErrNotExist) {
-						return results, rerr
+						scanErrs = append(scanErrs, fmt.Errorf("read %s: %w", path, rerr))
 					}
 					continue
 				}
@@ -359,7 +361,7 @@ func scanMurmurs(ledgerPath string, terms []string, now time.Time, strict bool) 
 				}
 				if jerr := json.Unmarshal(data, &m); jerr != nil {
 					if strict {
-						return results, fmt.Errorf("parse %s: %w", path, jerr)
+						scanErrs = append(scanErrs, fmt.Errorf("parse %s: %w", path, jerr))
 					}
 					continue
 				}
@@ -383,7 +385,7 @@ func scanMurmurs(ledgerPath string, terms []string, now time.Time, strict bool) 
 			}
 		}
 	}
-	return results, nil
+	return results, errors.Join(scanErrs...)
 }
 
 // scanPlans walks data/plans/<YYYY-MM-DD-slug>/ and scores plan.md hits. This
@@ -405,6 +407,7 @@ func scanPlans(ledgerPath string, terms []string, now time.Time, strict bool) ([
 
 	cutoff := now.Add(-MaxPlanAge)
 	var results []Result
+	var scanErrs []error
 
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -427,7 +430,7 @@ func scanPlans(ledgerPath string, terms []string, now time.Time, strict bool) ([
 		data, rerr := os.ReadFile(path)
 		if rerr != nil {
 			if strict && !errors.Is(rerr, fs.ErrNotExist) {
-				return results, rerr
+				scanErrs = append(scanErrs, fmt.Errorf("read %s: %w", path, rerr))
 			}
 			continue
 		}
@@ -445,7 +448,7 @@ func scanPlans(ledgerPath string, terms []string, now time.Time, strict bool) ([
 			CreatedAt:  ts.Format(time.RFC3339),
 		})
 	}
-	return results, nil
+	return results, errors.Join(scanErrs...)
 }
 
 // scanPlanFeedback walks data/plans/<dated-slug>/feedback/round-*.json and
@@ -467,6 +470,7 @@ func scanPlanFeedback(ledgerPath string, terms []string, now time.Time, strict b
 
 	cutoff := now.Add(-MaxPlanAge)
 	var results []Result
+	var scanErrs []error
 
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -481,7 +485,7 @@ func scanPlanFeedback(ledgerPath string, terms []string, now time.Time, strict b
 		rounds, rerr := os.ReadDir(fbDir)
 		if rerr != nil {
 			if strict && !errors.Is(rerr, fs.ErrNotExist) {
-				return results, rerr
+				scanErrs = append(scanErrs, fmt.Errorf("read feedback dir %s: %w", fbDir, rerr))
 			}
 			continue
 		}
@@ -493,7 +497,7 @@ func scanPlanFeedback(ledgerPath string, terms []string, now time.Time, strict b
 			data, ferr := os.ReadFile(path)
 			if ferr != nil {
 				if strict && !errors.Is(ferr, fs.ErrNotExist) {
-					return results, ferr
+					scanErrs = append(scanErrs, fmt.Errorf("read %s: %w", path, ferr))
 				}
 				continue
 			}
@@ -510,7 +514,7 @@ func scanPlanFeedback(ledgerPath string, terms []string, now time.Time, strict b
 			}
 			if jerr := json.Unmarshal(data, &round); jerr != nil {
 				if strict {
-					return results, fmt.Errorf("parse %s: %w", path, jerr)
+					scanErrs = append(scanErrs, fmt.Errorf("parse %s: %w", path, jerr))
 				}
 				continue
 			}
@@ -547,7 +551,7 @@ func scanPlanFeedback(ledgerPath string, terms []string, now time.Time, strict b
 			})
 		}
 	}
-	return results, nil
+	return results, errors.Join(scanErrs...)
 }
 
 // planTimestamp resolves a plan's created_at, preferring meta.json's explicit

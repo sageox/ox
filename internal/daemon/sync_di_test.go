@@ -95,7 +95,7 @@ func TestDI_PushMurmurCommitsUsesInjectedGitRunner(t *testing.T) {
 	assert.Equal(t, int64(1), mock.calls.Load(), "should call injected git runner for murmur commit check")
 	assert.Contains(t, mock.lastArgs, "log", "should pass log subcommand")
 	assert.Contains(t, mock.lastArgs, "@{upstream}..HEAD", "should inspect every unpushed commit")
-	assert.NotContains(t, mock.lastArgs, "data/murmurs/", "a path filter could hide unsafe non-murmur commits")
+	assert.NotContains(t, mock.lastArgs, "--", "a pathspec separator could hide unsafe non-murmur commits")
 }
 
 func TestDI_BackwardCompatibility(t *testing.T) {

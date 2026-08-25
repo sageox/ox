@@ -63,7 +63,7 @@ func defaultCorpusFiles() map[string]string {
 		"docs/adr/002-daemon-architecture.md":   "# Daemon Architecture\n\n**Status**: Accepted\n**Date**: 2025-11-01\n\n## Context\n\nDaemon owns pulls.\n",
 		"docs/adr/ADR-002-unix-socket.md":       "# ADR-002: Unix Socket IPC\n\n**Status**: Accepted\n**Date**: 2025-12-01\n\n## Context\n\nIPC over unix sockets.\n",
 		"docs/adr/README.md":                    "# Index\n\n| ADR | Title |\n",
-		"docs/adr/notes.md":                     "just some markdown with no decision shape\n",
+		"docs/adr/notes.md":                     "# Notes\n\nJust some markdown with no decision shape.\n",
 	}
 }
 
@@ -310,10 +310,17 @@ func TestScoreCorpus(t *testing.T) {
 		// distinction matters: a strong TITLE match must survive a long query
 		// (see TestScoreCorpus_MonotonicInQueryLength), a weak excerpt one need not.
 		got := scoreCorpus(corpus, "socket quantum blockchain kubernetes")
+		found := false
 		for _, s := range got {
-			if s.rec.ID == "ADR-002" && s.score >= minDRScore {
-				t.Errorf("excerpt-only match should score below floor %.2f: %+v", minDRScore, s)
+			if s.rec.ID == "ADR-002" {
+				found = true
+				if s.score >= minDRScore {
+					t.Errorf("excerpt-only match should score below floor %.2f: %+v", minDRScore, s)
+				}
 			}
+		}
+		if !found {
+			t.Fatalf("ADR-002 must remain a scored below-floor candidate: %+v", got)
 		}
 	})
 }
@@ -547,6 +554,9 @@ func TestEnrich_OnRealTempCorpus(t *testing.T) {
 	}
 	if related.Relation != RelationCandidate && related.Relation != VariantSupersedeCandidate {
 		t.Errorf("relation: %q", related.Relation)
+	}
+	if res.Signals.Degraded {
+		t.Errorf("known support markdown must not degrade a readable corpus: %+v", res.Annotations)
 	}
 	if !res.Signals.Material {
 		t.Error("material should be true with a related decision")
@@ -878,6 +888,23 @@ func TestEnrich_CorpusPresentButUnparsed(t *testing.T) {
 	}
 }
 
+func TestEnrich_DescriptiveMalformedRecordDegraded(t *testing.T) {
+	swapRegistry(t, nil, nil)
+	root := t.TempDir()
+	writeCorpus(t, root, map[string]string{
+		"docs/adr/ADR-001-visible.md":     "# ADR-001: Visible Decision\n\n**Status**: Accepted\n",
+		"docs/adr/deployment-strategy.md": "# Deployment Strategy\n\nProse without DR metadata.\n",
+	})
+
+	res := Enrich(context.Background(), Input{Topic: "deployment strategy"}, root)
+	if !res.Signals.Degraded {
+		t.Fatal("a titled, unparseable markdown file in the decision corpus must mark retrieval degraded")
+	}
+	if strings.Contains(res.Guidance, "verifiable claim") {
+		t.Errorf("malformed decision must prevent verified-absence guidance: %q", res.Guidance)
+	}
+}
+
 // TestEnrich_CorpusPartiallyUnparsed prevents a valid neighboring DR from
 // masking a markdown file retrieval could not catalog. A query about the hidden
 // file must not be reported as a verified absence merely because another record
@@ -1024,5 +1051,21 @@ func TestEnrich_ExplainSurfacesCapOmissions(t *testing.T) {
 	}
 	if !strings.Contains(res.Dropped[0].Reason, "annotation cap") {
 		t.Fatalf("cap omission reason missing: %+v", res.Dropped[0])
+	}
+}
+
+func TestDroppedCandidates_ExcludesInputRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "docs", "adr", "ADR-070-widget.md")
+	env := &Env{Corpus: []Record{{
+		ID:      "ADR-070",
+		Path:    path,
+		RelPath: "docs/adr/ADR-070-widget.md",
+		Title:   "Widget Rendering Pipeline",
+		Excerpt: "The kubernetes cluster hosts the renderer.",
+	}}}
+
+	got := droppedCandidates(env, Input{Path: path, Topic: "kubernetes"})
+	if len(got) != 0 {
+		t.Fatalf("the input DR must never be reported as a dropped related candidate: %+v", got)
 	}
 }

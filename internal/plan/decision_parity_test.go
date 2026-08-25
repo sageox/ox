@@ -72,54 +72,72 @@ func TestDecisionPlanParity_SameCorpusSameADR(t *testing.T) {
 // preserve an earlier seed match under a bounded result set. The plan bundle
 // also reports how many above-floor candidates its cap omitted.
 func TestDecisionPlanParity_CompetingRecordsCannotEvictMatch(t *testing.T) {
-	root := t.TempDir()
-	writeDR(t, root, "docs/adr/ADR-002-socket.md",
-		"# ADR-002: Unix Domain Socket IPC\n\n**Status**: Accepted\n**Date**: 2026-01-01\n")
-	for i, title := range []string{
-		"Session Adapter Context",
-		"Plan Integration Lifecycle",
-		"Security Adapter Distribution",
-		"Context Session Lifecycle",
-		"Integration Security Plan",
-		"Adapter Lifecycle Context",
-	} {
-		writeDR(t, root, filepath.Join("docs/adr", fmt.Sprintf("ADR-%03d-distractor.md", i+3)),
-			fmt.Sprintf("# ADR-%03d: %s\n\n**Status**: Accepted\n**Date**: 2026-01-01\n", i+3, title))
+	tests := []struct {
+		name  string
+		topic string
+	}{
+		{
+			name:  "competing terms",
+			topic: "socket session adapter context plan integration lifecycle security distribution",
+		},
+		{
+			name: "ordinary prose extension",
+			topic: "socket session adapter context plan integration lifecycle security distribution " +
+				"implementation ownership compatibility rollout migration observability",
+		},
 	}
 
-	topic := "socket session adapter context plan integration lifecycle security distribution"
-	dres := decision.Enrich(context.Background(), decision.Input{Topic: topic}, root)
-	decisionFound := false
-	for _, ann := range dres.Annotations {
-		decisionFound = decisionFound || ann.Ref == "ADR-002"
-	}
-	if !decisionFound {
-		t.Fatalf("decision enrich evicted ADR-002: %+v", dres.Annotations)
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeDR(t, root, "docs/adr/ADR-002-socket.md",
+				"# ADR-002: Unix Domain Socket IPC\n\n**Status**: Accepted\n**Date**: 2026-01-01\n")
+			for i, title := range []string{
+				"Session Adapter Context",
+				"Plan Integration Lifecycle",
+				"Security Adapter Distribution",
+				"Context Session Lifecycle",
+				"Integration Security Plan",
+				"Adapter Lifecycle Context",
+			} {
+				writeDR(t, root, filepath.Join("docs/adr", fmt.Sprintf("ADR-%03d-distractor.md", i+3)),
+					fmt.Sprintf("# ADR-%03d: %s\n\n**Status**: Accepted\n**Date**: 2026-01-01\n", i+3, title))
+			}
 
-	in, err := ResolveInput(topic, nil, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pres := Enrich(context.Background(), in, root)
-	planFound := false
-	for _, item := range pres.Context {
-		planFound = planFound || (item.Kind == "adr" && strings.Contains(item.Ref, "ADR-002"))
-	}
-	if !planFound {
-		t.Fatalf("plan enrich evicted ADR-002: %+v", pres.Context)
-	}
-	adrCount, omitted := 0, 0
-	for _, item := range pres.Context {
-		if item.Kind == "adr" {
-			adrCount++
-			omitted += item.Omitted
-		}
-	}
-	if adrCount != planDecisionCap {
-		t.Fatalf("plan DR context must stay capped at %d, got %d", planDecisionCap, adrCount)
-	}
-	if omitted != 2 {
-		t.Fatalf("plan DR context must report two omitted candidates, got %d", omitted)
+			dres := decision.Enrich(context.Background(), decision.Input{Topic: tc.topic}, root)
+			decisionFound := false
+			for _, ann := range dres.Annotations {
+				decisionFound = decisionFound || ann.Ref == "ADR-002"
+			}
+			if !decisionFound {
+				t.Fatalf("decision enrich evicted ADR-002: %+v", dres.Annotations)
+			}
+
+			in, err := ResolveInput(tc.topic, nil, "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pres := Enrich(context.Background(), in, root)
+			planFound := false
+			for _, item := range pres.Context {
+				planFound = planFound || (item.Kind == "adr" && strings.Contains(item.Ref, "ADR-002"))
+			}
+			if !planFound {
+				t.Fatalf("plan enrich evicted ADR-002: %+v", pres.Context)
+			}
+			adrCount, omitted := 0, 0
+			for _, item := range pres.Context {
+				if item.Kind == "adr" {
+					adrCount++
+					omitted += item.Omitted
+				}
+			}
+			if adrCount != planDecisionCap {
+				t.Fatalf("plan DR context must stay capped at %d, got %d", planDecisionCap, adrCount)
+			}
+			if omitted != 2 {
+				t.Fatalf("plan DR context must report two omitted candidates, got %d", omitted)
+			}
+		})
 	}
 }

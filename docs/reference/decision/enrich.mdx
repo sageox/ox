@@ -22,6 +22,8 @@ Input modes (precedence order):
   stdin                 a draft to verify before presenting
 
 Output is JSON by default (the agent path). Use --text for a human summary.
+If any configured source cannot be read, enrich emits a degraded result and
+exits non-zero so callers cannot mistake partial retrieval for a verified miss.
 
 ```
 ox decision enrich [flags]

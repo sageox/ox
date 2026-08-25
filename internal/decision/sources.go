@@ -207,20 +207,34 @@ func hasGlobMeta(pattern string) bool {
 var (
 	likelyDecisionNameRe    = regexp.MustCompile(`(?i)^(?:adr|ddr)(?:[-_]|\.md$)|^\d{1,4}[-_]`)
 	decisionSectionIntentRe = regexp.MustCompile(`(?im)^##\s+decision\b`)
+	decisionSupportFiles    = map[string]struct{}{
+		"contributing.md": {},
+		"guide.md":        {},
+		"index.md":        {},
+		"notes.md":        {},
+		"process.md":      {},
+		"template.md":     {},
+	}
 )
 
 // likelyDecisionRecord distinguishes malformed DRs from intentional Markdown
-// neighbors such as notes.md and TEMPLATE.md. Strong intent signals are a DR-
-// shaped filename/H1, explicit DR frontmatter, or a Decision section.
+// neighbors such as notes.md and TEMPLATE.md. Known support filenames are
+// excluded; other Markdown with a title is conservatively treated as a broken
+// DR so a descriptive filename cannot turn an unparseable decision into a
+// falsely verified absence.
 func likelyDecisionRecord(path, content string) bool {
 	base := filepath.Base(path)
 	if likelyDecisionNameRe.MatchString(base) || headIDRe.MatchString(firstH1Line(content)) {
 		return true
 	}
+	if _, excluded := decisionSupportFiles[strings.ToLower(base)]; excluded {
+		return false
+	}
 	lower := strings.ToLower(content)
 	return strings.Contains(lower, "\ntype: adr") ||
 		strings.Contains(lower, "\ntype: ddr") ||
-		decisionSectionIntentRe.MatchString(content)
+		decisionSectionIntentRe.MatchString(content) ||
+		firstH1Line(content) != ""
 }
 
 // PathMatcher returns a predicate reporting whether a repo-relative path lies

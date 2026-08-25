@@ -174,6 +174,9 @@ func droppedCandidates(env *Env, in Input) []DroppedCandidate {
 		}
 	}
 	for _, s := range scoreCorpus(env.Corpus, terms) {
+		if in.Path != "" && samePath(in.Path, s.rec.Path) {
+			continue
+		}
 		if s.score >= minDRScore {
 			continue // surfaced already, not dropped
 		}

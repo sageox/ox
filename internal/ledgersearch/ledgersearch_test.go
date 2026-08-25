@@ -77,6 +77,111 @@ func TestSearch_StrictReadReportsCorruptMurmur(t *testing.T) {
 	}
 }
 
+func TestStrictScannersContinueAfterEntryFailure(t *testing.T) {
+	t.Parallel()
+	now := ledgerSearchTestNow
+	tests := []struct {
+		name         string
+		wantSourceID string
+		setup        func(*testing.T, string)
+		scan         func(string) ([]Result, error)
+	}{
+		{
+			name:         "sessions",
+			wantSourceID: "2026-05-22T10-15-ryan-OxVALID",
+			setup: func(t *testing.T, root string) {
+				broken := filepath.Join(root, "sessions", "2026-05-21T10-15-ryan-OxBROKEN", "summary.md")
+				if err := os.MkdirAll(broken, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeSession(t, root, "2026-05-22T10-15-ryan-OxVALID", "oauth oauth oauth")
+			},
+			scan: func(root string) ([]Result, error) {
+				return scanSessions(root, tokenize("oauth"), now, true)
+			},
+		},
+		{
+			name:         "murmurs",
+			wantSourceID: "z-valid",
+			setup: func(t *testing.T, root string) {
+				hourDir := filepath.Join(root, "data", "murmurs", now.Format("2006-01-02"), now.Format("15"))
+				if err := os.MkdirAll(hourDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(hourDir, "a-broken.json"), []byte("{"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				writeMurmur(t, root, now, "z-valid", "auth", "oauth oauth oauth")
+			},
+			scan: func(root string) ([]Result, error) {
+				return scanMurmurs(root, tokenize("oauth"), now, true)
+			},
+		},
+		{
+			name:         "plans",
+			wantSourceID: "2026-05-22-z-valid",
+			setup: func(t *testing.T, root string) {
+				broken := filepath.Join(root, "data", "plans", "2026-05-21-a-broken", "plan.md")
+				if err := os.MkdirAll(broken, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writePlan(t, root, "2026-05-22-z-valid", now, "auth", "ryan", "oauth oauth oauth")
+			},
+			scan: func(root string) ([]Result, error) {
+				return scanPlans(root, tokenize("oauth"), now, true)
+			},
+		},
+		{
+			name:         "plan feedback",
+			wantSourceID: "2026-05-22-auth-plan",
+			setup: func(t *testing.T, root string) {
+				fbDir := filepath.Join(root, "data", "plans", "2026-05-22-auth-plan", "feedback")
+				if err := os.MkdirAll(fbDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(fbDir, "round-a-broken.json"), []byte("{"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				round, err := json.Marshal(map[string]any{
+					"reviewer":   "sam",
+					"created_at": now,
+					"items": []map[string]string{{
+						"note": "oauth oauth oauth",
+					}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(fbDir, "round-z-valid.json"), round, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			scan: func(root string) ([]Result, error) {
+				return scanPlanFeedback(root, tokenize("oauth"), now, true)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			tc.setup(t, root)
+			results, err := tc.scan(root)
+			if err == nil {
+				t.Fatal("strict scan must report the corrupt entry")
+			}
+			found := false
+			for _, result := range results {
+				found = found || result.SourceID == tc.wantSourceID
+			}
+			if !found {
+				t.Fatalf("strict scan lost a valid sibling after the corrupt entry: %+v (err=%v)", results, err)
+			}
+		})
+	}
+}
+
 func TestSearch_SessionMatch(t *testing.T) {
 	t.Parallel()
 	dir := makeLedger(t)

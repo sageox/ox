@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/decision"
 )
 
@@ -36,7 +37,7 @@ func newDecisionTestRepo(t *testing.T, withCorpus bool) string {
 	return root
 }
 
-func runDecisionEnrich(t *testing.T, args ...string) string {
+func runDecisionEnrichResult(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	cmd := decisionEnrichCmd
 	var out bytes.Buffer
@@ -54,10 +55,17 @@ func runDecisionEnrich(t *testing.T, args ...string) string {
 			t.Fatal(err)
 		}
 	}
-	if err := cmd.RunE(cmd, nil); err != nil {
+	err := cmd.RunE(cmd, nil)
+	return out.String(), err
+}
+
+func runDecisionEnrich(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := runDecisionEnrichResult(t, args...)
+	if err != nil {
 		t.Fatalf("enrich RunE: %v", err)
 	}
-	return out.String()
+	return out
 }
 
 func TestDecisionEnrichCmd_TopicJSON(t *testing.T) {
@@ -169,6 +177,24 @@ func TestDecisionEnrichCmd_Text(t *testing.T) {
 	}
 	if !strings.Contains(out, "Signals:") || !strings.Contains(out, "Guidance:") {
 		t.Errorf("summary sections missing:\n%s", out)
+	}
+}
+
+func TestDecisionEnrichCmd_DegradedResultExitsNonZero(t *testing.T) {
+	root := newDecisionTestRepo(t, false)
+	writeADRFile(t, root, "docs/adr/deployment-strategy.md",
+		"# Deployment Strategy\n\nProse without enough metadata to catalog this decision.\n")
+
+	out, err := runDecisionEnrichResult(t, "topic", "deployment strategy")
+	if !cli.IsSilent(err) {
+		t.Fatalf("degraded retrieval must return a silent non-zero error, got %v", err)
+	}
+	var res decision.Result
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("degraded output must remain valid JSON: %v\n%s", err, out)
+	}
+	if !res.Signals.Degraded {
+		t.Fatalf("malformed decision source must be marked degraded: %s", out)
 	}
 }
 
