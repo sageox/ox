@@ -266,6 +266,14 @@ func ClassifyRawFile(rawPath string) RawKind {
 			return RawSubstantive // at least one line beyond header
 		}
 	}
+	// Fail SAFE on an incomplete read. A line exceeding the 256 KiB scanner
+	// buffer (a large paste or tool payload) stops the scan with an error; a
+	// too-long line is itself evidence of substantial content, and reporting
+	// RawHeaderOnly here would let the cleanup paths os.RemoveAll a real
+	// session. Never classify what we could not read as a deletable phantom.
+	if scanner.Err() != nil {
+		return RawSubstantive
+	}
 	return RawHeaderOnly
 }
 
@@ -306,6 +314,13 @@ func HasUserTurn(rawPath string) bool {
 		if entry.Type == "user" {
 			return true
 		}
+	}
+	// Fail safe on an incomplete read: a user entry larger than the 256 KiB
+	// scanner buffer stops the scan with an error, and reporting "no user turn"
+	// would suppress registration and draft publication for a real session with
+	// a large prompt. When we could not read the file fully, assume a user turn.
+	if scanner.Err() != nil {
+		return true
 	}
 	return false
 }

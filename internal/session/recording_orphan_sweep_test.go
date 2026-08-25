@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -124,4 +125,70 @@ func TestCleanupOrphanedStubsInDir_KeepsNonPhantoms(t *testing.T) {
 	assert.DirExists(t, finalized, "a finalized/draft session must survive")
 	assert.DirExists(t, live, "a live recording must survive")
 	assert.DirExists(t, young, "a just-primed session inside the grace period must survive")
+}
+
+// TestCleanupOrphanedStubsInDir_KeepsOversizedContent guards the destructive
+// failure mode: a user turn larger than the 256 KiB scan buffer must NOT be
+// misread as a header-only phantom and deleted. Classification fails safe to
+// RawSubstantive on an incomplete scan, so the dir survives.
+func TestCleanupOrphanedStubsInDir_KeepsOversizedContent(t *testing.T) {
+	base := t.TempDir()
+	bigUserLine := `{"type":"user","content":"` + strings.Repeat("x", 300*1024) + `"}` + "\n"
+	dir := makeStub(t, base, "2026-08-25T19-11-ryan-OxBig1", map[string]string{
+		"raw.jsonl": headerLine + bigUserLine,
+	}, 2*orphanStubGracePeriod)
+
+	result := CleanupOrphanedStubsInDir(base)
+
+	assert.Equal(t, 0, result.Removed, "a session with an oversized real entry must never be reaped")
+	assert.DirExists(t, dir, "content too large for the scan buffer must fail safe to keep")
+}
+
+// TestClassifyAndUserTurn_FailSafeOnOversizedLine pins the classification
+// contract directly: a line past the 256 KiB buffer stops the scan with an
+// error, and both classifiers must fail safe rather than report "empty".
+func TestClassifyAndUserTurn_FailSafeOnOversizedLine(t *testing.T) {
+	dir := t.TempDir()
+
+	// Header only, but the header line itself exceeds the buffer.
+	bigHeader := filepath.Join(dir, "bighdr.jsonl")
+	require.NoError(t, os.WriteFile(bigHeader,
+		[]byte(`{"type":"header","x":"`+strings.Repeat("y", 300*1024)+`"}`+"\n"), 0o644))
+	assert.Equal(t, RawSubstantive, ClassifyRawFile(bigHeader),
+		"an unreadable (oversized) line must not classify as RawHeaderOnly")
+
+	// Header + an oversized user entry.
+	bigUser := filepath.Join(dir, "biguser.jsonl")
+	require.NoError(t, os.WriteFile(bigUser,
+		[]byte(headerLine+`{"type":"user","content":"`+strings.Repeat("z", 300*1024)+`"}`+"\n"), 0o644))
+	assert.True(t, HasUserTurn(bigUser),
+		"an oversized user entry must fail safe to 'has user turn', not suppress the session")
+}
+
+// TestCleanupOrphanedStubsInDir_ErrorPaths covers non-existent and non-directory
+// inputs: the sweep must return a zero result without panicking, never treating
+// an unreadable location as work done.
+func TestCleanupOrphanedStubsInDir_ErrorPaths(t *testing.T) {
+	t.Run("missing directory", func(t *testing.T) {
+		result := CleanupOrphanedStubsInDir(filepath.Join(t.TempDir(), "does-not-exist"))
+		assert.Equal(t, 0, result.Removed)
+		assert.Empty(t, result.Names)
+	})
+
+	t.Run("path is a file, not a directory", func(t *testing.T) {
+		f := filepath.Join(t.TempDir(), "a-file")
+		require.NoError(t, os.WriteFile(f, []byte("x"), 0o644))
+		assert.NotPanics(t, func() {
+			result := CleanupOrphanedStubsInDir(f)
+			assert.Equal(t, 0, result.Removed)
+		})
+	})
+
+	t.Run("non-directory entries in the sweep dir are skipped", func(t *testing.T) {
+		base := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(base, "stray.txt"), []byte("x"), 0o644))
+		result := CleanupOrphanedStubsInDir(base)
+		assert.Equal(t, 0, result.Removed)
+		assert.FileExists(t, filepath.Join(base, "stray.txt"), "a stray file must be left untouched")
+	})
 }

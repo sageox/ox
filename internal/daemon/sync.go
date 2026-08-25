@@ -1769,7 +1769,8 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 		return
 	}
 
-	orphans, err := session.FindOrphanedDrafts(ledgerPath, s.draftCacheDirs(ledgerPath))
+	cacheDirs := s.draftCacheDirs(ledgerPath)
+	orphans, err := session.FindOrphanedDrafts(ledgerPath, cacheDirs)
 	if err != nil || len(orphans) == 0 {
 		return
 	}
@@ -1786,6 +1787,13 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 	var removed int
 	for _, name := range orphans {
 		if err := session.ValidateDraftSessionName(name); err != nil {
+			continue
+		}
+		// Revalidate under the lock. SaveRecordingState writes .recording.json /
+		// raw.jsonl WITHOUT ledgerMu, so a recording could have appeared for this
+		// name between detection and here. Never git-rm a draft that now has
+		// local recording data — recovering it is upload-retry's job.
+		if session.DraftHasLocalSessionData(cacheDirs, name) {
 			continue
 		}
 		rel := filepath.ToSlash(filepath.Join("sessions", name))
@@ -1818,7 +1826,14 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 // could live in, for the orphan detector to consult.
 func (s *SyncScheduler) draftCacheDirs(ledgerPath string) []string {
 	dirs := []string{filepath.Join(ledgerPath, ".sageox", "cache", "sessions")}
-	repoID := filepath.Base(ledgerPath)
+	// Resolve the repo ID the way the CLI does — from the configured project —
+	// so the XDG cache paths match where StartRecording actually wrote. A custom
+	// ledger path whose basename differs from the repo ID would otherwise miss a
+	// live recording and let a recoverable draft be retracted.
+	repoID := config.GetRepoID(s.config.ProjectRoot)
+	if repoID == "" {
+		repoID = filepath.Base(ledgerPath) // fallback: ledger dirs are named by repo id
+	}
 	if repoID != "" && repoID != "." {
 		dirs = append(dirs, filepath.Join(paths.SessionCacheDir(repoID), "sessions"))
 		for _, altDir := range paths.AlternateSessionCacheDirs(repoID) {
