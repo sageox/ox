@@ -63,6 +63,18 @@ func TestApplyCatalogTokenRewrites(t *testing.T) {
 			want:    []string{"session", "list", "--json=false"},
 		},
 		{
+			name:    "joined form preserves command-owned flag",
+			in:      []string{"distill", "history", "since", "24h", "--format=json"},
+			aliases: formatAliases,
+			want:    []string{"distill", "history", "since", "24h", "--format=json"},
+		},
+		{
+			name:    "split form preserves command-owned flag",
+			in:      []string{"distill", "history", "since", "24h", "--format", "json"},
+			aliases: formatAliases,
+			want:    []string{"distill", "history", "since", "24h", "--format", "json"},
+		},
+		{
 			name:    "unknown value passes through (cobra/friction handles)",
 			in:      []string{"session", "list", "--format=yaml"},
 			aliases: formatAliases,

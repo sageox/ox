@@ -654,7 +654,6 @@ func TestFormatGitRepoStatus(t *testing.T) {
 				Exists:           true,
 				UncommittedCount: 0,
 				HasLastSync:      true,
-				LastSync:         time.Now().Add(-30 * time.Second),
 			},
 			"synced (just now)", "success",
 		},
@@ -673,7 +672,11 @@ func TestFormatGitRepoStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			text, semantic := status.FormatGitRepoStatus(tt.status)
+			input := tt.status
+			if input.HasLastSync {
+				input.LastSync = time.Now().Add(-30 * time.Second)
+			}
+			text, semantic := status.FormatGitRepoStatus(input)
 			assert.Contains(t, text, tt.wantText)
 			assert.Equal(t, tt.wantSemantic, semantic)
 		})
@@ -683,27 +686,26 @@ func TestFormatGitRepoStatus(t *testing.T) {
 func TestFormatTimeAgo(t *testing.T) {
 	t.Parallel()
 
-	now := time.Now()
 	tests := []struct {
-		name string
-		t    time.Time
-		want string
+		name   string
+		offset time.Duration
+		want   string
 	}{
-		{"just now", now.Add(-5 * time.Second), "just now"},
-		{"1 minute ago", now.Add(-1 * time.Minute), "1 minute ago"},
-		{"multiple minutes", now.Add(-15 * time.Minute), "15 minutes ago"},
-		{"1 hour ago", now.Add(-1 * time.Hour), "1 hour ago"},
-		{"multiple hours", now.Add(-5 * time.Hour), "5 hours ago"},
-		{"1 day ago", now.Add(-25 * time.Hour), "1 day ago"},
-		{"multiple days", now.Add(-72 * time.Hour), "3 days ago"},
-		{"1 week ago", now.Add(-8 * 24 * time.Hour), "1 week ago"},
-		{"multiple weeks", now.Add(-21 * 24 * time.Hour), "3 weeks ago"},
+		{"just now", -5 * time.Second, "just now"},
+		{"1 minute ago", -1 * time.Minute, "1 minute ago"},
+		{"multiple minutes", -15 * time.Minute, "15 minutes ago"},
+		{"1 hour ago", -1 * time.Hour, "1 hour ago"},
+		{"multiple hours", -5 * time.Hour, "5 hours ago"},
+		{"1 day ago", -25 * time.Hour, "1 day ago"},
+		{"multiple days", -72 * time.Hour, "3 days ago"},
+		{"1 week ago", -8 * 24 * time.Hour, "1 week ago"},
+		{"multiple weeks", -21 * 24 * time.Hour, "3 weeks ago"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := status.FormatTimeAgo(tt.t)
+			got := status.FormatTimeAgo(time.Now().Add(tt.offset))
 			assert.Equal(t, tt.want, got)
 		})
 	}

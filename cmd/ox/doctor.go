@@ -687,6 +687,10 @@ func (p *doctorProgress) clear() {
 }
 
 func runDoctorChecks(parent context.Context, opts doctorOptions) []checkCategory {
+	return runDoctorChecksWithState(parent, opts, detectDoctorState())
+}
+
+func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state doctorState) []checkCategory {
 	var categories []checkCategory
 	if parent == nil {
 		parent = context.Background()
@@ -702,9 +706,6 @@ func runDoctorChecks(parent context.Context, opts doctorOptions) []checkCategory
 	progress := newDoctorProgress(opts.verbose)
 	progress.ctx = ctx
 	defer progress.clear()
-
-	// detect environment state early for conditional suppression
-	state := detectDoctorState()
 
 	// Category 0: Authentication (FIRST - most important)
 	// SageOx requires authentication to function

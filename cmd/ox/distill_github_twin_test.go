@@ -183,7 +183,7 @@ func setupFactsTwinRepos(t *testing.T) (bareURL, nodeAPath, nodeBPath string) {
 
 	// Create bare repo.
 	barePath := filepath.Join(base, "team-context.git")
-	runTwinGit(t, "", "init", "--bare", barePath)
+	runTwinGit(t, "", "init", "--bare", "--initial-branch=main", barePath)
 
 	// Clone A and seed directory structure.
 	nodeAPath = filepath.Join(base, "node-a")

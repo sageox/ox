@@ -19,6 +19,7 @@ import (
 // never depend on full doctor state.
 var (
 	cachedCategories     []checkCategory
+	cachedDoctorState    doctorState
 	cachedCategoriesOnce sync.Once
 )
 
@@ -28,7 +29,8 @@ func getCachedDoctorChecks(t *testing.T) []checkCategory {
 		t.Skip("short: full doctor pipeline shells out to git/auth — see .claude/rules/testing.md")
 	}
 	cachedCategoriesOnce.Do(func() {
-		cachedCategories = runDoctorChecks(context.Background(), doctorOptions{fix: false})
+		cachedDoctorState = detectDoctorState()
+		cachedCategories = runDoctorChecksWithState(context.Background(), doctorOptions{fix: false}, cachedDoctorState)
 	})
 	return cachedCategories
 }
@@ -116,7 +118,7 @@ func TestDoctorSuppression_DaemonNotRunning(t *testing.T) {
 
 	// when daemon is not running, we should see a single grouped skip
 	// rather than multiple individual warnings
-	if !isDaemonRunningInTest() {
+	if !cachedDoctorState.isDaemonRunning {
 		// should have exactly one check (the grouped skip)
 		assert.Equal(t, 1, len(daemonCat.checks), "should have single grouped daemon check when daemon not running")
 
@@ -148,7 +150,7 @@ func TestDoctorSuppression_NotLoggedIn(t *testing.T) {
 
 	// when not logged in, we should see a single grouped skip
 	// rather than multiple individual warnings
-	if !isAuthenticatedInTest() {
+	if !cachedDoctorState.isAuthenticated {
 		// should have exactly one check (the grouped skip)
 		assert.Equal(t, 1, len(serviceCat.checks), "should have single grouped service check when not logged in")
 
@@ -188,20 +190,8 @@ func TestDoctorSuppression_GitRepoPaths(t *testing.T) {
 	require.NotNil(t, repoPathsCheck, "git repo paths check should be present")
 
 	// when not logged in, the check should be skipped
-	if !isAuthenticatedInTest() {
+	if !cachedDoctorState.isAuthenticated {
 		assert.True(t, repoPathsCheck.skipped, "git repo paths should be skipped when not logged in")
 		assert.Contains(t, repoPathsCheck.message, "requires login", "message should indicate requires login")
 	}
-}
-
-// isDaemonRunningInTest checks if daemon is running in test environment
-func isDaemonRunningInTest() bool {
-	state := detectDoctorState()
-	return state.isDaemonRunning
-}
-
-// isAuthenticatedInTest checks if authenticated in test environment
-func isAuthenticatedInTest() bool {
-	state := detectDoctorState()
-	return state.isAuthenticated
 }

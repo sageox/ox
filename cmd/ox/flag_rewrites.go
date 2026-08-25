@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/spf13/cobra"
 )
 
 // flagAlias is the wire shape we read out of default_catalog.json's `tokens`
@@ -65,9 +67,14 @@ func applyCatalogTokenRewrites(args []string, aliases map[string]string) []strin
 	if len(aliases) == 0 {
 		return args
 	}
+	target, _, _ := rootCmd.Find(args)
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if commandAcceptsLongFlag(target, a) {
+			out = append(out, a)
+			continue
+		}
 
 		// joined form: arg literally equals a catalog pattern.
 		if target, ok := aliases[a]; ok {
@@ -90,4 +97,17 @@ func applyCatalogTokenRewrites(args []string, aliases map[string]string) []strin
 		out = append(out, a)
 	}
 	return out
+}
+
+// commandAcceptsLongFlag reports whether arg names a flag owned by the target
+// command. Catalog rewrites are fallbacks for unknown flags; applying one to a
+// command that intentionally defines the same spelling changes valid behavior
+// (for example, `distill history since --format=json` became global `--json`
+// while the command silently kept its default content format).
+func commandAcceptsLongFlag(cmd *cobra.Command, arg string) bool {
+	if cmd == nil || !strings.HasPrefix(arg, "--") {
+		return false
+	}
+	name := strings.TrimPrefix(strings.SplitN(arg, "=", 2)[0], "--")
+	return name != "" && cmd.Flags().Lookup(name) != nil
 }

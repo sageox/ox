@@ -61,6 +61,15 @@ type agentCase struct {
 
 var cases = []agentCase{
 	{
+		adapter: "codex",
+		bin:     "codex",
+		args: func(prompt, _ string) []string {
+			return []string{"exec", "--skip-git-repo-check", "--sandbox", "read-only", "--color", "never", prompt}
+		},
+		isolatesSessions: false, // writes to ~/.codex/sessions
+		verified:         "codex exec --help, 0.147.0: `exec` for non-interactive mode with an explicit read-only sandbox",
+	},
+	{
 		adapter: "pi",
 		bin:     "pi", // see the collision warning on bin
 		args: func(prompt, sessionDir string) []string {
@@ -258,7 +267,10 @@ func summarize(entries []map[string]any) string {
 
 func newGitRepo(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, args := range [][]string{
 		{"init", "-q"},
 		// never touch the developer's real git identity
@@ -272,6 +284,9 @@ func newGitRepo(t *testing.T) string {
 		}
 	}
 	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("# Test repo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".sageox"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return dir

@@ -7,14 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-08-25
+
+Decision context holds up in real plans, visual plans stay readable and recoverable, and routine Git workflows are safer.
+
 ### New
 
 - **`ox kb query` — search files across knowledge bubbles** — one question, ranked file hits grouped per bubble: `ox kb query '#engineering' '#platform' "how do we batch relay spans"`. Honest per-bubble outcomes (no matches vs. never indexed vs. failed), `--mode`/`-k`/`--path` controls, and `--json` with AI coworker guidance. Requires KB file search enabled server-side.
 
 ### Improved
 
-- **`ox upgrade` now updates direct installs in place** — if you installed ox with the quick-install script, `ox upgrade` downloads and swaps in the new version for you (verified before it is applied) instead of just printing instructions. Homebrew and `go install` installs upgrade as before.
-- **You hear about new versions even without the background service running** — `ox status` checks for a newer ox on its own and offers to upgrade on the spot.
+- **Decision Records stay findable in real work** — `ox decision enrich` and `ox plan enrich` now find governing decisions from full issue bodies and plans, not only short title-like searches. `ox decision enrich --explain` shows near-matches and results omitted by context limits.
+- **Direct installs can update themselves** — `ox upgrade` now verifies and applies quick-install updates in place, while `ox status` checks for new versions even when the background service is not running. Homebrew and `go install` workflows continue to work as before.
+- **Visual plans are easier to open and harder to lose** — most plans now remain directly readable in Git, while large plans save safely and `ox doctor` can detect and repair missing content.
+- **AI coworker context stays focused** — SageOx attribution now appears only when shared context meaningfully influenced the work.
+
+### Fixed
+
+- **Decision lookups no longer claim certainty when a source is unavailable** — degraded runs preserve valid results, warn clearly, and exit non-zero instead of presenting an incomplete search as a verified absence.
+- **`ox distill history since --format=json` now returns structured output as requested** — command-specific format choices no longer silently fall back to content output.
+- **Code indexing no longer breaks linked worktrees** — code search leaves repository Git configuration untouched.
+- **Ledger updates are safer during concurrent work** — unresolved conflicts are rejected, unrelated changes are not swept into the same update, and interrupted work remains recoverable.
 
 ## [0.14.0] - 2026-08-20
 

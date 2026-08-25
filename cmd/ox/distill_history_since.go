@@ -70,7 +70,12 @@ func registerDistillHistorySinceFlags(cmd *cobra.Command, flags *distillHistoryS
 // text is intentionally not accepted — see the comment at the format
 // validation branch below for the rationale.
 func runDistillHistorySince(cmd *cobra.Command, args []string) error {
-	flags := distillHistorySinceFlagSet
+	flags := distillHistorySinceFlags{}
+	flags.Layer, _ = cmd.Flags().GetString("layer")
+	flags.Team, _ = cmd.Flags().GetString("team")
+	flags.AllTeams, _ = cmd.Flags().GetBool("all-teams")
+	flags.Format, _ = cmd.Flags().GetString("format")
+	flags.Limit, _ = cmd.Flags().GetInt("limit")
 	start := time.Now()
 	elapsed := func() int64 { return time.Since(start).Milliseconds() }
 

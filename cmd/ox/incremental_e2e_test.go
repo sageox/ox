@@ -48,7 +48,7 @@ func TestIncrementalE2E_SingleAgent(t *testing.T) {
 	claudeSessionID := "test-e2e-session-001"
 
 	// create Claude Code source JSONL in the expected location
-	sourceFile := createClaudeSourceFile(t, env)
+	sourceFile := createClaudeSourceFileNamed(t, env, claudeSessionID+".jsonl")
 
 	// write session marker (simulates what ox agent prime does)
 	writeE2ESessionMarker(t, env, agentID, claudeSessionID)
@@ -57,7 +57,7 @@ func TestIncrementalE2E_SingleAgent(t *testing.T) {
 	createE2EAgentInstance(t, env.workspace, agentID)
 
 	// write initial user entry BEFORE session start (should be filtered out)
-	writeClaudeEntry(t, sourceFile, claudeUserEntry(time.Now().Add(-1*time.Minute).UTC().Format(time.RFC3339Nano), "Hello, fix the bug"))
+	writeClaudeEntry(t, sourceFile, claudeUserEntry(time.Now().Add(-1*time.Minute).UTC().Format(time.RFC3339Nano), "Agent "+agentID+": hello, fix the bug"))
 
 	// --- session start ---
 	out := runOx(t, oxBin, env, agentID, "session", "start")
@@ -220,11 +220,17 @@ func TestIncrementalE2E_CtrlC_AntiEntropy(t *testing.T) {
 	claudeSessionID := "test-ctrlc-session-001"
 
 	// create Claude Code source JSONL
-	sourceFile := createClaudeSourceFile(t, env)
+	sourceFile := createClaudeSourceFileNamed(t, env, claudeSessionID+".jsonl")
 
 	// write session marker and agent instance
 	writeE2ESessionMarker(t, env, agentID, claudeSessionID)
 	createE2EAgentInstance(t, env.workspace, agentID)
+
+	// Give adapter discovery an agent-specific pre-session entry. Session start
+	// routes Claude files by agent ID before hooks can supply the native session
+	// ID; the old empty fixture left recording attached to no source file.
+	writeClaudeEntry(t, sourceFile, claudeUserEntry(
+		time.Now().Add(-1*time.Minute).UTC().Format(time.RFC3339Nano), "Agent "+agentID+": start"))
 
 	// --- session start ---
 	out := runOx(t, oxBin, env, agentID, "session", "start")
@@ -243,7 +249,8 @@ func TestIncrementalE2E_CtrlC_AntiEntropy(t *testing.T) {
 	runOxHook(t, oxBin, env, agentID, "PostToolUse", claudeSessionID)
 
 	writeClaudeEntry(t, sourceFile, claudeUserEntry(
-		now.Add(2*time.Second).UTC().Format(time.RFC3339Nano), "Now fix the validation"))
+		now.Add(2*time.Second).UTC().Format(time.RFC3339Nano),
+		"Now fix validation so malformed configuration is rejected clearly, and add regression coverage for every failure path."))
 	writeClaudeEntry(t, sourceFile, claudeAssistantEntry(
 		now.Add(4*time.Second).UTC().Format(time.RFC3339Nano),
 		"Fixing validation logic.", "Edit", `{"file_path":"/src/validate.go"}`))
