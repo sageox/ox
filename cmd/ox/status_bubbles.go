@@ -26,8 +26,6 @@ import (
 	"strings"
 	"time"
 
-	lipgloss "charm.land/lipgloss/v2"
-
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/kb"
@@ -444,37 +442,10 @@ var statusBubblesFetchForRoot = func(projectRoot string) (statusBubblesFetch, st
 	}, ep
 }
 
-// commonDir returns the longest shared leading directory of a and b.
-func commonDir(a, b string) string {
-	if a == b {
-		return a
-	}
-	sep := string(os.PathSeparator)
-	as, bs := strings.Split(a, sep), strings.Split(b, sep)
-	n := len(as)
-	if len(bs) < n {
-		n = len(bs)
-	}
-	i := 0
-	for i < n && as[i] == bs[i] {
-		i++
-	}
-	return strings.Join(as[:i], sep)
-}
-
 // renderSlugRef styles a slug reference: the sigil (@ for an owner, # for a
 // bubble) is muted so the slug itself stands out — e.g. dim("@") + bright("sageox").
 func renderSlugRef(sigil, slug string) string {
 	return statusMutedStyle.Render(sigil) + statusValueStyle.Render(slug)
-}
-
-// padCell right-pads a (possibly ANSI-styled) cell to width w using its
-// visible width, so color codes don't break column alignment.
-func padCell(cell string, w int) string {
-	if gap := w - lipgloss.Width(cell); gap > 0 {
-		return cell + strings.Repeat(" ", gap)
-	}
-	return cell
 }
 
 // renderBubbleStatus renders the dense status cell for a bubble's local

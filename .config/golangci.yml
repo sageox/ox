@@ -11,6 +11,9 @@ linters:
     - govet
     - staticcheck
 
+    # Dead code
+    - unused
+
     # Security
     - gosec
 
@@ -64,6 +67,14 @@ linters:
           - gosec
           - errorlint
           - sloglint
+
+      # Adapter rules.go files are deliberately-unwired scaffolds — each file's
+      # header documents "not yet wired into main.go", kept as a documented
+      # future-integration point. Exempt them from `unused` so the intentional
+      # handlers don't have to be deleted or littered with per-func nolints.
+      - path: cmd/ox-adapter-(aider|gemini|pi)/rules\.go
+        linters:
+          - unused
 
       # SA5011 false-positives in tests. The pattern
       #   x := f(); if x == nil { t.Fatal(...) }; x.Field

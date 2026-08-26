@@ -128,20 +128,16 @@ func loadCorpus(gitRoot string, cfg *config.DecisionConfig) corpusLoadResult {
 	return corpusLoadResult{records: records, unparsed: unparsed, err: errors.Join(loadErrs...)}
 }
 
-// listFiles expands dirs (recursive *.md) and doublestar globs into a deduped
-// file list. README.md is excluded everywhere — corpus index tables, not DRs.
-func listFiles(gitRoot string, patterns []string) []string {
-	return discoverFiles(gitRoot, patterns, false).files
-}
-
 type fileDiscovery struct {
 	files []string
 	err   error
 }
 
-// discoverFiles is listFiles plus source-status reporting. When configured is
-// true, a literal path was explicitly promised by decision.paths, so a missing
-// or inaccessible path is an unavailable source rather than an empty corpus.
+// discoverFiles expands dirs (recursive *.md) and doublestar globs into a
+// deduped file list (README.md excluded — corpus index tables, not DRs) with
+// source-status reporting. When configured is true, a literal path was
+// explicitly promised by decision.paths, so a missing or inaccessible path is
+// an unavailable source rather than an empty corpus.
 func discoverFiles(gitRoot string, patterns []string, configured bool) fileDiscovery {
 	seen := make(map[string]struct{})
 	var out []string
