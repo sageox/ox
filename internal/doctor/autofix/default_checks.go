@@ -61,6 +61,13 @@ func Default() *Registry {
 		BlastRadius: "single ledger; git rebase --abort/--quit on a STALE wedge only (fresh in-flight rebases untouched); no history rewrite, HEAD unchanged",
 		Run:         checkLedgerRebaseWedge,
 	})
+	r.Register(&Check{
+		Slug:        "ledger-sacred-deletion",
+		Description: "Detect and alert on any commit in recent ledger history that mass-deleted sacred plans/sessions (ADR-024 data-loss guard); detection only, never auto-restores",
+		MinInterval: 15 * time.Minute,
+		BlastRadius: "read-only; scans recent ledger history and reports, no writes",
+		Run:         checkLedgerSacredDeletion,
+	})
 	return r
 }
 

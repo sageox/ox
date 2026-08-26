@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/sacred"
 )
 
 // commitLedgerSnapshot commits the ledger index as an IMMUTABLE, pre-validated
@@ -69,10 +71,74 @@ func commitLedgerSnapshot(ctx context.Context, ledgerPath, message string) (comm
 			"(likely a concurrent autostash-pop conflict; resolve it before retrying)", bad)
 	}
 
+	// ADR-024 backstop: never let a single commit wipe sacred trees. Scans the
+	// exact snapshot being committed (parent→tree), so it binds the same
+	// immutable tree the conflict scan above vetted — TOCTOU-safe.
+	if err := assertNoSacredMassDeletion(ctx, ledgerPath, parent, tree); err != nil {
+		return false, err
+	}
+
 	if err := commitTreeToBranch(ctx, ledgerPath, tree, parent, message); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// assertNoSacredMassDeletion fails a ledger commit whose snapshot (parent→tree)
+// would delete more than sacredMassDeleteThreshold files under a sacredPrefix.
+// Call it AFTER snapshotting the index tree and BEFORE writing the commit, so
+// the check binds exactly the tree being committed.
+//
+// Fail-closed, matching firstConflictMarkerInTree: an unborn branch (parent=="")
+// has no deletions and passes; if the diff itself cannot be computed the caller
+// must NOT commit, so the error propagates rather than defaulting to "safe".
+func assertNoSacredMassDeletion(ctx context.Context, ledgerPath, parent, tree string) error {
+	if parent == "" {
+		return nil // first commit: nothing pre-existing to delete
+	}
+	// diff-tree lists only paths whose status is Deletion between the two trees.
+	out, err := ledgerGit(ctx, ledgerPath,
+		"diff-tree", "--no-commit-id", "--name-only", "-r", "--diff-filter=D", parent, tree)
+	if err != nil {
+		return fmt.Errorf("sacred mass-delete guard: git diff-tree %s..%s: %w",
+			shortOID(parent), shortOID(tree), err)
+	}
+	deleted := sacred.Filter(strings.Split(string(out), "\n"))
+	if len(deleted) <= sacred.MassDeleteThreshold {
+		return nil
+	}
+	if os.Getenv(sacred.OverrideEnv) == "1" {
+		slog.WarnContext(ctx, "ledger sacred mass-deletion allowed by explicit override",
+			"repo", ledgerPath, "sacred_deletions", len(deleted), "override_env", sacred.OverrideEnv)
+		return nil
+	}
+	// Loud alert: this is a data-loss event caught at the last line of defense.
+	slog.ErrorContext(ctx, "REFUSING ledger commit: sacred mass-deletion detected",
+		"repo", ledgerPath,
+		"sacred_deletions", len(deleted),
+		"threshold", sacred.MassDeleteThreshold,
+		"sample", sampleStrings(deleted, 5),
+		"override_env", sacred.OverrideEnv)
+	return fmt.Errorf("refusing commit: would delete %d files under sacred paths (%s) in one commit, "+
+		"exceeds guard threshold %d — likely a sparse/GC-reconcile wipe (see ADR-024); "+
+		"if this bulk removal is intentional, set %s=1",
+		len(deleted), strings.Join(sacred.Prefixes, ", "), sacred.MassDeleteThreshold, sacred.OverrideEnv)
+}
+
+// sampleStrings returns at most n elements of s, for bounded log output.
+func sampleStrings(s []string, n int) []string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// shortOID abbreviates a git object id for log/error readability.
+func shortOID(oid string) string {
+	if len(oid) > 8 {
+		return oid[:8]
+	}
+	return oid
 }
 
 // snapshotLedgerIndexTree writes the current index to an immutable tree and

@@ -297,8 +297,16 @@ func commitCheckoutGitignore(ctx context.Context, repoPath string) error {
 		return fmt.Errorf("git add .sageox/.gitignore: %s: %w", strings.TrimSpace(string(output)), err)
 	}
 
+	// Commit ONLY .sageox/.gitignore — the trailing pathspec makes this a
+	// path-limited (--only) commit, so any OTHER changes already staged in the
+	// index (e.g. deletions a sparse/GC reconcile removed from the cone) are NOT
+	// swept into this commit. Without the pathspec, this bare `git commit`
+	// snapshotted the whole index: on 2026-08-25 it recorded 10,373 deletions
+	// (every plan + session on the Ox Dot ledger) under this very message and
+	// pushed them. See ADR-024 and the assertNoSacredMassDeletion backstop.
 	commitCmd := exec.CommandContext(ctx, "git", "-C", repoPath,
-		"commit", "-m", "chore: add .sageox/.gitignore to exclude daemon cache files")
+		"commit", "-m", "chore: add .sageox/.gitignore to exclude daemon cache files",
+		"--", ".sageox/.gitignore")
 	if output, err := commitCmd.CombinedOutput(); err != nil {
 		// exit code 1 = nothing to commit (file already committed)
 		var exitErr *exec.ExitError
