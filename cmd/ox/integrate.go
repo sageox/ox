@@ -661,6 +661,14 @@ func uninstallAllIntegrations(force bool) error {
 		installed = append(installed, "Gemini CLI (user)")
 	}
 
+	// check Factory Droid
+	if hasDroidHooks(false) {
+		installed = append(installed, "Factory Droid (project)")
+	}
+	if hasDroidHooks(true) {
+		installed = append(installed, "Factory Droid (user)")
+	}
+
 	// check Amp CLI
 	if hasAmpHooks(false) {
 		installed = append(installed, "Amp CLI (project)")
@@ -726,6 +734,12 @@ func uninstallAllIntegrations(force bool) error {
 	}
 	if err := uninstallGeminiHooks(true); err != nil {
 		errors = append(errors, fmt.Sprintf("Gemini CLI (user): %v", err))
+	}
+	if err := uninstallDroidHooks(false); err != nil {
+		errors = append(errors, fmt.Sprintf("Factory Droid (project): %v", err))
+	}
+	if err := uninstallDroidHooks(true); err != nil {
+		errors = append(errors, fmt.Sprintf("Factory Droid (user): %v", err))
 	}
 	if err := uninstallAmpHooks(false); err != nil {
 		errors = append(errors, fmt.Sprintf("Amp CLI (project): %v", err))

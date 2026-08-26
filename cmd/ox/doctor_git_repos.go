@@ -398,7 +398,10 @@ func checkGitFsck() checkResult {
 	}
 
 	// run fsck with connectivity-only for speed and a timeout
-	cmd := exec.Command("git", "fsck", "--connectivity-only", "--no-progress")
+	// --no-dangling: a dangling (unreferenced) object is normal git state,
+	// not corruption, so suppress it at the source rather than let it reach
+	// classifyFsckOutput and get mistaken for an object error.
+	cmd := exec.Command("git", "fsck", "--connectivity-only", "--no-progress", "--no-dangling")
 	cmd.Dir = gitRoot
 
 	type fsckResult struct {
@@ -469,7 +472,14 @@ var fsckRemoteHeadRe = regexp.MustCompile(`^refs/remotes/([^/]+)/HEAD$`)
 
 // fsckObjectErrorRe matches git fsck lines that indicate genuine
 // object-database corruption (as opposed to a broken ref).
-var fsckObjectErrorRe = regexp.MustCompile(`(?i)(missing (blob|tree|commit|tag)|broken link|dangling (blob|tree|commit|tag)|error in (tree|commit|blob|tag)|bad object|bad sha1 file|sha1 mismatch)`)
+var fsckObjectErrorRe = regexp.MustCompile(`(?i)(missing (blob|tree|commit|tag)|broken link|error in (tree|commit|blob|tag)|bad object|bad sha1 file|sha1 mismatch)`)
+
+// fsckDanglingRe matches a git fsck "dangling <type> <sha>" line. A dangling
+// object is unreferenced but the object DB is intact — normal state after a
+// rebase/amend/branch-delete, not corruption. git fsck is invoked with
+// --no-dangling so these are usually suppressed at the source; this is the
+// belt-and-suspenders guard for a git that predates the flag.
+var fsckDanglingRe = regexp.MustCompile(`(?i)^dangling (blob|tree|commit|tag)\b`)
 
 // classifyFsckOutput parses the (non-empty, trimmed) combined stdout+stderr
 // of `git fsck --connectivity-only --no-progress` and classifies it as:
@@ -496,6 +506,7 @@ func classifyFsckOutput(output string) (severity fsckSeverity, summary string, d
 	var unclassified []string // lines that are neither a recognized ref issue nor object corruption
 
 	hasObjectError := false
+	sawDangling := false
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -505,6 +516,11 @@ func classifyFsckOutput(output string) (severity fsckSeverity, summary string, d
 			refIssues = append(refIssues, m[1])
 			continue
 		}
+		if fsckDanglingRe.MatchString(line) {
+			// dangling object — benign, not corruption and not a ref issue.
+			sawDangling = true
+			continue
+		}
 		if fsckObjectErrorRe.MatchString(line) {
 			hasObjectError = true
 			continue
@@ -512,15 +528,23 @@ func classifyFsckOutput(output string) (severity fsckSeverity, summary string, d
 		unclassified = append(unclassified, line)
 	}
 
-	// Any genuine object corruption, or any line we can't positively
-	// classify as a harmless ref issue, means treat this as real
-	// corruption. Mixed output (ref issues + object corruption) also
-	// fails — object corruption dominates.
-	if hasObjectError || len(unclassified) > 0 || len(refIssues) == 0 {
+	switch {
+	case hasObjectError || len(unclassified) > 0:
+		// Genuine object corruption, or a line we can't positively classify
+		// as harmless. Mixed output (ref issues + object corruption) lands
+		// here too — object corruption dominates.
+		return fsckSeverityFail, fsckFailSummary(lines), fsckCorruptionDetail
+	case len(refIssues) > 0:
+		// Broken/dangling refs only (possibly alongside benign dangling
+		// objects) — a ref-repair issue, not corruption.
+		return fsckSeverityWarn, fsckWarnSummary(refIssues), fsckWarnDetail(refIssues)
+	case sawDangling:
+		// Nothing but benign dangling-object lines — the object DB is intact.
+		return fsckSeverityOK, "object database OK (dangling objects only)", ""
+	default:
+		// Non-zero exit but nothing classifiable survived. Stay conservative.
 		return fsckSeverityFail, fsckFailSummary(lines), fsckCorruptionDetail
 	}
-
-	return fsckSeverityWarn, fsckWarnSummary(refIssues), fsckWarnDetail(refIssues)
 }
 
 // fsckFailSummary mirrors the original checkGitFsck behavior: use the first

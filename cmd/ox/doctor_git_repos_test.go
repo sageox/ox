@@ -807,9 +807,14 @@ func TestClassifyFsckOutput(t *testing.T) {
 			wantSeverity: fsckSeverityFail,
 		},
 		{
-			name:         "dangling commit is genuine object corruption",
+			name:         "dangling object alone is benign, not corruption",
 			output:       "dangling commit 2222222222222222222222222222222222222222",
-			wantSeverity: fsckSeverityFail,
+			wantSeverity: fsckSeverityOK,
+		},
+		{
+			name:         "dangling object alongside a stale ref stays a ref warning",
+			output:       "dangling commit 2222222222222222222222222222222222222222\n" + belgradeStaleHead,
+			wantSeverity: fsckSeverityWarn,
 		},
 		{
 			name:         "mixed ref issue and object corruption fails — corruption dominates",

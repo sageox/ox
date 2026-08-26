@@ -62,13 +62,24 @@ func (r *WhisperRegistry) SetClock(now func() time.Time) {
 // the close-before-replace makes the registry correct on its own terms and
 // prevents a latent fd leak if that guard is ever bypassed (e.g. a GC
 // directory-swap that re-points a team's DB path).
+//
+// If the prior handle's Close fails, the replacement is NOT committed: the
+// prior store stays registered (so a later idle-close/shutdown can retry its
+// Close and reclaim the fd) and the incoming store is closed instead — so
+// neither handle leaks. Committing the replacement in that case would drop
+// the only reference to the un-closed prior store, making the leak permanent.
 func (r *WhisperRegistry) AddTeamStore(teamID string, store *whisperstore.Store) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if prior, ok := r.teamStores[teamID]; ok && prior != nil && prior != store {
 		if err := prior.Close(); err != nil {
-			r.logger.Warn("failed to close replaced team whisper store",
+			r.logger.Warn("keeping prior team whisper store; its Close failed, closing incoming instead",
 				"team_id", teamID, "err", err)
+			if cerr := store.Close(); cerr != nil {
+				r.logger.Warn("failed to close incoming team whisper store after prior Close failure",
+					"team_id", teamID, "err", cerr)
+			}
+			return
 		}
 	}
 	r.teamStores[teamID] = store
