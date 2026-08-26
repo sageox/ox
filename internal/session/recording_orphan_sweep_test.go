@@ -127,6 +127,28 @@ func TestCleanupOrphanedStubsInDir_KeepsNonPhantoms(t *testing.T) {
 	assert.DirExists(t, young, "a just-primed session inside the grace period must survive")
 }
 
+// TestClassifyRawFile_UnreadablePresentFileIsNotMissing guards the deletion
+// path: a raw.jsonl that exists but cannot be opened (permission / transient
+// I/O) must NOT classify as RawMissing (which the sweep would reap). Only a
+// genuinely absent file is RawMissing; anything present-but-unreadable fails
+// safe to RawSubstantive.
+func TestClassifyRawFile_UnreadablePresentFileIsNotMissing(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "raw.jsonl")
+	require.NoError(t, os.WriteFile(p, []byte(headerLine+`{"type":"user"}`+"\n"), 0o644))
+	require.NoError(t, os.Chmod(p, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
+
+	// Running as root defeats mode bits — skip rather than assert a false pass.
+	if f, err := os.Open(p); err == nil {
+		_ = f.Close()
+		t.Skip("cannot make file unreadable (running as root?)")
+	}
+
+	assert.Equal(t, RawSubstantive, ClassifyRawFile(p),
+		"a present-but-unreadable raw.jsonl must never classify as RawMissing (deletable)")
+}
+
 // TestCleanupOrphanedStubsInDir_KeepsMalformedMarker guards the P1: a
 // .recording.json that exists but cannot be parsed (an incomplete/concurrent
 // write — exactly what an ACTIVE recording looks like mid-flight) must fail

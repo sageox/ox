@@ -1811,8 +1811,14 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 			s.logger.Warn("retract orphaned draft: git rm failed", "session", name, "error", err)
 			continue
 		}
-		// Remove any untracked leftovers git rm --ignore-unmatch left behind.
-		_ = os.RemoveAll(filepath.Join(ledgerPath, "sessions", name))
+		// Remove any untracked leftovers git rm --ignore-unmatch left behind. If
+		// that fails, do NOT commit a partial retraction — restore and retry next
+		// scan, otherwise the remote loses meta.json while leftover files linger
+		// locally and no future scan rediscovers them.
+		if err := os.RemoveAll(filepath.Join(ledgerPath, "sessions", name)); err != nil {
+			s.restoreDraftForRetry(ctx, ledgerPath, rel, name, fmt.Errorf("remove leftovers: %w", err))
+			continue
+		}
 
 		// A published draft's meta.json is tracked, so git rm must have staged a
 		// deletion. If the diff errors or shows nothing staged, we cannot safely

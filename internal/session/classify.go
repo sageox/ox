@@ -3,6 +3,7 @@ package session
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -252,7 +253,13 @@ func ClassifyRawFile(rawPath string) RawKind {
 
 	f, err := os.Open(rawPath)
 	if err != nil {
-		return RawMissing
+		if errors.Is(err, os.ErrNotExist) {
+			return RawMissing
+		}
+		// Present but unreadable (permission / transient I/O). Fail SAFE — never
+		// let a cleanup path delete a raw.jsonl we simply could not open; only a
+		// genuinely absent file is RawMissing.
+		return RawSubstantive
 	}
 	defer f.Close()
 
