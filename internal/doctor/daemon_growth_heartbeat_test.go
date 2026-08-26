@@ -10,48 +10,59 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestFDGrowthVerdict_CrossRestartNotALeak pins the E fix: a history that
-// spans a daemon restart (a low-count old PID followed by a higher but flat
-// new PID) must NOT warn. The pre-fix code compared history[0] vs
-// history[last] regardless of PID, so this exact shape produced the spurious
-// "delta +35 over 81d" leak warning. Post-fix, only samples sharing the
-// newest PID are compared, so the verdict is PASS.
-func TestFDGrowthVerdict_CrossRestartNotALeak(t *testing.T) {
-	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	h := fdHistoryFile{Samples: []fdHistorySample{
-		{At: base, Count: 5, PID: 100},                                  // previous process lifetime
-		{At: base.Add(81 * 24 * time.Hour), Count: 40, PID: 200},        // current process, first sample
-		{At: base.Add(81*24*time.Hour + 7*time.Hour), Count: 40, PID: 200}, // current process, flat
-	}}
-	res := fdGrowthVerdict("fd", h)
-	assert.Equal(t, StatusPass, res.Status,
-		"cross-restart FD counts must not be compared as a leak signal")
-}
-
-// TestFDGrowthVerdict_SamePIDGrowthWarns ensures the E fix still catches a
-// genuine within-lifetime leak: same PID, growth past the delta threshold
-// over more than the minimum span.
-func TestFDGrowthVerdict_SamePIDGrowthWarns(t *testing.T) {
-	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	h := fdHistoryFile{Samples: []fdHistorySample{
-		{At: base, Count: 10, PID: 300},
-		{At: base.Add(7 * time.Hour), Count: 10 + fdGrowthWarnDelta + 5, PID: 300},
-	}}
-	res := fdGrowthVerdict("fd", h)
-	assert.Equal(t, StatusWarn, res.Status,
-		"real growth within one daemon lifetime must still warn")
-}
-
-// TestFDGrowthVerdict_SeedingCases covers the "not enough current-lifetime
-// data" branches: an unknown PID (0), and a single same-PID sample.
-func TestFDGrowthVerdict_SeedingCases(t *testing.T) {
+// TestFDGrowthVerdict pins the E fix: FD growth is judged only within the
+// current daemon lifetime (samples sharing the newest PID), never across
+// restarts.
+func TestFDGrowthVerdict(t *testing.T) {
 	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	unknownPID := fdHistoryFile{Samples: []fdHistorySample{{At: base, Count: 10, PID: 0}}}
-	assert.Equal(t, StatusPass, fdGrowthVerdict("fd", unknownPID).Status)
+	tests := []struct {
+		name    string
+		samples []fdHistorySample
+		want    Status
+	}{
+		{
+			// A history that spans a daemon restart (a low-count old PID
+			// followed by a higher but flat new PID) must NOT warn. The
+			// pre-fix code compared history[0] vs history[last] regardless of
+			// PID, so this exact shape produced the spurious "delta +35 over
+			// 81d" leak warning.
+			name: "cross-restart counts are not a leak signal",
+			samples: []fdHistorySample{
+				{At: base, Count: 5, PID: 100},                                     // previous process lifetime
+				{At: base.Add(81 * 24 * time.Hour), Count: 40, PID: 200},           // current process, first sample
+				{At: base.Add(81*24*time.Hour + 7*time.Hour), Count: 40, PID: 200}, // current process, flat
+			},
+			want: StatusPass,
+		},
+		{
+			// Same PID, growth past the delta threshold over more than the
+			// minimum span — a genuine within-lifetime leak still warns.
+			name: "same-PID growth within one lifetime warns",
+			samples: []fdHistorySample{
+				{At: base, Count: 10, PID: 300},
+				{At: base.Add(7 * time.Hour), Count: 10 + fdGrowthWarnDelta + 5, PID: 300},
+			},
+			want: StatusWarn,
+		},
+		{
+			name:    "unknown PID (0) seeds without a verdict",
+			samples: []fdHistorySample{{At: base, Count: 10, PID: 0}},
+			want:    StatusPass,
+		},
+		{
+			name:    "single same-PID sample is insufficient data",
+			samples: []fdHistorySample{{At: base, Count: 10, PID: 300}},
+			want:    StatusPass,
+		},
+	}
 
-	singleSample := fdHistoryFile{Samples: []fdHistorySample{{At: base, Count: 10, PID: 300}}}
-	assert.Equal(t, StatusPass, fdGrowthVerdict("fd", singleSample).Status)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := fdGrowthVerdict("fd", fdHistoryFile{Samples: tt.samples})
+			assert.Equal(t, tt.want, res.Status)
+		})
+	}
 }
 
 // TestSamplesForCurrentLifetime verifies the segmentation helper returns only
@@ -78,17 +89,39 @@ func TestSamplesForCurrentLifetime(t *testing.T) {
 // or a team check (team heartbeats key on team_id and are not subject to the
 // workspace_id divergence).
 func TestAlternateHeartbeatCandidate_Guards(t *testing.T) {
-	_, _, ok := alternateHeartbeatCandidate("team", func() string { return "/whatever" })
-	assert.False(t, ok, "team checks are not project-root-derived")
+	tests := []struct {
+		name            string
+		checkType       string
+		findProjectRoot func() string
+	}{
+		{
+			name:            "team checks are not project-root-derived",
+			checkType:       "team",
+			findProjectRoot: func() string { return "/whatever" },
+		},
+		{
+			name:            "nil resolver yields no alternate",
+			checkType:       "workspace",
+			findProjectRoot: nil,
+		},
+		{
+			name:            "empty project root yields no alternate",
+			checkType:       "ledger",
+			findProjectRoot: func() string { return "" },
+		},
+		{
+			name:            "a root with no .sageox config has no repo_id",
+			checkType:       "workspace",
+			findProjectRoot: func() string { return t.TempDir() },
+		},
+	}
 
-	_, _, ok = alternateHeartbeatCandidate("workspace", nil)
-	assert.False(t, ok, "nil resolver yields no alternate")
-
-	_, _, ok = alternateHeartbeatCandidate("ledger", func() string { return "" })
-	assert.False(t, ok, "empty project root yields no alternate")
-
-	_, _, ok = alternateHeartbeatCandidate("workspace", func() string { return t.TempDir() })
-	assert.False(t, ok, "a root with no .sageox config has no repo_id, so no alternate")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, ok := alternateHeartbeatCandidate(tt.checkType, tt.findProjectRoot)
+			assert.False(t, ok)
+		})
+	}
 }
 
 // TestAlternateHeartbeatCandidate_DerivesDaemonWay pins the core of the F
