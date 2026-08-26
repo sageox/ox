@@ -413,18 +413,16 @@ func TestSelfHeal_LockTimeout_DefersThenRecovers(t *testing.T) {
 	require.True(t, HasNeedsReindexMarker(tmp, "test"))
 }
 
-// TestSelfHeal_FlockHostileFS_HealsWithoutLock proves the flock-hostile-FS
-// escape hatch: when the heal lock cannot be SET UP at all (not merely
-// contended by a live peer), there is no peer to defer to, so a provably-corrupt
-// index must still be healed rather than left permanently unrepairable. This is
-// the opposite verdict from the timeout case above — a setup error is not a
-// timeout — and the bounded bbolt probe in reclassifyUnderLock is what keeps the
-// lock-less nuke from clobbering a healthy index.
+// TestSelfHeal_FlockHostileFS_DefersNeverRacyNuke proves that when the heal lock
+// cannot be SET UP at all (flock-hostile filesystem, not a mere timeout), a
+// destructive rebuild is REFUSED, not run lockless. A lockless nuke would let two
+// concurrent healers RemoveAll each other's fresh replacement; since the codedb
+// is a rebuildable derived cache, we defer instead and leave recovery to a full
+// reindex. The no-racy-nuke guarantee holds even where flock does not work.
 //
-// Failure prevented: on a filesystem where flock is unsupported, every open of a
-// corrupt sub-index returns a deferral error forever and code search never
-// recovers (the availability bug flagged on #835).
-func TestSelfHeal_FlockHostileFS_HealsWithoutLock(t *testing.T) {
+// Failure prevented: two processes on a flock-less FS racing RemoveAll+recreate
+// (REMOVE CREATE REMOVE CREATE) and one healer losing metadata the other deleted.
+func TestSelfHeal_FlockHostileFS_DefersNeverRacyNuke(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: Bleve + bbolt operations")
 	}
@@ -437,27 +435,31 @@ func TestSelfHeal_FlockHostileFS_HealsWithoutLock(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, first.Close())
 	emptyMappingForLatestSnapshot(t, filepath.Join(indexPath, "store", "root.bolt"))
+	boltPath := filepath.Join(indexPath, "store", "root.bolt")
+	infoBefore, err := os.Stat(boltPath)
+	require.NoError(t, err)
 
 	// Simulate a filesystem where flock setup fails: the seam returns
-	// (locked=false, err!=nil), which the caller must treat as "no peer", NOT as
-	// a timeout to defer on.
+	// (locked=false, err!=nil) — no peer, and no safe way to serialize a rebuild.
 	orig := acquireSubIndexHealLockFn
 	t.Cleanup(func() { acquireSubIndexHealLockFn = orig })
 	acquireSubIndexHealLockFn = func(string) (*flock.Flock, bool, error) {
 		return nil, false, errors.New("simulated flock-hostile filesystem")
 	}
 
-	healed, err := openOrCreateBleveIndex(tmp, indexPath, "code")
-	require.NoError(t, err, "a corrupt index on a flock-hostile FS must heal, not defer forever")
-	defer func() { _ = healed.Close() }()
+	idx, err := rebuildSubIndexLocked(tmp, indexPath, "code", false,
+		fmt.Errorf("corrupt mapping"))
+	require.Nil(t, idx)
+	require.Error(t, err, "must defer, never nuke without a cross-process lock")
+	require.Equal(t, 1, counter.get("defer"))
+	require.Equal(t, 0, counter.get("nuke"), "no lockless RemoveAll may happen")
+	require.False(t, HasNeedsReindexMarker(tmp, "code"))
 
-	require.Equal(t, 1, counter.get("nuke"),
-		"setup failure with a corrupt index must nuke+recreate, not defer")
-	require.Equal(t, 0, counter.get("defer"))
-	require.True(t, HasNeedsReindexMarker(tmp, "code"))
-	n, err := healed.DocCount()
-	require.NoError(t, err)
-	require.Equal(t, uint64(0), n)
+	// The corrupt index must be left exactly as-is (not RemoveAll'd + recreated).
+	infoAfter, err := os.Stat(boltPath)
+	require.NoError(t, err, "the sub-index must not be destroyed by a lockless heal")
+	require.Equal(t, infoBefore.ModTime(), infoAfter.ModTime(),
+		"root.bolt must be untouched — no rebuild ran")
 }
 
 // --- D2. reclassifyUnderLock must never destroy or adopt on a soft failure ---
