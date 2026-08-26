@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1166,7 +1167,7 @@ func (c *SessionAutoStageCheck) findUnstagedSessionFiles(ledgerPath string) []st
 func (c *SessionAutoStageCheck) scanSessionFilesInDir(dir string) []string {
 	var files []string
 
-	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -1185,7 +1186,11 @@ func (c *SessionAutoStageCheck) scanSessionFilesInDir(dir string) []string {
 			files = append(files, relPath)
 		}
 		return nil
-	})
+	}); err != nil {
+		// an incomplete scan can leave session files unstaged; surface it rather
+		// than dropping it silently.
+		slog.Warn("scan session files: walk failed", "dir", dir, "err", err)
+	}
 
 	return files
 }
@@ -1380,7 +1385,9 @@ func (c *SessionPushCheck) countCommitsAhead(ledgerPath string) int {
 	}
 
 	var count int
-	fmt.Sscanf(strings.TrimSpace(string(aheadOutput)), "%d", &count)
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(aheadOutput)), "%d", &count); err != nil {
+		return 0
+	}
 	return count
 }
 

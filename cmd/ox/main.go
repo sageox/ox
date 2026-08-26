@@ -49,7 +49,7 @@ func init() {
 	//
 	// Override: Set NO_COLOR=0 to force colors even in agent context.
 	if agentx.IsAgentContext() && os.Getenv("NO_COLOR") == "" {
-		os.Setenv("NO_COLOR", "1")
+		_ = os.Setenv("NO_COLOR", "1") // Setenv fails only on an invalid name
 	}
 
 	// Escape hatch: CLICOLOR_FORCE=1 disables the global ANSI stripper below
@@ -66,7 +66,7 @@ func init() {
 	// fmt.Print(style.Render(...)) which bypasses it. These pipes catch
 	// everything globally for both streams.
 	if !forceColor && !isatty.IsTerminal(os.Stdout.Fd()) && !isatty.IsCygwinTerminal(os.Stdout.Fd()) {
-		os.Setenv("NO_COLOR", "1") // keep for libraries that do check it
+		_ = os.Setenv("NO_COLOR", "1") // keep for libraries that do check it; Setenv fails only on an invalid name
 
 		pr, pw, err := os.Pipe()
 		if err == nil {
@@ -142,7 +142,7 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 
 	// mark retry attempts to avoid telemetry double-counting
 	if attempt > 0 {
-		os.Setenv("OX_FRICTION_RETRY", "1")
+		_ = os.Setenv("OX_FRICTION_RETRY", "1") // Setenv fails only on an invalid name
 	}
 
 	err := rootCmd.Execute()

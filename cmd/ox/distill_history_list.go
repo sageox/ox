@@ -283,8 +283,8 @@ func writeJournalEnvelope(w io.Writer, format string, env *distillHistoryEnvelop
 		fmt.Fprintf(w, `{"success":false,"error":{"code":"envelope_marshal_failed","message":%q,"retryable":false}}`+"\n", err.Error())
 		return
 	}
-	w.Write(b)
-	w.Write([]byte{'\n'})
+	_, _ = w.Write(b)            // best-effort terminal output
+	_, _ = w.Write([]byte{'\n'}) // best-effort terminal output
 }
 
 // writeJournalRuntimeError emits an error envelope (exit code 1) onto

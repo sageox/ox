@@ -284,10 +284,14 @@ func (r *WhisperRegistry) RemoveCursor(agentID string) {
 	defer r.mu.RUnlock()
 
 	if r.ledgerStore != nil {
-		r.ledgerStore.RemoveCursor(agentID)
+		if err := r.ledgerStore.RemoveCursor(agentID); err != nil {
+			r.logger.Warn("failed to remove ledger cursor", "agent", agentID, "error", err)
+		}
 	}
-	for _, store := range r.teamStores {
-		store.RemoveCursor(agentID)
+	for teamID, store := range r.teamStores {
+		if err := store.RemoveCursor(agentID); err != nil {
+			r.logger.Warn("failed to remove team cursor", "agent", agentID, "team", teamID, "error", err)
+		}
 	}
 }
 

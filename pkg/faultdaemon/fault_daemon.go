@@ -246,11 +246,11 @@ func (d *FaultDaemon) handleConn(conn net.Conn) {
 		return
 
 	case FaultCorruptResponse:
-		conn.Write([]byte("not json garbage \x00\xff\xfe\n"))
+		_, _ = conn.Write([]byte("not json garbage \x00\xff\xfe\n")) // best-effort
 		return
 
 	case FaultPartialResponse:
-		conn.Write([]byte(`{"success":true,"data":`))
+		_, _ = conn.Write([]byte(`{"success":true,"data":`)) // best-effort
 		time.Sleep(100 * time.Millisecond)
 		return
 
@@ -272,8 +272,8 @@ func (d *FaultDaemon) handleConn(conn net.Conn) {
 		// send two responses
 		resp := d.generateResponse(request, cfg)
 		if resp != nil {
-			conn.Write(resp)
-			conn.Write(resp) // second response
+			_, _ = conn.Write(resp) // best-effort
+			_, _ = conn.Write(resp) // second response, best-effort
 		}
 		return
 
@@ -284,7 +284,7 @@ func (d *FaultDaemon) handleConn(conn net.Conn) {
 			if resp[len(resp)-1] == '\n' {
 				resp = resp[:len(resp)-1]
 			}
-			conn.Write(resp)
+			_, _ = conn.Write(resp) // best-effort
 		}
 		time.Sleep(200 * time.Millisecond)
 		return
@@ -292,7 +292,7 @@ func (d *FaultDaemon) handleConn(conn net.Conn) {
 	case FaultChunkedResponse:
 		resp := d.generateResponse(request, cfg)
 		for _, b := range resp {
-			conn.Write([]byte{b})
+			_, _ = conn.Write([]byte{b}) // best-effort
 			time.Sleep(500 * time.Microsecond)
 		}
 		return
@@ -315,23 +315,23 @@ func (d *FaultDaemon) handleConn(conn net.Conn) {
 		for i := range hugePayload {
 			hugePayload[i] = 'x'
 		}
-		conn.Write(append(hugePayload, '\n'))
+		_, _ = conn.Write(append(hugePayload, '\n')) // best-effort
 		return
 
 	case FaultInvalidJSON:
-		conn.Write([]byte("{\"success\":true,\"data\":\"bad\x00char\"}\n"))
+		_, _ = conn.Write([]byte("{\"success\":true,\"data\":\"bad\x00char\"}\n")) // best-effort
 		return
 
 	case FaultEmbeddedNewlines:
 		// send response with escaped newlines (valid JSON)
-		conn.Write([]byte("{\"success\":true,\"data\":\"line1\\nline2\\nline3\"}\n"))
+		_, _ = conn.Write([]byte("{\"success\":true,\"data\":\"line1\\nline2\\nline3\"}\n")) // best-effort
 		return
 
 	case FaultWriteHalfThenHang:
 		resp := d.generateResponse(request, cfg)
 		if resp != nil {
 			half := len(resp) / 2
-			conn.Write(resp[:half])
+			_, _ = conn.Write(resp[:half]) // best-effort
 		}
 		select {
 		case <-d.ctx.Done():
@@ -356,6 +356,6 @@ func (d *FaultDaemon) generateResponse(request []byte, cfg Config) []byte {
 func (d *FaultDaemon) sendNormalResponse(conn net.Conn, request []byte, cfg Config) {
 	resp := d.generateResponse(request, cfg)
 	if resp != nil {
-		conn.Write(resp)
+		_, _ = conn.Write(resp) // best-effort
 	}
 }

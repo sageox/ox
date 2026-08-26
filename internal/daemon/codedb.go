@@ -595,7 +595,9 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 			if baseDir := m.resolveLedgerDataDir(); baseDir != "" && baseDir != dataDir {
 				baseDB, bErr := codedb.Open(baseDir)
 				if bErr == nil {
-					baseDB.BuildDirtyIndex(ctx, projectRoot, opts)
+					if _, dErr := baseDB.BuildDirtyIndex(ctx, projectRoot, opts); dErr != nil {
+						m.logger.Warn("ledger dirty overlay build failed", "error", dErr)
+					}
 					baseDB.Close()
 				}
 			}
@@ -998,7 +1000,9 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 		if baseDir := m.resolveLedgerDataDir(); baseDir != "" && baseDir != dataDir {
 			baseDB, bErr := codedb.Open(baseDir)
 			if bErr == nil {
-				baseDB.BuildDirtyIndex(ctx, projectRoot, opts)
+				if _, dErr := baseDB.BuildDirtyIndex(ctx, projectRoot, opts); dErr != nil {
+					m.logger.Warn("ledger dirty overlay build failed", "error", dErr)
+				}
 				baseDB.Close()
 			}
 		}

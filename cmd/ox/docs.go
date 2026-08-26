@@ -61,7 +61,9 @@ func runDocsGenerate(cmd *cobra.Command, args []string) error {
 
 	// Restore .gitkeep if it existed
 	if hasGitkeep {
-		os.WriteFile(gitkeepPath, []byte{}, 0644)
+		if err := os.WriteFile(gitkeepPath, []byte{}, 0644); err != nil {
+			return fmt.Errorf("failed to restore .gitkeep: %w", err)
+		}
 	}
 
 	// Sync package.json version with CLI version

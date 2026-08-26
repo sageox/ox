@@ -489,7 +489,10 @@ func BuildDirtyIndex(ctx context.Context, localPath, dirtyPath string, opts Inde
 			continue
 		}
 
-		batch.Index("dirty_"+relPath, BleveCodeDoc{Content: string(content)})
+		if err := batch.Index("dirty_"+relPath, BleveCodeDoc{Content: string(content)}); err != nil {
+			slog.Warn("dirty index: batch index failed", "path", relPath, "err", err)
+			continue
+		}
 		indexed++
 	}
 
@@ -1046,7 +1049,9 @@ func (st *indexState) insertDiff(commitDBID int64, path string, oldBlobDBID sql.
 
 	diffText := generateDiffText(st.repo, path, oldOID, newOID, hasOld, hasNew, oldText, newText)
 	if diffText != "" {
-		st.diffBatch.Index("diff_"+strconv.FormatInt(diffDBID, 10), BleveDiffDoc{Content: diffText})
+		if err := st.diffBatch.Index("diff_"+strconv.FormatInt(diffDBID, 10), BleveDiffDoc{Content: diffText}); err != nil {
+			return fmt.Errorf("index diff: %w", err)
+		}
 		st.diffBatchN++
 		if err := st.flushDiffBatch(false); err != nil {
 			return err
@@ -1150,10 +1155,12 @@ func getTreeEntries(repo *git.Repository, treeHash plumbing.Hash, cache map[plum
 	}
 
 	entries := make(map[string]plumbing.Hash)
-	tree.Files().ForEach(func(f *object.File) error {
+	if err := tree.Files().ForEach(func(f *object.File) error {
 		entries[f.Name] = f.Hash
 		return nil
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("iterate tree files: %w", err)
+	}
 
 	cache[treeHash] = entries
 	return entries, nil
@@ -1208,7 +1215,9 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, str
 			reader.Close()
 			if readErr == nil && utf8.Valid(content) && len(content) > 0 {
 				blobText = string(content)
-				st.codeBatch.Index("blob_"+strconv.FormatInt(blobDBID, 10), BleveCodeDoc{Content: blobText})
+				if err := st.codeBatch.Index("blob_"+strconv.FormatInt(blobDBID, 10), BleveCodeDoc{Content: blobText}); err != nil {
+					return 0, "", false, fmt.Errorf("index blob: %w", err)
+				}
 				st.codeBatchN++
 				indexed = true
 				if err := st.flushCodeBatch(false); err != nil {
@@ -2031,7 +2040,10 @@ sendLoop2:
 					return 0, 0, fmt.Errorf("scan inserted comment id: %w", err)
 				}
 				if cmIdx < len(batch) {
-					commentBatch.Index("comment_"+strconv.FormatInt(commentID, 10), BleveCommentDoc{Content: batch[cmIdx].Text})
+					if err := commentBatch.Index("comment_"+strconv.FormatInt(commentID, 10), BleveCommentDoc{Content: batch[cmIdx].Text}); err != nil {
+						rows.Close()
+						return 0, 0, fmt.Errorf("index comment: %w", err)
+					}
 				}
 				cmIdx++
 				commentBatchN++

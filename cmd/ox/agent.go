@@ -1431,7 +1431,7 @@ func formatWhispers(w io.Writer, entries []whisperstore.WhisperEntry) bool {
 			writeXMLAttribute(w, "metadata", metadata)
 		}
 		fmt.Fprint(w, ">")
-		xml.EscapeText(w, []byte(e.Content))
+		_ = xml.EscapeText(w, []byte(e.Content)) // best-effort terminal output
 		fmt.Fprint(w, "</entry>\n")
 	}
 	fmt.Fprintln(w, "</system-reminder>")

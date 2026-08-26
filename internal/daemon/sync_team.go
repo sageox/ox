@@ -327,7 +327,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 					"team", r.ws.TeamName, "count", len(changedFiles))
 				for _, cf := range changedFiles {
 					id, _ := uuid.NewV7()
-					s.whisperRegistry.Add("ledger", whisperstore.WhisperEntry{
+					if err := s.whisperRegistry.Add("ledger", whisperstore.WhisperEntry{
 						ID:         id.String(),
 						Scope:      "ledger",
 						Type:       whisperstore.WhisperTrigger,
@@ -336,7 +336,9 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 						Content:    fmt.Sprintf("Team context updated: %s", cf),
 						Importance: whisperstore.ImportanceNormal,
 						CreatedAt:  time.Now(),
-					})
+					}); err != nil {
+						s.logger.Warn("failed to add team context trigger whisper", "team", r.ws.TeamName, "file", cf, "error", err)
+					}
 				}
 			}
 		}

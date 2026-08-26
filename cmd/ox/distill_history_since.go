@@ -263,9 +263,9 @@ func renderDistillHistorySinceContent(w io.Writer, entries []read.Entry, bodies 
 			fmt.Fprint(w, "\n---\n")
 			fmt.Fprintln(w, marker)
 		}
-		w.Write([]byte(body))
+		_, _ = w.Write([]byte(body)) // best-effort terminal output
 		if body[len(body)-1] != '\n' {
-			w.Write([]byte{'\n'})
+			_, _ = w.Write([]byte{'\n'}) // best-effort terminal output
 		}
 	}
 }

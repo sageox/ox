@@ -304,9 +304,9 @@ func renderDistillHistoryShowContent(w io.Writer, entries []read.Entry) {
 		} else {
 			fmt.Fprintf(w, "\n---\n<!-- entry: %s -->\n", e.ID)
 		}
-		w.Write([]byte(e.BodyMD))
+		_, _ = w.Write([]byte(e.BodyMD)) // best-effort terminal output
 		if len(e.BodyMD) > 0 && e.BodyMD[len(e.BodyMD)-1] != '\n' {
-			w.Write([]byte{'\n'})
+			_, _ = w.Write([]byte{'\n'}) // best-effort terminal output
 		}
 	}
 }

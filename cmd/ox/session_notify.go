@@ -79,7 +79,7 @@ func notifySessionAbortedAsync(projectRoot, sessionID string) {
 	if sessionID == "" {
 		return
 	}
-	runSessionSignal("aborted", func(client *api.RepoClient, repoID string) error {
+	_ = runSessionSignal("aborted", func(client *api.RepoClient, repoID string) error { // fire-and-forget
 		return client.NotifySessionAborted(api.SessionAbortedNotification{
 			SessionID: sessionID,
 			RepoID:    repoID,

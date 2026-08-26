@@ -1154,7 +1154,9 @@ func (d *Daemon) initComponents() time.Duration {
 		d.mu.Lock()
 		d.restartRequested = true
 		d.mu.Unlock()
-		go d.Stop()
+		go func() {
+			_ = d.Stop() // best-effort; caller checks RestartRequested() and re-execs regardless
+		}()
 	})
 	// pre-populate credentials from credential store (cold-start)
 	if creds, err := gitserver.LoadCredentialsForEndpoint(projectEndpoint); err == nil && creds != nil {

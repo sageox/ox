@@ -586,7 +586,9 @@ func (s *AdapterSupervisor) handleCrash(adapterType string) (*AdapterProcess, er
 	// clean up old process
 	if old.cmd != nil && old.cmd.Process != nil {
 		old.cmd.Process.Kill()
-		go old.cmd.Wait() // reap zombie
+		go func() {
+			_ = old.cmd.Wait() // reap zombie, best-effort
+		}()
 	}
 	delete(s.processes, adapterType)
 

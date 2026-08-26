@@ -120,7 +120,9 @@ func (s *Store) initSchema(ctx context.Context) error {
 		}
 	}
 
-	s.setMetadata(ctx, "schema_version", strconv.Itoa(currentSchemaVersion))
+	if err := s.setMetadata(ctx, "schema_version", strconv.Itoa(currentSchemaVersion)); err != nil {
+		return fmt.Errorf("set schema version: %w", err)
+	}
 	s.doltCommit(ctx, "schema: init carts v"+strconv.Itoa(currentSchemaVersion))
 	return nil
 }
@@ -215,8 +217,11 @@ func (s *Store) getMetadata(ctx context.Context, key string) (string, error) {
 	return value, err
 }
 
-func (s *Store) setMetadata(ctx context.Context, key, value string) {
-	s.db.ExecContext(ctx, "REPLACE INTO metadata (`key`, value) VALUES (?, ?)", key, value)
+func (s *Store) setMetadata(ctx context.Context, key, value string) error {
+	if _, err := s.db.ExecContext(ctx, "REPLACE INTO metadata (`key`, value) VALUES (?, ?)", key, value); err != nil {
+		return fmt.Errorf("set metadata %q: %w", key, err)
+	}
+	return nil
 }
 
 func splitStatements(sql string) []string {

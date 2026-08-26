@@ -293,8 +293,8 @@ func checkLedgerBranchStatus(fix bool) checkResult {
 
 	aheadCount := 0
 	behindCount := 0
-	fmt.Sscanf(ahead, "%d", &aheadCount)
-	fmt.Sscanf(behind, "%d", &behindCount)
+	_, _ = fmt.Sscanf(ahead, "%d", &aheadCount)   // git rev-list --count always emits digits
+	_, _ = fmt.Sscanf(behind, "%d", &behindCount) // git rev-list --count always emits digits
 
 	if aheadCount > 0 && behindCount > 0 {
 		if fix {
@@ -484,8 +484,8 @@ func fixLedgerBranchDiverged(ledgerPath string, aheadCount, behindCount int) che
 		parts := strings.Fields(strings.TrimSpace(string(revOut)))
 		if len(parts) == 2 {
 			behind, ahead := 0, 0
-			fmt.Sscanf(parts[0], "%d", &behind)
-			fmt.Sscanf(parts[1], "%d", &ahead)
+			_, _ = fmt.Sscanf(parts[0], "%d", &behind) // git rev-list --count always emits digits
+			_, _ = fmt.Sscanf(parts[1], "%d", &ahead)  // git rev-list --count always emits digits
 
 			switch {
 			case ahead == 0 && behind == 0:

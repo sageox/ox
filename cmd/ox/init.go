@@ -368,7 +368,7 @@ func runInit() error {
 		if resolvedEndpoint == "" {
 			return fmt.Errorf("invalid --endpoint value: %q", initEndpointFlag)
 		}
-		os.Setenv(endpoint.EnvVar, resolvedEndpoint)
+		_ = os.Setenv(endpoint.EnvVar, resolvedEndpoint) // Setenv fails only on an invalid name
 		if !initQuiet {
 			fmt.Println()
 			fmt.Printf("Using endpoint: %s\n", cli.StyleBold.Render(endpoint.NormalizeSlug(resolvedEndpoint)))
@@ -385,7 +385,7 @@ func runInit() error {
 				fmt.Printf("Run %s to authenticate.\n", cli.StyleCommand.Render("ox login"))
 				return nil
 			}
-			os.Setenv(endpoint.EnvVar, selectedEndpoint)
+			_ = os.Setenv(endpoint.EnvVar, selectedEndpoint) // Setenv fails only on an invalid name
 			fmt.Println()
 			fmt.Printf("Using endpoint: %s\n", cli.StyleBold.Render(endpoint.NormalizeSlug(selectedEndpoint)))
 		}

@@ -169,7 +169,7 @@ func computeDestPath(filename string, allFiles []string) (string, error) {
 }
 
 // transformFile reads the source file, updates frontmatter, and writes to destination
-func transformFile(srcPath, destPath string, sidebarPosition int) error {
+func transformFile(srcPath, destPath string, sidebarPosition int) (err error) {
 	// Read source file
 	srcFile, err := os.Open(srcPath)
 	if err != nil {
@@ -194,7 +194,11 @@ func transformFile(srcPath, destPath string, sidebarPosition int) error {
 
 	scanner := bufio.NewScanner(srcFile)
 	writer := bufio.NewWriter(destFile)
-	defer writer.Flush()
+	defer func() {
+		if flushErr := writer.Flush(); flushErr != nil && err == nil {
+			err = fmt.Errorf("failed to flush destination file: %w", flushErr)
+		}
+	}()
 	pendingBlankLines := 0
 	writeLine := func(line string) {
 		if line == "" {
@@ -202,10 +206,10 @@ func transformFile(srcPath, destPath string, sidebarPosition int) error {
 			return
 		}
 		for range pendingBlankLines {
-			writer.WriteString("\n")
+			_, _ = writer.WriteString("\n") // error surfaces at the deferred Flush above
 		}
 		pendingBlankLines = 0
-		writer.WriteString(line + "\n")
+		_, _ = writer.WriteString(line + "\n") // error surfaces at the deferred Flush above
 	}
 
 	// Track frontmatter processing

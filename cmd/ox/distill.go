@@ -138,8 +138,8 @@ func inferWeeklyHighWater(tcPath string) time.Time {
 			continue
 		}
 		var y, w int
-		fmt.Sscanf(m[1], "%d", &y)
-		fmt.Sscanf(m[2], "%d", &w)
+		_, _ = fmt.Sscanf(m[1], "%d", &y) // input is regex-validated digits
+		_, _ = fmt.Sscanf(m[2], "%d", &w) // input is regex-validated digits
 		if !found || y > latestYear || (y == latestYear && w > latestWeek) {
 			latestYear, latestWeek = y, w
 			found = true
@@ -314,8 +314,8 @@ func readWeeklyFilesForMonth(weeklyDir string, year, month int) ([]string, []str
 			continue
 		}
 		var wy, ww int
-		fmt.Sscanf(m[1], "%d", &wy)
-		fmt.Sscanf(m[2], "%d", &ww)
+		_, _ = fmt.Sscanf(m[1], "%d", &wy) // input is regex-validated digits
+		_, _ = fmt.Sscanf(m[2], "%d", &ww) // input is regex-validated digits
 
 		wStart, wEnd := isoWeekRange(wy, ww)
 		// week overlaps month if week starts before month ends AND week ends after month starts

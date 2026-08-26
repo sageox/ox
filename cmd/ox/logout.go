@@ -75,7 +75,12 @@ var logoutCmd = &cobra.Command{
 			for {
 				fmt.Print("Select endpoint to logout (1-", maxSelection, "): ")
 				var input string
-				fmt.Scanln(&input)
+				if _, err := fmt.Scanln(&input); err != nil {
+					// unreadable input (e.g. closed/EOF stdin) — cancel rather than
+					// spin forever re-prompting against a stream that can't answer.
+					fmt.Println("Logout canceled.")
+					return nil
+				}
 				n, err := fmt.Sscanf(input, "%d", &selection)
 				if err == nil && n == 1 && selection >= 1 && selection <= maxSelection {
 					break
