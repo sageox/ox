@@ -42,7 +42,10 @@ jobs:
         working-directory: docs
         run: npm publish
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITHUB_TOKEN works when @sageox/cli-docs grants this repository
+          # Actions write access. DOCS_PACKAGE_TOKEN is the explicit fallback
+          # for organizations that do not inherit package access from source.
+          NODE_AUTH_TOKEN: ${{ secrets.DOCS_PACKAGE_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Trigger docs site update
         uses: peter-evans/repository-dispatch@v3

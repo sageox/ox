@@ -40,7 +40,7 @@ var (
 
 	// Semantic status colors (aligned with brand)
 	ColorPass   = theme.Color(HexPass)   // sage green - brand success
-	ColorWarn   = theme.Color(HexWarn)   // copper gold - brand warning
+	ColorWarn   = theme.Color(HexWarn)   // gold - semantic warning only
 	ColorFail   = theme.Color(HexFail)   // ox red - brand error
 	ColorMuted  = theme.Color(HexMuted)  // charcoal gray - recessive
 	ColorAccent = theme.Color(HexAccent) // info blue - brand accent

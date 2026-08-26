@@ -173,16 +173,17 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 	// carrier of the start-minted ID on this reconstruct path too (daemon
 	// orphan-finalize recovers it from here when meta.json was never written)
 	meta := &session.StoreMeta{
-		Version:      "1.0",
-		SessionID:    state.SessionID,
-		CreatedAt:    state.StartedAt,
-		AgentID:      state.AgentID,
-		AgentType:    agentTypeForMeta,
-		AgentVersion: result.AgentVersion,
-		Model:        result.Model,
-		Username:     identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
-		RepoID:       repoID,
-		OxVersion:    version.Version,
+		Version:                "1.0",
+		SessionID:              state.SessionID,
+		ContinuedFromSessionID: state.ContinuedFromSessionID,
+		CreatedAt:              state.StartedAt,
+		AgentID:                state.AgentID,
+		AgentType:              agentTypeForMeta,
+		AgentVersion:           result.AgentVersion,
+		Model:                  result.Model,
+		Username:               identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
+		RepoID:                 repoID,
+		OxVersion:              version.Version,
 	}
 	if err := rawWriter.WriteHeader(meta); err != nil {
 		rawWriter.Close()

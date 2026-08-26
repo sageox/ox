@@ -225,6 +225,7 @@ func TestSessionMeta_LinkageFieldsRoundTrip(t *testing.T) {
 	meta := NewSessionMeta("linked-session", "user", "Ox1234", "claude-code",
 		time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)).
 		RepoID("repo_xyz").
+		ContinuedFromSessionID("ses_019f6f6a-d182-7f4e-a54d-8dcb44567c8d").
 		ProducedCommits([]string{"abc1234", "def5678"}).
 		LinkedPRs([]string{"https://github.com/owner/repo/pull/42"}).
 		LinkedIssues([]string{"#101", "#103"}).
@@ -239,6 +240,7 @@ func TestSessionMeta_LinkageFieldsRoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"https://github.com/owner/repo/pull/42"}, got.LinkedPRs)
 	assert.Equal(t, []string{"#101", "#103"}, got.LinkedIssues)
 	assert.Equal(t, LinkageStatusUploaded, got.LinkageStatus)
+	assert.Equal(t, meta.ContinuedFromSessionID, got.ContinuedFromSessionID)
 }
 
 // TestSessionMeta_LegacyWithoutLinkageFields verifies a meta.json written

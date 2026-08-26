@@ -94,6 +94,23 @@ func TestWriteRawHeader(t *testing.T) {
 		assert.Equal(t, "OxTest1", meta["agent_id"])
 	})
 
+	t.Run("carries continuation identity", func(t *testing.T) {
+		projectRoot := setupIncrementalTest(t)
+		state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+			AgentID:                "OxResume",
+			AdapterName:            "claude-code",
+			Username:               "testuser",
+			ContinuedFromSessionID: "ses_019f6f6a-d182-7f4e-a54d-8dcb44567c8d",
+		})
+		require.NoError(t, err)
+		require.NoError(t, writeRawHeader(projectRoot, state))
+
+		stored, err := session.ReadSessionFromPath(filepath.Join(state.SessionPath, "raw.jsonl"))
+		require.NoError(t, err)
+		require.NotNil(t, stored.Meta)
+		assert.Equal(t, state.ContinuedFromSessionID, stored.Meta.ContinuedFromSessionID)
+	})
+
 	t.Run("empty session path returns error", func(t *testing.T) {
 		state := &session.RecordingState{SessionPath: ""}
 		err := writeRawHeader("/tmp", state)

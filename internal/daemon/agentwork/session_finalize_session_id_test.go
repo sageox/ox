@@ -29,6 +29,7 @@ import (
 //   - The preserved ID comes from an actual meta.json written via the
 //     same lfs.NewSessionMeta/WriteSessionMetaOnly path production uses.
 func TestWriteMetaAndUploadLFS_SessionIDPrecedence(t *testing.T) {
+	continuedFromSessionID := sessionid.GenerateSessionID()
 	tests := []struct {
 		name string
 		// preservedID, when non-empty, is written into a pre-existing
@@ -85,10 +86,10 @@ func TestWriteMetaAndUploadLFS_SessionIDPrecedence(t *testing.T) {
 			if tt.headerID != "" {
 				sessionIDField = fmt.Sprintf(`,"session_id":%q`, tt.headerID)
 			}
-			rawContent := fmt.Sprintf(`{"type":"header","metadata":{"version":"1.0","agent_id":"Ox7f3a","agent_type":"claude-code"%s}}
+			rawContent := fmt.Sprintf(`{"type":"header","metadata":{"version":"1.0","agent_id":"Ox7f3a","agent_type":"claude-code","continued_from_session_id":%q%s}}
 {"type":"user","content":"hello","seq":1}
 {"type":"assistant","content":"hi","seq":2}
-`, sessionIDField)
+`, continuedFromSessionID, sessionIDField)
 			rawPath := filepath.Join(sessionDir, "raw.jsonl")
 			if err := os.WriteFile(rawPath, []byte(rawContent), 0o644); err != nil {
 				t.Fatal(err)
@@ -129,6 +130,9 @@ func TestWriteMetaAndUploadLFS_SessionIDPrecedence(t *testing.T) {
 			meta, err := lfs.ReadSessionMeta(sessionDir)
 			if err != nil {
 				t.Fatalf("ReadSessionMeta after writeMetaAndUploadLFS: %v", err)
+			}
+			if meta.ContinuedFromSessionID != continuedFromSessionID {
+				t.Errorf("ContinuedFromSessionID = %q, want %q", meta.ContinuedFromSessionID, continuedFromSessionID)
 			}
 
 			switch {

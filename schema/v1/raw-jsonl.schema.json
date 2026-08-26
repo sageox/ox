@@ -48,6 +48,11 @@
               "type": "string",
               "description": "CAUTION — in THIS dialect `session_id` is an agent-supplied identifier, NOT the ses_ recording identity that the native header's metadata.session_id carries. One key, two meanings, split by dialect. ox's reader keeps them apart by only accepting ses_-prefixed values into the recording-identity field; a consumer that conflates them will attribute a session to the wrong recording."
             },
+            "continued_from_session_id": {
+              "type": "string",
+              "pattern": "^ses_",
+              "description": "Prior finalized recording identity when this import is a continuation."
+            },
             "started_at": { "$ref": "#/$defs/rfc3339" },
             "username": { "$ref": "#/$defs/username" }
           }
@@ -76,6 +81,11 @@
           "type": "string",
           "pattern": "^ses_",
           "description": "The ses_ recording identity minted at session start. The header is its crash-safe carrier: the on-disk recording-state file is deleted at stop/abort, so an orphan-finalize can only recover this id from here. See the import dialect's _meta.session_id, which overloads the same key with a DIFFERENT meaning."
+        },
+        "continued_from_session_id": {
+          "type": "string",
+          "pattern": "^ses_",
+          "description": "Prior finalized recording identity when this recording continues a reopened native coding-agent session."
         },
         "agent_type": { "type": "string", "description": "Coding agent identifier, e.g. \"claude-code\"." },
         "agent_version": { "type": "string", "description": "Version of the coding agent." },

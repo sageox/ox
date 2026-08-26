@@ -25,7 +25,7 @@ import (
 // Terminal.app; anything reporting TERM=xterm-256color with no COLORTERM) does
 // not ignore an unrecognized "38;2;..." — it parses the parameters as
 // independent SGR codes. Any channel landing in 100-107 therefore becomes a
-// *background* color: brand copper #E0A56A ends in 0x6A = 106 = bright-cyan
+// *background* color: a prior brand hex ended in 0x6A = 106 = bright-cyan
 // background, which painted the `ox --help` command column and the login
 // disclaimer as unreadable grey-on-cyan blocks. Several other palette entries
 // sit one token away from the same trap (#2DD4BF starts 0x2D = 45 = magenta
@@ -124,7 +124,7 @@ func Adapt(c color.Color) color.Color {
 	return Profile.Convert(c)
 }
 
-// Color parses a hex ("#7A8F78") or ANSI index ("214") color and adapts it to
+// Color parses a hex ("#7AAA77") or ANSI index ("214") color and adapts it to
 // the terminal's profile. Use this anywhere lipgloss.Color would be reached for
 // in non-TUI code.
 func Color(s string) color.Color {

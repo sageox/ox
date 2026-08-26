@@ -8,8 +8,8 @@ import (
 
 // SageOx brand color palette (unified, CLI-optimized)
 // Primary: Sage green - earthy, wise, calm
-// Secondary: Copper gold - premium, trustworthy
-// Accent: Forest green - depth, nature
+// Secondary: strongest sage step - selected, interactive
+// Accent: sage callout step - paths, highlights
 // AdaptiveColor automatically adjusts for light/dark terminals
 //
 // Colors are sourced from the sageox-design system.

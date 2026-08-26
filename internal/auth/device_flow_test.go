@@ -159,7 +159,7 @@ func TestLogin_Success(t *testing.T) {
 		if r.URL.Path == UserInfoEndpoint {
 			// verify authorization header
 			auth := r.Header.Get("Authorization")
-			assert.Equal(t, "Bearer test-jwt-token", auth)
+			assert.Equal(t, "Bearer test-access-token", auth)
 
 			json.NewEncoder(w).Encode(UserInfo{
 				UserID: "user-123",

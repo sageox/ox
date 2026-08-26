@@ -475,6 +475,9 @@ func writeRetryUploadMeta(
 		// prefers a preserved meta.json id over minting a new one — so it
 		// is authoritative and never rotates across retries.
 		next.SessionID = sessionID
+		if orphan.Meta.ContinuedFromSessionID != "" {
+			next.ContinuedFromSessionID = orphan.Meta.ContinuedFromSessionID
+		}
 
 		// fields this retry actually owns
 		next.Model = orphan.Meta.Model

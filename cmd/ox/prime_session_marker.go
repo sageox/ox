@@ -39,11 +39,12 @@ func SessionMarkerDir() string {
 //   - Idempotency: re-priming the same session reuses the ox agent ID
 //   - Hook context: agent_hook.go reads markers to pass agent state to handlers
 type SessionMarker struct {
-	AgentID        string    `json:"agent_id"`
-	SessionID      string    `json:"session_id,omitempty"` // ox-generated server session ID
-	AgentSessionID string    `json:"agent_session_id"`     // coding agent's native session identifier
-	PrimedAt       time.Time `json:"primed_at"`            // when session was primed
-	ParentPID      int       `json:"parent_pid,omitempty"` // parent agent process ID
+	AgentID            string    `json:"agent_id"`
+	SessionID          string    `json:"session_id,omitempty"`           // ox-generated agent-instance server session ID
+	RecordingSessionID string    `json:"recording_session_id,omitempty"` // durable ses_ recording ID for resume linkage
+	AgentSessionID     string    `json:"agent_session_id"`               // coding agent's native session identifier
+	PrimedAt           time.Time `json:"primed_at"`                      // when session was primed
+	ParentPID          int       `json:"parent_pid,omitempty"`           // parent agent process ID
 }
 
 // AgentHookInput is an alias for agentx.HookInput.

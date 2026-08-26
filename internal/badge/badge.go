@@ -19,8 +19,8 @@ import (
 
 const (
 	// BadgeMarkdown is the markdown snippet for the SageOx badge.
-	// Uses shields.io with SageOx brand sage green (#7A8F78).
-	BadgeMarkdown = `[![powered by SageOx](https://img.shields.io/badge/powered%20by-SageOx-7A8F78?labelColor=555)](https://github.com/sageox/ox)`
+	// Uses shields.io with SageOx brand sage green (#7AAA77).
+	BadgeMarkdown = `[![powered by SageOx](https://img.shields.io/badge/powered%20by-SageOx-7AAA77?labelColor=555)](https://github.com/sageox/ox)`
 
 	// StatusNotAsked indicates badge has not been suggested yet.
 	StatusNotAsked = ""

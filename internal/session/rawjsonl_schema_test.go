@@ -205,6 +205,8 @@ func TestRawJSONLSchema_RejectsMalformedLines(t *testing.T) {
 		// to the wrong recording — so the native side pins the prefix.
 		{"native header session_id without ses_ prefix",
 			`{"type":"header","metadata":{"version":"1.0","session_id":"test-session-001"}}`},
+		{"native header continuation without ses_ prefix",
+			`{"type":"header","metadata":{"version":"1.0","created_at":"2026-01-01T00:00:00Z","continued_from_session_id":"test-session-001"}}`},
 		{"not an object", `"just a string"`},
 	}
 

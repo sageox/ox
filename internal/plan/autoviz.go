@@ -50,7 +50,7 @@ var (
 // gets the most distinct openers.
 var swimPalette = []string{
 	"#99c693", // sage-400
-	"#d9b654", // warning-400 — copper's successor (DDR-010)
+	"#d9b654", // warning-400 — semantic warning only (DDR-010)
 	"#97aebd", // info
 	"#d77e6c", // error-400
 	"#b7b6a3", // silt-300

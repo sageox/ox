@@ -10,17 +10,17 @@ Colors are sourced from `sageox-design` and generated into `internal/theme/gener
 
 | Token | Dark Mode | Light Mode | Usage |
 |-------|-----------|------------|-------|
-| Primary | `#7A8F78` | `#4F6A48` | Brand identity, headers, spinners |
-| Secondary | `#E0A56A` | `#B87D3A` | Commands, interactive elements |
-| Accent | `#8FA888` | `#3D5437` | File paths, callouts, highlights |
+| Primary | `#7AAA77` | `#3D643B` | Brand identity, headers, spinners |
+| Secondary | `#ADCFA3` | `#324F31` | Commands, interactive elements; strongest sage emphasis |
+| Accent | `#99C693` | `#4E7D4C` | File paths, callouts, highlights |
 
 ### Semantic Colors
 
 | Token | Dark Mode | Light Mode | Usage |
 |-------|-----------|------------|-------|
-| Success | `#7A8F78` | `#4F6A48` | Passed checks, confirmations |
-| Warning | `#E0A56A` | `#B87D3A` | Cautions, dirty builds |
-| Error | `#E07070` | `#A03030` | Failures, critical issues |
+| Success | `#7AAA77` | `#3D643B` | Passed checks, confirmations |
+| Warning | `#D9B654` | `#A5842F` | Cautions, dirty builds |
+| Error | `#D77E6C` | `#9F4838` | Failures, critical issues |
 | Info | `#7FA7C8` | `#5580A0` | Informational, flags, links |
 | Dim | `#8F99A3` | `#6B7580` | Secondary text, descriptions |
 
@@ -30,8 +30,8 @@ All colors use `lipgloss.AdaptiveColor` for automatic light/dark terminal detect
 
 ```go
 ColorPrimary = compat.AdaptiveColor{
-    Light: lipgloss.Color("#4F6A48"),
-    Dark:  lipgloss.Color("#7A8F78"),
+    Light: lipgloss.Color("#3D643B"),
+    Dark:  lipgloss.Color("#7AAA77"),
 }
 ```
 

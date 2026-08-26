@@ -27,7 +27,7 @@ func withProfile(t *testing.T, p colorprofile.Profile) {
 // "38;2;R;G;B" as independent SGR codes, so a channel in 100-107 silently
 // becomes a background color. Emitting no "38;2;" at all below TrueColor is the
 // property that makes that class of bug impossible, for every token — not just
-// the copper #E0A56A that happened to trip it.
+// the prior brand hex that happened to trip it.
 func TestAdapt_NoTruecolorBelowTrueColor(t *testing.T) {
 	degraded := []colorprofile.Profile{colorprofile.ANSI256, colorprofile.ANSI, colorprofile.ASCII, colorprofile.NoTTY}
 
@@ -45,14 +45,14 @@ func TestAdapt_NoTruecolorBelowTrueColor(t *testing.T) {
 	}
 }
 
-// TestAdapt_CopperRendersAsOneIndexedColor pins the exact byte shape of the
-// reported bug: brand copper on a 256-color terminal must be a single indexed
+// TestAdapt_LowByteBackgroundCodeRendersAsOneIndexedColor pins the exact byte shape of the
+// reported bug: a truecolor hex on a 256-color terminal must be a single indexed
 // foreground, never the four-parameter form whose trailing 106 reads as
 // bright-cyan background.
-func TestAdapt_CopperRendersAsOneIndexedColor(t *testing.T) {
+func TestAdapt_LowByteBackgroundCodeRendersAsOneIndexedColor(t *testing.T) {
 	withProfile(t, colorprofile.ANSI256)
 
-	got := lipgloss.NewStyle().Foreground(Color("#E0A56A")).Render("code")
+	got := lipgloss.NewStyle().Foreground(Color("#12346A")).Render("code")
 
 	assert.Contains(t, got, "38;5;")
 	assert.NotContains(t, got, "106")
@@ -63,9 +63,9 @@ func TestAdapt_CopperRendersAsOneIndexedColor(t *testing.T) {
 func TestAdapt_TrueColorIsPassthrough(t *testing.T) {
 	withProfile(t, colorprofile.TrueColor)
 
-	got := lipgloss.NewStyle().Foreground(Color("#E0A56A")).Render("code")
+	got := lipgloss.NewStyle().Foreground(Color("#12346A")).Render("code")
 
-	assert.Contains(t, got, "38;2;224;165;106")
+	assert.Contains(t, got, "38;2;18;52;106")
 }
 
 // TestAdapt_AdaptiveTokensDegrade covers the generated compat.AdaptiveColor
@@ -93,9 +93,9 @@ func TestAdapt_NoColorProfilesEmitNoColor(t *testing.T) {
 	for _, p := range []colorprofile.Profile{colorprofile.ASCII, colorprofile.NoTTY} {
 		withProfile(t, p)
 
-		require.Nil(t, Adapt(lipgloss.Color("#E0A56A")))
+		require.Nil(t, Adapt(lipgloss.Color("#12346A")))
 
-		got := lipgloss.NewStyle().Foreground(Color("#E0A56A")).Bold(true).Render("x")
+		got := lipgloss.NewStyle().Foreground(Color("#12346A")).Bold(true).Render("x")
 		assert.NotContains(t, got, "38;")
 		assert.True(t, strings.Contains(got, "1m"), "bold should survive on %s", p)
 	}

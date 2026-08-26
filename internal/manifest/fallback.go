@@ -35,6 +35,7 @@ var teamContextFallbackIncludes = []string{
 	"AGENTS.md",
 	"memory/",
 	"docs/",
+	"agents/",
 	"coworkers/",
 	"discussions/", // all discussion artifacts synced by cloud pipeline
 	"agent-context/",

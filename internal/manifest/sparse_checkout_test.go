@@ -67,6 +67,7 @@ func TestComputeSparseSet_FallbackConfigExcludesData(t *testing.T) {
 
 	// verify known fallback paths are present
 	assert.Contains(t, result, "/memory/")
+	assert.Contains(t, result, "/agents/")
 	assert.Contains(t, result, "/.sageox/")
 }
 

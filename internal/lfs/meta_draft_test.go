@@ -277,6 +277,21 @@ func TestWriteDraftSessionMeta_PreservesPublishedSessionID(t *testing.T) {
 	assert.Equal(t, 12, meta.TurnCount, "counters still advance")
 }
 
+func TestWriteDraftSessionMeta_PreservesPublishedContinuation(t *testing.T) {
+	dir := t.TempDir()
+	initial := draftInputFixture("s")
+	initial.ContinuedFromSessionID = "ses_01950000-0000-7000-8000-000000000002"
+	require.NoError(t, WriteDraftSessionMeta(context.Background(), dir, initial))
+
+	refresh := draftInputFixture("s")
+	refresh.TurnCount = 12
+	require.NoError(t, WriteDraftSessionMeta(context.Background(), dir, refresh))
+
+	meta, err := ReadSessionMeta(dir)
+	require.NoError(t, err)
+	assert.Equal(t, initial.ContinuedFromSessionID, meta.ContinuedFromSessionID)
+}
+
 // TestWriteDraftSessionMeta_CountersAreMonotonic.
 //
 // RecordingState is an unlocked load-modify-save, so a lost increment is
@@ -334,7 +349,8 @@ func TestWriteDraftSessionMeta_RequiresValidSessionID(t *testing.T) {
 // than in review.
 func TestDraftInput_CarriesNoTranscriptDerivedText(t *testing.T) {
 	allowed := map[string]bool{
-		"SessionName": true, "SessionID": true, "Username": true, "UserID": true,
+		"SessionName": true, "SessionID": true, "ContinuedFromSessionID": true,
+		"Username": true, "UserID": true,
 		"RepoID": true, "AgentID": true, "AgentType": true, "Model": true,
 		"CreatedAt": true, "TurnCount": true, "EntryCount": true, "Now": true,
 	}

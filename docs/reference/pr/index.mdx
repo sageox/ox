@@ -1,33 +1,30 @@
 ---
-title: "ox upgrade"
-description: "CLI reference for ox upgrade"
-sidebar_position: 99
+title: "ox pr"
+description: "CLI reference for ox pr"
+sidebar_position: 72
 ---
 
-## ox upgrade
+## ox pr
 
-Upgrade ox to the latest version
+Author SageOx content for pull requests
 
 ### Synopsis
 
-Detect how ox was installed and upgrade using the appropriate method: Homebrew, go install, or an in-place download that verifies and replaces the binary.
+Author SageOx content that goes into a pull request.
 
-```
-ox upgrade [flags]
-```
+Distinct from 'ox code prs', which lists indexed PRs for triage.
 
 ### Options
 
 ```
-  -h, --help            help for upgrade
-      --json            output as JSON
-      --target string   pin upgrade to a specific version tag (e.g. v0.18.0); empty = latest from GitHub releases API
+  -h, --help   help for pr
 ```
 
 ### Options inherited from parent commands
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
@@ -37,3 +34,4 @@ ox upgrade [flags]
 ### SEE ALSO
 
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox pr header](/pr/header)	 - Emit the SageOx credit line for the top of a PR description

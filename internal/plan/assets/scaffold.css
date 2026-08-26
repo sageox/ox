@@ -9,10 +9,9 @@
    from reading as a foreign object inside the app that frames it
    (apps/web .../plans/[plan_dir] renders this file in an iframe).
 
-   The accents are the "earthed, never neon" semantic ramps. Copper is RETIRED
-   (DDR-010, the green-black rebrand) — the variable is `--gold`, and its value
-   comes from the `warning` ramp, which the token file names as the successor to
-   copper's premium-accent role. Do not reintroduce a second brand hue: hierarchy
+   The accents are the "earthed, never neon" semantic ramps. The old warm brand
+   accent is retired (DDR-010, the green-black rebrand) — `--gold` comes only
+   from the warning ramp. Do not reintroduce a second brand hue: hierarchy
    here is weight and position, not another colour. */
 :root{
   --bg:#0b0d0b; --panel:#111411; --panel2:#171b17; --hair:#212620; --hair2:#1d221d;

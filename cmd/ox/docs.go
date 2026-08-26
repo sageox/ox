@@ -22,6 +22,7 @@ func runDocsGenerate(cmd *cobra.Command, args []string) error {
 	output, _ := cmd.Flags().GetString("output")
 
 	fmt.Printf("Generating documentation to %s...\n", output)
+	prepareDocsCommandTree(rootCmd)
 
 	// Create temp directory for raw Cobra output
 	tmpDir, err := os.MkdirTemp("", "ox-docs-*")
@@ -71,6 +72,22 @@ func runDocsGenerate(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("Documentation generated successfully")
 	return nil
+}
+
+// prepareDocsCommandTree makes documentation generation independent of local
+// feature flags and cached server settings. Reference docs describe the public,
+// released CLI surface; experimental commands stay out until their gates are
+// removed from the command registration itself.
+func prepareDocsCommandTree(root *cobra.Command) {
+	root.CompletionOptions.DisableDefaultCmd = true
+	for _, child := range root.Commands() {
+		switch child.Name() {
+		case "attest", "scout", "memory", "completion":
+			root.RemoveCommand(child)
+		case "carts", "cart-analyze":
+			child.Hidden = true
+		}
+	}
 }
 
 // syncPackageVersion updates docs/package.json version to match CLI version

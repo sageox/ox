@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-08-25
+
+Resumed work stays connected, team rules recover reliably, and SageOx uses one calm visual language everywhere.
+
+### Improved
+
+- **Resumed AI coworker sessions stay connected** — a new recording keeps a durable link to the session it continues, including through drafts, recovery, and upload retries.
+- **The CLI and documentation stay in sync** — CI now detects generated-reference drift, the complete stable command set is published, and the docs workflow can use a dedicated package credential when repository permissions are insufficient.
+- **SageOx has one consistent palette** — CLI, TUI, plans, demos, and documentation now share an all-sage brand palette, reserving gold for warnings and using accessible light and dark variants.
+
+### Fixed
+
+- **Device login works with opaque session credentials** — the login flow uses the credential returned by device authentication to fetch identity while continuing to store the exchanged API token.
+- **Team rules survive sparse-checkout recovery** — fallback manifests include the `agents/` directory, so repositories without a usable manifest still materialize shared AI coworker guidance.
+
 ## [0.14.1] - 2026-08-25
 
 Decision context holds up in real plans, visual plans stay readable and recoverable, and routine Git workflows are safer.

@@ -36,6 +36,7 @@ import (
 	"github.com/sageox/ox/internal/runtime"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/sessionid"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/tips"
@@ -434,7 +435,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// attempt to start session recording if enabled (local, no auth needed)
 	phaseStart = time.Now()
-	sessionStat := startSessionRecording(projectRoot, agentID, agentType, parentAgentID)
+	continuedFromSessionID := recordingSessionIDFromMarker(existingMarker)
+	sessionStat := startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID)
+	recordingSessionID := recordingSessionIDForMarker(projectRoot, agentID, continuedFromSessionID)
 	timing["session_start"] = time.Since(phaseStart).Milliseconds()
 
 	// check if user is authenticated — degraded mode if not (recording continues locally)
@@ -446,10 +449,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			// write session marker so hooks can discover session file and continue recording
 			if agentSessionID != "" {
 				marker := &SessionMarker{
-					AgentID:        agentID,
-					AgentSessionID: agentSessionID,
-					PrimedAt:       time.Now(),
-					ParentPID:      proc.FindAgentAncestorPID(),
+					AgentID:            agentID,
+					RecordingSessionID: recordingSessionID,
+					AgentSessionID:     agentSessionID,
+					PrimedAt:           time.Now(),
+					ParentPID:          proc.FindAgentAncestorPID(),
 				}
 				if writeErr := WriteSessionMarker(marker); writeErr != nil {
 					slog.Warn("failed to write session marker in degraded mode", "error", writeErr)
@@ -918,11 +922,12 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// write session marker for idempotent behavior (graceful failure)
 	if agentSessionID != "" {
 		marker := &SessionMarker{
-			AgentID:        agentID,
-			SessionID:      inst.ServerSessionID,
-			AgentSessionID: agentSessionID,
-			PrimedAt:       time.Now(),
-			ParentPID:      proc.FindAgentAncestorPID(),
+			AgentID:            agentID,
+			SessionID:          inst.ServerSessionID,
+			RecordingSessionID: recordingSessionID,
+			AgentSessionID:     agentSessionID,
+			PrimedAt:           time.Now(),
+			ParentPID:          proc.FindAgentAncestorPID(),
 		}
 		if err := WriteSessionMarker(marker); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to write session marker: %v\n", err)
@@ -1174,7 +1179,31 @@ func sessionWatchMode(agentType string) string {
 	return "hook"
 }
 
-func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string) *sessionStatus {
+// recordingSessionIDFromMarker returns the prior durable recording identity
+// carried by a native coding-agent session marker. Marker files are local,
+// long-lived inputs, so only a structurally valid ses_ ID is trusted.
+func recordingSessionIDFromMarker(marker *SessionMarker) string {
+	if marker == nil || !sessionid.IsValidSessionID(marker.RecordingSessionID) {
+		return ""
+	}
+	return marker.RecordingSessionID
+}
+
+// recordingSessionIDForMarker prefers the active recording's identity and
+// otherwise preserves the prior valid identity. The fallback matters when a
+// resume cannot start recording immediately (for example, before its ledger
+// clone arrives): a later prime can still establish the continuation link.
+func recordingSessionIDForMarker(projectRoot, agentID, prior string) string {
+	if state, err := session.LoadRecordingStateForAgent(projectRoot, agentID); err == nil && state != nil && sessionid.IsValidSessionID(state.SessionID) {
+		return state.SessionID
+	}
+	if sessionid.IsValidSessionID(prior) {
+		return prior
+	}
+	return ""
+}
+
+func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID string) *sessionStatus {
 	// resolve session mode from the config hierarchy. Sessions record into
 	// the project ledger; Knowledge Bubbles play no part (ox ADR-028).
 	resolved := config.ResolveSessionRecording(projectRoot)
@@ -1256,15 +1285,16 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 	watchMode := sessionWatchMode(agentType)
 
 	opts := session.StartRecordingOptions{
-		AgentID:       agentID,
-		AdapterName:   agentType,
-		OutputFile:    outputFile,
-		FilterMode:    resolved.Mode,
-		ParentPID:     parentPID,
-		Username:      identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName()),
-		WorkspacePath: projectRoot,
-		Branch:        repotools.GetCurrentBranch(projectRoot),
-		WatchMode:     watchMode,
+		AgentID:                agentID,
+		AdapterName:            agentType,
+		OutputFile:             outputFile,
+		FilterMode:             resolved.Mode,
+		ParentPID:              parentPID,
+		Username:               identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName()),
+		WorkspacePath:          projectRoot,
+		Branch:                 repotools.GetCurrentBranch(projectRoot),
+		WatchMode:              watchMode,
+		ContinuedFromSessionID: continuedFromSessionID,
 	}
 
 	// propagate parent agent info so the recording state knows this is a subagent

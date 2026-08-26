@@ -33,6 +33,9 @@ jobs:
       - name: Build
         run: go build -v ./...
 
+      - name: Check generated CLI docs
+        run: make docs-check
+
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@latest
 

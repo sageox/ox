@@ -156,18 +156,19 @@ func publishDraftPlaceholder(projectRoot, ledgerPath, sessionName string, state 
 	sessionDir := draftLedgerSessionDir(ledgerPath, sessionName)
 
 	input := lfs.DraftInput{
-		SessionName: sessionName,
-		SessionID:   state.SessionID,
-		Username:    identity.AttributionDisplayName(ep, config.GetDisplayName()),
-		UserID:      auth.GetUserID(ep),
-		RepoID:      getRepoIDOrDefault(projectRoot),
-		AgentID:     state.AgentID,
-		AgentType:   state.AdapterName,
-		Model:       state.Model,
-		CreatedAt:   state.StartedAt,
-		TurnCount:   state.TurnCount,
-		EntryCount:  state.EntryCount,
-		Now:         time.Now(),
+		SessionName:            sessionName,
+		SessionID:              state.SessionID,
+		ContinuedFromSessionID: state.ContinuedFromSessionID,
+		Username:               identity.AttributionDisplayName(ep, config.GetDisplayName()),
+		UserID:                 auth.GetUserID(ep),
+		RepoID:                 getRepoIDOrDefault(projectRoot),
+		AgentID:                state.AgentID,
+		AgentType:              state.AdapterName,
+		Model:                  state.Model,
+		CreatedAt:              state.StartedAt,
+		TurnCount:              state.TurnCount,
+		EntryCount:             state.EntryCount,
+		Now:                    time.Now(),
 	}
 
 	// Bounded so a wedged flock on meta.json (a concurrent finalize holding it)

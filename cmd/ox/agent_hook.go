@@ -882,5 +882,5 @@ func startSessionRecordingIfConfigured(ctx *HookContext) {
 		agentID = ctx.Marker.AgentID
 	}
 
-	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, "")
+	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, "", recordingSessionIDFromMarker(ctx.Marker))
 }

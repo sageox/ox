@@ -36,15 +36,16 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 	}
 
 	meta := &session.StoreMeta{
-		Version:   "1.0",
-		CreatedAt: state.StartedAt,
-		AgentID:   state.AgentID,
-		SessionID: state.SessionID,
-		AgentType: agentTypeForMeta,
-		Model:     state.Model,
-		Username:  identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
-		RepoID:    repoID,
-		OxVersion: version.Version,
+		Version:                "1.0",
+		CreatedAt:              state.StartedAt,
+		AgentID:                state.AgentID,
+		SessionID:              state.SessionID,
+		ContinuedFromSessionID: state.ContinuedFromSessionID,
+		AgentType:              agentTypeForMeta,
+		Model:                  state.Model,
+		Username:               identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
+		RepoID:                 repoID,
+		OxVersion:              version.Version,
 	}
 
 	// enrich with adapter metadata if available

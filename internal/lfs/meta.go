@@ -70,6 +70,10 @@ type SessionMeta struct {
 	//     and silently break dedup/lookup.
 	SessionID string `json:"session_id,omitempty"`
 
+	// ContinuedFromSessionID links this recording to the prior finalized
+	// recording created for the same native coding-agent session.
+	ContinuedFromSessionID string `json:"continued_from_session_id,omitempty"`
+
 	AgentType           string     `json:"agent_type"` // "claude-code", "cursor", etc.
 	Model               string     `json:"model,omitempty"`
 	Title               string     `json:"title,omitempty"`
@@ -584,6 +588,13 @@ func (b *SessionMetaBuilder) LinkageStatus(status string) *SessionMetaBuilder {
 // round-trip.
 func (b *SessionMetaBuilder) SessionID(id string) *SessionMetaBuilder {
 	b.meta.SessionID = id
+	return b
+}
+
+// ContinuedFromSessionID links this recording to the prior finalized half of
+// the same native coding-agent session.
+func (b *SessionMetaBuilder) ContinuedFromSessionID(id string) *SessionMetaBuilder {
+	b.meta.ContinuedFromSessionID = id
 	return b
 }
 

@@ -97,7 +97,7 @@ like a generic dev-tool doc instead of a SageOx one.
 
 **Colour carries one meaning each**, and never carries it alone — every hue is
 paired with a label or glyph: sage = aligns/shipped, gold = gate, amber =
-hold/warn, red = risk/blocker, teal = team context. **Copper is retired**
+hold/warn, red = risk/blocker, teal = team context. **The old warm brand accent is retired**
 (DDR-010, the green-black rebrand); gold, from the `warning` ramp, is its
 successor. Do not introduce a second brand hue.
 

@@ -1,7 +1,7 @@
 # Makefile for ox CLI tool
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open
-.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-timings test-all test-slow test-browser test-integration test-agents test-preflight test-digital-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
+.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-timings test-all test-slow test-browser test-integration test-agents test-preflight test-digital-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
 GO := go
@@ -462,6 +462,20 @@ docs: ## Generate CLI reference docs
 	@echo "Generating CLI reference documentation..."
 	$(GO) run ./cmd/ox docs --output docs/reference
 	@echo "Documentation generated: docs/reference/"
+
+docs-check: ## Fail when committed CLI reference docs differ from Cobra
+	@docs_tmp=$$(mktemp -d); \
+		trap 'rm -rf "$$docs_tmp"' EXIT; \
+		cp docs/package.json "$$docs_tmp/package.json"; \
+		$(GO) run ./cmd/ox docs --output "$$docs_tmp/reference"; \
+		if ! diff -ru -x .gitkeep docs/reference "$$docs_tmp/reference"; then \
+			echo "Generated CLI docs are stale. Run 'make docs' and commit the result."; \
+			exit 1; \
+		fi; \
+		if ! cmp -s docs/package.json "$$docs_tmp/package.json"; then \
+			echo "docs/package.json is stale. Run 'make docs' and commit the result."; \
+			exit 1; \
+		fi
 
 docs-publish: docs ## Publish docs to GitHub Packages
 	@echo "Publishing docs to GitHub Packages..."

@@ -36,10 +36,11 @@ func TestWriteSessionMarker_RoundTrip(t *testing.T) {
 	t.Cleanup(func() { DeleteSessionMarker(agentSessionID) })
 
 	marker := &SessionMarker{
-		AgentID:        "OxRoundTrip",
-		SessionID:      "oxsid_rt",
-		AgentSessionID: agentSessionID,
-		PrimedAt:       time.Now().Truncate(time.Second),
+		AgentID:            "OxRoundTrip",
+		SessionID:          "oxsid_rt",
+		RecordingSessionID: "ses_019f6f6a-d182-7f4e-a54d-8dcb44567c8d",
+		AgentSessionID:     agentSessionID,
+		PrimedAt:           time.Now().Truncate(time.Second),
 	}
 	require.NoError(t, WriteSessionMarker(marker))
 
@@ -48,6 +49,7 @@ func TestWriteSessionMarker_RoundTrip(t *testing.T) {
 	require.NotNil(t, read)
 	assert.Equal(t, "OxRoundTrip", read.AgentID)
 	assert.Equal(t, "oxsid_rt", read.SessionID)
+	assert.Equal(t, marker.RecordingSessionID, read.RecordingSessionID)
 	assert.Equal(t, agentSessionID, read.AgentSessionID)
 }
 

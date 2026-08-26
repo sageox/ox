@@ -1374,6 +1374,9 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		next.AgentID = agentID
 		next.AgentType = agentType
 		next.SessionID = sessionIDForMeta
+		if stored.Meta != nil && stored.Meta.ContinuedFromSessionID != "" {
+			next.ContinuedFromSessionID = stored.Meta.ContinuedFromSessionID
+		}
 
 		// Clear the draft placeholder markers (ADR-029). MANDATORY on this
 		// path, not defensive: `next := current` above deliberately preserves
@@ -1849,7 +1852,7 @@ func (h *SessionFinalizeHandler) gitCommitPointerRewrite(payload *SessionFinaliz
 func (h *SessionFinalizeHandler) synthesizeMeta(sessionDir, sessionName string) *lfs.SessionMeta {
 	rawPath := filepath.Join(sessionDir, "raw.jsonl")
 
-	var agentID, agentType, username, headerSessionID string
+	var agentID, agentType, username, headerSessionID, continuedFromSessionID string
 	var createdAt time.Time
 	if stored, err := session.ReadSessionFromPath(rawPath); err == nil && stored != nil && stored.Meta != nil {
 		agentID = stored.Meta.AgentID
@@ -1857,6 +1860,7 @@ func (h *SessionFinalizeHandler) synthesizeMeta(sessionDir, sessionName string) 
 		username = stored.Meta.Username
 		createdAt = stored.Meta.CreatedAt
 		headerSessionID = stored.Meta.SessionID
+		continuedFromSessionID = stored.Meta.ContinuedFromSessionID
 	}
 	// Crash-safe carrier read: a recording written by an older writer can fail
 	// to parse into StoreMeta while its raw first line still carries the ID.
@@ -1878,6 +1882,7 @@ func (h *SessionFinalizeHandler) synthesizeMeta(sessionDir, sessionName string) 
 	// recording already had — exactly what ResolveOrMintSessionID exists to stop.
 	return lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).
 		SessionID(session.ResolveOrMintSessionID("", headerSessionID)).
+		ContinuedFromSessionID(continuedFromSessionID).
 		StopReason(session.StopReasonRecovered).
 		Build()
 }
@@ -2317,6 +2322,9 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	}
 	if state.SessionID != "" {
 		metaFields["session_id"] = state.SessionID
+	}
+	if state.ContinuedFromSessionID != "" {
+		metaFields["continued_from_session_id"] = state.ContinuedFromSessionID
 	}
 	header := map[string]any{
 		"_meta": metaFields,

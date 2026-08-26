@@ -167,7 +167,7 @@ func TestStripANSI(t *testing.T) {
 		want  string
 	}{
 		{"hello world", "hello world"},
-		{"\x1b[38;2;224;165;106m\u2726\x1b[m Use ox", "\u2726 Use ox"},
+		{"\x1b[38;2;173;207;163m\u2726\x1b[m Use ox", "\u2726 Use ox"},
 		{"\x1b[1mBold\x1b[0m Normal", "Bold Normal"},
 	}
 

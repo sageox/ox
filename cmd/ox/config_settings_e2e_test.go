@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ledger"
@@ -140,7 +141,7 @@ func TestConfigE2E_SessionRecordingGateControlsRecording(t *testing.T) {
 
 	// Disabled via the real command: the gate creates no recording.
 	oxConfigSetRepo(t, "session_recording", "disabled")
-	assert.Nil(t, startSessionRecording(f.projectRoot, agentID, "claude-code", ""),
+	assert.Nil(t, startSessionRecording(f.projectRoot, agentID, "claude-code", "", ""),
 		"session_recording=disabled must not start a recording")
 	st, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
 	require.NoError(t, err)
@@ -154,7 +155,7 @@ func TestConfigE2E_SessionRecordingGateControlsRecording(t *testing.T) {
 
 	// Auto via the real command: the gate creates a recording with a transcript.
 	oxConfigSetRepo(t, "session_recording", "auto")
-	status := startSessionRecording(f.projectRoot, agentID, "claude-code", "")
+	status := startSessionRecording(f.projectRoot, agentID, "claude-code", "", "")
 	require.NotNil(t, status, "session_recording=auto must start a recording")
 	assert.True(t, status.Recording, "auto must actually record")
 	st2, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
@@ -162,6 +163,60 @@ func TestConfigE2E_SessionRecordingGateControlsRecording(t *testing.T) {
 	require.NotNil(t, st2, "auto must persist recording state")
 	assert.FileExists(t, filepath.Join(st2.SessionPath, "raw.jsonl"),
 		"auto must create the session transcript on disk")
+}
+
+// TestConfigE2E_ResumeLinksNewRecordingToPriorSession exercises the durable
+// resume handoff: a native coding-agent session marker survives SessionEnd,
+// and a later prime uses its prior ses_ identity to link the new recording.
+func TestConfigE2E_ResumeLinksNewRecordingToPriorSession(t *testing.T) {
+	f := newDraftLedgerFixture(t)
+	t.Chdir(f.projectRoot)
+	cfg = &config.Config{}
+	oxConfigSetRepo(t, "session_recording", "auto")
+
+	const (
+		agentID        = "OxResume"
+		agentSessionID = "claude-resume-fixture"
+	)
+	t.Cleanup(func() { _ = DeleteSessionMarker(agentSessionID) })
+
+	firstStatus := startSessionRecording(f.projectRoot, agentID, "claude-code", "", "")
+	require.NotNil(t, firstStatus)
+	first, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
+	require.NoError(t, err)
+	require.NotNil(t, first)
+
+	marker := &SessionMarker{
+		AgentID:            agentID,
+		RecordingSessionID: first.SessionID,
+		AgentSessionID:     agentSessionID,
+		PrimedAt:           time.Now(),
+	}
+	require.NoError(t, WriteSessionMarker(marker))
+
+	// SessionEnd finalizes the first recording and clears its active state.
+	// Removing the cache directory models the daemon's successful upload/prune.
+	_, err = session.StopRecording(f.projectRoot, agentID)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(first.SessionPath))
+
+	resumedMarker, err := ReadSessionMarker(agentSessionID)
+	require.NoError(t, err)
+	continuedFrom := recordingSessionIDFromMarker(resumedMarker)
+	secondStatus := startSessionRecording(f.projectRoot, agentID, "claude-code", "", continuedFrom)
+	require.NotNil(t, secondStatus)
+	second, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
+	require.NoError(t, err)
+	require.NotNil(t, second)
+
+	assert.NotEqual(t, first.SessionID, second.SessionID, "each finalized half keeps its own identity")
+	assert.Equal(t, first.SessionID, second.ContinuedFromSessionID)
+
+	stored, err := session.ReadSessionFromPath(filepath.Join(second.SessionPath, "raw.jsonl"))
+	require.NoError(t, err)
+	require.NotNil(t, stored.Meta)
+	assert.Equal(t, first.SessionID, stored.Meta.ContinuedFromSessionID,
+		"continuation must survive loss of the ephemeral recording state")
 }
 
 // TestConfigE2E_CloudQueryGateControlsTheNetworkDecision proves the privacy

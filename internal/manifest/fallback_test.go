@@ -20,7 +20,7 @@ func TestFallbackConfigFor_KB(t *testing.T) {
 	assert.ElementsMatch(t, []string{".sageox/", "AGENTS.md", "knowledge/"}, cfg.Includes,
 		"kb fallback must be exactly control-plane + AGENTS.md + knowledge/")
 
-	for _, teamOnly := range []string{"SOUL.md", "TEAM.md", "MEMORY.md", "memory/", "docs/", "coworkers/", "discussions/", "agent-context/"} {
+	for _, teamOnly := range []string{"SOUL.md", "TEAM.md", "MEMORY.md", "memory/", "docs/", "agents/", "coworkers/", "discussions/", "agent-context/"} {
 		assert.NotContains(t, cfg.Includes, teamOnly,
 			"kb fallback must not inherit team-context path %q", teamOnly)
 	}
@@ -36,6 +36,7 @@ func TestFallbackConfigFor_TeamContext(t *testing.T) {
 
 	assert.Contains(t, cfg.Includes, "SOUL.md")
 	assert.Contains(t, cfg.Includes, "discussions/")
+	assert.Contains(t, cfg.Includes, "agents/", "team rules must survive manifest fallback")
 	assert.NotContains(t, cfg.Includes, "knowledge/",
 		"team-context fallback must not include the bubble knowledge/ tree")
 }

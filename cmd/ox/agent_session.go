@@ -1029,16 +1029,17 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// carrier of the start-minted ID on the reconstruct path too (daemon
 	// orphan-finalize recovers it from here when meta.json was never written)
 	meta := &session.StoreMeta{
-		Version:      "1.0",
-		SessionID:    state.SessionID,
-		CreatedAt:    state.StartedAt,
-		AgentID:      state.AgentID,
-		AgentType:    agentTypeForMeta,
-		AgentVersion: result.AgentVersion,
-		Model:        result.Model,
-		Username:     identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
-		RepoID:       repoID,
-		OxVersion:    version.Version,
+		Version:                "1.0",
+		SessionID:              state.SessionID,
+		ContinuedFromSessionID: state.ContinuedFromSessionID,
+		CreatedAt:              state.StartedAt,
+		AgentID:                state.AgentID,
+		AgentType:              agentTypeForMeta,
+		AgentVersion:           result.AgentVersion,
+		Model:                  result.Model,
+		Username:               identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
+		RepoID:                 repoID,
+		OxVersion:              version.Version,
 	}
 	if err := rawWriter.WriteHeader(meta); err != nil {
 		rawWriter.Close()
@@ -1362,6 +1363,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		EntryCount(result.EntryCount).
 		Summary(result.Summary).
 		StopReason(session.StopReasonStopped).
+		ContinuedFromSessionID(state.ContinuedFromSessionID).
 		ProducedCommits(state.ProducedCommits).
 		ProducedPlans(state.ProducedPlans).
 		LinkedPRs(state.LinkedPRs).

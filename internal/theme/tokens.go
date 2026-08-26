@@ -25,17 +25,18 @@ type TokenInfo struct {
 	UseCase  string        // one-line description
 }
 
-// Tokens is the authoritative ordered list of every semantic color
-// the CLI exposes. The component catalog uses this to render swatches;
-// docs/design/tokens.md references it as the canonical reference.
+// Tokens is the authoritative ordered list of every semantic color the CLI
+// exposes. Values mirror sageox-design tokens/colors.yaml's CLI hex and
+// hex-light mappings. Secondary is a stronger sage emphasis step, not a second
+// brand hue; gold is reserved exclusively for Warning.
 var Tokens = []TokenInfo{
-	{"Primary", CategoryBrand, "#4F6A48", "#7A8F78", "App name, headers, spinners — the calm sage anchor"},
-	{"Secondary", CategoryBrand, "#B87D3A", "#E0A56A", "Commands, interactive elements — copper highlight"},
-	{"Accent", CategoryBrand, "#3D5437", "#8FA888", "File paths, callouts, \"look here\""},
+	{"Primary", CategoryBrand, "#3D643B", "#7AAA77", "App name, headers, spinners — the calm sage anchor"},
+	{"Secondary", CategoryBrand, "#324F31", "#ADCFA3", "Commands and selected elements — strongest sage emphasis"},
+	{"Accent", CategoryBrand, "#4E7D4C", "#99C693", "File paths, callouts, \"look here\""},
 
-	{"Success", CategorySemantic, "#4F6A48", "#7A8F78", "Passed checks, confirmations"},
-	{"Warning", CategorySemantic, "#B87D3A", "#E0A56A", "Cautions, dirty builds, soft warnings"},
-	{"Error", CategorySemantic, "#A03030", "#E07070", "Failures, blocked items, hard stops"},
+	{"Success", CategorySemantic, "#3D643B", "#7AAA77", "Passed checks, confirmations"},
+	{"Warning", CategorySemantic, "#A5842F", "#D9B654", "Cautions, dirty builds, soft warnings"},
+	{"Error", CategorySemantic, "#9F4838", "#D77E6C", "Failures, blocked items, hard stops"},
 	{"Info", CategorySemantic, "#5580A0", "#7FA7C8", "Flags, links, informational notes"},
 	{"Dim", CategorySemantic, "#6B7580", "#8F99A3", "Descriptions, secondary text"},
 

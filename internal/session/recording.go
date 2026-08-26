@@ -69,19 +69,23 @@ type RecordingState struct {
 	// keep resolving after upload. omitempty: recordings started under an
 	// older binary round-trip with an empty ID and fall back to name-based
 	// URLs.
-	SessionID        string    `json:"session_id,omitempty"`
-	StartedAt        time.Time `json:"started_at"`
-	AdapterName      string    `json:"adapter_name"`
-	SessionFile      string    `json:"session_file"` // source file from adapter (Claude Code JSONL)
-	OutputFile       string    `json:"output_file"`  // output file being recorded
-	SessionPath      string    `json:"session_path"` // path to session folder
-	Title            string    `json:"title,omitempty"`
-	EntryCount       int       `json:"entry_count"`
-	LastReminderSeq  int       `json:"last_reminder_seq"`
-	ReminderInterval int       `json:"reminder_interval"`
-	FilterMode       string    `json:"filter_mode,omitempty"`    // "infra" or "all" - controls event filtering
-	WorkspacePath    string    `json:"workspace_path,omitempty"` // git root / project directory
-	Branch           string    `json:"branch,omitempty"`         // git branch at recording start
+	SessionID string `json:"session_id,omitempty"`
+	// ContinuedFromSessionID links this recording to the prior recording made
+	// for the same native coding-agent session after SessionEnd finalized it.
+	// It is a durable ses_<UUID> identity, not a path or agent-instance ID.
+	ContinuedFromSessionID string    `json:"continued_from_session_id,omitempty"`
+	StartedAt              time.Time `json:"started_at"`
+	AdapterName            string    `json:"adapter_name"`
+	SessionFile            string    `json:"session_file"` // source file from adapter (Claude Code JSONL)
+	OutputFile             string    `json:"output_file"`  // output file being recorded
+	SessionPath            string    `json:"session_path"` // path to session folder
+	Title                  string    `json:"title,omitempty"`
+	EntryCount             int       `json:"entry_count"`
+	LastReminderSeq        int       `json:"last_reminder_seq"`
+	ReminderInterval       int       `json:"reminder_interval"`
+	FilterMode             string    `json:"filter_mode,omitempty"`    // "infra" or "all" - controls event filtering
+	WorkspacePath          string    `json:"workspace_path,omitempty"` // git root / project directory
+	Branch                 string    `json:"branch,omitempty"`         // git branch at recording start
 
 	// Parent-child session tracking for subagent workflows
 	// When a parent spawns subagents, each subagent can report its session
@@ -874,6 +878,11 @@ type StartRecordingOptions struct {
 	Origin      string // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
 	StartOffset int64  // byte offset of SessionFile at recording start; entries before this are pre-session
 	WatchMode   string // "hook" or "tail" — how entries are captured
+
+	// ContinuedFromSessionID is the prior durable recording identity when a
+	// native coding-agent session is reopened after its previous recording was
+	// finalized. Invalid values are ignored rather than persisted.
+	ContinuedFromSessionID string
 }
 
 // StartRecording begins a new recording session.
@@ -979,30 +988,36 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		origin = string(agentx.DetectOriginFromOS(""))
 	}
 
+	continuedFromSessionID := opts.ContinuedFromSessionID
+	if !sessionid.IsValidSessionID(continuedFromSessionID) {
+		continuedFromSessionID = ""
+	}
+
 	state := &RecordingState{
-		AgentID:           opts.AgentID,
-		SessionID:         sessionid.GenerateSessionID(),
-		AdapterName:       opts.AdapterName,
-		SessionFile:       opts.SessionFile,
-		OutputFile:        sessionFile,
-		SessionPath:       sessionPath,
-		Title:             opts.Title,
-		StartedAt:         time.Now().UTC(),
-		EntryCount:        0,
-		LastReminderSeq:   0,
-		ReminderInterval:  reminderInterval,
-		FilterMode:        opts.FilterMode,
-		WorkspacePath:     opts.WorkspacePath,
-		Branch:            opts.Branch,
-		ParentSessionPath: opts.ParentSessionPath,
-		ParentAgentID:     opts.ParentAgentID,
-		AgentType:         opts.AgentType,
-		Model:             opts.Model,
-		ParentPID:         opts.ParentPID,
-		Origin:            origin,
-		CacheDir:          paths.CacheDir(),
-		StartOffset:       opts.StartOffset,
-		WatchMode:         opts.WatchMode,
+		AgentID:                opts.AgentID,
+		SessionID:              sessionid.GenerateSessionID(),
+		ContinuedFromSessionID: continuedFromSessionID,
+		AdapterName:            opts.AdapterName,
+		SessionFile:            opts.SessionFile,
+		OutputFile:             sessionFile,
+		SessionPath:            sessionPath,
+		Title:                  opts.Title,
+		StartedAt:              time.Now().UTC(),
+		EntryCount:             0,
+		LastReminderSeq:        0,
+		ReminderInterval:       reminderInterval,
+		FilterMode:             opts.FilterMode,
+		WorkspacePath:          opts.WorkspacePath,
+		Branch:                 opts.Branch,
+		ParentSessionPath:      opts.ParentSessionPath,
+		ParentAgentID:          opts.ParentAgentID,
+		AgentType:              opts.AgentType,
+		Model:                  opts.Model,
+		ParentPID:              opts.ParentPID,
+		Origin:                 origin,
+		CacheDir:               paths.CacheDir(),
+		StartOffset:            opts.StartOffset,
+		WatchMode:              opts.WatchMode,
 	}
 
 	// always capture parent PID for liveness detection and ghost cleanup

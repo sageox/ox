@@ -29,7 +29,7 @@
 
 ## sequence-diagram
 use: an ordered call/response path that crosses components, services, or async boundaries — when "in what order, how many round-trips" is the question.
-why: shows ordering and latency a flowchart can't; use 2–5 participants, explicit return paths, and one copper focal exchange. Static editorial SVG is the default; Mermaid remains a quick fallback for throwaway work.
+why: shows ordering and latency a flowchart can't; use 2–5 participants, explicit return paths, and one gold focal exchange. Static editorial SVG is the default; Mermaid remains a quick fallback for throwaway work.
 ```html
 <svg data-ox-viz="sequence-diagram" class="oxv-seq" viewBox="0 0 960 600" role="img" aria-labelledby="seq-title seq-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#f4f2ef)">
   <title id="seq-title">Request and response sequence</title>
@@ -559,7 +559,7 @@ why: a top-to-bottom decision spine makes the happy path and exceptional exits i
 
 ## data-flow
 use: data moving from sources through transformations to stores or consumers — when lineage, responsibility, and handoff shape matter more than control flow.
-why: a role-scoped pipeline shows what changes at each boundary and where state becomes durable. Use plain verbs on edges and reserve copper for the transformation under review.
+why: a role-scoped pipeline shows what changes at each boundary and where state becomes durable. Use plain verbs on edges and reserve gold for the transformation under review.
 ```html
 <svg data-ox-viz="data-flow" class="oxv-data" viewBox="0 0 960 600" role="img" aria-labelledby="data-title data-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#f4f2ef)">
   <title id="data-title">Context data flow</title><desc id="data-desc">Loose inputs are normalized, enriched, stored, and then consumed by AI coworkers.</desc>

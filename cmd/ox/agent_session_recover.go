@@ -238,6 +238,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 					metaBuilder := sessionMetaBase(sessionName, displayName, state.AgentID, state.AdapterName, state.StartedAt, projectRoot, sessionID).
 						EntryCount(entryCount).
 						StopReason(session.StopReasonRecovered).
+						ContinuedFromSessionID(state.ContinuedFromSessionID).
 						ProducedCommits(state.ProducedCommits).
 						ProducedPlans(state.ProducedPlans).
 						WithFiles(fileRefs)

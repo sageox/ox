@@ -55,18 +55,19 @@ const draftBlockingFile = "raw.jsonl"
 // session is being shared. The server renders drafts by session name and
 // counters; that is sufficient and it is safe.
 type DraftInput struct {
-	SessionName string
-	SessionID   string // ses_<UUIDv7> minted at StartRecording — REQUIRED
-	Username    string // privacy-safe display name via identity.AttributionDisplayName(); never an email
-	UserID      string
-	RepoID      string
-	AgentID     string
-	AgentType   string
-	Model       string
-	CreatedAt   time.Time
-	TurnCount   int
-	EntryCount  int
-	Now         time.Time
+	SessionName            string
+	SessionID              string // ses_<UUIDv7> minted at StartRecording — REQUIRED
+	ContinuedFromSessionID string
+	Username               string // privacy-safe display name via identity.AttributionDisplayName(); never an email
+	UserID                 string
+	RepoID                 string
+	AgentID                string
+	AgentType              string
+	Model                  string
+	CreatedAt              time.Time
+	TurnCount              int
+	EntryCount             int
+	Now                    time.Time
 }
 
 // Validate checks the required identity fields. A draft without a valid
@@ -79,6 +80,9 @@ func (in DraftInput) Validate() error {
 	}
 	if !sessionid.IsValidSessionID(in.SessionID) {
 		return fmt.Errorf("draft requires a valid ses_ session id, got %q", in.SessionID)
+	}
+	if in.ContinuedFromSessionID != "" && !sessionid.IsValidSessionID(in.ContinuedFromSessionID) {
+		return fmt.Errorf("draft continuation requires a valid ses_ session id, got %q", in.ContinuedFromSessionID)
 	}
 	return nil
 }
@@ -141,23 +145,28 @@ func WriteDraftSessionMeta(ctx context.Context, sessionDir string, in DraftInput
 		if current != nil && current.SessionID != "" {
 			sessionID = current.SessionID
 		}
+		continuedFromSessionID := in.ContinuedFromSessionID
+		if current != nil && current.ContinuedFromSessionID != "" {
+			continuedFromSessionID = current.ContinuedFromSessionID
+		}
 
 		next := &SessionMeta{
-			Version:     "1.0",
-			SessionName: in.SessionName,
-			SessionID:   sessionID,
-			Username:    in.Username,
-			UserID:      in.UserID,
-			RepoID:      in.RepoID,
-			AgentID:     in.AgentID,
-			AgentType:   in.AgentType,
-			Model:       in.Model,
-			CreatedAt:   in.CreatedAt,
-			EntryCount:  in.EntryCount,
-			Draft:       true,
-			TurnCount:   in.TurnCount,
-			UpdatedAt:   &now,
-			Files:       map[string]FileRef{},
+			Version:                "1.0",
+			SessionName:            in.SessionName,
+			SessionID:              sessionID,
+			ContinuedFromSessionID: continuedFromSessionID,
+			Username:               in.Username,
+			UserID:                 in.UserID,
+			RepoID:                 in.RepoID,
+			AgentID:                in.AgentID,
+			AgentType:              in.AgentType,
+			Model:                  in.Model,
+			CreatedAt:              in.CreatedAt,
+			EntryCount:             in.EntryCount,
+			Draft:                  true,
+			TurnCount:              in.TurnCount,
+			UpdatedAt:              &now,
+			Files:                  map[string]FileRef{},
 		}
 		if current != nil && !current.CreatedAt.IsZero() {
 			next.CreatedAt = current.CreatedAt

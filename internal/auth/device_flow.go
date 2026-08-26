@@ -212,8 +212,9 @@ func Login(ctx context.Context, deviceCode *DeviceCodeResponse, statusCallback f
 				refreshToken = jwtToken.RefreshToken
 			}
 
-			// fetch user info using JWT
-			userInfo, err := fetchUserInfo(client, apiURL, accessToken)
+			// Userinfo is part of the device flow and authenticates with the opaque
+			// session credential. The exchanged JWT is for SageOx API requests.
+			userInfo, err := fetchUserInfo(client, apiURL, token.AccessToken)
 			if err != nil {
 				return fmt.Errorf("failed to fetch user info: %w", err)
 			}
@@ -578,8 +579,9 @@ func (c *AuthClient) Login(ctx context.Context, deviceCode *DeviceCodeResponse, 
 				refreshToken = jwtToken.RefreshToken
 			}
 
-			// fetch user info using JWT
-			userInfo, err := fetchUserInfo(httpClient, apiURL, accessToken)
+			// Userinfo is part of the device flow and authenticates with the opaque
+			// session credential. The exchanged JWT is for SageOx API requests.
+			userInfo, err := fetchUserInfo(httpClient, apiURL, token.AccessToken)
 			if err != nil {
 				return fmt.Errorf("failed to fetch user info: %w", err)
 			}

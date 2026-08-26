@@ -112,7 +112,7 @@ func TestApplySparseCheckout_FallbackWithFilePatterns(t *testing.T) {
 		"TEAM.md":   "# Team\n",
 		"MEMORY.md": "# Memory\n",
 	}
-	fallbackDirs := []string{"docs", "memory", "coworkers", ".sageox"}
+	fallbackDirs := []string{"docs", "memory", "agents", "coworkers", ".sageox"}
 	for _, dir := range fallbackDirs {
 		require.NoError(t, os.MkdirAll(filepath.Join(teamDir, dir), 0755))
 		require.NoError(t, os.WriteFile(
@@ -150,6 +150,7 @@ func TestApplySparseCheckout_FallbackWithFilePatterns(t *testing.T) {
 	// verify directory patterns too
 	assert.Contains(t, sparseList, "docs/", "directory patterns must work in sparse-checkout")
 	assert.Contains(t, sparseList, "memory/", "directory patterns must work in sparse-checkout")
+	assert.Contains(t, sparseList, "agents/", "team rules must work in sparse-checkout")
 }
 
 func TestTwoPhaseClone_Success(t *testing.T) {
@@ -208,7 +209,9 @@ func TestTwoPhaseClone_NoManifest(t *testing.T) {
 	isolateCredentials(t)
 
 	// no manifest content — should use fallback
-	bareDir := setupTeamContextBareRepo(t, "", nil)
+	bareDir := setupTeamContextBareRepo(t, "", map[string]string{
+		"agents/rules/review.md": "# Team review rules\n",
+	})
 	cloneURL := "file://" + bareDir
 
 	projectDir := setupProjectWithConfig(t, "")
@@ -228,6 +231,7 @@ func TestTwoPhaseClone_NoManifest(t *testing.T) {
 	assert.FileExists(t, filepath.Join(targetDir, "SOUL.md"))
 	assert.FileExists(t, filepath.Join(targetDir, "TEAM.md"))
 	assert.FileExists(t, filepath.Join(targetDir, "memory", "notes.md"))
+	assert.FileExists(t, filepath.Join(targetDir, "agents", "rules", "review.md"))
 }
 
 func TestTwoPhaseClone_DeniedPathsExcluded(t *testing.T) {
