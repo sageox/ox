@@ -13,6 +13,7 @@ package store
 // data-loss-shaped race that widened with the torn-bolt trigger in #826.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -333,6 +334,7 @@ func TestConcurrentSelfHeal_MultiProcess(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			cmd := exec.Command(os.Args[0], "-test.run=^$")
+			cmd.Dir = tmp // keep the re-exec'd child out of the repo working tree
 			cmd.Env = append(os.Environ(),
 				selfHealHelperEnv+"=1",
 				selfHealRootEnv+"="+tmp,
@@ -408,6 +410,53 @@ func TestSelfHeal_LockTimeout_DefersThenRecovers(t *testing.T) {
 	require.NoError(t, err, "retry after the lock frees must heal")
 	defer func() { _ = healed.Close() }()
 	require.True(t, HasNeedsReindexMarker(tmp, "test"))
+}
+
+// TestSelfHeal_FlockHostileFS_HealsWithoutLock proves the flock-hostile-FS
+// escape hatch: when the heal lock cannot be SET UP at all (not merely
+// contended by a live peer), there is no peer to defer to, so a provably-corrupt
+// index must still be healed rather than left permanently unrepairable. This is
+// the opposite verdict from the timeout case above — a setup error is not a
+// timeout — and the bounded bbolt probe in reclassifyUnderLock is what keeps the
+// lock-less nuke from clobbering a healthy index.
+//
+// Failure prevented: on a filesystem where flock is unsupported, every open of a
+// corrupt sub-index returns a deferral error forever and code search never
+// recovers (the availability bug flagged on #835).
+func TestSelfHeal_FlockHostileFS_HealsWithoutLock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: Bleve + bbolt operations")
+	}
+	installFastCorruptionProbes(t)
+	counter := installActionCounter(t)
+
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "test-index")
+	first, err := openOrCreateBleveIndex(tmp, indexPath, "code")
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+	emptyMappingForLatestSnapshot(t, filepath.Join(indexPath, "store", "root.bolt"))
+
+	// Simulate a filesystem where flock setup fails: the seam returns
+	// (locked=false, err!=nil), which the caller must treat as "no peer", NOT as
+	// a timeout to defer on.
+	orig := acquireSubIndexHealLockFn
+	t.Cleanup(func() { acquireSubIndexHealLockFn = orig })
+	acquireSubIndexHealLockFn = func(string) (*flock.Flock, bool, error) {
+		return nil, false, errors.New("simulated flock-hostile filesystem")
+	}
+
+	healed, err := openOrCreateBleveIndex(tmp, indexPath, "code")
+	require.NoError(t, err, "a corrupt index on a flock-hostile FS must heal, not defer forever")
+	defer func() { _ = healed.Close() }()
+
+	require.Equal(t, 1, counter.get("nuke"),
+		"setup failure with a corrupt index must nuke+recreate, not defer")
+	require.Equal(t, 0, counter.get("defer"))
+	require.True(t, HasNeedsReindexMarker(tmp, "code"))
+	n, err := healed.DocCount()
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), n)
 }
 
 // --- E. Lock placement guardrail ---
