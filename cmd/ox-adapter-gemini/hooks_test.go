@@ -218,6 +218,85 @@ func TestDiagnoseHooks_FlagsTheInvalidShapeAsAnError(t *testing.T) {
 	}
 }
 
+// TestDiagnoseHooks_OffersSafeFixViaOx verifies both repairable gemini hook
+// issues (invalid shape and missing) are repairable via the "ox" dispatch
+// path, not the external adapter binary — ox-adapter-gemini as argv[0] is
+// rejected by adapterFixArgvAllowlist in cmd/ox/doctor_adapters.go, so a
+// FixArgv naming it would silently downgrade to display-only under
+// `ox doctor --fix`.
+// Failure prevented: FixSafe=true with an argv[0] the auto-fix path refuses,
+// making the "safe, automatic" repair never actually run.
+func TestDiagnoseHooks_OffersSafeFixViaOx(t *testing.T) {
+	t.Parallel()
+
+	wantArgv := []string{"ox", "integrate", "install", "--gemini"}
+
+	t.Run("hooks-missing", func(t *testing.T) {
+		repo := t.TempDir()
+
+		issues := diagnoseHooks(repo)
+
+		issue := findIssueBySlug(issues, "gemini:hooks-missing")
+		if issue == nil {
+			t.Fatalf("expected gemini:hooks-missing, got %+v", issues)
+		}
+		if !issue.FixSafe {
+			t.Error("FixSafe = false, want true")
+		}
+		if !slicesEqual(issue.FixArgv, wantArgv) {
+			t.Errorf("FixArgv = %v, want %v (argv[0] must be \"ox\" — "+
+				"ox-adapter-gemini is not in the auto-fix allowlist)", issue.FixArgv, wantArgv)
+		}
+	})
+
+	t.Run("hooks-invalid-shape", func(t *testing.T) {
+		repo := t.TempDir()
+		settingsPath := filepath.Join(repo, ".gemini", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		legacy := `{"hooks":{"PostToolUse":"AGENT_ENV=gemini ox agent hook PostToolUse"}}`
+		if err := os.WriteFile(settingsPath, []byte(legacy), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		issues := diagnoseHooks(repo)
+
+		issue := findIssueBySlug(issues, "gemini:hooks-invalid-shape")
+		if issue == nil {
+			t.Fatalf("expected gemini:hooks-invalid-shape, got %+v", issues)
+		}
+		if !issue.FixSafe {
+			t.Error("FixSafe = false, want true")
+		}
+		if !slicesEqual(issue.FixArgv, wantArgv) {
+			t.Errorf("FixArgv = %v, want %v (argv[0] must be \"ox\" — "+
+				"ox-adapter-gemini is not in the auto-fix allowlist)", issue.FixArgv, wantArgv)
+		}
+	})
+}
+
+func findIssueBySlug(issues []adapterprotocol.DiagnoseIssue, slug string) *adapterprotocol.DiagnoseIssue {
+	for i := range issues {
+		if issues[i].Slug == slug {
+			return &issues[i]
+		}
+	}
+	return nil
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // TestInstallHooks_IsIdempotent keeps repeated installs (doctor auto-fix runs
 // on every invocation) from stacking duplicate hook definitions.
 func TestInstallHooks_IsIdempotent(t *testing.T) {

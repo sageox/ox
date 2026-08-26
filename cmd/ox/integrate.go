@@ -65,6 +65,7 @@ var (
 	integrateAmpFlag      bool
 	integratePiFlag       bool
 	integrateOMPFlag      bool
+	integrateDroidFlag    bool
 	integrateAllFlag      bool
 	integrateForceFlag    bool
 )
@@ -103,7 +104,8 @@ Other agents can be installed with their respective flags:
   --amp       Amp CLI integration (AGENTS.md marker)
   --opencode  OpenCode plugin
   --pi        Pi coding agent integration (AGENTS.md marker)
-  --omp       OMP integration (.omp/AGENTS.md marker)`,
+  --omp       OMP integration (.omp/AGENTS.md marker)
+  --droid     Factory Droid hooks`,
 	RunE: runIntegrateInstall,
 }
 
@@ -128,7 +130,7 @@ var integrateListCmd = &cobra.Command{
 func hasAnyAgentFlag() bool {
 	return integratePiFlag || integrateOMPFlag || integrateAmpFlag ||
 		integrateCodexFlag || integrateGeminiFlag || integrateOpenCodeFlag ||
-		integrateUserFlag
+		integrateDroidFlag || integrateUserFlag
 }
 
 // integrateAgentInfo pairs adapter metadata with its current install status.
@@ -309,6 +311,23 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Factory Droid installation
+	if integrateDroidFlag {
+		if err := installDroidHooks(integrateUserFlag); err != nil {
+			return fmt.Errorf("installing Factory Droid integration: %w", err)
+		}
+
+		location := "project"
+		if integrateUserFlag {
+			location = "user"
+		}
+		fmt.Println(ui.PassStyle.Render("✓") + fmt.Sprintf(" Factory Droid %s-level integration installed", location))
+
+		userCfg, _ := config.LoadUserConfig()
+		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
+		return nil
+	}
+
 	// Codex CLI installation
 	if integrateCodexFlag {
 		if err := installCodexHooks(integrateUserFlag); err != nil {
@@ -449,6 +468,23 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Printf("✓ Amp CLI project-level integration uninstalled\n")
+
+		userCfg, _ := config.LoadUserConfig()
+		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
+		return nil
+	}
+
+	// Factory Droid uninstallation
+	if integrateDroidFlag {
+		if err := uninstallDroidHooks(integrateUserFlag); err != nil {
+			return fmt.Errorf("uninstalling Factory Droid integration: %w", err)
+		}
+
+		location := "project"
+		if integrateUserFlag {
+			location = "user"
+		}
+		fmt.Printf("✓ Factory Droid %s-level integration uninstalled\n", location)
 
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
@@ -752,6 +788,8 @@ func init() {
 	_ = integrateInstallCmd.Flags().MarkHidden("pi")
 	integrateInstallCmd.Flags().BoolVar(&integrateOMPFlag, "omp", false, "install OMP integration (.omp/AGENTS.md marker)")
 	_ = integrateInstallCmd.Flags().MarkHidden("omp")
+	integrateInstallCmd.Flags().BoolVar(&integrateDroidFlag, "droid", false, "install Factory Droid hooks instead of Claude Code hooks")
+	_ = integrateInstallCmd.Flags().MarkHidden("droid")
 
 	// uninstall flags
 	integrateUninstallCmd.Flags().BoolVar(&integrateUserFlag, "user", false, "uninstall from user-level config")
@@ -769,6 +807,8 @@ func init() {
 	_ = integrateUninstallCmd.Flags().MarkHidden("pi")
 	integrateUninstallCmd.Flags().BoolVar(&integrateOMPFlag, "omp", false, "uninstall OMP integration (.omp/AGENTS.md marker)")
 	_ = integrateUninstallCmd.Flags().MarkHidden("omp")
+	integrateUninstallCmd.Flags().BoolVar(&integrateDroidFlag, "droid", false, "uninstall Factory Droid hooks instead of Claude Code hooks")
+	_ = integrateUninstallCmd.Flags().MarkHidden("droid")
 	_ = integrateUninstallCmd.Flags().MarkHidden("all")
 	_ = integrateUninstallCmd.Flags().MarkHidden("force")
 

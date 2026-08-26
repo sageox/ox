@@ -126,7 +126,12 @@ func diagnoseHooks(repoRoot string) []adapterprotocol.DiagnoseIssue {
 		return nil
 	}
 
-	fixCmd := "ox-adapter-gemini install-hooks --repo-root " + repoRoot + " --scope project"
+	fixCmd := "ox integrate install --gemini"
+	// "ox" is the only allowlisted argv[0] for the doctor auto-fix path
+	// (ox-adapter-gemini itself is rejected by adapterFixArgvAllowlist), so
+	// route through the in-process `ox integrate install --gemini` command
+	// rather than the external adapter binary.
+	fixArgv := []string{"ox", "integrate", "install", "--gemini"}
 
 	// gemini validates settings before it does anything else: a non-array
 	// value under hooks.<Event> makes the CLI refuse to start
@@ -150,7 +155,7 @@ func diagnoseHooks(repoRoot string) []adapterprotocol.DiagnoseIssue {
 							"hooks.<Event> to be an array of hook definitions.",
 						settingsPath, event),
 					Fix:     fixCmd,
-					FixArgv: []string{"ox-adapter-gemini", "install-hooks", "--repo-root", repoRoot, "--scope", "project"},
+					FixArgv: fixArgv,
 					FixSafe: true,
 				})
 			}
@@ -166,7 +171,7 @@ func diagnoseHooks(repoRoot string) []adapterprotocol.DiagnoseIssue {
 			Detail: "Gemini CLI hooks are not configured for this project (expected " +
 				"SessionStart, BeforeAgent, AfterTool and SessionEnd). Session recording is disabled.",
 			Fix:     fixCmd,
-			FixArgv: []string{"ox-adapter-gemini", "install-hooks", "--repo-root", repoRoot, "--scope", "project"},
+			FixArgv: fixArgv,
 			FixSafe: true,
 		})
 	}

@@ -166,8 +166,14 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 				Severity: "warning",
 				Title:    "OpenCode hooks not installed",
 				Detail:   fmt.Sprintf("%s not found.", pluginPath),
-				Fix:      "ox-adapter-opencode install-hooks --repo-root " + p.RepoRoot + " --scope project",
-				FixSafe:  true,
+				Fix:      "ox integrate install --opencode",
+				// "ox" is the only allowlisted argv[0] for the doctor
+				// auto-fix path (ox-adapter-opencode itself is rejected by
+				// adapterFixArgvAllowlist), so route through the in-process
+				// `ox integrate install --opencode` command rather than the
+				// external adapter binary.
+				FixArgv: []string{"ox", "integrate", "install", "--opencode"},
+				FixSafe: true,
 			})
 		}
 	}
