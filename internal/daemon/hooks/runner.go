@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/sageox/ox/internal/envutil"
@@ -85,11 +84,15 @@ func (r *HookRunner) run(ctx context.Context, event Event, hook HookConfig) {
 		return
 	}
 
-	cmd := exec.Command("sh", "-c", hook.Command)
+	cmd := newHookCmd(hook.Command)
 	cmd.Stdin = bytes.NewReader(eventJSON)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Run the hook in its own process group (Unix) / process group ID
+	// (Windows) so forked/spawned descendants can be terminated alongside it
+	// — see terminateProcessGroup / killProcessGroup in runner_unix.go and
+	// runner_windows.go.
+	setProcessGroup(cmd)
 	// Hooks run arbitrary user-defined commands (e.g. from a prompt-injected
 	// CLAUDE.md `env > /tmp/x`). They must NOT inherit daemon secrets — sanitize
 	// to the default allowlist before adding the hook-specific OX_EVENT vars.
@@ -105,12 +108,11 @@ func (r *HookRunner) run(ctx context.Context, event Event, hook HookConfig) {
 	}
 
 	// signal the entire process group so forked children are also terminated
-	pgid := cmd.Process.Pid
 	termTimer := time.AfterFunc(hookTimeout, func() {
-		_ = syscall.Kill(-pgid, syscall.SIGTERM)
+		terminateProcessGroup(cmd)
 	})
 	killTimer := time.AfterFunc(hookTimeout+hookKillDelay, func() {
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		killProcessGroup(cmd)
 	})
 
 	waitErr := cmd.Wait()
