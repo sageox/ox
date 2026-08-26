@@ -32,7 +32,7 @@ func checkClaudeSkills(fix bool) checkResult {
 	problem := describeSkillPlan(plan)
 	if !fix {
 		if len(plan.Conflicts) > 0 && len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 {
-			return WarningCheck("Agent skills", problem, "Resolve the preserved user-owned or modified files manually")
+			return WarningCheck("Agent skills", problem, describeSkillConflicts(plan.Conflicts))
 		}
 		return FailedCheck("Agent skills", problem, "Run `ox doctor --fix` to reconcile unchanged managed files")
 	}
@@ -42,9 +42,23 @@ func checkClaudeSkills(fix bool) checkResult {
 	}
 	plan = applied
 	if len(plan.Conflicts) > 0 {
-		return WarningCheck("Agent skills", fmt.Sprintf("reconciled with %d preserved conflict(s)", len(plan.Conflicts)), "Resolve the preserved user-owned or modified files manually")
+		return WarningCheck("Agent skills", fmt.Sprintf("reconciled with %d preserved conflict(s)", len(plan.Conflicts)), describeSkillConflicts(plan.Conflicts))
 	}
 	return PassedCheck("Agent skills", fmt.Sprintf("reconciled %d file change(s) across %d native target(s)", len(plan.Creates)+len(plan.Updates)+len(plan.Removes), plan.TargetCount))
+}
+
+// describeSkillConflicts renders each preserved conflict as "<path> —
+// <reason>" so `ox doctor` tells the user exactly which files to resolve
+// and why ox left them alone, instead of just a count.
+func describeSkillConflicts(conflicts []skillmanager.Conflict) string {
+	if len(conflicts) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(conflicts))
+	for _, c := range conflicts {
+		parts = append(parts, fmt.Sprintf("%s — %s", c.Path, c.Reason))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func describeSkillPlan(plan *skillmanager.ReconcilePlan) string {
