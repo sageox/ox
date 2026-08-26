@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.14.2] - 2026-08-25
 
-Resumed work stays connected, team rules recover reliably, and SageOx uses one calm visual language everywhere.
+Resumed work stays connected, stale sessions clean up after themselves, code indexing self-heals, team rules recover reliably, and SageOx uses one calm visual language everywhere.
 
 ### Improved
 
@@ -19,6 +19,8 @@ Resumed work stays connected, team rules recover reliably, and SageOx uses one c
 
 ### Fixed
 
+- **Session history stays clean** — sessions that were only primed or never captured a prompt no longer pile up on your machine or linger as stale "in progress" conversation links. ox reclaims them automatically in the background and during `ox doctor`, and a session is only registered once real work happens.
+- **Code indexing recovers from a damaged cache** — a corrupted index now rebuilds itself instead of crash-looping `ox`.
 - **Device login works with opaque session credentials** — the login flow uses the credential returned by device authentication to fetch identity while continuing to store the exchanged API token.
 - **Team rules survive sparse-checkout recovery** — fallback manifests include the `agents/` directory, so repositories without a usable manifest still materialize shared AI coworker guidance.
 
