@@ -464,82 +464,93 @@ func TestSelfHeal_FlockHostileFS_DefersNeverRacyNuke(t *testing.T) {
 
 // --- D2. reclassifyUnderLock must never destroy or adopt on a soft failure ---
 
-// TestReclassify_StatError_DefersNotNuke proves a transient stat failure on a
-// healthy sub-index's root.bolt is treated as "defer", never as "rebuild". A
-// permission/I/O blip must not reach RemoveAll and replace a good index with an
-// empty one.
+// TestReclassify_SoftFailure_DefersNotDestructive proves that a SOFT failure
+// during reclassification — one that does NOT prove corruption — resolves to
+// healDefer, never to a destructive rebuild or a silent adoption. Both cases
+// share the "must not nuke, must not adopt, must not mark" contract; each induces
+// a different soft failure and adds its own survival check.
 //
-// Failure prevented: a retryable os.Stat error destroying healthy index content.
-func TestReclassify_StatError_DefersNotNuke(t *testing.T) {
+// Failure prevented: a retryable error (a stat blip, an unreadable version
+// marker) either destroying a healthy index or laundering a stale one as current.
+func TestReclassify_SoftFailure_DefersNotDestructive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: Bleve + bbolt operations")
 	}
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions; cannot force EACCES")
+	cases := []struct {
+		name string
+		// requireVersion selects the plain self-heal (false) vs mapping-upgrade
+		// (true) path through rebuildSubIndexLocked.
+		requireVersion bool
+		skip           func(t *testing.T)
+		// induce corrupts the soft classification input on an otherwise
+		// healthy+free index, and returns an extra post-run assertion (or nil).
+		induce func(t *testing.T, indexPath string) func(t *testing.T)
+	}{
+		{
+			name:           "transient stat error never nukes a healthy index",
+			requireVersion: false,
+			skip: func(t *testing.T) {
+				if os.Geteuid() == 0 {
+					t.Skip("root bypasses directory permissions; cannot force EACCES")
+				}
+			},
+			induce: func(t *testing.T, indexPath string) func(t *testing.T) {
+				// Drop rx on "store" so stat of its child root.bolt fails with EACCES
+				// (a non-ENOENT error) while the bolt still exists and is healthy.
+				storeDir := filepath.Join(indexPath, "store")
+				require.NoError(t, os.Chmod(storeDir, 0o000))
+				t.Cleanup(func() { _ = os.Chmod(storeDir, 0o755) })
+				return func(t *testing.T) {
+					// The healthy bolt must survive — no RemoveAll happened.
+					require.NoError(t, os.Chmod(storeDir, 0o755))
+					_, statErr := os.Stat(filepath.Join(storeDir, "root.bolt"))
+					require.NoError(t, statErr, "healthy bolt must survive a stat-error classification")
+				}
+			},
+		},
+		{
+			name:           "marker read failure never adopts a stale index",
+			requireVersion: true,
+			induce: func(t *testing.T, indexPath string) func(t *testing.T) {
+				// Replace the version marker file with a dir so the under-lock re-read
+				// returns a non-nil error. The index is healthy + free.
+				marker := filepath.Join(indexPath, mappingVersionMarker)
+				require.NoError(t, os.Remove(marker))
+				require.NoError(t, os.Mkdir(marker, 0o755))
+				return nil
+			},
+		},
 	}
-	installFastCorruptionProbes(t)
-	counter := installActionCounter(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.skip != nil {
+				tc.skip(t)
+			}
+			installFastCorruptionProbes(t)
+			counter := installActionCounter(t)
 
-	tmp := t.TempDir()
-	indexPath := filepath.Join(tmp, "test-index")
-	first, err := openOrCreateBleveIndex(tmp, indexPath, "code")
-	require.NoError(t, err)
-	require.NoError(t, first.Close())
+			tmp := t.TempDir()
+			indexPath := filepath.Join(tmp, "test-index")
+			first, err := openOrCreateBleveIndex(tmp, indexPath, "code")
+			require.NoError(t, err)
+			require.NoError(t, first.Close())
 
-	// Drop rx on the "store" dir so stat of its child root.bolt fails with EACCES
-	// (a non-ENOENT error) while the bolt itself still exists and is healthy.
-	storeDir := filepath.Join(indexPath, "store")
-	require.NoError(t, os.Chmod(storeDir, 0o000))
-	t.Cleanup(func() { _ = os.Chmod(storeDir, 0o755) })
+			extraCheck := tc.induce(t, indexPath)
 
-	idx, err := rebuildSubIndexLocked(tmp, indexPath, "code", false,
-		fmt.Errorf("open failed"))
-	require.Nil(t, idx)
-	require.Error(t, err, "a transient stat failure must defer, never nuke a healthy index")
-	require.Equal(t, 1, counter.get("defer"))
-	require.Equal(t, 0, counter.get("nuke"))
-	require.False(t, HasNeedsReindexMarker(tmp, "code"))
+			idx, err := rebuildSubIndexLocked(tmp, indexPath, "code", tc.requireVersion,
+				fmt.Errorf("soft failure"))
+			require.Nil(t, idx)
+			require.Error(t, err, "a soft failure must defer, not rebuild or adopt")
+			require.Equal(t, 1, counter.get("defer"))
+			require.Equal(t, 0, counter.get("nuke"), "no destructive rebuild on a soft failure")
+			require.Equal(t, 0, counter.get("adopt"), "no silent adoption on a soft failure")
+			require.False(t, HasNeedsReindexMarker(tmp, "code"))
 
-	// The healthy bolt must survive — no RemoveAll happened.
-	require.NoError(t, os.Chmod(storeDir, 0o755))
-	_, statErr := os.Stat(filepath.Join(storeDir, "root.bolt"))
-	require.NoError(t, statErr, "healthy bolt must survive a stat-error classification")
-}
-
-// TestReclassify_MarkerReadFailure_DefersNotAdoptStale proves the mapping-version
-// upgrade path defers when the under-lock version re-read fails, instead of
-// adopting a still-stale index and skipping both the upgrade and the reindex
-// marker.
-//
-// Failure prevented: a transient marker read error silently returning a
-// mapping-stale index as if it were current.
-func TestReclassify_MarkerReadFailure_DefersNotAdoptStale(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: Bleve + bbolt operations")
+			if extraCheck != nil {
+				extraCheck(t)
+			}
+		})
 	}
-	installFastCorruptionProbes(t)
-	counter := installActionCounter(t)
-
-	tmp := t.TempDir()
-	indexPath := filepath.Join(tmp, "test-index")
-	first, err := openOrCreateBleveIndex(tmp, indexPath, "code")
-	require.NoError(t, err)
-	require.NoError(t, first.Close())
-
-	// Make the mapping-version marker unreadable (replace the file with a dir) so
-	// the under-lock re-confirm returns a non-nil error. The index is healthy+free.
-	marker := filepath.Join(indexPath, mappingVersionMarker)
-	require.NoError(t, os.Remove(marker))
-	require.NoError(t, os.Mkdir(marker, 0o755))
-
-	idx, err := rebuildSubIndexLocked(tmp, indexPath, "code", true,
-		fmt.Errorf("stale mapping suspected"))
-	require.Nil(t, idx)
-	require.Error(t, err, "must defer when the version can't be re-confirmed, not adopt a maybe-stale index")
-	require.Equal(t, 1, counter.get("defer"))
-	require.Equal(t, 0, counter.get("adopt"))
-	require.Equal(t, 0, counter.get("nuke"))
-	require.False(t, HasNeedsReindexMarker(tmp, "code"))
 }
 
 // TestBoundedAdoptOpen_TimesOutUnderContention proves the adopt open is bounded:
