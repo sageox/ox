@@ -25,6 +25,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
 )
 
 // Env vars set on a re-exec of the test binary make TestMain run
@@ -457,6 +458,118 @@ func TestSelfHeal_FlockHostileFS_HealsWithoutLock(t *testing.T) {
 	n, err := healed.DocCount()
 	require.NoError(t, err)
 	require.Equal(t, uint64(0), n)
+}
+
+// --- D2. reclassifyUnderLock must never destroy or adopt on a soft failure ---
+
+// TestReclassify_StatError_DefersNotNuke proves a transient stat failure on a
+// healthy sub-index's root.bolt is treated as "defer", never as "rebuild". A
+// permission/I/O blip must not reach RemoveAll and replace a good index with an
+// empty one.
+//
+// Failure prevented: a retryable os.Stat error destroying healthy index content.
+func TestReclassify_StatError_DefersNotNuke(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: Bleve + bbolt operations")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions; cannot force EACCES")
+	}
+	installFastCorruptionProbes(t)
+	counter := installActionCounter(t)
+
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "test-index")
+	first, err := openOrCreateBleveIndex(tmp, indexPath, "code")
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+
+	// Drop rx on the "store" dir so stat of its child root.bolt fails with EACCES
+	// (a non-ENOENT error) while the bolt itself still exists and is healthy.
+	storeDir := filepath.Join(indexPath, "store")
+	require.NoError(t, os.Chmod(storeDir, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(storeDir, 0o755) })
+
+	idx, err := rebuildSubIndexLocked(tmp, indexPath, "code", false,
+		fmt.Errorf("open failed"))
+	require.Nil(t, idx)
+	require.Error(t, err, "a transient stat failure must defer, never nuke a healthy index")
+	require.Equal(t, 1, counter.get("defer"))
+	require.Equal(t, 0, counter.get("nuke"))
+	require.False(t, HasNeedsReindexMarker(tmp, "code"))
+
+	// The healthy bolt must survive — no RemoveAll happened.
+	require.NoError(t, os.Chmod(storeDir, 0o755))
+	_, statErr := os.Stat(filepath.Join(storeDir, "root.bolt"))
+	require.NoError(t, statErr, "healthy bolt must survive a stat-error classification")
+}
+
+// TestReclassify_MarkerReadFailure_DefersNotAdoptStale proves the mapping-version
+// upgrade path defers when the under-lock version re-read fails, instead of
+// adopting a still-stale index and skipping both the upgrade and the reindex
+// marker.
+//
+// Failure prevented: a transient marker read error silently returning a
+// mapping-stale index as if it were current.
+func TestReclassify_MarkerReadFailure_DefersNotAdoptStale(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: Bleve + bbolt operations")
+	}
+	installFastCorruptionProbes(t)
+	counter := installActionCounter(t)
+
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "test-index")
+	first, err := openOrCreateBleveIndex(tmp, indexPath, "code")
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+
+	// Make the mapping-version marker unreadable (replace the file with a dir) so
+	// the under-lock re-confirm returns a non-nil error. The index is healthy+free.
+	marker := filepath.Join(indexPath, mappingVersionMarker)
+	require.NoError(t, os.Remove(marker))
+	require.NoError(t, os.Mkdir(marker, 0o755))
+
+	idx, err := rebuildSubIndexLocked(tmp, indexPath, "code", true,
+		fmt.Errorf("stale mapping suspected"))
+	require.Nil(t, idx)
+	require.Error(t, err, "must defer when the version can't be re-confirmed, not adopt a maybe-stale index")
+	require.Equal(t, 1, counter.get("defer"))
+	require.Equal(t, 0, counter.get("adopt"))
+	require.Equal(t, 0, counter.get("nuke"))
+	require.False(t, HasNeedsReindexMarker(tmp, "code"))
+}
+
+// TestBoundedAdoptOpen_TimesOutUnderContention proves the adopt open is bounded:
+// if a live writer holds the sub-index bbolt lock, boundedAdoptOpen returns an
+// error near the timeout instead of blocking in bleve.Open for the writer's
+// whole lifetime (the post-probe race window in reclassifyUnderLock).
+//
+// Failure prevented: the self-heal path hanging indefinitely when an ordinary
+// codedb.Open grabs the lock between the freedom probe and the adopt open.
+func TestBoundedAdoptOpen_TimesOutUnderContention(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: Bleve + bbolt operations")
+	}
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "test-index")
+	first, err := openOrCreateBleveIndex(tmp, indexPath, "code")
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+
+	// A live writer holds bbolt's exclusive lock for the sub-index, mimicking an
+	// ordinary codedb.Open that raced into the post-probe window.
+	boltPath := filepath.Join(indexPath, "store", "root.bolt")
+	held, err := bbolt.Open(boltPath, 0o600, &bbolt.Options{Timeout: time.Second})
+	require.NoError(t, err)
+	defer func() { _ = held.Close() }()
+
+	start := time.Now()
+	idx, err := boundedAdoptOpen(indexPath, 200*time.Millisecond)
+	elapsed := time.Since(start)
+	require.Nil(t, idx)
+	require.Error(t, err, "adopt open must time out, not hang, while a writer holds the lock")
+	require.Less(t, elapsed, 3*time.Second, "must return near the timeout, not block indefinitely")
 }
 
 // --- E. Lock placement guardrail ---

@@ -846,12 +846,13 @@ func acquireSubIndexHealLock(path string) (*flock.Flock, bool, error) {
 // lock is held, so a concurrent process's repair is adopted rather than
 // clobbered.
 //
-// It must NEVER call the blocking bleve.Open (safeOpenBleve) against an index a
-// live writer may hold: bleve.Open takes bbolt's exclusive lock with no timeout
-// and would hang forever. So the classification uses only BOUNDED bbolt probes —
-// the same non-blocking primitives openOrCreateBleveIndex uses — and only calls
-// the blocking open once it has PROVEN the index is free (we briefly held the
-// exclusive lock ourselves). A healthy index held open by the winning process
+// It must NEVER block on bleve.Open against an index a live writer may hold:
+// bleve.Open takes bbolt's exclusive lock with no timeout and would hang forever.
+// So the classification uses only BOUNDED bbolt probes — the same non-blocking
+// primitives openOrCreateBleveIndex uses — and adopts only once it has PROVEN the
+// index is free (we briefly held the exclusive lock ourselves), via
+// boundedAdoptOpen so even a writer that races into the post-probe window caps
+// the wait rather than hanging. A healthy index held open by the winning process
 // therefore resolves to healDefer, never to a hang and never to a nuke (the #828
 // data-loss path).
 //
@@ -860,8 +861,14 @@ func acquireSubIndexHealLock(path string) (*flock.Flock, bool, error) {
 func reclassifyUnderLock(path, name string, requireVersion bool) (bleve.Index, healVerdict) {
 	boltPath := filepath.Join(path, "store", "root.bolt")
 	if _, statErr := os.Stat(boltPath); statErr != nil {
-		// bolt absent / path structure broken → still needs a (re)build.
-		return nil, healNuke
+		if errors.Is(statErr, os.ErrNotExist) {
+			// bolt genuinely absent / path structure broken → needs a (re)build.
+			return nil, healNuke
+		}
+		// A transient stat failure (permission, I/O) on a bolt that may well exist
+		// must NOT be read as "rebuild": that would let a retryable error destroy a
+		// healthy index. Defer and let a later pass reclassify.
+		return nil, healDefer
 	}
 	// Provable structural corruption via the read-only peek (100ms per attempt).
 	if isBleveIndexCorrupt(boltPath) {
@@ -880,24 +887,70 @@ func reclassifyUnderLock(path, name string, requireVersion bool) (bleve.Index, h
 		return nil, healDefer // held by a live writer, or transient — never nuke
 	}
 	// We hold the exclusive lock: the index is healthy AND free. Release it and
-	// hand back a real bleve handle to adopt. Under the heal lock no other healer
-	// competes; the only remaining opener is a brief reader, so the follow-on
-	// blocking open is safe (and matches the pre-existing top-level open).
+	// hand back a real bleve handle to adopt. There is a narrow window between the
+	// Close here and the adopt open below in which an ordinary codedb.Open could
+	// grab bbolt's exclusive lock; because bleve.Open has no deadline, a naked
+	// open would then block for that store's whole lifetime. boundedAdoptOpen caps
+	// the wait and maps that contention to healDefer instead of a hang.
 	_ = db.Close()
-	idx, openErr := safeOpenBleve(path)
+	idx, openErr := boundedAdoptOpen(path, bleveExclusiveProbeTimeout)
 	if openErr != nil {
-		// Raced away between probe and open, or a non-corruption open failure —
-		// defer rather than nuke a possibly-healthy index.
+		// Raced away between probe and open, timed out on a late writer, or a
+		// non-corruption open failure — defer rather than nuke a possibly-healthy
+		// index.
 		return nil, healDefer
 	}
 	if requireVersion {
 		got, verErr := readMappingVersion(path)
-		if verErr == nil && got < bleveMappingVersion(name) {
+		if verErr != nil {
+			// Staleness was already established at the top-level upgrade call; if we
+			// cannot re-confirm the version under the lock, adopting would silently
+			// return a maybe-stale index and skip both the upgrade and the marker.
+			// Defer instead so a later pass makes the call on solid ground.
+			_ = idx.Close()
+			return nil, healDefer
+		}
+		if got < bleveMappingVersion(name) {
 			_ = idx.Close()
 			return nil, healNuke // clean + free but still stale → upgrade it
 		}
 	}
 	return idx, healAdopt
+}
+
+// boundedAdoptOpen opens a bleve index but never blocks longer than timeout.
+// bleve.Open takes bbolt's exclusive lock with no deadline, so if an ordinary
+// codedb.Open races in and grabs the lock between reclassifyUnderLock's freedom
+// probe and this open, a naked open would hang until that store closes. We cap
+// it: on timeout we return an error (the caller maps it to healDefer) and, if
+// the abandoned open later succeeds, close the handle so it cannot leak.
+func boundedAdoptOpen(path string, timeout time.Duration) (bleve.Index, error) {
+	type openResult struct {
+		idx bleve.Index
+		err error
+	}
+	ch := make(chan openResult, 1)
+	go func() {
+		idx, err := safeOpenBleve(path)
+		ch <- openResult{idx, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.idx, r.err
+	case <-time.After(timeout):
+		// Reap a late success so the orphaned handle can't leak. Guard defensively:
+		// the abandoned open may resolve after the index dir has been torn down,
+		// where Close can hit a typed-nil handle or panic — neither may crash us.
+		go func() {
+			r := <-ch
+			if r.err != nil || r.idx == nil {
+				return
+			}
+			defer func() { _ = recover() }()
+			_ = r.idx.Close()
+		}()
+		return nil, fmt.Errorf("adopt open of %s timed out after %s (index became busy)", path, timeout)
+	}
 }
 
 // rebuildSubIndexLocked serializes a destructive sub-index rebuild across
