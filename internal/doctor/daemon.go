@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
@@ -432,6 +433,11 @@ type DaemonHeartbeatCheck struct {
 	Identifier  string // repo_id or team_id
 	DisplayName string // for output
 	Endpoint    string // SageOx endpoint
+
+	// findProjectRoot is exposed for tests; zero-valued in production and
+	// resolved to config.FindProjectRoot inside Run. See
+	// alternateHeartbeatCandidate for why this exists.
+	findProjectRoot func() string
 }
 
 // NewDaemonHeartbeatCheck creates a heartbeat check for a specific repo.
@@ -506,6 +512,28 @@ func (c *DaemonHeartbeatCheck) Run(_ context.Context, _ bool) CheckResult {
 
 	entry, err := daemon.ReadLastHeartbeatFromPath(heartbeatPath)
 	if err != nil || entry == nil {
+		// The doctor CLI computes repoID/workspaceID from git's notion of
+		// project root (the git top-level directory), while the daemon
+		// derives its own workspace identity from config.FindProjectRoot()
+		// (the directory that actually owns .sageox/) at startup. These are
+		// USUALLY the same directory, but not guaranteed to be — e.g. a
+		// monorepo where .sageox/ lives in a subdirectory rather than at
+		// the git top-level. When they diverge, the primary heartbeatPath
+		// above is a path the daemon never wrote to. Before concluding the
+		// repo isn't syncing, retry against the path the daemon would
+		// actually have written, derived the same way it derives it.
+		findProjectRoot := c.findProjectRoot
+		if findProjectRoot == nil {
+			findProjectRoot = config.FindProjectRoot
+		}
+		if altPath := alternateHeartbeatPath(c.Type, ep, findProjectRoot); altPath != "" && altPath != heartbeatPath {
+			if altEntry, altErr := daemon.ReadLastHeartbeatFromPath(altPath); altErr == nil && altEntry != nil {
+				entry, err = altEntry, nil
+			}
+		}
+	}
+
+	if err != nil || entry == nil {
 		if daemon.IsRunning() {
 			// grace period: daemon just started
 			client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
@@ -577,6 +605,60 @@ func splitCompositeID(id string) (repoID, workspaceID string) {
 		return "", ""
 	}
 	return id[:lastIdx], id[lastIdx+1:]
+}
+
+// alternateHeartbeatCandidate derives an independent (repoID, workspaceID)
+// pair for a "workspace" or "ledger" heartbeat check using findProjectRoot —
+// the SAME project-root-discovery function the daemon itself uses at
+// startup (config.FindProjectRoot, which walks up looking for the
+// .sageox-owning directory; see findProjectRootForDaemon in
+// internal/daemon/fallback.go, which sets the daemon process's CWD to this
+// value before it computes CurrentWorkspaceID()).
+//
+// The doctor CLI's primary computation instead starts from git's notion of
+// project root (`git rev-parse --show-toplevel`). That is usually the same
+// directory, but not guaranteed to be: whenever .sageox/ isn't at the git
+// top-level (e.g. a monorepo where a project's .sageox/ lives in a
+// subdirectory), the two diverge and the doctor reads a heartbeat path the
+// daemon never wrote — producing a false "not syncing" warning even though
+// the daemon is healthy and actively syncing this exact repo.
+//
+// Returns ok=false when findProjectRoot is nil, the check type isn't
+// project-root-derived (team heartbeats key on team_id directly, which
+// isn't subject to this divergence), or no repo_id can be found at the
+// discovered root — callers should fall back to whatever the primary
+// lookup found.
+func alternateHeartbeatCandidate(checkType string, findProjectRoot func() string) (repoID, workspaceID string, ok bool) {
+	if findProjectRoot == nil || (checkType != "workspace" && checkType != "ledger") {
+		return "", "", false
+	}
+	root := findProjectRoot()
+	if root == "" {
+		return "", "", false
+	}
+	repoID = config.GetRepoID(root)
+	if repoID == "" {
+		return "", "", false
+	}
+	workspaceID = daemon.RepoBasedWorkspaceID(root)
+	if workspaceID == "" {
+		return "", "", false
+	}
+	return repoID, workspaceID, true
+}
+
+// alternateHeartbeatPath returns the heartbeat file path the daemon would
+// have written for checkType, derived via findProjectRoot. Returns "" if no
+// alternate candidate is available (see alternateHeartbeatCandidate).
+func alternateHeartbeatPath(checkType, ep string, findProjectRoot func() string) string {
+	repoID, workspaceID, ok := alternateHeartbeatCandidate(checkType, findProjectRoot)
+	if !ok {
+		return ""
+	}
+	if checkType == "ledger" {
+		return daemon.UserLedgerHeartbeatPath(ep, repoID, workspaceID)
+	}
+	return daemon.UserHeartbeatPath(ep, repoID, workspaceID)
 }
 
 // DaemonFDPressureCheck warns when the daemon is consuming a worrying
@@ -804,34 +886,76 @@ func (c *DaemonFDGrowthCheck) Run(_ context.Context, _ bool) CheckResult {
 		history.Samples = history.Samples[len(history.Samples)-fdHistoryMaxSamples:]
 	}
 
-	// Persist BEFORE returning so the next run sees this sample even on a
-	// fast doctor invocation. A failed write is non-fatal — we still
-	// report the in-memory verdict.
+	// Persist BEFORE computing the verdict so the next run sees this sample
+	// even on a fast doctor invocation. A failed write is non-fatal — we
+	// still report the in-memory verdict.
 	_ = saveFDHistory(path, history)
 
-	if len(history.Samples) < 2 {
+	return fdGrowthVerdict(c.Name(), history)
+}
+
+// samplesForCurrentLifetime returns the trailing run of samples that share
+// the newest sample's PID — i.e. only the samples captured during the
+// currently-running daemon process's lifetime.
+//
+// The daemon restarts many times over the life of a history file (each
+// restart gets a fresh PID from the OS, and a fresh FD count that has
+// nothing to do with the previous process's count). Comparing a sample from
+// a previous process's lifetime against the current one is not a valid
+// leak signal — over enough restarts it produces exactly the kind of
+// "+44 FDs over 81 days" reading that looks like a slow leak but is really
+// just two unrelated processes' steady-state counts happening to differ.
+//
+// A PID of 0 means "unknown" (a sample written before this field existed,
+// or a platform that doesn't report it) and is treated as its own
+// unmatched lifetime rather than silently bridging across restarts.
+func samplesForCurrentLifetime(samples []fdHistorySample) []fdHistorySample {
+	if len(samples) == 0 {
+		return nil
+	}
+	currentPID := samples[len(samples)-1].PID
+	start := len(samples) - 1
+	for start > 0 && samples[start-1].PID == currentPID {
+		start--
+	}
+	return samples[start:]
+}
+
+// fdGrowthVerdict computes the FD-growth CheckResult from the (already
+// updated + persisted) sample history. Pure (no daemon/IPC) so the
+// PID-segmentation and threshold logic is unit-testable without a running
+// daemon — mirrors fdPressureVerdict.
+//
+// Only samples sharing the newest sample's PID are compared; see
+// samplesForCurrentLifetime for why cross-restart comparisons are invalid.
+func fdGrowthVerdict(name string, history fdHistoryFile) CheckResult {
+	current := history.Samples[len(history.Samples)-1]
+	lifetime := samplesForCurrentLifetime(history.Samples)
+
+	if current.PID == 0 || len(lifetime) < 2 {
 		return CheckResult{
-			Name:    c.Name(),
+			Name:    name,
 			Status:  StatusPass,
-			Message: fmt.Sprintf("%d FDs (history seeding)", status.OpenFDs),
+			Message: fmt.Sprintf("%d FDs (history seeding)", current.Count),
 		}
 	}
 
-	oldest := history.Samples[0]
-	newest := history.Samples[len(history.Samples)-1]
+	oldest := lifetime[0]
+	newest := lifetime[len(lifetime)-1]
 	span := newest.At.Sub(oldest.At)
 	delta := newest.Count - oldest.Count
 
-	msg := fmt.Sprintf("%d FDs (delta %+d over %s, %d samples)",
-		status.OpenFDs, delta, formatDuration(span), len(history.Samples))
+	msg := fmt.Sprintf("%d FDs (delta %+d over %s, %d samples this run)",
+		current.Count, delta, formatDuration(span), len(lifetime))
 
 	if span < fdGrowthMinSpan {
-		// Not enough history to call growth meaningful yet.
-		return CheckResult{Name: c.Name(), Status: StatusPass, Message: msg}
+		// Not enough history within this daemon lifetime to call growth
+		// meaningful yet.
+		return CheckResult{Name: name, Status: StatusPass, Message: msg}
 	}
 	if delta >= fdGrowthWarnDelta {
 		return CheckResult{
-			Name:    c.Name(),
+			Name:    name,
 			Status:  StatusWarn,
 			Message: msg,
 			Fix: "Daemon FD count has been climbing across recent doctor runs. " +
@@ -839,7 +963,7 @@ func (c *DaemonFDGrowthCheck) Run(_ context.Context, _ bool) CheckResult {
 				"daemon log for any subsystem opening per-team/per-KB handles without releasing them.",
 		}
 	}
-	return CheckResult{Name: c.Name(), Status: StatusPass, Message: msg}
+	return CheckResult{Name: name, Status: StatusPass, Message: msg}
 }
 
 // DefaultFDGrowthHistoryPath returns the canonical on-disk path for the

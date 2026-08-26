@@ -55,10 +55,22 @@ func (r *WhisperRegistry) SetClock(now func() time.Time) {
 	r.now = now
 }
 
-// AddTeamStore registers a team whisper store.
+// AddTeamStore registers a team whisper store. If a different store is
+// already registered for teamID, the prior handle is closed before it is
+// replaced — otherwise the old sqlite connection would leak. Callers today
+// gate this behind HasTeamStore so a replace never happens in practice, but
+// the close-before-replace makes the registry correct on its own terms and
+// prevents a latent fd leak if that guard is ever bypassed (e.g. a GC
+// directory-swap that re-points a team's DB path).
 func (r *WhisperRegistry) AddTeamStore(teamID string, store *whisperstore.Store) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if prior, ok := r.teamStores[teamID]; ok && prior != nil && prior != store {
+		if err := prior.Close(); err != nil {
+			r.logger.Warn("failed to close replaced team whisper store",
+				"team_id", teamID, "err", err)
+		}
+	}
 	r.teamStores[teamID] = store
 	r.lastAccess[teamID] = r.now()
 }
