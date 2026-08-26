@@ -33,6 +33,10 @@ a teammate already in the same files, and proposes a plan **enriched** with
 collisions, prior art, and who owns the area. All of it because every session is
 recorded to your team's shared, queryable history.
 
+## Latest Project Activity
+
+![SageOx — latest project activity](https://www.sageox.ai/api/v1/public/mural/vio0F88wcSd9grV3piwmisVtNA_rWF-ta8gpGJ_tf1g)
+
 ---
 
 ## Install
@@ -73,23 +77,19 @@ ox status               # auth, project, sync state, and daemon health
 That's the whole setup. When an AI coworker runs `ox agent prime` at the start of
 a session, team context loads in automatically.
 
-**Recording is opt-in.** Nothing is captured until you start a session:
+**Recording is on by default.** Once a repo is initialized, every new AI coworker
+session records automatically — there's nothing to start. Context only compounds
+when sessions are actually captured, and the payoff arrives a week later when a
+teammate's agent already knows what you decided today.
+
+Secrets are stripped locally before anything uploads, and you can record manually
+or turn it off entirely — open the config editor and pick a recording mode:
 
 ```bash
-ox session start        # record this one session
+ox config                # interactive editor; walks you through the modes
 ```
 
-**We recommend turning it on for good.** Context only compounds if sessions are
-actually captured — a session nobody recorded is context nobody inherits, and the
-payoff above arrives a week later when a teammate's agent already knows what you
-decided today:
-
-```bash
-ox config set session_recording auto
-```
-
-Secrets are stripped locally before anything uploads, and you can pause or
-disable at any time — see [What gets recorded](#what-gets-recorded).
+More detail in [What gets recorded](#what-gets-recorded).
 
 Then just ask your AI coworker things it couldn't have known on its own:
 
@@ -105,8 +105,9 @@ Then just ask your AI coworker things it couldn't have known on its own:
 so teammates and future sessions can learn from prior work. Here is exactly what
 leaves your machine, and what doesn't.
 
-**Recording is off until you start it.** Nothing is captured until you run
-`ox session start`, and secrets are stripped locally before anything is uploaded.
+**Recording is on by default.** In an initialized repo, each new AI coworker
+session records automatically, and secrets are stripped locally before anything is
+uploaded.
 
 ### What is captured
 
@@ -145,6 +146,9 @@ If you're offline or an upload fails, the session stays cached and
 `ox doctor --fix` retries it later. Cached sessions persist until uploaded or
 removed; there's no TTL or automatic pruning.
 
+`ox uninstall` removes local session data and config. Sessions already synced are
+not deleted; add `--local-only` to skip notifying the server.
+
 <sub>Enterprise self-hosted deployment isn't available today —
 [talk to us](https://sageox.ai) if you need it.</sub>
 
@@ -155,52 +159,30 @@ public, not shared across teams. **Other than turning off recording for the sess
 altogether, there are no finer per-session privacy controls:** if you are on a
 team and you record, your teammates can read your sessions.
 
-### Deleting a session
+### Turning it off, or recording manually
+
+Recording starts automatically with each new AI coworker session. To end the
+active one:
 
 ```bash
-ox session remove       # delete from your local cache
-```
-
-> ⚠️ **This only reaches sessions that haven't synced yet.** `ox session stop`
-> saves locally and then uploads immediately, so in normal online use a stopped
-> session is already synced. There is no discard option and no
-> self-service purge.
-
-Once a session is synced, its record is permanent: it's backed by a git
-repository, so it remains in git history even after the session is removed.
-Rewriting that history isn't exposed through the CLI. **Contact support if you
-need further session purging.**
-
-`ox uninstall` removes local session data and config. Sessions already synced are
-not deleted; add `--local-only` to skip notifying the server.
-
-### Starting, pausing, and turning it off
-
-```bash
-ox session start        # begin recording
 ox session stop         # end the active session
 ```
 
-To change the standing behavior, set `session_recording`:
+To change the standing behavior — record manually, or not at all — open the
+config editor and choose a recording mode:
 
 ```bash
-ox config set session_recording auto              # this machine, every repo
-ox config set session_recording disabled          # this machine, every repo
-ox config set session_recording disabled --repo   # this repo only
+ox config               # interactive editor; walks you through the modes
 ```
 
 | Mode | Behavior |
 |---|---|
-| `auto` | Agent hooks start recording automatically — **recommended** |
-| `manual` | Recording only when you run `ox session start` — **default** |
+| `auto` | Agent hooks start recording automatically — **default** |
+| `manual` | Recording only when you run `ox session start` |
 | `disabled` | Agent hooks won't auto-start; manual start still works |
 
 All three modes govern what **agent hooks** do. `ox session start` always works —
 including under `disabled`, which stops automatic capture but is not a hard lock.
-
-Most teams move to `auto` once they've read this section. Shared memory is only
-as good as what reaches it, and `manual` means the sessions worth inheriting are
-exactly the ones someone forgot to record.
 
 Your user-level setting overrides every repo and team setting. A `disabled` you
 set for yourself can't be undone by a repo you cloned or a team you joined.
@@ -211,28 +193,10 @@ Full detail: [Privacy Policy](https://sageox.ai/privacy) ·
 
 ---
 
-## The loop
-
-```mermaid
-flowchart LR
-    REC["Record at sageox.ai<br/>discussions, decisions"]
-    KB["Knowledge Bubbles<br/>team context plus history"]
-    PRIME["ox agent prime<br/>loads context"]
-    WORK["AI Coworker session"]
-    CAP["Session captured<br/>to team history"]
-    REC --> KB --> PRIME --> WORK --> CAP --> KB
-```
-
-Record a discussion once. It's distilled into **Knowledge Bubbles** ⏳ — your
-team's shared memory. The next time anyone primes a coding session, that context
-flows in. The session itself is captured back to the team's space, so the next coworker
-inherits it too. Context compounds instead of evaporating.
-
 ## What you get
 
 | Capability | | Command | Learn more |
 |---|:---:|---|---|
-| Team context + repo memory as **Knowledge Bubbles** | ⏳ | `ox kb list` | [jit-discovery](docs/guides/jit-discovery.md) |
 | Query past sessions, discussions, and code — across agents and machines | ✅ | `ox query "..."` | [query](docs/reference/query.mdx) |
 | Auto-recorded coworker sessions | ✅ | `ox agent prime`, `ox session list` | [session capture](docs/architecture/session-capture-architecture.md) |
 | Real-time coordination signals between coworkers | ✅ | `ox murmur "..."` | — |
@@ -241,7 +205,7 @@ inherits it too. Context compounds instead of evaporating.
 | Load an expert AI coworker into context | ✅ | `ox coworker load <name>` | — |
 | Diagnose and auto-fix your setup | ✅ | `ox doctor --fix` | [doctor](docs/reference/doctor.mdx) |
 
-✅ generally available · ⏳ in preview — available, still stabilizing
+✅ generally available
 
 ## How it works
 
@@ -294,6 +258,14 @@ is compatible with, not affiliated with, them.</sub>
 
 ## Configuration
 
+Run `ox config` to open the interactive editor — it lists every setting with its
+current value and source, walks you through valid choices, and writes the right
+file for you. It's the recommended way to change anything, recording mode included.
+
+```bash
+ox config               # interactive settings editor (TUI)
+```
+
 Configuration resolves in this order, highest priority to lowest:
 
 1. **CLI flags** — `--verbose`, `--quiet`, `--json`
@@ -306,8 +278,8 @@ Configuration resolves in this order, highest priority to lowest:
 deliberate: a repo or team can suggest a default, but it cannot override your
 personal preferences — recording mode, telemetry, and the like.
 
-`ox config set <key> <value>` writes the user file; add `--repo` to write the repo
-file instead.
+For scripting, `ox config set <key> <value>` writes the user file directly; add
+`--repo` to write the repo file instead.
 
 ## Contributing
 
