@@ -39,12 +39,19 @@ func newRetractScheduler(t *testing.T) (*SyncScheduler, string) {
 
 func gitInit(t *testing.T, dir string) {
 	t.Helper()
-	mustGit(t, dir, "init", "--quiet")
+	mustGit(t, dir, "-c", "init.defaultBranch=main", "init", "--quiet")
 	mustGit(t, dir, "config", "user.email", "test@example.com")
 	mustGit(t, dir, "config", "user.name", "Test")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("x\n"), 0o644))
 	mustGit(t, dir, "add", "README.md")
 	mustGit(t, dir, "commit", "--quiet", "-m", "init")
+
+	// A bare upstream so draftPublishedOnRemote can resolve @{upstream}: the
+	// reaper only retracts drafts already present on the remote.
+	remote := t.TempDir()
+	mustGit(t, remote, "-c", "init.defaultBranch=main", "init", "--quiet", "--bare")
+	mustGit(t, dir, "remote", "add", "origin", remote)
+	mustGit(t, dir, "push", "-u", "--quiet", "origin", "main")
 }
 
 func mustGit(t *testing.T, dir string, args ...string) string {
@@ -56,9 +63,10 @@ func mustGit(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// commitStaleDraft writes and commits a draft placeholder whose updated_at
-// heartbeat is `age` in the past, mirroring a real published draft commit.
-func commitStaleDraft(t *testing.T, ledger, name string, age time.Duration) {
+// writeDraftCommit writes and commits a draft placeholder whose updated_at
+// heartbeat is `age` in the past. When push is true it is also pushed to the
+// bare upstream, mirroring a real published draft.
+func writeDraftCommit(t *testing.T, ledger, name string, age time.Duration, push bool) {
 	t.Helper()
 	dir := filepath.Join(ledger, "sessions", name)
 	require.NoError(t, os.MkdirAll(dir, 0o755))
@@ -70,6 +78,16 @@ func commitStaleDraft(t *testing.T, ledger, name string, age time.Duration) {
 	}))
 	mustGit(t, ledger, "add", "-A", "sessions/")
 	mustGit(t, ledger, "commit", "--quiet", "-m", "session-draft: "+name)
+	if push {
+		mustGit(t, ledger, "push", "--quiet", "origin", "main")
+	}
+}
+
+// commitStaleDraft writes, commits, and PUSHES a stale draft — the normal
+// published-then-abandoned case the reaper cleans.
+func commitStaleDraft(t *testing.T, ledger, name string, age time.Duration) {
+	t.Helper()
+	writeDraftCommit(t, ledger, name, age, true)
 }
 
 // TestRetractOrphanedDrafts_RemovesStaleCommittedDraft is the core behavior: a
@@ -87,6 +105,24 @@ func TestRetractOrphanedDrafts_RemovesStaleCommittedDraft(t *testing.T) {
 	subj := mustGit(t, ledger, "log", "-1", "--format=%s")
 	assert.Equal(t, "session-draft: retract "+name, subj,
 		"retraction must land as a session-draft: commit so the daemon push carries it")
+}
+
+// TestRetractOrphanedDrafts_SkipsUnpushedDraft — a stale draft whose publish
+// commit is still LOCAL must never be retracted. Stacking a retraction on an
+// unpushed publish would make pushSessionDraftCommits ship both, manufacturing a
+// publish the daemon should never send to the remote.
+func TestRetractOrphanedDrafts_SkipsUnpushedDraft(t *testing.T) {
+	s, ledger := newRetractScheduler(t)
+	const name = "2026-01-01T00-00-testuser-OxUnpub"
+	writeDraftCommit(t, ledger, name, 120*time.Hour, false) // committed but NOT pushed
+
+	s.retractOrphanedDrafts(context.Background(), ledger)
+
+	assert.DirExists(t, filepath.Join(ledger, "sessions", name),
+		"an unpushed draft belongs to the publish flow — the reaper must not touch it")
+	subj := mustGit(t, ledger, "log", "-1", "--format=%s")
+	assert.NotEqual(t, "session-draft: retract "+name, subj,
+		"no retraction commit may be created for an unpublished draft")
 }
 
 // TestRetractOrphanedDrafts_KeepsFreshDraft — a draft whose heartbeat is recent

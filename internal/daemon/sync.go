@@ -1797,6 +1797,16 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 			continue
 		}
 		rel := filepath.ToSlash(filepath.Join("sessions", name))
+
+		// Only retract drafts that are ALREADY on the remote. If a draft's publish
+		// commit is still local/unpushed, stacking a retraction on top of it would
+		// make pushSessionDraftCommits ship BOTH — manufacturing a publish the
+		// daemon never should. An unpushed draft belongs to the publish flow, not
+		// this reaper. Unknown/unresolvable upstream fails safe to skip.
+		if !s.draftPublishedOnRemote(ctx, ledgerPath, rel) {
+			continue
+		}
+
 		if _, err := s.git.RunGit(ctx, ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", rel); err != nil {
 			s.logger.Warn("retract orphaned draft: git rm failed", "session", name, "error", err)
 			continue
@@ -1804,21 +1814,50 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 		// Remove any untracked leftovers git rm --ignore-unmatch left behind.
 		_ = os.RemoveAll(filepath.Join(ledgerPath, "sessions", name))
 
-		// Only commit if the rm actually staged a tracked deletion; a draft
-		// written-but-never-committed stages nothing and needs no commit.
-		staged, _ := s.git.RunGit(ctx, ledgerPath, "diff", "--cached", "--name-only", "--", rel)
-		if strings.TrimSpace(staged) == "" {
+		// A published draft's meta.json is tracked, so git rm must have staged a
+		// deletion. If the diff errors or shows nothing staged, we cannot safely
+		// commit — restore the index + worktree from HEAD so a dangling staged
+		// deletion can't be swept into an unrelated commit, and the next scan
+		// rediscovers the orphan to retry.
+		staged, diffErr := s.git.RunGit(ctx, ledgerPath, "diff", "--cached", "--name-only", "--", rel)
+		if diffErr != nil || strings.TrimSpace(staged) == "" {
+			s.restoreDraftForRetry(ctx, ledgerPath, rel, name, diffErr)
 			continue
 		}
 		if _, err := s.git.RunGit(ctx, ledgerPath, "commit", "--no-verify",
 			"-m", sessionDraftCommitPrefix+"retract "+name, "--", rel); err != nil {
-			s.logger.Warn("retract orphaned draft: git commit failed", "session", name, "error", err)
+			// Commit failed: the deletion is staged and the dir is gone, which
+			// would orphan the candidate. Restore so the next scan retries.
+			s.restoreDraftForRetry(ctx, ledgerPath, rel, name, err)
 			continue
 		}
 		removed++
 	}
 	if removed > 0 {
 		s.logger.Info("retracted orphaned session drafts", "path", ledgerPath, "count", removed)
+	}
+}
+
+// draftPublishedOnRemote reports whether the draft at rel exists in the ledger's
+// upstream tree — i.e. it has actually been published to the remote. Fails safe
+// to false (skip retraction) when the upstream cannot be resolved, so the daemon
+// never stacks a retraction on a draft the remote has not seen.
+func (s *SyncScheduler) draftPublishedOnRemote(ctx context.Context, ledgerPath, rel string) bool {
+	_, err := s.git.RunGit(ctx, ledgerPath, "cat-file", "-e", "@{upstream}:"+rel+"/meta.json")
+	return err == nil
+}
+
+// restoreDraftForRetry undoes a partial retraction — unstages the deletion and
+// restores the draft dir from HEAD — so a failed retract leaves no dangling
+// staged deletion (which an unrelated commit could sweep under the wrong
+// message) and the next scan can rediscover the orphan and retry it.
+func (s *SyncScheduler) restoreDraftForRetry(ctx context.Context, ledgerPath, rel, name string, cause error) {
+	s.logger.Warn("retract orphaned draft: restoring after failed retraction", "session", name, "error", cause)
+	if _, err := s.git.RunGit(ctx, ledgerPath, "reset", "-q", "--", rel); err != nil {
+		s.logger.Warn("retract orphaned draft: reset failed", "session", name, "error", err)
+	}
+	if _, err := s.git.RunGit(ctx, ledgerPath, "checkout", "-q", "HEAD", "--", rel); err != nil {
+		s.logger.Warn("retract orphaned draft: checkout restore failed", "session", name, "error", err)
 	}
 }
 

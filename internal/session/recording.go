@@ -902,12 +902,21 @@ func CleanupOrphanedStubsInDir(cacheSessionsDir string) GhostCleanupResult {
 			// phantom candidate — fall through
 		}
 
-		// a live recording (marker present + PID alive) is never a phantom.
+		// A live OR unverifiable recording is never a phantom. Fail CLOSED when a
+		// .recording.json marker exists but cannot be read or parsed: an
+		// incomplete/concurrent write is exactly what an ACTIVE recording looks
+		// like mid-flight, and deleting it would destroy a live session's
+		// identity and recovery data. Only reap when the marker is ABSENT, or
+		// present-parseable-and-PID-dead.
 		if data, readErr := os.ReadFile(recordingStatePath(sessionPath)); readErr == nil {
 			var state RecordingState
-			if json.Unmarshal(data, &state) == nil && state.IsAgentAlive() {
-				continue
+			if json.Unmarshal(data, &state) != nil || state.IsAgentAlive() {
+				continue // unreadable-as-JSON or still alive → keep
 			}
+			// parsed cleanly and the PID is dead → eligible; fall through.
+		} else if !os.IsNotExist(readErr) {
+			// marker present but the read itself failed (permission/transient) → keep.
+			continue
 		}
 
 		// age guard: only reap dirs older than the grace period, so a session

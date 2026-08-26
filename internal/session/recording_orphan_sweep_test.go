@@ -127,6 +127,23 @@ func TestCleanupOrphanedStubsInDir_KeepsNonPhantoms(t *testing.T) {
 	assert.DirExists(t, young, "a just-primed session inside the grace period must survive")
 }
 
+// TestCleanupOrphanedStubsInDir_KeepsMalformedMarker guards the P1: a
+// .recording.json that exists but cannot be parsed (an incomplete/concurrent
+// write — exactly what an ACTIVE recording looks like mid-flight) must fail
+// closed, not fall through to os.RemoveAll and destroy a live session.
+func TestCleanupOrphanedStubsInDir_KeepsMalformedMarker(t *testing.T) {
+	base := t.TempDir()
+	dir := makeStub(t, base, "2026-08-25T19-11-ryan-OxMalf", map[string]string{
+		"raw.jsonl":   headerLine,
+		recordingFile: `{"parent_pid": not-valid-json`,
+	}, 2*orphanStubGracePeriod)
+
+	result := CleanupOrphanedStubsInDir(base)
+
+	assert.Equal(t, 0, result.Removed, "an unparseable marker must fail closed (keep)")
+	assert.DirExists(t, dir, "a marker present but unreadable may be a live session mid-write")
+}
+
 // TestCleanupOrphanedStubsInDir_KeepsOversizedContent guards the destructive
 // failure mode: a user turn larger than the 256 KiB scan buffer must NOT be
 // misread as a header-only phantom and deleted. Classification fails safe to
