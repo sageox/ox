@@ -772,6 +772,106 @@ func TestCheckSSHAuth(t *testing.T) {
 	_ = result
 }
 
+// TestClassifyFsckOutput covers the checkGitFsck false-positive fix: git
+// fsck exits non-zero both for genuine object-database corruption AND for
+// harmless broken/dangling refs (e.g. a stale refs/remotes/<remote>/HEAD
+// left behind after the remote's default branch was deleted). Only the
+// former should ever recommend re-cloning the repository.
+func TestClassifyFsckOutput(t *testing.T) {
+	const belgradeStaleHead = "error: refs/remotes/belgrade/HEAD: invalid sha1 pointer 0000000000000000000000000000000000000000"
+
+	tests := []struct {
+		name         string
+		output       string
+		wantSeverity fsckSeverity
+	}{
+		{
+			name:         "empty output is OK",
+			output:       "",
+			wantSeverity: fsckSeverityOK,
+		},
+		{
+			name:         "stale remote-tracking HEAD is a warning, not corruption",
+			output:       belgradeStaleHead,
+			wantSeverity: fsckSeverityWarn,
+		},
+		{
+			name:         "missing blob is genuine object corruption",
+			output:       "missing blob deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+			wantSeverity: fsckSeverityFail,
+		},
+		{
+			name: "broken link is genuine object corruption",
+			output: "broken link from   tree 1111111111111111111111111111111111111111\n" +
+				"              to   blob 0000000000000000000000000000000000000000",
+			wantSeverity: fsckSeverityFail,
+		},
+		{
+			name:         "dangling commit is genuine object corruption",
+			output:       "dangling commit 2222222222222222222222222222222222222222",
+			wantSeverity: fsckSeverityFail,
+		},
+		{
+			name:         "mixed ref issue and object corruption fails — corruption dominates",
+			output:       belgradeStaleHead + "\nmissing blob deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+			wantSeverity: fsckSeverityFail,
+		},
+		{
+			name:         "unrecognized non-empty output stays conservative and fails",
+			output:       "something git fsck never printed before",
+			wantSeverity: fsckSeverityFail,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			severity, summary, detail := classifyFsckOutput(tt.output)
+			if severity != tt.wantSeverity {
+				t.Fatalf("classifyFsckOutput(%q) severity = %q, want %q\nsummary=%q\ndetail=%q",
+					tt.output, severity, tt.wantSeverity, summary, detail)
+			}
+		})
+	}
+}
+
+// TestClassifyFsckOutput_BrokenRemoteHead_RemedyIsRefRepairNotReclone pins the
+// exact remedy shown for the canonical stale refs/remotes/<remote>/HEAD case:
+// it must name `git remote set-head <remote> -a` and must NOT tell the user
+// to re-clone the repository.
+func TestClassifyFsckOutput_BrokenRemoteHead_RemedyIsRefRepairNotReclone(t *testing.T) {
+	output := "error: refs/remotes/belgrade/HEAD: invalid sha1 pointer 0000000000000000000000000000000000000000"
+
+	severity, summary, detail := classifyFsckOutput(output)
+
+	if severity != fsckSeverityWarn {
+		t.Fatalf("severity = %q, want %q (summary=%q detail=%q)", severity, fsckSeverityWarn, summary, detail)
+	}
+	if !strings.Contains(detail, "git remote set-head belgrade -a") {
+		t.Errorf("expected detail to name the concrete fix `git remote set-head belgrade -a`, got: %s", detail)
+	}
+	if strings.Contains(strings.ToLower(detail), "re-clone") {
+		t.Errorf("broken-ref-only finding must never recommend re-cloning, got detail: %s", detail)
+	}
+	if strings.Contains(strings.ToLower(summary), "re-clone") {
+		t.Errorf("broken-ref-only finding must never recommend re-cloning, got summary: %s", summary)
+	}
+}
+
+// TestClassifyFsckOutput_MissingBlob_RemedyIsReclone pins the remedy for
+// genuine object corruption: it must still recommend re-cloning.
+func TestClassifyFsckOutput_MissingBlob_RemedyIsReclone(t *testing.T) {
+	output := "missing blob deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+	severity, summary, detail := classifyFsckOutput(output)
+
+	if severity != fsckSeverityFail {
+		t.Fatalf("severity = %q, want %q (summary=%q detail=%q)", severity, fsckSeverityFail, summary, detail)
+	}
+	if !strings.Contains(strings.ToLower(detail), "re-clone") {
+		t.Errorf("expected genuine object corruption to still recommend re-cloning, got detail: %s", detail)
+	}
+}
+
 // TestExtractTeamIDFromRepoName_DisplayNames verifies that
 // extractTeamIDFromRepoName handles real API display names.
 // Bug #37: the API returns display names like "SageOx" not repo names

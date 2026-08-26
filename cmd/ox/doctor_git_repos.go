@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -383,6 +384,13 @@ func checkMergeConflicts() checkResult {
 // Uses --connectivity-only for speed (skips blob content checks).
 // Detects corrupted objects that can cause silent failures.
 // Has a 5s timeout to avoid blocking on very large repos.
+//
+// git fsck also exits non-zero for harmless broken/dangling refs (e.g. a
+// stale refs/remotes/<remote>/HEAD left behind after the remote's default
+// branch was deleted or renamed) — that is a ref-repair issue, not object
+// database corruption, and does NOT warrant a "re-clone the repository"
+// remedy. classifyFsckOutput() distinguishes the two so only genuine object
+// corruption is reported as FAILED.
 func checkGitFsck() checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
@@ -406,18 +414,39 @@ func checkGitFsck() checkResult {
 	select {
 	case result := <-done:
 		if result.err != nil {
-			// fsck found issues - provide actionable guidance
-			lines := strings.Split(strings.TrimSpace(string(result.output)), "\n")
-			summary := "corruption detected"
-			if len(lines) > 0 && lines[0] != "" {
-				firstLine := lines[0]
-				if len(firstLine) > 50 {
-					firstLine = firstLine[:47] + "..."
-				}
-				summary = firstLine
+			output := strings.TrimSpace(string(result.output))
+			if output == "" {
+				// non-zero exit with no output to classify — stay conservative,
+				// this is the pre-existing "unexplained failure" behavior.
+				return FailedCheck("git integrity", "corruption detected", fsckCorruptionDetail)
 			}
 
-			detail := `Git repository has corrupted objects. This can happen after:
+			severity, summary, detail := classifyFsckOutput(output)
+			if severity == fsckSeverityWarn {
+				return WarningCheck("git integrity", summary, detail)
+			}
+			return FailedCheck("git integrity", summary, detail)
+		}
+		return PassedCheck("git integrity", "object database OK")
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		return PassedCheck("git integrity", "skipped (large repo)")
+	}
+}
+
+// fsckSeverity classifies the result of parsing git fsck output.
+type fsckSeverity string
+
+const (
+	fsckSeverityOK   fsckSeverity = "ok"   // no problems found
+	fsckSeverityWarn fsckSeverity = "warn" // broken/dangling refs only — not object corruption
+	fsckSeverityFail fsckSeverity = "fail" // genuine object-database corruption (or unclassifiable output)
+)
+
+// fsckCorruptionDetail is the remedy shown for genuine object-database
+// corruption. Re-cloning is only ever appropriate here — never for a
+// broken-ref-only finding.
+const fsckCorruptionDetail = `Git repository has corrupted objects. This can happen after:
   • Disk errors or power loss during git operations
   • Incomplete clones or interrupted fetches
 
@@ -428,13 +457,113 @@ To fix:
 
 Run 'git fsck' for detailed error information.`
 
-			return FailedCheck("git integrity", summary, detail)
-		}
-		return PassedCheck("git integrity", "object database OK")
-	case <-time.After(5 * time.Second):
-		_ = cmd.Process.Kill()
-		return PassedCheck("git integrity", "skipped (large repo)")
+// fsckRefErrorRe matches a git fsck line reporting a broken/dangling ref,
+// e.g. `error: refs/remotes/belgrade/HEAD: invalid sha1 pointer 000...`.
+// Group 1 captures the ref path (refs/remotes/belgrade/HEAD).
+var fsckRefErrorRe = regexp.MustCompile(`^error: (refs/\S+):`)
+
+// fsckRemoteHeadRe extracts the remote name from a remote-tracking HEAD ref
+// path (refs/remotes/<remote>/HEAD), so the remedy can name the exact
+// `git remote set-head <remote> -a` command to run.
+var fsckRemoteHeadRe = regexp.MustCompile(`^refs/remotes/([^/]+)/HEAD$`)
+
+// fsckObjectErrorRe matches git fsck lines that indicate genuine
+// object-database corruption (as opposed to a broken ref).
+var fsckObjectErrorRe = regexp.MustCompile(`(?i)(missing (blob|tree|commit|tag)|broken link|dangling (blob|tree|commit|tag)|error in (tree|commit|blob|tag)|bad object|bad sha1 file|sha1 mismatch)`)
+
+// classifyFsckOutput parses the (non-empty, trimmed) combined stdout+stderr
+// of `git fsck --connectivity-only --no-progress` and classifies it as:
+//
+//   - fsckSeverityOK:   no problem lines at all (empty output)
+//   - fsckSeverityWarn: every problem line is a broken/dangling ref — a
+//     ref-repair issue, never object corruption
+//   - fsckSeverityFail: at least one line indicates genuine object-database
+//     corruption, OR a line could not be positively classified as a
+//     harmless ref issue (stay conservative — never silently downgrade
+//     output we don't recognize)
+//
+// It is a pure function (no git invocation) so it can be unit tested
+// against captured fsck output without a real corrupted repository.
+func classifyFsckOutput(output string) (severity fsckSeverity, summary string, detail string) {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return fsckSeverityOK, "object database OK", ""
 	}
+
+	lines := strings.Split(trimmed, "\n")
+
+	var refIssues []string    // ref paths reported broken/dangling, e.g. refs/remotes/belgrade/HEAD
+	var unclassified []string // lines that are neither a recognized ref issue nor object corruption
+
+	hasObjectError := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if m := fsckRefErrorRe.FindStringSubmatch(line); m != nil {
+			refIssues = append(refIssues, m[1])
+			continue
+		}
+		if fsckObjectErrorRe.MatchString(line) {
+			hasObjectError = true
+			continue
+		}
+		unclassified = append(unclassified, line)
+	}
+
+	// Any genuine object corruption, or any line we can't positively
+	// classify as a harmless ref issue, means treat this as real
+	// corruption. Mixed output (ref issues + object corruption) also
+	// fails — object corruption dominates.
+	if hasObjectError || len(unclassified) > 0 || len(refIssues) == 0 {
+		return fsckSeverityFail, fsckFailSummary(lines), fsckCorruptionDetail
+	}
+
+	return fsckSeverityWarn, fsckWarnSummary(refIssues), fsckWarnDetail(refIssues)
+}
+
+// fsckFailSummary mirrors the original checkGitFsck behavior: use the first
+// non-empty line of fsck's output, truncated, as the one-line summary.
+func fsckFailSummary(lines []string) string {
+	summary := "corruption detected"
+	if len(lines) > 0 && lines[0] != "" {
+		firstLine := lines[0]
+		if len(firstLine) > 50 {
+			firstLine = firstLine[:47] + "..."
+		}
+		summary = firstLine
+	}
+	return summary
+}
+
+// fsckWarnSummary produces the one-line summary for a broken-ref-only finding.
+func fsckWarnSummary(refs []string) string {
+	if len(refs) == 1 {
+		return fmt.Sprintf("broken ref: %s", refs[0])
+	}
+	return fmt.Sprintf("%d broken ref(s)", len(refs))
+}
+
+// fsckWarnDetail builds the ref-repair remedy. For a remote-tracking HEAD
+// ref it names the exact `git remote set-head <remote> -a` command; for any
+// other ref path it falls back to a generic delete-the-stale-ref remedy.
+func fsckWarnDetail(refs []string) string {
+	var b strings.Builder
+	b.WriteString("Git repository has one or more broken/dangling refs (not object corruption). This can happen after:\n")
+	b.WriteString("  • The upstream branch a remote-tracking HEAD pointed to was deleted or renamed\n")
+	b.WriteString("  • A remote's default branch changed (e.g. master -> main)\n\n")
+	b.WriteString("To fix:\n")
+	for _, ref := range refs {
+		if m := fsckRemoteHeadRe.FindStringSubmatch(ref); m != nil {
+			remote := m[1]
+			fmt.Fprintf(&b, "  • %s: run `git remote set-head %s -a` to repoint it at the remote's current default branch\n", ref, remote)
+		} else {
+			fmt.Fprintf(&b, "  • %s: this ref no longer resolves; remove it with `git update-ref -d %s`\n", ref, ref)
+		}
+	}
+	b.WriteString("\nThis is a ref-repair issue, not object-database corruption — re-cloning is not necessary.")
+	return b.String()
 }
 
 // checkGitLockFiles checks for stale git lock files from crashed processes.
