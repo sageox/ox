@@ -1,0 +1,50 @@
+---
+title: "ox code refs"
+description: "CLI reference for ox code refs"
+sidebar_position: 20
+---
+
+## ox code refs
+
+Where is <name> referenced in code text? (text search across the index)
+
+### Synopsis
+
+Find text occurrences of <name> in indexed code.
+
+Equivalent DSL:  ox code search "<name>" type:code
+
+For the resolved call graph use callers/callees — refs is plain text search.
+
+Examples:
+  ox code refs authenticate
+  ox code refs migration --lang go
+
+```
+ox code refs <name> [flags]
+```
+
+### Options
+
+```
+      --full-json     full uncompacted JSON output (~4x more context tokens)
+  -h, --help          help for refs
+      --lang string   restrict to a language (e.g. go, ts)
+      --limit int     max results to return (default 10)
+      --snippet int   max snippet length per result, in characters (default 200)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox code](/code)	 - Search code, symbols, history, PRs, and comments in this repo

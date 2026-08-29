@@ -1,12 +1,58 @@
 ---
 title: "ox code search"
 description: "CLI reference for ox code search"
-sidebar_position: 16
+sidebar_position: 21
 ---
 
 ## ox code search
 
-Search indexed code using queries
+Search the CodeDB index using a query DSL
+
+### Synopsis
+
+Search the indexed CodeDB for symbols, code, diffs, commits, comments, PRs, and issues.
+
+DSL grammar:
+  type:{code,symbol,diff,commit,comment,pr,issue}   what kind of record to match
+  repo:<name>[@<rev>]    file:<glob>    lang:<id>
+  author:<name>          message:<text>
+  before:<date>          after:<date>                ISO 8601 or relative
+  calls:<name>           calledby:<name>             resolved call graph (ADR-019)
+  returns:<type>         depth:1..10                 transitive call depth
+  confidence:{extracted,inferred,ambiguous}          ADR-019 edge confidence
+  ckind:<kind>           state:<pr_state>
+  select:{repo,file,symbol,symbol.<kind>}
+  count:<N>              case:yes
+  patterntype:{literal,keyword,regexp}
+  OR                                                 boolean across groups
+  /pattern/                                          forced regex
+  -<filter>                                          negate any filter
+
+Examples:
+  # symbol definition (what grep usually misses among text matches)
+  ox code search "ResolveSession" type:symbol
+
+  # resolved call graph — who calls authenticate()?
+  ox code search "" calledby:authenticate
+
+  # what does Handler call, two hops deep?
+  ox code search "" calls:Handler depth:2
+
+  # indexed PR titles + bodies + review comments
+  ox code search "rate limit" type:pr state:open
+
+  # source comments tagged TODO
+  ox code search "TODO" type:comment ckind:todo
+
+  # git log + content match together
+  ox code search "migration" author:rupak after:2026-04-01
+
+  # cross-language regex via /pattern/
+  ox code search "/Resolve[A-Z]\w+Recording/"
+
+When the index is unavailable (still building, not yet created), agent-context
+invocations emit a structured JSON status instead of erroring — callers should
+parse the status field before treating output as results.
 
 ```
 ox code search <query> [flags]
@@ -15,10 +61,11 @@ ox code search <query> [flags]
 ### Options
 
 ```
-      --decisions   only results from this repo's decision records (ADRs/DDRs)
-      --full-json   full uncompacted JSON output (~6x more context tokens)
-  -h, --help        help for search
-      --limit int   max results to return (default 10)
+      --decisions     only results from this repo's decision records (ADRs/DDRs)
+      --full-json     full uncompacted JSON output (~4x more context tokens)
+  -h, --help          help for search
+      --limit int     max results to return (default 10)
+      --snippet int   max snippet length per result, in characters (default 200)
 ```
 
 ### Options inherited from parent commands
@@ -34,4 +81,4 @@ ox code search <query> [flags]
 
 ### SEE ALSO
 
-* [ox code](/code)	 - Search code in this repo
+* [ox code](/code)	 - Search code, symbols, history, PRs, and comments in this repo

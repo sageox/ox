@@ -1,0 +1,47 @@
+---
+title: "ox code callers"
+description: "CLI reference for ox code callers"
+sidebar_position: 14
+---
+
+## ox code callers
+
+Who calls <name>? (resolved call graph)
+
+### Synopsis
+
+List the callers of <name> using the ADR-019 resolved call graph.
+
+Equivalent DSL:  ox code search "" calledby:<name>
+
+Examples:
+  ox code callers authenticate
+  ox code callers ResolveSessionRecording --limit 20
+
+```
+ox code callers <name> [flags]
+```
+
+### Options
+
+```
+      --full-json     full uncompacted JSON output (~4x more context tokens)
+  -h, --help          help for callers
+      --limit int     max results to return (default 10)
+      --snippet int   max snippet length per result, in characters (default 200)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox code](/code)	 - Search code, symbols, history, PRs, and comments in this repo

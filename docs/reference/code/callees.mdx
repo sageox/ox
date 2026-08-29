@@ -1,0 +1,48 @@
+---
+title: "ox code callees"
+description: "CLI reference for ox code callees"
+sidebar_position: 13
+---
+
+## ox code callees
+
+What does <name> call? (resolved call graph, transitive via --depth)
+
+### Synopsis
+
+List the callees of <name> using the ADR-019 resolved call graph.
+
+Equivalent DSL:  ox code search "" calls:<name> depth:<N>
+
+Examples:
+  ox code callees Handler
+  ox code callees authenticate --depth 3
+
+```
+ox code callees <name> [flags]
+```
+
+### Options
+
+```
+      --depth int     transitive call depth (1-10) (default 1)
+      --full-json     full uncompacted JSON output (~4x more context tokens)
+  -h, --help          help for callees
+      --limit int     max results to return (default 10)
+      --snippet int   max snippet length per result, in characters (default 200)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox code](/code)	 - Search code, symbols, history, PRs, and comments in this repo
