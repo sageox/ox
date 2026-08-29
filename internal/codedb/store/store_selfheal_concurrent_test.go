@@ -335,8 +335,9 @@ func TestConcurrentSelfHeal_MultiProcess(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			cmd := exec.Command(os.Args[0], "-test.run=^$")
-			cmd.Dir = tmp // keep the re-exec'd child out of the repo working tree
-			cmd.Env = append(os.Environ(),
+			// keep the re-exec'd child out of the repo working tree
+			cmd.Dir = tmp
+			cmd.Env = append(os.Environ(), // safe: re-execs this test binary (os.Args[0]), not the ox CLI; it needs the parent test env
 				selfHealHelperEnv+"=1",
 				selfHealRootEnv+"="+tmp,
 				selfHealPathEnv+"="+indexPath,

@@ -444,3 +444,163 @@ func TestQueryTeamContext_GivesUpIfRetryAlso401s(t *testing.T) {
 
 	assert.Equal(t, 2, queryCallCount, "expected exactly one retry, not a loop")
 }
+
+// --- team defaulted from a team-scoped credential (GH #840) ---
+// Failure prevented: `ox query` in a directory with no .sageox/ refused with
+// "no team or repo ID available. Run 'ox init' first" while `ox status`, in
+// the same directory with the same credential, printed the bound team. The
+// team-id check ran ABOVE the auth block, so the credential was never read.
+
+// serveQueryWithIntrospect stands up an endpoint that answers introspection
+// with introspectBody and records what the query request asked to search.
+// Counters let a test assert introspection was NOT consulted when the team was
+// already known — the precedence claim, not just the happy path.
+func serveQueryWithIntrospect(t *testing.T, introspectBody string) (srv *httptest.Server, introspectHits *int, queried *api.QueryRequest) {
+	t.Helper()
+	hits := 0
+	var lastReq api.QueryRequest
+
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case auth.IntrospectEndpoint:
+			hits++
+			if introspectBody == "" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			_, _ = w.Write([]byte(introspectBody))
+		case "/api/v1/query":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&lastReq))
+			_ = json.NewEncoder(w).Encode(api.QueryResponse{Results: []api.QueryResult{{Text: "ok"}}})
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits, &lastReq
+}
+
+// liveTokenFor saves a far-from-expiry credential for ep so the proactive
+// refresh in queryTeamContext stays out of the way of what these tests assert.
+func liveTokenFor(t *testing.T, ep string) {
+	t.Helper()
+	require.NoError(t, auth.SaveTokenForEndpoint(ep, &auth.StoredToken{
+		AccessToken:  "team-scoped-access",
+		RefreshToken: "test-refresh-token",
+		ExpiresAt:    time.Now().Add(1 * time.Hour),
+		TokenType:    "Bearer",
+	}))
+}
+
+const teamPrincipalBody = `{"active":true,"principal_kind":"team-service",` +
+	`"team":{"team_id":"team_from_credential"},"token":{"prefix":"oxt_","name":"ci-deploy"}}`
+
+// TestQueryTeamContext_DefaultsTeamFromTeamBoundCredential is the issue's
+// repro: no .sageox/, no flags, a credential bound to exactly one team. The
+// query must run against that team instead of erroring.
+func TestQueryTeamContext_DefaultsTeamFromTeamBoundCredential(t *testing.T) {
+	srv, introspectHits, queried := serveQueryWithIntrospect(t, teamPrincipalBody)
+	t.Setenv("SAGEOX_ENDPOINT", srv.URL)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	liveTokenFor(t, srv.URL)
+
+	// bare directory: no .sageox/, so the project config carries no team/repo
+	uninitialized := t.TempDir()
+	qa := &queryArgs{query: "authentication", mode: "hybrid", limit: 5, source: "team"}
+
+	resp, err := queryTeamContext(qa, uninitialized, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	assert.Equal(t, 1, *introspectHits, "expected the credential to be introspected exactly once")
+	assert.Equal(t, []string{"team_from_credential"}, queried.Teams,
+		"query must search the team the credential is bound to")
+}
+
+// TestQueryTeamContext_PersonalCredentialKeepsInitError proves a credential
+// that names a user rather than a single team still gets today's error — there
+// is genuinely nothing to default from, so `ox init` / --team remain the
+// remedies.
+func TestQueryTeamContext_PersonalCredentialKeepsInitError(t *testing.T) {
+	userBody := `{"active":true,"principal_kind":"user","user":{"id":"u_1","email":"dev@example.test"}}`
+	srv, introspectHits, queried := serveQueryWithIntrospect(t, userBody)
+	t.Setenv("SAGEOX_ENDPOINT", srv.URL)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	liveTokenFor(t, srv.URL)
+
+	qa := &queryArgs{query: "authentication", mode: "hybrid", limit: 5, source: "team"}
+
+	resp, err := queryTeamContext(qa, t.TempDir(), "", "")
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.ErrorIs(t, err, errNoTeamOrRepoID)
+	assert.Equal(t, "no team or repo ID available. Run 'ox init' first or pass --team/--repo flags", err.Error(),
+		"error text is unchanged for a credential that names no single team")
+
+	assert.Equal(t, 1, *introspectHits)
+	assert.Empty(t, queried.Teams, "no query should have been sent")
+}
+
+// TestQueryTeamContext_KnownTeamSkipsIntrospection proves introspection is the
+// LAST resort: an explicit --team and a project-config team_id each win, and
+// neither pays a network round trip to learn what it already knows.
+func TestQueryTeamContext_KnownTeamSkipsIntrospection(t *testing.T) {
+	tests := []struct {
+		name     string
+		flagTeam string
+		wantTeam string
+	}{
+		{name: "project config supplies the team", wantTeam: "test-team"},
+		{name: "explicit --team overrides project config", flagTeam: "team_flag", wantTeam: "team_flag"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, introspectHits, queried := serveQueryWithIntrospect(t, teamPrincipalBody)
+			token := &auth.StoredToken{
+				AccessToken:  "team-scoped-access",
+				RefreshToken: "test-refresh-token",
+				ExpiresAt:    time.Now().Add(1 * time.Hour),
+				TokenType:    "Bearer",
+			}
+			projectRoot, qa := newQueryTestProject(t, srv, token)
+			qa.repoID = "" // isolate team resolution from the repo fallback
+			qa.teamID = tt.flagTeam
+
+			cfg, err := config.LoadProjectConfig(projectRoot)
+			require.NoError(t, err)
+			cfg.RepoID = ""
+			require.NoError(t, config.SaveProjectConfig(projectRoot, cfg))
+
+			resp, err := queryTeamContext(qa, projectRoot, "", "")
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+
+			assert.Equal(t, []string{tt.wantTeam}, queried.Teams)
+			assert.Zero(t, *introspectHits, "a known team must not trigger introspection")
+		})
+	}
+}
+
+// TestQueryTeamContext_UnreachableEndpointIsNotAnInitProblem proves an offline
+// caller is told the endpoint could not be reached rather than being sent to
+// `ox init`, which would not have fixed anything.
+func TestQueryTeamContext_UnreachableEndpointIsNotAnInitProblem(t *testing.T) {
+	srv, _, _ := serveQueryWithIntrospect(t, teamPrincipalBody)
+	deadURL := srv.URL
+	srv.Close()
+
+	t.Setenv("SAGEOX_ENDPOINT", deadURL)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	liveTokenFor(t, deadURL)
+
+	qa := &queryArgs{query: "authentication", mode: "hybrid", limit: 5, source: "team"}
+
+	resp, err := queryTeamContext(qa, t.TempDir(), "", "")
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.ErrorIs(t, err, auth.ErrEndpointUnreachable)
+	assert.NotContains(t, err.Error(), "ox init")
+}

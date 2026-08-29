@@ -125,7 +125,7 @@ const queryUsage = `Usage: ox query "search text" [flags]
 Flags:
   --limit N      Max results to return (default: 5)
   --mode MODE    Search mode: hybrid, knn, or bm25 (default: hybrid)
-  --team ID      Team ID to search (default: from project config)
+  --team ID      Team ID to search (default: project config, else the credential's team)
   --repo ID      Repo ID to search (default: from project config)
   --source SRC   Search source: team (default), code, local, all
   --local        Shorthand for --source=local (zero-network ledger search)
@@ -266,6 +266,36 @@ func writeQueryResponse(combined *combinedQueryResponse, qa *queryArgs) (int, er
 	return outputBytes, err
 }
 
+// errNoTeamOrRepoID is the answer when nothing — flags, project config, or the
+// credential itself — names a team or a repo to search. `ox init` and the
+// explicit flags are the only remedies left at that point.
+var errNoTeamOrRepoID = errors.New("no team or repo ID available. Run 'ox init' first or pass --team/--repo flags")
+
+// teamIDFromCredential asks the introspection endpoint which team the bearer
+// credential authenticates as. Only a team-scoped credential names one; a
+// personal credential names a user, and for that caller `ox init` or --team
+// really is the remedy, so the error stays unchanged.
+//
+// An unreachable endpoint is reported as itself rather than as
+// errNoTeamOrRepoID: the credential may well name a team, we just could not
+// ask, and sending an offline caller to `ox init` would not fix it.
+func teamIDFromCredential(ep, accessToken string) (string, error) {
+	res, err := auth.Introspect(ep, accessToken)
+	if err != nil {
+		if errors.Is(err, auth.ErrEndpointUnreachable) {
+			return "", fmt.Errorf("no team or repo ID available and %s could not be reached to read the one your credential is bound to: %w",
+				endpoint.NormalizeEndpoint(ep), err)
+		}
+		slog.Debug("introspection did not supply a team id", "error", err)
+		return "", errNoTeamOrRepoID
+	}
+	if res.Team == nil || res.Team.TeamID == "" {
+		return "", errNoTeamOrRepoID
+	}
+	slog.Debug("team id defaulted from credential", "team_id", res.Team.TeamID)
+	return res.Team.TeamID, nil
+}
+
 // queryTeamContext searches team context via the vector search API.
 func queryTeamContext(qa *queryArgs, projectRoot, agentID, agentType string) (*api.QueryResponse, error) {
 	cfg, err := config.LoadProjectConfig(projectRoot)
@@ -293,14 +323,25 @@ func queryTeamContext(qa *queryArgs, projectRoot, agentID, agentType string) (*a
 	if qa.repoID != "" {
 		req.Repos = []string{qa.repoID}
 	}
-	if len(req.Teams) == 0 && len(req.Repos) == 0 {
-		return nil, fmt.Errorf("no team or repo ID available. Run 'ox init' first or pass --team/--repo flags")
-	}
 
 	ep := endpoint.GetForProject(projectRoot)
 	token, err := auth.EnsureValidTokenForEndpoint(ep, 300)
 	if err != nil || token == nil || token.AccessToken == "" {
 		return nil, fmt.Errorf("not authenticated. Run 'ox login' first")
+	}
+
+	// Outside an initialized repo the credential is the only identity there
+	// is, and a team-scoped one names exactly one team. Refusing here without
+	// asking sent the caller to `ox init` — wrong for a scratch directory or a
+	// CI checkout that only wants to read — for a fact the credential already
+	// carries and `ox status` already prints. Last resort by construction:
+	// --team/--repo and the project config are both resolved above.
+	if len(req.Teams) == 0 && len(req.Repos) == 0 {
+		teamID, err := teamIDFromCredential(ep, token.AccessToken)
+		if err != nil {
+			return nil, err
+		}
+		req.Teams = []string{teamID}
 	}
 
 	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
