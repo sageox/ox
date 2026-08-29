@@ -272,13 +272,14 @@ func writeQueryResponse(combined *combinedQueryResponse, qa *queryArgs) (int, er
 var errNoTeamOrRepoID = errors.New("no team or repo ID available. Run 'ox init' first or pass --team/--repo flags")
 
 // teamIDFromCredential asks the introspection endpoint which team the bearer
-// credential authenticates as. Only a team-scoped credential names one; a
-// personal credential names a user, and for that caller `ox init` or --team
-// really is the remedy, so the error stays unchanged.
+// credential authenticates as. Only a team-scoped credential names one.
 //
-// An unreachable endpoint is reported as itself rather than as
-// errNoTeamOrRepoID: the credential may well name a team, we just could not
-// ask, and sending an offline caller to `ox init` would not fix it.
+// errNoTeamOrRepoID is reserved for the one case it describes: introspection
+// ANSWERED, and the answer named no single team. Every way of failing to get an
+// answer — offline, rejected, unreadable — keeps its own error, because none of
+// them is an initialization problem and `ox init` cannot fix any of them (it
+// needs a working credential itself). Collapsing them would tell a coworker
+// holding a revoked token to run the one command that will fail the same way.
 func teamIDFromCredential(ep, accessToken string) (string, error) {
 	res, err := auth.Introspect(ep, accessToken)
 	if err != nil {
@@ -286,8 +287,12 @@ func teamIDFromCredential(ep, accessToken string) (string, error) {
 			return "", fmt.Errorf("no team or repo ID available and %s could not be reached to read the one your credential is bound to: %w",
 				endpoint.NormalizeEndpoint(ep), err)
 		}
-		slog.Debug("introspection did not supply a team id", "error", err)
-		return "", errNoTeamOrRepoID
+		// Rejected credential or an unreadable answer. Introspect deliberately
+		// carries no sentinel to tell those apart (the server returns a uniform
+		// 401 so a caller cannot enumerate which credentials exist), so name
+		// the likely remedy conditionally rather than assert the wrong one for
+		// what may be a protocol fault. Its message is already redacted.
+		return "", fmt.Errorf("could not read the team your credential is bound to: %w (run 'ox login' if it is stale)", err)
 	}
 	if res.Team == nil || res.Team.TeamID == "" {
 		return "", errNoTeamOrRepoID

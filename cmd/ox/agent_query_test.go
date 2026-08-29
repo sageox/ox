@@ -455,7 +455,7 @@ func TestQueryTeamContext_GivesUpIfRetryAlso401s(t *testing.T) {
 // with introspectBody and records what the query request asked to search.
 // Counters let a test assert introspection was NOT consulted when the team was
 // already known — the precedence claim, not just the happy path.
-func serveQueryWithIntrospect(t *testing.T, introspectBody string) (srv *httptest.Server, introspectHits *int, queried *api.QueryRequest) {
+func serveQueryWithIntrospect(t *testing.T, introspectStatus int, introspectBody string) (srv *httptest.Server, introspectHits *int, queried *api.QueryRequest) {
 	t.Helper()
 	hits := 0
 	var lastReq api.QueryRequest
@@ -465,10 +465,7 @@ func serveQueryWithIntrospect(t *testing.T, introspectBody string) (srv *httptes
 		switch r.URL.Path {
 		case auth.IntrospectEndpoint:
 			hits++
-			if introspectBody == "" {
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
+			w.WriteHeader(introspectStatus)
 			_, _ = w.Write([]byte(introspectBody))
 		case "/api/v1/query":
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&lastReq))
@@ -501,7 +498,7 @@ const teamPrincipalBody = `{"active":true,"principal_kind":"team-service",` +
 // repro: no .sageox/, no flags, a credential bound to exactly one team. The
 // query must run against that team instead of erroring.
 func TestQueryTeamContext_DefaultsTeamFromTeamBoundCredential(t *testing.T) {
-	srv, introspectHits, queried := serveQueryWithIntrospect(t, teamPrincipalBody)
+	srv, introspectHits, queried := serveQueryWithIntrospect(t, http.StatusOK, teamPrincipalBody)
 	t.Setenv("SAGEOX_ENDPOINT", srv.URL)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	liveTokenFor(t, srv.URL)
@@ -525,7 +522,7 @@ func TestQueryTeamContext_DefaultsTeamFromTeamBoundCredential(t *testing.T) {
 // remedies.
 func TestQueryTeamContext_PersonalCredentialKeepsInitError(t *testing.T) {
 	userBody := `{"active":true,"principal_kind":"user","user":{"id":"u_1","email":"dev@example.test"}}`
-	srv, introspectHits, queried := serveQueryWithIntrospect(t, userBody)
+	srv, introspectHits, queried := serveQueryWithIntrospect(t, http.StatusOK, userBody)
 	t.Setenv("SAGEOX_ENDPOINT", srv.URL)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	liveTokenFor(t, srv.URL)
@@ -558,7 +555,7 @@ func TestQueryTeamContext_KnownTeamSkipsIntrospection(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv, introspectHits, queried := serveQueryWithIntrospect(t, teamPrincipalBody)
+			srv, introspectHits, queried := serveQueryWithIntrospect(t, http.StatusOK, teamPrincipalBody)
 			token := &auth.StoredToken{
 				AccessToken:  "team-scoped-access",
 				RefreshToken: "test-refresh-token",
@@ -588,7 +585,7 @@ func TestQueryTeamContext_KnownTeamSkipsIntrospection(t *testing.T) {
 // caller is told the endpoint could not be reached rather than being sent to
 // `ox init`, which would not have fixed anything.
 func TestQueryTeamContext_UnreachableEndpointIsNotAnInitProblem(t *testing.T) {
-	srv, _, _ := serveQueryWithIntrospect(t, teamPrincipalBody)
+	srv, _, _ := serveQueryWithIntrospect(t, http.StatusOK, teamPrincipalBody)
 	deadURL := srv.URL
 	srv.Close()
 
@@ -603,4 +600,53 @@ func TestQueryTeamContext_UnreachableEndpointIsNotAnInitProblem(t *testing.T) {
 	assert.Nil(t, resp)
 	assert.ErrorIs(t, err, auth.ErrEndpointUnreachable)
 	assert.NotContains(t, err.Error(), "ox init")
+}
+
+// TestQueryTeamContext_IntrospectionFailureIsNotAnInitProblem covers the two
+// ways introspection can fail while the endpoint is perfectly reachable: the
+// server rejects the credential, or it answers 200 with something unreadable.
+// Neither is an initialization problem, and reporting one as "Run 'ox init'"
+// sends a coworker with a revoked token to a command that cannot help them
+// (and that needs a working login itself).
+func TestQueryTeamContext_IntrospectionFailureIsNotAnInitProblem(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantErrHas string
+	}{
+		{
+			name:       "credential rejected server-side",
+			status:     http.StatusUnauthorized,
+			body:       `{"error":"invalid_token","error_description":"session expired"}`,
+			wantErrHas: "session expired",
+		},
+		{
+			name:       "unreadable 200 response",
+			status:     http.StatusOK,
+			body:       `{{{ not json`,
+			wantErrHas: "malformed introspection response",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _, queried := serveQueryWithIntrospect(t, tt.status, tt.body)
+			t.Setenv("SAGEOX_ENDPOINT", srv.URL)
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			liveTokenFor(t, srv.URL)
+
+			qa := &queryArgs{query: "authentication", mode: "hybrid", limit: 5, source: "team"}
+
+			resp, err := queryTeamContext(qa, t.TempDir(), "", "")
+			require.Error(t, err)
+			assert.Nil(t, resp)
+			assert.Contains(t, err.Error(), tt.wantErrHas,
+				"the real reason introspection failed must survive")
+			assert.NotContains(t, err.Error(), "ox init",
+				"`ox init` cannot fix a rejected or unreadable credential")
+			assert.NotErrorIs(t, err, errNoTeamOrRepoID)
+			assert.Empty(t, queried.Teams, "no query should have been sent")
+		})
+	}
 }
