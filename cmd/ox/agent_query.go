@@ -347,6 +347,17 @@ func queryTeamContext(qa *queryArgs, projectRoot, agentID, agentType string) (*a
 			return nil, err
 		}
 		req.Teams = []string{teamID}
+		// A credential binds to a team, not a checkout, so this branch has no
+		// repo to name. Without asking for the team's ledgers, "search team
+		// knowledge" answers from team context alone and silently omits every
+		// session, plan, and murmur.
+		//
+		// Deliberately NOT set for every teams-only request, though the server
+		// accepts it from any caller: `--team` with no repo narrows the same
+		// way, but turning it on there would change results for callers who
+		// have them today. That is a separate decision from fixing a path that
+		// returns nothing at all.
+		req.IncludeTeamRepos = true
 	}
 
 	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)

@@ -514,6 +514,8 @@ func TestQueryTeamContext_DefaultsTeamFromTeamBoundCredential(t *testing.T) {
 	assert.Equal(t, 1, *introspectHits, "expected the credential to be introspected exactly once")
 	assert.Equal(t, []string{"team_from_credential"}, queried.Teams,
 		"query must search the team the credential is bound to")
+	assert.True(t, queried.IncludeTeamRepos,
+		"a credential-derived team has no repo to name, so the team's ledgers must be requested explicitly")
 }
 
 // TestQueryTeamContext_PersonalCredentialKeepsInitError proves a credential
@@ -577,6 +579,8 @@ func TestQueryTeamContext_KnownTeamSkipsIntrospection(t *testing.T) {
 
 			assert.Equal(t, []string{tt.wantTeam}, queried.Teams)
 			assert.Zero(t, *introspectHits, "a known team must not trigger introspection")
+			assert.False(t, queried.IncludeTeamRepos,
+				"a caller that named its team must not silently pay for team-wide fan-out")
 		})
 	}
 }
@@ -649,4 +653,22 @@ func TestQueryTeamContext_IntrospectionFailureIsNotAnInitProblem(t *testing.T) {
 			assert.Empty(t, queried.Teams, "no query should have been sent")
 		})
 	}
+}
+
+// TestQueryRequest_IncludeTeamReposWireKey pins the JSON key the server reads.
+// Every other test round-trips through the same Go struct, so a typo in the tag
+// would serialize under the wrong name, be ignored by the server, and still
+// pass all of them — the field would be dead on the wire with green tests.
+func TestQueryRequest_IncludeTeamReposWireKey(t *testing.T) {
+	t.Parallel()
+
+	on, err := json.Marshal(api.QueryRequest{Query: "q", IncludeTeamRepos: true})
+	require.NoError(t, err)
+	assert.Contains(t, string(on), `"include_team_repos":true`)
+
+	// omitempty: an ordinary repo-scoped query must not carry the field at all,
+	// so the server keeps its own default rather than being told "false".
+	off, err := json.Marshal(api.QueryRequest{Query: "q"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(off), "include_team_repos")
 }

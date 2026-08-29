@@ -27,6 +27,13 @@ type QueryRequest struct {
 	Repos     []string `json:"repos"`                // repo IDs to search ledger indexes
 	AgentID   string   `json:"agent_id,omitempty"`   // querying agent instance (e.g. "Oxa7b3")
 	AgentType string   `json:"agent_type,omitempty"` // querying agent type (e.g. "claude-code")
+
+	// IncludeTeamRepos asks the server to fold the named teams' ledger indexes
+	// into a teams-only search. Without it a request carrying no Repos reaches
+	// team context alone — never a session, plan, or murmur. Opt-in on both
+	// sides: fan-out cost grows with team size, so a caller that already names
+	// its repo must not pay for it.
+	IncludeTeamRepos bool `json:"include_team_repos,omitempty"`
 }
 
 // QueryResponse represents the POST /api/v1/query response.
