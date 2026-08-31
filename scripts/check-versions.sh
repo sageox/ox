@@ -56,6 +56,18 @@ if [ -f "claude-plugin/.claude-plugin/plugin.json" ]; then
     check_version "$PLUGIN_VERSION" "claude-plugin/.claude-plugin/plugin.json"
 fi
 
+# Check npm/package.json (@sageox/ox npm wrapper)
+if [ -f "npm/package.json" ]; then
+    NPM_VERSION=$(grep '"version"' npm/package.json 2>/dev/null | head -1 | sed 's/.*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/')
+    check_version "$NPM_VERSION" "npm/package.json"
+fi
+
+# Check pip/pyproject.toml (sageox PyPI wrapper skeleton)
+if [ -f "pip/pyproject.toml" ]; then
+    PIP_VERSION=$(grep '^version = ' pip/pyproject.toml 2>/dev/null | head -1 | sed 's/.*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/')
+    check_version "$PIP_VERSION" "pip/pyproject.toml"
+fi
+
 # Check CHANGELOG.md has the current version
 if [ -f "CHANGELOG.md" ]; then
     # Extract first version from CHANGELOG.md (format: ## [X.Y.Z])
