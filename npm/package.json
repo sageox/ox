@@ -1,0 +1,58 @@
+{
+  "name": "@sageox/ox",
+  "version": "0.14.3",
+  "description": "SageOx (ox) CLI — the hivemind for agentic engineering. Downloads and runs the official signed ox binary. Try it with: npx @sageox/ox",
+  "keywords": [
+    "sageox",
+    "ox",
+    "cli",
+    "ai",
+    "agent",
+    "agentic",
+    "coding-agent",
+    "developer-tools",
+    "team-context",
+    "mcp"
+  ],
+  "homepage": "https://sageox.ai/docs/cli",
+  "bugs": {
+    "url": "https://github.com/sageox/ox/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sageox/ox.git",
+    "directory": "npm"
+  },
+  "license": "MIT",
+  "author": "SageOx Inc.",
+  "type": "commonjs",
+  "bin": {
+    "ox": "bin/ox.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "install.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "freebsd"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  }
+}

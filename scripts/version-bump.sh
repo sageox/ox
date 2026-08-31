@@ -82,7 +82,24 @@ if [ -f "claude-plugin/.claude-plugin/plugin.json" ]; then
     update_file "claude-plugin/.claude-plugin/plugin.json" "\"version\": \"$CURRENT_VERSION\"" "\"version\": \"$NEW_VERSION\""
 fi
 
-# 4. CHANGELOG.md - check if version already present
+# 4. npm/package.json (@sageox/ox npm wrapper — CI re-pins this from the tag at
+#    publish, but keep the committed default in sync so local `npm pack` is honest)
+if [ -f "npm/package.json" ]; then
+    echo "  - npm/package.json"
+    update_file "npm/package.json" "\"version\": \"$CURRENT_VERSION\"" "\"version\": \"$NEW_VERSION\""
+fi
+
+# 5. pip/ wrapper (follow-up skeleton — keep in sync so it's release-ready)
+if [ -f "pip/pyproject.toml" ]; then
+    echo "  - pip/pyproject.toml"
+    update_file "pip/pyproject.toml" "version = \"$CURRENT_VERSION\"" "version = \"$NEW_VERSION\""
+fi
+if [ -f "pip/sageox/__init__.py" ]; then
+    echo "  - pip/sageox/__init__.py"
+    update_file "pip/sageox/__init__.py" "__version__ = \"$CURRENT_VERSION\"" "__version__ = \"$NEW_VERSION\""
+fi
+
+# 6. CHANGELOG.md - check if version already present
 if [ -f "CHANGELOG.md" ]; then
     if ! grep -q "\[$NEW_VERSION\]" CHANGELOG.md; then
         echo -e "  - CHANGELOG.md ${YELLOW}(needs manual update)${NC}"

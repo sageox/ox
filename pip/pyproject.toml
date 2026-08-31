@@ -1,0 +1,49 @@
+##
+## SKELETON — follow-up, not yet wired into the release pipeline.
+##
+## This mirrors the npm wrapper (../npm) for the Python ecosystem: `pip install
+## sageox` installs a console-script `ox` that downloads the official signed ox
+## binary from GitHub Releases and verifies it against the release checksums.txt
+## (same integrity check as scripts/install.sh), then execs it.
+##
+## Before this can publish to PyPI:
+##   - claim/own the `sageox` project name on PyPI
+##   - add a PyPI publish job (prefer Trusted Publishing / OIDC over a token)
+##   - decide package name if `sageox` is taken (e.g. `sageox-cli`)
+##
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sageox"
+version = "0.14.3"
+description = "SageOx (ox) CLI — downloads and runs the official signed ox binary."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "SageOx Inc." }]
+requires-python = ">=3.9"
+keywords = ["sageox", "ox", "cli", "ai", "agent", "agentic", "developer-tools"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: POSIX :: BSD :: FreeBSD",
+  "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Homepage = "https://sageox.ai/docs/cli"
+Repository = "https://github.com/sageox/ox"
+Issues = "https://github.com/sageox/ox/issues"
+
+# Installs an `ox` command that shells into sageox.__main__:main, which lazily
+# downloads + verifies the native binary on first run.
+[project.scripts]
+ox = "sageox.__main__:main"
+
+[tool.setuptools]
+packages = ["sageox"]

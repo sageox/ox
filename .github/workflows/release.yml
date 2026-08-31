@@ -89,3 +89,56 @@ jobs:
           echo "[View Release](https://github.com/sageox/ox/releases/tag/${{ env.RELEASE_TAG }})" >> $GITHUB_STEP_SUMMARY
         env:
           SAGEOX_CLI_SIGNING_KEY: ${{ secrets.SAGEOX_CLI_SIGNING_KEY }}
+
+  # Publish the @sageox/ox npm wrapper. It downloads the SAME signed release
+  # tarball that build-and-release just uploaded (verified via checksums.txt), so
+  # it MUST run after that job — `needs` guarantees the assets exist first.
+  publish-npm:
+    name: Publish @sageox/ox to npm
+    needs: build-and-release
+    if: github.repository == 'sageox/ox'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for npm provenance (SLSA build attestation)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish wrapper
+        working-directory: npm
+        env:
+          # Publishing under the public @sageox scope requires the org to own that
+          # scope on npmjs.org plus an NPM_TOKEN with publish rights. Until that is
+          # set up this step no-ops cleanly instead of failing the release.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN secret is not set; skipping public npm publish."
+            echo "Prerequisites: own the public @sageox scope on npmjs.org and add an"
+            echo "NPM_TOKEN secret with publish rights. See npm/README.md."
+            exit 0
+          fi
+          VERSION="${RELEASE_TAG#v}"
+          # Pin the wrapper's version to the release tag so its postinstall fetches
+          # the matching release assets.
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          # Prereleases (e.g. 1.2.0-rc.1) publish under the 'next' dist-tag so they
+          # never become the default `npm install @sageox/ox` for everyone.
+          if printf '%s' "$VERSION" | grep -q '-'; then
+            DIST_TAG=next
+          else
+            DIST_TAG=latest
+          fi
+          echo "Publishing @sageox/ox@$VERSION (dist-tag: $DIST_TAG)"
+          npm publish --provenance --access public --tag "$DIST_TAG"
