@@ -42,6 +42,7 @@ import (
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/tokens"
 	"github.com/sageox/ox/internal/ui"
+	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/sageox/ox/internal/useragent"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 	"github.com/spf13/cobra"
@@ -899,19 +900,32 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	// check for version updates from daemon cache (pure file read, ~0ms)
+	// Check for version updates from the daemon cache (pure file read, ~0ms).
+	//
+	// UpdateAvailable/LatestVersion are DATA — always present, because anything
+	// parsing prime's output asked for them. UpdateHint and the UserNotices
+	// entry are the NOTICE: they instruct the AI coworker to raise the upgrade
+	// with the human out loud, so they go through the same ledger that caps the
+	// terminal tiers. Prime is where the calm tier lands when stderr belongs to
+	// an agent, so it carries the fact once per release line per day instead of
+	// on every prime.
 	if vResult := checkVersionFromCache(); vResult != nil {
 		output.UpdateAvailable = true
 		output.LatestVersion = vResult.LatestVersion
-		output.UpdateHint = fmt.Sprintf(
-			"ox v%s -> v%s is available. Offer to run 'ox upgrade' for the coworker — "+
-				"it upgrades in place for Homebrew, go install, and direct (install.sh) installs.",
-			vResult.CurrentVersion, vResult.LatestVersion,
-		)
-		output.UserNotices = append(output.UserNotices, UserNotice{
-			Type:    "upgrade",
-			Message: output.UpdateHint,
-		})
+
+		now := time.Now()
+		if line, due := updateNoticeDue(now); due {
+			output.UpdateHint = fmt.Sprintf(
+				"ox v%s -> v%s is available. Offer to run 'ox upgrade' for the coworker — "+
+					"it upgrades in place for Homebrew, go install, and direct (install.sh) installs.",
+				vResult.CurrentVersion, vResult.LatestVersion,
+			)
+			output.UserNotices = append(output.UserNotices, UserNotice{
+				Type:    "upgrade",
+				Message: output.UpdateHint,
+			})
+			updatenotice.RecordNotified(line, now)
+		}
 	}
 
 	// add support notice to user notices if present

@@ -124,8 +124,9 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		return outputUpgradeResult(cmd, result, jsonOutput)
 	}
 
-	// clear version cache so next check picks up new version
-	_ = os.Remove(versionCacheFile)
+	// clear version cache (and the notice ledger with it) so the next check
+	// starts from a clean slate
+	clearVersionCacheAfterUpgrade()
 
 	result.Status = "upgraded"
 	result.Message = fmt.Sprintf("Upgraded to v%s", vResult.LatestVersion)

@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/perf"
 	"github.com/sageox/ox/internal/signature"
 	"github.com/sageox/ox/internal/telemetry"
+	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
@@ -121,6 +122,10 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	// set global output mode
 	SetJSONMode(cfg.JSON)
 	SetNoInteractive(cfg.NoInteractive)
+	// Update notices are human-facing prose; either machine-output mode turns
+	// one into a parse error for whatever is reading the stream. Wired here so
+	// every command inherits it rather than each notice site re-deriving it.
+	updatenotice.SetMachineOutput(cfg.JSON || cfg.Text)
 
 	// A long-running service process (`ox daemon start --foreground`) is not a
 	// command invocation. Cobra's post-run hooks fire at service *shutdown*, so

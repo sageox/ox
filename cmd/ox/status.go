@@ -28,6 +28,7 @@ import (
 	"github.com/sageox/ox/internal/status"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/tui"
+	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -1620,24 +1621,22 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			fmt.Print(renderAgentTasksSection(gitRoot))
 		}
 
-		// show version update notice if available. refreshVersionCacheIfStale
-		// does a bounded live check so the notice reaches coworkers who never
-		// run the daemon (the daemon is otherwise the only cache writer).
+		// Calm update notice. refreshVersionCacheIfStale does a bounded live
+		// check so the notice reaches coworkers who never run the daemon (the
+		// daemon is otherwise the only cache writer).
+		//
+		// One dim line, at most once per release line per day, and only with a
+		// human watching. The old block printed a bold "Update available"
+		// banner, a hint line, AND an inline "Upgrade ox now?" prompt on every
+		// single `ox status` — three interruptions repeating forever for one
+		// fact. Dim rather than warning-colored on purpose: an available
+		// upgrade is news, not an alarm.
 		if vResult := refreshVersionCacheIfStale(6 * time.Hour); vResult != nil {
-			fmt.Printf("\n%s  %s\n",
-				statusWarningStyle.Render("Update available"),
-				fmt.Sprintf("v%s → v%s", vResult.CurrentVersion, vResult.LatestVersion),
-			)
-			// make the notice actionable rather than a dead string: offer to
-			// run the upgrade right here when we're at an interactive terminal.
-			if cli.IsInteractive() && !cfg.Quiet {
-				if cli.ConfirmYesNo("Upgrade ox now?", false) {
-					_ = runUpgrade(upgradeCmd, nil)
-				} else {
-					fmt.Printf("%s\n", cli.StyleDim.Render("Run 'ox upgrade' when you're ready."))
-				}
-			} else {
-				fmt.Printf("%s\n", cli.StyleDim.Render("Run 'ox upgrade' to update."))
+			now := time.Now()
+			if line, due := calmUpdateNoticeDue(now); due {
+				fmt.Printf("\n%s\n", cli.StyleDim.Render(
+					formatCalmUpdateNotice(vResult.LatestVersion, vResult.CurrentVersion)))
+				updatenotice.RecordNotified(line, now)
 			}
 		}
 
@@ -1837,8 +1836,12 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 		}
 	}
 
-	// version section — refresh the cache lazily (bounded live check) so
+	// Version section — refresh the cache lazily (bounded live check) so
 	// daemon-less coworkers still see update availability in JSON output.
+	//
+	// Deliberately NOT gated by the notice ledger: this is a field a caller
+	// explicitly asked for, not an interruption. Nor does it stamp the ledger —
+	// a machine reading JSON has not told the human anything.
 	currentVersion := strings.TrimPrefix(version.Version, "v")
 	vJSON := &statusVersionJSON{Current: currentVersion}
 	if vResult := refreshVersionCacheIfStale(6 * time.Hour); vResult != nil {
