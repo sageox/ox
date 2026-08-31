@@ -204,3 +204,38 @@ func TestCheckAndUpdate_MalformedBody(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decode")
 }
+
+// The daemon rebuilds VersionCacheData from scratch on every successful poll.
+// If it saved that without carrying the CLI's update-notice ledger, each poll
+// would erase the "already told this coworker" memory and the upgrade nag would
+// come back on every command until the next notice fired.
+func TestCheckAndUpdate_200_PreservesNoticeLedger(t *testing.T) {
+	t.Parallel()
+	vc := testVersionCacheWithServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `"new-etag"`)
+		_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": "v0.16.1"})
+	})
+
+	// The CLI stamped the ledger on disk after this daemon last loaded, so the
+	// daemon's in-memory copy does not know about it.
+	stamped := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	require.NoError(t, vc.Save(&VersionCacheData{
+		LatestVersion:  "v0.16.0",
+		CheckedAt:      stamped,
+		LastNaggedLine: "0.16",
+		LastNaggedAt:   stamped,
+	}))
+	vc.mu.Lock()
+	vc.data = nil // simulate a daemon that started before the stamp
+	vc.mu.Unlock()
+
+	require.NoError(t, vc.CheckAndUpdate(context.Background()))
+
+	fresh := &VersionCache{filePath: vc.filePath, logger: slog.Default()}
+	require.NoError(t, fresh.Load())
+	got := fresh.Data()
+	require.NotNil(t, got)
+	assert.Equal(t, "v0.16.1", got.LatestVersion, "poll must still record the new version")
+	assert.Equal(t, "0.16", got.LastNaggedLine, "poll must not erase the notice ledger")
+	assert.Equal(t, stamped.UTC(), got.LastNaggedAt.UTC())
+}

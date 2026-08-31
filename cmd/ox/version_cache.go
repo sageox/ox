@@ -1,26 +1,18 @@
 package main
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/sageox/ox/internal/version"
 )
 
-// versionCacheFile is the path to the version cache file.
-// Package-level var so tests can override with t.TempDir().
-var versionCacheFile = filepath.Join(paths.CacheDir(), "version-check.json")
-
-// versionCacheData matches the daemon's cache format for latest version info.
-type versionCacheData struct {
-	LatestVersion string    `json:"latest_version"`
-	CheckedAt     time.Time `json:"checked_at"`
-	ETag          string    `json:"etag,omitempty"`
-}
+// versionCacheData is the on-disk version cache plus the notice ledger.
+// Aliased rather than redeclared so exactly one struct describes this file — a
+// second copy is how a writer silently drops the ledger fields and restores the
+// per-command nag.
+type versionCacheData = updatenotice.Data
 
 // versionCheckResult holds the outcome of comparing cached version against current.
 type versionCheckResult struct {
@@ -29,47 +21,36 @@ type versionCheckResult struct {
 	CurrentVersion  string
 }
 
-// readVersionCache reads the daemon-written version cache file.
+// readVersionCache reads the version cache file.
 // Returns nil on any error (missing file, corrupt JSON, etc.).
 func readVersionCache() *versionCacheData {
-	data, err := os.ReadFile(versionCacheFile)
-	if err != nil {
-		return nil
-	}
-	var cache versionCacheData
-	if err := json.Unmarshal(data, &cache); err != nil {
-		return nil
-	}
-	return &cache
+	return updatenotice.Read()
 }
 
 // writeVersionCacheFromDoctor writes the version cache as a side effect of doctor's
 // live GitHub check. This warms the cache for prime even when the daemon isn't running.
 func writeVersionCacheFromDoctor(latestVersion string) {
-	cachePath := versionCacheFile
-
-	// read existing cache to preserve ETag if present
-	existing := readVersionCache()
 	data := &versionCacheData{
 		LatestVersion: latestVersion,
 		CheckedAt:     time.Now(),
 	}
-	if existing != nil {
+	// Preserve the ETag (so the next conditional request keeps its advantage)
+	// AND the notice ledger: a routine version refresh must not erase the
+	// coworker's memory of having already been told.
+	if existing := updatenotice.Read(); existing != nil {
 		data.ETag = existing.ETag
+		updatenotice.CarryLedger(data, existing)
 	}
+	_ = updatenotice.Write(data)
+}
 
-	raw, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return
-	}
-
-	dir := filepath.Dir(cachePath)
-	_ = os.MkdirAll(dir, 0700)
-	tmpPath := cachePath + ".tmp"
-	if err := os.WriteFile(tmpPath, raw, 0600); err != nil {
-		return
-	}
-	_ = os.Rename(tmpPath, cachePath)
+// clearVersionCacheAfterUpgrade drops the cache — ledger included — after a
+// successful `ox upgrade`. Both must go: the running process still reports its
+// OLD compiled-in version, so a surviving cache would keep claiming an update
+// is available, and a surviving ledger would suppress the FIRST notice about
+// the next release line.
+func clearVersionCacheAfterUpgrade() {
+	updatenotice.Reset()
 }
 
 // refreshVersionCacheIfStale ensures the version cache is reasonably fresh
