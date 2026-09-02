@@ -51,3 +51,26 @@ func TestNoteExportYield_LogsOncePerTransition(t *testing.T) {
 	assert.True(t, noteExportYield(ep, false), "expired -> fresh")
 	assert.False(t, noteExportYield(ep, false))
 }
+
+// Only a usable bearer ends an expired-token pause. A logout (nil token) or
+// an unreadable auth.json after the pause must leave it paused, otherwise the
+// log claims "resumed: fresh token on disk" when there is no token at all.
+func TestExportBearerNoting_LogoutDoesNotResume(t *testing.T) {
+	const ep = "https://api.noting-test.sageox.ai"
+	stale := &StoredToken{AccessToken: "tok-stale", RefreshToken: "r", ExpiresAt: time.Now().Add(-time.Minute)}
+	fresh := &StoredToken{AccessToken: "tok-fresh", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)}
+	paused := func() bool {
+		exportYield.mu.Lock()
+		defer exportYield.mu.Unlock()
+		return exportYield.expired[ep]
+	}
+
+	assert.Equal(t, "", exportBearerNoting(ep, stale, nil))
+	assert.True(t, paused(), "expired token pauses")
+	assert.Equal(t, "", exportBearerNoting(ep, nil, nil))
+	assert.True(t, paused(), "logout must not read as a resume")
+	assert.Equal(t, "", exportBearerNoting(ep, fresh, errors.New("auth.json unreadable")))
+	assert.True(t, paused(), "unreadable store must not read as a resume")
+	assert.Equal(t, "tok-fresh", exportBearerNoting(ep, fresh, nil))
+	assert.False(t, paused(), "a usable bearer resumes")
+}

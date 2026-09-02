@@ -24,8 +24,19 @@ import (
 // stops re-sending one the server has already rejected.
 func ExportBearerForEndpoint(ep string) string {
 	tok, err := GetTokenForEndpoint(ep)
+	return exportBearerNoting(ep, tok, err)
+}
+
+// exportBearerNoting is ExportBearerForEndpoint after the disk read: decide,
+// then record the yield state. Only a usable bearer ends an expired-token
+// pause. Logged-out / unreadable yields "" with expired=false, and must NOT
+// flip the state, or a logout after an expiry would log "resumed: fresh
+// token on disk" with no token on disk.
+func exportBearerNoting(ep string, tok *StoredToken, err error) string {
 	bearer, expired := exportBearer(ep, tok, err)
-	noteExportYield(ep, expired)
+	if expired || bearer != "" {
+		noteExportYield(ep, expired)
+	}
 	return bearer
 }
 
