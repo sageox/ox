@@ -2,6 +2,7 @@
 
 **Status**: Accepted
 **Date**: 2026-04-02
+**Amended**: 2026-09-02 — checkout-side insulation (see "Addendum" at the end)
 
 ## Context
 
@@ -103,3 +104,32 @@ Credentials are loaded from the local credential store (`gitserver.LoadCredentia
 - `git lfs ls-files` is still used in one place: `RepairMissingLFSObjects` (push pre-flight) scans for orphaned pointers. This gracefully degrades — if git-lfs is not installed, the repair step is skipped.
 - Users cannot `git lfs pull` to hydrate ox's pointer files (no `.gitattributes` filter). Hydration goes through `ox` commands. This is intentional — ledger content is accessed through ox, not raw git operations.
 - The `StripLFSConfig` pre-flight on every push is a workaround for a GitLab ALB behavior. If GitLab fixes this, the workaround becomes dead code (harmless but unnecessary).
+
+## Addendum (2026-09-02): the user's git-lfs still runs on ox's clones
+
+This ADR insulated ox from the user's global git-lfs on the **push** side (`StripLFSConfig`)
+and assumed the **checkout** side was safe because ox never writes `.gitattributes` with
+`filter=lfs`. That assumption does not hold for every clone ox manages: team-context repos are
+seeded server-side and *do* ship `.gitattributes` with `filter=lfs` on discussion attachments
+(their bytes are served through the API's LFS resolver — a deliberate decision in the owning
+service). On any machine where git-lfs is installed globally, its clean/smudge filters
+therefore run on every checkout of those clones.
+
+Observed consequence (COE 2026-09-02): a nested LFS pointer committed upstream is unwrapped one
+layer by git-lfs smudge on every checkout, so the worktree can never equal the index. The
+daemon's `pull --rebase --autostash` then fails on every cycle, leaks an autostash each time,
+and the team context silently stops syncing. `ox doctor` has a repair for this shape
+(`restoreRawLFSPointers`) but the check gating it did not run against the affected clone.
+
+**Amended decision.** The insulation is complete only when it covers both directions:
+
+- Every git command ox runs — daemon and CLI — passes
+  `-c filter.lfs.smudge=cat -c filter.lfs.clean=cat -c filter.lfs.process= -c filter.lfs.required=false`.
+  This is the exact set `restoreRawLFSPointers` already uses; it now applies to
+  `gitutil.NewNetworkCmd` and the CLI git wrappers as a matter of course, not as a repair.
+- The consequence "hydration goes through ox's own download path, never through smudge" is
+  thereby made true regardless of the user's global git config, which ox does not control.
+- `StripLFSConfig` remains as the push-side half.
+
+Tracked as bd `ox-baz5.4` (insulation) and `ox-baz5.5` (doctor check scoping). Related:
+ADR-030 (per-clone serialization), `.claude/rules/lfs-no-git-lfs-binary.md`.
