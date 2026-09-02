@@ -95,13 +95,20 @@ func (rt *bearerRoundTripper) noteResponse(tok string, status int) {
 	defer rt.rejectMu.Unlock()
 	switch {
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		// Warn, not Debug: while armed the exporter is silent on the wire,
+		// so this line is the only client-side evidence that telemetry
+		// stopped. Once per arm (incl. a failed post-cooldown probe, which
+		// is a useful ~10-min heartbeat), not once per dropped batch.
 		if rt.rejected != tok {
-			slog.Debug("otel export rejected by server; suppressing exports for this token",
+			slog.Warn("otel export paused: server rejected bearer; dropping batches for this token",
 				"status", status, "cooldown", rejectedTokenCooldown)
 		}
 		rt.rejected = tok
 		rt.rejectedAt = time.Now()
 	case status >= 200 && status < 300:
+		if rt.rejected != "" {
+			slog.Warn("otel export resumed: server accepted bearer", "status", status)
+		}
 		rt.rejected = ""
 	}
 }

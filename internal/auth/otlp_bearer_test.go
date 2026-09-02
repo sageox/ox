@@ -16,9 +16,38 @@ func TestExportBearer(t *testing.T) {
 	fresh := &StoredToken{AccessToken: "tok-fresh", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)}
 	stale := &StoredToken{AccessToken: "tok-stale", RefreshToken: "r", ExpiresAt: time.Now().Add(-time.Minute)}
 
-	assert.Equal(t, "tok-fresh", exportBearer(ep, fresh, nil))
-	assert.Equal(t, "", exportBearer(ep, stale, nil), "expired stored token must yield, not be sent")
-	assert.Equal(t, "", exportBearer(ep, nil, nil), "logged out")
-	assert.Equal(t, "", exportBearer(ep, fresh, errors.New("auth.json unreadable")))
-	assert.Equal(t, "", exportBearer(ep, &StoredToken{ExpiresAt: time.Now().Add(time.Hour)}, nil), "empty access token")
+	cases := []struct {
+		name    string
+		tok     *StoredToken
+		err     error
+		want    string
+		expired bool
+	}{
+		{"fresh", fresh, nil, "tok-fresh", false},
+		{"expired stored token must yield, not be sent", stale, nil, "", true},
+		{"logged out is not an expiry", nil, nil, "", false},
+		{"unreadable auth.json", fresh, errors.New("auth.json unreadable"), "", false},
+		{"empty access token", &StoredToken{ExpiresAt: time.Now().Add(time.Hour)}, nil, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, expired := exportBearer(ep, tc.tok, tc.err)
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.expired, expired)
+		})
+	}
+}
+
+// The expiry yield is silent on the wire, so the transition must be logged
+// exactly once each way — not once per batch (a daemon exports every few
+// seconds) and not never. Failure prevented: a daemon whose traces stopped
+// with nothing in its log explaining why.
+func TestNoteExportYield_LogsOncePerTransition(t *testing.T) {
+	const ep = "https://api.yield-test.sageox.ai"
+	assert.False(t, noteExportYield(ep, false), "initial fresh state is not a transition")
+	assert.True(t, noteExportYield(ep, true), "fresh -> expired")
+	assert.False(t, noteExportYield(ep, true), "still expired: no repeat")
+	assert.False(t, noteExportYield(ep, true))
+	assert.True(t, noteExportYield(ep, false), "expired -> fresh")
+	assert.False(t, noteExportYield(ep, false))
 }
