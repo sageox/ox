@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -202,6 +203,78 @@ func resolveTeamByQuery(projectRoot, query string) *enrichedTeam {
 	}
 
 	return nil
+}
+
+// resolveTeamMembership finds a team in an API-supplied membership list by slug,
+// team ID, or name, using the same resolution order as resolveTeamByQuery above.
+//
+// The two resolvers sit next to each other on purpose. resolveTeamByQuery answers
+// from locally cloned team contexts, which is right for `ox team show` but wrong for
+// `ox init`: at init time the repo may have no local team data at all. This one
+// answers from the authoritative membership list the API returns, and keeping the
+// pass order identical means the same string resolves to the same team on either path.
+func resolveTeamMembership(teams []api.TeamMembership, query string) *api.TeamMembership {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" || len(teams) == 0 {
+		return nil
+	}
+	q := strings.ToLower(trimmed)
+
+	// pass 1: exact slug match. Skip empty slugs, or an empty-slug team would
+	// swallow queries that should have fallen through to ID or name.
+	for i, t := range teams {
+		if t.Slug != "" && strings.ToLower(t.Slug) == q {
+			return &teams[i]
+		}
+	}
+
+	// pass 2: exact team ID match
+	for i, t := range teams {
+		if t.ID == trimmed {
+			return &teams[i]
+		}
+	}
+
+	// pass 3: case-insensitive name match
+	for i, t := range teams {
+		if t.Name != "" && strings.EqualFold(t.Name, trimmed) {
+			return &teams[i]
+		}
+	}
+
+	return nil
+}
+
+// fetchTeamMemberships returns the teams the authenticated user belongs to, as
+// reported by the API. A missing or unusable token is not fatal here: the request
+// is attempted unauthenticated and the caller decides what an empty result means.
+func fetchTeamMemberships() ([]api.TeamMembership, error) {
+	teamClient := api.NewRepoClient()
+	if token, err := auth.EnsureValidToken(300); err == nil && token != nil && token.AccessToken != "" {
+		teamClient.WithAuthToken(token.AccessToken)
+	}
+	reposResp, err := teamClient.GetRepos()
+	if err != nil {
+		return nil, err
+	}
+	if reposResp == nil {
+		return nil, nil
+	}
+	return reposResp.TeamMembershipsFromRepos(), nil
+}
+
+// formatTeamCandidates renders the user's teams for an error message, so a failed
+// --team lookup can show what would have worked rather than only what did not.
+func formatTeamCandidates(teams []api.TeamMembership) string {
+	parts := make([]string, 0, len(teams))
+	for _, t := range teams {
+		if t.Slug != "" {
+			parts = append(parts, fmt.Sprintf("%s (%s, %s)", t.Name, t.Slug, t.ID))
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s (%s)", t.Name, t.ID))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // teamsFromDaemonStatus queries the running daemon for team context workspaces.

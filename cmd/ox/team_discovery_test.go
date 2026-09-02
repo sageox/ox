@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
 	"github.com/stretchr/testify/assert"
 )
@@ -128,4 +129,73 @@ func TestResolveTeamByQuery_WhitespaceHandling(t *testing.T) {
 		t.Skip("team not found in discovery")
 	}
 	assert.Equal(t, "team-ws-test", result.TeamID, "query with whitespace should still match")
+}
+
+func TestResolveTeamMembership_TableDriven(t *testing.T) {
+	teams := []api.TeamMembership{
+		{ID: "team_abc123", Name: "Platform", Slug: "platform"},
+		{ID: "team_xyz789", Name: "Developer Experience", Slug: "dx"},
+		// this team's NAME collides with the previous team's SLUG, which pins
+		// the resolution order rather than leaving it to chance
+		{ID: "team_def456", Name: "dx", Slug: "design-experiments"},
+		// slug that cannot be derived from the name, so only a real slug pass finds it
+		{ID: "team_ghi012", Name: "Research & Development", Slug: "rnd"},
+	}
+
+	tests := []struct {
+		name   string
+		query  string
+		wantID string // "" means no match expected
+	}{
+		{"exact slug", "platform", "team_abc123"},
+		{"slug is case-insensitive", "Platform", "team_abc123"},
+		{"exact team ID", "team_xyz789", "team_xyz789"},
+		{"name is case-insensitive", "developer experience", "team_xyz789"},
+		{"surrounding whitespace is trimmed", "  platform  ", "team_abc123"},
+		{"slug wins over a name that collides with it", "dx", "team_xyz789"},
+		{"slug that the name does not contain", "rnd", "team_ghi012"},
+		{"unknown value matches nothing", "no-such-team", ""},
+		{"empty query matches nothing", "", ""},
+		{"whitespace-only query matches nothing", "   ", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveTeamMembership(teams, tt.query)
+			if tt.wantID == "" {
+				assert.Nil(t, got, "expected no match for %q", tt.query)
+				return
+			}
+			if assert.NotNil(t, got, "expected a match for %q", tt.query) {
+				assert.Equal(t, tt.wantID, got.ID)
+			}
+		})
+	}
+}
+
+func TestResolveTeamMembership_EmptyTeamList(t *testing.T) {
+	assert.Nil(t, resolveTeamMembership(nil, "platform"))
+	assert.Nil(t, resolveTeamMembership([]api.TeamMembership{}, "platform"))
+}
+
+func TestResolveTeamMembership_TeamWithoutSlug(t *testing.T) {
+	// older servers omit slug; ID and name must still resolve
+	teams := []api.TeamMembership{{ID: "team_abc123", Name: "Platform"}}
+
+	assert.Equal(t, "team_abc123", resolveTeamMembership(teams, "team_abc123").ID)
+	assert.Equal(t, "team_abc123", resolveTeamMembership(teams, "platform").ID)
+	assert.Nil(t, resolveTeamMembership(teams, ""), "empty query must not match an empty slug")
+}
+
+func TestFormatTeamCandidates(t *testing.T) {
+	assert.Equal(t,
+		"Platform (platform, team_abc123), Developer Experience (dx, team_xyz789)",
+		formatTeamCandidates([]api.TeamMembership{
+			{ID: "team_abc123", Name: "Platform", Slug: "platform"},
+			{ID: "team_xyz789", Name: "Developer Experience", Slug: "dx"},
+		}))
+
+	// a team with no slug still renders, without an empty pair of parentheses
+	assert.Equal(t, "Platform (team_abc123)",
+		formatTeamCandidates([]api.TeamMembership{{ID: "team_abc123", Name: "Platform"}}))
 }
