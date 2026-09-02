@@ -400,9 +400,24 @@ func unbornLedgerFailure(ledgerPath, branch string, fix bool) checkResult {
 			return PassedCheck(name, fmt.Sprintf("restored branch %q from local objects", branch))
 		}
 		// Objects genuinely missing — one narrow fetch is the only way back, and
-		// a ledger that has never synced is worth it.
-		if fetchOut, fetchErr := exec.Command("git", "-C", ledgerPath, "fetch", "origin", branch).CombinedOutput(); fetchErr != nil {
-			return critical(FailedCheck(name, "fetch failed", gitutil.SanitizeOutput(strings.TrimSpace(string(fetchOut)))))
+		// a ledger that has never synced is worth it. Locked (ADR-030 D1): the
+		// daemon may be mid-fetch on this same clone; without the per-clone
+		// lock the two could interleave FETCH_HEAD exactly as in the
+		// 2026-09-02 incident.
+		var fetchOut []byte
+		fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		fetchErr := gitutil.WithRepoLock(fetchCtx, ledgerPath, func() error {
+			var err error
+			fetchOut, err = exec.Command("git", "-C", ledgerPath, "fetch", "origin", branch).CombinedOutput()
+			return err
+		})
+		fetchCancel()
+		if fetchErr != nil {
+			detail := strings.TrimSpace(string(fetchOut))
+			if detail == "" {
+				detail = fetchErr.Error() // lock could not be acquired — no CombinedOutput to show
+			}
+			return critical(FailedCheck(name, "fetch failed", gitutil.SanitizeOutput(detail)))
 		}
 		if out, err := exec.Command("git", "-C", ledgerPath, "checkout", branch).CombinedOutput(); err != nil {
 			return critical(FailedCheck(name, "checkout failed", gitutil.SanitizeOutput(strings.TrimSpace(string(out)))))
@@ -472,11 +487,17 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 // ox doctor --fix the divergence may already be resolved. Re-check before
 // attempting the heavier PushWithRetry path.
 func fixLedgerBranchDiverged(ledgerPath string, aheadCount, behindCount int) checkResult {
-	// re-fetch so we compare against the latest remote state
-	fetchCmd := exec.Command("git", "-C", ledgerPath, "fetch", "--quiet")
-	if err := fetchCmd.Run(); err != nil {
+	// re-fetch so we compare against the latest remote state. Locked
+	// (ADR-030 D1): serializes against a concurrent daemon fetch on the same
+	// clone. Best-effort either way — a stale re-check just falls through to
+	// the ahead/behind counts the caller already has.
+	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := gitutil.WithRepoLock(fetchCtx, ledgerPath, func() error {
+		return exec.Command("git", "-C", ledgerPath, "fetch", "--quiet").Run()
+	}); err != nil {
 		slog.Debug("fetch before diverged re-check failed", "error", err)
 	}
+	fetchCancel()
 
 	// re-check ahead/behind — daemon may have already reconciled
 	revCmd := exec.Command("git", "-C", ledgerPath, "rev-list", "--left-right", "--count", "origin/main...HEAD")

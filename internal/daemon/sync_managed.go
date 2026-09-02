@@ -108,7 +108,19 @@ const (
 	// skipReasonRemoteUnchanged / skipReasonRecentlyFetched: already current.
 	skipReasonRemoteUnchanged = "remote unchanged"
 	skipReasonRecentlyFetched = "recently fetched"
+	// skipReasonRepoLockBusy: another ox process (daemon goroutine or CLI)
+	// holds gitutil's per-clone lock past our wait budget. The clone is
+	// healthy — just in use — so this resolves itself next cycle. ADR-030.
+	skipReasonRepoLockBusy = "repo lock busy"
 )
+
+// fetchHeadRaceSignature is the (version-stable, prefix/suffix-agnostic)
+// substring of git's error when FETCH_HEAD carries more than one
+// merge-eligible head — the "two fetches interleaved" corruption ADR-030
+// closes with a per-clone lock. Matched against pull output so a transient
+// hit can be retried once instead of treated as a real conflict. See the
+// 2026-09-02 COE for the reproduction.
+const fetchHeadRaceSignature = "Cannot rebase onto multiple branches"
 
 // ManagedRepoPullResult describes what happened during pullManagedRepo.
 type ManagedRepoPullResult struct {
@@ -238,88 +250,155 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 		}
 	}
 
-	// --- Fetch ---
+	// --- Fetch + pull, serialized per clone ---
+	//
+	// ADR-030 D1: every mutating git operation on a managed clone runs
+	// inside gitutil.WithRepoLock so this pull cycle, the daemon's GC/wedge
+	// probe, a concurrent doctor pass, and any CLI invocation (ox status,
+	// ox doctor --fix) can never interleave a fetch or a rebase against the
+	// SAME clone. That interleaving is what corrupted FETCH_HEAD and
+	// produced "Cannot rebase onto multiple branches" in the 2026-09-02
+	// incident (COE: docs/coes/2026-09-02-daemon-git-sync-race-and-lfs-divergence.md).
+	var result ManagedRepoPullResult
+	lockErr := gitutil.WithRepoLock(ctx, path, func() error {
+		result = s.fetchAndPullLocked(ctx, opts, path, repoName, logger)
+		return nil
+	})
+	if lockErr != nil {
+		if gitutil.IsRepoLockBusy(lockErr) {
+			logger.Debug("repo locked by a concurrent ox process, skipping this cycle", "path", path, "error", lockErr)
+			return ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRepoLockBusy}
+		}
+		return ManagedRepoPullResult{Err: fmt.Errorf("acquire repo lock for %s: %w", repoName, lockErr)}
+	}
+	return result
+}
 
+// fetchAndPullLocked runs the fetch-then-pull sequence for pullManagedRepo.
+// The caller MUST already hold gitutil.WithRepoLock(path) — this method
+// performs no locking of its own and must not be called re-entrantly for
+// the same clone.
+func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepoPullOpts, path, repoName string, logger *slog.Logger) ManagedRepoPullResult {
 	// Refresh remote URL if credentials changed
 	projectEndpoint := endpoint.GetForProject(opts.ProjectRoot)
 	if err := gitserver.RefreshRemoteCredentials(path, projectEndpoint); err != nil {
 		logger.Warn("remote credential refresh failed", "path", path, "error", err)
 	}
 
-	// git fetch
-	fetchCtx, fetchSpan := perf.Start(ctx, "git_fetch")
-	fetchArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
-	fetchArgs = append(fetchArgs, "fetch", "--quiet")
-	// NewNetworkCmd disables the credential prompt so a lapsed PAT fails fast
-	// instead of hanging the daemon's background sync cycle on a TTY-less prompt.
-	fetchCmd := gitutil.NewNetworkCmd(fetchCtx, fetchArgs...)
-	if output, err := fetchCmd.CombinedOutput(); err != nil {
-		perf.RecordError(fetchSpan, err)
+	// ADR-030 D2: a pull that fails purely because two fetches interleaved
+	// (fetchHeadRaceSignature) is retried once — under the same lock, so
+	// the second fetch cannot race anything — before it is ever treated as
+	// a conflict. Any other failure, or a retry that hits the same wall,
+	// falls straight through to the ladder below on its final attempt.
+	const maxFetchPullAttempts = 2
+	var (
+		fetchHeadTime time.Time
+		diverged      bool
+		pullOutput    []byte
+		pullErr       error
+	)
+	for attempt := 1; attempt <= maxFetchPullAttempts; attempt++ {
+		// git fetch
+		fetchCtx, fetchSpan := perf.Start(ctx, "git_fetch")
+		fetchArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
+		fetchArgs = append(fetchArgs, "fetch", "--quiet")
+		// NewNetworkCmd disables the credential prompt so a lapsed PAT fails fast
+		// instead of hanging the daemon's background sync cycle on a TTY-less prompt.
+		fetchCmd := gitutil.NewNetworkCmd(fetchCtx, fetchArgs...)
+		if output, err := fetchCmd.CombinedOutput(); err != nil {
+			perf.RecordError(fetchSpan, err)
+			fetchSpan.End()
+			detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
+			errMsg := "fetch failed"
+			if detail != "" {
+				errMsg = fmt.Sprintf("fetch failed: %s", detail)
+			}
+			return ManagedRepoPullResult{Err: fmt.Errorf("%s: %w", errMsg, err)}
+		}
 		fetchSpan.End()
-		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
-		errMsg := "fetch failed"
-		if detail != "" {
-			errMsg = fmt.Sprintf("fetch failed: %s", detail)
+
+		// Track FETCH_HEAD mtime
+		if info, err := os.Stat(filepath.Join(path, ".git", "FETCH_HEAD")); err == nil {
+			fetchHeadTime = info.ModTime().UTC()
+			s.recordRemoteChange(path, fetchHeadTime)
 		}
-		return ManagedRepoPullResult{Err: fmt.Errorf("%s: %w", errMsg, err)}
-	}
-	fetchSpan.End()
 
-	// Track FETCH_HEAD mtime
-	var fetchHeadTime time.Time
-	if info, err := os.Stat(filepath.Join(path, ".git", "FETCH_HEAD")); err == nil {
-		fetchHeadTime = info.ModTime().UTC()
-		s.recordRemoteChange(path, fetchHeadTime)
-	}
-
-	// --- Divergence detection ---
-	result := ManagedRepoPullResult{FetchHeadTime: fetchHeadTime}
-
-	if opts.DetectDivergence {
-		if detectDivergedBranchesAt(ctx, path) {
+		// --- Divergence detection ---
+		diverged = false
+		if opts.DetectDivergence && detectDivergedBranchesAt(ctx, path) {
 			logger.Info("branches diverged, rebasing to reconcile", "repo", repoName)
-			result.Diverged = true
+			diverged = true
 		}
-	}
 
-	// --- Pull pre-flight: ensure shared KB merge=union rules ---
-	//
-	// Applies to both ledger AND team-context repos: they're both
-	// multi-writer KB-style clones (server seed + CLI seed + multiple
-	// coworker writes) and have the same wedge failure mode on
-	// concurrent writes to root metadata files. Without this rule,
-	// add/add or content/content collisions on AGENTS.md / CLAUDE.md /
-	// README.md / SOUL.md etc. halt the rebase and surface as "diverged
-	// from remote" errors that require manual intervention.
-	//
-	// kb.EnsureMergeAttributes writes per-clone .git/info/attributes
-	// (no working-tree artifact); idempotent, atomic, safe to call on
-	// every pull cycle.
-	//
-	// Best-effort: failure here is degraded mode (rebases may wedge),
-	// not a pull failure. Logged at warn level so an operator can spot
-	// a permission/IO issue.
-	if opts.EnsureKBMergeAttrs {
-		if changed, ensureErr := kb.EnsureMergeAttributes(path); ensureErr != nil {
-			logger.Warn("ensure merge attributes failed", "repo", repoName, "error", ensureErr)
-		} else if changed {
-			logger.Info("healed kb merge attributes (auto-repair pre-flight)", "repo", repoName)
+		// --- Pull pre-flight: ensure shared KB merge=union rules ---
+		//
+		// Applies to both ledger AND team-context repos: they're both
+		// multi-writer KB-style clones (server seed + CLI seed + multiple
+		// coworker writes) and have the same wedge failure mode on
+		// concurrent writes to root metadata files. Without this rule,
+		// add/add or content/content collisions on AGENTS.md / CLAUDE.md /
+		// README.md / SOUL.md etc. halt the rebase and surface as "diverged
+		// from remote" errors that require manual intervention.
+		//
+		// kb.EnsureMergeAttributes writes per-clone .git/info/attributes
+		// (no working-tree artifact); idempotent, atomic, safe to call on
+		// every pull cycle.
+		//
+		// Best-effort: failure here is degraded mode (rebases may wedge),
+		// not a pull failure. Logged at warn level so an operator can spot
+		// a permission/IO issue.
+		if opts.EnsureKBMergeAttrs {
+			if changed, ensureErr := kb.EnsureMergeAttributes(path); ensureErr != nil {
+				logger.Warn("ensure merge attributes failed", "repo", repoName, "error", ensureErr)
+			} else if changed {
+				logger.Info("healed kb merge attributes (auto-repair pre-flight)", "repo", repoName)
+			}
 		}
+
+		// ADR-030 D3: never run `pull --rebase` on top of a rebase this
+		// call did not start. Under the repo lock nothing else can be
+		// mid-pull against this clone, so in the normal case this is
+		// false — recoverPreexistingRebase already handled anything that
+		// predates this cycle. It stays as defense in depth for a writer
+		// outside the lock (a human running raw git, or a not-yet-locked
+		// ox path): skip rather than touch state that isn't this call's
+		// to recover, exactly the failure mode that collided on
+		// index.lock in the 2026-09-02 incident.
+		if gitutil.IsRebaseInProgress(path) {
+			logger.Warn("rebase already in progress before pull, not started by this call — skipping", "path", path, "repo", repoName)
+			return ManagedRepoPullResult{FetchHeadTime: fetchHeadTime, Diverged: diverged, Skipped: true, SkipReason: skipReasonRebaseInProgress}
+		}
+
+		// --- Pull ---
+		_, pullSpan := perf.Start(ctx, "git_pull_rebase")
+		pullArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
+		pullArgs = append(pullArgs, "pull", "--rebase", "--autostash", "--quiet")
+		pullCmd := gitutil.NewNetworkCmd(ctx, pullArgs...)
+		pullOutput, pullErr = pullCmd.CombinedOutput()
+		if pullErr != nil {
+			perf.RecordError(pullSpan, pullErr)
+		}
+		pullSpan.End()
+
+		if pullErr == nil {
+			break
+		}
+		if attempt < maxFetchPullAttempts && strings.Contains(string(pullOutput), fetchHeadRaceSignature) {
+			logger.Warn("FETCH_HEAD race detected (interleaved fetch), re-fetching and retrying once",
+				"repo", repoName, "attempt", attempt)
+			continue
+		}
+		break
 	}
 
-	// --- Pull ---
-
-	_, pullSpan := perf.Start(ctx, "git_pull_rebase")
-	pullArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
-	pullArgs = append(pullArgs, "pull", "--rebase", "--autostash", "--quiet")
-	pullCmd := gitutil.NewNetworkCmd(ctx, pullArgs...)
-	output, err := pullCmd.CombinedOutput()
-	if err != nil {
-		perf.RecordError(pullSpan, err)
+	result := ManagedRepoPullResult{FetchHeadTime: fetchHeadTime, Diverged: diverged}
+	if pullErr == nil {
+		return result
 	}
-	pullSpan.End()
-	if err != nil {
-		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
+
+	{
+		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(pullOutput)))
+		err := pullErr
 		logger.Warn("pull failed", "error", err, "output", detail, "repo", repoName)
 
 		// Try auto-resolving conflicts in safe paths before giving up
@@ -438,8 +517,6 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 		result.Err = fmt.Errorf("%s: %w", errMsg, err)
 		return result
 	}
-
-	return result
 }
 
 // sessionConflictPaths returns the subset of unmerged (conflicted) paths

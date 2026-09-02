@@ -261,8 +261,18 @@ func (s *SyncScheduler) ledgerSyncWedged(ctx context.Context, path string) (wedg
 	}
 
 	// bounded fetch to confirm we're actually online before concluding
-	// wedged — a fetch failure means offline, not stuck.
-	if _, err := gitutil.NewNetworkCmd(ctx, "-C", path, "fetch", "--quiet").CombinedOutput(); err != nil {
+	// wedged — a fetch failure means offline, not stuck. Locked (ADR-030
+	// D1): this probe runs on its own schedule, concurrently with the
+	// regular sync scheduler pull cycle in the SAME daemon process, so
+	// without the per-clone lock its fetch could interleave with the pull
+	// cycle's and corrupt FETCH_HEAD exactly like the 2026-09-02 incident.
+	// A lock-busy result is treated the same as offline: not confirmed, not
+	// wedged, retry next cycle.
+	fetchErr := gitutil.WithRepoLock(ctx, path, func() error {
+		_, err := gitutil.NewNetworkCmd(ctx, "-C", path, "fetch", "--quiet").CombinedOutput()
+		return err
+	})
+	if fetchErr != nil {
 		return false, 0, ahead
 	}
 

@@ -264,6 +264,11 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		s.workspaceRegistry.ClearSyncFailures(r.ws.ID)
 		if s.issues != nil {
 			s.issues.ClearIssue(IssueTypeSyncBackoff, r.ws.ID)
+			// bd ox-baz5.3: team-context clones go through the same
+			// pullManagedRepo recovery ladder as the ledger and can raise
+			// the same stuck-rebase issue; a successful pull clears it here
+			// too. See the matching comment in sync.go's doPull.
+			s.issues.ClearIssue(IssueTypeRebaseStuck, r.ws.ID)
 		}
 
 		mCfg := s.applySparseCheckout(ctx, r.ws.Path)

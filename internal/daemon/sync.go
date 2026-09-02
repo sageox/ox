@@ -1474,6 +1474,14 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		s.issues.ClearIssue(IssueTypeSyncBackoff, "ledger")
 		s.issues.ClearIssue(IssueTypeDiverged, "ledger")
 		s.issues.ClearIssue(IssueTypeSessionConflictWedge, "ledger")
+		// bd ox-baz5.3 / COE 2026-09-02: IssueTypeRebaseStuck was raised by a
+		// prior failed cycle's recovery ladder and had NO clear path — a
+		// ledger that recovered on its own next cycle kept showing `ox
+		// status` a confirm-required "stuck in a broken rebase state" error,
+		// with instructions (`git rebase --abort`) that did nothing, until
+		// the daemon was restarted. A successful pull is proof the clone is
+		// not stuck, the same evidence the other issue types above rely on.
+		s.issues.ClearIssue(IssueTypeRebaseStuck, "ledger")
 	}
 
 	duration := time.Since(startTime)
