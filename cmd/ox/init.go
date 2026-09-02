@@ -410,7 +410,6 @@ func runInit() error {
 	var selectedTeamID string
 	var selectedTeamName string
 	if initTeamFlag != "" {
-		selectedTeamID = strings.TrimSpace(initTeamFlag)
 		// --team has always taken the raw flag value and sent it to the API. Resolving
 		// it against the user's actual teams first means the slug `ox team list` prints
 		// and the name the picker shows both work here, matching every other team-taking
@@ -419,18 +418,13 @@ func runInit() error {
 		// covered: in an empty repo ensureInitialCommit has already seeded a commit by
 		// this point, so validating earlier still would require hoisting the endpoint
 		// and auth blocks above it. Tracked separately in #857.
-		memberships, err := fetchTeamMemberships()
+		memberships, fetchErr := fetchTeamMemberships()
+		resolvedID, resolvedName, err := resolveTeamFlag(initTeamFlag, memberships, fetchErr)
 		if err != nil {
-			// the teams could not be fetched at all, so nothing here is knowable:
-			// pass the value through unresolved rather than block init on a network
-			// failure. Only a SUCCESSFUL response is treated as authoritative below.
-			slog.Debug("could not fetch teams to resolve --team; passing the value through", "error", err)
-		} else if match := resolveTeamMembership(memberships, initTeamFlag); match != nil {
-			selectedTeamID = match.ID
-			selectedTeamName = match.Name
-		} else {
-			return unknownTeamError(strings.TrimSpace(initTeamFlag), memberships)
+			return err
 		}
+		selectedTeamID = resolvedID
+		selectedTeamName = resolvedName
 	} else {
 		// fetch teams from API to determine if selection is needed
 		teamClient := api.NewRepoClient()

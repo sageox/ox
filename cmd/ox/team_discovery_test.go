@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -209,13 +210,55 @@ func TestUnknownTeamError(t *testing.T) {
 	require.Error(t, withTeams)
 	assert.Contains(t, withTeams.Error(), `unknown team "no-such-team"`)
 	assert.Contains(t, withTeams.Error(), "Platform (platform, team_abc123)")
+}
 
-	// an account with no teams has no candidates, so listing an empty set would be
-	// noise: it gets the route that actually works instead
-	noTeams := unknownTeamError("no-such-team", nil)
-	require.Error(t, noTeams)
-	assert.Contains(t, noTeams.Error(), "belongs to no teams")
-	assert.Contains(t, noTeams.Error(), "without --team")
-	assert.NotContains(t, noTeams.Error(), "Your teams:",
-		"an empty candidate list must not be rendered as an empty 'Your teams:' line")
+// TestResolveTeamFlag_States pins which fetch outcomes may reject --team: only a
+// NON-EMPTY membership list may. Every other outcome passes the trimmed value
+// through to the server, which is the authority on team names.
+func TestResolveTeamFlag_States(t *testing.T) {
+	teams := []api.TeamMembership{
+		{ID: "team_abc123", Name: "Platform", Slug: "platform"},
+		{ID: "team_xyz789", Name: "Research & Development", Slug: "rnd"},
+	}
+
+	t.Run("transport error passes the trimmed value through", func(t *testing.T) {
+		id, name, err := resolveTeamFlag("  platform  ", nil, errors.New("network unreachable"))
+		require.NoError(t, err, "a degraded network must not make --team unusable")
+		assert.Equal(t, "platform", id, "the trimmed flag value must survive")
+		assert.Empty(t, name, "nothing was resolved, so no name may be claimed")
+	})
+
+	t.Run("nil membership list passes through rather than rejecting", func(t *testing.T) {
+		// fetchTeamMemberships returns (nil, nil) for a response with no body. Reading
+		// that as "this account has no teams" is what blocked ox init --team.
+		id, name, err := resolveTeamFlag(" platform ", nil, nil)
+		require.NoError(t, err, "an empty list is not proof the account has no teams")
+		assert.Equal(t, "platform", id)
+		assert.Empty(t, name)
+	})
+
+	t.Run("empty non-nil membership list also passes through", func(t *testing.T) {
+		// Deliberate: promptNoTeams offers "Continue (a new team will be created)" on
+		// the picker path, so zero teams is continuable everywhere else in init.
+		id, name, err := resolveTeamFlag("platform", []api.TeamMembership{}, nil)
+		require.NoError(t, err, "zero teams is a continuable state on every other init path")
+		assert.Equal(t, "platform", id)
+		assert.Empty(t, name)
+	})
+
+	t.Run("authoritative list resolves a slug the name does not contain", func(t *testing.T) {
+		id, name, err := resolveTeamFlag("rnd", teams, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "team_xyz789", id)
+		assert.Equal(t, "Research & Development", name)
+	})
+
+	t.Run("authoritative list rejects a value it does not contain", func(t *testing.T) {
+		id, name, err := resolveTeamFlag("no-such-team", teams, nil)
+		require.Error(t, err, "a non-empty list is authoritative, so an absent value is a typo")
+		assert.Contains(t, err.Error(), `unknown team "no-such-team"`)
+		assert.Contains(t, err.Error(), "Platform (platform, team_abc123)")
+		assert.Empty(t, id)
+		assert.Empty(t, name)
+	})
 }
