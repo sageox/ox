@@ -167,13 +167,7 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	// The OTLP proxy is JWT-gated; closure resolves the token at export
 	// time so the per-command exporter always uses the latest value on disk
 	// (refreshed by other code paths).
-	tokenFunc := func() string {
-		tok, err := auth.GetTokenForEndpoint(apiEndpoint)
-		if err != nil || tok == nil {
-			return ""
-		}
-		return tok.AccessToken
-	}
+	tokenFunc := func() string { return auth.ExportBearerForEndpoint(apiEndpoint) }
 	// Install perf TreeCollectorProcessor BEFORE Init so the next
 	// NewTracerProvider call sees it alongside the OTLP batch exporter.
 	// Spans produced anywhere in the CLI feed both backends — OTLP for

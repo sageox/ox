@@ -1100,13 +1100,7 @@ func (d *Daemon) initComponents() time.Duration {
 		// The OTLP proxy is JWT-gated. The daemon is long-running and the
 		// stored token rotates on refresh, so resolve per-export via this
 		// closure rather than baking a static header at Init time.
-		tokenFunc := func() string {
-			tok, err := auth.GetTokenForEndpoint(apiEndpoint)
-			if err != nil || tok == nil {
-				return ""
-			}
-			return tok.AccessToken
-		}
+		tokenFunc := func() string { return auth.ExportBearerForEndpoint(apiEndpoint) }
 		// Install perf processor BEFORE Init so the daemon's tree sink
 		// receives every span the OTLP exporter does. Per-span slog is
 		// gated by duration (>=100ms) and OX_TRACE; tree rendering to

@@ -29,12 +29,81 @@ import (
 // Called per-export so long-running processes (daemon) pick up rotated tokens.
 // Returning "" means no bearer is available (logged out / token expired): the
 // batch is dropped client-side (see bearerRoundTripper.RoundTrip) rather than
-// sent, because the JWT-gated proxy would only 401 it anyway.
+// sent, because the JWT-gated proxy would only 401 it anyway. Callers should
+// return auth.ExportBearerForEndpoint, which already yields "" for an expired
+// stored token — handing back a raw stored token here is how the 2026-08/09
+// prod 401 flood happened (sageox-9naj9).
 type TokenFunc func() string
+
+// rejectedTokenCooldown is how long the exporter stops sending after the
+// server rejects a bearer, before it probes again with that same value. The
+// only way a rejected token becomes valid is a server-side change (re-issued
+// team token, JWKS/userinfo outage ending), which is rare and slow, so 10 min
+// costs nothing in freshness. A ROTATED token (different value) resumes
+// immediately — the memo is keyed on the exact string.
+const rejectedTokenCooldown = 10 * time.Minute
 
 type bearerRoundTripper struct {
 	base      http.RoundTripper
 	tokenFunc TokenFunc
+
+	// rejected is the last bearer the server answered 401/403 to, and
+	// rejectedAt when. While tokenFunc keeps returning that exact value the
+	// exporter drops batches client-side instead of re-sending: a long-running
+	// daemon or buzz agent holding a revoked SAGEOX_TOKEN otherwise 401s once
+	// per batch forever (sageox-9naj9: ~15k/hour in prod), and the client
+	// cannot fix that token by retrying. Expired user JWTs are filtered
+	// earlier (auth.ExportBearerForEndpoint); this catches what the client
+	// cannot see locally — revoked, wrong-endpoint, or server-side rejection.
+	rejectMu   sync.Mutex
+	rejected   string
+	rejectedAt time.Time
+}
+
+// dropped is the synthetic 2xx returned when a batch is discarded client-side:
+// the batch exporter treats it as delivered, so it neither retries nor logs.
+func dropped(req *http.Request) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Proto:      req.Proto,
+		ProtoMajor: req.ProtoMajor,
+		ProtoMinor: req.ProtoMinor,
+		Header:     make(http.Header),
+		Body:       http.NoBody,
+		Request:    req,
+	}
+}
+
+func (rt *bearerRoundTripper) suppressed(tok string) bool {
+	rt.rejectMu.Lock()
+	defer rt.rejectMu.Unlock()
+	if rt.rejected == "" || rt.rejected != tok {
+		return false
+	}
+	if time.Since(rt.rejectedAt) >= rejectedTokenCooldown {
+		// Cooldown over: let exactly one probe through. A repeat 401 re-arms
+		// the memo below; a 2xx clears it.
+		rt.rejected = ""
+		return false
+	}
+	return true
+}
+
+func (rt *bearerRoundTripper) noteResponse(tok string, status int) {
+	rt.rejectMu.Lock()
+	defer rt.rejectMu.Unlock()
+	switch {
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		if rt.rejected != tok {
+			slog.Debug("otel export rejected by server; suppressing exports for this token",
+				"status", status, "cooldown", rejectedTokenCooldown)
+		}
+		rt.rejected = tok
+		rt.rejectedAt = time.Now()
+	case status >= 200 && status < 300:
+		rt.rejected = ""
+	}
 }
 
 func (rt *bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -47,21 +116,19 @@ func (rt *bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 		// apps/web/src/lib/otel-browser.ts. A 2xx with an empty body makes the
 		// batch exporter treat the batch as delivered, so it neither retries
 		// nor logs an export error.
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Status:     "200 OK",
-			Proto:      req.Proto,
-			ProtoMajor: req.ProtoMajor,
-			ProtoMinor: req.ProtoMinor,
-			Header:     make(http.Header),
-			Body:       http.NoBody,
-			Request:    req,
-		}, nil
+		return dropped(req), nil
+	}
+	if rt.suppressed(tok) {
+		return dropped(req), nil
 	}
 	// clone to avoid mutating the caller's request (otlptracehttp may retry)
 	req = req.Clone(req.Context())
 	req.Header.Set("Authorization", "Bearer "+tok)
-	return rt.base.RoundTrip(req)
+	resp, err := rt.base.RoundTrip(req)
+	if err == nil && resp != nil {
+		rt.noteResponse(tok, resp.StatusCode)
+	}
+	return resp, err
 }
 
 var (
