@@ -7,6 +7,7 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEnrichedTeam_ToConfigTeamContext(t *testing.T) {
@@ -198,4 +199,23 @@ func TestFormatTeamCandidates(t *testing.T) {
 	// a team with no slug still renders, without an empty pair of parentheses
 	assert.Equal(t, "Platform (team_abc123)",
 		formatTeamCandidates([]api.TeamMembership{{ID: "team_abc123", Name: "Platform"}}))
+}
+
+func TestUnknownTeamError(t *testing.T) {
+	// an account with teams gets the candidates it could have typed
+	withTeams := unknownTeamError("no-such-team", []api.TeamMembership{
+		{ID: "team_abc123", Name: "Platform", Slug: "platform"},
+	})
+	require.Error(t, withTeams)
+	assert.Contains(t, withTeams.Error(), `unknown team "no-such-team"`)
+	assert.Contains(t, withTeams.Error(), "Platform (platform, team_abc123)")
+
+	// an account with no teams has no candidates, so listing an empty set would be
+	// noise: it gets the route that actually works instead
+	noTeams := unknownTeamError("no-such-team", nil)
+	require.Error(t, noTeams)
+	assert.Contains(t, noTeams.Error(), "belongs to no teams")
+	assert.Contains(t, noTeams.Error(), "without --team")
+	assert.NotContains(t, noTeams.Error(), "Your teams:",
+		"an empty candidate list must not be rendered as an empty 'Your teams:' line")
 }

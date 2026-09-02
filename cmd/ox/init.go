@@ -126,7 +126,7 @@ This command will:
 7. Associate the repo with your team (prompts for team selection)
 8. Register repository with SageOx API
 
-Use --team to specify a team ID directly, or let ox init prompt you.
+Use --team to specify a team by name, slug, or ID, or let ox init prompt you.
 
 After init, run 'ox guide getting-started' for a five-minute walkthrough,
 or 'ox guide team-rules' to learn how to share AI coworker conventions
@@ -414,18 +414,22 @@ func runInit() error {
 		// --team has always taken the raw flag value and sent it to the API. Resolving
 		// it against the user's actual teams first means the slug `ox team list` prints
 		// and the name the picker shows both work here, matching every other team-taking
-		// surface, and a typo fails now rather than as an HTTP 400 after init has already
-		// modified the working tree. A failed fetch falls through with the raw value: a
-		// degraded network should not make --team unusable.
-		if memberships, err := fetchTeamMemberships(); err != nil {
+		// surface, and a typo fails before REPOSITORY SETUP writes anything rather than
+		// as an HTTP 400 after every file has been written and staged. One case is not
+		// covered: in an empty repo ensureInitialCommit has already seeded a commit by
+		// this point, so validating earlier still would require hoisting the endpoint
+		// and auth blocks above it. Tracked separately in #857.
+		memberships, err := fetchTeamMemberships()
+		if err != nil {
+			// the teams could not be fetched at all, so nothing here is knowable:
+			// pass the value through unresolved rather than block init on a network
+			// failure. Only a SUCCESSFUL response is treated as authoritative below.
 			slog.Debug("could not fetch teams to resolve --team; passing the value through", "error", err)
-		} else if len(memberships) > 0 {
-			match := resolveTeamMembership(memberships, initTeamFlag)
-			if match == nil {
-				return fmt.Errorf("unknown team %q\n\nYour teams: %s", strings.TrimSpace(initTeamFlag), formatTeamCandidates(memberships))
-			}
+		} else if match := resolveTeamMembership(memberships, initTeamFlag); match != nil {
 			selectedTeamID = match.ID
 			selectedTeamName = match.Name
+		} else {
+			return unknownTeamError(strings.TrimSpace(initTeamFlag), memberships)
 		}
 	} else {
 		// fetch teams from API to determine if selection is needed

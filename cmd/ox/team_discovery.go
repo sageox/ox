@@ -277,6 +277,17 @@ func formatTeamCandidates(teams []api.TeamMembership) string {
 	return strings.Join(parts, ", ")
 }
 
+// unknownTeamError reports a --team value that a successful team fetch could not
+// resolve. An empty membership list is authoritative rather than inconclusive: an
+// account that belongs to no team has no value that could have matched, so it gets
+// the route that does work instead of a list of candidates that would be blank.
+func unknownTeamError(query string, teams []api.TeamMembership) error {
+	if len(teams) == 0 {
+		return fmt.Errorf("unknown team %q: this account belongs to no teams\n\nRun ox init without --team to create one", query)
+	}
+	return fmt.Errorf("unknown team %q\n\nYour teams: %s", query, formatTeamCandidates(teams))
+}
+
 // teamsFromDaemonStatus queries the running daemon for team context workspaces.
 func teamsFromDaemonStatus() []enrichedTeam {
 	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
