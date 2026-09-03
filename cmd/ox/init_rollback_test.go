@@ -114,25 +114,79 @@ func TestRollbackInit_OnlyFilesNoDirectory(t *testing.T) {
 	assert.DirExists(t, sageoxDir, "directory should be preserved when not a fresh init")
 }
 
-func TestRollbackInit_EmptyTracker(t *testing.T) {
-	// should not panic with empty tracker
-	tracker := newInitTracker(t.TempDir())
-	tracker.rollback(true)
-}
-
-func TestRollbackInit_NonexistentFiles(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// files that don't exist
-	files := []string{
-		filepath.Join(tmpDir, "nonexistent1.txt"),
-		filepath.Join(tmpDir, "nonexistent2.txt"),
+// TestRollbackInit_SkipsMissingAndSparesUntracked verifies rollback removes only
+// what it tracked, and is not derailed by tracked paths that were never created.
+//
+// Failure prevented: a tracked file may never exist if init failed early.
+// Aborting on the first missing path leaves the files that DID get created
+// behind; deleting beyond the tracked set destroys the user's own files.
+func TestRollbackInit_SkipsMissingAndSparesUntracked(t *testing.T) {
+	tests := []struct {
+		name string
+		// tracked returns the paths to record as created, given the temp dir
+		// and the path of a real file that exists on disk.
+		tracked      func(dir, real string) []string
+		isFreshInit  bool
+		wantRealGone bool
+	}{
+		{
+			name:         "an empty tracker removes nothing",
+			tracked:      func(dir, real string) []string { return nil },
+			wantRealGone: false,
+		},
+		{
+			name:         "an empty tracker on a fresh init still removes nothing",
+			tracked:      func(dir, real string) []string { return nil },
+			isFreshInit:  true,
+			wantRealGone: false,
+		},
+		{
+			name: "missing tracked paths are skipped and the real one still goes",
+			tracked: func(dir, real string) []string {
+				return []string{
+					filepath.Join(dir, "nonexistent1.txt"),
+					filepath.Join(dir, "nonexistent2.txt"),
+					real,
+				}
+			},
+			wantRealGone: true,
+		},
 	}
 
-	// should not panic, just skip missing files
-	tracker := newInitTracker(tmpDir)
-	tracker.createdFiles = files
-	tracker.rollback(true)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+
+			sentinel := filepath.Join(dir, "pre-existing.txt")
+			if err := os.WriteFile(sentinel, []byte("keep me\n"), 0o644); err != nil {
+				t.Fatalf("write sentinel: %v", err)
+			}
+			real := filepath.Join(dir, "created.txt")
+			if err := os.WriteFile(real, []byte("remove me\n"), 0o644); err != nil {
+				t.Fatalf("write tracked file: %v", err)
+			}
+
+			tracker := newInitTracker(dir)
+			tracker.isFreshInit = tt.isFreshInit
+			tracker.createdFiles = tt.tracked(dir, real)
+			tracker.rollback(true)
+
+			_, err := os.Stat(real)
+			if tt.wantRealGone && !os.IsNotExist(err) {
+				t.Error("rollback stopped at the first missing file and left a tracked file behind")
+			}
+			if !tt.wantRealGone && err != nil {
+				t.Errorf("rollback removed an untracked file: %v", err)
+			}
+			// The sentinel is never tracked in any case.
+			if _, err := os.Stat(sentinel); err != nil {
+				t.Errorf("rollback removed an untracked file: %v", err)
+			}
+			if _, err := os.Stat(dir); err != nil {
+				t.Errorf("rollback removed the tracker root: %v", err)
+			}
+		})
+	}
 }
 
 func TestRollbackInit_ReInitScenario(t *testing.T) {

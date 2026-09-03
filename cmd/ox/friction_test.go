@@ -91,46 +91,71 @@ func TestFrictionIPC_CalledFromRecoveryPath(t *testing.T) {
 			"removing this breaks CLI→daemon friction telemetry")
 }
 
-// TestSendFrictionEvent_NilEvent verifies nil events are safely ignored.
-func TestSendFrictionEvent_NilEvent(t *testing.T) {
-	// should not panic
-	sendFrictionEvent(nil)
-}
+// TestSendFrictionEvent_Suppressed verifies every path that must NOT reach the
+// daemon, using an injected socket so "suppressed" means "nothing arrived"
+// rather than "the call returned".
+//
+// Failure prevented: two of these are telemetry opt-outs. Asserting only that
+// the call does not panic passes against a build that ignores them entirely and
+// sends the event anyway.
+func TestSendFrictionEvent_Suppressed(t *testing.T) {
+	sample := &friction.FrictionEvent{Kind: "unknown-command", Input: "ox bad"}
 
-// TestSendFrictionEvent_DoNotTrack verifies telemetry opt-out is respected.
-func TestSendFrictionEvent_DoNotTrack(t *testing.T) {
-	t.Setenv("DO_NOT_TRACK", "1")
-
-	// set up socket that should NOT receive anything
-	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("ox-fdnt-%d.sock", time.Now().UnixNano()%100000))
-	t.Cleanup(func() { os.Remove(socketPath) })
-
-	listener, err := net.Listen("unix", socketPath)
-	require.NoError(t, err)
-	defer listener.Close()
-
-	received := make(chan struct{}, 1)
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		received <- struct{}{}
-	}()
-
-	event := &friction.FrictionEvent{
-		Kind:  "unknown-command",
-		Input: "ox bad",
+	tests := []struct {
+		name  string
+		env   map[string]string
+		event *friction.FrictionEvent
+	}{
+		{
+			// The nil guard is the first line of sendFrictionEventTo. Without
+			// it a nil event either panics or serializes to a null payload and
+			// is delivered as a real event.
+			name:  "a nil event",
+			event: nil,
+		},
+		{
+			name:  "DO_NOT_TRACK=1",
+			env:   map[string]string{"DO_NOT_TRACK": "1"},
+			event: sample,
+		},
+		{
+			name:  "SAGEOX_FRICTION=false",
+			env:   map[string]string{"SAGEOX_FRICTION": "false"},
+			event: sample,
+		},
 	}
 
-	// exercise the real sendFrictionEventTo — should be blocked by DO_NOT_TRACK
-	sendFrictionEventTo(event, socketPath)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
 
-	select {
-	case <-received:
-		t.Fatal("friction event should NOT be sent when DO_NOT_TRACK=1")
-	case <-time.After(50 * time.Millisecond):
-		// good — no IPC sent
+			socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("ox-fsup-%d.sock", time.Now().UnixNano()%100000))
+			t.Cleanup(func() { os.Remove(socketPath) })
+
+			listener, err := net.Listen("unix", socketPath)
+			require.NoError(t, err)
+			defer listener.Close()
+
+			received := make(chan struct{}, 1)
+			go func() {
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				received <- struct{}{}
+			}()
+
+			sendFrictionEventTo(tt.event, socketPath)
+
+			select {
+			case <-received:
+				t.Fatal("event reached the daemon but delivery should have been suppressed")
+			case <-time.After(50 * time.Millisecond):
+				// good — nothing sent
+			}
+		})
 	}
 }

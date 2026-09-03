@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -97,10 +98,36 @@ func TestEmitProvidedContextTrace_NilTeamCtx(t *testing.T) {
 	}
 }
 
+// TestEmitProvidedContextTrace_EmptySessionDir verifies an absent session
+// directory writes nothing anywhere, checked from an empty working directory.
+//
+// Failure prevented: the writer joins paths onto sessionDir. Without the empty
+// guard, "" makes every path relative, so the trace lands in whatever directory
+// the agent happened to be run from — inside the user's repo.
 func TestEmitProvidedContextTrace_EmptySessionDir(t *testing.T) {
-	// should return immediately without error
-	emitProvidedContextTrace("", &prime.TeamContextInfo{TeamName: "test"}, nil)
-	// no file created, nothing to verify — just ensures no panic
+	cwd := t.TempDir()
+	restore := changeToDir(t, cwd)
+	defer restore()
+
+	// MemoryContent must be non-empty: it is what makes the writer append an
+	// event at all. With an empty struct nothing is ever written and the test
+	// passes even with the sessionDir guard removed.
+	emitProvidedContextTrace("", &prime.TeamContextInfo{
+		TeamName:      "test",
+		MemoryContent: "some memory content",
+	}, nil)
+
+	entries, err := os.ReadDir(cwd)
+	if err != nil {
+		t.Fatalf("read working directory: %v", err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("empty sessionDir wrote %v into the working directory, want nothing", names)
+	}
 }
 
 func TestEmitProvidedContextTrace_NoInstructions(t *testing.T) {
