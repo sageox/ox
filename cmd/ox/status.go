@@ -953,6 +953,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 // daemonSyncWarningThreshold is the uptime duration after which we expect syncs to have occurred
 const daemonSyncWarningThreshold = time.Minute
 
+// daemonGetState indirects daemon.GetState so tests can drive the branches
+// below. The real function probes a live socket, so without this seam the
+// stopped-daemon wording is only reachable on a machine that happens to have
+// no daemon running — which is not the usual developer state.
+var daemonGetState = daemon.GetState
+
 // renderDaemonSyncSection renders daemon sync statistics
 func renderDaemonSyncSection(ds *daemon.StatusData, syncHistory []daemon.SyncEvent, localCfg *config.LocalConfig, noProject bool, projectInitialized bool) string {
 	var b strings.Builder
@@ -974,7 +980,7 @@ func renderDaemonSyncSection(ds *daemon.StatusData, syncHistory []daemon.SyncEve
 	// handle nil status (daemon not connected)
 	if ds == nil {
 		b.WriteString(statusLabelStyle.Render("Status"))
-		switch daemon.GetState() {
+		switch daemonGetState() {
 		case daemon.DaemonStateStarting:
 			b.WriteString(statusMutedStyle.Render("◐ starting — process is running but not yet accepting connections"))
 		case daemon.DaemonStateStuck:

@@ -148,31 +148,77 @@ func TestRenderDaemonSyncSection(t *testing.T) {
 	}
 }
 
-// TestRenderDaemonSyncSection_UninitializedProjectIsNotAlarming checks that a
-// stopped daemon reads as expected in a repo that was never initialized, and as
-// actionable in one that was.
+// TestRenderDaemonSyncSection_StoppedDaemonWording drives daemonGetState
+// directly so every branch of the nil-status switch is reachable regardless of
+// whether a daemon happens to be running on the machine under test.
 //
 // Failure prevented: the same "daemon not running" fact means different things
 // either side of `ox init`. Showing the initialized wording in an uninitialized
-// repo tells the reader to start a daemon for a project that does not exist yet.
-func TestRenderDaemonSyncSection_UninitializedProjectIsNotAlarming(t *testing.T) {
-	if state := daemon.GetState(); state != daemon.DaemonStateStopped {
-		// Starting/stuck/running states short-circuit before the branch under
-		// test, so the comparison below would be vacuous.
-		t.Skipf("daemon state is %v, not stopped; this branch is unreachable", state)
+// repo tells the reader to start a daemon for a project that does not exist
+// yet. Reading the real daemon state instead made this assertion vacuous on any
+// machine with a daemon up, which is the normal developer state.
+func TestRenderDaemonSyncSection_StoppedDaemonWording(t *testing.T) {
+	stubDaemonState := func(t *testing.T, state daemon.DaemonState) {
+		t.Helper()
+		prev := daemonGetState
+		daemonGetState = func() daemon.DaemonState { return state }
+		t.Cleanup(func() { daemonGetState = prev })
 	}
 
-	uninit := renderDaemonSyncSection(nil, nil, nil, false, false)
-	inited := renderDaemonSyncSection(nil, nil, nil, false, true)
+	tests := []struct {
+		name               string
+		state              daemon.DaemonState
+		projectInitialized bool
+		wantContains       []string
+		wantOmits          []string
+	}{
+		{
+			name:               "stopped in an uninitialized project blames init, not the daemon",
+			state:              daemon.DaemonStateStopped,
+			projectInitialized: false,
+			wantContains:       []string{"ox init"},
+			wantOmits:          []string{"ox daemon start"},
+		},
+		{
+			name:               "stopped in an initialized project points at the daemon",
+			state:              daemon.DaemonStateStopped,
+			projectInitialized: true,
+			wantContains:       []string{"ox daemon start"},
+			wantOmits:          []string{"ox init"},
+		},
+		{
+			name:               "starting short-circuits both wordings",
+			state:              daemon.DaemonStateStarting,
+			projectInitialized: false,
+			wantContains:       []string{"starting"},
+			wantOmits:          []string{"ox init", "ox daemon start"},
+		},
+		{
+			name:               "stuck recommends a restart, not init",
+			state:              daemon.DaemonStateStuck,
+			projectInitialized: false,
+			wantContains:       []string{"stuck", "ox daemon restart"},
+			wantOmits:          []string{"ox init"},
+		},
+	}
 
-	if !strings.Contains(uninit, "ox init") {
-		t.Errorf("uninitialized output %q should attribute the stopped daemon to init not having run", uninit)
-	}
-	if strings.Contains(inited, "ox init") {
-		t.Errorf("initialized output %q must not suggest init on an already-initialized project", inited)
-	}
-	if uninit == inited {
-		t.Error("initialized and uninitialized projects render the same daemon message")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubDaemonState(t, tt.state)
+
+			got := renderDaemonSyncSection(nil, nil, nil, false, tt.projectInitialized)
+
+			for _, want := range tt.wantContains {
+				if !strings.Contains(got, want) {
+					t.Errorf("output %q should contain %q", got, want)
+				}
+			}
+			for _, omit := range tt.wantOmits {
+				if strings.Contains(got, omit) {
+					t.Errorf("output %q unexpectedly contains %q", got, omit)
+				}
+			}
+		})
 	}
 }
 

@@ -812,7 +812,10 @@ func TestCheckSSHAuth(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
+			// os.UserHomeDir reads HOME on unix and USERPROFILE on Windows;
+			// set both so the check cannot fall through to the real profile.
 			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
 			if tt.setup != nil {
 				tt.setup(t, home)
 			}

@@ -127,6 +127,12 @@ func TestSendFrictionEvent_Suppressed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Neutralize both opt-outs before applying the case's own. An
+			// inherited DO_NOT_TRACK=1 would suppress the SAGEOX_FRICTION case
+			// for the wrong reason, and vice versa, so each case would pass
+			// against a build that ignores the variable it is meant to prove.
+			t.Setenv("DO_NOT_TRACK", "")
+			t.Setenv("SAGEOX_FRICTION", "true")
 			for k, v := range tt.env {
 				t.Setenv(k, v)
 			}

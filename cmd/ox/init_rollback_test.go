@@ -143,10 +143,14 @@ func TestRollbackInit_SkipsMissingAndSparesUntracked(t *testing.T) {
 		{
 			name: "missing tracked paths are skipped and the real one still goes",
 			tracked: func(dir, real string) []string {
+				// rollback walks createdFiles in reverse, so `real` must be
+				// first for the missing paths to be reached before it. With
+				// `real` last it is removed first and a rollback that aborts
+				// on the first os.Remove error still passes.
 				return []string{
+					real,
 					filepath.Join(dir, "nonexistent1.txt"),
 					filepath.Join(dir, "nonexistent2.txt"),
-					real,
 				}
 			},
 			wantRealGone: true,
