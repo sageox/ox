@@ -56,12 +56,13 @@ func acquireInProcess(ctx context.Context, lockPath string, deadline time.Time) 
 	ch := inProcessChan(lockPath)
 
 	var timerC <-chan time.Time
+	var requested time.Duration
 	if !deadline.IsZero() {
-		d := time.Until(deadline)
-		if d < 0 {
-			d = 0
+		requested = time.Until(deadline)
+		if requested < 0 {
+			requested = 0
 		}
-		timer := time.NewTimer(d)
+		timer := time.NewTimer(requested)
 		defer timer.Stop()
 		timerC = timer.C
 	}
@@ -72,6 +73,10 @@ func acquireInProcess(ctx context.Context, lockPath string, deadline time.Time) 
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-timerC:
-		return nil, &ErrLockTimeout{Path: lockPath, Timeout: time.Until(deadline)}
+		// requested, not time.Until(deadline): the deadline has already
+		// passed by the time this branch runs, so re-deriving it here
+		// would report a near-zero duration instead of the wait the
+		// caller actually asked for.
+		return nil, &ErrLockTimeout{Path: lockPath, Timeout: requested}
 	}
 }

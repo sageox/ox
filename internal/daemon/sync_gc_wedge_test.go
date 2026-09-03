@@ -38,7 +38,7 @@ func TestLedgerSyncWedged_FreshUnpushedCommit_NotWedged(t *testing.T) {
 	require.NoError(t, exec.Command("git", "-C", cloneDir, "add", "-A").Run())
 	require.NoError(t, exec.Command("git", "-C", cloneDir, "commit", "-m", "unpushed").Run())
 
-	wedged, _, count := s.ledgerSyncWedged(context.Background(), cloneDir)
+	wedged, _, count, _ := s.ledgerSyncWedged(context.Background(), cloneDir)
 	assert.False(t, wedged, "a fresh unpushed commit is not a wedge — normal push/pull will resolve it")
 	assert.Equal(t, 1, count)
 }
@@ -58,7 +58,7 @@ func TestLedgerSyncWedged_AheadOnly_NotWedged(t *testing.T) {
 	require.NoError(t, exec.Command("git", "-C", cloneDir, "commit", "-m", "unpushed").Run())
 	backdateCommitTimestamp(t, cloneDir, -4*time.Hour)
 
-	wedged, _, _ := s.ledgerSyncWedged(context.Background(), cloneDir)
+	wedged, _, _, _ := s.ledgerSyncWedged(context.Background(), cloneDir)
 	assert.False(t, wedged, "ahead-only, never behind, must not be wedged regardless of age")
 }
 
@@ -81,7 +81,7 @@ func TestLedgerSyncWedged_BehindOnly_NotWedged(t *testing.T) {
 	require.NoError(t, exec.Command("git", "-C", otherDir, "commit", "-m", "remote advance").Run())
 	require.NoError(t, exec.Command("git", "-C", otherDir, "push", "origin", "HEAD:main").Run())
 
-	wedged, _, _ := s.ledgerSyncWedged(context.Background(), cloneDir)
+	wedged, _, _, _ := s.ledgerSyncWedged(context.Background(), cloneDir)
 	assert.False(t, wedged, "behind-only (never ahead) must not be wedged — a plain pull resolves it")
 }
 
@@ -96,7 +96,7 @@ func TestLedgerSyncWedged_GenuinelyWedged_DetectsAfterAgeThreshold(t *testing.T)
 	diverge(t, bareDir, cloneDir, "local.txt", "remote.txt")
 
 	// too young: must not be wedged yet even though ahead+behind
-	wedged, age, count := s.ledgerSyncWedged(context.Background(), cloneDir)
+	wedged, age, count, _ := s.ledgerSyncWedged(context.Background(), cloneDir)
 	assert.False(t, wedged, "ahead+behind but younger than ledgerSyncWedgeAge must not be wedged yet")
 	assert.Equal(t, 1, count)
 	assert.Less(t, age, ledgerSyncWedgeAge)
@@ -104,7 +104,7 @@ func TestLedgerSyncWedged_GenuinelyWedged_DetectsAfterAgeThreshold(t *testing.T)
 	// backdate the local commit past the threshold
 	backdateCommitTimestamp(t, cloneDir, -4*time.Hour)
 
-	wedged, age, count = s.ledgerSyncWedged(context.Background(), cloneDir)
+	wedged, age, count, _ = s.ledgerSyncWedged(context.Background(), cloneDir)
 	assert.True(t, wedged, "ahead+behind older than ledgerSyncWedgeAge must be detected as wedged")
 	assert.GreaterOrEqual(t, age, ledgerSyncWedgeAge)
 	assert.Equal(t, 1, count)
@@ -126,8 +126,9 @@ func TestLedgerSyncWedged_Offline_NotWedged(t *testing.T) {
 	// point origin at a nonexistent path so fetch fails
 	require.NoError(t, exec.Command("git", "-C", cloneDir, "remote", "set-url", "origin", "/nonexistent/repo.git").Run())
 
-	wedged, _, _ := s.ledgerSyncWedged(context.Background(), cloneDir)
+	wedged, _, _, lockBusy := s.ledgerSyncWedged(context.Background(), cloneDir)
 	assert.False(t, wedged, "a fetch failure (offline) must not be classified as wedged")
+	assert.False(t, lockBusy, "a genuine offline fetch failure is not lock contention")
 }
 
 // diverge makes cloneDir simultaneously ahead (one unpushed local commit
@@ -757,7 +758,7 @@ func TestCheckAndRunGC_WedgeTrigger_ClearsSessionConflictIssueOnPlainSuccess(t *
 	// sanity check: confirm the fixture is genuinely wedged per the same
 	// heuristic checkAndRunGC itself calls, and that the net diff really is
 	// empty (the whole point of this fixture).
-	wedged, age, count := s.ledgerSyncWedged(context.Background(), ledgerDir)
+	wedged, age, count, _ := s.ledgerSyncWedged(context.Background(), ledgerDir)
 	require.True(t, wedged, "fixture must be genuinely wedged (ahead+behind, old enough)")
 	require.GreaterOrEqual(t, age, ledgerSyncWedgeAge)
 	require.Equal(t, 2, count)
@@ -797,4 +798,45 @@ func TestCheckAndRunGC_WedgeTrigger_ClearsSessionConflictIssueOnPlainSuccess(t *
 	_, stillPresent := tracker.GetIssue(IssueTypeSessionConflictWedge, "ledger")
 	assert.False(t, stillPresent,
 		"a successful GC that resolves a detected wedge must clear the session-conflict-wedge issue via checkAndRunGC's dispatch-level switch, even when recovered=false (nothing needed capturing)")
+}
+
+// TestLedgerSyncWedged_LockBusy_DoesNotClaimConfirmed proves the caller can
+// tell "no check ran because a peer held the repo lock" apart from "checked,
+// genuinely not wedged" — checkAndRunGC uses this to avoid spending the 6h
+// wedge-check cooldown on a cycle where nothing was actually verified. Before
+// this, a lock held by the daemon's own concurrent sync cycle (now common,
+// since ADR-030 serializes every fetch on the clone) would silently disable
+// wedge detection for up to ledgerGCWedgeCooldown with no signal that it had
+// happened.
+func TestLedgerSyncWedged_LockBusy_DoesNotClaimConfirmed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	bareDir, cloneDir := gcInitBareAndClone(t, t.TempDir())
+	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "new.txt"), []byte("x"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", cloneDir, "add", "-A").Run())
+	require.NoError(t, exec.Command("git", "-C", cloneDir, "commit", "-m", "unpushed").Run())
+	_ = bareDir
+
+	s := newTestScheduler(t.TempDir())
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_ = gitutil.WithRepoLock(context.Background(), cloneDir, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	wedged, _, unpushedCount, lockBusy := s.ledgerSyncWedged(ctx, cloneDir)
+
+	assert.False(t, wedged, "a lock-busy result must never be reported as wedged")
+	assert.True(t, lockBusy, "a peer holding the repo lock must be distinguishable from a genuine offline fetch failure")
+	assert.Equal(t, 1, unpushedCount, "ahead-count is still known even when the confirming fetch couldn't run")
 }

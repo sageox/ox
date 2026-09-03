@@ -263,12 +263,22 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		s.workspaceRegistry.ClearWorkspaceError(r.ws.ID)
 		s.workspaceRegistry.ClearSyncFailures(r.ws.ID)
 		if s.issues != nil {
+			// IssueTypeSyncBackoff is set by shouldSyncOrBypass(ws.ID, ...)
+			// — keyed on ws.ID. IssueTypeRebaseStuck is set inside
+			// pullManagedRepo/pullTeamContext on repoName :=
+			// filepath.Base(ws.Path) (ManagedRepoPullOpts.RepoName) — a
+			// DIFFERENT key. They read alike but are not interchangeable:
+			// the two happen to coincide for a well-formed team ID
+			// (paths.TeamContextDir joins the team dir on the sanitized
+			// ID), but clearing on the wrong one would silently no-op —
+			// exactly the class of bug this fix exists to close. Each
+			// clear uses the key its issue was actually set with.
 			s.issues.ClearIssue(IssueTypeSyncBackoff, r.ws.ID)
 			// bd ox-baz5.3: team-context clones go through the same
 			// pullManagedRepo recovery ladder as the ledger and can raise
 			// the same stuck-rebase issue; a successful pull clears it here
 			// too. See the matching comment in sync.go's doPull.
-			s.issues.ClearIssue(IssueTypeRebaseStuck, r.ws.ID)
+			s.issues.ClearIssue(IssueTypeRebaseStuck, filepath.Base(r.ws.Path))
 		}
 
 		mCfg := s.applySparseCheckout(ctx, r.ws.Path)

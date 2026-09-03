@@ -45,10 +45,11 @@ func TestWithRepoLock_DifferentClonesDoNotContend(t *testing.T) {
 	a, b := t.TempDir(), t.TempDir()
 	require.NotEqual(t, RepoLockTarget(a), RepoLockTarget(b))
 	release := make(chan struct{})
+	held := make(chan struct{})
 	go func() {
-		_ = WithRepoLock(context.Background(), a, func() error { <-release; return nil })
+		_ = WithRepoLock(context.Background(), a, func() error { close(held); <-release; return nil })
 	}()
-	time.Sleep(20 * time.Millisecond)
+	<-held // wait for confirmation clone A actually holds the lock, not a fixed guess
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	err := WithRepoLock(ctx, b, func() error { return nil })

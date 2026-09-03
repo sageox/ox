@@ -136,10 +136,16 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 			wedged := false
 			var wedgeAge time.Duration
 			if !intervalExceeded && !fullClone && wedgeCooldownElapsed {
-				wedged, wedgeAge, _ = s.ledgerSyncWedged(ctx, l.Path)
-				s.mu.Lock()
-				s.lastWedgeCheck = time.Now()
-				s.mu.Unlock()
+				var lockBusy bool
+				wedged, wedgeAge, _, lockBusy = s.ledgerSyncWedged(ctx, l.Path)
+				// A lock-busy result means no check actually ran — spending
+				// the cooldown on it would let frequent contention from the
+				// daemon's own sync cycle silently disable wedge detection.
+				if !lockBusy {
+					s.mu.Lock()
+					s.lastWedgeCheck = time.Now()
+					s.mu.Unlock()
+				}
 			}
 
 			if intervalExceeded || fullClone || wedged {
@@ -254,10 +260,10 @@ const ledgerGCWedgeCooldown = 6 * time.Hour
 // multi-hour incident. Confirmed via a live fetch so a merely-offline
 // machine, an explicitly supported normal state, is never mistaken for
 // wedged.
-func (s *SyncScheduler) ledgerSyncWedged(ctx context.Context, path string) (wedged bool, oldestUnpushedAge time.Duration, unpushedCount int) {
+func (s *SyncScheduler) ledgerSyncWedged(ctx context.Context, path string) (wedged bool, oldestUnpushedAge time.Duration, unpushedCount int, lockBusy bool) {
 	ahead, err := revListCount(ctx, path, "@{upstream}..HEAD", "origin/main..HEAD")
 	if err != nil || ahead <= 0 {
-		return false, 0, 0
+		return false, 0, 0, false
 	}
 
 	// bounded fetch to confirm we're actually online before concluding
@@ -273,14 +279,19 @@ func (s *SyncScheduler) ledgerSyncWedged(ctx context.Context, path string) (wedg
 		return err
 	})
 	if fetchErr != nil {
-		return false, 0, ahead
+		// A lock held by a concurrent ox process (the sync scheduler's own
+		// pull cycle, most likely, since this probe now shares its lock)
+		// is NOT the same signal as offline: the caller must not spend the
+		// 6h cooldown on a cycle where no check actually happened, or
+		// frequent lock contention could starve this detector indefinitely.
+		return false, 0, ahead, gitutil.IsRepoLockBusy(fetchErr)
 	}
 
 	behind, err := revListCount(ctx, path, "HEAD..@{upstream}", "HEAD..origin/main")
 	if err != nil || behind <= 0 {
 		// ahead only, not behind — a plain push (gcPushUnpushedCommits)
 		// resolves this; not wedged.
-		return false, 0, ahead
+		return false, 0, ahead, false
 	}
 
 	oldestOutput, err := gitutil.RunGit(ctx, path, "log", "@{upstream}..HEAD", "--format=%ct")
@@ -288,20 +299,20 @@ func (s *SyncScheduler) ledgerSyncWedged(ctx context.Context, path string) (wedg
 		oldestOutput, err = gitutil.RunGit(ctx, path, "log", "origin/main..HEAD", "--format=%ct")
 	}
 	if err != nil {
-		return false, 0, ahead
+		return false, 0, ahead, false
 	}
 	timestamps := strings.Fields(strings.TrimSpace(oldestOutput))
 	if len(timestamps) == 0 {
-		return false, 0, ahead
+		return false, 0, ahead, false
 	}
 	// git log lists newest-first; the last line is the oldest unpushed commit.
 	oldestUnix, err := strconv.ParseInt(timestamps[len(timestamps)-1], 10, 64)
 	if err != nil {
-		return false, 0, ahead
+		return false, 0, ahead, false
 	}
 
 	age := time.Since(time.Unix(oldestUnix, 0))
-	return age >= ledgerSyncWedgeAge, age, ahead
+	return age >= ledgerSyncWedgeAge, age, ahead, false
 }
 
 // revListCount runs `git rev-list --count <range>`, falling back to
