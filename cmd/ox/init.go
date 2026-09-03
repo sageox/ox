@@ -880,7 +880,7 @@ func runInit() error {
 		if err := config.SaveProjectConfig(gitRoot, cfg); err != nil {
 			cli.PrintWarning(fmt.Sprintf("Could not save config: %v", err))
 		} else if !initQuiet {
-			cli.PrintSuccess(fmt.Sprintf("Registered with SageOx (team: %s)", resp.TeamID))
+			cli.PrintSuccess(fmt.Sprintf("Registered with SageOx (team: %s)", formatTeamLabel(selectedTeamName, resp.TeamID)))
 		}
 
 		// update README.md with SageOx links now that we have repo_id and team_id
@@ -1130,6 +1130,18 @@ func createRepoMarker(sageoxDir, repoID, repoSalt string, gitIdentity *repotools
 // Example: "repo_01jfk3mab..." -> "01jfk3mab..."
 func extractUUIDSuffix(repoID string) string {
 	return strings.TrimPrefix(repoID, "repo_")
+}
+
+// formatTeamLabel renders the team this repo was just bound to. init already holds
+// the team's name whenever the user picked it from the selector, so lead with that
+// and keep the ID alongside — the ID is what --team accepts and what the dashboard
+// URL uses. Falls back to the bare ID when no name is available, which is the --team
+// path: passing a team ID skips the team fetch, so no name is ever retrieved.
+func formatTeamLabel(name, id string) string {
+	if strings.TrimSpace(name) == "" {
+		return id
+	}
+	return fmt.Sprintf("%s (%s)", name, id)
 }
 
 // stringSlicesEqual compares two string slices for equality
