@@ -490,6 +490,14 @@ func TestEmitUnsavedPlanNudge_StaysSilentWhenItCannotMarkDelivery(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
 
+	// A privileged process ignores mode bits entirely. Without this probe the
+	// test would FAIL under root (the nudge emits normally) rather than skip —
+	// a false red in any root container.
+	if f, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
+		_ = f.Close()
+		t.Skip("the stamp is still writable despite mode 0400 (privileged process); nothing to assert")
+	}
+
 	var out bytes.Buffer
 	emitUnsavedPlanNudge(&out, root, testAgentID)
 	if out.Len() != 0 {
@@ -534,6 +542,15 @@ func TestPlanEnrichCmd_SurvivesAnUnwritableStampCache(t *testing.T) {
 		t.Skipf("cannot chmod in this environment: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(cacheParent, 0o755) })
+
+	// Same privileged-process caveat as above, but the failure mode is worse
+	// here: under root the stamp write SUCCEEDS and this test passes without
+	// ever reaching the fail-open path it exists to prove. Probe, don't assume.
+	probe := filepath.Join(cacheParent, ".writable-probe")
+	if err := os.Mkdir(probe, 0o755); err == nil {
+		_ = os.Remove(probe)
+		t.Skip("the cache is still writable despite mode 0500 (privileged process); the fail-open path would not be exercised")
+	}
 
 	// runPlanEnrich t.Fatal's on a non-nil error, so reaching the assertions at
 	// all is the fail-open proof; the output check pins that it is real JSON and
