@@ -193,9 +193,15 @@ goroutine, not mocks, `-race` clean.
   ```bash
   T=~/.local/share/sageox/sageox.ai/teams/team_xlcr6yzpec
   NOLFS="-c filter.lfs.smudge=cat -c filter.lfs.process= -c filter.lfs.required=false"
-  git -C $T $NOLFS checkout -- <path/to/image.jpg>
-  git -C $T $NOLFS pull --rebase --autostash
-  git -C $T stash clear
+  git -C "$T" $NOLFS checkout -- PATH_TO_ATTACHMENT  # replace with the path `git status` reports as modified
+  git -C "$T" $NOLFS pull --rebase --autostash
+  # drop only the orphan autostash entries the loop above produced — never
+  # `stash clear`, which would also delete any unrelated stash a teammate has
+  # legitimately pending. Re-querying `stash list` each iteration (rather than
+  # dropping from a pre-captured list) sidesteps index shifting after each drop.
+  while ref=$(git -C "$T" stash list | grep -im1 autostash | cut -d: -f1); [ -n "$ref" ]; do
+    git -C "$T" stash drop "$ref"
+  done
   ```
 
   This is precisely what `restoreRawLFSPointers` does; it is here because the doctor check
