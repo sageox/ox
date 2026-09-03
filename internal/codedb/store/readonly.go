@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/blevesearch/bleve/v2"
 )
@@ -87,6 +89,23 @@ func openSQLiteReadOnly(dbPath string) (*sql.DB, error) {
 		}
 		return nil, fmt.Errorf("%w: %w", ErrReadOnly, err)
 	}
+
+	// A store built by an older ox is missing tables and columns the current
+	// search path queries, and the writable open repairs that by running
+	// CreateSchema on every open. Here it cannot, so a stale store would answer
+	// some queries and fail others with "no such column".
+	//
+	// CreateSchema is reused as the check rather than a hand-listed set of
+	// required objects: every statement in it is guarded (CREATE ... IF NOT
+	// EXISTS, addColumnsIfMissing, the issue-474 sentinel), so against a
+	// fully-migrated store it writes nothing and succeeds on a read-only
+	// connection, and against a stale one it attempts the missing DDL and fails
+	// naming the object. A parallel list would drift from the migrations the
+	// first time someone adds one.
+	if err := CreateSchema(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("%w: %s needs a schema migration that cannot be applied without write access: %w", ErrReadOnly, dbPath, err)
+	}
 	return db, nil
 }
 
@@ -95,8 +114,18 @@ func openSQLiteReadOnly(dbPath string) (*sql.DB, error) {
 // must be escaped — a database under a home directory containing a space would
 // otherwise be truncated at the space. journal_mode, synchronous and
 // foreign_keys are all write-side and are omitted.
+//
+// Windows needs both conversions below. ToSlash turns `C:\...` separators into
+// the `/` SQLite's URI parser requires (a no-op on POSIX, where a backslash is
+// an ordinary filename character and must stay one). The leading slash makes a
+// drive-letter path absolute: without it `url.URL` renders `C:` as the URI's
+// authority — `file://C:/...` — and the open fails.
 func readOnlyDSN(dbPath string, immutable bool) string {
-	u := url.URL{Scheme: "file", Path: dbPath}
+	uriPath := filepath.ToSlash(dbPath)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	u := url.URL{Scheme: "file", Path: uriPath}
 	dsn := u.String() + "?mode=ro&_pragma=cache_size(-65536)&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)"
 	if immutable {
 		dsn += "&immutable=1"

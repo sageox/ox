@@ -753,7 +753,12 @@ var codeStatusCmd = &cobra.Command{
 				ReadOnly:    readOnly,
 			}
 			if codeStats != nil {
-				out.IndexingNow = codeStats.IndexingNow
+				// daemonIndexing, not codeStats.IndexingNow: when this repo
+				// reads the ledger index, LedgerIndexingNow is the flag that
+				// gated the direct open above. Reporting the shared index's
+				// flag here says "not indexing" while the counts came from the
+				// daemon's cache precisely because it is.
+				out.IndexingNow = daemonIndexing
 				if !codeStats.LastIndexed.IsZero() {
 					t := codeStats.LastIndexed
 					out.LastIndexed = &t
@@ -812,7 +817,7 @@ var codeStatusCmd = &cobra.Command{
 		// status line — health signal first
 		b.WriteString(statusLabelStyle.Render("Status"))
 		switch {
-		case !indexExists && (codeStats == nil || !codeStats.IndexingNow):
+		case !indexExists && !daemonIndexing:
 			b.WriteString(statusWarningStyle.Render("⚠ not indexed"))
 			b.WriteString("\n")
 			b.WriteString(statusLabelStyle.Render(""))
@@ -830,7 +835,7 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString("\n")
 			b.WriteString(statusLabelStyle.Render(""))
 			b.WriteString(statusMutedStyle.Render(openErr))
-		case codeStats != nil && codeStats.IndexingNow:
+		case daemonIndexing:
 			b.WriteString(statusWarningStyle.Render("◐ indexing…"))
 		case codeStats != nil && codeStats.LastError != "" && totalCommits == 0:
 			b.WriteString(statusWarningStyle.Render("⚠ pending"))
@@ -1032,7 +1037,7 @@ var codeStatusCmd = &cobra.Command{
 		b.WriteString("\n")
 
 		// next check — only when daemon is running and index exists
-		if codeStats != nil && !codeStats.IndexingNow && indexExists && syncInterval > 0 && !codeStats.LastIndexed.IsZero() {
+		if codeStats != nil && !daemonIndexing && indexExists && syncInterval > 0 && !codeStats.LastIndexed.IsZero() {
 			nextCheck := codeStats.LastIndexed.Add(syncInterval)
 			remaining := time.Until(nextCheck)
 			b.WriteString(statusLabelStyle.Render("Next check"))

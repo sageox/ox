@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,11 +17,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// codeStatusJSON stands up a git project wired to a shared CodeDB dir, lets the
-// caller seed and then break that dir, and returns the parsed `ox code status
-// --json` envelope. Running the real command is the point: the defect being
-// guarded is what a caller reads off this JSON, not what a helper returns.
-func codeStatusJSON(t *testing.T, seed func(dataDir string)) map[string]any {
+// runCodeStatus stands up a git project wired to a shared CodeDB dir, lets the
+// caller seed and then break that dir, and runs the real `ox code status`.
+// Running the real command is the point: the defect being guarded is what a
+// caller reads off this output, not what a helper returns.
+//
+// Returns the human-readable text; when jsonMode is set the parsed `--json`
+// envelope is returned instead and the text is empty. The human path prints
+// through fmt.Print, so os.Stdout is what has to be captured.
+func runCodeStatus(t *testing.T, jsonMode bool, seed func(dataDir string)) (map[string]any, string) {
 	t.Helper()
 
 	projectRoot := t.TempDir()
@@ -57,13 +62,31 @@ func codeStatusJSON(t *testing.T, seed func(dataDir string)) map[string]any {
 
 	var buf bytes.Buffer
 	cmd := &cobra.Command{Use: codeStatusCmd.Use, RunE: codeStatusCmd.RunE}
-	cmd.Flags().Bool("json", true, "")
+	cmd.Flags().Bool("json", jsonMode, "")
 	cmd.SetOut(&buf)
-	require.NoError(t, cmd.RunE(cmd, nil))
 
+	stdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stdout = w
+	// Drain concurrently: a full pipe buffer would deadlock the command mid-print.
+	drained := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		drained <- string(b)
+	}()
+	runErr := cmd.RunE(cmd, nil)
+	require.NoError(t, w.Close())
+	os.Stdout = stdout
+	human := <-drained
+	require.NoError(t, runErr)
+
+	if !jsonMode {
+		return nil, human
+	}
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &out), "output: %s", buf.String())
-	return out
+	return out, ""
 }
 
 func requireChmodDeniesWrites(t *testing.T, dir string) {
@@ -83,7 +106,7 @@ func requireChmodDeniesWrites(t *testing.T, dir string) {
 // it and say where it came from — a caller that sees read_only knows `ox code
 // index` will refuse before it tries.
 func TestCodeStatusJSON_ReadOnlyIndexIsCountedAndLabeled(t *testing.T) {
-	out := codeStatusJSON(t, func(dataDir string) {
+	out, _ := runCodeStatus(t, true, func(dataDir string) {
 		requireChmodDeniesWrites(t, dataDir)
 	})
 
@@ -97,7 +120,7 @@ func TestCodeStatusJSON_ReadOnlyIndexIsCountedAndLabeled(t *testing.T) {
 // under index_exists: true — byte-identical to a warm index holding nothing.
 // An agent reads that as "nothing here", searches, finds nothing, and says so.
 func TestCodeStatusJSON_UnreadableIndexIsNotReportedAsEmpty(t *testing.T) {
-	out := codeStatusJSON(t, func(dataDir string) {
+	out, _ := runCodeStatus(t, true, func(dataDir string) {
 		// Truncate to a schema-less file: readable, openable, and carrying none
 		// of the tables status counts — the shape of an index ox cannot use.
 		require.NoError(t, os.WriteFile(filepath.Join(dataDir, store.MetadataDBFile), nil, 0o600))
@@ -107,4 +130,36 @@ func TestCodeStatusJSON_UnreadableIndexIsNotReportedAsEmpty(t *testing.T) {
 	require.Equal(t, true, out["index_exists"])
 	require.NotEmpty(t, out["open_error"],
 		"an index that could not be opened must not read as an empty one: %v", out)
+}
+
+// The JSON envelope is not the only surface a coworker reads. Human output must
+// carry the same two facts, and carry them where the eye lands first — on the
+// Status line, not buried under counts that look healthy.
+func TestCodeStatusHuman_LabelsReadOnlyAndUnreadable(t *testing.T) {
+	t.Run("read-only index says so and points at the consequence", func(t *testing.T) {
+		_, human := runCodeStatus(t, false, func(dataDir string) {
+			requireChmodDeniesWrites(t, dataDir)
+		})
+		require.Contains(t, human, "read-only")
+		require.Contains(t, human, "ox code index")
+		require.NotContains(t, human, "unreadable")
+	})
+
+	t.Run("unreadable index reports the reason, not an empty one", func(t *testing.T) {
+		_, human := runCodeStatus(t, false, func(dataDir string) {
+			require.NoError(t, os.WriteFile(filepath.Join(dataDir, store.MetadataDBFile), nil, 0o600))
+			requireChmodDeniesWrites(t, dataDir)
+		})
+		require.Contains(t, human, "unreadable")
+		require.Contains(t, human, "read-only")
+		// "empty index" is the state this must never be confused with.
+		require.NotContains(t, human, "empty index")
+	})
+
+	t.Run("absent index still reads as not indexed", func(t *testing.T) {
+		_, human := runCodeStatus(t, false, func(dataDir string) {
+			require.NoError(t, os.RemoveAll(dataDir))
+		})
+		require.Contains(t, human, "not indexed")
+	})
 }
