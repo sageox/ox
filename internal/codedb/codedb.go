@@ -59,6 +59,12 @@ func (db *DB) Store() *store.Store {
 	return db.store
 }
 
+// ReadOnly reports whether the codedb was opened from media this process cannot
+// write. Reads work; indexing is refused.
+func (db *DB) ReadOnly() bool {
+	return db.store.ReadOnly
+}
+
 // IndexRepo clones/fetches and indexes a git repository.
 func (db *DB) IndexRepo(ctx context.Context, url string, opts index.IndexOptions) error {
 	return index.IndexRepo(ctx, db.store, url, opts)
@@ -87,6 +93,15 @@ func OpenIndexWithHeal(ctx context.Context, dataDir string, indexFn func(context
 	db, err := Open(dataDir)
 	if err != nil {
 		return nil, err
+	}
+
+	// Every recovery below this point writes: the marker escalation and the
+	// corruption retry both wipe dataDir, and indexFn itself only writes. On a
+	// read-only store none of that is possible, so say so once here instead of
+	// failing partway through a pass.
+	if db.ReadOnly() {
+		_ = db.Close()
+		return nil, fmt.Errorf("cannot index into %s: %w", dataDir, store.ErrReadOnly)
 	}
 
 	// Open self-heals a structurally-corrupt bleve sub-index transparently: it

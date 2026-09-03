@@ -147,6 +147,11 @@ type Store struct {
 	Root         string
 	closeOnce    sync.Once
 
+	// ReadOnly is set when the store was opened from media this process cannot
+	// write (read-only mount, container layer, chmod). Reads are served; every
+	// write, self-heal and mapping upgrade is refused rather than attempted.
+	ReadOnly bool
+
 	// dirty overlays for uncommitted worktree files (keyed by worktree ID)
 	dirtyCodeIndexes  map[string]bleve.Index
 	CombinedCodeIndex bleve.Index // alias of CodeIndex + all dirty indexes, or just CodeIndex
@@ -177,13 +182,16 @@ type Store struct {
 // that need bleve (e.g. `ox code search`) just see empty results until the
 // daemon repopulates; callers that don't need bleve (e.g. `ox code insights`)
 // should use OpenSQLOnly to skip bleve entirely.
+//
+// Read-only media: a store the process cannot write is opened read-only (see
+// ErrReadOnly) with Store.ReadOnly set, not diagnosed as corrupt and deleted.
 func Open(root string) (*Store, error) {
-	db, err := openSQLite(root)
+	db, readOnly, err := openSQLite(root)
 	if err != nil {
 		return nil, err
 	}
 
-	codeIndex, diffIndex, commentIndex, err := openBleveIndexes(root)
+	codeIndex, diffIndex, commentIndex, err := openBleveIndexes(root, readOnly)
 	if err != nil {
 		_ = db.Close()
 		return nil, err
@@ -196,6 +204,7 @@ func Open(root string) (*Store, error) {
 		DiffIndex:        diffIndex,
 		CommentIndex:     commentIndex,
 		Root:             root,
+		ReadOnly:         readOnly,
 		dirtyCodeIndexes: make(map[string]bleve.Index),
 	}
 	s.CombinedCodeIndex = s.CodeIndex // default: no overlay
@@ -211,7 +220,7 @@ func Open(root string) (*Store, error) {
 // or otherwise unavailable. SQLite's WAL mode makes concurrent reads safe
 // even while the daemon is actively writing.
 func OpenSQLOnly(root string) (*Store, error) {
-	db, err := openSQLite(root)
+	db, readOnly, err := openSQLite(root)
 	if err != nil {
 		return nil, err
 	}
@@ -219,23 +228,36 @@ func OpenSQLOnly(root string) (*Store, error) {
 		db:               db,
 		queries:          codedbsqlc.New(db),
 		Root:             root,
+		ReadOnly:         readOnly,
 		dirtyCodeIndexes: make(map[string]bleve.Index),
 	}, nil
 }
 
 // openSQLite handles the SQLite half of store construction. Shared by Open
 // and OpenSQLOnly so the SQLite pragma string and integrity check live in one
-// place.
-func openSQLite(root string) (*sql.DB, error) {
+// place. The bool reports whether the store had to be opened read-only.
+func openSQLite(root string) (*sql.DB, bool, error) {
+	dbPath := filepath.Join(root, MetadataDBFile)
+
+	// Settle writability before anything diagnoses the store. On read-only
+	// media SQLite fails with SQLITE_READONLY_DIRECTORY — WAL mode has to
+	// create the `-shm` wal-index before it can read anything — and at the
+	// integrity_check call site below that is indistinguishable from
+	// corruption, whose remedy is deleting the database. A store we cannot
+	// write is not a store that is damaged (#871).
+	if _, err := os.Stat(dbPath); err == nil && !storeIsWritable(root) {
+		db, roErr := openSQLiteReadOnly(dbPath)
+		return db, true, roErr
+	}
+
 	reposDir := filepath.Join(root, "repos")
 	bleveDir := filepath.Join(root, "bleve")
 	for _, dir := range []string{root, reposDir, bleveDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return nil, fmt.Errorf("create dir %s: %w", dir, err)
+			return nil, false, fmt.Errorf("create dir %s: %w", dir, err)
 		}
 	}
 
-	dbPath := filepath.Join(root, MetadataDBFile)
 	// WAL: concurrent readers + one writer. busy_timeout: wait up to 5s for
 	// write locks instead of failing immediately. This matters when multiple
 	// daemons (one per worktree) share the same index. Long-term fix is
@@ -245,21 +267,37 @@ func openSQLite(root string) (*sql.DB, error) {
 	// to normal I/O for pages beyond the mmap region or on unsupported systems.
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)")
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
+		return nil, false, fmt.Errorf("open sqlite: %w", err)
 	}
 
 	if err := checkSQLiteIntegrity(db); err != nil {
 		_ = db.Close()
+		// Re-probe. The check at the top of this function is skipped when no
+		// metadata.db existed yet, and media can turn read-only in between (a
+		// remount, a revoked ACL). Deleting the index over either is
+		// unrecoverable — a cold rebuild costs minutes.
+		if !storeIsWritable(root) {
+			return nil, true, fmt.Errorf("%w: %w", ErrReadOnly, err)
+		}
 		slog.Error("sqlite corruption detected, removing database", "path", dbPath, "err", err)
 		removeSQLiteFiles(dbPath)
-		return nil, fmt.Errorf("sqlite integrity check failed: %w", ErrCorrupt)
+		return nil, false, fmt.Errorf("sqlite integrity check failed: %w", ErrCorrupt)
 	}
 
 	if err := CreateSchema(db); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("create schema: %w", err)
+		// An unwritable database file inside a writable directory reaches here
+		// rather than the read-only branch above: the directory probe passed,
+		// and SQLite could create the WAL sidecars, so nothing objected until a
+		// migration tried to write. Same physical condition, so same error
+		// class — which side of the store is unwritable should not decide how
+		// callers classify it.
+		if !fileIsWritable(dbPath) {
+			return nil, true, fmt.Errorf("%w: %s needs a schema migration that cannot be applied: %w", ErrReadOnly, dbPath, err)
+		}
+		return nil, false, fmt.Errorf("create schema: %w", err)
 	}
-	return db, nil
+	return db, false, nil
 }
 
 // bleveMappingFor returns the bleve index mapping for a sub-index.
@@ -376,19 +414,30 @@ func upgradeBleveSubIndex(root, path, name string, fromVersion int) (bleve.Index
 // openBleveIndexes opens (or self-heals + recreates) the three bleve
 // sub-indexes. Returns all three on success; closes any successfully opened
 // indexes if a later one fails.
-func openBleveIndexes(root string) (codeIdx, diffIdx, commentIdx bleve.Index, err error) {
+//
+// A read-only store gets neither self-heal nor mapping-version upgrade: both
+// are nuke-and-recreate, and both need a writable directory. It opens what is
+// on disk or reports why it could not.
+func openBleveIndexes(root string, readOnly bool) (codeIdx, diffIdx, commentIdx bleve.Index, err error) {
 	bleveDir := filepath.Join(root, "bleve")
+	open := func(name string) (bleve.Index, error) {
+		path := filepath.Join(bleveDir, name)
+		if readOnly {
+			return openBleveReadOnly(path, name)
+		}
+		return openOrCreateBleveIndex(root, path, name)
+	}
 
-	codeIdx, err = openOrCreateBleveIndex(root, filepath.Join(bleveDir, "code"), "code")
+	codeIdx, err = open("code")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("open code index: %w", err)
 	}
-	diffIdx, err = openOrCreateBleveIndex(root, filepath.Join(bleveDir, "diff"), "diff")
+	diffIdx, err = open("diff")
 	if err != nil {
 		_ = codeIdx.Close()
 		return nil, nil, nil, fmt.Errorf("open diff index: %w", err)
 	}
-	commentIdx, err = openOrCreateBleveIndex(root, filepath.Join(bleveDir, "comment"), "comment")
+	commentIdx, err = open("comment")
 	if err != nil {
 		_ = codeIdx.Close()
 		_ = diffIdx.Close()

@@ -181,11 +181,14 @@ func TestCodeStatusDisplay_EmptyIndex(t *testing.T) {
 	var codeStats *daemon.CodeDBStats // nil = no daemon running
 
 	// Evaluate the switch conditions in order, matching codeStatusCmd logic.
+	// daemonIndexing folds in the ledger index's flag; codeStats is nil here,
+	// so it is false and the branch order is what is under test.
+	daemonIndexing := codeStats != nil && codeStats.IndexingNow
 	var statusCase string
 	switch {
-	case !indexExists && (codeStats == nil || !codeStats.IndexingNow):
+	case !indexExists && !daemonIndexing:
 		statusCase = "not-indexed"
-	case codeStats != nil && codeStats.IndexingNow:
+	case daemonIndexing:
 		statusCase = "indexing"
 	case codeStats != nil && codeStats.LastError != "" && totalCommits == 0:
 		statusCase = "pending"

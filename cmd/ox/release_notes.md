@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **See where a slow pipeline actually spends its time** — `ox viz render waterfall` draws the browser-devtools waterfall for any timed sequence: one row per stage on one clock, so overlap and serialization are obvious at a glance. Give the rows dependency edges and it computes the critical path, dims everything that didn't set the total, marks the long pole, and draws the idle wait between stages — the dead time a bar-only chart hides and the cheapest latency to delete.
 - **Preview any visualization in a browser without hand-building a page** — `ox viz render <id> --page` wraps the fragment in a standalone themed document carrying the same stylesheet the visual ships against, so what you see is what lands in the artifact.
+- **Search a code index you can't write** — `ox code search` now serves a codedb on read-only media: a read-only mount, a container image layer, or a copy on a locked-down volume. A scheduled job can mount an index another process maintains and query it without keeping a second copy or paying for a cold rebuild.
+
+### Fixed
+
+- **A read-only code index is no longer mistaken for a corrupt one and deleted** — ox read "cannot write this database" as "this database is damaged" and tried to delete it; only the read-only filesystem stopped it. The same misreading on writable media would have destroyed a healthy index that costs minutes to rebuild.
+- **`ox code status` no longer reports an index it could not open as an empty one** — it answered zeros under `index_exists: true`, which reads exactly like a warm index holding nothing. It now shows `✗ unreadable` with the reason (`open_error` in `--json`), and labels a read-only index as such.
+- **`ox code index` refuses a read-only index up front** — with a message naming the directory, instead of failing partway through a pass.
 
 ## [0.14.3] - 2026-08-31
 
