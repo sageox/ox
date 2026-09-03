@@ -500,6 +500,12 @@ func handlePrompt(ctx *HookContext) error {
 	// begins right after the plan was approved.
 	emitPlanNudge(os.Stdout, ctx.ProjectRoot, agentID)
 
+	// Tell the agent, once, when a plan was enriched this session and never
+	// saved. Covers every route the ExitPlanMode nudge above cannot see: Codex
+	// plan mode (which leaves no artifact ox can find) and any session where
+	// plan mode was never entered. Fail-open.
+	emitUnsavedPlanNudge(os.Stdout, ctx.ProjectRoot, agentID)
+
 	// Steer the agent toward `ox plan enrich`/`ox plan render` at the planning
 	// moment — fired when the agent is in plan mode (permission_mode == "plan")
 	// OR the prompt asks to render an HTML plan, once per planning episode.
