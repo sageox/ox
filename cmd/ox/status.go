@@ -1408,6 +1408,24 @@ func countReadyAgentTasks(gitRoot, agentType string) int {
 	return len(ready)
 }
 
+// resolveStatusProject returns the directory whose .sageox/ describes the
+// repository status is reporting on, and whether that project is initialized.
+//
+// The project root is the git root, not the working directory. gitRoot is
+// already resolved by walking up, so it is correct from any subdirectory,
+// while statting cwd/.sageox reports an initialized project as uninitialized
+// from every subdirectory and then recommends `ox init` on a healthy repo.
+//
+// Outside a git repo there is nothing to walk up to, so status describes the
+// directory the user is standing in, as it always has.
+func resolveStatusProject(cwd, gitRoot string) (root string, initialized bool) {
+	root = gitRoot
+	if root == "" {
+		root = cwd
+	}
+	return root, config.IsInitialized(root)
+}
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Display SageOx status and directory locations",
@@ -1472,13 +1490,12 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			return fmt.Errorf("failed to get working directory: %w", err)
 		}
 
-		sageoxDir := filepath.Join(cwd, ".sageox")
+		projectRoot, projectInitialized := resolveStatusProject(cwd, gitRoot)
+
+		sageoxDir := filepath.Join(projectRoot, ".sageox")
 		var localCfg *config.LocalConfig
-		var projectInitialized bool
 
-		if stat, err := os.Stat(sageoxDir); err == nil && stat.IsDir() {
-			projectInitialized = true
-
+		if projectInitialized {
 			if gitRoot != "" {
 				// load local config for git repos section
 				localCfg, _ = config.LoadLocalConfig(gitRoot)
@@ -1559,7 +1576,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		// JSON output mode
 		if statusJSONFlag {
 			output := buildStatusJSON(authenticated, authErr, token, endpointSlug, authFile, authFileExists,
-				userConfigDir, cwd, sageoxDir, projectInitialized, localCfg, gitRoot, repoDetail, codeStats,
+				userConfigDir, projectRoot, sageoxDir, projectInitialized, localCfg, gitRoot, repoDetail, codeStats,
 				daemonStatus, client, bubblesSummary)
 			jsonBytes, err := json.MarshalIndent(output, "", "  ")
 			if err != nil {
@@ -1666,7 +1683,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 // fields are permanent, first-class output — conversation stores are not
 // bubbles (ox ADR-028) and never fold into the bubbles field.
 func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken, endpointSlug, authFile string, authFileExists bool,
-	userConfigDir, cwd, sageoxDir string, projectInitialized bool, localCfg *config.LocalConfig, gitRoot string,
+	userConfigDir, projectRoot, sageoxDir string, projectInitialized bool, localCfg *config.LocalConfig, gitRoot string,
 	repoDetail *api.RepoDetailResponse, codeStats *daemon.CodeDBStats,
 	daemonStatus *daemon.StatusData, daemonClient *daemon.Client,
 	bubblesSummary statusBubblesSummary) statusJSONOutput {
@@ -1721,7 +1738,7 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 	// project section
 	output.Project = &statusProjectJSON{
 		Initialized: projectInitialized,
-		Directory:   cwd,
+		Directory:   projectRoot,
 	}
 	if projectInitialized {
 		output.Project.ConfigPath = sageoxDir
