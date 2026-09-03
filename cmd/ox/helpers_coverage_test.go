@@ -641,13 +641,42 @@ func TestCheckSessionCompleteness_SomeMissing(t *testing.T) {
 
 // --- resolvePhase ---
 
+// TestResolvePhase_UnknownAgent pins the cross-agent fallback.
+//
+// Failure prevented: an agent type ox does not know must still resolve a hook
+// event that every known agent shares, or hooks from a new or renamed agent
+// silently resolve to no phase and the event is dropped.
 func TestResolvePhase_UnknownAgent(t *testing.T) {
-	// unknown agent type should try all maps as fallback
-	phase := resolvePhase("totally-unknown-agent", "session_start")
-	// session_start maps to "start" for claude-code; fallback should find it
-	// (or return empty if event doesn't match any agent)
-	// the point: it shouldn't panic
-	_ = phase
+	tests := []struct {
+		name  string
+		agent string
+		event string
+		want  string
+	}{
+		{
+			// session_start is mapped by claude-code; the fallback sweeps every map.
+			name:  "an event some known agent maps resolves through the fallback",
+			agent: "totally-unknown-agent",
+			event: "session_start",
+			want:  "start",
+		},
+		{
+			// Must resolve to nothing rather than to an arbitrary phase picked
+			// out of whichever map happened to iterate first.
+			name:  "an event no agent maps resolves to no phase",
+			agent: "totally-unknown-agent",
+			event: "bogus_event",
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolvePhase(tt.agent, tt.event); got != tt.want {
+				t.Errorf("resolvePhase(%q, %q) = %q, want %q", tt.agent, tt.event, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestResolvePhase_UnknownEvent(t *testing.T) {
