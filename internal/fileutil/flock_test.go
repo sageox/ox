@@ -10,6 +10,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestWithFileLock_SerializesGoroutines proves the in-process side of
@@ -222,4 +225,50 @@ func TestHelperFlockHolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helper acquire failed: %v", err)
 	}
+}
+
+// TestErrLockTimeout_Error covers the Timeout field this PR added: the
+// zero-value fallback to the package default, and reporting the actual
+// caller-supplied timeout (gitutil.WithRepoLock passes its own 2-minute
+// budget here, not the 10s package default — a bare zero check would have
+// let that regress silently).
+func TestErrLockTimeout_Error(t *testing.T) {
+	zero := &ErrLockTimeout{Path: "/tmp/x.lock"}
+	assert.Contains(t, zero.Error(), LockTimeout.String(), "Timeout: 0 must fall back to the package default, not report a bogus 0s")
+
+	custom := &ErrLockTimeout{Path: "/tmp/x.lock", Timeout: 2 * time.Minute}
+	assert.Contains(t, custom.Error(), "2m0s", "a caller-supplied timeout must be reported as given, not the package default")
+	assert.NotContains(t, custom.Error(), LockTimeout.String())
+}
+
+// TestWithFileLockTimeout_ReportsRequestedTimeout is the regression for the
+// exact bug this PR fixed: acquireInProcess used to compute
+// time.Until(deadline) AFTER its timer fired, which is ~0 (sometimes
+// negative) by construction, not the timeout the caller actually asked for.
+func TestWithFileLockTimeout_ReportsRequestedTimeout(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "contended.dat")
+
+	release := make(chan struct{})
+	held := make(chan struct{})
+	go func() {
+		_ = WithFileLock(context.Background(), target, func() error { close(held); <-release; return nil })
+	}()
+	<-held
+	defer close(release)
+
+	const requested = 150 * time.Millisecond
+	err := WithFileLockTimeout(context.Background(), target, requested, func() error {
+		return errors.New("must not run")
+	})
+
+	var timeoutErr *ErrLockTimeout
+	require.ErrorAs(t, err, &timeoutErr)
+	// Within a few ms of what was asked for (clock-read jitter between the
+	// two time.Now() calls), not ~0s — which is what
+	// time.Until(deadline) computed AFTER the timer fires would report.
+	assert.InDelta(t, requested, timeoutErr.Timeout, float64(5*time.Millisecond),
+		"must report the timeout actually requested, not ~0s from time.Until(deadline) computed after the timer already fired")
+	assert.Greater(t, timeoutErr.Timeout, 100*time.Millisecond,
+		"the bug this regresses to reports a near-zero duration; anything under 100ms means it's back")
 }
