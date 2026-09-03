@@ -263,6 +263,14 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		s.workspaceRegistry.ClearWorkspaceError(r.ws.ID)
 		s.workspaceRegistry.ClearSyncFailures(r.ws.ID)
 		if s.issues != nil {
+			// Keyed on ws.ID because that's what shouldSyncOrBypass(ws.ID,
+			// ...) actually set it with — NOT the same key pullTeamContext
+			// uses for its own repo-scoped issues (repoName :=
+			// filepath.Base(path)). The two read alike but are set by
+			// different code with different keys; pullManagedRepo-raised
+			// issues (GitLock, MergeConflict, Diverged, RebaseStuck) are
+			// cleared inside pullTeamContext instead, next to where they're
+			// raised, so the key is never re-derived or guessed here.
 			s.issues.ClearIssue(IssueTypeSyncBackoff, r.ws.ID)
 		}
 
@@ -493,10 +501,15 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		s.issues.ClearIssue(IssueTypeGitLock, repoName)
 	}
 
-	// sync succeeded - clear merge conflict and diverged issues
+	// sync succeeded - clear merge conflict, diverged, and stuck-rebase issues
 	if s.issues != nil {
 		s.issues.ClearIssue(IssueTypeMergeConflict, repoName)
 		s.issues.ClearIssue(IssueTypeDiverged, repoName)
+		// bd ox-baz5.3: team-context clones go through the same
+		// pullManagedRepo recovery ladder as the ledger and can raise the
+		// same stuck-rebase issue, keyed on this same repoName
+		// (ManagedRepoPullOpts.RepoName above). See sync.go's doPull.
+		s.issues.ClearIssue(IssueTypeRebaseStuck, repoName)
 	}
 
 	return nil

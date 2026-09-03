@@ -326,9 +326,18 @@ func checkSyncStatus(path string, status *Status) {
 	if age, ok := gitutil.FetchHeadAge(path); ok && age < gitutil.MinFetchHeadAge {
 		// use cached state — daemon keeps ledger current via its sync loop
 	} else {
-		// fetch with timeout to avoid hanging on network issues
+		// fetch with timeout to avoid hanging on network issues. Locked
+		// (ADR-030 D1): this is the CLI side of the FETCH_HEAD race — `ox
+		// status` fetching concurrently with the daemon's own pull cycle
+		// corrupted FETCH_HEAD in the 2026-09-02 incident. The existing
+		// 10s ctx already bounds the wait if the daemon holds the lock for
+		// a longer pull; on timeout we just fall through to cached state,
+		// same as a fetch failure always did.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, _ = gitutil.RunGit(ctx, path, "fetch", "--quiet")
+		_ = gitutil.WithRepoLock(ctx, path, func() error {
+			_, err := gitutil.RunGit(ctx, path, "fetch", "--quiet")
+			return err
+		})
 		cancel()
 	}
 

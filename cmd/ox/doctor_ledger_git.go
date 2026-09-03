@@ -400,9 +400,29 @@ func unbornLedgerFailure(ledgerPath, branch string, fix bool) checkResult {
 			return PassedCheck(name, fmt.Sprintf("restored branch %q from local objects", branch))
 		}
 		// Objects genuinely missing — one narrow fetch is the only way back, and
-		// a ledger that has never synced is worth it.
-		if fetchOut, fetchErr := exec.Command("git", "-C", ledgerPath, "fetch", "origin", branch).CombinedOutput(); fetchErr != nil {
-			return critical(FailedCheck(name, "fetch failed", gitutil.SanitizeOutput(strings.TrimSpace(string(fetchOut)))))
+		// a ledger that has never synced is worth it. Locked (ADR-030 D1): the
+		// daemon may be mid-fetch on this same clone; without the per-clone
+		// lock the two could interleave FETCH_HEAD exactly as in the
+		// 2026-09-02 incident.
+		var fetchOut []byte
+		fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		fetchErr := gitutil.WithRepoLock(fetchCtx, ledgerPath, func() error {
+			var err error
+			// NewNetworkCmd, not a bare exec.Command: binds the fetch itself
+			// to fetchCtx (a stalled network fetch would otherwise run
+			// unbounded once the lock is held — fetchCtx only bounded the
+			// wait to ACQUIRE it) and disables the interactive credential
+			// prompt the daemon/doctor have no TTY to answer.
+			fetchOut, err = gitutil.NewNetworkCmd(fetchCtx, "-C", ledgerPath, "fetch", "origin", branch).CombinedOutput()
+			return err
+		})
+		fetchCancel()
+		if fetchErr != nil {
+			detail := strings.TrimSpace(string(fetchOut))
+			if detail == "" {
+				detail = fetchErr.Error() // lock could not be acquired — no CombinedOutput to show
+			}
+			return critical(FailedCheck(name, "fetch failed", gitutil.SanitizeOutput(detail)))
 		}
 		if out, err := exec.Command("git", "-C", ledgerPath, "checkout", branch).CombinedOutput(); err != nil {
 			return critical(FailedCheck(name, "checkout failed", gitutil.SanitizeOutput(strings.TrimSpace(string(out)))))
@@ -435,36 +455,75 @@ func fixLedgerBranchAhead(ledgerPath string, aheadCount int) checkResult {
 
 // fixLedgerBranchBehind pulls remote changes into local ledger.
 func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
-	// --autostash: uncommitted local changes must not block the pull
-	pullCmd := exec.Command("git", "-C", ledgerPath, "pull", "--rebase", "--autostash")
-	output, err := pullCmd.CombinedOutput()
-	if err != nil {
-		errStr := strings.TrimSpace(string(output))
-		// Route through automerge, not the bare accept-theirs call. This was the
-		// one reconcile path that skipped the tiered resolver, so it got no union
-		// tier and no LLM tier while every other path (CLI push, daemon pull,
-		// diverged fix) went through ledgerLLMResolveHook. Behind-only pulls hit
-		// exactly the same sessions/ conflicts as the others.
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_, resolveErr := ledgerLLMResolveHook()(ctx, ledgerPath, nil)
-		cancel()
-		if resolveErr != nil {
-			slog.Debug("rebase auto-resolve failed", "error", resolveErr)
-			// AuditAndAbort: log HEAD SHA, unmerged files, and stash count
-			// before discarding rebase state so silent recovery is not
-			// invisible. See ox-ooy3 and .claude/rules/daemon-git.md.
-			abortCtx, abortCancel := context.WithTimeout(context.Background(), 15*time.Second)
-			_ = gitutil.AuditAndAbort(abortCtx, ledgerPath, gitutil.AuditOpRebase, "doctor --fix auto-resolve failed", slog.Default())
-			abortCancel()
-			return FailedCheck("Ledger branch status",
-				"pull --rebase failed (aborted)",
-				fmt.Sprintf("Conflict during rebase (aborted to restore clean state): %s", errStr))
+	// Locked (ADR-030 D1): the whole pull + conflict-resolution + abort
+	// sequence runs under the per-clone lock. A concurrent daemon sync
+	// cycle fetching or rebasing the same clone mid-sequence is exactly
+	// the 2026-09-02 incident's shape. 30s to ACQUIRE the lock, matching
+	// this file's other fetch sites (fixLedgerBranchDiverged, the
+	// unborn-branch repair) — this bounds only the wait to get the lock,
+	// not the work once inside it, which has its own budgets below.
+	var result checkResult
+	lockCtx, lockCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer lockCancel()
+	lockErr := gitutil.WithRepoLock(lockCtx, ledgerPath, func() error {
+		// ADR-030 D3, applied here too: a rebase that already existed
+		// before this call's own pull is not this call's to resolve or
+		// abort — it belongs to whoever started it (a human running raw
+		// git is the one realistic case once the lock is held). Only a
+		// rebase this specific pull created is safe to touch below.
+		hadRebaseBefore := gitutil.IsRebaseInProgress(ledgerPath)
+
+		// --autostash: uncommitted local changes must not block the pull.
+		// Bounded so a hung network pull can't hold the lock forever.
+		pullCtx, pullCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		pullCmd := gitutil.NewNetworkCmd(pullCtx, "-C", ledgerPath, "pull", "--rebase", "--autostash")
+		output, err := pullCmd.CombinedOutput()
+		pullCancel()
+		if err != nil {
+			errStr := strings.TrimSpace(string(output))
+			if hadRebaseBefore {
+				result = FailedCheck("Ledger branch status",
+					"pull --rebase failed",
+					fmt.Sprintf("A rebase was already in progress before this pull (not started by ox doctor --fix) — not touching it: %s", errStr))
+				return nil
+			}
+			// Route through automerge, not the bare accept-theirs call. This was the
+			// one reconcile path that skipped the tiered resolver, so it got no union
+			// tier and no LLM tier while every other path (CLI push, daemon pull,
+			// diverged fix) went through ledgerLLMResolveHook. Behind-only pulls hit
+			// exactly the same sessions/ conflicts as the others.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_, resolveErr := ledgerLLMResolveHook()(ctx, ledgerPath, nil)
+			cancel()
+			if resolveErr != nil {
+				slog.Debug("rebase auto-resolve failed", "error", resolveErr)
+				// AuditAndAbort: log HEAD SHA, unmerged files, and stash count
+				// before discarding rebase state so silent recovery is not
+				// invisible. See ox-ooy3 and .claude/rules/daemon-git.md.
+				abortCtx, abortCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				_ = gitutil.AuditAndAbort(abortCtx, ledgerPath, gitutil.AuditOpRebase, "doctor --fix auto-resolve failed", slog.Default())
+				abortCancel()
+				result = FailedCheck("Ledger branch status",
+					"pull --rebase failed (aborted)",
+					fmt.Sprintf("Conflict during rebase (aborted to restore clean state): %s", errStr))
+				return nil
+			}
+			result = PassedCheck("Ledger branch status",
+				fmt.Sprintf("pulled %d commit(s) (auto-resolved conflicts)", behindCount))
+			return nil
 		}
-		return PassedCheck("Ledger branch status",
-			fmt.Sprintf("pulled %d commit(s) (auto-resolved conflicts)", behindCount))
+		result = PassedCheck("Ledger branch status",
+			fmt.Sprintf("pulled %d commit(s)", behindCount))
+		return nil
+	})
+	if lockErr != nil {
+		detail := lockErr.Error()
+		if gitutil.IsRepoLockBusy(lockErr) {
+			detail = "a concurrent ox process (daemon sync, another doctor run) held the ledger; try again"
+		}
+		return FailedCheck("Ledger branch status", "could not acquire ledger lock", detail)
 	}
-	return PassedCheck("Ledger branch status",
-		fmt.Sprintf("pulled %d commit(s)", behindCount))
+	return result
 }
 
 // fixLedgerBranchDiverged reconciles a diverged ledger by rebasing then pushing.
@@ -472,11 +531,20 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 // ox doctor --fix the divergence may already be resolved. Re-check before
 // attempting the heavier PushWithRetry path.
 func fixLedgerBranchDiverged(ledgerPath string, aheadCount, behindCount int) checkResult {
-	// re-fetch so we compare against the latest remote state
-	fetchCmd := exec.Command("git", "-C", ledgerPath, "fetch", "--quiet")
-	if err := fetchCmd.Run(); err != nil {
+	// re-fetch so we compare against the latest remote state. Locked
+	// (ADR-030 D1): serializes against a concurrent daemon fetch on the same
+	// clone. Best-effort either way — a stale re-check just falls through to
+	// the ahead/behind counts the caller already has.
+	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := gitutil.WithRepoLock(fetchCtx, ledgerPath, func() error {
+		// NewNetworkCmd binds the fetch to fetchCtx too, not just the lock
+		// wait — see the matching comment in the unborn-branch repair above.
+		_, err := gitutil.NewNetworkCmd(fetchCtx, "-C", ledgerPath, "fetch", "--quiet").CombinedOutput()
+		return err
+	}); err != nil {
 		slog.Debug("fetch before diverged re-check failed", "error", err)
 	}
+	fetchCancel()
 
 	// re-check ahead/behind — daemon may have already reconciled
 	revCmd := exec.Command("git", "-C", ledgerPath, "rev-list", "--left-right", "--count", "origin/main...HEAD")

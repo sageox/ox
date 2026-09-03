@@ -3,12 +3,15 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -474,4 +477,74 @@ func TestUnbornLedger_FailedRepairStaysCritical(t *testing.T) {
 		"a failed repair must stay critical, not be demoted to the attention bucket")
 	assert.Equal(t, CheckSlugLedgerBranchStatus, res.slug,
 		"slug must survive so the failure correlates with the original check")
+}
+
+// TestFixLedgerBranchBehind_LockBusy_FailsFastInsteadOfRacing proves the
+// bd ox-baz5.1/CodeRabbit finding is fixed: fixLedgerBranchBehind used to run
+// `git pull --rebase --autostash` (plus LLM conflict resolution and abort)
+// completely outside gitutil.WithRepoLock, so it could interleave FETCH_HEAD
+// writes with a concurrent daemon sync cycle on the same clone — the exact
+// 2026-09-02 incident shape. With the lock in place, a peer holding it makes
+// this fail fast and cleanly instead of racing the peer's git operations.
+func TestFixLedgerBranchBehind_LockBusy_FailsFastInsteadOfRacing(t *testing.T) {
+	_, machineB := createBareAndClone(t)
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_ = gitutil.WithRepoLock(context.Background(), machineB, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	defer close(release)
+
+	start := time.Now()
+	result := fixLedgerBranchBehind(machineB, 1)
+	elapsed := time.Since(start)
+
+	assert.False(t, result.passed, "must not report success when the pull never ran")
+	assert.Contains(t, result.detail, "concurrent ox process",
+		"failure must explain it's lock contention, not a real git error, so a user isn't sent chasing a phantom conflict")
+	assert.Less(t, elapsed, 35*time.Second,
+		"must fail within the lock's own acquire budget (30s), not hang past it")
+}
+
+// TestFixLedgerBranchBehind_ForeignRebase_NeverTouched proves the ADR-030 D3
+// guard applies here too, not just in the daemon's pull path: a rebase that
+// already existed before this call's own `git pull --rebase` — a human
+// running raw git, since nothing else can be mid-rebase against this clone
+// once the lock is held — is not this call's to resolve or abort.
+func TestFixLedgerBranchBehind_ForeignRebase_NeverTouched(t *testing.T) {
+	barePath, machineA := createBareAndClone(t)
+	machineB := cloneBare(t, barePath)
+
+	// machineA pushes, AND machineB has an unpushed local commit: a pure
+	// fast-forward (behind but not diverged) never invokes the rebase
+	// machinery at all, so an empty rebase-merge/ would go unnoticed — git
+	// only refuses on it once there's a real rebase to attempt.
+	require.NoError(t, os.WriteFile(filepath.Join(machineA, "notes.txt"), []byte("from A"), 0644))
+	runGit(t, machineA, "add", "notes.txt")
+	runGit(t, machineA, "commit", "--no-verify", "-m", "notes from A")
+	runGit(t, machineA, "push")
+	runGit(t, machineB, "fetch")
+	require.NoError(t, os.WriteFile(filepath.Join(machineB, "local.txt"), []byte("from B"), 0644))
+	runGit(t, machineB, "add", "local.txt")
+	runGit(t, machineB, "commit", "--no-verify", "-m", "local change on B")
+
+	// Fake a foreign rebase-in-progress: enough for gitutil.IsRebaseInProgress
+	// to see it, and for git itself to refuse the pull with its own
+	// "already a rebase-merge directory" error — no real conflict needed.
+	require.NoError(t, os.MkdirAll(filepath.Join(machineB, ".git", "rebase-merge"), 0o755))
+
+	result := fixLedgerBranchBehind(machineB, 1)
+
+	assert.False(t, result.passed, "must not report success while a foreign rebase sits untouched")
+	assert.Contains(t, result.detail, "not touching it",
+		"failure must say the rebase predates this call, not read like a real conflict")
+
+	_, err := os.Stat(filepath.Join(machineB, ".git", "rebase-merge"))
+	assert.NoError(t, err, "the foreign rebase-merge directory must survive untouched — proves neither resolve nor AuditAndAbort ran")
 }
