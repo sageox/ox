@@ -12,6 +12,7 @@ import (
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/tokens"
@@ -38,6 +39,14 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 		if guidanceCheck.warning || !guidanceCheck.passed {
 			checks = append(checks, guidanceCheck)
 		}
+		// even with nothing configured locally, the daemon may still be
+		// syncing an "other" team context (ox-baz5.5) — scan it too.
+		for _, tc := range daemonSyncedTeamContexts(nil) {
+			pointerCheck := checkDoubleEncodedLFSPointers(tc, opts)
+			if pointerCheck.warning || !pointerCheck.passed {
+				checks = append(checks, pointerCheck)
+			}
+		}
 		return checks
 	}
 
@@ -60,6 +69,20 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 		}
 	}
 
+	// ox-baz5.5: localCfg.TeamContexts is this repo's declared list, but the
+	// daemon may also be syncing an "other" team context that was never
+	// declared here (e.g. a secondary/internal team). Before this, the LFS
+	// nested-pointer scan above silently never visited that clone — the
+	// "Team Context" section completed in ~23ms even while a real diverged
+	// clone sat unscanned. Enumerate what the daemon actually syncs and scan
+	// whatever wasn't already covered.
+	for _, tc := range daemonSyncedTeamContexts(localCfg.TeamContexts) {
+		pointerCheck := checkDoubleEncodedLFSPointers(tc, opts)
+		if pointerCheck.warning || !pointerCheck.passed {
+			checks = append(checks, pointerCheck)
+		}
+	}
+
 	// check for legacy team contexts that should be migrated
 	legacyCheck := checkLegacyTeamContexts(gitRoot)
 	if legacyCheck.warning {
@@ -79,6 +102,52 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 	}
 
 	return checks
+}
+
+// daemonSyncedTeamContexts asks the daemon (via IPC — checkTeamContextHealth
+// runs in the CLI process and has no direct access to the daemon's in-memory
+// WorkspaceRegistry) which team-context clones it is actually syncing, and
+// returns the ones not already present in configured. This is how ox-baz5.5
+// closes the gap: configured comes from this repo's declared
+// localCfg.TeamContexts, which does not include a team context the daemon
+// syncs for other reasons (e.g. a secondary/internal team). A daemon that
+// isn't running, or times out, degrades to no extra contexts — this is a
+// best-effort supplement to the configured scan, never a replacement for it.
+func daemonSyncedTeamContexts(configured []config.TeamContext) []config.TeamContext {
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
+	if client == nil || client.Ping() != nil {
+		return nil
+	}
+	status, err := client.Status()
+	if err != nil || status == nil {
+		return nil
+	}
+	return extraTeamContextsFromStatus(status, configured)
+}
+
+// extraTeamContextsFromStatus is the pure filtering logic behind
+// daemonSyncedTeamContexts, split out so the ox-baz5.5 fix — "don't miss a
+// team-context clone the daemon syncs but this repo never declared" — is
+// testable without a live daemon IPC connection.
+func extraTeamContextsFromStatus(status *daemon.StatusData, configured []config.TeamContext) []config.TeamContext {
+	known := make(map[string]bool, len(configured))
+	for _, tc := range configured {
+		known[tc.Path] = true
+	}
+
+	var extra []config.TeamContext
+	for _, ws := range status.Workspaces["team-context"] {
+		if !ws.Exists || ws.Path == "" || known[ws.Path] {
+			continue
+		}
+		extra = append(extra, config.TeamContext{
+			TeamID:   ws.TeamID,
+			TeamName: ws.TeamName,
+			Path:     ws.Path,
+			LastSync: ws.LastSync,
+		})
+	}
+	return extra
 }
 
 // checkDoubleEncodedLFSPointers detects the only worktree shape caused by an
