@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -171,4 +172,40 @@ func mustStatSize(t *testing.T, path string) int64 {
 func mustHasMarker(t *testing.T, dataDir, name string) bool {
 	t.Helper()
 	return store.HasNeedsReindexMarker(dataDir, name)
+}
+
+// `ox doctor --fix` removes the entire codedb directory on a corruption
+// verdict. That verdict must come from a check that actually inspected the
+// data: an index this process merely cannot read — locked by another writer,
+// on read-only media, permissions revoked — is not a damaged one, and removing
+// it costs minutes of rebuild for a condition that may clear on its own.
+func TestCheckCodeIndexAtDir_UnreadableIndexIsNotRemovedByFix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod does not deny reads on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod does not deny reads")
+	}
+
+	tmp := t.TempDir()
+	indexDir := filepath.Join(tmp, "codedb")
+	db, err := codedb.Open(indexDir)
+	require.NoError(t, err)
+	_, err = db.Store().Exec(`INSERT INTO repos (name, path) VALUES ('demo','/tmp/demo')`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	// Unreadable database file, writable directory — so the removal below WOULD
+	// succeed if it were attempted, which is what makes the survival assertion
+	// meaningful.
+	dbPath := filepath.Join(indexDir, store.MetadataDBFile)
+	require.NoError(t, os.Chmod(dbPath, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(dbPath, 0o600) })
+
+	result := checkCodeIndexAtDir(indexDir, true)
+
+	assert.True(t, result.warning, "an index that could not be read must be flagged, not reported clean")
+	assert.Contains(t, result.message, "could not open index")
+	_, statErr := os.Stat(dbPath)
+	assert.NoError(t, statErr, "--fix removed an index it never proved was damaged")
 }

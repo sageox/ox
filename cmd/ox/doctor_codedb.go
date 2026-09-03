@@ -58,6 +58,15 @@ func checkCodeIndexAtDir(dataDir string, fix bool) checkResult {
 			}
 			return FailedCheck("Code index", fmt.Sprintf("%s sub-index is structurally corrupt", mce.Name), "run 'ox doctor --fix' to rebuild only the affected sub-index")
 		}
+		// Remove only on a verdict that the index is damaged. An open that
+		// failed for a reason unrelated to the contents — the store is locked,
+		// unreadable, or on read-only media — says nothing about the data, and
+		// --fix would otherwise delete a healthy index that costs minutes to
+		// rebuild.
+		if !errors.Is(err, store.ErrCorrupt) {
+			return WarningCheck("Code index", fmt.Sprintf("could not open index: %v", err),
+				"nothing was removed; resolve the condition above and rerun 'ox doctor'")
+		}
 		if fix {
 			_ = os.RemoveAll(dataDir)
 			return PassedCheck("Code index", "corrupt index removed, run 'ox code index' to rebuild")
@@ -66,13 +75,21 @@ func checkCodeIndexAtDir(dataDir string, fix bool) checkResult {
 	}
 	defer db.Close()
 
-	if err := db.Store().CheckIntegrity(); errors.Is(err, store.ErrCorrupt) {
+	integrityErr := db.Store().CheckIntegrity()
+	if errors.Is(integrityErr, store.ErrCorrupt) {
 		if fix {
 			db.Close()
 			_ = os.RemoveAll(dataDir)
 			return PassedCheck("Code index", "corrupt index removed, run 'ox code index' to rebuild")
 		}
 		return FailedCheck("Code index", "index corruption detected", "run 'ox doctor' to remove and rebuild")
+	}
+	if integrityErr != nil {
+		// The check could not run. Nothing has found fault with the index, so
+		// --fix must not remove it — but saying nothing would report it healthy.
+		return WarningCheck("Code index",
+			fmt.Sprintf("integrity could not be verified: %v", integrityErr),
+			"retry when the index is not being written: 'ox doctor'")
 	}
 
 	// Self-heal markers come BEFORE the empty-index check: a freshly-healed
