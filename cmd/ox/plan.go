@@ -103,14 +103,29 @@ Output is JSON by default (the AI-coworker/plumbing path). Use --text for a huma
 			// DEFAULT: JSON plumbing path — emit the Result and nothing else.
 			// With --persist (the ExitPlanMode hook) also save + commit a draft;
 			// the save writes only to logs/ledger so stdout JSON stays clean.
+			saved := ""
 			if persist && gitRoot != "" && config.PlanSave(gitRoot) {
-				savePlanWithProvenance(gitRoot, in, result, nil)
+				saved = savePlanWithProvenance(gitRoot, in, result, nil)
+			}
+			// Nothing persisted this plan, so the agent is about to implement
+			// from a document no teammate will ever see. Stamp it for the
+			// unsaved-plan nudge; armUnsavedPlanStamp self-gates on consult
+			// mode and on triviality.
+			if saved == "" {
+				if err := armUnsavedPlanStamp(gitRoot, envAgentID(), in, result); err != nil {
+					slog.Debug("plan: could not arm unsaved-plan stamp", "error", err)
+				}
 			}
 			return writePlanJSON(cmd, result)
 		}
 
 		// --text: human porcelain — auto-save (if enabled), metric, summary.
 		savedDir := maybeSavePlan(gitRoot, in, result)
+		if savedDir == "" {
+			if err := armUnsavedPlanStamp(gitRoot, envAgentID(), in, result); err != nil {
+				slog.Debug("plan: could not arm unsaved-plan stamp", "error", err)
+			}
+		}
 		plan.RecordPlanGenerated(result, savedDir != "")
 		return writePlanHuman(cmd, result, savedDir)
 	},
@@ -304,6 +319,12 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	if err != nil {
 		return ""
 	}
+
+	// The plan is in the ledger, so any pending "you drafted and never saved"
+	// nudge is now wrong. Cleared here rather than at the end of the function
+	// because everything below is best-effort decoration on an already-durable
+	// save.
+	clearUnsavedPlanStamp(gitRoot, envAgentID())
 
 	// Hero poster: a designed SVG poster of the plan (internal/planhero),
 	// generated from its structured data — NOT a browser screenshot, so this
