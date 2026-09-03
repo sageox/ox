@@ -152,16 +152,27 @@ func readOnlyDSN(dbPath string, immutable bool) string {
 // Errors are returned as-is. The self-heal and mapping-upgrade paths that handle
 // them on a writable store both nuke and recreate the sub-index directory, which
 // is neither possible nor wanted here.
-func openBleveReadOnly(path, name string) (idx bleve.Index, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			idx = nil
-			err = fmt.Errorf("%w: bleve %s sub-index at %s panicked on open: %v", ErrReadOnly, name, path, r)
-		}
-	}()
-	idx, err = bleve.OpenUsing(path, map[string]interface{}{"read_only": true})
+func openBleveReadOnly(path, name string) (bleve.Index, error) {
+	idx, err := recoverBleveOpen(func() (bleve.Index, error) {
+		return bleve.OpenUsing(path, map[string]interface{}{"read_only": true})
+	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: open bleve %s sub-index at %s: %w", ErrReadOnly, name, path, err)
 	}
 	return idx, nil
+}
+
+// recoverBleveOpen runs open, turning a panic into an error. bleve can panic on
+// a structurally broken index rather than returning one — safeOpenBleve carries
+// the same guard for the writable path. Factored out so the recovery contract is
+// testable without a corrupt index on disk, the same reason runBleveProbe is
+// separate from CheckIntegrity.
+func recoverBleveOpen(open func() (bleve.Index, error)) (idx bleve.Index, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			idx = nil
+			err = fmt.Errorf("panic during open: %v", r)
+		}
+	}()
+	return open()
 }

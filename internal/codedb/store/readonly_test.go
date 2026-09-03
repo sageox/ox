@@ -297,6 +297,31 @@ func TestReadOnlyDSNEscapesPath(t *testing.T) {
 	}
 }
 
+// fileIsWritable decides whether a failed migration is a read-only store or a
+// real error, so a wrong answer either way matters: false-negative loses the
+// classification, false-positive lets the corruption remedy run.
+func TestFileIsWritable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metadata.db")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if !fileIsWritable(path) {
+		t.Error("fileIsWritable = false on a 0600 file, want true")
+	}
+
+	requirePOSIXPermissions(t)
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+	if fileIsWritable(path) {
+		t.Error("fileIsWritable = true on a 0444 file, want false")
+	}
+	if fileIsWritable(filepath.Join(t.TempDir(), "absent.db")) {
+		t.Error("fileIsWritable = true for a file that does not exist, want false")
+	}
+}
+
 // storeIsWritable is the gate that keeps "cannot write" from reaching the
 // corruption verdict, so both of its answers need to be true.
 func TestStoreIsWritable(t *testing.T) {
@@ -452,4 +477,29 @@ func TestOpenReadOnlyDatabaseFileInWritableDirIsNotDeleted(t *testing.T) {
 	if _, statErr := os.Stat(dbPath); statErr != nil {
 		t.Errorf("metadata.db was deleted from a writable directory: %v", statErr)
 	}
+}
+
+// A read-only store is never repaired, so a bleve sub-index that panics on open
+// must come back as an error the caller can report — an escaping panic would
+// take down `ox code search` instead.
+func TestRecoverBleveOpen(t *testing.T) {
+	t.Run("panic becomes an error", func(t *testing.T) {
+		idx, err := recoverBleveOpen(func() (bleve.Index, error) { panic("torn scorch segment") })
+		if err == nil {
+			t.Fatal("panic did not surface as an error")
+		}
+		if idx != nil {
+			t.Error("index must be nil after a panic")
+		}
+		if !strings.Contains(err.Error(), "torn scorch segment") {
+			t.Errorf("error = %v, want it to carry the panic value", err)
+		}
+	})
+
+	t.Run("ordinary results pass through", func(t *testing.T) {
+		want := errors.New("index path does not exist")
+		if _, err := recoverBleveOpen(func() (bleve.Index, error) { return nil, want }); !errors.Is(err, want) {
+			t.Errorf("error = %v, want it unchanged", err)
+		}
+	})
 }
