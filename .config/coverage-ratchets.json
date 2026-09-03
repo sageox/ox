@@ -11,6 +11,16 @@
         "path": "cmd/ox/agent_session.go",
         "reason": "Durable score write and retry preservation are directly tested; the orchestration call site awaits the ox-ilrr.7 lifecycle seam",
         "expires": "2026-09-30"
+      },
+      {
+        "path": "cmd/ox/doctor_ledger_git.go",
+        "reason": "PR #868 (ADR-030 per-clone git locking): the new WithRepoLock wrapper and D3 own-rebase guard in fixLedgerBranchBehind are directly tested (TestFixLedgerBranchBehind_LockBusy_FailsFastInsteadOfRacing, TestFixLedgerBranchBehind_ForeignRebase_NeverTouched). The remaining uncovered lines are the pre-existing LLM-resolver/AuditAndAbort conflict-resolution ladder, unchanged in behavior but re-indented into the diff by the new wrapper. Covering it needs a mock for automerge's external-binary resolver contract, tracked as bd ox-baz5.7.",
+        "expires": "2026-10-17"
+      },
+      {
+        "path": "internal/daemon/sync_managed.go",
+        "reason": "PR #868 (ADR-030 per-clone git locking): the new lock/retry/D3-guard logic in pullManagedRepo and fetchAndPullLocked is directly tested (TestPullManagedRepo_ConcurrentFetchDoesNotCorruptFETCH_HEAD, -race clean). The remaining uncovered lines are the pre-existing auto-resolve/LLM-resolver/AuditAndAbort conflict ladder, extracted verbatim (unchanged in behavior) out of the old pullManagedRepo body. Same automerge mocking gap as doctor_ledger_git.go, tracked together under bd ox-baz5.7.",
+        "expires": "2026-10-17"
       }
     ]
   },
