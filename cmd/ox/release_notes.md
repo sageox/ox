@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ox code status` no longer reports an index it could not open as an empty one** — it answered zeros under `index_exists: true`, which reads exactly like a warm index holding nothing. It now shows `✗ unreadable` with the reason (`open_error` in `--json`), and labels a read-only index as such.
 - **`ox code index` refuses a read-only index up front** — with a message naming the directory, instead of failing partway through a pass.
 
+### Fixed
+
+- **`ox` no longer tells you to rotate a perfectly healthy login** — every interactive `ox status`, `ox doctor`, and `ox agent prime` signed off with `warn=ox_token_expiring`, claiming your credential expired in a few hours and pointing you at the token-creation page — while the same `ox status` reported your session as auto-refreshing. It was reading the OAuth access-token stamp, which the refresh grant rotates on its own, as if it were your credential's lifetime. The warning now applies only to a `SAGEOX_TOKEN` credential, where expiry is real and rotating the token is the actual remedy.
+
 ## [0.14.3] - 2026-08-31
 
 Code indexing stays safe on every worktree layout, a wedged checkout repairs itself, and team-scoped credentials just work with `ox query`.

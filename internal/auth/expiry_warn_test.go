@@ -3,6 +3,9 @@ package auth
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ephemeral"
 	"github.com/sageox/ox/internal/runtime"
 )
@@ -133,17 +137,92 @@ func TestCheckAndWarnExpiry_SkippedForNonTTY(t *testing.T) {
 	assert.Empty(t, buf.String())
 }
 
+// serveEnvTokenMeta binds a CRC-valid SAGEOX_TOKEN to a stub metadata server
+// and returns the StoredToken the env layer produces for it. The endpoint env
+// var must point at the same server or envTokenBoundValue refuses the token.
+func serveEnvTokenMeta(t *testing.T, body map[string]any) (*httptest.Server, *StoredToken) {
+	t.Helper()
+	withTempCacheDir(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	t.Setenv(endpoint.EnvVar, srv.URL)
+	t.Setenv(EnvVarToken, "oxp_test_4bDZfN")
+
+	stored, state := EnvTokenFor(srv.URL)
+	require.Equal(t, EnvTokenValid, state, "fixture token must pass the local CRC check")
+	return srv, stored
+}
+
 // TestResolveTokenExpiry_NeverExpires — Failure prevented: a never-expires
-// token (server returns ExpiresAt == nil) somehow triggers a warning,
+// token (server returns expires_at: null) somehow triggers a warning,
 // which would be permanently noisy and nonsensical.
 func TestResolveTokenExpiry_NeverExpires(t *testing.T) {
 	clearEphemeralForTest(t)
-	tok := &StoredToken{
-		AccessToken: "oxp_never",
-		ExpiresAt:   time.Time{}, // zero-value: never expires
+	srv, stored := serveEnvTokenMeta(t, map[string]any{"expires_at": nil, "name": "forever"})
+
+	_, _, ok := resolveTokenExpiry(context.Background(), srv.URL, stored)
+	assert.False(t, ok, "a null expires_at must be treated as never-expires")
+}
+
+// TestResolveTokenExpiry_EnvTokenStillWarns — Failure prevented: suppressing the
+// disk-token false alarm goes too far and silences the one credential class the
+// warning exists for. An env token has no refresh credential, so its expiry is
+// terminal and a human must go rotate it.
+func TestResolveTokenExpiry_EnvTokenStillWarns(t *testing.T) {
+	clearEphemeralForTest(t)
+	expires := time.Now().Add(48 * time.Hour).UTC()
+	srv, stored := serveEnvTokenMeta(t, map[string]any{
+		"expires_at": expires.Format(time.RFC3339),
+		"name":       "ci-token",
+	})
+
+	got, created, ok := resolveTokenExpiry(context.Background(), srv.URL, stored)
+	require.True(t, ok, "an expiring env token must still resolve an expiry")
+	assert.WithinDuration(t, expires, got, time.Second)
+	assert.False(t, created.IsZero(), "createdAt must fall back to the assumed lifetime")
+}
+
+// TestResolveTokenExpiry_DiskTokenNeverWarns — Failure prevented: `ox status`
+// prints "✓ auto-refresh enabled" and then, on the next line, tells the same
+// user their token expires in minutes and to mint a new one at /settings/tokens.
+// device_flow.go and refresh.go are the only writers of auth.json, so a disk
+// StoredToken.ExpiresAt is always the OAuth access-token stamp — hours away by
+// construction, and always inside the warning threshold.
+func TestResolveTokenExpiry_DiskTokenNeverWarns(t *testing.T) {
+	t.Setenv(EnvVarToken, "") // no env credential — force the disk path
+
+	tests := []struct {
+		name  string
+		token *StoredToken
+	}{
+		{"auto-refreshing session", &StoredToken{
+			AccessToken:  "jwt.access",
+			RefreshToken: "refresh-present",
+			ExpiresAt:    time.Now().Add(11 * time.Minute),
+		}},
+		{"better-auth session token as refresh credential", &StoredToken{
+			AccessToken:  "jwt.access",
+			SessionToken: "session-present",
+			ExpiresAt:    time.Now().Add(2 * time.Hour),
+		}},
+		// Re-login IS required here, but `ox login` is the remedy — not the new
+		// PAT this warning would advertise. Login and `ox status` already say so.
+		{"no refresh credential at all", &StoredToken{
+			AccessToken: "jwt.access",
+			ExpiresAt:   time.Now().Add(23 * time.Hour),
+		}},
 	}
-	_, _, _, ok := resolveTokenExpiry(context.Background(), "https://sageox.ai", tok)
-	assert.False(t, ok, "zero-time ExpiresAt must be treated as never-expires")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, ok := resolveTokenExpiry(context.Background(), "https://sageox.ai", tc.token)
+			assert.False(t, ok, "a disk-stored token must never produce an expiry warning")
+		})
+	}
 }
 
 // TestEmitExpiryWarning_Format — Failure prevented: warning format drifts
@@ -151,10 +230,10 @@ func TestResolveTokenExpiry_NeverExpires(t *testing.T) {
 // depend on this shape.
 func TestEmitExpiryWarning_Format(t *testing.T) {
 	var buf bytes.Buffer
-	emitExpiryWarning(&buf, "https://sageox.ai", "disk", 4*24*time.Hour+3*time.Hour)
+	emitExpiryWarning(&buf, "https://sageox.ai", "env", 4*24*time.Hour+3*time.Hour)
 	out := buf.String()
 	assert.True(t, strings.HasPrefix(out, "warn=ox_token_expiring"), "missing warn= prefix")
-	assert.Contains(t, out, "source=disk")
+	assert.Contains(t, out, "source=env")
 	assert.Contains(t, out, "expires_in=4d3h")
 	assert.Contains(t, out, "create_new=https://sageox.ai/settings/tokens")
 	assert.True(t, strings.HasSuffix(out, "\n"), "must be single line terminated by \\n")
