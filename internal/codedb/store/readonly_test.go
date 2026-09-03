@@ -440,6 +440,12 @@ func TestOpenReadOnlyDatabaseFileInWritableDirIsNotDeleted(t *testing.T) {
 		_ = got.Close()
 		t.Fatal("Open succeeded with an unwritable database needing migration; want refusal")
 	}
+	// Same physical condition as an unwritable directory, so it must carry the
+	// same error class — a caller asking "is this index writable?" should not
+	// have to know which half of the store said no.
+	if !errors.Is(err, ErrReadOnly) {
+		t.Errorf("error = %v, want ErrReadOnly", err)
+	}
 	if errors.Is(err, ErrCorrupt) {
 		t.Errorf("error = %v, must not be reported as corruption", err)
 	}

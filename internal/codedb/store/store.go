@@ -286,6 +286,15 @@ func openSQLite(root string) (*sql.DB, bool, error) {
 
 	if err := CreateSchema(db); err != nil {
 		_ = db.Close()
+		// An unwritable database file inside a writable directory reaches here
+		// rather than the read-only branch above: the directory probe passed,
+		// and SQLite could create the WAL sidecars, so nothing objected until a
+		// migration tried to write. Same physical condition, so same error
+		// class — which side of the store is unwritable should not decide how
+		// callers classify it.
+		if !fileIsWritable(dbPath) {
+			return nil, true, fmt.Errorf("%w: %s needs a schema migration that cannot be applied: %w", ErrReadOnly, dbPath, err)
+		}
 		return nil, false, fmt.Errorf("create schema: %w", err)
 	}
 	return db, false, nil

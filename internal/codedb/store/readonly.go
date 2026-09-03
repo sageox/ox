@@ -44,6 +44,18 @@ func storeIsWritable(root string) bool {
 	return true
 }
 
+// fileIsWritable reports whether this process can open path for writing.
+// Distinct from storeIsWritable, which asks about the directory: SQLite needs
+// both, and a store can fail on either one alone.
+func fileIsWritable(path string) bool {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
+}
+
 // openSQLiteReadOnly opens metadata.db for reading on media this process cannot
 // write. The store is in WAL mode, so which of SQLite's two read-only openings
 // applies depends on whether an un-checkpointed WAL is sitting next to it.
