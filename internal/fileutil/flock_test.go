@@ -337,3 +337,32 @@ func TestWithFileLockTimeout_InProcessContextCancel(t *testing.T) {
 		t.Fatal("did not return after context cancel — in-process gate ignored ctx.Done()")
 	}
 }
+
+// TestWithFileLockTimeout_CrossProcessGenuineTimeout exercises the
+// cross-process flock polling loop's OWN deadline check — distinct from
+// every other timeout test here, which all contend at the in-process gate
+// and never reach this loop at all. A child-process holder bypasses the
+// in-process map entirely, so this is the only way to prove the flock-level
+// ErrLockTimeout actually fires when the lock is genuinely still held.
+func TestWithFileLockTimeout_CrossProcessGenuineTimeout(t *testing.T) {
+	if !crossProcessFlockAvailable() {
+		t.Skip("cross-process flock not available on this platform")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "genuine-timeout.dat")
+
+	holder, release := startLockHolder(t, target)
+	defer release()
+	<-holder.acquired
+
+	start := time.Now()
+	err := WithFileLockTimeout(context.Background(), target, 100*time.Millisecond, func() error {
+		return errors.New("must not run — the child process still holds the lock")
+	})
+	elapsed := time.Since(start)
+
+	var timeoutErr *ErrLockTimeout
+	require.ErrorAs(t, err, &timeoutErr)
+	assert.GreaterOrEqual(t, elapsed, 100*time.Millisecond, "must actually wait out the requested timeout, not return early")
+	assert.Less(t, elapsed, 2*time.Second, "must not wait past the requested timeout")
+}
