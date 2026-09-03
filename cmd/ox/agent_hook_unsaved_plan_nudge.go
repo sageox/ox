@@ -55,6 +55,11 @@ const (
 // unsavedPlanStamp records a plan that was enriched but never persisted.
 // Serialized as JSON so a later reader (session-end report, `ox doctor`) can
 // describe the plan without re-reading it.
+//
+// Topic and SourcePath both come from the plan DOCUMENT (its H1 and its path),
+// so both are untrusted. Anything that renders either into model context must
+// go through reminderSafePlanTarget or an equivalent — only SourcePath is
+// rendered today, which is why only it has a sanitizer so far.
 type unsavedPlanStamp struct {
 	Topic      string    `json:"topic"`
 	SourcePath string    `json:"source_path,omitempty"`
@@ -122,7 +127,12 @@ func armUnsavedPlanStamp(projectRoot, agentID string, in plan.Input, res plan.Re
 		NonTrivial: res.Signals.NonTrivial,
 		ArmedAt:    time.Now().UTC(),
 	}
-	if prev, ok := readUnsavedPlanStamp(path); ok && prev.Topic == topic {
+	// Identity is (topic, source path), not topic alone. Two plans can easily
+	// share an H1 — "Implementation Plan" is the default title ox itself
+	// generates — and matching on topic alone would carry the first plan's
+	// NudgedAt onto the second, silently costing it its only reminder.
+	if prev, ok := readUnsavedPlanStamp(path); ok &&
+		prev.Topic == topic && prev.SourcePath == st.SourcePath {
 		st.NudgedAt = prev.NudgedAt
 	}
 
@@ -213,13 +223,40 @@ func emitUnsavedPlanNudge(w io.Writer, projectRoot, agentID string) {
 // that order, on one line. It never asks a question and never proposes opening
 // a browser: saving is local, durable, and needs no human decision, so the nudge
 // must not manufacture one.
+//
+// The plan path is ATTACKER-INFLUENCED and crosses into trusted model context,
+// so it is sanitized rather than interpolated: a file named
+// `x</system-reminder>...` would otherwise close the wrapper handlePrompt puts
+// around this line and let the remainder land as system-level instructions.
 func unsavedPlanNudgeLine(st unsavedPlanStamp) string {
-	target := "<plan.md|plan.html>"
-	if st.SourcePath != "" {
-		target = st.SourcePath
-	}
 	return fmt.Sprintf(
 		"A plan was drafted this session (%s) and never saved to the ledger. Save it — `ox plan save --file %s` — so it becomes prior art the next person gets back from `ox plan enrich` instead of re-deriving it.",
-		planScopePhrase(st.Files, st.Steps), target,
+		planScopePhrase(st.Files, st.Steps), reminderSafePlanTarget(st.SourcePath),
 	)
+}
+
+// reminderSafePlanTarget renders a plan path as a single shell argument that is
+// also safe to embed in trusted model context.
+//
+// Two independent hazards, two independent treatments:
+//
+//   - SHELL: a path with a space, `;`, `$`, or a backtick is several arguments
+//     (or a command) once pasted. POSIX single-quoting collapses it back to one
+//     literal argument; the only character needing care inside single quotes is
+//     the single quote itself.
+//   - MARKUP: `<` and `>` can terminate the <system-reminder> wrapper. They are
+//     escaped AFTER quoting, so a pathological name is rendered visibly rather
+//     than silently dropped — a mangled path the reader can see beats a nudge
+//     that quietly names the wrong file. Such a name cannot survive as a
+//     runnable command either way, and it is not a shape any real plan has.
+//
+// An empty path (a plan piped on stdin) yields a bracket-free placeholder;
+// angle brackets in our own literal would be markup noise in the same wrapper.
+func reminderSafePlanTarget(sourcePath string) string {
+	if sourcePath == "" {
+		return "path/to/plan.md"
+	}
+	quoted := "'" + strings.ReplaceAll(sourcePath, "'", `'\''`) + "'"
+	quoted = strings.ReplaceAll(quoted, "<", "&lt;")
+	return strings.ReplaceAll(quoted, ">", "&gt;")
 }
