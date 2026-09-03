@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,11 +23,22 @@ import (
 	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
 	"go.etcd.io/bbolt"
 	bbolterrors "go.etcd.io/bbolt/errors"
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // ErrCorrupt indicates the index is corrupted and needs re-indexing.
 var ErrCorrupt = fmt.Errorf("codedb index is corrupt")
+
+// ErrIntegrityUnknown reports that PRAGMA integrity_check could not run.
+// SQLite examined nothing, so it has said nothing about the database contents.
+//
+// Kept distinct from ErrCorrupt because the two license opposite actions. A
+// corruption verdict is what lets callers destroy the index — openSQLite
+// removes metadata.db and its sidecars, `ox doctor --fix` removes the whole
+// dataDir — and doing that on a check that never happened throws away an index
+// that may be perfectly healthy, at a cost of minutes to rebuild.
+var ErrIntegrityUnknown = errors.New("codedb integrity could not be checked")
 
 // ErrFullReindexRequired is returned by RebuildBleveSubIndex when the
 // requested sub-index (code/diff) cannot be repopulated from existing SQL
@@ -278,6 +290,12 @@ func openSQLite(root string) (*sql.DB, bool, error) {
 		// unrecoverable — a cold rebuild costs minutes.
 		if !storeIsWritable(root) {
 			return nil, true, fmt.Errorf("%w: %w", ErrReadOnly, err)
+		}
+		// Only a check that actually inspected the data licenses destroying it.
+		// An inconclusive one names a condition of this process or this moment,
+		// not of the index.
+		if !errors.Is(err, ErrCorrupt) {
+			return nil, false, err
 		}
 		slog.Error("sqlite corruption detected, removing database", "path", dbPath, "err", err)
 		removeSQLiteFiles(dbPath)
@@ -571,7 +589,10 @@ func (s *Store) rebuildCombinedIndex() {
 // Callers that genuinely need bleve integrity must use Open, not OpenSQLOnly.
 func (s *Store) CheckIntegrity() error {
 	if err := checkSQLiteIntegrity(s.db); err != nil {
-		return fmt.Errorf("sqlite: %w", ErrCorrupt)
+		// Pass the verdict through rather than relabelling every failure
+		// ErrCorrupt: `ox doctor --fix` responds to that label by removing the
+		// whole dataDir, so a check that could not run must not wear it.
+		return fmt.Errorf("sqlite: %w", err)
 	}
 
 	// Probe each bleve sub-index with the FST-touching field walk from PR #607.
@@ -666,16 +687,66 @@ func runBleveProbe(name string, probe func() error) (err error) {
 	return nil
 }
 
-// checkSQLiteIntegrity runs PRAGMA integrity_check and returns an error if the database is corrupt.
+// integrityBusyAttempts bounds the SQLITE_BUSY retry below. Three tries 20ms
+// apart covers the WAL-conversion window seen in the concurrent-fresh-open race
+// without adding measurable latency to a healthy open.
+const (
+	integrityBusyAttempts = 3
+	integrityBusyBackoff  = 20 * time.Millisecond
+)
+
+// checkSQLiteIntegrity runs PRAGMA integrity_check and classifies the outcome.
+//
+// It separates two results that a single error return conflated:
+//
+//   - The check RAN and reported something other than "ok" — evidence of
+//     damage, returned as ErrCorrupt, which is the verdict that licenses
+//     callers to delete and rebuild.
+//   - The check could not run — ErrIntegrityUnknown. SQLite read nothing, so it
+//     has reported nothing about the data; an I/O error, an exhausted fd table
+//     or an out-of-memory is not a statement that the index is broken.
+//     SQLITE_CORRUPT and SQLITE_NOTADB are the exception, since there the check
+//     failed *because* the file is damaged.
+//
+// SQLITE_BUSY is retried rather than reported. busy_timeout does not cover the
+// exclusive lock taken while a brand-new database is converted to WAL, so
+// openers racing to create one codedb (the #758 scenario) can get an immediate
+// BUSY — which reached the corruption branch and deleted the zero-byte file the
+// winning opener was still initializing.
 func checkSQLiteIntegrity(db *sql.DB) error {
-	var result string
-	if err := db.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
-		return fmt.Errorf("integrity_check query failed: %w", err)
+	var lastErr error
+	for attempt := range integrityBusyAttempts {
+		var result string
+		lastErr = db.QueryRow("PRAGMA integrity_check").Scan(&result)
+		if lastErr == nil {
+			if result == "ok" {
+				return nil
+			}
+			return fmt.Errorf("%w: integrity_check returned: %s", ErrCorrupt, result)
+		}
+		if !isSQLiteCode(lastErr, sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) {
+			break
+		}
+		if attempt < integrityBusyAttempts-1 {
+			time.Sleep(integrityBusyBackoff)
+		}
 	}
-	if result != "ok" {
-		return fmt.Errorf("integrity_check returned: %s", result)
+	if isSQLiteCode(lastErr, sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB) {
+		return fmt.Errorf("%w: integrity_check: %w", ErrCorrupt, lastErr)
 	}
-	return nil
+	return fmt.Errorf("%w: %w", ErrIntegrityUnknown, lastErr)
+}
+
+// isSQLiteCode reports whether err is a SQLite error whose primary result code
+// is one of want. Extended codes carry the primary in the low byte
+// (SQLITE_BUSY_SNAPSHOT is SQLITE_BUSY | 2<<8), so the comparison masks it off
+// rather than matching the code exactly.
+func isSQLiteCode(err error, want ...int) bool {
+	var sqErr *sqlite.Error
+	if !errors.As(err, &sqErr) {
+		return false
+	}
+	return slices.Contains(want, sqErr.Code()&0xff)
 }
 
 // removeSQLiteFiles removes the database file and its WAL/SHM sidecars.
