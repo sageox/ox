@@ -415,3 +415,180 @@ func TestReminderSafePlanTarget_QuotesAsASingleShellArgument(t *testing.T) {
 		t.Errorf("angle brackets reached the reminder: %q", got)
 	}
 }
+
+// The stamp is derived cache data on a path other tools sweep. Every way it can
+// come back wrong has to degrade to "no nudge" — never a crash, and never a
+// reminder built from half-read state.
+func TestReadUnsavedPlanStamp_CorruptStateDegradesToSilence(t *testing.T) {
+	for _, tc := range []struct{ name, content string }{
+		{"truncated mid-write", `{"topic":"ship it","files":3`},
+		{"not json at all", "plan.md\n"},
+		{"empty file", ""},
+		{"valid json, no topic", `{"files":3,"steps":6,"armed_at":"2026-09-03T00:00:00Z"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := planUnsavedPath(root, testAgentID)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, ok := readUnsavedPlanStamp(path); ok {
+				t.Error("corrupt stamp was accepted; a nudge would be built from it")
+			}
+			var out bytes.Buffer
+			emitUnsavedPlanNudge(&out, root, testAgentID)
+			if out.Len() != 0 {
+				t.Errorf("emitted a nudge from a corrupt stamp; got %q", out.String())
+			}
+		})
+	}
+}
+
+// Arming must never fail the command the agent is waiting on. An unwritable
+// cache directory returns an error for the caller's debug log and nothing else.
+func TestArmUnsavedPlanStamp_UnwritableCacheIsAnErrorNotAPanic(t *testing.T) {
+	root := t.TempDir()
+	cacheParent := filepath.Join(root, ".sageox", "cache")
+	if err := os.MkdirAll(cacheParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Read+execute only: the subdirectory the stamp needs cannot be created.
+	if err := os.Chmod(cacheParent, 0o500); err != nil {
+		t.Skipf("cannot chmod in this environment: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cacheParent, 0o755) })
+
+	err := armUnsavedPlanStamp(root, testAgentID, draftedInput("plan.md"), materialResult())
+	if err == nil {
+		t.Skip("filesystem allowed the write anyway (running as root?); nothing to assert")
+	}
+	if _, ok := readStamp(t, root); ok {
+		t.Error("a stamp exists despite the write having failed")
+	}
+}
+
+// The nudge marks itself delivered BEFORE writing, and stays silent if that
+// mark cannot be persisted — an unheard reminder beats one that repeats on
+// every prompt for four hours. That tradeoff is documented in the code and was
+// previously untested.
+func TestEmitUnsavedPlanNudge_StaysSilentWhenItCannotMarkDelivery(t *testing.T) {
+	root := t.TempDir()
+	if err := armUnsavedPlanStamp(root, testAgentID, draftedInput("plan.md"), materialResult()); err != nil {
+		t.Fatalf("arm returned error: %v", err)
+	}
+
+	// The FILE has to be read-only, not its directory: truncating an existing
+	// file needs write permission on the file itself, so a read-only directory
+	// does not stop the mark from landing.
+	path := planUnsavedPath(root, testAgentID)
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Skipf("cannot chmod in this environment: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	var out bytes.Buffer
+	emitUnsavedPlanNudge(&out, root, testAgentID)
+	if out.Len() != 0 {
+		t.Fatalf("delivered a nudge it could not mark, so it would repeat every prompt; got %q", out.String())
+	}
+}
+
+// clearUnsavedPlanStamp is called on every successful save, including the many
+// saves that had no stamp to begin with. It must be a silent no-op there.
+func TestClearUnsavedPlanStamp_NoStampAndNoAgentAreQuietNoOps(t *testing.T) {
+	root := t.TempDir()
+	clearUnsavedPlanStamp(root, testAgentID) // nothing armed
+	clearUnsavedPlanStamp(root, "")          // no agent id
+	clearUnsavedPlanStamp("", testAgentID)   // no project root
+	if _, ok := readStamp(t, root); ok {
+		t.Error("clear created a stamp")
+	}
+}
+
+// Arming is a side effect of enrich, never its job. If the cache cannot be
+// written the command must still return the enrichment the agent is waiting on
+// — a reminder is worth nothing if the feature that carries it can break
+// `ox plan enrich`.
+func TestPlanEnrichCmd_SurvivesAnUnwritableStampCache(t *testing.T) {
+	root := newPlanEnrichTestRepo(t)
+	t.Setenv("SAGEOX_AGENT_ID", testAgentID)
+
+	planPath := filepath.Join(root, "plan.md")
+	body := "# Survive an unwritable cache\n"
+	for _, s := range []string{"Context", "Approach", "Rollout", "Risks", "Verification", "Rollback"} {
+		body += "\n## " + s + "\n\nProse for " + s + ".\n"
+	}
+	if err := os.WriteFile(planPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write plan: %v", err)
+	}
+
+	cacheParent := filepath.Join(root, ".sageox", "cache")
+	if err := os.MkdirAll(cacheParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cacheParent, 0o500); err != nil {
+		t.Skipf("cannot chmod in this environment: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cacheParent, 0o755) })
+
+	// runPlanEnrich t.Fatal's on a non-nil error, so reaching the assertions at
+	// all is the fail-open proof; the output check pins that it is real JSON and
+	// not a truncated write.
+	out := runPlanEnrich(t, "file", "plan.md")
+	var res plan.Result
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("enrich did not return usable JSON when the cache was unwritable: %v\n%s", err, out)
+	}
+	if !res.Signals.NonTrivial {
+		t.Errorf("enrichment itself was degraded by the cache failure: %+v", res.Signals)
+	}
+}
+
+// TestHandlePrompt_DeliversTheUnsavedPlanNudge is the wiring test for the
+// delivery side, and it exists because the tail of handlePrompt had NO
+// integration coverage at all: every existing handlePrompt test constructs a
+// context with no Marker, so all of them return at the `agentID == ""` guard
+// before reaching a single emit call. A unit test of emitUnsavedPlanNudge
+// passes whether or not handlePrompt ever calls it.
+//
+// Red-first: delete the emitUnsavedPlanNudge call from handlePrompt → this test
+// fails and nothing else does.
+func TestHandlePrompt_DeliversTheUnsavedPlanNudge(t *testing.T) {
+	withFakeRunner(t, &fakeRunner{}) // keep the recall path a no-op
+
+	root := t.TempDir()
+	if err := armUnsavedPlanStamp(root, testAgentID, draftedInput("/repo/plan.md"), materialResult()); err != nil {
+		t.Fatalf("arm returned error: %v", err)
+	}
+
+	ctx := &HookContext{
+		ProjectRoot: root,
+		Marker:      &SessionMarker{AgentID: testAgentID},
+	}
+
+	var hookErr error
+	// captureRealStdout lives in recap_test.go — the hook handlers write to
+	// os.Stdout directly, so intercepting the real file is the only way to see
+	// what production would deliver.
+	out := string(captureRealStdout(t, func() { hookErr = handlePrompt(ctx) }))
+	if hookErr != nil {
+		t.Fatalf("handlePrompt errored: %v", hookErr)
+	}
+	if !strings.Contains(out, "never saved to the ledger") {
+		t.Fatalf("the nudge never reached stdout, so nothing delivers it in production; got %q", out)
+	}
+	if !strings.Contains(out, "/repo/plan.md") {
+		t.Errorf("nudge reached stdout without naming the plan; got %q", out)
+	}
+
+	// Second prompt in the same session must be silent — the once-only
+	// guarantee has to hold through the real delivery path, not just the unit.
+	second := string(captureRealStdout(t, func() { _ = handlePrompt(ctx) }))
+	if strings.Contains(second, "never saved to the ledger") {
+		t.Errorf("nudged on a second prompt; got %q", second)
+	}
+}
