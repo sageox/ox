@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -188,8 +189,8 @@ func TestResolveTokenExpiry_EnvTokenStillWarns(t *testing.T) {
 }
 
 // TestResolveTokenExpiry_DiskTokenNeverWarns — Failure prevented: `ox status`
-// prints "✓ auto-refresh enabled" and then, on the next line, tells the same
-// user their token expires in minutes and to mint a new one at /settings/tokens.
+// reports "✓ auto-refresh enabled" and then signs off telling the same user
+// their token expires in minutes and to mint a new one at /settings/tokens.
 // device_flow.go and refresh.go are the only writers of auth.json, so a disk
 // StoredToken.ExpiresAt is always the OAuth access-token stamp — hours away by
 // construction, and always inside the warning threshold.
@@ -223,6 +224,90 @@ func TestResolveTokenExpiry_DiskTokenNeverWarns(t *testing.T) {
 			assert.False(t, ok, "a disk-stored token must never produce an expiry warning")
 		})
 	}
+}
+
+// fakeTTY forces writerIsTTY true for the duration of the test so the decision
+// below the gate — threshold, dedupe, emitted line — is reachable at all.
+func fakeTTY(t *testing.T) {
+	t.Helper()
+	real := writerIsTTY
+	writerIsTTY = func(io.Writer) bool { return true }
+	t.Cleanup(func() { writerIsTTY = real })
+}
+
+// TestCheckAndWarnExpiry_EndToEnd drives the real entry point the CLI calls,
+// not the resolver underneath it, for both credential sources.
+//
+// Failure prevented: the disk-token regression is "fixed" in resolveTokenExpiry
+// while CheckAndWarnExpiry still emits — nothing else covers the path from the
+// public function through to the bytes on stderr.
+func TestCheckAndWarnExpiry_EndToEnd(t *testing.T) {
+	t.Run("env token at a terminal warns", func(t *testing.T) {
+		clearEphemeralForTest(t)
+		fakeTTY(t)
+		resetExpiryWarnedKeysForTest()
+		expires := time.Now().Add(48 * time.Hour).UTC()
+		srv, _ := serveEnvTokenMeta(t, map[string]any{
+			"expires_at": expires.Format(time.RFC3339),
+			"name":       "ci-token",
+		})
+
+		var buf bytes.Buffer
+		emitted := CheckAndWarnExpiry(context.Background(), srv.URL, &buf)
+		require.True(t, emitted, "an expiring SAGEOX_TOKEN at a terminal must warn")
+		assert.Contains(t, buf.String(), "warn=ox_token_expiring")
+		assert.Contains(t, buf.String(), "source=env")
+
+		// Dedupe: the same process must not nag twice for the same credential.
+		var second bytes.Buffer
+		assert.False(t, CheckAndWarnExpiry(context.Background(), srv.URL, &second))
+		assert.Empty(t, second.String())
+	})
+
+	t.Run("auto-refreshing disk login stays silent", func(t *testing.T) {
+		clearEphemeralForTest(t)
+		fakeTTY(t)
+		resetExpiryWarnedKeysForTest()
+		t.Setenv(EnvVarToken, "") // credential comes from auth.json, not the env
+		dir := t.TempDir()
+		t.Setenv("HOME", dir)
+		t.Setenv("XDG_CONFIG_HOME", dir)
+
+		const ep = "https://sageox.ai"
+		require.NoError(t, SaveTokenForEndpoint(ep, &StoredToken{
+			AccessToken:  "jwt.access",
+			RefreshToken: "refresh-present",
+			// The stamp that used to drive the warning: hours out, auto-rotated.
+			ExpiresAt: time.Now().Add(11 * time.Minute),
+			TokenType: "Bearer",
+		}))
+
+		var buf bytes.Buffer
+		emitted := CheckAndWarnExpiry(context.Background(), ep, &buf)
+		assert.False(t, emitted, "a refreshing disk login must never warn")
+		assert.Empty(t, buf.String(), "nothing may reach stderr for a healthy login")
+	})
+}
+
+// TestResolveTokenExpiry_ServerUnreachable — Failure prevented: a metadata
+// endpoint that errors turns a best-effort warning into a hard failure or a
+// bogus expiry. FetchTokenMetaCached soft-fails to nil; we must stay silent.
+func TestResolveTokenExpiry_ServerUnreachable(t *testing.T) {
+	clearEphemeralForTest(t)
+	withTempCacheDir(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv(endpoint.EnvVar, srv.URL)
+	t.Setenv(EnvVarToken, "oxp_test_4bDZfN")
+
+	stored, state := EnvTokenFor(srv.URL)
+	require.Equal(t, EnvTokenValid, state)
+
+	_, _, ok := resolveTokenExpiry(context.Background(), srv.URL, stored)
+	assert.False(t, ok, "an unreadable metadata response must not produce an expiry")
 }
 
 // TestEmitExpiryWarning_Format — Failure prevented: warning format drifts

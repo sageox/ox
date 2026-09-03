@@ -223,7 +223,12 @@ func humanizeDuration(d time.Duration) string {
 // writerIsTTY returns true when w is an *os.File pointing at a TTY. Any
 // other writer (bytes.Buffer in tests, pipes, files) returns false — we
 // never spam non-interactive consumers.
-func writerIsTTY(w io.Writer) bool {
+//
+// A var, not a plain func, so tests can reach the code below the gate. Every
+// caller passes os.Stderr and no test can hand it a real terminal without a
+// pty, so with a fixed gate the entire decision — threshold, dedupe, and the
+// emitted line itself — is unreachable from the test suite.
+var writerIsTTY = func(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	if !ok {
 		return false
