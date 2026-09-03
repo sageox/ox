@@ -366,3 +366,22 @@ func TestWithFileLockTimeout_CrossProcessGenuineTimeout(t *testing.T) {
 	assert.GreaterOrEqual(t, elapsed, 100*time.Millisecond, "must actually wait out the requested timeout, not return early")
 	assert.Less(t, elapsed, 2*time.Second, "must not wait past the requested timeout")
 }
+
+// TestWithFileLockTimeout_OpenFileFails covers the os.OpenFile error path:
+// if the lock directory can't be created or opened, WithFileLockTimeout
+// must return a wrapped error, not panic or silently proceed as if
+// unlocked. Forced by pointing TMPDIR at a regular file instead of a
+// directory — portable and root-safe, unlike chmod-based permission
+// denial, which CI often runs privileged enough to ignore.
+func TestWithFileLockTimeout_OpenFileFails(t *testing.T) {
+	notADir := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(notADir, []byte("x"), 0o644))
+	t.Setenv("TMPDIR", notADir)
+
+	err := WithFileLockTimeout(context.Background(), "/some/target", LockTimeout, func() error {
+		return errors.New("must not run — the lock could not have been acquired")
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "open lock file")
+}
