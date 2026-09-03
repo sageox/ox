@@ -272,3 +272,68 @@ func TestWithFileLockTimeout_ReportsRequestedTimeout(t *testing.T) {
 	assert.Greater(t, timeoutErr.Timeout, 100*time.Millisecond,
 		"the bug this regresses to reports a near-zero duration; anything under 100ms means it's back")
 }
+
+// TestWithFileLockTimeout_AlreadyPastDeadline covers acquireInProcess's
+// negative-duration clamp: a caller whose deadline has already passed by
+// the time it calls in (a slow caller building the deadline earlier, then
+// getting delayed before the actual lock call) must fail fast, not panic
+// or block on a negative-duration timer.
+func TestWithFileLockTimeout_AlreadyPastDeadline(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "past-deadline.dat")
+
+	release := make(chan struct{})
+	held := make(chan struct{})
+	go func() {
+		_ = WithFileLock(context.Background(), target, func() error { close(held); <-release; return nil })
+	}()
+	<-held
+	defer close(release)
+
+	start := time.Now()
+	err := WithFileLockTimeout(context.Background(), target, -1*time.Second, func() error {
+		return errors.New("must not run")
+	})
+	elapsed := time.Since(start)
+
+	var timeoutErr *ErrLockTimeout
+	require.ErrorAs(t, err, &timeoutErr)
+	assert.Equal(t, time.Duration(0), timeoutErr.Timeout, "an already-past deadline clamps to zero, not a negative duration")
+	assert.Less(t, elapsed, time.Second, "must fail immediately, not block on a negative-duration timer")
+}
+
+// TestWithFileLockTimeout_InProcessContextCancel covers acquireInProcess's
+// OWN ctx.Done() branch specifically — contention from another goroutine in
+// the SAME process, not the cross-process flock's separate ctx check
+// (TestWithFileLock_RespectsContext exercises that one, via a child process
+// whose lock never contends the in-process gate at all). This is exactly
+// the path two of ADR-030's four WithRepoLock sites depend on: the daemon's
+// sync scheduler and its GC/wedge probe are goroutines in the same process,
+// not separate ones.
+func TestWithFileLockTimeout_InProcessContextCancel(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "inprocess-cancel.dat")
+
+	release := make(chan struct{})
+	held := make(chan struct{})
+	go func() {
+		_ = WithFileLock(context.Background(), target, func() error { close(held); <-release; return nil })
+	}()
+	<-held
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	doneCh := make(chan error, 1)
+	go func() {
+		doneCh <- WithFileLockTimeout(ctx, target, LockTimeout, func() error { return nil })
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-doneCh:
+		assert.ErrorIs(t, err, context.Canceled, "in-process contention must respect ctx cancellation, not just the timeout")
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not return after context cancel — in-process gate ignored ctx.Done()")
+	}
+}
