@@ -103,15 +103,31 @@ func TestPullManagedRepo_ConcurrentFetchDoesNotCorruptFETCH_HEAD(t *testing.T) {
 	s := newTestScheduler(t.TempDir())
 	const iterations = 15
 	var failures []string
+	lastSkipped := false
 	for i := 0; i < iterations; i++ {
 		advanceRemote(t, writer, i)
-		res := s.pullManagedRepo(ctx, ManagedRepoPullOpts{
+		pullCtx := ctx
+		if i == iterations-1 {
+			// flock grants no fairness guarantee — the peer could in
+			// principle win the whole RepoLockTimeout window on this last
+			// call, which would report Skipped (not a failure) while
+			// leaving local genuinely behind and failing the catch-up
+			// assertions below for a reason this test doesn't intend to
+			// detect. Stop racing before the call the assertions depend on.
+			cancel()
+			<-peerDone
+			pullCtx = context.Background()
+		}
+		res := s.pullManagedRepo(pullCtx, ManagedRepoPullOpts{
 			RepoPath:     local,
 			RepoName:     "ledger",
 			SyncInterval: 0,
 			MinFetchAge:  time.Nanosecond, // the peer keeps FETCH_HEAD fresh; do not let dedup skip the pull
 			Logger:       s.logger,
 		})
+		if i == iterations-1 {
+			lastSkipped = res.Skipped
+		}
 		if res.Err != nil {
 			failures = append(failures, res.Err.Error())
 		}
@@ -119,8 +135,8 @@ func TestPullManagedRepo_ConcurrentFetchDoesNotCorruptFETCH_HEAD(t *testing.T) {
 			failures = append(failures, "issue: "+res.Issue.Summary)
 		}
 	}
-	cancel()
-	<-peerDone
+
+	assert.False(t, lastSkipped, "the final iteration must actually pull (peer is stopped by then), not skip — the catch-up assertions below only mean something if it ran")
 
 	for _, f := range failures {
 		assert.NotContains(t, f, "multiple branches", "FETCH_HEAD race reached git pull")

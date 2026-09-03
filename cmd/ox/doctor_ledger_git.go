@@ -466,6 +466,13 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 	lockCtx, lockCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer lockCancel()
 	lockErr := gitutil.WithRepoLock(lockCtx, ledgerPath, func() error {
+		// ADR-030 D3, applied here too: a rebase that already existed
+		// before this call's own pull is not this call's to resolve or
+		// abort — it belongs to whoever started it (a human running raw
+		// git is the one realistic case once the lock is held). Only a
+		// rebase this specific pull created is safe to touch below.
+		hadRebaseBefore := gitutil.IsRebaseInProgress(ledgerPath)
+
 		// --autostash: uncommitted local changes must not block the pull.
 		// Bounded so a hung network pull can't hold the lock forever.
 		pullCtx, pullCancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -474,6 +481,12 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 		pullCancel()
 		if err != nil {
 			errStr := strings.TrimSpace(string(output))
+			if hadRebaseBefore {
+				result = FailedCheck("Ledger branch status",
+					"pull --rebase failed",
+					fmt.Sprintf("A rebase was already in progress before this pull (not started by ox doctor --fix) — not touching it: %s", errStr))
+				return nil
+			}
 			// Route through automerge, not the bare accept-theirs call. This was the
 			// one reconcile path that skipped the tiered resolver, so it got no union
 			// tier and no LLM tier while every other path (CLI push, daemon pull,

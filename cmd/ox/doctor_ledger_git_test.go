@@ -511,3 +511,40 @@ func TestFixLedgerBranchBehind_LockBusy_FailsFastInsteadOfRacing(t *testing.T) {
 	assert.Less(t, elapsed, 35*time.Second,
 		"must fail within the lock's own acquire budget (30s), not hang past it")
 }
+
+// TestFixLedgerBranchBehind_ForeignRebase_NeverTouched proves the ADR-030 D3
+// guard applies here too, not just in the daemon's pull path: a rebase that
+// already existed before this call's own `git pull --rebase` — a human
+// running raw git, since nothing else can be mid-rebase against this clone
+// once the lock is held — is not this call's to resolve or abort.
+func TestFixLedgerBranchBehind_ForeignRebase_NeverTouched(t *testing.T) {
+	barePath, machineA := createBareAndClone(t)
+	machineB := cloneBare(t, barePath)
+
+	// machineA pushes, AND machineB has an unpushed local commit: a pure
+	// fast-forward (behind but not diverged) never invokes the rebase
+	// machinery at all, so an empty rebase-merge/ would go unnoticed — git
+	// only refuses on it once there's a real rebase to attempt.
+	require.NoError(t, os.WriteFile(filepath.Join(machineA, "notes.txt"), []byte("from A"), 0644))
+	runGit(t, machineA, "add", "notes.txt")
+	runGit(t, machineA, "commit", "--no-verify", "-m", "notes from A")
+	runGit(t, machineA, "push")
+	runGit(t, machineB, "fetch")
+	require.NoError(t, os.WriteFile(filepath.Join(machineB, "local.txt"), []byte("from B"), 0644))
+	runGit(t, machineB, "add", "local.txt")
+	runGit(t, machineB, "commit", "--no-verify", "-m", "local change on B")
+
+	// Fake a foreign rebase-in-progress: enough for gitutil.IsRebaseInProgress
+	// to see it, and for git itself to refuse the pull with its own
+	// "already a rebase-merge directory" error — no real conflict needed.
+	require.NoError(t, os.MkdirAll(filepath.Join(machineB, ".git", "rebase-merge"), 0o755))
+
+	result := fixLedgerBranchBehind(machineB, 1)
+
+	assert.False(t, result.passed, "must not report success while a foreign rebase sits untouched")
+	assert.Contains(t, result.detail, "not touching it",
+		"failure must say the rebase predates this call, not read like a real conflict")
+
+	_, err := os.Stat(filepath.Join(machineB, ".git", "rebase-merge"))
+	assert.NoError(t, err, "the foreign rebase-merge directory must survive untouched — proves neither resolve nor AuditAndAbort ran")
+}
