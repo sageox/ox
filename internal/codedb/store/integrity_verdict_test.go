@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -79,30 +80,109 @@ func TestCheckSQLiteIntegrity_BusyIsNotCorruption(t *testing.T) {
 
 // The counterpart: a check that RAN and found damage must still say so, or the
 // self-heal that rebuilds a genuinely broken index never fires.
+//
+// SQLite reports damage two different ways, and the classifier has a separate
+// branch for each: an unreadable file fails the query outright (SQLITE_NOTADB),
+// while a structurally intact file with a damaged page returns a description of
+// the problem as an ordinary result. Both must reach ErrCorrupt.
 func TestCheckSQLiteIntegrity_DamageIsStillCorruption(t *testing.T) {
+	tests := []struct {
+		name   string
+		damage func(t *testing.T, dbPath string)
+	}{
+		{
+			// Not a database at all: the query itself fails.
+			name: "unreadable file",
+			damage: func(t *testing.T, dbPath string) {
+				garbage := make([]byte, 4096)
+				if _, err := rand.Read(garbage); err != nil {
+					t.Fatalf("rand: %v", err)
+				}
+				if err := os.WriteFile(dbPath, garbage, 0o600); err != nil {
+					t.Fatalf("write garbage: %v", err)
+				}
+			},
+		},
+		{
+			// A live database with a damaged page — what real corruption looks
+			// like. integrity_check completes and reports the fault as a row
+			// ("row N missing from index ..."), never as an error.
+			name: "damaged page",
+			damage: func(t *testing.T, dbPath string) {
+				b, err := os.ReadFile(dbPath)
+				if err != nil {
+					t.Fatalf("read: %v", err)
+				}
+				off := int(float64(len(b)) * 0.9)
+				for i := 0; i < 16 && off+i < len(b); i++ {
+					b[off+i] ^= 0xFF
+				}
+				if err := os.WriteFile(dbPath, b, 0o600); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			s, err := Open(root)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			// Enough rows that a page deep in the file holds real data.
+			for i := range 3000 {
+				if _, err := s.Exec(`INSERT INTO repos (name, path) VALUES (?, ?)`,
+					fmt.Sprint("n", i), fmt.Sprint("/p", i)); err != nil {
+					t.Fatalf("insert: %v", err)
+				}
+			}
+			_ = s.Close()
+
+			dbPath := filepath.Join(root, MetadataDBFile)
+			tt.damage(t, dbPath)
+
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			defer db.Close()
+			err = checkSQLiteIntegrity(db)
+			if !errors.Is(err, ErrCorrupt) {
+				t.Errorf("error = %v, want ErrCorrupt", err)
+			}
+			if errors.Is(err, ErrIntegrityUnknown) {
+				t.Errorf("error = %v, damage must not be reported as unknown", err)
+			}
+		})
+	}
+}
+
+// Not every failure comes from SQLite. A driver-level or pool-level error
+// carries no result code at all, and defaulting those to "corrupt" is what put
+// three destructive paths behind an error nobody classified.
+func TestStoreCheckIntegrity_NonSQLiteFailureIsNotCorruption(t *testing.T) {
 	root := t.TempDir()
 	s, err := Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	_ = s.Close()
-
-	dbPath := filepath.Join(root, MetadataDBFile)
-	garbage := make([]byte, 4096)
-	if _, err := rand.Read(garbage); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
-	if err := os.WriteFile(dbPath, garbage, 0o600); err != nil {
-		t.Fatalf("write garbage: %v", err)
+	// Closing the pool makes the next query fail with database/sql's own error,
+	// which is not a *sqlite.Error and so carries no code to classify.
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open: %v", err)
+	err = s.CheckIntegrity()
+	if err == nil {
+		t.Fatal("expected CheckIntegrity to fail against a closed store")
 	}
-	defer db.Close()
-	if err := checkSQLiteIntegrity(db); !errors.Is(err, ErrCorrupt) {
-		t.Errorf("error = %v, want ErrCorrupt", err)
+	if errors.Is(err, ErrCorrupt) {
+		t.Errorf("error = %v, must not be a corruption verdict", err)
+	}
+	if !errors.Is(err, ErrIntegrityUnknown) {
+		t.Errorf("error = %v, want ErrIntegrityUnknown", err)
 	}
 }
 

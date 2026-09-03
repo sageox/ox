@@ -75,19 +75,20 @@ func checkCodeIndexAtDir(dataDir string, fix bool) checkResult {
 	}
 	defer db.Close()
 
-	if err := db.Store().CheckIntegrity(); err != nil {
-		if errors.Is(err, store.ErrCorrupt) {
-			if fix {
-				db.Close()
-				_ = os.RemoveAll(dataDir)
-				return PassedCheck("Code index", "corrupt index removed, run 'ox code index' to rebuild")
-			}
-			return FailedCheck("Code index", "index corruption detected", "run 'ox doctor' to remove and rebuild")
+	integrityErr := db.Store().CheckIntegrity()
+	if errors.Is(integrityErr, store.ErrCorrupt) {
+		if fix {
+			db.Close()
+			_ = os.RemoveAll(dataDir)
+			return PassedCheck("Code index", "corrupt index removed, run 'ox code index' to rebuild")
 		}
-		// The check could not run — nothing has found fault with the index, so
-		// --fix must not remove it. Report and let the next run decide.
+		return FailedCheck("Code index", "index corruption detected", "run 'ox doctor' to remove and rebuild")
+	}
+	if integrityErr != nil {
+		// The check could not run. Nothing has found fault with the index, so
+		// --fix must not remove it — but saying nothing would report it healthy.
 		return WarningCheck("Code index",
-			fmt.Sprintf("integrity could not be verified: %v", err),
+			fmt.Sprintf("integrity could not be verified: %v", integrityErr),
 			"retry when the index is not being written: 'ox doctor'")
 	}
 
