@@ -467,12 +467,25 @@ func TestRunDoctorChecks_CategoryStructure(t *testing.T) {
 	}
 }
 
+// adapterBlockLines are the lines of the Pi adapter block in
+// adapterBlockFixture: every one of them must be gone after a fix pass, since
+// stripBlock removes the whole span between the markers, not just the markers.
+// Spelled out literally rather than read from adapterBlockMarkers so that
+// dropping an entry from that table cannot quietly turn this into a test of a
+// different block.
+var adapterBlockLines = []string{
+	"<!-- ox:prime:pi:start -->",
+	"## Pi block",
+	"ox agent prime",
+	"<!-- ox:prime:pi:end -->",
+}
+
 // adapterBlockFixture is an AGENTS.md carrying one adapter prime block
 // between the two universal markers: what `--fix` must remove, wrapped in
 // what it must leave alone.
-const adapterBlockFixture = "<!-- ox:prime-check -->\n\n" +
+const adapterBlockFixture = OxPrimeCheckMarker + "\n\n" +
 	"<!-- ox:prime:pi:start -->\n## Pi block\nox agent prime\n<!-- ox:prime:pi:end -->\n" +
-	"<!-- ox:prime --> footer\n"
+	OxPrimeMarker + " footer\n"
 
 // TestRunDoctorChecks_WithFixFlag verifies the fix flag reaches the checks.
 func TestRunDoctorChecks_WithFixFlag(t *testing.T) {
@@ -510,10 +523,14 @@ func TestRunDoctorChecks_WithFixFlag(t *testing.T) {
 	// universal markers around it survive.
 	fixed, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
 	require.NoError(t, err)
-	assert.NotContains(t, string(fixed), "ox:prime:pi:start",
-		"fix=true left the adapter prime block in place")
-	assert.Contains(t, string(fixed), "<!-- ox:prime -->",
-		"fix=true removed a universal marker it must preserve")
+	for _, line := range adapterBlockLines {
+		assert.NotContains(t, string(fixed), line,
+			"fix=true left part of the adapter prime block behind: %q", line)
+	}
+	assert.Contains(t, string(fixed), OxPrimeCheckMarker,
+		"fix=true removed the universal ox:prime-check header it must preserve")
+	assert.Contains(t, string(fixed), OxPrimeMarker,
+		"fix=true removed the universal ox:prime footer it must preserve")
 
 	// The two passes ran in different working directories, so this compares the
 	// shape of the check registry rather than anything about the fix flag: the
