@@ -1,0 +1,126 @@
+package store
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+
+	"github.com/blevesearch/bleve/v2"
+)
+
+// ErrReadOnly reports that the codedb store lives on media this process cannot
+// write. It is deliberately not ErrCorrupt: nothing about the store is damaged,
+// so nothing about it is deleted, rebuilt, or self-healed. A read-only store
+// that opens successfully serves reads and sets Store.ReadOnly; one that cannot
+// be served read-only fails with this error explaining why.
+var ErrReadOnly = errors.New("codedb index is read-only")
+
+// storeIsWritable reports whether this process can create a file inside root.
+//
+// It exists to keep "cannot write" from being diagnosed as "corrupt". On
+// read-only media, PRAGMA integrity_check fails with SQLITE_READONLY_DIRECTORY
+// — WAL mode has to create the `-shm` wal-index before it can read anything —
+// and at that call site the failure is indistinguishable from real corruption,
+// whose remedy is deleting the database. So writability is settled before any
+// corruption verdict is reached.
+//
+// Probing with a real file rather than reading mode bits is what makes the
+// answer true for the cases that actually occur: a read-only bind mount, a
+// container image layer, an ACL, or a chmod. It runs on every open of an
+// existing store; a create-close-unlink is cheap next to the SQLite and bleve
+// opens that follow it in the same call.
+func storeIsWritable(root string) bool {
+	f, err := os.CreateTemp(root, ".ox-write-probe-*")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return true
+}
+
+// openSQLiteReadOnly opens metadata.db for reading on media this process cannot
+// write. The store is in WAL mode, so which of SQLite's two read-only openings
+// applies depends on whether an un-checkpointed WAL is sitting next to it.
+//
+//   - No WAL sidecar (the state a cleanly closed store is left in: SQLite
+//     checkpoints and deletes it when the last connection closes) — the main
+//     file is the whole database, and `immutable=1` reads it without creating
+//     the `-shm` wal-index it would otherwise need. Plain `mode=ro` fails here
+//     with SQLITE_READONLY_DIRECTORY.
+//
+//   - A WAL sidecar with content (a store copied or killed mid-write) — SQLite
+//     reads a WAL database with no write access as long as both `-wal` and
+//     `-shm` are present and readable, so `mode=ro` sees the whole database and
+//     immutable=1 must NOT be used: it ignores the WAL, and the rows parked
+//     there can be anything up to the entire schema. If that open fails,
+//     refuse. A partial database answering queries fluently is the failure this
+//     whole path exists to prevent.
+func openSQLiteReadOnly(dbPath string) (*sql.DB, error) {
+	immutable := true
+	if fi, err := os.Stat(dbPath + "-wal"); err == nil && fi.Size() > 0 {
+		immutable = false
+	}
+
+	db, err := sql.Open("sqlite", readOnlyDSN(dbPath, immutable))
+	if err != nil {
+		return nil, fmt.Errorf("%w: open sqlite: %w", ErrReadOnly, err)
+	}
+
+	// Prove the store answers a query before handing it back, so an unreadable
+	// file, an absent schema, or a WAL whose `-shm` is missing surfaces here
+	// instead of as "no such table" on every later query. PRAGMA
+	// integrity_check is skipped: it costs O(database size) — 0.8s to 18s on
+	// stores we already ship — and its only remedy is the deletion this path
+	// exists to refuse.
+	var name string
+	if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='commits'`).Scan(&name); err != nil {
+		_ = db.Close()
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: %s has no codedb schema and cannot be initialized without write access", ErrReadOnly, dbPath)
+		}
+		if !immutable {
+			return nil, fmt.Errorf("%w: %s holds un-checkpointed writes and its write-ahead log cannot be read here: %w", ErrReadOnly, dbPath, err)
+		}
+		return nil, fmt.Errorf("%w: %w", ErrReadOnly, err)
+	}
+	return db, nil
+}
+
+// readOnlyDSN builds the SQLite URI for a read-only open. The `file:` scheme is
+// what makes SQLite parse `immutable` at all, and the URI form means the path
+// must be escaped — a database under a home directory containing a space would
+// otherwise be truncated at the space. journal_mode, synchronous and
+// foreign_keys are all write-side and are omitted.
+func readOnlyDSN(dbPath string, immutable bool) string {
+	u := url.URL{Scheme: "file", Path: dbPath}
+	dsn := u.String() + "?mode=ro&_pragma=cache_size(-65536)&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)"
+	if immutable {
+		dsn += "&immutable=1"
+	}
+	return dsn
+}
+
+// openBleveReadOnly opens one bleve sub-index with scorch's read_only config,
+// which opens root.bolt O_RDONLY and creates no directory — the two things
+// bleve.Open does that a read-only store cannot afford.
+//
+// Errors are returned as-is. The self-heal and mapping-upgrade paths that handle
+// them on a writable store both nuke and recreate the sub-index directory, which
+// is neither possible nor wanted here.
+func openBleveReadOnly(path, name string) (idx bleve.Index, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			idx = nil
+			err = fmt.Errorf("%w: bleve %s sub-index at %s panicked on open: %v", ErrReadOnly, name, path, r)
+		}
+	}()
+	idx, err = bleve.OpenUsing(path, map[string]interface{}{"read_only": true})
+	if err != nil {
+		return nil, fmt.Errorf("%w: open bleve %s sub-index at %s: %w", ErrReadOnly, name, path, err)
+	}
+	return idx, nil
+}

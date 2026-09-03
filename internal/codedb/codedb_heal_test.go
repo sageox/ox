@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
+	"github.com/sageox/ox/internal/codedb/store"
 )
 
 // The crash-loop this fix targets: an indexing pass fails against a half-written
@@ -174,5 +177,48 @@ func TestBuildCodeDBAtomic_ConcurrentBuildsLeaveValidCache(t *testing.T) {
 	_ = db.Close()
 	if leftovers, _ := filepath.Glob(finalDir + ".*"); len(leftovers) != 0 {
 		t.Fatalf("expected no staging/backup leftovers after concurrent builds, found %v", leftovers)
+	}
+}
+
+// A read-only store has no writable path through OpenIndexWithHeal: indexFn
+// only writes, and both recovery arms (marker escalation, corruption retry)
+// wipe dataDir. Refusing up front keeps a mounted read-only index from being
+// half-processed and, more importantly, from reaching os.RemoveAll.
+func TestOpenIndexWithHeal_RefusesReadOnlyStore(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod does not make a directory unwritable on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod does not deny writes")
+	}
+
+	dataDir := filepath.Join(t.TempDir(), "codedb")
+	seed, err := codedb.Open(dataDir)
+	if err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("seed close: %v", err)
+	}
+	if out, err := exec.Command("chmod", "-R", "a-w", dataDir).CombinedOutput(); err != nil {
+		t.Fatalf("chmod: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("chmod", "-R", "u+w", dataDir).Run() })
+
+	called := false
+	db, err := codedb.OpenIndexWithHeal(context.Background(), dataDir,
+		func(context.Context, *codedb.DB) error { called = true; return nil })
+	if err == nil {
+		_ = db.Close()
+		t.Fatal("OpenIndexWithHeal succeeded on a read-only store; want refusal")
+	}
+	if !errors.Is(err, store.ErrReadOnly) {
+		t.Errorf("error = %v, want store.ErrReadOnly", err)
+	}
+	if called {
+		t.Error("indexFn ran against a read-only store")
+	}
+	if _, statErr := os.Stat(filepath.Join(dataDir, store.MetadataDBFile)); statErr != nil {
+		t.Errorf("metadata.db missing after refusal: %v", statErr)
 	}
 }

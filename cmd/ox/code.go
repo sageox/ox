@@ -314,7 +314,7 @@ const (
 // branch on `status` rather than parsing stderr — this turns a hard error into
 // a recoverable signal that includes the recommended fallback.
 type indexNotReadyResponse struct {
-	Status       string `json:"status"`        // "indexing" | "not_indexed"
+	Status       string `json:"status"` // "indexing" | "not_indexed"
 	Message      string `json:"message"`
 	FallbackHint string `json:"fallback_hint"`
 }
@@ -659,10 +659,21 @@ var codeStatusCmd = &cobra.Command{
 		}
 		var repos []repoRow
 
+		// openErr records why the counts below are missing. Without it the
+		// output of an index that could not be opened is byte-identical to a
+		// warm index holding nothing — zeros under index_exists: true — and a
+		// caller searching that store gets no results and reports none.
+		var openErr string
+		var readOnly bool
+
 		daemonIndexing := codeStats != nil && ((useLedger && codeStats.LedgerIndexingNow) || (!useLedger && codeStats.IndexingNow))
 		if indexExists && !daemonIndexing {
 			db, err := codedb.Open(dataDir)
+			if err != nil {
+				openErr = err.Error()
+			}
 			if err == nil {
+				readOnly = db.ReadOnly()
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM commits").Scan(&totalCommits)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM blobs").Scan(&totalBlobs)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM symbols").Scan(&totalSymbols)
@@ -722,6 +733,12 @@ var codeStatusCmd = &cobra.Command{
 				IndexingNow bool            `json:"indexing_now"`
 				LastIndexed *time.Time      `json:"last_indexed,omitempty"`
 				LastError   string          `json:"last_error,omitempty"`
+				// OpenError is set when the index directory exists but could not
+				// be opened. When present the counts above are unknown, not zero.
+				OpenError string `json:"open_error,omitempty"`
+				// ReadOnly reports an index served from media ox cannot write:
+				// searchable, but never re-indexed or self-healed in place.
+				ReadOnly bool `json:"read_only,omitempty"`
 			}
 			out := jsonStats{
 				Commits:     totalCommits,
@@ -732,6 +749,8 @@ var codeStatusCmd = &cobra.Command{
 				DiskBytes:   dirSize(dataDir),
 				DataDir:     dataDir,
 				IndexExists: indexExists,
+				OpenError:   openErr,
+				ReadOnly:    readOnly,
 			}
 			if codeStats != nil {
 				out.IndexingNow = codeStats.IndexingNow
@@ -803,6 +822,14 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString("\n")
 			fmt.Print(b.String())
 			return nil
+		case openErr != "":
+			// Ranked above every daemon-derived state: the daemon's cached
+			// counts describe an index this machine just failed to open, and
+			// reporting them would hide that failure behind a healthy number.
+			b.WriteString(statusErrorStyle.Render("✗ unreadable"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render(openErr))
 		case codeStats != nil && codeStats.IndexingNow:
 			b.WriteString(statusWarningStyle.Render("◐ indexing…"))
 		case codeStats != nil && codeStats.LastError != "" && totalCommits == 0:
@@ -826,6 +853,17 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString(statusSuccessStyle.Render("✓ indexed"))
 		}
 		b.WriteString("\n")
+
+		if readOnly {
+			b.WriteString(statusLabelStyle.Render("Mode"))
+			b.WriteString(statusWarningStyle.Render("read-only"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("Served from media ox cannot write — searchable, but "))
+			b.WriteString(statusHighlightStyle.Render("ox code index"))
+			b.WriteString(statusMutedStyle.Render(" will refuse"))
+			b.WriteString("\n")
+		}
 
 		// repo identity — show GitHub remote name if detected
 		if ghOwner != "" && ghRepo != "" {
