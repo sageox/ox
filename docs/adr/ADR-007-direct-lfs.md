@@ -125,8 +125,10 @@ and the team context silently stops syncing. `ox doctor` has a repair for this s
 
 - Every git command ox runs — daemon and CLI — passes
   `-c filter.lfs.smudge=cat -c filter.lfs.clean=cat -c filter.lfs.process= -c filter.lfs.required=false`.
-  This is the exact set `restoreRawLFSPointers` already uses; it now applies to
-  `gitutil.NewNetworkCmd` and the CLI git wrappers as a matter of course, not as a repair.
+  `restoreRawLFSPointers` (`cmd/ox/doctor_team.go`) already overrides three of these
+  (`smudge`, `process`, `required`) for its read-only `checkout` repair; the fourth,
+  `clean=cat`, is added for completeness — `git pull --autostash` can invoke the clean
+  filter when it stashes dirty LFS-filtered content, which a plain checkout never does.
 - The consequence "hydration goes through ox's own download path, never through smudge" is
   thereby made true regardless of the user's global git config, which ox does not control.
 - `StripLFSConfig` remains as the push-side half.

@@ -147,15 +147,15 @@ to the ledger): a `--quiet` git pipeline whose error path assumes it is the only
 
 ## Actions
 
-| Action | Issue | Owner | Priority |
-|---|---|---|---|
-| Per-clone `flock` around fetch / pull / rebase at all four sites; re-fetch-and-retry once on the exact `multiple branches` error | `ox-baz5.1` | Ryan | P1 |
-| Recovery ladder acts only on a rebase this pull started | `ox-baz5.2` | Ryan | P2 |
-| Clear `IssueTypeRebaseStuck` and the sync-suspended warning on the next successful pull | `ox-baz5.3` | Ryan | P2 |
-| Every ox git invocation passes `-c filter.lfs.smudge=cat -c filter.lfs.clean=cat -c filter.lfs.process= -c filter.lfs.required=false` | `ox-baz5.4` | Ryan | P1 |
-| `ox doctor` walks every team-context clone the daemon syncs; nested-pointer fixture | `ox-baz5.5` | Ryan | P2 |
-| Atomic ledger clone; doctor repairs `HEAD → .invalid` without discarding staged content | `ox-baz5.6` | — | P1 |
-| ADR-007 addendum (checkout-side insulation) and ADR-030 (per-clone serialization) | this PR | — | — |
+| Action | Issue | Owner | Priority | Status |
+|---|---|---|---|---|
+| Per-clone `flock` around fetch / pull / rebase at all four sites; re-fetch-and-retry once on the exact `multiple branches` error | `ox-baz5.1` | Ryan | P1 | [PR #868](https://github.com/sageox/ox/pull/868) — open |
+| Recovery ladder acts only on a rebase this pull started | `ox-baz5.2` | Ryan | P2 | [PR #868](https://github.com/sageox/ox/pull/868) — open |
+| Clear `IssueTypeRebaseStuck` and the sync-suspended warning on the next successful pull | `ox-baz5.3` | Ryan | P2 | [PR #868](https://github.com/sageox/ox/pull/868) — open |
+| Every ox git invocation passes `-c filter.lfs.smudge=cat -c filter.lfs.clean=cat -c filter.lfs.process= -c filter.lfs.required=false` | `ox-baz5.4` | Ryan | P1 | not started |
+| `ox doctor` walks every team-context clone the daemon syncs; nested-pointer fixture | `ox-baz5.5` | Ryan | P2 | not started |
+| Atomic ledger clone; doctor repairs `HEAD → .invalid` without discarding staged content | `ox-baz5.6` | — | P1 | not started |
+| ADR-007 addendum (checkout-side insulation) and ADR-030 (per-clone serialization) | this PR | — | — | this docs PR |
 
 ## Manual recovery (what was done on the affected machine)
 
