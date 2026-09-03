@@ -1,6 +1,6 @@
 # ADR-030: Per-clone serialization of git operations
 
-**Status:** Proposed
+**Status:** Accepted — implemented in [PR #868](https://github.com/sageox/ox/pull/868), merged 2026-09-03
 **Date:** 2026-09-02
 **Supersedes:** nothing
 **Related:** ADR-007 (direct LFS, amended alongside this), `adr-ledger-architecture.md`
@@ -122,9 +122,11 @@ pull, matching `IssueTypeDirtyWorkspace` / `IssueTypeGCFailed`.
 
 - COE: `docs/coes/2026-09-02-daemon-git-sync-race-and-lfs-divergence.md`
 - Issues: bd `ox-baz5.1` (D1, D2), `ox-baz5.2` (D3), `ox-baz5.3` (D4)
-- Implementation: [PR #868](https://github.com/sageox/ox/pull/868) — `internal/gitutil/repolock.go`
-  (`WithRepoLock`), `internal/fileutil/flock_inprocess.go` (made context/deadline-aware to
-  support D1: two of the four lock sites are goroutines in the same daemon process, not
-  separate processes, so the in-process gate needed the same ctx/timeout the cross-process
-  flock already honored)
+- Implementation: [PR #868](https://github.com/sageox/ox/pull/868) — merged (`a7466f08`) —
+  `internal/gitutil/repolock.go` (`WithRepoLock`), `internal/fileutil/flock_inprocess.go`
+  (made context/deadline-aware to support D1: two of the four lock sites are goroutines in
+  the same daemon process, not separate processes, so the in-process gate needed the same
+  ctx/timeout the cross-process flock already honored). D3 was also applied to
+  `cmd/ox/doctor_ledger_git.go`'s `fixLedgerBranchBehind` — found missing there in review,
+  see the COE's "Post-merge" section.
 - Precedent for flocked read-modify-write in this codebase: `internal/daemon/terminal_handler.go`

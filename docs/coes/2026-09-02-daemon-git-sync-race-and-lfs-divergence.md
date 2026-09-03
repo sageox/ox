@@ -149,13 +149,39 @@ to the ledger): a `--quiet` git pipeline whose error path assumes it is the only
 
 | Action | Issue | Owner | Priority | Status |
 |---|---|---|---|---|
-| Per-clone `flock` around fetch / pull / rebase at all four sites; re-fetch-and-retry once on the exact `multiple branches` error | `ox-baz5.1` | Ryan | P1 | [PR #868](https://github.com/sageox/ox/pull/868) — open |
-| Recovery ladder acts only on a rebase this pull started | `ox-baz5.2` | Ryan | P2 | [PR #868](https://github.com/sageox/ox/pull/868) — open |
-| Clear `IssueTypeRebaseStuck` and the sync-suspended warning on the next successful pull | `ox-baz5.3` | Ryan | P2 | [PR #868](https://github.com/sageox/ox/pull/868) — open |
+| Per-clone `flock` around fetch / pull / rebase at all four sites; re-fetch-and-retry once on the exact `multiple branches` error | `ox-baz5.1` | Ryan | P1 | [PR #868](https://github.com/sageox/ox/pull/868) — merged (`a7466f08`) |
+| Recovery ladder acts only on a rebase this pull started | `ox-baz5.2` | Ryan | P2 | [PR #868](https://github.com/sageox/ox/pull/868) — merged (`a7466f08`) |
+| Clear `IssueTypeRebaseStuck` and the sync-suspended warning on the next successful pull | `ox-baz5.3` | Ryan | P2 | [PR #868](https://github.com/sageox/ox/pull/868) — merged (`a7466f08`) |
 | Every ox git invocation passes `-c filter.lfs.smudge=cat -c filter.lfs.clean=cat -c filter.lfs.process= -c filter.lfs.required=false` | `ox-baz5.4` | Ryan | P1 | not started |
 | `ox doctor` walks every team-context clone the daemon syncs; nested-pointer fixture | `ox-baz5.5` | Ryan | P2 | not started |
 | Atomic ledger clone; doctor repairs `HEAD → .invalid` without discarding staged content | `ox-baz5.6` | — | P1 | not started |
 | ADR-007 addendum (checkout-side insulation) and ADR-030 (per-clone serialization) | this PR | — | — | this docs PR |
+
+## Post-merge: what review caught in the fix itself
+
+Two rounds of CodeRabbit review on PR #868 found the *same bug class this COE describes*,
+twice more, inside the fix's own first draft:
+
+- **`fixLedgerBranchBehind`** (`cmd/ox/doctor_ledger_git.go`, part of `ox doctor --fix`) ran
+  `pull --rebase --autostash` plus the LLM-conflict-resolve/`AuditAndAbort` ladder completely
+  outside `WithRepoLock` — the exact unlocked-pull shape cascade 1 describes, just in a
+  fourth call site nobody had traced through yet. It also lacked the D3 own-rebase guard.
+  Both fixed in the round-2 commit.
+- **`sync_team.go`** cleared `IssueTypeRebaseStuck` on the wrong key (`ws.ID` instead of the
+  `repoName` `pullManagedRepo` actually raised it with) — a latent no-op that would have
+  reproduced the "error outlives the problem" symptom for team contexts specifically. Caught
+  before merge, not after.
+
+Consistent with "why it survived" above: this failure mode is easy to reintroduce by hand,
+one call site at a time, because each site *looks* like ordinary error handling until you
+know to ask "does this touch a rebase it might not own, under a lock it might not hold."
+Adversarial review closed the gap the first pass missed — not tooling, not a lint rule.
+
+Closing the diff-coverage floor on the merged PR needed two time-boxed exceptions
+(`.config/coverage-ratchets.json`, expire 2026-10-17, tracked as `ox-baz5.7`) for
+pre-existing LLM-resolver/`AuditAndAbort` code that entered the diff only by being
+re-indented, plus 10 new tests for everything genuinely new — real lock contention from a
+goroutine, not mocks, `-race` clean.
 
 ## Manual recovery (what was done on the affected machine)
 
