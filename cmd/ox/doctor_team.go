@@ -41,12 +41,7 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 		}
 		// even with nothing configured locally, the daemon may still be
 		// syncing an "other" team context (ox-baz5.5) — scan it too.
-		for _, tc := range daemonSyncedTeamContexts(nil) {
-			pointerCheck := checkDoubleEncodedLFSPointers(tc, opts)
-			if pointerCheck.warning || !pointerCheck.passed {
-				checks = append(checks, pointerCheck)
-			}
-		}
+		checks = append(checks, scanExtraTeamContexts(daemonSyncedTeamContexts(nil), opts)...)
 		return checks
 	}
 
@@ -76,12 +71,7 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 	// "Team Context" section completed in ~23ms even while a real diverged
 	// clone sat unscanned. Enumerate what the daemon actually syncs and scan
 	// whatever wasn't already covered.
-	for _, tc := range daemonSyncedTeamContexts(localCfg.TeamContexts) {
-		pointerCheck := checkDoubleEncodedLFSPointers(tc, opts)
-		if pointerCheck.warning || !pointerCheck.passed {
-			checks = append(checks, pointerCheck)
-		}
-	}
+	checks = append(checks, scanExtraTeamContexts(daemonSyncedTeamContexts(localCfg.TeamContexts), opts)...)
 
 	// check for legacy team contexts that should be migrated
 	legacyCheck := checkLegacyTeamContexts(gitRoot)
@@ -104,6 +94,23 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 	return checks
 }
 
+// scanExtraTeamContexts runs the nested-LFS-pointer check against each
+// daemon-synced-but-unconfigured team context (ox-baz5.5) and returns any
+// resulting checkResults. Split out from checkTeamContextHealth's two
+// near-identical loops so the actual scan-and-report behavior is testable
+// with a synthetic extra list, independent of the daemon plumbing that
+// produces it.
+func scanExtraTeamContexts(extra []config.TeamContext, opts doctorOptions) []checkResult {
+	var checks []checkResult
+	for _, tc := range extra {
+		pointerCheck := checkDoubleEncodedLFSPointers(tc, opts)
+		if pointerCheck.warning || !pointerCheck.passed {
+			checks = append(checks, pointerCheck)
+		}
+	}
+	return checks
+}
+
 // daemonSyncedTeamContexts asks the daemon (via IPC — checkTeamContextHealth
 // runs in the CLI process and has no direct access to the daemon's in-memory
 // WorkspaceRegistry) which team-context clones it is actually syncing, and
@@ -115,6 +122,16 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 // best-effort supplement to the configured scan, never a replacement for it.
 func daemonSyncedTeamContexts(configured []config.TeamContext) []config.TeamContext {
 	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
+	return daemonSyncedTeamContextsVia(client, configured)
+}
+
+// daemonSyncedTeamContextsVia takes the IPC client as a parameter so tests
+// can point it at a socket that is guaranteed not to exist, rather than
+// relying on no daemon happening to be registered for the test process's
+// resolved workspace — daemon.CurrentWorkspaceID() memoizes via sync.Once
+// per process, so a test-local os.Chdir cannot reliably re-scope it once
+// another test in the same binary has already resolved it.
+func daemonSyncedTeamContextsVia(client *daemon.Client, configured []config.TeamContext) []config.TeamContext {
 	if client == nil || client.Ping() != nil {
 		return nil
 	}

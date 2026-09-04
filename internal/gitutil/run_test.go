@@ -127,6 +127,15 @@ func TestRunGit(t *testing.T) {
 				"\tclean = cat\n"+
 				"\trequired = true\n"), 0o644))
 		t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+		// GIT_CONFIG_GLOBAL redirects only the GLOBAL file — the RAW
+		// checkout below (the fixture-sanity step, run without RunGit's
+		// insulation) still reads whatever SYSTEM config the host actually
+		// has. filter.<driver>.process (a long-running filter protocol)
+		// takes precedence over smudge/clean when set, so a host with a
+		// real system-level git-lfs config could silently override this
+		// fixture's smudge and break the sanity check. GIT_CONFIG_NOSYSTEM
+		// makes the raw checkout hermetic regardless of host state.
+		t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 
 		repo := t.TempDir()
 		run := func(args ...string) {
