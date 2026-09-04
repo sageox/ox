@@ -187,10 +187,11 @@ type SyncScheduler struct {
 	configSyncSkipped sync.Map
 
 	// test hooks (nil in production)
-	onBeforeCloneSem        func()        // called just before acquiring cloneSem; tests use this to observe blocking
-	cloneSemTimeoutOverride time.Duration // override cloneSemTimeout for tests (0 = use default)
-	gcAsyncTestHook         func()        // called at the start of TriggerGCAsync's goroutine, before runTriggerGC; tests use this to hold the goroutine open deterministically
-	gcSwapWindowTestHook    func()        // called right after runBlueGreenGCOpts writes .gc-swap-lock, before the rename; tests use this to observe the lock file mid-swap
+	onBeforeCloneSem         func()        // called just before acquiring cloneSem; tests use this to observe blocking
+	cloneSemTimeoutOverride  time.Duration // override cloneSemTimeout for tests (0 = use default)
+	preCloneLockWaitOverride time.Duration // override the pre-clone lock's wait budget for tests (0 = use gitutil.PreCloneLockTimeout+10s)
+	gcAsyncTestHook          func()        // called at the start of TriggerGCAsync's goroutine, before runTriggerGC; tests use this to hold the goroutine open deterministically
+	gcSwapWindowTestHook     func()        // called right after runBlueGreenGCOpts writes .gc-swap-lock, before the rename; tests use this to observe the lock file mid-swap
 
 	// callbacks
 	onActivity   func()                                                           // called on any sync activity
@@ -2268,9 +2269,6 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		return nil, fmt.Errorf("invalid clone URL: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
 	// ox-baz5.6: everything from here through a completed clone runs under a
 	// lock keyed on payload.RepoPath. Two Checkout() calls racing for the
 	// same target (a background clone retry, GC self-heal, and a codedb
@@ -2282,7 +2280,11 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	// which doesn't exist until a clone has already created a .git
 	// directory. See gitutil.WithPreCloneLock's doc comment for the full
 	// reproduction.
-	lockCtx, lockCancel := context.WithTimeout(context.Background(), gitutil.PreCloneLockTimeout+10*time.Second)
+	lockWait := s.preCloneLockWaitOverride
+	if lockWait == 0 {
+		lockWait = gitutil.PreCloneLockTimeout + 10*time.Second
+	}
+	lockCtx, lockCancel := context.WithTimeout(context.Background(), lockWait)
 	defer lockCancel()
 	err := gitutil.WithPreCloneLock(lockCtx, payload.RepoPath, func() error {
 		// Re-verify directory state now that we hold the lock — a peer that
@@ -2305,6 +2307,18 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 				}
 			}
 		}
+
+		// The clone's own network deadline starts HERE, only once we actually
+		// hold the lock — not before waiting for it. Starting it earlier (the
+		// original bug, flagged on review) let a long lock wait consume the
+		// budget: a waiter that acquired the lock after, say, 55s of a 60s
+		// deadline would have its `git clone` killed almost immediately by
+		// "context deadline exceeded", which IsPreCloneLockBusy then
+		// misclassifies as benign lock contention (matches
+		// context.DeadlineExceeded) — masking a real clone failure as a
+		// harmless retry-next-cycle.
+		cloneCtx, cloneCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cloneCancel()
 
 		// send progress: connecting
 		if progress != nil {
@@ -2347,7 +2361,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			if progress != nil {
 				_ = progress.WriteStage("cloning", "Fetching repository structure...")
 			}
-			mCfg, err := s.twoPhaseClone(ctx, cloneURL, payload.RepoPath, progress)
+			mCfg, err := s.twoPhaseClone(cloneCtx, cloneURL, payload.RepoPath, progress)
 			if err != nil {
 				s.logger.Error("checkout: two-phase clone failed", "error", err)
 				s.recordError(fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
@@ -2407,7 +2421,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		// NewNetworkCmd sets GIT_TERMINAL_PROMPT=0 so a credential gap fails
 		// fast instead of EOFing on a username prompt in the daemon's TTY-less
 		// environment.
-		cloneCmd := gitutil.NewNetworkCmd(ctx, cloneArgs...)
+		cloneCmd := gitutil.NewNetworkCmd(cloneCtx, cloneArgs...)
 		// set cmd.Dir so git doesn't fail when daemon CWD has been deleted
 		if parentDir := filepath.Dir(payload.RepoPath); parentDir != "" {
 			_ = os.MkdirAll(parentDir, 0755)
@@ -2430,7 +2444,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		if _, err := os.Stat(filepath.Join(tempPath, ".git")); err != nil {
 			return fmt.Errorf("clone verification failed: temp clone has no .git directory: %w", err)
 		}
-		if err := exec.CommandContext(ctx, "git", "-C", tempPath, "rev-parse", "--verify", "-q", "HEAD").Run(); err != nil {
+		if err := exec.CommandContext(cloneCtx, "git", "-C", tempPath, "rev-parse", "--verify", "-q", "HEAD").Run(); err != nil {
 			return fmt.Errorf("clone verification failed: temp clone's HEAD does not resolve: %w", err)
 		}
 
@@ -2443,7 +2457,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		agentsOpts := &gitserver.AgentsMDOptions{
 			RepoType: payload.RepoType,
 		}
-		if err := gitserver.CreateAgentsMD(ctx, tempPath, agentsOpts); err != nil {
+		if err := gitserver.CreateAgentsMD(cloneCtx, tempPath, agentsOpts); err != nil {
 			s.logger.Warn("checkout: failed to create AGENTS.MD", "error", err)
 		}
 
@@ -2481,7 +2495,11 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	}
 
 	// configure pull strategy to use rebase (avoids merge commits, cleaner history)
-	configCmd := exec.CommandContext(ctx, "git", "-C", payload.RepoPath, "config", "pull.rebase", "true")
+	// own short-lived context: this is local config, not network I/O, and must
+	// not inherit whatever budget the clone above happened to have left.
+	configCtx, configCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer configCancel()
+	configCmd := exec.CommandContext(configCtx, "git", "-C", payload.RepoPath, "config", "pull.rebase", "true")
 	if output, err := configCmd.CombinedOutput(); err != nil {
 		s.logger.Warn("checkout: failed to set pull.rebase config", "error", err, "output", string(output))
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 )
 
 // CheckSlugLedgerInvalidHead detects a ledger whose .git/HEAD points at a
@@ -33,6 +35,11 @@ const CheckSlugLedgerInvalidHead = "ledger-invalid-head"
 // invalidHeadCheckTimeout bounds the local git plumbing this check runs
 // (rev-parse, check-ref-format, status) — all local, no network.
 const invalidHeadCheckTimeout = 30 * time.Second
+
+// invalidHeadRepairTimeout bounds the --fix path, which re-clones the whole
+// ledger from origin — real ledgers observed in the field run to hundreds of
+// MB, so this needs far more headroom than the read-only detection above.
+const invalidHeadRepairTimeout = 10 * time.Minute
 
 func init() {
 	RegisterDoctorCheck(&DoctorCheck{
@@ -130,15 +137,46 @@ func invalidHeadCheck(ledgerPath string, fix bool) checkResult {
 		return r
 	}
 
-	return fixLedgerInvalidHead(ctx, ledgerPath, invalidRef)
+	// The repair re-clones the whole ledger from origin — needs far more
+	// headroom than the read-only detection above, which is why this gets
+	// its own context rather than reusing the 30s one this function started
+	// with.
+	repairCtx, repairCancel := context.WithTimeout(context.Background(), invalidHeadRepairTimeout)
+	defer repairCancel()
+	return fixLedgerInvalidHead(repairCtx, ledgerPath, invalidRef)
 }
 
-// fixLedgerInvalidHead repairs an unresolvable HEAD: move the corrupted
-// clone aside (never delete it), clone fresh from origin, restore any
-// uncommitted sessions/ and data/ content from the backup, and commit it.
-// The backup is left on disk — not cleaned up — so a failure at any step
-// leaves the original recoverable exactly where it was.
+// fixLedgerInvalidHead repairs an unresolvable HEAD. The whole operation
+// runs under gitutil.WithPreCloneLock — the same lock Checkout() takes
+// before cloning into this same path — because an unlocked rename +
+// reclone here would reopen the exact concurrent-clone race ox-baz5.6
+// exists to close: the daemon could be mid-clone (or mid-recovery of its
+// own) on this exact path at the same moment this runs.
 func fixLedgerInvalidHead(ctx context.Context, ledgerPath, invalidRef string) checkResult {
+	const name = "Ledger HEAD integrity"
+
+	var result checkResult
+	if lockErr := gitutil.WithPreCloneLock(ctx, ledgerPath, func() error {
+		result = repairInvalidHead(ctx, ledgerPath, invalidRef)
+		return nil
+	}); lockErr != nil {
+		return FailedCheck(name, "could not acquire the ledger clone lock to repair HEAD",
+			fmt.Sprintf("%v — another ox process may be cloning or repairing this same path; try again shortly", lockErr))
+	}
+	return result
+}
+
+// repairInvalidHead does the actual repair: move the corrupted clone aside,
+// clone fresh from origin, restore any uncommitted sessions/ and data/
+// content from the backup, and commit it. Always called with
+// gitutil.WithPreCloneLock held (see fixLedgerInvalidHead).
+//
+// On ANY failure below the rename, this rolls back to the EXACT original
+// corrupted state at ledgerPath — never a partially-repaired clone. A
+// partial repair left in place would make checkLedgerGitHealth's later
+// checks (branch-status, clean-workdir, ...) run against incomplete
+// recovered data and report it as if it were fine.
+func repairInvalidHead(ctx context.Context, ledgerPath, invalidRef string) checkResult {
 	const name = "Ledger HEAD integrity"
 
 	remoteURLOut, err := exec.CommandContext(ctx, "git", "-C", ledgerPath, "remote", "get-url", "origin").Output()
@@ -156,14 +194,20 @@ func fixLedgerInvalidHead(ctx context.Context, ledgerPath, invalidRef string) ch
 		return FailedCheck(name, "could not move the corrupted clone aside", err.Error())
 	}
 
-	if err := gitserver.CloneFromURLWithEndpoint(ctx, remoteURL, ledgerPath, projectEndpoint, nil); err != nil {
-		// non-destructive on failure: put the original back exactly where it was.
+	// rollback restores ledgerPath to its EXACT original state and removes
+	// backupPath in the process (it's been moved back) — "nothing was lost,
+	// but nothing was published either." Used on every failure path below.
+	rollback := func(reason string) checkResult {
 		_ = os.RemoveAll(ledgerPath)
 		if restoreErr := os.Rename(backupPath, ledgerPath); restoreErr != nil {
-			return FailedCheck(name, "reclone failed AND could not restore the original — nothing was lost, but manual recovery is needed",
-				fmt.Sprintf("reclone error: %v; restore error: %v; the corrupted clone is intact at %s", err, restoreErr, backupPath))
+			return FailedCheck(name, reason+" — AND could not restore the original; manual recovery needed",
+				fmt.Sprintf("restore error: %v; the corrupted original is intact at %s", restoreErr, backupPath))
 		}
-		return FailedCheck(name, "reclone failed; original left untouched", err.Error())
+		return FailedCheck(name, reason, "The original is left exactly as it was; nothing was published, nothing was lost.")
+	}
+
+	if err := gitserver.CloneFromURLWithEndpoint(ctx, remoteURL, ledgerPath, projectEndpoint, nil); err != nil {
+		return rollback(fmt.Sprintf("reclone failed: %v", err))
 	}
 
 	restoredDirs := 0
@@ -174,10 +218,26 @@ func fixLedgerInvalidHead(ctx context.Context, ledgerPath, invalidRef string) ch
 			continue
 		}
 		dst := filepath.Join(ledgerPath, dir)
-		if err := copyLedgerDir(src, dst); err != nil {
-			return FailedCheck(name,
-				fmt.Sprintf("re-cloned, but failed to restore %s/ from the backup", dir),
-				fmt.Sprintf("%v — the original content is untouched at %s", err, backupPath))
+		conflicts, err := restoreLedgerDir(src, dst)
+		if err != nil {
+			return rollback(fmt.Sprintf("re-clone succeeded, but restoring %s/ failed: %v", dir, err))
+		}
+		if len(conflicts) > 0 {
+			// ox-baz5.6's corruption is a never-completed FIRST clone, which
+			// has no prior synced state to be stale relative to — but this
+			// check's detection (an unresolvable HEAD) isn't scoped only to
+			// that shape. A backup that IS behind origin must never silently
+			// overwrite what origin already has, so any same-path/
+			// different-content collision refuses the whole repair rather
+			// than guessing which side is newer. The original is fully
+			// intact after rollback; a human can reconcile the two by hand.
+			sample := conflicts[0]
+			if len(conflicts) > 1 {
+				sample = fmt.Sprintf("%s (+%d more)", sample, len(conflicts)-1)
+			}
+			return rollback(fmt.Sprintf(
+				"%d file(s) under %s/ differ between the backup and the fresh clone from origin (e.g. %s) — refusing to guess which is newer",
+				len(conflicts), dir, sample))
 		}
 		restoredDirs++
 	}
@@ -198,8 +258,9 @@ func fixLedgerInvalidHead(ctx context.Context, ledgerPath, invalidRef string) ch
 	result := fixLedgerDirtyWorkdir(ledgerPath, fileCount)
 	result.name = name
 	if !result.passed {
-		// surface the exact commit failure; the reclone itself already
-		// succeeded and the backup is still there.
+		// surface the exact commit failure; the reclone + restore already
+		// succeeded (no conflicts) and the backup is still there — this is a
+		// normal "dirty workdir, didn't commit yet" state, not corruption.
 		result.detail = fmt.Sprintf("%s (backup at %s)", result.detail, backupPath)
 		return result
 	}
@@ -210,25 +271,57 @@ func fixLedgerInvalidHead(ctx context.Context, ledgerPath, invalidRef string) ch
 			"nothing else needs recovering.", invalidRef, backupPath))
 }
 
-// copyLedgerDir recursively copies a directory tree from src to dst,
-// preserving file modes. Used only by fixLedgerInvalidHead to restore
-// sessions/ and data/ from a backed-up corrupted clone.
-func copyLedgerDir(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+// restoreLedgerDir copies files from src into dst, refusing to silently
+// overwrite a destination file that already exists with DIFFERENT content.
+// Returns the relative paths of any such conflicts; callers must treat any
+// non-empty result as "do not commit" — dst is otherwise left with whatever
+// non-conflicting files were already copied before the conflict was hit.
+func restoreLedgerDir(src, dst string) (conflicts []string, err error) {
+	walkErr := filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		relPath, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
+		relPath, relErr := filepath.Rel(src, path)
+		if relErr != nil {
+			return relErr
 		}
 		dstPath := filepath.Join(dst, relPath)
 		if d.IsDir() {
 			return os.MkdirAll(dstPath, 0o755)
 		}
+
+		if existing, statErr := os.Stat(dstPath); statErr == nil && !existing.IsDir() {
+			same, cmpErr := filesIdentical(path, dstPath)
+			if cmpErr != nil {
+				return cmpErr
+			}
+			if same {
+				return nil // already present with identical content — nothing to do
+			}
+			conflicts = append(conflicts, relPath)
+			return nil // do not overwrite; recorded above for the caller to act on
+		}
+
 		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 			return err
 		}
 		return copyFile(path, dstPath)
 	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return conflicts, nil
+}
+
+// filesIdentical reports whether a and b have byte-identical content.
+func filesIdentical(a, b string) (bool, error) {
+	aBytes, err := os.ReadFile(a)
+	if err != nil {
+		return false, err
+	}
+	bBytes, err := os.ReadFile(b)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(aBytes, bBytes), nil
 }

@@ -265,3 +265,85 @@ func TestWithPreCloneLock_SerializesConcurrentCallers(t *testing.T) {
 
 	assert.Equal(t, 1, maxActive, "at most one caller should be inside the locked section at a time")
 }
+
+// TestCloneInBackground_PreCloneLockBusyDoesNotEscalateBackoff covers the
+// caller-side half of ox-baz5.6's pre-clone lock: when Checkout() reports
+// the lock is busy (another actor is already cloning this exact path),
+// cloneInBackground must treat it the same way it already treats a busy
+// clone semaphore — retry next cycle without escalating backoff — not as a
+// real clone failure worth penalizing.
+func TestCloneInBackground_PreCloneLockBusyDoesNotEscalateBackoff(t *testing.T) {
+	s := checkoutTestScheduler(t)
+	// short wait budget so the test doesn't sit for the production 5m10s
+	// default while a peer holds the lock.
+	s.preCloneLockWaitOverride = 200 * time.Millisecond
+
+	repoPath := filepath.Join(t.TempDir(), "ledger")
+	workspaceID := "ws-lock-busy-test"
+
+	holding := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_ = gitutil.WithPreCloneLock(context.Background(), repoPath, func() error {
+			close(holding)
+			<-release
+			return nil
+		})
+	}()
+	<-holding
+	defer close(release)
+
+	s.cloneWg.Add(1)
+	// a URL that passes isValidCloneURL (localhost is always allowed) but is
+	// never actually dialed — the lock must block entry before any network
+	// attempt happens.
+	s.cloneInBackground("http://127.0.0.1:1/repo.git", repoPath, "ledger", workspaceID)
+
+	attempts, _ := s.workspaceRegistry.GetCloneRetryInfo(workspaceID)
+	assert.Zero(t, attempts, "a busy pre-clone lock must not increment the retry/backoff counter")
+
+	_, statErr := os.Stat(repoPath)
+	assert.True(t, os.IsNotExist(statErr), "nothing should have been cloned while the lock was held by a peer")
+}
+
+// TestSyncScheduler_Checkout_EmptyRemoteFailsVerification covers the second
+// half of the atomic clone's own verification (the first half — clone exit
+// code — is covered by FailedLedgerCloneLeavesNoHalfClone above): `git
+// clone` can exit 0 against a genuinely empty bare remote (zero commits)
+// and still produce a temp clone whose HEAD does not resolve to anything.
+// The atomic-clone verification must catch this before ever renaming the
+// temp clone into place, the same way it catches an early-EOF exit failure.
+func TestSyncScheduler_Checkout_EmptyRemoteFailsVerification(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// a bare remote with ZERO commits — `git clone` against it succeeds
+	// (exit 0) but leaves an unborn HEAD in the resulting clone.
+	root := t.TempDir()
+	bare := filepath.Join(root, "empty.git")
+	cmd := exec.Command("git", "init", "--bare", "--initial-branch=main", bare)
+	require.NoError(t, cmd.Run())
+	require.NoError(t, exec.Command("git", "-C", bare, "update-server-info").Run())
+	srv := httptest.NewServer(http.FileServer(http.Dir(bare)))
+	t.Cleanup(srv.Close)
+
+	s := checkoutTestScheduler(t)
+	repoPath := filepath.Join(t.TempDir(), "ledger")
+	result, err := s.Checkout(CheckoutPayload{
+		CloneURL: srv.URL,
+		RepoPath: repoPath,
+		RepoType: "ledger",
+	}, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HEAD does not resolve")
+	assert.Nil(t, result)
+
+	_, statErr := os.Stat(repoPath)
+	assert.True(t, os.IsNotExist(statErr), "a clone whose HEAD doesn't resolve must not be published to the final path")
+	assert.Empty(t, tmpCloneSiblings(t, repoPath), "no temp staging directory should survive a failed verification")
+}
