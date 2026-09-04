@@ -187,10 +187,11 @@ type SyncScheduler struct {
 	configSyncSkipped sync.Map
 
 	// test hooks (nil in production)
-	onBeforeCloneSem        func()        // called just before acquiring cloneSem; tests use this to observe blocking
-	cloneSemTimeoutOverride time.Duration // override cloneSemTimeout for tests (0 = use default)
-	gcAsyncTestHook         func()        // called at the start of TriggerGCAsync's goroutine, before runTriggerGC; tests use this to hold the goroutine open deterministically
-	gcSwapWindowTestHook    func()        // called right after runBlueGreenGCOpts writes .gc-swap-lock, before the rename; tests use this to observe the lock file mid-swap
+	onBeforeCloneSem         func()        // called just before acquiring cloneSem; tests use this to observe blocking
+	cloneSemTimeoutOverride  time.Duration // override cloneSemTimeout for tests (0 = use default)
+	preCloneLockWaitOverride time.Duration // override the pre-clone lock's wait budget for tests (0 = use gitutil.PreCloneLockTimeout+10s)
+	gcAsyncTestHook          func()        // called at the start of TriggerGCAsync's goroutine, before runTriggerGC; tests use this to hold the goroutine open deterministically
+	gcSwapWindowTestHook     func()        // called right after runBlueGreenGCOpts writes .gc-swap-lock, before the rename; tests use this to observe the lock file mid-swap
 
 	// callbacks
 	onActivity   func()                                                           // called on any sync activity
@@ -2268,69 +2269,132 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		return nil, fmt.Errorf("invalid clone URL: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	// send progress: connecting
-	if progress != nil {
-		_ = progress.WriteStage("connecting", "Connecting to remote...")
+	// ox-baz5.6: everything from here through a completed clone runs under a
+	// lock keyed on payload.RepoPath. Two Checkout() calls racing for the
+	// same target (a background clone retry, GC self-heal, and a codedb
+	// indexing kickoff have all been observed firing within ~1-2s of each
+	// other) would otherwise both pass the exists-check above and both start
+	// cloning into the same destination — the cloneSem acquired earlier
+	// bounds TOTAL concurrent clones, not clones-per-target. gitutil.
+	// WithRepoLock can't cover this phase: it keys on <clone>/.git/ox-sync,
+	// which doesn't exist until a clone has already created a .git
+	// directory. See gitutil.WithPreCloneLock's doc comment for the full
+	// reproduction.
+	lockWait := s.preCloneLockWaitOverride
+	if lockWait == 0 {
+		lockWait = gitutil.PreCloneLockTimeout + 10*time.Second
 	}
-	s.logger.Info("checkout: starting clone", "url", payload.CloneURL, "path", payload.RepoPath, "type", payload.RepoType)
+	lockCtx, lockCancel := context.WithTimeout(context.Background(), lockWait)
+	defer lockCancel()
+	err := gitutil.WithPreCloneLock(lockCtx, payload.RepoPath, func() error {
+		// Re-verify directory state now that we hold the lock — a peer that
+		// raced us here may have finished cloning while we waited for it
+		// (or for the semaphore slot, above). Mirrors the semaphore's own
+		// TOCTOU recheck.
+		if info, statErr := os.Stat(payload.RepoPath); statErr == nil && info.IsDir() {
+			gitDir := filepath.Join(payload.RepoPath, ".git")
+			if _, err := os.Stat(gitDir); err == nil {
+				if payload.RepoType != "team-context" {
+					s.logger.Debug("checkout: repo appeared while waiting for pre-clone lock", "path", payload.RepoPath)
+					result.AlreadyExists = true
+					return nil
+				}
+				sageoxDir := filepath.Join(payload.RepoPath, ".sageox")
+				if _, sErr := os.Stat(sageoxDir); sErr == nil {
+					s.logger.Debug("checkout: team-context completed while waiting for pre-clone lock", "path", payload.RepoPath)
+					result.AlreadyExists = true
+					return nil
+				}
+			}
+		}
 
-	// send progress: cloning
-	if progress != nil {
-		_ = progress.WriteStage("cloning", "Cloning repository...")
-	}
+		// The clone's own network deadline starts HERE, only once we actually
+		// hold the lock — not before waiting for it. Starting it earlier (the
+		// original bug, flagged on review) let a long lock wait consume the
+		// budget: a waiter that acquired the lock after, say, 55s of a 60s
+		// deadline would have its `git clone` killed almost immediately by
+		// "context deadline exceeded", which IsPreCloneLockBusy then
+		// misclassifies as benign lock contention (matches
+		// context.DeadlineExceeded) — masking a real clone failure as a
+		// harmless retry-next-cycle.
+		cloneCtx, cloneCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cloneCancel()
 
-	// Clone with bare URL + an in-argv credential helper instead of embedding
-	// the PAT into the origin URL. Per ox-eeqi, embedded credentials persist
-	// into .git/config and leak via backups, `git remote -v`, and GIT_TRACE.
-	// After clone succeeds, we install the helper into the cloned repo's
-	// .git/config (see post-clone block) so future fetch/push operations
-	// resolve credentials the same way.
-	//
-	// The `-c credential.helper=` (empty) before the real helper resets any
-	// inherited helpers so ours is authoritative for this single invocation.
-	cloneURL := payload.CloneURL
-	endpointURL := s.workspaceRegistry.GetEndpoint()
-	s.logger.Info("checkout: clone via credential helper",
-		"endpoint", endpointURL, "clone_url", payload.CloneURL)
-	// Sanity check: we have credentials for this endpoint (caller already
-	// authenticated). Without them, the helper will return nothing and git
-	// falls back to its own prompt — fine for interactive use, broken for
-	// daemon. So we log clearly when creds are missing.
-	if creds, err := s.creds.LoadCredentialsForEndpoint(endpointURL); err != nil {
-		s.logger.Error("checkout: failed to load git credentials", "error", err, "endpoint", endpointURL)
-	} else if creds == nil || creds.Token == "" {
-		s.logger.Warn("checkout: no git credentials found; clone may fail",
-			"endpoint", endpointURL)
-	}
-
-	// branch on repo type: team contexts use two-phase partial clone,
-	// ledgers use full clone (they need complete history for CLI writes)
-	if payload.RepoType == "team-context" {
+		// send progress: connecting
 		if progress != nil {
-			_ = progress.WriteStage("cloning", "Fetching repository structure...")
+			_ = progress.WriteStage("connecting", "Connecting to remote...")
 		}
-		mCfg, err := s.twoPhaseClone(ctx, cloneURL, payload.RepoPath, progress)
-		if err != nil {
-			s.logger.Error("checkout: two-phase clone failed", "error", err)
-			s.recordError(fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
-			return nil, err
-		}
-		if mCfg != nil {
-			if mCfg.SyncIntervalMin > 0 {
-				s.workspaceRegistry.SetSyncIntervalMin(payload.RepoPath, mCfg.SyncIntervalMin)
-			}
-			if mCfg.GCIntervalDays > 0 {
-				s.workspaceRegistry.SetGCInterval(payload.RepoPath, mCfg.GCIntervalDays)
-			}
-		}
-	} else {
-		// ledger: full clone
+		s.logger.Info("checkout: starting clone", "url", payload.CloneURL, "path", payload.RepoPath, "type", payload.RepoType)
+
+		// send progress: cloning
 		if progress != nil {
 			_ = progress.WriteStage("cloning", "Cloning repository...")
 		}
+
+		// Clone with bare URL + an in-argv credential helper instead of embedding
+		// the PAT into the origin URL. Per ox-eeqi, embedded credentials persist
+		// into .git/config and leak via backups, `git remote -v`, and GIT_TRACE.
+		// After clone succeeds, we install the helper into the cloned repo's
+		// .git/config (see post-clone block) so future fetch/push operations
+		// resolve credentials the same way.
+		//
+		// The `-c credential.helper=` (empty) before the real helper resets any
+		// inherited helpers so ours is authoritative for this single invocation.
+		cloneURL := payload.CloneURL
+		endpointURL := s.workspaceRegistry.GetEndpoint()
+		s.logger.Info("checkout: clone via credential helper",
+			"endpoint", endpointURL, "clone_url", payload.CloneURL)
+		// Sanity check: we have credentials for this endpoint (caller already
+		// authenticated). Without them, the helper will return nothing and git
+		// falls back to its own prompt — fine for interactive use, broken for
+		// daemon. So we log clearly when creds are missing.
+		if creds, err := s.creds.LoadCredentialsForEndpoint(endpointURL); err != nil {
+			s.logger.Error("checkout: failed to load git credentials", "error", err, "endpoint", endpointURL)
+		} else if creds == nil || creds.Token == "" {
+			s.logger.Warn("checkout: no git credentials found; clone may fail",
+				"endpoint", endpointURL)
+		}
+
+		// branch on repo type: team contexts use two-phase partial clone,
+		// ledgers use full clone (they need complete history for CLI writes)
+		if payload.RepoType == "team-context" {
+			if progress != nil {
+				_ = progress.WriteStage("cloning", "Fetching repository structure...")
+			}
+			mCfg, err := s.twoPhaseClone(cloneCtx, cloneURL, payload.RepoPath, progress)
+			if err != nil {
+				s.logger.Error("checkout: two-phase clone failed", "error", err)
+				s.recordError(fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
+				return err
+			}
+			if mCfg != nil {
+				if mCfg.SyncIntervalMin > 0 {
+					s.workspaceRegistry.SetSyncIntervalMin(payload.RepoPath, mCfg.SyncIntervalMin)
+				}
+				if mCfg.GCIntervalDays > 0 {
+					s.workspaceRegistry.SetGCInterval(payload.RepoPath, mCfg.GCIntervalDays)
+				}
+			}
+			return nil
+		}
+
+		// ledger: full clone, into a temp sibling directory first — never
+		// straight into payload.RepoPath. ox-baz5.6: a clone that drops
+		// mid-transfer (observed on a 711MB ledger over HTTPS: "fetch-pack:
+		// unexpected disconnect while reading sideband packet") used to leave
+		// a half-initialized .git in the FINAL location, which the daemon
+		// and every CLI command thereafter treated as a real ledger —
+		// HEAD pointing at refs/heads/.invalid, every commit failing with
+		// "cannot lock ref HEAD: reference already exists". Renaming into
+		// place only after a verified-complete clone means a failure at any
+		// point leaves nothing at payload.RepoPath for anything else to
+		// mistake for a real clone.
+		if progress != nil {
+			_ = progress.WriteStage("cloning", "Cloning repository...")
+		}
+		tempPath := fmt.Sprintf("%s.tmp-%d", payload.RepoPath, time.Now().UnixNano())
+		defer func() { _ = os.RemoveAll(tempPath) }() // no-op once renamed away
+
 		// Per ox-eeqi: clone with ox-managed credential helper, not embedded
 		// URL credentials. CredentialHelperArgs clears inherited helpers and
 		// installs ours for this single invocation. Shared with the
@@ -2352,12 +2416,12 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		}
 		cloneArgs = append(cloneArgs,
 			"-c", "protocol.ext.allow=never",
-			"clone", "--quiet", "--", cloneURL, payload.RepoPath,
+			"clone", "--quiet", "--", cloneURL, tempPath,
 		)
 		// NewNetworkCmd sets GIT_TERMINAL_PROMPT=0 so a credential gap fails
 		// fast instead of EOFing on a username prompt in the daemon's TTY-less
 		// environment.
-		cloneCmd := gitutil.NewNetworkCmd(ctx, cloneArgs...)
+		cloneCmd := gitutil.NewNetworkCmd(cloneCtx, cloneArgs...)
 		// set cmd.Dir so git doesn't fail when daemon CWD has been deleted
 		if parentDir := filepath.Dir(payload.RepoPath); parentDir != "" {
 			_ = os.MkdirAll(parentDir, 0755)
@@ -2368,21 +2432,55 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			s.logger.Error("checkout: clone failed", "error", err, "output", sanitizedOutput)
 			s.recordError(fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
 			if sanitizedOutput != "" {
-				return nil, fmt.Errorf("git clone failed: %s", sanitizedOutput)
+				return fmt.Errorf("git clone failed: %s", sanitizedOutput)
 			}
-			return nil, fmt.Errorf("git clone failed: %w", err)
+			return fmt.Errorf("git clone failed: %w", err)
 		}
 
-		// create AGENTS.md for newly cloned ledger repos
+		// verify the temp clone is actually complete before it ever becomes
+		// visible at payload.RepoPath — an early-EOF clone can exit non-zero
+		// (caught above) or, less commonly, leave a .git without a
+		// resolvable HEAD despite git reporting success.
+		if _, err := os.Stat(filepath.Join(tempPath, ".git")); err != nil {
+			return fmt.Errorf("clone verification failed: temp clone has no .git directory: %w", err)
+		}
+		if err := exec.CommandContext(cloneCtx, "git", "-C", tempPath, "rev-parse", "--verify", "-q", "HEAD").Run(); err != nil {
+			return fmt.Errorf("clone verification failed: temp clone's HEAD does not resolve: %w", err)
+		}
+
+		// create AGENTS.md for newly cloned ledger repos — inside the temp
+		// dir, before it becomes visible, so a failure here can't leave a
+		// half-initialized ledger at the final path either.
 		if progress != nil {
 			_ = progress.WriteStage("initializing", "Creating AGENTS.md...")
 		}
 		agentsOpts := &gitserver.AgentsMDOptions{
 			RepoType: payload.RepoType,
 		}
-		if err := gitserver.CreateAgentsMD(ctx, payload.RepoPath, agentsOpts); err != nil {
+		if err := gitserver.CreateAgentsMD(cloneCtx, tempPath, agentsOpts); err != nil {
 			s.logger.Warn("checkout: failed to create AGENTS.MD", "error", err)
 		}
+
+		// atomic swap: the only moment payload.RepoPath goes from
+		// non-existent to a complete, verified clone. If another actor
+		// somehow created it between our lock-holder recheck above and now
+		// (shouldn't happen — this whole closure runs under the pre-clone
+		// lock for this exact path — but os.Rename onto an existing
+		// directory fails safely rather than merging into it either way),
+		// this fails loudly instead of silently corrupting either side.
+		if err := os.Rename(tempPath, payload.RepoPath); err != nil {
+			return fmt.Errorf("failed to move completed clone into place: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		if gitutil.IsPreCloneLockBusy(err) {
+			return nil, fmt.Errorf("another clone is already in progress for %s: %w", payload.RepoPath, err)
+		}
+		return nil, err
+	}
+	if result.AlreadyExists {
+		return result, nil
 	}
 
 	// send progress: verifying
@@ -2397,7 +2495,11 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	}
 
 	// configure pull strategy to use rebase (avoids merge commits, cleaner history)
-	configCmd := exec.CommandContext(ctx, "git", "-C", payload.RepoPath, "config", "pull.rebase", "true")
+	// own short-lived context: this is local config, not network I/O, and must
+	// not inherit whatever budget the clone above happened to have left.
+	configCtx, configCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer configCancel()
+	configCmd := exec.CommandContext(configCtx, "git", "-C", payload.RepoPath, "config", "pull.rebase", "true")
 	if output, err := configCmd.CombinedOutput(); err != nil {
 		s.logger.Warn("checkout: failed to set pull.rebase config", "error", err, "output", string(output))
 	}

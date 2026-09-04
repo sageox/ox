@@ -21,6 +21,16 @@
         "path": "internal/daemon/sync_managed.go",
         "reason": "PR #868 (ADR-030 per-clone git locking): the new lock/retry/D3-guard logic in pullManagedRepo and fetchAndPullLocked is directly tested (TestPullManagedRepo_ConcurrentFetchDoesNotCorruptFETCH_HEAD, -race clean). The remaining uncovered lines are the pre-existing auto-resolve/LLM-resolver/AuditAndAbort conflict ladder, extracted verbatim (unchanged in behavior) out of the old pullManagedRepo body. Same automerge mocking gap as doctor_ledger_git.go, tracked together under bd ox-baz5.7.",
         "expires": "2026-10-17"
+      },
+      {
+        "path": "internal/daemon/sync.go",
+        "reason": "ox-baz5.6 (atomic + pre-clone-locked ledger clone): the new WithPreCloneLock wrapper, temp-dir-then-rename atomicity, and HEAD-resolves verification are directly tested (TestSyncScheduler_Checkout_LedgerCloneIsAtomic, _FailedLedgerCloneLeavesNoHalfClone, _ConcurrentLedgerCloneRace, _EmptyRemoteFailsVerification, all -race clean). The remaining uncovered lines are the pre-existing team-context two-phase-clone dispatch branch, re-indented into the diff by the new lock wrapper but unchanged in behavior. Covering it needs a real smart-HTTP git server test fixture — the dumb-HTTP static file serving used for the ledger-clone tests above can't negotiate git's partial-clone protocol (--filter=blob:none) that gitserver.TwoPhaseClone requires. Tracked as bd ox-baz5.6.1.",
+        "expires": "2026-10-17"
+      },
+      {
+        "path": "cmd/ox/doctor_ledger_invalid_head.go",
+        "reason": "ox-baz5.6 (doctor ledger-HEAD-integrity repair): the reachable repair, conflict-detection, and rollback branches are directly tested (12 tests including TestRepairInvalidHead_RefusesConflictingContent, _RestoreErrorTriggersRollback, _RenameAsideFails, TestRestoreLedgerDir_WalkErrorOnUnreadableSubdir/_ConflictCheckReadFailure, TestFilesIdentical_ReadErrors, TestFixLedgerInvalidHead_SerializesWithPreCloneLock). The remaining 7 lines are genuinely unreachable without a race or root: rollback()'s own restore-rename failing after its paired rename into the same parent dir already succeeded (no hook to fail only the second); filepath.Rel erroring on a path WalkDir itself produced from the same root (dead defensive code); and a file-copy's parent-dir MkdirAll failing after WalkDir already visited and created that same directory moments earlier in the traversal. Tracked as bd ox-baz5.6.1.",
+        "expires": "2026-10-17"
       }
     ]
   },

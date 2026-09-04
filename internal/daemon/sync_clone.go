@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/sageox/ox/internal/gitutil"
 )
 
 // cloneBackoffMax is the maximum backoff duration for transient clone errors (1 hour).
@@ -84,6 +86,15 @@ func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspac
 		// semaphore timeout is transient — retry next cycle without escalating backoff
 		if errors.Is(err, ErrCloneSemaphoreTimeout) {
 			s.logger.Info("clone semaphore busy, will retry next cycle", "type", repoType, "path", repoPath)
+			return
+		}
+
+		// ox-baz5.6: another actor is already cloning this exact path (a
+		// concurrent trigger lost the pre-clone lock race) — same "not our
+		// fault, just wait" shape as the semaphore case above, not a real
+		// clone failure worth escalating backoff over.
+		if gitutil.IsPreCloneLockBusy(err) {
+			s.logger.Info("another clone already in progress for this path, will retry next cycle", "type", repoType, "path", repoPath)
 			return
 		}
 
