@@ -283,7 +283,9 @@ func TestCloneInBackground_PreCloneLockBusyDoesNotEscalateBackoff(t *testing.T) 
 
 	holding := make(chan struct{})
 	release := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		_ = gitutil.WithPreCloneLock(context.Background(), repoPath, func() error {
 			close(holding)
 			<-release
@@ -291,7 +293,10 @@ func TestCloneInBackground_PreCloneLockBusyDoesNotEscalateBackoff(t *testing.T) 
 		})
 	}()
 	<-holding
-	defer close(release)
+	defer func() {
+		close(release)
+		<-done // wait for the holder's unlock to finish before t.TempDir() cleanup runs
+	}()
 
 	s.cloneWg.Add(1)
 	// a URL that passes isValidCloneURL (localhost is always allowed) but is

@@ -246,8 +246,7 @@ func TestInvalidHeadCheck_FixReClonesAndRestoresStagedContent(t *testing.T) {
 	assert.Contains(t, result.message, "repaired")
 
 	// the repaired clone must be healthy: HEAD resolves.
-	out, err := exec.Command("git", "-C", cloneDir, "rev-parse", "--verify", "-q", "HEAD").CombinedOutput()
-	require.NoError(t, err, string(out))
+	runGitLedgerT(t, cloneDir, "rev-parse", "--verify", "-q", "HEAD")
 
 	// the staged content must have survived the reclone, committed.
 	sessionContent, err := os.ReadFile(filepath.Join(cloneDir, "sessions", "s1.txt"))
@@ -257,9 +256,8 @@ func TestInvalidHeadCheck_FixReClonesAndRestoresStagedContent(t *testing.T) {
 	require.NoError(t, err, "data/d1.txt must survive the repair")
 	assert.Equal(t, "data content\n", string(dataContent))
 
-	statusOut, err := exec.Command("git", "-C", cloneDir, "status", "--porcelain").CombinedOutput()
-	require.NoError(t, err)
-	assert.Empty(t, string(statusOut), "restored content must be committed, not left staged")
+	statusOut := runGitLedgerT(t, cloneDir, "status", "--porcelain")
+	assert.Empty(t, statusOut, "restored content must be committed, not left staged")
 
 	// the corrupted original must be preserved, never deleted, per
 	// .claude/rules/daemon-git.md "never discard uncommitted changes".
@@ -510,8 +508,7 @@ func TestRepairInvalidHead_NothingToRestoreIsAWarningNotAFailure(t *testing.T) {
 	assert.True(t, result.warning)
 	assert.Contains(t, result.message, "nothing to restore")
 
-	out, err := exec.Command("git", "-C", cloneDir, "rev-parse", "--verify", "-q", "HEAD").CombinedOutput()
-	require.NoError(t, err, string(out))
+	runGitLedgerT(t, cloneDir, "rev-parse", "--verify", "-q", "HEAD")
 
 	backups, err := filepath.Glob(cloneDir + ".corrupt-backup-*")
 	require.NoError(t, err)
@@ -562,8 +559,7 @@ func TestRepairInvalidHead_CommitFailureSurfacesButKeepsRepair(t *testing.T) {
 
 	// unlike a reclone/restore failure, this must NOT roll back: HEAD now
 	// resolves and the restored content is genuinely on disk, just uncommitted.
-	out, err := exec.Command("git", "-C", cloneDir, "rev-parse", "--verify", "-q", "HEAD").CombinedOutput()
-	require.NoError(t, err, "the repaired clone's HEAD must resolve even though the commit itself failed: %s", out)
+	runGitLedgerT(t, cloneDir, "rev-parse", "--verify", "-q", "HEAD")
 	content, err := os.ReadFile(filepath.Join(cloneDir, "sessions", "s1.txt"))
 	require.NoError(t, err)
 	assert.Contains(t, string(content), "<<<<<<<", "the conflicted content must still be present, uncommitted, for a human to resolve")
@@ -747,7 +743,9 @@ func TestFixLedgerInvalidHead_SerializesWithPreCloneLock(t *testing.T) {
 	// concurrent daemon Checkout() (or another repair) were already running.
 	holding := make(chan struct{})
 	release := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		_ = gitutil.WithPreCloneLock(context.Background(), cloneDir, func() error {
 			close(holding)
 			<-release
@@ -755,7 +753,10 @@ func TestFixLedgerInvalidHead_SerializesWithPreCloneLock(t *testing.T) {
 		})
 	}()
 	<-holding
-	defer close(release)
+	defer func() {
+		close(release)
+		<-done // wait for the holder's unlock to finish before t.TempDir() cleanup runs
+	}()
 
 	shortCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
