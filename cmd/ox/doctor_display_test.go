@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -465,28 +467,75 @@ func TestRunDoctorChecks_CategoryStructure(t *testing.T) {
 	}
 }
 
-// TestRunDoctorChecks_WithFixFlag verifies fix flag is passed through
+// adapterBlockLines are the lines of the Pi adapter block in
+// adapterBlockFixture: every one of them must be gone after a fix pass, since
+// stripBlock removes the whole span between the markers, not just the markers.
+// Spelled out literally rather than read from adapterBlockMarkers so that
+// dropping an entry from that table cannot quietly turn this into a test of a
+// different block.
+var adapterBlockLines = []string{
+	"<!-- ox:prime:pi:start -->",
+	"## Pi block",
+	"ox agent prime",
+	"<!-- ox:prime:pi:end -->",
+}
+
+// adapterBlockFixture is an AGENTS.md carrying one adapter prime block
+// between the two universal markers: what `--fix` must remove, wrapped in
+// what it must leave alone.
+const adapterBlockFixture = OxPrimeCheckMarker + "\n\n" +
+	"<!-- ox:prime:pi:start -->\n## Pi block\nox agent prime\n<!-- ox:prime:pi:end -->\n" +
+	OxPrimeMarker + " footer\n"
+
+// TestRunDoctorChecks_WithFixFlag verifies the fix flag reaches the checks.
 func TestRunDoctorChecks_WithFixFlag(t *testing.T) {
 	// Not part of the fast tier. This drives a REAL doctor pass with fix=true —
 	// network probes (the ledger connectivity check alone allows 10s), API calls,
 	// and git operations — and it cannot be cached because it has side effects.
-	// In isolation it takes ~5s; under `-parallel 32` contention it measured
-	// 192s, roughly half the entire `make test` wall clock for this one test.
-	// It still runs in `make test-all` and CI, which is where it belongs.
+	// In isolation it takes ~5s. It still runs in `make test-all` and CI, which
+	// is where it belongs.
 	if testing.Short() {
 		t.Skip("short: drives a real doctor --fix pass with network probes")
 	}
-	t.Parallel()
+
+	// Read the shared fix=false result first, while the working directory is
+	// still the one every other consumer of the cache sees. The cache is a
+	// sync.Once, so whichever test populates it decides what they all read.
+	categoriesWithoutFix := getCachedDoctorChecks(t)
+	require.NotEmpty(t, categoriesWithoutFix, "runDoctorChecks(false) returned no categories")
+
+	// Deliberately not t.Parallel. A fix pass resolves its target through
+	// findGitRoot(), i.e. through the process-wide working directory, so the
+	// only way to keep it off the developer's checkout is to move that
+	// directory — which is not safe while parallel tests share the process.
+	//
+	// Failure prevented: run from the checkout, this test's own --fix pass
+	// stripped the adapter prime block out of the repository's tracked
+	// AGENTS.md on every full-tier run, and reported ok while doing it.
+	dir := setupGitRepoWithFiles(t, map[string]string{"AGENTS.md": adapterBlockFixture})
+
 	// run with fix=true (can't cache this since it may have side effects)
 	categoriesWithFix := runDoctorChecks(context.Background(), doctorOptions{fix: true})
 	require.NotEmpty(t, categoriesWithFix, "runDoctorChecks(true) returned no categories")
 
-	// use cached fix=false result
-	categoriesWithoutFix := getCachedDoctorChecks(t)
-	require.NotEmpty(t, categoriesWithoutFix, "runDoctorChecks(false) returned no categories")
+	// The flag reached the checks, and it reached them here rather than in the
+	// checkout: the adapter block is gone from the throwaway repo while the
+	// universal markers around it survive.
+	fixed, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	require.NoError(t, err)
+	for _, line := range adapterBlockLines {
+		assert.NotContains(t, string(fixed), line,
+			"fix=true left part of the adapter prime block behind: %q", line)
+	}
+	assert.Contains(t, string(fixed), OxPrimeCheckMarker,
+		"fix=true removed the universal ox:prime-check header it must preserve")
+	assert.Contains(t, string(fixed), OxPrimeMarker,
+		"fix=true removed the universal ox:prime footer it must preserve")
 
-	// both should return similar category structure; minor differences acceptable
-	// due to conditional checks that may only appear in one mode
+	// The two passes ran in different working directories, so this compares the
+	// shape of the check registry rather than anything about the fix flag: the
+	// count is structurally the same in both modes, and the tolerance only
+	// absorbs conditional checks that may appear in one of them.
 	assert.InDelta(t, len(categoriesWithFix), len(categoriesWithoutFix), 3, "category count difference too large")
 }
 
