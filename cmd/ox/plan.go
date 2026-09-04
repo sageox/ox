@@ -293,6 +293,19 @@ func planLFSClient(gitRoot string) *lfs.Client {
 // slug via <meta name="ox-plan-slug"> (the authoring contract), which then
 // wins over the title-derived one.
 func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html []byte, primary string) string {
+	// Consult-mode input (`enrich --topic`: Raw deliberately empty, no
+	// document exists yet) must never persist — it would mint a real pln_ id
+	// around a zero-byte plan.md, an empty creator-less entry in the plan
+	// gallery. Guarded here, the one choke point every save path funnels
+	// through, so --persist, --text auto-save, render, and `plan save` all
+	// skip alike; plan.Save has the same check as a second layer. HTML-primary
+	// input is exempt: the page is the plan of record, Raw only its derived
+	// markdown.
+	if strings.TrimSpace(in.Raw) == "" && html == nil {
+		slog.Info("plan save skipped: no authored content (topic-only consult input)", "topic", in.Topic)
+		return ""
+	}
+
 	topic := planTopic(in)
 	slug := plan.Slugify(topic)
 	if primary == plan.PrimaryHTML {

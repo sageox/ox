@@ -25,6 +25,7 @@ package plan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -57,6 +58,11 @@ const (
 	// git tree from bloating.
 	htmlLFSThreshold = 1024 * 1024
 )
+
+// ErrNothingToSave is returned by Save when the input carries no authored
+// content (topic-only consult input, empty stdin). Callers treat it as a
+// clean skip, not a failure — see savePlanArtifacts in cmd/ox.
+var ErrNothingToSave = errors.New("plan save: no authored content to persist")
 
 // PlanStatus is the plan's own lifecycle, independent of the producing
 // session. A plan is worth keeping even if never built — it is a decision
@@ -216,6 +222,16 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 	ledger := ledgerPathFor(gitRoot)
 	if ledger == "" {
 		return "", "", fmt.Errorf("no ledger configured for %q: cannot save plan", gitRoot)
+	}
+
+	// Consult-mode input never persists: `plan enrich --topic` deliberately
+	// builds an Input with empty Raw (no document exists yet — see
+	// newTopicInput), and saving it would mint a real pln_ id around a
+	// zero-byte plan.md, an empty entry in every plan gallery. HTML-primary
+	// saves are exempt: there the page is the plan of record and Raw is only
+	// its derived markdown.
+	if strings.TrimSpace(in.Raw) == "" && html == nil {
+		return "", "", ErrNothingToSave
 	}
 
 	if meta.CreatedAt.IsZero() {
