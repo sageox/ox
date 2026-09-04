@@ -288,7 +288,8 @@ func extraContextWithNestedLFSPointer(t *testing.T) []config.TeamContext {
 func extraContextClean(t *testing.T) []config.TeamContext {
 	t.Helper()
 	repo := t.TempDir()
-	cmd := exec.Command("git", "init", "-q", repo)
+	cmd := exec.Command("git", "init", "-q")
+	cmd.Dir = repo
 	require.NoError(t, cmd.Run())
 	return []config.TeamContext{{TeamID: "other", Path: repo}}
 }
