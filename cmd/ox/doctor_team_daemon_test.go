@@ -27,71 +27,64 @@ import (
 // the pure filtering logic behind daemonSyncedTeamContexts, tested without a
 // live daemon IPC connection.
 func TestExtraTeamContextsFromStatus(t *testing.T) {
-	t.Run("daemon-synced context missing from configured is surfaced", func(t *testing.T) {
-		status := &daemon.StatusData{
-			Workspaces: map[string][]daemon.WorkspaceSyncStatus{
+	cases := []struct {
+		name       string
+		status     *daemon.StatusData
+		configured []config.TeamContext
+		want       []config.TeamContext
+	}{
+		{
+			name: "daemon-synced context missing from configured is surfaced",
+			status: &daemon.StatusData{Workspaces: map[string][]daemon.WorkspaceSyncStatus{
 				"team-context": {
 					{Path: "/configured/path", Exists: true, TeamID: "t1", TeamName: "Configured"},
 					{Path: "/other/path", Exists: true, TeamID: "t2", TeamName: "Other Team"},
 				},
-			},
-		}
-		configured := []config.TeamContext{{Path: "/configured/path", TeamID: "t1"}}
-
-		extra := extraTeamContextsFromStatus(status, configured)
-
-		assert.Len(t, extra, 1, "must surface exactly the team context missing from configured")
-		assert.Equal(t, "/other/path", extra[0].Path)
-		assert.Equal(t, "t2", extra[0].TeamID)
-		assert.Equal(t, "Other Team", extra[0].TeamName)
-	})
-
-	t.Run("fully configured daemon workspaces produce nothing extra", func(t *testing.T) {
-		status := &daemon.StatusData{
-			Workspaces: map[string][]daemon.WorkspaceSyncStatus{
-				"team-context": {
-					{Path: "/configured/path", Exists: true, TeamID: "t1"},
-				},
-			},
-		}
-		configured := []config.TeamContext{{Path: "/configured/path", TeamID: "t1"}}
-
-		assert.Empty(t, extraTeamContextsFromStatus(status, configured),
-			"must not re-surface a context the caller already scans")
-	})
-
-	t.Run("non-existent daemon workspace is skipped", func(t *testing.T) {
-		// Exists=false means the daemon knows about the workspace but hasn't
-		// cloned it yet — nothing on disk to scan for nested LFS pointers.
-		status := &daemon.StatusData{
-			Workspaces: map[string][]daemon.WorkspaceSyncStatus{
-				"team-context": {
-					{Path: "/not/cloned/yet", Exists: false, TeamID: "t3"},
-				},
-			},
-		}
-		assert.Empty(t, extraTeamContextsFromStatus(status, nil))
-	})
-
-	t.Run("no team-context key in workspaces produces nothing", func(t *testing.T) {
-		status := &daemon.StatusData{Workspaces: map[string][]daemon.WorkspaceSyncStatus{
-			"ledger": {{Path: "/ledger/path", Exists: true}},
-		}}
-		assert.Empty(t, extraTeamContextsFromStatus(status, nil))
-	})
-
-	t.Run("nil configured list still dedupes against itself", func(t *testing.T) {
-		status := &daemon.StatusData{
-			Workspaces: map[string][]daemon.WorkspaceSyncStatus{
+			}},
+			configured: []config.TeamContext{{Path: "/configured/path", TeamID: "t1"}},
+			want:       []config.TeamContext{{Path: "/other/path", TeamID: "t2", TeamName: "Other Team"}},
+		},
+		{
+			name: "fully configured daemon workspaces produce nothing extra",
+			status: &daemon.StatusData{Workspaces: map[string][]daemon.WorkspaceSyncStatus{
+				"team-context": {{Path: "/configured/path", Exists: true, TeamID: "t1"}},
+			}},
+			configured: []config.TeamContext{{Path: "/configured/path", TeamID: "t1"}},
+			want:       nil,
+		},
+		{
+			// Exists=false means the daemon knows about the workspace but
+			// hasn't cloned it yet — nothing on disk to scan.
+			name: "non-existent daemon workspace is skipped",
+			status: &daemon.StatusData{Workspaces: map[string][]daemon.WorkspaceSyncStatus{
+				"team-context": {{Path: "/not/cloned/yet", Exists: false, TeamID: "t3"}},
+			}},
+			want: nil,
+		},
+		{
+			name: "no team-context key in workspaces produces nothing",
+			status: &daemon.StatusData{Workspaces: map[string][]daemon.WorkspaceSyncStatus{
+				"ledger": {{Path: "/ledger/path", Exists: true}},
+			}},
+			want: nil,
+		},
+		{
+			name: "nil configured list still returns every existing daemon-synced context",
+			status: &daemon.StatusData{Workspaces: map[string][]daemon.WorkspaceSyncStatus{
 				"team-context": {
 					{Path: "/a", Exists: true, TeamID: "a"},
 					{Path: "/b", Exists: true, TeamID: "b"},
 				},
-			},
-		}
-		extra := extraTeamContextsFromStatus(status, nil)
-		assert.Len(t, extra, 2, "with nothing configured, every existing daemon-synced context is extra")
-	})
+			}},
+			want: []config.TeamContext{{Path: "/a", TeamID: "a"}, {Path: "/b", TeamID: "b"}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, extraTeamContextsFromStatus(tc.status, tc.configured))
+		})
+	}
 }
 
 // TestDaemonSyncedTeamContexts_NoDaemon proves the fail-safe direction: when
@@ -222,51 +215,80 @@ func startFakeDaemon(t *testing.T, respond func(daemon.Message) daemon.Response)
 // here against the "extra" (daemon-only) code path instead of the configured
 // one.
 func TestScanExtraTeamContexts(t *testing.T) {
-	t.Run("nested pointer in an extra context produces a warning", func(t *testing.T) {
-		if _, err := exec.LookPath("git"); err != nil {
-			t.Skip("git not installed")
-		}
-		repo := t.TempDir()
-		run := func(args ...string) {
-			t.Helper()
-			cmd := exec.Command("git", args...)
-			cmd.Dir = repo
-			out, err := cmd.CombinedOutput()
-			require.NoError(t, err, "git %v: %s", args, out)
-		}
-		run("init", "-q")
-		run("config", "user.email", "test@example.com")
-		run("config", "user.name", "Test User")
+	cases := []struct {
+		name        string
+		buildExtra  func(t *testing.T) []config.TeamContext
+		wantLen     int
+		wantWarning bool
+	}{
+		{
+			name:        "nested pointer in an extra context produces a warning",
+			buildExtra:  extraContextWithNestedLFSPointer,
+			wantLen:     1,
+			wantWarning: true,
+		},
+		{
+			name:       "clean extra context produces no checks",
+			buildExtra: extraContextClean,
+			wantLen:    0,
+		},
+		{
+			name:       "empty extra list produces no checks",
+			buildExtra: func(t *testing.T) []config.TeamContext { return nil },
+			wantLen:    0,
+		},
+	}
 
-		inner := []byte(lfs.FormatPointer("sha256:inner", 9914))
-		outer := lfs.FormatPointer("sha256:outer", int64(len(inner)))
-		path := filepath.Join(repo, "frame.jpg")
-		require.NoError(t, os.WriteFile(path, []byte(outer), 0o644))
-		run("add", "frame.jpg")
-		run("commit", "-q", "-m", "outer pointer")
-		require.NoError(t, os.WriteFile(path, inner, 0o644))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := exec.LookPath("git"); err != nil {
+				t.Skip("git not installed")
+			}
+			checks := scanExtraTeamContexts(tc.buildExtra(t), doctorOptions{fix: false})
 
-		extra := []config.TeamContext{{TeamID: "other", TeamName: "Other Team", Path: repo}}
-		checks := scanExtraTeamContexts(extra, doctorOptions{fix: false})
+			require.Len(t, checks, tc.wantLen)
+			if tc.wantWarning {
+				assert.True(t, checks[0].warning)
+				assert.Contains(t, checks[0].name, "Other Team")
+			}
+		})
+	}
+}
 
-		require.Len(t, checks, 1)
-		assert.True(t, checks[0].warning)
-		assert.Contains(t, checks[0].name, "Other Team")
-	})
+// extraContextWithNestedLFSPointer builds a git repo containing the same
+// nested-pointer fixture shape as TestFindDoubleEncodedLFSPointerPaths
+// (doctor_team_lfs_test.go), returned as a single "extra" (daemon-only,
+// unconfigured) team context.
+func extraContextWithNestedLFSPointer(t *testing.T) []config.TeamContext {
+	t.Helper()
+	repo := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	run("init", "-q")
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "Test User")
 
-	t.Run("clean extra context produces no checks", func(t *testing.T) {
-		if _, err := exec.LookPath("git"); err != nil {
-			t.Skip("git not installed")
-		}
-		repo := t.TempDir()
-		cmd := exec.Command("git", "init", "-q", repo)
-		require.NoError(t, cmd.Run())
+	inner := []byte(lfs.FormatPointer("sha256:inner", 9914))
+	outer := lfs.FormatPointer("sha256:outer", int64(len(inner)))
+	path := filepath.Join(repo, "frame.jpg")
+	require.NoError(t, os.WriteFile(path, []byte(outer), 0o644))
+	run("add", "frame.jpg")
+	run("commit", "-q", "-m", "outer pointer")
+	require.NoError(t, os.WriteFile(path, inner, 0o644))
 
-		extra := []config.TeamContext{{TeamID: "other", Path: repo}}
-		assert.Empty(t, scanExtraTeamContexts(extra, doctorOptions{fix: false}))
-	})
+	return []config.TeamContext{{TeamID: "other", TeamName: "Other Team", Path: repo}}
+}
 
-	t.Run("empty extra list produces no checks", func(t *testing.T) {
-		assert.Empty(t, scanExtraTeamContexts(nil, doctorOptions{fix: false}))
-	})
+// extraContextClean builds a plain git repo with nothing to flag.
+func extraContextClean(t *testing.T) []config.TeamContext {
+	t.Helper()
+	repo := t.TempDir()
+	cmd := exec.Command("git", "init", "-q", repo)
+	require.NoError(t, cmd.Run())
+	return []config.TeamContext{{TeamID: "other", Path: repo}}
 }
