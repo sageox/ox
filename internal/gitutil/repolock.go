@@ -63,3 +63,51 @@ func IsRepoLockBusy(err error) bool {
 	var timeout *fileutil.ErrLockTimeout
 	return errors.As(err, &timeout) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
+
+// PreCloneLockTimeout bounds how long WithPreCloneLock waits for a peer
+// clone of the same target to finish. A ledger clone can legitimately run
+// for minutes on a large repo (711MB observed in ox-baz5.6); the timeout is
+// generous with the same reasoning as RepoLockTimeout — a legitimately slow
+// peer must not be mistaken for a stuck one.
+const PreCloneLockTimeout = 5 * time.Minute
+
+// WithPreCloneLock serializes every attempt to create a git clone at
+// repoPath — the phase WithRepoLock cannot cover, since it keys on
+// <clone>/.git/ox-sync and that file does not exist until a clone has
+// already created a .git directory. ox-baz5.6: multiple independent
+// triggers (a daemon background clone retry, GC self-heal, a codedb
+// indexing kickoff) can each observe the target missing and race to clone
+// into the same destination concurrently — the cloneSem in sync.go bounds
+// TOTAL concurrent clones but does not serialize by target path, so two
+// racing triggers can both pass the exists-check and both start cloning
+// into repoPath. This reproduced deterministically on a large ledger whose
+// clone intermittently dropped mid-transfer, corrupting the destination on
+// every retry.
+//
+// The lock is keyed directly on repoPath via PreCloneLockTarget (hashed by
+// fileutil.LockPath into an OS-tmpdir sidecar — the same mechanism
+// WithRepoLock uses), not on any file inside repoPath, since nothing there
+// is guaranteed to exist yet.
+func WithPreCloneLock(ctx context.Context, repoPath string, fn func() error) error {
+	return fileutil.WithFileLockTimeout(ctx, PreCloneLockTarget(repoPath), PreCloneLockTimeout, fn)
+}
+
+// PreCloneLockTarget is the path the pre-clone lock is keyed on. Suffixed
+// (not the bare repoPath) so its hash never collides with a WithRepoLock
+// key for the same path, even though the two are never expected to be held
+// simultaneously — WithRepoLock's key only exists once repoPath/.git does.
+func PreCloneLockTarget(repoPath string) string {
+	return repoPath + ".preclone-lock"
+}
+
+// IsPreCloneLockBusy reports whether err means another ox process is
+// already cloning this same target — the pre-clone analog of
+// IsRepoLockBusy. Callers treat this as "someone else is handling it,
+// retry next cycle without escalating backoff", never as a clone fault.
+func IsPreCloneLockBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	var timeout *fileutil.ErrLockTimeout
+	return errors.As(err, &timeout) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}

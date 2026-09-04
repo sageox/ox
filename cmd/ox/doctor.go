@@ -1216,6 +1216,14 @@ func enrichCheckResult(check *checkResult) {
 var ledgerGitHealthOrder = []string{
 	// network check (git ls-remote); runs only under --fix to avoid slow I/O.
 	CheckSlugLedgerRemoteReachable,
+	// ox-baz5.6: MUST run before every other check below. An unresolvable
+	// HEAD (a syntactically invalid ref left by an interrupted clone) makes
+	// stranded-commits, unmerged-paths, stuck-operation, clean-workdir, and
+	// branch-status all assume something false about HEAD — before this
+	// check existed they silently skipped or failed on a cryptic git error
+	// instead of naming the real problem. Repair here first; everything
+	// downstream then runs against a resolvable HEAD.
+	CheckSlugLedgerInvalidHead,
 	// ox-akab: MUST be the first mutating check. Commits reachable only from
 	// HEAD have to be given a branch BEFORE anything downstream can move HEAD —
 	// the unmerged-paths and stuck-operation fixes both abort in-progress
