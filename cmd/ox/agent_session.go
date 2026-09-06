@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/sageox/agentx"
@@ -357,6 +358,18 @@ func ensurePrimeBeforeSession(agentID string) {
 	}
 
 	// prime hasn't run — execute it inline
+	//
+	// Guard against test binaries: os.Executable() below resolves to the
+	// compiled `go test` binary when this runs inside a test process, not
+	// the real ox CLI. exec'ing it with args "agent prime" doesn't hit any
+	// -test.* flag, so the test binary just reruns its entire suite from
+	// scratch — which reaches this same code path again, recursing without
+	// bound until the package's test deadline kills it. See #846.
+	if testing.Testing() {
+		slog.Debug("session start: skipping inline prime (running under go test)")
+		return
+	}
+
 	slog.Info("session start: prime not detected, running inline", "agent_session_id", agentSessionID)
 
 	oxPath, err := os.Executable()
