@@ -139,6 +139,15 @@ type Meta struct {
 	CreatedAt      time.Time `json:"created_at"`
 	SourcePlanPath string    `json:"source_plan_path,omitempty"`
 
+	// Kind names WHAT this artifact is. "plan" (the zero value) means the
+	// pre-work document; the others are artifacts that arrive at different
+	// moments in the same work and were, before this existed, simply never
+	// saved. The guidance said "for a material PLAN, author a plan.html", so
+	// an agent holding a finished device-capture review sheet classified it as
+	// not-a-plan and left a 168 KB page in .context/ until a human asked for
+	// it. Naming the kinds is what makes the guidance match what people build.
+	Kind ArtifactKind `json:"kind,omitempty"`
+
 	// Status is the plan's lifecycle. Missing == "draft" for legacy plans.
 	Status PlanStatus `json:"status,omitempty"`
 	// Primary records which stored artifact is the plan of record: "html"
@@ -172,6 +181,7 @@ type PlanInfo struct {
 	Authors   []string
 	HasHTML   bool
 	Status    PlanStatus
+	Kind      ArtifactKind
 }
 
 // LoadMeta reads and parses a captured plan's meta.json from its plan directory
@@ -180,6 +190,86 @@ type PlanInfo struct {
 // without re-deriving the on-disk path. A missing/unreadable meta is an error.
 func LoadMeta(planDir string) (Meta, error) {
 	return readMeta(planDir)
+}
+
+// ArtifactKind names what a saved artifact IS. The storage, review loop and
+// chrome are identical for every kind — they differ only in when they arrive
+// and what a reader should expect, which is exactly the distinction the single
+// noun "plan" was hiding.
+type ArtifactKind string
+
+const (
+	// KindPlan is the default: a document written BEFORE the work.
+	KindPlan ArtifactKind = "plan"
+	// KindMockup is a visual proposal for a user-facing surface.
+	KindMockup ArtifactKind = "mockup"
+	// KindReview is a sheet built for a human to judge something — the
+	// artifact whose whole purpose is the look, not the argument.
+	KindReview ArtifactKind = "review"
+	// KindEvidence records what was measured or observed, after the fact.
+	KindEvidence ArtifactKind = "evidence"
+)
+
+// ValidKind reports whether k is a known artifact kind. Empty is valid and
+// means KindPlan, so every plan saved before kinds existed keeps working.
+func ValidKind(k string) bool {
+	switch ArtifactKind(strings.ToLower(strings.TrimSpace(k))) {
+	case "", KindPlan, KindMockup, KindReview, KindEvidence:
+		return true
+	}
+	return false
+}
+
+// KindOrDefault normalizes a kind, mapping empty to KindPlan.
+func KindOrDefault(k ArtifactKind) ArtifactKind {
+	if strings.TrimSpace(string(k)) == "" {
+		return KindPlan
+	}
+	return ArtifactKind(strings.ToLower(strings.TrimSpace(string(k))))
+}
+
+// AllKinds lists the kinds for help text and validation messages.
+func AllKinds() []string {
+	return []string{string(KindPlan), string(KindMockup), string(KindReview), string(KindEvidence)}
+}
+
+// priorSaveOfSource finds a live plan already saved from the same source file,
+// so a re-save revises it instead of forking a new one. Superseded, abandoned
+// and realized plans are skipped — those lifecycle states are deliberate and a
+// later save must not silently reopen them. Fail-open: any read error yields
+// "no prior", which restores the derive-from-topic behavior.
+func priorSaveOfSource(ledger, sourcePath string) (Meta, bool) {
+	if strings.TrimSpace(sourcePath) == "" {
+		return Meta{}, false
+	}
+	plansDir := paths.LedgerPlansDir(ledger)
+	if plansDir == "" {
+		return Meta{}, false
+	}
+	entries, err := os.ReadDir(plansDir)
+	if err != nil {
+		return Meta{}, false
+	}
+	var best Meta
+	var found bool
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		m, err := readMeta(filepath.Join(plansDir, e.Name()))
+		if err != nil || m.SourcePlanPath != sourcePath {
+			continue
+		}
+		switch m.Status {
+		case PlanStatusSuperseded, PlanStatusAbandoned, PlanStatusRealized:
+			continue
+		}
+		// Most recent wins when a source path has been saved more than once.
+		if !found || m.CreatedAt.After(best.CreatedAt) {
+			best, found = m, true
+		}
+	}
+	return best, found
 }
 
 // Save writes a captured plan into the ledger under data/plans/<dated-slug>/.
@@ -222,11 +312,33 @@ func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string,
 		meta.CreatedAt = time.Now().UTC()
 	}
 	if meta.Slug == "" {
-		meta.Slug = Slugify(meta.Topic)
+		// Re-saving the SAME source file revises the SAME plan.
+		//
+		// Without this, the slug is derived from the topic, so editing a page's
+		// title or H1 between saves silently mints a SECOND plan from one
+		// source file — observed in the field as two entries five minutes
+		// apart with identical source_plan_path and session, which the human
+		// then had to reconcile with `ox plan supersede` by hand.
+		//
+		// Updating in place is safe precisely because the ledger is a git
+		// repository: every earlier revision stays in history and is always
+		// recoverable, so "revise" never destroys the prior version.
+		//
+		// An EXPLICIT slug (--slug, or <meta name="ox-plan-slug">) always wins
+		// — this only fills in the derived case. A superseded or abandoned
+		// plan is never revived: that lifecycle decision is deliberate, and
+		// re-saving over it would undo it silently.
+		if prior, ok := priorSaveOfSource(ledger, meta.SourcePlanPath); ok {
+			meta.Slug = prior.Slug
+			meta.CreatedAt = prior.CreatedAt // keep the dir name stable
+		} else {
+			meta.Slug = Slugify(meta.Topic)
+		}
 	}
 
 	// Stamp the current schema version onto both long-lived artifacts so a
 	// future reader can detect and migrate an older on-disk layout.
+	meta.Kind = KindOrDefault(meta.Kind)
 	meta.SchemaVersion = SchemaVersion
 	res.SchemaVersion = SchemaVersion
 
@@ -773,6 +885,7 @@ func planInfoFrom(dir, dirName string, meta Meta) PlanInfo {
 		Authors:   meta.Authors,
 		HasHTML:   hasHTML,
 		Status:    CurrentStatus(dir),
+		Kind:      KindOrDefault(meta.Kind),
 	}
 }
 

@@ -30,6 +30,14 @@ var headingLevel = map[atom.Atom]int{
 	atom.H1: 1, atom.H2: 2, atom.H3: 3, atom.H4: 4, atom.H5: 5, atom.H6: 6,
 }
 
+// DetailsOpenMarker / DetailsCloseMarker fence a collapsed <details> appendix in
+// derived markdown. Invisible when rendered; read by stripDetails so
+// implementation notes never drive diagram or mockup expectations.
+const (
+	DetailsOpenMarker  = "<!-- ox:details -->"
+	DetailsCloseMarker = "<!-- /ox:details -->"
+)
+
 // ExtractMarkdown derives searchable markdown from an authored HTML plan
 // document. It is a lossy, deterministic projection: headings, paragraphs,
 // lists, tables, code blocks and links survive; interactive-only content
@@ -139,6 +147,32 @@ func (e *extractor) walkBlock(n *html.Node) {
 			}
 
 			switch c.DataAtom {
+			case atom.Details:
+				if hasAttr(c, "open") {
+					// `open` is a BOOLEAN HTML attribute: presence alone means
+					// the block is expanded, so <details open>,
+					// <details open=""> and even <details open="false"> are
+					// all showing their content to the reader. Visible prose
+					// is the plan's own prose — walk it transparently, exactly
+					// like the default container case, so it reaches derived
+					// markdown unfenced and keeps driving cue scoring.
+					e.walkBlock(c)
+					continue
+				}
+				// Fence the collapsed appendix with invisible markers so
+				// downstream cue scoring can tell implementation notes from
+				// the plan's own prose. Without this the tags are dropped and
+				// the notes read as ordinary body text: the appendix that the
+				// human-attention lint REQUIRES then supplied two mockup cues
+				// ("screenshot", "screen" in a regeneration command) and
+				// tripped the mockup rule on a section that changes no UI.
+				// HTML comments, so nothing is visible in the rendered
+				// markdown and no content is lost.
+				e.flush()
+				e.blocks = append(e.blocks, DetailsOpenMarker)
+				e.walkBlock(c)
+				e.flush()
+				e.blocks = append(e.blocks, DetailsCloseMarker)
 			case atom.H1, atom.H2, atom.H3, atom.H4, atom.H5, atom.H6:
 				e.flush()
 				e.emitHeading(c)
