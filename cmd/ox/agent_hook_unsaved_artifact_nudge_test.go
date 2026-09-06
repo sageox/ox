@@ -134,22 +134,27 @@ func TestFindUnsavedArtifacts_SameBasenameElsewhereStillNudges(t *testing.T) {
 	}
 }
 
-// A relative SourcePlanPath (legacy plans) still claims its artifact: both
-// sides of the check normalize to an absolute, cleaned path.
-func TestFindUnsavedArtifacts_RelativeSavedSourceStillClaims(t *testing.T) {
+// A RELATIVE SourcePlanPath (legacy plans only — Save records absolute) claims
+// nothing, and the artifact nudges. The directory such a path was relative to
+// was never persisted, so resolving it against the current one is a guess, and
+// the wrong guess is the unrecoverable direction: a resolution that lands on an
+// unrelated file silences that file permanently. Nudging once about an artifact
+// that turns out to be saved is the failure we prefer.
+//
+// The absolute case is the real path and is covered by the tests above; this
+// pins that we do not quietly extend it to paths we cannot prove.
+func TestFindUnsavedArtifacts_RelativeSavedSourceIsUnprovable(t *testing.T) {
 	root := newPlanCaptureTestRepo(t)
 	page := filepath.Join(root, "docs", "review.html")
 	authoredPage(t, page)
 
-	// newPlanCaptureTestRepo chdirs into root, so this relative path resolves
-	// to the same artifact the walk finds.
 	if _, _, err := plan.Save(root, plan.Input{Raw: "# Review\n"}, plan.Result{}, nil,
 		plan.Meta{Topic: "Review", SourcePlanPath: filepath.Join("docs", "review.html")}); err != nil {
 		t.Fatalf("seed saved plan: %v", err)
 	}
 
-	if got := findUnsavedArtifacts(root, time.Now()); len(got) != 0 {
-		t.Fatalf("nudged on an artifact a saved plan already claims: %v", got)
+	if got := findUnsavedArtifacts(root, time.Now()); !slices.Contains(got, page) {
+		t.Fatalf("a relative stored path was treated as proof the artifact is saved: got %v, want %s", got, page)
 	}
 }
 

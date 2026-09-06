@@ -95,9 +95,8 @@ func looksAuthoredPage(head []byte) bool {
 
 // normalizeArtifactPath is the single normalization BOTH sides of the claimed
 // check go through — the ledger's stored source path and the path the walk
-// found — so a legacy relative SourcePlanPath compares equal to the absolute
-// path on disk. An unresolvable path yields an error and is dropped rather
-// than compared raw.
+// found — so the two are compared in one spelling and never as raw strings.
+// An unresolvable path yields an error and is dropped rather than compared raw.
 func normalizeArtifactPath(p string) (string, error) {
 	abs, err := filepath.Abs(p)
 	if err != nil {
@@ -128,6 +127,16 @@ func savedSourcePaths(gitRoot string) map[string]bool {
 	for _, i := range infos {
 		m, err := plan.LoadMeta(i.Dir)
 		if err != nil || m.SourcePlanPath == "" {
+			continue
+		}
+		// A RELATIVE stored path is unprovable, so it claims nothing. Save
+		// records an absolute path (absSourcePlanPath), but a legacy entry may
+		// hold a relative one — and the working directory it was relative TO
+		// was never persisted. Resolving it against whatever cwd happens to be
+		// current would be a guess, and the failure it buys is the bad one: a
+		// guess that lands on an unrelated file silences that file forever. An
+		// unclaimed legacy artifact nudges once instead, which is recoverable.
+		if !filepath.IsAbs(m.SourcePlanPath) {
 			continue
 		}
 		abs, err := normalizeArtifactPath(m.SourcePlanPath)
