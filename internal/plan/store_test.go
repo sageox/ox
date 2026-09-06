@@ -490,3 +490,103 @@ func TestReadPlanMeta_LegacyNoProvenance(t *testing.T) {
 		t.Errorf("legacy meta should have empty new fields, got %+v", got)
 	}
 }
+
+// TestSave_ResaveFromSameSourceRevisesInPlace pins the field bug: one authored
+// page saved twice, with an H1 edit between saves, produced TWO ledger plans
+// (identical source_plan_path, minutes apart) because the slug is derived from
+// the topic. The human had to run `ox plan supersede` by hand.
+func TestSave_ResaveFromSameSourceRevisesInPlace(t *testing.T) {
+	withLedger(t, t.TempDir())
+	gitRoot := "/g"
+	src := "/tmp/authored-page.html"
+
+	first := Meta{Topic: "Arc typography at actual size — device capture review",
+		SourcePlanPath: src, Primary: PrimaryHTML}
+	if _, _, err := Save(gitRoot, Input{}, Result{}, []byte("<h1>a</h1>"), first); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	// Same file, edited title — the exact shape that forked in the field.
+	second := Meta{Topic: "Arc typography at actual size",
+		SourcePlanPath: src, Primary: PrimaryHTML}
+	if _, _, err := Save(gitRoot, Input{}, Result{}, []byte("<h1>b</h1>"), second); err != nil {
+		t.Fatalf("second save: %v", err)
+	}
+
+	infos, err := List(gitRoot)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(infos) != 1 {
+		var got []string
+		for _, i := range infos {
+			got = append(got, i.Slug)
+		}
+		t.Fatalf("re-save forked the plan: got %d plans %v, want 1", len(infos), got)
+	}
+}
+
+// An explicit slug still wins, and a superseded plan is never revived.
+func TestSave_ExplicitSlugAndSupersededAreRespected(t *testing.T) {
+	withLedger(t, t.TempDir())
+	gitRoot := "/g"
+	src := "/tmp/page.html"
+
+	dead := Meta{Topic: "Old", Slug: "old-plan", SourcePlanPath: src,
+		Status: PlanStatusSuperseded}
+	if _, _, err := Save(gitRoot, Input{}, Result{}, nil, dead); err != nil {
+		t.Fatalf("save superseded: %v", err)
+	}
+	fresh := Meta{Topic: "New take", SourcePlanPath: src}
+	if _, _, err := Save(gitRoot, Input{}, Result{}, nil, fresh); err != nil {
+		t.Fatalf("save fresh: %v", err)
+	}
+	infos, _ := List(gitRoot)
+	if len(infos) != 2 {
+		t.Fatalf("a superseded plan was revived: got %d plans, want 2", len(infos))
+	}
+}
+
+// TestSave_KindRecordedAndDefaulted pins that an artifact's KIND survives the
+// round-trip and that everything saved before kinds existed still reads as a
+// plan. The single noun "plan" is what let a finished review sheet go unsaved.
+func TestSave_KindRecordedAndDefaulted(t *testing.T) {
+	withLedger(t, t.TempDir())
+	for _, tc := range []struct {
+		name string
+		kind ArtifactKind
+		want ArtifactKind
+	}{
+		{"review sheet keeps its kind", KindReview, KindReview},
+		{"mockup keeps its kind", KindMockup, KindMockup},
+		{"legacy plan with no kind reads as plan", "", KindPlan},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := Meta{Topic: "Artifact " + tc.name, Kind: tc.kind,
+				SourcePlanPath: "/tmp/" + string(tc.want) + "-" + tc.name + ".html"}
+			dir, _, err := Save("/g", Input{}, Result{}, nil, meta)
+			if err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			got, err := LoadMeta(dir)
+			if err != nil {
+				t.Fatalf("load meta: %v", err)
+			}
+			if KindOrDefault(got.Kind) != tc.want {
+				t.Fatalf("kind = %q, want %q", got.Kind, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidKind(t *testing.T) {
+	for _, ok := range []string{"", "plan", "mockup", "review", "evidence", "REVIEW", " mockup "} {
+		if !ValidKind(ok) {
+			t.Errorf("ValidKind(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"sketch", "diagram", "notes"} {
+		if ValidKind(bad) {
+			t.Errorf("ValidKind(%q) = true, want false", bad)
+		}
+	}
+}

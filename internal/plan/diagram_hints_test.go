@@ -281,3 +281,36 @@ func TestBuildGuidance_FoldsVizHints(t *testing.T) {
 		t.Errorf("no viz hints should omit the clause: %s", g2)
 	}
 }
+
+// TestMockupExpectation_IgnoresDetailsAppendix pins the rule interaction that
+// the human-attention lint creates: it REQUIRES a collapsed <details>
+// Implementation notes appendix, that appendix carries no heading of its own so
+// its prose lands in the preceding section, and its regeneration commands
+// unavoidably say "screenshot" and "screen". Two distinct body cues is exactly
+// minVizScore, so before stripDetails the mockup expectation fired on a section
+// that changes no user-facing surface.
+//
+// Red without the fix: computeMockupExpectation returns the heading.
+func TestMockupExpectation_IgnoresDetailsAppendix(t *testing.T) {
+	in := Input{Sections: []Section{{
+		Heading: "What this does not establish",
+		Body: "Physical size and viewing distance are not reproduced here.\n" +
+			"<details><summary>Implementation notes</summary>\n" +
+			"python tools/arc-lab/device_review.py --host IP  # one screenshot per screen\n" +
+			"</details>",
+	}}}
+	if got := computeMockupExpectation(in); got != "" {
+		t.Fatalf("appendix prose drove a mockup expectation: got %q, want none", got)
+	}
+}
+
+// A genuine user-facing section must still fire — the fix must not blunt the rule.
+func TestMockupExpectation_StillFiresOnRealSurface(t *testing.T) {
+	in := Input{Sections: []Section{{
+		Heading: "Onboarding screen",
+		Body:    "The empty state needs microcopy.",
+	}}}
+	if got := computeMockupExpectation(in); got != "Onboarding screen" {
+		t.Fatalf("real surface stopped firing: got %q", got)
+	}
+}

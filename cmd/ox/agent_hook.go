@@ -505,6 +505,10 @@ func handlePrompt(ctx *HookContext) error {
 	// plan mode (which leaves no artifact ox can find) and any session where
 	// plan mode was never entered. Fail-open.
 	emitUnsavedPlanNudge(os.Stdout, ctx.ProjectRoot, agentID)
+	// The plan nudge above only fires when `ox plan enrich` armed it. An agent
+	// that authored a page without ever running enrich arms nothing, so the
+	// artifact itself is the second, independent signal.
+	emitUnsavedArtifactNudge(os.Stdout, ctx.ProjectRoot, agentID)
 
 	// Steer the agent toward `ox plan enrich`/`ox plan render` at the planning
 	// moment — fired when the agent is in plan mode (permission_mode == "plan")

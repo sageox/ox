@@ -236,9 +236,23 @@ when the plan carried SageOx enrichment the render must credit it (footer line +
 an anchored OX marker), an un-enriched plan must not overclaim, and the SageOx
 mark must be self-contained (no live remote avatar). Advisory by default; pass
 --strict to exit non-zero on findings (for CI / golden checks).`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		strict, _ := cmd.Flags().GetBool("strict")
+		// --file lints an UNSAVED page. Every finding this reports (missing
+		// hero visual, no Implementation notes appendix, missing wordmark) is
+		// an AUTHORING-time concern, but a slug-only lint cannot be run until
+		// the page is already in the ledger — so in practice a page shipped,
+		// and only then learned what was wrong with it.
+		if file, _ := cmd.Flags().GetString("file"); file != "" {
+			if len(args) > 0 {
+				return fmt.Errorf("pass either <slug> or --file, not both")
+			}
+			return runPlanLintFile(cmd, file, strict)
+		}
+		if len(args) == 0 {
+			return fmt.Errorf("pass a saved plan <slug>, or --file <plan.html> to lint before saving")
+		}
 		return runPlanLint(cmd, args[0], strict)
 	},
 }
@@ -292,7 +306,23 @@ func planLFSClient(gitRoot string) *lfs.Client {
 // DERIVED markdown (ExtractMarkdown). An HTML-primary page may declare its own
 // slug via <meta name="ox-plan-slug"> (the authoring contract), which then
 // wins over the title-derived one.
-func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html []byte, primary string) string {
+// planSaveOpts carries the optional, caller-supplied facts about a save that
+// most call sites do not have an opinion about.
+type planSaveOpts struct{ kind string }
+
+// saveOpt sets one optional save fact. Variadic so the existing call sites —
+// which have no kind to declare — keep compiling unchanged.
+type saveOpt func(*planSaveOpts)
+
+// withKind records WHAT the artifact is (mockup / review / evidence); empty
+// means the default, a plan.
+func withKind(k string) saveOpt { return func(o *planSaveOpts) { o.kind = k } }
+
+func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html []byte, primary string, options ...saveOpt) string {
+	var opts planSaveOpts
+	for _, o := range options {
+		o(&opts)
+	}
 	topic := planTopic(in)
 	slug := plan.Slugify(topic)
 	if primary == plan.PrimaryHTML {
@@ -306,6 +336,7 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 
 	meta := plan.Meta{
 		Topic:          topic,
+		Kind:           plan.ArtifactKind(opts.kind),
 		Slug:           slug,
 		Authors:        planAuthors(gitRoot),
 		CreatedAt:      time.Now().UTC(),
@@ -517,6 +548,12 @@ func runPlanSave(cmd *cobra.Command) error {
 // deterministic enrichment itself, so a single command turns an authored page
 // into a saved, enriched, reviewable plan.
 func runPlanSaveFile(cmd *cobra.Command, filePath, annPath string) error {
+	kind, _ := cmd.Flags().GetString("kind")
+	if !plan.ValidKind(kind) {
+		return fmt.Errorf("unknown --kind %q; want one of: %s",
+			kind, strings.Join(plan.AllKinds(), ", "))
+	}
+
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("read plan %q: %w", filePath, err)
@@ -542,7 +579,7 @@ func runPlanSaveFile(cmd *cobra.Command, filePath, annPath string) error {
 		mdIn := plan.Parse(derived)
 		mdIn.Path = filePath
 		result := loadResult(mdIn)
-		dir := savePlanArtifacts(gitRoot, mdIn, result, data, plan.PrimaryHTML)
+		dir := savePlanArtifacts(gitRoot, mdIn, result, data, plan.PrimaryHTML, withKind(kind))
 		if dir == "" {
 			return fmt.Errorf("save plan: no ledger configured for %q or write failed", gitRoot)
 		}
@@ -559,7 +596,7 @@ func runPlanSaveFile(cmd *cobra.Command, filePath, annPath string) error {
 	in := plan.Parse(string(data))
 	in.Path = filePath
 	result := loadResult(in)
-	dir := savePlanArtifacts(gitRoot, in, result, nil, "")
+	dir := savePlanArtifacts(gitRoot, in, result, nil, "", withKind(kind))
 	if dir == "" {
 		return fmt.Errorf("save plan: no ledger configured for %q or write failed", gitRoot)
 	}
@@ -572,6 +609,61 @@ func runPlanSaveFile(cmd *cobra.Command, filePath, annPath string) error {
 // findings. Advisory by default; --strict makes it exit non-zero on findings so
 // a golden check or CI step can enforce the contract. Fail-open on a missing or
 // LFS-dehydrated render (nothing local to lint).
+// runPlanLintFile lints an authored page that has NOT been saved yet, so an
+// author can fix craft findings before the artifact reaches the ledger. It
+// runs the same render + craft checks as the saved path against locally
+// computed enrichment; the attribution/session check is skipped, since an
+// unsaved page has no recorded session to link to yet — and per the false-negative
+// lesson below, a skipped check is reported as skipped, never as a pass.
+func runPlanLintFile(cmd *cobra.Command, filePath string, strict bool) error {
+	out := cmd.OutOrStdout()
+	html, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read %q: %w", filePath, err)
+	}
+	if !plan.LooksLikeHTML(string(html)) {
+		return fmt.Errorf("%q does not look like an authored HTML page", filePath)
+	}
+
+	in := plan.Parse(plan.ExtractMarkdown(html))
+	in.Path = filePath
+	res := plan.Enrich(context.Background(), in, findGitRoot())
+
+	checked := plan.InjectChrome(html, plan.BuildChromeData(res, plan.RenderOptions{
+		Slug: strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath)),
+	}))
+	// Two checks cannot be answered before a save, and per the false-negative
+	// lesson in runPlanLint a check that did not run is reported as SKIPPED,
+	// never folded into a pass:
+	//   - the anchored OX marker is injected by ox chrome when a SAVED plan
+	//     renders, so an unsaved page legitimately has none;
+	//   - the session link needs a recorded session this page does not have yet.
+	var findings []plan.Finding
+	var skipped []string
+	for _, f := range append(plan.LintRender(checked, res), plan.LintCraft(res, html)...) {
+		if f.Rule == "branding.ox-marker" {
+			skipped = append(skipped, f.Rule)
+			continue
+		}
+		findings = append(findings, f)
+	}
+	skipped = append(skipped, "branding.session-link")
+
+	if len(findings) == 0 {
+		fmt.Fprintf(out, "%s render + craft checks OK — not saved yet, so these did NOT run: %s\n",
+			cli.StyleSuccess.Render("✓"), strings.Join(skipped, ", "))
+		return nil
+	}
+	for _, f := range findings {
+		fmt.Fprintf(out, "%s [%s] %s\n", cli.StyleWarning.Render("!"), f.Rule, f.Message)
+	}
+	fmt.Fprintf(out, "  (not saved yet, so these did NOT run: %s)\n", strings.Join(skipped, ", "))
+	if strict {
+		return fmt.Errorf("%d plan lint finding(s)", len(findings))
+	}
+	return nil
+}
+
 func runPlanLint(cmd *cobra.Command, slug string, strict bool) error {
 	out := cmd.OutOrStdout()
 	gitRoot := findGitRoot()
@@ -1148,16 +1240,17 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, cli.StyleDim.Render("SLUG\tDATE\tSTATUS\tHTML\tREVIEW\tAUTHORS\tTOPIC"))
+	fmt.Fprintln(tw, cli.StyleDim.Render("SLUG\tDATE\tKIND\tSTATUS\tHTML\tREVIEW\tAUTHORS\tTOPIC"))
 	anyOpen := false
 	for _, p := range plans {
 		open := openReviewCount(p.Dir)
 		if open > 0 {
 			anyOpen = true
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.Slug,
 			planDate(p.CreatedAt),
+			string(plan.KindOrDefault(p.Kind)),
 			statusMark(p.Status),
 			htmlMark(p.HasHTML),
 			reviewMark(open),
@@ -1170,6 +1263,15 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 	}
 	if anyOpen {
 		cli.PrintHint("Plans with open review items — `ox plan feedback show <slug>`, address, then `ox plan feedback resolve`.")
+	}
+	// Second surface for the artifact gap. The prompt-hook nudge reaches the
+	// model mid-session; this reaches a HUMAN on resume, which matters because
+	// most people never run `ox session stop` — they close the terminal and let
+	// anti-entropy pick the session up later.
+	if arts := findUnsavedArtifacts(findGitRoot(), time.Now()); len(arts) > 0 {
+		cli.PrintHint(fmt.Sprintf(
+			"%d self-contained page(s) authored here are not in the ledger (e.g. %s) — `ox plan save --file <page> --kind mockup|review|evidence`.",
+			len(arts), filepath.Base(arts[0])))
 	}
 	return nil
 }
@@ -1399,6 +1501,8 @@ func init() {
 	planListCmd.Flags().Bool("json", false, "emit the plan list as JSON (scripting path)")
 
 	planSaveCmd.Flags().String("file", "", "the plan of record: an authored self-contained .html page (preferred; saved as canonical, markdown derived) or a .md quick plan; annotations optional (ox self-enriches)")
+	planLintCmd.Flags().String("file", "", "lint an UNSAVED authored page before the first save (authoring-time checks)")
+	planSaveCmd.Flags().String("kind", "", "what this artifact IS: plan (default) | mockup | review | evidence — a mockup, review sheet or evidence page belongs in the ledger exactly as much as a plan does")
 	planSaveCmd.Flags().String("plan", "", "legacy: plan markdown file (with --annotations; prefer --file)")
 	planSaveCmd.Flags().String("annotations", "", "merged annotations.json: enrich badges + AI-coworker judgment badges (required with --plan; optional with --file, which self-enriches)")
 	planSaveCmd.Flags().String("html", "", "deprecated and rejected: save authored HTML canonically with --file plan.html")

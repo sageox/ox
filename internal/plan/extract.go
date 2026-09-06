@@ -36,6 +36,14 @@ var headingLevel = map[atom.Atom]int{
 // degrades to its visible text. Never returns an error — a malformed
 // document yields best-effort text (the derived md is a convenience view,
 // the authored HTML stays the plan of record).
+// DetailsOpenMarker / DetailsCloseMarker fence a collapsed <details> appendix in
+// derived markdown. Invisible when rendered; read by stripDetails so
+// implementation notes never drive diagram or mockup expectations.
+const (
+	DetailsOpenMarker  = "<!-- ox:details -->"
+	DetailsCloseMarker = "<!-- /ox:details -->"
+)
+
 func ExtractMarkdown(htmlBytes []byte) string {
 	doc, err := html.Parse(strings.NewReader(string(htmlBytes)))
 	if err != nil {
@@ -139,6 +147,21 @@ func (e *extractor) walkBlock(n *html.Node) {
 			}
 
 			switch c.DataAtom {
+			case atom.Details:
+				// Fence the collapsed appendix with invisible markers so
+				// downstream cue scoring can tell implementation notes from
+				// the plan's own prose. Without this the tags are dropped and
+				// the notes read as ordinary body text: the appendix that the
+				// human-attention lint REQUIRES then supplied two mockup cues
+				// ("screenshot", "screen" in a regeneration command) and
+				// tripped the mockup rule on a section that changes no UI.
+				// HTML comments, so nothing is visible in the rendered
+				// markdown and no content is lost.
+				e.flush()
+				e.blocks = append(e.blocks, DetailsOpenMarker)
+				e.walkBlock(c)
+				e.flush()
+				e.blocks = append(e.blocks, DetailsCloseMarker)
 			case atom.H1, atom.H2, atom.H3, atom.H4, atom.H5, atom.H6:
 				e.flush()
 				e.emitHeading(c)

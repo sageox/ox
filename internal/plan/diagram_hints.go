@@ -2,6 +2,7 @@ package plan
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -238,9 +239,47 @@ const minVizScore = 2
 // scoreVizSection scores one section against a pattern's cues. A heading match
 // counts double (the agent TITLED the section that — a strong signal); a body
 // match counts once. Returns the score and the distinct terms that hit.
+// detailsBlockRe matches a collapsed <details> appendix, including its summary
+// and body, so cue scoring can ignore it. Non-greedy and (?is) so it spans
+// newlines and tolerates attributes/case.
+var detailsBlockRe = regexp.MustCompile(`(?is)<details\b[^>]*>.*?</details>`)
+
+// detailsMarkerRe matches the fenced form ExtractMarkdown leaves in derived
+// markdown. Both forms exist because scoring runs against RAW authored HTML in
+// some paths and DERIVED markdown in others — handling only the tag form is why
+// the first fix looked right in a unit test and changed nothing in practice.
+var detailsMarkerRe = regexp.MustCompile(`(?is)` + regexp.QuoteMeta(DetailsOpenMarker) + `.*?` + regexp.QuoteMeta(DetailsCloseMarker))
+
+// stripDetails removes collapsed <details> appendices from prose before cue
+// scoring.
+//
+// Why this exists: the human-attention lint REQUIRES a material plan to carry a
+// closed <details>Implementation notes</details> appendix, and that appendix has
+// no heading of its own — so its prose is attributed to the preceding H2. Its
+// unavoidable vocabulary ("screenshot", "screen", "swipe" in a regeneration
+// command) then supplies two distinct body cues, which is exactly minVizScore,
+// and the mockup expectation fires on a section that changes no user-facing
+// surface. Satisfying one rule tripped the other.
+//
+// The precision policy documented above ("an incidental 'screen' in body prose
+// scores 1 and does not fire") holds for one cue and breaks for two — and the
+// required appendix reliably supplies two. Implementation notes are written FOR
+// the implementer; they are not a description of a surface, so they should not
+// drive diagram or mockup expectations at all.
+func stripDetails(body string) string {
+	out := body
+	if strings.Contains(out, DetailsOpenMarker) {
+		out = detailsMarkerRe.ReplaceAllString(out, " ")
+	}
+	if strings.Contains(strings.ToLower(out), "<details") {
+		out = detailsBlockRe.ReplaceAllString(out, " ")
+	}
+	return out
+}
+
 func scoreVizSection(heading, body string, cues []string) (int, []string) {
 	h := strings.ToLower(" " + heading + " ")
-	bd := strings.ToLower(" " + body + " ")
+	bd := strings.ToLower(" " + stripDetails(body) + " ")
 	score := 0
 	var hits []string
 	for _, c := range cues {
