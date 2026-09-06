@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -52,6 +54,21 @@ const (
 
 	// artifactScanMaxDepth keeps the walk cheap on a large repo.
 	artifactScanMaxDepth = 6
+
+	// artifactMaxNudged caps how many artifacts one scan reports: a nudge
+	// names a few, never a wall.
+	artifactMaxNudged = 3
+
+	// artifactCandidateCap bounds the metadata-only candidate list the walk
+	// collects. Head-reading happens after the walk returns, so the walk
+	// cannot know which candidates will survive looksAuthoredPage — this cap
+	// is what keeps the work bounded on a repo full of large generated HTML
+	// that the size/age gates alone do not exclude.
+	artifactCandidateCap = 32
+
+	// artifactHeadBytes is how much of a candidate is examined to decide
+	// whether it reads as an authored page.
+	artifactHeadBytes = 2048
 )
 
 // artifactSkipDirs are never walked: build output and dependency trees hold
@@ -76,8 +93,32 @@ func looksAuthoredPage(head []byte) bool {
 		strings.Contains(h, "data-ox-section")
 }
 
-// savedSourcePaths returns the absolute source paths every saved plan already
-// claims, so an artifact that IS in the ledger never nudges.
+// normalizeArtifactPath is the single normalization BOTH sides of the claimed
+// check go through — the ledger's stored source path and the path the walk
+// found — so a legacy relative SourcePlanPath compares equal to the absolute
+// path on disk. An unresolvable path yields an error and is dropped rather
+// than compared raw.
+func normalizeArtifactPath(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
+}
+
+// savedSourcePaths returns the normalized absolute source paths every saved
+// plan already claims, so an artifact that IS in the ledger never nudges.
+//
+// Artifact identity is the source path and nothing else. Also matching on
+// basename looked like a cheap way to recognize a page copied to a temp path
+// before being saved, but the authoring contract tells everyone to name the
+// file plan.html — so ONE saved plan silenced every future page in the
+// project, and `docs/review.html` claimed an unrelated `scratch/review.html`.
+// The accepted cost of dropping it: a page saved from a temp copy will nudge
+// once about the working-tree original. That is the right trade — a stale
+// reminder is recoverable, a permanently silenced one is not. If copies ever
+// need to be equivalent, that calls for an explicit stored identity for the
+// copy relationship, not a basename guess.
 func savedSourcePaths(gitRoot string) map[string]bool {
 	out := map[string]bool{}
 	infos, err := plan.List(gitRoot)
@@ -89,11 +130,11 @@ func savedSourcePaths(gitRoot string) map[string]bool {
 		if err != nil || m.SourcePlanPath == "" {
 			continue
 		}
-		out[m.SourcePlanPath] = true
-		// A page is often copied to a temp path before saving, so also match
-		// on basename: the ledger records the copy, the working tree holds the
-		// original, and they are the same artifact.
-		out["base:"+filepath.Base(m.SourcePlanPath)] = true
+		abs, err := normalizeArtifactPath(m.SourcePlanPath)
+		if err != nil {
+			continue
+		}
+		out[abs] = true
 	}
 	return out
 }
@@ -101,6 +142,12 @@ func savedSourcePaths(gitRoot string) map[string]bool {
 // findUnsavedArtifacts walks the project for recently-authored self-contained
 // pages that no saved plan claims. Bounded in depth, size and age so it stays
 // cheap enough to run on a prompt hook.
+//
+// The walk collects candidates from directory metadata ONLY; their heads are
+// read after it returns. Opening a file from inside a WalkDir callback races
+// the walk's own view of the tree — a directory component can be swapped for a
+// symlink between the walk's stat and the open — so the read happens once the
+// tree is no longer being enumerated.
 func findUnsavedArtifacts(projectRoot string, now time.Time) []string {
 	if projectRoot == "" {
 		return nil
@@ -108,7 +155,7 @@ func findUnsavedArtifacts(projectRoot string, now time.Time) []string {
 	claimed := savedSourcePaths(projectRoot)
 	rootDepth := strings.Count(filepath.Clean(projectRoot), string(os.PathSeparator))
 
-	var found []string
+	var candidates []string
 	_ = filepath.WalkDir(projectRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // unreadable subtree: skip, never fail the hook
@@ -132,46 +179,60 @@ func findUnsavedArtifacts(projectRoot string, now time.Time) []string {
 		if now.Sub(info.ModTime()) > artifactMaxAge {
 			return nil
 		}
-		abs, err := filepath.Abs(path)
-		if err != nil {
+		abs, err := normalizeArtifactPath(path)
+		if err != nil || claimed[abs] {
 			return nil
 		}
-		if claimed[abs] || claimed["base:"+filepath.Base(abs)] {
-			return nil
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return nil
-		}
-		head := make([]byte, 2048)
-		n, _ := f.Read(head)
-		_ = f.Close()
-		if !looksAuthoredPage(head[:n]) {
-			return nil
-		}
-		found = append(found, abs)
-		if len(found) >= 3 {
-			return filepath.SkipAll // one nudge names a few, never a wall
+		candidates = append(candidates, abs)
+		if len(candidates) >= artifactCandidateCap {
+			return filepath.SkipAll
 		}
 		return nil
 	})
+
+	var found []string
+	for _, abs := range candidates {
+		if !looksAuthoredPage(artifactHead(abs)) {
+			continue
+		}
+		found = append(found, abs)
+		if len(found) >= artifactMaxNudged {
+			break
+		}
+	}
 	return found
 }
 
+// artifactHead reads the opening bytes of a candidate. Called only after the
+// walk has returned; an unreadable file yields no bytes, which reads as
+// not-an-authored-page.
+func artifactHead(path string) []byte {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	head := make([]byte, artifactHeadBytes)
+	n, _ := f.Read(head)
+	_ = f.Close()
+	return head[:n]
+}
+
 // artifactNudgedPath is the marker recording that this artifact was mentioned.
+//
+// The filename is a hash of the absolute artifact path, not a rewrite of the
+// path itself. Flattening separators made distinct artifacts collide —
+// /repo/a/b.html and /repo/a_b.html produced the same marker, so the second
+// page was silenced by the first's reminder and never nudged at all. Hex also
+// preserves the flatten's actual purpose for free: it can hold neither a path
+// separator nor "..", so the marker can never escape the cache dir.
 func artifactNudgedPath(projectRoot, agentID, artifact string) string {
 	base := planUnsavedPath(projectRoot, agentID)
 	if base == "" {
 		return ""
 	}
 	dir := filepath.Join(filepath.Dir(filepath.Dir(base)), artifactNudgeCacheSubdir)
-	// The artifact path is attacker-influenced; hash-free but flattened so it
-	// can never escape the cache dir.
-	safe := strings.NewReplacer(string(os.PathSeparator), "_", ":", "_", "..", "_").Replace(artifact)
-	if len(safe) > 180 {
-		safe = safe[len(safe)-180:]
-	}
-	return filepath.Join(dir, safe+".json")
+	sum := sha256.Sum256([]byte(artifact))
+	return filepath.Join(dir, hex.EncodeToString(sum[:])[:32]+".json")
 }
 
 // emitUnsavedArtifactNudge tells the model about a self-contained page it

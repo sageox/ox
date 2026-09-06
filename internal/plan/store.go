@@ -192,41 +192,6 @@ func LoadMeta(planDir string) (Meta, error) {
 	return readMeta(planDir)
 }
 
-// Save writes a captured plan into the ledger under data/plans/<dated-slug>/.
-// It writes plan.md (from in.Raw), annotations.json (res), and meta.json as
-// plain git-tracked text. plan.html is written ONLY when html != nil, and always
-// as PLAIN bytes — dehydration of a large render to an LFS pointer is the CLI
-// caller's job (DehydrateHTML), post-upload. Save never renders HTML, never
-// uploads, and never commits — it only materializes files in the working tree.
-// Returns the absolute plan directory.
-//
-// Save also appends one lifecycle event to the plan's events.jsonl (see
-// events.go) — additive, dual-write alongside meta.json: meta.json remains the
-// canonical snapshot read, events.jsonl is the append-only history a reader
-// folds to reconstruct it. The append is best-effort and never fails Save; the
-// stored plan.html's <head> is stamped with the resulting pln_ id (see
-// html_meta.go).
-//
-// gitRoot is the producing project's git root; the ledger path is resolved
-// from it via ProjectContext. Returns an error if no ledger is configured
-// (the caller decides whether that is fatal — the porcelain path treats it as
-// "nothing to save").
-//
-// The returned EventKind is the kind Save actually appended — EventCreated on a
-// plan's first save, EventRevised on every later one. It is returned rather
-// than left for the caller to re-derive because re-reading events.jsonl to
-// learn what we just wrote is not equivalent: the append is best-effort, so on
-// failure the log's last entry is a STALE event (possibly an `approved` from a
-// lifecycle verb, a kind a save never produces), and the read happens after
-// this function's flock is released, so a concurrent AppendPlanEvent can land
-// in between. Both make the caller report a kind that disagrees with this save.
-// On an append failure the returned kind is still the kind this save decided —
-// callers reporting it to a server are describing the save, not the file.
-// priorSaveOfSource finds a live plan already saved from the same source file,
-// so a re-save revises it instead of forking a new one. Superseded, abandoned
-// and realized plans are skipped — those lifecycle states are deliberate and a
-// later save must not silently reopen them. Fail-open: any read error yields
-// "no prior", which restores the derive-from-topic behaviour.
 // ArtifactKind names what a saved artifact IS. The storage, review loop and
 // chrome are identical for every kind — they differ only in when they arrive
 // and what a reader should expect, which is exactly the distinction the single
@@ -268,6 +233,11 @@ func AllKinds() []string {
 	return []string{string(KindPlan), string(KindMockup), string(KindReview), string(KindEvidence)}
 }
 
+// priorSaveOfSource finds a live plan already saved from the same source file,
+// so a re-save revises it instead of forking a new one. Superseded, abandoned
+// and realized plans are skipped — those lifecycle states are deliberate and a
+// later save must not silently reopen them. Fail-open: any read error yields
+// "no prior", which restores the derive-from-topic behavior.
 func priorSaveOfSource(ledger, sourcePath string) (Meta, bool) {
 	if strings.TrimSpace(sourcePath) == "" {
 		return Meta{}, false
@@ -302,6 +272,36 @@ func priorSaveOfSource(ledger, sourcePath string) (Meta, bool) {
 	return best, found
 }
 
+// Save writes a captured plan into the ledger under data/plans/<dated-slug>/.
+// It writes plan.md (from in.Raw), annotations.json (res), and meta.json as
+// plain git-tracked text. plan.html is written ONLY when html != nil, and always
+// as PLAIN bytes — dehydration of a large render to an LFS pointer is the CLI
+// caller's job (DehydrateHTML), post-upload. Save never renders HTML, never
+// uploads, and never commits — it only materializes files in the working tree.
+// Returns the absolute plan directory.
+//
+// Save also appends one lifecycle event to the plan's events.jsonl (see
+// events.go) — additive, dual-write alongside meta.json: meta.json remains the
+// canonical snapshot read, events.jsonl is the append-only history a reader
+// folds to reconstruct it. The append is best-effort and never fails Save; the
+// stored plan.html's <head> is stamped with the resulting pln_ id (see
+// html_meta.go).
+//
+// gitRoot is the producing project's git root; the ledger path is resolved
+// from it via ProjectContext. Returns an error if no ledger is configured
+// (the caller decides whether that is fatal — the porcelain path treats it as
+// "nothing to save").
+//
+// The returned EventKind is the kind Save actually appended — EventCreated on a
+// plan's first save, EventRevised on every later one. It is returned rather
+// than left for the caller to re-derive because re-reading events.jsonl to
+// learn what we just wrote is not equivalent: the append is best-effort, so on
+// failure the log's last entry is a STALE event (possibly an `approved` from a
+// lifecycle verb, a kind a save never produces), and the read happens after
+// this function's flock is released, so a concurrent AppendPlanEvent can land
+// in between. Both make the caller report a kind that disagrees with this save.
+// On an append failure the returned kind is still the kind this save decided —
+// callers reporting it to a server are describing the save, not the file.
 func Save(gitRoot string, in Input, res Result, html []byte, meta Meta) (string, EventKind, error) {
 	ledger := ledgerPathFor(gitRoot)
 	if ledger == "" {

@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/internal/plan"
 )
 
 // authoredPage writes a self-contained page big enough to clear the size gate.
@@ -102,5 +105,81 @@ func TestEmitUnsavedArtifactNudge_OncePerArtifact(t *testing.T) {
 	}
 	if second.Len() != 0 {
 		t.Fatalf("nudge repeated on the next prompt: %q", second.String())
+	}
+}
+
+// A saved plan claims ONE artifact: the source path it was saved from. Two
+// pages that merely share a basename are two artifacts. This is the regression
+// that mattered most in practice — the authoring contract tells everyone to
+// name the file plan.html, so basename matching meant the first saved plan
+// silenced every later page in the project.
+func TestFindUnsavedArtifacts_SameBasenameElsewhereStillNudges(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	savedSource := filepath.Join(root, "docs", "review.html")
+	authoredPage(t, savedSource)
+	unsaved := filepath.Join(root, "scratch", "review.html")
+	authoredPage(t, unsaved)
+
+	if _, _, err := plan.Save(root, plan.Input{Raw: "# Review\n"}, plan.Result{}, nil,
+		plan.Meta{Topic: "Review", SourcePlanPath: savedSource}); err != nil {
+		t.Fatalf("seed saved plan: %v", err)
+	}
+
+	got := findUnsavedArtifacts(root, time.Now())
+	if !slices.Contains(got, unsaved) {
+		t.Fatalf("a distinct artifact sharing a basename with a saved plan was silenced: got %v, want %s", got, unsaved)
+	}
+	if slices.Contains(got, savedSource) {
+		t.Errorf("the saved plan's own source nudged: %v", got)
+	}
+}
+
+// A relative SourcePlanPath (legacy plans) still claims its artifact: both
+// sides of the check normalize to an absolute, cleaned path.
+func TestFindUnsavedArtifacts_RelativeSavedSourceStillClaims(t *testing.T) {
+	root := newPlanCaptureTestRepo(t)
+	page := filepath.Join(root, "docs", "review.html")
+	authoredPage(t, page)
+
+	// newPlanCaptureTestRepo chdirs into root, so this relative path resolves
+	// to the same artifact the walk finds.
+	if _, _, err := plan.Save(root, plan.Input{Raw: "# Review\n"}, plan.Result{}, nil,
+		plan.Meta{Topic: "Review", SourcePlanPath: filepath.Join("docs", "review.html")}); err != nil {
+		t.Fatalf("seed saved plan: %v", err)
+	}
+
+	if got := findUnsavedArtifacts(root, time.Now()); len(got) != 0 {
+		t.Fatalf("nudged on an artifact a saved plan already claims: %v", got)
+	}
+}
+
+// Marker identity must survive paths that differ only where a flattening
+// scheme collapses them: /repo/a/b.html and /repo/a_b.html both flatten to
+// "_repo_a_b.html", so the second artifact was suppressed by the first's
+// marker and never nudged at all.
+func TestArtifactNudgedPath_DistinctPathsDistinctMarkers(t *testing.T) {
+	root := t.TempDir()
+	const agentID = "Ox0042"
+
+	nested := artifactNudgedPath(root, agentID, "/repo/a/b.html")
+	flat := artifactNudgedPath(root, agentID, "/repo/a_b.html")
+	if nested == "" || flat == "" {
+		t.Fatalf("no marker path: nested=%q flat=%q", nested, flat)
+	}
+	if nested == flat {
+		t.Fatalf("distinct artifacts share one marker: %s", nested)
+	}
+
+	// The artifact path is attacker-influenced, so the marker must stay inside
+	// the cache dir no matter what the path holds.
+	cacheDir := filepath.Join(root, ".sageox", "cache", artifactNudgeCacheSubdir)
+	for _, art := range []string{"/repo/a/b.html", "../../etc/passwd", `C:\x\y.html`} {
+		marker := artifactNudgedPath(root, agentID, art)
+		if name := filepath.Base(marker); strings.ContainsAny(name, `/\:`) || strings.Contains(name, "..") {
+			t.Errorf("marker filename for %q is not escape-proof: %q", art, name)
+		}
+		if dir := filepath.Dir(marker); dir != cacheDir {
+			t.Errorf("marker for %q escaped the cache dir: %s", art, dir)
+		}
 	}
 }
