@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -178,6 +179,21 @@ func LegacyBundles(repoRoot string, target adapterprotocol.SkillTarget) ([]strin
 		}
 		data, readErr := readNoSymlink(filepath.Join(root, entry.Name(), skills.SkillFileName))
 		if os.IsNotExist(readErr) {
+			continue
+		}
+		// A symlinked or non-regular SKILL.md here belongs to SOMEONE ELSE. This
+		// directory is shared: a repo puts its own skills beside ox's, and some
+		// of them are generated symlinks (the sageox monorepo's agent-parity
+		// mirrors are exactly this). Such a file cannot carry a valid ox stamp,
+		// so it can never be one of ours — skipping it is the correct answer.
+		//
+		// Aborting instead is what made skill rollout silently dead: this loop
+		// exists only to discover which bundles are already installed, and one
+		// foreign symlink returned an error for the WHOLE scan, so `ox doctor`
+		// reported "cannot inspect managed skills" and reconciled nothing. Every
+		// later ox release then failed to reach the repo — which is how a repo
+		// ends up missing ox-pr-header while the guidance points at it.
+		if errors.Is(readErr, ErrNonRegularFile) {
 			continue
 		}
 		if readErr != nil {
@@ -888,7 +904,14 @@ func retiredLegacyFiles(repoRoot string, target adapterprotocol.SkillTarget, des
 		}
 		data, readErr := readRepoFile(repoRoot, path)
 		if readErr != nil {
-			if os.IsNotExist(readErr) {
+			// Same shared-directory reasoning as LegacyBundles: this walks EVERY
+			// skill dir looking for retired ox skills, and a symlinked SKILL.md
+			// belongs to the repo, not to ox. It cannot carry a valid ox stamp, so
+			// it can never be a retirement candidate — skipping it is the answer.
+			// Returning the error instead aborted the entire plan, which is what
+			// made `ox doctor` report "cannot inspect managed skills" and reconcile
+			// nothing for any skill.
+			if os.IsNotExist(readErr) || errors.Is(readErr, ErrNonRegularFile) {
 				continue
 			}
 			return nil, readErr
@@ -915,7 +938,7 @@ func inspectRepoFile(repoRoot, relative string) ([]byte, fs.FileMode, error) {
 		return nil, 0, err
 	}
 	if info.Mode()&fs.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, 0, fmt.Errorf("refusing non-regular or symlink skill file %s", path)
+		return nil, 0, fmt.Errorf("%w: %s", ErrNonRegularFile, path)
 	}
 	data, err := os.ReadFile(path)
 	return data, info.Mode(), err
@@ -926,13 +949,22 @@ func readRepoFile(repoRoot, relative string) ([]byte, error) {
 	return data, err
 }
 
+// ErrNonRegularFile marks a path ox declined to read because it is a symlink or
+// otherwise not a regular file. Callers that are INSPECTING A FILE OX MANAGES
+// must treat it as fatal — following a symlink out of the repo is the
+// path-escape this refusal exists to prevent. Callers that are merely SCANNING
+// a shared directory to discover which skills are ox's should skip it: a file
+// ox cannot read is a file ox does not manage, which is an answer, not a
+// failure.
+var ErrNonRegularFile = errors.New("refusing non-regular or symlink file")
+
 func readNoSymlink(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
 	if info.Mode()&fs.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("refusing non-regular or symlink file %s", path)
+		return nil, fmt.Errorf("%w: %s", ErrNonRegularFile, path)
 	}
 	return os.ReadFile(path)
 }

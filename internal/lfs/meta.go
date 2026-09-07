@@ -74,11 +74,25 @@ type SessionMeta struct {
 	// recording created for the same native coding-agent session.
 	ContinuedFromSessionID string `json:"continued_from_session_id,omitempty"`
 
-	AgentType           string     `json:"agent_type"` // "claude-code", "cursor", etc.
-	Model               string     `json:"model,omitempty"`
-	Title               string     `json:"title,omitempty"`
-	CreatedAt           time.Time  `json:"created_at"`
-	EntryCount          int        `json:"entry_count,omitempty"`
+	AgentType string    `json:"agent_type"` // "claude-code", "cursor", etc.
+	Model     string    `json:"model,omitempty"`
+	Title     string    `json:"title,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+
+	// EntryCount is the number of CONVERSATION entries: user messages, assistant
+	// messages, and every tool call. It counts what the adapter read out of the
+	// agent's own session file, so the type:"header"/type:"footer" records ox
+	// writes into raw.jsonl are NOT included — `wc -l raw.jsonl` runs slightly
+	// ahead of this, and that gap is framing, not loss.
+	//
+	// It is NOT a turn count — one response turn
+	// routinely produces dozens of entries — and it is the authoritative size of
+	// a finished session, which is why finalize clears TurnCount and leaves this
+	// one. A draft is the only state that carries both counters; see ADR-029's
+	// consumer contract for why that pairing is where a reader picks the wrong
+	// "size".
+	EntryCount int `json:"entry_count,omitempty"`
+
 	Summary             string     `json:"summary,omitempty"`
 	StopReason          string     `json:"stop_reason,omitempty"`        // how session ended (session.StopReason* constants)
 	StopDetail          string     `json:"stop_detail,omitempty"`        // human-readable detail (matched message, capped 512B)

@@ -351,3 +351,66 @@ func TestSymlinkAndMalformedLockFailWithoutMutation(t *testing.T) {
 	_, err = Plan(symlinkLockRepo, "1.0.0", desiredFor(target), []adapterprotocol.SkillTarget{target})
 	require.ErrorContains(t, err, "symlink")
 }
+
+// TestForeignSymlinkDoesNotAbortSkillDiscovery pins the defect that made ox
+// skill rollout silently dead in any repo that keeps its own skills beside
+// ox's.
+//
+// `.claude/skills/` is SHARED. The sageox monorepo generates agent-parity
+// mirrors there as symlinks, and both whole-directory scans — LegacyBundles
+// (which bundles are installed?) and retiredLegacyFiles (which ox skills should
+// be removed?) — refused to read them and returned the error for the entire
+// scan. `ox doctor` then reported "cannot inspect managed skills" and
+// reconciled nothing, so every later ox release failed to reach the repo. That
+// is how a repo ends up without ox-pr-header while prime tells the agent to
+// "see the ox-pr-header skill".
+//
+// A symlinked SKILL.md cannot carry a valid ox stamp, so it is definitionally
+// not ox's. Skipping it is the correct answer; the hard refusal stays on the
+// write path, where following a symlink is the path-escape this guards.
+func TestForeignSymlinkDoesNotAbortSkillDiscovery(t *testing.T) {
+	t.Parallel()
+
+	repo := t.TempDir()
+	root := filepath.Join(repo, ".claude", "skills")
+
+	// One real ox-stamped skill, so discovery has something to find.
+	managed := filepath.Join(root, "ox-plan")
+	if err := os.MkdirAll(managed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("# ox-plan\n")
+	stamped := append([]byte("<!-- ox-hash: "+agentx.ContentHash(body)+" ver: 0.0.1 -->\n"), body...)
+	if err := os.WriteFile(filepath.Join(managed, "SKILL.md"), stamped, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A foreign skill whose SKILL.md is a symlink — the agent-parity shape.
+	foreign := filepath.Join(root, "bdd-compile")
+	if err := os.MkdirAll(foreign, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realFile := filepath.Join(repo, "tests", "bdd", "skills", "bdd-compile", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(realFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(realFile, []byte("# bdd-compile\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realFile, filepath.Join(foreign, "SKILL.md")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	target := adapterprotocol.SkillTarget{
+		Key: "claude", Root: ".claude/skills",
+		Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
+		LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+	}
+	bundles, err := LegacyBundles(repo, target)
+	if err != nil {
+		t.Fatalf("LegacyBundles aborted on a foreign symlink: %v", err)
+	}
+	if len(bundles) == 0 {
+		t.Error("discovery skipped the foreign symlink but also lost the real stamped skill beside it")
+	}
+}

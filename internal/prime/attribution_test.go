@@ -1,6 +1,7 @@
 package prime
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/config"
@@ -117,5 +118,33 @@ func TestBuildAttributionTextSection(t *testing.T) {
 				assert.NotContains(t, got, a)
 			}
 		})
+	}
+}
+
+// TestAttributionGuidanceStatesBothHalvesOfThePRContract pins the drift that
+// shipped a PR with the SageOx-Session trailer and no `ox pr header` credit
+// line: the markdown guidance here gained the header directive while the XML
+// renderer's hand-maintained sibling block (cmd/ox/agent_prime_xml.go) did not,
+// and XML is what a Claude Code agent actually reads.
+//
+// A PR body has two attribution ends. The trailer rides session state and is
+// re-emitted on every prime; the header is taught once, in guidance. If only
+// one end is stated, only one end ships — which is exactly what happened.
+func TestAttributionGuidanceStatesBothHalvesOfThePRContract(t *testing.T) {
+	t.Parallel()
+
+	got := WithAttributionGuidance("", true, config.ResolvedAttribution{
+		Commit: "Co-Authored-By: SageOx <ox@sageox.ai>",
+		PR:     "Co-Authored-By: SageOx",
+	})
+
+	for _, want := range []string{
+		"ox pr header",    // the top-of-body half
+		"SageOx-Session:", // the bottom-of-body half
+		"--plan",          // how a saved plan gets linked from the header
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("attribution guidance is missing %q — a PR authored from it can only carry half the contract", want)
+		}
 	}
 }
