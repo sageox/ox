@@ -595,3 +595,47 @@ func TestLegacyMigration_CommitsTheIgnoreFilesAndConverges(t *testing.T) {
 		}
 	}
 }
+
+// TestLegacyMigration_FailedRemovalNeverClobbersUnstagedWork covers the rollback's
+// blast radius.
+//
+// `git rm` validates its whole pathspec up front and refuses the ENTIRE invocation
+// when any path carries local modifications — so a failure there deletes nothing.
+// The rollback used to check out every path in m.remove regardless, which meant a
+// refused housekeeping commit silently overwrote the user's unstaged edits in
+// files the migration had never touched. migrationBlocker deliberately tolerates
+// unstaged work (a developer mid-edit is the normal case), so this is the common
+// path, not an exotic one.
+func TestLegacyMigration_FailedRemovalNeverClobbersUnstagedWork(t *testing.T) {
+	root := migrationRepo(t)
+
+	// Plan first, exactly as doctor does: classification runs against a clean
+	// stamped file, so the path lands in m.remove.
+	m, err := planLegacyMigration(root)
+	if err != nil {
+		t.Fatalf("planLegacyMigration: %v", err)
+	}
+	if len(m.remove) == 0 {
+		t.Fatal("fixture no longer plans any superseded removal; the test would prove nothing")
+	}
+
+	// The user then starts editing one of those paths — the window CodeRabbit
+	// named, between the blocker check and the git rm. git rm now refuses its
+	// entire pathspec and deletes nothing.
+	edited := filepath.Join(root, filepath.FromSlash(m.remove[0]))
+	userBytes := "MY UNSAVED WORK\n"
+	if err := os.WriteFile(edited, []byte(userBytes), 0o644); err != nil {
+		t.Fatalf("write user edit: %v", err)
+	}
+
+	// Apply is expected to fail here; what matters is what it leaves behind.
+	_ = m.Apply()
+
+	got, readErr := os.ReadFile(edited)
+	if readErr != nil {
+		t.Fatalf("the rollback deleted a file it never removed: %v", readErr)
+	}
+	if string(got) != userBytes {
+		t.Errorf("rollback overwrote the user's unstaged work with HEAD:\n got: %q\nwant: %q", got, userBytes)
+	}
+}

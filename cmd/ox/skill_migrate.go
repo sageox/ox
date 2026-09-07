@@ -54,6 +54,11 @@ type legacyMigration struct {
 	// its own. They are left tracked and untouched: these predate the reserved-prefix
 	// contract, so their author never agreed to ox owning that path.
 	preserved []string
+
+	// removed records the paths git rm actually deleted, so a rollback restores
+	// those and only those. It is never the same as remove: git rm refuses its
+	// entire pathspec when any path is locally modified, deleting nothing.
+	removed []string
 }
 
 // Empty reports whether there is nothing to migrate.
@@ -402,17 +407,31 @@ func (m *legacyMigration) Apply() (err error) {
 			// first unknown one, so mixing in a freshly written ignore file — which
 			// HEAD has never seen — would silently restore nothing at all. That is
 			// the same one-bad-pathspec failure as GH #731.
-			tracked := append(append([]string{}, m.uncache...), m.remove...)
+			tracked := append(append([]string{}, m.uncache...), m.removed...)
 			if len(tracked) > 0 {
 				reset := exec.Command("git", append([]string{"reset", "--quiet", "HEAD", "--"}, tracked...)...)
 				reset.Dir = m.repoRoot
 				_ = reset.Run()
 			}
-			// git rm deleted these paths from disk, so restore them from HEAD. The
-			// --cached paths never left the working tree; checking them out would
-			// overwrite any unstaged bytes that existed before the failed commit.
-			if len(m.remove) > 0 {
-				restore := exec.Command("git", append([]string{"checkout", "--"}, m.remove...)...)
+			// Restore ONLY the paths git rm actually deleted, and only while they
+			// are still absent.
+			//
+			// Restoring from m.remove would be wrong in the case that matters: git rm
+			// validates its whole pathspec up front and refuses the entire invocation
+			// when any path has local modifications, so a failure there deletes
+			// nothing. Checking out the full list would then overwrite the user's
+			// unstaged bytes in files this migration never touched — turning a
+			// refused housekeeping commit into silent loss of their work. The
+			// existence re-check also covers a path restored by something else
+			// between the failure and this defer.
+			var restorable []string
+			for _, p := range m.removed {
+				if _, statErr := os.Stat(filepath.Join(m.repoRoot, filepath.FromSlash(p))); os.IsNotExist(statErr) {
+					restorable = append(restorable, p)
+				}
+			}
+			if len(restorable) > 0 {
+				restore := exec.Command("git", append([]string{"checkout", "--"}, restorable...)...)
 				restore.Dir = m.repoRoot
 				_ = restore.Run()
 			}
@@ -445,6 +464,9 @@ func (m *legacyMigration) Apply() (err error) {
 		if err := runMigrationGit(m.repoRoot, append([]string{"rm", "--quiet", "--"}, m.remove...)); err != nil {
 			return fmt.Errorf("remove superseded files: %w", err)
 		}
+		// Only now are these paths known to be gone from the working tree. The
+		// rollback restores from this list, never from m.remove — see below.
+		m.removed = append(m.removed, m.remove...)
 	}
 
 	// Stage the ignore files in the SAME commit. They are what make the untracked
