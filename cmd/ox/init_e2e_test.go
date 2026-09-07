@@ -140,3 +140,39 @@ func TestRunInit_AdoptsUntrackedManagedOnlyScopedIgnore(t *testing.T) {
 	assert.Contains(t, stagedPaths(t, env.Root), filepath.Join(".claude", ".gitignore"),
 		"an untracked, managed-only scoped ignore must be adopted and staged, or the on-ramp stays invisible")
 }
+
+// TestRunInit_UnwritableScopedIgnoreWarnsAndStillCompletes covers the
+// write-failure path in runInit.
+//
+// Failure prevented: `ox init` dying, or worse silently continuing, because it
+// could not write one ignore file. Init has already registered the repo and
+// written config by this point; aborting would leave a half-initialized repo,
+// and saying nothing would leave the coworker believing ox's files are hidden
+// when they are not. It must warn and carry on.
+//
+// The fixture makes .claude/.gitignore a DIRECTORY. os.WriteFile fails on a
+// directory on every platform we ship to, so unlike an os.Chmod fixture this
+// exercises the branch identically on Windows — see bead ox-avjb for the
+// fail-open trap that avoids.
+func TestRunInit_UnwritableScopedIgnoreWarnsAndStillCompletes(t *testing.T) {
+	env := newOxE2E(t)
+	withInitFlags(t, env.TeamID)
+	// the warning is gated on !initQuiet, so this test must not be quiet
+	initQuiet = false
+
+	blocker := filepath.Join(env.Root, ".claude", ".gitignore")
+	require.NoError(t, os.MkdirAll(blocker, 0o755),
+		"fixture: .claude/.gitignore must be a directory so writing it fails")
+
+	require.NoError(t, runInit(),
+		"a failed ignore write must not abort an otherwise successful init")
+
+	// init still finished its real work
+	assert.DirExists(t, filepath.Join(env.Root, ".sageox"))
+	assert.Contains(t, env.Requested(), "/api/v1/repo/init")
+
+	// and the blocker is untouched — ox never destroys what it cannot write
+	info, err := os.Stat(blocker)
+	require.NoError(t, err)
+	assert.True(t, info.IsDir(), "ox must not replace a path it failed to write")
+}

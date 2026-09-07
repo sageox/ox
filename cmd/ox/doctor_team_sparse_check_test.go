@@ -179,3 +179,56 @@ func TestManifestIncludedMissingDirs_NoManifestClaimsNothing(t *testing.T) {
 		t.Errorf("a nil manifest must claim no directories, got %v", got)
 	}
 }
+
+// TestCheckTeamSparseCheckout_RepairFailureIsReportedNotSwallowed covers the
+// branch where ox tries a local repair and git refuses.
+//
+// Failure prevented: a --fix that reports success after its repair failed. The
+// directory is still unmaterialized, so the coworker's team rules are still
+// absent, but doctor has told them it fixed the problem — the worst of the
+// three possible outcomes, because it ends the investigation.
+//
+// The fixture replaces .git/info/sparse-checkout with a DIRECTORY, so git
+// cannot write the new spec. Portable on every platform, unlike a chmod or
+// symlink fixture (bead ox-avjb).
+func TestCheckTeamSparseCheckout_RepairFailureIsReportedNotSwallowed(t *testing.T) {
+	teamPath := seedSparseTeamContext(t)
+
+	// Break git's ability to update the working tree while leaving the sparse
+	// spec itself readable — the check skips any repo whose spec it cannot read,
+	// so an unreadable spec would never reach the repair branch at all.
+	idx := filepath.Join(teamPath, ".git", "index")
+	if err := os.Remove(idx); err != nil {
+		t.Fatalf("remove index: %v", err)
+	}
+	if err := os.MkdirAll(idx, 0o755); err != nil {
+		t.Fatalf("fixture: .git/index must be a directory: %v", err)
+	}
+
+	gitRoot, cleanup := setupTempGitRepo(t)
+	defer cleanup()
+	restoreCwd := changeToDir(t, gitRoot)
+	defer restoreCwd()
+	requireSageoxDir(t, gitRoot)
+
+	if err := config.SaveLocalConfig(gitRoot, &config.LocalConfig{
+		TeamContexts: []config.TeamContext{
+			{TeamID: "team-862c", TeamName: "Engineering", Path: teamPath},
+		},
+	}); err != nil {
+		t.Fatalf("SaveLocalConfig: %v", err)
+	}
+
+	result := checkTeamSparseCheckout(true)
+
+	if result.passed {
+		t.Error("a failed repair must not report success")
+	}
+	if !strings.Contains(result.message, "agents/") {
+		t.Errorf("the still-missing directory must be named, got: %s", result.message)
+	}
+	// still absent on disk — the report matches reality
+	if _, err := os.Stat(filepath.Join(teamPath, "agents")); !os.IsNotExist(err) {
+		t.Error("fixture invalid: the repair must genuinely have failed")
+	}
+}
