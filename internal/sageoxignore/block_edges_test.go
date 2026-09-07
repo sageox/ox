@@ -1,0 +1,192 @@
+package sageoxignore
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func writeIgnore(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), ".gitignore")
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	return p
+}
+
+// TestEnsureBlock_TruncatedBlockIsLeftVisibleNotSpliced.
+//
+// A begin marker with no end marker means the block was truncated or hand-edited.
+// Guessing where it ended and splicing there would silently eat whatever the user
+// wrote after it. Appending a fresh, complete block is recoverable and leaves the
+// damage visible for a human to resolve.
+func TestEnsureBlock_TruncatedBlockIsLeftVisibleNotSpliced(t *testing.T) {
+	userRule := "keepme.txt\n"
+	p := writeIgnore(t, BlockBegin+"\nskills/old-*/\n"+userRule)
+
+	changed, _, err := EnsureBlock(p, []string{"skills/ox-cli-*/"})
+	if err != nil {
+		t.Fatalf("EnsureBlock: %v", err)
+	}
+	if !changed {
+		t.Fatal("a damaged block was treated as current")
+	}
+
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(got), userRule) {
+		t.Errorf("ox ate a user rule that followed a truncated block:\n%s", got)
+	}
+	if !strings.Contains(string(got), "skills/ox-cli-*/") {
+		t.Errorf("no complete block was appended:\n%s", got)
+	}
+}
+
+// TestEnsureBlock_RepairsAMissingTrailingNewline: without this, the user's last
+// rule and ox's first comment merge into one line, silently changing what that
+// rule matches.
+func TestEnsureBlock_RepairsAMissingTrailingNewline(t *testing.T) {
+	p := writeIgnore(t, "no-trailing-newline.txt")
+
+	if _, _, err := EnsureBlock(p, []string{"skills/ox-cli-*/"}); err != nil {
+		t.Fatalf("EnsureBlock: %v", err)
+	}
+
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(got), "no-trailing-newline.txt"+BlockBegin) {
+		t.Errorf("the user's last rule was merged with ox's block header:\n%s", got)
+	}
+	if !strings.HasPrefix(string(got), "no-trailing-newline.txt\n") {
+		t.Errorf("the user's rule was altered:\n%s", got)
+	}
+}
+
+// TestEnsureBlock_RewritesOnlyBetweenTheMarkers: gitignore ordering is
+// semantically significant, so everything outside the markers must survive
+// byte-identical, in place.
+func TestEnsureBlock_RewritesOnlyBetweenTheMarkers(t *testing.T) {
+	before := "before.txt\n!keep/\n\n"
+	after := "\nafter.txt\n"
+	p := writeIgnore(t, before+BlockBegin+"\nstale-entry\n"+BlockEnd+"\n"+after)
+
+	if _, _, err := EnsureBlock(p, []string{"skills/ox-cli-*/"}); err != nil {
+		t.Fatalf("EnsureBlock: %v", err)
+	}
+
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	s := string(got)
+	if !strings.HasPrefix(s, before) {
+		t.Errorf("content before the block changed:\n%s", s)
+	}
+	if !strings.HasSuffix(s, after) {
+		t.Errorf("content after the block changed:\n%s", s)
+	}
+	if strings.Contains(s, "stale-entry") {
+		t.Errorf("the stale entry inside the block survived:\n%s", s)
+	}
+}
+
+// TestEnsureBlock_CreatedFlagDistinguishesNewFromExisting drives the init
+// rollback decision: a file ox created is deleted on rollback, one that already
+// existed is restored. Getting this backwards deletes the user's rules.
+func TestEnsureBlock_CreatedFlagDistinguishesNewFromExisting(t *testing.T) {
+	fresh := filepath.Join(t.TempDir(), ".gitignore")
+	_, created, err := EnsureBlock(fresh, []string{"skills/ox-cli-*/"})
+	if err != nil {
+		t.Fatalf("EnsureBlock: %v", err)
+	}
+	if !created {
+		t.Error("a file that did not exist was not reported as created")
+	}
+
+	p := writeIgnore(t, "mine.txt\n")
+	_, created, err = EnsureBlock(p, []string{"skills/ox-cli-*/"})
+	if err != nil {
+		t.Fatalf("EnsureBlock: %v", err)
+	}
+	if created {
+		t.Error("an existing file was reported as created; rollback would delete the user's rules")
+	}
+}
+
+// TestEnsureBlock_UnreadableFileIsAnErrorNotASilentOverwrite: treating a read
+// failure as "empty" would rewrite the file with only ox's block, destroying
+// every rule in it.
+func TestEnsureBlock_UnreadableFileIsAnErrorNotASilentOverwrite(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission bits do not apply")
+	}
+	p := writeIgnore(t, "mine.txt\n")
+	if err := os.Chmod(p, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
+
+	if _, _, err := EnsureBlock(p, []string{"skills/ox-cli-*/"}); err == nil {
+		t.Fatal("an unreadable ignore file was not reported as an error")
+	}
+
+	_ = os.Chmod(p, 0o644)
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "mine.txt\n" {
+		t.Errorf("ox overwrote a file it could not read:\n%s", got)
+	}
+}
+
+// TestRemoveBlock_LeavesEverythingElseByteIdentical is the uninstall contract.
+func TestRemoveBlock_LeavesEverythingElseByteIdentical(t *testing.T) {
+	original := "a.txt\n!keep/\nb/\n"
+	p := writeIgnore(t, original)
+	if _, _, err := EnsureBlock(p, []string{"skills/ox-cli-*/"}); err != nil {
+		t.Fatalf("EnsureBlock: %v", err)
+	}
+
+	removed, err := RemoveBlock(p)
+	if err != nil {
+		t.Fatalf("RemoveBlock: %v", err)
+	}
+	if !removed {
+		t.Fatal("RemoveBlock reported no block to remove")
+	}
+
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != original {
+		t.Errorf("uninstall did not restore the file byte-for-byte:\ngot  %q\nwant %q", got, original)
+	}
+}
+
+// TestRemoveBlock_MissingFileAndMissingBlockAreNotErrors: uninstall runs on
+// repositories ox may never have touched.
+func TestRemoveBlock_MissingFileAndMissingBlockAreNotErrors(t *testing.T) {
+	absent := filepath.Join(t.TempDir(), ".gitignore")
+	removed, err := RemoveBlock(absent)
+	if err != nil || removed {
+		t.Errorf("missing file: removed=%v err=%v", removed, err)
+	}
+
+	p := writeIgnore(t, "only-user-rules.txt\n")
+	removed, err = RemoveBlock(p)
+	if err != nil || removed {
+		t.Errorf("no ox block: removed=%v err=%v", removed, err)
+	}
+	got, _ := os.ReadFile(p)
+	if string(got) != "only-user-rules.txt\n" {
+		t.Errorf("uninstall modified a file with no ox block:\n%s", got)
+	}
+}

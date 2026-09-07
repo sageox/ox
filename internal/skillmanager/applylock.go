@@ -56,8 +56,21 @@ func applyLockPath(repoRoot string) string {
 // processes hold locks on two different inodes with the same name.
 func acquireApplyLock(repoRoot string) (unlock func(), acquired bool, err error) {
 	path := applyLockPath(repoRoot)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	// ensureDir, not os.MkdirAll: MkdirAll happily walks THROUGH a symlinked
+	// .sageox/cache, so a repository whose cache directory points elsewhere would
+	// have ox create and flock a file outside itself. ensureDir refuses a symlink
+	// at any component, matching every other write path in this package.
+	if err := ensureDir(repoRoot, filepath.Dir(path)); err != nil {
 		return nil, false, fmt.Errorf("create skills lock dir: %w", err)
+	}
+	// The lock file itself gets the same treatment: os.OpenFile follows a symlink,
+	// so without this a symlinked skills-apply.lock redirects the open.
+	if info, statErr := os.Lstat(path); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return nil, false, fmt.Errorf("refusing non-regular or symlink skills apply lock %s", path)
+		}
+	} else if !os.IsNotExist(statErr) {
+		return nil, false, fmt.Errorf("inspect skills apply lock: %w", statErr)
 	}
 	return platformAcquireApplyLock(path)
 }
