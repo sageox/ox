@@ -222,9 +222,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	hookInput := ReadAgentHookInput()
 	var agentSessionID string
 	var hookSource string // "" when invoked directly (no piped hook stdin), else startup/resume/clear/compact
+	// The EVENT name as well as the source field: agentx documents Source as
+	// populated "only for session start/end", so a PreCompact payload carries an
+	// empty Source and the compact-vs-full decision cannot be made from it alone.
+	var hookEventName string
 	if hookInput != nil {
 		agentSessionID = hookInput.SessionID
 		hookSource = hookInput.Source
+		hookEventName = hookInput.HookEventName
 	}
 
 	// fallback: if no session ID from hook stdin, try agent's native env var
@@ -632,7 +637,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// (primeCallCount==1, set above), always yields compactReprime=false
 	// (full preamble). See prime.ShouldCompactReprime for the full
 	// belt-and-suspenders rationale.
-	compactReprime := prime.ShouldCompactReprime(primeCallCount, hookSource)
+	compactReprime := prime.ShouldCompactReprimeForEvent(primeCallCount, hookEventName, hookSource)
 
 	contentWithAttribution := withAttributionGuidance("", isLoggedIn, attribution)
 
