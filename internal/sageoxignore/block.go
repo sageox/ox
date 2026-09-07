@@ -50,30 +50,20 @@ func EnsureBlock(path string, entries []string) (changed bool, created bool, err
 	want := renderBlock(entries)
 	content := string(existing)
 
-	begin := strings.Index(content, BlockBegin)
-	if begin >= 0 {
-		endIdx := strings.Index(content[begin:], BlockEnd)
-		if endIdx >= 0 {
-			end := begin + endIdx + len(BlockEnd)
-			// Absorb the newline that terminates the end marker so replacing the
-			// block cannot accumulate blank lines across runs.
-			if end < len(content) && content[end] == '\n' {
-				end++
-			}
-			if content[begin:end] == want {
-				return false, false, nil
-			}
-			updated := content[:begin] + want + content[end:]
-			if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
-				return false, false, fmt.Errorf("write %s: %w", path, err)
-			}
-			return true, false, nil
+	if begin, end, ok := findBlock(content); ok {
+		if content[begin:end] == want {
+			return false, false, nil
 		}
-		// Begin marker with no end marker: a truncated or hand-mangled block. Do
-		// NOT try to guess where it ended and splice — appending a fresh, complete
-		// block is recoverable and leaves the damaged text visible to the user,
-		// whereas a wrong guess silently eats their rules.
+		updated := content[:begin] + want + content[end:]
+		if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+			return false, false, fmt.Errorf("write %s: %w", path, err)
+		}
+		return true, false, nil
 	}
+	// No well-formed block. A begin marker with no end marker is a truncated or
+	// hand-mangled block: do NOT guess where it ended and splice, because a wrong
+	// guess silently eats the user's rules. Appending a fresh, complete block is
+	// recoverable and leaves the damaged text visible.
 
 	var buf strings.Builder
 	buf.WriteString(content)
@@ -135,4 +125,42 @@ func renderBlock(entries []string) string {
 	b.WriteString(BlockEnd)
 	b.WriteString("\n")
 	return b.String()
+}
+
+// findBlock locates a WELL-FORMED managed block: a begin marker and the first end
+// marker after it, with no second begin marker in between.
+//
+// The "no second begin" rule is what makes a damaged file safe. A file containing
+// an orphaned begin marker gets a fresh complete block appended after it; on the
+// NEXT run, a naive "first begin, first end" search would pair the ORPHAN with
+// the new block's end marker and replace everything between them — silently
+// deleting every user rule that sat after the damaged marker. Skipping to the
+// last begin marker before the end marker keeps that region untouched.
+//
+// end is the index just past the end marker's terminating newline, so replacing
+// the block cannot accumulate blank lines across runs.
+func findBlock(content string) (begin, end int, ok bool) {
+	search := 0
+	for {
+		b := strings.Index(content[search:], BlockBegin)
+		if b < 0 {
+			return 0, 0, false
+		}
+		b += search
+		e := strings.Index(content[b:], BlockEnd)
+		if e < 0 {
+			return 0, 0, false // orphaned begin marker: no well-formed block
+		}
+		e += b
+		// A second begin marker before this end marker means b is the orphan.
+		if next := strings.Index(content[b+len(BlockBegin):e], BlockBegin); next >= 0 {
+			search = b + len(BlockBegin) + next
+			continue
+		}
+		end = e + len(BlockEnd)
+		if end < len(content) && content[end] == '\n' {
+			end++
+		}
+		return b, end, true
+	}
 }

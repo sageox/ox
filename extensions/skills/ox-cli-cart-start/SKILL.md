@@ -1,6 +1,6 @@
 ---
 name: ox-cli-cart-start
-description: "<!-- Keep this file thin. Portable behavioral guidance (the naming intent)"
+description: "Claim a cart and start working on it."
 # Lifecycle and diagnostic surfaces stay EXPLICIT (ADR-023): the user
 # invokes them, the model never does. This also keeps their descriptions
 # out of context, so folding the command surface in costs no tokens.

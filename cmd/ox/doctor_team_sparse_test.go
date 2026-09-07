@@ -102,3 +102,58 @@ func TestMissingSparseTopLevelDirs_CleanCheckoutReportsNothing(t *testing.T) {
 		t.Errorf("a fully materialized checkout reported missing directories: %v", missing)
 	}
 }
+
+// TestMissingSparseTopLevelDirs_UntrackedContentDoesNotMaskTheOmission:
+// directory PRESENCE is not evidence the content materialized. An excluded
+// directory can exist purely because of untracked local files beside it, and a
+// presence check would then report everything fine while every tracked file under
+// it is still absent — the same silent failure as #862, one layer down.
+func TestMissingSparseTopLevelDirs_UntrackedContentDoesNotMaskTheOmission(t *testing.T) {
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	origin := t.TempDir()
+	run(origin, "init", "--bare", "--initial-branch=main")
+	seed := t.TempDir()
+	run(seed, "init", "--initial-branch=main")
+	run(seed, "config", "user.email", "t@example.com")
+	run(seed, "config", "user.name", "T")
+	for _, rel := range []string{"agents/rules/team.md", "README.md"} {
+		p := filepath.Join(seed, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(p, []byte("x\n"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	run(seed, "add", "-A")
+	run(seed, "commit", "-q", "-m", "seed")
+	run(seed, "remote", "add", "origin", origin)
+	run(seed, "push", "-q", "origin", "main")
+
+	clone := filepath.Join(t.TempDir(), "team-context")
+	run(filepath.Dir(clone), "clone", "-q", "--no-checkout", origin, "team-context")
+	run(clone, "sparse-checkout", "init", "--no-cone")
+	run(clone, "sparse-checkout", "set", "--no-cone", "/*", "!/*/")
+	run(clone, "checkout", "-q", "main")
+
+	// The directory exists locally, but only because of an UNTRACKED file.
+	if err := os.MkdirAll(filepath.Join(clone, "agents"), 0o755); err != nil {
+		t.Fatalf("mkdir agents: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(clone, "agents", "local-scratch.md"), []byte("mine\n"), 0o644); err != nil {
+		t.Fatalf("write untracked: %v", err)
+	}
+
+	missing := missingSparseTopLevelDirs(clone)
+	if !strings.Contains(strings.Join(missing, ","), "agents/") {
+		t.Errorf("untracked local content masked the omission; team rules would silently never materialize. got %v", missing)
+	}
+}

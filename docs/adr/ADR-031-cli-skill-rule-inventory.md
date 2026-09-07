@@ -96,7 +96,7 @@ Ignoring a file does nothing while git still tracks it, and there is no way to u
 
 **Costs:** every `/ox-*` slash name changes, once. Customization becomes forking to a non-reserved name. One migration commit lands in each customer repository.
 
-**Accepted risks:** Windows has no cross-process lock for the apply path (documented gap, mirroring the existing daemon posture). Whether Codex/Gemini/OMP honor `disable-model-invocation` is **unverified** — they share the `.agents/skills` projection, so if they ignore it, 13 lifecycle skills become model-invocable there; tracked as its own task and gated before that projection is trusted.
+**Accepted risks:** Whether Codex/Gemini/OMP honor `disable-model-invocation` is **unverified** — they share the `.agents/skills` projection, so if they ignore it, 13 lifecycle skills become model-invocable there; tracked as its own task and gated before that projection is trusted.
 
 ## See also
 

@@ -1,6 +1,6 @@
 ---
 name: ox-cli-session-status
-description: "<!-- Keep this file thin. Behavioral guidance (use-when, common-issues, errors)"
+description: "Check the status of all active session recordings in this project."
 # Lifecycle and diagnostic surfaces stay EXPLICIT (ADR-023): the user
 # invokes them, the model never does. This also keeps their descriptions
 # out of context, so folding the command surface in costs no tokens.

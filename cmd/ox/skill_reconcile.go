@@ -238,7 +238,11 @@ func hasLegacyOxCommands(repoRoot string) bool {
 		if readErr != nil {
 			continue
 		}
-		if hash, _, _ := adapterstamp.ExtractStampAnywhere(data, "ox"); hash != "" {
+		// Verify the stamp against the body, matching validLegacyStamp. A stamped
+		// file the user has since EDITED is not ox state, and accepting it here
+		// would add Claude targets and default bundles off the back of a file the
+		// reconciler will not classify as ox-owned.
+		if hash, _, body := adapterstamp.ExtractStampAnywhere(data, "ox"); hash != "" && agentx.ContentHash(body) == hash {
 			return true
 		}
 	}

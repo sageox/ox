@@ -22,7 +22,8 @@ package skillmanager
 // doctor says so out loud.
 //
 // flock is per-open-file-description, so this correctly serializes two
-// goroutines in one process as well as two processes.
+// goroutines in one process as well as two processes. Windows gets the same
+// non-blocking exclusive semantics from LockFileEx.
 
 import (
 	"errors"

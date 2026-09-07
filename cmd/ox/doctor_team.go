@@ -748,9 +748,35 @@ func missingSparseTopLevelDirs(repoPath string) []string {
 		if name == "" {
 			continue
 		}
-		if _, statErr := os.Stat(filepath.Join(repoPath, name)); statErr != nil {
+		// Directory presence is NOT evidence the content materialized: an excluded
+		// directory can exist purely because of untracked local files beside it, and
+		// the check would then pass while every tracked file under it is still
+		// absent. Verify a file HEAD actually tracks.
+		child := firstTrackedChild(repoPath, name)
+		if child == "" {
+			continue // nothing tracked under it; nothing to be missing
+		}
+		if _, statErr := os.Stat(filepath.Join(repoPath, filepath.FromSlash(child))); statErr != nil {
 			missing = append(missing, name+"/")
 		}
 	}
 	return missing
+}
+
+// firstTrackedChild returns one path HEAD tracks under dir, or "" if none.
+// It is the probe for whether sparse-checkout actually materialized the content,
+// as opposed to the directory merely existing.
+func firstTrackedChild(repoPath, dir string) string {
+	cmd := exec.Command("git", "ls-tree", "-r", "--name-only", "HEAD", "--", dir+"/")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			return line
+		}
+	}
+	return ""
 }

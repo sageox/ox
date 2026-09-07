@@ -834,6 +834,43 @@ func ReconcileUpdateNonBlocking(repoRoot, version string, update DesiredUpdate) 
 	return plan, err
 }
 
+// ReconcileUpdateGated is ReconcileUpdate with a veto that runs BETWEEN planning
+// and applying, inside the same held lock.
+//
+// It exists because a caller cannot otherwise inspect a plan before it lands:
+// ReconcileUpdate plans and applies in one call, so any check the caller performs
+// on the returned plan describes work that is already on disk. The daemon's
+// "never rewrite a tracked file" rule was exactly that shape and therefore
+// enforced nothing.
+//
+// Splitting Plan and Apply at the call site would reopen the window this lock was
+// added to close, so the veto lives inside it instead. A gate that returns an
+// error skips Apply entirely and that error is returned to the caller.
+func ReconcileUpdateGated(repoRoot, version string, update DesiredUpdate, gate func(*ReconcilePlan) error) (*ReconcilePlan, error) {
+	var plan *ReconcilePlan
+	err := fileutil.WithFileLock(context.Background(), LockPath(repoRoot), func() error {
+		desired, targets, err := LoadDesired(repoRoot)
+		if err != nil {
+			return err
+		}
+		desired, targets, err = update(desired, targets)
+		if err != nil {
+			return err
+		}
+		plan, err = Plan(repoRoot, version, desired, targets)
+		if err != nil {
+			return err
+		}
+		if gate != nil {
+			if err := gate(plan); err != nil {
+				return err
+			}
+		}
+		return Apply(plan)
+	})
+	return plan, err
+}
+
 // Reconcile replaces desired state and is primarily useful to tests and
 // compatibility callers. Lifecycle read-modify-write paths use ReconcileUpdate.
 func Reconcile(repoRoot, version string, desired DesiredSkills, targets []adapterprotocol.SkillTarget) (*ReconcilePlan, error) {

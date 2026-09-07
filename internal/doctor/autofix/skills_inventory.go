@@ -66,13 +66,30 @@ func checkSkillsInventoryDrift(ctx context.Context, repoPath string) CheckResult
 	// Planning and applying as two independent steps leaves a window where another
 	// process changes desired state between them, and this tick then writes a plan
 	// built from state that no longer exists.
+	// errTrackedFile aborts the apply from inside the lock. The check must happen
+	// BETWEEN planning and applying: inspecting the returned plan would describe
+	// writes that already landed, which is how this guard came to enforce nothing.
+	var trackedPaths []string
+	errTrackedFile := errors.New("plan touches tracked files")
+
 	var plan *skillmanager.ReconcilePlan
-	plan, err = skillmanager.ReconcileUpdate(repoPath, version.Version,
+	plan, err = skillmanager.ReconcileUpdateGated(repoPath, version.Version,
 		func(current skillmanager.DesiredSkills, currentTargets []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
 			// Identity: the daemon reconciles what the project already selected and
 			// never widens it.
 			return current, currentTargets, nil
+		},
+		func(p *skillmanager.ReconcilePlan) error {
+			if trackedPaths = trackedPlanPaths(ctx, repoPath, p); len(trackedPaths) > 0 {
+				return errTrackedFile
+			}
+			return nil
 		})
+	if errors.Is(err, errTrackedFile) {
+		res.Status = StatusFound
+		res.Summary = fmt.Sprintf("%d tracked file(s) need updating; run `ox doctor --fix` (background updates never touch tracked files)", len(trackedPaths))
+		return res
+	}
 	if err != nil {
 		if errors.Is(err, skillmanager.ErrApplyInProgress) {
 			res.Summary = "skipped: another ox process is reconciling"
@@ -92,15 +109,6 @@ func checkSkillsInventoryDrift(ctx context.Context, repoPath string) CheckResult
 		res.Summary = plan.Warnings[0]
 		return res
 	}
-	// Refuse to write a tracked path. The committed on-ramp skill is the realistic
-	// case: when its content changes in a release, applying here would silently
-	// modify a file in the developer's working tree.
-	if tracked := trackedPlanPaths(repoPath, plan); len(tracked) > 0 {
-		res.Status = StatusFound
-		res.Summary = fmt.Sprintf("%d tracked file(s) need updating; run `ox doctor --fix` (background updates never touch tracked files)", len(tracked))
-		return res
-	}
-
 	changed := len(plan.Creates) + len(plan.Updates) + len(plan.Removes)
 	if changed == 0 {
 		if n := len(plan.Conflicts); n > 0 {
@@ -120,7 +128,7 @@ func checkSkillsInventoryDrift(ctx context.Context, repoPath string) CheckResult
 // A single `git ls-files` over the planned paths answers it; an error is treated
 // as "nothing tracked" because a repository without git is a normal state for this
 // check and must not turn into a reported fault.
-func trackedPlanPaths(repoPath string, plan *skillmanager.ReconcilePlan) []string {
+func trackedPlanPaths(ctx context.Context, repoPath string, plan *skillmanager.ReconcilePlan) []string {
 	var candidates []string
 	for _, a := range plan.Creates {
 		candidates = append(candidates, a.Path)
@@ -134,7 +142,8 @@ func trackedPlanPaths(repoPath string, plan *skillmanager.ReconcilePlan) []strin
 	if len(candidates) == 0 {
 		return nil
 	}
-	cmd := exec.Command("git", append([]string{"ls-files", "-z", "--"}, candidates...)...)
+	// CommandContext so a canceled tick is not blocked waiting on git.
+	cmd := exec.CommandContext(ctx, "git", append([]string{"ls-files", "-z", "--"}, candidates...)...)
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {

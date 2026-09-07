@@ -735,9 +735,16 @@ func runInit() error {
 	if ignoreErr != nil && !initQuiet {
 		cli.PrintWarning(fmt.Sprintf("Could not write ox ignore rules: %v", ignoreErr))
 	}
-	for _, rel := range ignoreFiles {
-		abs := filepath.Join(gitRoot, rel)
-		tracker.trackCreatedFile(abs)
+	for _, f := range ignoreFiles {
+		abs := filepath.Join(gitRoot, f.Rel)
+		// created vs modified decides what rollback does: remove the file, or put
+		// its previous contents back. Calling trackCreatedFile on a file the user
+		// already had would make rollback DELETE their ignore rules.
+		if f.Created {
+			tracker.trackCreatedFile(abs)
+		} else {
+			tracker.trackModifiedFile(abs)
+		}
 		// Force-staged on purpose: plenty of repositories root-ignore .claude/, and
 		// the ignore file is one of the two things that MUST reach teammates.
 		tracker.trackForceStage(abs)

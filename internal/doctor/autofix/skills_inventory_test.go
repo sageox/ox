@@ -202,8 +202,16 @@ func TestSkillsInventoryDrift_NeverRewritesATrackedFile(t *testing.T) {
 	}
 
 	res := checkSkillsInventoryDrift(context.Background(), repoRoot)
+
+	// Assert the WORKING TREE, not just the reported status. A status-only
+	// assertion passes even when the write already happened — which is exactly how
+	// this guard came to enforce nothing while its test stayed green: the check ran
+	// after Apply, reported StatusFound, and the file on disk had already changed.
+	if _, err := os.Stat(managedFile); err == nil {
+		t.Errorf("the background tick RESTORED a tracked file on disk; the developer would find a change they did not make")
+	}
 	if res.Status == StatusFixed {
-		t.Errorf("the background tick rewrote a TRACKED file; the developer would find a change they did not make")
+		t.Errorf("status reported a fix for a tracked path")
 	}
 	if res.Status != StatusFound {
 		t.Errorf("expected StatusFound reporting the tracked path, got %v (%s)", res.Status, res.Summary)

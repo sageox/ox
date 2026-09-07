@@ -141,7 +141,7 @@ func classifyLegacyPath(repoRoot, rel string) legacyClass {
 		if skills.IsRetired(name) {
 			return legacySuperseded
 		}
-	case ".claude/rules", ".factory/rules", ".claude/commands":
+	case ".claude/rules", ".factory/rules", ".agents/rules", ".claude/commands":
 		if skillmanager.IsReservedName(name) {
 			return legacyReserved
 		}
@@ -153,7 +153,7 @@ func classifyLegacyPath(repoRoot, rel string) legacyClass {
 		// .factory/rules/sageox/use-team-context.md tracked forever — found by
 		// running the migration against a real clone rather than a fixture.
 		nestedLegacy := len(parts) > 3 && parts[2] == "sageox" &&
-			(surface == ".claude/rules" || surface == ".factory/rules")
+			(surface == ".claude/rules" || surface == ".factory/rules" || surface == ".agents/rules")
 		if skills.IsRetired(name) || nestedLegacy {
 			if stampVerifies(filepath.Join(repoRoot, filepath.FromSlash(rel))) {
 				return legacySuperseded
@@ -324,15 +324,38 @@ func (m *legacyMigration) Apply() (err error) {
 	}
 	defer func() {
 		if err != nil {
-			// Restore the index to HEAD. Safe precisely because migrationBlocker
-			// already established there were no staged changes of the user's own.
-			reset := exec.Command("git", "reset", "--quiet", "HEAD", "--")
-			reset.Dir = m.repoRoot
-			_ = reset.Run()
-			// Bring back any working-tree file `git rm` deleted.
-			restore := exec.Command("git", "checkout", "--", ".")
-			restore.Dir = m.repoRoot
-			_ = restore.Run()
+			// Restore ONLY the paths this migration touched.
+			//
+			// A repo-wide `git checkout -- .` would also discard the user's unstaged
+			// edits to unrelated files. migrationBlocker refuses to run when anything
+			// is STAGED, but it deliberately tolerates unstaged work — a developer
+			// mid-edit is the normal case — so a blanket restore turns a failed
+			// housekeeping commit into silent loss of their work in progress.
+			// Only paths that exist in HEAD can be reset or checked out. git
+			// validates every pathspec up front and fails the WHOLE invocation on the
+			// first unknown one, so mixing in a freshly written ignore file — which
+			// HEAD has never seen — would silently restore nothing at all. That is
+			// the same one-bad-pathspec failure as GH #731.
+			tracked := append(append([]string{}, m.uncache...), m.remove...)
+			if len(tracked) > 0 {
+				reset := exec.Command("git", append([]string{"reset", "--quiet", "HEAD", "--"}, tracked...)...)
+				reset.Dir = m.repoRoot
+				_ = reset.Run()
+				restore := exec.Command("git", append([]string{"checkout", "--"}, tracked...)...)
+				restore.Dir = m.repoRoot
+				_ = restore.Run()
+			}
+			// Untracked additions (the ignore files, an adopted on-ramp) are unstaged
+			// individually; each is its own pathspec so one failure cannot zero the batch.
+			untracked := append([]string{}, m.adopt...)
+			for _, f := range scopedIgnoreFiles() {
+				untracked = append(untracked, filepath.Join(f.dir, ".gitignore"))
+			}
+			for _, p := range untracked {
+				unstage := exec.Command("git", "reset", "--quiet", "HEAD", "--", p)
+				unstage.Dir = m.repoRoot
+				_ = unstage.Run()
+			}
 		}
 	}()
 

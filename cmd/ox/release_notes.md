@@ -169,7 +169,7 @@ Decision Records get first-class team context, and three real reliability gaps i
 
 ### Changed
 
-- **Fresher skills and rules on every `ox init` / `ox doctor --fix`** — includes a new `ox-cli-session-review` skill for auditing session quality, a reorganized `ox-cli-plan` skill, and a new rule that points every agent to where your team's shared conventions actually live.
+- **Fresher skills and rules on every `ox init` / `ox doctor --fix`** — includes a new `ox-session-review` skill for auditing session quality, a reorganized `ox-plan` skill, and a new rule that points every agent to where your team's shared conventions actually live.
 
 ### Fixed
 
@@ -732,7 +732,7 @@ New tests pin the scope contract, the auto-redact happy path, the quarantine pat
 
 **Session maintenance commands**
 - `ox session remove` deletes sessions from the ledger
-- `/ox-cli-session-review` skill with auto-fix for stale commands
+- `/ox-session-review` skill with auto-fix for stale commands
 
 **GitHub PR/issue sync**
 - Daemon automatically syncs GitHub PRs and issues into the local code search index

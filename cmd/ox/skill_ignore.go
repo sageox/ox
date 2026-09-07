@@ -71,21 +71,39 @@ func scopedIgnoreFiles() []scopedIgnoreFile {
 // Existence is the gate on purpose. Writing .agents/.gitignore into a repository
 // that has no .agents/ directory would add vendor footprint to a project that
 // never asked for that agent — the same complaint this whole rework answers.
-func ensureScopedIgnoreFiles(repoRoot string) ([]string, error) {
-	var written []string
+// ignoreFileResult is one ignore file ox wrote, and whether ox created it.
+//
+// The distinction is load-bearing for rollback: a file ox CREATED is removed on
+// rollback, while a file that already existed must be restored to its previous
+// contents. Treating an existing file as created would delete a file the user
+// wrote, which is strictly worse than the failure being rolled back.
+type ignoreFileResult struct {
+	Rel     string
+	Created bool
+}
+
+func ensureScopedIgnoreFiles(repoRoot string) ([]ignoreFileResult, error) {
+	var written []ignoreFileResult
 	for _, f := range scopedIgnoreFiles() {
 		dirPath := filepath.Join(repoRoot, f.dir)
-		info, err := os.Stat(dirPath)
+		// Lstat, not Stat: Stat follows symlinks, so a repository that makes an
+		// agent directory a symlink could steer ox into writing outside repoRoot.
+		// This mirrors skillmanager's refusal to write through a symlinked parent.
+		info, err := os.Lstat(dirPath)
 		if err != nil || !info.IsDir() {
-			continue // ox does not write here; do not create footprint
+			continue // absent, a symlink, or not a directory: ox writes nothing here
 		}
 		path := filepath.Join(dirPath, ".gitignore")
-		changed, _, err := sageoxignore.EnsureBlock(path, f.entries)
+		if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			// A symlinked .gitignore would have ox edit whatever it points at.
+			continue
+		}
+		changed, created, err := sageoxignore.EnsureBlock(path, f.entries)
 		if err != nil {
 			return written, err
 		}
 		if changed {
-			written = append(written, filepath.Join(f.dir, ".gitignore"))
+			written = append(written, ignoreFileResult{Rel: filepath.Join(f.dir, ".gitignore"), Created: created})
 		}
 	}
 	return written, nil

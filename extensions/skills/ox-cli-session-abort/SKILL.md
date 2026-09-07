@@ -1,6 +1,6 @@
 ---
 name: ox-cli-session-abort
-description: "<!-- Keep this file thin. Behavioral guidance (use-when, post-command, errors)"
+description: "Abort a session, discarding all local data without uploading to the ledger."
 # Lifecycle and diagnostic surfaces stay EXPLICIT (ADR-023): the user
 # invokes them, the model never does. This also keeps their descriptions
 # out of context, so folding the command surface in costs no tokens.

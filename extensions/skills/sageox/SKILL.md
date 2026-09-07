@@ -20,7 +20,7 @@ a machine where the `ox` CLI is **not** installed.
 ox agent prime
 ```
 
-Run it before anything else, and again after a context compaction or clear. It
+Run it at session start — it is fine to read the user's request first — and again after a context compaction or clear. It
 loads team conventions, architectural decisions, prior sessions from teammates,
 and your agent identity. Most other `ox` commands need that identity.
 

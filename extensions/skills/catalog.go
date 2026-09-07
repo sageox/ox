@@ -274,6 +274,15 @@ func validateFrontmatter(name, content string) error {
 	if foundName != name {
 		return fmt.Errorf("canonical skill %q frontmatter name is %q", name, foundName)
 	}
+	// A description that is really an HTML comment is a conversion accident, not a
+	// description: the source file's first line was a `<!-- ... -->` block and it
+	// was lifted verbatim into the frontmatter. YAML accepts it as a quoted string,
+	// so nothing else catches it, and the skill ships with its activation surface
+	// replaced by a stray comment while its continuation and `-->` leak into the
+	// body as visible text.
+	if strings.HasPrefix(strings.Trim(description, "\"'"), "<!--") {
+		return fmt.Errorf("canonical skill %q has an HTML comment as its description", name)
+	}
 	if description == "" {
 		// Folded YAML values are accepted when a subsequent indented line exists.
 		if !strings.Contains(fm, "description: >") && !strings.Contains(fm, "description: |") {

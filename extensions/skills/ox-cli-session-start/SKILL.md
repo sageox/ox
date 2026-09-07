@@ -1,6 +1,6 @@
 ---
 name: ox-cli-session-start
-description: "<!-- Keep this file thin. Behavioral guidance (use-when, common-issues, errors)"
+description: "Start recording this agent session to the project ledger."
 # Lifecycle and diagnostic surfaces stay EXPLICIT (ADR-023): the user
 # invokes them, the model never does. This also keeps their descriptions
 # out of context, so folding the command surface in costs no tokens.

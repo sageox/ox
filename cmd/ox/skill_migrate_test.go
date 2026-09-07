@@ -357,3 +357,48 @@ func TestLegacyMigration_NeverRemovesTheOnlySurface(t *testing.T) {
 		t.Error("the legacy command should be preserved and reported, not silently dropped from the plan")
 	}
 }
+
+// TestLegacyMigration_RollbackDoesNotDiscardUnrelatedUnstagedWork is the
+// data-loss guard on the failure path.
+//
+// migrationBlocker refuses to run when anything is STAGED, but it deliberately
+// tolerates unstaged work — a developer mid-edit is the normal case. A repo-wide
+// `git checkout -- .` in the rollback would therefore reach past ox's own paths
+// and silently revert their work in progress, turning a failed housekeeping
+// commit into lost work.
+func TestLegacyMigration_RollbackDoesNotDiscardUnrelatedUnstagedWork(t *testing.T) {
+	root := migrationRepo(t)
+
+	// The developer's work in progress: tracked, edited, NOT staged.
+	writeRepoFile(t, root, "src/feature.go", "package main\n")
+	git(t, root, "add", "src/feature.go")
+	git(t, root, "commit", "-q", "-m", "add feature")
+	inProgress := "package main\n\n// half-written thought I have not saved anywhere else\n"
+	writeRepoFile(t, root, "src/feature.go", inProgress)
+
+	// Force the commit to fail.
+	hooks := filepath.Join(t.TempDir(), "reject-hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hooks, "pre-commit"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+	git(t, root, "config", "core.hooksPath", hooks)
+
+	m, err := planLegacyMigration(root)
+	if err != nil {
+		t.Fatalf("planLegacyMigration: %v", err)
+	}
+	if err := m.Apply(); err == nil {
+		t.Fatal("Apply should have failed on the rejecting hook")
+	}
+
+	got, err := os.ReadFile(filepath.Join(root, "src", "feature.go"))
+	if err != nil {
+		t.Fatalf("read feature.go: %v", err)
+	}
+	if string(got) != inProgress {
+		t.Errorf("the rollback discarded unrelated unstaged work.\n--- want ---\n%q\n--- got ---\n%q", inProgress, string(got))
+	}
+}

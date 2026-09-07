@@ -110,7 +110,7 @@ func TestScopedIgnoreFiles_NoFootprintInDirectoriesOxDoesNotUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureScopedIgnoreFiles: %v", err)
 	}
-	if len(written) != 1 || written[0] != filepath.Join(".claude", ".gitignore") {
+	if len(written) != 1 || written[0].Rel != filepath.Join(".claude", ".gitignore") {
 		t.Errorf("expected only .claude/.gitignore, got %v", written)
 	}
 	for _, dir := range []string{".agents", ".factory"} {
@@ -180,4 +180,54 @@ func TestIsReservedManagedPath_OwnershipBoundary(t *testing.T) {
 			t.Errorf("%s: got reserved=%v want %v (%s)", c.rel, got, c.reserved, c.why)
 		}
 	}
+}
+
+// TestScopedIgnoreFiles_RefusesSymlinkedPaths is the containment guard.
+//
+// os.Stat follows symlinks, so a repository that makes an agent directory — or
+// its .gitignore — a symlink could steer `ox init` or `ox doctor --fix` into
+// writing a file OUTSIDE the repository. This mirrors skillmanager's refusal to
+// write through a symlinked parent.
+func TestScopedIgnoreFiles_RefusesSymlinkedPaths(t *testing.T) {
+	t.Run("symlinked agent directory", func(t *testing.T) {
+		root := newIgnoreTestRepo(t)
+		outside := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(root, ".claude")); err != nil {
+			t.Fatalf("symlink .claude: %v", err)
+		}
+
+		written, err := ensureScopedIgnoreFiles(root)
+		if err != nil {
+			t.Fatalf("ensureScopedIgnoreFiles: %v", err)
+		}
+		if len(written) != 0 {
+			t.Errorf("ox wrote through a symlinked agent directory: %v", written)
+		}
+		if _, err := os.Stat(filepath.Join(outside, ".gitignore")); err == nil {
+			t.Error("ox created a file outside the repository")
+		}
+	})
+
+	t.Run("symlinked .gitignore", func(t *testing.T) {
+		root := newIgnoreTestRepo(t)
+		touch(t, root, ".claude/skills/ox-cli-plan/SKILL.md")
+		outside := filepath.Join(t.TempDir(), "victim.gitignore")
+		if err := os.WriteFile(outside, []byte("# the user's own file\n"), 0o644); err != nil {
+			t.Fatalf("write victim: %v", err)
+		}
+		if err := os.Symlink(outside, filepath.Join(root, ".claude", ".gitignore")); err != nil {
+			t.Fatalf("symlink .gitignore: %v", err)
+		}
+
+		if _, err := ensureScopedIgnoreFiles(root); err != nil {
+			t.Fatalf("ensureScopedIgnoreFiles: %v", err)
+		}
+		got, err := os.ReadFile(outside)
+		if err != nil {
+			t.Fatalf("read victim: %v", err)
+		}
+		if string(got) != "# the user's own file\n" {
+			t.Errorf("ox wrote through a symlinked .gitignore into a file outside the repo:\n%s", got)
+		}
+	})
 }

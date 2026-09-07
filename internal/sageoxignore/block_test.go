@@ -182,3 +182,28 @@ func TestRemoveBlock_LeavesUserRulesByteIdentical(t *testing.T) {
 		t.Errorf("uninstall did not restore the file byte-for-byte.\n--- want ---\n%q\n--- got ---\n%q", user, got)
 	}
 }
+
+// TestEnsureBlock_TruncatedBlockSurvivesRepeatedCalls is the second-call bug.
+//
+// A file with an orphaned begin marker gets a fresh complete block appended. On
+// the NEXT call a naive "first begin, first end" search pairs the ORPHAN with the
+// new block's end marker and replaces everything between them — silently deleting
+// every user rule that sat after the damaged marker. The writer runs at init, at
+// doctor, and on the daemon tick, so a second call is guaranteed.
+func TestEnsureBlock_TruncatedBlockSurvivesRepeatedCalls(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".gitignore")
+	write(t, path, BlockBegin+"\nskills/ox-cli-*/\n# user deleted the end marker\nmy-secret/\nbuild/\n")
+
+	for i := 1; i <= 3; i++ {
+		if _, _, err := EnsureBlock(path, oxEntries); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+		got := read(t, path)
+		if !strings.Contains(got, "my-secret/") {
+			t.Fatalf("run %d deleted a user rule that followed the damaged marker:\n%s", i, got)
+		}
+		if !strings.Contains(got, "build/") {
+			t.Fatalf("run %d deleted a user rule that followed the damaged marker:\n%s", i, got)
+		}
+	}
+}
