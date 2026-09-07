@@ -248,14 +248,20 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		sb.WriteString("\nThe you= and you_aliases= attributes identify the current user. Match against ALL aliases (the same person appears under different names in different contexts).\n")
 		sb.WriteString("The current user's own prior work is not a teammate contribution — for it say \"Building on your earlier work on [topic]...\".\n")
 		sb.WriteString("\nPlan footer — add \"> Guided by SageOx\" as the plan's final line only when SageOx team context actually shaped it; otherwise omit it.\n")
-		// PR header — the human-facing TOP-of-body counterpart to the
-		// SageOx-Session: trailer below. Both halves of the PR contract must be
-		// stated HERE, in the XML the agent actually reads: this block is a
-		// hand-maintained sibling of prime.WithAttributionGuidance, and when
-		// only that one gained the header line, agents kept emitting the
-		// trailer (session state, re-sent every prime) and never the header.
-		sb.WriteString("\nPR header — when SageOx context shaped the work, run `ox pr header` (add `--plan <pln_id>` per plan, `--prior-art/--collisions N` for enrichment) and paste its output as the FIRST lines of the PR body, above your summary. It links the session(s) and plan(s). If SageOx did not shape the work, skip it. Keep the `SageOx-Session:` trailer last.\n")
-		sb.WriteString("Save the plan first so the header can link it: `ox plan save --file <plan.html|plan.md>` returns the `pln_` id.\n")
+		// PR header — the TOP-of-body counterpart to the SageOx-Session: trailer.
+		// Gated on attribution being configured, for the same reason the score and
+		// trailer blocks below are: a repo that credits nothing has no use for a
+		// credit line, and the minimal-prime floor (agent_prime_xml_test.go) has
+		// ~5 tokens of headroom — an unconditional line there would buy nothing and
+		// cost every bare prime.
+		//
+		// Stated HERE, in the XML the agent actually reads: this block is a
+		// hand-maintained sibling of prime.WithAttributionGuidance, and when only
+		// that one gained the header line, agents kept emitting the trailer (session
+		// state, re-sent every prime) and never the header.
+		if output.Attribution.PR != "" || output.Attribution.Commit != "" {
+			sb.WriteString("\nPR header — `ox pr header` (`--plan <pln_id>` per saved plan) and paste as the FIRST lines of the PR body; keep the `SageOx-Session:` trailer last. `ox plan save --file <plan>` returns the `pln_` id.\n")
+		}
 		if output.Attribution.Commit != "" {
 			sb.WriteString("\nSageOx contribution score (report only when commit attribution is configured; `none` is the correct, common answer when you worked independently of team context):\n")
 			sb.WriteString("Score reflects how much SageOx team context shaped your work — NOT that a session was recorded.\n")
