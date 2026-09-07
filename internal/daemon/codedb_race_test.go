@@ -301,7 +301,12 @@ func TestMultipleManagersCheckFreshness(t *testing.T) {
 			}
 		}
 		return true
-	}, 10*time.Second, 50*time.Millisecond, "timed out waiting for background indexing to stop")
+		// 60s, not 10s. These are unjoinable goroutines doing real Bleve indexing
+		// and SQLite work; on a loaded shared CI runner that legitimately exceeds
+		// ten seconds, which made this fail as a flake rather than a defect. The
+		// bound still has to exist — without it a genuine hang would wedge the
+		// suite instead of failing it.
+	}, 60*time.Second, 50*time.Millisecond, "timed out waiting for background indexing to stop")
 	// brief pause for file handles to fully close after indexing stops
 	time.Sleep(200 * time.Millisecond)
 }

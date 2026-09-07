@@ -121,13 +121,32 @@ const (
 // Uses crypto/rand for random generation from [0-9A-Za-z].
 // 62^5 ≈ 916M possibilities — collision-safe within a single session.
 func GenerateEntryID() string {
+	// Rejection sampling, not modulo.
+	//
+	// 256 is not a multiple of 62, so `rand byte % 62` makes the first 8
+	// characters of the alphabet about 1.6% more likely than the other 54. That
+	// bias shrinks the effective ID space and raises the collision rate for no
+	// benefit at all. Discarding the 8 unusable byte values costs one extra draw
+	// roughly 3% of the time and makes the distribution exactly uniform.
+	const usable = 256 - (256 % len(entryIDCharset)) // 248
+
 	b := make([]byte, entryIDLength)
 	rb := make([]byte, entryIDLength)
-	if _, err := rand.Read(rb); err != nil {
-		return "00000"
-	}
-	for i := range b {
-		b[i] = entryIDCharset[int(rb[i])%len(entryIDCharset)]
+	filled := 0
+	for filled < entryIDLength {
+		if _, err := rand.Read(rb); err != nil {
+			return "00000"
+		}
+		for _, v := range rb {
+			if int(v) >= usable {
+				continue // biased tail: draw again rather than fold it in
+			}
+			b[filled] = entryIDCharset[int(v)%len(entryIDCharset)]
+			filled++
+			if filled == entryIDLength {
+				break
+			}
+		}
 	}
 	return string(b)
 }
