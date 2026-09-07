@@ -37,8 +37,42 @@ const (
 //     never grows.
 //   - A file that lacked a trailing newline gets one before the block is appended,
 //     rather than having its last rule silently merged with our first line.
+//
+// blockFile is the read/write pair the block writer operates through.
+//
+// It exists so the writer can be anchored to a trusted *os.Root instead of
+// resolving a path through the ambient filesystem on every call. Between an
+// Lstat check and a path-based write there is a window in which the directory or
+// the .gitignore can be replaced by a symlink, redirecting ox's write outside the
+// repository. Root-relative operations close that window: the kernel resolves
+// each component against the held root directory.
+type blockFile struct {
+	name  string // for error messages only
+	read  func() ([]byte, error)
+	write func([]byte) error
+}
+
+// EnsureBlockInRoot is EnsureBlock anchored to a trusted repository root.
+// name is relative to root; every read and write stays inside it.
+func EnsureBlockInRoot(root *os.Root, name string, entries []string) (changed bool, created bool, err error) {
+	return ensureBlock(blockFile{
+		name:  name,
+		read:  func() ([]byte, error) { return root.ReadFile(name) },
+		write: func(b []byte) error { return root.WriteFile(name, b, 0o644) },
+	}, entries)
+}
+
 func EnsureBlock(path string, entries []string) (changed bool, created bool, err error) {
-	existing, err := os.ReadFile(path)
+	return ensureBlock(blockFile{
+		name:  path,
+		read:  func() ([]byte, error) { return os.ReadFile(path) },
+		write: func(b []byte) error { return os.WriteFile(path, b, 0o644) },
+	}, entries)
+}
+
+func ensureBlock(f blockFile, entries []string) (changed bool, created bool, err error) {
+	path := f.name
+	existing, err := f.read()
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return false, false, fmt.Errorf("read %s: %w", path, err)
@@ -55,7 +89,7 @@ func EnsureBlock(path string, entries []string) (changed bool, created bool, err
 			return false, false, nil
 		}
 		updated := content[:begin] + want + content[end:]
-		if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+		if err := f.write([]byte(updated)); err != nil {
 			return false, false, fmt.Errorf("write %s: %w", path, err)
 		}
 		return true, false, nil
@@ -74,7 +108,7 @@ func EnsureBlock(path string, entries []string) (changed bool, created bool, err
 		buf.WriteString("\n")
 	}
 	buf.WriteString(want)
-	if err := os.WriteFile(path, []byte(buf.String()), 0o644); err != nil {
+	if err := f.write([]byte(buf.String())); err != nil {
 		return false, false, fmt.Errorf("write %s: %w", path, err)
 	}
 	return true, created, nil

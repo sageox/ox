@@ -1,7 +1,9 @@
 package skillmanager
 
 import (
+	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 
 	"github.com/sageox/ox/internal/sageoxignore"
@@ -81,7 +83,8 @@ type IgnoreFileResult struct {
 }
 
 func EnsureScopedIgnoreFiles(repoRoot string) ([]IgnoreFileResult, error) {
-	return ensureScopedIgnoreFilesIn(repoRoot, nil)
+	written, _, err := ensureScopedIgnoreFilesIn(repoRoot, nil)
+	return written, err
 }
 
 // EnsureScopedIgnoreFilesForDirs also writes the block into agent directories
@@ -92,43 +95,64 @@ func EnsureScopedIgnoreFiles(repoRoot string) ([]IgnoreFileResult, error) {
 // would skip exactly the directory about to be filled with reserved-prefix
 // files. The gate still applies everywhere else, so a repository never sprouts
 // an agent directory it does not use.
-func EnsureScopedIgnoreFilesForDirs(repoRoot string, force map[string]bool) ([]IgnoreFileResult, error) {
+//
+// The second return value names the agent directories ox could NOT protect: a
+// symlinked directory, a symlinked .gitignore, or one it could not create. A
+// caller about to materialize reserved-prefix files into such a directory MUST
+// NOT proceed — the files would land visible to git with no rule hiding them,
+// which is the exact state that puts vendor files in a customer's pull request.
+func EnsureScopedIgnoreFilesForDirs(repoRoot string, force map[string]bool) ([]IgnoreFileResult, []string, error) {
 	return ensureScopedIgnoreFilesIn(repoRoot, force)
 }
 
-func ensureScopedIgnoreFilesIn(repoRoot string, force map[string]bool) ([]IgnoreFileResult, error) {
+func ensureScopedIgnoreFilesIn(repoRoot string, force map[string]bool) ([]IgnoreFileResult, []string, error) {
+	// Anchor every operation to the repository root.
+	//
+	// Checking a path with Lstat and then writing it by path leaves a window in
+	// which the directory or the .gitignore can be swapped for a symlink, which
+	// would redirect the write outside the repository. Root-relative operations
+	// resolve each component against the held root, so that swap cannot escape.
+	root, err := os.OpenRoot(repoRoot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open repository root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
 	var written []IgnoreFileResult
+	var unprotected []string
 	for _, f := range ScopedIgnoreFiles() {
-		dirPath := filepath.Join(repoRoot, f.Dir)
 		// Lstat, not Stat: Stat follows symlinks, so a repository that makes an
 		// agent directory a symlink could steer ox into writing outside repoRoot.
-		// This mirrors skillmanager's refusal to write through a symlinked parent.
-		info, err := os.Lstat(dirPath)
+		info, err := root.Lstat(f.Dir)
 		switch {
 		case err == nil && info.Mode()&os.ModeSymlink != 0:
-			continue // symlinked agent dir: refuse, it can point outside the repo
+			unprotected = append(unprotected, f.Dir)
+			continue
 		case err == nil && !info.IsDir():
+			unprotected = append(unprotected, f.Dir)
 			continue
 		case err != nil:
 			if !force[f.Dir] {
-				continue // ox writes nothing here
+				continue // ox writes nothing here, so there is nothing to protect
 			}
-			if mkErr := os.MkdirAll(dirPath, 0o755); mkErr != nil {
+			if mkErr := root.MkdirAll(f.Dir, 0o755); mkErr != nil {
+				unprotected = append(unprotected, f.Dir)
 				continue
 			}
 		}
-		path := filepath.Join(dirPath, ".gitignore")
-		if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		name := path.Join(f.Dir, ".gitignore")
+		if fi, err := root.Lstat(name); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 			// A symlinked .gitignore would have ox edit whatever it points at.
+			unprotected = append(unprotected, f.Dir)
 			continue
 		}
-		changed, created, err := sageoxignore.EnsureBlock(path, f.Entries)
+		changed, created, err := sageoxignore.EnsureBlockInRoot(root, name, f.Entries)
 		if err != nil {
-			return written, err
+			return written, unprotected, err
 		}
 		if changed {
 			written = append(written, IgnoreFileResult{Rel: filepath.Join(f.Dir, ".gitignore"), Created: created})
 		}
 	}
-	return written, nil
+	return written, unprotected, nil
 }

@@ -796,3 +796,69 @@ func TestApplyAlwaysWritesTheIgnoreRuleFirst(t *testing.T) {
 	_, err = os.Stat(filepath.Join(repo, ".factory"))
 	require.Error(t, err, "ox created footprint in a directory it does not use")
 }
+
+// TestApplyRefusesToMaterializeWhereTheIgnoreRuleCannotBeWritten covers the gap
+// two independent reviews found in the ignore invariant.
+//
+// Writing the rule "best effort" is not enough. ensureScopedIgnoreFilesIn skips a
+// symlinked .gitignore — correctly, since editing through it would write outside
+// the repository — but Apply then went on to materialize reserved-prefix files
+// into that same directory anyway. That reproduces the customer state this whole
+// rework exists to prevent: ox-cli-* files on disk, visible to git, one
+// `git add -A` from their history. Refusing is recoverable; their commit is not.
+func TestApplyRefusesToMaterializeWhereTheIgnoreRuleCannotBeWritten(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+
+	// The target root is .agents/skills, so .agents is the directory ox will fill.
+	agents := filepath.Join(repo, ".agents")
+	require.NoError(t, os.MkdirAll(agents, 0o755))
+	outside := filepath.Join(t.TempDir(), "victim")
+	require.NoError(t, os.WriteFile(outside, []byte("# the user's own file\n"), 0o644))
+	if err := os.Symlink(outside, filepath.Join(agents, ".gitignore")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	plan, err := planWithSource(repo, "1.0.0", DefaultDesired(targets), targets,
+		fakeCatalog{revision: "rev-1", skill: fakeSkill("1.0.0", "one")})
+	require.NoError(t, err)
+
+	err = Apply(plan)
+	require.Error(t, err, "Apply installed reserved-prefix files into a directory with no usable "+
+		"ignore rule; they would be visible to git and one `git add -A` from the customer's history")
+	require.Contains(t, err.Error(), ".agents", "the error must name the unprotected directory")
+
+	if entries, readErr := os.ReadDir(filepath.Join(agents, "skills")); readErr == nil {
+		require.Empty(t, entries, "ox half-installed skills despite refusing")
+	}
+	got, readErr := os.ReadFile(outside)
+	require.NoError(t, readErr)
+	require.Equal(t, "# the user's own file\n", string(got),
+		"ox wrote through the symlink into a file outside the repository")
+}
+
+// TestApplyStillProceedsWhenAnUnprotectedDirIsNotBeingWritten pins the other half:
+// the refusal is scoped to directories ox actually materializes into. A repository
+// with a symlinked .factory/.gitignore but no .factory work must still get its
+// skills — over-refusing would break installs that were never at risk.
+func TestApplyStillProceedsWhenAnUnprotectedDirIsNotBeingWritten(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+
+	factory := filepath.Join(repo, ".factory")
+	require.NoError(t, os.MkdirAll(factory, 0o755))
+	outside := filepath.Join(t.TempDir(), "victim")
+	require.NoError(t, os.WriteFile(outside, []byte("x\n"), 0o644))
+	if err := os.Symlink(outside, filepath.Join(factory, ".gitignore")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	plan, err := planWithSource(repo, "1.0.0", DefaultDesired(targets), targets,
+		fakeCatalog{revision: "rev-1", skill: fakeSkill("1.0.0", "one")})
+	require.NoError(t, err)
+	require.NoError(t, Apply(plan), "refused an install that was never at risk")
+	_, err = os.ReadFile(filepath.Join(repo, ".agents", ".gitignore"))
+	require.NoError(t, err, "the protected directory still needs its rule")
+}

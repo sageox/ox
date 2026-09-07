@@ -199,6 +199,33 @@ func (plan *ReconcilePlan) agentDirs() map[string]bool {
 	return dirs
 }
 
+// materializingDirs names only the agent directories this plan will WRITE into.
+//
+// Removals are deliberately excluded: deleting a file from a directory with no
+// usable ignore rule leaves nothing visible to git, so there is nothing to
+// protect and no reason to block the cleanup.
+func (plan *ReconcilePlan) materializingDirs() map[string]bool {
+	dirs := map[string]bool{}
+	for _, group := range [][]FileAction{plan.Creates, plan.Updates} {
+		for _, a := range group {
+			if i := strings.Index(a.Path, "/"); i > 0 {
+				dirs[a.Path[:i]] = true
+			}
+		}
+	}
+	return dirs
+}
+
+func intersectDirs(names []string, want map[string]bool) []string {
+	var out []string
+	for _, n := range names {
+		if want[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // WrittenPaths returns repository-relative files created or updated by Apply.
 func (plan *ReconcilePlan) WrittenPaths() []string {
 	return actionPaths(plan.Creates, plan.Updates)
@@ -697,8 +724,19 @@ func Apply(plan *ReconcilePlan) error {
 	//
 	// Best-effort. A repository that cannot take the ignore block still gets its
 	// skills; failing the whole reconcile over it would be a worse trade.
-	if _, err := EnsureScopedIgnoreFilesForDirs(plan.repoRoot, plan.agentDirs()); err != nil {
+	_, unprotected, err := EnsureScopedIgnoreFilesForDirs(plan.repoRoot, plan.agentDirs())
+	if err != nil {
 		slog.Debug("skills: could not write ox ignore rules", "repo", plan.repoRoot, "error", err)
+	}
+	// Best-effort ONLY where nothing is being materialized. If ox is about to write
+	// reserved-prefix files into a directory it could not protect — a symlinked
+	// agent directory, a symlinked .gitignore, one it could not create — it must not
+	// write them at all. Those files would land visible to git with no rule hiding
+	// them: precisely the state that puts the vendor rename into a customer's pull
+	// request. Refusing is recoverable; a vendor file in their history is not.
+	if blocked := intersectDirs(unprotected, plan.materializingDirs()); len(blocked) > 0 {
+		return fmt.Errorf("refusing to install ox-managed files into %s: no usable .gitignore there "+
+			"(a symlinked directory or .gitignore); the files would be visible to git", strings.Join(blocked, ", "))
 	}
 
 	if len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 && !plan.lockChanged {
