@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/sageox/ox/internal/fileutil"
@@ -339,5 +340,50 @@ func TestCheckSkillsInventoryDrift_StandsDownWhenAnotherProcessHoldsTheLock(t *t
 
 	if res.Status == StatusFixed {
 		t.Error("the daemon applied while another process held the reconcile lock")
+	}
+}
+
+// TestCheckSkillsInventoryDrift_ReportsTheApplyLockDistinctly.
+//
+// There are TWO locks and they mean different things. The reconcile lock
+// (.sageox/skills.lock.json) serializes plan-and-apply; the APPLY lock
+// (.sageox/cache/skills-apply.lock) serializes the multi-step mutation itself and
+// is non-blocking, so a loser gets ErrApplyInProgress rather than waiting.
+//
+// The daemon must report that as "another ox process is reconciling" — an
+// expected, self-resolving condition — and not as StatusError, which would make
+// a routine overlap with `ox doctor` or a session start look like a fault.
+func TestCheckSkillsInventoryDrift_ReportsTheApplyLockDistinctly(t *testing.T) {
+	root := driftRepo(t)
+	seedSelectedRepo(t, root, version.Version)
+	if err := os.RemoveAll(filepath.Join(root, ".claude", "skills")); err != nil {
+		t.Fatalf("simulate drift: %v", err)
+	}
+
+	// Hold the APPLY lock, the way a concurrent `ox doctor --fix` would.
+	lockPath := filepath.Join(root, ".sageox", "cache", "skills-apply.lock")
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open lock: %v", err)
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Skipf("could not take the apply lock: %v", err)
+	}
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+
+	res := checkSkillsInventoryDrift(context.Background(), root)
+
+	if res.Status == StatusError {
+		t.Errorf("a routine overlap with another ox process was reported as a fault: %q", res.Summary)
+	}
+	if res.Status == StatusFixed {
+		t.Error("the daemon applied while another process held the apply lock")
+	}
+	if !strings.Contains(res.Summary, "reconciling") {
+		t.Errorf("summary does not name the reason it stood down: %q", res.Summary)
 	}
 }
