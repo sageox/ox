@@ -744,9 +744,22 @@ func runInit() error {
 
 	// Write the ox-managed ignore block BEFORE anything is staged, so the rule
 	// that hides ox's own files exists in the tree before the index is touched.
-	ignoreFiles, ignoreErr := ensureScopedIgnoreFiles(gitRoot)
-	if ignoreErr != nil && !initQuiet {
-		cli.PrintWarning(fmt.Sprintf("Could not write ox ignore rules: %v", ignoreErr))
+	// Warn on UNPROTECTED as well as on error. A directory ox cannot own — a
+	// symlinked or non-regular .gitignore — is reported as unprotected and returns
+	// no error at all, so an error-only check goes silent in exactly the case the
+	// user most needs to hear about: ox's files are about to exist in that
+	// directory with nothing hiding them from git.
+	ignoreFiles, unprotected, ignoreErr := skillmanager.EnsureScopedIgnoreFilesForDirs(gitRoot, nil)
+	if !initQuiet {
+		if ignoreErr != nil {
+			cli.PrintWarning(fmt.Sprintf("Could not write ox ignore rules: %v", ignoreErr))
+		}
+		if len(unprotected) > 0 {
+			cli.PrintWarning(fmt.Sprintf(
+				"Could not write ox ignore rules in %s — ox files there will be visible to git; "+
+					"remove or rename the blocking path and rerun `ox doctor --fix`",
+				strings.Join(unprotected, ", ")))
+		}
 	}
 	trackScopedIgnoreFilesForInit(tracker, gitRoot, ignoreFiles, ignoreErr)
 

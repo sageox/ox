@@ -3,6 +3,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,8 +165,28 @@ func TestRunInit_UnwritableScopedIgnoreWarnsAndStillCompletes(t *testing.T) {
 	require.NoError(t, os.MkdirAll(blocker, 0o755),
 		"fixture: .claude/.gitignore must be a directory so writing it fails")
 
-	require.NoError(t, runInit(),
+	// Capture stdout: the warning is the user-visible half of this contract, and
+	// asserting only "init completed" let it go silent unnoticed once already.
+	// ensureScopedIgnoreFiles reports a directory it cannot own as UNPROTECTED with
+	// no error, so an error-only warning check printed nothing in exactly the case
+	// the user needs to hear about.
+	// STDERR, not stdout: cli.PrintWarning writes there. Capturing stdout returned
+	// the whole success banner and no warning, which reads exactly like "ox stayed
+	// silent" — the failure this assertion is meant to catch.
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	realStderr := os.Stderr
+	os.Stderr = w
+	initErr := runInit()
+	os.Stderr = realStderr
+	require.NoError(t, w.Close())
+	printed, readErr := io.ReadAll(r)
+	require.NoError(t, readErr)
+
+	require.NoError(t, initErr,
 		"a failed ignore write must not abort an otherwise successful init")
+	assert.Contains(t, strings.ToLower(string(printed)), "ignore rules",
+		"init said nothing about an ignore file it could not write; ox files there are visible to git")
 
 	// init still finished its real work
 	assert.DirExists(t, filepath.Join(env.Root, ".sageox"))
