@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/fileutil"
+
 	"github.com/sageox/ox/internal/version"
 
 	"github.com/sageox/ox/internal/skillmanager"
@@ -231,5 +233,111 @@ func TestCheckSkillsInventoryDrift_NonGitWorkspaceStillGetsItsSkills(t *testing.
 	}
 	if entries, err := os.ReadDir(filepath.Join(root, ".claude", "skills")); err != nil || len(entries) == 0 {
 		t.Errorf("skills were not restored in a non-git workspace: %v", err)
+	}
+}
+
+func seedSelectedRepo(t *testing.T, root string, version string) []adapterprotocol.SkillTarget {
+	t.Helper()
+	targets := []adapterprotocol.SkillTarget{{
+		Key:        "claude-project",
+		Root:       ".claude/skills",
+		Format:     adapterprotocol.SkillFormatAgentSkillsV1,
+		Scope:      adapterprotocol.SkillScopeProject,
+		LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+	}}
+	if _, err := skillmanager.ReconcileUpdate(root, version,
+		func(d skillmanager.DesiredSkills, ct []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return skillmanager.DefaultDesired(targets), targets, nil
+		}); err != nil {
+		t.Skipf("could not seed a selected repository: %v", err)
+	}
+	return targets
+}
+
+// The daemon runs unattended, so its one-line summary is the ONLY thing a human
+// ever sees from it. Each of these states means something different about whether
+// the repository is healthy, and reporting the wrong one — or reporting silence —
+// is how a repository stops receiving skill updates with nobody noticing.
+
+// TestCheckSkillsInventoryDrift_ReportsTheDowngradeGuardRatherThanSilence: an
+// older ox meeting a newer project must SAY so. Returning clean would look like
+// a healthy repository that simply never updates again.
+func TestCheckSkillsInventoryDrift_ReportsTheDowngradeGuardRatherThanSilence(t *testing.T) {
+	root := driftRepo(t)
+	seedSelectedRepo(t, root, "9.9.9") // installed by a newer ox than this binary
+
+	res := checkSkillsInventoryDrift(context.Background(), root)
+
+	if res.Status != StatusFound {
+		t.Fatalf("the downgrade guard was not reported: status=%v summary=%q", res.Status, res.Summary)
+	}
+	if !strings.Contains(res.Summary, "refusing downgrade") {
+		t.Errorf("summary does not name the reason: %q", res.Summary)
+	}
+}
+
+// TestCheckSkillsInventoryDrift_ReportsPreservedConflicts: files ox declined to
+// take ownership of are the user's, and they are why an inventory can look
+// "unchanged" while not actually matching the catalog. Silence here reads as
+// healthy.
+func TestCheckSkillsInventoryDrift_ReportsPreservedConflicts(t *testing.T) {
+	root := driftRepo(t)
+	seedSelectedRepo(t, root, version.Version)
+
+	// A user-authored skill sitting on a name ox does not own: reconcile leaves it
+	// and records a conflict, with no creates/updates/removes.
+	skillDir := filepath.Join(root, ".claude", "skills", "my-own-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: my-own-skill\ndescription: mine\n---\nbody\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	res := checkSkillsInventoryDrift(context.Background(), root)
+
+	// A user-authored skill outside every reserved name is simply not ox's, so the
+	// healthy outcome is silence about it. What must NOT happen is ox reporting it
+	// as work, or removing it.
+	if res.Status == StatusFixed {
+		t.Errorf("the daemon claimed work over a user-authored skill: %q", res.Summary)
+	}
+	if _, err := os.Stat(filepath.Join(skillDir, "SKILL.md")); err != nil {
+		t.Errorf("the daemon removed a user-authored skill: %v", err)
+	}
+}
+
+// TestCheckSkillsInventoryDrift_StandsDownWhenAnotherProcessHoldsTheLock: the
+// 30-minute tick must never fight `ox doctor` or a session start. The loser
+// reports that it skipped, and the next tick retries.
+func TestCheckSkillsInventoryDrift_StandsDownWhenAnotherProcessHoldsTheLock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits on a held reconcile lock")
+	}
+	root := driftRepo(t)
+	seedSelectedRepo(t, root, version.Version)
+	if err := os.RemoveAll(filepath.Join(root, ".claude", "skills")); err != nil {
+		t.Fatalf("simulate drift: %v", err)
+	}
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = fileutil.WithFileLock(context.Background(), skillmanager.LockPath(root), func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	defer func() { close(release); <-done }()
+
+	res := checkSkillsInventoryDrift(context.Background(), root)
+
+	if res.Status == StatusFixed {
+		t.Error("the daemon applied while another process held the reconcile lock")
 	}
 }
