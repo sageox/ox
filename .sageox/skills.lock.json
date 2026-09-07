@@ -2,7 +2,9 @@
   "schema_version": 2,
   "desired": {
     "bundles": [
-      "core"
+      "core",
+      "lifecycle",
+      "onramp"
     ],
     "targets": [
       "claude-project"

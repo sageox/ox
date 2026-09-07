@@ -383,8 +383,21 @@ func trackedAgentPaths(repoRoot string) ([]string, error) {
 	cmd.Dir = repoRoot
 	out, err := cmd.Output()
 	if err != nil {
-		// A repository with none of these directories is not an error.
-		return nil, nil
+		// Distinguish "there is nothing here to list" from "git could not read this
+		// repository". Swallowing BOTH as "nothing tracked" is the same defect that
+		// was fixed in trackedPlanPaths: the migration then plans against a false
+		// premise — it concludes no ox file is tracked, and `ox doctor` reports the
+		// self-contradictory "no ox-managed files tracked" while offering to untrack
+		// them. A corrupt index or an unreadable repository must surface, not be
+		// reported as clean.
+		//
+		// `git ls-files` exits 0 with empty output when its pathspecs match nothing,
+		// so the "none of these directories exist" case never reaches here anyway;
+		// only a genuine failure does.
+		if !isGitRepository(repoRoot) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("list tracked ox files: %w", err)
 	}
 	var paths []string
 	for _, p := range strings.Split(string(out), "\x00") {
@@ -812,4 +825,13 @@ func liveRecordingInProgress(repoRoot string) bool {
 		}
 	}
 	return false
+}
+
+// isGitRepository reports whether repoRoot is inside a git repository at all.
+// A managed workspace that is not a git repo is a normal state; a git repo whose
+// index git cannot read is not.
+func isGitRepository(repoRoot string) bool {
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd.Dir = repoRoot
+	return cmd.Run() == nil
 }

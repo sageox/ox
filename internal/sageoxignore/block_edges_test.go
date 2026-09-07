@@ -326,3 +326,73 @@ func TestEnsureBlock_TwoBlocksFromABadMergeStillConverge(t *testing.T) {
 		t.Errorf("the user's rule was lost while reconciling duplicate blocks:\n%s", got)
 	}
 }
+
+// TestRemoveBlock_RefusesToGuessAtADamagedBlock.
+//
+// Uninstall deletes text from a file ox does not own outright. A begin marker
+// with no end marker means the block was truncated or hand-edited, and there is
+// no safe place to stop deleting — guessing eats whatever the user wrote after
+// it. Removing nothing is recoverable; removing too much is not.
+func TestRemoveBlock_RefusesToGuessAtADamagedBlock(t *testing.T) {
+	userRules := "keep-me.txt\n!keep/\n"
+	damaged := BlockBegin + "\nskills/ox-cli-*/\n" + userRules // no end marker
+	p := writeIgnore(t, damaged)
+
+	removed, err := RemoveBlock(p)
+	if err != nil {
+		t.Fatalf("RemoveBlock: %v", err)
+	}
+	if removed {
+		t.Error("RemoveBlock spliced a block whose end marker was missing")
+	}
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != damaged {
+		t.Errorf("the file was modified despite the damaged block:\n%q", got)
+	}
+}
+
+// TestRemoveBlock_UnreadableFileIsAnErrorNotASilentSuccess: reporting "removed
+// nothing, no problem" for a file it could not read would let an uninstall claim
+// success while leaving ox's rules in place.
+func TestRemoveBlock_UnreadableFileIsAnErrorNotASilentSuccess(t *testing.T) {
+	// A DIRECTORY where the file is expected: fails the read on every platform,
+	// unlike chmod (a near-no-op on Windows) or a symlink (privileged there).
+	dir := filepath.Join(t.TempDir(), ".gitignore")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	removed, err := RemoveBlock(dir)
+	if err == nil {
+		t.Error("an unreadable ignore file was reported as a clean no-op")
+	}
+	if removed {
+		t.Error("RemoveBlock claimed it removed a block it could not read")
+	}
+}
+
+// TestRemoveBlock_AbsorbsTheSeparatorItAdded: EnsureBlock inserts a blank line
+// before the block, so leaving it behind means install-then-uninstall does not
+// round-trip and the file grows a blank line on every cycle.
+func TestRemoveBlock_AbsorbsTheSeparatorItAdded(t *testing.T) {
+	original := "mine.txt\n"
+	p := writeIgnore(t, original)
+	for i := 0; i < 3; i++ {
+		if _, _, err := EnsureBlock(p, []string{"skills/ox-cli-*/"}); err != nil {
+			t.Fatalf("EnsureBlock %d: %v", i, err)
+		}
+		if _, err := RemoveBlock(p); err != nil {
+			t.Fatalf("RemoveBlock %d: %v", i, err)
+		}
+		got, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+		if string(got) != original {
+			t.Fatalf("cycle %d did not round-trip:\ngot  %q\nwant %q", i, got, original)
+		}
+	}
+}

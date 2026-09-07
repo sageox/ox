@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -197,5 +198,76 @@ func TestCheckLegacyOxFilesIn_PreservesUserEditedFilesAndSaysSo(t *testing.T) {
 	res := checkLegacyOxFilesIn(root, false)
 	if !strings.Contains(res.message, "user-edited") {
 		t.Errorf("the summary does not mention preserved user-edited files: %q", res.message)
+	}
+}
+
+// TestCheckLegacyOxFilesIn_EmptyRootIsSkippedNotCrashed: the check is reachable
+// with an unresolved root (the cwd wrapper hands it whatever findGitRoot found).
+// It must skip rather than plan a migration against the filesystem root.
+func TestCheckLegacyOxFilesIn_EmptyRootIsSkippedNotCrashed(t *testing.T) {
+	res := checkLegacyOxFilesIn("", true)
+	// SkippedCheck is its own state: skipped=true, passed=false. "Not applicable"
+	// must not read as either healthy or broken.
+	if !res.skipped {
+		t.Errorf("an unresolved root was not reported as skipped: %q / %q", res.message, res.detail)
+	}
+	if !strings.Contains(res.message, "not in git repo") {
+		t.Errorf("summary does not say why it skipped: %q", res.message)
+	}
+}
+
+// TestCheckLegacyOxFilesIn_UninspectableRepoWarnsInsteadOfClaimingClean.
+//
+// planLegacyMigration shells out to git. If that fails, reporting "none tracked"
+// would tell the user their repository is clean when ox simply could not look —
+// and the migration would never run. A DIRECTORY where .git/index belongs breaks
+// git's read on every platform without chmod or symlinks.
+func TestCheckLegacyOxFilesIn_UninspectableRepoWarnsInsteadOfClaimingClean(t *testing.T) {
+	root := migrationRepo(t)
+	idx := filepath.Join(root, ".git", "index")
+	if err := os.WriteFile(idx, []byte("not a git index at all"), 0o644); err != nil {
+		t.Fatalf("corrupt index: %v", err)
+	}
+	// Confirm git itself now refuses, so this asserts against the real condition.
+	probe := exec.Command("git", "ls-files")
+	probe.Dir = root
+	if out, err := probe.CombinedOutput(); err == nil {
+		t.Skipf("this git tolerates the corrupt index (%q); nothing to inspect-fail", out)
+	}
+
+	res := checkLegacyOxFilesIn(root, false)
+
+	if !res.warning {
+		t.Errorf("a repository ox could not inspect was not reported: %q / %q", res.message, res.detail)
+	}
+	for _, claim := range []string{"none tracked", "no ox-managed files tracked"} {
+		if strings.Contains(res.message, claim) {
+			t.Errorf("ox claimed the repository was clean while unable to read it: %q", res.message)
+		}
+	}
+}
+
+// TestCheckLegacyOxFilesIn_DefersWhileAGitOperationIsInFlight: the migration
+// writes a commit. Doing that mid-rebase would land it on the wrong base, or be
+// discarded by the rebase's own reset. Deferring is always recoverable.
+func TestCheckLegacyOxFilesIn_DefersWhileAGitOperationIsInFlight(t *testing.T) {
+	root := migrationRepo(t)
+	// A MERGE_HEAD marker is exactly what git leaves during a conflicted merge.
+	if err := os.WriteFile(filepath.Join(root, ".git", "MERGE_HEAD"),
+		[]byte("0000000000000000000000000000000000000000\n"), 0o644); err != nil {
+		t.Fatalf("write MERGE_HEAD: %v", err)
+	}
+	before := strings.Join(trackedPaths(t, root), "\n")
+
+	res := checkLegacyOxFilesIn(root, true)
+
+	if !res.warning {
+		t.Errorf("the migration did not defer during an in-flight merge: %q / %q", res.message, res.detail)
+	}
+	if !strings.Contains(res.message, "deferred") {
+		t.Errorf("summary does not say it deferred: %q", res.message)
+	}
+	if after := strings.Join(trackedPaths(t, root), "\n"); after != before {
+		t.Error("the migration touched the index during an in-flight merge")
 	}
 }
