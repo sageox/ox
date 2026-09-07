@@ -109,3 +109,73 @@ func TestCheckTeamSparseCheckout_ReportsAndRepairsTheManifestOmission(t *testing
 		t.Errorf("check must pass once the directory is materialized, got: %s", after.detail)
 	}
 }
+
+// TestCheckTeamSparseCheckout_UnmaterializedNeedsServerFixNotLocalRepair pins
+// the branch that separates "ox can fix this" from "only the server can".
+//
+// A directory that exists in HEAD but not in the working tree, whose absence
+// the tracked manifest does NOT contradict, cannot be repaired locally: the
+// manifest is generated server-side and the tracked copy wins over the client
+// fallback, so re-applying the sparse spec would faithfully re-exclude it.
+//
+// Failure prevented: ox claiming a local repair it cannot perform. `--fix` would
+// report success, the content would still be absent, and the next run would
+// report the same thing forever — while the actual defect (a manifest that omits
+// content the commit carries, GH #862) went unreported to the only people who
+// can fix it.
+func TestCheckTeamSparseCheckout_UnmaterializedNeedsServerFixNotLocalRepair(t *testing.T) {
+	teamPath := seedSparseTeamContext(t)
+
+	// Rewrite the manifest so it no longer includes agents/. The directory is
+	// still in HEAD and still absent from the working tree, but now nothing
+	// claims it should be there — which is exactly the server-side omission.
+	manifestPath := filepath.Join(teamPath, ".sageox", "sync.manifest")
+	if err := os.WriteFile(manifestPath,
+		[]byte("version 1\ninclude .sageox/\ninclude memory/\n"), 0o644); err != nil {
+		t.Fatalf("rewrite manifest: %v", err)
+	}
+
+	gitRoot, cleanup := setupTempGitRepo(t)
+	defer cleanup()
+	restoreCwd := changeToDir(t, gitRoot)
+	defer restoreCwd()
+	requireSageoxDir(t, gitRoot)
+
+	if err := config.SaveLocalConfig(gitRoot, &config.LocalConfig{
+		TeamContexts: []config.TeamContext{
+			{TeamID: "team-862b", TeamName: "Engineering", Path: teamPath},
+		},
+	}); err != nil {
+		t.Fatalf("SaveLocalConfig: %v", err)
+	}
+
+	result := checkTeamSparseCheckout(false)
+
+	if !strings.Contains(result.message, "missing directories that exist in HEAD") {
+		t.Errorf("must report the HEAD-vs-worktree gap, got: %s", result.message)
+	}
+	if !strings.Contains(result.detail, "server-side manifest fix") {
+		t.Errorf("must name the server-side remedy rather than implying a local fix, got: %s", result.detail)
+	}
+	// A warning, not a failure: nothing here is broken on this machine, and it
+	// must not become a --fix target that can never converge.
+	if !result.passed || !result.warning {
+		t.Errorf("unrepairable-locally must be a warning, not a failure: passed=%v warning=%v",
+			result.passed, result.warning)
+	}
+
+	// And --fix must not pretend otherwise.
+	if fixed := checkTeamSparseCheckout(true); !strings.Contains(fixed.message, "missing directories that exist in HEAD") {
+		t.Errorf("--fix must not claim to have repaired a server-side omission, got: %s", fixed.message)
+	}
+}
+
+// TestManifestIncludedMissingDirs_NoManifestClaimsNothing.
+// Failure prevented: treating "we could not read a manifest" as "the manifest
+// includes everything", which would route every missing directory into the
+// locally-repairable branch and make ox re-apply a sparse spec it never read.
+func TestManifestIncludedMissingDirs_NoManifestClaimsNothing(t *testing.T) {
+	if got := manifestIncludedMissingDirs(nil, []string{"agents/", "memory/"}); got != nil {
+		t.Errorf("a nil manifest must claim no directories, got %v", got)
+	}
+}
