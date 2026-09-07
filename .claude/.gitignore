@@ -1,0 +1,8 @@
+# >>> ox-managed — installed locally by ox, do not edit >>>
+skills/ox-cli-*/
+rules/ox-cli.md
+rules/ox-cli-*
+commands/ox-cli-*
+skills/sageox-team-*/
+rules/sageox-team-*
+# <<< ox-managed <<<
