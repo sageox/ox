@@ -170,9 +170,13 @@ network — is bound by three rules.
    number. Its purpose is to show *forward motion*; the meaning is in the first derivative,
    not the value. Finalize clears it.
 
-3. **`entry_count` is not a turn count.** It counts `raw.jsonl` entries — user messages,
+3. **`entry_count` is not a turn count.** It counts CONVERSATION entries — user messages,
    assistant messages, and every tool call — so it runs roughly an order of magnitude above
-   `turn_count`. Labeling it "N turns" overstates a session by that factor.
+   `turn_count`. Labeling it "N turns" overstates a session by that factor. It does **not**
+   count the `type: "header"` / `type: "footer"` records ox writes into `raw.jsonl` itself:
+   the count comes from what the adapter read out of the agent's own session file, so a
+   consumer diffing `entry_count` against `wc -l raw.jsonl` will see a small fixed shortfall
+   and should not treat it as loss.
 
 Rules 2 and 3 are the same trap the finalize path already avoids, stated in the `TurnCount`
 doc comment: *"leaving both would invite consumers to disagree about which one means size."*

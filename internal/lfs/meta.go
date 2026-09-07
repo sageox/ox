@@ -79,8 +79,13 @@ type SessionMeta struct {
 	Title     string    `json:"title,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 
-	// EntryCount is the number of raw.jsonl entries: user messages, assistant
-	// messages, and every tool call. It is NOT a turn count — one response turn
+	// EntryCount is the number of CONVERSATION entries: user messages, assistant
+	// messages, and every tool call. It counts what the adapter read out of the
+	// agent's own session file, so the type:"header"/type:"footer" records ox
+	// writes into raw.jsonl are NOT included — `wc -l raw.jsonl` runs slightly
+	// ahead of this, and that gap is framing, not loss.
+	//
+	// It is NOT a turn count — one response turn
 	// routinely produces dozens of entries — and it is the authoritative size of
 	// a finished session, which is why finalize clears TurnCount and leaves this
 	// one. A draft is the only state that carries both counters; see ADR-029's
