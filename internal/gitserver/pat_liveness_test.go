@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -231,7 +232,7 @@ exit 0
 	fakeDir := t.TempDir()
 	fakePath := fakeDir + "/git"
 	require.NoError(t, os.Symlink(fakeGit.Name(), fakePath))
-	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	creds := &GitCredentials{
 		Token: "valid-token",
@@ -261,6 +262,19 @@ func TestClearCredentialHelperEntry(t *testing.T) {
 	t.Run("runs git credential reject for valid URL", func(t *testing.T) {
 		if testing.Short() {
 			t.Skip("short: flaky under high parallelism due to 3s internal timeout")
+		}
+		// Windows: this test's isolation FAILS OPEN there, which is worse than not
+		// running it. The fake git below is a `#!/bin/sh` script reached through a
+		// symlink named `git` (not `git.exe`), injected via a PATH built with a
+		// hardcoded ":" instead of os.PathListSeparator. On Windows the injected
+		// entry is one malformed path, so the fake is never found — and if symlink
+		// creation happens to succeed (Developer Mode or elevation), the REAL git
+		// resolves instead and `git credential reject` runs against the developer's
+		// actual credential store for https://git.sageox.ai, evicting a live
+		// credential as a side effect of a unit test. This package is not in the
+		// skills-windows CI job either, so nothing would have caught it.
+		if runtime.GOOS == "windows" {
+			t.Skip("windows: the fake-git PATH injection does not apply and would fall through to the real git")
 		}
 
 		// inject a fake git that records whether it was called with "credential reject"
