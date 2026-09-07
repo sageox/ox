@@ -402,3 +402,196 @@ func TestLegacyMigration_RollbackDoesNotDiscardUnrelatedUnstagedWork(t *testing.
 		t.Errorf("the rollback discarded unrelated unstaged work.\n--- want ---\n%q\n--- got ---\n%q", inProgress, string(got))
 	}
 }
+
+func TestLegacyMigration_PreservesUnverifiedRetiredSkillTree(t *testing.T) {
+	root := migrationRepo(t)
+	manifest := ".claude/skills/ox-plan/SKILL.md"
+	notes := ".claude/skills/ox-plan/notes.md"
+	writeRepoFile(t, root, manifest,
+		"<!-- ox-hash: deadbeefcafe ver: 0.14.0 -->\nI customized this retired skill\n")
+	writeRepoFile(t, root, notes, "notes that were never part of ox's manifest\n")
+	git(t, root, "add", "--", manifest, notes)
+	git(t, root, "commit", "-q", "-m", "customize retired skill")
+
+	m, err := planLegacyMigration(root)
+	if err != nil {
+		t.Fatalf("planLegacyMigration: %v", err)
+	}
+	removed := strings.Join(m.remove, "\n")
+	if strings.Contains(removed, manifest) || strings.Contains(removed, notes) {
+		t.Fatalf("unverified retired skill content was scheduled for deletion: %v", m.remove)
+	}
+	preserved := strings.Join(m.preserved, "\n")
+	for _, rel := range []string{manifest, notes} {
+		if !strings.Contains(preserved, rel) {
+			t.Errorf("%s was not reported as preserved: %v", rel, m.preserved)
+		}
+	}
+}
+
+func TestLegacyMigration_AgentsTargetDoesNotReplaceClaudeCommands(t *testing.T) {
+	root := t.TempDir()
+	git(t, root, "init", "--initial-branch=main")
+	git(t, root, "config", "user.email", "t@e.example")
+	git(t, root, "config", "user.name", "T")
+
+	command := ".claude/commands/ox-prime.md"
+	writeRepoFile(t, root, command,
+		string(agentx.StampedContent([]byte("legacy prime\n"), "0.14.0", "ox")))
+	writeRepoFile(t, root, ".sageox/skills.lock.json", `{
+  "schema_version": 2,
+  "desired": {"bundles": ["core"], "targets": ["portable-project"]},
+  "targets": [{"key": "portable-project", "root": ".agents/skills", "format": "agent-skills/v1", "scope": "project", "link_policy": "reject"}]
+}`)
+	git(t, root, "add", "-A")
+	git(t, root, "commit", "-q", "-m", "legacy Claude command with portable target")
+
+	m, err := planLegacyMigration(root)
+	if err != nil {
+		t.Fatalf("planLegacyMigration: %v", err)
+	}
+	if m.replacementAvailable {
+		t.Fatal(".agents/skills was treated as a Claude Code replacement")
+	}
+	if strings.Contains(strings.Join(m.remove, "\n"), command) {
+		t.Fatalf("Claude command would be removed without a .claude/skills target: %v", m.remove)
+	}
+	if !strings.Contains(strings.Join(m.preserved, "\n"), command) {
+		t.Fatalf("Claude command was not preserved: %v", m.preserved)
+	}
+}
+
+func TestLegacyMigration_FailedCommitPreservesUnstagedUncachedBytes(t *testing.T) {
+	root := migrationRepo(t)
+	managed := filepath.Join(root, ".claude", "skills", "ox-cli-plan", "SKILL.md")
+	inProgress := "my local experiment in a still-tracked managed file\n"
+	if err := os.WriteFile(managed, []byte(inProgress), 0o644); err != nil {
+		t.Fatalf("edit managed file: %v", err)
+	}
+
+	hooks := filepath.Join(t.TempDir(), "reject-hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hooks, "pre-commit"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+	git(t, root, "config", "core.hooksPath", hooks)
+
+	m, err := planLegacyMigration(root)
+	if err != nil {
+		t.Fatalf("planLegacyMigration: %v", err)
+	}
+	if err := m.Apply(); err == nil {
+		t.Fatal("Apply should fail on the rejecting hook")
+	}
+	got, err := os.ReadFile(managed)
+	if err != nil {
+		t.Fatalf("read managed file after rollback: %v", err)
+	}
+	if string(got) != inProgress {
+		t.Fatalf("rollback discarded unstaged managed bytes: got %q want %q", got, inProgress)
+	}
+}
+
+func TestLegacyMigration_BlocksDirtyCommittedFootprint(t *testing.T) {
+	root := migrationRepo(t)
+	if _, err := ensureScopedIgnoreFiles(root); err != nil {
+		t.Fatalf("ensureScopedIgnoreFiles: %v", err)
+	}
+	git(t, root, "add", "--force", "--", ".claude/.gitignore")
+	git(t, root, "commit", "-q", "-m", "track scoped ignore")
+	ignorePath := filepath.Join(root, ".claude", ".gitignore")
+	f, err := os.OpenFile(ignorePath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open ignore file: %v", err)
+	}
+	if _, err := f.WriteString("my-local-rule/\n"); err != nil {
+		_ = f.Close()
+		t.Fatalf("edit ignore file: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close ignore file: %v", err)
+	}
+
+	reason := migrationBlocker(root)
+	if !strings.Contains(reason, "unstaged changes in files the migration must commit") {
+		t.Fatalf("dirty committed footprint did not block migration: %q", reason)
+	}
+}
+
+func TestLegacyMigration_StagesOnlyOnRampManifest(t *testing.T) {
+	root := migrationRepo(t)
+	manifest := ".claude/skills/sageox/SKILL.md"
+	notes := ".claude/skills/sageox/notes.md"
+	writeRepoFile(t, root, manifest, "on-ramp\n")
+	writeRepoFile(t, root, notes, "user notes\n")
+	if _, err := ensureScopedIgnoreFiles(root); err != nil {
+		t.Fatalf("ensureScopedIgnoreFiles: %v", err)
+	}
+
+	m, err := planLegacyMigration(root)
+	if err != nil {
+		t.Fatalf("planLegacyMigration: %v", err)
+	}
+	if err := m.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	tracked := strings.Join(trackedPaths(t, root), "\n")
+	if !strings.Contains(tracked, manifest) {
+		t.Errorf("on-ramp manifest was not adopted: %s", tracked)
+	}
+	if strings.Contains(tracked, notes) {
+		t.Errorf("user file beside on-ramp was swept into migration commit: %s", tracked)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(notes))); err != nil {
+		t.Errorf("user file beside on-ramp did not remain on disk: %v", err)
+	}
+}
+
+// TestLegacyMigration_CommitsTheIgnoreFilesAndConverges pins the two halves of
+// the ignore-file lifecycle.
+//
+// Prime and the daemon WRITE the scoped .gitignore — that is what protects the
+// local checkout the moment reserved files appear — but neither can commit. So
+// the migration has to adopt them, or they sit untracked forever and a teammate's
+// fresh clone gets no rule at all: the first ox run there puts vendor files
+// straight back into their pull request.
+//
+// The convergence half matters just as much: once committed, the plan must stop
+// reporting them, or `ox doctor` nags about the same files on every run.
+func TestLegacyMigration_CommitsTheIgnoreFilesAndConverges(t *testing.T) {
+	root := migrationRepo(t)
+
+	// The state prime leaves behind: ignore files written, nothing committed.
+	if _, err := ensureScopedIgnoreFiles(root); err != nil {
+		t.Fatalf("ensureScopedIgnoreFiles: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".claude", ".gitignore")); err != nil {
+		t.Fatalf("precondition: ignore file should exist on disk: %v", err)
+	}
+
+	m, err := planLegacyMigration(root)
+	if err != nil {
+		t.Fatalf("planLegacyMigration: %v", err)
+	}
+	if err := m.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	tracked := strings.Join(trackedPaths(t, root), "\n")
+	if !strings.Contains(tracked, ".claude/.gitignore") {
+		t.Error(".claude/.gitignore was not committed; teammates would inherit no rule")
+	}
+
+	// Converges: a second plan has no ignore-file work left.
+	m2, err := planLegacyMigration(root)
+	if err != nil {
+		t.Fatalf("replan: %v", err)
+	}
+	for _, rel := range m2.adopt {
+		if strings.HasSuffix(rel, ".gitignore") {
+			t.Errorf("%s reported as outstanding work after it was committed; doctor would nag every run", rel)
+		}
+	}
+}

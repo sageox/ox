@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sageox/ox/internal/manifest"
 )
 
 // TestMissingSparseTopLevelDirs_CatchesTheManifestOmission reproduces GH #862.
@@ -21,6 +23,8 @@ import (
 // disk: a top-level directory in the commit but not in the working tree was
 // excluded by the sparse spec. That catches an omission nobody anticipated,
 // which a pattern check by construction cannot.
+// A nil config is passed deliberately: expectedTeamTopLevelDirs falls back to the
+// team-context include set, which is the contract these tests are about.
 func TestMissingSparseTopLevelDirs_CatchesTheManifestOmission(t *testing.T) {
 	run := func(dir string, args ...string) {
 		t.Helper()
@@ -38,7 +42,7 @@ func TestMissingSparseTopLevelDirs_CatchesTheManifestOmission(t *testing.T) {
 	run(seed, "init", "--initial-branch=main")
 	run(seed, "config", "user.email", "t@example.com")
 	run(seed, "config", "user.name", "T")
-	for _, rel := range []string{"agents/rules/team.md", "memory/MEMORY.md", "README.md"} {
+	for _, rel := range []string{"agents/rules/team.md", "data/raw.bin", "memory/MEMORY.md", "README.md"} {
 		p := filepath.Join(seed, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
@@ -62,13 +66,18 @@ func TestMissingSparseTopLevelDirs_CatchesTheManifestOmission(t *testing.T) {
 	run(clone, "sparse-checkout", "set", "--no-cone", "/*", "!/*/", "/memory/")
 	run(clone, "checkout", "-q", "main")
 
-	missing := missingSparseTopLevelDirs(clone)
+	cfg := manifest.FallbackConfigFor(manifest.RepoKindTeamContext)
+	cfg.Denies = append(cfg.Denies, "data/")
+	missing := missingSparseTopLevelDirs(clone, cfg)
 	joined := strings.Join(missing, ",")
 	if !strings.Contains(joined, "agents/") {
 		t.Errorf("the omitted agents/ directory was not detected; team rules would silently never materialize. got %v", missing)
 	}
 	if strings.Contains(joined, "memory/") {
 		t.Errorf("an included directory was reported missing: %v", missing)
+	}
+	if strings.Contains(joined, "data/") {
+		t.Errorf("an intentionally denied directory was reported missing: %v", missing)
 	}
 }
 
@@ -98,7 +107,7 @@ func TestMissingSparseTopLevelDirs_CleanCheckoutReportsNothing(t *testing.T) {
 	run(repo, "add", "-A")
 	run(repo, "commit", "-q", "-m", "seed")
 
-	if missing := missingSparseTopLevelDirs(repo); len(missing) != 0 {
+	if missing := missingSparseTopLevelDirs(repo, manifest.FallbackConfigFor(manifest.RepoKindTeamContext)); len(missing) != 0 {
 		t.Errorf("a fully materialized checkout reported missing directories: %v", missing)
 	}
 }
@@ -152,7 +161,7 @@ func TestMissingSparseTopLevelDirs_UntrackedContentDoesNotMaskTheOmission(t *tes
 		t.Fatalf("write untracked: %v", err)
 	}
 
-	missing := missingSparseTopLevelDirs(clone)
+	missing := missingSparseTopLevelDirs(clone, manifest.FallbackConfigFor(manifest.RepoKindTeamContext))
 	if !strings.Contains(strings.Join(missing, ","), "agents/") {
 		t.Errorf("untracked local content masked the omission; team rules would silently never materialize. got %v", missing)
 	}

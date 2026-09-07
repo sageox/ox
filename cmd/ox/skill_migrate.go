@@ -44,8 +44,10 @@ type legacyMigration struct {
 	// when there is something to untrack.
 	adopt []string
 
-	// replacementAvailable records whether this project has a skill target, i.e.
-	// whether the surface that supersedes the legacy commands actually exists.
+	// replacementAvailable records whether this project has the Claude skill
+	// target, i.e. whether the surface that supersedes legacy Claude commands
+	// actually exists. A portable .agents/skills target is not a replacement:
+	// Claude Code does not read it.
 	replacementAvailable bool
 
 	// preserved are paths that wear an ox name but whose bytes ox cannot verify as
@@ -79,7 +81,12 @@ func planLegacyMigration(repoRoot string) (*legacyMigration, error) {
 	if err != nil {
 		return nil, err
 	}
-	m.replacementAvailable = len(targets) > 0
+	for _, target := range targets {
+		if filepath.ToSlash(target.Root) == ".claude/skills" {
+			m.replacementAvailable = true
+			break
+		}
+	}
 
 	tracked, err := trackedAgentPaths(repoRoot)
 	if err != nil {
@@ -90,8 +97,21 @@ func planLegacyMigration(repoRoot string) (*legacyMigration, error) {
 		trackedSet[filepath.ToSlash(rel)] = struct{}{}
 	}
 	// The committed footprint: present on disk but not yet in git.
+	//
+	// The scoped .gitignore files belong here as much as the on-ramp does. Prime
+	// and the daemon WRITE them — that is what protects the local checkout the
+	// moment reserved files appear — but neither can commit, so without this they
+	// would sit untracked forever and never reach a teammate. A teammate's fresh
+	// clone would then have no rule, and the first ox run there would put vendor
+	// files straight back into their pull request.
+	footprint := []string{}
 	for _, root := range []string{".claude", ".agents"} {
-		rel := path.Join(root, "skills", skillmanager.CommittedOnRamp, "SKILL.md")
+		footprint = append(footprint, path.Join(root, "skills", skillmanager.CommittedOnRamp, "SKILL.md"))
+	}
+	for _, f := range skillmanager.ScopedIgnoreFiles() {
+		footprint = append(footprint, path.Join(f.Dir, ".gitignore"))
+	}
+	for _, rel := range footprint {
 		if _, ok := trackedSet[rel]; ok {
 			continue
 		}
@@ -139,7 +159,14 @@ func classifyLegacyPath(repoRoot, rel string) legacyClass {
 			return legacyReserved
 		}
 		if skills.IsRetired(name) {
-			return legacySuperseded
+			// Retired skill names predate the reserved-prefix ownership contract.
+			// Only the stamped SKILL.md is attributable to ox; supporting files or
+			// an edited manifest may contain user work and must remain untouched.
+			if len(parts) == 4 && parts[3] == skills.SkillFileName &&
+				stampVerifies(filepath.Join(repoRoot, filepath.FromSlash(rel))) {
+				return legacySuperseded
+			}
+			return legacyUserOwned
 		}
 	case ".claude/rules", ".factory/rules", ".agents/rules", ".claude/commands":
 		if skillmanager.IsReservedName(name) {
@@ -178,9 +205,14 @@ func stampVerifies(path string) bool {
 }
 
 func trackedAgentPaths(repoRoot string) ([]string, error) {
+	// The scoped ignore files are listed too. They are part of the committed
+	// footprint, so the plan must be able to tell "already tracked" from "written
+	// locally but never committed" — otherwise an adopted-and-committed ignore file
+	// would look like outstanding work on every single run.
 	args := []string{"ls-files", "-z", "--",
 		".claude/skills", ".claude/rules", ".claude/commands",
-		".agents/skills", ".agents/rules", ".factory/rules"}
+		".agents/skills", ".agents/rules", ".factory/rules",
+		".claude/.gitignore", ".agents/.gitignore", ".factory/.gitignore"}
 	cmd := exec.Command("git", args...)
 	cmd.Dir = repoRoot
 	out, err := cmd.Output()
@@ -264,7 +296,41 @@ func migrationBlocker(repoRoot string) string {
 	if staged {
 		return "you have staged changes; commit or unstage them and rerun `ox doctor --fix`"
 	}
+
+	// The migration force-stages these committed-footprint files. If the user has
+	// an unstaged edit in one of them, a bare commit would silently absorb that
+	// edit into ox's housekeeping commit. Check before EnsureBlock mutates any
+	// ignore file, so the guard observes the user's original working tree.
+	dirty, err := hasUnstagedMigrationChanges(repoRoot)
+	if err != nil {
+		return "cannot inspect files the migration must commit"
+	}
+	if dirty {
+		return "you have unstaged changes in files the migration must commit; commit or stash them and rerun `ox doctor --fix`"
+	}
 	return ""
+}
+
+func hasUnstagedMigrationChanges(repoRoot string) (bool, error) {
+	paths := []string{
+		filepath.Join(".claude", "skills", skillmanager.CommittedOnRamp, skills.SkillFileName),
+		filepath.Join(".agents", "skills", skillmanager.CommittedOnRamp, skills.SkillFileName),
+		filepath.Join(".sageox", "skills.lock.json"),
+	}
+	for _, f := range scopedIgnoreFiles() {
+		paths = append(paths, filepath.Join(f.Dir, ".gitignore"))
+	}
+	cmd := exec.Command("git", append([]string{"diff", "--quiet", "--"}, paths...)...)
+	cmd.Dir = repoRoot
+	err := cmd.Run()
+	if err == nil {
+		return false, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, err
 }
 
 func resolvedGitDir(repoRoot string) (string, error) {
@@ -341,7 +407,12 @@ func (m *legacyMigration) Apply() (err error) {
 				reset := exec.Command("git", append([]string{"reset", "--quiet", "HEAD", "--"}, tracked...)...)
 				reset.Dir = m.repoRoot
 				_ = reset.Run()
-				restore := exec.Command("git", append([]string{"checkout", "--"}, tracked...)...)
+			}
+			// git rm deleted these paths from disk, so restore them from HEAD. The
+			// --cached paths never left the working tree; checking them out would
+			// overwrite any unstaged bytes that existed before the failed commit.
+			if len(m.remove) > 0 {
+				restore := exec.Command("git", append([]string{"checkout", "--"}, m.remove...)...)
 				restore.Dir = m.repoRoot
 				_ = restore.Run()
 			}
@@ -403,8 +474,8 @@ func (m *legacyMigration) Apply() (err error) {
 	// point, and leaving a modified lockfile beside it makes the "one commit"
 	// promise false.
 	for _, rel := range []string{
-		filepath.Join(".claude", "skills", skillmanager.CommittedOnRamp),
-		filepath.Join(".agents", "skills", skillmanager.CommittedOnRamp),
+		filepath.Join(".claude", "skills", skillmanager.CommittedOnRamp, skills.SkillFileName),
+		filepath.Join(".agents", "skills", skillmanager.CommittedOnRamp, skills.SkillFileName),
 		filepath.Join(".sageox", "skills.lock.json"),
 	} {
 		if _, statErr := os.Stat(filepath.Join(m.repoRoot, rel)); statErr != nil {
