@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -122,5 +123,96 @@ func TestKnownRepos_SurvivesAWellFormedButUnexpectedShape(t *testing.T) {
 	RememberRepo(repo)
 	if len(KnownRepos()) != 1 {
 		t.Errorf("an unfamiliar but valid registry shape was not handled: %v", KnownRepos())
+	}
+}
+
+// TestKnownRepos_PrunesDeletedCheckoutsButKeepsLiveOnes.
+//
+// The registry is what lets `ox upgrade` reach a checkout nobody has opened, so
+// it accumulates entries forever unless it prunes. A deleted worktree — normal in
+// a Conductor workflow, where workspaces are created and destroyed constantly —
+// must drop out, and a live one must never be pruned alongside it.
+func TestKnownRepos_PrunesDeletedCheckoutsButKeepsLiveOnes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", home)
+	t.Setenv("HOME", home)
+
+	live := t.TempDir()
+	gone := t.TempDir()
+	RememberRepo(live)
+	RememberRepo(gone)
+	if got := KnownRepos(); len(got) != 2 {
+		t.Fatalf("precondition: expected both repositories recorded, got %v", got)
+	}
+
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	got := KnownRepos()
+	if len(got) != 1 || got[0] != live {
+		t.Errorf("pruning did not keep exactly the live checkout: %v", got)
+	}
+
+	// And the prune must be PERSISTED, not recomputed on every read — otherwise the
+	// file grows without bound across a machine's lifetime.
+	data, err := os.ReadFile(knownReposPath())
+	if err != nil {
+		t.Fatalf("read registry: %v", err)
+	}
+	if strings.Contains(string(data), gone) {
+		t.Errorf("the deleted checkout is still on disk after a prune:\n%s", data)
+	}
+}
+
+// TestKnownRepos_AFileWhereACheckoutWasIsNotAliveEither: a path that exists but
+// is not a directory is not a checkout. Treating it as one would have `ox upgrade`
+// try to reconcile a regular file.
+func TestKnownRepos_AFileWhereACheckoutWasIsNotAliveEither(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", home)
+	t.Setenv("HOME", home)
+
+	repo := t.TempDir()
+	RememberRepo(repo)
+	if err := os.RemoveAll(repo); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if err := os.WriteFile(repo, []byte("not a checkout anymore\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if got := KnownRepos(); len(got) != 0 {
+		t.Errorf("a regular file was reported as a live checkout: %v", got)
+	}
+}
+
+// TestRememberRepo_DoesNotRewriteTheRegistryOnEverySessionStart.
+//
+// This runs at every `ox agent prime`. Rewriting the file each time would mean
+// constant disk churn on a machine with many repositories and many sessions, for
+// an entry that has not changed. It refreshes at most daily.
+func TestRememberRepo_DoesNotRewriteTheRegistryOnEverySessionStart(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", home)
+	t.Setenv("HOME", home)
+
+	repo := t.TempDir()
+	RememberRepo(repo)
+	first, err := os.ReadFile(knownReposPath())
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		RememberRepo(repo)
+	}
+
+	again, err := os.ReadFile(knownReposPath())
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(first) != string(again) {
+		t.Errorf("the registry was rewritten by a repeat call:\nfirst %s\nagain %s", first, again)
 	}
 }
