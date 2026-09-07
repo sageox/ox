@@ -18,6 +18,10 @@ wholesale at session stop.
 
 Full rationale: [docs/adr/ADR-029-session-draft-placeholder.md](../../docs/adr/ADR-029-session-draft-placeholder.md).
 
+Consumers **outside** this repo — anything that reads `sessions/<name>/meta.json` over the
+API rather than off disk — are bound by the same rule plus two counter rules. See ADR-029,
+"The contract for consumers outside the CLI."
+
 ---
 
 ## The one rule

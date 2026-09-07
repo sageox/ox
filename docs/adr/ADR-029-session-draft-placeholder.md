@@ -142,6 +142,48 @@ Every site that reads a possibly-unreadable `meta.json` picks a direction. The r
 | daemon `detectInDir` / `DetectOrphanedForAgent` | **skip** | Falling through reaches `recoverRawFromSessionFile`, which writes real bytes to the tracked `raw.jsonl` and breaks LFS for the team |
 | `ledgersearch.isDraftSession` | not a draft (index it) | Fail-open; a malformed file must not hide a real session from search |
 
+## The contract for consumers outside the CLI
+
+The cost section below counts roughly fifteen CLI call sites. It undercounts. The **SageOx
+server is also a consumer of `meta.json`**, and it renders that file on surfaces the CLI
+never sees — the team home page's session list, a repo's session detail page, and
+`/c/<ses_id>` itself.
+
+That gap shipped a bug. The decision table above names the CLI symptom exactly — *"Without
+it a draft reads as `StatusUploaded`: live recordings render as finished"* — and fixes it
+with a derived `StatusDraft`. Nothing carried the same rule across the API boundary, so the
+identical failure reappeared on the web: a live draft rendered as a finished session, with a
+normal card and an empty transcript.
+
+Any consumer reading `sessions/<name>/meta.json` — in any language, on either side of the
+network — is bound by three rules.
+
+1. **Branch on `draft` before rendering anything as a finished session.** An absent key means
+   not-a-draft (`omitempty`, back-compat), and an unreadable file must also be treated as
+   not-a-draft, matching `IsDraft()`'s nil-safe direction. A draft has no turns, no summary,
+   and no title — not "none loaded yet", none *at all*, structurally, because
+   `lfs.DraftInput` has no field that could hold them. Render it as in-progress, or omit it.
+   Never as an empty finished session.
+
+2. **Do not present `turn_count` as a count.** It advances only every
+   `DraftRefreshEveryTurns` (10) turns, so a live draft reads 2, 12, 22, 32 — never the true
+   number. Its purpose is to show *forward motion*; the meaning is in the first derivative,
+   not the value. Finalize clears it.
+
+3. **`entry_count` is not a turn count.** It counts `raw.jsonl` entries — user messages,
+   assistant messages, and every tool call — so it runs roughly an order of magnitude above
+   `turn_count`. Labeling it "N turns" overstates a session by that factor.
+
+Rules 2 and 3 are the same trap the finalize path already avoids, stated in the `TurnCount`
+doc comment: *"leaving both would invite consumers to disagree about which one means size."*
+Finalize clears `TurnCount` for precisely that reason. **A draft is the one state that ships
+both counters** — so it is the one state where that disagreement is available to have, and a
+consumer duly had it.
+
+The mirror-image obligation belongs to this repo. `meta.json` is a published API, and a field
+whose meaning is recoverable only by reading Go source is not documented. Both counters now
+carry doc comments in `internal/lfs/meta.go`.
+
 ## Consequences
 
 **Good.** `/c/<id>` resolves mid-session, durably and retryably. `ox session status` gains
@@ -159,7 +201,8 @@ by roughly 1 + turns/10 per session.
 its co-staging window routine rather than theoretical, and it should get the same pathspec
 treatment in a follow-up. `pushMurmurCommits` has the secret-gate hole this change declined to
 propagate. `.recording.json` is now gitignored, but that does not untrack markers already
-committed in existing ledgers.
+committed in existing ledgers. Server-side rendering of drafts does not yet honor the
+consumer contract above; that work is owned privately and tracked there.
 
 ## Alternatives considered
 
