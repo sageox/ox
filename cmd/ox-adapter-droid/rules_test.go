@@ -26,9 +26,9 @@ func TestHandleInstallRules_CreatesFile(t *testing.T) {
 
 	assert.True(t, resp.Installed)
 	// repo-relative per the adapterprotocol FilesWritten contract — see GH #731.
-	assert.Contains(t, resp.FilesWritten, filepath.Join(".factory", "rules", "ox.md"))
+	assert.Contains(t, resp.FilesWritten, filepath.Join(".factory", "rules", "ox-cli.md"))
 
-	ruleFile := filepath.Join(dir, ".factory", "rules", "ox.md")
+	ruleFile := filepath.Join(dir, ".factory", "rules", "ox-cli.md")
 	data, err := os.ReadFile(ruleFile)
 	require.NoError(t, err, "ox.md must exist on disk after install")
 	assert.Contains(t, string(data), "agentx-hash", "file must contain agentx stamp")
@@ -66,7 +66,7 @@ func TestHandleCheckRules_Missing(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.False(t, resp.Installed)
-	assert.Contains(t, resp.Missing, "ox.md")
+	assert.Contains(t, resp.Missing, "ox-cli.md")
 }
 
 // TestHandleCheckRules_Installed verifies that check reports installed=true
@@ -104,12 +104,12 @@ func TestHandleCheckRules_FrontmatterBodyEdited_ReportsStale(t *testing.T) {
 
 	clean, err := handleCheckRules(params)
 	require.NoError(t, err)
-	require.NotContains(t, clean.Stale, "ox.md", "precondition: freshly installed rule must not be stale")
+	require.NotContains(t, clean.Stale, "ox-cli.md", "precondition: freshly installed rule must not be stale")
 
 	// Appending to the body changes the stamped content (the stamp hash covers
 	// the body WITHOUT frontmatter) while leaving frontmatter and the stamp line
 	// intact — exactly the drift agentx's first-line check cannot see.
-	rulePath := filepath.Join(dir, ".factory", "rules", "ox.md")
+	rulePath := filepath.Join(dir, ".factory", "rules", "ox-cli.md")
 	orig, err := os.ReadFile(rulePath)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(rulePath, append(orig, []byte("\n\nhand-edited drift\n")...), 0o644))
@@ -117,22 +117,22 @@ func TestHandleCheckRules_FrontmatterBodyEdited_ReportsStale(t *testing.T) {
 	resp, err := handleCheckRules(params)
 	require.NoError(t, err)
 
-	assert.Contains(t, resp.Stale, "ox.md", "edited frontmatter'd body must be reported Stale (Bug 2)")
+	assert.Contains(t, resp.Stale, "ox-cli.md", "edited frontmatter'd body must be reported Stale (Bug 2)")
 	assert.False(t, resp.Installed, "Installed must be false when a rule has drifted")
 }
 
 // TestHandleCheckRules_NamespacedBodyEdited_ReportsStale verifies Bug 2 also
-// covers the namespaced sageox/use-team-context.md pointer rule on droid.
+// covers the ox-cli-use-team-context.md pointer rule on droid.
 // Failure prevented: a drifted team-context pointer rule passes doctor while
 // teaching the agent stale discovery instructions.
-func TestHandleCheckRules_NamespacedBodyEdited_ReportsStale(t *testing.T) {
+func TestHandleCheckRules_PointerRuleBodyEdited_ReportsStale(t *testing.T) {
 	dir := t.TempDir()
 	params := adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.8.0"}
 
 	_, err := handleInstallRules(params)
 	require.NoError(t, err)
 
-	rulePath := filepath.Join(dir, ".factory", "rules", "sageox", "use-team-context.md")
+	rulePath := filepath.Join(dir, ".factory", "rules", "ox-cli-use-team-context.md")
 	orig, err := os.ReadFile(rulePath)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(rulePath, append(orig, []byte("\n\ndrift\n")...), 0o644))
@@ -140,7 +140,7 @@ func TestHandleCheckRules_NamespacedBodyEdited_ReportsStale(t *testing.T) {
 	resp, err := handleCheckRules(params)
 	require.NoError(t, err)
 
-	assert.Contains(t, resp.Stale, "sageox/use-team-context.md", "edited namespaced body must be reported Stale (Bug 2)")
+	assert.Contains(t, resp.Stale, "ox-cli-use-team-context.md", "edited pointer-rule body must be reported Stale (Bug 2)")
 	assert.False(t, resp.Installed)
 }
 
@@ -152,13 +152,13 @@ func TestHandleCheckRules_UserManagedRuleNotStale(t *testing.T) {
 	dir := t.TempDir()
 	rulesDir := filepath.Join(dir, ".factory", "rules")
 	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "ox.md"),
+	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "ox-cli.md"),
 		[]byte("# my own ox rule, no stamp\n"), 0o644))
 
 	resp, err := handleCheckRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.8.0"})
 	require.NoError(t, err)
 
-	assert.NotContains(t, resp.Stale, "ox.md", "unstamped user-managed file must never be flagged stale")
+	assert.NotContains(t, resp.Stale, "ox-cli.md", "unstamped user-managed file must never be flagged stale")
 }
 
 // --- C. Uninstall lifecycle ---
@@ -183,12 +183,12 @@ func TestHandleUninstallRules_AgentxLimitationOnTopLevelOxMd(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, name := range resp.FilesRemoved {
-		if name == "ox.md" {
+		if name == "ox-cli.md" {
 			t.Fatalf("ox.md was removed — agentx may have fixed the frontmatter limitation; remove this test and update the workaround in rules.go")
 		}
 	}
 
-	ruleFile := filepath.Join(dir, ".factory", "rules", "ox.md")
+	ruleFile := filepath.Join(dir, ".factory", "rules", "ox-cli.md")
 	_, err = os.Stat(ruleFile)
 	assert.NoError(t, err, "ox.md survives uninstall due to agentx frontmatter limitation")
 }

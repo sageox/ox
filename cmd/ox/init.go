@@ -728,8 +728,27 @@ func runInit() error {
 	// <root><root>/.codex/hooks.json, and one such entry failed the whole
 	// `git add`, leaving even .claude/settings.json unstaged.
 	installedHooks := installAgentHooks(gitRoot, true, selectedAgents) // quiet — summarized below
+
+	// Write the ox-managed ignore block BEFORE anything is staged, so the rule
+	// that hides ox's own files exists in the tree before the index is touched.
+	ignoreFiles, ignoreErr := ensureScopedIgnoreFiles(gitRoot)
+	if ignoreErr != nil && !initQuiet {
+		cli.PrintWarning(fmt.Sprintf("Could not write ox ignore rules: %v", ignoreErr))
+	}
+	for _, rel := range ignoreFiles {
+		abs := filepath.Join(gitRoot, rel)
+		tracker.trackCreatedFile(abs)
+		// Force-staged on purpose: plenty of repositories root-ignore .claude/, and
+		// the ignore file is one of the two things that MUST reach teammates.
+		tracker.trackForceStage(abs)
+	}
+
+	// Every installed path is tracked for ROLLBACK, but only the non-reserved ones
+	// are staged — see stageableInstalledPaths for why.
 	for _, hookFile := range installedHooks {
 		tracker.trackCreatedFile(hookFile)
+	}
+	for _, hookFile := range stageableInstalledPaths(gitRoot, installedHooks) {
 		tracker.trackForceStage(hookFile)
 	}
 

@@ -20,7 +20,6 @@ func TestHandleInfo_CapabilitiesPinned(t *testing.T) {
 		adapterprotocol.CapSessionReader,
 		adapterprotocol.CapHookInstaller,
 		adapterprotocol.CapRulesInstaller,
-		adapterprotocol.CapCommandsInstaller,
 		adapterprotocol.CapSkillsInstaller,
 		adapterprotocol.CapIncrementalReader,
 		adapterprotocol.CapFileWatcher,

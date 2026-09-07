@@ -150,7 +150,7 @@ func lintMermaidFontRace(html []byte) []Finding {
 
 var (
 	// the canonical OX marker is a focusable button named for screen readers
-	// (extensions/skills/ox-plan/SKILL.md: `<button aria-label="SageOx insight">`).
+	// (extensions/skills/ox-cli-plan/SKILL.md: `<button aria-label="SageOx insight">`).
 	oxMarkerRe = regexp.MustCompile(`(?i)aria-label\s*=\s*["']SageOx insight["']`)
 
 	// footer credit, e.g. "Team context enriched by SageOx" — substring match,
@@ -210,7 +210,7 @@ func LintArtifact(htmlBytes []byte) []Finding {
 
 // LintBranding verifies a rendered plan HTML carries the conditional SageOx
 // attribution the html-plan skill is spec'd to produce. The contract
-// (extensions/skills/ox-plan/SKILL.md, "SageOx attribution — subtle, earned,
+// (extensions/skills/ox-cli-plan/SKILL.md, "SageOx attribution — subtle, earned,
 // conditional"):
 //
 //   - EARNED: when the plan carried enrichment — any deterministic badges OR
@@ -277,7 +277,7 @@ func LintBranding(html []byte, res Result) []BrandingFinding {
 // identity renders with no /c/ conversation link back to that exact session.
 // The Go renderer injects the footer link deterministically
 // (RenderOptions.SessionURL); this advisory exists for agent-authored renders
-// (the ox-plan skill) where the link is part of the spec but the author is
+// (the ox-cli-plan skill) where the link is part of the spec but the author is
 // fallible. Exact-ID match only — a link to a different session is as wrong
 // as none. Fail-open and advisory: callers warn, never block. Empty page or
 // empty sessionID returns nil.

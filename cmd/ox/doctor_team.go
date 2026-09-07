@@ -594,6 +594,9 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 	}
 
 	var needsFix, fixed, checked int
+	// unmaterialized collects team contexts whose sparse spec excludes a top-level
+	// directory their own HEAD contains — the #862 shape.
+	var unmaterialized []string
 
 	for _, tc := range localCfg.TeamContexts {
 		if tc.Path == "" || !isGitRepo(tc.Path) {
@@ -625,6 +628,21 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 			}
 		}
 
+		// Root patterns alone are NOT sufficient, and #862 is the proof: the tracked
+		// manifest omitted `agents/`, so sparse-checkout never materialized team
+		// rules on any client while this check reported everything fine. The
+		// patterns were correct; the include list was short.
+		//
+		// The only reliable signal is comparing what HEAD contains against what is
+		// actually on disk. A top-level directory that exists in the commit but not
+		// in the working tree was excluded by the sparse spec — which is exactly the
+		// failure, and it is invisible to a pattern check.
+		if missing := missingSparseTopLevelDirs(tc.Path); len(missing) > 0 {
+			unmaterialized = append(unmaterialized,
+				fmt.Sprintf("%s (%s)", filepath.Base(tc.Path), strings.Join(missing, ", ")))
+			continue
+		}
+
 		if hasRootGlob && hasNegateRootDirs {
 			continue
 		}
@@ -643,6 +661,16 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 
 	if checked == 0 {
 		return SkippedCheck("Team sparse checkout", "no sparse-checkout repos", "")
+	}
+
+	if len(unmaterialized) > 0 {
+		// The durable fix is server-side — the manifest is generated there and the
+		// tracked copy wins over the client fallback — so ox reports rather than
+		// pretending it can repair this locally.
+		return WarningCheck("Team sparse checkout",
+			fmt.Sprintf("%d team context(s) are missing directories that exist in HEAD: %s",
+				len(unmaterialized), strings.Join(unmaterialized, "; ")),
+			"The sync manifest excludes content the commit contains, so those files never reach this machine; this needs a server-side manifest fix")
 	}
 
 	if needsFix == 0 {
@@ -700,4 +728,29 @@ func runGitStatus(dir string) (string, error) {
 		return "", fmt.Errorf("git status failed for %s: %s", dir, strings.TrimSpace(string(output)))
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+// missingSparseTopLevelDirs returns top-level directories present in HEAD but
+// absent from the working tree, i.e. excluded by the sparse-checkout spec.
+//
+// This is what catches a manifest whose include list is short. A pattern check
+// can only confirm the patterns it knows to look for; this compares the commit
+// against reality, so it catches an omission nobody anticipated.
+func missingSparseTopLevelDirs(repoPath string) []string {
+	cmd := exec.Command("git", "ls-tree", "-d", "--name-only", "HEAD")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return nil // unborn HEAD or not a repo: nothing to compare against
+	}
+	var missing []string
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if name == "" {
+			continue
+		}
+		if _, statErr := os.Stat(filepath.Join(repoPath, name)); statErr != nil {
+			missing = append(missing, name+"/")
+		}
+	}
+	return missing
 }

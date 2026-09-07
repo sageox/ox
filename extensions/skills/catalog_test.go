@@ -1,6 +1,8 @@
 package skills
 
 import (
+	"io/fs"
+	"path"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -83,5 +85,46 @@ func TestPortableSkillsAvoidHostSpecificActivationSyntax(t *testing.T) {
 				t.Errorf("portable skill %s contains host-specific activation phrase %q", skill.Name, phrase)
 			}
 		}
+	}
+}
+
+// TestSlashOnlySkillsCarryAnAgentNeutralGuard closes a gap that depends on
+// UNVERIFIED vendor behavior.
+//
+// `disable-model-invocation: true` is a Claude Code frontmatter key. Codex,
+// Gemini, and OMP all read the SAME .agents/skills projection, and whether any of
+// them honors that key is unknown. If they do not, every lifecycle and diagnostic
+// skill — ox-cli-session-stop, ox-cli-session-abort, ox-cli-doctor, ox-cli-init —
+// enters their context with a description and becomes model-invocable, so
+// ADR-023's ruling that lifecycle surfaces stay EXPLICIT would silently fail on
+// exactly the agents the command fold was meant to help.
+//
+// The body-level guard does not depend on any vendor honoring anything: it is
+// instruction text every agent reads. Belt and braces, deliberately.
+func TestSlashOnlySkillsCarryAnAgentNeutralGuard(t *testing.T) {
+	entries, err := fs.ReadDir(FS, ".")
+	if err != nil {
+		t.Fatalf("read skills: %v", err)
+	}
+	var checked int
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		body, err := fs.ReadFile(FS, path.Join(e.Name(), SkillFileName))
+		if err != nil {
+			continue
+		}
+		if !strings.Contains(string(body), "disable-model-invocation: true") {
+			continue
+		}
+		checked++
+		if !strings.Contains(string(body), "Explicit invocation only") {
+			t.Errorf("%s declares disable-model-invocation but carries no agent-neutral guard; "+
+				"on an agent that ignores the frontmatter key the model could fire it unprompted", e.Name())
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no slash-only skills found; the fold or the frontmatter key regressed")
 	}
 }

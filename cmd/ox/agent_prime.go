@@ -531,6 +531,15 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// check auth status for attribution warning
 	isLoggedIn, _ := auth.IsAuthCredentialValidForEndpoint(projectEndpoint)
 
+	// Bring the managed skill inventory in line with this binary before the agent
+	// reads it. The healthy path is a lockfile read and two comparisons; a plan is
+	// only built once a mismatch is proven. Failures never reach the session.
+	skillReconcileStart := time.Now()
+	if n := reconcileSkillInventoryIfStale(projectRoot); n > 0 {
+		timing["skills_reconciled"] = int64(n)
+	}
+	timing["skills_reconcile"] = time.Since(skillReconcileStart).Milliseconds()
+
 	// check for .needs-doctor-agent marker
 	needsDoctorAgent := doctor.NeedsDoctorAgent(projectRoot)
 	var doctorHint string

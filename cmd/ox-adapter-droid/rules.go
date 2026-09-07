@@ -23,11 +23,11 @@ const sageoxRulesNamespace = "sageox"
 func handleInstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.InstallRulesResponse, error) {
 	rm := rules.NewDroidRulesManager()
 
+	// Every ox rule now installs FLAT under the reserved ox-cli-* prefix, so there
+	// is no subdirectory to pre-create. The legacy sageox/ tree is only removed
+	// from here on: a nested directory cannot be covered by the single .gitignore
+	// glob that keeps ox's rules out of the customer's pull requests.
 	rulesDir := rm.RulesDir(p.RepoRoot)
-	nsDir := filepath.Join(rulesDir, sageoxRulesNamespace)
-	if err := os.MkdirAll(nsDir, 0o755); err != nil {
-		return nil, err
-	}
 
 	ruleFiles := oxRuleFiles(p.Version)
 
@@ -39,6 +39,12 @@ func handleInstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.Install
 	// Install below rewrites them fresh. See adapterstamp.AppendFrontmatterStale
 	// for the same frontmatter-aware staleness reasoning.
 	adapterstamp.RemoveTamperedRules(rulesDir, ruleFiles)
+
+	// Retire the pre-0.15.0 rule surface on the INSTALL path. Doing it only on
+	// uninstall would mean it never happens for an existing project, which would
+	// then carry both the legacy .factory/rules/ox.md and the nested sageox/ tree
+	// beside the new flat files. Only ox-stamped files are removed.
+	retireLegacyRules(rulesDir)
 
 	written, err := rm.Install(context.Background(), p.RepoRoot, ruleFiles, true)
 	if err != nil {
@@ -79,6 +85,29 @@ func handleCheckRules(p adapterprotocol.RulesParams) (*adapterprotocol.CheckRule
 		Stale:     stale,
 		RulesDir:  rulesDir,
 	}, nil
+}
+
+// legacyRuleFiles are the top-level rule filenames ox installed before the
+// 0.15.0 flattening; removed on install, and only when their ox stamp verifies
+// them as ours.
+var legacyRuleFiles = []string{"ox.md"}
+
+// retireLegacyRules deletes the pre-0.15.0 ox rule surface: the top-level legacy
+// files and the whole sageox/ subdirectory. Best-effort — a failure here must
+// never block installing the current rules.
+func retireLegacyRules(rulesDir string) {
+	for _, name := range legacyRuleFiles {
+		path := filepath.Join(rulesDir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if !adapterstamp.LooksStamped(data) {
+			continue // user-authored; not ours to remove
+		}
+		_ = os.Remove(path)
+	}
+	_, _ = uninstallNamespaceFiles(rulesDir)
 }
 
 func handleUninstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.UninstallRulesResponse, error) {
@@ -152,13 +181,13 @@ func uninstallNamespaceFiles(rulesDir string) ([]string, error) {
 func oxRuleFiles(version string) []agentx.RuleFile {
 	return []agentx.RuleFile{
 		{
-			Name:        "ox.md",
+			Name:        "ox-cli.md",
 			Content:     oxRulesContent,
 			Version:     version,
 			Description: "SageOx behavioral guidance for AI coworkers",
 		},
 		{
-			Name:        sageoxRulesNamespace + "/use-team-context.md",
+			Name:        "ox-cli-use-team-context.md",
 			Content:     useTeamContextContent,
 			Version:     version,
 			Description: "How to discover and use team-context rules and knowledge from the SageOx ox CLI",

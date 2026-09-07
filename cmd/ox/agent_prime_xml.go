@@ -154,7 +154,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		sb.WriteString("- A prior decision, a prod anomaly, or a metric/cost change — anything with a before/after.\n")
 		sb.WriteString("Route the cue to the right corpus — these are DIFFERENT retrieval modes, not interchangeable:\n")
 		// per-cue routing rows are sourced from the capability table's floor entries
-		// so the Layer-1 reminder and the additive ox-consult skill cannot drift.
+		// so the Layer-1 reminder and the additive ox-cli-consult skill cannot drift.
 		// Rendered from the compile-time table (no per-session state) → stays in the
 		// static cache tier, byte-identical across sessions for a given binary.
 		for _, route := range consultRoutes() {
@@ -706,7 +706,7 @@ func escapeXMLText(s string) string {
 
 // consultRoutes returns the cue→corpus routing rows for the <consult-first>
 // reminder, sourced from the capability table's floor entries. The table is the
-// single source of truth: the same floor cue set feeds the additive `ox-consult`
+// single source of truth: the same floor cue set feeds the additive `ox-cli-consult`
 // skill's activation description, so the Layer-1 reminder and the skill cannot
 // drift. Returns rows from every MechanismFloor entry that carries routes (today
 // just consult-first), preserving table order.

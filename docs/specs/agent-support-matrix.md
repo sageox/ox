@@ -247,3 +247,29 @@ No per-agent configuration is required in `.sageox/config.json` — that file is
 ### Future: Pluggable Agent Architecture
 
 See [GitHub issue #394: pluggable agent adapter architecture](https://github.com/sageox/ox/issues/394) for research on whether agent support should be externally pluggable vs compiled-in. Current agent count is 5; as more AI coding agents emerge, the maintenance cost of compiled-in adapters may warrant a plugin registry pattern.
+
+## Skills (added by ADR-031)
+
+Before the 0.15.0 fold this matrix had no skill rows at all, and the lifecycle
+surface (`/ox-prime`, `/ox-status`, `/ox-doctor`, session start/stop) existed only
+as Claude command files — a Claude-only affordance ADR-023 recorded as a
+cross-agent gap. Folding those into skills closes it for every adapter that reads
+a skills root.
+
+| Capability | Claude Code | Codex | Gemini CLI | OMP | Droid |
+|---|---|---|---|---|---|
+| Skills root | `.claude/skills` | `.agents/skills` | `.agents/skills` | `.agents/skills` | — |
+| Rules root | `.claude/rules` | — | — | — | `.factory/rules` |
+| Auto-activating playbooks (`ox-cli-plan`, …) | yes | yes | yes | yes | — |
+| Slash-only lifecycle skills (`ox-cli-prime`, …) | yes | yes | yes | yes | — |
+| Honors `disable-model-invocation` | yes (documented) | **unverified** | **unverified** | **unverified** | n/a |
+
+**The unverified row is load-bearing, not a footnote.** Codex, Gemini, and OMP
+share one `.agents/skills` projection. If they do not honor
+`disable-model-invocation`, 13 lifecycle and diagnostic skills enter their context
+with descriptions and become model-invocable — so ADR-023's "lifecycle stays
+explicit" ruling would silently fail on exactly the agents the fold was meant to
+help. Treat these cells as unverified until observed on a real client.
+
+Note that Claude Code does **not** read `.agents/skills`; the cross-agent reach
+comes from ox writing a separate projection, not from a shared directory.

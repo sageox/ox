@@ -62,6 +62,13 @@ func Default() *Registry {
 		Run:         checkLedgerRebaseWedge,
 	})
 	r.Register(&Check{
+		Slug:        "skills-inventory-drift",
+		Description: "Reconcile ox-managed skill files that drifted from the catalog this binary ships",
+		MinInterval: 30 * time.Minute,
+		BlastRadius: "single workspace; ox-managed skill files only — never installs into an unselected repo, never touches the git index, user-modified files preserved as conflicts",
+		Run:         checkSkillsInventoryDrift,
+	})
+	r.Register(&Check{
 		Slug:        "ledger-sacred-deletion",
 		Description: "Detect and alert on any commit in recent ledger history that mass-deleted sacred plans/sessions (ADR-024 data-loss guard); detection only, never auto-restores",
 		MinInterval: 15 * time.Minute,

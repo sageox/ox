@@ -160,7 +160,18 @@ func outputUpgradeResult(cmd *cobra.Command, result upgradeResult, jsonOutput bo
 	case "upgraded":
 		fmt.Printf("\n%s %s\n", cli.StyleSuccess.Render("✓"), result.Message)
 		fmt.Printf("%s %s\n", cli.StyleDim.Render("Release notes:"), result.ReleaseURL)
-		fmt.Printf("%s %s\n", cli.StyleDim.Render("Tip:"), "Restart your terminal or run 'ox daemon restart'")
+		// Retire daemons still running the previous binary. Left alive they would
+		// keep reconciling repositories against the OLD embedded catalog — see
+		// retireStaleDaemonsAfterUpgrade.
+		if n := reconcileKnownReposAfterUpgrade(); n > 0 {
+			fmt.Printf("%s %s\n", cli.StyleDim.Render("Skills:"),
+				fmt.Sprintf("refreshed in %d repository/repositories", n))
+		}
+		if n := retireStaleDaemonsAfterUpgrade(); n > 0 {
+			fmt.Printf("%s %s\n", cli.StyleDim.Render("Daemons:"),
+				"stopped so they restart on the new version (they respawn on demand)")
+		}
+		fmt.Printf("%s %s\n", cli.StyleDim.Render("Tip:"), "Restart your terminal to pick up the new binary in this shell")
 	case "manual":
 		fmt.Printf("\n%s\n", result.Message)
 		if result.ReleaseURL != "" {

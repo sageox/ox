@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 )
 
 const SkillFileName = "SKILL.md"
@@ -29,8 +30,51 @@ type Bundle struct {
 // Catalog is intentionally a slice: declaration order is the human-facing
 // order, while selection below remains deterministic and duplicate-safe.
 var Catalog = []Bundle{
-	{ID: "core", Description: "Everyday SageOx workflows and skill manager", Default: true, SkillIDs: []string{"ox-consult", "ox-conversation", "ox-decision", "ox-plan", "ox-pr-header", "ox-recap", "ox-session-review", "ox-skill-manager", "ox-viz"}},
-	{ID: "attest", Description: "Optional Attest BDD and evidence playbooks", SkillIDs: []string{"ox-attest-goal", "ox-attest-create"}},
+	{ID: "core", Description: "Everyday SageOx workflows and skill manager", Default: true, SkillIDs: []string{"ox-cli-consult", "ox-cli-conversation", "ox-cli-decision", "ox-cli-plan", "ox-cli-pr-header", "ox-cli-recap", "ox-cli-session-review", "ox-cli-skill-manager", "ox-cli-viz"}},
+	{ID: "onramp", Description: "The single committed SageOx on-ramp skill", Default: true, SkillIDs: []string{"sageox"}},
+	{ID: "lifecycle", Description: "Explicit ox lifecycle and diagnostic slash surfaces", Default: true, SkillIDs: []string{"ox-cli-cart", "ox-cli-cart-done", "ox-cli-cart-drop", "ox-cli-cart-start", "ox-cli-doctor", "ox-cli-init", "ox-cli-prime", "ox-cli-session-abort", "ox-cli-session-list", "ox-cli-session-start", "ox-cli-session-status", "ox-cli-session-stop", "ox-cli-status"}},
+	{ID: "attest", Description: "Optional Attest BDD and evidence playbooks", SkillIDs: []string{"ox-cli-attest-goal", "ox-cli-attest-create"}},
+}
+
+// Retired names ox once installed and no longer ships.
+//
+// Retirement is the half of the lifecycle that never worked under the old model:
+// removing a file meant asking every customer to accept a deletion commit, so in
+// practice nobody ever did it, and five orphaned command files survived in this
+// repository across releases with no release removing them.
+//
+// A name stays here for two releases after it stops shipping. That window is what
+// lets the reconciler recognize a file as ox-owned — and therefore safe to remove
+// once its stamp or digest verifies — rather than treating it as a stranger and
+// leaving it behind forever. Removing a name from this list is the second, final
+// step of a retirement, and it is only safe when the file can no longer be found
+// in the wild.
+//
+// Entries are matched against BOTH skill directory names and Claude command file
+// basenames, because the 0.15.0 fold turned one surface into the other.
+var Retired = []string{
+	// 0.15.0: skills renamed to the reserved ox-cli-* namespace.
+	"ox-consult", "ox-conversation", "ox-decision", "ox-plan", "ox-pr-header",
+	"ox-recap", "ox-session-review", "ox-skill-manager", "ox-viz",
+	"ox-attest-goal", "ox-attest-create",
+	// 0.15.0: the Claude-only command surface folded into skills.
+	"ox", "ox-status", "ox-doctor", "ox-init", "ox-prime",
+	"ox-session-start", "ox-session-stop", "ox-session-status",
+	"ox-session-list", "ox-session-abort",
+	"ox-cart", "ox-cart-start", "ox-cart-done", "ox-cart-drop",
+	// Orphans that predate the fold: shipped once, dropped from the catalog, but
+	// never removed from anyone's repository because removal required a commit.
+	"ox-agents", "ox-session-pause", "ox-session-recover", "ox-session-resume",
+}
+
+// IsRetired reports whether name is a surface ox once installed and now removes.
+func IsRetired(name string) bool {
+	for _, r := range Retired {
+		if r == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Skill is one complete canonical skill directory. Files are relative to the
@@ -73,9 +117,26 @@ func DefaultBundleIDs() []string {
 	return ids
 }
 
+var (
+	digestOnce  sync.Once
+	digestValue string
+	digestErr   error
+)
+
 // Digest is a stable identity for the complete catalog source. Schedulers use
 // it as a dedupe key; it is not a signature or a Team Context trust decision.
+//
+// The result is memoized because the catalog is compiled into the binary and
+// cannot change while the process runs, and because Digest is now on the session
+// hot path: `ox agent prime` calls it once per start to decide whether the
+// materialized inventory is stale. Recomputing means validating the whole source
+// tree and hashing every skill file on every session, to reach the same answer.
 func Digest() (string, error) {
+	digestOnce.Do(func() { digestValue, digestErr = computeDigest() })
+	return digestValue, digestErr
+}
+
+func computeDigest() (string, error) {
 	if err := Validate(); err != nil {
 		return "", err
 	}

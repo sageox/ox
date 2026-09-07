@@ -67,7 +67,7 @@ func WithAttributionGuidance(content string, loggedIn bool, attr config.Resolved
 	// SageOx-Session: trailer; rendered by the CLI so the agent never hand-writes the
 	// sanitizer-fragile markup.
 	sb.WriteString("\n**PR Header (only when SageOx shaped the work — paste at the TOP of a PR body):**\n")
-	sb.WriteString("When SageOx team context genuinely shaped this work (your score is not `none`) and you open a PR, run `ox pr header` (add `--plan <pln_id>` for each plan and `--prior-art/--collisions N` for enrichment) and paste its output as the FIRST lines of the PR description, above your summary. It renders a thin, on-brand credit line linking the session(s) and plan(s). If SageOx did not shape the work, skip it. Keep the `SageOx-Session:` trailer at the bottom. See the `ox-pr-header` skill.\n")
+	sb.WriteString("When SageOx team context genuinely shaped this work (your score is not `none`) and you open a PR, run `ox pr header` (add `--plan <pln_id>` for each plan and `--prior-art/--collisions N` for enrichment) and paste its output as the FIRST lines of the PR description, above your summary. It renders a thin, on-brand credit line linking the session(s) and plan(s). If SageOx did not shape the work, skip it. Keep the `SageOx-Session:` trailer at the bottom. See the `ox-cli-pr-header` skill.\n")
 
 	// SageOx contribution score — rendered only when commit attribution is configured
 	if attr.Commit != "" {

@@ -988,37 +988,76 @@ func checkProjectSymlinks(fix bool) checkResult {
 		teamTarget = paths.TeamContextDir(projectCfg.TeamID, ep)
 	}
 
-	// checkSymlink returns true if the symlink exists and points to the expected target
-	checkSymlink := func(rel, expectedTarget string) bool {
+	// checkSymlink classifies one project symlink.
+	//
+	// The dangling case is the one that used to escape: os.Readlink succeeds on a
+	// symlink whose target no longer exists, so a link left pointing at a deleted
+	// ledger or team-context clone reported "ok" and doctor moved on. Resolving the
+	// link with os.Stat — which follows it — is what separates "the link is right"
+	// from "the thing it names is actually there".
+	//
+	// Dangling is reported apart from missing/wrong because it is not repairable by
+	// relinking: createOrUpdateSymlink (internal/config/local_config.go) returns nil
+	// when the link already points at the requested target, so re-running the fix
+	// would change nothing while claiming a repair. The missing thing is the target.
+	checkSymlink := func(rel, expectedTarget string) (ok bool, state string) {
 		if expectedTarget == "" {
-			return true // nothing to check
+			return true, "" // nothing to check
 		}
 		abs := filepath.Join(gitRoot, rel)
 		target, err := os.Readlink(abs)
 		if err != nil {
-			return false // missing or not a symlink
+			return false, "missing" // absent, or present but not a symlink
 		}
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(abs), target)
 		}
-		return filepath.Clean(target) == filepath.Clean(expectedTarget)
+		if filepath.Clean(target) != filepath.Clean(expectedTarget) {
+			return false, "wrong target"
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return false, "dangling"
+		}
+		return true, ""
 	}
 
-	var issues []string
-	if ledgerTarget != "" && !checkSymlink(".sageox/ledger", ledgerTarget) {
-		issues = append(issues, ".sageox/ledger")
-	}
-	if teamTarget != "" && !checkSymlink(".sageox/teams/primary", teamTarget) {
-		issues = append(issues, ".sageox/teams/primary")
+	// relinkable holds links a fix can actually repair; dangling holds links whose
+	// target is gone, which needs the owning subsystem (ledger clone, team sync),
+	// not another symlink.
+	var relinkable, dangling []string
+	for _, c := range []struct {
+		rel    string
+		target string
+	}{
+		{".sageox/ledger", ledgerTarget},
+		{".sageox/teams/primary", teamTarget},
+	} {
+		ok, state := checkSymlink(c.rel, c.target)
+		if ok {
+			continue
+		}
+		if state == "dangling" {
+			dangling = append(dangling, fmt.Sprintf("%s -> %s (target missing)", c.rel, c.target))
+			continue
+		}
+		relinkable = append(relinkable, fmt.Sprintf("%s (%s)", c.rel, state))
 	}
 
-	if len(issues) == 0 {
+	if len(relinkable) == 0 && len(dangling) == 0 {
 		return PassedCheck("Project symlinks", "ok")
 	}
 
-	if !fix {
+	// A dangling link is never silently "fixed" — report it whether or not --fix ran.
+	if len(dangling) > 0 && len(relinkable) == 0 {
 		return WarningCheck("Project symlinks",
-			fmt.Sprintf("%d need repair: %s", len(issues), strings.Join(issues, ", ")),
+			fmt.Sprintf("%d dangling: %s", len(dangling), strings.Join(dangling, ", ")),
+			"The symlink is correct but its target does not exist. Run `ox doctor` and address the ledger/team-context clone it points at")
+	}
+
+	if !fix {
+		all := append(append([]string{}, relinkable...), dangling...)
+		return WarningCheck("Project symlinks",
+			fmt.Sprintf("%d need repair: %s", len(all), strings.Join(all, ", ")),
 			"Run `ox doctor --fix` to create project symlinks")
 	}
 
@@ -1035,6 +1074,11 @@ func checkProjectSymlinks(fix bool) checkResult {
 		}
 	}
 
+	if len(dangling) > 0 {
+		return WarningCheck("Project symlinks",
+			fmt.Sprintf("relinked %d, but %d dangling: %s", fixed, len(dangling), strings.Join(dangling, ", ")),
+			"The dangling symlink's target does not exist; relinking cannot create it")
+	}
 	if fixed > 0 {
 		return PassedCheck("Project symlinks", fmt.Sprintf("fixed %d symlinks", fixed))
 	}

@@ -47,7 +47,7 @@ func agentInstallTree(t *testing.T, repo string) []string {
 	rels := []string{
 		".claude/settings.json",
 		".claude/commands/ox.md",
-		".claude/skills/ox-plan/SKILL.md",
+		".claude/skills/ox-cli-plan/SKILL.md",
 		".claude/rules/ox.md",
 		".claude/rules/sageox/use-team-context.md",
 	}
@@ -94,7 +94,7 @@ func TestStageAll_OneBadPathDoesNotZeroTheBatch(t *testing.T) {
 	}
 	// exactly the shape adapters used to emit: a skills-dir-relative name
 	// joined onto the repo root, pointing at a file that does not exist.
-	tracker.trackForceStage(filepath.Join(repo, "ox-plan/SKILL.md"))
+	tracker.trackForceStage(filepath.Join(repo, "ox-cli-plan/SKILL.md"))
 	tracker.trackForceStage(filepath.Join(repo, "ox.md"))
 
 	tracker.stageAll()
@@ -168,7 +168,7 @@ func TestStageAll_StagesNonClaudeInstructionFiles(t *testing.T) {
 func TestNormalizeAdapterFilesWritten(t *testing.T) {
 	repo := testGitRepo(t)
 	settings := writeFileAt(t, repo, ".claude/settings.json", "{}")
-	skill := writeFileAt(t, repo, ".claude/skills/ox-plan/SKILL.md", "x")
+	skill := writeFileAt(t, repo, ".claude/skills/ox-cli-plan/SKILL.md", "x")
 	outside := filepath.Join(t.TempDir(), "elsewhere.json")
 	require.NoError(t, os.WriteFile(outside, []byte("{}"), 0o644))
 
@@ -191,8 +191,8 @@ func TestNormalizeAdapterFilesWritten(t *testing.T) {
 			"double-joining produced <root><root>/... and broke the whole batch",
 		},
 		{
-			"skills-dir-relative is dropped", []string{"ox-plan/SKILL.md"}, nil,
-			"resolves to <root>/ox-plan/SKILL.md which does not exist; dropping " +
+			"skills-dir-relative is dropped", []string{"ox-cli-plan/SKILL.md"}, nil,
+			"resolves to <root>/ox-cli-plan/SKILL.md which does not exist; dropping " +
 				"beats guessing, and the adapter fix is what makes it arrive correctly",
 		},
 		{
@@ -217,7 +217,7 @@ func TestNormalizeAdapterFilesWritten(t *testing.T) {
 		},
 		{
 			"forward slashes are accepted",
-			[]string{".claude/skills/ox-plan/SKILL.md"}, []string{skill},
+			[]string{".claude/skills/ox-cli-plan/SKILL.md"}, []string{skill},
 			"adapters emit JSON paths with forward slashes regardless of platform",
 		},
 	}
@@ -244,7 +244,7 @@ func TestNormalizeAdapterFilesWritten_KeepsGoodEntriesAlongsideBadOnes(t *testin
 
 	got := normalizeAdapterFilesWritten(repo, []string{
 		".claude/settings.json",  // valid, repo-relative
-		"ox-plan/SKILL.md",       // junk, skills-dir-relative
+		"ox-cli-plan/SKILL.md",   // junk, skills-dir-relative
 		command,                  // valid, absolute
 		"ox.md",                  // junk, rules-dir-relative
 		"/tmp/definitely/absent", // junk, absolute and outside
@@ -498,4 +498,51 @@ func TestStageAll_StagesClaudePrimaryInstructionFiles(t *testing.T) {
 	staged := stagedFiles(t, repo)
 	assert.Contains(t, staged, "AGENTS.md")
 	assert.Contains(t, staged, "CLAUDE.md")
+}
+
+// TestStageAll_NeverStagesReservedOxArtifacts is the acceptance test for the
+// PR-noise fix, and it is the exact inverse of TestStageAll_StagesTheClaudeTree
+// above: that test pinned "ox init must actually stage what it writes" (GH #731),
+// and this one pins the boundary that stops it from staging the vendor files
+// which caused the churn.
+//
+// Both must hold at once. The on-ramp skill, the hook settings, and the ignore
+// file still have to reach the index — a teammate's fresh clone depends on them —
+// while every ox-cli-* artifact must stay out of it.
+func TestStageAll_NeverStagesReservedOxArtifacts(t *testing.T) {
+	repo := testGitRepo(t)
+
+	reserved := []string{
+		".claude/skills/ox-cli-plan/SKILL.md",
+		".claude/skills/ox-cli-prime/SKILL.md",
+		".claude/rules/ox-cli.md",
+		".claude/rules/ox-cli-use-team-context.md",
+		".agents/skills/ox-cli-recap/SKILL.md",
+	}
+	mustStage := []string{
+		".claude/settings.json",
+		".claude/skills/sageox/SKILL.md",
+		".claude/skills/my-own-skill/SKILL.md",
+	}
+	var all []string
+	for _, rel := range append(append([]string{}, reserved...), mustStage...) {
+		writeFileAt(t, repo, rel, "x")
+		all = append(all, filepath.Join(repo, rel))
+	}
+
+	tracker := newInitTracker(repo)
+	for _, abs := range stageableInstalledPaths(repo, all) {
+		tracker.trackForceStage(abs)
+	}
+	tracker.stageAll()
+
+	staged := stagedFiles(t, repo)
+	for _, rel := range reserved {
+		assert.NotContains(t, staged, rel,
+			"%s reached the index — every ox release would put it back in the customer's PR", rel)
+	}
+	for _, rel := range mustStage {
+		assert.Contains(t, staged, rel,
+			"%s must still be staged; a fresh clone depends on it", rel)
+	}
 }

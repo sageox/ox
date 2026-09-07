@@ -40,6 +40,11 @@ canonical root and format. Codex and Gemini therefore produce one shared
 | Gemini CLI | `.agents/skills/<skill>/` | Portable Agent Skills (shared with Codex) |
 | AI coworker without native skills | None | Future Skill Bridge; not implemented speculatively |
 
+All managed targets are project-scoped, and every managed file is GITIGNORED
+under a reserved namespace (ADR-031) — with exactly one exception, the committed
+`sageox` on-ramp skill, which is the only SageOx artifact present on a machine
+where the CLI is not installed.
+
 All managed targets are project-scoped. Native discovery and activation remain
 authoritative; SageOx does not replace vendor-trained routing with hooks, a
 bootloader, or an MCP page-fault path.
@@ -52,6 +57,22 @@ bootloader, or an MCP page-fault path.
 - selected bundle IDs and target keys;
 - normalized target descriptor snapshots;
 - every managed file's repository-relative path, SHA-256 digest, and mode.
+
+Ownership is split across two files as of schema 2 (ADR-031): the COMMITTED
+`.sageox/skills.lock.json` carries the project's selection (bundles, targets),
+while the machine-local, gitignored `.sageox/cache/skills-state.json` carries the
+catalog revision, the ox version, and the per-file digests this machine
+materialized. Without that split the manifest alone would keep producing a
+tracked diff on every content-bearing release, even though every file it
+describes is invisible to git. Schema-1 manifests migrate on read.
+
+Inside the reserved namespaces (`ox-cli-*`, `sageox-team-*`) ox owns the bytes
+ABSOLUTELY: a local edit is restored on the next reconcile rather than preserved
+as a conflict. Preserve-on-edit was correct while these files were tracked — an
+edit showed up in `git diff` — and becomes harmful once they are gitignored,
+where a preserved edit is permanent silent drift. Overwrite is not delete,
+though: ox removes only what it can prove it wrote, so unrecognized content
+inside a reserved namespace is reported, never swept.
 
 The lockfile—not an inline comment—is the ownership source. Existing
 `ox-hash` stamps are accepted for one-release migration only when their body
@@ -72,6 +93,10 @@ Ownership rules are deliberately conservative:
 - on uninstall, preserve a modified retired file but relinquish ownership so
   it does not become a permanent Doctor conflict;
 - reject symlinked targets, parent directories, lockfiles, and managed files.
+  A central store symlinked into each repository was evaluated and rejected in
+  ADR-031: symlinked skill entries do work in Claude Code and Codex, but as a
+  delivery mechanism they silently no-op on Windows, dangle in containers, and
+  make one editor save change every repository on the machine.
 
 Apply writes `.sageox/cache/skills-apply.json` before target mutation. The
 journal records each old/new digest pair. If a process exits before the
@@ -91,6 +116,13 @@ distinguishes interrupted SageOx writes from coincidentally similar user files.
 - uninstall removes unchanged owned files once across all targets.
 - an upgrade converges on the next explicit Doctor/init lifecycle operation;
   the old process does not attempt to execute a newly installed catalog.
+
+AMENDED by ADR-031: the daemon now runs a DETERMINISTIC reconcile check on its
+slow tick (`skills-inventory-drift`). The objection below was to an AI coworker
+performing repair; this is the same code path `ox doctor` runs, and it is bounded
+— it never installs into a repository that selected no targets, never runs while
+a session is recording, never touches the git index, and never rewrites a tracked
+file. The sentence below stands for the AI-coworker case only.
 
 The daemon does not schedule an AI coworker to perform deterministic skill
 repair. Explicit lifecycle commands own reconciliation. Current desired state

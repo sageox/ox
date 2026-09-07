@@ -554,7 +554,7 @@ func TestOutputAgentPrimeXML_ConsultFirst(t *testing.T) {
 	}
 
 	// the Layer-1 floor must stand ALONE on Codex/Droid: no Claude-only skill or
-	// slash-command references. The consult reflex is hybrid — a thin `ox-consult`
+	// slash-command references. The consult reflex is hybrid — a thin `ox-cli-consult`
 	// skill adds Claude auto-activation ergonomics on top — but the floor block
 	// must never point at it, or a Codex/Droid agent reads a dangling reference to
 	// a surface it can't load. Assert the block carries neither "skill" nor "/ox-".
@@ -694,7 +694,7 @@ func TestOutputAgentPrimeXML_VisualizationGuidanceIsArtifactNeutral(t *testing.T
 }
 
 // TestConsultRoutes_NoDriftWithSkill is the conformance contract between the
-// Layer-1 <consult-first> floor reminder and the additive portable `ox-consult`
+// Layer-1 <consult-first> floor reminder and the additive portable `ox-cli-consult`
 // skill: both render the SAME retrieval reflex, so the skill's activation
 // description must name every corpus the floor table routes to. If a future
 // edit drops a route from the skill's frontmatter (or adds one the floor
@@ -714,14 +714,14 @@ func TestConsultRoutes_NoDriftWithSkill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve repo root: %v", err)
 	}
-	skillPath := filepath.Join(root, "extensions", "skills", "ox-consult", "SKILL.md")
+	skillPath := filepath.Join(root, "extensions", "skills", "ox-cli-consult", "SKILL.md")
 	raw, err := os.ReadFile(skillPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", skillPath, err)
 	}
 	desc := skillFrontmatterDescription(t, string(raw))
 	if desc == "" {
-		t.Fatalf("ox-consult SKILL.md has no frontmatter description")
+		t.Fatalf("ox-cli-consult SKILL.md has no frontmatter description")
 	}
 
 	// every corpus command the floor table routes to must be named in the
@@ -736,7 +736,7 @@ func TestConsultRoutes_NoDriftWithSkill(t *testing.T) {
 			continue
 		}
 		if !strings.Contains(desc, corpus) {
-			t.Errorf("ox-consult skill description drifted: floor routes to %q but the skill frontmatter does not name it.\n"+
+			t.Errorf("ox-cli-consult skill description drifted: floor routes to %q but the skill frontmatter does not name it.\n"+
 				"floor cue: %s\nskill description: %s", corpus, r.Cue, desc)
 		}
 	}
@@ -758,7 +758,7 @@ func TestConsultRoutes_NoDriftWithSkill(t *testing.T) {
 			continue
 		}
 		if _, ok := routeCorpora[c]; !ok {
-			t.Errorf("ox-consult skill description includes %q not present in floor consult routes", c)
+			t.Errorf("ox-cli-consult skill description includes %q not present in floor consult routes", c)
 		}
 	}
 }

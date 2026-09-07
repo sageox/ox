@@ -13,36 +13,32 @@ import (
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
-// sageoxRulesNamespace is the subdirectory under .claude/rules/ where ox
-// installs its NEW rules going forward. The first canonical ox rule
-// (.claude/rules/ox.md, "be a good teammate" behavioral guidance) stays
-// at the top level — it's the long-lived face of the SageOx CLI and
-// teams have built muscle memory around it. Everything else SageOx
-// adds (use-team-context, future user-context pointer, etc.) goes under
-// sageox/ so we don't pollute the rules root with ox-* prefixed siblings.
+// sageoxRulesNamespace is the LEGACY subdirectory under .claude/rules/ where ox
+// used to install its non-primary rules, kept solely so existing repositories can
+// be cleaned up. Nothing is written there any more.
 //
-// Design note (rule pointer pattern): rather than syncing every team
-// rule from team context into .claude/rules/ (continuous mirror, conflict
-// resolution, per-adapter coverage problems), the adapter installs ONE
-// pointer rule (sageox/use-team-context.md) that teaches the agent how
-// to discover team rules in their canonical home
-// (<team-context>/agents/rules/). Team rules stay where the team writes
-// them; the agent navigates to them on demand. No sync. No cleanup.
+// As of the 0.15.0 rename every ox rule is installed FLAT under the reserved
+// ox-cli-* prefix (ox-cli.md, ox-cli-use-team-context.md). The subdirectory
+// existed to avoid "polluting the rules root with ox-* prefixed siblings"; the
+// reserved prefix now does that job in the filename, which is what lets a single
+// glob in .claude/.gitignore cover the whole ox rule surface. A nested directory
+// cannot be covered by the same one-line rule, so flattening is a prerequisite
+// for keeping rules out of the customer's pull requests.
+//
+// Design note (rule pointer pattern), unchanged: rather than mirroring every team
+// rule into .claude/rules/, the adapter installs ONE pointer rule that teaches
+// the agent to discover team rules in their canonical home
+// (<team-context>/agents/rules/). Team rules stay where the team writes them.
 const sageoxRulesNamespace = "sageox"
 
 func handleInstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.InstallRulesResponse, error) {
 	rm := rules.NewClaudeCodeRulesManager()
 
-	// Ensure .claude/rules/sageox/ exists. agentx.Install only MkdirAlls
-	// the rules root; rule names with a path component (sageox/foo.md)
-	// require the parent directory to exist before WriteFile succeeds.
-	// The top-level ox.md doesn't need this since the rules root itself
-	// is mkdirall'd by agentx.
+	// Every ox rule now lives flat under the ox-cli-* prefix, so there is no
+	// subdirectory to pre-create: agentx MkdirAlls the rules root itself. The
+	// legacy sageox/ directory is only ever REMOVED from here on (see
+	// uninstallNamespaceFiles).
 	rulesDir := rm.RulesDir(p.RepoRoot)
-	nsDir := filepath.Join(rulesDir, sageoxRulesNamespace)
-	if err := os.MkdirAll(nsDir, 0o755); err != nil {
-		return nil, err
-	}
 
 	ruleFiles := oxRuleFiles(p.Version)
 
@@ -54,6 +50,14 @@ func handleInstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.Install
 	// Install below rewrites them fresh. See adapterstamp.AppendFrontmatterStale
 	// for the same frontmatter-aware staleness reasoning.
 	adapterstamp.RemoveTamperedRules(rulesDir, ruleFiles)
+
+	// Retire the pre-0.15.0 rule surface. Doing this only on uninstall would mean
+	// it never happens: an existing project installs once and reconciles forever
+	// after, so it would keep both the legacy .claude/rules/ox.md and the nested
+	// sageox/ tree alongside the new flat ox-cli-* files — two rule sets saying
+	// overlapping things, and a nested directory no single ignore line can cover.
+	// Only ox-stamped files are removed; anything the user wrote or edited stays.
+	retireLegacyRules(rulesDir)
 
 	written, err := rm.Install(context.Background(), p.RepoRoot, ruleFiles, true)
 	if err != nil {
@@ -122,17 +126,42 @@ func handleUninstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.Unins
 	}, nil
 }
 
-// uninstallNamespaceFiles removes ox-stamped files from the sageox/
-// subdirectory, then removes the directory itself if empty. Files
-// without an ox stamp (manually-added by the user) are preserved.
+// legacyRuleFiles are the top-level rule filenames ox installed before the
+// 0.15.0 flattening. They are removed on install, and only when their ox stamp
+// verifies them as ours.
+var legacyRuleFiles = []string{"ox.md"}
+
+// retireLegacyRules deletes the pre-0.15.0 ox rule surface: the top-level
+// legacy files and the whole sageox/ subdirectory. Best-effort — a failure here
+// must never block installing the current rules.
+func retireLegacyRules(rulesDir string) {
+	for _, name := range legacyRuleFiles {
+		path := filepath.Join(rulesDir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if !adapterstamp.LooksStamped(data) {
+			continue // user-authored; not ours to remove
+		}
+		_ = os.Remove(path)
+	}
+	_, _ = uninstallNamespaceFiles(rulesDir)
+}
+
+// uninstallNamespaceFiles removes ox-stamped rules from the LEGACY sageox/
+// subdirectory, then removes the directory itself if empty. Files without an ox
+// stamp (added by the user) are preserved.
 //
-// Implementation note: agentx v0.1.10's ExtractCommandHash inspects only
-// the first line of file content, which means files with YAML frontmatter
-// (description:/globs:) — exactly the files this adapter writes for the
-// sageox/ namespace — appear unstamped to agentx. We sidestep that by
-// scanning the full content for the stamp prefix marker. When agentx
-// fixes this limitation upstream, this can collapse back to a single
-// ExtractCommandHash call.
+// After the 0.15.0 flattening this is pure migration: it is how a repository
+// initialized by an older ox stops carrying a nested rule tree that no single
+// .gitignore line can cover.
+//
+// Implementation note: agentx v0.1.10's ExtractCommandHash inspects only the
+// first line of file content, so files with YAML frontmatter — exactly what this
+// adapter used to write here — appear unstamped to agentx. We scan the full
+// content for the stamp marker instead. When agentx fixes that upstream this can
+// collapse back to a single ExtractCommandHash call.
 func uninstallNamespaceFiles(rulesDir string) ([]string, error) {
 	nsDir := filepath.Join(rulesDir, sageoxRulesNamespace)
 	entries, err := os.ReadDir(nsDir)
@@ -204,13 +233,13 @@ func uninstallNamespaceFiles(rulesDir string) ([]string, error) {
 func oxRuleFiles(version string) []agentx.RuleFile {
 	return []agentx.RuleFile{
 		{
-			Name:        "ox.md",
+			Name:        "ox-cli.md",
 			Content:     oxRulesContent,
 			Version:     version,
 			Description: "SageOx behavioral guidance for AI coworkers",
 		},
 		{
-			Name:        sageoxRulesNamespace + "/use-team-context.md",
+			Name:        "ox-cli-use-team-context.md",
 			Content:     useTeamContextContent,
 			Version:     version,
 			Description: "How to discover and use team-context rules and knowledge from the SageOx ox CLI",
