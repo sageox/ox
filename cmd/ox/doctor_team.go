@@ -637,7 +637,8 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 		// actually on disk. A top-level directory that exists in the commit but not
 		// in the working tree was excluded by the sparse spec — which is exactly the
 		// failure, and it is invisible to a pattern check.
-		if missing := missingSparseTopLevelDirs(tc.Path); len(missing) > 0 {
+		cfg := manifest.ParseFile(filepath.Join(tc.Path, ".sageox", "sync.manifest"), manifest.RepoKindTeamContext)
+		if missing := missingSparseTopLevelDirs(tc.Path, cfg); len(missing) > 0 {
 			unmaterialized = append(unmaterialized,
 				fmt.Sprintf("%s (%s)", filepath.Base(tc.Path), strings.Join(missing, ", ")))
 			continue
@@ -736,47 +737,89 @@ func runGitStatus(dir string) (string, error) {
 // This is what catches a manifest whose include list is short. A pattern check
 // can only confirm the patterns it knows to look for; this compares the commit
 // against reality, so it catches an omission nobody anticipated.
-func missingSparseTopLevelDirs(repoPath string) []string {
+func missingSparseTopLevelDirs(repoPath string, cfg *manifest.ManifestConfig) []string {
 	cmd := exec.Command("git", "ls-tree", "-d", "--name-only", "HEAD")
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
 		return nil // unborn HEAD or not a repo: nothing to compare against
 	}
+	expected := expectedTeamTopLevelDirs(cfg)
 	var missing []string
 	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if name == "" {
+		if name == "" || !expected[name] {
 			continue
 		}
 		// Directory presence is NOT evidence the content materialized: an excluded
-		// directory can exist purely because of untracked local files beside it, and
-		// the check would then pass while every tracked file under it is still
-		// absent. Verify a file HEAD actually tracks.
-		child := firstTrackedChild(repoPath, name)
-		if child == "" {
-			continue // nothing tracked under it; nothing to be missing
+		// directory can exist purely because of untracked local files beside it. Look
+		// for a tracked child that the manifest does not explicitly deny, and require
+		// at least one such child to exist in the working tree.
+		var hasExpectedChild, materialized bool
+		for _, child := range trackedChildren(repoPath, name) {
+			if manifestPathDenied(child, cfg) {
+				continue
+			}
+			hasExpectedChild = true
+			if _, statErr := os.Stat(filepath.Join(repoPath, filepath.FromSlash(child))); statErr == nil {
+				materialized = true
+				break
+			}
 		}
-		if _, statErr := os.Stat(filepath.Join(repoPath, filepath.FromSlash(child))); statErr != nil {
+		if hasExpectedChild && !materialized {
 			missing = append(missing, name+"/")
 		}
 	}
 	return missing
 }
 
-// firstTrackedChild returns one path HEAD tracks under dir, or "" if none.
-// It is the probe for whether sparse-checkout actually materialized the content,
-// as opposed to the directory merely existing.
-func firstTrackedChild(repoPath, dir string) string {
+// expectedTeamTopLevelDirs is the product-level team-context shape plus any
+// additional top-level directory the current manifest explicitly includes.
+// Restricting the check to this set keeps intentionally sparse trees such as
+// data/ and assets/ from being diagnosed merely because they exist in HEAD.
+func expectedTeamTopLevelDirs(cfg *manifest.ManifestConfig) map[string]bool {
+	expected := make(map[string]bool)
+	add := func(entries []string) {
+		for _, entry := range entries {
+			clean := strings.Trim(strings.TrimSpace(filepath.ToSlash(entry)), "/")
+			if clean == "" {
+				continue
+			}
+			expected[strings.SplitN(clean, "/", 2)[0]] = true
+		}
+	}
+	add(manifest.FallbackConfigFor(manifest.RepoKindTeamContext).Includes)
+	if cfg != nil {
+		add(cfg.Includes)
+	}
+	return expected
+}
+
+func manifestPathDenied(rel string, cfg *manifest.ManifestConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	for _, deny := range cfg.Denies {
+		deny = strings.Trim(filepath.ToSlash(deny), "/")
+		if deny != "" && (rel == deny || strings.HasPrefix(rel, deny+"/")) {
+			return true
+		}
+	}
+	return false
+}
+
+func trackedChildren(repoPath, dir string) []string {
 	cmd := exec.Command("git", "ls-tree", "-r", "--name-only", "HEAD", "--", dir+"/")
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
-		return ""
+		return nil
 	}
+	var children []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line != "" {
-			return line
+			children = append(children, line)
 		}
 	}
-	return ""
+	return children
 }
