@@ -5,7 +5,6 @@ import (
 
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/skillmanager"
-	"github.com/sageox/ox/internal/version"
 )
 
 // retireStaleDaemonsAfterUpgrade stops daemons still running the previous ox
@@ -54,17 +53,22 @@ func retireStaleDaemonsAfterUpgrade() int {
 func reconcileKnownReposAfterUpgrade() int {
 	var updated int
 	for _, root := range skillmanager.KnownRepos() {
-		revision, oxVersion, selected := skillmanager.InstalledSource(root)
+		_, _, selected := skillmanager.InstalledSource(root)
 		if !selected {
 			continue
 		}
-		want, err := catalogRevision()
-		if err != nil {
-			return updated
-		}
-		if revision == want && oxVersion == version.Version {
-			continue
-		}
+		// Deliberately NOT short-circuited on a matching recorded revision.
+		//
+		// The recorded revision says what ox last WROTE, not what is on disk now. A
+		// bad merge, a stray rm -rf, or a branch switch can delete the whole managed
+		// tree while the state file still reports it current — and this function is
+		// the only thing that visits a repository nobody opens. Skipping on the
+		// recorded value is exactly the short-circuit that left real checkouts
+		// unhealed until prime was taught to look past it.
+		//
+		// The cost is one plan per known repository per upgrade. Apply detects a
+		// no-op and returns without writing, so the common case stays cheap, and an
+		// upgrade is rare.
 		plan, err := reconcileCommittedSkillsNonBlocking(root)
 		if err != nil || plan == nil {
 			slog.Debug("upgrade: could not reconcile repo", "repo", root, "error", err)

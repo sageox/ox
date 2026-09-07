@@ -29,9 +29,6 @@ import (
 // Best-effort by construction. Every failure path returns without disturbing the
 // session: a project that cannot reconcile still primes, because a stale
 // playbook is a degraded session while a failed prime is no session at all.
-// catalogRevision is the digest of the catalog compiled into this binary.
-func catalogRevision() (string, error) { return skills.Digest() }
-
 func reconcileSkillInventoryIfStale(projectRoot string) (changed int) {
 	if projectRoot == "" {
 		return 0

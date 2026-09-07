@@ -13,11 +13,20 @@ import (
 // pattern, because only git knows the answer: a later negation, a nested ignore
 // file, or a different pattern spelling all change the outcome, and a string
 // search sees none of them.
+// checkOxIgnoreRules resolves the repository from the process working directory and
+// delegates. The split exists so the logic can be driven against a scratch
+// repository in tests: the cwd binding is untestable AND hazardous — a test that
+// ran the cwd form once operated on the developer's own checkout and removed
+// tracked files from it.
 func checkOxIgnoreRules(fix bool) checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
 		return SkippedCheck("ox ignore rules", "not in git repo", "")
 	}
+	return checkOxIgnoreRulesIn(gitRoot, fix)
+}
+
+func checkOxIgnoreRulesIn(gitRoot string, fix bool) checkResult {
 
 	// A representative reserved path per agent directory that ox actually uses.
 	probes := map[string]string{
@@ -73,11 +82,15 @@ func checkOxIgnoreRules(fix bool) checkResult {
 // Reported, never auto-fixed: removing a path from the index is a commit-shaped
 // act, and the one commit ox is willing to write is the guarded migration.
 func checkOxFilesNotTracked(fix bool) checkResult {
-	_ = fix
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
 		return SkippedCheck("ox files untracked", "not in git repo", "")
 	}
+	return checkOxFilesNotTrackedIn(gitRoot, fix)
+}
+
+func checkOxFilesNotTrackedIn(gitRoot string, fix bool) checkResult {
+	_ = fix
 	migration, err := planLegacyMigration(gitRoot)
 	if err != nil {
 		return WarningCheck("ox files untracked", "cannot inspect tracked ox files", err.Error())

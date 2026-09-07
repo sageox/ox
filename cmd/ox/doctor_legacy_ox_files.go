@@ -19,11 +19,20 @@ import (
 // FixLevelAuto means human-initiated and foreground — it fires when someone runs
 // `ox doctor`. It does NOT mean the daemon does this unattended; the daemon's
 // reconcile check never touches the git index.
+// checkLegacyOxFiles resolves the repository from the process working directory and
+// delegates. The split exists so the logic can be driven against a scratch
+// repository in tests: the cwd binding is untestable AND hazardous — a test that
+// ran the cwd form once operated on the developer's own checkout and removed
+// tracked files from it.
 func checkLegacyOxFiles(fix bool) checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
 		return SkippedCheck("Legacy ox files", "not in git repo", "")
 	}
+	return checkLegacyOxFilesIn(gitRoot, fix)
+}
+
+func checkLegacyOxFilesIn(gitRoot string, fix bool) checkResult {
 
 	migration, err := planLegacyMigration(gitRoot)
 	if err != nil {
