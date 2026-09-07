@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/extensions/skills"
@@ -130,10 +131,26 @@ func planCommittedSkills(repoRoot string) (*skillmanager.ReconcilePlan, error) {
 
 func reconcileCommittedSkills(repoRoot string) (*skillmanager.ReconcilePlan, error) {
 	plan, err := skillmanager.ReconcileUpdate(repoRoot, version.Version, func(current skillmanager.DesiredSkills, currentTargets []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
-		if len(current.Targets) > 0 {
-			return current, currentTargets, nil
+		if len(current.Targets) == 0 {
+			return bootstrapLegacySkillState(repoRoot, current, currentTargets)
 		}
-		return bootstrapLegacySkillState(repoRoot, current, currentTargets)
+		// Re-assert the DEFAULT bundles. Without this a bundle introduced by a new
+		// release never reaches an existing project: the lockfile records the
+		// bundles chosen at `ox init` time, and reconcile would faithfully install
+		// exactly those forever.
+		//
+		// That is not hypothetical — it is how the `sageox` on-ramp, the ONE file
+		// this whole design keeps in git, failed to install into a real repository
+		// during the first end-to-end run. A default bundle means "ox ships this to
+		// everyone"; a project that never opted out must get it.
+		//
+		// Deliberately doctor-only: this can change the committed lockfile, and
+		// `ox doctor` is the human-initiated path that already owns the index. Prime
+		// and the daemon stay on the recorded state so neither writes a tracked file.
+		for _, id := range skills.DefaultBundleIDs() {
+			current = skillmanager.AddBundles(current, id)
+		}
+		return current, currentTargets, nil
 	})
 	return plan, err
 }
@@ -182,7 +199,70 @@ func bootstrapLegacySkillState(repoRoot string, desired skillmanager.DesiredSkil
 			}
 		}
 	}
+	// A project that has ox-stamped COMMANDS but no ox skills predates the skills
+	// installer entirely. Its command surface is nonetheless proof that it selected
+	// Claude Code, so treat that as the selection signal.
+	//
+	// Without this, the 0.15.0 fold is a pure regression for such a project: the
+	// migration removes the eight legacy command files and, finding no recorded
+	// skill target, installs no replacement — so the user loses /ox-prime and every
+	// other lifecycle surface and gains nothing. Observed on a real repository.
+	if len(desired.Targets) == 0 && hasLegacyOxCommands(repoRoot) {
+		for _, target := range detectedOrClaudeTargets(repoRoot) {
+			targets = append(targets, target)
+			desired = skillmanager.AddTargets(desired, target)
+		}
+		if len(desired.Targets) > 0 {
+			for _, id := range skills.DefaultBundleIDs() {
+				desired = skillmanager.AddBundles(desired, id)
+			}
+		}
+	}
 	return desired, targets, nil
+}
+
+// hasLegacyOxCommands reports whether .claude/commands holds a file ox installed.
+// Only an ox-stamped file counts; a command the user wrote themselves says nothing
+// about whether they ever ran `ox init`.
+func hasLegacyOxCommands(repoRoot string) bool {
+	dir := filepath.Join(repoRoot, ".claude", "commands")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(dir, e.Name()))
+		if readErr != nil {
+			continue
+		}
+		if hash, _, _ := adapterstamp.ExtractStampAnywhere(data, "ox"); hash != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// detectedOrClaudeTargets prefers live adapter detection and falls back to the
+// canonical Claude Code projection, because the evidence that got us here — an
+// ox-stamped .claude/commands file — is Claude-specific.
+func detectedOrClaudeTargets(repoRoot string) []adapterprotocol.SkillTarget {
+	if detected, err := detectedSkillTargets(repoRoot); err == nil && len(detected) > 0 {
+		return detected
+	}
+	canonical, err := skillmanager.CanonicalizeTargets(repoRoot, []adapterprotocol.SkillTarget{{
+		Key:        "claude-project",
+		Root:       ".claude/skills",
+		Format:     adapterprotocol.SkillFormatAgentSkillsV1,
+		Scope:      adapterprotocol.SkillScopeProject,
+		LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+	}})
+	if err != nil {
+		return nil
+	}
+	return canonical
 }
 
 func addSkillBundle(repoRoot, bundle string) (*skillmanager.ReconcilePlan, error) {

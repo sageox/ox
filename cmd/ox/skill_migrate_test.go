@@ -49,6 +49,15 @@ func migrationRepo(t *testing.T) string {
 	writeRepoFile(t, root, ".claude/commands/ox-status.md",
 		"<!-- ox-hash: deadbeefcafe ver: 0.14.0 -->\nI edited this\n")
 
+	// A recorded skill target: the replacement surface EXISTS. Without it the
+	// migration correctly refuses to remove the legacy command files, because
+	// doing so would leave the project with no ox surface at all.
+	writeRepoFile(t, root, ".sageox/skills.lock.json", `{
+  "schema_version": 2,
+  "desired": {"bundles": ["core"], "targets": ["claude-project"]},
+  "targets": [{"key": "claude-project", "root": ".claude/skills", "format": "agent-skills-v1", "scope": "project", "link_policy": "reject"}]
+}`)
+
 	git(t, root, "add", "-A")
 	git(t, root, "commit", "-q", "-m", "initial")
 	return root
@@ -312,5 +321,39 @@ func TestLegacyMigration_InFlightGuardWorksInALinkedWorktree(t *testing.T) {
 
 	if reason := migrationBlocker(wt); !strings.Contains(reason, "merge") {
 		t.Errorf("in-flight merge not detected inside a linked worktree; ox would commit mid-merge. got %q", reason)
+	}
+}
+
+// TestLegacyMigration_NeverRemovesTheOnlySurface is the gate that stops the
+// migration from being a pure regression.
+//
+// The legacy .claude/commands files ARE the entire ox surface for a project that
+// predates the skills installer. Removing them where no skill target is recorded
+// leaves the user with neither — /ox-prime and every other lifecycle command gone,
+// and nothing installed to replace them. That happened on a real repository before
+// this gate existed.
+func TestLegacyMigration_NeverRemovesTheOnlySurface(t *testing.T) {
+	root := t.TempDir()
+	git(t, root, "init", "--initial-branch=main")
+	git(t, root, "config", "user.email", "t@e.example")
+	git(t, root, "config", "user.name", "T")
+
+	// A pre-skills project: ox commands, no skills lockfile, no skill target.
+	writeRepoFile(t, root, ".claude/commands/ox-prime.md",
+		string(agentx.StampedContent([]byte("legacy prime\n"), "0.14.0", "ox")))
+	git(t, root, "add", "-A")
+	git(t, root, "commit", "-q", "-m", "initial")
+
+	m, err := planLegacyMigration(root)
+	if err != nil {
+		t.Fatalf("planLegacyMigration: %v", err)
+	}
+	for _, rel := range m.remove {
+		if strings.HasPrefix(rel, ".claude/commands/") {
+			t.Errorf("%s would be removed with no replacement installed; the project would lose its only ox surface", rel)
+		}
+	}
+	if len(m.preserved) == 0 {
+		t.Error("the legacy command should be preserved and reported, not silently dropped from the plan")
 	}
 }

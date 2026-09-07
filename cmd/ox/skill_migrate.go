@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -36,6 +37,17 @@ type legacyMigration struct {
 	// would put the whole migration straight back.
 	remove []string
 
+	// adopt are committed-footprint paths that exist on disk but are not tracked —
+	// the sageox on-ramp, most importantly. They are work in their own right: a
+	// repository whose untrack already happened would otherwise leave the ONE file
+	// this design keeps in git sitting untracked forever, because Apply only runs
+	// when there is something to untrack.
+	adopt []string
+
+	// replacementAvailable records whether this project has a skill target, i.e.
+	// whether the surface that supersedes the legacy commands actually exists.
+	replacementAvailable bool
+
 	// preserved are paths that wear an ox name but whose bytes ox cannot verify as
 	// its own. They are left tracked and untouched: these predate the reserved-prefix
 	// contract, so their author never agreed to ox owning that path.
@@ -43,7 +55,7 @@ type legacyMigration struct {
 }
 
 // Empty reports whether there is nothing to migrate.
-func (m *legacyMigration) Empty() bool { return len(m.uncache)+len(m.remove) == 0 }
+func (m *legacyMigration) Empty() bool { return len(m.uncache)+len(m.remove)+len(m.adopt) == 0 }
 
 // planLegacyMigration classifies every tracked path under the agent directories.
 //
@@ -53,15 +65,50 @@ func (m *legacyMigration) Empty() bool { return len(m.uncache)+len(m.remove) == 
 func planLegacyMigration(repoRoot string) (*legacyMigration, error) {
 	m := &legacyMigration{repoRoot: repoRoot}
 
+	// Never remove the old surface until the new one is in place.
+	//
+	// The legacy .claude/commands files ARE the entire ox surface for a project
+	// that predates the skills installer. Removing them in a repository where no
+	// skill target is recorded leaves the user with neither: /ox-prime and every
+	// other lifecycle command gone, and nothing installed to replace them. That is
+	// a pure regression, and it happened on a real repository before this gate
+	// existed. Reconcile runs before this check and records a target when it
+	// adopts one, so by the time we get here the replacement is either present or
+	// genuinely unavailable.
+	_, targets, err := skillmanager.LoadDesired(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	m.replacementAvailable = len(targets) > 0
+
 	tracked, err := trackedAgentPaths(repoRoot)
 	if err != nil {
 		return nil, err
+	}
+	trackedSet := make(map[string]struct{}, len(tracked))
+	for _, rel := range tracked {
+		trackedSet[filepath.ToSlash(rel)] = struct{}{}
+	}
+	// The committed footprint: present on disk but not yet in git.
+	for _, root := range []string{".claude", ".agents"} {
+		rel := path.Join(root, "skills", skillmanager.CommittedOnRamp, "SKILL.md")
+		if _, ok := trackedSet[rel]; ok {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(repoRoot, filepath.FromSlash(rel))); err == nil {
+			m.adopt = append(m.adopt, rel)
+		}
 	}
 	for _, rel := range tracked {
 		switch classifyLegacyPath(repoRoot, rel) {
 		case legacyReserved:
 			m.uncache = append(m.uncache, rel)
 		case legacySuperseded:
+			if !m.replacementAvailable && strings.HasPrefix(filepath.ToSlash(rel), ".claude/commands/") {
+				// Leave the user their only surface.
+				m.preserved = append(m.preserved, rel)
+				continue
+			}
 			m.remove = append(m.remove, rel)
 		case legacyUserOwned:
 			m.preserved = append(m.preserved, rel)
@@ -101,7 +148,13 @@ func classifyLegacyPath(repoRoot, rel string) legacyClass {
 		// A legacy rule or command is removed only when its ox stamp still verifies
 		// against its body. An ox-stamped file the user has since EDITED no longer
 		// hashes to its stamp, and deleting it would destroy their work.
-		if skills.IsRetired(name) || (surface == ".claude/rules" && len(parts) > 3 && parts[2] == "sageox") {
+		// The nested legacy namespace applies to EVERY rules root ox wrote, not just
+		// Claude's. Hardcoding ".claude/rules" left a verifying
+		// .factory/rules/sageox/use-team-context.md tracked forever — found by
+		// running the migration against a real clone rather than a fixture.
+		nestedLegacy := len(parts) > 3 && parts[2] == "sageox" &&
+			(surface == ".claude/rules" || surface == ".factory/rules")
+		if skills.IsRetired(name) || nestedLegacy {
 			if stampVerifies(filepath.Join(repoRoot, filepath.FromSlash(rel))) {
 				return legacySuperseded
 			}
@@ -150,11 +203,18 @@ func trackedAgentPaths(repoRoot string) ([]string, error) {
 // The checks are deliberately conservative: doing nothing is always recoverable,
 // and the migration will simply run on the next invocation.
 func migrationBlocker(repoRoot string) string {
-	// A recording session means an AI coworker is mid-turn in this repository.
+	// A LIVE recording session means an AI coworker is mid-turn in this repository.
 	// `ox doctor` is routinely run BY an agent during a session, so this is not a
 	// theoretical case — and a commit appearing under the user's session is exactly
 	// the surprise the #732 ruling was about.
-	if session.IsRecording(repoRoot) {
+	//
+	// Liveness matters, not merely the presence of state. session.IsRecording only
+	// asks whether a .recording.json exists, and a crashed or abandoned session
+	// leaves one behind forever — which would defer this migration permanently in a
+	// repository that has no session running at all. `ox session status` reported
+	// "Not recording" for exactly such a repository while this guard was blocking
+	// it, which is how the over-block was found.
+	if liveRecordingInProgress(repoRoot) {
 		return "a session is recording; rerun `ox doctor --fix` when it has stopped"
 	}
 
@@ -311,6 +371,27 @@ func (m *legacyMigration) Apply() (err error) {
 		}
 	}
 
+	// Stage the committed FOOTPRINT in the same commit: the sageox on-ramp and the
+	// lockfile the reconcile just updated.
+	//
+	// Without this the migration leaves the on-ramp untracked — the one file this
+	// whole design keeps in git, and the only SageOx artifact present on a machine
+	// where the CLI is not installed. Leaving it for the user to notice defeats the
+	// point, and leaving a modified lockfile beside it makes the "one commit"
+	// promise false.
+	for _, rel := range []string{
+		filepath.Join(".claude", "skills", skillmanager.CommittedOnRamp),
+		filepath.Join(".agents", "skills", skillmanager.CommittedOnRamp),
+		filepath.Join(".sageox", "skills.lock.json"),
+	} {
+		if _, statErr := os.Stat(filepath.Join(m.repoRoot, rel)); statErr != nil {
+			continue
+		}
+		if err := runMigrationGit(m.repoRoot, []string{"add", "--force", "--", rel}); err != nil {
+			return fmt.Errorf("stage committed footprint: %w", err)
+		}
+	}
+
 	body := "ox now materializes its skills and rules locally and gitignores them,\n" +
 		"so upgrading ox no longer changes any tracked file in this repository.\n\n" +
 		"Reverting this commit is safe: `ox doctor --fix` will redo it."
@@ -328,4 +409,24 @@ func runMigrationGit(dir string, args []string) error {
 		return fmt.Errorf("git %s: %w: %s", strings.Join(args[:1], " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// liveRecordingInProgress reports whether any recording in this repository still
+// has a live agent process behind it.
+//
+// A state whose parent process is gone is a leftover, not a session: blocking on
+// it would strand the migration forever. A state with no recorded PID is treated
+// as live, matching RecordingState.IsAgentAlive — when we cannot tell, the safe
+// answer is to stand down.
+func liveRecordingInProgress(repoRoot string) bool {
+	states, err := session.LoadAllRecordingStates(repoRoot)
+	if err != nil {
+		return false // cannot tell from state we cannot read; other guards still apply
+	}
+	for _, st := range states {
+		if st.IsAgentAlive() {
+			return true
+		}
+	}
+	return false
 }

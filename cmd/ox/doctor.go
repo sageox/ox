@@ -813,6 +813,15 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	// Skill target selection is project state, not a consequence of which AI
 	// coworker happens to be detected during this Doctor run.
 	integrationChecks = append(integrationChecks, checkClaudeSkills(opts.shouldFix(CheckSlugClaudeSkills)))
+	// The ox-managed inventory: keep ox's own files ignored, report any that are
+	// still tracked, and run the one-time untrack migration. Registering a check
+	// is not enough — doctor executes an explicit list, so a check that is only
+	// registered is indistinguishable from one that always passes.
+	integrationChecks = append(integrationChecks,
+		checkOxIgnoreRules(opts.shouldFix(CheckSlugOxIgnoreRules)),
+		checkOxFilesNotTracked(opts.shouldFix(CheckSlugOxFilesUntracked)),
+		checkLegacyOxFiles(opts.shouldFix(CheckSlugLegacyOxFiles)),
+	)
 	if detectAmp() {
 		integrationChecks = append(integrationChecks, checkAmpHooks(opts.shouldFix(CheckSlugAmpHooks)))
 	}
