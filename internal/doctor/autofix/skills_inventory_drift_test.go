@@ -2,11 +2,15 @@ package autofix
 
 import (
 	"context"
+	"github.com/sageox/ox/internal/version"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
 func driftRepo(t *testing.T) string {
@@ -93,5 +97,105 @@ func TestCheckSkillsInventoryDrift_ReportsAnUnreadableLockfileInsteadOfGuessing(
 	}
 	if !strings.Contains(res.Summary, "lockfile") {
 		t.Errorf("summary does not name the problem: %q", res.Summary)
+	}
+}
+
+// TestCheckSkillsInventoryDrift_MaterializesAndConverges is the daemon's job seen
+// end to end: a selected repository whose managed tree has drifted gets it back,
+// and a second tick reports nothing. A tick that reported work every time would
+// mean the daemon never settles.
+func TestCheckSkillsInventoryDrift_MaterializesAndConverges(t *testing.T) {
+	root := driftRepo(t)
+	targets := []adapterprotocol.SkillTarget{{
+		Key:        "claude-project",
+		Root:       ".claude/skills",
+		Format:     adapterprotocol.SkillFormatAgentSkillsV1,
+		Scope:      adapterprotocol.SkillScopeProject,
+		LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+	}}
+	if _, err := skillmanager.ReconcileUpdate(root, version.Version,
+		func(d skillmanager.DesiredSkills, ct []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return skillmanager.DefaultDesired(targets), targets, nil
+		}); err != nil {
+		t.Skipf("could not seed a selected repository: %v", err)
+	}
+
+	// Drift: the managed tree is deleted out from under the recorded state.
+	if err := os.RemoveAll(filepath.Join(root, ".claude", "skills")); err != nil {
+		t.Fatalf("simulate drift: %v", err)
+	}
+
+	res := checkSkillsInventoryDrift(context.Background(), root)
+	if res.Status != StatusFixed {
+		t.Fatalf("drift was not repaired: status=%v summary=%q", res.Status, res.Summary)
+	}
+	if entries, err := os.ReadDir(filepath.Join(root, ".claude", "skills")); err != nil || len(entries) == 0 {
+		t.Errorf("the managed tree was not restored: err=%v", err)
+	}
+
+	// And the ignore rule must exist, or the restored files are visible to git.
+	if _, err := os.Stat(filepath.Join(root, ".claude", ".gitignore")); err != nil {
+		t.Errorf("the daemon materialized skills with no ignore rule: %v", err)
+	}
+
+	if again := checkSkillsInventoryDrift(context.Background(), root); again.Status != StatusClean {
+		t.Errorf("a second tick still reported work: status=%v summary=%q", again.Status, again.Summary)
+	}
+}
+
+// TestCheckSkillsInventoryDrift_NeverRewritesATrackedManagedFile is the #732
+// boundary. The daemon runs with nobody at the keyboard, so finding a modified
+// tracked file in `git status` afterwards is exactly the intrusion that ruling
+// was about. The gate must veto the apply, not merely report afterwards.
+func TestCheckSkillsInventoryDrift_NeverRewritesATrackedManagedFile(t *testing.T) {
+	root := driftRepo(t)
+	targets := []adapterprotocol.SkillTarget{{
+		Key:        "claude-project",
+		Root:       ".claude/skills",
+		Format:     adapterprotocol.SkillFormatAgentSkillsV1,
+		Scope:      adapterprotocol.SkillScopeProject,
+		LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+	}}
+	if _, err := skillmanager.ReconcileUpdate(root, version.Version,
+		func(d skillmanager.DesiredSkills, ct []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return skillmanager.DefaultDesired(targets), targets, nil
+		}); err != nil {
+		t.Skipf("could not seed a selected repository: %v", err)
+	}
+
+	// Someone force-added a managed file, so it is now TRACKED.
+	skillsDir := filepath.Join(root, ".claude", "skills")
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil || len(entries) == 0 {
+		t.Skipf("no managed skills materialized: %v", err)
+	}
+	rel := filepath.Join(".claude", "skills", entries[0].Name(), "SKILL.md")
+	abs := filepath.Join(root, rel)
+	if _, err := os.Stat(abs); err != nil {
+		t.Skipf("unexpected skill layout: %v", err)
+	}
+	add := exec.Command("git", "add", "--force", "--", filepath.ToSlash(rel))
+	add.Dir = root
+	if out, err := add.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, out)
+	}
+	// Perturb it so a reconcile would want to rewrite it.
+	if err := os.WriteFile(abs, []byte("locally edited\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	before, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	res := checkSkillsInventoryDrift(context.Background(), root)
+
+	after, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatalf("read after: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("the daemon rewrote a TRACKED managed file with nobody at the keyboard (status=%v, %q)",
+			res.Status, res.Summary)
 	}
 }

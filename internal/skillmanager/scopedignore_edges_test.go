@@ -109,3 +109,64 @@ func TestScopedIgnoreFiles_CoversTheRuleNameWithNoTrailingHyphen(t *testing.T) {
 		}
 	}
 }
+
+// IsManagedOnlyScopedIgnore decides whether the migration may adopt an untracked
+// .gitignore into a commit automatically. Adopting one that also holds the user's
+// own rules would commit their bytes on their behalf, in a housekeeping commit
+// they never reviewed.
+
+func TestIsManagedOnlyScopedIgnore_AdoptsOnlyAPurelyGeneratedFile(t *testing.T) {
+	repo := t.TempDir()
+	claude := filepath.Join(repo, ".claude")
+	if err := os.MkdirAll(claude, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Exactly what ox generates, and nothing else.
+	if _, err := EnsureScopedIgnoreFiles(repo); err != nil {
+		t.Fatalf("EnsureScopedIgnoreFiles: %v", err)
+	}
+	if !IsManagedOnlyScopedIgnore(repo, ".claude/.gitignore") {
+		t.Error("a purely ox-generated ignore file was not recognized; the migration would never adopt it")
+	}
+
+	// The same valid block with a user rule beside it: those bytes are theirs.
+	p := filepath.Join(claude, ".gitignore")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if err := os.WriteFile(p, append([]byte("settings.local.json\n\n"), data...), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if IsManagedOnlyScopedIgnore(repo, ".claude/.gitignore") {
+		t.Error("ox would auto-commit a file containing the user's own rules")
+	}
+}
+
+func TestIsManagedOnlyScopedIgnore_RejectsPathsItDoesNotOwn(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".claude"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if _, err := EnsureScopedIgnoreFiles(repo); err != nil {
+		t.Fatalf("EnsureScopedIgnoreFiles: %v", err)
+	}
+	for _, rel := range []string{
+		".gitignore",                // the repository root file — never ox's
+		".claude/skills/.gitignore", // a deeper file the user may have written
+		".claude/settings.json",     // not an ignore file at all
+		"",                          // nothing
+	} {
+		if IsManagedOnlyScopedIgnore(repo, rel) {
+			t.Errorf("%q was claimed as an ox-managed ignore file", rel)
+		}
+	}
+}
+
+func TestIsManagedOnlyScopedIgnore_MissingFileIsNotAdoptable(t *testing.T) {
+	repo := t.TempDir()
+	if IsManagedOnlyScopedIgnore(repo, ".claude/.gitignore") {
+		t.Error("a file that does not exist was reported adoptable")
+	}
+}
