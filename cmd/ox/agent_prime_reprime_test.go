@@ -113,6 +113,16 @@ func TestPrimeTokenBudget_FullAndCompactStayUnderCeiling(t *testing.T) {
 	// read the old "Required/Automatic" wording as "always attribute" and fabricated
 	// provenance, and the imperative tone re-triggered prompt-injection suspicion
 	// every session. The follow-on prime-slimming work (S1) brings this back down.
+	// Raised 3600 -> 3700 (#880): XML-escaping the placeholders in the guidance
+	// blocks and the two command tables, so the document actually parses — a raw
+	// `<dr.md>` opened an element that never closed and cost every consumer the
+	// remainder of the output. Measured 3653 here, leaving ~47 of headroom, in
+	// line with the buffer the previous raises kept.
+	//
+	// Escaping is TEXT-only (&, <, >) via escapeXMLText, deliberately: quotes are
+	// legal in element content, and escaping them as well cost ~2x the tokens and
+	// turned `ox query "<q>"` into `ox query &quot;&lt;q&gt;&quot;` for the agent
+	// that has to read it.
 	// Raised 3340 -> 3600 (#664): the <commands> table gains verb-mode +
 	// DSL-mode `ox code` rows (defs/callers/callees/refs/log, plus type:pr /
 	// calls: / calledby: intents) so agents discover CodeDB's call-graph,
@@ -123,7 +133,7 @@ func TestPrimeTokenBudget_FullAndCompactStayUnderCeiling(t *testing.T) {
 	// prose moved to `ox code search --help` / .claude/rules/ox-code.md) to hold
 	// the real-usage cost down; this fixture measures the banner-off path.
 	const (
-		fullCeiling    = 3600
+		fullCeiling    = 3700
 		compactCeiling = 400
 	)
 
@@ -159,7 +169,12 @@ func TestRequiredFullPrimeDirectives_PresentInFullOutput(t *testing.T) {
 	xml := renderXML(t, out)
 
 	for _, d := range prime.RequiredFullPrimeDirectives() {
-		if !strings.Contains(xml, d.Marker) {
+		// The manifest marker is the RAW command text, because
+		// TestRequiredFullPrimeDirectives_ConsultFirstReachable matches it
+		// against the capability table. The emitted document escapes
+		// placeholders, so compare against the escaped form rather than
+		// weakening either side to a substring that survives both.
+		if !strings.Contains(xml, escapeXMLText(d.Marker)) {
 			t.Errorf("FULL prime output missing required directive %q (marker %q)", d.Name, d.Marker)
 		}
 	}
@@ -229,7 +244,12 @@ func assertFullRePrime(t *testing.T, xml string) {
 		t.Error("expected FULL prime output, but found mode=\"compact\"")
 	}
 	for _, d := range prime.RequiredFullPrimeDirectives() {
-		if !strings.Contains(xml, d.Marker) {
+		// The manifest marker is the RAW command text, because
+		// TestRequiredFullPrimeDirectives_ConsultFirstReachable matches it
+		// against the capability table. The emitted document escapes
+		// placeholders, so compare against the escaped form rather than
+		// weakening either side to a substring that survives both.
+		if !strings.Contains(xml, escapeXMLText(d.Marker)) {
 			t.Errorf("FULL prime output missing required directive %q (marker %q)", d.Name, d.Marker)
 		}
 	}

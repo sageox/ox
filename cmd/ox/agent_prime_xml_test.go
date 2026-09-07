@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/xml"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -543,11 +545,11 @@ func TestOutputAgentPrimeXML_ConsultFirst(t *testing.T) {
 		t.Error("consult-first must route recency cues to `ox session list`")
 	}
 	// conceptual cue routes to semantic query
-	if !strings.Contains(xml, `ox query "<question>"`) {
+	if !strings.Contains(xml, `ox query "&lt;question&gt;"`) {
 		t.Error("consult-first must route conceptual cues to `ox query`")
 	}
 	// code-provenance cue routes to code search
-	if !strings.Contains(xml, `ox code search "<pattern>"`) {
+	if !strings.Contains(xml, `ox code search "&lt;pattern&gt;"`) {
 		t.Error("consult-first must route code-provenance cues to `ox code search`")
 	}
 
@@ -1119,12 +1121,16 @@ func TestOutputAgentPrimeXML_SageoxOverheadBudget_Regression(t *testing.T) {
 	// not its mechanics. The rationale still lives on demand in `ox guide
 	// plan-enrichment`.
 	//
+	// Raised 2190 -> 2250 (#880): XML-escaping the guidance placeholders, so the
+	// prime document parses instead of dying at the first `<topic>`. Measured
+	// 2209 — a +19 floor, text-only escaping (&, <, >); escaping quotes too would
+	// have cost roughly double for no correctness gain in element content.
 	// Raised 2150 -> 2190 (#809): the static-tier <attribution> conditional/anti-
 	// fabrication gate plus the <instructions> self-verification pointer add ~32
 	// tokens to the minimal floor. Same #809 correctness rationale as the full-prime
 	// ceiling (see agent_prime_reprime_test.go); the prime-slimming follow-up (S1)
 	// brings it back down.
-	const sageoxOverheadCeiling = 2190
+	const sageoxOverheadCeiling = 2250
 	sageoxTokens := budget.Get(prime.BudgetSourceSageox)
 	if sageoxTokens > sageoxOverheadCeiling {
 		t.Errorf("SageOx overhead floor for minimal prime = %d tokens, exceeds ceiling %d.\n"+
@@ -1423,6 +1429,82 @@ func TestOutputAgentPrimeXML_KnowledgeBubbles_PendingCheckoutNote(t *testing.T) 
 			// the commands stay advertised in every state — they work unmounted
 			if !strings.Contains(xml, "ox kb describe") {
 				t.Errorf("ox kb describe must stay listed:\n%s", xml)
+			}
+		})
+	}
+}
+
+// TestOutputAgentPrimeXML_IsWellFormed parses the whole emitted document rather
+// than grepping it for substrings, which is the gap that let a raw `<pln_id>`
+// placeholder ship inside <attribution>: every other guidance line in this file
+// escapes its placeholders as &lt;...&gt; (see the `ox code defs &lt;name&gt;`
+// block and the session-score line), so a new line that forgets is invisible to
+// every Contains-style assertion while silently opening a tag that never closes.
+//
+// The attribution-configured case is the one that was broken, and it is gated —
+// a bare prime never reaches that branch — so the minimal shape alone would not
+// have caught it. Both shapes are covered for that reason.
+func TestOutputAgentPrimeXML_IsWellFormed(t *testing.T) {
+	tests := []struct {
+		name   string
+		output agentPrimeOutput
+	}{
+		{
+			name:   "minimal",
+			output: agentPrimeOutput{AgentID: "test-agent", Status: "fresh"},
+		},
+		{
+			// PR + commit attribution configured: unlocks the PR-header line,
+			// the plan footer and the contribution-score block.
+			name: "attribution configured",
+			output: agentPrimeOutput{
+				AgentID: "test-agent",
+				Status:  "fresh",
+				Attribution: config.ResolvedAttribution{
+					Commit: "Co-Authored-By: SageOx <ox@sageox.ai>",
+					PR:     "Co-Authored-By: SageOx <ox@sageox.ai>",
+				},
+			},
+		},
+		{
+			// PR-only: the header line is reachable through this branch too.
+			name: "pr attribution only",
+			output: agentPrimeOutput{
+				AgentID:     "test-agent",
+				Status:      "fresh",
+				Attribution: config.ResolvedAttribution{PR: "Co-Authored-By: SageOx <ox@sageox.ai>"},
+			},
+		},
+	}
+
+	// The fully-loaded shape is the one that matters most: it is the only case
+	// that renders the <commands> and <team-commands> tables, whose rows are
+	// DATA (guidance and team-authored) rather than literals written here — and
+	// data is where an angle bracket arrives without anyone reviewing it.
+	tests = append(tests, struct {
+		name   string
+		output agentPrimeOutput
+	}{name: "fully loaded", output: fullyLoadedPrimeFixture()})
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&buf)
+
+			if _, err := outputAgentPrimeXML(cmd, tc.output); err != nil {
+				t.Fatalf("outputAgentPrimeXML() error = %v", err)
+			}
+
+			dec := xml.NewDecoder(bytes.NewReader(buf.Bytes()))
+			for {
+				_, err := dec.Token()
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					t.Fatalf("prime output is not well-formed XML: %v\n\n%s", err, buf.String())
+				}
 			}
 		})
 	}

@@ -158,7 +158,11 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		// Rendered from the compile-time table (no per-session state) → stays in the
 		// static cache tier, byte-identical across sessions for a given binary.
 		for _, route := range consultRoutes() {
-			fmt.Fprintf(&sb, "- %s → %s\n", route.Cue, route.Command)
+			// escapeXML on BOTH: these are table data, not literals authored
+			// here, and the table legitimately contains placeholders like
+			// `--file <dr.md>`. Written raw, that opens an element that never
+			// closes and the whole <ox-prime> document stops parsing.
+			fmt.Fprintf(&sb, "- %s → %s\n", escapeXMLText(route.Cue), escapeXMLText(route.Command))
 		}
 		sb.WriteString("</consult-first>\n")
 
@@ -169,7 +173,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		// team rules matter, the manual publish workflow) moved to `ox guide
 		// team-rules` — read once, on demand, instead of paid on every prime.
 		sb.WriteString("\n<rule-promotion-guidance>\n")
-		sb.WriteString("When the user adds/edits a project-local rule (.claude/rules/*.md, CLAUDE.md, AGENTS.md, etc.) that looks team-wide rather than repo-specific, ask whether to also publish it to agents/rules/<name>.md in SageOx team context. Default to asking; never silent-publish; skip repo-specific rules. Run `ox guide team-rules` for the file format and workflow.\n")
+		sb.WriteString("When the user adds/edits a project-local rule (.claude/rules/*.md, CLAUDE.md, AGENTS.md, etc.) that looks team-wide rather than repo-specific, ask whether to also publish it to agents/rules/&lt;name&gt;.md in SageOx team context. Default to asking; never silent-publish; skip repo-specific rules. Run `ox guide team-rules` for the file format and workflow.\n")
 		sb.WriteString("Team rules reach every supported AI coding agent (Claude, Codex, Amp, etc.) for teammates running ox; project-local .claude/rules/ reaches only Claude users on this machine.\n")
 		sb.WriteString("</rule-promotion-guidance>\n")
 
@@ -230,7 +234,9 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 			sb.WriteString("| Intent | Command |\n")
 			sb.WriteString("|--------|---------|\n")
 			for _, ic := range output.Guidance.Commands {
-				fmt.Fprintf(&sb, "| %s | `%s` |\n", ic.Intent, ic.Command)
+				// Table DATA, same as the consult-first rows: guidance commands
+				// legitimately carry placeholders like `ox query "<your question>"`.
+				fmt.Fprintf(&sb, "| %s | `%s` |\n", escapeXMLText(ic.Intent), escapeXMLText(ic.Command))
 			}
 			sb.WriteString("</commands>\n")
 		}
@@ -260,7 +266,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		// that one gained the header line, agents kept emitting the trailer (session
 		// state, re-sent every prime) and never the header.
 		if output.Attribution.PR != "" || output.Attribution.Commit != "" {
-			sb.WriteString("\nPR header — `ox pr header` (`--plan <pln_id>` per saved plan) and paste as the FIRST lines of the PR body; keep the `SageOx-Session:` trailer last. `ox plan save --file <plan>` returns the `pln_` id.\n")
+			sb.WriteString("\nPR header — `ox pr header` (`--plan &lt;pln_id&gt;` per saved plan) and paste as the FIRST lines of the PR body; keep the `SageOx-Session:` trailer last. `ox plan save --file &lt;plan&gt;` returns the `pln_` id.\n")
 		}
 		if output.Attribution.Commit != "" {
 			sb.WriteString("\nSageOx contribution score (report only when commit attribution is configured; `none` is the correct, common answer when you worked independently of team context):\n")
@@ -353,7 +359,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 					fmt.Fprintf(&sb, "| %s | %s | %s |\n", cw.Name, desc, model)
 				}
 				bk.charge(prime.BudgetSourceTeam)
-				sb.WriteString("\nLoad: `ox coworker load <name>`\n")
+				sb.WriteString("\nLoad: `ox coworker load &lt;name&gt;`\n")
 				sb.WriteString("</coworkers>\n")
 				bk.charge(prime.BudgetSourceSageox)
 			}
@@ -369,7 +375,9 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 					if desc == "" {
 						desc = "(no description)"
 					}
-					fmt.Fprintf(&sb, "| %s | %s | %s |\n", tcmd.Name, tcmd.Trigger, desc)
+					// Team-authored data — the least trustworthy input on this
+					// path, and the one most likely to contain an angle bracket.
+					fmt.Fprintf(&sb, "| %s | %s | %s |\n", escapeXMLText(tcmd.Name), escapeXMLText(tcmd.Trigger), escapeXMLText(desc))
 				}
 				bk.charge(prime.BudgetSourceTeam)
 				sb.WriteString("</team-commands>\n")
@@ -428,7 +436,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		if output.Ledger != nil && output.Ledger.Exists {
 			sb.WriteString("\n<ledger>\n")
 			sb.WriteString("Repo-specific archive of prior AI coworker coding sessions.\n")
-			sb.WriteString("NOT team context. Use `ox session list` to browse, `ox session view <name> --text` to view.\n")
+			sb.WriteString("NOT team context. Use `ox session list` to browse, `ox session view &lt;name&gt; --text` to view.\n")
 			sb.WriteString("Do not read ledger files directly (LFS stubs).\n")
 			sb.WriteString("</ledger>\n")
 		}
@@ -485,7 +493,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 				fmt.Fprintf(&sb, "| %s | %s |\n", t.Slug, age)
 			}
 			sb.WriteString("\nList all: `ox teams`\n")
-			sb.WriteString("Read: `ox agent team-ctx <slug>`\n")
+			sb.WriteString("Read: `ox agent team-ctx &lt;slug&gt;`\n")
 			sb.WriteString("</other-teams>\n")
 		}
 
@@ -679,6 +687,23 @@ func escapeXML(s string) string {
 	return xmlEscaper.Replace(s)
 }
 
+// xmlTextEscaper escapes only what ELEMENT TEXT requires: &, < and >. Quotes
+// and apostrophes are legal in text content and are left alone — escaping them
+// there (as escapeXML does, correctly, for attribute values) costs tokens on
+// every prime and turns readable guidance like `ox query "<q>"` into
+// `ox query &quot;&lt;q&gt;&quot;` for the agent that has to read it.
+var xmlTextEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+)
+
+// escapeXMLText is escapeXML for element content. Use it for anything written
+// between tags; use escapeXML for attribute values.
+func escapeXMLText(s string) string {
+	return xmlTextEscaper.Replace(s)
+}
+
 // consultRoutes returns the cue→corpus routing rows for the <consult-first>
 // reminder, sourced from the capability table's floor entries. The table is the
 // single source of truth: the same floor cue set feeds the additive `ox-consult`
@@ -716,11 +741,11 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	sb.WriteString("A plan follows a creed: don't waste human attention, delight them, educate them visually and crisply.\n")
 	// Cross-agent mandate: planning should ALWAYS draw on SageOx conversation
 	// intelligence first, regardless of agent tier.
-	sb.WriteString("Before planning non-trivial work, consult SageOx conversation intelligence: `ox query \"<topic>\"` (discussions+sessions), `ox code search` (code+history) — plans ignoring recent team context get re-litigated.\n")
+	sb.WriteString("Before planning non-trivial work, consult SageOx conversation intelligence: `ox query \"&lt;topic&gt;\"` (discussions+sessions), `ox code search` (code+history) — plans ignoring recent team context get re-litigated.\n")
 	if prime.ClassifyAgentTier(agentType) == prime.TierBronze {
 		// lighter tier: surface the surface, don't promise real-time nudges.
-		sb.WriteString("When you produce a plan: run `ox plan enrich` (JSON) WHILE drafting. For material work author `plan.html`, save it canonically with `ox plan save --file plan.html`, then present it through `ox plan render --file plan.html --open` so ox injects team context without replacing the page. Verify with `ox plan lint <slug> [--strict]`. Browse prior plans: `ox plan list`. Run `ox guide plan-enrichment` for the full workflow.\n")
-		sb.WriteString("Structure it in two layers: a decision layer up top, then exactly one collapsed `<details>` \"Implementation notes\" appendix at the end for the implementer.\n")
+		sb.WriteString("When you produce a plan: run `ox plan enrich` (JSON) WHILE drafting. For material work author `plan.html`, save it canonically with `ox plan save --file plan.html`, then present it through `ox plan render --file plan.html --open` so ox injects team context without replacing the page. Verify with `ox plan lint &lt;slug&gt; [--strict]`. Browse prior plans: `ox plan list`. Run `ox guide plan-enrichment` for the full workflow.\n")
+		sb.WriteString("Structure it in two layers: a decision layer up top, then exactly one collapsed `&lt;details&gt;` \"Implementation notes\" appendix at the end for the implementer.\n")
 		sb.WriteString("</plan-enrichment-guidance>\n")
 		return
 	}
@@ -728,13 +753,13 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	// HTML + review loop are HUMAN-opt-in: the agent recommends, the human runs.
 	// The authored page leads; ox supplies canonical storage, enrichment chrome,
 	// and review without becoming a second renderer or source of truth.
-	sb.WriteString("For a material plan — or a mockup, review sheet, or evidence page, which belong in the ledger too — author a purpose-built `plan.html`, save it as the single record with `ox plan save --file plan.html --kind plan|mockup|review|evidence`, then present it through `ox plan render --file plan.html --open`; ox preserves the page, derives markdown, and injects team context (prior art, collisions, expert routing, knowledge bubbles, team memory), attribution, and review chrome. Never use legacy `--plan + --html`: competing sources can make review discard the authored page. Verify with `ox plan lint --file plan.html` BEFORE the first save, `ox plan lint <slug>` after. After presenting, proactively OFFER the live review loop: on the human's yes, launch `ox plan review <slug>` (they mark up in-browser, you address items live) — never auto-start without the yes. `ox plan list` flags open review items on resume.\n")
+	sb.WriteString("For a material plan — or a mockup, review sheet, or evidence page, which belong in the ledger too — author a purpose-built `plan.html`, save it as the single record with `ox plan save --file plan.html --kind plan|mockup|review|evidence`, then present it through `ox plan render --file plan.html --open`; ox preserves the page, derives markdown, and injects team context (prior art, collisions, expert routing, knowledge bubbles, team memory), attribution, and review chrome. Never use legacy `--plan + --html`: competing sources can make review discard the authored page. Verify with `ox plan lint --file plan.html` BEFORE the first save, `ox plan lint &lt;slug&gt;` after. After presenting, proactively OFFER the live review loop: on the human's yes, launch `ox plan review &lt;slug&gt;` (they mark up in-browser, you address items live) — never auto-start without the yes. `ox plan list` flags open review items on resume.\n")
 	// Two-audience structure: a plan is read by the ~10-min human approver AND
 	// the agent that implements it. Steer agents to layer, not average — detail
 	// relocated to the end, never inlined up top or deleted (see buildGuidance).
-	sb.WriteString("Structure the plan in two layers for its two readers: a minutiae-free decision layer up top (conclusion, tradeoffs, biggest risk, one hero diagram) that a human approves in ~10 min, then exactly one collapsed `<details>` \"Implementation notes\" appendix at the END for the implementing agent (exact files, edits, gotchas) — relocate detail there rather than inlining it up top or dropping it.\n")
+	sb.WriteString("Structure the plan in two layers for its two readers: a minutiae-free decision layer up top (conclusion, tradeoffs, biggest risk, one hero diagram) that a human approves in ~10 min, then exactly one collapsed `&lt;details&gt;` \"Implementation notes\" appendix at the END for the implementing agent (exact files, edits, gotchas) — relocate detail there rather than inlining it up top or dropping it.\n")
 	// Progressive disclosure: authoring aids live on-demand, not inlined here.
-	sb.WriteString("Use `ox viz suggest \"<what needs explaining>\"` for diagrams, charts, layouts, and mockups. The generic markdown renderer is only the quick path for small, low-stakes plans. Never hand-author a SageOx credit or your own footnote/ⓘ markers — ox chrome owns the footer credit and OX context markers; for the rest, use the `ox viz ox-annotation` pattern.\n")
+	sb.WriteString("Use `ox viz suggest \"&lt;what needs explaining&gt;\"` for diagrams, charts, layouts, and mockups. The generic markdown renderer is only the quick path for small, low-stakes plans. Never hand-author a SageOx credit or your own footnote/ⓘ markers — ox chrome owns the footer credit and OX context markers; for the rest, use the `ox viz ox-annotation` pattern.\n")
 	sb.WriteString("</plan-enrichment-guidance>\n")
 }
 
@@ -742,7 +767,7 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 // vocabulary, independent of whether it uses SageOx enriched plans.
 func writeVisualizationGuidance(sb *strings.Builder) {
 	sb.WriteString("\n<visualization-guidance>\n")
-	sb.WriteString("Before a material PR description, run `ox viz pr`: no visual if prose answers it; GitHub-safe Mermaid for a 2–5-node flow; rich only for a reviewer question Mermaid cannot answer. For a known question, run `ox viz pr --intent \"<question>\" --json`.\n")
+	sb.WriteString("Before a material PR description, run `ox viz pr`: no visual if prose answers it; GitHub-safe Mermaid for a 2–5-node flow; rich only for a reviewer question Mermaid cannot answer. For a known question, run `ox viz pr --intent \"&lt;question&gt;\" --json`.\n")
 	projectRoot := findGitRoot()
 	if config.PRVisualsRich(projectRoot) {
 		theme := config.PRVisualsTheme(projectRoot)
@@ -750,7 +775,7 @@ func writeVisualizationGuidance(sb *strings.Builder) {
 	} else {
 		sb.WriteString("Generated PNG/SVG PR images are disabled; the ox viz catalog and `ox viz suggest` remain available. For PR text, use GitHub-safe Mermaid only when it helps; enable image generation with `ox config set pr_visuals.rich on`.\n")
 	}
-	sb.WriteString("For architecture, flow, state, sequence, comparison, chronology, or quantitative shape, use `ox viz suggest \"<intent>\"`; the catalog serves plans, docs, PRs, reports, and design notes. Pull `ox viz <id>`; only `ox-render` recipes support `ox viz render`; check SVG/HTML with `ox viz lint`.\n")
+	sb.WriteString("For architecture, flow, state, sequence, comparison, chronology, or quantitative shape, use `ox viz suggest \"&lt;intent&gt;\"`; the catalog serves plans, docs, PRs, reports, and design notes. Pull `ox viz &lt;id&gt;`; only `ox-render` recipes support `ox viz render`; check SVG/HTML with `ox viz lint`.\n")
 	sb.WriteString("</visualization-guidance>\n")
 }
 
@@ -770,8 +795,8 @@ func writeDecisionRecordGuidance(sb *strings.Builder) {
 	}
 	sb.WriteString("\n<decision-record-guidance>\n")
 	sb.WriteString("This repo keeps Decision Records (ADRs/DDRs) — permanent team memory; consult before touching one.\n")
-	sb.WriteString("New DR: `ox decision enrich --topic \"<subject>\"` before drafting. Editing: `ox decision enrich --file <path>`. Both are zero-cost JSON: related decisions, numbering, ready-to-paste citations — re-run after editing (a citation you can't resolve should be deleted, not left dangling).\n")
-	sb.WriteString("Mid-implementation, before a nontrivial design choice: check for a standing constraint first — `ox code search \"<topic>\" --decisions`.\n")
+	sb.WriteString("New DR: `ox decision enrich --topic \"&lt;subject&gt;\"` before drafting. Editing: `ox decision enrich --file &lt;path&gt;`. Both are zero-cost JSON: related decisions, numbering, ready-to-paste citations — re-run after editing (a citation you can't resolve should be deleted, not left dangling).\n")
+	sb.WriteString("Mid-implementation, before a nontrivial design choice: check for a standing constraint first — `ox code search \"&lt;topic&gt;\" --decisions`.\n")
 	sb.WriteString("Paste citation comments VERBATIM, never hand-composed. Run `ox guide decision-records` for the credit and amendment rules.\n")
 	sb.WriteString("</decision-record-guidance>\n")
 }
@@ -797,7 +822,7 @@ func emitTeamRules(sb *strings.Builder, bk *bookkeeper, rules []teamdocs.TeamRul
 		}
 	}
 
-	sb.WriteString("\n<team-rules hint=\"agents/rules/<topic>.md — modular AI-coworker rules. See `ox guide team-rules`.\">\n")
+	sb.WriteString("\n<team-rules hint=\"agents/rules/&lt;topic&gt;.md — modular AI-coworker rules. See `ox guide team-rules`.\">\n")
 	bk.charge(prime.BudgetSourceSageox)
 
 	// always-tier rules: framing is ours, body+name+desc+path are team's
