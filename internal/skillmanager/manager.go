@@ -573,7 +573,19 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 					// visible and plausibly deliberate), and becomes harmful once they
 					// are gitignored — a preserved edit is then permanent silent drift
 					// that no teammate can see and ox can never repair.
-					if !migrationOwned && IsReservedName(skill.Name) {
+					// The reclaim keys on skill.Name — ox's OWN catalog name, which is
+					// always reserved — so on a case-insensitive filesystem (macOS APFS
+					// by default, and Windows) it would reclaim a directory that is not
+					// actually named a reserved name. A user skill at `OX-CLI-Plan` is
+					// the same directory on disk as `ox-cli-plan`, but it is theirs:
+					// IsReservedName("OX-CLI-Plan") is false, and git's `skills/ox-cli-*/`
+					// ignore glob is case-sensitive, so it was never even ignored. Without
+					// this check ox overwrites their SKILL.md with its own, reports no
+					// conflict, and the next commit ships ox's content from their tracked
+					// file. Falling through leaves migrationOwned false, which routes to
+					// the conflict-and-preserve branch below.
+					if !migrationOwned && IsReservedName(skill.Name) &&
+						!caseVariantDirOnDisk(repoRoot, skillRoot, skill.Name) {
 						migrationOwned = true
 					}
 					if !migrationOwned {
@@ -1453,6 +1465,34 @@ func desiredFileMode(path string) fs.FileMode {
 }
 
 func modeString(mode fs.FileMode) string { return fmt.Sprintf("%04o", mode.Perm()) }
+
+// caseVariantDirOnDisk reports whether the directory at skillRoot exists under a
+// name that differs from want only in case.
+//
+// It answers "is the thing I am about to reclaim actually named what I think it
+// is named?" — which os.Stat cannot, because a case-insensitive filesystem
+// resolves `ox-cli-plan` to an existing `OX-CLI-Plan`. Reading the parent
+// directory gives the real on-disk names.
+//
+// On a case-sensitive filesystem the two paths are genuinely different
+// directories, so this always returns false and costs one ReadDir.
+func caseVariantDirOnDisk(repoRoot, skillRoot, want string) bool {
+	parent := filepath.Dir(filepath.Join(repoRoot, filepath.FromSlash(skillRoot)))
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return false // nothing readable to collide with
+	}
+	var variant bool
+	for _, e := range entries {
+		if e.Name() == want {
+			return false // the exact reserved name exists; it is ox's
+		}
+		if strings.EqualFold(e.Name(), want) {
+			variant = true
+		}
+	}
+	return variant
+}
 
 func (plan *ReconcilePlan) addConflict(target, path, reason string) {
 	plan.Conflicts = append(plan.Conflicts, Conflict{TargetKey: target, Path: path, Reason: reason})

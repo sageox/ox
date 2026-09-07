@@ -1144,3 +1144,52 @@ func TestPlan_RefusesALockfileFromAFutureSchema(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(got), `"schema_version": 99`, "the older ox rewrote a newer lockfile")
 }
+
+// TestPlan_ReservedReclaimNeverEatsACaseVariantUserSkill.
+//
+// macOS (APFS default) and Windows are case-INSENSITIVE. A user skill directory
+// named `OX-CLI-Plan` is therefore the same directory on disk as ox's reserved
+// `ox-cli-plan` — but it is NOT a reserved name, so it is the user's.
+//
+// The reserved-namespace reclaim checks IsReservedName(skill.Name), which is ox's
+// own catalog name and always reserved. It never verifies what is actually on
+// disk. So ox resolves into the user's directory, decides "reserved means
+// reserved", and overwrites their SKILL.md with its own — no conflict, no
+// warning, no error.
+//
+// The damage compounds: git's ignore glob `skills/ox-cli-*/` IS case-sensitive,
+// so the user's directory was never ignored. Their file is tracked, now contains
+// ox's content, and the next commit ships it.
+func TestPlan_ReservedReclaimNeverEatsACaseVariantUserSkill(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+
+	// Confirm the filesystem is case-insensitive; on a case-sensitive one these are
+	// genuinely different paths and there is nothing to test.
+	probe := filepath.Join(repo, "CaseProbe")
+	require.NoError(t, os.WriteFile(probe, []byte("x"), 0o644))
+	if _, err := os.Stat(filepath.Join(repo, "caseprobe")); err != nil {
+		t.Skip("case-sensitive filesystem: the collision cannot occur here")
+	}
+	require.NoError(t, os.Remove(probe))
+
+	userDir := filepath.Join(repo, ".agents", "skills", "OX-CLI-Plan")
+	require.NoError(t, os.MkdirAll(userDir, 0o755))
+	userBody := []byte("---\nname: OX-CLI-Plan\ndescription: my own planning skill\n---\nMY WORK\n")
+	require.NoError(t, os.WriteFile(filepath.Join(userDir, "SKILL.md"), userBody, 0o644))
+
+	plan, err := Plan(repo, "1.0.0", DefaultDesired(targets), targets)
+	require.NoError(t, err)
+	require.NoError(t, Apply(plan))
+
+	got, err := os.ReadFile(filepath.Join(userDir, "SKILL.md"))
+	require.NoError(t, err)
+	// Compare a short marker rather than the whole file: ox's ox-cli-plan body is
+	// thousands of words, and dumping it makes the failure unreadable.
+	require.Contains(t, string(got), "MY WORK",
+		"ox overwrote a user-authored skill whose name differs from a reserved one only in case")
+	require.NotContains(t, string(got), "name: ox-cli-plan",
+		"the user's file now holds ox's reserved-skill content")
+	require.Len(t, plan.Conflicts, 1, "the collision was not reported as a conflict")
+}
