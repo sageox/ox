@@ -44,6 +44,19 @@ type knownReposDoc struct {
 // knownReposPath lives under DataDir, not CacheDir: on macOS a GUI process and a
 // terminal process resolve different cache roots, so a cache-based list would be
 // invisible to half the processes that write it.
+// knownReposLockWait bounds how long a writer waits for the registry lock.
+//
+// Deliberately NOT knownReposLockWait (100ms). That budget exists for the skills
+// APPLY lock, where a session start must never stall behind a doctor run doing
+// real filesystem work. The work under THIS lock is a small JSON read, one slice
+// append, and an atomic write — microseconds. At 100ms, several processes
+// starting together silently lost each other's records: eight concurrent
+// RememberRepo calls retained six. A dropped record means `ox upgrade` never
+// reaches that checkout, which is the entire reason the registry exists.
+//
+// Two seconds is still bounded, so a wedged lock can never hang a session.
+const knownReposLockWait = 2 * time.Second
+
 func knownReposPath() string {
 	dir := paths.DataDir()
 	if dir == "" {
@@ -60,7 +73,7 @@ func RememberRepo(repoRoot string) {
 	if path == "" || repoRoot == "" {
 		return
 	}
-	_ = fileutil.WithFileLockTimeout(context.Background(), path, nonBlockingLockWait, func() error {
+	_ = fileutil.WithFileLockTimeout(context.Background(), path, knownReposLockWait, func() error {
 		doc := loadKnownRepos(path)
 		now := time.Now().UTC()
 		for i, r := range doc.Repos {
@@ -89,7 +102,7 @@ func KnownRepos() []string {
 	}
 	var doc knownReposDoc
 	locked := false
-	_ = fileutil.WithFileLockTimeout(context.Background(), path, nonBlockingLockWait, func() error {
+	_ = fileutil.WithFileLockTimeout(context.Background(), path, knownReposLockWait, func() error {
 		locked = true
 		doc = loadKnownRepos(path)
 		return nil
@@ -110,7 +123,7 @@ func KnownRepos() []string {
 	if locked && len(kept) != len(doc.Repos) {
 		// Reacquire around the prune RMW: the first lock was intentionally released
 		// before filesystem stats so a slow mount cannot stall every session start.
-		_ = fileutil.WithFileLockTimeout(context.Background(), path, nonBlockingLockWait, func() error {
+		_ = fileutil.WithFileLockTimeout(context.Background(), path, knownReposLockWait, func() error {
 			current := loadKnownRepos(path)
 			var currentKept []knownRepo
 			for _, r := range current.Repos {
