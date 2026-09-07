@@ -422,7 +422,7 @@ func TestOutputAgentPrimeXML_FullOutput(t *testing.T) {
 		"</team-instructions>",
 		"<coworkers>",
 		"</coworkers>",
-		"<team-commands>",
+		"<team-commands",
 		"</team-commands>",
 		"<memory>",
 		"</memory>",
@@ -1168,6 +1168,7 @@ func TestOutputAgentPrimeXML_TeamRules_AlwaysAndIndexed(t *testing.T) {
 					Name:            "escalation-policy",
 					Description:     "Page humans on auth/payment issues.",
 					RelPath:         "escalation.md",
+					AbsPath:         "/team/agents/rules/escalation.md",
 					Visibility:      teamdocs.VisibilityAlways,
 					Body:            "**Why:** Some calls need humans.\n",
 					EstimatedTokens: 12,
@@ -1176,6 +1177,7 @@ func TestOutputAgentPrimeXML_TeamRules_AlwaysAndIndexed(t *testing.T) {
 					Name:        "postgres-uses-jsonb",
 					Description: "Prefer JSONB metadata columns.",
 					RelPath:     "backend/postgres.md",
+					AbsPath:     "/team/agents/rules/backend/postgres.md",
 					Visibility:  teamdocs.VisibilityIndexed,
 				},
 			},
@@ -1203,8 +1205,16 @@ func TestOutputAgentPrimeXML_TeamRules_AlwaysAndIndexed(t *testing.T) {
 	if !strings.Contains(xml, "postgres-uses-jsonb") {
 		t.Error("indexed rule name should appear in catalog")
 	}
-	if !strings.Contains(xml, "backend/postgres.md") {
-		t.Error("indexed rule path should appear so agent can read on demand")
+	// The path handed to the agent must be the ABSOLUTE one. The
+	// use-team-context rule ox installs says to Read "the absolute path shown in
+	// the prime output's <team-rules> block"; RelPath is relative to whichever
+	// rules root the file came from, and that root is never emitted, so a
+	// relative cell here sends the agent after a path it cannot resolve.
+	if !strings.Contains(xml, "| postgres-uses-jsonb | Prefer JSONB metadata columns. | /team/agents/rules/backend/postgres.md |") {
+		t.Error("indexed rule row should carry the absolute path the installed rule tells agents to Read")
+	}
+	if !strings.Contains(xml, `path="/team/agents/rules/escalation.md"`) {
+		t.Error("always-tier rule path attr should be absolute too")
 	}
 
 	// budget block surfaces always-tier cost
@@ -1219,6 +1229,95 @@ func TestOutputAgentPrimeXML_TeamRules_AlwaysAndIndexed(t *testing.T) {
 	}
 	if !strings.Contains(xml, `estimated_always_tokens="12"`) {
 		t.Error("budget should report estimated tokens for always-tier")
+	}
+}
+
+// TestOutputAgentPrimeXML_TeamCommands_PathNotSlashClaim verifies that the team
+// commands catalog gives the agent a path it can actually open, and does not
+// advertise a host slash command.
+//
+// Failure prevented: ox installs no slash command for team commands — the
+// catalog previously emitted name/trigger/description with no path at all,
+// while prime's text rendering told the agent to "invoke commands via slash
+// prefix (e.g., /deploy)". An agent following that runs a command that does not
+// exist, and has no path to fall back to.
+func TestOutputAgentPrimeXML_TeamCommands_PathNotSlashClaim(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	output := agentPrimeOutput{
+		AgentID: "agent-1",
+		Status:  "fresh",
+		TeamContext: &teamContextInfo{
+			TeamID:   "team-1",
+			TeamName: "TestTeam",
+			CoworkerCommands: []claude.Command{
+				{
+					Name:        "deploy",
+					Trigger:     "/deploy",
+					Description: "Ship to production.",
+					Path:        "/team/agents/commands/deploy.md",
+				},
+			},
+		},
+	}
+
+	if _, err := outputAgentPrimeXML(cmd, output); err != nil {
+		t.Fatalf("outputAgentPrimeXML: %v", err)
+	}
+
+	xml := buf.String()
+
+	if !strings.Contains(xml, "/team/agents/commands/deploy.md") {
+		t.Error("team command row must carry the path the agent should read")
+	}
+	if !strings.Contains(xml, "ox does NOT install these as host slash commands") {
+		t.Error("catalog must say ox did not install a slash command for these")
+	}
+}
+
+func TestOutputAgentPrimeXML_TeamRuleMetadataIsXMLEscaped(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	output := agentPrimeOutput{
+		AgentID: "agent-1",
+		Status:  "fresh",
+		TeamContext: &teamContextInfo{
+			TeamID:   "team-1",
+			TeamName: "TestTeam",
+			TeamRules: []teamdocs.TeamRule{
+				{
+					Name:        `ops & "security"`,
+					Description: `Read <before> changes`,
+					AbsPath:     `/team/A&B/"rules".md`,
+					Visibility:  teamdocs.VisibilityAlways,
+					Body:        "Rule body.\n",
+				},
+				{
+					Name:        "indexed & rule",
+					Description: "Read <on demand>",
+					AbsPath:     "/team/A&B/indexed.md",
+					Visibility:  teamdocs.VisibilityIndexed,
+				},
+			},
+		},
+	}
+
+	if _, err := outputAgentPrimeXML(cmd, output); err != nil {
+		t.Fatalf("outputAgentPrimeXML: %v", err)
+	}
+	xml := buf.String()
+	if !strings.Contains(xml, `name="ops &amp; &quot;security&quot;" visibility="always" description="Read &lt;before&gt; changes" path="/team/A&amp;B/&quot;rules&quot;.md"`) {
+		t.Errorf("always-rule attributes were not XML escaped: %s", xml)
+	}
+	if !strings.Contains(xml, `| indexed &amp; rule | Read &lt;on demand&gt; | /team/A&amp;B/indexed.md |`) {
+		t.Errorf("indexed-rule row was not XML escaped: %s", xml)
+	}
+	if !strings.Contains(xml, `| ops &amp; "security" | 0 |`) {
+		t.Errorf("always-rule budget row was not XML escaped: %s", xml)
 	}
 }
 

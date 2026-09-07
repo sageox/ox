@@ -117,11 +117,11 @@ func TestDiscoverAgents_SkipsUppercaseFiles(t *testing.T) {
 	}
 
 	// uppercase documentation files should be excluded
-	os.WriteFile(filepath.Join(agentsDir, "AGENTS.md"), []byte("# Agents Guide"), 0644)
-	os.WriteFile(filepath.Join(agentsDir, "README.md"), []byte("# README"), 0644)
+	_ = os.WriteFile(filepath.Join(agentsDir, "AGENTS.md"), []byte("# Agents Guide"), 0644)
+	_ = os.WriteFile(filepath.Join(agentsDir, "README.md"), []byte("# README"), 0644)
 
 	// lowercase agent file should be included
-	os.WriteFile(filepath.Join(agentsDir, "reviewer.md"), []byte("---\ndescription: Reviews code\n---\n# Reviewer\n"), 0644)
+	_ = os.WriteFile(filepath.Join(agentsDir, "reviewer.md"), []byte("---\ndescription: Reviews code\n---\n# Reviewer\n"), 0644)
 
 	agents, err := DiscoverAgents(tmpDir)
 	if err != nil {

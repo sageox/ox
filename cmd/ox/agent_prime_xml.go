@@ -366,9 +366,9 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 
 			// team commands: framing is ours, rows are team data
 			if len(output.TeamContext.CoworkerCommands) > 0 {
-				sb.WriteString("\n<team-commands>\n")
-				sb.WriteString("| Command | Trigger | Description |\n")
-				sb.WriteString("|---------|---------|-------------|\n")
+				sb.WriteString("\n<team-commands hint=\"ox does NOT install these as host slash commands — read the file at Path on demand\">\n")
+				sb.WriteString("| Command | Trigger | Description | Path |\n")
+				sb.WriteString("|---------|---------|-------------|------|\n")
 				bk.charge(prime.BudgetSourceSageox)
 				for _, tcmd := range output.TeamContext.CoworkerCommands {
 					desc := tcmd.Description
@@ -377,7 +377,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 					}
 					// Team-authored data — the least trustworthy input on this
 					// path, and the one most likely to contain an angle bracket.
-					fmt.Fprintf(&sb, "| %s | %s | %s |\n", escapeXMLText(tcmd.Name), escapeXMLText(tcmd.Trigger), escapeXMLText(desc))
+					fmt.Fprintf(&sb, "| %s | %s | %s | %s |\n", escapeXMLText(tcmd.Name), escapeXMLText(tcmd.Trigger), escapeXMLText(desc), escapeXMLText(tcmd.Path))
 				}
 				bk.charge(prime.BudgetSourceTeam)
 				sb.WriteString("</team-commands>\n")
@@ -829,15 +829,15 @@ func emitTeamRules(sb *strings.Builder, bk *bookkeeper, rules []teamdocs.TeamRul
 	for _, r := range alwaysRules {
 		sb.WriteString("\n<rule")
 		bk.charge(prime.BudgetSourceSageox)
-		fmt.Fprintf(sb, " name=%q", r.Name)
+		fmt.Fprintf(sb, ` name="%s"`, escapeXML(r.Name))
 		bk.charge(prime.BudgetSourceTeam)
 		sb.WriteString(" visibility=\"always\"")
 		bk.charge(prime.BudgetSourceSageox)
 		if r.Description != "" {
-			fmt.Fprintf(sb, " description=%q", r.Description)
+			fmt.Fprintf(sb, ` description="%s"`, escapeXML(r.Description))
 			bk.charge(prime.BudgetSourceTeam)
 		}
-		fmt.Fprintf(sb, " path=%q", r.RelPath)
+		fmt.Fprintf(sb, ` path="%s"`, escapeXML(r.AbsPath))
 		bk.charge(prime.BudgetSourceTeam)
 		sb.WriteString(">\n")
 		bk.charge(prime.BudgetSourceSageox)
@@ -852,7 +852,7 @@ func emitTeamRules(sb *strings.Builder, bk *bookkeeper, rules []teamdocs.TeamRul
 
 	// indexed-tier rules: framing/headers ours, rows are team's
 	if len(indexedRules) > 0 {
-		sb.WriteString("\n<indexed hint=\"read on demand by path\">\n")
+		sb.WriteString("\n<indexed hint=\"read on demand with the Read tool at the absolute Path below\">\n")
 		sb.WriteString("| Name | Description | Path |\n")
 		sb.WriteString("|------|-------------|------|\n")
 		bk.charge(prime.BudgetSourceSageox)
@@ -861,7 +861,13 @@ func emitTeamRules(sb *strings.Builder, bk *bookkeeper, rules []teamdocs.TeamRul
 			if desc == "" {
 				desc = "(no description)"
 			}
-			fmt.Fprintf(sb, "| %s | %s | %s |\n", r.Name, desc, r.RelPath)
+			// AbsPath, not RelPath: the use-team-context rule ox installs tells
+			// the agent to Read "the absolute path shown in the prime output's
+			// <team-rules> block". RelPath is relative to whichever rules root
+			// the file was found under (agents/rules or coworkers/rules), and
+			// that root is never emitted — so a relative path here is not
+			// resolvable by the agent being instructed to open it.
+			fmt.Fprintf(sb, "| %s | %s | %s |\n", escapeXMLText(r.Name), escapeXMLText(desc), escapeXMLText(r.AbsPath))
 		}
 		bk.charge(prime.BudgetSourceTeam)
 		sb.WriteString("</indexed>\n")
@@ -881,7 +887,7 @@ func emitTeamRules(sb *strings.Builder, bk *bookkeeper, rules []teamdocs.TeamRul
 		sb.WriteString("| Rule | ~Tokens |\n")
 		sb.WriteString("|------|---------|\n")
 		for _, r := range alwaysRules {
-			fmt.Fprintf(sb, "| %s | %d |\n", r.Name, r.EstimatedTokens)
+			fmt.Fprintf(sb, "| %s | %d |\n", escapeXMLText(r.Name), r.EstimatedTokens)
 		}
 		sb.WriteString("</team-rules-budget>\n")
 		bk.charge(prime.BudgetSourceSageox)

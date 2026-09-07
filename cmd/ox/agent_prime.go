@@ -851,7 +851,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	if output.Session != nil && output.Session.Recording {
 		notifParts = append(notifParts, "Session recording: active — discussions may be shared with teammates")
 	} else {
-		notifParts = append(notifParts, "Session recording: available (/ox-session-start)")
+		notifParts = append(notifParts, "Session recording: available (ox agent session start)")
 	}
 	if len(notifParts) > 0 {
 		output.UserNotification = "This session is enhanced by team context via SageOx. " + strings.Join(notifParts, ". ") + "."
@@ -869,7 +869,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// when a subagent's parent was paused; without this, the message lives only
 	// in the nested Session struct and the top-level prime output derives its
 	// "Session recording" hint from Session.Recording alone, so the agent ends
-	// up advertising "Session recording: available (/ox-session-start)" while
+	// up advertising "Session recording: available (ox agent session start)" while
 	// the recording was just intentionally skipped. Lift the message into the
 	// canonical UserNotices channel so both --json and --text consumers see it.
 	if sessionStat != nil && !sessionStat.Recording && sessionStat.UserNotification != "" {
@@ -1243,7 +1243,7 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 		}
 	}
 
-	// respect explicit session stop — user ran /ox-session-stop, don't auto-restart
+	// respect explicit session stop — user ran ox agent session stop, don't auto-restart
 	if session.ConsumeExplicitStop(projectRoot, agentID) {
 		return nil
 	}
@@ -1411,7 +1411,7 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 	}
 
 	// build user notification message
-	notificationMsg := "Recording session. Discussions may be shared with your team. Run /ox-session-stop to end recording."
+	notificationMsg := "Recording session. Discussions may be shared with your team. Run ox agent session stop to end recording."
 	if resolved.IsAuto() {
 		notificationMsg += " (Tip: Disable auto-start with 'ox config set session_recording manual')"
 	}
@@ -1595,7 +1595,7 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 	if output.Session != nil && output.Session.Recording {
 		fmt.Fprintf(cmd.OutOrStdout(), "- Session recording: active\n")
 	} else {
-		fmt.Fprintln(cmd.OutOrStdout(), "- Session recording: available (`/ox-session-start`)")
+		fmt.Fprintln(cmd.OutOrStdout(), "- Session recording: available (`ox agent session start`)")
 	}
 
 	// quick reference: intent-to-command lookup
@@ -1842,17 +1842,20 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 			fmt.Fprintln(cmd.OutOrStdout())
 			fmt.Fprintln(cmd.OutOrStdout(), "## Team Commands")
 			fmt.Fprintln(cmd.OutOrStdout())
-			fmt.Fprintln(cmd.OutOrStdout(), "| Command | Trigger | Description |")
-			fmt.Fprintln(cmd.OutOrStdout(), "|---------|---------|-------------|")
+			fmt.Fprintln(cmd.OutOrStdout(), "| Command | Trigger | Description | Path |")
+			fmt.Fprintln(cmd.OutOrStdout(), "|---------|---------|-------------|------|")
 			for _, tcmd := range output.TeamContext.CoworkerCommands {
 				desc := tcmd.Description
 				if desc == "" {
 					desc = "(no description)"
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "| %s | %s | %s |\n", tcmd.Name, tcmd.Trigger, desc)
+				fmt.Fprintf(cmd.OutOrStdout(), "| %s | %s | %s | %s |\n", tcmd.Name, tcmd.Trigger, desc, tcmd.Path)
 			}
 			fmt.Fprintln(cmd.OutOrStdout())
-			fmt.Fprintln(cmd.OutOrStdout(), "Invoke commands via slash prefix (e.g., /deploy).")
+			// ox installs no host slash command for team commands, so telling the
+			// agent to "invoke /deploy" sent it after something that does not
+			// exist. The path is the only thing it can actually act on.
+			fmt.Fprintln(cmd.OutOrStdout(), "ox does not install these as slash commands — read the file at Path on demand.")
 		}
 
 		// emit team docs catalog if any indexed docs exist
@@ -2056,8 +2059,9 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 		info.Escalation = "capabilities/team/index.md"
 	}
 
-	// discover coworker customizations from coworkers/
-	// agents in coworkers/agents/, commands in coworkers/commands/
+	// discover coworker customizations
+	// profiles in agents/profiles/, commands in agents/commands/
+	// (legacy coworkers/agents/ and coworkers/commands/ are still read)
 	customizations, err := claude.DiscoverAll(tc.Path)
 	if err == nil && customizations != nil && customizations.HasAnyCustomizations() {
 		// populate instruction file paths
@@ -2070,7 +2074,7 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 			}
 		}
 
-		// populate discovered agents/commands
+		// populate discovered coworker profiles and team commands
 		info.Coworkers = customizations.Agents
 		info.CoworkerCommands = customizations.Commands
 
