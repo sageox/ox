@@ -170,3 +170,48 @@ func TestDiscoverAll_ProfileIndexAndAgentsMDFromCanonicalRoot(t *testing.T) {
 		t.Errorf("expected 1 discovered profile, got %d", len(tc.Agents))
 	}
 }
+
+// blockDirRead makes path exist but be unreadable as a directory by making it a
+// regular FILE. Deliberately not os.Chmod: chmod's semantics differ by platform
+// (Windows maps only the read-only bit), so a permission-based fixture would
+// silently no-op there and this test would pass while exercising nothing — the
+// fail-open shape recorded in bead ox-avjb. A file where a directory is
+// expected fails identically everywhere.
+func blockDirRead(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// TestDiscoverAgents_UnreadableRootIsReportedNotSwallowed.
+//
+// Failure prevented: a team context whose profiles root cannot be read looking
+// identical to one that simply has no profiles. Both would render an empty
+// coworker list at prime, and the coworker would conclude their team has no
+// experts rather than that something is wrong. A missing directory is a normal
+// state and stays nil/nil; an unreadable one is a fault and must surface.
+func TestDiscoverAgents_UnreadableRootIsReportedNotSwallowed(t *testing.T) {
+	team := t.TempDir()
+	blockDirRead(t, filepath.Join(team, "agents", "profiles"))
+
+	_, err := DiscoverAgents(team)
+	if err == nil {
+		t.Fatal("an unreadable profiles root must return an error, not an empty list")
+	}
+}
+
+// TestDiscoverTeamCommands_UnreadableRootIsReportedNotSwallowed is the same
+// contract for the commands root.
+func TestDiscoverTeamCommands_UnreadableRootIsReportedNotSwallowed(t *testing.T) {
+	team := t.TempDir()
+	blockDirRead(t, filepath.Join(team, "agents", "commands"))
+
+	_, err := DiscoverTeamCommands(team)
+	if err == nil {
+		t.Fatal("an unreadable commands root must return an error, not an empty list")
+	}
+}
