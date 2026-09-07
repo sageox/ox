@@ -975,3 +975,83 @@ func TestInstalledSource_UnreadableLockfileReportsUnselected(t *testing.T) {
 	require.Empty(t, revision)
 	require.Empty(t, oxVersion)
 }
+
+// The skill lockfile is COMMITTED. Anyone who can land a pull request can shape
+// its `targets[].root`, and ox writes files into that path on the next reconcile —
+// which happens automatically at session start. So target normalization is a trust
+// boundary, not a formatting step, and every rejection below is a path ox must
+// refuse to write into.
+//
+// Two of them are worse than "files in the wrong place": `.git/hooks` is
+// executable-on-git-operation, so accepting it turns a merged pull request into
+// arbitrary code execution on every teammate's machine, and `.sageox` is where ox
+// keeps the lockfile itself, so accepting it lets a target rewrite the state that
+// decides what gets written next.
+func TestNormalizeTarget_RefusesEveryRootThatEscapesOrIsReserved(t *testing.T) {
+	repo := t.TempDir()
+	base := adapterprotocol.SkillTarget{
+		Key:        "k",
+		Format:     adapterprotocol.SkillFormatAgentSkillsV1,
+		Scope:      adapterprotocol.SkillScopeProject,
+		LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+	}
+	with := func(mutate func(*adapterprotocol.SkillTarget)) adapterprotocol.SkillTarget {
+		tgt := base
+		mutate(&tgt)
+		return tgt
+	}
+
+	refuse := map[string]adapterprotocol.SkillTarget{
+		"parent traversal":            with(func(x *adapterprotocol.SkillTarget) { x.Root = "../outside/skills" }),
+		"traversal after a real dir":  with(func(x *adapterprotocol.SkillTarget) { x.Root = ".claude/../../etc/skills" }),
+		"absolute path":               with(func(x *adapterprotocol.SkillTarget) { x.Root = "/etc/skills" }),
+		"repository root itself":      with(func(x *adapterprotocol.SkillTarget) { x.Root = "." }),
+		"root normalizing to dot":     with(func(x *adapterprotocol.SkillTarget) { x.Root = ".claude/.." }),
+		"the git directory":           with(func(x *adapterprotocol.SkillTarget) { x.Root = ".git/hooks" }),
+		"ox's own state directory":    with(func(x *adapterprotocol.SkillTarget) { x.Root = ".sageox/cache" }),
+		"missing key":                 with(func(x *adapterprotocol.SkillTarget) { x.Key = ""; x.Root = ".claude/skills" }),
+		"missing format":              with(func(x *adapterprotocol.SkillTarget) { x.Format = ""; x.Root = ".claude/skills" }),
+		"a scope ox does not support": with(func(x *adapterprotocol.SkillTarget) { x.Scope = "user"; x.Root = ".claude/skills" }),
+		"a link policy that follows":  with(func(x *adapterprotocol.SkillTarget) { x.LinkPolicy = "follow"; x.Root = ".claude/skills" }),
+	}
+	for name, tgt := range refuse {
+		if _, err := CanonicalizeTargets(repo, []adapterprotocol.SkillTarget{tgt}); err == nil {
+			t.Errorf("%s: accepted root %q — ox would write skill files there", name, tgt.Root)
+		}
+	}
+
+	// The legitimate shape still passes, and is normalized to slash form so the
+	// lockfile is byte-identical across platforms.
+	ok, err := CanonicalizeTargets(repo, []adapterprotocol.SkillTarget{
+		with(func(x *adapterprotocol.SkillTarget) { x.Root = filepath.Join(".claude", "skills") }),
+	})
+	require.NoError(t, err)
+	require.Len(t, ok, 1)
+	require.Equal(t, ".claude/skills", ok[0].Root, "root must be stored slash-separated")
+}
+
+// TestPlan_RefusesALockfileWhoseTargetEscapesTheRepository closes the loop: the
+// guard has to hold when the bad target arrives the way it actually would — read
+// back out of a committed lockfile — not only when passed directly to the
+// normalizer.
+func TestPlan_RefusesALockfileWhoseTargetEscapesTheRepository(t *testing.T) {
+	repo := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Dir(LockPath(repo)), 0o755))
+	hostile := `{
+  "schema_version": 2,
+  "desired": {"bundles": ["core"], "targets": ["evil"]},
+  "targets": [{"key": "evil", "root": "../outside/skills", "format": "agent-skills/v1", "scope": "project", "link_policy": "reject"}]
+}`
+	require.NoError(t, os.WriteFile(LockPath(repo), []byte(hostile), 0o644))
+
+	outside := filepath.Join(filepath.Dir(repo), "outside")
+
+	desired, targets, err := LoadDesired(repo)
+	if err == nil {
+		_, err = Plan(repo, "1.0.0", desired, targets)
+	}
+	require.Error(t, err, "a lockfile pointing outside the repository was accepted")
+
+	_, statErr := os.Stat(outside)
+	require.True(t, os.IsNotExist(statErr), "ox created a directory outside the repository at %s", outside)
+}

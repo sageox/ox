@@ -2,12 +2,13 @@ package autofix
 
 import (
 	"context"
-	"github.com/sageox/ox/internal/version"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sageox/ox/internal/version"
 
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/pkg/adapterprotocol"
@@ -197,5 +198,38 @@ func TestCheckSkillsInventoryDrift_NeverRewritesATrackedManagedFile(t *testing.T
 	if string(after) != string(before) {
 		t.Errorf("the daemon rewrote a TRACKED managed file with nobody at the keyboard (status=%v, %q)",
 			res.Status, res.Summary)
+	}
+}
+
+// TestCheckSkillsInventoryDrift_NonGitWorkspaceStillGetsItsSkills: the
+// tracked-path gate must not turn "not a git repository" into a veto. Managed
+// workspaces without git are a normal state, and vetoing there would stop the
+// daemon reconciling them at all.
+func TestCheckSkillsInventoryDrift_NonGitWorkspaceStillGetsItsSkills(t *testing.T) {
+	root := t.TempDir() // deliberately NOT a git repository
+	targets := []adapterprotocol.SkillTarget{{
+		Key:        "claude-project",
+		Root:       ".claude/skills",
+		Format:     adapterprotocol.SkillFormatAgentSkillsV1,
+		Scope:      adapterprotocol.SkillScopeProject,
+		LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+	}}
+	if _, err := skillmanager.ReconcileUpdate(root, version.Version,
+		func(d skillmanager.DesiredSkills, ct []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return skillmanager.DefaultDesired(targets), targets, nil
+		}); err != nil {
+		t.Skipf("could not seed: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, ".claude", "skills")); err != nil {
+		t.Fatalf("simulate drift: %v", err)
+	}
+
+	res := checkSkillsInventoryDrift(context.Background(), root)
+
+	if res.Status != StatusFixed {
+		t.Errorf("a non-git workspace was not reconciled: status=%v summary=%q", res.Status, res.Summary)
+	}
+	if entries, err := os.ReadDir(filepath.Join(root, ".claude", "skills")); err != nil || len(entries) == 0 {
+		t.Errorf("skills were not restored in a non-git workspace: %v", err)
 	}
 }

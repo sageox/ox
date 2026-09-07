@@ -233,3 +233,88 @@ func TestIsManagedOnly_RequiresNothingOutsideTheMarkers(t *testing.T) {
 		t.Error("a block for different entries was accepted as managed-only")
 	}
 }
+
+// TestEnsureBlock_CRLFFileConvergesInsteadOfRewritingForever.
+//
+// On Windows with core.autocrlf=true every checkout rewrites the committed
+// .gitignore with CRLF line endings. If EnsureBlock compared against its own LF
+// rendering and rewrote on every mismatch, prime would modify a TRACKED file at
+// every session start on those machines — permanent, invisible churn in exactly
+// the file this design added to stop churn.
+func TestEnsureBlock_CRLFFileConvergesInsteadOfRewritingForever(t *testing.T) {
+	entries := []string{"skills/ox-cli-*/", "rules/ox-cli.md"}
+	p := writeIgnore(t, "mine.txt\n")
+	if _, _, err := EnsureBlock(p, entries); err != nil {
+		t.Fatalf("EnsureBlock: %v", err)
+	}
+	lf, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	// Simulate the checkout: every newline becomes CRLF.
+	crlf := strings.ReplaceAll(string(lf), "\n", "\r\n")
+	if err := os.WriteFile(p, []byte(crlf), 0o644); err != nil {
+		t.Fatalf("write crlf: %v", err)
+	}
+
+	first, _, err := EnsureBlock(p, entries)
+	if err != nil {
+		t.Fatalf("EnsureBlock on CRLF: %v", err)
+	}
+	afterFirst, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	// Whatever it decided the first time, a SECOND call must be a no-op. A writer
+	// that keeps disagreeing with its own output never settles.
+	second, _, err := EnsureBlock(p, entries)
+	if err != nil {
+		t.Fatalf("EnsureBlock second: %v", err)
+	}
+	afterSecond, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if second {
+		t.Errorf("the writer still reported a change on the second pass after a CRLF checkout (first=%v); "+
+			"every session start would modify a tracked file", first)
+	}
+	if string(afterFirst) != string(afterSecond) {
+		t.Error("the file changed again on the second pass; the writer does not converge")
+	}
+	if !strings.Contains(string(afterSecond), "mine.txt") {
+		t.Errorf("the user's rule was lost through the CRLF round trip:\n%q", afterSecond)
+	}
+}
+
+// TestEnsureBlock_TwoBlocksFromABadMergeStillConverge.
+//
+// A merge that takes both sides of a conflicted .gitignore leaves two complete ox
+// blocks. git honors duplicate ignore rules, so nothing looks broken — but the
+// writer must still settle rather than fight itself forever, and it must never
+// delete the user's rules while sorting it out.
+func TestEnsureBlock_TwoBlocksFromABadMergeStillConverge(t *testing.T) {
+	entries := []string{"skills/ox-cli-*/"}
+	one := renderBlock(entries)
+	p := writeIgnore(t, "mine.txt\n\n"+one+"\n"+one)
+
+	if _, _, err := EnsureBlock(p, entries); err != nil {
+		t.Fatalf("EnsureBlock: %v", err)
+	}
+	changed, _, err := EnsureBlock(p, entries)
+	if err != nil {
+		t.Fatalf("EnsureBlock second: %v", err)
+	}
+	if changed {
+		t.Error("the writer never settles on a file carrying two ox blocks")
+	}
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(got), "mine.txt") {
+		t.Errorf("the user's rule was lost while reconciling duplicate blocks:\n%s", got)
+	}
+}

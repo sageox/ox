@@ -167,9 +167,12 @@ func hasLiveRecording(repoPath string) (bool, error) {
 
 // trackedPlanPaths returns the planned paths that git currently tracks.
 //
-// A single `git ls-files` over the planned paths answers it; an error is treated
-// as "nothing tracked" because a repository without git is a normal state for this
-// check and must not turn into a reported fault.
+// A single `git ls-files` over the planned paths answers it. A FAILED lookup is
+// NOT "nothing tracked": returning an empty list on error is what let the apply
+// proceed and rewrite the very tracked file this gate exists to protect. Only the
+// specific case of "this is not a git repository" — a normal state for a managed
+// workspace — reads as nothing tracked; everything else returns errTrackedLookup
+// and vetoes the apply.
 func trackedPlanPaths(ctx context.Context, repoPath string, plan *skillmanager.ReconcilePlan) ([]string, error) {
 	var candidates []string
 	for _, a := range plan.Creates {
