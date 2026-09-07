@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/skillmanager"
@@ -170,5 +171,36 @@ func TestReconcileSkillInventoryIfStale_ToleratesMalformedLockfile(t *testing.T)
 
 	if changed := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
 		t.Errorf("malformed lockfile should yield no work, got changed=%d", changed)
+	}
+}
+
+// TestReconcileSkillInventoryIfStale_SelfHealsAMissingIgnoreRule covers the state
+// a build that predated the ignore invariant left behind in real checkouts:
+// reserved-prefix skills materialized on disk with NO rule hiding them.
+//
+// Such a repository is stuck without this. The staleness compare short-circuits
+// because the recorded revision already matches, so Apply — where the ignore rule
+// is written — is never reached, and nothing on the session path would ever
+// notice. The files sit untracked and unignored, one `git add -A` from being
+// committed into the customer's history.
+func TestReconcileSkillInventoryIfStale_SelfHealsAMissingIgnoreRule(t *testing.T) {
+	repoRoot, _ := installSkillsForTest(t)
+
+	// Reproduce the damaged state: skills present and current, ignore rule gone.
+	for _, dir := range []string{".claude", ".agents", ".factory"} {
+		_ = os.Remove(filepath.Join(repoRoot, dir, ".gitignore"))
+	}
+
+	changed := reconcileSkillInventoryIfStale(repoRoot)
+	if changed != 0 {
+		t.Errorf("healing the ignore rule must not require a reconcile; got changed=%d", changed)
+	}
+
+	data, err := os.ReadFile(filepath.Join(repoRoot, ".claude", ".gitignore"))
+	if err != nil {
+		t.Fatalf("prime did not restore the ignore rule; the repository stays one `git add -A` from committing vendor files: %v", err)
+	}
+	if !strings.Contains(string(data), "skills/ox-cli-*/") {
+		t.Errorf("ignore rule restored without the skills glob:\n%s", data)
 	}
 }
