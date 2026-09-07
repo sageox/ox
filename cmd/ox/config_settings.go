@@ -191,7 +191,7 @@ Override per-invocation with --html, --text, or --json flags.`,
   off — Never publish a placeholder. The /c/ link stays unresolvable until
         session stop.
 
-Aborting a session (/ox-session-abort) deletes any published placeholder from
+Aborting a session (ox agent session abort --force) deletes any published placeholder from
 the ledger.`,
 		ValidValues: config.ValidSessionDraftModes,
 		Default:     config.SessionDraftOn,

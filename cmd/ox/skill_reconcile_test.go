@@ -10,7 +10,7 @@ import (
 )
 
 func TestCleanupLegacyClaudeCommandsPreservesUserFiles(t *testing.T) {
-	repo := t.TempDir()
+	repo := retireCommandsRepo(t)
 	commands := filepath.Join(repo, ".claude", "commands")
 	if err := os.MkdirAll(commands, 0o755); err != nil {
 		t.Fatal(err)

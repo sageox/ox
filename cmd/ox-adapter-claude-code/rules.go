@@ -31,6 +31,11 @@ import (
 // (<team-context>/agents/rules/). Team rules stay where the team writes them.
 const sageoxRulesNamespace = "sageox"
 
+const (
+	oxRuleDescription          = "SageOx behavioral guidance for AI coworkers"
+	teamContextRuleDescription = "How to discover and use team-context rules and knowledge from the SageOx ox CLI"
+)
+
 func handleInstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.InstallRulesResponse, error) {
 	rm := rules.NewClaudeCodeRulesManager()
 
@@ -51,18 +56,15 @@ func handleInstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.Install
 	// for the same frontmatter-aware staleness reasoning.
 	adapterstamp.RemoveTamperedRules(rulesDir, ruleFiles)
 
-	// Retire the pre-0.15.0 rule surface. Doing this only on uninstall would mean
-	// it never happens: an existing project installs once and reconciles forever
-	// after, so it would keep both the legacy .claude/rules/ox.md and the nested
-	// sageox/ tree alongside the new flat ox-cli-* files — two rule sets saying
-	// overlapping things, and a nested directory no single ignore line can cover.
-	// Only ox-stamped files are removed; anything the user wrote or edited stays.
-	retireLegacyRules(rulesDir)
-
 	written, err := rm.Install(context.Background(), p.RepoRoot, ruleFiles, true)
 	if err != nil {
 		return nil, err
 	}
+
+	// Retire the pre-0.15.0 rule surface only after its replacement is safely
+	// installed. Existing projects otherwise risk losing their only guidance if
+	// the current install fails partway through.
+	retireLegacyRules(rulesDir)
 
 	// agentx returns names relative to the rules dir (ox.md,
 	// sageox/use-team-context.md). The FilesWritten contract is
@@ -114,12 +116,14 @@ func handleUninstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.Unins
 	}
 
 	rulesDir := rm.RulesDir(p.RepoRoot)
+	removedCurrent := adapterstamp.RemoveVerifiedRules(rulesDir, oxRuleFiles(p.Version))
 	removedNS, err := uninstallNamespaceFiles(rulesDir)
 	if err != nil {
 		return nil, err
 	}
 
-	removed := append(removedTop, removedNS...)
+	removed := append(removedTop, removedCurrent...)
+	removed = append(removed, removedNS...)
 	return &adapterprotocol.UninstallRulesResponse{
 		Uninstalled:  len(removed) > 0,
 		FilesRemoved: removed,
@@ -141,7 +145,7 @@ func retireLegacyRules(rulesDir string) {
 		if err != nil {
 			continue
 		}
-		if !adapterstamp.LooksStamped(data) {
+		if !adapterstamp.RuleStampVerifies(data, agentx.DefaultStampPrefix, oxRuleDescription) {
 			continue // user-authored; not ours to remove
 		}
 		_ = os.Remove(path)
@@ -186,7 +190,7 @@ func uninstallNamespaceFiles(rulesDir string) ([]string, error) {
 		if err != nil {
 			continue
 		}
-		if !adapterstamp.LooksStamped(data) {
+		if !adapterstamp.RuleStampVerifies(data, agentx.DefaultStampPrefix, teamContextRuleDescription) {
 			continue // not ours
 		}
 		if err := os.Remove(path); err == nil {
@@ -236,13 +240,13 @@ func oxRuleFiles(version string) []agentx.RuleFile {
 			Name:        "ox-cli.md",
 			Content:     oxRulesContent,
 			Version:     version,
-			Description: "SageOx behavioral guidance for AI coworkers",
+			Description: oxRuleDescription,
 		},
 		{
 			Name:        "ox-cli-use-team-context.md",
 			Content:     useTeamContextContent,
 			Version:     version,
-			Description: "How to discover and use team-context rules and knowledge from the SageOx ox CLI",
+			Description: teamContextRuleDescription,
 		},
 	}
 }
@@ -297,7 +301,7 @@ Attribution is **conditional**: attribute to SageOx only when SageOx-delivered t
   it after the session is stopped or aborted.
 
 ### Record Your Session
-Sessions auto-record after priming. Use ` + "`/ox-session-stop`" + ` to end.
+Sessions auto-record after priming. Use ` + "`ox agent session stop`" + ` to end.
 Your session becomes part of the project ledger — teammates learn from it.
 
 ## Quick Reference

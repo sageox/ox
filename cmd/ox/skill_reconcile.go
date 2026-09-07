@@ -60,15 +60,14 @@ func reconcileSelectedSkills(repoRoot string, selected []adapterprotocol.SkillTa
 	return plan, nil
 }
 
-// retireLegacyClaudeCommands removes ox-stamped files from .claude/commands that
-// the CLI no longer ships.
+// retireLegacyClaudeCommands removes untracked ox-stamped files from
+// .claude/commands that the CLI no longer ships.
 //
-// It DELETES, so it is deliberately NOT wired into the generic reconcile path.
-// Only two callers may invoke it: `ox init`, which the user ran on purpose, and
-// the `Legacy ox files` doctor check, which carries the full set of migration
-// guards. Everything else that reconciles — `ox agent prime` on the session hot
-// path, the daemon's background tick, an adapter RPC — must be able to run
-// against any directory without removing files from it.
+// It DELETES, so it is deliberately wired only into `ox init`, which the user
+// ran on purpose. Tracked commands are left for the guarded `Legacy ox files`
+// Doctor migration: init's rollback tracker cannot restore or stage deletions
+// performed inside this helper, and deleting the file would also remove the
+// on-disk bytes Doctor needs to verify ownership.
 //
 // That separation is not theoretical. While this was wired into the shared
 // reconcile path, running the test suite deleted sixteen tracked files from the
@@ -101,8 +100,8 @@ func retireLegacyClaudeCommands(repoRoot string, targets []adapterprotocol.Skill
 		names = append(names, current...)
 	}
 	for _, name := range names {
-		path := filepath.Join(repoRoot, ".claude", "commands", name+".md")
-		data, readErr := os.ReadFile(path)
+		commandPath := filepath.Join(repoRoot, ".claude", "commands", name+".md")
+		data, readErr := os.ReadFile(commandPath)
 		if readErr != nil {
 			continue
 		}
@@ -115,8 +114,13 @@ func retireLegacyClaudeCommands(repoRoot string, targets []adapterprotocol.Skill
 		if hash == "" || agentx.ContentHash(body) != hash {
 			continue
 		}
-		if err := os.Remove(path); err != nil {
-			slog.Warn("skills: failed to remove retired Claude command", "path", path, "error", err)
+		tracked, trackErr := gitTracksPath(repoRoot,
+			filepath.ToSlash(filepath.Join(".claude", "commands", name+".md")))
+		if trackErr != nil || tracked {
+			continue
+		}
+		if err := os.Remove(commandPath); err != nil {
+			slog.Warn("skills: failed to remove retired Claude command", "path", commandPath, "error", err)
 		}
 	}
 }

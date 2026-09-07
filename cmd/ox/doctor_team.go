@@ -597,6 +597,7 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 	// unmaterialized collects team contexts whose sparse spec excludes a top-level
 	// directory their own HEAD contains — the #862 shape.
 	var unmaterialized []string
+	var locallyRepairable []string
 
 	for _, tc := range localCfg.TeamContexts {
 		if tc.Path == "" || !isGitRepo(tc.Path) {
@@ -639,6 +640,29 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 		// failure, and it is invisible to a pattern check.
 		cfg := manifest.ParseFile(filepath.Join(tc.Path, ".sageox", "sync.manifest"), manifest.RepoKindTeamContext)
 		if missing := missingSparseTopLevelDirs(tc.Path, cfg); len(missing) > 0 {
+			localMissing := manifestIncludedMissingDirs(cfg, missing)
+			if len(localMissing) > 0 {
+				needsFix++
+				if !fix {
+					locallyRepairable = append(locallyRepairable,
+						fmt.Sprintf("%s (%s)", filepath.Base(tc.Path), strings.Join(localMissing, ", ")))
+					continue
+				}
+				if repairErr := repairTeamSparseCheckout(tc.Path); repairErr != nil {
+					slog.Warn("failed to repair sparse-checkout",
+						"path", tc.Path, "error", repairErr)
+					locallyRepairable = append(locallyRepairable,
+						fmt.Sprintf("%s (%s)", filepath.Base(tc.Path), strings.Join(localMissing, ", ")))
+					continue
+				}
+				fixed++
+				// Re-read reality after `sparse-checkout set`. Only a directory
+				// that actually materialized counts as repaired.
+				missing = missingSparseTopLevelDirs(tc.Path, cfg)
+				if len(missing) == 0 {
+					continue
+				}
+			}
 			unmaterialized = append(unmaterialized,
 				fmt.Sprintf("%s (%s)", filepath.Base(tc.Path), strings.Join(missing, ", ")))
 			continue
@@ -662,6 +686,12 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 
 	if checked == 0 {
 		return SkippedCheck("Team sparse checkout", "no sparse-checkout repos", "")
+	}
+	if len(locallyRepairable) > 0 {
+		return FailedCheck("Team sparse checkout",
+			fmt.Sprintf("%d team context(s) exclude directories already included by their manifest: %s",
+				len(locallyRepairable), strings.Join(locallyRepairable, "; ")),
+			"Run `ox doctor --fix` to reapply the local sparse-checkout spec")
 	}
 
 	if len(unmaterialized) > 0 {
@@ -689,6 +719,27 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 		fmt.Sprintf("%d repo(s) missing root-level patterns (/* and !/*/)", unfixed),
 		"Root-level files like .gitattributes cannot be staged without these patterns.\n"+
 			"        Run `ox doctor` to auto-fix (FixLevelAuto)")
+}
+
+func manifestIncludedMissingDirs(cfg *manifest.ManifestConfig, missing []string) []string {
+	if cfg == nil {
+		return nil
+	}
+	included := make(map[string]bool)
+	for _, entry := range cfg.Includes {
+		clean := strings.Trim(strings.TrimSpace(filepath.ToSlash(entry)), "/")
+		if clean == "" {
+			continue
+		}
+		included[strings.SplitN(clean, "/", 2)[0]] = true
+	}
+	var local []string
+	for _, dir := range missing {
+		if included[strings.Trim(filepath.ToSlash(dir), "/")] {
+			local = append(local, dir)
+		}
+	}
+	return local
 }
 
 // repairTeamSparseCheckout re-applies sparse-checkout from the manifest

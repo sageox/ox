@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/session"
@@ -45,8 +46,15 @@ func checkSkillsInventoryDrift(ctx context.Context, repoPath string) CheckResult
 		return res
 	}
 
-	// A recording session is reading these files right now.
-	if session.IsRecording(repoPath) {
+	// A LIVE recording session is reading these files right now. Merely finding
+	// a state file is insufficient: crashed sessions leave .recording.json behind,
+	// and treating that tombstone as live disables this repair forever.
+	recording, recordingErr := hasLiveRecording(repoPath)
+	if recordingErr != nil {
+		res.Summary = "skipped: could not inspect recording sessions"
+		return res
+	}
+	if recording {
 		res.Summary = "skipped: session recording in progress"
 		return res
 	}
@@ -80,6 +88,13 @@ func checkSkillsInventoryDrift(ctx context.Context, repoPath string) CheckResult
 			return current, currentTargets, nil
 		},
 		func(p *skillmanager.ReconcilePlan) error {
+			// The lockfile is committed project intent. Even when normalization
+			// produces no file action (for example pruning an unselected target),
+			// the daemon must not rewrite it in the background.
+			if p.LockChanged() {
+				trackedPaths = []string{filepath.ToSlash(filepath.Join(".sageox", "skills.lock.json"))}
+				return errTrackedFile
+			}
 			var lookupErr error
 			trackedPaths, lookupErr = trackedPlanPaths(ctx, repoPath, p)
 			if lookupErr != nil {
@@ -135,6 +150,19 @@ func checkSkillsInventoryDrift(ctx context.Context, repoPath string) CheckResult
 	res.Status = StatusFixed
 	res.Summary = fmt.Sprintf("reconciled %d ox-managed skill file(s)", changed)
 	return res
+}
+
+func hasLiveRecording(repoPath string) (bool, error) {
+	states, err := session.LoadAllRecordingStates(repoPath)
+	if err != nil {
+		return false, err
+	}
+	for _, state := range states {
+		if state.IsAgentAlive() {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // trackedPlanPaths returns the planned paths that git currently tracks.

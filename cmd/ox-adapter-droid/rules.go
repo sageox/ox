@@ -20,6 +20,11 @@ import (
 // rules root.
 const sageoxRulesNamespace = "sageox"
 
+const (
+	oxRuleDescription          = "SageOx behavioral guidance for AI coworkers"
+	teamContextRuleDescription = "How to discover and use team-context rules and knowledge from the SageOx ox CLI"
+)
+
 func handleInstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.InstallRulesResponse, error) {
 	rm := rules.NewDroidRulesManager()
 
@@ -40,16 +45,15 @@ func handleInstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.Install
 	// for the same frontmatter-aware staleness reasoning.
 	adapterstamp.RemoveTamperedRules(rulesDir, ruleFiles)
 
-	// Retire the pre-0.15.0 rule surface on the INSTALL path. Doing it only on
-	// uninstall would mean it never happens for an existing project, which would
-	// then carry both the legacy .factory/rules/ox.md and the nested sageox/ tree
-	// beside the new flat files. Only ox-stamped files are removed.
-	retireLegacyRules(rulesDir)
-
 	written, err := rm.Install(context.Background(), p.RepoRoot, ruleFiles, true)
 	if err != nil {
 		return nil, err
 	}
+
+	// Retire the pre-0.15.0 rule surface only after its replacement is safely
+	// installed. Existing projects otherwise risk losing their only guidance if
+	// the current install fails partway through.
+	retireLegacyRules(rulesDir)
 
 	// agentx returns names relative to the rules dir; the FilesWritten
 	// contract is repo-relative. See GH #731.
@@ -102,7 +106,7 @@ func retireLegacyRules(rulesDir string) {
 		if err != nil {
 			continue
 		}
-		if !adapterstamp.LooksStamped(data) {
+		if !adapterstamp.RuleStampVerifies(data, agentx.DefaultStampPrefix, oxRuleDescription) {
 			continue // user-authored; not ours to remove
 		}
 		_ = os.Remove(path)
@@ -121,12 +125,14 @@ func handleUninstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.Unins
 	}
 
 	rulesDir := rm.RulesDir(p.RepoRoot)
+	removedCurrent := adapterstamp.RemoveVerifiedRules(rulesDir, oxRuleFiles(p.Version))
 	removedNS, err := uninstallNamespaceFiles(rulesDir)
 	if err != nil {
 		return nil, err
 	}
 
-	removed := append(removedTop, removedNS...)
+	removed := append(removedTop, removedCurrent...)
+	removed = append(removed, removedNS...)
 	return &adapterprotocol.UninstallRulesResponse{
 		Uninstalled:  len(removed) > 0,
 		FilesRemoved: removed,
@@ -160,7 +166,7 @@ func uninstallNamespaceFiles(rulesDir string) ([]string, error) {
 		if err != nil {
 			continue
 		}
-		if !adapterstamp.LooksStamped(data) {
+		if !adapterstamp.RuleStampVerifies(data, agentx.DefaultStampPrefix, teamContextRuleDescription) {
 			continue
 		}
 		if err := os.Remove(path); err == nil {
@@ -184,13 +190,13 @@ func oxRuleFiles(version string) []agentx.RuleFile {
 			Name:        "ox-cli.md",
 			Content:     oxRulesContent,
 			Version:     version,
-			Description: "SageOx behavioral guidance for AI coworkers",
+			Description: oxRuleDescription,
 		},
 		{
 			Name:        "ox-cli-use-team-context.md",
 			Content:     useTeamContextContent,
 			Version:     version,
-			Description: "How to discover and use team-context rules and knowledge from the SageOx ox CLI",
+			Description: teamContextRuleDescription,
 		},
 	}
 }

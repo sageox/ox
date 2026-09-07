@@ -3,6 +3,7 @@ package skillmanager
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -75,5 +76,33 @@ func TestKnownRepos_CorruptCacheIsRebuilt(t *testing.T) {
 	RememberRepo(root)
 	if got := KnownRepos(); len(got) != 1 {
 		t.Errorf("the cache did not rebuild after corruption: %v", got)
+	}
+}
+
+func TestKnownRepos_ConcurrentRememberDoesNotLoseEntries(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	const count = 8
+	roots := make([]string, count)
+	for i := range roots {
+		roots[i] = t.TempDir()
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, root := range roots {
+		root := root
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			RememberRepo(root)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	got := KnownRepos()
+	if len(got) != count {
+		t.Fatalf("concurrent RememberRepo calls retained %d entries, want %d: %v", len(got), count, got)
 	}
 }

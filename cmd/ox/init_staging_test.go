@@ -546,3 +546,96 @@ func TestStageAll_NeverStagesReservedOxArtifacts(t *testing.T) {
 			"%s must still be staged; a fresh clone depends on it", rel)
 	}
 }
+
+func TestInitStagesByteIdenticalUntrackedScopedIgnore(t *testing.T) {
+	repo := testGitRepo(t)
+	writeFileAt(t, repo, ".gitignore", ".claude/\n")
+	cmd := exec.Command("git", "add", "--", ".gitignore")
+	cmd.Dir = repo
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-q", "-m", "ignore Claude directory")
+	cmd.Dir = repo
+	require.NoError(t, cmd.Run())
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".claude"), 0o755))
+
+	// Simulate a prior Doctor run: it wrote the correct block but did not stage it.
+	if _, err := ensureScopedIgnoreFiles(repo); err != nil {
+		t.Fatalf("first ensureScopedIgnoreFiles: %v", err)
+	}
+	results, err := ensureScopedIgnoreFiles(repo)
+	require.NoError(t, err)
+	require.Empty(t, results, "byte-identical ensure should report no write")
+
+	tracker := newInitTracker(repo)
+	trackScopedIgnoreFilesForInit(tracker, repo, results, err)
+	tracker.stageAll()
+
+	assert.Contains(t, stagedFiles(t, repo), ".claude/.gitignore",
+		"the committed ignore rule must be adopted even when this init did not rewrite it")
+}
+
+func TestInitDoesNotStageUntouchedScopedIgnoreUserChanges(t *testing.T) {
+	repo := testGitRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".claude"), 0o755))
+	if _, err := ensureScopedIgnoreFiles(repo); err != nil {
+		t.Fatalf("ensure scoped ignore: %v", err)
+	}
+	ignore := filepath.Join(repo, ".claude", ".gitignore")
+	f, err := os.OpenFile(ignore, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString("user-base-rule/\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		require.NoError(t, cmd.Run(), "git %v", args)
+	}
+	runGit("add", "--force", "--", ".claude/.gitignore")
+	runGit("commit", "-q", "-m", "track scoped ignore")
+	f, err = os.OpenFile(ignore, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString("user-work-in-progress/\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	results, ensureErr := ensureScopedIgnoreFiles(repo)
+	require.NoError(t, ensureErr)
+	require.Empty(t, results, "the managed block is already current")
+	tracker := newInitTracker(repo)
+	trackScopedIgnoreFilesForInit(tracker, repo, results, ensureErr)
+	tracker.stageAll()
+
+	assert.Empty(t, stagedFiles(t, repo),
+		"a no-op ensure must not stage the user's unrelated scoped-ignore edit")
+	cmd := exec.Command("git", "status", "--short", "--", ".claude/.gitignore")
+	cmd.Dir = repo
+	status, err := cmd.Output()
+	require.NoError(t, err)
+	assert.Equal(t, " M .claude/.gitignore\n", string(status))
+}
+
+func TestInitDoesNotAdoptUntrackedScopedIgnoreWithUserRules(t *testing.T) {
+	repo := testGitRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".claude"), 0o755))
+	if _, err := ensureScopedIgnoreFiles(repo); err != nil {
+		t.Fatalf("ensure scoped ignore: %v", err)
+	}
+	ignore := filepath.Join(repo, ".claude", ".gitignore")
+	f, err := os.OpenFile(ignore, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString("user-rule/\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	results, ensureErr := ensureScopedIgnoreFiles(repo)
+	require.NoError(t, ensureErr)
+	require.Empty(t, results)
+	tracker := newInitTracker(repo)
+	trackScopedIgnoreFilesForInit(tracker, repo, results, ensureErr)
+	tracker.stageAll()
+
+	assert.Empty(t, stagedFiles(t, repo),
+		"an untracked file with user-owned bytes outside the block must not be adopted")
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -44,6 +45,21 @@ type legacyMigration struct {
 	// when there is something to untrack.
 	adopt []string
 
+	// stage is the exact committed footprint Apply may add. It is deliberately
+	// planned rather than rediscovered at apply time, so a user-created untracked
+	// file cannot appear between the safety check and `git add --force`.
+	stage []string
+
+	// cleanup contains verified legacy command files that are not tracked. They
+	// have no index entry to remove, but deletion still belongs inside the same
+	// rollback boundary as the migration commit.
+	cleanup []migrationFileSnapshot
+
+	// ignoreBefore snapshots every scoped ignore file Apply may modify. Ensure is
+	// part of the transaction: a rejecting hook must restore both tracked and
+	// untracked files byte-for-byte.
+	ignoreBefore map[string]migrationFileSnapshot
+
 	// replacementAvailable records whether this project has the Claude skill
 	// target, i.e. whether the surface that supersedes legacy Claude commands
 	// actually exists. A portable .agents/skills target is not a replacement:
@@ -61,8 +77,17 @@ type legacyMigration struct {
 	removed []string
 }
 
+type migrationFileSnapshot struct {
+	rel    string
+	data   []byte
+	mode   os.FileMode
+	exists bool
+}
+
 // Empty reports whether there is nothing to migrate.
-func (m *legacyMigration) Empty() bool { return len(m.uncache)+len(m.remove)+len(m.adopt) == 0 }
+func (m *legacyMigration) Empty() bool {
+	return len(m.uncache)+len(m.remove)+len(m.adopt)+len(m.cleanup) == 0
+}
 
 // planLegacyMigration classifies every tracked path under the agent directories.
 //
@@ -70,7 +95,7 @@ func (m *legacyMigration) Empty() bool { return len(m.uncache)+len(m.remove)+len
 // edit from `git status` with skip-worktree or assume-unchanged, and trusting the
 // index would then let ox delete work it cannot see.
 func planLegacyMigration(repoRoot string) (*legacyMigration, error) {
-	m := &legacyMigration{repoRoot: repoRoot}
+	m := &legacyMigration{repoRoot: repoRoot, ignoreBefore: make(map[string]migrationFileSnapshot)}
 
 	// Never remove the old surface until the new one is in place.
 	//
@@ -82,12 +107,17 @@ func planLegacyMigration(repoRoot string) (*legacyMigration, error) {
 	// existed. Reconcile runs before this check and records a target when it
 	// adopts one, so by the time we get here the replacement is either present or
 	// genuinely unavailable.
-	_, targets, err := skillmanager.LoadDesired(repoRoot)
+	desired, targets, err := skillmanager.LoadDesired(repoRoot)
 	if err != nil {
 		return nil, err
 	}
+	selectedTargets := make(map[string]bool, len(desired.Targets))
+	for _, key := range desired.Targets {
+		selectedTargets[key] = true
+	}
 	for _, target := range targets {
-		if filepath.ToSlash(target.Root) == ".claude/skills" {
+		if filepath.ToSlash(target.Root) == ".claude/skills" && selectedTargets[target.Key] &&
+			installedClaudeReplacement(repoRoot, target.Root) {
 			m.replacementAvailable = true
 			break
 		}
@@ -118,11 +148,25 @@ func planLegacyMigration(repoRoot string) (*legacyMigration, error) {
 	}
 	for _, rel := range footprint {
 		if _, ok := trackedSet[rel]; ok {
+			m.stage = append(m.stage, rel)
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(repoRoot, filepath.FromSlash(rel))); err == nil {
+		if info, statErr := os.Lstat(filepath.Join(repoRoot, filepath.FromSlash(rel))); statErr == nil &&
+			info.Mode().IsRegular() && safeUntrackedMigrationFootprint(repoRoot, rel) {
 			m.adopt = append(m.adopt, rel)
+			m.stage = append(m.stage, rel)
 		}
+	}
+	// The lockfile path is ox-owned project state. If reconcile created or changed
+	// it after the preflight, it belongs in the one migration commit; unlike the
+	// agent-directory footprint it is not an open namespace for user content.
+	lockRel := filepath.ToSlash(filepath.Join(".sageox", "skills.lock.json"))
+	if info, statErr := os.Lstat(filepath.Join(repoRoot, filepath.FromSlash(lockRel))); statErr == nil && info.Mode().IsRegular() {
+		m.stage = append(m.stage, lockRel)
+	}
+	for _, f := range scopedIgnoreFiles() {
+		rel := filepath.ToSlash(filepath.Join(f.Dir, ".gitignore"))
+		m.ignoreBefore[rel] = snapshotMigrationFile(repoRoot, rel)
 	}
 	for _, rel := range tracked {
 		switch classifyLegacyPath(repoRoot, rel) {
@@ -138,6 +182,9 @@ func planLegacyMigration(repoRoot string) (*legacyMigration, error) {
 		case legacyUserOwned:
 			m.preserved = append(m.preserved, rel)
 		}
+	}
+	if m.replacementAvailable {
+		m.cleanup = untrackedLegacyCommands(repoRoot, trackedSet)
 	}
 	return m, nil
 }
@@ -168,12 +215,22 @@ func classifyLegacyPath(repoRoot, rel string) legacyClass {
 			// Only the stamped SKILL.md is attributable to ox; supporting files or
 			// an edited manifest may contain user work and must remain untouched.
 			if len(parts) == 4 && parts[3] == skills.SkillFileName &&
-				stampVerifies(filepath.Join(repoRoot, filepath.FromSlash(rel))) {
+				plainStampVerifies(filepath.Join(repoRoot, filepath.FromSlash(rel)), "ox") {
 				return legacySuperseded
 			}
 			return legacyUserOwned
 		}
-	case ".claude/rules", ".factory/rules", ".agents/rules", ".claude/commands":
+	case ".claude/commands":
+		// Commands are a superseded surface, including same-named ox-cli-*
+		// commands briefly shipped during the transition. Unlike reserved skills
+		// and rules they must leave disk, but only when their body still verifies:
+		// command stamps have no generated frontmatter to validate separately.
+		if (skillmanager.IsReservedName(name) || skills.IsRetired(name)) &&
+			commandStampVerifies(filepath.Join(repoRoot, filepath.FromSlash(rel))) {
+			return legacySuperseded
+		}
+		return legacyUserOwned
+	case ".claude/rules", ".factory/rules", ".agents/rules":
 		if skillmanager.IsReservedName(name) {
 			return legacyReserved
 		}
@@ -187,7 +244,7 @@ func classifyLegacyPath(repoRoot, rel string) legacyClass {
 		nestedLegacy := len(parts) > 3 && parts[2] == "sageox" &&
 			(surface == ".claude/rules" || surface == ".factory/rules" || surface == ".agents/rules")
 		if skills.IsRetired(name) || nestedLegacy {
-			if stampVerifies(filepath.Join(repoRoot, filepath.FromSlash(rel))) {
+			if legacyRuleStampVerifies(filepath.Join(repoRoot, filepath.FromSlash(rel)), nestedLegacy) {
 				return legacySuperseded
 			}
 			return legacyUserOwned
@@ -196,17 +253,121 @@ func classifyLegacyPath(repoRoot, rel string) legacyClass {
 	return legacyUserOwned
 }
 
-func stampVerifies(path string) bool {
+const (
+	oxRuleDescription          = "SageOx behavioral guidance for AI coworkers"
+	teamContextRuleDescription = "How to discover and use team-context rules and knowledge from the SageOx ox CLI"
+)
+
+func commandStampVerifies(path string) bool {
+	return plainStampVerifies(path, "ox")
+}
+
+func plainStampVerifies(path, prefix string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
 	}
-	for _, prefix := range []string{"ox", agentx.DefaultStampPrefix} {
-		if hash, _, body := adapterstamp.ExtractStampAnywhere(data, prefix); hash != "" && agentx.ContentHash(body) == hash {
-			return true
+	// Commands and the old skill manifests had no generated preamble. Requiring
+	// the stamp on line one prevents an otherwise verifying body from claiming
+	// user-authored bytes inserted before the stamp.
+	return strings.HasPrefix(strings.ReplaceAll(string(data), "\r\n", "\n"), agentx.StampComment(prefix)) &&
+		adapterstamp.StampVerifies(data, prefix)
+}
+
+func legacyRuleStampVerifies(path string, nested bool) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	description := oxRuleDescription
+	if nested {
+		description = teamContextRuleDescription
+	}
+	return adapterstamp.RuleStampVerifies(data, agentx.DefaultStampPrefix, description)
+}
+
+func installedClaudeReplacement(repoRoot, targetRoot string) bool {
+	const replacement = "ox-cli-prime"
+	want, err := canonicalSkillManifest(replacement)
+	if err != nil {
+		return false
+	}
+	got, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(targetRoot), replacement, skills.SkillFileName))
+	return err == nil && bytes.Equal(got, want)
+}
+
+func canonicalSkillManifest(name string) ([]byte, error) {
+	selected, err := skills.Selected("", []string{name})
+	if err != nil {
+		return nil, err
+	}
+	if len(selected) != 1 || selected[0].Name != name {
+		return nil, fmt.Errorf("canonical skill %q is unavailable", name)
+	}
+	return selected[0].Content, nil
+}
+
+func safeUntrackedMigrationFootprint(repoRoot, rel string) bool {
+	rel = filepath.ToSlash(rel)
+	info, err := os.Lstat(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	if strings.HasSuffix(rel, "/.gitignore") {
+		return skillmanager.IsManagedOnlyScopedIgnore(repoRoot, rel)
+	}
+	if rel == filepath.ToSlash(filepath.Join(".claude", "skills", skillmanager.CommittedOnRamp, skills.SkillFileName)) ||
+		rel == filepath.ToSlash(filepath.Join(".agents", "skills", skillmanager.CommittedOnRamp, skills.SkillFileName)) {
+		want, err := canonicalSkillManifest(skillmanager.CommittedOnRamp)
+		if err != nil {
+			return false
 		}
+		got, readErr := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+		return readErr == nil && bytes.Equal(got, want)
 	}
 	return false
+}
+
+func snapshotMigrationFile(repoRoot, rel string) migrationFileSnapshot {
+	snapshot := migrationFileSnapshot{rel: filepath.ToSlash(rel)}
+	info, err := os.Lstat(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+	if err != nil || !info.Mode().IsRegular() {
+		return snapshot
+	}
+	data, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+	if err != nil {
+		return snapshot
+	}
+	snapshot.exists = true
+	snapshot.data = data
+	snapshot.mode = info.Mode().Perm()
+	return snapshot
+}
+
+func untrackedLegacyCommands(repoRoot string, tracked map[string]struct{}) []migrationFileSnapshot {
+	dir := filepath.Join(repoRoot, ".claude", "commands")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var snapshots []migrationFileSnapshot
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		rel := filepath.ToSlash(filepath.Join(".claude", "commands", entry.Name()))
+		if _, ok := tracked[rel]; ok {
+			continue
+		}
+		name := strings.TrimSuffix(entry.Name(), ".md")
+		if !skillmanager.IsReservedName(name) && !skills.IsRetired(name) {
+			continue
+		}
+		if commandStampVerifies(filepath.Join(repoRoot, filepath.FromSlash(rel))) {
+			snapshots = append(snapshots, snapshotMigrationFile(repoRoot, rel))
+		}
+	}
+	return snapshots
 }
 
 func trackedAgentPaths(repoRoot string) ([]string, error) {
@@ -240,6 +401,18 @@ func trackedAgentPaths(repoRoot string) ([]string, error) {
 // The checks are deliberately conservative: doing nothing is always recoverable,
 // and the migration will simply run on the next invocation.
 func migrationBlocker(repoRoot string) string {
+	return migrationBlockerWithFootprint(repoRoot, true)
+}
+
+// migrationRuntimeBlocker rechecks conditions that may change after Doctor's
+// preflight without treating Doctor's own reconcile output as user dirt. The
+// affected-path cleanliness check is performed once, before any Doctor repair
+// can touch the lockfile or scoped ignore files.
+func migrationRuntimeBlocker(repoRoot string) string {
+	return migrationBlockerWithFootprint(repoRoot, false)
+}
+
+func migrationBlockerWithFootprint(repoRoot string, inspectFootprint bool) string {
 	// A LIVE recording session means an AI coworker is mid-turn in this repository.
 	// `ox doctor` is routinely run BY an agent during a session, so this is not a
 	// theoretical case — and a commit appearing under the user's session is exactly
@@ -306,12 +479,14 @@ func migrationBlocker(repoRoot string) string {
 	// an unstaged edit in one of them, a bare commit would silently absorb that
 	// edit into ox's housekeeping commit. Check before EnsureBlock mutates any
 	// ignore file, so the guard observes the user's original working tree.
-	dirty, err := hasUnstagedMigrationChanges(repoRoot)
-	if err != nil {
-		return "cannot inspect files the migration must commit"
-	}
-	if dirty {
-		return "you have unstaged changes in files the migration must commit; commit or stash them and rerun `ox doctor --fix`"
+	if inspectFootprint {
+		dirty, err := hasUnstagedMigrationChanges(repoRoot)
+		if err != nil {
+			return "cannot inspect files the migration must commit"
+		}
+		if dirty {
+			return "you have unstaged changes in files the migration must commit; commit or stash them and rerun `ox doctor --fix`"
+		}
 	}
 	return ""
 }
@@ -328,14 +503,72 @@ func hasUnstagedMigrationChanges(repoRoot string) (bool, error) {
 	cmd := exec.Command("git", append([]string{"diff", "--quiet", "--"}, paths...)...)
 	cmd.Dir = repoRoot
 	err := cmd.Run()
-	if err == nil {
-		return false, nil
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 1 {
+			return true, nil
+		}
+		return false, err
 	}
-	var ee *exec.ExitError
-	if errors.As(err, &ee) && ee.ExitCode() == 1 {
-		return true, nil
+
+	// `git diff` deliberately says nothing about untracked files. That makes an
+	// existence-only adoption check dangerous: `git add --force` would commit a
+	// user's own sageox/SKILL.md or scoped .gitignore. Only exact canonical files
+	// are safe to adopt; an existing untracked lockfile is conservatively treated
+	// as user work because there is no prior index state proving its provenance.
+	for _, rel := range paths {
+		tracked, trackErr := gitTracksPath(repoRoot, rel)
+		if trackErr != nil {
+			return false, trackErr
+		}
+		info, statErr := os.Lstat(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+		if os.IsNotExist(statErr) {
+			if tracked {
+				return true, nil
+			}
+			continue
+		}
+		if statErr != nil || !info.Mode().IsRegular() {
+			return true, nil
+		}
+		if tracked {
+			matches, matchErr := trackedFileMatchesHead(repoRoot, rel)
+			if matchErr != nil {
+				return false, matchErr
+			}
+			if !matches {
+				return true, nil
+			}
+			continue
+		}
+		if rel == filepath.ToSlash(filepath.Join(".sageox", "skills.lock.json")) ||
+			!safeUntrackedMigrationFootprint(repoRoot, filepath.ToSlash(rel)) {
+			return true, nil
+		}
 	}
-	return false, err
+	return false, nil
+}
+
+// trackedFileMatchesHead compares a working-tree file with HEAD even when the
+// index entry is marked assume-unchanged or skip-worktree. `git diff` honors
+// those performance flags and can therefore hide edits from the migration's
+// safety gate. hash-object --path applies the repository's normal clean filters,
+// avoiding false positives on CRLF or other filtered working-tree content.
+func trackedFileMatchesHead(repoRoot, rel string) (bool, error) {
+	rel = filepath.ToSlash(rel)
+	working := exec.Command("git", "hash-object", "--path="+rel, "--", rel)
+	working.Dir = repoRoot
+	workingHash, err := working.Output()
+	if err != nil {
+		return false, err
+	}
+	head := exec.Command("git", "rev-parse", "HEAD:"+rel)
+	head.Dir = repoRoot
+	headHash, err := head.Output()
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(workingHash)) == strings.TrimSpace(string(headHash)), nil
 }
 
 func resolvedGitDir(repoRoot string) (string, error) {
@@ -437,17 +670,33 @@ func (m *legacyMigration) Apply() (err error) {
 			}
 			// Untracked additions (the ignore files, an adopted on-ramp) are unstaged
 			// individually; each is its own pathspec so one failure cannot zero the batch.
-			untracked := append([]string{}, m.adopt...)
-			for _, f := range scopedIgnoreFiles() {
-				untracked = append(untracked, filepath.Join(f.Dir, ".gitignore"))
-			}
+			untracked := append(append([]string{}, m.adopt...), m.stage...)
 			for _, p := range untracked {
 				unstage := exec.Command("git", "reset", "--quiet", "HEAD", "--", p)
 				unstage.Dir = m.repoRoot
 				_ = unstage.Run()
 			}
+			for _, snapshot := range m.cleanup {
+				restoreMigrationSnapshot(m.repoRoot, snapshot)
+			}
+			for _, snapshot := range m.ignoreBefore {
+				restoreMigrationSnapshot(m.repoRoot, snapshot)
+			}
 		}
 	}()
+
+	// Ignore creation/update is inside the transaction. Planning captured every
+	// original byte before this point, so a failed commit can restore the working
+	// tree as well as the index.
+	ignoreResults, ensureErr := ensureScopedIgnoreFiles(m.repoRoot)
+	if ensureErr != nil {
+		return fmt.Errorf("write ox ignore rules: %w", ensureErr)
+	}
+	stagePaths := append([]string{}, m.stage...)
+	for _, result := range ignoreResults {
+		stagePaths = append(stagePaths, filepath.ToSlash(result.Rel))
+	}
+	m.stage = stagePaths
 
 	if len(m.uncache) > 0 {
 		// --cached: the file stays on disk. It is a CURRENT managed artifact whose
@@ -468,6 +717,11 @@ func (m *legacyMigration) Apply() (err error) {
 		// rollback restores from this list, never from m.remove — see below.
 		m.removed = append(m.removed, m.remove...)
 	}
+	for _, snapshot := range m.cleanup {
+		if removeErr := os.Remove(filepath.Join(m.repoRoot, filepath.FromSlash(snapshot.rel))); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("remove untracked superseded command %s: %w", snapshot.rel, removeErr)
+		}
+	}
 
 	// Stage the ignore files in the SAME commit. They are what make the untracked
 	// paths ignored rather than untracked noise, so shipping the untrack without
@@ -477,16 +731,6 @@ func (m *legacyMigration) Apply() (err error) {
 	// --force because plenty of repositories root-ignore .claude/ (people do it
 	// because of settings.local.json); without it the one file that has to reach
 	// teammates would be silently skipped.
-	for _, f := range scopedIgnoreFiles() {
-		rel := filepath.Join(f.Dir, ".gitignore")
-		if _, statErr := os.Stat(filepath.Join(m.repoRoot, rel)); statErr != nil {
-			continue
-		}
-		if err := runMigrationGit(m.repoRoot, []string{"add", "--force", "--", rel}); err != nil {
-			return fmt.Errorf("stage ignore rules: %w", err)
-		}
-	}
-
 	// Stage the committed FOOTPRINT in the same commit: the sageox on-ramp and the
 	// lockfile the reconcile just updated.
 	//
@@ -495,17 +739,26 @@ func (m *legacyMigration) Apply() (err error) {
 	// where the CLI is not installed. Leaving it for the user to notice defeats the
 	// point, and leaving a modified lockfile beside it makes the "one commit"
 	// promise false.
-	for _, rel := range []string{
-		filepath.Join(".claude", "skills", skillmanager.CommittedOnRamp, skills.SkillFileName),
-		filepath.Join(".agents", "skills", skillmanager.CommittedOnRamp, skills.SkillFileName),
-		filepath.Join(".sageox", "skills.lock.json"),
-	} {
+	seenStage := make(map[string]bool, len(stagePaths))
+	for _, rel := range stagePaths {
+		rel = filepath.ToSlash(rel)
+		if seenStage[rel] {
+			continue
+		}
+		seenStage[rel] = true
 		if _, statErr := os.Stat(filepath.Join(m.repoRoot, rel)); statErr != nil {
 			continue
 		}
 		if err := runMigrationGit(m.repoRoot, []string{"add", "--force", "--", rel}); err != nil {
 			return fmt.Errorf("stage committed footprint: %w", err)
 		}
+	}
+	staged, stagedErr := hasStagedChanges(m.repoRoot)
+	if stagedErr != nil {
+		return fmt.Errorf("inspect migration index: %w", stagedErr)
+	}
+	if !staged {
+		return nil
 	}
 
 	body := "ox now materializes its skills and rules locally and gitignores them,\n" +
@@ -515,6 +768,20 @@ func (m *legacyMigration) Apply() (err error) {
 		return fmt.Errorf("commit migration: %w", err)
 	}
 	return nil
+}
+
+func restoreMigrationSnapshot(repoRoot string, snapshot migrationFileSnapshot) {
+	abs := filepath.Join(repoRoot, filepath.FromSlash(snapshot.rel))
+	if !snapshot.exists {
+		_ = os.Remove(abs)
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(abs), 0o755)
+	mode := snapshot.mode
+	if mode == 0 {
+		mode = 0o644
+	}
+	_ = os.WriteFile(abs, snapshot.data, mode)
 }
 
 func runMigrationGit(dir string, args []string) error {

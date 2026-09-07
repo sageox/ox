@@ -420,7 +420,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 				output.PauseCount = state.PauseCount
 				output.InheritedPause = state.InheritedPause
 				output.InheritedFromSession = state.InheritedFromSession
-				output.Guidance = "Recording is SUSPENDED. Resume with `ox session resume` or stop with `ox session stop`."
+				output.Guidance = "Recording is SUSPENDED. Resume with `ox agent session resume` or stop with `ox agent session stop`."
 			}
 			// ADR-029: surface draft-placeholder state so "my /c/ link 404s"
 			// is diagnosable rather than a guess.

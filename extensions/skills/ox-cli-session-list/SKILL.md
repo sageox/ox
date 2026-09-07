@@ -11,8 +11,6 @@ disable-model-invocation: true
 > It performs a lifecycle or diagnostic action with side effects, so never
 > invoke it on your own initiative.
 
-     belongs in the ox CLI JSON output (guidance field), not here.
-     Skills are agent-specific wrappers; ox serves all agents (Codex, etc.). -->
 List recent sessions from the project ledger and offer to view one.
 
 ## Steps

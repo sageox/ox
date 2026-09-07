@@ -1,12 +1,14 @@
 package skillmanager
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
 	"time"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -58,21 +60,24 @@ func RememberRepo(repoRoot string) {
 	if path == "" || repoRoot == "" {
 		return
 	}
-	doc := loadKnownRepos(path)
-	now := time.Now().UTC()
-	for i, r := range doc.Repos {
-		if r.Path == repoRoot {
-			// Only rewrite once a day; this runs at every session start.
-			if now.Sub(r.Seen) < 24*time.Hour {
-				return
+	_ = fileutil.WithFileLockTimeout(context.Background(), path, nonBlockingLockWait, func() error {
+		doc := loadKnownRepos(path)
+		now := time.Now().UTC()
+		for i, r := range doc.Repos {
+			if r.Path == repoRoot {
+				// Only rewrite once a day; this runs at every session start.
+				if now.Sub(r.Seen) < 24*time.Hour {
+					return nil
+				}
+				doc.Repos[i].Seen = now
+				saveKnownRepos(path, doc)
+				return nil
 			}
-			doc.Repos[i].Seen = now
-			saveKnownRepos(path, doc)
-			return
 		}
-	}
-	doc.Repos = append(doc.Repos, knownRepo{Path: repoRoot, Seen: now})
-	saveKnownRepos(path, doc)
+		doc.Repos = append(doc.Repos, knownRepo{Path: repoRoot, Seen: now})
+		saveKnownRepos(path, doc)
+		return nil
+	})
 }
 
 // KnownRepos returns the recorded checkouts that still exist on disk, pruning
@@ -82,7 +87,18 @@ func KnownRepos() []string {
 	if path == "" {
 		return nil
 	}
-	doc := loadKnownRepos(path)
+	var doc knownReposDoc
+	locked := false
+	_ = fileutil.WithFileLockTimeout(context.Background(), path, nonBlockingLockWait, func() error {
+		locked = true
+		doc = loadKnownRepos(path)
+		return nil
+	})
+	if !locked {
+		// Writes use atomic rename, so an unlocked fallback still observes one
+		// complete snapshot. Skip pruning below because another writer owns the RMW.
+		doc = loadKnownRepos(path)
+	}
 	var alive []string
 	var kept []knownRepo
 	for _, r := range doc.Repos {
@@ -91,8 +107,22 @@ func KnownRepos() []string {
 			kept = append(kept, r)
 		}
 	}
-	if len(kept) != len(doc.Repos) {
-		saveKnownRepos(path, knownReposDoc{Repos: kept})
+	if locked && len(kept) != len(doc.Repos) {
+		// Reacquire around the prune RMW: the first lock was intentionally released
+		// before filesystem stats so a slow mount cannot stall every session start.
+		_ = fileutil.WithFileLockTimeout(context.Background(), path, nonBlockingLockWait, func() error {
+			current := loadKnownRepos(path)
+			var currentKept []knownRepo
+			for _, r := range current.Repos {
+				if info, err := os.Stat(r.Path); err == nil && info.IsDir() {
+					currentKept = append(currentKept, r)
+				}
+			}
+			if len(currentKept) != len(current.Repos) {
+				saveKnownRepos(path, knownReposDoc{Repos: currentKept})
+			}
+			return nil
+		})
 	}
 	sort.Strings(alive)
 	return alive
@@ -118,5 +148,5 @@ func saveKnownRepos(path string, doc knownReposDoc) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, append(data, '\n'), 0o600)
+	_ = fileutil.AtomicWriteBytes(path, append(data, '\n'), 0o600)
 }

@@ -149,6 +149,53 @@ func TestSkillsInventoryDrift_SkipsWhileASessionIsRecording(t *testing.T) {
 	}
 }
 
+func TestSkillsInventoryDrift_RepairsAfterRecordingProcessDies(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(xdg, "cache"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(xdg, "data"))
+	repoRoot, managedFile := installSkillsFixture(t)
+	if err := os.Remove(managedFile); err != nil {
+		t.Fatalf("remove managed file: %v", err)
+	}
+
+	const repoID = "repo_01jfk3mabdeadrecording"
+	cfg, err := json.Marshal(map[string]string{
+		"repo_id":  repoID,
+		"endpoint": "https://sageox.example",
+	})
+	if err != nil {
+		t.Fatalf("marshal project config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, ".sageox", "config.json"), cfg, 0o644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	sessionPath := filepath.Join(paths.SessionCacheDir(repoID), "sessions", "2026-09-07-dead-recording")
+	state := &session.RecordingState{
+		AgentID:     "DeadAg",
+		SessionPath: sessionPath,
+		StartedAt:   time.Now().Add(-time.Hour),
+		AdapterName: "claude-code",
+		ParentPID:   1 << 30, // above the platform PID range; guaranteed not live
+	}
+	if err := session.SaveRecordingState(repoRoot, state); err != nil {
+		t.Fatalf("save stale recording state: %v", err)
+	}
+	if !session.IsRecording(repoRoot) {
+		t.Fatal("fixture must leave a recording state file behind")
+	}
+	if state.IsAgentAlive() {
+		t.Fatal("fixture PID unexpectedly reported alive")
+	}
+
+	res := checkSkillsInventoryDrift(context.Background(), repoRoot)
+	if res.Status != StatusFixed {
+		t.Fatalf("dead recording state blocked repair: status=%v summary=%q", res.Status, res.Summary)
+	}
+	if _, err := os.Stat(managedFile); err != nil {
+		t.Errorf("managed file was not repaired after recording process died: %v", err)
+	}
+}
+
 // TestSkillsInventoryDrift_RegisteredInDefaultRegistry makes the wiring itself a
 // tested property: an unregistered check is dead code that every other test in
 // this file would still pass.
@@ -268,5 +315,51 @@ func TestSkillsInventoryDrift_FailedTrackedLookupVetoesTheApply(t *testing.T) {
 	}
 	if res.Status == StatusFixed {
 		t.Errorf("expected the check to stand down, got StatusFixed (%s)", res.Summary)
+	}
+}
+
+func TestSkillsInventoryDrift_NeverNormalizesCommittedLockInBackground(t *testing.T) {
+	repoRoot, _ := installSkillsFixture(t)
+	lockPath := skillmanager.LockPath(repoRoot)
+
+	// Leave a descriptor recorded but unselected and remove local ownership
+	// state. Planning has no file action, but it does want to prune the descriptor
+	// from the committed lockfile. That write is still forbidden to the daemon.
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read lock: %v", err)
+	}
+	var lock map[string]any
+	if err := json.Unmarshal(data, &lock); err != nil {
+		t.Fatalf("decode lock: %v", err)
+	}
+	desired := lock["desired"].(map[string]any)
+	desired["targets"] = []string{}
+	normalizeCandidate, err := json.MarshalIndent(lock, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal lock: %v", err)
+	}
+	normalizeCandidate = append(normalizeCandidate, '\n')
+	if err := os.WriteFile(lockPath, normalizeCandidate, 0o644); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+	if err := os.Remove(skillmanager.StatePath(repoRoot)); err != nil {
+		t.Fatalf("remove local state: %v", err)
+	}
+	before, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read before: %v", err)
+	}
+
+	res := checkSkillsInventoryDrift(context.Background(), repoRoot)
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read after: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("daemon rewrote committed skill selection without any file action")
+	}
+	if res.Status != StatusFound {
+		t.Fatalf("expected the foreground repair to be reported, got %v (%s)", res.Status, res.Summary)
 	}
 }

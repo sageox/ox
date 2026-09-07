@@ -34,6 +34,24 @@ func claudeTargets() []adapterprotocol.SkillTarget {
 	}}
 }
 
+func retireCommandsRepo(t *testing.T) string {
+	t.Helper()
+	repoRoot := t.TempDir()
+	retireCommandsGit(t, repoRoot, "init", "--initial-branch=main")
+	retireCommandsGit(t, repoRoot, "config", "user.email", "test@example.com")
+	retireCommandsGit(t, repoRoot, "config", "user.name", "Test User")
+	return repoRoot
+}
+
+func retireCommandsGit(t *testing.T, repoRoot string, args ...string) string {
+	t.Helper()
+	out, err := runIsolatedGit(t, repoRoot, args...)
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+	return out
+}
+
 // TestRetireLegacyClaudeCommands_RemovesRetiredNamesNotCurrentOnes is the bug the
 // fold introduces if the retired list is not wired in: after the rename the
 // catalog knows "ox-cli-prime" while the file on disk is still "ox-prime.md", so
@@ -41,7 +59,7 @@ func claudeTargets() []adapterprotocol.SkillTarget {
 // survives forever. The user then has both /ox-prime and /ox-cli-prime, with the
 // old one still serving stale guidance.
 func TestRetireLegacyClaudeCommands_RemovesRetiredNamesNotCurrentOnes(t *testing.T) {
-	repoRoot := t.TempDir()
+	repoRoot := retireCommandsRepo(t)
 	retired := writeStampedCommand(t, repoRoot, "ox-prime", "legacy prime guidance\n")
 	orphan := writeStampedCommand(t, repoRoot, "ox-session-resume", "orphan that no release ever removed\n")
 
@@ -63,7 +81,7 @@ func TestRetireLegacyClaudeCommands_RemovesRetiredNamesNotCurrentOnes(t *testing
 // an ox-stamped file the user has since edited (stamp present but no longer
 // matching the body). Deleting either destroys work ox was never given.
 func TestRetireLegacyClaudeCommands_PreservesUserEditedAndUserAuthoredFiles(t *testing.T) {
-	repoRoot := t.TempDir()
+	repoRoot := retireCommandsRepo(t)
 
 	// Stamped by ox, then edited by the user: the stamp no longer verifies.
 	edited := writeStampedCommand(t, repoRoot, "ox-status", "original body\n")
@@ -105,7 +123,7 @@ func TestRetireLegacyClaudeCommands_PreservesUserEditedAndUserAuthoredFiles(t *t
 // selected Claude has no .claude/commands surface to retire, and the sweep must
 // not reach into a directory it does not own.
 func TestRetireLegacyClaudeCommands_NoOpWithoutAClaudeTarget(t *testing.T) {
-	repoRoot := t.TempDir()
+	repoRoot := retireCommandsRepo(t)
 	kept := writeStampedCommand(t, repoRoot, "ox-prime", "legacy prime guidance\n")
 
 	retireLegacyClaudeCommands(repoRoot, []adapterprotocol.SkillTarget{{
@@ -118,5 +136,26 @@ func TestRetireLegacyClaudeCommands_NoOpWithoutAClaudeTarget(t *testing.T) {
 
 	if _, err := os.Stat(kept); err != nil {
 		t.Errorf("sweep removed a Claude command in a project with no Claude target: %v", err)
+	}
+}
+
+func TestRetireLegacyClaudeCommands_PreservesTrackedFilesForMigration(t *testing.T) {
+	repoRoot := retireCommandsRepo(t)
+	if err := os.WriteFile(filepath.Join(repoRoot, "README.md"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	retireCommandsGit(t, repoRoot, "add", "--", "README.md")
+	retireCommandsGit(t, repoRoot, "commit", "-q", "-m", "seed")
+	tracked := writeStampedCommand(t, repoRoot, "ox-prime", "legacy prime guidance\n")
+	retireCommandsGit(t, repoRoot, "add", "--", ".claude/commands/ox-prime.md")
+	retireCommandsGit(t, repoRoot, "commit", "-q", "-m", "track legacy command")
+
+	retireLegacyClaudeCommands(repoRoot, claudeTargets())
+
+	if _, err := os.Stat(tracked); err != nil {
+		t.Fatalf("tracked command was deleted before the guarded migration could verify it: %v", err)
+	}
+	if status := retireCommandsGit(t, repoRoot, "status", "--porcelain", "--", ".claude/commands/ox-prime.md"); status != "" {
+		t.Fatalf("init-time retirement dirtied the tracked command: %q", status)
 	}
 }

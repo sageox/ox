@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
@@ -23,6 +24,7 @@ import (
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/prime"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
@@ -280,9 +282,8 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 		// the env-var lookup so even the "missing agent id" error
 		// path gets the correct span name.
 		renameDispatcherSpan(dispatchedCommandPath(args)...)
-		envID := os.Getenv("SAGEOX_AGENT_ID")
-		if agentinstance.IsValidAgentID(envID) {
-			return runWithAgentID(cmd, envID, args)
+		if agentID := resolveImplicitAgentID(); agentID != "" {
+			return runWithAgentID(cmd, agentID, args)
 		}
 		return fmt.Errorf("no agent ID: %q requires an agent ID (run 'ox agent prime' first)", firstArg)
 	}
@@ -296,6 +297,41 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%s", msg)
 	}
 	return fmt.Errorf("unknown command or invalid agent_id: %s\nRun 'ox agent --help' for usage", firstArg)
+}
+
+// resolveImplicitAgentID resolves `ox agent session ...` and the other
+// agent-ID-free shorthands to the AI coworker that owns the calling process.
+//
+// SAGEOX_AGENT_ID remains the cheapest path for Claude Code, whose env file can
+// export it into later tool calls. Other AI coworkers cannot generally mutate
+// their parent environment, so prime's native-session marker is the portable
+// identity source. When an agent has no native session ID, fall back to the
+// live agent-process PID recorded in the marker. The PID lookup returns nil
+// when different agent IDs share that process, rather than guessing among
+// unrelated or pre-clear sessions.
+func resolveImplicitAgentID() string {
+	if envID := os.Getenv("SAGEOX_AGENT_ID"); agentinstance.IsValidAgentID(envID) {
+		return envID
+	}
+
+	agent := agentx.CurrentAgent()
+	if agent == nil {
+		return ""
+	}
+	if agent.SupportsSession() {
+		if nativeSessionID := agent.SessionID(agentx.NewSystemEnvironment()); nativeSessionID != "" {
+			marker, err := ReadSessionMarker(nativeSessionID)
+			if err == nil && marker != nil && agentinstance.IsValidAgentID(marker.AgentID) {
+				return marker.AgentID
+			}
+		}
+	}
+
+	marker := FindUnambiguousSessionMarkerByPID(proc.FindAgentAncestorPID())
+	if marker == nil || !agentinstance.IsValidAgentID(marker.AgentID) {
+		return ""
+	}
+	return marker.AgentID
 }
 
 // renderAgentHumanHandoff directs a person who invokes bare `ox agent` to

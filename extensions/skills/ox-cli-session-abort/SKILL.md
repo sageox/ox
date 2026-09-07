@@ -11,10 +11,8 @@ disable-model-invocation: true
 > It performs a lifecycle or diagnostic action with side effects, so never
 > invoke it on your own initiative.
 
-     belongs in the ox CLI JSON output (guidance field), not here.
-     Skills are agent-specific wrappers; ox serves all agents (Codex, etc.). -->
 Abort a session, discarding all local data without uploading to the ledger.
-This is destructive and cannot be undone. Use `/ox-session-stop` to save instead.
+This is destructive and cannot be undone. Use `ox agent session stop` to save instead.
 
 To abort the current session:
 $ox agent session abort --force

@@ -67,7 +67,7 @@ func TestValidateRejectsUnsafeAndMalformedSources(t *testing.T) {
 }
 
 func TestPortableSkillsAvoidHostSpecificActivationSyntax(t *testing.T) {
-	selected, err := SelectedBundles("1.0.0", nil, []string{"core", "attest"})
+	selected, err := SelectedBundles("1.0.0", nil, []string{"core", "onramp", "lifecycle", "attest"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,6 +84,17 @@ func TestPortableSkillsAvoidHostSpecificActivationSyntax(t *testing.T) {
 			if strings.Contains(body, phrase) {
 				t.Errorf("portable skill %s contains host-specific activation phrase %q", skill.Name, phrase)
 			}
+		}
+	}
+}
+
+func TestValidateFrontmatterRejectsUnmatchedHTMLCommentFence(t *testing.T) {
+	for _, body := range []string{
+		"---\nname: ox-cli-demo\ndescription: demo\n---\nbody\n-->\n",
+		"---\nname: ox-cli-demo\ndescription: demo\n---\n<!-- body\n",
+	} {
+		if err := validateFrontmatter("ox-cli-demo", body); err == nil {
+			t.Errorf("validateFrontmatter accepted unmatched HTML comment fence in %q", body)
 		}
 	}
 }

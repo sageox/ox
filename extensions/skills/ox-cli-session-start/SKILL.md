@@ -11,10 +11,6 @@ disable-model-invocation: true
 > It performs a lifecycle or diagnostic action with side effects, so never
 > invoke it on your own initiative.
 
-     belongs in the ox CLI JSON output (guidance field), not here.
-     Skills are agent-specific wrappers; ox serves all agents (Codex, etc.).
-     Exception: Post-Command sections that require agent-side actions (e.g.,
-     displaying a notice, generating a summary) are legitimate here. -->
 Start recording this agent session to the project ledger.
 
 ## Post-Command (REQUIRED)

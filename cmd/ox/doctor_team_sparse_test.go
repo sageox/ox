@@ -166,3 +166,51 @@ func TestMissingSparseTopLevelDirs_UntrackedContentDoesNotMaskTheOmission(t *tes
 		t.Errorf("untracked local content masked the omission; team rules would silently never materialize. got %v", missing)
 	}
 }
+
+func TestRepairTeamSparseCheckout_MaterializesManifestIncludedDirectory(t *testing.T) {
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
+		}
+	}
+	repo := t.TempDir()
+	run(repo, "init", "--initial-branch=main")
+	run(repo, "config", "user.email", "t@example.com")
+	run(repo, "config", "user.name", "T")
+	for rel, content := range map[string]string{
+		".sageox/sync.manifest": "version 1\ninclude .sageox/\ninclude agents/\ninclude memory/\n",
+		"agents/rules/team.md":  "team rule\n",
+		"memory/MEMORY.md":      "memory\n",
+		"README.md":             "root\n",
+	} {
+		p := filepath.Join(repo, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	run(repo, "add", "-A")
+	run(repo, "commit", "-q", "-m", "seed")
+	run(repo, "sparse-checkout", "init", "--no-cone")
+	run(repo, "sparse-checkout", "set", "--no-cone", "/*", "!/*/", "/.sageox/", "/memory/")
+
+	cfg := manifest.ParseFile(filepath.Join(repo, ".sageox", "sync.manifest"), manifest.RepoKindTeamContext)
+	missing := missingSparseTopLevelDirs(repo, cfg)
+	if !strings.Contains(strings.Join(manifestIncludedMissingDirs(cfg, missing), ","), "agents/") {
+		t.Fatalf("fixture did not classify the omitted manifest directory as locally repairable: %v", missing)
+	}
+	if err := repairTeamSparseCheckout(repo); err != nil {
+		t.Fatalf("repairTeamSparseCheckout: %v", err)
+	}
+	if missing := missingSparseTopLevelDirs(repo, cfg); len(missing) != 0 {
+		t.Fatalf("repair did not materialize the manifest-included directory: %v", missing)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "agents", "rules", "team.md")); err != nil {
+		t.Fatalf("team rule remains absent after repair: %v", err)
+	}
+}

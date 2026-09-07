@@ -11,9 +11,6 @@ disable-model-invocation: true
 > It performs a lifecycle or diagnostic action with side effects, so never
 > invoke it on your own initiative.
 
-     lives in the ox CLI JSON output (guidance field), not here — ox serves
-     all agents (Codex, Droid). Only the host-specific /rename mechanism is a
-     legitimate Layer-2 note below. -->
 Claim a cart and start working on it.
 
 ## Post-Command

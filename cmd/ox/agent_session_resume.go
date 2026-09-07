@@ -54,7 +54,7 @@ func runAgentSessionResume(inst *agentinstance.Instance, _ []string) error {
 			SessionName: session.GetSessionName(state.SessionPath),
 			Status:      "not_suspended",
 			Message:     "session is not suspended; nothing to resume",
-			Guidance:    "Already recording. Pause with `ox session pause` to suspend.",
+			Guidance:    "Already recording. Pause with `ox agent session pause` to suspend.",
 		})
 	}
 

@@ -35,6 +35,7 @@ type upgradeResult struct {
 	InstallMethod   installMethod `json:"install_method"`
 	ReleaseURL      string        `json:"release_url,omitempty"`
 	Message         string        `json:"message,omitempty"`
+	DaemonsStopped  int           `json:"daemons_stopped,omitempty"`
 }
 
 var upgradeCmd = &cobra.Command{
@@ -129,6 +130,12 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 
 	result.Status = "upgraded"
 	result.Message = fmt.Sprintf("Upgraded to v%s", vResult.LatestVersion)
+	// This process still contains the OLD compiled-in version and skill catalog,
+	// even after brew/go install/self-replace updates the executable on disk. It
+	// may safely stop old daemons, but must leave inventory reconciliation to the
+	// next invocation of the new binary (`ox agent prime`). Running maintenance
+	// here, before rendering, also keeps --json behavior identical to text mode.
+	result.DaemonsStopped = retireStaleDaemonsAfterUpgrade()
 	return outputUpgradeResult(cmd, result, jsonOutput)
 }
 
@@ -160,19 +167,9 @@ func outputUpgradeResult(cmd *cobra.Command, result upgradeResult, jsonOutput bo
 	case "upgraded":
 		fmt.Printf("\n%s %s\n", cli.StyleSuccess.Render("✓"), result.Message)
 		fmt.Printf("%s %s\n", cli.StyleDim.Render("Release notes:"), result.ReleaseURL)
-		// Retire daemons still running the previous binary. Left alive they would
-		// keep reconciling repositories against the OLD embedded catalog — see
-		// retireStaleDaemonsAfterUpgrade.
-		// Order matters: retire the stale daemons FIRST. Each is still running the
-		// previous binary with the previous catalog compiled in, so one that ticks
-		// while we are reconciling would write the OLD skills back over the new ones.
-		if n := retireStaleDaemonsAfterUpgrade(); n > 0 {
+		if result.DaemonsStopped > 0 {
 			fmt.Printf("%s %s\n", cli.StyleDim.Render("Daemons:"),
 				"stopped so they restart on the new version (they respawn on demand)")
-		}
-		if n := reconcileKnownReposAfterUpgrade(); n > 0 {
-			fmt.Printf("%s %s\n", cli.StyleDim.Render("Skills:"),
-				fmt.Sprintf("refreshed in %d repository/repositories", n))
 		}
 		fmt.Printf("%s %s\n", cli.StyleDim.Render("Tip:"), "Restart your terminal to pick up the new binary in this shell")
 	case "manual":

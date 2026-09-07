@@ -38,6 +38,11 @@ func migrationRepo(t *testing.T) string {
 
 	// ox-owned, current reserved names
 	writeRepoFile(t, root, ".claude/skills/ox-cli-plan/SKILL.md", "managed\n")
+	prime, err := canonicalSkillManifest("ox-cli-prime")
+	if err != nil {
+		t.Fatalf("load canonical prime skill: %v", err)
+	}
+	writeRepoFile(t, root, ".claude/skills/ox-cli-prime/SKILL.md", string(prime))
 	writeRepoFile(t, root, ".claude/rules/ox-cli.md", "managed rule\n")
 	// ox-owned, superseded legacy names carrying a VERIFYING stamp
 	writeRepoFile(t, root, ".claude/commands/ox-prime.md",
@@ -461,6 +466,63 @@ func TestLegacyMigration_AgentsTargetDoesNotReplaceClaudeCommands(t *testing.T) 
 	}
 }
 
+func TestLegacyMigration_DescriptorWithoutInstalledClaudeSkillDoesNotReplaceCommands(t *testing.T) {
+	root := t.TempDir()
+	git(t, root, "init", "--initial-branch=main")
+	git(t, root, "config", "user.email", "t@e.example")
+	git(t, root, "config", "user.name", "T")
+
+	command := ".claude/commands/ox-prime.md"
+	writeRepoFile(t, root, command,
+		string(agentx.StampedContent([]byte("legacy prime\n"), "0.14.0", "ox")))
+	writeRepoFile(t, root, ".sageox/skills.lock.json", `{
+  "schema_version": 2,
+  "desired": {"bundles": ["lifecycle"], "targets": ["claude-project"]},
+  "targets": [{"key": "claude-project", "root": ".claude/skills", "format": "agent-skills/v1", "scope": "project", "link_policy": "reject"}]
+}`)
+	git(t, root, "add", "-A")
+	git(t, root, "commit", "-q", "-m", "descriptor without materialized replacement")
+
+	m, err := planLegacyMigration(root)
+	if err != nil {
+		t.Fatalf("planLegacyMigration: %v", err)
+	}
+	if m.replacementAvailable {
+		t.Fatal("a target descriptor was treated as an installed replacement")
+	}
+	if strings.Contains(strings.Join(m.remove, "\n"), command) {
+		t.Fatalf("legacy command would be removed after skill reconciliation failed: %v", m.remove)
+	}
+}
+
+func TestLegacyMigration_NoInstalledClaudeSkillPreservesUntrackedCommands(t *testing.T) {
+	root := t.TempDir()
+	git(t, root, "init", "--initial-branch=main")
+	git(t, root, "config", "user.email", "t@e.example")
+	git(t, root, "config", "user.name", "T")
+	writeRepoFile(t, root, ".sageox/skills.lock.json", `{
+  "schema_version": 2,
+  "desired": {"bundles": ["lifecycle"], "targets": ["claude-project"]},
+  "targets": [{"key": "claude-project", "root": ".claude/skills", "format": "agent-skills/v1", "scope": "project", "link_policy": "reject"}]
+}`)
+	git(t, root, "add", "-A")
+	git(t, root, "commit", "-q", "-m", "configured without materialized skills")
+
+	command := ".claude/commands/ox-cli-prime.md"
+	writeRepoFile(t, root, command,
+		string(agentx.StampedContent([]byte("legacy prime\n"), "0.14.0", "ox")))
+	m, err := planLegacyMigration(root)
+	if err != nil {
+		t.Fatalf("planLegacyMigration: %v", err)
+	}
+	if len(m.cleanup) != 0 {
+		t.Fatalf("untracked legacy command scheduled for deletion without a replacement: %v", m.cleanup)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(command))); err != nil {
+		t.Fatalf("legacy command was not preserved: %v", err)
+	}
+}
+
 func TestLegacyMigration_FailedCommitPreservesUnstagedUncachedBytes(t *testing.T) {
 	root := migrationRepo(t)
 	managed := filepath.Join(root, ".claude", "skills", "ox-cli-plan", "SKILL.md")
@@ -524,7 +586,11 @@ func TestLegacyMigration_StagesOnlyOnRampManifest(t *testing.T) {
 	root := migrationRepo(t)
 	manifest := ".claude/skills/sageox/SKILL.md"
 	notes := ".claude/skills/sageox/notes.md"
-	writeRepoFile(t, root, manifest, "on-ramp\n")
+	onRamp, err := canonicalSkillManifest("sageox")
+	if err != nil {
+		t.Fatalf("load canonical on-ramp: %v", err)
+	}
+	writeRepoFile(t, root, manifest, string(onRamp))
 	writeRepoFile(t, root, notes, "user notes\n")
 	if _, err := ensureScopedIgnoreFiles(root); err != nil {
 		t.Fatalf("ensureScopedIgnoreFiles: %v", err)
@@ -546,6 +612,172 @@ func TestLegacyMigration_StagesOnlyOnRampManifest(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(notes))); err != nil {
 		t.Errorf("user file beside on-ramp did not remain on disk: %v", err)
+	}
+}
+
+func TestLegacyMigration_NeverAdoptsUserAuthoredUntrackedFootprint(t *testing.T) {
+	tests := []struct {
+		name    string
+		rel     string
+		content string
+	}{
+		{"on-ramp", ".claude/skills/sageox/SKILL.md", "# my own sageox skill\n"},
+		{"scoped ignore", ".claude/.gitignore", "my-private-rule/\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := migrationRepo(t)
+			writeRepoFile(t, root, tt.rel, tt.content)
+
+			m, err := planLegacyMigration(root)
+			if err != nil {
+				t.Fatalf("planLegacyMigration: %v", err)
+			}
+			if strings.Contains(strings.Join(m.adopt, "\n"), tt.rel) {
+				t.Fatalf("user-authored file was scheduled for adoption: %v", m.adopt)
+			}
+			if reason := migrationBlocker(root); !strings.Contains(reason, "unstaged changes") {
+				t.Fatalf("user-authored untracked footprint did not block the commit: %q", reason)
+			}
+		})
+	}
+}
+
+func TestLegacyMigration_AssumeUnchangedFootprintChangesStillBlockCommit(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		change func(t *testing.T, path string)
+	}{
+		{
+			name: "edit",
+			change: func(t *testing.T, path string) {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("read lockfile: %v", err)
+				}
+				if err := os.WriteFile(path, append(data, []byte("\n")...), 0o644); err != nil {
+					t.Fatalf("edit hidden lockfile: %v", err)
+				}
+			},
+		},
+		{
+			name: "deletion",
+			change: func(t *testing.T, path string) {
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("delete hidden lockfile: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := migrationRepo(t)
+			rel := ".sageox/skills.lock.json"
+			git(t, root, "update-index", "--assume-unchanged", "--", rel)
+			tt.change(t, filepath.Join(root, filepath.FromSlash(rel)))
+			if status := git(t, root, "status", "--porcelain", "--", rel); status != "" {
+				t.Fatalf("fixture change was not hidden by assume-unchanged: %q", status)
+			}
+
+			if reason := migrationBlocker(root); !strings.Contains(reason, "unstaged changes") {
+				t.Fatalf("hidden footprint change did not block the automatic commit: %q", reason)
+			}
+		})
+	}
+}
+
+func TestTrackedFileMatchesHead_AppliesCleanFilters(t *testing.T) {
+	root := migrationRepo(t)
+	rel := ".sageox/skills.lock.json"
+	writeRepoFile(t, root, ".gitattributes", rel+" text eol=crlf\n")
+	git(t, root, "add", "--", ".gitattributes")
+	git(t, root, "commit", "-q", "-m", "configure CRLF checkout")
+
+	lockPath := filepath.Join(root, filepath.FromSlash(rel))
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read lockfile: %v", err)
+	}
+	data = []byte(strings.ReplaceAll(string(data), "\n", "\r\n"))
+	if err := os.WriteFile(lockPath, data, 0o644); err != nil {
+		t.Fatalf("write CRLF lockfile: %v", err)
+	}
+	if matches, err := trackedFileMatchesHead(root, rel); err != nil || !matches {
+		t.Fatalf("filtered working tree did not match HEAD: matches=%v err=%v", matches, err)
+	}
+}
+
+func TestLegacyMigration_CommitFailureRestoresIgnoreAndUntrackedCommand(t *testing.T) {
+	root := migrationRepo(t)
+	ignoreRel := ".claude/.gitignore"
+	ignoreBefore := "user-rule/\n"
+	writeRepoFile(t, root, ignoreRel, ignoreBefore)
+	git(t, root, "add", "--force", "--", ignoreRel)
+	git(t, root, "commit", "-q", "-m", "track user ignore")
+
+	commandRel := ".claude/commands/ox-cli-prime.md"
+	commandBefore := string(agentx.StampedContent([]byte("legacy current-name command\n"), "0.14.0", "ox"))
+	writeRepoFile(t, root, commandRel, commandBefore)
+
+	hooks := filepath.Join(t.TempDir(), "reject-hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hooks, "pre-commit"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+	git(t, root, "config", "core.hooksPath", hooks)
+
+	m, err := planLegacyMigration(root)
+	if err != nil {
+		t.Fatalf("planLegacyMigration: %v", err)
+	}
+	if err := m.Apply(); err == nil {
+		t.Fatal("Apply should fail on the rejecting hook")
+	}
+	for rel, want := range map[string]string{ignoreRel: ignoreBefore, commandRel: commandBefore} {
+		got, readErr := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if readErr != nil || string(got) != want {
+			t.Errorf("%s was not restored: err=%v got=%q want=%q", rel, readErr, got, want)
+		}
+	}
+	if status := git(t, root, "status", "--porcelain"); status != "?? .claude/commands/ox-cli-prime.md" {
+		t.Errorf("rollback did not restore the exact pre-apply state: %q", status)
+	}
+}
+
+func TestLegacyMigration_LegacyRuleFrontmatterMustVerify(t *testing.T) {
+	root := migrationRepo(t)
+	rel := ".claude/rules/ox.md"
+	body := agentx.StampedContent([]byte("managed body\n"), "0.14.0", agentx.DefaultStampPrefix)
+	writeRepoFile(t, root, rel, "---\ndescription: user changed this\n---\n"+string(body))
+	git(t, root, "add", "--", rel)
+	git(t, root, "commit", "-q", "-m", "customize legacy rule frontmatter")
+
+	m, err := planLegacyMigration(root)
+	if err != nil {
+		t.Fatalf("planLegacyMigration: %v", err)
+	}
+	if strings.Contains(strings.Join(m.remove, "\n"), rel) {
+		t.Fatalf("rule with user-edited frontmatter was scheduled for deletion: %v", m.remove)
+	}
+}
+
+func TestLegacyMigration_PreflightIgnoresDoctorAuthoredFootprintChanges(t *testing.T) {
+	root := migrationRepo(t)
+	preflight := migrationBlocker(root)
+	if preflight != "" {
+		t.Fatalf("clean preflight unexpectedly blocked: %s", preflight)
+	}
+	if _, err := reconcileCommittedSkills(root); err != nil {
+		t.Fatalf("simulate Doctor skill reconcile: %v", err)
+	}
+
+	result, pending := checkLegacyOxFilesWithPreflight(root, true, preflight)
+	if pending {
+		t.Fatalf("Doctor deferred on changes it authored: %s (%s)", result.message, result.detail)
+	}
+	if subject := git(t, root, "log", "-1", "--pretty=%s"); subject != MigrationCommitSubject {
+		t.Fatalf("migration was not committed after Doctor reconciliation: %q", subject)
 	}
 }
 

@@ -58,7 +58,7 @@ func runAgentSessionPause(inst *agentinstance.Instance, _ []string) error {
 			SuspendedAt: state.SuspendedAt.UTC().Format(time.RFC3339),
 			Seq:         state.EntryCount,
 			PauseCount:  state.PauseCount,
-			Guidance:    "No change. Resume with `ox session resume` (or /ox-session-resume).",
+			Guidance:    "No change. Resume with `ox agent session resume`.",
 		})
 	}
 
@@ -106,7 +106,7 @@ func runAgentSessionPause(inst *agentinstance.Instance, _ []string) error {
 		Seq:         seq,
 		PauseCount:  pauseCount,
 		SuspendedAt: now.Format(time.RFC3339),
-		Guidance:    "Recording continues to local cache; the suspended range will be excluded from upload. Resume with `ox session resume` (or /ox-session-resume).",
+		Guidance:    "Recording continues to local cache; the suspended range will be excluded from upload. Resume with `ox agent session resume`.",
 	})
 }
 

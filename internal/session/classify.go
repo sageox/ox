@@ -79,8 +79,8 @@ const ghostHeuristicAge = 5 * time.Minute
 
 // StopReason constants for how a session ended.
 const (
-	StopReasonStopped       = "stopped"        // user explicitly stopped via /ox-session-stop
-	StopReasonCanceled      = "canceled"       // user explicitly canceled via /ox-session-abort
+	StopReasonStopped       = "stopped"        // user explicitly stopped via ox agent session stop
+	StopReasonCanceled      = "canceled"       // user explicitly canceled via ox agent session abort
 	StopReasonRecovered     = "recovered"      // recovered from orphan by daemon anti-entropy
 	StopReasonRateLimited   = "rate_limited"   // adapter detected agent hit a usage / rate limit
 	StopReasonQuotaExceeded = "quota_exceeded" // adapter detected agent quota exhausted

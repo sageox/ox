@@ -541,7 +541,7 @@ func emitSuspendedNudge(w io.Writer, projectRoot, agentID string) {
 		return
 	}
 	dur := formatPausedDuration(time.Since(*state.SuspendedAt))
-	fmt.Fprintf(w, "<system-reminder>[ox] ⏸ Recording SUSPENDED (%s ago). Resume: /ox-session-resume · Stop: /ox-session-stop</system-reminder>\n", dur)
+	fmt.Fprintf(w, "<system-reminder>[ox] ⏸ Recording SUSPENDED (%s ago). Resume: ox agent session resume · Stop: ox agent session stop</system-reminder>\n", dur)
 }
 
 // handleCompact handles the compact phase.

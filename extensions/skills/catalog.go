@@ -254,6 +254,9 @@ func validateSource(source fs.FS, catalog []Bundle) error {
 }
 
 func validateFrontmatter(name, content string) error {
+	if hasUnmatchedHTMLCommentFence(content) {
+		return fmt.Errorf("canonical skill %q has an unmatched HTML comment fence", name)
+	}
 	if !strings.HasPrefix(content, "---\n") {
 		return fmt.Errorf("canonical skill %q must start with YAML frontmatter", name)
 	}
@@ -292,6 +295,64 @@ func validateFrontmatter(name, content string) error {
 		}
 	}
 	return nil
+}
+
+func hasUnmatchedHTMLCommentFence(content string) bool {
+	inComment := false
+	inCodeFence := false
+	fence := ""
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !inComment {
+			if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+				marker := trimmed[:3]
+				if !inCodeFence {
+					inCodeFence, fence = true, marker
+				} else if marker == fence {
+					inCodeFence, fence = false, ""
+				}
+				continue
+			}
+			if inCodeFence {
+				continue
+			}
+		}
+
+		for i := 0; i < len(line); {
+			if inComment {
+				end := strings.Index(line[i:], "-->")
+				if end < 0 {
+					break
+				}
+				inComment = false
+				i += end + len("-->")
+				continue
+			}
+			if line[i] == '`' {
+				run := 1
+				for i+run < len(line) && line[i+run] == '`' {
+					run++
+				}
+				delim := strings.Repeat("`", run)
+				end := strings.Index(line[i+run:], delim)
+				if end < 0 {
+					break
+				}
+				i += run + end + run
+				continue
+			}
+			if strings.HasPrefix(line[i:], "<!--") {
+				inComment = true
+				i += len("<!--")
+				continue
+			}
+			if strings.HasPrefix(line[i:], "-->") {
+				return true
+			}
+			i++
+		}
+	}
+	return inComment
 }
 
 func Selected(version string, names []string) ([]Skill, error) {

@@ -3,8 +3,10 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -163,16 +165,9 @@ func TestHandleCheckRules_UserManagedRuleNotStale(t *testing.T) {
 
 // --- C. Uninstall lifecycle ---
 
-// TestHandleUninstallRules_AgentxLimitationOnTopLevelOxMd documents that
-// agentx v0.1.10's Uninstall cannot remove the top-level ox.md because
-// ExtractCommandHash only inspects the first line, and YAML frontmatter
-// (description: ...) lives there. The adapter works around this for the
-// sageox/ namespace via adapterstamp.LooksStamped, but the top-level file still
-// hits the upstream bug.
-//
-// When agentx fixes the limitation upstream, this test will FAIL —
-// prompting us to remove it and simplify the workaround.
-func TestHandleUninstallRules_AgentxLimitationOnTopLevelOxMd(t *testing.T) {
+// TestHandleUninstallRules_RemovesCurrentFlatRules verifies uninstall handles
+// the YAML-frontmatter rules that agentx's first-line-only stamp reader misses.
+func TestHandleUninstallRules_RemovesCurrentFlatRules(t *testing.T) {
 	dir := t.TempDir()
 	params := adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.8.0"}
 
@@ -182,15 +177,118 @@ func TestHandleUninstallRules_AgentxLimitationOnTopLevelOxMd(t *testing.T) {
 	resp, err := handleUninstallRules(params)
 	require.NoError(t, err)
 
-	for _, name := range resp.FilesRemoved {
-		if name == "ox-cli.md" {
-			t.Fatalf("ox.md was removed — agentx may have fixed the frontmatter limitation; remove this test and update the workaround in rules.go")
-		}
+	for _, name := range []string{"ox-cli.md", "ox-cli-use-team-context.md"} {
+		assert.Contains(t, resp.FilesRemoved, name)
+		assert.NoFileExists(t, filepath.Join(dir, ".factory", "rules", name))
 	}
+}
 
-	ruleFile := filepath.Join(dir, ".factory", "rules", "ox-cli.md")
-	_, err = os.Stat(ruleFile)
-	assert.NoError(t, err, "ox.md survives uninstall due to agentx frontmatter limitation")
+func stampedLegacyRule(body, description string) []byte {
+	frontmatter := "---\ndescription: " + description + "\n---\n"
+	return append([]byte(frontmatter), agentx.StampedContent([]byte(body), "0.14.0", agentx.DefaultStampPrefix)...)
+}
+
+func seedLegacyNamespaceRule(t *testing.T, repoRoot string) string {
+	t.Helper()
+	nsDir := filepath.Join(repoRoot, ".factory", "rules", "sageox")
+	require.NoError(t, os.MkdirAll(nsDir, 0o755))
+	path := filepath.Join(nsDir, "use-team-context.md")
+	require.NoError(t, os.WriteFile(path, stampedLegacyRule("# legacy pointer rule\n", teamContextRuleDescription), 0o644))
+	return path
+}
+
+func TestHandleInstallRules_RetiresVerifiedLegacyRuleSurface(t *testing.T) {
+	dir := t.TempDir()
+	rulesDir := filepath.Join(dir, ".factory", "rules")
+	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+	legacyTop := filepath.Join(rulesDir, "ox.md")
+	require.NoError(t, os.WriteFile(legacyTop, stampedLegacyRule("# legacy ox rule\n", oxRuleDescription), 0o644))
+	legacyNS := seedLegacyNamespaceRule(t, dir)
+
+	_, err := handleInstallRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.15.0"})
+	require.NoError(t, err)
+	assert.NoFileExists(t, legacyTop)
+	assert.NoFileExists(t, legacyNS)
+}
+
+func TestHandleInstallRules_PreservesEditedLegacyRules(t *testing.T) {
+	dir := t.TempDir()
+	rulesDir := filepath.Join(dir, ".factory", "rules")
+	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+	legacyTop := filepath.Join(rulesDir, "ox.md")
+	require.NoError(t, os.WriteFile(legacyTop,
+		append(stampedLegacyRule("# legacy ox rule\n", oxRuleDescription), []byte("user edit\n")...), 0o644))
+	legacyNS := seedLegacyNamespaceRule(t, dir)
+	nsData, err := os.ReadFile(legacyNS)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(legacyNS, append(nsData, []byte("user edit\n")...), 0o644))
+
+	_, err = handleInstallRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.15.0"})
+	require.NoError(t, err)
+	assert.FileExists(t, legacyTop)
+	assert.FileExists(t, legacyNS)
+}
+
+func TestHandleInstallRules_PreservesFrontmatterEditedLegacyRules(t *testing.T) {
+	dir := t.TempDir()
+	rulesDir := filepath.Join(dir, ".factory", "rules")
+	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+	legacyTop := filepath.Join(rulesDir, "ox.md")
+	topData := strings.Replace(
+		string(stampedLegacyRule("# legacy ox rule\n", oxRuleDescription)),
+		oxRuleDescription,
+		"User-owned description",
+		1,
+	)
+	require.NoError(t, os.WriteFile(legacyTop, []byte(topData), 0o644))
+
+	legacyNS := seedLegacyNamespaceRule(t, dir)
+	nsData, err := os.ReadFile(legacyNS)
+	require.NoError(t, err)
+	nsData = []byte(strings.Replace(string(nsData), teamContextRuleDescription, "User-owned description", 1))
+	require.NoError(t, os.WriteFile(legacyNS, nsData, 0o644))
+
+	_, err = handleInstallRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.15.0"})
+	require.NoError(t, err)
+	assert.FileExists(t, legacyTop, "frontmatter edits must make a legacy rule user-owned")
+	assert.FileExists(t, legacyNS, "frontmatter edits must make a legacy rule user-owned")
+}
+
+func TestHandleInstallRules_RetiresCRLFLegacyRules(t *testing.T) {
+	dir := t.TempDir()
+	rulesDir := filepath.Join(dir, ".factory", "rules")
+	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+	legacyTop := filepath.Join(rulesDir, "ox.md")
+	topData := strings.ReplaceAll(
+		string(stampedLegacyRule("# legacy ox rule\n", oxRuleDescription)),
+		"\n",
+		"\r\n",
+	)
+	require.NoError(t, os.WriteFile(legacyTop, []byte(topData), 0o644))
+
+	legacyNS := seedLegacyNamespaceRule(t, dir)
+	nsData, err := os.ReadFile(legacyNS)
+	require.NoError(t, err)
+	nsData = []byte(strings.ReplaceAll(string(nsData), "\n", "\r\n"))
+	require.NoError(t, os.WriteFile(legacyNS, nsData, 0o644))
+
+	_, err = handleInstallRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.15.0"})
+	require.NoError(t, err)
+	assert.NoFileExists(t, legacyTop, "CRLF checkout must not prevent clean legacy retirement")
+	assert.NoFileExists(t, legacyNS, "CRLF checkout must not prevent clean legacy retirement")
+}
+
+func TestHandleInstallRules_FailurePreservesLegacyRules(t *testing.T) {
+	dir := t.TempDir()
+	rulesDir := filepath.Join(dir, ".factory", "rules")
+	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+	legacyTop := filepath.Join(rulesDir, "ox.md")
+	require.NoError(t, os.WriteFile(legacyTop, stampedLegacyRule("# legacy ox rule\n", oxRuleDescription), 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(rulesDir, "ox-cli.md"), 0o755))
+
+	_, err := handleInstallRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.15.0"})
+	require.Error(t, err)
+	assert.FileExists(t, legacyTop, "legacy guidance must survive until replacement install succeeds")
 }
 
 // --- D. Diagnose integration ---

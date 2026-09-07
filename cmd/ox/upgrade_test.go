@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestDetectInstallMethod_DevBuild(t *testing.T) {
@@ -12,6 +16,30 @@ func TestDetectInstallMethod_DevBuild(t *testing.T) {
 	method := detectInstallMethod()
 	if method != installSource {
 		t.Errorf("expected installSource for test build, got %s", method)
+	}
+}
+
+func TestOutputUpgradeResultJSONIncludesPostUpgradeMaintenance(t *testing.T) {
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	result := upgradeResult{
+		Status:          "upgraded",
+		PreviousVersion: "0.14.0",
+		NewVersion:      "0.15.0",
+		InstallMethod:   installBinary,
+		DaemonsStopped:  2,
+	}
+
+	if err := outputUpgradeResult(cmd, result, true); err != nil {
+		t.Fatalf("outputUpgradeResult: %v", err)
+	}
+	var got upgradeResult
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("decode JSON: %v", err)
+	}
+	if got.DaemonsStopped != 2 {
+		t.Fatalf("daemons_stopped = %d, want 2", got.DaemonsStopped)
 	}
 }
 

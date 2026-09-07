@@ -74,7 +74,7 @@ func TestBuildSessionStartOutput(t *testing.T) {
 			assert.Equal(t, started.Format(time.RFC3339), out.Started)
 			assert.Equal(t, tt.notice, out.Notice)
 			assert.Equal(t, sessionStartGuidance, out.Guidance)
-			assert.Contains(t, out.Hint, "ox-session-stop")
+			assert.Contains(t, out.Hint, "ox agent session stop")
 
 			if tt.wantGeneric {
 				assert.Equal(t, tt.sessionFile, out.SessionFile)
