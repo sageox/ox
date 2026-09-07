@@ -280,7 +280,7 @@ Typical layout:
           <topic>.md             # one concern per file
           backend/postgres.md    # subdirectories supported
           frontend/react.md
-        commands/                # team slash commands
+        commands/                # team commands (read on demand, NOT slash commands)
         profiles/                # AI coworker profiles
       discussions/               # archived team meetings
       memory/                    # daily/weekly/monthly summaries

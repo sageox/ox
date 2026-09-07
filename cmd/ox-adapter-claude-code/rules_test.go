@@ -505,3 +505,40 @@ func TestHandleInstallRules_FailurePreservesLegacyRules(t *testing.T) {
 	require.Error(t, err)
 	assert.FileExists(t, legacyTop, "legacy guidance must survive until replacement install succeeds")
 }
+
+// TestPointerRule_TellsTheTruthAboutTeamContent verifies the installed
+// use-team-context pointer rule matches what ox actually does. This rule is the
+// only discovery instruction most AI coworkers ever read, so a false statement
+// in it sends every agent on the team after something that does not exist.
+//
+// Failure prevented: two shipped falsehoods. (1) The rule advertised
+// agents/commands/ as "team slash commands" while ox installs no slash command
+// for them at all — an agent that believed it would invoke /deploy and get
+// nothing. (2) The rule tells the agent to Read "the absolute path shown in the
+// prime output's <team-rules> block"; prime emitted a relative path, so the
+// instruction could not be followed. Both are now true, and this pins them.
+func TestPointerRule_TellsTheTruthAboutTeamContent(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := handleInstallRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.8.0"})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, ".claude", "rules", "ox-cli-use-team-context.md"))
+	require.NoError(t, err)
+	body := string(data)
+
+	// the canonical roots ox now actually reads (with coworkers/ as fallback).
+	// The rule renders them as an indented tree under agents/, so assert on the
+	// rendered lines rather than a joined "agents/commands/" path.
+	assert.Contains(t, body, "      agents/", "pointer rule must show the canonical agents/ tree")
+	assert.Contains(t, body, "        profiles/", "pointer rule must name the profiles root under agents/")
+	assert.Contains(t, body, "        commands/", "pointer rule must name the commands root under agents/")
+
+	// ox installs no host slash command for team commands — never imply it does
+	assert.NotContains(t, body, "team slash commands",
+		"pointer rule must not advertise team commands as invocable slash commands")
+
+	// the absolute-path instruction is only honest because prime emits AbsPath
+	assert.Contains(t, body, "absolute path",
+		"pointer rule tells agents to Read the absolute path; prime must keep emitting one")
+}

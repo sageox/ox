@@ -310,3 +310,29 @@ func TestDiagnose_RulesMissing(t *testing.T) {
 	}
 	assert.Contains(t, slugs, "droid:rules-missing")
 }
+
+// TestPointerRule_TellsTheTruthAboutTeamContent is the droid twin of the
+// claude-code assertion: both adapters ship the same pointer-rule text from
+// separate Go literals, so a correction to one can silently miss the other.
+// Failure prevented: droid users keep reading that team commands are slash
+// commands after the claude-code copy was fixed.
+func TestPointerRule_TellsTheTruthAboutTeamContent(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := handleInstallRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.8.0"})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, ".factory", "rules", "ox-cli-use-team-context.md"))
+	require.NoError(t, err)
+	body := string(data)
+
+	assert.Contains(t, body, "      agents/")
+	assert.Contains(t, body, "        profiles/")
+	assert.Contains(t, body, "        commands/")
+	assert.NotContains(t, body, "team slash commands",
+		"pointer rule must not advertise team commands as invocable slash commands")
+	// droid's copy wraps the sentence, so compare on whitespace-normalized text
+	flat := strings.Join(strings.Fields(body), " ")
+	assert.Contains(t, flat, "absolute path shown in the prime output",
+		"pointer rule tells agents to read the absolute path; prime must keep emitting one")
+}

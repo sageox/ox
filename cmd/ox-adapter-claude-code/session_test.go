@@ -240,7 +240,7 @@ func TestFindSessionFile_MtimeBuffer(t *testing.T) {
 
 	// file mtime is exactly 30 seconds before sinceTime — at the buffer boundary
 	// the buffer subtracts 30s, so mtime == (since - 30s) should pass (>= comparison)
-	os.Remove(withinBuffer)
+	_ = os.Remove(withinBuffer)
 	atBoundary := filepath.Join(projectDir, "at-boundary.jsonl")
 	if err := os.WriteFile(atBoundary, content, 0o644); err != nil {
 		t.Fatal(err)
@@ -259,7 +259,7 @@ func TestFindSessionFile_MtimeBuffer(t *testing.T) {
 	}
 
 	// file mtime is 60 seconds before sinceTime — outside the 30s buffer
-	os.Remove(atBoundary)
+	_ = os.Remove(atBoundary)
 	outsideBuffer := filepath.Join(projectDir, "outside-buffer.jsonl")
 	if err := os.WriteFile(outsideBuffer, content, 0o644); err != nil {
 		t.Fatal(err)
