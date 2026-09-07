@@ -3,6 +3,7 @@ package sageoxignore
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -123,6 +124,13 @@ func TestEnsureBlock_CreatedFlagDistinguishesNewFromExisting(t *testing.T) {
 // failure as "empty" would rewrite the file with only ox's block, destroying
 // every rule in it.
 func TestEnsureBlock_UnreadableFileIsAnErrorNotASilentOverwrite(t *testing.T) {
+	// Windows: Go's Chmod maps only the read-only bit, so 0o000 does NOT make a
+	// file unreadable and the read below would succeed — this test would fail
+	// there while asserting nothing. os.Geteuid also returns -1 rather than 0 on
+	// Windows, so the root check alone never caught it.
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: chmod cannot make a file unreadable")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: permission bits do not apply")
 	}

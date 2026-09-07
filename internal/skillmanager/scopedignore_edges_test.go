@@ -15,7 +15,10 @@ func TestEnsureScopedIgnoreFilesForDirs_ReportsEveryDirectoryItCouldNotProtect(t
 	repo := t.TempDir()
 	outside := t.TempDir()
 
-	// .claude: the whole agent directory is a symlink out of the repository.
+	// Windows refuses symlink creation without Developer Mode or elevation, so the
+	// whole scenario is unreachable there. Skip on the FIRST failure rather than
+	// letting a later one hard-fail the run: the earlier version skipped here but
+	// used t.Fatalf below, so on Windows this test failed instead of skipping.
 	if err := os.Symlink(outside, filepath.Join(repo, ".claude")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
@@ -29,7 +32,7 @@ func TestEnsureScopedIgnoreFilesForDirs_ReportsEveryDirectoryItCouldNotProtect(t
 		t.Fatalf("write: %v", err)
 	}
 	if err := os.Symlink(victim, filepath.Join(agents, ".gitignore")); err != nil {
-		t.Fatalf("symlink: %v", err)
+		t.Skipf("symlinks unavailable: %v", err)
 	}
 	// .factory: a plain FILE where a directory should be.
 	if err := os.WriteFile(filepath.Join(repo, ".factory"), []byte("not a dir\n"), 0o644); err != nil {

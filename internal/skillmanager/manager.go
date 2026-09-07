@@ -353,7 +353,20 @@ func normalizeTarget(repoRoot string, target adapterprotocol.SkillTarget) (adapt
 		return adapterprotocol.SkillTarget{}, fmt.Errorf("skill target %q uses unsupported link policy %q", target.Key, target.LinkPolicy)
 	}
 	root := filepath.Clean(filepath.FromSlash(target.Root))
-	if root == "." || filepath.IsAbs(root) {
+	// filepath.IsAbs is NOT sufficient, because it is platform-dependent in a
+	// direction that weakens this guard exactly where it matters least obviously.
+	// On Windows an absolute path needs a volume name (`C:\…` or a `\\server\share`
+	// UNC), so IsAbs("/etc/skills") is FALSE there — a lockfile carrying that root
+	// would be reinterpreted as RELATIVE and joined under the repository. It stays
+	// contained, so it is not an escape, but the author's intent is silently
+	// rewritten and the guard ends up strictly weaker on Windows than on Unix.
+	// That asymmetry is not acceptable in a trust boundary fed by a committed file
+	// anyone who lands a pull request can shape.
+	//
+	// A leading slash or backslash means "rooted" on every platform we support,
+	// whatever the local volume grammar thinks.
+	if root == "." || filepath.IsAbs(root) ||
+		strings.HasPrefix(root, "/") || strings.HasPrefix(root, `\`) {
 		return adapterprotocol.SkillTarget{}, fmt.Errorf("skill target %q root must be repository-relative", target.Key)
 	}
 	if err := ensureWithin(repoRoot, filepath.Join(repoRoot, root)); err != nil {

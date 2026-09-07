@@ -1002,9 +1002,14 @@ func TestNormalizeTarget_RefusesEveryRootThatEscapesOrIsReserved(t *testing.T) {
 	}
 
 	refuse := map[string]adapterprotocol.SkillTarget{
-		"parent traversal":            with(func(x *adapterprotocol.SkillTarget) { x.Root = "../outside/skills" }),
-		"traversal after a real dir":  with(func(x *adapterprotocol.SkillTarget) { x.Root = ".claude/../../etc/skills" }),
-		"absolute path":               with(func(x *adapterprotocol.SkillTarget) { x.Root = "/etc/skills" }),
+		"parent traversal":           with(func(x *adapterprotocol.SkillTarget) { x.Root = "../outside/skills" }),
+		"traversal after a real dir": with(func(x *adapterprotocol.SkillTarget) { x.Root = ".claude/../../etc/skills" }),
+		// These two test ROOTED-path rejection, not filepath.IsAbs. Do not "fix"
+		// either into a C:\ path on Windows: IsAbs is false for both there (Windows
+		// wants a volume name), so a bare leading slash or backslash is precisely
+		// the case that used to slip through and be reinterpreted as relative.
+		"unix-rooted path":            with(func(x *adapterprotocol.SkillTarget) { x.Root = "/etc/skills" }),
+		"windows-rooted path":         with(func(x *adapterprotocol.SkillTarget) { x.Root = `\etc\skills` }),
 		"repository root itself":      with(func(x *adapterprotocol.SkillTarget) { x.Root = "." }),
 		"root normalizing to dot":     with(func(x *adapterprotocol.SkillTarget) { x.Root = ".claude/.." }),
 		"the git directory":           with(func(x *adapterprotocol.SkillTarget) { x.Root = ".git/hooks" }),
