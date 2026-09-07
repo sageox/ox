@@ -144,3 +144,38 @@ func TestDetectedOrClaudeTargets_FallsBackToTheClaudeProjection(t *testing.T) {
 		t.Errorf("fallback did not include the Claude projection: %+v", got)
 	}
 }
+
+// TestRetireLegacyClaudeCommands_NeverDeletesATrackedCommand.
+//
+// Retirement deletes from disk. For an UNTRACKED file that is invisible and
+// correct. For a TRACKED one it shows up as an unstaged deletion in the user's
+// `git status` — a background housekeeping step silently staging a removal from
+// their history. Those are the migration's to untrack in a reviewable commit, not
+// this sweep's to delete.
+func TestRetireLegacyClaudeCommands_NeverDeletesATrackedCommand(t *testing.T) {
+	root := migrationRepo(t)
+	cmds := filepath.Join(root, ".claude", "commands")
+	if err := os.MkdirAll(cmds, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// migrationRepo already tracks .claude/commands/ox-prime.md with exactly these
+	// bytes, which is the state under test: tracked AND stamp-verifying.
+	stamped := agentx.StampedContent([]byte("legacy prime\n"), "0.14.0", "ox")
+	trackedPath := filepath.Join(cmds, "ox-prime.md")
+
+	// An identical but UNTRACKED sibling, which retirement may remove.
+	untrackedPath := filepath.Join(cmds, "ox-recap.md")
+	if err := os.WriteFile(untrackedPath, stamped, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	retireLegacyClaudeCommands(root, detectedOrClaudeTargets(root))
+
+	if _, err := os.Stat(trackedPath); err != nil {
+		t.Errorf("a TRACKED legacy command was deleted; the user would find an unstaged deletion they did not make: %v", err)
+	}
+	if _, err := os.Stat(untrackedPath); !os.IsNotExist(err) {
+		t.Errorf("an untracked stamp-verified legacy command survived retirement: %v", err)
+	}
+}

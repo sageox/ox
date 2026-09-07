@@ -138,3 +138,64 @@ func TestCheckOxFilesNotTrackedIn_ReportsWithoutTouchingTheIndex(t *testing.T) {
 		t.Error("the diagnostic check mutated the git index")
 	}
 }
+
+// TestCheckOxFilesNotTrackedIn_ReportsTheCountAndPassesWhenClean: this check is
+// the standing signal that someone force-added a reserved path. Reporting zero
+// when files are tracked would hide the exact regression the ignore rules exist
+// to prevent.
+func TestCheckOxFilesNotTrackedIn_ReportsTheCountAndPassesWhenClean(t *testing.T) {
+	root := migrationRepo(t)
+
+	before := checkOxFilesNotTrackedIn(root, false)
+	if before.passed && !before.warning {
+		t.Errorf("a repository with tracked ox files reported clean: %q", before.message)
+	}
+
+	// Migrate, then it must report clean.
+	if res := checkLegacyOxFilesIn(root, true); !res.passed {
+		t.Fatalf("migration did not run: %q / %q", res.message, res.detail)
+	}
+	after := checkOxFilesNotTrackedIn(root, false)
+	if !after.passed || after.warning {
+		t.Errorf("after migration the check still reports work: %q / %q", after.message, after.detail)
+	}
+}
+
+// TestCheckOxIgnoreRulesIn_PassesOnARepositoryWithNoAgentDirs: a project that has
+// never run ox must not be reported as broken, and must not sprout directories.
+func TestCheckOxIgnoreRulesIn_PassesOnARepositoryWithNoAgentDirs(t *testing.T) {
+	root := newIgnoreTestRepo(t)
+
+	res := checkOxIgnoreRulesIn(root, true)
+	if !res.passed || res.warning {
+		t.Errorf("a repository ox has never touched was reported broken: %q / %q", res.message, res.detail)
+	}
+	for _, dir := range []string{".claude", ".agents", ".factory"} {
+		if _, err := os.Stat(filepath.Join(root, dir)); err == nil {
+			t.Errorf("the check created %s/", dir)
+		}
+	}
+}
+
+// TestCheckLegacyOxFilesIn_PreservesUserEditedFilesAndSaysSo: the count in the
+// summary is how a user learns ox deliberately left something alone. Silently
+// dropping those files from the report reads as "nothing to see", when in fact
+// files ox once owned are still tracked.
+func TestCheckLegacyOxFilesIn_PreservesUserEditedFilesAndSaysSo(t *testing.T) {
+	root := migrationRepo(t)
+
+	if res := checkLegacyOxFilesIn(root, true); !res.passed {
+		t.Fatalf("migration did not run: %q / %q", res.message, res.detail)
+	}
+
+	// migrationRepo seeds an ox-named command the user edited, so its stamp no
+	// longer verifies; it must survive and be reported.
+	edited := filepath.Join(root, ".claude", "commands", "ox-status.md")
+	if _, err := os.Stat(edited); err != nil {
+		t.Fatalf("the migration removed a user-edited file: %v", err)
+	}
+	res := checkLegacyOxFilesIn(root, false)
+	if !strings.Contains(res.message, "user-edited") {
+		t.Errorf("the summary does not mention preserved user-edited files: %q", res.message)
+	}
+}

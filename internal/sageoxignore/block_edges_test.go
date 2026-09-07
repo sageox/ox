@@ -190,3 +190,46 @@ func TestRemoveBlock_MissingFileAndMissingBlockAreNotErrors(t *testing.T) {
 		t.Errorf("uninstall modified a file with no ox block:\n%s", got)
 	}
 }
+
+// IsManagedOnly is used as OWNERSHIP PROOF before the migration adopts an
+// otherwise untracked .gitignore into a commit it makes on the user's behalf. It
+// has to be stricter than "contains a valid block": a single line of theirs
+// outside the markers means those bytes are not ox's to commit.
+func TestIsManagedOnly_RequiresNothingOutsideTheMarkers(t *testing.T) {
+	entries := []string{"skills/ox-cli-*/", "rules/ox-cli.md"}
+
+	p := filepath.Join(t.TempDir(), ".gitignore")
+	if _, _, err := EnsureBlock(p, entries); err != nil {
+		t.Fatalf("EnsureBlock: %v", err)
+	}
+	generated, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !IsManagedOnly(generated, entries) {
+		t.Fatal("freshly generated content was not recognized as managed-only")
+	}
+
+	for name, content := range map[string][]byte{
+		"a user rule before the block": append([]byte("mine.txt\n"), generated...),
+		"a user rule after the block":  append(append([]byte{}, generated...), []byte("mine.txt\n")...),
+		"different entries":            []byte(string(generated) + ""),
+		"empty":                        nil,
+		"no block at all":              []byte("just.txt\n"),
+	} {
+		if name == "different entries" {
+			if !IsManagedOnly(content, entries) {
+				t.Errorf("%s: identical content was rejected", name)
+			}
+			continue
+		}
+		if IsManagedOnly(content, entries) {
+			t.Errorf("%s: would be adopted into a commit on the user's behalf", name)
+		}
+	}
+
+	// The same block rendered for a DIFFERENT entry set is not ours either.
+	if IsManagedOnly(generated, []string{"skills/other-*/"}) {
+		t.Error("a block for different entries was accepted as managed-only")
+	}
+}
