@@ -5,3 +5,8 @@
 # SageOx team context
 .sageox/** linguist-language=SageOx
 *.ox linguist-language=SageOx
+
+# The skill catalog is embedded from the checkout at build time, and its
+# frontmatter parser expects LF. Without this, git on Windows checks these out
+# with CRLF and a Windows-built ox rejects its own catalog.
+extensions/skills/**/*.md text eol=lf

@@ -128,3 +128,47 @@ func TestSlashOnlySkillsCarryAnAgentNeutralGuard(t *testing.T) {
 		t.Fatal("no slash-only skills found; the fold or the frontmatter key regressed")
 	}
 }
+
+// TestCatalogValidatesWithCRLFCheckout is the portability regression the new
+// Windows CI job caught on its first run.
+//
+// The catalog is embedded from the checkout at BUILD time, and git on Windows
+// checks .md files out with CRLF by default. validateFrontmatter looks for a
+// literal "---\n" prefix, so a Windows-built ox embedded "---\r\n…", rejected
+// every skill in its own catalog, and could install nothing at all — with an
+// error message ("must start with YAML frontmatter") that points at the file
+// rather than at the line endings.
+//
+// Failure prevented: ox is completely non-functional on Windows, and the cause
+// is invisible to anyone reading the source on macOS or Linux.
+func TestCatalogValidatesWithCRLFCheckout(t *testing.T) {
+	crlf := func(s string) string { return strings.ReplaceAll(s, "\n", "\r\n") }
+	body := "---\nname: ox-cli-demo\ndescription: a demo skill\n---\n\nbody\n"
+
+	source := fstest.MapFS{
+		"ox-cli-demo/" + SkillFileName: &fstest.MapFile{Data: []byte(crlf(body))},
+	}
+	catalog := []Bundle{{
+		ID: "core", Description: "d", Default: true, SkillIDs: []string{"ox-cli-demo"},
+	}}
+
+	if err := validateSource(source, catalog); err != nil {
+		t.Fatalf("a CRLF checkout must validate; ox would be unusable on Windows: %v", err)
+	}
+}
+
+// TestNormalizeEOLKeepsTheDigestPlatformIndependent: normalizing at read time
+// rather than only in the validator is what stops a Windows machine and a Linux
+// machine from disagreeing about which catalog revision is installed — which
+// would make each of them reconcile the other's work forever.
+func TestNormalizeEOLKeepsTheDigestPlatformIndependent(t *testing.T) {
+	lf := []byte("---\nname: x\n---\nbody\n")
+	crlf := []byte("---\r\nname: x\r\n---\r\nbody\r\n")
+
+	if got, want := string(normalizeEOL(crlf)), string(lf); got != want {
+		t.Errorf("normalizeEOL(CRLF) = %q, want %q", got, want)
+	}
+	if got := string(normalizeEOL(lf)); got != string(lf) {
+		t.Errorf("normalizeEOL must leave LF content byte-identical, got %q", got)
+	}
+}

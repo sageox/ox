@@ -2,6 +2,7 @@
 package skills
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -224,6 +225,7 @@ func validateSource(source fs.FS, catalog []Bundle) error {
 		if err != nil {
 			return fmt.Errorf("canonical skill %q has no %s: %w", name, SkillFileName, err)
 		}
+		content = normalizeEOL(content)
 		if err := validateFrontmatter(name, string(content)); err != nil {
 			return err
 		}
@@ -320,6 +322,24 @@ func Selected(version string, names []string) ([]Skill, error) {
 	return out, nil
 }
 
+// normalizeEOL rewrites CRLF to LF.
+//
+// The catalog is embedded from the checkout at BUILD time, and git on Windows
+// checks .md files out with CRLF by default. Without this, a Windows-built ox
+// embeds "---\r\n…" and then rejects its own catalog: validateFrontmatter looks
+// for a literal "---\n" prefix, so every skill fails validation and the binary
+// can install nothing at all.
+//
+// Normalizing here rather than only in the validator also keeps the catalog
+// DIGEST identical across platforms, so a Windows machine and a Linux machine
+// agree about which revision is installed instead of reconciling forever.
+func normalizeEOL(b []byte) []byte {
+	if !bytes.Contains(b, []byte("\r\n")) {
+		return b
+	}
+	return bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
+}
+
 func readSkill(name, version string) (Skill, error) {
 	var files []File
 	err := fs.WalkDir(FS, name, func(file string, d fs.DirEntry, walkErr error) error {
@@ -330,6 +350,7 @@ func readSkill(name, version string) (Skill, error) {
 		if err != nil {
 			return err
 		}
+		content = normalizeEOL(content)
 		rel := strings.TrimPrefix(file, name+"/")
 		files = append(files, File{Path: rel, Content: content})
 		return nil
