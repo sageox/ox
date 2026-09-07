@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/skillmanager"
+
 	"github.com/sageox/agentx"
 )
 
@@ -168,5 +170,89 @@ func TestInstalledClaudeReplacement_RequiresExactCanonicalBytes(t *testing.T) {
 	put(t, root, targetRoot+"/ox-cli-prime/SKILL.md", append(want, []byte("\nedited\n")...))
 	if installedClaudeReplacement(root, targetRoot) {
 		t.Error("an edited replacement counted as installed; the migration would remove the old surface anyway")
+	}
+}
+
+// safeUntrackedMigrationFootprint decides what the migration may add to a commit
+// it makes on the user's behalf. Anything it accepts gets committed without the
+// user reviewing it, so "is this byte-for-byte something ox generated?" is the
+// only acceptable test — a near-match means committing their bytes for them.
+func TestSafeUntrackedMigrationFootprint_AcceptsOnlyExactGeneratedContent(t *testing.T) {
+	root := classifyRepo(t)
+
+	// The on-ramp, exactly as the catalog ships it.
+	want, err := canonicalSkillManifest(skillmanager.CommittedOnRamp)
+	if err != nil {
+		t.Skipf("on-ramp unavailable in this catalog: %v", err)
+	}
+	onramp := filepath.ToSlash(filepath.Join(".claude", "skills", skillmanager.CommittedOnRamp, "SKILL.md"))
+	put(t, root, onramp, want)
+	if !safeUntrackedMigrationFootprint(root, onramp) {
+		t.Error("the canonical on-ramp was refused; the migration would never commit it")
+	}
+
+	// The same path, edited by the user.
+	put(t, root, onramp, append(want, []byte("\nmy own note\n")...))
+	if safeUntrackedMigrationFootprint(root, onramp) {
+		t.Error("ox would commit a user-edited on-ramp on their behalf")
+	}
+
+	// A scoped ignore file holding the user's own rules alongside ox's block.
+	if _, err := ensureScopedIgnoreFiles(root); err != nil {
+		t.Fatalf("ensureScopedIgnoreFiles: %v", err)
+	}
+	rel := ".claude/.gitignore"
+	if !safeUntrackedMigrationFootprint(root, rel) {
+		t.Error("a purely ox-generated ignore file was refused")
+	}
+	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	put(t, root, rel, append([]byte("settings.local.json\n\n"), data...))
+	if safeUntrackedMigrationFootprint(root, rel) {
+		t.Error("ox would commit a .gitignore containing the user's own rules")
+	}
+}
+
+// TestSafeUntrackedMigrationFootprint_RejectsAnythingUnexpected: only regular
+// files ox itself generates are eligible. A symlink or a path outside the known
+// footprint must never ride along in an automatic commit.
+func TestSafeUntrackedMigrationFootprint_RejectsAnythingUnexpected(t *testing.T) {
+	root := classifyRepo(t)
+
+	put(t, root, ".claude/skills/my-skill/SKILL.md", []byte("mine\n"))
+	if safeUntrackedMigrationFootprint(root, ".claude/skills/my-skill/SKILL.md") {
+		t.Error("a user-authored skill was eligible for the automatic commit")
+	}
+	if safeUntrackedMigrationFootprint(root, ".claude/skills/absent/SKILL.md") {
+		t.Error("a missing path was eligible")
+	}
+
+	link := filepath.Join(root, ".claude", "linked.gitignore")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "elsewhere"), link); err == nil {
+		if safeUntrackedMigrationFootprint(root, ".claude/linked.gitignore") {
+			t.Error("a symlink was eligible for the automatic commit")
+		}
+	}
+}
+
+// TestCanonicalSkillManifest_UnknownNameIsAnError: every caller treats a returned
+// error as "no replacement available", which is the gate that stops the migration
+// removing a surface before its replacement exists. Returning empty bytes with no
+// error would make that gate pass vacuously.
+func TestCanonicalSkillManifest_UnknownNameIsAnError(t *testing.T) {
+	if _, err := canonicalSkillManifest("definitely-not-a-skill"); err == nil {
+		t.Error("an unknown skill name produced a manifest")
+	}
+	got, err := canonicalSkillManifest(skillmanager.CommittedOnRamp)
+	if err != nil {
+		t.Skipf("on-ramp unavailable: %v", err)
+	}
+	if len(got) == 0 {
+		t.Error("the on-ramp manifest is empty")
 	}
 }

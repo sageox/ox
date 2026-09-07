@@ -1,13 +1,18 @@
 package skillmanager
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/sageox/ox/internal/fileutil"
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/extensions/skills"
@@ -861,4 +866,112 @@ func TestApplyStillProceedsWhenAnUnprotectedDirIsNotBeingWritten(t *testing.T) {
 	require.NoError(t, Apply(plan), "refused an install that was never at risk")
 	_, err = os.ReadFile(filepath.Join(repo, ".agents", ".gitignore"))
 	require.NoError(t, err, "the protected directory still needs its rule")
+}
+
+// ReconcileUpdateNonBlocking is what `ox agent prime` calls. It exists so a
+// session start can never stall behind a doctor run holding the reconcile lock —
+// it yields instead. None of it was covered.
+
+func TestReconcileUpdateNonBlocking_DoesTheWorkWhenUncontended(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+
+	plan, err := ReconcileUpdateNonBlocking(repo, "1.0.0",
+		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return DefaultDesired(targets), targets, nil
+		})
+	require.NoError(t, err, "an uncontended reconcile must not report a timeout")
+	require.NotNil(t, plan)
+
+	_, err = os.Stat(filepath.Join(repo, ".agents", ".gitignore"))
+	require.NoError(t, err, "the ignore rule must exist beside anything materialized")
+}
+
+// TestReconcileUpdateNonBlocking_YieldsRatherThanStallingASession is the whole
+// point: with the reconcile lock held elsewhere it returns promptly instead of
+// blocking a session start behind another process's filesystem work.
+func TestReconcileUpdateNonBlocking_YieldsRatherThanStallingASession(t *testing.T) {
+	repo := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Dir(LockPath(repo)), 0o755))
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = fileutil.WithFileLockTimeout(context.Background(), LockPath(repo), 5*time.Second, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	defer func() { close(release); <-done }()
+
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	start := time.Now()
+	_, err := ReconcileUpdateNonBlocking(repo, "1.0.0",
+		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return DefaultDesired(targets), targets, nil
+		})
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "a contended reconcile must report rather than silently doing nothing")
+	require.Less(t, elapsed, 2*time.Second,
+		"prime waited %s on the reconcile lock; a session start must never stall behind another process", elapsed)
+}
+
+// TestReconcileUpdateNonBlocking_PropagatesAnUpdateError: the caller decides the
+// desired state. If that decision fails, the reconcile must surface it rather
+// than applying a half-formed plan.
+func TestReconcileUpdateNonBlocking_PropagatesAnUpdateError(t *testing.T) {
+	repo := t.TempDir()
+	sentinel := errors.New("desired state unavailable")
+
+	_, err := ReconcileUpdateNonBlocking(repo, "1.0.0",
+		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return DesiredSkills{}, nil, sentinel
+		})
+	require.ErrorIs(t, err, sentinel)
+	_, statErr := os.Stat(filepath.Join(repo, ".agents", "skills"))
+	require.True(t, os.IsNotExist(statErr), "a failed update still materialized files")
+}
+
+// TestInstalledSource_MergesBothHalvesOfTheSplitLockfile.
+//
+// Schema 2 moved source.revision/version out of the COMMITTED lockfile into
+// machine-local state. Reading only the committed half reports an empty revision,
+// so prime's fast-path compare never matches and it runs a full plan on every
+// single session start.
+func TestInstalledSource_MergesBothHalvesOfTheSplitLockfile(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+
+	_, err := ReconcileUpdate(repo, "1.0.0",
+		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return DefaultDesired(targets), targets, nil
+		})
+	require.NoError(t, err)
+
+	revision, oxVersion, selected := InstalledSource(repo)
+	require.True(t, selected, "a reconciled repository must report as selected")
+	require.NotEmpty(t, revision, "empty revision: prime would re-plan on every session start")
+	require.Equal(t, "1.0.0", oxVersion)
+}
+
+// TestInstalledSource_UnreadableLockfileReportsUnselected: a corrupt lockfile must
+// not be read as "selected with an empty revision", which would make prime
+// re-plan forever against state it cannot trust.
+func TestInstalledSource_UnreadableLockfileReportsUnselected(t *testing.T) {
+	repo := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Dir(LockPath(repo)), 0o755))
+	require.NoError(t, os.WriteFile(LockPath(repo), []byte("{not json"), 0o644))
+
+	revision, oxVersion, selected := InstalledSource(repo)
+	require.False(t, selected)
+	require.Empty(t, revision)
+	require.Empty(t, oxVersion)
 }
