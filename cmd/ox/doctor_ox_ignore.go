@@ -28,15 +28,15 @@ func checkOxIgnoreRules(fix bool) checkResult {
 
 	var broken []string
 	for _, f := range scopedIgnoreFiles() {
-		probe, ok := probes[f.dir]
+		probe, ok := probes[f.Dir]
 		if !ok {
 			continue
 		}
-		if !dirExists(filepath.Join(gitRoot, f.dir)) {
+		if !dirExists(filepath.Join(gitRoot, f.Dir)) {
 			continue
 		}
 		if !gitPathIsIgnored(gitRoot, probe) {
-			broken = append(broken, f.dir)
+			broken = append(broken, f.Dir)
 		}
 	}
 	if len(broken) == 0 {

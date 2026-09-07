@@ -172,3 +172,22 @@ func TestNormalizeEOLKeepsTheDigestPlatformIndependent(t *testing.T) {
 		t.Errorf("normalizeEOL must leave LF content byte-identical, got %q", got)
 	}
 }
+
+// TestFrontmatterRejectsWhitespacePaddedComment: trimming the quotes off
+// `description: " <!-- ..."` leaves a leading space, and a bare HasPrefix check
+// sails straight past it — so the conversion accident this guard exists to catch
+// would still ship, with the stray comment as the skill's activation metadata.
+func TestFrontmatterRejectsWhitespacePaddedComment(t *testing.T) {
+	for _, desc := range []string{
+		`"<!-- Keep this file thin."`,
+		`" <!-- Keep this file thin."`,
+		`"   <!-- padded harder"`,
+	} {
+		body := "---\nname: ox-cli-demo\ndescription: " + desc + "\n---\n\nbody\n"
+		source := fstest.MapFS{"ox-cli-demo/" + SkillFileName: &fstest.MapFile{Data: []byte(body)}}
+		catalog := []Bundle{{ID: "core", Description: "d", Default: true, SkillIDs: []string{"ox-cli-demo"}}}
+		if err := validateSource(source, catalog); err == nil {
+			t.Errorf("description %s was accepted; the skill would ship with a comment as its activation metadata", desc)
+		}
+	}
+}

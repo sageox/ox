@@ -349,7 +349,7 @@ func (m *legacyMigration) Apply() (err error) {
 			// individually; each is its own pathspec so one failure cannot zero the batch.
 			untracked := append([]string{}, m.adopt...)
 			for _, f := range scopedIgnoreFiles() {
-				untracked = append(untracked, filepath.Join(f.dir, ".gitignore"))
+				untracked = append(untracked, filepath.Join(f.Dir, ".gitignore"))
 			}
 			for _, p := range untracked {
 				unstage := exec.Command("git", "reset", "--quiet", "HEAD", "--", p)
@@ -385,7 +385,7 @@ func (m *legacyMigration) Apply() (err error) {
 	// because of settings.local.json); without it the one file that has to reach
 	// teammates would be silently skipped.
 	for _, f := range scopedIgnoreFiles() {
-		rel := filepath.Join(f.dir, ".gitignore")
+		rel := filepath.Join(f.Dir, ".gitignore")
 		if _, statErr := os.Stat(filepath.Join(m.repoRoot, rel)); statErr != nil {
 			continue
 		}

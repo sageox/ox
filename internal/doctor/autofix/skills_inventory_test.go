@@ -226,3 +226,47 @@ func mustRel(t *testing.T, root, abs string) string {
 	}
 	return rel
 }
+
+// TestSkillsInventoryDrift_FailedTrackedLookupVetoesTheApply closes the hole where
+// an UNANSWERED question read as "no".
+//
+// trackedPlanPaths used to turn every git error into an empty result, so a failing
+// `git ls-files` looked exactly like "nothing is tracked" and the gate let the
+// apply proceed — rewriting the very tracked file it exists to protect. Standing
+// down is the only safe reading of a lookup that did not answer.
+//
+// The failure is induced by corrupting .git/index rather than by canceling the
+// context: the check returns early on a canceled context, so a canceled-ctx
+// fixture would never reach the lookup and the test would pass for the wrong
+// reason. It did, on the first attempt.
+func TestSkillsInventoryDrift_FailedTrackedLookupVetoesTheApply(t *testing.T) {
+	repoRoot, managedFile := installSkillsFixture(t)
+
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoRoot
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "--initial-branch=main")
+
+	if err := os.Remove(managedFile); err != nil {
+		t.Fatalf("remove managed file: %v", err)
+	}
+	// A corrupt index makes `git ls-files` fail while the directory is still very
+	// much a git repository, which is the shape the veto has to handle.
+	if err := os.WriteFile(filepath.Join(repoRoot, ".git", "index"), []byte("not an index"), 0o644); err != nil {
+		t.Fatalf("corrupt index: %v", err)
+	}
+
+	res := checkSkillsInventoryDrift(context.Background(), repoRoot)
+
+	if _, err := os.Stat(managedFile); err == nil {
+		t.Error("the apply proceeded despite an unanswered tracked-path lookup")
+	}
+	if res.Status == StatusFixed {
+		t.Errorf("expected the check to stand down, got StatusFixed (%s)", res.Summary)
+	}
+}

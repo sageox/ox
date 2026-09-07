@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -180,6 +181,22 @@ func StatePath(repoRoot string) string {
 
 func journalPath(repoRoot string) string {
 	return filepath.Join(repoRoot, filepath.FromSlash(journalRelativePath))
+}
+
+// agentDirs names the top-level agent directories this plan will write into,
+// including ones that do not exist yet. Apply writes the ignore rule before the
+// files, so an existence check at that moment would skip the very directory
+// about to be filled.
+func (plan *ReconcilePlan) agentDirs() map[string]bool {
+	dirs := map[string]bool{}
+	for _, group := range [][]FileAction{plan.Creates, plan.Updates, plan.Removes} {
+		for _, a := range group {
+			if i := strings.Index(a.Path, "/"); i > 0 {
+				dirs[a.Path[:i]] = true
+			}
+		}
+	}
+	return dirs
 }
 
 // WrittenPaths returns repository-relative files created or updated by Apply.
@@ -663,6 +680,27 @@ func Apply(plan *ReconcilePlan) error {
 	if len(plan.Warnings) > 0 {
 		return nil
 	}
+
+	// NEVER materialize a reserved-prefix file without the rule that hides it.
+	//
+	// This lives in Apply because Apply is the one choke point every materialization
+	// path passes through — `ox init`, `ox doctor`, `ox agent prime`, the daemon
+	// tick, and the adapter RPCs. Writing the ignore block beside those callers
+	// instead of inside this one left prime and the daemon materializing skills with
+	// no rule to hide them: a real repository ended up with nine untracked ox-cli-*
+	// skills and nine unstaged deletions of their old names, one `git add -A` away
+	// from committing the entire vendor rename into the customer's history.
+	//
+	// It runs before the no-op return on purpose: a repository whose skills are
+	// already current can still be missing the ignore file, and that is exactly the
+	// state that quietly commits vendor files.
+	//
+	// Best-effort. A repository that cannot take the ignore block still gets its
+	// skills; failing the whole reconcile over it would be a worse trade.
+	if _, err := EnsureScopedIgnoreFilesForDirs(plan.repoRoot, plan.agentDirs()); err != nil {
+		slog.Debug("skills: could not write ox ignore rules", "repo", plan.repoRoot, "error", err)
+	}
+
 	if len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 && !plan.lockChanged {
 		_ = os.Remove(journalPath(plan.repoRoot))
 		return nil

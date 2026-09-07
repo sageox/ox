@@ -280,7 +280,9 @@ func validateFrontmatter(name, content string) error {
 	// so nothing else catches it, and the skill ships with its activation surface
 	// replaced by a stray comment while its continuation and `-->` leak into the
 	// body as visible text.
-	if strings.HasPrefix(strings.Trim(description, "\"'"), "<!--") {
+	// TrimSpace AFTER the quotes: `description: " <!-- ..."` leaves a leading space
+	// once the quotes are gone, and a bare HasPrefix would sail straight past it.
+	if strings.HasPrefix(strings.TrimSpace(strings.Trim(description, "\"'")), "<!--") {
 		return fmt.Errorf("canonical skill %q has an HTML comment as its description", name)
 	}
 	if description == "" {

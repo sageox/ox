@@ -80,7 +80,16 @@ func checkSkillsInventoryDrift(ctx context.Context, repoPath string) CheckResult
 			return current, currentTargets, nil
 		},
 		func(p *skillmanager.ReconcilePlan) error {
-			if trackedPaths = trackedPlanPaths(ctx, repoPath, p); len(trackedPaths) > 0 {
+			var lookupErr error
+			trackedPaths, lookupErr = trackedPlanPaths(ctx, repoPath, p)
+			if lookupErr != nil {
+				// An UNANSWERED question is not a "no". Swallowing the error here
+				// would let a canceled or failing `git ls-files` read as "nothing is
+				// tracked", and the apply would proceed to rewrite a tracked file —
+				// exactly what this gate exists to prevent.
+				return lookupErr
+			}
+			if len(trackedPaths) > 0 {
 				return errTrackedFile
 			}
 			return nil
@@ -88,6 +97,11 @@ func checkSkillsInventoryDrift(ctx context.Context, repoPath string) CheckResult
 	if errors.Is(err, errTrackedFile) {
 		res.Status = StatusFound
 		res.Summary = fmt.Sprintf("%d tracked file(s) need updating; run `ox doctor --fix` (background updates never touch tracked files)", len(trackedPaths))
+		return res
+	}
+	if errors.Is(err, errTrackedLookup) {
+		// Stand down rather than guess. The next tick retries.
+		res.Summary = "skipped: could not determine which files git tracks"
 		return res
 	}
 	if err != nil {
@@ -128,7 +142,7 @@ func checkSkillsInventoryDrift(ctx context.Context, repoPath string) CheckResult
 // A single `git ls-files` over the planned paths answers it; an error is treated
 // as "nothing tracked" because a repository without git is a normal state for this
 // check and must not turn into a reported fault.
-func trackedPlanPaths(ctx context.Context, repoPath string, plan *skillmanager.ReconcilePlan) []string {
+func trackedPlanPaths(ctx context.Context, repoPath string, plan *skillmanager.ReconcilePlan) ([]string, error) {
 	var candidates []string
 	for _, a := range plan.Creates {
 		candidates = append(candidates, a.Path)
@@ -140,14 +154,21 @@ func trackedPlanPaths(ctx context.Context, repoPath string, plan *skillmanager.R
 		candidates = append(candidates, a.Path)
 	}
 	if len(candidates) == 0 {
-		return nil
+		return nil, nil
 	}
 	// CommandContext so a canceled tick is not blocked waiting on git.
 	cmd := exec.CommandContext(ctx, "git", append([]string{"ls-files", "-z", "--"}, candidates...)...)
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
-		return nil
+		// Distinguish "this is not a git repository" — a normal state for a managed
+		// workspace — from a lookup that genuinely failed or was canceled. Only the
+		// latter must veto; treating the former as a veto would stop the daemon
+		// reconciling any non-git project.
+		if !isGitRepo(repoPath) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: %w", errTrackedLookup, err)
 	}
 	var tracked []string
 	for _, p := range strings.Split(string(out), "\x00") {
@@ -155,5 +176,15 @@ func trackedPlanPaths(ctx context.Context, repoPath string, plan *skillmanager.R
 			tracked = append(tracked, p)
 		}
 	}
-	return tracked
+	return tracked, nil
+}
+
+// errTrackedLookup marks a failed or canceled tracked-path lookup, so the gate
+// can abort the apply instead of reading the failure as "nothing is tracked".
+var errTrackedLookup = errors.New("tracked-path lookup failed")
+
+func isGitRepo(repoPath string) bool {
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd.Dir = repoPath
+	return cmd.Run() == nil
 }

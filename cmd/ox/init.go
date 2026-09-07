@@ -729,6 +729,17 @@ func runInit() error {
 	// `git add`, leaving even .claude/settings.json unstaged.
 	installedHooks := installAgentHooks(gitRoot, true, selectedAgents) // quiet — summarized below
 
+	// Snapshot every scoped ignore file that ALREADY EXISTS, before writing any of
+	// them. trackModifiedFile snapshots eagerly, at call time — so calling it after
+	// the write would capture the already-modified bytes and rollback would
+	// "restore" the ox block into the user's file instead of removing it.
+	for _, f := range scopedIgnoreFiles() {
+		abs := filepath.Join(gitRoot, f.Dir, ".gitignore")
+		if _, err := os.Lstat(abs); err == nil {
+			tracker.trackModifiedFile(abs)
+		}
+	}
+
 	// Write the ox-managed ignore block BEFORE anything is staged, so the rule
 	// that hides ox's own files exists in the tree before the index is touched.
 	ignoreFiles, ignoreErr := ensureScopedIgnoreFiles(gitRoot)
@@ -737,13 +748,11 @@ func runInit() error {
 	}
 	for _, f := range ignoreFiles {
 		abs := filepath.Join(gitRoot, f.Rel)
-		// created vs modified decides what rollback does: remove the file, or put
-		// its previous contents back. Calling trackCreatedFile on a file the user
-		// already had would make rollback DELETE their ignore rules.
+		// A file ox CREATED is removed on rollback; one that already existed is
+		// restored from the snapshot taken above. Calling trackCreatedFile on a file
+		// the user already had would make rollback DELETE their ignore rules.
 		if f.Created {
 			tracker.trackCreatedFile(abs)
-		} else {
-			tracker.trackModifiedFile(abs)
 		}
 		// Force-staged on purpose: plenty of repositories root-ignore .claude/, and
 		// the ignore file is one of the two things that MUST reach teammates.

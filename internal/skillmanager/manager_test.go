@@ -764,3 +764,35 @@ func TestSchemaOneLockfileIsActuallyRewritten(t *testing.T) {
 	require.NotContains(t, string(after), "old-rev",
 		"stale inline source stayed in the committed lockfile")
 }
+
+// TestApplyAlwaysWritesTheIgnoreRuleFirst is the invariant a real repository
+// violated: never materialize a reserved-prefix file without the rule that hides
+// it.
+//
+// A reconcile driven from `ox agent prime` or the daemon tick used to write
+// ox-cli-* skills while the ignore block was written only by `ox init` and two
+// doctor checks. The observed result in a customer checkout was nine untracked
+// ox-cli-* skills next to nine unstaged deletions of their old names — one
+// `git add -A` away from committing the whole vendor rename into their history.
+//
+// Apply is the choke point every materialization path passes through, which is
+// why the rule lives here rather than beside each caller.
+func TestApplyAlwaysWritesTheIgnoreRuleFirst(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+
+	plan, err := planWithSource(repo, "1.0.0", DefaultDesired(targets), targets,
+		fakeCatalog{revision: "rev-1", skill: fakeSkill("1.0.0", "one")})
+	require.NoError(t, err)
+	require.NoError(t, Apply(plan))
+
+	// The target root is .agents/skills, so .agents/.gitignore must exist.
+	data, err := os.ReadFile(filepath.Join(repo, ".agents", ".gitignore"))
+	require.NoError(t, err, "materializing skills without an ignore rule is how vendor files get committed")
+	require.Contains(t, string(data), "skills/"+CLIPrefix+"*/")
+
+	// And it must not appear where ox wrote nothing.
+	_, err = os.Stat(filepath.Join(repo, ".factory"))
+	require.Error(t, err, "ox created footprint in a directory it does not use")
+}
