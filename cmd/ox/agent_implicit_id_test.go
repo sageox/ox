@@ -37,6 +37,10 @@ func TestRunAgentDispatcher_ResolvesNativeSessionMarkerWithoutEnv(t *testing.T) 
 		PrimedAt:       time.Now(),
 	}))
 
+	// Clear competing agent runtime signals FIRST: running the suite inside
+	// another coding agent otherwise leaves two agents claiming the process and
+	// detection becomes a coin flip.
+	isolateAgentDetection(t)
 	t.Setenv("SAGEOX_AGENT_ID", "")
 	t.Setenv("AGENT_ENV", "codex")
 	t.Setenv("CODEX_THREAD_ID", nativeSessionID)
