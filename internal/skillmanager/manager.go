@@ -585,7 +585,7 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 					}
 					continue
 				}
-				if actualDigest != want || actualMode.Perm() != mode.Perm() {
+				if actualDigest != want || modeDrift(actualMode, mode) {
 					plan.Updates = append(plan.Updates, FileAction{TargetKey: key, Path: path, Content: content, Mode: mode, PreviousDigest: actualDigest, Digest: want})
 				} else {
 					plan.Preserves = append(plan.Preserves, path)

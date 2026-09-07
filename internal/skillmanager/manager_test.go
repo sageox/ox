@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -224,7 +225,13 @@ func TestPlanCoversAllSkillTreeFiles(t *testing.T) {
 	require.NoError(t, Apply(plan))
 	info, err := os.Stat(filepath.Join(repo, ".agents", "skills", "test-skill", "scripts", "check.sh"))
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+	// NTFS has no POSIX permission bits — Go synthesizes a mode and os.Chmod only
+	// toggles the read-only attribute — so the executable bit is a POSIX-only
+	// assertion. Asserting it everywhere is what made the installer look broken on
+	// Windows when the real portability bug was elsewhere (see modeDrift).
+	if runtime.GOOS != "windows" {
+		require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+	}
 
 	missing := filepath.Join(repo, ".agents", "skills", "test-skill", "references", "guide.md")
 	require.NoError(t, os.Remove(missing))
