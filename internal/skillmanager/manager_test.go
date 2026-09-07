@@ -1055,3 +1055,92 @@ func TestPlan_RefusesALockfileWhoseTargetEscapesTheRepository(t *testing.T) {
 	_, statErr := os.Stat(outside)
 	require.True(t, os.IsNotExist(statErr), "ox created a directory outside the repository at %s", outside)
 }
+
+// The apply journal is a crash-recovery HINT, not a source of truth. Every one of
+// these cases used to have the same shape of consequence if treated as fatal: the
+// file lives in gitignored cache/, so nobody ever sees it, `ox doctor` reports
+// "cannot inspect managed skills", prime gives up at debug level, and that
+// repository silently never receives another skill update again.
+
+func TestPlan_CorruptJournalIsDiscardedSoTheRepositoryStillHeals(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	require.NoError(t, ensureDir(repo, filepath.Dir(journalPath(repo))))
+	require.NoError(t, os.WriteFile(journalPath(repo), []byte("{ truncated mid-write"), 0o600))
+
+	plan, err := Plan(repo, "1.0.0", DefaultDesired(targets), targets)
+	require.NoError(t, err, "a corrupt recovery hint wedged the repository forever")
+	require.NotNil(t, plan)
+	require.NoError(t, Apply(plan))
+	require.NoFileExists(t, journalPath(repo), "the discarded journal was left behind")
+}
+
+func TestPlan_JournalFromAnotherSchemaIsDiscardedNotFatal(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	require.NoError(t, ensureDir(repo, filepath.Dir(journalPath(repo))))
+	// A crash just before a version upgrade leaves a journal from the OLD schema.
+	require.NoError(t, os.WriteFile(journalPath(repo),
+		[]byte(`{"schema_version": 99, "pending": []}`), 0o600))
+
+	plan, err := Plan(repo, "1.0.0", DefaultDesired(targets), targets)
+	require.NoError(t, err, "a journal from another schema wedged the repository")
+	require.NotNil(t, plan)
+	require.NoError(t, Apply(plan))
+}
+
+// TestPlan_RefusesToDowngradeAProjectInstalledByANewerOx: an older binary — a
+// teammate who has not upgraded, or a stale daemon — must not rewrite a newer
+// project's inventory back to its own older catalog. Doing so would flap the
+// managed files between two ox versions every time either one ran.
+func TestPlan_RefusesToDowngradeAProjectInstalledByANewerOx(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+
+	_, err := ReconcileUpdate(repo, "9.9.9",
+		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return DefaultDesired(targets), targets, nil
+		})
+	require.NoError(t, err)
+	before, err := os.ReadFile(LockPath(repo))
+	require.NoError(t, err)
+
+	plan, err := Plan(repo, "0.1.0", DefaultDesired(targets), targets)
+	require.NoError(t, err, "the downgrade guard must warn, not error")
+	require.NotEmpty(t, plan.Warnings, "an older ox silently rewrote a newer project's inventory")
+	require.Contains(t, plan.Warnings[0], "refusing downgrade")
+	require.Empty(t, plan.Creates)
+	require.Empty(t, plan.Updates)
+	require.Empty(t, plan.Removes)
+
+	require.NoError(t, Apply(plan))
+	after, err := os.ReadFile(LockPath(repo))
+	require.NoError(t, err)
+	require.Equal(t, string(before), string(after), "the older ox rewrote the committed lockfile")
+}
+
+// TestPlan_RefusesALockfileFromAFutureSchema is the forward-compatibility half:
+// a teammate on a newer ox migrates the lockfile, an older ox pulls it, and must
+// stand down rather than recreate old-name files and force-stage them.
+func TestPlan_RefusesALockfileFromAFutureSchema(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	require.NoError(t, ensureDir(repo, filepath.Dir(LockPath(repo))))
+	future := `{"schema_version": 99, "desired": {"bundles": ["core"], "targets": ["` + target.Key + `"]}, "targets": []}`
+	require.NoError(t, os.WriteFile(LockPath(repo), []byte(future), 0o644))
+
+	plan, err := Plan(repo, "1.0.0", DefaultDesired(targets), targets)
+	require.NoError(t, err)
+	require.NotEmpty(t, plan.Warnings, "an older ox proceeded against a newer lockfile schema")
+	require.Contains(t, plan.Warnings[0], "newer than this ox supports")
+	require.Empty(t, plan.Creates)
+
+	require.NoError(t, Apply(plan))
+	got, err := os.ReadFile(LockPath(repo))
+	require.NoError(t, err)
+	require.Contains(t, string(got), `"schema_version": 99`, "the older ox rewrote a newer lockfile")
+}
