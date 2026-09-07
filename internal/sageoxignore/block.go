@@ -198,3 +198,11 @@ func findBlock(content string) (begin, end int, ok bool) {
 		return b, end, true
 	}
 }
+
+// IsManagedOnly reports whether content is exactly the block ox generates for
+// entries, with no user-authored rules before or after it. It is intentionally
+// stricter than merely finding a valid block: callers use it as ownership proof
+// before adopting an otherwise untracked .gitignore into the repository.
+func IsManagedOnly(content []byte, entries []string) bool {
+	return string(content) == renderBlock(entries)
+}

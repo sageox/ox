@@ -156,3 +156,20 @@ func ensureScopedIgnoreFilesIn(repoRoot string, force map[string]bool) ([]Ignore
 	}
 	return written, unprotected, nil
 }
+
+// IsManagedOnlyScopedIgnore reports whether rel names one of the scoped ignore
+// files and its bytes are exactly the ox-generated block. A valid managed block
+// surrounded by other rules is not enough: those other bytes belong to the user
+// and an untracked file containing them must never be adopted automatically.
+func IsManagedOnlyScopedIgnore(repoRoot, rel string) bool {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	for _, f := range ScopedIgnoreFiles() {
+		wantRel := filepath.ToSlash(filepath.Join(f.Dir, ".gitignore"))
+		if rel != wantRel {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+		return err == nil && sageoxignore.IsManagedOnly(data, f.Entries)
+	}
+	return false
+}
