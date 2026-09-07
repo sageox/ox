@@ -611,7 +611,7 @@ func TestSchemaOneLockfileMigratesOnRead(t *testing.T) {
   "schema_version": 1,
   "source": {"kind": "builtin", "revision": "old-rev", "version": "0.14.0"},
   "desired": {"bundles": ["core"], "targets": ["agents-project"]},
-  "targets": [{"key": "agents-project", "root": ".agents/skills", "format": "agent-skills-v1", "scope": "project", "link_policy": "reject"}],
+  "targets": [{"key": "agents-project", "root": ".agents/skills", "format": "agent-skills/v1", "scope": "project", "link_policy": "reject"}],
   "managed_files": []
 }`
 	require.NoError(t, os.WriteFile(LockPath(repo), []byte(legacy), 0o644))
@@ -722,4 +722,45 @@ func TestRetiringAUserModifiedSkillPreservesTheirWork(t *testing.T) {
 	got, err := os.ReadFile(guide)
 	require.NoError(t, err, "retirement destroyed a file the user had edited")
 	require.Equal(t, mine, got)
+}
+
+// TestSchemaOneLockfileIsActuallyRewritten is the other half of the schema
+// migration, and the half that was missing.
+//
+// Reading a schema-1 lockfile works, but marshalCommitted always renders schema 2
+// — so if the project selection is unchanged, the canonical bytes compare EQUAL,
+// lockChanged stays false, Apply skips the write, and the file sits at schema 1
+// with stale inline source and managed_files forever. The old test proved the
+// read and stopped there.
+//
+// Failure prevented: a repository never migrates, so an older ox keeps being
+// allowed to reconcile it and the committed lockfile keeps churning per release.
+func TestSchemaOneLockfileIsActuallyRewritten(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(LockPath(repo)), 0o755))
+	legacy := `{
+  "schema_version": 1,
+  "source": {"kind": "builtin", "revision": "old-rev", "version": "0.14.0"},
+  "desired": {"bundles": ["core"], "targets": ["agents-project"]},
+  "targets": [{"key": "agents-project", "root": ".agents/skills", "format": "agent-skills/v1", "scope": "project", "link_policy": "reject"}],
+  "managed_files": []
+}`
+	require.NoError(t, os.WriteFile(LockPath(repo), []byte(legacy), 0o644))
+
+	plan, err := planWithSource(repo, "1.0.0", desiredFor(target), targets,
+		fakeCatalog{revision: "rev-1", skill: fakeSkill("1.0.0", "one")})
+	require.NoError(t, err)
+	require.True(t, plan.lockChanged, "a schema-1 lockfile must be seen as needing a rewrite")
+	require.NoError(t, Apply(plan))
+
+	after, err := os.ReadFile(LockPath(repo))
+	require.NoError(t, err)
+	require.Contains(t, string(after), `"schema_version": 2`, "lockfile did not migrate to schema 2")
+	require.NotContains(t, string(after), "managed_files",
+		"stale machine-local state stayed in the committed lockfile")
+	require.NotContains(t, string(after), "old-rev",
+		"stale inline source stayed in the committed lockfile")
 }

@@ -36,7 +36,10 @@ func checkLegacyOxFiles(fix bool) checkResult {
 		return PassedCheck("Legacy ox files", "none tracked")
 	}
 
-	summary := fmt.Sprintf("%d ox-managed file(s) still tracked in git", len(migration.uncache)+len(migration.remove))
+	// adopt is real work too: a repository whose untrack already happened can still
+	// have the committed on-ramp sitting untracked. Counting only uncache+remove
+	// reported "0 ox-managed file(s) still tracked" while the check proceeded.
+	summary := describeMigrationWork(migration)
 	if !fix {
 		return FailedCheck("Legacy ox files", summary,
 			"Run `ox doctor --fix` to untrack them in one revertable commit")
@@ -87,4 +90,22 @@ func init() {
 		Description: "Takes ox-managed skills, rules, and commands out of git tracking",
 		Run:         checkLegacyOxFiles,
 	})
+}
+
+// describeMigrationWork reports each kind of work separately, because they are
+// not the same act: untracking removes files from git, while adopting ADDS the
+// committed on-ramp to it. Collapsing them into one "still tracked" number
+// reported zero for an adopt-only repository.
+func describeMigrationWork(m *legacyMigration) string {
+	var parts []string
+	if n := len(m.uncache) + len(m.remove); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d ox-managed file(s) to untrack", n))
+	}
+	if n := len(m.adopt); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d committed file(s) to add", n))
+	}
+	if len(parts) == 0 {
+		return "no ox-managed files tracked"
+	}
+	return strings.Join(parts, "; ")
 }

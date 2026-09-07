@@ -126,6 +126,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # This job runs no authenticated git operations, and a persisted
+          # GITHUB_TOKEN in the local git config is readable by every later step.
+          persist-credentials: false
 
       - uses: actions/setup-go@v5
         with:

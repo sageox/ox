@@ -1034,6 +1034,17 @@ func readLock(repoRoot string) (lockFile, []byte, error) {
 	if err != nil {
 		return lockFile{}, nil, err
 	}
+	if lock.SchemaVersion < lockSchemaVersion {
+		// Return the RAW on-disk bytes as the comparison basis for an older schema.
+		//
+		// marshalCommitted always renders schema 2, so a schema-1 file whose project
+		// selection is unchanged would produce canonical bytes identical to the next
+		// plan's — lockChanged would be false, Apply would skip the write, and the
+		// file would sit at schema 1 with stale inline source and managed_files
+		// forever. Handing back the raw bytes guarantees the mismatch that triggers
+		// the rewrite exactly once.
+		return lock, data, nil
+	}
 	return lock, canonical, nil
 }
 

@@ -55,7 +55,7 @@ func migrationRepo(t *testing.T) string {
 	writeRepoFile(t, root, ".sageox/skills.lock.json", `{
   "schema_version": 2,
   "desired": {"bundles": ["core"], "targets": ["claude-project"]},
-  "targets": [{"key": "claude-project", "root": ".claude/skills", "format": "agent-skills-v1", "scope": "project", "link_policy": "reject"}]
+  "targets": [{"key": "claude-project", "root": ".claude/skills", "format": "agent-skills/v1", "scope": "project", "link_policy": "reject"}]
 }`)
 
 	git(t, root, "add", "-A")
