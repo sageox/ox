@@ -2,6 +2,7 @@ package skillmanager
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -141,14 +142,24 @@ func ensureScopedIgnoreFilesIn(repoRoot string, force map[string]bool) ([]Ignore
 			}
 		}
 		name := path.Join(f.Dir, ".gitignore")
-		if fi, err := root.Lstat(name); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			// A symlinked .gitignore would have ox edit whatever it points at.
+		// Any NON-REGULAR .gitignore, not just a symlink. A symlink would have ox
+		// edit whatever it points at; a directory (a bad merge, an interrupted
+		// extraction, a stray mkdir) makes every read and write fail. Both mean ox
+		// cannot own the rule here, and both must reach the caller as "unprotected"
+		// so Apply refuses to materialize into this directory.
+		if fi, err := root.Lstat(name); err == nil && !fi.Mode().IsRegular() {
 			unprotected = append(unprotected, f.Dir)
 			continue
 		}
 		changed, created, err := sageoxignore.EnsureBlockInRoot(root, name, f.Entries)
 		if err != nil {
-			return written, unprotected, err
+			// Record and keep going. Returning here abandoned every remaining agent
+			// directory, so one unusable .claude/.gitignore silently left .agents and
+			// .factory with no rule either — one broken directory disarming the
+			// protection for the whole repository.
+			slog.Debug("skills: could not write ox ignore block", "dir", f.Dir, "error", err)
+			unprotected = append(unprotected, f.Dir)
+			continue
 		}
 		if changed {
 			written = append(written, IgnoreFileResult{Rel: filepath.Join(f.Dir, ".gitignore"), Created: created})

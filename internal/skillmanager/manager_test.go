@@ -1296,3 +1296,31 @@ func TestReconcileUpdateGated_VetoLeavesNothingHalfWritten(t *testing.T) {
 	require.Equal(t, revisionBefore, revisionAfter, "a vetoed reconcile rewrote the recorded revision")
 	require.Equal(t, versionBefore, versionAfter)
 }
+
+// TestApplyRefusesWhenTheIgnoreFileIsADirectory closes the loop on the portable
+// failure case: the write cannot succeed, so Apply must refuse to materialize
+// rather than fill the directory with reserved-prefix files git can see.
+//
+// This reaches the same guard as the symlink case but through the path that
+// reported NOTHING — the write error — and it needs no chmod and no symlink, so
+// unlike those it actually runs on Windows.
+func TestApplyRefusesWhenTheIgnoreFileIsADirectory(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+
+	// The target root is .agents/skills, so .agents is the directory ox will fill.
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".agents", ".gitignore"), 0o755))
+
+	plan, err := planWithSource(repo, "1.0.0", DefaultDesired(targets), targets,
+		fakeCatalog{revision: "rev-1", skill: fakeSkill("1.0.0", "one")})
+	require.NoError(t, err)
+
+	err = Apply(plan)
+	require.Error(t, err, "ox materialized reserved-prefix files into a directory whose ignore rule it could not write")
+	require.Contains(t, err.Error(), ".agents")
+
+	if entries, readErr := os.ReadDir(filepath.Join(repo, ".agents", "skills")); readErr == nil {
+		require.Empty(t, entries, "ox half-installed skills despite refusing")
+	}
+}

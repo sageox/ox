@@ -173,3 +173,60 @@ func TestIsManagedOnlyScopedIgnore_MissingFileIsNotAdoptable(t *testing.T) {
 		t.Error("a file that does not exist was reported adoptable")
 	}
 }
+
+// TestEnsureScopedIgnoreFilesForDirs_NonRegularIgnoreFileIsUnprotected.
+//
+// Portable failure injection: a DIRECTORY where a file is expected fails
+// os.ReadFile and os.WriteFile on every platform, with no chmod (a near-no-op on
+// Windows) and no symlink (privileged there). It is how a bad merge, an
+// interrupted archive extraction, or a stray `mkdir` leaves a repository.
+//
+// The bug this pins: the write failed, so ox reported the directory neither as
+// written NOR as unprotected — an empty list. Apply's gate intersects
+// `unprotected` with the directories it is about to fill, so an empty list meant
+// the gate never fired and ox materialized reserved-prefix files into .claude
+// with no rule hiding them. That is precisely the state the invariant exists to
+// prevent, reached through the one path that reported nothing.
+func TestEnsureScopedIgnoreFilesForDirs_NonRegularIgnoreFileIsUnprotected(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".claude", ".gitignore"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	_, unprotected, _ := EnsureScopedIgnoreFilesForDirs(repo, nil)
+
+	var found bool
+	for _, d := range unprotected {
+		if d == ".claude" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf(".claude was not reported unprotected (%v); Apply's gate would not fire and "+
+			"reserved files would land visible to git", unprotected)
+	}
+}
+
+// TestEnsureScopedIgnoreFilesForDirs_OneBrokenDirDoesNotAbandonTheRest: the sweep
+// returned on the first write error, so a single unusable .claude/.gitignore left
+// .agents and .factory with no rule either — one broken directory silently
+// disarming the protection for every other agent in the repository.
+func TestEnsureScopedIgnoreFilesForDirs_OneBrokenDirDoesNotAbandonTheRest(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".claude", ".gitignore"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, dir := range []string{".agents", ".factory"} {
+		if err := os.MkdirAll(filepath.Join(repo, dir), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	_, _, _ = EnsureScopedIgnoreFilesForDirs(repo, nil)
+
+	for _, dir := range []string{".agents", ".factory"} {
+		if _, err := os.Stat(filepath.Join(repo, dir, ".gitignore")); err != nil {
+			t.Errorf("%s/.gitignore was never written because .claude failed first: %v", dir, err)
+		}
+	}
+}
