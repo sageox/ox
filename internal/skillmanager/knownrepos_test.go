@@ -80,7 +80,12 @@ func TestKnownRepos_CorruptCacheIsRebuilt(t *testing.T) {
 }
 
 func TestKnownRepos_ConcurrentRememberDoesNotLoseEntries(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	// HOME as well as XDG_DATA_HOME: DataDir falls back to SageoxDir() (which reads
+	// HOME) whenever XDG mode is off, so setting only XDG_DATA_HOME leaves the test
+	// sharing the developer's real registry with every other test in the package.
+	home := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", home)
+	t.Setenv("HOME", home)
 
 	const count = 8
 	roots := make([]string, count)
