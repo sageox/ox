@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/skillmanager"
@@ -254,5 +255,113 @@ func TestCanonicalSkillManifest_UnknownNameIsAnError(t *testing.T) {
 	}
 	if len(got) == 0 {
 		t.Error("the on-ramp manifest is empty")
+	}
+}
+
+// The migration writes one commit to the user's history, so its cleanliness gate
+// decides whether their in-progress work rides along. These cover the ways that
+// gate can be defeated.
+
+// TestTrackedFileMatchesHead_SeesAnEditGitDiffDeliberatelyHides.
+//
+// `git update-index --assume-unchanged` tells git to stop checking a file for
+// modifications — a real performance flag people set on large or generated files.
+// `git diff` then reports the working tree CLEAN even though the bytes differ, so
+// a gate built on `git diff` would wave the migration through and commit the
+// user's edit. hash-object compares content directly and is not fooled.
+func TestTrackedFileMatchesHead_SeesAnEditGitDiffDeliberatelyHides(t *testing.T) {
+	root := migrationRepo(t)
+	rel := ".claude/rules/design.md"
+	abs := filepath.Join(root, filepath.FromSlash(rel))
+
+	matches, err := trackedFileMatchesHead(root, rel)
+	if err != nil {
+		t.Fatalf("trackedFileMatchesHead: %v", err)
+	}
+	if !matches {
+		t.Fatalf("precondition: an untouched tracked file should match HEAD")
+	}
+
+	git(t, root, "update-index", "--assume-unchanged", "--", rel)
+	if err := os.WriteFile(abs, []byte("MY UNCOMMITTED EDIT\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Confirm git itself is now hiding the edit, so the test is exercising the
+	// real condition rather than asserting against a straw man.
+	out := git(t, root, "diff", "--name-only", "--", rel)
+	if strings.TrimSpace(out) != "" {
+		t.Skipf("this git reports the edit despite assume-unchanged (%q); nothing to defeat", out)
+	}
+
+	matches, err = trackedFileMatchesHead(root, rel)
+	if err != nil {
+		t.Fatalf("trackedFileMatchesHead: %v", err)
+	}
+	if matches {
+		t.Error("the gate believed a file matched HEAD while it held the user's uncommitted edit; " +
+			"the migration would have committed their work")
+	}
+}
+
+// TestHasUnstagedMigrationChanges_BlocksOnAnEditToAPathTheCommitWouldTouch.
+// It covers the ADD side of the commit specifically: the on-ramp, the lockfile
+// and the scoped ignore files all get `git add --force`d, so an unstaged edit to
+// any of them would be swept into ox's commit as the user's unreviewed work.
+func TestHasUnstagedMigrationChanges_BlocksOnAnEditToAPathTheCommitWouldTouch(t *testing.T) {
+	root := migrationRepo(t)
+
+	dirty, err := hasUnstagedMigrationChanges(root)
+	if err != nil {
+		t.Fatalf("hasUnstagedMigrationChanges: %v", err)
+	}
+	if dirty {
+		t.Fatal("precondition: a freshly built fixture should be clean")
+	}
+
+	// The gate covers the files the migration ADDS to its commit — the on-ramp,
+	// the lockfile, the scoped ignore files — not the ones it removes. A removal
+	// target the user has edited is caught by `git rm` refusing it, which is a
+	// different mechanism with its own test. So perturb a tracked footprint path.
+	abs := filepath.Join(root, ".sageox", "skills.lock.json")
+	if _, statErr := os.Stat(abs); statErr != nil {
+		t.Skipf("fixture has no tracked lockfile to perturb: %v", statErr)
+	}
+	if err := os.WriteFile(abs, []byte("{\"schema_version\": 2}\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	dirty, err = hasUnstagedMigrationChanges(root)
+	if err != nil {
+		t.Fatalf("hasUnstagedMigrationChanges: %v", err)
+	}
+	if !dirty {
+		t.Error("an unstaged edit to a file the migration commits was not detected")
+	}
+}
+
+// TestHasUnstagedMigrationChanges_UntrackedUserFileAtAFootprintPathBlocks.
+//
+// `git diff` says nothing about untracked files, so an existence-only check would
+// let `git add --force` sweep a user's own sageox/SKILL.md into ox's commit. Only
+// byte-exact canonical content is adoptable; anything else must block.
+func TestHasUnstagedMigrationChanges_UntrackedUserFileAtAFootprintPathBlocks(t *testing.T) {
+	root := migrationRepo(t)
+	rel := filepath.Join(".claude", "skills", skillmanager.CommittedOnRamp, "SKILL.md")
+	abs := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(abs, []byte("---\nname: sageox\n---\nMY OWN VERSION\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	dirty, err := hasUnstagedMigrationChanges(root)
+	if err != nil {
+		t.Fatalf("hasUnstagedMigrationChanges: %v", err)
+	}
+	if !dirty {
+		t.Error("a user-authored file sitting at a footprint path was not treated as blocking; " +
+			"`git add --force` would have committed it")
 	}
 }

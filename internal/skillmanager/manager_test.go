@@ -1198,3 +1198,101 @@ func TestPlan_ReservedReclaimNeverEatsACaseVariantUserSkill(t *testing.T) {
 		"the user's file now holds ox's reserved-skill content")
 	require.Len(t, plan.Conflicts, 1, "the collision was not reported as a conflict")
 }
+
+// ReconcileUpdateGated exists so a caller can VETO an apply from inside the lock
+// that already serializes plan-and-apply. Inspecting the returned plan instead
+// would be too late — Apply has already run — and splitting Plan from Apply at
+// the call site reopens the race the lock closed. The daemon uses it to refuse
+// rewriting a tracked file; none of it was directly covered.
+
+func TestReconcileUpdateGated_GateErrorSkipsApplyEntirely(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	veto := errors.New("plan touches tracked files")
+
+	var sawPlan bool
+	plan, err := ReconcileUpdateGated(repo, "1.0.0",
+		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return DefaultDesired(targets), targets, nil
+		},
+		func(p *ReconcilePlan) error {
+			sawPlan = p != nil && len(p.Creates) > 0
+			return veto
+		})
+
+	require.ErrorIs(t, err, veto)
+	require.True(t, sawPlan, "the gate must see the planned work BEFORE it is applied")
+	require.NotNil(t, plan, "the caller still needs the plan it vetoed")
+
+	_, statErr := os.Stat(filepath.Join(repo, ".agents", "skills"))
+	require.True(t, os.IsNotExist(statErr), "a vetoed reconcile still materialized files")
+	_, statErr = os.Stat(LockPath(repo))
+	require.True(t, os.IsNotExist(statErr), "a vetoed reconcile still wrote the lockfile")
+}
+
+func TestReconcileUpdateGated_NilGateAppliesNormally(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+
+	plan, err := ReconcileUpdateGated(repo, "1.0.0",
+		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return DefaultDesired(targets), targets, nil
+		}, nil)
+
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	entries, readErr := os.ReadDir(filepath.Join(repo, ".agents", "skills"))
+	require.NoError(t, readErr)
+	require.NotEmpty(t, entries, "a nil gate must not block the apply")
+}
+
+func TestReconcileUpdateGated_UpdateErrorNeverReachesTheGate(t *testing.T) {
+	repo := t.TempDir()
+	sentinel := errors.New("desired state unavailable")
+	gateCalled := false
+
+	_, err := ReconcileUpdateGated(repo, "1.0.0",
+		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return DesiredSkills{}, nil, sentinel
+		},
+		func(p *ReconcilePlan) error { gateCalled = true; return nil })
+
+	require.ErrorIs(t, err, sentinel)
+	require.False(t, gateCalled, "the gate was handed a plan that was never built")
+	_, statErr := os.Stat(filepath.Join(repo, ".agents", "skills"))
+	require.True(t, os.IsNotExist(statErr))
+}
+
+// TestReconcileUpdateGated_VetoLeavesNothingHalfWritten is the property the whole
+// design rests on: a veto is indistinguishable from never having run.
+func TestReconcileUpdateGated_VetoLeavesNothingHalfWritten(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+
+	// Seed a healthy install first, so a veto has something it could damage.
+	_, err := ReconcileUpdate(repo, "1.0.0",
+		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return DefaultDesired(targets), targets, nil
+		})
+	require.NoError(t, err)
+	before, err := os.ReadFile(LockPath(repo))
+	require.NoError(t, err)
+	revisionBefore, versionBefore, _ := InstalledSource(repo)
+
+	_, err = ReconcileUpdateGated(repo, "1.0.0",
+		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return DefaultDesired(targets), nil, nil // drop every target
+		},
+		func(p *ReconcilePlan) error { return errors.New("veto") })
+	require.Error(t, err)
+
+	after, err := os.ReadFile(LockPath(repo))
+	require.NoError(t, err)
+	require.Equal(t, string(before), string(after), "a vetoed reconcile rewrote the committed lockfile")
+	revisionAfter, versionAfter, _ := InstalledSource(repo)
+	require.Equal(t, revisionBefore, revisionAfter, "a vetoed reconcile rewrote the recorded revision")
+	require.Equal(t, versionBefore, versionAfter)
+}
