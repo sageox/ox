@@ -74,7 +74,7 @@ func TestSendFrictionEvent_DeliversToSocket(t *testing.T) {
 func TestFrictionIPC_CalledFromRecoveryPath(t *testing.T) {
 	t.Parallel()
 
-	src, err := os.ReadFile("main.go")
+	src, err := os.ReadFile(repoPath("main.go"))
 	require.NoError(t, err, "should be able to read main.go")
 
 	// check for an uncommented call (tab-indented, no leading //)

@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -133,6 +134,14 @@ func TestCleanupOrphanedStubsInDir_KeepsNonPhantoms(t *testing.T) {
 // genuinely absent file is RawMissing; anything present-but-unreadable fails
 // safe to RawSubstantive.
 func TestClassifyRawFile_UnreadablePresentFileIsNotMissing(t *testing.T) {
+	// Chmod(0o000) is the isolation mechanism here, and Go's Chmod maps only the
+	// read-only bit on Windows — the target stays readable and this test would pass
+	// while asserting nothing. See .claude/rules/testing.md, "Failure Paths That
+	// Render Identically To Success".
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: chmod cannot remove read permission")
+	}
+
 	dir := t.TempDir()
 	p := filepath.Join(dir, "raw.jsonl")
 	require.NoError(t, os.WriteFile(p, []byte(headerLine+`{"type":"user"}`+"\n"), 0o644))

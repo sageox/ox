@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -575,6 +576,14 @@ func TestSelfHeal_FlockHostileFS_DefersNeverRacyNuke(t *testing.T) {
 // Failure prevented: a retryable error (a stat blip, an unreadable version
 // marker) either destroying a healthy index or laundering a stale one as current.
 func TestReclassify_SoftFailure_DefersNotDestructive(t *testing.T) {
+	// Chmod(0o000) is the isolation mechanism here, and Go's Chmod maps only the
+	// read-only bit on Windows — the target stays readable and this test would pass
+	// while asserting nothing. See .claude/rules/testing.md, "Failure Paths That
+	// Render Identically To Success".
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: chmod cannot remove read permission")
+	}
+
 	if testing.Short() {
 		t.Skip("short: Bleve + bbolt operations")
 	}

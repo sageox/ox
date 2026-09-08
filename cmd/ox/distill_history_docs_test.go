@@ -142,10 +142,10 @@ func TestDistillHistoryReferenceDocs_Committed(t *testing.T) {
 // for locating a module root from an arbitrary test location.
 func findRepoRootForDocsTest(t *testing.T) string {
 	t.Helper()
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
+	// Walk up from the SOURCE tree, not the process working directory: TestMain
+	// deliberately moves the process out of the repository so a cwd-resolved doctor
+	// check cannot reconcile the developer's own checkout.
+	dir := packageDir
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 			return dir

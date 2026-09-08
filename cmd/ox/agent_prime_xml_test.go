@@ -710,7 +710,7 @@ func TestConsultRoutes_NoDriftWithSkill(t *testing.T) {
 
 	// read the additive skill's frontmatter description (YAML between the first
 	// two --- fences). Path resolves from cmd/ox/ → repo root → extensions/...
-	root, err := filepath.Abs(filepath.Join("..", ".."))
+	root, err := filepath.Abs(repoPath("..", ".."))
 	if err != nil {
 		t.Fatalf("resolve repo root: %v", err)
 	}

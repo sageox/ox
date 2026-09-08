@@ -581,6 +581,14 @@ func TestForeignKeysEnabled(t *testing.T) {
 // bolt because it was mistaken for a live lock (false-lock, the 458-restart
 // incident).
 func TestBoltCorruptOnExclusiveOpen_DistinguishesCorruptionFromLiveLock(t *testing.T) {
+	// Chmod(0o000) is the isolation mechanism here, and Go's Chmod maps only the
+	// read-only bit on Windows — the file stays readable and this test would pass
+	// while never creating the unreadable condition it asserts on. See
+	// .claude/rules/testing.md, "Failure Paths That Render Identically To Success".
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: chmod cannot remove read permission")
+	}
+
 	// Not parallel: this test overrides the package-level probe timeout. Go
 	// runs non-parallel tests to completion before parallel ones resume, so
 	// the override cannot race a concurrent openOrCreateBleveIndex.

@@ -1,6 +1,6 @@
 # ADR-031 — The ox CLI skill & rule inventory: reserved namespaces, gitignored materialization
 
-**Status:** Draft (Proposed) — awaiting Ryan's review as path-location and data-ergonomics owner. Two decisions in this ADR trip the `CLAUDE.md` Required-Review gate ("Path locations", "Data access ergonomics"), and one of them has ox writing a commit into a customer's repository. Implementation has landed behind these decisions so the review has running code to judge; it flips to Accepted on approval.
+**Status:** Accepted — approved by Ryan Snodgrass on 2026-09-07 as path-location and data-ergonomics owner. Both gated decisions were ruled on explicitly: **(8)** ox may write the single untrack commit at `FixLevelAuto`, and **(5)** the scoped ox-owned `.gitignore` files are the right home for the ignore rules.
 
 **Date:** 2026-09-07 · **Supersedes:** nothing · **Amends:** ADR-023 (two-layer skill injection), `docs/specs/skill-management.md`
 
