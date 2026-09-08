@@ -13,15 +13,14 @@ import (
 
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/sageox/ox/internal/useragent"
 )
 
-// VersionCacheData holds the cached latest release version from GitHub.
-type VersionCacheData struct {
-	LatestVersion string    `json:"latest_version"`
-	CheckedAt     time.Time `json:"checked_at"`
-	ETag          string    `json:"etag,omitempty"`
-}
+// VersionCacheData holds the cached latest release version from GitHub, plus
+// the CLI's update-notice ledger. Aliased to the canonical struct so the daemon
+// cannot drift from the CLI's view of a file they both write.
+type VersionCacheData = updatenotice.Data
 
 // VersionCache manages the GitHub release version cache on disk.
 // Thread-safe for concurrent access.
@@ -178,6 +177,16 @@ func (v *VersionCache) CheckAndUpdate(ctx context.Context) error {
 			CheckedAt:     time.Now(),
 			ETag:          resp.Header.Get("ETag"),
 		}
+
+		// The CLI stamps its update-notice ledger into this same file between
+		// daemon polls, so the in-memory copy loaded at daemon start can be
+		// hours stale. Re-read before saving: overwriting with a stale (or
+		// absent) ledger erases the coworker's "already told" memory, and the
+		// upgrade nag comes back on every command until the next notice.
+		_ = v.Load()
+		v.mu.RLock()
+		updatenotice.CarryLedger(newData, v.data)
+		v.mu.RUnlock()
 
 		v.logger.Info("version check: fetched latest", "version", release.TagName)
 		return v.Save(newData)
