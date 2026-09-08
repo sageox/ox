@@ -99,6 +99,16 @@ func TestNativeRecovery_WaitsForCaptureLock(t *testing.T) {
 			}
 
 			handler := NewSessionFinalizeHandlerForTest(nil)
+			// This test asserts the WAIT half of the capture-lock contract: the
+			// detector must still be blocked when the writer finally releases.
+			// The default 250ms budget is the DEFER half, asserted by
+			// TestNativeRecovery_BusyCaptureDefersWithoutLosingState. Sharing one
+			// budget makes the two race: the flush handshake below is not bounded
+			// under 250ms, so on a loaded runner recovery deferred, returned zero
+			// items, and this test failed on a timing accident. Give the wait a
+			// budget the handshake cannot outlive; the deadline assertions below
+			// still prove it blocks.
+			handler.captureLockWait = 30 * time.Second
 			started, done := make(chan struct{}), make(chan struct{})
 			var items []*WorkItem
 			var detectErr error
