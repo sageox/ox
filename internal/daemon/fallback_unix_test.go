@@ -58,7 +58,7 @@ func startFakeOxDaemon(t *testing.T, shellBody string) (int, <-chan struct{}) {
 }
 
 // startFakeProcess runs sh under the given executable name with a daemon-shaped
-// argument list: argv is [<dir>/<name>, -c, <body>, daemon, start, --foreground].
+// argument list: argv is [<dir>/<name>, -c, <body>, daemon, start, --foreground, readyPath].
 //
 // It has to be a symlink to a real executable, not a #! script — the kernel
 // rewrites a shebang script's argv[0] to the interpreter, so a script always
@@ -69,10 +69,12 @@ func startFakeProcess(t *testing.T, name, shellBody string) (int, <-chan struct{
 
 	sh, err := exec.LookPath("sh")
 	require.NoError(t, err)
-	fakeExe := filepath.Join(t.TempDir(), name)
+	dir := t.TempDir()
+	fakeExe := filepath.Join(dir, name)
 	require.NoError(t, os.Symlink(sh, fakeExe))
 
-	child := exec.Command(fakeExe, "-c", shellBody, "daemon", "start", "--foreground")
+	readyPath := filepath.Join(dir, "ready")
+	child := exec.Command(fakeExe, "-c", `printf ready > "$3"; `+shellBody, "daemon", "start", "--foreground", readyPath)
 	require.NoError(t, child.Start())
 
 	done := make(chan struct{})
@@ -84,6 +86,12 @@ func startFakeProcess(t *testing.T, name, shellBody string) (int, <-chan struct{
 		_ = child.Process.Kill()
 		<-done
 	})
+	// Start does not wait for the shell to run. Synchronize with the child
+	// before testing process identity or signaling it.
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(readyPath)
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond, "fake process did not start")
 	return child.Process.Pid, done
 }
 
