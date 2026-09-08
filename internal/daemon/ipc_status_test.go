@@ -3,12 +3,14 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/codedb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,6 +35,88 @@ func TestStatusData_JSON(t *testing.T) {
 	assert.Equal(t, status.Running, decoded.Running)
 	assert.Equal(t, status.Pid, decoded.Pid)
 	assert.Equal(t, status.LedgerPath, decoded.LedgerPath)
+}
+
+// Status must remain responsive when a cold or failed index has no cached stats
+// and another writer holds the database open. Exercise both real IPC handlers.
+func TestServerClient_StatusWithLockedCodeDB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real code databases and IPC servers")
+	}
+
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_RUNTIME_DIR", recoveryRuntimeDir(t, "ox-ipc-stats-"))
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	for _, tt := range []struct {
+		name     string
+		indexing bool
+		cached   bool
+		lastErr  error
+	}{
+		{name: "cold start"},
+		{name: "failed initial index", lastErr: errors.New("code index is corrupt")},
+		{name: "active initial index", indexing: true},
+		{name: "failed refresh preserves stats", cached: true, lastErr: errors.New("refresh failed")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			seedCodeDB(t, dataDir)
+			// Keep Bleve's real writer lock held throughout the status requests.
+			db, err := codedb.Open(dataDir)
+			require.NoError(t, err)
+			defer db.Close()
+
+			cfg := DefaultConfig()
+			cfg.ProjectRoot = t.TempDir()
+			d := New(cfg, nil)
+			d.scheduler = NewSyncScheduler(cfg, d.logger)
+			d.codedb = NewCodeDBManager(cfg.ProjectRoot, d.logger, nil)
+			d.codedb.dataDir = dataDir
+			d.codedb.indexing = tt.indexing
+			d.codedb.lastErr = tt.lastErr
+			d.codedb.ledgerStats = CodeDBStats{IndexExists: true, Commits: 7}
+			if tt.cached {
+				d.codedb.stats = queryStatsFromDB(db, dataDir)
+				d.codedb.lastIndex = time.Now().Add(-time.Minute).UTC()
+			}
+
+			server := NewServerWithService(d.logger, &daemonServiceImpl{d: d})
+			stop := startRecoveryTestServer(t, server)
+			defer func() {
+				// Release a blocked old implementation before draining handlers.
+				require.NoError(t, db.Close())
+				stop()
+			}()
+
+			client := &Client{socketPath: SocketPath(), timeout: 250 * time.Millisecond}
+			for range 2 {
+				status, err := client.Status()
+				require.NoError(t, err, "daemon status must not wait for the code database")
+				require.NotNil(t, status.CodeDB)
+				assert.True(t, status.Running)
+				codeStatus, err := client.CodeStatus()
+				require.NoError(t, err, "code status must not wait for the code database")
+				assert.Equal(t, status.CodeDB, codeStatus)
+				assert.True(t, codeStatus.IndexExists)
+				assert.Equal(t, tt.indexing, codeStatus.IndexingNow)
+				assert.Equal(t, dataDir, codeStatus.DataDir)
+				assert.True(t, codeStatus.LedgerExists)
+				assert.Equal(t, 7, codeStatus.LedgerCommits)
+				if tt.lastErr != nil {
+					assert.Equal(t, tt.lastErr.Error(), codeStatus.LastError)
+				} else {
+					assert.Empty(t, codeStatus.LastError)
+				}
+				if tt.cached {
+					assert.Equal(t, 3, codeStatus.Commits)
+					assert.Len(t, codeStatus.Repos, 2)
+					assert.Equal(t, d.codedb.lastIndex, codeStatus.LastIndexed)
+				}
+			}
+		})
+	}
 }
 
 // --- Regression tests: IPC status must remain responsive during long-running operations ---

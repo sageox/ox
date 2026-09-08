@@ -1020,82 +1020,29 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 }
 
 // Stats returns current index statistics.
-// Returns cached stats from the last index run to avoid blocking on SQLite
-// during active indexing. Only queries the DB on cold start (no cached stats
-// and not currently indexing).
+// Counts come from the last successful index run. Never open the database here:
+// cold starts and failed indexing can leave SQLite or Bleve unavailable, and
+// status IPC requests must remain responsive in those states.
 func (m *CodeDBManager) Stats() CodeDBStats {
 	m.mu.Lock()
-	indexing := m.indexing
-	lastIndex := m.lastIndex
-	lastErr := m.lastErr
-	cached := m.stats
-	ledgerIndexing := m.ledgerIndexing
-	ledgerStats := m.ledgerStats
+	result := m.stats
+	result.IndexingNow = m.indexing
+	result.LastIndexed = m.lastIndex
+	result.LastError = ""
+	if m.lastErr != nil {
+		result.LastError = m.lastErr.Error()
+	}
+	result.LedgerIndexingNow = m.ledgerIndexing
+	result.LedgerExists = m.ledgerStats.IndexExists
+	result.LedgerCommits = m.ledgerStats.Commits
 	m.mu.Unlock()
 
-	dataDir := m.resolveSharedDataDir()
-
-	// merge ledger index fields into result
-	mergeLedger := func(s *CodeDBStats) {
-		s.LedgerIndexingNow = ledgerIndexing
-		s.LedgerExists = ledgerStats.IndexExists
-		s.LedgerCommits = ledgerStats.Commits
+	result.DataDir = m.resolveSharedDataDir()
+	if !result.IndexExists {
+		_, err := os.Stat(result.DataDir)
+		result.IndexExists = err == nil
 	}
 
-	// if we have cached stats, return them with live metadata
-	if cached.IndexExists {
-		cached.IndexingNow = indexing
-		cached.LastIndexed = lastIndex
-		cached.DataDir = dataDir
-		cached.LastError = ""
-		if lastErr != nil {
-			cached.LastError = lastErr.Error()
-		}
-		mergeLedger(&cached)
-		return cached
-	}
-
-	// no cached stats yet — cold start before first index completes
-	result := CodeDBStats{
-		DataDir:     dataDir,
-		IndexingNow: indexing,
-		LastIndexed: lastIndex,
-	}
-	if lastErr != nil {
-		result.LastError = lastErr.Error()
-	}
-
-	// if indexing is active, don't try to open the DB (it will block)
-	if indexing {
-		if _, err := os.Stat(dataDir); err == nil {
-			result.IndexExists = true
-		}
-		mergeLedger(&result)
-		return result
-	}
-
-	// not indexing and no cache: try a quick read to populate initial stats
-	if _, err := os.Stat(dataDir); err == nil {
-		result.IndexExists = true
-
-		db, err := codedb.Open(dataDir)
-		if err == nil {
-			defer db.Close()
-			result = queryStatsFromDB(db, dataDir)
-			result.IndexingNow = indexing
-			result.LastIndexed = lastIndex
-			if lastErr != nil {
-				result.LastError = lastErr.Error()
-			}
-
-			// cache for future calls
-			m.mu.Lock()
-			m.stats = result
-			m.mu.Unlock()
-		}
-	}
-
-	mergeLedger(&result)
 	return result
 }
 
