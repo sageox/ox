@@ -10,10 +10,10 @@ extensions/skills/<skill>/
   scripts/        # optional
 ```
 
-The embedded catalog is the built-in source of truth. `core` is selected by
-default; `attest` is opt-in. Authenticated Team Context sources may extend the
-catalog later, but must use the same Plan/Apply engine rather than introduce a
-second installer or activation framework.
+The embedded catalog is the built-in source of truth. `core`, `onramp`, and
+`lifecycle` are selected by default. Authenticated Team Context sources may
+extend the catalog later, but must use the same Plan/Apply engine rather than
+introduce a second installer or activation framework.
 
 ## Native targets
 
@@ -111,8 +111,6 @@ distinguishes interrupted SageOx writes from coincidentally similar user files.
 - `ox doctor` plans only committed targets. For the one-release migration, a
   target with a valid legacy stamp may bootstrap selection.
 - `ox doctor --fix` applies the plan and preserves conflicts.
-- `ox attest install` adds the `attest` bundle once, then reconciles the
-  deduplicated committed targets.
 - uninstall removes unchanged owned files once across all targets.
 - an upgrade converges on the next explicit Doctor/init lifecycle operation;
   the old process does not attempt to execute a newly installed catalog.

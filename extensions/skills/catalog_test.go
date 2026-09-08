@@ -12,11 +12,11 @@ func TestCanonicalCatalogValidAndDeterministic(t *testing.T) {
 	if err := Validate(); err != nil {
 		t.Fatalf("Validate() = %v", err)
 	}
-	first, err := SelectedBundles("1.0.0", nil, []string{"core", "attest"})
+	first, err := SelectedBundles("1.0.0", nil, []string{"core", "onramp"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := SelectedBundles("1.0.0", nil, []string{"core", "attest"})
+	second, err := SelectedBundles("1.0.0", nil, []string{"core", "onramp"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,8 +37,8 @@ func TestCanonicalCatalogValidAndDeterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, skill := range defaults {
-		if strings.HasPrefix(skill.Name, "ox-attest-") {
-			t.Fatalf("opt-in skill %s leaked into default bundle", skill.Name)
+		if strings.Contains(skill.Name, "attest") {
+			t.Fatalf("retired skill %s leaked into catalog", skill.Name)
 		}
 	}
 }
@@ -67,7 +67,7 @@ func TestValidateRejectsUnsafeAndMalformedSources(t *testing.T) {
 }
 
 func TestPortableSkillsAvoidHostSpecificActivationSyntax(t *testing.T) {
-	selected, err := SelectedBundles("1.0.0", nil, []string{"core", "onramp", "lifecycle", "attest"})
+	selected, err := SelectedBundles("1.0.0", nil, []string{"core", "onramp", "lifecycle"})
 	if err != nil {
 		t.Fatal(err)
 	}

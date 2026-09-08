@@ -528,7 +528,6 @@ func initFeatureFlags(cmd *cobra.Command) {
 // help before PersistentPreRunE, so a RunE-only guard would still advertise the
 // command and a Hidden-only guard would still allow direct execution.
 func syncFeatureGatedCommands(root *cobra.Command) {
-	setCommandRegistered(root, attestCmd, flags.Get().AttestEnabled)
 	setCommandRegistered(root, scoutCmd, auth.IsScoutEnabled())
 }
 

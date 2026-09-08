@@ -201,7 +201,7 @@ type SkillsParams struct {
 	// selects the adapter's default skill set, so capability-specific playbooks
 	// stay opt-in instead of silently arriving in every initialized repository.
 	Names []string `json:"names,omitempty"`
-	// Bundles selects curated capability groups such as "attest". Bundles are
+	// Bundles selects curated capability groups such as "core". Bundles are
 	// the stable user/team-facing install contract; Names remains for repair.
 	Bundles []string `json:"bundles,omitempty"`
 }

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`ox attest` and its optional playbooks have been removed** — the experimental capability and evidence commands introduced in 0.14.0 are no longer available in ox. Existing acceptance specifications and evidence files remain in your repository.
+
 ### New
 
 - **See where a slow pipeline actually spends its time** — `ox viz render waterfall` draws the browser-devtools waterfall for any timed sequence: one row per stage on one clock, so overlap and serialization are obvious at a glance. Give the rows dependency edges and it computes the critical path, dims everything that didn't set the total, marks the long pole, and draws the idle wait between stages — the dead time a bar-only chart hides and the cheapest latency to delete.
