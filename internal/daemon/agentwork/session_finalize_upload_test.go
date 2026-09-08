@@ -618,16 +618,12 @@ func TestProcessResult_UploadOnly_AlreadyCommitted_PrunesCache(t *testing.T) {
 }
 
 // A session whose content lives outside the ledger cannot be committed: an XDG
-// cache dir that stageSessionInLedger left in place, or a symlink under
-// sessions/ that points at one. Either way the only copy must keep real
-// content, not pointers.
+// cache dir that stageSessionInLedger left in place, a symlink under sessions/
+// that points at one, or a sessions/ root that is itself a symlink. Either way
+// the only copy must keep real content, not pointers.
 func TestGitCommitAndPush_LeavesOutOfLedgerSessionIntact(t *testing.T) {
-	for _, viaSymlink := range []bool{false, true} {
-		name := "xdg dir"
-		if viaSymlink {
-			name = "symlink under sessions"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, mode := range []string{"xdg dir", "symlink under sessions", "symlinked sessions root"} {
+		t.Run(mode, func(t *testing.T) {
 			ledgerPath := t.TempDir()
 			runGitCmd(t, ledgerPath, "init", "--quiet")
 			externalDir := filepath.Join(t.TempDir(), "sessions", "2026-01-10T14-30-testuser-OxXDG")
@@ -640,14 +636,21 @@ func TestGitCommitAndPush_LeavesOutOfLedgerSessionIntact(t *testing.T) {
 				t.Fatal(err)
 			}
 			sessionDir := externalDir
-			if viaSymlink {
+			link := func(target, name string) {
+				if err := os.Symlink(target, name); err != nil {
+					t.Skipf("symlinks unsupported: %v", err)
+				}
+			}
+			switch mode {
+			case "symlink under sessions":
 				if err := os.MkdirAll(filepath.Join(ledgerPath, "sessions"), 0o755); err != nil {
 					t.Fatal(err)
 				}
 				sessionDir = filepath.Join(ledgerPath, "sessions", filepath.Base(externalDir))
-				if err := os.Symlink(externalDir, sessionDir); err != nil {
-					t.Skipf("symlinks unsupported: %v", err)
-				}
+				link(externalDir, sessionDir)
+			case "symlinked sessions root":
+				link(filepath.Dir(externalDir), filepath.Join(ledgerPath, "sessions"))
+				sessionDir = filepath.Join(ledgerPath, "sessions", filepath.Base(externalDir))
 			}
 
 			handler := NewSessionFinalizeHandler(slog.Default())

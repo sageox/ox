@@ -1524,12 +1524,18 @@ func isGitTrackedLedgerSession(sessionDir, ledgerPath string) bool {
 		return false
 	}
 	trackedDir := filepath.Join(ledgerPath, "sessions")
-	// Compare resolved paths when both exist: a symlink under sessions/ that
-	// points outside the ledger must not count as tracked, because the pointer
-	// write in gitCommitAndPush follows it into the target's real content.
-	if resolvedTracked, err := filepath.EvalSymlinks(trackedDir); err == nil {
-		if resolvedSession, err := filepath.EvalSymlinks(sessionDir); err == nil {
-			trackedDir, sessionDir = resolvedTracked, resolvedSession
+	// Compare resolved paths when they exist: a symlink under sessions/, or a
+	// symlinked sessions/ root, that points outside the ledger must not count
+	// as tracked, because the pointer write in gitCommitAndPush follows it
+	// into the target's real content while git refuses paths beyond a symlink.
+	if resolvedLedger, err := filepath.EvalSymlinks(ledgerPath); err == nil {
+		if resolvedTracked, err := filepath.EvalSymlinks(trackedDir); err == nil {
+			if resolvedTracked != filepath.Join(resolvedLedger, "sessions") {
+				return false
+			}
+			if resolvedSession, err := filepath.EvalSymlinks(sessionDir); err == nil {
+				trackedDir, sessionDir = resolvedTracked, resolvedSession
+			}
 		}
 	}
 	if filepath.Clean(sessionDir) == filepath.Clean(trackedDir) {
