@@ -114,6 +114,10 @@ func TestServerClient_StatusWithLockedCodeDB(t *testing.T) {
 					assert.Equal(t, 3, codeStatus.Commits)
 					assert.Len(t, codeStatus.Repos, 2)
 					assert.Equal(t, d.codedb.lastIndex, codeStatus.LastIndexed)
+				} else {
+					assert.Zero(t, codeStatus.Commits)
+					assert.Empty(t, codeStatus.Repos)
+					assert.True(t, codeStatus.LastIndexed.IsZero())
 				}
 			}
 		})
