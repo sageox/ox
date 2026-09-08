@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Codex sessions now finalize on their own** — archiving or deleting a Codex conversation, or closing Codex, publishes the recording the same way closing Claude Code does. Until now a Codex session stayed in the local cache until someone ran `ox agent <id> session stop` or the daemon's stale sweep noticed the exited process. Existing installs pick up the new hook on the next `ox doctor`.
 - **Claude Code and Codex session recording continues after individual commands finish** — interrupted uploads remain recoverable, with secret redaction preserved before publication.
 - **A read-only code index is no longer mistaken for a corrupt one and deleted** — ox read "cannot write this database" as "this database is damaged" and tried to delete it; only the read-only filesystem stopped it. The same misreading on writable media would have destroyed a healthy index that costs minutes to rebuild.
 - **`ox code status` no longer reports an index it could not open as an empty one** — it answered zeros under `index_exists: true`, which reads exactly like a warm index holding nothing. It now shows `✗ unreadable` with the reason (`open_error` in `--json`), and labels a read-only index as such.

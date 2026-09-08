@@ -39,6 +39,9 @@ func TestResolvePhase(t *testing.T) {
 		{"claude alias resolves", "claudecode", "SessionStart", phaseStart},
 		{"claude short alias resolves", "claude", "SessionStart", phaseStart},
 		{"unknown agent falls back", "codex", "SessionStart", phaseStart},
+		// the Codex adapter installs SessionEnd; auto-finalize depends on this
+		// resolving to the end phase through the cross-agent fallback.
+		{"codex SessionEnd finalizes", "codex", "SessionEnd", phaseEnd},
 		{"unknown agent unknown event", "codex", "FooBar", ""},
 	}
 
