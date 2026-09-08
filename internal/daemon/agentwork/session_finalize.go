@@ -433,7 +433,9 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			// entries written after the watcher's last poll. Never write content
 			// into the git-tracked ledger path.
 			if sessionsDir != filepath.Join(ledgerPath, "sessions") {
-				recoverErr := fileutil.WithFileLock(context.Background(), rawPath, func() error {
+				// A busy capture writer can be retried on the next detect pass;
+				// keep one session from blocking the scan for the default 10s.
+				recoverErr := fileutil.WithFileLockTimeout(context.Background(), rawPath, 250*time.Millisecond, func() error {
 					var err error
 					hasRaw, err = recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath)
 					if err != nil {
@@ -698,7 +700,7 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			}
 
 			if sessionsDir != filepath.Join(ledgerPath, "sessions") {
-				recoverErr := fileutil.WithFileLock(context.Background(), rawPath, func() error {
+				recoverErr := fileutil.WithFileLockTimeout(context.Background(), rawPath, 250*time.Millisecond, func() error {
 					var err error
 					hasRaw, err = recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath)
 					if err != nil {

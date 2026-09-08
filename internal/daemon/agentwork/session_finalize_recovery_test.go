@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -154,11 +158,111 @@ func TestNativeRecovery_WaitsForCaptureLock(t *testing.T) {
 	}
 }
 
+// One busy capture writer must not stall the detector for ten seconds per
+// session. Deferral preserves the recording so the next pass can finish it.
+func TestNativeRecovery_BusyCaptureDefersWithoutLosingState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: checks lock-acquisition deadlines for both detectors")
+	}
+	for _, detector := range []string{"anti-entropy", "agent-exit"} {
+		t.Run(detector, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+			ledgerPath := t.TempDir()
+			sessionDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", "recovery-OxBusy")
+			require.NoError(t, os.MkdirAll(sessionDir, 0700))
+			sourceDir := filepath.Join(home, ".codex", "sessions")
+			require.NoError(t, os.MkdirAll(sourceDir, 0700))
+			source := filepath.Join(sourceDir, "native.jsonl")
+			require.NoError(t, os.WriteFile(source, []byte("recover after release\n"), 0600))
+			state := session.RecordingState{
+				AgentID: "OxBusy", AdapterName: "codex", WatchMode: "tail",
+				SessionFile: source, SessionPath: sessionDir, ParentPID: 99999999,
+				StartedAt: time.Now().Add(-time.Hour),
+			}
+			recPath := filepath.Join(sessionDir, recordingMarker)
+			writeRecordingState(t, recPath, state)
+			recBefore, err := os.ReadFile(recPath)
+			require.NoError(t, err)
+			rawPath := filepath.Join(sessionDir, artifactRaw)
+			const raw = "{\"_meta\":{\"agent_type\":\"codex\"}}\n"
+			require.NoError(t, os.WriteFile(rawPath, []byte(raw), 0600))
+
+			locked, release, holderDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			releaseLock := sync.OnceFunc(func() { close(release) })
+			var holderErr error
+			go func() {
+				defer close(holderDone)
+				holderErr = fileutil.WithFileLock(context.Background(), rawPath, func() error {
+					close(locked)
+					<-release
+					return nil
+				})
+			}()
+			t.Cleanup(func() {
+				releaseLock()
+				<-holderDone
+			})
+			select {
+			case <-locked:
+			case <-holderDone:
+				require.NoError(t, holderErr)
+				t.Fatal("capture lock was not acquired")
+			}
+
+			handler := NewSessionFinalizeHandlerForTest(nil)
+			for attempt := range 2 {
+				done := make(chan struct{})
+				var items []*WorkItem
+				var detectErr error
+				go func() {
+					defer close(done)
+					if detector == "anti-entropy" {
+						items, detectErr = handler.Detect(ledgerPath)
+					} else {
+						items = handler.DetectOrphanedForAgent(ledgerPath, state.AgentID, state.ParentPID)
+					}
+				}()
+				t.Cleanup(func() {
+					releaseLock()
+					<-done
+				})
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Fatal("one busy session stalled the detector instead of deferring to the next pass")
+				}
+				require.NoError(t, detectErr)
+				if attempt == 0 {
+					require.Empty(t, items)
+					recAfter, err := os.ReadFile(recPath)
+					require.NoError(t, err)
+					assert.Equal(t, recBefore, recAfter)
+					rawAfter, err := os.ReadFile(rawPath)
+					require.NoError(t, err)
+					assert.Equal(t, raw, string(rawAfter))
+					releaseLock()
+					<-holderDone
+					require.NoError(t, holderErr)
+				} else {
+					require.Len(t, items, 1)
+					stored, err := session.ReadSessionFromPath(rawPath)
+					require.NoError(t, err)
+					require.Len(t, stored.Entries, 1)
+					assert.Equal(t, "recover after release", stored.Entries[0]["content"])
+					assert.NoFileExists(t, recPath)
+				}
+			}
+		})
+	}
+}
+
 // A missed watcher poll must recover before cleanup or either finalization detector
 // drops the recording marker, including the header eagerly written by prime.
 func TestNativeRecovery_ReachesFinalization(t *testing.T) {
 	for _, detector := range []string{"anti-entropy", "agent-exit"} {
-		for _, rawState := range []string{"missing", "header", "partial", "caught-up"} {
+		for _, rawState := range []string{"missing", "header", "partial", "caught-up", "legacy"} {
 			t.Run(detector+"/"+rawState, func(t *testing.T) {
 				home := t.TempDir()
 				t.Setenv("HOME", home)
@@ -176,11 +280,15 @@ func TestNativeRecovery_ReachesFinalization(t *testing.T) {
 					AgentID: "OxTail", SessionID: "ses_01890a5d-ac96-774b-bcce-b302099a8057",
 					AdapterName: "codex", WatchMode: "tail", SessionFile: source,
 					SessionPath: sessionDir, ParentPID: 99999999,
-					StartedAt: time.Now().Add(-72 * time.Hour),
+					StartedAt:              time.Now().Add(-72 * time.Hour),
+					ContinuedFromSessionID: "ses_01890a5d-ac96-774b-bcce-b302099a8000",
 				}
-				header := `{"_meta":{"schema_version":"1","agent_id":"OxTail","agent_type":"codex","session_id":"` + state.SessionID + `","username":"coworker","model":"gpt-test"}}` + "\n"
+				header := `{"_meta":{"schema_version":"1","agent_id":"OxTail","agent_type":"codex","session_id":"` + state.SessionID + `","continued_from_session_id":"` + state.ContinuedFromSessionID + `","username":"coworker","model":"gpt-test"}}` + "\n"
+				if rawState == "legacy" {
+					header = strings.Replace(header, `"_meta":`, `"type":"header","metadata":`, 1)
+				}
 				raw := header
-				if rawState == "partial" || rawState == "caught-up" {
+				if rawState == "partial" || rawState == "caught-up" || rawState == "legacy" {
 					raw += `{"type":"assistant","content":"first captured response","seq":1}` + "\n"
 					state.SourceOffset = int64(len(first))
 					state.EntryCount = 1
@@ -189,6 +297,9 @@ func TestNativeRecovery_ReachesFinalization(t *testing.T) {
 					raw += `{"type":"assistant","content":"last response before process exit","seq":2}` + "\n"
 					state.SourceOffset += int64(len(last))
 					state.EntryCount++
+				}
+				if rawState == "legacy" {
+					raw += `{"type":"footer","exit_reason":"interrupted"}` + "\n"
 				}
 				rawPath := filepath.Join(sessionDir, artifactRaw)
 				if rawState != "missing" {
@@ -216,18 +327,24 @@ func TestNativeRecovery_ReachesFinalization(t *testing.T) {
 				assert.Equal(t, "first captured response", stored.Entries[0]["content"])
 				assert.Equal(t, "last response before process exit", stored.Entries[1]["content"])
 				assert.Equal(t, state.SessionID, stored.Meta.SessionID)
+				assert.Equal(t, state.ContinuedFromSessionID, stored.Meta.ContinuedFromSessionID)
 				assert.NoFileExists(t, recPath)
 				if rawState != "missing" {
 					assert.Equal(t, "coworker", stored.Meta.Username, "existing metadata must survive recovery")
 					assert.Equal(t, "gpt-test", stored.Meta.Model)
-					if rawState == "partial" || rawState == "caught-up" {
+					if rawState == "partial" || rawState == "caught-up" || rawState == "legacy" {
 						assert.Equal(t, map[string]any{"type": "assistant", "content": "first captured response", "seq": float64(1)}, stored.Entries[0], "all fields of the captured prefix must survive")
 					}
+				}
+				if rawState == "legacy" {
+					assert.Equal(t, "interrupted", stored.Footer["exit_reason"], "legacy footer metadata must survive")
 				}
 				items, err = handler.Detect(ledgerPath)
 				require.NoError(t, err)
 				require.Len(t, items, 1)
-				assert.Equal(t, 2, countRawJSONLEntries(t, rawPath), "a later detect must not append duplicates")
+				after, err := session.ReadSessionFromPath(rawPath)
+				require.NoError(t, err)
+				assert.Len(t, after.Entries, 2, "a later detect must not append duplicates")
 			})
 		}
 	}
@@ -237,7 +354,7 @@ func TestNativeRecovery_ReachesFinalization(t *testing.T) {
 // cursor instead of uploading an incomplete session and destroying the retry state.
 func TestNativeRecovery_SourceFailurePreservesRecording(t *testing.T) {
 	for _, detector := range []string{"anti-entropy", "agent-exit"} {
-		for _, sourceState := range []string{"missing", "outside-root", "deferred-discovery"} {
+		for _, sourceState := range []string{"missing", "outside-root", "deferred-discovery", "malformed-capture", "unreadable-capture", "missing-cursor", "regressed-cursor", "invalid-header", "blocked-temp", "pointer", "nonincremental"} {
 			t.Run(detector+"/"+sourceState, func(t *testing.T) {
 				home := t.TempDir()
 				t.Setenv("HOME", home)
@@ -249,24 +366,60 @@ func TestNativeRecovery_SourceFailurePreservesRecording(t *testing.T) {
 				require.NoError(t, os.MkdirAll(sourceDir, 0700))
 				source := filepath.Join(sourceDir, "missing.jsonl")
 				switch sourceState {
+				case "missing":
 				case "outside-root":
 					source = filepath.Join(home, "private.jsonl")
 					require.NoError(t, os.WriteFile(source, []byte("private data\n"), 0600))
 				case "deferred-discovery":
 					source = ""
+				default:
+					require.NoError(t, os.WriteFile(source, []byte("prefix line\nnative tail\n"), 0600))
 				}
 				state := session.RecordingState{
 					AgentID: "OxRetry", AdapterName: "codex", WatchMode: "tail",
 					SessionFile: source, SessionPath: sessionDir, ParentPID: 99999999,
 					StartedAt: time.Now().Add(-time.Hour), SourceOffset: 12, EntryCount: 1,
 				}
+				switch sourceState {
+				case "missing-cursor":
+					state.SourceOffset = 0
+				case "regressed-cursor":
+					state.SourceOffset = 100000
+				case "nonincremental":
+					original, err := adapters.GetAdapter("codex")
+					require.NoError(t, err)
+					adapters.Unregister("codex")
+					// A third-party adapter may expose only Adapter, without the
+					// incremental-reader contract needed to merge a captured prefix.
+					adapters.Register(struct{ adapters.Adapter }{original})
+					t.Cleanup(func() {
+						adapters.Unregister("codex")
+						adapters.Register(original)
+					})
+				}
 				recPath := filepath.Join(sessionDir, recordingMarker)
 				writeRecordingState(t, recPath, state)
 				recBefore, err := os.ReadFile(recPath)
 				require.NoError(t, err)
 				rawPath := filepath.Join(sessionDir, artifactRaw)
-				const raw = "{\"_meta\":{\"agent_type\":\"codex\"}}\n{\"type\":\"assistant\",\"content\":\"captured\"}\n"
+				raw := "{\"_meta\":{\"agent_type\":\"codex\"}}\n{\"type\":\"assistant\",\"content\":\"captured\"}\n"
+				switch sourceState {
+				case "malformed-capture":
+					raw += "{torn entry"
+				case "invalid-header":
+					raw = strings.Replace(raw, `{"agent_type":"codex"}`, `"damaged"`, 1)
+				case "blocked-temp":
+					require.NoError(t, os.Mkdir(rawPath+".tmp", 0700))
+				case "pointer":
+					raw = lfs.FormatPointer("sha256:"+strings.Repeat("a", 64), 2048)
+				}
 				require.NoError(t, os.WriteFile(rawPath, []byte(raw), 0600))
+				if sourceState == "unreadable-capture" {
+					if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+						t.Skip("requires enforced Unix file permissions")
+					}
+					require.NoError(t, os.Chmod(rawPath, 0000))
+				}
 				handler := NewSessionFinalizeHandlerForTest(nil)
 				var items []*WorkItem
 				if detector == "anti-entropy" {
@@ -279,11 +432,155 @@ func TestNativeRecovery_SourceFailurePreservesRecording(t *testing.T) {
 				recAfter, err := os.ReadFile(recPath)
 				require.NoError(t, err)
 				assert.Equal(t, recBefore, recAfter)
+				if sourceState == "unreadable-capture" {
+					require.NoError(t, os.Chmod(rawPath, 0600))
+				}
 				rawAfter, err := os.ReadFile(rawPath)
 				require.NoError(t, err)
 				assert.Equal(t, raw, string(rawAfter))
 			})
 		}
+	}
+}
+
+// Recovery can be invoked directly by repair code as well as after detection.
+// Missing identity, a missing marker, or a remote pointer must never cause the
+// repair path to replace already captured or remotely stored content.
+func TestNativeRecovery_RefusesUnsafeRepairInputs(t *testing.T) {
+	for _, input := range []string{"missing-marker", "pointer", "missing-home", "unknown-source"} {
+		t.Run(input, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			sessionDir := t.TempDir()
+			rawPath := filepath.Join(sessionDir, artifactRaw)
+			recPath := filepath.Join(sessionDir, recordingMarker)
+			state := session.RecordingState{
+				AgentID: "OxRepair", WatchMode: "tail", AdapterName: "codex",
+				SessionFile: filepath.Join(home, ".codex", "sessions", "native.jsonl"),
+			}
+			raw := "{\"_meta\":{\"agent_type\":\"codex\"}}\n{\"type\":\"assistant\",\"content\":\"keep captured content\"}\n"
+			switch input {
+			case "pointer":
+				raw = lfs.FormatPointer("sha256:"+strings.Repeat("a", 64), 2048)
+			case "unknown-source":
+				state.AdapterName = ""
+			case "missing-home":
+				if runtime.GOOS == "windows" {
+					t.Skip("Unix home lookup uses HOME")
+				}
+				t.Setenv("HOME", "")
+			}
+			require.NoError(t, os.WriteFile(rawPath, []byte(raw), 0600))
+			if input != "missing-marker" {
+				writeRecordingState(t, recPath, state)
+			}
+			handler := NewSessionFinalizeHandlerForTest(nil)
+			recovered, err := recoverRawFromSessionFile(handler.logger, recPath, sessionDir, rawPath)
+			if input == "unknown-source" {
+				require.NoError(t, err)
+				assert.True(t, recovered, "legacy captured content is usable without a native adapter")
+			} else {
+				require.Error(t, err)
+				assert.False(t, recovered)
+			}
+			after, err := os.ReadFile(rawPath)
+			require.NoError(t, err)
+			assert.Equal(t, raw, string(after))
+			if input == "missing-marker" {
+				assert.NoFileExists(t, recPath, "repair must not recreate a cleared recording")
+			} else {
+				assert.FileExists(t, recPath)
+			}
+		})
+	}
+}
+
+// Native lookup can overlap a user ending or aborting a session. Recovery must
+// preserve those later choices and retain existing content if replacement fails.
+func TestNativeRecovery_DiscoveryAndInterruptedRepair(t *testing.T) {
+	for _, lookup := range []string{"found", "empty-result", "aborted", "stopped", "destination-replaced"} {
+		t.Run(lookup, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+			ledgerPath := t.TempDir()
+			sessionDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", "recovery-OxLookup")
+			require.NoError(t, os.MkdirAll(sessionDir, 0700))
+			sourceDir := filepath.Join(home, ".codex", "sessions")
+			require.NoError(t, os.MkdirAll(sourceDir, 0700))
+			source := filepath.Join(sourceDir, "native.jsonl")
+			const first = "captured prefix\n"
+			require.NoError(t, os.WriteFile(source, []byte(first+"recovered tail\n"), 0600))
+			state := session.RecordingState{
+				AgentID: "OxLookup", AgentSessionID: "matching-native-session",
+				WorkspacePath: t.TempDir(), AdapterName: "codex", WatchMode: "tail",
+				SessionPath: sessionDir, ParentPID: 99999999,
+				StartedAt: time.Now().Add(-time.Hour), SourceOffset: int64(len(first)), EntryCount: 1,
+			}
+			recPath := filepath.Join(sessionDir, recordingMarker)
+			writeRecordingState(t, recPath, state)
+			rawPath := filepath.Join(sessionDir, artifactRaw)
+			const raw = "{\"_meta\":{\"agent_type\":\"codex\"}}\n{\"type\":\"assistant\",\"content\":\"captured prefix\"}\n"
+			require.NoError(t, os.WriteFile(rawPath, []byte(raw), 0600))
+			original, err := adapters.GetAdapter("codex")
+			require.NoError(t, err)
+			adapters.Unregister("codex")
+			adapters.Register(&testAdapter{name: "codex", find: func(query adapters.SessionLookup) (string, error) {
+				assert.Equal(t, state.WorkspacePath, query.RepoRoot)
+				assert.Equal(t, state.AgentID, query.AgentID)
+				assert.Equal(t, state.AgentSessionID, query.AgentSessionID)
+				assert.True(t, state.StartedAt.Add(-5*time.Minute).Equal(query.Since), "discovery must retain the recording's time window")
+				switch lookup {
+				case "empty-result":
+					return "", nil
+				case "aborted":
+					require.NoError(t, os.Remove(recPath))
+				case "stopped":
+					next := state
+					stopped := time.Now()
+					next.StoppedAt = &stopped
+					writeRecordingState(t, recPath, next)
+				case "destination-replaced":
+					require.NoError(t, os.Remove(rawPath))
+					require.NoError(t, os.Mkdir(rawPath, 0700))
+					require.NoError(t, os.WriteFile(filepath.Join(rawPath, "keep"), []byte("concurrent data"), 0600))
+				}
+				return source, nil
+			}})
+			t.Cleanup(func() {
+				adapters.Unregister("codex")
+				adapters.Register(original)
+			})
+
+			handler := NewSessionFinalizeHandlerForTest(nil)
+			items := handler.DetectOrphanedForAgent(ledgerPath, state.AgentID, state.ParentPID)
+			if lookup == "found" {
+				require.Len(t, items, 1)
+				stored, err := session.ReadSessionFromPath(rawPath)
+				require.NoError(t, err)
+				require.Len(t, stored.Entries, 2)
+				assert.Equal(t, "captured prefix", stored.Entries[0]["content"])
+				assert.Equal(t, "recovered tail", stored.Entries[1]["content"])
+				assert.NoFileExists(t, recPath)
+			} else {
+				assert.Empty(t, items)
+				if lookup == "destination-replaced" {
+					data, err := os.ReadFile(filepath.Join(rawPath, "keep"))
+					require.NoError(t, err)
+					assert.Equal(t, "concurrent data", string(data))
+				} else {
+					after, err := os.ReadFile(rawPath)
+					require.NoError(t, err)
+					assert.Equal(t, raw, string(after))
+				}
+				if lookup == "aborted" {
+					assert.NoFileExists(t, recPath)
+				} else {
+					assert.FileExists(t, recPath)
+				}
+			}
+			assert.NoFileExists(t, rawPath+".tmp", "failed recovery must not leave partial output for the next pass")
+		})
 	}
 }
 

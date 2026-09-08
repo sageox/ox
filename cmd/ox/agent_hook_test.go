@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/agentx"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
@@ -129,8 +132,8 @@ func setupHandleAfterToolTest(t *testing.T) (projectRoot string, agentID string,
 	return projectRoot, agentID, sourceFile
 }
 
-// Hook discovery must capture its own native conversation, including files created before prime.
-func TestHandleAfterTool_CodexDiscoveryUsesRecordingIdentity(t *testing.T) {
+func buildCodexCaptureAdapter(t *testing.T) string {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("short: builds and invokes the real Codex adapter")
 	}
@@ -139,6 +142,12 @@ func TestHandleAfterTool_CodexDiscoveryUsesRecordingIdentity(t *testing.T) {
 	build.Dir = findModuleRoot(t)
 	buildOutput, err := build.CombinedOutput()
 	require.NoError(t, err, "%s", buildOutput)
+	return adapterBin
+}
+
+// Hook discovery must capture its own native conversation, including files created before prime.
+func TestHandleAfterTool_CodexDiscoveryUsesRecordingIdentity(t *testing.T) {
+	adapterBin := buildCodexCaptureAdapter(t)
 
 	for _, sourceState := range []string{"undiscovered", "missing", "truncated"} {
 		for _, knownIdentity := range []bool{true, false} {
@@ -209,6 +218,63 @@ func TestHandleAfterTool_CodexDiscoveryUsesRecordingIdentity(t *testing.T) {
 				assert.NotContains(t, string(raw), "sibling conversation")
 			})
 		}
+	}
+}
+
+// Current hook input must override an older marker when selecting the native conversation.
+func TestHookStart_UsesCurrentNativeSessionIdentity(t *testing.T) {
+	adapterBin := buildCodexCaptureAdapter(t)
+	const nativeID = "codex-test-session"
+	for _, tt := range []struct {
+		name     string
+		markerID string
+		input    *agentx.HookInput
+	}{
+		{name: "marker only", markerID: nativeID},
+		{name: "empty input retains marker", markerID: nativeID, input: &agentx.HookInput{}},
+		{name: "input overrides stale marker", markerID: "stale-native-session", input: &agentx.HookInput{SessionID: nativeID}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			f := newDraftLedgerFixture(t)
+			t.Chdir(f.projectRoot)
+			defaultLedger, err := ledger.DefaultPath()
+			require.NoError(t, err)
+			require.NoError(t, os.MkdirAll(filepath.Dir(defaultLedger), 0o755))
+			runGit(t, f.projectRoot, "clone", "--quiet", f.barePath, defaultLedger)
+			oldCfg := cfg
+			cfg = &config.Config{}
+			t.Cleanup(func() { cfg = oldCfg })
+			oxConfigSetRepo(t, "session_recording", "auto")
+			adapter, err := adapters.NewExternalAdapter(adapterBin)
+			require.NoError(t, err)
+			adapters.Register(adapter)
+			t.Cleanup(func() {
+				adapters.Unregister("codex")
+				_ = adapter.Close()
+			})
+			source := writeCodexSessionFile(t, os.Getenv("HOME"), f.projectRoot)
+			data, err := os.ReadFile(source)
+			require.NoError(t, err)
+			sibling := filepath.Join(filepath.Dir(source), "stale-session.jsonl")
+			require.NoError(t, os.WriteFile(sibling, []byte(strings.ReplaceAll(string(data), nativeID, "stale-native-session")), 0o600))
+
+			const agentID = "OxHookNative"
+			startSessionRecordingIfConfigured(&HookContext{
+				AgentType: "codex", ProjectRoot: f.projectRoot, Input: tt.input,
+				Marker: &SessionMarker{AgentID: agentID, AgentSessionID: tt.markerID, RecordingSessionID: draftTestSessionID},
+			})
+			state, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
+			require.NoError(t, err)
+			require.NotNil(t, state)
+			assert.Equal(t, nativeID, state.AgentSessionID)
+			assert.Equal(t, source, state.SessionFile, "hook startup must attach to the current native conversation")
+			assert.Equal(t, draftTestSessionID, state.ContinuedFromSessionID)
+			assert.FileExists(t, filepath.Join(state.SessionPath, "raw.jsonl"))
+		})
 	}
 }
 

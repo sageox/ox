@@ -79,6 +79,33 @@ func TestToolCallsSurviveReadCommands(t *testing.T) {
 	}
 }
 
+// An invalid tool payload must not create a bogus result or prevent later messages from being read.
+func TestMalformedToolOutputDoesNotDiscardFollowingMessages(t *testing.T) {
+	for _, kind := range []string{"function_call_output", "custom_tool_call_output"} {
+		for _, output := range []string{`{"text":"unexpected object"}`, `42`, `[{"type":"input_text","text":17}]`} {
+			t.Run(kind+"/"+output, func(t *testing.T) {
+				malformed := fmt.Sprintf(`{"timestamp":"2026-09-07T16:50:00Z","type":"response_item","payload":{"type":%q,"call_id":"bad-output","output":%s}}`, kind, output)
+				entries, err := parseCodexLine([]byte(malformed))
+				if err == nil || !strings.Contains(err.Error(), "parse tool output") || len(entries) != 0 {
+					t.Fatalf("malformed tool output = %+v, %v; want a parse error and no entries", entries, err)
+				}
+				path := filepath.Join(t.TempDir(), "session.jsonl")
+				content := malformed + "\n" + `{"timestamp":"2026-09-07T16:50:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Following message survives."}]}}` + "\n"
+				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				result, err := handleRead(adapterprotocol.ReadParams{SessionFile: path})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(result.Entries) != 1 || result.Entries[0].Content != "Following message survives." {
+					t.Fatalf("session after malformed output = %+v; want the following message", result.Entries)
+				}
+			})
+		}
+	}
+}
+
 // TestCustomToolResultsPairAcrossReads prevents delayed custom tool results
 // losing their name and input when calls and results arrive in separate polls.
 func TestCustomToolResultsPairAcrossReads(t *testing.T) {

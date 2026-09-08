@@ -2,14 +2,18 @@ package agentwork
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -69,6 +73,61 @@ func newTestManager(runner Runner, cfgFn func() *config.AgentWorkerConfig) (*Man
 }
 
 // --- tests ---
+
+func TestManager_ForceDetect_QuiescesFinishedCaptureWhenDisabled(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits for capture polling before cleanup")
+	}
+	for _, finished := range []string{"stopped", "dead"} {
+		t.Run(finished, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+			t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+			watcher := newTestWatcherManager(t)
+			t.Cleanup(watcher.StopAll)
+			m, _ := newTestManager(NewMockRunner(false), disabledConfig)
+			m.ledgerPath = t.TempDir()
+			m.SetSessionWatcher(watcher)
+			m.RegisterHandler(NewSessionFinalizeHandlerForTest(nil))
+
+			source := watcher.codexSessionPath(t, "finished.jsonl")
+			content := []byte("Keep this captured response.\n")
+			require.NoError(t, os.WriteFile(source, content, 0600))
+			state := session.RecordingState{
+				AgentID: "OxFinish", WorkspacePath: t.TempDir(),
+				SessionPath: filepath.Join(m.ledgerPath, ".sageox", "cache", "sessions", "finished"),
+				AdapterName: "codex", WatchMode: "tail", SessionFile: source,
+				ParentPID: os.Getpid(), StartedAt: time.Now(),
+			}
+			require.NoError(t, session.SaveRecordingState(state.WorkspacePath, &state))
+			require.NoError(t, watcher.StartWatch("finished", source, "codex", m.ledgerPath, state.SessionPath))
+			recPath := filepath.Join(state.SessionPath, recordingMarker)
+			require.Eventually(t, func() bool {
+				data, err := os.ReadFile(recPath)
+				var current session.RecordingState
+				return err == nil && json.Unmarshal(data, &current) == nil && current.SourceOffset == int64(len(content))
+			}, 5*time.Second, 10*time.Millisecond, "watcher must capture before the session finishes")
+			data, err := os.ReadFile(recPath)
+			require.NoError(t, err)
+			require.NoError(t, json.Unmarshal(data, &state))
+			if finished == "stopped" {
+				stoppedAt := time.Now()
+				state.StoppedAt = &stoppedAt
+			} else {
+				state.ParentPID = 99999999
+			}
+			require.NoError(t, session.SaveRecordingState(state.WorkspacePath, &state))
+
+			assert.Zero(t, m.ForceDetect(), "disabled workers must not queue summary generation")
+			assert.Empty(t, watcher.ActiveSessions(), "capture must stop even when summary generation is disabled")
+			assert.FileExists(t, recPath, "cleanup must retain the cursor for later finalization")
+			assert.Equal(t, 1, countRawJSONLEntries(t, filepath.Join(state.SessionPath, "raw.jsonl")))
+			assert.Zero(t, watcher.DetectAndRestart(m.ledgerPath), "finished sessions must not restart")
+		})
+	}
+}
 
 func TestManager_StartStop(t *testing.T) {
 	runner := NewMockRunner(true)

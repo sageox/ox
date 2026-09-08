@@ -11,6 +11,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestHasExplicitStop_PreservesPerAgentBreadcrumb(t *testing.T) {
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, t.TempDir())
+	assert.False(t, HasExplicitStop("", "OxStopA"))
+	assert.False(t, HasExplicitStop(projectRoot, ""))
+	assert.False(t, HasExplicitStop(projectRoot, "OxStopA"))
+
+	require.NoError(t, MarkExplicitStop(projectRoot, "OxStopA"))
+	for range 2 {
+		assert.True(t, HasExplicitStop(projectRoot, "OxStopA"), "watcher checks must not consume the breadcrumb")
+		assert.False(t, HasExplicitStop(projectRoot, "OxStopB"), "stopping one coworker must not stop another")
+	}
+	assert.FileExists(t, filepath.Join(sessionsBase, explicitStopMarker+".OxStopA"))
+
+	require.NoError(t, MarkExplicitStop(projectRoot, "OxStopB"))
+	assert.True(t, ConsumeExplicitStop(projectRoot, "OxStopA"))
+	assert.False(t, HasExplicitStop(projectRoot, "OxStopA"))
+	assert.True(t, HasExplicitStop(projectRoot, "OxStopB"))
+	assert.True(t, ConsumeExplicitStop(projectRoot, "OxStopB"))
+	assert.False(t, HasExplicitStop(projectRoot, "OxStopB"))
+}
+
 func TestClearRecordingState(t *testing.T) {
 	t.Run("clears existing state from session folder", func(t *testing.T) {
 		cacheDir := t.TempDir()
