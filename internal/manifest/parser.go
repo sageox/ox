@@ -273,6 +273,62 @@ func EnsureSageoxInclude(paths []string) []string {
 	return append(paths, "/.sageox/")
 }
 
+// requiredTeamContextDirs are directories ox ITSELF reads out of a team-context
+// checkout. They are not a preference: if one is missing from the sparse set,
+// the feature that reads it is silently dead on every client.
+//
+// agents/ holds team rules (teamdocs.DiscoverRules) and team skills. The
+// server-generated sync.manifest has omitted it — GH #862 — so sparse-checkout
+// never materialized the directory and DiscoverRules walked an empty tree. No
+// error surfaced anywhere: an empty tree and "this team has no rules" are the
+// same value, which is why it went unnoticed. The client fallback include set
+// lists agents/, but the TRACKED manifest wins whenever one exists.
+var requiredTeamContextDirs = []string{"agents/"}
+
+// EnsureRequiredIncludes floors the sparse set with the directories ox needs for
+// this repo kind, whatever the server-generated manifest happens to list.
+//
+// This is a floor, not an override: it only ADDS, and only when the path is not
+// already covered. A manifest that lists a required directory — under any of the
+// leading-slash or trailing-slash spellings — is left exactly as it is.
+//
+// The durable fix for a manifest that omits a required directory is server-side.
+// This keeps a client working in the meantime rather than failing silently, and
+// costs nothing once the manifest is correct.
+func EnsureRequiredIncludes(paths []string, kind RepoKind) []string {
+	if kind != RepoKindTeamContext {
+		return paths
+	}
+	for _, want := range requiredTeamContextDirs {
+		if includesPath(paths, want) {
+			continue
+		}
+		// Appended, never prepended, for the same reason as EnsureSageoxInclude:
+		// ComputeSparseSet emits "!/*/" to drop root-level directories, and in
+		// --no-cone mode later patterns override earlier ones.
+		paths = append(paths, "/"+strings.TrimSuffix(want, "/")+"/")
+	}
+	return paths
+}
+
+// includesPath reports whether want is already covered by paths, tolerating the
+// leading- and trailing-slash spellings a hand-edited manifest may use.
+func includesPath(paths []string, want string) bool {
+	norm := func(p string) string {
+		return strings.Trim(strings.TrimSpace(p), "/")
+	}
+	target := norm(want)
+	if target == "" {
+		return true
+	}
+	for _, p := range paths {
+		if norm(p) == target {
+			return true
+		}
+	}
+	return false
+}
+
 // pathOverlaps returns true if a and b overlap: same path, or one is a
 // parent directory of the other.
 func pathOverlaps(a, b string) bool {
