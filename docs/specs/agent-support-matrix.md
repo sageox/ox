@@ -30,9 +30,9 @@ Agent-specific hooks (`ox integrate install --<agent>`) are *additive* — they 
 | Pull whispers (`ox agent whisper`) | Yes | Yes | Yes | Yes | Yes |
 | AGENTS.md / CLAUDE.md marker | Yes (universal) | Yes (universal) | Yes (universal) | Yes (universal + Amp-specific block) | Yes (universal; OpenCode reads AGENTS.md natively) |
 | **Silver: Hooks** | | | | | |
-| Native hook/plugin events | 6 (SessionStart, PreCompact, PostToolUse, Stop, SessionEnd, UserPromptSubmit) | 4 (SessionStart, BeforeAgent, AfterTool, SessionEnd) | 2 (SessionStart, SessionEnd) | 2 (tool:pre-execute, tool:post-execute — experimental) | 27+ (session.*, message.*, tool.*, file.*, command.*, permission.*, lsp.*, server.*, tui.*, shell.*, todo.*) |
-| ox-used hook events | 6 | 4 | 2 | 0 (AGENTS.md marker only) | 1 (session.created) |
-| Phase mapping (agentx) | Full (in agentx) | Local fallback (pending agentx) | Full (in agentx) | N/A | N/A |
+| Native hook/plugin events | 6 (SessionStart, PreCompact, PostToolUse, Stop, SessionEnd, UserPromptSubmit) | 4 (SessionStart, BeforeAgent, AfterTool, SessionEnd) | 12 (SessionStart, SessionEnd, SubagentStart, PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, UserPromptSubmit, SubagentStop, Stop, Interrupt) | 2 (tool:pre-execute, tool:post-execute — experimental) | 27+ (session.*, message.*, tool.*, file.*, command.*, permission.*, lsp.*, server.*, tui.*, shell.*, todo.*) |
+| ox-used hook events | 6 | 4 | 6 (SessionStart, PreToolUse, PostToolUse, UserPromptSubmit, Stop, SessionEnd) | 0 (AGENTS.md marker only) | 1 (session.created) |
+| Phase mapping (agentx) | Full (in agentx) | Local fallback (pending agentx) | Local fallback (pending agentx) | N/A | N/A |
 | Startup banner (JSON stdout) | Yes | Yes | No | No | No |
 | Hook install/uninstall | `ox integrate install` | `ox integrate install --gemini` | `ox integrate install --codex` | `ox integrate install --amp` |
 | `ox doctor` detection + auto-fix | Yes | Yes | Yes | Yes | Yes |

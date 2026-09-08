@@ -156,8 +156,13 @@ directory up to the repo root, so context primes even before hooks are installed
   `OX_PROJECT_ROOT` to the absolute repo root rather than relying on the cwd walk.
 - **Gemini, Droid**: no `SessionStart` hook, so priming depends on the instruction
   file marker rather than firing automatically.
-- **Codex**: no `SessionEnd` hook, so sessions do not auto-finalize; they close on
-  the next `ox agent <id> session stop` or daemon sweep.
+- **Codex**: sessions auto-finalize through `SessionEnd`, which Codex fires when a
+  conversation is archived or deleted, when Codex closes normally, or after 30
+  minutes idle with no connected client. A hard kill of the Codex process skips
+  the hook; the daemon's dead-process sweep finalizes those recordings instead.
+  Project-scope hooks (`.codex/hooks.json`) load only once the project `.codex/`
+  layer is trusted via `/hooks`; user-scope `~/.codex/hooks.json` needs no per-repo
+  trust. Installs made before `SessionEnd` was added are completed by `ox doctor`.
 - **Pi**: instruction-file marker only, no lifecycle hooks. Session recording also only
   understands transcript format version 3. Pi 0.84+ introduced a v4 lane-based session
   model that ox does not yet parse — `ox doctor` reports `pi:format-unsupported` when it
