@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -505,7 +506,7 @@ func autoStartDaemon() error {
 	}
 
 	// get the path to the current executable
-	exe, err := os.Executable()
+	exe, err := selfexec.Path()
 	if err != nil {
 		return fmt.Errorf("get executable path: %w", err)
 	}

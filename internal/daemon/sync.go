@@ -46,6 +46,7 @@ import (
 	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/perf"
+	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/version"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
@@ -1025,7 +1026,11 @@ func (s *SyncScheduler) triggerDistill(ctx context.Context) {
 	s.logger.Info("triggering memory distillation")
 	start := time.Now()
 
-	oxPath, err := os.Executable()
+	oxPath, err := selfexec.Path()
+	if errors.Is(err, selfexec.ErrUnderTest) {
+		s.logger.Debug("distill skipped: running under go test")
+		return
+	}
 	if err != nil {
 		oxPath = "ox" // fall back to PATH lookup
 	}

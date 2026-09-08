@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
@@ -454,7 +455,7 @@ func runDaemonForeground(ledgerPath string) error {
 // startDaemonBackground starts the daemon as a background process.
 func startDaemonBackground(ledgerPath string) error {
 	// get the path to the current executable
-	exe, err := os.Executable()
+	exe, err := selfexec.Path()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}

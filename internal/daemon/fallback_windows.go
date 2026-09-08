@@ -13,6 +13,10 @@ import (
 // signalProcess on Windows ignores the signal value and calls proc.Kill().
 const sigTERM = syscall.Signal(0xF)
 
+// sigKILL mirrors sigTERM on Windows: signalProcess ignores the signal value
+// for anything non-zero and calls proc.Kill(), which is already ungraceful.
+const sigKILL = syscall.Signal(0x9)
+
 // isOxDaemonProcess checks if the given PID is an ox daemon process.
 // On Windows, /proc is not available; we optimistically assume it is.
 // TODO: use Windows API (CreateToolhelp32Snapshot) for process identity checks.

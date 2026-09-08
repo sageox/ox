@@ -29,6 +29,7 @@ import (
 	"github.com/sageox/ox/internal/plan"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/pipeline"
@@ -369,7 +370,7 @@ func ensurePrimeBeforeSession(agentID string) {
 	// prime hasn't run — execute it inline
 	slog.Info("session start: prime not detected, running inline", "agent_session_id", agentSessionID)
 
-	oxPath, err := os.Executable()
+	oxPath, err := selfexec.Path()
 	if err != nil {
 		slog.Warn("session start: cannot find ox executable for inline prime", "error", err)
 		return

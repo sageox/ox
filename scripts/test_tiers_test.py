@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import unittest
 from pathlib import Path
 
@@ -113,6 +114,29 @@ class TestTierContractTest(unittest.TestCase):
             "fast: go_test must be an object", test_tiers.validate(config)
         )
 
+    def test_concurrency_overrides_dial_a_single_run_down(self):
+        # a loaded workstation is a local decision; CI still gets the contract
+        with _env(OX_TEST_P="2", OX_TEST_PARALLEL="8"):
+            flags = test_tiers.go_test_flags(self.config, "full")
+        self.assertEqual(["-p", "2"], flags[flags.index("-p") : flags.index("-p") + 2])
+        self.assertEqual(
+            ["-parallel", "8"],
+            flags[flags.index("-parallel") : flags.index("-parallel") + 2],
+        )
+
+    def test_concurrency_overrides_default_to_the_contract(self):
+        with _env(OX_TEST_P=None, OX_TEST_PARALLEL=None):
+            self.assertEqual(
+                test_tiers.go_test_flags(self.config, "full"),
+                ["-race", "-count=1", "-p", "8", "-parallel", "32", "-timeout=15m"],
+            )
+
+    def test_rejects_nonsense_concurrency_override(self):
+        for value in ("0", "-4", "many"):
+            with self.subTest(value=value), _env(OX_TEST_P=value):
+                with self.assertRaises(ValueError):
+                    test_tiers.go_test_flags(self.config, "full")
+
     def test_config_remains_machine_readable_json(self):
         encoded = json.dumps(self.config)
         self.assertEqual(self.config, json.loads(encoded))
@@ -121,3 +145,28 @@ class TestTierContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _env:
+    """Temporarily set (or unset, with None) environment variables."""
+
+    def __init__(self, **overrides):
+        self.overrides = overrides
+        self.saved = {}
+
+    def __enter__(self):
+        for key, value in self.overrides.items():
+            self.saved[key] = os.environ.get(key)
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        return self
+
+    def __exit__(self, *exc):
+        for key, value in self.saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        return False

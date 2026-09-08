@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/selfexec"
 )
 
 // Plan-exit enrichment nudge (Gold tier — Claude Code).
@@ -190,7 +191,7 @@ func planEnrichArgs() []string { return []string{"plan", "enrich", "--json", "--
 // ok=false on any failure; every caller treats a failure as fail-open (skip
 // this step, never block the nudge).
 func runPlanSubprocess(planText string, args ...string) ([]byte, bool) {
-	oxPath, err := os.Executable()
+	oxPath, err := selfexec.Path()
 	if err != nil {
 		slog.Debug("hook: plan-exit cannot find ox executable", "error", err)
 		return nil, false
