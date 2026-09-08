@@ -162,6 +162,10 @@ func TestUploadSessionToLedger_PreservesPriorStateAtFallibleBoundaries(t *testin
 			assert.Contains(t, err.Error(), tc.failAt+" failed")
 			assert.Equal(t, tc.wantCalls, calls, "no later phase may run after a failed boundary")
 			assertSessionBytesPreserved(t, fixture)
+			require.FileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile), "every failure after meta.json exists must leave retry ownership")
+			orphans, scanErr := findOrphanedSessionsInDir(filepath.Dir(fixture.state.SessionPath), fixture.ledgerPath)
+			require.NoError(t, scanErr)
+			require.Len(t, orphans, 1, "doctor must discover the interrupted upload")
 
 			meta, readErr := lfs.ReadSessionMeta(filepath.Join(fixture.ledgerPath, "sessions", fixture.sessionName))
 			require.NoError(t, readErr, "metadata must be durable before external publication")
@@ -252,6 +256,7 @@ func TestUploadSessionToLedger_ReadOnlyIsNotHiddenByRecoveryWrapping(t *testing.
 	assert.Equal(t, api.ErrReadOnly, err, "the caller relies on the sentinel for membership guidance")
 	assert.Equal(t, []string{"upload_lfs"}, calls)
 	assertSessionBytesPreserved(t, fixture)
+	assert.NoFileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile), "read-only access is not retryable")
 }
 
 func TestSessionUploadOrchestration_FailedUploadThenRetryIsIdempotent(t *testing.T) {
@@ -424,40 +429,43 @@ func TestSessionUpload_ScansContentBeforeLFS(t *testing.T) {
 	}
 }
 
-// A readable session can still exceed the scanner's per-line limit. Stop and
-// doctor must retain it for retry instead of uploading bytes the scan missed.
-func TestSessionUpload_ScanFailureStopsBeforeLFS(t *testing.T) {
+// A line longer than the old 4 MiB scanner buffer but under the file-size cap
+// must be inspected and redacted, not refused: doctor re-runs the same scan on
+// the same bytes, so a refusal here would strand the session permanently.
+func TestSessionUpload_ScansLongLinesUnderSizeCap(t *testing.T) {
 	for _, mode := range []string{"stop", "doctor"} {
 		t.Run(mode, func(t *testing.T) {
 			fixture := newSessionUploadFixture(t)
 			t.Setenv("OX_ALLOW_SECRETS", "")
-			// This valid JSONL entry is below the file-size cap but exceeds the
-			// line scanner's buffer. LFS can read and upload it without error.
-			oversized := []byte(strings.ReplaceAll(string(fixture.rawContent), "preserve me", strings.Repeat("x", 4*1024*1024)))
+			const canary = "AKIAIOSFODNN7EXAMPLE"
+			longLine := strings.Repeat("x", 4*1024*1024+1024) + " " + canary
+			require.Less(t, len(longLine), prePushScannerSizeCap, "the line must stay under the file cap so the file is scanned")
+			oversized := []byte(strings.ReplaceAll(string(fixture.rawContent), "preserve me", longLine))
 			require.NoError(t, os.WriteFile(fixture.result.RawPath, oversized, 0o600))
 			var calls []string
-			effects := scriptedSessionUploadEffects(&calls, map[string]lfs.FileRef{ledgerFileRaw: lfs.NewFileRef(oversized)}, "")
+			effects := scriptedSessionUploadEffects(&calls, nil, "")
+			effects.uploadLFS = func(_, sessionDir string) (map[string]lfs.FileRef, error) {
+				calls = append(calls, "upload_lfs")
+				uploaded, err := os.ReadFile(filepath.Join(sessionDir, ledgerFileRaw))
+				require.NoError(t, err)
+				require.False(t, bytes.Contains(uploaded, []byte(canary)), "the long line must be scanned and redacted before upload")
+				return map[string]lfs.FileRef{ledgerFileRaw: lfs.NewFileRef(uploaded)}, nil
+			}
 			var err error
 			if mode == "doctor" {
 				err = retrySessionUploadWithEffects(fixture.projectRoot, fixture.ledgerPath, fixture.orphan(), effects)
 			} else {
 				err = uploadSessionToLedgerWithEffects(fixture.projectRoot, fixture.result, fixture.state, fixture.ledgerPath, fixture.sessionName, effects)
 			}
-			require.ErrorContains(t, err, "scan session content for secrets")
-			assert.Empty(t, calls, "failed inspection must stop before any upload or publication effect")
-			preserved, readErr := os.ReadFile(fixture.result.RawPath)
-			require.NoError(t, readErr)
-			assert.True(t, bytes.Equal(oversized, preserved), "the source must remain available for recovery")
-			orphans, scanErr := findOrphanedSessionsInDir(filepath.Dir(fixture.state.SessionPath), fixture.ledgerPath)
-			require.NoError(t, scanErr)
-			require.Len(t, orphans, 1, "doctor must discover the interrupted upload")
-
-			// Once the source can be inspected, the same upload can finish.
-			require.NoError(t, os.WriteFile(fixture.result.RawPath, fixture.rawContent, 0o600))
-			calls = nil
-			effects = scriptedSessionUploadEffects(&calls, fixture.refs, "")
-			require.NoError(t, retrySessionUploadWithEffects(fixture.projectRoot, fixture.ledgerPath, orphans[0], effects))
-			assert.Equal(t, []string{"upload_lfs", "commit_retry"}, calls)
+			require.NoError(t, err)
+			want := []string{"upload_lfs", "commit_initial", "reconcile_plans", "finalize_linkage"}
+			if mode == "doctor" {
+				want = []string{"upload_lfs", "commit_retry"}
+			}
+			assert.Equal(t, want, calls, "scan and redaction must precede upload, then publication runs normally")
+			meta, err := lfs.ReadSessionMeta(filepath.Join(fixture.ledgerPath, "sessions", fixture.sessionName))
+			require.NoError(t, err)
+			assert.NotEmpty(t, meta.Redactions, "the redaction audit must record the long line")
 		})
 	}
 }
@@ -526,7 +534,7 @@ func TestRetrySessionUpload_LFSFailurePreservesManifest(t *testing.T) {
 // secret left in the index by an interrupted attempt.
 func TestSessionUpload_QuarantineFailureRemainsRetryable(t *testing.T) {
 	for _, mode := range []string{"stop", "doctor"} {
-		for _, failure := range []string{"index locked", "rename blocked"} {
+		for _, failure := range []string{"index locked", "quarantine dir blocked", "rename blocked"} {
 			t.Run(mode+"/"+failure, func(t *testing.T) {
 				fixture := newSessionUploadFixture(t)
 				_, fixture.ledgerPath = createBareAndClone(t)
@@ -540,9 +548,15 @@ func TestSessionUpload_QuarantineFailureRemainsRetryable(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(sessionDir, ledgerFileSummaryMD), summary, 0o600))
 				runGit(t, fixture.ledgerPath, "add", "--sparse", sessionDir)
 				blocker := filepath.Join(fixture.ledgerPath, ".git", "index.lock")
-				if failure == "index locked" {
+				switch failure {
+				case "index locked":
 					require.NoError(t, os.WriteFile(blocker, nil, 0o600))
-				} else {
+				case "quarantine dir blocked":
+					// A regular file where the quarantine tree belongs makes MkdirAll fail.
+					blocker = filepath.Join(fixture.ledgerPath, ".sageox", "cache", "quarantine")
+					require.NoError(t, os.MkdirAll(filepath.Dir(blocker), 0o700))
+					require.NoError(t, os.WriteFile(blocker, nil, 0o600))
+				default:
 					blocker = filepath.Join(fixture.ledgerPath, ".sageox", "cache", "quarantine", fixture.sessionName, ledgerFileSummaryMD)
 					require.NoError(t, os.MkdirAll(blocker, 0o700))
 				}

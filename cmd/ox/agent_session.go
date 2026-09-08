@@ -1410,22 +1410,30 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		// session that may never reach the remote.
 		LinkageStatus(lfs.LinkageStatusStaged)
 
+	// Record retry ownership before the ledger gains a final meta.json: once
+	// that file exists, findOrphanedSessionsInDir skips this session unless
+	// the marker is present, so every failure below must leave it behind.
+	sourceCacheDir := filepath.Dir(result.RawPath)
+	if err := writeSessionUploadRetryPending(sourceCacheDir); err != nil {
+		return fmt.Errorf("record pending session upload: %w", err)
+	}
+
 	meta, err := writeInitialSessionMeta(sessionDir, state.AgentID, metaBuilder)
 	if err != nil {
 		return fmt.Errorf("write meta.json: %w", err)
 	}
 
-	sourceCacheDir := filepath.Dir(result.RawPath)
 	if err := prepareSessionUpload(context.Background(), ledgerPath, sessionName); err != nil {
-		// Metadata already exists, so explicit retry ownership keeps a failed
-		// scan or partial quarantine discoverable by doctor.
-		return errors.Join(fmt.Errorf("prepare session upload: %w", err), writeSessionUploadRetryPending(sourceCacheDir))
+		return fmt.Errorf("prepare session upload: %w", err)
 	}
 
 	// upload content files to LFS blob storage
 	fileRefs, err := effects.uploadLFS(projectRoot, sessionDir)
 	if err != nil {
 		if errors.Is(err, api.ErrReadOnly) {
+			// Read-only access is not retryable; a marker would only hand doctor
+			// a retry that fails the same way.
+			_ = os.Remove(filepath.Join(sourceCacheDir, sessionUploadRetryPendingFile))
 			return err // don't wrap, don't set doctor marker
 		}
 		return fmt.Errorf("LFS upload: %w", err)
@@ -1449,9 +1457,6 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		return fmt.Errorf("ensure .gitignore: %w", err)
 	}
 
-	if err := writeSessionUploadRetryPending(sourceCacheDir); err != nil {
-		return fmt.Errorf("record pending session upload: %w", err)
-	}
 	store, err := session.NewStore(ledgerPath)
 	if err != nil {
 		return fmt.Errorf("open session recovery store: %w", err)

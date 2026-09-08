@@ -216,8 +216,11 @@ func scanFileForSecrets(r *session.Redactor, abs, rel string, result *PrePushSca
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	// allow very long JSONL lines (session entries can be 1-2 MB per line).
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	// Any file under prePushScannerSizeCap fits in one rawJSONLMaxLineBytes
+	// line, so a scanned file can never fail on line length. That matters for
+	// prepareSessionUpload, which fails closed on scan errors and would otherwise
+	// strand a session that doctor re-scans identically on every pass.
+	scanner.Buffer(make([]byte, 64*1024), rawJSONLMaxLineBytes)
 
 	lineNo := 0
 	for scanner.Scan() {

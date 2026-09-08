@@ -926,7 +926,9 @@ func redactFileInPlace(abs string, _ *session.Redactor) error {
 	}
 
 	scanner := bufio.NewScanner(src)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	// Match scanFileForSecrets: a line the scanner accepted must be redactable
+	// here, or the file falls through to quarantine instead of being cleaned.
+	scanner.Buffer(make([]byte, 64*1024), rawJSONLMaxLineBytes)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {

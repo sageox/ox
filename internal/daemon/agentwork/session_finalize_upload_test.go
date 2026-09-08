@@ -1,6 +1,7 @@
 package agentwork
 
 import (
+	"bytes"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -8,6 +9,8 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+
+	"github.com/sageox/ox/internal/lfs"
 )
 
 // rawContent is a minimal valid session with substantive entries.
@@ -611,5 +614,35 @@ func TestProcessResult_UploadOnly_AlreadyCommitted_PrunesCache(t *testing.T) {
 	// so a surviving cache dir means the same session is re-queued in 5 minutes
 	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
 		t.Error("cache dir survived an already-committed session — Detect() will re-queue it forever")
+	}
+}
+
+// A session that stageSessionInLedger leaves outside the ledger (an XDG cache
+// dir) cannot be committed. Its only copy must keep real content, not pointers.
+func TestGitCommitAndPush_LeavesOutOfLedgerSessionIntact(t *testing.T) {
+	ledgerPath := t.TempDir()
+	runGitCmd(t, ledgerPath, "init", "--quiet")
+	sessionDir := filepath.Join(t.TempDir(), "sessions", "2026-01-10T14-30-testuser-OxXDG")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(testRawContent)
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	if err := os.WriteFile(rawPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewSessionFinalizeHandler(slog.Default())
+	payload := &SessionFinalizePayload{SessionDir: sessionDir, RawPath: rawPath, LedgerPath: ledgerPath}
+	if handler.gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef(raw)}) {
+		t.Fatal("a session outside the ledger must not report a successful push")
+	}
+
+	got, err := os.ReadFile(rawPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lfs.IsPointerFile(rawPath) || !bytes.Equal(got, raw) {
+		t.Fatalf("out-of-ledger raw.jsonl must keep its content, got %d bytes", len(got))
 	}
 }

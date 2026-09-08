@@ -1745,6 +1745,15 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	ledgerPath := payload.LedgerPath
 	sessionName := filepath.Base(payload.SessionDir)
 
+	// stageSessionInLedger leaves a session outside the ledger (an XDG cache
+	// dir) where it is, so the git add below fails for it. Refuse before the
+	// pointer write: pointerizing that dir would turn its only copy of the
+	// content into stubs that Detect and doctor both skip.
+	if !isGitTrackedLedgerSession(payload.SessionDir, ledgerPath) {
+		h.logger.Warn("session dir is outside the ledger sessions tree; skipping commit", "session", sessionName, "dir", payload.SessionDir)
+		return false
+	}
+
 	// A raw-only first push can trigger GitLab GC before a second pointer push,
 	// unlinking the newly uploaded objects from the project. Publish pointers
 	// immediately, under the same lock as staging and committing.

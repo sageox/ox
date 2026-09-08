@@ -294,6 +294,10 @@ quarantineFiles:
 			toRel := filepath.ToSlash(filepath.Join(".sageox", "cache", "quarantine", sess, fname))
 			toAbs := filepath.Join(ledgerPath, toRel)
 			if err := os.MkdirAll(filepath.Dir(toAbs), 0o700); err != nil {
+				if !amendCommit {
+					quarantineErr = fmt.Errorf("create quarantine dir for %s: %w", fromRel, err)
+					break quarantineFiles
+				}
 				slog.Warn("pre-push quarantine: mkdir failed; skipping",
 					"path", toRel, "error", err)
 				continue
