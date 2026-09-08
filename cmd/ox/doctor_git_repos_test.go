@@ -764,12 +764,66 @@ func TestNormalizeGitURLForCompare(t *testing.T) {
 	}
 }
 
+// TestCheckSSHAuth drives the key lookup off a controlled HOME so the result is
+// determined by the fixture rather than by the developer's own ~/.ssh.
+//
+// Failure prevented: doctor reports SSH auth as available. Reading the real
+// home directory made the outcome differ between a laptop with keys and CI
+// without them, so neither answer was ever asserted.
 func TestCheckSSHAuth(t *testing.T) {
-	// this test just verifies the function doesn't panic
-	// actual SSH key presence depends on the test environment
-	result := checkSSHAuth()
-	// result can be true or false depending on environment
-	_ = result
+	// plantKey writes a stand-in private key at the given name under ~/.ssh.
+	plantKey := func(t *testing.T, home, name string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+			t.Fatalf("create .ssh: %v", err)
+		}
+		key := filepath.Join(home, ".ssh", name)
+		if err := os.WriteFile(key, []byte("not-a-real-key\n"), 0o600); err != nil {
+			t.Fatalf("write %q: %v", key, err)
+		}
+	}
+
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, home string)
+		want  bool
+	}{
+		{
+			name: "no keys present",
+			want: false,
+		},
+		{
+			name:  "an ed25519 key is found",
+			setup: func(t *testing.T, home string) { plantKey(t, home, "id_ed25519") },
+			want:  true,
+		},
+		{
+			name:  "an rsa key is found",
+			setup: func(t *testing.T, home string) { plantKey(t, home, "id_rsa") },
+			want:  true,
+		},
+		{
+			name:  "an unrelated file in .ssh is not a key",
+			setup: func(t *testing.T, home string) { plantKey(t, home, "known_hosts") },
+			want:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			// os.UserHomeDir reads HOME on unix and USERPROFILE on Windows;
+			// set both so the check cannot fall through to the real profile.
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			if tt.setup != nil {
+				tt.setup(t, home)
+			}
+			if got := checkSSHAuth(); got != tt.want {
+				t.Errorf("checkSSHAuth() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 // TestClassifyFsckOutput covers the checkGitFsck false-positive fix: git

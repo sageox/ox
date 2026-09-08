@@ -183,15 +183,34 @@ func TestDetectOtherAIEditors_MultipleEditors(t *testing.T) {
 	}
 }
 
+// TestDetectOtherAIEditors_NoEditors verifies a project-level editor directory
+// is what gets detected, distinguishing it from the empty case above.
 func TestDetectOtherAIEditors_NoEditors(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
 	gitRoot, cleanup := setupTempGitRepo(t)
 	defer cleanup()
 
 	restoreCwd := changeToDir(t, gitRoot)
 	defer restoreCwd()
 
-	// just verify function doesn't panic (may detect user-level editors)
-	_ = detectOtherAIEditors()
+	before := detectOtherAIEditors()
+	if len(before) != 0 {
+		t.Fatalf("precondition: expected no editors, got %v", before)
+	}
+
+	// Planting one known editor's project path must move the result, otherwise
+	// the empty answer above is indistinguishable from a detector that is off.
+	if len(knownEditors) == 0 || len(knownEditors[0].paths) == 0 {
+		t.Skip("no known editors compiled in")
+	}
+	plant := filepath.Join(gitRoot, knownEditors[0].paths[0])
+	if err := os.MkdirAll(plant, 0o755); err != nil {
+		t.Fatalf("plant %q: %v", plant, err)
+	}
+	if after := detectOtherAIEditors(); len(after) == 0 {
+		t.Errorf("detectOtherAIEditors() found nothing after planting %q", plant)
+	}
 }
 
 // TestCheckCodexIntegration_ProjectWithHooks verifies passed when hooks installed
@@ -513,17 +532,22 @@ func TestDetectOtherAIEditors_NoDuplicates(t *testing.T) {
 	}
 }
 
+// TestDetectOtherAIEditors_EmptyRepo pins the empty result with HOME controlled,
+// so the assertion holds on a developer machine that has editors installed.
+//
+// Failure prevented: the detector scans project-relative AND user-level paths.
+// Without pinning HOME the expected value was unknowable, so the result was
+// discarded and a detector reporting every known editor would have passed.
 func TestDetectOtherAIEditors_EmptyRepo(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
 	gitRoot, cleanup := setupTempGitRepo(t)
 	defer cleanup()
 
 	restoreCwd := changeToDir(t, gitRoot)
 	defer restoreCwd()
 
-	// no editor directories
-	detected := detectOtherAIEditors()
-
-	// should return empty or only user-level editors (not error)
-	// just verify it doesn't panic
-	_ = detected
+	if detected := detectOtherAIEditors(); len(detected) != 0 {
+		t.Errorf("detectOtherAIEditors() = %v, want none in an empty repo with an empty home", detected)
+	}
 }
