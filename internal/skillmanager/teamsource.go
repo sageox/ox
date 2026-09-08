@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	skills "github.com/sageox/ox/extensions/skills"
 	"github.com/sageox/ox/internal/teamdocs"
@@ -141,13 +140,37 @@ func (c *teamCatalog) Select(version string, desired DesiredSkills) ([]skills.Sk
 }
 
 // loadTeamSkill reads a discovered skill's bytes for classification.
+//
+// Reads go through an *os.Root anchored at the skill directory, NOT through
+// os.ReadFile on a rejoined path. Discovery skips symlinks, but the team checkout
+// is mutable under the daemon: a sparse refresh or another writer can replace an
+// entry between the walk and the read. A path-based read would then follow the
+// replacement and pull bytes from an arbitrary location on the machine into the
+// catalog — content that is then materialized into the customer's repository.
+// Root-relative reads resolve every component against the held directory, so a
+// symlink swapped in afterwards cannot escape it.
 func loadTeamSkill(ts teamdocs.TeamSkill) (teamskills.Skill, error) {
+	root, err := os.OpenRoot(ts.AbsDir)
+	if err != nil {
+		return teamskills.Skill{}, fmt.Errorf("open team skill dir: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
 	out := teamskills.Skill{Name: ts.Name}
 	for _, rel := range ts.Files {
-		abs := filepath.Join(ts.AbsDir, filepath.FromSlash(rel))
-		data, err := os.ReadFile(abs)
-		if err != nil {
-			return teamskills.Skill{}, err
+		// Re-check through the held root: a regular file at walk time may be a
+		// symlink now, and Root.ReadFile would happily read a link that stays
+		// inside the root.
+		info, statErr := root.Lstat(rel)
+		if statErr != nil {
+			return teamskills.Skill{}, fmt.Errorf("inspect %s: %w", rel, statErr)
+		}
+		if !info.Mode().IsRegular() {
+			return teamskills.Skill{}, fmt.Errorf("refusing non-regular team skill file %s", rel)
+		}
+		data, readErr := root.ReadFile(rel)
+		if readErr != nil {
+			return teamskills.Skill{}, readErr
 		}
 		out.Files = append(out.Files, teamskills.File{Path: rel, Content: data})
 	}
@@ -165,16 +188,21 @@ func manifestContent(s teamskills.Skill) []byte {
 
 // toCatalogFiles converts a team skill's files for materialization.
 //
-// scripts/ are dropped entirely unless the approver explicitly allowed them.
-// Writing them non-executable would still put runnable content on disk that an
-// agent is invited to `sh` — the file mode is not the boundary, the presence of
-// the file is.
+// Runnable files are dropped entirely unless the approver explicitly allowed
+// them. Writing them non-executable would still put runnable content on disk that
+// an agent is invited to `sh` — the file's PRESENCE is the boundary, not its mode.
+//
+// It uses teamskills.IsExecutableFile, the same predicate that classified the
+// skill. Two definitions of "runnable" is how `bin/deploy.sh` came to be
+// classified as prose while a root-level `scripts/` check filtered nothing.
 func toCatalogFiles(s teamskills.Skill, allowScripts bool) []skills.File {
 	var out []skills.File
 	for _, f := range s.Files {
 		clean := filepath.ToSlash(filepath.Clean(f.Path))
-		if !allowScripts && (clean == "scripts" || strings.HasPrefix(clean, "scripts/")) {
-			continue
+		if !allowScripts {
+			if executable, _ := teamskills.IsExecutableFile(clean, f.Content); executable {
+				continue
+			}
 		}
 		out = append(out, skills.File{Path: clean, Content: f.Content})
 	}

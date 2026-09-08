@@ -102,27 +102,67 @@ func TestNoHardcodedPathListSeparator(t *testing.T) {
 // Only the 0o000 / 0000 form is flagged. Chmod to a specific mode is ordinary
 // setup, not an isolation mechanism.
 func TestChmodBasedIsolationDeclaresItsPlatform(t *testing.T) {
-	chmodZero := regexp.MustCompile(`os\.Chmod\([^)]*,\s*0o?000\s*\)`)
 	var offenders []string
 	eachTestFile(t, func(path, src string) {
-		if !chmodZero.MatchString(src) {
-			return
-		}
-		// A file-level acknowledgement is enough: either it skips on Windows, or it
-		// is Unix-only by build tag.
-		if strings.Contains(src, `runtime.GOOS == "windows"`) ||
-			strings.Contains(src, "//go:build unix") ||
+		// A whole-file build tag covers every test in it.
+		if strings.Contains(src, "//go:build unix") ||
 			strings.Contains(src, "//go:build !windows") ||
 			strings.Contains(src, "//go:build linux || darwin") {
 			return
 		}
-		offenders = append(offenders, path)
+		for _, fn := range chmodZeroFunctions(src) {
+			offenders = append(offenders, path+": "+fn)
+		}
 	})
 	if len(offenders) > 0 {
-		t.Errorf("Chmod(0o000) used to force a failure, with no platform guard, in:\n  %s\n"+
+		t.Errorf("Chmod(0o000) used to force a failure, in a test that does not skip on Windows:\n  %s\n"+
 			"Windows maps only the read-only bit, so the file stays readable and the test "+
 			"passes while asserting nothing. Skip on runtime.GOOS == \"windows\" with a "+
 			"comment, or use a portable lever (a directory where a file is expected).",
 			strings.Join(offenders, "\n  "))
 	}
+}
+
+var (
+	chmodZero    = regexp.MustCompile(`os\.Chmod\([^)]*,\s*0o?000\s*\)`)
+	funcDeclLine = regexp.MustCompile(`^func\s+(\w+)\s*\(`)
+	windowsSkip  = regexp.MustCompile(`runtime\.GOOS\s*==\s*"windows"`)
+)
+
+// chmodZeroFunctions returns the names of top-level functions that call
+// Chmod(0o000) without a Windows guard IN THAT FUNCTION.
+//
+// Attributing each call to its enclosing function is the point. A file-wide text
+// match exempted every chmod in a file as soon as ONE unrelated test mentioned
+// windows — so an unguarded test could still pass on Windows without ever
+// creating the failure condition it asserts on. The rule in
+// .claude/rules/testing.md puts the obligation on the test that uses the
+// mechanism, not on its neighbors.
+func chmodZeroFunctions(src string) []string {
+	var out []string
+	var current string
+	var body []string
+
+	flush := func() {
+		if current == "" {
+			return
+		}
+		joined := strings.Join(body, "\n")
+		if chmodZero.MatchString(joined) && !windowsSkip.MatchString(joined) {
+			out = append(out, current)
+		}
+	}
+
+	for _, line := range strings.Split(src, "\n") {
+		if m := funcDeclLine.FindStringSubmatch(line); m != nil {
+			flush()
+			current, body = m[1], nil
+			continue
+		}
+		if current != "" {
+			body = append(body, line)
+		}
+	}
+	flush()
+	return out
 }

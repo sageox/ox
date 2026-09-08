@@ -118,7 +118,7 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string, kind manifest
 		sparsePaths = []string{"/.sageox/"}
 	}
 	sparsePaths = manifest.EnsureSageoxInclude(sparsePaths)
-	sparsePaths = manifest.EnsureRequiredIncludes(sparsePaths, kind)
+	sparsePaths = manifest.EnsureRequiredIncludes(sparsePaths, kind, manifest.DenyPaths(cfg))
 
 	args := append([]string{"sparse-checkout", "set", "--no-cone"}, sparsePaths...)
 	if _, err := gitutil.RunGit(ctx, repoPath, args...); err != nil {

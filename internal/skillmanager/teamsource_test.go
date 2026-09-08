@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/teamdocs"
+
 	"github.com/sageox/ox/internal/teamskills"
 	"github.com/stretchr/testify/require"
 )
@@ -195,4 +197,47 @@ func loadForTest(t *testing.T, teamPath, name string) teamskills.Skill {
 	})
 	require.NoError(t, err)
 	return s
+}
+
+// TestLoadTeamSkill_RefusesAnEntrySwappedAfterDiscovery.
+//
+// Discovery skips symlinks, but the team checkout is MUTABLE under the daemon: a
+// sparse refresh or another writer can replace an entry between the walk and the
+// read. That window is the whole risk, and it cannot be exercised through
+// TeamSkillSource — which walks and reads in one call — so this drives
+// loadTeamSkill with the post-discovery state directly: a Files list naming an
+// entry that WAS regular and is now a symlink pointing outside the checkout.
+//
+// A path-based os.ReadFile follows it and pulls arbitrary bytes from the machine
+// into the catalog, which are then materialized into the customer's repository.
+func TestLoadTeamSkill_RefusesAnEntrySwappedAfterDiscovery(t *testing.T) {
+	team := t.TempDir()
+	writeTeamSkill(t, team, "deploy", "", map[string]string{"references/note.md": "harmless\n"})
+	skillDir := filepath.Join(team, "agents", "skills", "deploy")
+
+	secret := filepath.Join(t.TempDir(), "secret.md")
+	require.NoError(t, os.WriteFile(secret, []byte("SECRET FROM OUTSIDE THE CHECKOUT\n"), 0o644))
+
+	victim := filepath.Join(skillDir, "references", "note.md")
+	require.NoError(t, os.Remove(victim))
+	if err := os.Symlink(secret, victim); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// Exactly what discovery produced a moment before the swap.
+	ts := teamdocs.TeamSkill{
+		Name:   "deploy",
+		AbsDir: skillDir,
+		Files:  []string{"SKILL.md", "references/note.md"},
+	}
+
+	loaded, err := loadTeamSkill(ts)
+	if err == nil {
+		for _, f := range loaded.Files {
+			require.NotContains(t, string(f.Content), "SECRET FROM OUTSIDE THE CHECKOUT",
+				"a symlink swapped in after discovery leaked %s into the catalog", f.Path)
+		}
+		t.Fatal("a non-regular entry was read without complaint")
+	}
+	require.Contains(t, err.Error(), "note.md", "the error should name the tampered entry")
 }

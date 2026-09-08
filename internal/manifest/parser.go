@@ -288,14 +288,22 @@ var requiredTeamContextDirs = []string{"agents/"}
 // EnsureRequiredIncludes floors the sparse set with the directories ox needs for
 // this repo kind, whatever the server-generated manifest happens to list.
 //
-// This is a floor, not an override: it only ADDS, and only when the path is not
-// already covered. A manifest that lists a required directory — under any of the
-// leading-slash or trailing-slash spellings — is left exactly as it is.
+// This is a floor, not an override, in three senses:
+//
+//  1. It only ADDS, and only when the path is not already covered.
+//  2. It does NOT override an explicit deny. A team that deliberately denied
+//     agents/ has made a choice; flooring over it would silently materialize
+//     content they excluded on purpose.
+//  3. Denied DESCENDANTS are re-emitted as negations after the floor. This is
+//     load-bearing: ComputeSparseSet enforces denies by omitting overlapping
+//     includes and never emits deny patterns of its own, so appending "/agents/"
+//     under --no-cone ordering would re-include a denied "agents/secrets/" that
+//     was previously excluded only because no include mentioned it.
 //
 // The durable fix for a manifest that omits a required directory is server-side.
 // This keeps a client working in the meantime rather than failing silently, and
 // costs nothing once the manifest is correct.
-func EnsureRequiredIncludes(paths []string, kind RepoKind) []string {
+func EnsureRequiredIncludes(paths []string, kind RepoKind, denies []string) []string {
 	if kind != RepoKindTeamContext {
 		return paths
 	}
@@ -303,12 +311,49 @@ func EnsureRequiredIncludes(paths []string, kind RepoKind) []string {
 		if includesPath(paths, want) {
 			continue
 		}
+		if deniedAtOrAbove(denies, want) {
+			continue // an explicit deny outranks the floor
+		}
 		// Appended, never prepended, for the same reason as EnsureSageoxInclude:
 		// ComputeSparseSet emits "!/*/" to drop root-level directories, and in
 		// --no-cone mode later patterns override earlier ones.
 		paths = append(paths, "/"+strings.TrimSuffix(want, "/")+"/")
+
+		// Re-exclude anything denied BENEATH what we just floored. Later patterns
+		// win, so these must follow the include.
+		for _, d := range denies {
+			if deniedUnder(want, d) {
+				paths = append(paths, "!"+anchorPattern(strings.TrimSpace(d)))
+			}
+		}
 	}
 	return paths
+}
+
+// deniedAtOrAbove reports whether want is denied outright, or sits beneath a
+// denied parent.
+func deniedAtOrAbove(denies []string, want string) bool {
+	target := strings.Trim(strings.TrimSpace(want), "/")
+	for _, d := range denies {
+		deny := strings.Trim(strings.TrimSpace(d), "/")
+		if deny == "" {
+			continue
+		}
+		if deny == target || strings.HasPrefix(target+"/", deny+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// deniedUnder reports whether deny names something strictly beneath parent.
+func deniedUnder(parent, deny string) bool {
+	p := strings.Trim(strings.TrimSpace(parent), "/")
+	d := strings.Trim(strings.TrimSpace(deny), "/")
+	if p == "" || d == "" || d == p {
+		return false
+	}
+	return strings.HasPrefix(d+"/", p+"/")
 }
 
 // includesPath reports whether want is already covered by paths, tolerating the
@@ -350,4 +395,16 @@ func validatePath(path string, lineNum int) error {
 		return fmt.Errorf("path traversal")
 	}
 	return nil
+}
+
+// DenyPaths returns cfg's deny list, tolerating a nil config.
+//
+// Exists so callers can pass denies to EnsureRequiredIncludes without repeating
+// a nil check at every call site — and, more importantly, without being tempted
+// to pass nil and quietly lose the deny enforcement.
+func DenyPaths(cfg *ManifestConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Denies
 }

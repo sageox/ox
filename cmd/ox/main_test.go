@@ -57,6 +57,25 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	// Verify the sandbox is not itself inside a repository, BEFORE any test runs.
+	//
+	// os.MkdirTemp uses os.TempDir(), which honors $TMPDIR (or %TMP%/%TEMP%). If
+	// that points under a checkout — a developer with TMPDIR set to a scratch dir
+	// in a repo, or a CI image that does — findGitRoot() still resolves a
+	// repository after the chdir, and a FixLevelAuto check reached before the
+	// tripwire test would reconcile it. The tripwire alone is not enough: it runs
+	// in test order, and TestRunDoctorChecks_WithFixFlag may run first.
+	if root := findGitRoot(); root != "" {
+		fmt.Fprintf(os.Stderr,
+			"cmd/ox tests: sandbox %s is inside git repository %s.\n"+
+				"A FixLevelAuto doctor check would reconcile that repository. "+
+				"Set TMPDIR to a directory outside any checkout and re-run.\n",
+			sandbox, root)
+		_ = os.Chdir(packageDir)
+		_ = os.RemoveAll(sandbox)
+		os.Exit(1)
+	}
+
 	code := m.Run()
 
 	// Leave the sandbox before removing it; some platforms refuse to unlink the

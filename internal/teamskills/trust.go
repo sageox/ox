@@ -62,6 +62,49 @@ const (
 	CapInlineCommand Capability = "inline-command"
 )
 
+// scriptExtensions are file types a coding agent can be told to run directly.
+//
+// Deliberately broad. The cost of a false positive is one approval prompt; the
+// cost of a false negative is runnable code materialized as "prose" with nobody
+// having decided. A .js in a skill may well be a code sample — but SKILL.md can
+// just as easily say "run node helper.js", and nothing downstream distinguishes
+// the two.
+var scriptExtensions = map[string]bool{
+	".sh": true, ".bash": true, ".zsh": true, ".fish": true,
+	".py": true, ".rb": true, ".pl": true, ".lua": true,
+	".ps1": true, ".bat": true, ".cmd": true,
+	".js": true, ".mjs": true, ".cjs": true, ".ts": true, ".php": true,
+}
+
+// scriptDirNames are directory names that mean "runnable" at ANY depth.
+var scriptDirNames = map[string]bool{"scripts": true, "script": true, "bin": true}
+
+// IsExecutableFile reports whether a skill file can cause code to run, and why.
+//
+// One predicate, used by classification, by materialization, and by the file
+// mode. They MUST agree: a file classified as prose but written executable — or
+// filtered on one path and not the other — is a gap between two definitions of
+// the same thing, which is exactly how `bin/deploy.sh` and `tools/scripts/run.sh`
+// shipped as prose while only a root-level `scripts/` was checked.
+func IsExecutableFile(relPath string, content []byte) (bool, string) {
+	clean := path.Clean(strings.ReplaceAll(relPath, "\\", "/"))
+
+	// A script directory at any depth, not only at the root.
+	for _, seg := range strings.Split(clean, "/") {
+		if scriptDirNames[strings.ToLower(seg)] {
+			return true, "under " + seg + "/"
+		}
+	}
+	if scriptExtensions[strings.ToLower(path.Ext(clean))] {
+		return true, "script extension " + path.Ext(clean)
+	}
+	// A shebang makes any file runnable whatever it is called.
+	if len(content) >= 2 && content[0] == '#' && content[1] == '!' {
+		return true, "shebang"
+	}
+	return false, ""
+}
+
 // Verdict is the trust classification of one candidate skill.
 type Verdict struct {
 	// Executable is true when the skill can cause code to run. Such a skill needs
@@ -111,22 +154,29 @@ func Classify(s Skill) Verdict {
 	for _, f := range s.Files {
 		clean := path.Clean(strings.ReplaceAll(f.Path, "\\", "/"))
 
-		// Any file under scripts/, at any depth.
-		if clean == "scripts" || strings.HasPrefix(clean, "scripts/") {
-			add(CapBundledScript, clean)
+		if executable, why := IsExecutableFile(clean, f.Content); executable {
+			add(CapBundledScript, clean+" ("+why+")")
 			continue
 		}
 
-		// Frontmatter and body checks apply to markdown only; a bundled asset is
-		// inert until something runs it, and scripts/ already covers that case.
+		// Frontmatter and inline-command checks apply to markdown; a non-runnable
+		// asset is inert until something runs it, and the predicate above already
+		// covers anything that is runnable.
 		if !strings.HasSuffix(clean, ".md") {
 			continue
 		}
-		front, body := splitFrontmatter(string(f.Content))
+		normalized := strings.ReplaceAll(string(f.Content), "\r\n", "\n")
+		front, _ := splitFrontmatter(normalized)
 		if allowedToolsKey.MatchString(front) {
 			add(CapAllowedTools, clean)
 		}
-		for _, line := range inlineCommandLines(body) {
+		// Scan the FULL document, not just the body. splitFrontmatter returns an
+		// empty body for unterminated frontmatter — deliberately, so a hidden
+		// allowed-tools grant is still seen — and scanning only the body would then
+		// miss every inline command in exactly that malformed shape. A frontmatter
+		// line cannot legitimately start with !` anyway, so there is nothing to
+		// exclude.
+		for _, line := range inlineCommandLines(normalized) {
 			add(CapInlineCommand, clean+": "+line)
 		}
 	}

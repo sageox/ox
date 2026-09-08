@@ -753,7 +753,7 @@ func repairTeamSparseCheckout(tcPath string) error {
 		return fmt.Errorf("no sparse paths computed from manifest")
 	}
 	sparsePaths = manifest.EnsureSageoxInclude(sparsePaths)
-	sparsePaths = manifest.EnsureRequiredIncludes(sparsePaths, manifest.RepoKindTeamContext)
+	sparsePaths = manifest.EnsureRequiredIncludes(sparsePaths, manifest.RepoKindTeamContext, manifest.DenyPaths(cfg))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
