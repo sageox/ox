@@ -3,12 +3,15 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"syscall"
 	"testing"
 	"time"
 
@@ -35,6 +38,57 @@ func setupIsolatedRegistry(t *testing.T, entries map[string]DaemonInfo) string {
 
 	return tmpDir
 }
+
+// startFakeOxDaemon starts a stand-in daemon that satisfies matchesOxDaemon:
+// argv[0]'s basename is exactly "ox" and "daemon" is a real argument, the same
+// shape the production spawn in ensureDaemonImpl produces.
+//
+// The old fixtures named the script "ox-daemon-fake" and passed no arguments,
+// which only ever matched because the identity check was two independent
+// substring searches. Tightening that check to protect reused PIDs from SIGKILL
+// necessarily invalidates the old shape — so the fixture has to describe a real
+// daemon now, which is the point.
+//
+// shellBody is the child's signal behavior (how it reacts to SIGTERM).
+// Returns the child's PID and a channel closed once the child is reaped, so a
+// caller can assert the process actually died rather than sleeping.
+func startFakeOxDaemon(t *testing.T, shellBody string) (int, <-chan struct{}) {
+	t.Helper()
+	return startFakeProcess(t, "ox", shellBody)
+}
+
+// startFakeProcess runs sh under the given executable name with a daemon-shaped
+// argument list: argv is [<dir>/<name>, -c, <body>, daemon, start, --foreground].
+//
+// It has to be a symlink to a real executable, not a #! script — the kernel
+// rewrites a shebang script's argv[0] to the interpreter, so a script always
+// presents as /bin/sh and could never carry the argv[0] a real ox daemon has.
+// Getting this wrong is how a negative control passes for the wrong reason.
+func startFakeProcess(t *testing.T, name, shellBody string) (int, <-chan struct{}) {
+	t.Helper()
+
+	sh, err := exec.LookPath("sh")
+	require.NoError(t, err)
+	fakeExe := filepath.Join(t.TempDir(), name)
+	require.NoError(t, os.Symlink(sh, fakeExe))
+
+	child := exec.Command(fakeExe, "-c", shellBody, "daemon", "start", "--foreground")
+	require.NoError(t, child.Start())
+
+	done := make(chan struct{})
+	go func() {
+		_ = child.Wait()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		<-done
+	})
+	return child.Process.Pid, done
+}
+
+// fakeDaemonExitsOnTerm is a well-behaved daemon: SIGTERM is enough.
+const fakeDaemonExitsOnTerm = "trap 'exit 0' TERM; while true; do sleep 1; done"
 
 func TestKillStaleDaemon_NoRegistryEntry(t *testing.T) {
 	setupIsolatedRegistry(t, map[string]DaemonInfo{})
@@ -169,22 +223,7 @@ func TestKillStaleDaemon_StopAckedPidAlive(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(tmpDir) })
 	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
 
-	// start a child process whose command line contains "ox" and "daemon", so
-	// isOxDaemonProcess accepts it: the script's own filename supplies both.
-	fakeOxDaemon := filepath.Join(tmpDir, "ox-daemon-fake")
-	require.NoError(t, os.WriteFile(fakeOxDaemon, []byte("#!/bin/sh\ntrap 'exit 0' TERM\nwhile true; do sleep 1; done\n"), 0755))
-	child := exec.Command(fakeOxDaemon)
-	require.NoError(t, child.Start())
-	childPID := child.Process.Pid
-	childDone := make(chan struct{})
-	go func() {
-		_ = child.Wait()
-		close(childDone)
-	}()
-	t.Cleanup(func() {
-		_ = child.Process.Kill()
-		<-childDone
-	})
+	childPID, childDone := startFakeOxDaemon(t, fakeDaemonExitsOnTerm)
 
 	wsID := "stop-acked"
 	socketPath := filepath.Join(tmpDir, "sageox", "daemon", "daemon-"+wsID+".sock")
@@ -247,23 +286,7 @@ func TestKillStaleDaemon_AliveButUnreachable(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
 
-	// start a child process whose command line contains "ox" and "daemon", so
-	// isOxDaemonProcess accepts it: the script's own filename supplies both.
-	fakeOxDaemon := filepath.Join(tmpDir, "ox-daemon-fake")
-	require.NoError(t, os.WriteFile(fakeOxDaemon, []byte("#!/bin/sh\ntrap 'exit 0' TERM\nwhile true; do sleep 1; done\n"), 0755))
-	child := exec.Command(fakeOxDaemon)
-	require.NoError(t, child.Start())
-	childPID := child.Process.Pid
-	// reap child in background so it doesn't become zombie after SIGTERM
-	childDone := make(chan struct{})
-	go func() {
-		_ = child.Wait()
-		close(childDone)
-	}()
-	t.Cleanup(func() {
-		_ = child.Process.Kill()
-		<-childDone
-	})
+	childPID, childDone := startFakeOxDaemon(t, fakeDaemonExitsOnTerm)
 
 	// verify child is alive
 	require.NoError(t, signalProcess(childPID, 0), "child should be alive")
@@ -368,56 +391,130 @@ func TestIsOxDaemonProcess_RejectsUnresolvablePID(t *testing.T) {
 }
 
 func TestIsOxDaemonProcess_AcceptsOxDaemon(t *testing.T) {
-	// the script's own filename supplies both "ox" and "daemon"
-	fakeOxDaemon := filepath.Join(t.TempDir(), "ox-daemon-fake")
-	require.NoError(t, os.WriteFile(fakeOxDaemon, []byte("#!/bin/sh\nsleep 300\n"), 0755))
-	child := exec.Command(fakeOxDaemon)
-	require.NoError(t, child.Start())
-	childDone := make(chan struct{})
-	go func() {
-		_ = child.Wait()
-		close(childDone)
-	}()
-	t.Cleanup(func() {
-		_ = child.Process.Kill()
-		<-childDone
-	})
+	pid, _ := startFakeOxDaemon(t, fakeDaemonExitsOnTerm)
 
-	assert.True(t, isOxDaemonProcess(child.Process.Pid))
+	assert.True(t, isOxDaemonProcess(pid))
+}
+
+// --- SIGTERM -> SIGKILL escalation ---
+//
+// The child here is a REAL live process (so liveness, the poll loop, and the
+// registry cleanup are all real); only signal DELIVERY is simulated, through
+// signalProcessFn. That is deliberate. The obvious fixture — a shell with
+// `trap` ignoring SIGTERM — was tried first and passed while silently taking
+// the SIGTERM branch under parallel load, i.e. it asserted the right outcome
+// without ever running the escalation it existed to cover. Simulating delivery
+// makes which rung of the ladder ran an assertion instead of a hope.
+
+// swallowSignals installs a signalProcessFn that reports every signal it is
+// asked to deliver and drops the named ones on the floor, while passing
+// liveness checks and everything else through to the real syscall.
+func swallowSignals(t *testing.T, dropped ...syscall.Signal) *[]syscall.Signal {
+	t.Helper()
+
+	var delivered []syscall.Signal
+	original := signalProcessFn
+	t.Cleanup(func() { signalProcessFn = original })
+
+	signalProcessFn = func(pid int, sig syscall.Signal) error {
+		if sig == 0 {
+			return original(pid, sig) // liveness must stay honest
+		}
+		delivered = append(delivered, sig)
+		if slices.Contains(dropped, sig) {
+			return nil // "sent" successfully, arrived nowhere
+		}
+		return original(pid, sig)
+	}
+	return &delivered
+}
+
+// registerStaleDaemon writes an isolated registry naming pid as the workspace's
+// daemon, with a socket path that does not exist so IPC is unreachable and
+// cleanup goes straight to the signal ladder.
+func registerStaleDaemon(t *testing.T, wsID string, pid int) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
+	regDir := filepath.Join(tmpDir, "sageox", "daemon")
+	require.NoError(t, os.MkdirAll(regDir, 0700))
+
+	reg := &Registry{Daemons: map[string]DaemonInfo{
+		wsID: {WorkspaceID: wsID, PID: pid, SocketPath: filepath.Join(regDir, "daemon-"+wsID+".sock")},
+	}}
+	data, err := json.MarshalIndent(reg, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(regDir, "registry.json"), data, 0600))
+}
+
+// TestKillStaleDaemon_SigkillIneffective_ReportsFailure: reporting success for
+// a daemon that is still alive is worse than reporting failure — the caller
+// starts a second daemon on the same socket.
+func TestKillStaleDaemon_SigkillIneffective_ReportsFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping signal escalation test in short mode")
+	}
+
+	tests := []struct {
+		name     string
+		signalFn func(t *testing.T, pid int)
+	}{
+		{
+			name: "both signals delivered but ignored",
+			signalFn: func(t *testing.T, pid int) {
+				swallowSignals(t, sigTERM, sigKILL)
+			},
+		},
+		{
+			name: "SIGKILL itself is rejected by the kernel",
+			signalFn: func(t *testing.T, pid int) {
+				original := signalProcessFn
+				t.Cleanup(func() { signalProcessFn = original })
+				signalProcessFn = func(pid int, sig syscall.Signal) error {
+					switch sig {
+					case 0:
+						return original(pid, sig)
+					case sigKILL:
+						return syscall.EPERM // e.g. the pid is not ours anymore
+					default:
+						return nil
+					}
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pid, _ := startFakeOxDaemon(t, fakeDaemonExitsOnTerm)
+			registerStaleDaemon(t, "wedged", pid)
+			tt.signalFn(t, pid)
+
+			err := KillStaleDaemon("wedged")
+
+			require.Error(t, err, "a surviving daemon must never be reported as stopped")
+			assert.Contains(t, err.Error(), "SIGKILL")
+		})
+	}
 }
 
 // TestKillStaleDaemon_IgnoresSigtermEscalatesToSigkill covers the escalation a
-// wedged daemon needs. Before it existed, KillStaleDaemon returned an error
-// here — and that error blocks every subsequent `ox daemon start` for the
-// workspace, permanently.
+// wedged daemon needs, against a real process and real signals. Before it
+// existed, KillStaleDaemon returned an error here — and that error blocks every
+// subsequent `ox daemon start` for the workspace, permanently.
 func TestKillStaleDaemon_IgnoresSigtermEscalatesToSigkill(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping SIGKILL escalation test in short mode")
 	}
 
-	tmpDir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
-
-	// Child ignores SIGTERM outright; only SIGKILL can reap it. It touches a
-	// ready file AFTER installing the trap: signaling it before then races the
-	// shell's startup and the default SIGTERM action kills it, which makes this
-	// test pass without ever reaching the escalation.
-	readyPath := filepath.Join(tmpDir, "trap-installed")
-	fakeOxDaemon := filepath.Join(tmpDir, "ox-daemon-fake")
-	require.NoError(t, os.WriteFile(fakeOxDaemon,
-		[]byte("#!/bin/sh\ntrap '' TERM\ntouch \""+readyPath+"\"\nwhile true; do sleep 1; done\n"), 0755))
-	child := exec.Command(fakeOxDaemon)
-	require.NoError(t, child.Start())
-	childPID := child.Process.Pid
-	childDone := make(chan struct{})
-	go func() {
-		_ = child.Wait()
-		close(childDone)
-	}()
-	t.Cleanup(func() {
-		_ = child.Process.Kill()
-		<-childDone
-	})
+	// The child touches a ready file AFTER installing the trap. Signaling it
+	// before then races the shell's startup: the default SIGTERM action kills
+	// the child, KillStaleDaemon returns in ~50ms, and the test passes without
+	// ever entering the escalation branch it exists to cover.
+	readyPath := filepath.Join(t.TempDir(), "trap-installed")
+	body := `trap '' TERM; touch "` + readyPath + `"; while true; do sleep 1; done`
+	childPID, childDone := startFakeOxDaemon(t, body)
 
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(readyPath)
@@ -425,18 +522,11 @@ func TestKillStaleDaemon_IgnoresSigtermEscalatesToSigkill(t *testing.T) {
 	}, 10*time.Second, 20*time.Millisecond, "child never installed its SIGTERM trap")
 
 	wsID := "sigterm-ignored"
-	regDir := filepath.Join(tmpDir, "sageox", "daemon")
-	require.NoError(t, os.MkdirAll(regDir, 0700))
-	reg := &Registry{Daemons: map[string]DaemonInfo{
-		// no socket file: IPC is unreachable, so cleanup goes straight to signals
-		wsID: {WorkspaceID: wsID, PID: childPID, SocketPath: filepath.Join(regDir, "daemon-"+wsID+".sock")},
-	}}
-	data, _ := json.MarshalIndent(reg, "", "  ")
-	require.NoError(t, os.WriteFile(filepath.Join(regDir, "registry.json"), data, 0600))
+	registerStaleDaemon(t, wsID, childPID)
 
-	// guard: without this the test can pass vacuously — if KillStaleDaemon
-	// cannot see the entry it returns nil having done nothing, and every
-	// assertion below still holds.
+	// guards: without these the test can pass vacuously — if KillStaleDaemon
+	// cannot see the entry, or cannot identify the process, it returns nil
+	// having done nothing and every assertion below still holds.
 	preload, err := LoadRegistry()
 	require.NoError(t, err)
 	require.NotNil(t, preload.FindByWorkspaceID(wsID), "registry entry must be visible to KillStaleDaemon")
@@ -472,5 +562,88 @@ func TestBuildDaemonArgs_WithoutRepo(t *testing.T) {
 	assert.Equal(t, []string{"daemon", "start", "--foreground"}, args)
 	for _, arg := range args {
 		assert.NotContains(t, arg, "--repo")
+	}
+}
+
+// --- process identity: exactness is a safety property ---
+
+// TestMatchesOxDaemon is the PID-reuse guard's contract. KillStaleDaemon
+// consults it immediately before SIGTERM and then SIGKILL, so a false positive
+// is a stranger's process being killed — on macOS, where the ps(1) fallback
+// only just made this code path live.
+//
+// Red-first proof: restore the old
+// strings.Contains(cmdline, "ox") && strings.Contains(cmdline, "daemon")
+// and every "not ours" row below flips to true.
+func TestMatchesOxDaemon(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		cmdline string
+		want    bool
+	}{
+		{"production spawn", "/opt/homebrew/bin/ox daemon start --foreground", true},
+		{"production spawn with repo", "/usr/local/bin/ox daemon start --foreground --repo=sageox/ox", true},
+		{"bare relative invocation", "./ox daemon start", true},
+		{"global flag before subcommand", "/usr/local/bin/ox --verbose daemon start", true},
+
+		{"firefox", "/usr/bin/firefox --daemon", false},
+		{"podman", "/usr/bin/podman daemon", false},
+		{"toxiproxy", "/usr/local/bin/toxiproxy daemon", false},
+		{"unrelated binary under an ox-ish path", "/Users/rox/bin/redis-server --daemonize", false},
+		{"ox test binary", "/tmp/go-build123/b001/ox.test daemon start", false},
+		{"ox without the daemon subcommand", "/usr/local/bin/ox status", false},
+		{"daemon named in a flag value, not a subcommand", "/usr/local/bin/ox log --grep=daemon", false},
+		{"argv[0] only", "/usr/local/bin/ox", false},
+		{"empty", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, matchesOxDaemon(tt.cmdline))
+		})
+	}
+}
+
+// TestIsOxDaemonProcess_RejectsForeignDaemonSubcommand is the end-to-end half
+// of the guard: a LIVE process that says "daemon" but is not ox must never be
+// classified as ours, because classification is what authorizes the signal.
+func TestIsOxDaemonProcess_RejectsForeignDaemonSubcommand(t *testing.T) {
+	// identical argument list to a real daemon — only argv[0] differs
+	pid, _ := startFakeProcess(t, "notox", fakeDaemonExitsOnTerm)
+
+	assert.False(t, isOxDaemonProcess(pid),
+		"a non-ox process running a `daemon` subcommand must not be signalable")
+}
+
+// --- daemon spawn refuses to re-exec a test binary ---
+
+// TestPsCmdline_EmptyOutput: ps can exit 0 and print nothing (a process that
+// vanished between the liveness check and the query). Empty is not a command
+// line, and treating it as one would feed "" to matchesOxDaemon.
+func TestPsCmdline_EmptyOutput(t *testing.T) {
+	original := psCommand
+	t.Cleanup(func() { psCommand = original })
+
+	tests := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"empty", "", false},
+		{"whitespace only", "  \n\t\n", false},
+		{"real command line", "/usr/local/bin/ox daemon start\n", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			psCommand = func(context.Context, int) ([]byte, error) { return []byte(tt.out), nil }
+
+			_, ok := psCmdline(os.Getpid())
+
+			assert.Equal(t, tt.want, ok)
+		})
 	}
 }

@@ -249,6 +249,18 @@ func ensureDaemonImpl(wait bool) error {
 	return fmt.Errorf("daemon started but not responding")
 }
 
+// signalProcessFn is the process-signaling seam KillStaleDaemon uses.
+// Production points it at signalProcess.
+//
+// Tests substitute it to drive the escalation ladder deterministically. The
+// alternative — a shell child that ignores SIGTERM via a trap — makes the
+// test's PROOF depend on which /bin/sh the runner ships and on how loaded the
+// machine is: observed locally passing while silently taking the SIGTERM
+// branch, asserting the outcome without ever exercising the escalation it
+// exists to cover. Liveness (signal 0) still goes to a real process; only
+// delivery is simulated.
+var signalProcessFn = signalProcess
+
 // KillStaleDaemon kills any existing daemon for the given workspace before starting a new one.
 // Escalation: IPC stop (graceful) → SIGTERM (forceful) → error.
 // Returns nil if the stale daemon was successfully stopped or none existed.
@@ -268,7 +280,7 @@ func KillStaleDaemon(workspaceID string) error {
 	}
 
 	// check if process is alive (signal 0)
-	if err := signalProcess(info.PID, 0); err != nil {
+	if err := signalProcessFn(info.PID, 0); err != nil {
 		// process is dead — clean up stale registry entry and files
 		slog.Debug("stale daemon entry (process dead), cleaning up", "workspace_id", workspaceID, "pid", info.PID)
 		_ = reg.Unregister(workspaceID)
@@ -304,7 +316,7 @@ func KillStaleDaemon(workspaceID string) error {
 	}
 
 	slog.Info("sending SIGTERM to stale daemon", "workspace_id", workspaceID, "pid", info.PID)
-	if err := signalProcess(info.PID, sigTERM); err != nil {
+	if err := signalProcessFn(info.PID, sigTERM); err != nil {
 		slog.Warn("failed to SIGTERM stale daemon", "workspace_id", workspaceID, "pid", info.PID, "error", err)
 	}
 
@@ -318,7 +330,7 @@ func KillStaleDaemon(workspaceID string) error {
 	// SIGTERM ignored. Without this escalation a single wedged daemon blocks
 	// every subsequent `ox daemon start` for the workspace, forever.
 	slog.Warn("stale daemon ignored SIGTERM, escalating to SIGKILL", "workspace_id", workspaceID, "pid", info.PID)
-	if err := signalProcess(info.PID, sigKILL); err != nil {
+	if err := signalProcessFn(info.PID, sigKILL); err != nil {
 		slog.Warn("failed to SIGKILL stale daemon", "workspace_id", workspaceID, "pid", info.PID, "error", err)
 	}
 
@@ -336,7 +348,7 @@ func KillStaleDaemon(workspaceID string) error {
 func WaitForProcessExit(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if err := signalProcess(pid, 0); err != nil {
+		if err := signalProcessFn(pid, 0); err != nil {
 			return true // process exited
 		}
 		time.Sleep(50 * time.Millisecond)

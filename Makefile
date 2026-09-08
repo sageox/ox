@@ -143,9 +143,14 @@ FULL_TEST_FLAGS = $(shell $(TEST_TIER_TOOL) flags full)
 SLOW_TEST_FLAGS = $(shell $(TEST_TIER_TOOL) flags slow)
 # Same full tier, dialed down for a machine that is NOT dedicated to this run.
 # Overridable per-invocation: make test-calm CALM_P=1 CALM_PARALLEL=4
+# Deliberately NOT a $(shell ...) variable: these two values come from the
+# operator, so the tier tool can legitimately reject them (CALM_P=0,
+# CALM_PARALLEL=many). Make does not stop for a failed $(shell ...) — it
+# substitutes the empty output — which would run the suite with no -race, no
+# -timeout and no -count while still printing "full tier". The recipe below
+# generates the flags itself so a rejection is fatal.
 CALM_P ?= 2
 CALM_PARALLEL ?= 8
-CALM_TEST_FLAGS = $(shell OX_TEST_P=$(CALM_P) OX_TEST_PARALLEL=$(CALM_PARALLEL) $(TEST_TIER_TOOL) flags full)
 SLOW_TEST_PACKAGES := ./cmd/ox ./internal/daemon ./internal/session ./tests/adapters
 GOTESTSUM_JUNIT = $(if $(strip $(TEST_JUNIT)),--junitfile "$(TEST_JUNIT)",)
 GOTESTSUM_TIMINGS = $(if $(strip $(TEST_TIMINGS)),--jsonfile-timing-events "$(TEST_TIMINGS)",)
@@ -218,7 +223,8 @@ test-calm: check-test-tiers ## Run the full test tier at reduced concurrency (sh
 	@# and ~50% system time, at which point everything (including the tests)
 	@# gets slower. Same coverage, same race detector, a quarter of the fan-out.
 	$(call say,"Running full tests at reduced concurrency (-p $(CALM_P) -parallel $(CALM_PARALLEL))...")
-	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(CALM_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
+	@calm_flags="$$(OX_TEST_P=$(CALM_P) OX_TEST_PARALLEL=$(CALM_PARALLEL) $(TEST_TIER_TOOL) flags full)" || exit $$?; \
+		$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $$calm_flags -coverprofile=coverage.out -covermode=atomic ./...
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 test-slow: check-test-tiers ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed
