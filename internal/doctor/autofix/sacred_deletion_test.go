@@ -50,7 +50,48 @@ func TestScanLedgerSacredDeletions_FlagsHistoricalWipe(t *testing.T) {
 
 	res := scanLedgerSacredDeletions(context.Background(), repo, "/fake/repo")
 	assert.Equal(t, StatusFound, res.Status, "a historical sacred wipe must be surfaced")
-	assert.Contains(t, res.Summary, "sacred mass-deletion")
+	assert.Contains(t, res.Summary, "plan/session deletion history")
+}
+
+// One session can contain six artifacts. Keep the warning and safety threshold,
+// but do not call it a confirmed mass wipe or instruct customers to undo it.
+func TestScanLedgerSacredDeletions_ReportsFactsWithoutChangingHistory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git history")
+	}
+	for _, message := range []string{"Delete session example", "github: sync PRs"} {
+		t.Run(message, func(t *testing.T) {
+			repo := newSacredTestRepo(t)
+			dir := filepath.Join(repo, "sessions", "example")
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			for _, name := range []string{"meta.json", "raw.jsonl", "summary.json", "summary.md", "session.md", "context-trace.jsonl"} {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("preserved in history\n"), 0o600))
+			}
+			afGit(t, repo, "add", "sessions")
+			afGit(t, repo, "commit", "-m", "record session")
+			afGit(t, repo, "rm", "-r", "sessions/example")
+			afGit(t, repo, "commit", "-m", message)
+			head := afGit(t, repo, "rev-parse", "HEAD")
+			// An unrelated uncommitted edit must also survive the scan.
+			dirty := filepath.Join(repo, "base.txt")
+			require.NoError(t, os.WriteFile(dirty, []byte("customer edit\n"), 0o600))
+			status := afGit(t, repo, "status", "--porcelain")
+			for range 2 {
+				res := scanLedgerSacredDeletions(context.Background(), repo, "/fake/repo")
+				require.Equal(t, StatusFound, res.Status, "commit messages are not proof of authorization")
+				assert.Contains(t, res.Summary, "1 commit(s) deleting 6 plan/session files")
+				assert.Contains(t, res.Summary, "verify intent before recovery")
+				assert.NotContains(t, res.Summary, "mass-deletion")
+			}
+			assert.Equal(t, head, afGit(t, repo, "rev-parse", "HEAD"))
+			assert.Equal(t, status, afGit(t, repo, "status", "--porcelain"))
+			assert.NoDirExists(t, dir, "scanning must not restore intentionally deleted data")
+			assert.Equal(t, "preserved in history", afGit(t, repo, "show", "HEAD^:sessions/example/raw.jsonl"))
+			content, err := os.ReadFile(dirty)
+			require.NoError(t, err)
+			assert.Equal(t, "customer edit\n", string(content))
+		})
+	}
 }
 
 // TestScanLedgerSacredDeletions_CleanWhenNoWipe: a ledger that only ever added

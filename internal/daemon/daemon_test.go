@@ -123,6 +123,80 @@ func TestDaemon_DeadAgentQuiescesCaptureBeforeFinalizing(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(string(data), "Preserve the final Codex response."))
 }
 
+// A follower must observe successful syncs by the shared owner without rewriting
+// config or the owner's cache, including after an upgrade with no usable cache.
+func TestDaemonStatus_SharedTeamContextSync(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("SAGEOX_ENDPOINT", "https://status.test.invalid")
+	older := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	newer := older.Add(30 * time.Minute)
+	cases := []struct {
+		name       string
+		configSync time.Time
+		sharedSync time.Time
+		corrupt    bool
+		want       time.Time
+	}{
+		{name: "never synced"},
+		{name: "missing cache", configSync: older, want: older},
+		{name: "corrupt cache", configSync: older, corrupt: true, want: older},
+		{name: "shared owner synced", sharedSync: newer, want: newer},
+		{name: "shared cache newer", configSync: older, sharedSync: newer, want: newer},
+		{name: "config newer", configSync: newer, sharedSync: older, want: newer},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.ProjectRoot = t.TempDir()
+			d := New(cfg, nil)
+			d.scheduler = NewSyncScheduler(cfg, d.logger)
+			d.scheduler.SetGlobalSyncLease("", nil)
+			teamPath := t.TempDir()
+			ws := &WorkspaceState{
+				ID: "team_1", Type: WorkspaceTypeTeamContext, Path: teamPath,
+				TeamID: "team_1", TeamName: "Test Team", Exists: true,
+				ConfigLastSync: tc.configSync, LastErr: "local sync failed",
+			}
+			d.scheduler.WorkspaceRegistry().workspaces[ws.ID] = ws
+			statePath := filepath.Join(teamPath, ".sageox", "cache", "sync-state.json")
+			if !tc.sharedSync.IsZero() {
+				require.NoError(t, SaveSyncState(teamPath, &SyncState{LastSync: tc.sharedSync}))
+			}
+			if tc.corrupt {
+				require.NoError(t, os.MkdirAll(filepath.Dir(statePath), 0755))
+				require.NoError(t, os.WriteFile(statePath, []byte("{incomplete"), 0600))
+			}
+			before, beforeErr := os.ReadFile(statePath)
+			svc := &daemonServiceImpl{d: d}
+			status := svc.Status()
+			require.False(t, status.GlobalSyncOwner)
+			require.Len(t, status.Workspaces["team-context"], 1)
+			require.Len(t, status.TeamContexts, 1)
+			assert.Equal(t, tc.want, status.Workspaces["team-context"][0].LastSync)
+			assert.Equal(t, tc.want, status.TeamContexts[0].LastSync)
+			assert.Equal(t, ws.LastErr, status.Workspaces["team-context"][0].LastErr)
+			assert.Equal(t, ws.LastErr, status.TeamContexts[0].LastErr)
+			assert.Equal(t, tc.configSync, ws.ConfigLastSync, "status must not mutate registry state")
+			after, afterErr := os.ReadFile(statePath)
+			assert.Equal(t, before, after, "status must not rewrite shared sync state")
+			if os.IsNotExist(beforeErr) {
+				assert.True(t, os.IsNotExist(afterErr), "status must not create shared sync state")
+			} else {
+				require.NoError(t, afterErr)
+			}
+
+			// The owner updates the shared cache while this follower keeps running.
+			advanced := newer.Add(time.Minute)
+			require.NoError(t, SaveSyncState(teamPath, &SyncState{LastSync: advanced}))
+			status = svc.Status()
+			assert.Equal(t, advanced, status.Workspaces["team-context"][0].LastSync)
+			assert.Equal(t, advanced, status.TeamContexts[0].LastSync)
+			assert.Equal(t, tc.configSync, ws.ConfigLastSync)
+		})
+	}
+}
+
 func TestNew(t *testing.T) {
 	t.Run("with nil config uses defaults", func(t *testing.T) {
 		d := New(nil, nil)

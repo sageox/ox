@@ -31,8 +31,9 @@ const commitMarker = "\x1e"
 // files under a sacred prefix.
 //
 // DETECTION ONLY — it never restores. Per ADR-024 sacred-data deletion needs
-// explicit human approval, and the content is always recoverable from history,
-// so a hit is surfaced as StatusFound and alerted for a human to recover. This
+// explicit human approval, so a hit is surfaced as StatusFound for review.
+// A file-count threshold cannot establish intent: even one intentionally
+// removed plan/session may contain enough artifacts to trigger it. This
 // is the belt to the commit-time guard's suspenders: it fires even when the
 // guard never ran (old binary) or was bypassed (force-push).
 func checkLedgerSacredDeletion(ctx context.Context, repoPath string) CheckResult {
@@ -111,8 +112,8 @@ func scanLedgerSacredDeletions(ctx context.Context, ledgerPath, repoPath string)
 			sample = append(sample, fmt.Sprintf("%s(%d)", shortSHA(h.commit), h.count))
 		}
 	}
-	// Loud alert: a data-loss event is sitting in history right now.
-	slog.ErrorContext(ctx, "ALERT: sacred mass-deletion found in ledger history",
+	// Keep every threshold hit visible; commit messages do not prove consent.
+	slog.ErrorContext(ctx, "ALERT: plan/session deletions found in ledger history",
 		"repo", repoPath,
 		"ledger", ledgerPath,
 		"wipe_commits", len(hits),
@@ -122,7 +123,7 @@ func scanLedgerSacredDeletions(ctx context.Context, ledgerPath, repoPath string)
 	return CheckResult{
 		Status: StatusFound,
 		Repo:   repoPath,
-		Summary: fmt.Sprintf("sacred mass-deletion in ledger history: %d commit(s) deleting %d plan/session files (e.g. %s) — recover from history; do NOT auto-delete (ADR-024)",
+		Summary: fmt.Sprintf("plan/session deletion history: %d commit(s) deleting %d plan/session files (e.g. %s) — verify intent before recovery; do NOT auto-delete (ADR-024)",
 			len(hits), total, strings.Join(sample, ", ")),
 	}
 }
