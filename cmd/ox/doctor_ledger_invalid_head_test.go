@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -654,6 +655,14 @@ func TestRepairInvalidHead_RestoreErrorTriggersRollback(t *testing.T) {
 // window to work around.
 
 func TestRestoreLedgerDir_WalkErrorOnUnreadableSubdir(t *testing.T) {
+	// Chmod(0o000) is the isolation mechanism here, and Go's Chmod maps only the
+	// read-only bit on Windows — the target stays readable and this test would pass
+	// while asserting nothing. See .claude/rules/testing.md, "Failure Paths That
+	// Render Identically To Success".
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: chmod cannot remove read permission")
+	}
+
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: permission-denied fixtures don't apply")
 	}
@@ -671,6 +680,14 @@ func TestRestoreLedgerDir_WalkErrorOnUnreadableSubdir(t *testing.T) {
 }
 
 func TestRestoreLedgerDir_ConflictCheckReadFailure(t *testing.T) {
+	// Chmod(0o000) is the isolation mechanism here, and Go's Chmod maps only the
+	// read-only bit on Windows — the target stays readable and this test would pass
+	// while asserting nothing. See .claude/rules/testing.md, "Failure Paths That
+	// Render Identically To Success".
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: chmod cannot remove read permission")
+	}
+
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: permission-denied fixtures don't apply")
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -311,6 +312,14 @@ func TestCheckFreshness_SkipsWorktreeGone_LedgerIndexUnaffected(t *testing.T) {
 // triggers the skip — permission errors should still attempt indexing.
 // Failure prevented: overly aggressive guard skips indexing on transient permission issues.
 func TestCheckFreshness_PermissionError_StillProceeds(t *testing.T) {
+	// Chmod(0o000) is the isolation mechanism here, and Go's Chmod maps only the
+	// read-only bit on Windows — the target stays readable and this test would pass
+	// while asserting nothing. See .claude/rules/testing.md, "Failure Paths That
+	// Render Identically To Success".
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: chmod cannot remove read permission")
+	}
+
 	t.Parallel()
 
 	if os.Getuid() == 0 {

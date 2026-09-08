@@ -294,7 +294,7 @@ func TestClearCredentialHelperEntry(t *testing.T) {
 
 		fakeDir := t.TempDir()
 		require.NoError(t, os.Symlink(fakeGit.Name(), fakeDir+"/git"))
-		t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+		t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 		ClearCredentialHelperEntry("https://git.sageox.ai")
 
@@ -451,6 +451,15 @@ exit 128`)
 // TestValidatePATLiveness_CredentialHelperSuppressed.
 func installFakeGit(t *testing.T, scriptBody string) {
 	t.Helper()
+	// Windows: every isolation mechanism below is inert there — the fake is a
+	// `#!/bin/sh` script, the symlink is named `git` not `git.exe`, and even with a
+	// correct PATH separator Windows would not resolve it. If symlink creation
+	// happens to succeed (Developer Mode), the REAL git runs against the
+	// developer's own credential store. See .claude/rules/testing.md.
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: the fake-git PATH injection does not apply and would fall through to the real git")
+	}
+	t.Helper()
 	fakeGit, err := os.CreateTemp("", "fake-git-*")
 	require.NoError(t, err)
 	t.Cleanup(func() { os.Remove(fakeGit.Name()) })
@@ -462,5 +471,5 @@ func installFakeGit(t *testing.T, scriptBody string) {
 
 	fakeDir := t.TempDir()
 	require.NoError(t, os.Symlink(fakeGit.Name(), fakeDir+"/git"))
-	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -324,6 +325,14 @@ func TestLoadHooksDedupSameCommandDifferentEvents(t *testing.T) {
 // TestLoadHooksPermissionError verifies an unreadable file returns an error.
 // Failure prevented: permission error silently returns empty hooks.
 func TestLoadHooksPermissionError(t *testing.T) {
+	// Chmod(0o000) is the isolation mechanism here, and Go's Chmod maps only the
+	// read-only bit on Windows — the target stays readable and this test would pass
+	// while asserting nothing. See .claude/rules/testing.md, "Failure Paths That
+	// Render Identically To Success".
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: chmod cannot remove read permission")
+	}
+
 	t.Parallel()
 
 	dir := t.TempDir()
