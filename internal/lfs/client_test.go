@@ -454,7 +454,8 @@ func TestReadLFS_ContextCancellation(t *testing.T) {
 func TestReadLFS_StreamingFailureBoundaries(t *testing.T) {
 	content := []byte(strings.Repeat("verified-content", 8))
 	oid := ComputeOID(content)
-	status := http.StatusOK
+	var status atomic.Int32
+	status.Store(http.StatusOK)
 	var hits atomic.Int32
 	c, server := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
@@ -464,7 +465,7 @@ func TestReadLFS_StreamingFailureBoundaries(t *testing.T) {
 			}}}}})
 			return
 		}
-		w.WriteHeader(status)
+		w.WriteHeader(int(status.Load()))
 		w.Write(content)
 	})
 	resp, err := c.BatchDownload([]BatchObject{{OID: oid}})
@@ -507,8 +508,8 @@ func TestReadLFS_StreamingFailureBoundaries(t *testing.T) {
 		require.ErrorContains(t, err, "exceeded maximum size")
 	})
 	t.Run("revoked between grant and download", func(t *testing.T) {
-		status = http.StatusUnauthorized
-		defer func() { status = http.StatusOK }()
+		status.Store(http.StatusUnauthorized)
+		defer status.Store(http.StatusOK)
 		err := DownloadToFileContext(context.Background(), action, io.Discard, true, oid)
 		var httpErr *HTTPError
 		require.ErrorAs(t, err, &httpErr)

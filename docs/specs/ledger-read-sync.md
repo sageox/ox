@@ -43,7 +43,9 @@ The backend contract uses standard Git smart HTTP, including protocol v2 and obj
 
 Git credentials never appear in remote URLs, command arguments, persisted Git configuration, or an additional credential file. Inherited Git helpers are cleared for the bounded operation. Redirects cannot move authorization to another origin or repository. LFS uses the same scoped endpoint and credential for download authorization, verifies content hashes, and keeps credentials off unrelated object-storage hosts. Neither this client mode nor the proposed read route authorizes push or LFS upload.
 
-The server must check the current TAT and repository authorization on every new request. Downloads and requests already in flight cannot be recalled by revocation. A consumer must independently establish current repository authorization before serving cached content; a ready or recently refreshed file is not proof of permission.
+Both `read-only` and `full-access` (read/write) TATs can authorize this read capability for an accessible repository. The TAT itself authenticates ledger requests; no separate client ledger token is issued. Effective permissions are the intersection of the current TAT scope, repository authorization, and supported operation. This read-only command and route deny writes for both scopes. A future explicit write capability must require `full-access` and current repository authorization; a broader server-side provider credential must never elevate the caller.
+
+The server must check the current TAT scope and repository authorization on every new request. Downloads and requests already in flight cannot be recalled by revocation. A consumer must independently establish current repository authorization before serving cached content; a ready or recently refreshed file is not proof of permission.
 
 ## JSON result and exit status
 
@@ -132,6 +134,6 @@ Give background refresh and individual tool calls separate budgets. A short tool
 
 ## Acceptance and rollout
 
-Hermetic tests can exercise Git smart HTTP, current-TAT authorization, real subprocesses, locking, sparse history, hydration failures, and recovery against controlled fixtures. Live acceptance additionally requires an enabled backend supporting clone/fetch, protocol v2/lazy object fetches, LFS download, per-request revocation, and repository scoping. The consumer must prove separate data-home isolation and safe concurrent reads in its own runtime.
+Hermetic tests can exercise Git smart HTTP, current-TAT authorization, real subprocesses, locking, sparse history, hydration failures, and recovery against controlled fixtures. Live acceptance additionally requires an enabled backend supporting clone/fetch, protocol v2/lazy object fetches, LFS download, per-request revocation, and repository scoping. Backend acceptance must exercise both TAT scopes for reads, deny pushes/uploads on the read route for both, and recheck scope downgrades on the next request. Exact Git upload-pack and LFS download-batch POSTs are reads for scope enforcement; arbitrary POSTs retain mutation checks. The consumer must prove separate data-home isolation and safe concurrent reads in its own runtime.
 
 Keep existing human/direct-Git behavior and explicit legacy consumer paths available until callers can migrate. There is no automatic credential fallback. Ryan's review is required for the new data-access contract and discovery source-of-truth use under this repository's engineering policy. A released ox version and matching CLI/reference docs must be published before toolkit pins this capability.
