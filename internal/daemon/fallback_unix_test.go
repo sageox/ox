@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -49,7 +50,8 @@ func setupIsolatedRegistry(t *testing.T, entries map[string]DaemonInfo) string {
 // necessarily invalidates the old shape — so the fixture has to describe a real
 // daemon now, which is the point.
 //
-// shellBody is the child's signal behavior (how it reacts to SIGTERM).
+// shellBody is the child's signal behavior (how it reacts to SIGTERM) and
+// must write R to fd 3 once its signal handlers are installed.
 // Returns the child's PID and a channel closed once the child is reaped, so a
 // caller can assert the process actually died rather than sleeping.
 func startFakeOxDaemon(t *testing.T, shellBody string) (int, <-chan struct{}) {
@@ -58,7 +60,7 @@ func startFakeOxDaemon(t *testing.T, shellBody string) (int, <-chan struct{}) {
 }
 
 // startFakeProcess runs sh under the given executable name with a daemon-shaped
-// argument list: argv is [<dir>/<name>, -c, <body>, daemon, start, --foreground, readyPath].
+// argument list: argv is [<dir>/<name>, -c, <body>, daemon, start, --foreground].
 //
 // It has to be a symlink to a real executable, not a #! script — the kernel
 // rewrites a shebang script's argv[0] to the interpreter, so a script always
@@ -69,13 +71,17 @@ func startFakeProcess(t *testing.T, name, shellBody string) (int, <-chan struct{
 
 	sh, err := exec.LookPath("sh")
 	require.NoError(t, err)
-	dir := t.TempDir()
-	fakeExe := filepath.Join(dir, name)
+	fakeExe := filepath.Join(t.TempDir(), name)
 	require.NoError(t, os.Symlink(sh, fakeExe))
 
-	readyPath := filepath.Join(dir, "ready")
-	child := exec.Command(fakeExe, "-c", `printf ready > "$3"; `+shellBody, "daemon", "start", "--foreground", readyPath)
+	readyRead, readyWrite, err := os.Pipe()
+	require.NoError(t, err)
+	defer readyRead.Close()
+	defer readyWrite.Close()
+	child := exec.Command(fakeExe, "-c", shellBody, "daemon", "start", "--foreground")
+	child.ExtraFiles = []*os.File{readyWrite}
 	require.NoError(t, child.Start())
+	_ = readyWrite.Close()
 
 	done := make(chan struct{})
 	go func() {
@@ -86,17 +92,27 @@ func startFakeProcess(t *testing.T, name, shellBody string) (int, <-chan struct{
 		_ = child.Process.Kill()
 		<-done
 	})
-	// Start does not wait for the shell to run. Synchronize with the child
-	// before testing process identity or signaling it.
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(readyPath)
-		return err == nil
-	}, 5*time.Second, 10*time.Millisecond, "fake process did not start")
+	// Start can return while Linux still exposes an empty /proc/PID/cmdline.
+	// Wait for the child itself, not for the identity matcher under test, so
+	// startup timing cannot cause false failures or hide a broken matcher.
+	var readyByte [1]byte
+	ready := make(chan error, 1)
+	go func() {
+		_, err := io.ReadFull(readyRead, readyByte[:])
+		ready <- err
+	}()
+	select {
+	case err := <-ready:
+		require.NoError(t, err, "fake daemon exited before signaling readiness")
+		require.Equal(t, byte('R'), readyByte[0], "unexpected fake daemon readiness signal")
+	case <-time.After(5 * time.Second):
+		t.Fatal("fake daemon did not signal readiness")
+	}
 	return child.Process.Pid, done
 }
 
 // fakeDaemonExitsOnTerm is a well-behaved daemon: SIGTERM is enough.
-const fakeDaemonExitsOnTerm = "trap 'exit 0' TERM; while true; do sleep 1; done"
+const fakeDaemonExitsOnTerm = "trap 'exit 0' TERM; printf R >&3; exec 3>&-; while true; do sleep 1; done"
 
 func TestKillStaleDaemon_NoRegistryEntry(t *testing.T) {
 	setupIsolatedRegistry(t, map[string]DaemonInfo{})
@@ -516,18 +532,11 @@ func TestKillStaleDaemon_IgnoresSigtermEscalatesToSigkill(t *testing.T) {
 		t.Skip("skipping SIGKILL escalation test in short mode")
 	}
 
-	// The child touches a ready file AFTER installing the trap. Signaling it
-	// before then races the shell's startup: the default SIGTERM action kills
-	// the child, KillStaleDaemon returns in ~50ms, and the test passes without
-	// ever entering the escalation branch it exists to cover.
-	readyPath := filepath.Join(t.TempDir(), "trap-installed")
-	body := `trap '' TERM; touch "` + readyPath + `"; while true; do sleep 1; done`
+	// The readiness pipe signals AFTER installing the trap. Signaling before
+	// then would kill the child through the default SIGTERM action and pass
+	// this test without ever exercising SIGKILL escalation.
+	body := `trap '' TERM; printf R >&3; exec 3>&-; while true; do sleep 1; done`
 	childPID, childDone := startFakeOxDaemon(t, body)
-
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(readyPath)
-		return err == nil
-	}, 10*time.Second, 20*time.Millisecond, "child never installed its SIGTERM trap")
 
 	wsID := "sigterm-ignored"
 	registerStaleDaemon(t, wsID, childPID)

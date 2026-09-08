@@ -359,7 +359,7 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 	// Record retry ownership before mutating the ledger. Once meta.json becomes
 	// final, ordinary orphan discovery skips it to avoid replaying an already
 	// published session. This cache-side marker is what keeps failures from any
-	// later phase (including the post-push pointer commit) discoverable on the
+	// later phase (including pointer preparation and push) discoverable on the
 	// next doctor pass. A successful pass prunes the cache and marker together.
 	if err := writeSessionUploadRetryPending(orphan.CachePath); err != nil {
 		return fmt.Errorf("record pending session upload retry: %w", err)
@@ -408,6 +408,15 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 		return err
 	}
 
+	// Redaction records need durable metadata before the upload. The later
+	// read-modify-write preserves that audit when it installs the uploaded refs.
+	if _, err := writeRetryUploadMeta(sessionDir, projectRoot, orphan, sessionID, nil); err != nil {
+		return err
+	}
+	if err := prepareSessionUpload(context.Background(), ledgerPath, orphan.SessionName); err != nil {
+		return fmt.Errorf("prepare session upload: %w", err)
+	}
+
 	// upload to LFS
 	fileRefs, err := effects.uploadLFS(projectRoot, sessionDir)
 	if err != nil {
@@ -431,26 +440,29 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 		hasSummary = true
 	}
 
-	// commit and push (meta.json + optional summary.json)
+	store, err := session.NewStore(ledgerPath)
+	if err != nil {
+		return fmt.Errorf("open session recovery store: %w", err)
+	}
+	recoveryCacheDir, err := store.PreserveSessionCache(sessionDir, orphan.CachePath)
+	if err != nil {
+		return err
+	}
+
+	// AssertUploaded: uploadLFS succeeded above. Keep the source cache for retry,
+	// and publish the pointers with metadata in the first commit so GitLab GC
+	// cannot run between a raw-content push and a later pointer rewrite.
+	if _, err := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(meta.Files)); err != nil {
+		return fmt.Errorf("write LFS pointer files: %w", err)
+	}
+
+	// commit and push (pointers, meta.json, and optional summary.json)
 	if err := effects.commitRetry(ledgerPath, orphan.SessionName, hasSummary); err != nil {
 		return fmt.Errorf("commit and push: %w", err)
 	}
-
-	// push succeeded — now safe to replace content files with LFS pointer stubs.
-	// AssertUploaded: this retry path uploaded meta.Files' blobs before the push.
-	if len(meta.Files) > 0 {
-		written, writeErr := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(meta.Files))
-		if len(written) > 0 {
-			// Mirror the primary stop path: leaving freshly written pointers dirty
-			// lets a daemon pull autostash them and can freeze a stash conflict into
-			// a later unrelated commit. Commit every pointer that landed, even when
-			// another file in the same batch failed to rewrite.
-			if err := effects.commitPointerRewrite(ledgerPath, orphan.SessionName, written); err != nil {
-				return fmt.Errorf("commit LFS pointer rewrite: %w", err)
-			}
-		}
-		if writeErr != nil {
-			return fmt.Errorf("write LFS pointer files: %w", writeErr)
+	if recoveryCacheDir != "" {
+		if err := os.RemoveAll(recoveryCacheDir); err != nil {
+			slog.Debug("prune session recovery copy", "dir", recoveryCacheDir, "error", err)
 		}
 	}
 
@@ -460,9 +472,8 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 // writeRetryUploadMeta records a retry-upload's results into meta.json,
 // updating only the fields this path owns and preserving everything else.
 //
-// Uses WriteSessionMetaOnly semantics (via MutateSessionMeta) so content
-// files stay intact until after the push — pointer stubs with no remote
-// would be unrecoverable.
+// Uses WriteSessionMetaOnly semantics (via MutateSessionMeta); the caller
+// prepares pointers only after the upload and metadata write succeed.
 //
 // # Why read-modify-write and not a fresh builder (GH #710)
 //
@@ -523,7 +534,11 @@ func writeRetryUploadMeta(
 		// fields this retry actually owns
 		next.Model = orphan.Meta.Model
 		next.EntryCount = orphan.EntryCount
-		next.Files = fileRefs
+		// A nil manifest is the pre-upload metadata pass. Retain the prior
+		// uploaded refs until a successful upload supplies their replacement.
+		if fileRefs != nil {
+			next.Files = fileRefs
+		}
 		// preserve-if-set: don't stomp a real terminal stop reason with the
 		// generic "recovered" just because doctor re-uploaded the content.
 		if next.StopReason == "" {

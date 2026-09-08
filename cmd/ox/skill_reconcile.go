@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -135,6 +134,7 @@ func planCommittedSkills(repoRoot string) (*skillmanager.ReconcilePlan, error) {
 
 func reconcileCommittedSkills(repoRoot string) (*skillmanager.ReconcilePlan, error) {
 	plan, err := skillmanager.ReconcileUpdate(repoRoot, version.Version, func(current skillmanager.DesiredSkills, currentTargets []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
+		current, _ = skillmanager.RemoveRetiredSelections(current)
 		if len(current.Targets) == 0 {
 			return bootstrapLegacySkillState(repoRoot, current, currentTargets)
 		}
@@ -271,31 +271,6 @@ func detectedOrClaudeTargets(repoRoot string) []adapterprotocol.SkillTarget {
 		return nil
 	}
 	return canonical
-}
-
-func addSkillBundle(repoRoot, bundle string) (*skillmanager.ReconcilePlan, error) {
-	desired, targets, err := skillmanager.LoadDesired(repoRoot)
-	if err != nil {
-		return nil, err
-	}
-	if len(desired.Targets) == 0 {
-		targets, err = detectedSkillTargets(repoRoot)
-		if err != nil {
-			return nil, err
-		}
-		if len(targets) == 0 {
-			return nil, fmt.Errorf("no detected AI coworker supports native Agent Skills; Attest remains available through the ox CLI")
-		}
-		desired = skillmanager.DefaultDesired(targets)
-	}
-	return skillmanager.ReconcileUpdate(repoRoot, version.Version, func(current skillmanager.DesiredSkills, currentTargets []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
-		if len(current.Targets) == 0 {
-			current = desired
-			currentTargets = targets
-		}
-		current = skillmanager.AddBundles(current, bundle)
-		return current, currentTargets, nil
-	})
 }
 
 func uninstallManagedSkills(repoRoot string) (*skillmanager.ReconcilePlan, error) {

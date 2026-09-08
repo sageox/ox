@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`ox attest` and its optional playbooks have been removed** — the experimental capability and evidence commands introduced in 0.14.0 are no longer available in ox. Existing acceptance specifications and evidence files remain in your repository.
+
 ### New
 
 - **See where a slow pipeline actually spends its time** — `ox viz render waterfall` draws the browser-devtools waterfall for any timed sequence: one row per stage on one clock, so overlap and serialization are obvious at a glance. Give the rows dependency edges and it computes the critical path, dims everything that didn't set the total, marks the long pole, and draws the idle wait between stages — the dead time a bar-only chart hides and the cheapest latency to delete.
@@ -15,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Claude Code and Codex session recording continues after individual commands finish** — interrupted uploads remain recoverable, with secret redaction preserved before publication.
 - **A read-only code index is no longer mistaken for a corrupt one and deleted** — ox read "cannot write this database" as "this database is damaged" and tried to delete it; only the read-only filesystem stopped it. The same misreading on writable media would have destroyed a healthy index that costs minutes to rebuild.
 - **`ox code status` no longer reports an index it could not open as an empty one** — it answered zeros under `index_exists: true`, which reads exactly like a warm index holding nothing. It now shows `✗ unreadable` with the reason (`open_error` in `--json`), and labels a read-only index as such.
 - **`ox code index` refuses a read-only index up front** — with a message naming the directory, instead of failing partway through a pass.

@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/useragent"
@@ -481,8 +482,8 @@ func startDaemonBackground(ledgerPath string) error {
 	}
 
 	// start daemon process
-	// NOTE: No setsid/detach — Claude manages the daemon process lifecycle.
 	cmd := exec.Command(exe, args...)
+	proc.Detach(cmd)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	// set CWD to git root so daemon computes correct repo-based workspace ID
