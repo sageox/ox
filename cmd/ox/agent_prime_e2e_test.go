@@ -209,6 +209,10 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 				assert.Equal(t, nativeID, waiting.AgentSessionID)
 				// A subsequent environment without a native ID must not erase the saved one.
 				require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", "", "", ""))
+				waiting, err = session.LoadRecordingStateForAgent(f.projectRoot, agentID)
+				require.NoError(t, err)
+				require.NotNil(t, waiting)
+				assert.Equal(t, nativeID, waiting.AgentSessionID, "an empty native ID must not erase the saved one")
 			}
 			assert.Empty(t, waiting.SessionFile)
 			assert.Equal(t, first.SessionID, waiting.SessionID)

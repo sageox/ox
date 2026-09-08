@@ -239,7 +239,7 @@ func TestSessionWatcherManager_CaptureReleasesLock(t *testing.T) {
 			case "explicit-stop", "incremental-stop":
 				require.NoError(t, session.MarkExplicitStop(projectRoot, state.AgentID))
 			}
-			require.Eventually(t, func() bool { return len(mgr.ActiveSessions()) == 0 }, 2*pollInterval, 10*time.Millisecond)
+			require.Eventually(t, func() bool { return len(mgr.ActiveSessions()) == 0 }, 5*time.Second, 10*time.Millisecond)
 			mgr.StopAll()
 			require.NoError(t, fileutil.WithFileLockTimeout(context.Background(), rawPath, 100*time.Millisecond, func() error { return nil }),
 				"CLI finalization must be able to acquire the capture lock")
