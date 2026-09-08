@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -518,12 +519,22 @@ func oxEnv(env e2eEnv) []string {
 	return result
 }
 
+// runOx returns stdout so stderr warnings cannot contaminate JSON results.
 func runOx(t *testing.T, oxBin string, env e2eEnv, agentID string, args ...string) string {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
 	fullArgs := append([]string{"agent", agentID}, args...)
-	out, exitCode, _ := testguard.RunOx(t, oxBin, env.workspace, oxEnv(env), fullArgs...)
-	require.Equal(t, 0, exitCode, "ox agent %s %v failed:\n%s", agentID, args, out)
-	return out
+	cmd := testguard.OxCmdContext(t, ctx, oxBin, env.workspace, oxEnv(env), fullArgs...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if stderr.Len() > 0 {
+		t.Logf("ox agent %s %v stderr:\n%s", agentID, args, stderr.String())
+	}
+	require.NoError(t, err, "ox agent %s %v failed:\n%s", agentID, args, out)
+	return string(out)
 }
 
 func runOxHook(t *testing.T, oxBin string, env e2eEnv, agentID, event, sessionID string) string {
