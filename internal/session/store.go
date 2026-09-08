@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/sessionid"
@@ -706,6 +707,44 @@ func (s *Store) ResolveContentFile(sessionName, filename string) string {
 // CacheSessionPath returns the cache path for a session's content files.
 func (s *Store) CacheSessionPath(sessionName string) string {
 	return filepath.Join(s.cacheBasePath, sessionName)
+}
+
+// PreserveSessionCache saves prepared session content in the canonical recovery
+// cache before pointer conversion. It returns the extra copy to prune after a
+// successful push, or an empty path when the original cache is already canonical.
+// The original recording cache is left intact, including through symlink aliases.
+func (s *Store) PreserveSessionCache(sessionDir, originalCacheDir string) (string, error) {
+	cacheDir := s.CacheSessionPath(filepath.Base(sessionDir))
+	originalInfo, originalErr := os.Stat(originalCacheDir)
+	cacheInfo, cacheErr := os.Stat(cacheDir)
+	if originalErr == nil && cacheErr == nil && os.SameFile(originalInfo, cacheInfo) {
+		return "", nil
+	}
+
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		return "", fmt.Errorf("read prepared session: %w", err)
+	}
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		return "", fmt.Errorf("create session recovery cache: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		src := filepath.Join(sessionDir, entry.Name())
+		if lfs.IsPointerFile(src) {
+			continue // retain existing real content, never replace it with a stub
+		}
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return "", fmt.Errorf("read session artifact %s: %w", entry.Name(), err)
+		}
+		if err := fileutil.AtomicWriteBytes(filepath.Join(cacheDir, entry.Name()), data, 0o600); err != nil {
+			return "", fmt.Errorf("preserve session artifact %s: %w", entry.Name(), err)
+		}
+	}
+	return cacheDir, nil
 }
 
 // IsSessionHydrated checks if content files exist locally for a session.

@@ -14,21 +14,19 @@ import (
 // Keep this value explicit (rather than a package global) so parallel tests do
 // not race by swapping process-wide hooks.
 type sessionUploadEffects struct {
-	uploadLFS            func(projectRoot, sessionDir string) (map[string]lfs.FileRef, error)
-	commitInitial        func(ledgerPath, sessionName string) error
-	commitRetry          func(ledgerPath, sessionName string, includeSummary bool) error
-	commitPointerRewrite func(ledgerPath, sessionName string, paths []string) error
-	reconcilePlans       func(projectRoot string, slugs []string, sessionName, sessionID string)
-	finalizeLinkage      func(projectRoot, sessionDir string, meta *lfs.SessionMeta, sessionName string) []api.PRLinkMiss
+	uploadLFS       func(projectRoot, sessionDir string) (map[string]lfs.FileRef, error)
+	commitInitial   func(ledgerPath, sessionName string) error
+	commitRetry     func(ledgerPath, sessionName string, includeSummary bool) error
+	reconcilePlans  func(projectRoot string, slugs []string, sessionName, sessionID string)
+	finalizeLinkage func(projectRoot, sessionDir string, meta *lfs.SessionMeta, sessionName string) []api.PRLinkMiss
 }
 
 func productionSessionUploadEffects() sessionUploadEffects {
 	return sessionUploadEffects{
-		uploadLFS:            uploadSessionLFS,
-		commitInitial:        commitAndPushLedger,
-		commitRetry:          commitAndPushLedgerWithExtras,
-		commitPointerRewrite: commitPointerRewriteAndPush,
-		reconcilePlans:       reconcileProducedPlansAtStop,
-		finalizeLinkage:      finalizeLinkageAfterPush,
+		uploadLFS:       uploadSessionLFS,
+		commitInitial:   commitAndPushLedger,
+		commitRetry:     commitAndPushLedgerWithExtras,
+		reconcilePlans:  reconcileProducedPlansAtStop,
+		finalizeLinkage: finalizeLinkageAfterPush,
 	}
 }

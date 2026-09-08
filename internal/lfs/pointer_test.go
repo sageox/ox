@@ -385,25 +385,126 @@ func TestNewFileRef_EndToEnd_RoundTrip(t *testing.T) {
 	assert.Equal(t, "sha256:"+ComputeOID(content), got.OID)
 }
 
-func TestWritePointerFiles_PartialFailure(t *testing.T) {
-	dir := t.TempDir()
-
-	// create a subdirectory that doesn't exist to trigger a write error
-	files := map[string]FileRef{
-		"good.jsonl":            {OID: "sha256:aaa", Size: 100},
-		"nonexistent/bad.jsonl": {OID: "sha256:bbb", Size: 200},
+func TestWritePointerFiles_RollsBackOnError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
 	}
+	for _, failure := range []string{"write", "mismatched content", "unsafe filename", "read"} {
+		t.Run(failure, func(t *testing.T) {
+			dir := initLedgerRepo(t)
+			originals := map[string]string{
+				"a-raw.jsonl":     "recorded conversation\n",
+				"b-pointer.jsonl": FormatPointer("sha256:old", 123),
+				"c-empty.jsonl":   "",
+				"summary.json":    `{"summary":"keep this in git"}`,
+			}
+			modes := make(map[string]os.FileMode)
+			for name, content := range originals {
+				path := filepath.Join(dir, name)
+				perm := os.FileMode(0o600)
+				if name == "b-pointer.jsonl" {
+					perm = 0o640
+				}
+				require.NoError(t, os.WriteFile(path, []byte(content), perm))
+				info, err := os.Stat(path)
+				require.NoError(t, err)
+				modes[name] = info.Mode().Perm()
+			}
+			files := map[string]FileRef{
+				"a-raw.jsonl":     NewFileRef([]byte(originals["a-raw.jsonl"])),
+				"b-pointer.jsonl": NewFileRef([]byte("new pointer target")),
+				"c-empty.jsonl":   NewFileRef(nil),
+				"d-created.jsonl": NewFileRef([]byte("already uploaded content")),
+				"summary.json":    NewGitFileRef(int64(len(originals["summary.json"]))),
+			}
+			switch failure {
+			case "write":
+				// A real filesystem write failure after the earlier names: the
+				// destination's parent is absent. No mocked writer is involved.
+				files["z-missing/raw.jsonl"] = NewFileRef([]byte("missing parent"))
+			case "mismatched content":
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "z-mismatch.jsonl"), []byte("newer content"), 0o600))
+				files["z-mismatch.jsonl"] = NewFileRef([]byte("older content"))
+			case "unsafe filename":
+				files["z/../../escape.jsonl"] = NewFileRef([]byte("unsafe name"))
+			case "read":
+				require.NoError(t, os.Mkdir(filepath.Join(dir, "z-directory.jsonl"), 0o700))
+				files["z-directory.jsonl"] = NewFileRef([]byte("not a file"))
+			}
+			git(t, dir, "add", ".")
+			git(t, dir, "commit", "--no-verify", "-m", "original session files")
 
-	paths, err := WritePointerFiles(dir, AssertUploadedManifest(files))
-	// map iteration is random, so we might get the error on either file
-	// at least one file should fail because the subdirectory doesn't exist
-	if err != nil {
-		assert.Contains(t, err.Error(), "write pointer")
-		// partial results may be returned
-		t.Logf("partial paths returned: %v", paths)
+			paths, err := WritePointerFiles(dir, AssertUploadedManifest(files))
+			require.Error(t, err)
+			assert.Empty(t, paths, "a rolled-back batch must report no written pointers")
+			for name, want := range originals {
+				path := filepath.Join(dir, name)
+				got, err := os.ReadFile(path)
+				require.NoError(t, err)
+				assert.Equal(t, want, string(got), name)
+				info, err := os.Stat(path)
+				require.NoError(t, err)
+				assert.Equal(t, modes[name], info.Mode().Perm(), name)
+			}
+			assert.NoFileExists(t, filepath.Join(dir, "d-created.jsonl"))
+			assert.Empty(t, git(t, dir, "status", "--porcelain"), "failed pointer preparation must not leave files for a later autostash or commit")
+		})
 	}
-	// if both succeeded (map iteration hit good first), that's also fine
-	// the key test is that it doesn't panic
+}
+
+func TestWritePointerFiles_PreservesSymlinkAliases(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	for _, fail := range []bool{false, true} {
+		name := "success"
+		if fail {
+			name = "rollback"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := initLedgerRepo(t)
+			rawPath := filepath.Join(dir, "raw.jsonl")
+			content := []byte("recorded conversation\n")
+			require.NoError(t, os.WriteFile(rawPath, content, 0o640))
+			originalInfo, err := os.Stat(rawPath)
+			require.NoError(t, err)
+			links := map[string]string{"a-alias.jsonl": "b-alias.jsonl", "b-alias.jsonl": "raw.jsonl"}
+			for link, target := range links {
+				if err := os.Symlink(target, filepath.Join(dir, link)); err != nil {
+					t.Skipf("symlink aliases unsupported: %v", err)
+				}
+			}
+			git(t, dir, "add", ".")
+			git(t, dir, "commit", "--no-verify", "-m", "original session aliases")
+
+			ref := NewFileRef(content)
+			files := map[string]FileRef{"a-alias.jsonl": ref, "b-alias.jsonl": ref, "raw.jsonl": ref}
+			if fail {
+				files["z-missing/raw.jsonl"] = ref // actual write failure after both aliases and their target
+			}
+			paths, err := WritePointerFiles(dir, AssertUploadedManifest(files))
+			got, readErr := os.ReadFile(rawPath)
+			require.NoError(t, readErr)
+			if fail {
+				require.Error(t, err)
+				assert.Empty(t, paths)
+				assert.Equal(t, content, got)
+				assert.Empty(t, git(t, dir, "status", "--porcelain"), "rollback must restore target bytes and symlink types")
+			} else {
+				require.NoError(t, err)
+				assert.Len(t, paths, 3)
+				assert.Equal(t, FormatPointer(ref.OID, ref.Size), string(got))
+			}
+			for link, target := range links {
+				got, err := os.Readlink(filepath.Join(dir, link))
+				require.NoError(t, err, "the write must preserve each symlink itself")
+				assert.Equal(t, target, got)
+			}
+			info, err := os.Stat(rawPath)
+			require.NoError(t, err)
+			assert.Equal(t, originalInfo.Mode().Perm(), info.Mode().Perm(), "target permissions survive success and rollback")
+		})
+	}
 }
 
 func TestParsePointer_RejectsExcessiveSize(t *testing.T) {

@@ -321,59 +321,12 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 	// immutable tree, scans that snapshot, and commits exactly it — so a blob
 	// staged after the snapshot is neither vetted-away nor swept in. See #749 and
 	// the PR #811 review (validation↔commit TOCTOU).
-	committed, err := commitLedgerSnapshot(context.Background(), ledgerPath, fmt.Sprintf("session: %s", sessionName))
+	_, err := commitLedgerSnapshot(context.Background(), ledgerPath, fmt.Sprintf("session: %s", sessionName))
 	if err != nil {
 		return fmt.Errorf("committing ledger: %w", err)
 	}
-	if !committed {
-		return nil // nothing to commit
-	}
-
-	// push with pull --rebase retry (up to 3 attempts)
-	return pushLedger(context.Background(), ledgerPath)
-}
-
-// commitPointerRewriteAndPush commits the post-upload LFS pointer rewrite and
-// pushes it. Called immediately after lfs.WritePointerFiles in the session-stop
-// pipeline to close the dirty-worktree window that would otherwise race against
-// the daemon's sync-timer pull (`git pull --rebase --autostash`).
-//
-// Stages only the explicit pointer paths returned by WritePointerFiles — does
-// not re-glob the manifest — so any concurrent unrelated change to the session
-// dir between the initial commit and this one cannot be silently folded into
-// the "lfs: pointerize <name>" commit.
-//
-// Returns nil if pointerPaths is empty (nothing to commit) or if git reports
-// "nothing to commit" (idempotent).
-func commitPointerRewriteAndPush(ledgerPath, sessionName string, pointerPaths []string) error {
-	if len(pointerPaths) == 0 {
-		return nil
-	}
-
-	waitForGCSwap(ledgerPath)
-
-	// --sparse: ledger repos use sparse-checkout (cone mode)
-	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, pointerPaths...)
-	addCmd := exec.Command("git", addArgs...)
-	if output, err := addCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git add failed: %s: %w", string(output), err)
-	}
-
-	// Same immutable-snapshot commit as commitAndPushLedger (see #749 and the
-	// PR #811 validation↔commit TOCTOU note). Distinct subject so it doesn't
-	// shadow the canonical "session: <name>" commit in git log.
-	committed, err := commitLedgerSnapshot(context.Background(), ledgerPath, fmt.Sprintf("lfs: pointerize %s", sessionName))
-	if err != nil {
-		return fmt.Errorf("committing ledger: %w", err)
-	}
-	if !committed {
-		return nil // nothing to commit
-	}
-
-	// push with pull --rebase retry. If the remote has independently modified
-	// the same path (the very race this guards against), PushWithRetry will
-	// abort the rebase cleanly (internal/gitutil/push.go:191) — no conflict
-	// markers can survive into a commit. Caller (slog.Warn) handles the error.
+	// An identical retry may have no new commit but still owe the remote the
+	// pointer commit from a failed push. Always retry publication.
 	return pushLedger(context.Background(), ledgerPath)
 }
 

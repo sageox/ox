@@ -2,6 +2,7 @@ package lfs
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -213,6 +214,80 @@ func TestReconcile_NestedSessionDirectories(t *testing.T) {
 	result, err := ReconcileUnpushedPointers(context.Background(), dir, "https://example.com", nil)
 	assert.Error(t, err) // LFS client fails
 	assert.Equal(t, 3, result.ScannedPointers, "should scan all nested session dirs")
+}
+
+// A 404 after upload must not turn a recoverable session into an empty commit
+// whose successful push lets the caller prune the only surviving source cache.
+func TestReconcile_PreservesRecoverableSessionCache(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git history and mocked LFS batch API")
+	}
+	raw := []byte("{\"type\":\"user\",\"content\":\"keep this recording\"}\n")
+	pointer := []byte(FormatPointer("sha256:"+ComputeOID(raw), int64(len(raw))))
+	for _, tc := range []struct {
+		name    string
+		cache   []byte
+		protect bool
+	}{
+		{name: "recoverable content", cache: raw, protect: true},
+		{name: "missing cache"},
+		{name: "empty cache", cache: []byte{}},
+		{name: "pointer stub cache", cache: pointer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger, _ := initLedgerWithRemote(t)
+			rawPath := filepath.Join(ledger, "sessions", "test-session", "raw.jsonl")
+			planPath := filepath.Join(ledger, "data", "plans", "test-plan", "plan.html")
+			planOID := strings.Repeat("a", 64)
+			planPointer := []byte(lfsPointerContent(planOID, 100))
+			for path, data := range map[string][]byte{rawPath: pointer, planPath: planPointer} {
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+				require.NoError(t, os.WriteFile(path, data, 0o644))
+			}
+			git(t, ledger, "add", "sessions", "data/plans")
+			git(t, ledger, "commit", "-m", "uploaded pointers awaiting push", "--no-verify")
+
+			cachePath := filepath.Join(ledger, ".sageox", "cache", "sessions", "test-session", "raw.jsonl")
+			if tc.cache != nil {
+				require.NoError(t, os.MkdirAll(filepath.Dir(cachePath), 0o755))
+				require.NoError(t, os.WriteFile(cachePath, tc.cache, 0o600))
+			}
+			headBefore := git(t, ledger, "rev-parse", "HEAD")
+			indexBefore := git(t, ledger, "write-tree")
+			statusBefore := git(t, ledger, "status", "--porcelain")
+			client := fakeLFSDownloadServer(t, map[string]int{
+				ComputeOID(raw): http.StatusNotFound,
+				planOID:         http.StatusNotFound,
+			})
+			result, err := reconcileUnpushedPointers(context.Background(), ledger, nil,
+				func() (*Client, error) { return client, nil })
+
+			assert.Equal(t, 2, result.MissingOnRemote)
+			if tc.protect {
+				require.ErrorContains(t, err, "retry session upload")
+				assert.Zero(t, result.Replaced)
+				assert.False(t, result.Squashed)
+				assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"), "history must remain intact")
+				assert.Equal(t, indexBefore, git(t, ledger, "write-tree"), "nothing may be staged")
+				assert.Equal(t, statusBefore, git(t, ledger, "status", "--porcelain"))
+				for path, expected := range map[string][]byte{rawPath: pointer, planPath: planPointer, cachePath: raw} {
+					content, readErr := os.ReadFile(path)
+					require.NoError(t, readErr)
+					assert.Equal(t, expected, content, "abort before modifying any pointer or cache")
+				}
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, 2, result.Replaced, "unrecoverable missing objects must still be reconciled")
+				assert.True(t, result.Squashed)
+				assert.Equal(t, 1, unpushedCount(t, ledger))
+				for _, path := range []string{rawPath, planPath} {
+					content, readErr := os.ReadFile(path)
+					require.NoError(t, readErr)
+					assert.Empty(t, content)
+				}
+			}
+		})
+	}
 }
 
 // --- Guarantee 4: idempotent ---

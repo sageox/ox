@@ -698,11 +698,8 @@ func TestRetrySessionUpload_ZeroEntryGuard(t *testing.T) {
 // credentials with empty projectRoot), raw.jsonl copied to the ledger session dir is
 // NOT replaced with an LFS pointer stub.
 //
-// The bug was: WriteSessionMeta (with fileRefs) was called before git push, replacing
-// content files with pointer stubs. If push then failed, the content was lost.
-// The fix: WriteSessionMetaOnly is used before push; WritePointerFiles runs only after
-// a successful push. When LFS fails, retrySessionUpload returns an error before any
-// write step that would corrupt content.
+// Pointer preparation requires a successful LFS upload. If upload fails, the
+// ledger copy and source cache must both retain their real content for retry.
 func TestRetrySessionUpload_ContentFilesNotPointers_OnLFSFailure(t *testing.T) {
 	tmpDir := t.TempDir()
 	cacheDir := filepath.Join(tmpDir, "cache")
@@ -732,12 +729,7 @@ func TestRetrySessionUpload_ContentFilesNotPointers_OnLFSFailure(t *testing.T) {
 	err := retrySessionUpload("", ledgerDir, orphan)
 	require.Error(t, err, "expected upload error with no project or git repo")
 
-	// CRITICAL (bug #291 regression): raw.jsonl copied to the ledger session dir must
-	// NOT be replaced with an LFS pointer stub at any point before a successful push.
-	// If retrySessionUpload failed after copying raw.jsonl but before the push, the
-	// content file must remain as real bytes — not a tiny pointer.
-	// Before the fix, WriteSessionMeta (with fileRefs) was called before commitAndPush,
-	// so a push failure would leave only pointer stubs with no remote blob backing.
+	// Without a successful upload, no ledger content may become a pointer.
 	// check ALL content files in the ledger session dir survive as real content
 	ledgerSessionDir := filepath.Join(ledgerDir, "sessions", sessionName)
 	contentFiles := []string{ledgerFileRaw}

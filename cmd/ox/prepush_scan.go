@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/perf"
 	"github.com/sageox/ox/internal/session"
 )
@@ -307,7 +308,26 @@ func prePushSecretsAllowed() bool {
 // publishing whatever the chokepoint missed (the same content already
 // hit the chokepoint at write time).
 func runPrePushSecretGate(ctx context.Context, ledgerPath string) error {
-	result, err := scanPrePushForSecrets(ctx, ledgerPath)
+	return runSessionSecretGate(ctx, ledgerPath, func() (*PrePushScanResult, error) {
+		return scanPrePushForSecrets(ctx, ledgerPath)
+	}, true)
+}
+
+// prepareSessionUpload runs the same redaction and quarantine policy on real
+// content before LFS computes its OIDs. This pass removes quarantined files
+// from the index but must not amend an unrelated holding commit.
+func prepareSessionUpload(ctx context.Context, ledgerPath, sessionName string) error {
+	paths := make([]string, 0, len(lfs.ContentFiles))
+	for _, name := range lfs.ContentFiles {
+		paths = append(paths, filepath.ToSlash(filepath.Join("sessions", sessionName, name)))
+	}
+	return runSessionSecretGate(ctx, ledgerPath, func() (*PrePushScanResult, error) {
+		return scanPaths(ledgerPath, paths)
+	}, false)
+}
+
+func runSessionSecretGate(ctx context.Context, ledgerPath string, scan func() (*PrePushScanResult, error), amendCommit bool) error {
+	result, err := scan()
 	if err != nil {
 		slog.Warn("pre-push secret gate: scan failed, allowing push", "error", err)
 		return nil
@@ -328,7 +348,7 @@ func runPrePushSecretGate(ctx context.Context, ledgerPath string) error {
 
 	// Try the canonical chokepoint first; it can clear anything the
 	// scanner found (they share a detector catalog).
-	auto, redactErr := autoRedactSessionFindings(ctx, ledgerPath, result)
+	auto, redactErr := autoRedactSessionFindings(ctx, ledgerPath, result, amendCommit)
 	if redactErr != nil {
 		slog.Warn("pre-push secret gate: auto-redact failed; will quarantine remainder",
 			"error", redactErr)
@@ -336,7 +356,7 @@ func runPrePushSecretGate(ctx context.Context, ledgerPath string) error {
 
 	// Re-scan post-redact. Anything left is either non-JSONL or hit a
 	// per-file error in the redact pass.
-	rescan, rescanErr := scanPrePushForSecrets(ctx, ledgerPath)
+	rescan, rescanErr := scan()
 	if rescanErr != nil {
 		slog.Warn("pre-push secret gate: rescan after auto-redact failed; allowing push",
 			"error", rescanErr)
@@ -352,8 +372,11 @@ func runPrePushSecretGate(ctx context.Context, ledgerPath string) error {
 	}
 
 	// Quarantine the remainder so the rest of the push can proceed.
-	q, qErr := quarantineUnredactableFindings(ledgerPath, rescan.Findings)
+	q, qErr := quarantineUnredactableFindings(ledgerPath, rescan.Findings, amendCommit)
 	if qErr != nil {
+		if !amendCommit {
+			return fmt.Errorf("prepare session quarantine: %w", qErr)
+		}
 		slog.Warn("pre-push secret gate: quarantine partial; push will still proceed",
 			"error", qErr)
 	}

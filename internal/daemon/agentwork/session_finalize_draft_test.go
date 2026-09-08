@@ -347,7 +347,8 @@ func TestStageSessionInLedger_PurgesDraftAndPreservesSessionID(t *testing.T) {
 
 	h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
 	payload := &SessionFinalizePayload{SessionDir: cacheDir, LedgerPath: ledgerPath}
-	require.NoError(t, h.stageSessionInLedger(payload))
+	_, stageErr := h.stageSessionInLedger(payload)
+	require.NoError(t, stageErr)
 
 	assert.Equal(t, destDir, payload.SessionDir, "payload must point at the staged location")
 	assert.Equal(t, draftTestSessionID, payload.PreservedSessionID,
@@ -403,7 +404,8 @@ func TestStageSessionInLedger_LeavesFinalizedSessionAlone(t *testing.T) {
 
 	h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
 	payload := &SessionFinalizePayload{SessionDir: cacheDir, LedgerPath: ledgerPath}
-	require.NoError(t, h.stageSessionInLedger(payload))
+	_, stageErr := h.stageSessionInLedger(payload)
+	require.NoError(t, stageErr)
 
 	body, err := os.ReadFile(filepath.Join(destDir, "summary.md"))
 	require.NoError(t, err)

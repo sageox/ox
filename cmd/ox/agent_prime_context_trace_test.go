@@ -106,8 +106,7 @@ func TestEmitProvidedContextTrace_NilTeamCtx(t *testing.T) {
 // the agent happened to be run from — inside the user's repo.
 func TestEmitProvidedContextTrace_EmptySessionDir(t *testing.T) {
 	cwd := t.TempDir()
-	restore := changeToDir(t, cwd)
-	defer restore()
+	t.Chdir(cwd)
 
 	// MemoryContent must be non-empty: it is what makes the writer append an
 	// event at all. With an empty struct nothing is ever written and the test

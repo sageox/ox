@@ -1231,8 +1231,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		return nil
 	}
 
-	// write meta.json and attempt LFS upload before git commit; returns file refs
-	// so we can write pointer files only after a successful push.
+	// write meta.json and attempt LFS upload before committing the pointer files.
 	// Non-nil error means a fatal precondition failed (e.g., corrupt
 	// existing meta.json that would force a SessionID rotation if we
 	// continued); abort the entire finalize flow rather than stage/commit.
@@ -1242,12 +1241,10 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		return nil
 	}
 
-	// save original cache path before stageSessionInLedger may update payload.SessionDir
-	origCacheDir := payload.SessionDir
-
 	// stage in ledger/sessions/ if the session is still in the cache dir
 	// (.sageox/cache/ is gitignored in the ledger, so we must copy first)
-	if err := h.stageSessionInLedger(payload); err != nil {
+	origCacheDir, err := h.stageSessionInLedger(payload)
+	if err != nil {
 		h.logger.Warn("failed to stage session in ledger, skipping commit", "session", sessionName, "err", err)
 		return nil
 	}
@@ -1258,26 +1255,11 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		h.logger.Warn("gitignore setup failed", "err", err)
 	}
 
-	pushed := h.gitCommitAndPush(payload)
-
-	// push succeeded — now safe to replace content files with LFS pointer stubs
-	// and commit the pointer rewrite so the remote ledger has pointers (not blobs)
-	if pushed && len(fileRefs) > 0 {
-		// AssertUploaded: fileRefs' blobs were uploaded to LFS by UploadSessionFiles
-		// and the pointer rewrite happens only after a successful push.
-		written, err := lfs.WritePointerFiles(payload.SessionDir, lfs.AssertUploadedManifest(fileRefs))
-		if err != nil {
-			h.logger.Warn("LFS pointer file write failed after push", "session", sessionName, "err", err)
-		} else if len(written) > 0 {
-			if err := h.gitCommitPointerRewrite(payload, written); err != nil {
-				h.logger.Warn("pointer rewrite commit failed (non-fatal)", "session", sessionName, "err", err)
-			}
-		}
-	}
+	pushed := h.gitCommitAndPush(payload, fileRefs)
 
 	// prune cache dir only after a successful push — on push failure the cache
 	// is the only surviving copy of the session content
-	if pushed && origCacheDir != payload.SessionDir {
+	if pushed && origCacheDir != "" {
 		if err := os.RemoveAll(origCacheDir); err != nil {
 			h.logger.Debug("prune cache after finalize", "dir", origCacheDir, "err", err)
 		}
@@ -1293,7 +1275,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 
 // writeMetaAndUploadLFS writes meta.json and attempts LFS upload for a finalized session.
 // LFS upload is best-effort: on failure, content files remain as regular blobs.
-// Returns the LFS file refs so the caller can write pointer files after a successful push.
+// Returns the LFS file refs so the caller can commit pointers in the first push.
 //
 // The error return is reserved for fatal conditions where finalization MUST
 // abort before staging/committing — currently only when PreservedSessionID
@@ -1556,16 +1538,25 @@ func isInLedgerCacheDir(sessionDir, ledgerPath string) bool {
 	return strings.HasPrefix(filepath.Clean(sessionDir)+string(filepath.Separator), filepath.Clean(cacheDir)+string(filepath.Separator))
 }
 
-// stageSessionInLedger copies session files from the ledger cache dir to the
-// git-tracked ledger/sessions/<name>/ directory and updates payload.SessionDir.
-// If the session is already in ledger/sessions/, this is a no-op.
-func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePayload) error {
-	if !isInLedgerCacheDir(payload.SessionDir, payload.LedgerPath) {
-		return nil // already in ledger/sessions/ or another tracked path
+// stageSessionInLedger prepares a ledger copy and returns the cache to retain
+// until push succeeds. Sessions already in the ledger are backed up to the same
+// cache before their content can be replaced with pointers.
+func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePayload) (string, error) {
+	fromCache := isInLedgerCacheDir(payload.SessionDir, payload.LedgerPath)
+	if !fromCache && !isGitTrackedLedgerSession(payload.SessionDir, payload.LedgerPath) {
+		return "", nil
 	}
 
 	sessionName := filepath.Base(payload.SessionDir)
 	destDir := filepath.Join(payload.LedgerPath, "sessions", sessionName)
+	cacheDir := payload.SessionDir
+	if !fromCache {
+		store, err := session.NewStore(payload.LedgerPath)
+		if err != nil {
+			return "", err
+		}
+		return store.PreserveSessionCache(payload.SessionDir, payload.SessionDir)
+	}
 
 	// Supersede any draft placeholder wholesale before copying (ADR-029).
 	// This loop copies every file from the cache dir over the destination, but
@@ -1597,12 +1588,12 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 	}
 
 	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return fmt.Errorf("create ledger session dir: %w", err)
+		return "", fmt.Errorf("create session copy dir: %w", err)
 	}
 
 	entries, err := os.ReadDir(payload.SessionDir)
 	if err != nil {
-		return fmt.Errorf("read cache session dir: %w", err)
+		return "", fmt.Errorf("read session dir: %w", err)
 	}
 
 	for _, entry := range entries {
@@ -1612,20 +1603,19 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 		src := filepath.Join(payload.SessionDir, entry.Name())
 		dst := filepath.Join(destDir, entry.Name())
 		if err := copySessionFile(src, dst); err != nil {
-			return fmt.Errorf("copy %s: %w", entry.Name(), err)
+			return "", fmt.Errorf("copy %s: %w", entry.Name(), err)
 		}
 	}
 
 	// update payload to point at the staged location
 	payload.SessionDir = destDir
-	return nil
+	return cacheDir, nil
 }
 
 // processUploadOnly handles sessions that are fully finalized in the cache
 // but were never committed/pushed to the ledger. Skips LLM summarization.
 func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePayload) error {
 	sessionName := filepath.Base(payload.SessionDir)
-	origCacheDir := payload.SessionDir
 
 	// Before staging: if any content files are already LFS pointer stubs, verify
 	// their backing blobs exist in the remote LFS store. Committing pointer stubs
@@ -1643,7 +1633,8 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 	}
 
 	// copy all artifacts from cache to ledger/sessions/<name>/
-	if err := h.stageSessionInLedger(payload); err != nil {
+	origCacheDir, err := h.stageSessionInLedger(payload)
+	if err != nil {
 		h.logger.Warn("upload-only: failed to stage session", "session", sessionName, "err", err)
 		return nil
 	}
@@ -1716,25 +1707,14 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 		h.logger.Warn("upload-only: gitignore setup failed", "err", err)
 	}
 
-	pushed := h.gitCommitAndPush(payload)
+	pushed := h.gitCommitAndPush(payload, fileRefs)
 
-	// only write pointer stubs and prune cache after a successful push —
-	// on failure the cache is the only surviving copy of the session content
+	// Keep the source cache until the pointer commit reaches the remote.
 	if pushed {
-		if len(fileRefs) > 0 {
-			// AssertUploaded: fileRefs' blobs were uploaded by UploadSessionFiles;
-			// pointer rewrite is gated on the successful push above.
-			written, err := lfs.WritePointerFiles(payload.SessionDir, lfs.AssertUploadedManifest(fileRefs))
-			if err != nil {
-				h.logger.Warn("upload-only: LFS pointer write failed after push", "session", sessionName, "err", err)
-			} else if len(written) > 0 {
-				if err := h.gitCommitPointerRewrite(payload, written); err != nil {
-					h.logger.Warn("upload-only: pointer rewrite commit failed (non-fatal)", "session", sessionName, "err", err)
-				}
+		if origCacheDir != "" {
+			if err := os.RemoveAll(origCacheDir); err != nil {
+				h.logger.Debug("upload-only: prune cache", "dir", origCacheDir, "err", err)
 			}
-		}
-		if err := os.RemoveAll(origCacheDir); err != nil {
-			h.logger.Debug("upload-only: prune cache", "dir", origCacheDir, "err", err)
 		}
 		h.logger.Info("session uploaded via anti-entropy (upload-only)", "session", sessionName)
 		return nil
@@ -1749,9 +1729,9 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 
 // gitCommitAndPush stages, commits, and pushes the finalized session.
 // Returns true if the push succeeded, false otherwise.
-// Push failures are non-fatal — callers should gate pointer-file writes and
-// cache pruning on the return value to avoid data loss.
-func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayload) bool {
+// Uploaded files become pointers before the first commit. Callers retain the
+// source cache until this returns true.
+func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayload, fileRefs map[string]lfs.FileRef) bool {
 	if h.skipGit {
 		return true // treat skip as success so tests can prune cache
 	}
@@ -1764,6 +1744,15 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 
 	ledgerPath := payload.LedgerPath
 	sessionName := filepath.Base(payload.SessionDir)
+
+	// A raw-only first push can trigger GitLab GC before a second pointer push,
+	// unlinking the newly uploaded objects from the project. Publish pointers
+	// immediately, under the same lock as staging and committing.
+	// AssertUploaded: both callers obtained fileRefs from UploadSessionFiles.
+	if _, err := lfs.WritePointerFiles(payload.SessionDir, lfs.AssertUploadedManifest(fileRefs)); err != nil {
+		h.logger.Warn("LFS pointer file write failed before commit", "session", sessionName, "err", err)
+		return false
+	}
 
 	// relative path from ledger root for git add
 	relDir, err := filepath.Rel(ledgerPath, payload.SessionDir)
@@ -1838,59 +1827,6 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		return false
 	}
 	return true
-}
-
-// gitCommitPointerRewrite commits and pushes the LFS pointer file rewrite.
-// Without this second commit, the remote ledger retains raw blobs alongside
-// meta.json claiming storage=lfs — the web frontend then fails to resolve
-// content via the LFS Batch API. This mirrors the CLI's
-// commitPointerRewriteAndPush (cmd/ox/session_upload.go).
-func (h *SessionFinalizeHandler) gitCommitPointerRewrite(payload *SessionFinalizePayload, pointerPaths []string) error {
-	if h.skipGit || len(pointerPaths) == 0 {
-		return nil
-	}
-
-	if h.ledgerMu != nil {
-		h.ledgerMu.Lock()
-		defer h.ledgerMu.Unlock()
-	}
-
-	ledgerPath := payload.LedgerPath
-	sessionName := filepath.Base(payload.SessionDir)
-
-	// stage only the pointer files
-	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, pointerPaths...)
-	cmd := exec.Command("git", addArgs...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git add pointers: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-
-	msg := fmt.Sprintf("lfs: pointerize %s", sessionName)
-	if err := h.runGit(ledgerPath, "commit", "-m", msg); err != nil {
-		// nothing to commit is fine — files may already be pointers
-		if strings.Contains(err.Error(), "nothing to commit") {
-			return nil
-		}
-		return err
-	}
-
-	ep := endpoint.GetForProject(h.projectRoot)
-	return gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
-		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
-		Logger:              h.logger,
-		ReconcileLFS: func(repoPath string) (bool, error) {
-			if ep == "" {
-				return false, nil
-			}
-			result, reconcileErr := lfs.ReconcileUnpushedPointers(
-				context.Background(), repoPath, ep, h.logger)
-			if reconcileErr != nil {
-				return false, reconcileErr
-			}
-			return result.Replaced > 0, nil
-		},
-	})
 }
 
 // synthesizeMeta builds a minimal meta.json from the raw.jsonl header for a
@@ -1993,24 +1929,15 @@ func isNothingToCommit(err error) bool {
 	return strings.Contains(msg, "nothing to commit") || strings.Contains(msg, "no changes added to commit")
 }
 
-// copySessionFile copies src to dst, creating dst if it doesn't exist.
+// copySessionFile replaces dst atomically so an interrupted backup cannot
+// leave a partial cache file that detection would prefer over the source.
+// Session content stays owner-only, including when an existing copy is replaced.
 func copySessionFile(src, dst string) error {
-	in, err := os.Open(src)
+	content, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	if _, err := io.Copy(out, in); err != nil {
-		return err
-	}
-	return out.Sync()
+	return fileutil.AtomicWriteBytes(dst, content, 0o600)
 }
 
 // extractPayload type-asserts the work item payload.

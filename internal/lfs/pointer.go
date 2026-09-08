@@ -1,12 +1,16 @@
 package lfs
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/sageox/ox/internal/fileutil"
 )
 
 // pointerVersion is the Git LFS pointer spec version string.
@@ -101,14 +105,21 @@ func NestedPointer(outer FileRef, content []byte) (FileRef, bool) {
 // pointer minted for content that was never uploaded — a compile error.
 //
 // Refuses to replace real content that does not match the ref OID — see
-// guardPointerOverwrite.
+// guardPointerOverwrite. Replacement is atomic and preserves an existing
+// file's permissions; new pointer files are owner-only.
 func WritePointerFile(path string, uploaded UploadedRef) error {
 	ref := uploaded.ref
 	if err := guardPointerOverwrite(path, ref); err != nil {
 		return err
 	}
+	perm := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	content := FormatPointer(ref.OID, ref.Size)
-	return os.WriteFile(path, []byte(content), 0644)
+	return fileutil.AtomicWriteBytes(path, []byte(content), perm)
 }
 
 // guardPointerOverwrite refuses to replace real on-disk content with a pointer
@@ -127,7 +138,10 @@ func WritePointerFile(path string, uploaded UploadedRef) error {
 // bytes. Refusing here converts unrecoverable data loss into a loud error.
 func guardPointerOverwrite(path string, ref FileRef) error {
 	existing, err := os.ReadFile(path)
-	if err != nil || len(existing) == 0 {
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read pointer destination: %w", err)
+	}
+	if len(existing) == 0 {
 		return nil // nothing on disk to lose
 	}
 	if _, _, perr := ParsePointer(string(existing)); perr == nil {
@@ -153,13 +167,63 @@ func guardPointerOverwrite(path string, ref FileRef) error {
 // are skipped — writing a pointer file there would clobber the real content
 // with empty bytes. Legacy entries (no Storage field) are treated as LFS
 // per FileRef.EffectiveStorage().
-func WritePointerFiles(dir string, files map[string]UploadedRef) ([]string, error) {
+// On failure, restore the batch's original bytes, modes, and absent files so
+// earlier rewrites cannot be swept into an unrelated commit or autostash.
+// If restoration itself fails, return those paths and include the errors.
+func WritePointerFiles(dir string, files map[string]UploadedRef) (paths []string, err error) {
 	if len(files) == 0 {
 		return nil, nil
 	}
 
-	var paths []string
-	for name, uploaded := range files {
+	type originalFile struct {
+		path    string
+		content []byte
+		pointer []byte
+		mode    os.FileMode
+		exists  bool
+	}
+	var originals []originalFile
+	defer func() {
+		if err == nil {
+			return
+		}
+		paths = nil
+		for i := len(originals) - 1; i >= 0; i-- {
+			original := originals[i]
+			current, readErr := os.ReadFile(original.path)
+			if os.IsNotExist(readErr) && !original.exists {
+				continue // already restored to its original absence
+			}
+			var restoreErr error
+			switch {
+			case readErr != nil:
+				restoreErr = readErr
+			case !bytes.Equal(current, original.pointer):
+				// Never overwrite a later writer's content.
+				restoreErr = fmt.Errorf("destination changed during pointer preparation")
+			case original.exists:
+				restoreErr = fileutil.AtomicWriteBytes(original.path, original.content, original.mode)
+			default:
+				restoreErr = os.Remove(original.path)
+				if os.IsNotExist(restoreErr) {
+					restoreErr = nil
+				}
+			}
+			if restoreErr != nil {
+				paths = append(paths, original.path)
+				err = errors.Join(err, fmt.Errorf("restore %s: %w", original.path, restoreErr))
+			}
+		}
+		sort.Strings(paths)
+	}()
+
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		uploaded := files[name]
 		if !uploaded.ref.IsLFS() {
 			continue // Storage=git: real content stays in place
 		}
@@ -167,9 +231,30 @@ func WritePointerFiles(dir string, files map[string]UploadedRef) ([]string, erro
 			return paths, fmt.Errorf("unsafe pointer filename: %w", err)
 		}
 		p := filepath.Join(dir, name)
+		original := originalFile{path: p, pointer: []byte(FormatPointer(uploaded.ref.OID, uploaded.ref.Size))}
+		info, statErr := os.Lstat(p)
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return paths, fmt.Errorf("inspect pointer destination %s: %w", name, statErr)
+		}
+		if info != nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				info, statErr = os.Stat(p)
+				if statErr != nil {
+					return paths, fmt.Errorf("inspect pointer target %s: %w", name, statErr)
+				}
+			}
+			content, readErr := os.ReadFile(p)
+			if readErr != nil {
+				return paths, fmt.Errorf("read pointer destination %s: %w", name, readErr)
+			}
+			original.content, original.mode, original.exists = content, info.Mode().Perm(), true
+		}
 		if err := WritePointerFile(p, uploaded); err != nil {
 			return paths, fmt.Errorf("write pointer %s: %w", name, err)
 		}
+		// A failed atomic write leaves this destination untouched. Only the
+		// replacements that succeeded belong to this batch's rollback.
+		originals = append(originals, original)
 		paths = append(paths, p)
 	}
 

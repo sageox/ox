@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/version"
@@ -513,6 +514,7 @@ func autoStartDaemon() error {
 
 	// start daemon process in background
 	cmd := exec.Command(exe, "daemon", "start")
+	proc.Detach(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start daemon: %w", err)
 	}

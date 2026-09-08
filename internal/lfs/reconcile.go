@@ -41,7 +41,8 @@ type ReconcileResult struct {
 // committed (daemon murmur, user manual commit, unscoped git add, etc.).
 //
 // Safe to call on clean repos — returns immediately if no pointer files exist
-// or all pointers have valid backing objects.
+// or all pointers have valid backing objects. A recoverable session cache aborts
+// reconciliation before any changes so upload can retry without losing content.
 //
 // The squash is necessary because GitLab's pre-receive hook scans ALL commits
 // in the push pack, not just HEAD. Replacing pointers in the working tree and
@@ -145,7 +146,7 @@ func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *s
 			if obj.Error == nil {
 				continue
 			}
-			// Only 404 proves the blob is genuinely absent. Any other status —
+			// Only 404 permits missing-object recovery. Any other status —
 			// 401 (token expired), 429 (rate limited), 5xx (server trouble) —
 			// says nothing about whether the object exists, and treating it as
 			// "gone" blanks a live recording to zero bytes, an operation with no
@@ -168,6 +169,27 @@ func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *s
 	if len(missing) == 0 {
 		logger.Debug("lfs reconcile: all pointer OIDs present in remote", "count", len(pointers))
 		return result, nil
+	}
+
+	// A successful push lets session upload prune its source cache. Refuse to
+	// turn recoverable content into empty stubs and report that as publication.
+	// Check every candidate before changing any pointers or git history.
+	for idx := range missing {
+		p := pointers[idx]
+		if !strings.HasPrefix(p.relPath, "sessions"+string(filepath.Separator)) {
+			continue
+		}
+		cachePath := filepath.Join(ledgerPath, ".sageox", "cache", p.relPath)
+		info, err := os.Stat(cachePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return result, fmt.Errorf("inspect session recovery cache for %s: %w", p.relPath, err)
+		}
+		if info.Mode().IsRegular() && info.Size() > 0 && !IsPointerFile(cachePath) {
+			return result, fmt.Errorf("refusing to replace %s: local session content is available; retry session upload", p.relPath)
+		}
 	}
 
 	logger.Info("lfs reconcile: replacing orphaned pointers with empty stubs",

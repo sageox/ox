@@ -1335,12 +1335,8 @@ func finalizeModeForSessionStop(userPrefersAsync bool) session.FinalizeDispatchM
 	return session.ChooseFinalizeMode(!daemon.IsDaemonDisabled(), userPrefersAsync)
 }
 
-// uploadSessionToLedger copies content files from cache to ledger, uploads to LFS,
-// writes meta.json, and commits+pushes. This is phase 2 of the two-phase design:
-
-// content files are uploaded to LFS blob storage first, then meta.json (containing
-// LFS OIDs) is committed to git. Content files themselves are .gitignore'd in the
-// ledger repo -- only meta.json is tracked by git. Other machines fetch content via LFS.
+// uploadSessionToLedger uploads cached blobs to LFS, then commits and pushes
+// their pointers together with session metadata.
 // If this fails, the session data is safe in the local cache and doctor can retry.
 // ledgerPath and sessionName are pre-computed by the caller.
 func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string) error {
@@ -1419,6 +1415,10 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		return fmt.Errorf("write meta.json: %w", err)
 	}
 
+	if err := prepareSessionUpload(context.Background(), ledgerPath, sessionName); err != nil {
+		return fmt.Errorf("prepare session upload: %w", err)
+	}
+
 	// upload content files to LFS blob storage
 	fileRefs, err := effects.uploadLFS(projectRoot, sessionDir)
 	if err != nil {
@@ -1428,11 +1428,16 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		return fmt.Errorf("LFS upload: %w", err)
 	}
 
-	// update meta.json with LFS file references; use WriteSessionMetaOnly so
-	// content files remain intact on disk until after the push — this prevents
-	// data loss if the push fails (pointer stubs + no remote = unrecoverable)
-	meta.Files = fileRefs
-	if err := lfs.WriteSessionMetaOnly(sessionDir, meta); err != nil {
+	// Persist the uploaded refs before preparing the ledger copy for git.
+	// The source cache retains the real content through any push failure.
+	if err := lfs.MutateSessionMeta(context.Background(), sessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		if current == nil {
+			return nil, fmt.Errorf("session metadata disappeared during upload")
+		}
+		current.Files = fileRefs
+		meta = current // retain the redaction audit written before upload
+		return current, nil
+	}); err != nil {
 		return fmt.Errorf("update meta.json with LFS refs: %w", err)
 	}
 
@@ -1441,45 +1446,44 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		return fmt.Errorf("ensure .gitignore: %w", err)
 	}
 
-	// commit meta.json + .gitignore and push
+	sourceCacheDir := filepath.Dir(result.RawPath)
+	if err := writeSessionUploadRetryPending(sourceCacheDir); err != nil {
+		return fmt.Errorf("record pending session upload: %w", err)
+	}
+	store, err := session.NewStore(ledgerPath)
+	if err != nil {
+		return fmt.Errorf("open session recovery store: %w", err)
+	}
+	recoveryCacheDir, err := store.PreserveSessionCache(sessionDir, sourceCacheDir)
+	if err != nil {
+		return err
+	}
+
+	// Publish pointers in the first commit. A raw-only intermediate push can
+	// trigger GitLab GC before the pointers arrive, unlinking uploaded objects.
+	// AssertUploaded: uploadLFS succeeded above; the source cache is untouched.
+	if _, err := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(fileRefs)); err != nil {
+		return fmt.Errorf("write LFS pointer files: %w", err)
+	}
+
+	// commit the pointers, meta.json, and .gitignore together and push
 	if err := effects.commitInitial(ledgerPath, sessionName); err != nil {
 		// set marker - session saved locally but not synced to remote
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("commit and push: %w", err)
 	}
+	if recoveryCacheDir != "" {
+		if err := os.RemoveAll(recoveryCacheDir); err != nil {
+			slog.Debug("prune session recovery copy", "dir", recoveryCacheDir, "error", err)
+		}
+	}
+	_ = os.Remove(filepath.Join(sourceCacheDir, sessionUploadRetryPendingFile))
 
 	// reverse-link reconciliation: the session now has a canonical ses_ id and
 	// is committed, so backfill it + outcome=stopped onto every plan this
 	// session produced (slugs in hand — no directory scan), then commit those
 	// plan dirs. Best-effort; any miss falls to `ox doctor`.
 	effects.reconcilePlans(projectRoot, state.ProducedPlans, sessionName, meta.EffectiveSessionID())
-
-	// push succeeded — now safe to replace content files with LFS pointer stubs
-	if len(meta.Files) > 0 {
-		// WritePointerFiles can return both a partial `written` slice AND a
-		// non-nil error (internal/lfs/pointer.go:100 returns paths-so-far on
-		// the first failure). Always commit whatever pointers DID land — any
-		// rewritten pointer left uncommitted re-opens the autostash race for
-		// that file, even if other files in the same call failed.
-		// AssertUploaded: meta.Files is the persisted manifest whose blobs were
-		// uploaded before the push that just succeeded above.
-		written, writeErr := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(meta.Files))
-		if len(written) > 0 {
-			// Commit the pointer rewrite so it doesn't sit dirty in the worktree.
-			// A dirty worktree here races against the daemon's sync-timer pull:
-			// `git pull --rebase --autostash` would stash the pointer, and if a
-			// peer pushed an incompatible change to the same file in the meantime,
-			// the stash-pop yields conflict markers that ox doctor's auto-commit
-			// will eventually freeze into a permanent commit on main.
-			// (Tactical fix; pointer-first commit ordering is a separate discussion.)
-			if err := effects.commitPointerRewrite(ledgerPath, sessionName, written); err != nil {
-				slog.Warn("LFS pointer rewrite commit failed", "error", err, "session", sessionName)
-			}
-		}
-		if writeErr != nil {
-			slog.Warn("LFS pointer file write failed after push", "error", writeErr, "session", sessionName)
-		}
-	}
 
 	// M5: the push succeeded — the session URL is now viewable. Transition
 	// LinkageStatus to uploaded and best-effort notify the SageOx server so

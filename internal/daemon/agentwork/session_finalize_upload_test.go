@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 )
@@ -173,7 +174,7 @@ func TestStageSessionInLedger_CopiesFiles(t *testing.T) {
 		LedgerPath: ledgerPath,
 	}
 
-	if err := handler.stageSessionInLedger(payload); err != nil {
+	if _, err := handler.stageSessionInLedger(payload); err != nil {
 		t.Fatalf("stageSessionInLedger failed: %v", err)
 	}
 
@@ -195,28 +196,60 @@ func TestStageSessionInLedger_CopiesFiles(t *testing.T) {
 	}
 }
 
-// TestStageSessionInLedger_NoopIfAlreadyInLedger verifies that stageSessionInLedger
-// is a no-op when the session is already in ledger/sessions/.
-func TestStageSessionInLedger_NoopIfAlreadyInLedger(t *testing.T) {
-	handler := NewSessionFinalizeHandler(slog.Default())
-	ledgerPath := t.TempDir()
+// A session finalized in place needs a cache copy before pointer preparation.
+func TestStageSessionInLedger_BacksUpTrackedSession(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing bool
+	}{
+		{name: "new backup"},
+		{name: "existing private backup", existing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := NewSessionFinalizeHandler(slog.Default())
+			ledgerPath := t.TempDir()
+			sessionName := "2026-01-10T14-30-testuser-OxNOOP"
+			sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+			if err := os.MkdirAll(sessionDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(testRawContent), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.existing {
+				cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
+				if err := os.MkdirAll(cacheDir, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte("previous recording"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 
-	sessionName := "2026-01-10T14-30-testuser-OxNOOP"
-	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
-	if err := os.MkdirAll(sessionDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	payload := &SessionFinalizePayload{
-		SessionDir: sessionDir,
-		LedgerPath: ledgerPath,
-	}
-
-	if err := handler.stageSessionInLedger(payload); err != nil {
-		t.Fatalf("stageSessionInLedger failed: %v", err)
-	}
-	if payload.SessionDir != sessionDir {
-		t.Errorf("payload.SessionDir should not change: got %q", payload.SessionDir)
+			payload := &SessionFinalizePayload{SessionDir: sessionDir, LedgerPath: ledgerPath}
+			cacheDir, err := handler.stageSessionInLedger(payload)
+			if err != nil {
+				t.Fatalf("stageSessionInLedger failed: %v", err)
+			}
+			if payload.SessionDir != sessionDir {
+				t.Errorf("payload.SessionDir should not change: got %q", payload.SessionDir)
+			}
+			backupPath := filepath.Join(cacheDir, "raw.jsonl")
+			backup, err := os.ReadFile(backupPath)
+			if err != nil || string(backup) != testRawContent {
+				t.Fatalf("tracked session must retain its raw content in cache: %v", err)
+			}
+			// Windows file modes do not express POSIX owner/group permissions.
+			if runtime.GOOS != "windows" {
+				info, err := os.Stat(backupPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mode := info.Mode().Perm(); mode != 0600 {
+					t.Errorf("recording backup must remain owner-only: got %04o, want 0600", mode)
+				}
+			}
+		})
 	}
 }
 

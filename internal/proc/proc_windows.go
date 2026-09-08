@@ -4,9 +4,13 @@ package proc
 
 import (
 	"os"
+	"os/exec"
 
 	"golang.org/x/sys/windows"
 )
+
+// Detach is a no-op on Windows, which has no Unix sessions or process groups.
+func Detach(cmd *exec.Cmd) {}
 
 // stillActive is the exit code GetExitCodeProcess reports for a process that has
 // not exited (STILL_ACTIVE in the Win32 headers, 259). x/sys/windows exposes the
