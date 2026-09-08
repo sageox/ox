@@ -1,15 +1,211 @@
 package lfs
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Upgrading must repair legacy error summaries without losing session identity,
+// content references, extension fields, diagnostics, or customer-authored text.
+func TestRecoverEmptyTitleMeta_PreservesLegacyData(t *testing.T) {
+	const diagnostic = "Summary generation failed: legacy timeout"
+	for _, tc := range []struct {
+		name       string
+		title      string
+		summary    string
+		status     string
+		diagnostic string
+		recovery   string
+		draft      bool
+		dryRun     bool
+		skip       bool
+	}{
+		{name: "recover legacy error", summary: diagnostic, recovery: "Recovered title"},
+		{name: "bound legacy error retries", summary: diagnostic},
+		{name: "preserve both diagnostics", summary: diagnostic, diagnostic: "Earlier validation failure"},
+		{name: "preserve valid summary", summary: "Customer-written summary", recovery: "Recovered title"},
+		{name: "healthy title", title: "Customer-written title", summary: "Customer-written summary", recovery: "Stale title", skip: true},
+		{name: "terminal metadata", summary: diagnostic, status: "unrecoverable", skip: true},
+		{name: "live draft", draft: true, skip: true},
+		{name: "dry run", summary: diagnostic, recovery: "Recovered title", dryRun: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			original := map[string]any{
+				"version": "1.0", "session_name": "legacy-session", "session_id": "ses_preserve",
+				"created_at": "2026-04-01T00:00:00Z", "title": tc.title, "summary": tc.summary,
+				"summary_status": tc.status, "validation_error": tc.diagnostic, "draft": tc.draft,
+				"files":           map[string]any{"raw.jsonl": map[string]any{"oid": "sha256:abc", "size": 123, "future_storage_field": "keep"}},
+				"future_metadata": map[string]any{"large_id": json.Number("9007199254740993"), "value": "keep"},
+			}
+			if tc.draft {
+				delete(original, "files")
+			}
+			// Write the legacy shape directly: today's writer rejects the very
+			// error strings that an older CLI persisted.
+			before, err := json.MarshalIndent(original, "", "  ")
+			require.NoError(t, err)
+			metaPath := filepath.Join(dir, "meta.json")
+			require.NoError(t, os.WriteFile(metaPath, before, 0o600))
+			writeTestSummary(t, dir, tc.recovery)
+			summaryBefore, err := os.ReadFile(filepath.Join(dir, "summary.json"))
+			require.NoError(t, err)
+			raw := []byte("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 123\n")
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), raw, 0o600))
+
+			out := RecoverEmptyTitleMeta(dir, tc.dryRun)
+			require.Empty(t, out.Error)
+			assert.Equal(t, tc.skip, out.Skipped)
+			after, err := os.ReadFile(metaPath)
+			require.NoError(t, err)
+			if tc.skip || tc.dryRun {
+				assert.Equal(t, before, after, "ineligible and dry-run metadata must stay byte-identical")
+			} else {
+				meta, err := ReadSessionMeta(dir)
+				require.NoError(t, err)
+				require.NoError(t, meta.Validate())
+				if tc.recovery != "" {
+					assert.Equal(t, tc.recovery, meta.Title)
+					assert.True(t, out.RecoveredFromJSON)
+				} else {
+					assert.True(t, out.BumpedAttempts)
+					assert.Equal(t, 1, meta.SummaryAttempts)
+				}
+				if tc.summary == diagnostic {
+					assert.Contains(t, meta.ValidationError, diagnostic, "moving an error out of display fields must preserve it")
+					assert.Contains(t, meta.ValidationError, tc.diagnostic)
+				} else {
+					assert.Equal(t, tc.summary, meta.Summary)
+				}
+				var oldFields, newFields map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(before, &oldFields))
+				require.NoError(t, json.Unmarshal(after, &newFields))
+				for _, field := range []string{"title", "summary", "summary_status", "summary_attempts", "validation_error"} {
+					delete(oldFields, field)
+					delete(newFields, field)
+				}
+				assert.Equal(t, oldFields, newFields, "repair must preserve all unowned fields, including unknown nested fields")
+				info, err := os.Stat(metaPath)
+				require.NoError(t, err)
+				assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+
+				for range MaxSummaryAttempts {
+					require.Empty(t, RecoverEmptyTitleMeta(dir, false).Error)
+				}
+				stable, err := os.ReadFile(metaPath)
+				require.NoError(t, err)
+				assert.True(t, RecoverEmptyTitleMeta(dir, false).Skipped)
+				again, err := os.ReadFile(metaPath)
+				require.NoError(t, err)
+				assert.Equal(t, stable, again, "repeated upgrade repairs must converge to a no-op")
+			}
+			summaryAfter, err := os.ReadFile(filepath.Join(dir, "summary.json"))
+			require.NoError(t, err)
+			assert.Equal(t, summaryBefore, summaryAfter)
+			rawAfter, err := os.ReadFile(filepath.Join(dir, "raw.jsonl"))
+			require.NoError(t, err)
+			assert.Equal(t, raw, rawAfter, "repair must never rewrite content or LFS stubs")
+		})
+	}
+}
+
+// Invalid historical JSON must remain available for deliberate recovery.
+func TestRecoverEmptyTitleMeta_PreservesCorruptMetadata(t *testing.T) {
+	for _, content := range []string{"{\n<<<<<<< HEAD\n\"title\": \"A\"\n=======\n\"title\": \"B\"\n>>>>>>> other\n}", `{"title":`, `null`} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "meta.json")
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		writeTestSummary(t, dir, "Available title")
+		for _, dryRun := range []bool{true, false, false} {
+			require.NotEmpty(t, RecoverEmptyTitleMeta(dir, dryRun).Error)
+		}
+		after, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, content, string(after))
+	}
+}
+
+// Repair must not replace a metadata symlink or rewrite its target on upgrade.
+func TestRecoverEmptyTitleMeta_PreservesSymlink(t *testing.T) {
+	targetDir := t.TempDir()
+	writeTestMeta(t, targetDir, &SessionMeta{})
+	target := filepath.Join(targetDir, "meta.json")
+	before, err := os.ReadFile(target)
+	require.NoError(t, err)
+	dir := t.TempDir()
+	link := filepath.Join(dir, "meta.json")
+	require.NoError(t, os.Symlink(target, link))
+	writeTestSummary(t, dir, "Recovered title")
+	for _, dryRun := range []bool{true, false} {
+		assert.Contains(t, RecoverEmptyTitleMeta(dir, dryRun).Error, "non-regular")
+	}
+	gotTarget, err := os.Readlink(link)
+	require.NoError(t, err)
+	assert.Equal(t, target, gotTarget)
+	after, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
+}
+
+// Recovery after an earlier cleanup pass must not discard the moved diagnostic.
+func TestRecoverEmptyTitleMeta_DelayedRecoveryKeepsDiagnostic(t *testing.T) {
+	dir := t.TempDir()
+	const diagnostic = "Summary generation failed: legacy timeout"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"),
+		[]byte(`{"summary":"`+diagnostic+`","validation_error":"Earlier failure"}`), 0o600))
+	require.Empty(t, RecoverEmptyTitleMeta(dir, false).Error)
+	writeTestSummary(t, dir, "Recovered title")
+	out := RecoverEmptyTitleMeta(dir, false)
+	require.Empty(t, out.Error)
+	assert.True(t, out.RecoveredFromJSON)
+	meta, err := ReadSessionMeta(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "Recovered title", meta.Title)
+	assert.Contains(t, meta.ValidationError, diagnostic)
+	assert.Contains(t, meta.ValidationError, "Earlier failure")
+}
+
+// A repair must wait for a cooperating writer and reread its latest metadata.
+func TestRecoverEmptyTitleMeta_CoordinatesWithConcurrentWriter(t *testing.T) {
+	dir := t.TempDir()
+	writeTestMeta(t, dir, &SessionMeta{})
+	writeTestSummary(t, dir, "Stale recovery title")
+	done := make(chan MetaRepairOutcome, 1)
+	err := fileutil.WithFileLock(context.Background(), filepath.Join(dir, "meta.json"), func() error {
+		started := make(chan struct{})
+		go func() {
+			close(started)
+			done <- RecoverEmptyTitleMeta(dir, false)
+		}()
+		<-started
+		select {
+		case <-done:
+			t.Error("repair bypassed the metadata lock")
+		case <-time.After(100 * time.Millisecond):
+		}
+		return WriteSessionMetaOnly(dir, &SessionMeta{Title: "Concurrent customer edit", SessionID: "ses_preserve"})
+	})
+	require.NoError(t, err)
+	select {
+	case out := <-done:
+		require.Empty(t, out.Error)
+		assert.True(t, out.Skipped)
+	case <-time.After(time.Second):
+		t.Fatal("repair did not finish after releasing the metadata lock")
+	}
+	meta, err := ReadSessionMeta(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "Concurrent customer edit", meta.Title)
+	assert.Equal(t, "ses_preserve", meta.SessionID)
+}
 
 // writeTestMeta is a small helper used by the recovery tests. It
 // writes a minimal SessionMeta to <dir>/meta.json so each test reads
@@ -98,7 +294,8 @@ func TestRecoverEmptyTitleMeta_RecoversFromSummaryJSON(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Recovered Title From summary.json", got.Title)
 	assert.Equal(t, "ok", got.SummaryStatus, "status must transition failed_validation → ok")
-	assert.Empty(t, got.ValidationError, "stale ops diagnostic must be cleared")
+	assert.Equal(t, "content validation failed: title too short", got.ValidationError,
+		"automatic title repair must retain historical diagnostics")
 	assert.Equal(t, 0, got.SummaryAttempts, "attempt counter must reset on success")
 }
 

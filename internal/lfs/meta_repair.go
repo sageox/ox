@@ -1,6 +1,7 @@
 package lfs
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/fileutil"
 )
 
 // MetaRepairOutcome reports what RecoverEmptyTitleMeta did to a single
@@ -30,9 +33,10 @@ type MetaRepairOutcome struct {
 // SummaryAttempts and, at MaxSummaryAttempts, flips status to
 // unrecoverable so future calls early-exit.
 //
-// This is the daemon-safe core of the empty-title repair flow. Both
-// the CLI `ox session repair-meta-summary` tool and the autofix
-// scheduler delegate to this so the on-disk behavior is identical.
+// This is the daemon-safe empty-title repair. The explicit CLI
+// `ox session repair-meta-summary` also repairs non-empty leaky titles.
+// Automatic repair preserves healthy titles and patches only its five
+// fields under the shared metadata lock, retaining all other JSON data.
 //
 // Idempotency contract: running this repeatedly on a healthy meta is a
 // no-op (Skipped=true, no write). Running it repeatedly on an
@@ -43,77 +47,144 @@ type MetaRepairOutcome struct {
 func RecoverEmptyTitleMeta(sessionDir string, dryRun bool) MetaRepairOutcome {
 	name := filepath.Base(sessionDir)
 	out := MetaRepairOutcome{SessionName: name}
+	metaPath := filepath.Join(sessionDir, metaFilename)
 
-	meta, err := ReadSessionMeta(sessionDir)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+	repair := func(meta *SessionMeta) (*SessionMeta, error) {
+		if meta == nil {
 			out.Skipped = true
-			return out
+			return nil, nil
 		}
-		out.Error = err.Error()
-		return out
-	}
 
-	// A draft placeholder legitimately has no title (ADR-029): it is a
-	// meta.json-only marker for a LIVE recording, not a session whose
-	// summarization failed. Without this skip, every autofix tick would treat
-	// the empty title as a fault, bump SummaryAttempts, and at
-	// MaxSummaryAttempts stamp summary_status="unrecoverable" into a session
-	// that is still being recorded — which the daemon's finalize (a
-	// preserve-unowned-fields RMW) would then carry into the finished session,
-	// permanently marking real work as unsummarizable. It would also dirty the
-	// ledger worktree mid-recording for a file the CLI is about to purge.
-	if meta.IsDraft() {
-		out.Skipped = true
-		return out
-	}
-
-	// Healthy or terminal — nothing to do. We treat any non-empty
-	// trimmed title as "healthy" because that's what the web UI will
-	// render; we don't second-guess whether the title is good.
-	if strings.TrimSpace(meta.Title) != "" {
-		out.Skipped = true
-		return out
-	}
-	// Terminal failure — daemon already exhausted MaxSummaryAttempts on
-	// this session. Stop trying. The session is teammate-visible (LFS
-	// upload happened) and the row title falls back to the session-name
-	// slug in the UI.
-	if meta.SummaryStatus == "unrecoverable" {
-		out.Skipped = true
-		return out
-	}
-
-	// Try to recover a clean title from summary.json. The daemon may
-	// have written a failure-stub summary.json with title="" too — in
-	// which case readSummaryJSONTitle returns "" and we fall through to
-	// the bump-attempts path.
-	if cleanTitle := readSummaryJSONTitle(sessionDir); cleanTitle != "" {
-		meta.Title = cleanTitle
-		// Mirror title into summary if summary.json doesn't carry a
-		// distinct one. Keeps the two fields consistent for older
-		// readers that prefer Summary over Title.
-		if strings.TrimSpace(meta.Summary) == "" {
-			meta.Summary = cleanTitle
+		// A draft placeholder legitimately has no title (ADR-029): it is a
+		// meta.json-only marker for a LIVE recording, not a session whose
+		// summarization failed. Without this skip, every autofix tick would treat
+		// the empty title as a fault, bump SummaryAttempts, and at
+		// MaxSummaryAttempts stamp summary_status="unrecoverable" into a session
+		// that is still being recorded — which the daemon's finalize (a
+		// preserve-unowned-fields RMW) would then carry into the finished session,
+		// permanently marking real work as unsummarizable. It would also dirty the
+		// ledger worktree mid-recording for a file the CLI is about to purge.
+		if meta.IsDraft() {
+			out.Skipped = true
+			return nil, nil
 		}
-		meta.SummaryStatus = "ok"
-		meta.ValidationError = ""
-		meta.SummaryAttempts = 0
-		out.RecoveredFromJSON = true
-	} else {
-		meta.SummaryAttempts++
-		out.BumpedAttempts = true
-		if meta.SummaryAttempts >= MaxSummaryAttempts {
-			meta.SummaryStatus = "unrecoverable"
-			out.FlippedTerminal = true
+
+		// Healthy or terminal — nothing to do. We treat any non-empty
+		// trimmed title as "healthy" because that's what the web UI will
+		// render; we don't second-guess whether the title is good.
+		if strings.TrimSpace(meta.Title) != "" {
+			out.Skipped = true
+			return nil, nil
 		}
+		// Terminal failure — daemon already exhausted MaxSummaryAttempts on
+		// this session. Stop trying. The session is teammate-visible (LFS
+		// upload happened) and the row title falls back to the session-name
+		// slug in the UI.
+		if meta.SummaryStatus == "unrecoverable" {
+			out.Skipped = true
+			return nil, nil
+		}
+
+		// Older CLIs persisted error prose in Summary. Move it to the diagnostic
+		// field before writing: otherwise validation rejects every repair attempt.
+		// Preserve both diagnostics when a different one is already present.
+		leakySummary := IsLeakySummaryString(meta.Summary)
+		if leakySummary {
+			if meta.ValidationError == "" {
+				meta.ValidationError = meta.Summary
+			} else if !strings.Contains(meta.ValidationError, meta.Summary) {
+				meta.ValidationError += "\n" + meta.Summary
+			}
+			meta.Summary = ""
+		}
+
+		// Try to recover a clean title from summary.json. The daemon may
+		// have written a failure-stub summary.json with title="" too — in
+		// which case readSummaryJSONTitle returns "" and we fall through to
+		// the bump-attempts path.
+		if cleanTitle := readSummaryJSONTitle(sessionDir); cleanTitle != "" {
+			meta.Title = cleanTitle
+			// Mirror title into summary if summary.json doesn't carry a
+			// distinct one. Keeps the two fields consistent for older
+			// readers that prefer Summary over Title.
+			if strings.TrimSpace(meta.Summary) == "" {
+				meta.Summary = cleanTitle
+			}
+			meta.SummaryStatus = "ok"
+			// Repairing a display title is not a new summary generation;
+			// retain diagnostics, including ones moved by an earlier pass.
+			meta.SummaryAttempts = 0
+			out.RecoveredFromJSON = true
+		} else {
+			meta.SummaryAttempts++
+			out.BumpedAttempts = true
+			if meta.SummaryAttempts >= MaxSummaryAttempts {
+				meta.SummaryStatus = "unrecoverable"
+				out.FlippedTerminal = true
+			}
+		}
+
+		if err := meta.Validate(); err != nil {
+			return nil, fmt.Errorf("repaired session meta failed invariant: %w", err)
+		}
+		info, err := os.Lstat(metaPath)
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("refusing to repair non-regular meta.json")
+		}
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			return nil, err
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			return nil, err
+		}
+		if fields == nil {
+			return nil, fmt.Errorf("meta.json must contain a JSON object")
+		}
+		if dryRun {
+			return nil, nil
+		}
+		// Patch only the repair-owned fields. Rewriting the typed manifest would
+		// drop fields from older/newer producers, including nested file metadata.
+		for key, value := range map[string]any{
+			"title": meta.Title, "summary": meta.Summary,
+			"summary_status": meta.SummaryStatus, "summary_attempts": meta.SummaryAttempts,
+			"validation_error": meta.ValidationError,
+		} {
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				return nil, err
+			}
+			fields[key] = encoded
+		}
+		data, err = json.MarshalIndent(fields, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		// MutateSessionMeta holds the shared metadata lock; return nil so it
+		// does not replace this lossless patch with a typed-manifest rewrite.
+		return nil, fileutil.AtomicWriteBytes(metaPath, data, info.Mode().Perm())
 	}
 
+	var err error
 	if dryRun {
-		return out
+		var meta *SessionMeta
+		meta, err = ReadSessionMeta(sessionDir)
+		if errors.Is(err, fs.ErrNotExist) {
+			err = nil
+		}
+		if err == nil {
+			_, err = repair(meta)
+		}
+	} else {
+		err = MutateSessionMeta(context.Background(), sessionDir, repair)
 	}
-	if err := WriteSessionMetaOnly(sessionDir, meta); err != nil {
-		out.Error = "write meta.json: " + err.Error()
+	if err != nil {
+		return MetaRepairOutcome{SessionName: name, Error: err.Error()}
 	}
 	return out
 }

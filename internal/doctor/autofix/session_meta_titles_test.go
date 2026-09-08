@@ -131,3 +131,26 @@ func TestRepairLedgerSessionTitles_BumpsOnlyReportFound(t *testing.T) {
 	assert.Equal(t, StatusFound, res.Status, "pure-bump pass must surface as Found, not Fixed")
 	assert.Contains(t, res.Summary, "bumped=1")
 }
+
+// Successful repairs must not clear the warning for remaining corrupt sessions.
+func TestRepairLedgerSessionTitles_PartialRepairKeepsWarning(t *testing.T) {
+	sessionsDir := t.TempDir()
+	seedSession(t, sessionsDir, "recoverable", &lfs.SessionMeta{}, "Recovered title")
+	corruptDir := filepath.Join(sessionsDir, "corrupt")
+	require.NoError(t, os.Mkdir(corruptDir, 0o700))
+	corruptPath := filepath.Join(corruptDir, "meta.json")
+	const corrupt = "{\n<<<<<<< HEAD\n"
+	require.NoError(t, os.WriteFile(corruptPath, []byte(corrupt), 0o600))
+
+	res := repairLedgerSessionTitles(sessionsDir, "/fake/repo")
+	assert.Equal(t, StatusFound, res.Status, "one successful repair must not hide another session's error")
+	assert.Contains(t, res.Summary, "recovered=1")
+	assert.Contains(t, res.Summary, "errored=1")
+	assert.Equal(t, StatusFound, repairLedgerSessionTitles(sessionsDir, "/fake/repo").Status)
+	meta, err := lfs.ReadSessionMeta(filepath.Join(sessionsDir, "recoverable"))
+	require.NoError(t, err)
+	assert.Equal(t, "Recovered title", meta.Title)
+	bytes, err := os.ReadFile(corruptPath)
+	require.NoError(t, err)
+	assert.Equal(t, corrupt, string(bytes))
+}

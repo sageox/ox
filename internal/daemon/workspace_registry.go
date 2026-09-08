@@ -694,13 +694,15 @@ func (r *WorkspaceRegistry) GetLedgerPath() string {
 // GetTeamContextStatus returns team context status in the legacy format.
 // This provides backward compatibility with existing status display code.
 func (r *WorkspaceRegistry) GetTeamContextStatus() []TeamContextSyncStatus {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	var result []TeamContextSyncStatus
-	for _, ws := range r.workspaces {
+	for _, ws := range r.GetAllWorkspaces() {
 		if ws.Type != WorkspaceTypeTeamContext {
 			continue
+		}
+		// Read the shared owner's progress without changing registry/config
+		// state or holding the registry lock during disk reads.
+		if state := LoadSyncState(ws.Path); state.LastSync.After(ws.ConfigLastSync) {
+			ws.ConfigLastSync = state.LastSync
 		}
 		result = append(result, TeamContextSyncStatus{
 			TeamID:   ws.TeamID,

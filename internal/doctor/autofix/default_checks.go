@@ -374,8 +374,12 @@ func repairLedgerSessionTitles(sessionsDir, repoPath string) CheckResult {
 		return CheckResult{Status: StatusClean, Repo: repoPath}
 	}
 	if recovered > 0 || flipped > 0 {
+		status := StatusFixed
+		if errored > 0 {
+			status = StatusFound // partial progress must not clear unresolved errors
+		}
 		return CheckResult{
-			Status:  StatusFixed,
+			Status:  status,
 			Repo:    repoPath,
 			Summary: fmt.Sprintf("session meta titles: recovered=%d flipped_terminal=%d bumped=%d errored=%d", recovered, flipped, bumped, errored),
 		}

@@ -1044,8 +1044,8 @@ func formatSyncHistory(history []SyncEvent) string {
 
 // determineHealth calculates overall health status.
 func determineHealth(status *StatusData) HealthStatus {
-	// critical: many recent errors or sync very stale
-	if status.RecentErrorCount >= 5 {
+	// Critical issues must take precedence over sync or issue warnings.
+	if status.RecentErrorCount >= 5 || MaxIssueSeverity(status.Issues) == SeverityCritical {
 		return HealthCritical
 	}
 
@@ -1059,8 +1059,8 @@ func determineHealth(status *StatusData) HealthStatus {
 		}
 	}
 
-	// warning: some errors
-	if status.RecentErrorCount > 0 {
+	// A successful sync does not clear outstanding integrity or repair issues.
+	if status.RecentErrorCount > 0 || status.NeedsHelp || len(status.Issues) > 0 {
 		return HealthWarning
 	}
 
