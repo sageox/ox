@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blevesearch/bleve/v2"
 	"github.com/gofrs/flock"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/bbolt"
@@ -73,6 +74,7 @@ func runSelfHealHelper(root, path, name string) int {
 			return 0
 		}
 		lastErr = err
+		fmt.Fprintf(os.Stderr, "open attempt %d failed: %v\n", attempt, err)
 		time.Sleep(15 * time.Millisecond)
 	}
 	fmt.Fprintf(os.Stderr, "helper never obtained a working index: %v\n", lastErr)
@@ -365,10 +367,109 @@ func TestConcurrentSelfHeal_MultiProcess(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(0), n)
 	require.True(t, HasNeedsReindexMarker(tmp, "code"),
-		"at least one process must have marked the sub-index for reindex")
+		"at least one process must have marked the sub-index for reindex; process output: %q", outs)
 }
 
 // --- D. Lock unavailable: never nuke racily, recover on retry ---
+
+// A missing-metadata opener must recheck under the heal lock before replacing
+// an index that a competing healer finished in the meantime.
+func TestSelfHeal_MissingMetadataPreservesConcurrentReplacement(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: Bleve + filesystem operations")
+	}
+	for _, heldOpen := range []bool{false, true} {
+		t.Run(fmt.Sprintf("winner_held_open=%t", heldOpen), func(t *testing.T) {
+			installFastCorruptionProbes(t)
+			root := t.TempDir()
+			indexPath := filepath.Join(root, "test-index")
+			require.NoError(t, os.Mkdir(indexPath, 0o700)) // healer's partially recreated directory
+			var winner bleve.Index
+			origHook := subIndexHealLockAcquiredHook
+			t.Cleanup(func() {
+				subIndexHealLockAcquiredHook = origHook
+				if winner != nil {
+					_ = winner.Close()
+				}
+			})
+			hookRan := false
+			subIndexHealLockAcquiredHook = func(string) {
+				hookRan = true
+				// Complete the competing repair before this opener reclassifies.
+				require.NoError(t, os.RemoveAll(indexPath))
+				var err error
+				winner, err = createBleveSubIndex(indexPath, "code")
+				require.NoError(t, err)
+				require.NoError(t, winner.Index("survivor", map[string]string{"content": "keep"}))
+				if !heldOpen {
+					require.NoError(t, winner.Close())
+					winner = nil
+				}
+			}
+			idx, err := openOrCreateBleveIndex(root, indexPath, "code")
+			if idx != nil {
+				defer func() { _ = idx.Close() }()
+			}
+			require.True(t, hookRan, "missing-metadata recovery must acquire the shared heal lock")
+			if heldOpen {
+				require.ErrorContains(t, err, "lock contention")
+				require.Nil(t, idx)
+				idx = winner
+			} else {
+				require.NoError(t, err)
+			}
+			count, err := idx.DocCount()
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), count, "loser must preserve the competing replacement's content")
+			require.False(t, HasNeedsReindexMarker(root, "code"), "adopting or deferring must not rebuild")
+		})
+	}
+}
+
+// A broken store path still needs a locked rebuild, including ENOTDIR.
+func TestSelfHeal_BrokenStoreStructure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: Bleve + filesystem operations")
+	}
+	root := t.TempDir()
+	indexPath := filepath.Join(root, "test-index")
+	idx, err := createBleveSubIndex(indexPath, "code")
+	require.NoError(t, err)
+	require.NoError(t, idx.Close())
+	storePath := filepath.Join(indexPath, "store")
+	require.NoError(t, os.RemoveAll(storePath))
+	require.NoError(t, os.WriteFile(storePath, []byte("broken layout"), 0o600))
+	idx, err = openOrCreateBleveIndex(root, indexPath, "code")
+	require.NoError(t, err)
+	defer func() { _ = idx.Close() }()
+	require.True(t, HasNeedsReindexMarker(root, "code"))
+}
+
+// Refuse destructive repair when its durable reindex signal cannot be written.
+func TestSelfHeal_MarkerFailurePreservesCorruptIndex(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: Bleve + filesystem operations")
+	}
+	root := t.TempDir()
+	indexPath := filepath.Join(root, "test-index")
+	idx, err := createBleveSubIndex(indexPath, "code")
+	require.NoError(t, err)
+	require.NoError(t, idx.Close())
+	boltPath := filepath.Join(indexPath, "store", "root.bolt")
+	emptyMappingForLatestSnapshot(t, boltPath)
+	before, err := os.ReadFile(boltPath)
+	require.NoError(t, err)
+	require.NoError(t, os.Mkdir(NeedsReindexMarkerPath(root, "code"), 0o700))
+	idx, err = rebuildSubIndexLocked(root, indexPath, "code", false, errors.New("corrupt mapping"))
+	if idx != nil {
+		defer func() { _ = idx.Close() }()
+	}
+	require.ErrorContains(t, err, "reindex marker")
+	require.Nil(t, idx)
+	after, err := os.ReadFile(boltPath)
+	require.NoError(t, err)
+	require.Equal(t, before, after, "marker failure must leave the existing index unchanged")
+}
 
 // TestSelfHeal_LockTimeout_DefersThenRecovers proves the safety valve: when the
 // heal lock cannot be acquired (a live healer holds it), a corrupt-index open

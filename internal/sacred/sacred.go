@@ -19,9 +19,9 @@ var Prefixes = []string{"data/plans/", "sessions/"}
 
 // MassDeleteThreshold is the maximum number of sacred-path files a single ledger
 // commit may delete before it is treated as a suspected wipe. Set deliberately
-// tight: a routine `ox plan` delete or session removal touches one dir (its ~5
-// artifact files) and passes; removing two or more plans/sessions at once trips
-// it. Per ADR-024 sacred deletion needs explicit human approval, so err toward
+// tight: a single plan or session can exceed this file-count threshold. A hit
+// is a safety backstop, not proof of a mass wipe or unintended deletion.
+// Per ADR-024 sacred deletion needs explicit human approval, so err toward
 // refusing. The 2026-08-25 incident staged 1000+ sacred deletions in one commit.
 const MassDeleteThreshold = 5
 

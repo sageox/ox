@@ -1549,6 +1549,13 @@ func (s *daemonServiceImpl) Status() *StatusData {
 	if registry := s.d.scheduler.WorkspaceRegistry(); registry != nil {
 		projectTeamID = registry.ProjectTeamID()
 		for _, ws := range registry.GetAllWorkspaces() {
+			// A different daemon may own global sync; its cache is fresher
+			// than this project's config. Only update the status snapshot.
+			if ws.Type == WorkspaceTypeTeamContext {
+				if state := LoadSyncState(ws.Path); state.LastSync.After(ws.ConfigLastSync) {
+					ws.ConfigLastSync = state.LastSync
+				}
+			}
 			wsType := string(ws.Type)
 			// normalize type to match API convention (team_context -> team-context)
 			if wsType == "team_context" {

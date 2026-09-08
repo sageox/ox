@@ -175,29 +175,27 @@ func TestServer_StatusHandler_NeverBlocks(t *testing.T) {
 		},
 	)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	go server.Start(ctx)
-	time.Sleep(100 * time.Millisecond)
+	stop := startRecoveryTestServer(t, server)
+	defer stop()
 
 	// send 100 concurrent status requests
 	const numRequests = 100
-	done := make(chan struct{}, numRequests)
+	done := make(chan error, numRequests)
 
 	overallStart := time.Now()
 	for i := 0; i < numRequests; i++ {
 		go func() {
-			defer func() { done <- struct{}{} }()
 			client := &Client{socketPath: SocketPath(), timeout: 5 * time.Second}
-			_, _ = client.Status()
+			_, err := client.Status()
+			done <- err
 		}()
 	}
 
 	// wait for all to complete
 	for i := 0; i < numRequests; i++ {
 		select {
-		case <-done:
+		case err := <-done:
+			require.NoError(t, err, "status request failed")
 		case <-time.After(5 * time.Second):
 			t.Fatalf("status request %d timed out after 5s", i)
 		}
