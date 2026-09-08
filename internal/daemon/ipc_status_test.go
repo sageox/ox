@@ -37,8 +37,9 @@ func TestStatusData_JSON(t *testing.T) {
 	assert.Equal(t, status.LedgerPath, decoded.LedgerPath)
 }
 
-// Status must remain responsive when a cold or failed index has no cached stats
-// and another writer holds the database open. Exercise both real IPC handlers.
+// TestServerClient_StatusWithLockedCodeDB verifies both status IPC handlers stay
+// responsive when a cold or failed index has no cached stats and another writer
+// holds the database open.
 func TestServerClient_StatusWithLockedCodeDB(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real code databases and IPC servers")
