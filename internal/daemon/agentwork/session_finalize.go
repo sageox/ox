@@ -161,7 +161,22 @@ type SessionFinalizeHandler struct {
 	// after each emit. Single-threaded by construction: judge and emit
 	// both run synchronously inside ProcessResult.
 	lastJudgeResult *summaryeval.JudgeResult
+	// captureLockWait bounds how long recovery waits for a busy capture
+	// writer's raw-file lock before deferring the session to a later detect
+	// pass. Defaults to defaultCaptureLockWait.
+	//
+	// A field rather than a constant because two tests assert opposite halves
+	// of this contract — that a busy writer causes a deferral, and that
+	// recovery resumes once that writer releases the lock. Pinning both to one
+	// wall-clock budget makes them race each other: on a loaded runner the
+	// second test's flush handshake outlives the budget, recovery defers, and
+	// the test fails on a timing accident rather than a real regression.
+	captureLockWait time.Duration
 }
+
+// defaultCaptureLockWait keeps one busy session from blocking the whole detect
+// scan for the file lock's default 10s.
+const defaultCaptureLockWait = 250 * time.Millisecond
 
 // NewSessionFinalizeHandler creates a handler with the given logger.
 func NewSessionFinalizeHandler(logger *slog.Logger) *SessionFinalizeHandler {
@@ -172,6 +187,7 @@ func NewSessionFinalizeHandler(logger *slog.Logger) *SessionFinalizeHandler {
 		logger:                  logger,
 		qualityUploadThreshold:  0.3,
 		qualityDiscardThreshold: 0.1,
+		captureLockWait:         defaultCaptureLockWait,
 	}
 }
 
@@ -433,9 +449,8 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			// entries written after the watcher's last poll. Never write content
 			// into the git-tracked ledger path.
 			if sessionsDir != filepath.Join(ledgerPath, "sessions") {
-				// A busy capture writer can be retried on the next detect pass;
-				// keep one session from blocking the scan for the default 10s.
-				recoverErr := fileutil.WithFileLockTimeout(context.Background(), rawPath, 250*time.Millisecond, func() error {
+				// A busy capture writer can be retried on the next detect pass.
+				recoverErr := fileutil.WithFileLockTimeout(context.Background(), rawPath, h.captureLockWait, func() error {
 					var err error
 					hasRaw, err = recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath)
 					if err != nil {
@@ -700,7 +715,7 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			}
 
 			if sessionsDir != filepath.Join(ledgerPath, "sessions") {
-				recoverErr := fileutil.WithFileLockTimeout(context.Background(), rawPath, 250*time.Millisecond, func() error {
+				recoverErr := fileutil.WithFileLockTimeout(context.Background(), rawPath, h.captureLockWait, func() error {
 					var err error
 					hasRaw, err = recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath)
 					if err != nil {
