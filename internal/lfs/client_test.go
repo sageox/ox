@@ -1,12 +1,18 @@
 package lfs
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -193,4 +199,251 @@ func TestBatch_ObjectError(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.NotNil(t, resp.Objects[0].Error)
 	assert.Equal(t, 404, resp.Objects[0].Error.Code)
+}
+
+const (
+	readTestRepoID = "repo_01936d5a-0000-7abc-8def-0123456789ab"
+	readTestToken  = "oxt_test_1ljPfr"
+	rotatedToken   = "oxt_rotated_1lKvCA"
+)
+
+func readLFSFixture(t *testing.T, handler http.HandlerFunc) (*Client, *httptest.Server) {
+	t.Helper()
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	t.Setenv("SAGEOX_ENDPOINT", server.URL)
+	t.Setenv("SAGEOX_TOKEN", readTestToken)
+	c, err := NewReadClient(server.URL, readTestRepoID, server.URL+"/api/v1/cli/repos/"+readTestRepoID+"/ledger.git")
+	require.NoError(t, err)
+	c.httpClient.Transport = server.Client().Transport
+	previous := lfsHTTPClient
+	local := *previous
+	local.Transport = server.Client().Transport
+	lfsHTTPClient = &local
+	t.Cleanup(func() { lfsHTTPClient = previous })
+	return c, server
+}
+
+// Failure prevented: a client or saved action retains an old identity after rotation.
+func TestReadLFS_RotationAndDownloadOnly(t *testing.T) {
+	content := []byte("authorized session content")
+	oid := ComputeOID(content)
+	wantToken := readTestToken
+	var hits atomic.Int32
+	c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		username, token, ok := r.BasicAuth()
+		assert.True(t, ok)
+		assert.Equal(t, "ox", username)
+		assert.Equal(t, wantToken, token)
+		assert.Empty(t, r.Header.Get("X-Upstream-Token"))
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			var request batchRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			assert.Equal(t, "download", request.Operation)
+			json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{
+				OID: oid, Size: int64(len(content)), Actions: &Actions{
+					Download: &Action{Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + oid,
+						Header: map[string]string{"Authorization": "Bearer stale-token", "X-Upstream-Token": "secret"}},
+					Upload: &Action{Href: "https://" + r.Host + "/upload"}, Verify: &Action{Href: "https://" + r.Host + "/verify"},
+				},
+			}}})
+			return
+		}
+		assert.Equal(t, http.MethodGet, r.Method)
+		w.Write(content)
+	})
+	resp, err := c.BatchDownload([]BatchObject{{OID: oid, Size: int64(len(content))}})
+	require.NoError(t, err)
+	actions := resp.Objects[0].Actions
+	require.NotNil(t, actions.Download)
+	assert.Nil(t, actions.Upload)
+	assert.Nil(t, actions.Verify)
+	assert.Empty(t, c.authHeader, "read clients must not retain a token")
+
+	wantToken = rotatedToken
+	t.Setenv("SAGEOX_TOKEN", rotatedToken)
+	var out bytes.Buffer
+	require.NoError(t, DownloadToFileContext(context.Background(), actions.Download, &out, true, oid))
+	assert.Equal(t, content, out.Bytes())
+	_, err = c.BatchDownload([]BatchObject{{OID: oid, Size: int64(len(content))}})
+	require.NoError(t, err)
+
+	_, err = c.BatchUpload([]BatchObject{{OID: oid}})
+	require.Error(t, err)
+	require.Error(t, UploadObject(actions.Download, content))
+	require.Error(t, VerifyObject(actions.Download, oid, int64(len(content))))
+	assert.Equal(t, int32(3), hits.Load(), "read clients and actions cannot perform upload/verify requests")
+
+	t.Setenv("SAGEOX_TOKEN", "")
+	_, err = c.BatchDownload([]BatchObject{{OID: oid}})
+	require.ErrorIs(t, err, auth.ErrReadTokenUnavailable)
+	_, err = DownloadObject(actions.Download)
+	require.ErrorIs(t, err, auth.ErrReadTokenUnavailable)
+	assert.Equal(t, int32(3), hits.Load(), "missing current credential must stop remote requests")
+}
+
+// Failure prevented: grant denial is treated as an empty ledger or leaks a reflected token.
+func TestReadLFS_DeniedAndMissingRemainDistinct(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				w.Write([]byte(readTestToken))
+			})
+			_, err := c.BatchDownload(nil)
+			var httpErr *HTTPError
+			require.ErrorAs(t, err, &httpErr)
+			assert.Equal(t, status, httpErr.StatusCode)
+			assert.NotContains(t, err.Error(), readTestToken)
+		})
+	}
+	t.Run("missing object", func(t *testing.T) {
+		c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{OID: "missing", Error: &ObjectError{Code: 404, Message: readTestToken}}}})
+		})
+		resp, err := c.BatchDownload([]BatchObject{{OID: "missing"}})
+		require.NoError(t, err)
+		require.Len(t, resp.Objects, 1)
+		require.NotNil(t, resp.Objects[0].Error)
+		assert.Equal(t, 404, resp.Objects[0].Error.Code)
+		assert.NotContains(t, resp.Objects[0].Error.Message, readTestToken)
+	})
+}
+
+// Failure prevented: upstream action headers or TAT escape to signed object storage.
+func TestReadLFS_SignedStorageIsCredentialFreeAndVerified(t *testing.T) {
+	content := []byte("plan from signed storage")
+	oid := ComputeOID(content)
+	corrupt := false
+	var hits atomic.Int32
+	storage := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		for _, header := range []string{"Authorization", "Proxy-Authorization", "Cookie", "X-Upstream-Token"} {
+			assert.Empty(t, r.Header.Get(header), header)
+		}
+		assert.Equal(t, "storage-signature", r.URL.Query().Get("signature"))
+		if corrupt {
+			w.Write([]byte("corrupt"))
+			return
+		}
+		w.Write(content)
+	}))
+	defer storage.Close()
+	c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{OID: oid, Actions: &Actions{Download: &Action{
+			Href:   storage.URL + "/object?signature=storage-signature",
+			Header: map[string]string{"Authorization": "Bearer " + readTestToken, "Cookie": "session=secret", "X-Upstream-Token": "secret"},
+		}}}}})
+	})
+	resp, err := c.BatchDownload([]BatchObject{{OID: oid}})
+	require.NoError(t, err)
+	action := resp.Objects[0].Actions.Download
+	data, err := DownloadObject(action)
+	require.NoError(t, err)
+	assert.Equal(t, content, data)
+	corrupt = true
+	_, err = DownloadObject(action)
+	require.ErrorContains(t, err, "OID mismatch")
+	var out bytes.Buffer
+	err = DownloadToFileContext(context.Background(), action, &out, false, "")
+	require.ErrorContains(t, err, "OID mismatch", "verification cannot be disabled for read actions")
+	assert.Equal(t, int32(3), hits.Load())
+}
+
+// Failure prevented: a malicious action broadens same-origin TAT authority or leaks it in URLs.
+func TestReadLFS_UnsafeActionsNeverReachNetwork(t *testing.T) {
+	var actionHref string
+	var hits atomic.Int32
+	oid := ComputeOID([]byte("content"))
+	c, server := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{OID: oid, Actions: &Actions{Download: &Action{Href: actionHref}}}}})
+	})
+	for _, href := range []string{
+		server.URL + "/api/v1/cli/repos/foreign/ledger.git/info/lfs/objects/" + oid,
+		c.readURL + "/info/lfs/objects/" + strings.Repeat("0", 64),
+		c.readURL + "/git-upload-pack",
+		strings.Replace(server.URL, "https://", "http://", 1) + "/object",
+		"https://username:password@storage.example/object",
+		"https://storage.example/object?token=" + readTestToken,
+		"https://storage.example/object?token=" + strings.ReplaceAll(readTestToken, "_", "%5f"),
+		"https://storage.example/object?token=" + readTestToken + "&invalid=%zz",
+	} {
+		t.Run(href, func(t *testing.T) {
+			actionHref = href
+			before := hits.Load()
+			resp, err := c.BatchDownload([]BatchObject{{OID: oid}})
+			require.NoError(t, err)
+			_, err = DownloadObject(resp.Objects[0].Actions.Download)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), readTestToken)
+			assert.Equal(t, before+1, hits.Load(), "only batch discovery should reach network")
+		})
+	}
+}
+
+// Failure prevented: redirects replay same-origin Authorization on unrelated routes.
+func TestReadLFS_BatchAndObjectRedirectsRefused(t *testing.T) {
+	for _, redirectBatch := range []bool{true, false} {
+		t.Run(map[bool]string{true: "batch", false: "object"}[redirectBatch], func(t *testing.T) {
+			var hits atomic.Int32
+			oid := ComputeOID([]byte("content"))
+			c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				if !redirectBatch && strings.HasSuffix(r.URL.Path, "/batch") {
+					json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{OID: oid, Actions: &Actions{Download: &Action{
+						Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + oid,
+					}}}}})
+					return
+				}
+				if strings.HasSuffix(r.URL.Path, "/leak") {
+					t.Error("redirect must never be followed")
+					return
+				}
+				http.Redirect(w, r, "/leak", http.StatusTemporaryRedirect)
+			})
+			resp, err := c.BatchDownload([]BatchObject{{OID: oid}})
+			wantHits := int32(1)
+			if !redirectBatch {
+				require.NoError(t, err)
+				_, err = DownloadObject(resp.Objects[0].Actions.Download)
+				wantHits++
+			}
+			var httpErr *HTTPError
+			require.ErrorAs(t, err, &httpErr)
+			assert.Equal(t, http.StatusTemporaryRedirect, httpErr.StatusCode)
+			assert.Equal(t, wantHits, hits.Load())
+		})
+	}
+}
+
+// Failure prevented: a canceled refresh keeps downloading LFS content past its budget.
+func TestReadLFS_ContextCancellation(t *testing.T) {
+	for _, cancelBatch := range []bool{true, false} {
+		t.Run(map[bool]string{true: "batch", false: "object"}[cancelBatch], func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			release := make(chan struct{})
+			defer close(release)
+			oid := ComputeOID([]byte("content"))
+			c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if !cancelBatch && strings.HasSuffix(r.URL.Path, "/batch") {
+					json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{OID: oid, Actions: &Actions{Download: &Action{
+						Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + oid,
+					}}}}})
+					return
+				}
+				cancel()
+				<-release
+			})
+			resp, err := c.BatchDownloadContext(ctx, nil)
+			if !cancelBatch {
+				require.NoError(t, err)
+				var out bytes.Buffer
+				err = DownloadToFileContext(ctx, resp.Objects[0].Actions.Download, &out, true, oid)
+			}
+			require.True(t, errors.Is(err, context.Canceled), "%v", err)
+		})
+	}
 }

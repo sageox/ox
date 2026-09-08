@@ -39,6 +39,10 @@ var rootCmd = &cobra.Command{
 	Short: "Shared team context that makes agentic engineering multiplayer",
 	Long:  `Shared team context between your AI and human coworkers. Sessions, ledgers, and team knowledge that make agentic engineering multiplayer.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if isHeadlessLedgerRead(cmd) {
+			return nil
+		}
+
 		// initialize CLI context (centralizes config, logger, telemetry)
 		var err error
 		cliCtx, err = cli.NewContext(cmd, args)
@@ -81,6 +85,10 @@ var rootCmd = &cobra.Command{
 		return nil
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
+		if isHeadlessLedgerRead(cmd) {
+			return nil
+		}
+
 		// drain any in-flight heartbeat goroutines before the process exits.
 		// critical for short-lived hook subprocesses that would otherwise kill
 		// the goroutines before the IPC send completes.

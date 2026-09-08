@@ -103,8 +103,12 @@ func main() {
 	// load .env files if present (silently ignore if not found)
 	// order: .env.local (highest priority), .env (base config)
 	// supports FEATURE_CLOUD, FEATURE_AUTH, SAGEOX_API, etc.
-	_ = godotenv.Load(".env.local")
-	_ = godotenv.Load(".env")
+	// A hosted read must not inherit endpoint or credential selection from
+	// whichever source checkout happens to be the working directory.
+	if !headlessLedgerReadRequested(os.Args[1:]) {
+		_ = godotenv.Load(".env.local")
+		_ = godotenv.Load(".env")
+	}
 
 	args := applyCatalogTokenRewrites(os.Args[1:], loadFlagAliases(defaultCatalogJSON))
 	exitCode := executeWithFrictionRecovery(args, 0)
@@ -136,8 +140,10 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 	// Resolve cached/env feature flags before Cobra parses the command. This is
 	// required for default-off commands: help and command lookup both happen
 	// before PersistentPreRunE.
-	initFeatureFlags(rootCmd)
-	syncFeatureGatedCommands(rootCmd)
+	if !headlessLedgerReadRequested(args) {
+		initFeatureFlags(rootCmd)
+		syncFeatureGatedCommands(rootCmd)
+	}
 	rootCmd.SetArgs(args)
 
 	// mark retry attempts to avoid telemetry double-counting
@@ -158,6 +164,14 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 	var jexit *distillHistoryExitError
 	if errors.As(err, &jexit) {
 		return jexit.ExitCode
+	}
+	if headlessLedgerReadRequested(args) {
+		// Cobra flag parsing can fail before RunE. Keep even that path out
+		// of friction recovery, which sends daemon events and can retry.
+		if cmd, _, _ := rootCmd.Find(args); cmd == gitCredentialHelperCmd {
+			return 2 // Git helpers must keep their protocol output silent.
+		}
+		return writeReadSyncUsageError(rootCmd, args)
 	}
 
 	// try friction recovery
