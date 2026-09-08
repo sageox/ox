@@ -283,6 +283,9 @@ func (d *Daemon) checkDeadAgentsAndFinalize() {
 			)
 
 			if d.sessionFinalizeHandler != nil {
+				if d.sessionWatcher != nil {
+					d.sessionWatcher.Cleanup()
+				}
 				items := d.sessionFinalizeHandler.DetectOrphanedForAgent(d.config.LedgerPath, agentID, pid)
 				for _, item := range items {
 					if d.agentWorker.Enqueue(item) {
@@ -1549,6 +1552,13 @@ func (s *daemonServiceImpl) Status() *StatusData {
 	if registry := s.d.scheduler.WorkspaceRegistry(); registry != nil {
 		projectTeamID = registry.ProjectTeamID()
 		for _, ws := range registry.GetAllWorkspaces() {
+			// A different daemon may own global sync; its cache is fresher
+			// than this project's config. Only update the status snapshot.
+			if ws.Type == WorkspaceTypeTeamContext {
+				if state := LoadSyncState(ws.Path); state.LastSync.After(ws.ConfigLastSync) {
+					ws.ConfigLastSync = state.LastSync
+				}
+			}
 			wsType := string(ws.Type)
 			// normalize type to match API convention (team_context -> team-context)
 			if wsType == "team_context" {
@@ -1911,7 +1921,7 @@ func (s *daemonServiceImpl) SessionWatchStart(payload SessionWatchStartPayload) 
 	}
 	// derive paths server-side; never trust client-supplied destinations
 	ledgerPath := s.d.config.LedgerPath
-	cachePath := filepath.Join(ledgerPath, "sessions", payload.SessionName)
+	cachePath := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", payload.SessionName)
 	if err := s.d.sessionWatcher.StartWatch(
 		payload.SessionName, payload.SessionFile,
 		payload.AdapterName, ledgerPath, cachePath,

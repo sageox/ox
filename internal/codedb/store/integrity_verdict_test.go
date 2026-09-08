@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"modernc.org/sqlite"
@@ -190,6 +191,14 @@ func TestStoreCheckIntegrity_NonSQLiteFailureIsNotCorruption(t *testing.T) {
 // removeSQLiteFiles. The directory here is writable, so the deletion WOULD
 // succeed — which is what makes the survival assertion mean something.
 func TestOpenSQLite_InconclusiveCheckDoesNotDeleteTheIndex(t *testing.T) {
+	// Chmod(0o000) is the isolation mechanism here, and Go's Chmod maps only the
+	// read-only bit on Windows — the target stays readable and this test would pass
+	// while asserting nothing. See .claude/rules/testing.md, "Failure Paths That
+	// Render Identically To Success".
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: chmod cannot remove read permission")
+	}
+
 	requirePOSIXPermissions(t)
 
 	root := t.TempDir()

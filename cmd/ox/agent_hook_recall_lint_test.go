@@ -22,7 +22,7 @@ import (
 // rationale, leaving `--local` looking like an arbitrary choice that
 // the next refactor "cleans up" into a remote call.
 func TestLoadBearingCommentPresent_LocalRecall(t *testing.T) {
-	const path = "agent_hook_recall.go"
+	path := repoPath("agent_hook_recall.go")
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)

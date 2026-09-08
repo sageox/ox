@@ -9,7 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 
@@ -140,4 +145,106 @@ func TestRunAgentPrime_ReconcilesWhenTheRecordedRevisionIsStale(t *testing.T) {
 		"a stale recorded revision must make prime rebuild the inventory, restoring the missing skill")
 	assert.Contains(t, buf.String(), "skills_reconciled",
 		"prime must report how many files it wrote when the reconcile actually did work")
+}
+
+// A source created after prime must join the existing recording, including after a state-write failure.
+func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
+	adapterBin := buildCodexCaptureAdapter(t)
+	for _, readOnlyState := range []bool{false, true} {
+		name := "writable state"
+		if readOnlyState {
+			name = "state write recovers"
+		}
+		t.Run(name, func(t *testing.T) {
+			if readOnlyState && os.Geteuid() == 0 {
+				t.Skip("root can write files despite read-only permissions")
+			}
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			f := newDraftLedgerFixture(t)
+			t.Chdir(f.projectRoot)
+			defaultLedger, err := ledger.DefaultPath()
+			require.NoError(t, err)
+			require.NoError(t, os.MkdirAll(filepath.Dir(defaultLedger), 0o755))
+			runGit(t, f.projectRoot, "clone", "--quiet", f.barePath, defaultLedger)
+			oldCfg := cfg
+			cfg = &config.Config{}
+			t.Cleanup(func() { cfg = oldCfg })
+			oxConfigSetRepo(t, "session_recording", "auto")
+			adapter, err := adapters.NewExternalAdapter(adapterBin)
+			require.NoError(t, err)
+			adapters.Register(adapter)
+			t.Cleanup(func() {
+				adapters.Unregister("codex")
+				_ = adapter.Close()
+			})
+
+			const agentID, nativeID = "OxCodexLate", "codex-test-session"
+			firstStatus := startSessionRecording(f.projectRoot, agentID, "codex", "", "", "")
+			require.NotNil(t, firstStatus)
+			require.True(t, firstStatus.Recording)
+			first, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
+			require.NoError(t, err)
+			require.NotNil(t, first)
+			require.Equal(t, "tail", first.WatchMode)
+			require.Empty(t, first.SessionFile)
+			rawBefore, err := os.ReadFile(filepath.Join(first.SessionPath, "raw.jsonl"))
+			require.NoError(t, err)
+			markerPath := filepath.Join(first.SessionPath, ".recording.json")
+			if readOnlyState {
+				require.NoError(t, os.Chmod(markerPath, 0o400))
+				t.Cleanup(func() { _ = os.Chmod(markerPath, 0o600) })
+			}
+
+			// Learn the native ID while its file is still unavailable. Keep it for daemon discovery.
+			require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", "", "", nativeID))
+			waiting, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
+			require.NoError(t, err)
+			require.NotNil(t, waiting)
+			if readOnlyState {
+				assert.Empty(t, waiting.AgentSessionID, "failed state writes must leave the prior recording intact")
+			} else {
+				assert.Equal(t, nativeID, waiting.AgentSessionID)
+				// A subsequent environment without a native ID must not erase the saved one.
+				require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", "", "", ""))
+				waiting, err = session.LoadRecordingStateForAgent(f.projectRoot, agentID)
+				require.NoError(t, err)
+				require.NotNil(t, waiting)
+				assert.Equal(t, nativeID, waiting.AgentSessionID, "an empty native ID must not erase the saved one")
+			}
+			assert.Empty(t, waiting.SessionFile)
+			assert.Equal(t, first.SessionID, waiting.SessionID)
+
+			source := writeCodexSessionFile(t, os.Getenv("HOME"), f.projectRoot)
+			beforePrime := first.StartedAt.Add(-time.Minute)
+			require.NoError(t, os.Chtimes(source, beforePrime, beforePrime))
+			data, err := os.ReadFile(source)
+			require.NoError(t, err)
+			sibling := filepath.Join(filepath.Dir(source), "newer-sibling.jsonl")
+			require.NoError(t, os.WriteFile(sibling, []byte(strings.ReplaceAll(string(data), nativeID, "sibling-session")), 0o600))
+
+			foundStatus := startSessionRecording(f.projectRoot, agentID, "codex", "", "", nativeID)
+			require.NotNil(t, foundStatus)
+			assert.Equal(t, source, foundStatus.File)
+			if readOnlyState {
+				pending, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
+				require.NoError(t, err)
+				require.NotNil(t, pending)
+				assert.Empty(t, pending.SessionFile, "discovery must preserve a recording when its source path cannot yet be saved")
+				require.NoError(t, os.Chmod(markerPath, 0o600))
+				require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", "", "", nativeID))
+			}
+			found, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
+			require.NoError(t, err)
+			require.NotNil(t, found)
+			assert.Equal(t, nativeID, found.AgentSessionID)
+			assert.Equal(t, source, found.SessionFile)
+			assert.Equal(t, first.SessionID, found.SessionID, "re-prime must recover the existing recording")
+			rawAfter, err := os.ReadFile(filepath.Join(found.SessionPath, "raw.jsonl"))
+			require.NoError(t, err)
+			assert.Equal(t, rawBefore, rawAfter, "discovery must not replace the recording's captured data")
+		})
+	}
 }

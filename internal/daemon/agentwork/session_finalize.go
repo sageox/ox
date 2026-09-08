@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
@@ -427,20 +429,36 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 				h.logger.Debug("skipping session with active recording", "session", name)
 				continue
 			}
-			if !hasRaw {
-				// attempt recovery from adapter source file (#184)
-				if recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath) {
-					hasRaw = true
-				} else {
-					h.logger.Warn("stale recording unrecoverable, clearing marker",
-						"session", name,
-						"recording_age", recAge.Round(time.Hour),
-					)
-					if rmErr := os.Remove(recPath); rmErr != nil {
-						h.logger.Warn("failed to remove unrecoverable recording marker", "err", rmErr)
+			// Recovery also fills an eager header and drains the final native
+			// entries written after the watcher's last poll. Never write content
+			// into the git-tracked ledger path.
+			if sessionsDir != filepath.Join(ledgerPath, "sessions") {
+				// A busy capture writer can be retried on the next detect pass;
+				// keep one session from blocking the scan for the default 10s.
+				recoverErr := fileutil.WithFileLockTimeout(context.Background(), rawPath, 250*time.Millisecond, func() error {
+					var err error
+					hasRaw, err = recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath)
+					if err != nil {
+						return err
 					}
-					continue
+					// A queued watcher must observe the cleared marker before it
+					// acquires this lock and tries to resume the old cursor.
+					return os.Remove(recPath)
+				})
+				if recoverErr != nil {
+					h.logger.Warn("stale recording recovery deferred", "session", name, "err", recoverErr)
+					continue // preserve raw and the cursor so a later pass can retry
 				}
+			} else if err := os.Remove(recPath); err != nil {
+				h.logger.Warn("failed to remove stale recording marker", "session", name, "err", err)
+				continue
+			}
+			if !hasRaw {
+				h.logger.Warn("stale recording unrecoverable, clearing marker",
+					"session", name,
+					"recording_age", recAge.Round(time.Hour),
+				)
+				continue
 			}
 			// stale recording with raw.jsonl: clear the marker so we can finalize
 			h.logger.Info("clearing stale recording for anti-entropy finalization",
@@ -448,10 +466,6 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 				"recording_age", recAge.Round(time.Hour),
 				"detection_method", method,
 			)
-			if err := os.Remove(recPath); err != nil {
-				h.logger.Warn("failed to remove stale recording marker", "session", name, "err", err)
-				continue
-			}
 		}
 
 		if !hasRaw {
@@ -679,30 +693,40 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			rawPath := filepath.Join(sessionDir, artifactRaw)
 			hasRaw := false
 			if _, statErr := os.Stat(rawPath); statErr == nil {
+				if lfs.IsPointerFile(rawPath) {
+					continue
+				}
 				hasRaw = true
 			}
 
-			if !hasRaw {
-				// attempt recovery from adapter source file
-				if recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath) {
-					hasRaw = true
-				} else {
-					h.logger.Warn("orphaned recording unrecoverable for agent",
-						"session", name, "agent_id", agentID,
-					)
-					_ = os.Remove(recPath)
+			if sessionsDir != filepath.Join(ledgerPath, "sessions") {
+				recoverErr := fileutil.WithFileLockTimeout(context.Background(), rawPath, 250*time.Millisecond, func() error {
+					var err error
+					hasRaw, err = recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath)
+					if err != nil {
+						return err
+					}
+					return os.Remove(recPath)
+				})
+				if recoverErr != nil {
+					h.logger.Warn("orphaned recording recovery deferred", "session", name, "err", recoverErr)
 					continue
 				}
+			} else if err := os.Remove(recPath); err != nil {
+				h.logger.Warn("failed to remove orphaned recording marker", "session", name, "err", err)
+				continue
+			}
+			if !hasRaw {
+				h.logger.Warn("orphaned recording unrecoverable for agent",
+					"session", name, "agent_id", agentID,
+				)
+				continue
 			}
 
 			// clear the recording marker so finalization can proceed
 			h.logger.Info("clearing orphaned recording for agent exit finalization",
 				"session", name, "agent_id", agentID,
 			)
-			if err := os.Remove(recPath); err != nil {
-				h.logger.Warn("failed to remove orphaned recording marker", "session", name, "err", err)
-				continue
-			}
 
 			if !session.HasSubstantiveEntries(rawPath) {
 				continue
@@ -2233,51 +2257,122 @@ func validateStoredEntries(entries []map[string]any, logger *slog.Logger) []stri
 	return warnings
 }
 
-// recoverRawFromSessionFile attempts to generate raw.jsonl from the adapter's
-// source file when a stale recording has no raw.jsonl. Handles the case where
-// an agent crashed before any hooks fired but the source file still exists.
-func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath string) bool {
-	// read .recording.json
+// recoverRawFromSessionFile recovers missing capture and drains a dead tail
+// recording from its persisted cursor. The watcher must be stopped first.
+// false, nil means the source was verified empty; errors leave the marker and
+// captured data intact so finalization can retry without losing the native tail.
+func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath string) (bool, error) {
 	data, err := os.ReadFile(recPath)
 	if err != nil {
-		logger.Warn("recovery: cannot read recording state", "path", recPath, "err", err)
-		return false
+		return false, fmt.Errorf("read recording state: %w", err)
 	}
 	var state session.RecordingState
 	if err := json.Unmarshal(data, &state); err != nil {
-		logger.Warn("recovery: invalid recording state", "path", recPath, "err", err)
-		return false
+		return false, fmt.Errorf("parse recording state: %w", err)
 	}
 
-	// check SessionFile exists and has content
-	if state.SessionFile == "" {
-		logger.Info("recovery: no session file path in recording state", "session_dir", sessionDir)
-		return false
+	hasRaw := session.HasSubstantiveEntries(rawPath)
+	if state.StoppedAt != nil || (hasRaw && state.WatchMode != "tail") {
+		return hasRaw, nil // CLI stop already selected and masked the recording
 	}
-	info, err := os.Stat(state.SessionFile)
-	if err != nil || info.Size() == 0 {
-		logger.Info("recovery: session file missing or empty",
-			"session_file", state.SessionFile,
-			"exists", err == nil,
-		)
-		return false
+	if lfs.IsPointerFile(rawPath) {
+		return false, fmt.Errorf("cannot recover into an LFS pointer")
 	}
 
-	// get adapter
+	// Keep every existing metadata/entry field. A decoder error is fatal:
+	// silently skipping malformed captured data would lose it on the rewrite.
+	var header, footer map[string]any
+	var captured []map[string]any
+	if f, openErr := os.Open(rawPath); openErr == nil {
+		defer f.Close()
+		dec := json.NewDecoder(f)
+		for {
+			var entry map[string]any
+			if err := dec.Decode(&entry); errors.Is(err, io.EOF) {
+				break
+			} else if err != nil {
+				return false, fmt.Errorf("read captured session: %w", err)
+			}
+			if _, isMeta := entry["_meta"]; isMeta || entry["type"] == "header" {
+				header = entry
+			} else if entry["type"] == "footer" {
+				footer = entry
+			} else {
+				captured = append(captured, entry)
+			}
+		}
+		if err := f.Close(); err != nil {
+			return false, fmt.Errorf("close captured session: %w", err)
+		}
+	} else if !errors.Is(openErr, os.ErrNotExist) {
+		return false, fmt.Errorf("open captured session: %w", openErr)
+	}
+
+	meta, _ := header["_meta"].(map[string]any)
+	if header["type"] == "header" {
+		meta, _ = header["metadata"].(map[string]any)
+	}
+	if recovered, _ := meta["recovered"].(bool); recovered {
+		// Recovery atomically committed its content and mask before a crash
+		// left the old marker behind. Do not import or mask those entries twice.
+		return len(captured) > 0, nil
+	}
+	if state.AdapterName == "" {
+		return hasRaw, nil
+	}
 	adapter, err := adapters.GetAdapter(state.AdapterName)
 	if err != nil {
-		logger.Warn("recovery: unknown adapter", "adapter", state.AdapterName, "err", err)
-		return false
+		return false, fmt.Errorf("resolve recovery adapter: %w", err)
+	}
+	if state.SessionFile == "" {
+		if state.WatchMode != "tail" {
+			return hasRaw, nil
+		}
+		state.SessionFile, err = adapter.FindSessionFile(adapters.SessionLookup{
+			RepoRoot: state.WorkspacePath, AgentID: state.AgentID,
+			Since: state.StartedAt.Add(-5 * time.Minute), AgentSessionID: state.AgentSessionID,
+		})
+		if err != nil {
+			return false, fmt.Errorf("find native session for recovery: %w", err)
+		}
+		if state.SessionFile == "" {
+			return false, adapters.ErrSessionNotFound
+		}
+	}
+	if state.WatchMode == "tail" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false, fmt.Errorf("resolve session source home: %w", err)
+		}
+		state.SessionFile, err = adapters.SafeSessionFilePath(state.AdapterName, state.SessionFile, home)
+		if err != nil {
+			return false, fmt.Errorf("validate recovery source: %w", err)
+		}
 	}
 
-	// read all entries from source
-	rawEntries, err := adapter.Read(state.SessionFile)
+	var rawEntries []adapters.RawEntry
+	if reader, ok := adapter.(adapters.IncrementalReader); ok {
+		offset := state.StartOffset
+		if len(captured) > 0 {
+			if state.SourceOffset <= state.StartOffset {
+				return false, fmt.Errorf("captured session has no reliable native recovery cursor")
+			}
+			offset = state.SourceOffset
+		}
+		var nextOffset int64
+		rawEntries, nextOffset, err = reader.ReadFromOffset(state.SessionFile, offset)
+		if err == nil && (nextOffset < offset || (len(rawEntries) > 0 && nextOffset == offset)) {
+			return false, fmt.Errorf("native recovery cursor did not advance: offset=%d returned=%d", offset, nextOffset)
+		}
+	} else if len(captured) == 0 {
+		rawEntries, err = adapter.Read(state.SessionFile)
+	} else {
+		return false, fmt.Errorf("adapter does not support incremental recovery")
+	}
 	if err != nil {
-		logger.Warn("recovery: failed to read session file", "path", state.SessionFile, "err", err)
-		return false
+		return false, fmt.Errorf("read native session: %w", err)
 	}
 
-	// filter entries by StartedAt
 	var filtered []adapters.RawEntry
 	for _, e := range rawEntries {
 		if !e.Timestamp.IsZero() && e.Timestamp.Before(state.StartedAt) {
@@ -2285,99 +2380,81 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		}
 		filtered = append(filtered, e)
 	}
-
-	if len(filtered) == 0 {
-		logger.Info("recovery: no entries after session start time",
-			"session_file", state.SessionFile,
-			"started_at", state.StartedAt,
-			"total_entries", len(rawEntries),
-		)
-		return false
-	}
-
-	// convert to session entries
 	entries := session.ConvertRawEntries(filtered)
-
-	// redact secrets
-	projectRoot := state.WorkspacePath
-	if projectRoot != "" {
-		redactor, _ := session.NewRedactorWithCustomRules(projectRoot)
-		if redactor != nil {
-			redactor.RedactEntries(entries)
-		}
+	ranges := session.BuildSegmentRanges(state.Lifecycle)
+	if len(entries) == 0 && len(ranges) == 0 {
+		return len(captured) > 0, nil
 	}
 
-	// write to a temp file first so a partial write never leaves a corrupt
-	// raw.jsonl that a future Detect cycle would treat as valid
+	if header == nil {
+		meta = map[string]any{
+			"schema_version": "1", "agent_id": state.AgentID,
+			"agent_type": state.AdapterName, "started_at": state.StartedAt,
+		}
+		if state.SessionID != "" {
+			meta["session_id"] = state.SessionID
+		}
+		if state.ContinuedFromSessionID != "" {
+			meta["continued_from_session_id"] = state.ContinuedFromSessionID
+		}
+		header = map[string]any{"_meta": meta}
+	}
+	if meta == nil {
+		return false, fmt.Errorf("captured session has an invalid metadata header")
+	}
+	meta["recovered"] = true
+
+	// Atomic replacement preserves the captured prefix on any source or write
+	// failure. All newly imported content passes through RawWriter's full
+	// command, built-in, custom and extra-detector redaction stack.
 	tmpPath := rawPath + ".tmp"
-	f, err := os.Create(tmpPath)
+	rw, err := session.NewRawWriterTruncate(tmpPath, state.WorkspacePath)
 	if err != nil {
-		logger.Warn("recovery: cannot create temp file", "path", tmpPath, "err", err)
-		return false
+		return false, err
 	}
-	defer func() {
-		f.Close()
-		os.Remove(tmpPath) // no-op after successful rename
-	}()
-
-	enc := json.NewEncoder(f)
-
-	// write header. state.SessionID (when present — post rollout, minted at
-	// StartRecording) MUST be carried into the reconstructed header: this
-	// raw.jsonl is the crash-safe carrier every later finalize path reads
-	// via ReadHeaderSessionID/ParseStoreMeta. Dropping it here would make
-	// writeMetaAndUploadLFS treat the session as having no durable ID and
-	// mint a fresh one, rotating away from an identity that may already be
-	// circulated (commit trailers, PR bodies) or cached server-side.
-	metaFields := map[string]any{
-		"schema_version": "1",
-		"agent_id":       state.AgentID,
-		"agent_type":     state.AdapterName,
-		"started_at":     state.StartedAt,
-		"recovered":      true,
+	defer rw.Close()
+	defer os.Remove(tmpPath)
+	if err := rw.WriteRaw(header); err != nil {
+		return false, err
 	}
-	if state.SessionID != "" {
-		metaFields["session_id"] = state.SessionID
+	written := 0
+	for i, entry := range captured {
+		if session.IsSeqExcluded(i, ranges) {
+			continue
+		}
+		if err := rw.WriteRaw(entry); err != nil {
+			return false, err
+		}
+		written++
 	}
-	if state.ContinuedFromSessionID != "" {
-		metaFields["continued_from_session_id"] = state.ContinuedFromSessionID
+	for i := range entries {
+		if session.IsSeqExcluded(len(captured)+i, ranges) {
+			continue
+		}
+		if err := rw.WriteEntry(&entries[i]); err != nil {
+			return false, err
+		}
+		written++
 	}
-	header := map[string]any{
-		"_meta": metaFields,
-	}
-	if err := enc.Encode(header); err != nil {
-		logger.Warn("recovery: failed to write header", "err", err)
-		return false
-	}
-
-	for _, entry := range entries {
-		if err := enc.Encode(entry); err != nil {
-			logger.Warn("recovery: failed to write entry", "err", err)
-			return false
+	if footer != nil {
+		if err := rw.WriteRaw(footer); err != nil {
+			return false, err
 		}
 	}
-
-	if err := f.Sync(); err != nil {
-		logger.Warn("recovery: fsync failed", "err", err)
-		return false
+	if err := rw.CloseAndSync(); err != nil {
+		return false, err
 	}
-
-	if err := f.Close(); err != nil {
-		logger.Warn("recovery: close failed", "err", err)
-		return false
+	// Abort or stop may have removed/updated the marker while the adapter
+	// read its source. Never resurrect an aborted session or replace CLI work.
+	current, err := os.ReadFile(recPath)
+	if err != nil || !bytes.Equal(data, current) {
+		return false, fmt.Errorf("recording changed during native recovery")
 	}
-
 	if err := os.Rename(tmpPath, rawPath); err != nil {
-		logger.Warn("recovery: atomic rename failed", "err", err)
-		return false
+		return false, fmt.Errorf("replace recovered session: %w", err)
 	}
-
-	logger.Info("recovery: raw.jsonl recovered from session file",
-		"session_dir", sessionDir,
-		"entries", len(entries),
-		"source", state.SessionFile,
-	)
-	return true
+	logger.Info("recovered native session", "session_dir", sessionDir, "entries", written, "source", state.SessionFile)
+	return written > 0, nil
 }
 
 // isPIDAlive checks if a process with the given PID exists.

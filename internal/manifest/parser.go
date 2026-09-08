@@ -273,6 +273,107 @@ func EnsureSageoxInclude(paths []string) []string {
 	return append(paths, "/.sageox/")
 }
 
+// requiredTeamContextDirs are directories ox ITSELF reads out of a team-context
+// checkout. They are not a preference: if one is missing from the sparse set,
+// the feature that reads it is silently dead on every client.
+//
+// agents/ holds team rules (teamdocs.DiscoverRules) and team skills. The
+// server-generated sync.manifest has omitted it — GH #862 — so sparse-checkout
+// never materialized the directory and DiscoverRules walked an empty tree. No
+// error surfaced anywhere: an empty tree and "this team has no rules" are the
+// same value, which is why it went unnoticed. The client fallback include set
+// lists agents/, but the TRACKED manifest wins whenever one exists.
+var requiredTeamContextDirs = []string{"agents/"}
+
+// EnsureRequiredIncludes floors the sparse set with the directories ox needs for
+// this repo kind, whatever the server-generated manifest happens to list.
+//
+// This is a floor, not an override, in three senses:
+//
+//  1. It only ADDS, and only when the path is not already covered.
+//  2. It does NOT override an explicit deny. A team that deliberately denied
+//     agents/ has made a choice; flooring over it would silently materialize
+//     content they excluded on purpose.
+//  3. Denied DESCENDANTS are re-emitted as negations after the floor. This is
+//     load-bearing: ComputeSparseSet enforces denies by omitting overlapping
+//     includes and never emits deny patterns of its own, so appending "/agents/"
+//     under --no-cone ordering would re-include a denied "agents/secrets/" that
+//     was previously excluded only because no include mentioned it.
+//
+// The durable fix for a manifest that omits a required directory is server-side.
+// This keeps a client working in the meantime rather than failing silently, and
+// costs nothing once the manifest is correct.
+func EnsureRequiredIncludes(paths []string, kind RepoKind, denies []string) []string {
+	if kind != RepoKindTeamContext {
+		return paths
+	}
+	for _, want := range requiredTeamContextDirs {
+		if includesPath(paths, want) {
+			continue
+		}
+		if deniedAtOrAbove(denies, want) {
+			continue // an explicit deny outranks the floor
+		}
+		// Appended, never prepended, for the same reason as EnsureSageoxInclude:
+		// ComputeSparseSet emits "!/*/" to drop root-level directories, and in
+		// --no-cone mode later patterns override earlier ones.
+		paths = append(paths, "/"+strings.TrimSuffix(want, "/")+"/")
+
+		// Re-exclude anything denied BENEATH what we just floored. Later patterns
+		// win, so these must follow the include.
+		for _, d := range denies {
+			if deniedUnder(want, d) {
+				paths = append(paths, "!"+anchorPattern(strings.TrimSpace(d)))
+			}
+		}
+	}
+	return paths
+}
+
+// deniedAtOrAbove reports whether want is denied outright, or sits beneath a
+// denied parent.
+func deniedAtOrAbove(denies []string, want string) bool {
+	target := strings.Trim(strings.TrimSpace(want), "/")
+	for _, d := range denies {
+		deny := strings.Trim(strings.TrimSpace(d), "/")
+		if deny == "" {
+			continue
+		}
+		if deny == target || strings.HasPrefix(target+"/", deny+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// deniedUnder reports whether deny names something strictly beneath parent.
+func deniedUnder(parent, deny string) bool {
+	p := strings.Trim(strings.TrimSpace(parent), "/")
+	d := strings.Trim(strings.TrimSpace(deny), "/")
+	if p == "" || d == "" || d == p {
+		return false
+	}
+	return strings.HasPrefix(d+"/", p+"/")
+}
+
+// includesPath reports whether want is already covered by paths, tolerating the
+// leading- and trailing-slash spellings a hand-edited manifest may use.
+func includesPath(paths []string, want string) bool {
+	norm := func(p string) string {
+		return strings.Trim(strings.TrimSpace(p), "/")
+	}
+	target := norm(want)
+	if target == "" {
+		return true
+	}
+	for _, p := range paths {
+		if norm(p) == target {
+			return true
+		}
+	}
+	return false
+}
+
 // pathOverlaps returns true if a and b overlap: same path, or one is a
 // parent directory of the other.
 func pathOverlaps(a, b string) bool {
@@ -294,4 +395,16 @@ func validatePath(path string, lineNum int) error {
 		return fmt.Errorf("path traversal")
 	}
 	return nil
+}
+
+// DenyPaths returns cfg's deny list, tolerating a nil config.
+//
+// Exists so callers can pass denies to EnsureRequiredIncludes without repeating
+// a nil check at every call site — and, more importantly, without being tempted
+// to pass nil and quietly lose the deny enforcement.
+func DenyPaths(cfg *ManifestConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Denies
 }

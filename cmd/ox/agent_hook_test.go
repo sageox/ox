@@ -4,12 +4,17 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sageox/agentx"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
@@ -125,6 +130,152 @@ func setupHandleAfterToolTest(t *testing.T) (projectRoot string, agentID string,
 	require.NoError(t, writeRawHeader(projectRoot, state))
 
 	return projectRoot, agentID, sourceFile
+}
+
+func buildCodexCaptureAdapter(t *testing.T) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("short: builds and invokes the real Codex adapter")
+	}
+	adapterBin := filepath.Join(t.TempDir(), "ox-adapter-codex")
+	build := exec.Command("go", "build", "-o", adapterBin, "./cmd/ox-adapter-codex")
+	build.Dir = findModuleRoot(t)
+	buildOutput, err := build.CombinedOutput()
+	require.NoError(t, err, "%s", buildOutput)
+	return adapterBin
+}
+
+// Hook discovery must capture its own native conversation, including files created before prime.
+func TestHandleAfterTool_CodexDiscoveryUsesRecordingIdentity(t *testing.T) {
+	adapterBin := buildCodexCaptureAdapter(t)
+
+	for _, sourceState := range []string{"undiscovered", "missing", "truncated"} {
+		for _, knownIdentity := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/native_id=%t", sourceState, knownIdentity), func(t *testing.T) {
+				t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+				t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+				t.Setenv("OX_XDG_DISABLE", "")
+				projectRoot, agentID, previousSource := setupHandleAfterToolTest(t)
+				t.Chdir(projectRoot)
+				adapter, err := adapters.NewExternalAdapter(adapterBin)
+				require.NoError(t, err)
+				adapters.Register(adapter)
+				t.Cleanup(func() {
+					adapters.Unregister("codex")
+					_ = adapter.Close()
+				})
+
+				state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+				require.NoError(t, err)
+				require.NotNil(t, state)
+				nativeID := "019d2c0d-ac3c-7b72-bb1d-0f246ad1f0d0"
+				now := time.Now()
+				dateDir := filepath.Join(os.Getenv("HOME"), ".codex", "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
+				require.NoError(t, os.MkdirAll(dateDir, 0o755))
+				sourceFile := filepath.Join(dateDir, "requested.jsonl")
+				content := fmt.Sprintf("{\"type\":\"session_meta\",\"payload\":{\"id\":%q,\"cwd\":%q}}\n"+
+					"{\"timestamp\":%q,\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"requested conversation\"}]}}\n",
+					nativeID, projectRoot, state.StartedAt.Add(time.Second).Format(time.RFC3339Nano))
+				require.NoError(t, os.WriteFile(sourceFile, []byte(content), 0o600))
+				beforePrime := state.StartedAt.Add(-time.Minute)
+				require.NoError(t, os.Chtimes(sourceFile, beforePrime, beforePrime))
+				if knownIdentity {
+					// A newer sibling makes ignoring the persisted identity capture the wrong source.
+					sibling := strings.ReplaceAll(content, nativeID, "sibling-session")
+					sibling = strings.ReplaceAll(sibling, "requested conversation", "sibling conversation")
+					require.NoError(t, os.WriteFile(filepath.Join(dateDir, "sibling.jsonl"), []byte(sibling), 0o600))
+				}
+				require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
+					s.AdapterName = "codex"
+					s.WorkspacePath = projectRoot
+					if knownIdentity {
+						s.AgentSessionID = nativeID
+					}
+					switch sourceState {
+					case "undiscovered":
+						s.SessionFile = ""
+					case "missing":
+						s.SessionFile = filepath.Join(dateDir, "missing.jsonl")
+					case "truncated":
+						s.SessionFile = previousSource
+						s.SourceOffset = 1024
+					}
+				}))
+
+				require.NoError(t, handleAfterTool(&HookContext{
+					Phase: phaseAfterTool, AgentType: "codex", ProjectRoot: projectRoot,
+					Marker: &SessionMarker{AgentID: agentID},
+				}))
+				captured, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+				require.NoError(t, err)
+				require.NotNil(t, captured)
+				assert.Equal(t, sourceFile, captured.SessionFile)
+				assert.Equal(t, int64(len(content)), captured.SourceOffset)
+				assert.Equal(t, 1, captured.EntryCount)
+				raw, err := os.ReadFile(filepath.Join(captured.SessionPath, "raw.jsonl"))
+				require.NoError(t, err)
+				assert.Contains(t, string(raw), "requested conversation")
+				assert.NotContains(t, string(raw), "sibling conversation")
+			})
+		}
+	}
+}
+
+// Current hook input must override an older marker when selecting the native conversation.
+func TestHookStart_UsesCurrentNativeSessionIdentity(t *testing.T) {
+	adapterBin := buildCodexCaptureAdapter(t)
+	const nativeID = "codex-test-session"
+	for _, tt := range []struct {
+		name     string
+		markerID string
+		input    *agentx.HookInput
+	}{
+		{name: "marker only", markerID: nativeID},
+		{name: "empty input retains marker", markerID: nativeID, input: &agentx.HookInput{}},
+		{name: "input overrides stale marker", markerID: "stale-native-session", input: &agentx.HookInput{SessionID: nativeID}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			f := newDraftLedgerFixture(t)
+			t.Chdir(f.projectRoot)
+			defaultLedger, err := ledger.DefaultPath()
+			require.NoError(t, err)
+			require.NoError(t, os.MkdirAll(filepath.Dir(defaultLedger), 0o755))
+			runGit(t, f.projectRoot, "clone", "--quiet", f.barePath, defaultLedger)
+			oldCfg := cfg
+			cfg = &config.Config{}
+			t.Cleanup(func() { cfg = oldCfg })
+			oxConfigSetRepo(t, "session_recording", "auto")
+			adapter, err := adapters.NewExternalAdapter(adapterBin)
+			require.NoError(t, err)
+			adapters.Register(adapter)
+			t.Cleanup(func() {
+				adapters.Unregister("codex")
+				_ = adapter.Close()
+			})
+			source := writeCodexSessionFile(t, os.Getenv("HOME"), f.projectRoot)
+			data, err := os.ReadFile(source)
+			require.NoError(t, err)
+			sibling := filepath.Join(filepath.Dir(source), "stale-session.jsonl")
+			require.NoError(t, os.WriteFile(sibling, []byte(strings.ReplaceAll(string(data), nativeID, "stale-native-session")), 0o600))
+
+			const agentID = "OxHookNative"
+			startSessionRecordingIfConfigured(&HookContext{
+				AgentType: "codex", ProjectRoot: f.projectRoot, Input: tt.input,
+				Marker: &SessionMarker{AgentID: agentID, AgentSessionID: tt.markerID, RecordingSessionID: draftTestSessionID},
+			})
+			state, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
+			require.NoError(t, err)
+			require.NotNil(t, state)
+			assert.Equal(t, nativeID, state.AgentSessionID)
+			assert.Equal(t, source, state.SessionFile, "hook startup must attach to the current native conversation")
+			assert.Equal(t, draftTestSessionID, state.ContinuedFromSessionID)
+			assert.FileExists(t, filepath.Join(state.SessionPath, "raw.jsonl"))
+		})
+	}
 }
 
 func TestHandleAfterTool_WritesEntriesToRawJSONL(t *testing.T) {

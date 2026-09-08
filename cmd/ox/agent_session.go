@@ -23,6 +23,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/plan"
@@ -123,6 +124,10 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	title := parseTitle(args)
 
 	agentType := canonicalAgentType(inst.AgentType)
+	var agentSessionID string
+	if agent, ok := agentx.DefaultRegistry.Get(agentx.AgentType(agentType)); ok && agent.SupportsSession() {
+		agentSessionID = agent.SessionID(agentx.NewSystemEnvironment())
+	}
 	adapterName := ""          // canonical adapter name for GetAdapter() lookup
 	agentTypeName := agentType // original type for metadata
 	sessionFile := ""
@@ -137,9 +142,10 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		}
 		since := time.Now().Add(-5 * time.Minute)
 		sf, findErr := codexAdapter.FindSessionFile(adapters.SessionLookup{
-			RepoRoot: projectRoot,
-			AgentID:  inst.AgentID,
-			Since:    since,
+			RepoRoot:       projectRoot,
+			AgentID:        inst.AgentID,
+			AgentSessionID: agentSessionID,
+			Since:          since,
 		})
 		if findErr != nil {
 			if errors.Is(findErr, adapters.ErrSessionNotFound) {
@@ -227,17 +233,18 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	// start recording with agent ID from session
 	opts := session.StartRecordingOptions{
-		AgentID:       inst.AgentID,
-		AdapterName:   adapterName,
-		AgentType:     agentTypeName,
-		SessionFile:   sessionFile,
-		Title:         title,
-		Username:      identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName()),
-		WorkspacePath: projectRoot,
-		Branch:        repotools.GetCurrentBranch(projectRoot),
-		ParentPID:     parentPID,
-		StartOffset:   startOffset,
-		WatchMode:     "hook", // CLI-started sessions use hook mode (CLI hooks drive recording)
+		AgentID:        inst.AgentID,
+		AgentSessionID: agentSessionID,
+		AdapterName:    adapterName,
+		AgentType:      agentTypeName,
+		SessionFile:    sessionFile,
+		Title:          title,
+		Username:       identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName()),
+		WorkspacePath:  projectRoot,
+		Branch:         repotools.GetCurrentBranch(projectRoot),
+		ParentPID:      parentPID,
+		StartOffset:    startOffset,
+		WatchMode:      sessionWatchMode(adapterName),
 	}
 
 	state, err := session.StartRecording(projectRoot, opts)
@@ -258,6 +265,9 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	// register-at-start so /c/<session_id> resolves from t=0 (fire-and-forget)
 	notifySessionStartedAsync(projectRoot, state)
+	if state.WatchMode == "tail" {
+		sendSessionWatchStart(state, projectRoot)
+	}
 
 	// build output once, render based on mode
 	output := buildSessionStartOutput(inst.AgentID, adapterName, sessionFile, title, notice, state.StartedAt)
@@ -442,7 +452,9 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// mark explicit stop BEFORE daemon RPC so anti-entropy cannot restart
 	// the watcher in the window between RPC and mark
-	_ = session.MarkExplicitStop(projectRoot, inst.AgentID)
+	if err := session.MarkExplicitStop(projectRoot, inst.AgentID); err != nil {
+		return fmt.Errorf("mark session stopped: %w", err)
+	}
 
 	// for tail-mode sessions: tell the daemon to stop tailing before we process
 	if state.WatchMode == "tail" {
@@ -466,9 +478,10 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 				repoRoot = projectRoot // fallback for legacy states without WorkspacePath
 			}
 			lookup := adapters.SessionLookup{
-				RepoRoot: repoRoot,
-				AgentID:  state.AgentID,
-				Since:    state.StartedAt,
+				RepoRoot:       repoRoot,
+				AgentID:        state.AgentID,
+				AgentSessionID: state.AgentSessionID,
+				Since:          state.StartedAt.Add(-5 * time.Minute),
 			}
 			if sf, findErr := adapter.FindSessionFile(lookup); findErr == nil {
 				slog.Info("session file discovered at stop time", "file", sf, "adapter", state.AdapterName)
@@ -480,9 +493,10 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 				pathVariants := sessionPathVariants(repoRoot)
 				for _, variant := range pathVariants {
 					retryLookup := adapters.SessionLookup{
-						RepoRoot: variant,
-						AgentID:  state.AgentID,
-						Since:    state.StartedAt,
+						RepoRoot:       variant,
+						AgentID:        state.AgentID,
+						AgentSessionID: state.AgentSessionID,
+						Since:          state.StartedAt.Add(-5 * time.Minute),
 					}
 					if sf, retryErr := adapter.FindSessionFile(retryLookup); retryErr == nil {
 						slog.Info("session file discovered via path variant", "file", sf, "original_root", repoRoot, "variant", variant)
@@ -520,7 +534,27 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	var processResult *agentSessionResult
 	if state.SessionFile != "" {
 		processStart := time.Now()
-		processResult, err = processAgentSession(projectRoot, state)
+		if state.WatchMode == "tail" {
+			// IPC stop is advisory. Wait for the writer's file lock and reload
+			// its final cursor before draining, so an in-flight batch is not
+			// captured twice. A lock failure preserves the recording for retry.
+			err = fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+				latest, loadErr := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
+				if loadErr != nil {
+					return loadErr
+				}
+				if latest == nil {
+					return session.ErrNotRecording
+				}
+				latest.SessionFile = state.SessionFile
+				state = latest
+				var processErr error
+				processResult, processErr = processAgentSession(projectRoot, state)
+				return processErr
+			})
+		} else {
+			processResult, err = processAgentSession(projectRoot, state)
+		}
 		timing["process_ms"] = time.Since(processStart).Milliseconds()
 		if err != nil {
 			// set marker so future ox agent prime knows doctor is needed

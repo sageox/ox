@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
@@ -23,12 +27,17 @@ import (
 // watcher manager tests to exercise catch-up reads and live tailing without
 // requiring real external adapter binaries.
 type testAdapter struct {
-	name string
+	name  string
+	find  func(adapters.SessionLookup) (string, error)
+	watch func(context.Context, string) (<-chan adapters.RawEntry, error)
 }
 
 func (a *testAdapter) Name() string { return a.name }
 func (a *testAdapter) Detect() bool { return false }
-func (a *testAdapter) FindSessionFile(_ adapters.SessionLookup) (string, error) {
+func (a *testAdapter) FindSessionFile(lookup adapters.SessionLookup) (string, error) {
+	if a.find != nil {
+		return a.find(lookup)
+	}
 	return "", adapters.ErrSessionNotFound
 }
 func (a *testAdapter) Read(_ string) ([]adapters.RawEntry, error) { return nil, nil }
@@ -37,6 +46,9 @@ func (a *testAdapter) ReadMetadata(_ string) (*adapters.SessionMetadata, error) 
 }
 
 func (a *testAdapter) Watch(ctx context.Context, path string) (<-chan adapters.RawEntry, error) {
+	if a.watch != nil {
+		return a.watch(ctx, path)
+	}
 	tw := adapters.NewTailWatcher(path, 0, testParseLine)
 	return tw.Watch(ctx)
 }
@@ -110,6 +122,185 @@ func (m *SessionWatcherManager) codexSessionPath(t *testing.T, name string) stri
 
 // --- A. Lifecycle ---
 
+// A queued start can pass validation before CLI stop finishes under the raw lock.
+// It must recheck the marker after acquiring that lock and leave capture closed.
+func TestSessionWatcherManager_QueuedStartRechecksRecording(t *testing.T) {
+	for _, change := range []string{"removed", "corrupt", "stopped", "explicit-stop", "raw-directory"} {
+		t.Run(change, func(t *testing.T) {
+			mgr := newTestWatcherManager(t)
+			t.Cleanup(mgr.StopAll)
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			projectRoot := t.TempDir()
+			require.NoError(t, config.SaveProjectConfig(projectRoot, &config.ProjectConfig{RepoID: "repo_queued_start", Endpoint: "https://test.sageox.ai"}))
+			cachePath := t.TempDir()
+			source := mgr.codexSessionPath(t, "queued.jsonl")
+			require.NoError(t, os.WriteFile(source, []byte("must not be captured\n"), 0600))
+			rawPath := filepath.Join(cachePath, "raw.jsonl")
+			recPath := filepath.Join(cachePath, recordingMarker)
+			state := session.RecordingState{
+				AgentID: "OxQueued", WorkspacePath: projectRoot, SessionPath: cachePath,
+				SessionFile: source, AdapterName: "codex", WatchMode: "tail", ParentPID: os.Getpid(),
+			}
+			writeRecordingState(t, recPath, state)
+			require.NoError(t, fileutil.WithFileLock(context.Background(), rawPath, func() error {
+				require.NoError(t, mgr.StartWatch("queued", source, "codex", "/ledger", cachePath))
+				switch change {
+				case "removed":
+					return os.Remove(recPath)
+				case "corrupt":
+					return os.WriteFile(recPath, []byte("{invalid"), 0600)
+				case "stopped":
+					now := time.Now()
+					state.StoppedAt = &now
+					writeRecordingState(t, recPath, state)
+				case "explicit-stop":
+					return session.MarkExplicitStop(projectRoot, state.AgentID)
+				case "raw-directory":
+					return os.Mkdir(rawPath, 0700)
+				}
+				return nil
+			}))
+			require.Eventually(t, func() bool { return len(mgr.ActiveSessions()) == 0 }, time.Second, time.Millisecond)
+			mgr.StopAll()
+			if change == "raw-directory" {
+				assert.DirExists(t, rawPath, "an unwritable capture must be preserved for repair")
+				assert.FileExists(t, recPath, "opening failure must remain retryable")
+			} else {
+				assert.NoFileExists(t, rawPath, "late start must not recreate finalized capture")
+			}
+			if change == "explicit-stop" {
+				assert.True(t, session.HasExplicitStop(projectRoot, state.AgentID))
+			}
+		})
+	}
+}
+
+// Stream-only adapters must still capture, stop without IPC, and release the
+// raw lock when their stream ends or fails. Incremental adapters obey the same stop.
+func TestSessionWatcherManager_CaptureReleasesLock(t *testing.T) {
+	for _, end := range []string{"stream-close", "cancel", "explicit-stop", "watch-error", "incremental-stop"} {
+		t.Run(end, func(t *testing.T) {
+			if testing.Short() && (end == "explicit-stop" || end == "incremental-stop") {
+				t.Skip("short: durable stop detected on polling interval")
+			}
+			mgr := newTestWatcherManager(t)
+			t.Cleanup(mgr.StopAll)
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			projectRoot := t.TempDir()
+			require.NoError(t, config.SaveProjectConfig(projectRoot, &config.ProjectConfig{RepoID: "repo_capture_stop", Endpoint: "https://test.sageox.ai"}))
+			cachePath := t.TempDir()
+			source := mgr.codexSessionPath(t, "stream.jsonl")
+			require.NoError(t, os.WriteFile(source, nil, 0600))
+			state := session.RecordingState{
+				AgentID: "OxStream", WorkspacePath: projectRoot, SessionPath: cachePath,
+				SessionFile: source, AdapterName: "codex", WatchMode: "tail", ParentPID: os.Getpid(),
+			}
+			writeRecordingState(t, filepath.Join(cachePath, recordingMarker), state)
+			original, err := adapters.GetAdapter("codex")
+			require.NoError(t, err)
+			entries := make(chan adapters.RawEntry, 1)
+			if end != "incremental-stop" {
+				// Embedding the Adapter interface exposes Watch but hides the fake's
+				// IncrementalReader, exercising the supported stream-only fallback.
+				adapter := struct{ adapters.Adapter }{&testAdapter{name: "codex", watch: func(context.Context, string) (<-chan adapters.RawEntry, error) {
+					if end == "watch-error" {
+						return nil, errors.New("native session watch unavailable")
+					}
+					return entries, nil
+				}}}
+				adapters.Unregister("codex")
+				adapters.Register(adapter)
+				t.Cleanup(func() {
+					mgr.StopAll()
+					adapters.Unregister("codex")
+					adapters.Register(original)
+				})
+			}
+			rawPath := filepath.Join(cachePath, "raw.jsonl")
+			require.NoError(t, mgr.StartWatch("stream", source, "codex", "/ledger", cachePath))
+			if end == "incremental-stop" {
+				require.Eventually(t, func() bool { _, err := os.Stat(rawPath); return err == nil }, time.Second, time.Millisecond)
+			} else if end != "watch-error" {
+				entries <- adapters.RawEntry{Role: "assistant", Content: "captured before stop", Timestamp: time.Now()}
+				require.Eventually(t, func() bool {
+					data, err := os.ReadFile(rawPath)
+					return err == nil && strings.Contains(string(data), "captured before stop")
+				}, time.Second, time.Millisecond)
+			}
+			switch end {
+			case "stream-close":
+				close(entries)
+			case "cancel":
+				mgr.StopWatch("stream")
+			case "explicit-stop", "incremental-stop":
+				require.NoError(t, session.MarkExplicitStop(projectRoot, state.AgentID))
+			}
+			require.Eventually(t, func() bool { return len(mgr.ActiveSessions()) == 0 }, 5*time.Second, 10*time.Millisecond)
+			mgr.StopAll()
+			require.NoError(t, fileutil.WithFileLockTimeout(context.Background(), rawPath, 100*time.Millisecond, func() error { return nil }),
+				"CLI finalization must be able to acquire the capture lock")
+			data, err := os.ReadFile(rawPath)
+			require.NoError(t, err)
+			if end == "watch-error" || end == "incremental-stop" {
+				assert.Empty(t, data)
+			} else {
+				assert.Equal(t, 1, strings.Count(string(data), "captured before stop"))
+			}
+			assert.FileExists(t, filepath.Join(cachePath, recordingMarker), "capture must leave finalization state intact")
+		})
+	}
+}
+
+// A queued start IPC can arrive after stop removed or closed the recording.
+// It must not recreate capture, overwrite finalized content, or consume the
+// durable stop breadcrumb that also protects against a later auto-start.
+func TestSessionWatcherManager_StartWatch_RequiresLiveRecording(t *testing.T) {
+	for _, marker := range []string{"missing", "corrupt", "stopped", "explicit-stop"} {
+		t.Run(marker, func(t *testing.T) {
+			mgr := newTestWatcherManager(t)
+			t.Cleanup(mgr.StopAll)
+			t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+			t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+			t.Setenv("OX_XDG_DISABLE", "")
+			projectRoot := t.TempDir()
+			cfg := &config.ProjectConfig{RepoID: "repo_closed_recording", Endpoint: "https://test.sageox.ai"}
+			require.NoError(t, config.SaveProjectConfig(projectRoot, cfg))
+			cachePath := t.TempDir()
+			source := mgr.codexSessionPath(t, "closed.jsonl")
+			require.NoError(t, os.WriteFile(source, []byte("must not be captured\n"), 0600))
+			state := session.RecordingState{
+				AgentID: "OxClosed", WorkspacePath: projectRoot, SessionPath: cachePath,
+				SessionFile: source, AdapterName: "codex", WatchMode: "tail", ParentPID: os.Getpid(),
+			}
+			recPath := filepath.Join(cachePath, recordingMarker)
+			switch marker {
+			case "corrupt":
+				require.NoError(t, os.WriteFile(recPath, []byte("{invalid"), 0600))
+			case "stopped":
+				stopped := time.Now()
+				state.StoppedAt = &stopped
+				writeRecordingState(t, recPath, state)
+			case "explicit-stop":
+				writeRecordingState(t, recPath, state)
+				require.NoError(t, session.MarkExplicitStop(projectRoot, state.AgentID))
+			}
+
+			err := mgr.StartWatch("closed", source, "codex", paths.LedgersDataDir(cfg.RepoID, cfg.Endpoint), cachePath)
+			assert.Error(t, err, "a delayed IPC must be rejected when the recording is no longer live")
+			assert.Empty(t, mgr.ActiveSessions())
+			mgr.StopAll()
+			assert.NoFileExists(t, filepath.Join(cachePath, "raw.jsonl"), "rejected starts must not write capture data")
+			if marker == "explicit-stop" {
+				assert.True(t, session.ConsumeExplicitStop(projectRoot, state.AgentID), "watcher validation must not consume the explicit-stop breadcrumb")
+			}
+		})
+	}
+}
+
 // TestSessionWatcherManager_StartWatch_Idempotent verifies that starting a
 // watcher twice for the same session is a no-op (not an error or double-start).
 // Failure prevented: duplicate goroutines tailing the same file.
@@ -125,6 +316,9 @@ func TestSessionWatcherManager_StartWatch_Idempotent(t *testing.T) {
 	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
 
+	writeRecordingState(t, filepath.Join(dir, recordingMarker), session.RecordingState{
+		WatchMode: "tail", AdapterName: "codex", SessionFile: sessionFile, ParentPID: os.Getpid(),
+	})
 	err := mgr.StartWatch("test-session", sessionFile, "codex", "/ledger", dir)
 	require.NoError(t, err)
 
@@ -150,6 +344,9 @@ func TestSessionWatcherManager_StopWatch_RemovesWatcher(t *testing.T) {
 	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
 
+	writeRecordingState(t, filepath.Join(dir, recordingMarker), session.RecordingState{
+		WatchMode: "tail", AdapterName: "codex", SessionFile: sessionFile, ParentPID: os.Getpid(),
+	})
 	require.NoError(t, mgr.StartWatch("s1", sessionFile, "codex", "/ledger", dir))
 	assert.Len(t, mgr.ActiveSessions(), 1)
 
@@ -178,7 +375,12 @@ func TestSessionWatcherManager_StopAll_CleansUp(t *testing.T) {
 	for _, name := range []string{"s1", "s2", "s3"} {
 		f := mgr.codexSessionPath(t, name+".jsonl")
 		require.NoError(t, os.WriteFile(f, []byte{}, 0644))
-		require.NoError(t, mgr.StartWatch(name, f, "codex", "/ledger", dir))
+		cachePath := filepath.Join(dir, name)
+		require.NoError(t, os.MkdirAll(cachePath, 0700))
+		writeRecordingState(t, filepath.Join(cachePath, recordingMarker), session.RecordingState{
+			WatchMode: "tail", AdapterName: "codex", SessionFile: f, ParentPID: os.Getpid(),
+		})
+		require.NoError(t, mgr.StartWatch(name, f, "codex", "/ledger", cachePath))
 	}
 	assert.Len(t, mgr.ActiveSessions(), 3)
 
@@ -247,7 +449,7 @@ func TestSessionWatcherManager_DetectAndRestart_FindsTailRecordings(t *testing.T
 	defer mgr.StopAll()
 
 	ledgerDir := t.TempDir()
-	sessionsDir := filepath.Join(ledgerDir, "sessions")
+	sessionsDir := filepath.Join(ledgerDir, ".sageox", "cache", "sessions")
 
 	// create a tail-mode recording
 	sessionDir := filepath.Join(sessionsDir, "2026-03-31T10-00-test")
@@ -269,13 +471,122 @@ func TestSessionWatcherManager_DetectAndRestart_FindsTailRecordings(t *testing.T
 	assert.Len(t, mgr.ActiveSessions(), 1)
 }
 
+// A source file that appears after prime must be discovered without restarting
+// the coworker, using its persisted native ID rather than another session's file.
+func TestSessionWatcherManager_DetectAndRestart_RetriesMissingSource(t *testing.T) {
+	mgr := newTestWatcherManager(t)
+	t.Cleanup(mgr.StopAll)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+	t.Setenv("OX_XDG_DISABLE", "")
+	projectRoot := t.TempDir()
+	cfg := &config.ProjectConfig{RepoID: "repo_delayed_source", Endpoint: "https://test.sageox.ai"}
+	require.NoError(t, config.SaveProjectConfig(projectRoot, cfg))
+	ledgerPath := paths.LedgersDataDir(cfg.RepoID, cfg.Endpoint)
+	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+		AgentID: "OxLate", AgentSessionID: "native-thread", AdapterName: "codex",
+		WorkspacePath: projectRoot, WatchMode: "tail", ParentPID: os.Getpid(),
+	})
+	require.NoError(t, err)
+	source := mgr.codexSessionPath(t, "late.jsonl")
+	original, err := adapters.GetAdapter("codex")
+	require.NoError(t, err)
+	adapters.Unregister("codex")
+	adapters.Register(&testAdapter{name: "codex", find: func(lookup adapters.SessionLookup) (string, error) {
+		assert.Equal(t, state.AgentID, lookup.AgentID)
+		assert.Equal(t, "native-thread", lookup.AgentSessionID)
+		assert.Equal(t, projectRoot, lookup.RepoRoot)
+		if _, err := os.Stat(source); err != nil {
+			return "", err
+		}
+		return source, nil
+	}})
+	t.Cleanup(func() {
+		mgr.StopAll()
+		adapters.Unregister("codex")
+		adapters.Register(original)
+	})
+
+	assert.Zero(t, mgr.DetectAndRestart(ledgerPath), "missing source must remain retryable")
+	before, err := session.LoadRecordingStateForAgent(projectRoot, state.AgentID)
+	require.NoError(t, err)
+	require.NotNil(t, before)
+	assert.Empty(t, before.SessionFile)
+	require.NoError(t, os.WriteFile(source, []byte("late message\n"), 0o600))
+	require.Equal(t, 1, mgr.DetectAndRestart(ledgerPath))
+	after, err := session.LoadRecordingStateForAgent(projectRoot, state.AgentID)
+	require.NoError(t, err)
+	require.NotNil(t, after)
+	assert.Equal(t, source, after.SessionFile)
+	assert.Equal(t, "native-thread", after.AgentSessionID)
+	assert.Zero(t, mgr.DetectAndRestart(ledgerPath), "repeated detection must not duplicate capture")
+}
+
+// Failed discovery must not start capture from another file or lose the native
+// identity needed to retry when Conductor eventually writes the session.
+func TestSessionWatcherManager_DetectAndRestart_RejectsUnavailableSource(t *testing.T) {
+	for _, failure := range []string{"no-adapter", "unknown-adapter", "unsafe-source", "removed-recording"} {
+		t.Run(failure, func(t *testing.T) {
+			mgr := newTestWatcherManager(t)
+			t.Cleanup(mgr.StopAll)
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			projectRoot := t.TempDir()
+			cfg := &config.ProjectConfig{RepoID: "repo_discovery_failure", Endpoint: "https://test.sageox.ai"}
+			require.NoError(t, config.SaveProjectConfig(projectRoot, cfg))
+			adapterName := "codex"
+			switch failure {
+			case "no-adapter":
+				adapterName = ""
+			case "unknown-adapter":
+				adapterName = "missing-session-adapter"
+			}
+			state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+				AgentID: "OxDiscovery", AgentSessionID: "native-thread", AdapterName: adapterName,
+				WorkspacePath: projectRoot, WatchMode: "tail", ParentPID: os.Getpid(),
+			})
+			require.NoError(t, err)
+			source := mgr.codexSessionPath(t, "discovered.jsonl")
+			if failure == "unsafe-source" {
+				source = filepath.Join(t.TempDir(), "private.jsonl")
+			}
+			require.NoError(t, os.WriteFile(source, []byte("must not be uploaded\n"), 0600))
+			original, err := adapters.GetAdapter("codex")
+			require.NoError(t, err)
+			adapters.Unregister("codex")
+			adapters.Register(&testAdapter{name: "codex", find: func(lookup adapters.SessionLookup) (string, error) {
+				assert.Equal(t, state.AgentSessionID, lookup.AgentSessionID)
+				if failure == "removed-recording" {
+					return source, os.Remove(filepath.Join(state.SessionPath, recordingMarker))
+				}
+				return source, nil
+			}})
+			t.Cleanup(func() {
+				mgr.StopAll()
+				adapters.Unregister("codex")
+				adapters.Register(original)
+			})
+			assert.Zero(t, mgr.DetectAndRestart(paths.LedgersDataDir(cfg.RepoID, cfg.Endpoint)))
+			assert.Empty(t, mgr.ActiveSessions())
+			if failure != "removed-recording" {
+				after, err := session.LoadRecordingStateForAgent(projectRoot, state.AgentID)
+				require.NoError(t, err)
+				require.NotNil(t, after)
+				assert.Empty(t, after.SessionFile)
+				assert.Equal(t, "native-thread", after.AgentSessionID)
+			}
+		})
+	}
+}
+
 // TestSessionWatcherManager_DetectAndRestart_SkipsHookMode verifies hook-mode
 // recordings are not picked up by detection.
 // Failure prevented: daemon starts duplicate watcher for hook-driven sessions.
 func TestSessionWatcherManager_DetectAndRestart_SkipsHookMode(t *testing.T) {
 	mgr := newTestWatcherManager(t)
 	ledgerDir := t.TempDir()
-	sessionsDir := filepath.Join(ledgerDir, "sessions")
+	sessionsDir := filepath.Join(ledgerDir, ".sageox", "cache", "sessions")
 
 	sessionDir := filepath.Join(sessionsDir, "hook-session")
 	require.NoError(t, os.MkdirAll(sessionDir, 0755))
@@ -294,7 +605,7 @@ func TestSessionWatcherManager_DetectAndRestart_SkipsHookMode(t *testing.T) {
 func TestSessionWatcherManager_DetectAndRestart_SkipsStopped(t *testing.T) {
 	mgr := newTestWatcherManager(t)
 	ledgerDir := t.TempDir()
-	sessionsDir := filepath.Join(ledgerDir, "sessions")
+	sessionsDir := filepath.Join(ledgerDir, ".sageox", "cache", "sessions")
 
 	sessionDir := filepath.Join(sessionsDir, "stopped-session")
 	require.NoError(t, os.MkdirAll(sessionDir, 0755))
@@ -320,7 +631,7 @@ func TestSessionWatcherManager_DetectAndRestart_SkipsStopped(t *testing.T) {
 func TestSessionWatcherManager_DetectAndRestart_SkipsDeadPID(t *testing.T) {
 	mgr := newTestWatcherManager(t)
 	ledgerDir := t.TempDir()
-	sessionsDir := filepath.Join(ledgerDir, "sessions")
+	sessionsDir := filepath.Join(ledgerDir, ".sageox", "cache", "sessions")
 
 	sessionDir := filepath.Join(sessionsDir, "dead-agent")
 	require.NoError(t, os.MkdirAll(sessionDir, 0755))
@@ -349,7 +660,7 @@ func TestSessionWatcherManager_DetectAndRestart_SkipsAlreadyWatched(t *testing.T
 	mgr := newTestWatcherManager(t)
 
 	ledgerDir := t.TempDir()
-	sessionsDir := filepath.Join(ledgerDir, "sessions")
+	sessionsDir := filepath.Join(ledgerDir, ".sageox", "cache", "sessions")
 	sessionDir := filepath.Join(sessionsDir, "active-session")
 	require.NoError(t, os.MkdirAll(sessionDir, 0755))
 
@@ -403,7 +714,7 @@ func TestSessionWatcherManager_DetectAndRestart_CatchUpFromPersistedOffset(t *te
 	defer mgr.StopAll()
 
 	ledgerDir := t.TempDir()
-	sessionsDir := filepath.Join(ledgerDir, "sessions")
+	sessionsDir := filepath.Join(ledgerDir, ".sageox", "cache", "sessions")
 	sessionDir := filepath.Join(sessionsDir, "catchup-session")
 	require.NoError(t, os.MkdirAll(sessionDir, 0755))
 
@@ -476,7 +787,7 @@ func TestSessionWatcherManager_WritePath_RedactsCredentials(t *testing.T) {
 	defer mgr.StopAll()
 
 	ledgerDir := t.TempDir()
-	sessionsDir := filepath.Join(ledgerDir, "sessions")
+	sessionsDir := filepath.Join(ledgerDir, ".sageox", "cache", "sessions")
 	sessionDir := filepath.Join(sessionsDir, "canary-session")
 	require.NoError(t, os.MkdirAll(sessionDir, 0755))
 
@@ -564,7 +875,7 @@ func TestSessionWatcherManager_WritePath_WholeOutputRedactsAwsSso(t *testing.T) 
 	defer mgr.StopAll()
 
 	ledgerDir := t.TempDir()
-	sessionsDir := filepath.Join(ledgerDir, "sessions")
+	sessionsDir := filepath.Join(ledgerDir, ".sageox", "cache", "sessions")
 	sessionDir := filepath.Join(sessionsDir, "aws-sso-session")
 	require.NoError(t, os.MkdirAll(sessionDir, 0755))
 
@@ -856,6 +1167,9 @@ func TestSessionWatcherManager_Cleanup_StopsStopped(t *testing.T) {
 	dir := t.TempDir()
 	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
+	writeRecordingState(t, filepath.Join(dir, recordingMarker), session.RecordingState{
+		WatchMode: "tail", AdapterName: "codex", SessionFile: sessionFile, ParentPID: os.Getpid(),
+	})
 	require.NoError(t, mgr.StartWatch("s1", sessionFile, "codex", "/ledger", dir))
 
 	// write a stopped recording marker
@@ -885,9 +1199,13 @@ func TestSessionWatcherManager_Cleanup_StopsOrphaned(t *testing.T) {
 	dir := t.TempDir()
 	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
+	writeRecordingState(t, filepath.Join(dir, recordingMarker), session.RecordingState{
+		WatchMode: "tail", AdapterName: "codex", SessionFile: sessionFile, ParentPID: os.Getpid(),
+	})
 	require.NoError(t, mgr.StartWatch("s1", sessionFile, "codex", "/ledger", dir))
 
-	// no .recording.json in dir → orphaned
+	// marker removed after startup → orphaned
+	require.NoError(t, os.Remove(filepath.Join(dir, recordingMarker)))
 	mgr.Cleanup()
 
 	require.Eventually(t, func() bool {
@@ -908,7 +1226,14 @@ func TestSessionWatcherManager_Cleanup_SkipsCorruptRecording(t *testing.T) {
 	dir := t.TempDir()
 	sessionFile := mgr.codexSessionPath(t, "session.jsonl")
 	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
+	writeRecordingState(t, filepath.Join(dir, recordingMarker), session.RecordingState{
+		WatchMode: "tail", AdapterName: "codex", SessionFile: sessionFile, ParentPID: os.Getpid(),
+	})
 	require.NoError(t, mgr.StartWatch("s1", sessionFile, "codex", "/ledger", dir))
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(dir, "raw.jsonl"))
+		return err == nil
+	}, time.Second, 10*time.Millisecond, "wait for capture to open before corrupting the marker")
 
 	// overwrite .recording.json with garbage
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), []byte("{{not json"), 0644))
@@ -959,7 +1284,7 @@ func TestSessionWatcherManager_DetectAndRestart_OffsetBeyondEOF(t *testing.T) {
 	mgr := newTestWatcherManager(t)
 
 	ledgerDir := t.TempDir()
-	sessionsDir := filepath.Join(ledgerDir, "sessions")
+	sessionsDir := filepath.Join(ledgerDir, ".sageox", "cache", "sessions")
 	sessionDir := filepath.Join(sessionsDir, "truncated-session")
 	require.NoError(t, os.MkdirAll(sessionDir, 0755))
 
@@ -1001,7 +1326,7 @@ func TestSessionWatcherManager_CatchUpReadFailure_LiveTailStillStarts(t *testing
 	mgr := newTestWatcherManager(t)
 
 	ledgerDir := t.TempDir()
-	sessionsDir := filepath.Join(ledgerDir, "sessions")
+	sessionsDir := filepath.Join(ledgerDir, ".sageox", "cache", "sessions")
 	sessionDir := filepath.Join(sessionsDir, "catchup-fail-session")
 	require.NoError(t, os.MkdirAll(sessionDir, 0755))
 
@@ -1052,6 +1377,10 @@ func TestSessionWatcherManager_PersistOffset_MissingRecordingJSON(t *testing.T) 
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), recData, 0644))
 
 	require.NoError(t, mgr.StartWatch("s1", sessionFile, "codex", "/ledger", dir))
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(dir, "raw.jsonl"))
+		return err == nil
+	}, time.Second, 10*time.Millisecond, "wait for capture to open before removing the marker")
 
 	// delete .recording.json while watcher is active
 	require.NoError(t, os.Remove(filepath.Join(dir, ".recording.json")))
@@ -1063,6 +1392,10 @@ func TestSessionWatcherManager_PersistOffset_MissingRecordingJSON(t *testing.T) 
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
+	require.Eventually(t, func() bool {
+		info, err := os.Stat(filepath.Join(dir, "raw.jsonl"))
+		return err == nil && info.Size() > 0
+	}, 5*time.Second, 10*time.Millisecond, "capture must reach persistOffset with the marker absent")
 	// watcher should still be running (persistOffset didn't crash)
 	require.Eventually(t, func() bool {
 		return len(mgr.ActiveSessions()) == 1
@@ -1092,6 +1425,10 @@ func TestSessionWatcherManager_PersistOffset_CorruptRecordingJSON(t *testing.T) 
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), recData, 0644))
 
 	require.NoError(t, mgr.StartWatch("s1", sessionFile, "codex", "/ledger", dir))
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(dir, "raw.jsonl"))
+		return err == nil
+	}, time.Second, 10*time.Millisecond, "wait for capture to open before corrupting the marker")
 
 	// corrupt .recording.json while watcher is active
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), []byte("%%%CORRUPT%%%"), 0644))
@@ -1103,6 +1440,10 @@ func TestSessionWatcherManager_PersistOffset_CorruptRecordingJSON(t *testing.T) 
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
+	require.Eventually(t, func() bool {
+		info, err := os.Stat(filepath.Join(dir, "raw.jsonl"))
+		return err == nil && info.Size() > 0
+	}, 5*time.Second, 10*time.Millisecond, "capture must reach persistOffset with a corrupt marker")
 	// watcher should still be running (persistOffset didn't crash)
 	require.Eventually(t, func() bool {
 		return len(mgr.ActiveSessions()) == 1

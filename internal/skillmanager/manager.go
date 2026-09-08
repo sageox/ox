@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/teamskills"
+
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/extensions/skills"
 	"github.com/sageox/ox/internal/adapterstamp"
@@ -1470,8 +1472,15 @@ func digestBytes(data []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+// desiredFileMode decides which materialized files get the executable bit.
+//
+// It shares teamskills.IsExecutableFile with classification and materialization
+// so all three agree on what "runnable" means. They previously did not: a
+// root-only "scripts/" prefix here left bin/deploy.sh non-executable while the
+// classifier called it prose — two definitions of the same thing, which is the
+// gap that let runnable files ship unapproved.
 func desiredFileMode(path string) fs.FileMode {
-	if strings.HasPrefix(filepath.ToSlash(path), "scripts/") {
+	if executable, _ := teamskills.IsExecutableFile(filepath.ToSlash(path), nil); executable {
 		return 0o755
 	}
 	return 0o644

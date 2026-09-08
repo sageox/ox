@@ -845,12 +845,9 @@ func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 		return nil, fmt.Errorf("stat bleve bolt file %s: %w", boltPath, statErr)
 	}
 
-	// bolt file absent or path structure broken — nuke and recreate
-	slog.Error("bleve index corrupt, recreating", "path", path, "err", err)
-	if removeErr := os.RemoveAll(path); removeErr != nil {
-		return nil, fmt.Errorf("remove corrupt bleve index %s: %w", path, removeErr)
-	}
-	return createBleveSubIndex(path, name)
+	// A healer may be recreating this directory. Recheck under its lock before
+	// treating absent metadata or a broken store path as our own repair.
+	return selfHealBleveSubIndex(root, path, name, err)
 }
 
 // selfHealBleveSubIndex recovers from proven mapping/snapshot corruption by
@@ -865,11 +862,8 @@ func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 // opens cleanly is an acceptable replacement (the healed index is empty and
 // carries the current mapping version).
 //
-// The marker is best-effort: if the marker write fails (disk full, permission
-// denied) the function still returns the empty index — the daemon will see
-// the empty bleve on its next freshness check via different signals (empty
-// search results) but the explicit signal is preferred. Marker failure is
-// logged at warn level.
+// The reindex marker is written before removal so interrupted/failed recreation
+// cannot lose the rebuild signal. If it cannot be written, keep the old index.
 func selfHealBleveSubIndex(root, path, name string, openErr error) (bleve.Index, error) {
 	return rebuildSubIndexLocked(root, path, name, false, openErr)
 }
@@ -981,7 +975,7 @@ func acquireSubIndexHealLock(path string) (*flock.Flock, bool, error) {
 func reclassifyUnderLock(path, name string, requireVersion bool) (bleve.Index, healVerdict) {
 	boltPath := filepath.Join(path, "store", "root.bolt")
 	if _, statErr := os.Stat(boltPath); statErr != nil {
-		if errors.Is(statErr, os.ErrNotExist) {
+		if errors.Is(statErr, os.ErrNotExist) || errors.Is(statErr, syscall.ENOTDIR) {
 			// bolt genuinely absent / path structure broken → needs a (re)build.
 			return nil, healNuke
 		}
@@ -1082,8 +1076,8 @@ func boundedAdoptOpen(path string, timeout time.Duration) (bleve.Index, error) {
 //   - healAdopt → return the replacement the winner created; never nuke it.
 //   - healDefer → return the pre-existing retryable "lock contention" error; a
 //     healthy index is being held open, not corrupt.
-//   - healNuke  → we hold the lock and it is still corrupt/stale: RemoveAll +
-//     recreate empty + write the .needs_reindex marker.
+//   - healNuke  → we hold the lock and it is still corrupt/stale: write the
+//     .needs_reindex marker, then RemoveAll + recreate empty.
 //
 // A destructive rebuild (RemoveAll + recreate) runs ONLY while the heal lock is
 // held. When the lock cannot be acquired — for EITHER reason — we never nuke,
@@ -1122,8 +1116,8 @@ func rebuildSubIndexLocked(root, path, name string, requireVersion bool, openErr
 // applyRebuildVerdict reclassifies the sub-index and acts on the verdict:
 // adopt a concurrent repair, defer to a live writer, or nuke+recreate+marker a
 // still-corrupt/stale index. Callers MUST hold the heal lock — the healNuke path
-// does a destructive RemoveAll, which is safe to run only under cross-process
-// serialization (see rebuildSubIndexLocked; the no-lock paths never reach here).
+// first records the reindex marker, then does a destructive RemoveAll under
+// cross-process serialization (the no-lock paths never reach here).
 func applyRebuildVerdict(root, path, name string, requireVersion bool, openErrForLog error) (bleve.Index, error) {
 	idx, verdict := reclassifyUnderLock(path, name, requireVersion)
 	switch verdict {
@@ -1139,6 +1133,9 @@ func applyRebuildVerdict(root, path, name string, requireVersion bool, openErrFo
 
 	// healNuke: the index is still provably corrupt/stale. The specific trigger
 	// (parse error vs stale mapping version) is in open_err.
+	if markerErr := WriteNeedsReindexMarker(root, name); markerErr != nil {
+		return nil, fmt.Errorf("write reindex marker before rebuilding bleve sub-index %s: %w", name, markerErr)
+	}
 	slog.Warn("bleve sub-index rebuild (nuke + recreate)",
 		"name", name, "path", path, "open_err", openErrForLog)
 	if removeErr := os.RemoveAll(path); removeErr != nil {
@@ -1147,10 +1144,6 @@ func applyRebuildVerdict(root, path, name string, requireVersion bool, openErrFo
 	newIdx, err := createBleveSubIndex(path, name)
 	if err != nil {
 		return nil, fmt.Errorf("recreate empty bleve sub-index %s: %w", path, err)
-	}
-	if markerErr := WriteNeedsReindexMarker(root, name); markerErr != nil {
-		slog.Warn("failed to write needs_reindex marker; daemon may not auto-rebuild",
-			"name", name, "root", root, "err", markerErr)
 	}
 	subIndexRebuildActionHook("nuke")
 	return newIdx, nil

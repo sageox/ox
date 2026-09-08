@@ -237,6 +237,36 @@ func TestDetermineHealth(t *testing.T) {
 			&StatusData{Running: true, RecentErrorCount: 10},
 			HealthCritical,
 		},
+		{
+			"warning - active integrity issue despite successful sync",
+			&StatusData{LastSync: time.Now(), SyncIntervalRead: time.Minute, Issues: []DaemonIssue{{Severity: SeverityWarning}}},
+			HealthWarning,
+		},
+		{
+			"warning - blocking issue",
+			&StatusData{Issues: []DaemonIssue{{Severity: SeverityError}}},
+			HealthWarning,
+		},
+		{
+			"critical - highest issue severity wins",
+			&StatusData{Issues: []DaemonIssue{{Severity: SeverityWarning}, {Severity: SeverityCritical}, {Severity: SeverityError}}},
+			HealthCritical,
+		},
+		{
+			"critical - issue takes precedence over stale sync warning",
+			&StatusData{LastSync: time.Now().Add(-time.Hour), SyncIntervalRead: time.Minute, Issues: []DaemonIssue{{Severity: SeverityCritical}}},
+			HealthCritical,
+		},
+		{
+			"critical - sync errors take precedence over issue warning",
+			&StatusData{RecentErrorCount: 5, Issues: []DaemonIssue{{Severity: SeverityWarning}}},
+			HealthCritical,
+		},
+		{
+			"warning - needs help without issue details",
+			&StatusData{NeedsHelp: true},
+			HealthWarning,
+		},
 	}
 
 	for _, tt := range tests {

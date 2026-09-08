@@ -630,9 +630,10 @@ func handleAfterTool(ctx *HookContext) error {
 			repoRoot = ctx.ProjectRoot
 		}
 		sf, findErr := adapter.FindSessionFile(adapters.SessionLookup{
-			RepoRoot: repoRoot,
-			AgentID:  agentID,
-			Since:    state.StartedAt,
+			RepoRoot:       repoRoot,
+			AgentID:        agentID,
+			AgentSessionID: state.AgentSessionID,
+			Since:          state.StartedAt.Add(-5 * time.Minute),
 		})
 		if findErr != nil || sf == "" {
 			slog.Info("hook: session file not found", "agentID", agentID, "adapter", state.AdapterName, "repo", repoRoot, "err", findErr)
@@ -659,9 +660,10 @@ func handleAfterTool(ctx *HookContext) error {
 			repoRoot = ctx.ProjectRoot
 		}
 		sf, findErr := adapter.FindSessionFile(adapters.SessionLookup{
-			RepoRoot: repoRoot,
-			AgentID:  agentID,
-			Since:    state.StartedAt,
+			RepoRoot:       repoRoot,
+			AgentID:        agentID,
+			AgentSessionID: state.AgentSessionID,
+			Since:          state.StartedAt.Add(-5 * time.Minute),
 		})
 		if findErr == nil && sf != "" && sf != state.SessionFile {
 			slog.Info("hook: rediscovered session file", "old", state.SessionFile, "new", sf)
@@ -889,9 +891,14 @@ func startSessionRecordingIfConfigured(ctx *HookContext) {
 	}
 
 	agentID := ""
+	agentSessionID := ""
 	if ctx.Marker != nil {
 		agentID = ctx.Marker.AgentID
+		agentSessionID = ctx.Marker.AgentSessionID
+	}
+	if ctx.Input != nil && ctx.Input.SessionID != "" {
+		agentSessionID = ctx.Input.SessionID
 	}
 
-	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, "", recordingSessionIDFromMarker(ctx.Marker))
+	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, "", recordingSessionIDFromMarker(ctx.Marker), agentSessionID)
 }
