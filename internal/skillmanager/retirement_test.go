@@ -114,3 +114,31 @@ func TestLegacyRetiredSkillsStillSelectTheirTarget(t *testing.T) {
 		}
 	}
 }
+
+// Saved names from any retired catalog generation must not block surviving skills.
+func TestAllRetiredSelectionsAllowReconciliationAndRepair(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	desired := DesiredSkills{
+		Names:   append(append([]string(nil), skills.Retired...), "ox-cli-consult"),
+		Targets: []string{target.Key},
+	}
+	plan, err := Reconcile(repo, "1.0.0", desired, targets)
+	require.NoError(t, err)
+	require.True(t, plan.RetiredSelections)
+	require.FileExists(t, filepath.Join(repo, target.Root, "ox-cli-consult", "SKILL.md"))
+	saved, _, err := LoadDesired(repo)
+	require.NoError(t, err)
+	require.ElementsMatch(t, desired.Names, saved.Names, "automatic reconciliation preserves committed intent")
+	repaired, removed := RemoveRetiredSelections(saved)
+	require.True(t, removed)
+	require.Equal(t, []string{"ox-cli-consult"}, repaired.Names)
+	require.ElementsMatch(t, desired.Names, saved.Names, "migration must not mutate its input")
+	plan, err = Reconcile(repo, "1.0.0", repaired, targets)
+	require.NoError(t, err)
+	require.False(t, plan.RetiredSelections)
+	saved, _, err = LoadDesired(repo)
+	require.NoError(t, err)
+	require.Equal(t, []string{"ox-cli-consult"}, saved.Names)
+}

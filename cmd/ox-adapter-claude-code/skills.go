@@ -29,7 +29,18 @@ func handleInstallSkills(p adapterprotocol.SkillsParams) (*adapterprotocol.Insta
 	}
 	// This is a Claude-only migration from old slash-command surfaces. The
 	// shared installer owns all Agent Skills lifecycle mechanics.
-	selected, err := skills.SelectedBundles(p.Version, p.Names, p.Bundles)
+	desired := skillmanager.AddBundles(skillmanager.DesiredSkills{Names: p.Names}, p.Bundles...)
+	desired, retired := skillmanager.RemoveRetiredSelections(desired)
+	if retired && len(desired.Names) == 0 && len(desired.Bundles) == 0 {
+		// An explicit retired-only request must not fall back to cleaning up
+		// commands for every default skill.
+		return result, nil
+	}
+	bundles := make([]string, 0, len(desired.Bundles))
+	for _, bundle := range desired.Bundles {
+		bundles = append(bundles, bundle.ID)
+	}
+	selected, err := skills.SelectedBundles(p.Version, desired.Names, bundles)
 	if err != nil {
 		return nil, err
 	}

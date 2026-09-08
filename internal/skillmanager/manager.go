@@ -1095,7 +1095,7 @@ func targetForDir(repoRoot, dir string) (adapterprotocol.SkillTarget, error) {
 	return normalizeTarget(repoRoot, adapterprotocol.SkillTarget{Key: key, Root: root, Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject, LinkPolicy: adapterprotocol.SkillLinkPolicyReject})
 }
 
-// RemoveRetiredSelections removes only known obsolete Attest selections.
+// RemoveRetiredSelections removes known retired skill names and bundles.
 // Automatic reconciliation filters them only while selecting catalog content;
 // doctor may persist this migration as an explicit repair of project intent.
 func RemoveRetiredSelections(desired DesiredSkills) (DesiredSkills, bool) {
@@ -1109,12 +1109,11 @@ func RemoveRetiredSelections(desired DesiredSkills) (DesiredSkills, bool) {
 		next.Bundles = append(next.Bundles, bundle)
 	}
 	for _, name := range desired.Names {
-		switch name {
-		case "ox-cli-attest-goal", "ox-cli-attest-create", "ox-attest-goal", "ox-attest-create":
+		if skills.IsRetired(name) {
 			removed = true
-		default:
-			next.Names = append(next.Names, name)
+			continue
 		}
+		next.Names = append(next.Names, name)
 	}
 	return next, removed
 }
