@@ -1,12 +1,16 @@
 package agentwork
 
 import (
+	"bytes"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
+
+	"github.com/sageox/ox/internal/lfs"
 )
 
 // rawContent is a minimal valid session with substantive entries.
@@ -173,7 +177,7 @@ func TestStageSessionInLedger_CopiesFiles(t *testing.T) {
 		LedgerPath: ledgerPath,
 	}
 
-	if err := handler.stageSessionInLedger(payload); err != nil {
+	if _, err := handler.stageSessionInLedger(payload); err != nil {
 		t.Fatalf("stageSessionInLedger failed: %v", err)
 	}
 
@@ -195,28 +199,60 @@ func TestStageSessionInLedger_CopiesFiles(t *testing.T) {
 	}
 }
 
-// TestStageSessionInLedger_NoopIfAlreadyInLedger verifies that stageSessionInLedger
-// is a no-op when the session is already in ledger/sessions/.
-func TestStageSessionInLedger_NoopIfAlreadyInLedger(t *testing.T) {
-	handler := NewSessionFinalizeHandler(slog.Default())
-	ledgerPath := t.TempDir()
+// A session finalized in place needs a cache copy before pointer preparation.
+func TestStageSessionInLedger_BacksUpTrackedSession(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing bool
+	}{
+		{name: "new backup"},
+		{name: "existing private backup", existing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := NewSessionFinalizeHandler(slog.Default())
+			ledgerPath := t.TempDir()
+			sessionName := "2026-01-10T14-30-testuser-OxNOOP"
+			sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+			if err := os.MkdirAll(sessionDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(testRawContent), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.existing {
+				cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
+				if err := os.MkdirAll(cacheDir, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte("previous recording"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 
-	sessionName := "2026-01-10T14-30-testuser-OxNOOP"
-	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
-	if err := os.MkdirAll(sessionDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	payload := &SessionFinalizePayload{
-		SessionDir: sessionDir,
-		LedgerPath: ledgerPath,
-	}
-
-	if err := handler.stageSessionInLedger(payload); err != nil {
-		t.Fatalf("stageSessionInLedger failed: %v", err)
-	}
-	if payload.SessionDir != sessionDir {
-		t.Errorf("payload.SessionDir should not change: got %q", payload.SessionDir)
+			payload := &SessionFinalizePayload{SessionDir: sessionDir, LedgerPath: ledgerPath}
+			cacheDir, err := handler.stageSessionInLedger(payload)
+			if err != nil {
+				t.Fatalf("stageSessionInLedger failed: %v", err)
+			}
+			if payload.SessionDir != sessionDir {
+				t.Errorf("payload.SessionDir should not change: got %q", payload.SessionDir)
+			}
+			backupPath := filepath.Join(cacheDir, "raw.jsonl")
+			backup, err := os.ReadFile(backupPath)
+			if err != nil || string(backup) != testRawContent {
+				t.Fatalf("tracked session must retain its raw content in cache: %v", err)
+			}
+			// Windows file modes do not express POSIX owner/group permissions.
+			if runtime.GOOS != "windows" {
+				info, err := os.Stat(backupPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mode := info.Mode().Perm(); mode != 0600 {
+					t.Errorf("recording backup must remain owner-only: got %04o, want 0600", mode)
+				}
+			}
+		})
 	}
 }
 
@@ -578,5 +614,58 @@ func TestProcessResult_UploadOnly_AlreadyCommitted_PrunesCache(t *testing.T) {
 	// so a surviving cache dir means the same session is re-queued in 5 minutes
 	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
 		t.Error("cache dir survived an already-committed session — Detect() will re-queue it forever")
+	}
+}
+
+// A session whose content lives outside the ledger cannot be committed: an XDG
+// cache dir that stageSessionInLedger left in place, a symlink under sessions/
+// that points at one, or a sessions/ root that is itself a symlink. Either way
+// the only copy must keep real content, not pointers.
+func TestGitCommitAndPush_LeavesOutOfLedgerSessionIntact(t *testing.T) {
+	for _, mode := range []string{"xdg dir", "symlink under sessions", "symlinked sessions root"} {
+		t.Run(mode, func(t *testing.T) {
+			ledgerPath := t.TempDir()
+			runGitCmd(t, ledgerPath, "init", "--quiet")
+			externalDir := filepath.Join(t.TempDir(), "sessions", "2026-01-10T14-30-testuser-OxXDG")
+			if err := os.MkdirAll(externalDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			raw := []byte(testRawContent)
+			rawPath := filepath.Join(externalDir, "raw.jsonl")
+			if err := os.WriteFile(rawPath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sessionDir := externalDir
+			link := func(target, name string) {
+				if err := os.Symlink(target, name); err != nil {
+					t.Skipf("symlinks unsupported: %v", err)
+				}
+			}
+			switch mode {
+			case "symlink under sessions":
+				if err := os.MkdirAll(filepath.Join(ledgerPath, "sessions"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				sessionDir = filepath.Join(ledgerPath, "sessions", filepath.Base(externalDir))
+				link(externalDir, sessionDir)
+			case "symlinked sessions root":
+				link(filepath.Dir(externalDir), filepath.Join(ledgerPath, "sessions"))
+				sessionDir = filepath.Join(ledgerPath, "sessions", filepath.Base(externalDir))
+			}
+
+			handler := NewSessionFinalizeHandler(slog.Default())
+			payload := &SessionFinalizePayload{SessionDir: sessionDir, RawPath: filepath.Join(sessionDir, "raw.jsonl"), LedgerPath: ledgerPath}
+			if handler.gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef(raw)}) {
+				t.Fatal("a session outside the ledger must not report a successful push")
+			}
+
+			got, err := os.ReadFile(rawPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lfs.IsPointerFile(rawPath) || !bytes.Equal(got, raw) {
+				t.Fatalf("external raw.jsonl must keep its content, got %d bytes", len(got))
+			}
+		})
 	}
 }

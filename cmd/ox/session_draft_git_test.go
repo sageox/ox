@@ -935,13 +935,10 @@ func TestDraftLifecycle_EndToEnd_ManifestMatchesTree(t *testing.T) {
 	require.NoError(t, lfs.WriteSessionMetaOnly(sessionDir, finalMeta))
 	registerGitArtifactInMeta(sessionDir, "summary.json", 64)
 
-	require.NoError(t, commitAndPushLedger(f.ledgerPath, sessionName))
-	// Content becomes pointers only after the push succeeds.
+	// The uploaded content is published as pointers in the first final commit.
 	_, err = lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(refs))
 	require.NoError(t, err)
-	require.NoError(t, commitPointerRewriteAndPush(f.ledgerPath, sessionName,
-		[]string{filepath.Join("sessions", sessionName, "raw.jsonl"),
-			filepath.Join("sessions", sessionName, "summary.md")}))
+	require.NoError(t, commitAndPushLedger(f.ledgerPath, sessionName))
 
 	// --- assert the terminal state through a FRESH clone ---
 	fresh := cloneBare(t, f.barePath)

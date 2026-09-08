@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/selfexec"
 )
@@ -112,8 +113,7 @@ func ShouldUseDaemon() bool {
 }
 
 // EnsureDaemon ensures the daemon is running, starting it if necessary.
-// Claude manages the daemon process lifecycle (launching and killing), so
-// setsid/detach is no longer needed. The daemon relies on its inactivity
+// The daemon outlives the starting command and relies on its inactivity
 // timeout to self-exit when no heartbeats arrive.
 // Returns nil on success (daemon is running), or an error if it couldn't be started.
 // This is a no-op if daemon is already running or disabled via SAGEOX_DAEMON=false.
@@ -127,9 +127,7 @@ func EnsureDaemon() error {
 }
 
 // EnsureDaemonAttached is an alias for EnsureDaemon.
-// Previously started the daemon without setsid (attached to caller's process group).
-// Now that Claude manages the daemon lifecycle, setsid is removed entirely and
-// both functions behave identically.
+// Both detach the background daemon from the caller's process group.
 func EnsureDaemonAttached() error {
 	if IsDaemonDisabled() {
 		return nil
@@ -214,9 +212,8 @@ func ensureDaemonImpl(wait bool) error {
 	}
 
 	// start daemon process
-	// NOTE: No setsid/detach — Claude manages the daemon process lifecycle.
-	// The daemon relies on inactivity timeout to self-exit when claude dies.
 	cmd := exec.Command(exe, buildDaemonArgs(resolveRepoName())...)
+	proc.Detach(cmd)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	// set CWD to project root so daemon computes correct repo-based workspace ID

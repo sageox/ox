@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -702,6 +704,161 @@ func TestParseFilenameTimestamp(t *testing.T) {
 			}
 
 			assert.Equal(t, tt.wantYear, got.Year())
+		})
+	}
+}
+
+func TestStore_PreserveSessionCache_KeepsOriginalCanonicalCache(t *testing.T) {
+	for _, alias := range []bool{false, true} {
+		name := "direct"
+		if alias {
+			name = "symlink"
+		}
+		t.Run(name, func(t *testing.T) {
+			store, err := NewStore(t.TempDir())
+			require.NoError(t, err)
+			prepared := store.GetSessionPath("recording")
+			canonical := store.CacheSessionPath("recording")
+			require.NoError(t, os.MkdirAll(prepared, 0o700))
+			require.NoError(t, os.MkdirAll(canonical, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(prepared, rawFilename), []byte("prepared content"), 0o600))
+			original := []byte("original recording")
+			require.NoError(t, os.WriteFile(filepath.Join(canonical, rawFilename), original, 0o600))
+			source := canonical
+			if alias {
+				source = filepath.Join(t.TempDir(), "alias")
+				if err := os.Symlink(canonical, source); err != nil {
+					t.Skipf("symlink aliases unsupported: %v", err)
+				}
+			}
+
+			prunePath, err := store.PreserveSessionCache(prepared, source)
+			require.NoError(t, err)
+			assert.Empty(t, prunePath, "the original recording must never be handed to the caller for pruning")
+			content, err := os.ReadFile(filepath.Join(source, rawFilename))
+			require.NoError(t, err)
+			assert.Equal(t, original, content, "preservation must not replace the original with prepared content")
+		})
+	}
+}
+
+func TestStore_PreserveSessionCache_CopiesPreparedContent(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		name := "new cache"
+		if existing {
+			name = "existing cache"
+		}
+		t.Run(name, func(t *testing.T) {
+			store, err := NewStore(t.TempDir())
+			require.NoError(t, err)
+			prepared := store.GetSessionPath("recording")
+			canonical := store.CacheSessionPath("recording")
+			require.NoError(t, os.MkdirAll(prepared, 0o700))
+			originalDir := t.TempDir()
+			original := []byte("original recording before preparation")
+			require.NoError(t, os.WriteFile(filepath.Join(originalDir, rawFilename), original, 0o600))
+			artifacts := map[string][]byte{
+				rawFilename:  []byte(`{"type":"user","content":"prepared for upload"}` + "\n"),
+				"meta.json":  []byte(`{"session_id":"ses_019d0000-0000-7000-8000-000000000007"}`),
+				"session.md": []byte("Prepared session markdown"),
+			}
+			for filename, content := range artifacts {
+				require.NoError(t, os.WriteFile(filepath.Join(prepared, filename), content, 0o644))
+			}
+			// A stub must never overwrite a previous real summary or create a
+			// pretend recovery copy when the summary is only available remotely.
+			summary := []byte("previous real summary")
+			ref := lfs.NewFileRef(summary)
+			pointer := []byte(lfs.FormatPointer(ref.OID, ref.Size))
+			require.NoError(t, os.WriteFile(filepath.Join(prepared, "summary.md"), pointer, 0o600))
+			require.NoError(t, os.MkdirAll(filepath.Join(prepared, "nested"), 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(prepared, "nested", "unrelated"), []byte("skip me"), 0o600))
+			if existing {
+				require.NoError(t, os.MkdirAll(canonical, 0o700))
+				require.NoError(t, os.WriteFile(filepath.Join(canonical, rawFilename), []byte("stale copy"), 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(canonical, "summary.md"), summary, 0o600))
+			}
+
+			prunePath, err := store.PreserveSessionCache(prepared, originalDir)
+			require.NoError(t, err)
+			assert.Equal(t, canonical, prunePath, "only the extra recovery copy may be pruned")
+			for filename, want := range artifacts {
+				path := filepath.Join(canonical, filename)
+				content, err := os.ReadFile(path)
+				require.NoError(t, err)
+				assert.Equal(t, want, content)
+				if runtime.GOOS != "windows" {
+					info, err := os.Stat(path)
+					require.NoError(t, err)
+					assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "recovery content must remain owner-only")
+				}
+			}
+			if existing {
+				content, err := os.ReadFile(filepath.Join(canonical, "summary.md"))
+				require.NoError(t, err)
+				assert.Equal(t, summary, content)
+			} else {
+				assert.NoFileExists(t, filepath.Join(canonical, "summary.md"))
+			}
+			assert.NoDirExists(t, filepath.Join(canonical, "nested"))
+			content, err := os.ReadFile(filepath.Join(originalDir, rawFilename))
+			require.NoError(t, err)
+			assert.Equal(t, original, content)
+		})
+	}
+}
+
+func TestStore_PreserveSessionCache_FilesystemFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		wantErr string
+	}{
+		{name: "missing prepared directory", wantErr: "read prepared session"},
+		{name: "unreadable prepared directory", wantErr: "read prepared session"},
+		{name: "unreadable artifact", wantErr: "read session artifact raw.jsonl"},
+		{name: "cache path is a file", wantErr: "create session recovery cache"},
+		{name: "artifact destination is a directory", wantErr: "preserve session artifact raw.jsonl"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := NewStore(t.TempDir())
+			require.NoError(t, err)
+			prepared := store.GetSessionPath("recording")
+			canonical := store.CacheSessionPath("recording")
+			require.NoError(t, os.MkdirAll(prepared, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(prepared, rawFilename), []byte("prepared content"), 0o600))
+			originalDir := t.TempDir()
+			original := []byte("recoverable original recording")
+			require.NoError(t, os.WriteFile(filepath.Join(originalDir, rawFilename), original, 0o600))
+			switch tc.name {
+			case "missing prepared directory":
+				require.NoError(t, os.RemoveAll(prepared))
+			case "unreadable prepared directory", "unreadable artifact":
+				if runtime.GOOS == "windows" {
+					t.Skip("windows: chmod cannot remove read permission")
+				}
+				blocked := prepared
+				if tc.name == "unreadable artifact" {
+					blocked = filepath.Join(prepared, rawFilename)
+				}
+				require.NoError(t, os.Chmod(blocked, 0o000))
+				t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+				if f, err := os.Open(blocked); err == nil {
+					_ = f.Close()
+					t.Skip("cannot make source unreadable (running as root?)")
+				}
+			case "cache path is a file":
+				require.NoError(t, os.MkdirAll(filepath.Dir(canonical), 0o700))
+				require.NoError(t, os.WriteFile(canonical, []byte("existing file"), 0o600))
+			case "artifact destination is a directory":
+				require.NoError(t, os.MkdirAll(filepath.Join(canonical, rawFilename), 0o700))
+			}
+
+			prunePath, err := store.PreserveSessionCache(prepared, originalDir)
+			require.ErrorContains(t, err, tc.wantErr)
+			assert.Empty(t, prunePath, "failed preservation must not authorize pruning")
+			content, err := os.ReadFile(filepath.Join(originalDir, rawFilename))
+			require.NoError(t, err)
+			assert.Equal(t, original, content, "the original must survive every preservation failure")
 		})
 	}
 }

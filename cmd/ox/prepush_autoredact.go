@@ -3,15 +3,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 )
@@ -88,8 +91,8 @@ type autoRedactResult struct {
 // autoRedactSessionFindings groups findings by session, redacts each
 // JSONL file in-place via the canonical chokepoint (redactFileInPlace),
 // appends a RedactionPass to each affected session's meta.json, and
-// stages + amends the holding commit so the next push carries the
-// scrubbed bytes.
+// optionally stages + amends the holding commit. Before LFS upload there is
+// no holding commit yet; only the content and audit record are prepared.
 //
 // Non-JSONL paths are skipped here and surface as remaining findings on
 // the caller's re-scan — they get the quarantine path instead.
@@ -99,7 +102,7 @@ type autoRedactResult struct {
 // rejected, meta.json mutation failed). Per-file errors degrade
 // gracefully: that file stays in the "remaining findings" bucket and
 // the caller quarantines it.
-func autoRedactSessionFindings(ctx context.Context, ledgerPath string, result *PrePushScanResult) (*autoRedactResult, error) {
+func autoRedactSessionFindings(ctx context.Context, ledgerPath string, result *PrePushScanResult, amendCommit bool) (*autoRedactResult, error) {
 	if result == nil || len(result.Findings) == 0 {
 		return &autoRedactResult{}, nil
 	}
@@ -177,15 +180,17 @@ func autoRedactSessionFindings(ctx context.Context, ledgerPath string, result *P
 	// Stage + amend in one go. Reuses the same primitive `ox session
 	// redact` uses; auditors get one consistent shape regardless of
 	// whether the redaction was interactive or automatic.
-	byPath := map[string][]redactHistoryFinding{}
-	for _, rel := range redactedRels {
-		byPath[rel] = nil
-	}
-	for _, mp := range metaPaths {
-		byPath[mp] = nil
-	}
-	if err := stageAndAmendRedactedFiles(ledgerPath, byPath); err != nil {
-		return out, fmt.Errorf("stage/amend redacted files: %w", err)
+	if amendCommit {
+		byPath := map[string][]redactHistoryFinding{}
+		for _, rel := range redactedRels {
+			byPath[rel] = nil
+		}
+		for _, mp := range metaPaths {
+			byPath[mp] = nil
+		}
+		if err := stageAndAmendRedactedFiles(ledgerPath, byPath); err != nil {
+			return out, fmt.Errorf("stage/amend redacted files: %w", err)
+		}
 	}
 
 	out.FixedPaths = redactedRels
@@ -204,7 +209,9 @@ type quarantineResult struct {
 }
 
 // quarantineUnredactableFindings handles findings that the auto-redact
-// pass could not clear. For each affected file:
+// pass could not clear. Before upload, amendCommit is false: remove any index
+// entry left by an interrupted attempt, but do not amend the prior commit.
+// For each affected file:
 //
 //  1. Atomically rename `<ledger>/sessions/<name>/<file>` →
 //     `<ledger>/.sageox/cache/quarantine/<name>/<file>` so the bytes
@@ -223,11 +230,17 @@ type quarantineResult struct {
 //
 // Returns the carved-out paths + marker locations. Per-file errors are
 // logged and skipped — the goal is to never block the push; partial
-// quarantine is better than full block.
-func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding) (*quarantineResult, error) {
+// quarantine is better than full block. Before upload, index or rename
+// failures stop the operation after recording any completed quarantines.
+func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding, amendCommit bool) (*quarantineResult, error) {
 	out := &quarantineResult{}
 	if len(findings) == 0 {
 		return out, nil
+	}
+	if !amendCommit {
+		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+			return out, fmt.Errorf("prepare quarantine index: %w", err)
+		}
 	}
 
 	// Group findings by session for the marker write.
@@ -251,6 +264,8 @@ func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding
 
 	// Deduplicate moves per file (multiple findings per file → one move).
 	seenPaths := map[string]bool{}
+	var quarantineErr error
+quarantineFiles:
 	for sess, g := range groups {
 		for _, f := range g.findings {
 			if seenPaths[f.Path] {
@@ -279,21 +294,56 @@ func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding
 			toRel := filepath.ToSlash(filepath.Join(".sageox", "cache", "quarantine", sess, fname))
 			toAbs := filepath.Join(ledgerPath, toRel)
 			if err := os.MkdirAll(filepath.Dir(toAbs), 0o700); err != nil {
+				if !amendCommit {
+					quarantineErr = fmt.Errorf("create quarantine dir for %s: %w", fromRel, err)
+					break quarantineFiles
+				}
 				slog.Warn("pre-push quarantine: mkdir failed; skipping",
 					"path", toRel, "error", err)
 				continue
 			}
+			var indexEntries []byte
+			if !amendCommit {
+				// Preserve the index's bytes and mode, which may differ from the
+				// working file. An empty snapshot means the path is untracked.
+				indexEntries, err = exec.Command("git", "-C", ledgerPath, "ls-files", "--stage", "-z", "--", fromRel).Output()
+				if err != nil {
+					quarantineErr = fmt.Errorf("read quarantined path from index %s: %w", fromRel, err)
+					break quarantineFiles
+				}
+				// A previous attempt may already have staged these bytes. Moving
+				// only the working file would leave that secret-bearing blob in
+				// the next commit, invisible to the working-tree scanner.
+				gitOutput, err := exec.Command("git", "-C", ledgerPath, "rm", "--cached", "--ignore-unmatch", "--force", "--sparse", "--", fromRel).CombinedOutput()
+				if err != nil {
+					quarantineErr = fmt.Errorf("remove quarantined path from index %s: %s: %w", fromRel, strings.TrimSpace(string(gitOutput)), err)
+					break quarantineFiles
+				}
+			}
 			if err := os.Rename(fromAbs, toAbs); err != nil {
+				if !amendCommit {
+					quarantineErr = fmt.Errorf("quarantine %s: %w", fromRel, err)
+					if len(indexEntries) > 0 {
+						restore := exec.Command("git", "-C", ledgerPath, "update-index", "-z", "--index-info")
+						restore.Stdin = strings.NewReader(string(indexEntries))
+						if gitOutput, restoreErr := restore.CombinedOutput(); restoreErr != nil {
+							quarantineErr = errors.Join(quarantineErr, fmt.Errorf("restore quarantined path in index %s: %s: %w", fromRel, strings.TrimSpace(string(gitOutput)), restoreErr))
+						}
+					}
+					break quarantineFiles
+				}
 				slog.Warn("pre-push quarantine: rename failed; skipping",
 					"from", fromRel, "to", toRel, "error", err)
 				continue
 			}
-			if err := unstagePath(ledgerPath, fromRel); err != nil {
-				slog.Warn("pre-push quarantine: unstage failed; bytes are quarantined but path may remain in commit",
-					"path", fromRel, "error", err)
-				// Don't return — best-effort. The push will still likely
-				// succeed because the moved-aside file no longer exists
-				// at the staged path; git may auto-detect the deletion.
+			if amendCommit {
+				if err := unstagePath(ledgerPath, fromRel); err != nil {
+					slog.Warn("pre-push quarantine: unstage failed; bytes are quarantined but path may remain in commit",
+						"path", fromRel, "error", err)
+					// Don't return — best-effort. The push will still likely
+					// succeed because the moved-aside file no longer exists
+					// at the staged path; git may auto-detect the deletion.
+				}
 			}
 			g.quarantineLocs = append(g.quarantineLocs, redactionDebtLocation{
 				From: fromRel,
@@ -305,7 +355,7 @@ func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding
 
 	// If we unstaged anything, amend the holding commit once so its
 	// tree matches the now-quarantined working state.
-	if len(out.QuarantinedRels) > 0 {
+	if amendCommit && len(out.QuarantinedRels) > 0 {
 		if err := amendDroppingPaths(ledgerPath); err != nil {
 			slog.Warn("pre-push quarantine: amend failed; push may still surface the bad paths",
 				"error", err)
@@ -333,6 +383,9 @@ func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding
 			QuarantinePaths: g.quarantineLocs,
 		}
 		for _, f := range g.findings {
+			if !slices.Contains(out.QuarantinedRels, f.Path) {
+				continue // recovery requires a matching location for every finding
+			}
 			_, fname, _ := splitSessionPath(f.Path)
 			rec.Findings = append(rec.Findings, redactionDebtFinding{
 				Detector: f.Detector,
@@ -353,7 +406,7 @@ func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding
 		}
 		out.DebtMarkers = append(out.DebtMarkers, markerRel)
 	}
-	return out, nil
+	return out, quarantineErr
 }
 
 // unstagePath removes a single path from the index, leaving the working
