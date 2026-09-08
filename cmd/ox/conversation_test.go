@@ -42,7 +42,7 @@ func useConversationTestReader(t *testing.T) {
 	orig := openConversationReader
 	t.Cleanup(func() { openConversationReader = orig })
 	openConversationReader = func() (*read.Reader, *read.Error) {
-		return read.New("../../internal/conversation/read/testdata/discussions",
+		return read.New(repoPath("..", "..", "internal", "conversation", "read", "testdata", "discussions"),
 			time.Date(2026, 8, 20, 17, 41, 0, 0, time.UTC)), nil
 	}
 }
