@@ -423,9 +423,11 @@ func buildIncrementalE2EBinaries(t *testing.T) (string, string) {
 func slowTestProjectRoot(t *testing.T) string {
 	t.Helper()
 
-	// find project root
-	dir, err := os.Getwd()
-	require.NoError(t, err)
+	// Walk up from the SOURCE directory, not the process working directory:
+	// TestMain deliberately moves the process out of the ox repository (see
+	// cmd/ox/main_test.go), so os.Getwd() here is an empty sandbox under
+	// /tmp with no go.mod above it.
+	dir := packageDir
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 			content, _ := os.ReadFile(filepath.Join(dir, "go.mod"))

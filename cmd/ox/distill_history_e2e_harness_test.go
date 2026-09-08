@@ -124,14 +124,17 @@ type stagedFixture struct {
 // Binary build
 // ---------------------------------------------------------------------------
 
-// findDistillHistoryProjectRoot walks up from cwd until it finds a go.mod whose
-// module path is github.com/sageox/ox. Mirrors the discovery pattern
-// used by buildOxBinary in incremental_e2e_test.go. Suffixed to avoid
-// collision with the production findProjectRoot in cmd/ox/agent.go.
+// findDistillHistoryProjectRoot walks up from the package SOURCE directory
+// until it finds a go.mod whose module path is github.com/sageox/ox. Mirrors
+// the discovery pattern used by buildOxBinary in incremental_e2e_test.go.
+// Suffixed to avoid collision with the production findProjectRoot in
+// cmd/ox/agent.go.
+//
+// It must not start from os.Getwd(): TestMain deliberately moves the process
+// out of the ox repository (see cmd/ox/main_test.go).
 func findDistillHistoryProjectRoot(t *testing.T) string {
 	t.Helper()
-	dir, err := os.Getwd()
-	require.NoError(t, err, "getwd")
+	dir := packageDir
 	for {
 		gomod := filepath.Join(dir, "go.mod")
 		if data, err := os.ReadFile(gomod); err == nil {
