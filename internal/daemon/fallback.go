@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/selfexec"
 )
 
 // TryConnectOrDirect attempts to connect to the daemon.
@@ -195,7 +196,7 @@ func ensureDaemonImpl(wait bool) error {
 	stopLegacyDaemon()
 
 	// get the path to the current executable
-	exe, err := os.Executable()
+	exe, err := selfexec.Path()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
@@ -313,7 +314,21 @@ func KillStaleDaemon(workspaceID string) error {
 		_ = os.Remove(info.SocketPath)
 		return nil
 	}
-	return fmt.Errorf("stale daemon %d did not exit after SIGTERM", info.PID)
+
+	// SIGTERM ignored. Without this escalation a single wedged daemon blocks
+	// every subsequent `ox daemon start` for the workspace, forever.
+	slog.Warn("stale daemon ignored SIGTERM, escalating to SIGKILL", "workspace_id", workspaceID, "pid", info.PID)
+	if err := signalProcess(info.PID, sigKILL); err != nil {
+		slog.Warn("failed to SIGKILL stale daemon", "workspace_id", workspaceID, "pid", info.PID, "error", err)
+	}
+
+	if WaitForProcessExit(info.PID, 2*time.Second) {
+		_ = reg.Unregister(workspaceID)
+		_ = os.Remove(PidPathForWorkspace(workspaceID))
+		_ = os.Remove(info.SocketPath)
+		return nil
+	}
+	return fmt.Errorf("stale daemon %d did not exit after SIGKILL", info.PID)
 }
 
 // WaitForProcessExit polls signal 0 until the process exits or timeout is reached.

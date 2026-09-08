@@ -141,6 +141,11 @@ TEST_TIER_TOOL := python3 scripts/test_tiers.py
 FAST_TEST_FLAGS = $(shell $(TEST_TIER_TOOL) flags fast)
 FULL_TEST_FLAGS = $(shell $(TEST_TIER_TOOL) flags full)
 SLOW_TEST_FLAGS = $(shell $(TEST_TIER_TOOL) flags slow)
+# Same full tier, dialed down for a machine that is NOT dedicated to this run.
+# Overridable per-invocation: make test-calm CALM_P=1 CALM_PARALLEL=4
+CALM_P ?= 2
+CALM_PARALLEL ?= 8
+CALM_TEST_FLAGS = $(shell OX_TEST_P=$(CALM_P) OX_TEST_PARALLEL=$(CALM_PARALLEL) $(TEST_TIER_TOOL) flags full)
 SLOW_TEST_PACKAGES := ./cmd/ox ./internal/daemon ./internal/session ./tests/adapters
 GOTESTSUM_JUNIT = $(if $(strip $(TEST_JUNIT)),--junitfile "$(TEST_JUNIT)",)
 GOTESTSUM_TIMINGS = $(if $(strip $(TEST_TIMINGS)),--jsonfile-timing-events "$(TEST_TIMINGS)",)
@@ -204,6 +209,16 @@ test-timings: ## Reprint metrics from the latest fast-test timing artifact
 test-all: check-test-tiers ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
 	$(call say,"Running all tests including expensive tests...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FULL_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
+	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
+
+test-calm: check-test-tiers ## Run the full test tier at reduced concurrency (shared or already-loaded machine)
+	@# The tier contract's -p 8 -parallel 32 assumes the runner owns the machine.
+	@# Locally it runs once per agent session per worktree: two concurrent
+	@# `make test-all` runs on an 18-core workstation measured load average 37
+	@# and ~50% system time, at which point everything (including the tests)
+	@# gets slower. Same coverage, same race detector, a quarter of the fan-out.
+	$(call say,"Running full tests at reduced concurrency (-p $(CALM_P) -parallel $(CALM_PARALLEL))...")
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(CALM_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 test-slow: check-test-tiers ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed

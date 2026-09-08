@@ -157,19 +157,20 @@ func TestKillStaleDaemon_AliveButReachable(t *testing.T) {
 }
 
 func TestKillStaleDaemon_StopAckedPidAlive(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("requires Linux /proc cmdline check")
-	}
 	if testing.Short() {
 		t.Skip("skipping daemon IPC escalation test in short mode")
 	}
 
-	tmpDir := t.TempDir()
+	// Use /tmp directly to keep the socket path short — macOS limits Unix socket
+	// paths to 104 chars, and t.TempDir() generates paths under /var/folders/...
+	// which are too long when combined with the daemon socket suffix.
+	tmpDir, err := os.MkdirTemp("/tmp", "oxd-")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
 	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
 
-	// start a child process whose /proc/<pid>/cmdline contains "ox" and "daemon".
-	// exec -a sets argv[0] but Linux /proc/cmdline shows the actual binary path,
-	// so we create a script whose filename satisfies isOxDaemonProcess.
+	// start a child process whose command line contains "ox" and "daemon", so
+	// isOxDaemonProcess accepts it: the script's own filename supplies both.
 	fakeOxDaemon := filepath.Join(tmpDir, "ox-daemon-fake")
 	require.NoError(t, os.WriteFile(fakeOxDaemon, []byte("#!/bin/sh\ntrap 'exit 0' TERM\nwhile true; do sleep 1; done\n"), 0755))
 	child := exec.Command(fakeOxDaemon)
@@ -239,9 +240,6 @@ func TestKillStaleDaemon_StopAckedPidAlive(t *testing.T) {
 }
 
 func TestKillStaleDaemon_AliveButUnreachable(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("requires Linux /proc cmdline check")
-	}
 	if testing.Short() {
 		t.Skip("skipping process kill test in short mode")
 	}
@@ -249,9 +247,8 @@ func TestKillStaleDaemon_AliveButUnreachable(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
 
-	// start a child process whose /proc/<pid>/cmdline contains "ox" and "daemon".
-	// exec -a sets argv[0] but Linux /proc/cmdline shows the actual binary path,
-	// so we create a script whose filename satisfies isOxDaemonProcess.
+	// start a child process whose command line contains "ox" and "daemon", so
+	// isOxDaemonProcess accepts it: the script's own filename supplies both.
 	fakeOxDaemon := filepath.Join(tmpDir, "ox-daemon-fake")
 	require.NoError(t, os.WriteFile(fakeOxDaemon, []byte("#!/bin/sh\ntrap 'exit 0' TERM\nwhile true; do sleep 1; done\n"), 0755))
 	child := exec.Command(fakeOxDaemon)
@@ -294,6 +291,69 @@ func TestKillStaleDaemon_AliveButUnreachable(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("child process did not exit after SIGTERM")
 	}
+}
+
+// --- process identity tests ---
+
+// TestProcessCmdline_CurrentProcess is the darwin regression gate for
+// isOxDaemonProcess. The implementation used to read /proc/<pid>/cmdline and
+// nothing else; macOS has no /proc, so it returned false for EVERY pid. Its
+// caller KillStaleDaemon reacts to false by unregistering the entry and
+// deleting the pid file and socket while leaving the process ALIVE and
+// untracked — one leaked orphan per cleanup, and the SIGTERM/SIGKILL
+// escalation below it unreachable.
+//
+// Red-first proof: delete the ps(1) fallback in processCmdline and this test
+// fails on macOS while still passing on Linux — the exact platform split that
+// let the bug ship.
+func TestProcessCmdline_CurrentProcess(t *testing.T) {
+	cmdline, ok := processCmdline(os.Getpid())
+
+	require.True(t, ok, "processCmdline must resolve the running process on %s", runtime.GOOS)
+	assert.Contains(t, cmdline, ".test", "cmdline should name the compiled test binary")
+}
+
+func TestProcessCmdline_UnknownPID(t *testing.T) {
+	_, ok := processCmdline(999999999) // very unlikely to be alive
+
+	assert.False(t, ok, "unknown pid must not resolve to a command line")
+}
+
+func TestIsOxDaemonProcess_RejectsUnrelatedProcess(t *testing.T) {
+	// PID-reuse guard: a live process that is not an ox daemon must never be
+	// signaled, on any platform.
+	child := exec.Command("sleep", "300")
+	require.NoError(t, child.Start())
+	childDone := make(chan struct{})
+	go func() {
+		_ = child.Wait()
+		close(childDone)
+	}()
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		<-childDone
+	})
+
+	assert.False(t, isOxDaemonProcess(child.Process.Pid))
+}
+
+func TestIsOxDaemonProcess_AcceptsOxDaemon(t *testing.T) {
+	// the script's own filename supplies both "ox" and "daemon"
+	fakeOxDaemon := filepath.Join(t.TempDir(), "ox-daemon-fake")
+	require.NoError(t, os.WriteFile(fakeOxDaemon, []byte("#!/bin/sh\nsleep 300\n"), 0755))
+	child := exec.Command(fakeOxDaemon)
+	require.NoError(t, child.Start())
+	childDone := make(chan struct{})
+	go func() {
+		_ = child.Wait()
+		close(childDone)
+	}()
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		<-childDone
+	})
+
+	assert.True(t, isOxDaemonProcess(child.Process.Pid))
 }
 
 // --- buildDaemonArgs tests ---

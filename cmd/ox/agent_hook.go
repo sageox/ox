@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/proc"
+	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 )
@@ -835,7 +836,7 @@ func appendRedactedEntries(rawPath string, entries []session.Entry) error {
 // Reuses all existing prime logic cleanly via subprocess invocation.
 // Passes the original raw stdin bytes to prime to preserve unknown/agent-specific fields.
 func runPrimeForHook(agentID string, ctx *HookContext) error {
-	oxPath, err := os.Executable()
+	oxPath, err := selfexec.Path()
 	if err != nil {
 		return fmt.Errorf("hook: cannot find ox executable: %w", err)
 	}

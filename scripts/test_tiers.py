@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -21,6 +22,8 @@ REQUIRED_TIERS = {
     "release",
 }
 SAFE_TAG = re.compile(r"^[A-Za-z0-9_.-]+$")
+ENV_PACKAGE_PARALLELISM = "OX_TEST_P"
+ENV_TEST_PARALLELISM = "OX_TEST_PARALLEL"
 SAFE_TIMEOUT = re.compile(r"^(?:[0-9]+(?:ns|us|µs|ms|s|m|h))+$")
 
 
@@ -133,6 +136,28 @@ def validate(config: dict) -> list[str]:
     return failures
 
 
+def _concurrency(env_var: str, declared: int) -> int:
+    """Return the declared parallelism, or an operator override from the environment.
+
+    The declared values are sized for a dedicated CI runner with the machine to
+    itself. Locally the same numbers run N-at-a-time, once per agent session and
+    git worktree: on an 18-core workstation two concurrent full-tier runs drove
+    the load average to 37 and the machine to ~50% system time. These overrides
+    let one run be dialed down without editing the tier contract that CI
+    enforces, so a loaded machine is a local decision rather than a repo-wide one.
+    """
+    raw = os.environ.get(env_var)
+    if raw is None:
+        return declared
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{env_var} must be a positive integer, got {raw!r}") from None
+    if value < 1:
+        raise ValueError(f"{env_var} must be >= 1, got {value}")
+    return value
+
+
 def go_test_flags(config: dict, tier_name: str) -> list[str]:
     tier = config["tiers"].get(tier_name)
     if tier is None:
@@ -151,8 +176,8 @@ def go_test_flags(config: dict, tier_name: str) -> list[str]:
         flags.append("-race")
     if "count" in settings:
         flags.append("-count=" + str(settings["count"]))
-    flags.extend(["-p", str(settings["package_parallelism"])])
-    flags.extend(["-parallel", str(settings["test_parallelism"])])
+    flags.extend(["-p", str(_concurrency(ENV_PACKAGE_PARALLELISM, settings["package_parallelism"]))])
+    flags.extend(["-parallel", str(_concurrency(ENV_TEST_PARALLELISM, settings["test_parallelism"]))])
     flags.append("-timeout=" + settings["timeout"])
     return flags
 
