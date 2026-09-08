@@ -434,6 +434,11 @@ func (m *Manager) runSessionCleanup() {
 	sw := m.sessionWatcher
 	m.mu.Unlock()
 
+	// Quiesce finished watchers before cleanup or finalization reads their cursor.
+	if sw != nil {
+		sw.Cleanup()
+	}
+
 	if ok {
 		if sfh, ok := h.(*SessionFinalizeHandler); ok {
 			sfh.Cleanup(m.ledgerPath)
@@ -443,7 +448,6 @@ func (m *Manager) runSessionCleanup() {
 	// tail-mode watcher anti-entropy: restart orphaned watchers, stop finished ones
 	if sw != nil {
 		sw.DetectAndRestart(m.ledgerPath)
-		sw.Cleanup()
 	}
 }
 

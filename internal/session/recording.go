@@ -62,6 +62,9 @@ type LifecycleEvent struct {
 // Stored in sessions/<session-name>/.recording.json
 type RecordingState struct {
 	AgentID string `json:"agent_id"`
+	// AgentSessionID identifies the native session independently of its file's
+	// modification time, including when the daemon retries discovery later.
+	AgentSessionID string `json:"agent_session_id,omitempty"`
 	// SessionID is the durable ses_<UUIDv7> recording identity, minted once at
 	// StartRecording and reused verbatim by every finalize path (stop, recover,
 	// daemon). It exists from t=0 so conversation URLs (/c/<ses_id>) circulated
@@ -551,6 +554,20 @@ func resolveSessionsWritePath(projectRoot string) string {
 
 const explicitStopMarker = ".session_stopped"
 
+// HasExplicitStop checks the stop breadcrumb without consuming it. Tail watchers
+// use it to stop even when the CLI cannot reach the daemon over IPC.
+func HasExplicitStop(projectRoot, agentID string) bool {
+	if projectRoot == "" || agentID == "" {
+		return false
+	}
+	for _, dir := range sessionsSearchPaths(projectRoot) {
+		if _, err := os.Stat(filepath.Join(dir, explicitStopMarker+"."+agentID)); !os.IsNotExist(err) {
+			return true
+		}
+	}
+	return false
+}
+
 // MarkExplicitStop writes a per-agent breadcrumb indicating the user explicitly
 // stopped recording. This prevents the next auto-start cycle (e.g. from /clear
 // hook re-prime) from silently restarting the session for this specific agent.
@@ -701,6 +718,11 @@ func cleanupStaleEmptyRecordings(projectRoot string) {
 		if state.SessionPath == "" {
 			continue
 		}
+		// A native log can hold the session even when the watcher never wrote
+		// an entry. Let finalization read it before classifying this as empty.
+		if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail") {
+			continue
+		}
 		// only clean phantom stubs — a header-only or missing raw.jsonl. Since
 		// eager writes at recording start (ses_/c link, header, context-trace),
 		// an abandoned session leaves a dir with content, so a plain os.Stat
@@ -783,6 +805,9 @@ func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
 		// immediately; give the recording time to establish before cleanup.
 		if !state.StartedAt.IsZero() && time.Since(state.StartedAt) < GhostGracePeriod {
 			continue
+		}
+		if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail") {
+			continue // native source must be checked by finalization first
 		}
 
 		// parent is dead — check if there's any recoverable data. Classify
@@ -917,6 +942,9 @@ func CleanupOrphanedStubsInDir(cacheSessionsDir string) GhostCleanupResult {
 			if json.Unmarshal(data, &state) != nil || state.IsAgentAlive() {
 				continue // unreadable-as-JSON or still alive → keep
 			}
+			if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail") {
+				continue // native source must be checked by finalization first
+			}
 			// parsed cleanly and the PID is dead → eligible; fall through.
 		} else if !os.IsNotExist(readErr) {
 			// marker present but the read itself failed (permission/transient) → keep.
@@ -974,6 +1002,7 @@ func loadRecordingStatesFromDir(sessionsDir string) ([]*RecordingState, error) {
 // StartRecordingOptions contains options for starting a recording.
 type StartRecordingOptions struct {
 	AgentID          string
+	AgentSessionID   string
 	AdapterName      string
 	SessionFile      string // source file from adapter (Claude Code JSONL)
 	OutputFile       string // output file being recorded
@@ -1112,6 +1141,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 
 	state := &RecordingState{
 		AgentID:                opts.AgentID,
+		AgentSessionID:         opts.AgentSessionID,
 		SessionID:              sessionid.GenerateSessionID(),
 		ContinuedFromSessionID: continuedFromSessionID,
 		AdapterName:            opts.AdapterName,

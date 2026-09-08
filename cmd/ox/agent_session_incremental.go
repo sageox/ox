@@ -108,7 +108,7 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 
 		entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, readOffset)
 		if readErr != nil {
-			slog.Debug("finalize: incremental read failed", "error", readErr)
+			return nil, fmt.Errorf("read final session entries: %w", readErr)
 		} else if len(entries) > 0 {
 			slog.Info("finalize: drain result", "entries_read", len(entries), "new_offset", newOffset)
 
@@ -132,7 +132,7 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 				drainEntries := session.ConvertRawEntries(entries)
 
 				if appendErr := appendRedactedEntries(rawPath, drainEntries); appendErr != nil {
-					slog.Debug("finalize: append entries failed", "error", appendErr)
+					return nil, fmt.Errorf("append final session entries: %w", appendErr)
 				} else {
 					// only advance offset/count after successful append;
 					// leaving them unchanged lets the next drain retry these entries
