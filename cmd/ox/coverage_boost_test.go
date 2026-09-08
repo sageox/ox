@@ -566,10 +566,31 @@ func TestOxActorDetector_ReturnsConsistentResult(t *testing.T) {
 // dispatchPhase — testing specific branches at 0%
 // =============================================================================
 
-// TestDispatchPhase_CompactPhase and TestDispatchPhase_StartPhase are intentionally
-// excluded: both phases call runPrimeForHook which execs os.Executable(). In a test
-// binary, that re-runs the full test suite recursively, hanging for the 10-minute
-// default timeout. These paths are covered by integration tests instead.
+// TestDispatchPhase_StartPhase and TestDispatchPhase_CompactPhase were absent for
+// exactly as long as the fork bomb existed. Both phases route through
+// runPrimeForHook, which used to exec os.Executable() — the compiled TEST
+// binary — and re-run this entire suite recursively until the timeout. Now that
+// runPrimeForHook goes through internal/selfexec, the two hook phases a coworker
+// actually hits first are testable in-process, so they are tested.
+func TestDispatchPhase_StartPhase(t *testing.T) {
+	ctx := &HookContext{
+		Phase:       phaseStart,
+		AgentType:   "claude-code",
+		ProjectRoot: t.TempDir(),
+	}
+
+	assert.NoError(t, dispatchPhase(ctx), "start must not fail just because prime was skipped")
+}
+
+func TestDispatchPhase_CompactPhase(t *testing.T) {
+	ctx := &HookContext{
+		Phase:       phaseCompact,
+		AgentType:   "claude-code",
+		ProjectRoot: t.TempDir(),
+	}
+
+	assert.NoError(t, dispatchPhase(ctx), "compact must not fail just because prime was skipped")
+}
 
 func TestDispatchPhase_StopPhase(t *testing.T) {
 	t.Parallel()
