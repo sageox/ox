@@ -30,7 +30,14 @@ var ErrUnderTest = errors.New("selfexec: refusing to re-exec the test binary")
 // Returning ErrUnderTest makes that recursion impossible by construction,
 // rather than relying on each new call site remembering to guard itself.
 func Path() (string, error) {
-	if testing.Testing() {
+	return resolve(testing.Testing())
+}
+
+// resolve is Path with the under-test decision injected. Path's own branches
+// are otherwise untestable: testing.Testing() is true by definition inside
+// every test, so the real-binary path could never be exercised.
+func resolve(underTest bool) (string, error) {
+	if underTest {
 		return "", ErrUnderTest
 	}
 	return os.Executable()
