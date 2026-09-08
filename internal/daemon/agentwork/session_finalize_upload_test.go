@@ -617,32 +617,52 @@ func TestProcessResult_UploadOnly_AlreadyCommitted_PrunesCache(t *testing.T) {
 	}
 }
 
-// A session that stageSessionInLedger leaves outside the ledger (an XDG cache
-// dir) cannot be committed. Its only copy must keep real content, not pointers.
+// A session whose content lives outside the ledger cannot be committed: an XDG
+// cache dir that stageSessionInLedger left in place, or a symlink under
+// sessions/ that points at one. Either way the only copy must keep real
+// content, not pointers.
 func TestGitCommitAndPush_LeavesOutOfLedgerSessionIntact(t *testing.T) {
-	ledgerPath := t.TempDir()
-	runGitCmd(t, ledgerPath, "init", "--quiet")
-	sessionDir := filepath.Join(t.TempDir(), "sessions", "2026-01-10T14-30-testuser-OxXDG")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	raw := []byte(testRawContent)
-	rawPath := filepath.Join(sessionDir, "raw.jsonl")
-	if err := os.WriteFile(rawPath, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	for _, viaSymlink := range []bool{false, true} {
+		name := "xdg dir"
+		if viaSymlink {
+			name = "symlink under sessions"
+		}
+		t.Run(name, func(t *testing.T) {
+			ledgerPath := t.TempDir()
+			runGitCmd(t, ledgerPath, "init", "--quiet")
+			externalDir := filepath.Join(t.TempDir(), "sessions", "2026-01-10T14-30-testuser-OxXDG")
+			if err := os.MkdirAll(externalDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			raw := []byte(testRawContent)
+			rawPath := filepath.Join(externalDir, "raw.jsonl")
+			if err := os.WriteFile(rawPath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sessionDir := externalDir
+			if viaSymlink {
+				if err := os.MkdirAll(filepath.Join(ledgerPath, "sessions"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				sessionDir = filepath.Join(ledgerPath, "sessions", filepath.Base(externalDir))
+				if err := os.Symlink(externalDir, sessionDir); err != nil {
+					t.Skipf("symlinks unsupported: %v", err)
+				}
+			}
 
-	handler := NewSessionFinalizeHandler(slog.Default())
-	payload := &SessionFinalizePayload{SessionDir: sessionDir, RawPath: rawPath, LedgerPath: ledgerPath}
-	if handler.gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef(raw)}) {
-		t.Fatal("a session outside the ledger must not report a successful push")
-	}
+			handler := NewSessionFinalizeHandler(slog.Default())
+			payload := &SessionFinalizePayload{SessionDir: sessionDir, RawPath: filepath.Join(sessionDir, "raw.jsonl"), LedgerPath: ledgerPath}
+			if handler.gitCommitAndPush(payload, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef(raw)}) {
+				t.Fatal("a session outside the ledger must not report a successful push")
+			}
 
-	got, err := os.ReadFile(rawPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lfs.IsPointerFile(rawPath) || !bytes.Equal(got, raw) {
-		t.Fatalf("out-of-ledger raw.jsonl must keep its content, got %d bytes", len(got))
+			got, err := os.ReadFile(rawPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lfs.IsPointerFile(rawPath) || !bytes.Equal(got, raw) {
+				t.Fatalf("external raw.jsonl must keep its content, got %d bytes", len(got))
+			}
+		})
 	}
 }
