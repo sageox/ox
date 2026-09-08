@@ -313,6 +313,31 @@ func TestProcessCmdline_CurrentProcess(t *testing.T) {
 	assert.Contains(t, cmdline, ".test", "cmdline should name the compiled test binary")
 }
 
+// TestPsCmdline_CurrentProcess covers the ps(1) strategy directly. On Linux
+// /proc always wins, so without this test the macOS-only path would be dead in
+// the coverage profile — which is precisely how the darwin bug went unnoticed.
+func TestPsCmdline_CurrentProcess(t *testing.T) {
+	cmdline, ok := psCmdline(os.Getpid())
+
+	require.True(t, ok, "ps(1) must resolve the running process on %s", runtime.GOOS)
+	assert.Contains(t, cmdline, ".test")
+}
+
+func TestPsCmdline_UnknownPID(t *testing.T) {
+	_, ok := psCmdline(999999999)
+
+	assert.False(t, ok)
+}
+
+// TestProcCmdline_MatchesPlatform pins the /proc strategy to the platform that
+// actually has /proc, so a future "simplification" back to a single strategy
+// fails here rather than silently on macOS only.
+func TestProcCmdline_MatchesPlatform(t *testing.T) {
+	_, ok := procCmdline(os.Getpid())
+
+	assert.Equal(t, runtime.GOOS == "linux", ok, "/proc is a Linux-only interface")
+}
+
 func TestProcessCmdline_UnknownPID(t *testing.T) {
 	_, ok := processCmdline(999999999) // very unlikely to be alive
 
@@ -337,6 +362,11 @@ func TestIsOxDaemonProcess_RejectsUnrelatedProcess(t *testing.T) {
 	assert.False(t, isOxDaemonProcess(child.Process.Pid))
 }
 
+func TestIsOxDaemonProcess_RejectsUnresolvablePID(t *testing.T) {
+	// PID-reuse guard: if the command line cannot be read at all, never signal.
+	assert.False(t, isOxDaemonProcess(999999999))
+}
+
 func TestIsOxDaemonProcess_AcceptsOxDaemon(t *testing.T) {
 	// the script's own filename supplies both "ox" and "daemon"
 	fakeOxDaemon := filepath.Join(t.TempDir(), "ox-daemon-fake")
@@ -354,6 +384,80 @@ func TestIsOxDaemonProcess_AcceptsOxDaemon(t *testing.T) {
 	})
 
 	assert.True(t, isOxDaemonProcess(child.Process.Pid))
+}
+
+// TestKillStaleDaemon_IgnoresSigtermEscalatesToSigkill covers the escalation a
+// wedged daemon needs. Before it existed, KillStaleDaemon returned an error
+// here — and that error blocks every subsequent `ox daemon start` for the
+// workspace, permanently.
+func TestKillStaleDaemon_IgnoresSigtermEscalatesToSigkill(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping SIGKILL escalation test in short mode")
+	}
+
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
+
+	// Child ignores SIGTERM outright; only SIGKILL can reap it. It touches a
+	// ready file AFTER installing the trap: signaling it before then races the
+	// shell's startup and the default SIGTERM action kills it, which makes this
+	// test pass without ever reaching the escalation.
+	readyPath := filepath.Join(tmpDir, "trap-installed")
+	fakeOxDaemon := filepath.Join(tmpDir, "ox-daemon-fake")
+	require.NoError(t, os.WriteFile(fakeOxDaemon,
+		[]byte("#!/bin/sh\ntrap '' TERM\ntouch \""+readyPath+"\"\nwhile true; do sleep 1; done\n"), 0755))
+	child := exec.Command(fakeOxDaemon)
+	require.NoError(t, child.Start())
+	childPID := child.Process.Pid
+	childDone := make(chan struct{})
+	go func() {
+		_ = child.Wait()
+		close(childDone)
+	}()
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		<-childDone
+	})
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(readyPath)
+		return err == nil
+	}, 10*time.Second, 20*time.Millisecond, "child never installed its SIGTERM trap")
+
+	wsID := "sigterm-ignored"
+	regDir := filepath.Join(tmpDir, "sageox", "daemon")
+	require.NoError(t, os.MkdirAll(regDir, 0700))
+	reg := &Registry{Daemons: map[string]DaemonInfo{
+		// no socket file: IPC is unreachable, so cleanup goes straight to signals
+		wsID: {WorkspaceID: wsID, PID: childPID, SocketPath: filepath.Join(regDir, "daemon-"+wsID+".sock")},
+	}}
+	data, _ := json.MarshalIndent(reg, "", "  ")
+	require.NoError(t, os.WriteFile(filepath.Join(regDir, "registry.json"), data, 0600))
+
+	// guard: without this the test can pass vacuously — if KillStaleDaemon
+	// cannot see the entry it returns nil having done nothing, and every
+	// assertion below still holds.
+	preload, err := LoadRegistry()
+	require.NoError(t, err)
+	require.NotNil(t, preload.FindByWorkspaceID(wsID), "registry entry must be visible to KillStaleDaemon")
+	require.NoError(t, signalProcess(childPID, 0), "child must be alive before the kill")
+	require.True(t, isOxDaemonProcess(childPID), "child must be identifiable as an ox daemon")
+
+	start := time.Now()
+	require.NoError(t, KillStaleDaemon(wsID), "SIGKILL escalation should reap a SIGTERM-proof daemon")
+	// SIGTERM is waited on for 2s before escalating; a faster return means the
+	// escalation branch was never entered.
+	assert.Greater(t, time.Since(start), 2*time.Second, "must have waited out SIGTERM before escalating")
+
+	select {
+	case <-childDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("child survived SIGTERM and SIGKILL")
+	}
+
+	loaded, err := LoadRegistry()
+	require.NoError(t, err)
+	assert.Nil(t, loaded.FindByWorkspaceID(wsID), "registry entry should be cleaned up after SIGKILL")
 }
 
 // --- buildDaemonArgs tests ---

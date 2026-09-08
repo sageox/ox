@@ -46,12 +46,27 @@ func isOxDaemonProcess(pid int) bool {
 // stale-daemon cleanup on macOS leaked an orphan, and the SIGTERM escalation
 // below it was unreachable dead code.
 func processCmdline(pid int) (string, bool) {
-	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
-		// cmdline is NUL-separated; join for simple substring match
-		return strings.ReplaceAll(string(data), "\x00", " "), true
+	if cmdline, ok := procCmdline(pid); ok {
+		return cmdline, true
 	}
+	return psCmdline(pid)
+}
 
-	// bounded: a wedged process table must not stall the daemon-start path
+// procCmdline reads /proc/<pid>/cmdline. Present on Linux, absent everywhere
+// else — kept separate from psCmdline so each strategy is directly testable on
+// a platform where the other one is the live path.
+func procCmdline(pid int) (string, bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return "", false
+	}
+	// cmdline is NUL-separated; join for simple substring match
+	return strings.ReplaceAll(string(data), "\x00", " "), true
+}
+
+// psCmdline asks ps(1) for the process arguments. Bounded: a wedged process
+// table must not stall the daemon-start path.
+func psCmdline(pid int) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "args=").Output()
