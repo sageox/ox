@@ -140,7 +140,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 			StartedAt:   startedAt,
 		})
 
-		result := recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath)
+		result, _ := recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath)
 		if !result {
 			t.Fatal("expected recovery to succeed")
 		}
@@ -190,7 +190,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 			StartedAt:   time.Now().Add(-2 * time.Hour),
 		})
 
-		if recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath) {
+		if recovered, _ := recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath); recovered {
 			t.Error("expected recovery to fail for empty session file")
 		}
 	})
@@ -207,7 +207,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 			StartedAt:   time.Now().Add(-2 * time.Hour),
 		})
 
-		if recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath) {
+		if recovered, _ := recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath); recovered {
 			t.Error("expected recovery to fail for missing session file")
 		}
 	})
@@ -223,7 +223,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 			StartedAt:   time.Now().Add(-2 * time.Hour),
 		})
 
-		if recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath) {
+		if recovered, _ := recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath); recovered {
 			t.Error("expected recovery to fail when no session file in state")
 		}
 	})
@@ -237,7 +237,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath) {
+		if recovered, _ := recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath); recovered {
 			t.Error("expected recovery to fail for invalid recording JSON")
 		}
 	})
@@ -257,7 +257,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 			StartedAt:   time.Now().Add(-2 * time.Hour),
 		})
 
-		if recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath) {
+		if recovered, _ := recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath); recovered {
 			t.Error("expected recovery to fail for unknown adapter")
 		}
 	})
@@ -283,7 +283,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 			StartedAt:   startedAt,
 		})
 
-		result := recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath)
+		result, _ := recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath)
 		if !result {
 			t.Fatal("expected recovery to succeed")
 		}
@@ -327,7 +327,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 			SessionID:   durableID,
 		})
 
-		if !recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath) {
+		if recovered, _ := recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath); !recovered {
 			t.Fatal("expected recovery to succeed")
 		}
 
@@ -357,7 +357,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 			// SessionID intentionally empty
 		})
 
-		if !recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath) {
+		if recovered, _ := recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath); !recovered {
 			t.Fatal("expected recovery to succeed")
 		}
 
@@ -385,7 +385,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 			StartedAt:   startedAt,
 		})
 
-		if recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath) {
+		if recovered, _ := recoverRawFromSessionFile(logger, recPath, sessionDir, rawPath); recovered {
 			t.Error("expected recovery to fail when all entries are before start time")
 		}
 	})

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
@@ -852,4 +854,85 @@ func TestFinalizeIncrementalSession_EmptySession(t *testing.T) {
 	assert.Equal(t, rawPath, got.RawPath, "RawPath should still be set even for empty sessions")
 	assert.Empty(t, got.SummaryMDPath, "no summary should be generated for empty session")
 	assert.Empty(t, got.SessionMDPath, "no session markdown should be generated for empty session")
+}
+
+// A failed final Codex drain must preserve its captured prefix and cursor for retry.
+func TestCodexSessionStop_FinalDrainFailurePreservesRecording(t *testing.T) {
+	for _, failure := range []string{"read", "append"} {
+		t.Run(failure, func(t *testing.T) {
+			if failure == "append" && os.Geteuid() == 0 {
+				t.Skip("root can write files despite read-only permissions")
+			}
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("OX_XDG_DISABLE", "")
+			t.Setenv("SAGEOX_DAEMON", "false")
+			projectRoot := setupIncrementalTest(t)
+			t.Chdir(projectRoot)
+			previousCfg := cfg
+			cfg = &config.Config{Text: true}
+			t.Cleanup(func() { cfg = previousCfg })
+
+			adapter := &testCodexAdapter{}
+			adapters.Register(adapter)
+			t.Cleanup(func() { adapters.Unregister("codex") })
+			sourceFile := writeCodexSessionFile(t, os.Getenv("HOME"), projectRoot)
+			inst := &agentinstance.Instance{AgentID: "OxDrainRetry", AgentType: "codex"}
+			state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+				AgentID: inst.AgentID, AdapterName: "codex", SessionFile: sourceFile,
+				WorkspacePath: projectRoot, WatchMode: "tail", ParentPID: os.Getpid(),
+			})
+			require.NoError(t, err)
+			require.NoError(t, writeRawHeader(projectRoot, state))
+			rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+			appendCodexMessage(t, sourceFile, "user", "captured prefix")
+			prefix, offset, err := adapter.ReadFromOffset(sourceFile, 0)
+			require.NoError(t, err)
+			require.Len(t, prefix, 1)
+			require.NoError(t, appendRedactedEntries(rawPath, session.ConvertRawEntries(prefix)))
+			require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
+				s.SourceOffset = offset
+				s.EntryCount = len(prefix)
+			}))
+			before, err := os.ReadFile(rawPath)
+			require.NoError(t, err)
+			appendCodexMessage(t, sourceFile, "assistant", "final Codex response")
+			if failure == "read" {
+				require.NoError(t, os.Rename(sourceFile, sourceFile+".unavailable"))
+			} else {
+				require.NoError(t, os.Chmod(rawPath, 0o400))
+				t.Cleanup(func() { _ = os.Chmod(rawPath, 0o600) })
+			}
+
+			err = runAgentSessionStop(inst)
+			require.Error(t, err, "stop must not finalize only the captured prefix")
+			assert.Contains(t, err.Error(), "recording state preserved")
+			preserved, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
+			require.NoError(t, err)
+			require.NotNil(t, preserved)
+			assert.Equal(t, offset, preserved.SourceOffset)
+			assert.Equal(t, 1, preserved.EntryCount)
+			after, err := os.ReadFile(rawPath)
+			require.NoError(t, err)
+			assert.Equal(t, before, after, "a failed drain must preserve already captured content")
+
+			if failure == "read" {
+				require.NoError(t, os.Rename(sourceFile+".unavailable", sourceFile))
+			} else {
+				require.NoError(t, os.Chmod(rawPath, 0o600))
+			}
+			require.NoError(t, runAgentSessionStop(inst))
+			cleared, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
+			require.NoError(t, err)
+			assert.Nil(t, cleared)
+			stored, err := session.ReadSessionFromPath(rawPath)
+			require.NoError(t, err)
+			var contents []any
+			for _, entry := range stored.Entries {
+				contents = append(contents, entry["content"])
+			}
+			assert.Equal(t, []any{"captured prefix", "final Codex response"}, contents,
+				"retry must retain the prefix and capture the final turn exactly once")
+		})
+	}
 }

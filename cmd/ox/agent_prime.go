@@ -441,7 +441,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// attempt to start session recording if enabled (local, no auth needed)
 	phaseStart = time.Now()
 	continuedFromSessionID := recordingSessionIDFromMarker(existingMarker)
-	sessionStat := startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID)
+	sessionStat := startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID)
 	recordingSessionID := recordingSessionIDForMarker(projectRoot, agentID, continuedFromSessionID)
 	timing["session_start"] = time.Since(phaseStart).Milliseconds()
 
@@ -1220,7 +1220,7 @@ func recordingSessionIDForMarker(projectRoot, agentID, prior string) string {
 	return ""
 }
 
-func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID string) *sessionStatus {
+func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID string) *sessionStatus {
 	// resolve session mode from the config hierarchy. Sessions record into
 	// the project ledger; Knowledge Bubbles play no part (ox ADR-028).
 	resolved := config.ResolveSessionRecording(projectRoot)
@@ -1244,7 +1244,12 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 	}
 
 	// respect explicit session stop — user ran ox agent session stop, don't auto-restart
-	if session.ConsumeExplicitStop(projectRoot, agentID) {
+	if session.HasExplicitStop(projectRoot, agentID) {
+		// A stop in progress or awaiting retry still owns the recording.
+		// Keep its signal until processing clears the state.
+		if state, err := session.LoadRecordingStateForAgent(projectRoot, agentID); err == nil && state == nil {
+			session.ConsumeExplicitStop(projectRoot, agentID)
+		}
 		return nil
 	}
 
@@ -1275,6 +1280,17 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 
 	// check if already recording
 	if existing, err := session.LoadRecordingStateForAgent(projectRoot, agentID); err == nil && existing != nil {
+		if existing.WatchMode == "tail" && existing.SessionFile == "" {
+			if agentSessionID != "" && existing.AgentSessionID != agentSessionID {
+				if err := session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
+					s.AgentSessionID = agentSessionID
+				}); err != nil {
+					slog.Warn("failed to persist native session identity", "agent_id", agentID, "error", err)
+				}
+				existing.AgentSessionID = agentSessionID
+			}
+			sendSessionWatchStart(existing, projectRoot)
+		}
 		return &sessionStatus{
 			Recording: true,
 			File:      existing.SessionFile,
@@ -1303,6 +1319,7 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 
 	opts := session.StartRecordingOptions{
 		AgentID:                agentID,
+		AgentSessionID:         agentSessionID,
 		AdapterName:            agentType,
 		OutputFile:             outputFile,
 		FilterMode:             resolved.Mode,
@@ -1442,9 +1459,10 @@ func sendSessionWatchStart(state *session.RecordingState, projectRoot string) {
 			repoRoot = projectRoot
 		}
 		sf, err := adapter.FindSessionFile(adapters.SessionLookup{
-			RepoRoot: repoRoot,
-			AgentID:  state.AgentID,
-			Since:    state.StartedAt,
+			RepoRoot:       repoRoot,
+			AgentID:        state.AgentID,
+			AgentSessionID: state.AgentSessionID,
+			Since:          state.StartedAt.Add(-5 * time.Minute),
 		})
 		if err != nil {
 			slog.Debug("tail-mode: session file not found yet, daemon will discover later",
@@ -1454,7 +1472,9 @@ func sendSessionWatchStart(state *session.RecordingState, projectRoot string) {
 		sessionFile = sf
 		// persist the discovered session file so daemon can find it via DetectAndRestart
 		state.SessionFile = sf
-		if saveErr := session.SaveRecordingState(projectRoot, state); saveErr != nil {
+		if saveErr := session.UpdateRecordingStateForAgent(projectRoot, state.AgentID, func(s *session.RecordingState) {
+			s.SessionFile = sf
+		}); saveErr != nil {
 			slog.Warn("failed to save session file to recording state", "error", saveErr)
 		}
 	}

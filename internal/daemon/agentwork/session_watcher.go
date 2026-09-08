@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 )
@@ -46,10 +47,13 @@ type SessionWatcherManager struct {
 // activeWatcher tracks a running TailWatcher goroutine.
 type activeWatcher struct {
 	cancel      context.CancelFunc
+	done        chan struct{}
 	sessionName string
 	adapterName string
 	sessionFile string
 	cachePath   string
+	projectRoot string
+	agentID     string
 	ledgerPath  string
 	startOffset int64 // byte offset in source file to resume from (0 for fresh start)
 	startedAt   time.Time
@@ -92,7 +96,7 @@ func (m *SessionWatcherManager) StartWatch(
 }
 
 // startWatchAt is the internal start method that accepts a starting offset.
-// offset=0 means start from current EOF (fresh start from IPC).
+// offset=0 means catch up from the beginning of the native session.
 // offset>0 means catch up from that position first (daemon restart recovery).
 func (m *SessionWatcherManager) startWatchAt(
 	sessionName, sessionFile, adapterName, ledgerPath, cachePath string, offset int64,
@@ -139,14 +143,29 @@ func (m *SessionWatcherManager) startWatchAt(
 	}
 
 	rawPath := filepath.Join(cachePath, "raw.jsonl")
+	var state session.RecordingState
+	data, err := os.ReadFile(filepath.Join(cachePath, recordingMarker))
+	if err != nil {
+		return fmt.Errorf("read recording state: %w", err)
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return fmt.Errorf("read recording state: %w", err)
+	}
+	if state.StoppedAt != nil || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
+		return fmt.Errorf("session recording has stopped")
+	}
+	offset = max(offset, state.SourceOffset, state.StartOffset)
 
 	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // G118: cancel is stored in activeWatcher.cancel, called by StopWatch/StopAll
 	aw := &activeWatcher{
 		cancel:      cancel,
+		done:        make(chan struct{}),
 		sessionName: sessionName,
 		adapterName: adapterName,
 		sessionFile: sessionFile,
 		cachePath:   cachePath,
+		projectRoot: state.WorkspacePath,
+		agentID:     state.AgentID,
 		ledgerPath:  ledgerPath,
 		startOffset: offset,
 		startedAt:   time.Now(),
@@ -168,13 +187,11 @@ func (m *SessionWatcherManager) startWatchAt(
 func (m *SessionWatcherManager) StopWatch(sessionName string) {
 	m.mu.Lock()
 	aw, ok := m.watchers[sessionName]
-	if ok {
-		delete(m.watchers, sessionName)
-	}
 	m.mu.Unlock()
 
 	if ok {
 		aw.cancel()
+		<-aw.done
 		m.logger.Info("session watcher stopped", "session", sessionName)
 	}
 }
@@ -215,7 +232,7 @@ func (m *SessionWatcherManager) ActiveSessions() []string {
 // On restart, reads the persisted SourceOffset from .recording.json so the
 // catch-up read recovers entries written while the daemon was down.
 func (m *SessionWatcherManager) DetectAndRestart(ledgerPath string) int {
-	sessionsDir := filepath.Join(ledgerPath, "sessions")
+	sessionsDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions")
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		return 0
@@ -248,15 +265,42 @@ func (m *SessionWatcherManager) DetectAndRestart(ledgerPath string) int {
 		if err := json.Unmarshal(data, &state); err != nil {
 			continue
 		}
-		if state.WatchMode != "tail" || state.StoppedAt != nil {
+		if state.WatchMode != "tail" || state.StoppedAt != nil || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
 			continue
 		}
-		if state.SessionFile == "" || state.AdapterName == "" {
+		if state.AdapterName == "" {
 			continue
 		}
 		// don't restart watchers for dead agents — let session_finalize handle them
 		if !state.IsAgentAlive() {
 			continue
+		}
+		if state.SessionFile == "" {
+			adapter, err := resolveAdapter(state.AdapterName)
+			if err != nil {
+				continue
+			}
+			source, err := adapter.FindSessionFile(adapters.SessionLookup{
+				RepoRoot:       state.WorkspacePath,
+				AgentID:        state.AgentID,
+				AgentSessionID: state.AgentSessionID,
+				Since:          state.StartedAt.Add(-5 * time.Minute),
+			})
+			if err != nil {
+				m.logger.Debug("session source not available yet", "session", sessionName, "error", err)
+				continue
+			}
+			if _, err := adapters.SafeSessionFilePath(state.AdapterName, source, m.homeDir()); err != nil {
+				m.logger.Warn("refusing discovered session source", "session", sessionName, "error", err)
+				continue
+			}
+			if err := session.UpdateRecordingStateForAgent(state.WorkspacePath, state.AgentID, func(s *session.RecordingState) {
+				s.SessionFile = source
+			}); err != nil {
+				m.logger.Warn("failed to persist discovered session source", "session", sessionName, "error", err)
+				continue
+			}
+			state.SessionFile = source
 		}
 
 		cachePath := filepath.Join(sessionsDir, sessionName)
@@ -308,6 +352,7 @@ func (m *SessionWatcherManager) runWatcher(
 	adapter adapters.Adapter, rawPath string,
 ) {
 	defer m.wg.Done()
+	defer close(aw.done)
 	defer func() {
 		m.mu.Lock()
 		// skip cleanup if StopAll already ran (prevents re-inserting into cleared map)
@@ -319,95 +364,126 @@ func (m *SessionWatcherManager) runWatcher(
 		m.mu.Unlock()
 	}()
 
-	// Per ox-h20u: ALL raw.jsonl writes go through session.RawWriter. The
-	// writer constructs and applies the three-layer redaction stack
-	// (CommandRedactor → built-in Redactor → gitleaks extras). There is no
-	// way to call WriteEntry without redaction running first. Adapters can
-	// only emit RawEntry JSON on stdout — they have no write access to
-	// raw.jsonl.
-	rw, err := session.NewRawWriter(rawPath, "")
-	if err != nil {
-		m.logger.Error("failed to open raw.jsonl for writing",
-			"session", aw.sessionName, "path", rawPath, "error", err)
-		return
-	}
-	defer rw.Close()
-
-	// cursor is where recording resumes from. It starts at the persisted
-	// offset and must be carried through catch-up into the poll loop —
-	// re-deriving it from aw.startOffset later would re-read and duplicate
-	// everything catch-up just recovered.
-	cursor := aw.startOffset
-
-	// catch-up: read entries between the persisted offset and now
-	if reader, ok := adapter.(adapters.IncrementalReader); ok && cursor > 0 {
-		entries, newOffset, readErr := reader.ReadFromOffset(aw.sessionFile, cursor)
-		switch {
-		case readErr != nil:
-			m.logger.Warn("catch-up read failed; continuing from the persisted offset",
-				"session", aw.sessionName, "offset", cursor, "error", readErr)
-		case len(entries) > 0:
-			converted := session.ConvertRawEntries(entries)
-			if writeErr := writeEntries(rw, converted); writeErr != nil {
-				// the cursor must NOT advance past entries that never reached
-				// the ledger: doing so marks them consumed and they are gone
-				// for good. Leaving it where it is costs a re-read.
-				m.logger.Error("catch-up write failed; leaving the cursor in place so the entries can be recovered",
-					"session", aw.sessionName, "offset", cursor, "error", writeErr)
-				return
-			}
-			cursor = newOffset
-			m.persistOffset(aw, cursor, len(converted))
-			m.logger.Info("catch-up read recovered entries",
-				"session", aw.sessionName,
-				"entries", len(entries),
-				"from_offset", aw.startOffset,
-				"to_offset", cursor,
-			)
+	// Serialize with CLI stop independently of IPC. The stop breadcrumb makes
+	// the poll loop release this lock; the CLI then reloads the final cursor.
+	err := fileutil.WithFileLock(ctx, rawPath, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-	}
+		data, err := os.ReadFile(filepath.Join(aw.cachePath, recordingMarker))
+		if err != nil {
+			return err
+		}
+		var state session.RecordingState
+		if err := json.Unmarshal(data, &state); err != nil {
+			return err
+		}
+		if state.StoppedAt != nil || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
+			return nil
+		}
 
-	// Record through the adapter's own incremental reader whenever it has one.
-	//
-	// The alternative, adapter.Watch, delivers entries with NO cursor, so any
-	// resume offset has to be inferred from the file afterwards — and both
-	// ways of being wrong lose data. Infer high (file size, or a boundary
-	// scanned after the write) and a record the agent appended in between is
-	// marked consumed but never written. Infer low and a restart re-reads and
-	// duplicates. Database-backed adapters cannot even infer: their offset is
-	// a row count nothing outside the adapter can compute.
-	//
-	// ReadFromOffset returns the cursor it actually consumed to, so there is
-	// nothing to infer.
-	if reader, ok := adapter.(adapters.IncrementalReader); ok {
-		m.pollSession(ctx, aw, reader, rw, cursor)
-		return
-	}
+		// Per ox-h20u: ALL raw.jsonl writes go through session.RawWriter. The
+		// writer constructs and applies the three-layer redaction stack
+		// (CommandRedactor → built-in Redactor → gitleaks extras). There is no
+		// way to call WriteEntry without redaction running first. Adapters can
+		// only emit RawEntry JSON on stdout — they have no write access to
+		// raw.jsonl.
+		rw, err := session.NewRawWriter(rawPath, aw.projectRoot)
+		if err != nil {
+			m.logger.Error("failed to open raw.jsonl for writing",
+				"session", aw.sessionName, "path", rawPath, "error", err)
+			return nil
+		}
+		defer rw.Close()
 
-	// Fallback for an adapter with no incremental reader: tail for entries and
-	// accept that the session cannot be resumed. Every shipped adapter now
-	// implements ReadFromOffset (enforced by tests/adapters), so this path is
-	// for third-party adapters only.
-	ch, err := adapter.Watch(ctx, aw.sessionFile)
-	if err != nil {
-		m.logger.Error("failed to start tail watcher",
-			"session", aw.sessionName, "error", err)
-		return
-	}
-	m.logger.Warn("adapter has no incremental reader; this session cannot resume after a daemon restart",
-		"session", aw.sessionName, "adapter", aw.adapterName)
+		// cursor is where recording resumes from. It starts at the persisted
+		// offset and must be carried through catch-up into the poll loop —
+		// re-deriving it from aw.startOffset later would re-read and duplicate
+		// everything catch-up just recovered.
+		cursor := max(aw.startOffset, state.SourceOffset, state.StartOffset)
 
-	for entry := range ch {
-		converted := session.ConvertRawEntries([]adapters.RawEntry{entry})
-		for i := range converted {
-			if encErr := rw.WriteEntry(&converted[i]); encErr != nil {
-				m.logger.Warn("failed to write entry to raw.jsonl",
-					"session", aw.sessionName, "error", encErr)
+		// catch-up: read entries between the persisted offset and now
+		if reader, ok := adapter.(adapters.IncrementalReader); ok && cursor > 0 {
+			entries, newOffset, readErr := reader.ReadFromOffset(aw.sessionFile, cursor)
+			switch {
+			case readErr != nil:
+				m.logger.Warn("catch-up read failed; continuing from the persisted offset",
+					"session", aw.sessionName, "offset", cursor, "error", readErr)
+			case len(entries) > 0:
+				converted := session.ConvertRawEntries(entries)
+				if writeErr := writeEntries(rw, converted); writeErr != nil {
+					// the cursor must NOT advance past entries that never reached
+					// the ledger: doing so marks them consumed and they are gone
+					// for good. Leaving it where it is costs a re-read.
+					m.logger.Error("catch-up write failed; leaving the cursor in place so the entries can be recovered",
+						"session", aw.sessionName, "offset", cursor, "error", writeErr)
+					return nil
+				}
+				cursor = newOffset
+				m.persistOffset(aw, cursor, len(converted))
+				m.logger.Info("catch-up read recovered entries",
+					"session", aw.sessionName,
+					"entries", len(entries),
+					"from_offset", aw.startOffset,
+					"to_offset", cursor,
+				)
 			}
 		}
-		// no offset is persisted: Watch delivers entries with no cursor, and
-		// every way of guessing one from the file loses data in one direction
-		// or the other — see pollSession
+
+		// Record through the adapter's own incremental reader whenever it has one.
+		//
+		// The alternative, adapter.Watch, delivers entries with NO cursor, so any
+		// resume offset has to be inferred from the file afterwards — and both
+		// ways of being wrong lose data. Infer high (file size, or a boundary
+		// scanned after the write) and a record the agent appended in between is
+		// marked consumed but never written. Infer low and a restart re-reads and
+		// duplicates. Database-backed adapters cannot even infer: their offset is
+		// a row count nothing outside the adapter can compute.
+		//
+		// ReadFromOffset returns the cursor it actually consumed to, so there is
+		// nothing to infer.
+		if reader, ok := adapter.(adapters.IncrementalReader); ok {
+			m.pollSession(ctx, aw, reader, rw, cursor)
+			return nil
+		}
+
+		// Fallback for an adapter with no incremental reader: tail for entries and
+		// accept that the session cannot be resumed. Every shipped adapter now
+		// implements ReadFromOffset (enforced by tests/adapters), so this path is
+		// for third-party adapters only.
+		ch, err := adapter.Watch(ctx, aw.sessionFile)
+		if err != nil {
+			m.logger.Error("failed to start tail watcher",
+				"session", aw.sessionName, "error", err)
+			return nil
+		}
+		m.logger.Warn("adapter has no incremental reader; this session cannot resume after a daemon restart",
+			"session", aw.sessionName, "adapter", aw.adapterName)
+
+		ticker := time.NewTicker(pollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+				if session.HasExplicitStop(aw.projectRoot, aw.agentID) {
+					return nil
+				}
+			case entry, ok := <-ch:
+				if !ok || session.HasExplicitStop(aw.projectRoot, aw.agentID) {
+					return nil
+				}
+				converted := session.ConvertRawEntries([]adapters.RawEntry{entry})
+				if err := writeEntries(rw, converted); err != nil {
+					return err
+				}
+				// Watch has no cursor to persist; see pollSession.
+			}
+		}
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		m.logger.Warn("session watcher ended", "session", aw.sessionName, "error", err)
 	}
 }
 
@@ -434,6 +510,9 @@ func (m *SessionWatcherManager) pollSession(
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+		if session.HasExplicitStop(aw.projectRoot, aw.agentID) {
+			return
 		}
 
 		entries, newOffset, err := reader.ReadFromOffset(aw.sessionFile, offset)

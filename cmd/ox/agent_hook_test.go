@@ -4,7 +4,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -125,6 +127,89 @@ func setupHandleAfterToolTest(t *testing.T) (projectRoot string, agentID string,
 	require.NoError(t, writeRawHeader(projectRoot, state))
 
 	return projectRoot, agentID, sourceFile
+}
+
+// Hook discovery must capture its own native conversation, including files created before prime.
+func TestHandleAfterTool_CodexDiscoveryUsesRecordingIdentity(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds and invokes the real Codex adapter")
+	}
+	adapterBin := filepath.Join(t.TempDir(), "ox-adapter-codex")
+	build := exec.Command("go", "build", "-o", adapterBin, "./cmd/ox-adapter-codex")
+	build.Dir = findModuleRoot(t)
+	buildOutput, err := build.CombinedOutput()
+	require.NoError(t, err, "%s", buildOutput)
+
+	for _, sourceState := range []string{"undiscovered", "missing", "truncated"} {
+		for _, knownIdentity := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/native_id=%t", sourceState, knownIdentity), func(t *testing.T) {
+				t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+				t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+				t.Setenv("OX_XDG_DISABLE", "")
+				projectRoot, agentID, previousSource := setupHandleAfterToolTest(t)
+				t.Chdir(projectRoot)
+				adapter, err := adapters.NewExternalAdapter(adapterBin)
+				require.NoError(t, err)
+				adapters.Register(adapter)
+				t.Cleanup(func() {
+					adapters.Unregister("codex")
+					_ = adapter.Close()
+				})
+
+				state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+				require.NoError(t, err)
+				require.NotNil(t, state)
+				nativeID := "019d2c0d-ac3c-7b72-bb1d-0f246ad1f0d0"
+				now := time.Now()
+				dateDir := filepath.Join(os.Getenv("HOME"), ".codex", "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
+				require.NoError(t, os.MkdirAll(dateDir, 0o755))
+				sourceFile := filepath.Join(dateDir, "requested.jsonl")
+				content := fmt.Sprintf("{\"type\":\"session_meta\",\"payload\":{\"id\":%q,\"cwd\":%q}}\n"+
+					"{\"timestamp\":%q,\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"requested conversation\"}]}}\n",
+					nativeID, projectRoot, state.StartedAt.Add(time.Second).Format(time.RFC3339Nano))
+				require.NoError(t, os.WriteFile(sourceFile, []byte(content), 0o600))
+				beforePrime := state.StartedAt.Add(-time.Minute)
+				require.NoError(t, os.Chtimes(sourceFile, beforePrime, beforePrime))
+				if knownIdentity {
+					// A newer sibling makes ignoring the persisted identity capture the wrong source.
+					sibling := strings.ReplaceAll(content, nativeID, "sibling-session")
+					sibling = strings.ReplaceAll(sibling, "requested conversation", "sibling conversation")
+					require.NoError(t, os.WriteFile(filepath.Join(dateDir, "sibling.jsonl"), []byte(sibling), 0o600))
+				}
+				require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
+					s.AdapterName = "codex"
+					s.WorkspacePath = projectRoot
+					if knownIdentity {
+						s.AgentSessionID = nativeID
+					}
+					switch sourceState {
+					case "undiscovered":
+						s.SessionFile = ""
+					case "missing":
+						s.SessionFile = filepath.Join(dateDir, "missing.jsonl")
+					case "truncated":
+						s.SessionFile = previousSource
+						s.SourceOffset = 1024
+					}
+				}))
+
+				require.NoError(t, handleAfterTool(&HookContext{
+					Phase: phaseAfterTool, AgentType: "codex", ProjectRoot: projectRoot,
+					Marker: &SessionMarker{AgentID: agentID},
+				}))
+				captured, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+				require.NoError(t, err)
+				require.NotNil(t, captured)
+				assert.Equal(t, sourceFile, captured.SessionFile)
+				assert.Equal(t, int64(len(content)), captured.SourceOffset)
+				assert.Equal(t, 1, captured.EntryCount)
+				raw, err := os.ReadFile(filepath.Join(captured.SessionPath, "raw.jsonl"))
+				require.NoError(t, err)
+				assert.Contains(t, string(raw), "requested conversation")
+				assert.NotContains(t, string(raw), "sibling conversation")
+			})
+		}
+	}
 }
 
 func TestHandleAfterTool_WritesEntriesToRawJSONL(t *testing.T) {

@@ -283,6 +283,9 @@ func (d *Daemon) checkDeadAgentsAndFinalize() {
 			)
 
 			if d.sessionFinalizeHandler != nil {
+				if d.sessionWatcher != nil {
+					d.sessionWatcher.Cleanup()
+				}
 				items := d.sessionFinalizeHandler.DetectOrphanedForAgent(d.config.LedgerPath, agentID, pid)
 				for _, item := range items {
 					if d.agentWorker.Enqueue(item) {
@@ -1911,7 +1914,7 @@ func (s *daemonServiceImpl) SessionWatchStart(payload SessionWatchStartPayload) 
 	}
 	// derive paths server-side; never trust client-supplied destinations
 	ledgerPath := s.d.config.LedgerPath
-	cachePath := filepath.Join(ledgerPath, "sessions", payload.SessionName)
+	cachePath := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", payload.SessionName)
 	if err := s.d.sessionWatcher.StartWatch(
 		payload.SessionName, payload.SessionFile,
 		payload.AdapterName, ledgerPath, cachePath,

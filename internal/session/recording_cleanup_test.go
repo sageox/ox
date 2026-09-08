@@ -210,6 +210,42 @@ func TestCleanupStaleEmptyRecordings_RemovesEmptyDir(t *testing.T) {
 
 // --- Ghost session cleanup tests ---
 
+// Source discovery and capture can both lag prime. All cleanup paths must give
+// native recovery a chance before deleting an old header-only recording.
+func TestRecordingCleanup_PreservesNativeRecoveryState(t *testing.T) {
+	for _, cleanup := range []string{"stale", "ghost", "orphan"} {
+		for _, source := range []string{"known", "pending"} {
+			t.Run(cleanup+"/"+source, func(t *testing.T) {
+				projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, t.TempDir())
+				sessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxNative")
+				require.NoError(t, os.MkdirAll(sessionPath, 0700))
+				state := &RecordingState{
+					AgentID: "OxNative", SessionPath: sessionPath,
+					ParentPID: 99999999, StartedAt: time.Now().Add(-72 * time.Hour),
+					AdapterName: "codex", WatchMode: "tail",
+				}
+				if source == "known" {
+					state.SessionFile = filepath.Join(t.TempDir(), "native.jsonl")
+					require.NoError(t, os.WriteFile(state.SessionFile, []byte("native conversation\n"), 0600))
+				}
+				require.NoError(t, SaveRecordingState(projectRoot, state))
+				require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"), []byte("{\"type\":\"header\"}\n"), 0600))
+				require.NoError(t, os.Chtimes(sessionPath, state.StartedAt, state.StartedAt))
+				switch cleanup {
+				case "stale":
+					cleanupStaleEmptyRecordings(projectRoot)
+				case "ghost":
+					assert.Zero(t, CleanupGhostSessionsInDir(sessionsBase).Removed)
+				case "orphan":
+					assert.Zero(t, CleanupOrphanedStubsInDir(sessionsBase).Removed)
+				}
+				assert.FileExists(t, filepath.Join(sessionPath, recordingFile))
+				assert.FileExists(t, filepath.Join(sessionPath, "raw.jsonl"))
+			})
+		}
+	}
+}
+
 func TestCleanupGhostSessionsInDir_RemovesDeadPIDNoData(t *testing.T) {
 	sessionsDir := filepath.Join(t.TempDir(), "sessions")
 	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxDead")

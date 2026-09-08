@@ -1,9 +1,9 @@
 // session.go — session reading, parsing, discovery, and types for codex adapter.
 //
 // Codex CLI stores sessions as JSONL in ~/.codex/sessions/<session-id>.jsonl.
-// Each line is a JSON object with "type" field: "user", "assistant",
-// "function_call", "function_call_output". Tool entries have "name",
-// "arguments" (JSON string), and "call_id" for correlation. Real sessions
+// Message and tool entries are wrapped in response_item JSON objects.
+// Tool calls use "arguments" for function_call or "input" for custom_tool_call,
+// with "name" and "call_id" for correlation. Real sessions
 // routinely fire several function_calls before any of their
 // function_call_outputs return (parallel/back-to-back tool use), so pairs
 // are rarely adjacent in the stream. mergeToolEntries() pairs them by
@@ -44,8 +44,9 @@ type codexPayload struct {
 	Content    []codexContentBlock `json:"content"`
 	Name       string              `json:"name"`
 	Arguments  string              `json:"arguments"`
+	Input      string              `json:"input"`
 	CallID     string              `json:"call_id"`
-	Output     string              `json:"output"`
+	Output     json.RawMessage     `json:"output"`
 	// event_msg fields
 	Message string `json:"message,omitempty"`
 }
@@ -158,17 +159,39 @@ func parseResponseItem(p *codexPayload, ts string) ([]adapterprotocol.RawEntry, 
 	switch p.ItemType {
 	case "message":
 		return parseCodexMessage(p, ts)
-	case "function_call":
+	case "function_call", "custom_tool_call":
 		if p.Name == "" {
 			return nil, nil
 		}
+		input := p.Arguments
+		if p.ItemType == "custom_tool_call" {
+			input = p.Input
+		}
 		return []adapterprotocol.RawEntry{
-			adapterruntime.ToolUseWithID(parseTS(ts), p.Name, p.Arguments, p.CallID),
+			adapterruntime.ToolUseWithID(parseTS(ts), p.Name, input, p.CallID),
 		}, nil
-	case "function_call_output":
-		isErr := isCodexToolError(p.Output)
+	case "function_call_output", "custom_tool_call_output":
+		var output string
+		if len(p.Output) > 0 {
+			if err := json.Unmarshal(p.Output, &output); err != nil {
+				// Codex also writes tool output as content blocks. Preserve text
+				// and leave image payloads out of the session's text representation.
+				var blocks []codexContentBlock
+				if err := json.Unmarshal(p.Output, &blocks); err != nil {
+					return nil, fmt.Errorf("parse tool output: %w", err)
+				}
+				var parts []string
+				for _, block := range blocks {
+					if block.Text != "" {
+						parts = append(parts, block.Text)
+					}
+				}
+				output = strings.Join(parts, "\n")
+			}
+		}
+		isErr := isCodexToolError(output)
 		return []adapterprotocol.RawEntry{
-			adapterruntime.ToolResultWithID(parseTS(ts), p.Output, isErr, p.CallID),
+			adapterruntime.ToolResultWithID(parseTS(ts), output, isErr, p.CallID),
 		}, nil
 	}
 
@@ -237,7 +260,7 @@ func classifyCodexUserContent(blocks []codexContentBlock) (string, bool) {
 	return text, false
 }
 
-// isCodexToolError reports whether a function_call_output represents a
+// isCodexToolError reports whether a tool result represents a
 // failed command. Real exec_command/write_stdin output embeds "Process
 // exited with code N" as one line within a multi-line block ("Command:
 // ...\nChunk ID: ...\nWall time: ...\nProcess exited with code N\n..."), not
@@ -257,7 +280,7 @@ func isCodexToolError(output string) bool {
 	return false
 }
 
-// mergeToolEntries pairs function_call / function_call_output entries by
+// mergeToolEntries pairs function and custom tool calls with their results by
 // call_id regardless of how far apart they land in the parsed stream. Codex
 // routinely fires several tool calls before any of their results return, so
 // requiring strict adjacency (the previous implementation) missed most pairs
@@ -320,7 +343,7 @@ func mergeToolEntries(entries []adapterprotocol.RawEntry, pending map[string]ada
 			continue
 		}
 
-		// tool result: ToolName == "" here (function_call_output never sets it).
+		// tool result: ToolName == "" here (output entries never set it).
 		if _, ok := callIdx[e.CallID]; ok {
 			// its call is in this same batch and already carries the
 			// output from the block above — drop the now-redundant
@@ -356,10 +379,9 @@ func findCodexSession(repoRoot, agentID, since, agentSessionID string) (string, 
 		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
 			return "", err
 		}
-		if path, err := findCodexBySessionID(sessionsDir, agentSessionID); err == nil {
-			return path, nil
-		}
-		// fall through to timestamp-based scanning
+		// The requested file may not exist yet. Wait for that session instead
+		// of attaching this recording to another conversation in the workspace.
+		return findCodexBySessionID(sessionsDir, agentSessionID)
 	}
 
 	sinceTime := time.Time{}

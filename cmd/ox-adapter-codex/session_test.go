@@ -1,15 +1,127 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
 )
+
+// TestToolCallsSurviveReadCommands covers the string and content-block outputs
+// written by Codex 0.153.2 in Conductor. Custom calls were silently omitted;
+// array outputs failed JSON decoding even for ordinary function calls.
+func TestToolCallsSurviveReadCommands(t *testing.T) {
+	for _, call := range []struct {
+		kind     string
+		inputKey string
+		input    string
+	}{
+		{kind: "function_call", inputKey: "arguments", input: `{"cmd":"go test ./..."}`},
+		{kind: "custom_tool_call", inputKey: "input", input: "text(await tools.exec_command({cmd: 'go test ./...'}));"},
+	} {
+		for _, output := range []struct {
+			name    string
+			json    string
+			text    string
+			isError bool
+		}{
+			{name: "string", json: `"Script completed\nPASS"`, text: "Script completed\nPASS"},
+			{name: "empty string", json: `""`},
+			{name: "empty content blocks", json: `[]`},
+			{
+				name: "content blocks",
+				json: `[{"type":"input_text","text":"Script failed"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"},{"type":"input_text","text":"Process exited with code 1\nFAIL"}]`,
+				text: "Script failed\nProcess exited with code 1\nFAIL", isError: true,
+			},
+		} {
+			for _, command := range []string{"read", "read-from-offset"} {
+				t.Run(call.kind+"/"+output.name+"/"+command, func(t *testing.T) {
+					path := filepath.Join(t.TempDir(), "session.jsonl")
+					content := fmt.Sprintf(`{"timestamp":"2026-09-07T16:50:00Z","type":"response_item","payload":{"type":%q,"name":"exec","call_id":"call-1",%q:%q}}
+{"timestamp":"2026-09-07T16:50:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Checking the tests."}]}}
+{"timestamp":"2026-09-07T16:50:02Z","type":"response_item","payload":{"type":%q,"call_id":"call-1","output":%s}}
+`, call.kind, call.inputKey, call.input, call.kind+"_output", output.json)
+					if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					var buf bytes.Buffer
+					args := []string{command, "--session-file", path}
+					if command == "read-from-offset" {
+						args = append(args, "--offset", "0")
+					}
+					if err := adapterruntime.RunWithArgs(adapterConfig, args, nil, &buf); err != nil {
+						t.Fatal(err)
+					}
+					var result adapterprotocol.ReadFromOffsetResult
+					if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
+						t.Fatal(err)
+					}
+					if len(result.Entries) != 2 {
+						t.Fatalf("entries = %+v, want paired tool call and assistant message", result.Entries)
+					}
+					tool := result.Entries[0]
+					if tool.Role != adapterprotocol.RoleTool || tool.ToolName != "exec" || tool.CallID != "call-1" || tool.ToolInput != call.input || tool.ToolOutput != output.text || tool.IsError != output.isError {
+						t.Fatalf("tool = %+v, want call-1 with input %q, output %q, is_error=%v", tool, call.input, output.text, output.isError)
+					}
+					if command == "read-from-offset" && result.NewOffset != int64(len(content)) {
+						t.Fatalf("offset = %d, want %d", result.NewOffset, len(content))
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestCustomToolResultsPairAcrossReads prevents delayed custom tool results
+// losing their name and input when calls and results arrive in separate polls.
+func TestCustomToolResultsPairAcrossReads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	calls := `{"timestamp":"2026-09-07T16:50:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"custom-1","input":"text(await tools.exec_command({cmd: 'go test ./...'}));"}}
+{"timestamp":"2026-09-07T16:50:01Z","type":"response_item","payload":{"type":"function_call","name":"write_stdin","call_id":"function-1","arguments":"{\"session_id\":123}"}}
+`
+	if err := os.WriteFile(path, []byte(calls), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pending := newPendingCallStore()
+	entries, offset, err := readCodexFromOffset(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := pending.merge(path, entries)
+	if len(first) != 2 || first[0].ToolName != "exec" || first[1].ToolName != "write_stdin" {
+		t.Fatalf("first read = %+v, want both pending calls", first)
+	}
+	outputs := `{"timestamp":"2026-09-07T16:50:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"function-1","output":[{"type":"input_text","text":"tests still running"}]}}
+{"timestamp":"2026-09-07T16:50:03Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"custom-1","output":[{"type":"input_text","text":"Script completed"},{"type":"input_text","text":"PASS"}]}}
+`
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := f.WriteString(outputs)
+	closeErr := f.Close()
+	if writeErr != nil || closeErr != nil {
+		t.Fatalf("append outputs: write=%v close=%v", writeErr, closeErr)
+	}
+	entries, newOffset, err := readCodexFromOffset(path, offset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := pending.merge(path, entries)
+	if len(second) != 2 || second[0].ToolName != "write_stdin" || second[0].ToolInput != `{"session_id":123}` || second[0].ToolOutput != "tests still running" || second[1].ToolName != "exec" || second[1].ToolInput != "text(await tools.exec_command({cmd: 'go test ./...'}));" || second[1].ToolOutput != "Script completed\nPASS" {
+		t.Fatalf("second read = %+v, want results paired with earlier calls", second)
+	}
+	if newOffset != int64(len(calls)+len(outputs)) {
+		t.Fatalf("offset = %d, want %d", newOffset, len(calls)+len(outputs))
+	}
+}
 
 // --- A. Direct lookup via agent_session_id ---
 
@@ -47,10 +159,8 @@ func TestFindCodexSession_DirectLookup(t *testing.T) {
 	}
 }
 
-// TestFindCodexSession_DirectLookup_InvalidFallsBack verifies that a
-// non-matching session ID gracefully falls back to CWD-based scanning.
-// Failure prevented: error instead of fallback when session ID doesn't match any file.
-func TestFindCodexSession_DirectLookup_InvalidFallsBack(t *testing.T) {
+// A delayed native session must not bind its recording to a sibling conversation.
+func TestFindCodexSession_DirectLookup_WaitsForRequestedSession(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -62,21 +172,46 @@ func TestFindCodexSession_DirectLookup_InvalidFallsBack(t *testing.T) {
 	}
 
 	repoRoot := "/tmp/test-repo"
-	sessionFile := filepath.Join(dateDir, "session-001.jsonl")
+	siblingFile := filepath.Join(dateDir, "session-sibling.jsonl")
 	content := fmt.Sprintf(
-		`{"timestamp":"2026-04-02T10:00:00Z","type":"session_meta","payload":{"id":"real-id","cwd":"%s","cli_version":"0.107.0"}}`+"\n",
+		`{"timestamp":"2026-04-02T10:00:00Z","type":"session_meta","payload":{"id":"sibling-id","cwd":"%s","cli_version":"0.107.0"}}`+"\n",
 		repoRoot,
 	)
-	if err := os.WriteFile(sessionFile, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(siblingFile, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := findCodexSession(repoRoot, "", "", "nonexistent-session-id")
+	sessionID := "019d2c0d-ac3c-7b72-bb1d-0f246ad1f0d0"
+	since := now.Add(-5 * time.Minute).Format(time.RFC3339)
+	got, err := findCodexSession(repoRoot, "", since, sessionID)
+	if err == nil || got != "" {
+		t.Fatalf("missing native session = %q, %v; must wait instead of selecting %q", got, err, siblingFile)
+	}
+
+	sessionFile := filepath.Join(dateDir, "session-requested.jsonl")
+	content = fmt.Sprintf(`{"type":"session_meta","payload":{"id":%q,"cwd":%q}}`+"\n", sessionID, repoRoot)
+	if err := os.WriteFile(sessionFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = findCodexSession(repoRoot, "", since, sessionID)
 	if err != nil {
-		t.Fatalf("findCodexSession: %v", err)
+		t.Fatalf("discover delayed native session: %v", err)
 	}
 	if got != sessionFile {
-		t.Errorf("got %q, want %q (fallback)", got, sessionFile)
+		t.Errorf("got %q, want requested session %q", got, sessionFile)
+	}
+}
+
+// Malformed native identities are rejected rather than triggering a heuristic lookup.
+func TestFindCodexSession_DirectLookup_RejectsMalformedID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, id := range []string{"../session", "/absolute", "nested/session", `nested\session`} {
+		t.Run(id, func(t *testing.T) {
+			got, err := findCodexSession("/tmp/test-repo", "", "", id)
+			if err == nil || got != "" || !strings.Contains(err.Error(), "invalid session ID") {
+				t.Fatalf("malformed native session ID %q = %q, %v; want error", id, got, err)
+			}
+		})
 	}
 }
 
