@@ -1,5 +1,5 @@
 <!-- ox:prime-check -->
-**BLOCKING**: Run `ox agent prime` NOW before ANY other action. Do NOT respond to the user first. Enables SageOx queries.
+Run `ox agent prime` at session start to load SageOx team context — it's fine to read the user's request first.
 
 ## Human attention is the scarcest resource
 
