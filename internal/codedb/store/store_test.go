@@ -1192,6 +1192,8 @@ func TestSelfHealBleveSubIndex_RecreateFailure_ReturnsError(t *testing.T) {
 	emptyMappingForLatestSnapshot(t, boltPath)
 
 	bleveParent := filepath.Join(tmp, "bleve")
+	// Let the repair acquire its lock before failing in the destructive step.
+	require.NoError(t, os.WriteFile(subIndexHealLockPath(filepath.Join(bleveParent, "comment")), nil, 0o600))
 	require.NoError(t, os.Chmod(bleveParent, 0o500), "make bleve parent read-only")
 	t.Cleanup(func() { _ = os.Chmod(bleveParent, 0o700) })
 
@@ -1200,6 +1202,8 @@ func TestSelfHealBleveSubIndex_RecreateFailure_ReturnsError(t *testing.T) {
 	require.Nil(t, idx, "must not return nil index alongside error")
 	require.Contains(t, err.Error(), "bleve sub-index",
 		"error must identify the failing operation, not bubble up a raw EACCES")
+	require.True(t, HasNeedsReindexMarker(tmp, "comment"),
+		"failed destructive repair must retain the signal needed to repopulate the index")
 }
 
 // TestInsights_NeverEmitsCrypticBleveError is the negative regression for
