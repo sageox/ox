@@ -1415,8 +1415,11 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		return fmt.Errorf("write meta.json: %w", err)
 	}
 
+	sourceCacheDir := filepath.Dir(result.RawPath)
 	if err := prepareSessionUpload(context.Background(), ledgerPath, sessionName); err != nil {
-		return fmt.Errorf("prepare session upload: %w", err)
+		// Metadata already exists, so explicit retry ownership keeps a failed
+		// scan or partial quarantine discoverable by doctor.
+		return errors.Join(fmt.Errorf("prepare session upload: %w", err), writeSessionUploadRetryPending(sourceCacheDir))
 	}
 
 	// upload content files to LFS blob storage
@@ -1446,7 +1449,6 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		return fmt.Errorf("ensure .gitignore: %w", err)
 	}
 
-	sourceCacheDir := filepath.Dir(result.RawPath)
 	if err := writeSessionUploadRetryPending(sourceCacheDir); err != nil {
 		return fmt.Errorf("record pending session upload: %w", err)
 	}

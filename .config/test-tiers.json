@@ -66,6 +66,7 @@
       "includes": [
         "Code activity behavior through a freshly built ox binary",
         "Fresh-install init and doctor journey against a mock SageOx API with external network blocked",
+        "Background daemon survival after command process-group cleanup on supported Unix platforms",
         "Session start, incremental capture, and stop through the compiled binary, plus crash-artifact preservation through the production finalizer",
         "Coverage fragments from the compiled binary merged with the full Go test profile"
       ],

@@ -225,11 +225,13 @@ func TestReconcile_PreservesRecoverableSessionCache(t *testing.T) {
 	raw := []byte("{\"type\":\"user\",\"content\":\"keep this recording\"}\n")
 	pointer := []byte(FormatPointer("sha256:"+ComputeOID(raw), int64(len(raw))))
 	for _, tc := range []struct {
-		name    string
-		cache   []byte
-		protect bool
+		name      string
+		cache     []byte
+		protect   bool
+		statError bool
 	}{
 		{name: "recoverable content", cache: raw, protect: true},
+		{name: "cache lookup error", protect: true, statError: true},
 		{name: "missing cache"},
 		{name: "empty cache", cache: []byte{}},
 		{name: "pointer stub cache", cache: pointer},
@@ -252,6 +254,12 @@ func TestReconcile_PreservesRecoverableSessionCache(t *testing.T) {
 				require.NoError(t, os.MkdirAll(filepath.Dir(cachePath), 0o755))
 				require.NoError(t, os.WriteFile(cachePath, tc.cache, 0o600))
 			}
+			if tc.statError {
+				// A file blocking a cache directory is an inspection failure,
+				// not proof that the source is absent and safe to discard.
+				require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Dir(cachePath)), 0o700))
+				require.NoError(t, os.WriteFile(filepath.Dir(cachePath), []byte("blocked cache directory"), 0o600))
+			}
 			headBefore := git(t, ledger, "rev-parse", "HEAD")
 			indexBefore := git(t, ledger, "write-tree")
 			statusBefore := git(t, ledger, "status", "--porcelain")
@@ -264,13 +272,27 @@ func TestReconcile_PreservesRecoverableSessionCache(t *testing.T) {
 
 			assert.Equal(t, 2, result.MissingOnRemote)
 			if tc.protect {
-				require.ErrorContains(t, err, "retry session upload")
+				if tc.statError {
+					require.ErrorContains(t, err, "inspect session recovery cache")
+					var pathErr *os.PathError
+					require.ErrorAs(t, err, &pathErr)
+					assert.Equal(t, cachePath, pathErr.Path)
+				} else {
+					require.ErrorContains(t, err, "retry session upload")
+				}
 				assert.Zero(t, result.Replaced)
 				assert.False(t, result.Squashed)
 				assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"), "history must remain intact")
 				assert.Equal(t, indexBefore, git(t, ledger, "write-tree"), "nothing may be staged")
 				assert.Equal(t, statusBefore, git(t, ledger, "status", "--porcelain"))
-				for path, expected := range map[string][]byte{rawPath: pointer, planPath: planPointer, cachePath: raw} {
+				preserved := map[string][]byte{rawPath: pointer, planPath: planPointer}
+				if tc.cache != nil {
+					preserved[cachePath] = tc.cache
+				}
+				if tc.statError {
+					preserved[filepath.Dir(cachePath)] = []byte("blocked cache directory")
+				}
+				for path, expected := range preserved {
 					content, readErr := os.ReadFile(path)
 					require.NoError(t, readErr)
 					assert.Equal(t, expected, content, "abort before modifying any pointer or cache")

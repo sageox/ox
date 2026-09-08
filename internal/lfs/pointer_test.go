@@ -2,9 +2,12 @@ package lfs
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -389,7 +392,7 @@ func TestWritePointerFiles_RollsBackOnError(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git operations")
 	}
-	for _, failure := range []string{"write", "mismatched content", "unsafe filename", "read"} {
+	for _, failure := range []string{"write", "mismatched content", "unsafe filename", "read", "inspect", "dangling symlink"} {
 		t.Run(failure, func(t *testing.T) {
 			dir := initLedgerRepo(t)
 			originals := map[string]string{
@@ -430,12 +433,26 @@ func TestWritePointerFiles_RollsBackOnError(t *testing.T) {
 			case "read":
 				require.NoError(t, os.Mkdir(filepath.Join(dir, "z-directory.jsonl"), 0o700))
 				files["z-directory.jsonl"] = NewFileRef([]byte("not a file"))
+			case "inspect":
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "z-parent"), []byte("not a directory"), 0o600))
+				files["z-parent/raw.jsonl"] = NewFileRef([]byte("blocked by parent"))
+			case "dangling symlink":
+				if err := os.Symlink("missing-target.jsonl", filepath.Join(dir, "z-link.jsonl")); err != nil {
+					t.Skipf("symlinks unsupported: %v", err)
+				}
+				files["z-link.jsonl"] = NewFileRef([]byte("missing target"))
 			}
 			git(t, dir, "add", ".")
 			git(t, dir, "commit", "--no-verify", "-m", "original session files")
 
 			paths, err := WritePointerFiles(dir, AssertUploadedManifest(files))
 			require.Error(t, err)
+			switch failure {
+			case "inspect":
+				assert.ErrorContains(t, err, "inspect pointer destination")
+			case "dangling symlink":
+				assert.ErrorContains(t, err, "inspect pointer target")
+			}
 			assert.Empty(t, paths, "a rolled-back batch must report no written pointers")
 			for name, want := range originals {
 				path := filepath.Join(dir, name)
@@ -448,6 +465,166 @@ func TestWritePointerFiles_RollsBackOnError(t *testing.T) {
 			}
 			assert.NoFileExists(t, filepath.Join(dir, "d-created.jsonl"))
 			assert.Empty(t, git(t, dir, "status", "--porcelain"), "failed pointer preparation must not leave files for a later autostash or commit")
+		})
+	}
+}
+
+// An atomic rename must not overwrite content whose read failed, even when the
+// directory permissions would permit replacing its inode.
+func TestWritePointerFile_PreservesUnreadableDestination(t *testing.T) {
+	for _, kind := range []string{"directory", "unreadable file"} {
+		t.Run(kind, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "raw.jsonl")
+			content := []byte("keep unreadable recording")
+			if kind == "directory" {
+				require.NoError(t, os.Mkdir(path, 0o700))
+			} else {
+				if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+					t.Skip("requires POSIX permissions enforced for a non-root user")
+				}
+				require.NoError(t, os.WriteFile(path, content, 0o000))
+				t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+			}
+
+			err := WritePointerFile(path, AssertUploaded(NewFileRef(content)))
+			require.ErrorContains(t, err, "read pointer destination")
+			if kind == "directory" {
+				assert.DirExists(t, path)
+			} else {
+				assert.ErrorIs(t, err, os.ErrPermission)
+				require.NoError(t, os.Chmod(path, 0o600))
+				got, err := os.ReadFile(path)
+				require.NoError(t, err)
+				assert.Equal(t, content, got)
+			}
+		})
+	}
+}
+
+// A failed batch must neither overwrite another writer nor hide the paths that
+// could not be restored. A real pipe holds the last read while files change.
+func TestWritePointerFiles_RollbackPreservesConcurrentChanges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: named-pipe coordination and filesystem permission changes")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX named pipe")
+	}
+	mkfifo, err := exec.LookPath("mkfifo")
+	if err != nil {
+		t.Skip("mkfifo unavailable")
+	}
+	for _, tc := range []struct {
+		name    string
+		change  string
+		existed bool
+	}{
+		{name: "later writer", change: "content", existed: true},
+		{name: "original removed", change: "remove", existed: true},
+		{name: "new pointer already removed", change: "remove"},
+		{name: "destination became a directory", change: "directory", existed: true},
+		{name: "restore write denied", change: "permissions", existed: true},
+		{name: "restore removal denied", change: "permissions"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.change == "permissions" && os.Geteuid() == 0 {
+				t.Skip("root bypasses directory permission bits")
+			}
+			dir := t.TempDir()
+			parent := filepath.Join(dir, "a-session")
+			require.NoError(t, os.Mkdir(parent, 0o700))
+			rawPath := filepath.Join(parent, "raw.jsonl")
+			original := []byte("original recording")
+			if tc.existed {
+				require.NoError(t, os.WriteFile(rawPath, original, 0o600))
+			}
+			otherPath := filepath.Join(dir, "b-other.jsonl")
+			require.NoError(t, os.WriteFile(otherPath, original, 0o600))
+			barrierPath := filepath.Join(dir, "z-barrier.jsonl")
+			require.NoError(t, exec.Command(mkfifo, barrierPath).Run())
+			barrier, err := os.OpenFile(barrierPath, os.O_RDWR, 0o600)
+			require.NoError(t, err)
+			type outcome struct {
+				paths []string
+				err   error
+			}
+			done := make(chan outcome, 1)
+			finished := false
+			t.Cleanup(func() {
+				_ = os.Chmod(parent, 0o700)
+				_ = os.Remove(barrierPath)
+				_ = os.Mkdir(barrierPath, 0o700)
+				_ = barrier.Close()
+				if !finished {
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						t.Error("pointer batch did not leave the filesystem barrier")
+					}
+				}
+			})
+			go func() {
+				ref := NewFileRef(original)
+				paths, err := WritePointerFiles(dir, AssertUploadedManifest(map[string]FileRef{
+					"a-session/raw.jsonl": ref, "b-other.jsonl": ref, "z-barrier.jsonl": ref,
+				}))
+				done <- outcome{paths: paths, err: err}
+			}()
+			// The FIFO cannot finish until this test releases it. Observe that
+			// both preceding replacements landed before the competing change.
+			require.Eventually(t, func() bool { return IsPointerFile(otherPath) }, 5*time.Second, time.Millisecond)
+			newContent := []byte("new content from another writer")
+			switch tc.change {
+			case "content":
+				require.NoError(t, os.WriteFile(rawPath, newContent, 0o600))
+			case "remove", "directory":
+				require.NoError(t, os.Remove(rawPath))
+				if tc.change == "directory" {
+					require.NoError(t, os.Mkdir(rawPath, 0o700))
+				}
+			case "permissions":
+				require.NoError(t, os.Chmod(parent, 0o500))
+			}
+			// Make the terminal artifact unreadable as a file, then release
+			// any open FIFO reader. The batch must now fail and roll back.
+			require.NoError(t, os.Remove(barrierPath))
+			require.NoError(t, os.Mkdir(barrierPath, 0o700))
+			require.NoError(t, barrier.Close())
+			var result outcome
+			select {
+			case result = <-done:
+				finished = true
+			case <-time.After(5 * time.Second):
+				t.Fatal("pointer batch did not finish after the terminal failure")
+			}
+			require.ErrorContains(t, result.err, "z-barrier.jsonl")
+			if !tc.existed && tc.change == "remove" {
+				assert.Empty(t, result.paths, "another writer already restored the original absence")
+				assert.NotContains(t, result.err.Error(), "restore ")
+			} else {
+				assert.Equal(t, []string{rawPath}, result.paths, "report only the destination still requiring recovery")
+				assert.ErrorContains(t, result.err, "restore "+rawPath)
+			}
+			switch tc.change {
+			case "content":
+				assert.ErrorContains(t, result.err, "destination changed during pointer preparation")
+				got, err := os.ReadFile(rawPath)
+				require.NoError(t, err)
+				assert.Equal(t, newContent, got, "rollback must preserve the later writer")
+			case "remove":
+				assert.NoFileExists(t, rawPath)
+				if tc.existed {
+					assert.ErrorIs(t, result.err, os.ErrNotExist, "joined restore error must retain its cause")
+				}
+			case "directory":
+				assert.DirExists(t, rawPath)
+			case "permissions":
+				assert.ErrorIs(t, result.err, os.ErrPermission, "joined restore error must retain its cause")
+				assert.True(t, IsPointerFile(rawPath), "failed restoration must leave the pointer intact")
+			}
+			other, err := os.ReadFile(otherPath)
+			require.NoError(t, err)
+			assert.Equal(t, original, other, "one restore failure must not prevent the rest of the rollback")
 		})
 	}
 }

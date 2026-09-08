@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -228,7 +229,8 @@ type quarantineResult struct {
 //
 // Returns the carved-out paths + marker locations. Per-file errors are
 // logged and skipped — the goal is to never block the push; partial
-// quarantine is better than full block.
+// quarantine is better than full block. Before upload, index or rename
+// failures stop the operation after recording any completed quarantines.
 func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding, amendCommit bool) (*quarantineResult, error) {
 	out := &quarantineResult{}
 	if len(findings) == 0 {
@@ -261,6 +263,8 @@ func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding
 
 	// Deduplicate moves per file (multiple findings per file → one move).
 	seenPaths := map[string]bool{}
+	var quarantineErr error
+quarantineFiles:
 	for sess, g := range groups {
 		for _, f := range g.findings {
 			if seenPaths[f.Path] {
@@ -297,14 +301,16 @@ func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding
 				// A previous attempt may already have staged these bytes. Moving
 				// only the working file would leave that secret-bearing blob in
 				// the next commit, invisible to the working-tree scanner.
-				out, err := exec.Command("git", "-C", ledgerPath, "rm", "--cached", "--ignore-unmatch", "--force", "--sparse", "--", fromRel).CombinedOutput()
+				gitOutput, err := exec.Command("git", "-C", ledgerPath, "rm", "--cached", "--ignore-unmatch", "--force", "--sparse", "--", fromRel).CombinedOutput()
 				if err != nil {
-					return nil, fmt.Errorf("remove quarantined path from index %s: %s: %w", fromRel, strings.TrimSpace(string(out)), err)
+					quarantineErr = fmt.Errorf("remove quarantined path from index %s: %s: %w", fromRel, strings.TrimSpace(string(gitOutput)), err)
+					break quarantineFiles
 				}
 			}
 			if err := os.Rename(fromAbs, toAbs); err != nil {
 				if !amendCommit {
-					return out, fmt.Errorf("quarantine %s: %w", fromRel, err)
+					quarantineErr = fmt.Errorf("quarantine %s: %w", fromRel, err)
+					break quarantineFiles
 				}
 				slog.Warn("pre-push quarantine: rename failed; skipping",
 					"from", fromRel, "to", toRel, "error", err)
@@ -357,6 +363,9 @@ func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding
 			QuarantinePaths: g.quarantineLocs,
 		}
 		for _, f := range g.findings {
+			if !slices.Contains(out.QuarantinedRels, f.Path) {
+				continue // recovery requires a matching location for every finding
+			}
 			_, fname, _ := splitSessionPath(f.Path)
 			rec.Findings = append(rec.Findings, redactionDebtFinding{
 				Detector: f.Detector,
@@ -377,7 +386,7 @@ func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding
 		}
 		out.DebtMarkers = append(out.DebtMarkers, markerRel)
 	}
-	return out, nil
+	return out, quarantineErr
 }
 
 // unstagePath removes a single path from the index, leaving the working

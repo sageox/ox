@@ -424,6 +424,44 @@ func TestSessionUpload_ScansContentBeforeLFS(t *testing.T) {
 	}
 }
 
+// A readable session can still exceed the scanner's per-line limit. Stop and
+// doctor must retain it for retry instead of uploading bytes the scan missed.
+func TestSessionUpload_ScanFailureStopsBeforeLFS(t *testing.T) {
+	for _, mode := range []string{"stop", "doctor"} {
+		t.Run(mode, func(t *testing.T) {
+			fixture := newSessionUploadFixture(t)
+			t.Setenv("OX_ALLOW_SECRETS", "")
+			// This valid JSONL entry is below the file-size cap but exceeds the
+			// line scanner's buffer. LFS can read and upload it without error.
+			oversized := []byte(strings.ReplaceAll(string(fixture.rawContent), "preserve me", strings.Repeat("x", 4*1024*1024)))
+			require.NoError(t, os.WriteFile(fixture.result.RawPath, oversized, 0o600))
+			var calls []string
+			effects := scriptedSessionUploadEffects(&calls, map[string]lfs.FileRef{ledgerFileRaw: lfs.NewFileRef(oversized)}, "")
+			var err error
+			if mode == "doctor" {
+				err = retrySessionUploadWithEffects(fixture.projectRoot, fixture.ledgerPath, fixture.orphan(), effects)
+			} else {
+				err = uploadSessionToLedgerWithEffects(fixture.projectRoot, fixture.result, fixture.state, fixture.ledgerPath, fixture.sessionName, effects)
+			}
+			require.ErrorContains(t, err, "scan session content for secrets")
+			assert.Empty(t, calls, "failed inspection must stop before any upload or publication effect")
+			preserved, readErr := os.ReadFile(fixture.result.RawPath)
+			require.NoError(t, readErr)
+			assert.True(t, bytes.Equal(oversized, preserved), "the source must remain available for recovery")
+			orphans, scanErr := findOrphanedSessionsInDir(filepath.Dir(fixture.state.SessionPath), fixture.ledgerPath)
+			require.NoError(t, scanErr)
+			require.Len(t, orphans, 1, "doctor must discover the interrupted upload")
+
+			// Once the source can be inspected, the same upload can finish.
+			require.NoError(t, os.WriteFile(fixture.result.RawPath, fixture.rawContent, 0o600))
+			calls = nil
+			effects = scriptedSessionUploadEffects(&calls, fixture.refs, "")
+			require.NoError(t, retrySessionUploadWithEffects(fixture.projectRoot, fixture.ledgerPath, orphans[0], effects))
+			assert.Equal(t, []string{"upload_lfs", "commit_retry"}, calls)
+		})
+	}
+}
+
 func TestRetrySessionUpload_PushFailureRemainsIncomplete(t *testing.T) {
 	fixture := newSessionUploadFixture(t)
 	orphan := fixture.orphan()

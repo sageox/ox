@@ -56,6 +56,58 @@ func mustGit(t *testing.T, dir string, args ...string) {
 	require.NoErrorf(t, err, "git %s: %s", strings.Join(args, " "), string(out))
 }
 
+// A read failure must keep a new upload pending, while the existing ledger-wide
+// push gate keeps its fail-open policy for unrelated commits.
+func TestSessionSecretGate_ScanErrorsKeepUploadsPending(t *testing.T) {
+	t.Setenv("OX_ALLOW_SECRETS", "")
+	for _, mode := range []struct {
+		name        string
+		amendCommit bool
+	}{
+		{name: "upload"},
+		{name: "existing_push", amendCommit: true},
+	} {
+		for _, phase := range []struct {
+			name   string
+			failOn int
+		}{
+			{name: "initial_scan", failOn: 1},
+			{name: "rescan", failOn: 2},
+		} {
+			t.Run(mode.name+"/"+phase.name, func(t *testing.T) {
+				ledger := t.TempDir()
+				const rel = "sessions/scan-error/summary.md"
+				path := filepath.Join(ledger, filepath.FromSlash(rel))
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+				require.NoError(t, os.WriteFile(path, []byte("AKIAIOSFODNN7EXAMPLE\n"), 0o600))
+				calls := 0
+				var scanErr error
+				err := runSessionSecretGate(context.Background(), ledger, func() (*PrePushScanResult, error) {
+					calls++
+					if calls == phase.failOn {
+						// Simulate a filesystem change between preparation and reading.
+						// A directory fails to scan on every supported platform.
+						require.NoError(t, os.Remove(path))
+						require.NoError(t, os.Mkdir(path, 0o700))
+					}
+					result, err := scanPaths(ledger, []string{rel})
+					if err != nil {
+						scanErr = err
+					}
+					return result, err
+				}, mode.amendCommit)
+				require.Error(t, scanErr, "the filesystem failure must reach the scanner")
+				assert.Equal(t, phase.failOn, calls)
+				if mode.amendCommit {
+					assert.NoError(t, err, "an unrelated ledger push must retain its existing policy")
+				} else {
+					require.ErrorIs(t, err, scanErr, "uninspected content must not reach the LFS upload")
+				}
+			})
+		}
+	}
+}
+
 // TestScanPrePushForSecrets_FindsAwsKey is the load-bearing test: a planted
 // AWS canary must be flagged before any bytes reach the cloud.
 func TestScanPrePushForSecrets_FindsAwsKey(t *testing.T) {

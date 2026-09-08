@@ -315,7 +315,8 @@ func runPrePushSecretGate(ctx context.Context, ledgerPath string) error {
 
 // prepareSessionUpload runs the same redaction and quarantine policy on real
 // content before LFS computes its OIDs. This pass removes quarantined files
-// from the index but must not amend an unrelated holding commit.
+// from the index but must not amend an unrelated holding commit. Scan errors
+// keep this session pending without blocking unrelated ledger pushes.
 func prepareSessionUpload(ctx context.Context, ledgerPath, sessionName string) error {
 	paths := make([]string, 0, len(lfs.ContentFiles))
 	for _, name := range lfs.ContentFiles {
@@ -329,6 +330,9 @@ func prepareSessionUpload(ctx context.Context, ledgerPath, sessionName string) e
 func runSessionSecretGate(ctx context.Context, ledgerPath string, scan func() (*PrePushScanResult, error), amendCommit bool) error {
 	result, err := scan()
 	if err != nil {
+		if !amendCommit {
+			return fmt.Errorf("scan session content for secrets: %w", err)
+		}
 		slog.Warn("pre-push secret gate: scan failed, allowing push", "error", err)
 		return nil
 	}
@@ -358,6 +362,9 @@ func runSessionSecretGate(ctx context.Context, ledgerPath string, scan func() (*
 	// per-file error in the redact pass.
 	rescan, rescanErr := scan()
 	if rescanErr != nil {
+		if !amendCommit {
+			return fmt.Errorf("rescan session content for secrets: %w", rescanErr)
+		}
 		slog.Warn("pre-push secret gate: rescan after auto-redact failed; allowing push",
 			"error", rescanErr)
 		return nil

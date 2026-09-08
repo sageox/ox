@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -166,6 +167,81 @@ func TestRunPrePushSecretGate_QuarantinesNonJSONLAndAllowsPush(t *testing.T) {
 	// session's meta.json should still be in HEAD's tree.
 	if mustGitCapture(t, work, "ls-tree", "--name-only", "HEAD", "unrelated.txt") == "" {
 		t.Fatalf("unrelated.txt missing from HEAD; quarantine over-reached")
+	}
+}
+
+// A later failure must not hide files already moved to quarantine from either
+// doctor's debt summary or the session redaction recovery command.
+func TestQuarantineBeforeUpload_PartialFailureRemainsDiscoverable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone and quarantine recovery")
+	}
+	for _, failure := range []string{"index locked", "rename blocked"} {
+		t.Run(failure, func(t *testing.T) {
+			if failure == "index locked" && runtime.GOOS == "windows" {
+				t.Skip("index-lock injection uses a POSIX git wrapper")
+			}
+			const sessionName = "2026-05-12-partial-quarantine"
+			firstRel := "sessions/" + sessionName + "/notes.md"
+			failedRel := "sessions/" + sessionName + "/summary.md"
+			const content = "preserve this quarantined session content\n"
+			work := makeLedgerWithCommit(t, map[string]string{
+				firstRel: content, failedRel: "failed file remains here\n", "unrelated.txt": "keep\n",
+			})
+			headBefore := mustGitCapture(t, work, "rev-parse", "HEAD")
+			quarantineDir := filepath.Join(work, ".sageox", "cache", "quarantine", sessionName)
+			if failure == "rename blocked" {
+				require.NoError(t, os.MkdirAll(filepath.Join(quarantineDir, "summary.md"), 0o700))
+			} else {
+				realGit, err := exec.LookPath("git")
+				require.NoError(t, err)
+				binDir := t.TempDir()
+				// Let real git remove the first path, then create a competing
+				// index lock immediately before its second removal attempt.
+				wrapper := "#!/bin/sh\nfor arg do last=\"$arg\"; done\n" +
+					"if [ \"$last\" = \"$OX_TEST_QUARANTINE_FAIL_PATH\" ]; then\n" +
+					"  : > \"$OX_TEST_QUARANTINE_LOCK\"\nfi\n" +
+					"exec \"$OX_TEST_QUARANTINE_REAL_GIT\" \"$@\"\n"
+				require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(wrapper), 0o755))
+				t.Setenv("OX_TEST_QUARANTINE_FAIL_PATH", failedRel)
+				t.Setenv("OX_TEST_QUARANTINE_LOCK", filepath.Join(work, ".git", "index.lock"))
+				t.Setenv("OX_TEST_QUARANTINE_REAL_GIT", realGit)
+				t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			}
+
+			out, err := quarantineUnredactableFindings(work, []PrePushFinding{
+				{Path: firstRel, Line: 1, Detector: "aws_access_key"},
+				{Path: failedRel, Line: 1, Detector: "aws_access_key"},
+			}, false)
+			require.Error(t, err)
+			if failure == "index locked" {
+				assert.ErrorContains(t, err, "remove quarantined path from index")
+			} else {
+				assert.ErrorContains(t, err, "quarantine "+failedRel)
+			}
+			if assert.NotNil(t, out, "partial quarantine results must survive the error") {
+				assert.Equal(t, []string{firstRel}, out.QuarantinedRels)
+				assert.Equal(t, []string{".sageox/cache/redaction-debt/" + sessionName + ".json"}, out.DebtMarkers)
+			}
+			preserved, readErr := os.ReadFile(filepath.Join(quarantineDir, "notes.md"))
+			require.NoError(t, readErr)
+			assert.Equal(t, content, string(preserved))
+			require.NoFileExists(t, filepath.Join(work, firstRel))
+			require.FileExists(t, filepath.Join(work, failedRel), "the failed move must leave its source intact")
+			assert.Equal(t, headBefore, mustGitCapture(t, work, "rev-parse", "HEAD"), "pre-upload quarantine must not amend a commit")
+
+			summaries, malformed := readDebtSummaries(filepath.Join(work, ".sageox", "cache", "redaction-debt"))
+			assert.Empty(t, malformed)
+			require.Len(t, summaries, 1, "doctor must discover the earlier successful quarantine")
+			assert.Equal(t, sessionName, summaries[0].session)
+			assert.Equal(t, 1, summaries[0].files)
+			assert.Equal(t, 1, summaries[0].findings)
+			recovery, recoveryErr := enumerateQuarantineFindings(work, nil)
+			require.NoError(t, recoveryErr, "failed candidates must not become unmapped findings in the debt marker")
+			require.Len(t, recovery, 1, "session redaction must discover the preserved file")
+			assert.Equal(t, firstRel, recovery[0].Path)
+			assert.Equal(t, filepath.ToSlash(filepath.Join(".sageox", "cache", "quarantine", sessionName, "notes.md")), recovery[0].QuarantinePath)
+		})
 	}
 }
 

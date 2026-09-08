@@ -115,7 +115,7 @@ func WritePointerFile(path string, uploaded UploadedRef) error {
 	perm := os.FileMode(0o600)
 	if info, err := os.Stat(path); err == nil {
 		perm = info.Mode().Perm()
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	content := FormatPointer(ref.OID, ref.Size)
@@ -138,7 +138,7 @@ func WritePointerFile(path string, uploaded UploadedRef) error {
 // bytes. Refusing here converts unrecoverable data loss into a loud error.
 func guardPointerOverwrite(path string, ref FileRef) error {
 	existing, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read pointer destination: %w", err)
 	}
 	if len(existing) == 0 {
@@ -191,7 +191,7 @@ func WritePointerFiles(dir string, files map[string]UploadedRef) (paths []string
 		for i := len(originals) - 1; i >= 0; i-- {
 			original := originals[i]
 			current, readErr := os.ReadFile(original.path)
-			if os.IsNotExist(readErr) && !original.exists {
+			if errors.Is(readErr, os.ErrNotExist) && !original.exists {
 				continue // already restored to its original absence
 			}
 			var restoreErr error
@@ -205,7 +205,7 @@ func WritePointerFiles(dir string, files map[string]UploadedRef) (paths []string
 				restoreErr = fileutil.AtomicWriteBytes(original.path, original.content, original.mode)
 			default:
 				restoreErr = os.Remove(original.path)
-				if os.IsNotExist(restoreErr) {
+				if errors.Is(restoreErr, os.ErrNotExist) {
 					restoreErr = nil
 				}
 			}
@@ -233,7 +233,7 @@ func WritePointerFiles(dir string, files map[string]UploadedRef) (paths []string
 		p := filepath.Join(dir, name)
 		original := originalFile{path: p, pointer: []byte(FormatPointer(uploaded.ref.OID, uploaded.ref.Size))}
 		info, statErr := os.Lstat(p)
-		if statErr != nil && !os.IsNotExist(statErr) {
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 			return paths, fmt.Errorf("inspect pointer destination %s: %w", name, statErr)
 		}
 		if info != nil {
