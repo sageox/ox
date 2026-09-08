@@ -79,14 +79,15 @@ type Conflict struct {
 // Apply writes individual files, commits the lockfile last, and is recoverable
 // through a pending-operation journal.
 type ReconcilePlan struct {
-	Creates          []FileAction
-	Updates          []FileAction
-	Removes          []FileAction
-	Conflicts        []Conflict
-	Preserves        []string
-	Warnings         []string
-	TargetCount      int
-	DesiredFileCount int
+	Creates           []FileAction
+	Updates           []FileAction
+	Removes           []FileAction
+	Conflicts         []Conflict
+	Preserves         []string
+	Warnings          []string
+	TargetCount       int
+	DesiredFileCount  int
+	RetiredSelections bool // saved selections doctor can remove from committed intent
 
 	repoRoot    string
 	nextLock    lockFile
@@ -291,6 +292,15 @@ func LegacyBundles(repoRoot string, target adapterprotocol.SkillTarget) ([]strin
 		}
 	}
 	var bundles []string
+	// A verified retired skill still proves this target previously selected ox.
+	// Keep the target discoverable so pre-lock installs can retire their files
+	// and receive the default replacements, even with no surviving bundle member.
+	for name := range managedNames {
+		if skills.IsRetired(name) {
+			bundles = append(bundles, skills.DefaultBundleIDs()...)
+			break
+		}
+	}
 	for _, bundle := range skills.Catalog {
 		for _, name := range bundle.SkillIDs {
 			if _, ok := managedNames[name]; ok {
@@ -491,6 +501,7 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 		return nil, err
 	}
 	plan := &ReconcilePlan{repoRoot: repoRoot, journal: journal, TargetCount: len(desired.Targets)}
+	_, plan.RetiredSelections = RemoveRetiredSelections(desired)
 	if old.SchemaVersion > lockSchemaVersion {
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf("skills lock schema %d is newer than this ox supports", old.SchemaVersion))
 		plan.nextLock = old
@@ -1084,7 +1095,32 @@ func targetForDir(repoRoot, dir string) (adapterprotocol.SkillTarget, error) {
 	return normalizeTarget(repoRoot, adapterprotocol.SkillTarget{Key: key, Root: root, Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject, LinkPolicy: adapterprotocol.SkillLinkPolicyReject})
 }
 
+// RemoveRetiredSelections removes only known obsolete Attest selections.
+// Automatic reconciliation filters them only while selecting catalog content;
+// doctor may persist this migration as an explicit repair of project intent.
+func RemoveRetiredSelections(desired DesiredSkills) (DesiredSkills, bool) {
+	next := DesiredSkills{Targets: append([]string(nil), desired.Targets...)}
+	removed := false
+	for _, bundle := range desired.Bundles {
+		if bundle.ID == "attest" {
+			removed = true
+			continue
+		}
+		next.Bundles = append(next.Bundles, bundle)
+	}
+	for _, name := range desired.Names {
+		switch name {
+		case "ox-cli-attest-goal", "ox-cli-attest-create", "ox-attest-goal", "ox-attest-create":
+			removed = true
+		default:
+			next.Names = append(next.Names, name)
+		}
+	}
+	return next, removed
+}
+
 func selectDesiredSkills(version string, desired DesiredSkills) ([]skills.Skill, error) {
+	desired, _ = RemoveRetiredSelections(desired)
 	ids := bundleIDs(desired.Bundles)
 	names, err := skills.BundleNames(ids)
 	if err != nil {

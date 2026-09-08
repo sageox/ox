@@ -34,7 +34,6 @@ var Catalog = []Bundle{
 	{ID: "core", Description: "Everyday SageOx workflows and skill manager", Default: true, SkillIDs: []string{"ox-cli-consult", "ox-cli-conversation", "ox-cli-decision", "ox-cli-plan", "ox-cli-pr-header", "ox-cli-recap", "ox-cli-session-review", "ox-cli-skill-manager", "ox-cli-viz"}},
 	{ID: "onramp", Description: "The single committed SageOx on-ramp skill", Default: true, SkillIDs: []string{"sageox"}},
 	{ID: "lifecycle", Description: "Explicit ox lifecycle and diagnostic slash surfaces", Default: true, SkillIDs: []string{"ox-cli-cart", "ox-cli-cart-done", "ox-cli-cart-drop", "ox-cli-cart-start", "ox-cli-doctor", "ox-cli-init", "ox-cli-prime", "ox-cli-session-abort", "ox-cli-session-list", "ox-cli-session-start", "ox-cli-session-status", "ox-cli-session-stop", "ox-cli-status"}},
-	{ID: "attest", Description: "Optional Attest BDD and evidence playbooks", SkillIDs: []string{"ox-cli-attest-goal", "ox-cli-attest-create"}},
 }
 
 // Retired names ox once installed and no longer ships.
@@ -54,6 +53,8 @@ var Catalog = []Bundle{
 // Entries are matched against BOTH skill directory names and Claude command file
 // basenames, because the 0.15.0 fold turned one surface into the other.
 var Retired = []string{
+	// Attest CLI removal.
+	"ox-cli-attest-goal", "ox-cli-attest-create",
 	// 0.15.0: skills renamed to the reserved ox-cli-* namespace.
 	"ox-consult", "ox-conversation", "ox-decision", "ox-plan", "ox-pr-header",
 	"ox-recap", "ox-session-review", "ox-skill-manager", "ox-viz",

@@ -8,14 +8,14 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/extensions/skills"
+	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // pickSkill returns a default-installed skill name, failing the test if none
-// ship. Attest playbooks are opt-in, so lifecycle tests must not accidentally
-// select a skill the default installer intentionally leaves absent.
+// ship. Lifecycle tests must use a skill supplied by the default installer.
 func pickSkill(t *testing.T) string {
 	t.Helper()
 	skills, err := skills.Selected("0.8.0", nil)
@@ -96,29 +96,18 @@ func TestHandleInstallSkills_NoOpReportsNothingWritten(t *testing.T) {
 			"FilesWritten drives init's honest 'already up to date' message")
 }
 
-// TestHandleInstallSkills_OptInAttestSkillsStayOutOfDefaultInstall keeps a
-// team that uses normal ox integration from receiving Attest playbooks it did
-// not choose. An explicit capability install is the only path that writes them.
-func TestHandleInstallSkills_OptInAttestSkillsStayOutOfDefaultInstall(t *testing.T) {
+// Explicit selections must be saved even when their skills also belong to defaults.
+func TestHandleInstallSkills_ExplicitSelection(t *testing.T) {
 	dir := t.TempDir()
-	defaultInstall, err := handleInstallSkills(adapterprotocol.SkillsParams{
-		RepoRoot: dir,
-		Version:  "0.8.0",
+	installed, err := handleInstallSkills(adapterprotocol.SkillsParams{
+		RepoRoot: dir, Version: "0.8.0", Names: []string{"ox-cli-consult", "ox-cli-recap"},
 	})
 	require.NoError(t, err)
-	assert.NotContains(t, defaultInstall.FilesWritten,
-		filepath.Join(".claude", "skills", "ox-cli-attest-goal", skillFileName))
-
-	optIn, err := handleInstallSkills(adapterprotocol.SkillsParams{
-		RepoRoot: dir,
-		Version:  "0.8.0",
-		Names:    []string{"ox-cli-attest-goal", "ox-cli-attest-create"},
-	})
+	assert.Contains(t, installed.FilesWritten, filepath.Join(".claude", "skills", "ox-cli-consult", skillFileName))
+	assert.Contains(t, installed.FilesWritten, filepath.Join(".claude", "skills", "ox-cli-recap", skillFileName))
+	desired, _, err := skillmanager.LoadDesired(dir)
 	require.NoError(t, err)
-	assert.Contains(t, optIn.FilesWritten,
-		filepath.Join(".claude", "skills", "ox-cli-attest-goal", skillFileName))
-	assert.Contains(t, optIn.FilesWritten,
-		filepath.Join(".claude", "skills", "ox-cli-attest-create", skillFileName))
+	assert.ElementsMatch(t, []string{"ox-cli-consult", "ox-cli-recap"}, desired.Names)
 }
 
 func TestHandleInstallSkills_RejectsUnknownOptInSkill(t *testing.T) {

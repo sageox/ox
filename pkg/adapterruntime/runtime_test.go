@@ -610,7 +610,7 @@ func TestRunWithArgs_InstallSkillsPassesRequestedNames(t *testing.T) {
 
 	err := adapterruntime.RunWithArgs(cfg, []string{
 		"install-skills", "--repo-root", "/tmp/test", "--version", "0.8.0",
-		"--skill", "ox-cli-attest-goal", "--skill", "ox-cli-attest-create", "--bundle", "attest",
+		"--skill", "ox-cli-consult", "--skill", "ox-cli-recap", "--bundle", "core",
 	}, nil, &stdout)
 	if err != nil {
 		t.Fatalf("RunWithArgs returned error: %v", err)
@@ -618,10 +618,10 @@ func TestRunWithArgs_InstallSkillsPassesRequestedNames(t *testing.T) {
 	if got.RepoRoot != "/tmp/test" || got.Version != "0.8.0" {
 		t.Fatalf("skills params = %#v, want repo root and version", got)
 	}
-	if strings.Join(got.Names, ",") != "ox-cli-attest-goal,ox-cli-attest-create" {
+	if strings.Join(got.Names, ",") != "ox-cli-consult,ox-cli-recap" {
 		t.Fatalf("skill names = %#v, want requested order", got.Names)
 	}
-	if strings.Join(got.Bundles, ",") != "attest" {
+	if strings.Join(got.Bundles, ",") != "core" {
 		t.Fatalf("skill bundles = %#v, want requested order", got.Bundles)
 	}
 }

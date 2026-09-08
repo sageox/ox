@@ -58,19 +58,15 @@ ox doctor      # verifies hooks + context injection
 ```
 No extra setup needed — Claude Code is the reference implementation.
 
-Teams using Attest can additionally install its customer-journey BDD and
-evidence-recording playbooks with `ox attest install`. They are opt-in skills,
-not lifecycle hooks; use `ox integrate install` to manage hooks.
-
 ## Canonical Agent Skills
 
 ox authors every portable playbook once in `extensions/skills/`, in the open
 Agent Skills `SKILL.md` format. Claude Code receives a managed copy under
 `.claude/skills/`; Codex, ChatGPT desktop's Codex surface, and Gemini CLI
 receive the same managed skill under `.agents/skills/`. `ox doctor --fix`
-reconciles the project-selected native targets, including updates, retired
-ox-owned files, and a partially installed Attest bundle, while preserving
-user-authored additions and modified managed files.
+reconciles the project-selected native targets, including updates, missing
+skills, and retired ox-owned files, while preserving user-authored additions
+and modified retired files.
 
 ### Codex
 ```bash

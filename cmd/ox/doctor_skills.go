@@ -19,19 +19,19 @@ func checkClaudeSkills(fix bool) checkResult {
 	if err != nil {
 		return WarningCheck("Agent skills", "cannot inspect managed skills", err.Error())
 	}
-	if plan.TargetCount == 0 {
+	if plan.TargetCount == 0 && !plan.RetiredSelections {
 		return SkippedCheck("Agent skills", "no project-selected skill targets", "Run `ox init` and select an AI coworker with native Agent Skills")
 	}
 	if len(plan.Warnings) > 0 {
 		return WarningCheck("Agent skills", strings.Join(plan.Warnings, "; "), "Use the same or a newer ox version before reconciling")
 	}
-	if len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 && len(plan.Conflicts) == 0 {
+	if len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 && len(plan.Conflicts) == 0 && !plan.RetiredSelections {
 		return PassedCheck("Agent skills", fmt.Sprintf("%d managed files across %d native target(s)", plan.DesiredFileCount, plan.TargetCount))
 	}
 
 	problem := describeSkillPlan(plan)
 	if !fix {
-		if len(plan.Conflicts) > 0 && len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 {
+		if len(plan.Conflicts) > 0 && len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 && !plan.RetiredSelections {
 			return WarningCheck("Agent skills", problem, describeSkillConflicts(plan.Conflicts))
 		}
 		return FailedCheck("Agent skills", problem, "Run `ox doctor --fix` to reconcile unchanged managed files")
@@ -62,7 +62,10 @@ func describeSkillConflicts(conflicts []skillmanager.Conflict) string {
 }
 
 func describeSkillPlan(plan *skillmanager.ReconcilePlan) string {
-	parts := make([]string, 0, 4)
+	parts := make([]string, 0, 5)
+	if plan.RetiredSelections {
+		parts = append(parts, "retired skill selections")
+	}
 	if len(plan.Creates) > 0 {
 		parts = append(parts, fmt.Sprintf("%d missing", len(plan.Creates)))
 	}
