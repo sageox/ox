@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -239,7 +240,7 @@ func TestReadLFS_RotationAndDownloadOnly(t *testing.T) {
 		assert.Empty(t, r.Header.Get("X-Upstream-Token"))
 		if strings.HasSuffix(r.URL.Path, "/batch") {
 			var request batchRequest
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 			assert.Equal(t, "download", request.Operation)
 			json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{
 				OID: oid, Size: int64(len(content)), Actions: &Actions{
@@ -446,4 +447,77 @@ func TestReadLFS_ContextCancellation(t *testing.T) {
 			require.True(t, errors.Is(err, context.Canceled), "%v", err)
 		})
 	}
+}
+
+// Streaming must reject changed object identity, local write failures, oversized
+// responses, and lost authorization without publishing unchecked bytes.
+func TestReadLFS_StreamingFailureBoundaries(t *testing.T) {
+	content := []byte(strings.Repeat("verified-content", 8))
+	oid := ComputeOID(content)
+	status := http.StatusOK
+	var hits atomic.Int32
+	c, server := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{OID: oid, Actions: &Actions{Download: &Action{
+				Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + oid,
+			}}}}})
+			return
+		}
+		w.WriteHeader(status)
+		w.Write(content)
+	})
+	resp, err := c.BatchDownload([]BatchObject{{OID: oid}})
+	require.NoError(t, err)
+	action := resp.Objects[0].Actions.Download
+	t.Run("invalid constructor authority", func(t *testing.T) {
+		_, err := NewReadClient(c.readEndpoint, c.readRepoID, "https://foreign.example/ledger.git")
+		require.Error(t, err)
+	})
+	t.Run("missing current token", func(t *testing.T) {
+		t.Setenv("SAGEOX_TOKEN", "")
+		_, err := NewReadClient(c.readEndpoint, c.readRepoID, c.readURL)
+		require.ErrorIs(t, err, auth.ErrReadTokenUnavailable)
+		err = DownloadToFileContext(context.Background(), action, io.Discard, true, oid)
+		require.ErrorIs(t, err, auth.ErrReadTokenUnavailable)
+	})
+	t.Run("invalid destination or action", func(t *testing.T) {
+		require.Error(t, DownloadToFile(action, nil, true, oid))
+		require.Error(t, DownloadToFile(nil, io.Discard, true, oid))
+		invalid := *action
+		invalid.Href = "https://%zz"
+		require.Error(t, DownloadToFile(&invalid, io.Discard, true, oid))
+	})
+	t.Run("mismatched grant", func(t *testing.T) {
+		before := hits.Load()
+		err := DownloadToFileContext(context.Background(), action, io.Discard, true, strings.Repeat("0", 64))
+		require.ErrorContains(t, err, "does not match expected OID")
+		require.Equal(t, before, hits.Load())
+	})
+	t.Run("destination failure", func(t *testing.T) {
+		r, w := io.Pipe()
+		require.NoError(t, r.CloseWithError(io.ErrClosedPipe))
+		defer w.Close()
+		err := DownloadToFileContext(context.Background(), action, w, true, oid)
+		require.ErrorIs(t, err, io.ErrClosedPipe)
+	})
+	t.Run("oversized object", func(t *testing.T) {
+		t.Setenv("OX_LFS_MAX_OBJECT_SIZE", "8")
+		err := DownloadToFile(action, io.Discard, true, oid)
+		require.ErrorContains(t, err, "exceeded maximum size")
+	})
+	t.Run("revoked between grant and download", func(t *testing.T) {
+		status = http.StatusUnauthorized
+		defer func() { status = http.StatusOK }()
+		err := DownloadToFileContext(context.Background(), action, io.Discard, true, oid)
+		var httpErr *HTTPError
+		require.ErrorAs(t, err, &httpErr)
+		require.Equal(t, http.StatusUnauthorized, httpErr.StatusCode)
+	})
+	t.Run("lost connection", func(t *testing.T) {
+		server.Close()
+		err := DownloadToFileContext(context.Background(), action, io.Discard, true, oid)
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), action.Href)
+	})
 }

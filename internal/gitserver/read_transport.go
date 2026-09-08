@@ -3,6 +3,7 @@ package gitserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
@@ -180,6 +181,13 @@ func (t *ReadTransport) validateConfig(ctx context.Context, dir string, env []st
 		cmd.WaitDelay = 5 * time.Second
 		out, err := cmd.Output()
 		if err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("inspect read transport config: %w", ctx.Err())
+			}
+			var execErr *exec.Error
+			if errors.As(err, &execErr) {
+				return fmt.Errorf("inspect read transport config: %w", err)
+			}
 			return ErrUnsafeReadTransport
 		}
 		for _, line := range strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00") {
@@ -194,7 +202,7 @@ func (t *ReadTransport) validateConfig(ctx context.Context, dir string, env []st
 
 func (t *ReadTransport) safeConfig(key, value string) bool {
 	switch key {
-	case "", "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates", "core.ignorecase", "core.precomposeunicode", "core.sparsecheckout", "core.sparsecheckoutcone", "extensions.worktreeconfig", "extensions.partialclone", "remote.origin.promisor", "remote.origin.partialclonefilter", "user.name", "user.email", "commit.gpgsign", "tag.gpgsign":
+	case "", "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates", "core.ignorecase", "core.precomposeunicode", "core.sparsecheckout", "core.sparsecheckoutcone", "index.sparse", "extensions.worktreeconfig", "extensions.partialclone", "remote.origin.promisor", "remote.origin.partialclonefilter", "user.name", "user.email", "commit.gpgsign", "tag.gpgsign":
 		return true
 	case "remote.origin.url":
 		return value == t.readURL

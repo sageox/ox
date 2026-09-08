@@ -79,7 +79,7 @@ The sample paths and counts are illustrative; the returned coverage describes th
 | `ready` | Local materialization is safe to read while holding the checkout lock and under the stated coverage. This is independent of current authorization and freshness. |
 | `last_successful_sync` | UTC time of authorized remote Git ref observation for the subsequently verified revision, or `null` if unknown. |
 | `history` | `full`, `shallow`, or `unknown`. A shallow checkout cannot report full coverage/readiness. |
-| `coverage.complete` | Every required path for the current sparse/activity policy has been verified. |
+| `coverage.complete` | Every required path for the receipt’s pinned sparse/activity window has been verified. |
 | `coverage.paths` | Required materialized paths/patterns for the receipt. Sessions and plans are always retained. |
 | `coverage.files`, `coverage.empty` | Verified file count and whether the selected committed tree is empty. Empty is distinct from failed discovery or missing hydration. An unborn HEAD does not qualify and remains unavailable. |
 | `hydration.state` | `complete`, `missing`, or `unknown`. |
@@ -106,7 +106,7 @@ Previously hydrated objects whose committed pointers change or disappear are ret
 
 `--check` acquires the materialization lock, verifies local state without contacting the server or triggering lazy fetches, and can republish recovered local readiness. It requires an existing identity-matched receipt; an arbitrary checkout or missing/corrupt receipt remains unavailable until an authorized refresh. It never advances freshness. A retained observation timestamp is usable only when its recorded HEAD still matches the verified HEAD. Recovery at a different or unconfirmed HEAD yields unknown remote freshness. Missing local objects/hydration remain unavailable offline.
 
-Full Git commit history is retained by default; sparse checkout and the existing activity window bound worktree materialization. The canonical coverage includes `.sageox`, `.sync`, `sessions`, `audit`, `data/plans`, 30 days of GitHub activity, and 12 hours of murmurs. Full history does not promise that every historical large object is eagerly hydrated.
+Full Git commit history is retained by default; sparse checkout and the existing activity window bound worktree materialization. The canonical coverage includes `.sageox`, `.sync`, `sessions`, `audit`, `data/plans`, 30 days of GitHub activity, and 12 hours of murmurs. Full history does not promise that every historical large object is eagerly hydrated. Each refresh pins its coverage window once and persists it in `coverage.paths`. Offline checks verify that saved window; crossing an hour or day boundary does not expire local readiness or advance freshness.
 
 An owned shallow cache whose origin already equals the discovered read URL can upgrade after discovery proves the selected repository identity. It must establish full history before reporting readiness and preserve local data on failure. Arbitrary direct GitLab/provider caches are not automatically rebound to a new remote: those callers retain their explicit legacy path until a separate authorized migration is available.
 

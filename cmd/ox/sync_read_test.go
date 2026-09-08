@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -338,4 +339,40 @@ func TestReadSyncCredentialHelperDoesNotLoadDotenv(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "output=%s", out)
 	require.Equal(t, "quit=true\n\n", string(out))
+}
+
+// Failure prevented: human output reports success on an unavailable checkout,
+// or a failed JSON write produces a successful process exit.
+func TestReadSyncOutputContract(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		code               int
+		class, out, errOut string
+	}{
+		{"ready", 0, "", "Ledger ready: /selected/ledger (HEAD abc123)\n", ""},
+		{"denied", 1, "denied", "", "Ledger read failed: denied\n"},
+		{"usage", 2, "invalid_arguments", "", "Ledger read failed: invalid_arguments\nUse: ox sync --read-only --repo repo_<uuid> [--timeout 5m] [--check] [--json]\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			result := ledger.ReadSyncResult{Path: "/selected/ledger", Head: "abc123", Ready: tc.code == 0, ErrorClass: tc.class}
+			err := finishReadSync(cmd, result, false, tc.code)
+			if tc.code == 0 {
+				require.NoError(t, err)
+			} else {
+				require.Equal(t, tc.code, exitCodeOf(t, err))
+			}
+			require.Equal(t, tc.out, stdout.String())
+			require.Equal(t, tc.errOut, stderr.String())
+		})
+	}
+	r, w := io.Pipe()
+	require.NoError(t, r.Close())
+	defer w.Close()
+	cmd := &cobra.Command{}
+	cmd.SetOut(w)
+	require.Equal(t, 1, exitCodeOf(t, finishReadSync(cmd, ledger.ReadSyncResult{Ready: true}, true, 0)))
 }

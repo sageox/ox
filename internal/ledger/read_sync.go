@@ -94,6 +94,8 @@ func ReadSync(ctx context.Context, opts ReadSyncOptions) ReadSyncResult {
 
 func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitserver.ReadTransport) ReadSyncResult {
 	result := newReadResult(opts)
+	dirs := sparseCheckoutDirs()
+	result.Coverage.Paths = dirs
 	workPath := opts.Path
 	fresh := false
 	if _, err := os.Lstat(opts.Path); os.IsNotExist(err) {
@@ -106,7 +108,7 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 	if !fresh {
 		// Inspect all local content before fetch or dehydration. Verified hydration
 		// is an expected Git diff; any other local edit is preserved and refused.
-		if _, err := readFiles(ctx, transport, workPath, false); err != nil {
+		if _, err := readFiles(ctx, transport, workPath, dirs, false); err != nil {
 			result.ErrorClass = readErrorClass(ctx, err)
 			return result
 		}
@@ -161,20 +163,20 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 			}
 		}
 		if syncErr == nil {
-			syncErr = dehydrateReadFiles(ctx, transport, workPath, remoteHead)
+			syncErr = dehydrateReadFiles(ctx, transport, workPath, remoteHead, dirs)
 		}
 	}
 	if syncErr == nil {
 		// Use the same coverage policy as the human/daemon checkout. --cone is
 		// explicit so an owned shallow cache can safely establish full coverage.
-		args := append([]string{"sparse-checkout", "set", "--cone", "--"}, sparseCheckoutDirs()...)
+		args := append([]string{"sparse-checkout", "set", "--cone", "--"}, dirs...)
 		_, syncErr = runReadGit(ctx, transport, true, workPath, args...)
 	}
 	if syncErr == nil {
 		_, syncErr = runReadGit(ctx, transport, true, workPath, "checkout", "--no-overwrite-ignore", "--detach", remoteHead)
 	}
 	if syncErr == nil {
-		syncErr = hydrateReadFiles(ctx, transport, workPath, opts)
+		syncErr = hydrateReadFiles(ctx, transport, workPath, opts, dirs)
 	}
 	if fresh && syncErr != nil {
 		result.ErrorClass = readErrorClass(ctx, syncErr)
@@ -183,7 +185,7 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 
 	// Verification can recover readiness after a remote failure, but only a
 	// completed fetch of this exact HEAD may establish new remote evidence.
-	result = verifyReadCheckout(ctx, opts, transport, workPath)
+	result = verifyReadCheckout(ctx, opts, transport, workPath, dirs)
 	if previous != nil && previous.Head == result.Head && validReadTime(previous.LastSuccessfulSync) {
 		result.LastSuccessfulSync = previous.LastSuccessfulSync
 	}
@@ -277,7 +279,7 @@ type readFile struct {
 // readFiles verifies the index and covered files against Git objects. Hashing
 // both plain files and hydrated LFS content detects edits hidden by Git's stat
 // cache, assume-unchanged, or an obsolete success receipt.
-func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir string, coverage bool) ([]readFile, error) {
+func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir string, dirs []string, coverage bool) ([]readFile, error) {
 	if _, err := runReadGit(ctx, transport, false, dir, "diff", "--cached", "--quiet", "HEAD", "--"); err != nil {
 		return nil, errors.New("dirty")
 	}
@@ -294,8 +296,12 @@ func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir stri
 	if err != nil {
 		return nil, err
 	}
-	dirs := sparseCheckoutDirs()
 	if coverage {
+		for _, required := range baseSparseDirs {
+			if !slices.Contains(dirs, required) {
+				return nil, errors.New("incomplete_coverage")
+			}
+		}
 		actual, err := runReadGit(ctx, transport, false, dir, "sparse-checkout", "list")
 		if err != nil {
 			return nil, errors.New("incomplete_coverage")
@@ -349,7 +355,7 @@ func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir stri
 		if len(pointer) != 0 {
 			if oid, pointerSize, err := lfs.ParsePointer(string(pointer)); err == nil {
 				file.pointer, file.ref = pointer, lfs.FileRef{OID: oid, Size: pointerSize}
-			} else if lfs.IsPointerFile(abs) {
+			} else if strings.HasPrefix(string(pointer), "version https://git-lfs.github.com/spec/v1\n") {
 				return nil, errors.New("missing_hydration")
 			}
 		}
@@ -442,8 +448,8 @@ func readSparseIncludes(name string, dirs []string) bool {
 	return false
 }
 
-func dehydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, dir, target string) error {
-	files, err := readFiles(ctx, transport, dir, false)
+func dehydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, dir, target string, dirs []string) error {
+	files, err := readFiles(ctx, transport, dir, dirs, false)
 	if err != nil {
 		return err
 	}
@@ -496,33 +502,60 @@ func dehydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport,
 	return nil
 }
 
-func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, dir string, opts ReadSyncOptions) error {
-	files, err := readFiles(ctx, transport, dir, true)
+func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, dir string, opts ReadSyncOptions, dirs []string) error {
+	files, err := readFiles(ctx, transport, dir, dirs, true)
 	if err != nil {
 		return err
 	}
-	var client *lfs.Client
+	requests := make([]lfs.BatchObject, 0)
+	sizes := make(map[string]int64)
 	for _, f := range files {
 		if len(f.pointer) == 0 || f.hydrated {
 			continue
 		}
-		if client == nil {
-			client, err = lfs.NewReadClient(opts.Endpoint, opts.RepoID, opts.ReadURL)
-			if err != nil {
-				return err
+		oid := f.ref.BareOID()
+		if size, ok := sizes[oid]; ok {
+			if size != f.ref.Size {
+				return errors.New("missing_hydration")
 			}
+			continue
 		}
-		resp, err := client.BatchDownloadContext(ctx, []lfs.BatchObject{{OID: f.ref.BareOID(), Size: f.ref.Size}})
-		if err != nil {
-			return err
-		}
-		if len(resp.Objects) == 1 && resp.Objects[0].Error != nil && (resp.Objects[0].Error.Code == 401 || resp.Objects[0].Error.Code == 403) {
-			return &lfs.HTTPError{StatusCode: resp.Objects[0].Error.Code}
-		}
-		if len(resp.Objects) != 1 || resp.Objects[0].OID != f.ref.BareOID() || resp.Objects[0].Size != f.ref.Size || resp.Objects[0].Error != nil || resp.Objects[0].Actions == nil || resp.Objects[0].Actions.Download == nil {
+		sizes[oid] = f.ref.Size
+		requests = append(requests, lfs.BatchObject{OID: oid, Size: f.ref.Size})
+	}
+	if len(requests) == 0 {
+		return nil
+	}
+	client, err := lfs.NewReadClient(opts.Endpoint, opts.RepoID, opts.ReadURL)
+	if err != nil {
+		return err
+	}
+	resp, err := client.BatchDownloadContext(ctx, requests)
+	if err != nil {
+		return err
+	}
+	actions := make(map[string]*lfs.Action, len(resp.Objects))
+	for _, object := range resp.Objects {
+		size, requested := sizes[object.OID]
+		if !requested || actions[object.OID] != nil {
 			return errors.New("missing_hydration")
 		}
-		if err := materializeReadObject(ctx, resp.Objects[0].Actions.Download, filepath.Join(dir, f.path), f.ref); err != nil {
+		if object.Error != nil && (object.Error.Code == 401 || object.Error.Code == 403) {
+			return &lfs.HTTPError{StatusCode: object.Error.Code}
+		}
+		if size != object.Size || object.Error != nil || object.Actions == nil || object.Actions.Download == nil {
+			return errors.New("missing_hydration")
+		}
+		actions[object.OID] = object.Actions.Download
+	}
+	if len(actions) != len(requests) {
+		return errors.New("missing_hydration")
+	}
+	for _, f := range files {
+		if len(f.pointer) == 0 || f.hydrated {
+			continue
+		}
+		if err := materializeReadObject(ctx, actions[f.ref.BareOID()], filepath.Join(dir, f.path), f.ref); err != nil {
 			return err
 		}
 	}
@@ -559,8 +592,9 @@ func materializeReadObject(ctx context.Context, action *lfs.Action, path string,
 	return syncReadDir(filepath.Dir(path))
 }
 
-func verifyReadCheckout(ctx context.Context, opts ReadSyncOptions, transport *gitserver.ReadTransport, dir string) ReadSyncResult {
+func verifyReadCheckout(ctx context.Context, opts ReadSyncOptions, transport *gitserver.ReadTransport, dir string, dirs []string) ReadSyncResult {
 	result := newReadResult(opts)
+	result.Coverage.Paths = dirs
 	var err error
 	result.Head, err = runReadGit(ctx, transport, false, dir, "rev-parse", "--verify", "HEAD")
 	if err != nil {
@@ -577,12 +611,12 @@ func verifyReadCheckout(ctx context.Context, opts ReadSyncOptions, transport *gi
 		result.History, result.ErrorClass = "unknown", "incomplete_history"
 		return result
 	}
-	files, err := readFiles(ctx, transport, dir, true)
+	files, err := readFiles(ctx, transport, dir, dirs, true)
 	if err != nil {
 		result.ErrorClass = readErrorClass(ctx, err)
 		return result
 	}
-	result.Coverage = ReadCoverage{Complete: true, Paths: sparseCheckoutDirs(), Files: len(files), Empty: len(files) == 0}
+	result.Coverage = ReadCoverage{Complete: true, Paths: dirs, Files: len(files), Empty: len(files) == 0}
 	result.Hydration.State = "complete"
 	for _, f := range files {
 		if len(f.pointer) != 0 {
@@ -641,7 +675,7 @@ func checkReadinessLocked(ctx context.Context, path, repoID, endpoint string) Re
 		result.ErrorClass = "identity_mismatch"
 		return result
 	}
-	result = verifyReadCheckout(ctx, opts, transport, path)
+	result = verifyReadCheckout(ctx, opts, transport, path, previous.Coverage.Paths)
 	if previous.Head == result.Head && validReadTime(previous.LastSuccessfulSync) {
 		result.LastSuccessfulSync = previous.LastSuccessfulSync
 	}

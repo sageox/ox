@@ -45,6 +45,135 @@ func commitReadLFSPointer(t *testing.T, f *readFixture, path string, content []b
 	return pointer
 }
 
+// Failure prevented: batching mixes up out-of-order grants, repeats a shared
+// object in the request, or reacquires grants for already verified warm files.
+func TestReadSyncLFSBatchHydratesUniqueAndSharedObjects(t *testing.T) {
+	first, second := []byte("shared session content\n"), []byte("different plan content\n")
+	firstOID, secondOID := lfs.ComputeOID(first), lfs.ComputeOID(second)
+	expected := []lfs.BatchObject{{OID: firstOID, Size: int64(len(first))}, {OID: secondOID, Size: int64(len(second))}}
+	contents := map[string][]byte{firstOID: first, secondOID: second}
+	var batches, downloads atomic.Int32
+	f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			batches.Add(1)
+			assert.Equal(t, http.MethodPost, r.Method)
+			var request struct {
+				Operation string            `json:"operation"`
+				Objects   []lfs.BatchObject `json:"objects"`
+			}
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			assert.Equal(t, "download", request.Operation)
+			assert.ElementsMatch(t, expected, request.Objects)
+			response := lfs.BatchResponse{}
+			for i := len(request.Objects) - 1; i >= 0; i-- {
+				object := request.Objects[i]
+				response.Objects = append(response.Objects, lfs.BatchResponseObject{
+					OID: object.OID, Size: object.Size, Actions: &lfs.Actions{Download: &lfs.Action{
+						Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + object.OID,
+					}},
+				})
+			}
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+		downloads.Add(1)
+		assert.Equal(t, http.MethodGet, r.Method)
+		content, ok := contents[filepath.Base(r.URL.Path)]
+		if !assert.True(t, ok, "only a requested object may be downloaded") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write(content)
+	})
+	files := map[string][]byte{
+		"sessions/a/session.md": first, "sessions/b/session.md": first,
+		"data/plans/batched/plan.md": second,
+	}
+	for path, content := range files {
+		commitReadLFSPointer(t, f, path, content)
+	}
+	result := ReadSync(context.Background(), f.opts)
+	require.True(t, result.Ready, "%+v", result)
+	require.Equal(t, ReadHydration{State: "complete", Required: len(files), Completed: len(files)}, result.Hydration)
+	for path, content := range files {
+		actual, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+		require.NoError(t, err)
+		require.Equal(t, content, actual, path)
+	}
+	require.Equal(t, int32(1), batches.Load(), "all unique objects share one batch grant")
+	coldDownloads := downloads.Load()
+	require.Positive(t, coldDownloads)
+	warm := ReadSync(context.Background(), f.opts)
+	require.True(t, warm.Ready, "%+v", warm)
+	require.Equal(t, result.Head, warm.Head)
+	require.Equal(t, int32(1), batches.Load())
+	require.Equal(t, coldDownloads, downloads.Load(), "warm verified files require no object downloads")
+}
+
+// Failure prevented: an incomplete or mismatched batch partially hydrates files
+// before discovering that another object's identity, size, or action is invalid.
+func TestReadSyncLFSBatchRejectsInvalidResponsesBeforeMaterialization(t *testing.T) {
+	for _, name := range []string{"missing", "duplicate", "foreign", "wrong size", "missing action"} {
+		t.Run(name, func(t *testing.T) {
+			var batches, downloads atomic.Int32
+			f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasSuffix(r.URL.Path, "/batch") {
+					downloads.Add(1)
+					http.Error(w, "invalid batch must not start a download", http.StatusInternalServerError)
+					return
+				}
+				batches.Add(1)
+				var request struct {
+					Objects []lfs.BatchObject `json:"objects"`
+				}
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+				if !assert.Len(t, request.Objects, 2) {
+					http.Error(w, "expected a single combined batch", http.StatusBadRequest)
+					return
+				}
+				objects := make([]lfs.BatchResponseObject, 0, 2)
+				for _, object := range request.Objects {
+					objects = append(objects, lfs.BatchResponseObject{
+						OID: object.OID, Size: object.Size, Actions: &lfs.Actions{Download: &lfs.Action{
+							Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + object.OID,
+						}},
+					})
+				}
+				switch name {
+				case "missing":
+					objects = objects[:1]
+				case "duplicate":
+					objects[1] = objects[0]
+				case "foreign":
+					objects[1].OID = lfs.ComputeOID([]byte("unrequested object"))
+				case "wrong size":
+					objects[1].Size++
+				case "missing action":
+					objects[1].Actions = nil
+				}
+				json.NewEncoder(w).Encode(lfs.BatchResponse{Objects: objects})
+			})
+			require.True(t, ReadSync(context.Background(), f.opts).Ready)
+			pointers := map[string]string{}
+			for _, path := range []string{"sessions/a/session.md", "sessions/b/session.md"} {
+				pointers[path] = commitReadLFSPointer(t, f, path, []byte(path+"\n"))
+			}
+			result := ReadSync(context.Background(), f.opts)
+			require.False(t, result.Ready)
+			require.Equal(t, "missing_hydration", result.ErrorClass)
+			require.Nil(t, result.LastSuccessfulSync)
+			require.Equal(t, int32(1), batches.Load())
+			require.Zero(t, downloads.Load(), "validate the entire grant before materializing any object")
+			for path, pointer := range pointers {
+				actual, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+				require.NoError(t, err)
+				require.Equal(t, pointer, string(actual), path)
+			}
+			require.False(t, CheckReadiness(context.Background(), f.opts.Path, f.opts.RepoID, f.opts.Endpoint).Ready)
+		})
+	}
+}
+
 // Failure prevented: readers see partial hydration, or slow object delivery
 // makes a revision appear remotely observed later than its actual Git fetch.
 func TestReadSyncLFSHydrationPublishesAfterVerification(t *testing.T) {
@@ -67,7 +196,7 @@ func TestReadSyncLFSHydrationPublishesAfterVerification(t *testing.T) {
 				Operation string            `json:"operation"`
 				Objects   []lfs.BatchObject `json:"objects"`
 			}
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 			assert.Equal(t, "download", request.Operation)
 			assert.Equal(t, []lfs.BatchObject{{OID: oid, Size: int64(len(content))}}, request.Objects)
 			json.NewEncoder(w).Encode(lfs.BatchResponse{Objects: []lfs.BatchResponseObject{{
@@ -163,8 +292,10 @@ func TestReadSyncLFSFailedRefreshPreservesEarlierHydration(t *testing.T) {
 			var request struct {
 				Objects []lfs.BatchObject `json:"objects"`
 			}
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
-			require.Len(t, request.Objects, 1)
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			if !assert.Len(t, request.Objects, 1) {
+				return
+			}
 			requested := request.Objects[0]
 			object := lfs.BatchResponseObject{OID: requested.OID, Size: requested.Size}
 			if requested.OID == retainedOID {

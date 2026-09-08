@@ -20,6 +20,42 @@ import (
 
 const readTestRepoID = "repo_01936d5a-0000-7abc-8def-0123456789ab"
 
+// Failure prevented: malformed discovery authorizes a different authority or
+// repository before individual Git or LFS requests are checked.
+func TestReadTransportRejectsUnsafeDiscovery(t *testing.T) {
+	base := "https://sageox.ai/api/v1/cli/repos/" + readTestRepoID + "/ledger.git"
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		repoID   string
+		readURL  string
+	}{
+		{"malformed endpoint", "https://%", readTestRepoID, base},
+		{"insecure endpoint", "http://sageox.ai", readTestRepoID, base},
+		{"missing authority", "https:", readTestRepoID, base},
+		{"endpoint credentials", "https://ox:secret@sageox.ai", readTestRepoID, base},
+		{"endpoint path", "https://sageox.ai/other", readTestRepoID, base},
+		{"endpoint query", "https://sageox.ai?other=yes", readTestRepoID, base},
+		{"endpoint fragment", "https://sageox.ai#other", readTestRepoID, base},
+		{"invalid repo", "https://sageox.ai", "repo_invalid", base},
+		{"noncanonical repo", "https://sageox.ai", strings.ToUpper(readTestRepoID), base},
+		{"malformed discovery", "https://sageox.ai", readTestRepoID, "https://%"},
+		{"foreign authority", "https://sageox.ai", readTestRepoID, strings.Replace(base, "sageox.ai", "foreign.example", 1)},
+		{"discovery credentials", "https://sageox.ai", readTestRepoID, strings.Replace(base, "://", "://ox:secret@", 1)},
+		{"encoded discovery path", "https://sageox.ai", readTestRepoID, strings.Replace(base, "ledger.git", "%6cedger.git", 1)},
+		{"discovery query", "https://sageox.ai", readTestRepoID, base + "?"},
+		{"discovery fragment", "https://sageox.ai", readTestRepoID, base + "#other"},
+		{"wrong discovery path", "https://sageox.ai", readTestRepoID, base + "/info/refs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport, err := NewReadTransport(tc.endpoint, tc.repoID, tc.readURL)
+			require.ErrorIs(t, err, ErrUnsafeReadTransport)
+			require.Nil(t, transport)
+			require.ErrorIs(t, ValidateReadRequestURL(tc.endpoint, tc.repoID, tc.readURL, base), ErrUnsafeReadTransport)
+		})
+	}
+}
+
 // Failure prevented: prefix/encoding tricks disclose the selected credential to
 // another origin, resource, service, or upload endpoint.
 func TestReadTransportCredentialScope(t *testing.T) {
@@ -31,6 +67,7 @@ func TestReadTransportCredentialScope(t *testing.T) {
 	}{
 		{"resource", base, true},
 		{"refs", base + "/info/refs?service=git-upload-pack", true},
+		{"refs without service", base + "/info/refs", true},
 		{"pack", base + "/git-upload-pack", true},
 		{"batch", base + "/info/lfs/objects/batch", true},
 		{"object", base + "/info/lfs/objects/" + strings.Repeat("a", 64), true},
@@ -44,6 +81,8 @@ func TestReadTransportCredentialScope(t *testing.T) {
 		{"userinfo", strings.Replace(base, "://", "://ox:secret@", 1), false},
 		{"fragment", base + "#leak", false},
 		{"query", base + "?secret=yes", false},
+		{"malformed request", "https://%", false},
+		{"empty query", base + "?", false},
 		{"push refs", base + "/info/refs?service=git-receive-pack", false},
 		{"push", base + "/git-receive-pack", false},
 		{"lfs upload", base + "/info/lfs/objects/" + strings.Repeat("a", 64) + "/verify", false},
@@ -55,6 +94,103 @@ func TestReadTransportCredentialScope(t *testing.T) {
 			} else {
 				require.ErrorIs(t, err, ErrUnsafeReadTransport)
 			}
+		})
+	}
+}
+
+// Failure prevented: a checkout delegates Git configuration to another path,
+// or a damaged config causes validation to skip the command's unsafe settings.
+func TestReadTransportRejectsUnsafeConfigFiles(t *testing.T) {
+	readURL := "https://sageox.ai/api/v1/cli/repos/" + readTestRepoID + "/ledger.git"
+	transport, err := NewReadTransport("https://sageox.ai", readTestRepoID, readURL)
+	require.NoError(t, err)
+	for _, name := range []string{"git file", "git symlink", "missing config", "config symlink", "malformed config", "worktree override"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			gitDir := filepath.Join(dir, ".git")
+			switch name {
+			case "git file":
+				require.NoError(t, os.WriteFile(gitDir, []byte("gitdir: /other"), 0o600))
+			case "git symlink":
+				require.NoError(t, os.Symlink(t.TempDir(), gitDir))
+			default:
+				require.NoError(t, os.Mkdir(gitDir, 0o700))
+				configPath := filepath.Join(gitDir, "config")
+				switch name {
+				case "config symlink":
+					target := filepath.Join(t.TempDir(), "config")
+					require.NoError(t, os.WriteFile(target, nil, 0o600))
+					require.NoError(t, os.Symlink(target, configPath))
+				case "malformed config":
+					require.NoError(t, os.WriteFile(configPath, []byte("[unterminated"), 0o600))
+				case "worktree override":
+					require.NoError(t, os.WriteFile(configPath, nil, 0o600))
+					require.NoError(t, os.WriteFile(filepath.Join(gitDir, "config.worktree"), []byte("[credential]\nhelper = !echo stolen\n"), 0o600))
+				}
+			}
+			cmd, err := transport.LocalCommand(context.Background(), dir, "status", "--porcelain")
+			require.ErrorIs(t, err, ErrUnsafeReadTransport)
+			require.Nil(t, cmd)
+		})
+	}
+}
+
+// Failure prevented: an unset credential falls back to ambient authentication,
+// or cancellation racing with process startup/completion fails the operation.
+func TestReadTransportMissingTokenAndCancellation(t *testing.T) {
+	t.Setenv("SAGEOX_TOKEN", "")
+	readURL := "https://sageox.ai/api/v1/cli/repos/" + readTestRepoID + "/ledger.git"
+	transport, err := NewReadTransport("https://sageox.ai", readTestRepoID, readURL)
+	require.NoError(t, err)
+	dir := t.TempDir()
+	cmd, err := transport.Command(context.Background(), dir, "ls-remote", readURL)
+	require.ErrorIs(t, err, ErrReadTokenUnavailable)
+	require.Nil(t, cmd)
+
+	cmd, err = transport.LocalCommand(context.Background(), dir, "version")
+	require.NoError(t, err)
+	require.ErrorIs(t, cmd.Cancel(), os.ErrProcessDone)
+	require.NoError(t, cmd.Run())
+	require.ErrorIs(t, cmd.Cancel(), os.ErrProcessDone)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cmd, err = transport.LocalCommand(ctx, dir, "version")
+	require.NoError(t, err)
+	require.ErrorIs(t, cmd.Run(), context.Canceled)
+}
+
+// Failure prevented: missing Git or cancellation is misreported as a hostile
+// checkout, causing callers to suggest repairing a valid configuration.
+func TestReadTransportConfigInspectionExecutionErrors(t *testing.T) {
+	readURL := "https://sageox.ai/api/v1/cli/repos/" + readTestRepoID + "/ledger.git"
+	transport, err := NewReadTransport("https://sageox.ai", readTestRepoID, readURL)
+	require.NoError(t, err)
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, ".git"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("[core]\nbare = false\n"), 0o600))
+	for _, name := range []string{"canceled", "deadline", "missing git"} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			want := exec.ErrNotFound
+			switch name {
+			case "canceled":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+				want = context.Canceled
+			case "deadline":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadline(ctx, time.Unix(0, 0))
+				defer cancel()
+				want = context.DeadlineExceeded
+			case "missing git":
+				t.Setenv("PATH", t.TempDir())
+			}
+			cmd, err := transport.LocalCommand(ctx, dir, "status", "--porcelain")
+			require.ErrorIs(t, err, want)
+			require.NotErrorIs(t, err, ErrUnsafeReadTransport)
+			require.Nil(t, cmd)
 		})
 	}
 }

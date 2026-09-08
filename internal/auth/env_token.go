@@ -22,6 +22,8 @@ var ErrReadTokenUnavailable = gitserver.ErrReadTokenUnavailable
 
 // CurrentReadToken never consults a disk login or GitLab credential store.
 // Re-read it for every operation so a reused client observes token rotation.
+// Callers supply the selected canonical origin; normalizing a requested sibling
+// host here would broaden the authority allowed to receive this credential.
 func CurrentReadToken(endpointURL string) (string, error) {
 	if strings.TrimSuffix(endpointURL, "/") != strings.TrimSuffix(EnvTokenEndpoint(), "/") {
 		return "", ErrReadTokenUnavailable

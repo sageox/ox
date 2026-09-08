@@ -202,6 +202,7 @@ func TestReadSyncRecoveryAndReaderLock(t *testing.T) {
 	previous := loadReadReceipt(f.opts.Path, f.opts.RepoID, f.opts.Endpoint)
 	require.NotNil(t, previous)
 	invalid := newReadResult(f.opts)
+	invalid.Coverage.Paths = previous.Coverage.Paths
 	require.NoError(t, publishReadReceipt(f.opts.Path, readReceipt{ReadSyncResult: invalid, ReadURL: f.opts.ReadURL}, previous))
 	recovered := CheckReadiness(ctx, f.opts.Path, f.opts.RepoID, f.opts.Endpoint)
 	require.True(t, recovered.Ready)
@@ -275,7 +276,7 @@ func TestReadSyncLocalHydrationEvidence(t *testing.T) {
 	require.Equal(t, 1, ready.Hydration.Completed)
 	transport, err := gitserver.NewReadTransport(f.opts.Endpoint, f.opts.RepoID, f.opts.ReadURL)
 	require.NoError(t, err)
-	require.NoError(t, gitutil.WithRepoLock(ctx, f.opts.Path, func() error { return dehydrateReadFiles(ctx, transport, f.opts.Path, "") }))
+	require.NoError(t, gitutil.WithRepoLock(ctx, f.opts.Path, func() error { return dehydrateReadFiles(ctx, transport, f.opts.Path, "", sparseCheckoutDirs()) }))
 	actual, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, pointer, string(actual))

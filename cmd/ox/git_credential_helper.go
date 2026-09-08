@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -117,6 +118,14 @@ func helperReadGet(stdin io.Reader, stdout io.Writer, endpointURL, repoID, readU
 			}
 		}
 	}
+	reason := "malformed_request"
+	switch {
+	case errors.Is(err, gitserver.ErrUnsafeReadTransport):
+		reason = "unsafe_scope"
+	case errors.Is(err, auth.ErrReadTokenUnavailable):
+		reason = "token_unavailable"
+	}
+	slog.Debug("git-credential-helper: read credential rejected", "reason", reason)
 	_, err = fmt.Fprint(stdout, "quit=true\n\n")
 	return err
 }
