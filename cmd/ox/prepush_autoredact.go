@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -297,7 +298,15 @@ quarantineFiles:
 					"path", toRel, "error", err)
 				continue
 			}
+			var indexEntries []byte
 			if !amendCommit {
+				// Preserve the index's bytes and mode, which may differ from the
+				// working file. An empty snapshot means the path is untracked.
+				indexEntries, err = exec.Command("git", "-C", ledgerPath, "ls-files", "--stage", "-z", "--", fromRel).Output()
+				if err != nil {
+					quarantineErr = fmt.Errorf("read quarantined path from index %s: %w", fromRel, err)
+					break quarantineFiles
+				}
 				// A previous attempt may already have staged these bytes. Moving
 				// only the working file would leave that secret-bearing blob in
 				// the next commit, invisible to the working-tree scanner.
@@ -310,6 +319,13 @@ quarantineFiles:
 			if err := os.Rename(fromAbs, toAbs); err != nil {
 				if !amendCommit {
 					quarantineErr = fmt.Errorf("quarantine %s: %w", fromRel, err)
+					if len(indexEntries) > 0 {
+						restore := exec.Command("git", "-C", ledgerPath, "update-index", "-z", "--index-info")
+						restore.Stdin = strings.NewReader(string(indexEntries))
+						if gitOutput, restoreErr := restore.CombinedOutput(); restoreErr != nil {
+							quarantineErr = errors.Join(quarantineErr, fmt.Errorf("restore quarantined path in index %s: %s: %w", fromRel, strings.TrimSpace(string(gitOutput)), restoreErr))
+						}
+					}
 					break quarantineFiles
 				}
 				slog.Warn("pre-push quarantine: rename failed; skipping",
