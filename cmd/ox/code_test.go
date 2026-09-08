@@ -380,13 +380,13 @@ func TestValidateSymbolArg_AcceptsCleanIdentifiers(t *testing.T) {
 
 func TestValidateSymbolArg_RejectsDSLInjection(t *testing.T) {
 	bad := []string{
-		"foo calledby:bar",         // whitespace + colon — would inject second filter
-		"foo bar",                  // whitespace — would re-tokenize
-		"foo:bar",                  // colon — would be parsed as filter
-		`"quoted"`,                 // quote — would short-circuit tokenizer
-		"foo\ttab",                 // tab — whitespace variant
-		"foo\nnewline",             // newline — whitespace variant
-		"foo'apostrophe",           // single quote — DSL delimiter
+		"foo calledby:bar", // whitespace + colon — would inject second filter
+		"foo bar",          // whitespace — would re-tokenize
+		"foo:bar",          // colon — would be parsed as filter
+		`"quoted"`,         // quote — would short-circuit tokenizer
+		"foo\ttab",         // tab — whitespace variant
+		"foo\nnewline",     // newline — whitespace variant
+		"foo'apostrophe",   // single quote — DSL delimiter
 	}
 	for _, b := range bad {
 		assert.Error(t, validateSymbolArg("test", b), "must reject %q", b)

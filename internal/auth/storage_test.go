@@ -404,13 +404,29 @@ func TestStoredToken_IsExpired_EdgeCases(t *testing.T) {
 	// at exact expiration with no buffer, should be expired
 	assert.True(t, token.IsExpired(0), "want true for token expiring at exactly now")
 
-	// just before expiration
-	token.ExpiresAt = now.Add(1 * time.Millisecond)
-	assert.False(t, token.IsExpired(0), "want false for token expiring 1ms in future")
+	// Not yet expired. The margin is a full minute, not a millisecond, on purpose:
+	// IsExpired reads the clock itself, so any margin shorter than the scheduling
+	// delay between these two lines is a race, not an assertion. On a loaded CI
+	// runner the 1ms this used to allow was routinely exceeded, and the test failed
+	// while the code was correct.
+	token.ExpiresAt = now.Add(1 * time.Minute)
+	assert.False(t, token.IsExpired(0), "want false for a token that expires a minute from now")
 
-	// just after expiration
-	token.ExpiresAt = now.Add(-1 * time.Millisecond)
-	assert.True(t, token.IsExpired(0), "want true for token expired 1ms ago")
+	// Already expired, with the same reasoning applied in the other direction.
+	token.ExpiresAt = now.Add(-1 * time.Minute)
+	assert.True(t, token.IsExpired(0), "want true for a token that expired a minute ago")
+
+	// The buffer shifts the threshold forward: a token valid for another 30s is
+	// treated as expired when the caller asks for 60s of headroom. This is what
+	// makes refresh happen BEFORE a request fails, so it must not regress.
+	token.ExpiresAt = now.Add(30 * time.Second)
+	assert.False(t, token.IsExpired(0), "30s of validity is not expired with no buffer")
+	assert.True(t, token.IsExpired(60), "30s of validity must count as expired against a 60s buffer")
+
+	// A negative buffer is clamped to zero rather than extending validity — a
+	// caller passing -3600 must not be handed an hour of credential it does not have.
+	token.ExpiresAt = now.Add(-1 * time.Minute)
+	assert.True(t, token.IsExpired(-3600), "a negative buffer must not resurrect an expired token")
 }
 
 // --- Normalization tests ---

@@ -68,7 +68,7 @@ func handleReadMetadata(p adapterprotocol.ReadParams) (*adapterprotocol.ReadMeta
 	if err != nil {
 		return meta, nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 64*1024)
@@ -97,7 +97,7 @@ func readSessionFile(path string) ([]adapterprotocol.RawEntry, *adapterprotocol.
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open session file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var entries []adapterprotocol.RawEntry
 	meta := &adapterprotocol.SessionMetadata{}
@@ -291,7 +291,7 @@ func readSessionCWD(path string) string {
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 16*1024)
@@ -346,7 +346,7 @@ func sessionContainsAgentID(path, agentID string) bool {
 	if err != nil {
 		return false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 64*1024)
@@ -369,7 +369,7 @@ func findStartOffset(path string, sinceTime time.Time) int64 {
 	if err != nil {
 		return 0
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 64*1024)

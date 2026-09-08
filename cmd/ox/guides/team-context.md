@@ -31,7 +31,7 @@ You don't usually interact with this directory directly — `ox` commands manage
   TEAM.md                  ← team handbook (referenced)
   agents/
     rules/                 ← modular team rules (one file per concern)
-    commands/              ← team slash commands
+    commands/              ← team commands (read on demand, NOT slash commands)
     profiles/              ← AI coworker profiles
   coworkers/               ← legacy location for agents/, commands/ (still read for backward compat)
   discussions/             ← archived team meetings, transcripts, keyframes

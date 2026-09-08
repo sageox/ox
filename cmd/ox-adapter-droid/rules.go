@@ -20,14 +20,19 @@ import (
 // rules root.
 const sageoxRulesNamespace = "sageox"
 
+const (
+	oxRuleDescription          = "SageOx behavioral guidance for AI coworkers"
+	teamContextRuleDescription = "How to discover and use team-context rules and knowledge from the SageOx ox CLI"
+)
+
 func handleInstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.InstallRulesResponse, error) {
 	rm := rules.NewDroidRulesManager()
 
+	// Every ox rule now installs FLAT under the reserved ox-cli-* prefix, so there
+	// is no subdirectory to pre-create. The legacy sageox/ tree is only removed
+	// from here on: a nested directory cannot be covered by the single .gitignore
+	// glob that keeps ox's rules out of the customer's pull requests.
 	rulesDir := rm.RulesDir(p.RepoRoot)
-	nsDir := filepath.Join(rulesDir, sageoxRulesNamespace)
-	if err := os.MkdirAll(nsDir, 0o755); err != nil {
-		return nil, err
-	}
 
 	ruleFiles := oxRuleFiles(p.Version)
 
@@ -44,6 +49,11 @@ func handleInstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.Install
 	if err != nil {
 		return nil, err
 	}
+
+	// Retire the pre-0.15.0 rule surface only after its replacement is safely
+	// installed. Existing projects otherwise risk losing their only guidance if
+	// the current install fails partway through.
+	retireLegacyRules(rulesDir)
 
 	// agentx returns names relative to the rules dir; the FilesWritten
 	// contract is repo-relative. See GH #731.
@@ -81,6 +91,29 @@ func handleCheckRules(p adapterprotocol.RulesParams) (*adapterprotocol.CheckRule
 	}, nil
 }
 
+// legacyRuleFiles are the top-level rule filenames ox installed before the
+// 0.15.0 flattening; removed on install, and only when their ox stamp verifies
+// them as ours.
+var legacyRuleFiles = []string{"ox.md"}
+
+// retireLegacyRules deletes the pre-0.15.0 ox rule surface: the top-level legacy
+// files and the whole sageox/ subdirectory. Best-effort — a failure here must
+// never block installing the current rules.
+func retireLegacyRules(rulesDir string) {
+	for _, name := range legacyRuleFiles {
+		path := filepath.Join(rulesDir, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if !adapterstamp.RuleStampVerifies(data, agentx.DefaultStampPrefix, oxRuleDescription) {
+			continue // user-authored; not ours to remove
+		}
+		_ = os.Remove(path)
+	}
+	_, _ = uninstallNamespaceFiles(rulesDir)
+}
+
 func handleUninstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.UninstallRulesResponse, error) {
 	rm := rules.NewDroidRulesManager()
 
@@ -92,12 +125,14 @@ func handleUninstallRules(p adapterprotocol.RulesParams) (*adapterprotocol.Unins
 	}
 
 	rulesDir := rm.RulesDir(p.RepoRoot)
+	removedCurrent := adapterstamp.RemoveVerifiedRules(rulesDir, oxRuleFiles(p.Version))
 	removedNS, err := uninstallNamespaceFiles(rulesDir)
 	if err != nil {
 		return nil, err
 	}
 
-	removed := append(removedTop, removedNS...)
+	removed := append(removedTop, removedCurrent...)
+	removed = append(removed, removedNS...)
 	return &adapterprotocol.UninstallRulesResponse{
 		Uninstalled:  len(removed) > 0,
 		FilesRemoved: removed,
@@ -131,7 +166,7 @@ func uninstallNamespaceFiles(rulesDir string) ([]string, error) {
 		if err != nil {
 			continue
 		}
-		if !adapterstamp.LooksStamped(data) {
+		if !adapterstamp.RuleStampVerifies(data, agentx.DefaultStampPrefix, teamContextRuleDescription) {
 			continue
 		}
 		if err := os.Remove(path); err == nil {
@@ -152,16 +187,16 @@ func uninstallNamespaceFiles(rulesDir string) ([]string, error) {
 func oxRuleFiles(version string) []agentx.RuleFile {
 	return []agentx.RuleFile{
 		{
-			Name:        "ox.md",
+			Name:        "ox-cli.md",
 			Content:     oxRulesContent,
 			Version:     version,
-			Description: "SageOx behavioral guidance for AI coworkers",
+			Description: oxRuleDescription,
 		},
 		{
-			Name:        sageoxRulesNamespace + "/use-team-context.md",
+			Name:        "ox-cli-use-team-context.md",
 			Content:     useTeamContextContent,
 			Version:     version,
-			Description: "How to discover and use team-context rules and knowledge from the SageOx ox CLI",
+			Description: teamContextRuleDescription,
 		},
 	}
 }
@@ -245,7 +280,7 @@ Typical layout:
           <topic>.md             # one concern per file
           backend/postgres.md    # subdirectories supported
           frontend/react.md
-        commands/                # team slash commands
+        commands/                # team commands (read on demand, NOT slash commands)
         profiles/                # AI coworker profiles
       discussions/               # archived team meetings
       memory/                    # daily/weekly/monthly summaries

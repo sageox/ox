@@ -1,9 +1,11 @@
 package adapterstamp
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sageox/agentx"
@@ -71,6 +73,49 @@ func TestLooksStamped(t *testing.T) {
 	assert.False(t, LooksStamped([]byte("no stamp here\n")), "unstamped file must not look stamped")
 }
 
+func TestStampVerifiesRejectsEditedBody(t *testing.T) {
+	clean := stampedRule("body\n")
+	edited := append(append([]byte{}, clean...), []byte("edited\n")...)
+
+	assert.True(t, StampVerifies(clean, agentx.DefaultStampPrefix))
+	assert.False(t, StampVerifies(edited, agentx.DefaultStampPrefix))
+	assert.False(t, StampVerifies([]byte("no stamp\n"), agentx.DefaultStampPrefix))
+}
+
+func TestRuleStampVerifiesCoversFrontmatterAndNormalizesCRLF(t *testing.T) {
+	const description = "SageOx guidance"
+	body := "body\n"
+	clean := []byte("---\ndescription: " + description + "\n---\n" + string(stampedRule(body)[len("---\ndescription: x\n---\n"):]))
+	crlf := []byte(strings.ReplaceAll(string(clean), "\n", "\r\n"))
+	edited := bytes.Replace(clean, []byte(description), []byte("user description"), 1)
+
+	assert.True(t, RuleStampVerifies(clean, agentx.DefaultStampPrefix, description))
+	assert.True(t, RuleStampVerifies(crlf, agentx.DefaultStampPrefix, description))
+	assert.False(t, RuleStampVerifies(edited, agentx.DefaultStampPrefix, description))
+}
+
+func TestRemoveVerifiedRulesPreservesEditedAndUserFiles(t *testing.T) {
+	dir := t.TempDir()
+	clean := filepath.Join(dir, "clean.md")
+	edited := filepath.Join(dir, "edited.md")
+	user := filepath.Join(dir, "user.md")
+	require.NoError(t, os.WriteFile(clean, stampedRule("clean\n"), 0o644))
+	editedData := append(stampedRule("original\n"), []byte("edited\n")...)
+	require.NoError(t, os.WriteFile(edited, editedData, 0o644))
+	require.NoError(t, os.WriteFile(user, []byte("user\n"), 0o644))
+
+	removed := RemoveVerifiedRules(dir, []agentx.RuleFile{
+		{Name: "clean.md", Description: "x"},
+		{Name: "edited.md", Description: "x"},
+		{Name: "user.md", Description: "x"},
+	})
+
+	assert.Equal(t, []string{"clean.md"}, removed)
+	assert.NoFileExists(t, clean)
+	assert.FileExists(t, edited)
+	assert.FileExists(t, user)
+}
+
 // --- C. RemoveTamperedRules ---
 
 // TestRemoveTamperedRules_RemovesEditedBody verifies a stamped file whose body
@@ -86,10 +131,21 @@ func TestRemoveTamperedRules_RemovesEditedBody(t *testing.T) {
 	tampered = append(tampered, []byte("tampered body\n")...)
 	require.NoError(t, os.WriteFile(path, tampered, 0o644))
 
-	RemoveTamperedRules(dir, []agentx.RuleFile{{Name: "ox.md"}})
+	RemoveTamperedRules(dir, []agentx.RuleFile{{Name: "ox.md", Description: "x"}})
 
 	_, err := os.Stat(path)
 	assert.True(t, os.IsNotExist(err), "tampered stamped file must be removed")
+}
+
+func TestRemoveTamperedRules_RemovesEditedFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ox.md")
+	edited := bytes.Replace(stampedRule("body\n"), []byte("description: x"), []byte("description: user edit"), 1)
+	require.NoError(t, os.WriteFile(path, edited, 0o644))
+
+	RemoveTamperedRules(dir, []agentx.RuleFile{{Name: "ox.md", Description: "x"}})
+
+	assert.NoFileExists(t, path)
 }
 
 // TestRemoveTamperedRules_KeepsCleanAndUserFiles verifies a file whose body still
@@ -103,7 +159,10 @@ func TestRemoveTamperedRules_KeepsCleanAndUserFiles(t *testing.T) {
 	require.NoError(t, os.WriteFile(clean, stampedRule("body\n"), 0o644))
 	require.NoError(t, os.WriteFile(user, []byte("# user content\n"), 0o644))
 
-	RemoveTamperedRules(dir, []agentx.RuleFile{{Name: "clean.md"}, {Name: "user.md"}})
+	RemoveTamperedRules(dir, []agentx.RuleFile{
+		{Name: "clean.md", Description: "x"},
+		{Name: "user.md", Description: "x"},
+	})
 
 	_, err := os.Stat(clean)
 	assert.NoError(t, err, "clean stamped file must be preserved")
@@ -123,10 +182,22 @@ func TestAppendFrontmatterStale_BodyTampered(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "ox.md"), tampered, 0o644))
 
 	stale := AppendFrontmatterStale(dir,
-		[]agentx.RuleFile{{Name: "ox.md", Content: []byte("original\n"), Version: "0.8.0"}},
+		[]agentx.RuleFile{{Name: "ox.md", Content: []byte("original\n"), Version: "0.8.0", Description: "x"}},
 		nil, nil)
 
 	assert.Contains(t, stale, "ox.md", "tampered body must be reported stale")
+}
+
+func TestAppendFrontmatterStale_FrontmatterTampered(t *testing.T) {
+	dir := t.TempDir()
+	edited := bytes.Replace(stampedRule("original\n"), []byte("description: x"), []byte("description: user edit"), 1)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ox.md"), edited, 0o644))
+
+	stale := AppendFrontmatterStale(dir,
+		[]agentx.RuleFile{{Name: "ox.md", Content: []byte("original\n"), Version: "0.8.0", Description: "x"}},
+		nil, nil)
+
+	assert.Contains(t, stale, "ox.md")
 }
 
 // TestAppendFrontmatterStale_BinaryDrift verifies a rule whose stamp matches its
@@ -137,7 +208,7 @@ func TestAppendFrontmatterStale_BinaryDrift(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "ox.md"), stampedRule("old body\n"), 0o644))
 
 	stale := AppendFrontmatterStale(dir,
-		[]agentx.RuleFile{{Name: "ox.md", Content: []byte("new body\n"), Version: "0.9.0"}},
+		[]agentx.RuleFile{{Name: "ox.md", Content: []byte("new body\n"), Version: "0.9.0", Description: "x"}},
 		nil, nil)
 
 	assert.Contains(t, stale, "ox.md", "binary drift must be reported stale")
@@ -156,7 +227,7 @@ func TestAppendFrontmatterStale_DowngradeGuard(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "ox.md"), onDisk, 0o644))
 
 	stale := AppendFrontmatterStale(dir,
-		[]agentx.RuleFile{{Name: "ox.md", Content: []byte("older content\n"), Version: "0.8.0"}},
+		[]agentx.RuleFile{{Name: "ox.md", Content: []byte("older content\n"), Version: "0.8.0", Description: "x"}},
 		nil, nil)
 
 	assert.NotContains(t, stale, "ox.md", "rule installed by newer binary must not be stale for an older one")
@@ -170,7 +241,7 @@ func TestAppendFrontmatterStale_SkipsUserManaged(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "ox.md"), []byte("# user content\n"), 0o644))
 
 	stale := AppendFrontmatterStale(dir,
-		[]agentx.RuleFile{{Name: "ox.md", Content: []byte("anything\n"), Version: "0.8.0"}},
+		[]agentx.RuleFile{{Name: "ox.md", Content: []byte("anything\n"), Version: "0.8.0", Description: "x"}},
 		nil, nil)
 
 	assert.NotContains(t, stale, "ox.md", "unstamped user-managed file must never be flagged stale")
@@ -186,7 +257,7 @@ func TestAppendFrontmatterStale_SkipsAlreadyFlagged(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "ox.md"), tampered, 0o644))
 
 	stale := AppendFrontmatterStale(dir,
-		[]agentx.RuleFile{{Name: "ox.md", Content: []byte("original\n"), Version: "0.8.0"}},
+		[]agentx.RuleFile{{Name: "ox.md", Content: []byte("original\n"), Version: "0.8.0", Description: "x"}},
 		nil, []string{"ox.md"})
 
 	// "ox.md" was already stale; it must appear exactly once.

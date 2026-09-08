@@ -115,3 +115,30 @@ jobs:
         with:
           version: v2.11.4
           args: -c .config/golangci.yml
+
+  # The skill installer is the one subsystem where Windows is a first-class
+  # target rather than an aspiration: copy materialization IS what Windows gets,
+  # because the symlink helper elsewhere in ox silently no-ops there. The
+  # installer has ZERO GOOS branches today and is portable precisely because it
+  # relies only on Lstat and rename — this job is what keeps that true, since a
+  # regression would give Windows users no skills and no error.
+  skills-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # This job runs no authenticated git operations, and a persisted
+          # GITHUB_TOKEN in the local git config is readable by every later step.
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Configure git identity for tests
+        run: |
+          git config --global user.email "ci@sageox.ai"
+          git config --global user.name "CI"
+
+      - name: Skill inventory tests
+        run: go test ./internal/skillmanager/... ./internal/sageoxignore/... ./extensions/skills/... -count=1

@@ -71,6 +71,38 @@ func markerPath(agentSessionID string) string {
 // the marker with the agent's PID, and any later prime inside the same agent
 // process can find it by walking up to that same PID.
 func FindSessionMarkerByPID(agentPID int) *SessionMarker {
+	matches := liveSessionMarkersByPID(agentPID)
+	if len(matches) == 0 {
+		return nil
+	}
+	return matches[0]
+}
+
+// FindUnambiguousSessionMarkerByPID is the safe process-identity lookup used
+// by agent-ID-free commands. Multiple native sessions can legitimately share
+// one long-lived agent process across clear/resume boundaries. Return a marker
+// only when every live match agrees on the ox agent ID; selecting one distinct
+// ID by filename order would operate on an arbitrary AI coworker.
+func FindUnambiguousSessionMarkerByPID(agentPID int) *SessionMarker {
+	matches := liveSessionMarkersByPID(agentPID)
+	if len(matches) == 0 {
+		return nil
+	}
+	found := matches[0]
+	for _, marker := range matches[1:] {
+		if found.AgentID != marker.AgentID {
+			return nil
+		}
+		// The identity is the same; keep the newest native session key for
+		// callers that also need AgentSessionID.
+		if marker.PrimedAt.After(found.PrimedAt) {
+			found = marker
+		}
+	}
+	return found
+}
+
+func liveSessionMarkersByPID(agentPID int) []*SessionMarker {
 	if agentPID <= 0 {
 		return nil
 	}
@@ -78,6 +110,7 @@ func FindSessionMarkerByPID(agentPID int) *SessionMarker {
 	if err != nil {
 		return nil
 	}
+	var matches []*SessionMarker
 	for _, entry := range entries {
 		// WriteSessionMarker emits atomic temp files as "<sid>.json.tmp"
 		// and renames to "<sid>.json" — the .json suffix check here also
@@ -104,9 +137,10 @@ func FindSessionMarkerByPID(agentPID int) *SessionMarker {
 		if !proc.IsAlive(m.ParentPID) {
 			continue
 		}
-		return &m
+		marker := m
+		matches = append(matches, &marker)
 	}
-	return nil
+	return matches
 }
 
 // ReadSessionMarker reads a session marker from disk.

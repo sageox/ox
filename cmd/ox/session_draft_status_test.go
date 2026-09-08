@@ -239,7 +239,7 @@ func TestDraftViewNotice_ExplainsInsteadOfNotFound(t *testing.T) {
 	require.NotEmpty(t, msg, "a published draft must explain itself, not fall through to 'not found'")
 	assert.Contains(t, msg, "still recording")
 	assert.Contains(t, msg, draftName)
-	assert.Contains(t, msg, "ox-session-stop", "the message must say what to do next")
+	assert.Contains(t, msg, "ox agent session stop", "the message must say what to do next")
 
 	// Negative controls: neither a finalized session nor an absent one gets the
 	// draft message, or `session view` would swallow a real not-found error.

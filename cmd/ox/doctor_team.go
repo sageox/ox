@@ -594,6 +594,10 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 	}
 
 	var needsFix, fixed, checked int
+	// unmaterialized collects team contexts whose sparse spec excludes a top-level
+	// directory their own HEAD contains — the #862 shape.
+	var unmaterialized []string
+	var locallyRepairable []string
 
 	for _, tc := range localCfg.TeamContexts {
 		if tc.Path == "" || !isGitRepo(tc.Path) {
@@ -625,6 +629,45 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 			}
 		}
 
+		// Root patterns alone are NOT sufficient, and #862 is the proof: the tracked
+		// manifest omitted `agents/`, so sparse-checkout never materialized team
+		// rules on any client while this check reported everything fine. The
+		// patterns were correct; the include list was short.
+		//
+		// The only reliable signal is comparing what HEAD contains against what is
+		// actually on disk. A top-level directory that exists in the commit but not
+		// in the working tree was excluded by the sparse spec — which is exactly the
+		// failure, and it is invisible to a pattern check.
+		cfg := manifest.ParseFile(filepath.Join(tc.Path, ".sageox", "sync.manifest"), manifest.RepoKindTeamContext)
+		if missing := missingSparseTopLevelDirs(tc.Path, cfg); len(missing) > 0 {
+			localMissing := manifestIncludedMissingDirs(cfg, missing)
+			if len(localMissing) > 0 {
+				needsFix++
+				if !fix {
+					locallyRepairable = append(locallyRepairable,
+						fmt.Sprintf("%s (%s)", filepath.Base(tc.Path), strings.Join(localMissing, ", ")))
+					continue
+				}
+				if repairErr := repairTeamSparseCheckout(tc.Path); repairErr != nil {
+					slog.Warn("failed to repair sparse-checkout",
+						"path", tc.Path, "error", repairErr)
+					locallyRepairable = append(locallyRepairable,
+						fmt.Sprintf("%s (%s)", filepath.Base(tc.Path), strings.Join(localMissing, ", ")))
+					continue
+				}
+				fixed++
+				// Re-read reality after `sparse-checkout set`. Only a directory
+				// that actually materialized counts as repaired.
+				missing = missingSparseTopLevelDirs(tc.Path, cfg)
+				if len(missing) == 0 {
+					continue
+				}
+			}
+			unmaterialized = append(unmaterialized,
+				fmt.Sprintf("%s (%s)", filepath.Base(tc.Path), strings.Join(missing, ", ")))
+			continue
+		}
+
 		if hasRootGlob && hasNegateRootDirs {
 			continue
 		}
@@ -644,6 +687,22 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 	if checked == 0 {
 		return SkippedCheck("Team sparse checkout", "no sparse-checkout repos", "")
 	}
+	if len(locallyRepairable) > 0 {
+		return FailedCheck("Team sparse checkout",
+			fmt.Sprintf("%d team context(s) exclude directories already included by their manifest: %s",
+				len(locallyRepairable), strings.Join(locallyRepairable, "; ")),
+			"Run `ox doctor --fix` to reapply the local sparse-checkout spec")
+	}
+
+	if len(unmaterialized) > 0 {
+		// The durable fix is server-side — the manifest is generated there and the
+		// tracked copy wins over the client fallback — so ox reports rather than
+		// pretending it can repair this locally.
+		return WarningCheck("Team sparse checkout",
+			fmt.Sprintf("%d team context(s) are missing directories that exist in HEAD: %s",
+				len(unmaterialized), strings.Join(unmaterialized, "; ")),
+			"The sync manifest excludes content the commit contains, so those files never reach this machine; this needs a server-side manifest fix")
+	}
 
 	if needsFix == 0 {
 		return PassedCheck("Team sparse checkout",
@@ -660,6 +719,27 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 		fmt.Sprintf("%d repo(s) missing root-level patterns (/* and !/*/)", unfixed),
 		"Root-level files like .gitattributes cannot be staged without these patterns.\n"+
 			"        Run `ox doctor` to auto-fix (FixLevelAuto)")
+}
+
+func manifestIncludedMissingDirs(cfg *manifest.ManifestConfig, missing []string) []string {
+	if cfg == nil {
+		return nil
+	}
+	included := make(map[string]bool)
+	for _, entry := range cfg.Includes {
+		clean := strings.Trim(strings.TrimSpace(filepath.ToSlash(entry)), "/")
+		if clean == "" {
+			continue
+		}
+		included[strings.SplitN(clean, "/", 2)[0]] = true
+	}
+	var local []string
+	for _, dir := range missing {
+		if included[strings.Trim(filepath.ToSlash(dir), "/")] {
+			local = append(local, dir)
+		}
+	}
+	return local
 }
 
 // repairTeamSparseCheckout re-applies sparse-checkout from the manifest
@@ -700,4 +780,97 @@ func runGitStatus(dir string) (string, error) {
 		return "", fmt.Errorf("git status failed for %s: %s", dir, strings.TrimSpace(string(output)))
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+// missingSparseTopLevelDirs returns top-level directories present in HEAD but
+// absent from the working tree, i.e. excluded by the sparse-checkout spec.
+//
+// This is what catches a manifest whose include list is short. A pattern check
+// can only confirm the patterns it knows to look for; this compares the commit
+// against reality, so it catches an omission nobody anticipated.
+func missingSparseTopLevelDirs(repoPath string, cfg *manifest.ManifestConfig) []string {
+	cmd := exec.Command("git", "ls-tree", "-d", "--name-only", "HEAD")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return nil // unborn HEAD or not a repo: nothing to compare against
+	}
+	expected := expectedTeamTopLevelDirs(cfg)
+	var missing []string
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if name == "" || !expected[name] {
+			continue
+		}
+		// Directory presence is NOT evidence the content materialized: an excluded
+		// directory can exist purely because of untracked local files beside it. Look
+		// for a tracked child that the manifest does not explicitly deny, and require
+		// at least one such child to exist in the working tree.
+		var hasExpectedChild, materialized bool
+		for _, child := range trackedChildren(repoPath, name) {
+			if manifestPathDenied(child, cfg) {
+				continue
+			}
+			hasExpectedChild = true
+			if _, statErr := os.Stat(filepath.Join(repoPath, filepath.FromSlash(child))); statErr == nil {
+				materialized = true
+				break
+			}
+		}
+		if hasExpectedChild && !materialized {
+			missing = append(missing, name+"/")
+		}
+	}
+	return missing
+}
+
+// expectedTeamTopLevelDirs is the product-level team-context shape plus any
+// additional top-level directory the current manifest explicitly includes.
+// Restricting the check to this set keeps intentionally sparse trees such as
+// data/ and assets/ from being diagnosed merely because they exist in HEAD.
+func expectedTeamTopLevelDirs(cfg *manifest.ManifestConfig) map[string]bool {
+	expected := make(map[string]bool)
+	add := func(entries []string) {
+		for _, entry := range entries {
+			clean := strings.Trim(strings.TrimSpace(filepath.ToSlash(entry)), "/")
+			if clean == "" {
+				continue
+			}
+			expected[strings.SplitN(clean, "/", 2)[0]] = true
+		}
+	}
+	add(manifest.FallbackConfigFor(manifest.RepoKindTeamContext).Includes)
+	if cfg != nil {
+		add(cfg.Includes)
+	}
+	return expected
+}
+
+func manifestPathDenied(rel string, cfg *manifest.ManifestConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	for _, deny := range cfg.Denies {
+		deny = strings.Trim(filepath.ToSlash(deny), "/")
+		if deny != "" && (rel == deny || strings.HasPrefix(rel, deny+"/")) {
+			return true
+		}
+	}
+	return false
+}
+
+func trackedChildren(repoPath, dir string) []string {
+	cmd := exec.Command("git", "ls-tree", "-r", "--name-only", "HEAD", "--", dir+"/")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var children []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			children = append(children, line)
+		}
+	}
+	return children
 }

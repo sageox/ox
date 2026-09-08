@@ -47,7 +47,7 @@ func agentInstallTree(t *testing.T, repo string) []string {
 	rels := []string{
 		".claude/settings.json",
 		".claude/commands/ox.md",
-		".claude/skills/ox-plan/SKILL.md",
+		".claude/skills/ox-cli-plan/SKILL.md",
 		".claude/rules/ox.md",
 		".claude/rules/sageox/use-team-context.md",
 	}
@@ -94,7 +94,7 @@ func TestStageAll_OneBadPathDoesNotZeroTheBatch(t *testing.T) {
 	}
 	// exactly the shape adapters used to emit: a skills-dir-relative name
 	// joined onto the repo root, pointing at a file that does not exist.
-	tracker.trackForceStage(filepath.Join(repo, "ox-plan/SKILL.md"))
+	tracker.trackForceStage(filepath.Join(repo, "ox-cli-plan/SKILL.md"))
 	tracker.trackForceStage(filepath.Join(repo, "ox.md"))
 
 	tracker.stageAll()
@@ -168,7 +168,7 @@ func TestStageAll_StagesNonClaudeInstructionFiles(t *testing.T) {
 func TestNormalizeAdapterFilesWritten(t *testing.T) {
 	repo := testGitRepo(t)
 	settings := writeFileAt(t, repo, ".claude/settings.json", "{}")
-	skill := writeFileAt(t, repo, ".claude/skills/ox-plan/SKILL.md", "x")
+	skill := writeFileAt(t, repo, ".claude/skills/ox-cli-plan/SKILL.md", "x")
 	outside := filepath.Join(t.TempDir(), "elsewhere.json")
 	require.NoError(t, os.WriteFile(outside, []byte("{}"), 0o644))
 
@@ -191,8 +191,8 @@ func TestNormalizeAdapterFilesWritten(t *testing.T) {
 			"double-joining produced <root><root>/... and broke the whole batch",
 		},
 		{
-			"skills-dir-relative is dropped", []string{"ox-plan/SKILL.md"}, nil,
-			"resolves to <root>/ox-plan/SKILL.md which does not exist; dropping " +
+			"skills-dir-relative is dropped", []string{"ox-cli-plan/SKILL.md"}, nil,
+			"resolves to <root>/ox-cli-plan/SKILL.md which does not exist; dropping " +
 				"beats guessing, and the adapter fix is what makes it arrive correctly",
 		},
 		{
@@ -217,7 +217,7 @@ func TestNormalizeAdapterFilesWritten(t *testing.T) {
 		},
 		{
 			"forward slashes are accepted",
-			[]string{".claude/skills/ox-plan/SKILL.md"}, []string{skill},
+			[]string{".claude/skills/ox-cli-plan/SKILL.md"}, []string{skill},
 			"adapters emit JSON paths with forward slashes regardless of platform",
 		},
 	}
@@ -244,7 +244,7 @@ func TestNormalizeAdapterFilesWritten_KeepsGoodEntriesAlongsideBadOnes(t *testin
 
 	got := normalizeAdapterFilesWritten(repo, []string{
 		".claude/settings.json",  // valid, repo-relative
-		"ox-plan/SKILL.md",       // junk, skills-dir-relative
+		"ox-cli-plan/SKILL.md",   // junk, skills-dir-relative
 		command,                  // valid, absolute
 		"ox.md",                  // junk, rules-dir-relative
 		"/tmp/definitely/absent", // junk, absolute and outside
@@ -498,4 +498,144 @@ func TestStageAll_StagesClaudePrimaryInstructionFiles(t *testing.T) {
 	staged := stagedFiles(t, repo)
 	assert.Contains(t, staged, "AGENTS.md")
 	assert.Contains(t, staged, "CLAUDE.md")
+}
+
+// TestStageAll_NeverStagesReservedOxArtifacts is the acceptance test for the
+// PR-noise fix, and it is the exact inverse of TestStageAll_StagesTheClaudeTree
+// above: that test pinned "ox init must actually stage what it writes" (GH #731),
+// and this one pins the boundary that stops it from staging the vendor files
+// which caused the churn.
+//
+// Both must hold at once. The on-ramp skill, the hook settings, and the ignore
+// file still have to reach the index — a teammate's fresh clone depends on them —
+// while every ox-cli-* artifact must stay out of it.
+func TestStageAll_NeverStagesReservedOxArtifacts(t *testing.T) {
+	repo := testGitRepo(t)
+
+	reserved := []string{
+		".claude/skills/ox-cli-plan/SKILL.md",
+		".claude/skills/ox-cli-prime/SKILL.md",
+		".claude/rules/ox-cli.md",
+		".claude/rules/ox-cli-use-team-context.md",
+		".agents/skills/ox-cli-recap/SKILL.md",
+	}
+	mustStage := []string{
+		".claude/settings.json",
+		".claude/skills/sageox/SKILL.md",
+		".claude/skills/my-own-skill/SKILL.md",
+	}
+	var all []string
+	for _, rel := range append(append([]string{}, reserved...), mustStage...) {
+		writeFileAt(t, repo, rel, "x")
+		all = append(all, filepath.Join(repo, rel))
+	}
+
+	tracker := newInitTracker(repo)
+	for _, abs := range stageableInstalledPaths(repo, all) {
+		tracker.trackForceStage(abs)
+	}
+	tracker.stageAll()
+
+	staged := stagedFiles(t, repo)
+	for _, rel := range reserved {
+		assert.NotContains(t, staged, rel,
+			"%s reached the index — every ox release would put it back in the customer's PR", rel)
+	}
+	for _, rel := range mustStage {
+		assert.Contains(t, staged, rel,
+			"%s must still be staged; a fresh clone depends on it", rel)
+	}
+}
+
+func TestInitStagesByteIdenticalUntrackedScopedIgnore(t *testing.T) {
+	repo := testGitRepo(t)
+	writeFileAt(t, repo, ".gitignore", ".claude/\n")
+	cmd := exec.Command("git", "add", "--", ".gitignore")
+	cmd.Dir = repo
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-q", "-m", "ignore Claude directory")
+	cmd.Dir = repo
+	require.NoError(t, cmd.Run())
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".claude"), 0o755))
+
+	// Simulate a prior Doctor run: it wrote the correct block but did not stage it.
+	if _, err := ensureScopedIgnoreFiles(repo); err != nil {
+		t.Fatalf("first ensureScopedIgnoreFiles: %v", err)
+	}
+	results, err := ensureScopedIgnoreFiles(repo)
+	require.NoError(t, err)
+	require.Empty(t, results, "byte-identical ensure should report no write")
+
+	tracker := newInitTracker(repo)
+	trackScopedIgnoreFilesForInit(tracker, repo, results, err)
+	tracker.stageAll()
+
+	assert.Contains(t, stagedFiles(t, repo), ".claude/.gitignore",
+		"the committed ignore rule must be adopted even when this init did not rewrite it")
+}
+
+func TestInitDoesNotStageUntouchedScopedIgnoreUserChanges(t *testing.T) {
+	repo := testGitRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".claude"), 0o755))
+	if _, err := ensureScopedIgnoreFiles(repo); err != nil {
+		t.Fatalf("ensure scoped ignore: %v", err)
+	}
+	ignore := filepath.Join(repo, ".claude", ".gitignore")
+	f, err := os.OpenFile(ignore, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString("user-base-rule/\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		require.NoError(t, cmd.Run(), "git %v", args)
+	}
+	runGit("add", "--force", "--", ".claude/.gitignore")
+	runGit("commit", "-q", "-m", "track scoped ignore")
+	f, err = os.OpenFile(ignore, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString("user-work-in-progress/\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	results, ensureErr := ensureScopedIgnoreFiles(repo)
+	require.NoError(t, ensureErr)
+	require.Empty(t, results, "the managed block is already current")
+	tracker := newInitTracker(repo)
+	trackScopedIgnoreFilesForInit(tracker, repo, results, ensureErr)
+	tracker.stageAll()
+
+	assert.Empty(t, stagedFiles(t, repo),
+		"a no-op ensure must not stage the user's unrelated scoped-ignore edit")
+	cmd := exec.Command("git", "status", "--short", "--", ".claude/.gitignore")
+	cmd.Dir = repo
+	status, err := cmd.Output()
+	require.NoError(t, err)
+	assert.Equal(t, " M .claude/.gitignore\n", string(status))
+}
+
+func TestInitDoesNotAdoptUntrackedScopedIgnoreWithUserRules(t *testing.T) {
+	repo := testGitRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".claude"), 0o755))
+	if _, err := ensureScopedIgnoreFiles(repo); err != nil {
+		t.Fatalf("ensure scoped ignore: %v", err)
+	}
+	ignore := filepath.Join(repo, ".claude", ".gitignore")
+	f, err := os.OpenFile(ignore, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString("user-rule/\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	results, ensureErr := ensureScopedIgnoreFiles(repo)
+	require.NoError(t, ensureErr)
+	require.Empty(t, results)
+	tracker := newInitTracker(repo)
+	trackScopedIgnoreFilesForInit(tracker, repo, results, ensureErr)
+	tracker.stageAll()
+
+	assert.Empty(t, stagedFiles(t, repo),
+		"an untracked file with user-owned bytes outside the block must not be adopted")
 }

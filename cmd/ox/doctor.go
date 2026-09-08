@@ -812,7 +812,27 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	}
 	// Skill target selection is project state, not a consequence of which AI
 	// coworker happens to be detected during this Doctor run.
+	// Capture migration cleanliness BEFORE reconciliation can update the tracked
+	// lockfile or scoped ignore files. Those Doctor-authored changes belong in the
+	// migration commit; treating them as pre-existing user work defers forever.
+	legacyRoot := findGitRoot()
+	legacyFix := opts.shouldFix(CheckSlugLegacyOxFiles)
+	legacyPreflight := ""
+	if legacyFix && legacyRoot != "" {
+		legacyPreflight = migrationBlocker(legacyRoot)
+	}
 	integrationChecks = append(integrationChecks, checkClaudeSkills(opts.shouldFix(CheckSlugClaudeSkills)))
+	legacyCheck, legacyPending := checkLegacyOxFilesWithPreflight(legacyRoot, legacyFix, legacyPreflight)
+	// The ox-managed inventory: keep ox's own files ignored, report any that are
+	// still tracked, and run the one-time untrack migration. Registering a check
+	// is not enough — doctor executes an explicit list, so a check that is only
+	// registered is indistinguishable from one that always passes.
+	ignoreFix := opts.shouldFix(CheckSlugOxIgnoreRules) && !legacyPending
+	integrationChecks = append(integrationChecks,
+		legacyCheck,
+		checkOxIgnoreRules(ignoreFix),
+		checkOxFilesNotTracked(opts.shouldFix(CheckSlugOxFilesUntracked)),
+	)
 	if detectAmp() {
 		integrationChecks = append(integrationChecks, checkAmpHooks(opts.shouldFix(CheckSlugAmpHooks)))
 	}

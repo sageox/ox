@@ -160,6 +160,11 @@ const (
 
 	// Skill checks
 	CheckSlugClaudeSkills = "claude-skills"
+	// CheckSlugLegacyOxFiles owns the one-time transition that takes ox-managed
+	// skills, rules, and commands out of a customer's git history.
+	CheckSlugLegacyOxFiles    = "legacy-ox-files"
+	CheckSlugOxIgnoreRules    = "ox-ignore-rules"
+	CheckSlugOxFilesUntracked = "ox-files-untracked"
 
 	// Rules checks
 	CheckSlugAdapterRules = "adapter-rules"

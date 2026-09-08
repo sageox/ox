@@ -13,11 +13,55 @@ import (
 // CoworkersDir is the base path for coworker customizations within a team context.
 const CoworkersDir = "coworkers"
 
-// AgentsDir is the path for agent definitions within a team context.
+// AgentsDir is the LEGACY path for coworker profiles within a team context. It
+// remains the write location (`ox coworker add`) so a team's profiles are never
+// split across two directories mid-migration; reads accept both roots.
 const AgentsDir = "coworkers/agents"
 
-// CommandsDir is the path for slash command definitions within a team context.
+// CommandsDir is the LEGACY path for slash command definitions within a team context.
 const CommandsDir = "coworkers/commands"
+
+// ProfileDirs and CommandDirs are the read roots, canonical location first.
+//
+// `ox guide team-context`, the installed use-team-context rule, and both
+// adapters' rule text have always advertised agents/profiles/ and
+// agents/commands/ as canonical, naming coworkers/ the "legacy location ...
+// still read for backward compat". Only agents/rules/ was ever wired up, so a
+// profile or command authored exactly where the docs said to put it was
+// invisible to every AI coworker. These mirror teamdocs.DiscoverRules: walk
+// canonical first, then legacy, and dedupe by name so canonical wins.
+var (
+	ProfileDirs = []string{"agents/profiles", AgentsDir}
+	CommandDirs = []string{"agents/commands", CommandsDir}
+)
+
+// dedupeByName keeps the first entry seen for each name. Callers walk the
+// canonical root first, so the canonical copy is the one that survives.
+func dedupeByName[T any](items []T, name func(T) string) []T {
+	seen := make(map[string]bool, len(items))
+	out := items[:0]
+	for _, item := range items {
+		key := name(item)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, item)
+	}
+	return out
+}
+
+// findInProfileDirs returns the first existing <teamPath>/<root>/<file> across
+// ProfileDirs, canonical root first.
+func findInProfileDirs(teamPath, file string) (string, bool) {
+	for _, root := range ProfileDirs {
+		candidate := filepath.Join(teamPath, root, file)
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+			return candidate, true
+		}
+	}
+	return "", false
+}
 
 // DiscoverAll finds all Claude customizations in a team context path.
 // This is the main entry point for discovering team Claude customizations.
@@ -49,17 +93,15 @@ func DiscoverAll(teamPath string) (*TeamCustomizations, error) {
 	agents, _ := DiscoverAgents(teamPath)
 	tc.Agents = agents
 
-	// check for agents-level AGENTS.md (coworkers/agents/AGENTS.md)
-	agentsAgentsMD := filepath.Join(teamPath, AgentsDir, "AGENTS.md")
-	if _, err := os.Stat(agentsAgentsMD); err == nil {
+	// profile-level AGENTS.md, canonical root first
+	if agentsAgentsMD, ok := findInProfileDirs(teamPath, "AGENTS.md"); ok {
 		tc.HasAgentsAgentsMD = true
 		tc.AgentsAgentsMDPath = agentsAgentsMD
 		tc.AgentsAgentsMDContent = ReadFirstLines(agentsAgentsMD, constants.MaxInlineContextLines)
 	}
 
-	// check for agents index.md (provides catalog of available specialists)
-	agentsIndexPath := filepath.Join(teamPath, AgentsDir, "index.md")
-	if _, err := os.Stat(agentsIndexPath); err == nil {
+	// profile index.md (catalog of available specialists), canonical root first
+	if agentsIndexPath, ok := findInProfileDirs(teamPath, "index.md"); ok {
 		tc.HasAgentsIndex = true
 		tc.AgentsIndexPath = agentsIndexPath
 	}
@@ -71,10 +113,22 @@ func DiscoverAll(teamPath string) (*TeamCustomizations, error) {
 	return tc, nil
 }
 
-// DiscoverAgents finds all agents in a team context.
+// DiscoverAgents finds all coworker profiles in a team context, reading the
+// canonical agents/profiles/ root and the legacy coworkers/agents/ root.
 // Checks index.md first (token-optimized), falls back to individual files.
 func DiscoverAgents(teamPath string) ([]Agent, error) {
-	agentsDir := filepath.Join(teamPath, AgentsDir)
+	var agents []Agent
+	for _, root := range ProfileDirs {
+		discovered, err := discoverAgentsIn(filepath.Join(teamPath, root))
+		if err != nil {
+			return nil, err
+		}
+		agents = append(agents, discovered...)
+	}
+	return dedupeByName(agents, func(a Agent) string { return a.Name }), nil
+}
+
+func discoverAgentsIn(agentsDir string) ([]Agent, error) {
 
 	// check if agents directory exists
 	if _, err := os.Stat(agentsDir); os.IsNotExist(err) {
@@ -133,7 +187,7 @@ func parseAgentFrontmatter(path string) (description, model string) {
 	if err != nil {
 		return "", ""
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
 	inFrontmatter := false
@@ -183,15 +237,20 @@ type AgentContent struct {
 	Content     string `json:"content"` // full markdown content
 }
 
-// LoadAgent loads the full content of an agent file by name.
-// Searches in the standard coworkers/agents/ directory.
+// LoadAgent loads the full content of a coworker profile by name, searching the
+// same roots DiscoverAgents walks. Discovery and load MUST agree: a profile that
+// prime lists but `ox coworker load` cannot open is worse than one never listed.
 // Returns the full file content along with parsed frontmatter metadata.
 func LoadAgent(teamPath, name string) (*AgentContent, error) {
 	if teamPath == "" || name == "" {
 		return nil, nil
 	}
 
-	agentPath := filepath.Join(teamPath, AgentsDir, name+".md")
+	agentPath, ok := findInProfileDirs(teamPath, name+".md")
+	if !ok {
+		// preserve the legacy not-found error shape for callers that inspect it
+		agentPath = filepath.Join(teamPath, AgentsDir, name+".md")
+	}
 
 	data, err := os.ReadFile(agentPath)
 	if err != nil {
@@ -250,7 +309,7 @@ func parseFirstDescription(path string) string {
 	if err != nil {
 		return ""
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
 	inFrontmatter := false
@@ -314,7 +373,7 @@ func ReadFirstLines(path string, maxLines int) string {
 	if err != nil {
 		return ""
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
 	var lines []string

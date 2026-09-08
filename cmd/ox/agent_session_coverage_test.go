@@ -215,7 +215,7 @@ func TestBuildSessionStartOutput_Coverage(t *testing.T) {
 	if out.Notice != "notice text" {
 		t.Errorf("Notice = %q, want %q", out.Notice, "notice text")
 	}
-	if out.Hint != "Run /ox-session-stop to end recording" {
+	if out.Hint != "Run ox agent session stop to end recording" {
 		t.Errorf("unexpected Hint: %q", out.Hint)
 	}
 }

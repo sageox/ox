@@ -126,7 +126,7 @@ func TestCheckAdapterRules_StaleBody_DetectedAndFixed(t *testing.T) {
 	// hand-edit the frontmatter'd top-level claude rule body (append to the body
 	// below the stamp — the stamp covers the body WITHOUT frontmatter, so this is
 	// exactly the drift agentx's first-line check can't see).
-	claudeRule := filepath.Join(gitRoot, ".claude", "rules", "ox.md")
+	claudeRule := filepath.Join(gitRoot, ".claude", "rules", "ox-cli.md")
 	orig, err := os.ReadFile(claudeRule)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(claudeRule, append(orig, []byte("\n\nhand-edited drift\n")...), 0o644))
@@ -164,7 +164,7 @@ func TestCheckAdapterRules_DroidStaleBody_DetectedAndFixed(t *testing.T) {
 
 	require.True(t, checkAdapterRules(false).passed, "precondition: clean install must pass")
 
-	droidRule := filepath.Join(gitRoot, ".factory", "rules", "ox.md")
+	droidRule := filepath.Join(gitRoot, ".factory", "rules", "ox-cli.md")
 	orig, err := os.ReadFile(droidRule)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(droidRule, append(orig, []byte("\n\ndroid drift\n")...), 0o644))
@@ -178,13 +178,13 @@ func TestCheckAdapterRules_DroidStaleBody_DetectedAndFixed(t *testing.T) {
 	assert.True(t, checkAdapterRules(false).passed, "check must pass after --fix")
 }
 
-// TestCheckAdapterRules_NamespacedFrontmatterDrift_Detected is the targeted
+// TestCheckAdapterRules_PointerRuleFrontmatterDrift_Detected is the targeted
 // regression for Bug 2: the frontmatter'd sageox/use-team-context.md pointer
 // rule, when its body is hand-edited, must be reported stale through the doctor
 // check (it would pass today via raw agentx Validate, which only reads line 1).
 // Failure prevented: a drifted team-context pointer rule passes doctor while
 // teaching the agent stale discovery instructions.
-func TestCheckAdapterRules_NamespacedFrontmatterDrift_Detected(t *testing.T) {
+func TestCheckAdapterRules_PointerRuleFrontmatterDrift_Detected(t *testing.T) {
 	gitRoot, cleanup := setupTempGitRepo(t)
 	defer cleanup()
 	restoreCwd := changeToDir(t, gitRoot)
@@ -198,13 +198,13 @@ func TestCheckAdapterRules_NamespacedFrontmatterDrift_Detected(t *testing.T) {
 	// droid not installed here — its rules will read as missing, which still
 	// exercises aggregation, but we assert specifically on the namespaced edit.
 
-	pointer := filepath.Join(gitRoot, ".claude", "rules", "sageox", "use-team-context.md")
+	pointer := filepath.Join(gitRoot, ".claude", "rules", "ox-cli-use-team-context.md")
 	orig, err := os.ReadFile(pointer)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(pointer, append(orig, []byte("\n\npointer drift\n")...), 0o644))
 
 	result := checkAdapterRules(false)
-	assert.True(t, isFailed(result), "namespaced frontmatter drift must be detected: %+v", result)
+	assert.True(t, isFailed(result), "pointer-rule frontmatter drift must be detected: %+v", result)
 	assert.Contains(t, result.message, "use-team-context.md",
-		"the drifted namespaced rule must be named in the report: %q", result.message)
+		"the drifted pointer rule must be named in the report: %q", result.message)
 }

@@ -111,7 +111,7 @@ func renderClearNotice(info *ClearNoticeInfo, newAgentID string, recordingOn boo
 			"[ox] /clear → previous session %s (suspended, %s) finalized. "+
 				"Paused range excluded from upload. "+
 				"New session %s started — RECORDING SUSPENDED (carried from previous). "+
-				"Resume: /ox-session-resume · Stop: /ox-session-stop",
+				"Resume: ox agent session resume · Stop: ox agent session stop",
 			info.SessionName, dur, newAgentID,
 		)
 	}

@@ -206,7 +206,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	useragent.SetAgentType(adapterName)
 
 	// capture file size before recording starts — entries before this offset are pre-session
-	// (e.g., buffered messages from before /ox-session-start was called)
+	// (e.g., buffered messages from before ox agent session start was called)
 	var startOffset int64
 	if sessionFile != "" {
 		if fi, err := os.Stat(sessionFile); err == nil {
@@ -289,7 +289,7 @@ func buildSessionStartOutput(agentID, adapterName, sessionFile, title, notice st
 		Title:    title,
 		Adapter:  adapterName,
 		Started:  startedAt.Format(time.RFC3339),
-		Hint:     "Run /ox-session-stop to end recording",
+		Hint:     "Run ox agent session stop to end recording",
 		Notice:   notice,
 		Guidance: sessionStartGuidance,
 	}
@@ -299,7 +299,7 @@ func buildSessionStartOutput(agentID, adapterName, sessionFile, title, notice st
 		output.NextActions = []string{
 			fmt.Sprintf("Use 'ox agent %s session log --role user --content \"...\"' to record conversation turns", agentID),
 			"Or write JSONL directly to session_file (see format_hint)",
-			"Run /ox-session-stop when done",
+			"Run ox agent session stop when done",
 		}
 	}
 	return output
@@ -317,7 +317,7 @@ func printSessionStartText(agentID, adapterName, title, notice string, startedAt
 	}
 	fmt.Printf("  Agent: %s (%s)\n", agentID, adapterName)
 	fmt.Printf("  Started: %s\n", startedAt.Format("15:04:05"))
-	fmt.Printf("  Run %s to end recording\n", cli.StyleCommand.Render("/ox-session-stop"))
+	fmt.Printf("  Run %s to end recording\n", cli.StyleCommand.Render("ox agent session stop"))
 }
 
 // isManualSessionAgent returns true for agent types that require explicit

@@ -486,7 +486,7 @@ func draftViewNotice(sessionName string) string {
 			msg += "\nLive view: " + url
 		}
 	}
-	msg += "\nRun 'ox session view " + sessionName + "' again after '/ox-session-stop' to read the transcript."
+	msg += "\nRun 'ox session view " + sessionName + "' again after 'ox agent session stop' to read the session."
 	return msg
 }
 

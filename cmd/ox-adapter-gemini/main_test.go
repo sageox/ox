@@ -56,15 +56,15 @@ func TestReadFromOffset_WiredInOneShotMode(t *testing.T) {
 func TestInstallSkills_WritesCanonicalAgentSkills(t *testing.T) {
 	repo := t.TempDir()
 	var out bytes.Buffer
-	if err := adapterruntime.RunWithArgs(adapterConfig, []string{"install-skills", "--repo-root", repo, "--version", "1.0.0", "--skill", "ox-attest-goal"}, nil, &out); err != nil {
+	if err := adapterruntime.RunWithArgs(adapterConfig, []string{"install-skills", "--repo-root", repo, "--version", "1.0.0", "--skill", "ox-cli-attest-goal"}, nil, &out); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(repo, ".agents", "skills", "ox-attest-goal", "SKILL.md")
+	path := filepath.Join(repo, ".agents", "skills", "ox-cli-attest-goal", "SKILL.md")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(string(data), "---\nname: ox-attest-goal") {
+	if !strings.HasPrefix(string(data), "---\nname: ox-cli-attest-goal") {
 		t.Fatal("installed skill did not retain canonical frontmatter")
 	}
 }

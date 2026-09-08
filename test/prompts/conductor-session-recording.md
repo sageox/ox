@@ -152,7 +152,7 @@ import sys,json; d=json.load(sys.stdin)
 print(f'agent_id={d.get(\"agent_id\")}')"
 ```
 
-**Step 2:** Stop the session using the ox-session-stop skill. Run: `/ox-session-stop`
+**Step 2:** Stop the session with: `ox agent session stop`
 
 After the skill completes, verify the output:
 - PASS if `success: true` in the output
@@ -235,7 +235,7 @@ print(aid)
 echo "New agent_id to abort: $NEW_SESSION"
 ```
 
-**Step 4:** Abort the session using the ox-session-abort skill. Run: `/ox-session-abort`
+**Step 4:** Abort the session with: `ox agent session abort --force`
 
 **Step 5:** Verify the session was discarded:
 

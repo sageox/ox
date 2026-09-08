@@ -35,6 +35,7 @@ type upgradeResult struct {
 	InstallMethod   installMethod `json:"install_method"`
 	ReleaseURL      string        `json:"release_url,omitempty"`
 	Message         string        `json:"message,omitempty"`
+	DaemonsStopped  int           `json:"daemons_stopped,omitempty"`
 }
 
 var upgradeCmd = &cobra.Command{
@@ -129,6 +130,12 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 
 	result.Status = "upgraded"
 	result.Message = fmt.Sprintf("Upgraded to v%s", vResult.LatestVersion)
+	// This process still contains the OLD compiled-in version and skill catalog,
+	// even after brew/go install/self-replace updates the executable on disk. It
+	// may safely stop old daemons, but must leave inventory reconciliation to the
+	// next invocation of the new binary (`ox agent prime`). Running maintenance
+	// here, before rendering, also keeps --json behavior identical to text mode.
+	result.DaemonsStopped = retireStaleDaemonsAfterUpgrade()
 	return outputUpgradeResult(cmd, result, jsonOutput)
 }
 
@@ -160,7 +167,11 @@ func outputUpgradeResult(cmd *cobra.Command, result upgradeResult, jsonOutput bo
 	case "upgraded":
 		fmt.Printf("\n%s %s\n", cli.StyleSuccess.Render("✓"), result.Message)
 		fmt.Printf("%s %s\n", cli.StyleDim.Render("Release notes:"), result.ReleaseURL)
-		fmt.Printf("%s %s\n", cli.StyleDim.Render("Tip:"), "Restart your terminal or run 'ox daemon restart'")
+		if result.DaemonsStopped > 0 {
+			fmt.Printf("%s %s\n", cli.StyleDim.Render("Daemons:"),
+				"stopped so they restart on the new version (they respawn on demand)")
+		}
+		fmt.Printf("%s %s\n", cli.StyleDim.Render("Tip:"), "Restart your terminal to pick up the new binary in this shell")
 	case "manual":
 		fmt.Printf("\n%s\n", result.Message)
 		if result.ReleaseURL != "" {

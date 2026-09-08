@@ -79,7 +79,7 @@ func TestInstallSkillsWritesPortableAgentSkills(t *testing.T) {
 	if err := adapterruntime.RunWithArgs(adapterConfig, args, nil, &out); err != nil {
 		t.Fatalf("install-skills failed: %v (output: %s)", err, out.String())
 	}
-	path := filepath.Join(repo, ".agents", "skills", "ox-plan", "SKILL.md")
+	path := filepath.Join(repo, ".agents", "skills", "ox-cli-plan", "SKILL.md")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("OMP skill was not installed at %s: %v", path, err)
 	}

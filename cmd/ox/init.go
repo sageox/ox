@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -27,6 +28,7 @@ import (
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/sageoxignore"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/ui"
 	"github.com/sageox/ox/internal/version"
@@ -728,8 +730,45 @@ func runInit() error {
 	// <root><root>/.codex/hooks.json, and one such entry failed the whole
 	// `git add`, leaving even .claude/settings.json unstaged.
 	installedHooks := installAgentHooks(gitRoot, true, selectedAgents) // quiet — summarized below
+
+	// Snapshot every scoped ignore file that ALREADY EXISTS, before writing any of
+	// them. trackModifiedFile snapshots eagerly, at call time — so calling it after
+	// the write would capture the already-modified bytes and rollback would
+	// "restore" the ox block into the user's file instead of removing it.
+	for _, f := range scopedIgnoreFiles() {
+		abs := filepath.Join(gitRoot, f.Dir, ".gitignore")
+		if _, err := os.Lstat(abs); err == nil {
+			tracker.trackModifiedFile(abs)
+		}
+	}
+
+	// Write the ox-managed ignore block BEFORE anything is staged, so the rule
+	// that hides ox's own files exists in the tree before the index is touched.
+	// Warn on UNPROTECTED as well as on error. A directory ox cannot own — a
+	// symlinked or non-regular .gitignore — is reported as unprotected and returns
+	// no error at all, so an error-only check goes silent in exactly the case the
+	// user most needs to hear about: ox's files are about to exist in that
+	// directory with nothing hiding them from git.
+	ignoreFiles, unprotected, ignoreErr := skillmanager.EnsureScopedIgnoreFilesForDirs(gitRoot, nil)
+	if !initQuiet {
+		if ignoreErr != nil {
+			cli.PrintWarning(fmt.Sprintf("Could not write ox ignore rules: %v", ignoreErr))
+		}
+		if len(unprotected) > 0 {
+			cli.PrintWarning(fmt.Sprintf(
+				"Could not write ox ignore rules in %s — ox files there will be visible to git; "+
+					"remove or rename the blocking path and rerun `ox doctor --fix`",
+				strings.Join(unprotected, ", ")))
+		}
+	}
+	trackScopedIgnoreFilesForInit(tracker, gitRoot, ignoreFiles, ignoreErr)
+
+	// Every installed path is tracked for ROLLBACK, but only the non-reserved ones
+	// are staged — see stageableInstalledPaths for why.
 	for _, hookFile := range installedHooks {
 		tracker.trackCreatedFile(hookFile)
+	}
+	for _, hookFile := range stageableInstalledPaths(gitRoot, installedHooks) {
 		tracker.trackForceStage(hookFile)
 	}
 
@@ -1686,6 +1725,73 @@ type initTracker struct {
 	// throw their staged work away — the exact class of "ox touched
 	// something it wasn't asked to" this PR exists to stop.
 	indexEntries map[string]string
+}
+
+// trackScopedIgnoreFilesForInit records rollback ownership and staging for the
+// scoped ignore files EnsureScopedIgnoreFiles just validated.
+//
+// A byte-identical file is absent from results because the writer correctly
+// reports no write. It still has to be force-staged: a prior Doctor run may have
+// created the correct file without adding it to git, and a root `.claude/` ignore
+// rule otherwise makes that committed on-ramp invisible forever.
+func trackScopedIgnoreFilesForInit(tracker *initTracker, gitRoot string, results []ignoreFileResult, ensureErr error) {
+	created := make(map[string]bool, len(results))
+	var paths []string
+	for _, result := range results {
+		created[result.Rel] = result.Created
+		paths = append(paths, result.Rel)
+	}
+	if ensureErr == nil {
+		for _, f := range scopedIgnoreFiles() {
+			rel := filepath.Join(f.Dir, ".gitignore")
+			info, err := os.Lstat(filepath.Join(gitRoot, rel))
+			if err != nil || !info.Mode().IsRegular() || created[rel] {
+				continue
+			}
+			// A no-op Ensure result proves only that the managed block is current;
+			// it says nothing about bytes outside that block. Adopt the file only
+			// when it is untracked and consists solely of ox's generated block.
+			// Tracked no-op files need no staging, and untracked files with user
+			// rules must remain the user's work.
+			if !skillmanager.IsManagedOnlyScopedIgnore(gitRoot, rel) {
+				continue
+			}
+			tracked, trackErr := gitTracksPath(gitRoot, rel)
+			if trackErr == nil && !tracked {
+				paths = append(paths, rel)
+			}
+		}
+	}
+
+	seen := make(map[string]bool, len(paths))
+	for _, rel := range paths {
+		if seen[rel] {
+			continue
+		}
+		seen[rel] = true
+		abs := filepath.Join(gitRoot, rel)
+		// A file ox CREATED is removed on rollback; one that already existed is
+		// restored from the snapshot taken before EnsureScopedIgnoreFiles ran.
+		if created[rel] {
+			tracker.trackCreatedFile(abs)
+		}
+		// Force-staged on purpose: repositories commonly root-ignore .claude/.
+		tracker.trackForceStage(abs)
+	}
+}
+
+func gitTracksPath(gitRoot, rel string) (bool, error) {
+	cmd := exec.Command("git", "ls-files", "--error-unmatch", "--", filepath.ToSlash(rel))
+	cmd.Dir = gitRoot
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, err
 }
 
 func newInitTracker(gitRoot string) *initTracker {

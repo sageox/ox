@@ -357,7 +357,12 @@ func (t *StoredToken) IsExpired(bufferSeconds int) bool {
 		bufferSeconds = 0
 	}
 	threshold := time.Now().Add(time.Duration(bufferSeconds) * time.Second)
-	return threshold.After(t.ExpiresAt)
+	// !Before, not After: a token whose expiry instant equals the threshold is
+	// EXPIRED. Strict After() treated the exact-expiry instant as still valid,
+	// which is the wrong direction for a credential check — and it made the
+	// boundary test fail whenever both time.Now() calls landed inside one clock
+	// tick, which is exactly when the equality case arises.
+	return !threshold.Before(t.ExpiresAt)
 }
 
 // Auth validation functions (IsAuthenticated, IsAuthenticatedForEndpoint,

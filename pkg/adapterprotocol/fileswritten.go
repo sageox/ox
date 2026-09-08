@@ -29,7 +29,7 @@ import (
 // GH #731: four in-tree adapters used four different conventions —
 // repo-relative, skills-dir-relative, rules-dir-relative, and absolute.
 // ox joined them all onto RepoRoot, producing paths like
-// `<root>/ox-plan/SKILL.md` that did not exist. `git add` validates every
+// `<root>/ox-cli-plan/SKILL.md` that did not exist. `git add` validates every
 // pathspec up front and fails the whole invocation on the first bad one,
 // so a single malformed entry stopped ox from staging *anything* —
 // including the valid `.claude/settings.json`. On a fresh `ox init` that

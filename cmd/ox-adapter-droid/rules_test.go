@@ -3,8 +3,10 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,9 +28,9 @@ func TestHandleInstallRules_CreatesFile(t *testing.T) {
 
 	assert.True(t, resp.Installed)
 	// repo-relative per the adapterprotocol FilesWritten contract — see GH #731.
-	assert.Contains(t, resp.FilesWritten, filepath.Join(".factory", "rules", "ox.md"))
+	assert.Contains(t, resp.FilesWritten, filepath.Join(".factory", "rules", "ox-cli.md"))
 
-	ruleFile := filepath.Join(dir, ".factory", "rules", "ox.md")
+	ruleFile := filepath.Join(dir, ".factory", "rules", "ox-cli.md")
 	data, err := os.ReadFile(ruleFile)
 	require.NoError(t, err, "ox.md must exist on disk after install")
 	assert.Contains(t, string(data), "agentx-hash", "file must contain agentx stamp")
@@ -66,7 +68,7 @@ func TestHandleCheckRules_Missing(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.False(t, resp.Installed)
-	assert.Contains(t, resp.Missing, "ox.md")
+	assert.Contains(t, resp.Missing, "ox-cli.md")
 }
 
 // TestHandleCheckRules_Installed verifies that check reports installed=true
@@ -104,12 +106,12 @@ func TestHandleCheckRules_FrontmatterBodyEdited_ReportsStale(t *testing.T) {
 
 	clean, err := handleCheckRules(params)
 	require.NoError(t, err)
-	require.NotContains(t, clean.Stale, "ox.md", "precondition: freshly installed rule must not be stale")
+	require.NotContains(t, clean.Stale, "ox-cli.md", "precondition: freshly installed rule must not be stale")
 
 	// Appending to the body changes the stamped content (the stamp hash covers
 	// the body WITHOUT frontmatter) while leaving frontmatter and the stamp line
 	// intact — exactly the drift agentx's first-line check cannot see.
-	rulePath := filepath.Join(dir, ".factory", "rules", "ox.md")
+	rulePath := filepath.Join(dir, ".factory", "rules", "ox-cli.md")
 	orig, err := os.ReadFile(rulePath)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(rulePath, append(orig, []byte("\n\nhand-edited drift\n")...), 0o644))
@@ -117,22 +119,22 @@ func TestHandleCheckRules_FrontmatterBodyEdited_ReportsStale(t *testing.T) {
 	resp, err := handleCheckRules(params)
 	require.NoError(t, err)
 
-	assert.Contains(t, resp.Stale, "ox.md", "edited frontmatter'd body must be reported Stale (Bug 2)")
+	assert.Contains(t, resp.Stale, "ox-cli.md", "edited frontmatter'd body must be reported Stale (Bug 2)")
 	assert.False(t, resp.Installed, "Installed must be false when a rule has drifted")
 }
 
 // TestHandleCheckRules_NamespacedBodyEdited_ReportsStale verifies Bug 2 also
-// covers the namespaced sageox/use-team-context.md pointer rule on droid.
+// covers the ox-cli-use-team-context.md pointer rule on droid.
 // Failure prevented: a drifted team-context pointer rule passes doctor while
 // teaching the agent stale discovery instructions.
-func TestHandleCheckRules_NamespacedBodyEdited_ReportsStale(t *testing.T) {
+func TestHandleCheckRules_PointerRuleBodyEdited_ReportsStale(t *testing.T) {
 	dir := t.TempDir()
 	params := adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.8.0"}
 
 	_, err := handleInstallRules(params)
 	require.NoError(t, err)
 
-	rulePath := filepath.Join(dir, ".factory", "rules", "sageox", "use-team-context.md")
+	rulePath := filepath.Join(dir, ".factory", "rules", "ox-cli-use-team-context.md")
 	orig, err := os.ReadFile(rulePath)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(rulePath, append(orig, []byte("\n\ndrift\n")...), 0o644))
@@ -140,7 +142,7 @@ func TestHandleCheckRules_NamespacedBodyEdited_ReportsStale(t *testing.T) {
 	resp, err := handleCheckRules(params)
 	require.NoError(t, err)
 
-	assert.Contains(t, resp.Stale, "sageox/use-team-context.md", "edited namespaced body must be reported Stale (Bug 2)")
+	assert.Contains(t, resp.Stale, "ox-cli-use-team-context.md", "edited pointer-rule body must be reported Stale (Bug 2)")
 	assert.False(t, resp.Installed)
 }
 
@@ -152,27 +154,20 @@ func TestHandleCheckRules_UserManagedRuleNotStale(t *testing.T) {
 	dir := t.TempDir()
 	rulesDir := filepath.Join(dir, ".factory", "rules")
 	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "ox.md"),
+	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "ox-cli.md"),
 		[]byte("# my own ox rule, no stamp\n"), 0o644))
 
 	resp, err := handleCheckRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.8.0"})
 	require.NoError(t, err)
 
-	assert.NotContains(t, resp.Stale, "ox.md", "unstamped user-managed file must never be flagged stale")
+	assert.NotContains(t, resp.Stale, "ox-cli.md", "unstamped user-managed file must never be flagged stale")
 }
 
 // --- C. Uninstall lifecycle ---
 
-// TestHandleUninstallRules_AgentxLimitationOnTopLevelOxMd documents that
-// agentx v0.1.10's Uninstall cannot remove the top-level ox.md because
-// ExtractCommandHash only inspects the first line, and YAML frontmatter
-// (description: ...) lives there. The adapter works around this for the
-// sageox/ namespace via adapterstamp.LooksStamped, but the top-level file still
-// hits the upstream bug.
-//
-// When agentx fixes the limitation upstream, this test will FAIL —
-// prompting us to remove it and simplify the workaround.
-func TestHandleUninstallRules_AgentxLimitationOnTopLevelOxMd(t *testing.T) {
+// TestHandleUninstallRules_RemovesCurrentFlatRules verifies uninstall handles
+// the YAML-frontmatter rules that agentx's first-line-only stamp reader misses.
+func TestHandleUninstallRules_RemovesCurrentFlatRules(t *testing.T) {
 	dir := t.TempDir()
 	params := adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.8.0"}
 
@@ -182,15 +177,118 @@ func TestHandleUninstallRules_AgentxLimitationOnTopLevelOxMd(t *testing.T) {
 	resp, err := handleUninstallRules(params)
 	require.NoError(t, err)
 
-	for _, name := range resp.FilesRemoved {
-		if name == "ox.md" {
-			t.Fatalf("ox.md was removed — agentx may have fixed the frontmatter limitation; remove this test and update the workaround in rules.go")
-		}
+	for _, name := range []string{"ox-cli.md", "ox-cli-use-team-context.md"} {
+		assert.Contains(t, resp.FilesRemoved, name)
+		assert.NoFileExists(t, filepath.Join(dir, ".factory", "rules", name))
 	}
+}
 
-	ruleFile := filepath.Join(dir, ".factory", "rules", "ox.md")
-	_, err = os.Stat(ruleFile)
-	assert.NoError(t, err, "ox.md survives uninstall due to agentx frontmatter limitation")
+func stampedLegacyRule(body, description string) []byte {
+	frontmatter := "---\ndescription: " + description + "\n---\n"
+	return append([]byte(frontmatter), agentx.StampedContent([]byte(body), "0.14.0", agentx.DefaultStampPrefix)...)
+}
+
+func seedLegacyNamespaceRule(t *testing.T, repoRoot string) string {
+	t.Helper()
+	nsDir := filepath.Join(repoRoot, ".factory", "rules", "sageox")
+	require.NoError(t, os.MkdirAll(nsDir, 0o755))
+	path := filepath.Join(nsDir, "use-team-context.md")
+	require.NoError(t, os.WriteFile(path, stampedLegacyRule("# legacy pointer rule\n", teamContextRuleDescription), 0o644))
+	return path
+}
+
+func TestHandleInstallRules_RetiresVerifiedLegacyRuleSurface(t *testing.T) {
+	dir := t.TempDir()
+	rulesDir := filepath.Join(dir, ".factory", "rules")
+	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+	legacyTop := filepath.Join(rulesDir, "ox.md")
+	require.NoError(t, os.WriteFile(legacyTop, stampedLegacyRule("# legacy ox rule\n", oxRuleDescription), 0o644))
+	legacyNS := seedLegacyNamespaceRule(t, dir)
+
+	_, err := handleInstallRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.15.0"})
+	require.NoError(t, err)
+	assert.NoFileExists(t, legacyTop)
+	assert.NoFileExists(t, legacyNS)
+}
+
+func TestHandleInstallRules_PreservesEditedLegacyRules(t *testing.T) {
+	dir := t.TempDir()
+	rulesDir := filepath.Join(dir, ".factory", "rules")
+	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+	legacyTop := filepath.Join(rulesDir, "ox.md")
+	require.NoError(t, os.WriteFile(legacyTop,
+		append(stampedLegacyRule("# legacy ox rule\n", oxRuleDescription), []byte("user edit\n")...), 0o644))
+	legacyNS := seedLegacyNamespaceRule(t, dir)
+	nsData, err := os.ReadFile(legacyNS)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(legacyNS, append(nsData, []byte("user edit\n")...), 0o644))
+
+	_, err = handleInstallRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.15.0"})
+	require.NoError(t, err)
+	assert.FileExists(t, legacyTop)
+	assert.FileExists(t, legacyNS)
+}
+
+func TestHandleInstallRules_PreservesFrontmatterEditedLegacyRules(t *testing.T) {
+	dir := t.TempDir()
+	rulesDir := filepath.Join(dir, ".factory", "rules")
+	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+	legacyTop := filepath.Join(rulesDir, "ox.md")
+	topData := strings.Replace(
+		string(stampedLegacyRule("# legacy ox rule\n", oxRuleDescription)),
+		oxRuleDescription,
+		"User-owned description",
+		1,
+	)
+	require.NoError(t, os.WriteFile(legacyTop, []byte(topData), 0o644))
+
+	legacyNS := seedLegacyNamespaceRule(t, dir)
+	nsData, err := os.ReadFile(legacyNS)
+	require.NoError(t, err)
+	nsData = []byte(strings.Replace(string(nsData), teamContextRuleDescription, "User-owned description", 1))
+	require.NoError(t, os.WriteFile(legacyNS, nsData, 0o644))
+
+	_, err = handleInstallRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.15.0"})
+	require.NoError(t, err)
+	assert.FileExists(t, legacyTop, "frontmatter edits must make a legacy rule user-owned")
+	assert.FileExists(t, legacyNS, "frontmatter edits must make a legacy rule user-owned")
+}
+
+func TestHandleInstallRules_RetiresCRLFLegacyRules(t *testing.T) {
+	dir := t.TempDir()
+	rulesDir := filepath.Join(dir, ".factory", "rules")
+	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+	legacyTop := filepath.Join(rulesDir, "ox.md")
+	topData := strings.ReplaceAll(
+		string(stampedLegacyRule("# legacy ox rule\n", oxRuleDescription)),
+		"\n",
+		"\r\n",
+	)
+	require.NoError(t, os.WriteFile(legacyTop, []byte(topData), 0o644))
+
+	legacyNS := seedLegacyNamespaceRule(t, dir)
+	nsData, err := os.ReadFile(legacyNS)
+	require.NoError(t, err)
+	nsData = []byte(strings.ReplaceAll(string(nsData), "\n", "\r\n"))
+	require.NoError(t, os.WriteFile(legacyNS, nsData, 0o644))
+
+	_, err = handleInstallRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.15.0"})
+	require.NoError(t, err)
+	assert.NoFileExists(t, legacyTop, "CRLF checkout must not prevent clean legacy retirement")
+	assert.NoFileExists(t, legacyNS, "CRLF checkout must not prevent clean legacy retirement")
+}
+
+func TestHandleInstallRules_FailurePreservesLegacyRules(t *testing.T) {
+	dir := t.TempDir()
+	rulesDir := filepath.Join(dir, ".factory", "rules")
+	require.NoError(t, os.MkdirAll(rulesDir, 0o755))
+	legacyTop := filepath.Join(rulesDir, "ox.md")
+	require.NoError(t, os.WriteFile(legacyTop, stampedLegacyRule("# legacy ox rule\n", oxRuleDescription), 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(rulesDir, "ox-cli.md"), 0o755))
+
+	_, err := handleInstallRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.15.0"})
+	require.Error(t, err)
+	assert.FileExists(t, legacyTop, "legacy guidance must survive until replacement install succeeds")
 }
 
 // --- D. Diagnose integration ---
@@ -211,4 +309,30 @@ func TestDiagnose_RulesMissing(t *testing.T) {
 		slugs = append(slugs, issue.Slug)
 	}
 	assert.Contains(t, slugs, "droid:rules-missing")
+}
+
+// TestPointerRule_TellsTheTruthAboutTeamContent is the droid twin of the
+// claude-code assertion: both adapters ship the same pointer-rule text from
+// separate Go literals, so a correction to one can silently miss the other.
+// Failure prevented: droid users keep reading that team commands are slash
+// commands after the claude-code copy was fixed.
+func TestPointerRule_TellsTheTruthAboutTeamContent(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := handleInstallRules(adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.8.0"})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, ".factory", "rules", "ox-cli-use-team-context.md"))
+	require.NoError(t, err)
+	body := string(data)
+
+	assert.Contains(t, body, "      agents/")
+	assert.Contains(t, body, "        profiles/")
+	assert.Contains(t, body, "        commands/")
+	assert.NotContains(t, body, "team slash commands",
+		"pointer rule must not advertise team commands as invocable slash commands")
+	// droid's copy wraps the sentence, so compare on whitespace-normalized text
+	flat := strings.Join(strings.Fields(body), " ")
+	assert.Contains(t, flat, "absolute path shown in the prime output",
+		"pointer rule tells agents to read the absolute path; prime must keep emitting one")
 }
