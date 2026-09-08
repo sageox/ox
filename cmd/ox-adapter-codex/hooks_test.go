@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -269,4 +270,40 @@ func TestHandleDiagnose_CodexProjectMissingHooks(t *testing.T) {
 	require.Len(t, result.Issues, 1)
 	assert.Equal(t, "codex:hooks-missing", result.Issues[0].Slug)
 	assert.True(t, result.Issues[0].FixSafe)
+}
+
+// Installs written by older ox versions carry five events. Doctor's check must
+// flag them, and a re-install must add SessionEnd without touching the rest,
+// or Codex sessions on upgraded machines keep waiting for a manual stop.
+func TestHandleInstallHooks_AddsSessionEndToExistingInstall(t *testing.T) {
+	repoRoot := t.TempDir()
+	hooksPath := filepath.Join(repoRoot, codexProjectPath, codexHooksFileName)
+	legacy := map[string][]codexHookEntry{}
+	for _, event := range []string{"SessionStart", "PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop"} {
+		legacy[event] = mergeHookEntries(nil, hookCommand(event), event)
+	}
+	legacy["Stop"] = append(legacy["Stop"], codexHookEntry{Hooks: []codexHook{{Type: "command", Command: "echo user-hook"}}})
+	require.NoError(t, writeHooksFile(hooksPath, legacy, map[string]json.RawMessage{}, "project"))
+
+	check, err := handleCheckHooks(adapterprotocol.HookParams{RepoRoot: repoRoot, Scope: "project"})
+	require.NoError(t, err)
+	assert.False(t, check.Installed, "a five-event install predates SessionEnd and must be reported incomplete")
+
+	response, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: repoRoot, Scope: "project"})
+	require.NoError(t, err)
+	assert.Equal(t, codexHookEvents, response.Hooks)
+
+	hooksMap, _, err := readHooksFile(hooksPath)
+	require.NoError(t, err)
+	require.Len(t, hooksMap["SessionEnd"], 1)
+	require.Len(t, hooksMap["SessionEnd"][0].Hooks, 1)
+	assert.Equal(t, hookCommand("SessionEnd"), hooksMap["SessionEnd"][0].Hooks[0].Command)
+	assert.Contains(t, hooksMap["SessionEnd"][0].Hooks[0].Command, "ox agent hook SessionEnd")
+	assert.Empty(t, hooksMap["SessionEnd"][0].Hooks[0].StatusMessage, "only SessionStart shows a status message")
+	require.Len(t, hooksMap["Stop"], 2, "the user's own Stop hook must survive the re-install")
+	assert.Equal(t, "echo user-hook", hooksMap["Stop"][1].Hooks[0].Command)
+
+	check, err = handleCheckHooks(adapterprotocol.HookParams{RepoRoot: repoRoot, Scope: "project"})
+	require.NoError(t, err)
+	assert.True(t, check.Installed)
 }

@@ -138,14 +138,26 @@ func runAgentHook(args []string) error {
 	return dispatchPhase(ctx)
 }
 
-// localEventPhases supplements agentx registry with phase mappings for agents
-// not yet defined in agentx (pending module release).
+// localEventPhases supplements the agentx registry with phase mappings for
+// agents whose agentx definition does not implement LifecycleEventMapper yet.
+// Without an entry here such an agent resolves through the "try all maps"
+// fallback in resolvePhase, which works only while every agent spells its
+// events the same way.
 var localEventPhases = map[string]map[agentx.HookEvent]agentx.Phase{
 	"gemini": {
 		"SessionStart": agentx.PhaseStart,
 		"BeforeAgent":  agentx.PhasePrompt,
 		"AfterTool":    agentx.PhaseAfterTool,
 		"SessionEnd":   agentx.PhaseEnd,
+	},
+	// the six events cmd/ox-adapter-codex installs (codexHookEvents)
+	"codex": {
+		"SessionStart":     agentx.PhaseStart,
+		"PreToolUse":       agentx.PhaseBeforeTool,
+		"PostToolUse":      agentx.PhaseAfterTool,
+		"UserPromptSubmit": agentx.PhasePrompt,
+		"Stop":             agentx.PhaseStop,
+		"SessionEnd":       agentx.PhaseEnd,
 	},
 }
 

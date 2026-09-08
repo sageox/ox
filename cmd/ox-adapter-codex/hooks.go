@@ -21,13 +21,20 @@ const (
 	codexConfigFile    = "config.toml"
 )
 
-// all Codex CLI hook events ox should install handlers for
+// all Codex CLI hook events ox should install handlers for.
+//
+// SessionEnd is what finalizes a recording without an explicit `session stop`:
+// Codex fires it when the conversation is archived or deleted, when Codex
+// closes normally, or after 30 minutes idle with no connected client. ox maps
+// it to the end phase (handleEnd), the same path Claude Code and Gemini use.
+// Stop only marks the end of a turn.
 var codexHookEvents = []string{
 	"SessionStart",
 	"PreToolUse",
 	"PostToolUse",
 	"UserPromptSubmit",
 	"Stop",
+	"SessionEnd",
 }
 
 // hookCommand returns the shell command for a given event.

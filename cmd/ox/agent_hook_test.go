@@ -38,8 +38,16 @@ func TestResolvePhase(t *testing.T) {
 		{"claude unknown event", "claude-code", "SubagentStop", ""},
 		{"claude alias resolves", "claudecode", "SessionStart", phaseStart},
 		{"claude short alias resolves", "claude", "SessionStart", phaseStart},
-		{"unknown agent falls back", "codex", "SessionStart", phaseStart},
-		{"unknown agent unknown event", "codex", "FooBar", ""},
+		// every event cmd/ox-adapter-codex installs has an explicit local mapping
+		{"codex SessionStart", "codex", "SessionStart", phaseStart},
+		{"codex PreToolUse", "codex", "PreToolUse", phaseBeforeTool},
+		{"codex PostToolUse", "codex", "PostToolUse", phaseAfterTool},
+		{"codex UserPromptSubmit", "codex", "UserPromptSubmit", phasePrompt},
+		{"codex Stop", "codex", "Stop", phaseStop},
+		{"codex SessionEnd finalizes", "codex", "SessionEnd", phaseEnd},
+		{"codex unknown event", "codex", "FooBar", ""},
+		{"unregistered agent falls back", "some-new-agent", "SessionStart", phaseStart},
+		{"unregistered agent unknown event", "some-new-agent", "FooBar", ""},
 	}
 
 	for _, tt := range tests {
