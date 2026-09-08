@@ -53,11 +53,11 @@ func TestMain(m *testing.M) {
 
 // runSelfHealHelper is the child-process body for the real multi-process race
 // test. It drives the actual production entry point (openOrCreateBleveIndex) on
-// a shared, already-corrupted sub-index, retrying on the retryable "lock
-// contention" verdict exactly as a real daemon/CLI caller would, and exits 0
-// once it holds a working index. Any process that permanently fails to get a
-// working index exits non-zero — which the parent treats as the #828 race
-// destroying the replacement.
+// a shared, already-corrupted sub-index, retrying on the retryable open verdict
+// exactly as a real daemon/CLI caller would, and exits 0 once it holds a working
+// index. Any process that permanently fails to get a working index exits
+// non-zero — which the parent treats as the #828 race destroying the
+// replacement.
 func runSelfHealHelper(root, path, name string) int {
 	if root == "" || path == "" || name == "" {
 		fmt.Fprintf(os.Stderr, "bad helper spec root=%q path=%q name=%q\n", root, path, name)
@@ -211,12 +211,60 @@ func TestRebuildSubIndexLocked_HeldOpen_Defers(t *testing.T) {
 		fmt.Errorf("simulated corrupt open"))
 	require.Nil(t, idx)
 	require.Error(t, err, "a healthy-but-held index must not be healed")
-	require.Contains(t, err.Error(), "lock contention",
-		"held index must surface the retryable contention error")
+	require.Contains(t, err.Error(), "self-heal deferred",
+		"held index must surface the retryable deferred-heal error")
+	require.NotContains(t, err.Error(), "appears to be in use (lock contention)",
+		"deferred healing must be distinguishable from a direct open contention error")
 	require.Equal(t, 1, counter.get("defer"))
 	require.Equal(t, 0, counter.get("nuke"),
 		"a live-locked healthy index must never be nuked")
 	require.False(t, HasNeedsReindexMarker(tmp, "test"))
+}
+
+// TestOpenOrCreateBleveIndex_MappingParseErrorSurvivesInconclusivePeek covers
+// the field state where Bleve can select an empty-mapping snapshot that the
+// lightweight corruption peek does not identify. Bleve skips malformed entries
+// while walking snapshots newest-to-oldest; the peek must not turn Bleve's
+// definitive mapping-parse error into a lock-contention diagnosis merely
+// because its narrower inspection was inconclusive.
+//
+// Failure prevented: a free, corrupt index retries forever as "in use (lock
+// contention)" and never writes the marker that triggers a full rebuild.
+func TestOpenOrCreateBleveIndex_MappingParseErrorSurvivesInconclusivePeek(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: Bleve + bbolt operations")
+	}
+	installFastCorruptionProbes(t)
+
+	root := t.TempDir()
+	indexPath := filepath.Join(root, "test-index")
+	idx, err := openOrCreateBleveIndex(root, indexPath, "code")
+	require.NoError(t, err)
+	require.NoError(t, idx.Close())
+
+	boltPath := filepath.Join(indexPath, "store", "root.bolt")
+	emptyMappingForLatestSnapshot(t, boltPath)
+
+	// Bleve walks backward past entries it cannot decode as snapshot epochs.
+	// isBleveIndexCorrupt currently inspects only the final cursor entry, so this
+	// realistic unknown-entry shape makes its result inconclusive while Bleve
+	// continues to the real snapshot and reports the empty mapping.
+	db, err := bbolt.Open(boltPath, 0o600, &bbolt.Options{Timeout: time.Second})
+	require.NoError(t, err)
+	require.NoError(t, db.Update(func(tx *bbolt.Tx) error {
+		snapshots := tx.Bucket([]byte{'s'})
+		require.NotNil(t, snapshots, "snapshots bucket missing — Bleve layout changed")
+		return snapshots.Put([]byte{0xff}, []byte("unknown snapshot entry"))
+	}))
+	require.NoError(t, db.Close())
+	require.False(t, isBleveIndexCorrupt(boltPath),
+		"precondition: the lightweight peek must be inconclusive for this fixture")
+
+	healed, err := openOrCreateBleveIndex(root, indexPath, "code")
+	require.NoError(t, err, "Bleve's mapping-parse error must trigger safe self-heal")
+	require.NoError(t, healed.Close())
+	require.True(t, HasNeedsReindexMarker(root, "code"),
+		"self-heal must leave the full-reindex signal")
 }
 
 // --- B. Deterministic two-healer race (the #828 regression) ---
@@ -292,7 +340,7 @@ func TestConcurrentSelfHeal_LoserDoesNotClobberWinner(t *testing.T) {
 
 	// Loser deferred — it did NOT create a competing index and did NOT nuke.
 	require.Error(t, b.err, "loser must defer to the winner, not heal in parallel")
-	require.Contains(t, b.err.Error(), "lock contention")
+	require.Contains(t, b.err.Error(), "self-heal deferred")
 	require.Nil(t, b.idx)
 	require.Equal(t, 1, counter.get("defer"))
 
@@ -413,7 +461,7 @@ func TestSelfHeal_MissingMetadataPreservesConcurrentReplacement(t *testing.T) {
 			}
 			require.True(t, hookRan, "missing-metadata recovery must acquire the shared heal lock")
 			if heldOpen {
-				require.ErrorContains(t, err, "lock contention")
+				require.ErrorContains(t, err, "self-heal deferred")
 				require.Nil(t, idx)
 				idx = winner
 			} else {

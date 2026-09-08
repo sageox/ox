@@ -769,13 +769,13 @@ func removeSQLiteFiles(dbPath string) {
 // daemon indexing pass does a full rebuild. Returns the empty index with no
 // error — callers see a working but empty bleve, not a typed error.
 //
-// True lock contention (another writer holds bbolt's exclusive flock) is
-// preserved as the pre-existing "lock contention" error: the corruption peek
-// retries a read-only open (100ms timeout per attempt) a few times before
-// giving up, so a live exclusive lock blocks the peek and we stay in the safe
-// wait-and-retry path — but a transient hold that clears within the retry
-// budget no longer permanently masks provable corruption (see
-// isBleveIndexCorrupt).
+// True lock contention (another writer holds bbolt's exclusive flock) remains
+// non-destructive: the corruption peek retries a read-only open (100ms timeout
+// per attempt) a few times before giving up. If Bleve already proved its
+// mapping is invalid, the locked self-heal path rechecks and reports a distinct
+// deferral while the writer remains; other open errors retain the direct
+// "lock contention" diagnosis. A transient hold that clears within the retry
+// budget no longer permanently masks provable corruption.
 //
 // path is the bleve sub-index dir (e.g. <root>/bleve/code); root is the
 // codedb dataDir (needed to locate the marker file).
@@ -839,6 +839,14 @@ func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 		if boltCorruptOnExclusiveOpen(boltPath) {
 			return selfHealBleveSubIndex(root, path, name, err)
 		}
+		// Bleve reached the persisted mapping and proved it cannot parse it.
+		// The narrower bbolt peek above can be inconclusive when it encounters
+		// an entry Bleve skips while selecting a usable snapshot. Route the
+		// definitive Bleve error through the locked recheck instead of relabeling
+		// it as contention; the recheck still refuses to nuke a live-held index.
+		if IsBleveMappingParseError(err) {
+			return selfHealBleveSubIndex(root, path, name, err)
+		}
 		return nil, fmt.Errorf("bleve index appears to be in use (lock contention): %w", err)
 	} else if !os.IsNotExist(statErr) && !errors.Is(statErr, syscall.ENOTDIR) {
 		// permission/IO errors are transient — nuking would cause data loss
@@ -883,7 +891,7 @@ const (
 	healNuke
 	// healDefer: the index cannot be reopened but is NOT provably corrupt — a
 	// live writer holds its exclusive bbolt lock. Never nuke a healthy-but-held
-	// index; surface the pre-existing retryable "lock contention" error.
+	// index; surface a distinct retryable self-heal deferral.
 	healDefer
 )
 
@@ -1009,6 +1017,13 @@ func reclassifyUnderLock(path, name string, requireVersion bool) (bleve.Index, h
 	_ = db.Close()
 	idx, openErr := boundedAdoptOpen(path, bleveExclusiveProbeTimeout)
 	if openErr != nil {
+		// This is a fresh error from the index currently on disk, after the
+		// bounded exclusive probe proved no writer held root.bolt. Bleve's own
+		// mapping parser is authoritative when the lightweight bbolt inspection
+		// could not identify the snapshot Bleve ultimately selected.
+		if IsBleveMappingParseError(openErr) {
+			return nil, healNuke
+		}
 		// Raced away between probe and open, timed out on a late writer, or a
 		// non-corruption open failure — defer rather than nuke a possibly-healthy
 		// index.
@@ -1074,8 +1089,8 @@ func boundedAdoptOpen(path string, timeout time.Duration) (bleve.Index, error) {
 //
 // Flow: acquire the per-sub-index heal lock, then reclassify under it:
 //   - healAdopt → return the replacement the winner created; never nuke it.
-//   - healDefer → return the pre-existing retryable "lock contention" error; a
-//     healthy index is being held open, not corrupt.
+//   - healDefer → return a retryable self-heal deferral; a healthy index is
+//     being held open or the current state could not be confirmed.
 //   - healNuke  → we hold the lock and it is still corrupt/stale: write the
 //     .needs_reindex marker, then RemoveAll + recreate empty.
 //
@@ -1128,7 +1143,7 @@ func applyRebuildVerdict(root, path, name string, requireVersion bool, openErrFo
 		return idx, nil
 	case healDefer:
 		subIndexRebuildActionHook("defer")
-		return nil, fmt.Errorf("bleve index appears to be in use (lock contention): %w", openErrForLog)
+		return nil, fmt.Errorf("bleve sub-index %s self-heal deferred (index busy or state unconfirmed): %w", name, openErrForLog)
 	}
 
 	// healNuke: the index is still provably corrupt/stale. The specific trigger
@@ -1462,6 +1477,14 @@ func safeOpenBleve(path string) (idx bleve.Index, err error) {
 		}
 	}()
 	return bleve.Open(path)
+}
+
+// IsBleveMappingParseError reports whether Bleve opened an index far enough to
+// read its persisted mapping but could not decode that mapping. Bleve exposes
+// no typed error for this condition, so matching its stable error prefix is the
+// only way to distinguish proven mapping corruption from a generic open error.
+func IsBleveMappingParseError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "error parsing mapping JSON:")
 }
 
 // --- SQL convenience methods ---

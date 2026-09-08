@@ -912,16 +912,15 @@ func TestIsBleveIndexCorrupt_RecoversWhenLockClearsWithinRetryBudget(t *testing.
 		"self-heal must write the reindex marker")
 }
 
-// TestOpenOrCreateBleveIndex_SustainedLockStillReturnsContentionError verifies
+// TestOpenOrCreateBleveIndex_SustainedLockDefersSelfHeal verifies
 // that the corruption-peek retry does NOT turn genuinely sustained lock
 // contention into a false self-heal: a lock held for the entire retry budget
-// must still surface the pre-existing "lock contention" error unchanged, and
-// must NOT nuke the index.
+// must surface a distinct deferred-heal error and must NOT nuke the index.
 //
 // Failure prevented: a naive retry-until-success peek turning a real,
 // long-running writer (e.g. the daemon mid full-reindex) into a spurious
 // nuke-and-recreate of an index that was never actually corrupt.
-func TestOpenOrCreateBleveIndex_SustainedLockStillReturnsContentionError(t *testing.T) {
+func TestOpenOrCreateBleveIndex_SustainedLockDefersSelfHeal(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: Bleve + bbolt operations")
 	}
@@ -954,7 +953,7 @@ func TestOpenOrCreateBleveIndex_SustainedLockStillReturnsContentionError(t *test
 	// to finish quickly.
 	var lockDB *bbolt.DB
 	bleveCorruptionPeekRetryHook = func(attempt int) {
-		if attempt == 0 {
+		if attempt == 0 && lockDB == nil {
 			var lockErr error
 			lockDB, lockErr = bbolt.Open(boltPath, 0600, &bbolt.Options{Timeout: 2 * time.Second})
 			require.NoError(t, lockErr, "acquire competing exclusive lock")
@@ -968,8 +967,10 @@ func TestOpenOrCreateBleveIndex_SustainedLockStillReturnsContentionError(t *test
 
 	_, openErr := openOrCreateBleveIndex(tmp, indexPath, "test")
 	require.Error(t, openErr, "sustained contention must still surface an error")
-	require.Contains(t, openErr.Error(), "lock contention",
-		"sustained contention must not be misread as self-healable corruption")
+	require.Contains(t, openErr.Error(), "self-heal deferred",
+		"sustained contention after a corruption trigger must report deferred healing")
+	require.NotContains(t, openErr.Error(), "appears to be in use (lock contention)",
+		"deferred healing must be distinguishable from a direct open contention error")
 	require.False(t, HasNeedsReindexMarker(tmp, "test"),
 		"a genuinely locked (not proven corrupt) index must not trigger self-heal")
 }

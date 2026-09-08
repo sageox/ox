@@ -64,6 +64,10 @@ func checkCodeIndexAtDir(dataDir string, fix bool) checkResult {
 		// --fix would otherwise delete a healthy index that costs minutes to
 		// rebuild.
 		if !errors.Is(err, store.ErrCorrupt) {
+			if store.IsBleveMappingParseError(err) {
+				return WarningCheck("Code index", fmt.Sprintf("could not open index: %v", err),
+					"run 'ox code index --full' to rebuild; nothing was removed")
+			}
 			return WarningCheck("Code index", fmt.Sprintf("could not open index: %v", err),
 				"nothing was removed; resolve the condition above and rerun 'ox doctor'")
 		}

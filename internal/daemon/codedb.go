@@ -637,7 +637,16 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	m.lastIndex = time.Now()
 	m.lastErr = nil
 	m.stats = cachedStats
+	tracker := m.issues
 	m.mu.Unlock()
+
+	// A completed normal or full index includes the dirty-overlay stage and
+	// supersedes any failure recorded by an earlier standalone refresh. Clear
+	// it here so explicit `ox code index --full` repairs status immediately,
+	// without waiting for an unrelated worktree edit to trigger another refresh.
+	if tracker != nil {
+		tracker.ClearIssue(IssueTypeDirtyOverlayFailed, "")
+	}
 
 	// indexing succeeded — clear any self-heal markers so the next freshness
 	// check doesn't re-force --full. (The dataDir wipe above would have removed

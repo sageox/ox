@@ -82,6 +82,52 @@ func TestDoIndex_HonorsSelfHealMarker_ForcesFullReindex(t *testing.T) {
 	require.Greater(t, commitsAfterSecond, 0, "second index must repopulate commits after wipe")
 }
 
+// TestDoIndex_SuccessClearsDirtyOverlayFailure verifies that either successful
+// indexing mode retires an earlier overlay warning. Both modes rebuild the
+// dirty overlay as part of the completed pipeline, so leaving the old issue in
+// daemon status misreports a healthy index until an unrelated file edit.
+//
+// Failure prevented: a successful `ox code index --full` still leaves
+// dirty_overlay_failed in the status panel indefinitely.
+func TestDoIndex_SuccessClearsDirtyOverlayFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: exercises real git + SQLite + Bleve indexing passes")
+	}
+
+	repoDir := t.TempDir()
+	seedGitRepo(t, repoDir)
+
+	tracker := NewIssueTracker()
+	mgr := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
+	mgr.dataDir = t.TempDir()
+	mgr.SetIssueTracker(tracker)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	_, err := mgr.Index(ctx, CodeIndexPayload{}, nil)
+	require.NoError(t, err, "initial index must succeed before testing reindex modes")
+
+	for _, full := range []bool{false, true} {
+		name := "incremental"
+		if full {
+			name = "full"
+		}
+		t.Run(name, func(t *testing.T) {
+			tracker.SetIssue(DaemonIssue{
+				Type:     IssueTypeDirtyOverlayFailed,
+				Severity: SeverityWarning,
+				Summary:  "stale dirty overlay failure",
+			})
+
+			_, err := mgr.Index(ctx, CodeIndexPayload{Full: full}, nil)
+			require.NoError(t, err)
+
+			_, found := tracker.GetIssue(IssueTypeDirtyOverlayFailed, "")
+			assert.False(t, found, "successful %s index must clear the stale overlay issue", name)
+		})
+	}
+}
+
 // TestStoreOpen_SelfHealsTransparently_NoDaemonRetryNeeded verifies the
 // integration boundary between store.Open self-heal and the daemon: when the
 // daemon's CheckFreshness opens the store and bleve is corrupt, Open self-
