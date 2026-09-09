@@ -200,6 +200,10 @@ func TestConversationUsageErrors(t *testing.T) {
 			if env.Error.Code != tt.wantCode {
 				t.Errorf("error.code = %q, want %q", env.Error.Code, tt.wantCode)
 			}
+			// The exit error must preserve the diagnostic already rendered on stdout.
+			if env.Error.Message == "" || err.Error() != env.Error.Message {
+				t.Errorf("exit error = %q, want envelope message %q", err.Error(), env.Error.Message)
+			}
 		})
 	}
 }

@@ -167,9 +167,9 @@ filesystem-staged fixtures give us.
 
 ## 2. Test matrix
 
-Four cases. Every command exists in the tz PR's worktree — no
-dependency on the journal read surface. Each case directly verifies
-one of the changes in the tz plan.
+Three active cases (TZ-02–TZ-04), with no dependency on the journal
+read surface. TZ-01 is retained below only as historical context;
+its `ox distill --dry-run` command has been removed.
 
 | ID | What's verified | Fixture + env | Command | Observable outcome | Failure mode caught |
 |---|---|---|---|---|---|
@@ -178,9 +178,9 @@ one of the changes in the tz plan.
 | TZ-03 | **`ox config get timezone` does not leak the stray key.** | Project config `.sageox/config.json` carries a stray `"timezone": "Asia/Tokyo"` key. | `ox config get timezone` | Non-zero exit. Stderr contains `unknown setting`. Stdout does NOT echo `Asia/Tokyo`. | `getResolvedConfigValue`'s `case "timezone"` survived, or the `ProjectConfig.Timezone` field is still unmarshalled into a resolvable path, letting the dead key leak out as a first-class "resolved" value. |
 | TZ-04 | **`ox doctor` auto-scrubs dead `timezone` keys from both configs without collateral damage, and is idempotent.** | Project config `.sageox/config.json` carries a stray `"timezone": "Asia/Tokyo"` AND an unrelated `"team_id": "team_abc"` key; team `config.toml` carries `timezone = "Europe/Berlin"` AND an `[owners]` section with at least one member. | `ox doctor --fix --yes`, run twice back-to-back | **First run:** exit 0; both config files on disk no longer contain the top-level `timezone` key; `team_id` and `[owners]` section + TOML comments are byte-preserved. **Second run:** exit 0; both files byte-identical to their post-first-run state (zero mutation idempotency). File-state assertions are stronger than finding-count assertions here because they directly prove the scrub happened on disk — `ox doctor` has no JSON output mode, so finding-count cannot be asserted via stdout parsing. | Unit 7's autofix rule is missing; scrubs more than the `timezone` key (collateral damage); corrupts TOML structure or comments; leaves the key in place; is not idempotent (re-fires on an already-clean file); or emits a `fail`-level finding that would flip exit code non-zero. |
 
-**Count: 4 cases.** TZ-01 covers the write-path revert (Units 1, 2,
-3, 5). TZ-02/03 cover the config surface deletion (Unit 4). TZ-04
-covers the doctor autofix rule (Unit 7).
+**Count: 3 active cases.** TZ-02/03 cover the config surface deletion
+(Unit 4). TZ-04 covers the doctor autofix rule (Unit 7). The superseded
+TZ-01 covered the removed write path (Units 1, 2, 3, 5).
 
 > **Cross-PR dependency:** None. Every command is in the tz PR's
 > worktree. No `t.Skip` guards, no probes, no coordination with the
@@ -288,13 +288,13 @@ No `t.Cleanup` is required for file system. No daemon means no
 
 ## 6. Summary
 
-- **4 end-to-end cases** directly verifying the tz changes:
-  - TZ-01: UTC bucketing with env, project config, and team config
-    tz inputs all present and all silently ignored.
+- **3 active end-to-end cases** directly verifying the remaining tz changes:
   - TZ-02: `ox config set timezone` is rejected.
   - TZ-03: `ox config get timezone` does not leak a stray key.
   - TZ-04: `ox doctor` auto-scrubs dead `timezone` keys without
     collateral damage and is idempotent across runs.
+- **TZ-01 is superseded:** its UTC bucketing checks exercised the removed
+  `ox distill --dry-run` command and are no longer part of the test suite.
 - All parallelizable, all hermetic via `testguard.MinimalEnv` +
   `t.TempDir`, all gated behind the existing `//go:build slow` tag
   so `make test` stays fast.
