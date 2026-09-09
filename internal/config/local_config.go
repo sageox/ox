@@ -482,6 +482,39 @@ func (c *LocalConfig) UpdateTeamContextLastSync(teamID string) {
 			return
 		}
 	}
+	// Deliberately no append: this caller has only an ID, and an entry with an
+	// empty name and path is worse than no entry — it persists a team context
+	// config block that cannot be resolved. Callers that hold the identity
+	// should use UpsertTeamContextLastSync.
+}
+
+// UpsertTeamContextLastSync records a successful sync for teamID, adding the
+// team context to the config when it isn't listed yet. name/slug/path seed a
+// newly-created entry and are ignored for one that already exists.
+//
+// The append matters: team contexts discovered from the repo-detail API
+// (RegisterTeamContextsFromAPI) are never written to config, so the plain
+// update looped over an empty slice and returned silently. Its caller then
+// saved the file and reported success, leaving last_sync unrecordable for
+// those teams — every daemon restart replayed them as "not synced".
+func (c *LocalConfig) UpsertTeamContextLastSync(teamID, name, slug, path string) {
+	now := time.Now().UTC()
+	for i := range c.TeamContexts {
+		if c.TeamContexts[i].TeamID == teamID {
+			c.TeamContexts[i].LastSync = now
+			return
+		}
+	}
+	if teamID == "" {
+		return
+	}
+	c.TeamContexts = append(c.TeamContexts, TeamContext{
+		TeamID:   teamID,
+		TeamName: name,
+		Slug:     slug,
+		Path:     path,
+		LastSync: now,
+	})
 }
 
 // UpdateTeamContextLastGC records when the daemon last GC-recloned a team context.

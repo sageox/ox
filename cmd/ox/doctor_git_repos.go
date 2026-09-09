@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/repotools"
@@ -1437,10 +1438,14 @@ func checkLedgerPathMismatch(fix bool) checkResult {
 }
 
 // checkTeamContextCloneStrategy detects team context clones that are full clones
-// (not partial). Partial clones use --filter=blob:none which sets
-// extensions.partialClone in the git config. Full clones download all blobs upfront
-// and waste disk/bandwidth. This is informational only — blue-green reclone will
+// (not partial). Full clones download all blobs upfront and waste
+// disk/bandwidth. This is informational only — blue-green reclone will
 // eventually replace full clones with partial ones.
+//
+// Detection goes through gitutil.InspectRepo (promisor-remote first). Checking
+// `extensions.partialClone` alone reported every ox clone as a full clone: git
+// 2.50 records `clone --filter` as remote.<name>.promisor and never sets that
+// extension key.
 func checkTeamContextCloneStrategy() []checkResult {
 	var results []checkResult
 
@@ -1459,12 +1464,11 @@ func checkTeamContextCloneStrategy() []checkResult {
 			continue
 		}
 
-		cmd := exec.Command("git", "-C", tc.Path, "config", "--get", "extensions.partialClone")
-		output, err := cmd.Output()
+		state, err := gitutil.InspectRepo(tc.Path)
 
 		name := fmt.Sprintf("Team %s clone strategy", tc.TeamName)
 
-		if err != nil || strings.TrimSpace(string(output)) == "" {
+		if err != nil || !state.Partial {
 			results = append(results, InfoCheck(name,
 				"full clone (not partial)",
 				"Will be upgraded to partial clone on next reclone"))

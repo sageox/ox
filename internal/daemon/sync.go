@@ -696,12 +696,16 @@ func (s *SyncScheduler) recordError(msg string) {
 	}
 }
 
+// recentErrorWindow bounds how far back "recent" reaches for both the error
+// count and the last-error line, so the two can never disagree on screen.
+const recentErrorWindow = time.Hour
+
 // RecentErrorCount returns the count of recent errors (last hour).
 func (s *SyncScheduler) RecentErrorCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cutoff := time.Now().Add(-time.Hour)
+	cutoff := time.Now().Add(-recentErrorWindow)
 	count := 0
 	for _, e := range s.recentErrors {
 		if e.Time.After(cutoff) {
@@ -711,7 +715,14 @@ func (s *SyncScheduler) RecentErrorCount() int {
 	return count
 }
 
-// LastError returns the most recent error message and time.
+// LastError returns the most recent error message and time, or empty when the
+// newest error is older than the recentErrorWindow.
+//
+// recentErrors is bounded by COUNT (maxRecentErrs), not age, so without this
+// window a single transient failure — a DNS blip while the laptop slept —
+// stayed rendered as "Last error: ✗ ..." indefinitely, directly beside the
+// "0 errors" that RecentErrorCount (which does window by age) reported from
+// the same struct.
 func (s *SyncScheduler) LastError() (string, time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -720,6 +731,9 @@ func (s *SyncScheduler) LastError() (string, time.Time) {
 		return "", time.Time{}
 	}
 	last := s.recentErrors[len(s.recentErrors)-1]
+	if time.Since(last.Time) > recentErrorWindow {
+		return "", time.Time{}
+	}
 	return last.Message, last.Time
 }
 
@@ -1137,11 +1151,15 @@ func (s *SyncScheduler) shouldSyncOrBypass(id string, forceSync bool) bool {
 	if s.workspaceRegistry.IsSyncSuspended(id) {
 		s.logger.Warn("sync suspended after repeated identical dirty tree", "id", id)
 		if s.issues != nil {
+			// Names `ox sync --all-teams` specifically: bare `ox sync` reaches
+			// only the ledger (cmd/ox/sync.go syncViaDaemon), and `ox doctor`
+			// has no team-context force-sync path at all — the previous wording
+			// pointed at two commands that cannot clear this state.
 			s.issues.SetIssue(DaemonIssue{
 				Type:     IssueTypeSyncBackoff,
 				Severity: SeverityWarning,
 				Repo:     id,
-				Summary:  "Sync suspended after the same local changes failed twice; run `ox doctor` or `ox sync` after resolving the checkout",
+				Summary:  "Sync suspended: the same local changes failed twice. Resolve the checkout, then run `ox sync --all-teams` (bare `ox sync` syncs only the ledger)",
 			})
 		}
 		return false

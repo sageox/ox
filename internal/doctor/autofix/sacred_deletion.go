@@ -27,15 +27,18 @@ const commitMarker = "\x1e"
 // checkLedgerSacredDeletion is the daemon's periodic deep check for the
 // data-loss class the 2026-08-25 Ox Dot wipe belongs to: a single commit that
 // deleted every saved plan + session. It resolves the workspace's ledger and
-// scans recent history for any commit deleting more than sacred.MassDeleteThreshold
-// files under a sacred prefix.
+// scans recent history for any commit that removed more than
+// sacred.MassDeleteThreshold whole plans/sessions.
 //
 // DETECTION ONLY — it never restores. Per ADR-024 sacred-data deletion needs
-// explicit human approval, so a hit is surfaced as StatusFound for review.
-// A file-count threshold cannot establish intent: even one intentionally
-// removed plan/session may contain enough artifacts to trigger it. This
-// is the belt to the commit-time guard's suspenders: it fires even when the
-// guard never ran (old binary) or was bypassed (force-push).
+// explicit human approval, so a hit is surfaced as StatusFound for review; a
+// commit message is not that approval. This is the belt to the commit-time
+// guard's suspenders: it fires even when the guard never ran (old binary) or
+// was bypassed (force-push).
+//
+// Counts entities REMOVED, not sacred files touched. Deleting artifacts from
+// inside a session — a sweep of stale `.rej` files, say — loses no session and
+// is not reported, which the previous file count could not express.
 func checkLedgerSacredDeletion(ctx context.Context, repoPath string) CheckResult {
 	if repoPath == "" {
 		return CheckResult{Status: StatusClean}
@@ -81,21 +84,31 @@ func scanLedgerSacredDeletions(ctx context.Context, ledgerPath, repoPath string)
 	}
 	var hits []wipe
 	var cur string
-	var cnt int
+	var touched []string
 	flush := func() {
-		if cur != "" && cnt > sacred.MassDeleteThreshold {
-			hits = append(hits, wipe{cur, cnt})
+		if cur == "" {
+			return
+		}
+		// Entities merely TOUCHED by a deletion are only candidates: removing
+		// `sessions/X/meta.json.rej` leaves session X intact. Confirm each
+		// candidate is actually absent from this commit's tree before counting
+		// it, so artifact sweeps no longer register as wipes.
+		candidates := sacred.Entities(touched)
+		if len(candidates) > sacred.MassDeleteThreshold {
+			if removed := removedEntities(ctx, ledgerPath, cur, candidates); len(removed) > sacred.MassDeleteThreshold {
+				hits = append(hits, wipe{cur, len(removed)})
+			}
 		}
 	}
 	for _, line := range strings.Split(out, "\n") {
 		if strings.HasPrefix(line, commitMarker) {
 			flush()
 			cur = strings.TrimSpace(strings.TrimPrefix(line, commitMarker))
-			cnt = 0
+			touched = touched[:0]
 			continue
 		}
-		if sacred.HasPrefix(strings.TrimSpace(line)) {
-			cnt++
+		if p := strings.TrimSpace(line); sacred.HasPrefix(p) {
+			touched = append(touched, p)
 		}
 	}
 	flush()
@@ -123,9 +136,38 @@ func scanLedgerSacredDeletions(ctx context.Context, ledgerPath, repoPath string)
 	return CheckResult{
 		Status: StatusFound,
 		Repo:   repoPath,
-		Summary: fmt.Sprintf("plan/session deletion history: %d commit(s) deleting %d plan/session files (e.g. %s) — verify intent before recovery; do NOT auto-delete (ADR-024)",
+		Summary: fmt.Sprintf("plan/session deletion history: %d commit(s) removing %d whole plans/sessions (e.g. %s) — verify intent before recovery; do NOT auto-delete (ADR-024)",
 			len(hits), total, strings.Join(sample, ", ")),
 	}
+}
+
+// removedEntities returns the subset of candidates that no longer exist in
+// treeish. One `git ls-tree` lists the survivors in a single call; anything
+// not listed is gone.
+//
+// Only called for commits whose candidate count already exceeds the threshold,
+// so the common commit costs no extra git invocation. On error it returns
+// candidates unchanged — a scan that cannot confirm survival must not silence
+// a potential wipe (fail-loud, matching the check's detection-only contract).
+func removedEntities(ctx context.Context, ledgerPath, treeish string, candidates []string) []string {
+	args := append([]string{"ls-tree", "-d", "--name-only", treeish, "--"}, candidates...)
+	out, err := gitutil.RunGit(ctx, ledgerPath, args...)
+	if err != nil {
+		return candidates
+	}
+	survived := make(map[string]bool, len(candidates))
+	for _, line := range strings.Split(out, "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			survived[p] = true
+		}
+	}
+	removed := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		if !survived[c] {
+			removed = append(removed, c)
+		}
+	}
+	return removed
 }
 
 // shortSHA abbreviates a commit id for bounded log/summary output.

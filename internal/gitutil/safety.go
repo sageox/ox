@@ -306,12 +306,27 @@ func StripLFSConfig(repoPath string) {
 	}
 }
 
-// FetchHeadAge returns how long ago FETCH_HEAD was last modified.
-// Returns (0, false) if FETCH_HEAD doesn't exist or can't be read.
+// FetchHeadAge returns how long ago a SUCCESSFUL fetch last wrote FETCH_HEAD.
+// Returns (0, false) if FETCH_HEAD doesn't exist, can't be read, or is empty.
+//
+// The empty case is not a corner case, it is the failure case: git truncates
+// FETCH_HEAD before contacting the remote, so a fetch that fails — DNS down,
+// remote gone — leaves a zero-byte file with a fresh mtime. Callers use this
+// age to skip a "recent" fetch, so counting that file made a failed fetch
+// suppress the retry that would have recovered, and the resulting skip is
+// reported to the caller as a successful sync.
+//
+// A successful fetch always writes at least one ref line, including when the
+// repo is already up to date, so non-empty is a sound success signal. Treating
+// empty as "no fetch" errs toward fetching again, which is the safe direction:
+// a redundant fetch costs one round trip, a false skip costs correctness.
 func FetchHeadAge(repoPath string) (time.Duration, bool) {
 	fetchHead := filepath.Join(repoPath, ".git", "FETCH_HEAD")
 	info, err := os.Stat(fetchHead)
 	if err != nil {
+		return 0, false
+	}
+	if info.Size() == 0 {
 		return 0, false
 	}
 	return time.Since(info.ModTime()), true

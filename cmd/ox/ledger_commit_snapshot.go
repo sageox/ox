@@ -104,25 +104,64 @@ func assertNoSacredMassDeletion(ctx context.Context, ledgerPath, parent, tree st
 			shortOID(parent), shortOID(tree), err)
 	}
 	deleted := sacred.Filter(strings.Split(string(out), "\n"))
-	if len(deleted) <= sacred.MassDeleteThreshold {
+	// Count whole plans/sessions, not files. A single session directory is
+	// 6-7 files, so the old file count refused an ordinary one-session
+	// delete, and a `.rej` artifact sweep that removed no session at all.
+	candidates := sacred.Entities(deleted)
+	if len(candidates) <= sacred.MassDeleteThreshold {
+		return nil
+	}
+	// Touching an entity is not removing it — confirm absence in the tree
+	// being committed before refusing.
+	removed, err := survivorFilteredEntities(ctx, ledgerPath, tree, candidates)
+	if err != nil {
+		return fmt.Errorf("sacred mass-delete guard: git ls-tree %s: %w", shortOID(tree), err)
+	}
+	if len(removed) <= sacred.MassDeleteThreshold {
 		return nil
 	}
 	if os.Getenv(sacred.OverrideEnv) == "1" {
 		slog.WarnContext(ctx, "ledger sacred mass-deletion allowed by explicit override",
-			"repo", ledgerPath, "sacred_deletions", len(deleted), "override_env", sacred.OverrideEnv)
+			"repo", ledgerPath, "sacred_entities_removed", len(removed), "override_env", sacred.OverrideEnv)
 		return nil
 	}
 	// Loud alert: this is a data-loss event caught at the last line of defense.
 	slog.ErrorContext(ctx, "REFUSING ledger commit: sacred mass-deletion detected",
 		"repo", ledgerPath,
-		"sacred_deletions", len(deleted),
+		"sacred_entities_removed", len(removed),
+		"sacred_files_deleted", len(deleted),
 		"threshold", sacred.MassDeleteThreshold,
-		"sample", sampleStrings(deleted, 5),
+		"sample", sampleStrings(removed, 5),
 		"override_env", sacred.OverrideEnv)
-	return fmt.Errorf("refusing commit: would delete %d files under sacred paths (%s) in one commit, "+
+	return fmt.Errorf("refusing commit: would remove %d whole plans/sessions under sacred paths (%s) in one commit, "+
 		"exceeds guard threshold %d — likely a sparse/GC-reconcile wipe (see ADR-024); "+
 		"if this bulk removal is intentional, set %s=1",
-		len(deleted), strings.Join(sacred.Prefixes, ", "), sacred.MassDeleteThreshold, sacred.OverrideEnv)
+		len(removed), strings.Join(sacred.Prefixes, ", "), sacred.MassDeleteThreshold, sacred.OverrideEnv)
+}
+
+// survivorFilteredEntities returns the candidates absent from tree. Unlike the
+// daemon detector's equivalent, an ls-tree failure is propagated rather than
+// swallowed: this guard is fail-closed, so a check that cannot run must block
+// the commit instead of waving it through.
+func survivorFilteredEntities(ctx context.Context, ledgerPath, tree string, candidates []string) ([]string, error) {
+	args := append([]string{"ls-tree", "-d", "--name-only", tree, "--"}, candidates...)
+	out, err := ledgerGit(ctx, ledgerPath, args...)
+	if err != nil {
+		return nil, err
+	}
+	survived := make(map[string]bool, len(candidates))
+	for _, line := range strings.Split(string(out), "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			survived[p] = true
+		}
+	}
+	removed := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		if !survived[c] {
+			removed = append(removed, c)
+		}
+	}
+	return removed, nil
 }
 
 // sampleStrings returns at most n elements of s, for bounded log output.

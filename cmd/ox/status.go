@@ -1167,17 +1167,26 @@ func renderDaemonSyncSection(ds *daemon.StatusData, syncHistory []daemon.SyncEve
 					label = ws.TeamID
 				}
 
+				// This block lives under the "Syncing" heading, so the mark
+				// reports SYNC state, not merely that the directory exists.
+				// A bare ✓ meaning "is a git repo" hid a five-hour
+				// team-context sync outage behind a green checkmark while
+				// `ox daemon status` correctly showed "not synced".
 				b.WriteString(syncLabel.Render("  " + label))
-				if ws.Exists {
-					b.WriteString(statusSuccessStyle.Render("✓ "))
-				} else {
+				switch {
+				case !ws.Exists:
 					b.WriteString(statusWarningStyle.Render("⚠ "))
-				}
-				// condensed: sync time on same line as label
-				if !ws.LastSync.IsZero() {
+					if ws.CloneURL != "" {
+						b.WriteString(statusMutedStyle.Render(ws.CloneURL))
+					} else {
+						b.WriteString(statusMutedStyle.Render("not cloned"))
+					}
+				case ws.LastSync.IsZero():
+					b.WriteString(statusWarningStyle.Render("◐ "))
+					b.WriteString(statusMutedStyle.Render("not synced"))
+				default:
+					b.WriteString(statusSuccessStyle.Render("✓ "))
 					b.WriteString(statusMutedStyle.Render(status.FormatTimeAgo(ws.LastSync)))
-				} else if !ws.Exists && ws.CloneURL != "" {
-					b.WriteString(statusMutedStyle.Render(ws.CloneURL))
 				}
 				b.WriteString("\n")
 

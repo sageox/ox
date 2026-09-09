@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -245,10 +246,23 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 
 		if r.err != nil {
 			s.workspaceRegistry.SetWorkspaceError(r.ws.ID, r.err.Error())
-			fingerprint, fpErr := worktreeFingerprint(ctx, r.ws.Path)
-			suspended := fpErr == nil && s.workspaceRegistry.RecordSyncFailureFingerprint(r.ws.ID, fingerprint)
-			if fpErr != nil {
+			// Permanent suspension is reserved for failures the LOCAL checkout
+			// causes deterministically (ADR-024 / issue #767: an LFS
+			// double-encode that no pull could ever settle, whose retries piled
+			// up autostash entries without bound). A network failure repeats
+			// identically too, but resolves on its own — suspending it stopped
+			// team-context sync for hours after a laptop sleep, while
+			// getErrorHint was still promising "Will retry automatically".
+			// Transient failures take the ordinary bounded backoff instead.
+			var suspended bool
+			if isTransientSyncError(r.err) {
 				s.workspaceRegistry.RecordSyncFailure(r.ws.ID)
+			} else {
+				fingerprint, fpErr := worktreeFingerprint(ctx, r.ws.Path)
+				suspended = fpErr == nil && s.workspaceRegistry.RecordSyncFailureFingerprint(r.ws.ID, fingerprint)
+				if fpErr != nil {
+					s.workspaceRegistry.RecordSyncFailure(r.ws.ID)
+				}
 			}
 			s.recordSyncStateFailure(r.ws.Path)
 			s.logger.Debug("team context pull failed", "team", r.ws.TeamName, "error", r.err, "suspended", suspended)
@@ -391,14 +405,70 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 // worktreeFingerprint returns a content-independent identifier for the
 // worktree state that caused a failed sync. It deliberately hashes porcelain
 // output so logs and status never expose local filenames or data.
+//
+// Returns "" for a CLEAN worktree. A clean tree hashes to sha256("") — the
+// same constant on every repo, every time — so "the fingerprint repeated"
+// would carry no evidence that the checkout caused the failure.
+// RecordSyncFailureFingerprint skips suspension on an empty fingerprint, so
+// this routes clean-tree failures to ordinary backoff. Nothing is lost: the
+// unbounded-autostash harm that motivated suspension needs local changes to
+// stash, which a clean tree does not have.
 func worktreeFingerprint(ctx context.Context, repoPath string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "status", "--porcelain=v1", "--untracked-files=all")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
 	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return "", nil
+	}
 	sum := sha256.Sum256(out)
 	return fmt.Sprintf("%x", sum), nil
+}
+
+// isTransientSyncError reports whether a failed pull is environmental —
+// network, DNS, or a server that was unreachable — rather than caused by the
+// local checkout. Transient failures must never trigger the permanent
+// fingerprint suspension: they clear on their own, and bounded exponential
+// backoff already paces the retries.
+//
+// The matched substrings are git/curl transport wording, deliberately kept in
+// sync with humanizeError's network cases in status_display.go — that function
+// renders these same errors to users as "network may be offline".
+func isTransientSyncError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"could not resolve host",
+		"resolving timed out",
+		"no such host",
+		"connection timed out",
+		"operation timed out",
+		"connection refused",
+		"connection reset",
+		"network is unreachable",
+		"network is down",
+		"temporary failure in name resolution",
+		"ssl connect error",
+		"gnutls_handshake() failed",
+		"empty reply from server",
+		"failed to connect to",
+		"unexpected disconnect",
+		"the remote end hung up unexpectedly",
+		"early eof",
+		"context deadline exceeded",
+		"i/o timeout",
+		"502 bad gateway",
+		"503 service unavailable",
+		"504 gateway",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // pullTeamContext performs a git pull on a single team context repo.
