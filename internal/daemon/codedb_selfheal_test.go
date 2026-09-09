@@ -107,6 +107,30 @@ func TestDoIndex_SuccessClearsDirtyOverlayFailure(t *testing.T) {
 	initialCancel()
 	require.NoError(t, err, "initial index must succeed before testing reindex modes")
 
+	t.Run("recent successful overlay", func(t *testing.T) {
+		mgr.mu.Lock()
+		mgr.lastDirtyRefresh = time.Now()
+		mgr.mu.Unlock()
+		tracker.SetIssue(DaemonIssue{
+			Type:     IssueTypeDirtyOverlayFailed,
+			Severity: SeverityWarning,
+			Summary:  "stale dirty overlay failure",
+		})
+
+		indexCtx, indexCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		_, err := mgr.Index(indexCtx, CodeIndexPayload{}, nil)
+		indexCancel()
+		require.NoError(t, err)
+
+		_, found := tracker.GetIssue(IssueTypeDirtyOverlayFailed, "")
+		assert.False(t, found, "recent successful overlay must retire an older failure")
+	})
+
+	mgr.mu.Lock()
+	mgr.lastDirtyRefresh = time.Time{}
+	mgr.mu.Unlock()
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "hello.go"), []byte("package main\nfunc Dirty() {}\n"), 0o600))
+
 	for _, full := range []bool{false, true} {
 		name := "incremental"
 		if full {

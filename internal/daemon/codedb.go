@@ -972,6 +972,7 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 		if err != nil {
 			m.logger.Warn("dirty overlay refresh: open failed", "error", err)
 			m.mu.Lock()
+			m.lastDirtyRefresh = time.Time{}
 			tracker := m.issues
 			m.mu.Unlock()
 			if tracker != nil {
@@ -991,6 +992,7 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 		if dirtyErr != nil {
 			m.logger.Warn("dirty overlay refresh failed", "error", dirtyErr)
 			m.mu.Lock()
+			m.lastDirtyRefresh = time.Time{}
 			tracker := m.issues
 			m.mu.Unlock()
 			if tracker != nil {
