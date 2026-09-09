@@ -224,9 +224,19 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 		return nil, &HTTPError{StatusCode: resp.StatusCode}
 	}
 
-	respBody, err := io.ReadAll(resp.Body)
+	// Read-route batch metadata is bounded independently of the request deadline,
+	// including chunked bodies. Read one extra byte to detect overflow before decoding.
+	const maxBatchResponseBytes = 1 << 20
+	var body io.Reader = resp.Body
+	if c.readURL != "" {
+		body = io.LimitReader(body, maxBatchResponseBytes+1)
+	}
+	respBody, err := io.ReadAll(body)
 	if err != nil {
 		return nil, fmt.Errorf("read batch response: %w", err)
+	}
+	if c.readURL != "" && len(respBody) > maxBatchResponseBytes {
+		return nil, fmt.Errorf("LFS batch response exceeds %d bytes", maxBatchResponseBytes)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

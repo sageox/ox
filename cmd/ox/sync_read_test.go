@@ -232,6 +232,16 @@ func TestReadSyncRequestedIncludesMalformedReadFlags(t *testing.T) {
 		{[]string{"sync", "--", "--read-only"}, false},
 		{[]string{"sync", "--team", "team"}, false},
 		{[]string{"status", "--json"}, false},
+		{[]string{"query", "sync", "--repo", readSyncTestRepoID, "--unknown"}, false},
+		{[]string{"query", "git-credential-helper", "--read-repo", readSyncTestRepoID}, false},
+		{[]string{"help", "sync", "--repo", readSyncTestRepoID}, false},
+		{[]string{"--config", "sync", "query", "text", "--repo", readSyncTestRepoID}, false},
+		{[]string{"-c", "git-credential-helper", "query", "text", "--read-url", "url"}, false},
+		{[]string{"--", "sync", "--read-only"}, false},
+		{[]string{"unknown-command", "sync", "--read-only"}, false},
+		{[]string{"--config", "config.yaml", "sync", "--read-only"}, true},
+		{[]string{"-cconfig.yaml", "sync", "--read-only"}, true},
+		{[]string{"-vq", "sync", "--read-only"}, true},
 		{[]string{"git-credential-helper", "--read-endpoint=https://test.sageox.ai", "get"}, true},
 		{[]string{"git-credential-helper", "--read-repo", readSyncTestRepoID, "get"}, true},
 		{[]string{"git-credential-helper", "get"}, false},
@@ -299,6 +309,39 @@ func TestReadSyncProcessIgnoresDotenvAndSanitizesParserErrors(t *testing.T) {
 			files, err := os.ReadDir(dir)
 			require.NoError(t, err)
 			require.Len(t, files, 1)
+		})
+	}
+}
+
+// Failure prevented: query text or a flag value named sync changes an unrelated
+// command's initialization and parser errors into ledger-read handling.
+func TestReadSyncProcessPreservesOtherCommandErrors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real CLI subprocesses")
+	}
+	bin, err := os.Executable()
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"ordinary query", []string{"query", "ordinary", "--repo", readSyncTestRepoID, "--unknown"}},
+		{"sync query", []string{"query", "sync", "--repo", readSyncTestRepoID, "--unknown"}},
+		{"helper query", []string{"query", "git-credential-helper", "--read-repo", readSyncTestRepoID, "--unknown"}},
+		{"config value", []string{"--config", "sync", "query", "ordinary", "--repo", readSyncTestRepoID, "--unknown"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"-test.run=^TestReadSyncProcessHelper$", "--"}, tc.args...)
+			cmd := testguard.OxCmd(t, bin, t.TempDir(), []string{
+				"OX_TEST_READ_SYNC_HELPER=1", "XDG_DATA_HOME=" + t.TempDir(), "HOME=" + t.TempDir(),
+			}, args...)
+			out, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			require.ErrorAs(t, err, &exit)
+			assert.Equal(t, 1, exit.ExitCode(), "output=%s", out)
+			assert.Contains(t, string(out), "unknown flag:")
+			assert.NotContains(t, string(out), "Ledger read failed")
+			assert.NotContains(t, string(out), "Use: ox sync --read-only")
 		})
 	}
 }

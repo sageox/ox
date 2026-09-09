@@ -22,11 +22,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// headlessLedgerReadRequested runs before Cobra and dotenv loading. A malformed read
-// invocation also skips project configuration, daemon IPC, and friction retries.
+// headlessLedgerReadRequested runs before flag parsing and dotenv loading. A malformed
+// read invocation also skips project configuration, daemon IPC, and friction retries.
 func headlessLedgerReadRequested(args []string) bool {
-	syncRequested := slices.Contains(args, "sync")
-	helperRequested := slices.Contains(args, "git-credential-helper")
+	// Reuse Cobra's command lookup so positional arguments and flag values
+	// cannot select the read path for an unrelated command.
+	cmd, _, _ := rootCmd.Find(args)
+	syncRequested := cmd == syncCmd
+	helperRequested := cmd == gitCredentialHelperCmd
 	if !syncRequested && !helperRequested {
 		return false
 	}

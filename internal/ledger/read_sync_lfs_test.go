@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -108,6 +110,123 @@ func TestReadSyncLFSBatchHydratesUniqueAndSharedObjects(t *testing.T) {
 	require.Equal(t, result.Head, warm.Head)
 	require.Equal(t, int32(1), batches.Load())
 	require.Equal(t, coldDownloads, downloads.Load(), "warm verified files require no object downloads")
+}
+
+// Failure prevented: ledgers with over 100 unique pointers exceed the backend's
+// batch limit, or a later failed batch discards previously verified hydration.
+func TestReadSyncLFSBoundedBatchesPreserveProgress(t *testing.T) {
+	for _, tc := range []struct{ name, errorClass string }{
+		{name: "complete"},
+		{name: "later batch foreign", errorClass: "missing_hydration"},
+		{name: "later batch denied", errorClass: "denied"},
+		{name: "later batch canceled", errorClass: "interrupted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			contents := make(map[string][]byte)
+			paths := make(map[string]string)
+			for i := range 101 {
+				content := []byte(fmt.Sprintf("batched object %03d\n", i))
+				oid := lfs.ComputeOID(content)
+				contents[oid] = content
+				paths[fmt.Sprintf("sessions/bounded/object-%03d.md", i)] = oid
+			}
+			firstOID := paths["sessions/bounded/object-000.md"]
+			paths["sessions/bounded/shared.md"] = firstOID
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var batches, downloads atomic.Int32
+			f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasSuffix(r.URL.Path, "/batch") {
+					downloads.Add(1)
+					content, ok := contents[filepath.Base(r.URL.Path)]
+					if !assert.True(t, ok) {
+						http.NotFound(w, r)
+						return
+					}
+					w.Write(content)
+					return
+				}
+				batch := batches.Add(1)
+				body, err := io.ReadAll(r.Body)
+				assert.NoError(t, err)
+				assert.LessOrEqual(t, len(body), 64*1024, "backend request-body limit")
+				var request struct {
+					Objects []lfs.BatchObject `json:"objects"`
+				}
+				assert.NoError(t, json.Unmarshal(body, &request))
+				if len(request.Objects) > 100 {
+					http.Error(w, "batch object limit exceeded", http.StatusRequestEntityTooLarge)
+					return
+				}
+				if batch == 1 {
+					assert.Len(t, request.Objects, 100)
+				} else {
+					assert.Len(t, request.Objects, 1)
+					assert.Equal(t, int32(101), downloads.Load(), "the prior batch, including shared files, remains hydrated")
+				}
+				if batch == 2 {
+					switch tc.name {
+					case "later batch denied":
+						w.WriteHeader(http.StatusForbidden)
+						return
+					case "later batch canceled":
+						cancel()
+						<-r.Context().Done()
+						return
+					case "later batch foreign":
+						request.Objects = []lfs.BatchObject{{OID: firstOID, Size: int64(len(contents[firstOID]))}}
+					}
+				}
+				response := lfs.BatchResponse{}
+				for i := len(request.Objects) - 1; i >= 0; i-- {
+					object := request.Objects[i]
+					response.Objects = append(response.Objects, lfs.BatchResponseObject{
+						OID: object.OID, Size: object.Size, Actions: &lfs.Actions{Download: &lfs.Action{
+							Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + object.OID,
+						}},
+					})
+				}
+				json.NewEncoder(w).Encode(response)
+			})
+			require.True(t, ReadSync(ctx, f.opts).Ready)
+			require.NoError(t, os.MkdirAll(filepath.Join(f.source, "sessions/bounded"), 0700))
+			for path, oid := range paths {
+				pointer := lfs.FormatPointer("sha256:"+oid, int64(len(contents[oid])))
+				require.NoError(t, os.WriteFile(filepath.Join(f.source, path), []byte(pointer), 0600))
+			}
+			readTestGit(t, f.source, "add", "--", "sessions/bounded")
+			readTestGit(t, f.source, "commit", "-m", "add more than one LFS batch")
+			readTestGit(t, f.bare, "fetch", f.source, "+refs/heads/main:refs/heads/main")
+			result := ReadSync(ctx, f.opts)
+			require.Equal(t, tc.errorClass, result.ErrorClass, "%+v", result)
+			require.Equal(t, int32(2), batches.Load())
+			if tc.errorClass != "" {
+				require.False(t, result.Ready)
+				require.Equal(t, int32(101), downloads.Load())
+				receipt := loadReadReceipt(f.opts.Path, f.opts.RepoID, f.opts.Endpoint)
+				require.NotNil(t, receipt)
+				require.False(t, receipt.Ready)
+				for path, oid := range paths {
+					actual, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+					require.NoError(t, err)
+					if path == "sessions/bounded/object-100.md" {
+						require.Equal(t, lfs.FormatPointer("sha256:"+oid, int64(len(contents[oid]))), string(actual))
+					} else {
+						require.Equal(t, contents[oid], actual, path)
+					}
+				}
+				result = ReadSync(context.Background(), f.opts)
+				require.Equal(t, int32(3), batches.Load(), "retry requests only the remaining object")
+			}
+			require.True(t, result.Ready, "%+v", result)
+			require.Equal(t, int32(len(paths)), downloads.Load())
+			for path, oid := range paths {
+				actual, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+				require.NoError(t, err)
+				require.Equal(t, contents[oid], actual, path)
+			}
+		})
+	}
 }
 
 // Failure prevented: an incomplete or mismatched batch partially hydrates files

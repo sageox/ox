@@ -508,20 +508,20 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 		return err
 	}
 	requests := make([]lfs.BatchObject, 0)
-	sizes := make(map[string]int64)
+	pending := make(map[string][]readFile)
 	for _, f := range files {
 		if len(f.pointer) == 0 || f.hydrated {
 			continue
 		}
 		oid := f.ref.BareOID()
-		if size, ok := sizes[oid]; ok {
-			if size != f.ref.Size {
+		if same := pending[oid]; len(same) != 0 {
+			if same[0].ref.Size != f.ref.Size {
 				return errors.New("missing_hydration")
 			}
-			continue
+		} else {
+			requests = append(requests, lfs.BatchObject{OID: oid, Size: f.ref.Size})
 		}
-		sizes[oid] = f.ref.Size
-		requests = append(requests, lfs.BatchObject{OID: oid, Size: f.ref.Size})
+		pending[oid] = append(pending[oid], f)
 	}
 	if len(requests) == 0 {
 		return nil
@@ -530,33 +530,42 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 	if err != nil {
 		return err
 	}
-	resp, err := client.BatchDownloadContext(ctx, requests)
-	if err != nil {
-		return err
-	}
-	actions := make(map[string]*lfs.Action, len(resp.Objects))
-	for _, object := range resp.Objects {
-		size, requested := sizes[object.OID]
-		if !requested || actions[object.OID] != nil {
-			return errors.New("missing_hydration")
-		}
-		if object.Error != nil && (object.Error.Code == 401 || object.Error.Code == 403) {
-			return &lfs.HTTPError{StatusCode: object.Error.Code}
-		}
-		if size != object.Size || object.Error != nil || object.Actions == nil || object.Actions.Download == nil {
-			return errors.New("missing_hydration")
-		}
-		actions[object.OID] = object.Actions.Download
-	}
-	if len(actions) != len(requests) {
-		return errors.New("missing_hydration")
-	}
-	for _, f := range files {
-		if len(f.pointer) == 0 || f.hydrated {
-			continue
-		}
-		if err := materializeReadObject(ctx, actions[f.ref.BareOID()], filepath.Join(dir, f.path), f.ref); err != nil {
+	// The read route allows 100 objects and 64 KiB of request JSON. Fixed-size
+	// SHA-256 OIDs keep each batch well below that body limit. Materialize one
+	// validated batch at a time so grants stay bounded and failures retain progress.
+	const batchSize = 100
+	for start := 0; start < len(requests); start += batchSize {
+		batch := requests[start:min(start+batchSize, len(requests))]
+		resp, err := client.BatchDownloadContext(ctx, batch)
+		if err != nil {
 			return err
+		}
+		if len(resp.Objects) != len(batch) {
+			return errors.New("missing_hydration")
+		}
+		actions := make(map[string]*lfs.Action, len(batch))
+		for _, object := range batch {
+			actions[object.OID] = nil
+		}
+		for _, object := range resp.Objects {
+			action, requested := actions[object.OID]
+			if !requested || action != nil {
+				return errors.New("missing_hydration")
+			}
+			if object.Error != nil && (object.Error.Code == 401 || object.Error.Code == 403) {
+				return &lfs.HTTPError{StatusCode: object.Error.Code}
+			}
+			if pending[object.OID][0].ref.Size != object.Size || object.Error != nil || object.Actions == nil || object.Actions.Download == nil {
+				return errors.New("missing_hydration")
+			}
+			actions[object.OID] = object.Actions.Download
+		}
+		for _, object := range batch {
+			for _, f := range pending[object.OID] {
+				if err := materializeReadObject(ctx, actions[object.OID], filepath.Join(dir, f.path), f.ref); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil

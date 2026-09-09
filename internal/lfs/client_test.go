@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -136,6 +137,51 @@ func TestBatch_ServerError(t *testing.T) {
 	_, err := c.BatchUpload([]BatchObject{{OID: "abc", Size: 10}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HTTP 500")
+}
+
+// Failure prevented: a batch response, including an error or chunked body,
+// consumes unbounded memory before decoding or returning the HTTP failure.
+func TestReadLFS_BatchResponseSizeBound(t *testing.T) {
+	const limit = 1 << 20
+	for _, tc := range []struct {
+		name    string
+		size    int
+		status  int
+		chunked bool
+	}{
+		{name: "exact limit", size: limit, status: http.StatusOK},
+		{name: "oversized", size: limit + 1, status: http.StatusOK},
+		{name: "chunked exact limit", size: limit, status: http.StatusOK, chunked: true},
+		{name: "chunked oversized", size: limit + 1, status: http.StatusOK, chunked: true},
+		{name: "oversized error", size: limit + 1, status: http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const body = `{"objects":[]}`
+			c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if !tc.chunked {
+					w.Header().Set("Content-Length", fmt.Sprint(tc.size))
+				}
+				w.WriteHeader(tc.status)
+				if tc.chunked {
+					w.(http.Flusher).Flush()
+				}
+				io.WriteString(w, body+strings.Repeat(" ", tc.size-len(body)))
+			})
+			response, err := c.BatchDownload(nil)
+			if tc.status != http.StatusOK {
+				var httpErr *HTTPError
+				require.ErrorAs(t, err, &httpErr)
+				require.Equal(t, tc.status, httpErr.StatusCode)
+				require.Nil(t, response)
+			} else if tc.size > limit {
+				require.ErrorContains(t, err, "batch response exceeds")
+				require.Nil(t, response)
+			} else {
+				require.NoError(t, err)
+				require.Empty(t, response.Objects)
+			}
+		})
+	}
 }
 
 // TestBatch_RejectsPlaintextHTTP confirms doBatch refuses to send
