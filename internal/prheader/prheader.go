@@ -1,13 +1,21 @@
 // Package prheader renders the SageOx "credit line" that an AI coworker pastes
 // at the TOP of a pull-request description body — the human-facing counterpart
-// to the machine `SageOx-Session:` trailer (see cmd/ox/session_url.go). It names
-// the team, links the session(s) and plan(s) that produced the change, and
-// whispers a Tufte-style enrichment stat.
+// to the machine `SageOx-Session:` trailer (see cmd/ox/session_url.go). It links
+// the session(s), plan(s), and discussion(s) that produced the change, and names
+// the team they belong to.
 //
 // Render is a PURE function: deterministic output for a given Input, no I/O, no
 // globals mutated — mirroring internal/planhero so it is trivially table-tested.
-// Every Input field degrades independently: no sessions, no plans, and no
-// enrichment each still produce a valid, good-looking line.
+//
+// # The one rule about when it renders
+//
+// A credit line exists so a reviewer can GO LOOK. Render therefore emits nothing
+// unless the header carries at least one artifact link a reviewer can open. The
+// team name alone is not a credit: the wordmark's /t/ link is chrome a reviewer
+// never needs, and a mark with no session, plan, or discussion behind it is a
+// logo stamp on someone else's pull request, not provenance. State the rule as a
+// property of the CLASS — "at least one openable link" — so the next artifact
+// type inherits the gate instead of re-deriving it.
 //
 // # Why the markup looks the way it does
 //
@@ -22,16 +30,44 @@
 // So the line is built from the primitives that survive: a <blockquote> card
 // (left accent bar + subtle tint — the one card-like chrome GitHub allows), a
 // theme-adaptive <picture> wordmark (the only mechanism that swaps by
-// prefers-color-scheme), <a>, <sub>, <b>, <br>, and &nbsp;/&middot; entities. Two
+// prefers-color-scheme), <a>, <b>, and &nbsp;/&middot; entities. Two
 // dividers carry meaning: a slash joins the wordmark to the team name (the
 // owner/team breadcrumb — containment), a middle dot divides the peer links.
 // The wordmark is an <img>, so it can link to the team page AND keep its brand
 // color — a text <a> cannot, since GitHub forces every link to its own blue, so
-// the team name stays plain <b> text and the actionable Session/Plan links are
-// the only blue. A small "guided by" kicker sits above the wordmark (its
-// attribution), so the brand name is the mark itself, never repeated as text.
-// Enrichment stats recede to a second line in <sub>, or — in Tier B — a floated
-// <img align="right"> that hard-pins to the container edge without table chrome.
+// the team name stays plain <b> text and the artifact links are the only blue.
+//
+// # Vertical alignment: why <small> and no align attribute
+//
+// Everything sits on ONE line, and every glyph on that line must share a
+// baseline. Two measured findings drive the markup:
+//
+//   - The kicker is UNWRAPPED plain text. It cannot be made smaller without going
+//     crooked. Measured against GitHub's own render pipeline (POST /markdown,
+//     mode=gfm), the sanitizer drops <small>, <cite>, and <font size>, and keeps
+//     <span> only after stripping its style attribute. The ONLY surviving
+//     size-reducers are <sub> and <sup>, and both carry a vertical-align that
+//     moves the text off the baseline the rest of the row sits on — <sub> sinking
+//     the kicker is exactly the wobble this round removed. So there is no element
+//     that shrinks text AND stays on the baseline AND survives: smaller and
+//     aligned cannot both be had, and aligned wins. Do not "fix" this by reaching
+//     for <small> — GitHub deletes it, and the code would be claiming a hierarchy
+//     the reader never sees.
+//   - The wordmark carries NO align attribute (i.e. vertical-align:baseline).
+//     Measured against a 14px system-font line with the mark at 16px:
+//     align="middle" sinks the mark 4.5px below the text baseline; the default
+//     baseline alignment leaves it 3.5px high. Two legacy values (absmiddle,
+//     texttop) measure closer but are not in the HTML rendering spec and map
+//     differently across engines, and align="top"/"bottom" are positioned
+//     against the LINE BOX, so their offset would move the moment a taller
+//     element joined the row. Only baseline and middle are both spec-defined and
+//     text-relative; baseline is the closer of the two.
+//
+// The residual 3.5px is an ASSET defect, not one this package can fix: the
+// wordmark PNG's own ink baseline sits ~77% down its canvas, so no vertical-align
+// keyword can land it on the text baseline. The cause-fix is a re-export from
+// sageox-design with the baseline at a known fraction; leaning on a browser quirk
+// here would be a backstop hiding that, and would teach the next author nothing.
 package prheader
 
 import (
@@ -46,16 +82,19 @@ import (
 // belongs in <source media="(prefers-color-scheme: dark)">; "-light.png" is the
 // dark-ink default <img>. VERIFY this direction by eye before shipping — a
 // backwards pairing renders clean and only vanishes in the "wrong" mode.
+//
+// KNOWN ASSET DEFECT (tracked for sageox-design, which owns brand assets): the
+// two files are not one artwork at two inks. Light is 313x86 (ratio 3.640, 2px
+// padding, ink baseline 76.7% down); dark is 512x133 (ratio 3.850, ink flush to
+// all four edges, baseline 78.2%). At a fixed height the mark therefore changes
+// width by ~6% when a reader switches theme. The height below is tuned to the
+// light asset.
 const (
 	wordmarkLightURL = "https://sageox.ai/sageox-wordmark-light.png"
 	wordmarkDarkURL  = "https://sageox.ai/sageox-wordmark-dark.png"
-	// 18px reads as a wordmark next to ~14px GitHub body text without dominating
-	// the row; align="middle" vertically centers it on the text line (falls back
-	// to baseline harmlessly if a renderer drops the attribute).
-	wordmarkHeight = "18"
-	// The Tier-B floated enrichment strip sits slightly smaller than the wordmark
-	// so it reads as subordinate — a whisper, not a second anchor.
-	stripHeight = "16"
+	// 16px reads as a wordmark next to ~14px GitHub body text without dominating
+	// the row. Deliberately no align attribute — see the package doc.
+	wordmarkHeight = "16"
 	// brandName is the wordmark's own name. The team-name segment is suppressed
 	// when it equals this (case-insensitively), so a team literally named "SageOx"
 	// (the dogfood team) doesn't render the brand twice — mark then bold text.
@@ -64,102 +103,67 @@ const (
 
 // Idempotency markers so a future server-side reconciler (see
 // docs/specs/session-pr-issue-linkage.md) can find and replace the block in
-// place rather than appending duplicates. Bump the version suffix on a
-// breaking-layout change.
+// place rather than appending duplicates. Bumped to v2 for the single-line
+// layout: v1 blocks in existing PR bodies are a different shape.
 const (
-	markerStart = "<!-- sageox:pr-header v1 -->"
+	markerStart = "<!-- sageox:pr-header v2 -->"
 	markerEnd   = "<!-- /sageox:pr-header -->"
 )
 
-// Signals is the enrichment summary a header can whisper. It mirrors the
-// client-side plan.Signals shape (internal/plan) so the command maps one to the
-// other without this package importing plan. Material gates the whole whisper:
-// stats render only when enrichment materially fired AND a Plan link exists to
-// verify them (see Input.wantsWhisper).
-type Signals struct {
-	Collisions int  `json:"collisions"`
-	PriorArt   int  `json:"prior_art"`
-	Material   bool `json:"material"`
-}
-
-// hasWhisper reports whether there is any enrichment stat worth rendering. It is
-// content-based (not just Material) so a Material flag with zero specific counts
-// can never emit an empty caption — there is no longer a brand-name fallback line,
-// that attribution now lives in the "guided by" kicker.
-func (s Signals) hasWhisper() bool { return s.PriorArt > 0 || s.Collisions > 0 }
-
-// Session and Plan carry a single pre-built, server-visible web URL. Link TEXT
-// is a generic label chosen by this package ("Session 1", "Plan") — never a
-// title — because the /c/ and /plan/ URLs are deliberately opaque so nothing
-// about the work leaks into a public PR body.
+// Session, Plan, and Discussion each carry a single pre-built, server-visible web
+// URL. Link TEXT is a generic label chosen by this package ("Session 1", "Plan")
+// — never a title — because the /c/ and /plan/ URLs are deliberately opaque so
+// nothing about the work leaks into a public PR body.
 type (
-	Session struct{ URL string }
-	Plan    struct{ URL string }
+	Session    struct{ URL string }
+	Plan       struct{ URL string }
+	Discussion struct{ URL string }
 )
 
-// StripURLs are the hosted light/dark PNG URLs for the Tier-B floated enrichment
-// strip. When non-nil AND a whisper is warranted, Render emits the floated image
-// instead of the <sub> text whisper. Nil selects Tier A (text) — the always-works
-// default that needs no hosting.
-type StripURLs struct {
-	Light string
-	Dark  string
-}
-
 // Input is the fully-resolved data a header renders from. The caller (the ox
-// command) owns all resolution — config lookup, URL building, the optional strip
-// upload — so this stays a pure render. TeamName is UNTRUSTED (team-editable
-// config) and is HTML-escaped before it reaches the output.
+// command) owns all resolution — config lookup, URL building — so this stays a
+// pure render. TeamName is UNTRUSTED (team-editable config) and is HTML-escaped
+// before it reaches the output.
 type Input struct {
-	TeamName string    // display name, e.g. "SageOx Internal"; "" omits the team segment
-	TeamURL  string    // {endpoint}/t/{slug}; "" leaves the wordmark unlinked
-	Sessions []Session // 0..N; ordered as displayed
-	Plans    []Plan    // 0..N; ordered as displayed
-	Signals  Signals
-	ShowStat bool       // false suppresses the whisper regardless of Signals
-	Strip    *StripURLs // non-nil => Tier B floated image whisper
+	TeamName    string       // display name, e.g. "Acme Rockets"; "" omits the team segment
+	TeamURL     string       // {endpoint}/t/{slug}; "" leaves the wordmark unlinked
+	Sessions    []Session    // 0..N; ordered as displayed
+	Plans       []Plan       // 0..N; ordered as displayed
+	Discussions []Discussion // 0..N; ordered as displayed
 }
 
-// WantsWhisper reports whether the enrichment stats should render: the caller
-// asked for them (ShowStat), a signal materially fired, AND a Plan link is
-// present so a reviewer has somewhere to verify the claim. Exported as the one
-// source of the rule so the command (which also decides whether to upload a Tier-B
-// strip) and Render can't drift.
-func (in Input) WantsWhisper() bool {
-	return in.ShowStat && in.Signals.hasWhisper() && len(in.Plans) > 0
+// HasLinks reports whether the header carries at least one artifact link a
+// reviewer can open — the single gate on rendering at all. Exported as the one
+// source of the rule so the command (which explains the no-op on stderr) and
+// Render can't drift.
+func (in Input) HasLinks() bool {
+	return len(in.Sessions)+len(in.Plans)+len(in.Discussions) > 0
 }
 
-// Render returns the paste-ready, GitHub-safe credit-line block: a <blockquote>
-// card wrapped in the idempotency markers. It never errors on content — every
-// field degrades independently — so it returns only a string; the signature keeps
-// a value-receiver-free pure shape for the callers and tests.
+// Render returns the paste-ready, GitHub-safe credit-line block: a single-line
+// <blockquote> card wrapped in the idempotency markers, or "" when there is
+// nothing to credit. It never errors on content — every field degrades
+// independently — so it returns only a string.
 func Render(in Input) string {
-	whisper := in.WantsWhisper()
-	tierB := whisper && in.Strip != nil && in.Strip.Light != "" && in.Strip.Dark != ""
-
-	// Suppress the team name when it only repeats the brand the wordmark already
-	// shows — the dogfood team is literally "SageOx", so mark + name would read
-	// "SageOx · SageOx".
-	teamName := strings.TrimSpace(in.TeamName)
-	showTeam := teamName != "" && !strings.EqualFold(teamName, brandName)
-
-	// A lone wordmark carries no information — no team, no links, no stats.
-	// Return "" so the caller emits nothing rather than stamping a bare logo
-	// onto a PR body.
-	if !showTeam && len(in.Sessions) == 0 && len(in.Plans) == 0 && !whisper {
+	// A header that links nothing credits nothing. See the package doc.
+	if !in.HasLinks() {
 		return ""
 	}
 
-	// Identity row (inside the card). Tier B's floated strip MUST come first in
-	// source order so it floats onto the same line as the text that follows.
-	var row strings.Builder
-	if tierB {
-		row.WriteString(floatedStrip(in.Strip.Light, in.Strip.Dark, whisperAlt(in.Signals)))
-	}
+	// Suppress the team name when it only repeats the brand the wordmark already
+	// shows — the dogfood team is literally "SageOx", so mark + name would read
+	// "SageOx / SageOx".
+	teamName := strings.TrimSpace(in.TeamName)
+	showTeam := teamName != "" && !strings.EqualFold(teamName, brandName)
 
-	// "guided by" kicker on its own small line above the wordmark: the attribution,
-	// so the brand name is the mark itself and never repeated as plain text.
-	row.WriteString("<sub>guided&nbsp;by</sub><br>")
+	var row strings.Builder
+
+	// "guided by" kicker: the attribution, so the brand name is the mark itself and
+	// never repeated as plain text. Deliberately UNWRAPPED — see the alignment note
+	// in the package doc. It recedes by contrast, not by size: the links are forced
+	// blue and the team name is bold, so plain body text is already the quietest
+	// thing on the row.
+	row.WriteString("guided&nbsp;by&nbsp;")
 
 	// Anchor: the theme-adaptive wordmark <picture>, linked (as an image, so it
 	// keeps its brand color) to the team page.
@@ -177,24 +181,16 @@ func Render(in Input) string {
 		row.WriteString("</b>")
 	}
 
-	// Sessions and plans: the actionable links, grouped within a category by
-	// whitespace (Tufte grouping), categories divided by a middle dot.
+	// The actionable links, grouped within a category by whitespace (Tufte
+	// grouping), categories divided by a middle dot.
 	writeLinks(&row, numberedLabels("Session", len(in.Sessions)), sessionSlice(in.Sessions))
 	writeLinks(&row, numberedLabels("Plan", len(in.Plans)), planSlice(in.Plans))
+	writeLinks(&row, numberedLabels("Discussion", len(in.Discussions)), discussionSlice(in.Discussions))
 
 	var b strings.Builder
 	b.WriteString(markerStart)
 	b.WriteString("\n> ")
 	b.WriteString(row.String())
-
-	// Enrichment stats recede to a second line inside the card. Tier B bakes them
-	// into the floated image instead, so the text row is skipped there.
-	if whisper && !tierB {
-		b.WriteString("\n>\n> <sub>")
-		b.WriteString(whisperMarkup(in.Signals))
-		b.WriteString("</sub>")
-	}
-
 	b.WriteString("\n")
 	b.WriteString(markerEnd)
 	return b.String()
@@ -202,36 +198,28 @@ func Render(in Input) string {
 
 // sep is the calm PEER divider — a non-breaking middle dot, the Linear/Apple
 // separator, never a shields.io pipe. It divides sibling categories: the team,
-// the sessions, the plans.
+// the sessions, the plans, the discussions.
 func sep() string { return "&nbsp;&middot;&nbsp;" }
 
 // hierSep is the CONTAINMENT divider — a non-breaking slash, the owner/team
 // breadcrumb every reviewer already reads (GitHub org/repo, Linear Team/Project).
-// It joins the wordmark to the team name so "SageOx / SageOx Internal" reads as
-// one unit — the team within the brand — distinct from the peer links after it.
+// It joins the wordmark to the team name so "SageOx / Acme Rockets" reads as one
+// unit — the team within the brand — distinct from the peer links after it.
 func hierSep() string { return "&nbsp;/&nbsp;" }
 
 // wordmark builds the theme-adaptive <picture>, wrapped in an <a> to the team
 // page when one is known. An unlinked wordmark (teamURL == "") still renders.
+// No align attribute: the default baseline alignment measured closest among the
+// spec-defined, text-relative options. See the package doc.
 func wordmark(teamURL string) string {
 	pic := "<picture>" +
 		`<source media="(prefers-color-scheme: dark)" srcset="` + escapeHTML(wordmarkDarkURL) + `">` +
-		`<img alt="` + escapeHTML(brandName) + `" height="` + wordmarkHeight + `" align="middle" src="` + escapeHTML(wordmarkLightURL) + `">` +
+		`<img alt="` + escapeHTML(brandName) + `" height="` + wordmarkHeight + `" src="` + escapeHTML(wordmarkLightURL) + `">` +
 		"</picture>"
 	if strings.TrimSpace(teamURL) == "" {
 		return pic
 	}
 	return `<a href="` + escapeHTML(teamURL) + `">` + pic + "</a>"
-}
-
-// floatedStrip builds the Tier-B enrichment image: a right-floated <picture>
-// whose alt carries the full sentence so screen readers and a broken-image
-// fallback still read the credit.
-func floatedStrip(light, dark, alt string) string {
-	return "<picture>" +
-		`<source media="(prefers-color-scheme: dark)" srcset="` + escapeHTML(dark) + `">` +
-		`<img alt="` + escapeHTML(alt) + `" align="right" height="` + stripHeight + `" src="` + escapeHTML(light) + `">` +
-		"</picture>"
 }
 
 // writeLinks appends one category of links: a leading category separator, then
@@ -263,6 +251,14 @@ func planSlice(p []Plan) []string {
 	out := make([]string, len(p))
 	for i := range p {
 		out[i] = p[i].URL
+	}
+	return out
+}
+
+func discussionSlice(d []Discussion) []string {
+	out := make([]string, len(d))
+	for i := range d {
+		out[i] = d[i].URL
 	}
 	return out
 }
