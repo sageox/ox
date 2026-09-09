@@ -4,6 +4,14 @@ Pull requests are welcome from anyone. So are issues — and if you'd rather des
 
 A note on how we review: when AI agents can produce large, plausible-looking changes, quality and security come from scrutinizing the inputs to the development process. Expect PRs to be reviewed on that basis. Small, focused changes with tests get merged faster than large ones, and a PR that explains *why* is easier to trust than one that only shows *what*.
 
+## Codex setup
+
+This repo includes shared SageOx hooks in [`.codex/hooks.json`](.codex/hooks.json)
+to load Team Context and record sessions according to the repo's SageOx settings.
+Install `ox` on your `PATH` (`make build && make install`), then open Codex in
+the repo and use `/hooks` to review and trust the project hooks. New or changed
+hooks require review before they run; see [Codex hook trust](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
+
 ## Two Ways In
 
 **File an issue** — [bug reports, feature requests, and agent prompts](https://github.com/sageox/ox/issues) are all welcome. Be as detailed as you like. A maintainer reviews it, generates an implementation plan, and SageOx engineers build it with full test coverage and code review. You get the fix or feature you asked for, maintained over time, without having to keep a fork in sync.

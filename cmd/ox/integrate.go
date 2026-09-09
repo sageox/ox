@@ -225,6 +225,9 @@ func runIntegrateInteractive() error {
 		fmt.Println("All detected AI coworkers are already integrated.")
 		for _, a := range agents {
 			fmt.Printf("  %s %s\n", ui.PassStyle.Render("✓"), a.displayName)
+			if a.name == "codex" {
+				cli.PrintInfo(codexHookTrustHint)
+			}
 		}
 		return nil
 	}
@@ -252,6 +255,9 @@ func runIntegrateInteractive() error {
 			cli.PrintWarning(fmt.Sprintf("Could not install %s: %v", a.displayName, err))
 		} else {
 			cli.PrintSuccess(fmt.Sprintf("Installed %s integration", a.displayName))
+			if a.name == "codex" {
+				cli.PrintInfo(codexHookTrustHint)
+			}
 			installed++
 		}
 	}
@@ -333,6 +339,9 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		if err := installCodexHooks(integrateUserFlag); err != nil {
 			return fmt.Errorf("installing Codex CLI integration: %w", err)
 		}
+
+		cli.PrintSuccess("Installed Codex hooks")
+		cli.PrintInfo(codexHookTrustHint)
 
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
