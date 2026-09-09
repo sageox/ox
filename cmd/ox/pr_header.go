@@ -33,14 +33,20 @@ It links the session(s), plan(s), and discussion(s) that produced the change and
 names the team they belong to. Paste the output above your description; keep the
 'SageOx-Session:' trailer at the bottom.
 
-The line renders ONLY when it can link at least one artifact a reviewer can open.
-A team name alone is not a credit — a wordmark with nothing behind it is a logo
-stamp, not provenance — so with no session, plan, or discussion the command
-prints nothing and explains why on stderr.
+The line renders ONLY when it has at least one artifact to link. A team name
+alone is not a credit — a wordmark with nothing behind it is a logo stamp, not
+provenance — so with no session, plan, or discussion the command prints nothing
+and explains why on stderr.
+
+ox verifies only the CURRENT session, from local recording state, and withholds
+its link until the server has confirmed it. Ids passed explicitly are the
+caller's assertion: ox includes them as given rather than adding a network
+round-trip to a render command that must never fail on an unreachable remote, so
+it warns on stderr instead. Pass --allow-unconfirmed to accept a possible 404 and
+silence the warning.
 
 The markup is built from the primitives that survive GitHub's PR-body sanitizer
-(a theme-adaptive <picture> wordmark, real <a> links, a baseline-stable <small>
-kicker) and fits on one line.
+(a theme-adaptive ` + "`<picture>`" + ` wordmark and real ` + "`<a>`" + ` links) and fits on one line.
 
 Examples:
   # Auto-link the current session
