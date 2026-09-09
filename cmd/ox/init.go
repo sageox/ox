@@ -1021,6 +1021,11 @@ func runInit() error {
 		fmt.Printf("  %d. Run %s to confirm everything is working properly\n", step, cli.StyleCommand.Render("ox doctor"))
 		step++
 
+		if selectedAgents["codex"] && hasCodexHooks(false) {
+			fmt.Printf("  %d. %s\n", step, codexHookTrustHint)
+			step++
+		}
+
 		// step N: invite teammates — ox invite sends the invitations directly,
 		// so this no longer sends people to the dashboard to copy a link.
 		if cfg.TeamID != "" {

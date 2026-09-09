@@ -96,7 +96,11 @@ sessions/
 # Claude scheduled-task runtime lock (ephemeral: session PID + timestamp)
 .claude/scheduled_tasks.lock
 
+# Share repository hooks; keep other Codex state local.
 .codex/
+!/.codex/
+/.codex/*
+!/.codex/hooks.json
 
 team-contexts/
 

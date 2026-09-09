@@ -148,6 +148,12 @@ func runIntegrateInteractive() error {
 	if gitRoot == "" {
 		return fmt.Errorf("not in a git repository — run from a project directory")
 	}
+	// Existing Codex hooks still need trust when other integrations are missing.
+	defer func() {
+		if hasCodexHooks(false) {
+			cli.PrintInfo(codexHookTrustHint)
+		}
+	}()
 
 	// build the list of agents with their install status
 	agents := []integrateAgentInfo{
@@ -333,6 +339,9 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		if err := installCodexHooks(integrateUserFlag); err != nil {
 			return fmt.Errorf("installing Codex CLI integration: %w", err)
 		}
+
+		cli.PrintSuccess("Installed Codex hooks")
+		cli.PrintInfo(codexHookTrustHint)
 
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)

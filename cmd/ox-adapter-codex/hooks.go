@@ -261,6 +261,11 @@ func writeHooksFile(path string, hooksMap map[string][]codexHookEntry, rawMap ma
 }
 
 func mergeHookEntries(existing []codexHookEntry, oxCmd string, event string) []codexHookEntry {
+	// Match Gemini's ten-second budget; Codex caps SessionEnd at three seconds.
+	timeout := 10
+	if event == "SessionEnd" {
+		timeout = 3
+	}
 	hasOx := false
 	for i, entry := range existing {
 		for j, hook := range entry.Hooks {
@@ -269,6 +274,7 @@ func mergeHookEntries(existing []codexHookEntry, oxCmd string, event string) []c
 					Type:          "command",
 					Command:       oxCmd,
 					StatusMessage: statusMessageForEvent(event),
+					Timeout:       timeout,
 				}
 				hasOx = true
 			}
@@ -283,6 +289,7 @@ func mergeHookEntries(existing []codexHookEntry, oxCmd string, event string) []c
 					Type:          "command",
 					Command:       oxCmd,
 					StatusMessage: statusMessageForEvent(event),
+					Timeout:       timeout,
 				},
 			},
 		})
