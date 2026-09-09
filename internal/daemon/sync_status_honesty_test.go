@@ -98,35 +98,37 @@ func TestLastError_WindowedToMatchRecentErrorCount(t *testing.T) {
 		"LastError and RecentErrorCount must never disagree about what is recent")
 }
 
-// Team contexts discovered from the repo-detail API have no config entry, so
-// the plain update looped over an empty slice and returned silently while its
-// caller saved the file and reported success. last_sync was unrecordable for
-// exactly those teams.
-func TestUpsertTeamContextLastSync_AddsMissingTeam(t *testing.T) {
+// An API-discovered team context must NOT be written into config.local.toml.
+//
+// Failure prevented: a revoked team coming back. CleanupRevokedTeamContexts
+// removes the in-memory workspace and the on-disk checkout but never edits
+// config.local.toml, and LoadFromConfig recreates a workspace from any entry
+// it finds — so a config entry written on a successful sync would resurrect a
+// team whose access was revoked, and it would resume cloning and syncing.
+//
+// Recording last-sync for these teams is handled by sync-state.json in the
+// checkout, which survives a GC reclone (see the cache preservation in
+// runBlueGreenGCOpts) and is what a non-owner daemon reads regardless.
+func TestUpdateTeamContextLastSync_DoesNotPersistAPIDiscoveredTeam(t *testing.T) {
 	t.Parallel()
 	cfg := &config.LocalConfig{}
 
 	cfg.UpdateTeamContextLastSync("team_api_discovered")
 	assert.Empty(t, cfg.TeamContexts,
-		"the plain update must stay a no-op for an unknown team (callers rely on it not inventing entries without identity)")
+		"persisting an API-discovered team would let a revoked team survive cleanup")
 
-	cfg.UpsertTeamContextLastSync("team_api_discovered", "Discovered", "discovered", "/tmp/team")
-	require.Len(t, cfg.TeamContexts, 1, "an API-discovered team must become recordable")
-	assert.Equal(t, "team_api_discovered", cfg.TeamContexts[0].TeamID)
-	assert.Equal(t, "Discovered", cfg.TeamContexts[0].TeamName)
-	assert.Equal(t, "/tmp/team", cfg.TeamContexts[0].Path)
-	require.True(t, cfg.TeamContexts[0].HasLastSync())
-	first := cfg.TeamContexts[0].LastSync
+	// A team the user is actually configured for still records normally.
+	cfg.TeamContexts = []config.TeamContext{{TeamID: "team_configured", TeamName: "Configured"}}
+	cfg.UpdateTeamContextLastSync("team_configured")
+	require.Len(t, cfg.TeamContexts, 1)
+	assert.True(t, cfg.TeamContexts[0].HasLastSync(), "a configured team must still record last_sync")
 
-	// A second sync updates in place rather than appending a duplicate.
-	cfg.UpsertTeamContextLastSync("team_api_discovered", "Ignored", "ignored", "/tmp/other")
-	require.Len(t, cfg.TeamContexts, 1, "upsert must not duplicate an existing team")
-	assert.Equal(t, "Discovered", cfg.TeamContexts[0].TeamName, "identity fields seed only on create")
-	assert.False(t, cfg.TeamContexts[0].LastSync.Before(first))
-
-	// An empty team ID is not an identity and must never be persisted.
-	cfg.UpsertTeamContextLastSync("", "", "", "")
-	assert.Len(t, cfg.TeamContexts, 1)
+	// An empty team ID is not an identity: it must not match an entry that
+	// happens to carry an empty TeamID and stamp it as freshly synced.
+	cfg.TeamContexts = []config.TeamContext{{TeamID: "", TeamName: "Malformed"}}
+	cfg.UpdateTeamContextLastSync("")
+	assert.False(t, cfg.TeamContexts[0].HasLastSync(),
+		"an empty team ID must not be treated as a match")
 }
 
 // routeAutofixResult is the only thing that writes or retires an "autofix_*"

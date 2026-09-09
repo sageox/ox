@@ -1,6 +1,7 @@
 package gitutil
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -410,11 +411,17 @@ func TestFetchHeadAge_FailedFetchDoesNotSuppressRetry(t *testing.T) {
 	require.True(t, ok, "a successful fetch must register as a recent fetch")
 	assert.Less(t, age, time.Minute)
 
-	// Now fail a fetch. RFC 2606 reserved TLD: never resolves, no network.
-	run(work, "remote", "set-url", "origin", "https://nonexistent-host-for-gitutil-tests.invalid/x.git")
-	failed := exec.Command("git", "fetch", "origin")
+	// Now fail a fetch. A closed loopback port refuses immediately and needs
+	// no DNS, so the failure mode and latency don't depend on the CI
+	// resolver. Bounded by a context deadline so a hang fails the test
+	// rather than stalling the suite.
+	run(work, "remote", "set-url", "origin", "https://127.0.0.1:1/x.git")
+	fetchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	failed := exec.CommandContext(fetchCtx, "git", "fetch", "origin")
 	failed.Dir = work
 	require.Error(t, failed.Run(), "fixture must reproduce a failed fetch")
+	require.NoError(t, fetchCtx.Err(), "the fetch must fail on its own, not by deadline")
 
 	info, err := os.Stat(filepath.Join(work, ".git", "FETCH_HEAD"))
 	require.NoError(t, err, "git leaves FETCH_HEAD behind after a failed fetch")

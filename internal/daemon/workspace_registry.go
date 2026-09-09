@@ -642,9 +642,10 @@ func (r *WorkspaceRegistry) UpdateConfigLastSync(id string) error {
 	case WorkspaceTypeLedger:
 		r.localConfigCache.UpdateLedgerLastSync()
 	case WorkspaceTypeTeamContext:
-		// Upsert, not update: API-discovered team contexts have no config
-		// entry to update, and without one their last_sync can never persist.
-		r.localConfigCache.UpsertTeamContextLastSync(ws.TeamID, ws.TeamName, ws.TeamSlug, ws.Path)
+		// No-op for an API-discovered team, which has no config entry — by
+		// design, see the note on UpdateTeamContextLastSync. Its last-sync
+		// time lives in the checkout's sync-state.json.
+		r.localConfigCache.UpdateTeamContextLastSync(ws.TeamID)
 	}
 
 	return config.SaveLocalConfig(r.projectRoot, r.localConfigCache)

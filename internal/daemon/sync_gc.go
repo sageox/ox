@@ -436,7 +436,16 @@ func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 			if s.issues != nil {
 				s.issues.ClearIssue(IssueTypeDirtyWorkspace, name)
 				s.issues.ClearIssue(IssueTypeGCFailed, name)
+				// Keyed on ws.ID, not name: shouldSyncOrBypass raises
+				// SyncBackoff with the workspace ID, while the two issues
+				// above are keyed by display name. The two read alike.
+				s.issues.ClearIssue(IssueTypeSyncBackoff, ws.ID)
 			}
+			// A forced reclone replaces the checkout just as the interval-driven
+			// one does, so it must also retire a suspension recorded against the
+			// worktree that no longer exists. Without this, `ox doctor --gc`
+			// looked like a recovery path but left background sync skipped.
+			s.workspaceRegistry.ClearSyncFailures(ws.ID)
 		case gcSkippedDirty:
 			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: local changes could not be preserved for GC", name))
 			if s.issues != nil {
@@ -630,15 +639,18 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	if _, err := os.Stat(swapMarker); err == nil {
 		s.logger.Warn("gc: found an interrupted prior GC that completed its swap but not its restore, recovering before continuing",
 			"path", ws.Path, "workspace", wsLabel)
-		if isLedger {
-			if _, statErr := os.Stat(cacheBackupDir); statErr == nil {
-				if applyErr := gcRestoreCache(cacheBackupDir, ws.Path); applyErr != nil {
-					s.logger.Error("gc: failed to restore orphaned cache backup, preserving for manual recovery",
-						"path", ws.Path, "cache_backup", cacheBackupDir, "error", applyErr)
-					return gcFailed, false
-				}
-				_ = os.RemoveAll(cacheBackupDir)
+		// Not ledger-only: team contexts now have a preserved cache too, and
+		// the leftover sweep below deletes cacheBackupDir unconditionally. A
+		// crash between the swap and phase 1.5 would otherwise discard the
+		// backup — taking sync-state.json with it, which is the file a
+		// non-owner daemon reads to learn when a team context last synced.
+		if _, statErr := os.Stat(cacheBackupDir); statErr == nil {
+			if applyErr := gcRestoreCache(cacheBackupDir, ws.Path); applyErr != nil {
+				s.logger.Error("gc: failed to restore orphaned cache backup, preserving for manual recovery",
+					"path", ws.Path, "cache_backup", cacheBackupDir, "error", applyErr)
+				return gcFailed, false
 			}
+			_ = os.RemoveAll(cacheBackupDir)
 		}
 		if _, statErr := os.Stat(diffFile); statErr == nil {
 			if applyErr := s.gcRestoreDiff(ctx, ws.Path, diffFile); applyErr != nil {

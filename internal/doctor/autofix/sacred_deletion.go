@@ -28,7 +28,7 @@ const commitMarker = "\x1e"
 // data-loss class the 2026-08-25 Ox Dot wipe belongs to: a single commit that
 // deleted every saved plan + session. It resolves the workspace's ledger and
 // scans recent history for any commit that removed more than
-// sacred.MassDeleteThreshold whole plans/sessions.
+// sacred.DetectorEntityThreshold whole plans/sessions.
 //
 // DETECTION ONLY — it never restores. Per ADR-024 sacred-data deletion needs
 // explicit human approval, so a hit is surfaced as StatusFound for review; a
@@ -94,8 +94,8 @@ func scanLedgerSacredDeletions(ctx context.Context, ledgerPath, repoPath string)
 		// candidate is actually absent from this commit's tree before counting
 		// it, so artifact sweeps no longer register as wipes.
 		candidates := sacred.Entities(touched)
-		if len(candidates) > sacred.MassDeleteThreshold {
-			if removed := removedEntities(ctx, ledgerPath, cur, candidates); len(removed) > sacred.MassDeleteThreshold {
+		if len(candidates) > sacred.DetectorEntityThreshold {
+			if removed := removedEntities(ctx, ledgerPath, cur, candidates); len(removed) > sacred.DetectorEntityThreshold {
 				hits = append(hits, wipe{cur, len(removed)})
 			}
 		}
@@ -132,7 +132,7 @@ func scanLedgerSacredDeletions(ctx context.Context, ledgerPath, repoPath string)
 		"wipe_commits", len(hits),
 		"sacred_deletions_total", total,
 		"sample", sample,
-		"threshold", sacred.MassDeleteThreshold)
+		"threshold", sacred.DetectorEntityThreshold)
 	return CheckResult{
 		Status: StatusFound,
 		Repo:   repoPath,

@@ -190,9 +190,11 @@ func TestDoTeamSync_NetworkOutageDoesNotSuspend(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(teamPath, "AGENTS.md"), []byte("team\n"), 0o600))
 	run(teamPath, "add", "AGENTS.md")
 	run(teamPath, "commit", "-m", "seed")
-	// RFC 2606 reserved TLD: never resolves, so this reproduces the incident's
-	// "Could not resolve host" without depending on the network.
-	run(teamPath, "remote", "add", "origin", "https://nonexistent-host-for-ox-tests.invalid/team-context.git")
+	// A closed loopback port refuses immediately and needs no DNS, so the
+	// failure mode and latency don't depend on the CI resolver. The incident's
+	// literal "Could not resolve host" text is covered without any network by
+	// the TestIsTransientSyncError table.
+	run(teamPath, "remote", "add", "origin", "https://127.0.0.1:1/team-context.git")
 
 	const teamID = "team_transient"
 	cfgTOML := "[[team_contexts]]\n" +
@@ -228,8 +230,22 @@ func TestDoTeamSync_NetworkOutageDoesNotSuspend(t *testing.T) {
 	// further failure presents the same fingerprint — and that is the state
 	// that used to suspend sync permanently.
 	for attempt := 1; attempt <= 4; attempt++ {
-		_, err := scheduler.doTeamSync(ctx, nil, false)
+		results, err := scheduler.doTeamSync(ctx, nil, false)
 		require.NoError(t, err, "per-team failures are carried in results, not returned")
+
+		// Assert the fixture is exercising the branch under test. Without this
+		// the test would pass vacuously if the fixture's error ever came back
+		// classified as LOCAL — it would then be taking the suspension path and
+		// proving nothing about network failures.
+		var observed string
+		for _, r := range results {
+			if r.TeamID == teamID {
+				observed = r.Error
+			}
+		}
+		require.NotEmpty(t, observed, "attempt %d must report a per-team error", attempt)
+		require.True(t, isTransientSyncError(errors.New(observed)),
+			"attempt %d: fixture must produce a NETWORK-shaped failure, got %q", attempt, observed)
 
 		require.False(t, scheduler.workspaceRegistry.IsSyncSuspended(teamID),
 			"attempt %d: a network outage must never permanently suspend team-context sync", attempt)
