@@ -390,22 +390,6 @@ repository choice; repository choices override a team default.`,
 		Default:     boolToOnOff(config.DefaultPRVisualsHeader),
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo, ConfigLevelTeam},
 	},
-	{
-		Key:         "pr_visuals.style",
-		Description: "PR header enrichment-whisper style",
-		LongDescription: `Selects how the credit line's enrichment whisper renders.
-
-  text  - A small caption. Always works; no image hosting.
-  image - A baked, floated light/dark strip (real type + a Tufte micro-viz).
-          Needs an asset uploader; falls back to text when unavailable.
-  auto  - image when an uploader is available, else text. (default)
-
-Set at team, repository, or personal scope.`,
-		Category:    "Pull requests",
-		ValidValues: []string{config.PRVisualsStyleText, config.PRVisualsStyleImage, config.PRVisualsStyleAuto},
-		Default:     config.DefaultPRVisualsStyle,
-		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo, ConfigLevelTeam},
-	},
 	// NOTE: attribution.plan and attribution.session are intentionally not exposed
 	// in ox config — they are always-on transparency requirements, not user preferences.
 	{
@@ -751,17 +735,6 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.TeamVal = boolToOnOff(*teamCfg.PRVisuals.Header)
 		}
 
-	case "pr_visuals.style":
-		if userCfg != nil && userCfg.PRVisuals.IsStyleSet() {
-			cv.UserVal = *userCfg.PRVisuals.Style
-		}
-		if repoCfg != nil && repoCfg.PRVisuals.IsStyleSet() {
-			cv.RepoVal = *repoCfg.PRVisuals.Style
-		}
-		if teamCfg != nil && teamCfg.PRVisuals.IsStyleSet() {
-			cv.TeamVal = *teamCfg.PRVisuals.Style
-		}
-
 	}
 
 	// determine effective value and source (User > Repo > Team > Default)
@@ -1005,12 +978,6 @@ func setUserConfig(key, value string) error {
 		enabled := value == "on"
 		cfg.PRVisuals.Header = &enabled
 
-	case "pr_visuals.style":
-		if cfg.PRVisuals == nil {
-			cfg.PRVisuals = &config.PRVisualsConfig{}
-		}
-		cfg.PRVisuals.Style = config.StringPtr(value)
-
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)
 	}
@@ -1113,12 +1080,6 @@ func setRepoConfig(key, value, projectRoot string) error {
 		enabled := value == "on"
 		cfg.PRVisuals.Header = &enabled
 
-	case "pr_visuals.style":
-		if cfg.PRVisuals == nil {
-			cfg.PRVisuals = &config.PRVisualsConfig{}
-		}
-		cfg.PRVisuals.Style = config.StringPtr(value)
-
 	default:
 		return fmt.Errorf("setting %s not supported at repo level", key)
 	}
@@ -1168,12 +1129,6 @@ func setTeamConfig(key, value, projectRoot string) error {
 		}
 		enabled := value == "on"
 		cfg.PRVisuals.Header = &enabled
-
-	case "pr_visuals.style":
-		if cfg.PRVisuals == nil {
-			cfg.PRVisuals = &config.PRVisualsConfig{}
-		}
-		cfg.PRVisuals.Style = config.StringPtr(value)
 
 	default:
 		return fmt.Errorf("setting %s not supported at team level", key)
@@ -1324,14 +1279,6 @@ func unsetUserConfig(key string) error {
 			}
 		}
 
-	case "pr_visuals.style":
-		if cfg.PRVisuals != nil {
-			cfg.PRVisuals.Style = nil
-			if cfg.PRVisuals.IsEmpty() {
-				cfg.PRVisuals = nil
-			}
-		}
-
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)
 	}
@@ -1445,14 +1392,6 @@ func unsetRepoConfig(key, projectRoot string) error {
 			}
 		}
 
-	case "pr_visuals.style":
-		if cfg.PRVisuals != nil {
-			cfg.PRVisuals.Style = nil
-			if cfg.PRVisuals.IsEmpty() {
-				cfg.PRVisuals = nil
-			}
-		}
-
 	default:
 		return fmt.Errorf("setting %s not supported at repo level", key)
 	}
@@ -1499,14 +1438,6 @@ func unsetTeamConfig(key, projectRoot string) error {
 	case "pr_visuals.header":
 		if cfg.PRVisuals != nil {
 			cfg.PRVisuals.Header = nil
-			if cfg.PRVisuals.IsEmpty() {
-				cfg.PRVisuals = nil
-			}
-		}
-
-	case "pr_visuals.style":
-		if cfg.PRVisuals != nil {
-			cfg.PRVisuals.Style = nil
 			if cfg.PRVisuals.IsEmpty() {
 				cfg.PRVisuals = nil
 			}

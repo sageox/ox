@@ -29,20 +29,28 @@ var prHeaderCmd = &cobra.Command{
 	Long: `Emit a thin, on-brand credit line to paste at the very TOP of a pull-request
 description body — the human-facing counterpart to the 'SageOx-Session:' trailer.
 
-It names the team, links the session(s) and plan(s) that produced the change,
-and whispers a subtle enrichment stat. Paste the output above your description;
-keep the 'SageOx-Session:' trailer at the bottom.
+It links the session(s), plan(s), and discussion(s) that produced the change and
+names the team they belong to. Paste the output above your description; keep the
+'SageOx-Session:' trailer at the bottom.
 
-The line is built from the primitives that survive GitHub's PR-body sanitizer
-(a theme-adaptive <picture> wordmark, real <a> links, a <sub> caption) and
-degrades cleanly: no session, no plan, and no enrichment each still render.
+The line renders ONLY when it can link at least one artifact a reviewer can open.
+A team name alone is not a credit — a wordmark with nothing behind it is a logo
+stamp, not provenance — so with no session, plan, or discussion the command
+prints nothing and explains why on stderr.
+
+The markup is built from the primitives that survive GitHub's PR-body sanitizer
+(a theme-adaptive <picture> wordmark, real <a> links, a baseline-stable <small>
+kicker) and fits on one line.
 
 Examples:
-  # Auto-link the current session; no enrichment
+  # Auto-link the current session
   ox pr header
 
-  # Link two plans the session produced, with enrichment counts
-  ox pr header --plan pln_4d8e2f --plan pln_1a6b9c --prior-art 2 --collisions 1
+  # Link two plans the session produced
+  ox pr header --plan pln_4d8e2f --plan pln_1a6b9c
+
+  # Credit a recorded discussion the PR came directly out of
+  ox pr header --discussion cnv_019ff2f5-2079-7be1-b05e-8caad2772e61
 
   # Write straight into a PR body file (never a heredoc — it mangles the markup)
   ox pr header > body.md && cat description.md >> body.md
@@ -58,22 +66,35 @@ func init() {
 	f := prHeaderCmd.Flags()
 	f.StringArray("session", nil, "session URL or ses_ id to link (repeatable; defaults to the current session)")
 	f.StringArray("plan", nil, "plan URL or pln_ id to link (repeatable)")
-	f.Int("prior-art", 0, "enrichment: related sessions surfaced")
-	f.Int("collisions", 0, "enrichment: concurrent edits flagged")
-	f.Bool("no-stat", false, "suppress the enrichment whisper")
-	f.String("style", "", "whisper render: text | image | auto (default: pr_visuals.style)")
-	f.Bool("allow-unconfirmed", false, "accept links that may not be server-visible yet — the current session before upload, and explicit --session/--plan refs — without a warning (may 404)")
+	f.StringArray("discussion", nil, "recorded-discussion URL or cnv_ id to link (repeatable; only when the PR came directly out of it)")
+	f.Bool("allow-unconfirmed", false, "accept links that may not be server-visible yet — the current session before upload, and explicit --session/--plan/--discussion refs — without a warning (may 404)")
 }
+
+// prHeaderGuidance is the behavioral contract for the AI coworker pasting this
+// line. It ships in the --json payload rather than only in a SKILL body: skills
+// are Claude-only, and Codex/Droid install no commands, so guidance that lives in
+// a skill never reaches them. One source of truth, delivered by the live binary,
+// which cannot drift from the behavior it describes.
+const prHeaderGuidance = "Paste this markdown VERBATIM as the first lines of the PR body, above your " +
+	"summary — never hand-author or edit it; the markup is tuned to GitHub's PR-body sanitizer and " +
+	"editing it is how it renders as a bordered table or a vanished wordmark. Write the body via a " +
+	"file, never a heredoc (a heredoc mangles the markup). Add it only when SageOx-delivered team " +
+	"context measurably shaped the work; if it did not, emit neither this header nor the " +
+	"SageOx-Session: trailer. When it did, the header is the FIRST line of the body and the " +
+	"SageOx-Session: trailer stays the LAST. Do not retitle the links or add artifact titles — the " +
+	"/c/ and /plan/ URLs are deliberately opaque so nothing about the work leaks into a public PR. " +
+	"An empty markdown field means there was nothing to credit: paste nothing and move on."
 
 // prHeaderResponse is the --json shape for agent consumption: the paste-ready
 // markdown plus the resolved inputs, so an agent can verify what it will paste.
+// Markdown is empty when there was nothing to credit.
 type prHeaderResponse struct {
-	Markdown string           `json:"markdown"`
-	Tier     string           `json:"tier"` // "text" | "image"
-	Team     string           `json:"team,omitempty"`
-	Sessions []string         `json:"sessions,omitempty"`
-	Plans    []string         `json:"plans,omitempty"`
-	Signals  prheader.Signals `json:"signals"`
+	Markdown    string   `json:"markdown"`
+	Team        string   `json:"team,omitempty"`
+	Sessions    []string `json:"sessions,omitempty"`
+	Plans       []string `json:"plans,omitempty"`
+	Discussions []string `json:"discussions,omitempty"`
+	Guidance    string   `json:"guidance"`
 }
 
 func runPRHeader(cmd *cobra.Command, _ []string) error {
@@ -89,9 +110,7 @@ func runPRHeader(cmd *cobra.Command, _ []string) error {
 	cfg, _ := config.LoadProjectConfig(gitRoot)
 	ep := prResolveEndpoint(cfg)
 
-	in := prheader.Input{
-		ShowStat: !flagBool(cmd, "no-stat"),
-	}
+	var in prheader.Input
 	if cfg != nil {
 		in.TeamName = cfg.TeamName
 		if slug := strings.TrimSpace(cfg.Team); slug != "" {
@@ -104,6 +123,7 @@ func runPRHeader(cmd *cobra.Command, _ []string) error {
 	allowUnconfirmed := flagBool(cmd, "allow-unconfirmed")
 	sessionFlags := flagStringArray(cmd, "session")
 	planFlags := flagStringArray(cmd, "plan")
+	discussionFlags := flagStringArray(cmd, "discussion")
 	sessionArgs := sessionFlags
 	if len(sessionArgs) == 0 {
 		if u, unconfirmed := autoSessionURL(gitRoot, allowUnconfirmed); u != "" {
@@ -131,54 +151,45 @@ func runPRHeader(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Explicit --session/--plan refs are the caller's assertion. Unlike the auto
-	// current session (whose local recording state ox can check), an arbitrary id
-	// carries no local signal — and ox will not add a per-id network round-trip to
-	// a render command that must never fail on an unreachable remote. So explicit
-	// refs are included AS GIVEN, but never SILENTLY: a typo'd or not-yet-uploaded
-	// ref would 404 for a reviewer, so warn (stderr only, never in the PR markdown).
-	// --allow-unconfirmed means "I accept a possible 404" and silences it.
-	if !allowUnconfirmed && (len(sessionFlags) > 0 || len(planFlags) > 0) {
-		fmt.Fprintln(cmd.ErrOrStderr(), "note: explicit --session/--plan links are included as given and not verified against the server — confirm they resolve or a reviewer may hit a 404 (pass --allow-unconfirmed to accept and silence)")
-	}
-
-	// Enrichment signals come from the agent (it holds the ox plan enrich
-	// counts). Material is derived — we only whisper when a signal actually
-	// fired, never on an empty set.
-	in.Signals = prheader.Signals{
-		PriorArt:   flagInt(cmd, "prior-art"),
-		Collisions: flagInt(cmd, "collisions"),
-	}
-	in.Signals.Material = in.Signals.PriorArt > 0 || in.Signals.Collisions > 0
-
-	// Tier B (baked floated strip) only when a whisper is actually warranted (real
-	// stats + a Plan link to verify them) AND the style allows AND an uploader can
-	// host it. Any failure falls back to Tier A text — the header must never fail
-	// because the image path is unreachable.
-	tier := "text"
-	if in.WantsWhisper() && resolvePRStyle(cmd, gitRoot) != config.PRVisualsStyleText {
-		if strip, err := prheader.UploadStrip(resolveStripUploader(gitRoot), in.Signals); err == nil {
-			in.Strip = strip
-			tier = "image"
+	// Discussions resolve through the SAME universal /c/ route as sessions: a
+	// conversation id is the cnv_ twin of a ses_ id, and /c/ resolves either.
+	// Never auto-discovered — only the agent can judge that a recorded discussion
+	// is DIRECTLY about this PR, which is rare.
+	discussionURLs := make([]string, 0)
+	for _, d := range discussionFlags {
+		if u := artifactURL(ep, d, "/c/", "cnv_"); u != "" {
+			in.Discussions = append(in.Discussions, prheader.Discussion{URL: u})
+			discussionURLs = append(discussionURLs, u)
 		}
+	}
+
+	// Explicit refs are the caller's assertion. Unlike the auto current session
+	// (whose local recording state ox can check), an arbitrary id carries no local
+	// signal — and ox will not add a per-id network round-trip to a render command
+	// that must never fail on an unreachable remote. So explicit refs are included
+	// AS GIVEN, but never SILENTLY: a typo'd or not-yet-uploaded ref would 404 for
+	// a reviewer, so warn (stderr only, never in the PR markdown).
+	// --allow-unconfirmed means "I accept a possible 404" and silences it.
+	if !allowUnconfirmed && (len(sessionFlags) > 0 || len(planFlags) > 0 || len(discussionFlags) > 0) {
+		fmt.Fprintln(cmd.ErrOrStderr(), "note: explicit --session/--plan/--discussion links are included as given and not verified against the server — confirm they resolve or a reviewer may hit a 404 (pass --allow-unconfirmed to accept and silence)")
 	}
 
 	markup := prheader.Render(in)
 
 	if flagBool(cmd, "json") {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(prHeaderResponse{
-			Markdown: markup,
-			Tier:     tier,
-			Team:     in.TeamName,
-			Sessions: sessionURLs,
-			Plans:    planURLs,
-			Signals:  in.Signals,
+			Markdown:    markup,
+			Team:        in.TeamName,
+			Sessions:    sessionURLs,
+			Plans:       planURLs,
+			Discussions: discussionURLs,
+			Guidance:    prHeaderGuidance,
 		})
 	}
-	// Render returns "" when the line would carry no payload (no team, session,
-	// plan, or whisper). Emit nothing to stdout rather than a bare wordmark.
+	// Render returns "" when the header would link nothing. Emit nothing to
+	// stdout rather than a bare wordmark stamped onto a PR body.
 	if markup == "" {
-		fmt.Fprintln(cmd.ErrOrStderr(), "no team, session, or plan to credit — nothing to paste")
+		fmt.Fprintln(cmd.ErrOrStderr(), "no session, plan, or discussion to link — nothing to paste (a team name alone is not a credit)")
 		return nil
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), markup)
@@ -273,41 +284,10 @@ func idTypePrefix(raw string) string {
 	return raw[:i+1]
 }
 
-// resolvePRStyle resolves the whisper style: the --style flag overrides the
-// config; an unknown flag value is ignored in favor of the config default.
-func resolvePRStyle(cmd *cobra.Command, gitRoot string) string {
-	if v := strings.TrimSpace(flagString(cmd, "style")); v != "" {
-		switch v {
-		case config.PRVisualsStyleText, config.PRVisualsStyleImage, config.PRVisualsStyleAuto:
-			return v
-		}
-	}
-	return config.PRVisualsStyle(gitRoot)
-}
-
-// resolveStripUploader returns the Uploader for the Tier-B baked strip. It is a
-// stub today: ox has no public-asset upload path yet (see the plan / bd
-// follow-up), so this returns nil and every style resolves to Tier A text. When
-// a SageOx cloud-image endpoint (or a credentialed CDN uploader) lands, wire it
-// here — the rest of the flow (render, fallback, tests) already handles Tier B.
-func resolveStripUploader(_ string) prheader.Uploader {
-	return nil
-}
-
 // Small flag accessors keep runPRHeader readable; cobra's error returns are safe
 // to drop here because every flag is registered with a default above.
 func flagBool(cmd *cobra.Command, name string) bool {
 	v, _ := cmd.Flags().GetBool(name)
-	return v
-}
-
-func flagInt(cmd *cobra.Command, name string) int {
-	v, _ := cmd.Flags().GetInt(name)
-	return v
-}
-
-func flagString(cmd *cobra.Command, name string) string {
-	v, _ := cmd.Flags().GetString(name)
 	return v
 }
 

@@ -6,16 +6,15 @@ import (
 )
 
 // baseInput is a fully-populated header: a team (distinct from the brand), two
-// sessions, one plan, and material enrichment (2 prior art + 1 collision).
-// Individual tests clone and mutate it to exercise one axis at a time.
+// sessions, one plan, and one discussion. Individual tests clone and mutate it to
+// exercise one axis at a time.
 func baseInput() Input {
 	return Input{
-		TeamName: "SageOx Internal",
-		TeamURL:  "https://sageox.ai/t/sageox-internal",
-		Sessions: []Session{{URL: "https://sageox.ai/c/ses_9f2a3c"}, {URL: "https://sageox.ai/c/ses_7c1b8d"}},
-		Plans:    []Plan{{URL: "https://sageox.ai/plan/pln_4d8e2f"}},
-		Signals:  Signals{PriorArt: 2, Collisions: 1, Material: true},
-		ShowStat: true,
+		TeamName:    "Acme Rockets",
+		TeamURL:     "https://sageox.ai/t/acme",
+		Sessions:    []Session{{URL: "https://sageox.ai/c/ses_9f2a3c"}, {URL: "https://sageox.ai/c/ses_7c1b8d"}},
+		Plans:       []Plan{{URL: "https://sageox.ai/plan/pln_4d8e2f"}},
+		Discussions: []Discussion{{URL: "https://sageox.ai/c/cnv_019ff2f5"}},
 	}
 }
 
@@ -37,71 +36,138 @@ func mustNotContain(t *testing.T, got string, subs ...string) {
 	}
 }
 
+// TestRender_full pins every fragment of a fully-populated line, and — because
+// the whole point of this round is compaction — asserts it is ONE line inside the
+// markers. Failure prevented: a future edit reintroduces a stacked row and the
+// credit line quietly grows back into the reviewer's reading space.
 func TestRender_full(t *testing.T) {
 	got := Render(baseInput())
 
 	mustContain(t, got,
-		markerStart, markerEnd,
-		"\n> ",                          // blockquote card
-		"<sub>guided&nbsp;by</sub><br>", // the "guided by" kicker above the mark
+		"<!-- sageox:pr-header v2 -->",
+		"<!-- /sageox:pr-header -->",
+		"<small>guided&nbsp;by</small>&nbsp;",
+		`<a href="https://sageox.ai/t/acme">`,
 		`<source media="(prefers-color-scheme: dark)" srcset="https://sageox.ai/sageox-wordmark-dark.png">`,
-		`src="https://sageox.ai/sageox-wordmark-light.png"`,
-		`<a href="https://sageox.ai/t/sageox-internal">`, // wordmark links to the team page
-		"&nbsp;/&nbsp;<b>SageOx&nbsp;Internal</b>",       // wordmark->team joined by a SLASH (containment breadcrumb)
+		`<img alt="SageOx" height="16" src="https://sageox.ai/sageox-wordmark-light.png">`,
+		"&nbsp;/&nbsp;<b>Acme&nbsp;Rockets</b>",
 		`<a href="https://sageox.ai/c/ses_9f2a3c">Session&nbsp;1</a>`,
 		`<a href="https://sageox.ai/c/ses_7c1b8d">Session&nbsp;2</a>`,
-		`<a href="https://sageox.ai/plan/pln_4d8e2f">Plan</a>`, // one plan => unnumbered
-		"> <sub>2&nbsp;related&nbsp;sessions &middot; 1&nbsp;concurrent&nbsp;edit&nbsp;flagged</sub>",
+		`<a href="https://sageox.ai/plan/pln_4d8e2f">Plan</a>`,
+		`<a href="https://sageox.ai/c/cnv_019ff2f5">Discussion</a>`,
 	)
-	// The team name is NOT a link (would go GitHub-blue like Session/Plan).
-	mustNotContain(t, got,
-		`<a href="https://sageox.ai/t/sageox-internal"><b>`,
-		"Guided&nbsp;by&nbsp;SageOx", "prior&nbsp;art", "collision", "expert",
-		"&middot;&nbsp;<b>SageOx", // team is slash-joined now, not middot-joined
-	)
-	// Peer links keep the middle dot (whisper caption divides its stats with it too).
-	mustContain(t, got, "&middot;")
-	// Sessions grouped by whitespace, not a divider.
-	mustContain(t, got, "Session&nbsp;1</a>&nbsp;&nbsp;<a")
-	// Markers wrap the whole thing on their own lines.
-	if !strings.HasPrefix(got, markerStart+"\n") || !strings.HasSuffix(got, "\n"+markerEnd) {
-		t.Errorf("markers not wrapping content:\n%s", got)
+
+	// One line of content, and it is a blockquote line.
+	body := strings.TrimPrefix(got, markerStart+"\n")
+	body = strings.TrimSuffix(body, "\n"+markerEnd)
+	if strings.Contains(body, "\n") {
+		t.Errorf("credit line must be a single line, got %d lines:\n%s",
+			strings.Count(body, "\n")+1, body)
+	}
+	if !strings.HasPrefix(body, "> ") {
+		t.Errorf("content line must be a blockquote line, got %q", body)
 	}
 }
 
-// TestRender_dedupBrandTeamName proves the brand is never rendered twice: when the
-// team name equals the wordmark's brand (the dogfood team is literally "SageOx"),
-// the team-name text is suppressed — the mark stands for it. Case-insensitive.
-// Failure prevented: every SageOx PR reads "SageOx · SageOx".
+// TestRender_noSubElement is the alignment regression guard. <sub> shrinks text
+// but also carries vertical-align:sub, dropping it below the baseline the rest of
+// the row sits on — the visible wobble this round removed. <small> shrinks
+// without moving the baseline.
+// Failure prevented: someone reaches for <sub> again for "smaller text" and the
+// line silently goes crooked in every PR body.
+func TestRender_noSubElement(t *testing.T) {
+	got := Render(baseInput())
+	mustNotContain(t, got, "<sub>", "</sub>")
+	mustContain(t, got, "<small>")
+}
+
+// TestRender_wordmarkHasNoAlignAttribute is the other half of the alignment
+// guard. align="middle" — what shipped before — sinks the mark 4.5px below the
+// text baseline; the default (no attribute) leaves it 3.5px high, the closest of
+// the spec-defined, text-relative options.
+// Failure prevented: an align attribute is added back "to center it" and the mark
+// sinks, or a line-box-relative value is used whose offset shifts whenever a
+// taller element joins the row.
+func TestRender_wordmarkHasNoAlignAttribute(t *testing.T) {
+	got := Render(baseInput())
+	mustNotContain(t, got, "align=")
+}
+
+// TestRender_gateRequiresALinkableArtifact is the headline behavior change: a
+// header exists so a reviewer can GO LOOK, so it renders only when it carries at
+// least one openable link. A team name is not a credit.
+// Failure prevented: a bare SageOx logo is stamped onto a pull request that
+// SageOx has nothing to show for.
+func TestRender_gateRequiresALinkableArtifact(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(Input) Input
+		want   bool // want a rendered header
+	}{
+		{
+			name:   "session only",
+			mutate: func(in Input) Input { in.Plans, in.Discussions = nil, nil; return in },
+			want:   true,
+		},
+		{
+			name:   "plan only",
+			mutate: func(in Input) Input { in.Sessions, in.Discussions = nil, nil; return in },
+			want:   true,
+		},
+		{
+			name:   "discussion only",
+			mutate: func(in Input) Input { in.Sessions, in.Plans = nil, nil; return in },
+			want:   true,
+		},
+		{
+			name: "no links, team present => nothing",
+			mutate: func(in Input) Input {
+				in.Sessions, in.Plans, in.Discussions = nil, nil, nil
+				return in
+			},
+			want: false,
+		},
+		{
+			name: "no links, no team => nothing",
+			mutate: func(in Input) Input {
+				in.Sessions, in.Plans, in.Discussions = nil, nil, nil
+				in.TeamName, in.TeamURL = "", ""
+				return in
+			},
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := tc.mutate(baseInput())
+			got := Render(in)
+			if tc.want && got == "" {
+				t.Fatalf("want a rendered header, got empty")
+			}
+			if !tc.want && got != "" {
+				t.Fatalf("want nothing rendered, got:\n%s", got)
+			}
+			// The gate and its exported predicate must never disagree — the
+			// command relies on HasLinks to explain the no-op on stderr.
+			if in.HasLinks() != tc.want {
+				t.Errorf("HasLinks() = %v, want %v", in.HasLinks(), tc.want)
+			}
+		})
+	}
+}
+
+// TestRender_dedupBrandTeamName proves the dogfood case: a team literally named
+// "SageOx" does not render the brand twice (mark, then the same word in bold).
+// The links still carry the header, so it renders.
 func TestRender_dedupBrandTeamName(t *testing.T) {
-	for _, name := range []string{"SageOx", "sageox", "  SageOx  "} {
-		in := baseInput()
-		in.TeamName = name
-		got := Render(in)
-		mustContain(t, got, "<picture>", `<a href="https://sageox.ai/c/ses_9f2a3c">`)
-		mustNotContain(t, got, "<b>")           // team-name text omitted entirely
-		mustNotContain(t, got, "&nbsp;/&nbsp;") // ...and no orphan hierarchy slash
-	}
-	// A team whose name merely CONTAINS the brand still renders (not an exact match).
 	in := baseInput()
-	in.TeamName = "SageOx Internal"
-	mustContain(t, Render(in), "<b>SageOx&nbsp;Internal</b>")
-}
-
-// TestRender_whisperRequiresPlan proves stats render only when a Plan link is
-// present — a reviewer needs somewhere to verify the claim.
-// Failure prevented: unverifiable enrichment numbers on a plan-less PR.
-func TestRender_whisperRequiresPlan(t *testing.T) {
-	in := baseInput()
-	in.Plans = nil // material signals, but nothing to verify against
+	in.TeamName = "sageox" // case-insensitive
 	got := Render(in)
-	// The kicker is also a "> <sub>", so assert on the stat text, not the tag.
-	mustNotContain(t, got, "related", "concurrent")
-
-	in.Plans = []Plan{{URL: "https://sageox.ai/plan/pln_x"}}
-	mustContain(t, Render(in), "2&nbsp;related&nbsp;sessions", "1&nbsp;concurrent&nbsp;edit&nbsp;flagged")
+	mustContain(t, got, "<picture>", `>Plan</a>`)
+	mustNotContain(t, got, "<b>", "&nbsp;/&nbsp;")
 }
 
+// TestRender_degradedStates walks the axes that vary independently.
 func TestRender_degradedStates(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -110,44 +176,41 @@ func TestRender_degradedStates(t *testing.T) {
 		notContain []string
 	}{
 		{
-			name: "one session, no plans, no enrichment",
+			name: "one session, nothing else",
 			mutate: func(in Input) Input {
 				in.Sessions = []Session{{URL: "https://sageox.ai/c/ses_9f2a3c"}}
-				in.Plans = nil
-				in.Signals = Signals{}
+				in.Plans, in.Discussions = nil, nil
 				return in
 			},
-			contains:   []string{`>Session</a>`, "<sub>guided&nbsp;by</sub><br>"}, // singular, unnumbered
-			notContain: []string{"Session&nbsp;1", "related", "concurrent", "Plan"},
+			contains:   []string{`>Session</a>`, "<small>guided&nbsp;by</small>"}, // singular, unnumbered
+			notContain: []string{"Session&nbsp;1", "Plan", "Discussion"},
 		},
 		{
-			name: "bare: no sessions, no plans, no enrichment",
-			mutate: func(in Input) Input {
-				in.Sessions = nil
-				in.Plans = nil
-				in.Signals = Signals{}
-				return in
-			},
-			contains:   []string{"<picture>", "<b>SageOx&nbsp;Internal</b>", "<sub>guided&nbsp;by</sub><br>"},
-			notContain: []string{"Session", "Plan", "related", "concurrent"},
-		},
-		{
-			name: "material but ShowStat off => no stats",
-			mutate: func(in Input) Input {
-				in.ShowStat = false
-				return in
-			},
-			contains:   []string{"Session&nbsp;1"},
-			notContain: []string{"related", "concurrent"},
-		},
-		{
-			name: "no team name => team segment omitted",
+			name: "no team name => team segment omitted, links carry it",
 			mutate: func(in Input) Input {
 				in.TeamName = ""
 				return in
 			},
 			contains:   []string{"<picture>", "Session&nbsp;1"},
 			notContain: []string{"<b>"},
+		},
+		{
+			name: "no team URL => wordmark renders unlinked",
+			mutate: func(in Input) Input {
+				in.TeamURL = ""
+				return in
+			},
+			contains:   []string{"<picture>", "<b>Acme&nbsp;Rockets</b>"},
+			notContain: []string{`<a href="https://sageox.ai/t/`},
+		},
+		{
+			name: "two discussions get numbered",
+			mutate: func(in Input) Input {
+				in.Discussions = []Discussion{{URL: "https://sageox.ai/c/cnv_a"}, {URL: "https://sageox.ai/c/cnv_b"}}
+				return in
+			},
+			contains:   []string{"Discussion&nbsp;1", "Discussion&nbsp;2"},
+			notContain: []string{">Discussion</a>"},
 		},
 	}
 	for _, tc := range tests {
@@ -159,60 +222,12 @@ func TestRender_degradedStates(t *testing.T) {
 	}
 }
 
+// TestRender_teamNameEscaped proves the untrusted-input path: team_name is
+// team-editable config and lands in a public PR body.
 func TestRender_teamNameEscaped(t *testing.T) {
 	in := baseInput()
-	in.TeamName = `Ac & <script>alert(1)</script>`
+	in.TeamName = `<script>alert("x")</script>`
 	got := Render(in)
-	mustContain(t, got, "&amp;", "&lt;script&gt;")
-	mustNotContain(t, got, "<script>alert")
-}
-
-func TestRender_noTeamURL_wordmarkUnlinked(t *testing.T) {
-	in := baseInput()
-	in.TeamURL = ""
-	got := Render(in)
-	// The wordmark <picture> must appear, but not wrapped in an anchor to a team.
-	mustContain(t, got, "<picture>")
-	mustNotContain(t, got, `<a href="https://sageox.ai/t/`)
-}
-
-func TestRender_tierB_floatedStripFirstNoSub(t *testing.T) {
-	in := baseInput()
-	in.Strip = &StripURLs{
-		Light: "https://assets.sageox.ai/pr/enrich-2-1-light.svg",
-		Dark:  "https://assets.sageox.ai/pr/enrich-2-1-dark.svg",
-	}
-	got := Render(in)
-
-	mustContain(t, got,
-		`align="right"`,
-		`srcset="https://assets.sageox.ai/pr/enrich-2-1-dark.svg"`,
-		`alt="2 related sessions · 1 concurrent edit flagged"`,
-	)
-	// The floated strip must precede the wordmark in source order (so it floats
-	// onto the same line), and Tier B replaces the <sub> TEXT stats.
-	stripIdx := strings.Index(got, `align="right"`)
-	markIdx := strings.Index(got, `alt="SageOx"`)
-	if stripIdx < 0 || markIdx < 0 || stripIdx > markIdx {
-		t.Errorf("floated strip must come before the wordmark; strip=%d wordmark=%d", stripIdx, markIdx)
-	}
-	// The text-tier stats caption is not emitted under Tier B (the kicker's
-	// <sub> is fine; the &nbsp;-joined stats markup must be absent).
-	mustNotContain(t, got, "2&nbsp;related&nbsp;sessions")
-}
-
-func TestRender_tierB_ignoredWithoutWhisper(t *testing.T) {
-	in := baseInput()
-	in.Signals = Signals{} // no counts => no whisper => strip irrelevant
-	in.Strip = &StripURLs{Light: "l.svg", Dark: "d.svg"}
-	got := Render(in)
-	mustNotContain(t, got, `align="right"`, "related")
-}
-
-func TestRender_tierB_ignoredWhenStripIncomplete(t *testing.T) {
-	in := baseInput()
-	in.Strip = &StripURLs{Light: "only-light.svg"} // missing dark => fall back to Tier A text
-	got := Render(in)
-	mustContain(t, got, "> <sub>", "2&nbsp;related&nbsp;sessions")
-	mustNotContain(t, got, `align="right"`)
+	mustNotContain(t, got, "<script>", `alert("x")`)
+	mustContain(t, got, "&lt;script&gt;")
 }

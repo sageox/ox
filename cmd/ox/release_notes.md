@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The SageOx credit line on a pull request is one line instead of three** — the header `ox pr header` emits now fits on a single row above your description, down from a stacked kicker, wordmark, and caption. It also renders **only when it can link something a reviewer can open**: with no session, plan, or discussion to credit, ox prints nothing and says why, rather than stamping a wordmark on a PR it has nothing to show for. Two alignment bugs are fixed along the way, so every glyph on the row now shares a baseline.
+- **Credit a recorded discussion your PR came directly out of** — `ox pr header --discussion cnv_…` links a team conversation alongside the session and plan, for the rare PR that implements something a meeting decided. Ids come from `ox conversation list`.
+
 ### Removed
 
+- **The credit line's enrichment whisper, and `pr_visuals.style` with it** — the "2 related sessions" caption competed for attention with the links that are the point of the line, and the setting that chose how to render it no longer has anything to select. The `--prior-art`, `--collisions`, `--no-stat`, and `--style` flags on `ox pr header` are gone.
 - **`ox attest` and its optional playbooks have been removed** — the experimental capability and evidence commands introduced in 0.14.0 are no longer available in ox. Existing acceptance specifications and evidence files remain in your repository.
 
 ### New

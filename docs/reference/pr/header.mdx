@@ -13,20 +13,28 @@ Emit the SageOx credit line for the top of a PR description
 Emit a thin, on-brand credit line to paste at the very TOP of a pull-request
 description body — the human-facing counterpart to the 'SageOx-Session:' trailer.
 
-It names the team, links the session(s) and plan(s) that produced the change,
-and whispers a subtle enrichment stat. Paste the output above your description;
-keep the 'SageOx-Session:' trailer at the bottom.
+It links the session(s), plan(s), and discussion(s) that produced the change and
+names the team they belong to. Paste the output above your description; keep the
+'SageOx-Session:' trailer at the bottom.
 
-The line is built from the primitives that survive GitHub's PR-body sanitizer
-(a theme-adaptive <picture> wordmark, real <a> links, a <sub> caption) and
-degrades cleanly: no session, no plan, and no enrichment each still render.
+The line renders ONLY when it can link at least one artifact a reviewer can open.
+A team name alone is not a credit — a wordmark with nothing behind it is a logo
+stamp, not provenance — so with no session, plan, or discussion the command
+prints nothing and explains why on stderr.
+
+The markup is built from the primitives that survive GitHub's PR-body sanitizer
+(a theme-adaptive <picture> wordmark, real <a> links, a baseline-stable <small>
+kicker) and fits on one line.
 
 Examples:
-  # Auto-link the current session; no enrichment
+  # Auto-link the current session
   ox pr header
 
-  # Link two plans the session produced, with enrichment counts
-  ox pr header --plan pln_4d8e2f --plan pln_1a6b9c --prior-art 2 --collisions 1
+  # Link two plans the session produced
+  ox pr header --plan pln_4d8e2f --plan pln_1a6b9c
+
+  # Credit a recorded discussion the PR came directly out of
+  ox pr header --discussion cnv_019ff2f5-2079-7be1-b05e-8caad2772e61
 
   # Write straight into a PR body file (never a heredoc — it mangles the markup)
   ox pr header > body.md && cat description.md >> body.md
@@ -39,14 +47,11 @@ ox pr header [flags]
 ### Options
 
 ```
-      --allow-unconfirmed     accept links that may not be server-visible yet — the current session before upload, and explicit --session/--plan refs — without a warning (may 404)
-      --collisions int        enrichment: concurrent edits flagged
-  -h, --help                  help for header
-      --no-stat               suppress the enrichment whisper
-      --plan stringArray      plan URL or pln_ id to link (repeatable)
-      --prior-art int         enrichment: related sessions surfaced
-      --session stringArray   session URL or ses_ id to link (repeatable; defaults to the current session)
-      --style string          whisper render: text | image | auto (default: pr_visuals.style)
+      --allow-unconfirmed        accept links that may not be server-visible yet — the current session before upload, and explicit --session/--plan/--discussion refs — without a warning (may 404)
+      --discussion stringArray   recorded-discussion URL or cnv_ id to link (repeatable; only when the PR came directly out of it)
+  -h, --help                     help for header
+      --plan stringArray         plan URL or pln_ id to link (repeatable)
+      --session stringArray      session URL or ses_ id to link (repeatable; defaults to the current session)
 ```
 
 ### Options inherited from parent commands
