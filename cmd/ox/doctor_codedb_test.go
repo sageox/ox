@@ -137,6 +137,53 @@ func TestCheckCodeIndexAtDir_CorruptMapping_TargetedRebuild(t *testing.T) {
 	require.NoError(t, db2.Close())
 }
 
+// TestCheckCodeIndexAtDir_MappingOpenErrorRecommendsFullReindex verifies that
+// doctor turns Bleve's otherwise opaque mapping-parse failure into the recovery
+// command known to work. The blocked heal-lock fixture keeps the open error
+// visible long enough for doctor to report it instead of repairing it inline.
+//
+// Failure prevented: doctor reports only a misleading lock-contention warning,
+// leaving users to discover `ox code index --full` from daemon logs.
+func TestCheckCodeIndexAtDir_MappingOpenErrorRecommendsFullReindex(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
+
+	dataDir := t.TempDir()
+	db, err := codedb.Open(dataDir)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	boltPath := filepath.Join(dataDir, "bleve", "comment", "store", "root.bolt")
+	corruptCommentMapping(t, boltPath)
+
+	// Put an unknown entry after the real snapshot. Bleve skips it and reaches
+	// the empty mapping; the lightweight corruption peek remains inconclusive.
+	bolt, err := bbolt.Open(boltPath, 0o600, &bbolt.Options{Timeout: time.Second})
+	require.NoError(t, err)
+	require.NoError(t, bolt.Update(func(tx *bbolt.Tx) error {
+		snapshots := tx.Bucket([]byte{'s'})
+		require.NotNil(t, snapshots, "snapshots bucket missing — Bleve layout changed")
+		return snapshots.Put([]byte{0xff}, []byte("unknown snapshot entry"))
+	}))
+	require.NoError(t, bolt.Close())
+
+	// Point the heal lock through a regular file so opening the lock fails with
+	// ENOTDIR. The store correctly refuses a lockless destructive repair,
+	// allowing doctor to exercise its open-error remediation path.
+	notDir := filepath.Join(dataDir, "not-a-directory")
+	require.NoError(t, os.WriteFile(notDir, []byte("block lock creation"), 0o600))
+	healLock := filepath.Join(dataDir, "bleve", "comment.heal.lock")
+	if err := os.Symlink(filepath.Join(notDir, "lock"), healLock); err != nil {
+		t.Skipf("symlink unavailable; cannot isolate heal-lock setup failure: %v", err)
+	}
+
+	result := checkCodeIndexAtDir(dataDir, false)
+	assert.True(t, result.warning, "an unhealed mapping error must be visible")
+	assert.Contains(t, result.message, "error parsing mapping JSON")
+	assert.Contains(t, result.detail, "ox code index --full")
+}
+
 // corruptCommentMapping zeroes the latest snapshot's mapping doc in the
 // comment sub-index — same on-disk state observed in production.
 func corruptCommentMapping(t *testing.T, boltPath string) {

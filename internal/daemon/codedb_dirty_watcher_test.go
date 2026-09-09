@@ -386,8 +386,20 @@ func TestRefreshDirtyOverlay_RunsConcurrentlyWithLedgerIndex(t *testing.T) {
 func TestRefreshDirtyOverlay_ContextCanceled(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+	repoDir := initDirtyTestRepo(t)
+	dataDir := filepath.Join(t.TempDir(), "codedb")
+	db, err := codedb.Open(dataDir)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	mgr := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
+	mgr.mu.Lock()
+	mgr.dataDir = dataDir
+	mgr.lastDirtyRefresh = time.Now()
+	mgr.mu.Unlock()
+
+	tracker := NewIssueTracker()
+	mgr.SetIssueTracker(tracker)
 
 	fires := make(chan struct{}, 1)
 	mgr.dirtyTestHook = func() {
@@ -418,6 +430,13 @@ func TestRefreshDirtyOverlay_ContextCanceled(t *testing.T) {
 		defer mgr.mu.Unlock()
 		return !mgr.dirtyRefreshing
 	}, 2*time.Second, 10*time.Millisecond, "dirtyRefreshing flag not released after context cancellation")
+
+	mgr.mu.Lock()
+	lastDirtyRefresh := mgr.lastDirtyRefresh
+	mgr.mu.Unlock()
+	assert.True(t, lastDirtyRefresh.IsZero(), "canceled refresh must invalidate an earlier success timestamp")
+	_, found := tracker.GetIssue(IssueTypeDirtyOverlayFailed, "")
+	assert.True(t, found, "canceled dirty overlay build must report a failure")
 }
 
 // --- C. Deterministic concurrency: verify no double goroutine ---
@@ -778,6 +797,7 @@ func TestRefreshDirtyOverlay_EmitsIssueOnOpenFailure(t *testing.T) {
 	mgr := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
 	mgr.mu.Lock()
 	mgr.dataDir = dataDir
+	mgr.lastDirtyRefresh = time.Now()
 	mgr.mu.Unlock()
 
 	tracker := NewIssueTracker()
@@ -819,6 +839,11 @@ func TestRefreshDirtyOverlay_EmitsIssueOnOpenFailure(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "should emit %s issue on codedb.Open failure, got: %v", IssueTypeDirtyOverlayFailed, issues)
+
+	mgr.mu.Lock()
+	lastDirtyRefresh := mgr.lastDirtyRefresh
+	mgr.mu.Unlock()
+	assert.True(t, lastDirtyRefresh.IsZero(), "failed refresh must invalidate an earlier success timestamp")
 }
 
 // TestRefreshDirtyOverlay_ClearsIssueOnSuccess verifies that a successful
