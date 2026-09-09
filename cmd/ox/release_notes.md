@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`ox distill` and its history commands have been removed** — local automatic distillation and `history list`, `show`, and `since` are no longer available. The separate `ox memory distill` and `ox agent <id> distill` commands remain available.
+- **The bundled OpenClaw integration has been removed** — SageOx no longer ships its OpenClaw skills, installer, deployment scripts, or ClawHub tooling.
 - **The credit line's enrichment whisper, and `pr_visuals.style` with it** — the "2 related sessions" caption competed for attention with the links that are the point of the line, and the setting that chose how to render it no longer has anything to select. The `--prior-art`, `--collisions`, `--no-stat`, and `--style` flags on `ox pr header` are gone.
 - **`ox attest` and its optional playbooks have been removed** — the experimental capability and evidence commands introduced in 0.14.0 are no longer available in ox. Existing acceptance specifications and evidence files remain in your repository.
 

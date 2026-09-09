@@ -1,5 +1,7 @@
 # Implementation Plan — Team Timezone Removal
 
+> **Partially superseded — 2026-09-09:** `ox distill` and its subcommands have been removed. Distill-specific implementation steps, bucketing behavior, and command examples below are historical. The removal of timezone configuration and the doctor cleanup remain applicable; see [journal_timezone_e2e_test.go](../../cmd/ox/journal_timezone_e2e_test.go) for current coverage.
+
 **Companion to:** [`team-memory-journal.md`](./team-memory-journal.md) §5.b, §6.4
 
 **Scope:** The team-timezone feature revert only. All journal

@@ -409,7 +409,7 @@ func TestTeamSync_PropagatesSetupFailure(t *testing.T) {
 // TestTeamSync_CorruptRepoReportedAsError verifies that when a team context repo
 // is corrupt and the daemon moves it aside for re-clone, the sync is reported as
 // an error rather than "synced". The local path is gone after the move, so
-// reporting success would let targeted sync / distill proceed against a team
+// reporting success would let targeted sync proceed against a team
 // context that is no longer present.
 func TestTeamSync_CorruptRepoReportedAsError(t *testing.T) {
 	if testing.Short() {

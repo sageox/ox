@@ -1,6 +1,8 @@
 # `ox distill history` Read Surface — E2E Test Plan
 
-Status: plan
+> **Superseded — 2026-09-09:** `ox distill history` and its dedicated tests have been removed. The scenarios below are historical and must not be used as requirements for the current CLI.
+
+Status: superseded
 Owner: test-architect
 Scope: end-to-end test plan for the **journal read surface** feature
 landing in its own PR. The team timezone removal is tested in a

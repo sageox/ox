@@ -1,5 +1,7 @@
 # GitHub Activity Assembly — TDD Implementation Plan
 
+> **Distill integration superseded — 2026-09-09:** `ox distill` has been removed as a caller. Activity assembly under `internal/codedb/query/` still serves `ox code activity`; distill integration steps and references to the deleted pipeline below are historical.
+
 ## Overview
 
 9-step TDD implementation plan for assembling GitHub event clusters from CodeDB
@@ -7,7 +9,7 @@ for the fact extractor. Each step builds on the previous and produces a working,
 testable increment.
 
 **Package:** `internal/codedb/query/`
-**Callers:** `ox code activity` (CLI) and `ox distill` (pipeline step)
+**Current caller:** `ox code activity` (CLI)
 **Output:** Flat JSON array of event clusters matching `github-extractor.md` input spec
 
 ### Key Design Decisions (from cross-review)

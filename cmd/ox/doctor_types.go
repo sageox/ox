@@ -191,9 +191,6 @@ const (
 	CheckSlugCredentialIntegrity = "credential-integrity"
 	CheckSlugGitPATLiveness      = "git-pat-liveness"
 
-	// Distillation checks
-	CheckSlugGuidanceFiles = "guidance-files"
-
 	// Agent Worker checks
 	CheckSlugAgentWorkerBinary = "agent-worker-binary"
 

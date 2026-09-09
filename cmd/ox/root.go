@@ -158,12 +158,11 @@ func init() {
 	// software development
 	initCmd.GroupID = "dev"
 
-	// knowledge surfaces — context, search, distillation, kb bubbles
+	// knowledge surfaces — context, search, kb bubbles
 	importCmd.GroupID = "knowledge"
 	kbCmd.GroupID = "knowledge"
 	queryCmd.GroupID = "knowledge"
 	scoutCmd.GroupID = "knowledge"
-	distillCmd.GroupID = "knowledge"
 	recapCmd.GroupID = "knowledge"
 	conversationCmd.GroupID = "knowledge"
 

@@ -300,7 +300,6 @@ point is that the human knows exactly what to do next, and it never leaks onto t
 | thread triage + reply/resolve | **`/monitor-pr`** (§triage, §5) |
 | fast-follow | mechanics inline above (this repo has no `stack` skill) |
 | internal next-steps | this skill, Step 9 (INTERNAL handoff, never posted) |
-| lint this skill | **`/clawhub-skill-lint`** before publish |
 
 ## Basis (Aug 2026 threat classes this hardens against)
 

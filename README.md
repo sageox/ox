@@ -249,9 +249,8 @@ any agent — including ones with no adapter — as long as `ox` is on `PATH`.
 ### Orchestrators
 
 `ox` runs inside [Block Buzz](https://github.com/block/buzz),
-[Conductor](https://conductor.build),
-[Gas City](https://github.com/gastownhall/gascity), and
-[OpenClaw](https://github.com/openclaw/openclaw).
+[Conductor](https://conductor.build), and
+[Gas City](https://github.com/gastownhall/gascity).
 
 <sub>Agent and orchestrator names are trademarks of their respective owners; `ox`
 is compatible with, not affiliated with, them.</sub>

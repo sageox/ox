@@ -107,7 +107,7 @@ func exitCodeOf(t *testing.T, err error) int {
 	if err == nil {
 		return 0
 	}
-	var exit *distillHistoryExitError
+	var exit *commandExitError
 	if !errors.As(err, &exit) {
 		t.Fatalf("error is not the typed exit error: %v", err)
 	}
@@ -199,6 +199,10 @@ func TestConversationUsageErrors(t *testing.T) {
 			}
 			if env.Error.Code != tt.wantCode {
 				t.Errorf("error.code = %q, want %q", env.Error.Code, tt.wantCode)
+			}
+			// The exit error must preserve the diagnostic already rendered on stdout.
+			if env.Error.Message == "" || err.Error() != env.Error.Message {
+				t.Errorf("exit error = %q, want envelope message %q", err.Error(), env.Error.Message)
 			}
 		})
 	}

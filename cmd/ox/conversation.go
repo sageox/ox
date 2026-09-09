@@ -14,7 +14,7 @@ import (
 // local-first, read-only access to the active team's recorded discussions —
 // summaries, transcript slices, and distillation topics — straight from the
 // team-context checkout on disk. With no subcommand, it behaves like
-// `ox conversation list` for discoverability (mirroring `ox distill history`).
+// `ox conversation list` for discoverability.
 //
 // Every subcommand is a thin shell over internal/conversation/read: the read
 // package owns team resolution, INDEX.json lookup, path guarding, disclosure
@@ -55,8 +55,8 @@ func init() {
 }
 
 // conversationFormatFlags is the output-mode surface every conversation
-// command shares: --format json|text defaulting to json (the distill-history
-// pattern — machine-first), with --text as a plain shorthand.
+// command shares: --format json|text defaulting to json, with --text as a
+// plain shorthand.
 type conversationFormatFlags struct {
 	Format string
 	Text   bool
@@ -151,22 +151,11 @@ func conversationExitCode(e *read.Error) int {
 	}
 }
 
-// conversationExitError wraps a read error into the typed exit-code error
-// main.go already honors (distillHistoryExitError is the one exit-carrying
-// error executeWithFrictionRecovery unwraps; reusing it keeps the
-// conversation family out of friction recovery and the default error
-// printer — the envelope is already on stdout when this returns).
+// conversationExitError returns the exit status matching a typed read error.
 func conversationExitError(e *read.Error) error {
-	return &distillHistoryExitError{
+	return &commandExitError{
 		ExitCode: conversationExitCode(e),
-		Envelope: distillHistoryEnvelope{
-			Success: false,
-			Error: &distillHistoryEnvelopeError{
-				Code:      e.Code,
-				Message:   e.Message,
-				Retryable: e.Retryable,
-			},
-		},
+		Message:  e.Message,
 	}
 }
 
@@ -187,15 +176,12 @@ func finishConversationEnvelope(w io.Writer, format string, env *read.Envelope, 
 func conversationUsageExit(w io.Writer, format, code, msg string) error {
 	e := &read.Error{Code: code, Message: msg}
 	writeConversationEnvelope(w, format, read.ErrorEnvelope(e), nil)
-	return &distillHistoryExitError{
+	return &commandExitError{
 		ExitCode: 2,
-		Envelope: distillHistoryEnvelope{
-			Success: false,
-			Error:   &distillHistoryEnvelopeError{Code: code, Message: msg},
-		},
+		Message:  e.Message,
 	}
 }
 
 // conversationUsageErrorCode is the envelope code for malformed flag values
-// detected at the command layer (mirrors the distill-history usage code).
+// detected at the command layer.
 const conversationUsageErrorCode = "usage_error"

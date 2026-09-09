@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -200,4 +201,38 @@ func outputDistilledContext(out io.Writer, path string) bool {
 	fmt.Fprint(out, string(content))
 
 	return true
+}
+
+// discussionMetadata matches the metadata.json schema in discussion dirs.
+type discussionMetadata struct {
+	RecordingID string `json:"recording_id"`
+	Title       string `json:"title"`
+	CreatedAt   string `json:"created_at"` // RFC3339
+	UserID      string `json:"user_id"`
+}
+
+// loadDiscussionMetadata reads and parses metadata.json from a discussion dir.
+func loadDiscussionMetadata(dirPath string) (*discussionMetadata, error) {
+	data, err := os.ReadFile(filepath.Join(dirPath, "metadata.json"))
+	if err != nil {
+		return nil, fmt.Errorf("read metadata.json: %w", err)
+	}
+	var meta discussionMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("parse metadata.json: %w", err)
+	}
+	if meta.Title == "" {
+		return nil, fmt.Errorf("metadata.json missing title")
+	}
+	return &meta, nil
+}
+
+// DiscussionIndexEntry holds data for one line in the per-discussion index.
+type DiscussionIndexEntry struct {
+	DirName      string
+	Title        string
+	Date         string   // YYYY-MM-DD
+	VisualTypes  []string // content types from keyframes
+	HasSummary   bool     // server-generated summary.json exists
+	Participants []string // unique speaker names from transcript
 }

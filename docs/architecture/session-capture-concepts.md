@@ -382,9 +382,9 @@ sequenceDiagram
    (fork, migrate to new host) does not require moving sessions. They travel with
    the ledger, which is keyed by `repo_id`.
 
-8. **Distillation is downstream of session publication.** `ox distill` reads
-   `summary.json` files across the ledger and derives team memory facts. Distillation
-   failures cannot affect capture — the pipeline is DAG-shaped, not cyclic.
+8. **Summary consumption is downstream of session publication.** Consumers read
+   published `summary.json` files across the ledger. Consumer failures cannot
+   affect capture — the pipeline is DAG-shaped, not cyclic.
 
 9. **Context trace and session raw are peers, not nested.** `context-trace.jsonl`
    lives in the same folder as `raw.jsonl`. A trace event references an `eid` from

@@ -9,8 +9,7 @@ import (
 
 // TestConversationReferenceDocs_Committed pins that the generated reference
 // docs for the `ox conversation` family have been committed and match the
-// current command surface shape. This is the "golden" check (same pattern as
-// TestDistillHistoryReferenceDocs_Committed): the files exist and advertise
+// current command surface shape: the files exist and advertise
 // the exact flag set and usage string the implementation exposes.
 //
 // Failure prevented: a developer edits a flag name or adds a new one and
@@ -130,5 +129,26 @@ func TestConversationReferenceDocs_Committed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// findRepoRootForDocsTest walks up from the test's source directory
+// until it finds a directory containing a go.mod — the Go convention
+// for locating a module root from an arbitrary test location.
+func findRepoRootForDocsTest(t *testing.T) string {
+	t.Helper()
+	// Walk up from the SOURCE tree, not the process working directory: TestMain
+	// deliberately moves the process out of the repository so a cwd-resolved doctor
+	// check cannot reconcile the developer's own checkout.
+	dir := packageDir
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("go.mod not found walking up from test source directory")
+		}
+		dir = parent
 	}
 }
