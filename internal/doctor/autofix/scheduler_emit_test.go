@@ -43,3 +43,26 @@ func TestScheduler_EmitsCleanSoIssuesCanBeRetired(t *testing.T) {
 	assert.Equal(t, StatusClean, got[0].Status)
 	assert.Equal(t, "flaky", got[0].Slug, "the sink needs the slug to know which issue to retire")
 }
+
+// tick() is the ticker path, distinct from RunNow. It must route results
+// through the same sink, or a scheduled pass would never retire an issue that
+// only an on-demand pass could clear.
+func TestScheduler_TickEmitsThroughSink(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(&Check{
+		Slug: "ticked",
+		Run: func(context.Context, string) CheckResult {
+			return CheckResult{Status: StatusClean}
+		},
+	})
+	var got []CheckResult
+	s := NewScheduler(reg, nil, func() []string { return []string{""} }, func(r CheckResult) {
+		got = append(got, r)
+	})
+
+	s.tick(context.Background())
+
+	require.Len(t, got, 1, "the ticker path must reach the sink, Clean included")
+	assert.Equal(t, StatusClean, got[0].Status)
+	assert.Equal(t, "ticked", got[0].Slug)
+}

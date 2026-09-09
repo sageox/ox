@@ -183,3 +183,28 @@ func TestScanLedgerSacredDeletions_IgnoresSmallDeletion(t *testing.T) {
 	res := scanLedgerSacredDeletions(context.Background(), repo, "/fake/repo")
 	assert.Equal(t, StatusClean, res.Status)
 }
+
+// removedEntities cannot confirm survival when git fails, so it must report
+// every candidate as removed rather than silently returning none.
+//
+// Failure prevented: an unreadable or rewritten ledger silencing the wipe
+// detector — an error meaning the same thing as "nothing was deleted".
+func TestRemovedEntities_FailsLoudWhenGitErrors(t *testing.T) {
+	repo := newSacredTestRepo(t)
+	candidates := []string{"sessions/a", "sessions/b"}
+
+	got := removedEntities(context.Background(), repo, "0000000000000000000000000000000000000000", candidates)
+	assert.Equal(t, candidates, got,
+		"a scan that cannot confirm survival must not silence a potential wipe")
+
+	// And the happy path still filters: a surviving directory is not "removed".
+	dir := filepath.Join(repo, "sessions", "kept")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"), []byte("{}\n"), 0o600))
+	afGit(t, repo, "add", "sessions")
+	afGit(t, repo, "commit", "-m", "keep one")
+	head := afGit(t, repo, "rev-parse", "HEAD")
+
+	got = removedEntities(context.Background(), repo, head, []string{"sessions/kept", "sessions/gone"})
+	assert.Equal(t, []string{"sessions/gone"}, got, "a surviving entity must not count as removed")
+}

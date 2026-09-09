@@ -35,6 +35,8 @@ func TestEntityOf(t *testing.T) {
 		{"plan prefix with no entity", "data/plans/", ""},
 		{"similar but different prefix", "sessions-archive/abc/meta.json", ""},
 		{"whitespace only", "   ", ""},
+		{"empty first segment", "sessions//meta.json", ""},
+		{"plan empty first segment", "data/plans//plan.md", ""},
 
 		// Raw `git` output lines arrive with surrounding whitespace.
 		{"trims surrounding whitespace", "  sessions/abc/meta.json  ", "sessions/abc"},

@@ -1447,19 +1447,25 @@ func checkLedgerPathMismatch(fix bool) checkResult {
 // 2.50 records `clone --filter` as remote.<name>.promisor and never sets that
 // extension key.
 func checkTeamContextCloneStrategy() []checkResult {
-	var results []checkResult
-
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
-		return results
+		return nil
 	}
 
 	localCfg, err := config.LoadLocalConfig(gitRoot)
 	if err != nil || localCfg == nil {
-		return results
+		return nil
 	}
 
-	for _, tc := range localCfg.TeamContexts {
+	return teamContextCloneStrategyResults(localCfg.TeamContexts)
+}
+
+// teamContextCloneStrategyResults is the decision half, split from the
+// cwd-dependent lookup above so it can be exercised against real clones
+// without chdir'ing the test process into a fixture.
+func teamContextCloneStrategyResults(teamContexts []config.TeamContext) []checkResult {
+	var results []checkResult
+	for _, tc := range teamContexts {
 		if tc.Path == "" || !isGitRepo(tc.Path) {
 			continue
 		}
