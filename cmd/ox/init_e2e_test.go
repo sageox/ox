@@ -66,6 +66,7 @@ func TestRunInit_CodexTrustStepRequiresInstalledHooks(t *testing.T) {
 				require.Contains(t, output, "/hooks to review and trust the SageOx hooks")
 				require.Contains(t, strings.ToLower(output), "next steps")
 				steps := output[strings.Index(strings.ToLower(output), "next steps"):]
+				require.Contains(t, steps, "ox doctor")
 				assert.Less(t, strings.Index(steps, "ox doctor"), strings.Index(steps, "/hooks"))
 				assert.Less(t, strings.Index(steps, "/hooks"), strings.Index(steps, "Invite teammates"))
 			} else {
