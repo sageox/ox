@@ -46,7 +46,7 @@ func TestRender_full(t *testing.T) {
 	mustContain(t, got,
 		"<!-- sageox:pr-header v2 -->",
 		"<!-- /sageox:pr-header -->",
-		"<small>guided&nbsp;by</small>&nbsp;",
+		"guided&nbsp;by&nbsp;",
 		`<a href="https://sageox.ai/t/acme">`,
 		`<source media="(prefers-color-scheme: dark)" srcset="https://sageox.ai/sageox-wordmark-dark.png">`,
 		`<img alt="SageOx" height="16" src="https://sageox.ai/sageox-wordmark-light.png">`,
@@ -69,16 +69,18 @@ func TestRender_full(t *testing.T) {
 	}
 }
 
-// TestRender_noSubElement is the alignment regression guard. <sub> shrinks text
-// but also carries vertical-align:sub, dropping it below the baseline the rest of
-// the row sits on — the visible wobble this round removed. <small> shrinks
-// without moving the baseline.
-// Failure prevented: someone reaches for <sub> again for "smaller text" and the
-// line silently goes crooked in every PR body.
-func TestRender_noSubElement(t *testing.T) {
+// TestRender_kickerIsUnwrappedPlainText is the alignment regression guard.
+// <sub>/<sup> are the only size-reducing elements GitHub's PR sanitizer keeps,
+// and both carry a vertical-align that lifts the kicker off the baseline the rest
+// of the row sits on. <small> would not go crooked but GitHub deletes it outright
+// (measured against POST /markdown, mode=gfm), so wrapping in it would only make
+// the code claim a size hierarchy the reader never sees.
+// Failure prevented: someone reaches for "smaller text" again and either the line
+// goes crooked in every PR body, or the markup lies about how it renders.
+func TestRender_kickerIsUnwrappedPlainText(t *testing.T) {
 	got := Render(baseInput())
-	mustNotContain(t, got, "<sub>", "</sub>")
-	mustContain(t, got, "<small>")
+	mustContain(t, got, "guided&nbsp;by&nbsp;")
+	mustNotContain(t, got, "<sub>", "<sup>", "<small>", "<span")
 }
 
 // TestRender_wordmarkHasNoAlignAttribute is the other half of the alignment
@@ -182,7 +184,7 @@ func TestRender_degradedStates(t *testing.T) {
 				in.Plans, in.Discussions = nil, nil
 				return in
 			},
-			contains:   []string{`>Session</a>`, "<small>guided&nbsp;by</small>"}, // singular, unnumbered
+			contains:   []string{`>Session</a>`, "guided&nbsp;by&nbsp;"}, // singular, unnumbered
 			notContain: []string{"Session&nbsp;1", "Plan", "Discussion"},
 		},
 		{

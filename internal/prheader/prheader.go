@@ -30,7 +30,7 @@
 // So the line is built from the primitives that survive: a <blockquote> card
 // (left accent bar + subtle tint — the one card-like chrome GitHub allows), a
 // theme-adaptive <picture> wordmark (the only mechanism that swaps by
-// prefers-color-scheme), <a>, <small>, <b>, and &nbsp;/&middot; entities. Two
+// prefers-color-scheme), <a>, <b>, and &nbsp;/&middot; entities. Two
 // dividers carry meaning: a slash joins the wordmark to the team name (the
 // owner/team breadcrumb — containment), a middle dot divides the peer links.
 // The wordmark is an <img>, so it can link to the team page AND keep its brand
@@ -42,11 +42,17 @@
 // Everything sits on ONE line, and every glyph on that line must share a
 // baseline. Two measured findings drive the markup:
 //
-//   - The kicker uses <small>, never <sub>. Both shrink text, but <sub> also
-//     carries vertical-align:sub and drops its text BELOW the baseline the rest
-//     of the row sits on — a visible wobble. <small> shrinks without moving the
-//     baseline, and it fails safe: if a sanitizer ever drops it the text renders
-//     full-size, still aligned.
+//   - The kicker is UNWRAPPED plain text. It cannot be made smaller without going
+//     crooked. Measured against GitHub's own render pipeline (POST /markdown,
+//     mode=gfm), the sanitizer drops <small>, <cite>, and <font size>, and keeps
+//     <span> only after stripping its style attribute. The ONLY surviving
+//     size-reducers are <sub> and <sup>, and both carry a vertical-align that
+//     moves the text off the baseline the rest of the row sits on — <sub> sinking
+//     the kicker is exactly the wobble this round removed. So there is no element
+//     that shrinks text AND stays on the baseline AND survives: smaller and
+//     aligned cannot both be had, and aligned wins. Do not "fix" this by reaching
+//     for <small> — GitHub deletes it, and the code would be claiming a hierarchy
+//     the reader never sees.
 //   - The wordmark carries NO align attribute (i.e. vertical-align:baseline).
 //     Measured against a 14px system-font line with the mark at 16px:
 //     align="middle" sinks the mark 4.5px below the text baseline; the default
@@ -152,9 +158,12 @@ func Render(in Input) string {
 
 	var row strings.Builder
 
-	// "guided by" kicker, inline and baseline-stable: the attribution, so the
-	// brand name is the mark itself and never repeated as plain text.
-	row.WriteString("<small>guided&nbsp;by</small>&nbsp;")
+	// "guided by" kicker: the attribution, so the brand name is the mark itself and
+	// never repeated as plain text. Deliberately UNWRAPPED — see the alignment note
+	// in the package doc. It recedes by contrast, not by size: the links are forced
+	// blue and the team name is bold, so plain body text is already the quietest
+	// thing on the row.
+	row.WriteString("guided&nbsp;by&nbsp;")
 
 	// Anchor: the theme-adaptive wordmark <picture>, linked (as an image, so it
 	// keeps its brand color) to the team page.
