@@ -148,6 +148,12 @@ func runIntegrateInteractive() error {
 	if gitRoot == "" {
 		return fmt.Errorf("not in a git repository — run from a project directory")
 	}
+	// Existing Codex hooks still need trust when other integrations are missing.
+	defer func() {
+		if hasCodexHooks(false) {
+			cli.PrintInfo(codexHookTrustHint)
+		}
+	}()
 
 	// build the list of agents with their install status
 	agents := []integrateAgentInfo{
@@ -225,9 +231,6 @@ func runIntegrateInteractive() error {
 		fmt.Println("All detected AI coworkers are already integrated.")
 		for _, a := range agents {
 			fmt.Printf("  %s %s\n", ui.PassStyle.Render("✓"), a.displayName)
-			if a.name == "codex" {
-				cli.PrintInfo(codexHookTrustHint)
-			}
 		}
 		return nil
 	}
@@ -255,9 +258,6 @@ func runIntegrateInteractive() error {
 			cli.PrintWarning(fmt.Sprintf("Could not install %s: %v", a.displayName, err))
 		} else {
 			cli.PrintSuccess(fmt.Sprintf("Installed %s integration", a.displayName))
-			if a.name == "codex" {
-				cli.PrintInfo(codexHookTrustHint)
-			}
 			installed++
 		}
 	}

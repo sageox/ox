@@ -167,6 +167,51 @@ func TestHandleInstallHooks_IsIdempotentAfterLegacyMigration(t *testing.T) {
 	assert.Equal(t, firstHooks, secondHooks)
 }
 
+// Fresh installs and upgrades must bound hook execution without changing
+// another tool's timeout or losing the limits on the next install.
+func TestHandleInstallHooks_BoundsExecution(t *testing.T) {
+	for _, scope := range []string{"project", "user"} {
+		t.Run(scope, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			params := adapterprotocol.HookParams{RepoRoot: t.TempDir(), Scope: scope}
+			hooksPath := resolveHooksPath(params.RepoRoot, scope)
+			legacy := map[string][]codexHookEntry{
+				"SessionStart": {{Hooks: []codexHook{{Type: "command", Command: hookCommand("SessionStart"), Timeout: 600}}}},
+				"SessionEnd":   {{Hooks: []codexHook{{Type: "command", Command: hookCommand("SessionEnd")}}}},
+				"Stop":         {{Hooks: []codexHook{{Type: "command", Command: "echo custom-hook", Timeout: 17}}}},
+			}
+			require.NoError(t, writeHooksFile(hooksPath, legacy, nil, scope))
+			wantTimeouts := map[string]int{
+				"SessionStart": 10, "PreToolUse": 10, "PostToolUse": 10,
+				"UserPromptSubmit": 10, "Stop": 10, "SessionEnd": 3,
+			}
+			for range 2 {
+				response, err := handleInstallHooks(params)
+				require.NoError(t, err)
+				require.True(t, response.Installed)
+				hooks, _, err := readHooksFile(hooksPath)
+				require.NoError(t, err)
+				for event, want := range wantTimeouts {
+					count := 0
+					for _, entry := range hooks[event] {
+						for _, hook := range entry.Hooks {
+							if hook.Command == "echo custom-hook" {
+								assert.Equal(t, 17, hook.Timeout)
+								continue
+							}
+							assert.Equal(t, hookCommand(event), hook.Command)
+							assert.Equal(t, want, hook.Timeout, event)
+							count++
+						}
+					}
+					assert.Equal(t, 1, count, event)
+				}
+				assert.Equal(t, "echo custom-hook", hooks["Stop"][0].Hooks[0].Command)
+			}
+		})
+	}
+}
+
 func TestHandleUninstallHooks_LeavesCodexConfigUntouched(t *testing.T) {
 	repoRoot := t.TempDir()
 	params := adapterprotocol.HookParams{RepoRoot: repoRoot, Scope: "project"}

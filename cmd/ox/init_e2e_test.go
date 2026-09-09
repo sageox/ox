@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,6 +27,53 @@ func withInitFlags(t *testing.T, team string) {
 		initQuiet, initTeamFlag, initForce = prevQuiet, prevTeam, prevForce
 		initEndpointFlag, initAgentsFlag = prevEndpoint, prevAgents
 	})
+}
+
+// Codex hooks remain inactive until trusted, so init's next steps must explain
+// approval only when the selected integration actually installed its hooks.
+func TestRunInit_CodexTrustStepRequiresInstalledHooks(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		agents       string
+		installFails bool
+		wantTrust    bool
+	}{
+		{name: "installed", agents: "codex", wantTrust: true},
+		{name: "install failed", agents: "codex", installFails: true},
+		{name: "not selected", agents: "claude-code"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newOxE2E(t)
+			withInitFlags(t, env.TeamID)
+			initQuiet, initAgentsFlag = false, tc.agents
+
+			adapterDir := t.TempDir()
+			createFakeAdapterWithHooks(t, adapterDir, "codex", "0.1.0", "session", ".codex")
+			t.Setenv("OX_ADAPTER_PATH", adapterDir)
+			adapters.Unregister("codex")
+			t.Cleanup(func() { adapters.Unregister("codex") })
+			if tc.installFails {
+				require.NoError(t, os.WriteFile(filepath.Join(env.Root, ".codex"), []byte("blocked"), 0o644))
+			}
+
+			var err error
+			output := captureStdoutForPlanCLI(t, func() { err = runInit() })
+			require.NoError(t, err, "an optional integration failure must not prevent repository setup")
+			assert.Contains(t, env.Requested(), "/api/v1/repo/init")
+			assert.Contains(t, output, "SageOx initialized successfully!")
+			if tc.wantTrust {
+				assert.FileExists(t, filepath.Join(env.Root, ".codex", "hooks.json"))
+				require.Contains(t, output, "/hooks to review and trust the SageOx hooks")
+				require.Contains(t, strings.ToLower(output), "next steps")
+				steps := output[strings.Index(strings.ToLower(output), "next steps"):]
+				assert.Less(t, strings.Index(steps, "ox doctor"), strings.Index(steps, "/hooks"))
+				assert.Less(t, strings.Index(steps, "/hooks"), strings.Index(steps, "Invite teammates"))
+			} else {
+				assert.NotContains(t, output, "/hooks")
+				assert.NoFileExists(t, filepath.Join(env.Root, ".codex", "hooks.json"))
+			}
+		})
+	}
 }
 
 // TestRunInit_WritesScopedIgnoreAndNeverStagesReservedArtifacts drives runInit

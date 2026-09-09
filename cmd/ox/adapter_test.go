@@ -326,6 +326,7 @@ func createFakeAdapter(t *testing.T, dir, name, version, adapterType string) str
 // (e.g., ".codex") where the fake install-hooks writes a hooks.json file.
 func fakeAdapterWithHooksScript(name, version, adapterType, configDir string) string {
 	return fmt.Sprintf(`#!/bin/sh
+set -e
 case "$1" in
   info)
     echo '{"protocol_version":1,"name":"%s","display_name":"%s","version":"%s","type":"%s","capabilities":["session_reader","hook_installer"]}'
