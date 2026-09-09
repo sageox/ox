@@ -102,9 +102,9 @@ func TestDoIndex_SuccessClearsDirtyOverlayFailure(t *testing.T) {
 	mgr.dataDir = t.TempDir()
 	mgr.SetIssueTracker(tracker)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	_, err := mgr.Index(ctx, CodeIndexPayload{}, nil)
+	initialCtx, initialCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	_, err := mgr.Index(initialCtx, CodeIndexPayload{}, nil)
+	initialCancel()
 	require.NoError(t, err, "initial index must succeed before testing reindex modes")
 
 	for _, full := range []bool{false, true} {
@@ -119,13 +119,31 @@ func TestDoIndex_SuccessClearsDirtyOverlayFailure(t *testing.T) {
 				Summary:  "stale dirty overlay failure",
 			})
 
-			_, err := mgr.Index(ctx, CodeIndexPayload{Full: full}, nil)
+			indexCtx, indexCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			_, err := mgr.Index(indexCtx, CodeIndexPayload{Full: full}, nil)
+			indexCancel()
 			require.NoError(t, err)
 
 			_, found := tracker.GetIssue(IssueTypeDirtyOverlayFailed, "")
 			assert.False(t, found, "successful %s index must clear the stale overlay issue", name)
 		})
 	}
+
+	t.Run("remote does not clear local overlay issue", func(t *testing.T) {
+		tracker.SetIssue(DaemonIssue{
+			Type:     IssueTypeDirtyOverlayFailed,
+			Severity: SeverityWarning,
+			Summary:  "local dirty overlay still needs recovery",
+		})
+
+		indexCtx, indexCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		_, err := mgr.Index(indexCtx, CodeIndexPayload{URL: repoDir}, nil)
+		indexCancel()
+		require.NoError(t, err)
+
+		_, found := tracker.GetIssue(IssueTypeDirtyOverlayFailed, "")
+		assert.True(t, found, "remote indexing must not clear a local overlay failure")
+	})
 }
 
 // TestStoreOpen_SelfHealsTransparently_NoDaemonRetryNeeded verifies the

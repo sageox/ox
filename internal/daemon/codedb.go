@@ -573,12 +573,14 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	// is a full tear-down-and-rebuild (git status + re-read all files + new Bleve index),
 	// so running it again here is pure waste when the overlay is already fresh.
 	var dirtyDuration time.Duration
+	dirtyOverlaySucceeded := false
 	if payload.URL == "" {
 		m.mu.Lock()
 		dirtyFresh := !m.lastDirtyRefresh.IsZero() && time.Since(m.lastDirtyRefresh) < 2*time.Minute
 		m.mu.Unlock()
 
 		if dirtyFresh {
+			dirtyOverlaySucceeded = true
 			m.logger.Debug("codedb skipping dirty overlay in doIndex, poll-built overlay is fresh")
 		} else {
 			dirtyStart := time.Now()
@@ -588,8 +590,11 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 			dirtyCount, dirtyErr := db.BuildDirtyIndex(ctx, projectRoot, opts)
 			if dirtyErr != nil {
 				m.logger.Warn("dirty index build failed", "error", dirtyErr)
-			} else if dirtyCount > 0 {
-				m.logger.Debug("dirty index built", "files", dirtyCount)
+			} else {
+				dirtyOverlaySucceeded = true
+				if dirtyCount > 0 {
+					m.logger.Debug("dirty index built", "files", dirtyCount)
+				}
 			}
 			dirtyDuration = time.Since(dirtyStart)
 
@@ -644,7 +649,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	// supersedes any failure recorded by an earlier standalone refresh. Clear
 	// it here so explicit `ox code index --full` repairs status immediately,
 	// without waiting for an unrelated worktree edit to trigger another refresh.
-	if tracker != nil {
+	if tracker != nil && dirtyOverlaySucceeded {
 		tracker.ClearIssue(IssueTypeDirtyOverlayFailed, "")
 	}
 
