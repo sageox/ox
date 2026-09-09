@@ -7,6 +7,7 @@ package lfs
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/useragent"
 )
@@ -25,6 +27,37 @@ type Client struct {
 	batchURL   string // e.g., https://git.sageox.io/sageox/ledger.git/info/lfs/objects/batch
 	httpClient *http.Client
 	authHeader string // "Basic <base64(username:token)>"
+	// Read clients resolve the selected credential for every request, never cache it.
+	readEndpoint string
+	readRepoID   string
+	readURL      string
+}
+
+// NewReadClient creates a download-only client for an authorized SageOx ledger.
+// readURL must be the canonical URL returned by discovery for this repository.
+func NewReadClient(endpointURL, repoID, readURL string) (*Client, error) {
+	if err := gitserver.ValidateReadURL(endpointURL, repoID, readURL); err != nil {
+		return nil, err
+	}
+	if _, err := auth.CurrentReadToken(endpointURL); err != nil {
+		return nil, err
+	}
+	c := NewClient(readURL, "", "")
+	c.authHeader = ""
+	c.readEndpoint, c.readRepoID, c.readURL = endpointURL, repoID, readURL
+	c.httpClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return c, nil
+}
+
+// HTTPError exposes status without reflecting response bodies or signed URLs.
+type HTTPError struct {
+	StatusCode int
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("LFS request returned HTTP %d", e.StatusCode)
 }
 
 // NewClient creates an LFS client for the given git repo URL.
@@ -105,6 +138,9 @@ type Action struct {
 	// TrustedHost is the host:port of the batch URL the action came from.
 	// Lowercased so comparisons are case-insensitive.
 	TrustedHost string `json:"-"`
+
+	readClient *Client // non-nil only for actions from a selected read-only client
+	readOID    string
 }
 
 // ObjectError is returned when the server cannot process an object.
@@ -115,16 +151,24 @@ type ObjectError struct {
 
 // BatchUpload requests upload URLs for the given objects.
 func (c *Client) BatchUpload(objects []BatchObject) (*BatchResponse, error) {
-	return c.doBatch("upload", objects)
+	return c.doBatch(context.Background(), "upload", objects)
 }
 
 // BatchDownload requests download URLs for the given objects.
 func (c *Client) BatchDownload(objects []BatchObject) (*BatchResponse, error) {
-	return c.doBatch("download", objects)
+	return c.BatchDownloadContext(context.Background(), objects)
+}
+
+// BatchDownloadContext requests download URLs within the caller's deadline.
+func (c *Client) BatchDownloadContext(ctx context.Context, objects []BatchObject) (*BatchResponse, error) {
+	return c.doBatch(ctx, "download", objects)
 }
 
 // doBatch sends a batch request and returns the response.
-func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchResponse, error) {
+func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchObject) (*BatchResponse, error) {
+	if c.readURL != "" && operation != "download" {
+		return nil, fmt.Errorf("read-only LFS client cannot upload")
+	}
 	// Fail closed before sending Authorization. The batch URL is built
 	// from the git remote URL in NewClient; if someone misconfigures or
 	// MITM-rewrites the remote to plaintext http://example.com, this
@@ -150,7 +194,7 @@ func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchRespons
 		return nil, fmt.Errorf("marshal batch request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.batchURL, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.batchURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("create batch request: %w", err)
 	}
@@ -160,16 +204,39 @@ func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchRespons
 	// only User-Agent for external Git host; no X-Orchestrator
 	req.Header.Set("User-Agent", useragent.String())
 	req.Header.Set("Authorization", c.authHeader)
+	if c.readURL != "" {
+		if err := gitserver.ValidateReadRequestURL(c.readEndpoint, c.readRepoID, c.readURL, req.URL.String()); err != nil {
+			return nil, err
+		}
+		token, err := auth.CurrentReadToken(c.readEndpoint)
+		if err != nil {
+			return nil, err
+		}
+		req.SetBasicAuth("ox", token)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("batch request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	if c.readURL != "" && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
+		return nil, &HTTPError{StatusCode: resp.StatusCode}
+	}
 
-	respBody, err := io.ReadAll(resp.Body)
+	// Read-route batch metadata is bounded independently of the request deadline,
+	// including chunked bodies. Read one extra byte to detect overflow before decoding.
+	const maxBatchResponseBytes = 1 << 20
+	var body io.Reader = resp.Body
+	if c.readURL != "" {
+		body = io.LimitReader(body, maxBatchResponseBytes+1)
+	}
+	respBody, err := io.ReadAll(body)
 	if err != nil {
 		return nil, fmt.Errorf("read batch response: %w", err)
+	}
+	if c.readURL != "" && len(respBody) > maxBatchResponseBytes {
+		return nil, fmt.Errorf("LFS batch response exceeds %d bytes", maxBatchResponseBytes)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -195,12 +262,25 @@ func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchRespons
 		a.TrustedHost = host
 	}
 	for i := range batchResp.Objects {
+		if c.readURL != "" && batchResp.Objects[i].Error != nil {
+			batchResp.Objects[i].Error.Message = http.StatusText(batchResp.Objects[i].Error.Code)
+		}
 		if batchResp.Objects[i].Actions == nil {
 			continue
 		}
 		stamp(batchResp.Objects[i].Actions.Upload)
 		stamp(batchResp.Objects[i].Actions.Download)
 		stamp(batchResp.Objects[i].Actions.Verify)
+		if c.readURL != "" {
+			actions := batchResp.Objects[i].Actions
+			actions.Upload, actions.Verify = nil, nil
+			if actions.Download != nil {
+				actions.Download.readClient = c
+				actions.Download.readOID = batchResp.Objects[i].OID
+				// Upstream credentials never belong on the client download request.
+				actions.Download.Header = nil
+			}
+		}
 	}
 
 	return &batchResp, nil

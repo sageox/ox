@@ -518,6 +518,13 @@ var baseSparseDirs = []string{
 	"data/plans",
 }
 
+// sparseCheckoutDirs is the canonical ledger coverage, including activity windows.
+func sparseCheckoutDirs() []string {
+	dirs := append([]string{}, baseSparseDirs...)
+	dirs = append(dirs, ComputeGitHubDataPaths(DefaultGitHubDataWindowDays)...)
+	return append(dirs, ComputeMurmurDataPaths(DefaultMurmurWindowHours)...)
+}
+
 // ConfigureSparseCheckout sets up sparse checkout for the ledger.
 // Includes: baseSparseDirs, a sliding window of recent GitHub data,
 // and a rolling window of recent murmur data (hourly granularity).
@@ -547,16 +554,7 @@ func ConfigureSparseCheckout(path string) error {
 	}
 
 	// base directories always included
-	dirs := append([]string{}, baseSparseDirs...)
-
-	// add sliding window of recent GitHub data (last N days, default 30)
-	// keeps local disk usage small; older data lives in git history
-	dirs = append(dirs, ComputeGitHubDataPaths(DefaultGitHubDataWindowDays)...)
-
-	// add rolling window of recent murmur data (last N hours, default 12)
-	// hourly granularity keeps the checkout tight while ensuring the daemon
-	// can read murmur files after git pull
-	dirs = append(dirs, ComputeMurmurDataPaths(DefaultMurmurWindowHours)...)
+	dirs := sparseCheckoutDirs()
 
 	// protect staged/dirty files: "sparse-checkout set" removes tracked files
 	// outside the cone from the working tree. If the CLI has staged files in a

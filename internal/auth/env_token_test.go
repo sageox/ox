@@ -28,6 +28,67 @@ func validSageOxTestToken(prefix, body string) string {
 	return withPrefix + "_" + crc32Base62(withPrefix)
 }
 
+// Failure prevented: read sync silently changes identities by accepting a PAT,
+// using a disk login, or carrying a team token to a different endpoint.
+func TestCurrentReadTokenRequiresSelectedTeamToken(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
+	require.NoError(t, SaveTokenForEndpoint("https://sageox.ai", createTestTokenForTest(time.Hour)))
+	for _, tc := range []struct {
+		name     string
+		token    string
+		endpoint string
+		want     string
+	}{
+		{"team token", "oxt_test_1ljPfr", "https://sageox.ai", "oxt_test_1ljPfr"},
+		{"trailing slash", "oxt_test_1ljPfr", "https://sageox.ai/", "oxt_test_1ljPfr"},
+		{"normalized token", " Bearer oxt_test_1ljPfr\n", "https://sageox.ai", "oxt_test_1ljPfr"},
+		{"missing despite disk login", "", "https://sageox.ai", ""},
+		{"personal token", "oxp_test_4bDZfN", "https://sageox.ai", ""},
+		{"opaque token", "oauth-access-token", "https://sageox.ai", ""},
+		{"bad checksum", "oxt_test_1ljPfX", "https://sageox.ai", ""},
+		{"wrong endpoint", "oxt_test_1ljPfr", "https://staging.sageox.ai", ""},
+		{"normalized sibling host", "oxt_test_1ljPfr", "https://api.sageox.ai", ""},
+		{"embedded newline", validSageOxTestToken(TeamTokenPrefix, "test\ninjected"), "https://sageox.ai", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(EnvVarToken, tc.token)
+			token, err := CurrentReadToken(tc.endpoint)
+			if tc.want == "" {
+				require.ErrorIs(t, err, ErrReadTokenUnavailable)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, tc.want, token)
+		})
+	}
+}
+
+// Failure prevented: a long-lived reader reuses a revoked credential after
+// SAGEOX_TOKEN rotates, disappears, or switches to another deployment.
+func TestCurrentReadTokenObservesRotation(t *testing.T) {
+	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
+	for _, raw := range []string{"oxt_test_1ljPfr", "oxt_rotated_1lKvCA", ""} {
+		t.Setenv(EnvVarToken, raw)
+		token, err := CurrentReadToken("https://sageox.ai")
+		if raw == "" {
+			require.ErrorIs(t, err, ErrReadTokenUnavailable)
+		} else {
+			require.NoError(t, err)
+		}
+		require.Equal(t, raw, token)
+	}
+	t.Setenv(EnvVarToken, "oxt_test_1ljPfr")
+	t.Setenv("SAGEOX_ENDPOINT", "https://staging.sageox.ai")
+	token, err := CurrentReadToken("https://sageox.ai")
+	require.ErrorIs(t, err, ErrReadTokenUnavailable)
+	require.Empty(t, token)
+	token, err = CurrentReadToken("https://staging.sageox.ai")
+	require.NoError(t, err)
+	require.Equal(t, "oxt_test_1ljPfr", token)
+}
+
 // TestTokenFromEnv_SageOxTokenSet — Failure prevented: SAGEOX_TOKEN env doesn't produce a
 // usable StoredToken, breaking CI/CD and headless agents.
 func TestTokenFromEnv_SageOxTokenSet(t *testing.T) {

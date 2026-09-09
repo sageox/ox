@@ -3,13 +3,16 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/useragent"
 )
 
@@ -133,9 +136,71 @@ type RepoDetailResponse struct {
 
 // RepoDetailLedger is the ledger section of the repo detail response.
 type RepoDetailLedger struct {
-	Status  string `json:"status"`            // "ready", "pending", "error"
-	RepoURL string `json:"repo_url"`          // git clone URL (empty if not ready)
-	Message string `json:"message,omitempty"` // status message for pending/error
+	Status  string `json:"status"`             // "ready", "pending", "error"
+	RepoURL string `json:"repo_url"`           // git clone URL (empty if not ready)
+	ReadURL string `json:"read_url,omitempty"` // authorized TAT read URL; absent on unsupported servers
+	Message string `json:"message,omitempty"`  // status message for pending/error
+}
+
+var (
+	ErrLedgerReadUnavailable = errors.New("the selected endpoint does not provide ledger read access")
+	ErrLedgerReadMissing     = errors.New("the selected repository has no available ledger")
+)
+
+// GetLedgerReadURL uses the existing repo-scoped discovery endpoint with the
+// current selected TAT, independently of any human token installed on c. It
+// never provisions a ledger, follows redirects, or substitutes another URL.
+// The caller must freshly resolve token via auth.CurrentReadToken before each call.
+func (c *RepoClient) GetLedgerReadURL(ctx context.Context, repoID, token string) (string, error) {
+	if !repotools.IsValidRepoID(repoID) {
+		return "", gitserver.ErrUnsafeReadTransport
+	}
+	baseURL := strings.TrimSuffix(c.baseURL, "/")
+	// Validate the selected authority before sending any credential.
+	if err := gitserver.ValidateReadURL(baseURL, repoID, baseURL+fmt.Sprintf(repoDetailPath, repoID)+"/ledger.git"); err != nil {
+		return "", err
+	}
+	if token == "" || !strings.HasPrefix(token, "oxt_") || strings.ContainsAny(token, "\r\n") {
+		return "", gitserver.ErrReadTokenUnavailable
+	}
+	req, err := useragent.NewRequest(ctx, http.MethodGet, baseURL+fmt.Sprintf(repoDetailPath, repoID), nil)
+	if err != nil {
+		return "", ErrLedgerReadUnavailable
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := *c.httpClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", ErrLedgerReadUnavailable
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return "", ErrUnauthorized
+	case http.StatusForbidden:
+		return "", ErrForbidden
+	case http.StatusOK:
+	default:
+		return "", ErrLedgerReadUnavailable
+	}
+	var detail RepoDetailResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&detail); err != nil {
+		return "", ErrLedgerReadUnavailable
+	}
+	if detail.Ledger == nil || detail.Ledger.Status != "ready" {
+		return "", ErrLedgerReadMissing
+	}
+	if detail.Ledger.ReadURL == "" {
+		return "", ErrLedgerReadUnavailable
+	}
+	if err := gitserver.ValidateReadURL(baseURL, repoID, detail.Ledger.ReadURL); err != nil {
+		return "", err
+	}
+	return detail.Ledger.ReadURL, nil
 }
 
 // RepoDetailTeamContext is a team context in the repo detail response.

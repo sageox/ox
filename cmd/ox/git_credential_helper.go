@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/spf13/cobra"
 )
@@ -66,6 +68,9 @@ Git then calls "ox git-credential-helper get" on every authenticated fetch
 or push, eliminating the need to embed the PAT in the origin URL.`
 
 func init() {
+	gitCredentialHelperCmd.Flags().String("read-endpoint", "", "Selected endpoint for read-only ledger authentication")
+	gitCredentialHelperCmd.Flags().String("read-repo", "", "Selected read-only ledger repository ID")
+	gitCredentialHelperCmd.Flags().String("read-url", "", "Authorized ledger read URL from discovery")
 	rootCmd.AddCommand(gitCredentialHelperCmd)
 }
 
@@ -76,6 +81,12 @@ func runGitCredentialHelper(cmd *cobra.Command, args []string) error {
 	}
 	switch op {
 	case "get":
+		if cmd.Flags().Changed("read-endpoint") || cmd.Flags().Changed("read-repo") || cmd.Flags().Changed("read-url") {
+			ep, _ := cmd.Flags().GetString("read-endpoint")
+			repoID, _ := cmd.Flags().GetString("read-repo")
+			readURL, _ := cmd.Flags().GetString("read-url")
+			return helperReadGet(cmd.InOrStdin(), cmd.OutOrStdout(), ep, repoID, readURL)
+		}
 		return helperGet(cmd.InOrStdin(), cmd.OutOrStdout())
 	case "store", "erase":
 		// ox's credential store is driven by the ox CLI's login/logout flows,
@@ -86,6 +97,37 @@ func runGitCredentialHelper(cmd *cobra.Command, args []string) error {
 		// Unknown op: silently exit 0 per the protocol.
 		return drainStdin(cmd.InOrStdin())
 	}
+}
+
+// A selected read helper never falls through to disk credentials or prompting.
+// Git propagates this non-secret scope to its lazy-fetch subprocesses.
+func helperReadGet(stdin io.Reader, stdout io.Writer, endpointURL, repoID, readURL string) error {
+	req, err := parseGitCredentialRequest(stdin)
+	if err == nil {
+		if req["protocol"] != "https" || strings.HasPrefix(req["path"], "/") || strings.ContainsAny(req["host"]+req["path"], "\r\n") {
+			err = gitserver.ErrUnsafeReadTransport
+		} else {
+			err = gitserver.ValidateReadRequestURL(endpointURL, repoID, readURL, req["protocol"]+"://"+req["host"]+"/"+req["path"])
+		}
+		if err == nil {
+			var token string
+			token, err = auth.CurrentReadToken(endpointURL)
+			if err == nil {
+				_, err = fmt.Fprintf(stdout, "username=ox\npassword=%s\n\n", token)
+				return err
+			}
+		}
+	}
+	reason := "malformed_request"
+	switch {
+	case errors.Is(err, gitserver.ErrUnsafeReadTransport):
+		reason = "unsafe_scope"
+	case errors.Is(err, auth.ErrReadTokenUnavailable):
+		reason = "token_unavailable"
+	}
+	slog.Debug("git-credential-helper: read credential rejected", "reason", reason)
+	_, err = fmt.Fprint(stdout, "quit=true\n\n")
+	return err
 }
 
 // helperGet parses the credential request on stdin and emits a matching
@@ -197,9 +239,6 @@ func HelperCommandString() string {
 // that may contain spaces but won't contain shell metacharacters in any
 // supported install location).
 func shellQuote(s string) string {
-	if !strings.ContainsAny(s, " '\t\"$`\\") {
-		return s
-	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
