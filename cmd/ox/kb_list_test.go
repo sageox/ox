@@ -391,7 +391,7 @@ func TestRunKBList_NonEmptyWithWarnings(t *testing.T) {
 //
 // Failure prevented: a refactor that drops the AddCommand call in init().
 func TestKBListCmd_RegistrationOnParent(t *testing.T) {
-	t.Parallel()
+	// Commands lazily sorts the shared kbCmd, so wiring tests must run serially.
 
 	var found bool
 	for _, sub := range kbCmd.Commands() {

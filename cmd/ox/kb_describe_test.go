@@ -548,7 +548,7 @@ func TestRenderKBDescribe_EmptyOptionalRowsOmitted(t *testing.T) {
 // AddCommand call or the alias that keeps existing `ox kb show` muscle
 // memory working.
 func TestKBDescribeCmd_RegistrationOnParent(t *testing.T) {
-	t.Parallel()
+	// Commands lazily sorts the shared kbCmd, so wiring tests must run serially.
 
 	var describeCmd *struct {
 		hasShowAlias bool
