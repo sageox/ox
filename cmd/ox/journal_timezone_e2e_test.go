@@ -4,8 +4,6 @@
 //
 // These tests assert the target state after units 1-7 of the journal-timezone
 // revert have landed:
-//   - Unit 1: daily bucketing is hardcoded to UTC (`now := time.Now().UTC()`)
-//   - Unit 2: groupObservationsByDay no longer takes a tz parameter
 //   - Unit 4: "timezone" is removed from the ox config settings registry
 //   - Unit 7: ox doctor --fix scrubs any stray `timezone` keys from both
 //     project config.json and team-context config.toml
@@ -19,7 +17,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,10 +24,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/facts"
 	"github.com/sageox/ox/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -100,24 +95,13 @@ func setupTZWorkspace(t *testing.T) tzWorkspace {
 	// .sageox/ must exist before SaveLocalConfig is called
 	require.NoError(t, os.MkdirAll(filepath.Join(workspace, ".sageox"), 0o755))
 
-	// init team context git repo — ox memory put and ox distill commit into it
+	// init team context git repo for the doctor configuration checks
 	tzGit(t, teamCtx, "init")
 	tzGit(t, teamCtx, "config", "user.name", "Test")
 	tzGit(t, teamCtx, "config", "user.email", "test@test.local")
 	require.NoError(t, os.WriteFile(filepath.Join(teamCtx, ".gitkeep"), []byte{}, 0o644))
 	tzGit(t, teamCtx, "add", ".gitkeep")
 	tzGit(t, teamCtx, "commit", "-m", "init")
-
-	// pre-create the memory subdirs ox expects; ensureMemoryDirs/seed* run even
-	// in --dry-run, and we need them to succeed against our fake team context.
-	for _, sub := range []string{
-		"memory/daily", "memory/weekly", "memory/monthly",
-		"memory/guidance",
-		"memory/.observations",
-		"memory/.discussion-facts", "memory/.github-facts", "memory/.session-facts",
-	} {
-		require.NoError(t, os.MkdirAll(filepath.Join(teamCtx, sub), 0o755))
-	}
 
 	// register the team context so config.FindRepoTeamContext resolves it.
 	// (Without this the fallback path would point into the XDG data dir, which
@@ -144,8 +128,6 @@ func setupTZWorkspace(t *testing.T) tzWorkspace {
 		"GIT_COMMITTER_NAME=Test",
 		"GIT_COMMITTER_EMAIL=test@test.local",
 		"GIT_CONFIG_NOSYSTEM=1",
-		// ox memory subcommand is feature-gated; TZ-01 needs `ox memory put`.
-		"FEATURE_MEMORY=1",
 	}
 
 	return tzWorkspace{
@@ -202,95 +184,6 @@ func writeTZTeamConfig(t *testing.T, w tzWorkspace, content string) {
 	require.NoError(t, os.WriteFile(filepath.Join(w.teamCtx, "config.toml"),
 		[]byte(content), 0o644))
 }
-
-// tzPutObservation runs `ox memory put <json>`, then rewrites the resulting
-// JSONL file's _meta.recorded_at header to target. ox memory put uses
-// time.Now().UTC() internally and gives no caller hook for the timestamp,
-// so the rewrite is the only way to simulate "observation recorded at T".
-// Returns the absolute path of the observation file.
-func tzPutObservation(t *testing.T, oxBin string, w tzWorkspace, content string, target time.Time) string {
-	t.Helper()
-
-	payload, err := json.Marshal(map[string]string{"content": content})
-	require.NoError(t, err)
-
-	out, code, _ := testguard.RunOx(t, oxBin, w.workspace, w.env, "memory", "put", string(payload))
-	require.Equal(t, 0, code, "ox memory put failed: %s", out)
-
-	matches, err := filepath.Glob(filepath.Join(w.teamCtx, "memory", ".observations", "*", "*.jsonl"))
-	require.NoError(t, err)
-	require.Len(t, matches, 1, "expected exactly one observation file after memory put, got %v", matches)
-	obsPath := matches[0]
-
-	header, factsInFile, err := facts.ReadFacts(obsPath)
-	require.NoError(t, err, "read observation file")
-	header.Meta.RecordedAt = target.UTC().Format(time.RFC3339)
-	require.NoError(t, facts.WriteFacts(obsPath, header, factsInFile), "rewrite observation header")
-
-	return obsPath
-}
-
-// --------------------------------------------------------------------------
-// TZ-01 — UTC bucketing ignores stray TZ inputs
-// --------------------------------------------------------------------------
-
-// TestJournalTimezone_TZ01_UTCBucketingIgnoresStrayTZInputs verifies that the
-// daily distill groups an observation by its RecordedAt date in UTC, ignoring:
-//   - the OX_TIMEZONE environment variable
-//   - a stray "timezone" key in .sageox/config.json
-//   - a stray "timezone" key in the team context config.toml
-//
-// Failure prevented: the team-timezone revert regresses and one of these stray
-// inputs bleeds back into day-bucket selection, causing observations to land
-// in the wrong daily summary.
-func TestJournalTimezone_TZ01_UTCBucketingIgnoresStrayTZInputs(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now().UTC()
-
-	oxBin := testguard.BuildOxBinary(t, tzProjectRoot(t))
-	w := setupTZWorkspace(t)
-
-	// StrayKeysWithObservation fixture — both configs carry stray timezone keys.
-	writeTZProjectConfig(t, w, map[string]string{"timezone": `"Asia/Tokyo"`})
-	writeTZTeamConfig(t, w, "timezone = \"Europe/Berlin\"\n")
-
-	// target = yesterday 06:30 UTC. Six hours into the UTC day is safely away
-	// from the day-boundary flip, and more than 6h inside the LA calendar day,
-	// so OX_TIMEZONE=America/Los_Angeles would bucket this observation under
-	// the PREVIOUS calendar day if the code honored it.
-	target := now.Add(-24 * time.Hour).Truncate(24 * time.Hour).
-		Add(6*time.Hour + 30*time.Minute)
-	expectedUTCDay := target.Format("2006-01-02")
-
-	_ = tzPutObservation(t, oxBin, w, "observation content for TZ-01", target)
-
-	// inject stray OX_TIMEZONE that a regressed code path might honor
-	env := append([]string(nil), w.env...)
-	env = append(env, "OX_TIMEZONE=America/Los_Angeles")
-
-	out, code, _ := testguard.RunOx(t, oxBin, w.workspace, env,
-		"distill", "--dry-run", "--layer=daily")
-	require.Equal(t, 0, code, "ox distill --dry-run --layer=daily failed: %s", out)
-
-	expectedLine := fmt.Sprintf("Daily distill: 1 observations and 0 facts for %s", expectedUTCDay)
-	assert.Contains(t, out, expectedLine,
-		"dry-run output should bucket the observation under UTC day %s\nfull output:\n%s",
-		expectedUTCDay, out)
-
-	// The LA calendar day for 06:30 UTC is the prior UTC date. If a regressed
-	// code path honored OX_TIMEZONE, the observation would appear under laDay.
-	laDay := target.Add(-24 * time.Hour).Format("2006-01-02")
-	if laDay != expectedUTCDay {
-		assert.NotContains(t, out, "for "+laDay,
-			"LA-wallclock day %s must not appear in dry-run output; full output:\n%s",
-			laDay, out)
-	}
-}
-
-// --------------------------------------------------------------------------
-// TZ-02 — ox config set timezone is rejected
-// --------------------------------------------------------------------------
 
 // TestJournalTimezone_TZ02_ConfigSetTimezoneRejected verifies that after the
 // revert, `ox config set timezone <value>` is not a valid setting and the

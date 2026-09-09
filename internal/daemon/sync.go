@@ -36,7 +36,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon/hooks"
 	"github.com/sageox/ox/internal/flags"
@@ -46,7 +45,6 @@ import (
 	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/perf"
-	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/version"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
@@ -838,15 +836,6 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		defer gcTicker.Stop()
 	}
 
-	// memory distillation ticker — spawns `ox distill` as subprocess
-	var distillTicker *time.Ticker
-	var distillChan <-chan time.Time
-	if s.config.DistillInterval > 0 && s.config.ProjectRoot != "" {
-		distillTicker = time.NewTicker(s.config.DistillInterval)
-		distillChan = distillTicker.C
-		defer distillTicker.Stop()
-	}
-
 	// codedb freshness check ticker — detects new commits (branch switch, manual commit, pulled history).
 	// Decoupled from git pull: dirty overlay via fsnotify handles file edits with ~5s latency.
 	var codedbCheckTicker *time.Ticker
@@ -962,11 +951,6 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			s.checkAndRunGC(taskCtx)
 			span.End()
 
-		case <-distillChan:
-			taskCtx, span := s.tracer.StartTask(ctx, "daemon:distill")
-			s.triggerDistill(taskCtx)
-			span.End()
-
 		case <-githubSyncChan:
 			if s.githubSync != nil {
 				if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
@@ -1007,47 +991,6 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			span.End()
 		}
 	}
-}
-
-// triggerDistill spawns `ox distill` as a subprocess for memory distillation.
-// The daemon only triggers the process; all writes happen in the subprocess.
-func (s *SyncScheduler) triggerDistill(ctx context.Context) {
-	// guard: only distill if FEATURE_MEMORY is enabled
-	if !auth.IsMemoryEnabled() {
-		return
-	}
-
-	// guard: need claude CLI available
-	if _, err := exec.LookPath("claude"); err != nil {
-		s.logger.Debug("distill skipped: claude CLI not in PATH")
-		return
-	}
-
-	s.logger.Info("triggering memory distillation")
-	start := time.Now()
-
-	oxPath, err := selfexec.Path()
-	if errors.Is(err, selfexec.ErrUnderTest) {
-		s.logger.Debug("distill skipped: running under go test")
-		return
-	}
-	if err != nil {
-		oxPath = "ox" // fall back to PATH lookup
-	}
-
-	cmd := exec.CommandContext(ctx, oxPath, "distill")
-	cmd.Dir = s.config.ProjectRoot
-	cmd.Env = append(os.Environ(), "FEATURE_MEMORY=true")
-
-	out, err := cmd.CombinedOutput()
-	duration := time.Since(start)
-
-	if err != nil {
-		s.logger.Warn("distill failed", "error", err, "output", strings.TrimSpace(string(out)), "duration", duration)
-		return
-	}
-
-	s.logger.Info("distill completed", "output", strings.TrimSpace(string(out)), "duration", duration)
 }
 
 // TriggerSync triggers an immediate sync (debounced by watcher).

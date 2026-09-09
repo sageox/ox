@@ -73,10 +73,6 @@ type Config struct {
 	// The actual GC cadence is per-workspace from gc_interval_days in the manifest.
 	GCCheckInterval time.Duration
 
-	// DistillInterval is how often to trigger memory distillation.
-	// Zero disables automatic distillation.
-	DistillInterval time.Duration
-
 	// CodeDBCheckInterval is how often to run CheckFreshness to detect new commits
 	// (branch switches, manual commits, pulled history). Decoupled from git pull
 	// cadence because the dirty overlay (via fsnotify) handles uncommitted file
@@ -140,7 +136,6 @@ func DefaultConfig() *Config {
 		DebounceWindow:            500 * time.Millisecond,
 		VersionCheckInterval:      30 * time.Minute, // ETag conditional requests make this cheap
 		GCCheckInterval:           1 * time.Hour,    // check hourly, actual GC cadence is per-workspace
-		DistillInterval:           6 * time.Hour,    // distill memory every 6 hours
 		LedgerCheckInterval:       15 * time.Minute, // check if ledger index needs rebuild every 15 minutes
 		GitHubSyncInterval:        15 * time.Minute, // sync PRs/issues every 15 minutes
 		MurmurNudgeInterval:       15 * time.Minute, // nudge agents to self-report every 15 minutes

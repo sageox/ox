@@ -153,7 +153,7 @@ func runReadSync(cmd *cobra.Command, args []string) error {
 func finishReadSync(cmd *cobra.Command, result ledger.ReadSyncResult, jsonOutput bool, code int) error {
 	if jsonOutput {
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(result); err != nil {
-			return &distillHistoryExitError{ExitCode: 1}
+			return &commandExitError{ExitCode: 1, Message: err.Error()}
 		}
 	} else if code == 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Ledger ready: %s (HEAD %s)\n", result.Path, result.Head)
@@ -164,7 +164,7 @@ func finishReadSync(cmd *cobra.Command, result ledger.ReadSyncResult, jsonOutput
 		}
 	}
 	if code != 0 {
-		return &distillHistoryExitError{ExitCode: code, Envelope: distillHistoryEnvelope{Error: &distillHistoryEnvelopeError{Code: result.ErrorClass, Message: "ledger read failed"}}}
+		return &commandExitError{ExitCode: code, Message: "ledger read failed"}
 	}
 	return nil
 }

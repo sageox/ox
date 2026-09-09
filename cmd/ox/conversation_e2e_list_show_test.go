@@ -120,7 +120,7 @@ func TestConversationE2E_List_LimitAndSince(t *testing.T) {
 // absence is data, not an error (D13).
 func TestConversationE2E_List_EmptyTeam(t *testing.T) {
 	t.Parallel()
-	e2e := setupDistillHistoryE2E(t, nowConversationE2E())
+	e2e := setupConversationWorkspace(t, nowConversationE2E())
 	// No stageConversationDiscussions: the team context has no discussions/.
 
 	out, exit := e2e.Run(t, "conversation", "list")
@@ -278,7 +278,7 @@ func TestConversationE2E_LoggedOut(t *testing.T) {
 func TestConversationE2E_EphemeralNoTeamContext(t *testing.T) {
 	t.Parallel()
 	e2e := setupConversationE2E(t)
-	writeLocalConfigTeams(t, e2e.workspace, nil)
+	writeConversationLocalConfigTeams(t, e2e.workspace, nil)
 
 	out, exit := e2e.Run(t, "conversation", "list")
 	require.Equal(t, 1, exit, "out:\n%s", out)

@@ -53,7 +53,6 @@ func TestSyncBubbles_Scheduler_RegisteredOnTeamContextTicker(t *testing.T) {
 	cfg.SyncIntervalRead = time.Hour                    // disable read ticker effects
 	cfg.TeamContextSyncInterval = 50 * time.Millisecond // fast kb tick
 	cfg.GCCheckInterval = 0                             // disable
-	cfg.DistillInterval = 0
 	cfg.CodeDBCheckInterval = 0
 	cfg.LedgerCheckInterval = 0
 	cfg.GitHubSyncInterval = 0
@@ -109,7 +108,6 @@ func TestSyncBubbles_Scheduler_NoTickerWhenIntervalZero(t *testing.T) {
 	cfg.SyncIntervalRead = time.Hour
 	cfg.TeamContextSyncInterval = 0 // disabled — implies kb disabled too
 	cfg.GCCheckInterval = 0
-	cfg.DistillInterval = 0
 	cfg.CodeDBCheckInterval = 0
 	cfg.LedgerCheckInterval = 0
 	cfg.GitHubSyncInterval = 0

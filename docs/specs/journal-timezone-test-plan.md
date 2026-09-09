@@ -1,6 +1,8 @@
 # Timezone Removal — E2E Test Plan
 
-Status: plan
+> **Partially superseded — 2026-09-09:** `ox distill` and its subcommands have been removed. TZ-01, the distill dry-run fixture/bucketing checks, and all distill/journal command examples below are historical. TZ-02–TZ-04 remain relevant for rejecting timezone settings and repairing stale configuration; the current tests are in [journal_timezone_e2e_test.go](../../cmd/ox/journal_timezone_e2e_test.go).
+
+Status: partially superseded
 Owner: test-architect
 Scope: end-to-end test plan for the **team timezone removal** feature
 landing in its own PR. The journal read surface (`ox journal list` /
@@ -119,7 +121,7 @@ command, since that is the supported write path and it exercises the
 same `memory/.observations/` layout that `ox distill --dry-run` will
 read.
 
-### 1.5 Bucketing is observed via `ox distill --dry-run`
+### 1.5 Superseded: bucketing via `ox distill --dry-run`
 
 The bucketing case (TZ-01 below) needs to prove that a new
 observation buckets on the correct UTC day. The vehicle is
@@ -171,7 +173,7 @@ one of the changes in the tz plan.
 
 | ID | What's verified | Fixture + env | Command | Observable outcome | Failure mode caught |
 |---|---|---|---|---|---|
-| TZ-01 | **UTC bucketing; all three tz inputs silently ignored.** | Project config `.sageox/config.json` carries a stray `"timezone": "Asia/Tokyo"` key; team `config.toml` carries a stray `timezone = "Europe/Berlin"` key; env carries `OX_TIMEZONE=America/Los_Angeles`; one observation landed via `ox memory put` with RFC3339 timestamp `2026-04-12T23:30:00-07:00` (= `2026-04-13T06:30:00Z`). | `ox distill --dry-run --json` | Exit 0. JSON envelope's would-write block shows the observation bucketed on `2026-04-13` (the UTC day of the instant), NOT `2026-04-12`. Stderr carries no "using timezone ..." line and no "invalid timezone" warning. | Any single surviving tz input — env var, project config key, team config key, or a `.In(tz)` call in `groupObservationsByDay` / `determineLayers` — would bucket on `2026-04-12` (LA/Tokyo/Berlin wall-clock day) and the test fails. This one case catches every incomplete-revert failure mode on the decision path. |
+| TZ-01 (superseded) | **UTC bucketing; all three tz inputs silently ignored.** | Project config `.sageox/config.json` carries a stray `"timezone": "Asia/Tokyo"` key; team `config.toml` carries a stray `timezone = "Europe/Berlin"` key; env carries `OX_TIMEZONE=America/Los_Angeles`; one observation landed via `ox memory put` with RFC3339 timestamp `2026-04-12T23:30:00-07:00` (= `2026-04-13T06:30:00Z`). | `ox distill --dry-run --json` | Exit 0. JSON envelope's would-write block shows the observation bucketed on `2026-04-13` (the UTC day of the instant), NOT `2026-04-12`. Stderr carries no "using timezone ..." line and no "invalid timezone" warning. | Any single surviving tz input — env var, project config key, team config key, or a `.In(tz)` call in `groupObservationsByDay` / `determineLayers` — would bucket on `2026-04-12` (LA/Tokyo/Berlin wall-clock day) and the test fails. This one case catches every incomplete-revert failure mode on the decision path. |
 | TZ-02 | **`ox config set timezone` is rejected at the command surface.** | Fresh workspace. | `ox config set timezone UTC` | Non-zero exit. Stderr contains `unknown setting` (or whatever the registry-miss message is). No config file is modified. | The `timezone` entry in the `ConfigSetting` registry survived Unit 4, so the command succeeds. |
 | TZ-03 | **`ox config get timezone` does not leak the stray key.** | Project config `.sageox/config.json` carries a stray `"timezone": "Asia/Tokyo"` key. | `ox config get timezone` | Non-zero exit. Stderr contains `unknown setting`. Stdout does NOT echo `Asia/Tokyo`. | `getResolvedConfigValue`'s `case "timezone"` survived, or the `ProjectConfig.Timezone` field is still unmarshalled into a resolvable path, letting the dead key leak out as a first-class "resolved" value. |
 | TZ-04 | **`ox doctor` auto-scrubs dead `timezone` keys from both configs without collateral damage, and is idempotent.** | Project config `.sageox/config.json` carries a stray `"timezone": "Asia/Tokyo"` AND an unrelated `"team_id": "team_abc"` key; team `config.toml` carries `timezone = "Europe/Berlin"` AND an `[owners]` section with at least one member. | `ox doctor --fix --yes`, run twice back-to-back | **First run:** exit 0; both config files on disk no longer contain the top-level `timezone` key; `team_id` and `[owners]` section + TOML comments are byte-preserved. **Second run:** exit 0; both files byte-identical to their post-first-run state (zero mutation idempotency). File-state assertions are stronger than finding-count assertions here because they directly prove the scrub happened on disk — `ox doctor` has no JSON output mode, so finding-count cannot be asserted via stdout parsing. | Unit 7's autofix rule is missing; scrubs more than the `timezone` key (collateral damage); corrupts TOML structure or comments; leaves the key in place; is not idempotent (re-fires on an already-clean file); or emits a `fail`-level finding that would flip exit code non-zero. |

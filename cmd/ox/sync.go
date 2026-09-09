@@ -471,7 +471,7 @@ func syncAllTeamContexts(_ context.Context, jsonOutput bool, result *SyncResult)
 	// The sync succeeds only if every team context ended up locally usable
 	// (synced or already up to date). Teams that errored or are still cloning are
 	// not usable, so report them as a failure rather than printing blanket success
-	// — otherwise scripts/distill could proceed against missing/stale context.
+	// — otherwise downstream commands could proceed against missing/stale context.
 	if notReady := notReadyTeams(results); len(notReady) > 0 {
 		msg := fmt.Sprintf("team context(s) not ready: %s", strings.Join(notReady, ", "))
 		if !jsonOutput {

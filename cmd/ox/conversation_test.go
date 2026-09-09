@@ -107,7 +107,7 @@ func exitCodeOf(t *testing.T, err error) int {
 	if err == nil {
 		return 0
 	}
-	var exit *distillHistoryExitError
+	var exit *commandExitError
 	if !errors.As(err, &exit) {
 		t.Fatalf("error is not the typed exit error: %v", err)
 	}

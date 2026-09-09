@@ -19,8 +19,8 @@ type Config struct {
 // Runtime flags (--verbose, --json, etc.) are applied by the cobra layer in cli/context.go.
 func Load() *Config {
 	// Seed the user-config ephemeral preference before any subsystem
-	// consults the runtime capability probe. Commands like `ox distill
-	// --sync` decide about daemon startup during PersistentPreRun, so
+	// consults the runtime capability probe. Commands decide about
+	// daemon startup during PersistentPreRun, so
 	// the persisted preference must be visible here even if no later
 	// code explicitly loads user config.
 	_, _ = LoadUserConfig()

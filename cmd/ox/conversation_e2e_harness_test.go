@@ -3,7 +3,7 @@
 // conversation_e2e_harness_test.go — hermetic E2E harness for the
 // ox conversation read family (list/show/transcript/topics/topic).
 //
-// Reuses the distill-history harness primitives (setupDistillHistoryE2E,
+// Uses the conversation workspace primitives (setupConversationWorkspace,
 // testguard.BuildOxBinary/RunOx, full HOME/XDG reroute under t.TempDir(),
 // staged team contexts via .sageox/config.json + config.local.toml
 // [[team_contexts]]) and adds: the conversation envelope decoder, typed
@@ -476,23 +476,23 @@ const convE2ETotalIndexed = 8
 const convE2ELiveFolders = 6
 
 // nowConversationE2E is the single reference instant a conversation E2E
-// captures at entry (mirrors the distill-history harness clock discipline).
+// captures at entry for stable relative-time assertions.
 func nowConversationE2E() time.Time { return time.Now().UTC() }
 
 // setupConversationE2E builds the shared hermetic harness (fresh binary,
 // workspace, XDG reroute, fake auth) and stages the conversation fixture
 // tree in the primary team context. Returns the harness; the discussions
 // root lives at <primaryTeam.path>/discussions.
-func setupConversationE2E(t *testing.T) *distillHistoryE2E {
+func setupConversationE2E(t *testing.T) *conversationE2E {
 	t.Helper()
-	e2e := setupDistillHistoryE2E(t, nowConversationE2E())
+	e2e := setupConversationWorkspace(t, nowConversationE2E())
 	stageConversationDiscussions(t, e2e.primaryTeam.path)
 	return e2e
 }
 
 // removeConversationAuth deletes the fake auth.json so the harness models a
 // fully logged-out machine (D14: local reads never touch auth).
-func removeConversationAuth(t *testing.T, e2e *distillHistoryE2E) {
+func removeConversationAuth(t *testing.T, e2e *conversationE2E) {
 	t.Helper()
 	require.NoError(t, os.Remove(filepath.Join(e2e.configHome, "sageox", "auth.json")))
 }

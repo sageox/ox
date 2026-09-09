@@ -34,11 +34,6 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 		if legacyCheck.warning || !legacyCheck.passed {
 			checks = append(checks, legacyCheck)
 		}
-		// guidance check uses FindRepoTeamContext (daemon-discovered)
-		guidanceCheck := checkGuidanceFiles(opts.shouldFix(CheckSlugGuidanceFiles))
-		if guidanceCheck.warning || !guidanceCheck.passed {
-			checks = append(checks, guidanceCheck)
-		}
 		// even with nothing configured locally, the daemon may still be
 		// syncing an "other" team context (ox-baz5.5) — scan it too.
 		checks = append(checks, scanExtraTeamContexts(daemonSyncedTeamContexts(nil), opts)...)
@@ -83,12 +78,6 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 	orphanCheck := checkOrphanedTeamDirs(opts)
 	if orphanCheck.warning || !orphanCheck.passed {
 		checks = append(checks, orphanCheck)
-	}
-
-	// check for distill guidance files
-	guidanceCheck := checkGuidanceFiles(opts.shouldFix(CheckSlugGuidanceFiles))
-	if guidanceCheck.warning || !guidanceCheck.passed {
-		checks = append(checks, guidanceCheck)
 	}
 
 	return checks

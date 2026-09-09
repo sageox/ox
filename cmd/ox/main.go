@@ -128,6 +128,17 @@ func main() {
 	os.Exit(exitCode)
 }
 
+// commandExitError carries the exit status for a command that has already
+// handled its output, bypassing friction recovery and duplicate error output.
+type commandExitError struct {
+	ExitCode int
+	Message  string
+}
+
+func (e *commandExitError) Error() string {
+	return e.Message
+}
+
 // executeWithFrictionRecovery runs the command with friction recovery support.
 // If the command fails and we can auto-correct with high confidence, we retry
 // with the corrected args. Returns the exit code.
@@ -156,14 +167,14 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 		return 0
 	}
 
-	// Commands may return a typed exit-code error that already carries a
-	// rendered envelope (ox distill history list/show/since use this path to
+	// Commands that have already rendered an error envelope may return a
+	// typed exit-code error (conversation and ledger read commands use this path to
 	// surface usage_error as exit 2 without going through the default
 	// error printer or friction recovery). RunE writes the envelope to
 	// stdout before returning; here we only need to honor the code.
-	var jexit *distillHistoryExitError
-	if errors.As(err, &jexit) {
-		return jexit.ExitCode
+	var commandExit *commandExitError
+	if errors.As(err, &commandExit) {
+		return commandExit.ExitCode
 	}
 	if headlessLedgerReadRequested(args) {
 		// Cobra flag parsing can fail before RunE. Keep even that path out

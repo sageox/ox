@@ -102,8 +102,7 @@ func applyCatalogTokenRewrites(args []string, aliases map[string]string) []strin
 // commandAcceptsLongFlag reports whether arg names a flag owned by the target
 // command. Catalog rewrites are fallbacks for unknown flags; applying one to a
 // command that intentionally defines the same spelling changes valid behavior
-// (for example, `distill history since --format=json` became global `--json`
-// while the command silently kept its default content format).
+// by replacing the command-specific flag with a global output flag.
 func commandAcceptsLongFlag(cmd *cobra.Command, arg string) bool {
 	if cmd == nil || !strings.HasPrefix(arg, "--") {
 		return false
