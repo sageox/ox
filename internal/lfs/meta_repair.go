@@ -1,6 +1,7 @@
 package lfs
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/sageox/ox/internal/fileutil"
@@ -155,19 +157,54 @@ func RecoverEmptyTitleMeta(sessionDir string, dryRun bool) MetaRepairOutcome {
 			"summary_status": meta.SummaryStatus, "summary_attempts": meta.SummaryAttempts,
 			"validation_error": meta.ValidationError,
 		} {
+			// These optional fields use omitempty in the normal writer. A reset
+			// retry count must disappear on both replicas; retain real diagnostics.
+			if value == "" || value == 0 {
+				delete(fields, key)
+				continue
+			}
 			encoded, err := json.Marshal(value)
 			if err != nil {
 				return nil, err
 			}
 			fields[key] = encoded
 		}
-		data, err = json.MarshalIndent(fields, "", "  ")
+		// A map sorts keys alphabetically, unlike WriteSessionMetaOnly. That
+		// whole-file reorder conflicts with an identical remote title repair.
+		// Use the schema's order, but keep raw values so unknown nested fields
+		// survive. Append any unknown top-level fields in deterministic order.
+		var ordered bytes.Buffer
+		ordered.WriteByte('{')
+		schema := reflect.TypeFor[SessionMeta]()
+		for i := range schema.NumField() {
+			key := strings.Split(schema.Field(i).Tag.Get("json"), ",")[0]
+			if value, exists := fields[key]; exists {
+				if ordered.Len() > 1 {
+					ordered.WriteByte(',')
+				}
+				fmt.Fprintf(&ordered, "%q:%s", key, value)
+				delete(fields, key)
+			}
+		}
+		if len(fields) > 0 {
+			extra, err := json.Marshal(fields)
+			if err != nil {
+				return nil, err
+			}
+			if ordered.Len() > 1 {
+				ordered.WriteByte(',')
+			}
+			ordered.Write(extra[1 : len(extra)-1])
+		}
+		ordered.WriteByte('}')
+		var formatted bytes.Buffer
+		err = json.Indent(&formatted, ordered.Bytes(), "", "  ")
 		if err != nil {
 			return nil, err
 		}
 		// MutateSessionMeta holds the shared metadata lock; return nil so it
 		// does not replace this lossless patch with a typed-manifest rewrite.
-		return nil, fileutil.AtomicWriteBytes(metaPath, data, info.Mode().Perm())
+		return nil, fileutil.AtomicWriteBytes(metaPath, formatted.Bytes(), info.Mode().Perm())
 	}
 
 	var err error

@@ -476,6 +476,16 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 		// --autostash: uncommitted local changes must not block the pull.
 		// Bounded so a hung network pull can't hold the lock forever.
 		pullCtx, pullCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		if !hadRebaseBefore {
+			// Existing autostash conflicts need a lossless metadata repair,
+			// not the positional resolution used for an active rebase.
+			if _, err := gitutil.ResolveAutostashConflicts(pullCtx, ledgerPath, ledger.AutoResolvePrefixes, nil); err != nil {
+				pullCancel()
+				result = FailedCheck("Ledger branch status", "autostash recovery failed",
+					fmt.Sprintf("Local changes remain unresolved before pull: %s", err))
+				return nil
+			}
+		}
 		pullCmd := gitutil.NewNetworkCmd(pullCtx, "-C", ledgerPath, "pull", "--rebase", "--autostash")
 		output, err := pullCmd.CombinedOutput()
 		pullCancel()
@@ -510,10 +520,19 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 			}
 			result = PassedCheck("Ledger branch status",
 				fmt.Sprintf("pulled %d commit(s) (auto-resolved conflicts)", behindCount))
-			return nil
+		} else {
+			result = PassedCheck("Ledger branch status",
+				fmt.Sprintf("pulled %d commit(s)", behindCount))
 		}
-		result = PassedCheck("Ledger branch status",
-			fmt.Sprintf("pulled %d commit(s)", behindCount))
+		// Git can finish the pull or rebase successfully while restoring the
+		// autostash leaves an unmerged index. Verify both success paths.
+		recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer recoveryCancel()
+		if _, err := gitutil.ResolveAutostashConflicts(recoveryCtx, ledgerPath, ledger.AutoResolvePrefixes, nil); err != nil {
+			result = FailedCheck("Ledger branch status",
+				"autostash recovery failed",
+				fmt.Sprintf("Pull completed, but local changes remain unresolved: %s", err))
+		}
 		return nil
 	})
 	if lockErr != nil {

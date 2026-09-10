@@ -106,6 +106,8 @@ const lfsObjectsMissing = "LFS objects are missing"
 // Retry loop: up to MaxRetries attempts with linear backoff (1s, 2s, 3s...).
 // On non-fast-forward rejection: pulls with --rebase --autostash, optionally
 // auto-resolves conflicts for paths in AutoResolvePrefixes.
+// The retry pull acquires WithRepoLock; callers and conflict hooks must not
+// acquire that same non-reentrant lock around this call or inside the hook.
 func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 	log := opts.logger()
 
@@ -176,74 +178,95 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 			if attempt == maxRetries {
 				return fmt.Errorf("git push failed after %d attempts: %s", maxRetries, outStr)
 			}
-			if IsRebaseInProgress(repoPath) {
-				abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-				_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
-				abortCancel()
-			}
-
-			pullCtx, pullCancel := context.WithTimeout(ctx, opTimeout)
-			pullOut, pullErr := RunGit(pullCtx, repoPath, "pull", "--rebase", "--autostash", "--quiet")
-			pullCancel()
-			if pullErr != nil {
-				if len(opts.AutoResolvePrefixes) > 0 {
-					resolveCtx, resolveCancel := context.WithTimeout(ctx, opTimeout)
-					resolveErr := ResolveRebaseAcceptTheirs(resolveCtx, repoPath, opts.AutoResolvePrefixes, opts.AutoResolveDenyPrefixes)
-					resolveCancel()
-					if resolveErr != nil {
-						log.Debug("rebase auto-resolve failed", "error", resolveErr)
-
-						// give the caller a chance to resolve via a higher tier
-						// (e.g. LLM merge) before we abort. The hook owns the
-						// rebase --continue if it succeeds.
-						hookResolved := false
-						if opts.OnUnresolvedConflicts != nil {
-							pathsCtx, pathsCancel := context.WithTimeout(ctx, opTimeout)
-							conflicted, listErr := listConflictedFiles(pathsCtx, repoPath)
-							pathsCancel()
-							// if we can't enumerate conflicts, the hook can't make
-							// an informed decision (it'd see an empty list and
-							// either falsely report "resolved" or operate on
-							// stale state). Skip the hook and abort the rebase
-							// rather than guess.
-							if listErr != nil {
-								log.Warn("listing conflicted files failed; skipping resolve hook", "error", listErr)
-								abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-								_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
-								abortCancel()
-								return fmt.Errorf("git pull --rebase failed during retry: %s (could not list conflicts: %w)", pullOut, listErr)
-							}
-							hookCtx, hookCancel := context.WithTimeout(ctx, opTimeout)
-							resolved, hookErr := opts.OnUnresolvedConflicts(hookCtx, repoPath, conflicted)
-							hookCancel()
-							// only treat as resolved when the hook succeeded AND
-							// signaled resolved. a hook that returned an error
-							// MAY have left the rebase index half-staged; we
-							// must abort rather than continue retrying.
-							if hookErr != nil {
-								log.Warn("OnUnresolvedConflicts hook failed", "error", hookErr)
-							} else if resolved {
-								log.Info("resolved rebase conflicts via OnUnresolvedConflicts hook", "paths", conflicted)
-								hookResolved = true
-							}
-						}
-
-						if !hookResolved {
-							abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-							_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
-							abortCancel()
-							return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
-						}
-					} else {
-						log.Info("auto-resolved rebase conflicts", "strategy", "accept-theirs")
-					}
-				} else {
-					// no auto-resolve configured — abort and fail
+			// Keep the pull, rebase resolution, and autostash restoration under
+			// the same clone lock as daemon pulls and doctor repairs.
+			rebaseErr := WithRepoLock(ctx, repoPath, func() error {
+				if IsRebaseInProgress(repoPath) {
 					abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
 					_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
 					abortCancel()
-					return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
 				}
+
+				pullCtx, pullCancel := context.WithTimeout(ctx, opTimeout)
+				// A prior pull may have left autostash conflicts without an
+				// active rebase. Never send those to the positional resolver.
+				if _, err := ResolveAutostashConflicts(pullCtx, repoPath, opts.AutoResolvePrefixes, opts.AutoResolveDenyPrefixes); err != nil {
+					pullCancel()
+					return fmt.Errorf("restore autostash before pull: %w", err)
+				}
+				pullOut, pullErr := RunGit(pullCtx, repoPath, "pull", "--rebase", "--autostash", "--quiet")
+				pullCancel()
+				if pullErr != nil {
+					if len(opts.AutoResolvePrefixes) > 0 {
+						resolveCtx, resolveCancel := context.WithTimeout(ctx, opTimeout)
+						resolveErr := ResolveRebaseAcceptTheirs(resolveCtx, repoPath, opts.AutoResolvePrefixes, opts.AutoResolveDenyPrefixes)
+						resolveCancel()
+						if resolveErr != nil {
+							log.Debug("rebase auto-resolve failed", "error", resolveErr)
+
+							// give the caller a chance to resolve via a higher tier
+							// (e.g. LLM merge) before we abort. The hook owns the
+							// rebase --continue if it succeeds.
+							hookResolved := false
+							if opts.OnUnresolvedConflicts != nil {
+								pathsCtx, pathsCancel := context.WithTimeout(ctx, opTimeout)
+								conflicted, listErr := listConflictedFiles(pathsCtx, repoPath)
+								pathsCancel()
+								// if we can't enumerate conflicts, the hook can't make
+								// an informed decision (it'd see an empty list and
+								// either falsely report "resolved" or operate on
+								// stale state). Skip the hook and abort the rebase
+								// rather than guess.
+								if listErr != nil {
+									log.Warn("listing conflicted files failed; skipping resolve hook", "error", listErr)
+									abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
+									_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
+									abortCancel()
+									return fmt.Errorf("git pull --rebase failed during retry: %s (could not list conflicts: %w)", pullOut, listErr)
+								}
+								hookCtx, hookCancel := context.WithTimeout(ctx, opTimeout)
+								resolved, hookErr := opts.OnUnresolvedConflicts(hookCtx, repoPath, conflicted)
+								hookCancel()
+								// only treat as resolved when the hook succeeded AND
+								// signaled resolved. a hook that returned an error
+								// MAY have left the rebase index half-staged; we
+								// must abort rather than continue retrying.
+								if hookErr != nil {
+									log.Warn("OnUnresolvedConflicts hook failed", "error", hookErr)
+								} else if resolved {
+									log.Info("resolved rebase conflicts via OnUnresolvedConflicts hook", "paths", conflicted)
+									hookResolved = true
+								}
+							}
+
+							if !hookResolved {
+								abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
+								_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
+								abortCancel()
+								return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
+							}
+						} else {
+							log.Info("auto-resolved rebase conflicts", "strategy", "accept-theirs")
+						}
+					} else {
+						// no auto-resolve configured — abort and fail
+						abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
+						_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
+						abortCancel()
+						return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
+					}
+				}
+				// A successful pull (or rebase --continue) can still leave conflicts
+				// when applying the autostash. Do not retry the push in that state.
+				recoveryCtx, recoveryCancel := context.WithTimeout(ctx, opTimeout)
+				defer recoveryCancel()
+				if _, err := ResolveAutostashConflicts(recoveryCtx, repoPath, opts.AutoResolvePrefixes, opts.AutoResolveDenyPrefixes); err != nil {
+					return fmt.Errorf("restore autostash after pull: %w", err)
+				}
+				return nil
+			})
+			if rebaseErr != nil {
+				return rebaseErr
 			}
 		} else {
 			if attempt == maxRetries {

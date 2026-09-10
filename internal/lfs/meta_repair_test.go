@@ -5,13 +5,131 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Independent title repairs must converge through a real pull. Git exit zero
+// alone misses autostash conflicts, and JSONEq alone misses duplicate keys.
+func TestTitleRepairConvergesThroughPull(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clones and autostash")
+	}
+	for _, tc := range []struct {
+		name          string
+		sortedBase    bool
+		sortedRemote  bool
+		different     bool
+		attempts      int
+		emptyDefaults bool
+	}{
+		{name: "normal writer"},
+		{name: "historical sorted base", sortedBase: true},
+		{name: "previous failed attempts", attempts: 2},
+		{name: "existing empty defaults", emptyDefaults: true},
+		{name: "older remote writer", sortedRemote: true},
+		{name: "different remote title", different: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writer, bare := initLedgerWithRemote(t)
+			const rel = "sessions/test/meta.json"
+			remoteSession := filepath.Join(writer, "sessions/test")
+			require.NoError(t, os.MkdirAll(remoteSession, 0o755))
+			meta := &SessionMeta{Version: "1.0", SessionName: "test", SessionID: "ses_keep",
+				AgentType: "claude-code", CreatedAt: time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)}
+			meta.SummaryAttempts = tc.attempts
+			if tc.attempts > 0 {
+				meta.ValidationError = "Earlier summary failure"
+			}
+			writeRemote := func(sorted bool) {
+				t.Helper()
+				require.NoError(t, WriteSessionMetaOnly(remoteSession, meta))
+				if sorted {
+					data, err := os.ReadFile(filepath.Join(writer, rel))
+					require.NoError(t, err)
+					var fields map[string]json.RawMessage
+					require.NoError(t, json.Unmarshal(data, &fields))
+					data, err = json.MarshalIndent(fields, "", "  ")
+					require.NoError(t, err)
+					require.NoError(t, os.WriteFile(filepath.Join(writer, rel), data, 0o644))
+				}
+			}
+			writeRemote(tc.sortedBase)
+			if tc.emptyDefaults {
+				seed, err := os.ReadFile(filepath.Join(writer, rel))
+				require.NoError(t, err)
+				seed = append(seed[:len(seed)-1], []byte(`,"title":"","summary":"","summary_status":"","validation_error":"","summary_attempts":0}`)...)
+				require.NoError(t, os.WriteFile(filepath.Join(writer, rel), seed, 0o644))
+			}
+			git(t, writer, "add", "--sparse", rel)
+			git(t, writer, "commit", "-m", "seed metadata")
+			git(t, writer, "push")
+			local := t.TempDir()
+			git(t, writer, "clone", bare, local)
+			git(t, local, "config", "user.name", "Test")
+			git(t, local, "config", "user.email", "test@test.local")
+			localSession := filepath.Join(local, "sessions/test")
+			writeTestSummary(t, localSession, "Recovered title")
+			require.Empty(t, RecoverEmptyTitleMeta(localSession, false).Error)
+			repaired, err := os.ReadFile(filepath.Join(local, rel))
+			require.NoError(t, err)
+			meta.Title, meta.Summary, meta.SummaryStatus = "Recovered title", "Recovered title", "ok"
+			meta.SummaryAttempts = 0
+			if tc.different {
+				meta.Title = "Customer changed this title"
+			}
+			writeRemote(tc.sortedRemote)
+			git(t, writer, "commit", "-am", "independent remote repair")
+			git(t, writer, "push")
+			git(t, local, "pull", "--rebase", "--autostash", "--quiet")
+			conflicts := git(t, local, "ls-files", "--unmerged")
+			if tc.sortedRemote || tc.different {
+				require.NotEmpty(t, conflicts)
+				err = gitutil.WithRepoLock(context.Background(), local, func() error {
+					_, resolveErr := gitutil.ResolveAutostashConflicts(context.Background(), local, []string{"sessions/"}, nil)
+					return resolveErr
+				})
+				require.NotEmpty(t, git(t, local, "stash", "list"), "retain recovery backup")
+				if tc.different {
+					require.Error(t, err)
+					assert.NotEmpty(t, git(t, local, "ls-files", "--unmerged"))
+					return
+				}
+				require.NoError(t, err)
+			} else {
+				require.Empty(t, conflicts, "agreeing repairs must merge without recovery")
+				remote, err := os.ReadFile(filepath.Join(writer, rel))
+				require.NoError(t, err)
+				assert.Equal(t, string(remote), string(repaired), "repair must match the normal writer")
+			}
+			assert.Empty(t, git(t, local, "ls-files", "--unmerged"))
+			data, err := os.ReadFile(filepath.Join(local, rel))
+			require.NoError(t, err)
+			// Decode each top-level member separately so duplicate keys cannot hide.
+			decoder := json.NewDecoder(strings.NewReader(string(data)))
+			_, err = decoder.Token()
+			require.NoError(t, err)
+			seen := make(map[string]bool)
+			for decoder.More() {
+				key, err := decoder.Token()
+				require.NoError(t, err)
+				require.False(t, seen[key.(string)], "duplicate metadata key: %s", key)
+				seen[key.(string)] = true
+				var value json.RawMessage
+				require.NoError(t, decoder.Decode(&value))
+			}
+			got, err := ReadSessionMeta(localSession)
+			require.NoError(t, err)
+			assert.Equal(t, meta, got)
+		})
+	}
+}
 
 // Upgrading must repair legacy error summaries without losing session identity,
 // content references, extension fields, diagnostics, or customer-authored text.
