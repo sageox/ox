@@ -572,6 +572,8 @@ func TestPushWithRetry_RebaseInProgressAborted(t *testing.T) {
 
 // Only a successful hook that completes the rebase may allow another push.
 // Failure paths must preserve both replicas' commits and release the repo lock.
+// TestPushWithRetry_OnUnresolvedConflictsHookCalled verifies that failed or
+// canceled resolution preserves commits and releases the lock before returning.
 func TestPushWithRetry_OnUnresolvedConflictsHookCalled(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git push with retry")

@@ -549,6 +549,8 @@ func TestFixLedgerBranchBehind_ForeignRebase_NeverTouched(t *testing.T) {
 	assert.NoError(t, err, "the foreign rebase-merge directory must survive untouched — proves neither resolve nor AuditAndAbort ran")
 }
 
+// TestFixLedgerBranchBehind_AutostashConflicts prevents doctor from reporting a
+// completed pull or discarding fields when an autostash leaves metadata conflicts.
 func TestFixLedgerBranchBehind_AutostashConflicts(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
