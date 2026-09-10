@@ -548,3 +548,107 @@ func TestFixLedgerBranchBehind_ForeignRebase_NeverTouched(t *testing.T) {
 	_, err := os.Stat(filepath.Join(machineB, ".git", "rebase-merge"))
 	assert.NoError(t, err, "the foreign rebase-merge directory must survive untouched — proves neither resolve nor AuditAndAbort ran")
 }
+
+// TestFixLedgerBranchBehind_AutostashConflicts prevents doctor from reporting a
+// completed pull or discarding fields when an autostash leaves metadata conflicts.
+func TestFixLedgerBranchBehind_AutostashConflicts(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		localTitle       string
+		rebaseConflict   bool
+		existingConflict bool
+		wantPassed       bool
+	}{
+		{name: "agreeing metadata", localTitle: "Ready", wantPassed: true},
+		{name: "after resolving rebase", localTitle: "Ready", rebaseConflict: true, wantPassed: true},
+		{name: "differing metadata", localTitle: "Local"},
+		{name: "existing agreeing metadata", localTitle: "Ready", existingConflict: true, wantPassed: true},
+		{name: "existing differing metadata", localTitle: "Local", existingConflict: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bare, writer := createBareAndClone(t)
+			const rel = "sessions/test/meta.json"
+			require.NoError(t, os.MkdirAll(filepath.Join(writer, "sessions/test"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(writer, rel), []byte(`{"title":"","keep":"yes"}`+"\n"), 0o644))
+			if tc.rebaseConflict {
+				require.NoError(t, os.MkdirAll(filepath.Join(writer, "data"), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(writer, "data/shared.txt"), []byte("base"), 0o644))
+				runGit(t, writer, "add", "data/shared.txt")
+			}
+			runGit(t, writer, "add", "--sparse", rel)
+			runGit(t, writer, "commit", "--no-verify", "-m", "seed metadata")
+			runGit(t, writer, "push")
+			repo := cloneBare(t, bare)
+			if tc.rebaseConflict {
+				require.NoError(t, os.WriteFile(filepath.Join(writer, "data/shared.txt"), []byte("remote"), 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(repo, "data/shared.txt"), []byte("local"), 0o644))
+				runGit(t, repo, "commit", "--no-verify", "-am", "local data change")
+			}
+			const remoteMeta = `{"title":"Ready","keep":"yes","remote_only":true}`
+			require.NoError(t, os.WriteFile(filepath.Join(writer, rel), []byte(remoteMeta+"\n"), 0o644))
+			runGit(t, writer, "commit", "--no-verify", "-am", "remote title")
+			runGit(t, writer, "push")
+			localMeta := `{"keep":"yes","title":"` + tc.localTitle + `","summary_attempts":0,"local_only":true}` + "\n"
+			mergedMeta := `{"keep":"yes","title":"` + tc.localTitle + `","summary_attempts":0,"local_only":true,"remote_only":true}`
+			require.NoError(t, os.WriteFile(filepath.Join(repo, rel), []byte(localMeta), 0o644))
+			var conflictsBefore, headBefore, stashBefore string
+			var worktreeBefore, indexBefore []byte
+			if tc.existingConflict {
+				// A prior successful pull left an autostash conflict. New
+				// upstream work must not route it through the rebase resolver.
+				runGit(t, repo, "pull", "--rebase", "--autostash")
+				conflictsBefore = runGit(t, repo, "ls-files", "--unmerged")
+				require.NotEmpty(t, conflictsBefore)
+				require.False(t, gitutil.IsRebaseInProgress(repo))
+				var err error
+				worktreeBefore, err = os.ReadFile(filepath.Join(repo, rel))
+				require.NoError(t, err)
+				indexBefore, err = os.ReadFile(filepath.Join(repo, ".git/index"))
+				require.NoError(t, err)
+				headBefore = runGit(t, repo, "rev-parse", "HEAD")
+				stashBefore = runGit(t, repo, "stash", "list")
+				require.NoError(t, os.WriteFile(filepath.Join(writer, "remote.txt"), []byte("next remote change"), 0o644))
+				runGit(t, writer, "add", "remote.txt")
+				runGit(t, writer, "commit", "--no-verify", "-m", "advance remote")
+				runGit(t, writer, "push")
+			}
+			remoteBefore := runGit(t, writer, "rev-parse", "HEAD")
+			result := fixLedgerBranchBehind(repo, 1)
+			assert.Equal(t, tc.wantPassed, result.passed, result.detail)
+			assert.False(t, gitutil.IsRebaseInProgress(repo))
+			if tc.rebaseConflict {
+				assert.Equal(t, "1", runGit(t, repo, "rev-list", "--count", "@{upstream}..HEAD"), "only the existing local commit may be rebased")
+			} else {
+				wantHead := remoteBefore
+				if tc.existingConflict && !tc.wantPassed {
+					wantHead = headBefore
+				}
+				assert.Equal(t, wantHead, runGit(t, repo, "rev-parse", "HEAD"), "recovery must not create a commit or pull past a disagreement")
+			}
+			assert.JSONEq(t, remoteMeta, runGit(t, repo, "show", "HEAD:"+rel), "dirty metadata must stay uncommitted")
+			assert.Equal(t, remoteBefore, runGit(t, bare, "rev-parse", "HEAD"), "doctor pull must not push")
+			assert.NotEmpty(t, runGit(t, repo, "stash", "list"), "retain the original dirty metadata")
+			assert.JSONEq(t, localMeta, runGit(t, repo, "show", "stash@{0}:"+rel))
+			conflicts := runGit(t, repo, "ls-files", "--unmerged")
+			if tc.wantPassed {
+				assert.Empty(t, conflicts)
+				data, err := os.ReadFile(filepath.Join(repo, rel))
+				require.NoError(t, err)
+				assert.JSONEq(t, mergedMeta, string(data))
+			} else {
+				assert.NotEmpty(t, conflicts)
+				assert.Contains(t, result.detail, "title differs")
+				if tc.existingConflict {
+					assert.Equal(t, conflictsBefore, conflicts, "preserve all conflict stages")
+					data, err := os.ReadFile(filepath.Join(repo, rel))
+					require.NoError(t, err)
+					assert.Equal(t, worktreeBefore, data, "leave disagreements untouched")
+					index, err := os.ReadFile(filepath.Join(repo, ".git/index"))
+					require.NoError(t, err)
+					assert.Equal(t, indexBefore, index, "leave the index untouched")
+					assert.Equal(t, stashBefore, runGit(t, repo, "stash", "list"))
+				}
+			}
+		})
+	}
+}

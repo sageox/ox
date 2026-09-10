@@ -3,6 +3,8 @@ package gitutil
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,6 +94,108 @@ func TestPushWithRetry_NothingToPush(t *testing.T) {
 		OpTimeout:  10 * time.Second,
 	})
 	assert.NoError(t, err)
+}
+
+// Retrying a rejected push must inspect the index after both a clean rebase
+// and an auto-resolved rebase: restoring the autostash can conflict in either.
+func TestPushWithRetry_AutostashConflicts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git push and autostash")
+	}
+	for _, tc := range []struct {
+		name             string
+		localTitle       string
+		rebaseConflict   bool
+		existingConflict bool
+		deny             []string
+		wantError        bool
+	}{
+		{name: "agreeing metadata", localTitle: "Ready"},
+		{name: "after resolving rebase", localTitle: "Ready", rebaseConflict: true},
+		{name: "differing metadata", localTitle: "Local", wantError: true},
+		{name: "existing agreeing metadata", localTitle: "Ready", existingConflict: true},
+		{name: "existing differing metadata", localTitle: "Local", existingConflict: true, wantError: true},
+		{name: "denied metadata", localTitle: "Ready", deny: []string{"sessions/test/"}, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, bare := initBareRemoteRepo(t)
+			const rel = "sessions/test/meta.json"
+			require.NoError(t, os.MkdirAll(filepath.Join(repo, "sessions/test"), 0o755))
+			addCommit(t, repo, rel, `{"title":"","keep":"yes"}`+"\n", "seed metadata")
+			run(t, repo, "git", "push", "--quiet")
+			writer := filepath.Join(t.TempDir(), "writer")
+			run(t, "", "git", "clone", "--quiet", bare, writer)
+			run(t, writer, "git", "config", "user.name", "Test")
+			run(t, writer, "git", "config", "user.email", "test@test.local")
+			if tc.rebaseConflict {
+				require.NoError(t, os.WriteFile(filepath.Join(writer, "init.txt"), []byte("remote"), 0o644))
+				run(t, writer, "git", "add", "init.txt")
+				addCommit(t, repo, "init.txt", "local", "local change")
+			} else {
+				addCommit(t, repo, "local.txt", "local", "local change")
+			}
+			const remoteMeta = `{"title":"Ready","keep":"yes","remote_only":true}`
+			addCommit(t, writer, rel, remoteMeta+"\n", "remote title")
+			run(t, writer, "git", "push", "--quiet")
+			localMeta := fmt.Sprintf("{\"keep\":\"yes\",\"title\":%q,\"summary_attempts\":0,\"local_only\":true}\n", tc.localTitle)
+			mergedMeta := fmt.Sprintf(`{"keep":"yes","title":%q,"summary_attempts":0,"local_only":true,"remote_only":true}`, tc.localTitle)
+			require.NoError(t, os.WriteFile(filepath.Join(repo, rel), []byte(localMeta), 0o644))
+			var conflictsBefore, headBefore, stashBefore string
+			var worktreeBefore, indexBefore []byte
+			if tc.existingConflict {
+				// Model a checkout wedged by an older client, then make the
+				// remote advance again so this push must enter its pull retry.
+				run(t, repo, "git", "pull", "--rebase", "--autostash", "--quiet")
+				conflictsBefore = gitInRepo(t, repo, "ls-files", "--unmerged")
+				require.NotEmpty(t, conflictsBefore)
+				require.False(t, IsRebaseInProgress(repo))
+				var err error
+				worktreeBefore, err = os.ReadFile(filepath.Join(repo, rel))
+				require.NoError(t, err)
+				indexBefore, err = os.ReadFile(filepath.Join(repo, ".git/index"))
+				require.NoError(t, err)
+				headBefore = gitInRepo(t, repo, "rev-parse", "HEAD")
+				stashBefore = gitInRepo(t, repo, "stash", "list")
+				addCommit(t, writer, "remote.txt", "next remote change", "advance remote")
+				run(t, writer, "git", "push", "--quiet")
+			}
+			remoteBefore := gitInRepo(t, writer, "rev-parse", "HEAD")
+			err := PushWithRetry(context.Background(), repo, PushOpts{
+				AutoResolvePrefixes:     []string{"sessions/", "init.txt"},
+				AutoResolveDenyPrefixes: tc.deny,
+				MaxRetries:              2,
+				OpTimeout:               10 * time.Second,
+			})
+			conflicts := gitInRepo(t, repo, "ls-files", "--unmerged")
+			assert.False(t, IsRebaseInProgress(repo))
+			assert.NotEmpty(t, gitInRepo(t, repo, "stash", "list"), "retain the original dirty metadata")
+			assert.JSONEq(t, localMeta, gitInRepo(t, repo, "show", "stash@{0}:"+rel))
+			if tc.wantError {
+				require.Error(t, err)
+				assert.NotEmpty(t, conflicts)
+				assert.Equal(t, remoteBefore, gitInRepo(t, bare, "rev-parse", "HEAD"), "do not retry the push while conflicts remain")
+				if tc.existingConflict {
+					assert.Equal(t, conflictsBefore, conflicts, "preserve all conflict stages")
+					data, err := os.ReadFile(filepath.Join(repo, rel))
+					require.NoError(t, err)
+					assert.Equal(t, worktreeBefore, data, "leave disagreements untouched")
+					index, err := os.ReadFile(filepath.Join(repo, ".git/index"))
+					require.NoError(t, err)
+					assert.Equal(t, indexBefore, index, "leave the index untouched")
+					assert.Equal(t, headBefore, gitInRepo(t, repo, "rev-parse", "HEAD"))
+					assert.Equal(t, stashBefore, gitInRepo(t, repo, "stash", "list"))
+				}
+			} else {
+				require.NoError(t, err)
+				assert.Empty(t, conflicts)
+				data, err := os.ReadFile(filepath.Join(repo, rel))
+				require.NoError(t, err)
+				assert.JSONEq(t, mergedMeta, string(data))
+				assert.Equal(t, gitInRepo(t, repo, "rev-parse", "HEAD"), gitInRepo(t, bare, "rev-parse", "HEAD"))
+				assert.JSONEq(t, remoteMeta, gitInRepo(t, bare, "show", "HEAD:"+rel), "recovery must not commit the dirty metadata")
+			}
+		})
+	}
 }
 
 func TestPushWithRetry_RepoBlockedByLockFile(t *testing.T) {
@@ -466,59 +570,117 @@ func TestPushWithRetry_RebaseInProgressAborted(t *testing.T) {
 	assert.Contains(t, err.Error(), "broken rebase state")
 }
 
-// TestPushWithRetry_OnUnresolvedConflictsHookCalled verifies that when
-// ResolveRebaseAcceptTheirs cannot resolve a conflict because the path is
-// outside AutoResolvePrefixes, the OnUnresolvedConflicts hook is invoked
-// with the conflicted paths. If the hook reports unresolved, the rebase is
-// aborted and PushWithRetry returns an error.
-//
-// Failure prevented: a higher-tier resolver (e.g. LLM merge) can never be
-// wired in if PushWithRetry refuses to surface the conflict.
+// Only a successful hook that completes the rebase may allow another push.
+// Failure paths must preserve both replicas' commits and release the repo lock.
+// TestPushWithRetry_OnUnresolvedConflictsHookCalled verifies that failed or
+// canceled resolution preserves commits and releases the lock before returning.
 func TestPushWithRetry_OnUnresolvedConflictsHookCalled(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git push with retry")
 	}
-	repo, bare := initBareRemoteRepo(t)
+	for _, tc := range []struct {
+		name              string
+		disableResolution bool
+		hookError         bool
+		resolve           bool
+		cancelEnumeration bool
+		wantHookCalls     int
+	}{
+		{name: "unresolved", wantHookCalls: 1},
+		{name: "no auto-resolve prefixes", disableResolution: true},
+		{name: "hook error after staging", hookError: true, wantHookCalls: 1},
+		{name: "hook completes rebase", resolve: true, wantHookCalls: 1},
+		{name: "conflict enumeration canceled", cancelEnumeration: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, bare := initBareRemoteRepo(t)
+			second := filepath.Join(t.TempDir(), "second")
+			run(t, "", "git", "clone", "--quiet", bare, second)
+			run(t, second, "git", "config", "user.email", "test@test.local")
+			run(t, second, "git", "config", "user.name", "Test")
+			addCommit(t, second, "shared.txt", "from-second", "second shared")
+			run(t, second, "git", "push", "--quiet")
+			addCommit(t, repo, "shared.txt", "from-first", "first shared")
+			localHead := gitInRepo(t, repo, "rev-parse", "HEAD")
+			remoteHead := gitInRepo(t, bare, "rev-parse", "HEAD")
 
-	// second clone pushes a conflicting change to a path NOT covered by
-	// AutoResolvePrefixes (we use "data/github/" as the safe prefix below,
-	// but the conflict happens at the repo root).
-	second := filepath.Join(t.TempDir(), "second")
-	run(t, "", "git", "clone", "--quiet", bare, second)
-	run(t, second, "git", "config", "user.email", "test@test.local")
-	run(t, second, "git", "config", "user.name", "Test")
-	require.NoError(t, os.WriteFile(filepath.Join(second, "shared.txt"),
-		[]byte("from-second"), 0644))
-	run(t, second, "git", "add", "shared.txt")
-	run(t, second, "git", "commit", "-m", "second shared", "--no-verify", "--quiet")
-	run(t, second, "git", "push", "--quiet")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+				ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
+					// Cancel at the real Git failure boundary, before enumerating
+					// paths. The hook must never receive a misleading empty list.
+					if tc.cancelEnumeration && attr.Key == slog.MessageKey && attr.Value.String() == "rebase auto-resolve failed" {
+						cancel()
+					}
+					return attr
+				},
+			}))
+			prefixes := []string{"data/github/"} // does not cover shared.txt
+			if tc.disableResolution {
+				prefixes = nil
+			}
+			hookCalls := 0
+			var capturedPaths []string
+			const merged = "from-second\nfrom-first\n"
+			err := PushWithRetry(ctx, repo, PushOpts{
+				MaxRetries:          2,
+				OpTimeout:           10 * time.Second,
+				AutoResolvePrefixes: prefixes,
+				Logger:              logger,
+				OnUnresolvedConflicts: func(ctx context.Context, repoPath string, paths []string) (bool, error) {
+					hookCalls++
+					capturedPaths = append([]string(nil), paths...)
+					if !tc.resolve && !tc.hookError {
+						return false, nil
+					}
+					if err := os.WriteFile(filepath.Join(repoPath, "shared.txt"), []byte(merged), 0644); err != nil {
+						return false, err
+					}
+					if _, err := RunGit(ctx, repoPath, "add", "shared.txt"); err != nil {
+						return false, err
+					}
+					if tc.hookError {
+						// An error must override even a true resolved result and
+						// restore the original commit after partially staging.
+						return true, fmt.Errorf("resolver failed after staging")
+					}
+					_, err := runRebaseStep(ctx, repoPath, "--continue")
+					return err == nil, err
+				},
+			})
 
-	// first clone makes a conflicting change to the same path
-	require.NoError(t, os.WriteFile(filepath.Join(repo, "shared.txt"),
-		[]byte("from-first"), 0644))
-	run(t, repo, "git", "add", "shared.txt")
-	run(t, repo, "git", "commit", "-m", "first shared", "--no-verify", "--quiet")
-
-	var hookCalls atomic.Int32
-	var capturedPaths []string
-	err := PushWithRetry(context.Background(), repo, PushOpts{
-		MaxRetries:          2,
-		OpTimeout:           10 * time.Second,
-		AutoResolvePrefixes: []string{"data/github/"}, // does NOT cover shared.txt
-		OnUnresolvedConflicts: func(ctx context.Context, repoPath string, paths []string) (bool, error) {
-			hookCalls.Add(1)
-			capturedPaths = append([]string(nil), paths...)
-			return false, nil // signal unresolved → PushWithRetry should abort
-		},
-	})
-
-	assert.Error(t, err, "expected push to fail when hook reports unresolved")
-	assert.Equal(t, int32(1), hookCalls.Load(), "OnUnresolvedConflicts hook must be invoked exactly once")
-	assert.Contains(t, capturedPaths, "shared.txt",
-		"hook must receive the unresolved conflicted paths")
-
-	// rebase must have been aborted before returning so the repo is left clean
-	assert.False(t, IsRebaseInProgress(repo), "rebase should be aborted on hook-unresolved failure")
+			assert.Equal(t, tc.wantHookCalls, hookCalls)
+			if tc.wantHookCalls > 0 {
+				assert.Equal(t, []string{"shared.txt"}, capturedPaths)
+			}
+			if tc.resolve {
+				require.NoError(t, err)
+				assert.Equal(t, gitInRepo(t, repo, "rev-parse", "HEAD"), gitInRepo(t, bare, "rev-parse", "HEAD"))
+				assert.Equal(t, strings.TrimSpace(merged), gitInRepo(t, bare, "show", "HEAD:shared.txt"))
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "git pull --rebase failed during retry")
+				assert.Equal(t, remoteHead, gitInRepo(t, bare, "rev-parse", "HEAD"), "failed resolution must not push")
+				if tc.cancelEnumeration {
+					assert.ErrorIs(t, err, context.Canceled)
+					assert.Contains(t, err.Error(), "could not list conflicts")
+					// Cancellation also prevents abort; the original commit
+					// must remain recoverable with a fresh operation context.
+					assert.True(t, IsRebaseInProgress(repo))
+					run(t, repo, "git", "rebase", "--abort")
+				}
+				assert.Equal(t, localHead, gitInRepo(t, repo, "rev-parse", "HEAD"))
+				assert.Equal(t, "from-first", gitInRepo(t, repo, "show", "HEAD:shared.txt"))
+			}
+			assert.False(t, IsRebaseInProgress(repo))
+			assert.Empty(t, gitInRepo(t, repo, "status", "--porcelain"))
+			lockCtx, lockCancel := context.WithTimeout(context.Background(), time.Second)
+			defer lockCancel()
+			require.NoError(t, WithRepoLock(lockCtx, repo, func() error { return nil }), "retry must release the repo lock")
+		})
+	}
 }
 
 // contains mirrors strings.Contains for test clarity.
