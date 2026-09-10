@@ -118,6 +118,43 @@ func TestPullManagedRepo_SessionMetaConflict_ClassifiesAsSessionConflictWedge(t 
 		"AuditAndAbort should have cleared the rebase-merge dir")
 }
 
+// A canceled resolver still aborts the rebase using a fresh context. The
+// subsequent autostash inspection then fails on cancellation; it must not
+// replace the pull failure or the divergence issue already reported.
+func TestPullManagedRepo_AutostashInspectionPreservesPullFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	localDir := makeSessionMetaConflictClone(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resolverCalled := false
+	s := newTestScheduler(t.TempDir())
+	result := s.pullManagedRepo(ctx, ManagedRepoPullOpts{
+		RepoPath:         localDir,
+		RepoName:         "ledger",
+		DetectDivergence: true,
+		ResolveRules:     []manifest.ResolveRule{{Mode: manifest.ResolveModeAuto, Path: "data/"}},
+		Logger:           discardLogger(),
+		LLMResolver: func(ctx context.Context, _ string, _ []string) (bool, error) {
+			resolverCalled = true
+			cancel()
+			return false, ctx.Err()
+		},
+	})
+
+	require.True(t, resolverCalled, "the real pull must reach conflict resolution before cancellation")
+	assert.False(t, gitutil.IsRebaseInProgress(localDir), "abort must finish despite the canceled pull context")
+	require.NotNil(t, result.Issue)
+	assert.Equal(t, IssueTypeDiverged, result.Issue.Type)
+	require.Error(t, result.Err)
+	assert.ErrorContains(t, result.Err, "pull failed")
+	assert.ErrorContains(t, result.Err, "inspect unmerged index")
+	assert.ErrorIs(t, result.Err, context.Canceled)
+	var pullExit *exec.ExitError
+	assert.ErrorAs(t, result.Err, &pullExit, "the original git pull error must remain in the error chain")
+}
+
 // --- B. Severity escalation by elapsed time ---
 //
 // escalateSessionConflictSeverity must escalate purely as a function of how

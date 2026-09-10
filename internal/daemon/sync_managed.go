@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -286,13 +287,17 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 		return ManagedRepoPullResult{Err: fmt.Errorf("acquire repo lock for %s: %w", repoName, lockErr)}
 	}
 	if conflictErr != nil {
-		result.Err = conflictErr
-		result.Issue = &DaemonIssue{
-			Type:            IssueTypeMergeConflict,
-			Severity:        SeverityError,
-			Repo:            repoName,
-			Summary:         fmt.Sprintf("%s has unresolved conflicts: %s", repoName, conflictErr),
-			RequiresConfirm: true,
+		result.Err = errors.Join(result.Err, conflictErr)
+		// Preserve an earlier pull classification, including session-wedge
+		// escalation, when autostash recovery reports an additional failure.
+		if result.Issue == nil {
+			result.Issue = &DaemonIssue{
+				Type:            IssueTypeMergeConflict,
+				Severity:        SeverityError,
+				Repo:            repoName,
+				Summary:         fmt.Sprintf("%s has unresolved conflicts: %s", repoName, conflictErr),
+				RequiresConfirm: true,
+			}
 		}
 	}
 	return result

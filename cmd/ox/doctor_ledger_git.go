@@ -725,9 +725,15 @@ func fixLedgerUnmergedPaths(ledgerPath string, unmerged []unmergedPath) checkRes
 		})
 		if resolveErr == nil {
 			if resolved {
-				return PassedCheck("Ledger unmerged paths", "resolved agreeing session metadata from autostash")
+				return PassedCheck(name, "resolved agreeing session metadata from autostash")
 			}
-			return PassedCheck("Ledger unmerged paths", "conflicts already resolved")
+			return PassedCheck(name, "conflicts already resolved")
+		}
+		if gitutil.IsRepoLockBusy(resolveErr) {
+			r := WarningCheck(name, "ledger busy, recovery deferred",
+				"Another ox operation is using the ledger; retry `ox doctor --fix` shortly.")
+			r.slug = CheckSlugLedgerUnmergedPaths
+			return r
 		}
 		sample := unmerged[0].Path
 		if len(unmerged) > 1 {

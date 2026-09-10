@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -333,6 +335,20 @@ func TestFixLedgerUnmergedPaths_RepairsAgreeingAutostash(t *testing.T) {
 	require.Empty(t, op)
 	status, err := runIsolatedGit(t, repo, "status", "--porcelain=v1")
 	require.NoError(t, err)
+	// A concurrent sync must yield retry guidance without touching the conflict;
+	// releasing its lock must let the same doctor recovery succeed below.
+	require.NoError(t, gitutil.WithRepoLock(context.Background(), repo, func() error {
+		result := fixLedgerUnmergedPaths(repo, parseUnmergedPaths(status))
+		assert.True(t, result.warning, "%+v", result)
+		assert.Contains(t, result.message, "busy")
+		assert.Contains(t, result.detail, "retry")
+		assert.NotContains(t, result.detail, "checkout --ours")
+		assert.Equal(t, CheckSlugLedgerUnmergedPaths, result.slug)
+		return nil
+	}))
+	unchanged, err := runIsolatedGit(t, repo, "status", "--porcelain=v1")
+	require.NoError(t, err)
+	assert.Equal(t, status, unchanged)
 	result := fixLedgerUnmergedPaths(repo, parseUnmergedPaths(status))
 	require.True(t, result.passed, "%+v", result)
 	data, err := os.ReadFile(path)
