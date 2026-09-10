@@ -17,4 +17,7 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+      - id: check-json
+        # testdata deliberately contains malformed JSON fixtures
+        exclude: (^|/)testdata/
       - id: check-added-large-files

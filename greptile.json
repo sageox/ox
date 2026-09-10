@@ -1,0 +1,15 @@
+{
+  "triggerOnUpdates": false,
+  "triggerOnDrafts": false,
+  "strictness": 2,
+  "commentTypes": [
+    "logic",
+    "syntax"
+  ],
+  "disabledLabels": [
+    "no-greptile"
+  ],
+  "includeConfidenceScore": true,
+  "ignorePatterns": "internal/codedb/sqlc/**\ninternal/whisper/store/sqlc/**\ninternal/theme/generated.go\ninternal/session/gitleaks_generated.go\ndocs/reference/**\n.beads/**",
+  "instructions": "ox captures a developer's coding session and uploads it to a shared team ledger. Session capture is tier-0 data: a silent defect anywhere in the capture -> finalize -> LFS upload -> ledger commit path destroys work a user cannot recreate. Weight findings in internal/session/, internal/lfs/, internal/ledger/, internal/daemon/ and internal/redaction/ above everything else, and flag any change that could drop, truncate, reorder, or silently skip a session entry.\n\nRepo invariants worth flagging when violated:\n- ox never shells out to the git-lfs binary and never writes .gitattributes entries with filter=lfs; all LFS work is pure Go in internal/lfs/. Flag exec of `git lfs` / `git-lfs`, LookPath(\"git-lfs\"), or LFS behavior gated on .gitattributes.\n- The daemon reads (pull/fetch); the CLI writes (add/commit/push). Flag daemon code that commits, pushes, or discards uncommitted changes.\n- Redaction runs before session content leaves the machine. Flag a new path that uploads session content without passing through internal/redaction.\n- Logs are single-line key=value (slog.Info(\"action\", \"key\", val)). Flag multiline or pretty-printed log statements.\n- Errors are compared with errors.Is / errors.As and wrapped with context, never string-matched.\n- Prefer the canonical helpers listed in AGENTS.md over re-derived ones: config.IsInitialized over os.Stat(\".sageox/\"), paths.TeamContextDir over hand-joined ~/.sageox paths, endpoint.GetForProject over reading the endpoint from env directly, cli.OpenInBrowser over browser.OpenURL or exec of open / xdg-open.\n- No copyleft dependencies (GPL/LGPL/AGPL/SSPL/EPL/CC-BY-SA). Flag any go.mod addition under one.\n\nStyle is already enforced by gofmt, goimports, and golangci-lint - do not comment on formatting or naming."
+}

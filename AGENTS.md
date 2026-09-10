@@ -159,6 +159,8 @@ Always confirm with human before doing a git commit or a git push in this repo.
 
 **PR review feedback:** Use the `/monitor-pr` skill to watch an open PR and drive it to green. It streams state via the `Monitor` tool, triages each unresolved thread (including CodeRabbit nitpicks and `isOutdated` threads, which must not be blanket-skipped), replies `"Fixed."`, and resolves via GraphQL on `reviewThreads`.
 
+**Review bots (`greptile.json`, `.coderabbit.yaml`):** Neither blocks a merge. CodeRabbit re-reviews every push; **Greptile reviews at PR-open only** (`triggerOnUpdates: false`), so before merging you must re-trigger it on the final state — `gh pr comment <n> --body "@greptileai"`. Never merge on a Greptile read of the first draft. Label a PR `no-greptile` to skip it entirely (large mechanical diffs only). `CONTRIBUTING.md` carries the human-facing version.
+
 ### Key Practices
 
 - **Simplicity**: Minimum complexity for current needs
