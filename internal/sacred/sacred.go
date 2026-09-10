@@ -23,7 +23,70 @@ var Prefixes = []string{"data/plans/", "sessions/"}
 // is a safety backstop, not proof of a mass wipe or unintended deletion.
 // Per ADR-024 sacred deletion needs explicit human approval, so err toward
 // refusing. The 2026-08-25 incident staged 1000+ sacred deletions in one commit.
+//
+// Used by the commit-time guard, which BLOCKS. Left in files deliberately:
+// erring toward refusing costs a caller one failed commit and loses nothing,
+// so it is the safe direction for a gate that stands between an automated
+// reconcile and permanent deletion.
 const MassDeleteThreshold = 5
+
+// DetectorEntityThreshold is the equivalent for the daemon's periodic history
+// scan, which only REPORTS — it never blocks, restores, or deletes.
+//
+// Counted in whole plans/sessions rather than files, and deliberately NOT
+// shared with MassDeleteThreshold, because the two mechanisms fail in opposite
+// directions. A guard that fires needlessly costs a refused commit; a detector
+// that fires needlessly costs the operator's attention every 15 minutes,
+// forever, until they stop reading it — which is how a real alert gets missed.
+// Counting files made every ordinary `ox session delete` (6-7 files) and every
+// stale-artifact sweep look like a wipe: on one real ledger, 32 of 33 reported
+// "mass deletions" were nothing of the kind.
+const DetectorEntityThreshold = 2
+
+// EntityOf returns the plan or session directory that owns p — the unit a
+// human would call "a plan" or "a session" — or "" when p is not sacred.
+//
+// Deleting some files inside a session is not losing the session, so callers
+// must additionally confirm the entity is gone from the resulting tree before
+// counting it. See the .rej sweep noted on MassDeleteThreshold: 15 deleted
+// files across 6 session directories, 0 sessions lost.
+func EntityOf(p string) string {
+	p = strings.TrimSpace(p)
+	for _, pre := range Prefixes {
+		if !strings.HasPrefix(p, pre) {
+			continue
+		}
+		rest := strings.TrimPrefix(p, pre)
+		if rest == "" {
+			return ""
+		}
+		if idx := strings.Index(rest, "/"); idx >= 0 {
+			rest = rest[:idx]
+		}
+		if rest == "" {
+			return ""
+		}
+		return pre + rest
+	}
+	return ""
+}
+
+// Entities returns the distinct sacred entities touched by paths, preserving
+// first-seen order. Blank and non-sacred entries are dropped so callers can
+// pass raw `git` output lines.
+func Entities(paths []string) []string {
+	seen := make(map[string]bool, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		e := EntityOf(p)
+		if e == "" || seen[e] {
+			continue
+		}
+		seen[e] = true
+		out = append(out, e)
+	}
+	return out
+}
 
 // OverrideEnv, when set to "1", lets a deliberate bulk removal through the
 // commit-time guard. The detector ignores it — a historical mass deletion is

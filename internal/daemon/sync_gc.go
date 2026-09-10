@@ -99,7 +99,16 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 				})
 			case gcSuccess:
 				s.issues.ClearIssue(IssueTypeDirtyWorkspace, repoName)
+				s.issues.ClearIssue(IssueTypeSyncBackoff, ws.ID)
 			}
+		}
+		// A reclone replaces the entire checkout, so any suspension recorded
+		// against the OLD worktree's fingerprint no longer describes anything
+		// that exists. Without this, a suspended team context stayed suspended
+		// across reclones and only `ox sync --all-teams` could revive it.
+		// Mirrors the ledger's post-GC ClearSyncFailures below.
+		if result == gcSuccess {
+			s.workspaceRegistry.ClearSyncFailures(ws.ID)
 		}
 
 		break // one GC per check cycle to avoid overloading
@@ -427,7 +436,16 @@ func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 			if s.issues != nil {
 				s.issues.ClearIssue(IssueTypeDirtyWorkspace, name)
 				s.issues.ClearIssue(IssueTypeGCFailed, name)
+				// Keyed on ws.ID, not name: shouldSyncOrBypass raises
+				// SyncBackoff with the workspace ID, while the two issues
+				// above are keyed by display name. The two read alike.
+				s.issues.ClearIssue(IssueTypeSyncBackoff, ws.ID)
 			}
+			// A forced reclone replaces the checkout just as the interval-driven
+			// one does, so it must also retire a suspension recorded against the
+			// worktree that no longer exists. Without this, `ox doctor --gc`
+			// looked like a recovery path but left background sync skipped.
+			s.workspaceRegistry.ClearSyncFailures(ws.ID)
 		case gcSkippedDirty:
 			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: local changes could not be preserved for GC", name))
 			if s.issues != nil {
@@ -621,15 +639,18 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	if _, err := os.Stat(swapMarker); err == nil {
 		s.logger.Warn("gc: found an interrupted prior GC that completed its swap but not its restore, recovering before continuing",
 			"path", ws.Path, "workspace", wsLabel)
-		if isLedger {
-			if _, statErr := os.Stat(cacheBackupDir); statErr == nil {
-				if applyErr := gcRestoreCache(cacheBackupDir, ws.Path); applyErr != nil {
-					s.logger.Error("gc: failed to restore orphaned cache backup, preserving for manual recovery",
-						"path", ws.Path, "cache_backup", cacheBackupDir, "error", applyErr)
-					return gcFailed, false
-				}
-				_ = os.RemoveAll(cacheBackupDir)
+		// Not ledger-only: team contexts now have a preserved cache too, and
+		// the leftover sweep below deletes cacheBackupDir unconditionally. A
+		// crash between the swap and phase 1.5 would otherwise discard the
+		// backup — taking sync-state.json with it, which is the file a
+		// non-owner daemon reads to learn when a team context last synced.
+		if _, statErr := os.Stat(cacheBackupDir); statErr == nil {
+			if applyErr := gcRestoreCache(cacheBackupDir, ws.Path); applyErr != nil {
+				s.logger.Error("gc: failed to restore orphaned cache backup, preserving for manual recovery",
+					"path", ws.Path, "cache_backup", cacheBackupDir, "error", applyErr)
+				return gcFailed, false
 			}
+			_ = os.RemoveAll(cacheBackupDir)
 		}
 		if _, statErr := os.Stat(diffFile); statErr == nil {
 			if applyErr := s.gcRestoreDiff(ctx, ws.Path, diffFile); applyErr != nil {
@@ -731,17 +752,22 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		return gcSkippedDirty, false
 	}
 
-	// step 0d (ledger only): preserve .sageox/cache/ (gitignored, contains codedb indexes)
+	// step 0d: preserve .sageox/cache/ (gitignored: codedb indexes on the
+	// ledger, sync-state.json on every workspace).
 	// cache must survive reclones — abort GC if preservation fails
+	//
+	// Not ledger-only: recordSyncState writes each team context's
+	// sync-state.json here, and that file is how a non-owner daemon learns
+	// when the global-sync owner last pulled (see the LoadSyncState fallback
+	// in daemon.go Status). Dropping it on reclone left every follower daemon
+	// reporting a healthy team context as "not synced".
 	hasCache := false
-	if isLedger {
-		if err := gcPreserveCache(ws.Path, cacheBackupDir); err != nil {
-			s.logger.Warn("gc: skipping reclone, cannot preserve cache",
-				"path", ws.Path, "error", err)
-			return gcFailed, false
-		} else if _, err := os.Stat(cacheBackupDir); err == nil {
-			hasCache = true
-		}
+	if err := gcPreserveCache(ws.Path, cacheBackupDir); err != nil {
+		s.logger.Warn("gc: skipping reclone, cannot preserve cache",
+			"path", ws.Path, "error", err)
+		return gcFailed, false
+	} else if _, err := os.Stat(cacheBackupDir); err == nil {
+		hasCache = true
 	}
 
 	// --- phase 1: clone, validate, swap ---
@@ -906,8 +932,8 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		_ = os.Remove(swapLockPath)
 	}
 
-	// --- phase 1.5 (ledger only): restore cache ---
-	if isLedger && hasCache {
+	// --- phase 1.5: restore cache ---
+	if hasCache {
 		if err := gcRestoreCache(cacheBackupDir, ws.Path); err != nil {
 			// keep backup so manual recovery is possible
 			s.logger.Error("gc: failed to restore cache, backup retained",

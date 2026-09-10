@@ -642,6 +642,9 @@ func (r *WorkspaceRegistry) UpdateConfigLastSync(id string) error {
 	case WorkspaceTypeLedger:
 		r.localConfigCache.UpdateLedgerLastSync()
 	case WorkspaceTypeTeamContext:
+		// No-op for an API-discovered team, which has no config entry — by
+		// design, see the note on UpdateTeamContextLastSync. Its last-sync
+		// time lives in the checkout's sync-state.json.
 		r.localConfigCache.UpdateTeamContextLastSync(ws.TeamID)
 	}
 
@@ -1120,13 +1123,18 @@ func isCheckoutClean(path string) bool {
 }
 
 // isPartialClone returns true if a git repo was cloned with --filter (partial clone).
-// Checks for extensions.partialClone in git config, which git sets automatically
-// when --filter is used during clone.
+//
+// Delegates to gitutil.InspectRepo, which reads the promisor-remote signal
+// (`remote.<name>.promisor`) and only falls back to `extensions.partialClone`.
+// This previously checked `extensions.partialClone` alone — git 2.50 does not
+// set that key for `clone --filter`, it sets remote.origin.promisor, so the
+// check returned false for every ox clone. checkAndRunGC treats "not partial"
+// as a full-clone upgrade trigger that bypasses the GC interval, so every team
+// context was being re-cloned on each hourly GC cycle, in every daemon.
 func isPartialClone(path string) bool {
-	cmd := exec.Command("git", "-C", path, "config", "--get", "extensions.partialClone")
-	output, err := cmd.Output()
+	state, err := gitutil.InspectRepo(path)
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(string(output)) != ""
+	return state.Partial
 }

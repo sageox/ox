@@ -1414,21 +1414,7 @@ func (d *Daemon) startWorkers() {
 		autofixReg := autofix.Default()
 		d.autofixSched = autofix.NewScheduler(autofixReg, d.logger,
 			func() []string { return []string{d.config.ProjectRoot} },
-			func(r autofix.CheckResult) {
-				if d.issues == nil {
-					return
-				}
-				severity := SeverityWarning
-				if r.Status == autofix.StatusError {
-					severity = SeverityError
-				}
-				d.issues.SetIssue(DaemonIssue{
-					Type:     "autofix_" + r.Slug,
-					Severity: severity,
-					Repo:     r.Repo,
-					Summary:  r.Summary,
-				})
-			})
+			d.routeAutofixResult)
 		d.wg.Add(1)
 		go func() {
 			defer d.wg.Done()
@@ -1593,10 +1579,15 @@ func (s *daemonServiceImpl) Status() *StatusData {
 	globalSyncEndpoint := endpoint.NormalizeEndpoint(endpoint.GetForProject(s.d.config.ProjectRoot))
 
 	return &StatusData{
-		Running:            true,
-		Pid:                os.Getpid(),
-		Version:            Version(),
-		Uptime:             time.Since(s.d.startTime),
+		Running: true,
+		Pid:     os.Getpid(),
+		Version: Version(),
+		// Round(0) strips the monotonic reading so this is a wall-clock
+		// difference. macOS suspends the monotonic clock across system sleep,
+		// so time.Since under-reported uptime by exactly the time the laptop
+		// was asleep — a daemon started 19h ago reported 16h while the issues
+		// it raised, timestamped with wall clock, correctly read "19h ago".
+		Uptime:             time.Since(s.d.startTime.Round(0)),
 		WorkspacePath:      workspacePath,
 		LedgerPath:         s.d.config.LedgerPath,
 		LastSync:           s.d.scheduler.LastSync(),
@@ -2158,4 +2149,34 @@ func (s *daemonServiceImpl) SessionUploaded(name, url, agentID string, dur time.
 			Payload: hooks.SessionUploadedPayload(name, url, agentID, dur),
 		})
 	}
+}
+
+// routeAutofixResult turns one autofix check result into issue-tracker state.
+//
+// Clean and Fixed RETIRE the issue; only Found (needs a human) and Error (the
+// check itself broke) are open issues. Both halves matter: nothing else clears
+// an "autofix_*" issue, so before Clean was routed here an issue raised once
+// persisted for the daemon's whole lifetime, and filing Fixed as a warning
+// meant a successful repair reported itself as an outstanding problem —
+// "session meta titles: recovered=1" sat in `ox daemon status` long after the
+// titles it names were recovered.
+func (d *Daemon) routeAutofixResult(r autofix.CheckResult) {
+	if d.issues == nil {
+		return
+	}
+	issueType := "autofix_" + r.Slug
+	if r.Status == autofix.StatusClean || r.Status == autofix.StatusFixed {
+		d.issues.ClearIssue(issueType, r.Repo)
+		return
+	}
+	severity := SeverityWarning
+	if r.Status == autofix.StatusError {
+		severity = SeverityError
+	}
+	d.issues.SetIssue(DaemonIssue{
+		Type:     issueType,
+		Severity: severity,
+		Repo:     r.Repo,
+		Summary:  r.Summary,
+	})
 }

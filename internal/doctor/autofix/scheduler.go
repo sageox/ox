@@ -40,8 +40,11 @@ type Scheduler struct {
 // scheduler always sees the freshest set without coordinating
 // invalidation.
 //
-// emit is optional. When non-nil the scheduler calls it for every
-// non-Clean result so the daemon can route into IssueTracker / slog.
+// emit is optional. When non-nil the scheduler calls it for EVERY
+// result, Clean included, so the daemon can route into IssueTracker /
+// slog. Clean must reach the sink: it is the only signal that a
+// previously-reported issue is resolved, and without it an issue raised
+// once stayed in the tracker for the daemon's whole lifetime.
 // nil emit means "log only," useful in tests.
 func NewScheduler(reg *Registry, logger *slog.Logger, workspace func() []string, emit func(CheckResult)) *Scheduler {
 	if logger == nil {
@@ -101,15 +104,19 @@ func (s *Scheduler) Run(ctx context.Context) {
 // scheduler is running on its ticker or invoked imperatively.
 func (s *Scheduler) RunOnce(ctx context.Context) []CheckResult {
 	results := s.tickCollect(ctx, false)
-	if s.emit != nil {
-		for _, r := range results {
-			if r.Status == StatusClean {
-				continue
-			}
-			s.emit(r)
-		}
-	}
+	s.emitAll(results)
 	return results
+}
+
+// emitAll routes every result to the sink, Clean included. Callers rely on
+// Clean arriving to retire an issue the same check raised earlier.
+func (s *Scheduler) emitAll(results []CheckResult) {
+	if s.emit == nil {
+		return
+	}
+	for _, r := range results {
+		s.emit(r)
+	}
 }
 
 // RunNow is RunOnce with the per-check MinInterval throttle disabled.
@@ -124,25 +131,18 @@ func (s *Scheduler) RunOnce(ctx context.Context) []CheckResult {
 // throttle relative to this call.
 func (s *Scheduler) RunNow(ctx context.Context) []CheckResult {
 	results := s.tickCollect(ctx, true)
-	if s.emit != nil {
-		for _, r := range results {
-			if r.Status == StatusClean {
-				continue
-			}
-			s.emit(r)
-		}
-	}
+	s.emitAll(results)
 	return results
 }
 
 func (s *Scheduler) tick(ctx context.Context) {
 	results := s.tickCollect(ctx, false)
+	s.emitAll(results)
 	for _, r := range results {
+		// Clean reaches the sink (to retire stale issues) but is not logged —
+		// a healthy check every tick would be pure noise.
 		if r.Status == StatusClean {
 			continue
-		}
-		if s.emit != nil {
-			s.emit(r)
 		}
 		s.logger.Info("autofix",
 			"slug", r.Slug,

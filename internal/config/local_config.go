@@ -476,13 +476,30 @@ func (c *LocalConfig) SetTeamContext(teamID, teamName, path string) {
 
 // UpdateTeamContextLastSync updates the last sync time for a team context.
 func (c *LocalConfig) UpdateTeamContextLastSync(teamID string) {
+	if teamID == "" {
+		return
+	}
 	for i := range c.TeamContexts {
 		if c.TeamContexts[i].TeamID == teamID {
 			c.TeamContexts[i].LastSync = time.Now().UTC()
 			return
 		}
 	}
+	// Deliberately no append: this caller has only an ID, and an entry with an
+	// empty name and path is worse than no entry — it persists a team context
+	// config block that cannot be resolved. Callers that hold the identity
+	// should use UpsertTeamContextLastSync.
 }
+
+// A team context discovered from the repo-detail API
+// (RegisterTeamContextsFromAPI) is deliberately NOT added to config here, so
+// this stays a no-op for one. Writing it would give a revoked team a way back:
+// CleanupRevokedTeamContexts removes the in-memory workspace and the on-disk
+// checkout but never edits config.local.toml, and LoadFromConfig recreates a
+// workspace from any entry it finds — so the team would reappear and resume
+// syncing on the next reload. Its last-sync time is carried by
+// .sageox/cache/sync-state.json in the checkout instead, which survives a GC
+// reclone and is what a non-owner daemon reads anyway.
 
 // UpdateTeamContextLastGC records when the daemon last GC-recloned a team context.
 func (c *LocalConfig) UpdateTeamContextLastGC(teamID string) {
