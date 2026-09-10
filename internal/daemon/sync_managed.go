@@ -137,7 +137,7 @@ type ManagedRepoPullResult struct {
 	// Diverged is true if branches were diverged before the pull.
 	Diverged bool
 
-	// AutoResolved is true if rebase conflicts were auto-resolved.
+	// AutoResolved is true if rebase or autostash conflicts were auto-resolved.
 	AutoResolved bool
 
 	// FetchHeadTime is the FETCH_HEAD mtime after fetch (zero if not fetched).
@@ -230,26 +230,6 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 		}
 	}
 
-	// --- Dedup checks ---
-
-	// ls-remote SHA check: cheapest way to skip when nothing changed
-	if s.remoteRefCheck(ctx, path) {
-		return ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRemoteUnchanged}
-	}
-
-	// FETCH_HEAD mtime dedup (secondary: cross-daemon coordination)
-	if age, ok := gitutil.FetchHeadAge(path); ok {
-		minAge := opts.MinFetchAge
-		if minAge == 0 {
-			minAge = gitutil.MinFetchHeadAge
-		}
-		threshold := max(opts.SyncInterval/2, minAge)
-		if age < threshold {
-			logger.Debug("repo recently fetched, skipping", "path", path, "age", age)
-			return ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRecentlyFetched}
-		}
-	}
-
 	// --- Fetch + pull, serialized per clone ---
 	//
 	// ADR-030 D1: every mutating git operation on a managed clone runs
@@ -260,8 +240,42 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 	// produced "Cannot rebase onto multiple branches" in the 2026-09-02
 	// incident (COE: docs/coes/2026-09-02-daemon-git-sync-race-and-lfs-divergence.md).
 	var result ManagedRepoPullResult
+	var conflictErr error
 	lockErr := gitutil.WithRepoLock(ctx, path, func() error {
+		autoPaths := manifest.AutoResolvePaths(opts.ResolveRules)
+		denyPaths := manifest.AutoResolveDenyPaths(opts.ResolveRules)
+		// Check before dedup: a previous successful pull can leave autostash
+		// conflicts even when the remote and FETCH_HEAD have not changed.
+		recovered, err := gitutil.ResolveAutostashConflicts(ctx, path, autoPaths, denyPaths)
+		if err != nil {
+			conflictErr = err
+			return nil
+		}
+		if !recovered {
+			if s.remoteRefCheck(ctx, path) {
+				result = ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRemoteUnchanged}
+				return nil
+			}
+			if age, ok := gitutil.FetchHeadAge(path); ok {
+				minAge := opts.MinFetchAge
+				if minAge == 0 {
+					minAge = gitutil.MinFetchHeadAge
+				}
+				if age < max(opts.SyncInterval/2, minAge) {
+					logger.Debug("repo recently fetched, skipping", "path", path, "age", age)
+					result = ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRecentlyFetched}
+					return nil
+				}
+			}
+		}
 		result = s.fetchAndPullLocked(ctx, opts, path, repoName, logger)
+		result.AutoResolved = result.AutoResolved || recovered
+		// Git can return zero after a successful rebase whose autostash failed
+		// to apply. Check the index even after success, including auto-resolution.
+		if !gitutil.IsRebaseInProgress(path) {
+			recovered, conflictErr = gitutil.ResolveAutostashConflicts(ctx, path, autoPaths, denyPaths)
+			result.AutoResolved = result.AutoResolved || recovered
+		}
 		return nil
 	})
 	if lockErr != nil {
@@ -270,6 +284,16 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 			return ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRepoLockBusy}
 		}
 		return ManagedRepoPullResult{Err: fmt.Errorf("acquire repo lock for %s: %w", repoName, lockErr)}
+	}
+	if conflictErr != nil {
+		result.Err = conflictErr
+		result.Issue = &DaemonIssue{
+			Type:            IssueTypeMergeConflict,
+			Severity:        SeverityError,
+			Repo:            repoName,
+			Summary:         fmt.Sprintf("%s has unresolved conflicts: %s", repoName, conflictErr),
+			RequiresConfirm: true,
+		}
 	}
 	return result
 }

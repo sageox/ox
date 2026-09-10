@@ -311,6 +311,38 @@ func TestFixLedgerUnmergedPaths_ClearsMergeHead(t *testing.T) {
 	assert.Empty(t, postUnmerged, "no UU files may survive the abort; got: %q", postStatus)
 }
 
+// Doctor must repair the autostash state its own diagnostic tells users to fix.
+func TestFixLedgerUnmergedPaths_RepairsAgreeingAutostash(t *testing.T) {
+	skipIntegration(t)
+	repo := t.TempDir()
+	const rel = "sessions/test/meta.json"
+	path := filepath.Join(repo, rel)
+	mustRunGit(t, repo, "init", "--initial-branch=main")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(`{"title":""}`+"\n"), 0o644))
+	mustRunGit(t, repo, "add", "--sparse", rel)
+	mustRunGit(t, repo, "commit", "-m", "base")
+	const local = `{"summary_attempts":0,"title":"Recovered"}`
+	require.NoError(t, os.WriteFile(path, []byte(local+"\n"), 0o644))
+	mustRunGit(t, repo, "stash", "push", "-m", "autostash")
+	require.NoError(t, os.WriteFile(path, []byte(`{"title":"Recovered"}`+"\n"), 0o644))
+	mustRunGit(t, repo, "commit", "-am", "remote repair")
+	out, err := runIsolatedGit(t, repo, "stash", "apply")
+	require.Error(t, err, out)
+	op, _ := detectInProgressGitOp(repo)
+	require.Empty(t, op)
+	status, err := runIsolatedGit(t, repo, "status", "--porcelain=v1")
+	require.NoError(t, err)
+	result := fixLedgerUnmergedPaths(repo, parseUnmergedPaths(status))
+	require.True(t, result.passed, "%+v", result)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.JSONEq(t, local, string(data))
+	out, err = runIsolatedGit(t, repo, "ls-files", "--unmerged")
+	require.NoError(t, err)
+	assert.Empty(t, out)
+}
+
 // TestFixLedgerUnmergedPaths_NoStateMarkers_NoAutoResolve covers the rare
 // case where unmerged paths exist with no MERGE_HEAD / rebase / cherry-pick
 // in progress. This happens when conflicts are staged manually via

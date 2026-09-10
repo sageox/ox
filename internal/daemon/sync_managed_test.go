@@ -363,3 +363,84 @@ func TestSessionMetaConflict_AutoResolvesUnderProductionRules(t *testing.T) {
 	require.False(t, gitutil.IsRebaseInProgress(localDir),
 		"no rebase may be left in progress after a successful reconcile")
 }
+
+// A successful pull can leave autostash conflicts without a rebase in progress.
+// Both the first pull and later cycles must recover agreeing metadata, while
+// preserving genuinely different values for manual resolution.
+func TestPullManagedRepo_AutostashConflicts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git pull and autostash")
+	}
+	for _, tc := range []struct {
+		name        string
+		preexisting bool
+		localTitle  string
+		wantError   bool
+	}{
+		{"new agreeing conflict", false, "Recovered", false},
+		{"existing agreeing conflict", true, "Recovered", false},
+		{"new differing conflict", false, "Local title", true},
+		{"existing differing conflict", true, "Local title", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateCredentials(t)
+			bare, writer := initBareRepo(t, "autostash")
+			const rel = "sessions/test/meta.json"
+			require.NoError(t, os.MkdirAll(filepath.Join(writer, "sessions/test"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(writer, rel), []byte(`{"session_id":"s","title":""}`+"\n"), 0o644))
+			gitInDir(t, writer, "add", "--sparse", rel)
+			gitInDir(t, writer, "commit", "-m", "seed")
+			gitInDir(t, writer, "push", "origin", "main")
+			local := filepath.Join(t.TempDir(), "local")
+			gitInDir(t, writer, "clone", bare, local)
+			gitConfig(t, local)
+			require.NoError(t, os.WriteFile(filepath.Join(writer, rel), []byte(`{"session_id":"s","title":"Recovered"}`+"\n"), 0o644))
+			gitInDir(t, writer, "commit", "-am", "remote title repair")
+			gitInDir(t, writer, "push", "origin", "main")
+			localMeta := `{"title":"` + tc.localTitle + `","session_id":"s","summary_attempts":0,"validation_error":""}` + "\n"
+			require.NoError(t, os.WriteFile(filepath.Join(local, rel), []byte(localMeta), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(local, "unrelated.txt"), []byte("keep me"), 0o644))
+			if tc.preexisting {
+				out, err := runGitOut(t, local, "pull", "--rebase", "--autostash", "--quiet")
+				require.NoError(t, err, out)
+				require.Contains(t, out, "Applying autostash resulted in conflicts")
+			}
+			s := newTestScheduler(t.TempDir())
+			opts := ManagedRepoPullOpts{RepoPath: local, RepoName: "ledger", ResolveRules: ledger.DefaultResolveRules, Logger: discardLogger()}
+			result := s.pullManagedRepo(context.Background(), opts)
+			assert.False(t, gitutil.IsRebaseInProgress(local))
+			conflicts, err := runGitOut(t, local, "ls-files", "--unmerged")
+			require.NoError(t, err)
+			if tc.wantError {
+				require.Error(t, result.Err)
+				require.NotNil(t, result.Issue)
+				assert.Equal(t, IssueTypeMergeConflict, result.Issue.Type)
+				assert.NotEmpty(t, conflicts)
+			} else {
+				require.NoError(t, result.Err)
+				require.Nil(t, result.Issue)
+				assert.True(t, result.AutoResolved)
+				assert.Empty(t, conflicts)
+				meta, err := os.ReadFile(filepath.Join(local, rel))
+				require.NoError(t, err)
+				assert.JSONEq(t, localMeta, string(meta))
+				// Recovery must allow a later remote update to arrive too.
+				require.NoError(t, os.WriteFile(filepath.Join(writer, "next.txt"), []byte("next pull"), 0o644))
+				gitInDir(t, writer, "add", "next.txt")
+				gitInDir(t, writer, "commit", "-m", "next remote update")
+				gitInDir(t, writer, "push", "origin", "main")
+				old := time.Now().Add(-time.Hour)
+				require.NoError(t, os.Chtimes(filepath.Join(local, ".git/FETCH_HEAD"), old, old))
+				result = newTestScheduler(t.TempDir()).pullManagedRepo(context.Background(), opts)
+				require.NoError(t, result.Err)
+				assert.FileExists(t, filepath.Join(local, "next.txt"))
+			}
+			stash, err := runGitOut(t, local, "stash", "list")
+			require.NoError(t, err)
+			assert.Contains(t, stash, "autostash", "retain the original local changes")
+			unrelated, err := os.ReadFile(filepath.Join(local, "unrelated.txt"))
+			require.NoError(t, err)
+			assert.Equal(t, "keep me", string(unrelated))
+		})
+	}
+}

@@ -705,17 +705,30 @@ func parseUnmergedPaths(porcelain string) []unmergedPath {
 // over `git reset` / `checkout --theirs` because they're reversible — they
 // only undo the operation in flight, never user-authored commits.
 //
-// If no in-progress operation can be identified (rare — usually means the
-// conflict was staged manually via `git update-index --cacheinfo`), the
-// situation is surfaced for human attention rather than guessed at.
+// Without an in-progress operation, only agreeing autostash metadata is
+// repaired automatically. Other conflicts are surfaced for manual resolution.
 func fixLedgerUnmergedPaths(ledgerPath string, unmerged []unmergedPath) checkResult {
 	const name = "Ledger unmerged paths"
 
 	op, hint := detectInProgressGitOp(ledgerPath)
 	if op == "" {
-		// No state markers — likely a manually-staged conflict, OR
-		// detectInProgressGitOp could not inspect .git (permission/IO).
-		// DO NOT auto-resolve; the right action depends on user intent.
+		// Autostash conflicts have no in-progress operation to abort. Repair
+		// agreeing metadata under the same lock as daemon pulls; never choose
+		// a side when the data differs or the worktree has further edits.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		var resolved bool
+		resolveErr := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+			var err error
+			resolved, err = gitutil.ResolveAutostashConflicts(ctx, ledgerPath, ledger.AutoResolvePrefixes, nil)
+			return err
+		})
+		if resolveErr == nil {
+			if resolved {
+				return PassedCheck("Ledger unmerged paths", "resolved agreeing session metadata from autostash")
+			}
+			return PassedCheck("Ledger unmerged paths", "conflicts already resolved")
+		}
 		sample := unmerged[0].Path
 		if len(unmerged) > 1 {
 			sample = fmt.Sprintf("%s (+%d more)", sample, len(unmerged)-1)
@@ -727,9 +740,10 @@ func fixLedgerUnmergedPaths(ledgerPath string, unmerged []unmergedPath) checkRes
 		if hint != "" {
 			prefix = fmt.Sprintf("could not inspect .git for in-progress operation (%s).\n       ", hint)
 		}
+		prefix += fmt.Sprintf("Automatic recovery could not resolve the conflict: %s.\n       ", resolveErr)
 		detail := prefix + fmt.Sprintf(
 			"%d unmerged file(s) but no merge/rebase/cherry-pick in progress (%s).\n       "+
-				"This usually means the conflict was staged manually. Resolve by hand:\n       "+
+				"This can happen when restoring an autostash or after manual edits. Resolve by hand:\n       "+
 				"  cd %s\n       "+
 				"  git status                       # inspect the conflict\n       "+
 				"  git checkout --ours <file>       # or --theirs, depending on intent\n       "+
