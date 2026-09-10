@@ -440,7 +440,10 @@ func TestPullManagedRepo_AutostashConflicts(t *testing.T) {
 			if tc.preexisting {
 				out, err := runGitOut(t, local, "pull", "--rebase", "--autostash", "--quiet")
 				require.NoError(t, err, out)
-				require.Contains(t, out, "Applying autostash resulted in conflicts")
+				require.False(t, gitutil.IsRebaseInProgress(local))
+				unmerged, err := runGitOut(t, local, "ls-files", "--unmerged")
+				require.NoError(t, err)
+				require.NotEmpty(t, unmerged, "successful pull must leave an autostash conflict")
 			}
 			s := newTestScheduler(t.TempDir())
 			opts := ManagedRepoPullOpts{RepoPath: local, RepoName: "ledger", ResolveRules: ledger.DefaultResolveRules, Logger: discardLogger()}
