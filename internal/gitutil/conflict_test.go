@@ -89,6 +89,8 @@ func TestAutostashRecoveryPreservesData(t *testing.T) {
 		extraConflict  bool
 		marker         string
 		stagingFailure bool
+		missingFile    bool
+		missingBlob    bool
 		wantError      bool
 	}{
 		{name: "retain all fields and large IDs", local: local},
@@ -106,6 +108,8 @@ func TestAutostashRecoveryPreservesData(t *testing.T) {
 		{name: "cherry-pick in progress", local: local, marker: "CHERRY_PICK_HEAD", wantError: true},
 		{name: "revert in progress", local: local, marker: "REVERT_HEAD", wantError: true},
 		{name: "resume after staging failure", local: local, stagingFailure: true},
+		{name: "missing conflicted file", local: local, missingFile: true, wantError: true},
+		{name: "missing conflict blob", local: local, missingBlob: true, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := t.TempDir()
@@ -164,6 +168,13 @@ func TestAutostashRecoveryPreservesData(t *testing.T) {
 			if tc.stagingFailure {
 				require.NoError(t, os.WriteFile(filepath.Join(repo, ".git/index.lock"), nil, 0o600))
 			}
+			if tc.missingFile {
+				require.NoError(t, os.Remove(path))
+			}
+			if tc.missingBlob {
+				oid := gitInRepo(t, repo, "rev-parse", ":1:"+rel)
+				require.NoError(t, os.Remove(filepath.Join(repo, ".git/objects", oid[:2], oid[2:])))
+			}
 			var resolved bool
 			err = WithRepoLock(context.Background(), repo, func() error {
 				var err error
@@ -190,7 +201,17 @@ func TestAutostashRecoveryPreservesData(t *testing.T) {
 			if tc.wantError {
 				require.Error(t, err)
 				assert.False(t, resolved)
+				if tc.missingFile {
+					assert.ErrorContains(t, err, "missing or not a regular file")
+				}
+				if tc.missingBlob {
+					assert.ErrorContains(t, err, "read conflict stage")
+				}
 				for file, original := range before {
+					if tc.missingFile && file == path {
+						assert.NoFileExists(t, file, "recovery must not recreate a removed file")
+						continue
+					}
 					after, err := os.ReadFile(file)
 					require.NoError(t, err)
 					assert.Equal(t, original, after, file)
@@ -209,6 +230,51 @@ func TestAutostashRecoveryPreservesData(t *testing.T) {
 				assert.Equal(t, string(after), gitInRepo(t, repo, "show", ":"+rel)+"\n")
 			}
 			assert.Equal(t, stash, gitInRepo(t, repo, "rev-parse", "refs/stash"))
+		})
+	}
+}
+
+// An unreadable index must report failure; an already-resolved index is a no-op.
+// Neither state may rewrite metadata or the index while trying to recover it.
+func TestAutostashRecoveryWithoutReadableConflicts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index states")
+	}
+	for _, corrupt := range []bool{false, true} {
+		name := "clean index"
+		if corrupt {
+			name = "corrupt index"
+		}
+		t.Run(name, func(t *testing.T) {
+			repo := t.TempDir()
+			gitInRepo(t, repo, "init", "-b", "main")
+			path := filepath.Join(repo, "sessions/test/meta.json")
+			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+			original := []byte(`{"title":"Keep me"}` + "\n")
+			require.NoError(t, os.WriteFile(path, original, 0o644))
+			gitInRepo(t, repo, "add", "--sparse", ".")
+			indexPath := filepath.Join(repo, ".git/index")
+			if corrupt {
+				require.NoError(t, os.WriteFile(indexPath, []byte("invalid index"), 0o644))
+			}
+			index, err := os.ReadFile(indexPath)
+			require.NoError(t, err)
+			err = WithRepoLock(context.Background(), repo, func() error {
+				resolved, err := ResolveAutostashConflicts(context.Background(), repo, []string{"sessions/"}, nil)
+				assert.False(t, resolved)
+				return err
+			})
+			if corrupt {
+				require.ErrorContains(t, err, "inspect unmerged index")
+			} else {
+				require.NoError(t, err)
+			}
+			after, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, original, after)
+			afterIndex, err := os.ReadFile(indexPath)
+			require.NoError(t, err)
+			assert.Equal(t, index, afterIndex)
 		})
 	}
 }
