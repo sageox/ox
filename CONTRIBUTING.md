@@ -4,6 +4,32 @@ Pull requests are welcome from anyone. So are issues — and if you'd rather des
 
 A note on how we review: when AI agents can produce large, plausible-looking changes, quality and security come from scrutinizing the inputs to the development process. Expect PRs to be reviewed on that basis. Small, focused changes with tests get merged faster than large ones, and a PR that explains *why* is easier to trust than one that only shows *what*.
 
+## Automated review
+
+Two bots read every PR here, and **neither one blocks a merge** — they are
+readers, not gates. A maintainer still makes the call.
+
+- **CodeRabbit** reviews when the PR opens and again on every push.
+- **Greptile** reviews when the PR opens, and then **not again until someone
+  asks**. That is deliberate: re-reviewing every intermediate push spends a
+  shared review budget on code that is about to change anyway, and the budget
+  is org-wide — a repo that burns it degrades review everywhere.
+
+So when you have pushed your fixes and CI is green, **ask Greptile for one
+more read of the final state** — comment `@greptileai` on the PR, or press
+**"Re-trigger Greptile"** in its comment footer. That gives the PR two good
+reviews (as opened, as merging) instead of a dozen partial ones.
+
+Configuration lives in [`greptile.json`](greptile.json) and
+[`.coderabbit.yaml`](.coderabbit.yaml). Greptile is told to weight session
+capture, LFS upload, and ledger paths above everything else, because a silent
+defect there destroys work a user cannot recreate. It is also told to skip
+generated files and to leave formatting alone — gofmt, goimports, and
+golangci-lint already own that.
+
+If a PR is large and mechanical (a rename, a codegen refresh) and a bot review
+would be pure noise, a maintainer can label it `no-greptile` to skip it.
+
 ## Codex setup
 
 This repo includes shared SageOx hooks in [`.codex/hooks.json`](.codex/hooks.json)
