@@ -48,6 +48,20 @@ func notifySessionStartedAsync(projectRoot string, state *session.RecordingState
 		}
 		return
 	}
+
+	// session_publishing: manual promises that nothing about this session
+	// reaches the cloud until the user explicitly uploads it. This POST would
+	// send session_id, repo_id, session_name, agent id/type, and the BRANCH
+	// NAME — exactly the kind of implicit publish manual mode exists to
+	// prevent. Deliberately checked AFTER the no-user-turn branch above and
+	// left at "deferred" (not flipped to "pending"/"confirmed"): every retry
+	// site (prime, doctor, the per-turn draft path) re-runs this same check,
+	// so switching back to auto mid-session, or an explicit later upload,
+	// registers normally on the next attempt rather than being wedged.
+	if config.GetSessionPublishing(projectRoot) == config.SessionPublishingManual {
+		slog.Debug("session registration suppressed: session_publishing is manual", "session_id", state.SessionID)
+		return
+	}
 	err := runSessionSignal("started", func(client *api.RepoClient, repoID string) error {
 		return client.NotifySessionStarted(api.SessionStartedNotification{
 			SessionID:   state.SessionID,
@@ -75,8 +89,20 @@ func notifySessionStartedAsync(projectRoot string, state *session.RecordingState
 // notifySessionAbortedAsync flips a registered recording to "discarded" so
 // its /c/ page stops claiming "in progress" and the server drops pending
 // PR-link repair tasks. Same fire-and-forget contract as started.
-func notifySessionAbortedAsync(projectRoot, sessionID string) {
+// everRegistered reports whether the server was ever told this session exists.
+// Manual publishing suppresses start-registration, so a purely manual session is
+// unknown to the server and an abort signal would be the FIRST thing it hears
+// about it — a leak of exactly the kind manual mode promises to prevent.
+//
+// A session that DID register (started under auto, flipped to manual later) must
+// still be tombstoned: leaving a stale "in progress" /c/ page up, for a session
+// the user explicitly discarded, is a worse privacy outcome than the two opaque
+// ids the abort call carries.
+func notifySessionAbortedAsync(projectRoot, sessionID string, everRegistered bool) {
 	if sessionID == "" {
+		return
+	}
+	if !everRegistered {
 		return
 	}
 	_ = runSessionSignal("aborted", func(client *api.RepoClient, repoID string) error { // fire-and-forget

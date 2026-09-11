@@ -414,6 +414,10 @@ func runInit() error {
 	if initTeamFlag != "" {
 		// use explicitly provided team
 		selectedTeamID = initTeamFlag
+		// best-effort: resolve the display name so config.json's team_name
+		// isn't left empty, which degrades every downstream label to the
+		// raw team_xxx id. Never blocks or fails init.
+		selectedTeamName = teamNameForID(selectedTeamID)
 	} else {
 		// fetch teams from API to determine if selection is needed
 		teamClient := api.NewRepoClient()
@@ -437,9 +441,16 @@ func runInit() error {
 				return fmt.Errorf("team selection canceled")
 			}
 		} else if reposResp != nil && len(reposResp.TeamMembershipsFromRepos()) > 0 {
-			selectedTeamID, selectedTeamName, err = selectTeam(reposResp.TeamMembershipsFromRepos())
+			// the repo may already be bound to a team from a prior init —
+			// pre-select and mark that row so re-running ox init doesn't
+			// silently rebind it to whatever sorts first.
+			var currentTeamID string
+			if existingCfg, cfgErr := config.LoadProjectConfig(gitRoot); cfgErr == nil && existingCfg != nil {
+				currentTeamID = existingCfg.TeamID
+			}
+			selectedTeamID, selectedTeamName, err = selectTeam(reposResp.TeamMembershipsFromRepos(), currentTeamID)
 			if err != nil {
-				return fmt.Errorf("team selection canceled")
+				return fmt.Errorf("team selection canceled: %w", err)
 			}
 		} else if reposResp != nil {
 			proceed, promptErr := promptNoTeams()
@@ -2549,14 +2560,72 @@ func selectInitEndpoint() (string, bool) {
 	return selectedEp.URL, false
 }
 
+// teamNameForID best-effort resolves a team ID to its display name via the
+// API, so --team <id> doesn't leave config.json's team_name empty (every
+// downstream label then falls back to the raw team_xxx id). Returns "" on
+// any failure — this must never block or fail ox init.
+func teamNameForID(teamID string) string {
+	if teamID == "" {
+		return ""
+	}
+	token, err := auth.EnsureValidToken(300)
+	if err != nil || token == nil || token.AccessToken == "" {
+		return ""
+	}
+	client := api.NewRepoClient()
+	client.WithAuthToken(token.AccessToken)
+	reposResp, err := client.GetRepos()
+	if err != nil || reposResp == nil {
+		return ""
+	}
+	for _, team := range reposResp.TeamMembershipsFromRepos() {
+		if team.ID == teamID {
+			return team.Name
+		}
+	}
+	return ""
+}
+
+// teamSortKey returns the case-insensitive label a team sorts by: its
+// display name, falling back to its ID when unnamed. Used to make the team
+// picker's order deterministic — TeamMembershipsFromRepos falls back to
+// ranging over a Go map when the server sends no explicit teams array, which
+// would otherwise reorder the list (and its silently-accepted default row)
+// between runs.
+func teamSortKey(t api.TeamMembership) string {
+	label := t.Name
+	if label == "" {
+		label = t.ID
+	}
+	return strings.ToLower(label)
+}
+
 // selectTeam prompts the user to select a team for this repo.
 // Always shows an interactive selector, even for single-team users.
 // Includes a "Create new team" option that opens the dashboard.
-// Returns the selected team ID, team name (may be empty), or error if canceled.
-func selectTeam(teams []api.TeamMembership) (string, string, error) {
+// currentTeamID is the team this repo is already bound to (empty for a
+// fresh init) — when set, that row is pre-selected and marked "(current)"
+// so pressing Enter re-confirms the existing binding instead of silently
+// picking whatever sorts first.
+// Returns the selected team ID, team name (may be empty), or error if
+// canceled or if no interactive input was available to choose from.
+func selectTeam(teams []api.TeamMembership, currentTeamID string) (string, string, error) {
 	if len(teams) == 0 {
 		return "", "", fmt.Errorf("no teams available")
 	}
+
+	// Sort deterministically so the row Enter silently accepts never depends
+	// on map iteration order.
+	sorted := make([]api.TeamMembership, len(teams))
+	copy(sorted, teams)
+	sort.Slice(sorted, func(i, j int) bool {
+		ki, kj := teamSortKey(sorted[i]), teamSortKey(sorted[j])
+		if ki != kj {
+			return ki < kj
+		}
+		return sorted[i].ID < sorted[j].ID
+	})
+	teams = sorted
 
 	fmt.Println()
 	fmt.Println(ui.RenderCategory("Select Team"))
@@ -2567,23 +2636,39 @@ func selectTeam(teams []api.TeamMembership) (string, string, error) {
 	}
 	fmt.Println()
 
-	// build options with role indicators + "Create new team"
+	// build options with role/personal/current indicators + "Create new team"
+	defaultIdx := 0
 	options := make([]string, len(teams)+1)
 	for i, team := range teams {
-		roleIndicator := ""
+		label := team.Name
+		if label == "" {
+			label = team.ID
+		}
 		if team.Role != "" && team.Role != "member" {
-			roleIndicator = fmt.Sprintf(" (%s)", team.Role)
+			label += fmt.Sprintf("  (%s)", team.Role)
 		}
-		if team.Name != "" {
-			options[i] = fmt.Sprintf("%s%s", team.Name, roleIndicator)
-		} else {
-			options[i] = fmt.Sprintf("%s%s", team.ID, roleIndicator)
+		if team.Personal {
+			// Same "personal team" language as renderPersonalTeamRefusal
+			// (cmd/ox/invite.go) — a private, structurally single-member
+			// team that looks identical to a shared team without this.
+			label += "  (personal team)"
 		}
+		if currentTeamID != "" && team.ID == currentTeamID {
+			label += "  (current)"
+			defaultIdx = i
+		}
+		options[i] = label
 	}
 	options[len(teams)] = "+ Create new team"
 
-	selected, err := cli.SelectOne("Team:", options, 0)
+	// SelectOneRequired (not SelectOne): silently accepting defaultIdx when
+	// no one is there to answer would rebind — or bind — this repo to
+	// whichever team sorts first, with zero indication anything happened.
+	selected, err := cli.SelectOneRequired("Team:", options, defaultIdx)
 	if err != nil {
+		if errors.Is(err, cli.ErrNoInteractiveInput) {
+			return "", "", fmt.Errorf("cannot choose a team without interactive input — pass --team <id> (run 'ox team list' to see available teams)")
+		}
 		return "", "", err
 	}
 	if selected < 0 || selected >= len(options) {

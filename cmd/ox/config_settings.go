@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 
 	"github.com/sageox/ox/internal/config"
@@ -15,6 +16,13 @@ const (
 	ConfigLevelRepo    ConfigLevel = "repo"
 	ConfigLevelTeam    ConfigLevel = "team"
 	ConfigLevelDefault ConfigLevel = "default"
+	// ConfigLevelEnv is display-only: it identifies an env-var override in
+	// ConfigValue.Source (e.g. OX_SESSION_PUBLISHING) so 'ox config get'
+	// shows the value actually in effect. It is not a storage location —
+	// there is nothing to set/unset "at env level" — so it never appears in
+	// ConfigSetting.Levels and SetConfigValue/UnsetConfigValue don't handle
+	// it.
+	ConfigLevelEnv ConfigLevel = "env"
 )
 
 // ConfigSetting defines a configurable setting.
@@ -26,6 +34,18 @@ type ConfigSetting struct {
 	ValidValues     []string      // allowed values (empty = any string)
 	Default         string        // default value
 	Levels          []ConfigLevel // which levels support this setting
+
+	// Deprecated marks a setting kept only for backward compatibility: it
+	// remains resolvable and settable (existing config files and scripts
+	// must not break), but is not wired to any behavior. Never wire new
+	// behavior to a deprecated setting — remove the deprecation instead.
+	Deprecated bool
+	// DeprecationNotice is the honest, specific explanation surfaced by
+	// 'ox config get/set/list' for a Deprecated setting: it must say the
+	// setting never took effect (not merely that it's "no longer used"),
+	// and name the setting that actually does the job. Empty unless
+	// Deprecated is true.
+	DeprecationNotice string
 }
 
 // ConfigValue represents a resolved config value with its source.
@@ -34,6 +54,7 @@ type ConfigValue struct {
 	Value   string      `json:"value"`
 	Source  ConfigLevel `json:"source"`
 	Default string      `json:"default,omitempty"`
+	EnvVal  string      `json:"env_value,omitempty"` // highest priority; only populated for session_publishing/session_recording today (extending to every setting is tracked separately as ox-8d4t)
 	UserVal string      `json:"user_value,omitempty"`
 	RepoVal string      `json:"repo_value,omitempty"`
 	TeamVal string      `json:"team_value,omitempty"`
@@ -58,6 +79,33 @@ conventions and knowledge that apply to ALL repos your team owns.`,
 		Category:    "Sessions",
 		ValidValues: []string{"disabled", "manual", "auto"},
 		Default:     "auto",
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo, ConfigLevelTeam},
+	},
+	{
+		Key:         "session_publishing",
+		Description: "Whether a recorded session is published to the ledger, or held locally until you upload it explicitly.",
+		LongDescription: `Controls whether a recorded session is published to the ledger, or held
+locally until you upload it explicitly.
+
+  auto   - Publish the session to this repo's ledger on session stop (default).
+  manual - Hold the session locally only: no transcript upload, no mid-session
+           draft placeholder, and no session-started notice to the server.
+           Run 'ox session upload' to publish it explicitly. Because the
+           server never hears about a manual-mode session, any /c/<id> link
+           for it will 404 — surfaces that would print one stay silent
+           instead in manual mode.
+
+Precedence (highest wins): OX_SESSION_PUBLISHING env var > user config >
+this repo's .sageox/config.json > team config > default(auto). User config
+deliberately beats repo and team, so you can always decline to publish
+regardless of what the repo or team says.
+
+Note: telemetry, OTLP tracing, and the friction-feedback channel are
+separate switches with their own defaults — this setting does not affect
+them.`,
+		Category:    "Sessions",
+		ValidValues: config.ValidSessionPublishingModes,
+		Default:     config.SessionPublishingAuto,
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo, ConfigLevelTeam},
 	},
 	{
@@ -128,35 +176,43 @@ once you're familiar with the tool.`,
 	},
 	{
 		Key:         "context_git.auto_commit",
-		Description: "Auto-save session changes",
-		LongDescription: `Controls automatic saving of session data to the repo's ledger.
+		Description: "DEPRECATED — never had any effect; use session_publishing",
+		LongDescription: `DEPRECATED: this setting has never had any effect. Sessions were committed
+to the ledger regardless of what it was set to — it was never wired to any
+behavior.
 
-When enabled, sessions are automatically saved to the ledger when
-they end. This ensures no work is lost if you forget to save.
+To hold sessions locally until you publish them explicitly, use:
+    ox config set session_publishing manual
 
-When disabled, you must manually save sessions.
-
-Note: The ledger is specific to this repository. Each repo where
-'ox init' was run has its own ledger for session history.`,
-		Category:    "Sessions",
-		ValidValues: []string{"on", "off"},
-		Default:     "on",
-		Levels:      []ConfigLevel{ConfigLevelUser},
+The value is still accepted and stored, so 'ox config set/get/unset' keep
+working for scripts and older habits, but it does not — and never did —
+control anything. See bead ox-6p5y.11.`,
+		Category:          "Sessions",
+		ValidValues:       []string{"on", "off"},
+		Default:           "on",
+		Levels:            []ConfigLevel{ConfigLevelUser},
+		Deprecated:        true,
+		DeprecationNotice: "context_git.auto_commit has never had any effect — sessions were committed regardless of this setting.\nTo hold sessions locally until you publish them explicitly, use:\n    ox config set session_publishing manual",
 	},
 	{
 		Key:         "context_git.auto_push",
-		Description: "Auto-sync sessions to ledger",
-		LongDescription: `Controls automatic syncing of sessions to the repo's ledger.
+		Description: "DEPRECATED — never had any effect; use session_publishing",
+		LongDescription: `DEPRECATED: this setting has never had any effect. Sessions were published
+to the ledger regardless of what it was set to — it was never wired to any
+behavior.
 
-When enabled, sessions are automatically synced to the remote ledger
-after being saved locally. This completes the end-to-end session
-pipeline: record → commit → push → anti-entropy finalizes.
+To hold sessions locally until you publish them explicitly, use:
+    ox config set session_publishing manual
 
-When disabled, sessions stay local until you manually sync them.`,
-		Category:    "Sessions",
-		ValidValues: []string{"on", "off"},
-		Default:     "on",
-		Levels:      []ConfigLevel{ConfigLevelUser},
+The value is still accepted and stored, so 'ox config set/get/unset' keep
+working for scripts and older habits, but it does not — and never did —
+control anything. See bead ox-6p5y.11.`,
+		Category:          "Sessions",
+		ValidValues:       []string{"on", "off"},
+		Default:           "on",
+		Levels:            []ConfigLevel{ConfigLevelUser},
+		Deprecated:        true,
+		DeprecationNotice: "context_git.auto_push has never had any effect — sessions were published regardless of this setting.\nTo hold sessions locally until you publish them explicitly, use:\n    ox config set session_publishing manual",
 	},
 	{
 		Key:         "view_format",
@@ -529,6 +585,12 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 	// resolve based on key
 	switch key {
 	case "session_recording":
+		// OX_SESSION_RECORDING beats every stored layer at runtime
+		// (config.ResolveSessionRecording) — display must agree, or 'ox
+		// config get session_recording' shows a value that isn't in effect.
+		if envMode := os.Getenv(config.EnvSessionRecording); envMode != "" {
+			cv.EnvVal = config.NormalizeSessionRecording(envMode)
+		}
 		if userCfg != nil && userCfg.Sessions != nil {
 			mode := userCfg.Sessions.GetMode()
 			if mode != "" && mode != "none" {
@@ -540,6 +602,48 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 		}
 		if teamCfg != nil && teamCfg.SessionRecording != "" {
 			cv.TeamVal = config.NormalizeSessionRecording(teamCfg.SessionRecording)
+		}
+
+	case "session_publishing":
+		// OX_SESSION_PUBLISHING beats every stored layer at runtime
+		// (config.ResolveSessionPublishing) — display must agree, since this
+		// is exactly the privacy control a coworker runs 'ox config get' on
+		// to check their posture.
+		if envMode := os.Getenv(config.EnvSessionPublishing); envMode != "" {
+			cv.EnvVal = config.NormalizeSessionPublishing(envMode)
+		}
+		if userCfg != nil && userCfg.SessionPublishing != "" {
+			cv.UserVal = config.NormalizeSessionPublishing(userCfg.SessionPublishing)
+		}
+		if repoCfg != nil && repoCfg.SessionPublishing != "" {
+			cv.RepoVal = config.NormalizeSessionPublishing(repoCfg.SessionPublishing)
+		}
+		if teamCfg != nil && teamCfg.SessionPublishing != "" {
+			cv.TeamVal = config.NormalizeSessionPublishing(teamCfg.SessionPublishing)
+		}
+
+	case "context_git.auto_commit":
+		// DEPRECATED (bead ox-6p5y.11) — never wired to any behavior. Kept
+		// resolvable only so existing config files/scripts don't break; see
+		// the catalog entry's DeprecationNotice for the user-facing message.
+		if userCfg != nil && userCfg.ContextGit != nil && userCfg.ContextGit.AutoCommit != nil {
+			if *userCfg.ContextGit.AutoCommit {
+				cv.UserVal = "on"
+			} else {
+				cv.UserVal = "off"
+			}
+		}
+
+	case "context_git.auto_push":
+		// DEPRECATED (bead ox-6p5y.11) — never wired to any behavior. Kept
+		// resolvable only so existing config files/scripts don't break; see
+		// the catalog entry's DeprecationNotice for the user-facing message.
+		if userCfg != nil && userCfg.ContextGit != nil && userCfg.ContextGit.AutoPush != nil {
+			if *userCfg.ContextGit.AutoPush {
+				cv.UserVal = "on"
+			} else {
+				cv.UserVal = "off"
+			}
 		}
 
 	case "murmur_send":
@@ -580,24 +684,6 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			if userCfg.AreTipsEnabled() {
 				cv.UserVal = "on"
 			} else if userCfg.TipsEnabled != nil {
-				cv.UserVal = "off"
-			}
-		}
-
-	case "context_git.auto_commit":
-		if userCfg != nil && userCfg.ContextGit != nil && userCfg.ContextGit.AutoCommit != nil {
-			if *userCfg.ContextGit.AutoCommit {
-				cv.UserVal = "on"
-			} else {
-				cv.UserVal = "off"
-			}
-		}
-
-	case "context_git.auto_push":
-		if userCfg != nil && userCfg.ContextGit != nil && userCfg.ContextGit.AutoPush != nil {
-			if *userCfg.ContextGit.AutoPush {
-				cv.UserVal = "on"
-			} else {
 				cv.UserVal = "off"
 			}
 		}
@@ -737,8 +823,13 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 
 	}
 
-	// determine effective value and source (User > Repo > Team > Default)
-	if cv.UserVal != "" {
+	// determine effective value and source (Env > User > Repo > Team > Default).
+	// EnvVal is only ever populated for session_publishing/session_recording
+	// (see their cases above) — every other setting falls through untouched.
+	if cv.EnvVal != "" {
+		cv.Value = cv.EnvVal
+		cv.Source = ConfigLevelEnv
+	} else if cv.UserVal != "" {
 		cv.Value = cv.UserVal
 		cv.Source = ConfigLevelUser
 	} else if cv.RepoVal != "" {
@@ -849,15 +940,13 @@ func setUserConfig(key, value string) error {
 		}
 		cfg.Sessions.Mode = value
 
-	case "telemetry":
-		enabled := value == "on"
-		cfg.TelemetryEnabled = &enabled
-
-	case "tips":
-		enabled := value == "on"
-		cfg.TipsEnabled = &enabled
+	case "session_publishing":
+		cfg.SessionPublishing = value
 
 	case "context_git.auto_commit":
+		// DEPRECATED (bead ox-6p5y.11) — accepted and stored for backward
+		// compatibility only. Never wire this to behavior; see
+		// SetConfigValue's deprecation-notice print and session_publishing.
 		if cfg.ContextGit == nil {
 			cfg.ContextGit = &config.ContextGitConfig{}
 		}
@@ -865,11 +954,22 @@ func setUserConfig(key, value string) error {
 		cfg.ContextGit.AutoCommit = &enabled
 
 	case "context_git.auto_push":
+		// DEPRECATED (bead ox-6p5y.11) — accepted and stored for backward
+		// compatibility only. Never wire this to behavior; see
+		// SetConfigValue's deprecation-notice print and session_publishing.
 		if cfg.ContextGit == nil {
 			cfg.ContextGit = &config.ContextGitConfig{}
 		}
 		enabled := value == "on"
 		cfg.ContextGit.AutoPush = &enabled
+
+	case "telemetry":
+		enabled := value == "on"
+		cfg.TelemetryEnabled = &enabled
+
+	case "tips":
+		enabled := value == "on"
+		cfg.TipsEnabled = &enabled
 
 	case "view_format":
 		cfg.ViewFormat = value
@@ -999,6 +1099,9 @@ func setRepoConfig(key, value, projectRoot string) error {
 	case "session_recording":
 		cfg.SessionRecording = value
 
+	case "session_publishing":
+		cfg.SessionPublishing = value
+
 	case "murmur_send":
 		cfg.SetMurmuring(value)
 
@@ -1110,6 +1213,9 @@ func setTeamConfig(key, value, projectRoot string) error {
 	case "session_recording":
 		cfg.SessionRecording = value
 
+	case "session_publishing":
+		cfg.SessionPublishing = value
+
 	case "pr_visuals.rich":
 		if cfg.PRVisuals == nil {
 			cfg.PRVisuals = &config.PRVisualsConfig{}
@@ -1153,11 +1259,8 @@ func unsetUserConfig(key string) error {
 			}
 		}
 
-	case "telemetry":
-		cfg.TelemetryEnabled = nil
-
-	case "tips":
-		cfg.TipsEnabled = nil
+	case "session_publishing":
+		cfg.SessionPublishing = ""
 
 	case "context_git.auto_commit":
 		if cfg.ContextGit != nil {
@@ -1174,6 +1277,12 @@ func unsetUserConfig(key string) error {
 				cfg.ContextGit = nil
 			}
 		}
+
+	case "telemetry":
+		cfg.TelemetryEnabled = nil
+
+	case "tips":
+		cfg.TipsEnabled = nil
 
 	case "view_format":
 		cfg.ViewFormat = ""
@@ -1300,6 +1409,9 @@ func unsetRepoConfig(key, projectRoot string) error {
 	case "session_recording":
 		cfg.SessionRecording = ""
 
+	case "session_publishing":
+		cfg.SessionPublishing = ""
+
 	case "murmur_send":
 		cfg.SetMurmuring("")
 
@@ -1418,6 +1530,9 @@ func unsetTeamConfig(key, projectRoot string) error {
 	switch key {
 	case "session_recording":
 		cfg.SessionRecording = ""
+
+	case "session_publishing":
+		cfg.SessionPublishing = ""
 
 	case "pr_visuals.rich":
 		if cfg.PRVisuals != nil {

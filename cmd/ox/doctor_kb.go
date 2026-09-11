@@ -534,7 +534,7 @@ func checkKBStaleSync(fix bool) checkResult {
 	defer syncCancel()
 	if syncErr := kbHookSync()(syncCtx); syncErr != nil {
 		kbHookLogger().Warn("kb_doctor stale-sync autofix failed", "error", syncErr, "stale", len(stale))
-		return WarningCheck(name, msg, fmt.Sprintf("Auto-fix hint: %v", syncErr))
+		return WarningCheck(name, msg, kbAutoFixHint(syncErr))
 	}
 
 	// Recheck: a synchronous RequestSync should have written fresh meta.json
@@ -605,4 +605,38 @@ func runKBChecks(opts doctorOptions) []checkResult {
 		}(fn.name, fn.run)
 	}
 	return results
+}
+
+// kbAutoFixHint renders the detail line for a knowledge-bubble autofix that
+// failed.
+//
+// Two failure shapes reach here and both used to produce unusable output. A
+// daemon error that formats to an empty string rendered as a bare
+// "Auto-fix hint: " — a label with nothing after it, which reads as a bug in ox
+// rather than as a report about the daemon. And a transport-level failure
+// surfaced raw ("i/o timeout" on a socket path), which is true but leaves the
+// reader with no idea what to do.
+//
+// Both actually mean the same thing to a user: the daemon did not answer. So
+// say that, and name the command that shows why.
+func kbAutoFixHint(err error) string {
+	const nextStep = "The daemon did not complete the sync. Check it with:\n" +
+		"       ox daemon status"
+
+	if err == nil {
+		return nextStep
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return nextStep
+	}
+	// A timeout or a closed socket is a daemon-liveness problem, not something
+	// the raw transport error helps anyone act on.
+	if strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "no such file or directory") {
+		return fmt.Sprintf("%s\n       (%s)", nextStep, msg)
+	}
+	return fmt.Sprintf("Auto-fix hint: %s", msg)
 }

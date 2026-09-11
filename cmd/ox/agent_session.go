@@ -630,20 +630,20 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// output format selection (priority: review > text > json default)
 	if cfg.Review {
 		// security audit mode: human summary first, then JSON
-		outputTextSummary(state, duration, processResult)
+		outputTextSummary(projectRoot, state, duration, processResult)
 		fmt.Println()
 		fmt.Println("--- Machine Output ---")
-		return outputSessionStopJSON(inst, state, duration, processResult, timing)
+		return outputSessionStopJSON(projectRoot, inst, state, duration, processResult, timing)
 	}
 
 	if cfg.Text {
 		// human-readable text output
-		outputTextSummary(state, duration, processResult)
+		outputTextSummary(projectRoot, state, duration, processResult)
 		return nil
 	}
 
 	// default: JSON output
-	return outputSessionStopJSON(inst, state, duration, processResult, timing)
+	return outputSessionStopJSON(projectRoot, inst, state, duration, processResult, timing)
 }
 
 // sessionPathVariants returns alternate path forms that may produce different
@@ -792,7 +792,7 @@ func recordSessionObservation(projectRoot string, result *agentSessionResult, du
 }
 
 // outputTextSummary renders the human-readable text summary for session stop.
-func outputTextSummary(state *session.RecordingState, duration string, processResult *agentSessionResult) {
+func outputTextSummary(projectRoot string, state *session.RecordingState, duration string, processResult *agentSessionResult) {
 	if state.Title != "" {
 		cli.PrintSuccess(fmt.Sprintf("Recording stopped: %q", state.Title))
 	} else {
@@ -824,6 +824,21 @@ func outputTextSummary(state *session.RecordingState, duration string, processRe
 			}
 		}
 
+		// Where did this session go? Without this, a coworker who recorded
+		// successfully has no way to discover a wrong-team mismatch or find
+		// the session's durable URL — see sessionStopLocation.
+		loc := sessionStopLocation(projectRoot, state)
+		if loc.TeamName != "" || loc.TeamID != "" {
+			teamLabel := loc.TeamName
+			if teamLabel == "" {
+				teamLabel = loc.TeamID
+			}
+			fmt.Printf("  %-13s%s / %s\n", "Recorded to", teamLabel, loc.RepoDisplayName)
+		}
+		if loc.SessionURL != "" {
+			fmt.Printf("  %-13s%s\n", "View at", loc.SessionURL)
+		}
+
 		if processResult.SecretsRedacted > 0 {
 			fmt.Printf("\n  Redacted: %d secrets\n", processResult.SecretsRedacted)
 		}
@@ -833,8 +848,40 @@ func outputTextSummary(state *session.RecordingState, duration string, processRe
 	}
 }
 
+// sessionStopLocationInfo carries where a stopped session landed, for
+// rendering in both the human text summary and the JSON StopOutput
+// (contract D8). Fields are independently optional: a caller must check
+// each before using it rather than assuming they arrive together.
+type sessionStopLocationInfo struct {
+	TeamID          string
+	TeamName        string
+	RepoID          string
+	RepoDisplayName string
+	SessionURL      string // durable <endpoint>/c/<ses_id> link; "" when unavailable
+}
+
+// sessionStopLocation resolves the team/repo/URL a session was recorded
+// under. SessionURL is "" when attribution is off or the session's
+// server-side registration is still pending (see sessionLinkOutputs) —
+// callers must omit rather than print an empty or half-built URL.
+func sessionStopLocation(projectRoot string, state *session.RecordingState) sessionStopLocationInfo {
+	var info sessionStopLocationInfo
+	info.RepoDisplayName = filepath.Base(projectRoot)
+
+	projCfg, _ := config.LoadProjectConfig(projectRoot)
+	if projCfg != nil {
+		info.TeamID = projCfg.TeamID
+		info.TeamName = projCfg.TeamName
+		info.RepoID = projCfg.RepoID
+	}
+
+	attribution := loadResolvedAttribution()
+	info.SessionURL, _ = sessionLinkOutputs(projCfg, state, attribution.Session)
+	return info
+}
+
 // outputSessionStopJSON renders JSON output for session stop.
-func outputSessionStopJSON(inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, timing map[string]int64) error {
+func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, timing map[string]int64) error {
 	output := sessionStopOutput{
 		Success:  true,
 		Type:     "session_stop",
@@ -847,6 +894,11 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 	if state.Title != "" {
 		output.Title = state.Title
 	}
+	loc := sessionStopLocation(projectRoot, state)
+	output.SessionURL = loc.SessionURL
+	output.TeamID = loc.TeamID
+	output.TeamName = loc.TeamName
+	output.RepoID = loc.RepoID
 	if processResult != nil {
 		output.RawPath = processResult.RawPath
 		output.SummaryMDPath = processResult.SummaryMDPath

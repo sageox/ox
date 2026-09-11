@@ -399,6 +399,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 	var cloudRepos *api.ReposResponse
 	var cloudLedgerURL string
 	var cloudTeamContexts []api.RepoInfo
+	var cloudReposErr error
 
 	// use project endpoint for auth check and API calls (not global default)
 	// this ensures we query the correct endpoint when logged into multiple
@@ -409,8 +410,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 	var ledgerStatusErr error
 	var userEmail string
 
-	// repo detail for visibility/access info (works for both members and non-members)
+	// repo detail for visibility/access info (works for both members and non-members).
+	// repoDetailErr is kept (not discarded) because a failed call must render
+	// as "we couldn't check" below, never as "the team isn't visible" -- those
+	// are different facts with different fixes.
 	var repoDetail *api.RepoDetailResponse
+	var repoDetailErr error
 
 	if authenticated {
 		token, err := auth.GetTokenForEndpoint(projectEndpoint)
@@ -420,12 +425,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 
 			// fetch repo detail for visibility/access info
 			if projectCfg != nil && projectCfg.RepoID != "" {
-				repoDetail, _ = client.GetRepoDetail(projectCfg.RepoID)
+				repoDetail, repoDetailErr = client.GetRepoDetail(projectCfg.RepoID)
 			}
 
 			// fetch repos for team contexts
-			cloudRepos, err = client.GetRepos()
-			if err == nil && cloudRepos != nil {
+			cloudRepos, cloudReposErr = client.GetRepos()
+			if cloudReposErr == nil && cloudRepos != nil {
 				// categorize cloud repos
 				for _, repo := range cloudRepos.Repos {
 					switch repo.Type {
@@ -707,7 +712,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 	// --verbose for the Other Team Contexts cards (restored under ox
 	// ADR-028) so the section stays dense by default.
 	renderedTeams := make(map[string]bool)
-	renderCloudTC := func(cloudTC api.RepoInfo, showPath bool) {
+	// renderCloudTC renders one team-context card. isRepoTeam marks the
+	// repo's OWN bound team (config.json's team_id) — the same "(this
+	// repo)" distinction `ox team list` renders — with a "(this repo)"
+	// suffix and a direct dashboard URL, so it never looks like just another
+	// entry in "Other Team Contexts" below it.
+	renderCloudTC := func(cloudTC api.RepoInfo, showPath bool, isRepoTeam bool) {
 		expectedPath := paths.TeamContextDir(cloudTC.StableID(), projectEndpoint)
 		if renderedTeams[expectedPath] {
 			return
@@ -716,7 +726,15 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 
 		b.WriteString(statusLabelStyle.Render("Team"))
 		b.WriteString(statusValueStyle.Render(cloudTC.Name))
+		if isRepoTeam {
+			b.WriteString(" " + statusMutedStyle.Render("(this repo)"))
+		}
 		b.WriteString("\n")
+		if isRepoTeam {
+			b.WriteString(statusLabelStyle.Render("  URL"))
+			b.WriteString(statusMutedStyle.Render(teamDashboardURL(projectEndpoint, cloudTC.StableID())))
+			b.WriteString("\n")
+		}
 
 		visibility := "private"
 		accessLevel := "member"
@@ -792,9 +810,9 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString("\n")
 	}
 
-	// helper: render a single detail-only team context entry (showPath as
-	// in renderCloudTC).
-	renderDetailTC := func(detailTC api.RepoDetailTeamContext, showPath bool) {
+	// helper: render a single detail-only team context entry (showPath and
+	// isRepoTeam as in renderCloudTC).
+	renderDetailTC := func(detailTC api.RepoDetailTeamContext, showPath bool, isRepoTeam bool) {
 		expectedPath := paths.TeamContextDir(detailTC.StableID(), projectEndpoint)
 		if renderedTeams[expectedPath] {
 			return
@@ -803,7 +821,15 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 
 		b.WriteString(statusLabelStyle.Render("Team"))
 		b.WriteString(statusValueStyle.Render(detailTC.Name))
+		if isRepoTeam {
+			b.WriteString(" " + statusMutedStyle.Render("(this repo)"))
+		}
 		b.WriteString("\n")
+		if isRepoTeam {
+			b.WriteString(statusLabelStyle.Render("  URL"))
+			b.WriteString(statusMutedStyle.Render(teamDashboardURL(projectEndpoint, detailTC.StableID())))
+			b.WriteString("\n")
+		}
 
 		detailVisibility := "private"
 		if detailTC.Visibility != "" {
@@ -859,14 +885,53 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 
 	// Repo team context - rendered inline under Project Status
 	b.WriteString("\n")
-	if repoCloudTC != nil {
+	switch {
+	case repoCloudTC != nil:
 		hasAnyTeams = true
-		renderCloudTC(repoCloudTC.info, true)
-	} else if repoDetailTC != nil {
+		renderCloudTC(repoCloudTC.info, true, true)
+	case repoDetailTC != nil:
 		hasAnyTeams = true
-		renderDetailTC(repoDetailTC.info, true)
-	} else {
-		// no repo team context found
+		renderDetailTC(repoDetailTC.info, true, true)
+	case repoTeamID != "":
+		// The repo IS bound to a team (config.json's team_id is set), but
+		// that team is absent from every source this account can see. This
+		// must render distinguishably from "never initialized" below —
+		// rendering both as "not configured" is exactly what let a user's
+		// successfully-recorded sessions look, from the CLI's own status
+		// output, indistinguishable from a repo nobody had touched.
+		b.WriteString(statusLabelStyle.Render("Team"))
+		b.WriteString(statusMutedStyle.Render(repoTeamID))
+		b.WriteString("\n")
+		b.WriteString(statusLabelStyle.Render("Status"))
+		switch {
+		case repoDetailErr != nil || cloudReposErr != nil:
+			// The absence above is unproven, not confirmed: GetRepoDetail
+			// and/or GetRepos failed outright (network, transient 5xx),
+			// so we never actually got an answer from the source that
+			// would tell us whether this account can see the team.
+			// Rendering that identically to "not visible to this
+			// account" -- a real permission denial -- trains a coworker
+			// to distrust (or ignore) this warning the next time it's
+			// real.
+			b.WriteString(statusWarningStyle.Render("⚠ visibility unavailable"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("Could not reach the API to check this team's visibility. Try again shortly."))
+		case authenticated:
+			b.WriteString(statusWarningStyle.Render("⚠ not visible to this account"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("This repo is bound to a team your current account can't see."))
+		default:
+			b.WriteString(statusWarningStyle.Render("⚠ not visible to this account"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("Log in to check whether your account has access to this team."))
+		}
+		b.WriteString("\n")
+	default:
+		// no repo team context found, and none configured either — this
+		// repo has genuinely never been bound to a team.
 		b.WriteString(statusLabelStyle.Render("Status"))
 		b.WriteString(statusMutedStyle.Render("not configured"))
 		b.WriteString("\n")
@@ -903,7 +968,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		for _, entry := range otherCloudTCs {
 			info := entry.info
 			merged = append(merged, otherTCEntry{
-				render:    func() { renderCloudTC(info, verbose) },
+				render:    func() { renderCloudTC(info, verbose, false) },
 				notCloned: notCloned(info.StableID()),
 				name:      info.Name,
 			})
@@ -911,7 +976,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		for _, entry := range otherDetailTCs {
 			info := entry.info
 			merged = append(merged, otherTCEntry{
-				render:    func() { renderDetailTC(info, verbose) },
+				render:    func() { renderDetailTC(info, verbose, false) },
 				notCloned: notCloned(info.StableID()),
 				name:      info.Name,
 			})
@@ -1704,6 +1769,15 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 
 	output := statusJSONOutput{}
 
+	// repo/team identity from .sageox/config.json — read once and reused
+	// below for both ProjectJSON and marking the matching TeamContextJSON
+	// entry, so a JSON consumer can detect "bound to a team that isn't in
+	// team_contexts" (the account can't see it) without a second lookup.
+	var projectCfg *config.ProjectConfig
+	if gitRoot != "" {
+		projectCfg, _ = config.LoadProjectConfig(gitRoot)
+	}
+
 	// bubbles section — real KB-API rows only; team_contexts/ledger below
 	// are permanent first-class fields (ox ADR-028), not mirrors of this.
 	output.Bubbles = buildBubblesJSON(bubblesSummary)
@@ -1753,6 +1827,11 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 	output.Project = &statusProjectJSON{
 		Initialized: projectInitialized,
 		Directory:   projectRoot,
+	}
+	if projectCfg != nil {
+		output.Project.RepoID = projectCfg.RepoID
+		output.Project.TeamID = projectCfg.TeamID
+		output.Project.TeamName = projectCfg.TeamName
 	}
 	if projectInitialized {
 		output.Project.ConfigPath = sageoxDir
@@ -1812,11 +1891,12 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 			}
 			status := getGitRepoStatus(tc.Path, tc.LastSync, tc.HasLastSync())
 			tcJSON := statusTeamContextJSON{
-				TeamID:   tc.TeamID,
-				TeamName: tc.TeamName,
-				Path:     tc.Path,
-				Exists:   status.Exists,
-				Branch:   status.Branch,
+				TeamID:     tc.TeamID,
+				TeamName:   tc.TeamName,
+				Path:       tc.Path,
+				Exists:     status.Exists,
+				Branch:     status.Branch,
+				IsRepoTeam: projectCfg != nil && tc.TeamID != "" && tc.TeamID == projectCfg.TeamID,
 			}
 			if status.Error != "" {
 				tcJSON.Error = status.Error

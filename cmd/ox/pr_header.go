@@ -245,6 +245,17 @@ func autoSessionURL(gitRoot string, allowUnconfirmed bool) (url string, unconfir
 	if u == "" {
 		return "", false // no valid ses_ id (older binary) — nothing to link
 	}
+	if effectiveSessionPublishing() == config.SessionPublishingManual {
+		// Checked BEFORE the pending branch on purpose. A session can be both
+		// pending and manual, and reporting unconfirmed=true there makes the
+		// caller suggest --allow-unconfirmed — a flag that then yields no URL,
+		// because manual withholds unconditionally. Two states, opposite
+		// remedies: "pending" resolves itself on the next upload and may be
+		// forced; "manual" never resolves until someone explicitly uploads, so
+		// forcing it could only ever emit a permanently dead link into a public
+		// PR body.
+		return "", false
+	}
 	if state.LifecycleRegistrationState == "pending" && !allowUnconfirmed {
 		return "", true // server has not observed it — withhold, signal the caller
 	}

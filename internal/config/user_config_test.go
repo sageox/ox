@@ -34,127 +34,39 @@ func TestLoadUserConfig_RespectsDisabledTips(t *testing.T) {
 	assert.False(t, cfg.AreTipsEnabled(), "expected tips to be disabled")
 }
 
-func TestLoadUserConfig_ContextGitDefaults(t *testing.T) {
-	// use temp dir with no config file
-	tmpDir := t.TempDir()
-
-	cfg, err := LoadUserConfigFrom(tmpDir)
-	require.NoError(t, err, "unexpected error")
-
-	// auto_commit defaults to true
-	assert.True(t, cfg.GetContextGitAutoCommit(), "expected context_git.auto_commit to default to true")
-
-	// auto_push defaults to true
-	assert.True(t, cfg.GetContextGitAutoPush(), "expected context_git.auto_push to default to true")
-}
-
-func TestLoadUserConfig_RespectsContextGitSettings(t *testing.T) {
+// TestLoadUserConfig_ContextGitBlockStillRoundTrips is the backward-compat
+// proof for deprecating (not removing) context_git.auto_commit /
+// context_git.auto_push — bead ox-6p5y.11, contract D5 superseded 2026-09-10
+// to "deprecate with redirect": the setting was never wired to any
+// behavior, but a user config file written by an older ox version that
+// still carries a context_git block must keep loading without error, the
+// block's values must still round-trip (so 'ox config get
+// context_git.auto_push' can tell the user what they set, even though it
+// never did anything), and every other field in the same file must still
+// parse correctly.
+func TestLoadUserConfig_ContextGitBlockStillRoundTrips(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
 
-	// write config with context_git settings
-	content := []byte(`context_git:
+	content := []byte(`display_name: Devon
+context_git:
   auto_commit: false
   auto_push: true
+tips_enabled: false
 `)
 	require.NoError(t, os.WriteFile(configPath, content, 0644), "failed to write test config")
 
 	cfg, err := LoadUserConfigFrom(tmpDir)
-	require.NoError(t, err, "unexpected error")
+	require.NoError(t, err, "loading a config file with a deprecated context_git block must not error")
 
-	assert.False(t, cfg.GetContextGitAutoCommit(), "expected context_git.auto_commit to be false")
+	assert.Equal(t, "Devon", cfg.GetDisplayName(), "fields alongside the deprecated block must still load")
+	assert.False(t, cfg.AreTipsEnabled(), "fields alongside the deprecated block must still load")
 
-	assert.True(t, cfg.GetContextGitAutoPush(), "expected context_git.auto_push to be true")
-}
-
-func TestContextGitConfig_NilReceiver(t *testing.T) {
-	var cfg *ContextGitConfig
-
-	// nil receiver should return defaults
-	assert.True(t, cfg.IsAutoCommitEnabled(), "expected nil ContextGitConfig.IsAutoCommitEnabled() to return true")
-
-	assert.True(t, cfg.IsAutoPushEnabled(), "expected nil ContextGitConfig.IsAutoPushEnabled() to return true")
-}
-
-func TestUserConfig_SetContextGitAutoCommit(t *testing.T) {
-	cfg := &UserConfig{}
-
-	// setting on nil ContextGit should create it
-	cfg.SetContextGitAutoCommit(false)
-
-	require.NotNil(t, cfg.ContextGit, "expected ContextGit to be created")
-
-	assert.False(t, cfg.GetContextGitAutoCommit(), "expected auto_commit to be false after setting")
-
-	// setting to true
-	cfg.SetContextGitAutoCommit(true)
-	assert.True(t, cfg.GetContextGitAutoCommit(), "expected auto_commit to be true after setting")
-}
-
-func TestUserConfig_SetContextGitAutoPush(t *testing.T) {
-	cfg := &UserConfig{}
-
-	// setting on nil ContextGit should create it
-	cfg.SetContextGitAutoPush(true)
-
-	require.NotNil(t, cfg.ContextGit, "expected ContextGit to be created")
-
-	assert.True(t, cfg.GetContextGitAutoPush(), "expected auto_push to be true after setting")
-
-	// setting to false
-	cfg.SetContextGitAutoPush(false)
-	assert.False(t, cfg.GetContextGitAutoPush(), "expected auto_push to be false after setting")
-}
-
-func TestSaveAndLoadUserConfig_ContextGit(t *testing.T) {
-	// use XDG_CONFIG_HOME to isolate test from real config
-	tmpDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-
-	// create and save config with context_git settings
-	cfg := &UserConfig{}
-	cfg.SetContextGitAutoCommit(false)
-	cfg.SetContextGitAutoPush(true)
-
-	require.NoError(t, SaveUserConfig(cfg), "failed to save config")
-
-	// load and verify
-	loaded, err := LoadUserConfig()
-	require.NoError(t, err, "failed to load config")
-
-	assert.False(t, loaded.GetContextGitAutoCommit(), "expected loaded auto_commit to be false")
-
-	assert.True(t, loaded.GetContextGitAutoPush(), "expected loaded auto_push to be true")
-}
-
-func TestContextGitConfig_PartialSettings(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "config.yaml")
-
-	// write config with only auto_commit set (auto_push should default)
-	content := []byte(`context_git:
-  auto_commit: false
-`)
-	require.NoError(t, os.WriteFile(configPath, content, 0644), "failed to write test config")
-
-	cfg, err := LoadUserConfigFrom(tmpDir)
-	require.NoError(t, err, "unexpected error")
-
-	assert.False(t, cfg.GetContextGitAutoCommit(), "expected context_git.auto_commit to be false")
-
-	// auto_push should still default to true
-	assert.True(t, cfg.GetContextGitAutoPush(), "expected context_git.auto_push to default to true")
-}
-
-func TestUserConfig_GetContextGitWithNilContextGit(t *testing.T) {
-	cfg := &UserConfig{
-		ContextGit: nil,
-	}
-
-	// should return defaults when ContextGit is nil
-	assert.True(t, cfg.GetContextGitAutoCommit(), "expected GetContextGitAutoCommit to return true with nil ContextGit")
-
-	assert.True(t, cfg.GetContextGitAutoPush(), "expected GetContextGitAutoPush to return true with nil ContextGit")
+	require.NotNil(t, cfg.ContextGit, "the deprecated block must still round-trip, not be silently dropped")
+	require.NotNil(t, cfg.ContextGit.AutoCommit)
+	assert.False(t, *cfg.ContextGit.AutoCommit)
+	require.NotNil(t, cfg.ContextGit.AutoPush)
+	assert.True(t, *cfg.ContextGit.AutoPush)
 }
 
 func TestLoadUserConfig_SessionsDefaults(t *testing.T) {

@@ -119,6 +119,15 @@ type StopOutput struct {
 	TotalMs          int64            `json:"total_ms,omitempty"`           // wall clock for entire session stop
 	Timing           map[string]int64 `json:"timing,omitempty"`             // per-phase breakdown (ms)
 
+	// Where the session landed — without these, a JSON consumer has no way
+	// to learn which team/repo a session was recorded under, or its durable
+	// view URL. SessionURL is empty when attribution is off or the session's
+	// server-side registration is still pending (see sessionLinkOutputs).
+	SessionURL string `json:"session_url,omitempty"`
+	TeamID     string `json:"team_id,omitempty"`
+	TeamName   string `json:"team_name,omitempty"`
+	RepoID     string `json:"repo_id,omitempty"`
+
 	// Terminal-stop metadata. Populated only when the session was
 	// finalized by the adapter terminal-error path (rate limit etc.),
 	// not by a user-initiated stop. StopReason mirrors session.StopReason*

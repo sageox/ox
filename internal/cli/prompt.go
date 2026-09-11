@@ -88,12 +88,62 @@ func (m selectModel) View() tea.View {
 	return tea.NewView(b.String())
 }
 
+// ErrNoInteractiveInput is returned by SelectOneRequired when a selection
+// could not be gathered from anyone — stdin is not a TTY and produced no
+// input at all (closed, empty, or unreadable), as opposed to a user who was
+// actually there and pressed Enter to accept the default. selectOneCore is
+// what tells these two apart; SelectOne (the original, widely-used API)
+// deliberately keeps its old behavior of silently falling back to
+// defaultIdx in both cases, so this error only ever surfaces through
+// SelectOneRequired. Use SelectOneRequired instead of SelectOne wherever
+// guessing wrong has a real cost — e.g. binding a repo to a team.
+var ErrNoInteractiveInput = errors.New("no interactive input available to make this selection")
+
 // SelectOne displays an interactive selection menu with arrow key navigation.
 // Returns the index of the selected option (0-based) or -1 if canceled.
 // Falls back to numbered prompt when stdin is not a TTY or in non-interactive mode.
+//
+// When no interactive input can be gathered at all (e.g. piped/CI/agent
+// harness with nothing on stdin), this silently returns (defaultIdx, nil) —
+// unchanged from its long-standing behavior, preserved here for every
+// existing caller. Callers for whom that silent guess is unsafe should call
+// SelectOneRequired instead.
 func SelectOne(title string, options []string, defaultIdx int) (int, error) {
+	idx, explicit, err := selectOneCore(title, options, defaultIdx)
+	if err != nil {
+		return -1, err
+	}
+	if !explicit {
+		return defaultIdx, nil
+	}
+	return idx, nil
+}
+
+// SelectOneRequired behaves like SelectOne, but returns
+// ErrNoInteractiveInput instead of silently accepting defaultIdx when no
+// one was actually there to answer (non-TTY stdin with nothing piped in,
+// EOF, or a read error). A caller that receives this error must not proceed
+// as if a choice were made — it should ask for an explicit flag/argument
+// instead of guessing.
+func SelectOneRequired(title string, options []string, defaultIdx int) (int, error) {
+	idx, explicit, err := selectOneCore(title, options, defaultIdx)
+	if err != nil {
+		return -1, err
+	}
+	if !explicit {
+		return -1, ErrNoInteractiveInput
+	}
+	return idx, nil
+}
+
+// selectOneCore is the shared implementation behind SelectOne and
+// SelectOneRequired. explicit reports whether idx reflects an actual
+// interactive choice (TTY menu selection, a typed number, or a deliberate
+// blank Enter read successfully from a pipe) as opposed to a fallback value
+// returned because no input could be gathered at all.
+func selectOneCore(title string, options []string, defaultIdx int) (idx int, explicit bool, err error) {
 	if len(options) == 0 {
-		return -1, errors.New("no options to select from")
+		return -1, false, errors.New("no options to select from")
 	}
 
 	cursor := 0
@@ -103,7 +153,7 @@ func SelectOne(title string, options []string, defaultIdx int) (int, error) {
 
 	// fall back to simple numbered prompt if non-interactive or stdin is not a TTY
 	if !IsInteractive() || (!isatty.IsTerminal(os.Stdin.Fd()) && !isatty.IsCygwinTerminal(os.Stdin.Fd())) {
-		return selectOneSimple(title, options, cursor)
+		return selectOneSimpleCore(title, options, cursor)
 	}
 
 	m := selectModel{
@@ -113,21 +163,27 @@ func SelectOne(title string, options []string, defaultIdx int) (int, error) {
 	}
 
 	p := tea.NewProgram(m)
-	finalModel, err := p.Run()
-	if err != nil {
-		return -1, err
+	finalModel, runErr := p.Run()
+	if runErr != nil {
+		return -1, false, runErr
 	}
 
 	result := finalModel.(selectModel)
 	if result.canceled {
-		return -1, fmt.Errorf("selection canceled")
+		return -1, false, fmt.Errorf("selection canceled")
 	}
 
-	return result.selected, nil
+	return result.selected, true, nil
 }
 
-// selectOneSimple is the fallback for non-TTY environments.
-func selectOneSimple(title string, options []string, defaultIdx int) (int, error) {
+// selectOneSimpleCore reads a numbered choice from stdin. explicit=false
+// means the read produced nothing at all (EOF/read error with no bytes) —
+// no one was there to accept or override the default. explicit=true covers
+// a valid typed number, a deliberate blank Enter (a successful read of an
+// empty line), and input with no trailing newline (bufio.ReadString returns
+// the final bytes together with io.EOF, e.g. `printf 2 | ox init`) — all of
+// which mean a human (or a script standing in for one) answered.
+func selectOneSimpleCore(title string, options []string, defaultIdx int) (idx int, explicit bool, err error) {
 	fmt.Println(title)
 	fmt.Println()
 	for i, opt := range options {
@@ -141,22 +197,28 @@ func selectOneSimple(title string, options []string, defaultIdx int) (int, error
 	fmt.Printf("Enter number [%d]: ", defaultIdx+1)
 
 	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
-	if err != nil {
-		return defaultIdx, nil
+	input, readErr := reader.ReadString('\n')
+	if readErr != nil && input == "" {
+		// Nothing to read at all — stdin was closed or empty. No one was
+		// there to accept or override the default.
+		return defaultIdx, false, nil
 	}
+	// readErr != nil with non-empty input means ReadString hit io.EOF after
+	// returning the final, newline-less bytes (e.g. `printf 2 | ox init`).
+	// That is a real answer someone piped in — treat it exactly like a
+	// terminated line, not like silence.
 
 	input = strings.TrimSpace(input)
 	if input == "" {
-		return defaultIdx, nil
+		return defaultIdx, true, nil
 	}
 
-	num, err := strconv.Atoi(input)
-	if err != nil || num < 1 || num > len(options) {
-		return -1, fmt.Errorf("invalid selection: %s", input)
+	num, convErr := strconv.Atoi(input)
+	if convErr != nil || num < 1 || num > len(options) {
+		return -1, true, fmt.Errorf("invalid selection: %s", input)
 	}
 
-	return num - 1, nil
+	return num - 1, true, nil
 }
 
 // SelectOneValue displays an interactive selection menu and returns the selected value.

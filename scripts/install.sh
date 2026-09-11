@@ -39,6 +39,92 @@ log_error() {
     echo -e "${RED}Error:${NC} $1" >&2
 }
 
+# Print PATH guidance for AI coding tool hooks, naming the shell startup
+# file that a non-interactive hook shell actually reads. No-op if the
+# binary's directory is already on PATH.
+#
+# AI coding tools run hooks in a non-interactive shell (e.g. `zsh -c
+# '...'`), which sources ~/.zshenv but never ~/.zshrc/~/.bash_profile/etc.
+# A binary that only ends up on PATH via an interactive rc file works fine
+# at the terminal but stays invisible to those hooks.
+#
+# zsh is the only shell here with a startup file a non-interactive `-c`
+# invocation always reads (~/.zshenv). bash has no such file by default —
+# non-interactive, non-login bash sources nothing unless $BASH_ENV is set,
+# and we deliberately don't tell users to set that: it's obscure and it
+# would affect every non-interactive bash invocation on the machine, not
+# just hooks. So for bash/fish/unknown we give the honest explanation
+# instead of the zsh-specific one, plus a restart reminder: the hook tool
+# inherits the environment of the terminal that launched it, so adding the
+# export to the interactive rc file and then restarting the tool from a
+# fresh terminal works, even though the file itself is never read directly
+# by the hook shell. Mirrors internal/constants/agent.go's
+# oxNotOnPathFallback and internal/doctor/checks/ox_in_path.go's
+# explanationFor/shellRCFor — keep the wording identical across all three.
+print_path_warning() {
+    local binary_path=$1
+    local install_dir
+    install_dir=$(dirname "$binary_path")
+
+    if [[ ":$PATH:" == *":$install_dir:"* ]]; then
+        return 0
+    fi
+
+    local shell_name rc_file path_line restart_line explanation
+    shell_name=$(basename "${SHELL:-}")
+    restart_line=""
+    # rc_file is display text only (never sourced or written to by this
+    # script), so the tilde is intentionally left unexpanded.
+    # shellcheck disable=SC2088
+    case "$shell_name" in
+        zsh)
+            rc_file="~/.zshenv"
+            path_line="export PATH=\"\$PATH:$install_dir\""
+            explanation="AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc."
+            ;;
+        bash)
+            rc_file="~/.bashrc"
+            path_line="export PATH=\"\$PATH:$install_dir\""
+            restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
+            explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
+            ;;
+        fish)
+            rc_file="~/.config/fish/config.fish"
+            path_line="fish_add_path $install_dir"
+            restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
+            explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
+            ;;
+        *)
+            rc_file="the startup file for your shell"
+            path_line="export PATH=\"\$PATH:$install_dir\""
+            restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
+            explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
+            ;;
+    esac
+
+    echo ""
+    log_warning "$BINARY is installed at $binary_path but is not on PATH for non-interactive shells."
+    echo "$explanation"
+    echo "Add this line to $rc_file:"
+    echo "    $path_line"
+    if [[ -n "$restart_line" ]]; then
+        echo "$restart_line"
+    fi
+    echo ""
+}
+
+# Point users at `ox doctor` unconditionally on every successful install —
+# not just when print_path_warning fires. The PATH check above only sees
+# THIS shell's PATH; it can't catch a fix that only touched an interactive
+# rc file (e.g. ~/.zshrc), which looks fine here and still leaves a hook
+# shell unable to find ox. `ox doctor` spawns a scrubbed, non-interactive
+# shell to check for exactly that gap, so it's the one thing in this flow
+# that can actually confirm the install worked for AI coworker hooks.
+print_doctor_hint() {
+    echo "Next: run \`$BINARY doctor\` to confirm your AI coworker can actually see this install."
+    echo ""
+}
+
 release_has_asset() {
     local release_json=$1
     local asset_name=$2
@@ -257,15 +343,6 @@ install_from_release() {
     LAST_INSTALL_PATH="$install_dir/$BINARY"
     log_success "$BINARY installed to $install_dir/$BINARY"
 
-    # Check if install_dir is in PATH
-    if [[ ":$PATH:" != *":$install_dir:"* ]]; then
-        log_warning "$install_dir is not in your PATH"
-        echo ""
-        echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-        echo "  export PATH=\"\$PATH:$install_dir\""
-        echo ""
-    fi
-
     cd - > /dev/null || cd "$HOME"
     rm -rf "$tmp_dir"
     return 0
@@ -324,15 +401,6 @@ install_with_go() {
             resign_for_macos "$bin_dir/$adapter"
         done
 
-        # Check if GOPATH/bin (or GOBIN) is in PATH
-        if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
-            log_warning "$bin_dir is not in your PATH"
-            echo ""
-            echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-            echo "  export PATH=\"\$PATH:$bin_dir\""
-            echo ""
-        fi
-
         return 0
     else
         log_error "go install failed"
@@ -386,15 +454,6 @@ build_from_source() {
             log_success "$BINARY installed to $install_dir/$BINARY"
             LAST_INSTALL_PATH="$install_dir/$BINARY"
 
-            # Check if install_dir is in PATH
-            if [[ ":$PATH:" != *":$install_dir:"* ]]; then
-                log_warning "$install_dir is not in your PATH"
-                echo ""
-                echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-                echo "  export PATH=\"\$PATH:$install_dir\""
-                echo ""
-            fi
-
             cd - > /dev/null || cd "$HOME"
             rm -rf "$tmp_dir"
             return 0
@@ -444,6 +503,8 @@ main() {
     # Try downloading from GitHub releases first
     if install_from_release "$platform"; then
         verify_installation
+        print_path_warning "$LAST_INSTALL_PATH"
+        print_doctor_hint
         exit 0
     fi
 
@@ -453,6 +514,8 @@ main() {
     if check_go; then
         if install_with_go; then
             verify_installation
+            print_path_warning "$LAST_INSTALL_PATH"
+            print_doctor_hint
             exit 0
         fi
     fi
@@ -476,6 +539,8 @@ main() {
 
     if build_from_source; then
         verify_installation
+        print_path_warning "$LAST_INSTALL_PATH"
+        print_doctor_hint
         exit 0
     fi
 

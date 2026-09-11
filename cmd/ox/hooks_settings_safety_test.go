@@ -60,8 +60,10 @@ func TestHookFallbackMessage(t *testing.T) {
 				// the else branch should contain a helpful install message
 				assert.Contains(t, hook.Command, "else echo",
 					"hook in %s (matcher=%q) should echo fallback when ox missing", eventName, entry.Matcher)
-				assert.Contains(t, hook.Command, "github.com/sageox/ox",
-					"fallback message in %s (matcher=%q) should point to install URL", eventName, entry.Matcher)
+				assert.Contains(t, hook.Command, "not on PATH for non-interactive shells",
+					"fallback in %s (matcher=%q) must distinguish off-PATH from not-installed", eventName, entry.Matcher)
+				assert.Contains(t, hook.Command, "brew install ox",
+					"fallback in %s (matcher=%q) must offer a runnable install command", eventName, entry.Matcher)
 			}
 		}
 	}
@@ -540,10 +542,29 @@ func TestConstantsFallbackMessage(t *testing.T) {
 	}
 
 	for _, cmd := range commands {
-		assert.Contains(t, cmd, "github.com/sageox/ox",
-			"fallback should point to install URL")
-		assert.Contains(t, cmd, "SageOx",
-			"fallback should mention SageOx")
+		// The fallback has two branches and BOTH must leave the user with a
+		// next action. The reported failure was a user who had installed ox
+		// being told to install ox: technically a message, practically a
+		// wrong turn that cost them a debugging session.
+
+		// Branch 1 — found, but not on PATH for a hook shell. Must name the
+		// file to edit. Naming ~/.zshrc here would be the original bug.
+		assert.Contains(t, cmd, "not on PATH for non-interactive shells",
+			"fallback must distinguish off-PATH from not-installed")
+		assert.Contains(t, cmd, "~/.zshenv",
+			"off-PATH branch must name the file a hook shell actually reads")
+		assert.NotContains(t, cmd, "Add this line to ~/.zshrc",
+			"must never tell a user to edit ~/.zshrc — a hook shell never reads it")
+
+		// Branch 2 — genuinely absent. Must give a runnable install command.
+		assert.Contains(t, cmd, "ox is not installed",
+			"not-installed branch must say so plainly")
+		assert.Contains(t, cmd, "brew install ox",
+			"not-installed branch must offer a runnable install command")
+
+		// Terminology: user-facing copy says "AI coding tools", never "agents".
+		assert.NotContains(t, cmd, "AI coding agents",
+			"user-facing hook copy must not say \"agents\"")
 	}
 }
 

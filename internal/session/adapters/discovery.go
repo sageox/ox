@@ -13,8 +13,48 @@ import (
 
 const adapterBinaryPrefix = "ox-adapter-"
 
+// executableFunc is a seam over os.Executable for tests -- see
+// discovery_test.go, which cannot control what path the real test binary
+// reports.
+var executableFunc = os.Executable
+
+// BundledAdapterDirs returns the directory (or directories, if ox is
+// reached through a symlink) containing the currently-running ox binary --
+// the location official installs (brew, install.sh) promise to co-locate
+// every ox-adapter-* binary in. Exported so doctor checks can verify that
+// promise directly, without duplicating the symlink-resolution logic.
+//
+// os.Executable() returns the path as invoked, WITHOUT resolving symlinks
+// (see $(go env GOROOT)/src/os/executable_darwin.go, which only
+// absolutizes a relative path). So a symlinked launcher -- e.g.
+// /usr/local/bin/ox -> ~/go/bin/ox -- makes the unresolved dir
+// /usr/local/bin, while the adapter siblings actually live in ~/go/bin
+// next to the real binary. Both dirs are returned so neither placement
+// silently loses every ox-adapter-* binary.
+func BundledAdapterDirs() []string {
+	var dirs []string
+
+	exe, err := executableFunc()
+	if err != nil {
+		return dirs
+	}
+
+	unresolvedDir := filepath.Dir(exe)
+	dirs = append(dirs, unresolvedDir)
+
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		if resolvedDir := filepath.Dir(resolved); resolvedDir != unresolvedDir {
+			dirs = append(dirs, resolvedDir)
+		}
+	}
+	// EvalSymlinks error (e.g. broken symlink) falls back to the
+	// unresolved dir already appended above -- never drop it.
+
+	return dirs
+}
+
 // AdapterDirs returns the ordered list of directories to scan for adapter binaries.
-// Priority: OX_ADAPTER_PATH (highest), bundled dir, user local dir.
+// Priority: OX_ADAPTER_PATH (highest), bundled dir(s), user local dir.
 func AdapterDirs() []string {
 	var dirs []string
 
@@ -23,10 +63,8 @@ func AdapterDirs() []string {
 		dirs = append(dirs, filepath.SplitList(envPath)...)
 	}
 
-	// bundled: same directory as the ox binary
-	if exe, err := os.Executable(); err == nil {
-		dirs = append(dirs, filepath.Dir(exe))
-	}
+	// bundled: same directory (or directories) as the ox binary
+	dirs = append(dirs, BundledAdapterDirs()...)
 
 	// user local: platform-specific
 	switch runtime.GOOS {

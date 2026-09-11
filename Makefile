@@ -11,6 +11,11 @@ VERSION := $(shell grep 'Version.*=' internal/version/version.go | head -1 | sed
 BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GOPATH := $(shell go env GOPATH)
+# go install writes to GOBIN when set, overriding GOPATH/bin — resolve the
+# same way here so PATH guidance and the `ox doctor` hint below point at
+# where the binary actually landed, not always GOPATH/bin.
+GOBIN := $(shell go env GOBIN)
+INSTALL_BIN := $(if $(strip $(GOBIN)),$(GOBIN),$(GOPATH)/bin)
 LDFLAGS := -ldflags "-X github.com/sageox/ox/internal/version.Version=$(VERSION) -X github.com/sageox/ox/internal/version.BuildDate=$(BUILD_TIME) -X github.com/sageox/ox/internal/version.GitCommit=$(GIT_COMMIT)"
 ADAPTER_LDFLAGS := -ldflags "-s -w"
 
@@ -77,6 +82,40 @@ build-acceptance: ## Build the exact ox + adapter binaries used by acceptance te
 	@$(GO) build $(ADAPTER_LDFLAGS) -o "$(ACCEPTANCE_DIR)/ox-adapter-claude-code" ./cmd/ox-adapter-claude-code
 
 install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
+	@echo ""
+	@echo "─────────────────────────────────────────────────────────────────────"
+	@echo "  This is a developer build of bleeding-edge HEAD — less tested than"
+	@echo "  a release, and it will not self-update."
+	@echo ""
+	@echo "  For everyday use, install a release instead:"
+	@echo ""
+	@echo "    brew tap sageox/tap && brew install ox        # recommended"
+	@echo "    curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash"
+	@echo ""
+	@echo "  Both self-update via \`ox upgrade\` and keep ox and its 10 adapter"
+	@echo "  binaries together on PATH."
+	@echo "─────────────────────────────────────────────────────────────────────"
+	@case ":$$PATH:" in \
+		*":$(INSTALL_BIN):"*) ;; \
+		*) \
+			shell_name=$$(basename "$${SHELL:-}"); \
+			restart_line=""; \
+			case "$$shell_name" in \
+				zsh) rc_file="~/.zshenv"; path_line="export PATH=\"\$$PATH:$(INSTALL_BIN)\""; explanation="AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc." ;; \
+				bash) rc_file="~/.bashrc"; path_line="export PATH=\"\$$PATH:$(INSTALL_BIN)\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
+				fish) rc_file="~/.config/fish/config.fish"; path_line="fish_add_path $(INSTALL_BIN)"; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
+				*) rc_file="the startup file for your shell"; path_line="export PATH=\"\$$PATH:$(INSTALL_BIN)\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
+			esac; \
+			echo ""; \
+			echo "ox is installed at $(INSTALL_BIN)/$(BINARY_NAME) but is not on PATH for non-interactive shells."; \
+			echo "$$explanation"; \
+			echo "Add this line to $$rc_file:"; \
+			echo "    $$path_line"; \
+			[ -n "$$restart_line" ] && echo "$$restart_line"; \
+			echo ""; \
+			;; \
+	esac
+	@echo "Next: run \`$(INSTALL_BIN)/$(BINARY_NAME) doctor\` to confirm your AI coworker can actually see this install."
 
 install-ox: ## Install ox to $GOPATH/bin
 	@echo "Installing $(BINARY_NAME) to $(GOPATH)/bin..."
@@ -176,6 +215,28 @@ GOTESTSUM_TIMINGS = $(if $(strip $(TEST_TIMINGS)),--jsonfile-timing-events "$(TE
 # GIT_CONFIG_NOSYSTEM=1        → ignore /etc/gitconfig
 # GIT_TERMINAL_PROMPT=0        → never prompt; fail fast on missing creds
 # GIT_AUTHOR_*  / GIT_COMMITTER_*  → identity without needing config
+#
+# GIT_CONFIG_COUNT / GIT_CONFIG_KEY_N / GIT_CONFIG_VALUE_N below prevent a
+# background `git gc --auto` from racing t.TempDir() cleanup. git forks
+# `gc --auto` (and `receive-pack` forks one after a push) and returns
+# without waiting for the child; if that child is still writing
+# .git/objects when the test's t.TempDir() runs RemoveAll, cleanup fails
+# with "directory not empty". This only bites under CI load — gc has
+# nothing to trigger on the small scratch repos these tests build locally.
+# gc.autoDetach=false is the load-bearing setting: it forces any gc that
+# *does* run to run synchronously instead of forking, so the race cannot
+# exist even if something re-enables auto-gc. gc.auto=0 / maintenance.auto
+# / receive.autogc stop it from triggering at all in the common case. Keep
+# all four — collapsing this back to just gc.auto=0 quietly reopens the
+# fork-and-return race for any path that doesn't honor gc.auto.
+#
+# Known, acceptable interaction: a handful of tests build their own
+# GIT_CONFIG_COUNT env for a specific git invocation (e.g.
+# cmd/ox/doctor_ledger_git_test.go, internal/kb/multiwriter_test.go,
+# internal/gitutil/rebase_resolve_integration_test.go). Env vars are
+# replaced, not merged, so their GIT_CONFIG_COUNT wins for that command and
+# it simply doesn't get these settings — same behavior as before this
+# change. Do not try to merge counts dynamically; that's fragile.
 TEST_GIT_ISOLATION := \
 	GIT_CONFIG_GLOBAL=/dev/null \
 	GIT_CONFIG_NOSYSTEM=1 \
@@ -183,7 +244,12 @@ TEST_GIT_ISOLATION := \
 	GIT_AUTHOR_NAME=ox-test \
 	GIT_AUTHOR_EMAIL=test@test.sageox.ai \
 	GIT_COMMITTER_NAME=ox-test \
-	GIT_COMMITTER_EMAIL=test@test.sageox.ai
+	GIT_COMMITTER_EMAIL=test@test.sageox.ai \
+	GIT_CONFIG_COUNT=4 \
+	GIT_CONFIG_KEY_0=gc.auto GIT_CONFIG_VALUE_0=0 \
+	GIT_CONFIG_KEY_1=gc.autoDetach GIT_CONFIG_VALUE_1=false \
+	GIT_CONFIG_KEY_2=maintenance.auto GIT_CONFIG_VALUE_2=false \
+	GIT_CONFIG_KEY_3=receive.autogc GIT_CONFIG_VALUE_3=false
 
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
 check-test-tiers: ## Validate the machine-readable test-tier contract

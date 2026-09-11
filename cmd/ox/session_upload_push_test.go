@@ -29,8 +29,24 @@ func createBareAndClone(t *testing.T) (string, string) {
 	// create bare repo
 	runGit(t, base, "init", "--bare", barePath)
 
+	// Disable background git maintenance in the fixture.
+	//
+	// `git push` makes the remote run receive-pack, which forks `gc --auto`
+	// and returns without waiting for it. That child keeps writing into
+	// remote.git after the test body finishes, so t.TempDir()'s RemoveAll
+	// races it and fails with "directory not empty" — a failure that has
+	// nothing to do with what the test asserts, and that only shows up on a
+	// loaded machine (it bit CI, never a local run).
+	runGit(t, barePath, "config", "gc.auto", "0")
+	runGit(t, barePath, "config", "receive.autogc", "false")
+	runGit(t, barePath, "config", "maintenance.auto", "false")
+
 	// clone it
 	runGit(t, base, "clone", barePath, clonePath)
+
+	// same reason as the bare repo above — no background gc in the clone either
+	runGit(t, clonePath, "config", "gc.auto", "0")
+	runGit(t, clonePath, "config", "maintenance.auto", "false")
 
 	// configure git identity in clone (isolated to temp dir)
 	runGit(t, clonePath, "config", "user.email", "test@example.com")
