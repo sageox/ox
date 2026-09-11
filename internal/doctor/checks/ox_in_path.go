@@ -323,8 +323,15 @@ func probeShellPath(ctx context.Context, shellPath, binary string) (string, erro
 	}
 
 	resolved := strings.TrimSpace(string(out))
-	if resolved == "" || resolved == notFoundSentinel {
+	if resolved == notFoundSentinel {
 		return "", ErrNotFoundInShell
+	}
+	if resolved == "" {
+		// The script always prints either a path or the sentinel, so empty
+		// output means we never saw the answer -- a startup file that
+		// redirects stdout (`exec >/dev/null`) is the realistic cause. That
+		// is unknown, not absent, and must not become an off-PATH warning.
+		return "", ErrShellProbeInconclusive
 	}
 	return resolved, nil
 }

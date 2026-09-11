@@ -185,6 +185,25 @@ func TestProbeShellPath_BinaryNotFound_ReturnsErrNotFoundInShell(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotFoundInShell)
 }
 
+// TestProbeShellPath_SucceedsButSwallowsStdout_IsInconclusive pins that a
+// shell which exits 0 while producing no output is reported as unknown, not
+// as "ox is missing". The probe script always prints either a path or the
+// sentinel, so empty output means the answer never reached us -- a startup
+// file doing `exec >/dev/null` is the realistic cause. Reporting that as an
+// off-PATH failure would be the false negative ErrShellProbeInconclusive
+// exists to prevent.
+func TestProbeShellPath_SucceedsButSwallowsStdout_IsInconclusive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shells only")
+	}
+	dir := t.TempDir()
+	silentShell := filepath.Join(dir, "silent-shell.sh")
+	require.NoError(t, os.WriteFile(silentShell, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	_, err := probeShellPath(context.Background(), silentShell, "ox")
+	assert.ErrorIs(t, err, ErrShellProbeInconclusive)
+}
+
 // TestProbeShellPath_NotFoundIsShellIndependent pins the not-found answer
 // across every POSIX shell present, not just whichever one is /bin/sh
 // here. It is the regression guard for reading the answer out of the exit
