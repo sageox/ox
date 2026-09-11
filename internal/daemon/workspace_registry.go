@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -584,6 +585,21 @@ func (r *WorkspaceRegistry) UpdateLastGC(id string) {
 	}
 
 	if err := config.SaveLocalConfig(r.projectRoot, r.localConfigCache); err != nil {
+		// An uninitialized project root has no .sageox/ to write into, so there
+		// is nothing to persist and nothing wrong. Warning here put a line in
+		// the daemon log once per workspace per GC cycle telling the daemon to
+		// run `ox init` — an instruction the process reading it can never act
+		// on, and invisible to users besides, since neither `ox status` nor
+		// `ox doctor` surfaces daemon logs.
+		//
+		// Keyed off the sentinel rather than a pre-check: SaveLocalConfig's
+		// precondition is only "a .sageox/ directory exists", which is weaker
+		// than config.IsInitialized, and guarding with the stricter predicate
+		// silently skipped persists that would have succeeded.
+		if errors.Is(err, config.ErrProjectNotInitialized) {
+			slog.Debug("skipping last_gc persist: project not initialized", "id", id, "project_root", r.projectRoot)
+			return
+		}
 		slog.Warn("failed to persist last_gc to config.local.toml", "id", id, "error", err)
 	}
 }

@@ -139,7 +139,7 @@ func checkKBMissingClone(fix bool) checkResult {
 
 	if syncErr := kickKBSync(); syncErr != nil {
 		kbHookLogger().Warn("kb_doctor missing-clone autofix failed", "error", syncErr, "missing", len(missing))
-		return WarningCheck(name, msg, fmt.Sprintf("Auto-fix hint: %v", syncErr))
+		return WarningCheck(name, msg, kbAutoFixHint(syncErr))
 	}
 	return PassedCheck(name, fmt.Sprintf("kicked sync for %d missing bubble(s)", len(missing)))
 }
@@ -188,7 +188,7 @@ func checkKBWedged(fix bool) checkResult {
 	}
 
 	if syncErr := kickKBSync(); syncErr != nil {
-		r := CriticalCheck(name, msg, fmt.Sprintf("Auto-fix hint: %v\n%s", syncErr, kbWedgedDetail(root, wedged)))
+		r := CriticalCheck(name, msg, kbAutoFixHint(syncErr)+"\n"+kbWedgedDetail(root, wedged))
 		r.slug = CheckSlugKBWedged
 		return r
 	}
@@ -293,7 +293,7 @@ func checkKBSparseCheckout(fix bool) checkResult {
 	}
 
 	if syncErr := kickKBSync(); syncErr != nil {
-		return WarningCheck(name, msg, fmt.Sprintf("Auto-fix hint: %v", syncErr))
+		return WarningCheck(name, msg, kbAutoFixHint(syncErr))
 	}
 	return PassedCheck(name, fmt.Sprintf("kicked sync to reapply sparse for %d bubble(s)", len(broken)))
 }

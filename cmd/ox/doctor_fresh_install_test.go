@@ -22,7 +22,34 @@ import (
 //
 // This is a critical invariant for user experience - if init creates a broken state,
 // users lose trust in the tool immediately.
+// sandboxDoctorEnv isolates a doctor test from the developer's real machine.
+//
+// These tests assert "a fresh install produces no warnings", but they ran with
+// HOME and the XDG dirs still pointing at the real user, so doctor's Knowledge
+// Bubbles and team-context checks inspected the developer's actual state. One
+// genuinely stale bubble on the machine turned this invariant test red for a
+// reason that had nothing to do with a fresh install — the worst outcome for a
+// test whose whole job is telling you that a fresh install is clean.
+//
+// Setting the XDG vars is what actually isolates it: internal/paths memoizes
+// os.UserHomeDir() process-wide via sync.Once, so in a shared test binary
+// t.Setenv("HOME", ...) alone does not redirect paths.*Dir() — but the XDG dirs
+// are consulted before the cached home.
+func sandboxDoctorEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("HOME", t.TempDir())
+	for _, v := range []string{
+		"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+		"XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+	} {
+		t.Setenv(v, t.TempDir())
+	}
+}
+
 func TestDoctorFreshInstall_NoWarnings(t *testing.T) {
+	sandboxDoctorEnv(t)
+
 	// create a fresh git repo
 	tmpDir := testGitRepo(t)
 
@@ -80,6 +107,8 @@ func TestDoctorFreshInstall_NoWarnings(t *testing.T) {
 // TestDoctorFreshInstall_EmptyRepo_NoWarnings verifies that in an empty repo
 // (no ox init yet), doctor reports appropriate status without confusing warnings.
 func TestDoctorFreshInstall_EmptyRepo_NoWarnings(t *testing.T) {
+	sandboxDoctorEnv(t)
+
 	// create a fresh git repo with no .sageox
 	tmpDir := testGitRepo(t)
 

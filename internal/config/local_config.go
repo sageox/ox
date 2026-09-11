@@ -119,6 +119,13 @@ func LoadLocalConfig(projectRoot string) (*LocalConfig, error) {
 // whole sequence under MutateLocalConfig so two daemons / a daemon + CLI
 // can't lose each other's team_contexts rows or ledger.last_sync updates.
 // See ox-dfy4 for the failure mode.
+// ErrProjectNotInitialized is returned when a write is attempted against a
+// directory that has no .sageox/. Callers that legitimately run outside an
+// initialized project (the daemon's GC bookkeeping, for one) use errors.Is to
+// tell "nothing to do here" apart from a genuine write failure, rather than
+// re-deriving the precondition with a predicate that can drift from this check.
+var ErrProjectNotInitialized = errors.New("project not initialized: run 'ox init' first")
+
 func SaveLocalConfig(projectRoot string, cfg *LocalConfig) error {
 	if projectRoot == "" {
 		return errors.New("project root cannot be empty")
@@ -132,7 +139,7 @@ func SaveLocalConfig(projectRoot string, cfg *LocalConfig) error {
 	// this prevents commands like ox status from creating artifacts in uninitialized projects
 	sageoxPath := filepath.Join(projectRoot, sageoxDir)
 	if _, err := os.Stat(sageoxPath); os.IsNotExist(err) {
-		return fmt.Errorf("project not initialized: run 'ox init' first")
+		return ErrProjectNotInitialized
 	}
 
 	// ensure .sageox directory exists (should already exist from check above, but be defensive)
