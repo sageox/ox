@@ -185,6 +185,29 @@ func TestProbeShellPath_BinaryNotFound_ReturnsErrNotFoundInShell(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotFoundInShell)
 }
 
+// TestProbeShellPath_StartupOutputDoesNotMaskTheAnswer covers a shell whose
+// startup file prints to stdout before the probe script runs -- an `echo` in
+// ~/.zshenv is the ordinary case. The answer is the final line; treating the
+// whole output as the answer would read "noise\n<sentinel>" as a resolved
+// path and report a shadowed binary that does not exist, and would corrupt a
+// real resolved path with the noise prefix.
+func TestProbeShellPath_StartupOutputDoesNotMaskTheAnswer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shells only")
+	}
+	dir := t.TempDir()
+	chattyShell := filepath.Join(dir, "chatty-shell.sh")
+	require.NoError(t, os.WriteFile(chattyShell,
+		[]byte("#!/bin/sh\nprintf 'welcome to your shell\\n'\nexec /bin/sh \"$@\"\n"), 0o755))
+
+	_, err := probeShellPath(context.Background(), chattyShell, "definitely-not-a-real-binary-xyz")
+	assert.ErrorIs(t, err, ErrNotFoundInShell, "startup noise must not mask an absent binary")
+
+	resolved, err := probeShellPath(context.Background(), chattyShell, "sh")
+	require.NoError(t, err)
+	assert.NotContains(t, resolved, "welcome", "startup noise must not contaminate the resolved path")
+}
+
 // TestProbeShellPath_SucceedsButSwallowsStdout_IsInconclusive pins that a
 // shell which exits 0 while producing no output is reported as unknown, not
 // as "ox is missing". The probe script always prints either a path or the

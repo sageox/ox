@@ -323,6 +323,15 @@ func probeShellPath(ctx context.Context, shellPath, binary string) (string, erro
 	}
 
 	resolved := strings.TrimSpace(string(out))
+	// A startup file is free to print to stdout before our script ever runs
+	// (an `echo` in ~/.zshenv is the common case). Both `command -v` and the
+	// sentinel emit exactly one final line, so the answer is the last line
+	// and anything above it is the shell's own noise. Comparing the whole
+	// output instead would read "noise\n<sentinel>" as a resolved path and
+	// report a shadowed binary that does not exist.
+	if idx := strings.LastIndexByte(resolved, '\n'); idx >= 0 {
+		resolved = strings.TrimSpace(resolved[idx+1:])
+	}
 	if resolved == notFoundSentinel {
 		return "", ErrNotFoundInShell
 	}
