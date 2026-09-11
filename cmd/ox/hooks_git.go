@@ -100,18 +100,24 @@ if command -v ox >/dev/null 2>&1; then
 	// defines.
 	oxGitHookNotOnPathFallback = `else
   _ox_p=""
-  [ -n "$GOBIN" ] && [ -x "$GOBIN/ox" ] && _ox_p="$GOBIN"
+  _ox_home="${HOME:-}"
+  [ -n "${GOBIN:-}" ] && [ -x "${GOBIN:-}/ox" ] && _ox_p="${GOBIN:-}"
   if [ -z "$_ox_p" ] && command -v go >/dev/null 2>&1; then
-    _ox_gp="$(go env GOPATH 2>/dev/null)/bin"
-    [ -x "$_ox_gp/ox" ] && _ox_p="$_ox_gp"
+    _ox_gb="$(go env GOBIN 2>/dev/null)"
+    [ -n "$_ox_gb" ] && [ -x "$_ox_gb/ox" ] && _ox_p="$_ox_gb"
+    if [ -z "$_ox_p" ]; then
+      _ox_gp="$(go env GOPATH 2>/dev/null)/bin"
+      [ -x "$_ox_gp/ox" ] && _ox_p="$_ox_gp"
+    fi
   fi
-  [ -z "$_ox_p" ] && [ -x "$HOME/go/bin/ox" ] && _ox_p="$HOME/go/bin"
-  [ -z "$_ox_p" ] && [ -x "$HOME/.local/bin/ox" ] && _ox_p="$HOME/.local/bin"
+  [ -n "$_ox_home" ] && [ -z "$_ox_p" ] && [ -x "$_ox_home/go/bin/ox" ] && _ox_p="$_ox_home/go/bin"
+  [ -n "$_ox_home" ] && [ -z "$_ox_p" ] && [ -x "$_ox_home/.local/bin/ox" ] && _ox_p="$_ox_home/.local/bin"
   [ -z "$_ox_p" ] && [ -x "/usr/local/bin/ox" ] && _ox_p="/usr/local/bin"
   [ -z "$_ox_p" ] && [ -x "/opt/homebrew/bin/ox" ] && _ox_p="/opt/homebrew/bin"
   if [ -n "$_ox_p" ]; then
     echo "ox is installed at $_ox_p/ox but is not on PATH for non-interactive shells." >&2
-    case "${SHELL##*/}" in
+    _ox_sh="${SHELL:-}"
+    case "${_ox_sh##*/}" in
       zsh)
         echo "AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc." >&2
         echo "Add this line to ~/.zshenv:" >&2
