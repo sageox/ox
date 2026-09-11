@@ -2110,20 +2110,25 @@ func (s *daemonServiceImpl) commitMurmur(ctx context.Context, payload MurmurPayl
 // finalize), poisoning the push queue with LFS pointer blobs whose backing
 // objects may not be in the remote LFS store.
 func writeAndCommitMurmur(ctx context.Context, targetDir string, payload MurmurPayload) error {
-	if err := ledger.WriteMurmurRaw(targetDir, payload.RelPath, payload.MurmurJSON); err != nil {
-		return fmt.Errorf("write murmur: %w", err)
-	}
-	if _, err := gitutil.RunGit(ctx, targetDir, "add", "--sparse", "data/murmurs/"); err != nil {
-		return fmt.Errorf("git add murmur: %w", err)
-	}
 	summary := payload.Content
 	if len(summary) > 50 {
 		summary = summary[:50] + "..."
 	}
-	if _, err := gitutil.RunGit(ctx, targetDir, "commit", "-m", fmt.Sprintf("murmur: %s", summary), "--", "data/murmurs/"); err != nil {
-		return fmt.Errorf("git commit murmur: %w", err)
-	}
-	return nil
+	return gitutil.WithRepoLock(ctx, targetDir, func() error {
+		if err := ledger.WriteMurmurRaw(targetDir, payload.RelPath, payload.MurmurJSON); err != nil {
+			return fmt.Errorf("write murmur: %w", err)
+		}
+		if _, err := gitutil.RunGit(ctx, targetDir, "add", "--sparse", "data/murmurs/"); err != nil {
+			return fmt.Errorf("git add murmur: %w", err)
+		}
+		if err := gitutil.ValidateStagedLedgerCommit(ctx, targetDir, "data/murmurs/"); err != nil {
+			return err
+		}
+		if _, err := gitutil.RunGit(ctx, targetDir, "commit", "-m", fmt.Sprintf("murmur: %s", summary), "--", "data/murmurs/"); err != nil {
+			return fmt.Errorf("git commit murmur: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *daemonServiceImpl) PauseMurmuring(agentID string) {

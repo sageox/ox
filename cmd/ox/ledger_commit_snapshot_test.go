@@ -92,6 +92,25 @@ func TestCommitLedgerSnapshot_RefusesMarkerAlreadyStaged(t *testing.T) {
 	assert.Equal(t, 1, countLines(log), "no commit should have been created")
 }
 
+// A marker-free meta.json can still be corrupt application data. The immutable
+// snapshot path must enforce the same JSON contract as automatic daemon writers.
+func TestCommitLedgerSnapshot_RefusesInvalidSessionMetadata(t *testing.T) {
+	skipIntegration(t)
+	repo := newLedgerTestRepo(t)
+	path := filepath.Join(repo, "sessions", "example", "meta.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(`{"title":`), 0o644))
+	mustRunGit(t, repo, "add", "--sparse", path)
+
+	committed, err := commitLedgerSnapshot(context.Background(), repo, "session: X")
+	require.ErrorContains(t, err, "invalid JSON")
+	assert.False(t, committed)
+
+	log, gerr := runIsolatedGit(t, repo, "log", "--oneline")
+	require.NoError(t, gerr)
+	assert.Equal(t, 1, countLines(log), "invalid metadata must not create a commit")
+}
+
 // TestCommitLedgerSnapshot_RefusesUnmergedIndex proves an unmerged (UU) index —
 // a live conflict — is refused: `git write-tree` cannot snapshot unmerged entries,
 // so the snapshot itself fails closed.

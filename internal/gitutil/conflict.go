@@ -52,6 +52,112 @@ func HasConflictMarkersBytes(data []byte) bool {
 	return false
 }
 
+// ValidateLedgerBlob rejects bytes that an automatic Ledger writer must never
+// publish. Conflict markers are invalid in every Ledger artifact; session
+// metadata additionally has a structural JSON contract that Git cannot enforce.
+//
+// Keep this check content-only so both staged-index validators and immutable
+// tree commits can enforce the same invariant without re-reading the worktree.
+func ValidateLedgerBlob(path string, data []byte) error {
+	if HasConflictMarkersBytes(data) {
+		return fmt.Errorf("%s contains an unresolved conflict", path)
+	}
+	if isSessionMetaPath(path) {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(data, &object); err != nil || object == nil {
+			return fmt.Errorf("%s contains invalid JSON object", path)
+		}
+	}
+	return nil
+}
+
+// ValidateStagedLedgerCommit validates the exact blobs currently staged for an
+// automatic Ledger commit. The caller MUST hold WithRepoLock from before its
+// first git add through the subsequent git commit; otherwise another ox process
+// could replace an already-validated index entry before commit.
+//
+// A live unmerged index fails at write-tree before git add can accidentally mark
+// a conflicted path resolved. When pathspecs are supplied, only blobs that the
+// path-scoped commit can publish are scanned; the unmerged-index check remains
+// global because git refuses every commit while any index stage is unresolved.
+func ValidateStagedLedgerCommit(ctx context.Context, repoPath string, pathspecs ...string) error {
+	if err := IsSafeForGitOps(repoPath); err != nil {
+		return fmt.Errorf("unsafe Ledger commit: %w", err)
+	}
+
+	if _, err := cleanGitOutput(ctx, repoPath, "write-tree"); err != nil {
+		return fmt.Errorf("snapshot Ledger index (unresolved conflict in index?): %w", err)
+	}
+
+	// Exclude only deletions: every other status can introduce a blob. In
+	// particular, a symlink-to-file type change is T rather than A/M and must not
+	// bypass validation merely because the path already existed.
+	args := []string{"diff", "--cached", "--name-only", "--diff-filter=d", "--no-renames", "-z", "HEAD", "--"}
+	args = append(args, pathspecs...)
+	paths, err := cleanGitOutput(ctx, repoPath, args...)
+	if err != nil {
+		// Managed Ledgers normally have a HEAD. Supporting an unborn clone keeps
+		// the guard fail-closed without making initial bootstrap a special case.
+		if _, headErr := cleanGitOutput(ctx, repoPath, "rev-parse", "--verify", "HEAD"); headErr == nil {
+			return fmt.Errorf("list staged Ledger blobs: %w", err)
+		}
+		args = []string{"ls-files", "--cached", "-z", "--"}
+		args = append(args, pathspecs...)
+		paths, err = cleanGitOutput(ctx, repoPath, args...)
+		if err != nil {
+			return fmt.Errorf("list staged Ledger blobs on unborn branch: %w", err)
+		}
+	}
+
+	for _, path := range splitNUL(paths) {
+		// :./ disambiguates a pathname such as "1:file" from Git's stage
+		// lookup syntax (:1:file). Read the index blob, never worktree bytes.
+		blob, err := cleanGitOutput(ctx, repoPath, "show", ":./"+path)
+		if err != nil {
+			return fmt.Errorf("inspect staged Ledger blob %s: %w", path, err)
+		}
+		if err := ValidateLedgerBlob(path, blob); err != nil {
+			return fmt.Errorf("refusing automatic Ledger commit: %w", err)
+		}
+	}
+	return nil
+}
+
+func isSessionMetaPath(path string) bool {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
+	return len(parts) == 3 && parts[0] == "sessions" && parts[1] != "" && parts[2] == "meta.json"
+}
+
+func splitNUL(data []byte) []string {
+	trimmed := bytes.TrimRight(data, "\x00")
+	if len(trimmed) == 0 {
+		return nil
+	}
+	parts := bytes.Split(trimmed, []byte{0})
+	paths := make([]string, 0, len(parts))
+	for _, part := range parts {
+		paths = append(paths, string(part))
+	}
+	return paths
+}
+
+// cleanGitOutput runs local Git plumbing without RunGit's output sanitization;
+// staged JSON bytes must round-trip byte-for-byte for structural validation.
+func cleanGitOutput(ctx context.Context, repoPath string, args ...string) ([]byte, error) {
+	full := []string{"-C", repoPath, "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"}
+	full = append(full, args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.Dir = repoPath
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
 // ResolveAutostashConflicts clears formatting-only session metadata conflicts
 // left by pull --autostash, which can exit successfully with an unmerged index.
 // It preserves every field from both sides and refuses differing values,

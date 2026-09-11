@@ -138,6 +138,57 @@ func TestRetractOrphanedDrafts_KeepsFreshDraft(t *testing.T) {
 		"a fresh draft is a live session and must never be retracted")
 }
 
+// A cross-machine heartbeat can land after the reaper's optimistic scan but
+// before it acquires the repo lock. The locked revalidation must observe that
+// refresh instead of deleting a session that is live on another machine.
+func TestRetractOrphanedDrafts_RevalidatesHeartbeatAfterLockWait(t *testing.T) {
+	s, ledger := newRetractScheduler(t)
+	const name = "2026-01-01T00-00-testuser-OxRefresh"
+	commitStaleDraft(t, ledger, name, 120*time.Hour)
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	lockDone := make(chan error, 1)
+	go func() {
+		lockDone <- gitutil.WithRepoLock(context.Background(), ledger, func() error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+
+	retractDone := make(chan struct{})
+	go func() {
+		s.retractOrphanedDrafts(context.Background(), ledger)
+		close(retractDone)
+	}()
+	require.Eventually(t, func() bool {
+		if s.ledgerMu.TryLock() {
+			s.ledgerMu.Unlock()
+			return false
+		}
+		return true
+	}, time.Second, time.Millisecond, "reaper must finish its optimistic scan and wait on the repo lock")
+
+	dir := filepath.Join(ledger, "sessions", name)
+	meta, err := lfs.ReadSessionMeta(dir)
+	require.NoError(t, err)
+	refreshedAt := time.Now().UTC()
+	meta.UpdatedAt = &refreshedAt
+	require.NoError(t, lfs.WriteSessionMetaOnly(dir, meta))
+	mustGit(t, ledger, "add", "--sparse", "sessions/"+name+"/meta.json")
+	mustGit(t, ledger, "commit", "--quiet", "-m", "session-draft: refresh "+name)
+	mustGit(t, ledger, "push", "--quiet", "origin", "main")
+
+	close(release)
+	require.NoError(t, <-lockDone)
+	<-retractDone
+
+	assert.DirExists(t, dir, "a heartbeat refreshed while waiting for the lock must survive")
+	assert.Equal(t, "session-draft: refresh "+name, mustGit(t, ledger, "log", "-1", "--format=%s"))
+}
+
 // TestRetractOrphanedDrafts_KeepsDraftWithLocalRecording — a cached transcript is
 // recoverable work owned by upload-retry, not the reaper, even when stale.
 func TestRetractOrphanedDrafts_KeepsDraftWithLocalRecording(t *testing.T) {
