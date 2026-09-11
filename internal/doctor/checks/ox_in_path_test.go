@@ -208,6 +208,29 @@ func TestProbeShellPath_StartupOutputDoesNotMaskTheAnswer(t *testing.T) {
 	assert.NotContains(t, resolved, "welcome", "startup noise must not contaminate the resolved path")
 }
 
+// TestProbeShellPath_UnterminatedStartupOutputDoesNotMaskTheAnswer covers the
+// harder half of the same problem: a startup file that writes WITHOUT a
+// trailing newline. Without a delimiter of our own, the shell's text and the
+// answer share one line ("welcome/bin/sh"), so taking the last line is not
+// enough -- the probe script has to open with a newline to guarantee its
+// answer starts clean.
+func TestProbeShellPath_UnterminatedStartupOutputDoesNotMaskTheAnswer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shells only")
+	}
+	dir := t.TempDir()
+	chattyShell := filepath.Join(dir, "unterminated-shell.sh")
+	require.NoError(t, os.WriteFile(chattyShell,
+		[]byte("#!/bin/sh\nprintf 'welcome'\nexec /bin/sh \"$@\"\n"), 0o755))
+
+	_, err := probeShellPath(context.Background(), chattyShell, "definitely-not-a-real-binary-xyz")
+	assert.ErrorIs(t, err, ErrNotFoundInShell, "unterminated startup noise must not mask an absent binary")
+
+	resolved, err := probeShellPath(context.Background(), chattyShell, "sh")
+	require.NoError(t, err)
+	assert.NotContains(t, resolved, "welcome", "unterminated startup noise must not contaminate the resolved path")
+}
+
 // TestProbeShellPath_SucceedsButSwallowsStdout_IsInconclusive pins that a
 // shell which exits 0 while producing no output is reported as unknown, not
 // as "ox is missing". The probe script always prints either a path or the

@@ -300,9 +300,12 @@ func probeShellPath(ctx context.Context, shellPath, binary string) (string, erro
 		return "", ErrShellProbeInconclusive
 	}
 
-	// The `|| printf` makes a clean not-found exit 0, so a non-zero exit
-	// now means only one thing: the shell itself failed.
-	script := "command -v " + binary + " 2>/dev/null || printf '%s' " + notFoundSentinel
+	// The leading newline guarantees our answer starts its own line even if
+	// a startup file wrote without a trailing one -- otherwise its text and
+	// the answer share a line ("welcome/bin/sh") and no amount of line
+	// splitting can separate them. The `|| printf` makes a clean not-found
+	// exit 0, so a non-zero exit now means only one thing: the shell failed.
+	script := "printf '\\n'; command -v " + binary + " 2>/dev/null || printf '%s' " + notFoundSentinel
 	cmd := exec.CommandContext(ctx, shellPath, "-c", script)
 	cmd.Env = scrubbedShellEnv()
 
