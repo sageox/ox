@@ -77,6 +77,40 @@ build-acceptance: ## Build the exact ox + adapter binaries used by acceptance te
 	@$(GO) build $(ADAPTER_LDFLAGS) -o "$(ACCEPTANCE_DIR)/ox-adapter-claude-code" ./cmd/ox-adapter-claude-code
 
 install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
+	@echo ""
+	@echo "─────────────────────────────────────────────────────────────────────"
+	@echo "  This is a developer build of bleeding-edge HEAD — less tested than"
+	@echo "  a release, and it will not self-update."
+	@echo ""
+	@echo "  For everyday use, install a release instead:"
+	@echo ""
+	@echo "    brew tap sageox/tap && brew install ox        # recommended"
+	@echo "    curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash"
+	@echo ""
+	@echo "  Both self-update via \`ox upgrade\` and keep ox and its 10 adapter"
+	@echo "  binaries together on PATH."
+	@echo "─────────────────────────────────────────────────────────────────────"
+	@case ":$$PATH:" in \
+		*":$(GOPATH)/bin:"*) ;; \
+		*) \
+			shell_name=$$(basename "$${SHELL:-}"); \
+			restart_line=""; \
+			case "$$shell_name" in \
+				zsh) rc_file="~/.zshenv"; path_line="export PATH=\"\$$PATH:$(GOPATH)/bin\"" ;; \
+				bash) rc_file="~/.bashrc"; path_line="export PATH=\"\$$PATH:$(GOPATH)/bin\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change." ;; \
+				fish) rc_file="~/.config/fish/config.fish"; path_line="fish_add_path $(GOPATH)/bin"; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change." ;; \
+				*) rc_file="your shell's startup file"; path_line="export PATH=\"\$$PATH:$(GOPATH)/bin\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change." ;; \
+			esac; \
+			echo ""; \
+			echo "ox is installed at $(GOPATH)/bin/$(BINARY_NAME) but is not on PATH for non-interactive shells."; \
+			echo "AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc."; \
+			echo "Add this line to $$rc_file:"; \
+			echo "    $$path_line"; \
+			[ -n "$$restart_line" ] && echo "$$restart_line"; \
+			echo ""; \
+			;; \
+	esac
+	@echo "Next: run \`$(BINARY_NAME) doctor\` to confirm your AI coworker can actually see this install."
 
 install-ox: ## Install ox to $GOPATH/bin
 	@echo "Installing $(BINARY_NAME) to $(GOPATH)/bin..."

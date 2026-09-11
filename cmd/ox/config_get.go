@@ -52,8 +52,17 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s: %s\n", cli.StyleBold.Render(key), cli.StyleSuccess.Render(cv.Value))
 	fmt.Println()
 
-	// show description
+	// A deprecated setting gets its notice printed here unconditionally —
+	// not only on 'set' — because the coworker most at risk is the one who
+	// set it long ago for privacy reasons and is now auditing, not setting
+	// it again. See ConfigSetting.DeprecationNotice.
 	setting := GetSetting(key)
+	if setting != nil && setting.Deprecated && setting.DeprecationNotice != "" {
+		fmt.Println(cli.StyleWarning.Render(setting.DeprecationNotice))
+		fmt.Println()
+	}
+
+	// show description
 	if setting != nil && setting.LongDescription != "" {
 		fmt.Println(cli.StyleDim.Render(setting.LongDescription))
 		fmt.Println()
@@ -180,6 +189,14 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		key,
 		value,
 		level)
+
+	// The value above is accepted and stored (backward compatibility), but
+	// a deprecated setting has no effect — say so immediately, don't leave
+	// the coworker believing the "✓" means it now does something.
+	if setting := GetSetting(key); setting != nil && setting.Deprecated && setting.DeprecationNotice != "" {
+		fmt.Println()
+		fmt.Println(cli.StyleWarning.Render(setting.DeprecationNotice))
+	}
 
 	return nil
 }
@@ -313,10 +330,20 @@ func runConfigList(cmd *cobra.Command, args []string) error {
 				sourceIndicator = cli.StyleDim.Render(" (default)")
 			}
 
-			fmt.Printf("  %-25s %s%s\n",
+			// A deprecated setting still lists its resolved value (it is
+			// still stored/settable — see D5), but must not look like a
+			// working control. The compact form here; 'ox config get
+			// <key>' prints the full "never had any effect" notice.
+			deprecatedIndicator := ""
+			if setting.Deprecated {
+				deprecatedIndicator = cli.StyleDim.Render(" (deprecated)")
+			}
+
+			fmt.Printf("  %-25s %s%s%s\n",
 				setting.Key+":",
 				cli.StyleSuccess.Render(cv.Value),
-				sourceIndicator)
+				sourceIndicator,
+				deprecatedIndicator)
 		}
 		fmt.Println()
 	}

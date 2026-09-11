@@ -288,6 +288,133 @@ func TestBuildStatusJSON_VisibilityAccessLevelCombinations(t *testing.T) {
 	}
 }
 
+// TestBuildStatusJSON_ProjectTeamIdentity is the red-first proof for fix J
+// item 1 (contract D8/J): before ProjectJSON carried RepoID/TeamID/TeamName,
+// a JSON consumer of `ox status --json` had no way to learn which team or
+// repo a project was bound to at all — the human renderer buried it five
+// sections deep, and JSON exposed nothing.
+func TestBuildStatusJSON_ProjectTeamIdentity(t *testing.T) {
+	t.Parallel()
+
+	gitRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(gitRoot, ".sageox"), 0755))
+	require.NoError(t, config.SaveProjectConfig(gitRoot, &config.ProjectConfig{
+		RepoID:   "repo_abc123",
+		TeamID:   "team_xyz789",
+		TeamName: "Acme Corp",
+	}))
+
+	output := buildStatusJSON(
+		false, nil, nil, "test.sageox.ai", "/tmp/auth.json", false,
+		"/tmp/config", gitRoot, filepath.Join(gitRoot, ".sageox"), true,
+		nil, gitRoot, nil, nil,
+		nil, nil,
+		statusBubblesSummary{},
+	)
+
+	require.NotNil(t, output.Project)
+	assert.Equal(t, "repo_abc123", output.Project.RepoID)
+	assert.Equal(t, "team_xyz789", output.Project.TeamID)
+	assert.Equal(t, "Acme Corp", output.Project.TeamName)
+}
+
+// TestBuildStatusJSON_TeamContextMarksRepoTeam is the proof for fix J item 1's
+// IsRepoTeam flag: a JSON consumer must be able to identify WHICH entry in
+// team_contexts (if any) is this repo's own bound team, and detect a
+// mismatch (project.team_id set but no entry has is_repo_team=true) without
+// re-deriving the comparison itself.
+func TestBuildStatusJSON_TeamContextMarksRepoTeam(t *testing.T) {
+	t.Parallel()
+
+	gitRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(gitRoot, ".sageox"), 0755))
+	require.NoError(t, config.SaveProjectConfig(gitRoot, &config.ProjectConfig{
+		TeamID: "team_repo_owner",
+	}))
+
+	otherTCPath := t.TempDir()
+	repoTCPath := t.TempDir()
+	localCfg := &config.LocalConfig{
+		TeamContexts: []config.TeamContext{
+			{TeamID: "team_other", TeamName: "Other Team", Path: otherTCPath},
+			{TeamID: "team_repo_owner", TeamName: "Repo's Team", Path: repoTCPath},
+		},
+	}
+
+	output := buildStatusJSON(
+		false, nil, nil, "test.sageox.ai", "/tmp/auth.json", false,
+		"/tmp/config", gitRoot, filepath.Join(gitRoot, ".sageox"), true,
+		localCfg, gitRoot, nil, nil,
+		nil, nil,
+		statusBubblesSummary{},
+	)
+
+	require.Len(t, output.TeamContexts, 2)
+	byID := make(map[string]status.TeamContextJSON)
+	for _, tc := range output.TeamContexts {
+		byID[tc.TeamID] = tc
+	}
+	assert.True(t, byID["team_repo_owner"].IsRepoTeam, "the repo's own bound team must be marked")
+	assert.False(t, byID["team_other"].IsRepoTeam, "an unrelated team context must not be marked as this repo's team")
+}
+
+// isolateStatusTestAuth points every auth/config lookup at empty temp
+// directories, so renderGitReposSection's real auth.IsAuthenticatedForEndpoint
+// call deterministically resolves to "not authenticated" instead of
+// depending on whatever happens to be logged in on the machine running the
+// test.
+func isolateStatusTestAuth(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("OX_XDG_ENABLE", "1")
+}
+
+// TestRenderGitReposSection_TeamBoundButNotVisible is the red-first proof
+// for fix J item 2 (contract D8/J): a repo whose config.json names a team_id
+// that this account cannot see (wrong account, revoked access, or simply
+// never fetched) rendered identically to a repo that was NEVER bound to any
+// team — both said "Status: not configured". A coworker who successfully
+// recorded sessions to a team status can't see would get no signal at all
+// that anything was different about their setup.
+func TestRenderGitReposSection_TeamBoundButNotVisible(t *testing.T) {
+	isolateStatusTestAuth(t)
+
+	gitRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(gitRoot, ".sageox"), 0755))
+	require.NoError(t, config.SaveProjectConfig(gitRoot, &config.ProjectConfig{
+		TeamID:   "team_ghost",
+		Endpoint: "http://127.0.0.1:1", // deliberately unreachable — never actually dialed while unauthenticated
+	}))
+
+	out := renderGitReposSection(nil, gitRoot, nil, statusBubblesSummary{}, false)
+
+	assert.Contains(t, out, "team_ghost", "the bound team id must be surfaced even when this account can't see the team")
+	assert.Contains(t, out, "not visible to this account", "must name the mismatch explicitly")
+	assert.NotContains(t, out, "not configured", "must not render identically to a repo that was never bound to a team")
+}
+
+// TestRenderGitReposSection_NeverConfigured is the negative control for the
+// above: a repo with no team_id at all must still say "not configured", and
+// must NOT claim a mismatch that doesn't exist.
+func TestRenderGitReposSection_NeverConfigured(t *testing.T) {
+	isolateStatusTestAuth(t)
+
+	gitRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(gitRoot, ".sageox"), 0755))
+	require.NoError(t, config.SaveProjectConfig(gitRoot, &config.ProjectConfig{
+		Endpoint: "http://127.0.0.1:1",
+	}))
+
+	out := renderGitReposSection(nil, gitRoot, nil, statusBubblesSummary{}, false)
+
+	assert.Contains(t, out, "not configured")
+	assert.NotContains(t, out, "not visible to this account", "a repo never bound to a team must not claim a mismatch")
+}
+
 func TestShortenPathViaSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlinks require Developer Mode on Windows")

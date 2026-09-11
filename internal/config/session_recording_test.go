@@ -309,6 +309,71 @@ func TestNormalizeSessionPublishing(t *testing.T) {
 	assert.Equal(t, SessionPublishingAuto, NormalizeSessionPublishing("bogus"))
 }
 
+// writeUserSessionPublishing writes a top-level session_publishing key to
+// the isolated user config.yaml. XDG_CONFIG_HOME must already be set (see
+// kbTestEnv).
+func writeUserSessionPublishing(t *testing.T, mode string) {
+	t.Helper()
+	xdg := os.Getenv("XDG_CONFIG_HOME")
+	require.NotEmpty(t, xdg, "XDG_CONFIG_HOME must be set first")
+	dir := filepath.Join(xdg, "sageox")
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	body := "session_publishing: " + mode + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0644))
+}
+
+// TestResolveSessionPublishing_PrecedenceMatrix pins the precedence chain
+// for session_publishing (contract D13, bead ox-6p5y.13):
+// OX_SESSION_PUBLISHING > user config > repo config > default(auto),
+// mirroring ResolveSessionRecording's env-wins / user-beats-repo rules
+// exactly. Before the user-config layer existed, ResolveSessionPublishing
+// consulted project config only — 'ox config set session_publishing manual'
+// at the user level would report success but have zero effect on whether
+// the transcript uploads, reproducing exactly the "setting lists but
+// doesn't set" defect class fixed for context_git.auto_push/auto_commit
+// (bead ox-6p5y.11). The env var is the pipeline/automation escape hatch
+// (D13), approved after an initial "no new OX_* var without review" hold.
+//
+// Run red-first against the pre-fix resolver (project-config-only, no user
+// or env layer): every "user" and "env" case here fails because those
+// layers are never consulted. Failure prevented: a user-level publishing
+// preference, or a pipeline's env override, silently not taking effect.
+func TestResolveSessionPublishing_PrecedenceMatrix(t *testing.T) {
+	tests := []struct {
+		name        string
+		envMode     string
+		userMode    string
+		projectMode string
+		wantMode    string
+		wantSource  SessionRecordingSource
+	}{
+		{name: "env wins over everything", envMode: "manual", userMode: "auto", projectMode: "auto", wantMode: SessionPublishingManual, wantSource: SessionRecordingSourceEnv},
+		{name: "env-only", envMode: "manual", wantMode: SessionPublishingManual, wantSource: SessionRecordingSourceEnv},
+		{name: "user-only", userMode: "manual", wantMode: SessionPublishingManual, wantSource: SessionRecordingSourceUser},
+		{name: "repo-only", projectMode: "manual", wantMode: SessionPublishingManual, wantSource: SessionRecordingSourceRepo},
+		{name: "user overrides repo", userMode: "manual", projectMode: "auto", wantMode: SessionPublishingManual, wantSource: SessionRecordingSourceUser},
+		{name: "neither set defaults to auto", wantMode: SessionPublishingAuto, wantSource: SessionRecordingSourceDefault},
+		{name: "invalid user value normalizes to auto but source stays user", userMode: "bogus", wantMode: SessionPublishingAuto, wantSource: SessionRecordingSourceUser},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir, _, _ := kbTestEnv(t)
+			if tt.projectMode != "" {
+				require.NoError(t, SaveProjectConfig(tmpDir, &ProjectConfig{RepoID: "repo_x", SessionPublishing: tt.projectMode}))
+			}
+			if tt.userMode != "" {
+				writeUserSessionPublishing(t, tt.userMode)
+			}
+			if tt.envMode != "" {
+				t.Setenv(EnvSessionPublishing, tt.envMode)
+			}
+			resolved := ResolveSessionPublishing(tmpDir)
+			assert.Equal(t, tt.wantMode, resolved.Mode)
+			assert.Equal(t, tt.wantSource, resolved.Source)
+		})
+	}
+}
+
 func boolPtr(b bool) *bool {
 	return &b
 }

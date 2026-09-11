@@ -248,6 +248,15 @@ func autoSessionURL(gitRoot string, allowUnconfirmed bool) (url string, unconfir
 	if state.LifecycleRegistrationState == "pending" && !allowUnconfirmed {
 		return "", true // server has not observed it — withhold, signal the caller
 	}
+	if effectiveSessionPublishing() == config.SessionPublishingManual {
+		// Manual publishing suppresses start-registration, so the server has
+		// never heard of this session and the /c/ link 404s. Not the same as
+		// "pending" — that state resolves on a retry, this one never does
+		// until an explicit upload — so it is not an unconfirmed link the
+		// caller may choose to force. A PR body outlives the session; a dead
+		// link in one is permanent.
+		return "", false
+	}
 	return u, false
 }
 

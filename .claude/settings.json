@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=claude-code ox agent hook PostToolUse 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi",
+            "command": "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent hook PostToolUse 2>&1 || true; else p=\"\"; [ -n \"$GOBIN\" ] && [ -x \"$GOBIN/ox\" ] && p=\"$GOBIN\"; [ -z \"$p\" ] && if command -v go >/dev/null 2>&1; then gp=\"$(go env GOPATH 2>/dev/null)/bin\"; [ -x \"$gp/ox\" ] && p=\"$gp\"; fi; [ -z \"$p\" ] && [ -x \"$HOME/go/bin/ox\" ] && p=\"$HOME/go/bin\"; [ -z \"$p\" ] && [ -x \"$HOME/.local/bin/ox\" ] && p=\"$HOME/.local/bin\"; [ -z \"$p\" ] && [ -x \"/usr/local/bin/ox\" ] && p=\"/usr/local/bin\"; [ -z \"$p\" ] && [ -x \"/opt/homebrew/bin/ox\" ] && p=\"/opt/homebrew/bin\"; if [ -n \"$p\" ]; then echo 'ox is installed at '\"$p\"'/ox but is not on PATH for non-interactive shells.'; echo 'AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc.'; echo 'Add this line to ~/.zshenv:'; echo '    export PATH=\"$PATH:'\"$p\"'\"'; else echo 'ox is not installed. Install a release: brew tap sageox/tap && brew install ox, or curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash'; fi; fi",
             "type": "command"
           }
         ],
@@ -15,11 +15,11 @@
       {
         "hooks": [
           {
-            "command": "if command -v bd \u003e/dev/null 2\u003e\u00261; then bd prime 2\u003e\u00261 || true; else echo '{\"sageox\": {\"notice\": \"This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.\"}}'; fi",
+            "command": "if command -v bd >/dev/null 2>&1; then bd prime 2>&1 || true; else echo '{\"sageox\": {\"notice\": \"This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.\"}}'; fi",
             "type": "command"
           },
           {
-            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=claude-code ox agent hook PreCompact 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi",
+            "command": "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent hook PreCompact 2>&1 || true; else p=\"\"; [ -n \"$GOBIN\" ] && [ -x \"$GOBIN/ox\" ] && p=\"$GOBIN\"; [ -z \"$p\" ] && if command -v go >/dev/null 2>&1; then gp=\"$(go env GOPATH 2>/dev/null)/bin\"; [ -x \"$gp/ox\" ] && p=\"$gp\"; fi; [ -z \"$p\" ] && [ -x \"$HOME/go/bin/ox\" ] && p=\"$HOME/go/bin\"; [ -z \"$p\" ] && [ -x \"$HOME/.local/bin/ox\" ] && p=\"$HOME/.local/bin\"; [ -z \"$p\" ] && [ -x \"/usr/local/bin/ox\" ] && p=\"/usr/local/bin\"; [ -z \"$p\" ] && [ -x \"/opt/homebrew/bin/ox\" ] && p=\"/opt/homebrew/bin\"; if [ -n \"$p\" ]; then echo 'ox is installed at '\"$p\"'/ox but is not on PATH for non-interactive shells.'; echo 'AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc.'; echo 'Add this line to ~/.zshenv:'; echo '    export PATH=\"$PATH:'\"$p\"'\"'; else echo 'ox is not installed. Install a release: brew tap sageox/tap && brew install ox, or curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash'; fi; fi",
             "type": "command"
           }
         ],
@@ -30,7 +30,7 @@
       {
         "hooks": [
           {
-            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=claude-code ox agent hook SessionEnd 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi",
+            "command": "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent hook SessionEnd 2>&1 || true; else p=\"\"; [ -n \"$GOBIN\" ] && [ -x \"$GOBIN/ox\" ] && p=\"$GOBIN\"; [ -z \"$p\" ] && if command -v go >/dev/null 2>&1; then gp=\"$(go env GOPATH 2>/dev/null)/bin\"; [ -x \"$gp/ox\" ] && p=\"$gp\"; fi; [ -z \"$p\" ] && [ -x \"$HOME/go/bin/ox\" ] && p=\"$HOME/go/bin\"; [ -z \"$p\" ] && [ -x \"$HOME/.local/bin/ox\" ] && p=\"$HOME/.local/bin\"; [ -z \"$p\" ] && [ -x \"/usr/local/bin/ox\" ] && p=\"/usr/local/bin\"; [ -z \"$p\" ] && [ -x \"/opt/homebrew/bin/ox\" ] && p=\"/opt/homebrew/bin\"; if [ -n \"$p\" ]; then echo 'ox is installed at '\"$p\"'/ox but is not on PATH for non-interactive shells.'; echo 'AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc.'; echo 'Add this line to ~/.zshenv:'; echo '    export PATH=\"$PATH:'\"$p\"'\"'; else echo 'ox is not installed. Install a release: brew tap sageox/tap && brew install ox, or curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash'; fi; fi",
             "type": "command"
           }
         ],
@@ -41,11 +41,11 @@
       {
         "hooks": [
           {
-            "command": "if command -v bd \u003e/dev/null 2\u003e\u00261; then bd prime 2\u003e\u00261 || true; else echo '{\"sageox\": {\"notice\": \"This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.\"}}'; fi",
+            "command": "if command -v bd >/dev/null 2>&1; then bd prime 2>&1 || true; else echo '{\"sageox\": {\"notice\": \"This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.\"}}'; fi",
             "type": "command"
           },
           {
-            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=claude-code ox agent hook SessionStart 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi",
+            "command": "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent hook SessionStart 2>&1 || true; else p=\"\"; [ -n \"$GOBIN\" ] && [ -x \"$GOBIN/ox\" ] && p=\"$GOBIN\"; [ -z \"$p\" ] && if command -v go >/dev/null 2>&1; then gp=\"$(go env GOPATH 2>/dev/null)/bin\"; [ -x \"$gp/ox\" ] && p=\"$gp\"; fi; [ -z \"$p\" ] && [ -x \"$HOME/go/bin/ox\" ] && p=\"$HOME/go/bin\"; [ -z \"$p\" ] && [ -x \"$HOME/.local/bin/ox\" ] && p=\"$HOME/.local/bin\"; [ -z \"$p\" ] && [ -x \"/usr/local/bin/ox\" ] && p=\"/usr/local/bin\"; [ -z \"$p\" ] && [ -x \"/opt/homebrew/bin/ox\" ] && p=\"/opt/homebrew/bin\"; if [ -n \"$p\" ]; then echo 'ox is installed at '\"$p\"'/ox but is not on PATH for non-interactive shells.'; echo 'AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc.'; echo 'Add this line to ~/.zshenv:'; echo '    export PATH=\"$PATH:'\"$p\"'\"'; else echo 'ox is not installed. Install a release: brew tap sageox/tap && brew install ox, or curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash'; fi; fi",
             "type": "command"
           }
         ],
@@ -56,7 +56,7 @@
       {
         "hooks": [
           {
-            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=claude-code ox agent hook Stop 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi",
+            "command": "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent hook Stop 2>&1 || true; else p=\"\"; [ -n \"$GOBIN\" ] && [ -x \"$GOBIN/ox\" ] && p=\"$GOBIN\"; [ -z \"$p\" ] && if command -v go >/dev/null 2>&1; then gp=\"$(go env GOPATH 2>/dev/null)/bin\"; [ -x \"$gp/ox\" ] && p=\"$gp\"; fi; [ -z \"$p\" ] && [ -x \"$HOME/go/bin/ox\" ] && p=\"$HOME/go/bin\"; [ -z \"$p\" ] && [ -x \"$HOME/.local/bin/ox\" ] && p=\"$HOME/.local/bin\"; [ -z \"$p\" ] && [ -x \"/usr/local/bin/ox\" ] && p=\"/usr/local/bin\"; [ -z \"$p\" ] && [ -x \"/opt/homebrew/bin/ox\" ] && p=\"/opt/homebrew/bin\"; if [ -n \"$p\" ]; then echo 'ox is installed at '\"$p\"'/ox but is not on PATH for non-interactive shells.'; echo 'AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc.'; echo 'Add this line to ~/.zshenv:'; echo '    export PATH=\"$PATH:'\"$p\"'\"'; else echo 'ox is not installed. Install a release: brew tap sageox/tap && brew install ox, or curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash'; fi; fi",
             "type": "command"
           }
         ],
@@ -67,7 +67,7 @@
       {
         "hooks": [
           {
-            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=claude-code ox agent hook UserPromptSubmit 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi",
+            "command": "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent hook UserPromptSubmit 2>&1 || true; else p=\"\"; [ -n \"$GOBIN\" ] && [ -x \"$GOBIN/ox\" ] && p=\"$GOBIN\"; [ -z \"$p\" ] && if command -v go >/dev/null 2>&1; then gp=\"$(go env GOPATH 2>/dev/null)/bin\"; [ -x \"$gp/ox\" ] && p=\"$gp\"; fi; [ -z \"$p\" ] && [ -x \"$HOME/go/bin/ox\" ] && p=\"$HOME/go/bin\"; [ -z \"$p\" ] && [ -x \"$HOME/.local/bin/ox\" ] && p=\"$HOME/.local/bin\"; [ -z \"$p\" ] && [ -x \"/usr/local/bin/ox\" ] && p=\"/usr/local/bin\"; [ -z \"$p\" ] && [ -x \"/opt/homebrew/bin/ox\" ] && p=\"/opt/homebrew/bin\"; if [ -n \"$p\" ]; then echo 'ox is installed at '\"$p\"'/ox but is not on PATH for non-interactive shells.'; echo 'AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc.'; echo 'Add this line to ~/.zshenv:'; echo '    export PATH=\"$PATH:'\"$p\"'\"'; else echo 'ox is not installed. Install a release: brew tap sageox/tap && brew install ox, or curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash'; fi; fi",
             "type": "command"
           }
         ],

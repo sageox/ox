@@ -146,6 +146,13 @@ func isExpectedEmptyRepoIssue(category string, check checkResult) bool {
 	if strings.Contains(check.name, "Git remotes") {
 		return true
 	}
+	// The go-test binary lives in a throwaway build dir, so it is genuinely
+	// off-PATH with no adapter siblings beside it. Both checks are reporting
+	// the truth about the test binary, not about a user's install. The sibling
+	// test exempts "ox in PATH" the same way in filterTestEnvironmentIssues.
+	if check.name == "ox in PATH" || check.name == "Adapter binaries" {
+		return true
+	}
 	// Discovery not run is optional/expected
 	if strings.Contains(check.name, "discovery") {
 		return true
@@ -379,6 +386,12 @@ func filterTestEnvironmentIssues(issues []string) []string {
 		}
 		// skip ox in PATH - not expected in test environment
 		if strings.Contains(issue, "ox in PATH") {
+			continue
+		}
+		// same reason: the go-test binary lives in a throwaway build dir with
+		// no ox-adapter-* siblings beside it. The check is telling the truth
+		// about the test binary, not about a user's install.
+		if strings.Contains(issue, "Adapter binaries") {
 			continue
 		}
 		// skip discovery - optional and not run in tests

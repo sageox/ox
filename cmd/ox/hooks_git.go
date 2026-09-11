@@ -24,7 +24,7 @@ const (
 # appends configured trailers (Co-Authored-By, SageOx-Session) to commits
 if command -v ox >/dev/null 2>&1; then
   ox hooks commit-msg --msg-file "$1" --source "${2:-}" 2>/dev/null || true
-fi
+` + oxGitHookNotOnPathFallback + `
 # end ox hook`
 	oxPrepareCommitMsgProbe = "ox hooks commit-msg"
 
@@ -35,7 +35,7 @@ fi
 # appends HEAD SHA to active recording's ProducedCommits index
 if command -v ox >/dev/null 2>&1; then
   ox hooks post-commit 2>/dev/null || true
-fi
+` + oxGitHookNotOnPathFallback + `
 # end ox hook`
 	oxPostCommitProbe = "ox hooks post-commit"
 
@@ -47,7 +47,7 @@ fi
 # rewrites SHAs in active recording's ProducedCommits on amend/rebase
 if command -v ox >/dev/null 2>&1; then
   ox hooks post-rewrite --mode "${1:-}" 2>/dev/null || true
-fi
+` + oxGitHookNotOnPathFallback + `
 # end ox hook`
 	oxPostRewriteProbe = "ox hooks post-rewrite"
 
@@ -61,7 +61,7 @@ fi
 # records PR + issue linkage for the active recording from the pushed range
 if command -v ox >/dev/null 2>&1; then
   ox hooks pre-push --remote "${1:-}" --url "${2:-}" 2>/dev/null || true
-fi
+` + oxGitHookNotOnPathFallback + `
 # end ox hook`
 	oxPrePushProbe = "ox hooks pre-push"
 
@@ -70,6 +70,40 @@ fi
 	// an alias for the prepare-commit-msg marker so external readers don't
 	// silently break.
 	oxHookMarkerStart = oxPrepareCommitMsgMarkerStart
+
+	// oxGitHookNotOnPathFallback is the shared else-branch for every
+	// ox-managed git hook above. Previously these hooks had no else at all:
+	// `command -v ox` failing meant total silence, every commit, forever —
+	// even though the real cause is usually that ox IS installed but the
+	// hook shell (a non-interactive `sh`, which reads none of a user's
+	// interactive rc files) can't see it on PATH.
+	//
+	// Probe the usual install locations — $GOBIN (when set) first, since
+	// it overrides GOPATH/bin for `go install` and costs nothing but an
+	// env var read — and name the real fix instead of staying silent.
+	// Only speak on the failure path — the success path (ox found, `then`
+	// branch) stays exactly as quiet as before, since these hooks fire on
+	// every commit/push.
+	oxGitHookNotOnPathFallback = `else
+  p=""
+  [ -n "$GOBIN" ] && [ -x "$GOBIN/ox" ] && p="$GOBIN"
+  if [ -z "$p" ] && command -v go >/dev/null 2>&1; then
+    gp="$(go env GOPATH 2>/dev/null)/bin"
+    [ -x "$gp/ox" ] && p="$gp"
+  fi
+  [ -z "$p" ] && [ -x "$HOME/go/bin/ox" ] && p="$HOME/go/bin"
+  [ -z "$p" ] && [ -x "$HOME/.local/bin/ox" ] && p="$HOME/.local/bin"
+  [ -z "$p" ] && [ -x "/usr/local/bin/ox" ] && p="/usr/local/bin"
+  [ -z "$p" ] && [ -x "/opt/homebrew/bin/ox" ] && p="/opt/homebrew/bin"
+  if [ -n "$p" ]; then
+    echo "ox is installed at $p/ox but is not on PATH for non-interactive shells." >&2
+    echo "AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc." >&2
+    echo "Add this line to ~/.zshenv:" >&2
+    echo "    export PATH=\"\$PATH:$p\"" >&2
+  else
+    echo "ox is not installed. Install a release: brew tap sageox/tap && brew install ox, or curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash" >&2
+  fi
+fi`
 )
 
 // hookSpec describes one ox-managed git hook section.

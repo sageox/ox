@@ -54,12 +54,17 @@ brew install ox
 curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash
 ```
 
-**From source:**
+**From source (contributor / developer path):**
 
 ```bash
 git clone https://github.com/sageox/ox.git && cd ox
 make build && make install
 ```
+
+This builds bleeding-edge HEAD — less tested than a release, and it won't
+self-update. Use Homebrew or the install script above for everyday use; both
+put `ox` and its 10 adapter binaries on PATH together and self-update via
+`ox upgrade`.
 
 Verify with `ox version`.
 
@@ -140,7 +145,11 @@ shell exports. The full pattern list lives in
 Sessions are written to your local cache first — `~/.cache/sageox/` — then synced
 to your team's shared history, a git repository hosted on sageox.ai. Content is
 stored as LFS blobs; only metadata is git-tracked. **In the current version,
-there is no local-only mode.**
+there is no self-hosted or local-only ledger** — the shared history always
+lives on sageox.ai. You can still keep an individual session from being
+published to it (see
+[Turning it off, or recording manually](#turning-it-off-or-recording-manually)
+below), but there's no way to run the ledger itself somewhere you control.
 
 If you're offline or an upload fails, the session stays cached and
 `ox doctor --fix` retries it later. Cached sessions persist until uploaded or
@@ -186,6 +195,22 @@ including under `disabled`, which stops automatic capture but is not a hard lock
 
 Your user-level setting overrides every repo and team setting. A `disabled` you
 set for yourself can't be undone by a repo you cloned or a team you joined.
+
+**Can I keep a session from being published automatically?** That's a separate
+setting from the recording mode above — `session_publishing` controls what
+happens when a session *stops*, not whether it starts:
+
+```bash
+ox config set session_publishing manual   # don't auto-publish when a session stops
+```
+
+With `session_publishing: manual`, a session is not published when it stops —
+it isn't pushed to the shared ledger until you explicitly run `ox session
+upload`. This is different from `session_recording: disabled` above, which
+stops automatic capture entirely; `manual` publishing still records, it just
+doesn't publish automatically. (Don't confuse the two `manual` values:
+`session_recording: manual` changes when capture *starts*; `session_publishing:
+manual` changes whether a finished session *publishes*.)
 
 Full detail: [Privacy Policy](https://sageox.ai/privacy) ·
 [Terms of Service](https://sageox.ai/terms) ·

@@ -698,6 +698,29 @@ func TestCleanupLocalSettingsOxHooks_NoopsWhenNoHooks(t *testing.T) {
 
 // --- hasLocalSettingsOxHooks ---
 
+// mustSettingsJSONWithCommand renders a minimal .claude/settings.local.json
+// containing a single SessionStart hook running cmd, encoded properly so any
+// quoting in cmd survives.
+func mustSettingsJSONWithCommand(cmd string) string {
+	payload := map[string]any{
+		"hooks": map[string]any{
+			"SessionStart": []any{
+				map[string]any{
+					"matcher": "",
+					"hooks": []any{
+						map[string]any{"command": cmd, "type": "command"},
+					},
+				},
+			},
+		},
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
 func TestHasLocalSettingsOxHooks(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -706,7 +729,11 @@ func TestHasLocalSettingsOxHooks(t *testing.T) {
 	}{
 		{
 			"has ox hook",
-			`{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"command":"` + oxPrimeLegacy + `","type":"command"}]}]}}`,
+			// Built with the JSON encoder, not string concatenation. The hook
+			// command legitimately contains double quotes (it exports PATH), and
+			// hand-splicing it into a JSON literal produces malformed JSON — which
+			// makes the detector look broken when it is the fixture that is.
+			mustSettingsJSONWithCommand(oxPrimeLegacy),
 			true,
 		},
 		{

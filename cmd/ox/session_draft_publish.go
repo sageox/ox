@@ -79,6 +79,20 @@ func maybePublishSessionDraft(ctx *HookContext) {
 		resolved = &config.ResolvedSessionDraft{Enabled: false}
 	}
 
+	// session_publishing: manual means nothing about this session leaves the
+	// machine until the user explicitly uploads it. A draft is a real ledger
+	// commit (session name, agent id/type, model, repo id, username, title)
+	// that the daemon's sync cycle pushes to the remote ~60s later — exactly
+	// the implicit publish manual mode promises will not happen. Checked here
+	// (after the cheap turn-count early-out above, so the common case below
+	// DraftPublishTurn still costs nothing) rather than at the top of the
+	// function, because the turn counter must still increment for every
+	// session regardless of publishing mode — see the comment on the
+	// UpdateRecordingStateForAgent call above.
+	if config.GetSessionPublishing(ctx.ProjectRoot) == config.SessionPublishingManual {
+		resolved = &config.ResolvedSessionDraft{Enabled: false}
+	}
+
 	action := draftDecision(state.TurnCount, state.DraftPublishedTurn, state.DraftPublishedAt != nil, resolved)
 	if action == draftActionNone {
 		return

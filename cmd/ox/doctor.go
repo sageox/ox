@@ -985,6 +985,10 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	oxPathCheck := checks.NewOxInPathCheck(nil)
 	ecosystemChecks := []checkResult{
 		convertDoctorResult(oxPathCheck.Run(ctx, false)),
+		// runs unconditionally: the pre-existing adapter guard only fires
+		// during an active recording, i.e. after a symlinked or partially
+		// copied install has already silently skipped every hook
+		checkAdapterSiblings(),
 	}
 	categories = append(categories, checkCategory{
 		name:   "Ecosystem",
@@ -1156,6 +1160,7 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 				checkAPIConnectivity(),
 				checkAPIEndpoint(opts.fix),
 				checkTeamRegistrationWithOpts(opts),
+				checkTeamVisibility(),
 			},
 		})
 

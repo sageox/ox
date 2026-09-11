@@ -24,14 +24,15 @@ Commands:
 
 Available settings:
   session_recording        disabled | manual | auto
+  session_publishing       auto | manual
   github_sync              enabled | disabled
   github_sync_prs          enabled | disabled
   github_sync_issues       enabled | disabled
   murmuring                manual | auto
   telemetry                on | off
   tips                     on | off
-  context_git.auto_commit  on | off
-  context_git.auto_push    on | off
+  context_git.auto_commit  on | off   (deprecated — never had any effect)
+  context_git.auto_push    on | off   (deprecated — never had any effect)
   pr_visuals.rich          on | off
   pr_visuals.theme         light | dark
   attribution.commit       (any text, "" to disable)

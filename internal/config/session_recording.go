@@ -219,20 +219,61 @@ type ResolvedSessionPublishing struct {
 }
 
 // ResolveSessionPublishing determines the effective session publishing mode.
-// Priority: project config > "auto" (default)
+//
+// Precedence (low → high), mirroring ResolveSessionRecording exactly
+// (contract D13, bead ox-6p5y.13):
+//  1. default (auto).
+//  2. team config (team context config.toml).
+//  3. project config (.sageox/config.json).
+//  4. user config (~/.config/sageox/config.yaml).
+//  5. OX_SESSION_PUBLISHING env var (highest — the pipeline/automation escape hatch).
 //
 // "auto" uploads to ledger on session stop (backward compatible default).
-// "manual" saves locally without uploading.
+// "manual" holds the session locally until the user runs an explicit
+// upload — suppressing not just the transcript upload but the mid-session
+// draft placeholder and the session-started cloud notification too (D12;
+// enforced by their own call sites, not here).
+//
+// User config deliberately beats project and team config so an individual
+// can opt out of publishing regardless of what the repo or team says.
+// Before this, 'ox config set session_publishing' had nowhere to write that
+// took effect at all: the setting wasn't in the catalog, and even
+// hand-editing the user config file was inert because this resolver only
+// ever consulted project config.
 func ResolveSessionPublishing(projectRoot string) *ResolvedSessionPublishing {
-	// check project config (.sageox/config.json)
+	// OX_SESSION_PUBLISHING env var — highest priority (pipelines / automation).
+	if envMode := os.Getenv(EnvSessionPublishing); envMode != "" {
+		return &ResolvedSessionPublishing{
+			Mode:   NormalizeSessionPublishing(envMode),
+			Source: SessionRecordingSourceEnv,
+		}
+	}
+
+	// user config (~/.config/sageox/config.yaml).
+	if userCfg, err := LoadUserConfig(); err == nil && userCfg != nil && userCfg.SessionPublishing != "" {
+		return &ResolvedSessionPublishing{
+			Mode:   NormalizeSessionPublishing(userCfg.SessionPublishing),
+			Source: SessionRecordingSourceUser,
+		}
+	}
+
+	// project config (.sageox/config.json)
 	if projectRoot != "" {
 		projectCfg, err := LoadProjectConfig(projectRoot)
-		if err == nil && projectCfg != nil {
-			if projectCfg.SessionPublishing != "" {
-				return &ResolvedSessionPublishing{
-					Mode:   NormalizeSessionPublishing(projectCfg.SessionPublishing),
-					Source: SessionRecordingSourceRepo,
-				}
+		if err == nil && projectCfg != nil && projectCfg.SessionPublishing != "" {
+			return &ResolvedSessionPublishing{
+				Mode:   NormalizeSessionPublishing(projectCfg.SessionPublishing),
+				Source: SessionRecordingSourceRepo,
+			}
+		}
+	}
+
+	// team config (from team context)
+	if projectRoot != "" {
+		if teamMode := loadTeamSessionPublishing(projectRoot); teamMode != "" {
+			return &ResolvedSessionPublishing{
+				Mode:   NormalizeSessionPublishing(teamMode),
+				Source: SessionRecordingSourceTeam,
 			}
 		}
 	}
@@ -242,6 +283,23 @@ func ResolveSessionPublishing(projectRoot string) *ResolvedSessionPublishing {
 		Mode:   SessionPublishingAuto,
 		Source: SessionRecordingSourceDefault,
 	}
+}
+
+// loadTeamSessionPublishing loads the session publishing setting from team
+// context. Mirrors loadTeamSessionRecording exactly. Returns empty string
+// if no team context or no setting configured.
+func loadTeamSessionPublishing(projectRoot string) string {
+	tc := FindRepoTeamContext(projectRoot)
+	if tc == nil || tc.Path == "" {
+		return ""
+	}
+
+	teamCfg, err := LoadTeamConfig(tc.Path)
+	if err != nil || teamCfg == nil {
+		return ""
+	}
+
+	return teamCfg.SessionPublishing
 }
 
 // GetSessionPublishing is a convenience function that returns just the publishing mode string.

@@ -555,6 +555,11 @@ func checkTeamRegistrationWithOpts(opts doctorOptions) checkResult {
 				"       • Cross-repo knowledge sharing across teammates")
 	}
 
+	// prefer the human-readable name: a raw team_xxx id is unactionable when a
+	// user is trying to work out WHICH team their sessions are landing in
+	if cfg.TeamName != "" {
+		return PassedCheck("Team registration", fmt.Sprintf("%s (%s)", cfg.TeamName, cfg.TeamID))
+	}
 	return PassedCheck("Team registration", cfg.TeamID)
 }
 

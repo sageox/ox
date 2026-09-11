@@ -43,32 +43,17 @@ func ValidateDisplayName(name string) error {
 	return nil
 }
 
-// ContextGitConfig holds settings for context git repo operations.
-// These control automatic commit/push behavior during session operations.
+// ContextGitConfig holds the deprecated context_git.auto_commit /
+// context_git.auto_push settings. DEPRECATED (bead ox-6p5y.11): these were
+// never wired to any behavior — see cmd/ox/config_settings.go's catalog
+// entries for the deprecation notice. The struct exists only so the
+// key stays resolvable/settable (backward compatibility + an honest "this
+// never took effect" message) via cmd/ox/config_settings.go's
+// ResolveConfigValue/setUserConfig/unsetUserConfig, which read and write
+// these fields directly. Do not add new callers; do not wire this to sync.
 type ContextGitConfig struct {
-	// AutoCommit controls whether to commit on session stop / session end.
-	// Default: true
 	AutoCommit *bool `yaml:"auto_commit,omitempty"`
-
-	// AutoPush controls whether to push after commit.
-	// Default: true
-	AutoPush *bool `yaml:"auto_push,omitempty"`
-}
-
-// IsAutoCommitEnabled returns true if auto-commit is enabled (default: true)
-func (c *ContextGitConfig) IsAutoCommitEnabled() bool {
-	if c == nil || c.AutoCommit == nil {
-		return true
-	}
-	return *c.AutoCommit
-}
-
-// IsAutoPushEnabled returns true if auto-push is enabled (default: true)
-func (c *ContextGitConfig) IsAutoPushEnabled() bool {
-	if c == nil || c.AutoPush == nil {
-		return true
-	}
-	return *c.AutoPush
+	AutoPush   *bool `yaml:"auto_push,omitempty"`
 }
 
 // SessionsConfig holds settings for session recording.
@@ -317,12 +302,13 @@ func (c *AgentWorkerConfig) WithDefaults() *AgentWorkerConfig {
 
 // UserConfig holds user-level configuration from config.yaml
 type UserConfig struct {
-	DisplayName       string             `yaml:"display_name,omitempty"`
-	TipsEnabled       *bool              `yaml:"tips_enabled,omitempty"`
-	TelemetryEnabled  *bool              `yaml:"telemetry_enabled,omitempty"`
-	SessionTermsShown *bool              `yaml:"session_terms_shown,omitempty"`
-	Attribution       *Attribution       `yaml:"attribution,omitempty"`
-	Badge             *BadgeConfig       `yaml:"badge,omitempty"`
+	DisplayName       string       `yaml:"display_name,omitempty"`
+	TipsEnabled       *bool        `yaml:"tips_enabled,omitempty"`
+	TelemetryEnabled  *bool        `yaml:"telemetry_enabled,omitempty"`
+	SessionTermsShown *bool        `yaml:"session_terms_shown,omitempty"`
+	Attribution       *Attribution `yaml:"attribution,omitempty"`
+	Badge             *BadgeConfig `yaml:"badge,omitempty"`
+	// ContextGit is DEPRECATED (bead ox-6p5y.11) — see ContextGitConfig.
 	ContextGit        *ContextGitConfig  `yaml:"context_git,omitempty"`
 	Sessions          *SessionsConfig    `yaml:"sessions,omitempty"`
 	AgentWorker       *AgentWorkerConfig `yaml:"agent_worker,omitempty"`
@@ -345,6 +331,14 @@ type UserConfig struct {
 	// /c/<session_id> link resolves before session stop. "on" (default) or
 	// "off". See internal/config/session_draft.go and ADR-029.
 	SessionDraft string `yaml:"session_draft,omitempty"`
+
+	// SessionPublishing controls what happens to a recording when the
+	// session stops: "auto" (default) uploads it to the ledger; "manual"
+	// saves it locally only, so the user must run 'ox session upload'
+	// explicitly. This is the user-level override — it takes precedence
+	// over the repo's .sageox/config.json session_publishing setting. See
+	// internal/config/session_recording.go and ResolveSessionPublishing.
+	SessionPublishing string `yaml:"session_publishing,omitempty"`
 
 	// Hooks holds per-hook-event policy switches. Today only carries the
 	// UserPromptSubmit cloud_query opt-in; see HooksConfig for rationale.
@@ -459,40 +453,6 @@ func (c *UserConfig) IsTelemetryEnabled() bool {
 // SetTelemetryEnabled sets the telemetry preference
 func (c *UserConfig) SetTelemetryEnabled(enabled bool) {
 	c.TelemetryEnabled = &enabled
-}
-
-// GetContextGitAutoCommit returns whether auto-commit is enabled for context git.
-// Default: true
-func (c *UserConfig) GetContextGitAutoCommit() bool {
-	if c.ContextGit == nil {
-		return true
-	}
-	return c.ContextGit.IsAutoCommitEnabled()
-}
-
-// GetContextGitAutoPush returns whether auto-push is enabled for context git.
-// Default: true
-func (c *UserConfig) GetContextGitAutoPush() bool {
-	if c.ContextGit == nil {
-		return true
-	}
-	return c.ContextGit.IsAutoPushEnabled()
-}
-
-// SetContextGitAutoCommit sets the auto-commit preference for context git.
-func (c *UserConfig) SetContextGitAutoCommit(enabled bool) {
-	if c.ContextGit == nil {
-		c.ContextGit = &ContextGitConfig{}
-	}
-	c.ContextGit.AutoCommit = &enabled
-}
-
-// SetContextGitAutoPush sets the auto-push preference for context git.
-func (c *UserConfig) SetContextGitAutoPush(enabled bool) {
-	if c.ContextGit == nil {
-		c.ContextGit = &ContextGitConfig{}
-	}
-	c.ContextGit.AutoPush = &enabled
 }
 
 // AreSessionsEnabled returns whether session recording is enabled.
@@ -728,50 +688,6 @@ func SaveUserConfig(cfg *UserConfig) error {
 	}
 
 	return nil
-}
-
-// GetContextGitAutoCommit loads user config and returns the auto-commit setting.
-// This is a convenience function for use without loading the full config.
-// Default: true
-func GetContextGitAutoCommit() bool {
-	cfg, err := LoadUserConfig()
-	if err != nil {
-		return true
-	}
-	return cfg.GetContextGitAutoCommit()
-}
-
-// GetContextGitAutoPush loads user config and returns the auto-push setting.
-// This is a convenience function for use without loading the full config.
-// Default: false
-func GetContextGitAutoPush() bool {
-	cfg, err := LoadUserConfig()
-	if err != nil {
-		return false
-	}
-	return cfg.GetContextGitAutoPush()
-}
-
-// SetContextGitAutoCommit loads user config, sets auto-commit, and saves.
-// This is a convenience function for setting a single value.
-func SetContextGitAutoCommit(value bool) error {
-	cfg, err := LoadUserConfig()
-	if err != nil {
-		cfg = &UserConfig{}
-	}
-	cfg.SetContextGitAutoCommit(value)
-	return SaveUserConfig(cfg)
-}
-
-// SetContextGitAutoPush loads user config, sets auto-push, and saves.
-// This is a convenience function for setting a single value.
-func SetContextGitAutoPush(value bool) error {
-	cfg, err := LoadUserConfig()
-	if err != nil {
-		cfg = &UserConfig{}
-	}
-	cfg.SetContextGitAutoPush(value)
-	return SaveUserConfig(cfg)
 }
 
 // AreSessionsEnabled loads user config and returns the sessions.enabled setting.

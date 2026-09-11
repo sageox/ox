@@ -1,8 +1,45 @@
 # ADR-008: Privacy
 
-**Status:** Accepted
+> ⚠️ **INTERNAL AND ASPIRATIONAL — do not hand this document to a customer as
+> a description of the shipped product.** It mixes real, shipped behavior
+> with commitments and CLI surfaces that were never built. The document
+> below is retained unmodified; the checklist immediately following this
+> banner (added 2026-09-10, bead ox-6p5y.14) is the correction layer —
+> read it first, then treat every claim below it as unverified until you've
+> checked it against the cited code.
+
+**Status:** Accepted (aspirational in parts — see banner and checklist above)
 **Date:** 2025-12-22
 **Deciders:** SageOx Engineering
+
+## Implementation status (added 2026-09-10)
+
+Audited against the code as of this annotation. Anything not listed here and
+not contradicted below should still be independently verified before it is
+repeated to a customer — this checklist covers what one audit pass found,
+not an exhaustive line-by-line reconciliation.
+
+| Claim in this ADR | Status |
+|---|---|
+| `ox telemetry off` / `ox telemetry status` / `ox telemetry on` | **Not implemented.** No `ox telemetry` subcommand exists. The real control is `ox config set telemetry off\|on` (`cmd/ox/config_settings.go`'s `"telemetry"` catalog entry, backed by `UserConfig.TelemetryEnabled` in `internal/config/user_config.go`). |
+| `~/.config/sageox/telemetry.json` state file, `{"enabled": ..., "disabled_at": ...}` | **Does not exist.** The opt-out is a field (`telemetry_enabled`) in the ordinary user config file, `~/.config/sageox/config.yaml` — no dedicated telemetry state file, no `disabled_at` timestamp. |
+| `ox init --offline` | **Not implemented.** `ox init` has no `--offline` flag today. |
+| `ox deregister` | **Not implemented.** No such command exists. |
+| First-run telemetry notice ("ox collects anonymous usage telemetry...") | **Not implemented.** No first-run notice is shown. |
+| Quarterly transparency report | **Not implemented.** Never published. |
+| "What We NEVER Collect" table: **Machine identifiers** | **Inaccurate as written.** `internal/telemetry/types.go`'s `Event.RepoID` is sent on every telemetry event — a per-repository identifier that lets events be correlated over time for that repo. It is not a hardware ID, but the table's blanket "machine identifiers: never" reads stronger than what the code actually does. |
+| **Precedence:** "Config file > Environment variable > Default" | **Backwards.** `internal/telemetry/client.go`'s `NewClient` checks `DO_NOT_TRACK` and `SAGEOX_TELEMETRY` **before** falling back to the config file — env wins, not config. |
+| `export SAGEOX_TELEMETRY=0` / `=1` | **Wrong values.** The real check is `strings.EqualFold(os.Getenv("SAGEOX_TELEMETRY"), "false")` — only the literal string `false` (any case) disables telemetry. Setting `SAGEOX_TELEMETRY=0` as this ADR instructs does **not** disable anything; it silently falls through to the config file. |
+| `ox cache clear` / `ox cache clear --user` | **Not implemented.** No `ox cache` command exists. |
+| `ox config set check_updates false` (Privacy Summary Matrix) | **Not a real setting.** No `check_updates` key exists in the config catalog. |
+| Local event queue location | Not named in the ADR's prose; the real path is project-local `.sageox/cache/telemetry.jsonl`, flushed lazily (`internal/telemetry/file_queue.go`), not the batched-in-memory-only picture the Data Flow diagram implies. |
+
+What the audit did **not** find contradicted: the opt-out itself works (env
+and config both genuinely gate export, just not in the order written above);
+telemetry payloads do not include file contents, file paths, command
+arguments, or git history, matching the "What We NEVER Collect" table apart
+from the RepoID row above; and §6 (Auth Session Metadata / device label,
+`SAGEOX_NO_DEVICE_LABEL=1`) is accurate and implemented as described.
 
 ## Context
 

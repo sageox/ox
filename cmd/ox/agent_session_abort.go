@@ -103,7 +103,7 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 
 	// flip the registered /c/ page to "discarded" and drop pending PR-link
 	// repair tasks server-side (fire-and-forget)
-	notifySessionAbortedAsync(projectRoot, state.SessionID)
+	notifySessionAbortedAsync(projectRoot, state.SessionID, state.LifecycleRegistrationState != "deferred")
 
 	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, draftWarning)
 }
@@ -198,7 +198,7 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 		return fmt.Errorf("failed to remove session data at %s: %w", sessionPath, err)
 	}
 
-	notifySessionAbortedAsync(projectRoot, abortedSessionID)
+	notifySessionAbortedAsync(projectRoot, abortedSessionID, true)
 
 	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, draftWarning)
 }
@@ -379,7 +379,7 @@ func abortDraftOnlySession(inst *agentinstance.Instance, cmd *cobra.Command, pro
 	}
 
 	deleted, warning := removeLedgerDraftForAbort(sessionName)
-	notifySessionAbortedAsync(projectRoot, abortedSessionID)
+	notifySessionAbortedAsync(projectRoot, abortedSessionID, true)
 	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, deleted, warning)
 }
 
@@ -458,7 +458,7 @@ func killFinalizedSession(inst *agentinstance.Instance, cmd *cobra.Command, proj
 		slog.Warn("failed to remove ledger hydration cache during finalized abort", "session", sessionName, "error", err)
 	}
 
-	notifySessionAbortedAsync(projectRoot, abortedSessionID)
+	notifySessionAbortedAsync(projectRoot, abortedSessionID, true)
 
 	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, false, "")
 }

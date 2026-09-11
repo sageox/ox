@@ -171,8 +171,13 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	}
 	// The OTLP proxy is JWT-gated; closure resolves the token at export
 	// time so the per-command exporter always uses the latest value on disk
-	// (refreshed by other code paths).
-	tokenFunc := func() string { return auth.ExportBearerForEndpoint(apiEndpoint) }
+	// (refreshed by other code paths). Gated on the same opt-out
+	// TelemetryClient already computed (DO_NOT_TRACK, SAGEOX_TELEMETRY=false,
+	// then the persisted telemetry setting — see telemetry.NewClient) so a
+	// user who turns telemetry off gets zero network export, not just zero
+	// product-event telemetry. See otlpTokenFunc for why this doesn't touch
+	// local tracing.
+	tokenFunc := otlpTokenFunc(cliCtx.TelemetryClient.IsEnabled(), apiEndpoint, auth.ExportBearerForEndpoint)
 	// Install perf TreeCollectorProcessor BEFORE Init so the next
 	// NewTracerProvider call sees it alongside the OTLP batch exporter.
 	// Spans produced anywhere in the CLI feed both backends — OTLP for
@@ -208,6 +213,40 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	observability.SetCommandAttrs(version.Version, os.Args[1:])
 
 	return cliCtx, nil
+}
+
+// otlpTokenFunc builds the TokenFunc passed to observability.Init.
+//
+// When telemetryEnabled is false, the returned func always yields "".
+// observability's bearerRoundTripper treats an empty token exactly like a
+// logged-out user: it drops the batch client-side (a synthetic 2xx, nothing
+// sent over the wire) instead of calling the OTLP endpoint — see
+// internal/observability/otel.go's dropped(). That is the mechanism this
+// gate relies on: it stops network export without touching observability.Init
+// itself, so the TracerProvider and the perf.TreeCollectorProcessor wired via
+// AddSpanProcessor still get built and still receive every span. Local
+// tracing (OX_TRACE=1, --verbose, slow-op rendering) therefore keeps working
+// with telemetry off — only the outbound OTLP request stops. Passing an
+// empty apiEndpoint to Init instead would have skipped TracerProvider
+// construction entirely and silently broken that local path too.
+//
+// telemetryEnabled should be the same opt-out decision telemetry.Client
+// already computed (DO_NOT_TRACK, SAGEOX_TELEMETRY=false, then the
+// persisted user config setting) via Client.IsEnabled(), so this never
+// re-derives that precedence.
+//
+// resolveBearer is auth.ExportBearerForEndpoint at the real call site; it's
+// a parameter (not a direct call) so tests can inject a resolver that
+// returns an obviously-fake, non-empty token — proving the disabled branch
+// truly short-circuits instead of merely agreeing with a resolver that
+// happens to return "" for an unauthenticated test environment anyway.
+func otlpTokenFunc(telemetryEnabled bool, apiEndpoint string, resolveBearer func(string) string) func() string {
+	return func() string {
+		if !telemetryEnabled {
+			return ""
+		}
+		return resolveBearer(apiEndpoint)
+	}
 }
 
 // IsVerbose returns true if verbose logging is enabled
