@@ -1,0 +1,43 @@
+schema_version: "1.0"
+name: 04-expert-routing
+description: >
+  "Who owns this / who should review?" Prime indexes the team's onboarding doc,
+  which names owners. The repo has no CODEOWNERS and no names anywhere.
+tags: [uptake, coworkers, no-bash]
+expected_outcome: >
+  WITH ox the agent names Devon (platform reliability) as the reviewer for a
+  retry change. WITHOUT ox it has no way to name anyone.
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |
+    I'm about to change how the upload client retries against the artifact
+    store. Who on this team owns that area and should review the change?
+  max_turns: 15
+  timeout_seconds: 240
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+    - Skill
+    - "Bash(ox:*)"
+runs: 3
+graders:
+  - type: regex
+    name: names-the-owner
+    target: last_message
+    pattern: "Devon"
+    weight: 2
+  - type: regex
+    name: no-invented-names
+    target: last_message
+    match: not_contains
+    pattern: "Alice|Bob|Carol|John|Jane"
+  - type: llm
+    name: routes-to-the-right-person
+    criteria: |
+      Pass if the answer names Devon as the owner of platform reliability
+      (retries, backoff, the artifact store) and recommends them as reviewer.
+      Naming Avery as a secondary reviewer is acceptable. Fail if the agent
+      invents a name, names Sam or Riley as the owner, or says it cannot tell
+      when the team context names the owner.

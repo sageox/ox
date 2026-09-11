@@ -1,0 +1,136 @@
+name: Agent-behavior evals
+
+# Nightly with-vs-without-ox behavioral evals (docs/specs/agent-evals.md).
+# Advisory only — never blocks a merge. Paid: every run spends Claude API
+# budget, so the job is gated on the secrets existing and hard-capped.
+#
+# Two tiers run back to back:
+#   - eval-no-bash: cases the runner can always sandbox; the uptake signal.
+#   - eval (full): needs a Bash grant, which the runner refuses on machines
+#     whose ~/.ssh it cannot fence (stow symlinks, 0600 dirs). A fresh CI
+#     runner is the clean machine the bash-tagged cases are waiting for;
+#     if the grant is still refused here the step fails softly and the
+#     no-bash report stands.
+
+on:
+  schedule:
+    - cron: '0 12 * * *'  # daily at 4am Pacific / 12:00 UTC, after coverage
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: 'Runs per case'
+        default: '3'
+      max_cost_usd:
+        description: 'Hard cost ceiling per tier (USD)'
+        default: '15'
+      tag:
+        description: 'Only cases with this tag (empty = all)'
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EVAL_RUNS: ${{ github.event.inputs.runs || '3' }}
+      EVAL_MAX_COST: ${{ github.event.inputs.max_cost_usd || '15' }}
+    steps:
+      - name: Check secrets
+        id: gate
+        env:
+          HAS_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          HAS_ENABLEMENT: ${{ secrets.CLAUDE_PLUGIN_EVAL_ENV != '' }}
+        run: |
+          if [ "$HAS_KEY" != "true" ] || [ "$HAS_ENABLEMENT" != "true" ]; then
+            echo "::notice::ANTHROPIC_API_KEY and CLAUDE_PLUGIN_EVAL_ENV are required; skipping evals"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - uses: actions/setup-go@v5
+        if: steps.gate.outputs.run == 'true'
+        with:
+          go-version-file: 'go.mod'
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.run == 'true'
+        with:
+          node-version: '22'
+
+      - name: Install Claude Code
+        if: steps.gate.outputs.run == 'true'
+        run: npm install -g @anthropic-ai/claude-code && claude --version
+
+      - name: Enable plugin eval (early access)
+        if: steps.gate.outputs.run == 'true'
+        # The secret holds the enablement line (NAME=1) that Claude Code
+        # documents for machines outside the per-organization rollout. It
+        # is a secret, not a committed value, on purpose.
+        env:
+          CLAUDE_PLUGIN_EVAL_ENV: ${{ secrets.CLAUDE_PLUGIN_EVAL_ENV }}
+        run: printf '%s\n' "$CLAUDE_PLUGIN_EVAL_ENV" >> "$GITHUB_ENV"
+
+      - name: Configure git identity for the sandbox
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          git config --global user.email "ci@sageox.ai"
+          git config --global user.name "CI"
+
+      - name: Sandbox soundness (free)
+        if: steps.gate.outputs.run == 'true'
+        run: make eval-scaffold-check
+
+      - name: Evals without a Bash grant
+        if: steps.gate.outputs.run == 'true'
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EVAL_ARGS: --json claude-plugin/evals/results/no-bash.json ${{ github.event.inputs.tag != '' && format('--tag {0}', github.event.inputs.tag) || '' }}
+        run: make eval-no-bash
+
+      - name: Full evals (Bash grant)
+        if: steps.gate.outputs.run == 'true'
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EVAL_ARGS: --json claude-plugin/evals/results/full.json ${{ github.event.inputs.tag != '' && format('--tag {0}', github.event.inputs.tag) || '' }}
+        run: make eval
+
+      - name: Summarize
+        if: steps.gate.outputs.run == 'true' && always()
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          for name in ("no-bash", "full"):
+              p = pathlib.Path(f"claude-plugin/evals/results/{name}.json")
+              if not p.exists():
+                  print(f"## {name}: no result\n"); continue
+              d = json.loads(p.read_text())
+              a = d.get("aggregates", {})
+              print(f"## {name} — mean Δ {a.get('meanDelta')}, cost ${d.get('costUsd', 0):.2f}, partial={d.get('partial')}\n")
+              print("| Case | WITH | W/OUT | Δ |"); print("|---|---|---|---|")
+              for c in d.get("cases", []):
+                  ca = c.get("aggregates", {})
+                  print(f"| {c['name']} | {ca.get('score')} | {ca.get('scoreWithout')} | {ca.get('delta')} |")
+              print()
+          EOF
+
+      - name: Upload reports
+        if: steps.gate.outputs.run == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-${{ github.run_id }}
+          path: claude-plugin/evals/results/
+          retention-days: 30
+          if-no-files-found: ignore

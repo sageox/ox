@@ -114,6 +114,20 @@
       ],
       "requires": ["full", "slow", "acceptance", "digital_twin"],
       "executor": "make test-release"
+    },
+    "eval": {
+      "description": "Agent-behavior evals: the same coding task run with the ox plugin and without it, scored by graders, reported as a delta. Proves the model takes up what ox delivers.",
+      "includes": [
+        "claude-plugin/evals/**/case.yaml driven by `claude plugin eval --ablation with-without`",
+        "Real Claude Code runs against the seeded Acme sandbox (fresh HOME, offline ox, local-only ledger)",
+        "Negative controls that bound the context tax and catch fabricated attribution"
+      ],
+      "excludes": [
+        "Anything a deterministic Go test can prove (delivery of prime, ledger commits, LFS)",
+        "Every commit, PR, or release gate — opt-in and paid, advisory only",
+        "Murmur, plan-nudge, and floor-only arms (need the six-event `ox init` hook set)"
+      ],
+      "executor": "claude plugin eval (make eval, make eval-smoke)"
     }
   }
 }

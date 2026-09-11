@@ -1,7 +1,7 @@
 # Makefile for ox CLI tool
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open check-test-tiers test-tiers
-.PHONY: help build build-ox build-adapters build-acceptance install install-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
+.PHONY: help build build-ox build-adapters build-acceptance install install-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
 GO := go
@@ -528,9 +528,49 @@ test-kb-twin: ## Digital twin kb tests (drives syncBubbles + GC against real bar
 	 done
 	@$(TEST_GIT_ISOLATION) time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=kb_twin -v -count=1 -timeout=5m $(KB_TWIN_COVER_FLAGS) ./tests/kb_twin/...
 
-test-benchmark: ## Run prime efficiency benchmarks (requires claude CLI) - ~80 min, ~40 API calls
-	@echo "Running prime efficiency benchmarks..."
-	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=integration -run TestPrimeEfficiency -timeout=90m ./tests/integration/agents/benchmark/...
+# ---------------------------------------------------------------------------
+# Agent-behavior evals (with-ox vs without-ox). See docs/specs/agent-evals.md.
+#
+# Every other tier proves ox DELIVERED context (prime emitted the XML, the
+# ledger committed). These prove the model TOOK IT UP: the same coding task
+# runs with the ox plugin and without it, and the delta is the score.
+# Opt-in and paid (Claude API calls); never chained from build/test/lint.
+# `claude plugin eval` is early access — see the doc for enablement.
+# ---------------------------------------------------------------------------
+EVAL_PLUGIN     := ./claude-plugin
+EVAL_RUNS       ?= 3
+EVAL_MAX_COST   ?= 15
+EVAL_ARGS       ?=
+# The sandbox gets the ox binary built from THIS checkout, never the one in
+# PATH, and every ox invocation inside it is daemon-less, offline, and
+# non-recording — the scaffold points it at a loopback port with nothing
+# listening, so no fixture token ever reaches a real SageOx host.
+# The KB fetch is left ON so every WITH run exercises prime's offline path:
+# its "connection refused" used to reach the model as a WARN on stderr and
+# (pilot 2026-09-11) convinced it no team context had loaded. Prime now keeps
+# WARN off stderr in payload mode; scaffold/check.sh guards that stays true.
+EVAL_ENV := PATH="$(CURDIR)/bin:$$PATH" OX_NO_DAEMON=1 OX_SESSION_RECORDING=disabled SAGEOX_TELEMETRY=false DO_NOT_TRACK=1
+EVAL_FLAGS := --ablation with-without --scaffold --no-publish --threshold 0 --judge-model sonnet \
+	--allow-tools "Bash(ox:*)" "Bash(go:*)" "Bash(git log:*)" Edit Write \
+	--max-cost-usd $(EVAL_MAX_COST)
+
+eval: build-ox ## Full agent-behavior eval suite, with-vs-without ox (paid; ~$$1-2/case/run)
+	$(call say,"Running agent-behavior evals ($(EVAL_RUNS) runs/case, cap $$$(EVAL_MAX_COST))...")
+	@$(EVAL_ENV) claude plugin eval $(EVAL_PLUGIN) --runs $(EVAL_RUNS) $(EVAL_FLAGS) $(EVAL_ARGS)
+
+eval-smoke: build-ox ## One run of the cheapest cases (tag: smoke) — before touching prime, guidance, or skills
+	$(call say,"Running eval smoke (1 run, --tag smoke)...")
+	@$(EVAL_ENV) claude plugin eval $(EVAL_PLUGIN) --runs 1 --tag smoke $(EVAL_FLAGS) $(EVAL_ARGS)
+
+# The runner refuses a Bash grant when ~/.ssh holds symlinks or other
+# credential stores it cannot fence (stow-managed dotfiles trip this). The
+# no-bash cases still exercise prime uptake through the SessionStart hook.
+eval-no-bash: build-ox ## Cases that need no Bash grant (tag: no-bash) — for machines the runner cannot sandbox
+	$(call say,"Running no-bash evals ($(EVAL_RUNS) runs/case)...")
+	@$(EVAL_ENV) claude plugin eval $(EVAL_PLUGIN) --runs $(EVAL_RUNS) --tag no-bash --ablation with-without --scaffold --no-publish --threshold 0 --judge-model sonnet --allow-tools Edit Write --max-cost-usd $(EVAL_MAX_COST) $(EVAL_ARGS)
+
+eval-scaffold-check: build-ox ## Prove the eval sandbox seeds and `ox agent prime` runs offline in it (free)
+	@bash claude-plugin/evals/scaffold/check.sh "$(CURDIR)/bin/ox"
 
 test-sequential: ## Run tests sequentially (for debugging race conditions)
 	$(call say,"Running tests sequentially...")

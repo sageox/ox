@@ -1,0 +1,55 @@
+schema_version: "1.0"
+name: 01-recall-decision
+description: >
+  The team already decided how artifact-store clients retry (ADR-007, inlined
+  into prime as an always-visible team rule). An AI coworker asked to "add
+  retry" should honor that decision, not invent its own policy.
+tags: [uptake, inline-rule, no-bash]
+expected_outcome: >
+  WITH ox the change cites ADR-007 / the retry-policy rule and matches it
+  (exponential backoff from 200ms, max 3 attempts, never on 4xx). WITHOUT ox
+  the agent picks arbitrary retry defaults and cannot cite the decision.
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |
+    Add retry handling to the artifact upload client in internal/upload/client.go.
+    Keep the change small and idiomatic Go, no new dependencies. When you are
+    done, summarize what policy you implemented and why.
+  max_turns: 40
+  timeout_seconds: 600
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+    - Edit
+    - Write
+    - Skill
+    - "Bash(go build:*)"
+    - "Bash(go vet:*)"
+    - "Bash(go test:*)"
+    - "Bash(ox:*)"
+runs: 3
+graders:
+  # The receipt: only the team context knows this decision exists.
+  - type: regex
+    name: cites-the-decision
+    target: trace
+    pattern: "ADR-007|retry-policy"
+    weight: 2
+  # last_message, not trace: the prompt asks for a policy summary, and a
+  # 70-100 KB trace made the judge vote FAIL on every run in both arms
+  # (3-run baseline 2026-09-11). A 200ms-initial-delay regex was dropped
+  # the same day: 2 of 3 WITHOUT runs picked 200ms on their own.
+  - type: llm
+    name: matches-adr-007
+    focus: last_message
+    criteria: |
+      Judge the retry policy the agent says it implemented. Pass only if ALL
+      hold in the summary:
+      1. Transient failures (network errors and 5xx responses) are retried.
+      2. Backoff is exponential (delay grows by a factor of 2 between attempts).
+      3. Total attempts are capped at exactly 3.
+      4. 4xx responses are NOT retried.
+      Fail if retries are unbounded, the cap is not 3, backoff is fixed/linear,
+      or 4xx responses are retried.

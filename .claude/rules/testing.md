@@ -20,6 +20,7 @@ paths:
 | Integration (real sessions) | `make test-integration` | External compatibility evidence; attested gating tracked by `ox-ilrr.4` |
 | Release | `make test-release` | Enforceable in-repo full + ratchet + slow + acceptance + twin gate |
 | Pre-PR gate | `make test-preflight` | lint + full + slow (~3-5min) |
+| Eval (agent behavior) | `make eval` / `make eval-smoke` | Opt-in, paid. Same task WITH vs WITHOUT the ox plugin, scored, reported as Δ. See `docs/specs/agent-evals.md` |
 
 **Output:** Makefile is quiet by default. Use `V=1 make test` for verbose.
 
@@ -35,6 +36,8 @@ if testing.Short() {
 ## Core Principles
 
 **No test theater.** Each test must answer: "What real-world failure does this prevent?"
+
+**Delivery is not uptake.** A test that proves ox emitted context (prime XML, a ledger commit, a whisper) does not prove the model used it. That claim is only provable by running the model with and without ox — the eval tier (`docs/specs/agent-evals.md`). Do not report an agent-facing feature as covered on delivery tests alone.
 
 **Test intent, not implementation.** Write the assertion first based on the requirement, then build the scenario. If a test would pass even with broken code, it's not testing anything.
 

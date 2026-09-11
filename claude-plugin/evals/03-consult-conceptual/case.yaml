@@ -1,0 +1,46 @@
+schema_version: "1.0"
+name: 03-consult-conceptual
+description: >
+  A "did we ever decide X?" question. The decision (ADR-012) lives only in the
+  team context docs that prime indexes; the repo contains no ADRs. The agent
+  must follow the pointer instead of reasoning from first principles.
+tags: [consult, conceptual, no-bash, smoke]
+expected_outcome: >
+  WITH ox the agent finds ADR-012 and states env vars > local config file >
+  team defaults, citing it. WITHOUT ox it can only guess or read config.go.
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |
+    Did we ever decide how runtime configuration precedence works here —
+    environment variables vs the local config file vs the team defaults?
+    I need the settled order and where it was decided, not a guess.
+  max_turns: 15
+  timeout_seconds: 240
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+    - Skill
+    - "Bash(ox:*)"
+runs: 3
+graders:
+  - type: regex
+    name: cites-adr-012
+    target: last_message
+    pattern: "ADR-012"
+    weight: 2
+  - type: regex
+    name: states-the-order
+    target: last_message
+    flags: "is"
+    pattern: "environment.*(local|config file).*(team|default)"
+  - type: llm
+    name: settled-not-guessed
+    criteria: |
+      Pass if the answer states the precedence order as environment variables
+      first, then the local config file, then team defaults, AND attributes it
+      to a recorded team decision (ADR-012 or the configuration-precedence
+      decision). Fail if the order is different, if it is presented as the
+      agent's own recommendation rather than a settled decision, or if the
+      agent says no decision exists.

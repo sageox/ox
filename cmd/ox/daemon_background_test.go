@@ -49,7 +49,7 @@ func TestBackgroundDaemonSurvivesCommandCleanup(t *testing.T) {
 				"XDG_STATE_HOME=" + filepath.Join(home, "state"),
 				"XDG_RUNTIME_DIR=" + runtimeDir,
 				"SAGEOX_ENDPOINT=http://127.0.0.1:1",
-				"SAGEOX_DAEMON=true", "OX_NO_DAEMON=0", "OX_OFFLINE=1",
+				"SAGEOX_DAEMON=true", "OX_NO_DAEMON=0",
 				"HTTP_PROXY=http://127.0.0.1:1", "HTTPS_PROXY=http://127.0.0.1:1",
 				"NO_PROXY=127.0.0.1,localhost",
 			}

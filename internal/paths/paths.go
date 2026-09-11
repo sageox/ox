@@ -389,6 +389,16 @@ func DaemonLogFile(repoID, workspaceID string) string {
 	return filepath.Join(logDir, fmt.Sprintf("daemon_%s_%s.log", repoID, workspaceID))
 }
 
+// AgentPayloadLogFile returns the diagnostics file for payload-producing
+// commands (`ox agent prime`, `ox agent hook`). Their stderr is fenced off
+// (see logger.InitPayloadMode) because hooks pipe it into the model's
+// context, so WARN-level diagnostics land here instead.
+//
+//	~/.cache/sageox/logs/agent-payload.log (or XDG equivalent)
+func AgentPayloadLogFile() string {
+	return filepath.Join(CacheDir(), "logs", "agent-payload.log")
+}
+
 // DaemonCacheDir returns the base directory for daemon cache files.
 // Used for heartbeats and other daemon-managed cache data.
 //

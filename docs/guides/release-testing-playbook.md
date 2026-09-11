@@ -27,7 +27,7 @@ Run top-to-bottom. Items marked ⚡ can run in parallel.
 
 Optional (not a release gate):
 ```
-[ ]   make test-benchmark           (~80min, needs claude CLI)
+[ ]   make eval                     (~10min, ~$10-15, needs claude CLI with plugin eval enabled)
 ```
 
 ---
@@ -124,16 +124,19 @@ Uses test account `test-ox-cli@sageox.ai`. Backs up and restores your local `aut
 
 **Do NOT ship if integration tests fail.** These verify the full session recording and anti-entropy pipelines end-to-end.
 
-### 9. Benchmark Tests (Optional)
+### 9. Agent-Behavior Evals (Optional)
 
 | | |
 |---|---|
-| **What** | Prime efficiency regression detection |
-| **Command** | `make test-benchmark` |
-| **Time** | ~80min, ~40 API calls |
-| **Prerequisites** | `claude` CLI |
+| **What** | Does the model take up what ox delivers? Same task WITH vs WITHOUT the ox plugin, scored, reported as Δ per case |
+| **Command** | `make eval` (`make eval-smoke` for a ~$3 subset; `make eval-scaffold-check` is free) |
+| **Time** | ~10min, ~$10–15 |
+| **Prerequisites** | `claude` CLI with `plugin eval` enabled (early access), Go |
 
-Not a release gate. Run when you suspect prime performance regressions.
+Not a release gate. Read the last report before shipping anything that touches
+prime, `guidance` strings, or skills: mean Δ ≥ 0, every negative control Δ ≥ −0.05,
+and the controls' WITH/WITHOUT cost ratio no worse than last release. See
+`docs/specs/agent-evals.md`.
 
 ### 10. Run Walks (Human-Driven)
 
@@ -198,5 +201,5 @@ For the complete release workflow, see `.claude/commands/release.md`. The testin
 | `SAGEOX_CI_PASSWORD` | smoke-test | Team secrets (test account password) |
 | `SAGEOX_ENDPOINT` | smoke-test (optional) | Defaults to `https://test.sageox.ai` |
 | `OX_BINARY` | smoke-test (optional) | Defaults to `bin/ox` or `ox` in PATH |
-| `ANTHROPIC_API_KEY` | test-integration, test-benchmark | Anthropic dashboard |
+| `ANTHROPIC_API_KEY` | test-integration; `make eval` when not using a Claude Code login | Anthropic dashboard |
 | `SAGEOX_CLI_SIGNING_KEY` | release.yml (CI only) | GitHub repo secrets |

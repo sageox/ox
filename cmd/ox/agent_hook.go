@@ -16,6 +16,8 @@ import (
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/selfexec"
@@ -86,6 +88,10 @@ func runAgentHook(args []string) error {
 		return fmt.Errorf("usage: ox agent hook <event>")
 	}
 	eventName := args[0]
+
+	// hook stdout is injected into the coworker's context and the hook
+	// templates run us with 2>&1 — keep WARN-level diagnostics off stderr.
+	logger.InitPayloadMode(false, paths.AgentPayloadLogFile())
 
 	// 1. fast check: is ox initialized?
 	projectRoot, err := findProjectRoot()

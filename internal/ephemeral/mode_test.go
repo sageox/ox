@@ -40,7 +40,6 @@ func clearEnv(t *testing.T) {
 		"OX_PERSIST_DISK",
 		"OX_NO_DAEMON",
 		"OX_BROWSER",
-		"OX_NETWORK",
 	}
 	for _, v := range vars {
 		t.Setenv(v, "")
