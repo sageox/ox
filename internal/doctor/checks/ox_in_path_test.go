@@ -3,6 +3,7 @@ package checks
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -182,6 +183,34 @@ func TestProbeShellPath_ResolvesARealBinaryViaScrubbedEnv(t *testing.T) {
 func TestProbeShellPath_BinaryNotFound_ReturnsErrNotFoundInShell(t *testing.T) {
 	_, err := probeShellPath(context.Background(), "/bin/sh", "definitely-not-a-real-binary-xyz")
 	assert.ErrorIs(t, err, ErrNotFoundInShell)
+}
+
+// TestProbeShellPath_NotFoundIsShellIndependent pins the not-found answer
+// across every POSIX shell present, not just whichever one is /bin/sh
+// here. It is the regression guard for reading the answer out of the exit
+// code: bash and zsh exit 1 on a failed `command -v`, dash exits 127. On
+// Debian and Ubuntu /bin/sh IS dash, so the code-reading version reported
+// ErrShellProbeInconclusive on most Linux machines -- silently disabling
+// the check in exactly the case it exists to catch. macOS never caught it
+// because its /bin/sh is not dash.
+func TestProbeShellPath_NotFoundIsShellIndependent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shells only")
+	}
+	for _, name := range []string{"sh", "bash", "zsh", "dash"} {
+		shell, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			_, err := probeShellPath(context.Background(), shell, "definitely-not-a-real-binary-xyz")
+			assert.ErrorIs(t, err, ErrNotFoundInShell)
+
+			resolved, err := probeShellPath(context.Background(), shell, "sh")
+			require.NoError(t, err)
+			assert.NotEmpty(t, resolved)
+		})
+	}
 }
 
 // TestProbeShellPath_ShellExitsNonOneForUnrelatedReason_IsInconclusive is
