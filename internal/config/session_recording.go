@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"os"
 )
 
@@ -112,6 +113,13 @@ func (r *ResolvedSessionRecording) IsManual() bool {
 //  5. OX_SESSION_RECORDING env var (highest — the pipeline/automation escape hatch).
 func ResolveSessionRecording(projectRoot string) *ResolvedSessionRecording {
 	// 0. OX_SESSION_RECORDING env var — highest priority (pipelines / automation).
+	//
+	// Deliberately NOT symmetric with OX_SESSION_PUBLISHING below, which
+	// rejects unrecognized values. Here an unknown value normalizes to
+	// "manual", which is the RESTRICTIVE direction — a typo records less, not
+	// more — and TestResolveSessionRecording_EnvVarOverridesAll pins that as
+	// intended. Publishing cannot borrow the same rule because its unknown
+	// value normalizes to "auto", i.e. a typo would re-enable uploads.
 	if envMode := os.Getenv(EnvSessionRecording); envMode != "" {
 		return &ResolvedSessionRecording{
 			Mode:   NormalizeSessionRecording(envMode),
@@ -242,11 +250,21 @@ type ResolvedSessionPublishing struct {
 // ever consulted project config.
 func ResolveSessionPublishing(projectRoot string) *ResolvedSessionPublishing {
 	// OX_SESSION_PUBLISHING env var — highest priority (pipelines / automation).
+	//
+	// An UNRECOGNIZED value is ignored rather than normalized. Normalizing it
+	// would map a typo like "manul" to "auto" — and because env outranks every
+	// other layer, that silently overrides a deliberate `session_publishing:
+	// manual` and re-enables uploads. A misspelled privacy control must never
+	// fail open; fall through and let the lower layers decide.
 	if envMode := os.Getenv(EnvSessionPublishing); envMode != "" {
-		return &ResolvedSessionPublishing{
-			Mode:   NormalizeSessionPublishing(envMode),
-			Source: SessionRecordingSourceEnv,
+		if IsValidSessionPublishingMode(envMode) {
+			return &ResolvedSessionPublishing{
+				Mode:   NormalizeSessionPublishing(envMode),
+				Source: SessionRecordingSourceEnv,
+			}
 		}
+		slog.Warn("ignoring unrecognized "+EnvSessionPublishing,
+			"value", envMode, "valid", ValidSessionPublishingModes)
 	}
 
 	// user config (~/.config/sageox/config.yaml).

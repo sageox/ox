@@ -498,3 +498,47 @@ func TestResolveSessionRecording_StaleKBBindingIsIgnored(t *testing.T) {
 	assert.Equal(t, without.Mode, with.Mode, "stale kb_id binding must not change the recording mode")
 	assert.Equal(t, without.Source, with.Source, "stale kb_id binding must not change the recording source")
 }
+
+// TestResolveSessionPublishing_InvalidEnvDoesNotReEnableUploads pins the
+// fail-closed rule for the publishing env override.
+//
+// NormalizeSessionPublishing maps anything unrecognized to "auto". Because the
+// env layer outranks every other layer, honoring a typo like "manul" would
+// silently override a deliberate `session_publishing: manual` and start
+// uploading again — the user would have spelled a privacy control wrong and
+// been given the opposite of what they asked for, with no signal.
+//
+// Note the deliberate asymmetry with OX_SESSION_RECORDING, which DOES normalize
+// unrecognized values: its unknown case resolves to "manual", the restrictive
+// direction, so a typo there records less rather than more.
+func TestResolveSessionPublishing_InvalidEnvDoesNotReEnableUploads(t *testing.T) {
+	tests := []struct {
+		name    string
+		envVal  string
+		want    string
+		wantSrc SessionRecordingSource
+	}{
+		{"typo must not win over a deliberate manual", "manul", SessionPublishingManual, SessionRecordingSourceUser},
+		{"garbage must not win either", "yes-please-upload", SessionPublishingManual, SessionRecordingSourceUser},
+		{"a valid env value still wins", SessionPublishingAuto, SessionPublishingAuto, SessionRecordingSourceEnv},
+		{"unset falls through to user config", "", SessionPublishingManual, SessionRecordingSourceUser},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("OX_XDG_ENABLE", "1")
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "cfg"))
+			t.Setenv("OX_SESSION_RECORDING", "")
+			t.Setenv(EnvSessionPublishing, tc.envVal)
+
+			// user config deliberately opts out of publishing
+			require.NoError(t, SaveUserConfig(&UserConfig{SessionPublishing: SessionPublishingManual}))
+
+			got := ResolveSessionPublishing("")
+			require.Equal(t, tc.want, got.Mode,
+				"an unrecognized env value must never silently re-enable uploads")
+			require.Equal(t, tc.wantSrc, got.Source)
+		})
+	}
+}

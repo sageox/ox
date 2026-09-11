@@ -78,11 +78,17 @@ func checkTeamVisibility() checkResult {
 	// team-context repo for simply won't appear) and is also what an older
 	// server returns. Warning off a derived list would mark healthy repos
 	// broken, and a check that cries wolf is a check people learn to skip.
-	if len(resp.Teams) == 0 {
+	return teamVisibilityVerdict(cfg, resp.Teams, projectEndpoint)
+}
+
+// teamVisibilityVerdict is the whole decision, split out from the I/O so it can
+// be tested without a server: given the memberships the server reported and the
+// team this repo is bound to, what should the user be told?
+func teamVisibilityVerdict(cfg *config.ProjectConfig, teams []api.TeamMembership, projectEndpoint string) checkResult {
+	if teams == nil {
 		return SkippedCheck(teamVisibilityCheckName,
 			"server did not report team memberships", "")
 	}
-	teams := resp.Teams
 
 	for _, t := range teams {
 		if t.ID != cfg.TeamID {
