@@ -164,6 +164,36 @@ func TestCommitTreeToBranch_RefusesWhenBranchAdvanced(t *testing.T) {
 	assert.Equal(t, theirs, gitInRepo(t, repo, "rev-parse", "HEAD"), "the concurrent commit must survive")
 }
 
+// TestCommitTreeToBranch_RefusesWhenUnbornBranchWasBorn — the CAS must hold
+// on a first commit too: an empty old value makes update-ref require the ref
+// to still be absent, so a concurrent first commit is not overwritten.
+func TestCommitTreeToBranch_RefusesWhenUnbornBranchWasBorn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git repository")
+	}
+	ctx := context.Background()
+	repo := t.TempDir()
+	gitInRepo(t, repo, "init", "-b", "main")
+	gitInRepo(t, repo, "config", "user.name", "Test")
+	gitInRepo(t, repo, "config", "user.email", "test@example.com")
+	writeGitutilFixture(t, repo, "sessions/x/meta.json", cleanMeta)
+	gitInRepo(t, repo, "add", "--sparse", "sessions/x/meta.json")
+	tree, err := writeIndexTree(ctx, repo, nil)
+	require.NoError(t, err)
+	parent, err := currentBranchTip(ctx, repo)
+	require.NoError(t, err)
+	require.Empty(t, parent, "fixture must start on an unborn branch")
+
+	writeGitutilFixture(t, repo, "other.txt", "theirs\n")
+	gitInRepo(t, repo, "add", "other.txt")
+	gitInRepo(t, repo, "commit", "-m", "theirs")
+	theirs := gitInRepo(t, repo, "rev-parse", "HEAD")
+
+	err = commitTreeToBranch(ctx, repo, tree, parent, "ours")
+	require.ErrorContains(t, err, "concurrent ledger commit")
+	assert.Equal(t, theirs, gitInRepo(t, repo, "rev-parse", "HEAD"), "the concurrent first commit must survive")
+}
+
 func TestCommitLedgerSnapshot_NothingToCommit(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git repository")

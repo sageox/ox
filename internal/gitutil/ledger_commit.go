@@ -223,10 +223,10 @@ func commitTreeToBranch(ctx context.Context, repoPath, tree, parent, message str
 	}
 	branchRef := strings.TrimSpace(string(refBytes))
 
-	upd := []string{"update-ref", "-m", "ox: " + message, branchRef, commit}
-	if parent != "" {
-		upd = append(upd, parent) // CAS: only advance if the tip is still parent
-	}
+	// CAS: only advance if the tip is still parent. On an unborn branch the
+	// empty old value tells git the ref must still not exist, so a concurrent
+	// first commit fails this update instead of being silently overwritten.
+	upd := []string{"update-ref", "-m", "ox: " + message, branchRef, commit, parent}
 	if _, err := cleanGitOutput(ctx, repoPath, upd...); err != nil {
 		return fmt.Errorf("advance %s (concurrent ledger commit?): %w", branchRef, err)
 	}
