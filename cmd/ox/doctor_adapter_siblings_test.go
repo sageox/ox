@@ -93,6 +93,34 @@ func TestAdapterSiblingsResult_IgnoresUnrelatedFiles(t *testing.T) {
 	}
 }
 
+// TestAdapterSiblingsResult_NonExecutableNotCounted is the red-first proof
+// that a present-but-not-executable ox-adapter-* must not count as
+// "present": internal/session/adapters/discovery.go's own resolver requires
+// the executable bit (fi.Mode()&0111 != 0) before it will run a binary as
+// an adapter, so a check that counted a non-executable file anyway would
+// report "10/10 present" while session hooks silently no-op on that
+// adapter -- lying in the same direction as the bug this check exists to
+// catch.
+func TestAdapterSiblingsResult_NonExecutableNotCounted(t *testing.T) {
+	dir := t.TempDir()
+	// codex is executable and must count; gemini is present but not
+	// executable and must NOT count.
+	touchFile(t, filepath.Join(dir, "ox-adapter-codex"))
+	nonExecPath := filepath.Join(dir, "ox-adapter-gemini")
+	if err := os.WriteFile(nonExecPath, []byte("#!/bin/sh\n"), 0644); err != nil {
+		t.Fatalf("write non-executable adapter: %v", err)
+	}
+
+	result := adapterSiblingsResult([]string{dir})
+
+	if result.message != "1/10 present" {
+		t.Errorf("message = %q, want %q (gemini is present but not executable, must not count)", result.message, "1/10 present")
+	}
+	if !strings.Contains(result.detail, "gemini") {
+		t.Errorf("detail should list gemini as missing since it isn't executable: %s", result.detail)
+	}
+}
+
 // TestAdapterSiblingsResult_NoDirs covers the case where
 // adapters.BundledAdapterDirs itself could not determine anything (e.g.
 // os.Executable failed) -- must skip, never warn on nothing.

@@ -111,6 +111,31 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 // runAgentSessionAbortByName aborts a session by name. Only allows discarding
 // orphan, ghost, or local-only sessions — not uploaded or actively recording ones.
 // This handles the gap where orphaned sessions have no clean discard path.
+// everRegisteredFromRecording reports whether the server was ever told this
+// session exists, read from the session's .recording.json.
+//
+// It decides whether aborting may contact the server at all. A session whose
+// registration is still "deferred" was never announced — under
+// `session_publishing: manual` it never will be — so an abort request would be
+// the FIRST thing the server learns about it. Discarding a session must not be
+// what finally announces it.
+//
+// Unreadable or absent state returns true, deliberately. We cannot prove a
+// session was never registered, and failing to tombstone one that WAS leaves an
+// "in progress" page up forever for a session the user explicitly discarded —
+// a worse privacy outcome than the two opaque ids an abort call carries.
+func everRegisteredFromRecording(recPath string) bool {
+	data, err := os.ReadFile(recPath)
+	if err != nil {
+		return true
+	}
+	var rs session.RecordingState
+	if json.Unmarshal(data, &rs) != nil {
+		return true
+	}
+	return rs.LifecycleRegistrationState != "deferred"
+}
+
 func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command, nameArg string) error {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
@@ -173,6 +198,7 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 	// first, raw-header carrier as fallback
 	abortedSessionID := ""
 	recPath := filepath.Join(sessionPath, ".recording.json")
+	abortedEverRegistered := everRegisteredFromRecording(recPath)
 	if data, err := os.ReadFile(recPath); err == nil {
 		var rs session.RecordingState
 		if json.Unmarshal(data, &rs) == nil {
@@ -198,7 +224,7 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 		return fmt.Errorf("failed to remove session data at %s: %w", sessionPath, err)
 	}
 
-	notifySessionAbortedAsync(projectRoot, abortedSessionID, true)
+	notifySessionAbortedAsync(projectRoot, abortedSessionID, abortedEverRegistered)
 
 	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName, draftDeleted, draftWarning)
 }

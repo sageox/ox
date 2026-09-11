@@ -399,6 +399,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 	var cloudRepos *api.ReposResponse
 	var cloudLedgerURL string
 	var cloudTeamContexts []api.RepoInfo
+	var cloudReposErr error
 
 	// use project endpoint for auth check and API calls (not global default)
 	// this ensures we query the correct endpoint when logged into multiple
@@ -409,8 +410,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 	var ledgerStatusErr error
 	var userEmail string
 
-	// repo detail for visibility/access info (works for both members and non-members)
+	// repo detail for visibility/access info (works for both members and non-members).
+	// repoDetailErr is kept (not discarded) because a failed call must render
+	// as "we couldn't check" below, never as "the team isn't visible" -- those
+	// are different facts with different fixes.
 	var repoDetail *api.RepoDetailResponse
+	var repoDetailErr error
 
 	if authenticated {
 		token, err := auth.GetTokenForEndpoint(projectEndpoint)
@@ -420,12 +425,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 
 			// fetch repo detail for visibility/access info
 			if projectCfg != nil && projectCfg.RepoID != "" {
-				repoDetail, _ = client.GetRepoDetail(projectCfg.RepoID)
+				repoDetail, repoDetailErr = client.GetRepoDetail(projectCfg.RepoID)
 			}
 
 			// fetch repos for team contexts
-			cloudRepos, err = client.GetRepos()
-			if err == nil && cloudRepos != nil {
+			cloudRepos, cloudReposErr = client.GetRepos()
+			if cloudReposErr == nil && cloudRepos != nil {
 				// categorize cloud repos
 				for _, repo := range cloudRepos.Repos {
 					switch repo.Type {
@@ -898,12 +903,29 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString(statusMutedStyle.Render(repoTeamID))
 		b.WriteString("\n")
 		b.WriteString(statusLabelStyle.Render("Status"))
-		b.WriteString(statusWarningStyle.Render("⚠ not visible to this account"))
-		b.WriteString("\n")
-		b.WriteString(statusLabelStyle.Render(""))
-		if authenticated {
+		switch {
+		case repoDetailErr != nil || cloudReposErr != nil:
+			// The absence above is unproven, not confirmed: GetRepoDetail
+			// and/or GetRepos failed outright (network, transient 5xx),
+			// so we never actually got an answer from the source that
+			// would tell us whether this account can see the team.
+			// Rendering that identically to "not visible to this
+			// account" -- a real permission denial -- trains a coworker
+			// to distrust (or ignore) this warning the next time it's
+			// real.
+			b.WriteString(statusWarningStyle.Render("⚠ visibility unavailable"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("Could not reach the API to check this team's visibility. Try again shortly."))
+		case authenticated:
+			b.WriteString(statusWarningStyle.Render("⚠ not visible to this account"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
 			b.WriteString(statusMutedStyle.Render("This repo is bound to a team your current account can't see."))
-		} else {
+		default:
+			b.WriteString(statusWarningStyle.Render("⚠ not visible to this account"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
 			b.WriteString(statusMutedStyle.Render("Log in to check whether your account has access to this team."))
 		}
 		b.WriteString("\n")

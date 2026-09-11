@@ -397,6 +397,57 @@ func TestRenderGitReposSection_TeamBoundButNotVisible(t *testing.T) {
 	assert.NotContains(t, out, "not configured", "must not render identically to a repo that was never bound to a team")
 }
 
+// TestRenderGitReposSection_TeamBoundButAPIFailure_ShowsUnavailableNotDenied
+// is the red-first proof that a transient API failure must never render
+// identically to a real permission denial. Before this fix, GetRepoDetail's
+// and GetRepos' errors were discarded (`repoDetail, _ = ...`), so a 5xx from
+// either endpoint fell through to the exact same "⚠ not visible to this
+// account" text as a genuine "your account can't see this team" -- "we
+// couldn't check" and "you don't have access" have different fixes, and
+// collapsing them trains a coworker to distrust the warning the next time
+// it's real.
+func TestRenderGitReposSection_TeamBoundButAPIFailure_ShowsUnavailableNotDenied(t *testing.T) {
+	isolateStatusTestAuth(t)
+	t.Setenv("SAGEOX_TOKEN", "")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == auth.IntrospectEndpoint {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"active": true,
+				"principal_kind": "user",
+				"scope": "full-access",
+				"token_type": "Bearer",
+				"expires_at": null,
+				"user": {"id": "u_1", "email": "person@example.test", "name": "Person A"},
+				"team": null,
+				"token": null
+			}`))
+			return
+		}
+		// Every repo-data endpoint (repos list, repo detail, ledger status)
+		// is down -- the transient-outage scenario this test proves must
+		// not render as a permission denial.
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	gitRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(gitRoot, ".sageox"), 0755))
+	require.NoError(t, config.SaveProjectConfig(gitRoot, &config.ProjectConfig{
+		TeamID:   "team_ghost",
+		RepoID:   "repo_ghost",
+		Endpoint: srv.URL,
+	}))
+	writeDiskLogin(t, srv.URL, "Person A", "person@example.test")
+
+	out := renderGitReposSection(nil, gitRoot, nil, statusBubblesSummary{}, false)
+
+	assert.Contains(t, out, "team_ghost", "the bound team id must still be surfaced")
+	assert.Contains(t, out, "visibility unavailable", "must name the real failure mode: we could not check")
+	assert.NotContains(t, out, "not visible to this account", "a transient API failure must not render as a permission denial")
+}
+
 // TestRenderGitReposSection_NeverConfigured is the negative control for the
 // above: a repo with no team_id at all must still say "not configured", and
 // must NOT claim a mismatch that doesn't exist.

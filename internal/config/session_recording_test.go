@@ -408,6 +408,11 @@ func kbTestEnv(t *testing.T) (tmpDir, dataHome, endpointSlug string) {
 	t.Setenv("XDG_DATA_HOME", dataHome)
 	t.Setenv("SAGEOX_ENDPOINT", endpointSlug)
 	t.Setenv("OX_SESSION_RECORDING", "")
+	// ResolveSessionPublishing checks OX_SESSION_PUBLISHING first, same as
+	// ResolveSessionRecording checks OX_SESSION_RECORDING above — a developer
+	// with either var exported in their shell would otherwise get confusing
+	// local failures in the three tests built on this fixture.
+	t.Setenv("OX_SESSION_PUBLISHING", "")
 	return
 }
 

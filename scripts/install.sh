@@ -39,9 +39,9 @@ log_error() {
     echo -e "${RED}Error:${NC} $1" >&2
 }
 
-# Print PATH guidance for AI agent hooks, naming the shell startup file
-# that a non-interactive hook shell actually reads. No-op if the binary's
-# directory is already on PATH.
+# Print PATH guidance for AI coding tool hooks, naming the shell startup
+# file that a non-interactive hook shell actually reads. No-op if the
+# binary's directory is already on PATH.
 #
 # AI coding tools run hooks in a non-interactive shell (e.g. `zsh -c
 # '...'`), which sources ~/.zshenv but never ~/.zshrc/~/.bash_profile/etc.
@@ -53,11 +53,14 @@ log_error() {
 # non-interactive, non-login bash sources nothing unless $BASH_ENV is set,
 # and we deliberately don't tell users to set that: it's obscure and it
 # would affect every non-interactive bash invocation on the machine, not
-# just hooks. So for bash/fish/unknown we give the honest fix instead: the
-# hook tool inherits the environment of the terminal that launched it, so
-# adding the export to the interactive rc file and then restarting the
-# tool from a fresh terminal works, even though the file itself is never
-# read directly by the hook shell.
+# just hooks. So for bash/fish/unknown we give the honest explanation
+# instead of the zsh-specific one, plus a restart reminder: the hook tool
+# inherits the environment of the terminal that launched it, so adding the
+# export to the interactive rc file and then restarting the tool from a
+# fresh terminal works, even though the file itself is never read directly
+# by the hook shell. Mirrors internal/constants/agent.go's
+# oxNotOnPathFallback and internal/doctor/checks/ox_in_path.go's
+# explanationFor/shellRCFor — keep the wording identical across all three.
 print_path_warning() {
     local binary_path=$1
     local install_dir
@@ -67,7 +70,7 @@ print_path_warning() {
         return 0
     fi
 
-    local shell_name rc_file path_line restart_line
+    local shell_name rc_file path_line restart_line explanation
     shell_name=$(basename "${SHELL:-}")
     restart_line=""
     # rc_file is display text only (never sourced or written to by this
@@ -77,27 +80,31 @@ print_path_warning() {
         zsh)
             rc_file="~/.zshenv"
             path_line="export PATH=\"\$PATH:$install_dir\""
+            explanation="AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc."
             ;;
         bash)
             rc_file="~/.bashrc"
             path_line="export PATH=\"\$PATH:$install_dir\""
             restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
+            explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
             ;;
         fish)
             rc_file="~/.config/fish/config.fish"
             path_line="fish_add_path $install_dir"
             restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
+            explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
             ;;
         *)
-            rc_file="your shell's startup file"
+            rc_file="the startup file for your shell"
             path_line="export PATH=\"\$PATH:$install_dir\""
             restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."
+            explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched."
             ;;
     esac
 
     echo ""
     log_warning "$BINARY is installed at $binary_path but is not on PATH for non-interactive shells."
-    echo "AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc."
+    echo "$explanation"
     echo "Add this line to $rc_file:"
     echo "    $path_line"
     if [[ -n "$restart_line" ]]; then

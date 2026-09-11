@@ -84,22 +84,58 @@ if command -v ox >/dev/null 2>&1; then
 	// Only speak on the failure path — the success path (ox found, `then`
 	// branch) stays exactly as quiet as before, since these hooks fire on
 	// every commit/push.
+	//
+	// Guidance branches on $SHELL: only zsh has a startup file a
+	// non-interactive shell always reads (~/.zshenv); bash/fish/other read
+	// no rc file by default, so they get an honest explanation instead of
+	// the zsh-specific one, plus a restart reminder. Mirrors
+	// internal/constants/agent.go's oxNotOnPathFallback (the AI-tool-hook
+	// flavor of this same message) and
+	// internal/doctor/checks/ox_in_path.go's explanationFor/shellRCFor —
+	// keep the three wordings identical.
+	//
+	// Uses `_ox_p`/`_ox_gp` (not `p`/`gp`): installHookSection appends this
+	// section into an existing hook file's shell scope, where plain
+	// `p`/`gp` could collide with a variable the surrounding hook already
+	// defines.
 	oxGitHookNotOnPathFallback = `else
-  p=""
-  [ -n "$GOBIN" ] && [ -x "$GOBIN/ox" ] && p="$GOBIN"
-  if [ -z "$p" ] && command -v go >/dev/null 2>&1; then
-    gp="$(go env GOPATH 2>/dev/null)/bin"
-    [ -x "$gp/ox" ] && p="$gp"
+  _ox_p=""
+  [ -n "$GOBIN" ] && [ -x "$GOBIN/ox" ] && _ox_p="$GOBIN"
+  if [ -z "$_ox_p" ] && command -v go >/dev/null 2>&1; then
+    _ox_gp="$(go env GOPATH 2>/dev/null)/bin"
+    [ -x "$_ox_gp/ox" ] && _ox_p="$_ox_gp"
   fi
-  [ -z "$p" ] && [ -x "$HOME/go/bin/ox" ] && p="$HOME/go/bin"
-  [ -z "$p" ] && [ -x "$HOME/.local/bin/ox" ] && p="$HOME/.local/bin"
-  [ -z "$p" ] && [ -x "/usr/local/bin/ox" ] && p="/usr/local/bin"
-  [ -z "$p" ] && [ -x "/opt/homebrew/bin/ox" ] && p="/opt/homebrew/bin"
-  if [ -n "$p" ]; then
-    echo "ox is installed at $p/ox but is not on PATH for non-interactive shells." >&2
-    echo "AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc." >&2
-    echo "Add this line to ~/.zshenv:" >&2
-    echo "    export PATH=\"\$PATH:$p\"" >&2
+  [ -z "$_ox_p" ] && [ -x "$HOME/go/bin/ox" ] && _ox_p="$HOME/go/bin"
+  [ -z "$_ox_p" ] && [ -x "$HOME/.local/bin/ox" ] && _ox_p="$HOME/.local/bin"
+  [ -z "$_ox_p" ] && [ -x "/usr/local/bin/ox" ] && _ox_p="/usr/local/bin"
+  [ -z "$_ox_p" ] && [ -x "/opt/homebrew/bin/ox" ] && _ox_p="/opt/homebrew/bin"
+  if [ -n "$_ox_p" ]; then
+    echo "ox is installed at $_ox_p/ox but is not on PATH for non-interactive shells." >&2
+    case "${SHELL##*/}" in
+      zsh)
+        echo "AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc." >&2
+        echo "Add this line to ~/.zshenv:" >&2
+        echo "    export PATH=\"\$PATH:$_ox_p\"" >&2
+        ;;
+      bash)
+        echo "AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." >&2
+        echo "Add this line to ~/.bashrc:" >&2
+        echo "    export PATH=\"\$PATH:$_ox_p\"" >&2
+        echo "Then restart your AI coding tool from a new terminal so it picks up the change." >&2
+        ;;
+      fish)
+        echo "AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." >&2
+        echo "Add this line to ~/.config/fish/config.fish:" >&2
+        echo "    fish_add_path $_ox_p" >&2
+        echo "Then restart your AI coding tool from a new terminal so it picks up the change." >&2
+        ;;
+      *)
+        echo "AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." >&2
+        echo "Add this line to the startup file for your shell:" >&2
+        echo "    export PATH=\"\$PATH:$_ox_p\"" >&2
+        echo "Then restart your AI coding tool from a new terminal so it picks up the change." >&2
+        ;;
+    esac
   else
     echo "ox is not installed. Install a release: brew tap sageox/tap && brew install ox, or curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash" >&2
   fi

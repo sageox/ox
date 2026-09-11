@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -69,9 +70,19 @@ func adapterSiblingsResult(dirs []string) checkResult {
 				continue
 			}
 			name := strings.TrimSuffix(strings.TrimPrefix(e.Name(), "ox-adapter-"), ".exe")
-			if name != "" {
-				found[name] = true
+			if name == "" {
+				continue
 			}
+			// A present-but-not-executable ox-adapter-* is invisible to the
+			// real resolver (internal/session/adapters/discovery.go's own
+			// executable-bit check) -- match it here so this check can't
+			// report "present" for a binary session hooks would skip.
+			path := filepath.Join(dir, e.Name())
+			fi, err := os.Stat(path)
+			if err != nil || fi.Mode()&0111 == 0 {
+				continue
+			}
+			found[name] = true
 		}
 	}
 

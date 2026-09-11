@@ -2,6 +2,10 @@ package checks
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/doctor"
@@ -168,7 +172,8 @@ func TestProbeShellPath_EmptyShellPath_IsInconclusive(t *testing.T) {
 
 func TestProbeShellPath_ResolvesARealBinaryViaScrubbedEnv(t *testing.T) {
 	// "command -v sh" should resolve even under the scrubbed PATH
-	// (/usr/bin:/bin), proving the scrub doesn't zero PATH outright.
+	// (/usr/bin:/bin:/usr/sbin:/sbin), proving the scrub doesn't zero PATH
+	// outright.
 	resolved, err := probeShellPath(context.Background(), "/bin/sh", "sh")
 	require.NoError(t, err)
 	assert.NotEmpty(t, resolved)
@@ -177,6 +182,84 @@ func TestProbeShellPath_ResolvesARealBinaryViaScrubbedEnv(t *testing.T) {
 func TestProbeShellPath_BinaryNotFound_ReturnsErrNotFoundInShell(t *testing.T) {
 	_, err := probeShellPath(context.Background(), "/bin/sh", "definitely-not-a-real-binary-xyz")
 	assert.ErrorIs(t, err, ErrNotFoundInShell)
+}
+
+// TestProbeShellPath_ShellExitsNonOneForUnrelatedReason_IsInconclusive is
+// the red-first proof for the fix distinguishing "the shell ran fine and
+// reported not-found" (POSIX `command -v`'s exit code 1, the only real
+// not-found signal) from "the shell itself failed for an unrelated
+// reason" -- e.g. a broken startup file, or an explicit `exit N` in it.
+// Before this fix, ANY non-zero exit from the probe shell was read as
+// ErrNotFoundInShell, so a supported shell dying in its own rc file would
+// have been misreported as "ox is not on PATH" instead of "could not
+// probe this shell".
+func TestProbeShellPath_ShellExitsNonOneForUnrelatedReason_IsInconclusive(t *testing.T) {
+	dir := t.TempDir()
+	fakeShell := filepath.Join(dir, "broken-shell.sh")
+	// Ignores its "-c <cmd>" args entirely and exits with a code that is
+	// not 1 -- simulating a shell whose startup died for a reason that has
+	// nothing to do with whether ox is on PATH.
+	require.NoError(t, os.WriteFile(fakeShell, []byte("#!/bin/sh\nexit 7\n"), 0o755))
+
+	_, err := probeShellPath(context.Background(), fakeShell, "ox")
+	assert.ErrorIs(t, err, ErrShellProbeInconclusive)
+	assert.NotErrorIs(t, err, ErrNotFoundInShell, "a non-1 exit code must never be misread as the not-found signal")
+}
+
+// TestScrubbedShellEnv_IncludesPlatformDefaultSbinDirs is the red-first
+// proof for including /usr/sbin and /sbin in the scrubbed probe PATH. The
+// two failure modes this trades off: inheriting the caller's real PATH
+// reproduces the false-green this check exists to catch (a PATH entry
+// added only to ~/.zshrc, which a real hook shell never sources); scrubbing
+// PATH down to too little makes a healthy machine look off-PATH when a
+// real hook shell would have resolved ox via its inherited system PATH.
+// The platform-default set (/usr/bin:/bin:/usr/sbin:/sbin) is what a real
+// non-interactive, non-login shell is actually seeded with.
+func TestScrubbedShellEnv_IncludesPlatformDefaultSbinDirs(t *testing.T) {
+	var path string
+	for _, kv := range scrubbedShellEnv() {
+		if p, ok := strings.CutPrefix(kv, "PATH="); ok {
+			path = p
+		}
+	}
+	require.NotEmpty(t, path, "scrubbedShellEnv must set a PATH entry")
+
+	dirs := strings.Split(path, ":")
+	for _, want := range []string{"/usr/bin", "/bin", "/usr/sbin", "/sbin"} {
+		assert.Contains(t, dirs, want, "scrubbed PATH must include the platform-default dir %q", want)
+	}
+}
+
+// TestProbeShellPath_ResolvesABinaryOnlyInSbin proves the platform-default
+// PATH fix end to end: a binary that lives ONLY in /usr/sbin or /sbin (never
+// /usr/bin or /bin) must still resolve through the scrubbed probe
+// environment, the same way it would for a real AI coding tool hook shell.
+func TestProbeShellPath_ResolvesABinaryOnlyInSbin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sbin/PATH-scrub semantics are POSIX-shell specific")
+	}
+
+	// visudo and chroot are the most reliably present /usr/sbin binaries
+	// across macOS and mainstream Linux distros (both ship with the base
+	// sudo/coreutils-equivalent packages). Skip -- rather than fail -- if
+	// none exist on this machine/CI image: an absent binary proves nothing
+	// about the PATH-scrub logic either way.
+	candidates := []string{"/usr/sbin/visudo", "/usr/sbin/chroot", "/sbin/ping"}
+	var binary string
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			binary = c
+			break
+		}
+	}
+	if binary == "" {
+		t.Skip("no known /usr/sbin or /sbin binary found on this machine to probe")
+	}
+
+	resolved, err := probeShellPath(context.Background(), "/bin/sh", filepath.Base(binary))
+	require.NoError(t, err, "a binary living only in /usr/sbin or /sbin must resolve under the scrubbed PATH -- "+
+		"if this fails, PATH was scrubbed down to /usr/bin:/bin only (the prior bug) instead of including the platform-default sbin dirs")
+	assert.NotEmpty(t, resolved)
 }
 
 // assertNotCalled fails the test if the stub is ever invoked -- used for

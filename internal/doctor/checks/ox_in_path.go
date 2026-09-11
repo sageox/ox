@@ -302,8 +302,19 @@ func probeShellPath(ctx context.Context, shellPath, binary string) (string, erro
 		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			// the shell ran fine and reported "not found" -- a real signal.
-			return "", ErrNotFoundInShell
+			// "command -v" itself only ever exits 0 (found) or 1 (not
+			// found) -- exit code 1 is the real "not found" signal. Any
+			// other exit code means the shell exited for a reason
+			// unrelated to whether ox is on PATH: e.g. a config error in
+			// the user's own startup file (zsh -c always sources
+			// ~/.zshenv, even non-interactively), or an explicit `exit N`
+			// in it. That must be reported as inconclusive, never
+			// misread as "ox is missing" -- a supported shell dying in
+			// its own rc file is not the same fact as ox being absent.
+			if exitErr.ExitCode() == 1 {
+				return "", ErrNotFoundInShell
+			}
+			return "", ErrShellProbeInconclusive
 		}
 		// couldn't even start the shell (bad path, permission denied, etc).
 		return "", ErrShellProbeInconclusive
@@ -318,10 +329,26 @@ func probeShellPath(ctx context.Context, shellPath, binary string) (string, erro
 
 // scrubbedShellEnv builds the minimal environment a non-interactive agent
 // hook shell actually gets: HOME/USER so shell startup files resolve
-// correctly, plus a bare-bones system PATH the shell's own startup files
-// are expected to extend. The caller's real PATH is never included.
+// correctly, plus the platform-default PATH a login-less shell inherits
+// before its own startup files run (the macOS/Linux "_PATH_DEFPATH" set) --
+// the shell's own startup files are expected to extend it further.
+//
+// This trades off two failure modes, and picking the wrong side of either
+// has already happened once on this exact line:
+//   - Inheriting the caller's real PATH re-tests whatever shell launched
+//     `ox doctor` and reproduces the exact false-green this check exists to
+//     catch (a PATH entry ox needs lives only in ~/.zshrc, which the real
+//     hook shell never sources).
+//   - Scrubbing PATH down to nothing (or too little) makes a healthy
+//     machine look off-PATH when a real hook shell would have resolved ox
+//     via its inherited system PATH -- a false positive that trains people
+//     to ignore doctor.
+//
+// The platform-default set is what a real non-interactive, non-login shell
+// is actually seeded with before its own rc files run, so it reproduces
+// that environment without importing the caller's PATH.
 func scrubbedShellEnv() []string {
-	env := []string{"PATH=/usr/bin:/bin"}
+	env := []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		env = append(env, "HOME="+home)
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 
 	"github.com/sageox/ox/internal/config"
@@ -15,6 +16,13 @@ const (
 	ConfigLevelRepo    ConfigLevel = "repo"
 	ConfigLevelTeam    ConfigLevel = "team"
 	ConfigLevelDefault ConfigLevel = "default"
+	// ConfigLevelEnv is display-only: it identifies an env-var override in
+	// ConfigValue.Source (e.g. OX_SESSION_PUBLISHING) so 'ox config get'
+	// shows the value actually in effect. It is not a storage location —
+	// there is nothing to set/unset "at env level" — so it never appears in
+	// ConfigSetting.Levels and SetConfigValue/UnsetConfigValue don't handle
+	// it.
+	ConfigLevelEnv ConfigLevel = "env"
 )
 
 // ConfigSetting defines a configurable setting.
@@ -46,6 +54,7 @@ type ConfigValue struct {
 	Value   string      `json:"value"`
 	Source  ConfigLevel `json:"source"`
 	Default string      `json:"default,omitempty"`
+	EnvVal  string      `json:"env_value,omitempty"` // highest priority; only populated for session_publishing/session_recording today (extending to every setting is tracked separately as ox-8d4t)
 	UserVal string      `json:"user_value,omitempty"`
 	RepoVal string      `json:"repo_value,omitempty"`
 	TeamVal string      `json:"team_value,omitempty"`
@@ -576,6 +585,12 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 	// resolve based on key
 	switch key {
 	case "session_recording":
+		// OX_SESSION_RECORDING beats every stored layer at runtime
+		// (config.ResolveSessionRecording) — display must agree, or 'ox
+		// config get session_recording' shows a value that isn't in effect.
+		if envMode := os.Getenv(config.EnvSessionRecording); envMode != "" {
+			cv.EnvVal = config.NormalizeSessionRecording(envMode)
+		}
 		if userCfg != nil && userCfg.Sessions != nil {
 			mode := userCfg.Sessions.GetMode()
 			if mode != "" && mode != "none" {
@@ -590,6 +605,13 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 		}
 
 	case "session_publishing":
+		// OX_SESSION_PUBLISHING beats every stored layer at runtime
+		// (config.ResolveSessionPublishing) — display must agree, since this
+		// is exactly the privacy control a coworker runs 'ox config get' on
+		// to check their posture.
+		if envMode := os.Getenv(config.EnvSessionPublishing); envMode != "" {
+			cv.EnvVal = config.NormalizeSessionPublishing(envMode)
+		}
 		if userCfg != nil && userCfg.SessionPublishing != "" {
 			cv.UserVal = config.NormalizeSessionPublishing(userCfg.SessionPublishing)
 		}
@@ -801,8 +823,13 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 
 	}
 
-	// determine effective value and source (User > Repo > Team > Default)
-	if cv.UserVal != "" {
+	// determine effective value and source (Env > User > Repo > Team > Default).
+	// EnvVal is only ever populated for session_publishing/session_recording
+	// (see their cases above) — every other setting falls through untouched.
+	if cv.EnvVal != "" {
+		cv.Value = cv.EnvVal
+		cv.Source = ConfigLevelEnv
+	} else if cv.UserVal != "" {
 		cv.Value = cv.UserVal
 		cv.Source = ConfigLevelUser
 	} else if cv.RepoVal != "" {

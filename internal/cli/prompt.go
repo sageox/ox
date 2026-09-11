@@ -177,10 +177,12 @@ func selectOneCore(title string, options []string, defaultIdx int) (idx int, exp
 }
 
 // selectOneSimpleCore reads a numbered choice from stdin. explicit=false
-// means the read produced nothing at all (EOF/read error) — no one was
-// there to accept or override the default. explicit=true covers both a
-// valid typed number and a deliberate blank Enter (a successful read of an
-// empty line), both of which mean a human answered.
+// means the read produced nothing at all (EOF/read error with no bytes) —
+// no one was there to accept or override the default. explicit=true covers
+// a valid typed number, a deliberate blank Enter (a successful read of an
+// empty line), and input with no trailing newline (bufio.ReadString returns
+// the final bytes together with io.EOF, e.g. `printf 2 | ox init`) — all of
+// which mean a human (or a script standing in for one) answered.
 func selectOneSimpleCore(title string, options []string, defaultIdx int) (idx int, explicit bool, err error) {
 	fmt.Println(title)
 	fmt.Println()
@@ -196,11 +198,15 @@ func selectOneSimpleCore(title string, options []string, defaultIdx int) (idx in
 
 	reader := bufio.NewReader(os.Stdin)
 	input, readErr := reader.ReadString('\n')
-	if readErr != nil {
+	if readErr != nil && input == "" {
 		// Nothing to read at all — stdin was closed or empty. No one was
 		// there to accept or override the default.
 		return defaultIdx, false, nil
 	}
+	// readErr != nil with non-empty input means ReadString hit io.EOF after
+	// returning the final, newline-less bytes (e.g. `printf 2 | ox init`).
+	// That is a real answer someone piped in — treat it exactly like a
+	// terminated line, not like silence.
 
 	input = strings.TrimSpace(input)
 	if input == "" {
