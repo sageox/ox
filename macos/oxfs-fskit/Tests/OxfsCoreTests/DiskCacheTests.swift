@@ -15,12 +15,54 @@ import Foundation
         }
     }
 
+    final class CountingSource: ContentSource, @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        let bytes: [UInt8]
+
+        init(_ bytes: [UInt8]) { self.bytes = bytes }
+
+        func fetch(_ reference: ContentRef, into output: ContentWriter) throws {
+            lock.lock()
+            count += 1
+            lock.unlock()
+            Thread.sleep(forTimeInterval: 0.02)
+            try output.write(bytes)
+        }
+
+        var fetchCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return count
+        }
+    }
+
+    final class ErrorBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Error] = []
+
+        func append(_ error: Error) {
+            lock.lock()
+            values.append(error)
+            lock.unlock()
+        }
+
+        var isEmpty: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return values.isEmpty
+        }
+    }
+
     private func tempRoot(_ n: String) -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("oxfs-disk-\(n)-\(UUID().uuidString)")
     }
     private func referenceAbc() -> ContentRef {
         try! ContentRef(tenant: "t", algorithm: "sha256",
                         digest: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", size: 3)
+    }
+    private func referenceXyz() -> ContentRef {
+        ContentRef.forSha256(tenant: "t", bytes: Array("xyz".utf8))
     }
     private func source(_ bytes: [UInt8]) -> MemorySource { MemorySource([referenceAbc().digest: bytes]) }
     private func manifest(_ g: UInt64) throws -> Manifest {
@@ -82,6 +124,93 @@ import Foundation
         ws = try Workspace.open(root: root, source: source(Array("abc".utf8)))
         let inode = try #require(ws.snapshot().byPath("sessions/one/raw.jsonl")).inode
         #expect(try ws.openInode(inode).read(offset: 0, count: 3) == Array("abc".utf8))
+    }
+
+    @Test func sameProcessCorruptionIsNeverServed() throws {
+        let root = tempRoot("same-process-corrupt")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let ws = try Workspace.open(root: root, source: source(Array("abc".utf8)))
+        _ = try ws.apply(manifest(1))
+        let inode = try #require(ws.snapshot().byPath("sessions/one/raw.jsonl")).inode
+        #expect(try ws.openInode(inode).read(offset: 0, count: 3) == Array("abc".utf8))
+
+        let object = try #require(findObject(root.appendingPathComponent("cache")))
+        try Data("abd".utf8).write(to: object)
+        #expect(throws: (any Error).self) {
+            _ = try ws.openInode(inode)
+        }
+        #expect(try ws.cacheTelemetry().residentObjects == 0)
+    }
+
+    @Test func injectedCommitFailureRollsBackCandidate() throws {
+        let root = tempRoot("commit-rollback")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = try DiskContentCache(
+            root: root.appendingPathComponent("cache"),
+            source: source(Array("abc".utf8))
+        )
+        let ws = try Workspace.open(root: root, cache: cache)
+        cache.failNextCommit()
+
+        #expect(throws: (any Error).self) {
+            _ = try ws.apply(self.manifest(1))
+        }
+        #expect(ws.snapshot().byPath("sessions/one/raw.jsonl") == nil)
+        #expect(try ws.cacheTelemetry().residentObjects == 0)
+        #expect(!FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("cache/active-apply.v1").path
+        ))
+    }
+
+    @Test func openDescriptorPinsExactObjectUntilClose() throws {
+        let root = tempRoot("open-pin")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let abc = referenceAbc(), xyz = referenceXyz()
+        let cache = try DiskContentCache(
+            root: root.appendingPathComponent("cache"),
+            source: MemorySource([
+                abc.digest: Array("abc".utf8),
+                xyz.digest: Array("xyz".utf8),
+            ]),
+            config: CacheConfig(maxBytes: 3)
+        )
+        _ = try cache.materialize(abc)
+        let opened = try cache.openContent(abc)
+
+        #expect(throws: (any Error).self) { _ = try cache.materialize(xyz) }
+        #expect(try opened.read(offset: 0, count: 3) == Array("abc".utf8))
+        #expect(try cache.resident(abc) != nil)
+
+        try opened.close()
+        _ = try cache.materialize(xyz)
+        #expect(try cache.resident(abc) == nil)
+        #expect(try cache.resident(xyz) != nil)
+    }
+
+    @Test func concurrentMaterializationCoalescesOneOriginFetch() throws {
+        let root = tempRoot("coalesced-fetch")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let reference = referenceAbc()
+        let source = CountingSource(Array("abc".utf8))
+        let cache = try DiskContentCache(
+            root: root.appendingPathComponent("cache"),
+            source: source
+        )
+        let errors = ErrorBox()
+
+        DispatchQueue.concurrentPerform(iterations: 16) { _ in
+            do {
+                _ = try cache.materialize(reference)
+            } catch {
+                errors.append(error)
+            }
+        }
+
+        #expect(errors.isEmpty)
+        #expect(source.fetchCount == 1)
+        #expect(try cache.telemetry().fetchedObjects == 1)
+        #expect(try cache.openBytes(reference) == Array("abc".utf8))
     }
 
     /// Port of `legacy_metadata_migrates_without_scanning_the_object_tree`.

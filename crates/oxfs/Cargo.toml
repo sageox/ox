@@ -15,8 +15,23 @@ path = "src/lib.rs"
 ctrlc = "3"
 
 [dependencies]
+# Remote oxdirtest transport. All are dual MIT/Apache-2.0.
+curl = "0.4"
+flate2 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tar = "0.4"
+url = "2"
 # Persistent cache catalog. rusqlite is MIT; bundled SQLite is public domain.
 rusqlite = { version = "0.40", features = ["bundled"] }
+# oxFS owns trace creation and exports through the authenticated SageOx OTLP
+# proxy. These dependencies are Apache-2.0 or MIT licensed.
+opentelemetry = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+opentelemetry_sdk = { version = "0.32", features = ["trace"] }
+tracing = "0.1"
+tracing-opentelemetry = "0.33"
+tracing-subscriber = "0.3"
 
 [[bin]]
 name = "oxfsd"

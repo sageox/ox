@@ -9,6 +9,39 @@ pub enum NodeKind {
     File,
 }
 
+/// Why a selected path is — or is not — visible in the mount. `Available` means
+/// resident and shown; every other value is a reason the path is absent from
+/// the tree but still recorded in `.sageox/INDEX` (design §3a). Two of these are
+/// **per-selector** — evaluated against an individual selecting Session:
+/// `NotSelected` and `AuthExpired` (the latter against that Session's own ox
+/// token, which does not exist in the crate yet — no code path produces it).
+/// The rest are **per-path** materialization outcomes that apply to every
+/// selector of the path: `ExceedsCacheLimit`, `NoSpace`, and `PathCollision`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Status {
+    Available,
+    NotSelected,
+    ExceedsCacheLimit,
+    NoSpace,
+    AuthExpired,
+    PathCollision,
+}
+
+impl Status {
+    /// The stable token written into `.sageox/INDEX.{md,json}`. These are the
+    /// enum values named in the design; tools parse them, so they are contract.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::NotSelected => "not_selected",
+            Self::ExceedsCacheLimit => "exceeds_cache_limit",
+            Self::NoSpace => "no_space",
+            Self::AuthExpired => "auth_expired",
+            Self::PathCollision => "path_collision",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FileNode {
     pub content: ContentRef,
@@ -23,6 +56,11 @@ pub struct FileNode {
 pub struct Selector {
     pub session_id: String,
     pub reason: String,
+    /// This Session's own view of the path. Usually equal to the path's
+    /// aggregate status, but distinct when a per-selector reason applies — a
+    /// losing entry in a canonical-path collision carries `PathCollision` while
+    /// the winning selector stays `Available` (see `Workspace::build_namespace`).
+    pub status: Status,
 }
 
 #[derive(Clone, Debug)]

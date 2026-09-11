@@ -40,6 +40,11 @@ final class LocalDirectorySource: ContentSource, @unchecked Sendable {
 
 struct Indexed { var entries: [ManifestEntry]; var sources: [String: URL]; var files: Int; var bytes: UInt64 }
 
+struct ControlState: Codable {
+    var generation: UInt64
+    var selected: Set<String>
+}
+
 func hexDigest(_ d: SHA256.Digest) -> String { d.map { String(format: "%02x", $0) }.joined() }
 
 /// Stream-hash a file into a validated ContentRef (tenant "oxdirtest").
@@ -80,10 +85,14 @@ func indexFiles(sourceRoot: URL, selections: [String]) throws -> Indexed {
         let content = try hashFile(file)
         let attrs = try FileManager.default.attributesOfItem(atPath: file.path)
         let mtime = UInt64((attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)
+        guard let permissions = attrs[.posixPermissions] as? NSNumber else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        let mode = UInt32(truncating: permissions) & 0o555
         sources[content.digest] = file
         do {
             entries.append(try ManifestEntry(path: relative, sourceID: file.path, sourceKind: "LocalDirectory",
-                                             mode: 0o444, mtimeSecs: mtime, content: content,
+                                             mode: mode, mtimeSecs: mtime, content: content,
                                              reason: "human-selected local directory"))
         } catch {
             FileHandle.standardError.write(Data("oxdirtest: skipping \(relative): \(error)\n".utf8))
@@ -109,7 +118,7 @@ func parseSelections(sourceRoot: URL, _ values: [String]) -> [String]? {
 }
 
 func publishSelection(sourceRoot: URL, source: LocalDirectorySource, workspace: Workspace,
-                      generation: inout UInt64, selected: Set<String>) -> Bool {
+                      controlURL: URL, generation: inout UInt64, selected: Set<String>) -> Bool {
     err("oxdirtest: scanning \(selected.count) selected directories...")
     let indexed: Indexed
     do { indexed = try indexFiles(sourceRoot: sourceRoot, selections: selected.sorted()) }
@@ -119,7 +128,23 @@ func publishSelection(sourceRoot: URL, source: LocalDirectorySource, workspace: 
     let previous = source.replace(indexed.sources)
     do {
         let outcome = try workspace.apply(Manifest(sessionID: "human-selection", generation: next, entries: indexed.entries))
+        guard outcome.applied else {
+            _ = source.replace(previous)
+            err("oxdirtest: selection ignored as stale; selection unchanged")
+            return false
+        }
         generation = next
+        do {
+            try durableAtomicReplace(
+                JSONEncoder().encode(ControlState(generation: next, selected: selected)),
+                at: controlURL
+            )
+        } catch {
+            // The Workspace apply already succeeded and cannot truthfully be
+            // described as unchanged. Keep the live state and make the loss of
+            // restart-only UI metadata explicit.
+            err("oxdirtest: WARNING selection applied but control state was not persisted: \(error)")
+        }
         err("oxdirtest: generation=\(generation) directories=\(selected.count) files=\(indexed.files) bytes=\(indexed.bytes) available=\(outcome.available) stopped=\(outcome.stopped)")
         if outcome.stopped > 0 {
             err("oxdirtest: WARNING \(outcome.stopped) of \(indexed.files) file(s) did not fit the cache and are NOT visible")
@@ -167,7 +192,7 @@ var sourceArg: String?
 var stateArg: String?
 var cacheBytes: UInt64 = DEFAULT_CACHE_MAX_BYTES
 do {
-    var args = Array(CommandLine.arguments.dropFirst())
+    let args = Array(CommandLine.arguments.dropFirst())
     var i = 0
     while i < args.count {
         switch args[i] {
@@ -186,7 +211,9 @@ guard let sourceArg else { usage(); exit(2) }
 // leaves /var unresolved, and the relative-path strip would then drop files.
 func realpathOf(_ path: String) -> String {
     var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
-    return realpath(path, &buffer) != nil ? String(cString: buffer) : path
+    guard realpath(path, &buffer) != nil else { return path }
+    let end = buffer.firstIndex(of: 0) ?? buffer.endIndex
+    return String(decoding: buffer[..<end].map { UInt8(bitPattern: $0) }, as: UTF8.self)
 }
 let sourceRoot = URL(fileURLWithPath: realpathOf(sourceArg))
 guard (try? sourceRoot.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
@@ -195,6 +222,26 @@ guard (try? sourceRoot.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) =
 let stateRoot = URL(fileURLWithPath: stateArg ?? FileManager.default.temporaryDirectory.appendingPathComponent("oxdirtest-\(ProcessInfo.processInfo.processIdentifier)").path)
 
 let source = LocalDirectorySource()
+let controlURL = stateRoot.appendingPathComponent("oxdirtest-control.json")
+let persistedControl = (try? Data(contentsOf: controlURL))
+    .flatMap { try? JSONDecoder().decode(ControlState.self, from: $0) }
+let stateDirectory = stateRoot.appendingPathComponent("state")
+let pendingSelectionsURL = stateDirectory.appendingPathComponent("selections.pending.json")
+let selectionsURL = stateDirectory.appendingPathComponent("selections.json")
+let restoredSelectionsURL = FileManager.default.fileExists(atPath: pendingSelectionsURL.path)
+    ? pendingSelectionsURL : selectionsURL
+let persistedSessions = (try? Data(contentsOf: restoredSelectionsURL))
+    .flatMap { try? JSONDecoder().decode([String: Manifest].self, from: $0) }
+if let manifest = persistedSessions?["human-selection"] {
+    var restored: [String: URL] = [:]
+    for entry in manifest.entries {
+        let path = URL(fileURLWithPath: entry.sourceID)
+        if FileManager.default.fileExists(atPath: path.path) {
+            restored[entry.content.digest] = path
+        }
+    }
+    _ = source.replace(restored)
+}
 let workspace: Workspace
 do {
     workspace = try Workspace.open(root: stateRoot, source: source, config: CacheConfig(maxBytes: cacheBytes))
@@ -203,8 +250,9 @@ do {
 err("oxdirtest: source=\(sourceRoot.path) state=\(stateRoot.path) cache_bytes=\(cacheBytes)")
 err("oxdirtest: type 'help' for commands. Selection drives the real verified cache; the FSKit mount is Phase 7.")
 
-var generation: UInt64 = 0
-var selected = Set<String>()
+let restoredManifest = workspace.manifest(sessionID: "human-selection")
+var generation = Swift.max(persistedControl?.generation ?? 0, restoredManifest?.generation ?? 0)
+var selected = persistedControl?.selected ?? []
 
 while true {
     FileHandle.standardError.write(Data("oxdirtest> ".utf8))
@@ -216,13 +264,13 @@ while true {
         guard let additions = parseSelections(sourceRoot: sourceRoot, Array(words.dropFirst())) else { continue }
         let candidate = selected.union(additions)
         if candidate == selected { err("oxdirtest: directories already selected; selection unchanged"); continue }
-        if publishSelection(sourceRoot: sourceRoot, source: source, workspace: workspace, generation: &generation, selected: candidate) {
+        if publishSelection(sourceRoot: sourceRoot, source: source, workspace: workspace, controlURL: controlURL, generation: &generation, selected: candidate) {
             selected = candidate
         }
     case "select":
         err("usage: select DIR [DIR ...]")
     case "clear":
-        if publishSelection(sourceRoot: sourceRoot, source: source, workspace: workspace, generation: &generation, selected: []) {
+        if publishSelection(sourceRoot: sourceRoot, source: source, workspace: workspace, controlURL: controlURL, generation: &generation, selected: []) {
             selected = []
         }
     case "status":

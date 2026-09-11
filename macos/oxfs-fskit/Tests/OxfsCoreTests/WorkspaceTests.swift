@@ -72,6 +72,19 @@ import Foundation
         #expect(try ws.apply(manifest(1)).applied == false)
     }
 
+    @Test func pendingSelectionIntentRollsForwardOnOpen() throws {
+        let root = tempRoot("pending-selection")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = root.appendingPathComponent("state")
+        let store = try SelectionStore(stateDir: state)
+        try store.stage(["s1": try manifest(1)])
+
+        let ws = try Workspace.open(root: root, source: source(Array("abc".utf8)))
+        #expect(ws.snapshot().byPath("sessions/one/raw.jsonl") != nil)
+        #expect(FileManager.default.fileExists(atPath: state.appendingPathComponent("selections.json").path))
+        #expect(!FileManager.default.fileExists(atPath: state.appendingPathComponent("selections.pending.json").path))
+    }
+
     /// Port of `invalid_bytes_never_become_visible`: content whose bytes don't
     /// hash to the reference digest is rejected and never appears.
     @Test func invalidBytesNeverBecomeVisible() throws {
@@ -172,5 +185,27 @@ import Foundation
         #expect(json.contains("path_collision"))
         #expect(json.contains("\"session_id\":\"a\",\"reason\":\"first\",\"status\":\"available\""))
         #expect(json.contains("\"session_id\":\"b\",\"reason\":\"second\",\"status\":\"path_collision\""))
+    }
+
+    @Test func collisionKeepsPublishedWinnerWhenLowerSessionArrives() throws {
+        let root = tempRoot("reverse-conflict")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let objects: [String: [UInt8]] = [
+            referenceAbc().digest: Array("abc".utf8),
+            referenceXyz().digest: Array("xyz".utf8),
+        ]
+        let ws = try Workspace.open(root: root, source: MemorySource(objects))
+
+        _ = try ws.apply(Manifest(sessionID: "b", generation: 1, entries: [
+            try ManifestEntry(path: "same", sourceID: "b", sourceKind: "Session",
+                              mode: 0o444, mtimeSecs: 0, content: referenceXyz(), reason: "first"),
+        ]))
+        let inode = try #require(ws.snapshot().byPath("same")).inode
+        _ = try ws.apply(Manifest(sessionID: "a", generation: 1, entries: [
+            try ManifestEntry(path: "same", sourceID: "a", sourceKind: "Session",
+                              mode: 0o444, mtimeSecs: 0, content: referenceAbc(), reason: "later"),
+        ]))
+
+        #expect(try ws.openInode(inode).read(offset: 0, count: 3) == Array("xyz".utf8))
     }
 }

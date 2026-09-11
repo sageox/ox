@@ -6,6 +6,15 @@
 build:
 	swift build
 
+xcode-project:
+	xcodegen generate
+
+xcode-build: xcode-project
+	xcodebuild -project Oxfs.xcodeproj -scheme OxfsHost -configuration Debug -allowProvisioningUpdates build
+
+xcode-build-unsigned: xcode-project
+	xcodebuild -project Oxfs.xcodeproj -scheme OxfsHost -configuration Debug CODE_SIGNING_ALLOWED=NO build
+
 # Uses scripts/test.sh so swift-testing works on a CLT-only box.
 test:
 	./scripts/test.sh

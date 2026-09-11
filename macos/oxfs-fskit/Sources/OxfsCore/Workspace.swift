@@ -64,12 +64,21 @@ public final class Workspace {
         }
         try cache.commitBatch()
         ws.namespace = try ws.buildNamespace(sessions, available)
+        // If a prior process stopped between cache reconciliation and selection
+        // publication, loading preferred the pending intent. The successful
+        // restore above completes that transaction.
+        try selections.commitStaged()
         return ws
     }
 
     public func snapshot() -> Namespace {
         stateLock.lock(); defer { stateLock.unlock() }
         return namespace
+    }
+
+    public func manifest(sessionID: String) -> Manifest? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return sessions[sessionID]
     }
 
     /// Apply a complete per-session desired set. Faithful port of `apply`.
@@ -121,7 +130,13 @@ public final class Workspace {
         }
         let missing = AdmitEverything.select(capacity: capacity, resident: available, candidates: candidates)
 
-        try cache.beginBatch(admissions.map { $0.content })
+        try selections.stage(candidate)
+        do {
+            try cache.beginBatch(admissions.map { $0.content })
+        } catch {
+            try? selections.rollbackStaged()
+            throw error
+        }
         do {
             let materialized = try cache.materializeMissingBatch(missing)
             available.formUnion(materialized)
@@ -129,6 +144,7 @@ public final class Workspace {
             try cache.commitBatch()
         } catch {
             try? cache.rollbackBatch()
+            try? selections.rollbackStaged()
             throw Self.mapError(error)
         }
 
@@ -141,7 +157,7 @@ public final class Workspace {
         let desiredPaths = Set(orderedEntries(candidate).map { $0.path.asString })
         let stoppedCount = desiredPaths.count - availableCount
 
-        try selections.replace(candidate)
+        try selections.commitStaged()
         stateLock.lock()
         sessions = candidate
         namespace = next
@@ -150,14 +166,19 @@ public final class Workspace {
         return ApplyOutcome(applied: true, available: availableCount, stopped: stoppedCount)
     }
 
-    public func openInode(_ inode: UInt64) throws -> OpenFile {
-        guard let node = snapshot().get(inode) else { throw WorkspaceError.notFound }
+    public func openInode(_ inode: UInt64, expectedContent: ContentRef? = nil) throws -> OpenFile {
+        // Revalidate and bind while publication is excluded. Once
+        // `cache.openContent` returns, its descriptor pin—not this lock—keeps
+        // the exact object alive across namespace replacement.
+        stateLock.lock(); defer { stateLock.unlock() }
+        guard let node = namespace.get(inode) else { throw WorkspaceError.notFound }
         guard node.kind == .file, let file = node.file else { throw WorkspaceError.isDirectory }
-        let backing: [UInt8]
+        if let expectedContent, file.content != expectedContent { throw WorkspaceError.stale }
+        let backing: OpenContent
         if let synthetic = file.synthetic {
-            backing = synthetic
+            backing = SyntheticOpenContent(bytes: synthetic)
         } else {
-            backing = try cache.openBytes(file.content)
+            backing = try cache.openContent(file.content)
         }
         try observations.append(.open, inode: inode, path: node.path, offset: 0, bytes: 0)
         return OpenFile(node: node, backing: backing, observations: observations)
@@ -193,8 +214,14 @@ public final class Workspace {
         }
 
         var desired: [String: DesiredIndex] = [:]
+        let published = snapshot()
         for (path, entries) in grouped {
-            let winner = entries.first(where: { available.contains(cache.storageKey($0.entry.content)) })?.entry
+            let publishedContent = published.byPath(path)?.file?.content
+            let winner = entries.first(where: {
+                $0.entry.content == publishedContent
+                    && available.contains(cache.storageKey($0.entry.content))
+            })?.entry
+                ?? entries.first(where: { available.contains(cache.storageKey($0.entry.content)) })?.entry
                 ?? entries[0].entry
             let collided = entries.contains { $0.entry.content != winner.content }
             let winnerResident = available.contains(cache.storageKey(winner.content))
@@ -361,10 +388,10 @@ public struct ApplyOutcome: Equatable, Sendable {
 /// bytes and append a `read` observation, mirroring `workspace.rs::OpenFile`.
 public final class OpenFile {
     private let node: Node
-    private let backing: [UInt8]
+    private let backing: OpenContent
     private let observations: ObservationLog
 
-    init(node: Node, backing: [UInt8], observations: ObservationLog) {
+    init(node: Node, backing: OpenContent, observations: ObservationLog) {
         self.node = node
         self.backing = backing
         self.observations = observations
@@ -374,16 +401,28 @@ public final class OpenFile {
     public var size: UInt64 { node.size }
 
     public func read(offset: UInt64, count: Int) throws -> [UInt8] {
-        let data = readRange(backing, offset: offset, count: count)
+        let data = try backing.read(offset: offset, count: count)
         try observations.append(.read, inode: node.inode, path: node.path, offset: offset, bytes: data.count)
         return data
     }
+
+    public func close() throws { try backing.close() }
+    deinit { try? backing.close() }
+}
+
+private final class SyntheticOpenContent: OpenContent {
+    private let bytes: [UInt8]
+    init(bytes: [UInt8]) { self.bytes = bytes }
+    var size: UInt64 { UInt64(bytes.count) }
+    func read(offset: UInt64, count: Int) throws -> [UInt8] { readRange(bytes, offset: offset, count: count) }
+    func close() throws {}
 }
 
 public enum WorkspaceError: Error, Equatable {
     case io(String)
     case notFound
     case isDirectory
+    case stale
     case readOnly
     case replacementCapacity(needed: UInt64, pinned: UInt64, capacity: UInt64)
     case poisoned

@@ -22,4 +22,9 @@ if [ -d "$FW/Testing.framework" ]; then
     )
 fi
 
-exec swift test "${FLAGS[@]}" "$@"
+if [ "${#FLAGS[@]}" -eq 0 ]; then
+    swift test "$@"
+else
+    swift test "${FLAGS[@]}" "$@"
+fi
+exec ./scripts/test-oxdirtest.sh

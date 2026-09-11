@@ -124,14 +124,9 @@ func ensureUserLevelMarker(filePath, agentName string) error {
 // detectActiveAgent determines which coding agent is currently running.
 // Uses the agentx detector first, then falls back to env var checks.
 func detectActiveAgent() agentx.AgentType {
-	ctx := context.Background()
-	detector := agentx.NewDetector()
-
-	if agent, err := detector.Detect(ctx); err == nil && agent != nil {
-		return agent.Type()
-	}
-
-	// fallback: check AGENT_ENV
+	// An explicit harness/adapter declaration is authoritative. Process-tree
+	// detection can otherwise see the outer Codex/Claude host while tests or a
+	// nested adapter intentionally target a different agent.
 	switch strings.ToLower(os.Getenv("AGENT_ENV")) {
 	case "claude-code", "claude":
 		return agentx.AgentTypeClaudeCode
@@ -145,6 +140,13 @@ func detectActiveAgent() agentx.AgentType {
 		return agentx.AgentTypeCopilot
 	case "gemini", "gemini-cli":
 		return agentx.AgentTypeGemini
+	}
+
+	ctx := context.Background()
+	detector := agentx.NewDetector()
+
+	if agent, err := detector.Detect(ctx); err == nil && agent != nil {
+		return agent.Type()
 	}
 
 	// default to Claude Code (most common)

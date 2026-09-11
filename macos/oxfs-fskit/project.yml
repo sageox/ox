@@ -1,0 +1,80 @@
+name: Oxfs
+options:
+  deploymentTarget:
+    macOS: "26.0"
+packages:
+  OxfsPackage:
+    path: .
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: Apple Development
+    DEVELOPMENT_TEAM: C2LRSF5CK3
+targets:
+  OxfsHost:
+    type: application
+    platform: macOS
+    sources: [App]
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: oxFS
+        LSMinimumSystemVersion: "26.0"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.sageox.oxfs
+        GENERATE_INFOPLIST_FILE: false
+    entitlements:
+      path: App/OxfsHost.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.ai.sageox.oxfs
+    dependencies:
+      - target: OxfsExtension
+        embed: true
+  OxfsExtension:
+    type: extensionkit-extension
+    platform: macOS
+    sources: [Extension]
+    info:
+      path: Extension/Info.plist
+      properties:
+        EXAppExtensionAttributes:
+          EXExtensionPointIdentifier: com.apple.fskit.fsmodule
+          FSMediaTypes: {}
+          FSPersonalities:
+            OxfsPersonality:
+              FSName: oxfs
+              FSfileObjectsAreCaseSensitive: true
+          FSRequiresSecurityScopedPathURLResources: true
+          FSShortName: oxfs
+          FSSupportsBlockResources: false
+          FSSupportsGenericURLResources: false
+          FSSupportsPathURLs: true
+          FSSupportsServerURLs: false
+    entitlements:
+      path: Extension/OxfsExtension.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.developer.fskit.fsmodule: true
+        com.apple.security.application-groups:
+          - group.ai.sageox.oxfs
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.sageox.oxfs.extension
+        PRODUCT_NAME: OxfsExtension
+        GENERATE_INFOPLIST_FILE: false
+        SKIP_INSTALL: true
+    dependencies:
+      - package: OxfsPackage
+        product: OxfsFSKit
+schemes:
+  OxfsHost:
+    build:
+      targets:
+        OxfsHost: all
+        OxfsExtension: all
+    run:
+      config: Debug

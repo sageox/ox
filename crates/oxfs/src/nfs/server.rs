@@ -185,13 +185,31 @@ fn dispatch_nfs(
 ) -> Result<Vec<u8>, super::XdrError> {
     match procedure {
         0 => Ok(Vec::new()),
-        1 => getattr(ws, args),
-        3 => lookup(ws, args),
-        4 => access(ws, args),
+        1 => {
+            ws.record_nfs_getattr();
+            getattr(ws, args)
+        }
+        3 => {
+            ws.record_nfs_lookup();
+            lookup(ws, args)
+        }
+        4 => {
+            ws.record_nfs_access();
+            access(ws, args)
+        }
         5 => readlink(ws, args),
-        6 => read(ws, args),
-        16 => readdir(ws, args, false),
-        17 => readdir(ws, args, true),
+        6 => {
+            ws.record_nfs_read();
+            read(ws, args)
+        }
+        16 => {
+            ws.record_nfs_readdir();
+            readdir(ws, args, false)
+        }
+        17 => {
+            ws.record_nfs_readdir();
+            readdir(ws, args, true)
+        }
         18 => fsstat(ws, args),
         19 => fsinfo(ws, args),
         20 => pathconf(ws, args),

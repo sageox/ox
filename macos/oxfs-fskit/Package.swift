@@ -14,11 +14,14 @@ let package = Package(
     ],
     products: [
         .library(name: "OxfsCore", targets: ["OxfsCore"]),
+        .library(name: "OxfsFSKit", targets: ["OxfsFSKit"]),
         .executable(name: "oxfs-hello", targets: ["oxfs-hello"]),
         .executable(name: "oxdirtest", targets: ["oxdirtest"]),
+        .executable(name: "oxfsmount", targets: ["oxfsmount"]),
     ],
     targets: [
         .target(name: "OxfsCore"),
+        .target(name: "OxfsFSKit", dependencies: ["OxfsCore"]),
         .executableTarget(
             name: "oxfs-hello",
             dependencies: ["OxfsCore"]
@@ -27,9 +30,17 @@ let package = Package(
             name: "oxdirtest",
             dependencies: ["OxfsCore"]
         ),
+        .executableTarget(
+            name: "oxfsmount",
+            dependencies: ["OxfsFSKit"]
+        ),
         .testTarget(
             name: "OxfsCoreTests",
             dependencies: ["OxfsCore"]
+        ),
+        .testTarget(
+            name: "OxfsFSKitTests",
+            dependencies: ["OxfsFSKit"]
         ),
     ]
 )

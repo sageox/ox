@@ -29,6 +29,15 @@ public struct ResidentContent: Sendable, Equatable {
     public let size: UInt64
 }
 
+/// A verified, pinned cache object retained for the lifetime of an open file.
+/// Implementations must keep the exact object readable until `close`, even if
+/// its namespace entry disappears and reconciliation needs cache space.
+public protocol OpenContent: AnyObject {
+    var size: UInt64 { get }
+    func read(offset: UInt64, count: Int) throws -> [UInt8]
+    func close() throws
+}
+
 public struct CacheTelemetrySnapshot: Sendable, Equatable {
     public var fetchedObjects: UInt64 = 0
     public var fetchedBytes: UInt64 = 0
@@ -57,11 +66,18 @@ public protocol ContentCache: AnyObject {
     func materializeMissingBatch(_ references: [ContentRef]) throws -> [String]
     func commitBatch() throws
     func rollbackBatch() throws
-    func openBytes(_ reference: ContentRef) throws -> [UInt8]
+    func openContent(_ reference: ContentRef) throws -> OpenContent
 }
 
 extension ContentCache {
     public func storageKey(_ reference: ContentRef) -> String { reference.storageKey }
+    /// Compatibility helper for tests and non-filesystem callers. Mounted
+    /// reads retain `OpenContent` instead of copying whole objects.
+    public func openBytes(_ reference: ContentRef) throws -> [UInt8] {
+        let opened = try openContent(reference)
+        defer { try? opened.close() }
+        return try opened.read(offset: 0, count: Int(min(opened.size, UInt64(Int.max))))
+    }
 }
 
 /// Ranked admission: take candidates in order, skipping already-resident and
@@ -109,6 +125,7 @@ public final class MemoryContentCache: ContentCache {
 
     private var inBatch = false
     private var pinned: Set<String> = []
+    private var openPins: [String: Int] = [:]
     private var batchAdded: [String] = []
 
     private var fetchedObjects: UInt64 = 0
@@ -243,13 +260,20 @@ public final class MemoryContentCache: ContentCache {
         batchAdded = []
     }
 
-    public func openBytes(_ reference: ContentRef) throws -> [UInt8] {
+    public func openContent(_ reference: ContentRef) throws -> OpenContent {
         lock.lock(); defer { lock.unlock() }
         guard let bytes = objects[reference.storageKey] else {
             throw FetchError.notFound // "content is not resident"
         }
         touchLocked(reference.storageKey)
-        return bytes
+        openPins[reference.storageKey, default: 0] += 1
+        return MemoryOpenContent(bytes: bytes) { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); defer { self.lock.unlock() }
+            let count = self.openPins[reference.storageKey, default: 0]
+            if count <= 1 { self.openPins[reference.storageKey] = nil }
+            else { self.openPins[reference.storageKey] = count - 1 }
+        }
     }
 
     // MARK: - locked helpers
@@ -270,7 +294,7 @@ public final class MemoryContentCache: ContentCache {
 
     private func ensureRoomLocked(for size: UInt64) throws {
         while usedLocked() + size > config.maxBytes {
-            guard let victim = lru.first(where: { !pinned.contains($0) }) else {
+            guard let victim = lru.first(where: { !pinned.contains($0) && openPins[$0] == nil }) else {
                 blocked &+= 1
                 throw FetchError.io("StorageFull")
             }
@@ -279,4 +303,30 @@ public final class MemoryContentCache: ContentCache {
             evicted &+= 1
         }
     }
+}
+
+private final class MemoryOpenContent: OpenContent {
+    private let bytes: [UInt8]
+    private let onClose: () -> Void
+    private let lock = NSLock()
+    private var closed = false
+
+    init(bytes: [UInt8], onClose: @escaping () -> Void) {
+        self.bytes = bytes
+        self.onClose = onClose
+    }
+    var size: UInt64 { UInt64(bytes.count) }
+    func read(offset: UInt64, count: Int) throws -> [UInt8] {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { throw FetchError.io("read after close") }
+        return readRange(bytes, offset: offset, count: count)
+    }
+    func close() throws {
+        lock.lock()
+        if closed { lock.unlock(); return }
+        closed = true
+        lock.unlock()
+        onClose()
+    }
+    deinit { try? close() }
 }

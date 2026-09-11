@@ -1,0 +1,78 @@
+name: OxfsFileProvider
+options:
+  deploymentTarget:
+    macOS: "15.0"
+packages:
+  OxfsCorePackage:
+    path: ../oxfs-fskit
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    CURRENT_PROJECT_VERSION: 2
+    MARKETING_VERSION: "0.1"
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: Apple Development
+    DEVELOPMENT_TEAM: C2LRSF5CK3
+targets:
+  OxfsFileProviderHost:
+    type: application
+    platform: macOS
+    sources: [App]
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: oxFS File Provider
+        LSMinimumSystemVersion: "15.0"
+    entitlements:
+      path: App/OxfsFileProviderHost.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - $(TeamIdentifierPrefix)group.ai.sageox.oxfs.fileprovider
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.sageox.oxfs.fileprovider
+        GENERATE_INFOPLIST_FILE: false
+    dependencies:
+      - target: OxfsFileProviderExtension
+        embed: true
+      - package: OxfsCorePackage
+        product: OxfsCore
+  OxfsFileProviderExtension:
+    type: app-extension
+    platform: macOS
+    sources: [Extension]
+    info:
+      path: Extension/Info.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.fileprovider-nonui
+          NSExtensionPrincipalClass: FileProviderExtension
+          NSExtensionFileProviderSupportsEnumeration: true
+          NSExtensionFileProviderDocumentGroup: $(TeamIdentifierPrefix)group.ai.sageox.oxfs.fileprovider
+          NSExtensionFileProviderDownloadPipelineDepth: 4
+    entitlements:
+      path: Extension/OxfsFileProviderExtension.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.files.bookmarks.app-scope: true
+        com.apple.security.files.bookmarks.document-scope: true
+        com.apple.security.application-groups:
+          - $(TeamIdentifierPrefix)group.ai.sageox.oxfs.fileprovider
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.sageox.oxfs.fileprovider.extension
+        PRODUCT_NAME: OxfsFileProviderExtension
+        GENERATE_INFOPLIST_FILE: false
+        SKIP_INSTALL: true
+    dependencies:
+      - package: OxfsCorePackage
+        product: OxfsCore
+schemes:
+  OxfsFileProviderHost:
+    build:
+      targets:
+        OxfsFileProviderHost: all
+        OxfsFileProviderExtension: all
+    run:
+      config: Debug

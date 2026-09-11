@@ -3,7 +3,7 @@ use crate::cache_policy::{AdmissionCandidate, AdmitEverything};
 use crate::content::{ContentSource, FetchError};
 use crate::inode::{InodeTable, ROOT_INODE};
 use crate::manifest::{Manifest, ManifestError};
-use crate::namespace::{FileNode, Namespace, Node, NodeKind, Selector};
+use crate::namespace::{FileNode, Namespace, Node, NodeKind, Selector, Status};
 use crate::observations::{ObservationKind, ObservationLog};
 use crate::selections::SelectionStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,7 +11,33 @@ use std::fmt;
 use std::fs::File;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+
+/// Per-op counts for the NFS surface, split by whether the op touches a cache
+/// object. `read` is the only data op: it resolves a `ContentRef` and opens the
+/// backing blob (bumping the cache's `opened_objects`). Everything else —
+/// `lookup`, `getattr`, `access`, `readdir` — is served entirely from the
+/// namespace snapshot and inode table and never reaches the content store. This
+/// is why `cd`/`ls` move none of the `*_objects` counters: they are pure
+/// metadata traffic that, until now, emitted no telemetry at all.
+#[derive(Default)]
+struct NfsTelemetry {
+    lookup: AtomicU64,
+    getattr: AtomicU64,
+    access: AtomicU64,
+    readdir: AtomicU64,
+    read: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NfsTelemetrySnapshot {
+    pub lookup: u64,
+    pub getattr: u64,
+    pub access: u64,
+    pub readdir: u64,
+    pub read: u64,
+}
 
 pub struct Workspace {
     namespace: RwLock<Arc<Namespace>>,
@@ -21,12 +47,19 @@ pub struct Workspace {
     sessions: Mutex<BTreeMap<String, Manifest>>,
     selections: SelectionStore,
     reconcile: Mutex<()>,
+    nfs: NfsTelemetry,
 }
 
 #[derive(Clone)]
 struct DesiredIndex {
+    /// The entry that binds the path — the "winner". A path is visible only when
+    /// this entry's content is resident; losing entries in a canonical-path
+    /// collision are recorded as extra selectors, never bound here.
     entry: crate::manifest::ManifestEntry,
     selectors: Vec<Selector>,
+    /// The per-path aggregate status: `Available` iff the winning entry is
+    /// resident, otherwise the governing non-visible reason (design §Insight).
+    status: Status,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,6 +104,7 @@ impl Workspace {
             sessions: Mutex::new(sessions),
             selections,
             reconcile: Mutex::new(()),
+            nfs: NfsTelemetry::default(),
         });
         // Restore as much of the persisted desired set as the configured cap
         // permits. Corrupt objects are removed by `resident` before admission.
@@ -181,8 +215,10 @@ impl Workspace {
         let mut candidate = sessions.clone();
         let admissions = manifest.entries.clone();
         candidate.insert(manifest.session_id.clone(), manifest);
-        // Validate the entire union before the first transfer.
-        self.validate_union(&candidate)?;
+        // A canonical-path collision (two Sessions selecting the same path with
+        // different content) is handled per entry, not by rejecting the whole
+        // update: `build_namespace` binds the winning entry, keeps the rest of
+        // the working set, and records the losing selectors as `path_collision`.
         let mut protected = BTreeMap::new();
         let mut available = BTreeSet::new();
         for entry in candidate.values().flat_map(|manifest| &manifest.entries) {
@@ -299,49 +335,91 @@ impl Workspace {
         })
     }
 
-    fn validate_union(&self, sessions: &BTreeMap<String, Manifest>) -> Result<(), WorkspaceError> {
-        let mut paths: BTreeMap<&str, &crate::ContentRef> = BTreeMap::new();
-        for entry in sessions.values().flat_map(|m| &m.entries) {
-            if let Some(previous) = paths.insert(entry.path.as_str(), &entry.content)
-                && previous != &entry.content
-            {
-                return Err(WorkspaceError::PathConflict(entry.path.as_str().into()));
-            }
-        }
-        Ok(())
-    }
-
     fn build_namespace(
         &self,
         sessions: &BTreeMap<String, Manifest>,
         available: &BTreeSet<String>,
     ) -> Result<Namespace, WorkspaceError> {
-        let mut desired: BTreeMap<String, DesiredIndex> = BTreeMap::new();
+        // Group every selecting entry by canonical path. This is where the union
+        // across Sessions is reconciled: a path with more than one distinct
+        // content is a collision, handled per entry (design §Insight). We never
+        // reject the whole update — we bind the winning entry, keep the rest of
+        // the working set, and record the losing selectors as `path_collision`.
+        let mut grouped: BTreeMap<String, Vec<(String, &crate::manifest::ManifestEntry)>> =
+            BTreeMap::new();
         let mut max_generation = 0;
         for manifest in sessions.values() {
             max_generation = max_generation.max(manifest.generation);
             for entry in &manifest.entries {
-                let selector = Selector {
-                    session_id: manifest.session_id.clone(),
-                    reason: entry.reason.clone(),
-                };
-                match desired.entry(entry.path.as_str().to_owned()) {
-                    std::collections::btree_map::Entry::Vacant(slot) => {
-                        slot.insert(DesiredIndex {
-                            entry: entry.clone(),
-                            selectors: vec![selector],
-                        });
-                    }
-                    std::collections::btree_map::Entry::Occupied(slot)
-                        if slot.get().entry.content == entry.content =>
-                    {
-                        slot.into_mut().selectors.push(selector);
-                    }
-                    std::collections::btree_map::Entry::Occupied(_) => {
-                        return Err(WorkspaceError::PathConflict(entry.path.as_str().into()));
-                    }
-                }
+                grouped
+                    .entry(entry.path.as_str().to_owned())
+                    .or_default()
+                    .push((manifest.session_id.clone(), entry));
             }
+        }
+        let mut desired: BTreeMap<String, DesiredIndex> = BTreeMap::new();
+        let published = self.snapshot();
+        for (path, entries) in &grouped {
+            // Prefer a winner whose content is already resident so a refresh
+            // never hides a visible file behind a conflicting selection ("never
+            // silently overwrites the resident file"). Break ties deterministically
+            // by Session-sorted order (`entries[0]` is the lowest Session ID).
+            let winner = entries
+                .iter()
+                .find(|(_, entry)| {
+                    published
+                        .by_path(path)
+                        .and_then(|node| node.file.as_ref())
+                        .is_some_and(|file| file.content == entry.content)
+                        && available.contains(&self.cache.storage_key(&entry.content))
+                })
+                .or_else(|| {
+                    entries.iter().find(|(_, entry)| {
+                        available.contains(&self.cache.storage_key(&entry.content))
+                    })
+                })
+                .map_or(entries[0].1, |(_, entry)| *entry);
+            let collided = entries
+                .iter()
+                .any(|(_, entry)| entry.content != winner.content);
+            let winner_resident = available.contains(&self.cache.storage_key(&winner.content));
+            // Per-path aggregate: `available` if the winner is resident, else the
+            // governing non-visible reason. Collision outranks capacity reasons
+            // because the path can never bind while two contents contend for it.
+            let path_status = if winner_resident {
+                Status::Available
+            } else if collided {
+                Status::PathCollision
+            } else if winner.content.size > self.cache.capacity() {
+                Status::ExceedsCacheLimit
+            } else {
+                Status::NoSpace
+            };
+            // Per-selector: an entry contending with a *different* content is the
+            // losing side of the collision and is always `path_collision`; an
+            // entry sharing the winner's content shares the path's fate. (Once
+            // the mount grows a per-session token, `auth_expired` becomes another
+            // per-selector reason evaluated here.)
+            let selectors = entries
+                .iter()
+                .map(|(session_id, entry)| Selector {
+                    session_id: session_id.clone(),
+                    reason: entry.reason.clone(),
+                    status: if entry.content == winner.content {
+                        path_status
+                    } else {
+                        Status::PathCollision
+                    },
+                })
+                .collect();
+            desired.insert(
+                path.clone(),
+                DesiredIndex {
+                    entry: winner.clone(),
+                    selectors,
+                    status: path_status,
+                },
+            );
         }
         let mut nodes: BTreeMap<u64, Node> = BTreeMap::from([(ROOT_INODE, Node::root())]);
         let mut by_path = BTreeMap::from([(String::new(), ROOT_INODE)]);
@@ -349,7 +427,10 @@ impl Workspace {
         let index_desired = desired.clone();
         for (path, desired) in desired {
             let entry = &desired.entry;
-            if !available.contains(&self.cache.storage_key(&entry.content)) {
+            // Only a resident winner is visible; `status == Available` holds
+            // exactly then. A blocked or collided path stays out of the tree and
+            // is explained solely through `.sageox/INDEX` (WYSIWYG, design §2).
+            if desired.status != Status::Available {
                 continue;
             }
             let parts: Vec<_> = path.split('/').collect();
@@ -414,8 +495,6 @@ impl Workspace {
             &mut inodes,
             max_generation,
             &index_desired,
-            &self.cache,
-            available,
         )?;
         // Allocate paths freely while constructing the private candidate, then
         // cross one durability boundary immediately before it can be published.
@@ -450,6 +529,35 @@ impl Workspace {
 
     pub fn cache_telemetry(&self) -> io::Result<crate::cache::CacheTelemetrySnapshot> {
         self.cache.telemetry()
+    }
+
+    pub fn record_nfs_lookup(&self) {
+        self.nfs.lookup.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_nfs_getattr(&self) {
+        self.nfs.getattr.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_nfs_access(&self) {
+        self.nfs.access.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_nfs_readdir(&self) {
+        self.nfs.readdir.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_nfs_read(&self) {
+        self.nfs.read.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Cumulative NFS op counts. `read` is the only data op (touches a cache
+    /// object); the rest are pure metadata served from the namespace + inode
+    /// table. Pair with `cache_telemetry` to see the two surfaces side by side.
+    pub fn nfs_telemetry(&self) -> NfsTelemetrySnapshot {
+        NfsTelemetrySnapshot {
+            lookup: self.nfs.lookup.load(Ordering::Relaxed),
+            getattr: self.nfs.getattr.load(Ordering::Relaxed),
+            access: self.nfs.access.load(Ordering::Relaxed),
+            readdir: self.nfs.readdir.load(Ordering::Relaxed),
+            read: self.nfs.read.load(Ordering::Relaxed),
+        }
     }
 
     pub fn resident_keys(&self) -> io::Result<Vec<String>> {
@@ -546,8 +654,6 @@ fn add_indexes(
     inodes: &mut InodeTable,
     generation: u64,
     desired: &BTreeMap<String, DesiredIndex>,
-    cache: &ContentCache,
-    available: &BTreeSet<String>,
 ) -> Result<(), WorkspaceError> {
     let dir_inode = inodes.inode_for(".sageox")?;
     let md_inode = inodes.inode_for(".sageox/INDEX.md")?;
@@ -558,13 +664,8 @@ fn add_indexes(
     let mut json = format!("{{\"generation\":{generation},\"files\":[");
     for (index, (path, item)) in desired.iter().enumerate() {
         let file = &item.entry;
-        let status = if available.contains(&cache.storage_key(&file.content)) {
-            "available"
-        } else if file.content.size > cache.capacity() {
-            "stopped: exceeds_cache_limit"
-        } else {
-            "stopped: cache_limit_reached"
-        };
+        // The per-path aggregate; each selector below carries its own status too.
+        let status = item.status.as_str();
         let selectors = item
             .selectors
             .iter()
@@ -598,9 +699,10 @@ fn add_indexes(
                 json.push(',');
             }
             json.push_str(&format!(
-                "{{\"session_id\":\"{}\",\"reason\":\"{}\"}}",
+                "{{\"session_id\":\"{}\",\"reason\":\"{}\",\"status\":\"{}\"}}",
                 json_escape(&selector.session_id),
-                json_escape(&selector.reason)
+                json_escape(&selector.reason),
+                selector.status.as_str()
             ));
         }
         json.push_str("]}");
@@ -693,7 +795,6 @@ pub enum WorkspaceError {
     NotFound,
     IsDirectory,
     ReadOnly,
-    PathConflict(String),
     /// The candidate fits the cache alone, but not while the still-published
     /// namespace keeps its own objects pinned through the swap.
     ReplacementCapacity {
@@ -712,7 +813,6 @@ impl fmt::Display for WorkspaceError {
             Self::NotFound => write!(f, "not found"),
             Self::IsDirectory => write!(f, "is a directory"),
             Self::ReadOnly => write!(f, "read-only filesystem"),
-            Self::PathConflict(path) => write!(f, "sessions select conflicting content at {path}"),
             Self::ReplacementCapacity {
                 needed,
                 pinned,

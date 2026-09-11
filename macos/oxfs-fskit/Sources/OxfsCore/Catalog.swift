@@ -119,7 +119,8 @@ final class Catalog {
 
     /// Reserve `key` for materialization, evicting per policy to make room.
     /// All-or-nothing: on `storageFull` no victims are consumed.
-    func reserve(_ key: String, size: UInt64, capacity: UInt64) throws -> (Reservation, [Victim]) {
+    func reserve(_ key: String, size: UInt64, capacity: UInt64,
+                 excluding pinned: Set<String> = []) throws -> (Reservation, [Victim]) {
         let existing = try existingRow(key)
         if let e = existing, e.state == STATE_RESIDENT, e.size == i64(size) { return (.resident, []) }
         if let e = existing, e.state == STATE_PENDING, e.size == i64(size) { return (.pending, []) }
@@ -142,7 +143,8 @@ final class Catalog {
         var refClears: [String] = []
         var newClockHand: UInt64?
         if plannedUsed > target {
-            let plan = try planVictims(incoming: key, used: plannedUsed, size: size, target: target)
+            let plan = try planVictims(incoming: key, used: plannedUsed, size: size,
+                                       target: target, excluding: pinned)
             for v in plan.victims { plannedUsed = plannedUsed >= v.size ? plannedUsed - v.size : 0 }
             victims.append(contentsOf: plan.victims)
             refClears = plan.refClears
@@ -175,13 +177,16 @@ final class Catalog {
 
     /// Compute the ordered victim prefix (excluding `incoming`) needed to fit,
     /// under the configured policy. Pure — performs no writes.
-    private func planVictims(incoming: String, used: UInt64, size: UInt64, target: UInt64) throws -> VictimPlan {
+    private func planVictims(incoming: String, used: UInt64, size: UInt64, target: UInt64,
+                             excluding pinned: Set<String>) throws -> VictimPlan {
         struct Cand { let key: String; let size: UInt64; let access: UInt64; let insertSeq: UInt64; let reference: Bool; let frequency: Int64 }
         var cands: [Cand] = []
         let stmt = try Stmt(db, "SELECT key,size,access_epoch,insert_seq,reference,frequency FROM cache_objects WHERE state=1 AND key<>?1")
         stmt.bindText(1, incoming)
         while stmt.step() == SQLITE_ROW {
-            cands.append(Cand(key: stmt.text(0), size: UInt64(stmt.int(1)), access: UInt64(stmt.int(2)),
+            let candidateKey = stmt.text(0)
+            if pinned.contains(candidateKey) { continue }
+            cands.append(Cand(key: candidateKey, size: UInt64(stmt.int(1)), access: UInt64(stmt.int(2)),
                               insertSeq: UInt64(stmt.int(3)), reference: stmt.int(4) != 0, frequency: stmt.int(5)))
         }
         stmt.finalize()

@@ -261,6 +261,66 @@ cache between runs; otherwise temporary state is removed during clean shutdown.
 Directory names containing whitespace are not supported by the interactive
 command parser.
 
+#### Remote SageOx repositories
+
+Remote mode discovers repository origins from the canonical SageOx XDG store,
+but never reads content from or mutates those checkouts. Ordinary files come
+from GitLab's authenticated raw/archive routes at remote `HEAD`; Git LFS
+pointers are hydrated through the repository's LFS Batch API. `--git-host` and
+`--source` are mutually exclusive.
+
+```bash
+cd /Users/port8080/src/sageox/oxfs-v1
+set -euo pipefail
+
+export MOUNT=/tmp/oxdirtest-mount
+export STATE=/tmp/oxdirtest-state
+export LOG=/tmp/oxdirtest.log
+export TEST_DATA_ROOT="$HOME/.local/share/sageox/test.sageox.ai"
+
+ox login --endpoint https://test.sageox.ai
+printf 'protocol=https\nhost=git.test.sageox.ai\n\n' \
+  | ox git-credential-helper get \
+  | grep -q '^password='
+
+test -f "$TEST_DATA_ROOT/teams/team_jihjpfkt8b/.git/config"
+test -f "$TEST_DATA_ROOT/teams/team_xlcr6yzpec/.git/config"
+test -f "$TEST_DATA_ROOT/ledgers/repo_019c5812-01e9-7b7d-b5b1-321c471c9777/.git/config"
+
+sudo -v
+if mount | grep -F " on $MOUNT " >/dev/null; then
+  sudo -n /sbin/umount "$MOUNT"
+fi
+rm -rf "$MOUNT" "$STATE" "$LOG"
+mkdir -p "$MOUNT" "$STATE"
+
+cargo build -p oxfs --bin oxdirtest
+sudo -v
+OXFS_CACHE_LOG=1 target/debug/oxdirtest \
+  --git-host git.test.sageox.ai \
+  --mountpoint "$MOUNT" \
+  --state "$STATE" \
+  --cache-bytes 10737418240 \
+  2>&1 | tee "$LOG"
+```
+
+Run the binary as the normal user, never with `sudo`. At the prompt:
+
+```text
+repos
+select teams/team_jihjpfkt8b/SOUL.md
+select teams/team_jihjpfkt8b/docs
+select ledgers/repo_019c5812-01e9-7b7d-b5b1-321c471c9777/sessions
+select teams/team_xlcr6yzpec/MEMORY.md
+status
+metrics
+quit
+```
+
+If graceful cleanup fails, run `sudo -n /sbin/umount "$MOUNT"`. After
+inspecting logs and state, remove them with
+`rm -rf "$MOUNT" "$STATE" "$LOG"`.
+
 #### Manual observability walkthrough
 
 Keep a named state directory so another terminal can follow oxFS activity.
@@ -316,6 +376,30 @@ admission, while `.sageox/INDEX` records desired paths that are stopped.
 cache/catalog gauges. Subtract two snapshots to attribute changes to the action
 between them. There are currently no per-NFS-RPC counters: mounted activity is
 observed at the workspace `open`/`read`/`dismiss` boundary instead.
+
+#### SageOx trace pipe
+
+oxFS owns its OpenTelemetry spans and sends them to the authenticated SageOx
+OTLP proxy; it never sends directly to Honeycomb and never accepts Honeycomb
+credentials. `oxdirtest` activates the pipe for manual runs using the canonical
+SageOx environment inputs:
+
+```bash
+export SAGEOX_ENDPOINT=https://api.sageox.ai # optional; this is the default
+export SAGEOX_TOKEN=...                      # tracing is off when unset
+target/debug/oxdirtest \
+  --source "$HOME/src" \
+  --mountpoint /tmp/oxdirtest-mount \
+  --state /tmp/oxdirtest-state \
+  --cache-bytes 268435456
+```
+
+The pipe posts OTLP protobuf to
+`$SAGEOX_ENDPOINT/api/v1/otlp/v1/traces` with SageOx bearer authentication, a
+two-second export timeout, and a shutdown flush. Initialization and export
+failures never prevent the filesystem from running. For now it emits only the
+`oxfs.session` root span; behavior-specific child spans belong inside oxFS and
+will be added after the manual walkthrough identifies useful boundaries.
 
 The integration suite sends real ONC RPC records over TCP. It does not bypass
 the wire adapter. Coverage includes mountd `MNT`, hierarchical `LOOKUP`, ranged

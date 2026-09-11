@@ -252,8 +252,14 @@ fn concurrent_sessions_coalesce_one_fetch() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+// A canonical-path collision is handled per entry, not by rejecting the whole
+// update: the conflicting entry is skipped and recorded as `path_collision`, the
+// resident file is never overwritten, and the rest of the update still applies.
+// Failure prevented: one Session selecting a conflicting content at a path a
+// second Session already holds would wipe out the whole update (and, worse,
+// could silently overwrite the resident file).
 #[test]
-fn conflicting_session_content_does_not_replace_live_snapshot() {
+fn conflicting_session_content_is_skipped_per_entry_not_rejected() {
     let root = temp("conflict");
     let mut objects = BTreeMap::new();
     objects.insert(reference().digest, b"abc".to_vec());
@@ -275,17 +281,66 @@ fn conflicting_session_content_does_not_replace_live_snapshot() {
     })
     .unwrap();
     let inode = ws.snapshot().by_path("same").unwrap().inode;
-    assert!(
-        ws.apply(Manifest {
-            session_id: "b".into(),
-            generation: 1,
-            entries: vec![
-                ManifestEntry::new("same", "b", "Session", 0o444, 0, second, "second").unwrap()
-            ]
-        })
-        .is_err()
-    );
+    // Session "b" selects the same path with different content plus a
+    // non-conflicting path. The apply must succeed, not error.
+    ws.apply(Manifest {
+        session_id: "b".into(),
+        generation: 1,
+        entries: vec![
+            ManifestEntry::new("same", "b", "Session", 0o444, 0, second, "second").unwrap(),
+            ManifestEntry::new("other", "b", "Session", 0o444, 0, xyz_reference(), "kept").unwrap(),
+        ],
+    })
+    .unwrap();
+    // The resident file is untouched — "same" still reads "abc", not "xyz".
     assert_eq!(ws.open_inode(inode).unwrap().read(0, 3).unwrap(), b"abc");
+    assert!(ws.snapshot().by_path("same").is_some());
+    // The rest of the update applied: the non-conflicting path is visible.
+    assert!(ws.snapshot().by_path("other").is_some());
+    // The losing selector is recorded as `path_collision`; the winning selector
+    // stays `available`; the path aggregate stays `available` (resident for one).
+    let json_inode = ws.snapshot().by_path(".sageox/INDEX.json").unwrap().inode;
+    let json = String::from_utf8(
+        ws.open_inode(json_inode)
+            .unwrap()
+            .read(0, usize::MAX)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(json.contains("path_collision"));
+    assert!(json.contains("\"session_id\":\"a\",\"reason\":\"first\",\"status\":\"available\""));
+    assert!(
+        json.contains("\"session_id\":\"b\",\"reason\":\"second\",\"status\":\"path_collision\"")
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn collision_keeps_published_winner_when_lower_session_arrives() {
+    let root = temp("reverse-conflict");
+    let objects = BTreeMap::from([
+        (reference().digest, b"abc".to_vec()),
+        (xyz_reference().digest, b"xyz".to_vec()),
+    ]);
+    let ws = Workspace::open(&root, Arc::new(MemorySource { objects })).unwrap();
+    ws.apply(Manifest {
+        session_id: "b".into(),
+        generation: 1,
+        entries: vec![
+            ManifestEntry::new("same", "b", "Session", 0o444, 0, xyz_reference(), "first").unwrap(),
+        ],
+    })
+    .unwrap();
+    let inode = ws.snapshot().by_path("same").unwrap().inode;
+    ws.apply(Manifest {
+        session_id: "a".into(),
+        generation: 1,
+        entries: vec![
+            ManifestEntry::new("same", "a", "Session", 0o444, 0, reference(), "later").unwrap(),
+        ],
+    })
+    .unwrap();
+    assert_eq!(ws.open_inode(inode).unwrap().read(0, 3).unwrap(), b"xyz");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -594,8 +649,7 @@ fn ranked_admission_stops_but_keeps_later_resident_content() {
     )
     .unwrap();
     assert!(
-        json.contains("\"path\":\"also-resident\"")
-            && json.contains("stopped: cache_limit_reached")
+        json.contains("\"path\":\"also-resident\"") && json.contains("\"status\":\"no_space\"")
     );
     std::fs::remove_dir_all(root).unwrap();
 }

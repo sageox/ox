@@ -17,6 +17,7 @@ pub mod observations;
 pub mod path;
 mod selections;
 mod sha256;
+pub mod telemetry;
 pub mod workspace;
 
 pub use cache::{CacheConfig, CacheTelemetrySnapshot, DEFAULT_CACHE_MAX_BYTES};

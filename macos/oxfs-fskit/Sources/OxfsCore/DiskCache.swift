@@ -7,11 +7,12 @@ import CryptoKit
 /// and atomically renames into place. A batch is one SQLite transaction guarded
 /// by an fsynced `active-apply.v1` journal so a crash leaves the catalog and the
 /// object tree consistent.
-public final class DiskContentCache: ContentCache {
+public final class DiskContentCache: ContentCache, @unchecked Sendable {
     private let root: URL
     private let source: ContentSource
     private let config: CacheConfig
     private let catalog: Catalog
+    private let instanceLockFD: Int32
     private let lock = NSLock()
 
     private var inBatch = false
@@ -20,6 +21,7 @@ public final class DiskContentCache: ContentCache {
     private var validated: Set<String> = []
     private var tempNonce: UInt64 = 0
     private var failNextCommitFlag = false
+    private var openPins: [String: Int] = [:]
 
     // telemetry counters
     private var fetchedObjects: UInt64 = 0
@@ -36,10 +38,34 @@ public final class DiskContentCache: ContentCache {
         self.config = config
         try FileManager.default.createDirectory(at: root.appendingPathComponent("objects"), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: root.appendingPathComponent("tmp"), withIntermediateDirectories: true)
+        let lockPath = root.appendingPathComponent("cache.lock").path
+        let lockFD = open(lockPath, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard lockFD >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        guard lockf(lockFD, F_TLOCK, 0) == 0 else {
+            let code = errno
+            close(lockFD)
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EBUSY)
+        }
+        var retainLock = false
+        defer {
+            if !retainLock {
+                _ = lockf(lockFD, F_ULOCK, 0)
+                close(lockFD)
+            }
+        }
+        self.instanceLockFD = lockFD
         self.catalog = try Catalog(path: root.appendingPathComponent("catalog.sqlite"), order: config.eviction)
         try removeOrphanTemps()
         try migrateMetadataV1()
         try recoverPending()
+        retainLock = true
+    }
+
+    deinit {
+        _ = lockf(instanceLockFD, F_ULOCK, 0)
+        close(instanceLockFD)
     }
 
     // MARK: - keys / paths
@@ -164,6 +190,12 @@ public final class DiskContentCache: ContentCache {
 
     public func materializeMissing(_ reference: ContentRef) throws -> ResidentContent {
         lock.lock(); defer { lock.unlock() }
+        // A concurrent caller may have completed while this caller waited for
+        // the cache lock. Recheck before reserving: reserving an already
+        // resident row is intentionally a no-op, but fetching it again is not.
+        if let resident = try residentLocked(reference) {
+            return resident
+        }
         let key = storageKey(reference)
         _ = try cacheReserveLocked(key, reference.size) // may throw StorageFull
         do {
@@ -196,12 +228,35 @@ public final class DiskContentCache: ContentCache {
         return out
     }
 
-    public func openBytes(_ reference: ContentRef) throws -> [UInt8] {
+    public func openContent(_ reference: ContentRef) throws -> OpenContent {
         lock.lock(); defer { lock.unlock() }
         guard try residentLocked(reference) != nil else { throw FetchError.notFound }
-        let bytes = [UInt8](try Data(contentsOf: objectPath(reference)))
+        let path = objectPath(reference)
+        // Residency checks may use the per-process validation cache, but every
+        // data open re-verifies the object. This prevents same-size mutation
+        // after an earlier lookup from ever reaching a filesystem reader.
+        let handle = try FileHandle(forReadingFrom: path)
+        let digest: String
+        do { digest = try hashHandle(handle) }
+        catch { try? handle.close(); throw error }
+        guard digest == reference.digest.lowercased() else {
+            try? handle.close()
+            try removeExisting(path)
+            try catalog.markMissing(storageKey(reference))
+            validated.remove(storageKey(reference))
+            throw FetchError.wrongDigest(expected: reference.digest, actual: "on-disk corruption")
+        }
+        try handle.seek(toOffset: 0)
         try catalog.touch(storageKey(reference))
-        return bytes
+        let key = storageKey(reference)
+        openPins[key, default: 0] += 1
+        return DiskOpenContent(handle: handle, size: reference.size) { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); defer { self.lock.unlock() }
+            let count = self.openPins[key, default: 0]
+            if count <= 1 { self.openPins[key] = nil }
+            else { self.openPins[key] = count - 1 }
+        }
     }
 
     // MARK: - internals
@@ -211,7 +266,10 @@ public final class DiskContentCache: ContentCache {
         let reservation: Reservation
         let victims: [Victim]
         do {
-            (reservation, victims) = try catalog.reserve(key, size: size, capacity: config.maxBytes)
+            (reservation, victims) = try catalog.reserve(
+                key, size: size, capacity: config.maxBytes,
+                excluding: Set(openPins.keys)
+            )
         } catch CatalogError.storageFull {
             blocked &+= 1
             throw FetchError.io("StorageFull")
@@ -238,8 +296,8 @@ public final class DiskContentCache: ContentCache {
             try? handle.close(); try? FileManager.default.removeItem(at: temp); throw error
         }
         let (size, digest) = writer.finish()
-        try? handle.synchronize()
-        try? handle.close()
+        try handle.synchronize()
+        try handle.close()
 
         if size != reference.size {
             try? FileManager.default.removeItem(at: temp)
@@ -270,7 +328,7 @@ public final class DiskContentCache: ContentCache {
     }
 
     private func evictVictim(_ victim: Victim) throws {
-        removeIfExists(keyPath(victim.key))
+        try removeExisting(keyPath(victim.key))
         validated.remove(victim.key)
         evicted &+= 1
     }
@@ -323,6 +381,10 @@ public final class DiskContentCache: ContentCache {
     private func hashFile(_ url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
+        return try hashHandle(handle)
+    }
+
+    private func hashHandle(_ handle: FileHandle) throws -> String {
         var hasher = SHA256()
         while true {
             let chunk = try handle.read(upToCount: 65536) ?? Data()
@@ -334,16 +396,63 @@ public final class DiskContentCache: ContentCache {
 
     private func fsyncFile(_ url: URL) throws {
         let handle = try FileHandle(forWritingTo: url)
-        try? handle.synchronize()
-        try? handle.close()
+        do {
+            try handle.synchronize()
+            try handle.close()
+        } catch {
+            try? handle.close()
+            throw error
+        }
     }
 
     private func syncDirectory(_ url: URL) throws {
         let fd = open(url.path, O_RDONLY)
-        if fd >= 0 { _ = fsync(fd); close(fd) }
+        guard fd >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { close(fd) }
+        guard fsync(fd) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 
     private func removeIfExists(_ url: URL) { try? FileManager.default.removeItem(at: url) }
+
+    private func removeExisting(_ url: URL) throws {
+        if unlink(url.path) == 0 || errno == ENOENT { return }
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+}
+
+private final class DiskOpenContent: OpenContent {
+    private let handle: FileHandle
+    let size: UInt64
+    private let onClose: () -> Void
+    private let lock = NSLock()
+    private var closed = false
+
+    init(handle: FileHandle, size: UInt64, onClose: @escaping () -> Void) {
+        self.handle = handle
+        self.size = size
+        self.onClose = onClose
+    }
+    func read(offset: UInt64, count: Int) throws -> [UInt8] {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { throw FetchError.io("read after close") }
+        guard offset < size, count > 0 else { return [] }
+        try handle.seek(toOffset: offset)
+        let bounded = min(UInt64(count), size - offset)
+        return [UInt8](try handle.read(upToCount: Int(bounded)) ?? Data())
+    }
+    func close() throws {
+        lock.lock()
+        if closed { lock.unlock(); return }
+        closed = true
+        lock.unlock()
+        defer { onClose() }
+        try handle.close()
+    }
+    deinit { try? close() }
 }
 
 /// A `ContentWriter` that streams to a file while hashing (SHA-256), counting,
