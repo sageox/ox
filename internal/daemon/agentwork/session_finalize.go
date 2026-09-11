@@ -172,6 +172,11 @@ type SessionFinalizeHandler struct {
 	// second test's flush handshake outlives the budget, recovery defers, and
 	// the test fails on a timing accident rather than a real regression.
 	captureLockWait time.Duration
+	// afterStageTestHook is called right after `git add` stages the session
+	// path, before the commit. Nil in production; tests use it to perturb the
+	// worktree between staging and commit and confirm the commit still
+	// publishes the staged (not worktree) bytes.
+	afterStageTestHook func()
 }
 
 // defaultCaptureLockWait keeps one busy session from blocking the whole detect
@@ -1775,23 +1780,20 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		return false
 	}
 
-	// A zero-delta stage is the NORMAL outcome for a session whose files already
+	// A zero-delta commit is the NORMAL outcome for a session whose files already
 	// match HEAD — stageSessionInLedger copies the cache over an already-committed
-	// sessions/<name>/, so git has nothing to record and `git commit` exits 1.
-	// Treating that as failure made the caller skip the cache prune, which left the
-	// session in .sageox/cache/ for Detect() to re-enqueue five minutes later,
-	// forever. The content is in git either way; that is what the caller needs.
-	//
-	// Ask git what is staged rather than parsing the commit's message: the wording
-	// varies with the rest of the tree ("working tree clean" vs "untracked files
-	// present"), so an unrelated stray file in the ledger would resurrect the loop.
+	// sessions/<name>/, so the scoped tree CommitLedgerSnapshot builds equals
+	// HEAD's and it reports committed=false rather than erroring. Treating that
+	// as failure made the caller skip the cache prune, which left the session in
+	// .sageox/cache/ for Detect() to re-enqueue five minutes later, forever. The
+	// content is in git either way; that is what the caller needs.
 	msg := fmt.Sprintf("finalize session %s", sessionName)
-	staged := false
+	var staged bool
 	// ADR-030's repo lock is cross-process; ledgerMu above only coordinates
-	// goroutines in this daemon. Holding both across pointer write, stage,
-	// validation, and commit prevents a CLI pull from restoring an autostash
-	// between those steps. Release before PushWithRetry, which takes the same
-	// non-reentrant lock if a non-fast-forward retry needs to pull.
+	// goroutines in this daemon. Holding both across pointer write, stage, and
+	// commit prevents a CLI pull from restoring an autostash between those
+	// steps. Release before PushWithRetry, which takes the same non-reentrant
+	// lock if a non-fast-forward retry needs to pull.
 	if err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
 		// A raw-only first push can trigger GitLab GC before a second pointer
 		// push, unlinking the newly uploaded objects from the project. Publish
@@ -1803,26 +1805,18 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		if err := h.runGit(ledgerPath, "add", "--sparse", relDir+"/"); err != nil {
 			return fmt.Errorf("git add: %w", err)
 		}
+		if h.afterStageTestHook != nil {
+			h.afterStageTestHook()
+		}
+		// CommitLedgerSnapshot commits an immutable tree built from HEAD plus the
+		// INDEX entries under relDir — never the worktree. A manual git process
+		// (or a stray concurrent writer) that rewrites a file in relDir between
+		// the git add above and here cannot ride along into this commit; the
+		// bytes published are exactly the bytes staged.
 		var err error
-		staged, err = h.hasStagedChanges(ledgerPath, relDir+"/")
+		staged, err = gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, msg, relDir+"/")
 		if err != nil {
-			return fmt.Errorf("inspect staged changes: %w", err)
-		}
-		if !staged {
-			return nil
-		}
-		if err := gitutil.ValidateStagedLedgerCommit(context.Background(), ledgerPath, relDir+"/"); err != nil {
-			return err
-		}
-		// Commit ONLY this session's path. A bare `git commit -m` writes the
-		// whole index and could sweep a different session's staged files.
-		if err := h.runGit(ledgerPath, "commit", "-m", msg, "--", relDir); err != nil {
-			// Raw human Git does not participate in the advisory repo lock, so an
-			// external committer can still empty the index after validation.
-			if !isNothingToCommit(err) {
-				return fmt.Errorf("git commit: %w", err)
-			}
-			h.logger.Debug("session committed concurrently", "session", sessionName)
+			return fmt.Errorf("commit session snapshot: %w", err)
 		}
 		return nil
 	}); err != nil {
@@ -1907,32 +1901,10 @@ func (h *SessionFinalizeHandler) synthesizeMeta(sessionDir, sessionName string) 
 		Build()
 }
 
-// hasStagedChanges reports whether the index differs from HEAD for pathspec.
-// Used to tell a no-op finalize (content already at HEAD) from a real commit
-// failure without depending on git's human-readable output.
-//
-// Scoped to the session's own path on purpose. The index is shared: if an
-// earlier finalize staged another session's files and then failed to commit for
-// some reason other than an empty stage, those files are still staged. An
-// unscoped check would see them, take the ordinary commit path, and fold that
-// session's files into this one's "finalize session <name>" commit. Nothing is
-// lost — the other session's next cycle finds nothing staged and simply pushes —
-// but the history would attribute files to the wrong session.
-func (h *SessionFinalizeHandler) hasStagedChanges(repoPath, pathspec string) (bool, error) {
-	cmd := exec.Command("git", "-C", repoPath, "diff", "--cached", "--name-only", "--", pathspec)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	out, err := cmd.Output()
-	if err != nil {
-		return false, fmt.Errorf("git diff --cached: %w", err)
-	}
-	return len(bytes.TrimSpace(out)) > 0, nil
-}
-
 // runGit executes a git command in the ledger directory.
 //
-// Pins the locale: isNothingToCommit matches git's English wording as a fallback
-// for the concurrent-committer race, and under a translated locale that match
-// would silently never fire.
+// Pins the locale so git's error text in logs stays stable and grep-able
+// regardless of the daemon host's language settings.
 func (h *SessionFinalizeHandler) runGit(repoPath string, args ...string) error {
 	fullArgs := append([]string{"-C", repoPath}, args...)
 	cmd := exec.Command("git", fullArgs...)
@@ -1946,17 +1918,6 @@ func (h *SessionFinalizeHandler) runGit(repoPath string, args ...string) error {
 }
 
 // --- helpers ---
-
-// isNothingToCommit reports whether a git commit failed because the index held
-// no changes. Only a fallback for the concurrent-committer race — the primary
-// check is hasStagedChanges, which does not depend on git's wording.
-func isNothingToCommit(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "nothing to commit") || strings.Contains(msg, "no changes added to commit")
-}
 
 // copySessionFile replaces dst atomically so an interrupted backup cannot
 // leave a partial cache file that detection would prefer over the source.

@@ -2101,14 +2101,13 @@ func (s *daemonServiceImpl) commitMurmur(ctx context.Context, payload MurmurPayl
 }
 
 // writeAndCommitMurmur writes the murmur file to disk (the daemon owns all I/O)
-// and commits it, scoped to data/murmurs/. The caller MUST have already
+// and commits it, scoped to the murmur's own path. The caller MUST have already
 // validated targetDir and payload.RelPath. Shared by the IPC path and the
 // outbox drain.
 //
-// The commit is scoped to data/murmurs/ — a bare `git commit` would sweep in any
-// other dirty index entries (e.g. session pointer stubs written by a previous
-// finalize), poisoning the push queue with LFS pointer blobs whose backing
-// objects may not be in the remote LFS store.
+// The commit is scoped to payload.RelPath, not the whole data/murmurs/ tree: a
+// neighbor's valid but unrelated staged edit under that directory must not
+// ride along into this murmur's commit.
 func writeAndCommitMurmur(ctx context.Context, targetDir string, payload MurmurPayload) error {
 	summary := payload.Content
 	if len(summary) > 50 {
@@ -2118,14 +2117,11 @@ func writeAndCommitMurmur(ctx context.Context, targetDir string, payload MurmurP
 		if err := ledger.WriteMurmurRaw(targetDir, payload.RelPath, payload.MurmurJSON); err != nil {
 			return fmt.Errorf("write murmur: %w", err)
 		}
-		if _, err := gitutil.RunGit(ctx, targetDir, "add", "--sparse", "data/murmurs/"); err != nil {
+		if _, err := gitutil.RunGit(ctx, targetDir, "add", "--sparse", "--", payload.RelPath); err != nil {
 			return fmt.Errorf("git add murmur: %w", err)
 		}
-		if err := gitutil.ValidateStagedLedgerCommit(ctx, targetDir, "data/murmurs/"); err != nil {
-			return err
-		}
-		if _, err := gitutil.RunGit(ctx, targetDir, "commit", "-m", fmt.Sprintf("murmur: %s", summary), "--", "data/murmurs/"); err != nil {
-			return fmt.Errorf("git commit murmur: %w", err)
+		if _, err := gitutil.CommitLedgerSnapshot(ctx, targetDir, fmt.Sprintf("murmur: %s", summary), payload.RelPath); err != nil {
+			return fmt.Errorf("commit murmur: %w", err)
 		}
 		return nil
 	})

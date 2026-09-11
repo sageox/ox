@@ -146,6 +146,13 @@ func TestRetractOrphanedDrafts_RevalidatesHeartbeatAfterLockWait(t *testing.T) {
 	const name = "2026-01-01T00-00-testuser-OxRefresh"
 	commitStaleDraft(t, ledger, name, 120*time.Hour)
 
+	// entered proves the reaper actually reached the locked closure and ran
+	// its revalidation, rather than merely returning early because
+	// WithRepoLock timed out on the contended lock (both produce the same
+	// externally-observable "the session dir still exists" outcome).
+	entered := make(chan struct{})
+	s.retractLockedTestHook = func() { close(entered) }
+
 	locked := make(chan struct{})
 	release := make(chan struct{})
 	lockDone := make(chan error, 1)
@@ -184,6 +191,12 @@ func TestRetractOrphanedDrafts_RevalidatesHeartbeatAfterLockWait(t *testing.T) {
 	close(release)
 	require.NoError(t, <-lockDone)
 	<-retractDone
+
+	select {
+	case <-entered:
+	default:
+		require.Fail(t, "reaper never entered the locked closure — it timed out on the repo lock instead")
+	}
 
 	assert.DirExists(t, dir, "a heartbeat refreshed while waiting for the lock must survive")
 	assert.Equal(t, "session-draft: refresh "+name, mustGit(t, ledger, "log", "-1", "--format=%s"))

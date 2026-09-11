@@ -37,16 +37,17 @@ func CommitAndPushGitHubData(ctx context.Context, ledgerPath, owner, repo string
 	// Keep stage, validation, and commit under ADR-030's cross-process lock.
 	// PushWithRetry takes the same non-reentrant lock only if it must pull, so
 	// publication runs after this critical section.
+	//
+	// CommitLedgerSnapshot commits the index, not the worktree: a pathspec-based
+	// `git commit -- relDir` re-reads the worktree at commit time, so anything
+	// that rewrote those paths between add and commit would be committed under
+	// this message instead of the validated blobs.
 	if err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
 		if output, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", relDir); err != nil {
 			return fmt.Errorf("git add failed: %s: %w", output, err)
 		}
-		if err := gitutil.ValidateStagedLedgerCommit(ctx, ledgerPath, relDir); err != nil {
+		if _, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, commitMsg, relDir); err != nil {
 			return err
-		}
-		output, err := gitutil.RunGit(ctx, ledgerPath, "commit", "--no-verify", "-m", commitMsg, "--", relDir)
-		if err != nil && !strings.Contains(output, "nothing to commit") {
-			return fmt.Errorf("git commit failed: %s: %w", output, err)
 		}
 		return nil
 	}); err != nil {

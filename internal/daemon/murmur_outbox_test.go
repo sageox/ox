@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -136,6 +137,46 @@ func TestWriteAndCommitMurmur_RefusesConflictMarkers(t *testing.T) {
 	err := writeAndCommitMurmur(context.Background(), ledgerDir, p)
 	require.ErrorContains(t, err, "unresolved conflict")
 	require.Equal(t, before, getGitSHA(t, ledgerDir), "validation failure must not advance HEAD")
+}
+
+// TestWriteAndCommitMurmur_ScopesCommitToOwnPath verifies the commit is scoped
+// to the murmur's own RelPath, not the whole data/murmurs/ tree. Failure
+// prevented: a bare `git commit -m` over data/murmurs/ would sweep in a
+// neighbor's unrelated staged edit under that directory into this murmur's
+// commit — misattributing it and leaving nothing else staged to publish it
+// under its own message.
+func TestWriteAndCommitMurmur_ScopesCommitToOwnPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: shells git")
+	}
+	ledgerDir, _ := initGitRepoWithCommit(t)
+	p := makeOutboxMurmur(t, ledgerDir, "scoped commit", time.Now().UTC())
+
+	// A valid, unrelated file staged under data/murmurs/ before the murmur
+	// commit runs — the neighbor this commit must not sweep in.
+	unrelatedRel := filepath.Join("data", "murmurs", "unrelated.json")
+	unrelatedAbs := filepath.Join(ledgerDir, unrelatedRel)
+	require.NoError(t, os.MkdirAll(filepath.Dir(unrelatedAbs), 0o755))
+	require.NoError(t, os.WriteFile(unrelatedAbs, []byte(`{"unrelated":true}`), 0o644))
+	out, err := exec.Command("git", "-C", ledgerDir, "add", "--sparse", "--", unrelatedRel).CombinedOutput()
+	require.NoError(t, err, "git add unrelated file failed: %s", out)
+
+	require.NoError(t, writeAndCommitMurmur(context.Background(), ledgerDir, p))
+
+	committedFiles := strings.TrimSpace(mustGitOutput(t, ledgerDir, "show", "--name-only", "--format=", "HEAD"))
+	require.Equal(t, filepath.ToSlash(p.RelPath), filepath.ToSlash(committedFiles),
+		"the murmur commit must contain ONLY the murmur's own path")
+
+	staged := strings.TrimSpace(mustGitOutput(t, ledgerDir, "diff", "--cached", "--name-only"))
+	require.Equal(t, filepath.ToSlash(unrelatedRel), filepath.ToSlash(staged),
+		"the neighbor's staged edit must survive, untouched, for its own commit")
+}
+
+func mustGitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
+	require.NoError(t, err, "git %v failed", args)
+	return string(out)
 }
 
 // TestDrainMurmurOutbox_DropsStale verifies murmurs older than the 24h window are

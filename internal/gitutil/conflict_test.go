@@ -97,6 +97,36 @@ func TestValidateLedgerBlob(t *testing.T) {
 	}
 }
 
+// TestValidateLedgerEntryMode — Git stores a symlink's target as the blob, so
+// content checks alone let a link whose target reads as valid JSON through.
+func TestValidateLedgerEntryMode(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		path    string
+		mode    string
+		wantErr string
+	}{
+		{name: "regular session metadata", path: "sessions/example/meta.json", mode: "100644"},
+		{name: "executable session artifact", path: "sessions/example/tool.sh", mode: "100755"},
+		{name: "symlink session metadata", path: "sessions/example/meta.json", mode: "120000", wantErr: "symbolic link"},
+		{name: "symlink session transcript", path: "sessions/example/raw.jsonl", mode: "120000", wantErr: "symbolic link"},
+		{name: "gitlink session metadata", path: "sessions/example/meta.json", mode: "160000", wantErr: "submodule"},
+		{name: "unknown mode under sessions", path: "sessions/example/meta.json", mode: "040000", wantErr: "unsupported index mode"},
+		{name: "symlink outside sessions is not this validator's call", path: "docs/link.md", mode: "120000"},
+		{name: "sessions root file is not a session entry", path: "sessions/README.md", mode: "120000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateLedgerEntryMode(tc.path, tc.mode)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
 const conflictMarkerFixture = "<<<<<<< Updated upstream\nours\n=======\ntheirs\n>>>>>>> Stashed changes\n"
 
 // Automatic Ledger commits validate index blobs, not worktree bytes. These
@@ -204,6 +234,49 @@ func TestValidateStagedLedgerCommit_RejectsTypeChangedBlob(t *testing.T) {
 
 	err := ValidateStagedLedgerCommit(context.Background(), repo, "sessions/example/")
 	require.ErrorContains(t, err, "unresolved conflict")
+}
+
+// TestValidateStagedLedgerCommit_RejectsSymlinkSessionMetadata is the PR #910
+// review regression: a regular meta.json replaced by a symlink whose TARGET
+// string is a valid JSON object. `git show :path` returns that target text, so
+// a content-only validator publishes sessions/<name>/meta.json as a symlink.
+func TestValidateStagedLedgerCommit_RejectsSymlinkSessionMetadata(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index state")
+	}
+	repo := t.TempDir()
+	gitInRepo(t, repo, "init", "-b", "main")
+	writeGitutilFixture(t, repo, "sessions/example/meta.json", `{"title":"Ready"}`+"\n")
+	gitInRepo(t, repo, "add", "--sparse", "sessions/example/meta.json")
+	gitInRepo(t, repo, "commit", "-m", "regular file")
+
+	path := filepath.Join(repo, "sessions", "example", "meta.json")
+	require.NoError(t, os.Remove(path))
+	if err := os.Symlink(`{"title":"Ready"}`, path); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	gitInRepo(t, repo, "add", "--sparse", "sessions/example/meta.json")
+
+	err := ValidateStagedLedgerCommit(context.Background(), repo, "sessions/example/")
+	require.ErrorContains(t, err, "symbolic link")
+}
+
+// TestValidateStagedLedgerCommit_RejectsGitlinkSessionMetadata covers the
+// other non-blob entry type, without needing symlink support on the host.
+func TestValidateStagedLedgerCommit_RejectsGitlinkSessionMetadata(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index state")
+	}
+	repo := t.TempDir()
+	gitInRepo(t, repo, "init", "-b", "main")
+	writeGitutilFixture(t, repo, "base.txt", "base\n")
+	gitInRepo(t, repo, "add", "base.txt")
+	gitInRepo(t, repo, "commit", "-m", "base")
+	head := gitInRepo(t, repo, "rev-parse", "HEAD")
+	gitInRepo(t, repo, "update-index", "--add", "--cacheinfo", "160000,"+head+",sessions/example/meta.json")
+
+	err := ValidateStagedLedgerCommit(context.Background(), repo, "sessions/example/")
+	require.ErrorContains(t, err, "submodule")
 }
 
 func TestValidateStagedLedgerCommit_UnbornBranch(t *testing.T) {

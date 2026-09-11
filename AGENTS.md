@@ -94,6 +94,7 @@ ox is agentic context infrastructure for software teams. It makes architectural 
 | `HasOxPrimeMarker(gitRoot)` | `cmd/ox/prime_marker.go` | `strings.Contains(file, "ox agent prime")` |
 | `EnsureOxPrimeMarker(gitRoot)` | `cmd/ox/prime_marker.go` | Manual marker injection |
 | `cli.OpenInBrowser(url)` | `internal/cli/output.go` | `browser.OpenURL()`, `exec.Command("open"/"xdg-open")` |
+| `gitutil.CommitLedgerSnapshot(ctx, repo, msg, paths...)` | `internal/gitutil/ledger_commit.go` | `git commit -m … -- <pathspec>` / bare `git commit` in any automatic Ledger writer |
 
 **Browser Opening:** Use `cli.OpenInBrowser(url)` for ALL browser opens. Handles headless + cross-platform natively.
 

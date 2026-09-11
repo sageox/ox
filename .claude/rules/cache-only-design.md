@@ -135,7 +135,9 @@ Two related traps in the same area:
 
 - `git commit -- <pathspec>` commits the **working tree**, not the index.
   Anything that rewrote those paths between `git add` and `git commit` gets
-  committed under your message. Re-verify before committing.
+  committed under your message. Automatic Ledger writers must commit through
+  `gitutil.CommitLedgerSnapshot(ctx, repo, msg, pathspecs...)` instead, which
+  validates and commits one immutable tree built from the index.
 - `deriveLedgerPath` returns `filepath.Dir` for ANY path whose parent is
   named `sessions` — including the XDG cache and the legacy in-repo fallback,
   where the "ledger" is the user's own project root. Validate the derived
