@@ -191,6 +191,7 @@ type SyncScheduler struct {
 	preCloneLockWaitOverride time.Duration // override the pre-clone lock's wait budget for tests (0 = use gitutil.PreCloneLockTimeout+10s)
 	gcAsyncTestHook          func()        // called at the start of TriggerGCAsync's goroutine, before runTriggerGC; tests use this to hold the goroutine open deterministically
 	gcSwapWindowTestHook     func()        // called right after runBlueGreenGCOpts writes .gc-swap-lock, before the rename; tests use this to observe the lock file mid-swap
+	retractLockedTestHook    func()        // called on entry to retractOrphanedDrafts' locked closure; tests use it to prove the reaper reached locked revalidation rather than timing out on the lock
 
 	// callbacks
 	onActivity   func()                                                           // called on any sync activity
@@ -1755,6 +1756,9 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 
 	var removed int
 	lockErr := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		if s.retractLockedTestHook != nil {
+			s.retractLockedTestHook()
+		}
 		// Re-check after taking both locks: ledgerMu coordinates this daemon,
 		// while the repo lock excludes CLI pulls and commits in other processes.
 		if gitutil.IsRebaseInProgress(ledgerPath) {
@@ -1814,15 +1818,19 @@ func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath st
 				s.restoreDraftForRetry(ctx, ledgerPath, rel, name, diffErr)
 				continue
 			}
-			if err := gitutil.ValidateStagedLedgerCommit(ctx, ledgerPath, rel); err != nil {
-				s.restoreDraftForRetry(ctx, ledgerPath, rel, name, err)
-				continue
-			}
-			if _, err := s.git.RunGit(ctx, ledgerPath, "commit", "--no-verify",
-				"-m", sessionDraftCommitPrefix+"retract "+name, "--", rel); err != nil {
+			committed, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, sessionDraftCommitPrefix+"retract "+name, rel)
+			if err != nil {
 				// Commit failed: the deletion is staged and the dir is gone, which
 				// would orphan the candidate. Restore so the next scan retries.
 				s.restoreDraftForRetry(ctx, ledgerPath, rel, name, err)
+				continue
+			}
+			if !committed {
+				// The staged deletion diff was non-empty above, so a scoped tree
+				// equal to HEAD here means nothing actually changed — restore
+				// rather than leave a dangling staged deletion for a later,
+				// unrelated commit to sweep up.
+				s.restoreDraftForRetry(ctx, ledgerPath, rel, name, fmt.Errorf("retraction produced no change"))
 				continue
 			}
 			removed++

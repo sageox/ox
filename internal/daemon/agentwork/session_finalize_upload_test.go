@@ -714,3 +714,57 @@ func TestGitCommitAndPush_RefusesConflictMarkers(t *testing.T) {
 		t.Fatalf("failed commit must preserve the conflicted file for recovery: %q, %v", got, err)
 	}
 }
+
+// TestGitCommitAndPush_CommitsStagedBytesNotWorktree verifies the commit
+// publishes the bytes `git add` staged, not whatever the worktree holds by the
+// time the commit actually runs. A manual git process (or any concurrent
+// writer) that rewrites meta.json between staging and commit must not have
+// those bytes ride into the published commit — CommitLedgerSnapshot builds
+// the committed tree from the INDEX, never the worktree.
+func TestGitCommitAndPush_CommitsStagedBytesNotWorktree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	_, ledgerPath := setupBareAndCloneLedger(t)
+
+	const sessionName = "2026-09-10T12-00-test-OxTOCTOU"
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cleanMeta := []byte(`{"title":"clean"}`)
+	if err := os.WriteFile(filepath.Join(sessionDir, "meta.json"), cleanMeta, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(testRawContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newGitBackedHandler()
+	// Simulate a manual Git process rewriting meta.json in the worktree AFTER
+	// this finalize has already staged the clean bytes.
+	handler.afterStageTestHook = func() {
+		conflicted := []byte("{\n<<<<<<< Updated upstream\n  \"title\": \"remote\"\n=======\n  \"title\": \"local\"\n>>>>>>> Stashed changes\n}\n")
+		if err := os.WriteFile(filepath.Join(sessionDir, "meta.json"), conflicted, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pushed := handler.gitCommitAndPush(&SessionFinalizePayload{
+		SessionDir: sessionDir,
+		RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
+		LedgerPath: ledgerPath,
+	}, nil)
+	if !pushed {
+		t.Fatal("a clean staged session must commit and push")
+	}
+
+	got := gitOutput(t, ledgerPath, "show", "HEAD:sessions/"+sessionName+"/meta.json")
+	if got != string(cleanMeta) {
+		t.Fatalf("commit must publish the STAGED bytes, not the worktree's post-stage rewrite: got %q, want %q", got, cleanMeta)
+	}
+	subject := gitOutput(t, ledgerPath, "log", "-1", "--format=%s")
+	if subject != "finalize session "+sessionName {
+		t.Fatalf("unexpected commit subject: %q", subject)
+	}
+}

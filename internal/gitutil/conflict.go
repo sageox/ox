@@ -71,61 +71,191 @@ func ValidateLedgerBlob(path string, data []byte) error {
 	return nil
 }
 
+// Git index entry modes. A tree entry is one of these four; anything else is
+// corrupt.
+const (
+	gitModeFile       = "100644"
+	gitModeExecutable = "100755"
+	gitModeSymlink    = "120000"
+	gitModeGitlink    = "160000"
+)
+
+// ValidateLedgerEntryMode rejects index entry types no ox writer produces
+// under sessions/. Content validation alone is not enough there: Git stores a
+// symbolic link's TARGET as the blob, so a link whose target text is a valid
+// JSON object passes ValidateLedgerBlob and the ledger publishes
+// sessions/<name>/meta.json as a symlink. A gitlink has no blob at all.
+//
+// Scoped to the session tree deliberately. ValidateStagedLedgerCommit also
+// vets LFS reconcile's squash of hand-made unpushed history, and refusing a
+// human's symlink elsewhere in the ledger would wedge push repair.
+func ValidateLedgerEntryMode(path, mode string) error {
+	if !isSessionPath(path) {
+		return nil
+	}
+	switch mode {
+	case gitModeFile, gitModeExecutable:
+		return nil
+	case gitModeSymlink:
+		return fmt.Errorf("%s is a symbolic link, not a regular file", path)
+	case gitModeGitlink:
+		return fmt.Errorf("%s is a submodule (gitlink), not a regular file", path)
+	default:
+		return fmt.Errorf("%s has unsupported index mode %q", path, mode)
+	}
+}
+
 // ValidateStagedLedgerCommit validates the exact blobs currently staged for an
 // automatic Ledger commit. The caller MUST hold WithRepoLock from before its
-// first git add through the subsequent git commit; otherwise another ox process
+// first git add through the subsequent commit; otherwise another ox process
 // could replace an already-validated index entry before commit.
 //
-// A live unmerged index fails at write-tree before git add can accidentally mark
-// a conflicted path resolved. When pathspecs are supplied, only blobs that the
-// path-scoped commit can publish are scanned; the unmerged-index check remains
-// global because git refuses every commit while any index stage is unresolved.
+// The index is snapshotted with write-tree and the resulting tree is compared
+// to HEAD, so validation reads immutable objects rather than the mutable index
+// or worktree. A live unmerged index fails at write-tree before git add can
+// accidentally mark a conflicted path resolved. When pathspecs are supplied,
+// only blobs that the path-scoped commit can publish are scanned; the
+// unmerged-index check remains global because git refuses every commit while
+// any index stage is unresolved.
+//
+// Validation alone leaves a window: `git commit -- <pathspec>` re-reads the
+// WORKTREE at commit time, not the index just validated. Callers that commit
+// must use CommitLedgerSnapshot, which validates and commits one immutable
+// tree, instead of pairing this function with a porcelain commit.
 func ValidateStagedLedgerCommit(ctx context.Context, repoPath string, pathspecs ...string) error {
 	if err := IsSafeForGitOps(repoPath); err != nil {
 		return fmt.Errorf("unsafe Ledger commit: %w", err)
 	}
-
-	if _, err := cleanGitOutput(ctx, repoPath, "write-tree"); err != nil {
-		return fmt.Errorf("snapshot Ledger index (unresolved conflict in index?): %w", err)
-	}
-
-	// Exclude only deletions: every other status can introduce a blob. In
-	// particular, a symlink-to-file type change is T rather than A/M and must not
-	// bypass validation merely because the path already existed.
-	args := []string{"diff", "--cached", "--name-only", "--diff-filter=d", "--no-renames", "-z", "HEAD", "--"}
-	args = append(args, pathspecs...)
-	paths, err := cleanGitOutput(ctx, repoPath, args...)
+	tree, err := writeIndexTree(ctx, repoPath, nil)
 	if err != nil {
-		// Managed Ledgers normally have a HEAD. Supporting an unborn clone keeps
-		// the guard fail-closed without making initial bootstrap a special case.
-		if _, headErr := cleanGitOutput(ctx, repoPath, "rev-parse", "--verify", "HEAD"); headErr == nil {
-			return fmt.Errorf("list staged Ledger blobs: %w", err)
-		}
-		args = []string{"ls-files", "--cached", "-z", "--"}
-		args = append(args, pathspecs...)
-		paths, err = cleanGitOutput(ctx, repoPath, args...)
-		if err != nil {
-			return fmt.Errorf("list staged Ledger blobs on unborn branch: %w", err)
-		}
+		return err
 	}
+	parent, err := currentBranchTip(ctx, repoPath)
+	if err != nil {
+		return err
+	}
+	return validateLedgerTree(ctx, repoPath, parent, tree, pathspecs...)
+}
 
-	for _, path := range splitNUL(paths) {
-		// :./ disambiguates a pathname such as "1:file" from Git's stage
-		// lookup syntax (:1:file). Read the index blob, never worktree bytes.
-		blob, err := cleanGitOutput(ctx, repoPath, "show", ":./"+path)
-		if err != nil {
-			return fmt.Errorf("inspect staged Ledger blob %s: %w", path, err)
+// validateLedgerTree validates every entry that tree adds or changes relative
+// to parent (every entry, on an unborn branch where parent is ""), limited to
+// pathspecs when given. Deletions have no blob and are always allowed here;
+// the sacred mass-deletion guard is a separate check.
+func validateLedgerTree(ctx context.Context, repoPath, parent, tree string, pathspecs ...string) error {
+	entries, err := changedTreeEntries(ctx, repoPath, parent, tree, pathspecs...)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := ValidateLedgerEntryMode(entry.path, entry.mode); err != nil {
+			return fmt.Errorf("refusing automatic Ledger commit: %w", err)
 		}
-		if err := ValidateLedgerBlob(path, blob); err != nil {
+		blob, err := cleanGitOutput(ctx, repoPath, "cat-file", "blob", entry.oid)
+		if err != nil {
+			return fmt.Errorf("inspect staged Ledger blob %s: %w", entry.path, err)
+		}
+		if err := ValidateLedgerBlob(entry.path, blob); err != nil {
 			return fmt.Errorf("refusing automatic Ledger commit: %w", err)
 		}
 	}
 	return nil
 }
 
+// treeEntry is one non-deleted path in a tree delta: its destination mode and
+// object id.
+type treeEntry struct {
+	path string
+	mode string
+	oid  string
+}
+
+// changedTreeEntries lists the entries tree adds or modifies relative to
+// parent, skipping deletions. With parent == "" (unborn branch) every entry in
+// tree is returned. Rename detection is off so every record is one path.
+func changedTreeEntries(ctx context.Context, repoPath, parent, tree string, pathspecs ...string) ([]treeEntry, error) {
+	if parent == "" {
+		args := append([]string{"ls-tree", "-r", "-z", tree, "--"}, pathspecs...)
+		raw, err := cleanGitOutput(ctx, repoPath, args...)
+		if err != nil {
+			return nil, fmt.Errorf("list Ledger tree: %w", err)
+		}
+		var entries []treeEntry
+		// ls-tree -z: "<mode> SP <type> SP <oid> TAB <path>" per record.
+		for _, rec := range splitNUL(raw) {
+			tab := strings.IndexByte(rec, '\t')
+			if tab < 0 {
+				continue
+			}
+			fields := strings.Fields(rec[:tab])
+			if len(fields) < 3 {
+				return nil, fmt.Errorf("unexpected ls-tree record %q", rec)
+			}
+			entries = append(entries, treeEntry{path: rec[tab+1:], mode: fields[0], oid: fields[2]})
+		}
+		return entries, nil
+	}
+	args := append([]string{"diff-tree", "-r", "-z", "--no-renames", parent, tree, "--"}, pathspecs...)
+	raw, err := cleanGitOutput(ctx, repoPath, args...)
+	if err != nil {
+		return nil, fmt.Errorf("diff Ledger trees: %w", err)
+	}
+	// diff-tree -r -z: ":<srcmode> <dstmode> <srcoid> <dstoid> <status>" NUL
+	// "<path>" NUL per record.
+	toks := splitNUL(raw)
+	var entries []treeEntry
+	for i := 0; i+1 < len(toks); i += 2 {
+		fields := strings.Fields(strings.TrimPrefix(toks[i], ":"))
+		if len(fields) < 5 {
+			return nil, fmt.Errorf("unexpected diff-tree record %q", toks[i])
+		}
+		if strings.HasPrefix(fields[4], "D") {
+			continue
+		}
+		entries = append(entries, treeEntry{path: toks[i+1], mode: fields[1], oid: fields[3]})
+	}
+	return entries, nil
+}
+
+// writeIndexTree snapshots an index into an immutable tree and returns its
+// id. extraEnv selects an alternate index (GIT_INDEX_FILE); nil means the
+// repository's own. write-tree refuses unmerged entries, so a live conflict
+// fails closed here.
+func writeIndexTree(ctx context.Context, repoPath string, extraEnv []string) (string, error) {
+	out, err := runPlumbing(ctx, repoPath, nil, extraEnv, "write-tree")
+	if err != nil {
+		return "", fmt.Errorf("snapshot Ledger index (unresolved conflict in index?): %w", err)
+	}
+	tree := strings.TrimSpace(string(out))
+	if tree == "" {
+		return "", errors.New("git write-tree returned an empty tree id")
+	}
+	return tree, nil
+}
+
+// currentBranchTip returns the commit HEAD resolves to, or "" on an unborn
+// branch. Managed Ledgers normally have a HEAD; supporting an unborn clone
+// keeps the guard fail-closed without making initial bootstrap a special case.
+func currentBranchTip(ctx context.Context, repoPath string) (string, error) {
+	out, err := cleanGitOutput(ctx, repoPath, "rev-parse", "--verify", "--quiet", "HEAD")
+	if err != nil {
+		if _, headErr := cleanGitOutput(ctx, repoPath, "symbolic-ref", "--quiet", "HEAD"); headErr == nil {
+			return "", nil // a branch name with no commit yet
+		}
+		return "", fmt.Errorf("resolve HEAD: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func isSessionMetaPath(path string) bool {
 	parts := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
 	return len(parts) == 3 && parts[0] == "sessions" && parts[1] != "" && parts[2] == "meta.json"
+}
+
+// isSessionPath reports whether path lives inside a session directory — the
+// tree ox writers own exclusively and always populate with regular files.
+func isSessionPath(path string) bool {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
+	return len(parts) >= 3 && parts[0] == "sessions" && parts[1] != ""
 }
 
 func splitNUL(data []byte) []string {
@@ -142,13 +272,25 @@ func splitNUL(data []byte) []string {
 }
 
 // cleanGitOutput runs local Git plumbing without RunGit's output sanitization;
-// staged JSON bytes must round-trip byte-for-byte for structural validation.
+// staged JSON bytes and object ids must round-trip byte-for-byte.
 func cleanGitOutput(ctx context.Context, repoPath string, args ...string) ([]byte, error) {
+	return runPlumbing(ctx, repoPath, nil, nil, args...)
+}
+
+// runPlumbing is cleanGitOutput with optional stdin and extra environment, for
+// commands such as update-index --index-info against an alternate index.
+// Signing is disabled explicitly: commit-tree honors commit.gpgsign and an
+// unattended daemon can never satisfy a passphrase prompt.
+func runPlumbing(ctx context.Context, repoPath string, stdin []byte, extraEnv []string, args ...string) ([]byte, error) {
 	full := []string{"-C", repoPath, "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"}
 	full = append(full, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Dir = repoPath
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
+	cmd.Env = append(cmd.Env, extraEnv...)
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
