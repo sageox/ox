@@ -3,6 +3,7 @@ package checks
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -182,6 +183,99 @@ func TestProbeShellPath_ResolvesARealBinaryViaScrubbedEnv(t *testing.T) {
 func TestProbeShellPath_BinaryNotFound_ReturnsErrNotFoundInShell(t *testing.T) {
 	_, err := probeShellPath(context.Background(), "/bin/sh", "definitely-not-a-real-binary-xyz")
 	assert.ErrorIs(t, err, ErrNotFoundInShell)
+}
+
+// TestProbeShellPath_StartupOutputDoesNotMaskTheAnswer covers a shell whose
+// startup file prints to stdout before the probe script runs -- an `echo` in
+// ~/.zshenv is the ordinary case. The answer is the final line; treating the
+// whole output as the answer would read "noise\n<sentinel>" as a resolved
+// path and report a shadowed binary that does not exist, and would corrupt a
+// real resolved path with the noise prefix.
+func TestProbeShellPath_StartupOutputDoesNotMaskTheAnswer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shells only")
+	}
+	dir := t.TempDir()
+	chattyShell := filepath.Join(dir, "chatty-shell.sh")
+	require.NoError(t, os.WriteFile(chattyShell,
+		[]byte("#!/bin/sh\nprintf 'welcome to your shell\\n'\nexec /bin/sh \"$@\"\n"), 0o755))
+
+	_, err := probeShellPath(context.Background(), chattyShell, "definitely-not-a-real-binary-xyz")
+	assert.ErrorIs(t, err, ErrNotFoundInShell, "startup noise must not mask an absent binary")
+
+	resolved, err := probeShellPath(context.Background(), chattyShell, "sh")
+	require.NoError(t, err)
+	assert.NotContains(t, resolved, "welcome", "startup noise must not contaminate the resolved path")
+}
+
+// TestProbeShellPath_UnterminatedStartupOutputDoesNotMaskTheAnswer covers the
+// harder half of the same problem: a startup file that writes WITHOUT a
+// trailing newline. Without a delimiter of our own, the shell's text and the
+// answer share one line ("welcome/bin/sh"), so taking the last line is not
+// enough -- the probe script has to open with a newline to guarantee its
+// answer starts clean.
+func TestProbeShellPath_UnterminatedStartupOutputDoesNotMaskTheAnswer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shells only")
+	}
+	dir := t.TempDir()
+	chattyShell := filepath.Join(dir, "unterminated-shell.sh")
+	require.NoError(t, os.WriteFile(chattyShell,
+		[]byte("#!/bin/sh\nprintf 'welcome'\nexec /bin/sh \"$@\"\n"), 0o755))
+
+	_, err := probeShellPath(context.Background(), chattyShell, "definitely-not-a-real-binary-xyz")
+	assert.ErrorIs(t, err, ErrNotFoundInShell, "unterminated startup noise must not mask an absent binary")
+
+	resolved, err := probeShellPath(context.Background(), chattyShell, "sh")
+	require.NoError(t, err)
+	assert.NotContains(t, resolved, "welcome", "unterminated startup noise must not contaminate the resolved path")
+}
+
+// TestProbeShellPath_SucceedsButSwallowsStdout_IsInconclusive pins that a
+// shell which exits 0 while producing no output is reported as unknown, not
+// as "ox is missing". The probe script always prints either a path or the
+// sentinel, so empty output means the answer never reached us -- a startup
+// file doing `exec >/dev/null` is the realistic cause. Reporting that as an
+// off-PATH failure would be the false negative ErrShellProbeInconclusive
+// exists to prevent.
+func TestProbeShellPath_SucceedsButSwallowsStdout_IsInconclusive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shells only")
+	}
+	dir := t.TempDir()
+	silentShell := filepath.Join(dir, "silent-shell.sh")
+	require.NoError(t, os.WriteFile(silentShell, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	_, err := probeShellPath(context.Background(), silentShell, "ox")
+	assert.ErrorIs(t, err, ErrShellProbeInconclusive)
+}
+
+// TestProbeShellPath_NotFoundIsShellIndependent pins the not-found answer
+// across every POSIX shell present, not just whichever one is /bin/sh
+// here. It is the regression guard for reading the answer out of the exit
+// code: bash and zsh exit 1 on a failed `command -v`, dash exits 127. On
+// Debian and Ubuntu /bin/sh IS dash, so the code-reading version reported
+// ErrShellProbeInconclusive on most Linux machines -- silently disabling
+// the check in exactly the case it exists to catch. macOS never caught it
+// because its /bin/sh is not dash.
+func TestProbeShellPath_NotFoundIsShellIndependent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shells only")
+	}
+	for _, name := range []string{"sh", "bash", "zsh", "dash"} {
+		shell, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			_, err := probeShellPath(context.Background(), shell, "definitely-not-a-real-binary-xyz")
+			assert.ErrorIs(t, err, ErrNotFoundInShell)
+
+			resolved, err := probeShellPath(context.Background(), shell, "sh")
+			require.NoError(t, err)
+			assert.NotEmpty(t, resolved)
+		})
+	}
 }
 
 // TestProbeShellPath_ShellExitsNonOneForUnrelatedReason_IsInconclusive is

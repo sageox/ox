@@ -346,6 +346,13 @@ func isExpectedE2EIssue(check ReportCheck) bool {
 		return true
 	}
 
+	// Adapter binaries -- the E2E harness builds only the ox binary into a
+	// scratch dir, never its ten ox-adapter-* siblings, so "1/10 present" is
+	// the correct reading of a correct environment, not a defect under test.
+	if containsAny(name, "Adapter binaries") {
+		return true
+	}
+
 	// discovery not run -- optional
 	if containsAny(name, "discovery") {
 		return true

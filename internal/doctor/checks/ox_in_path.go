@@ -280,6 +280,14 @@ func classifyShell(path string) shellKind {
 	}
 }
 
+// notFoundSentinel is what the probe script prints when `command -v`
+// fails. The not-found answer travels on stdout rather than in the exit
+// code because shells disagree on the code: bash and zsh exit 1, but dash
+// -- which IS /bin/sh on Debian and Ubuntu -- exits 127. Reading the code
+// instead made the check report "inconclusive" on most Linux machines,
+// exactly where it was supposed to report "ox is off PATH".
+const notFoundSentinel = "__OX_NOT_FOUND__"
+
 // probeShellPath runs `<shellPath> -c "command -v <binary>"` under a
 // scrubbed environment -- deliberately NOT inheriting the caller's PATH,
 // since that would just re-test whatever shell launched `ox doctor` and
@@ -292,7 +300,13 @@ func probeShellPath(ctx context.Context, shellPath, binary string) (string, erro
 		return "", ErrShellProbeInconclusive
 	}
 
-	cmd := exec.CommandContext(ctx, shellPath, "-c", "command -v "+binary)
+	// The leading newline guarantees our answer starts its own line even if
+	// a startup file wrote without a trailing one -- otherwise its text and
+	// the answer share a line ("welcome/bin/sh") and no amount of line
+	// splitting can separate them. The `|| printf` makes a clean not-found
+	// exit 0, so a non-zero exit now means only one thing: the shell failed.
+	script := "printf '\\n'; command -v " + binary + " 2>/dev/null || printf '%s' " + notFoundSentinel
+	cmd := exec.CommandContext(ctx, shellPath, "-c", script)
 	cmd.Env = scrubbedShellEnv()
 
 	out, err := cmd.Output()
@@ -300,29 +314,36 @@ func probeShellPath(ctx context.Context, shellPath, binary string) (string, erro
 		if ctx.Err() != nil {
 			return "", ErrShellProbeInconclusive
 		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			// "command -v" itself only ever exits 0 (found) or 1 (not
-			// found) -- exit code 1 is the real "not found" signal. Any
-			// other exit code means the shell exited for a reason
-			// unrelated to whether ox is on PATH: e.g. a config error in
-			// the user's own startup file (zsh -c always sources
-			// ~/.zshenv, even non-interactively), or an explicit `exit N`
-			// in it. That must be reported as inconclusive, never
-			// misread as "ox is missing" -- a supported shell dying in
-			// its own rc file is not the same fact as ox being absent.
-			if exitErr.ExitCode() == 1 {
-				return "", ErrNotFoundInShell
-			}
-			return "", ErrShellProbeInconclusive
-		}
-		// couldn't even start the shell (bad path, permission denied, etc).
+		// Any non-zero exit means the shell exited for a reason unrelated
+		// to whether ox is on PATH: a config error in the user's own
+		// startup file (zsh -c always sources ~/.zshenv, even
+		// non-interactively), or an explicit `exit N` in it. That must be
+		// reported as inconclusive, never misread as "ox is missing" -- a
+		// supported shell dying in its own rc file is not the same fact as
+		// ox being absent. This also covers failing to start the shell at
+		// all (bad path, permission denied).
 		return "", ErrShellProbeInconclusive
 	}
 
 	resolved := strings.TrimSpace(string(out))
-	if resolved == "" {
+	// A startup file is free to print to stdout before our script ever runs
+	// (an `echo` in ~/.zshenv is the common case). Both `command -v` and the
+	// sentinel emit exactly one final line, so the answer is the last line
+	// and anything above it is the shell's own noise. Comparing the whole
+	// output instead would read "noise\n<sentinel>" as a resolved path and
+	// report a shadowed binary that does not exist.
+	if idx := strings.LastIndexByte(resolved, '\n'); idx >= 0 {
+		resolved = strings.TrimSpace(resolved[idx+1:])
+	}
+	if resolved == notFoundSentinel {
 		return "", ErrNotFoundInShell
+	}
+	if resolved == "" {
+		// The script always prints either a path or the sentinel, so empty
+		// output means we never saw the answer -- a startup file that
+		// redirects stdout (`exec >/dev/null`) is the realistic cause. That
+		// is unknown, not absent, and must not become an off-PATH warning.
+		return "", ErrShellProbeInconclusive
 	}
 	return resolved, nil
 }
