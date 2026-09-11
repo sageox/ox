@@ -84,6 +84,13 @@ func newDraftHookLedgerFixture(t *testing.T) *draftHookLedgerFixture {
 	remoteBase := t.TempDir()
 	barePath := filepath.Join(remoteBase, "remote.git")
 	runGit(t, remoteBase, "init", "--bare", barePath)
+	// No background git maintenance: receive-pack forks `gc --auto` and returns
+	// without waiting, so that child can still be writing into remote.git when
+	// t.TempDir() cleanup runs — a "directory not empty" failure unrelated to
+	// anything the test asserts. Mirrors createBareAndClone.
+	runGit(t, barePath, "config", "gc.auto", "0")
+	runGit(t, barePath, "config", "receive.autogc", "false")
+	runGit(t, barePath, "config", "maintenance.auto", "false")
 
 	// The ledger clone MUST live at the exact path production computes from
 	// (repoID, endpoint) — see the type doc comment.
