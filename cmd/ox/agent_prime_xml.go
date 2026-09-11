@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
+	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/agentinstance"
@@ -152,6 +154,13 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		sb.WriteString("A confident answer that prior work contradicts is worse than a slow one. When you see these cues, searching SageOx first usually beats reasoning from scratch:\n")
 		sb.WriteString("- The user references recent or specific work they did: \"I just pushed...\", \"this request\", \"did X fix Y?\", \"is the alert gone now?\"\n")
 		sb.WriteString("- A prior decision, a prod anomaly, or a metric/cost change — anything with a before/after.\n")
+		// The stop condition matters as much as the trigger. Without it the
+		// reflex fires even when this prime already inlined the answer: the
+		// 2026-09-11 eval pilot watched an agent whose retry rule was in the
+		// <team-rules> block below re-read the rule file, the ADR, the
+		// discussions, memory, and seven ledger sessions before editing —
+		// 33 tool calls where 12 did the job.
+		sb.WriteString("Consulting is done once the answer is in front of you: if this prime already inlines it (a team-rules entry, the memory block, or a docs row whose Path you have read), act on it — do not re-search for the same fact. Search when the cue points at something NOT here.\n")
 		sb.WriteString("Route the cue to the right corpus — these are DIFFERENT retrieval modes, not interchangeable:\n")
 		// per-cue routing rows are sourced from the capability table's floor entries
 		// so the Layer-1 reminder and the additive ox-cli-consult skill cannot drift.
@@ -384,9 +393,29 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 				bk.charge(prime.BudgetSourceSageox)
 			}
 
-			// docs catalog (progressive disclosure — paths only, not content)
+			// docs catalog (progressive disclosure — paths only, not content).
+			// The absolute Path column is load-bearing: without it an agent
+			// with no shell (or one that prefers Read) has to walk the data
+			// directory to find the file the catalog just told it about —
+			// the 2026-09-11 eval pilot measured five extra tool calls for
+			// exactly that. <rule> and <team-commands> already carry Path.
 			if len(output.TeamContext.TeamDocs) > 0 {
-				sb.WriteString("\n<docs hint=\"read on demand, not preloaded\">\n")
+				// every catalog doc lives in one directory, so the absolute
+				// path is emitted once as dir= and each row carries only the
+				// name — the same information at a third of the bytes, which
+				// matters under the hook cap (agent_prime_hookcap.go).
+				docsDir := ""
+				for _, doc := range output.TeamContext.TeamDocs {
+					if doc.Path != "" {
+						docsDir = filepath.Dir(doc.Path)
+						break
+					}
+				}
+				if docsDir != "" {
+					fmt.Fprintf(&sb, "\n<docs dir=\"%s\" hint=\"read on demand with the Read tool at dir/Name, not preloaded\">\n", escapeXMLText(docsDir))
+				} else {
+					sb.WriteString("\n<docs hint=\"read on demand, not preloaded\">\n")
+				}
 				sb.WriteString("| Name | When to Read |\n")
 				sb.WriteString("|------|--------------|\n")
 				bk.charge(prime.BudgetSourceSageox)
@@ -399,11 +428,11 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 					if when == "" {
 						when = title
 					}
-					fmt.Fprintf(&sb, "| %s | %s |\n", doc.Name, when)
+					fmt.Fprintf(&sb, "| %s | %s |\n", escapeXMLText(doc.Name), escapeXMLText(when))
 				}
 				bk.charge(prime.BudgetSourceTeam)
 				if output.TeamContext.ReadCommand != "" {
-					fmt.Fprintf(&sb, "\nRead: `%s`\n", output.TeamContext.ReadCommand)
+					fmt.Fprintf(&sb, "\nList: `%s`\n", output.TeamContext.ReadCommand)
 				}
 				sb.WriteString("</docs>\n")
 				bk.charge(prime.BudgetSourceSageox)
@@ -659,9 +688,25 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	sb.WriteString("\n</ox-prime>\n")
 	bk.charge(prime.BudgetSourceSageox)
 
+	// hook cap: a host that caps injected hook output gets a prime that fits,
+	// with the sections that did not make it written to disk and named in a
+	// <deferred> pointer. Without this the host keeps 2 KB and drops the rest.
+	xml := sb.String()
+	if output.HookOutputBudget > 0 && len(xml) > output.HookOutputBudget {
+		full := xml
+		trimmed, deferred := fitPrimeToHookCap(full, output.HookOutputBudget, output.HookFullBundlePath)
+		if len(deferred) > 0 {
+			if err := writePrimeFullBundle(output.HookFullBundlePath, full); err != nil {
+				slog.Warn("prime: could not write full bundle for deferred sections", "path", output.HookFullBundlePath, "err", err)
+			}
+			slog.Debug("prime: trimmed to hook cap", "budget", output.HookOutputBudget, "full_bytes", len(full), "emitted_bytes", len(trimmed), "deferred", strings.Join(deferred, ","))
+			xml = trimmed
+		}
+	}
+
 	// write output
 	cw := agentinstance.NewCountingWriter(cmd.OutOrStdout())
-	_, err := cw.Write([]byte(sb.String()))
+	_, err := cw.Write([]byte(xml))
 	if err != nil {
 		return &bk.budget, err
 	}

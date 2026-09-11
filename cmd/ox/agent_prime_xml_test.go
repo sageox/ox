@@ -539,6 +539,12 @@ func TestOutputAgentPrimeXML_ConsultFirst(t *testing.T) {
 	if !strings.Contains(xml, "first-principles") {
 		t.Error("consult-first must warn against reasoning from first principles")
 	}
+	// the stop condition: an inlined answer ends the consult. Failure
+	// prevented: the reflex re-searching a fact prime already delivered —
+	// 33 tool calls vs 12 on the same edit in the 2026-09-11 eval pilot.
+	if !strings.Contains(xml, "do not re-search for the same fact") {
+		t.Error("consult-first must tell the agent to stop consulting once the answer is already inlined in this prime")
+	}
 
 	// recency cue routes to chronological session list, not semantic query
 	if !strings.Contains(xml, "ox session list --limit 20 --json") {

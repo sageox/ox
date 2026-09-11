@@ -364,6 +364,16 @@ type Output struct {
 	// for the agent's first prime this window or a clear/compact-triggered
 	// re-prime (the context window was actually wiped). See bd ox-32f6.
 	CompactReprime bool `json:"compact_reprime,omitempty"`
+	// HookOutputBudget, when > 0, is the most bytes the XML renderer may
+	// emit: the host injects hook output into the model only up to a cap
+	// (Claude Code persists anything over 10,000 characters and injects a
+	// 2 KB preview). Set by runAgentPrime for hook-driven Claude Code
+	// primes; zero for direct invocations and other hosts. Sections that
+	// do not fit are written to HookFullBundlePath and named in a
+	// <deferred> pointer. Never serialized: it is a rendering instruction,
+	// not session state.
+	HookOutputBudget   int    `json:"-"`
+	HookFullBundlePath string `json:"-"`
 	// Cumulative context stats (from daemon, best-effort).
 	// CumulativeContextTokens is the rolled-up total; the per-source
 	// split lives in CumulativeContextTokensBySource (keyed by

@@ -25,6 +25,11 @@ and assert on what a coworker sees at the terminal and in-session. When that
 runner ships, follow-up issues will bind these scenarios to the real command
 surfaces (`cmd/ox/*.go`) and a SageOx API twin.
 
+A `.feature` `Rule:` describes what ox **delivers** to a coworker. Whether the AI
+coworker then **takes it up** is a different lens — the agent-behavior eval tier
+(`docs/specs/agent-evals.md`, `claude-plugin/evals/`). A `Rule:` may name its
+eval case in a `See also:` line so the promise and its uptake proof stay linked.
+
 ## Structure
 
 ```text

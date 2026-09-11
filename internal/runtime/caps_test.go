@@ -20,8 +20,6 @@ func clearEnv(t *testing.T) {
 		envPersistDisk,
 		envNoDaemon,
 		envBrowser,
-		envNetwork,
-		envOffline,
 	}
 	for _, v := range vars {
 		t.Setenv(v, "")
@@ -42,9 +40,6 @@ func TestProbe_LaptopDefault(t *testing.T) {
 	}
 	if !c.Browser {
 		t.Errorf("laptop default: Browser should be true")
-	}
-	if !c.Network {
-		t.Errorf("laptop default: Network should be true")
 	}
 	if c.EnvLifetime != LifetimePersistent {
 		t.Errorf("laptop default: EnvLifetime should be LifetimePersistent, got %v", c.EnvLifetime)
@@ -94,36 +89,6 @@ func TestProbe_BrowserOverride(t *testing.T) {
 	c := Probe()
 	if c.Browser {
 		t.Errorf("OX_BROWSER=0 must force Browser=false")
-	}
-}
-
-func TestProbe_NetworkOverride(t *testing.T) {
-	cases := []struct {
-		name string
-		env  string
-		val  string
-		want bool
-	}{
-		{"default_online", "", "", true},
-		{"network_zero", envNetwork, "0", false},
-		{"network_false", envNetwork, "false", false},
-		{"network_offline", envNetwork, "offline", false},
-		{"network_bogus", envNetwork, "bogus", true}, // unrecognized stays online
-		{"offline_one", envOffline, "1", false},
-		{"offline_true", envOffline, "true", false},
-		{"offline_zero", envOffline, "0", true},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			clearEnv(t)
-			if tc.env != "" {
-				t.Setenv(tc.env, tc.val)
-			}
-			if got := Probe().Network; got != tc.want {
-				t.Errorf("%s=%q: Network got %v, want %v", tc.env, tc.val, got, tc.want)
-			}
-		})
 	}
 }
 

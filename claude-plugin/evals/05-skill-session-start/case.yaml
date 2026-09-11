@@ -1,0 +1,42 @@
+schema_version: "1.0"
+name: 05-skill-session-start
+description: >
+  The plugin's own skill should fire on its stated cue ("recording coding
+  sessions to a shared ledger") and route to the right ox command.
+  `tool_used: Skill` is the tool's plugin-fired indicator.
+tags: [skill-activation, bash]
+expected_outcome: >
+  WITH the plugin the `ox` skill fires and the agent runs
+  `ox agent session start`. WITHOUT it there is nothing to fire.
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |
+    Start recording this coding session to the team's shared ledger so my
+    teammates can see what I did.
+  max_turns: 10
+  timeout_seconds: 180
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+    - Skill
+    - "Bash(ox:*)"
+runs: 3
+graders:
+  - type: tool_used
+    name: plugin-skill-fired
+    tool: Skill
+    arm: with-only
+  - type: tool_used
+    name: ran-session-start
+    tool: Bash
+    input_match: "ox (agent )?session start"
+    arm: both
+    weight: 2
+  - type: regex
+    name: no-hand-rolled-recording
+    target: last_message
+    match: not_contains
+    flags: "i"
+    pattern: "script -q|asciinema|I cannot record|no way to record"

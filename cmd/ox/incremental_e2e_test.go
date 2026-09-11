@@ -513,8 +513,6 @@ func oxEnv(env e2eEnv) []string {
 		"USER=" + env.username,
 		// prevent real daemon IPC
 		"OX_NO_DAEMON=1",
-		// prevent real network calls
-		"OX_OFFLINE=1",
 	}
 	return result
 }

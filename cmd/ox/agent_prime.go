@@ -29,6 +29,7 @@ import (
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/proc"
@@ -202,6 +203,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	if err := requireDetectedOrExplicitAgent(agentType); err != nil {
 		return err
 	}
+
+	// stdout is the coworker's context and hooks pipe stderr into it too:
+	// fence WARN-level diagnostics off to a file (ERROR still surfaces).
+	verbose, _ := cmd.Flags().GetBool("verbose")
+	logger.InitPayloadMode(verbose, paths.AgentPayloadLogFile())
 
 	primeStart := time.Now()
 	timing := make(map[string]int64)
@@ -681,6 +687,16 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		HooksInstalled:     hooksInstalled,
 		CurrentUserName:    currentUserName,
 		CurrentUserAliases: currentUserAliases,
+	}
+
+	// Hook cap: Claude Code injects at most claudeHookOutputCap characters
+	// of hook output; anything longer is persisted to a file and the model
+	// sees a 2 KB preview. Only hook-driven primes (stdin carried the hook
+	// payload) are capped — a prime the agent ran itself lands in a tool
+	// result with its own, larger limit. Other hosts are not known to cap.
+	if hookInput != nil && canonicalAgentType(agentType) == string(agentx.AgentTypeClaudeCode) {
+		output.HookOutputBudget = primeHookBudget
+		output.HookFullBundlePath = primeFullBundlePath(agentID)
 	}
 
 	// MCP routing hint: emit the cloud MCP endpoint + suggested tools
@@ -1905,6 +1921,9 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 				fmt.Fprintf(cmd.OutOrStdout(), "  %s — \"%s\"\n", doc.Name, title)
 				if doc.When != "" {
 					fmt.Fprintf(cmd.OutOrStdout(), "    When: %s\n", doc.When)
+				}
+				if doc.Path != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "    Path: %s\n", doc.Path)
 				}
 			}
 		}
