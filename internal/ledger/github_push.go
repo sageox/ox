@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/gitutil"
 )
 
 // PushFunc is a function that pushes the ledger to remote with retry logic.
@@ -22,13 +24,6 @@ func CommitAndPushGitHubData(ctx context.Context, ledgerPath, owner, repo string
 		return nil
 	}
 
-	// stage all files in data/github/ with --sparse
-	addCmd := exec.Command("git", "-C", ledgerPath, "add", "--sparse", dataDir)
-	if output, err := addCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git add failed: %s: %w", string(output), err)
-	}
-
-	// commit
 	var parts []string
 	if result.PRTotal > 0 {
 		parts = append(parts, fmt.Sprintf("%d PRs", result.PRTotal))
@@ -37,13 +32,25 @@ func CommitAndPushGitHubData(ctx context.Context, ledgerPath, owner, repo string
 		parts = append(parts, fmt.Sprintf("%d issues", result.IssueTotal))
 	}
 	commitMsg := fmt.Sprintf("github: sync %s from %s/%s", strings.Join(parts, ", "), owner, repo)
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(output), "nothing to commit") {
-			// still push — a prior run may have committed but failed to push
-			return pushFn(ctx, ledgerPath)
+	relDir := filepath.ToSlash(filepath.Join("data", "github"))
+
+	// Keep stage, validation, and commit under ADR-030's cross-process lock.
+	// PushWithRetry takes the same non-reentrant lock only if it must pull, so
+	// publication runs after this critical section.
+	if err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		if output, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", relDir); err != nil {
+			return fmt.Errorf("git add failed: %s: %w", output, err)
 		}
-		return fmt.Errorf("git commit failed: %s: %w", string(output), err)
+		if err := gitutil.ValidateStagedLedgerCommit(ctx, ledgerPath, relDir); err != nil {
+			return err
+		}
+		output, err := gitutil.RunGit(ctx, ledgerPath, "commit", "--no-verify", "-m", commitMsg, "--", relDir)
+		if err != nil && !strings.Contains(output, "nothing to commit") {
+			return fmt.Errorf("git commit failed: %s: %w", output, err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	// push with caller-provided retry logic

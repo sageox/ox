@@ -1768,25 +1768,10 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		return false
 	}
 
-	// A raw-only first push can trigger GitLab GC before a second pointer push,
-	// unlinking the newly uploaded objects from the project. Publish pointers
-	// immediately, under the same lock as staging and committing.
-	// AssertUploaded: both callers obtained fileRefs from UploadSessionFiles.
-	if _, err := lfs.WritePointerFiles(payload.SessionDir, lfs.AssertUploadedManifest(fileRefs)); err != nil {
-		h.logger.Warn("LFS pointer file write failed before commit", "session", sessionName, "err", err)
-		return false
-	}
-
 	// relative path from ledger root for git add
 	relDir, err := filepath.Rel(ledgerPath, payload.SessionDir)
 	if err != nil {
 		h.logger.Warn("could not compute relative session path", "err", err)
-		return false
-	}
-
-	// git add --sparse <session-dir>/
-	if err := h.runGit(ledgerPath, "add", "--sparse", relDir+"/"); err != nil {
-		h.logger.Warn("git add failed", "err", err)
 		return false
 	}
 
@@ -1800,33 +1785,54 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	// Ask git what is staged rather than parsing the commit's message: the wording
 	// varies with the rest of the tree ("working tree clean" vs "untracked files
 	// present"), so an unrelated stray file in the ledger would resurrect the loop.
-	staged, err := h.hasStagedChanges(ledgerPath, relDir+"/")
-	if err != nil {
-		h.logger.Warn("could not inspect staged changes", "err", err)
-		return false
-	}
-
 	msg := fmt.Sprintf("finalize session %s", sessionName)
-	switch {
-	case !staged:
-		// Fall through to the push: the commit may exist locally from an earlier
-		// cycle and still be unpushed.
-		h.logger.Debug("session already committed, nothing new to stage", "session", sessionName)
-	default:
-		// Commit ONLY this session's path. A bare `git commit -m` writes the whole
-		// index, so any files another session left staged after a failed finalize
-		// would ride along under this session's message. Scoping the staged-changes
-		// check alone is not enough — that decides WHETHER to commit; this decides
-		// WHAT gets committed.
+	staged := false
+	// ADR-030's repo lock is cross-process; ledgerMu above only coordinates
+	// goroutines in this daemon. Holding both across pointer write, stage,
+	// validation, and commit prevents a CLI pull from restoring an autostash
+	// between those steps. Release before PushWithRetry, which takes the same
+	// non-reentrant lock if a non-fast-forward retry needs to pull.
+	if err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		// A raw-only first push can trigger GitLab GC before a second pointer
+		// push, unlinking the newly uploaded objects from the project. Publish
+		// pointers in the first commit. AssertUploaded: both callers obtained
+		// fileRefs from UploadSessionFiles.
+		if _, err := lfs.WritePointerFiles(payload.SessionDir, lfs.AssertUploadedManifest(fileRefs)); err != nil {
+			return fmt.Errorf("write LFS pointer files before commit: %w", err)
+		}
+		if err := h.runGit(ledgerPath, "add", "--sparse", relDir+"/"); err != nil {
+			return fmt.Errorf("git add: %w", err)
+		}
+		var err error
+		staged, err = h.hasStagedChanges(ledgerPath, relDir+"/")
+		if err != nil {
+			return fmt.Errorf("inspect staged changes: %w", err)
+		}
+		if !staged {
+			return nil
+		}
+		if err := gitutil.ValidateStagedLedgerCommit(context.Background(), ledgerPath, relDir+"/"); err != nil {
+			return err
+		}
+		// Commit ONLY this session's path. A bare `git commit -m` writes the
+		// whole index and could sweep a different session's staged files.
 		if err := h.runGit(ledgerPath, "commit", "-m", msg, "--", relDir); err != nil {
-			// A concurrent committer (a second daemon on the same ledger) can empty
-			// the index between the check above and this commit.
+			// Raw human Git does not participate in the advisory repo lock, so an
+			// external committer can still empty the index after validation.
 			if !isNothingToCommit(err) {
-				h.logger.Warn("git commit failed", "err", err)
-				return false
+				return fmt.Errorf("git commit: %w", err)
 			}
 			h.logger.Debug("session committed concurrently", "session", sessionName)
 		}
+		return nil
+	}); err != nil {
+		h.logger.Warn("session commit transaction failed", "session", sessionName, "err", err)
+		return false
+	}
+	if !staged {
+		// Fall through to the push: the commit may exist locally from an earlier
+		// cycle and still be unpushed.
+		h.logger.Debug("session already committed, nothing new to stage", "session", sessionName)
 	}
 
 	// push with retry (best-effort — failures are non-fatal)

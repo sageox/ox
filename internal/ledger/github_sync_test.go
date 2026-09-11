@@ -8,8 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/internal/gitutil"
 )
 
 // mockFetcher implements GitHubFetcher for testing.
@@ -703,6 +706,134 @@ func TestCommitAndPushGitHubData_WithData(t *testing.T) {
 	}
 	if !pushCalled {
 		t.Error("push should have been called")
+	}
+}
+
+// A prior session writer may have left a marker-laden stage-0 blob after
+// accidentally marking a conflict resolved. GitHub sync must commit only its
+// own tree and leave that recoverable corruption out of history.
+func TestCommitAndPushGitHubData_DoesNotSweepStagedSessionConflict(t *testing.T) {
+	ledgerPath := t.TempDir()
+	initGitRepo(t, ledgerPath)
+	metaRel := filepath.Join("sessions", "example", "meta.json")
+	metaPath := filepath.Join(ledgerPath, metaRel)
+	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metaPath, []byte(`{"title":"Clean"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runCmd("git", "-C", ledgerPath, "add", "--sparse", metaRel); err != nil {
+		t.Fatalf("seed add: %s: %v", out, err)
+	}
+	if out, err := runCmd("git", "-C", ledgerPath, "commit", "-m", "seed metadata"); err != nil {
+		t.Fatalf("seed commit: %s: %v", out, err)
+	}
+	const markers = "<<<<<<< Updated upstream\n{}\n=======\n{}\n>>>>>>> Stashed changes\n"
+	if err := os.WriteFile(metaPath, []byte(markers), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runCmd("git", "-C", ledgerPath, "add", "--sparse", metaRel); err != nil {
+		t.Fatalf("stage markers: %s: %v", out, err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := WriteGitHubPR(ledgerPath, &PRFile{Number: 43, Title: "Safe", State: "open", Author: "test", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	pushCalled := false
+	err := CommitAndPushGitHubData(context.Background(), ledgerPath, "org", "repo", &SyncResult{PRTotal: 1}, func(context.Context, string) error {
+		pushCalled = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("CommitAndPushGitHubData: %v", err)
+	}
+	if !pushCalled {
+		t.Fatal("GitHub-only commit should still publish")
+	}
+
+	headMeta, err := runCmd("git", "-C", ledgerPath, "show", "HEAD:"+filepath.ToSlash(metaRel))
+	if err != nil {
+		t.Fatalf("read committed metadata: %v", err)
+	}
+	if strings.Contains(headMeta, "<<<<<<<") {
+		t.Fatal("GitHub sync committed unrelated session conflict markers")
+	}
+	staged, err := runCmd("git", "-C", ledgerPath, "diff", "--cached", "--name-only", "--", metaRel)
+	if err != nil || !strings.Contains(staged, filepath.ToSlash(metaRel)) {
+		t.Fatalf("recoverable staged metadata must remain untouched: %q, %v", staged, err)
+	}
+}
+
+func TestCommitAndPushGitHubData_RefusesConflictInOwnedTree(t *testing.T) {
+	ledgerPath := t.TempDir()
+	initGitRepo(t, ledgerPath)
+	path := filepath.Join(GitHubDataDir(ledgerPath), "broken.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("<<<<<<< Updated upstream\n{}\n=======\n{}\n>>>>>>> Stashed changes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := runCmd("git", "-C", ledgerPath, "rev-parse", "HEAD")
+	pushCalled := false
+	err := CommitAndPushGitHubData(context.Background(), ledgerPath, "org", "repo", &SyncResult{PRTotal: 1}, func(context.Context, string) error {
+		pushCalled = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "unresolved conflict") {
+		t.Fatalf("expected conflict-marker rejection, got %v", err)
+	}
+	if pushCalled {
+		t.Fatal("push must not run after commit validation fails")
+	}
+	after, _ := runCmd("git", "-C", ledgerPath, "rev-parse", "HEAD")
+	if before != after {
+		t.Fatalf("validation failure advanced HEAD: before=%s after=%s", before, after)
+	}
+}
+
+func TestCommitAndPushGitHubData_WaitsForRepoWriter(t *testing.T) {
+	ledgerPath := t.TempDir()
+	initGitRepo(t, ledgerPath)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := WriteGitHubPR(ledgerPath, &PRFile{Number: 44, Title: "Wait", State: "open", Author: "test", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	lockDone := make(chan error, 1)
+	go func() {
+		lockDone <- gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	pushCalled := false
+	err := CommitAndPushGitHubData(ctx, ledgerPath, "org", "repo", &SyncResult{PRTotal: 1}, func(context.Context, string) error {
+		pushCalled = true
+		return nil
+	})
+	close(release)
+	if lockErr := <-lockDone; lockErr != nil {
+		t.Fatalf("release fixture lock: %v", lockErr)
+	}
+	if !gitutil.IsRepoLockBusy(err) {
+		t.Fatalf("expected repo-lock contention, got %v", err)
+	}
+	if pushCalled {
+		t.Fatal("writer must not push without entering its commit transaction")
+	}
+	staged, stageErr := runCmd("git", "-C", ledgerPath, "diff", "--cached", "--name-only")
+	if stageErr != nil || strings.TrimSpace(staged) != "" {
+		t.Fatalf("writer staged data while another transaction held the lock: %q, %v", staged, stageErr)
 	}
 }
 

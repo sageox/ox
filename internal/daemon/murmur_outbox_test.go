@@ -125,6 +125,19 @@ func TestDrainMurmurOutbox_CommitsAndRemoves(t *testing.T) {
 	require.Empty(t, entries, "outbox file must be removed after a confirmed commit")
 }
 
+func TestWriteAndCommitMurmur_RefusesConflictMarkers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: shells git")
+	}
+	ledgerDir, before := initGitRepoWithCommit(t)
+	p := makeOutboxMurmur(t, ledgerDir, "do not publish", time.Now().UTC())
+	p.MurmurJSON = []byte("<<<<<<< Updated upstream\n{}\n=======\n{}\n>>>>>>> Stashed changes\n")
+
+	err := writeAndCommitMurmur(context.Background(), ledgerDir, p)
+	require.ErrorContains(t, err, "unresolved conflict")
+	require.Equal(t, before, getGitSHA(t, ledgerDir), "validation failure must not advance HEAD")
+}
+
 // TestDrainMurmurOutbox_DropsStale verifies murmurs older than the 24h window are
 // discarded (deleted, never committed) so day-old WIP never resurfaces.
 func TestDrainMurmurOutbox_DropsStale(t *testing.T) {

@@ -318,7 +318,11 @@ func TestGitCommitAndPush_CommitExcludesOtherSessionsWhenStaged(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range append([]string{"raw.jsonl", "meta.json"}, requiredArtifacts...) {
-		if err := os.WriteFile(filepath.Join(targetDir, name), []byte("target content"), 0644); err != nil {
+		content := []byte("target content")
+		if name == "meta.json" {
+			content = []byte(`{"version":"1.0","session_name":"` + target + `"}`)
+		}
+		if err := os.WriteFile(filepath.Join(targetDir, name), content, 0644); err != nil {
 			t.Fatal(err)
 		}
 	}

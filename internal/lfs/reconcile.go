@@ -49,9 +49,18 @@ type ReconcileResult struct {
 // committing on top is not sufficient — the old commits still reference the
 // missing OIDs.
 func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL string, logger *slog.Logger) (*ReconcileResult, error) {
-	return reconcileUnpushedPointers(ctx, ledgerPath, logger, func() (*Client, error) {
-		return NewClientFromLedger(ledgerPath, endpointURL)
+	var result *ReconcileResult
+	err := gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		var err error
+		result, err = reconcileUnpushedPointers(ctx, ledgerPath, logger, func() (*Client, error) {
+			return NewClientFromLedger(ledgerPath, endpointURL)
+		})
+		return err
 	})
+	if result == nil {
+		result = &ReconcileResult{}
+	}
+	return result, err
 }
 
 // reconcileUnpushedPointers is the client-injectable core of
@@ -192,6 +201,14 @@ func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *s
 		}
 	}
 
+	// Reconcile's commit is intentionally unscoped because the later soft-reset
+	// squash republishes every unpushed change. Refuse pre-existing staged
+	// corruption before blanking any pointer so a bad session cannot either ride
+	// along in the repair commit or turn a recoverable LFS cleanup destructive.
+	if err := gitutil.ValidateStagedLedgerCommit(ctx, ledgerPath); err != nil {
+		return result, fmt.Errorf("validate Ledger before LFS reconcile: %w", err)
+	}
+
 	logger.Info("lfs reconcile: replacing orphaned pointers with empty stubs",
 		"missing", len(missing), "total_pointers", len(pointers))
 
@@ -221,6 +238,10 @@ func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *s
 	// commit the replacements
 	msg := fmt.Sprintf("fix: replace %d orphaned LFS pointers with empty stubs", result.Replaced)
 	commitCtx, commitCancel := context.WithTimeout(ctx, 10*time.Second)
+	if err := gitutil.ValidateStagedLedgerCommit(commitCtx, ledgerPath); err != nil {
+		commitCancel()
+		return result, fmt.Errorf("validate replacements: %w", err)
+	}
 	_, commitErr := gitutil.RunGit(commitCtx, ledgerPath, "commit", "-m", msg, "--no-verify")
 	commitCancel()
 	if commitErr != nil {
@@ -250,6 +271,13 @@ func squashUnpushed(ctx context.Context, repoPath, commitMsg string) error {
 		return fmt.Errorf("no upstream tracking ref: %w", err)
 	}
 	upstream = strings.TrimSpace(upstream)
+	originalCtx, originalCancel := context.WithTimeout(ctx, 5*time.Second)
+	original, originalErr := gitutil.RunGit(originalCtx, repoPath, "rev-parse", "--verify", "HEAD")
+	originalCancel()
+	if originalErr != nil {
+		return fmt.Errorf("resolve original HEAD: %w", originalErr)
+	}
+	original = strings.TrimSpace(original)
 
 	countCtx, countCancel := context.WithTimeout(ctx, 5*time.Second)
 	countOut, err := gitutil.RunGit(countCtx, repoPath, "rev-list", "--count", upstream+"..HEAD")
@@ -267,11 +295,27 @@ func squashUnpushed(ctx context.Context, repoPath, commitMsg string) error {
 	}
 
 	squashCtx, squashCancel := context.WithTimeout(ctx, 10*time.Second)
+	if err := gitutil.ValidateStagedLedgerCommit(squashCtx, repoPath); err != nil {
+		squashCancel()
+		return rollbackSoftReset(ctx, repoPath, original, fmt.Errorf("validate squash: %w", err))
+	}
 	_, err = gitutil.RunGit(squashCtx, repoPath, "commit", "-m", commitMsg, "--no-verify")
 	squashCancel()
 	if err != nil {
-		return fmt.Errorf("squash commit: %w", err)
+		return rollbackSoftReset(ctx, repoPath, original, fmt.Errorf("squash commit: %w", err))
 	}
 
 	return nil
+}
+
+// rollbackSoftReset restores the pre-squash branch tip after a validation or
+// commit failure. The soft reset's index already represents original's tree, so
+// restoring only HEAD preserves both the replacement commit and working copy.
+func rollbackSoftReset(ctx context.Context, repoPath, original string, cause error) error {
+	rollbackCtx, rollbackCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer rollbackCancel()
+	if _, err := gitutil.RunGit(rollbackCtx, repoPath, "reset", "--soft", original); err != nil {
+		return fmt.Errorf("%w; restore original HEAD: %w", cause, err)
+	}
+	return cause
 }

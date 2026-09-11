@@ -248,7 +248,13 @@ func blobHasMarker(ctx context.Context, ledgerPath, oid, path string) (bool, err
 	if err != nil {
 		return false, fmt.Errorf("inspect staged blob %s: %w", path, err)
 	}
-	return gitutil.HasConflictMarkersBytes(blob), nil
+	if gitutil.HasConflictMarkersBytes(blob) {
+		return true, nil
+	}
+	if err := gitutil.ValidateLedgerBlob(path, blob); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // commitTreeToBranch commits an already-validated tree and advances the current

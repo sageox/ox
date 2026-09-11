@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -110,6 +112,30 @@ func TestReconcile_NoSessions_Unaffected(t *testing.T) {
 	// sessions/ exists but is empty
 	result, err := ReconcileUnpushedPointers(context.Background(), dir, "", nil)
 	require.NoError(t, err)
+	assert.Zero(t, result.ScannedPointers)
+}
+
+func TestReconcile_WaitsForRepoWriter(t *testing.T) {
+	dir := initLedgerRepo(t)
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	lockDone := make(chan error, 1)
+	go func() {
+		lockDone <- gitutil.WithRepoLock(context.Background(), dir, func() error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	result, err := ReconcileUnpushedPointers(ctx, dir, "", nil)
+	close(release)
+	require.NoError(t, <-lockDone)
+	require.True(t, gitutil.IsRepoLockBusy(err), "expected repo-lock contention, got %v", err)
+	assert.NotNil(t, result)
 	assert.Zero(t, result.ScannedPointers)
 }
 
@@ -310,6 +336,73 @@ func TestReconcile_PreservesRecoverableSessionCache(t *testing.T) {
 			}
 		})
 	}
+}
+
+// LFS reconciliation used to run an unscoped commit, so a session conflict
+// staged by another writer could ride along with an unrelated pointer repair.
+// Refuse before changing either history or the pointer working copy.
+func TestReconcile_RefusesPreexistingStagedConflict(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git history and mocked LFS batch API")
+	}
+	ledger, _ := initLedgerWithRemote(t)
+	oid := strings.Repeat("a", 64)
+	pointer := []byte(lfsPointerContent(oid, 100))
+	pointerPath := filepath.Join(ledger, "sessions", "pointer-session", "raw.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(pointerPath), 0o755))
+	require.NoError(t, os.WriteFile(pointerPath, pointer, 0o644))
+	git(t, ledger, "add", "--sparse", "sessions/pointer-session/raw.jsonl")
+	git(t, ledger, "commit", "-m", "pointer awaiting push", "--no-verify")
+
+	metaPath := filepath.Join(ledger, "sessions", "conflicted", "meta.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(metaPath), 0o755))
+	markers := []byte("<<<<<<< Updated upstream\n{}\n=======\n{}\n>>>>>>> Stashed changes\n")
+	require.NoError(t, os.WriteFile(metaPath, markers, 0o644))
+	git(t, ledger, "add", "--sparse", "sessions/conflicted/meta.json")
+	headBefore := git(t, ledger, "rev-parse", "HEAD")
+
+	client := fakeLFSDownloadServer(t, map[string]int{oid: http.StatusNotFound})
+	result, err := reconcileUnpushedPointers(context.Background(), ledger, nil,
+		func() (*Client, error) { return client, nil })
+	require.ErrorContains(t, err, "unresolved conflict")
+	assert.Equal(t, 1, result.MissingOnRemote)
+	assert.Zero(t, result.Replaced)
+	assert.False(t, result.Squashed)
+	assert.Equal(t, headBefore, git(t, ledger, "rev-parse", "HEAD"))
+	content, readErr := os.ReadFile(pointerPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, pointer, content, "validation must run before destructive pointer replacement")
+}
+
+func TestReconcile_RefusesConflictInUnpushedHistory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git history and mocked LFS batch API")
+	}
+	ledger, _ := initLedgerWithRemote(t)
+	oid := strings.Repeat("b", 64)
+	pointerPath := filepath.Join(ledger, "sessions", "pointer-session", "raw.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(pointerPath), 0o755))
+	require.NoError(t, os.WriteFile(pointerPath, []byte(lfsPointerContent(oid, 100)), 0o644))
+	git(t, ledger, "add", "--sparse", "sessions/pointer-session/raw.jsonl")
+	git(t, ledger, "commit", "-m", "pointer awaiting push", "--no-verify")
+
+	metaPath := filepath.Join(ledger, "sessions", "conflicted", "meta.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(metaPath), 0o755))
+	markers := []byte("<<<<<<< Updated upstream\n{}\n=======\n{}\n>>>>>>> Stashed changes\n")
+	require.NoError(t, os.WriteFile(metaPath, markers, 0o644))
+	git(t, ledger, "add", "--sparse", "sessions/conflicted/meta.json")
+	git(t, ledger, "commit", "-m", "accidentally published conflict locally", "--no-verify")
+
+	client := fakeLFSDownloadServer(t, map[string]int{oid: http.StatusNotFound})
+	result, err := reconcileUnpushedPointers(context.Background(), ledger, nil,
+		func() (*Client, error) { return client, nil })
+	require.ErrorContains(t, err, "validate squash")
+	assert.Equal(t, 1, result.Replaced)
+	assert.False(t, result.Squashed)
+	assert.Equal(t, 3, unpushedCount(t, ledger), "failed validation must restore the pre-squash commit chain")
+	content, readErr := os.ReadFile(metaPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, markers, content, "failed squash must preserve corrupt metadata for doctor recovery")
 }
 
 // --- Guarantee 4: idempotent ---

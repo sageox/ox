@@ -69,6 +69,178 @@ func TestHasConflictMarkers_MissingFile(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestValidateLedgerBlob(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		path    string
+		content string
+		wantErr string
+	}{
+		{name: "valid session metadata", path: "sessions/example/meta.json", content: `{"title":"Ready"}`},
+		{name: "invalid session metadata", path: "sessions/example/meta.json", content: `{"title":`, wantErr: "invalid JSON"},
+		{name: "array session metadata", path: "sessions/example/meta.json", content: `[]`, wantErr: "invalid JSON object"},
+		{name: "scalar session metadata", path: "sessions/example/meta.json", content: `"metadata"`, wantErr: "invalid JSON object"},
+		{name: "null session metadata", path: "sessions/example/meta.json", content: `null`, wantErr: "invalid JSON object"},
+		{name: "invalid JSON outside session metadata", path: "data/github/event.json", content: `{"partial":`},
+		{name: "conflict marker in any artifact", path: "sessions/example/summary.md", content: conflictMarkerFixture, wantErr: "unresolved conflict"},
+		{name: "nested path named meta is not session metadata", path: "sessions/example/nested/meta.json", content: `{"partial":`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateLedgerBlob(tc.path, []byte(tc.content))
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+const conflictMarkerFixture = "<<<<<<< Updated upstream\nours\n=======\ntheirs\n>>>>>>> Stashed changes\n"
+
+// Automatic Ledger commits validate index blobs, not worktree bytes. These
+// real-Git cases prevent a writer from publishing a staged conflict or malformed
+// session metadata while preserving path-scoped commit isolation.
+func TestValidateStagedLedgerCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index states")
+	}
+	for _, tc := range []struct {
+		name       string
+		stagedPath string
+		content    string
+		pathspec   []string
+		wantErr    string
+		setup      func(t *testing.T, repo string)
+	}{
+		{name: "clean metadata", stagedPath: "sessions/example/meta.json", content: `{"title":"Ready"}` + "\n"},
+		{name: "invalid metadata", stagedPath: "sessions/example/meta.json", content: `{"title":`, wantErr: "invalid JSON"},
+		{name: "marker in non-JSON artifact", stagedPath: "sessions/example/summary.md", content: conflictMarkerFixture, wantErr: "unresolved conflict"},
+		{
+			name:       "path scope excludes unrelated staged corruption",
+			stagedPath: "data/github/event.json",
+			content:    `{"ok":true}` + "\n",
+			pathspec:   []string{"data/github/"},
+			setup: func(t *testing.T, repo string) {
+				writeGitutilFixture(t, repo, "sessions/other/meta.json", conflictMarkerFixture)
+				gitInRepo(t, repo, "add", "--sparse", "sessions/other/meta.json")
+			},
+		},
+		{
+			name:       "unmerged index outside path scope",
+			stagedPath: "data/github/event.json",
+			content:    `{"ok":true}` + "\n",
+			pathspec:   []string{"data/github/"},
+			wantErr:    "unresolved conflict in index",
+			setup: func(t *testing.T, repo string) {
+				writeGitutilFixture(t, repo, "shared.txt", "base\n")
+				gitInRepo(t, repo, "add", "shared.txt")
+				gitInRepo(t, repo, "commit", "-m", "shared base")
+				gitInRepo(t, repo, "checkout", "-b", "other")
+				writeGitutilFixture(t, repo, "shared.txt", "other\n")
+				gitInRepo(t, repo, "commit", "-am", "other change")
+				gitInRepo(t, repo, "checkout", "main")
+				writeGitutilFixture(t, repo, "shared.txt", "main\n")
+				gitInRepo(t, repo, "commit", "-am", "main change")
+				cmd := exec.Command("git", "merge", "other")
+				cmd.Dir = repo
+				require.Error(t, cmd.Run(), "fixture must leave an unmerged index")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			gitInRepo(t, repo, "init", "-b", "main")
+			writeGitutilFixture(t, repo, "base.txt", "base\n")
+			gitInRepo(t, repo, "add", "base.txt")
+			gitInRepo(t, repo, "commit", "-m", "base")
+			writeGitutilFixture(t, repo, tc.stagedPath, tc.content)
+			gitInRepo(t, repo, "add", "--sparse", tc.stagedPath)
+			if tc.setup != nil {
+				tc.setup(t, repo)
+			}
+
+			err := ValidateStagedLedgerCommit(context.Background(), repo, tc.pathspec...)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestValidateStagedLedgerCommit_AllowsDeletion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index state")
+	}
+	repo := t.TempDir()
+	gitInRepo(t, repo, "init", "-b", "main")
+	writeGitutilFixture(t, repo, "sessions/example/meta.json", `{"title":"Ready"}`+"\n")
+	gitInRepo(t, repo, "add", "--sparse", "sessions/example/meta.json")
+	gitInRepo(t, repo, "commit", "-m", "base")
+	gitInRepo(t, repo, "rm", "sessions/example/meta.json")
+
+	require.NoError(t, ValidateStagedLedgerCommit(context.Background(), repo, "sessions/example/"))
+}
+
+func TestValidateStagedLedgerCommit_RejectsTypeChangedBlob(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index state")
+	}
+	repo := t.TempDir()
+	gitInRepo(t, repo, "init", "-b", "main")
+	path := filepath.Join(repo, "sessions", "example", "meta.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	if err := os.Symlink("target.json", path); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	gitInRepo(t, repo, "add", "--sparse", "sessions/example/meta.json")
+	gitInRepo(t, repo, "commit", "-m", "seed symlink")
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, os.WriteFile(path, []byte(conflictMarkerFixture), 0o644))
+	gitInRepo(t, repo, "add", "--sparse", "sessions/example/meta.json")
+
+	err := ValidateStagedLedgerCommit(context.Background(), repo, "sessions/example/")
+	require.ErrorContains(t, err, "unresolved conflict")
+}
+
+func TestValidateStagedLedgerCommit_UnbornBranch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index state")
+	}
+	for _, tc := range []struct {
+		name    string
+		content string
+		wantErr string
+	}{
+		{name: "clean object", content: `{"title":"Ready"}` + "\n"},
+		{name: "invalid object", content: `[]`, wantErr: "invalid JSON object"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			gitInRepo(t, repo, "init", "-b", "main")
+			writeGitutilFixture(t, repo, "sessions/example/meta.json", tc.content)
+			gitInRepo(t, repo, "add", "--sparse", "sessions/example/meta.json")
+
+			err := ValidateStagedLedgerCommit(context.Background(), repo, "sessions/example/")
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func writeGitutilFixture(t *testing.T, repo, rel, content string) {
+	t.Helper()
+	path := filepath.Join(repo, filepath.FromSlash(rel))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+}
+
 // Recovery must not lose metadata, round numeric IDs, or overwrite edits made
 // after git produced the conflict. Refused repairs leave both index and file intact.
 func TestAutostashRecoveryPreservesData(t *testing.T) {

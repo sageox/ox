@@ -669,3 +669,48 @@ func TestGitCommitAndPush_LeavesOutOfLedgerSessionIntact(t *testing.T) {
 		})
 	}
 }
+
+// A stash-pop conflict can exist as an ordinary stage-0 file after git add.
+// Finalization must refuse it before commit, even though Git itself considers
+// that index entry resolved and would happily publish the marker bytes.
+func TestGitCommitAndPush_RefusesConflictMarkers(t *testing.T) {
+	ledgerPath := t.TempDir()
+	runGitCmd(t, ledgerPath, "init", "--initial-branch=main")
+	if err := os.WriteFile(filepath.Join(ledgerPath, "README.md"), []byte("ledger\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCmd(t, ledgerPath, "add", "README.md")
+	runGitCmd(t, ledgerPath, "commit", "-m", "initial")
+
+	const sessionName = "2026-09-10T12-00-test-Oxguard"
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markers := []byte("{\n<<<<<<< Updated upstream\n  \"title\": \"remote\"\n=======\n  \"title\": \"local\"\n>>>>>>> Stashed changes\n}\n")
+	if err := os.WriteFile(filepath.Join(sessionDir, "meta.json"), markers, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(testRawContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewSessionFinalizeHandler(slog.Default())
+	handler.skipLFS = true
+	handler.ledgerMu = &sync.Mutex{}
+	headBefore := gitOutput(t, ledgerPath, "rev-parse", "HEAD")
+	pushed := handler.gitCommitAndPush(&SessionFinalizePayload{
+		SessionDir: sessionDir,
+		RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
+		LedgerPath: ledgerPath,
+	}, nil)
+	if pushed {
+		t.Fatal("marker-laden metadata must not report a successful publication")
+	}
+	if headAfter := gitOutput(t, ledgerPath, "rev-parse", "HEAD"); headAfter != headBefore {
+		t.Fatalf("validation failure advanced HEAD: before=%s after=%s", headBefore, headAfter)
+	}
+	if got, err := os.ReadFile(filepath.Join(sessionDir, "meta.json")); err != nil || !bytes.Equal(got, markers) {
+		t.Fatalf("failed commit must preserve the conflicted file for recovery: %q, %v", got, err)
+	}
+}
