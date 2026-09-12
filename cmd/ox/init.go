@@ -437,12 +437,8 @@ func runInit() error {
 			slog.Debug("failed to fetch teams", "error", err)
 			cli.PrintWarning(fmt.Sprintf("Could not fetch teams from %s: %v", endpoint.NormalizeSlug(currentEP), err))
 			fmt.Println()
-			proceed, confirmErr := cli.ConfirmYesNoRequired("Continue without team selection? (a new team may be created)", false, false)
-			if confirmErr != nil {
-				return fmt.Errorf("cannot reach %s to list teams, and %w; pass --team explicitly", endpoint.NormalizeSlug(currentEP), confirmErr)
-			}
-			if !proceed {
-				return fmt.Errorf("team selection canceled")
+			if teamErr := confirmContinueWithoutTeam(currentEP); teamErr != nil {
+				return teamErr
 			}
 		} else if reposResp != nil && len(reposResp.TeamMembershipsFromRepos()) > 0 {
 			// the repo may already be bound to a team from a prior init —
@@ -2758,4 +2754,21 @@ func confirmEndpointRebind(storedEndpoint, currentEndpoint string) (bool, error)
 func abortEndpointRebind(storedEndpoint string) {
 	fmt.Println()
 	fmt.Printf("Aborted. Set SAGEOX_ENDPOINT=%s to use the stored endpoint.\n", storedEndpoint)
+}
+
+// confirmContinueWithoutTeam asks whether to proceed when the team list could
+// not be fetched. Returns nil to continue.
+//
+// Required, not ConfirmYesNo: an unanswered prompt here used to surface as the
+// bare "team selection canceled", which tells an unattended caller nothing
+// about what to do instead.
+func confirmContinueWithoutTeam(currentEP string) error {
+	proceed, err := cli.ConfirmYesNoRequired("Continue without team selection? (a new team may be created)", false, false)
+	if err != nil {
+		return fmt.Errorf("cannot reach %s to list teams, and %w; pass --team explicitly", endpoint.NormalizeSlug(currentEP), err)
+	}
+	if !proceed {
+		return fmt.Errorf("team selection canceled")
+	}
+	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -203,6 +204,108 @@ func TestConfirmEndpointFallback(t *testing.T) {
 	})
 }
 
+// --- ox init: continuing when the team list cannot be fetched ---------------
+
+func TestConfirmContinueWithoutTeam(t *testing.T) {
+	t.Run("unanswered prompt names the flag to pass instead", func(t *testing.T) {
+		var err error
+		captureConfirmOutput(t, func() {
+			withStdin(t, "", func() { err = confirmContinueWithoutTeam("https://sageox.ai") })
+		})
+
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, cli.ErrConfirmationRequired), "got %v", err)
+		assert.Contains(t, err.Error(), "--team",
+			"an unattended caller must be told how to proceed without a prompt")
+	})
+
+	t.Run("explicit no cancels", func(t *testing.T) {
+		var err error
+		captureConfirmOutput(t, func() {
+			withStdin(t, "n\n", func() { err = confirmContinueWithoutTeam("https://sageox.ai") })
+		})
+
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, cli.ErrConfirmationRequired),
+			"a deliberate decline is not a missing answer")
+		assert.Contains(t, err.Error(), "canceled")
+	})
+
+	t.Run("explicit yes continues", func(t *testing.T) {
+		var err error
+		captureConfirmOutput(t, func() {
+			withStdin(t, "y\n", func() { err = confirmContinueWithoutTeam("https://sageox.ai") })
+		})
+		assert.NoError(t, err)
+	})
+}
+
+// --- ox uninstall: the type-to-confirm gate ---------------------------------
+
+func TestConfirmUninstallGate(t *testing.T) {
+	t.Run("force skips the gate entirely", func(t *testing.T) {
+		var ok bool
+		var err error
+		captureConfirmOutput(t, func() {
+			withStdin(t, "", func() {
+				ok, err = confirmUninstallGate(t.TempDir(), "https://sageox.ai", false, true)
+			})
+		})
+		require.NoError(t, err)
+		assert.True(t, ok)
+	})
+
+	// The gate: an unattended run used to print "Uninstall canceled" and exit
+	// 0, which reads as a completed uninstall.
+	t.Run("unanswered gate errors and points at --force", func(t *testing.T) {
+		gitRoot := t.TempDir()
+		var ok bool
+		var err error
+		out := captureConfirmOutput(t, func() {
+			withStdin(t, "", func() {
+				ok, err = confirmUninstallGate(gitRoot, "https://sageox.ai", false, false)
+			})
+		})
+
+		assert.False(t, ok)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--force")
+		assert.NotContains(t, err.Error(), "--yes",
+			"--yes does not satisfy this gate, so the message must not suggest it")
+		assert.NotContains(t, out, "Uninstall canceled",
+			"an unanswered gate must not report a cancel the user never made")
+	})
+
+	t.Run("declining reports an ordinary cancel", func(t *testing.T) {
+		gitRoot := t.TempDir()
+		var ok bool
+		var err error
+		out := captureConfirmOutput(t, func() {
+			withStdin(t, "nope\n", func() {
+				ok, err = confirmUninstallGate(gitRoot, "https://sageox.ai", false, false)
+			})
+		})
+
+		require.NoError(t, err)
+		assert.False(t, ok)
+		assert.Contains(t, out, "Uninstall canceled")
+	})
+
+	t.Run("typing the repo name proceeds", func(t *testing.T) {
+		gitRoot := t.TempDir()
+		var ok bool
+		var err error
+		captureConfirmOutput(t, func() {
+			withStdin(t, filepath.Base(gitRoot)+"\n", func() {
+				ok, err = confirmUninstallGate(gitRoot, "https://sageox.ai", false, false)
+			})
+		})
+
+		require.NoError(t, err)
+		assert.True(t, ok)
+	})
+}
+
 // --- ox uninstall: the cloud-deletion confirmation link ----------------------
 
 // TestOfferCloudDeletionConfirmation_AlwaysPrintsTheURL is the regression gate
@@ -210,11 +313,15 @@ func TestConfirmEndpointFallback(t *testing.T) {
 // if this step is skipped without surfacing the URL, cloud records outlive the
 // local uninstall with nothing on screen pointing at them.
 func TestOfferCloudDeletionConfirmation_AlwaysPrintsTheURL(t *testing.T) {
-	const url = "https://sageox.ai/repos/repo_123/uninstall/confirm"
+	const (
+		ep     = "https://sageox.ai"
+		repoID = "repo_123"
+		url    = "https://sageox.ai/repos/repo_123/uninstall/confirm"
+	)
 
 	t.Run("unanswered prompt warns and prints the URL", func(t *testing.T) {
 		out := captureConfirmOutput(t, func() {
-			withStdin(t, "", func() { offerCloudDeletionConfirmation(url, false) })
+			withStdin(t, "", func() { offerCloudDeletionConfirmation(ep, repoID, false) })
 		})
 
 		assert.Contains(t, out, url, "the confirmation URL must never be silently dropped")
@@ -226,7 +333,7 @@ func TestOfferCloudDeletionConfirmation_AlwaysPrintsTheURL(t *testing.T) {
 
 	t.Run("declining still prints the URL for later", func(t *testing.T) {
 		out := captureConfirmOutput(t, func() {
-			withStdin(t, "n\n", func() { offerCloudDeletionConfirmation(url, false) })
+			withStdin(t, "n\n", func() { offerCloudDeletionConfirmation(ep, repoID, false) })
 		})
 
 		assert.Contains(t, out, url)
@@ -240,7 +347,7 @@ func TestOfferCloudDeletionConfirmation_AlwaysPrintsTheURL(t *testing.T) {
 		t.Setenv("SKIP_BROWSER", "1")
 
 		out := captureConfirmOutput(t, func() {
-			withStdin(t, "y\n", func() { offerCloudDeletionConfirmation(url, false) })
+			withStdin(t, "y\n", func() { offerCloudDeletionConfirmation(ep, repoID, false) })
 		})
 
 		assert.NotContains(t, out, "Confirm here:")
@@ -251,7 +358,7 @@ func TestOfferCloudDeletionConfirmation_AlwaysPrintsTheURL(t *testing.T) {
 		t.Setenv("SKIP_BROWSER", "1")
 
 		out := captureConfirmOutput(t, func() {
-			withStdin(t, "", func() { offerCloudDeletionConfirmation(url, true) })
+			withStdin(t, "", func() { offerCloudDeletionConfirmation(ep, repoID, true) })
 		})
 
 		assert.NotContains(t, out, "Confirm here:",

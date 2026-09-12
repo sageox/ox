@@ -169,23 +169,12 @@ func runUninstall() error {
 	}
 
 	// confirm with user unless --force
-	if !uninstallForce {
-		repoName := filepath.Base(gitRoot)
-		confirmed, confirmErr := confirmUninstallWithInput(repoName, selectedEndpoint, uninstallAllEndpoints, gitRoot)
-		if confirmErr != nil {
-			fmt.Fprintln(os.Stderr)
-			// Deliberately not the sentinel's own wording: --yes does not
-			// satisfy this gate, so pointing at it would send the user down a
-			// path that keeps failing.
-			return errors.New("uninstall requires confirmation: type the repository name at a terminal, or re-run with --force")
-		}
-		if !confirmed {
-			fmt.Fprintln(os.Stderr)
-			cli.PrintSuccess("Uninstall canceled")
-			return nil
-		}
-	} else {
-		slog.Info("uninstall confirmation", "skipped", "force flag enabled")
+	proceed, confirmErr := confirmUninstallGate(gitRoot, selectedEndpoint, uninstallAllEndpoints, uninstallForce)
+	if confirmErr != nil {
+		return confirmErr
+	}
+	if !proceed {
+		return nil
 	}
 
 	// perform uninstall steps
@@ -293,9 +282,8 @@ func notifyCloudUninstall(marker *api.RepoMarkerData) {
 		fmt.Printf("%s %s %s\n", cli.StyleDim.Render("Visit"), cli.StyleCommand.Render(statusURL), cli.StyleDim.Render("to check status."))
 
 		// offer to open browser for immediate confirmation
-		confirmURL := fmt.Sprintf("https://%s/repos/%s/uninstall/confirm", endpoint.NormalizeSlug(ep), marker.RepoID)
 		fmt.Fprintln(os.Stderr)
-		offerCloudDeletionConfirmation(confirmURL, uninstallForce)
+		offerCloudDeletionConfirmation(ep, marker.RepoID, uninstallForce)
 	}
 }
 
@@ -307,7 +295,9 @@ func notifyCloudUninstall(marker *api.RepoMarkerData) {
 // records that outlive the local uninstall. Every path therefore prints it:
 // silently skipping the step when nobody could answer is exactly how those
 // records got stranded.
-func offerCloudDeletionConfirmation(confirmURL string, force bool) {
+func offerCloudDeletionConfirmation(ep, repoID string, force bool) {
+	confirmURL := fmt.Sprintf("https://%s/repos/%s/uninstall/confirm", endpoint.NormalizeSlug(ep), repoID)
+
 	confirmNow, err := cli.ConfirmYesNoRequired("Confirm cloud resource deletion now?", false, force)
 	switch {
 	case err != nil:
@@ -817,4 +807,32 @@ func removeUserIntegrationsWithConfirmation() error {
 	}
 
 	return nil
+}
+
+// confirmUninstallGate runs the type-to-confirm gate before a destructive
+// uninstall. Returns (false, nil) when the user deliberately declined, and an
+// error when nobody was there to answer at all — that distinction is the whole
+// point: reporting "Uninstall canceled" and exiting 0 to an unattended caller
+// reads as success.
+func confirmUninstallGate(gitRoot, selectedEndpoint string, allEndpoints, force bool) (bool, error) {
+	if force {
+		slog.Info("uninstall confirmation", "skipped", "force flag enabled")
+		return true, nil
+	}
+
+	repoName := filepath.Base(gitRoot)
+	confirmed, err := confirmUninstallWithInput(repoName, selectedEndpoint, allEndpoints, gitRoot)
+	if err != nil {
+		fmt.Fprintln(os.Stderr)
+		// Deliberately not the sentinel's own wording: --yes does not satisfy
+		// this gate, so pointing at it would send the user down a path that
+		// keeps failing.
+		return false, errors.New("uninstall requires confirmation: type the repository name at a terminal, or re-run with --force")
+	}
+	if !confirmed {
+		fmt.Fprintln(os.Stderr)
+		cli.PrintSuccess("Uninstall canceled")
+		return false, nil
+	}
+	return true, nil
 }
