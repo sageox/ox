@@ -190,13 +190,15 @@ func regenerateAllSessionsArtifacts(store *session.Store, projectRoot string, fo
 		return nil
 	}
 
-	confirmed, confirmErr := cli.ConfirmYesNoRequired(fmt.Sprintf("Regenerate artifacts for %d session(s)?", len(sessions)), false, force)
-	if confirmErr != nil {
-		return confirmErr
-	}
-	if !confirmed {
-		fmt.Println("Canceled.")
-		return nil
+	if !force {
+		confirmed, confirmErr := cli.ConfirmYesNoRequired(fmt.Sprintf("Regenerate artifacts for %d session(s)?", len(sessions)), false, false)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if !confirmed {
+			fmt.Println("Canceled.")
+			return nil
+		}
 	}
 
 	var regenerated, skipped int

@@ -96,20 +96,22 @@ var logoutCmd = &cobra.Command{
 			}
 		}
 
-		// confirm before logging out (skip if --force or --yes)
-		var confirmMsg string
-		if len(endpointsToLogout) == 1 {
-			confirmMsg = fmt.Sprintf("Log out from %s?", endpointsToLogout[0])
-		} else {
-			confirmMsg = fmt.Sprintf("Log out from %d endpoints?", len(endpointsToLogout))
-		}
-		confirmed, confirmErr := cli.ConfirmYesNoRequired(confirmMsg, false, logoutForce)
-		if confirmErr != nil {
-			return confirmErr
-		}
-		if !confirmed {
-			fmt.Println("Logout canceled.")
-			return nil
+		// confirm before logging out (skip if --force)
+		if !logoutForce {
+			var confirmMsg string
+			if len(endpointsToLogout) == 1 {
+				confirmMsg = fmt.Sprintf("Log out from %s?", endpointsToLogout[0])
+			} else {
+				confirmMsg = fmt.Sprintf("Log out from %d endpoints?", len(endpointsToLogout))
+			}
+			confirmed, confirmErr := cli.ConfirmYesNoRequired(confirmMsg, false, false)
+			if confirmErr != nil {
+				return confirmErr
+			}
+			if !confirmed {
+				fmt.Println("Logout canceled.")
+				return nil
+			}
 		}
 
 		// logout from each endpoint

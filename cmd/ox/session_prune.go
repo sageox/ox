@@ -99,13 +99,15 @@ func runSessionPrune(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	confirmed, confirmErr := cli.ConfirmYesNoRequired(fmt.Sprintf("Remove %d local session(s)?", len(candidates)), false, force)
-	if confirmErr != nil {
-		return confirmErr
-	}
-	if !confirmed {
-		fmt.Println("Canceled.")
-		return nil
+	if !force {
+		confirmed, confirmErr := cli.ConfirmYesNoRequired(fmt.Sprintf("Remove %d local session(s)?", len(candidates)), false, false)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if !confirmed {
+			fmt.Println("Canceled.")
+			return nil
+		}
 	}
 
 	removed := deletePruneCandidates(candidates)

@@ -716,13 +716,15 @@ func uninstallAllIntegrations(force bool) error {
 
 	// Prompt unless force. Required, not ConfirmYesNo: this prompt defaults to
 	// YES, so a silent default would uninstall every integration unattended.
-	confirmed, confirmErr := cli.ConfirmYesNoRequired("Uninstall all?", true, force)
-	if confirmErr != nil {
-		return confirmErr
-	}
-	if !confirmed {
-		fmt.Println("Canceled.")
-		return nil
+	if !force {
+		confirmed, confirmErr := cli.ConfirmYesNoRequired("Uninstall all?", true, false)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if !confirmed {
+			fmt.Println("Canceled.")
+			return nil
+		}
 	}
 
 	// uninstall all

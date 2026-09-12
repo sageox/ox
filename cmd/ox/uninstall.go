@@ -295,28 +295,35 @@ func notifyCloudUninstall(marker *api.RepoMarkerData) {
 		// offer to open browser for immediate confirmation
 		confirmURL := fmt.Sprintf("https://%s/repos/%s/uninstall/confirm", endpoint.NormalizeSlug(ep), marker.RepoID)
 		fmt.Fprintln(os.Stderr)
+		offerCloudDeletionConfirmation(confirmURL, uninstallForce)
+	}
+}
 
-		confirmNow, confirmErr := cli.ConfirmYesNoRequired("Confirm cloud resource deletion now?", false, uninstallForce)
-		switch {
-		case confirmErr != nil:
-			// Nobody was there to answer. The uninstall request is submitted
-			// but unconfirmed, so this link is the only thing standing between
-			// the user and cloud records that outlive the local uninstall.
-			// Silently skipping the step is how those records got stranded.
-			slog.Warn("uninstall cloud confirmation", "skipped", "no interactive input", "url", confirmURL)
-			cli.PrintWarning("Cloud deletion is still unconfirmed — nothing was available to answer the prompt.")
-			fmt.Printf("%s %s\n", cli.StyleDim.Render("Confirm here:"), cli.StyleCommand.Render(confirmURL))
-		case confirmNow:
-			if err := openBrowserForUninstall(confirmURL); err != nil {
-				slog.Warn("failed to open browser", "error", err)
-				fmt.Println(cli.StyleWarning.Render("⚠ Could not open browser."))
-				fmt.Printf("%s %s\n", cli.StyleDim.Render("Open manually:"), cli.StyleCommand.Render(confirmURL))
-			} else {
-				fmt.Println(cli.StyleSuccess.Render("✓ Opened browser for confirmation"))
-			}
-		default:
-			fmt.Printf("%s %s\n", cli.StyleDim.Render("Confirm later at:"), cli.StyleCommand.Render(confirmURL))
+// offerCloudDeletionConfirmation offers to open the browser so the user can
+// confirm cloud-resource deletion immediately.
+//
+// The uninstall request has already been submitted at this point but is not yet
+// confirmed, so this URL is the only thing standing between the user and cloud
+// records that outlive the local uninstall. Every path therefore prints it:
+// silently skipping the step when nobody could answer is exactly how those
+// records got stranded.
+func offerCloudDeletionConfirmation(confirmURL string, force bool) {
+	confirmNow, err := cli.ConfirmYesNoRequired("Confirm cloud resource deletion now?", false, force)
+	switch {
+	case err != nil:
+		slog.Warn("uninstall cloud confirmation", "skipped", "no interactive input", "url", confirmURL)
+		cli.PrintWarning("Cloud deletion is still unconfirmed — nothing was available to answer the prompt.")
+		fmt.Printf("%s %s\n", cli.StyleDim.Render("Confirm here:"), cli.StyleCommand.Render(confirmURL))
+	case confirmNow:
+		if openErr := openBrowserForUninstall(confirmURL); openErr != nil {
+			slog.Warn("failed to open browser", "error", openErr)
+			fmt.Println(cli.StyleWarning.Render("⚠ Could not open browser."))
+			fmt.Printf("%s %s\n", cli.StyleDim.Render("Open manually:"), cli.StyleCommand.Render(confirmURL))
+		} else {
+			fmt.Println(cli.StyleSuccess.Render("✓ Opened browser for confirmation"))
 		}
+	default:
+		fmt.Printf("%s %s\n", cli.StyleDim.Render("Confirm later at:"), cli.StyleCommand.Render(confirmURL))
 	}
 }
 

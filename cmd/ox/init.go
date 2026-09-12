@@ -821,27 +821,12 @@ func runInit() error {
 	// call API to register repository
 	// check for endpoint mismatch
 	currentEndpoint := endpoint.Get()
-	if cfg.Endpoint != "" && cfg.Endpoint != currentEndpoint {
-		fmt.Println()
-		cli.PrintWarning("API endpoint mismatch detected")
-		fmt.Printf("  Stored:  %s\n", cfg.Endpoint)
-		fmt.Printf("  Current: %s\n", currentEndpoint)
-		fmt.Println()
-		fmt.Println("Re-registering will associate this repo with the new endpoint.")
-		// Required, not ConfirmYesNo: this prompt defaults to YES, and
-		// registration has no inverse in the CLI — a silent default would
-		// rebind the repo to a different endpoint with nobody having agreed.
-		proceed, confirmErr := cli.ConfirmYesNoRequired("Continue?", true, false)
-		if confirmErr != nil {
-			fmt.Println()
-			fmt.Printf("Aborted. Set SAGEOX_ENDPOINT=%s to use the stored endpoint.\n", cfg.Endpoint)
-			return fmt.Errorf("re-registering this repo to %s %w", endpoint.NormalizeSlug(currentEndpoint), confirmErr)
-		}
-		if !proceed {
-			fmt.Println()
-			fmt.Printf("Aborted. Set SAGEOX_ENDPOINT=%s to use the stored endpoint.\n", cfg.Endpoint)
-			return nil
-		}
+	proceed, confirmErr := confirmEndpointRebind(cfg.Endpoint, currentEndpoint)
+	if confirmErr != nil {
+		return confirmErr
+	}
+	if !proceed {
+		return nil
 	}
 
 	initAt := time.Now().UTC().Format(time.RFC3339)
@@ -2736,4 +2721,41 @@ func promptNoTeams() (bool, error) {
 	}
 
 	return true, nil
+}
+
+// confirmEndpointRebind asks before re-registering a repo against a different
+// endpoint than the one already stored. Returns (true, nil) when there is no
+// mismatch to resolve.
+//
+// The prompt defaults to YES, and registration has no inverse in the CLI — so
+// this uses ConfirmYesNoRequired rather than ConfirmYesNo: taking the default
+// with nobody there would rebind the repo to a different endpoint with no one
+// having agreed to it.
+func confirmEndpointRebind(storedEndpoint, currentEndpoint string) (bool, error) {
+	if storedEndpoint == "" || storedEndpoint == currentEndpoint {
+		return true, nil
+	}
+
+	fmt.Println()
+	cli.PrintWarning("API endpoint mismatch detected")
+	fmt.Printf("  Stored:  %s\n", storedEndpoint)
+	fmt.Printf("  Current: %s\n", currentEndpoint)
+	fmt.Println()
+	fmt.Println("Re-registering will associate this repo with the new endpoint.")
+
+	proceed, err := cli.ConfirmYesNoRequired("Continue?", true, false)
+	if err != nil {
+		abortEndpointRebind(storedEndpoint)
+		return false, fmt.Errorf("re-registering this repo to %s %w", endpoint.NormalizeSlug(currentEndpoint), err)
+	}
+	if !proceed {
+		abortEndpointRebind(storedEndpoint)
+		return false, nil
+	}
+	return true, nil
+}
+
+func abortEndpointRebind(storedEndpoint string) {
+	fmt.Println()
+	fmt.Printf("Aborted. Set SAGEOX_ENDPOINT=%s to use the stored endpoint.\n", storedEndpoint)
 }

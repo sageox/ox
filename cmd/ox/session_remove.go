@@ -88,13 +88,15 @@ func removeAllSessions(store *session.Store, force bool) error {
 	}
 
 	// confirm unless force flag is set
-	confirmed, confirmErr := cli.ConfirmYesNoRequired(fmt.Sprintf("This will remove %d local session(s). Continue?", len(sessions)), false, force)
-	if confirmErr != nil {
-		return confirmErr
-	}
-	if !confirmed {
-		fmt.Println("Canceled.")
-		return nil
+	if !force {
+		confirmed, confirmErr := cli.ConfirmYesNoRequired(fmt.Sprintf("This will remove %d local session(s). Continue?", len(sessions)), false, false)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if !confirmed {
+			fmt.Println("Canceled.")
+			return nil
+		}
 	}
 
 	var removed int
