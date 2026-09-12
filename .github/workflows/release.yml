@@ -22,6 +22,13 @@ jobs:
   verify-inrepo:
     if: github.repository == 'sageox/ox'
     runs-on: ubuntu-latest
+    # Read-only cannot see a draft, so this job could never pass: GitHub hides
+    # draft releases from tokens without push access, and the get-release-by-tag
+    # endpoint omits drafts for every token. `gh release view` only finds one by
+    # falling back to the list endpoint, which needs write. The job still only
+    # reads.
+    permissions:
+      contents: write
     steps:
       - name: Require an existing human-reviewed draft
         env:
