@@ -123,7 +123,9 @@ Safety:
     actionable here. They require the gated history-rewrite tool. The
     correct response is: rotate the leaked credential, mark the finding
     as known, and follow up via the team comms process.
-  - Per-finding human approval. There is no bulk-approve flag.
+  - Per-file human approval. There is no bulk-approve flag, and the global
+    ` + "`--yes`" + ` does NOT approve redactions: every file is asked about
+    individually, and ` + "`q`" + ` quits the pass with the snapshot intact.
   - Each redaction pass appends a RedactionPass entry to the session's
     meta.json (ox-8bfh) recording WHO redacted, WHEN, with WHICH catalog
     version+hash, and WHAT was caught — never the matched bytes.`,
