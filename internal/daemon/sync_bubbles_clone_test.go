@@ -10,6 +10,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -470,19 +471,70 @@ func TestSyncBubbles_Clone_ShallowAndPartialFilter(t *testing.T) {
 	assert.Equal(t, "true", strings.TrimSpace(string(promisor)))
 }
 
-// TestSyncBubbles_Clone_HasGitignoreEntries verifies cloneBubble installs
-// the .sageox/.gitignore entries that prevent daemon-written cache files
-// from showing up as untracked. Without this, blue-green GC reclone (if
-// kb ever grows one) would treat the checkout as permanently dirty.
+// kbGitCheckIgnored asks git whether rel would be ignored in dir. Behavior,
+// not spelling: it does not matter which file carries the rule.
+func kbGitCheckIgnored(t *testing.T, dir, rel string) bool {
+	t.Helper()
+	err := exec.Command("git", "-C", dir, "check-ignore", "-q", rel).Run()
+	if err == nil {
+		return true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false
+	}
+	t.Fatalf("git check-ignore %s: %v", rel, err)
+	return false
+}
+
+// seedKBRemote builds a bare, filter-capable remote whose main carries a
+// .sageox/sync.manifest plus a Curator artifact, and returns the bare and
+// work dirs so a test can push further "server-side" commits.
+func seedKBRemote(t *testing.T, extraFiles map[string]string) (bareDir, workDir string) {
+	t.Helper()
+	tmp := t.TempDir()
+	bareDir = filepath.Join(tmp, "kb.bare")
+	workDir = filepath.Join(tmp, "kb.work")
+	require.NoError(t, exec.Command("git", "init", "--bare", "-b", "main", bareDir).Run())
+	gitInDir(t, bareDir, "config", "uploadpack.allowfilter", "true")
+	require.NoError(t, exec.Command("git", "clone", bareDir, workDir).Run())
+	gitConfig(t, workDir)
+	files := map[string]string{
+		".sageox/sync.manifest":        "version 1\ninclude .sageox/\ninclude README.md\n",
+		".sageox/curator/marks/a.json": "{}\n",
+		"README.md":                    "v1\n",
+	}
+	for k, v := range extraFiles {
+		files[k] = v
+	}
+	for rel, body := range files {
+		full := filepath.Join(workDir, rel)
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+		require.NoError(t, os.WriteFile(full, []byte(body), 0o644))
+	}
+	gitInDir(t, workDir, "add", "-f", ".")
+	gitInDir(t, workDir, "commit", "-m", "seed")
+	gitInDir(t, workDir, "push", "origin", "HEAD:main")
+	return bareDir, workDir
+}
+
+func kbHead(t *testing.T, dir, ref string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "rev-parse", ref).Output()
+	require.NoError(t, err)
+	return strings.TrimSpace(string(out))
+}
+
+// TestSyncBubbles_Clone_NeverCommitsSageoxGitignore is the bubble-side
+// customer promise: after the daemon clones a bubble, there is no
+// daemon-authored .sageox/.gitignore, no local commit, and a Curator
+// artifact is not ignored — while the daemon's own meta.json still stays
+// out of git status via the local-only .git/info/exclude.
 //
-// Mirrors team-context's EnsureCheckoutGitignore behavior: only kicks in
-// when the cloned repo has a .sageox/ directory (the path that holds the
-// generated cache + meta files). Most kb bubbles will have one because
-// the daemon writes meta.json into it.
-//
-// Failure prevented: cache files (.sageox/cache/, etc.) being committed
-// or blocking future GC because EnsureCheckoutGitignoreCtx never ran.
-func TestSyncBubbles_Clone_HasGitignoreEntries(t *testing.T) {
+// Failure prevented: the committed `*` rule reaching a bubble's main and
+// making the server Curator's `git add -A` skip its own save-mark, so it
+// re-drives every synthesis hourly, forever (prod, 2026-08-18).
+func TestSyncBubbles_Clone_NeverCommitsSageoxGitignore(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git clone operations")
 	}
@@ -492,27 +544,11 @@ func TestSyncBubbles_Clone_HasGitignoreEntries(t *testing.T) {
 	kbTestEnv(t)
 	s, _ := kbTestScheduler(t)
 
-	// build a bare repo that already has a .sageox/ directory so
-	// EnsureCheckoutGitignoreCtx has somewhere to write. mirrors what a
-	// server-provisioned bubble actually looks like.
-	tmp := t.TempDir()
-	bareDir := filepath.Join(tmp, "gitignore.bare")
-	workDir := filepath.Join(tmp, "gitignore.work")
-	require.NoError(t, exec.Command("git", "init", "--bare", "-b", "main", bareDir).Run())
-	gitInDir(t, bareDir, "config", "uploadpack.allowfilter", "true")
-	require.NoError(t, exec.Command("git", "clone", bareDir, workDir).Run())
-	gitConfig(t, workDir)
-	require.NoError(t, os.MkdirAll(filepath.Join(workDir, ".sageox"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(workDir, ".sageox", "sync.manifest"), []byte("version 1\ninclude .sageox/\ninclude README.md\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(workDir, "README.md"), []byte("v1\n"), 0o644))
-	gitInDir(t, workDir, "add", ".")
-	gitInDir(t, workDir, "commit", "-m", "seed with .sageox")
-	gitInDir(t, workDir, "push", "origin", "HEAD:main")
-
+	bareDir, _ := seedKBRemote(t, nil)
 	bubble := api.KB{
-		KBID:    "kb_gitignore",
+		KBID:    "kb_noignore",
 		KBType:  api.KBTypeTeam,
-		Slug:    "gitignore",
+		Slug:    "noignore",
 		RepoURL: "file://" + bareDir,
 	}
 	s.SetKBBubbleListerFactory(func(_, _ string) KBBubbleLister {
@@ -522,28 +558,110 @@ func TestSyncBubbles_Clone_HasGitignoreEntries(t *testing.T) {
 	s.syncBubbles(context.Background())
 
 	target := paths.KBDir(endpoint.Get(), bubble.KBID)
-	gitignoreBytes, err := os.ReadFile(filepath.Join(target, ".sageox", ".gitignore"))
-	require.NoError(t, err, ".sageox/.gitignore must exist after clone")
-	contents := string(gitignoreBytes)
-	for _, want := range []string{"*", "!.gitignore", "!sync.manifest"} {
-		assert.Contains(t, contents, want,
-			".sageox/.gitignore must contain %q so cache files don't appear as untracked", want)
-	}
+	require.DirExists(t, filepath.Join(target, ".git"))
 
-	// daemon-written meta.json must not surface as untracked — exactly
-	// what the gitignore's `*` blanket entry prevents.
+	_, statErr := os.Stat(filepath.Join(target, ".sageox", ".gitignore"))
+	assert.True(t, os.IsNotExist(statErr), "daemon must not write .sageox/.gitignore into a bubble")
+	assert.Equal(t, kbHead(t, bareDir, "main"), kbHead(t, target, "HEAD"),
+		"bubble clone must carry no daemon-authored commit")
+
+	// Curator paths stay visible to git; daemon files stay hidden.
+	assert.False(t, kbGitCheckIgnored(t, target, ".sageox/curator/marks/new.json"),
+		"a new Curator mark must not be ignored")
+	assert.True(t, kbGitCheckIgnored(t, target, ".sageox/meta.json"),
+		"daemon meta.json must be ignored via .git/info/exclude")
+	require.FileExists(t, filepath.Join(target, ".sageox", "meta.json"), "reconcile writes meta.json")
+
 	statusOut, err := exec.Command("git", "-C", target, "status", "--porcelain").CombinedOutput()
 	require.NoError(t, err, "git status: %s", statusOut)
-	for _, line := range strings.Split(strings.TrimSpace(string(statusOut)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		assert.False(t,
-			strings.Contains(line, ".sageox/cache/") ||
-				strings.Contains(line, ".sageox/meta.json"),
-			"cache/meta file %q must not appear in git status — gitignore is missing entries", line)
+	assert.Empty(t, strings.TrimSpace(string(statusOut)),
+		"bubble checkout must be clean after sync (meta.json hidden by local exclude), got: %s", statusOut)
+}
+
+// TestSyncBubbles_Pull_BadGitignoreOnMain_NeverReAdded is the regression
+// test for the two production bubbles that already carry the bad file: a
+// remote whose main has the `*` .sageox/.gitignore committed. The daemon
+// must (1) not author any commit on clone, (2) after the server removes
+// the file, pull the removal cleanly and not re-create or re-commit it,
+// and (3) leave Curator paths un-ignored once the file is gone.
+//
+// Failure prevented: the daemon fighting the server-side repair by
+// re-adding the `*` rule on the next sync.
+func TestSyncBubbles_Pull_BadGitignoreOnMain_NeverReAdded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone/pull operations")
 	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	kbTestEnv(t)
+	s, _ := kbTestScheduler(t)
+
+	const badIgnore = "# Ignore all daemon-written files; re-include committed files\n*\n!.gitignore\n!sync.manifest\n"
+	bareDir, workDir := seedKBRemote(t, map[string]string{".sageox/.gitignore": badIgnore})
+	bubble := api.KB{
+		KBID:    "kb_badignore",
+		KBType:  api.KBTypeTeam,
+		Slug:    "badignore",
+		RepoURL: "file://" + bareDir,
+	}
+	s.SetKBBubbleListerFactory(func(_, _ string) KBBubbleLister {
+		return &fakeKBLister{bubbles: []api.KB{bubble}}
+	})
+
+	// pass 1: clone. The bad file arrives tracked (that is the server's
+	// problem to fix); the daemon must not add a commit of its own.
+	s.syncBubbles(context.Background())
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
+	require.FileExists(t, filepath.Join(target, ".sageox", ".gitignore"), "fixture: bad file is on main")
+	assert.Equal(t, kbHead(t, bareDir, "main"), kbHead(t, target, "HEAD"),
+		"clone of a bubble with the bad file must not add a daemon commit")
+
+	// server-side repair: remove the file from main.
+	gitInDir(t, workDir, "rm", "-q", ".sageox/.gitignore")
+	gitInDir(t, workDir, "commit", "-m", "fix: drop daemon .sageox/.gitignore so the Curator sees its marks")
+	gitInDir(t, workDir, "push", "origin", "HEAD:main")
+
+	// nudge FETCH_HEAD into the past so fetch dedup doesn't skip the pull.
+	fetchHead := filepath.Join(target, ".git", "FETCH_HEAD")
+	if info, err := os.Stat(fetchHead); err == nil {
+		past := info.ModTime().Add(-10 * time.Minute)
+		_ = os.Chtimes(fetchHead, past, past)
+	}
+
+	// pass 2: pull the repair, then reconcile again to prove nothing
+	// re-creates the file on a subsequent pass either.
+	s.syncBubbles(context.Background())
+	s.syncBubbles(context.Background())
+
+	assert.Equal(t, kbHead(t, bareDir, "main"), kbHead(t, target, "HEAD"),
+		"after pulling the repair the bubble must sit exactly on remote main")
+	_, statErr := os.Stat(filepath.Join(target, ".sageox", ".gitignore"))
+	assert.True(t, os.IsNotExist(statErr), "daemon must not re-create .sageox/.gitignore after the server removed it")
+
+	logOut, err := exec.Command("git", "-C", target, "log", "--format=%s").Output()
+	require.NoError(t, err)
+	assert.NotContains(t, string(logOut), "chore: add .sageox/.gitignore",
+		"no daemon-authored gitignore commit may exist in a bubble's history")
+
+	assert.False(t, kbGitCheckIgnored(t, target, ".sageox/curator/marks/new.json"),
+		"once the bad file is gone, Curator marks must not be ignored")
+	statusOut, err := exec.Command("git", "-C", target, "status", "--porcelain").CombinedOutput()
+	require.NoError(t, err, "git status: %s", statusOut)
+	assert.Empty(t, strings.TrimSpace(string(statusOut)), "bubble checkout must be clean, got: %s", statusOut)
+
+	// pass 3: a fresh clone of the repaired bubble (new machine, or a
+	// checkout healed after .git went missing). This is the leg the old
+	// code failed: a fresh clone re-wrote and re-committed the `*` file.
+	require.NoError(t, os.RemoveAll(target))
+	s.syncBubbles(context.Background())
+	require.DirExists(t, filepath.Join(target, ".git"), "re-clone must succeed")
+	_, statErr = os.Stat(filepath.Join(target, ".sageox", ".gitignore"))
+	assert.True(t, os.IsNotExist(statErr), "a fresh clone after the repair must not re-create .sageox/.gitignore")
+	assert.Equal(t, kbHead(t, bareDir, "main"), kbHead(t, target, "HEAD"),
+		"a fresh clone after the repair must carry no daemon-authored commit")
+	assert.False(t, kbGitCheckIgnored(t, target, ".sageox/curator/marks/new.json"),
+		"Curator marks must not be ignored in the re-cloned bubble")
 }
 
 // TestSyncBubbles_Pull_ManifestResolveRules verifies that when a bubble
