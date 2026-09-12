@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
@@ -184,9 +186,11 @@ func selectLogoutEndpoints(loggedInEndpoints []string, all bool, specified strin
 				"pass --endpoint <endpoint> to choose one, or --all to log out of every endpoint",
 				len(loggedInEndpoints))
 		}
-		var selection int
-		n, err := fmt.Sscanf(input, "%d", &selection)
-		if err == nil && n == 1 && selection >= 1 && selection <= maxSelection {
+		// strconv.Atoi, not fmt.Sscanf("%d"): Sscanf stops at the first
+		// non-digit, so "1abc" would parse as 1 and silently log out of an
+		// endpoint the operator never typed.
+		selection, err := strconv.Atoi(strings.TrimSpace(input))
+		if err == nil && selection >= 1 && selection <= maxSelection {
 			if selection == maxSelection {
 				return loggedInEndpoints, nil
 			}

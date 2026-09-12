@@ -472,6 +472,20 @@ func TestConfirmYesNoRequired_TellsDeclinedApartFromUnanswered(t *testing.T) {
 			want:      true,
 		},
 		{
+			// --yes short-circuits BEFORE stdin is read, so it overrides a
+			// piped answer rather than deferring to it. Documented on the flag.
+			name:      "global --yes overrides a piped no",
+			input:     "n\n",
+			assumeYes: true,
+			want:      true,
+		},
+		{
+			name:  "force overrides a piped no",
+			input: "n\n",
+			force: true,
+			want:  true,
+		},
+		{
 			name:  "invalid input is re-prompted, then answered",
 			input: "maybe\ny\n",
 			want:  true,

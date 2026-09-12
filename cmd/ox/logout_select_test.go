@@ -116,6 +116,21 @@ func TestSelectLogoutEndpoints_PipedSelection(t *testing.T) {
 		assert.Equal(t, two, got)
 	})
 
+	// fmt.Sscanf("%d") stops at the first non-digit, so "1abc" parsed as 1 and
+	// would have logged out of an endpoint the operator never typed.
+	t.Run("trailing characters are rejected, not truncated to a selection", func(t *testing.T) {
+		var got []string
+		var err error
+		silenceStdout(t, func() {
+			withStdin(t, "1abc\n2\n", func() {
+				got, err = selectLogoutEndpoints(two, false, "", false)
+			})
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"https://test.sageox.ai"}, got,
+			"\"1abc\" must be rejected and re-prompted, never read as endpoint 1")
+	})
+
 	t.Run("an invalid entry re-prompts rather than guessing", func(t *testing.T) {
 		var got []string
 		var err error

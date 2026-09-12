@@ -127,7 +127,7 @@ func registerPersistentFlags() {
 	// No -y shorthand here on purpose: `ox doctor -y` and `ox team invite -y`
 	// already bind their own, and a root-level shorthand would shadow them
 	// confusingly. Both local flags still feed the same global via NewContext.
-	rootCmd.PersistentFlags().Bool("yes", false, "answer yes to confirmation prompts (use when no answer is supplied on stdin)")
+	rootCmd.PersistentFlags().Bool("yes", false, "answer yes to confirmation prompts without reading stdin (overrides a piped answer)")
 }
 
 func init() {
