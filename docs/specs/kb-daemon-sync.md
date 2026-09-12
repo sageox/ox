@@ -57,6 +57,27 @@ Both `ox init` and the daemon reconciler write the rule (via
 --fix`) will *remove* a stale `.sageox/kb/` line from a root `.gitignore`, and
 only once the replacement is verifiably present.
 
+### Keeping the daemon's own files out of git — local excludes only
+
+Inside a bubble checkout the daemon writes `.sageox/meta.json` (plus its
+atomic-write temp file) and `.sageox/cache/`. Those are hidden from `git status`
+by an ox-managed block in the clone's **`.git/info/exclude`**
+(`kb.EnsureLocalExcludes`, reapplied on every clone and pull) — an explicit list
+of daemon-written paths, never a blanket `*`.
+
+A bubble **never** gets the committed `.sageox/.gitignore` that ledgers and team
+contexts carry (`gitserver.EnsureCheckoutGitignore`; `TwoPhaseClone` skips it for
+`RepoKindKB`). That file's `*` rule, once on a bubble's `main`, hides the
+server-side Curator's own `.sageox/curator/marks/` and `synopses/` from its
+`git add -A`, so it never sees its save-mark and re-drives the synthesis every
+hour. Two production bubbles hit exactly this on 2026-08-18 (ox #832 covers the
+same file's earlier ledger-side incident). Bubble sync is pull-only, so the
+daemon has no business authoring a commit in a bubble at all; `.git/info/exclude`
+is the only ignore surface it may touch, and nothing written there can reach the
+server or another clone. A bubble whose `main` already carries the bad file is a
+server-side repair (delete it from `main`); the daemon will pull the removal and
+never re-create it.
+
 ---
 
 ## Who syncs bubbles — leader-gated, exactly like team context

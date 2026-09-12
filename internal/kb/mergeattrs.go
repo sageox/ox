@@ -13,6 +13,7 @@
 package kb
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -136,36 +137,12 @@ func EnsureMergeAttributes(repoPath string) (changed bool, err error) {
 		return false, nil
 	}
 
-	// Atomic write: temp + fsync + rename. A direct WriteFile interrupted
-	// mid-write (process kill, power loss) would leave a truncated
-	// info/attributes that git silently treats as "no rules", which is
-	// exactly the wedged-rebase state this whole pre-flight is trying to
-	// prevent. Rename is atomic on the same filesystem.
-	dir := filepath.Dir(full)
-	tmp, err := os.CreateTemp(dir, ".attributes.tmp-*")
-	if err != nil {
-		return false, fmt.Errorf("create temp info/attributes: %w", err)
-	}
-	tmpName := tmp.Name()
-	// best-effort cleanup if we bail before rename
-	defer func() { _ = os.Remove(tmpName) }()
-
-	if _, err := tmp.WriteString(desired); err != nil {
-		_ = tmp.Close()
-		return false, fmt.Errorf("write temp info/attributes: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return false, fmt.Errorf("fsync temp info/attributes: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return false, fmt.Errorf("close temp info/attributes: %w", err)
-	}
-	if err := os.Chmod(tmpName, 0o644); err != nil {
-		return false, fmt.Errorf("chmod temp info/attributes: %w", err)
-	}
-	if err := os.Rename(tmpName, full); err != nil {
-		return false, fmt.Errorf("rename info/attributes: %w", err)
+	// Atomic write: a direct WriteFile interrupted mid-write (process kill,
+	// power loss) would leave a truncated info/attributes that git silently
+	// treats as "no rules", which is exactly the wedged-rebase state this
+	// whole pre-flight is trying to prevent.
+	if err := writeFileAtomic(full, desired); err != nil {
+		return false, fmt.Errorf("write info/attributes: %w", err)
 	}
 	return true, nil
 }
@@ -181,7 +158,13 @@ func EnsureMergeAttributes(repoPath string) (changed bool, err error) {
 //   - If the header is present but the footer is missing (corrupted /
 //     legacy), everything from the header to EOF is replaced.
 func mergeManagedBlock(existing, managed string) string {
-	headerIdx := strings.Index(existing, mergeAttrsHeader)
+	return mergeManagedBlockBetween(existing, managed, mergeAttrsHeader, mergeAttrsFooter)
+}
+
+// mergeManagedBlockBetween is mergeManagedBlock for an arbitrary
+// header/footer pair, shared with the .git/info/exclude writer.
+func mergeManagedBlockBetween(existing, managed, header, footer string) string {
+	headerIdx := strings.Index(existing, header)
 	if headerIdx < 0 {
 		if existing == "" {
 			return managed
@@ -195,13 +178,50 @@ func mergeManagedBlock(existing, managed string) string {
 
 	before := existing[:headerIdx]
 	after := ""
-	footerIdx := strings.Index(existing[headerIdx:], mergeAttrsFooter)
+	footerIdx := strings.Index(existing[headerIdx:], footer)
 	if footerIdx >= 0 {
-		end := headerIdx + footerIdx + len(mergeAttrsFooter)
+		end := headerIdx + footerIdx + len(footer)
 		if end < len(existing) && existing[end] == '\n' {
 			end++
 		}
 		after = existing[end:]
 	}
 	return before + managed + after
+}
+
+// writeFileAtomic writes content to full via temp + fsync + rename so a
+// crash mid-write can never leave a truncated file behind. Rename is
+// atomic on the same filesystem; the temp file is created next to the
+// target for that reason.
+func writeFileAtomic(full, content string) error {
+	dir := filepath.Dir(full)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(full)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	// best-effort cleanup if we bail before rename
+	defer func() { _ = os.Remove(tmpName) }()
+
+	// write + fsync + close as one step: any failure here means the temp
+	// file is not trustworthy, and the deferred remove discards it.
+	if err := fillAndClose(tmp, content); err != nil {
+		return fmt.Errorf("write temp: %w", err)
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return fmt.Errorf("chmod temp: %w", err)
+	}
+	if err := os.Rename(tmpName, full); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
+}
+
+// fillAndClose writes content, fsyncs, and closes f. The file is always
+// closed on return; the first error wins.
+func fillAndClose(f *os.File, content string) error {
+	_, writeErr := f.WriteString(content)
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	return errors.Join(writeErr, syncErr, closeErr)
 }

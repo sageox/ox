@@ -830,6 +830,10 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	}
 
 	// ensure .sageox/.gitignore excludes daemon-written files (cache/, checkout.json, etc.)
+	// Only ledgers and team contexts reach this path (they are the only
+	// workspace types in the registry). Knowledge Bubbles are GC'd by
+	// runKBGC, which never reclones, and must never get this committed file
+	// (see kb.EnsureLocalExcludes).
 	if err := gitserver.EnsureCheckoutGitignoreCtx(ctx, newPath); err != nil {
 		s.logger.Warn("gc: failed to ensure checkout .gitignore on new clone", "error", err)
 	}

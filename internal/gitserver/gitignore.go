@@ -12,7 +12,12 @@ import (
 )
 
 // checkoutRequiredEntries are the entries that must be present in .sageox/.gitignore
-// inside ledger and team context checkout directories. These prevent daemon-written
+// inside ledger and team context checkout directories — and ONLY those two
+// kinds. Knowledge Bubble checkouts must never receive this file: the
+// server-side Curator commits into .sageox/curator/, and the `*` rule below,
+// once committed to a bubble's main, hides those artifacts from the Curator's
+// own `git add -A`. Bubbles use local-only rules in .git/info/exclude instead
+// (internal/kb/localexclude.go). These prevent daemon-written
 // files from appearing as untracked in git status --porcelain, which would permanently
 // block blue-green GC reclone (isCheckoutClean() treats any porcelain output as dirty).
 //
@@ -73,8 +78,10 @@ func RejFilesTracked(repoPath string) (bool, error) {
 	return len(strings.TrimSpace(string(out))) > 0, nil
 }
 
-// EnsureCheckoutGitignore ensures .sageox/.gitignore exists in the given repo
-// with required entries to prevent daemon-written files from appearing as untracked.
+// EnsureCheckoutGitignore ensures .sageox/.gitignore exists in the given
+// ledger or team-context repo with required entries to prevent
+// daemon-written files from appearing as untracked. Never call it on a
+// Knowledge Bubble checkout — see checkoutRequiredEntries.
 // Without this, isCheckoutClean() in the GC path sees these files as dirty and
 // permanently blocks blue-green reclone.
 //
