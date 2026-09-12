@@ -88,11 +88,13 @@ func removeAllSessions(store *session.Store, force bool) error {
 	}
 
 	// confirm unless force flag is set
-	if !force {
-		if !cli.ConfirmYesNo(fmt.Sprintf("This will remove %d local session(s). Continue?", len(sessions)), false) {
-			fmt.Println("Canceled.")
-			return nil
-		}
+	confirmed, confirmErr := cli.ConfirmYesNoRequired(fmt.Sprintf("This will remove %d local session(s). Continue?", len(sessions)), false, force)
+	if confirmErr != nil {
+		return confirmErr
+	}
+	if !confirmed {
+		fmt.Println("Canceled.")
+		return nil
 	}
 
 	var removed int
@@ -225,13 +227,21 @@ func removeSessionByPattern(store *session.Store, pattern string, force bool) er
 			}
 		}
 		prompt := fmt.Sprintf("Remove %s from ledger? This affects all coworkers and cannot be undone", strings.Join(ledgerNames, ", "))
-		if !cli.ConfirmYesNo(prompt, false) {
+		confirmed, confirmErr := cli.ConfirmYesNoRequired(prompt, false, false)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if !confirmed {
 			fmt.Println("Canceled.")
 			return nil
 		}
 	} else if !force && !hasLedger {
 		// local-only single match confirmation
-		if !cli.ConfirmYesNo(fmt.Sprintf("Remove %s?", matchName(matches[0])), false) {
+		confirmed, confirmErr := cli.ConfirmYesNoRequired(fmt.Sprintf("Remove %s?", matchName(matches[0])), false, false)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if !confirmed {
 			fmt.Println("Canceled.")
 			return nil
 		}

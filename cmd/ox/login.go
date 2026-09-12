@@ -304,7 +304,11 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 		}
 
 		fmt.Fprintf(out, "Already authenticated as %s on %s\n", token.UserInfo.Email, endpoint.NormalizeSlug(currentEndpoint))
-		if !cli.ConfirmYesNo("Do you want to re-authenticate?", false) {
+		reauth, confirmErr := cli.ConfirmYesNoRequired("Do you want to re-authenticate?", false, false)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if !reauth {
 			fmt.Fprintln(out, "Authentication canceled.")
 			return nil
 		}
@@ -336,8 +340,16 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 
 				var selectedEndpoint string
 				if len(alternatives) == 1 {
-					// single alternative - ask yes/no
-					if cli.ConfirmYesNo(fmt.Sprintf("Would you like to authenticate to %s instead?", alternatives[0]), true) {
+					// single alternative - ask yes/no.
+					// Required, not ConfirmYesNo: this prompt defaults to YES,
+					// so a silent default would quietly authenticate against a
+					// DIFFERENT endpoint than the one asked for.
+					switchTo, switchErr := cli.ConfirmYesNoRequired(fmt.Sprintf("Would you like to authenticate to %s instead?", alternatives[0]), true, false)
+					switch {
+					case switchErr != nil:
+						fmt.Fprintf(out, "Not switching endpoints — nothing was available to answer the prompt.\n")
+						fmt.Fprintf(out, "Re-run in a terminal, or pass %s explicitly.\n", cli.StyleFlag.Render("--endpoint"))
+					case switchTo:
 						selectedEndpoint = alternatives[0]
 					}
 				} else {

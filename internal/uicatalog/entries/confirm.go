@@ -10,9 +10,11 @@ func init() {
 		Name:    "confirm",
 		Family:  uicatalog.FamilyInput,
 		Package: "internal/cli",
-		Exports: []string{"ConfirmYesNo", "ConfirmDangerousOperation", "ConfirmUninstall"},
+		Exports: []string{"ConfirmYesNo", "ConfirmYesNoRequired", "ConfirmDangerousOperation", "ConfirmUninstall"},
 		Since:   "0.4.0",
-		WhenToUse: "Yes/no gates with a clear default. For destructive operations " +
+		WhenToUse: "Yes/no gates with a clear default. When taking the default silently " +
+			"would lose work, use ConfirmYesNoRequired — it fails loudly instead of guessing " +
+			"when nobody is there to answer. For destructive operations " +
 			"use ConfirmDangerousOperation — it requires typing the exact target name, not just pressing y.",
 		WhenNotTo: "Selecting between equal options (use Select) or " +
 			"any flow where users will reflexively press enter — defaulting to dangerous is a footgun.",

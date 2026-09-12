@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -170,7 +171,15 @@ func runUninstall() error {
 	// confirm with user unless --force
 	if !uninstallForce {
 		repoName := filepath.Base(gitRoot)
-		if !confirmUninstallWithInput(repoName, selectedEndpoint, uninstallAllEndpoints, gitRoot) {
+		confirmed, confirmErr := confirmUninstallWithInput(repoName, selectedEndpoint, uninstallAllEndpoints, gitRoot)
+		if confirmErr != nil {
+			fmt.Fprintln(os.Stderr)
+			// Deliberately not the sentinel's own wording: --yes does not
+			// satisfy this gate, so pointing at it would send the user down a
+			// path that keeps failing.
+			return errors.New("uninstall requires confirmation: type the repository name at a terminal, or re-run with --force")
+		}
+		if !confirmed {
 			fmt.Fprintln(os.Stderr)
 			cli.PrintSuccess("Uninstall canceled")
 			return nil
@@ -284,9 +293,20 @@ func notifyCloudUninstall(marker *api.RepoMarkerData) {
 		fmt.Printf("%s %s %s\n", cli.StyleDim.Render("Visit"), cli.StyleCommand.Render(statusURL), cli.StyleDim.Render("to check status."))
 
 		// offer to open browser for immediate confirmation
+		confirmURL := fmt.Sprintf("https://%s/repos/%s/uninstall/confirm", endpoint.NormalizeSlug(ep), marker.RepoID)
 		fmt.Fprintln(os.Stderr)
-		if promptConfirmCloudDeletion() {
-			confirmURL := fmt.Sprintf("https://%s/repos/%s/uninstall/confirm", endpoint.NormalizeSlug(ep), marker.RepoID)
+
+		confirmNow, confirmErr := cli.ConfirmYesNoRequired("Confirm cloud resource deletion now?", false, uninstallForce)
+		switch {
+		case confirmErr != nil:
+			// Nobody was there to answer. The uninstall request is submitted
+			// but unconfirmed, so this link is the only thing standing between
+			// the user and cloud records that outlive the local uninstall.
+			// Silently skipping the step is how those records got stranded.
+			slog.Warn("uninstall cloud confirmation", "skipped", "no interactive input", "url", confirmURL)
+			cli.PrintWarning("Cloud deletion is still unconfirmed — nothing was available to answer the prompt.")
+			fmt.Printf("%s %s\n", cli.StyleDim.Render("Confirm here:"), cli.StyleCommand.Render(confirmURL))
+		case confirmNow:
 			if err := openBrowserForUninstall(confirmURL); err != nil {
 				slog.Warn("failed to open browser", "error", err)
 				fmt.Println(cli.StyleWarning.Render("⚠ Could not open browser."))
@@ -294,23 +314,10 @@ func notifyCloudUninstall(marker *api.RepoMarkerData) {
 			} else {
 				fmt.Println(cli.StyleSuccess.Render("✓ Opened browser for confirmation"))
 			}
+		default:
+			fmt.Printf("%s %s\n", cli.StyleDim.Render("Confirm later at:"), cli.StyleCommand.Render(confirmURL))
 		}
 	}
-}
-
-// promptConfirmCloudDeletion asks the user if they want to confirm cloud resource deletion now.
-// Returns true if user wants to proceed, false otherwise. Default is No.
-func promptConfirmCloudDeletion() bool {
-	fmt.Printf("%s [yN]: ", cli.StyleDim.Render("Confirm cloud resource deletion now?"))
-
-	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
-	if err != nil {
-		return false
-	}
-
-	input = strings.TrimSpace(strings.ToLower(input))
-	return input == "y" || input == "yes"
 }
 
 // openBrowserForUninstall opens the given URL in the default browser.
@@ -433,7 +440,11 @@ func selectEndpointForUninstall(gitRoot string, endpoints []string) (string, boo
 
 // confirmUninstallWithInput prompts user for confirmation by typing repo name or "uninstall"
 // returns true if user confirms, false otherwise
-func confirmUninstallWithInput(repoName, selectedEndpoint string, allEndpoints bool, gitRoot string) bool {
+// A read that yields nothing at all returns ErrConfirmationRequired so the
+// caller can fail loudly; --yes deliberately does NOT satisfy this gate, since
+// typing the repository name is exactly the step meant to resist automation.
+// --force remains the explicit escape hatch.
+func confirmUninstallWithInput(repoName, selectedEndpoint string, allEndpoints bool, gitRoot string) (bool, error) {
 	fmt.Fprintln(os.Stderr)
 	fmt.Println(cli.StyleError.Bold(true).Render("DANGER ZONE"))
 	fmt.Fprintln(os.Stderr)
@@ -467,9 +478,11 @@ func confirmUninstallWithInput(repoName, selectedEndpoint string, allEndpoints b
 
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
-	if err != nil {
-		slog.Error("failed to read confirmation input", "error", err)
-		return false
+	// A final line with no trailing newline arrives as data and io.EOF at once;
+	// only a read that produced nothing means nobody was there.
+	if err != nil && strings.TrimSpace(input) == "" {
+		slog.Warn("uninstall confirmation", "skipped", "no interactive input")
+		return false, cli.ErrConfirmationRequired
 	}
 
 	input = strings.TrimSpace(input)
@@ -477,11 +490,11 @@ func confirmUninstallWithInput(repoName, selectedEndpoint string, allEndpoints b
 		fmt.Fprintln(os.Stderr)
 		fmt.Println(cli.StyleError.Render("Confirmation failed."))
 		fmt.Printf("Expected: %s or %s, got: %s\n", repoName, "uninstall", input)
-		return false
+		return false, nil
 	}
 
 	slog.Info("uninstall confirmed", "repo", repoName, "input", input)
-	return true
+	return true, nil
 }
 
 // showLedgerBackupWarning checks if a ledger exists and warns the user to back it up

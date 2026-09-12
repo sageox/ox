@@ -1329,7 +1329,7 @@ func checkLedgerPathMismatch(fix bool) checkResult {
 				fmt.Printf("    Default path: %s\n", defaultPath)
 				fmt.Println()
 
-				if cli.ConfirmYesNo("Add this ledger path to config.local.toml?", true) {
+				if cli.AssumeYes() || cli.ConfirmYesNo("Add this ledger path to config.local.toml?", true) {
 					if localCfg.Ledger == nil {
 						localCfg.Ledger = &config.LedgerConfig{}
 					}
@@ -1386,7 +1386,7 @@ func checkLedgerPathMismatch(fix bool) checkResult {
 		// decide what to offer based on what exists
 		if defaultExists && !configuredExists {
 			// default exists, configured does not - suggest using default
-			if cli.ConfirmYesNo("Update config to use the default path (where ledger exists)?", true) {
+			if cli.AssumeYes() || cli.ConfirmYesNo("Update config to use the default path (where ledger exists)?", true) {
 				localCfg.Ledger.Path = defaultPath
 				if err := config.SaveLocalConfig(gitRoot, localCfg); err != nil {
 					return FailedCheck("Ledger path config", "save failed", err.Error())
@@ -1406,7 +1406,7 @@ func checkLedgerPathMismatch(fix bool) checkResult {
 				"Review and remove duplicate ledger, then update config")
 		} else {
 			// neither exists - offer to update config to default (for future clone)
-			if cli.ConfirmYesNo("Neither path exists. Update config to use default path?", true) {
+			if cli.AssumeYes() || cli.ConfirmYesNo("Neither path exists. Update config to use default path?", true) {
 				localCfg.Ledger.Path = defaultPath
 				if err := config.SaveLocalConfig(gitRoot, localCfg); err != nil {
 					return FailedCheck("Ledger path config", "save failed", err.Error())

@@ -121,7 +121,7 @@ func fixLegacyStructure(gitRoot string, localCfg *config.LocalConfig, issue repo
 	fmt.Println("  on next `ox doctor --fix` if the old one is removed.")
 	fmt.Println()
 
-	if cli.ConfirmYesNo("Continue using the current location for now?", true) {
+	if cli.AssumeYes() || cli.ConfirmYesNo("Continue using the current location for now?", true) {
 		// update config to explicitly use the current path
 		localCfg.Ledger = &config.LedgerConfig{
 			Path: issue.path,
@@ -141,7 +141,7 @@ func fixBrokenSymlink(localCfg *config.LocalConfig, issue repoPathIssue) bool {
 	fmt.Println("  The symlink for this team context is broken.")
 	fmt.Println()
 
-	if !cli.ConfirmYesNo("Remove broken symlink and re-clone from cloud?", true) {
+	if !cli.AssumeYes() && !cli.ConfirmYesNo("Remove broken symlink and re-clone from cloud?", true) {
 		fmt.Println("  Skipped.")
 		fmt.Println()
 		return false
@@ -276,7 +276,7 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 		case "missing", "empty-dir", "not-git-repo":
 			// for directories with potential data, ask before cloning
 			if issue.issue == "not-git-repo" {
-				if !cli.ConfirmYesNo("Clone from cloud?", true) {
+				if !cli.AssumeYes() && !cli.ConfirmYesNo("Clone from cloud?", true) {
 					skipped++
 					fmt.Println("  Skipped.")
 					fmt.Println()
@@ -671,7 +671,7 @@ func cloneRepoForFix(issue repoPathIssue) error {
 			fmt.Println()
 
 			// ask for confirmation - move, not delete
-			if !cli.ConfirmYesNo("Move this directory aside and clone fresh?", true) {
+			if !cli.AssumeYes() && !cli.ConfirmYesNo("Move this directory aside and clone fresh?", true) {
 				return fmt.Errorf("user declined to move directory")
 			}
 		}

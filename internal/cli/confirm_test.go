@@ -363,3 +363,166 @@ func TestDangerousOperationWarning(t *testing.T) {
 		assert.Contains(t, output, expected, "DangerousOperationWarning() output missing %q", expected)
 	}
 }
+
+// withStdin points os.Stdin at a pipe preloaded with input and silences
+// stdout for the duration of fn.
+func withStdin(t *testing.T, input string, fn func()) {
+	t.Helper()
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdin = r
+	if _, err := w.Write([]byte(input)); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+	w.Close()
+	defer func() { os.Stdin = oldStdin }()
+
+	oldStdout := os.Stdout
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	os.Stdout = devNull
+	defer func() {
+		os.Stdout = oldStdout
+		devNull.Close()
+	}()
+
+	fn()
+}
+
+// TestConfirmYesNoRequired_TellsDeclinedApartFromUnanswered is the regression
+// gate for the reported failure: with nothing on stdin, ox took the default
+// silently — a login that never happened, a logout that never happened, and an
+// uninstall that cleaned up locally while leaving cloud records behind.
+func TestConfirmYesNoRequired_TellsDeclinedApartFromUnanswered(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		defaultYes bool
+		force      bool
+		assumeYes  bool
+		want       bool
+		wantErr    error
+	}{
+		{
+			name:    "closed stdin is not an answer",
+			input:   "",
+			wantErr: ErrConfirmationRequired,
+		},
+		{
+			name:       "closed stdin is not an answer even when the default is yes",
+			input:      "",
+			defaultYes: true,
+			wantErr:    ErrConfirmationRequired,
+		},
+		{
+			name:    "whitespace-only stdin is not an answer",
+			input:   "   ",
+			wantErr: ErrConfirmationRequired,
+		},
+		{
+			name:    "garbage at EOF does not spin forever",
+			input:   "maybe",
+			wantErr: ErrConfirmationRequired,
+		},
+		{
+			// a piped answer is a real answer; requiring a TTY would break
+			// every script that answers honestly
+			name:  "piped yes is accepted without a tty",
+			input: "y\n",
+			want:  true,
+		},
+		{
+			name:  "piped yes without a trailing newline is accepted",
+			input: "y",
+			want:  true,
+		},
+		{
+			name:  "piped no is a real decline, not a missing answer",
+			input: "n\n",
+			want:  false,
+		},
+		{
+			name:       "deliberate blank enter takes the default",
+			input:      "\n",
+			defaultYes: true,
+			want:       true,
+		},
+		{
+			name:       "deliberate blank enter takes a false default",
+			input:      "\n",
+			defaultYes: false,
+			want:       false,
+		},
+		{
+			name:  "force answers yes without reading stdin",
+			input: "",
+			force: true,
+			want:  true,
+		},
+		{
+			name:      "global --yes answers yes without reading stdin",
+			input:     "",
+			assumeYes: true,
+			want:      true,
+		},
+		{
+			name:  "invalid input is re-prompted, then answered",
+			input: "maybe\ny\n",
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			SetAssumeYes(tt.assumeYes)
+			t.Cleanup(func() { SetAssumeYes(false) })
+
+			var got bool
+			var err error
+			withStdin(t, tt.input, func() {
+				got, err = ConfirmYesNoRequired("Continue?", tt.defaultYes, tt.force)
+			})
+
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestConfirmYesNo_KeepsSilentDefault pins the old behavior for the callers
+// that were deliberately left on ConfirmYesNo, so a future change to the shared
+// core cannot silently alter them.
+func TestConfirmYesNo_KeepsSilentDefault(t *testing.T) {
+	for _, defaultYes := range []bool{true, false} {
+		var got bool
+		withStdin(t, "", func() {
+			got = ConfirmYesNo("Continue?", defaultYes)
+		})
+		assert.Equal(t, defaultYes, got, "ConfirmYesNo with no input should still take the default")
+	}
+}
+
+// TestConfirmYesNoRequired_AssumeYesIsNeverInferred guards the rule that a
+// missing human must not be read as an agreeing human: only an explicit --yes
+// or OX_YES=1 sets it.
+func TestConfirmYesNoRequired_AssumeYesIsNeverInferred(t *testing.T) {
+	SetNoInteractive(true)
+	t.Cleanup(func() { SetNoInteractive(false) })
+
+	var err error
+	withStdin(t, "", func() {
+		_, err = ConfirmYesNoRequired("Continue?", true, false)
+	})
+	assert.ErrorIs(t, err, ErrConfirmationRequired,
+		"non-interactive mode must not imply consent")
+}

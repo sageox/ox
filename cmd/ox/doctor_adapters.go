@@ -301,6 +301,11 @@ func runAdapterFix(issue adapterprotocol.DiagnoseIssue, forceYes bool) error {
 			return fmt.Errorf("auto-fix refused: %q modifies global/system state and cannot be confirmed non-interactively; apply manually: %s",
 				strings.Join(issue.FixArgv, " "), issue.Fix)
 		}
+		// Deliberately NOT wired to --yes / cli.AssumeYes(): the argv here is
+		// supplied by an adapter, not by ox, and it escalates to global or
+		// system git scope. "answer yes to prompts" must not become "let any
+		// installed adapter mutate global config unattended" — this one keeps
+		// requiring a live human.
 		if !cli.ConfirmYesNo("Run this adapter-requested command?", false) {
 			return fmt.Errorf("auto-fix declined")
 		}

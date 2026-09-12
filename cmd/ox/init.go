@@ -437,7 +437,11 @@ func runInit() error {
 			slog.Debug("failed to fetch teams", "error", err)
 			cli.PrintWarning(fmt.Sprintf("Could not fetch teams from %s: %v", endpoint.NormalizeSlug(currentEP), err))
 			fmt.Println()
-			if !cli.ConfirmYesNo("Continue without team selection? (a new team may be created)", false) {
+			proceed, confirmErr := cli.ConfirmYesNoRequired("Continue without team selection? (a new team may be created)", false, false)
+			if confirmErr != nil {
+				return fmt.Errorf("cannot reach %s to list teams, and %w; pass --team explicitly", endpoint.NormalizeSlug(currentEP), confirmErr)
+			}
+			if !proceed {
 				return fmt.Errorf("team selection canceled")
 			}
 		} else if reposResp != nil && len(reposResp.TeamMembershipsFromRepos()) > 0 {
@@ -824,7 +828,16 @@ func runInit() error {
 		fmt.Printf("  Current: %s\n", currentEndpoint)
 		fmt.Println()
 		fmt.Println("Re-registering will associate this repo with the new endpoint.")
-		if !cli.ConfirmYesNo("Continue?", true) {
+		// Required, not ConfirmYesNo: this prompt defaults to YES, and
+		// registration has no inverse in the CLI — a silent default would
+		// rebind the repo to a different endpoint with nobody having agreed.
+		proceed, confirmErr := cli.ConfirmYesNoRequired("Continue?", true, false)
+		if confirmErr != nil {
+			fmt.Println()
+			fmt.Printf("Aborted. Set SAGEOX_ENDPOINT=%s to use the stored endpoint.\n", cfg.Endpoint)
+			return fmt.Errorf("re-registering this repo to %s %w", endpoint.NormalizeSlug(currentEndpoint), confirmErr)
+		}
+		if !proceed {
 			fmt.Println()
 			fmt.Printf("Aborted. Set SAGEOX_ENDPOINT=%s to use the stored endpoint.\n", cfg.Endpoint)
 			return nil
