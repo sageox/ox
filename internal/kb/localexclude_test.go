@@ -180,3 +180,97 @@ func TestEnsureLocalExcludes_Errors(t *testing.T) {
 	_, err = EnsureLocalExcludes(t.TempDir())
 	assert.Error(t, err, "must refuse a non-git directory")
 }
+
+// TestEnsureLocalExcludes_FailurePaths drives each reachable failure in
+// the exclude writer so a broken clone surfaces an error instead of a
+// silent no-op (the daemon logs it and continues; a silent nil would hide
+// that meta.json will show up as untracked forever).
+func TestEnsureLocalExcludes_FailurePaths(t *testing.T) {
+	t.Run("info_is_a_file", func(t *testing.T) {
+		dir := mkGitDir(t)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "info"), []byte("x"), 0o644))
+		_, err := EnsureLocalExcludes(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "create info dir")
+	})
+	t.Run("exclude_is_a_directory", func(t *testing.T) {
+		dir := mkGitDir(t)
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, localExcludeRelPath), 0o755))
+		_, err := EnsureLocalExcludes(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "read info/exclude")
+	})
+	t.Run("info_dir_read_only", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores directory permissions")
+		}
+		dir := mkGitDir(t)
+		info := filepath.Join(dir, ".git", "info")
+		require.NoError(t, os.MkdirAll(info, 0o755))
+		require.NoError(t, os.Chmod(info, 0o555))
+		t.Cleanup(func() { _ = os.Chmod(info, 0o755) })
+		_, err := EnsureLocalExcludes(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "write info/exclude")
+	})
+}
+
+// TestWriteFileAtomic_FailurePaths covers the atomic writer's own error
+// branches: an unwritable directory and a rename onto a non-empty
+// directory. A successful write must leave no temp file behind.
+func TestWriteFileAtomic_FailurePaths(t *testing.T) {
+	t.Run("success_leaves_no_temp", func(t *testing.T) {
+		dir := t.TempDir()
+		full := filepath.Join(dir, "out")
+		require.NoError(t, writeFileAtomic(full, "hello\n"))
+		got, err := os.ReadFile(full)
+		require.NoError(t, err)
+		assert.Equal(t, "hello\n", string(got))
+		entries, err := os.ReadDir(dir)
+		require.NoError(t, err)
+		assert.Len(t, entries, 1, "temp file must be renamed away, not left behind")
+	})
+	t.Run("rename_onto_nonempty_dir_fails", func(t *testing.T) {
+		dir := t.TempDir()
+		full := filepath.Join(dir, "out")
+		require.NoError(t, os.MkdirAll(filepath.Join(full, "child"), 0o755))
+		err := writeFileAtomic(full, "x")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "rename")
+		entries, _ := os.ReadDir(dir)
+		assert.Len(t, entries, 1, "temp file must be cleaned up after a failed rename")
+	})
+	t.Run("unwritable_dir_fails", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores directory permissions")
+		}
+		dir := t.TempDir()
+		require.NoError(t, os.Chmod(dir, 0o555))
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+		err := writeFileAtomic(filepath.Join(dir, "out"), "x")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "create temp")
+	})
+	t.Run("closed_file_write_fails", func(t *testing.T) {
+		f, err := os.CreateTemp(t.TempDir(), "closed-*")
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+		assert.Error(t, fillAndClose(f, "x"), "writing to a closed file must report an error")
+	})
+}
+
+// TestEnsureMergeAttributes_WriteFailure covers the merge-attrs writer's
+// error branch now that it shares writeFileAtomic.
+func TestEnsureMergeAttributes_WriteFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := mkGitDir(t)
+	info := filepath.Join(dir, ".git", "info")
+	require.NoError(t, os.MkdirAll(info, 0o755))
+	require.NoError(t, os.Chmod(info, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(info, 0o755) })
+	_, err := EnsureMergeAttributes(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "write info/attributes")
+}

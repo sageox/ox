@@ -13,6 +13,7 @@
 package kb
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -202,16 +203,10 @@ func writeFileAtomic(full, content string) error {
 	// best-effort cleanup if we bail before rename
 	defer func() { _ = os.Remove(tmpName) }()
 
-	if _, err := tmp.WriteString(content); err != nil {
-		_ = tmp.Close()
+	// write + fsync + close as one step: any failure here means the temp
+	// file is not trustworthy, and the deferred remove discards it.
+	if err := fillAndClose(tmp, content); err != nil {
 		return fmt.Errorf("write temp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("fsync temp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp: %w", err)
 	}
 	if err := os.Chmod(tmpName, 0o644); err != nil {
 		return fmt.Errorf("chmod temp: %w", err)
@@ -220,4 +215,13 @@ func writeFileAtomic(full, content string) error {
 		return fmt.Errorf("rename: %w", err)
 	}
 	return nil
+}
+
+// fillAndClose writes content, fsyncs, and closes f. The file is always
+// closed on return; the first error wins.
+func fillAndClose(f *os.File, content string) error {
+	_, writeErr := f.WriteString(content)
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	return errors.Join(writeErr, syncErr, closeErr)
 }

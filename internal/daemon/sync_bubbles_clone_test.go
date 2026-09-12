@@ -758,3 +758,46 @@ resolve auto data/
 	require.NoError(t, err)
 	assert.NotContains(t, string(statusOut), "UU", "no unmerged paths after manifest-driven resolve")
 }
+
+// TestSyncBubbles_LocalExcludeFailure_IsNonFatal verifies that a broken
+// .git/info (here: a regular file where the directory should be) makes
+// the local-exclude install fail loudly in the log but does not stop the
+// reconcile: meta.json is still written. Failure prevented: a cosmetic
+// ignore-rule problem escalating into a bubble that never gets metadata.
+func TestSyncBubbles_LocalExcludeFailure_IsNonFatal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	kbTestEnv(t)
+	s, _ := kbTestScheduler(t)
+
+	bareDir, _ := seedKBRemote(t, nil)
+	bubble := api.KB{
+		KBID:    "kb_excludefail",
+		KBType:  api.KBTypeTeam,
+		Slug:    "excludefail",
+		RepoURL: "file://" + bareDir,
+	}
+	s.SetKBBubbleListerFactory(func(_, _ string) KBBubbleLister {
+		return &fakeKBLister{bubbles: []api.KB{bubble}}
+	})
+
+	s.syncBubbles(context.Background())
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
+	require.DirExists(t, filepath.Join(target, ".git"))
+
+	// break .git/info and drop meta.json so the next pass has to rewrite it.
+	require.NoError(t, os.RemoveAll(filepath.Join(target, ".git", "info")))
+	require.NoError(t, os.WriteFile(filepath.Join(target, ".git", "info"), []byte("not a dir"), 0o644))
+	require.NoError(t, os.Remove(filepath.Join(target, ".sageox", "meta.json")))
+
+	s.syncBubbles(context.Background())
+
+	require.FileExists(t, filepath.Join(target, ".sageox", "meta.json"),
+		"reconcile must still write meta.json when the exclude install fails")
+	_, statErr := os.Stat(filepath.Join(target, ".sageox", ".gitignore"))
+	assert.True(t, os.IsNotExist(statErr), "an exclude failure must never fall back to a committed .sageox/.gitignore")
+}
