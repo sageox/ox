@@ -39,6 +39,7 @@ var backtickRegex = regexp.MustCompile("`([^`]+)`")
 
 var jsonMode bool
 var noInteractive bool
+var assumeYes bool
 
 func SetJSONMode(enabled bool) {
 	jsonMode = enabled
@@ -48,6 +49,18 @@ func SetJSONMode(enabled bool) {
 // When enabled, spinners and TUI elements are disabled.
 func SetNoInteractive(enabled bool) {
 	noInteractive = enabled
+}
+
+// SetAssumeYes sets the global "answer yes to every confirmation" flag,
+// from --yes or OX_YES=1. Deliberately separate from SetNoInteractive:
+// "there is no human watching" must never imply "the absent human agrees."
+func SetAssumeYes(enabled bool) {
+	assumeYes = enabled
+}
+
+// AssumeYes reports whether confirmations should be auto-approved.
+func AssumeYes() bool {
+	return assumeYes
 }
 
 // IsInteractive returns true if interactive mode is enabled.

@@ -88,6 +88,11 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	if cmd.Flags().Changed("no-interactive") {
 		cfg.NoInteractive, _ = cmd.Flags().GetBool("no-interactive")
 	}
+	// Picks up either the root persistent --yes or a command's own --yes/-y
+	// (doctor, team invite): cmd.Flags() merges both, local winning.
+	if cmd.Flags().Changed("yes") {
+		cfg.AssumeYes, _ = cmd.Flags().GetBool("yes")
+	}
 
 	// initialize logger
 	logger.Init(cfg.Verbose)
@@ -122,6 +127,7 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	// set global output mode
 	SetJSONMode(cfg.JSON)
 	SetNoInteractive(cfg.NoInteractive)
+	SetAssumeYes(cfg.AssumeYes)
 	// Update notices are human-facing prose; either machine-output mode turns
 	// one into a parse error for whatever is reading the stream. Wired here so
 	// every command inherits it rather than each notice site re-deriving it.

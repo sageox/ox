@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -166,10 +167,61 @@ func ConfirmDangerousOperation(operationName, exactMatch string, force bool) err
 	return nil
 }
 
+// ErrConfirmationRequired is returned by ConfirmYesNoRequired when nobody was
+// there to answer — stdin produced no input at all (closed, empty, or
+// unreadable) — as opposed to a user who was actually present and pressed
+// Enter to accept the default. Reaching this means the command must stop
+// rather than guess: a silent default here has repeatedly meant a login that
+// never happened, a logout that never happened, and an uninstall that cleaned
+// up locally while leaving cloud records behind.
+var ErrConfirmationRequired = errors.New("confirmation required: re-run in a terminal, or pass --yes")
+
 // ConfirmYesNo displays a yes/no prompt and loops until valid input.
 // Returns true if user confirms with y/yes, false for n/no.
 // Empty input uses the default specified by defaultYes.
+//
+// When no input can be gathered at all, this silently returns defaultYes —
+// unchanged from its long-standing behavior, preserved here for every existing
+// caller. Callers for whom that silent guess has a real cost should call
+// ConfirmYesNoRequired instead.
 func ConfirmYesNo(prompt string, defaultYes bool) bool {
+	answer, answered := confirmYesNoCore(prompt, defaultYes)
+	if !answered {
+		return defaultYes
+	}
+	return answer
+}
+
+// ConfirmYesNoRequired behaves like ConfirmYesNo, but returns
+// ErrConfirmationRequired instead of silently taking the default when no one
+// was there to answer. force (a command's own --force/--yes) and the global
+// --yes both short-circuit to an affirmative answer without prompting.
+//
+// Use this wherever taking the default silently would lose work or leave an
+// operation half-done.
+func ConfirmYesNoRequired(prompt string, defaultYes, force bool) (bool, error) {
+	if force || AssumeYes() {
+		return true, nil
+	}
+
+	answer, answered := confirmYesNoCore(prompt, defaultYes)
+	if !answered {
+		return false, ErrConfirmationRequired
+	}
+	return answer, nil
+}
+
+// confirmYesNoCore is the shared implementation behind ConfirmYesNo and
+// ConfirmYesNoRequired. answered reports whether answer reflects input a human
+// actually supplied — including a deliberate blank Enter, whether typed at a
+// terminal or piped in — as opposed to a fallback returned because stdin was
+// closed, empty, or unreadable.
+//
+// Note it does not consult IsInteractive(): `echo y | ox …` is a legitimate
+// answer even with no TTY, and rejecting it would break every scripted caller
+// that answers honestly. The distinction that matters is whether an answer
+// arrived, not whether a terminal was attached.
+func confirmYesNoCore(prompt string, defaultYes bool) (answer bool, answered bool) {
 	suffix := "[y/N]"
 	if defaultYes {
 		suffix = "[Y/n]"
@@ -180,21 +232,29 @@ func ConfirmYesNo(prompt string, defaultYes bool) bool {
 		fmt.Printf("%s %s: ", prompt, StyleDim.Render(suffix))
 
 		response, err := reader.ReadString('\n')
-		if err != nil {
-			return defaultYes
+		// A final line with no trailing newline arrives as data *and* io.EOF.
+		// That is a real answer, so only treat a read as unanswered when it
+		// yielded nothing at all.
+		if err != nil && strings.TrimSpace(response) == "" {
+			return defaultYes, false
 		}
 
 		response = strings.TrimSpace(strings.ToLower(response))
 
 		switch response {
 		case "":
-			return defaultYes
+			return defaultYes, true
 		case "y", "yes":
-			return true
+			return true, true
 		case "n", "no":
-			return false
+			return false, true
 		}
-		// invalid input, loop again
+
+		// Invalid input. Loop again only if there is more to read — otherwise
+		// the last line was garbage at EOF and re-prompting would spin forever.
+		if err != nil {
+			return defaultYes, false
+		}
 	}
 }
 

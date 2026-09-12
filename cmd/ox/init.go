@@ -437,8 +437,8 @@ func runInit() error {
 			slog.Debug("failed to fetch teams", "error", err)
 			cli.PrintWarning(fmt.Sprintf("Could not fetch teams from %s: %v", endpoint.NormalizeSlug(currentEP), err))
 			fmt.Println()
-			if !cli.ConfirmYesNo("Continue without team selection? (a new team may be created)", false) {
-				return fmt.Errorf("team selection canceled")
+			if teamErr := confirmContinueWithoutTeam(currentEP); teamErr != nil {
+				return teamErr
 			}
 		} else if reposResp != nil && len(reposResp.TeamMembershipsFromRepos()) > 0 {
 			// the repo may already be bound to a team from a prior init —
@@ -817,18 +817,15 @@ func runInit() error {
 	// call API to register repository
 	// check for endpoint mismatch
 	currentEndpoint := endpoint.Get()
-	if cfg.Endpoint != "" && cfg.Endpoint != currentEndpoint {
-		fmt.Println()
-		cli.PrintWarning("API endpoint mismatch detected")
-		fmt.Printf("  Stored:  %s\n", cfg.Endpoint)
-		fmt.Printf("  Current: %s\n", currentEndpoint)
-		fmt.Println()
-		fmt.Println("Re-registering will associate this repo with the new endpoint.")
-		if !cli.ConfirmYesNo("Continue?", true) {
-			fmt.Println()
-			fmt.Printf("Aborted. Set SAGEOX_ENDPOINT=%s to use the stored endpoint.\n", cfg.Endpoint)
-			return nil
-		}
+	proceed, confirmErr := confirmEndpointRebind(cfg.Endpoint, currentEndpoint)
+	if confirmErr != nil || !proceed {
+		// Init did not complete, so undo everything this run created, modified
+		// and staged — exactly as a failed registration below does. Returning
+		// here without rolling back leaves .sageox and the instruction-file
+		// edits on disk AND in the index, which makes an abort look like a
+		// half-finished init.
+		tracker.rollback(initQuiet)
+		return confirmErr
 	}
 
 	initAt := time.Now().UTC().Format(time.RFC3339)
@@ -2723,4 +2720,58 @@ func promptNoTeams() (bool, error) {
 	}
 
 	return true, nil
+}
+
+// confirmEndpointRebind asks before re-registering a repo against a different
+// endpoint than the one already stored. Returns (true, nil) when there is no
+// mismatch to resolve.
+//
+// The prompt defaults to YES, and registration has no inverse in the CLI — so
+// this uses ConfirmYesNoRequired rather than ConfirmYesNo: taking the default
+// with nobody there would rebind the repo to a different endpoint with no one
+// having agreed to it.
+func confirmEndpointRebind(storedEndpoint, currentEndpoint string) (bool, error) {
+	if storedEndpoint == "" || storedEndpoint == currentEndpoint {
+		return true, nil
+	}
+
+	fmt.Println()
+	cli.PrintWarning("API endpoint mismatch detected")
+	fmt.Printf("  Stored:  %s\n", storedEndpoint)
+	fmt.Printf("  Current: %s\n", currentEndpoint)
+	fmt.Println()
+	fmt.Println("Re-registering will associate this repo with the new endpoint.")
+
+	proceed, err := cli.ConfirmYesNoRequired("Continue?", true, false)
+	if err != nil {
+		abortEndpointRebind(storedEndpoint)
+		return false, fmt.Errorf("re-registering this repo to %s %w", endpoint.NormalizeSlug(currentEndpoint), err)
+	}
+	if !proceed {
+		abortEndpointRebind(storedEndpoint)
+		return false, nil
+	}
+	return true, nil
+}
+
+func abortEndpointRebind(storedEndpoint string) {
+	fmt.Println()
+	fmt.Printf("Aborted. Set SAGEOX_ENDPOINT=%s to use the stored endpoint.\n", storedEndpoint)
+}
+
+// confirmContinueWithoutTeam asks whether to proceed when the team list could
+// not be fetched. Returns nil to continue.
+//
+// Required, not ConfirmYesNo: an unanswered prompt here used to surface as the
+// bare "team selection canceled", which tells an unattended caller nothing
+// about what to do instead.
+func confirmContinueWithoutTeam(currentEP string) error {
+	proceed, err := cli.ConfirmYesNoRequired("Continue without team selection? (a new team may be created)", false, false)
+	if err != nil {
+		return fmt.Errorf("cannot reach %s to list teams, and %w; pass --team explicitly", endpoint.NormalizeSlug(currentEP), err)
+	}
+	if !proceed {
+		return fmt.Errorf("team selection canceled")
+	}
+	return nil
 }

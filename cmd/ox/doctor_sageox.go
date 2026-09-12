@@ -593,7 +593,7 @@ func promptOfflineMigration(forceYes bool) bool {
 	fmt.Println()
 	fmt.Println("Note: Your git user name and email will be shared with SageOx to facilitate team setup.")
 	fmt.Println()
-	return cli.ConfirmYesNo("Register this repository with SageOx?", false)
+	return cli.AssumeYes() || cli.ConfirmYesNo("Register this repository with SageOx?", false)
 }
 
 // registerRepoWithSageOx registers the repo with the SageOx API.

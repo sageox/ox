@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
@@ -32,68 +34,9 @@ var logoutCmd = &cobra.Command{
 		}
 
 		// determine which endpoint(s) to logout from
-		var endpointsToLogout []string
-
-		if logoutAll {
-			// logout from all endpoints
-			endpointsToLogout = loggedInEndpoints
-		} else if logoutEndpoint != "" {
-			// use specified endpoint
-			found := false
-			for _, ep := range loggedInEndpoints {
-				if ep == logoutEndpoint || endpoint.NormalizeSlug(ep) == endpoint.NormalizeSlug(logoutEndpoint) {
-					endpointsToLogout = []string{ep}
-					found = true
-					break
-				}
-			}
-			if !found {
-				return fmt.Errorf("not logged in to endpoint: %s", logoutEndpoint)
-			}
-		} else if len(loggedInEndpoints) == 1 {
-			// only one endpoint, use it
-			endpointsToLogout = loggedInEndpoints
-		} else if logoutForce {
-			// --force with multiple endpoints: log out from all (non-interactive)
-			endpointsToLogout = loggedInEndpoints
-		} else {
-			// multiple endpoints - prompt for selection
-			fmt.Println()
-			fmt.Println(cli.StyleDim.Render("You are logged into multiple SageOx endpoints."))
-			fmt.Println()
-
-			// display options
-			for i, ep := range loggedInEndpoints {
-				fmt.Printf("  %d. %s\n", i+1, ep)
-			}
-			fmt.Printf("  %d. All endpoints\n", len(loggedInEndpoints)+1)
-			fmt.Println()
-
-			// prompt for selection
-			var selection int
-			maxSelection := len(loggedInEndpoints) + 1
-			for {
-				fmt.Print("Select endpoint to logout (1-", maxSelection, "): ")
-				var input string
-				if _, err := fmt.Scanln(&input); err != nil {
-					// unreadable input (e.g. closed/EOF stdin) — cancel rather than
-					// spin forever re-prompting against a stream that can't answer.
-					fmt.Println("Logout canceled.")
-					return nil
-				}
-				n, err := fmt.Sscanf(input, "%d", &selection)
-				if err == nil && n == 1 && selection >= 1 && selection <= maxSelection {
-					break
-				}
-				fmt.Println(cli.StyleDim.Render("Invalid selection. Please enter a number."))
-			}
-
-			if selection == len(loggedInEndpoints)+1 {
-				// all endpoints selected
-				endpointsToLogout = loggedInEndpoints
-			} else {
-				endpointsToLogout = []string{loggedInEndpoints[selection-1]}
-			}
+		endpointsToLogout, selErr := selectLogoutEndpoints(loggedInEndpoints, logoutAll, logoutEndpoint, logoutForce)
+		if selErr != nil {
+			return selErr
 		}
 
 		// confirm before logging out (skip if --force)
@@ -104,7 +47,11 @@ var logoutCmd = &cobra.Command{
 			} else {
 				confirmMsg = fmt.Sprintf("Log out from %d endpoints?", len(endpointsToLogout))
 			}
-			if !cli.ConfirmYesNo(confirmMsg, false) {
+			confirmed, confirmErr := cli.ConfirmYesNoRequired(confirmMsg, false, false)
+			if confirmErr != nil {
+				return confirmErr
+			}
+			if !confirmed {
 				fmt.Println("Logout canceled.")
 				return nil
 			}
@@ -187,5 +134,68 @@ func stripExistingRemotes(ep string) {
 		if err := gitserver.StripRemoteCredentials(tc.Path); err != nil {
 			slog.Debug("failed to strip team context remote credentials", "team", tc.TeamName, "error", err)
 		}
+	}
+}
+
+// selectLogoutEndpoints resolves which endpoint(s) `ox logout` should act on.
+//
+// When several endpoints are logged in and none was named, this asks. If the
+// answer cannot be read it returns an error rather than canceling: canceling
+// exited 0 having revoked nothing and removed no local credentials, which is a
+// logout that silently did not happen. Which endpoint to log out of is a
+// selection, not a yes/no, so --yes cannot answer it either — the error names
+// the deterministic alternatives instead of guessing one.
+func selectLogoutEndpoints(loggedInEndpoints []string, all bool, specified string, force bool) ([]string, error) {
+	switch {
+	case all:
+		return loggedInEndpoints, nil
+
+	case specified != "":
+		for _, ep := range loggedInEndpoints {
+			if ep == specified || endpoint.NormalizeSlug(ep) == endpoint.NormalizeSlug(specified) {
+				return []string{ep}, nil
+			}
+		}
+		return nil, fmt.Errorf("not logged in to endpoint: %s", specified)
+
+	case len(loggedInEndpoints) == 1:
+		return loggedInEndpoints, nil
+
+	case force:
+		// --force with multiple endpoints: log out from all (non-interactive)
+		return loggedInEndpoints, nil
+	}
+
+	// multiple endpoints - prompt for selection
+	fmt.Println()
+	fmt.Println(cli.StyleDim.Render("You are logged into multiple SageOx endpoints."))
+	fmt.Println()
+
+	for i, ep := range loggedInEndpoints {
+		fmt.Printf("  %d. %s\n", i+1, ep)
+	}
+	fmt.Printf("  %d. All endpoints\n", len(loggedInEndpoints)+1)
+	fmt.Println()
+
+	maxSelection := len(loggedInEndpoints) + 1
+	for {
+		fmt.Print("Select endpoint to logout (1-", maxSelection, "): ")
+		var input string
+		if _, err := fmt.Scanln(&input); err != nil {
+			return nil, fmt.Errorf("logged into %d endpoints and no selection could be read from stdin; "+
+				"pass --endpoint <endpoint> to choose one, or --all to log out of every endpoint",
+				len(loggedInEndpoints))
+		}
+		// strconv.Atoi, not fmt.Sscanf("%d"): Sscanf stops at the first
+		// non-digit, so "1abc" would parse as 1 and silently log out of an
+		// endpoint the operator never typed.
+		selection, err := strconv.Atoi(strings.TrimSpace(input))
+		if err == nil && selection >= 1 && selection <= maxSelection {
+			if selection == maxSelection {
+				return loggedInEndpoints, nil
+			}
+			return []string{loggedInEndpoints[selection-1]}, nil
+		}
+		fmt.Println(cli.StyleDim.Render("Invalid selection. Please enter a number."))
 	}
 }

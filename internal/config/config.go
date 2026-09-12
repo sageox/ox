@@ -13,6 +13,12 @@ type Config struct {
 	Text          bool // human-readable text output (overrides JSON default)
 	Review        bool // security audit mode: both human summary and machine output
 	NoInteractive bool // disable spinners and TUI elements (auto-enabled in CI/ephemeral)
+	// AssumeYes answers every confirmation prompt affirmatively. Unlike
+	// NoInteractive it is never inferred from the environment: CI and agent
+	// harnesses must not silently acquire consent to destructive operations,
+	// which is the whole failure this flag exists to make impossible. It is
+	// set only by an explicit --yes or OX_YES=1.
+	AssumeYes bool
 }
 
 // Load creates a Config from environment variables only.
@@ -39,6 +45,7 @@ func Load() *Config {
 		// CI heuristics; both signals agree on the CI case today, but
 		// the redundancy is cheap.
 		NoInteractive: os.Getenv("OX_NO_INTERACTIVE") == "1" || isCI() || !runtime.Caps().Browser,
+		AssumeYes:     os.Getenv("OX_YES") == "1",
 	}
 }
 
