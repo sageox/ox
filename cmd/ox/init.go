@@ -818,11 +818,14 @@ func runInit() error {
 	// check for endpoint mismatch
 	currentEndpoint := endpoint.Get()
 	proceed, confirmErr := confirmEndpointRebind(cfg.Endpoint, currentEndpoint)
-	if confirmErr != nil {
+	if confirmErr != nil || !proceed {
+		// Init did not complete, so undo everything this run created, modified
+		// and staged — exactly as a failed registration below does. Returning
+		// here without rolling back leaves .sageox and the instruction-file
+		// edits on disk AND in the index, which makes an abort look like a
+		// half-finished init.
+		tracker.rollback(initQuiet)
 		return confirmErr
-	}
-	if !proceed {
-		return nil
 	}
 
 	initAt := time.Now().UTC().Format(time.RFC3339)
