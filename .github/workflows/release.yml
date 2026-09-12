@@ -19,9 +19,18 @@ env:
   RELEASE_TAG: ${{ inputs.tag }}
 
 jobs:
-  verify-inrepo:
+  # Separate from verify-inrepo on purpose. Seeing a draft requires write:
+  # GitHub hides draft releases from tokens without push access, and the
+  # get-release-by-tag endpoint omits drafts for every token, so `gh release
+  # view` only finds one via the list endpoint. This job never checks out the
+  # repository, so the elevated token is never exposed to repository code --
+  # actions/checkout persists it in git config, which would put a push-capable
+  # credential inside `make test-release`.
+  verify-draft:
     if: github.repository == 'sageox/ox'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Require an existing human-reviewed draft
         env:
@@ -33,6 +42,11 @@ jobs:
             exit 1
           fi
 
+  verify-inrepo:
+    if: github.repository == 'sageox/ox'
+    needs: verify-draft
+    runs-on: ubuntu-latest
+    steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
