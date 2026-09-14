@@ -143,10 +143,21 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string, kind manifest
 	// strip lfs config that git-lfs may have injected during clone
 	gitutil.StripLFSConfig(repoPath)
 
-	// ensure .sageox/.gitignore excludes daemon-written files (cache/, checkout.json, etc.)
-	// so they don't appear as untracked and block blue-green GC reclone
-	if err := EnsureCheckoutGitignoreCtx(ctx, repoPath); err != nil {
-		return nil, fmt.Errorf("ensure checkout .gitignore: %w", err)
+	// Ledgers and team contexts: commit .sageox/.gitignore so daemon-written
+	// files (cache/, checkout.json, etc.) never show as untracked and block
+	// blue-green GC reclone.
+	//
+	// Knowledge Bubbles are deliberately excluded. The committed file's
+	// blanket `*` rule reaches the bubble's main and makes the server-side
+	// Curator's `git add -A` skip its own .sageox/curator/ artifacts, so it
+	// re-drives every synthesis forever. Bubble sync is pull-only — the
+	// daemon never authors a commit in a bubble — and its local-only ignore
+	// rules go in .git/info/exclude instead (kb.EnsureLocalExcludes, applied
+	// by the bubble reconciler on every clone and pull).
+	if kind != manifest.RepoKindKB {
+		if err := EnsureCheckoutGitignoreCtx(ctx, repoPath); err != nil {
+			return nil, fmt.Errorf("ensure checkout .gitignore: %w", err)
+		}
 	}
 
 	return &TwoPhaseCloneResult{
