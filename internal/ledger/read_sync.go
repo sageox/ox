@@ -97,43 +97,61 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 	dirs := sparseCheckoutDirs()
 	result.Coverage.Paths = dirs
 	workPath := opts.Path
-	fresh := false
+	staged := false
 	if _, err := os.Lstat(opts.Path); os.IsNotExist(err) {
-		fresh = true
+		staged = true
 	} else if err != nil || !safeReadDirectory(opts.Path) || !Exists(opts.Path) {
 		result.ErrorClass = "interrupted"
 		return result
 	}
 	previous := loadReadReceipt(opts.Path, opts.RepoID, opts.Endpoint)
-	if !fresh {
+	clone := false
+	if staged {
+		if err := os.MkdirAll(filepath.Dir(opts.Path), 0700); err != nil {
+			result.ErrorClass = "interrupted"
+			return result
+		}
+		workPath = readStagePath(opts.Path)
+		clone = !resumableReadStage(ctx, transport, workPath, opts, dirs)
+		if clone {
+			// resumableReadStage also returns false when cancellation cut its
+			// inspection short. Refuse rather than delete a stage this attempt
+			// never finished reading.
+			if ctx.Err() != nil {
+				result.ErrorClass = "interrupted"
+				return result
+			}
+			if err := os.RemoveAll(workPath); err != nil {
+				result.ErrorClass = "interrupted"
+				return result
+			}
+			if err := os.MkdirAll(workPath, 0700); err != nil {
+				result.ErrorClass = "interrupted"
+				return result
+			}
+		}
+	} else {
 		// Inspect all local content before fetch or dehydration. Verified hydration
 		// is an expected Git diff; any other local edit is preserved and refused.
 		if _, err := readFiles(ctx, transport, workPath, dirs, false); err != nil {
 			result.ErrorClass = readErrorClass(ctx, err)
 			return result
 		}
-		if err := publishReadReceipt(opts.Path, readReceipt{ReadSyncResult: result, ReadURL: opts.ReadURL}, previous); err != nil {
+	}
+	if !clone {
+		// Durably invalidate before mutating. For a published checkout this is the
+		// readiness its readers consult; a resumed stage can carry a ready receipt
+		// from an attempt whose publishing rename failed, and it is cleared here.
+		if err := publishReadReceipt(workPath, readReceipt{ReadSyncResult: result, ReadURL: opts.ReadURL}, previous); err != nil {
 			result.ErrorClass = "interrupted"
 			return result
 		}
-	} else {
-		if err := os.MkdirAll(filepath.Dir(opts.Path), 0700); err != nil {
-			result.ErrorClass = "interrupted"
-			return result
-		}
-		stage, err := os.MkdirTemp(filepath.Dir(opts.Path), ".ox-read-clone-*")
-		if err != nil {
-			result.ErrorClass = "interrupted"
-			return result
-		}
-		workPath = stage
-		defer os.RemoveAll(stage) // only our unpublished, newly created staging area
 	}
 
 	var observed time.Time
 	var remoteHead string
 	var syncErr error
-	if fresh {
+	if clone {
 		_, syncErr = runReadGit(ctx, transport, true, filepath.Dir(workPath), "clone", "--no-checkout", "--filter=blob:none", "--", opts.ReadURL, workPath)
 		if syncErr == nil {
 			observed = time.Now().UTC()
@@ -175,10 +193,19 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 	if syncErr == nil {
 		_, syncErr = runReadGit(ctx, transport, true, workPath, "checkout", "--no-overwrite-ignore", "--detach", remoteHead)
 	}
+	if syncErr == nil && clone {
+		// A stage is continuable only once it has a worktree, so bind it to this
+		// identity here — before hydration, the step that takes the longest.
+		if err := publishReadReceipt(workPath, readReceipt{ReadSyncResult: result, ReadURL: opts.ReadURL}, nil); err != nil {
+			syncErr = errors.New("interrupted")
+		}
+	}
 	if syncErr == nil {
 		syncErr = hydrateReadFiles(ctx, transport, workPath, opts, dirs)
 	}
-	if fresh && syncErr != nil {
+	if staged && syncErr != nil {
+		// Keep the stage: it holds every object this attempt transferred, and it
+		// stays unpublished until resumableReadStage re-proves it.
 		result.ErrorClass = readErrorClass(ctx, syncErr)
 		return result
 	}
@@ -195,14 +222,14 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 	if syncErr != nil {
 		result.ErrorClass = readErrorClass(ctx, syncErr)
 	}
-	if fresh && !result.Ready {
+	if staged && !result.Ready {
 		return result
 	}
 	if err := publishReadReceipt(workPath, readReceipt{ReadSyncResult: result, ReadURL: opts.ReadURL}, nil); err != nil {
 		result.Ready, result.ErrorClass = false, "interrupted"
 		return result
 	}
-	if fresh {
+	if staged {
 		if err := os.Rename(workPath, opts.Path); err != nil {
 			result.Ready, result.ErrorClass = false, "interrupted"
 			return result
@@ -212,6 +239,32 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 		}
 	}
 	return result
+}
+
+// readStagePath names the unpublished staging clone for a checkout. It is a
+// sibling of path so publishing stays a same-filesystem rename, and it is
+// deterministic so a cold clone interrupted during hydration can be continued
+// instead of restarting from an empty directory.
+func readStagePath(path string) string {
+	return filepath.Join(filepath.Dir(path), ".ox-read-clone-"+filepath.Base(path))
+}
+
+// resumableReadStage reports whether an earlier interrupted cold clone left a
+// stage this attempt may continue. The stage must be a Git checkout carrying a
+// receipt this same repo identity, endpoint, and read URL wrote after its own
+// checkout succeeded, and its worktree must still match HEAD. A stage failing
+// any of those holds no published data, dirty file, or local commit — it is this
+// command's own scratch space — so the caller replaces it rather than refusing.
+func resumableReadStage(ctx context.Context, transport *gitserver.ReadTransport, stage string, opts ReadSyncOptions, dirs []string) bool {
+	if !safeReadDirectory(stage) || !Exists(stage) {
+		return false
+	}
+	receipt := loadReadReceiptAt(stage, opts.Path, opts.RepoID, opts.Endpoint)
+	if receipt == nil || receipt.ReadURL != opts.ReadURL {
+		return false
+	}
+	_, err := readFiles(ctx, transport, stage, dirs, false)
+	return err == nil
 }
 
 func validReadTime(t *time.Time) bool {
@@ -727,13 +780,20 @@ func checkReadinessLocked(ctx context.Context, path, repoID, endpoint string) Re
 const readReceiptRelative = ".sageox/cache/read-sync/receipt.json"
 
 func loadReadReceipt(path, repoID, endpoint string) *readReceipt {
-	if !safeReadParents(path, filepath.Join(path, ".sageox", "cache", "read-sync")) {
+	return loadReadReceiptAt(path, path, repoID, endpoint)
+}
+
+// loadReadReceiptAt reads dir's receipt and accepts it only for the checkout
+// path it names. The two differ for a staging clone, which carries the receipt
+// of the destination it has not been published to yet.
+func loadReadReceiptAt(dir, path, repoID, endpoint string) *readReceipt {
+	if !safeReadParents(dir, filepath.Join(dir, ".sageox", "cache", "read-sync")) {
 		return nil
 	}
-	if info, err := os.Lstat(filepath.Join(path, readReceiptRelative)); err != nil || !info.Mode().IsRegular() {
+	if info, err := os.Lstat(filepath.Join(dir, readReceiptRelative)); err != nil || !info.Mode().IsRegular() {
 		return nil
 	}
-	f, err := os.Open(filepath.Join(path, readReceiptRelative))
+	f, err := os.Open(filepath.Join(dir, readReceiptRelative))
 	if err != nil {
 		return nil
 	}
