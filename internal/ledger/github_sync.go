@@ -384,9 +384,36 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 		}
 
 		pr.Commits = commits
-		if err := WriteGitHubPR(ledgerPath, &pr); err != nil {
+		newPath, err := writeGitHubPR(ledgerPath, &pr)
+		if err != nil {
 			logger.Warn("write backfilled PR failed", "pr", pr.Number, "error", err)
 			continue
+		}
+
+		// Drop the snapshot we just enriched. Both files describe the SAME
+		// GitHub state — backfilling commits does not change the PR upstream,
+		// so updated_at is identical in both — and every consumer that has to
+		// pick one (findLatestFile here, candidateBeats in
+		// internal/codedb/index, the dedup above) orders by updated_at first.
+		// With that key tied the choice falls through to mtime, which ties too
+		// when both writes land in the same tick, and the winner is then the
+		// content hash: a coin flip that can hand a reader the commit-less
+		// snapshot. Leaving a strictly-less-complete duplicate of the same
+		// state on disk is what makes the tie possible, so remove it.
+		//
+		// Deliberately NOT fixed by bumping pr.UpdatedAt: that field mirrors
+		// GitHub's own updated_at, and RebuildSyncStateFromFiles feeds the max
+		// of it into GitHubTypeSyncState.LastSyncAt, which is the `since`
+		// cursor for the next incremental fetch. Inflating it would make ox
+		// skip PRs updated between GitHub's timestamp and ours.
+		// The inequality is an invariant guard, not a reachable case: adding
+		// commits always changes the content, so it always changes the hash.
+		// It is here because the cost of it ever being wrong is deleting the
+		// snapshot we just wrote.
+		if newPath != info.path {
+			if rmErr := os.Remove(info.path); rmErr != nil && !os.IsNotExist(rmErr) {
+				logger.Warn("remove superseded PR snapshot failed", "pr", pr.Number, "path", info.path, "error", rmErr)
+			}
 		}
 
 		backfilled++
