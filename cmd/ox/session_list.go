@@ -64,11 +64,18 @@ session data reflects the --repo target, but ledger-merged sessions still
 come from the CURRENT directory's configured ledger — this only matters
 if the two repos use different team ledgers.
 
+Pass a canonical ` + "`repo_<uuid>`" + ` to --repo instead to read a hosted ledger kept
+by 'ox sync --read-only'. That form needs no checkout and no project: it
+selects the ledger with SAGEOX_ENDPOINT and XDG_DATA_HOME, and reads it
+while holding the same lock the refresh takes, so a concurrent refresh
+cannot show a half-written checkout. See docs/specs/ledger-read-sync.md.
+
 Examples:
   ox session list              # show last 10 from past 7 days
   ox session list --limit 20   # show last 20 from past 7 days
   ox session list --all        # show all sessions (may be slow)
-  ox session list --repo /path/to/other/repo  # list a different repo's sessions`,
+  ox session list --repo /path/to/other/repo  # list a different repo's sessions
+  ox session list --repo repo_019ff2f5-2079-7be1-b05e-8caad2772e61 --json  # hosted ledger`,
 	RunE: runSessionList,
 }
 
@@ -76,7 +83,7 @@ func init() {
 	sessionCmd.AddCommand(sessionListCmd)
 	sessionListCmd.Flags().Int("limit", 10, "maximum sessions to show (0 for no limit)")
 	sessionListCmd.Flags().Bool("all", false, "show all sessions regardless of age (may be slow)")
-	sessionListCmd.Flags().String("repo", "", "list sessions for a different repo by filesystem path (must be the repo root; default: current repo)")
+	sessionListCmd.Flags().String("repo", "", "another repo's sessions: a filesystem path (must be the repo root), or a canonical repo_<uuid> to read a hosted ledger (default: current repo)")
 }
 
 // sessionListOutput is the JSON output format for session list.
@@ -113,6 +120,12 @@ type sessionListEntry struct {
 const sessionListAgentGuidance = "Pick sessions by title/summary; run 'ox session view <name>' to dig in. If hydration_status='dehydrated', run 'ox session download <name>' first."
 
 func runSessionList(cmd *cobra.Command, args []string) error {
+	// A canonical repo_<uuid> selects a hosted ledger that the caller has no
+	// checkout of; a path selects another local project. Nothing a caller would
+	// pass as a path can spell a repo ID, so the two never collide.
+	if repoID, _ := cmd.Flags().GetString("repo"); hostedLedgerSelected(repoID) {
+		return runHostedSessionList(cmd, repoID)
+	}
 	limit, _ := cmd.Flags().GetInt("limit")
 	showAll, _ := cmd.Flags().GetBool("all")
 	repoPath, _ := cmd.Flags().GetString("repo")
@@ -295,43 +308,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 		if showAll {
 			window = "all"
 		}
-		entries := make([]sessionListEntry, 0, len(sessions))
-		for _, t := range sessions {
-			uploaded := uploadedSessions[sessionMergeKey(t)]
-			status := string(session.ClassifySession(t, uploaded))
-			user := t.Username
-			if user == "" {
-				user = localUser
-			}
-			// legacy sessions leave SessionName empty — fall back to the filename so
-			// agents always have a usable identifier for the 'ox session view <name>'
-			// follow-up step described in the guidance hint.
-			name := t.SessionName
-			if name == "" {
-				name = t.Filename
-			}
-			entries = append(entries, sessionListEntry{
-				Name:      name,
-				Date:      t.CreatedAt.Format("2006-01-02"),
-				Time:      t.CreatedAt.Format("15:04"),
-				User:      user,
-				Status:    status,
-				Recording: t.Recording,
-				// Filter leaky strings out of JSON output too — agents
-				// (claude-code, codex, etc.) consume this as context and
-				// would otherwise see "Summary failed content validation:..."
-				// as if it were the session's real title. Same invariant the
-				// human-readable sessionBlurb enforces.
-				Title:           sanitizedNonLeakySessionText(t.Title),
-				Summary:         sanitizedNonLeakySessionText(t.Summary),
-				EntryCount:      t.EntryCount,
-				IsSubagent:      t.IsSubagent,
-				Origin:          t.Origin,
-				HydrationStatus: string(t.HydrationStatus),
-				StopReason:      t.StopReason,
-				HasRawData:      t.HasRawData,
-			})
-		}
+		entries := sessionListEntries(sessions, uploadedSessions, localUser)
 		out := sessionListOutput{
 			Sessions:        entries,
 			Total:           len(entries),
@@ -727,4 +704,132 @@ func mergeSessionSources(primary, additional []session.SessionInfo) []session.Se
 		return result[i].CreatedAt.After(result[j].CreatedAt)
 	})
 	return result
+}
+
+// sessionListEntries renders the JSON rows for sessions. uploaded reports which
+// of them are known to have reached the ledger, and localUser names the author
+// for legacy sessions recorded before meta.json carried one.
+func sessionListEntries(sessions []session.SessionInfo, uploaded map[string]bool, localUser string) []sessionListEntry {
+	entries := make([]sessionListEntry, 0, len(sessions))
+	for _, t := range sessions {
+		status := string(session.ClassifySession(t, uploaded[sessionMergeKey(t)]))
+		user := t.Username
+		if user == "" {
+			user = localUser
+		}
+		// legacy sessions leave SessionName empty — fall back to the filename so
+		// agents always have a usable identifier for the 'ox session view <name>'
+		// follow-up step described in the guidance hint.
+		name := t.SessionName
+		if name == "" {
+			name = t.Filename
+		}
+		entries = append(entries, sessionListEntry{
+			Name:      name,
+			Date:      t.CreatedAt.Format("2006-01-02"),
+			Time:      t.CreatedAt.Format("15:04"),
+			User:      user,
+			Status:    status,
+			Recording: t.Recording,
+			// Filter leaky strings out of JSON output too — agents
+			// (claude-code, codex, etc.) consume this as context and
+			// would otherwise see "Summary failed content validation:..."
+			// as if it were the session's real title. Same invariant the
+			// human-readable sessionBlurb enforces.
+			Title:           sanitizedNonLeakySessionText(t.Title),
+			Summary:         sanitizedNonLeakySessionText(t.Summary),
+			EntryCount:      t.EntryCount,
+			IsSubagent:      t.IsSubagent,
+			Origin:          t.Origin,
+			HydrationStatus: string(t.HydrationStatus),
+			StopReason:      t.StopReason,
+			HasRawData:      t.HasRawData,
+		})
+	}
+	return entries
+}
+
+// runHostedSessionList lists a hosted ledger's sessions under the shared
+// checkout lock, for a caller that has no source checkout and selects the
+// ledger by its canonical identity instead. See docs/specs/ledger-read-sync.md.
+//
+// Only the ledger is read. There is no local recording cache to merge, and no
+// local identity to attribute an author-less session to — guessing one would
+// name whichever account happens to own the hosted process.
+func runHostedSessionList(cmd *cobra.Command, repoID string) error {
+	limit, _ := cmd.Flags().GetInt("limit")
+	showAll, _ := cmd.Flags().GetBool("all")
+	if showAll {
+		limit = 0
+	}
+	jsonOutput, _ := cmd.Root().PersistentFlags().GetBool("json")
+	inAgent := agentx.IsAgentContext()
+	if inAgent && !cmd.Root().PersistentFlags().Changed("json") {
+		jsonOutput = true
+	}
+
+	var sessions []session.SessionInfo
+	if err := withHostedLedger(cmd, repoID, func(path string) error {
+		store, err := session.NewStore(path)
+		if err == nil {
+			if showAll {
+				sessions, err = store.ListAllSessions()
+			} else {
+				sessions, err = store.ListSessions()
+			}
+		}
+		if err != nil {
+			slog.Debug("hosted session list", "repo_id", repoID, "err", err)
+			return hostedReadFailed(cmd, "unavailable", 1)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if limit > 0 && len(sessions) > limit {
+		sessions = sessions[:limit]
+	}
+	// Everything here came out of the ledger, so every finalized session is by
+	// definition uploaded. Drafts are not: a meta.json-only placeholder means
+	// the session is still recording, not that its turn data landed.
+	uploaded := make(map[string]bool, len(sessions))
+	for _, t := range sessions {
+		if !t.Draft {
+			uploaded[sessionMergeKey(t)] = true
+		}
+	}
+
+	window := "7d"
+	if showAll {
+		window = "all"
+	}
+	if jsonOutput {
+		entries := sessionListEntries(sessions, uploaded, "")
+		out := sessionListOutput{
+			Sessions:        entries,
+			Total:           len(entries),
+			Window:          window,
+			RepoName:        repoID,
+			RepoID:          repoID,
+			LedgerAvailable: true,
+		}
+		if inAgent {
+			out.Guidance = sessionListAgentGuidance
+		}
+		return outputJSON(cmd.OutOrStdout(), out)
+	}
+
+	fmt.Println()
+	if len(sessions) == 0 {
+		fmt.Println(sessionEmptyStyle.Render(fmt.Sprintf("  No sessions found for %s.", repoID)))
+		fmt.Println()
+		return nil
+	}
+	printSessionTableHeader(inAgent)
+	for _, t := range sessions {
+		printSessionRow(t, uploaded[sessionMergeKey(t)], "")
+	}
+	fmt.Println()
+	return nil
 }

@@ -20,6 +20,7 @@ Examples:
   ox glance --since 3d             # last 3 days
   ox glance --since 7d --until 3d  # 7 days ago to 3 days ago
   ox glance --since 2026-03-18 --until 2026-03-22
+  ox glance --repo repo_019ff2f5-2079-7be1-b05e-8caad2772e61 --since 7d
 
 ```
 ox glance [flags]
@@ -29,6 +30,7 @@ ox glance [flags]
 
 ```
   -h, --help           help for glance
+      --repo string    read a hosted ledger by canonical repo_<uuid> instead of the current project (see docs/specs/ledger-read-sync.md)
       --since string   start of time window (3d, 7d, 24h, 1w, ISO date)
       --until string   end of time window (same formats as --since; default: now)
 ```

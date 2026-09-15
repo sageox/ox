@@ -51,17 +51,21 @@ func saveCheckpoints(cp *checkpointData) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
+// DefaultWindow is how far back a glance looks when it has no checkpoint to
+// resume from. Also used by readers that never write a checkpoint at all.
+const DefaultWindow = 4 * time.Hour
+
 // GetSince returns the last checkpoint for the given ledger path,
-// or falls back to 4 hours ago.
+// or falls back to DefaultWindow ago.
 func GetSince(ledgerPath string) time.Time {
 	cp, err := loadCheckpoints()
 	if err != nil {
-		return time.Now().Add(-4 * time.Hour)
+		return time.Now().Add(-DefaultWindow)
 	}
 	if t, ok := cp.Checkpoints[ledgerPath]; ok {
 		return t
 	}
-	return time.Now().Add(-4 * time.Hour)
+	return time.Now().Add(-DefaultWindow)
 }
 
 // MarkRead saves the current time as the checkpoint for the given ledger.

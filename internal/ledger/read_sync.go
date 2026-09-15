@@ -810,14 +810,25 @@ func verifyReadCheckout(ctx context.Context, opts ReadSyncOptions, transport *gi
 	return result
 }
 
+// ReadNotReadyError reports that the guard refused a read because the local
+// checkout did not verify. Class is one of the sanitized categories published in
+// docs/specs/ledger-read-sync.md, so a CLI reader can surface it without
+// pattern-matching an error string.
+type ReadNotReadyError struct{ Class string }
+
+func (e *ReadNotReadyError) Error() string { return e.Class }
+
 // WithReadCheckout holds the SAME lock as materialization for the entire read.
 // The callback must finish all filesystem reads before returning. It must not
 // call another locking ledger function. Authorization belongs to the caller.
+//
+// A refused read returns *ReadNotReadyError. Any other error means the lock
+// itself could not be taken.
 func WithReadCheckout(ctx context.Context, path, repoID, endpoint string, read func(ReadSyncResult) error) error {
 	return gitutil.WithRepoLock(ctx, path, func() error {
 		result := checkReadinessLocked(ctx, path, repoID, endpoint)
 		if !result.Ready {
-			return errors.New(result.ErrorClass)
+			return &ReadNotReadyError{Class: result.ErrorClass}
 		}
 		return read(result)
 	})

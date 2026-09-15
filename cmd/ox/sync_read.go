@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,7 +14,6 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
-	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
@@ -30,6 +27,12 @@ func headlessLedgerReadRequested(args []string) bool {
 	cmd, _, _ := rootCmd.Find(args)
 	syncRequested := cmd == syncCmd
 	helperRequested := cmd == gitCredentialHelperCmd
+	if cmd == sessionListCmd || cmd == glanceCmd {
+		// These commands read a hosted checkout only when --repo names one.
+		// Every other invocation is an ordinary project read and keeps the
+		// normal prelude.
+		return hostedLedgerSelected(hostedLedgerRepoArg(args))
+	}
 	if !syncRequested && !helperRequested {
 		return false
 	}
@@ -57,8 +60,14 @@ func headlessLedgerReadRequested(args []string) bool {
 }
 
 func isHeadlessLedgerRead(cmd *cobra.Command) bool {
-	if cmd.Name() == "git-credential-helper" {
+	switch cmd.Name() {
+	case "git-credential-helper":
 		return cmd.Flags().Changed("read-endpoint") || cmd.Flags().Changed("read-repo") || cmd.Flags().Changed("read-url")
+	case "glance", "list":
+		// `ox session list` is the only `list` in the tree with a --repo flag,
+		// so GetString fails for the others and they keep the normal prelude.
+		repo, err := cmd.Flags().GetString("repo")
+		return err == nil && hostedLedgerSelected(repo)
 	}
 	if cmd.Name() != "sync" {
 		return false
@@ -90,25 +99,15 @@ func runReadSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 	// Selection is explicitly independent of the source repository and disk
-	// logins. This is the same endpoint binding used for SAGEOX_TOKEN itself.
-	ep := auth.EnvTokenEndpoint()
-	u, err := url.Parse(ep)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-		result.ErrorClass = "invalid_arguments"
-		return finishReadSync(cmd, result, jsonOutput, 2)
+	// logins, and is shared with the guarded readers so one command cannot
+	// accept an endpoint or data home the others reject.
+	path, ep, class := selectHostedLedger(repoID)
+	if ep != "" {
+		result.RepoID, result.Endpoint = repoID, ep
 	}
-	if dataHome := os.Getenv("XDG_DATA_HOME"); dataHome != "" && !filepath.IsAbs(dataHome) {
-		result.ErrorClass = "invalid_arguments"
-		return finishReadSync(cmd, result, jsonOutput, 2)
-	}
-	if os.Getenv("OX_XDG_DISABLE") != "" {
-		result.ErrorClass = "invalid_arguments"
-		return finishReadSync(cmd, result, jsonOutput, 2)
-	}
-	result.RepoID, result.Endpoint = repoID, ep
-	result.Path = config.DefaultLedgerPath(repoID, ep)
-	if !filepath.IsAbs(result.Path) {
-		result.Path, result.ErrorClass = "", "invalid_arguments"
+	result.Path = path
+	if class != "" {
+		result.ErrorClass = class
 		return finishReadSync(cmd, result, jsonOutput, 2)
 	}
 
@@ -170,6 +169,14 @@ func finishReadSync(cmd *cobra.Command, result ledger.ReadSyncResult, jsonOutput
 }
 
 func writeReadSyncUsageError(cmd *cobra.Command, args []string) int {
+	// Resolve against the real command tree, not the writer handed in: the
+	// caller passes rootCmd only so output can be captured.
+	if target, _, _ := rootCmd.Find(args); target != syncCmd {
+		// The guarded readers publish their own JSON schemas. A sync receipt
+		// here would decode as a plausible result for a different command.
+		_ = hostedReadFailed(cmd, "invalid_arguments", 2)
+		return 2
+	}
 	jsonOutput := slices.Contains(args, "--json") || slices.Contains(args, "--json=true")
 	_ = finishReadSync(cmd, ledger.ReadSyncResult{
 		SchemaVersion: 1,
