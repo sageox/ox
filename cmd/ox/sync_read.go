@@ -159,7 +159,7 @@ func finishReadSync(cmd *cobra.Command, result ledger.ReadSyncResult, jsonOutput
 	} else {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Ledger read failed: %s\n", result.ErrorClass)
 		if code == 2 {
-			fmt.Fprintln(cmd.ErrOrStderr(), "Use: ox sync --read-only --repo repo_<uuid> [--timeout 5m] [--check] [--json]")
+			fmt.Fprintln(cmd.ErrOrStderr(), "Use: ox sync --read-only --repo repo_<uuid> [--timeout 30m] [--check] [--json]")
 		}
 	}
 	if code != 0 {

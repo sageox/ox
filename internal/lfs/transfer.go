@@ -139,6 +139,11 @@ func ComputeOID(content []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
+// ErrOIDMismatch reports content whose SHA-256 is not the identity it was
+// requested under. Callers tell it apart from a transport failure because the
+// same request returns the same bytes: retrying cannot change the answer.
+var ErrOIDMismatch = errors.New("OID mismatch")
+
 // UploadResult tracks the outcome of a single upload.
 type UploadResult struct {
 	OID   string
@@ -272,7 +277,7 @@ func DownloadObject(action *Action) ([]byte, error) {
 		return nil, fmt.Errorf("read download body: %w", err)
 	}
 	if action.readClient != nil && ComputeOID(data) != action.readOID {
-		return nil, fmt.Errorf("download OID mismatch")
+		return nil, fmt.Errorf("download %w", ErrOIDMismatch)
 	}
 
 	return data, nil
@@ -288,7 +293,7 @@ func DownloadAndVerifyObject(action *Action, expectedOID string) ([]byte, error)
 	actualOID := ComputeOID(data)
 	expectedHex := strings.TrimPrefix(expectedOID, "sha256:")
 	if actualOID != expectedHex {
-		return nil, fmt.Errorf("OID mismatch: expected %s, got %s", expectedOID, actualOID)
+		return nil, fmt.Errorf("%w: expected %s, got %s", ErrOIDMismatch, expectedOID, actualOID)
 	}
 	return data, nil
 }
@@ -370,7 +375,7 @@ func DownloadToFileContext(ctx context.Context, action *Action, dst io.Writer, v
 		actualOID := hex.EncodeToString(h.Sum(nil))
 		expectedHex := strings.TrimPrefix(expectedOID, "sha256:")
 		if actualOID != expectedHex {
-			return fmt.Errorf("OID mismatch: expected %s, got %s", expectedOID, actualOID)
+			return fmt.Errorf("%w: expected %s, got %s", ErrOIDMismatch, expectedOID, actualOID)
 		}
 	}
 
