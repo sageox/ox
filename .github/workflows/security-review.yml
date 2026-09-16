@@ -27,8 +27,8 @@ jobs:
     outputs:
       sensitive: ${{ steps.filter.outputs.sensitive }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -50,16 +50,16 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true   # never block merge
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # need full history for diff
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: 'go.mod'
 
       - name: Cache security scanner binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/security-bin
           key: ox-security-bins-${{ hashFiles('security/scripts/install-bins.sh') }}
@@ -80,7 +80,7 @@ jobs:
 
       - name: Upload SARIF to GitHub Security tab
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: security/.output/findings.sarif
           category: ox-security-fast
@@ -88,7 +88,7 @@ jobs:
 
       - name: Upload findings as artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: security-findings-${{ github.run_id }}
           path: security/.output/

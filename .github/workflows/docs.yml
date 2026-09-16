@@ -17,19 +17,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: 'go.mod'
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://npm.pkg.github.com'
 
       - name: Extract version from tag
@@ -57,7 +57,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.DOCS_PACKAGE_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Trigger docs site update
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@v4
         with:
           token: ${{ secrets.DISPATCH_TOKEN }}
           repository: sageox/sageox-monorepo
