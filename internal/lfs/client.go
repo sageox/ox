@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -59,6 +60,13 @@ type HTTPError struct {
 func (e *HTTPError) Error() string {
 	return fmt.Sprintf("LFS request returned HTTP %d", e.StatusCode)
 }
+
+// ErrBatchResponseUnusable reports a batch response the server delivered in
+// full but that cannot be used — past the size a read route accepts, or not
+// valid JSON. A body cut short by the transport fails earlier, while it is
+// read, so a caller can treat this as the server's settled answer and not as
+// something a second request could get past.
+var ErrBatchResponseUnusable = errors.New("unusable batch response")
 
 // NewClient creates an LFS client for the given git repo URL.
 // repoURL should be the git clone URL (e.g., https://git.sageox.io/sageox/ledger.git).
@@ -236,7 +244,7 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 		return nil, fmt.Errorf("read batch response: %w", err)
 	}
 	if c.readURL != "" && len(respBody) > maxBatchResponseBytes {
-		return nil, fmt.Errorf("LFS batch response exceeds %d bytes", maxBatchResponseBytes)
+		return nil, fmt.Errorf("%w: LFS batch response exceeds %d bytes", ErrBatchResponseUnusable, maxBatchResponseBytes)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -245,7 +253,7 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 
 	var batchResp BatchResponse
 	if err := json.Unmarshal(respBody, &batchResp); err != nil {
-		return nil, fmt.Errorf("decode batch response: %w", err)
+		return nil, fmt.Errorf("%w: decode batch response: %w", ErrBatchResponseUnusable, err)
 	}
 
 	// Stamp every action in the response with the trusted host derived
