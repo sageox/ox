@@ -1546,19 +1546,34 @@ func TestReadSyncLFSDeniedDownloadStopsTheBatchsOtherTransfers(t *testing.T) {
 	const slowPath, deniedPath = "sessions/denial/a-slow.md", "sessions/denial/b-denied.md"
 	slow, denied := []byte("content of the transfer already in flight\n"), []byte("content the grant no longer covers\n")
 	var served atomic.Int32
+	var stopped atomic.Bool
+	// Both downloads are dispatched at once, so the denial could otherwise be
+	// answered before the slow transfer has begun — and canceling a transfer
+	// that never started is not what this test is about. Holding the denial
+	// until the slow handler is running makes every run exercise the same thing.
+	inFlight := make(chan struct{})
+	var begin sync.Once
 	f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/batch") {
 			grantReadLFSBatch(t, w, r)
 			return
 		}
 		if filepath.Base(r.URL.Path) == lfs.ComputeOID(denied) {
+			select {
+			case <-inFlight:
+			case <-time.After(10 * time.Second):
+				t.Error("the transfer this denial must stop never started")
+				return
+			}
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
+		begin.Do(func() { close(inFlight) })
 		select {
 		case <-r.Context().Done():
 			// The denial reached this transfer and stopped it.
-		case <-time.After(5 * time.Second):
+			stopped.Store(true)
+		case <-time.After(10 * time.Second):
 			// Nothing canceled this download, so it delivers its object — which
 			// is the behavior under test failing, not the test timing out.
 			served.Add(1)
@@ -1573,6 +1588,7 @@ func TestReadSyncLFSDeniedDownloadStopsTheBatchsOtherTransfers(t *testing.T) {
 	require.False(t, result.Ready, "%+v", result)
 	require.Equal(t, "denied", result.ErrorClass, "%+v", result)
 	require.Equal(t, int32(0), served.Load(), "a denial must stop the transfers beside it")
+	require.True(t, stopped.Load(), "the transfer already in flight is the one that must be stopped")
 	for path, pointer := range map[string]string{slowPath: slowPointer, deniedPath: deniedPointer} {
 		actual, err := os.ReadFile(filepath.Join(f.opts.Path, path))
 		require.NoError(t, err)
