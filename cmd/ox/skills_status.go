@@ -322,8 +322,13 @@ func skillTargetRoots(gitRoot string) ([]string, error) {
 // files), which WithheldTeamSkills does not report because it only returns
 // approval holds.
 func installedState(gitRoot string, targets []string, d skillmanager.TeamSkillDecision, planned plannedPaths) (state, detail string) {
+	// NeedsApprove no longer means absent. A skill whose manifest is itself
+	// runnable is withheld outright (no InstalledAs); one that merely bundles
+	// scripts INSTALLS with the scripts dropped, and the flag says so. Reporting
+	// the second as "withheld" would tell the author their skill never arrived
+	// when its prose is sitting on disk.
 	switch {
-	case d.NeedsApprove:
+	case d.NeedsApprove && d.InstalledAs == "":
 		return skillWithheld, d.Reason
 	case d.Name != "" && d.InstalledAs == "":
 		return skillUnavailable, d.Reason
@@ -363,6 +368,9 @@ func installedState(gitRoot string, targets []string, d skillmanager.TeamSkillDe
 		return skillPending, "not complete in " + strings.Join(incomplete, ", ") + " — run `ox doctor --fix`"
 	case len(outdated) > 0:
 		return skillOutdated, "differs from the team's copy in " + strings.Join(outdated, ", ") + " — run `ox doctor --fix`"
+	}
+	if d.NeedsApprove {
+		return skillInstalled, d.Reason // on disk, minus its scripts
 	}
 	return skillInstalled, ""
 }
