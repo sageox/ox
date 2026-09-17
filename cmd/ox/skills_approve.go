@@ -195,8 +195,8 @@ func approveGuidance(out skillsApproveOutput, _ string) string {
 	}
 	if len(out.Pending) > 0 {
 		p := out.Pending[0]
-		return fmt.Sprintf("Read %s in your Team Context, then run `ox skills approve %s` (add --allow-scripts to make its bundled scripts runnable).",
-			p.Capabilities, p.Name)
+		return fmt.Sprintf("%q needs approval because of %s. Read that in your Team Context, then run `ox skills approve %s` (add --allow-scripts to also put its bundled scripts on disk).",
+			p.Name, p.Capabilities, p.Name)
 	}
 	if len(out.Approved) > 0 {
 		return "Approved. The skill is installed — your AI coworkers can use it now."
