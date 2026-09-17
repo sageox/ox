@@ -1373,6 +1373,15 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 			s.issues.ClearIssue(IssueTypeGitLock, "ledger")
 		}
 
+		// A skip that could only be reached by reading the index proves the
+		// clone is readable again, so a standing integrity issue is stale.
+		// Skips never reach the clear-on-success path below, so without this a
+		// repaired ledger whose remote has stopped changing would keep
+		// prompting for a repair it no longer needs.
+		if s.issues != nil && skipProvesIndexReadable(result.SkipReason) {
+			s.issues.ClearIssue(IssueTypeRepoIntegrity, "ledger")
+		}
+
 		// remote-unchanged or recently-fetched: update sync timestamps
 		if result.SkipReason == "remote unchanged" || result.SkipReason == "recently fetched" {
 			s.workspaceRegistry.ClearSyncFailures("ledger")

@@ -267,3 +267,125 @@ func TestDoTeamSync_NetworkOutageDoesNotSuspend(t *testing.T) {
 	assert.False(t, next.IsZero(),
 		"a retry must stay scheduled; suspension zeroes NextSyncAttempt and nothing unattended restores it")
 }
+
+// TestDoTeamSync_UnreadableIndexDoesNotSuspend drives doTeamSync's real failure
+// classification for the #962 fix's own mirror image.
+//
+// Failure prevented: classifyAutostashFailure calls an index it cannot read
+// "durable" and returns an error carrying gitutil.ErrConflictProbeFailed. But a
+// probe can fail for reasons that are not the index at all — a git killed
+// mid-run, a fork under resource pressure, a stalled filesystem — and the error
+// is identical either way. That text matches no isTransientSyncError substring,
+// so two cycles against the same dirty worktree set SyncSuspended and zeroed
+// NextSyncAttempt: team-context sync stopped permanently on a healthy machine,
+// the same ending as the #906 network blip, reached through a different door.
+//
+// The failure MUST still be visible while it retries — that is what
+// IssueTypeRepoIntegrity is for, and TestPullManagedRepo_* pin it. This test
+// pins only the other half: visible is not the same as suspended.
+//
+// Not parallel: the fixture edits the process-wide PATH and HOME.
+func TestDoTeamSync_UnreadableIndexDoesNotSuspend(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	// Isolate from the developer's real SageOx state, as
+	// TestDoTeamSync_NetworkOutageDoesNotSuspend does and for the same reason:
+	// discoverTeams() would otherwise read live credentials and sync the
+	// machine's actual team contexts.
+	isolated := t.TempDir()
+	t.Setenv("HOME", isolated)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(isolated, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(isolated, "data"))
+
+	projectRoot := t.TempDir()
+	teamPath := filepath.Join(t.TempDir(), "team-context")
+	require.NoError(t, os.MkdirAll(teamPath, 0o755))
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	run(teamPath, "init", "--initial-branch=main")
+	run(teamPath, "config", "user.name", "Test")
+	run(teamPath, "config", "user.email", "probe-suspend-test@test.sageox.ai")
+	run(teamPath, "config", "commit.gpgsign", "false")
+	require.NoError(t, os.WriteFile(filepath.Join(teamPath, "AGENTS.md"), []byte("team\n"), 0o600))
+	run(teamPath, "add", "AGENTS.md")
+	run(teamPath, "commit", "-m", "seed")
+	run(teamPath, "remote", "add", "origin", "https://127.0.0.1:1/team-context.git")
+
+	// A DIRTY checkout, unlike the network-outage test's clean one: a clean
+	// tree fingerprints to "" and can never suspend, so a clean fixture would
+	// pass vacuously. This is the state issue #767's guard was built for, and
+	// the one this failure class must nonetheless stay out of.
+	require.NoError(t, os.WriteFile(filepath.Join(teamPath, "local.txt"), []byte("uncommitted\n"), 0o600))
+
+	// Every index probe fails, for a reason that is not the index. The pull
+	// cycle's FIRST act is ResolveAutostashConflicts, so this aborts each cycle
+	// before any fetch — no network is involved, and `git status` (the
+	// fingerprint) keeps working, which is exactly what makes the suspension
+	// branch reachable.
+	gitShimFailingUnmergedProbe(t, 1_000_000)
+
+	const teamID = "team_probe_failure"
+	cfgTOML := "[[team_contexts]]\n" +
+		"team_id = '" + teamID + "'\n" +
+		"team_name = 'Probe Failure Test'\n" +
+		"path = '" + teamPath + "'\n" +
+		"last_sync = 1970-01-01T00:00:00Z\n" +
+		"last_gc = 1970-01-01T00:00:00Z\n"
+	require.NoError(t, os.MkdirAll(filepath.Join(projectRoot, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(projectRoot, ".sageox", "config.local.toml"), []byte(cfgTOML), 0o600))
+
+	cfg := DefaultConfig()
+	cfg.ProjectRoot = projectRoot
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	scheduler := NewSyncScheduler(cfg, logger)
+	ctx := context.Background()
+
+	// Four passes for the reason the network test gives: the daemon writes into
+	// the checkout on early passes, so the worktree is not byte-identical until
+	// it settles — and only once it does can two fingerprints match and suspend.
+	for attempt := 1; attempt <= 4; attempt++ {
+		results, err := scheduler.doTeamSync(ctx, nil, false)
+		require.NoError(t, err, "per-team failures are carried in results, not returned")
+
+		// Guard against a vacuous pass: if the fixture ever stopped producing a
+		// probe failure, every assertion below would hold for the wrong reason.
+		var observed string
+		for _, r := range results {
+			if r.TeamID == teamID {
+				observed = r.Error
+			}
+		}
+		require.NotEmpty(t, observed, "attempt %d must report a per-team error", attempt)
+		require.Contains(t, observed, "read index for",
+			"attempt %d: fixture must produce a PROBE failure, got %q", attempt, observed)
+		require.False(t, isTransientSyncError(errors.New(observed)),
+			"attempt %d: the point of this test is a failure the transient allowlist does NOT match", attempt)
+
+		require.False(t, scheduler.workspaceRegistry.IsSyncSuspended(teamID),
+			"attempt %d: an unreadable index must retry with backoff, never suspend permanently", attempt)
+
+		failures, _ := scheduler.workspaceRegistry.GetSyncRetryInfo(teamID)
+		require.Equal(t, attempt, failures,
+			"attempt %d must still be attempted; a suspended workspace is skipped and never retried", attempt)
+
+		// Expire the backoff so the next attempt runs without a real wait.
+		scheduler.workspaceRegistry.mu.Lock()
+		scheduler.workspaceRegistry.workspaces[teamID].NextSyncAttempt = time.Now().Add(-time.Minute)
+		scheduler.workspaceRegistry.mu.Unlock()
+	}
+
+	_, next := scheduler.workspaceRegistry.GetSyncRetryInfo(teamID)
+	assert.False(t, next.IsZero(),
+		"a retry must stay scheduled; suspension zeroes NextSyncAttempt and nothing unattended restores it")
+}

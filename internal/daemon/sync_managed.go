@@ -318,7 +318,8 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 // errors.Is(err, context.DeadlineExceeded) does NOT match (verified on go1.26).
 // So the error text cannot be trusted to name the cause, and an error-shape
 // allowlist is guaranteed to have holes. Re-reading the index is the only thing
-// that yields a fact, so this always does that and branches on the fact:
+// that yields a fact, so this always does that (reprobeConfirmAttempts times,
+// because one failed read is itself not a fact) and branches on the fact:
 //
 //   - conflicted  → a real merge conflict; report it exactly as before.
 //   - clean       → conflictErr said nothing true about the index (the #962
@@ -339,12 +340,18 @@ func classifyAutostashFailure(ctx context.Context, result *ManagedRepoPullResult
 
 	switch {
 	case probeErr != nil:
-		// A DURABLE failure: git could not read this clone's index on a fresh,
-		// generous, uncancellable context. A corrupt .git/index, a permission
-		// problem, or a missing git binary fails this way forever, so staying
-		// quiet would hide a repo that never syncs again behind a status that
-		// reports perfect health. isValidGitRepo only runs `rev-parse
-		// --git-dir` and never reads the index, so nothing upstream catches it.
+		// A DURABLE failure: git could not read this clone's index on any of
+		// reprobeConfirmAttempts fresh, generous, uncancellable reads. A corrupt
+		// .git/index, a permission problem, or a missing git binary fails this
+		// way forever, so staying quiet would hide a repo that never syncs again
+		// behind a status that reports perfect health. isValidGitRepo only runs
+		// `rev-parse --git-dir` and never reads the index, so nothing upstream
+		// catches it.
+		//
+		// "Durable" here is still a judgement, not a proof — which is why the
+		// resulting error must stay RETRYABLE downstream. doTeamSync routes it
+		// to bounded backoff rather than the permanent fingerprint suspension
+		// (see its ErrConflictProbeFailed branch); doPull already does.
 		//
 		// Not IssueTypeMergeConflict/RequiresConfirm: we did NOT find conflicts,
 		// and the #962 remedy for a confirm-gated conflict — hand-editing the
@@ -412,19 +419,80 @@ func classifyAutostashFailure(ctx context.Context, result *ManagedRepoPullResult
 	}
 }
 
+// Bounds on the confirmation re-read. Together they decide when
+// classifyAutostashFailure is allowed to call a clone durably broken.
+const (
+	// reprobeConfirmAttempts is how many INDEPENDENT reads must fail before the
+	// index counts as unreadable. One failed read is not evidence of a durable
+	// fault: a fork that hits EAGAIN under resource pressure, a transient
+	// filesystem error, and a git killed mid-run all fail exactly the way a
+	// corrupt .git/index does, and the error text cannot tell them apart (see
+	// gitutil.ErrConflictProbeFailed). Concluding "durable" from one sample is
+	// #962's mistake pointed the other way — asserting more than the probe
+	// proved — and for a team context it used to end in permanent sync
+	// suspension (doTeamSync now backs off instead, but this is the first of
+	// the two guards). A corrupt index fails all three reads identically and in
+	// milliseconds, so the durable case still goes loud on the first cycle.
+	reprobeConfirmAttempts = 3
+
+	// reprobeRetryDelay paces those reads. Short on purpose: it only has to
+	// outlast an instantaneous fork/IO blip, and it is paid inside the sync
+	// cycle. Anything longer-lived is NOT this loop's job — the caller's
+	// bounded sync backoff retries the whole cycle minutes later.
+	reprobeRetryDelay = 250 * time.Millisecond
+
+	// reprobeAttemptTimeout caps ONE read. Generous on purpose: this budget is
+	// what separates "transient" from "durable", and a local
+	// `git ls-files --unmerged` normally returns in milliseconds, so only a
+	// genuinely wedged git or a stalled filesystem can burn it. Sized so that
+	// all reprobeConfirmAttempts reads together stay in the same order of
+	// magnitude as the single 30s budget this replaced, because the worst case
+	// is paid as a delay to daemon shutdown.
+	reprobeAttemptTimeout = 15 * time.Second
+)
+
 // reprobeIndexConflicts re-reads repoPath's index on a context decoupled from
 // the sync cycle's, so a cancellation that killed the original probe cannot
-// also kill the confirmation. A non-nil error means the index could not be
-// READ — never that it is clean.
+// also kill the confirmation. It retries a bounded number of times and returns
+// the LAST error only when every attempt failed. A non-nil error therefore
+// means the index could not be READ on any of them — never that it is clean.
 func reprobeIndexConflicts(ctx context.Context, repoPath string) (bool, error) {
-	// Generous on purpose: this budget is what separates "transient" from
-	// "durable", and a local `git ls-files --unmerged` normally returns in
-	// milliseconds. 30s means only a genuinely wedged git or a stalled
-	// filesystem trips the durable branch, at the cost of delaying daemon
-	// shutdown by up to that long in exactly that pathological case.
-	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	defer cancel()
-	return gitutil.HasUnmergedEntries(probeCtx, repoPath)
+	base := context.WithoutCancel(ctx)
+	var lastErr error
+	for attempt := 1; attempt <= reprobeConfirmAttempts; attempt++ {
+		if attempt > 1 {
+			// Deliberately not ctx-aware: the whole point of WithoutCancel is
+			// that a dead sync context must not decide this verdict, and the
+			// total sleep is bounded at well under a second.
+			time.Sleep(reprobeRetryDelay)
+		}
+		probeCtx, cancel := context.WithTimeout(base, reprobeAttemptTimeout)
+		conflicted, err := gitutil.HasUnmergedEntries(probeCtx, repoPath)
+		cancel()
+		if err == nil {
+			return conflicted, nil
+		}
+		lastErr = err
+	}
+	return false, lastErr
+}
+
+// skipProvesIndexReadable reports whether a skip reason was only reachable
+// AFTER something successfully read this clone's index, which retires any
+// standing IssueTypeRepoIntegrity for it. "remote unchanged" and "recently
+// fetched" are decided after ResolveAutostashConflicts returned cleanly;
+// "unconfirmed conflict" is decided by a fresh re-read that found no unmerged
+// entries. The other skips prove nothing — the lock and rebase reasons return
+// before any index is read. Without this, a clone that was repaired keeps a
+// stale integrity issue forever once its remote stops changing, because a skip
+// never reaches the clear-on-successful-pull path.
+func skipProvesIndexReadable(reason string) bool {
+	switch reason {
+	case skipReasonRemoteUnchanged, skipReasonRecentlyFetched, skipReasonUnconfirmedConflict:
+		return true
+	default:
+		return false
+	}
 }
 
 // fetchAndPullLocked runs the fetch-then-pull sequence for pullManagedRepo.

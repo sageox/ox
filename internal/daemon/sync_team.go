@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/perf"
@@ -254,8 +256,20 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			// team-context sync for hours after a laptop sleep, while
 			// getErrorHint was still promising "Will retry automatically".
 			// Transient failures take the ordinary bounded backoff instead.
+			//
+			// ErrConflictProbeFailed joins them, even though it is local. It
+			// means "git could not read the index", which a corrupt .git/index
+			// and a momentary fork/IO/timeout failure produce identically —
+			// nothing in the error distinguishes settled from unclassifiable,
+			// so the codebase's retry rule makes it retryable. It is also not
+			// the failure the fingerprint guard was built for: #767's unbounded
+			// autostash pile needs a pull that RAN, and a probe failure aborts
+			// the cycle before any fetch, so nothing accumulates while we retry.
+			// The durable case is not thereby hidden — it is already loud as
+			// IssueTypeRepoIntegrity, which permanent silent suspension would
+			// only bury.
 			var suspended bool
-			if isTransientSyncError(r.err) {
+			if isTransientSyncError(r.err) || errors.Is(r.err, gitutil.ErrConflictProbeFailed) {
 				s.workspaceRegistry.RecordSyncFailure(r.ws.ID)
 			} else {
 				fingerprint, fpErr := worktreeFingerprint(ctx, r.ws.Path)
@@ -554,6 +568,12 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 			s.issues.SetIssue(*result.Issue)
 		} else if s.issues != nil {
 			s.issues.ClearIssue(IssueTypeGitLock, repoName)
+		}
+		// Same reasoning as doPull: a skip only reachable after a successful
+		// index read retires a standing integrity issue, and skips never reach
+		// the clear-on-success path at the bottom of this function.
+		if s.issues != nil && skipProvesIndexReadable(result.SkipReason) {
+			s.issues.ClearIssue(IssueTypeRepoIntegrity, repoName)
 		}
 		// A rebase in progress leaves the working tree in a partial, possibly
 		// inconsistent state — the team context is NOT safely usable, so return an

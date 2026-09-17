@@ -344,3 +344,136 @@ func writeUnmergedIndex(t *testing.T, repo, path string) {
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
 }
+
+// --- D. Bounded confirmation: one failed read is not a durable fault ---
+
+// The re-probe's own failure mode. A read that fails for a reason that is NOT
+// the index — a fork hitting EAGAIN, a stalled filesystem, a git killed mid-run
+// — is byte-for-byte indistinguishable from a corrupt .git/index, so a
+// single-sample verdict turns a blip into IssueTypeRepoIntegrity. Downstream
+// that is worse than noise: for a team context it used to end in permanent sync
+// suspension (the #906 shape, reached by a different path).
+//
+// Not parallel: gitShimFailingUnmergedProbe edits the process-wide PATH.
+func TestReprobeIndexConflicts_BoundedConfirmation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index states")
+	}
+
+	t.Run("a read that fails once and then succeeds is not durable", func(t *testing.T) {
+		repo := newProbeTestRepo(t, "notes.txt")
+		gitShimFailingUnmergedProbe(t, 1)
+
+		conflicted, err := reprobeIndexConflicts(context.Background(), repo)
+		require.NoError(t, err, "one failed read proves nothing; the retry read the index fine")
+		assert.False(t, conflicted)
+	})
+
+	t.Run("a read that fails every attempt is still durable", func(t *testing.T) {
+		repo := newProbeTestRepo(t, "notes.txt")
+		// One more than the bound, so the last attempt fails too.
+		gitShimFailingUnmergedProbe(t, reprobeConfirmAttempts+1)
+
+		_, err := reprobeIndexConflicts(context.Background(), repo)
+		require.Error(t, err, "bounded retry must not become infinite patience")
+		assert.ErrorIs(t, err, gitutil.ErrConflictProbeFailed)
+	})
+}
+
+// gitShimFailingUnmergedProbe puts a `git` wrapper first on PATH that fails the
+// first failures invocations carrying `--unmerged`, and passes everything else —
+// including every later probe — through to the real binary.
+//
+// It stages the one failure class no real-git fixture can produce: a probe that
+// fails for a reason OTHER than the index, leaving every other git command
+// working normally. Corrupting .git/index cannot stand in for it, because that
+// also breaks `git status`, and `git status` is what doTeamSync fingerprints
+// with — so a corrupt index never even reaches the suspension branch.
+//
+// Callers must NOT t.Parallel(): the PATH edit is process-wide.
+func gitShimFailingUnmergedProbe(t *testing.T, failures int) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "probe-count")
+	// The error text deliberately matches no isTransientSyncError substring:
+	// "unclassifiable", not "known transient", is the case under test.
+	script := fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  [ "$arg" = "--unmerged" ] || continue
+  n=$(cat %[1]q 2>/dev/null || echo 0)
+  n=$((n + 1))
+  printf '%%s' "$n" > %[1]q
+  if [ "$n" -le %[2]d ]; then
+    echo "fatal: unable to read the index: Resource temporarily unavailable" >&2
+    exit 128
+  fi
+  break
+done
+exec %[3]q "$@"
+`, counter, failures, realGit)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// --- E. Clearing the integrity issue once the clone is readable again ---
+
+// IssueTypeRepoIntegrity is cleared on a successful pull, but a clone whose
+// remote has stopped changing never gets one: every cycle dedups to a skip. The
+// skip reasons that are only reachable AFTER a successful index read are proof
+// enough, and without honoring them a repaired repo prompts forever for a
+// repair it no longer needs.
+//
+// Not parallel: pullTeamContext mutates a shared scheduler.
+func TestPullTeamContext_ReadableSkipClearsStaleIntegrityIssue(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index states")
+	}
+	repo := newProbeTestRepo(t, "notes.txt")
+	// A FETCH_HEAD younger than the dedup window is what makes this cycle skip
+	// with "recently fetched" — decided only after ResolveAutostashConflicts
+	// read the index and returned cleanly.
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".git", "FETCH_HEAD"),
+		[]byte("0000000000000000000000000000000000000000\t\tbranch 'main' of origin\n"), 0o644))
+
+	s := newTestScheduler(t.TempDir())
+	s.issues = NewIssueTracker()
+	repoName := filepath.Base(repo)
+	s.issues.SetIssue(DaemonIssue{
+		Type:     IssueTypeRepoIntegrity,
+		Severity: SeverityError,
+		Repo:     repoName,
+		Summary:  "left over from a cycle that could not read the index",
+	})
+
+	require.NoError(t, s.pullTeamContext(context.Background(), repo))
+
+	_, still := s.issues.GetIssue(IssueTypeRepoIntegrity, repoName)
+	assert.False(t, still, "the skip proved the index is readable; the issue is stale")
+}
+
+// The predicate's whole job is deciding which skips carry that proof. The
+// negative rows matter most: the lock and rebase skips return BEFORE any index
+// read, so clearing on them would retire an issue nothing re-examined.
+func TestSkipProvesIndexReadable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		reason string
+		want   bool
+	}{
+		{skipReasonRemoteUnchanged, true},
+		{skipReasonRecentlyFetched, true},
+		{skipReasonUnconfirmedConflict, true},
+		{skipReasonRebaseInProgress, false},
+		{skipReasonLockFilesPresent, false},
+		{skipReasonRepoLockBusy, false},
+		{"", false},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, skipProvesIndexReadable(tc.reason))
+		})
+	}
+}
