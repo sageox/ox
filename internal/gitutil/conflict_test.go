@@ -658,6 +658,19 @@ func TestAutostashRecoveryMergesBookkeepingCounters(t *testing.T) {
 			wantErr:  "field summary_attempts differs",
 		},
 		{
+			// The mirror of the case above. mergeMonotonicCounter validates BOTH
+			// sides, but every other bad-value case here spoils whichever side
+			// is read first, so the second guard had never executed — the rule
+			// was only ever proven to reject a bad ours, not a bad theirs.
+			// Asymmetric validation is exactly the kind of gap that survives a
+			// green suite, so this pins the other half.
+			name:     "a non-integer counter on the OTHER side refuses too",
+			base:     `{"title":"Ready","summary_attempts":0}`,
+			upstream: `{"title":"Ready","summary_attempts":2}`,
+			local:    `{"title":"Ready","summary_attempts":1.5}`,
+			wantErr:  "field summary_attempts differs",
+		},
+		{
 			name:     "string-typed counter refuses rather than guessing",
 			base:     `{"title":"Ready","summary_attempts":"0"}`,
 			upstream: `{"title":"Ready","summary_attempts":"2"}`,
