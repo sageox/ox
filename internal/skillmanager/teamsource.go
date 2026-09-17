@@ -266,7 +266,11 @@ func anySkillRootOnDisk(teamPath string) bool {
 		// The parent is what the sparse set includes ("agents/"), so a materialized
 		// parent with no skills yet is present, not blind.
 		parent := filepath.Dir(filepath.FromSlash(root))
-		if _, err := os.Stat(filepath.Join(teamPath, parent)); err == nil {
+		// IsDir, not merely "exists": a regular FILE named agents/ makes
+		// os.ReadDir on agents/skills fail, so discovery is not authoritative
+		// there either. Accepting it would report the checkout healthy while
+		// every skill silently failed to load.
+		if info, err := os.Stat(filepath.Join(teamPath, parent)); err == nil && info.IsDir() {
 			return true
 		}
 	}

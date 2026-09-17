@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -48,6 +49,9 @@ var skillsStatusCmd = &cobra.Command{
 }
 
 func init() {
+	// Without a GroupID cobra files this under "Additional Commands", away from
+	// the Knowledge family it belongs to.
+	skillsCmd.GroupID = "knowledge"
 	skillsStatusCmd.Flags().Bool("json", false, "Emit machine-readable JSON")
 	skillsCmd.AddCommand(skillsStatusCmd)
 	rootCmd.AddCommand(skillsCmd)
@@ -65,10 +69,15 @@ type skillsStatusOutput struct {
 }
 
 type teamContextStatus struct {
-	Name               string `json:"name,omitempty"`
-	Path               string `json:"path,omitempty"`
+	Name string `json:"name,omitempty"`
+	Path string `json:"path,omitempty"`
+	// Present is the checkout directory; SkillsMaterialized is whether any root
+	// discovery walks is a real directory inside it. Named for the state it
+	// represents rather than for agents/ specifically: the legacy coworkers/ root
+	// satisfies it, and reporting "agents/ materialized" for a legacy team would
+	// be a lie in the reassuring direction.
 	Present            bool   `json:"present"`
-	AgentsMaterialized bool   `json:"agents_materialized"`
+	SkillsMaterialized bool   `json:"skills_materialized"`
 	LastSync           string `json:"last_sync,omitempty"`
 	Stale              bool   `json:"stale"`
 }
@@ -79,6 +88,18 @@ type repoSkillStatus struct {
 	Targets        []string `json:"targets"`
 	Selected       bool     `json:"selected"`
 }
+
+// The states a published skill can be in from this repository's point of view.
+// Not a boolean: "the team published this" and "this is on my disk" are
+// different facts, and collapsing them is how a diagnostic reports success at
+// the exact moment the thing it diagnoses has not happened.
+const (
+	skillInstalled     = "installed"      // on disk now
+	skillPending       = "pending"        // reconcile will create it; not there yet
+	skillWithheld      = "withheld"       // executable, awaiting approval
+	skillUnavailable   = "unavailable"    // discovered but ox could not use it
+	skillNotApplicable = "not applicable" // published, but its repos: excludes this repo
+)
 
 type teamSkillStatus struct {
 	Name        string `json:"name"`
@@ -117,10 +138,15 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 
 	_, _, selected := skillmanager.InstalledSource(gitRoot)
 	out.Repo.Selected = selected
-	if _, targets, err := skillmanager.LoadDesired(gitRoot); err == nil {
-		for _, t := range targets {
-			out.Repo.Targets = append(out.Repo.Targets, t.Root)
-		}
+	targets, desiredErr := skillTargetRoots(gitRoot)
+	out.Repo.Targets = targets
+	if desiredErr != nil {
+		// A missing lockfile is a valid empty state; anything else means ox cannot
+		// read its own record of what it installed. Suppressing that made the
+		// command recommend `ox init` for a repo that is already initialized and
+		// merely has a corrupt lockfile.
+		out.Problems = append(out.Problems,
+			fmt.Sprintf("ox could not read this repository's skill lockfile, so what is installed here is unknown: %v", desiredErr))
 	}
 	if !selected {
 		out.Problems = append(out.Problems, "this repository has not selected an AI coworker, so no skills are installed — run `ox init`")
@@ -153,12 +179,14 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 		// `ox doctor` for a condition that is not wrong.
 		for _, root := range teamdocs.SkillRoots {
 			parent := filepath.Dir(filepath.FromSlash(root))
-			if _, statErr := os.Stat(filepath.Join(tc.Path, parent)); statErr == nil {
-				status.AgentsMaterialized = true
+			// IsDir, not merely "exists": a regular file named agents/ makes the
+			// ReadDir inside discovery fail, so the checkout is not usable either.
+			if info, statErr := os.Stat(filepath.Join(tc.Path, parent)); statErr == nil && info.IsDir() {
+				status.SkillsMaterialized = true
 				break
 			}
 		}
-		if !status.AgentsMaterialized {
+		if !status.SkillsMaterialized {
 			out.Problems = append(out.Problems,
 				"the Team Context is on disk but no skills directory was materialized, so team rules AND team skills are invisible here — run `ox doctor`")
 		}
@@ -173,13 +201,36 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 	}
 	out.TeamContext = status
 
-	// Discovery tells us what the team publishes; the plan tells us what reached
-	// disk and what was held. Neither alone answers the question.
-	discovered, _ := teamdocs.DiscoverSkills(tc.Path, slug)
-	withheld := map[string]skillmanager.TeamSkillDecision{}
-	if plan, planErr := planCommittedSkills(gitRoot); planErr == nil && plan != nil {
-		for _, d := range plan.WithheldTeamSkills() {
-			withheld[d.Name] = d
+	// Three different questions, deliberately asked separately:
+	//   what does the team publish        -> PublishedSkills
+	//   which of those are for this repo  -> SkillAppliesToRepo
+	//   which of those are actually here  -> the plan, and the file on disk
+	//
+	// Collapsing any two of them is how a diagnostic reports success at the exact
+	// moment the thing it diagnoses has not happened.
+	published, discoverErr := teamdocs.PublishedSkills(tc.Path)
+	if discoverErr != nil {
+		// A missing root is already an empty result; an error here means the
+		// checkout is present but malformed — e.g. agents/skills is a regular
+		// file. Reporting "none found" would tell the reader nothing exists when
+		// the truth is that the checkout needs repair.
+		out.Problems = append(out.Problems,
+			fmt.Sprintf("ox could not read the team's skills: %v", discoverErr))
+	}
+
+	decisions := map[string]skillmanager.TeamSkillDecision{}
+	pending := map[string]bool{}
+	plan, planErr := planCommittedSkills(gitRoot)
+	switch {
+	case planErr != nil:
+		out.Problems = append(out.Problems,
+			fmt.Sprintf("ox could not compute what should be installed here, so no skill below can be confirmed: %v", planErr))
+	case plan != nil:
+		for _, d := range plan.TeamSkills {
+			decisions[d.Name] = d
+		}
+		for _, action := range plan.Creates {
+			pending[action.Path] = true
 		}
 		if reason := plan.RetainedTeamReason(); reason != "" {
 			out.Problems = append(out.Problems,
@@ -187,11 +238,20 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 		}
 	}
 
-	for _, s := range discovered {
-		row := teamSkillStatus{Name: s.Name, AppliesHere: true, State: "installed"}
-		if d, held := withheld[s.Name]; held {
-			row.State = "withheld"
-			row.Detail = d.Reason
+	for _, sk := range published {
+		row := teamSkillStatus{Name: sk.Name, AppliesHere: teamdocs.SkillAppliesToRepo(sk, slug)}
+		switch {
+		case !row.AppliesHere:
+			// Without this row the skill is invisible, and "the team published
+			// nothing" looks identical to "the team published it for other repos."
+			// Those need opposite actions: author one, versus widen a repos: list.
+			row.State = skillNotApplicable
+			row.Detail = "its repos: list targets " + strings.Join(sk.Repos, ", ")
+		case planErr != nil:
+			row.State = "unknown"
+			row.Detail = "could not compute the plan"
+		default:
+			row.State, row.Detail = installedState(gitRoot, targets, decisions[sk.Name], pending)
 		}
 		out.TeamSkills = append(out.TeamSkills, row)
 	}
@@ -208,11 +268,61 @@ func skillsStatusGuidance(out skillsStatusOutput) string {
 		return out.Problems[0]
 	}
 	for _, s := range out.TeamSkills {
-		if s.State == "withheld" {
+		if s.State == skillWithheld {
 			return fmt.Sprintf("team skill %q is withheld: %s. Read the file it bundles before deciding to approve it.", s.Name, s.Detail)
 		}
 	}
+	for _, s := range out.TeamSkills {
+		if s.State == skillPending || s.State == skillUnavailable || s.State == "unknown" {
+			return fmt.Sprintf("team skill %q is %s: %s", s.Name, s.State, s.Detail)
+		}
+	}
 	return "Team skills are current. Nothing to do."
+}
+
+// skillTargetRoots reads the repo's selected skill roots, distinguishing "no
+// lockfile yet" from "the lockfile cannot be read."
+func skillTargetRoots(gitRoot string) ([]string, error) {
+	_, targets, err := skillmanager.LoadDesired(gitRoot)
+	if err != nil {
+		return nil, err
+	}
+	roots := make([]string, 0, len(targets))
+	for _, t := range targets {
+		roots = append(roots, t.Root)
+	}
+	return roots, nil
+}
+
+// installedState answers "is this skill actually here?" from the reconcile
+// decision plus the file on disk — never from the fact that it was discovered.
+//
+// Discovery only establishes that the team published a skill for this repo. A
+// pending create means reconcile intends to write it and has not; a decision
+// with no InstalledAs means ox could not use the skill at all (unreadable
+// files), which WithheldTeamSkills does not report because it only returns
+// approval holds.
+func installedState(gitRoot string, targets []string, d skillmanager.TeamSkillDecision, pending map[string]bool) (state, detail string) {
+	switch {
+	case d.NeedsApprove:
+		return skillWithheld, d.Reason
+	case d.Name != "" && d.InstalledAs == "":
+		return skillUnavailable, d.Reason
+	}
+	if d.InstalledAs == "" {
+		// No decision at all: the plan did not see it, so it is not ours to claim.
+		return skillUnavailable, "ox did not record a decision for this skill"
+	}
+	for _, root := range targets {
+		rel := path.Join(root, d.InstalledAs, "SKILL.md")
+		if pending[rel] {
+			return skillPending, "reconcile has not written it yet — run `ox doctor --fix`"
+		}
+		if _, err := os.Stat(filepath.Join(gitRoot, filepath.FromSlash(rel))); err == nil {
+			return skillInstalled, ""
+		}
+	}
+	return skillPending, "not on disk yet — run `ox doctor --fix`"
 }
 
 func roundedAge(t time.Time) string {
@@ -234,7 +344,7 @@ func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsSta
 		p("%s  %s", cli.StyleAccent.Render("Team Context"), name)
 		p("  path         %s", out.TeamContext.Path)
 		p("  checkout     %s", presence(out.TeamContext.Present))
-		p("  agents/      %s", materialized(out.TeamContext.AgentsMaterialized))
+		p("  skill roots  %s", materialized(out.TeamContext.SkillsMaterialized))
 		if out.TeamContext.LastSync != "" {
 			p("  last sync    %s", out.TeamContext.LastSync)
 		}
