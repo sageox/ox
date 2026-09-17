@@ -211,6 +211,37 @@ func seedScopedKBDir(t *testing.T, root, kbID, teamID string) string {
 	return dir
 }
 
+// TestCheckKBOrphans_AutoFixTimedOutButDaemonFinished checks that the result
+// comes from disk when the daemon call fails. The daemon does not abandon a
+// pass because the client stopped waiting, so triage can land after the
+// client's deadline elapses.
+//
+// Failure prevented (#941): reporting a failed auto-fix for work that
+// succeeded — the misdirection that issue was filed about.
+func TestCheckKBOrphans_AutoFixTimedOutButDaemonFinished(t *testing.T) {
+	root, h := kbTestSetup(t)
+	orphan := seedKBDir(t, root, "kb_orphan", nil)
+	h.List = func(context.Context) ([]api.KB, error) { return nil, nil }
+	h.GC = func(context.Context) error {
+		// the daemon triaged the orphan, then our read deadline elapsed
+		trash := filepath.Join(root, ".trash")
+		if err := os.MkdirAll(trash, 0o755); err != nil {
+			return err
+		}
+		if err := os.Rename(orphan, filepath.Join(trash, "kb_orphan-2026-09-17T00:00:00Z")); err != nil {
+			return err
+		}
+		return errors.New("read: read unix ->/tmp/sageox/daemon/daemon-752e705d.sock: i/o timeout")
+	}
+	applyHooks(h)
+
+	result := checkKBOrphans(true)
+
+	assert.True(t, result.passed && !result.warning, "disk shows the orphan gone; got %+v", result)
+	assert.Equal(t, "triaged 1 orphan(s) to .trash/", result.message)
+	assert.NoDirExists(t, orphan)
+}
+
 // TestCheckKBOrphans_AutoFixFailureDetail pins the detail line of a failed
 // orphan autofix: it names the command to run next instead of relaying a raw
 // IPC error.

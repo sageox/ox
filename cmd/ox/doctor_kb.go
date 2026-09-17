@@ -389,14 +389,20 @@ func checkKBOrphans(fix bool) checkResult {
 	// AutoFix path — kick the daemon's GC pass.
 	gcCtx, gcCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer gcCancel()
-	if gcErr := kbHookGC()(gcCtx); gcErr != nil {
+	gcErr := kbHookGC()(gcCtx)
+	if gcErr != nil {
 		kbHookLogger().Warn("kb_doctor orphan autofix failed", "error", gcErr, "orphans", len(orphans))
-		return FailedCheck(name, msg, kbAutoFixHint(gcErr))
 	}
 
-	// Recheck: confirm the orphans are gone from the canonical root.
+	// Recheck: confirm the orphans are gone from the canonical root. This runs
+	// even when the call failed, because the daemon does not abandon a pass
+	// when the client stops waiting for the response — so disk, not the IPC
+	// result, says whether the orphans were triaged.
 	postIDs, err := listLocalKBIDs(root)
 	if err != nil {
+		if gcErr != nil {
+			return FailedCheck(name, msg, kbAutoFixHint(gcErr))
+		}
 		// fix likely succeeded but we can't confirm — surface as warning.
 		return WarningCheck(name, "orphans triaged; recheck failed", err.Error())
 	}
@@ -411,6 +417,9 @@ func checkKBOrphans(fix bool) checkResult {
 		}
 	}
 	if len(stillPresent) > 0 {
+		if gcErr != nil {
+			return FailedCheck(name, msg, kbAutoFixHint(gcErr))
+		}
 		return FailedCheck(name,
 			fmt.Sprintf("%d orphan(s) still present after autofix", len(stillPresent)),
 			strings.Join(stillPresent, ", "))
