@@ -58,6 +58,17 @@ type CapturePriorGuidance struct {
 	Example      string   `json:"example"`
 }
 
+// WithheldSkill is a team skill ox found but did not install, and why.
+//
+// Carried as its own shape rather than reusing the skill manager's decision type
+// so this package keeps no dependency on the installer. Only the two fields a
+// reader can act on travel: the name they would recognize, and the reason they
+// would have to accept.
+type WithheldSkill struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason,omitempty"`
+}
+
 // TeamContextInfo represents discovered team context for prime output.
 //
 // Permanent, first-class: team contexts are conversation stores, not
@@ -325,32 +336,36 @@ type EphemeralHint struct {
 
 // Output is the structured response for agent bootstrap (prime)
 type Output struct {
-	Status            string                     `json:"status"` // fresh, degraded, unavailable
-	AgentID           string                     `json:"agent_id"`
-	Guidance          *Guidance                  `json:"guidance,omitempty"` // intent-to-command lookup (scan first)
-	SessionID         string                     `json:"session_id,omitempty"`
-	AgentType         string                     `json:"agent_type,omitempty"`     // detected or specified agent type
-	AgentSupported    bool                       `json:"agent_supported"`          // true if agent is officially supported
-	SupportNotice     string                     `json:"support_notice,omitempty"` // warning for unsupported agents
-	Content           string                     `json:"content"`
-	Attribution       config.ResolvedAttribution `json:"attribution"`                 // commit/PR attribution for ox-guided work
-	PlanFooter        string                     `json:"plan_footer,omitempty"`       // exact text for plan footer ("Guided by SageOx")
-	ProjectGuidance   *ProjectGuidance           `json:"project_guidance,omitempty"`  // AGENTS.md content if found
-	TeamInstructions  *TeamInstructions          `json:"team_instructions,omitempty"` // team AGENTS.md/CLAUDE.md content if found
-	CapturePrior      *CapturePriorGuidance      `json:"capture_prior,omitempty"`     // instructions for capturing prior history
-	Message           string                     `json:"message,omitempty"`
-	TokenEstimate     int                        `json:"token_estimate,omitempty"`      // estimated token count
-	ContentLength     int                        `json:"content_length,omitempty"`      // raw byte length
-	Session           *SessionStatus             `json:"session,omitempty"`             // session recording status
-	KB                []KBInfo                   `json:"kb,omitempty"`                  // knowledge-bubble envelope (KB-API rows only, ox ADR-028)
-	KBGuidance        string                     `json:"kb_guidance,omitempty"`         // how to consume the mounted bubbles (set when KB is non-empty)
-	Ledger            *LedgerInfo                `json:"ledger,omitempty"`              // the project ledger (conversation store; see LedgerInfo godoc)
-	Important         string                     `json:"important"`                     // always-present disambiguation of knowledge sources
-	TeamContext       *TeamContextInfo           `json:"team_context,omitempty"`        // team context (conversation store; see TeamContextInfo godoc)
-	TeamContextStatus string                     `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
-	OtherTeams        *OtherTeams                `json:"other_teams,omitempty"`         // non-primary teams (nil when only 1 team)
-	UserNotification  string                     `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user
-	AgentTip          string                     `json:"agent_tip,omitempty"`           // contextual tip for the agent itself (not for the user)
+	Status           string                     `json:"status"` // fresh, degraded, unavailable
+	AgentID          string                     `json:"agent_id"`
+	Guidance         *Guidance                  `json:"guidance,omitempty"` // intent-to-command lookup (scan first)
+	SessionID        string                     `json:"session_id,omitempty"`
+	AgentType        string                     `json:"agent_type,omitempty"`     // detected or specified agent type
+	AgentSupported   bool                       `json:"agent_supported"`          // true if agent is officially supported
+	SupportNotice    string                     `json:"support_notice,omitempty"` // warning for unsupported agents
+	Content          string                     `json:"content"`
+	Attribution      config.ResolvedAttribution `json:"attribution"`                 // commit/PR attribution for ox-guided work
+	PlanFooter       string                     `json:"plan_footer,omitempty"`       // exact text for plan footer ("Guided by SageOx")
+	ProjectGuidance  *ProjectGuidance           `json:"project_guidance,omitempty"`  // AGENTS.md content if found
+	TeamInstructions *TeamInstructions          `json:"team_instructions,omitempty"` // team AGENTS.md/CLAUDE.md content if found
+	CapturePrior     *CapturePriorGuidance      `json:"capture_prior,omitempty"`     // instructions for capturing prior history
+	Message          string                     `json:"message,omitempty"`
+	TokenEstimate    int                        `json:"token_estimate,omitempty"` // estimated token count
+	ContentLength    int                        `json:"content_length,omitempty"` // raw byte length
+	Session          *SessionStatus             `json:"session,omitempty"`        // session recording status
+	KB               []KBInfo                   `json:"kb,omitempty"`             // knowledge-bubble envelope (KB-API rows only, ox ADR-028)
+	KBGuidance       string                     `json:"kb_guidance,omitempty"`    // how to consume the mounted bubbles (set when KB is non-empty)
+	Ledger           *LedgerInfo                `json:"ledger,omitempty"`         // the project ledger (conversation store; see LedgerInfo godoc)
+	Important        string                     `json:"important"`                // always-present disambiguation of knowledge sources
+	// WithheldTeamSkills are team skills this reconcile declined to materialize.
+	// Empty on the healthy path, which is the common one — a repository with
+	// nothing held pays nothing for this field existing.
+	WithheldTeamSkills []WithheldSkill  `json:"withheld_team_skills,omitempty"`
+	TeamContext        *TeamContextInfo `json:"team_context,omitempty"`        // team context (conversation store; see TeamContextInfo godoc)
+	TeamContextStatus  string           `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
+	OtherTeams         *OtherTeams      `json:"other_teams,omitempty"`         // non-primary teams (nil when only 1 team)
+	UserNotification   string           `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user
+	AgentTip           string           `json:"agent_tip,omitempty"`           // contextual tip for the agent itself (not for the user)
 	// Prime call tracking
 	PrimeCallCount       int    `json:"prime_call_count,omitempty"`       // number of prime calls this session
 	PrimeExcessiveNotice string `json:"prime_excessive_notice,omitempty"` // warning if prime called excessively

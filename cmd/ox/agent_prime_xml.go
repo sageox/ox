@@ -444,6 +444,8 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 				emitTeamRules(&sb, bk, output.TeamContext.TeamRules)
 			}
 
+			emitWithheldTeamSkills(&sb, bk, output.WithheldTeamSkills)
+
 			// team memory (inlined content): framing ours, body is team's
 			if output.TeamContext.MemoryContent != "" {
 				sb.WriteString("\n<memory>\n")
@@ -852,6 +854,39 @@ func writeDecisionRecordGuidance(sb *strings.Builder) {
 // rule names, descriptions, paths, and bodies are team-content (the team
 // authored them). This keeps the rolled-up <context-budget> accurate even
 // when teams accumulate large always-tier rule libraries.
+// emitWithheldTeamSkills names the team skills ox declined to install.
+//
+// Emitted ONLY when something is held, so a healthy repository — the common case
+// — pays nothing. Prime is already trimmed to fit a hook budget, and a section
+// that reports "nothing is wrong" in every session is what pushes something
+// useful into the deferred file.
+//
+// It exists because a withheld skill is INVISIBLE from the repository: it looks
+// exactly as it would if nobody had authored it. The teammate who wrote it has
+// no way to discover from their own machine that it never arrived, so silence
+// here is indistinguishable from the skill not existing.
+//
+// One line per skill and a pointer, not a table: the detail belongs in
+// `ox skills status`, which can afford it.
+func emitWithheldTeamSkills(sb *strings.Builder, bk *bookkeeper, withheld []prime.WithheldSkill) {
+	if len(withheld) == 0 {
+		return
+	}
+	sb.WriteString("\n<team-skills-held hint=\"published by your team but held back in part or in full — a bundled script is dropped until approved, a manifest that grants tools is withheld outright. Run `ox skills status` for detail.\">\n")
+	bk.charge(prime.BudgetSourceSageox)
+	for _, skill := range withheld {
+		fmt.Fprintf(sb, "- %s", escapeXMLText(skill.Name))
+		bk.charge(prime.BudgetSourceTeam)
+		if skill.Reason != "" {
+			fmt.Fprintf(sb, ": %s", escapeXMLText(skill.Reason))
+			bk.charge(prime.BudgetSourceTeam)
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("</team-skills-held>\n")
+	bk.charge(prime.BudgetSourceSageox)
+}
+
 func emitTeamRules(sb *strings.Builder, bk *bookkeeper, rules []teamdocs.TeamRule) {
 	var alwaysRules []teamdocs.TeamRule
 	var indexedRules []teamdocs.TeamRule
