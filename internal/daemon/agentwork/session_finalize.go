@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -325,6 +326,7 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 	// deduplicate across all scan dirs (prefer earlier-found copy)
 	seen := make(map[string]bool)
 	var items []*WorkItem
+	var skips detectSkipStats
 
 	mergeItems := func(newItems []*WorkItem) {
 		for _, item := range newItems {
@@ -340,8 +342,9 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 	if ghostResult := session.CleanupGhostSessionsInDir(ledgerCacheSessionsDir); ghostResult.Removed > 0 {
 		h.logger.Info("ghost cleanup (ledger cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
 	}
-	if cacheItems, err := h.detectInDir(ledgerCacheSessionsDir, ledgerPath); err == nil {
+	if cacheItems, cacheSkips, err := h.detectInDir(ledgerCacheSessionsDir, ledgerPath); err == nil {
 		mergeItems(cacheItems)
+		skips.merge(cacheSkips)
 	}
 
 	// 2. git-tracked ledger sessions — uploaded/finalized sessions
@@ -349,8 +352,9 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 	if ghostResult := session.CleanupGhostSessionsInDir(ledgerSessionsDir); ghostResult.Removed > 0 {
 		h.logger.Info("ghost cleanup (ledger): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
 	}
-	if ledgerItems, err := h.detectInDir(ledgerSessionsDir, ledgerPath); err == nil {
+	if ledgerItems, ledgerSkips, err := h.detectInDir(ledgerSessionsDir, ledgerPath); err == nil {
 		mergeItems(ledgerItems)
+		skips.merge(ledgerSkips)
 	}
 
 	// 3. XDG/legacy cache paths — older ox versions or different XDG_CACHE_HOME environments
@@ -373,24 +377,45 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 			if ghostResult := session.CleanupGhostSessionsInDir(dir); ghostResult.Removed > 0 {
 				h.logger.Info("ghost cleanup (xdg cache): removed abandoned recordings", "dir", dir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
 			}
-			if xdgItems, err := h.detectInDir(dir, ledgerPath); err == nil {
+			if xdgItems, xdgSkips, err := h.detectInDir(dir, ledgerPath); err == nil {
 				mergeItems(xdgItems)
+				skips.merge(xdgSkips)
 			}
 		}
 	}
 
-	h.logger.Info("session finalize detect complete", "ledger", ledgerPath, "items", len(items))
+	h.logger.Info("session finalize detect complete",
+		"ledger", ledgerPath,
+		"items", len(items),
+		"skipped_with_content", skips.total(),
+	)
+	// A separate Warn rather than more keys on the line above: `items=0` is
+	// indistinguishable from a healthy ledger, and this is the one condition
+	// where it is not. Names the sessions so the user can run
+	// `ox agent <id> session recover` on them without guessing.
+	if skips.total() > 0 {
+		h.logger.Warn("sessions skipped while holding transcript content",
+			"ledger", ledgerPath,
+			"draft_not_provably_abandoned", len(skips.unprovenDraft),
+			"unreadable_meta", len(skips.unreadableMeta),
+			"sessions", skips.names(),
+		)
+	}
 	return items, nil
 }
 
-// detectInDir scans a single sessions directory for sessions needing finalization.
-func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]*WorkItem, error) {
+// detectInDir scans a single sessions directory for sessions needing
+// finalization. The second return value reports sessions it deliberately
+// skipped while they still held transcript bytes — see detectSkipStats.
+func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]*WorkItem, detectSkipStats, error) {
+	var skips detectSkipStats
+
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, skips, nil
 		}
-		return nil, fmt.Errorf("read sessions dir: %w", err)
+		return nil, skips, fmt.Errorf("read sessions dir: %w", err)
 	}
 
 	var items []*WorkItem
@@ -408,24 +433,94 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		sessionDir := filepath.Join(sessionsDir, name)
 		rawPath := filepath.Join(sessionDir, artifactRaw)
 
-		// Never touch a draft placeholder (ADR-029). It is an in-progress
-		// marker for a live recording, not an unfinished session awaiting
-		// anti-entropy: it has no raw.jsonl to summarize and no artifacts to
-		// repair, and every work class below would either no-op noisily or
-		// write a failure stub into a directory the CLI is about to purge.
+		// Liveness probe FIRST, because the draft guard below depends on its
+		// verdict. .recording.json is the only definitive signal of whether the
+		// client process that owns this directory still exists, and
+		// isStaleRecording already turns it into exactly the answer we need:
+		// dead PID => abandoned immediately, live PID => never abandoned, no
+		// PID => the 24h time threshold. Probing it here costs one stat for
+		// sessions that have no marker.
+		recPath := filepath.Join(sessionDir, recordingMarker)
+		recInfo, recStatErr := os.Stat(recPath)
+		hasRecordingMarker := recStatErr == nil
+		var (
+			recStale  bool
+			recAge    time.Duration
+			recMethod string
+		)
+		if hasRecordingMarker {
+			recStale, recAge, recMethod = isStaleRecording(recPath, recInfo, h.pidLookup, h.logger)
+		}
+		// PROVEN dead, not merely "not known to be alive". No marker at all
+		// yields false, so a session carrying no liveness evidence keeps the
+		// conservative treatment it has always had.
+		abandoned := hasRecordingMarker && recStale
+
+		_, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir)
+
+		// Fails CLOSED on an unreadable meta.json (torn write, rebase conflict
+		// markers). It must SKIP, never fall through: falling through reaches
+		// recoverRawFromSessionFile, which writes real transcript bytes onto
+		// the git-tracked raw.jsonl and breaks LFS linkage for the whole team.
+		// Skipping only defers finalization to a human.
 		//
-		// The !hasRaw guard further down would also skip a well-formed draft
-		// today, but only incidentally. Making it explicit means the safety
-		// survives a future change to that guard, and gives the regression
-		// test something real to assert against.
-		// Fails CLOSED. An unreadable meta.json here (torn write, rebase
-		// conflict markers) must SKIP, not fall through: falling through
-		// reaches recoverRawFromSessionFile, which writes real transcript
-		// bytes onto the git-tracked raw.jsonl and breaks LFS linkage for the
-		// whole team. Skipping only defers finalization to a human.
-		if _, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir); isDraft || metaErr != nil {
-			h.logger.Debug("skipping draft or unclassifiable session", "session", name, "err", metaErr)
+		// Its own branch and its own message deliberately: "draft" and
+		// "unparseable meta.json" are unrelated conditions, and sharing one
+		// Debug line between them is part of why #966 was unreadable in the
+		// logs.
+		if metaErr != nil {
+			// Warn only when bytes are actually stranded. A corrupt meta.json
+			// over an empty directory is a nuisance, not lost work, and this
+			// scan repeats every detectCooldown — warning on both would train
+			// the reader to ignore the line that matters.
+			if hasSessionContent(rawPath) {
+				skips.addUnreadableMeta(name)
+				h.logger.Warn("skipping session with unreadable meta.json, transcript stranded",
+					"session", name, "err", metaErr)
+			} else {
+				h.logger.Debug("skipping session with unreadable meta.json",
+					"session", name, "err", metaErr)
+			}
 			continue
+		}
+
+		// Never touch a LIVE draft placeholder (ADR-029). It is an in-progress
+		// marker for a recording the CLI still owns: every work class below
+		// would either no-op noisily or write a failure stub into a directory
+		// stageSessionInLedger is about to purge.
+		//
+		// But `draft: true` means "was live when last written", NOT "is live".
+		// The flag is set at start and cleared only by finalize, so a client
+		// process that dies in between freezes it set forever. Honoring it
+		// unconditionally made every such session permanently invisible to
+		// anti-entropy — two sessions holding 1151 and 628 entries sat
+		// unuploaded for 21h behind a healthy daemon (#966). The probe above is
+		// what separates the two cases, so only a draft we cannot PROVE is
+		// abandoned gets skipped here.
+		//
+		// A draft with no recording marker stays skipped: absence of evidence
+		// is not proof of death, and that is precisely the shape of the
+		// ordinary git-tracked placeholder the CLI refreshes every turn.
+		//
+		// Letting an abandoned draft through does not weaken the LFS-linkage
+		// guarantee above. Recovery into the git-tracked ledger path is blocked
+		// separately below (`sessionsDir != <ledger>/sessions`) — that is the
+		// guard which actually keeps transcript bytes off the tracked
+		// raw.jsonl. This one only decides whether to look at all.
+		if isDraft && !abandoned {
+			if hasSessionContent(rawPath) {
+				skips.addUnprovenDraft(name)
+			}
+			h.logger.Debug("skipping draft placeholder with no proof of abandonment",
+				"session", name, "recording_marker", hasRecordingMarker)
+			continue
+		}
+		if isDraft {
+			h.logger.Info("draft session's recording process is gone, reclaiming for anti-entropy",
+				"session", name,
+				"recording_age", recAge.Round(time.Minute),
+				"detection_method", recMethod,
+			)
 		}
 
 		// raw.jsonl must exist and be committed/pushed to the ledger.
@@ -441,12 +536,9 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			hasRaw = true
 		}
 
-		// check for active recording
-		recPath := filepath.Join(sessionDir, recordingMarker)
-		if recInfo, statErr := os.Stat(recPath); statErr == nil {
-			// .recording.json exists — check if it's stale (abandoned)
-			stale, recAge, method := isStaleRecording(recPath, recInfo, h.pidLookup, h.logger)
-			if !stale {
+		// act on the recording marker probed above
+		if hasRecordingMarker {
+			if !recStale {
 				h.logger.Debug("skipping session with active recording", "session", name)
 				continue
 			}
@@ -484,7 +576,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			h.logger.Info("clearing stale recording for anti-entropy finalization",
 				"session", name,
 				"recording_age", recAge.Round(time.Hour),
-				"detection_method", method,
+				"detection_method", recMethod,
 			)
 		}
 
@@ -598,7 +690,82 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		})
 	}
 
-	return items, nil
+	return items, skips, nil
+}
+
+// detectSkipStats accumulates sessions detectInDir refused to queue even though
+// they still hold transcript bytes on disk.
+//
+// A skip with no content is routine — an empty draft placeholder, a header-only
+// stub. A skip WITH content means finished work is sitting on disk that
+// anti-entropy has decided not to touch, which is the single strongest anomaly
+// signal this scan produces. It was silent at Debug when #966 stranded two
+// sessions for 21h behind an `items=0` that read exactly like "all healthy", so
+// these are counted per scan and surfaced at Warn where `ox doctor` (which
+// routes the user to `ox daemon logs`) can show them.
+//
+// Keyed by session name so a session found in two scan dirs — the ledger cache
+// and the git-tracked ledger — counts once.
+type detectSkipStats struct {
+	// unprovenDraft: draft:true and the owning process could not be proven
+	// dead (live PID, or no .recording.json to check at all).
+	unprovenDraft map[string]bool
+	// unreadableMeta: meta.json could not be parsed, so the fail-closed arm
+	// skipped rather than risk recovering onto a git-tracked raw.jsonl.
+	unreadableMeta map[string]bool
+}
+
+func (s *detectSkipStats) addUnprovenDraft(name string) {
+	if s.unprovenDraft == nil {
+		s.unprovenDraft = make(map[string]bool)
+	}
+	s.unprovenDraft[name] = true
+}
+
+func (s *detectSkipStats) addUnreadableMeta(name string) {
+	if s.unreadableMeta == nil {
+		s.unreadableMeta = make(map[string]bool)
+	}
+	s.unreadableMeta[name] = true
+}
+
+func (s *detectSkipStats) merge(other detectSkipStats) {
+	for name := range other.unprovenDraft {
+		s.addUnprovenDraft(name)
+	}
+	for name := range other.unreadableMeta {
+		s.addUnreadableMeta(name)
+	}
+}
+
+// names returns every skipped session once, sorted, so the log line is stable
+// across runs and diffable between them.
+func (s *detectSkipStats) names() []string {
+	union := make(map[string]bool, len(s.unprovenDraft)+len(s.unreadableMeta))
+	maps.Copy(union, s.unprovenDraft)
+	maps.Copy(union, s.unreadableMeta)
+	out := make([]string, 0, len(union))
+	for name := range union {
+		out = append(out, name)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func (s *detectSkipStats) total() int { return len(s.names()) }
+
+// hasSessionContent reports whether sessionDir holds real transcript bytes: a
+// raw.jsonl that exists, is non-empty, and is not an unhydrated LFS pointer.
+//
+// Deliberately cheaper than session.HasSubstantiveEntries — it runs for every
+// session the guards above skip, including the ordinary per-turn draft
+// placeholder, and only needs to answer "is there anything here to strand".
+func hasSessionContent(rawPath string) bool {
+	info, err := os.Stat(rawPath)
+	if err != nil || info.Size() == 0 {
+		return false
+	}
+	return !lfs.IsPointerFile(rawPath)
 }
 
 // DetectOrphanedForAgent scans for recordings belonging to a specific agent
@@ -655,13 +822,18 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 
 			sessionDir := filepath.Join(sessionsDir, name)
 
-			// Never treat a draft placeholder as an orphan to recover, and fail
-			// CLOSED on an unreadable meta.json. This is the other detection
-			// path that can reach recoverRawFromSessionFile, which would write
-			// real transcript bytes onto the git-tracked raw.jsonl and break
-			// LFS linkage for the whole team. detectInDir got this guard; this
-			// function is scanned by the same directories and needs it too.
-			if _, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir); isDraft || metaErr != nil {
+			// Fail CLOSED on an unreadable meta.json. This is the other
+			// detection path that can reach recoverRawFromSessionFile, which
+			// would write real transcript bytes onto the git-tracked raw.jsonl
+			// and break LFS linkage for the whole team.
+			//
+			// The DRAFT half of this guard used to live here too, above the
+			// liveness cross-check below — the same ordering bug detectInDir
+			// had (#966). It now sits after that check; see there.
+			_, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir)
+			if metaErr != nil {
+				h.logger.Warn("skipping session with unreadable meta.json",
+					"session", name, "agent_id", agentID, "err", metaErr)
 				continue
 			}
 
@@ -707,6 +879,34 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 						continue
 					}
 				}
+			}
+
+			// Never treat a LIVE draft placeholder as an orphan to recover
+			// (ADR-029) — but `draft: true` only means "was live when last
+			// written", so an abandoned draft must still be reclaimable (#966).
+			// Placed below the cross-check above so the same PID evidence is
+			// available here; reclaiming requires POSITIVE proof the owner is
+			// gone (a recorded stop, or a PID that is no longer alive), never
+			// the mere absence of proof it is running.
+			//
+			// This does not weaken the LFS-linkage guarantee: recovery into the
+			// git-tracked ledger path is blocked separately below
+			// (`sessionsDir != <ledger>/sessions`).
+			if isDraft {
+				ownerPID := state.ParentPID
+				if ownerPID <= 0 {
+					ownerPID = heartbeatPID
+				}
+				ownerGone := state.StoppedAt != nil || (ownerPID > 0 && !isPIDAlive(ownerPID))
+				if !ownerGone {
+					h.logger.Debug("skipping draft placeholder with no proof of abandonment",
+						"session", name, "agent_id", agentID, "owner_pid", ownerPID,
+					)
+					continue
+				}
+				h.logger.Info("draft session's recording process is gone, reclaiming as orphan",
+					"session", name, "agent_id", agentID, "owner_pid", ownerPID,
+				)
 			}
 
 			// check if already fully finalized
