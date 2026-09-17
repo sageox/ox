@@ -126,6 +126,45 @@ const DefaultRuleVisibility = VisibilityIndexed
 // Not implemented yet; this comment IS the design memo until someone
 // picks up the work.
 func DiscoverRules(teamPath, repoSlug string) ([]TeamRule, error) {
+	published, err := PublishedRules(teamPath)
+	if err != nil {
+		return nil, err
+	}
+
+	rules := published[:0]
+	for _, r := range published {
+		if RuleAppliesToRepo(r, repoSlug) {
+			rules = append(rules, r)
+		}
+	}
+
+	// load body + estimate tokens for visibility: always
+	for i := range rules {
+		if rules[i].Visibility != VisibilityAlways {
+			continue
+		}
+		body, err := readRuleBody(rules[i].AbsPath)
+		if err != nil {
+			// missing or unreadable bodies are skipped silently — prime
+			// must never fail because a single rule file is malformed
+			continue
+		}
+		rules[i].Body = body
+		rules[i].EstimatedTokens = estimateTokens(body)
+	}
+
+	return rules, nil
+}
+
+// PublishedRules returns every rule the team publishes to AI coworkers, before
+// the per-repo `repos:` filter is applied and without loading bodies.
+//
+// Split out from DiscoverRules for the same reason PublishedSkills was: a
+// human asking "which repos does this rule reach?" needs the list BEFORE the
+// filter has removed the answer. The audience/visibility/status filters are not
+// repo-specific and stay here — a draft or human-only rule is not published
+// anywhere, so listing it as "available elsewhere" would be wrong too.
+func PublishedRules(teamPath string) ([]TeamRule, error) {
 	if teamPath == "" {
 		return nil, nil
 	}
@@ -153,7 +192,7 @@ func DiscoverRules(teamPath, repoSlug string) ([]TeamRule, error) {
 	}
 	rules = deduped
 
-	// filter by audience, status, visibility, and repos
+	// filter by audience, status, and visibility — never by repo
 	filtered := rules[:0]
 	for _, r := range rules {
 		if r.Audience == RuleAudienceHuman {
@@ -168,27 +207,9 @@ func DiscoverRules(teamPath, repoSlug string) ([]TeamRule, error) {
 		if strings.HasPrefix(r.Status, RuleStatusSupersededPrefix) {
 			continue
 		}
-		if !ruleAppliesToRepo(r, repoSlug) {
-			continue
-		}
 		filtered = append(filtered, r)
 	}
 	rules = filtered
-
-	// load body + estimate tokens for visibility: always
-	for i := range rules {
-		if rules[i].Visibility != VisibilityAlways {
-			continue
-		}
-		body, err := readRuleBody(rules[i].AbsPath)
-		if err != nil {
-			// missing or unreadable bodies are skipped silently — prime
-			// must never fail because a single rule file is malformed
-			continue
-		}
-		rules[i].Body = body
-		rules[i].EstimatedTokens = estimateTokens(body)
-	}
 
 	sort.Slice(rules, func(i, j int) bool {
 		return rules[i].RelPath < rules[j].RelPath
@@ -271,11 +292,11 @@ func walkRulesDir(absRoot string) ([]TeamRule, error) {
 	return rules, nil
 }
 
-// ruleAppliesToRepo reports whether a rule's repos: filter matches the
+// RuleAppliesToRepo reports whether a rule's repos: filter matches the
 // current repo slug. Empty repos: means "all team repos." Empty repoSlug
 // means we don't know what repo we're in — be permissive and include
 // non-filtered rules so the agent still gets team-wide guidance.
-func ruleAppliesToRepo(r TeamRule, repoSlug string) bool {
+func RuleAppliesToRepo(r TeamRule, repoSlug string) bool {
 	if len(r.Repos) == 0 {
 		return true
 	}

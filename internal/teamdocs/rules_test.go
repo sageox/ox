@@ -477,3 +477,38 @@ func TestDiscoverRules_GlobsDoNotFilterDiscovery(t *testing.T) {
 		t.Errorf("Globs = %#v", rules[0].Globs)
 	}
 }
+
+// TestPublishedRules_KeepsRepoScopedRules: the whole reason this exists. A
+// human asking "which repos does this rule reach?" needs the rule BEFORE the
+// repos: filter has removed it. DiscoverRules must keep filtering exactly as
+// before — the split changes who can see the list, not what applies.
+func TestPublishedRules_KeepsRepoScopedRules(t *testing.T) {
+	root := t.TempDir()
+	writeRule(t, root, "agents/rules/everywhere.md", "---\nname: everywhere\ndescription: d\n---\nBody.\n")
+	writeRule(t, root, "agents/rules/web-only.md", "---\nname: web-only\ndescription: d\nrepos: [\"acme/web\"]\n---\nBody.\n")
+	writeRule(t, root, "agents/rules/parked.md", "---\nname: parked\ndescription: d\nstatus: draft\n---\nBody.\n")
+
+	published, err := PublishedRules(root)
+	if err != nil {
+		t.Fatalf("PublishedRules: %v", err)
+	}
+	names := func(rs []TeamRule) []string {
+		out := make([]string, 0, len(rs))
+		for _, r := range rs {
+			out = append(out, r.Name)
+		}
+		slices.Sort(out)
+		return out
+	}
+	if got := names(published); !slices.Equal(got, []string{"everywhere", "web-only"}) {
+		t.Errorf("PublishedRules = %v; a repo-scoped rule was dropped, or a draft leaked", got)
+	}
+
+	applies, err := DiscoverRules(root, "acme/api")
+	if err != nil {
+		t.Fatalf("DiscoverRules: %v", err)
+	}
+	if got := names(applies); !slices.Equal(got, []string{"everywhere"}) {
+		t.Errorf("DiscoverRules(acme/api) = %v; the repos: filter no longer applies", got)
+	}
+}

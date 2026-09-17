@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -155,4 +156,52 @@ func TestFetchAndRenderRoster_AuthErrorSurfaces(t *testing.T) {
 	err := fetchAndRenderRoster(context.Background(), &buf, lister, "team_abc", "Acme", false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, api.ErrUnauthorized)
+}
+
+// TestReadPublishedContent_DistinguishesAbsentFromEmpty: "nothing listed" and
+// "nothing published" are different facts. The author of a rule that is not
+// showing up needs to know which — an absent checkout is a sync problem, an
+// empty one means they have not published yet.
+func TestReadPublishedContent_DistinguishesAbsentFromEmpty(t *testing.T) {
+	if got := readPublishedContent(filepath.Join(t.TempDir(), "never-cloned")); got != nil {
+		t.Errorf("an absent checkout reported published content: %+v", got)
+	}
+
+	empty := t.TempDir()
+	got := readPublishedContent(empty)
+	if got == nil {
+		t.Fatal("a present-but-empty checkout was reported as absent")
+	}
+	if len(got.Rules) != 0 || len(got.Skills) != 0 {
+		t.Errorf("empty checkout listed content: %+v", got)
+	}
+}
+
+// TestRenderPublished_SaysWhereEachReaches is the card's one new claim: which
+// repos a rule or skill applies to. Empty repos: means EVERY repo on the team,
+// which is what an author usually wants and often did not realize they got.
+func TestRenderPublished_SaysWhereEachReaches(t *testing.T) {
+	var sb strings.Builder
+	renderPublished(&sb, &publishedContent{
+		Rules:  []publishedItem{{Name: "escalation"}},
+		Skills: []publishedItem{{Name: "deploy", Repos: []string{"acme/api", "acme/worker"}}},
+	})
+	out := sb.String()
+	for _, want := range []string{"escalation", "all repos", "deploy", "acme/api, acme/worker"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+
+	sb.Reset()
+	renderPublished(&sb, &publishedContent{Rules: []publishedItem{}, Skills: []publishedItem{}})
+	if !strings.Contains(sb.String(), "none published") {
+		t.Errorf("an empty section did not say so:\n%s", sb.String())
+	}
+
+	sb.Reset()
+	renderPublished(&sb, nil)
+	if sb.String() != "" {
+		t.Errorf("an absent checkout rendered a section:\n%q", sb.String())
+	}
 }

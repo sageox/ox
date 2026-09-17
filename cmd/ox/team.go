@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/spf13/cobra"
 )
 
@@ -318,6 +320,53 @@ type teamCard struct {
 	primary  bool
 	path     string
 	lastSync string
+	// published is what the team ships to every coworker's AI coworker, read
+	// from the checkout when it is on disk. Nil when it is not.
+	published *publishedContent
+}
+
+// publishedContent lists a team's rules and skills with their repo targeting.
+//
+// This answers the one question nothing else on the card does: "which repos
+// does this reach?" A rule with no repos: list applies to EVERY repo on the
+// team, which is usually what an author wants and often what they did not
+// realize they got.
+type publishedContent struct {
+	Rules  []publishedItem `json:"rules"`
+	Skills []publishedItem `json:"skills"`
+}
+
+type publishedItem struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	// Repos is the repos: list; empty means every repo on the team.
+	Repos []string `json:"repos,omitempty"`
+}
+
+// readPublishedContent lists what the team checkout publishes, using the same
+// discovery prime and the reconciler use so the card cannot disagree with them.
+// Read failures return nil rather than an error: the card is informational and
+// a malformed rule file must not stop `ox team show` from showing the team.
+func readPublishedContent(teamPath string) *publishedContent {
+	if teamPath == "" {
+		return nil
+	}
+	if _, err := os.Stat(teamPath); err != nil {
+		return nil
+	}
+	rules, rulesErr := teamdocs.PublishedRules(teamPath)
+	skills, skillsErr := teamdocs.PublishedSkills(teamPath)
+	if rulesErr != nil && skillsErr != nil {
+		return nil
+	}
+	out := &publishedContent{Rules: []publishedItem{}, Skills: []publishedItem{}}
+	for _, r := range rules {
+		out.Rules = append(out.Rules, publishedItem{Name: r.Name, Description: r.Description, Repos: r.Repos})
+	}
+	for _, sk := range skills {
+		out.Skills = append(out.Skills, publishedItem{Name: sk.Name, Description: sk.Description, Repos: sk.Repos})
+	}
+	return out
 }
 
 // teamRefFromArgs picks the team reference `ox team show`/`open` acts on. A
@@ -433,6 +482,8 @@ func runTeamShow(cmd *cobra.Command, args []string) error {
 		dashboard = fmt.Sprintf("%s/team/%s", strings.TrimRight(ep, "/"), url.PathEscape(card.teamID))
 	}
 
+	card.published = readPublishedContent(card.path)
+
 	if jsonMode {
 		return writeTeamShowJSON(cmd.OutOrStdout(), card, count, countKnown, dashboard)
 	}
@@ -475,15 +526,16 @@ func rosterCount(resp *api.TeamRosterResponse) (int, bool) {
 
 func writeTeamShowJSON(w io.Writer, c teamCard, count int, countKnown bool, dashboard string) error {
 	env := struct {
-		TeamID             string `json:"team_id"`
-		Name               string `json:"name"`
-		Slug               string `json:"slug,omitempty"`
-		Primary            bool   `json:"primary"`
-		CoworkerCount      int    `json:"coworker_count"`
-		CoworkersAvailable bool   `json:"coworkers_available"`
-		ContextPath        string `json:"context_path,omitempty"`
-		LastSync           string `json:"last_sync,omitempty"`
-		DashboardURL       string `json:"dashboard_url,omitempty"`
+		TeamID             string            `json:"team_id"`
+		Name               string            `json:"name"`
+		Slug               string            `json:"slug,omitempty"`
+		Primary            bool              `json:"primary"`
+		CoworkerCount      int               `json:"coworker_count"`
+		CoworkersAvailable bool              `json:"coworkers_available"`
+		ContextPath        string            `json:"context_path,omitempty"`
+		LastSync           string            `json:"last_sync,omitempty"`
+		DashboardURL       string            `json:"dashboard_url,omitempty"`
+		Published          *publishedContent `json:"published,omitempty"`
 	}{
 		TeamID:             c.teamID,
 		Name:               c.name,
@@ -494,6 +546,7 @@ func writeTeamShowJSON(w io.Writer, c teamCard, count int, countKnown bool, dash
 		ContextPath:        c.path,
 		LastSync:           c.lastSync,
 		DashboardURL:       dashboard,
+		Published:          c.published,
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -538,7 +591,37 @@ func renderTeamShow(w io.Writer, c teamCard, count int, countKnown bool, dashboa
 	kv("Path", teamsPathStyle.Render(cli.SanitizeTerminalText(c.path)))
 	kv("Dashboard", teamsPathStyle.Render(cli.SanitizeTerminalText(dashboard)))
 
+	renderPublished(w, c.published)
+
 	fmt.Fprintf(w, "\n  %s %s\n", teamsHintStyle.Render("Coworkers:"), teamsCommandStyle.Render("ox team members"))
+}
+
+// renderPublished lists the team's rules and skills with where each reaches.
+// Omitted entirely when the checkout is not on disk; says so when it is on
+// disk and empty, because "nothing listed" and "nothing published" are
+// different facts and the author of a missing rule needs to know which.
+func renderPublished(w io.Writer, p *publishedContent) {
+	if p == nil {
+		return
+	}
+	section := func(title string, items []publishedItem) {
+		fmt.Fprintf(w, "\n  %s\n", teamsLabelStyle.Render(title))
+		if len(items) == 0 {
+			fmt.Fprintf(w, "    %s\n", teamsHintStyle.Render("none published"))
+			return
+		}
+		for _, it := range items {
+			reach := "all repos"
+			if len(it.Repos) > 0 {
+				reach = strings.Join(it.Repos, ", ")
+			}
+			fmt.Fprintf(w, "    %-28s %s\n",
+				teamsNameStyle.Render(cli.SanitizeTerminalText(it.Name)),
+				teamsHintStyle.Render("→ "+cli.SanitizeTerminalText(reach)))
+		}
+	}
+	section("Rules", p.Rules)
+	section("Skills", p.Skills)
 }
 
 func runTeamOpen(cmd *cobra.Command, args []string) error {
