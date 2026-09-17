@@ -1192,24 +1192,13 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 // falling back to the directory name if the remote is unavailable.
 // Examples: "sageox/ox", "my-project"
 // offline-safe: falls back to directory name for local-only repos
+//
+// The implementation moved to repotools so the skill reconciler resolves the
+// slug the same way prime does — both feed it to the same `repos:` frontmatter
+// filter, and a second implementation would let a team document apply to rules
+// but not to skills.
 func repoSlugFromRemoteOrDir(projectRoot string) string {
-	cmd := exec.Command("git", "remote", "get-url", "origin")
-	cmd.Dir = projectRoot
-	out, err := cmd.Output()
-	if err == nil {
-		url := strings.TrimSpace(string(out))
-		// handle SSH: git@github.com:owner/repo.git
-		if idx := strings.Index(url, ":"); idx != -1 && !strings.Contains(url[:idx], "/") {
-			url = url[idx+1:]
-		}
-		// handle HTTPS: https://github.com/owner/repo.git
-		url = strings.TrimSuffix(url, ".git")
-		parts := strings.Split(url, "/")
-		if len(parts) >= 2 {
-			return parts[len(parts)-2] + "/" + parts[len(parts)-1]
-		}
-	}
-	return filepath.Base(projectRoot)
+	return repotools.RepoSlug(projectRoot)
 }
 
 // startSessionRecording attempts to start session recording if enabled.

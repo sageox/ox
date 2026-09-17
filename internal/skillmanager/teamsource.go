@@ -1,14 +1,17 @@
 package skillmanager
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	skills "github.com/sageox/ox/extensions/skills"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/teamskills"
 )
@@ -41,7 +44,11 @@ type TeamSkillDecision struct {
 type teamCatalog struct {
 	base      catalogSource
 	teamFiles []skills.Skill
-	digestSum string
+	teamPath  string
+	// incomplete is non-empty when this source could NOT see the team's skills,
+	// as opposed to seeing that the team publishes none. The planner reads it to
+	// decide whether an absent skill means "retire it" or "we are blind right now".
+	incomplete string
 }
 
 // TeamSkillSource builds a catalog source that adds approved team skills.
@@ -60,8 +67,13 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 	if base == nil {
 		base = builtInCatalog{}
 	}
-	if teamPath == "" {
-		return base, nil, nil
+	if reason := unseeableTeamSkills(teamPath, repoSlug); reason != "" {
+		// Deliberately still a teamCatalog, not the bare base. Returning base here
+		// was the original shape, and it is the bug: base reports an authoritative
+		// empty team half, so the planner retires every sageox-team-* file already
+		// on disk. A project whose daemon has not finished its first clone would
+		// have its team playbooks deleted for the crime of being early.
+		return &teamCatalog{base: base, teamPath: teamPath, incomplete: reason}, nil, nil
 	}
 
 	discovered, err := teamdocs.DiscoverSkills(teamPath, repoSlug)
@@ -111,7 +123,7 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 	}
 
 	sort.Slice(allowed, func(i, j int) bool { return allowed[i].Name < allowed[j].Name })
-	return &teamCatalog{base: base, teamFiles: allowed, digestSum: teamDigest(allowed)}, decisions, nil
+	return &teamCatalog{base: base, teamFiles: allowed, teamPath: teamPath}, decisions, nil
 }
 
 func (c *teamCatalog) Digest() (string, error) {
@@ -119,10 +131,17 @@ func (c *teamCatalog) Digest() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// The team half must be IN the digest. Prime compares this against the recorded
-	// revision to decide whether to re-plan, so a digest covering only the built-in
-	// catalog would leave an edited team skill stale until something else changed.
-	return base + "+team:" + c.digestSum, nil
+	// Keyed on the checkout's commit, NOT on a hash of the skills it contains.
+	// Prime compares this against the recorded revision to decide whether to
+	// re-plan at all, and it must be able to compute the same value WITHOUT
+	// walking the team tree — otherwise the cheap path costs exactly what it was
+	// added to avoid, on every session start, in every repo with a team context.
+	//
+	// The trade is that an UNCOMMITTED edit inside the checkout does not move this
+	// value. That is the right trade: the checkout is daemon-managed, the daemon
+	// reconciles off the pull that lands a commit, and the 30-minute drift check
+	// is the floor under anything else.
+	return base + "+team:" + teamRevision(c.teamPath), nil
 }
 
 func (c *teamCatalog) Select(version string, desired DesiredSkills) ([]skills.Skill, error) {
@@ -210,14 +229,167 @@ func toCatalogFiles(s teamskills.Skill, allowScripts bool) []skills.File {
 	return out
 }
 
-func teamDigest(list []skills.Skill) string {
-	h := sha256.New()
-	for _, s := range list {
-		fmt.Fprintf(h, "skill:%s\n", s.Name)
-		for _, f := range s.Files {
-			fmt.Fprintf(h, "file:%s:%d\n", f.Path, len(f.Content))
-			h.Write(f.Content)
+// teamRevision is a cheap signal that changes when the team checkout's committed
+// content could have changed: its resolved HEAD commit.
+//
+// Two file reads and no subprocess, because this runs on the prime hot path.
+// An unreadable or absent checkout yields "", which simply means "no team
+// component" — the same value a project with no team context produces, so the
+// comparison stays well-defined rather than erroring on the fast path.
+func teamRevision(teamPath string) string {
+	if teamPath == "" {
+		return ""
+	}
+	head, err := os.ReadFile(filepath.Join(teamPath, ".git", "HEAD"))
+	if err != nil {
+		return ""
+	}
+	line := strings.TrimSpace(string(head))
+	ref, isSymbolic := strings.CutPrefix(line, "ref: ")
+	if !isSymbolic {
+		return line // detached HEAD already holds the sha
+	}
+	sha, err := os.ReadFile(filepath.Join(teamPath, ".git", filepath.FromSlash(ref)))
+	if err != nil {
+		// Packed refs, or a ref this process cannot read. Returning "" re-plans
+		// every time, which is slow but never wrong; guessing would be the reverse.
+		return ""
+	}
+	return strings.TrimSpace(string(sha))
+}
+
+// ExpectedRevision computes what Plan would record for this repo, without
+// walking the catalog or the team checkout.
+//
+// It exists so the prime fast path and the planner cannot disagree. Prime used
+// to compare against the BUILT-IN digest alone while the planner recorded the
+// built-in digest plus a team component, so the two could never match once a
+// team context existed — turning the cheap path into a full plan on every
+// session start, silently, forever.
+func ExpectedRevision(repoRoot string) (string, error) {
+	base, err := skills.Digest()
+	if err != nil {
+		return "", err
+	}
+	var teamPath string
+	if repoRoot != "" {
+		if tc := config.FindRepoTeamContext(repoRoot); tc != nil {
+			teamPath = tc.Path
 		}
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	return base + "+team:" + teamRevision(teamPath), nil
+}
+
+// catalogForRepo resolves the catalog Plan should project into repoRoot: the
+// built-in one, unioned with this repository's team skills when a team context
+// is resolvable.
+//
+// Resolution deliberately reuses the two mechanisms that already exist rather
+// than taking teamPath and repoSlug as new Plan parameters:
+//
+//   - config.FindRepoTeamContext is what `ox agent prime` and `ox doctor` use to
+//     find the checkout. It matches THIS project's team_id and never guesses a
+//     cross-team context, so a machine with several teams cannot leak one team's
+//     skills into another team's repository.
+//   - repotools.RepoSlug is what prime feeds to teamdocs.DiscoverRules. Skills
+//     reuse the rules' `repos:` frontmatter contract verbatim, so they must be
+//     filtered against the same slug; deriving it a second way is how the same
+//     document comes to apply to rules but not to skills.
+//
+// Threading them through Plan instead would push the resolution onto every
+// caller — the adapters, the daemon autofix tick, `ox init` — and each would get
+// to be subtly wrong on its own.
+//
+// ABSENT IS FINE; UNREADABLE IS NOT. A repository with no team, or whose team
+// context has not been cloned yet, silently gets the built-in catalog: that is
+// the overwhelmingly common case and it must never fail a reconcile. A team
+// context that EXISTS but cannot be read is an error, and the reason is stronger
+// than tidiness — falling back to the built-in catalog would compute "no team
+// skills are desired" and Apply would then DELETE the sageox-team-* files
+// already on disk. Guessing "empty" on an unanswered question is the fail-open
+// shape teamskills.LoadApprovals already refuses; the cost here is deletion of
+// working content rather than materialization of unapproved content.
+func catalogForRepo(repoRoot string) (catalogSource, []TeamSkillDecision, error) {
+	base := catalogSource(builtInCatalog{})
+	// Every early exit returns a teamCatalog carrying a REASON, never the bare
+	// base. Returning base says "authoritatively, this team publishes no skills",
+	// and the planner acts on that by retiring every sageox-team-* file on disk.
+	// A repo with no team context configured, or whose daemon has not finished
+	// its first clone, would have its team skills deleted for being early.
+	if repoRoot == "" {
+		return &teamCatalog{base: base, incomplete: "no repository root to resolve a team context from"}, nil, nil
+	}
+
+	tc := config.FindRepoTeamContext(repoRoot)
+	if tc == nil || tc.Path == "" {
+		return &teamCatalog{base: base, incomplete: "no team context is configured for this project"}, nil, nil
+	}
+	if _, err := os.Stat(tc.Path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// The daemon clones team contexts in the background; a repo that was
+			// just initialized legitimately has nothing here yet.
+			return &teamCatalog{base: base, teamPath: tc.Path, incomplete: "team context checkout is not on disk yet"}, nil, nil
+		}
+		return nil, nil, fmt.Errorf("stat team context %s: %w", tc.Path, err)
+	}
+
+	// The slug costs a `git remote get-url`, so it is resolved only once a team
+	// context is known to exist — the population that can actually use it.
+	return TeamSkillSource(base, tc.Path, repotools.RepoSlug(repoRoot), repoRoot)
+}
+
+// WithheldTeamSkills returns the team skills this plan did NOT materialize
+// because they need a human's approval.
+//
+// Exported because a decision nobody renders is the same invisible failure as no
+// decision at all: from the repository, a skill held for approval and a skill
+// that was never authored look identical.
+func (plan *ReconcilePlan) WithheldTeamSkills() []TeamSkillDecision {
+	var out []TeamSkillDecision
+	for _, d := range plan.TeamSkills {
+		if d.NeedsApprove {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// IncompleteReason reports why this source could not see the team's skills, or
+// "" when its answer is authoritative.
+//
+// The planner removes any managed file that is absent from desired state. That
+// is correct for a skill the team retired and catastrophic for a skill ox simply
+// could not see, and the two produce the identical empty result — so the source
+// that produced the emptiness is the only thing that can tell them apart.
+func (c *teamCatalog) IncompleteReason() string { return c.incomplete }
+
+// unseeableTeamSkills reports why an empty discovery result must NOT be believed,
+// or "" when it can be.
+//
+// Three cheap checks, deliberately no git and no manifest parsing. The failure
+// this guards is a mass delete, and every condition that could hide a team's
+// skills resolves to "hold what we have" — so a conservative check that
+// occasionally declines to prune is strictly better than an exact one that costs
+// a subprocess on the prime hot path.
+func unseeableTeamSkills(teamPath, repoSlug string) string {
+	if teamPath == "" {
+		return "no team context is configured for this project"
+	}
+	if _, err := os.Stat(teamPath); err != nil {
+		return "team context checkout is not on disk yet"
+	}
+	// agents/ is where both team rules and team skills live. Its absence means the
+	// sparse checkout never materialized it (GH #862) — not that the team authored
+	// nothing. A team that genuinely has no agents/ has no skills either, so
+	// retaining nothing is the harmless outcome in that case.
+	if _, err := os.Stat(filepath.Join(teamPath, "agents")); err != nil {
+		return "team context agents/ directory is not materialized"
+	}
+	// Without a slug ox cannot evaluate any skill's repos: filter, so every
+	// targeted skill silently drops out — indistinguishable from the team
+	// un-publishing them.
+	if repoSlug == "" {
+		return "this repository's slug could not be determined"
+	}
+	return ""
 }

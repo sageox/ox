@@ -366,7 +366,7 @@ func (s *SyncScheduler) reconcileBubble(ctx context.Context, b api.KB) {
 		// would silently drift from team-context sync behavior, which
 		// reapplies sparse on every pull.
 		postPullCfg := manifest.ParseFile(manifestPath, manifest.RepoKindKB)
-		_ = applySparseFromManifest(ctx, target, postPullCfg, s.logger)
+		_ = applySparseFromManifest(ctx, target, postPullCfg, manifest.RepoKindKB, s.logger)
 	}
 
 	// shared kb merge=union rules — idempotent, safe to call after both

@@ -32,6 +32,17 @@ type TeamSkill struct {
 // skillManifestName is the file that makes a directory a skill.
 const skillManifestName = "SKILL.md"
 
+// SkillRoots are the directories inside a team-context checkout that may hold
+// skills, in precedence order: agents/skills is canonical and wins a name
+// collision, coworkers/skills is the legacy location.
+//
+// Exported because the daemon has to answer "did this pull touch a skill?" from
+// a list of changed paths, and it must answer with the SAME roots discovery
+// walks. A second copy of these strings is how a skill authored under the legacy
+// root would be found by discovery but never trigger a refresh — present in the
+// team repo, absent from every repository, with nothing logged either way.
+var SkillRoots = []string{"agents/skills", "coworkers/skills"}
+
 // DiscoverSkills returns the team skills that apply to repoSlug.
 //
 // Roots mirror DiscoverRules: agents/skills is canonical, coworkers/skills is the
@@ -49,7 +60,7 @@ func DiscoverSkills(teamPath, repoSlug string) ([]TeamSkill, error) {
 	}
 
 	var skills []TeamSkill
-	for _, root := range []string{"agents/skills", "coworkers/skills"} {
+	for _, root := range SkillRoots {
 		discovered, err := walkSkillsDir(filepath.Join(teamPath, root))
 		if err != nil {
 			return nil, err

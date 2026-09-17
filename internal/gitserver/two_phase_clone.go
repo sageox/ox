@@ -113,12 +113,10 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string, kind manifest
 	manifestPath := filepath.Join(repoPath, ".sageox", "sync.manifest")
 	cfg := manifest.ParseFile(manifestPath, kind)
 
-	sparsePaths := manifest.ComputeSparseSet(cfg)
+	sparsePaths := manifest.SparseSetFor(cfg, kind)
 	if len(sparsePaths) == 0 {
 		sparsePaths = []string{"/.sageox/"}
 	}
-	sparsePaths = manifest.EnsureSageoxInclude(sparsePaths)
-	sparsePaths = manifest.EnsureRequiredIncludes(sparsePaths, kind, manifest.DenyPaths(cfg))
 
 	args := append([]string{"sparse-checkout", "set", "--no-cone"}, sparsePaths...)
 	if _, err := gitutil.RunGit(ctx, repoPath, args...); err != nil {

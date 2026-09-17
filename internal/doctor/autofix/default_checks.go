@@ -63,7 +63,7 @@ func Default() *Registry {
 	})
 	r.Register(&Check{
 		Slug:        "skills-inventory-drift",
-		Description: "Reconcile ox-managed skill files that drifted from the catalog this binary ships",
+		Description: "Reconcile ox-managed skill files that drifted from the projected catalog (this binary's skills plus approved team skills)",
 		MinInterval: 30 * time.Minute,
 		BlastRadius: "single workspace; ox-managed skill files only — never installs into an unselected repo, never touches the git index, user-modified files preserved as conflicts",
 		Run:         checkSkillsInventoryDrift,

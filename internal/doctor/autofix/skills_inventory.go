@@ -15,7 +15,14 @@ import (
 )
 
 // checkSkillsInventoryDrift repairs ox-managed skill files that no longer match
-// the catalog compiled into the running binary.
+// the catalog Plan projects — the one compiled into the running binary, unioned
+// with the approved skills in this repo's team context.
+//
+// Since team skills joined that catalog it is also the anti-entropy FLOOR under
+// team content: the daemon reconciles promptly off the team-context pull that
+// noticed an edit (SyncScheduler.reconcileTeamSkills), and this slow tick catches
+// what that path cannot see — a sparse refresh that materializes agents/ without
+// moving HEAD, or an edit that landed while this daemon was down.
 //
 // It is the counterpart to the cheap staleness compare `ox agent prime` performs.
 // Prime deliberately does no work when the recorded revision matches, because it

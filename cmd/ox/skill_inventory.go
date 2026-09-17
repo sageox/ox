@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/sageox/ox/extensions/skills"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/version"
 )
@@ -61,7 +60,12 @@ func reconcileSkillInventoryIfStale(projectRoot string) (changed int) {
 		slog.Debug("skills: could not write ox ignore rules at prime", "error", err)
 	}
 
-	wantRevision, err := skills.Digest()
+	// Must be the SAME value the planner records, hence one shared function.
+	// Comparing against the built-in catalog digest alone was the bug: once a
+	// team context existed the planner recorded a team component too, the two
+	// could never be equal, and this fast path ran a full plan on every single
+	// session start in every repo with a team.
+	wantRevision, err := skillmanager.ExpectedRevision(projectRoot)
 	if err != nil {
 		slog.Debug("skills: catalog digest unavailable at prime", "error", err)
 		return 0
