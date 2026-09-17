@@ -53,7 +53,7 @@ var hookCapSectionPriority = []string{
 	// Ranked above the catalogs because it is a defect report, not content: a
 	// team skill that was published and never arrived. It is emitted only when
 	// something is held, so ranking it high costs a healthy session nothing.
-	"team-knowledge/team-skills-withheld",
+	"team-knowledge/team-skills-held",
 	"team-knowledge/memory",
 	"team-knowledge/team-instructions",
 	"team-knowledge/docs",

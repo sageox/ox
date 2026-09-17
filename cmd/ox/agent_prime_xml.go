@@ -872,7 +872,7 @@ func emitWithheldTeamSkills(sb *strings.Builder, bk *bookkeeper, withheld []prim
 	if len(withheld) == 0 {
 		return
 	}
-	sb.WriteString("\n<team-skills-withheld hint=\"these were published by your team but NOT installed. Run `ox skills status` for detail.\">\n")
+	sb.WriteString("\n<team-skills-held hint=\"published by your team but held back in part or in full — a bundled script is dropped until approved, a manifest that grants tools is withheld outright. Run `ox skills status` for detail.\">\n")
 	bk.charge(prime.BudgetSourceSageox)
 	for _, skill := range withheld {
 		fmt.Fprintf(sb, "- %s", escapeXMLText(skill.Name))
@@ -883,7 +883,7 @@ func emitWithheldTeamSkills(sb *strings.Builder, bk *bookkeeper, withheld []prim
 		}
 		sb.WriteString("\n")
 	}
-	sb.WriteString("</team-skills-withheld>\n")
+	sb.WriteString("</team-skills-held>\n")
 	bk.charge(prime.BudgetSourceSageox)
 }
 
