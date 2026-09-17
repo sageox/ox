@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -161,7 +162,7 @@ func TestSyncScheduler_PullTeamContext_FetchHeadDeduplication(t *testing.T) {
 	scheduler := NewSyncScheduler(cfg, logger)
 
 	// first pull should succeed
-	err := scheduler.pullTeamContext(context.Background(), teamDir)
+	_, err := scheduler.pullTeamContext(context.Background(), teamDir)
 	assert.NoError(t, err)
 
 	// simulate recent FETCH_HEAD by touching the file
@@ -170,7 +171,7 @@ func TestSyncScheduler_PullTeamContext_FetchHeadDeduplication(t *testing.T) {
 	require.NoError(t, os.WriteFile(fetchHead, []byte("fake-sha1\t\trefs/heads/main\n"), 0644))
 
 	// second pull should be skipped due to recent fetch
-	err = scheduler.pullTeamContext(context.Background(), teamDir)
+	_, err = scheduler.pullTeamContext(context.Background(), teamDir)
 	assert.NoError(t, err) // returns nil when skipped
 }
 
@@ -189,10 +190,41 @@ func TestSyncScheduler_PullTeamContext_NotGitRepo(t *testing.T) {
 	// pull should handle gracefully: detect invalid repo, move aside for re-clone.
 	// It returns an error so callers report the team context as not-usable (the
 	// path is gone until the next cycle re-clones it) rather than "synced".
-	err := scheduler.pullTeamContext(context.Background(), tcPath)
+	_, err := scheduler.pullTeamContext(context.Background(), tcPath)
 	assert.Error(t, err, "moving a corrupt repo aside must surface as not-usable, not success")
 	// original path should be gone (moved to .bak)
 	assert.NoDirExists(t, tcPath)
+}
+
+// The move-aside can itself fail, and when it does the clone is still corrupt
+// AND still in place — the one outcome a caller must never read as "synced".
+// Worth pinning separately from the happy path above: a corrupt clone that
+// reported success would be served to agents as team context indefinitely,
+// since nothing else re-examines it.
+func TestSyncScheduler_PullTeamContext_CorruptRepoRenameFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory write permissions, so rename cannot be made to fail")
+	}
+	tmpDir := t.TempDir()
+	tcPath := filepath.Join(tmpDir, "team-ctx")
+	require.NoError(t, os.MkdirAll(tcPath, 0o755))
+
+	// Read+execute only: the directory can still be traversed and listed, so
+	// isValidGitRepo still reports "corrupt", but creating the .bak entry
+	// alongside it fails with EACCES. Restored in cleanup or t.TempDir cannot
+	// remove the tree.
+	require.NoError(t, os.Chmod(tmpDir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(tmpDir, 0o755) })
+
+	cfg := DefaultConfig()
+	cfg.TeamContextSyncInterval = 10 * time.Minute
+	scheduler := NewSyncScheduler(cfg, slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})))
+
+	_, err := scheduler.pullTeamContext(context.Background(), tcPath)
+
+	require.Error(t, err, "a failed move-aside must never be reported as a successful sync")
+	assert.ErrorContains(t, err, "rename failed")
+	assert.DirExists(t, tcPath, "the corrupt clone is still there for the next cycle to retry")
 }
 
 func TestSyncScheduler_TeamContextIntegration(t *testing.T) {

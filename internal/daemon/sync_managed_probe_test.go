@@ -67,6 +67,8 @@ func TestPullManagedRepo_UnreadableIndexIsVisibleAndNotAConflict(t *testing.T) {
 	require.Error(t, result.Err, "doPull keys its failure path off Err, not Issue")
 	assert.ErrorIs(t, result.Err, gitutil.ErrConflictProbeFailed)
 	assert.False(t, result.Skipped, "Skipped is checked before Err and would swallow this")
+	assert.False(t, result.PullRan,
+		"the PRE-pull probe aborted this cycle, so no fetch ran and no autostash entry can have accumulated — doTeamSync routes on exactly this")
 }
 
 // The regression in its own terms: repeated cycles against a corrupt index must
@@ -448,7 +450,8 @@ func TestPullTeamContext_ReadableSkipClearsStaleIntegrityIssue(t *testing.T) {
 		Summary:  "left over from a cycle that could not read the index",
 	})
 
-	require.NoError(t, s.pullTeamContext(context.Background(), repo))
+	_, err := s.pullTeamContext(context.Background(), repo)
+	require.NoError(t, err)
 
 	_, still := s.issues.GetIssue(IssueTypeRepoIntegrity, repoName)
 	assert.False(t, still, "the skip proved the index is readable; the issue is stale")

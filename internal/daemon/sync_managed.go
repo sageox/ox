@@ -149,6 +149,20 @@ type ManagedRepoPullResult struct {
 	// AutoResolved is true if rebase or autostash conflicts were auto-resolved.
 	AutoResolved bool
 
+	// PullRan reports whether the fetch+pull sequence actually executed this
+	// cycle. A cycle that pulled may have left local side effects that repeat
+	// on every retry — most importantly an autostash entry, whose unbounded
+	// accumulation is the whole reason doTeamSync's worktree-fingerprint
+	// suspension exists (#767). A cycle that returned before the pull cannot
+	// have caused any of that.
+	//
+	// It is a separate field and not something a caller may infer from Err:
+	// classifyAutostashFailure JOINS a probe failure onto whatever the pull
+	// already reported, so the same gitutil.ErrConflictProbeFailed sentinel
+	// appears both when nothing ran and when a pull ran and failed
+	// deterministically. Only this bool tells those two apart.
+	PullRan bool
+
 	// FetchHeadTime is the FETCH_HEAD mtime after fetch (zero if not fetched).
 	FetchHeadTime time.Time
 
@@ -304,6 +318,9 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 	if conflictErr != nil {
 		classifyAutostashFailure(ctx, &result, conflictErr, pullRan, path, repoName, logger)
 	}
+	// Stamped AFTER classification, which replaces result wholesale on one
+	// branch — the field must describe this cycle, not survive by luck.
+	result.PullRan = pullRan
 	return result
 }
 
@@ -351,7 +368,7 @@ func classifyAutostashFailure(ctx context.Context, result *ManagedRepoPullResult
 		// "Durable" here is still a judgement, not a proof — which is why the
 		// resulting error must stay RETRYABLE downstream. doTeamSync routes it
 		// to bounded backoff rather than the permanent fingerprint suspension
-		// (see its ErrConflictProbeFailed branch); doPull already does.
+		// (see its pre-pull probe branch); doPull already does.
 		//
 		// Not IssueTypeMergeConflict/RequiresConfirm: we did NOT find conflicts,
 		// and the #962 remedy for a confirm-gated conflict — hand-editing the
