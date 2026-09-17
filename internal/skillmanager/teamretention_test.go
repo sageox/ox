@@ -104,3 +104,35 @@ func TestRetiredTeamSkillIsStillRemovedWhenTheCheckoutIsVisible(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(repo, installed),
 		"a skill the team retired is still on disk; the mirror only adds")
 }
+
+// TestLegacyCoworkersRootIsNotBlindness is a regression test for a bug that
+// shipped: the blindness check stat'd only `agents/`, but discovery walks
+// `agents/skills` AND the legacy `coworkers/skills`.
+//
+// A team that predates the agents/ migration keeps everything under coworkers/,
+// so every one of them was judged permanently blind. The consequence is quiet
+// and bad in the other direction from a mass delete: retirement is suppressed
+// forever, so a skill the team deletes never leaves anyone's machine and nothing
+// explains why. Found by running `ox skills status` against a real legacy team.
+func TestLegacyCoworkersRootIsNotBlindness(t *testing.T) {
+	t.Parallel()
+
+	teamPath := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(teamPath, "coworkers", "skills"), 0o755))
+
+	require.True(t, anySkillRootOnDisk(teamPath),
+		"a team whose skills live under the legacy coworkers/ root was judged blind, which suppresses retirement for them forever")
+	require.Empty(t, unseeableTeamSkills(teamPath, "acme/api"),
+		"a legacy-rooted team context was reported as unseeable")
+}
+
+// TestNoSkillRootAtAllIsBlindness is the counterweight: the check must still
+// catch the real GH #862 shape, where neither root materialized.
+func TestNoSkillRootAtAllIsBlindness(t *testing.T) {
+	t.Parallel()
+
+	teamPath := t.TempDir()
+	require.False(t, anySkillRootOnDisk(teamPath))
+	require.NotEmpty(t, unseeableTeamSkills(teamPath, "acme/api"),
+		"a team context with no skills directory at all was treated as authoritative, which permits a mass delete")
+}

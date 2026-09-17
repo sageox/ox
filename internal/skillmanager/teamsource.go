@@ -258,6 +258,21 @@ func teamRevision(teamPath string) string {
 	return strings.TrimSpace(string(sha))
 }
 
+// anySkillRootOnDisk reports whether any directory discovery would walk exists.
+// Keyed on teamdocs.SkillRoots, the same list DiscoverSkills uses, so a root can
+// never be walked by one and ignored by the other.
+func anySkillRootOnDisk(teamPath string) bool {
+	for _, root := range teamdocs.SkillRoots {
+		// The parent is what the sparse set includes ("agents/"), so a materialized
+		// parent with no skills yet is present, not blind.
+		parent := filepath.Dir(filepath.FromSlash(root))
+		if _, err := os.Stat(filepath.Join(teamPath, parent)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // ExpectedRevision computes what Plan would record for this repo, without
 // walking the catalog or the team checkout.
 //
@@ -378,12 +393,17 @@ func unseeableTeamSkills(teamPath, repoSlug string) string {
 	if _, err := os.Stat(teamPath); err != nil {
 		return "team context checkout is not on disk yet"
 	}
-	// agents/ is where both team rules and team skills live. Its absence means the
-	// sparse checkout never materialized it (GH #862) — not that the team authored
-	// nothing. A team that genuinely has no agents/ has no skills either, so
-	// retaining nothing is the harmless outcome in that case.
-	if _, err := os.Stat(filepath.Join(teamPath, "agents")); err != nil {
-		return "team context agents/ directory is not materialized"
+	// Discovery walks BOTH roots — agents/skills is canonical, coworkers/skills is
+	// legacy — so blindness means neither is on disk. Checking only agents/ marked
+	// every pre-migration team permanently blind, which silently suppressed
+	// retirement for them forever: a skill the team deleted would never leave any
+	// of their machines, and nothing would say why.
+	//
+	// Their absence still means the sparse checkout never materialized the
+	// directory (GH #862) rather than that the team authored nothing. A team with
+	// neither root has no skills either, so retaining nothing is harmless there.
+	if !anySkillRootOnDisk(teamPath) {
+		return "no skills directory is materialized in the team context"
 	}
 	// Without a slug ox cannot evaluate any skill's repos: filter, so every
 	// targeted skill silently drops out — indistinguishable from the team

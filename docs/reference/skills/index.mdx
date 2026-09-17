@@ -1,30 +1,25 @@
 ---
-title: "ox team open"
-description: "CLI reference for ox team open"
-sidebar_position: 98
+title: "ox skills"
+description: "CLI reference for ox skills"
+sidebar_position: 90
 ---
 
-## ox team open
+## ox skills
 
-Open a team's dashboard in the browser
+Inspect the skills your AI coworkers have
 
 ### Synopsis
 
-Open the SageOx web dashboard for a team.
+Inspect the skills installed for this repository.
 
-Name the team as a positional argument or with --team; with neither, opens this
-repo's team.
-
-```
-ox team open [team] [flags]
-```
+Skills come from two places: the ones ox itself ships, and the ones your team
+publishes to its Team Context. This command shows both, and — when a team skill
+is missing — which of the several possible reasons is the actual one.
 
 ### Options
 
 ```
-      --endpoint string   SageOx endpoint URL (for multi-endpoint repos)
-  -h, --help              help for open
-      --team string       Team ID or slug to open (defaults to this repo's team)
+  -h, --help   help for skills
 ```
 
 ### Options inherited from parent commands
@@ -41,4 +36,5 @@ ox team open [team] [flags]
 
 ### SEE ALSO
 
-* [ox team](/team)	 - Work with your teams and coworkers
+* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox skills status](/skills/status)	 - Show which team skills reached this repository, and why the rest did not
