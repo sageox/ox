@@ -261,7 +261,7 @@ test-tiers: check-test-tiers ## Print the executable test-tier contract
 # Root ./... deliberately excludes nested public modules.
 .PHONY: test-sessionprovenance
 test-sessionprovenance: ## Validate the public native-session contract
-	@go -C pkg/sessionprovenance test -race ./...
+	@$(GO) -C pkg/sessionprovenance test -race ./...
 
 test: check-test-tiers test-sessionprovenance ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
 	$(call say,"Running fast tests (skipping >500ms, no coverage)...")

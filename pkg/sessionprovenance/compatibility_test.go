@@ -175,6 +175,56 @@ func TestCoverageFailureAndIdentityBoundaries(t *testing.T) {
 	}
 }
 
+func TestExcludeRejectsEmptyReason(t *testing.T) {
+	source := Source{Version: 1, Agent: "codex", NativeSessionID: "0197d3f4-2c88-7a15-a9b0-4b5c6d7e8f04", Generation: strings.Repeat("a", 64), Ranges: []Range{{Start: 0, End: 1}}, ParserVersion: "codex-jsonl/v1", CapturedAt: time.Now()}
+	record := Record{Version: 1, Agent: source.Agent, NativeSessionID: source.NativeSessionID, Generation: source.Generation}
+	if err := record.Exclude(&source, "", time.Now()); err == nil {
+		t.Fatal("empty exclusion reason accepted")
+	}
+	if len(record.Exclusions) != 0 {
+		t.Fatal("record mutated despite rejected exclusion")
+	}
+}
+
+func TestValidateRequiresGenerationForProjections(t *testing.T) {
+	record := Record{
+		Version:         1,
+		Agent:           "codex",
+		NativeSessionID: "0197d3f4-2c88-7a15-a9b0-4b5c6d7e8f04",
+		Projections:     map[string]Projection{"export": {RawOID: strings.Repeat("b", 64), LayerID: "layer"}},
+	}
+	if record.Validate() == nil {
+		t.Fatal("projection-bearing record without generation accepted")
+	}
+	record.Projections = nil
+	record.ProjectionRevision = "rev-1"
+	if record.Validate() == nil {
+		t.Fatal("projection revision without generation accepted")
+	}
+}
+
+func TestRangeRoundTripPreservesUnknownFields(t *testing.T) {
+	data := []byte(`{"start":0,"end":1,"future_range":true}`)
+	var r Range
+	if err := json.Unmarshal(data, &r); err != nil {
+		t.Fatal(err)
+	}
+	if string(r.Extra["future_range"]) != "true" {
+		t.Fatal("lost range extension on decode")
+	}
+	encoded, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var again Range
+	if err = json.Unmarshal(encoded, &again); err != nil {
+		t.Fatal(err)
+	}
+	if string(again.Extra["future_range"]) != "true" {
+		t.Fatalf("lost range extension after round trip: %s", encoded)
+	}
+}
+
 // Publication receipts compare decoded provenance with the value just uploaded.
 // Decoding known-only fields must not invent empty extension maps and reject
 // an otherwise identical freshly published receipt.

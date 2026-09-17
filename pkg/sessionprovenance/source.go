@@ -12,8 +12,9 @@ import (
 )
 
 type Range struct {
-	Start int64 `json:"start"`
-	End   int64 `json:"end"`
+	Extra map[string]json.RawMessage `json:"-"`
+	Start int64                      `json:"start"`
+	End   int64                      `json:"end"`
 }
 type Source struct {
 	Extra           map[string]json.RawMessage `json:"-"`
@@ -93,8 +94,10 @@ func (r *Record) Validate() error {
 	if _, err := Path(r.NativeSessionID); err != nil {
 		return err
 	}
-	// Privacy intent can precede capture, so a record without coverage may omit generation.
-	if (r.Generation != "" || len(r.Coverage) > 0) && !digestPattern.MatchString(r.Generation) {
+	// Privacy intent can precede capture, so a record without coverage or
+	// projections may omit generation.
+	hasGenerationBoundData := len(r.Coverage) > 0 || len(r.Projections) > 0 || r.ProjectionRevision != ""
+	if (r.Generation != "" || hasGenerationBoundData) && !digestPattern.MatchString(r.Generation) {
 		return fmt.Errorf("invalid source generation")
 	}
 	for _, c := range r.Coverage {
@@ -230,6 +233,9 @@ func (r *Record) Covers(s *Source, name, oid string) bool {
 }
 
 func (r *Record) Exclude(s *Source, reason string, now time.Time) error {
+	if reason == "" {
+		return errors.New("missing exclusion reason")
+	}
 	if err := r.ValidateSource(s); err != nil {
 		return err
 	}
@@ -338,6 +344,22 @@ func (r *Projection) UnmarshalJSON(data []byte) error {
 }
 func (r Projection) MarshalJSON() ([]byte, error) {
 	type plain Projection
+	return encodeReceiptObject(plain(r), r.Extra)
+}
+
+func (r *Range) UnmarshalJSON(data []byte) error {
+	type plain Range
+	var decoded plain
+	extra, err := decodeReceiptObject(data, &decoded, "start", "end")
+	if err != nil {
+		return err
+	}
+	*r = Range(decoded)
+	r.Extra = extra
+	return nil
+}
+func (r Range) MarshalJSON() ([]byte, error) {
+	type plain Range
 	return encodeReceiptObject(plain(r), r.Extra)
 }
 
