@@ -409,6 +409,14 @@ func TestRefreshDirtyOverlay_ContextCanceled(t *testing.T) {
 		}
 	}
 
+	opened := make(chan struct{}, 1)
+	mgr.dirtyOpenHook = func() {
+		select {
+		case opened <- struct{}{}:
+		default:
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before calling
 
@@ -445,6 +453,17 @@ func TestRefreshDirtyOverlay_ContextCanceled(t *testing.T) {
 	// loaded runner. This assertion does not depend on timing.
 	assert.Contains(t, issue.Summary, "refresh canceled",
 		"a canceled refresh must be reported as canceled, not as a build failure")
+
+	// The flag is released above, so the goroutine has finished: if the open
+	// boundary was not reached by now it never will be. This is the assertion
+	// that pins the behavior -- moving the cancellation check to any point after
+	// codedb.Open reintroduces the uncancellable open and teardown during
+	// shutdown, and only this fires on it.
+	select {
+	case <-opened:
+		t.Fatal("a canceled refresh reached codedb.Open; its open and deferred Close take no context, so shutdown waits on Bleve teardown")
+	default:
+	}
 }
 
 // --- C. Deterministic concurrency: verify no double goroutine ---

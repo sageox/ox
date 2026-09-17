@@ -67,6 +67,11 @@ type CodeDBManager struct {
 	lastDirtyRefresh time.Time
 	// dirtyTestHook is called at the start of RefreshDirtyOverlay; nil in production.
 	dirtyTestHook func()
+	// dirtyOpenHook is called immediately before codedb.Open in RefreshDirtyOverlay;
+	// nil in production. It exists so a test can assert that a canceled refresh
+	// never reaches the uncancellable open/teardown, which no observable side
+	// effect of a skipped open otherwise reveals.
+	dirtyOpenHook func()
 }
 
 // CodeDBStats tracks index statistics.
@@ -995,6 +1000,9 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 		}
 
 		start := time.Now()
+		if m.dirtyOpenHook != nil {
+			m.dirtyOpenHook()
+		}
 		db, err := codedb.Open(dataDir)
 		if err != nil {
 			m.logger.Warn("dirty overlay refresh: open failed", "error", err)
