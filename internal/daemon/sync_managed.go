@@ -287,20 +287,73 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 		return ManagedRepoPullResult{Err: fmt.Errorf("acquire repo lock for %s: %w", repoName, lockErr)}
 	}
 	if conflictErr != nil {
-		result.Err = errors.Join(result.Err, conflictErr)
-		// Preserve an earlier pull classification, including session-wedge
-		// escalation, when autostash recovery reports an additional failure.
-		if result.Issue == nil {
-			result.Issue = &DaemonIssue{
-				Type:            IssueTypeMergeConflict,
-				Severity:        SeverityError,
-				Repo:            repoName,
-				Summary:         fmt.Sprintf("%s has unresolved conflicts: %s", repoName, conflictErr),
-				RequiresConfirm: true,
+		switch {
+		case isUndeterminedIndexState(conflictErr):
+			// The probe FAILED; it did not find conflicts. Joining this into
+			// result.Err would count it toward the consecutive-failure backoff
+			// and mint a RequiresConfirm merge-conflict issue that nothing
+			// clears once connectivity returns — the #962 incident, where a
+			// few minutes of dead DNS left two provably clean clones suspended
+			// with "has unresolved conflicts: ... context deadline exceeded".
+			// Cancellation is retryable by construction, so drop it and let
+			// the next cycle re-probe.
+			logger.Debug("index state undetermined, retrying next cycle",
+				"repo", repoName, "path", path, "error", conflictErr)
+		case !indexIsConflicted(ctx, path):
+			// Belt-and-braces: confirm against a FRESH context before telling a
+			// human their repo is conflicted. ctx may have been canceled after
+			// the probe read the index but before ResolveAutostashConflicts
+			// finished, producing an error that neither names cancellation nor
+			// reflects the index. A disagreement here is always the safer read,
+			// because the cost of a missed conflict is one more sync cycle
+			// while the cost of a false one is a stuck, human-gated repo.
+			logger.Warn("autostash recovery failed but the index is not conflicted, retrying next cycle",
+				"repo", repoName, "path", path, "error", conflictErr)
+		default:
+			result.Err = errors.Join(result.Err, conflictErr)
+			// Preserve an earlier pull classification, including session-wedge
+			// escalation, when autostash recovery reports an additional failure.
+			if result.Issue == nil {
+				result.Issue = &DaemonIssue{
+					Type:            IssueTypeMergeConflict,
+					Severity:        SeverityError,
+					Repo:            repoName,
+					Summary:         fmt.Sprintf("%s has unresolved conflicts: %s", repoName, conflictErr),
+					RequiresConfirm: true,
+				}
 			}
 		}
 	}
 	return result
+}
+
+// isUndeterminedIndexState reports whether err means "we never learned the
+// index state" rather than "the index is conflicted".
+//
+// Two shapes qualify. ErrConflictProbeFailed covers `git ls-files --unmerged`
+// itself failing. The bare context errors cover cancellation striking deeper in
+// ResolveAutostashConflicts — reading a conflict stage, writing a temp file —
+// where the wrapper text describes the step, not the cause. Either way the
+// error is transient and self-clearing, so it must never set RequiresConfirm:
+// human-approval gating is for states a human can actually adjudicate.
+func isUndeterminedIndexState(err error) bool {
+	return errors.Is(err, gitutil.ErrConflictProbeFailed) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled)
+}
+
+// indexIsConflicted re-probes repoPath with a context that outlives the sync
+// cycle's, so a cancellation that poisoned the original probe cannot also
+// poison the confirmation. Returns false when the probe cannot run — an
+// undetermined state must not be reported as a conflict.
+func indexIsConflicted(ctx context.Context, repoPath string) bool {
+	// Short and fixed: this is one local plumbing read on an already-failing
+	// path. Long enough to survive a busy disk, short enough that a wedged git
+	// cannot stall the sync cycle it runs inside.
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	conflicted, err := gitutil.HasUnmergedEntries(probeCtx, repoPath)
+	return err == nil && conflicted
 }
 
 // fetchAndPullLocked runs the fetch-then-pull sequence for pullManagedRepo.

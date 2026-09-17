@@ -21,6 +21,16 @@ import (
 // transcript, for instance — doesn't false-positive.
 const ConflictMarkerStart = "<<<<<<<"
 
+// ErrConflictProbeFailed marks an error as "we could not determine whether the
+// index holds conflicts", which is a different fact from "the index holds
+// conflicts". The distinction is load-bearing: a context deadline or a
+// canceled daemon kills `git ls-files --unmerged` before it produces any
+// output, so the resulting error carries ZERO information about index state.
+// Callers that gate human intervention on a conflict MUST branch on this with
+// errors.Is — reporting a failed probe as a conflict suspended sync on provably
+// clean clones and minted a RequiresConfirm issue nothing could clear (#962).
+var ErrConflictProbeFailed = errors.New("could not determine index state")
+
 // HasConflictMarkers reports whether the file at path contains an unresolved
 // git conflict marker.
 //
@@ -308,7 +318,10 @@ func runPlumbing(ctx context.Context, repoPath string, stdin []byte, extraEnv []
 func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixes, denyPrefixes []string) (bool, error) {
 	entries, err := listUnmergedEntries(ctx, repoPath)
 	if err != nil {
-		return false, fmt.Errorf("inspect unmerged index: %w", err)
+		// Deliberately unwrapped: listUnmergedEntries already tags this with
+		// ErrConflictProbeFailed and names the command, and any prefix added
+		// here would re-assert the conclusion the probe never reached.
+		return false, err
 	}
 	if len(entries) == 0 {
 		return false, nil
