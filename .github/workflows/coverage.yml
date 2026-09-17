@@ -1,8 +1,10 @@
 name: Coverage
 
+# PRs are covered by the CI workflow's test job, which runs these same suites
+# once, instrumented. This workflow is the main-branch baseline: CI on a push to
+# main runs only the fast tier, so without a scheduled run nothing would measure
+# coverage of main itself.
 on:
-  pull_request:
-    branches: [main]
   schedule:
     - cron: '0 11 * * *'  # daily at 3am Pacific / 11am UTC
   workflow_dispatch: {}   # allow manual trigger
@@ -40,10 +42,6 @@ jobs:
 
       - name: Enforce risk-package coverage ratchets
         run: python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json
-
-      - name: Enforce changed-line coverage
-        if: github.event_name == 'pull_request'
-        run: python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json --diff-base "${{ github.event.pull_request.base.sha }}"
 
       - name: Upload coverage
         if: always()
