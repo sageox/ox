@@ -302,8 +302,11 @@ func runPlumbing(ctx context.Context, repoPath string, stdin []byte, extraEnv []
 
 // ResolveAutostashConflicts clears formatting-only session metadata conflicts
 // left by pull --autostash, which can exit successfully with an unmerged index.
-// It preserves every field from both sides and refuses differing values,
-// deletions, other paths, active git operations, or edits made after the conflict.
+// It preserves every field from both sides and refuses differing values —
+// except for the small allowlist of ox-owned bookkeeping fields in
+// sessionMetaBookkeepingMerges, whose merge is mechanical rather than a choice
+// between two authors' content. Deletions, other paths, active git operations,
+// and edits made after the conflict are always refused.
 // The caller must hold WithRepoLock. No commits are made or stashes removed.
 func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixes, denyPrefixes []string) (bool, error) {
 	entries, err := listUnmergedEntries(ctx, repoPath)
@@ -363,7 +366,18 @@ func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixe
 		}
 		for key, value := range fields[3] {
 			if ours, exists := fields[2][key]; exists && !reflect.DeepEqual(ours, value) {
-				return false, fmt.Errorf("field %s differs in %s; manual resolution required", key, path)
+				// Differing values refuse by default. The narrow exception is
+				// ox's own bookkeeping, where the merge is mechanical rather
+				// than a choice between two authors' content — see
+				// sessionMetaBookkeepingMerges. Reached only for a path the
+				// guard above already confined to sessions/<name>/meta.json
+				// inside safePrefixes, so the policy cannot escape that tree.
+				merged, ok := mergeSessionMetaBookkeeping(key, ours, value)
+				if !ok {
+					return false, fmt.Errorf("field %s differs in %s; manual resolution required", key, path)
+				}
+				fields[2][key] = merged
+				continue
 			}
 			fields[2][key] = value
 		}
@@ -414,4 +428,84 @@ func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixe
 		}
 	}
 	return true, nil
+}
+
+// sessionMetaBookkeepingMerges is the complete allowlist of sessions/*/meta.json
+// fields whose two sides ox reconciles itself instead of refusing. It is
+// deliberately tiny and must stay that way: the blanket refusal above is what
+// stops a real content field — a summary body, a validation_error string, a
+// title — from being silently half-discarded, so this is not a general
+// "pick a side" heuristic and must never be widened into one.
+//
+// A field earns a place here only when a merge rule is mechanically correct
+// from the field's own semantics, not merely convenient.
+//
+// Deliberately absent: summary_status. #897 named it daemon-written bookkeeping
+// alongside summary_attempts, but it is a state label with no total order —
+// nothing picks between "failed" and "pending" without inventing policy — so it
+// keeps refusing.
+var sessionMetaBookkeepingMerges = map[string]func(ours, theirs any) (any, bool){
+	// summary_attempts is ox's own retry counter: the daemon increments it and
+	// never resets it, so it only ever moves up. Both sides of a
+	// pull --autostash have been counting the same session's attempts, which
+	// makes this the one conflict class ox reliably generates against itself
+	// (#956) — and, before this rule, the one class auto-resolve refused,
+	// wedging the index until a human ran git by hand in the ledger clone.
+	//
+	// max is the true attempt count, not a preference: because the counter is
+	// monotonic, the lower side is a strictly earlier observation of the same
+	// value, so taking the higher discards no information and keeps the counter
+	// monotonic across the merge.
+	"summary_attempts": mergeMonotonicCounter,
+}
+
+// mergeSessionMetaBookkeeping resolves one differing session-metadata field
+// when an ox-owned merge rule covers it. ok is false for every field outside
+// the allowlist and for any value the rule does not recognize, which returns
+// the caller to its refusal.
+func mergeSessionMetaBookkeeping(key string, ours, theirs any) (any, bool) {
+	merge, covered := sessionMetaBookkeepingMerges[key]
+	if !covered {
+		return nil, false
+	}
+	return merge(ours, theirs)
+}
+
+// mergeMonotonicCounter resolves two observations of a never-decreasing counter
+// to the larger. The winning side is returned as-is (a json.Number from the
+// stage that produced it) so the merged file re-encodes the original literal
+// rather than a value round-tripped through float64.
+//
+// Anything that is not a non-negative JSON integer — a float, a string, a null
+// from an older writer — is not a counter this rule understands. Refusing there
+// costs only a manual resolution; guessing could overwrite a field that merely
+// shares the name.
+func mergeMonotonicCounter(ours, theirs any) (any, bool) {
+	left, ok := counterValue(ours)
+	if !ok {
+		return nil, false
+	}
+	right, ok := counterValue(theirs)
+	if !ok {
+		return nil, false
+	}
+	if right > left {
+		return theirs, true
+	}
+	return ours, true
+}
+
+// counterValue reads a counter from a conflict stage decoded with
+// json.Decoder.UseNumber, so an integral value arrives as json.Number and a
+// non-integral one is rejected by Int64 rather than silently truncated.
+func counterValue(value any) (int64, bool) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	n, err := number.Int64()
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
