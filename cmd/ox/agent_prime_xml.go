@@ -878,6 +878,10 @@ func emitTeamRules(sb *strings.Builder, bk *bookkeeper, rules []teamdocs.TeamRul
 		bk.charge(prime.BudgetSourceTeam)
 		sb.WriteString(" visibility=\"always\"")
 		bk.charge(prime.BudgetSourceSageox)
+		if len(r.Globs) > 0 {
+			fmt.Fprintf(sb, ` globs="%s"`, escapeXML(strings.Join(r.Globs, ",")))
+			bk.charge(prime.BudgetSourceTeam)
+		}
 		if r.Description != "" {
 			fmt.Fprintf(sb, ` description="%s"`, escapeXML(r.Description))
 			bk.charge(prime.BudgetSourceTeam)
@@ -897,9 +901,25 @@ func emitTeamRules(sb *strings.Builder, bk *bookkeeper, rules []teamdocs.TeamRul
 
 	// indexed-tier rules: framing/headers ours, rows are team's
 	if len(indexedRules) > 0 {
+		anyGlobs := false
+		for _, r := range indexedRules {
+			if len(r.Globs) > 0 {
+				anyGlobs = true
+				break
+			}
+		}
 		sb.WriteString("\n<indexed hint=\"read on demand with the Read tool at the absolute Path below\">\n")
-		sb.WriteString("| Name | Description | Path |\n")
-		sb.WriteString("|------|-------------|------|\n")
+		// The Globs column appears only when a rule actually scopes itself. A team
+		// with no scoped rules pays nothing for the feature existing — this table
+		// is emitted into every session, so an always-present empty column is a
+		// per-session tax on every customer to serve the ones using it.
+		if anyGlobs {
+			sb.WriteString("| Name | Description | Applies to | Path |\n")
+			sb.WriteString("|------|-------------|------------|------|\n")
+		} else {
+			sb.WriteString("| Name | Description | Path |\n")
+			sb.WriteString("|------|-------------|------|\n")
+		}
 		bk.charge(prime.BudgetSourceSageox)
 		for _, r := range indexedRules {
 			desc := r.Description
@@ -912,7 +932,15 @@ func emitTeamRules(sb *strings.Builder, bk *bookkeeper, rules []teamdocs.TeamRul
 			// the file was found under (agents/rules or coworkers/rules), and
 			// that root is never emitted — so a relative path here is not
 			// resolvable by the agent being instructed to open it.
-			fmt.Fprintf(sb, "| %s | %s | %s |\n", escapeXMLText(r.Name), escapeXMLText(desc), escapeXMLText(r.AbsPath))
+			if anyGlobs {
+				scope := strings.Join(r.Globs, ", ")
+				if scope == "" {
+					scope = "any file"
+				}
+				fmt.Fprintf(sb, "| %s | %s | %s | %s |\n", escapeXMLText(r.Name), escapeXMLText(desc), escapeXMLText(scope), escapeXMLText(r.AbsPath))
+			} else {
+				fmt.Fprintf(sb, "| %s | %s | %s |\n", escapeXMLText(r.Name), escapeXMLText(desc), escapeXMLText(r.AbsPath))
+			}
 		}
 		bk.charge(prime.BudgetSourceTeam)
 		sb.WriteString("</indexed>\n")

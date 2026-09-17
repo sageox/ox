@@ -3,6 +3,7 @@ package teamdocs
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -309,5 +310,79 @@ func TestReadRuleBody_NoFrontmatter(t *testing.T) {
 	}
 	if !strings.HasPrefix(body, "Just a body") {
 		t.Errorf("body without frontmatter should pass through: %q", body)
+	}
+}
+
+// TestDiscoverRules_Globs covers the scope field that lets a rule be
+// team-general AND path-scoped at the same time.
+//
+// That quadrant is real and had no expression before: Go error-wrapping idioms,
+// Terraform conventions, and SQL migration rules all apply to every repo on the
+// team but only to some files in them. Without globs: an author's only options
+// were to load the rule in every session or to duplicate it into each repo's
+// local rules — the copies-that-rot problem team rules exist to solve.
+func TestDiscoverRules_Globs(t *testing.T) {
+	tests := []struct {
+		name      string
+		globsLine string
+		want      []string
+	}{
+		{"absent", "", nil},
+		{"inline list, matching repos: style", `globs: ["**/*.go", "**/*.mod"]`, []string{"**/*.go", "**/*.mod"}},
+		// An author copying a rule out of .cursor/rules writes the bare comma form.
+		// Rejecting it would leave the rule unscoped — loading everywhere, which is
+		// the exact outcome globs: exists to prevent.
+		{"bare comma form, as Cursor and Copilot write it", "globs: **/*.go,**/*.mod", []string{"**/*.go", "**/*.mod"}},
+		{"single bare glob", "globs: migrations/**", []string{"migrations/**"}},
+		{"quoted single", `globs: "**/*.tf"`, []string{"**/*.tf"}},
+		{"empty value is not a scope", "globs:", nil},
+		{"empty list is not a scope", "globs: []", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			body := "---\nname: scoped\ndescription: A scoped rule.\n"
+			if tt.globsLine != "" {
+				body += tt.globsLine + "\n"
+			}
+			body += "---\n\nUse errors.Is.\n"
+			writeRule(t, root, "agents/rules/scoped.md", body)
+
+			rules, err := DiscoverRules(root, "acme/api")
+			if err != nil {
+				t.Fatalf("DiscoverRules: %v", err)
+			}
+			if len(rules) != 1 {
+				t.Fatalf("got %d rules, want 1", len(rules))
+			}
+			if !slices.Equal(rules[0].Globs, tt.want) {
+				t.Errorf("Globs = %#v, want %#v", rules[0].Globs, tt.want)
+			}
+		})
+	}
+}
+
+// TestDiscoverRules_GlobsDoNotFilterDiscovery: globs describe WHERE a rule
+// applies inside a repo, not WHETHER the repo gets it. That is repos:.
+//
+// Conflating them would silently drop scoped rules from discovery, and the
+// symptom — a rule that exists in the team repo but never reaches anyone — is
+// the same one an unmaterialized checkout produces, so it would be diagnosed
+// as a sync problem rather than a filter bug.
+func TestDiscoverRules_GlobsDoNotFilterDiscovery(t *testing.T) {
+	root := t.TempDir()
+	writeRule(t, root, "agents/rules/go-idioms.md",
+		"---\nname: go-idioms\ndescription: Wrap errors.\nglobs: [\"**/*.go\"]\n---\n\nUse %w.\n")
+
+	rules, err := DiscoverRules(root, "acme/web-frontend")
+	if err != nil {
+		t.Fatalf("DiscoverRules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("a globbed rule was filtered out of a repo with no matching files yet: got %d rules", len(rules))
+	}
+	if !slices.Equal(rules[0].Globs, []string{"**/*.go"}) {
+		t.Errorf("Globs = %#v", rules[0].Globs)
 	}
 }
