@@ -578,6 +578,34 @@ func TestClassifyAutostashFailure_AbandonedConfirmationProvesNothing(t *testing.
 		assert.NoError(t, got.Err)
 	})
 
+	// The round-4 regression, end to end through the real probe ladder. A
+	// successful `git pull --rebase --autostash` exits zero even when the
+	// autostash re-apply left unmerged entries behind — that is the entire
+	// reason this cycle re-reads the index — so with no completed read a broken
+	// worktree and a clean one are the same bytes. Before the fix this branch
+	// handed doPull a result with Skipped=false and Err=nil, which clears sync
+	// failures, retires IssueTypeRepoIntegrity, records a pull success and
+	// stamps lastSync for a clone that may never sync again.
+	t.Run("after a successful pull the cycle is still not reported as a sync", func(t *testing.T) {
+		repo := newProbeTestRepo(t, "notes.txt")
+		gitShimSlowUnmergedProbe(t, 2)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		got := ManagedRepoPullResult{AutoResolved: true, FetchHeadTime: time.Now()}
+		classifyAutostashFailure(ctx, &got, ambiguous, true, repo, "ledger", discardLogger())
+
+		require.False(t, resultReadsAsSuccess(&got),
+			"took doPull's success path: Skipped=%v SkipReason=%q Err=%v", got.Skipped, got.SkipReason, got.Err)
+		assert.Equal(t, skipReasonUnconfirmedIndex, got.SkipReason)
+		assert.False(t, skipProvesIndexReadable(got.SkipReason),
+			"a read that never finished proves nothing in EITHER direction, so it must not retire a standing integrity issue")
+		assert.NoError(t, got.Err,
+			"nothing is known to be wrong: an error would feed the backoff and, with PullRan set, the permanent fingerprint suspension")
+		assert.Nil(t, got.Issue, "an abandoned confirmation is not evidence of a broken clone")
+		assert.True(t, got.AutoResolved, "what the pull observed stays true; only the sync verdict is withheld")
+	})
+
 	t.Run("after a failed pull the pull's own verdict stands", func(t *testing.T) {
 		repo := newProbeTestRepo(t, "notes.txt")
 		gitShimSlowUnmergedProbe(t, 2)
@@ -637,4 +665,159 @@ func probeCount(t *testing.T, counter string) int {
 	n, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	require.NoError(t, err)
 	return n
+}
+
+// --- G. The invariant, enumerated (PR #974 review, round 4) ---
+//
+// Three rounds of this PR each shipped one variant of a single class of bug:
+// something UNPROVEN reported as success. Round 1 dropped every probe failure
+// and returned a zero-value result. Round 3 routed a joined post-pull probe
+// error through backoff, bypassing suspension. Round 4 preserved a successful
+// pull verdict when the confirmation was abandoned. Every one was a branch that
+// forgot to fail the cycle.
+//
+// So the fix is not a fourth special case but a single guard —
+// withheldUnprovenSuccess — and this is its enforcement: the whole
+// (probe outcome × pullRan × incoming result) cross-product, asserting that
+// exactly one combination may leave a result doPull reads as a completed sync.
+// A future branch that forgets fails here instead of shipping.
+
+// classifyIndexProof is the narrow point where a (bool, error) probe return
+// becomes the one fact everything downstream branches on, so its whole mapping
+// is pinned — including the ordering that makes an abandoned ladder outrank the
+// last read's error it still carries in its chain.
+func TestClassifyIndexProof(t *testing.T) {
+	t.Parallel()
+	durable := fmt.Errorf("read index: %w", gitutil.ErrConflictProbeFailed)
+	abandoned := abandonedProbe(durable, true)
+
+	for _, tc := range []struct {
+		name        string
+		conflicted  bool
+		probeErr    error
+		want        indexProof
+		wantVerdict string
+		wantProves  bool
+	}{
+		{"completed read, no unmerged entries", false, nil, proofClean, "clean", true},
+		{"completed read, unmerged entries", true, nil, proofConflicted, "conflicted", true},
+		{"every read completed and failed", false, durable, proofUnreadable, "unreadable", true},
+		{
+			// The bool is meaningless whenever err != nil; the error wins.
+			name: "a failed read's bool is ignored", conflicted: true, probeErr: durable,
+			want: proofUnreadable, wantVerdict: "unreadable", wantProves: true,
+		},
+		{
+			// errProbeAbandoned wraps the last read's failure, so an
+			// error-first test would file a laptop-lid-close as a corrupt clone.
+			name: "an abandoned ladder outranks the error it carries", probeErr: abandoned,
+			want: proofUnknown, wantVerdict: "unconfirmed", wantProves: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := classifyIndexProof(tc.conflicted, tc.probeErr)
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.wantVerdict, got.String(), "index_verdict is a logged contract")
+			assert.Equal(t, tc.wantProves, got.provesIndexState())
+		})
+	}
+}
+
+// The cross-product. Pure by construction — applyIndexProof takes the proof
+// rather than producing it — so all of it runs without staging a real git index
+// state, which is what makes exhaustive enumeration affordable at all.
+func TestApplyIndexProof_NoUnprovenResultLooksLikeASync(t *testing.T) {
+	t.Parallel()
+
+	conflictErr := errors.New("cannot recover autostash while MERGE_HEAD is present or unreadable")
+	durable := fmt.Errorf("read index: %w", gitutil.ErrConflictProbeFailed)
+	abandoned := abandonedProbe(durable, true)
+
+	// Every distinguishable return reprobeIndexConflicts can produce.
+	probes := []struct {
+		name       string
+		conflicted bool
+		probeErr   error
+	}{
+		{"clean", false, nil},
+		{"conflicted", true, nil},
+		{"unreadable", false, durable},
+		{"unreadable with a stale bool", true, durable},
+		{"abandoned", false, abandoned},
+		{"abandoned with a stale bool", true, abandoned},
+	}
+
+	// Every shape pullManagedRepo can be holding when classification runs.
+	// "remote unchanged" is deliberately absent: it is decided before the pull
+	// with conflictErr still nil, so it can never reach here — and unlike the
+	// rebase skip it WOULD claim a readable index.
+	incoming := []struct {
+		name string
+		in   ManagedRepoPullResult
+	}{
+		{"nothing ran", ManagedRepoPullResult{}},
+		{"pull succeeded", ManagedRepoPullResult{AutoResolved: true, Diverged: true}},
+		{"pull failed", ManagedRepoPullResult{
+			Err:   errors.New("pull failed"),
+			Issue: &DaemonIssue{Type: IssueTypeDiverged, Severity: SeverityError, Repo: "ledger"},
+		}},
+		{"pull skipped mid-rebase", ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRebaseInProgress}},
+	}
+
+	for _, p := range probes {
+		for _, pullRan := range []bool{false, true} {
+			for _, inc := range incoming {
+				t.Run(fmt.Sprintf("%s/pullRan=%v/%s", p.name, pullRan, inc.name), func(t *testing.T) {
+					t.Parallel()
+					proof := classifyIndexProof(p.conflicted, p.probeErr)
+					in := inc.in
+					got := in
+					applyIndexProof(&got, proof, conflictErr, p.probeErr, pullRan, t.TempDir(), "ledger", discardLogger())
+
+					// THE INVARIANT. A result reads as a completed sync only
+					// when a read that RAN TO COMPLETION proved the index clean,
+					// a pull actually ran, and that pull itself succeeded.
+					// Every other cell of this table must fail the cycle.
+					wantSuccess := proof == proofClean && pullRan && resultReadsAsSuccess(&in)
+					require.Equal(t, wantSuccess, resultReadsAsSuccess(&got),
+						"Skipped=%v SkipReason=%q Err=%v", got.Skipped, got.SkipReason, got.Err)
+
+					// Retiring a standing IssueTypeRepoIntegrity requires a read
+					// that finished. Abandoning one proves nothing in either
+					// direction, so it must not clear the issue any more than it
+					// may raise one.
+					if got.Skipped && skipProvesIndexReadable(got.SkipReason) {
+						assert.Equal(t, proofClean, proof,
+							"skip reason %q claims the index was read", got.SkipReason)
+					}
+
+					// Human gating is only ever for a conflict a human can
+					// adjudicate — #962's whole complaint was a timeout wearing
+					// this shape, unclearable by anything the user can do.
+					if got.Issue != nil && got.Issue.RequiresConfirm {
+						assert.Equal(t, proofConflicted, proof)
+					}
+
+					if proof != proofUnknown {
+						return
+					}
+					// An unproven cycle stays ordinarily retryable: it may add
+					// no error of its own (which would feed the backoff and,
+					// with PullRan set, teamFailureTakesBackoff's permanent
+					// worktree-fingerprint suspension) and may raise no issue.
+					assert.NotErrorIs(t, got.Err, errProbeAbandoned,
+						"the abandonment must not reach a consumer as a failure")
+					assert.NotErrorIs(t, got.Err, gitutil.ErrConflictProbeFailed)
+					// Only "no NEW issue": the pre-pull arm replaces the result
+					// wholesale, so the two contradictory rows here (pullRan=false
+					// carrying a pull verdict, which pullManagedRepo cannot
+					// actually produce) legitimately drop it.
+					if got.Issue != nil {
+						assert.Same(t, in.Issue, got.Issue, "nothing was proved, so nothing new may be reported")
+					}
+				})
+			}
+		}
+	}
 }
