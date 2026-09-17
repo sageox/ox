@@ -94,6 +94,7 @@ func TestWithPublicationLockAllowsDifferentSessionsConcurrently(t *testing.T) {
 	ledger := t.TempDir()
 	release := make(chan struct{})
 	started := make(chan struct{})
+	firstErr := make(chan error, 1)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -103,10 +104,16 @@ func TestWithPublicationLockAllowsDifferentSessionsConcurrently(t *testing.T) {
 			<-release
 			return nil
 		})
-		require.NoError(t, err)
+		firstErr <- err
 	}()
 
-	<-started
+	select {
+	case <-started:
+	case err := <-firstErr:
+		t.Fatalf("first WithPublicationLock returned before invoking fn: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first WithPublicationLock to invoke fn")
+	}
 	done := make(chan struct{})
 	go func() {
 		err := WithPublicationLock(context.Background(), ledger, "session-two", func() error {
@@ -122,4 +129,5 @@ func TestWithPublicationLockAllowsDifferentSessionsConcurrently(t *testing.T) {
 	}
 	close(release)
 	wg.Wait()
+	require.NoError(t, <-firstErr)
 }

@@ -679,6 +679,19 @@ func TestAppendRecordingBatchRejectsNonAdvancingCursor(t *testing.T) {
 	w, err := NewRawWriter(raw, "")
 	require.NoError(t, err)
 	defer w.Close()
+
+	rawBefore, err := os.ReadFile(raw)
+	require.NoError(t, err)
+	stateBefore, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+
 	err = w.AppendRecordingBatch(statePath, []Entry{{Type: EntryTypeUser, Content: "x"}}, 50)
 	require.ErrorContains(t, err, "did not advance")
+
+	rawAfter, err := os.ReadFile(raw)
+	require.NoError(t, err)
+	stateAfter, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+	require.Equal(t, rawBefore, rawAfter, "rejected batch must not write any entries to raw.jsonl")
+	require.Equal(t, stateBefore, stateAfter, "rejected batch must not persist a new cursor to .recording.json")
 }
