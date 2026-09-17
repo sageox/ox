@@ -9,13 +9,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/daemon/testutil"
+	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -108,6 +113,138 @@ func TestCheckKBOrphans_AutoFixTriggersGCAndRechecksClean(t *testing.T) {
 	assert.Equal(t, 1, gcCalls, "GC hook must be invoked exactly once")
 	assert.True(t, result.passed && !result.warning, "post-fix must be clean pass; got %+v", result)
 	assert.NoDirExists(t, orphan, "orphan dir must be moved aside")
+}
+
+// TestCheckKBOrphans_AutoFixClearsOrphanThroughDaemon runs the orphan autofix
+// with the production GC and root hooks, over a real socket, into a real
+// SyncScheduler kb GC pass. Only the kb API is faked, on both sides.
+//
+// Failure prevented: the autofix sent trigger_gc, which recloned every team
+// context and the ledger instead of running kb GC. With 8 team contexts it
+// timed out at 30s, and the orphan stayed in place either way. kb-orphans is
+// FixLevelAuto, so that happened on every plain `ox doctor`.
+func TestCheckKBOrphans_AutoFixClearsOrphanThroughDaemon(t *testing.T) {
+	t.Setenv("OX_XDG_DISABLE", "") // legacy mode would ignore the XDG dirs below
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("SAGEOX_ENDPOINT", "https://staging.sageox.ai")
+	kbRoot := paths.KBDir(endpoint.Get(), "")
+	orphan := seedKBDir(t, kbRoot, "kb_orphan", nil)
+	kept := seedKBDir(t, kbRoot, "kb_kept", nil)
+
+	lister := &compatFakeKBSource{listFn: func() ([]api.KB, error) {
+		return []api.KB{{KBID: "kb_kept"}}, nil
+	}}
+	SetKBDoctorHooks(kbDoctorHooks{
+		List: func(ctx context.Context) ([]api.KB, error) { return lister.ListBubbles(ctx, api.KBScope{}) },
+	})
+	t.Cleanup(func() { SetKBDoctorHooks(kbDoctorHooks{}) })
+
+	// the scheduler lists bubbles for its project's team
+	project := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.json"),
+		[]byte(`{"endpoint":"https://staging.sageox.ai","team_id":"team_kbgc"}`), 0o644))
+	cfg := daemon.DefaultConfig()
+	cfg.ProjectRoot = project
+	scheduler := daemon.NewSyncScheduler(cfg, slog.New(slog.DiscardHandler))
+	scheduler.SetKBBubbleListerFactory(func(_, _ string) daemon.KBBubbleLister { return lister })
+
+	// The kb lock dir is resolved once per process. Resolve it before
+	// XDG_RUNTIME_DIR moves to a temp dir that cleanup deletes, so a later
+	// test never inherits a lock dir that no longer exists.
+	unlock, _, err := daemon.AcquireKBLock("kb_kept")
+	require.NoError(t, err)
+	if unlock != nil {
+		unlock()
+	}
+	runtimeDir, err := os.MkdirTemp("/tmp", "ox-kbgc-") // short: macOS caps socket paths at 104 bytes
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var reclones atomic.Int32
+	server := daemon.NewServerWithService(slog.New(slog.DiscardHandler), &testutil.MockService{
+		TriggerKBGCFunc: func() { scheduler.TriggerKBGC(ctx) },
+		TriggerGCFunc: func() *daemon.TriggerGCResponse {
+			reclones.Add(1)
+			return scheduler.TriggerGC(ctx)
+		},
+	})
+	done := make(chan error, 1)
+	go func() { done <- server.Start(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	require.Eventually(t, daemon.IsRunning, 2*time.Second, 10*time.Millisecond, "IPC server never answered ping")
+
+	result := checkKBOrphans(true)
+
+	assert.True(t, result.passed && !result.warning, "autofix must clear the orphan; got %+v", result)
+	assert.NoDirExists(t, orphan, "the orphan must leave the kb root")
+	assert.DirExists(t, filepath.Join(kbRoot, ".trash"), "the orphan must be moved to .trash/, not deleted")
+	assert.DirExists(t, kept, "a bubble the kb API still lists must stay")
+	assert.Zero(t, reclones.Load(), "the autofix must not start trigger_gc's reclone sweep")
+}
+
+// TestCheckKBOrphans_AutoFixFailureDetail pins the detail line of a failed
+// orphan autofix: it names the command to run next instead of relaying a raw
+// IPC error.
+func TestCheckKBOrphans_AutoFixFailureDetail(t *testing.T) {
+	tests := []struct {
+		name        string
+		setup       func(t *testing.T, h *kbDoctorHooks)
+		wantContain []string
+		wantAbsent  []string
+	}{
+		{
+			// Failure prevented: right after an upgrade, a daemon started by
+			// the previous ox answered with a bare "unknown message type".
+			name: "daemon predates trigger_kb_gc",
+			setup: func(t *testing.T, _ *kbDoctorHooks) {
+				t.Setenv("OX_XDG_DISABLE", "") // legacy mode would ignore XDG_RUNTIME_DIR
+				runtimeDir, err := os.MkdirTemp("/tmp", "ox-kbgc-")
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+				t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+				oldDaemon := testutil.NewMockDaemon() // answers trigger_kb_gc with "unknown message type"
+				oldDaemon.Start(t)
+				t.Cleanup(oldDaemon.Stop)
+			},
+			wantContain: []string{"ox daemon restart"},
+			wantAbsent:  []string{"unknown message type"},
+		},
+		{
+			// Failure prevented: "Auto-fix failed: read: read unix ->
+			// <socket>: i/o timeout" sent the reader after the socket.
+			name: "client deadline passes",
+			setup: func(_ *testing.T, h *kbDoctorHooks) {
+				h.GC = func(context.Context) error {
+					return errors.New("read: read unix ->/tmp/sageox/daemon/daemon-752e705d.sock: i/o timeout")
+				}
+			},
+			wantContain: []string{"daemon did not complete the auto-fix", "ox daemon status"},
+			wantAbsent:  []string{"Auto-fix failed"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root, h := kbTestSetup(t)
+			seedKBDir(t, root, "kb_orphan", nil)
+			h.List = func(context.Context) ([]api.KB, error) { return nil, nil }
+			tc.setup(t, h)
+			applyHooks(h)
+
+			result := checkKBOrphans(true)
+
+			assert.False(t, result.passed, "the orphan is still present; got %+v", result)
+			for _, want := range tc.wantContain {
+				assert.Contains(t, result.detail, want)
+			}
+			for _, absent := range tc.wantAbsent {
+				assert.NotContains(t, result.detail, absent)
+			}
+		})
+	}
 }
 
 // TestCheckKBOrphans_NoOrphansPasses verifies the happy path: every local

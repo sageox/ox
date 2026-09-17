@@ -246,15 +246,21 @@ func defaultKBDoctorSync(_ context.Context) error {
 	return client.RequestSync()
 }
 
-// defaultKBDoctorGC asks the daemon to run an immediate GC pass which, as a
-// side effect, also runs the kb GC triage that move-asides orphan kb dirs.
-// Same daemon-not-running hint as the sync hook.
+// defaultKBDoctorGC asks the daemon to run its kb GC pass, which moves orphan
+// kb dirs to .trash/, and waits for it so the caller's recheck sees the
+// result. It must not use TriggerGC: that reclones every team context and the
+// ledger, and never runs kb GC. Same daemon-not-running hint as the sync hook.
 func defaultKBDoctorGC(_ context.Context) error {
 	if !daemon.IsRunning() {
 		return errors.New("daemon not running — run `ox daemon start` to enable kb GC")
 	}
-	client := daemon.NewClientForCurrentRepoWithTimeout(30 * time.Second)
-	_, err := client.TriggerGC()
+	// Longer than the 30s cap the daemon puts on its kb API list, so a slow
+	// API ends in a result instead of a client-side timeout.
+	client := daemon.NewClientForCurrentRepoWithTimeout(45 * time.Second)
+	err := client.TriggerKBGC()
+	if isUnknownMessageTypeErr(err) {
+		return errors.New("the running daemon predates on-demand kb GC — run `ox daemon restart`, then re-run `ox doctor`")
+	}
 	return err
 }
 
@@ -380,7 +386,7 @@ func checkKBOrphans(fix bool) checkResult {
 	defer gcCancel()
 	if gcErr := kbHookGC()(gcCtx); gcErr != nil {
 		kbHookLogger().Warn("kb_doctor orphan autofix failed", "error", gcErr, "orphans", len(orphans))
-		return FailedCheck(name, msg, fmt.Sprintf("Auto-fix failed: %v", gcErr))
+		return FailedCheck(name, msg, kbAutoFixHint(gcErr))
 	}
 
 	// Recheck: confirm the orphans are gone from the canonical root.
@@ -620,7 +626,7 @@ func runKBChecks(opts doctorOptions) []checkResult {
 // Both actually mean the same thing to a user: the daemon did not answer. So
 // say that, and name the command that shows why.
 func kbAutoFixHint(err error) string {
-	const nextStep = "The daemon did not complete the sync. Check it with:\n" +
+	const nextStep = "The daemon did not complete the auto-fix. Check it with:\n" +
 		"       ox daemon status"
 
 	if err == nil {

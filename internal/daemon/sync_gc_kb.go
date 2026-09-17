@@ -1,12 +1,13 @@
 package daemon
 
 // Knowledge-bubble GC. Runs on the existing GCCheckInterval (1h) tick
-// alongside the team-context / ledger blue-green GC. Goal: reclaim disk
-// occupied by bubbles the caller no longer has access to (revoked,
-// deleted, or removed from the API list) without ever destructively
-// removing data the daemon hasn't fully reconciled.
+// alongside the team-context / ledger blue-green GC, and on demand via the
+// trigger_kb_gc IPC message (the kb orphan autofix in `ox doctor`). Goal:
+// reclaim disk occupied by bubbles the caller no longer has access to
+// (revoked, deleted, or removed from the API list) without ever
+// destructively removing data the daemon hasn't fully reconciled.
 //
-// Two phases run on each tick:
+// Two phases run on each pass:
 //
 //	Phase 1 (triage): list local kb/<kb_id>/ dirs, diff against the
 //	                  current API list, move orphans to kb/.trash/<kb_id>-<ts>/.
@@ -98,6 +99,20 @@ func (s *SyncScheduler) runKBGC(ctx context.Context, listFn kbAPIListFn) {
 	// phase 2: reaper — independent of phase 1 by design. A panic or
 	// failure in triage must NOT prevent .trash/ from draining.
 	s.kbGCReap(trashDir)
+}
+
+// TriggerKBGC runs one kb GC pass with the production kb lister and returns
+// when it finishes. Its callers — checkAndRunGC on the GC tick, and the
+// trigger_kb_gc handler that the `ox doctor` orphan autofix reaches — run on
+// goroutines with no recover above them, so a panic is recovered and logged
+// here instead of crashing the daemon.
+func (s *SyncScheduler) TriggerKBGC(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Warn("kb_gc panic recovered", "panic", r)
+		}
+	}()
+	s.runKBGC(ctx, s.buildKBGCListFn())
 }
 
 // kbGCRoot returns the canonical kb root directory for the active
