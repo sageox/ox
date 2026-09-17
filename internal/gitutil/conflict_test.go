@@ -514,7 +514,10 @@ func TestAutostashRecoveryWithoutReadableConflicts(t *testing.T) {
 			})
 			if corrupt {
 				// An unreadable index is a probe FAILURE, not a conflict
-				// report — same classification as the #962 timeout.
+				// report, so gitutil tags it the same way it tags the #962
+				// timeout. Only the daemon re-reads the index to tell the
+				// durable case from the retryable one; gitutil's job here is
+				// just to stop the message asserting a conflict.
 				require.ErrorIs(t, err, ErrConflictProbeFailed)
 				require.ErrorContains(t, err, "could not determine index state")
 			} else {

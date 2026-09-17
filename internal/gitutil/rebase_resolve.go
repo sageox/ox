@@ -432,7 +432,10 @@ func listUnmergedEntries(ctx context.Context, repoPath string) ([]unmergedEntry,
 		// Tag every probe FAILURE so callers can tell it from a probe RESULT.
 		// The most likely error here is context cancellation (laptop sleep, VPN
 		// flap, daemon shutdown), which kills git before it writes a byte of
-		// stderr — an error that proves nothing about the index. See
+		// stderr — an error that proves nothing about the index. Note that such
+		// an error does not necessarily NAME cancellation: exec.CommandContext
+		// only returns the context error when the context was already dead
+		// before Start, and otherwise reports "signal: killed". See
 		// ErrConflictProbeFailed in conflict.go.
 		return nil, fmt.Errorf("%w: git ls-files --unmerged: %w", ErrConflictProbeFailed, err)
 	}

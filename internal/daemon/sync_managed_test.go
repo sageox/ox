@@ -121,8 +121,9 @@ func TestPullManagedRepo_SessionMetaConflict_ClassifiesAsSessionConflictWedge(t 
 // A canceled resolver still aborts the rebase using a fresh context. The
 // subsequent autostash inspection then fails on cancellation; it must not
 // replace the pull failure or the divergence issue already reported — and
-// since #962 it must not contribute anything of its own either, because a
-// probe killed by cancellation never learned the index state.
+// since #962 it must not contribute anything of its own either, because the
+// re-read of the index that follows finds it clean, so the inspection failure
+// described the probe rather than the repo.
 func TestPullManagedRepo_AutostashInspectionPreservesPullFailure(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git clone operations")

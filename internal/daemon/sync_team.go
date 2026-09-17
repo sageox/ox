@@ -595,6 +595,9 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		// same stuck-rebase issue, keyed on this same repoName
 		// (ManagedRepoPullOpts.RepoName above). See sync.go's doPull.
 		s.issues.ClearIssue(IssueTypeRebaseStuck, repoName)
+		// Same reasoning as doPull: a completed pull proves the index is
+		// readable again, so the repo-integrity issue must not persist.
+		s.issues.ClearIssue(IssueTypeRepoIntegrity, repoName)
 	}
 
 	return nil

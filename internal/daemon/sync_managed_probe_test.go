@@ -16,64 +16,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- #962: a failed conflict probe is not a conflict ---
+// --- #962 and its follow-up: what a failed conflict probe may and may not do ---
 //
-// A few minutes of dead DNS made `git ls-files --unmerged` die on its context
-// deadline. pullManagedRepo treated every non-nil error from autostash
+// #962: a few minutes of dead DNS made `git ls-files --unmerged` die on its
+// context deadline. pullManagedRepo treated every non-nil error from autostash
 // recovery as a confirmed merge conflict, so two provably clean clones were
 // reported as "has unresolved conflicts: ... context deadline exceeded" and
 // pinned behind RequiresConfirm — a gate nothing clears once the network
 // returns.
-
-func TestIsUndeterminedIndexState(t *testing.T) {
-	t.Parallel()
-	probeFailure := fmt.Errorf("%w: git ls-files --unmerged: %w",
-		gitutil.ErrConflictProbeFailed, errors.New("exit status 128"))
-
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"nil", nil, false},
-		{"probe sentinel", probeFailure, true},
-		{"probe sentinel joined with a pull failure", errors.Join(errors.New("pull failed"), probeFailure), true},
-		// Verbatim shape from the incident report.
-		{"deadline through the probe", fmt.Errorf("%w: git ls-files --unmerged: git ls-files: : %w",
-			gitutil.ErrConflictProbeFailed, context.DeadlineExceeded), true},
-		// Cancellation can also strike AFTER the probe succeeded, deeper in
-		// ResolveAutostashConflicts, where the wrapper names the step rather
-		// than the cause. Still undetermined, still retryable.
-		{"cancellation reading a conflict stage", fmt.Errorf("read conflict stage for sessions/x/meta.json: %w", context.Canceled), true},
-		{"bare deadline", context.DeadlineExceeded, true},
-
-		// Genuine conflict verdicts MUST stay eligible for an issue — a human
-		// really does have to adjudicate these.
-		{"unresolved conflict", errors.New("unresolved conflict in notes.txt requires manual resolution"), false},
-		{"field differs", errors.New("field title differs in sessions/x/meta.json; manual resolution required"), false},
-		{"merge head present", errors.New("cannot recover autostash while MERGE_HEAD is present or unreadable"), false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, isUndeterminedIndexState(tc.err))
-		})
-	}
-}
-
-// The end-to-end shape of the bug, driven through the real decision path in
-// pullManagedRepo rather than the helper it calls — a helper-level test passes
-// even when the classification is never wired into the failure branch.
 //
-// An unreadable index is the same class as the incident's timeout: the probe
-// could not run, so nothing is known about the index. Reverting the
-// classification turns every assertion below red.
-func TestPullManagedRepo_UnreadableIndexDoesNotMintConflictIssue(t *testing.T) {
+// The follow-up regression: the first fix classified EVERY probe failure as
+// retryable and returned a zero-value ManagedRepoPullResult. doPull cannot
+// distinguish that from a healthy pull, so a DURABLY broken clone (corrupt
+// .git/index) silently never synced again while every signal read green.
+//
+// The invariant both halves share: a cycle that did not sync must never be
+// reportable as one that did.
+
+// --- A. Durable failure: loud, but never a confirm-gated merge conflict ---
+
+// An unreadable .git/index fails identically forever. It must reach the user,
+// and it must NOT wear the false-alarm shape #962 removed.
+func TestPullManagedRepo_UnreadableIndexIsVisibleAndNotAConflict(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git index states")
 	}
 	repo := newProbeTestRepo(t, "notes.txt")
-	require.NoError(t, os.WriteFile(filepath.Join(repo, ".git", "index"), []byte("invalid index"), 0o644))
+	corruptIndex(t, repo)
 
 	result := newTestScheduler(t.TempDir()).pullManagedRepo(context.Background(), ManagedRepoPullOpts{
 		RepoPath:     repo,
@@ -82,14 +51,60 @@ func TestPullManagedRepo_UnreadableIndexDoesNotMintConflictIssue(t *testing.T) {
 		Logger:       discardLogger(),
 	})
 
-	assert.Nil(t, result.Issue, "an undetermined index state must not mint an issue of any type")
-	assert.NoError(t, result.Err,
-		"an undetermined index state must not count toward the consecutive-failure backoff")
+	// The half worth keeping from the original test: still not a merge conflict.
+	require.NotNil(t, result.Issue, "a durably broken clone must not fail silently")
+	assert.NotEqual(t, IssueTypeMergeConflict, result.Issue.Type,
+		"the probe found no conflicts — it could not run at all")
+	assert.False(t, result.Issue.RequiresConfirm,
+		"human gating is for merges a human can adjudicate, not for a corrupt index")
+
+	// The half that was missing: the failure is visible.
+	assert.Equal(t, IssueTypeRepoIntegrity, result.Issue.Type)
+	assert.Equal(t, SeverityError, result.Issue.Severity)
+	assert.Equal(t, "team_qdur30tb4b", result.Issue.Repo)
+	assert.Contains(t, result.Issue.Summary, filepath.Join(repo, ".git", "index"),
+		"the summary must name the file a human or agent has to repair")
+	require.Error(t, result.Err, "doPull keys its failure path off Err, not Issue")
+	assert.ErrorIs(t, result.Err, gitutil.ErrConflictProbeFailed)
+	assert.False(t, result.Skipped, "Skipped is checked before Err and would swallow this")
 }
 
-// The other half: a probe that SUCCEEDED and found an unmerged index the
-// resolver cannot repair must still reach the user as a confirm-gated merge
-// conflict. Without this, the #962 fix would suppress real conflicts too.
+// The regression in its own terms: repeated cycles against a corrupt index must
+// never produce the zero-value result doPull reads as a healthy sync. Modeled on
+// the three-cycle reproduction — a single cycle would not have caught a fix that
+// only reports the first failure.
+func TestPullManagedRepo_CorruptIndexNeverLooksLikeSuccess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index states")
+	}
+	repo := newProbeTestRepo(t, "notes.txt")
+	corruptIndex(t, repo)
+	s := newTestScheduler(t.TempDir())
+
+	for cycle := 1; cycle <= 3; cycle++ {
+		result := s.pullManagedRepo(context.Background(), ManagedRepoPullOpts{
+			RepoPath:     repo,
+			RepoName:     "ledger",
+			ResolveRules: []manifest.ResolveRule{{Mode: manifest.ResolveModeAuto, Path: "data/"}},
+			Logger:       discardLogger(),
+		})
+
+		// This is precisely doPull's success path: not skipped, no error. Reaching
+		// it means ClearSyncFailures + RecordPullSuccess + lastSync = now on a
+		// cycle that never fetched a byte.
+		require.Falsef(t, !result.Skipped && result.Err == nil,
+			"cycle %d took doPull's success path: Skipped=%v SkipReason=%q Err=%v Issue=%v",
+			cycle, result.Skipped, result.SkipReason, result.Err, result.Issue)
+		require.NotNilf(t, result.Issue, "cycle %d must keep the issue visible, not report it once and go quiet", cycle)
+		assert.Equal(t, IssueTypeRepoIntegrity, result.Issue.Type, "cycle %d", cycle)
+	}
+}
+
+// --- B. Genuine conflict: unchanged, and the original #962 fix still holds ---
+
+// A probe that SUCCEEDED and found an unmerged index the resolver cannot repair
+// must still reach the user as a confirm-gated merge conflict. Without this, the
+// #962 fix would suppress real conflicts too.
 func TestPullManagedRepo_GenuineUnmergedIndexStillMintsConflictIssue(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: real git index states")
@@ -112,6 +127,174 @@ func TestPullManagedRepo_GenuineUnmergedIndexStillMintsConflictIssue(t *testing.
 	assert.ErrorContains(t, result.Err, "requires manual resolution")
 }
 
+// --- C. The re-probe itself ---
+//
+// classifyAutostashFailure never reads conflictErr's shape; it re-reads the
+// index and branches on what it finds. These cases drive that decision directly,
+// including the one pullManagedRepo cannot stage end-to-end: an ambiguous error
+// (no sentinel, no context error) over an index that is in fact clean — the
+// shape produced when a conflict is resolved between the failing probe and the
+// confirmation.
+func TestClassifyAutostashFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index states")
+	}
+
+	// Neither gitutil.ErrConflictProbeFailed nor a context error, so any
+	// error-shape allowlist would misfile it.
+	ambiguous := errors.New("cannot recover autostash while MERGE_HEAD is present or unreadable")
+	pullSucceeded := ManagedRepoPullResult{AutoResolved: true}
+	pullFailed := ManagedRepoPullResult{
+		Err:   errors.New("pull failed"),
+		Issue: &DaemonIssue{Type: IssueTypeDiverged, Severity: SeverityError, Repo: "ledger"},
+	}
+
+	tests := []struct {
+		name string
+		// index prepares the fixture repo's index state.
+		index   func(t *testing.T, repo string)
+		err     error
+		pullRan bool
+		in      ManagedRepoPullResult
+		assert  func(t *testing.T, got ManagedRepoPullResult)
+	}{
+		{
+			name:    "clean index before the pull becomes an explicit skip",
+			index:   func(*testing.T, string) {},
+			err:     ambiguous,
+			pullRan: false,
+			assert: func(t *testing.T, got ManagedRepoPullResult) {
+				assert.True(t, got.Skipped)
+				assert.Equal(t, skipReasonUnconfirmedConflict, got.SkipReason)
+				assert.NoError(t, got.Err, "a clean index must not count toward the consecutive-failure backoff")
+				assert.Nil(t, got.Issue)
+			},
+		},
+		{
+			// The #962 shape verbatim: the sync context died, so the probe
+			// returned a context error. The re-probe uses context.WithoutCancel,
+			// so it still reads the index and proves the clone clean.
+			name:    "canceled probe over a clean index does not mint a conflict",
+			index:   func(*testing.T, string) {},
+			err:     fmt.Errorf("%w: git ls-files --unmerged: git ls-files: : %w", gitutil.ErrConflictProbeFailed, context.DeadlineExceeded),
+			pullRan: false,
+			assert: func(t *testing.T, got ManagedRepoPullResult) {
+				assert.True(t, got.Skipped)
+				assert.Nil(t, got.Issue, "#962: a timeout must never become a RequiresConfirm merge conflict")
+				assert.NoError(t, got.Err)
+			},
+		},
+		{
+			name:    "clean index after a successful pull keeps the success",
+			index:   func(*testing.T, string) {},
+			err:     ambiguous,
+			pullRan: true,
+			in:      pullSucceeded,
+			assert: func(t *testing.T, got ManagedRepoPullResult) {
+				assert.Equal(t, pullSucceeded, got, "the pull really did sync; nothing may overwrite that")
+			},
+		},
+		{
+			name:    "clean index after a failed pull keeps the pull's verdict",
+			index:   func(*testing.T, string) {},
+			err:     ambiguous,
+			pullRan: true,
+			in:      pullFailed,
+			assert: func(t *testing.T, got ManagedRepoPullResult) {
+				assert.False(t, got.Skipped, "a failed pull must not be downgraded to a skip")
+				require.NotNil(t, got.Issue)
+				assert.Equal(t, IssueTypeDiverged, got.Issue.Type)
+				assert.EqualError(t, got.Err, "pull failed")
+			},
+		},
+		{
+			name:    "conflicted index mints the confirm-gated merge conflict",
+			index:   func(t *testing.T, repo string) { writeUnmergedIndex(t, repo, "notes.txt") },
+			err:     ambiguous,
+			pullRan: false,
+			assert: func(t *testing.T, got ManagedRepoPullResult) {
+				require.NotNil(t, got.Issue)
+				assert.Equal(t, IssueTypeMergeConflict, got.Issue.Type)
+				assert.True(t, got.Issue.RequiresConfirm)
+				assert.ErrorIs(t, got.Err, ambiguous)
+			},
+		},
+		{
+			name:    "unreadable index is durable and overrides a stale skip",
+			index:   corruptIndex,
+			err:     ambiguous,
+			pullRan: true,
+			in:      ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRebaseInProgress},
+			assert: func(t *testing.T, got ManagedRepoPullResult) {
+				assert.False(t, got.Skipped, "doPull checks Skipped before Err")
+				assert.Empty(t, got.SkipReason)
+				require.NotNil(t, got.Issue)
+				assert.Equal(t, IssueTypeRepoIntegrity, got.Issue.Type)
+				assert.False(t, got.Issue.RequiresConfirm)
+				assert.ErrorIs(t, got.Err, gitutil.ErrConflictProbeFailed)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			repo := newProbeTestRepo(t, "notes.txt")
+			tc.index(t, repo)
+
+			// A dead parent context: the re-probe must survive it, which is the
+			// whole reason it runs under context.WithoutCancel.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			got := tc.in
+			classifyAutostashFailure(ctx, &got, tc.err, tc.pullRan, repo, "ledger", discardLogger())
+			tc.assert(t, got)
+		})
+	}
+}
+
+// HasUnmergedEntries is the single source of fact classifyAutostashFailure
+// branches on, so its three outcomes are pinned directly.
+func TestReprobeIndexConflicts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index states")
+	}
+	t.Run("clean", func(t *testing.T) {
+		t.Parallel()
+		conflicted, err := reprobeIndexConflicts(context.Background(), newProbeTestRepo(t, "notes.txt"))
+		require.NoError(t, err)
+		assert.False(t, conflicted)
+	})
+	t.Run("conflicted", func(t *testing.T) {
+		t.Parallel()
+		repo := newProbeTestRepo(t, "notes.txt")
+		writeUnmergedIndex(t, repo, "notes.txt")
+		conflicted, err := reprobeIndexConflicts(context.Background(), repo)
+		require.NoError(t, err)
+		assert.True(t, conflicted)
+	})
+	t.Run("unreadable is an error, never a clean verdict", func(t *testing.T) {
+		t.Parallel()
+		repo := newProbeTestRepo(t, "notes.txt")
+		corruptIndex(t, repo)
+		conflicted, err := reprobeIndexConflicts(context.Background(), repo)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, gitutil.ErrConflictProbeFailed)
+		assert.False(t, conflicted, "the bool is meaningless when err != nil; callers must check err first")
+	})
+	t.Run("survives a canceled parent context", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		conflicted, err := reprobeIndexConflicts(ctx, newProbeTestRepo(t, "notes.txt"))
+		require.NoError(t, err, "context.WithoutCancel is what makes the #962 confirmation possible")
+		assert.False(t, conflicted)
+	})
+}
+
+// --- fixtures ---
+
 // newProbeTestRepo returns a one-commit repo with no remote. These tests never
 // reach fetch — autostash recovery runs first and returns before it — so the
 // fixture deliberately skips the bare-remote scaffolding other tests need.
@@ -126,6 +309,14 @@ func newProbeTestRepo(t *testing.T, path string) string {
 	out, err = runGitOut(t, repo, "commit", "-m", "base")
 	require.NoError(t, err, out)
 	return repo
+}
+
+// corruptIndex makes `git ls-files --unmerged` fail the same way forever, which
+// is what separates a durable failure from the retryable #962 timeout. Garbage
+// bytes are enough: git rejects the index on its signature/version header.
+func corruptIndex(t *testing.T, repo string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".git", "index"), []byte("invalid index"), 0o644))
 }
 
 // writeUnmergedIndex stages all three merge stages for path directly.

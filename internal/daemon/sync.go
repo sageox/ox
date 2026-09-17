@@ -1450,6 +1450,11 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		// the daemon was restarted. A successful pull is proof the clone is
 		// not stuck, the same evidence the other issue types above rely on.
 		s.issues.ClearIssue(IssueTypeRebaseStuck, "ledger")
+		// A pull that reached this point read the index successfully, which
+		// is the exact fact IssueTypeRepoIntegrity denies. Without this
+		// clear the issue would outlive the repair, the way
+		// IssueTypeRebaseStuck did before ox-baz5.3.
+		s.issues.ClearIssue(IssueTypeRepoIntegrity, "ledger")
 	}
 
 	duration := time.Since(startTime)
