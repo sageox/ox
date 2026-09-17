@@ -335,6 +335,9 @@ func TestDiscoverRules_Globs(t *testing.T) {
 		{"bare comma form, as Cursor and Copilot write it", "globs: **/*.go,**/*.mod", []string{"**/*.go", "**/*.mod"}},
 		{"single bare glob", "globs: migrations/**", []string{"migrations/**"}},
 		{"quoted single", `globs: "**/*.tf"`, []string{"**/*.tf"}},
+		// End to end: the literal hash must survive into the parsed glob, not just
+		// into the un-stripped value.
+		{"quoted entry containing a hash", `globs: ["**/*.go # generated sources"]`, []string{"**/*.go # generated sources"}},
 		{"empty value is not a scope", "globs:", nil},
 		{"empty list is not a scope", "globs: []", nil},
 		// The guide's own examples carried trailing comments. Parsed literally they
@@ -425,6 +428,13 @@ func TestStripYAMLComment_QuoteEscapes(t *testing.T) {
 		{"unterminated stays whole", `"no closing quote`, `"no closing quote`},
 		{"unquoted with comment", `bare value  # note`, `bare value`},
 		{"comment only", `# nothing`, ``},
+		// A # inside a quoted entry of a flow sequence is literal. Cutting at the
+		// first " #" produced the unparseable `["**/*.go`, which told the agent a
+		// scope that matches nothing the author meant.
+		{"hash inside a quoted sequence entry", `["**/*.go # generated sources"]`, `["**/*.go # generated sources"]`},
+		{"sequence then comment", `["**/*.go", "**/*.mod"]   # note`, `["**/*.go", "**/*.mod"]`},
+		{"sequence with apostrophe entry", `['it''s', "b"]  # note`, `['it''s', "b"]`},
+		{"unterminated sequence stays whole", `["**/*.go"`, `["**/*.go"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

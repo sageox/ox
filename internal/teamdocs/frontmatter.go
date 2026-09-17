@@ -134,6 +134,17 @@ func stripYAMLComment(v string) string {
 		}
 		return v // unterminated quote: leave it alone rather than guess
 	}
+	// A flow sequence has to be scanned to its matching bracket before any
+	// comment can be found, because a # inside one of its quoted entries is
+	// literal. Cutting at the first " #" turned globs: ["**/*.go # generated"]
+	// into the unparseable ["**/*.go — telling the agent a scope that does not
+	// match the files the author meant.
+	if len(v) > 0 && v[0] == '[' {
+		if end := closingBracket(v); end > 0 {
+			return v[:end+1]
+		}
+		return v // unterminated sequence: leave it alone rather than guess
+	}
 	if idx := strings.Index(v, " #"); idx >= 0 {
 		return strings.TrimSpace(v[:idx])
 	}
@@ -141,6 +152,31 @@ func stripYAMLComment(v string) string {
 		return "" // the whole value is a comment
 	}
 	return v
+}
+
+// closingBracket returns the index of the ] that closes the flow sequence
+// opened at v[0], or -1 when it is unterminated. Brackets inside quoted entries
+// do not count, and nesting is tracked so a sequence of sequences survives.
+func closingBracket(v string) int {
+	depth := 0
+	for i := 0; i < len(v); i++ {
+		switch v[i] {
+		case '\'', '"':
+			end := closingQuote(v[i:])
+			if end < 0 {
+				return -1 // unterminated quote inside the sequence
+			}
+			i += end
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // closingQuote returns the index of the quote that ends the scalar opened at
