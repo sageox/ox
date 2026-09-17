@@ -28,9 +28,18 @@ import (
 // Best-effort by construction. Every failure path returns without disturbing the
 // session: a project that cannot reconcile still primes, because a stale
 // playbook is a degraded session while a failed prime is no session at all.
-func reconcileSkillInventoryIfStale(projectRoot string) (changed int) {
+// It also returns the team skills the reconcile DECLINED to materialize, so
+// prime can say so once. A withheld skill leaves the repository looking exactly
+// as it would if nobody had authored it, and the team member who wrote it has no
+// way to discover that from their own machine.
+//
+// Reported on CHANGE, not every session: the withheld set can only shift when
+// the catalog revision does, and the fast path proves that has not happened
+// without building a plan. Re-emitting a line into every prime forever would
+// spend context on an unchanged fact — the cost this whole path exists to avoid.
+func reconcileSkillInventoryIfStale(projectRoot string) (changed int, withheld []skillmanager.TeamSkillDecision) {
 	if projectRoot == "" {
-		return 0
+		return 0, nil
 	}
 	revision, oxVersion, selected := skillmanager.InstalledSource(projectRoot)
 	if selected {
@@ -42,7 +51,7 @@ func reconcileSkillInventoryIfStale(projectRoot string) (changed int) {
 		// No targets recorded: this project has never selected an AI coworker with
 		// native skills, or has never been initialized. `ox init` owns first
 		// install; prime must not silently install into a repo that never asked.
-		return 0
+		return 0, nil
 	}
 	// SELF-HEAL, before the staleness compare.
 	//
@@ -68,10 +77,10 @@ func reconcileSkillInventoryIfStale(projectRoot string) (changed int) {
 	wantRevision, err := skillmanager.ExpectedRevision(projectRoot)
 	if err != nil {
 		slog.Debug("skills: catalog digest unavailable at prime", "error", err)
-		return 0
+		return 0, nil
 	}
 	if revision == wantRevision && oxVersion == version.Version {
-		return 0 // the common path
+		return 0, nil // the common path
 	}
 
 	plan, err := reconcileCommittedSkillsNonBlocking(projectRoot)
@@ -80,18 +89,19 @@ func reconcileSkillInventoryIfStale(projectRoot string) (changed int) {
 			// Another ox process holds the apply lock and is doing this exact work.
 			// Skipping is the correct outcome, not a degraded one.
 			slog.Debug("skills: reconcile already in progress, skipping at prime")
-			return 0
+			return 0, nil
 		}
 		slog.Debug("skills: prime reconcile failed", "error", err)
-		return 0
+		return 0, nil
 	}
 	if plan == nil {
-		return 0
+		return 0, nil
 	}
 	changed = len(plan.Creates) + len(plan.Updates) + len(plan.Removes)
-	if changed > 0 {
+	withheld = plan.WithheldTeamSkills()
+	if changed > 0 || len(withheld) > 0 {
 		slog.Info("skills: reconciled inventory at prime",
-			"changed", changed, "revision", wantRevision, "version", version.Version)
+			"changed", changed, "withheld", len(withheld), "revision", wantRevision, "version", version.Version)
 	}
-	return changed
+	return changed, withheld
 }

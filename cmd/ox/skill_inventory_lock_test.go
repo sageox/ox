@@ -46,7 +46,7 @@ func TestReconcileSkillInventoryIfStale_SkipsWhenAnotherProcessHoldsTheLock(t *t
 	}
 
 	// Stale revision, so without contention this would definitely do work.
-	if changed := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
+	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
 		t.Errorf("reconcile proceeded while another holder had the apply lock: changed=%d", changed)
 	}
 	if managedExists(t, managedFile) {
@@ -56,7 +56,7 @@ func TestReconcileSkillInventoryIfStale_SkipsWhenAnotherProcessHoldsTheLock(t *t
 	// Releasing the lock must restore normal behavior — proving the skip was
 	// contention and not a permanently broken path.
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	if changed := reconcileSkillInventoryIfStale(repoRoot); changed == 0 {
+	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed == 0 {
 		t.Errorf("reconcile did not resume after the lock was released")
 	}
 	if !managedExists(t, managedFile) {
@@ -94,7 +94,7 @@ func TestReconcileSkillInventoryIfStale_NeverWaitsOnTheReconcileLock(t *testing.
 	}
 
 	start := time.Now()
-	changed := reconcileSkillInventoryIfStale(repoRoot)
+	changed, _ := reconcileSkillInventoryIfStale(repoRoot)
 	elapsed := time.Since(start)
 
 	if changed != 0 {

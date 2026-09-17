@@ -50,6 +50,10 @@ var hookCapSectionPriority = []string{
 	// <team-knowledge> is trimmed by child, not as a block: the always-rules
 	// and memory are the product, the catalogs are one Read away.
 	"team-knowledge/team-rules",
+	// Ranked above the catalogs because it is a defect report, not content: a
+	// team skill that was published and never arrived. It is emitted only when
+	// something is held, so ranking it high costs a healthy session nothing.
+	"team-knowledge/team-skills-withheld",
 	"team-knowledge/memory",
 	"team-knowledge/team-instructions",
 	"team-knowledge/docs",
