@@ -172,12 +172,22 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	ledgerPath, ledgerErr := resolveLedgerPath()
 
 	sessionName := session.GetSessionName(state.SessionPath)
+	startMinted := state.SessionID
+	if startMinted == "" {
+		startMinted = session.ReadHeaderSessionID(rawPath)
+	}
 	var ledgerSessionDir string
 	var uploaded bool
 
 	if ledgerErr == nil {
 		ledgerSessionDir = filepath.Join(ledgerPath, "sessions", sessionName)
-		if err := os.MkdirAll(ledgerSessionDir, 0755); err != nil {
+		if preservedID, _, preserveErr := lfs.PreservedSessionIDAndDraft(ledgerSessionDir); preserveErr != nil {
+			_ = doctor.SetNeedsDoctorAgent(projectRoot)
+			return fmt.Errorf("refusing to recover session %q over unreadable existing metadata: %w", sessionName, preserveErr)
+		} else if preservedID != "" && startMinted != "" && preservedID != startMinted {
+			_ = doctor.SetNeedsDoctorAgent(projectRoot)
+			return fmt.Errorf("refusing to recover session %q over existing session ID %q (recovered session ID %q)", sessionName, preservedID, startMinted)
+		} else if err := os.MkdirAll(ledgerSessionDir, 0755); err != nil {
 			slog.Warn("create ledger session dir failed", "error", err)
 		} else {
 			// copy raw.jsonl to ledger (the critical artifact)
@@ -227,10 +237,6 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 					// when neither source has one. Resolved before the builder
 					// is constructed so sessionMetaBase always receives the
 					// final ID.
-					startMinted := state.SessionID
-					if startMinted == "" {
-						startMinted = session.ReadHeaderSessionID(rawPath)
-					}
 					sessionID := session.ResolveOrMintSessionID(preservedID, startMinted)
 
 					displayName := identity.AttributionDisplayName(endpoint.GetForProject(projectRoot), config.GetDisplayName())
