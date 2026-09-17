@@ -598,6 +598,26 @@ func TestAutostashRecoveryMergesBookkeepingCounters(t *testing.T) {
 			wantErr:  "field summary differs",
 		},
 		{
+			// The RESET shape, and the reason max is safe here at all.
+			// summary_attempts is NOT globally monotonic: a successful
+			// summarization sets it back to 0 (session_finalize.go), as do
+			// RecoverEmptyTitleMeta and ResetInlineSummaryEligible. Across a
+			// reset max is actively WRONG — it would resurrect the stale 3 over
+			// the newer 0 and re-trip MaxSummaryAttempts a try early.
+			//
+			// What prevents that is not the counter rule but the fact that
+			// every resetting writer also writes summary_status, which has no
+			// merge rule and refuses the whole path first. If a future writer
+			// ever touches summary_attempts alone, this case keeps passing
+			// while the rule silently becomes unsound — so it is the canary for
+			// that change, not a guarantee against it.
+			name:     "a counter RESET paired with its status write still refuses",
+			base:     `{"summary_status":"pending","summary_attempts":0}`,
+			upstream: `{"summary_status":"unrecoverable","summary_attempts":3}`,
+			local:    `{"summary_status":"ok","summary_attempts":0}`,
+			wantErr:  "field summary_status differs",
+		},
+		{
 			name:     "differing validation_error still refuses",
 			base:     `{"validation_error":"","summary_attempts":0}`,
 			upstream: `{"validation_error":"missing transcript","summary_attempts":2}`,

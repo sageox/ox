@@ -445,17 +445,33 @@ func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixe
 // nothing picks between "failed" and "pending" without inventing policy — so it
 // keeps refusing.
 var sessionMetaBookkeepingMerges = map[string]func(ours, theirs any) (any, bool){
-	// summary_attempts is ox's own retry counter: the daemon increments it and
-	// never resets it, so it only ever moves up. Both sides of a
+	// summary_attempts is ox's own retry counter. Both sides of a
 	// pull --autostash have been counting the same session's attempts, which
 	// makes this the one conflict class ox reliably generates against itself
 	// (#956) — and, before this rule, the one class auto-resolve refused,
 	// wedging the index until a human ran git by hand in the ledger clone.
 	//
-	// max is the true attempt count, not a preference: because the counter is
-	// monotonic, the lower side is a strictly earlier observation of the same
-	// value, so taking the higher discards no information and keeps the counter
-	// monotonic across the merge.
+	// The counter is monotonic only WITHIN a failure episode. It is NOT
+	// globally monotonic: three writers reset it to 0 —
+	// agentwork/session_finalize.go (every successful summarization),
+	// lfs/meta_repair.go RecoverEmptyTitleMeta (title recovered) and
+	// ResetInlineSummaryEligible (re-arming retries after a fix). Across a
+	// reset, max is WRONG: the lower side is the LATER observation, and taking
+	// the higher resurrects a stale count that re-trips MaxSummaryAttempts a
+	// try early.
+	//
+	// What actually makes max safe here is not monotonicity but the shape of
+	// those writers: every one of them writes summary_attempts atomically
+	// alongside summary_status and/or validation_error and/or title, none of
+	// which have a merge rule. The loop above refuses the whole path on the
+	// first uncovered differing key, so a reset can never reach this function
+	// with the counter differing in isolation.
+	// TestAutostashRecoveryMergesBookkeepingCounters pins this with the
+	// "a counter RESET paired with its status write still refuses" case.
+	//
+	// So: if you ever add a writer that touches summary_attempts ALONE, this
+	// rule becomes unsound. Give the counter a real reset-aware merge (or an
+	// episode id) before doing that.
 	"summary_attempts": mergeMonotonicCounter,
 }
 
