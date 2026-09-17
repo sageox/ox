@@ -435,8 +435,16 @@ func TestRefreshDirtyOverlay_ContextCanceled(t *testing.T) {
 	lastDirtyRefresh := mgr.lastDirtyRefresh
 	mgr.mu.Unlock()
 	assert.True(t, lastDirtyRefresh.IsZero(), "canceled refresh must invalidate an earlier success timestamp")
-	_, found := tracker.GetIssue(IssueTypeDirtyOverlayFailed, "")
-	assert.True(t, found, "canceled dirty overlay build must report a failure")
+	issue, found := tracker.GetIssue(IssueTypeDirtyOverlayFailed, "")
+	require.True(t, found, "canceled dirty overlay build must report a failure")
+
+	// Distinguishes "never started" from "started, then noticed". A summary of
+	// "refresh failed" means the goroutine reached codedb.Open and only learned
+	// of the cancellation inside BuildDirtyIndex -- the path whose uncancellable
+	// Bleve open and teardown is what the budget above cannot survive on a
+	// loaded runner. This assertion does not depend on timing.
+	assert.Contains(t, issue.Summary, "refresh canceled",
+		"a canceled refresh must be reported as canceled, not as a build failure")
 }
 
 // --- C. Deterministic concurrency: verify no double goroutine ---
