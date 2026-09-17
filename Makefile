@@ -258,7 +258,12 @@ check-test-tiers: ## Validate the machine-readable test-tier contract
 test-tiers: check-test-tiers ## Print the executable test-tier contract
 	@for tier in fast full slow acceptance digital_twin integration release; do $(TEST_TIER_TOOL) describe $$tier; echo; done
 
-test: check-test-tiers ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
+# Root ./... deliberately excludes nested public modules.
+.PHONY: test-sessionprovenance
+test-sessionprovenance: ## Validate the public native-session contract
+	@go -C pkg/sessionprovenance test -race ./...
+
+test: check-test-tiers test-sessionprovenance ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
 	$(call say,"Running fast tests (skipping >500ms, no coverage)...")
 	@timings='$(TEST_TIMINGS)'; \
 	if [ -z "$$timings" ]; then mkdir -p tmp; timings=$$(mktemp -p tmp test-timings.XXXXXX); else mkdir -p "$$(dirname "$$timings")"; fi; \
@@ -270,7 +275,7 @@ test: check-test-tiers ## Run fast tests — unit tests <500ms, race detection, 
 	if [ "$$test_status" -ne 0 ]; then exit "$$test_status"; fi; \
 	exit "$$metrics_status"
 
-test-cover: check-test-tiers ## Run fast tests with coverage collection (~15-20% slower than `make test`)
+test-cover: check-test-tiers test-sessionprovenance ## Run fast tests with coverage collection (~15-20% slower than `make test`)
 	$(call say,"Running fast tests with coverage...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FAST_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
@@ -280,12 +285,12 @@ test-timings: ## Reprint metrics from the latest fast-test timing artifact
 	@test -f $(TEST_TIMINGS) || (echo "No fast-test timing artifact at $(TEST_TIMINGS)." && exit 1)
 	@python3 $(TEST_METRICS) $(TEST_TIMINGS)
 
-test-all: check-test-tiers ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
+test-all: check-test-tiers test-sessionprovenance ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
 	$(call say,"Running all tests including expensive tests...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FULL_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
-test-calm: check-test-tiers ## Run the full test tier at reduced concurrency (shared or already-loaded machine)
+test-calm: check-test-tiers test-sessionprovenance ## Run the full test tier at reduced concurrency (shared or already-loaded machine)
 	@# The tier contract's -p 8 -parallel 32 assumes the runner owns the machine.
 	@# Locally it runs once per agent session per worktree: two concurrent
 	@# `make test-all` runs on an 18-core workstation measured load average 37
@@ -673,7 +678,7 @@ smoke-test: build ## Run smoke tests against SageOx cloud (requires SAGEOX_CI_PA
 
 # Code quality
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
-lint: lint-test-env ## Run golangci-lint
+lint: lint-test-env lint-sessionprovenance ## Run golangci-lint
 	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/usage/install/" && exit 1)
 	@# --allow-parallel-runners: multiple AI coding agent sessions routinely run
 	@# `make lint` at the same time in this repo. golangci-lint's default file
@@ -681,6 +686,13 @@ lint: lint-test-env ## Run golangci-lint
 	@# instead of just queuing or racing harmlessly — each invocation has its
 	@# own in-memory analysis, so concurrent runs don't corrupt shared state.
 	@golangci-lint run -c .config/golangci.yml --allow-parallel-runners ./...
+
+# Root ./... cannot reach a nested module: golangci-lint resolves packages
+# against the main module, so pkg/sessionprovenance would ship unlinted.
+.PHONY: lint-sessionprovenance
+lint-sessionprovenance: ## Lint the public native-session contract
+	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/usage/install/" && exit 1)
+	@cd pkg/sessionprovenance && golangci-lint run -c $(CURDIR)/.config/golangci.yml --allow-parallel-runners ./...
 
 lint-test-env: ## Check that test files use testguard instead of os.Environ()
 	$(call say,"Checking for os.Environ() in test files...")

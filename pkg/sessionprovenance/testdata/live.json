@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "agent": "codex",
+  "native_session_id": "0197d3f4-2c88-7a15-a9b0-4b5c6d7e8f04",
+  "generation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "ranges": [
+    {
+      "start": 0,
+      "end": 120
+    }
+  ],
+  "parser_version": "codex-jsonl/v1",
+  "captured_at": "2026-09-15T00:00:00.123456789Z",
+  "future_source": {
+    "retain": true
+  }
+}
