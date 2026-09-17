@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/skillmanager"
-	"github.com/sageox/ox/internal/teamskills"
 )
 
 // checkClaudeSkills retains its historical registration name, but checks the
@@ -108,14 +107,14 @@ func describeWithheldTeamSkills(withheld []skillmanager.TeamSkillDecision) strin
 	return fmt.Sprintf("team skills %s: %s", strings.Join(summary, ", "), strings.Join(parts, "; "))
 }
 
-// teamSkillApprovalHint points at the committed approval store.
+// teamSkillApprovalHint names the command that opens the gate.
 //
-// It names the FILE rather than a command because there is no approval command
-// yet — the store is written by hand or by a reviewer. Promising a command that
-// does not exist would be worse than the silence this check replaces.
-func teamSkillApprovalHint(repoRoot string) string {
-	return fmt.Sprintf("Review the skill in your team context, then record a digest-pinned approval in %s",
-		teamskills.ApprovalPath(repoRoot))
+// It used to name the approval FILE instead, because no approval command
+// existed and promising one would have been worse than silence. `ox skills
+// approve` now exists, so the hint names the action rather than asking a human
+// to hand-compute a sha256 into committed JSON.
+func teamSkillApprovalHint(string) string {
+	return "Review the skill in your team context, then run `ox skills approve` to see what is waiting and approve it"
 }
 
 func describeSkillPlan(plan *skillmanager.ReconcilePlan) string {

@@ -278,7 +278,7 @@ func skillsStatusGuidance(out skillsStatusOutput) string {
 	}
 	for _, s := range out.TeamSkills {
 		if s.State == skillWithheld {
-			return fmt.Sprintf("team skill %q is withheld: %s. Read the file it bundles before deciding to approve it.", s.Name, s.Detail)
+			return fmt.Sprintf("team skill %q is withheld: %s. Read the file it bundles, then run `ox skills approve %s`.", s.Name, s.Detail, s.Name)
 		}
 	}
 	for _, s := range out.TeamSkills {
