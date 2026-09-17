@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/manifest"
@@ -469,6 +471,7 @@ func TestSkipProvesIndexReadable(t *testing.T) {
 		{skipReasonRemoteUnchanged, true},
 		{skipReasonRecentlyFetched, true},
 		{skipReasonUnconfirmedConflict, true},
+		{skipReasonUnconfirmedIndex, false},
 		{skipReasonRebaseInProgress, false},
 		{skipReasonLockFilesPresent, false},
 		{skipReasonRepoLockBusy, false},
@@ -479,4 +482,159 @@ func TestSkipProvesIndexReadable(t *testing.T) {
 			assert.Equal(t, tc.want, skipProvesIndexReadable(tc.reason))
 		})
 	}
+}
+
+// --- F. The confirmation's own budget (PR #974 review) ---
+//
+// The confirmation ignores cancellation on purpose, but ignoring it for the
+// WHOLE ladder made one wedged clone hold the sync cycle for the full retry
+// sequence. Team sync waits on every bubble's confirmation serially and daemon
+// shutdown waits on the scheduler goroutine behind them, so that time is
+// shutdown latency multiplied by the number of wedged clones.
+//
+// The two tests below pin the two halves that must hold simultaneously: a
+// shutdown cuts a SLOW ladder short without concluding anything, and a shutdown
+// does NOT cut short the FAST ladder that actually diagnoses a corrupt index.
+
+// Not parallel: gitShimSlowUnmergedProbe edits the process-wide PATH.
+func TestReprobeIndexConflicts_ShutdownStopsASlowLadder(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index states")
+	}
+	repo := newProbeTestRepo(t, "notes.txt")
+	counter := gitShimSlowUnmergedProbe(t, 2)
+
+	// Already canceled: the daemon is going away, exactly the state in which
+	// the old ladder would still have spent its full retry sequence.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	_, err := reprobeIndexConflicts(ctx, repo)
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errProbeAbandoned,
+		"a ladder cut short proved nothing and must not be reported as a durable fault")
+	assert.ErrorIs(t, err, gitutil.ErrConflictProbeFailed,
+		"the last read's error stays in the chain so a log line still shows what failed")
+
+	attempts := probeCount(t, counter)
+	assert.Less(t, attempts, reprobeConfirmAttempts,
+		"shutdown must stop the ladder early; it ran all %d attempts", reprobeConfirmAttempts)
+	assert.Less(t, elapsed, reprobeConfirmAttempts*reprobeAttemptTimeout,
+		"the point of the drain is that the full per-attempt ladder is never paid during shutdown")
+}
+
+// The mirror image, and the invariant a drain must not break: a corrupt index
+// fails every read in microseconds, so the ladder finishes inside the drain and
+// the clone is still reported as durably broken on this very cycle — with
+// IssueTypeRepoIntegrity, not a confirm-gated merge conflict.
+func TestReprobeIndexConflicts_ShutdownStillConfirmsAFastLadder(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index states")
+	}
+	t.Parallel()
+	repo := newProbeTestRepo(t, "notes.txt")
+	corruptIndex(t, repo)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := reprobeIndexConflicts(ctx, repo)
+
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, errProbeAbandoned,
+		"three completed reads all failed — that IS the verdict, shutdown or not")
+	assert.ErrorIs(t, err, gitutil.ErrConflictProbeFailed)
+}
+
+// classifyAutostashFailure must read the abandoned verdict as "nothing proved",
+// not as the durable failure a completed ladder reports. Getting this wrong
+// would mint IssueTypeRepoIntegrity on every laptop-lid-close — #962's mistake
+// re-entered through the shutdown door.
+//
+// Not parallel: gitShimSlowUnmergedProbe edits the process-wide PATH.
+func TestClassifyAutostashFailure_AbandonedConfirmationProvesNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index states")
+	}
+	ambiguous := errors.New("cannot recover autostash while MERGE_HEAD is present or unreadable")
+
+	t.Run("before the pull it is a skip that does not claim a readable index", func(t *testing.T) {
+		repo := newProbeTestRepo(t, "notes.txt")
+		gitShimSlowUnmergedProbe(t, 2)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		var got ManagedRepoPullResult
+		classifyAutostashFailure(ctx, &got, ambiguous, false, repo, "ledger", discardLogger())
+
+		assert.True(t, got.Skipped, "a cycle that did nothing must never look like a sync")
+		assert.Equal(t, skipReasonUnconfirmedIndex, got.SkipReason)
+		assert.False(t, skipProvesIndexReadable(got.SkipReason),
+			"the read never finished, so it cannot retire a standing integrity issue")
+		assert.Nil(t, got.Issue, "an abandoned confirmation is not evidence of a broken clone")
+		assert.NoError(t, got.Err)
+	})
+
+	t.Run("after a failed pull the pull's own verdict stands", func(t *testing.T) {
+		repo := newProbeTestRepo(t, "notes.txt")
+		gitShimSlowUnmergedProbe(t, 2)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		got := ManagedRepoPullResult{
+			Err:   errors.New("pull failed"),
+			Issue: &DaemonIssue{Type: IssueTypeDiverged, Severity: SeverityError, Repo: "ledger"},
+		}
+		classifyAutostashFailure(ctx, &got, ambiguous, true, repo, "ledger", discardLogger())
+
+		assert.False(t, got.Skipped, "a failed pull must not be downgraded to a skip")
+		require.NotNil(t, got.Issue)
+		assert.Equal(t, IssueTypeDiverged, got.Issue.Type,
+			"an abandoned confirmation must not overwrite the pull's classification with RepoIntegrity")
+		assert.EqualError(t, got.Err, "pull failed")
+	})
+}
+
+// gitShimSlowUnmergedProbe makes every `--unmerged` read take seconds and then
+// fail, and passes everything else through. It stages the only shape that can
+// hold a shutdown: a read that is slow AND uninformative. Redirecting the sleep's
+// own descriptors matters — a grandchild holding the command's output pipes open
+// would make the read outlast its context deadline and blur what is being timed.
+//
+// Returns the path of its probe counter. Callers must NOT t.Parallel().
+func gitShimSlowUnmergedProbe(t *testing.T, sleepSeconds int) string {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "probe-count")
+	script := fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  [ "$arg" = "--unmerged" ] || continue
+  n=$(cat %[1]q 2>/dev/null || echo 0)
+  n=$((n + 1))
+  printf '%%s' "$n" > %[1]q
+  sleep %[2]d </dev/null >/dev/null 2>&1
+  echo "fatal: unable to read the index: Resource temporarily unavailable" >&2
+  exit 128
+done
+exec %[3]q "$@"
+`, counter, sleepSeconds, realGit)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return counter
+}
+
+// probeCount reads how many `--unmerged` reads a shim actually served.
+func probeCount(t *testing.T, counter string) int {
+	t.Helper()
+	raw, err := os.ReadFile(counter)
+	require.NoError(t, err, "the shim must have served at least one probe")
+	n, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	require.NoError(t, err)
+	return n
 }
