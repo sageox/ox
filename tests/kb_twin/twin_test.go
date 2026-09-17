@@ -69,10 +69,6 @@ func (f *fakeKBLister) ListBubbles(_ context.Context, _ api.KBScope) ([]api.KB, 
 	return out, nil
 }
 
-// twinTeamID is the primary project's team: the one scope the scheduler
-// lists and the scope every generated bubble row records.
-const twinTeamID = "team_twin"
-
 // scenarioEnv isolates XDG paths and endpoint for one scenario so
 // paths.KBDir resolves into a per-scenario tree. Returns the project
 // dir created for the "primary" project key; additional projects can
