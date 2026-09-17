@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-09-17
+
+Your team can publish a skill or a convention once and have it reach every teammate's AI coworker, reading a large Ledger no longer takes an hour or throws away its progress, and `brew install` finally gets you ox.
+
+### New
+
+- **Publish a skill or a convention once, for the whole team** — what your team publishes reaches every teammate's AI coworker, in every repo, whichever coding agent they use, and disappears everywhere when the team retires it. One design system can now hold across a desktop app, a mobile app, and a website without hand-copying the same conventions into three repos forever.
+- **Scope a team rule to the files it is about** — a team rule can now carry `globs:`, so one Go-idioms rule applies across every repo but only in sessions that touch `.go` files. The choice between spending context in every session and copying the rule into each repo, where the copies drift, is gone.
+- **`ox skills status` says why a team skill is not on your machine** — a checkout that never cloned, a skills folder that never materialized, a repo none of the rules target, and a team that published nothing all look identical from your repo: nothing there. Each line of the report now ends with the command that fixes it.
+- **Read a Ledger you have no checkout of** — `ox session list --repo repo_<uuid>` and `ox glance --repo repo_<uuid>` reach a hosted Ledger directly, so a hosted service or a scheduled job can read a team's history without cloning the source repository first.
+- **`ox attest publish` picks up where it left off** — a publication interrupted by a crash, an expired credential, or a lost acknowledgment resumes into the same package and run instead of starting over, and never re-uploads bytes that already landed.
+
+### Improved
+
+- **Reading a large Ledger is several times faster and no longer discards its progress** — content downloads in parallel with retries instead of one object at a time with none, an interrupted sync keeps everything it already fetched, and a resumed one asks only for what is still missing. `--timeout` now defaults to 30 minutes, a budget a background refresh can plan around.
+- **One unservable object no longer hides the rest of your Ledger** — sync used to stop at the first object the server would not serve, leaving thousands of healthy ones never attempted. It now fetches everything it can and names the objects it could not, and why, so a server-side data problem is distinguishable from a problem on your machine.
+
+### Fixed
+
+- **`brew install ox` installs ox** — the documented Homebrew command resolved to an unrelated text editor of the same name, so a new coworker following the README got someone else's program and `ox version` printed `0.7.7`. The command is `brew install sageox/tap/ox`, and the README, `make install`, `ox doctor`, and the setup hints all say so now.
+- **Commands run by an AI coworker, a script, or CI no longer quietly do nothing** — `ox logout`, `ox login`, and `ox uninstall` used to take the default when a confirmation prompt had nobody to answer it, so the logout never happened and uninstall left your cloud records behind. Each now either does the thing or says plainly why it did not, and `--yes` reaches every prompt.
+- **The PATH recovery instruction survives a directory with a space in it** — the fish version of the fix silently added two wrong directories instead, for exactly the user who needed it to work.
+- **Stopping the daemon no longer lets it start new work on the way out.**
+
 ## [0.15.0] - 2026-09-11
 
 ox stops leaving its own files in your pull requests, a first install gets to a working setup without a debugging session, and team-context sync recovers on its own after a network blip.
