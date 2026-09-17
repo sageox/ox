@@ -65,7 +65,12 @@ func convergeVerifiedImport(ctx context.Context, ledger, remote string, d import
 			allowed[path] = true
 		}
 	}
-	changed, err := gitutil.RunGit(ctx, ledger, "log", "--format=", "--name-only", remote+".."+local)
+	// A tree diff between the two endpoints is independent of commit
+	// topology: `git log --name-only` prints no file names for a merge
+	// commit (git omits merge diffs unless -m/--diff-merges/--first-parent),
+	// so a local merge that introduced paths outside allowed would pass this
+	// gate unnoticed.
+	changed, err := gitutil.RunGit(ctx, ledger, "diff", "--name-only", remote, local)
 	if err != nil {
 		return false, err
 	}

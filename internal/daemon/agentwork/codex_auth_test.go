@@ -1,3 +1,5 @@
+//go:build !windows
+
 package agentwork
 
 import (
@@ -7,6 +9,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+// This file writes an extensionless shell-script fixture named "codex" onto
+// PATH and expects checkCodexUsability's exec.LookPath("codex") to find it.
+// Windows resolves LookPath via PATHEXT extensions (.exe/.cmd/.bat/...), so
+// an extensionless "codex" is never found there and got.Installed would be
+// false — see .claude/rules/testing.md "Failure Paths That Render
+// Identically To Success" (the PATH-manipulation row) for why an honest
+// build-tag skip beats a fixture that can't actually exercise this platform.
 
 func TestCodexAuthenticationStreamsAndExitStatus(t *testing.T) {
 	for _, tc := range []struct {

@@ -5,13 +5,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
+
+// sourcePublicationFetchTimeout bounds the network fetch below. Every caller
+// passes context.Background() (no deadline of its own) from inside
+// WithRepoLock, so without an internal deadline here a stalled remote blocks
+// the repository lock indefinitely -- freezing unrelated commands like
+// `ox session abort`/`delete` for the whole Ledger. RunGit itself has no
+// timeout; it only honors whatever deadline ctx already carries.
+const sourcePublicationFetchTimeout = 60 * time.Second
 
 // CheckSourcePublication requires a refreshed remote ancestor before callers
 // reconcile source coverage under the repository lock. It never repairs or
 // rebases a dirty Ledger; the caller retains its local journal for a fresh scan.
 func CheckSourcePublication(ctx context.Context, repo string) error {
-	if _, err := RunGit(ctx, repo, "fetch", "--quiet", "origin"); err != nil {
+	fetchCtx, cancel := context.WithTimeout(ctx, sourcePublicationFetchTimeout)
+	defer cancel()
+	if _, err := RunGit(fetchCtx, repo, "fetch", "--quiet", "origin"); err != nil {
 		return fmt.Errorf("refresh source publication: %w", err)
 	}
 	if _, err := RunGit(ctx, repo, "merge-base", "--is-ancestor", "@{upstream}", "HEAD"); err != nil {

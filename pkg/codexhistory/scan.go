@@ -53,7 +53,10 @@ func Discover(home string) ([]string, error) {
 			if d.Type()&os.ModeSymlink != 0 {
 				return nil
 			}
-			if !d.IsDir() && strings.HasSuffix(d.Name(), ".jsonl") {
+			// Regular files only: a FIFO or device node with a .jsonl suffix
+			// would otherwise reach Stream/Inspect's os.Open, which can block
+			// indefinitely on a FIFO with no writer -- uncancelable via ctx.
+			if d.Type().IsRegular() && strings.HasSuffix(d.Name(), ".jsonl") {
 				paths = append(paths, p)
 			}
 			return nil

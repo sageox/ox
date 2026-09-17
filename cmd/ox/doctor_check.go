@@ -76,9 +76,15 @@ func runObservationalDoctor(cmd *cobra.Command) error {
 			}
 		}
 		// git status is observational with optional index refresh disabled.
-		git := exec.CommandContext(cmd.Context(), "git", "--no-optional-locks", "status", "--porcelain")
+		// Bounded like the Ledger status check below: cmd.Context() normally
+		// has no deadline, and a blocked fsmonitor hook or slow filesystem
+		// must not hang `ox doctor --check` indefinitely.
+		statusCtx, statusCancel := context.WithTimeout(cmd.Context(), 10*time.Second)
+		git := exec.CommandContext(statusCtx, "git", "--no-optional-locks", "status", "--porcelain")
 		git.Dir = root
-		if out, err := git.Output(); err != nil {
+		out, err := git.Output()
+		statusCancel()
+		if err != nil {
 			add("repository state", "failed", err.Error())
 		} else if strings.TrimSpace(string(out)) != "" {
 			add("repository state", "warning", "uncommitted changes present; no repairs performed")

@@ -302,15 +302,31 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 		if err != nil {
 			return err
 		}
+		// Resolve source registration BEFORE staging/committing, not after:
+		// this can fail (unresolved repo root, conflicting coverage), and
+		// failing it after CommitLedgerSnapshot would leave the session
+		// committed locally with no path to pushLedger below -- stuck
+		// unsynced until a manual retry. Mirrors the ordering in the
+		// daemon's equivalent (session_finalize.go's gitCommitAndPush).
+		var registerJob *sessionregistration.Job
 		if meta.Source != nil {
 			if err := gitutil.CheckSourcePublication(context.Background(), ledgerPath); err != nil {
 				return err
 			}
-			sourcePath, err := session.RecordSourceCoverage(ledgerPath, sessionName, meta.Files["raw.jsonl"].BareOID(), meta.Source)
+			raw, ok := meta.Files["raw.jsonl"]
+			if !ok || raw.BareOID() == "" {
+				return fmt.Errorf("source publication requires raw.jsonl")
+			}
+			root := findGitRoot()
+			if root == "" {
+				return fmt.Errorf("cannot resolve repository endpoint for session registration")
+			}
+			sourcePath, err := session.RecordSourceCoverage(ledgerPath, sessionName, raw.BareOID(), meta.Source)
 			if err != nil {
 				return err
 			}
 			files = append(files, filepath.Join(ledgerPath, sourcePath))
+			registerJob = &sessionregistration.Job{Endpoint: endpoint.GetForProject(root), RepoID: meta.RepoID, SessionName: sessionName, SourceDigest: meta.Source.SnapshotDigest}
 		}
 		var scope []string
 		for _, file := range files {
@@ -330,12 +346,8 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 		if err != nil {
 			return err
 		}
-		if meta.Source != nil {
-			root := findGitRoot()
-			if root == "" {
-				return fmt.Errorf("cannot resolve repository endpoint for session registration")
-			}
-			return sessionregistration.Enqueue(ledgerPath, sessionregistration.Job{Endpoint: endpoint.GetForProject(root), RepoID: meta.RepoID, SessionName: sessionName, SourceDigest: meta.Source.SnapshotDigest})
+		if registerJob != nil {
+			return sessionregistration.Enqueue(ledgerPath, *registerJob)
 		}
 		return nil
 	})

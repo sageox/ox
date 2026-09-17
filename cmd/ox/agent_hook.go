@@ -655,14 +655,26 @@ func handleAfterTool(ctx *HookContext) error {
 	// Serialize the read cursor and append transaction with the watcher and
 	// recovery. Reload after locking so concurrent hooks cannot replay a batch.
 	return fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
-		return captureHookEntries(ctx, agentID)
+		return captureHookEntries(ctx, agentID, state.SessionPath)
 	})
 }
 
-func captureHookEntries(ctx *HookContext, agentID string) error {
+// captureHookEntries drains new entries under the raw.jsonl lock acquired by
+// the caller for expectedSessionPath. It reloads recording state itself, but
+// a stop/start cycle for this agent can swap in a new SessionPath between the
+// caller's read and this reload (StartRecording can immediately mint a fresh
+// session after a stale, incomplete stop). If that happens, the lock we're
+// holding is for the wrong raw.jsonl -- writing here would race whatever
+// legitimately holds the new session's lock. Skip this invocation instead;
+// the next hook call reloads state and locks the current session correctly.
+func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath string) error {
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil || state.StoppedAt != nil {
 		return err
+	}
+	if state.SessionPath != expectedSessionPath {
+		slog.Debug("hook: afterTool session path changed since lock acquired, skipping", "agentID", agentID, "locked", expectedSessionPath, "current", state.SessionPath)
+		return nil
 	}
 	if err := session.RecoverRawAppend(filepath.Join(state.SessionPath, "raw.jsonl"), state.SourceOffset); err != nil {
 		return err

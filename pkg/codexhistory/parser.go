@@ -204,7 +204,7 @@ func IsToolError(output string) bool {
 	}
 	for _, line := range strings.Split(output, "\n") {
 		if code, ok := strings.CutPrefix(line, "Process exited with code "); ok {
-			return code != "0"
+			return strings.TrimSpace(code) != "0"
 		}
 	}
 	return false

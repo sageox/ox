@@ -1879,10 +1879,14 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		}
 		scope := []string{relDir + "/"}
 		meta, err := lfs.ReadSessionMeta(payload.SessionDir)
-		if err != nil {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		if meta.Source != nil {
+		// A missing meta.json here means writeMetaAndUploadLFS's best-effort
+		// write failed (see its doc comment) — the raw-content commit
+		// fallback must still proceed with the pointer files and source
+		// registration skipped, not abort the whole finalize.
+		if meta != nil && meta.Source != nil {
 			if err := gitutil.CheckSourcePublication(context.Background(), ledgerPath); err != nil {
 				return err
 			}
@@ -1943,11 +1947,11 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	}
 	if !h.skipLFS {
 		meta, err := lfs.ReadSessionMeta(payload.SessionDir)
-		if err != nil {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			h.logger.Warn("publication metadata unreadable", "err", err)
 			return false
 		}
-		if meta.Source != nil {
+		if meta != nil && meta.Source != nil {
 			client, err := lfs.NewClientFromLedger(ledgerPath, ep)
 			if err == nil {
 				err = sessionpublication.Verify(context.Background(), ledgerPath, sessionName, meta, client)
@@ -2437,12 +2441,14 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		}
 		filtered = append(filtered, e)
 	}
-	if err := session.SaveCaptureSource(&state); err != nil {
-		return false, err
-	}
 	entries := session.ConvertRawEntries(filtered)
 	ranges := session.BuildSegmentRanges(state.Lifecycle)
 	if len(entries) == 0 && len(ranges) == 0 {
+		// No transcript replacement happens on this branch, so the capture
+		// receipt is accurate against the raw.jsonl already on disk.
+		if err := session.SaveCaptureSource(&state); err != nil {
+			return false, err
+		}
 		return len(captured) > 0, nil
 	}
 
@@ -2515,6 +2521,14 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	}
 	if err := os.Rename(tmpPath, rawPath); err != nil {
 		return false, fmt.Errorf("replace recovered session: %w", err)
+	}
+	// Save the capture receipt only now that raw.jsonl actually contains the
+	// ranges it claims. Saving earlier (before the marker check and rename)
+	// let a receipt survive a failed replacement while raw.jsonl kept its old
+	// prefix, so downstream publication coverage could be claimed for
+	// content the transcript never received.
+	if err := session.SaveCaptureSource(&state); err != nil {
+		return false, err
 	}
 	logger.Info("recovered native session", "session_dir", sessionDir, "entries", written, "source", state.SessionFile)
 	return written > 0, nil
