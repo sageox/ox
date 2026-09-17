@@ -2,11 +2,13 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/stretchr/testify/require"
 )
 
@@ -159,4 +161,69 @@ func stageStatusTeam(t *testing.T, repo, teamPath string) {
 			TeamID: "team_status", TeamName: "Status Team", Slug: "status-team", Path: teamPath,
 		}},
 	}))
+}
+
+// TestCollectSkillsStatus_UnreadableLockfileDoesNotRecommendInit: InstalledSource
+// reports selected=false for a corrupt lockfile as well as for a missing one, so
+// the naive check told someone whose lockfile is unreadable to run `ox init` on a
+// repository that is already initialized — the one action that cannot help.
+func TestCollectSkillsStatus_UnreadableLockfileDoesNotRecommendInit(t *testing.T) {
+	repo := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(skillmanager.LockPath(repo), []byte("{ truncated"), 0o644))
+
+	out := collectSkillsStatus(repo)
+	problems := strings.Join(out.Problems, "\n")
+
+	require.Contains(t, problems, "could not read this repository's skill lockfile")
+	require.NotContains(t, problems, "run `ox init`",
+		"a corrupt lockfile was diagnosed as a repository that was never initialized")
+}
+
+// TestCollectSkillsStatus_EmptyPublishedSetIsAnAnswer: a successful, empty read
+// is a real finding and needs its own next action. Falling through to "Team
+// skills are current" tells the person asking "why isn't my skill here?" that
+// everything is fine — true, useless, and indistinguishable from the skill
+// having been filtered out by repos:.
+func TestCollectSkillsStatus_EmptyPublishedSetIsAnAnswer(t *testing.T) {
+	repo := t.TempDir()
+	teamPath := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(teamPath, "agents", "skills"), 0o755))
+	stageStatusTeam(t, repo, teamPath)
+	stageSelectedTarget(t, repo)
+	stageOriginRemote(t, repo, "https://github.com/acme/api.git")
+
+	out := collectSkillsStatus(repo)
+
+	require.Empty(t, out.TeamSkills)
+	require.Empty(t, out.Problems, "the fixture is healthy; a problem here would mask the guidance under test")
+	require.True(t, out.TeamContext.SkillsMaterialized)
+	require.Contains(t, out.Guidance, "has not published any skills",
+		"an empty-but-healthy team read fell through to generic success guidance: %q", out.Guidance)
+}
+
+// stageSelectedTarget writes a committed skill lockfile so the repo reads as
+// initialized. Without it InstalledSource reports selected=false and the
+// `ox init` problem correctly takes precedence over anything team-related.
+func stageSelectedTarget(t *testing.T, repo string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".sageox"), 0o755))
+	lock := `{"schema_version":2,` +
+		`"desired":{"bundles":["core"],"targets":["claude-project"]},` +
+		`"targets":[{"key":"claude-project","root":".claude/skills",` +
+		`"format":"agent-skills/v1","scope":"project","link_policy":"reject"}]}`
+	require.NoError(t, os.WriteFile(skillmanager.LockPath(repo), []byte(lock), 0o644))
+}
+
+// stageOriginRemote gives the fixture a recognized remote so the slug does not
+// fall back to the directory name — which is itself a reported problem and would
+// otherwise mask whatever guidance a test is exercising.
+func stageOriginRemote(t *testing.T, repo, url string) {
+	t.Helper()
+	for _, args := range [][]string{{"init", "-q"}, {"remote", "add", "origin", url}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo // never the developer's own repo
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
 }

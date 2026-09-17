@@ -148,7 +148,12 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 		out.Problems = append(out.Problems,
 			fmt.Sprintf("ox could not read this repository's skill lockfile, so what is installed here is unknown: %v", desiredErr))
 	}
-	if !selected {
+
+	// Only when the lockfile READ succeeded. InstalledSource also reports
+	// selected=false for an unreadable or malformed lockfile, so firing this
+	// unconditionally told someone with a corrupt lockfile to run `ox init` on a
+	// repository that is already initialized — the one action that cannot help.
+	if !selected && desiredErr == nil {
 		out.Problems = append(out.Problems, "this repository has not selected an AI coworker, so no skills are installed — run `ox init`")
 	}
 	// A slug that fell back to the directory name matches no `repos:` filter, so
@@ -276,6 +281,16 @@ func skillsStatusGuidance(out skillsStatusOutput) string {
 		if s.State == skillPending || s.State == skillUnavailable || s.State == "unknown" {
 			return fmt.Sprintf("team skill %q is %s: %s", s.Name, s.State, s.Detail)
 		}
+	}
+	// A successful, empty read is a real answer and needs its own next action.
+	// Falling through to "current" told the person asking "why isn't my skill
+	// here?" that everything was fine, which is true and useless — and made
+	// "nobody published one" indistinguishable from "it was filtered out."
+	if out.TeamContext != nil && out.TeamContext.SkillsMaterialized && len(out.TeamSkills) == 0 {
+		return "Your team has not published any skills yet. Add one under agents/skills/<name>/SKILL.md in the Team Context."
+	}
+	if out.TeamContext == nil {
+		return "This project has no Team Context, so there are no team skills to install."
 	}
 	return "Team skills are current. Nothing to do."
 }
