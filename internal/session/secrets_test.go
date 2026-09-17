@@ -1572,3 +1572,18 @@ func BenchmarkContainsSecrets(b *testing.B) {
 		r.ContainsSecrets(input)
 	}
 }
+
+// The pre-push secret gate scans whole raw.jsonl lines, and a single tool-output
+// line runs to megabytes. This is the size class that decides how long
+// `ox session stop` blocks, so measure it at that scale rather than at the
+// sentence scale the benchmarks above use.
+func BenchmarkScanForSecrets_MegabyteLine(b *testing.B) {
+	r := NewRedactor()
+	input := strings.Repeat("x", 1024*1024)
+
+	b.SetBytes(int64(len(input)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		r.ScanForSecrets(input)
+	}
+}
