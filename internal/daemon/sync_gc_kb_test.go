@@ -151,6 +151,63 @@ func TestKBGC_Triage_TrashItselfNotTriaged(t *testing.T) {
 	}
 }
 
+// TestKBGC_Triage_JudgesOnlyThisProjectsScopes runs one triage pass over a kb
+// root holding a checkout for each meta.json state, none of them in the kb
+// list, and checks which ones move to .trash/. The scheduler's project is
+// bound to kbTestTeamID.
+//
+// Failure prevented: every project on an endpoint shares the kb root, so GC in
+// a project bound to one team moved another team's bubbles into .trash/ —
+// deleting them after the grace period — because that project's scoped kb
+// list never includes them.
+func TestKBGC_Triage_JudgesOnlyThisProjectsScopes(t *testing.T) {
+	kbGCEnv(t)
+	s, _ := kbTestScheduler(t)
+
+	scoped := func(scopeType, scopeID string) func(dir string) error {
+		return func(dir string) error {
+			return writeKBMeta(dir, api.KB{ScopeType: scopeType, ScopeID: scopeID})
+		}
+	}
+	raw := func(body string) func(dir string) error {
+		return func(dir string) error {
+			if err := os.MkdirAll(filepath.Join(dir, ".sageox"), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(dir, ".sageox", "meta.json"), []byte(body), 0o644)
+		}
+	}
+	tests := []struct {
+		kbID      string
+		writeMeta func(dir string) error // nil: no meta.json
+		moved     bool
+	}{
+		{"kb_own_team_revoked", scoped(api.KBScopeTypeTeam, kbTestTeamID), true},
+		{"kb_other_team", scoped(api.KBScopeTypeTeam, "team_other"), false},
+		{"kb_personal_same_id", scoped(api.KBScopeTypeUser, kbTestTeamID), false},
+		{"kb_no_scope_recorded", raw(`{"type":"team","slug":"old","last_sync":"2026-07-01T00:00:00Z"}`), false},
+		{"kb_unparseable_meta", raw(`{not json`), false},
+		{"kb_never_synced", nil, true},
+	}
+	for _, tc := range tests {
+		dir := makeKBDir(t, tc.kbID, tc.kbID)
+		if tc.writeMeta != nil {
+			require.NoError(t, tc.writeMeta(dir))
+		}
+	}
+
+	s.runKBGC(context.Background(), stubListFn())
+
+	for _, tc := range tests {
+		dir := paths.KBDir(endpoint.Get(), tc.kbID)
+		if tc.moved {
+			assert.NoDirExists(t, dir, "%s: this project's orphan must move to .trash/", tc.kbID)
+		} else {
+			assert.DirExists(t, dir, "%s: a bubble this project cannot judge must stay", tc.kbID)
+		}
+	}
+}
+
 // --- Reaper ---
 
 // TestKBGC_Reap_ExpiredEntryRemoved verifies that a .trash entry older

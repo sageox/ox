@@ -2,9 +2,10 @@ package main
 
 // Knowledge-bubble doctor checks. Three independent checks per the kb plan:
 //
-//  1. Orphan kb dirs   — local <kbRoot>/<kb_id>/ exists but the API list
-//                        doesn't include it. AutoFix (FixLevelAuto) triggers
-//                        the daemon's kb-GC pass which moves orphans to .trash/.
+//  1. Orphan kb dirs   — local <kbRoot>/<kb_id>/ from this project's kb scopes
+//                        exists but the API list doesn't include it. AutoFix
+//                        (FixLevelAuto) triggers the daemon's kb-GC pass which
+//                        moves orphans to .trash/.
 //
 //  2. Failed-provision  — API row reports lifecycle_state="provision-failed".
 //                        Server-side issue, no client autofix; FixLevelCheckOnly
@@ -317,8 +318,8 @@ func readKBMeta(kbDir string) (kbMetaOnDisk, error) {
 // ----------------------------------------------------------------------
 
 // checkKBOrphans walks the kb root, fetches the API list, and reports any
-// local kb_id that the API no longer recognizes. AutoFix triggers the
-// daemon's kb-GC triage pass.
+// local bubble from this project's kb scopes that the API no longer lists.
+// AutoFix triggers the daemon's kb-GC triage pass.
 //
 // Skips entirely when the kb API is unavailable: we can't reason about
 // orphans without the source of truth. Skips when the kb root doesn't exist
@@ -363,9 +364,13 @@ func checkKBOrphans(fix bool) checkResult {
 		}
 	}
 
+	// The list covers only this project's scopes, so a bubble recorded under
+	// another scope is not this project's orphan. The daemon's triage applies
+	// the same rule and would leave it in place.
+	scopes := ambientKBScopes(findGitRoot())
 	var orphans []string
 	for _, id := range localIDs {
-		if _, ok := known[id]; !ok {
+		if _, ok := known[id]; !ok && daemon.KBListCovers(filepath.Join(root, id), scopes) {
 			orphans = append(orphans, id)
 		}
 	}

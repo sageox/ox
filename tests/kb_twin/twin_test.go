@@ -69,6 +69,10 @@ func (f *fakeKBLister) ListBubbles(_ context.Context, _ api.KBScope) ([]api.KB, 
 	return out, nil
 }
 
+// twinTeamID is the primary project's team: the one scope the scheduler
+// lists and the scope every generated bubble row records.
+const twinTeamID = "team_twin"
+
 // scenarioEnv isolates XDG paths and endpoint for one scenario so
 // paths.KBDir resolves into a per-scenario tree. Returns the project
 // dir created for the "primary" project key; additional projects can
@@ -99,7 +103,7 @@ func scenarioEnv(t *testing.T, scenarioName, endpoint string) string {
 	// non-empty ambient scope set. Endpoint inside is overridden by the
 	// env var above.
 	configJSON := fmt.Sprintf(`{"endpoint":%q,"repo_id":%q,"team_id":%q}`,
-		endpoint, "repo_primary", "team_twin")
+		endpoint, "repo_primary", twinTeamID)
 	mustWrite(t, filepath.Join(projectDir, ".sageox", "config.json"), configJSON)
 	mustWrite(t, filepath.Join(projectDir, ".sageox", "config.local.toml"), "")
 	return projectDir
@@ -467,7 +471,9 @@ func TestKBTwin_MetaJSONShape(t *testing.T) {
 	if err := json.Unmarshal(raw, &generic); err != nil {
 		t.Fatalf("parse meta: %v\nraw=%s", err, string(raw))
 	}
-	for _, key := range []string{"type", "slug", "owner_user_id", "viewer_role", "last_sync"} {
+	// scope_type and scope_id decide which project's GC and doctor may treat
+	// the bubble as an orphan (daemon.KBListCovers).
+	for _, key := range []string{"type", "slug", "owner_user_id", "viewer_role", "last_sync", "scope_type", "scope_id"} {
 		if _, ok := generic[key]; !ok {
 			t.Errorf("meta.json missing required key %q (raw=%s)", key, string(raw))
 		}

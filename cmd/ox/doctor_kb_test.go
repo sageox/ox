@@ -9,14 +9,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/daemon/testutil"
 	"github.com/sageox/ox/internal/endpoint"
@@ -115,35 +118,46 @@ func TestCheckKBOrphans_AutoFixTriggersGCAndRechecksClean(t *testing.T) {
 	assert.NoDirExists(t, orphan, "orphan dir must be moved aside")
 }
 
-// TestCheckKBOrphans_AutoFixClearsOrphanThroughDaemon runs the orphan autofix
-// with the production GC and root hooks, over a real socket, into a real
-// SyncScheduler kb GC pass. Only the kb API is faked, on both sides.
+// TestCheckKBOrphans_AutoFixThroughDaemon_MovesOnlyThisProjectsOrphans runs the
+// orphan autofix from a git project bound to one team, with the production GC
+// and root hooks, over a real socket, into a real SyncScheduler kb GC pass for
+// the same project. Only the kb API is faked. The kb root also holds another
+// team's bubble, as it does for anyone on two teams.
 //
-// Failure prevented: the autofix sent trigger_gc, which recloned every team
-// context and the ledger instead of running kb GC. With 8 team contexts it
-// timed out at 30s, and the orphan stayed in place either way. kb-orphans is
-// FixLevelAuto, so that happened on every plain `ox doctor`.
-func TestCheckKBOrphans_AutoFixClearsOrphanThroughDaemon(t *testing.T) {
+// Failures prevented:
+//   - the autofix sent trigger_gc, which recloned every team context and the
+//     ledger instead of running kb GC. With 8 team contexts it timed out at
+//     30s, and the orphan stayed in place either way. kb-orphans is
+//     FixLevelAuto, so that happened on every plain `ox doctor`.
+//   - the autofix moving another team's bubble into .trash/, because this
+//     project's scoped kb list never includes it.
+func TestCheckKBOrphans_AutoFixThroughDaemon_MovesOnlyThisProjectsOrphans(t *testing.T) {
 	t.Setenv("OX_XDG_DISABLE", "") // legacy mode would ignore the XDG dirs below
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("SAGEOX_ENDPOINT", "https://staging.sageox.ai")
-	kbRoot := paths.KBDir(endpoint.Get(), "")
-	orphan := seedKBDir(t, kbRoot, "kb_orphan", nil)
-	kept := seedKBDir(t, kbRoot, "kb_kept", nil)
+	ep := endpoint.Get()
+
+	// Doctor and the scheduler both derive the kb scopes they judge from this
+	// project's team binding.
+	project := t.TempDir()
+	require.NoError(t, exec.Command("git", "init", "-q", project).Run())
+	require.NoError(t, config.SaveProjectConfig(project, &config.ProjectConfig{Endpoint: ep, TeamID: "team_kbgc"}))
+	require.NoError(t, os.MkdirAll(config.DefaultTeamContextPath("team_kbgc", ep), 0o755))
+	t.Chdir(project)
+
+	kbRoot := paths.KBDir(ep, "")
+	orphan := seedScopedKBDir(t, kbRoot, "kb_orphan", "team_kbgc")
+	kept := seedScopedKBDir(t, kbRoot, "kb_kept", "team_kbgc")
+	otherTeam := seedScopedKBDir(t, kbRoot, "kb_other_team", "team_other")
 
 	lister := &compatFakeKBSource{listFn: func() ([]api.KB, error) {
-		return []api.KB{{KBID: "kb_kept"}}, nil
+		return []api.KB{{KBID: "kb_kept", ScopeType: api.KBScopeTypeTeam, ScopeID: "team_kbgc"}}, nil
 	}}
 	SetKBDoctorHooks(kbDoctorHooks{
 		List: func(ctx context.Context) ([]api.KB, error) { return lister.ListBubbles(ctx, api.KBScope{}) },
 	})
 	t.Cleanup(func() { SetKBDoctorHooks(kbDoctorHooks{}) })
 
-	// the scheduler lists bubbles for its project's team
-	project := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(project, ".sageox"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.json"),
-		[]byte(`{"endpoint":"https://staging.sageox.ai","team_id":"team_kbgc"}`), 0o644))
 	cfg := daemon.DefaultConfig()
 	cfg.ProjectRoot = project
 	scheduler := daemon.NewSyncScheduler(cfg, slog.New(slog.DiscardHandler))
@@ -179,10 +193,22 @@ func TestCheckKBOrphans_AutoFixClearsOrphanThroughDaemon(t *testing.T) {
 	result := checkKBOrphans(true)
 
 	assert.True(t, result.passed && !result.warning, "autofix must clear the orphan; got %+v", result)
+	assert.Equal(t, "triaged 1 orphan(s) to .trash/", result.message, "only this project's orphan may be reported")
 	assert.NoDirExists(t, orphan, "the orphan must leave the kb root")
 	assert.DirExists(t, filepath.Join(kbRoot, ".trash"), "the orphan must be moved to .trash/, not deleted")
 	assert.DirExists(t, kept, "a bubble the kb API still lists must stay")
+	assert.DirExists(t, otherTeam, "another team's bubble must stay")
 	assert.Zero(t, reclones.Load(), "the autofix must not start trigger_gc's reclone sweep")
+}
+
+// seedScopedKBDir creates <root>/<kbID>/ with the team scope the daemon
+// records in .sageox/meta.json for a synced bubble.
+func seedScopedKBDir(t *testing.T, root, kbID, teamID string) string {
+	t.Helper()
+	dir := seedKBDir(t, root, kbID, nil)
+	meta := fmt.Sprintf(`{"scope_type":%q,"scope_id":%q}`, api.KBScopeTypeTeam, teamID)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".sageox", "meta.json"), []byte(meta), 0o644))
+	return dir
 }
 
 // TestCheckKBOrphans_AutoFixFailureDetail pins the detail line of a failed

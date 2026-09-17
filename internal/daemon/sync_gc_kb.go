@@ -20,6 +20,10 @@ package daemon
 //     source of truth is unreachable and we refuse to delete on guesses.
 //   - Triage never `rm -rf`s a kb dir — orphans always go through .trash
 //     first with a 7-day grace period.
+//   - Triage judges only checkouts this project's kb list covers
+//     (KBListCovers). Every project on the endpoint shares the kb root, but the
+//     list covers one project's scopes, so another team's bubble is missing
+//     from it without being revoked.
 //   - The reaper only deletes when it can parse a valid timestamp from
 //     the trash dir name. Bad names are logged and left alone (forever
 //     if necessary — fail-safe over fail-clean).
@@ -170,6 +174,9 @@ func (s *SyncScheduler) kbGCTriage(ctx context.Context, kbRoot, trashDir string,
 			want[id] = struct{}{}
 		}
 	}
+	// The scopes buildKBGCListFn lists; want says nothing about bubbles
+	// recorded under any other scope.
+	scopes := kb.AmbientScopes(s.projectTeamIDForKB())
 
 	entries, err := os.ReadDir(kbRoot)
 	if err != nil {
@@ -187,6 +194,10 @@ func (s *SyncScheduler) kbGCTriage(ctx context.Context, kbRoot, trashDir string,
 		}
 		if _, ok := want[name]; ok {
 			continue // still authorized — leave alone
+		}
+		if !KBListCovers(filepath.Join(kbRoot, name), scopes) {
+			s.logger.Debug("kb_gc triage skip: bubble outside this project's kb scopes", "kb_id", name)
+			continue
 		}
 		// Clone-in-flight guard (in-process, cheap): if cloneBubble is
 		// mid-flight for this kb_id in this daemon, the target dir may
@@ -244,6 +255,36 @@ func (s *SyncScheduler) kbGCTriage(ctx context.Context, kbRoot, trashDir string,
 	if moved > 0 {
 		s.logger.Info("kb_gc triage complete", "moved", moved, "kept", len(entries)-moved)
 	}
+}
+
+// KBListCovers reports whether a kb list fetched for scopes speaks for the
+// bubble checkout at kbDir, so that the checkout's absence from that list
+// makes it an orphan. Every project on an endpoint shares the kb root, but the
+// list API answers one scope per call (ADR-073), so a project bound to one team
+// never lists another team's bubbles.
+//
+// The answer comes from the scope writeKBMeta records in .sageox/meta.json.
+// An orphan goes to .trash/ and is deleted after kbTrashGracePeriod, so each
+// case takes the direction that is harmless when wrong:
+//   - no meta.json: covered. writeKBMeta runs at the end of every successful
+//     reconcile, so the checkout never finished syncing.
+//   - meta.json unreadable, or recording no scope (checkouts last synced
+//     before ox recorded scopes): not covered. Nothing says whose bubble it is.
+//   - a recorded scope: covered only when it is one of scopes.
+func KBListCovers(kbDir string, scopes []api.KBScope) bool {
+	meta, err := readKBMeta(kbDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err != nil || meta.ScopeType == "" || meta.ScopeID == "" {
+		return false
+	}
+	for _, scope := range scopes {
+		if scope.Type == meta.ScopeType && scope.ID == meta.ScopeID {
+			return true
+		}
+	}
+	return false
 }
 
 // kbGCReap is phase 2: walk <trashDir>/, parse each entry's timestamp

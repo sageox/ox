@@ -169,6 +169,10 @@ func resolveRepoURLs(d *scenarioRepoDir, bubbles []BubbleSpec) ([]api.KB, error)
 			OwnerUserID: b.OwnerUserID,
 			ViewerRole:  b.ViewerRole,
 			RepoID:      b.RepoID,
+			// The scoped list API returns the scope it was asked for on
+			// every row; the scheduler lists the primary project's team.
+			ScopeType: api.KBScopeTypeTeam,
+			ScopeID:   twinTeamID,
 		}
 		switch {
 		case b.BadRepoURL:
