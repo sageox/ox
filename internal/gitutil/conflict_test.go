@@ -581,6 +581,22 @@ func TestAutostashRecoveryMergesBookkeepingCounters(t *testing.T) {
 			wantLiteral: `"summary_attempts": 4`,
 		},
 		{
+			// The accepted undercount, pinned as understood behavior rather
+			// than left to be rediscovered. Divergent clones make DISTINCT
+			// attempts, so base 1 + one bump upstream + two bumps locally is
+			// four attempts and max records three. sum (5) or the three-way
+			// delta ours+theirs-base (4) would each fail here — which is the
+			// point: swapping the rule is a policy change with a cost
+			// (overcounting flips a live session to "unrecoverable" early),
+			// not a bug fix. See sessionMetaBookkeepingMerges.
+			name:        "divergent clones undercount: max is a lower bound, not the total",
+			base:        `{"title":"Ready","summary_attempts":1}`,
+			upstream:    `{"title":"Ready","summary_attempts":2}`,
+			local:       `{"title":"Ready","summary_attempts":3}`,
+			wantMerged:  `{"title":"Ready","summary_attempts":3}`,
+			wantLiteral: `"summary_attempts": 3`,
+		},
+		{
 			name:        "identical counters still merge the surrounding union",
 			base:        `{"title":"","summary_attempts":0}`,
 			upstream:    `{"title":"Ready","summary_attempts":2,"cloud_only":true}`,
@@ -607,10 +623,11 @@ func TestAutostashRecoveryMergesBookkeepingCounters(t *testing.T) {
 			//
 			// What prevents that is not the counter rule but the fact that
 			// every resetting writer also writes summary_status, which has no
-			// merge rule and refuses the whole path first. If a future writer
-			// ever touches summary_attempts alone, this case keeps passing
-			// while the rule silently becomes unsound — so it is the canary for
-			// that change, not a guarantee against it.
+			// merge rule and refuses the whole path first. Writers that BUMP
+			// the counter alone already exist and are fine; a writer that
+			// RESETS it alone would leave this case passing while the rule
+			// silently becomes unsound — so it is the canary for that change,
+			// not a guarantee against it.
 			name:     "a counter RESET paired with its status write still refuses",
 			base:     `{"summary_status":"pending","summary_attempts":0}`,
 			upstream: `{"summary_status":"unrecoverable","summary_attempts":3}`,

@@ -451,27 +451,50 @@ var sessionMetaBookkeepingMerges = map[string]func(ours, theirs any) (any, bool)
 	// (#956) — and, before this rule, the one class auto-resolve refused,
 	// wedging the index until a human ran git by hand in the ledger clone.
 	//
-	// The counter is monotonic only WITHIN a failure episode. It is NOT
-	// globally monotonic: three writers reset it to 0 —
-	// agentwork/session_finalize.go (every successful summarization),
-	// lfs/meta_repair.go RecoverEmptyTitleMeta (title recovered) and
-	// ResetInlineSummaryEligible (re-arming retries after a fix). Across a
-	// reset, max is WRONG: the lower side is the LATER observation, and taking
-	// the higher resurrects a stale count that re-trips MaxSummaryAttempts a
-	// try early.
+	// max is a safe LOWER BOUND on the attempts made, not their true total.
+	// Every ledger clone runs autofix over the whole sessions/ tree
+	// (daemon checkSessionMetaTitles), so two clones retry the SAME session
+	// independently and their bumps are distinct attempts, not two views of
+	// one serialized counter: from a common base of 1, ours=2 with theirs=3
+	// is four attempts recorded as three.
 	//
-	// What actually makes max safe here is not monotonicity but the shape of
-	// those writers: every one of them writes summary_attempts atomically
+	// That undercount is chosen, not overlooked. It is bounded by the number
+	// of clones racing one session, it buys at most a few extra LLM calls
+	// before MaxSummaryAttempts bites, and checkSessionInlineSummaryRetry
+	// re-arms the cap daily regardless. The opposite error is far more
+	// expensive: a rule that can overshoot flips a still-summarizable session
+	// to "unrecoverable", which permanently demotes a teammate-visible title
+	// to the session-name slug. Spend tokens; do not discard summaries.
+	// TestAutostashRecoveryMergesBookkeepingCounters pins the undercount with
+	// "divergent clones undercount: max is a lower bound, not the total", so
+	// changing this rule is a deliberate policy change, not a bug fix.
+	//
+	// An exact rule does exist and is deliberately not used: stage 1 is the
+	// stash base, so ours+theirs-base would count both sides' bumps. It is
+	// exact only while stage 1 really is the common ancestor of both counters,
+	// and wherever that assumption slips the error flips to overcounting — the
+	// expensive direction above.
+	//
+	// Resets are a different hazard, and they are structurally out of reach
+	// twice over. summary_attempts is omitempty, so resetting it to 0 DELETES
+	// the key (meta_repair.go patches it exactly that way), and the deletion
+	// guard above refuses any base key missing from either side. Independently,
+	// all three resetting writers — session_finalize.go on a successful
+	// summarization, meta_repair.go RecoverEmptyTitleMeta on a recovered title,
+	// and ResetInlineSummaryEligible on a re-arm — write the counter atomically
 	// alongside summary_status and/or validation_error and/or title, none of
-	// which have a merge rule. The loop above refuses the whole path on the
-	// first uncovered differing key, so a reset can never reach this function
-	// with the counter differing in isolation.
-	// TestAutostashRecoveryMergesBookkeepingCounters pins this with the
-	// "a counter RESET paired with its status write still refuses" case.
+	// which have a merge rule, so the loop above refuses on that key first.
+	// Both guards matter, because across a reset max is actively WRONG: the
+	// lower side is the LATER observation, and taking the higher resurrects a
+	// stale count that re-trips MaxSummaryAttempts a try early. The test cases
+	// "deleted counter refuses before any merge rule applies" and "a counter
+	// RESET paired with its status write still refuses" pin one guard each.
 	//
-	// So: if you ever add a writer that touches summary_attempts ALONE, this
-	// rule becomes unsound. Give the counter a real reset-aware merge (or an
-	// episode id) before doing that.
+	// Writers that BUMP the counter alone already exist — RecoverEmptyTitleMeta
+	// below the cap, and `ox session repair-meta-summary` on a session already
+	// marked failed_validation — which is precisely why this merge is reachable
+	// at all. A writer that RESETS it alone would invalidate the analysis
+	// above; give the counter a reset-aware merge (or an episode id) first.
 	"summary_attempts": mergeMonotonicCounter,
 }
 
@@ -487,10 +510,13 @@ func mergeSessionMetaBookkeeping(key string, ours, theirs any) (any, bool) {
 	return merge(ours, theirs)
 }
 
-// mergeMonotonicCounter resolves two observations of a never-decreasing counter
-// to the larger. The winning side is returned as-is (a json.Number from the
-// stage that produced it) so the merged file re-encodes the original literal
-// rather than a value round-tripped through float64.
+// mergeMonotonicCounter resolves two sides of a counter that never decreases
+// within one failure episode to the larger. The two sides may be independent
+// counts rather than two readings of one count, so the result is a lower bound
+// on the total — see sessionMetaBookkeepingMerges for why that direction is the
+// one worth erring in. The winning side is returned as-is (a json.Number from
+// the stage that produced it) so the merged file re-encodes the original
+// literal rather than a value round-tripped through float64.
 //
 // Anything that is not a non-negative JSON integer — a float, a string, a null
 // from an older writer — is not a counter this rule understands. Refusing there
