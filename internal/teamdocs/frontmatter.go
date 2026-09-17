@@ -129,8 +129,8 @@ func extractValue(line, prefix string) string {
 // description that legitimately contains one.
 func stripYAMLComment(v string) string {
 	if len(v) > 0 && (v[0] == '"' || v[0] == '\'') {
-		if end := strings.IndexByte(v[1:], v[0]); end >= 0 {
-			return v[:end+2]
+		if end := closingQuote(v); end > 0 {
+			return v[:end+1]
 		}
 		return v // unterminated quote: leave it alone rather than guess
 	}
@@ -141,4 +141,30 @@ func stripYAMLComment(v string) string {
 		return "" // the whole value is a comment
 	}
 	return v
+}
+
+// closingQuote returns the index of the quote that ends the scalar opened at
+// v[0], or -1 when it is unterminated.
+//
+// Both escape forms have to be honored or the value is silently truncated at
+// its first inner quote: YAML doubles a single quote ('It”s') and backslash-
+// escapes a double quote ("say \"hi\""). Truncating there turns a description
+// into a fragment, and the reader has no way to tell it happened.
+func closingQuote(v string) int {
+	quote := v[0]
+	for i := 1; i < len(v); i++ {
+		switch {
+		case quote == '\'' && v[i] == '\'':
+			if i+1 < len(v) && v[i+1] == '\'' {
+				i++ // '' is one literal quote, not the end
+				continue
+			}
+			return i
+		case quote == '"' && v[i] == '\\':
+			i++ // skip whatever this escapes, including \"
+		case quote == '"' && v[i] == '"':
+			return i
+		}
+	}
+	return -1
 }

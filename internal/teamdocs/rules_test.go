@@ -407,6 +407,34 @@ func TestDiscoverRules_TrailingCommentsDoNotLeakIntoValues(t *testing.T) {
 	}
 }
 
+// TestStripYAMLComment_QuoteEscapes: both escape forms must survive, or a value
+// is silently truncated at its first inner quote and the reader cannot tell.
+func TestStripYAMLComment_QuoteEscapes(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{"plain double", `"hello"`, `"hello"`},
+		{"plain single", `'hello'`, `'hello'`},
+		{"double then comment", `"hello"   # note`, `"hello"`},
+		{"single then comment", `'hello'   # note`, `'hello'`},
+		// YAML doubles a single quote to escape it. Scanning for the first quote
+		// truncated 'It''s fine' to It, and apostrophes in descriptions are common.
+		{"doubled single quote", `'It''s fine'`, `'It''s fine'`},
+		{"doubled single quote then comment", `'It''s fine'  # yes`, `'It''s fine'`},
+		{"backslash-escaped double quote", `"say \"hi\" now"`, `"say \"hi\" now"`},
+		// A # inside quotes is literal YAML, not a comment.
+		{"hash inside quotes", `"Use #tags here"`, `"Use #tags here"`},
+		{"unterminated stays whole", `"no closing quote`, `"no closing quote`},
+		{"unquoted with comment", `bare value  # note`, `bare value`},
+		{"comment only", `# nothing`, ``},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripYAMLComment(tt.in); got != tt.want {
+				t.Errorf("stripYAMLComment(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func keysOf(m map[string]TeamRule) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
