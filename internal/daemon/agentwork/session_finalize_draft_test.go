@@ -57,13 +57,33 @@ func writeFinalizedSession(t *testing.T, sessionDir string) {
 	}))
 }
 
-// recordingMarkerWithPID writes a recording marker naming a specific owner PID,
-// backdated by age.
-//
-// The PID is the whole point of these fixtures: since #966 the draft guard
-// consults process liveness, so a draft + dead PID is RECLAIMED and a draft +
-// live PID is SKIPPED. A fixture that does not pin the PID deliberately is
-// asserting on whichever behavior it accidentally selected.
+// seedPublishedSessionID stamps a ses_ id onto an existing meta.json — the id a
+// /c/<id> link may already be pointing at from a PR body. Fixtures that assert
+// the id survives a reclaim MUST seed one first: writeFinalizedSession leaves
+// the field empty, and an assertion comparing "" to "" proves nothing.
+func seedPublishedSessionID(t *testing.T, sessionDir string) {
+	t.Helper()
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	require.NoError(t, err)
+	meta.SessionID = draftTestSessionID
+	require.NoError(t, lfs.WriteSessionMetaOnly(sessionDir, meta))
+}
+
+// writeHeaderOnlySession writes the routine placeholder shape: a raw.jsonl
+// holding only its metadata header, i.e. non-empty bytes but zero transcript
+// entries. Detection skips these as a matter of course, so they must not count
+// as stranded content.
+func writeHeaderOnlySession(t *testing.T, sessionDir string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"),
+		[]byte(`{"type":"header","metadata":{"version":"1.0","agent_id":"OxDraft"}}`+"\n"), 0644))
+	require.NoError(t, lfs.WriteSessionMetaOnly(sessionDir, &lfs.SessionMeta{
+		Version: "1.0", SessionName: filepath.Base(sessionDir),
+		AgentID: "OxDraft", AgentType: "claude-code", CreatedAt: time.Now().UTC(),
+	}))
+}
+
 // markDirAsDraft stamps draft:true onto an EXISTING meta.json, preserving
 // whatever else the directory holds.
 //
@@ -84,10 +104,25 @@ func markDirAsDraft(t *testing.T, sessionDir string) {
 	require.NoError(t, lfs.WriteSessionMetaOnly(sessionDir, meta))
 }
 
+// recordingMarkerWithPID writes a recording marker naming a specific owner PID,
+// backdated by age.
+//
+// The PID is the whole point of these fixtures: since #966 the draft guard
+// consults process liveness, so a draft + dead PID is RECLAIMED and a draft +
+// live PID is SKIPPED. A fixture that does not pin the PID deliberately is
+// asserting on whichever behavior it accidentally selected.
 func recordingMarkerWithPID(t *testing.T, sessionDir string, age time.Duration, pid int) {
 	t.Helper()
-	body := fmt.Sprintf(`{"agent_id":"OxDraft","started_at":%q,"parent_pid":%d}`,
-		time.Now().Add(-age).UTC().Format(time.RFC3339), pid)
+	writeRecordingMarker(t, sessionDir, age, fmt.Sprintf(
+		`{"agent_id":"OxDraft","started_at":%q,"parent_pid":%d}`,
+		time.Now().Add(-age).UTC().Format(time.RFC3339), pid))
+}
+
+// writeRecordingMarker drops body at .recording.json and backdates its mtime,
+// which is the age isStaleRecording falls back on when the marker carries no
+// usable started_at.
+func writeRecordingMarker(t *testing.T, sessionDir string, age time.Duration, body string) {
+	t.Helper()
 	path := filepath.Join(sessionDir, ".recording.json")
 	require.NoError(t, os.WriteFile(path, []byte(body), 0644))
 	old := time.Now().Add(-age)
@@ -104,6 +139,21 @@ func recordingMarkerWithPID(t *testing.T, sessionDir string, age time.Duration, 
 func staleRecordingMarker(t *testing.T, sessionDir string, age time.Duration) {
 	t.Helper()
 	recordingMarkerWithPID(t, sessionDir, age, 999999999)
+}
+
+// legacyRecordingMarker writes a marker with NO parent_pid — the rollout-compat
+// shape isStaleRecording explicitly still supports. With no PID in the marker
+// and no daemon pidLookup to fall back on there is nothing to ask about the
+// owner, so past 24h isStaleRecording reports stale via stalenessTimeThreshold.
+//
+// That verdict is AGE, not death: the owner may well be alive and still
+// writing. Fixtures built on it pin the rule that age alone never overrides a
+// draft's live claim.
+func legacyRecordingMarker(t *testing.T, sessionDir string, age time.Duration) {
+	t.Helper()
+	writeRecordingMarker(t, sessionDir, age, fmt.Sprintf(
+		`{"agent_id":"OxDraft","started_at":%q}`,
+		time.Now().Add(-age).UTC().Format(time.RFC3339)))
 }
 
 // liveRecordingMarker writes a marker whose owner process is THIS test binary,

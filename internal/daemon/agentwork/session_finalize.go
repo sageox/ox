@@ -434,12 +434,10 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		rawPath := filepath.Join(sessionDir, artifactRaw)
 
 		// Liveness probe FIRST, because the draft guard below depends on its
-		// verdict. .recording.json is the only definitive signal of whether the
-		// client process that owns this directory still exists, and
-		// isStaleRecording already turns it into exactly the answer we need:
-		// dead PID => abandoned immediately, live PID => never abandoned, no
-		// PID => the 24h time threshold. Probing it here costs one stat for
-		// sessions that have no marker.
+		// verdict. .recording.json is the only signal of whether the client
+		// process that owns this directory still exists, and isStaleRecording
+		// reports both a verdict and the EVIDENCE behind it. Probing it here
+		// costs one stat for sessions that have no marker.
 		recPath := filepath.Join(sessionDir, recordingMarker)
 		recInfo, recStatErr := os.Stat(recPath)
 		hasRecordingMarker := recStatErr == nil
@@ -451,10 +449,21 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		if hasRecordingMarker {
 			recStale, recAge, recMethod = isStaleRecording(recPath, recInfo, h.pidLookup, h.logger)
 		}
-		// PROVEN dead, not merely "not known to be alive". No marker at all
-		// yields false, so a session carrying no liveness evidence keeps the
-		// conservative treatment it has always had.
-		abandoned := hasRecordingMarker && recStale
+		// Keyed on the METHOD, not on recStale. recStale is ALSO true for
+		// stalenessTimeThreshold, which fires exactly when no PID could be
+		// obtained — unreadable or unparseable marker, or a legacy marker
+		// predating parent_pid with no daemon state to fall back on — and
+		// therefore means "nobody could be asked and 24h passed", never "the
+		// owner died". Sessions here routinely run longer than 24h, so
+		// accepting it would reclaim a LIVE draft: detect would clear
+		// .recording.json and queue the transcript as it stands, dropping every
+		// entry the owner writes afterward. Only stalenessPIDDead asked the
+		// kernel about a real PID and got an answer.
+		//
+		// The time threshold remains acceptable for the NON-draft recovery
+		// further below, where it has always been the fallback and no
+		// still-live claim is being overridden.
+		abandoned := hasRecordingMarker && recMethod == stalenessPIDDead
 
 		_, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir)
 
@@ -495,12 +504,13 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		// unconditionally made every such session permanently invisible to
 		// anti-entropy — two sessions holding 1151 and 628 entries sat
 		// unuploaded for 21h behind a healthy daemon (#966). The probe above is
-		// what separates the two cases, so only a draft we cannot PROVE is
-		// abandoned gets skipped here.
+		// what separates the two cases, so only a draft with a dead-PID verdict
+		// is reclaimed here.
 		//
-		// A draft with no recording marker stays skipped: absence of evidence
-		// is not proof of death, and that is precisely the shape of the
-		// ordinary git-tracked placeholder the CLI refreshes every turn.
+		// A draft with no recording marker — or one whose staleness rests on
+		// age alone — stays skipped: absence of evidence is not proof of death,
+		// and the no-marker shape is precisely the ordinary git-tracked
+		// placeholder the CLI refreshes every turn.
 		//
 		// Letting an abandoned draft through does not weaken the LFS-linkage
 		// guarantee above. Recovery into the git-tracked ledger path is blocked
@@ -512,7 +522,8 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 				skips.addUnprovenDraft(name)
 			}
 			h.logger.Debug("skipping draft placeholder with no proof of abandonment",
-				"session", name, "recording_marker", hasRecordingMarker)
+				"session", name, "recording_marker", hasRecordingMarker,
+				"detection_method", recMethod)
 			continue
 		}
 		if isDraft {
@@ -754,18 +765,20 @@ func (s *detectSkipStats) names() []string {
 
 func (s *detectSkipStats) total() int { return len(s.names()) }
 
-// hasSessionContent reports whether sessionDir holds real transcript bytes: a
-// raw.jsonl that exists, is non-empty, and is not an unhydrated LFS pointer.
+// hasSessionContent reports whether a skipped session is stranding real
+// transcript bytes, and therefore whether its skip is an anomaly worth a Warn.
 //
-// Deliberately cheaper than session.HasSubstantiveEntries — it runs for every
-// session the guards above skip, including the ordinary per-turn draft
-// placeholder, and only needs to answer "is there anything here to strand".
+// It must agree with the finalization floor used further up
+// (session.HasSubstantiveEntries), so it delegates rather than reimplementing:
+// a "non-empty file" test counts the header-only raw.jsonl that every ordinary
+// per-turn draft placeholder carries, and warning on those each detectCooldown
+// would bury the signal this counter exists to raise. Cost is bounded — the
+// classifier stops after the second line and never reads a whole transcript.
+//
+// Fails toward WARNING: a present-but-unreadable raw.jsonl classifies as
+// substantive, because "we could not look" must not read as "nothing is there".
 func hasSessionContent(rawPath string) bool {
-	info, err := os.Stat(rawPath)
-	if err != nil || info.Size() == 0 {
-		return false
-	}
-	return !lfs.IsPointerFile(rawPath)
+	return session.HasSubstantiveEntries(rawPath)
 }
 
 // DetectOrphanedForAgent scans for recordings belonging to a specific agent
@@ -2142,6 +2155,28 @@ func extractPayload(item *WorkItem) (*SessionFinalizePayload, error) {
 	return p, nil
 }
 
+// The `method` values isStaleRecording returns, naming the EVIDENCE behind its
+// verdict. Callers that only need "should this be finalized" read `stale`;
+// callers that need to know how strong the evidence is compare the method.
+//
+// Only stalenessPIDDead rests on an actual liveness check: a PID was available
+// and kill(pid, 0) refused it. That check reads ANY signal error as death,
+// which on Unix means ESRCH (gone) or EPERM — and EPERM can only arise here
+// from PID reuse by another user's process, in which case the original owner is
+// gone too.
+//
+// stalenessTimeThreshold is the opposite: it fires precisely when there was no
+// PID to ask (unreadable/unparseable marker, or a legacy marker predating
+// parent_pid with no daemon state to fall back on), so it means "nobody could
+// be asked, and it has been a long time" — never "the owner died".
+const (
+	stalenessPIDDead        = "pid_dead"
+	stalenessPIDDeadGrace   = "pid_dead_grace_period"
+	stalenessPIDAlive       = "pid_alive"
+	stalenessTimeThreshold  = "time_threshold"
+	stalenessTimeNotReached = "time_not_reached"
+)
+
 // isStaleRecording reads a .recording.json file and determines if the recording
 // is abandoned. Checks PID liveness first (instant detection), then falls back
 // to the 24h staleRecordingThreshold.
@@ -2155,9 +2190,9 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 		// can't read file — fall back to mod time
 		age = time.Since(info.ModTime())
 		if age > staleRecordingThreshold {
-			return true, age, "time_threshold"
+			return true, age, stalenessTimeThreshold
 		}
-		return false, age, "time_not_reached"
+		return false, age, stalenessTimeNotReached
 	}
 
 	var state struct {
@@ -2168,9 +2203,9 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
 		age = time.Since(info.ModTime())
 		if age > staleRecordingThreshold {
-			return true, age, "time_threshold"
+			return true, age, stalenessTimeThreshold
 		}
-		return false, age, "time_not_reached"
+		return false, age, stalenessTimeNotReached
 	}
 
 	// determine age
@@ -2200,13 +2235,13 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 			// transient shell PID. Don't mark stale until grace period expires.
 			if age < session.GhostGracePeriod {
 				logger.Debug("recording process dead but within grace period, skipping", "pid", pid, "age", age)
-				return false, age, "pid_dead_grace_period"
+				return false, age, stalenessPIDDeadGrace
 			}
 			logger.Debug("recording process dead, marking stale", "pid", pid, "age", age)
-			return true, age, "pid_dead"
+			return true, age, stalenessPIDDead
 		}
 		logger.Debug("recording process alive, skipping", "pid", pid)
-		return false, age, "pid_alive"
+		return false, age, stalenessPIDAlive
 	}
 
 	logger.Debug("no PID available, using time threshold", "session", filepath.Base(recPath))
@@ -2214,10 +2249,10 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	// fall back to time-based threshold
 	if age > staleRecordingThreshold {
 		logger.Debug("recording exceeded stale threshold", "age", age, "threshold", staleRecordingThreshold)
-		return true, age, "time_threshold"
+		return true, age, stalenessTimeThreshold
 	}
 	logger.Debug("recording within stale threshold", "age", age, "threshold", staleRecordingThreshold)
-	return false, age, "time_not_reached"
+	return false, age, stalenessTimeNotReached
 }
 
 // missingArtifacts returns the list of required artifacts not present in sessionDir.

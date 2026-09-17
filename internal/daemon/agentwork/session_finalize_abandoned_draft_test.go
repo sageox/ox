@@ -26,8 +26,11 @@ import (
 // `--force-session-uploads` reported items=0.
 //
 // The guard now consults isStaleRecording first, so it can tell a LIVE draft
-// (still skipped — ADR-029) from an ABANDONED one (reclaimed). These tests pin
-// both halves plus the fail-closed arm that must not move with them.
+// (still skipped — ADR-029) from an ABANDONED one (reclaimed) — and it keys on
+// that helper's EVIDENCE, not its bare verdict: only a dead-PID verdict
+// reclaims, never the 24h time threshold, which fires when no PID could be
+// obtained at all. These tests pin every half plus the fail-closed arm that
+// must not move with them.
 
 const (
 	ledgerSessionsSubdir = "sessions"
@@ -97,6 +100,42 @@ func TestDetect_ReclaimsAbandonedDraft(t *testing.T) {
 			},
 		},
 		{
+			// AGE IS NOT ABANDONMENT. A legacy marker carries no parent_pid, so
+			// isStaleRecording falls through to the 24h threshold and reports
+			// stale without ever asking about the owner — who may be alive and
+			// still writing. Sessions here routinely run past 24h, so the first
+			// cut of this fix (`abandoned := hasRecordingMarker && recStale`)
+			// reclaimed exactly that draft: marker cleared, partial transcript
+			// queued, every entry written afterward dropped.
+			//
+			// Planted in the LEDGER tree on purpose. In the cache tree a failed
+			// recoverRawFromSessionFile also leaves the marker and yields no
+			// items, so the assertions would pass for the wrong reason; here the
+			// reclaim path removes the marker outright and queues the session,
+			// which is a genuine red before the fix.
+			name:   "draft with a legacy marker (no parent_pid) past the 24h threshold",
+			subdir: ledgerSessionsSubdir,
+			setup: func(t *testing.T, dir string) {
+				writeFinalizedSession(t, dir)
+				markDirAsDraft(t, dir)
+				legacyRecordingMarker(t, dir, 26*time.Hour)
+			},
+			wantMarkerKept: true,
+		},
+		{
+			// The other half of that rule, and why it is scoped to drafts: for a
+			// NON-draft the 24h threshold is the pre-existing fallback and
+			// nothing is claiming the owner is live, so it must keep yielding
+			// work exactly as it did before #966.
+			name:   "NEGATIVE CONTROL: non-draft legacy marker past 24h still yields work",
+			subdir: ledgerSessionsSubdir,
+			setup: func(t *testing.T, dir string) {
+				writeFinalizedSession(t, dir)
+				legacyRecordingMarker(t, dir, 26*time.Hour)
+			},
+			wantItems: true,
+		},
+		{
 			// A dead PID must NOT buy a pass through the fail-closed arm. An
 			// unreadable meta.json is the #956 corruption class; falling
 			// through reaches recoverRawFromSessionFile, which would write real
@@ -156,9 +195,15 @@ func TestDetect_ReclaimsAbandonedDraft(t *testing.T) {
 // abandonedDraftWithTranscript is the exact #966 shape: a real transcript on
 // disk, meta.json frozen at draft:true, and a recording marker naming a process
 // that is gone.
+//
+// The ses_ id is seeded explicitly. writeFinalizedSession writes none and
+// markDirAsDraft only preserves what it finds, so without this the
+// "id must not rotate" assertion in TestDetect_AbandonedDraftMetaSurvivesReclaim
+// compares "" to "" and passes with the whole preservation path deleted.
 func abandonedDraftWithTranscript(t *testing.T, sessionDir string) {
 	t.Helper()
 	writeFinalizedSession(t, sessionDir)
+	seedPublishedSessionID(t, sessionDir)
 	markDirAsDraft(t, sessionDir)
 	staleRecordingMarker(t, sessionDir, 26*time.Hour)
 }
@@ -171,9 +216,10 @@ func abandonedDraftWithTranscript(t *testing.T, sessionDir string) {
 // is an anomaly and must be countable.
 func TestDetect_WarnsAboutSessionsSkippedWithContent(t *testing.T) {
 	const (
-		liveDraft  = "2026-09-16T18-54-testuser-OxLIVE"
-		unreadable = "2026-09-16T20-00-testuser-OxBADM"
-		emptyDraft = "2026-09-16T21-00-testuser-OxEMPT"
+		liveDraft   = "2026-09-16T18-54-testuser-OxLIVE"
+		unreadable  = "2026-09-16T20-00-testuser-OxBADM"
+		emptyDraft  = "2026-09-16T21-00-testuser-OxEMPT"
+		headerDraft = "2026-09-16T22-00-testuser-OxHDR0"
 	)
 
 	ledgerPath := t.TempDir()
@@ -193,6 +239,15 @@ func TestDetect_WarnsAboutSessionsSkippedWithContent(t *testing.T) {
 	// drowns in every ordinary per-turn draft placeholder.
 	writeDraftMeta(t, filepath.Join(sessionsDir, emptyDraft))
 
+	// Same category, and the one a size>0 test gets wrong: a live draft whose
+	// raw.jsonl holds only its header. Non-empty bytes, zero entries, nothing
+	// stranded — and it is the shape of every session between start and first
+	// turn, so counting it would fire this Warn on a healthy ledger.
+	headerDir := filepath.Join(sessionsDir, headerDraft)
+	writeHeaderOnlySession(t, headerDir)
+	markDirAsDraft(t, headerDir)
+	liveRecordingMarker(t, headerDir, 26*time.Hour)
+
 	var buf bytes.Buffer
 	h := NewSessionFinalizeHandlerForTest(slog.New(slog.NewJSONHandler(&buf, nil)))
 	items, err := h.Detect(ledgerPath)
@@ -203,7 +258,7 @@ func TestDetect_WarnsAboutSessionsSkippedWithContent(t *testing.T) {
 
 	complete := findLogRecord(t, records, "session finalize detect complete")
 	assert.Equal(t, float64(2), complete["skipped_with_content"],
-		"the routine empty placeholder must not inflate the anomaly count")
+		"neither the empty placeholder nor the header-only one may inflate the anomaly count")
 
 	warn := findLogRecord(t, records, "sessions skipped while holding transcript content")
 	assert.Equal(t, "WARN", warn["level"], "Debug is why this went unnoticed for 21h")
@@ -380,5 +435,8 @@ func TestDetect_AbandonedDraftMetaSurvivesReclaim(t *testing.T) {
 	after, err := lfs.ReadSessionMeta(sessionDir)
 	require.NoError(t, err)
 	assert.True(t, after.IsDraft(), "detect must not clear the draft flag; finalize does")
-	assert.Equal(t, before.SessionID, after.SessionID, "the published ses_ id must not rotate")
+	// Both sides pinned to the seeded id, not merely to each other: an
+	// equal-to-each-other assertion holds just as well when both are empty.
+	require.Equal(t, draftTestSessionID, before.SessionID, "fixture must publish an id to preserve")
+	assert.Equal(t, draftTestSessionID, after.SessionID, "the published ses_ id must not rotate")
 }
