@@ -73,6 +73,7 @@ var adapterCaps = map[string][]string{
 		adapterprotocol.CapSessionImporter,
 	},
 	"droid": {
+		adapterprotocol.CapSkillsInstaller,
 		adapterprotocol.CapSessionReader,
 		adapterprotocol.CapHookInstaller,
 		adapterprotocol.CapRulesInstaller,
@@ -84,6 +85,7 @@ var adapterCaps = map[string][]string{
 	// No CapFileWatcher: Goose sessions are SQLite rows behind a virtual
 	// "goose:<id>" handle, so there is no path for fsnotify to watch.
 	"goose": {
+		adapterprotocol.CapSkillsInstaller,
 		adapterprotocol.CapSessionReader,
 		adapterprotocol.CapHookInstaller,
 		adapterprotocol.CapIncrementalReader,
