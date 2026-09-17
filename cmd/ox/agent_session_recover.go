@@ -171,8 +171,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	// resolve ledger path for upload
 	ledgerPath, ledgerErr := resolveLedgerPath()
 
-	recoverEp := endpoint.GetForProject(projectRoot)
-	sessionName := session.GenerateSessionName(state.AgentID, identity.AttributionUsername(recoverEp, config.GetDisplayName()))
+	sessionName := session.GetSessionName(state.SessionPath)
 	var ledgerSessionDir string
 	var uploaded bool
 
