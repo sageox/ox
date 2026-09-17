@@ -655,7 +655,7 @@ func handleAfterTool(ctx *HookContext) error {
 	// Serialize the read cursor and append transaction with the watcher and
 	// recovery. Reload after locking so concurrent hooks cannot replay a batch.
 	return fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
-		return captureHookEntries(ctx, agentID, state.SessionPath)
+		return captureHookEntries(ctx, agentID, state.SessionPath, state.SessionID)
 	})
 }
 
@@ -667,13 +667,25 @@ func handleAfterTool(ctx *HookContext) error {
 // holding is for the wrong raw.jsonl -- writing here would race whatever
 // legitimately holds the new session's lock. Skip this invocation instead;
 // the next hook call reloads state and locks the current session correctly.
-func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath string) error {
+//
+// SessionPath alone is not a reliable generation check: it's minute-granular
+// (GenerateSessionName), so a stop immediately followed by a restart for the
+// same agent within the same minute mints an IDENTICAL path. expectedSessionID
+// is the durable per-recording identity minted once at StartRecording, so it
+// still distinguishes the two generations when the path collides; fall back
+// to the path comparison only for a pre-SessionID recording (empty on both
+// sides).
+func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expectedSessionID string) error {
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil || state.StoppedAt != nil {
 		return err
 	}
-	if state.SessionPath != expectedSessionPath {
-		slog.Debug("hook: afterTool session path changed since lock acquired, skipping", "agentID", agentID, "locked", expectedSessionPath, "current", state.SessionPath)
+	changed := state.SessionPath != expectedSessionPath
+	if expectedSessionID != "" || state.SessionID != "" {
+		changed = state.SessionID != expectedSessionID
+	}
+	if changed {
+		slog.Debug("hook: afterTool session changed since lock acquired, skipping", "agentID", agentID, "lockedPath", expectedSessionPath, "currentPath", state.SessionPath, "lockedSessionID", expectedSessionID, "currentSessionID", state.SessionID)
 		return nil
 	}
 	if err := session.RecoverRawAppend(filepath.Join(state.SessionPath, "raw.jsonl"), state.SourceOffset); err != nil {

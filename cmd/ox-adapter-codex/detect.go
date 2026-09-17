@@ -23,10 +23,10 @@ func handleDetect() (*adapterprotocol.DetectResponse, error) {
 
 	sessionsDir := filepath.Join(home, "sessions")
 	if info, err := os.Stat(sessionsDir); err == nil && info.IsDir() {
-		return &adapterprotocol.DetectResponse{Detected: true, Reason: "found ~/.codex/sessions/"}, nil
+		return &adapterprotocol.DetectResponse{Detected: true, Reason: "found Codex sessions directory"}, nil
 	}
 
-	return &adapterprotocol.DetectResponse{Detected: false, Reason: "codex executable and ~/.codex/sessions/ not found"}, nil
+	return &adapterprotocol.DetectResponse{Detected: false, Reason: "codex executable and Codex sessions directory not found"}, nil
 }
 
 // projectUsesCodex reports whether a repo has opted into Codex, mirroring
