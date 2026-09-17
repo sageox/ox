@@ -77,9 +77,17 @@ was the honest choice — and it spent context in every session that never touch
 
 Write globs either way; both forms parse:
 
+The inline-list form matches the style `repos:` already uses:
+
 ```yaml
-globs: ["**/*.go", "**/*.mod"]     # matches the repos: style
-globs: **/*.go,**/*.mod            # matches Cursor, Copilot, Cline
+globs: ["**/*.go", "**/*.mod"]
+```
+
+The bare comma form matches what Cursor, Copilot, and Cline use, so a rule
+copied out of `.cursor/rules` works unchanged:
+
+```yaml
+globs: **/*.go,**/*.mod
 ```
 
 Today `globs:` is advisory: your AI coworker sees the scope in its prime context and

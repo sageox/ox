@@ -337,6 +337,13 @@ func TestDiscoverRules_Globs(t *testing.T) {
 		{"quoted single", `globs: "**/*.tf"`, []string{"**/*.tf"}},
 		{"empty value is not a scope", "globs:", nil},
 		{"empty list is not a scope", "globs: []", nil},
+		// The guide's own examples carried trailing comments. Parsed literally they
+		// produced glob entries named "Cursor" and "Copilot" — a rule scoped to
+		// files that cannot exist, so it silently never applies. Anyone copying the
+		// documentation got a rule that looked scoped and was not.
+		{"trailing comment on the bare form", "globs: **/*.go,**/*.mod   # matches Cursor, Copilot, Cline", []string{"**/*.go", "**/*.mod"}},
+		{"trailing comment on the inline form", `globs: ["**/*.go", "**/*.mod"]   # matches the repos: style`, []string{"**/*.go", "**/*.mod"}},
+		{"comment-only value is no scope", "globs: # TODO decide", nil},
 	}
 
 	for _, tt := range tests {
@@ -361,6 +368,52 @@ func TestDiscoverRules_Globs(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDiscoverRules_TrailingCommentsDoNotLeakIntoValues covers the whole
+// frontmatter surface, not just globs: extractValue did not strip comments
+// either, so `name: foo # note` carried the comment into the identifier that
+// cross-references and superseded-by resolve against.
+//
+// A value that OPENS with a quote keeps its `#`, because there it is literal
+// YAML and truncating would corrupt a description that legitimately contains one.
+func TestDiscoverRules_TrailingCommentsDoNotLeakIntoValues(t *testing.T) {
+	root := t.TempDir()
+	writeRule(t, root, "agents/rules/commented.md",
+		"---\nname: commented   # the identifier\ndescription: Wrap errors.   # why\nrepos: [\"acme/api\"]   # only the API\n---\n\nBody.\n")
+	writeRule(t, root, "agents/rules/quoted.md",
+		"---\nname: quoted\ndescription: \"Use #tags in commit messages\"\n---\n\nBody.\n")
+
+	rules, err := DiscoverRules(root, "acme/api")
+	if err != nil {
+		t.Fatalf("DiscoverRules: %v", err)
+	}
+	byName := map[string]TeamRule{}
+	for _, r := range rules {
+		byName[r.Name] = r
+	}
+
+	if _, ok := byName["commented"]; !ok {
+		t.Fatalf("the name carried its trailing comment; got %v", keysOf(byName))
+	}
+	if got := byName["commented"].Description; got != "Wrap errors." {
+		t.Errorf("Description = %q, want the comment stripped", got)
+	}
+	if got := byName["commented"].Repos; !slices.Equal(got, []string{"acme/api"}) {
+		t.Errorf("Repos = %#v, want the comment stripped", got)
+	}
+	if got := byName["quoted"].Description; got != "Use #tags in commit messages" {
+		t.Errorf("Description = %q — a quoted # is literal YAML and must survive", got)
+	}
+}
+
+func keysOf(m map[string]TeamRule) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // TestDiscoverRules_GlobsDoNotFilterDiscovery: globs describe WHERE a rule

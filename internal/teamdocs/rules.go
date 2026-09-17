@@ -397,10 +397,9 @@ func parseRuleFrontmatter(path string) ruleFrontmatter {
 		case strings.HasPrefix(line, "from-discussion:"):
 			fm.FromDiscussion = extractValue(line, "from-discussion:")
 		case strings.HasPrefix(line, "repos:"):
-			val := strings.TrimSpace(strings.TrimPrefix(line, "repos:"))
-			fm.Repos = parseInlineList(val)
+			fm.Repos = parseInlineList(stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(line, "repos:"))))
 		case strings.HasPrefix(line, "globs:"):
-			fm.Globs = parseGlobs(strings.TrimSpace(strings.TrimPrefix(line, "globs:")))
+			fm.Globs = parseGlobs(stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(line, "globs:"))))
 		}
 
 		if lineCount > 30 {

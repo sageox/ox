@@ -111,7 +111,34 @@ func parseFrontmatter(path string) docFrontmatter {
 
 // extractValue gets the trimmed value after a "key:" prefix, stripping quotes.
 func extractValue(line, prefix string) string {
-	val := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	val := stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(line, prefix)))
 	val = strings.Trim(val, `"'`)
 	return val
+}
+
+// stripYAMLComment removes a trailing ` #` comment from a scalar value.
+//
+// Without this, `globs: **/*.go,**/*.mod   # matches Cursor` parsed the comment
+// as part of the value and produced glob entries named "Cursor" and "Copilot" —
+// a rule scoped to files that do not exist, which silently never applies. The
+// guide's own examples carried such comments, so anyone copying them got a rule
+// that looked scoped and was not.
+//
+// A value that OPENS with a quote is returned through its closing quote, because
+// inside quotes a `#` is literal YAML and truncating there would corrupt a
+// description that legitimately contains one.
+func stripYAMLComment(v string) string {
+	if len(v) > 0 && (v[0] == '"' || v[0] == '\'') {
+		if end := strings.IndexByte(v[1:], v[0]); end >= 0 {
+			return v[:end+2]
+		}
+		return v // unterminated quote: leave it alone rather than guess
+	}
+	if idx := strings.Index(v, " #"); idx >= 0 {
+		return strings.TrimSpace(v[:idx])
+	}
+	if strings.HasPrefix(v, "#") {
+		return "" // the whole value is a comment
+	}
+	return v
 }
