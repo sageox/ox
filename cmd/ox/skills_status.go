@@ -96,6 +96,7 @@ type repoSkillStatus struct {
 const (
 	skillInstalled     = "installed"      // on disk now
 	skillPending       = "pending"        // reconcile will create it; not there yet
+	skillOutdated      = "outdated"       // present, but differs from the team's copy
 	skillWithheld      = "withheld"       // executable, awaiting approval
 	skillUnavailable   = "unavailable"    // discovered but ox could not use it
 	skillNotApplicable = "not applicable" // published, but its repos: excludes this repo
@@ -224,7 +225,7 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 	}
 
 	decisions := map[string]skillmanager.TeamSkillDecision{}
-	pending := map[string]bool{}
+	var planned plannedPaths
 	plan, planErr := planCommittedSkills(gitRoot)
 	switch {
 	case planErr != nil:
@@ -235,7 +236,10 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 			decisions[d.Name] = d
 		}
 		for _, action := range plan.Creates {
-			pending[action.Path] = true
+			planned.created = append(planned.created, action.Path)
+		}
+		for _, action := range plan.Updates {
+			planned.updated = append(planned.updated, action.Path)
 		}
 		if reason := plan.RetainedTeamReason(); reason != "" {
 			out.Problems = append(out.Problems,
@@ -256,7 +260,7 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 			row.State = "unknown"
 			row.Detail = "could not compute the plan"
 		default:
-			row.State, row.Detail = installedState(gitRoot, targets, decisions[sk.Name], pending)
+			row.State, row.Detail = installedState(gitRoot, targets, decisions[sk.Name], planned)
 		}
 		out.TeamSkills = append(out.TeamSkills, row)
 	}
@@ -278,7 +282,7 @@ func skillsStatusGuidance(out skillsStatusOutput) string {
 		}
 	}
 	for _, s := range out.TeamSkills {
-		if s.State == skillPending || s.State == skillUnavailable || s.State == "unknown" {
+		if s.State == skillPending || s.State == skillOutdated || s.State == skillUnavailable || s.State == "unknown" {
 			return fmt.Sprintf("team skill %q is %s: %s", s.Name, s.State, s.Detail)
 		}
 	}
@@ -317,7 +321,7 @@ func skillTargetRoots(gitRoot string) ([]string, error) {
 // with no InstalledAs means ox could not use the skill at all (unreadable
 // files), which WithheldTeamSkills does not report because it only returns
 // approval holds.
-func installedState(gitRoot string, targets []string, d skillmanager.TeamSkillDecision, pending map[string]bool) (state, detail string) {
+func installedState(gitRoot string, targets []string, d skillmanager.TeamSkillDecision, planned plannedPaths) (state, detail string) {
 	switch {
 	case d.NeedsApprove:
 		return skillWithheld, d.Reason
@@ -328,16 +332,67 @@ func installedState(gitRoot string, targets []string, d skillmanager.TeamSkillDe
 		// No decision at all: the plan did not see it, so it is not ours to claim.
 		return skillUnavailable, "ox did not record a decision for this skill"
 	}
+
+	if len(targets) == 0 {
+		// No selected root means there is nowhere for it to be. Falling through the
+		// per-target loop returned "installed" on an empty list, which is the most
+		// confident possible answer about a repository that has installed nothing.
+		return skillPending, "this repository has no skills directory selected — run `ox init`"
+	}
+
+	// EVERY selected target must be complete, not the first one that looks it.
+	// A repo with both .claude/skills and .agents/skills selected — Claude Code
+	// beside Codex — would otherwise report installed while the second root was
+	// missing the skill, or held a stale copy, or had lost a bundled file.
+	var incomplete, outdated []string
 	for _, root := range targets {
-		rel := path.Join(root, d.InstalledAs, "SKILL.md")
-		if pending[rel] {
-			return skillPending, "reconcile has not written it yet — run `ox doctor --fix`"
-		}
-		if _, err := os.Stat(filepath.Join(gitRoot, filepath.FromSlash(rel))); err == nil {
-			return skillInstalled, ""
+		dir := path.Join(root, d.InstalledAs) + "/"
+		switch {
+		case planned.creates(dir):
+			incomplete = append(incomplete, root)
+		case !manifestPresent(gitRoot, dir):
+			incomplete = append(incomplete, root)
+		case planned.updates(dir):
+			// Present but not what the team published: a diagnostic that calls this
+			// "installed" is answering a different question than the one asked.
+			outdated = append(outdated, root)
 		}
 	}
-	return skillPending, "not on disk yet — run `ox doctor --fix`"
+	switch {
+	case len(incomplete) > 0:
+		return skillPending, "not complete in " + strings.Join(incomplete, ", ") + " — run `ox doctor --fix`"
+	case len(outdated) > 0:
+		return skillOutdated, "differs from the team's copy in " + strings.Join(outdated, ", ") + " — run `ox doctor --fix`"
+	}
+	return skillInstalled, ""
+}
+
+// manifestPresent reports whether the skill's SKILL.md exists under dir.
+func manifestPresent(gitRoot, dir string) bool {
+	_, err := os.Stat(filepath.Join(gitRoot, filepath.FromSlash(path.Join(dir, "SKILL.md"))))
+	return err == nil
+}
+
+// plannedPaths indexes the reconcile plan's intended writes by path.
+//
+// Matched on the skill's DIRECTORY prefix rather than on SKILL.md alone, so a
+// missing or stale bundled file — a reference doc, an asset — counts as not
+// installed too. The manifest being present says nothing about the rest.
+type plannedPaths struct {
+	created []string
+	updated []string
+}
+
+func (p plannedPaths) creates(dir string) bool { return hasPrefixIn(p.created, dir) }
+func (p plannedPaths) updates(dir string) bool { return hasPrefixIn(p.updated, dir) }
+
+func hasPrefixIn(paths []string, dir string) bool {
+	for _, candidate := range paths {
+		if strings.HasPrefix(candidate, dir) {
+			return true
+		}
+	}
+	return false
 }
 
 func roundedAge(t time.Time) string {

@@ -227,3 +227,62 @@ func stageOriginRemote(t *testing.T, repo, url string) {
 		require.NoError(t, err, "git %v: %s", args, out)
 	}
 }
+
+// TestInstalledState_EveryTargetMustBeComplete: a repo with two selected skill
+// roots — Claude Code beside Codex — must not be reported healthy because the
+// FIRST root happens to be complete.
+//
+// The earlier loop returned on the first target whose SKILL.md existed, so a
+// second root missing the skill, holding a stale copy, or having lost a bundled
+// file all read as "installed" with "Team skills are current."
+func TestInstalledState_EveryTargetMustBeComplete(t *testing.T) {
+	const installedAs = "sageox-team-deploy"
+	targets := []string{".claude/skills", ".agents/skills"}
+	decision := skillmanager.TeamSkillDecision{Name: "deploy", InstalledAs: installedAs}
+
+	stageManifest := func(t *testing.T, repo string, roots ...string) {
+		t.Helper()
+		for _, root := range roots {
+			dir := filepath.Join(repo, filepath.FromSlash(root), installedAs)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: x\n---\n"), 0o644))
+		}
+	}
+
+	t.Run("complete in both targets", func(t *testing.T) {
+		repo := t.TempDir()
+		stageManifest(t, repo, targets...)
+		state, _ := installedState(repo, targets, decision, plannedPaths{})
+		require.Equal(t, skillInstalled, state)
+	})
+
+	t.Run("missing from the second target", func(t *testing.T) {
+		repo := t.TempDir()
+		stageManifest(t, repo, ".claude/skills")
+		state, detail := installedState(repo, targets, decision, plannedPaths{})
+		require.Equal(t, skillPending, state,
+			"the status check stopped at the first complete target and called the skill installed")
+		require.Contains(t, detail, ".agents/skills", "the detail does not name the incomplete root")
+	})
+
+	t.Run("a pending create in the second target", func(t *testing.T) {
+		repo := t.TempDir()
+		stageManifest(t, repo, targets...)
+		planned := plannedPaths{created: []string{".agents/skills/" + installedAs + "/SKILL.md"}}
+		state, _ := installedState(repo, targets, decision, planned)
+		require.Equal(t, skillPending, state)
+	})
+
+	// Matched on the skill's directory, not SKILL.md, so a missing or stale
+	// BUNDLED file counts too — the manifest being present says nothing about
+	// the rest of the bundle.
+	t.Run("a stale bundled file makes it outdated", func(t *testing.T) {
+		repo := t.TempDir()
+		stageManifest(t, repo, targets...)
+		planned := plannedPaths{updated: []string{".agents/skills/" + installedAs + "/references/guide.md"}}
+		state, detail := installedState(repo, targets, decision, planned)
+		require.Equal(t, skillOutdated, state,
+			"a bundle whose contents differ from the team's copy was reported installed")
+		require.Contains(t, detail, ".agents/skills")
+	})
+}
