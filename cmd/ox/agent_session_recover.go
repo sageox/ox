@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -181,10 +183,20 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 
 	if ledgerErr == nil {
 		ledgerSessionDir = filepath.Join(ledgerPath, "sessions", sessionName)
-		if preservedID, _, preserveErr := lfs.PreservedSessionIDAndDraft(ledgerSessionDir); preserveErr != nil {
-			_ = doctor.SetNeedsDoctorAgent(projectRoot)
-			return fmt.Errorf("refusing to recover session %q over unreadable existing metadata: %w", sessionName, preserveErr)
-		} else if preservedID != "" && startMinted != "" && preservedID != startMinted {
+		var preservedID string
+		if existingMeta, preserveErr := lfs.ReadSessionMeta(ledgerSessionDir); preserveErr != nil {
+			if !errors.Is(preserveErr, fs.ErrNotExist) {
+				_ = doctor.SetNeedsDoctorAgent(projectRoot)
+				return fmt.Errorf("refusing to recover session %q over unreadable existing metadata: %w", sessionName, preserveErr)
+			}
+		} else if existingMeta != nil {
+			preservedID = existingMeta.SessionID
+			if preservedID == "" && !existingMeta.IsDraft() {
+				_ = doctor.SetNeedsDoctorAgent(projectRoot)
+				return fmt.Errorf("refusing to recover session %q over existing finalized legacy metadata without a session ID", sessionName)
+			}
+		}
+		if preservedID != "" && startMinted != "" && preservedID != startMinted {
 			_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			return fmt.Errorf("refusing to recover session %q over existing session ID %q (recovered session ID %q)", sessionName, preservedID, startMinted)
 		} else if err := os.MkdirAll(ledgerSessionDir, 0755); err != nil {
