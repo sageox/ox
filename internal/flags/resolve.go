@@ -19,6 +19,9 @@ func Resolve(ctx context.Context, providers ...Provider) Flags {
 
 // applyPatch overlays non-nil fields from p onto f.
 func applyPatch(f *Flags, p *Patch) {
+	if p.SessionImportEnabled != nil {
+		f.SessionImportEnabled = *p.SessionImportEnabled
+	}
 	if p.CodeDBEnabled != nil {
 		f.CodeDBEnabled = *p.CodeDBEnabled
 	}

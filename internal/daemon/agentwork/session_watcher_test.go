@@ -1392,20 +1392,16 @@ func TestSessionWatcherManager_PersistOffset_MissingRecordingJSON(t *testing.T) 
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	require.Eventually(t, func() bool {
-		info, err := os.Stat(filepath.Join(dir, "raw.jsonl"))
-		return err == nil && info.Size() > 0
-	}, 5*time.Second, 10*time.Millisecond, "capture must reach persistOffset with the marker absent")
-	// watcher should still be running (persistOffset didn't crash)
-	require.Eventually(t, func() bool {
-		return len(mgr.ActiveSessions()) == 1
-	}, 2*time.Second, 10*time.Millisecond, "watcher must survive missing .recording.json during persistOffset")
+	require.Eventually(t, func() bool { return len(mgr.ActiveSessions()) == 0 }, 5*time.Second, 10*time.Millisecond, "watcher must stop when its durable cursor cannot be written")
+	data, err := os.ReadFile(filepath.Join(dir, "raw.jsonl"))
+	require.NoError(t, err)
+	require.Empty(t, data, "no entries may be appended without a recoverable cursor")
 
 	mgr.StopAll()
 }
 
 // TestSessionWatcherManager_PersistOffset_CorruptRecordingJSON verifies that
-// persistOffset silently returns when .recording.json contains invalid JSON.
+// capture stops when .recording.json contains invalid JSON.
 // Failure prevented: watcher crashes when .recording.json is corrupted by
 // concurrent write or disk issue.
 func TestSessionWatcherManager_PersistOffset_CorruptRecordingJSON(t *testing.T) {
@@ -1440,14 +1436,37 @@ func TestSessionWatcherManager_PersistOffset_CorruptRecordingJSON(t *testing.T) 
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	require.Eventually(t, func() bool {
-		info, err := os.Stat(filepath.Join(dir, "raw.jsonl"))
-		return err == nil && info.Size() > 0
-	}, 5*time.Second, 10*time.Millisecond, "capture must reach persistOffset with a corrupt marker")
-	// watcher should still be running (persistOffset didn't crash)
-	require.Eventually(t, func() bool {
-		return len(mgr.ActiveSessions()) == 1
-	}, 2*time.Second, 10*time.Millisecond, "watcher must survive corrupt .recording.json during persistOffset")
+	require.Eventually(t, func() bool { return len(mgr.ActiveSessions()) == 0 }, 5*time.Second, 10*time.Millisecond, "watcher must stop when its durable cursor cannot be written")
+	data, err := os.ReadFile(filepath.Join(dir, "raw.jsonl"))
+	require.NoError(t, err)
+	require.Empty(t, data, "no entries may be appended without a recoverable cursor")
 
 	mgr.StopAll()
+}
+
+type nonAdvancingAdapter struct{ testAdapter }
+
+func (a *nonAdvancingAdapter) ReadFromOffset(_ string, offset int64) ([]adapters.RawEntry, int64, error) {
+	return []adapters.RawEntry{{Role: "assistant", Content: "must not append"}}, offset, nil
+}
+
+func TestWatcherRejectsNonAdvancingCatchUpCursor(t *testing.T) {
+	mgr := newTestWatcherManager(t)
+	dir := t.TempDir()
+	raw := filepath.Join(dir, "raw.jsonl")
+	writeRecordingState(t, filepath.Join(dir, recordingMarker), session.RecordingState{SessionPath: dir, SourceOffset: 10})
+	aw := &activeWatcher{done: make(chan struct{}), sessionName: "bad-cursor", cachePath: dir, startOffset: 10}
+	mgr.wg.Add(1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	mgr.runWatcher(ctx, aw, &nonAdvancingAdapter{}, raw)
+	data, err := os.ReadFile(raw)
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "must not append")
+	stateData, err := os.ReadFile(filepath.Join(dir, recordingMarker))
+	require.NoError(t, err)
+	var state session.RecordingState
+	require.NoError(t, json.Unmarshal(stateData, &state))
+	require.Equal(t, int64(10), state.SourceOffset)
+	require.Zero(t, state.EntryCount)
 }

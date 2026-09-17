@@ -3,6 +3,7 @@
 package proc
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -47,7 +48,13 @@ func processName(pid int) string {
 // isAliveProc checks if a process is alive using kill(pid, 0).
 func isAliveProc(proc *os.Process) bool {
 	err := proc.Signal(syscall.Signal(0))
-	return err == nil
+	return processMayBeAlive(err)
+}
+
+// A sandbox can deny signal zero for a healthy host process. Only positive
+// evidence of exit permits callers to discard recording state or IPC sockets.
+func processMayBeAlive(err error) bool {
+	return !errors.Is(err, syscall.ESRCH) && !errors.Is(err, os.ErrProcessDone)
 }
 
 // terminateProc sends SIGINT, letting the target close resources and release any

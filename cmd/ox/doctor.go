@@ -150,6 +150,9 @@ git health, agent environment, and connected services. Use --fix to auto-repair
 common issues, or --fix-slug to target specific checks.`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if isObservationalDoctor(cmd) {
+			return runObservationalDoctor(cmd)
+		}
 		// --force-session-uploads: force detection and upload of incomplete sessions
 		forceSessionUploads, _ := cmd.Flags().GetBool("force-session-uploads")
 		if forceSessionUploads {
@@ -402,6 +405,7 @@ func getAvailableSlugs() []string {
 }
 
 func init() {
+	doctorCmd.Flags().Bool("check", false, "observe local setup without repairs, uploads, credential refresh, or daemon startup")
 	doctorCmd.Flags().Bool("force-session-uploads", false, "Force detection and upload of incomplete sessions")
 	doctorCmd.Flags().Bool("gc", false, "force garbage collection (reclone) of team contexts")
 	doctorCmd.Flags().Bool("fix", false, "automatically fix issues where possible")

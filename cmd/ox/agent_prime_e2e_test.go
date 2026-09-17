@@ -192,10 +192,12 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 			require.Empty(t, first.SessionFile)
 			rawBefore, err := os.ReadFile(filepath.Join(first.SessionPath, "raw.jsonl"))
 			require.NoError(t, err)
+			// Atomic state replacement needs directory write access, not write
+			// permission on the old inode. Exercise the actual failure boundary.
 			markerPath := filepath.Join(first.SessionPath, ".recording.json")
 			if readOnlyState {
-				require.NoError(t, os.Chmod(markerPath, 0o400))
-				t.Cleanup(func() { _ = os.Chmod(markerPath, 0o600) })
+				require.NoError(t, os.Chmod(filepath.Dir(markerPath), 0o500))
+				t.Cleanup(func() { _ = os.Chmod(filepath.Dir(markerPath), 0o700) })
 			}
 
 			// Learn the native ID while its file is still unavailable. Keep it for daemon discovery.
@@ -233,7 +235,7 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, pending)
 				assert.Empty(t, pending.SessionFile, "discovery must preserve a recording when its source path cannot yet be saved")
-				require.NoError(t, os.Chmod(markerPath, 0o600))
+				require.NoError(t, os.Chmod(filepath.Dir(markerPath), 0o700))
 				require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", "", "", nativeID))
 			}
 			found, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)

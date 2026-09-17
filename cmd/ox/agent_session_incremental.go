@@ -112,16 +112,8 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		} else if len(entries) > 0 {
 			slog.Info("finalize: drain result", "entries_read", len(entries), "new_offset", newOffset)
 
-			// filter entries by timestamp — strict After() to prevent boundary leaks
-			if !state.StartedAt.IsZero() {
-				filtered := make([]adapters.RawEntry, 0, len(entries))
-				for _, e := range entries {
-					if e.Timestamp.After(state.StartedAt) {
-						filtered = append(filtered, e)
-					}
-				}
-				entries = filtered
-			}
+			// Byte cursors define this recording's scope. Timestamp filtering can
+			// silently omit equal-time records that its source receipt would cover.
 
 			if len(entries) > 0 {
 				// Per ox-h20u: redaction is enforced by the RawWriter
@@ -131,18 +123,27 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 				// gitleaks layers in order before encoding.
 				drainEntries := session.ConvertRawEntries(entries)
 
-				if appendErr := appendRedactedEntries(rawPath, drainEntries); appendErr != nil {
-					return nil, fmt.Errorf("append final session entries: %w", appendErr)
-				} else {
-					// only advance offset/count after successful append;
-					// leaving them unchanged lets the next drain retry these entries
-					_ = session.UpdateRecordingStateForAgent(projectRoot, state.AgentID, func(s *session.RecordingState) {
-						s.SourceOffset = newOffset
-						s.EntryCount += len(entries)
-					})
+				writer, err := session.NewRawWriter(rawPath, projectRoot)
+				if err != nil {
+					return nil, err
 				}
+				appendErr := writer.AppendRecordingBatch(filepath.Join(state.SessionPath, ".recording.json"), drainEntries, newOffset)
+				closeErr := writer.Close()
+				if appendErr != nil {
+					return nil, appendErr
+				}
+				if closeErr != nil {
+					return nil, closeErr
+				}
+				state.SourceOffset = newOffset
+				state.EntryCount += len(entries)
+
 			}
 		}
+	}
+
+	if err := session.SaveCaptureSource(state); err != nil {
+		return nil, err
 	}
 
 	// read back the completed raw.jsonl to generate artifacts

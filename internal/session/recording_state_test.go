@@ -658,3 +658,39 @@ func TestSaveRecordingState_PersistsAndLeavesNoArtifacts(t *testing.T) {
 	assert.Equal(t, "OxAtomic", loaded.AgentID)
 	assert.Equal(t, state.SessionPath, loaded.SessionPath)
 }
+
+func TestUpdateRecordingStateSerializesCursorMutation(t *testing.T) {
+	root := setupRecordingTest(t, t.TempDir())
+	_, err := StartRecording(root, StartRecordingOptions{AgentID: "OxLock", AdapterName: "claude-code", Username: "test"})
+	require.NoError(t, err)
+	state, err := LoadRecordingState(root)
+	require.NoError(t, err)
+	entered, release := make(chan struct{}), make(chan struct{})
+	updated := make(chan error, 1)
+	go func() {
+		updated <- UpdateRecordingState(root, func(s *RecordingState) { close(entered); <-release; s.LastReminderSeq = 7 })
+	}()
+	<-entered
+	cursorDone := make(chan error, 1)
+	go func() {
+		cursorDone <- MutateRecordingStateFile(recordingStatePath(state.SessionPath), func(s *RecordingState) error { s.SourceOffset = 99; return nil })
+	}()
+	// The cursor writer must wait while the lifecycle callback owns the state.
+	var early bool
+	select {
+	case err = <-cursorDone:
+		early = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	require.NoError(t, <-updated)
+	if !early {
+		err = <-cursorDone
+	}
+	require.NoError(t, err)
+	require.False(t, early, "cursor update escaped the shared state lock")
+	state, err = LoadRecordingState(root)
+	require.NoError(t, err)
+	require.Equal(t, int64(99), state.SourceOffset)
+	require.Equal(t, 7, state.LastReminderSeq)
+}

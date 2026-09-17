@@ -34,6 +34,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/pipeline"
+	"github.com/sageox/ox/internal/sessionpublication"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
@@ -1023,6 +1024,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// resulting commit will break LFS linkage and the daemon's anti-entropy
 	// will start clobbering. See the 2026-04-25 post-mortem (bd ox-4ncz).
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	if err := session.RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
+		return nil, err
+	}
 	hasIncrementalEntries := rawJSONLHasEntries(rawPath)
 
 	if hasIncrementalEntries {
@@ -1430,6 +1434,23 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	// zero-turn draft and pushed, which a finalize-time `git pull --rebase`
 	// folds into our working tree. Those describe nothing and must never
 	// survive into the finalized session as if an LLM had read the transcript.
+	source, err := session.ReadCaptureSource(filepath.Dir(result.RawPath))
+	if err != nil {
+		return err
+	}
+	if source == nil {
+		cachedMeta, metaErr := lfs.ReadSessionMeta(filepath.Dir(result.RawPath))
+		if metaErr != nil && !errors.Is(metaErr, os.ErrNotExist) {
+			return metaErr
+		}
+		if cachedMeta != nil {
+			source = cachedMeta.Source
+		}
+	}
+	if err := session.CheckCapturePublication(context.Background(), ledgerPath, sessionName, result.RawPath, source); err != nil {
+		return err
+	}
+	priorPublication, _ := lfs.ReadSessionMeta(sessionDir)
 	preservedID, wasDraft, err := supersedeDraftForFinalize(ledgerPath, sessionName)
 	if err != nil {
 		return fmt.Errorf("preserve existing SessionID for %s: %w", sessionName, err)
@@ -1511,6 +1532,16 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 			return nil, fmt.Errorf("session metadata disappeared during upload")
 		}
 		current.Files = fileRefs
+		if source != nil {
+			current.Source = source
+			current.ProcessingStatus = "pending"
+		}
+		if priorPublication != nil && priorPublication.PublishedAt != nil {
+			current.PublishedAt = priorPublication.PublishedAt
+		} else if current.PublishedAt == nil {
+			now := time.Now().UTC()
+			current.PublishedAt = &now
+		}
 		meta = current // retain the redaction audit written before upload
 		return current, nil
 	}); err != nil {
@@ -1543,6 +1574,15 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		// set marker - session saved locally but not synced to remote
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("commit and push: %w", err)
+	}
+	if meta.Source != nil {
+		client, err := getLFSClient(projectRoot)
+		if err != nil {
+			return err
+		}
+		if err := sessionpublication.Verify(context.Background(), ledgerPath, sessionName, meta, client); err != nil {
+			return fmt.Errorf("publication verification pending: %w", err)
+		}
 	}
 	if recoveryCacheDir != "" {
 		if err := os.RemoveAll(recoveryCacheDir); err != nil {

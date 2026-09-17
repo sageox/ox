@@ -47,6 +47,10 @@ func runAgentSessionResume(inst *agentinstance.Instance, _ []string) error {
 
 	// idempotent: not suspended
 	if state.SuspendedAt == nil {
+		if err := excludeNativeCapture(state, "resumed"); err != nil {
+			return fmt.Errorf("source exclusion synchronization pending: %w", err)
+		}
+		session.ClearExplicitPause(projectRoot, inst.AgentID)
 		return emitResumeOutput(os.Stdout, &sessionResumeOutput{
 			Success:     true,
 			Type:        "session_resume",
@@ -73,18 +77,34 @@ func runAgentSessionResume(inst *agentinstance.Instance, _ []string) error {
 		excluded    int
 		sessionName string
 	)
+	var boundaryErr error
 	if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
+		boundaryErr = checkCodexResumeBoundary(s)
+		if boundaryErr != nil {
+			return
+		}
 		resumeSeq = s.EntryCount
 		excluded = computeExcludedSinceLastPause(s.Lifecycle, resumeSeq)
 		sessionName = session.GetSessionName(s.SessionPath)
 		s.SuspendedAt = nil
 		s.Lifecycle = append(s.Lifecycle, session.LifecycleEvent{
-			Action: session.LifecycleActionResume,
-			At:     now,
-			Seq:    resumeSeq,
+			Action:            session.LifecycleActionResume,
+			At:                now,
+			Offset:            s.SourceOffset,
+			SourceOffsetKnown: s.AdapterName == "codex" && s.SessionFile != "",
+			Seq:               resumeSeq,
 		})
+		*state = *s
 	}); err != nil {
 		return fmt.Errorf("failed to clear suspended state: %w", err)
+	}
+
+	if boundaryErr != nil {
+		return boundaryErr
+	}
+
+	if err := excludeNativeCapture(state, "resumed"); err != nil {
+		return fmt.Errorf("recording resumed; source exclusion synchronization pending: %w", err)
 	}
 
 	// best-effort marker removal; idempotent if marker missing
@@ -168,5 +188,24 @@ func emitResumeOutput(w io.Writer, output *sessionResumeOutput) error {
 		return fmt.Errorf("format resume JSON: %w", err)
 	}
 	fmt.Fprintln(w, string(jsonOut))
+	return nil
+}
+
+// The native file can advance while its tail watcher is stopped. Resuming at a
+// stale cursor would close the exclusion before the paused bytes were drained.
+func checkCodexResumeBoundary(state *session.RecordingState) error {
+	if state.AdapterName != "codex" {
+		return nil
+	}
+	if state.SessionFile == "" {
+		return fmt.Errorf("recording remains paused: native source is unavailable")
+	}
+	info, err := os.Stat(state.SessionFile)
+	if err != nil {
+		return fmt.Errorf("recording remains paused: inspect native source: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() != state.SourceOffset {
+		return fmt.Errorf("recording remains paused: native capture has not caught up; restart the daemon and retry resume after it drains the source")
+	}
 	return nil
 }

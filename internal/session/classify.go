@@ -6,8 +6,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
+
+	procutil "github.com/sageox/ox/internal/proc"
 
 	"github.com/sageox/ox/internal/lfs"
 )
@@ -204,14 +205,7 @@ func isAbandoned(parentPID int, createdAt time.Time) bool {
 // isPIDAlive checks if a process with the given PID is still running.
 // Uses kill(pid, 0) which checks existence without sending a signal.
 func isPIDAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	return procutil.IsAlive(pid)
 }
 
 // RawKind classifies what a raw.jsonl path actually holds.

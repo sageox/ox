@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -183,7 +184,7 @@ func TestHandleAfterTool_CodexDiscoveryUsesRecordingIdentity(t *testing.T) {
 				sourceFile := filepath.Join(dateDir, "requested.jsonl")
 				content := fmt.Sprintf("{\"type\":\"session_meta\",\"payload\":{\"id\":%q,\"cwd\":%q}}\n"+
 					"{\"timestamp\":%q,\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"requested conversation\"}]}}\n",
-					nativeID, projectRoot, state.StartedAt.Add(time.Second).Format(time.RFC3339Nano))
+					nativeID, projectRoot, state.StartedAt.Format(time.RFC3339Nano))
 				require.NoError(t, os.WriteFile(sourceFile, []byte(content), 0o600))
 				beforePrime := state.StartedAt.Add(-time.Minute)
 				require.NoError(t, os.Chtimes(sourceFile, beforePrime, beforePrime))
@@ -918,4 +919,30 @@ func readJSONLFile(t *testing.T, path string) []map[string]any {
 		lines = append(lines, m)
 	}
 	return lines
+}
+
+func TestHandleAfterTool_RecoversUncommittedAppendWithoutDuplicates(t *testing.T) {
+	root, id, source := setupHandleAfterToolTest(t)
+	now := time.Now().Add(time.Second)
+	appendClaudeEntries(t, source, now, `{"type":"user","timestamp":"`+now.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"once only"}}`)
+	state, err := session.LoadRecordingStateForAgent(root, id)
+	require.NoError(t, err)
+	raw := filepath.Join(state.SessionPath, "raw.jsonl")
+	info, err := os.Stat(source)
+	require.NoError(t, err)
+	writer, err := session.NewRawWriter(raw, root)
+	require.NoError(t, err)
+	require.NoError(t, writer.BeginAppend(state.SourceOffset, info.Size()))
+	require.NoError(t, writer.WriteEntry(&session.Entry{Type: session.EntryTypeUser, Content: "once only"}))
+	require.NoError(t, writer.CloseAndSync()) // crash before cursor commit
+	ctx := &HookContext{Phase: phaseAfterTool, ProjectRoot: root, Marker: &SessionMarker{AgentID: id}}
+	require.NoError(t, handleAfterTool(ctx))
+	require.NoError(t, handleAfterTool(ctx))
+	count, err := session.CountValidatedEntries(context.Background(), raw)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	state, err = session.LoadRecordingStateForAgent(root, id)
+	require.NoError(t, err)
+	require.Equal(t, 1, state.EntryCount)
+	require.Equal(t, info.Size(), state.SourceOffset)
 }

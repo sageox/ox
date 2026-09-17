@@ -30,6 +30,9 @@ type SessionEntry struct {
 	// Content is the message or response content
 	Content string `json:"content"`
 
+	// CallID correlates streamed calls/results without buffering their content.
+	CallID string `json:"call_id,omitempty"`
+
 	// ToolName is the name of the tool called (for tool entries)
 	ToolName string `json:"tool_name,omitempty"`
 

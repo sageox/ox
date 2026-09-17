@@ -18,8 +18,19 @@ type FileSystem interface {
 	RemoveAll(path string) error
 }
 
+// FileCopier is an optional streaming capability. Existing in-memory/test
+// filesystems retain ReadFile/WriteFile compatibility; production never buffers
+// a complete transcript merely to copy it between cache and Ledger.
+type FileCopier interface {
+	CopyFile(destination, source string, perm os.FileMode) error
+}
+
 // OSFileSystem delegates to the real os package.
 type OSFileSystem struct{}
+
+func (OSFileSystem) CopyFile(destination, source string, perm os.FileMode) error {
+	return fileutil.AtomicCopyFile(destination, source, perm)
+}
 
 func (OSFileSystem) ReadFile(path string) ([]byte, error) {
 	return os.ReadFile(path)

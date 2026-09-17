@@ -39,7 +39,7 @@ var rootCmd = &cobra.Command{
 	Short: "Shared team context that makes agentic engineering multiplayer",
 	Long:  `Shared team context between your AI and human coworkers. Sessions, ledgers, and team knowledge that make agentic engineering multiplayer.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if isHeadlessLedgerRead(cmd) {
+		if isHeadlessLedgerRead(cmd) || isObservationalDoctor(cmd) || isSessionHistoryImport(cmd) {
 			return nil
 		}
 
@@ -85,7 +85,7 @@ var rootCmd = &cobra.Command{
 		return nil
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
-		if isHeadlessLedgerRead(cmd) {
+		if isHeadlessLedgerRead(cmd) || isObservationalDoctor(cmd) || isSessionHistoryImport(cmd) {
 			return nil
 		}
 
@@ -512,7 +512,7 @@ func initFeatureFlags(cmd *cobra.Command) {
 	var daemonProvider flags.DaemonProvider
 
 	// try daemon IPC first (fast path: daemon already has settings in memory)
-	if config.IsInitializedInCwd() && daemon.IsRunning() {
+	if config.IsInitializedInCwd() && daemon.IsResponsiveObservational() {
 		client := daemon.NewClientForCurrentRepo()
 		if settings, err := client.SettingsGet(); err == nil && settings != nil {
 			daemonProvider.CachedSettings = settings
@@ -539,6 +539,7 @@ func initFeatureFlags(cmd *cobra.Command) {
 // help before PersistentPreRunE, so a RunE-only guard would still advertise the
 // command and a Hidden-only guard would still allow direct execution.
 func syncFeatureGatedCommands(root *cobra.Command) {
+	setCommandRegistered(sessionCmd, sessionImportCmd, flags.Get().SessionImportEnabled)
 	setCommandRegistered(root, scoutCmd, auth.IsScoutEnabled())
 }
 

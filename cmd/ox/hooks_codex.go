@@ -1,6 +1,6 @@
 package main
 
-const codexHookTrustHint = "In Codex, run /hooks to review and trust the SageOx hooks before they can run."
+const codexHookTrustHint = "In Codex, run /hooks to review and trust the SageOx hooks. Send a prompt, then run ox doctor --check to verify hook execution, the capture daemon, and captured entries. Hook installation alone does not confirm recording."
 
 // installCodexHooks delegates to the external ox-adapter-codex binary.
 func installCodexHooks(user bool) error {

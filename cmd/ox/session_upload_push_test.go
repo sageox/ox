@@ -619,6 +619,6 @@ func TestCommitAndPushLedger_EmptySessionDir(t *testing.T) {
 
 	err := commitAndPushLedger(clonePath, sessionName)
 	require.Error(t, err, "should error when session dir exists but has no files to commit")
-	assert.Contains(t, err.Error(), "git add failed",
-		"error should indicate files were missing for git add")
+	assert.Contains(t, err.Error(), "meta.json not found",
+		"publication requires metadata before any staging")
 }

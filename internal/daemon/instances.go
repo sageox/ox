@@ -2,11 +2,11 @@ package daemon
 
 import (
 	"log/slog"
-	"os"
 	"slices"
 	"sync"
-	"syscall"
 	"time"
+
+	procutil "github.com/sageox/ox/internal/proc"
 )
 
 // Instance status constants.
@@ -73,14 +73,7 @@ type Instance struct {
 // Uses kill(pid, 0) which checks existence without sending a signal.
 // Returns false if no PID was recorded or the process is gone.
 func (i *Instance) IsProcessAlive() bool {
-	if i.ParentPID <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(i.ParentPID)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	return procutil.IsAlive(i.ParentPID)
 }
 
 // computeStatus determines the instance status based on the last heartbeat.

@@ -23,6 +23,7 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/repotools"
@@ -1031,6 +1032,12 @@ func runInit() error {
 
 		if selectedAgents["codex"] && hasCodexHooks(false) {
 			fmt.Printf("  %d. %s\n", step, codexHookTrustHint)
+			step++
+		}
+
+		if selectedAgents["codex"] && flags.Get().SessionImportEnabled {
+			fmt.Printf("  %d. Review existing Codex history with %s\n", step, cli.StyleCommand.Render("ox session import --agent codex --dry-run"))
+			fmt.Println("     Review the destination and sharing audience before choosing any sessions to upload.")
 			step++
 		}
 

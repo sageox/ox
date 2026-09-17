@@ -24,6 +24,7 @@ import (
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
+	"github.com/sageox/ox/pkg/codexhistory"
 )
 
 // --- types ---
@@ -131,154 +132,9 @@ func readCodexFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry,
 }
 
 func parseCodexLine(line []byte) ([]adapterprotocol.RawEntry, error) {
-	var raw codexEntry
-	if err := json.Unmarshal(line, &raw); err != nil {
-		return nil, err
-	}
-
-	switch raw.Type {
-	case "response_item":
-		return parseResponseItem(raw.Payload, raw.Timestamp)
-	case "event_msg":
-		return parseEventMsg(raw.Payload, raw.Timestamp)
-	}
-
-	return nil, nil
+	return codexhistory.ParseLine(line)
 }
-
-func parseTS(s string) time.Time {
-	t, _ := time.Parse(time.RFC3339Nano, s)
-	return t
-}
-
-func parseResponseItem(p *codexPayload, ts string) ([]adapterprotocol.RawEntry, error) {
-	if p == nil {
-		return nil, nil
-	}
-
-	switch p.ItemType {
-	case "message":
-		return parseCodexMessage(p, ts)
-	case "function_call", "custom_tool_call":
-		if p.Name == "" {
-			return nil, nil
-		}
-		input := p.Arguments
-		if p.ItemType == "custom_tool_call" {
-			input = p.Input
-		}
-		return []adapterprotocol.RawEntry{
-			adapterruntime.ToolUseWithID(parseTS(ts), p.Name, input, p.CallID),
-		}, nil
-	case "function_call_output", "custom_tool_call_output":
-		var output string
-		if len(p.Output) > 0 {
-			if err := json.Unmarshal(p.Output, &output); err != nil {
-				// Codex also writes tool output as content blocks. Preserve text
-				// and leave image payloads out of the session's text representation.
-				var blocks []codexContentBlock
-				if err := json.Unmarshal(p.Output, &blocks); err != nil {
-					return nil, fmt.Errorf("parse tool output: %w", err)
-				}
-				var parts []string
-				for _, block := range blocks {
-					if block.Text != "" {
-						parts = append(parts, block.Text)
-					}
-				}
-				output = strings.Join(parts, "\n")
-			}
-		}
-		isErr := isCodexToolError(output)
-		return []adapterprotocol.RawEntry{
-			adapterruntime.ToolResultWithID(parseTS(ts), output, isErr, p.CallID),
-		}, nil
-	}
-
-	return nil, nil
-}
-
-func parseEventMsg(p *codexPayload, _ string) ([]adapterprotocol.RawEntry, error) {
-	if p == nil {
-		return nil, nil
-	}
-
-	// user_message events are skipped — response_item/user already captures the
-	// same text with richer context (system instructions, content blocks).
-	// event_msg types we could extract in the future: task_started (turn
-	// boundaries), token_count (usage telemetry).
-
-	return nil, nil
-}
-
-func parseCodexMessage(p *codexPayload, ts string) ([]adapterprotocol.RawEntry, error) {
-	t := parseTS(ts)
-	switch p.Role {
-	case "user":
-		text, isSystem := classifyCodexUserContent(p.Content)
-		if text == "" {
-			return nil, nil
-		}
-		if isSystem {
-			return []adapterprotocol.RawEntry{adapterruntime.SystemEntry(t, text)}, nil
-		}
-		return []adapterprotocol.RawEntry{adapterruntime.UserEntry(t, text)}, nil
-
-	case "assistant":
-		var parts []string
-		for _, block := range p.Content {
-			if block.Type == "output_text" && block.Text != "" {
-				parts = append(parts, block.Text)
-			}
-		}
-		if len(parts) == 0 {
-			return nil, nil
-		}
-		return []adapterprotocol.RawEntry{adapterruntime.AssistantEntry(t, strings.Join(parts, "\n"))}, nil
-	}
-
-	return nil, nil
-}
-
-func classifyCodexUserContent(blocks []codexContentBlock) (string, bool) {
-	var parts []string
-	for _, block := range blocks {
-		if block.Type == "input_text" && block.Text != "" {
-			parts = append(parts, block.Text)
-		}
-	}
-	if len(parts) == 0 {
-		return "", false
-	}
-	text := strings.Join(parts, "\n")
-	trimmed := strings.TrimSpace(text)
-	if strings.HasPrefix(trimmed, "# AGENTS.md instructions") ||
-		strings.HasPrefix(trimmed, "<permissions instructions>") ||
-		strings.HasPrefix(trimmed, "<environment_context>") {
-		return text, true
-	}
-	return text, false
-}
-
-// isCodexToolError reports whether a tool result represents a
-// failed command. Real exec_command/write_stdin output embeds "Process
-// exited with code N" as one line within a multi-line block ("Command:
-// ...\nChunk ID: ...\nWall time: ...\nProcess exited with code N\n..."), not
-// as a prefix of the whole string. A strict HasPrefix check against the
-// entire output therefore never matched a real transcript and silently
-// reported every failed command as successful — a real is_error entry
-// (case fx_fail1-shaped) surfaced with IsError false.
-func isCodexToolError(output string) bool {
-	if output == "" {
-		return false
-	}
-	for _, line := range strings.Split(output, "\n") {
-		if code, ok := strings.CutPrefix(line, "Process exited with code "); ok {
-			return code != "0"
-		}
-	}
-	return false
-}
+func isCodexToolError(output string) bool { return codexhistory.IsToolError(output) }
 
 // mergeToolEntries pairs function and custom tool calls with their results by
 // call_id regardless of how far apart they land in the parsed stream. Codex
@@ -367,12 +223,12 @@ func mergeToolEntries(entries []adapterprotocol.RawEntry, pending map[string]ada
 // --- session discovery ---
 
 func findCodexSession(repoRoot, agentID, since, agentSessionID string) (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := codexhistory.Home()
 	if err != nil {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
 
-	sessionsDir := filepath.Join(home, ".codex", "sessions")
+	sessionsDir := filepath.Join(home, "sessions")
 
 	// direct lookup: scan recent date dirs for a file whose session_meta.id matches
 	if agentSessionID != "" {
@@ -420,24 +276,16 @@ func findCodexSession(repoRoot, agentID, since, agentSessionID string) (string, 
 // findCodexBySessionID scans recent date directories for a JSONL file whose
 // session_meta entry has a matching id field.
 func findCodexBySessionID(sessionsDir, sessionID string) (string, error) {
-	now := time.Now()
-	for day := 0; day < searchDays; day++ {
-		t := now.AddDate(0, 0, -day)
-		dateDir := filepath.Join(sessionsDir, t.Format("2006"), t.Format("01"), t.Format("02"))
-		entries, err := os.ReadDir(dateDir)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-				continue
-			}
-			path := filepath.Join(dateDir, entry.Name())
-			if codexFileHasSessionID(path, sessionID) {
-				return path, nil
-			}
+	paths, err := codexhistory.Discover(filepath.Dir(sessionsDir))
+	if err != nil {
+		return "", err
+	}
+	for _, path := range paths {
+		if codexFileHasSessionID(path, sessionID) {
+			return path, nil
 		}
 	}
+
 	return "", fmt.Errorf("codex session %s not found", sessionID)
 }
 
@@ -470,32 +318,18 @@ func codexFileHasSessionID(path, sessionID string) bool {
 
 func collectCodexCandidates(sessionsDir string, since time.Time) []candidate {
 	var candidates []candidate
-	now := time.Now()
-
-	for day := 0; day < searchDays; day++ {
-		t := now.AddDate(0, 0, -day)
-		dateDir := filepath.Join(sessionsDir, t.Format("2006"), t.Format("01"), t.Format("02"))
-		entries, err := os.ReadDir(dateDir)
-		if err != nil {
-			continue
+	// A resumed session retains its creation-date directory. Search by last
+	// modification, never by how recently its directory was named.
+	_ = filepath.WalkDir(sessionsDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			return nil
 		}
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-				continue
-			}
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			if !since.IsZero() && !info.ModTime().After(since) {
-				continue
-			}
-			candidates = append(candidates, candidate{
-				path:    filepath.Join(dateDir, entry.Name()),
-				modTime: info.ModTime(),
-			})
+		info, err := entry.Info()
+		if err == nil && (since.IsZero() || info.ModTime().After(since)) {
+			candidates = append(candidates, candidate{path: path, modTime: info.ModTime()})
 		}
-	}
+		return nil
+	})
 
 	return candidates
 }

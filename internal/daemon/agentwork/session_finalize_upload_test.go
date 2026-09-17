@@ -27,6 +27,7 @@ const testRawContent = `{"metadata":{"schema_version":"1","agent_type":"claude-c
 // returned [] — they accumulated indefinitely without being committed/pushed.
 func TestDetect_FullyFinalizedInCache_NotPushed(t *testing.T) {
 	handler := NewSessionFinalizeHandler(slog.Default())
+	handler.skipGit = true // This fixture exercises classification, without a Git/LFS transport.
 	ledgerPath := t.TempDir()
 
 	// create a session in ledger cache with ALL artifacts present
@@ -80,6 +81,7 @@ func TestDetect_FullyFinalizedInCache_NotPushed(t *testing.T) {
 // prune is the only signal that means "it reached the remote".
 func TestDetect_FullyFinalizedInCache_StaleLedgerMetaStillDetected(t *testing.T) {
 	handler := NewSessionFinalizeHandler(slog.Default())
+	handler.skipGit = true // This fixture exercises classification, without a Git/LFS transport.
 	ledgerPath := t.TempDir()
 
 	sessionName := "2026-01-10T13-00-testuser-OxDONE"
@@ -167,7 +169,7 @@ func TestStageSessionInLedger_CopiesFiles(t *testing.T) {
 	}
 	testFiles := []string{"raw.jsonl", "summary.md", "meta.json"}
 	for _, f := range testFiles {
-		if err := os.WriteFile(filepath.Join(cacheDir, f), []byte("content of "+f), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(cacheDir, f), []byte(stageFixtureContent(f)), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -193,7 +195,7 @@ func TestStageSessionInLedger_CopiesFiles(t *testing.T) {
 			t.Errorf("file %s not copied: %v", f, err)
 			continue
 		}
-		if string(data) != "content of "+f {
+		if string(data) != stageFixtureContent(f) {
 			t.Errorf("file %s has wrong content: %q", f, data)
 		}
 	}
@@ -767,4 +769,11 @@ func TestGitCommitAndPush_CommitsStagedBytesNotWorktree(t *testing.T) {
 	if subject != "finalize session "+sessionName {
 		t.Fatalf("unexpected commit subject: %q", subject)
 	}
+}
+
+func stageFixtureContent(name string) string {
+	if name == "meta.json" {
+		return `{ "session_name": "copy-test" }`
+	}
+	return "content of " + name
 }

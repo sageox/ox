@@ -78,6 +78,10 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 		return err
 	}
 
+	if err := excludeNativeCapture(state, "aborted"); err != nil {
+		return fmt.Errorf("preserve native session exclusion before abort: %w", err)
+	}
+
 	sessionName := session.GetSessionName(state.SessionPath)
 
 	// Remove any published draft placeholder from the ledger FIRST, while the
@@ -191,6 +195,14 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 
 	if err := confirmAbort(inst, cmd); err != nil {
 		return err
+	}
+
+	ledgerPath, err := resolveLedgerPath()
+	if err != nil {
+		ledgerPath = ""
+	}
+	if err := preserveLocalDeletionIntent(sessionPath, ledgerPath); err != nil {
+		return fmt.Errorf("preserve native history exclusion before abort: %w", err)
 	}
 
 	// capture the ses_ ID before the folder is destroyed so the server-side

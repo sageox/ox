@@ -27,12 +27,13 @@ import (
 type Flags struct {
 	// Feature gates. Mature capabilities default on; experimental capabilities
 	// default off until a server rollout or environment override enables them.
-	CodeDBEnabled  bool
-	WhisperEnabled bool
-	DistillEnabled bool
-	AutoDistill    bool
-	TUIEnabled     bool
-	AttestEnabled  bool
+	CodeDBEnabled        bool
+	WhisperEnabled       bool
+	DistillEnabled       bool
+	AutoDistill          bool
+	TUIEnabled           bool
+	AttestEnabled        bool
+	SessionImportEnabled bool
 
 	// Kill switches — default false (not activated).
 	// Any source setting these true disables the capability.
@@ -49,12 +50,13 @@ type Flags struct {
 // Nil fields mean "no opinion" — they are skipped during merge.
 // NOTE: When adding fields, also update allNil() in env.go and applyPatch() in resolve.go.
 type Patch struct {
-	CodeDBEnabled  *bool
-	WhisperEnabled *bool
-	DistillEnabled *bool
-	AutoDistill    *bool
-	TUIEnabled     *bool
-	AttestEnabled  *bool
+	CodeDBEnabled        *bool
+	WhisperEnabled       *bool
+	DistillEnabled       *bool
+	AutoDistill          *bool
+	TUIEnabled           *bool
+	AttestEnabled        *bool
+	SessionImportEnabled *bool
 
 	DisableFileDeleteTools *bool
 	DisableShellExecTools  *bool

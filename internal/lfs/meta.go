@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/pkg/sessionprovenance"
 )
 
 // legacySessionNamespace is the UUIDv5 namespace for synthesizing session
@@ -37,11 +38,14 @@ var legacySessionNamespace = uuid.MustParse("5e6238b7-9403-4ee4-b5ec-8a6d37a5de1
 // WriteSessionMeta also writes LFS pointer files (standard git-lfs naming)
 // to replace content files, preventing LFS garbage collection.
 type SessionMeta struct {
-	Version     string `json:"version"` // "1.0"
-	SessionName string `json:"session_name"`
-	Username    string `json:"username"` // privacy-safe display name — via identity.AttributionDisplayName(). Shared in ledger. NOT an email.
-	UserID      string `json:"user_id,omitempty"`
-	AgentID     string `json:"agent_id"`
+	Source           *sessionprovenance.Source `json:"source,omitempty"`
+	PublishedAt      *time.Time                `json:"published_at,omitempty"`
+	ProcessingStatus string                    `json:"processing_status,omitempty"`
+	Version          string                    `json:"version"` // "1.0"
+	SessionName      string                    `json:"session_name"`
+	Username         string                    `json:"username"` // privacy-safe display name — via identity.AttributionDisplayName(). Shared in ledger. NOT an email.
+	UserID           string                    `json:"user_id,omitempty"`
+	AgentID          string                    `json:"agent_id"`
 
 	// SessionID is the globally unique, content-bound identifier for THIS
 	// specific recording. Format: "ses_<UUIDv7>". Populated at session

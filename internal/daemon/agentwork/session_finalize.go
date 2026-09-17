@@ -3,6 +3,8 @@ package agentwork
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,8 +16,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	procutil "github.com/sageox/ox/internal/proc"
 
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/fileutil"
@@ -25,6 +28,8 @@ import (
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/sessionpublication"
+	"github.com/sageox/ox/internal/sessionregistration"
 	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/sageox/ox/pkg/summaryeval"
 )
@@ -75,7 +80,8 @@ type SessionFinalizePayload struct {
 
 	// storedSession is populated by BuildPrompt and reused by ProcessResult
 	// to avoid reading raw.jsonl twice.
-	storedSession *session.StoredSession `json:"-"`
+	storedSession     *session.StoredSession `json:"-"`
+	expectedRawDigest string                 `json:"-"`
 
 	// prefilterSummary holds a deterministic summary built by
 	// sessionsummary.MaybeBuildSkipSummary when BuildPrompt determined
@@ -322,6 +328,15 @@ func (h *SessionFinalizeHandler) Cleanup(ledgerPath string) {
 // and moved to ledgerPath/sessions/ after finalization/upload. XDG cache paths
 // are also scanned for sessions written by older ox versions or different environments.
 func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) {
+	if h.projectRoot != "" && !h.skipGit {
+		// This pass runs before runner authentication, just like raw publication.
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		if err := sessionregistration.RetryPending(ctx, ledgerPath, endpoint.GetForProject(h.projectRoot), filepath.Base(ledgerPath)); err != nil {
+			h.logger.Debug("session registration pending", "error", err)
+		}
+		cancel()
+	}
+
 	// deduplicate across all scan dirs (prefer earlier-found copy)
 	seen := make(map[string]bool)
 	var items []*WorkItem
@@ -387,7 +402,7 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]*WorkItem, error) {
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read sessions dir: %w", err)
@@ -406,6 +421,9 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		}
 
 		sessionDir := filepath.Join(sessionsDir, name)
+		if err := session.CheckImportPublication(ledgerPath, sessionDir); err != nil {
+			continue
+		}
 		rawPath := filepath.Join(sessionDir, artifactRaw)
 
 		// Never touch a draft placeholder (ADR-029). It is an in-progress
@@ -494,8 +512,15 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 
 		// skip raw.jsonl files with zero substantive entries (header-only)
 		if !session.HasSubstantiveEntries(rawPath) {
-			h.logger.Debug("skipping header-only session", "session", name)
+			h.logger.Error("capture failed: session has no substantive entries; native source retained for recovery", "session", name)
 			continue
+		}
+
+		if isInLedgerCacheDir(sessionDir, ledgerPath) && !h.skipGit {
+			if err := h.publishRawPending(&SessionFinalizePayload{SessionDir: sessionDir, RawPath: rawPath, LedgerPath: ledgerPath}); err != nil {
+				h.logger.Warn("raw session upload pending", "session", name, "error", err)
+				continue
+			}
 		}
 
 		missing := missingArtifacts(sessionDir)
@@ -654,6 +679,9 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			}
 
 			sessionDir := filepath.Join(sessionsDir, name)
+			if err := session.CheckImportPublication(ledgerPath, sessionDir); err != nil {
+				continue
+			}
 
 			// Never treat a draft placeholder as an orphan to recover, and fail
 			// CLOSED on an unreadable meta.json. This is the other detection
@@ -791,14 +819,29 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 		return RunRequest{}, err
 	}
 
+	if err := session.CheckImportPublication(payload.LedgerPath, payload.SessionDir); err != nil {
+		return RunRequest{}, err
+	}
+	if err := checkNativeCaptureReady(payload.SessionDir); err != nil {
+		return RunRequest{}, err
+	}
 	if payload.UploadOnly {
 		return RunRequest{SkipLLM: true}, nil
 	}
 
+	before, err := summarySourceDigest(payload.RawPath)
+	if err != nil {
+		return RunRequest{}, err
+	}
 	stored, err := session.ReadSessionFromPath(payload.RawPath)
 	if err != nil {
 		return RunRequest{}, fmt.Errorf("read session %s: %w", payload.RawPath, err)
 	}
+	after, err := summarySourceDigest(payload.RawPath)
+	if err != nil || before != after {
+		return RunRequest{}, fmt.Errorf("summary input changed while reading")
+	}
+	payload.expectedRawDigest = before
 
 	// validate session data quality
 	if warnings := validateStoredEntries(stored.Entries, h.logger); len(warnings) > 0 {
@@ -903,6 +946,43 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	if err != nil {
 		return err
 	}
+	return session.WithPublicationLock(context.Background(), payload.LedgerPath, filepath.Base(payload.SessionDir), func() error {
+		if err := session.CheckImportPublication(payload.LedgerPath, payload.SessionDir); err != nil {
+			return err
+		}
+		if err := checkNativeCaptureReady(payload.SessionDir); err != nil {
+			return err
+		}
+		if payload.expectedRawDigest != "" {
+			current, err := summarySourceDigest(payload.RawPath)
+			if err != nil || current != payload.expectedRawDigest {
+				return fmt.Errorf("summary input was replaced; retry against current transcript")
+			}
+		}
+		return h.processResultLocked(item, result)
+	})
+}
+
+// The digest pins the LLM input across an append-only import. The publication
+// lock then keeps a replacement from racing artifact writes and the commit.
+func summarySourceDigest(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func (h *SessionFinalizeHandler) processResultLocked(item *WorkItem, result *RunResult) error {
+	payload, err := extractPayload(item)
+	if err != nil {
+		return err
+	}
 
 	if payload.UploadOnly {
 		return h.processUploadOnly(payload)
@@ -974,7 +1054,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 				"exit_code", result.ExitCode,
 				"output_len", len(llmOutput),
 			)
-			return nil
+			return fmt.Errorf("summarization worker exited with status %d", result.ExitCode)
 		}
 
 		// parse LLM output into SummarizeResponse. Track whether we produced a real
@@ -1150,37 +1230,14 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		disposition = session.QualityUpload
 	}
 
-	if disposition == session.QualityDiscard {
-		if isGitTrackedLedgerSession(payload.SessionDir, payload.LedgerPath) {
-			// The session already lives in the ledger's git-tracked
-			// sessions/ tree — discard-by-deletion is broken both ways
-			// there: an uncommitted deletion is resurrected by the next
-			// pull/checkout (so anti-entropy re-detects it forever), and
-			// an auto-committed deletion would erase teammates' shared
-			// session history. Finalize it in place instead: keep the
-			// content, write the skip summary and a clean meta.json
-			// (SummaryStatus=ok) so every machine stops re-detecting it.
-			if strings.TrimSpace(summaryResp.Title) == "" {
-				summaryResp.Title = "Brief session" // same default as the prefilter
-			}
-			h.logger.Info("skip-quality session already on ledger, finalizing in place",
-				"session", sessionName,
-				"quality_category", summaryResp.QualityCategory,
-				"reason", summaryResp.ScoreReason,
-			)
-			disposition = session.QualityUpload
-		} else {
-			h.logger.Info("session below discard threshold, removing",
-				"session", sessionName,
-				"quality_score", summaryResp.QualityScore,
-				"threshold", h.qualityDiscardThreshold,
-				"reason", summaryResp.ScoreReason,
-			)
-			if err := os.RemoveAll(payload.SessionDir); err != nil {
-				h.logger.Warn("failed to remove low-quality session", "session", sessionName, "err", err)
-			}
-			return nil
+	if disposition == session.QualityDiscard || disposition == session.QualityLocalOnly {
+		// Quality is annotation, never authorization to erase a transcript or
+		// repeatedly ask an LLM to rejudge the same short conversation.
+		if strings.TrimSpace(summaryResp.Title) == "" {
+			summaryResp.Title = "Brief session"
 		}
+		h.logger.Info("retaining session with low-quality summary annotation", "session", sessionName)
+		disposition = session.QualityUpload
 	}
 
 	// use cached session from BuildPrompt, fall back to re-reading
@@ -1192,6 +1249,10 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 			h.logger.Warn("could not read session for export", "err", readErr)
 			return nil
 		}
+	}
+
+	if len(stored.Entries) == 0 {
+		return fmt.Errorf("capture failed: no substantive entries")
 	}
 
 	// generate all artifacts via shared path
@@ -1243,7 +1304,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	fileRefs, err := h.writeMetaAndUploadLFS(payload, stored, summaryResp)
 	if err != nil {
 		h.logger.Warn("session finalize aborted to preserve existing meta.json invariants", "session", sessionName, "err", err)
-		return nil
+		return err
 	}
 
 	// stage in ledger/sessions/ if the session is still in the cache dir
@@ -1476,14 +1537,12 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	ep := endpoint.GetForProject(h.projectRoot)
 	client, err := lfs.NewClientFromLedger(payload.LedgerPath, ep)
 	if err != nil {
-		h.logger.Warn("LFS client creation failed, committing raw content as fallback", "session", sessionName, "err", err)
-		return nil, nil
+		return nil, fmt.Errorf("LFS client creation: %w", err)
 	}
 
 	fileRefs, err := lfs.UploadSessionFiles(client, payload.SessionDir, h.logger)
 	if err != nil {
-		h.logger.Warn("LFS upload failed, committing raw content as fallback", "session", sessionName, "err", err)
-		return nil, nil
+		return nil, fmt.Errorf("LFS upload: %w", err)
 	}
 
 	// update meta.json with LFS file references under the shared advisory
@@ -1567,6 +1626,22 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 	}
 
 	sessionName := filepath.Base(payload.SessionDir)
+	source, err := session.ReadCaptureSource(payload.SessionDir)
+	if err != nil {
+		return "", err
+	}
+	if source == nil {
+		meta, metaErr := lfs.ReadSessionMeta(payload.SessionDir)
+		if metaErr != nil && !errors.Is(metaErr, os.ErrNotExist) {
+			return "", metaErr
+		}
+		if meta != nil {
+			source = meta.Source
+		}
+	}
+	if err := session.CheckCapturePublication(context.Background(), payload.LedgerPath, sessionName, filepath.Join(payload.SessionDir, "raw.jsonl"), source); err != nil {
+		return "", err
+	}
 	destDir := filepath.Join(payload.LedgerPath, "sessions", sessionName)
 	cacheDir := payload.SessionDir
 	if !fromCache {
@@ -1616,7 +1691,7 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 	}
 
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		src := filepath.Join(payload.SessionDir, entry.Name())
@@ -1664,11 +1739,11 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 		ep := endpoint.GetForProject(h.projectRoot)
 		client, err := lfs.NewClientFromLedger(payload.LedgerPath, ep)
 		if err != nil {
-			h.logger.Warn("upload-only: LFS client creation failed, committing raw content", "session", sessionName, "err", err)
+			return fmt.Errorf("upload-only LFS client: %w", err)
 		} else {
 			refs, err := lfs.UploadSessionFiles(client, payload.SessionDir, h.logger)
 			if err != nil {
-				h.logger.Warn("upload-only: LFS upload failed, committing raw content", "session", sessionName, "err", err)
+				return fmt.Errorf("upload-only LFS upload: %w", err)
 			} else {
 				fileRefs = refs
 				// update meta.json with LFS refs. Goes through
@@ -1802,7 +1877,25 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		if _, err := lfs.WritePointerFiles(payload.SessionDir, lfs.AssertUploadedManifest(fileRefs)); err != nil {
 			return fmt.Errorf("write LFS pointer files before commit: %w", err)
 		}
-		if err := h.runGit(ledgerPath, "add", "--sparse", relDir+"/"); err != nil {
+		scope := []string{relDir + "/"}
+		meta, err := lfs.ReadSessionMeta(payload.SessionDir)
+		if err != nil {
+			return err
+		}
+		if meta.Source != nil {
+			if err := gitutil.CheckSourcePublication(context.Background(), ledgerPath); err != nil {
+				return err
+			}
+			sourcePath, err := session.RecordSourceCoverage(ledgerPath, sessionName, meta.Files["raw.jsonl"].BareOID(), meta.Source)
+			if err != nil {
+				return err
+			}
+			scope = append(scope, sourcePath)
+			if err := sessionregistration.Enqueue(ledgerPath, sessionregistration.Job{Endpoint: endpoint.GetForProject(h.projectRoot), RepoID: meta.RepoID, SessionName: sessionName}); err != nil {
+				return err
+			}
+		}
+		if err := h.runGit(ledgerPath, append([]string{"add", "--sparse", "--"}, scope...)...); err != nil {
 			return fmt.Errorf("git add: %w", err)
 		}
 		if h.afterStageTestHook != nil {
@@ -1813,8 +1906,7 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		// (or a stray concurrent writer) that rewrites a file in relDir between
 		// the git add above and here cannot ride along into this commit; the
 		// bytes published are exactly the bytes staged.
-		var err error
-		staged, err = gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, msg, relDir+"/")
+		staged, err = gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, msg, scope...)
 		if err != nil {
 			return fmt.Errorf("commit session snapshot: %w", err)
 		}
@@ -1849,6 +1941,24 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		h.logger.Warn("git push failed (non-fatal)", "err", err)
 		return false
 	}
+	if !h.skipLFS {
+		meta, err := lfs.ReadSessionMeta(payload.SessionDir)
+		if err != nil {
+			h.logger.Warn("publication metadata unreadable", "err", err)
+			return false
+		}
+		if meta.Source != nil {
+			client, err := lfs.NewClientFromLedger(ledgerPath, ep)
+			if err == nil {
+				err = sessionpublication.Verify(context.Background(), ledgerPath, sessionName, meta, client)
+			}
+			if err != nil {
+				h.logger.Warn("publication verification pending", "session", sessionName, "err", err)
+				return false
+			}
+		}
+	}
+
 	return true
 }
 
@@ -1868,13 +1978,13 @@ func (h *SessionFinalizeHandler) synthesizeMeta(sessionDir, sessionName string) 
 
 	var agentID, agentType, username, headerSessionID, continuedFromSessionID string
 	var createdAt time.Time
-	if stored, err := session.ReadSessionFromPath(rawPath); err == nil && stored != nil && stored.Meta != nil {
-		agentID = stored.Meta.AgentID
-		agentType = stored.Meta.AgentType
-		username = stored.Meta.Username
-		createdAt = stored.Meta.CreatedAt
-		headerSessionID = stored.Meta.SessionID
-		continuedFromSessionID = stored.Meta.ContinuedFromSessionID
+	if header, err := session.ReadSessionHeader(rawPath); err == nil && header != nil {
+		agentID = header.AgentID
+		agentType = header.AgentType
+		username = header.Username
+		createdAt = header.CreatedAt
+		headerSessionID = header.SessionID
+		continuedFromSessionID = header.ContinuedFromSessionID
 	}
 	// Crash-safe carrier read: a recording written by an older writer can fail
 	// to parse into StoreMeta while its raw first line still carries the ID.
@@ -1923,11 +2033,7 @@ func (h *SessionFinalizeHandler) runGit(repoPath string, args ...string) error {
 // leave a partial cache file that detection would prefer over the source.
 // Session content stays owner-only, including when an existing copy is replaced.
 func copySessionFile(src, dst string) error {
-	content, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return fileutil.AtomicWriteBytes(dst, content, 0o600)
+	return fileutil.AtomicCopyFile(dst, src, 0o600)
 }
 
 // extractPayload type-asserts the work item payload.
@@ -1961,9 +2067,10 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	}
 
 	var state struct {
-		StartedAt time.Time `json:"started_at"`
-		AgentID   string    `json:"agent_id"`
-		ParentPID int       `json:"parent_pid"`
+		StartedAt time.Time  `json:"started_at"`
+		StoppedAt *time.Time `json:"stopped_at,omitempty"`
+		AgentID   string     `json:"agent_id"`
+		ParentPID int        `json:"parent_pid"`
 	}
 	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
 		age = time.Since(info.ModTime())
@@ -1971,6 +2078,10 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 			return true, age, "time_threshold"
 		}
 		return false, age, "time_not_reached"
+	}
+
+	if state.StoppedAt != nil {
+		return true, time.Since(*state.StoppedAt), "explicit_stop"
 	}
 
 	// determine age
@@ -1994,8 +2105,7 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	// if we have a PID, check liveness — dead process = stale immediately,
 	// live process = never stale (wait for next cycle)
 	if pid > 0 {
-		proc, procErr := os.FindProcess(pid)
-		if procErr != nil || proc.Signal(syscall.Signal(0)) != nil {
+		if !procutil.IsAlive(pid) {
 			// grace period: young recordings with dead PIDs may have stored a
 			// transient shell PID. Don't mark stale until grace period expires.
 			if age < session.GhostGracePeriod {
@@ -2024,7 +2134,7 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 func missingArtifacts(sessionDir string) []string {
 	var missing []string
 	for _, name := range requiredArtifacts {
-		if _, err := os.Stat(filepath.Join(sessionDir, name)); os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(sessionDir, name)); errors.Is(err, os.ErrNotExist) {
 			missing = append(missing, name)
 		}
 	}
@@ -2203,8 +2313,20 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		return false, fmt.Errorf("parse recording state: %w", err)
 	}
 
+	if err := session.RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
+		return false, err
+	}
 	hasRaw := session.HasSubstantiveEntries(rawPath)
-	if state.StoppedAt != nil || (hasRaw && state.WatchMode != "tail") {
+	if (state.StoppedAt != nil && !state.CaptureDrainPending) || (hasRaw && state.WatchMode != "tail" && !state.CaptureDrainPending && (state.AdapterName != "codex" || state.AgentSessionID == "")) {
+		// A hook-populated raw file still needs native provenance before its
+		// only reliable cursor (the recording marker) is retired. Never infer
+		// that cursor from the current native file size.
+		if hasRaw {
+			state.SessionPath = sessionDir
+			if err := session.SaveCaptureSource(&state); err != nil {
+				return false, err
+			}
+		}
 		return hasRaw, nil // CLI stop already selected and masked the recording
 	}
 	if lfs.IsPointerFile(rawPath) {
@@ -2293,6 +2415,9 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		}
 		var nextOffset int64
 		rawEntries, nextOffset, err = reader.ReadFromOffset(state.SessionFile, offset)
+		if err == nil {
+			state.SourceOffset = nextOffset
+		}
 		if err == nil && (nextOffset < offset || (len(rawEntries) > 0 && nextOffset == offset)) {
 			return false, fmt.Errorf("native recovery cursor did not advance: offset=%d returned=%d", offset, nextOffset)
 		}
@@ -2307,10 +2432,13 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 
 	var filtered []adapters.RawEntry
 	for _, e := range rawEntries {
-		if !e.Timestamp.IsZero() && e.Timestamp.Before(state.StartedAt) {
+		if state.AdapterName != "codex" && state.WatchMode != "tail" && !e.Timestamp.IsZero() && e.Timestamp.Before(state.StartedAt) {
 			continue
 		}
 		filtered = append(filtered, e)
+	}
+	if err := session.SaveCaptureSource(&state); err != nil {
+		return false, err
 	}
 	entries := session.ConvertRawEntries(filtered)
 	ranges := session.BuildSegmentRanges(state.Lifecycle)
@@ -2346,6 +2474,9 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	}
 	defer rw.Close()
 	defer os.Remove(tmpPath)
+	if err := rw.RestoreCaptureRedaction(&state, rawPath); err != nil {
+		return false, err
+	}
 	if err := rw.WriteRaw(header); err != nil {
 		return false, err
 	}
@@ -2391,14 +2522,7 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 
 // isPIDAlive checks if a process with the given PID exists.
 func isPIDAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	return procutil.IsAlive(pid)
 }
 
 // maybeRunJudge runs the LLM-as-judge scorer against a validated
@@ -2632,4 +2756,24 @@ func (h *SessionFinalizeHandler) mergeFileRefs(
 		merged[k] = v
 	}
 	return merged
+}
+
+// SessionEnd queues work before anti-entropy drains and retires the native
+// cursor. That direct IPC path must not publish or summarize an incomplete raw.
+func checkNativeCaptureReady(dir string) error {
+	b, err := os.ReadFile(filepath.Join(dir, recordingMarker))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var state session.RecordingState
+	if err = json.Unmarshal(b, &state); err != nil {
+		return err
+	}
+	if state.AdapterName == "codex" && state.AgentSessionID != "" {
+		return fmt.Errorf("native capture recovery pending; preserve recording cursor before finalization")
+	}
+	return nil
 }

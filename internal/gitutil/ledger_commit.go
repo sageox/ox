@@ -58,6 +58,27 @@ import (
 // Returns committed=false with nil error when the snapshot equals the parent's
 // tree — the "nothing to commit" idempotency callers rely on.
 func CommitLedgerSnapshot(ctx context.Context, repoPath, message string, pathspecs ...string) (committed bool, err error) {
+	return commitLedgerSnapshot(ctx, repoPath, message, nil, pathspecs...)
+}
+
+// CommitLedgerSessionDeletion authorizes only the exact sessions the caller's
+// deletion flow selected. It never exempts source receipts or unrelated files,
+// and retains the immutable scoped-tree validation and branch compare-and-swap.
+func CommitLedgerSessionDeletion(ctx context.Context, repoPath, message string, sessionNames []string, pathspecs ...string) (bool, error) {
+	if len(sessionNames) == 0 || len(pathspecs) == 0 {
+		return false, fmt.Errorf("explicit session deletion requires scoped session names")
+	}
+	var allowed []string
+	for _, name := range sessionNames {
+		if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00\r\n") {
+			return false, fmt.Errorf("invalid explicit session deletion name")
+		}
+		allowed = append(allowed, "sessions/"+name+"/")
+	}
+	return commitLedgerSnapshot(ctx, repoPath, message, allowed, pathspecs...)
+}
+
+func commitLedgerSnapshot(ctx context.Context, repoPath, message string, allowedDeletions []string, pathspecs ...string) (committed bool, err error) {
 	// Never mutate the ledger mid-rebase: moving the branch ref under a rebase
 	// consumes the replay step (see .claude/rules/cache-only-design.md).
 	if err := IsSafeForGitOps(repoPath); err != nil {
@@ -96,7 +117,7 @@ func CommitLedgerSnapshot(ctx context.Context, repoPath, message string, pathspe
 	if err := validateLedgerTree(ctx, repoPath, parent, tree, pathspecs...); err != nil {
 		return false, err
 	}
-	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree); err != nil {
+	if err := assertNoSacredMassDeletion(ctx, repoPath, parent, tree, allowedDeletions...); err != nil {
 		return false, err
 	}
 	if err := commitTreeToBranch(ctx, repoPath, tree, parent, message); err != nil {
@@ -168,17 +189,36 @@ func writeScopedIndexTree(ctx context.Context, repoPath, parent string, pathspec
 // Fail-closed, matching validateLedgerTree: an unborn branch (parent=="") has
 // no deletions and passes; if the diff itself cannot be computed the caller
 // must NOT commit, so the error propagates rather than defaulting to "safe".
-func assertNoSacredMassDeletion(ctx context.Context, repoPath, parent, tree string) error {
+func assertNoSacredMassDeletion(ctx context.Context, repoPath, parent, tree string, allowedDeletions ...string) error {
 	if parent == "" {
 		return nil // first commit: nothing pre-existing to delete
 	}
 	out, err := cleanGitOutput(ctx, repoPath,
-		"diff-tree", "--no-commit-id", "--name-only", "-r", "--diff-filter=D", parent, tree)
+		"diff-tree", "--no-commit-id", "--name-only", "-z", "-r", "--diff-filter=D", parent, tree)
 	if err != nil {
 		return fmt.Errorf("sacred mass-delete guard: git diff-tree %s..%s: %w",
 			shortOID(parent), shortOID(tree), err)
 	}
-	deleted := sacred.Filter(strings.Split(string(out), "\n"))
+	paths := strings.Split(string(out), "\x00")
+	if len(allowedDeletions) > 0 {
+		for _, path := range paths {
+			if path == "" {
+				continue
+			}
+			allowed := false
+			for _, prefix := range allowedDeletions {
+				if strings.HasPrefix(path, prefix) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return fmt.Errorf("explicit session deletion includes unselected path %q", path)
+			}
+		}
+		return nil
+	}
+	deleted := sacred.Filter(paths)
 	if len(deleted) <= sacred.MassDeleteThreshold {
 		return nil
 	}
