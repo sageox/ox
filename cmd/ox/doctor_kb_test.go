@@ -238,7 +238,8 @@ func TestCheckKBOrphans_AutoFixTimedOutButDaemonFinished(t *testing.T) {
 	result := checkKBOrphans(true)
 
 	assert.True(t, result.passed && !result.warning, "disk shows the orphan gone; got %+v", result)
-	assert.Equal(t, "triaged 1 orphan(s) to .trash/", result.message)
+	assert.Equal(t, "1 orphan(s) no longer in the kb root", result.message,
+		"the move-aside was never confirmed, so the message must not claim it")
 	assert.NoDirExists(t, orphan)
 }
 

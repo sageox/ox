@@ -425,6 +425,14 @@ func checkKBOrphans(fix bool) checkResult {
 			strings.Join(stillPresent, ", "))
 	}
 
+	if gcErr != nil {
+		// The daemon kept going after we stopped waiting for its response.
+		// Report what disk shows, not the move-aside we never saw confirmed.
+		kbHookLogger().Info("kb_doctor orphan autofix landed after the call failed",
+			"error", gcErr, "gone", len(orphans))
+		return PassedCheck(name, fmt.Sprintf("%d orphan(s) no longer in the kb root", len(orphans)))
+	}
+
 	kbHookLogger().Info("kb_doctor orphan autofix complete", "moved", len(orphans))
 	return PassedCheck(name, fmt.Sprintf("triaged %d orphan(s) to .trash/", len(orphans)))
 }
