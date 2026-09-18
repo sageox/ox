@@ -52,7 +52,7 @@ func commitHookBatchLeavingJournal(t *testing.T, projectRoot, agentID string) (s
 		if err = writer.SealAppend(); err != nil {
 			return err
 		}
-		return session.UpdateRecordingStateAt(stale.SessionPath, func(current *session.RecordingState) {
+		return session.UpdateRecordingStateAt(stale.SessionPath, stale.SessionID, func(current *session.RecordingState) {
 			current.SourceOffset = nextOffset
 			current.EntryCount++
 		})
@@ -175,7 +175,7 @@ func TestRecoverRefusesARecordingRestartedWhileItWaited(t *testing.T) {
 			stale, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 			require.NoError(t, err)
 			restartedID := stale.SessionID + "-restarted"
-			require.NoError(t, session.UpdateRecordingStateAt(stale.SessionPath, func(current *session.RecordingState) {
+			require.NoError(t, session.UpdateRecordingStateAt(stale.SessionPath, stale.SessionID, func(current *session.RecordingState) {
 				current.SessionID = restartedID
 			}))
 
@@ -277,7 +277,7 @@ func TestDiscardingACachedRecordingDiscardsOnlyTheOneThatWasOffered(t *testing.T
 		require.NoError(t, err)
 		rawPath := filepath.Join(offered.SessionPath, "raw.jsonl")
 		restartedID := offered.SessionID + "-restarted"
-		require.NoError(t, session.UpdateRecordingStateAt(offered.SessionPath, func(current *session.RecordingState) {
+		require.NoError(t, session.UpdateRecordingStateAt(offered.SessionPath, offered.SessionID, func(current *session.RecordingState) {
 			current.SessionID = restartedID
 		}))
 
@@ -384,7 +384,7 @@ func TestClearingAProcessedRecordingLeavesItsReplacementAlone(t *testing.T) {
 	processed, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	require.NoError(t, err)
 	replacementID := processed.SessionID + "-restarted"
-	require.NoError(t, session.UpdateRecordingStateAt(processed.SessionPath, func(current *session.RecordingState) {
+	require.NoError(t, session.UpdateRecordingStateAt(processed.SessionPath, processed.SessionID, func(current *session.RecordingState) {
 		current.SessionID = replacementID
 	}))
 
@@ -420,7 +420,7 @@ func TestRegistrationOutcomeDoesNotRevertACommittedCaptureCheckpoint(t *testing.
 
 	// A hook commits while the registration signal is still in flight.
 	committedOffset := stale.SourceOffset + 100
-	require.NoError(t, session.UpdateRecordingStateAt(stale.SessionPath, func(current *session.RecordingState) {
+	require.NoError(t, session.UpdateRecordingStateAt(stale.SessionPath, stale.SessionID, func(current *session.RecordingState) {
 		current.SourceOffset = committedOffset
 		current.PendingCommandRedactions = map[string]string{"call_1": "aws-secret-key"}
 	}))
@@ -436,6 +436,32 @@ func TestRegistrationOutcomeDoesNotRevertACommittedCaptureCheckpoint(t *testing.
 	require.Equal(t, committedOffset, latest.SourceOffset, "registration bookkeeping regressed the capture cursor")
 	require.Equal(t, map[string]string{"call_1": "aws-secret-key"}, latest.PendingCommandRedactions,
 		"registration bookkeeping forgot a pending credential redaction")
+}
+
+// TestRegistrationOutcomeDoesNotLandOnAReplacementRecording verifies the outcome
+// goes to the session the signal was sent for. If the agent stopped and restarted
+// while the signal was in flight, the new recording sits at the same
+// minute-granular path.
+// Failure prevented: the new session inheriting "confirmed" from the old one, so
+// its own registration never fires and its /c/ link never resolves.
+func TestRegistrationOutcomeDoesNotLandOnAReplacementRecording(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	stale, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	replacementID := stale.SessionID + "-restarted"
+	require.NoError(t, session.UpdateRecordingStateAt(stale.SessionPath, stale.SessionID, func(current *session.RecordingState) {
+		current.SessionID = replacementID
+		current.LifecycleRegistrationState = "deferred"
+	}))
+
+	stale.LifecycleRegistrationState = "confirmed"
+	persistLifecycleRegistration(stale)
+
+	replacement, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.Equal(t, replacementID, replacement.SessionID)
+	require.Equal(t, "deferred", replacement.LifecycleRegistrationState,
+		"the old session's registration outcome landed on the recording that replaced it")
 }
 
 // TestRegistrationOutcomeDoesNotResurrectAStoppedRecording covers the other way
@@ -506,7 +532,7 @@ func TestLockedStateUpdatesSurfaceWhatTheyCannotApply(t *testing.T) {
 	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	require.NoError(t, err)
 
-	require.ErrorIs(t, session.UpdateRecordingStateAt("", func(*session.RecordingState) {}), session.ErrEmptyPath)
+	require.ErrorIs(t, session.UpdateRecordingStateAt("", "ses_any", func(*session.RecordingState) {}), session.ErrEmptyPath)
 
 	require.NoError(t, os.WriteFile(filepath.Join(state.SessionPath, ".recording.json"), []byte("{torn"), 0o600))
 	require.ErrorContains(t, session.AppendProducedPlan(projectRoot, state.SessionPath, "plan-slug"), "update recording state")

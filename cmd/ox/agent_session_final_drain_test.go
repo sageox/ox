@@ -76,7 +76,7 @@ func TestFinalDrainKeepsTheSourceFileItsCursorBelongsTo(t *testing.T) {
 	require.NotEmpty(t, stale.SessionFile)
 
 	rediscovered := filepath.Join(t.TempDir(), "rediscovered.jsonl")
-	require.NoError(t, session.UpdateRecordingStateAt(stale.SessionPath, func(current *session.RecordingState) {
+	require.NoError(t, session.UpdateRecordingStateAt(stale.SessionPath, stale.SessionID, func(current *session.RecordingState) {
 		current.SessionFile = rediscovered
 		current.SourceOffset = 4096
 	}))

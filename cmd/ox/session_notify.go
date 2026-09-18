@@ -87,8 +87,13 @@ func notifySessionStartedAsync(projectRoot string, state *session.RecordingState
 // this runs on a live recording from the per-turn path: saving the whole copy
 // would revert any capture cursor or pending credential-redaction checkpoint a
 // hook or watcher committed while the signal was in flight.
+//
+// The outcome belongs to the session the signal was sent FOR. If the agent
+// stopped and restarted while it was in flight, the new recording sits at the
+// same minute-granular path and must not inherit it: "confirmed" would suppress
+// the new session's own registration, and its /c/ link would never resolve.
 func persistLifecycleRegistration(state *session.RecordingState) {
-	err := session.UpdateRecordingStateAt(state.SessionPath, func(current *session.RecordingState) {
+	err := session.UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(current *session.RecordingState) {
 		current.LifecycleRegistrationState = state.LifecycleRegistrationState
 		current.LifecycleRegistrationError = state.LifecycleRegistrationError
 	})

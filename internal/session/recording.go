@@ -27,6 +27,11 @@ var (
 
 	// ErrNoLedger is returned when session recording is attempted but no ledger is configured
 	ErrNoLedger = errors.New("no ledger configured for this project")
+
+	// ErrRecordingChanged is returned when the recording at a session path is no
+	// longer the one the caller loaded. Session names are minute-granular, so a
+	// recording restarted within the minute reuses the path of the one it replaced.
+	ErrRecordingChanged = errors.New("recording changed")
 )
 
 const recordingFile = ".recording.json"
@@ -1224,17 +1229,23 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	return state, nil
 }
 
-// UpdateRecordingStateAt applies updateFn to the recording stored under
+// UpdateRecordingStateAt applies updateFn to the recording sessionID stored under
 // sessionPath, as one read-modify-write under the state lock. Use it when the
-// caller already holds a loaded state: addressing the file by path cannot
-// retarget a different recording the way an agent lookup can. A recording that
-// has already stopped returns an error satisfying errors.Is(err, os.ErrNotExist)
-// and is never recreated.
-func UpdateRecordingStateAt(sessionPath string, updateFn func(*RecordingState)) error {
+// caller already holds a loaded state, and pass that state's identity: the caller
+// may have been away for a while (a network signal, a prompt), and neither an
+// agent lookup nor the path alone says the recording is still the same one.
+//
+// A recording that has stopped returns an error satisfying
+// errors.Is(err, os.ErrNotExist) and is never recreated; one that was replaced
+// returns ErrRecordingChanged and is left untouched.
+func UpdateRecordingStateAt(sessionPath, sessionID string, updateFn func(*RecordingState)) error {
 	if sessionPath == "" {
 		return fmt.Errorf("%w: session path", ErrEmptyPath)
 	}
 	return MutateRecordingStateFile(recordingStatePath(sessionPath), func(current *RecordingState) error {
+		if current.SessionID != sessionID {
+			return ErrRecordingChanged
+		}
 		updateFn(current)
 		return nil
 	})

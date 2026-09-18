@@ -70,7 +70,7 @@ func TestLiveRecordingWritersWaitForAnInFlightCaptureCommit(t *testing.T) {
 		{
 			name: "path-addressed update",
 			write: func(_ string, state *RecordingState) error {
-				return UpdateRecordingStateAt(state.SessionPath, func(current *RecordingState) {
+				return UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(current *RecordingState) {
 					current.LifecycleRegistrationState = "confirmed"
 				})
 			},
@@ -145,15 +145,48 @@ func TestPlanReverseLinkIsIdempotentAndNeverResurrects(t *testing.T) {
 func TestLockedUpdatesSurfaceATargetTheyCannotUse(t *testing.T) {
 	projectRoot, state := startLockedUpdateRecording(t)
 
-	require.ErrorIs(t, UpdateRecordingStateAt("", func(*RecordingState) {}), ErrEmptyPath)
+	require.ErrorIs(t, UpdateRecordingStateAt("", "ses_any", func(*RecordingState) {}), ErrEmptyPath)
 	require.ErrorIs(t, ClearRecordingStateAt("", state.SessionID), ErrEmptyPath)
 
 	require.NoError(t, os.WriteFile(recordingStatePath(state.SessionPath), []byte("{torn"), 0o600))
 	require.ErrorContains(t, AppendProducedPlan(projectRoot, state.SessionPath, "plan-slug"), "update recording state")
-	require.Error(t, UpdateRecordingStateAt(state.SessionPath, func(*RecordingState) {}))
+	require.Error(t, UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(*RecordingState) {}))
 
 	gone := filepath.Join(t.TempDir(), "never-recorded")
-	require.ErrorIs(t, UpdateRecordingStateAt(gone, func(*RecordingState) {}), os.ErrNotExist)
+	require.ErrorIs(t, UpdateRecordingStateAt(gone, "ses_any", func(*RecordingState) {}), os.ErrNotExist)
+}
+
+// TestUpdateLeavesAReplacementRecordingUntouched verifies an update names the
+// recording it is for. The caller may have been away (a network signal, a
+// prompt), and session names are minute-granular: a recording restarted within
+// the minute sits at the very path the caller still holds.
+// Failure prevented: bookkeeping about a finished session written onto the new
+// one that replaced it.
+func TestUpdateLeavesAReplacementRecordingUntouched(t *testing.T) {
+	projectRoot, state := startLockedUpdateRecording(t)
+	replacementID := state.SessionID + "-restarted"
+	require.NoError(t, UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(current *RecordingState) {
+		current.SessionID = replacementID
+		current.LifecycleRegistrationState = "deferred"
+	}))
+
+	err := UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(current *RecordingState) {
+		current.LifecycleRegistrationState = "confirmed"
+	})
+	require.ErrorIs(t, err, ErrRecordingChanged)
+
+	replacement, loadErr := LoadRecordingStateForAgent(projectRoot, state.AgentID)
+	require.NoError(t, loadErr)
+	require.Equal(t, replacementID, replacement.SessionID)
+	require.Equal(t, "deferred", replacement.LifecycleRegistrationState)
+
+	// Negative control: the same update DOES land when it names the recording there.
+	require.NoError(t, UpdateRecordingStateAt(state.SessionPath, replacementID, func(current *RecordingState) {
+		current.LifecycleRegistrationState = "confirmed"
+	}))
+	replacement, loadErr = LoadRecordingStateForAgent(projectRoot, state.AgentID)
+	require.NoError(t, loadErr)
+	require.Equal(t, "confirmed", replacement.LifecycleRegistrationState)
 }
 
 // --- Clearing names the recording it clears ---
@@ -166,7 +199,7 @@ func TestLockedUpdatesSurfaceATargetTheyCannotUse(t *testing.T) {
 func TestClearNamesTheRecordingItRemoves(t *testing.T) {
 	projectRoot, state := startLockedUpdateRecording(t)
 	replacementID := state.SessionID + "-restarted"
-	require.NoError(t, UpdateRecordingStateAt(state.SessionPath, func(current *RecordingState) {
+	require.NoError(t, UpdateRecordingStateAt(state.SessionPath, state.SessionID, func(current *RecordingState) {
 		current.SessionID = replacementID
 	}))
 
