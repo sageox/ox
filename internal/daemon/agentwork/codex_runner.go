@@ -1,11 +1,10 @@
 package agentwork
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -14,7 +13,7 @@ import (
 )
 
 // CodexRunner implements Runner using the OpenAI Codex CLI.
-// It spawns Codex in non-interactive mode with --full-auto.
+// It spawns Codex in non-interactive mode through codex exec with read-only tools.
 // CodexRunner is safe for concurrent use — each Run() call is independent.
 type CodexRunner struct {
 	binaryPath string
@@ -55,6 +54,10 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 		timeout = req.TimeoutOverride
 	}
 
+	if err := r.checkCapabilities(ctx); err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -62,67 +65,36 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 	// (potentially sensitive) session transcript does not appear in
 	// ps / /proc/<pid>/cmdline / sysctl kern.procargs2 (security finding #10).
 	// `-` as the positional prompt tells codex to read the prompt from stdin.
-	args := []string{"--full-auto", "--quiet", "-"}
+	args := []string{"exec", "--sandbox", "read-only", "--ephemeral", "--color", "never", "-c", "features.hooks=false", "-"}
 
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	cmd.Stdin = strings.NewReader(req.Prompt)
+	// Hooks are disabled above; recording is disabled independently because
+	// repository instructions may still ask the worker to run ox agent prime.
+	cmd.Env = append(os.Environ(), "OX_SESSION_RECORDING=disabled", "SAGEOX_DAEMON=false")
 	if req.WorkDir != "" {
 		cmd.Dir = req.WorkDir
 	}
 	setProcAttr(cmd)
 
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stderr pipe: %w", err)
-	}
-
+	// Drain both streams even after their limits: stopping a pipe reader can
+	// deadlock a verbose child. Reject truncated summaries rather than publish them.
+	stdout := &boundedCodexOutput{limit: 8 * 1024 * 1024}
+	stderr := &boundedCodexOutput{limit: 64 * 1024}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.WaitDelay = time.Second
 	start := time.Now()
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start codex: %w", err)
-	}
-
-	r.logger.Debug("codex process started", "pid", cmd.Process.Pid)
-
-	// read stderr in background
-	var stderrBuf []byte
-	stderrDone := make(chan struct{})
-	go func() {
-		defer close(stderrDone)
-		stderrBuf, _ = io.ReadAll(io.LimitReader(stderrPipe, 64*1024))
-	}()
-
-	// read stdout in background
-	outputCh := make(chan string, 1)
-	go func() {
-		scanner := bufio.NewScanner(stdoutPipe)
-		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		var lines []byte
-		for scanner.Scan() {
-			if len(lines) > 0 {
-				lines = append(lines, '\n')
-			}
-			lines = append(lines, scanner.Bytes()...)
-		}
-		outputCh <- string(lines)
-	}()
-
-	waitErr := cmd.Wait()
+	waitErr := cmd.Run()
 	elapsed := time.Since(start)
-
-	<-stderrDone
-	output := <-outputCh
-
-	if len(stderrBuf) > 0 {
-		r.logger.Debug("codex stderr", "output", string(stderrBuf))
-	}
+	stderrBuf := stderr.buf.Bytes()
+	output := strings.TrimSpace(stdout.buf.String())
 
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("codex timed out after %s: %w", timeout, ctx.Err())
+	}
+
+	if stdout.overflow {
+		return nil, fmt.Errorf("codex output exceeds %d bytes", stdout.limit)
 	}
 
 	exitCode := 0
@@ -146,4 +118,47 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 		ExitCode:  exitCode,
 		ModelUsed: "codex", // best-effort — coarse family attribution pending real CLI signal
 	}, nil
+}
+
+// Probe without session content before sending a prompt. Never retry with broader
+// permissions when an older installation lacks the isolation flags we require.
+func (r *CodexRunner) checkCapabilities(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, r.binaryPath, "exec", "--help")
+	output := &boundedCodexOutput{limit: 64 * 1024}
+	cmd.Stdout, cmd.Stderr = output, output
+	cmd.WaitDelay = time.Second
+	setProcAttr(cmd)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("cannot verify Codex worker isolation; update Codex and retry: %w", err)
+	}
+	if output.overflow {
+		return fmt.Errorf("cannot verify Codex worker isolation: help output exceeds limit")
+	}
+	help := output.buf.String()
+	for _, flag := range []string{"--sandbox", "--ephemeral", "--color", "--config"} {
+		if !strings.Contains(help, flag) {
+			return fmt.Errorf("codex worker requires %s; update Codex and retry", flag)
+		}
+	}
+	return nil
+}
+
+// boundedCodexOutput keeps memory bounded while continuing to drain child output.
+type boundedCodexOutput struct {
+	buf      bytes.Buffer
+	limit    int
+	overflow bool
+}
+
+func (w *boundedCodexOutput) Write(p []byte) (int, error) {
+	n := len(p)
+	remaining := w.limit - w.buf.Len()
+	if len(p) > remaining {
+		w.overflow = true
+		p = p[:remaining]
+	}
+	_, _ = w.buf.Write(p)
+	return n, nil
 }
