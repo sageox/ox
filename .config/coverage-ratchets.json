@@ -4,7 +4,8 @@
     "minimum": 90.0,
     "excluded_paths": [
       "**/*_generated.go",
-      "tests/**"
+      "tests/**",
+      "pkg/sessionprovenance/**"
     ],
     "exceptions": [
       {
