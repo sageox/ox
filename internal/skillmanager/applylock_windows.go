@@ -24,11 +24,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func platformAcquireApplyLock(path string) (unlock func(), acquired bool, err error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, false, fmt.Errorf("open skills apply lock %s: %w", path, err)
-	}
+func platformAcquireApplyLock(f *os.File) (unlock func(), acquired bool, err error) {
 	h := windows.Handle(f.Fd())
 	var overlapped windows.Overlapped
 	lockErr := windows.LockFileEx(

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -10,8 +11,10 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamskills"
 	"github.com/spf13/cobra"
@@ -492,6 +495,68 @@ func TestSkillsApprove_OneBadNameApprovesNothing(t *testing.T) {
 		"the prose-first baseline disappeared during a refused approval")
 	require.NoFileExists(t, filepath.Join(installedSkillDir(repo, "deploy"), "scripts", "run.sh"),
 		"a refused multi-name run still installed the first skill's script")
+}
+
+// TestExecuteApprovals_SerializesTheStoreTransaction proves the lock covers the
+// initial store read as well as save, reconcile, and rollback. Atomic replacement
+// alone cannot prevent two commands from loading the same snapshot and the later
+// writer discarding the earlier command's approval.
+func TestExecuteApprovals_SerializesTheStoreTransaction(t *testing.T) {
+	repo, team := stageApprovalRepo(t, "deploy", map[string]string{
+		"scripts/run.sh": "#!/bin/sh\necho deploy\n",
+	})
+	writeTeamSkillFiles(t, team, "audit", map[string]string{
+		"scripts/run.sh": "#!/bin/sh\necho audit\n",
+	})
+
+	candidates, err := skillmanager.ClassifyTeamSkills(repo)
+	require.NoError(t, err)
+	first := &teamskills.ApprovalStore{}
+	for _, candidate := range candidates {
+		if candidate.Name == "deploy" {
+			first.Approve(candidate.Name, candidate.Verdict, true)
+		}
+	}
+	require.Len(t, first.Approvals, 1)
+
+	locked := make(chan struct{})
+	writeFirst := make(chan struct{})
+	lockDone := make(chan error, 1)
+	go func() {
+		lockDone <- fileutil.WithFileLock(context.Background(), teamskills.ApprovalPath(repo), func() error {
+			close(locked)
+			<-writeFirst
+			return first.Save(repo)
+		})
+	}()
+	<-locked
+
+	approveDone := make(chan error, 1)
+	go func() {
+		_, execErr := executeApprovals(approveRequest{
+			GitRoot: repo, Names: []string{"audit"}, AllowScripts: true, AllowScriptsSet: true,
+		})
+		approveDone <- execErr
+	}()
+
+	var premature error
+	completedEarly := false
+	select {
+	case premature = <-approveDone:
+		completedEarly = true
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(writeFirst)
+	require.NoError(t, <-lockDone)
+	if completedEarly {
+		t.Fatalf("approval command bypassed the held store lock: %v", premature)
+	}
+	require.NoError(t, <-approveDone)
+
+	store, err := teamskills.LoadApprovals(repo)
+	require.NoError(t, err)
+	require.Len(t, store.Approvals, 2,
+		"the later approval overwrote the approval committed by the earlier transaction")
 }
 
 // TestSkillsApprove_ARepeatedNameIsOneDecision: `ox skills approve deploy

@@ -116,6 +116,29 @@ func TestTeamSkillSource_RunnableManifestStillWithholds(t *testing.T) {
 	require.Contains(t, decisions[0].Reason, "manifest itself")
 }
 
+// TestManifestHelpers_TreatManifestNameCaseInsensitively pins the supported
+// case-insensitive-filesystem shape. Discovery may find a manifest physically
+// named SKILL.MD; every later helper must still agree that it is the manifest,
+// preserve its bytes, and distinguish it from separately bundled scripts.
+func TestManifestHelpers_TreatManifestNameCaseInsensitively(t *testing.T) {
+	manifest := []byte("#!/bin/sh\necho manifest\n")
+	skill := teamskills.Skill{
+		Name: "deploy",
+		Files: []teamskills.File{
+			{Path: "SKILL.MD", Content: manifest},
+			{Path: "scripts/run.sh", Content: []byte("#!/bin/sh\necho bundled\n")},
+		},
+	}
+	verdict := teamskills.Classify(skill)
+
+	require.True(t, manifestIsRunnable(skill, verdict),
+		"an uppercase runnable manifest was mistaken for a droppable bundled script")
+	require.Equal(t, manifest, manifestContent(skill),
+		"an uppercase manifest produced a manifestless installation")
+	require.Equal(t, []skills.File{{Path: "SKILL.MD", Content: manifest}}, toCatalogFiles(skill, false),
+		"the approved manifest should remain while separately bundled scripts stay absent")
+}
+
 // TestTeamSkillSource_ApprovedExecutableMaterializesWithoutItsScripts.
 //
 // Approving the skill lets an agent READ its instructions. It does NOT put

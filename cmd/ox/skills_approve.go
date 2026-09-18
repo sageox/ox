@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamskills"
 	"github.com/spf13/cobra"
@@ -142,7 +144,7 @@ func runSkillsApprove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not inside a git repository")
 	}
 
-	decision, err := decideApprovals(approveRequest{
+	decision, err := executeApprovals(approveRequest{
 		GitRoot: gitRoot, Names: args, AllowScripts: allowScripts,
 		AllowScriptsSet: allowScriptsSet,
 	})
@@ -150,23 +152,42 @@ func runSkillsApprove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if decision.Changed {
-		if err := decision.Store.Save(gitRoot); err != nil {
-			// Name the file. Every read this command already did also lives under
-			// .sageox/, so a bare filesystem error here is indistinguishable from a
-			// config that could not be loaded — and those need opposite fixes.
-			return fmt.Errorf("record the approval in %s: %w", teamskills.ApprovalPath(gitRoot), err)
-		}
-	}
+	return emitApprovals(cmd.OutOrStdout(), decision.Output, asJSON)
+}
 
-	if decision.Reconcile {
+// executeApprovals keeps the approval store's entire read-modify-write,
+// reconcile, and possible rollback under one cross-process lock. Atomic store
+// replacement prevents torn JSON, but without this transaction two concurrent
+// commands can both read the same snapshot and the later save silently discards
+// the earlier command's grant.
+func executeApprovals(req approveRequest) (approveDecision, error) {
+	var decision approveDecision
+	err := fileutil.WithFileLock(context.Background(), teamskills.ApprovalPath(req.GitRoot), func() error {
+		var err error
+		decision, err = decideApprovals(req)
+		if err != nil {
+			return err
+		}
+
+		if decision.Changed {
+			if err := decision.Store.Save(req.GitRoot); err != nil {
+				// Name the file. Every read this command already did also lives under
+				// .sageox/, so a bare filesystem error here is indistinguishable from a
+				// config that could not be loaded — and those need opposite fixes.
+				return fmt.Errorf("record the approval in %s: %w", teamskills.ApprovalPath(req.GitRoot), err)
+			}
+		}
+
+		if !decision.Reconcile {
+			return nil
+		}
 		// Materialize in the same command. Recording an approval and then telling
 		// the human to run a second command leaves the repository in the exact
 		// state the approval was meant to end — the skill still absent — which
 		// reads as the approval not having worked.
-		if _, err := reconcileExactSelectedSkills(gitRoot); err != nil {
+		if _, err := reconcileExactSelectedSkills(req.GitRoot); err != nil {
 			if decision.RevokedScripts && decision.PreviousStore != nil {
-				if restoreErr := decision.PreviousStore.Save(gitRoot); restoreErr != nil {
+				if restoreErr := decision.PreviousStore.Save(req.GitRoot); restoreErr != nil {
 					return fmt.Errorf("revoking scripts failed: %w; restoring the previous approval also failed: %w", err, restoreErr)
 				}
 				return fmt.Errorf("revoking scripts failed and the previous approval was restored: %w", err)
@@ -176,9 +197,9 @@ func runSkillsApprove(cmd *cobra.Command, args []string) error {
 			}
 			return fmt.Errorf("installing the skill failed: %w", err)
 		}
-	}
-
-	return emitApprovals(cmd.OutOrStdout(), decision.Output, asJSON)
+		return nil
+	})
+	return decision, err
 }
 
 // decideApprovals resolves a request against the team checkout and the committed

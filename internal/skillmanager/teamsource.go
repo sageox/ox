@@ -248,7 +248,7 @@ func manifestIsRunnable(s teamskills.Skill, v teamskills.Verdict) bool {
 		}
 	}
 	for _, f := range s.Files {
-		if f.Path == skills.SkillFileName {
+		if strings.EqualFold(f.Path, skills.SkillFileName) {
 			runnable, _ := teamskills.IsExecutableFile(f.Path, f.Content)
 			return runnable
 		}
@@ -258,7 +258,7 @@ func manifestIsRunnable(s teamskills.Skill, v teamskills.Verdict) bool {
 
 func manifestContent(s teamskills.Skill) []byte {
 	for _, f := range s.Files {
-		if f.Path == "SKILL.md" {
+		if strings.EqualFold(f.Path, skills.SkillFileName) {
 			return f.Content
 		}
 	}
@@ -281,7 +281,7 @@ func toCatalogFiles(s teamskills.Skill, allowScripts bool) []skills.File {
 		// A runnable manifest reaches this point only after its digest-pinned
 		// manifest approval. --allow-scripts governs additional executable files,
 		// not whether that already-approved SKILL.md is silently dropped.
-		if !allowScripts && clean != skills.SkillFileName {
+		if !allowScripts && !strings.EqualFold(clean, skills.SkillFileName) {
 			if executable, _ := teamskills.IsExecutableFile(clean, f.Content); executable {
 				continue
 			}
