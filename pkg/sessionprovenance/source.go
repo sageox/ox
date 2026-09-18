@@ -78,20 +78,38 @@ var nativeSessionIDPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-
 var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 func Path(nativeID string) (string, error) { return SessionSourcePath("codex", nativeID) }
+
+// SessionSourcePath is the Ledger location of one native session's receipt.
+// The agent is a directory element, so it is confined to a single flat path
+// segment; the native ID is pinned to canonical UUID form. Those are the only
+// two inputs that reach the path, which is what keeps a receipt from escaping
+// data/session-sources/.
 func SessionSourcePath(agent, nativeID string) (string, error) {
-	if agent != "codex" || !nativeSessionIDPattern.MatchString(nativeID) {
+	if !ValidAgent(agent) {
+		return "", fmt.Errorf("invalid source agent")
+	}
+	if !nativeSessionIDPattern.MatchString(nativeID) {
 		return "", fmt.Errorf("invalid native session identity")
 	}
-	return "data/session-sources/codex/" + nativeID + ".json", nil
+	return "data/session-sources/" + agent + "/" + nativeID + ".json", nil
 }
-func ValidSessionName(name string) bool {
-	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, "/\\\x00")
+
+// validPathSegment reports whether s is safe as exactly one path element.
+func validPathSegment(s string) bool {
+	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, "/\\\x00")
 }
+func ValidSessionName(name string) bool { return validPathSegment(name) }
+
+// ValidAgent reports whether agent may name a receipt namespace. The contract
+// checks shape only; which agents a consumer will process is that consumer's
+// policy, so supporting a new agent needs no contract change.
+func ValidAgent(agent string) bool { return validPathSegment(agent) }
+
 func (r *Record) Validate() error {
-	if r == nil || r.Version != 1 || r.Agent != "codex" {
+	if r == nil || r.Version != 1 || !ValidAgent(r.Agent) {
 		return fmt.Errorf("unsupported source record")
 	}
-	if _, err := Path(r.NativeSessionID); err != nil {
+	if _, err := SessionSourcePath(r.Agent, r.NativeSessionID); err != nil {
 		return err
 	}
 	// A blank record precedes its first mutation (Exclude validates this prior

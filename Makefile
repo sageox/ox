@@ -258,10 +258,15 @@ check-test-tiers: ## Validate the machine-readable test-tier contract
 test-tiers: check-test-tiers ## Print the executable test-tier contract
 	@for tier in fast full slow acceptance digital_twin integration release; do $(TEST_TIER_TOOL) describe $$tier; echo; done
 
-# Root ./... deliberately excludes nested public modules.
+# Root ./... deliberately excludes nested public modules, so the contract's
+# coverage is collected here and appended into coverage.out by each coverage
+# tier below before the ratchet reads it. Otherwise every change to the
+# contract fails the changed-line gate as "no coverage data".
+SESSIONPROVENANCE_COVER := tmp/sessionprovenance-coverage.out
 .PHONY: test-sessionprovenance
 test-sessionprovenance: ## Validate the public native-session contract
-	@$(GO) -C pkg/sessionprovenance test -race ./...
+	@mkdir -p tmp
+	@$(GO) -C pkg/sessionprovenance test -race -coverprofile=$(CURDIR)/$(SESSIONPROVENANCE_COVER) -covermode=atomic ./...
 
 test: check-test-tiers test-sessionprovenance ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
 	$(call say,"Running fast tests (skipping >500ms, no coverage)...")
@@ -278,6 +283,7 @@ test: check-test-tiers test-sessionprovenance ## Run fast tests — unit tests <
 test-cover: check-test-tiers test-sessionprovenance ## Run fast tests with coverage collection (~15-20% slower than `make test`)
 	$(call say,"Running fast tests with coverage...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FAST_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
+	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 test-timings: ## Reprint metrics from the latest fast-test timing artifact
@@ -288,6 +294,7 @@ test-timings: ## Reprint metrics from the latest fast-test timing artifact
 test-all: check-test-tiers test-sessionprovenance ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
 	$(call say,"Running all tests including expensive tests...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FULL_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
+	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 test-calm: check-test-tiers test-sessionprovenance ## Run the full test tier at reduced concurrency (shared or already-loaded machine)
@@ -299,6 +306,7 @@ test-calm: check-test-tiers test-sessionprovenance ## Run the full test tier at 
 	$(call say,"Running full tests at reduced concurrency (-p $(CALM_P) -parallel $(CALM_PARALLEL))...")
 	@calm_flags="$$(OX_TEST_P=$(CALM_P) OX_TEST_PARALLEL=$(CALM_PARALLEL) $(TEST_TIER_TOOL) flags full)" || exit $$?; \
 		$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $$calm_flags -coverprofile=coverage.out -covermode=atomic ./...
+	@tail -n +2 $(SESSIONPROVENANCE_COVER) >> coverage.out
 	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 test-slow: check-test-tiers ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed
