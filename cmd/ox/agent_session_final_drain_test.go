@@ -19,7 +19,9 @@ func TestFinalDrainReloadsCommittedHookBatch(t *testing.T) {
 	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
 	stale, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	require.NoError(t, err)
+	// The adapter file did not exist at recording start, so none is persisted.
 	stale.WatchMode = "hook"
+	stale.SessionFile = ""
 	require.NoError(t, session.SaveRecordingState(projectRoot, stale))
 	rawPath := filepath.Join(stale.SessionPath, "raw.jsonl")
 	nextOffset := stale.SourceOffset + 100
@@ -61,6 +63,33 @@ func TestFinalDrainReloadsCommittedHookBatch(t *testing.T) {
 	after, err := os.ReadFile(rawPath)
 	require.NoError(t, err)
 	require.Equal(t, string(committed), string(after), "final drain must not roll back a committed hook batch")
+}
+
+// TestFinalDrainKeepsTheSourceFileItsCursorBelongsTo verifies a source file a
+// hook rediscovered and committed during the wait is not swapped back out.
+// Failure prevented: the final drain reading the wrong transcript from another
+// file's byte offset, silently skipping or tearing entries.
+func TestFinalDrainKeepsTheSourceFileItsCursorBelongsTo(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	stale, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.NotEmpty(t, stale.SessionFile)
+
+	rediscovered := filepath.Join(t.TempDir(), "rediscovered.jsonl")
+	require.NoError(t, session.UpdateRecordingStateAt(stale.SessionPath, func(current *session.RecordingState) {
+		current.SessionFile = rediscovered
+		current.SourceOffset = 4096
+	}))
+
+	require.NoError(t, fileutil.WithFileLock(context.Background(), filepath.Join(stale.SessionPath, "raw.jsonl"), func() error {
+		latest, err := reloadRecordingForFinalDrain(projectRoot, stale)
+		if err != nil {
+			return err
+		}
+		require.Equal(t, rediscovered, latest.SessionFile)
+		require.Equal(t, int64(4096), latest.SourceOffset)
+		return nil
+	}))
 }
 
 func TestFinalDrainRejectsRestartedRecordingAtSamePath(t *testing.T) {

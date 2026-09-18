@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/require"
@@ -186,6 +187,116 @@ func TestRecoverRefusesARecordingRestartedWhileItWaited(t *testing.T) {
 			require.Equal(t, restartedID, survivor.SessionID)
 		})
 	}
+}
+
+// --- Finalizers clear the recording BEFORE they release the capture lock ---
+
+// TestFinalizersClearTheRecordingBeforeReleasingTheCaptureLock verifies stop
+// and recover give up the capture lock only once the recording is gone. A hook
+// queued on that lock re-reads the state when it gets in: if the recording is
+// still live it appends a batch after the final drain.
+// Failure prevented: the tail of a session captured into a finalized recording,
+// never uploaded, with the state that pointed at it deleted a moment later.
+func TestFinalizersClearTheRecordingBeforeReleasingTheCaptureLock(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		finalize func(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error
+	}{
+		{"recover", recoverViaNormalStop},
+		{"stop", func(inst *agentinstance.Instance, _ string, _ *session.RecordingState) error {
+			return runAgentSessionStop(inst)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("SAGEOX_DAEMON", "false")
+			projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+			t.Chdir(projectRoot)
+			previousCfg := cfg
+			cfg = &config.Config{Text: true}
+			t.Cleanup(func() { cfg = previousCfg })
+
+			state, rawPath := commitHookBatchLeavingJournal(t, projectRoot, agentID)
+			statePath := filepath.Join(state.SessionPath, ".recording.json")
+
+			// Park the finalizer at its clear: the clear needs the state lock.
+			stateLockHeld := make(chan struct{})
+			releaseStateLock := make(chan struct{})
+			holderDone := make(chan error, 1)
+			go func() {
+				holderDone <- fileutil.WithFileLock(context.Background(), statePath, func() error {
+					close(stateLockHeld)
+					<-releaseStateLock
+					return nil
+				})
+			}()
+			<-stateLockHeld
+
+			finalized := make(chan error, 1)
+			go func() {
+				finalized <- tc.finalize(&agentinstance.Instance{AgentID: agentID, AgentType: "claude-code"}, projectRoot, state)
+			}()
+
+			// session.md is written by processing, so once it exists the final
+			// drain is over and the finalizer is on its way to the clear.
+			require.Eventually(t, func() bool {
+				_, err := os.Stat(filepath.Join(state.SessionPath, "session.md"))
+				return err == nil
+			}, 30*time.Second, 10*time.Millisecond, "fixture never reached the end of processing")
+
+			// The queued hook's view: whenever it can get the capture lock, the
+			// recording must already be gone. Timing out means the finalizer
+			// still holds the lock while it waits to clear, which is the point.
+			hookErr := fileutil.WithFileLockTimeout(context.Background(), rawPath, 500*time.Millisecond, func() error {
+				live, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+				require.NoError(t, err)
+				require.Nil(t, live, "a queued hook got the capture lock while the finalized recording was still live")
+				return nil
+			})
+			if hookErr == nil {
+				t.Log("hook acquired the capture lock after the recording was cleared")
+			}
+
+			close(releaseStateLock)
+			require.NoError(t, <-holderDone)
+			require.NoError(t, <-finalized)
+			gone, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+			require.NoError(t, err)
+			require.Nil(t, gone)
+		})
+	}
+}
+
+// TestClearingAProcessedRecordingLeavesItsReplacementAlone verifies the clear
+// names the recording that was processed. Session paths are minute-granular, so
+// a recording restarted within the minute lives at the very same path.
+// Failure prevented: a finalizer deleting the NEW recording an agent started in
+// the gap, leaving a live session with no state and nothing capturing it.
+func TestClearingAProcessedRecordingLeavesItsReplacementAlone(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	processed, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	replacementID := processed.SessionID + "-restarted"
+	require.NoError(t, session.UpdateRecordingStateAt(processed.SessionPath, func(current *session.RecordingState) {
+		current.SessionID = replacementID
+	}))
+
+	require.NoError(t, session.ClearRecordingStateAt(processed.SessionPath, processed.SessionID))
+	survivor, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.NotNil(t, survivor, "clearing the processed recording deleted the one that replaced it")
+	require.Equal(t, replacementID, survivor.SessionID)
+
+	// Negative control: the same call DOES clear the recording it names, and is
+	// idempotent once it is gone.
+	require.NoError(t, session.ClearRecordingStateAt(processed.SessionPath, replacementID))
+	require.NoError(t, session.ClearRecordingStateAt(processed.SessionPath, replacementID))
+	gone, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.Nil(t, gone)
+
+	require.ErrorIs(t, session.ClearRecordingStateAt("", replacementID), session.ErrEmptyPath)
 }
 
 // --- Lifecycle bookkeeping never reverts a committed capture checkpoint ---

@@ -3,6 +3,7 @@ package session
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 )
@@ -15,7 +16,7 @@ func (w *RawWriter) RestoreCaptureRedaction(state *RecordingState, rawPath strin
 		return fmt.Errorf("unsupported command redaction checkpoint")
 	}
 	if state.CommandRedactionVersion == 1 {
-		if len(state.PendingCommandRedactions) > 4096 {
+		if len(state.PendingCommandRedactions) > maxPendingCommandRedactions {
 			return fmt.Errorf("oversized command redaction checkpoint")
 		}
 		w.cmdRedactor.pending = make(map[string]string, len(state.PendingCommandRedactions))
@@ -35,7 +36,7 @@ func (w *RawWriter) RestoreCaptureRedaction(state *RecordingState, rawPath strin
 		return nil
 	}
 	f, err := os.Open(rawPath)
-	if os.IsNotExist(err) {
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {

@@ -29,6 +29,11 @@ type CommandRedactionRule struct {
 	Slug string
 }
 
+// maxPendingCommandRedactions bounds unmatched credential calls, live and
+// restored alike. One constant: a checkpoint limit that drifted above the live
+// bound would restore more pending calls than capture would ever have kept.
+const maxPendingCommandRedactions = 4096
+
 // DefaultCommandRedactions returns the built-in allowlist of credential-
 // emitting commands whose output should be redacted wholesale. Adding a
 // new entry is a one-line change to this slice; please include a comment
@@ -162,7 +167,7 @@ func (c *CommandRedactor) RedactEntry(entry *SessionEntry) bool {
 			}
 			// Only slugs are retained, never credential-bearing commands or output.
 			// Bound unmatched calls so corrupt history cannot consume unbounded memory.
-			if len(c.pending) >= 4096 {
+			if len(c.pending) >= maxPendingCommandRedactions {
 				c.overflow = true
 			} else {
 				c.pending[entry.CallID] = slug

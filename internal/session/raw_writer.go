@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -384,7 +385,7 @@ func (w *RawWriter) FinishAppend() error { return os.Remove(w.file.Name() + ".ap
 func RecoverRawAppend(path string, persistedOffset int64) error {
 	checkpointPath := path + ".append.json"
 	data, err := os.ReadFile(checkpointPath)
-	if os.IsNotExist(err) {
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {

@@ -558,8 +558,17 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 			}
 			state = latest
 			var processErr error
-			processResult, processErr = processAgentSession(projectRoot, state)
-			return processErr
+			if processResult, processErr = processAgentSession(projectRoot, state); processErr != nil {
+				return processErr
+			}
+			// Clear before releasing the lock, and clear THIS recording: a hook
+			// queued on the lock re-reads the state once it gets in. Left in
+			// place, it would append a batch after the final drain that nothing
+			// will ever upload. See ClearRecordingStateAt.
+			if clearErr := session.ClearRecordingStateAt(state.SessionPath, state.SessionID); clearErr != nil {
+				return fmt.Errorf("finalize recording stop: %w", clearErr)
+			}
+			return nil
 		})
 		timing["process_ms"] = time.Since(processStart).Milliseconds()
 		if err != nil {
@@ -588,8 +597,9 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// only clear recording state when processing succeeded or session was explicitly stopped
 	// with no data. Preserve state when session file discovery failed — it contains
 	// breadcrumbs (WorkspacePath, AdapterName, StartedAt) needed for recovery.
-	if processResult != nil || state.SessionFile == "" && state.AdapterName == "" {
-		if err := session.ClearRecordingStateForAgent(projectRoot, inst.AgentID); err != nil {
+	// A processed recording was already cleared under the capture lock above.
+	if processResult == nil && state.SessionFile == "" && state.AdapterName == "" {
+		if err := session.ClearRecordingStateAt(state.SessionPath, state.SessionID); err != nil {
 			_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			return fmt.Errorf("failed to finalize recording stop: %w", err)
 		}
@@ -2477,8 +2487,13 @@ func reloadRecordingForFinalDrain(projectRoot string, expected *session.Recordin
 	if latest.SessionPath != expected.SessionPath || latest.SessionID != expected.SessionID {
 		return nil, fmt.Errorf("recording changed while waiting to finalize")
 	}
-	// Stop may just have discovered a file that did not exist at recording start.
-	if expected.SessionFile != "" {
+	// Stop may just have discovered a file that did not exist at recording
+	// start; nothing is persisted for it yet, so carry it over. A PERSISTED file
+	// is different: SourceOffset is a byte cursor into it, and a hook that
+	// rediscovered the source while we waited committed the two together.
+	// Overwriting only the file would aim that cursor at the wrong transcript
+	// and the drain would skip or tear entries -- the persisted pair wins.
+	if latest.SessionFile == "" {
 		latest.SessionFile = expected.SessionFile
 	}
 	return latest, nil

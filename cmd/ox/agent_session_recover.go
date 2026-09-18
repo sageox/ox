@@ -108,17 +108,21 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 			return reloadErr
 		}
 		var processErr error
-		result, processErr = processAgentSession(projectRoot, latest)
-		return processErr
+		if result, processErr = processAgentSession(projectRoot, latest); processErr != nil {
+			return processErr
+		}
+		// Clear before releasing the lock, and clear THIS recording. A hook
+		// queued on the lock re-reads the state once it gets in; if the state
+		// were still there it would append a batch that nothing will ever
+		// finalize, and recovery would then delete the evidence it exists.
+		if clearErr := session.ClearRecordingStateAt(latest.SessionPath, latest.SessionID); clearErr != nil {
+			return fmt.Errorf("clear recovered recording state: %w", clearErr)
+		}
+		return nil
 	})
 	if err != nil {
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("failed to process session: %w", err)
-	}
-
-	if err := session.ClearRecordingStateForAgent(projectRoot, inst.AgentID); err != nil {
-		_ = doctor.SetNeedsDoctorAgent(projectRoot)
-		return fmt.Errorf("failed to clear recovered recording state: %w", err)
 	}
 
 	output := &sessionRecoverOutput{

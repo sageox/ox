@@ -437,11 +437,43 @@ func ClearRecordingStateForAgent(projectRoot, agentID string) error {
 	if state == nil {
 		return nil // idempotent: nothing to clear
 	}
-	statePath := recordingStatePath(state.SessionPath)
-	if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove recording state file=%s: %w", statePath, err)
+	return ClearRecordingStateAt(state.SessionPath, state.SessionID)
+}
+
+// ClearRecordingStateAt removes the recording sessionID stored under sessionPath
+// and no other. Finalizers call it while still holding the capture lock, naming
+// the recording they just processed: an agent lookup made after the lock is
+// released can find -- and delete -- a recording that replaced it in the
+// meantime. The path alone is not an identity either: session names are
+// minute-granular, so a recording restarted within the minute reuses it.
+//
+// The remove runs under the state lock so it cannot land between a concurrent
+// updater's read and its atomic write, which would bring the file straight back
+// as a ghost recording. Idempotent.
+func ClearRecordingStateAt(sessionPath, sessionID string) error {
+	if sessionPath == "" {
+		return fmt.Errorf("%w: session path", ErrEmptyPath)
 	}
-	return nil
+	statePath := recordingStatePath(sessionPath)
+	return fileutil.WithFileLock(context.Background(), statePath, func() error {
+		data, err := os.ReadFile(statePath)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read recording state file=%s: %w", statePath, err)
+		}
+		// An unparseable state identifies nothing and is cleared as before; a
+		// readable one naming another recording is not ours to remove.
+		var current RecordingState
+		if json.Unmarshal(data, &current) == nil && current.SessionID != sessionID {
+			return nil
+		}
+		if err := os.Remove(statePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove recording state file=%s: %w", statePath, err)
+		}
+		return nil
+	})
 }
 
 // AppendProducedPlan records a plan slug on the recording at sessionPath — the
