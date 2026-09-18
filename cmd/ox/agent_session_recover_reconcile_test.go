@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -204,6 +205,32 @@ func TestRecoverFromCacheSurfacesATranscriptItCannotRead(t *testing.T) {
 
 	err = recoverFromCache(&agentinstance.Instance{AgentID: agentID}, projectRoot, state, rawPath)
 	require.ErrorContains(t, err, "failed to read cached session")
+	require.ErrorContains(t, err, "session abort", "the error must say how to discard a transcript that stays unreadable")
+
+	// The read can fail for reasons that pass. Clearing here would orphan the
+	// transcript for good: the recording state is the only thing pointing at it.
+	survivor, loadErr := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, survivor, "an unreadable transcript cost the recording that points at it")
+	require.Equal(t, state.SessionID, survivor.SessionID)
+}
+
+// TestPublishingACachedRecordingFailsWhenItCannotBeCleared verifies a recovery
+// that could not retire the recording is not reported as a recovery. A directory
+// where the state file belongs makes the clear fail on every platform.
+// Failure prevented: "session recovered" while the recording is still live, so a
+// later hook appends to a published session and the next recover publishes it
+// again.
+func TestPublishingACachedRecordingFailsWhenItCannotBeCleared(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	state, rawPath := commitHookBatchLeavingJournal(t, projectRoot, agentID)
+	statePath := filepath.Join(state.SessionPath, ".recording.json")
+	require.NoError(t, os.Remove(statePath))
+	require.NoError(t, os.Mkdir(statePath, 0o700))
+
+	output, err := publishCachedRecording(&agentinstance.Instance{AgentID: agentID}, projectRoot, state, rawPath)
+	require.ErrorContains(t, err, "clear recovered recording state")
+	require.Nil(t, output, "a recovery that did not retire the recording must not produce a success payload")
 }
 
 // TestDiscardingACachedRecordingDiscardsOnlyTheOneThatWasOffered verifies the
@@ -223,6 +250,25 @@ func TestDiscardingACachedRecordingDiscardsOnlyTheOneThatWasOffered(t *testing.T
 		require.NoError(t, err)
 		require.Nil(t, gone)
 		require.NoDirExists(t, offered.SessionPath)
+	})
+
+	t.Run("a transcript that cannot be removed is not reported as discarded", func(t *testing.T) {
+		// os.Chmod does not deny deletion on Windows, and root ignores it.
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("needs a directory the current user cannot delete from")
+		}
+		projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+		offered, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+		require.NoError(t, err)
+		pinned := filepath.Join(offered.SessionPath, "pinned")
+		require.NoError(t, os.Mkdir(pinned, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(pinned, "transcript-fragment"), []byte("still here"), 0o600))
+		require.NoError(t, os.Chmod(pinned, 0o500))
+		t.Cleanup(func() { _ = os.Chmod(pinned, 0o700) })
+
+		err = discardCachedRecording(projectRoot, offered, filepath.Join(offered.SessionPath, "raw.jsonl"))
+		require.ErrorContains(t, err, "remove cached recording")
+		require.FileExists(t, filepath.Join(pinned, "transcript-fragment"), "fixture must actually block the removal")
 	})
 
 	t.Run("a recording restarted during the prompt is left alone", func(t *testing.T) {

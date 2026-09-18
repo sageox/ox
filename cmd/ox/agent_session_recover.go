@@ -183,8 +183,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	err := withCachedRecordingForRecovery(projectRoot, state, rawPath, func(latest *session.RecordingState) error {
 		stored, readErr := session.ReadSessionFromPath(rawPath)
 		if readErr != nil {
-			_ = session.ClearRecordingStateAt(latest.SessionPath, latest.SessionID)
-			return fmt.Errorf("failed to read cached session: %w", readErr)
+			return unreadableCachedSessionError(projectRoot, latest, readErr)
 		}
 		entryCount = len(stored.Entries)
 		return nil
@@ -241,14 +240,27 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 // only that one: the prompt it answers to was shown without the lock held.
 func discardCachedRecording(projectRoot string, state *session.RecordingState, rawPath string) error {
 	return withCachedRecordingForRecovery(projectRoot, state, rawPath, func(latest *session.RecordingState) error {
-		if err := session.ClearRecordingStateAt(latest.SessionPath, latest.SessionID); err != nil {
-			return err
+		// The coworker asked for this transcript to be gone, so a removal that
+		// fails is an error, never "discarded": RemoveAll deletes what it can
+		// and reports the first entry it could not, which names what is left.
+		// The state file lives inside SessionPath and goes with it; the clear
+		// below only matters if a concurrent state update wrote it back.
+		if err := os.RemoveAll(latest.SessionPath); err != nil {
+			return fmt.Errorf("remove cached recording: %w", err)
 		}
-		if latest.SessionPath != "" {
-			_ = os.RemoveAll(latest.SessionPath)
-		}
-		return nil
+		return session.ClearRecordingStateAt(latest.SessionPath, latest.SessionID)
 	})
+}
+
+// unreadableCachedSessionError reports a cached transcript that could not be
+// read, and deliberately leaves the recording in place. The read can fail for
+// reasons that pass (permissions, a filesystem hiccup); clearing the state would
+// orphan the transcript for good, and nothing else points at it. Discarding it is
+// the coworker's call, so the error says how.
+func unreadableCachedSessionError(projectRoot string, state *session.RecordingState, readErr error) error {
+	_ = doctor.SetNeedsDoctorAgent(projectRoot)
+	return fmt.Errorf("failed to read cached session: %w\nrecording state preserved; retry 'ox agent %s session recover', or discard it with 'ox agent %s session abort'",
+		readErr, state.AgentID, state.AgentID)
 }
 
 // publishCachedRecording uploads the cached raw.jsonl and clears the recording.
@@ -258,8 +270,7 @@ func discardCachedRecording(projectRoot string, state *session.RecordingState, r
 func publishCachedRecording(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState, rawPath string) (*sessionRecoverOutput, error) {
 	stored, err := session.ReadSessionFromPath(rawPath)
 	if err != nil {
-		_ = session.ClearRecordingStateAt(state.SessionPath, state.SessionID)
-		return nil, fmt.Errorf("failed to read cached session: %w", err)
+		return nil, unreadableCachedSessionError(projectRoot, state, err)
 	}
 	entryCount := len(stored.Entries)
 	entries := convertStoredMapEntries(stored.Entries)
@@ -377,8 +388,14 @@ func publishCachedRecording(inst *agentinstance.Instance, projectRoot string, st
 		_ = session.WriteNeedsSummaryMarker(cacheDir, rawPath, ledgerSessionDir)
 	}
 
-	// clear stale recording state -- this recording, while the lock is still held
-	_ = session.ClearRecordingStateAt(state.SessionPath, state.SessionID)
+	// clear stale recording state -- this recording, while the lock is still
+	// held. A clear that fails is not a recovery: the recording is still live, so
+	// a later hook would append to a published session and the next recover
+	// would publish it again.
+	if err := session.ClearRecordingStateAt(state.SessionPath, state.SessionID); err != nil {
+		_ = doctor.SetNeedsDoctorAgent(projectRoot)
+		return nil, fmt.Errorf("clear recovered recording state: %w", err)
+	}
 
 	// keep cache alive — raw.jsonl in ledger becomes an LFS stub after push,
 	// but push-summary needs to read it. Cache is pruned later by
