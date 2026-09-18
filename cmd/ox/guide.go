@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"embed"
+	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"sort"
 	"strings"
@@ -30,20 +32,30 @@ Without arguments, lists all available topics. With a topic argument,
 renders that guide. Topics are bundled into the ox binary, so they
 work offline and stay in sync with the version of ox you're running.
 
+With --json, the topic list is an array of topic, title, and description
+objects. A single topic is an object with those fields plus content
+containing Markdown without frontmatter. --json and --raw cannot be combined.
+
 Examples:
   ox guide                    # list all topics
   ox guide team-rules         # how to share AI coworker rules across the team
   ox guide getting-started    # five-minute walkthrough
-  ox guide team-rules --raw   # plain markdown (for piping to AI agents)`,
+  ox guide team-rules --raw   # plain markdown (for piping to AI coworkers)
+  ox guide --json             # topic metadata as JSON
+  ox guide team-rules --json  # metadata and Markdown content as JSON`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		raw, _ := cmd.Flags().GetBool("raw")
-
-		if len(args) == 0 {
-			return listGuides(raw)
+		jsonOutput := cfg != nil && cfg.JSON
+		if raw && jsonOutput {
+			return fmt.Errorf("--raw and --json cannot be combined; use --json=false to override OX_JSON")
 		}
 
-		return showGuide(args[0], raw)
+		if len(args) == 0 {
+			return listGuides(cmd.OutOrStdout(), raw, jsonOutput)
+		}
+
+		return showGuide(cmd.OutOrStdout(), args[0], raw, jsonOutput)
 	},
 }
 
@@ -53,9 +65,10 @@ func init() {
 
 // guideEntry is a discovered bundled guide.
 type guideEntry struct {
-	Topic       string // filename without .md (e.g., "team-rules")
-	Title       string // from frontmatter
-	Description string // from frontmatter
+	Topic       string `json:"topic"`       // filename without .md (e.g., "team-rules")
+	Title       string `json:"title"`       // from frontmatter
+	Description string `json:"description"` // from frontmatter
+	Content     string `json:"content,omitempty"`
 }
 
 // discoverGuides walks the embedded guides FS and returns a sorted catalog.
@@ -147,7 +160,7 @@ func trimFrontmatterValue(v string) string {
 	return v
 }
 
-func listGuides(raw bool) error {
+func listGuides(w io.Writer, raw, jsonOutput bool) error {
 	guides, err := discoverGuides()
 	if err != nil {
 		return err
@@ -156,10 +169,18 @@ func listGuides(raw bool) error {
 		return fmt.Errorf("no bundled guides found (this is a build error)")
 	}
 
+	if jsonOutput {
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(guides)
+	}
+
 	if raw {
 		// raw mode: machine-friendly output for piping
 		for _, g := range guides {
-			fmt.Printf("%s\t%s\t%s\n", g.Topic, g.Title, g.Description)
+			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\n", g.Topic, g.Title, g.Description); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -177,11 +198,11 @@ func listGuides(raw bool) error {
 		fmt.Fprintf(&sb, "| `%s` | %s |\n", g.Topic, desc)
 	}
 
-	fmt.Print(ui.RenderMarkdown(sb.String()))
-	return nil
+	_, err = fmt.Fprint(w, ui.RenderMarkdown(sb.String()))
+	return err
 }
 
-func showGuide(topic string, raw bool) error {
+func showGuide(w io.Writer, topic string, raw, jsonOutput bool) error {
 	// allow `ox guide team-rules.md` as well as `ox guide team-rules`
 	topic = strings.TrimSuffix(topic, ".md")
 
@@ -199,19 +220,33 @@ func showGuide(topic string, raw bool) error {
 
 	body := string(data)
 	if raw {
-		fmt.Print(body)
 		if !strings.HasSuffix(body, "\n") {
-			fmt.Println()
+			body += "\n"
 		}
-		return nil
+		_, err = fmt.Fprint(w, body)
+		return err
 	}
 
 	// strip YAML frontmatter for human rendering — Glamour treats it as
 	// content otherwise and the metadata block shows up at the top of the
 	// rendered output. AI agents using --raw still see the frontmatter.
 	body = stripGuideFrontmatter(body)
-	fmt.Print(ui.RenderMarkdown(body))
-	return nil
+	if jsonOutput {
+		title, desc := readGuideFrontmatter(topic + ".md")
+		if title == "" {
+			title = topic
+		}
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(guideEntry{
+			Topic:       topic,
+			Title:       title,
+			Description: desc,
+			Content:     body,
+		})
+	}
+	_, err = fmt.Fprint(w, ui.RenderMarkdown(body))
+	return err
 }
 
 // stripGuideFrontmatter removes a leading YAML frontmatter block (the form

@@ -16,11 +16,17 @@ Without arguments, lists all available topics. With a topic argument,
 renders that guide. Topics are bundled into the ox binary, so they
 work offline and stay in sync with the version of ox you're running.
 
+With --json, the topic list is an array of topic, title, and description
+objects. A single topic is an object with those fields plus content
+containing Markdown without frontmatter. --json and --raw cannot be combined.
+
 Examples:
   ox guide                    # list all topics
   ox guide team-rules         # how to share AI coworker rules across the team
   ox guide getting-started    # five-minute walkthrough
-  ox guide team-rules --raw   # plain markdown (for piping to AI agents)
+  ox guide team-rules --raw   # plain markdown (for piping to AI coworkers)
+  ox guide --json             # topic metadata as JSON
+  ox guide team-rules --json  # metadata and Markdown content as JSON
 
 ```
 ox guide [topic] [flags]

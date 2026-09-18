@@ -1,11 +1,132 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/prime"
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
 )
+
+// JSON consumers must receive one complete document for both the catalog and a topic.
+func TestGuideJSONOutput(t *testing.T) {
+	previousConfig := cfg
+	cfg = &config.Config{JSON: true}
+	t.Cleanup(func() { cfg = previousConfig })
+
+	for _, topic := range []string{"", "team-rules", "team-rules.md"} {
+		name := topic
+		if name == "" {
+			name = "catalog"
+		}
+		t.Run(name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("raw", false, "")
+			var args []string
+			if topic != "" {
+				args = []string{topic}
+			}
+			var runErr error
+			output := captureRealStdout(t, func() { runErr = guideCmd.RunE(cmd, args) })
+			require.NoError(t, runErr)
+
+			if topic == "" {
+				var guides []map[string]string
+				require.NoError(t, json.Unmarshal(output, &guides), "output: %s", output)
+				require.NotEmpty(t, guides)
+				var topics []string
+				for _, guide := range guides {
+					require.NotEmpty(t, guide["topic"])
+					require.NotEmpty(t, guide["title"])
+					require.NotEmpty(t, guide["description"])
+					require.NotContains(t, guide, "content")
+					topics = append(topics, guide["topic"])
+				}
+				require.IsIncreasing(t, topics)
+				require.Contains(t, topics, "team-rules")
+				return
+			}
+
+			var guide map[string]string
+			require.NoError(t, json.Unmarshal(output, &guide), "output: %s", output)
+			require.Equal(t, "team-rules", guide["topic"])
+			require.Equal(t, "Team Rules", guide["title"])
+			require.NotEmpty(t, guide["description"])
+			require.True(t, strings.HasPrefix(guide["content"], "# Team Rules\n"))
+			require.NotContains(t, guide["content"], "\x1b[")
+		})
+	}
+}
+
+// Raw mode must retain its TSV catalog and full Markdown (including frontmatter).
+func TestGuideRawOutput(t *testing.T) {
+	previousConfig := cfg
+	cfg = &config.Config{}
+	t.Cleanup(func() { cfg = previousConfig })
+
+	for _, topic := range []string{"", "team-rules"} {
+		name := topic
+		if name == "" {
+			name = "catalog"
+		}
+		t.Run(name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("raw", true, "")
+			var output bytes.Buffer
+			cmd.SetOut(&output)
+			if topic == "" {
+				require.NoError(t, guideCmd.RunE(cmd, nil))
+				require.Contains(t, output.String(), "team-rules\tTeam Rules\t")
+				for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
+					require.Len(t, strings.Split(line, "\t"), 3)
+				}
+				return
+			}
+
+			require.NoError(t, guideCmd.RunE(cmd, []string{topic}))
+			original, err := guidesFS.ReadFile("guides/team-rules.md")
+			require.NoError(t, err)
+			require.Equal(t, string(original), output.String())
+		})
+	}
+}
+
+// Invalid format combinations, missing topics, and failed writes must not report success.
+func TestGuideOutputErrors(t *testing.T) {
+	previousConfig := cfg
+	cfg = &config.Config{JSON: true}
+	t.Cleanup(func() { cfg = previousConfig })
+
+	for _, tt := range []struct {
+		name      string
+		args      []string
+		raw       bool
+		failWrite bool
+		wantError string
+	}{
+		{name: "catalog format conflict", raw: true, wantError: "--raw and --json cannot be combined"},
+		{name: "topic format conflict", args: []string{"team-rules"}, raw: true, wantError: "--raw and --json cannot be combined"},
+		{name: "missing topic", args: []string{"not-a-guide"}, wantError: `no bundled guide named "not-a-guide". Available:`},
+		{name: "catalog write failure", failWrite: true, wantError: "write failed"},
+		{name: "topic write failure", args: []string{"team-rules"}, failWrite: true, wantError: "write failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("raw", tt.raw, "")
+			var output bytes.Buffer
+			cmd.SetOut(&output)
+			if tt.failWrite {
+				cmd.SetOut(failingWriter{})
+			}
+			require.ErrorContains(t, guideCmd.RunE(cmd, tt.args), tt.wantError)
+			require.Empty(t, output.String())
+		})
+	}
+}
 
 func TestDiscoverGuides_BundledTopicsPresent(t *testing.T) {
 	guides, err := discoverGuides()
