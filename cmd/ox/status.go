@@ -1695,7 +1695,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		// consumer branches on the auth/project fields in the payload,
 		// not the process exit code.
 		if cfg == nil || !cfg.JSON {
-			return statusExitError(authenticated, projectInitialized)
+			return statusExitError(authenticated, projectInitialized, authErr)
 		}
 		return nil
 	},
@@ -1704,8 +1704,18 @@ daemon health, and a tree view of all SageOx directory locations.`,
 // statusExitError reports why `ox status` (non-JSON) should exit non-zero:
 // unauthenticated and/or an uninitialized project. Returns nil once both are
 // satisfied — the only state a script should treat as "everything is fine".
-func statusExitError(authenticated, projectInitialized bool) error {
+//
+// authErr distinguishes "the endpoint never answered" from "no credential" —
+// same split authFollowUpHint makes for the human-readable hint just above,
+// and for the same reason: telling a script to `ox login` when the real
+// problem is a VPN/proxy/DNS fault is wrong advice, not just wrong tone.
+func statusExitError(authenticated, projectInitialized bool, authErr error) error {
+	unreachable := !authenticated && errors.Is(authErr, auth.ErrEndpointUnreachable)
 	switch {
+	case unreachable && !projectInitialized:
+		return fmt.Errorf("could not verify authentication (endpoint unreachable) and project not initialized — check connectivity and run `ox init`")
+	case unreachable:
+		return fmt.Errorf("could not verify authentication — endpoint unreachable, check connectivity")
 	case !authenticated && !projectInitialized:
 		return fmt.Errorf("not authenticated and project not initialized — run `ox login` and `ox init`")
 	case !authenticated:
