@@ -33,6 +33,11 @@ func ReadSourceRecord(ledgerPath, nativeID string) (*sessionprovenance.Record, e
 	if r.NativeSessionID != nativeID {
 		return nil, fmt.Errorf("source identity mismatch")
 	}
+	// The contract validates agent shape only. This reader serves the codex
+	// namespace, so a record claiming another agent does not belong in it.
+	if r.Agent != "codex" {
+		return nil, fmt.Errorf("source agent mismatch")
+	}
 	return &r, nil
 }
 

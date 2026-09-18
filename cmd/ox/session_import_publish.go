@@ -99,6 +99,10 @@ func readImportRemoteRecord(ctx context.Context, ledger, ref, nativeID string) (
 	if r.NativeSessionID != nativeID {
 		return nil, fmt.Errorf("remote source identity mismatch")
 	}
+	// Read from the codex namespace; the contract validates agent shape only.
+	if r.Agent != "codex" {
+		return nil, fmt.Errorf("remote source agent mismatch")
+	}
 	return &r, nil
 }
 

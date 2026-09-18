@@ -91,7 +91,7 @@ func validateReceipt(name string, expected, actual *lfs.SessionMeta, record *ses
 		return err
 	}
 	source := expected.Source
-	if source == nil || !reflect.DeepEqual(source, actual.Source) || actual.RepoID != expected.RepoID || record.NativeSessionID != source.NativeSessionID || record.Generation != source.Generation {
+	if source == nil || !reflect.DeepEqual(source, actual.Source) || actual.RepoID != expected.RepoID || record.Agent != source.Agent || record.NativeSessionID != source.NativeSessionID || record.Generation != source.Generation {
 		return fmt.Errorf("remote provenance differs from publication")
 	}
 	raw, ok := actual.Files["raw.jsonl"]
