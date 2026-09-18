@@ -495,6 +495,16 @@ func applyIndexProof(result *ManagedRepoPullResult, proof indexProof, conflictEr
 	case proofConflicted:
 		// The probe agreed: there really are unmerged entries the resolver
 		// refused to auto-merge. This is the one state a human can adjudicate.
+		//
+		// Skipped is forced off for the same reason proofUnreadable does it:
+		// doPull and pullTeamContext both test Skipped BEFORE Err, so any skip
+		// still set from fetchAndPullLocked — skipReasonRebaseInProgress is the
+		// reachable one, if an outside git process clears the rebase state
+		// between that check and this probe — would send the cycle down the
+		// skip path and swallow the conflict error and its issue entirely.
+		// Leaving the two branches asymmetric is what made this easy to miss.
+		result.Skipped = false
+		result.SkipReason = ""
 		result.Err = errors.Join(result.Err, conflictErr)
 		// Preserve an earlier pull classification, including session-wedge
 		// escalation, when autostash recovery reports an additional failure.

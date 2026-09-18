@@ -799,6 +799,22 @@ func TestApplyIndexProof_NoUnprovenResultLooksLikeASync(t *testing.T) {
 						assert.Equal(t, proofConflicted, proof)
 					}
 
+					// A proof that reports something WRONG must never leave a
+					// skip set. doPull and pullTeamContext both test Skipped
+					// before Err, so a skip surviving alongside an error sends
+					// the cycle down the skip path and swallows the error and
+					// its issue whole. proofUnreadable always cleared it;
+					// proofConflicted did not, and an incoming
+					// skipReasonRebaseInProgress could therefore hide a real
+					// merge conflict. Asserted for BOTH so the two branches
+					// cannot drift apart again.
+					if proof == proofConflicted || proof == proofUnreadable {
+						assert.False(t, got.Skipped,
+							"%v sets Err/Issue, so a surviving skip (%q) would swallow them",
+							proof, got.SkipReason)
+						assert.Empty(t, got.SkipReason)
+					}
+
 					if proof != proofUnknown {
 						return
 					}
