@@ -341,10 +341,20 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		s.metrics.RecordTeamSync()
 		s.recordActivity()
 
+		// What this pull actually changed, computed once for the two consumers
+		// below. Primary team only — it avoids whisper noise from secondary team
+		// contexts, and it is also the correct scope for skills:
+		// config.FindRepoTeamContext resolves THIS repo's own team and never a
+		// cross-team context, so a secondary team's skills could not materialize
+		// here even if they changed.
+		var changedFiles []string
+		if r.ws.TeamID == s.workspaceRegistry.ProjectTeamID() {
+			changedFiles = s.detectChangedFiles(r.ws.Path, r.prePullSHA)
+		}
+
 		// emit trigger whispers for team context file changes
-		// Primary team only for now — avoids noise from secondary team contexts.
-		if s.whisperRegistry != nil && r.ws.TeamID == s.workspaceRegistry.ProjectTeamID() {
-			if changedFiles := s.detectChangedFiles(r.ws.Path, r.prePullSHA); len(changedFiles) > 0 {
+		if s.whisperRegistry != nil {
+			if len(changedFiles) > 0 {
 				s.logger.Debug("team context changes detected",
 					"team", r.ws.TeamName, "count", len(changedFiles))
 				for _, cf := range changedFiles {
@@ -364,6 +374,11 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 				}
 			}
 		}
+
+		// A team skill that changed in the remote is still not in any repository
+		// until something reconciles it. This is that something.
+		s.reconcileTeamSkills(changedFiles)
+
 		s.logger.Debug("team context synced", "team", r.ws.TeamName, "duration", r.duration)
 		if progress != nil {
 			_ = progress.WriteStage("synced", fmt.Sprintf("Team %s synced", r.ws.TeamName))
@@ -591,7 +606,7 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 // so kb sync and team-context sync share the same sparse application logic.
 func (s *SyncScheduler) applySparseCheckout(ctx context.Context, tcPath string) *manifest.ManifestConfig {
 	cfg := manifest.ParseFile(filepath.Join(tcPath, ".sageox", "sync.manifest"), manifest.RepoKindTeamContext)
-	_ = applySparseFromManifest(ctx, tcPath, cfg, s.logger)
+	_ = applySparseFromManifest(ctx, tcPath, cfg, manifest.RepoKindTeamContext, s.logger)
 	return cfg
 }
 

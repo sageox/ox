@@ -2,6 +2,7 @@ package skillmanager
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -108,27 +109,83 @@ func TestTeamSkillSource_ApprovedExecutableMaterializesWithoutItsScripts(t *test
 	}
 }
 
-// TestTeamSkillSource_DigestCoversTheTeamHalf: prime compares this digest against
-// the recorded revision to decide whether to re-plan. A digest covering only the
-// built-in catalog would leave an edited team skill stale until something else
-// happened to change.
-func TestTeamSkillSource_DigestCoversTheTeamHalf(t *testing.T) {
+// TestTeamSkillSource_DigestTracksTheTeamCheckoutCommit: prime compares this
+// digest against the recorded revision to decide whether to re-plan, so a digest
+// covering only the built-in catalog would leave an edited team skill stale
+// until something else happened to change.
+//
+// The team component is the checkout's HEAD commit rather than a hash of the
+// skills it contains, so that ExpectedRevision can reproduce the same value on
+// the prime hot path without walking the team tree. The consequence, asserted
+// below, is that an UNCOMMITTED edit does not move it — which is correct for a
+// checkout the daemon owns and advances by pulling commits.
+func TestTeamSkillSource_DigestTracksTheTeamCheckoutCommit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
 	team := t.TempDir()
 	project := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = team // never the developer's own repo
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	git("init", "-q", "-b", "main")
+	git("config", "user.email", "test@example.com")
+	git("config", "user.name", "Test")
+	git("config", "commit.gpgsign", "false") // the developer's global config may sign
+
 	writeTeamSkill(t, team, "deploy", "", nil)
+	git("add", ".")
+	git("commit", "-q", "-m", "add deploy")
 
-	src, _, err := TeamSkillSource(nil, team, "ox", project)
-	require.NoError(t, err)
-	before, err := src.Digest()
-	require.NoError(t, err)
+	digestOf := func() string {
+		t.Helper()
+		src, _, err := TeamSkillSource(nil, team, "ox", project)
+		require.NoError(t, err)
+		d, err := src.Digest()
+		require.NoError(t, err)
+		return d
+	}
 
+	before := digestOf()
+
+	// An uncommitted edit is deliberately invisible here: the daemon advances
+	// this checkout by pulling commits, and the drift check is the floor under
+	// anything else.
 	writeTeamSkill(t, team, "deploy", "", map[string]string{"references/extra.md": "new content\n"})
-	src2, _, err := TeamSkillSource(nil, team, "ox", project)
-	require.NoError(t, err)
-	after, err := src2.Digest()
+	require.Equal(t, before, digestOf(),
+		"an uncommitted edit moved the digest, so the cheap prime compare would re-plan every session")
+
+	git("add", ".")
+	git("commit", "-q", "-m", "edit deploy")
+	require.NotEqual(t, before, digestOf(),
+		"a committed team skill edit did not change the catalog digest; prime would never re-plan")
+}
+
+// TestExpectedRevisionMatchesWhatThePlannerRecords is the regression guard for
+// the prime fast path.
+//
+// The two were computed by different code — prime hashed the built-in catalog
+// alone, the planner recorded the built-in catalog plus a team component — so
+// once a team context existed they could never be equal and prime ran a full
+// plan on every session start, silently, forever. They now come from one
+// function; this asserts they stay that way.
+func TestExpectedRevisionMatchesWhatThePlannerRecords(t *testing.T) {
+	project := t.TempDir()
+
+	want, err := ExpectedRevision(project)
 	require.NoError(t, err)
 
-	require.NotEqual(t, before, after, "editing a team skill did not change the catalog digest; prime would never re-plan")
+	src, _, err := catalogForRepo(project)
+	require.NoError(t, err)
+	got, err := src.Digest()
+	require.NoError(t, err)
+
+	require.Equal(t, want, got,
+		"the prime fast path and the planner disagree about the recorded revision, so prime would re-plan on every session")
 }
 
 // TestTeamSkillSource_UnreadableApprovalsRefuseRatherThanMaterialize.

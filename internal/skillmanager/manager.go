@@ -89,10 +89,26 @@ type ReconcilePlan struct {
 	DesiredFileCount  int
 	RetiredSelections bool // saved selections doctor can remove from committed intent
 
+	// TeamSkills records what happened to every team skill this project
+	// discovered, materialized or not.
+	//
+	// It is a separate field rather than more Warnings entries because Warnings
+	// means "planning REFUSED and stopped" here — both existing producers return
+	// immediately after setting one, and `ox doctor` renders them with a fixed
+	// "use a newer ox" remediation. A skill held for approval is the same shape as
+	// a preserved Conflict: the plan is valid, one thing was deliberately left
+	// alone, and the human needs to be told which and why.
+	TeamSkills []TeamSkillDecision
+
 	repoRoot    string
 	nextLock    lockFile
 	lockChanged bool
-	journal     applyJournal
+
+	// teamIncomplete is non-empty when the catalog could not see the team's
+	// skills. It suppresses REMOVALS of team-owned files only; installs and
+	// updates of whatever was seen still proceed.
+	teamIncomplete string
+	journal        applyJournal
 }
 
 // committedLock is the half of the manifest that belongs in git: what this
@@ -239,6 +255,13 @@ func (plan *ReconcilePlan) RemovedPaths() []string { return actionPaths(plan.Rem
 
 // LockChanged reports whether Apply committed a new desired/ownership state.
 func (plan *ReconcilePlan) LockChanged() bool { return plan.lockChanged }
+
+// RetainedTeamReason reports why this plan declined to retire team-owned skill
+// files, or "" when the team half of the catalog was authoritative.
+//
+// Exported so `ox doctor` can say it once. A retention nobody can see is
+// indistinguishable from a sync that is quietly doing nothing.
+func (plan *ReconcilePlan) RetainedTeamReason() string { return plan.teamIncomplete }
 
 // Converged reports whether applying the plan can fully realize desired state.
 func (plan *ReconcilePlan) Converged() bool {
@@ -482,8 +505,27 @@ func normalizeDesired(desired DesiredSkills) DesiredSkills {
 }
 
 // Plan inspects the project without writing and returns a deterministic plan.
+//
+// The catalog it projects is the built-in one UNIONED with this repository's
+// approved team skills — resolved from repoRoot by catalogForRepo. Doing the
+// resolution here rather than in each caller is what makes team skills reach
+// disk at all: every materialization path in the codebase (Reconcile,
+// ReconcileUpdate, ReconcileUpdateNonBlocking, ReconcileUpdateGated, and the
+// `ox doctor` check) funnels through this one function, and for its first
+// release TeamSkillSource was wired into none of them.
 func Plan(repoRoot, version string, desired DesiredSkills, targets []adapterprotocol.SkillTarget) (*ReconcilePlan, error) {
-	return planWithSource(repoRoot, version, desired, targets, builtInCatalog{})
+	source, decisions, err := catalogForRepo(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := planWithSource(repoRoot, version, desired, targets, source)
+	if plan != nil {
+		// Carried even on the refusal paths (schema-newer, downgrade guard), which
+		// return a plan with no actions: a human looking at a repo that is not
+		// converging still needs to see which team skills are waiting on them.
+		plan.TeamSkills = decisions
+	}
+	return plan, err
 }
 
 func planWithSource(repoRoot, version string, desired DesiredSkills, targets []adapterprotocol.SkillTarget, source catalogSource) (*ReconcilePlan, error) {
@@ -531,6 +573,10 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 		if _, ok := targetByKey[key]; !ok {
 			return nil, fmt.Errorf("desired skill target %q has no descriptor", key)
 		}
+	}
+
+	if incomplete, ok := source.(interface{ IncompleteReason() string }); ok {
+		plan.teamIncomplete = incomplete.IncompleteReason()
 	}
 
 	digest, err := source.Digest()
@@ -679,6 +725,16 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 
 	for _, oldFile := range old.ManagedFiles {
 		if _, wanted := desiredPaths[oldFile.Path]; wanted {
+			continue
+		}
+		// A team skill absent from desired state means one of two things, and the
+		// difference is invisible from here: the team retired it, or ox could not
+		// see the team checkout. Only the first justifies deletion. When the source
+		// says it was blind, hold what we have — a stale skill is recoverable, a
+		// deleted team library is not.
+		if plan.teamIncomplete != "" && isTeamOwnedPath(targetByKey, oldFile) {
+			plan.Preserves = append(plan.Preserves, oldFile.Path)
+			next.ManagedFiles = append(next.ManagedFiles, oldFile)
 			continue
 		}
 		actual, _, readErr := inspectRepoFile(repoRoot, oldFile.Path)
@@ -1608,6 +1664,19 @@ func conflictSkills(root string, conflicts []Conflict) []string {
 		}
 	}
 	return sortedUnique(names)
+}
+
+// isTeamOwnedPath reports whether a managed file belongs to a team-sourced
+// skill, by reading the skill directory name out of the path under its target's
+// root. Keyed on the reserved prefix rather than on provenance recorded in the
+// lockfile, because the lockfile does not record provenance and adding it would
+// change the committed half.
+func isTeamOwnedPath(targetByKey map[string]adapterprotocol.SkillTarget, file managedFile) bool {
+	target, ok := targetByKey[file.Target]
+	if !ok {
+		return false
+	}
+	return strings.HasPrefix(skillName(target.Root, file.Path), TeamPrefix)
 }
 
 func skillName(root, path string) string {

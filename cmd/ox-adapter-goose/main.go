@@ -60,9 +60,20 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 			adapterprotocol.CapSessionImporter,
 			adapterprotocol.CapCapturePrior,
 			adapterprotocol.CapServeMode,
+			adapterprotocol.CapSkillsInstaller,
 		},
 		// No CapFileWatcher: the session handle is virtual ("goose:<id>"), so
 		// there is no path for fsnotify to watch. Recording is hook-driven.
+		// Goose reads .agents/skills at project scope, with .goose/skills as a legacy path.
+		// One root, never a fan-out: a skill copied into several of an agent's
+		// discovery paths is several files to keep in sync and several answers
+		// when they drift. CanonicalizeTargets folds this key across adapters, so
+		// selecting Codex and Amp together still yields one directory.
+		SkillTargets: []adapterprotocol.SkillTarget{{
+			Key: "agents-project", Root: ".agents/skills",
+			Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
+			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
 		HookEnvValues: []string{"goose"},
 		ServeMode:     true,
 	}, nil

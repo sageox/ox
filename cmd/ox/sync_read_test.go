@@ -394,7 +394,7 @@ func TestReadSyncOutputContract(t *testing.T) {
 	}{
 		{"ready", 0, "", "Ledger ready: /selected/ledger (HEAD abc123)\n", ""},
 		{"denied", 1, "denied", "", "Ledger read failed: denied\n"},
-		{"usage", 2, "invalid_arguments", "", "Ledger read failed: invalid_arguments\nUse: ox sync --read-only --repo repo_<uuid> [--timeout 5m] [--check] [--json]\n"},
+		{"usage", 2, "invalid_arguments", "", "Ledger read failed: invalid_arguments\nUse: ox sync --read-only --repo repo_<uuid> [--timeout 30m] [--check] [--json]\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

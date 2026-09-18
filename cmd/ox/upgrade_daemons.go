@@ -26,6 +26,13 @@ import (
 // repository reconcile at its next `ox agent prime`, which runs the new binary
 // and compares the catalog revision itself. Daemons respawn on demand.
 //
+// This reasoning is about the BUILT-IN catalog only, and stays true now that a
+// daemon also reconciles on its team-context tick: that path exists to propagate
+// TEAM content, which does not live in any binary, and Plan's downgrade guard
+// refuses it outright when the daemon's version is older than the one that last
+// wrote the repository. A stale daemon therefore still cannot walk a repo
+// backwards.
+//
 // Best-effort throughout: a failure to stop a daemon must never fail an upgrade
 // that has already succeeded.
 func retireStaleDaemonsAfterUpgrade() int {

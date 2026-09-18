@@ -192,9 +192,10 @@ func TestReadSyncLFSBoundedBatchesPreserveProgress(t *testing.T) {
 	for _, tc := range []struct{ name, errorClass string }{
 		{name: "complete"},
 		{name: "later batch foreign", errorClass: "missing_hydration"},
-		// A batch the server cannot serve right now is the transient case: it
-		// must not stop hydration, only leave its own objects unmaterialized.
-		{name: "later batch unavailable", errorClass: "missing_hydration"},
+		// A batch the server settles on must not stop hydration, only leave its
+		// own objects unmaterialized. A transient batch failure is retried
+		// instead — TestReadSyncLFSBatchRequestRetriesOnlyTransientFailures.
+		{name: "later batch refused", errorClass: "missing_hydration"},
 		{name: "later batch denied", errorClass: "denied"},
 		{name: "later batch canceled", errorClass: "interrupted"},
 	} {
@@ -243,8 +244,8 @@ func TestReadSyncLFSBoundedBatchesPreserveProgress(t *testing.T) {
 				}
 				if batch == 2 {
 					switch tc.name {
-					case "later batch unavailable":
-						w.WriteHeader(http.StatusInternalServerError)
+					case "later batch refused":
+						w.WriteHeader(http.StatusUnprocessableEntity)
 						return
 					case "later batch denied":
 						w.WriteHeader(http.StatusForbidden)
@@ -1089,8 +1090,9 @@ func newColdReadStageFixture(t *testing.T) *coldReadStageFixture {
 		oid := lfs.ComputeOID(content)
 		c.contents[oid], c.paths["sessions/cold/"+name+".md"], c.downloads[oid] = content, oid, &atomic.Int32{}
 	}
-	// Hydration follows tree order, so refusing "c" leaves "a" and "b" already
-	// transferred when the attempt fails.
+	// Refusing "c" leaves "a" and "b" transferred: hydration materializes every
+	// object it can and reports the one it could not. The refusal is settled so
+	// the attempt spends one request on it rather than a retry budget.
 	c.refused = c.paths["sessions/cold/c.md"]
 	c.readFixture = newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/batch") {
@@ -1120,7 +1122,7 @@ func newColdReadStageFixture(t *testing.T) *coldReadStageFixture {
 		}
 		c.downloads[oid].Add(1)
 		if oid == c.refused && c.refuse.Load() {
-			http.Error(w, "object refused", http.StatusInternalServerError)
+			http.Error(w, "object refused", http.StatusNotFound)
 			return
 		}
 		_, _ = w.Write(content)
@@ -1320,4 +1322,305 @@ func TestReadSyncColdStageResumesOnlyProvenIdentity(t *testing.T) {
 			require.False(t, receipt.Ready)
 		})
 	}
+}
+
+// grantReadLFSBatch answers a download batch request by granting every object
+// it names, so a test's handler can spend its attention on the object route.
+func grantReadLFSBatch(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	var request struct {
+		Objects []lfs.BatchObject `json:"objects"`
+	}
+	assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+	response := lfs.BatchResponse{}
+	for _, object := range request.Objects {
+		response.Objects = append(response.Objects, lfs.BatchResponseObject{
+			OID: object.OID, Size: object.Size, Actions: &lfs.Actions{Download: &lfs.Action{
+				Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + object.OID,
+			}},
+		})
+	}
+	assert.NoError(t, json.NewEncoder(w).Encode(response))
+}
+
+// Failure prevented: hydration transfers objects strictly one at a time, so a
+// cold clone of a real ledger — measured at ~3.2 objects/s against ~15,500
+// objects — needs over an hour of wall clock, cannot finish in any budget a
+// headless consumer can schedule, and holds the checkout lock against every
+// reader for that whole time (ox #948). The counter-risk is an unbounded
+// fan-out: one client must not open a request per object at one origin.
+func TestReadSyncLFSDownloadsObjectsConcurrentlyWithinTheBound(t *testing.T) {
+	paths := make([]string, 0, 2*readHydrationConcurrency)
+	contents := make(map[string][]byte)
+	oids := make(map[string]string)
+	for i := range 2 * readHydrationConcurrency {
+		path := fmt.Sprintf("sessions/parallel/object-%03d.md", i)
+		content := []byte(fmt.Sprintf("parallel object %03d\n", i))
+		paths = append(paths, path)
+		oids[path] = lfs.ComputeOID(content)
+		contents[oids[path]] = content
+	}
+	var inFlight, peak atomic.Int32
+	f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			grantReadLFSBatch(t, w, r)
+			return
+		}
+		current := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for observed := peak.Load(); current > observed; observed = peak.Load() {
+			if peak.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		// Hold the response open long enough that concurrent transfers overlap
+		// observably. Serial hydration never sees a second request in flight.
+		time.Sleep(20 * time.Millisecond)
+		content, ok := contents[filepath.Base(r.URL.Path)]
+		if !assert.True(t, ok, "only a requested object may be downloaded") {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write(content)
+	})
+	for _, path := range paths {
+		commitReadLFSPointer(t, f, path, contents[oids[path]])
+	}
+
+	result := ReadSync(context.Background(), f.opts)
+	require.True(t, result.Ready, "%+v", result)
+	require.Equal(t, ReadHydration{State: "complete", Required: len(paths), Completed: len(paths)}, result.Hydration)
+	require.Greater(t, peak.Load(), int32(1), "objects must not transfer one at a time")
+	require.LessOrEqual(t, peak.Load(), int32(readHydrationConcurrency), "concurrency must stay bounded at one origin")
+	for _, path := range paths {
+		actual, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+		require.NoError(t, err)
+		require.Equal(t, contents[oids[path]], actual, path)
+	}
+}
+
+// Failure prevented: a single transient failure anywhere in a transfer that
+// runs for many minutes fails the whole sync, so one network blip costs every
+// object the attempt had already moved (ox #948). The partial-body case also
+// guards the retry itself: an attempt that wrote a prefix must be replaced, not
+// appended to, or the retry verifies bytes no server ever sent.
+func TestReadSyncLFSRetriesTransientDownloadFailure(t *testing.T) {
+	const path = "sessions/flaky/session.md"
+	content := []byte("content that arrives on the second attempt\n")
+	for _, tc := range []struct {
+		name string
+		fail func(http.ResponseWriter)
+	}{
+		{"server is briefly unavailable", func(w http.ResponseWriter) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}},
+		{"connection is lost mid-object", func(w http.ResponseWriter) {
+			w.Header().Set("Content-Length", fmt.Sprint(len(content)))
+			_, _ = w.Write(content[:8])
+			// Flush before aborting. Go's own transport transparently retries a
+			// request whose connection dies before any response arrives, so an
+			// unflushed abort would prove nothing about ox's retry.
+			w.(http.Flusher).Flush()
+			panic(http.ErrAbortHandler)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/batch") {
+					grantReadLFSBatch(t, w, r)
+					return
+				}
+				if attempts.Add(1) == 1 {
+					tc.fail(w)
+					return
+				}
+				_, _ = w.Write(content)
+			})
+			commitReadLFSPointer(t, f, path, content)
+
+			result := ReadSync(context.Background(), f.opts)
+			require.True(t, result.Ready, "%+v", result)
+			require.Nil(t, result.ErrorDetail)
+			require.Equal(t, ReadHydration{State: "complete", Required: 1, Completed: 1}, result.Hydration)
+			require.Equal(t, int32(2), attempts.Load(), "one blip costs one retry, not the sync")
+			actual, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+			require.NoError(t, err)
+			require.Equal(t, content, actual, "the retry replaces the failed attempt's bytes")
+		})
+	}
+}
+
+// Failure prevented: retrying an answer the server has settled spends the
+// budget the objects still waiting need — three requests each for every object
+// a ledger holds that will never be served, and three for a grant that was
+// refused once.
+func TestReadSyncLFSSettledDownloadFailuresAreNotRetried(t *testing.T) {
+	const path = "sessions/settled/session.md"
+	content := []byte("content the server never serves\n")
+	for _, tc := range []struct {
+		name, errorClass, reason string
+		serve                    func(http.ResponseWriter)
+	}{
+		{"unauthorized", "denied", "download_refused", func(w http.ResponseWriter) { w.WriteHeader(http.StatusUnauthorized) }},
+		{"forbidden", "denied", "download_refused", func(w http.ResponseWriter) { w.WriteHeader(http.StatusForbidden) }},
+		{"object not found", "missing_hydration", "download_refused", func(w http.ResponseWriter) { w.WriteHeader(http.StatusNotFound) }},
+		{"content is not the object", "missing_hydration", "download_failed", func(w http.ResponseWriter) {
+			_, _ = w.Write([]byte("bytes that are not the object\n"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/batch") {
+					grantReadLFSBatch(t, w, r)
+					return
+				}
+				attempts.Add(1)
+				tc.serve(w)
+			})
+			// Publish a checkout first: a cold clone that fails hydration keeps
+			// its stage unpublished, and the stub under test would not exist.
+			require.True(t, ReadSync(context.Background(), f.opts).Ready)
+			pointer := commitReadLFSPointer(t, f, path, content)
+
+			result := ReadSync(context.Background(), f.opts)
+			require.False(t, result.Ready, "%+v", result)
+			require.Equal(t, tc.errorClass, result.ErrorClass, "%+v", result)
+			require.NotNil(t, result.ErrorDetail)
+			require.Equal(t, tc.reason, result.ErrorDetail.Reason)
+			require.Equal(t, int32(1), attempts.Load(), "a settled answer is asked for once")
+			actual, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+			require.NoError(t, err)
+			require.Equal(t, pointer, string(actual), "an unserved object keeps its stub")
+		})
+	}
+}
+
+// Failure prevented: a batch request that fails transiently costs the grants
+// for every object in it — up to 100 — and there is no smaller unit of the
+// request to fall back to. A refused batch must still be answered once.
+func TestReadSyncLFSBatchRequestRetriesOnlyTransientFailures(t *testing.T) {
+	const path = "sessions/batch-retry/session.md"
+	content := []byte("content behind one failed batch request\n")
+	for _, tc := range []struct {
+		name, errorClass string
+		code             int
+		ready            bool
+		batches          int32
+	}{
+		{"gateway is briefly unavailable", "", http.StatusBadGateway, true, 2},
+		{"batch is refused", "denied", http.StatusUnauthorized, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var batches atomic.Int32
+			f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasSuffix(r.URL.Path, "/batch") {
+					_, _ = w.Write(content)
+					return
+				}
+				if batches.Add(1) == 1 {
+					w.WriteHeader(tc.code)
+					return
+				}
+				grantReadLFSBatch(t, w, r)
+			})
+			require.True(t, ReadSync(context.Background(), f.opts).Ready)
+			commitReadLFSPointer(t, f, path, content)
+
+			result := ReadSync(context.Background(), f.opts)
+			require.Equal(t, tc.ready, result.Ready, "%+v", result)
+			require.Equal(t, tc.errorClass, result.ErrorClass, "%+v", result)
+			require.Nil(t, result.ErrorDetail, "a batch failure names no object")
+			require.Equal(t, tc.batches, batches.Load())
+		})
+	}
+}
+
+// Failure prevented: a grant the server stops honoring mid-batch keeps the
+// other concurrent transfers running behind it, so objects go on arriving and
+// committing after access was denied and the batch spends its remaining
+// requests on downloads that cannot succeed. Transferring one object at a time
+// stopped at the denial; transferring several at once must too.
+func TestReadSyncLFSDeniedDownloadStopsTheBatchsOtherTransfers(t *testing.T) {
+	const slowPath, deniedPath = "sessions/denial/a-slow.md", "sessions/denial/b-denied.md"
+	slow, denied := []byte("content of the transfer already in flight\n"), []byte("content the grant no longer covers\n")
+	var served atomic.Int32
+	var stopped atomic.Bool
+	// Both downloads are dispatched at once, so the denial could otherwise be
+	// answered before the slow transfer has begun — and canceling a transfer
+	// that never started is not what this test is about. Holding the denial
+	// until the slow handler is running makes every run exercise the same thing.
+	inFlight := make(chan struct{})
+	var begin sync.Once
+	f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			grantReadLFSBatch(t, w, r)
+			return
+		}
+		if filepath.Base(r.URL.Path) == lfs.ComputeOID(denied) {
+			select {
+			case <-inFlight:
+			case <-time.After(10 * time.Second):
+				t.Error("the transfer this denial must stop never started")
+				return
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		begin.Do(func() { close(inFlight) })
+		select {
+		case <-r.Context().Done():
+			// The denial reached this transfer and stopped it.
+			stopped.Store(true)
+		case <-time.After(10 * time.Second):
+			// Nothing canceled this download, so it delivers its object — which
+			// is the behavior under test failing, not the test timing out.
+			served.Add(1)
+			_, _ = w.Write(slow)
+		}
+	})
+	require.True(t, ReadSync(context.Background(), f.opts).Ready)
+	slowPointer := commitReadLFSPointer(t, f, slowPath, slow)
+	deniedPointer := commitReadLFSPointer(t, f, deniedPath, denied)
+
+	result := ReadSync(context.Background(), f.opts)
+	require.False(t, result.Ready, "%+v", result)
+	require.Equal(t, "denied", result.ErrorClass, "%+v", result)
+	require.Equal(t, int32(0), served.Load(), "a denial must stop the transfers beside it")
+	require.True(t, stopped.Load(), "the transfer already in flight is the one that must be stopped")
+	for path, pointer := range map[string]string{slowPath: slowPointer, deniedPath: deniedPointer} {
+		actual, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+		require.NoError(t, err)
+		require.Equal(t, pointer, string(actual), path)
+	}
+	require.Equal(t, ReadHydration{State: "missing", Required: 2, Completed: 0}, result.Hydration)
+}
+
+// Failure prevented: a batch response the server delivered in full but that
+// cannot be decoded is asked for twice more, adding two identical requests and
+// 600ms of backoff to a sync that already knows the answer. A body cut short by
+// the transport fails while it is read, so nothing reaching the decoder is
+// transient.
+func TestReadSyncLFSUnusableBatchResponseIsNotRetried(t *testing.T) {
+	const path = "sessions/malformed/session.md"
+	content := []byte("content whose grant never decodes\n")
+	var batches atomic.Int32
+	f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/batch") {
+			_, _ = w.Write(content)
+			return
+		}
+		batches.Add(1)
+		_, _ = w.Write([]byte(`{"objects": [`))
+	})
+	require.True(t, ReadSync(context.Background(), f.opts).Ready)
+	pointer := commitReadLFSPointer(t, f, path, content)
+
+	result := ReadSync(context.Background(), f.opts)
+	require.False(t, result.Ready, "%+v", result)
+	require.Equal(t, int32(1), batches.Load(), "a response the server completed is its settled answer")
+	actual, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+	require.NoError(t, err)
+	require.Equal(t, pointer, string(actual), "an ungranted object keeps its stub")
 }

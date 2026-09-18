@@ -737,12 +737,10 @@ func repairTeamSparseCheckout(tcPath string) error {
 	manifestPath := filepath.Join(tcPath, ".sageox", "sync.manifest")
 	cfg := manifest.ParseFile(manifestPath, manifest.RepoKindTeamContext)
 
-	sparsePaths := manifest.ComputeSparseSet(cfg)
+	sparsePaths := manifest.SparseSetFor(cfg, manifest.RepoKindTeamContext)
 	if len(sparsePaths) == 0 {
 		return fmt.Errorf("no sparse paths computed from manifest")
 	}
-	sparsePaths = manifest.EnsureSageoxInclude(sparsePaths)
-	sparsePaths = manifest.EnsureRequiredIncludes(sparsePaths, manifest.RepoKindTeamContext, manifest.DenyPaths(cfg))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

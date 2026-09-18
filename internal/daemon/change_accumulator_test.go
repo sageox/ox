@@ -5,6 +5,7 @@ import (
 	"os"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -193,22 +194,37 @@ func TestChangeAccumulator_OnSettledCallback(t *testing.T) {
 func TestChangeAccumulator_OnSettledNotCalledAfterStop(t *testing.T) {
 	t.Parallel()
 
-	acc := NewChangeAccumulator(100 * time.Millisecond)
+	for _, lateSettle := range []bool{false, true} {
+		name := "timer canceled"
+		if lateSettle {
+			name = "late settle after stop"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				acc := NewChangeAccumulator(100 * time.Millisecond)
+				defer acc.Stop()
 
-	var count int64
-	acc.SetOnSettled(func() {
-		atomic.AddInt64(&count, 1)
-	})
+				var count int64
+				acc.SetOnSettled(func() {
+					atomic.AddInt64(&count, 1)
+				})
+				acc.AddChange("src/main.go", ChangeModified, false)
+				acc.Stop()
 
-	acc.AddChange("src/main.go", ChangeModified, false)
-	// stop before settle fires
-	time.Sleep(20 * time.Millisecond)
-	acc.Stop()
+				if lateSettle {
+					// Model a timer callback already dispatched before Stop:
+					// Timer.Stop cannot prevent it from entering settle later.
+					acc.settle()
+				}
+				// Virtual time cannot overrun the stop ordering on a busy runner.
+				time.Sleep(200 * time.Millisecond)
+				synctest.Wait()
 
-	// wait past settle window
-	time.Sleep(200 * time.Millisecond)
-
-	assert.Equal(t, int64(0), atomic.LoadInt64(&count), "callback should not fire after Stop()")
+				assert.Equal(t, int64(0), atomic.LoadInt64(&count), "callback should not fire after Stop()")
+				assert.Empty(t, acc.DrainSettled(), "stopped changes should not be published")
+			})
+		})
+	}
 }
 
 // TestChangeAccumulator_OnSettledNotCalledWhenEmpty verifies that the callback

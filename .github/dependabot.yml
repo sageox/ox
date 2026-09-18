@@ -1,0 +1,23 @@
+version: 2
+
+updates:
+  # Nothing watched these before this file existed, and every action drifted
+  # onto the deprecated node20 runtime at once. Grouped so a week's bumps
+  # arrive as one reviewable PR instead of eleven.
+  #
+  # Merged by hand, like every other PR here — an action bump is a
+  # supply-chain change. Do not add an auto-merge workflow; the repo's
+  # allow_auto_merge setting is off, which is what enforces this today.
+  #
+  # Does NOT cover .github/workflows/*.disabled — Dependabot only reads
+  # .yml/.yaml, so those stay a manual bump whenever one is re-enabled.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci

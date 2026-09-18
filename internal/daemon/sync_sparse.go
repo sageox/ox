@@ -26,11 +26,11 @@ import (
 // callers can propagate if they need to, but the typical pattern is to
 // ignore the return value because losing sparse on one pass is recoverable
 // on the next.
-func applySparseFromManifest(ctx context.Context, repoPath string, cfg *manifest.ManifestConfig, logger *slog.Logger) error {
+func applySparseFromManifest(ctx context.Context, repoPath string, cfg *manifest.ManifestConfig, kind manifest.RepoKind, logger *slog.Logger) error {
 	if cfg == nil {
 		return nil
 	}
-	paths := manifest.ComputeSparseSet(cfg)
+	paths := manifest.SparseSetFor(cfg, kind)
 	if len(paths) == 0 {
 		if logger != nil {
 			logger.Debug("sparse-checkout: no paths computed, skipping", "path", repoPath)

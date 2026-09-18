@@ -140,6 +140,11 @@ func (a *ChangeAccumulator) settle() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// Timer.Stop cannot cancel a callback that has already been dispatched.
+	if a.stopped {
+		return
+	}
+
 	if len(a.pending) == 0 {
 		return
 	}
@@ -174,7 +179,8 @@ func (a *ChangeAccumulator) PendingCount() int {
 	return len(a.pending)
 }
 
-// Stop prevents further timer callbacks.
+// Stop prevents further settling. Callbacks already dispatched by settle may
+// still run; Stop does not wait for them.
 func (a *ChangeAccumulator) Stop() {
 	a.mu.Lock()
 	defer a.mu.Unlock()

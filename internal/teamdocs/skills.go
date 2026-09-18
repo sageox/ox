@@ -32,6 +32,17 @@ type TeamSkill struct {
 // skillManifestName is the file that makes a directory a skill.
 const skillManifestName = "SKILL.md"
 
+// SkillRoots are the directories inside a team-context checkout that may hold
+// skills, in precedence order: agents/skills is canonical and wins a name
+// collision, coworkers/skills is the legacy location.
+//
+// Exported because the daemon has to answer "did this pull touch a skill?" from
+// a list of changed paths, and it must answer with the SAME roots discovery
+// walks. A second copy of these strings is how a skill authored under the legacy
+// root would be found by discovery but never trigger a refresh — present in the
+// team repo, absent from every repository, with nothing logged either way.
+var SkillRoots = []string{"agents/skills", "coworkers/skills"}
+
 // DiscoverSkills returns the team skills that apply to repoSlug.
 //
 // Roots mirror DiscoverRules: agents/skills is canonical, coworkers/skills is the
@@ -44,12 +55,37 @@ const skillManifestName = "SKILL.md"
 // addressed upstream by flooring agents/ into the sparse set rather than by
 // guessing here.
 func DiscoverSkills(teamPath, repoSlug string) ([]TeamSkill, error) {
+	published, err := PublishedSkills(teamPath)
+	if err != nil {
+		return nil, err
+	}
+	out := published[:0]
+	for _, s := range published {
+		if SkillAppliesToRepo(s, repoSlug) {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+// PublishedSkills returns every skill the team publishes to AI coworkers,
+// before the per-repo `repos:` filter is applied.
+//
+// Split out from DiscoverSkills so a diagnostic can tell "the team published
+// nothing" apart from "the team published this for other repos." Those are
+// indistinguishable once the filter has run, and they need opposite answers
+// from the human: author a skill, versus widen a `repos:` list.
+//
+// The audience/visibility/status filters are NOT repo-specific and stay here: a
+// draft or human-only skill is not published to coworkers anywhere, so surfacing
+// it as "available elsewhere" would be wrong too.
+func PublishedSkills(teamPath string) ([]TeamSkill, error) {
 	if teamPath == "" {
 		return nil, nil
 	}
 
 	var skills []TeamSkill
-	for _, root := range []string{"agents/skills", "coworkers/skills"} {
+	for _, root := range SkillRoots {
 		discovered, err := walkSkillsDir(filepath.Join(teamPath, root))
 		if err != nil {
 			return nil, err
@@ -83,9 +119,6 @@ func DiscoverSkills(teamPath, repoSlug string) ([]TeamSkill, error) {
 		if strings.HasPrefix(s.Status, RuleStatusSupersededPrefix) {
 			continue
 		}
-		if !skillAppliesToRepo(s, repoSlug) {
-			continue
-		}
 		filtered = append(filtered, s)
 	}
 	skills = filtered
@@ -94,14 +127,14 @@ func DiscoverSkills(teamPath, repoSlug string) ([]TeamSkill, error) {
 	return skills, nil
 }
 
-// skillAppliesToRepo applies the `repos:` filter with the same semantics as
+// SkillAppliesToRepo applies the `repos:` filter with the same semantics as
 // rules: an empty list means every repo, and an unknown slug matches only
 // unfiltered skills.
 //
 // The unknown-slug case is deliberately conservative. Defaulting to "include"
 // when ox cannot tell which repo it is in would push a team skill into
 // repositories its author never listed.
-func skillAppliesToRepo(s TeamSkill, repoSlug string) bool {
+func SkillAppliesToRepo(s TeamSkill, repoSlug string) bool {
 	if len(s.Repos) == 0 {
 		return true
 	}

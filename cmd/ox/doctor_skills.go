@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/internal/teamskills"
 )
 
 // checkClaudeSkills retains its historical registration name, but checks the
@@ -26,6 +27,13 @@ func checkClaudeSkills(fix bool) checkResult {
 		return WarningCheck("Agent skills", strings.Join(plan.Warnings, "; "), "Use the same or a newer ox version before reconciling")
 	}
 	if len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 && len(plan.Conflicts) == 0 && !plan.RetiredSelections {
+		// Converged is not the same as complete. A team skill withheld pending
+		// approval leaves the repository looking exactly as it would if nobody had
+		// authored it, so this is the one place a human finds out it exists.
+		if withheld := plan.WithheldTeamSkills(); len(withheld) > 0 {
+			return WarningCheck("Agent skills", describeWithheldTeamSkills(withheld),
+				teamSkillApprovalHint(gitRoot))
+		}
 		return PassedCheck("Agent skills", fmt.Sprintf("%d managed files across %d native target(s)", plan.DesiredFileCount, plan.TargetCount))
 	}
 
@@ -44,6 +52,12 @@ func checkClaudeSkills(fix bool) checkResult {
 	if len(plan.Conflicts) > 0 {
 		return WarningCheck("Agent skills", fmt.Sprintf("reconciled with %d preserved conflict(s)", len(plan.Conflicts)), describeSkillConflicts(plan.Conflicts))
 	}
+	if withheld := plan.WithheldTeamSkills(); len(withheld) > 0 {
+		return WarningCheck("Agent skills",
+			fmt.Sprintf("reconciled %d file change(s); %s",
+				len(plan.Creates)+len(plan.Updates)+len(plan.Removes), describeWithheldTeamSkills(withheld)),
+			teamSkillApprovalHint(gitRoot))
+	}
 	return PassedCheck("Agent skills", fmt.Sprintf("reconciled %d file change(s) across %d native target(s)", len(plan.Creates)+len(plan.Updates)+len(plan.Removes), plan.TargetCount))
 }
 
@@ -59,6 +73,31 @@ func describeSkillConflicts(conflicts []skillmanager.Conflict) string {
 		parts = append(parts, fmt.Sprintf("%s — %s", c.Path, c.Reason))
 	}
 	return strings.Join(parts, "; ")
+}
+
+// describeWithheldTeamSkills names each team skill ox declined to materialize
+// and what it would be approving, mirroring describeSkillConflicts.
+//
+// The reason is carried, not summarized to a count: "2 team skills need
+// approval" tells a human nothing they can act on, whereas
+// "deploy — needs approval: bundled-script (scripts/run.sh (under scripts/))"
+// names the exact file they have to read before deciding.
+func describeWithheldTeamSkills(withheld []skillmanager.TeamSkillDecision) string {
+	parts := make([]string, 0, len(withheld))
+	for _, d := range withheld {
+		parts = append(parts, fmt.Sprintf("%s — %s", d.Name, d.Reason))
+	}
+	return fmt.Sprintf("%d team skill(s) withheld: %s", len(withheld), strings.Join(parts, "; "))
+}
+
+// teamSkillApprovalHint points at the committed approval store.
+//
+// It names the FILE rather than a command because there is no approval command
+// yet — the store is written by hand or by a reviewer. Promising a command that
+// does not exist would be worse than the silence this check replaces.
+func teamSkillApprovalHint(repoRoot string) string {
+	return fmt.Sprintf("Review the skill in your team context, then record a digest-pinned approval in %s",
+		teamskills.ApprovalPath(repoRoot))
 }
 
 func describeSkillPlan(plan *skillmanager.ReconcilePlan) string {
