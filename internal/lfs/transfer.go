@@ -266,7 +266,7 @@ func DownloadObject(action *Action) ([]byte, error) {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if action.readClient != nil {
-			return nil, &HTTPError{StatusCode: resp.StatusCode}
+			return nil, newHTTPError(resp)
 		}
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("download returned HTTP %d: %s", resp.StatusCode, string(body))
@@ -345,7 +345,7 @@ func DownloadToFileContext(ctx context.Context, action *Action, dst io.Writer, v
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if action.readClient != nil {
-			return &HTTPError{StatusCode: resp.StatusCode}
+			return newHTTPError(resp)
 		}
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("download returned HTTP %d: %s", resp.StatusCode, string(body))

@@ -774,31 +774,72 @@ func (s *readSkips) skip(ctx context.Context, err error) bool {
 	return true
 }
 
-// readHydrationConcurrency bounds how many object downloads are in flight at
-// once. Hydration is many small objects from one origin, so it is round-trip
-// bound rather than bandwidth bound: transferring them one at a time leaves the
-// link idle between objects, and a cold clone of a real ledger cannot finish in
-// any budget a headless consumer can schedule (ox #948). 8 is the Git LFS
-// client's own default concurrency for this protocol against this class of
-// server, and it keeps ox one polite consumer of one origin.
+// readHydrationConcurrency is the most object downloads hydration runs at once.
+// Hydration is many small objects from one origin, so it is round-trip bound
+// rather than bandwidth bound: transferring them one at a time leaves the link
+// idle between objects, and a cold clone of a real ledger cannot finish in any
+// budget a headless consumer can schedule (ox #948). 8 is the Git LFS client's
+// own default concurrency for this protocol against this class of server, and
+// it keeps ox one polite consumer of one origin. readLimiter runs fewer while
+// the server refuses them.
 const readHydrationConcurrency = 8
 
 // readRequestAttempts bounds how many times one batch request or object
-// download is tried, and readRequestBackoff is the pause before the second
-// attempt, doubled before each one after that. A cold clone transfers for many
-// minutes, so a single transport blip must not cost the whole sync; the bound
-// keeps a request that keeps failing from spending the budget the objects still
-// waiting need.
+// download may fail before it is abandoned, and readRequestBackoff is the pause
+// after the first failure, doubled after each one after that. A cold clone
+// transfers for many minutes, so a single transport blip must not cost the
+// whole sync; the bound keeps a request that keeps failing from spending the
+// budget the objects still waiting need. A refusal is not counted — see
+// withReadRetry.
 const readRequestAttempts = 3
 const readRequestBackoff = 200 * time.Millisecond
 
-// withReadRetry runs request until it succeeds, exhausts readRequestAttempts, or
-// fails with something repeating it cannot change.
+// readRetryShare sets how long one request may keep retrying: a thirtieth of
+// the operation's remaining budget, one minute of the default 30m. The window
+// grows with the budget a caller grants and shrinks as that budget is spent, so
+// no one request can take what the objects still waiting need.
+// readRetryWindowWithoutDeadline stands in for a context without a deadline,
+// which ox sync --read-only never passes.
+const readRetryShare = 30
+const readRetryWindowWithoutDeadline = time.Minute
+
+func readRetryWindow(ctx context.Context) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		return time.Until(deadline) / readRetryShare
+	}
+	return readRetryWindowWithoutDeadline
+}
+
+// withReadRetry runs request until it succeeds, fails with something repeating
+// it cannot change, fails readRequestAttempts times, or outlasts its retry
+// window.
+//
+// A refusal does not count toward readRequestAttempts. A read route shedding
+// load refuses in about a millisecond, so counting refusals abandoned healthy
+// objects after three lost races for the server's concurrency bound (ox #982).
+// The window alone bounds them, and a retry waits for the refusal's
+// Retry-After instead of the local backoff. Every wait is clamped to the
+// window, so a hostile or broken Retry-After costs at most one window, and the
+// last attempt is made as the window closes.
 func withReadRetry(ctx context.Context, request func() error) error {
+	closes := time.Now().Add(readRetryWindow(ctx))
 	backoff := readRequestBackoff
-	for attempt := 1; ; attempt++ {
+	failures := 0
+	for {
 		err := request()
-		if err == nil || attempt == readRequestAttempts || !retryReadRequest(ctx, err) {
+		if err == nil || !retryReadRequest(ctx, err) {
+			return err
+		}
+		wait, refused := readRefusal(err)
+		if !refused {
+			if failures++; failures == readRequestAttempts {
+				return err
+			}
+		}
+		if wait == 0 {
+			wait, backoff = backoff, backoff*2
+		}
+		if wait = min(wait, time.Until(closes)); wait <= 0 {
 			return err
 		}
 		select {
@@ -807,9 +848,8 @@ func withReadRetry(ctx context.Context, request func() error) error {
 			// what the attempt observed, and recordReadFailure classifies an
 			// expired context as "interrupted" whatever the error says.
 			return err
-		case <-time.After(backoff):
+		case <-time.After(wait):
 		}
-		backoff *= 2
 	}
 }
 
@@ -819,7 +859,7 @@ func withReadRetry(ctx context.Context, request func() error) error {
 // a server's own 5xx and 429 are settled answers — repeating one only spends
 // budget the objects still waiting need. Everything else is retried: the
 // transport failures that dominate a long transfer cannot be enumerated
-// reliably, and readRequestAttempts bounds what retrying one in vain costs.
+// reliably, and withReadRetry bounds what retrying one in vain costs.
 func retryReadRequest(ctx context.Context, err error) bool {
 	if readInterrupted(ctx, err) || errors.Is(err, auth.ErrReadTokenUnavailable) ||
 		errors.Is(err, lfs.ErrOIDMismatch) || errors.Is(err, lfs.ErrBatchResponseUnusable) {
@@ -929,6 +969,7 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 	// SHA-256 OIDs keep each batch well below that body limit. Materialize one
 	// batch at a time so grants stay bounded and failures retain progress.
 	const batchSize = 100
+	limiter := newReadLimiter()
 	for start := 0; start < len(requests); start += batchSize {
 		batch := requests[start:min(start+batchSize, len(requests))]
 		resp, err := batchReadGrants(ctx, client, batch)
@@ -1022,6 +1063,10 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 		// Downloads run concurrently; their failures are reported in batch order
 		// afterwards, so which object error_detail names does not depend on how
 		// the transfers happened to interleave. skips stays single-threaded.
+		//
+		// sem bounds the downloads in progress, each holding an open temp file;
+		// limiter bounds how many of them have a request at the server, which
+		// is fewer while the server refuses them.
 		failures := make([]error, len(grants))
 		downloads, stopDownloads := context.WithCancel(ctx)
 		sem := make(chan struct{}, readHydrationConcurrency)
@@ -1032,7 +1077,7 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 			go func() {
 				defer wg.Done()
 				defer func() { <-sem }()
-				failures[i] = materializeReadGrant(ctx, downloads, stopDownloads, dir, grant)
+				failures[i] = materializeReadGrant(ctx, downloads, stopDownloads, limiter, dir, grant)
 			}()
 		}
 		wg.Wait()
@@ -1055,8 +1100,8 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 // failure stopped it, not anything about this object, so its file stays a stub
 // exactly as it would have with one transfer at a time. The caller's own
 // cancellation is not that — ctx carries it too — and every download reports it.
-func materializeReadGrant(ctx, downloads context.Context, stop context.CancelFunc, dir string, grant readGrant) error {
-	err := materializeReadObject(downloads, grant.action, dir, grant.file.path, grant.file.ref)
+func materializeReadGrant(ctx, downloads context.Context, stop context.CancelFunc, limiter *readLimiter, dir string, grant readGrant) error {
+	err := materializeReadObject(downloads, limiter, grant.action, dir, grant.file.path, grant.file.ref)
 	switch {
 	case err == nil:
 		return nil
@@ -1068,9 +1113,12 @@ func materializeReadGrant(ctx, downloads context.Context, stop context.CancelFun
 	return err
 }
 
-// downloadReadObject streams one object into f, retrying a transport failure.
-func downloadReadObject(ctx context.Context, action *lfs.Action, f *os.File, ref lfs.FileRef) error {
-	return withReadRetry(ctx, func() error {
+// downloadReadObject streams one object into f, retrying under withReadRetry's
+// rule. Each attempt holds a limiter slot only while its request is at the
+// server, and reports its outcome to the limiter.
+func downloadReadObject(ctx context.Context, limiter *readLimiter, action *lfs.Action, f *os.File, ref lfs.FileRef) error {
+	refused := false
+	err := withReadRetry(ctx, func() error {
 		// An attempt that failed part-way has already written a prefix of the
 		// object. Each attempt starts from empty so the next one replaces those
 		// bytes instead of appending to them.
@@ -1080,13 +1128,23 @@ func downloadReadObject(ctx context.Context, action *lfs.Action, f *os.File, ref
 		if err := f.Truncate(0); err != nil {
 			return err
 		}
-		return lfs.DownloadToFileContext(ctx, action, f, true, ref.BareOID())
+		limiter.acquire()
+		defer limiter.release()
+		err := lfs.DownloadToFileContext(ctx, action, f, true, ref.BareOID())
+		limiter.observe(err, refused)
+		_, refused = readRefusal(err)
+		return err
 	})
+	if refused {
+		// The last attempt was refused and withReadRetry has stopped retrying.
+		limiter.forgo()
+	}
+	return err
 }
 
 // materializeReadObject downloads one object into rel under dir. rel is the
 // repo-relative path a failure names; dir never appears in the detail.
-func materializeReadObject(ctx context.Context, action *lfs.Action, dir, rel string, ref lfs.FileRef) error {
+func materializeReadObject(ctx context.Context, limiter *readLimiter, action *lfs.Action, dir, rel string, ref lfs.FileRef) error {
 	path := filepath.Join(dir, rel)
 	f, err := os.CreateTemp(filepath.Dir(path), ".ox-read-object-*")
 	if err != nil {
@@ -1094,7 +1152,7 @@ func materializeReadObject(ctx context.Context, action *lfs.Action, dir, rel str
 	}
 	defer os.Remove(f.Name())
 	defer f.Close()
-	if err := downloadReadObject(ctx, action, f, ref); err != nil {
+	if err := downloadReadObject(ctx, limiter, action, f, ref); err != nil {
 		// Cancellation and a missing credential are about the operation, not this
 		// object, and readErrorClass reports them ahead of any status. Returning
 		// them undecorated keeps the class and the detail describing one failure.

@@ -250,7 +250,7 @@ func TestReadSyncObjectMaterializationFailuresLeaveDestinationUntouched(t *testi
 			localRef := ref
 			rel := tc.prep(t, root, &localRef)
 			path := filepath.Join(root, rel)
-			err := materializeReadObject(context.Background(), action, root, rel, localRef)
+			err := materializeReadObject(context.Background(), newReadLimiter(), action, root, rel, localRef)
 			require.Error(t, err)
 			if tc.name == "size mismatch" {
 				require.EqualError(t, err, "missing_hydration")
