@@ -233,14 +233,20 @@ func TestReadSyncRecoveryAndReaderLock(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
-// Failure prevented: failed cold clones become published empty ledgers, or an
-// existing reader's receipt can be used for another repo/credential context.
+// Failure prevented: failed cold clones become published empty ledgers or
+// claim progress they never made, or an existing reader's receipt can be used
+// for another repo/credential context.
 func TestReadSyncColdFailureAndIdentityIsolation(t *testing.T) {
 	f := newReadFixture(t)
 	f.denied.Store(true)
 	result := ReadSync(context.Background(), f.opts)
 	require.False(t, result.Ready)
 	require.NoDirExists(t, f.opts.Path)
+	// Refused before any checkout, the attempt kept nothing, and its result
+	// must stay distinguishable from one that failed part-way.
+	require.False(t, result.Resumable)
+	require.Equal(t, ReadHydration{State: "unknown"}, result.Hydration)
+	require.Zero(t, result.Coverage.Files)
 	f.denied.Store(false)
 	require.True(t, ReadSync(context.Background(), f.opts).Ready)
 	wrong := CheckReadiness(context.Background(), f.opts.Path, "repo_01936d5a-0001-7abc-8def-0123456789ab", f.opts.Endpoint)

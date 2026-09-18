@@ -61,6 +61,11 @@ type ReadSyncResult struct {
 	// ErrorDetail says what failed, naming the object when one is identifiable.
 	// Additive within schema_version 1; consumers keep matching on ErrorClass.
 	ErrorDetail *ReadFailureDetail `json:"error_detail,omitempty"`
+	// Resumable reports that the checkout is unpublished and this attempt left
+	// a stage bound to this repo identity, endpoint, and read URL. The next
+	// attempt continues from that stage, rather than cloning from empty, if the
+	// stage still verifies. Additive within schema_version 1.
+	Resumable bool `json:"resumable,omitempty"`
 }
 
 // ReadFailureDetail says what failed, naming the object when one is
@@ -117,8 +122,8 @@ func ReadSync(ctx context.Context, opts ReadSyncOptions) ReadSyncResult {
 	return result
 }
 
-func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitserver.ReadTransport) ReadSyncResult {
-	result := newReadResult(opts)
+func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitserver.ReadTransport) (result ReadSyncResult) {
+	result = newReadResult(opts)
 	dirs := sparseCheckoutDirs()
 	result.Coverage.Paths = dirs
 	workPath := opts.Path
@@ -137,6 +142,10 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 			return result
 		}
 		workPath = readStagePath(opts.Path)
+		// Whichever return ends this attempt, report whether it leaves a stage
+		// to continue: that is how a consumer tells resume from restart. Publishing
+		// renames the stage away, so a published checkout never reports one.
+		defer func() { result.Resumable = boundReadStage(workPath, opts) }()
 		clone = !resumableReadStage(ctx, transport, workPath, opts, dirs)
 		if clone {
 			if err := replaceReadStage(ctx, transport, workPath, opts); err != nil {
@@ -215,11 +224,13 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 		}
 	}
 	if syncErr == nil {
-		syncErr = hydrateReadFiles(ctx, transport, workPath, opts, dirs)
+		syncErr = hydrateReadFiles(ctx, transport, workPath, opts, dirs, &result)
 	}
 	if staged && syncErr != nil {
 		// Keep the stage: it holds every object this attempt transferred, and it
-		// stays unpublished until resumableReadStage re-proves it.
+		// stays unpublished until resumableReadStage re-proves it. It is not
+		// verified here — that walks the whole worktree, and an interrupted
+		// attempt cannot run it — so result keeps the counts hydration left.
 		recordReadFailure(ctx, &result, syncErr)
 		return result
 	}
@@ -310,15 +321,22 @@ func ownedReadStage(ctx context.Context, transport *gitserver.ReadTransport, sta
 // any of those holds no published data, dirty file, or local commit — it is this
 // command's own scratch space — so the caller replaces it rather than refusing.
 func resumableReadStage(ctx context.Context, transport *gitserver.ReadTransport, stage string, opts ReadSyncOptions, dirs []string) bool {
-	if !safeReadDirectory(stage) || !Exists(stage) {
-		return false
-	}
-	receipt := loadReadReceiptAt(stage, opts.Path, opts.RepoID, opts.Endpoint)
-	if receipt == nil || receipt.ReadURL != opts.ReadURL {
+	if !boundReadStage(stage, opts) {
 		return false
 	}
 	_, err := readFiles(ctx, transport, stage, dirs, false)
 	return err == nil
+}
+
+// boundReadStage reports whether stage is a Git checkout carrying a receipt for
+// this repo identity, endpoint, and read URL. It reads no worktree content and
+// runs no Git subprocess, so it answers even after the context is canceled.
+func boundReadStage(stage string, opts ReadSyncOptions) bool {
+	if !safeReadDirectory(stage) || !Exists(stage) {
+		return false
+	}
+	receipt := loadReadReceiptAt(stage, opts.Path, opts.RepoID, opts.Endpoint)
+	return receipt != nil && receipt.ReadURL == opts.ReadURL
 }
 
 func validReadTime(t *time.Time) bool {
@@ -798,11 +816,18 @@ type readGrant struct {
 // afterwards, so a partial hydration still reports hydration.state "missing"
 // and ready false; the returned failure replaces verification's own detail
 // because it names why the object was skipped, which the worktree cannot say.
-func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, dir string, opts ReadSyncOptions, dirs []string) error {
+//
+// Once its first walk succeeds, whichever way this returns, progress counts
+// what that walk found plus every object committed since. A failed cold clone
+// returns without verifying its stage, so these counts are what its result
+// reports (ox #983).
+func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, dir string, opts ReadSyncOptions, dirs []string, progress *ReadSyncResult) error {
 	files, err := readFiles(ctx, transport, dir, dirs, true)
 	if err != nil {
 		return err
 	}
+	materialized := 0
+	defer func() { countReadFiles(progress, dirs, files, materialized) }()
 	var skips readSkips
 	requests := make([]lfs.BatchObject, 0)
 	pending := make(map[string][]readFile)
@@ -822,7 +847,9 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 				}
 				continue
 			}
-			if err := materializeEmptyReadObject(filepath.Join(dir, f.path)); err != nil && !skips.skip(ctx, err) {
+			if err := materializeEmptyReadObject(filepath.Join(dir, f.path)); err == nil {
+				materialized++
+			} else if !skips.skip(ctx, err) {
 				return err
 			}
 			continue
@@ -957,6 +984,7 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 		// afterwards, so which object error_detail names does not depend on how
 		// the transfers happened to interleave. skips stays single-threaded.
 		failures := make([]error, len(grants))
+		landed := make([]bool, len(grants))
 		downloads, stopDownloads := context.WithCancel(ctx)
 		sem := make(chan struct{}, readHydrationConcurrency)
 		var wg sync.WaitGroup
@@ -966,11 +994,18 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 			go func() {
 				defer wg.Done()
 				defer func() { <-sem }()
-				failures[i] = materializeReadGrant(ctx, downloads, stopDownloads, dir, grant)
+				landed[i], failures[i] = materializeReadGrant(ctx, downloads, stopDownloads, dir, grant)
 			}()
 		}
 		wg.Wait()
 		stopDownloads()
+		// Count before reporting: the loop below can return at a failure that
+		// sorts ahead of objects which landed all the same.
+		for _, ok := range landed {
+			if ok {
+				materialized++
+			}
+		}
 		for _, err := range failures {
 			if err != nil && !skips.skip(ctx, err) {
 				return err
@@ -980,8 +1015,8 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 	return skips.first
 }
 
-// materializeReadGrant downloads one granted file and reports the failure this
-// batch must account for.
+// materializeReadGrant downloads one granted file, and reports whether its
+// object is now in place and the failure this batch must account for.
 //
 // A failure that stops hydration cancels the batch's other downloads, so a
 // grant the server has stopped honoring does not keep requesting objects that
@@ -989,17 +1024,17 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 // failure stopped it, not anything about this object, so its file stays a stub
 // exactly as it would have with one transfer at a time. The caller's own
 // cancellation is not that — ctx carries it too — and every download reports it.
-func materializeReadGrant(ctx, downloads context.Context, stop context.CancelFunc, dir string, grant readGrant) error {
+func materializeReadGrant(ctx, downloads context.Context, stop context.CancelFunc, dir string, grant readGrant) (bool, error) {
 	err := materializeReadObject(downloads, grant.action, dir, grant.file.path, grant.file.ref)
 	switch {
 	case err == nil:
-		return nil
+		return true, nil
 	case downloads.Err() != nil && ctx.Err() == nil && errors.Is(err, context.Canceled):
-		return nil
+		return false, nil
 	case stopsReadHydration(ctx, err):
 		stop()
 	}
-	return err
+	return false, err
 }
 
 // downloadReadObject streams one object into f, retrying a transport failure.
@@ -1106,18 +1141,8 @@ func verifyReadCheckout(ctx context.Context, opts ReadSyncOptions, transport *gi
 		recordReadFailure(ctx, &result, err)
 		return result
 	}
-	result.Coverage = ReadCoverage{Complete: true, Paths: dirs, Files: len(files), Empty: len(files) == 0}
-	result.Hydration.State = "complete"
-	for _, f := range files {
-		if len(f.pointer) != 0 {
-			result.Hydration.Required++
-			if f.hydrated {
-				result.Hydration.Completed++
-			}
-		}
-	}
-	if result.Hydration.Required != result.Hydration.Completed {
-		result.Hydration.State = "missing"
+	countReadFiles(&result, dirs, files, 0)
+	if result.Hydration.State == "missing" {
 		// Routed through recordReadFailure so this detail is sanitized on the
 		// same path as every other one.
 		missing := errors.New("missing_hydration")
@@ -1132,6 +1157,25 @@ func verifyReadCheckout(ctx context.Context, opts ReadSyncOptions, transport *gi
 	}
 	result.Ready = true
 	return result
+}
+
+// countReadFiles sets result's coverage and hydration from files, a coverage
+// walk of the checkout. materialized counts the stubs that walk found which
+// have since been replaced by their verified objects.
+func countReadFiles(result *ReadSyncResult, dirs []string, files []readFile, materialized int) {
+	result.Coverage = ReadCoverage{Complete: true, Paths: dirs, Files: len(files), Empty: len(files) == 0}
+	result.Hydration = ReadHydration{State: "complete", Completed: materialized}
+	for _, f := range files {
+		if len(f.pointer) != 0 {
+			result.Hydration.Required++
+			if f.hydrated {
+				result.Hydration.Completed++
+			}
+		}
+	}
+	if result.Hydration.Required != result.Hydration.Completed {
+		result.Hydration.State = "missing"
+	}
 }
 
 // ReadNotReadyError reports that the guard refused a read because the local

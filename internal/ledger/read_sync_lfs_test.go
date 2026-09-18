@@ -1258,6 +1258,8 @@ func TestReadSyncColdStageSurvivesCanceledInspection(t *testing.T) {
 	require.False(t, result.Ready)
 	require.Equal(t, "interrupted", result.ErrorClass)
 	require.NoDirExists(t, c.opts.Path)
+	require.True(t, result.Resumable, "the stage it kept is still one the next attempt continues from")
+	require.Equal(t, ReadHydration{State: "unknown"}, result.Hydration, "canceled before counting, it reports no progress of its own")
 	kept, err := os.ReadFile(filepath.Join(stage, "sessions/cold/a.md"))
 	require.NoError(t, err)
 	require.Equal(t, c.contents[c.paths["sessions/cold/a.md"]], kept, "cancellation is not evidence against the stage")
