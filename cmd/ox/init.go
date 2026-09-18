@@ -128,7 +128,7 @@ This command will:
 7. Associate the repo with your team (prompts for team selection)
 8. Register repository with SageOx API
 
-Use --team to specify a team ID directly, or let ox init prompt you.
+Use --team to specify a team by name, slug, or ID, or let ox init prompt you.
 
 After init, run 'ox guide getting-started' for a five-minute walkthrough,
 or 'ox guide team-rules' to learn how to share AI coworker conventions
@@ -140,7 +140,7 @@ across your whole team (Claude, Codex, Amp, etc.).`,
 
 func init() {
 	initCmd.Flags().BoolVarP(&initQuiet, "quiet", "q", false, "suppress non-essential output (default: false)")
-	initCmd.Flags().StringVar(&initTeamFlag, "team", "", "team ID to associate this repo with")
+	initCmd.Flags().StringVar(&initTeamFlag, "team", "", "team to associate this repo with (name, slug, or ID)")
 	initCmd.Flags().BoolVar(&initForce, "force", false, "initialize even if .sageox/ exists on remote")
 	initCmd.Flags().StringVar(&initEndpointFlag, "endpoint", "", "SageOx endpoint URL (overrides SAGEOX_ENDPOINT)")
 	initCmd.Flags().StringVar(&initAgentsFlag, "agents", "", "comma-separated list of agents to configure (e.g., 'gemini,codex')")
@@ -412,12 +412,30 @@ func runInit() error {
 	var selectedTeamID string
 	var selectedTeamName string
 	if initTeamFlag != "" {
-		// use explicitly provided team
-		selectedTeamID = initTeamFlag
-		// best-effort: resolve the display name so config.json's team_name
-		// isn't left empty, which degrades every downstream label to the
-		// raw team_xxx id. Never blocks or fails init.
-		selectedTeamName = teamNameForID(selectedTeamID)
+		// --team has always taken the raw flag value and sent it to the API. Resolving
+		// it against the user's actual teams first means the slug `ox team list` prints
+		// and the name the picker shows both work here, matching every other team-taking
+		// surface, and a typo fails before REPOSITORY SETUP writes anything rather than
+		// as an HTTP 400 after every file has been written and staged. One case is not
+		// covered: in an empty repo ensureInitialCommit has already seeded a commit by
+		// this point, so validating earlier still would require hoisting the endpoint
+		// and auth blocks above it. Tracked separately in #857.
+		memberships, fetchErr := fetchTeamMemberships()
+		if fetchErr != nil {
+			// The picker path below reports a failed fetch and asks whether to
+			// continue. This path cannot ask — --team is the non-interactive way in
+			// — but it must not degrade silently either: the value is about to reach
+			// the server unvalidated. The error body is server text, so it is
+			// sanitized before it touches the terminal.
+			cli.PrintWarning(fmt.Sprintf("Could not check --team against your teams: %s",
+				cli.SanitizeTerminalText(fetchErr.Error())))
+		}
+		resolvedID, resolvedName, err := resolveTeamFlag(initTeamFlag, memberships, fetchErr)
+		if err != nil {
+			return err
+		}
+		selectedTeamID = resolvedID
+		selectedTeamName = resolvedName
 	} else {
 		// fetch teams from API to determine if selection is needed
 		teamClient := api.NewRepoClient()
@@ -2555,32 +2573,6 @@ func selectInitEndpoint() (string, bool) {
 	}
 
 	return selectedEp.URL, false
-}
-
-// teamNameForID best-effort resolves a team ID to its display name via the
-// API, so --team <id> doesn't leave config.json's team_name empty (every
-// downstream label then falls back to the raw team_xxx id). Returns "" on
-// any failure — this must never block or fail ox init.
-func teamNameForID(teamID string) string {
-	if teamID == "" {
-		return ""
-	}
-	token, err := auth.EnsureValidToken(300)
-	if err != nil || token == nil || token.AccessToken == "" {
-		return ""
-	}
-	client := api.NewRepoClient()
-	client.WithAuthToken(token.AccessToken)
-	reposResp, err := client.GetRepos()
-	if err != nil || reposResp == nil {
-		return ""
-	}
-	for _, team := range reposResp.TeamMembershipsFromRepos() {
-		if team.ID == teamID {
-			return team.Name
-		}
-	}
-	return ""
 }
 
 // teamSortKey returns the case-insensitive label a team sorts by: its
