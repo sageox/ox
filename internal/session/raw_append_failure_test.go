@@ -40,6 +40,11 @@ func TestRecoverRawAppendRefusesUnprovableJournals(t *testing.T) {
 		{name: "uncommitted batch but transcript is gone", journal: journal(rawAppendCheckpoint{RawSize: 4, OldOffset: 0, NewOffset: 10}), persisted: 0, wantErr: "raw.jsonl"},
 		{name: "uncommitted batch but transcript shrank", journal: journal(rawAppendCheckpoint{RawSize: 40, OldOffset: 0, NewOffset: 10}), raw: strPtr("short\n"), persisted: 0, wantErr: "truncated"},
 		{name: "committed batch but transcript is gone", journal: journal(rawAppendCheckpoint{RawSize: 4, OldOffset: 0, NewOffset: 10}), persisted: 10, wantErr: "raw.jsonl"},
+		// The writer can produce neither of these. Each one, taken at its word,
+		// costs transcript: the first blesses a file that shrank as "committed",
+		// the second matches a corrupt cursor and truncates to the journal's size.
+		{name: "sealed smaller than it started", journal: journal(rawAppendCheckpoint{RawSize: 40, OldOffset: 0, NewOffset: 10, FinalSize: int64Ptr(6)}), raw: strPtr("short\n"), persisted: 10, wantErr: "invalid capture checkpoint"},
+		{name: "negative starting cursor", journal: journal(rawAppendCheckpoint{RawSize: 0, OldOffset: -5, NewOffset: 10}), raw: strPtr("short\n"), persisted: -5, wantErr: "invalid capture checkpoint"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -53,6 +58,11 @@ func TestRecoverRawAppendRefusesUnprovableJournals(t *testing.T) {
 
 			require.ErrorContains(t, err, tt.wantErr)
 			require.FileExists(t, raw+".append.json", "a journal recovery could not act on must survive for the next attempt")
+			if tt.raw != nil {
+				after, readErr := os.ReadFile(raw)
+				require.NoError(t, readErr)
+				require.Equal(t, *tt.raw, string(after), "a refused journal must not cost any transcript")
+			}
 		})
 	}
 }
@@ -262,3 +272,5 @@ type discard struct{}
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
 
 func strPtr(s string) *string { return &s }
+
+func int64Ptr(v int64) *int64 { return &v }

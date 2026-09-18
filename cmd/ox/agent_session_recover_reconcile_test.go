@@ -113,7 +113,7 @@ func TestRecoverFromCacheDropsAnUnacknowledgedBatchBeforeReadingIt(t *testing.T)
 	require.NoError(t, err)
 	require.Contains(t, string(before), unacknowledged, "fixture must leave the torn batch on disk")
 
-	require.NoError(t, reconcileCachedRawForRecovery(projectRoot, state, rawPath))
+	require.NoError(t, recoverFromCache(&agentinstance.Instance{AgentID: agentID}, projectRoot, state, rawPath))
 
 	after, err := os.ReadFile(rawPath)
 	require.NoError(t, err)
@@ -128,7 +128,7 @@ func TestRecoverFromCacheKeepsABatchCommittedWhileItWaited(t *testing.T) {
 	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
 	stale, rawPath := commitHookBatchLeavingJournal(t, projectRoot, agentID)
 
-	require.NoError(t, reconcileCachedRawForRecovery(projectRoot, stale, rawPath))
+	require.NoError(t, recoverFromCache(&agentinstance.Instance{AgentID: agentID}, projectRoot, stale, rawPath))
 
 	after, err := os.ReadFile(rawPath)
 	require.NoError(t, err)
@@ -189,6 +189,62 @@ func TestRecoverRefusesARecordingRestartedWhileItWaited(t *testing.T) {
 	}
 }
 
+// TestRecoverFromCacheSurfacesATranscriptItCannotRead verifies "could not read
+// the cached transcript" is an error, not an empty recovery. A directory where
+// raw.jsonl belongs fails the read on every platform.
+// Failure prevented: recover reporting success for a session it published
+// nothing from.
+func TestRecoverFromCacheSurfacesATranscriptItCannotRead(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	require.NoError(t, os.Remove(rawPath))
+	require.NoError(t, os.Mkdir(rawPath, 0o700))
+
+	err = recoverFromCache(&agentinstance.Instance{AgentID: agentID}, projectRoot, state, rawPath)
+	require.ErrorContains(t, err, "failed to read cached session")
+}
+
+// TestDiscardingACachedRecordingDiscardsOnlyTheOneThatWasOffered verifies the
+// discard acts on the recording the coworker was asked about. The prompt is
+// shown without the capture lock, so the recording can change underneath it.
+// Failure prevented: "discard the orphaned session" deleting the state and the
+// captured transcript of a NEW recording that started while the prompt was up.
+func TestDiscardingACachedRecordingDiscardsOnlyTheOneThatWasOffered(t *testing.T) {
+	t.Run("the offered recording is removed with its cache", func(t *testing.T) {
+		projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+		offered, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+		require.NoError(t, err)
+
+		require.NoError(t, discardCachedRecording(projectRoot, offered, filepath.Join(offered.SessionPath, "raw.jsonl")))
+
+		gone, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+		require.NoError(t, err)
+		require.Nil(t, gone)
+		require.NoDirExists(t, offered.SessionPath)
+	})
+
+	t.Run("a recording restarted during the prompt is left alone", func(t *testing.T) {
+		projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+		offered, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+		require.NoError(t, err)
+		rawPath := filepath.Join(offered.SessionPath, "raw.jsonl")
+		restartedID := offered.SessionID + "-restarted"
+		require.NoError(t, session.UpdateRecordingStateAt(offered.SessionPath, func(current *session.RecordingState) {
+			current.SessionID = restartedID
+		}))
+
+		require.ErrorContains(t, discardCachedRecording(projectRoot, offered, rawPath), "recording changed")
+
+		survivor, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+		require.NoError(t, err)
+		require.NotNil(t, survivor)
+		require.Equal(t, restartedID, survivor.SessionID)
+		require.FileExists(t, rawPath, "the new recording's transcript was deleted")
+	})
+}
+
 // --- Finalizers clear the recording BEFORE they release the capture lock ---
 
 // TestFinalizersClearTheRecordingBeforeReleasingTheCaptureLock verifies stop
@@ -199,12 +255,18 @@ func TestRecoverRefusesARecordingRestartedWhileItWaited(t *testing.T) {
 // never uploaded, with the state that pointed at it deleted a moment later.
 func TestFinalizersClearTheRecordingBeforeReleasingTheCaptureLock(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		finalize func(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error
+		name string
+		// processed names a file the finalizer writes once its read of raw.jsonl
+		// is over, so its appearance means only the clear is left.
+		processed string
+		finalize  func(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error
 	}{
-		{"recover", recoverViaNormalStop},
-		{"stop", func(inst *agentinstance.Instance, _ string, _ *session.RecordingState) error {
+		{"recover", "session.md", recoverViaNormalStop},
+		{"stop", "session.md", func(inst *agentinstance.Instance, _ string, _ *session.RecordingState) error {
 			return runAgentSessionStop(inst)
+		}},
+		{"recover from cache", ".needs-summary", func(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
+			return recoverFromCache(inst, projectRoot, state, filepath.Join(state.SessionPath, "raw.jsonl"))
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -238,10 +300,8 @@ func TestFinalizersClearTheRecordingBeforeReleasingTheCaptureLock(t *testing.T) 
 				finalized <- tc.finalize(&agentinstance.Instance{AgentID: agentID, AgentType: "claude-code"}, projectRoot, state)
 			}()
 
-			// session.md is written by processing, so once it exists the final
-			// drain is over and the finalizer is on its way to the clear.
 			require.Eventually(t, func() bool {
-				_, err := os.Stat(filepath.Join(state.SessionPath, "session.md"))
+				_, err := os.Stat(filepath.Join(state.SessionPath, tc.processed))
 				return err == nil
 			}, 30*time.Second, 10*time.Millisecond, "fixture never reached the end of processing")
 

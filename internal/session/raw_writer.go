@@ -395,7 +395,12 @@ func RecoverRawAppend(path string, persistedOffset int64) error {
 	if err = json.Unmarshal(data, &checkpoint); err != nil {
 		return err
 	}
-	if checkpoint.RawSize < 0 || checkpoint.NewOffset <= checkpoint.OldOffset {
+	// Mirror what the writer can produce. SealAppend never records a final size
+	// below the size it started from, and cursors are byte offsets: a journal
+	// claiming otherwise is corrupt, and "committed" read off it would bless a
+	// raw file that has lost content since the batch began.
+	if checkpoint.RawSize < 0 || checkpoint.OldOffset < 0 || checkpoint.NewOffset <= checkpoint.OldOffset ||
+		(checkpoint.FinalSize != nil && *checkpoint.FinalSize < checkpoint.RawSize) {
 		return fmt.Errorf("invalid capture checkpoint")
 	}
 	switch persistedOffset {
