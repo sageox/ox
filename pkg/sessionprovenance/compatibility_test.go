@@ -186,6 +186,17 @@ func TestExcludeRejectsEmptyReason(t *testing.T) {
 	}
 }
 
+func TestExcludeRejectsZeroTimestamp(t *testing.T) {
+	source := Source{Version: 1, Agent: "codex", NativeSessionID: "0197d3f4-2c88-7a15-a9b0-4b5c6d7e8f04", Generation: strings.Repeat("a", 64), Ranges: []Range{{Start: 0, End: 1}}, ParserVersion: "codex-jsonl/v1", CapturedAt: time.Now()}
+	record := Record{Version: 1, Agent: source.Agent, NativeSessionID: source.NativeSessionID, Generation: source.Generation}
+	if err := record.Exclude(&source, "deleted", time.Time{}); err == nil {
+		t.Fatal("zero exclusion timestamp accepted")
+	}
+	if len(record.Exclusions) != 0 || !record.UpdatedAt.IsZero() {
+		t.Fatal("record mutated despite rejected exclusion")
+	}
+}
+
 func TestValidateRequiresUpdatedAtForContentBearingRecords(t *testing.T) {
 	base := Record{Version: 1, Agent: "codex", NativeSessionID: "0197d3f4-2c88-7a15-a9b0-4b5c6d7e8f04"}
 	if err := base.Validate(); err != nil {

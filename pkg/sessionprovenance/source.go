@@ -243,6 +243,9 @@ func (r *Record) Exclude(s *Source, reason string, now time.Time) error {
 	if reason == "" {
 		return errors.New("missing exclusion reason")
 	}
+	if now.IsZero() {
+		return errors.New("missing exclusion timestamp")
+	}
 	if err := r.ValidateSource(s); err != nil {
 		return err
 	}
