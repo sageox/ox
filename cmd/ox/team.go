@@ -336,17 +336,43 @@ type publishedContent struct {
 	Skills []publishedItem `json:"skills"`
 }
 
+// publishedItem is one rule or skill and where it reaches. Every field is
+// always emitted: one object shape per resource, so a consumer never has to
+// tell an intentional empty value from an absent one.
 type publishedItem struct {
 	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	// Repos is the repos: list; empty means every repo on the team.
-	Repos []string `json:"repos,omitempty"`
+	Description string `json:"description"`
+	// Repos is the repos: list, never nil so it marshals as [] rather than
+	// null. AllRepos states the same fact the empty list does, because an
+	// empty array reads as "reaches nothing" — the exact backwards reading
+	// this section exists to prevent.
+	Repos    []string `json:"repos"`
+	AllRepos bool     `json:"all_repos"`
+}
+
+// newPublishedItem normalizes one discovered rule or skill into the card's
+// shape. Rules and skills share it so the two lists cannot drift.
+func newPublishedItem(name, description string, repos []string) publishedItem {
+	normalized := make([]string, 0, len(repos))
+	normalized = append(normalized, repos...)
+	return publishedItem{
+		Name:        name,
+		Description: description,
+		Repos:       normalized,
+		AllRepos:    len(normalized) == 0,
+	}
 }
 
 // readPublishedContent lists what the team checkout publishes, using the same
 // discovery prime and the reconciler use so the card cannot disagree with them.
 // Read failures return nil rather than an error: the card is informational and
 // a malformed rule file must not stop `ox team show` from showing the team.
+//
+// EITHER discovery failing omits the whole section, the same as an absent
+// checkout. Listing the half we could read would render "Rules: none
+// published" over a directory we simply could not open — and the author of a
+// rule that is not showing up would read that as "I never published it."
+// Absent says "something is wrong here"; that is the honest signal.
 func readPublishedContent(teamPath string) *publishedContent {
 	if teamPath == "" {
 		return nil
@@ -356,15 +382,15 @@ func readPublishedContent(teamPath string) *publishedContent {
 	}
 	rules, rulesErr := teamdocs.PublishedRules(teamPath)
 	skills, skillsErr := teamdocs.PublishedSkills(teamPath)
-	if rulesErr != nil && skillsErr != nil {
+	if rulesErr != nil || skillsErr != nil {
 		return nil
 	}
 	out := &publishedContent{Rules: []publishedItem{}, Skills: []publishedItem{}}
 	for _, r := range rules {
-		out.Rules = append(out.Rules, publishedItem{Name: r.Name, Description: r.Description, Repos: r.Repos})
+		out.Rules = append(out.Rules, newPublishedItem(r.Name, r.Description, r.Repos))
 	}
 	for _, sk := range skills {
-		out.Skills = append(out.Skills, publishedItem{Name: sk.Name, Description: sk.Description, Repos: sk.Repos})
+		out.Skills = append(out.Skills, newPublishedItem(sk.Name, sk.Description, sk.Repos))
 	}
 	return out
 }
