@@ -103,10 +103,11 @@ const (
 )
 
 type teamSkillStatus struct {
-	Name        string `json:"name"`
-	AppliesHere bool   `json:"applies_here"`
-	State       string `json:"state"`
-	Detail      string `json:"detail,omitempty"`
+	Name          string `json:"name"`
+	AppliesHere   bool   `json:"applies_here"`
+	State         string `json:"state"`
+	NeedsApproval bool   `json:"needs_approval"`
+	Detail        string `json:"detail,omitempty"`
 }
 
 func runSkillsStatus(cmd *cobra.Command, _ []string) error {
@@ -260,7 +261,9 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 			row.State = "unknown"
 			row.Detail = "could not compute the plan"
 		default:
-			row.State, row.Detail = installedState(gitRoot, targets, decisions[sk.Name], planned)
+			decision := decisions[sk.Name]
+			row.NeedsApproval = decision.NeedsApprove
+			row.State, row.Detail = installedState(gitRoot, targets, decision, planned)
 		}
 		out.TeamSkills = append(out.TeamSkills, row)
 	}
@@ -278,7 +281,10 @@ func skillsStatusGuidance(out skillsStatusOutput) string {
 	}
 	for _, s := range out.TeamSkills {
 		if s.State == skillWithheld {
-			return fmt.Sprintf("team skill %q is withheld: %s. Read the file it bundles before deciding to approve it.", s.Name, s.Detail)
+			return fmt.Sprintf("team skill %q is withheld: %s. Read the file it bundles, then run `ox skills approve %s`.", s.Name, s.Detail, s.Name)
+		}
+		if s.State == skillInstalled && s.NeedsApproval {
+			return fmt.Sprintf("team skill %q is installed without its bundled scripts: %s. Read them in your Team Context, then run `ox skills approve --allow-scripts %s`.", s.Name, s.Detail, s.Name)
 		}
 	}
 	for _, s := range out.TeamSkills {
@@ -322,8 +328,13 @@ func skillTargetRoots(gitRoot string) ([]string, error) {
 // files), which WithheldTeamSkills does not report because it only returns
 // approval holds.
 func installedState(gitRoot string, targets []string, d skillmanager.TeamSkillDecision, planned plannedPaths) (state, detail string) {
+	// NeedsApprove no longer means absent. A skill whose manifest is itself
+	// runnable is withheld outright (no InstalledAs); one that merely bundles
+	// scripts INSTALLS with the scripts dropped, and the flag says so. Reporting
+	// the second as "withheld" would tell the author their skill never arrived
+	// when its prose is sitting on disk.
 	switch {
-	case d.NeedsApprove:
+	case d.NeedsApprove && d.InstalledAs == "":
 		return skillWithheld, d.Reason
 	case d.Name != "" && d.InstalledAs == "":
 		return skillUnavailable, d.Reason
@@ -363,6 +374,9 @@ func installedState(gitRoot string, targets []string, d skillmanager.TeamSkillDe
 		return skillPending, "not complete in " + strings.Join(incomplete, ", ") + " — run `ox doctor --fix`"
 	case len(outdated) > 0:
 		return skillOutdated, "differs from the team's copy in " + strings.Join(outdated, ", ") + " — run `ox doctor --fix`"
+	}
+	if d.NeedsApprove {
+		return skillInstalled, d.Reason // on disk, minus its scripts
 	}
 	return skillInstalled, ""
 }

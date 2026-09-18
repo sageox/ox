@@ -289,16 +289,16 @@ func TestInterruptedApplyRecoversBeforeAndAfterLockCommit(t *testing.T) {
 	plan, err := planWithSource(repo, "1.0.0", desired, []adapterprotocol.SkillTarget{target}, source)
 	require.NoError(t, err)
 	require.NotEmpty(t, plan.Creates)
+	root, err := os.OpenRoot(repo)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, root.Close()) }()
 
 	// Simulate exit after the journal and first file, before lock commit.
-	require.NoError(t, ensureDir(repo, filepath.Dir(journalPath(repo))))
 	journal, err := json.MarshalIndent(plan.journal, "", "  ")
 	require.NoError(t, err)
-	require.NoError(t, atomicWriteNoSymlink(journalPath(repo), append(journal, '\n'), 0o600))
+	require.NoError(t, atomicWriteInRoot(root, journalRelativePath, append(journal, '\n'), 0o600))
 	first := plan.Creates[0]
-	firstPath := filepath.Join(repo, filepath.FromSlash(first.Path))
-	require.NoError(t, ensureDir(repo, filepath.Dir(firstPath)))
-	require.NoError(t, atomicWriteNoSymlink(firstPath, first.Content, first.Mode))
+	require.NoError(t, atomicWriteInRoot(root, first.Path, first.Content, first.Mode))
 
 	recovered, err := planWithSource(repo, "1.0.0", desired, []adapterprotocol.SkillTarget{target}, source)
 	require.NoError(t, err)
@@ -309,7 +309,7 @@ func TestInterruptedApplyRecoversBeforeAndAfterLockCommit(t *testing.T) {
 	// Simulate exit after lock commit but before deleting the old journal.
 	journal, err = json.MarshalIndent(recovered.journal, "", "  ")
 	require.NoError(t, err)
-	require.NoError(t, atomicWriteNoSymlink(journalPath(repo), append(journal, '\n'), 0o600))
+	require.NoError(t, atomicWriteInRoot(root, journalRelativePath, append(journal, '\n'), 0o600))
 	final, err := planWithSource(repo, "1.0.0", desired, []adapterprotocol.SkillTarget{target}, source)
 	require.NoError(t, err)
 	require.Empty(t, final.Creates)
@@ -392,6 +392,173 @@ func TestSymlinkAndMalformedLockFailWithoutMutation(t *testing.T) {
 	require.NoError(t, os.Symlink(filepath.Join(symlinkLockRepo, "outside.json"), LockPath(symlinkLockRepo)))
 	_, err = Plan(symlinkLockRepo, "1.0.0", desiredFor(target), []adapterprotocol.SkillTarget{target})
 	require.ErrorContains(t, err, "symlink")
+}
+
+// TestRootRelativeMaterializationRefusesAParentSwappedForSymlink exercises the
+// gap between planning and applying. A mutable checkout can replace a validated
+// parent directory with a symlink after Plan returns; path-based temp, rename,
+// and remove calls would then operate in the symlink target. Holding an os.Root
+// and resolving each parent from that descriptor must keep both writes and
+// removals inside the repository.
+func TestRootRelativeMaterializationRefusesAParentSwappedForSymlink(t *testing.T) {
+	repo := t.TempDir()
+	outside := t.TempDir()
+	parent := filepath.Join(repo, ".agents", "skills")
+	require.NoError(t, os.MkdirAll(parent, 0o755))
+
+	root, err := os.OpenRoot(repo)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, root.Close()) }()
+
+	require.NoError(t, os.Remove(parent))
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	rel := ".agents/skills/victim.sh"
+	err = atomicWriteInRoot(root, rel, []byte("#!/bin/sh\n"), 0o755)
+	require.ErrorContains(t, err, "symlink")
+	require.NoFileExists(t, filepath.Join(outside, "victim.sh"),
+		"a raced parent redirected the materialization outside the repository")
+
+	victim := filepath.Join(outside, "victim.sh")
+	require.NoError(t, os.WriteFile(victim, []byte("keep\n"), 0o644))
+	err = removeRootFile(root, rel)
+	require.ErrorContains(t, err, "symlink")
+	require.FileExists(t, victim, "a raced parent redirected the removal outside the repository")
+}
+
+func TestRootRelativeHelpersRejectUnsafeAndMalformedPaths(t *testing.T) {
+	repo := t.TempDir()
+	root, err := os.OpenRoot(repo)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, root.Close()) }()
+
+	_, _, err = inspectRepoFile(filepath.Join(repo, "missing"), "file")
+	require.Error(t, err, "opening a missing repository root succeeded")
+
+	_, err = openRepoDir(root, "../escape", false)
+	require.ErrorContains(t, err, "escapes repository")
+
+	_, err = openRepoDir(root, "missing/parent", false)
+	require.Error(t, err, "opening an absent parent without create succeeded")
+
+	parent, _, err := openRepoParent(root, ".", false)
+	require.ErrorContains(t, err, "escapes repository")
+	require.Nil(t, parent)
+
+	_, _, err = inspectRootFile(root, "missing.txt")
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	err = atomicWriteInRoot(root, "../escape.txt", []byte("no\n"), 0o644)
+	require.ErrorContains(t, err, "escapes repository")
+
+	require.NoError(t, os.Mkdir(filepath.Join(repo, "directory-target"), 0o755))
+	err = atomicWriteInRoot(root, "directory-target", []byte("no\n"), 0o644)
+	require.ErrorContains(t, err, "non-regular")
+
+	escapeName := "outside-" + filepath.Base(repo)
+	outside := filepath.Join(filepath.Dir(repo), escapeName)
+	require.NoError(t, os.Mkdir(outside, 0o755))
+	t.Cleanup(func() { _ = os.Remove(outside) })
+	removeEmptyParentsInRoot(root, "../"+escapeName)
+	require.DirExists(t, outside, "invalid cleanup escaped the repository")
+}
+
+func TestApplyRejectsInvalidOrStaleActions(t *testing.T) {
+	t.Run("nil plan", func(t *testing.T) {
+		require.ErrorContains(t, Apply(nil), "nil skill reconcile plan")
+	})
+
+	t.Run("missing repository", func(t *testing.T) {
+		plan := &ReconcilePlan{repoRoot: filepath.Join(t.TempDir(), "missing")}
+		require.ErrorContains(t, Apply(plan), "open repository root")
+	})
+
+	t.Run("content changed after planning", func(t *testing.T) {
+		repo := t.TempDir()
+		plan := &ReconcilePlan{repoRoot: repo, Creates: []FileAction{{
+			Path: "managed.txt", Content: []byte("new\n"), Digest: "sha256:not-the-content",
+		}}}
+		require.ErrorContains(t, Apply(plan), "action content digest changed")
+		require.NoFileExists(t, journalPath(repo), "a rejected plan wrote its recovery journal")
+	})
+
+	t.Run("updated file disappeared after planning", func(t *testing.T) {
+		repo := t.TempDir()
+		content := []byte("new\n")
+		plan := &ReconcilePlan{repoRoot: repo, Updates: []FileAction{{
+			Path: "managed.txt", Content: content, Digest: digestBytes(content), PreviousDigest: digestBytes([]byte("old\n")),
+		}}}
+		require.ErrorContains(t, Apply(plan), "disappeared after planning")
+		require.NoFileExists(t, journalPath(repo), "a rejected plan wrote its recovery journal")
+	})
+
+	t.Run("removed file changed after planning", func(t *testing.T) {
+		repo := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(repo, "managed.txt"), []byte("edited\n"), 0o644))
+		plan := &ReconcilePlan{repoRoot: repo, Removes: []FileAction{{
+			Path: "managed.txt", PreviousDigest: digestBytes([]byte("old\n")),
+		}}}
+		require.ErrorContains(t, Apply(plan), "changed after planning")
+		require.NoFileExists(t, journalPath(repo), "a rejected plan wrote its recovery journal")
+	})
+
+	t.Run("later invalid action prevents earlier valid write", func(t *testing.T) {
+		repo := t.TempDir()
+		firstContent := []byte("first\n")
+		secondContent := []byte("second\n")
+		first := "first.txt"
+		plan := &ReconcilePlan{
+			repoRoot: repo,
+			Creates:  []FileAction{{Path: first, Content: firstContent, Digest: digestBytes(firstContent), Mode: 0o644}},
+			Updates: []FileAction{{
+				Path: "missing.txt", Content: secondContent, Digest: digestBytes(secondContent),
+				PreviousDigest: digestBytes([]byte("old\n")), Mode: 0o644,
+			}},
+		}
+
+		require.ErrorContains(t, Apply(plan), "disappeared after planning")
+		require.NoFileExists(t, filepath.Join(repo, first),
+			"Apply partially wrote an earlier action before rejecting the stale plan")
+		require.NoFileExists(t, journalPath(repo), "a rejected plan wrote its recovery journal")
+	})
+}
+
+func TestActionValidationReportsCurrentMissingAndUnreadableTargets(t *testing.T) {
+	repo := t.TempDir()
+	root, err := os.OpenRoot(repo)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, root.Close()) }()
+
+	current := []byte("current\n")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "current.txt"), current, 0o644))
+	alreadyCurrent, err := validateWriteAction(root, FileAction{
+		Path: "current.txt", Content: current, Digest: digestBytes(current),
+	})
+	require.NoError(t, err)
+	require.True(t, alreadyCurrent)
+
+	updated := []byte("updated\n")
+	alreadyCurrent, err = validateWriteAction(root, FileAction{
+		Path: "current.txt", Content: updated, Digest: digestBytes(updated),
+		PreviousDigest: digestBytes([]byte("stale\n")),
+	})
+	require.ErrorContains(t, err, "changed after planning")
+	require.False(t, alreadyCurrent)
+
+	require.NoError(t, os.Mkdir(filepath.Join(repo, "directory"), 0o755))
+	_, err = validateWriteAction(root, FileAction{
+		Path: "directory", Content: updated, Digest: digestBytes(updated),
+	})
+	require.Error(t, err)
+
+	alreadyAbsent, err := validateRemoveAction(root, FileAction{Path: "missing.txt"})
+	require.NoError(t, err)
+	require.True(t, alreadyAbsent)
+
+	_, err = validateRemoveAction(root, FileAction{Path: "directory"})
+	require.Error(t, err)
 }
 
 // TestForeignSymlinkDoesNotAbortSkillDiscovery pins the defect that made ox
@@ -1071,7 +1238,7 @@ func TestPlan_CorruptJournalIsDiscardedSoTheRepositoryStillHeals(t *testing.T) {
 	repo := t.TempDir()
 	target := sharedTarget()
 	targets := []adapterprotocol.SkillTarget{target}
-	require.NoError(t, ensureDir(repo, filepath.Dir(journalPath(repo))))
+	require.NoError(t, os.MkdirAll(filepath.Dir(journalPath(repo)), 0o755))
 	require.NoError(t, os.WriteFile(journalPath(repo), []byte("{ truncated mid-write"), 0o600))
 
 	plan, err := Plan(repo, "1.0.0", DefaultDesired(targets), targets)
@@ -1085,7 +1252,7 @@ func TestPlan_JournalFromAnotherSchemaIsDiscardedNotFatal(t *testing.T) {
 	repo := t.TempDir()
 	target := sharedTarget()
 	targets := []adapterprotocol.SkillTarget{target}
-	require.NoError(t, ensureDir(repo, filepath.Dir(journalPath(repo))))
+	require.NoError(t, os.MkdirAll(filepath.Dir(journalPath(repo)), 0o755))
 	// A crash just before a version upgrade leaves a journal from the OLD schema.
 	require.NoError(t, os.WriteFile(journalPath(repo),
 		[]byte(`{"schema_version": 99, "pending": []}`), 0o600))
@@ -1134,7 +1301,7 @@ func TestPlan_RefusesALockfileFromAFutureSchema(t *testing.T) {
 	repo := t.TempDir()
 	target := sharedTarget()
 	targets := []adapterprotocol.SkillTarget{target}
-	require.NoError(t, ensureDir(repo, filepath.Dir(LockPath(repo))))
+	require.NoError(t, os.MkdirAll(filepath.Dir(LockPath(repo)), 0o755))
 	future := `{"schema_version": 99, "desired": {"bundles": ["core"], "targets": ["` + target.Key + `"]}, "targets": []}`
 	require.NoError(t, os.WriteFile(LockPath(repo), []byte(future), 0o644))
 

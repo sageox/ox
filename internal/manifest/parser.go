@@ -310,6 +310,17 @@ func EnsureSageoxInclude(paths []string) []string {
 // lists agents/, but the TRACKED manifest wins whenever one exists.
 var requiredTeamContextDirs = []string{"agents/"}
 
+// RequiredIncludes returns the directories SparseSetFor floors into the sparse
+// set for repos of this kind, whatever the manifest lists. Exported so doctor
+// can tell "the manifest omits this but our own repair materializes it anyway"
+// apart from "only the server can fix this" — the two need opposite advice.
+func RequiredIncludes(kind RepoKind) []string {
+	if kind != RepoKindTeamContext {
+		return nil
+	}
+	return append([]string(nil), requiredTeamContextDirs...)
+}
+
 // EnsureRequiredIncludes floors the sparse set with the directories ox needs for
 // this repo kind, whatever the server-generated manifest happens to list.
 //

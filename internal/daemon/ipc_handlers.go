@@ -307,6 +307,11 @@ func handleTriggerGCAsync(s *Server, _ Message, _ net.Conn) HandlerResult {
 	return HandlerResult{Response: marshalResponse(resp)}
 }
 
+func handleTriggerKBGC(s *Server, _ Message, _ net.Conn) HandlerResult {
+	s.service.TriggerKBGC()
+	return HandlerResult{Response: &Response{Success: true}}
+}
+
 func handleCodeIndex(s *Server, msg Message, conn net.Conn) HandlerResult {
 	var payload CodeIndexPayload
 	if len(msg.Payload) > 0 {

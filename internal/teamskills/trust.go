@@ -162,7 +162,14 @@ func Classify(s Skill) Verdict {
 		// Frontmatter and inline-command checks apply to markdown; a non-runnable
 		// asset is inert until something runs it, and the predicate above already
 		// covers anything that is runnable.
-		if !strings.HasSuffix(clean, ".md") {
+		//
+		// Case-INSENSITIVE, matching the extension check above. Discovery Lstats
+		// "SKILL.md", which APFS and every Windows volume resolve to a file
+		// actually named SKILL.MD; a case-sensitive test here returned before ever
+		// looking for `allowed-tools:` or an inline command, so that manifest
+		// classified as prose and auto-installed with a shell grant nobody
+		// approved.
+		if !strings.EqualFold(path.Ext(clean), ".md") {
 			continue
 		}
 		normalized := strings.ReplaceAll(string(f.Content), "\r\n", "\n")

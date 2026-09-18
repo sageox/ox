@@ -88,6 +88,7 @@ The sample paths and counts are illustrative; the returned coverage describes th
 | `hydration.required`, `hydration.completed` | Current-worktree files whose committed blob is an LFS pointer, and how many of those are materialized and verified. Files that name one shared object are counted separately. |
 | `error_class` | Sanitized failure category, omitted when none. |
 | `error_detail` | What failed, omitted when the failure carries no recognized reason. See [Failure detail](#failure-detail). |
+| `skipped` | Every failure hydration walked past, present only when there was more than one. See [Skipped objects](#skipped-objects). |
 
 | Exit | Contract |
 | --- | --- |
@@ -121,10 +122,10 @@ Many distinct conditions share one `error_class` — a refused object, a malform
 | `path` | Repo-relative path of the file the object materializes. |
 | `oid` | Bare SHA-256 object identifier. |
 | `expected_oid` | Object identity the pointer should have named. |
-
-An `oid` or `expected_oid` is omitted when the value supplied for it is not a canonical bare SHA-256 identifier. A batch response may name an object that was never requested, and a committed pointer's `oid` line is unvalidated text; neither is republished.
 | `expected_size`, `actual_size` | Pointer-declared and observed sizes, in bytes. |
 | `server_code` | Status the server reported for this object. |
+
+An `oid` or `expected_oid` is omitted when the value supplied for it is not a canonical bare SHA-256 identifier. A batch response may name an object that was never requested, and a committed pointer's `oid` line is unvalidated text; neither is republished.
 
 | `reason` | `error_class` | Condition |
 | --- | --- | --- |
@@ -147,7 +148,39 @@ An `oid` or `expected_oid` is omitted when the value supplied for it is not a ca
 
 Detail obeys the same redaction rules as the rest of the result: no credential, credential-bearing URL, response body, or subprocess output. Server-supplied and pointer-supplied identifiers are validated before they are carried, never sanitized in place. There is no server message field. The client replaces a read route's per-object error prose with the status text for that error's code before any caller sees it, so a message field could only restate `server_code` and would misrepresent a client-generated string as the server's own.
 
-Consumers must tolerate four things: additional reasons; a detail that names no file, because some failures identify none — `batch_response_incomplete` describes a whole batch, and `shared_object_size_conflict` belongs to a pair of files rather than to either one; an absent `error_detail`, because a failure raised without a reason — a denied batch request, a Git failure, a canceled operation — carries none; and a detail that names one object when hydration skipped several, because it reports the first one skipped. `hydration.required` minus `hydration.completed` is how many pointer files are still stubs — both count files, not unique objects, so several files naming one unservable object each add to that difference.
+Consumers must tolerate four things: additional reasons; a detail that names no file, because some failures identify none — `batch_response_incomplete` describes a whole batch, and `shared_object_size_conflict` belongs to a pair of files rather than to either one; an absent `error_detail`, because a failure raised without a reason — a denied batch request, a Git failure, a canceled operation — carries none; and a detail that names one object when hydration skipped several, because it reports the first one skipped. [`skipped`](#skipped-objects) accounts for all of them. `hydration.required` minus `hydration.completed` is how many pointer files are still stubs — both count files, not unique objects, so several files naming one unservable object each add to that difference.
+
+### Skipped objects
+
+Hydration walks past an object it cannot materialize (see [Remote evidence and local recovery](#remote-evidence-and-local-recovery)), and `error_detail` names only the first one it walked past. When it walked past more than one failure, `skipped` accounts for all of them, so a cause shared by many objects reads as one cause rather than as one bad object. The two call for different responses: one object is repaired or accepted, while a systemic condition is not fixed by repairing its objects one at a time.
+
+```jsonc
+{
+  "error_class": "missing_hydration",
+  "error_detail": {"reason": "object_refused", "path": "sessions/2026-09-08-planning/session.md", "oid": "e25b11576e8941c24fc352eb7c060e024792fcae15b538c447ef5e0f3d473ffc", "server_code": 404},
+  "skipped": {
+    "total": 1807,
+    "reasons": {"downloaded_size_mismatch": 1, "object_refused": 1806},
+    "sample": [
+      {"reason": "object_refused", "path": "sessions/2026-09-08-planning/session.md", "oid": "e25b11576e8941c24fc352eb7c060e024792fcae15b538c447ef5e0f3d473ffc", "server_code": 404},
+      // …the next four object_refused failures, then the only downloaded_size_mismatch:
+      {"reason": "downloaded_size_mismatch", "path": "data/plans/rollout/plan.md", "oid": "247d95de6d4088050c66b5064f173e14a06a0dd5e2573dbc485723c1478d0507", "expected_size": 2048, "actual_size": 2047}
+    ]
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `total` | Every failure hydration walked past. |
+| `reasons` | Those failures counted by `reason`. |
+| `sample` | The first 5 failures of each reason, each as `error_detail` would describe it, in the order hydration met them — the order that decides which failure `error_detail` names. The cap is per reason, so a reason met after another has filled its share is still listed. |
+
+- **Truncation is explicit.** `sample` is capped and `total` is not. A `total` above the number of `sample` entries, or a `reasons` count above that reason's entries, means the sample stands for more failures than it lists.
+- **A failure without a reason is counted, not listed.** A failed batch request or a local write failure carries no reason, just as it carries no `error_detail`. It counts toward `total` but not toward `reasons` or `sample`, so `total` can exceed the sum of `reasons`.
+- **`total` counts failures, not files.** Most failures name one object. A failed download counts once per file, so an object several files name can count more than once, while a batch-level failure — `batch_response_incomplete`, or a failed batch request — counts once however many objects its batch left ungranted. `hydration.required` minus `hydration.completed` remains the number of files left as stubs.
+- **The first failure is reported as before.** `error_class` and `error_detail` still describe the first failure walked past. A sync that walked past exactly one failure carries no `skipped`, so its result reads exactly as it did before `skipped` existed.
+- **`skipped` describes one refresh.** It is absent when the operation failed as a whole (`interrupted`) and when hydration stopped on a failure it cannot walk past, because the result then reports that failure instead. `--check` never reports it.
 
 ## Remote evidence and local recovery
 
@@ -165,7 +198,7 @@ A batch's granted objects are downloaded concurrently, at most 8 at a time. Conc
 
 A failed batch request or object download is retried, at most 3 attempts with a doubling backoff. Only a failure a repeat could get past is retried — a transport failure, or the server's own 5xx or 429. A canceled operation, an unusable read credential, any other status including 401/403 and 404, content that does not hash to the object's identity, and a batch response the server delivered in full but that cannot be used are settled answers and are not retried. A response cut short by the transport is not one of those — truncation fails while the body is read, before anything tries to decode it. A retry never relaxes a verification: a partially transferred object is discarded rather than continued, and the size check still runs on what finally arrives.
 
-Hydration attempts every object and then reports. An object the server refuses, describes incorrectly, or fails to deliver is skipped: its files keep their stubs, every other object is still materialized, and `error_detail` names the first object skipped. A canceled operation, an unusable read credential, and a 401/403 stop hydration where they happen — no later object could be materialized either. Skipping never relaxes readiness: any required object still missing keeps `ready` false, `hydration.state` at `missing`, and a hydration `error_class`, while `hydration.required` and `hydration.completed` carry the real counts. A failed or canceled batch preserves earlier verified files; a retry requests only the objects still missing.
+Hydration attempts every object and then reports. An object the server refuses, describes incorrectly, or fails to deliver is skipped: its files keep their stubs, every other object is still materialized, `error_detail` names the first object skipped, and `skipped` accounts for every one when there was more than one. A canceled operation, an unusable read credential, and a 401/403 stop hydration where they happen — no later object could be materialized either. Skipping never relaxes readiness: any required object still missing keeps `ready` false, `hydration.state` at `missing`, and a hydration `error_class`, while `hydration.required` and `hydration.completed` carry the real counts. A failed or canceled batch preserves earlier verified files; a retry requests only the objects still missing.
 
 `--check` acquires the materialization lock, verifies local state without contacting the server or triggering lazy fetches, and can republish recovered local readiness. It requires an existing identity-matched receipt; an arbitrary checkout or missing/corrupt receipt remains unavailable until an authorized refresh. It never advances freshness. A retained observation timestamp is usable only when its recorded HEAD still matches the verified HEAD. Recovery at a different or unconfirmed HEAD yields unknown remote freshness. Missing local objects/hydration remain unavailable offline.
 

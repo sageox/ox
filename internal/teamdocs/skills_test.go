@@ -3,6 +3,7 @@ package teamdocs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -213,5 +214,185 @@ func TestDiscoverSkills_SymlinkedManifestIsSkipped(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("a symlinked manifest was discovered: %v", names(got))
+	}
+}
+
+// A team skill's NAME becomes a DIRECTORY NAME in the customer's repository, and
+// it is attacker-controlled: free text in `name:` frontmatter, from a repo any
+// teammate can push to, over a pull path that verifies no signature. These pin
+// that discovery is where an unusable name stops — upstream of everything that
+// installs OR offers to approve, so the two can never disagree about which
+// skills exist.
+
+func TestDiscoverSkills_NameThatWouldEscapeTheSkillsRootIsNotInstallable(t *testing.T) {
+	traversals := []string{
+		"../../../../.claude",
+		`..\..\..\..\.claude`,
+		"/etc/passwd",
+		"..",
+		".",
+		"sageox-team-..",
+	}
+	for _, bad := range traversals {
+		t.Run(bad, func(t *testing.T) {
+			team := t.TempDir()
+			writeSkill(t, team, "agents/skills", "onboarding", "name: "+bad+"\n", nil)
+			writeSkill(t, team, "agents/skills", "deploy", "name: deploy\n", nil)
+
+			got, err := DiscoverSkills(team, "ox")
+			if err != nil {
+				t.Fatalf("one unusable name failed discovery for every skill: %v", err)
+			}
+			if contains(names(got), bad) {
+				t.Errorf("discovery offered %q for installation; it becomes a path and walks out of the skills root", bad)
+			}
+			if !contains(names(got), "deploy") {
+				t.Errorf("one rejected skill took the team's other skills down with it: got %v", names(got))
+			}
+		})
+	}
+}
+
+func TestDiscoverSkills_UppercaseNameIsNotInstallable(t *testing.T) {
+	// Not a traversal, but a case-insensitive filesystem resolves `Deploy` and
+	// `deploy` to ONE directory while the reserved-prefix ignore globs are
+	// case-sensitive — the same collision manager.go's caseVariantDirOnDisk
+	// already guards. One canonical case is the only way both can be right.
+	team := t.TempDir()
+	writeSkill(t, team, "agents/skills", "deploy", "name: Deploy\n", nil)
+
+	got, err := DiscoverSkills(team, "ox")
+	if err != nil {
+		t.Fatalf("DiscoverSkills: %v", err)
+	}
+	if contains(names(got), "Deploy") {
+		t.Error("an uppercase skill name was offered for installation")
+	}
+}
+
+// TestPublishedSkills_ReportsARejectedNameRatherThanHidingIt.
+//
+// The rejection must stay VISIBLE. A team that publishes `Deploy` today would
+// otherwise watch it silently vanish on upgrade, with no discoverable cause —
+// which is a worse failure than the one being fixed, because nothing anywhere
+// says the skill was seen at all.
+func TestPublishedSkills_ReportsARejectedNameRatherThanHidingIt(t *testing.T) {
+	team := t.TempDir()
+	writeSkill(t, team, "agents/skills", "deploy", "name: Deploy\n", nil)
+
+	published, err := PublishedSkills(team)
+	if err != nil {
+		t.Fatalf("PublishedSkills: %v", err)
+	}
+	if len(published) != 1 {
+		t.Fatalf("a rejected skill vanished from the report the human reads: %v", names(published))
+	}
+	if published[0].NameError == "" {
+		t.Fatal("the skill was reported with no reason, so `ox skills status` cannot say why it is missing")
+	}
+	if !strings.Contains(published[0].NameError, "rename") {
+		t.Errorf("the reason names no remedy: %q", published[0].NameError)
+	}
+}
+
+// TestPublishedSkills_RejectedNamesNeverReachTheInstallPath is the layering
+// assertion: reporting sees everything, installation sees only the safe set.
+func TestPublishedSkills_RejectedNamesNeverReachTheInstallPath(t *testing.T) {
+	team := t.TempDir()
+	writeSkill(t, team, "agents/skills", "onboarding", "name: ../../../../.claude\n", nil)
+
+	published, err := PublishedSkills(team)
+	if err != nil {
+		t.Fatalf("PublishedSkills: %v", err)
+	}
+	for _, s := range published {
+		if s.NameError == "" {
+			t.Errorf("skill %q was published as usable", s.Name)
+		}
+	}
+
+	installable, err := DiscoverSkills(team, "ox")
+	if err != nil {
+		t.Fatalf("DiscoverSkills: %v", err)
+	}
+	if len(installable) != 0 {
+		t.Fatalf("a rejected skill reached the install path: %v", names(installable))
+	}
+}
+
+// TestPublishedSkills_RejectedNameIsSafeToPrint. The rejected name is the one
+// attacker-controlled string that still reaches a terminal, so it is the one
+// place an ANSI escape could hide the rest of a diagnostic.
+func TestPublishedSkills_RejectedNameIsSafeToPrint(t *testing.T) {
+	team := t.TempDir()
+	writeSkill(t, team, "agents/skills", "onboarding", "name: ev\x1b[2Kil\n", nil)
+
+	published, err := PublishedSkills(team)
+	if err != nil {
+		t.Fatalf("PublishedSkills: %v", err)
+	}
+	if len(published) != 1 {
+		t.Fatalf("want the rejected skill reported, got %v", names(published))
+	}
+	if strings.ContainsRune(published[0].Name, '\x1b') {
+		t.Errorf("a terminal escape reached the reported name: %q", published[0].Name)
+	}
+}
+
+// TestValidTeamSkillName is the canonical rule, pinned input by input.
+//
+// Rejecting rather than sanitizing is the deliberate half: sanitizing
+// `../../deploy` and `..\..\deploy` into one `deploy` would collide two skills
+// into one directory, which is a worse bug than the traversal it fixed.
+func TestValidTeamSkillName(t *testing.T) {
+	tests := []struct {
+		why  string
+		name string
+		want bool
+	}{
+		{"ordinary name", "deploy", true},
+		{"hyphenated", "deploy-to-prod", true},
+		{"dotted", "deploy.v2", true},
+		{"underscored", "deploy_v2", true},
+		{"leading digit", "0auth", true},
+		{"already prefixed", "sageox-team-deploy", true},
+		{"64 byte boundary", strings.Repeat("a", 64), true},
+
+		{"empty", "", false},
+		{"parent", "..", false},
+		{"current", ".", false},
+		{"posix traversal", "../../../../.claude", false},
+		{"windows traversal", `..\..\..\..\.claude`, false},
+		{"absolute path", "/etc/passwd", false},
+		{"traversal behind the reserved prefix", "sageox-team-..", false},
+		{"uppercase", "Deploy", false},
+		{"forward slash", "a/b", false},
+		{"backslash", `a\b`, false},
+		{"NUL byte", "deploy\x00", false},
+		{"newline smuggles a second line past an anchor", "deploy\n../../../.claude", false},
+		{"leading dot hides it from a directory listing", ".hidden", false},
+		{"trailing dot is ambiguous on Windows", "deploy.", false},
+		{"65 bytes", strings.Repeat("a", 65), false},
+		{"multi-byte is not lowercase ASCII", "déploy", false},
+		{"leading hyphen parses as a flag downstream", "-rf", false},
+		{"space", "my skill", false},
+		{"terminal escape", "ev\x1b[2Kil", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.why, func(t *testing.T) {
+			if got := ValidTeamSkillName(tt.name); got != tt.want {
+				t.Errorf("ValidTeamSkillName(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+			// Every rejection must come with a reason a human can act on;
+			// "invalid" with no remedy is a support ticket.
+			reason := rejectTeamSkillName(tt.name)
+			switch {
+			case tt.want && reason != "":
+				t.Errorf("a valid name was given a rejection reason: %q", reason)
+			case !tt.want && !strings.Contains(reason, "rename"):
+				t.Errorf("rejection reason names no remedy: %q", reason)
+			}
+		})
 	}
 }

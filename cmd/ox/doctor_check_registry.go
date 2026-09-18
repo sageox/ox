@@ -677,7 +677,7 @@ func init() {
 		Name:        "kb orphan dirs",
 		Category:    "Knowledge Bubbles",
 		FixLevel:    FixLevelAuto,
-		Description: "Detects local kb directories no longer in the kb API list and triages them via the daemon's GC pass",
+		Description: "Detects local kb directories from this project's kb scopes that the kb API no longer lists; auto-fix triages them via the daemon's kb GC pass",
 		Run:         checkKBOrphans,
 	})
 

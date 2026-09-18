@@ -225,17 +225,7 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 	}
 
 	// knowledge-bubble GC — independent of ledger / team-context GC.
-	// Wrapped in a defer/recover so a bug in the kb GC path can never
-	// prevent the ledger / team-context passes above from running, nor
-	// stall future GC ticks.
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				s.logger.Warn("kb_gc panic recovered", "panic", r)
-			}
-		}()
-		s.runKBGC(ctx, s.buildKBGCListFn())
-	}()
+	s.TriggerKBGC(ctx)
 
 	atomic.StoreInt32(&s.gcInProgress, 0)
 }
@@ -362,11 +352,12 @@ func isNonFastForwardErr(err error) bool {
 // TriggerGC forces a GC reclone of all eligible team contexts, bypassing the interval check.
 // Returns immediately if GC is already in progress. Runs synchronously.
 //
-// Do not convert this to run in the background: defaultKBDoctorGC
-// (cmd/ox/doctor_kb.go) calls TriggerGC and immediately rechecks disk
-// state for orphaned kb dirs, which depends on GC having actually
-// finished by the time this call returns. Use TriggerGCAsync for callers
-// (like `ox doctor --gc`) that must not block on a multi-minute reclone.
+// Do not convert this to run in the background: CLI binaries that predate
+// trigger_gc_async (before v0.12.0) send trigger_gc from `ox doctor --gc` and
+// print the reclone counts from this response. Use TriggerGCAsync for callers
+// that must not block on a multi-minute reclone.
+//
+// This does not run kb GC; TriggerKBGC does.
 func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 	if !atomic.CompareAndSwapInt32(&s.gcInProgress, 0, 1) {
 		return &TriggerGCResponse{Skipped: 1}

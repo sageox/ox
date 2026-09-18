@@ -161,3 +161,22 @@ func TestEnsureRequiredIncludes_UnrelatedDeniesAreNotEmitted(t *testing.T) {
 		}
 	}
 }
+
+func TestRequiredIncludes_ReturnsKindScopedDefensiveCopy(t *testing.T) {
+	got := RequiredIncludes(RepoKindTeamContext)
+	if len(got) != 1 || got[0] != "agents/" {
+		t.Fatalf("RequiredIncludes(team context) = %v, want [agents/]", got)
+	}
+
+	got[0] = "mutated/"
+	again := RequiredIncludes(RepoKindTeamContext)
+	if len(again) != 1 || again[0] != "agents/" {
+		t.Fatalf("caller mutation changed the shared required includes: %v", again)
+	}
+
+	for _, kind := range []RepoKind{RepoKindKB, RepoKind("ledger"), RepoKind("")} {
+		if other := RequiredIncludes(kind); other != nil {
+			t.Errorf("RequiredIncludes(%q) = %v, want nil", kind, other)
+		}
+	}
+}

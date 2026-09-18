@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -157,6 +158,21 @@ func reconcileCommittedSkills(repoRoot string) (*skillmanager.ReconcilePlan, err
 		return current, currentTargets, nil
 	})
 	return plan, err
+}
+
+// reconcileSelectedSkills applies exactly the selection already committed in
+// skills.lock.json. Approval is an authority change, not a selection change: it
+// must never add newly-default bundles, bootstrap targets, or rewrite project
+// intent as a side effect of materializing newly approved bytes.
+func reconcileExactSelectedSkills(repoRoot string) (*skillmanager.ReconcilePlan, error) {
+	desired, targets, err := skillmanager.LoadDesired(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	if len(desired.Targets) == 0 {
+		return nil, fmt.Errorf("no selected skill targets; run `ox init`")
+	}
+	return skillmanager.Reconcile(repoRoot, version.Version, desired, targets)
 }
 
 // reconcileCommittedSkillsNonBlocking is reconcileCommittedSkills for the session

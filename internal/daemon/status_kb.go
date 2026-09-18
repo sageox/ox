@@ -60,7 +60,7 @@ func (s *SyncScheduler) kbWorkspaceStatus() []WorkspaceSyncStatus {
 
 		// meta.json is the daemon's own per-bubble record (written every
 		// reconcile in writeKBMeta). Reuse the in-package kbMeta shape.
-		if meta, ok := readKBMetaForStatus(kbPath); ok {
+		if meta, err := readKBMeta(kbPath); err == nil {
 			row.KBType = string(meta.Type)
 			row.Slug = meta.Slug
 			row.LastSync = meta.LastSync
@@ -90,17 +90,17 @@ func kbHasGitDir(kbPath string) bool {
 	return err == nil
 }
 
-// readKBMetaForStatus loads <kbPath>/.sageox/meta.json into the in-package
-// kbMeta shape. Returns ok=false when the file is absent (initial-clone
-// pending) or unparseable, so the caller leaves those fields zero.
-func readKBMetaForStatus(kbPath string) (kbMeta, bool) {
+// readKBMeta loads <kbPath>/.sageox/meta.json into the in-package kbMeta
+// shape. The error wraps fs.ErrNotExist when the file is absent (initial
+// clone pending), so callers can tell that apart from an unparseable file.
+func readKBMeta(kbPath string) (kbMeta, error) {
 	data, err := os.ReadFile(filepath.Join(kbPath, ".sageox", "meta.json"))
 	if err != nil {
-		return kbMeta{}, false
+		return kbMeta{}, err
 	}
 	var meta kbMeta
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return kbMeta{}, false
+		return kbMeta{}, err
 	}
-	return meta, true
+	return meta, nil
 }

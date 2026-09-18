@@ -61,6 +61,10 @@ type ReadSyncResult struct {
 	// ErrorDetail says what failed, naming the object when one is identifiable.
 	// Additive within schema_version 1; consumers keep matching on ErrorClass.
 	ErrorDetail *ReadFailureDetail `json:"error_detail,omitempty"`
+	// Skipped accounts for every failure hydration walked past when there was
+	// more than one; ErrorDetail describes only the first. Additive within
+	// schema_version 1.
+	Skipped *ReadSkipped `json:"skipped,omitempty"`
 }
 
 // ReadFailureDetail says what failed, naming the object when one is
@@ -83,6 +87,24 @@ type ReadFailureDetail struct {
 	ActualSize   *int64 `json:"actual_size,omitempty"`
 	ServerCode   int    `json:"server_code,omitempty"`
 }
+
+// ReadSkipped keeps one cause shared by many objects from reading as one bad
+// object. Total counts every failure hydration walked past, including one that
+// carries no reason — a failed batch request or a local write failure, which
+// ErrorDetail cannot name either. Reasons tallies the failures that do carry
+// one, and Sample lists the first readSkipSample of each reason, in the order
+// that decides which failure ErrorDetail names.
+type ReadSkipped struct {
+	Total   int                 `json:"total"`
+	Reasons map[string]int      `json:"reasons"`
+	Sample  []ReadFailureDetail `json:"sample"`
+}
+
+// readSkipSample bounds how many failures of each reason ReadSkipped lists. A
+// ledger can skip thousands of objects; Total says how many a sample stands for.
+// The bound is per reason so that a rare reason met after a common one has
+// filled its share still gets examples.
+const readSkipSample = 5
 
 type readReceipt struct {
 	ReadSyncResult
@@ -240,9 +262,10 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 		return result
 	}
 	if err := publishReadReceipt(workPath, readReceipt{ReadSyncResult: result, ReadURL: opts.ReadURL}, nil); err != nil {
-		// Verification above may have recorded a detail. The failure now being
-		// reported is this write, not that object, so the detail goes with it.
-		result.Ready, result.ErrorClass, result.ErrorDetail = false, "interrupted", nil
+		// Verification or hydration above may have recorded a detail and a skip
+		// summary. The failure now being reported is this write, not those
+		// objects, so they go with it.
+		result.Ready, result.ErrorClass, result.ErrorDetail, result.Skipped = false, "interrupted", nil, nil
 		return result
 	}
 	if staged {
@@ -346,16 +369,17 @@ func missingHydration(detail ReadFailureDetail) error {
 func readSize(n int64) *int64 { return &n }
 
 // recordReadFailure sets the sanitized category together with the object detail
-// err carries. Both move together so a result can never pair one failure's
-// class with another failure's object. It is the only place that populates
-// ErrorDetail, which is what makes the OID sanitation below unskippable.
+// and skip summary err carries. They move together so a result can never pair
+// one failure's class with another failure's objects. It is the only place that
+// populates ErrorDetail and Skipped, which is what makes the OID sanitation
+// below unskippable.
 func recordReadFailure(ctx context.Context, result *ReadSyncResult, err error) {
 	result.ErrorClass = readErrorClass(ctx, err)
-	result.ErrorDetail = nil
+	result.ErrorDetail, result.Skipped = nil, nil
 	// A canceled or expired context classifies as "interrupted" whatever err
 	// says, including an object failure raised just before the deadline landed
 	// — verification runs Git subprocesses between the two. The operation, not
-	// that object, is what failed, so the detail goes with it.
+	// those objects, is what failed, so the detail and summary go with it.
 	if result.ErrorClass == "interrupted" {
 		return
 	}
@@ -364,6 +388,18 @@ func recordReadFailure(ctx context.Context, result *ReadSyncResult, err error) {
 		detail := failure.detail
 		detail.OID, detail.ExpectedOID = safeReadOID(detail.OID), safeReadOID(detail.ExpectedOID)
 		result.ErrorDetail = &detail
+	}
+	// A single failure walked past is fully described by the class and detail,
+	// so a summary starts at the second, and a result with one failure keeps the
+	// shape consumers already parse.
+	var skips *readSkips
+	if errors.As(err, &skips) && skips.total > 1 {
+		skipped := ReadSkipped{Total: skips.total, Reasons: skips.reasons, Sample: make([]ReadFailureDetail, 0, len(skips.sample))}
+		for _, detail := range skips.sample {
+			detail.OID, detail.ExpectedOID = safeReadOID(detail.OID), safeReadOID(detail.ExpectedOID)
+			skipped.Sample = append(skipped.Sample, detail)
+		}
+		result.Skipped = &skipped
 	}
 }
 
@@ -680,9 +716,28 @@ func dehydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport,
 	return nil
 }
 
-// readSkips keeps the first failure hydration walked past, and decides which
-// failures it may walk past at all.
-type readSkips struct{ first error }
+// readSkips accounts for the failures hydration walked past, and decides which
+// failures it may walk past at all. As an error it is the first of them, so that
+// failure alone still decides error_class and error_detail; recordReadFailure
+// reads the summary of all of them from it.
+type readSkips struct {
+	first   error
+	total   int
+	reasons map[string]int
+	sample  []ReadFailureDetail
+}
+
+func (s *readSkips) Error() string { return s.first.Error() }
+func (s *readSkips) Unwrap() error { return s.first }
+
+// err is what hydration returns once every object was attempted. It is nil when
+// nothing was walked past, rather than a readSkips holding no failure.
+func (s *readSkips) err() error {
+	if s.first == nil {
+		return nil
+	}
+	return s
+}
 
 // stopsReadHydration reports whether err is about the operation or the grant
 // rather than one object. An interrupted operation, an unusable read
@@ -705,7 +760,16 @@ func (s *readSkips) skip(ctx context.Context, err error) bool {
 		return false
 	}
 	if s.first == nil {
-		s.first = err
+		s.first, s.reasons = err, make(map[string]int)
+	}
+	s.total++
+	var failure *readFailure
+	if errors.As(err, &failure) {
+		reason := failure.detail.Reason
+		s.reasons[reason]++
+		if s.reasons[reason] <= readSkipSample {
+			s.sample = append(s.sample, failure.detail)
+		}
 	}
 	return true
 }
@@ -789,10 +853,12 @@ type readGrant struct {
 }
 
 // hydrateReadFiles materializes every object it can, then reports the first one
-// it could not. A ledger accumulates objects for as long as the team works, so
-// an object the server will not serve is a steady state rather than an
-// exception; returning at the first one left every later object a stub forever,
-// however healthy those objects were (ox #947).
+// it could not, carrying a summary of every one so that a failure shared by
+// thousands of objects does not read as one bad object (ox #984). A ledger
+// accumulates objects for as long as the team works, so an object the server
+// will not serve is a steady state rather than an exception; returning at the
+// first one left every later object a stub forever, however healthy those
+// objects were (ox #947).
 //
 // Skipping never relaxes readiness. verifyReadCheckout recounts the worktree
 // afterwards, so a partial hydration still reports hydration.state "missing"
@@ -853,7 +919,7 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 		pending[oid] = append(pending[oid], f)
 	}
 	if len(requests) == 0 {
-		return skips.first
+		return skips.err()
 	}
 	client, err := lfs.NewReadClient(opts.Endpoint, opts.RepoID, opts.ReadURL)
 	if err != nil {
@@ -977,7 +1043,7 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 			}
 		}
 	}
-	return skips.first
+	return skips.err()
 }
 
 // materializeReadGrant downloads one granted file and reports the failure this
