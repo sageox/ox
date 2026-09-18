@@ -337,6 +337,64 @@ func TestReviewLoop_RejectsBadJSON(t *testing.T) {
 	}
 }
 
+// TestReviewLoop_MissingAnchorIsBadRequest verifies /accept and /reopen both
+// reject a body with no anchor as 400, not a panic or a silent no-op.
+func TestReviewLoop_MissingAnchorIsBadRequest(t *testing.T) {
+	dir := t.TempDir()
+	srv, _, _ := newTestReviewServer(t, dir)
+	for _, path := range []string{"/accept", "/reopen"} {
+		if code := reviewPOST(t, srv.URL+path, "secret", "{}"); code != http.StatusBadRequest {
+			t.Errorf("%s with no anchor should be 400, got %d", path, code)
+		}
+	}
+}
+
+// TestReviewLoop_FeedbackAndReopenSurfaceSaveFailure verifies /feedback and
+// /reopen both report 500 — not a false 200 — when the underlying
+// plan.SaveFeedback write fails, so a human is never told a round was saved
+// when it wasn't.
+func TestReviewLoop_FeedbackAndReopenSurfaceSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	// A regular file where SaveFeedback expects to MkdirAll a "feedback"
+	// subdirectory fails deterministically on every platform (unlike chmod,
+	// which no-ops on Windows).
+	if err := os.WriteFile(filepath.Join(dir, "feedback"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, _, _ := newTestReviewServer(t, dir)
+	if code := reviewPOST(t, srv.URL+"/feedback", "secret", `{"items":[{"anchor":"h1","status":"comment"}]}`); code != http.StatusInternalServerError {
+		t.Errorf("/feedback with a blocked feedback dir should be 500, got %d", code)
+	}
+	if code := reviewPOST(t, srv.URL+"/reopen", "secret", `{"anchor":"h1"}`); code != http.StatusInternalServerError {
+		t.Errorf("/reopen with a blocked feedback dir should be 500, got %d", code)
+	}
+}
+
+// TestReviewLoop_AcceptSurfacesAppendResolutionFailure mirrors the above for
+// /accept's plan.AppendResolution write, which MkdirAlls the same "feedback"
+// subdirectory.
+func TestReviewLoop_AcceptSurfacesAppendResolutionFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "feedback"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, _, _ := newTestReviewServer(t, dir)
+	if code := reviewPOST(t, srv.URL+"/accept", "secret", `{"anchor":"h1"}`); code != http.StatusInternalServerError {
+		t.Errorf("/accept with a blocked feedback dir should be 500, got %d", code)
+	}
+}
+
+// TestReviewLoop_ApproveSurfacesAppendPlanEventFailure verifies /approve
+// reports 500 — not a false "approved" — when the plan has no recorded
+// history to append the approval event to.
+func TestReviewLoop_ApproveSurfacesAppendPlanEventFailure(t *testing.T) {
+	dir := t.TempDir() // no plan.Save / AppendEvent ever ran here — no history
+	srv, _, _ := newTestReviewServer(t, dir)
+	if code := reviewPOST(t, srv.URL+"/approve", "secret", "{}"); code != http.StatusInternalServerError {
+		t.Errorf("/approve with no plan history should be 500, got %d", code)
+	}
+}
+
 // TestBroadcaster_FansOut verifies a broadcast reaches every subscriber and a
 // busy subscriber never blocks the broadcaster. Failure prevented: the live
 // reload stalls because one slow SSE client wedges the fan-out.

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/agenttask"
@@ -140,7 +141,18 @@ func enqueuePlanFeedbackTask(gitRoot, planDir, slug string, items int) error {
 		return nil
 	}
 	meta, err := plan.LoadMeta(planDir)
-	if err != nil || meta.Provenance == nil || meta.Provenance.AgentID == "" {
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // no meta.json at all → nobody was ever recorded to notify
+		}
+		// meta.json exists but is unreadable/corrupt — a real failure, not "no
+		// author recorded." Reporting nil here would tell the human it landed
+		// (notified:true) when nothing was ever enqueued.
+		slog.Warn("plan feedback: could not load plan meta — cannot notify authoring coworker",
+			"error", err, "slug", slug, "plan_dir", planDir)
+		return err
+	}
+	if meta.Provenance == nil || meta.Provenance.AgentID == "" {
 		return nil // no authoring coworker recorded → nobody to notify
 	}
 	prov := meta.Provenance
@@ -155,7 +167,7 @@ func enqueuePlanFeedbackTask(gitRoot, planDir, slug string, items int) error {
 		Payload:     map[string]string{"plan_slug": slug},
 	}
 	_, err = agenttask.Enqueue(gitRoot, task)
-	if err != nil {
+	if err != nil && !enqueueFailureIsSettled(err) {
 		time.Sleep(100 * time.Millisecond)
 		_, err = agenttask.Enqueue(gitRoot, task)
 	}
@@ -165,6 +177,39 @@ func enqueuePlanFeedbackTask(gitRoot, planDir, slug string, items int) error {
 		return err
 	}
 	return nil
+}
+
+// enqueueSettledFailurePrefixes are agenttask.Enqueue error messages that are
+// deterministic for a given task and gitRoot: retrying the exact same call
+// reproduces the identical failure, so a retry only adds latency. This is a
+// negative list — anything NOT matched here is treated as possibly-transient
+// (DB open/lock/write contention) and gets one bounded retry.
+var enqueueSettledFailurePrefixes = []string{
+	"project root cannot be empty",
+	"failed to resolve project root",
+	"failed to create task directory", // MkdirAll blocked by a non-directory — waiting cannot fix this
+	"task cannot be nil",
+	"task title cannot be empty",
+	"unknown task kind",
+	"task title exceeds",
+	"task body exceeds",
+	"task payload exceeds",
+	"task payload key",
+	"new tasks must start",
+	"failed to encode payload",
+}
+
+// enqueueFailureIsSettled reports whether err is a known, deterministic
+// agenttask.Enqueue failure — a structural directory problem or a static task
+// validation error — that a retry cannot fix.
+func enqueueFailureIsSettled(err error) bool {
+	msg := err.Error()
+	for _, prefix := range enqueueSettledFailurePrefixes {
+		if strings.HasPrefix(msg, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func runPlanFeedbackShow(cmd *cobra.Command, slug string, jsonOut bool) error {

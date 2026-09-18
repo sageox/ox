@@ -357,13 +357,17 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 				http.Error(w, err.Error(), code)
 				return
 			}
-			bc.broadcast() // repaint the submitter's own tab too
 			w.Header().Set("Content-Type", "application/json")
 			resp := map[string]any{"ok": true}
 			for k, v := range extra {
 				resp[k] = v
 			}
 			_ = json.NewEncoder(w).Encode(resp)
+			// Broadcast the reload AFTER the response is written: the submitter's
+			// own tab reloads on this same SSE push, and a reload racing ahead of
+			// the fetch callback could wipe a notified:false toast before it ever
+			// shows.
+			bc.broadcast()
 		})
 	}
 

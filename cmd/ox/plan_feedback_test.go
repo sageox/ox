@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/sageox/ox/internal/agenttask"
 	"github.com/sageox/ox/internal/plan"
+	"github.com/spf13/cobra"
 )
 
 // writeTestPlanMeta writes a minimal meta.json with the given provenance into a
@@ -194,32 +197,44 @@ func TestEnqueuePlanFeedbackTask_UntargetedWhenNoAgentType(t *testing.T) {
 	}
 }
 
-// TestEnqueuePlanFeedbackTask_BestEffortOnBadMeta verifies a missing or corrupt
-// meta.json produces no task and no panic — the notify is best-effort and must
-// never break the feedback write that already succeeded.
-func TestEnqueuePlanFeedbackTask_BestEffortOnBadMeta(t *testing.T) {
-	// missing meta.json
+// TestEnqueuePlanFeedbackTask_MissingMetaIsANoop verifies a plan with no
+// meta.json at all (never had provenance recorded) produces no task, no
+// error, and no panic — this is the ordinary "nobody to notify" case, not a
+// failure.
+func TestEnqueuePlanFeedbackTask_MissingMetaIsANoop(t *testing.T) {
 	root := t.TempDir()
 	planDir := filepath.Join(root, "plan")
 	if err := os.MkdirAll(planDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	enqueuePlanFeedbackTask(root, planDir, "p", 1)
+	if err := enqueuePlanFeedbackTask(root, planDir, "p", 1); err != nil {
+		t.Errorf("missing meta must be a silent no-op, got error: %v", err)
+	}
 	if agenttask.QueueExists(root) && len(activeTasks(t, root)) != 0 {
 		t.Error("missing meta must enqueue nothing")
 	}
+}
 
-	// corrupt meta.json
-	root2 := t.TempDir()
-	planDir2 := filepath.Join(root2, "plan")
-	if err := os.MkdirAll(planDir2, 0o755); err != nil {
+// TestEnqueuePlanFeedbackTask_CorruptMetaIsAnError verifies a plan whose
+// meta.json exists but fails to parse returns a real error — not the silent
+// nil "nobody to notify" no-op.
+// Failure prevented: LoadMeta's read/parse error was previously folded into
+// the same branch as "no provenance recorded," so a corrupt meta.json made
+// the CLI print no warning and the review server report notified:true, even
+// though nothing was ever enqueued (caught in PR #996 review).
+func TestEnqueuePlanFeedbackTask_CorruptMetaIsAnError(t *testing.T) {
+	root := t.TempDir()
+	planDir := filepath.Join(root, "plan")
+	if err := os.MkdirAll(planDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(planDir2, "meta.json"), []byte("{not json"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(planDir, "meta.json"), []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	enqueuePlanFeedbackTask(root2, planDir2, "p", 1)
-	if agenttask.QueueExists(root2) && len(activeTasks(t, root2)) != 0 {
+	if err := enqueuePlanFeedbackTask(root, planDir, "p", 1); err == nil {
+		t.Error("corrupt meta must return an error, not a silent no-op")
+	}
+	if agenttask.QueueExists(root) && len(activeTasks(t, root)) != 0 {
 		t.Error("corrupt meta must enqueue nothing")
 	}
 }
@@ -278,5 +293,108 @@ func TestEnqueuePlanFeedbackTask_SurfacesEnqueueFailure(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "enqueue notify task failed") {
 		t.Errorf("enqueue failure must be logged at Warn level or above; captured log output: %q", logs.String())
+	}
+}
+
+// TestRunPlanFeedbackApply_WarnsOnNotifyFailure verifies the CLI `ox plan
+// feedback apply` path prints a human-visible warning when it cannot notify
+// the plan's authoring coworker, instead of quietly reporting success.
+// Failure prevented (ox#968): a human applies a feedback export, sees
+// "Applied N feedback item(s)" and nothing else, and never learns the
+// authoring coworker was never told to look at it.
+func TestRunPlanFeedbackApply_WarnsOnNotifyFailure(t *testing.T) {
+	root := newPlanStatusTestRepo(t)
+
+	if _, _, err := plan.Save(root, plan.Input{Raw: "# Apply warns\n"}, plan.Result{}, nil, plan.Meta{
+		Topic: "Apply warns", Slug: "apply-warns",
+		Provenance: &plan.Provenance{AgentID: "Ox#1", AgentType: "claude"},
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// A regular file at .sageox/agent_tasks makes agenttask.NewStore's
+	// MkdirAll fail deterministically, without disturbing the
+	// .sageox/config.json the ledger resolver already depends on.
+	if err := os.WriteFile(filepath.Join(root, ".sageox", "agent_tasks"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	feedbackPath := filepath.Join(t.TempDir(), "feedback.json")
+	feedback := `{"items":[{"anchor":"h1","status":"comment","note":"hi"}]}`
+	if err := os.WriteFile(feedbackPath, []byte(feedback), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	// cli.PrintWarning writes straight to os.Stderr, bypassing cmd.SetErr —
+	// swap the real stream (per the codebase's own lesson: asserting on
+	// stdout here would go red for the wrong reason and look identical to a
+	// silently-swallowed warning).
+	oldStderr := os.Stderr
+	r, w, perr := os.Pipe()
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = oldStderr })
+
+	applyErr := runPlanFeedbackApply(cmd, "apply-warns", feedbackPath)
+
+	w.Close()
+	os.Stderr = oldStderr
+	var stderrBuf bytes.Buffer
+	io.Copy(&stderrBuf, r)
+
+	if applyErr != nil {
+		t.Fatalf("runPlanFeedbackApply: %v", applyErr)
+	}
+	if !strings.Contains(stderrBuf.String(), "could not notify the plan's authoring coworker") {
+		t.Errorf("want a notify-failure warning on stderr, got %q", stderrBuf.String())
+	}
+}
+
+// TestEnqueueFailureIsSettled_ClassifiesKnownErrors verifies the retry gate
+// distinguishes deterministic agenttask.Enqueue failures (a retry cannot
+// possibly help — same input, same outcome) from unclassified ones, which
+// are treated as possibly-transient and get a retry.
+// Failure prevented: retrying a structurally broken task-store path (a file
+// where a directory belongs) on every enqueue just adds latency for a
+// failure that will never clear on its own (caught in PR #996 review).
+func TestEnqueueFailureIsSettled_ClassifiesKnownErrors(t *testing.T) {
+	settled := []string{
+		"project root cannot be empty",
+		"failed to resolve project root: boom",
+		"failed to create task directory: mkdir x: not a directory",
+		"task cannot be nil",
+		"task title cannot be empty",
+		`unknown task kind "bogus" (allowed: doctor, session-finalize, anti-entropy, custom)`,
+		"task title exceeds 500 bytes",
+		"task body exceeds 4000 bytes",
+		"task payload exceeds 2000 bytes",
+		`task payload key "token" looks sensitive; payload is surfaced to an AI coworker and must not carry secrets`,
+		`new tasks must start "ready", got "in_progress"`,
+		"failed to encode payload: json: unsupported value",
+	}
+	for _, msg := range settled {
+		if !enqueueFailureIsSettled(errors.New(msg)) {
+			t.Errorf("want settled (no retry) for %q", msg)
+		}
+	}
+
+	unclassified := []string{
+		"failed to open task db: database is locked",
+		"failed to insert task: database is locked",
+		"integrity_check: corrupt",
+		"schema version mismatch: db=1 want=2",
+		"context deadline exceeded",
+	}
+	for _, msg := range unclassified {
+		if enqueueFailureIsSettled(errors.New(msg)) {
+			t.Errorf("want NOT settled (retryable) for %q", msg)
+		}
 	}
 }
