@@ -345,25 +345,60 @@ def path_matches(path: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
 
 
+def introduces_body(source: str, index: int) -> bool:
+    """Whether the `func` keyword ending at index opens a body rather than a type.
+
+    `go tool cover` instruments function BODIES. Every coverable one reaches a
+    `{` with its signature closed, and Go's semicolon insertion forces that
+    brace onto the signature's own line -- so a newline at depth zero ends the
+    construct without a body. A `func` that is a TYPE (an interface method's
+    callback parameter, a struct field, `type H func(int) error`) instead runs
+    into the `)` or `,` of whatever encloses it, which is depth zero going
+    negative. Scanning for that distinction is what separates
+    `var h = func() {}` (coverable) from `Do(cb func(int) error)` (not).
+    """
+    depth = 0
+    for char in source[index:]:
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            if depth == 0:
+                return False
+            depth -= 1
+        elif depth == 0:
+            if char == "{":
+                return True
+            if char in ",\n":
+                return False
+    return False
+
+
 def declares_no_functions(path: str) -> bool | None:
-    """Whether a Go file has no `func` keyword, and so can never be profiled.
+    """Whether a Go file declares no function body, and so can never be profiled.
 
     `go tool cover` instruments function bodies only -- declarations and
     literals alike -- and every one of them is introduced by `func`. A file
-    without that keyword (constants, vars, embeds, a bare doc.go) contributes
-    zero blocks no matter how thoroughly its package is exercised. Returns None
-    when the file cannot be read, leaving the caller on its package fallback.
+    with no such body (constants, vars, embeds, a bare doc.go, an interface
+    contract) contributes zero blocks no matter how thoroughly its package is
+    exercised. Returns None when the file cannot be read, leaving the caller on
+    its package fallback.
 
     The keyword is matched anywhere, not just at column 0: Go permits indented
     top-level declarations, and `var h = func() {}` is a coverable body with no
-    `func` at line start. A `func` inside a comment or string reads as a
-    function here and merely keeps the stricter existing behavior.
+    `func` at line start. The keyword alone is not enough, though -- an
+    interface whose method takes a callback (`Stream(..., func(E) error)`) is
+    pure declaration, and reading that as a function made every edit to such a
+    file fail the gate, the same way PR #909's const-only package did before
+    this check existed.
     """
     try:
         source = Path(path).read_text(encoding="utf-8")
     except OSError:
         return None
-    return re.search(r"\bfunc\b", source) is None
+    return not any(
+        introduces_body(source, match.end())
+        for match in re.finditer(r"\bfunc\b", source)
+    )
 
 
 def validate_exceptions(

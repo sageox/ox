@@ -658,3 +658,114 @@ func TestSaveRecordingState_PersistsAndLeavesNoArtifacts(t *testing.T) {
 	assert.Equal(t, "OxAtomic", loaded.AgentID)
 	assert.Equal(t, state.SessionPath, loaded.SessionPath)
 }
+
+func TestUpdateRecordingStateSerializesCursorMutation(t *testing.T) {
+	root := setupRecordingTest(t, t.TempDir())
+	_, err := StartRecording(root, StartRecordingOptions{AgentID: "OxLock", AdapterName: "claude-code", Username: "test"})
+	require.NoError(t, err)
+	state, err := LoadRecordingState(root)
+	require.NoError(t, err)
+	entered, release := make(chan struct{}), make(chan struct{})
+	updated := make(chan error, 1)
+	go func() {
+		updated <- UpdateRecordingState(root, func(s *RecordingState) { close(entered); <-release; s.LastReminderSeq = 7 })
+	}()
+	<-entered
+	cursorDone := make(chan error, 1)
+	go func() {
+		cursorDone <- MutateRecordingStateFile(recordingStatePath(state.SessionPath), func(s *RecordingState) error { s.SourceOffset = 99; return nil })
+	}()
+	// The cursor writer must wait while the lifecycle callback owns the state.
+	var early bool
+	select {
+	case err = <-cursorDone:
+		early = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	require.NoError(t, <-updated)
+	if !early {
+		err = <-cursorDone
+	}
+	require.NoError(t, err)
+	require.False(t, early, "cursor update escaped the shared state lock")
+	state, err = LoadRecordingState(root)
+	require.NoError(t, err)
+	require.Equal(t, int64(99), state.SourceOffset)
+	require.Equal(t, 7, state.LastReminderSeq)
+}
+
+// TestMutateRecordingStateFileErrorsWhenFileMissing prevents a caller from
+// silently no-op'ing a mutation against a state file that was never created
+// (or was already cleared by StopRecording) — a lost mutation here would
+// mean a lifecycle event (pause/resume/cursor advance) is silently dropped.
+func TestMutateRecordingStateFileErrorsWhenFileMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "does-not-exist", ".recording.json")
+	err := MutateRecordingStateFile(path, func(s *RecordingState) error {
+		t.Fatal("update must not run when the state file can't be read")
+		return nil
+	})
+	require.Error(t, err)
+}
+
+// TestMutateRecordingStateFileErrorsOnCorruptJSON prevents a torn or
+// corrupted .recording.json (e.g. from a crash mid-write) from being
+// silently treated as a zero-value state, which would discard whatever
+// fields the corrupt write had already lost plus everything the update
+// function was about to change.
+func TestMutateRecordingStateFileErrorsOnCorruptJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), recordingFile)
+	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0600))
+	err := MutateRecordingStateFile(path, func(s *RecordingState) error {
+		t.Fatal("update must not run against a state we failed to parse")
+		return nil
+	})
+	require.Error(t, err)
+}
+
+// TestMutateRecordingStateFilePropagatesUpdateErrorWithoutWriting proves a
+// rejected mutation (e.g. AppendRecordingBatch's cursor-did-not-advance
+// guard) leaves the persisted state file byte-for-byte unchanged — writing
+// out a partial/rolled-back state here would desync the persisted cursor
+// from what was actually captured to raw.jsonl.
+func TestMutateRecordingStateFilePropagatesUpdateErrorWithoutWriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), recordingFile)
+	original := &RecordingState{AgentID: "OxKeep", SourceOffset: 5}
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0600))
+
+	sentinel := errors.New("update refused")
+	err = MutateRecordingStateFile(path, func(s *RecordingState) error {
+		s.SourceOffset = 999
+		return sentinel
+	})
+	require.ErrorIs(t, err, sentinel)
+
+	after, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.JSONEq(t, string(data), string(after), "state file must be unchanged when update() errors")
+}
+
+// TestUpdateRecordingStateForAgentReturnsErrNotRecordingWhenNoState prevents
+// a caller from mistaking "no active recording for this agent" for a
+// successful no-op mutation.
+func TestUpdateRecordingStateForAgentReturnsErrNotRecordingWhenNoState(t *testing.T) {
+	projectRoot, _ := createTestSessionProject(t)
+	err := UpdateRecordingStateForAgent(projectRoot, "OxGhost", func(s *RecordingState) {
+		t.Fatal("update must not run when the agent has no active recording")
+	})
+	require.ErrorIs(t, err, ErrNotRecording)
+}
+
+// TestUpdateRecordingStateReturnsErrNotRecordingWhenNoState prevents a
+// caller from mistaking "nothing is recording" for a successful mutation
+// (e.g. silently losing a reminder-sequence update).
+func TestUpdateRecordingStateReturnsErrNotRecordingWhenNoState(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := setupRecordingTest(t, cacheDir)
+	err := UpdateRecordingState(projectRoot, func(s *RecordingState) {
+		t.Fatal("update must not run when nothing is recording")
+	})
+	require.ErrorIs(t, err, ErrNotRecording)
+}

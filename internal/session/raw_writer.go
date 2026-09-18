@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/sageox/ox/internal/fileutil"
 )
 
 // RawWriter is the SINGLE supported way to write entries to a session's
@@ -56,14 +58,7 @@ type RawWriter struct {
 // (e.g. daemon writing to a ledger session whose project isn't known
 // at write time); built-in patterns still apply.
 func NewRawWriter(path, projectRoot string) (*RawWriter, error) {
-	// 0600: raw.jsonl holds full conversation content (and, until the
-	// redaction stack scrubs them, any secrets in transit). Keep it
-	// owner-only — never world-readable.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
-	if err != nil {
-		return nil, fmt.Errorf("raw writer: open: %w", err)
-	}
-	return newRawWriterFromFile(f, projectRoot), nil
+	return newRawFileWriter(path, projectRoot, os.O_WRONLY|os.O_CREATE|os.O_APPEND)
 }
 
 // NewRawWriterTruncate is the same as NewRawWriter but truncates the
@@ -71,12 +66,7 @@ func NewRawWriter(path, projectRoot string) (*RawWriter, error) {
 // that produce a fresh raw.jsonl rather than appending. The redaction
 // stack is identical — every byte still passes through.
 func NewRawWriterTruncate(path, projectRoot string) (*RawWriter, error) {
-	// 0600: owner-only, same rationale as NewRawWriter.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return nil, fmt.Errorf("raw writer: open: %w", err)
-	}
-	return newRawWriterFromFile(f, projectRoot), nil
+	return newRawFileWriter(path, projectRoot, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 }
 
 func newRawWriterFromFile(f *os.File, projectRoot string) *RawWriter {
@@ -130,6 +120,9 @@ func (w *RawWriter) WriteEntry(entry *SessionEntry) error {
 
 	// Layer 1: command-allowlist whole-output redaction.
 	w.cmdRedactor.RedactEntry(entry)
+	if w.cmdRedactor.overflow {
+		return fmt.Errorf("too many unmatched credential-output calls")
+	}
 
 	// Layer 2: built-in regex redactor (covers ToolInput, ToolOutput,
 	// Content via RedactEntries-style traversal).
@@ -253,7 +246,7 @@ func applyPatternToSlice(data []any, p *SecretPattern) {
 // Sync flushes the writer's underlying file. The json.Encoder's own
 // buffer was already drained by Encode (it writes per Encode call).
 func (w *RawWriter) Sync() error {
-	if w == nil || w.closed {
+	if w == nil || w.closed || w.file == nil {
 		return nil
 	}
 	return w.file.Sync()
@@ -261,7 +254,7 @@ func (w *RawWriter) Sync() error {
 
 // Close flushes and closes the underlying file. Idempotent.
 func (w *RawWriter) Close() error {
-	if w == nil || w.closed {
+	if w == nil || w.closed || w.file == nil {
 		return nil
 	}
 	w.closed = true
@@ -271,7 +264,7 @@ func (w *RawWriter) Close() error {
 // CloseAndSync is a convenience for callers that want fsync + close in
 // one shot at the end of a write session.
 func (w *RawWriter) CloseAndSync() error {
-	if w == nil || w.closed {
+	if w == nil || w.closed || w.file == nil {
 		return nil
 	}
 	if err := w.file.Sync(); err != nil {
@@ -294,4 +287,182 @@ func (w *RawWriter) CloseAndSync() error {
 //nolint:unused // reserved for in-package bypass use; expected unused warning until first caller
 func (w *RawWriter) asWriter() io.Writer {
 	return w.file
+}
+
+// NewRawStreamWriter applies exactly the raw-file redaction stack to a stream.
+// Import previews use io.Discard so inspecting history never creates artifacts.
+// Policy errors are fatal for new imports; silently ignoring a malformed rule
+// would publish content the repository owner intended to exclude.
+func NewRawStreamWriter(dst io.Writer, projectRoot string) (*RawWriter, error) {
+	redactor, problems := NewRedactorWithCustomRules(projectRoot)
+	if len(problems) != 0 {
+		return nil, fmt.Errorf("invalid redaction policy (%d errors)", len(problems))
+	}
+	w := newRawWriterFromFile(nil, "")
+	w.encoder = json.NewEncoder(dst)
+	w.redactor = redactor
+	return w, nil
+}
+
+// NewRawSnapshotWriter validates repository policy before truncating any output.
+// Import application must use the same strict policy as its read-only preview.
+func NewRawSnapshotWriter(path, projectRoot string) (*RawWriter, error) {
+	return NewRawWriterTruncate(path, projectRoot)
+}
+func newRawFileWriter(path, projectRoot string, flags int) (*RawWriter, error) {
+	w, err := NewRawStreamWriter(io.Discard, projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	// Validate policy before creating or truncating any persistent content.
+	f, err := os.OpenFile(path, flags, 0600)
+	if err != nil {
+		return nil, err
+	}
+	w.file = f
+	w.encoder = json.NewEncoder(f)
+	return w, nil
+}
+
+type rawAppendCheckpoint struct {
+	RawSize   int64  `json:"raw_size"`
+	FinalSize *int64 `json:"final_size,omitempty"`
+	OldOffset int64  `json:"old_offset"`
+	NewOffset int64  `json:"new_offset"`
+}
+
+// BeginAppend journals the rollback point before any batch bytes are written.
+// The caller must hold the raw capture lock through cursor persistence.
+func (w *RawWriter) BeginAppend(oldOffset, newOffset int64) error {
+	info, err := w.file.Stat()
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(rawAppendCheckpoint{RawSize: info.Size(), OldOffset: oldOffset, NewOffset: newOffset})
+	if err != nil {
+		return err
+	}
+	return fileutil.AtomicWriteBytes(w.file.Name()+".append.json", data, 0600)
+}
+
+// SealAppend persists the exact fsynced output length before the cursor can
+// advance. Recovery must reject a replaced/truncated file behind a committed cursor.
+func (w *RawWriter) SealAppend() error {
+	if err := w.Sync(); err != nil {
+		return err
+	}
+	path := w.file.Name() + ".append.json"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var checkpoint rawAppendCheckpoint
+	if err := json.Unmarshal(data, &checkpoint); err != nil {
+		return err
+	}
+	info, err := w.file.Stat()
+	if err != nil {
+		return err
+	}
+	size := info.Size()
+	if size < checkpoint.RawSize {
+		return fmt.Errorf("captured file was truncated")
+	}
+	checkpoint.FinalSize = &size
+	data, err = json.Marshal(checkpoint)
+	if err != nil {
+		return err
+	}
+	return fileutil.AtomicWriteBytes(path, data, 0600)
+}
+
+func (w *RawWriter) FinishAppend() error { return os.Remove(w.file.Name() + ".append.json") }
+
+// RecoverRawAppend discards only an unacknowledged batch. A cursor is committed
+// after raw fsync; if its atomic replacement survived, its batch must survive too.
+// Call under the capture lock before reading, stopping, or reopening the writer.
+func RecoverRawAppend(path string, persistedOffset int64) error {
+	checkpointPath := path + ".append.json"
+	data, err := os.ReadFile(checkpointPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var checkpoint rawAppendCheckpoint
+	if err = json.Unmarshal(data, &checkpoint); err != nil {
+		return err
+	}
+	if checkpoint.RawSize < 0 || checkpoint.NewOffset <= checkpoint.OldOffset {
+		return fmt.Errorf("invalid capture checkpoint")
+	}
+	switch persistedOffset {
+	case checkpoint.OldOffset:
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if info.Size() < checkpoint.RawSize {
+			return fmt.Errorf("captured file was truncated")
+		}
+		f, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			return err
+		}
+		if err = f.Truncate(checkpoint.RawSize); err == nil {
+			err = f.Sync()
+		}
+		closeErr := f.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	case checkpoint.NewOffset:
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if checkpoint.FinalSize == nil || info.Size() != *checkpoint.FinalSize {
+			return fmt.Errorf("committed capture size conflicts with pending batch")
+		}
+	default:
+		return fmt.Errorf("capture cursor conflicts with pending batch")
+	}
+	return os.Remove(checkpointPath)
+}
+
+// AppendRecordingBatch requires the raw capture lock; the nested state lock
+// keeps a pause/resume from crossing the batch's sequence/cursor boundary.
+func (w *RawWriter) AppendRecordingBatch(statePath string, entries []Entry, newOffset int64) error {
+	err := MutateRecordingStateFile(statePath, func(state *RecordingState) error {
+		if newOffset <= state.SourceOffset {
+			return fmt.Errorf("capture cursor did not advance")
+		}
+		if err := w.RestoreCaptureRedaction(state, w.file.Name()); err != nil {
+			return err
+		}
+		if err := w.BeginAppend(state.SourceOffset, newOffset); err != nil {
+			return err
+		}
+		for i := range entries {
+			if err := w.WriteEntry(&entries[i]); err != nil {
+				return err
+			}
+		}
+		if err := w.SealAppend(); err != nil {
+			return err
+		}
+		state.CommandRedactionVersion = 1
+		state.PendingCommandRedactions = w.cmdRedactor.pending
+		state.SourceOffset = newOffset
+		state.EntryCount += len(entries)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return w.FinishAppend()
 }

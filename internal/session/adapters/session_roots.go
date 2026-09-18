@@ -39,6 +39,13 @@ func KnownSessionRoots(adapterName, homeDir string) []string {
 	for _, r := range roots {
 		out = append(out, filepath.Join(homeDir, r))
 	}
+	// Only the daemon's inherited configuration can widen this allowlist;
+	// an IPC-supplied source path cannot choose a custom Codex home.
+	if canonical == "codex" {
+		if home := os.Getenv("CODEX_HOME"); filepath.IsAbs(home) {
+			out = append(out, filepath.Join(home, "sessions"), filepath.Join(home, "archived_sessions"))
+		}
+	}
 	if canonical == "omp" {
 		for _, root := range omppaths.SessionRoots(homeDir) {
 			if !containsRoot(out, root.Path) {
@@ -250,7 +257,7 @@ var adapterSessionHandles = map[string]string{
 // homeDir using the OS-appropriate separator.
 var adapterSessionRoots = map[string][]string{
 	"claude-code": {".claude/projects"},
-	"codex":       {".codex/sessions"},
+	"codex":       {".codex/sessions", ".codex/archived_sessions"},
 	"gemini":      {".gemini/tmp", ".gemini/sessions"},
 	// Generic / non-deep adapters store recordings inside the ox cache directory
 	// under the user's home — same fail-closed root as the deep adapters.

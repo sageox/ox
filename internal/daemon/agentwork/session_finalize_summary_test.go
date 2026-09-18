@@ -555,7 +555,7 @@ func TestProcessResult_QualityScoreDiscard(t *testing.T) {
 
 	// session dir should be removed
 	if _, statErr := os.Stat(sessionDir); !os.IsNotExist(statErr) {
-		t.Error("expected session directory to be removed for quality below discard threshold")
+		t.Error("successful publication should prune only the local cache")
 	}
 }
 
@@ -704,12 +704,7 @@ func TestProcessResult_ValidationFailure_UploadsFallbackStub(t *testing.T) {
 	}
 }
 
-// TestProcessResult_EmptySessionLLMScoreZero_Discarded is the #525 regression:
-// when the LLM correctly scores an empty session as 0 (not missing, explicit 0),
-// the session must flow through the discard gate and be removed — not uploaded.
-// Before the fix, EvaluateQuality's `score <= 0` short-circuit classified these
-// as QualityUpload, causing empty "No Activity Recorded" sessions to reach the
-// team ledger.
+// A header-only capture is a capture failure, regardless of the model score.
 func TestProcessResult_EmptySessionLLMScoreZero_Discarded(t *testing.T) {
 	// The leak this guards (#525) happens on the cache→ledger upload path —
 	// discard-by-deletion applies to recording-cache sessions. Git-tracked
@@ -724,6 +719,8 @@ func TestProcessResult_EmptySessionLLMScoreZero_Discarded(t *testing.T) {
 	if err := os.Rename(trackedDir, sessionDir); err != nil {
 		t.Fatal(err)
 	}
+
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(`{"type":"header","metadata":{"agent_type":"codex"}}`+"\n"), 0600))
 
 	handler := NewSessionFinalizeHandlerForTest(slog.Default())
 	handler.SetQualityThresholds(0.3, 0.1)
@@ -751,13 +748,9 @@ func TestProcessResult_EmptySessionLLMScoreZero_Discarded(t *testing.T) {
 		Output: `{"title":"Empty Session - No Activity Recorded","summary":"This session contained no dialog or activity. Only a session header was recorded, indicating the session was opened but no work was performed.","key_actions":["observed no recorded activity"],"outcome":"failed","topics_found":[],"quality_score":0,"score_reason":"Session contained only a header with no dialog or work performed."}`,
 	}
 
-	if err := handler.ProcessResult(item, result); err != nil {
-		t.Fatalf("ProcessResult: %v", err)
-	}
-
-	if _, statErr := os.Stat(sessionDir); !os.IsNotExist(statErr) {
-		t.Error("empty session scored 0 by LLM must be discarded, not uploaded")
-	}
+	require.ErrorContains(t, handler.ProcessResult(item, result), "capture failed")
+	require.FileExists(t, filepath.Join(sessionDir, "raw.jsonl"), "capture failure must retain recoverable local evidence")
+	require.NoFileExists(t, filepath.Join(ledgerPath, "sessions", "test-empty-zero", "summary.json"))
 }
 
 func TestProcessResult_QualityScoreBelowUpload(t *testing.T) {

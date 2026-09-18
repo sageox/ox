@@ -30,6 +30,8 @@ import (
 	"github.com/sageox/ox/internal/ledger/automerge"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/perf"
+	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/sessionregistration"
 )
 
 // gcSwapWaitBound is how long the CLI will wait for a daemon-side blue-green
@@ -292,41 +294,66 @@ func firstUnstageableFileInIndex(ledgerPath string) (string, error) {
 
 func commitAndPushLedger(ledgerPath, sessionName string) error {
 	waitForGCSwap(ledgerPath)
-
-	// ensure .gitignore is in place before any commit to prevent cache file leakage
-	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
-
-	// stage meta.json and .gitignore
-	sessionsDir := filepath.Join(ledgerPath, "sessions")
-	sessionDir := filepath.Join(sessionsDir, sessionName)
-
-	metaPath := filepath.Join(sessionDir, "meta.json")
-	gitignorePath := filepath.Join(sessionsDir, ".gitignore")
-
-	filesToAdd := append([]string{metaPath, gitignorePath}, sessionArtifactsToStage(sessionDir)...)
-
-	// --sparse: ledger repos use sparse-checkout (cone mode); this flag
-	// prevents git from blocking adds if sparse rules change or edge cases arise
-	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, filesToAdd...)
-	addCmd := exec.Command("git", addArgs...)
-	if output, err := addCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git add failed: %s: %w", string(output), err)
-	}
-
-	// Commit the index as an immutable, pre-validated tree snapshot. The old
-	// shape (validate the index, then a no-pathspec `git commit` that re-reads the
-	// WHOLE index at commit time) left a window where a concurrent daemon
-	// `pull --rebase --autostash` could stage an unchecked conflict blob between
-	// the check and the commit. commitLedgerSnapshot writes the index to an
-	// immutable tree, scans that snapshot, and commits exactly it — so a blob
-	// staged after the snapshot is neither vetted-away nor swept in. See #749 and
-	// the PR #811 review (validation↔commit TOCTOU).
-	_, err := commitLedgerSnapshot(context.Background(), ledgerPath, fmt.Sprintf("session: %s", sessionName))
+	err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
+		sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+		files := append([]string{filepath.Join(sessionDir, "meta.json"), filepath.Join(ledgerPath, "sessions", ".gitignore")}, sessionArtifactsToStage(sessionDir)...)
+		meta, err := lfs.ReadSessionMeta(sessionDir)
+		if err != nil {
+			return err
+		}
+		// Resolve source registration BEFORE staging/committing, not after:
+		// this can fail (unresolved repo root, conflicting coverage), and
+		// failing it after CommitLedgerSnapshot would leave the session
+		// committed locally with no path to pushLedger below -- stuck
+		// unsynced until a manual retry. Mirrors the ordering in the
+		// daemon's equivalent (session_finalize.go's gitCommitAndPush).
+		var registerJob *sessionregistration.Job
+		if meta.Source != nil {
+			if err := gitutil.CheckSourcePublication(context.Background(), ledgerPath); err != nil {
+				return err
+			}
+			raw, ok := meta.Files["raw.jsonl"]
+			if !ok || raw.BareOID() == "" {
+				return fmt.Errorf("source publication requires raw.jsonl")
+			}
+			root := findGitRoot()
+			if root == "" {
+				return fmt.Errorf("cannot resolve repository endpoint for session registration")
+			}
+			sourcePath, err := session.RecordSourceCoverage(ledgerPath, sessionName, raw.BareOID(), meta.Source)
+			if err != nil {
+				return err
+			}
+			files = append(files, filepath.Join(ledgerPath, sourcePath))
+			registerJob = &sessionregistration.Job{Endpoint: endpoint.GetForProject(root), RepoID: meta.RepoID, SessionName: sessionName, SourceDigest: meta.Source.SnapshotDigest}
+		}
+		var scope []string
+		for _, file := range files {
+			rel, err := filepath.Rel(ledgerPath, file)
+			if err != nil {
+				return err
+			}
+			scope = append(scope, rel)
+		}
+		add := exec.Command("git", append([]string{"-C", ledgerPath, "add", "--sparse", "--"}, scope...)...)
+		if out, err := add.CombinedOutput(); err != nil {
+			return fmt.Errorf("stage session: %w: %s", err, out)
+		}
+		// A damaged or concurrently edited Ledger may contain unrelated staged
+		// deletions. A session publication can commit only its explicit file set.
+		_, err = gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, fmt.Sprintf("session: %s", sessionName), scope...)
+		if err != nil {
+			return err
+		}
+		if registerJob != nil {
+			return sessionregistration.Enqueue(ledgerPath, *registerJob)
+		}
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("committing ledger: %w", err)
+		return err
 	}
-	// An identical retry may have no new commit but still owe the remote the
-	// pointer commit from a failed push. Always retry publication.
 	return pushLedger(context.Background(), ledgerPath)
 }
 

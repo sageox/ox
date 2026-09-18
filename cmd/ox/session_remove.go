@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
-	"os/exec"
+	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/pkg/sessionprovenance"
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
@@ -99,8 +104,13 @@ func removeAllSessions(store *session.Store, force bool) error {
 		}
 	}
 
+	ledgerPath, _ := resolveLedgerPath()
 	var removed int
 	for _, t := range sessions {
+		name := strings.TrimSuffix(t.Filename, ".jsonl")
+		if err := preserveLocalDeletionIntent(store.GetSessionPath(name), ledgerPath); err != nil {
+			return err
+		}
 		if err := store.Delete(t.Filename); err != nil {
 			fmt.Printf("  Warning: failed to remove %s: %v\n", t.Filename, err)
 		} else {
@@ -249,20 +259,6 @@ func removeSessionByPattern(store *session.Store, pattern string, force bool) er
 		}
 	}
 
-	// delete from local cache
-	var localRemoved int
-	for _, m := range matches {
-		if !m.isLocal {
-			continue
-		}
-		name := matchName(m)
-		if err := store.Delete(name); err != nil {
-			fmt.Printf("  Warning: failed to remove %s locally: %v\n", name, err)
-		} else {
-			localRemoved++
-		}
-	}
-
 	// batch-delete from ledger: collect all session names, single commit + push
 	var ledgerRemoved int
 	if hasLedger {
@@ -278,8 +274,27 @@ func removeSessionByPattern(store *session.Store, pattern string, force bool) er
 			removed, err := batchDeleteSessionsFromLedger(ledgerBase, ledgerSessionNames)
 			ledgerRemoved = removed
 			if err != nil {
-				fmt.Printf("  Warning: ledger removal error: %v\n", err)
+				return fmt.Errorf("ledger removal pending; local content retained: %w", err)
 			}
+		}
+	}
+
+	// delete from local cache
+	var localRemoved int
+	for _, m := range matches {
+		if !m.isLocal {
+			continue
+		}
+		name := matchName(m)
+		if !m.isLedger {
+			if err := preserveLocalDeletionIntent(store.GetSessionPath(strings.TrimSuffix(name, ".jsonl")), ledgerPath); err != nil {
+				return err
+			}
+		}
+		if err := store.Delete(name); err != nil {
+			fmt.Printf("  Warning: failed to remove %s locally: %v\n", name, err)
+		} else {
+			localRemoved++
 		}
 	}
 
@@ -341,36 +356,100 @@ func removedLocationLabel(local, ledger bool) string {
 // Uses pushLedger() for push with pull --rebase retry on conflict.
 func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (int, error) {
 	var staged int
-	var lastStaged string
-	for _, name := range sessionNames {
-		gitRm := exec.Command("git", "rm", "-r", "--force", filepath.Join("sessions", name))
-		gitRm.Dir = ledgerPath
-		if out, err := gitRm.CombinedOutput(); err != nil {
-			slog.Warn("git_rm_session", "session", name, "err", fmt.Sprintf("%s: %v", string(out), err))
-			continue
+	err := gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		var paths []string
+		// Validate every source before mutating any session, so a malformed receipt
+		// cannot turn a batch into an unprotected partial deletion.
+		type deletion struct {
+			name   string
+			source *sessionprovenance.Source
 		}
-		staged++
-		lastStaged = name
+		var selected []deletion
+		for _, name := range sessionNames {
+			if !sessionprovenance.ValidSessionName(name) {
+				return fmt.Errorf("invalid session name")
+			}
+			dir := filepath.Join(ledgerPath, "sessions", name)
+			if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+				continue
+			} else if err != nil {
+				return err
+			}
+			meta, err := lfs.ReadSessionMeta(dir)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			var source *sessionprovenance.Source
+			if meta != nil {
+				source = meta.Source
+			}
+			if source != nil {
+				if err := gitutil.CheckSourcePublication(context.Background(), ledgerPath); err != nil {
+					return err
+				}
+				record, err := session.ReadSourceRecord(ledgerPath, source.NativeSessionID)
+				if err != nil {
+					return err
+				}
+				if record == nil || record.Generation != source.Generation {
+					return fmt.Errorf("missing or conflicting source receipt")
+				}
+				if len(source.Ranges) == 0 {
+					return fmt.Errorf("missing source ranges")
+				}
+				for _, span := range source.Ranges {
+					if span.Start < 0 || span.End <= span.Start {
+						return fmt.Errorf("invalid source ranges")
+					}
+					found := false
+					for _, coverage := range record.Coverage {
+						if coverage.SessionName == name && coverage.Start == span.Start && coverage.End == span.End {
+							found = true
+							break
+						}
+					}
+					if !found {
+						return fmt.Errorf("source coverage does not identify deleted session")
+					}
+				}
+			}
+			selected = append(selected, deletion{name, source})
+		}
+		for _, item := range selected {
+			if item.source != nil {
+				for _, span := range item.source.Ranges {
+					if err := session.ExcludeNativeSession(ledgerPath, item.source.NativeSessionID, "deleted", span.Start, span.End); err != nil {
+						return err
+					}
+				}
+				rel, _ := sessionprovenance.Path(item.source.NativeSessionID)
+				if _, err := gitutil.RunGit(context.Background(), ledgerPath, "add", "--sparse", "--", rel); err != nil {
+					return err
+				}
+				paths = append(paths, rel)
+			}
+			rel := filepath.ToSlash(filepath.Join("sessions", item.name))
+			if _, err := gitutil.RunGit(context.Background(), ledgerPath, "rm", "-r", "--force", "--", rel); err != nil {
+				return err
+			}
+			paths = append(paths, rel)
+			staged++
+		}
+		if staged == 0 {
+			return fmt.Errorf("no sessions could be staged for removal")
+		}
+		message := fmt.Sprintf("session: delete %d session(s)", staged)
+		if staged == 1 {
+			message = "session: delete " + selected[0].name
+		}
+		_, err := gitutil.CommitLedgerSessionDeletion(context.Background(), ledgerPath, message, sessionNames, paths...)
+		return err
+	})
+	if err != nil {
+		return 0, err
 	}
-
-	if staged == 0 {
-		return 0, fmt.Errorf("no sessions could be staged for removal")
-	}
-
-	// single commit for all removals
-	commitMsg := fmt.Sprintf("session: delete %d session(s)", staged)
-	if staged == 1 {
-		commitMsg = fmt.Sprintf("session: delete %s", lastStaged)
-	}
-	gitCommit := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if out, err := gitCommit.CombinedOutput(); err != nil {
-		return 0, fmt.Errorf("git commit: %s: %w", string(out), err)
-	}
-
-	// push with retry (pull --rebase --autostash on conflict)
 	if err := pushLedger(context.Background(), ledgerPath); err != nil {
 		return 0, fmt.Errorf("push: %w", err)
 	}
-
 	return staged, nil
 }

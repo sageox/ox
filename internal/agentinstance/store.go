@@ -10,8 +10,9 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
-	"syscall"
 	"time"
+
+	procutil "github.com/sageox/ox/internal/proc"
 
 	"github.com/gofrs/flock"
 )
@@ -78,15 +79,7 @@ func (i *Instance) IsExpired() bool {
 // Uses kill(pid, 0) which checks existence without sending a signal.
 // Returns false if no PID was recorded or the process is gone.
 func (i *Instance) IsProcessAlive() bool {
-	if i.ParentPID <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(i.ParentPID)
-	if err != nil {
-		return false
-	}
-	// signal 0: test if process exists without actually signaling it
-	return proc.Signal(syscall.Signal(0)) == nil
+	return procutil.IsAlive(i.ParentPID)
 }
 
 // IsPrimeExcessive returns true if prime has been called more than the threshold.

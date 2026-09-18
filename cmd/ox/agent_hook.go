@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/prime"
@@ -270,6 +271,33 @@ func emitStartupBanner(w io.Writer, ctx *HookContext) {
 // startSessionRecording is idempotent (checks session.IsRecording first).
 func handleStart(ctx *HookContext) error {
 	emitStartupBanner(os.Stdout, ctx)
+	return bootstrapHookCapture(ctx)
+}
+
+// bootstrapHookCapture is shared by startup and the missed-start prompt fallback.
+func bootstrapHookCapture(ctx *HookContext) error {
+	defer func() {
+		if ctx.AgentType != "codex" || ctx.Marker == nil || ctx.Input == nil || ctx.Input.SessionID == "" {
+			return
+		}
+		_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, ctx.Marker.AgentID, func(state *session.RecordingState) {
+			if state.AgentSessionID != ctx.Input.SessionID {
+				return
+			}
+			now := time.Now().UTC()
+			state.HookInvocations++
+			state.LastHookAt = &now
+			state.LastHookStatus = "bootstrap-observed"
+		})
+	}()
+
+	if ctx.AgentType == "codex" && ctx.Marker != nil && session.HasExplicitStop(ctx.ProjectRoot, ctx.Marker.AgentID) {
+		return nil
+	}
+	// A prime marker says context was delivered, not that the host daemon survived.
+	if err := daemon.StartDaemonNoWait(); err != nil {
+		slog.Warn("hook: capture daemon unavailable", "error", err)
+	}
 
 	source := ""
 	if ctx.Input != nil {
@@ -414,8 +442,9 @@ func handleEnd(ctx *HookContext) error {
 	now := time.Now()
 	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
 		s.StoppedAt = &now
+		s.CaptureDrainPending = true
 	}); updateErr != nil {
-		slog.Debug("hook: end could not set StoppedAt", "agent_id", agentID, "error", updateErr)
+		return fmt.Errorf("persist session end before finalization: %w", updateErr)
 	}
 
 	// dispatch delegated finalization via daemon IPC. Best-effort: if the
@@ -436,11 +465,9 @@ func handleEnd(ctx *HookContext) error {
 		}
 	}
 
-	if clearErr := session.ClearRecordingStateForAgent(ctx.ProjectRoot, agentID); clearErr != nil {
-		slog.Debug("hook: end could not remove recording state", "agent_id", agentID, "error", clearErr)
-	}
-
-	slog.Info("hook: finalized session on agent end", "agent_id", agentID)
+	// Keep the stopped state as the durable recovery queue until finalization
+	// clears it. The short-lived hook cannot assume best-effort IPC succeeded.
+	slog.Info("hook: queued session finalization on agent end", "agent_id", agentID)
 	return nil
 }
 
@@ -471,6 +498,13 @@ func handleEnd(ctx *HookContext) error {
 // whispers are delivered exactly once across all channels. If handlePrompt delivers
 // a whisper, the PostToolUse fallback and active pull get 0 entries — no duplication.
 func handlePrompt(ctx *HookContext) error {
+	// Codex can attach to an existing conversation without replaying SessionStart.
+	// Only bootstrap with its exact native identity; never guess another task.
+	if ctx.AgentType == "codex" && ctx.Input != nil && ctx.Input.SessionID != "" {
+		if err := bootstrapHookCapture(ctx); err != nil {
+			slog.Warn("hook: prompt capture bootstrap failed", "error", err)
+		}
+	}
 	// Local-recall preamble runs BEFORE whispers so the model sees prior
 	// ledger context first. Strictly additive: any failure / timeout /
 	// no-match leaves the existing whisper path completely untouched.
@@ -618,6 +652,46 @@ func handleAfterTool(ctx *HookContext) error {
 		return nil // not recording for this agent, silent noop
 	}
 
+	// Serialize the read cursor and append transaction with the watcher and
+	// recovery. Reload after locking so concurrent hooks cannot replay a batch.
+	return fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+		return captureHookEntries(ctx, agentID, state.SessionPath, state.SessionID)
+	})
+}
+
+// captureHookEntries drains new entries under the raw.jsonl lock acquired by
+// the caller for expectedSessionPath. It reloads recording state itself, but
+// a stop/start cycle for this agent can swap in a new SessionPath between the
+// caller's read and this reload (StartRecording can immediately mint a fresh
+// session after a stale, incomplete stop). If that happens, the lock we're
+// holding is for the wrong raw.jsonl -- writing here would race whatever
+// legitimately holds the new session's lock. Skip this invocation instead;
+// the next hook call reloads state and locks the current session correctly.
+//
+// SessionPath alone is not a reliable generation check: it's minute-granular
+// (GenerateSessionName), so a stop immediately followed by a restart for the
+// same agent within the same minute mints an IDENTICAL path. expectedSessionID
+// is the durable per-recording identity minted once at StartRecording, so it
+// still distinguishes the two generations when the path collides; fall back
+// to the path comparison only for a pre-SessionID recording (empty on both
+// sides).
+func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expectedSessionID string) error {
+	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
+	if err != nil || state == nil || state.StoppedAt != nil {
+		return err
+	}
+	changed := state.SessionPath != expectedSessionPath
+	if expectedSessionID != "" || state.SessionID != "" {
+		changed = state.SessionID != expectedSessionID
+	}
+	if changed {
+		slog.Debug("hook: afterTool session changed since lock acquired, skipping", "agentID", agentID, "lockedPath", expectedSessionPath, "currentPath", state.SessionPath, "lockedSessionID", expectedSessionID, "currentSessionID", state.SessionID)
+		return nil
+	}
+	if err := session.RecoverRawAppend(filepath.Join(state.SessionPath, "raw.jsonl"), state.SourceOffset); err != nil {
+		return err
+	}
+
 	// Track every afterTool invocation + its terminal reason so `ox session status`
 	// can distinguish a healthy idle session (status=ok) from a broken recording
 	// (status=session-file-not-found, adapter-missing, etc.) when EntryCount=0.
@@ -669,6 +743,10 @@ func handleAfterTool(ctx *HookContext) error {
 	// staleness check: if the source file disappeared or shrank (e.g., Claude Code
 	// created a new file after compaction), try to rediscover it
 	if fi, statErr := os.Stat(state.SessionFile); statErr != nil || fi.Size() < state.SourceOffset {
+		if state.AdapterName == "codex" && state.EntryCount > 0 {
+			recordHookStatus("source-changed")
+			return fmt.Errorf("codex source disappeared or truncated; preserve capture for reconciliation")
+		}
 		if statErr != nil {
 			slog.Info("hook: session file missing, attempting rediscovery", "file", state.SessionFile)
 		} else {
@@ -715,7 +793,9 @@ func handleAfterTool(ctx *HookContext) error {
 
 	// filter entries by timestamp — strict After() to prevent boundary leaks
 	// for legacy states (StartOffset=0) where offset-based filtering isn't available
-	if !state.StartedAt.IsZero() {
+	// Codex native byte ranges are authoritative. Timestamp filtering would
+	// silently omit records while the provenance receipt claims their bytes.
+	if state.AdapterName != "codex" && state.StartOffset == 0 && !state.StartedAt.IsZero() {
 		filtered := make([]adapters.RawEntry, 0, len(entries))
 		for _, e := range entries {
 			if e.Timestamp.After(state.StartedAt) {
@@ -766,7 +846,16 @@ func handleAfterTool(ctx *HookContext) error {
 		}
 	}
 
-	if appendErr := appendRedactedEntries(rawPath, sessionEntries); appendErr != nil {
+	writer, writeErr := session.NewRawWriter(rawPath, ctx.ProjectRoot)
+	if writeErr != nil {
+		return writeErr
+	}
+	appendErr := writer.AppendRecordingBatch(filepath.Join(state.SessionPath, ".recording.json"), sessionEntries, newOffset)
+	closeErr := writer.Close()
+	if appendErr == nil {
+		appendErr = closeErr
+	}
+	if appendErr != nil {
 		slog.Info("hook: append entries failed", "agentID", agentID, "path", rawPath, "error", appendErr)
 		recordHookStatus("append-failed")
 		return nil // non-fatal
@@ -774,8 +863,6 @@ func handleAfterTool(ctx *HookContext) error {
 
 	now := time.Now().UTC()
 	_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
-		s.SourceOffset = newOffset
-		s.EntryCount += len(sessionEntries)
 		s.HookInvocations++
 		s.LastHookStatus = "ok"
 		s.LastHookAt = &now

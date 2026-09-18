@@ -3,6 +3,7 @@ package fileutil
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -19,6 +20,42 @@ import (
 // naive rename would replace the symlink with a regular file and break the
 // link. Ordinary (non-symlink) paths are written directly as before.
 func AtomicWriteBytes(filePath string, data []byte, perm os.FileMode) error {
+	return atomicWrite(filePath, perm, func(file *os.File) error { _, err := file.Write(data); return err })
+}
+
+// AtomicCopyFile preserves AtomicWriteBytes modes, symlinks and durability while
+// copying through a bounded buffer and detecting changes during that copy.
+// Callers requiring latest-state semantics must serialize source mutations.
+func AtomicCopyFile(destination, source string, perm os.FileMode) error {
+	file, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	before, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !before.Mode().IsRegular() {
+		return fmt.Errorf("copy source is not a regular file")
+	}
+	return atomicWrite(destination, perm, func(output *os.File) error {
+		count, err := io.Copy(output, io.NewSectionReader(file, 0, before.Size()))
+		if err != nil {
+			return err
+		}
+		after, err := os.Stat(source)
+		if err != nil {
+			return err
+		}
+		if count != before.Size() || !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+			return fmt.Errorf("copy source changed")
+		}
+		return nil
+	})
+}
+
+func atomicWrite(filePath string, perm os.FileMode, write func(*os.File) error) error {
 	// Follow symlinks so the link structure survives the write (e.g.
 	// CLAUDE.md → AGENTS.md). Lstat tells us whether filePath is itself a
 	// symlink; if it is, resolve to the real inode and write there.
@@ -46,7 +83,7 @@ func AtomicWriteBytes(filePath string, data []byte, perm os.FileMode) error {
 		}
 	}()
 
-	if _, err := tmp.Write(data); err != nil {
+	if err := write(tmp); err != nil {
 		tmp.Close()
 		return fmt.Errorf("write bytes: %w", err)
 	}

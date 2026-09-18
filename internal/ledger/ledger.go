@@ -511,6 +511,7 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 // origin/main and none on disk. Only dirtyDirsOutsideCone kept a save alive
 // long enough to commit at all.
 var baseSparseDirs = []string{
+	"data/session-sources",
 	".sageox",
 	".sync",
 	"sessions",

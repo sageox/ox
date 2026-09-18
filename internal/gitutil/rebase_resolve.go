@@ -98,6 +98,14 @@ func resolveOneRebaseStep(ctx context.Context, repoPath string, safePrefixes []s
 
 	// verify all conflicted files are under safe prefixes and not denied
 	for path := range allPaths {
+		if isSessionMetaPath(path) {
+			for stage := 1; stage <= 3; stage++ {
+				b, e := readIndexStage(ctx, repoPath, stage, path)
+				if e == nil && strings.Contains(b, `"source"`) {
+					return false, fmt.Errorf("source-bearing metadata %q requires explicit reconciliation", path)
+				}
+			}
+		}
 		if !matchesSafePrefix(path, safePrefixes, denies) {
 			return false, fmt.Errorf("conflicted file %q is not under safe auto-resolve prefixes %v", path, safePrefixes)
 		}
@@ -509,6 +517,10 @@ func listConflictedFiles(ctx context.Context, repoPath string) ([]string, error)
 // allow "data/", deny "data/proprietary/", allow "data/proprietary/public/"
 // correctly resolves data/proprietary/public/readme.md as safe.
 func matchesSafePrefix(path string, prefixes []string, denyPrefixes []string) bool {
+	// Source coverage and privacy tombstones cannot use positional conflict resolution.
+	if strings.HasPrefix(path, "data/session-sources/") {
+		return false
+	}
 	bestLen := 0
 	safe := false
 	for _, prefix := range prefixes {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
+	"github.com/sageox/ox/pkg/codexhistory"
 )
 
 func handleDetect() (*adapterprotocol.DetectResponse, error) {
@@ -15,17 +16,17 @@ func handleDetect() (*adapterprotocol.DetectResponse, error) {
 		return &adapterprotocol.DetectResponse{Detected: true, Reason: "found codex in PATH"}, nil
 	}
 
-	home, err := os.UserHomeDir()
+	home, err := codexhistory.Home()
 	if err != nil {
 		return &adapterprotocol.DetectResponse{Detected: false, Reason: "cannot determine home directory"}, nil
 	}
 
-	sessionsDir := filepath.Join(home, ".codex", "sessions")
+	sessionsDir := filepath.Join(home, "sessions")
 	if info, err := os.Stat(sessionsDir); err == nil && info.IsDir() {
-		return &adapterprotocol.DetectResponse{Detected: true, Reason: "found ~/.codex/sessions/"}, nil
+		return &adapterprotocol.DetectResponse{Detected: true, Reason: "found Codex sessions directory"}, nil
 	}
 
-	return &adapterprotocol.DetectResponse{Detected: false, Reason: "codex executable and ~/.codex/sessions/ not found"}, nil
+	return &adapterprotocol.DetectResponse{Detected: false, Reason: "codex executable and Codex sessions directory not found"}, nil
 }
 
 // projectUsesCodex reports whether a repo has opted into Codex, mirroring

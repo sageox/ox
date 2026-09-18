@@ -195,6 +195,12 @@ func UploadObject(action *Action, content []byte) error {
 // verify action href per the Git LFS batch API spec. The server responds 200
 // if the object exists with matching OID and size.
 func VerifyObject(action *Action, oid string, size int64) error {
+	return VerifyObjectContext(context.Background(), action, oid, size)
+}
+
+// VerifyObjectContext keeps session upload cancellation effective during the
+// final server acknowledgement as well as during the body transfer.
+func VerifyObjectContext(ctx context.Context, action *Action, oid string, size int64) error {
 	if action == nil || action.Href == "" {
 		return nil // no verify action = server doesn't require verification
 	}
@@ -204,7 +210,7 @@ func VerifyObject(action *Action, oid string, size int64) error {
 
 	body := fmt.Sprintf(`{"oid":"%s","size":%d}`, oid, size)
 
-	req, err := http.NewRequest("POST", action.Href, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", action.Href, strings.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create verify request: %w", err)
 	}
@@ -223,7 +229,7 @@ func VerifyObject(action *Action, oid string, size int64) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("verify returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 

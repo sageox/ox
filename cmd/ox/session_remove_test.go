@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/pkg/sessionprovenance"
 
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
@@ -255,4 +260,41 @@ func TestPushLedger_UsedByBatchDelete(t *testing.T) {
 	verifyClone := cloneBare(t, barePath)
 	_, err = os.Stat(filepath.Join(verifyClone, "test.txt"))
 	assert.NoError(t, err, "pushed file should exist on remote")
+}
+
+func TestBatchDeleteSessionsFromLedger_SourceTombstoneAndScopedIndex(t *testing.T) {
+	bare, repo := createBareAndClone(t)
+	isolatePushEnv(t, repo)
+	name := "2026-01-01T00-00-testuser-OxPriv"
+	dir := writeSessionFiles(t, repo, name)
+	source := &sessionprovenance.Source{Version: 1, Agent: "codex", NativeSessionID: "019c6d2e-27b0-798d-aaed-b036114dc63a", Generation: strings.Repeat("a", 64), Ranges: []sessionprovenance.Range{{Start: 0, End: 100}}}
+	meta, err := lfs.ReadSessionMeta(dir)
+	require.NoError(t, err)
+	meta.Source = source
+	data, err := json.Marshal(meta)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"), data, 0600))
+	_, err = session.RecordSourceCoverage(repo, name, strings.Repeat("b", 64), source)
+	require.NoError(t, err)
+	runGit(t, repo, "add", ".")
+	runGit(t, repo, "commit", "-m", "source fixture")
+	runGit(t, repo, "push")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "unrelated.txt"), []byte("keep staged"), 0600))
+	runGit(t, repo, "add", "unrelated.txt")
+	removed, err := batchDeleteSessionsFromLedger(repo, []string{name})
+	require.NoError(t, err)
+	require.Equal(t, 1, removed)
+	assert.Contains(t, runGit(t, repo, "diff", "--cached", "--name-only"), "unrelated.txt")
+	other := cloneBare(t, bare)
+	record, err := session.ReadSourceRecord(other, source.NativeSessionID)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	assert.True(t, record.Excludes(0, 100))
+	_, err = os.Stat(filepath.Join(other, "sessions", name))
+	assert.True(t, os.IsNotExist(err))
+	_, err = os.Stat(filepath.Join(other, "unrelated.txt"))
+	assert.True(t, os.IsNotExist(err))
+	// The same fresh receipt blocks publication before the raw file is opened.
+	err = session.CheckCapturePublication(context.Background(), repo, name, "missing-raw", source)
+	require.ErrorContains(t, err, "excluded")
 }

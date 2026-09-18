@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
@@ -90,8 +92,15 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 
 // recoverViaNormalStop uses the normal session stop flow when the adapter file exists.
 func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
-	// process session through the normal pipeline
-	result, err := processAgentSession(projectRoot, state)
+	// process session through the normal pipeline. Hold the raw.jsonl writer's
+	// file lock so this never races a hook or watcher still appending a batch
+	// under the same lock -- the recording may not actually be dead.
+	var result *agentSessionResult
+	err := fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+		var processErr error
+		result, processErr = processAgentSession(projectRoot, state)
+		return processErr
+	})
 	if err != nil {
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("failed to process session: %w", err)

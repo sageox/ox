@@ -1,8 +1,10 @@
 package pipeline
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 )
 
@@ -28,12 +30,8 @@ func CopySessionToLedger(fs FileSystem, result *Result, ledgerPath, sessionName 
 
 	// raw.jsonl is critical — must succeed
 	dstPath := filepath.Join(sessionDir, LedgerFileRaw)
-	data, err := fs.ReadFile(result.RawPath)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", LedgerFileRaw, err)
-	}
-	if err := fs.WriteFile(dstPath, data, 0644); err != nil {
-		return fmt.Errorf("copy %s to ledger: %w", LedgerFileRaw, err)
+	if err := copyLedgerArtifact(fs, result.RawPath, dstPath, LedgerFileRaw); err != nil {
+		return err
 	}
 
 	// secondary artifacts — best-effort
@@ -42,12 +40,7 @@ func CopySessionToLedger(fs FileSystem, result *Result, ledgerPath, sessionName 
 			continue
 		}
 		dstPath := filepath.Join(sessionDir, name)
-		data, err := fs.ReadFile(srcPath)
-		if err != nil {
-			slog.Debug("skip secondary artifact", "file", name, "error", err)
-			continue
-		}
-		if err := fs.WriteFile(dstPath, data, 0644); err != nil {
+		if err := copyLedgerArtifact(fs, srcPath, dstPath, name); err != nil {
 			slog.Debug("skip secondary artifact", "file", name, "error", err)
 		}
 	}
@@ -101,4 +94,25 @@ func rewriteSecondary(fsys FileSystem, result *Result) {
 	rewriteIfExists(&result.SessionMDPath, LedgerFileSessionMD)
 	rewriteIfExists(&result.PlanPath, LedgerFilePlan)
 	rewriteIfExists(&result.ContextTracePath, LedgerFileContextTrace)
+}
+
+func copyLedgerArtifact(fs FileSystem, source, destination, name string) error {
+	if copier, ok := fs.(FileCopier); ok {
+		if err := copier.CopyFile(destination, source, 0644); err != nil {
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) && pathErr.Path == source {
+				return fmt.Errorf("read %s: %w", name, err)
+			}
+			return fmt.Errorf("copy %s to ledger: %w", name, err)
+		}
+		return nil
+	}
+	data, err := fs.ReadFile(source)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", name, err)
+	}
+	if err := fs.WriteFile(destination, data, 0644); err != nil {
+		return fmt.Errorf("copy %s to ledger: %w", name, err)
+	}
+	return nil
 }

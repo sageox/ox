@@ -1,8 +1,12 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/internal/fileutil"
 
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
@@ -50,12 +54,12 @@ func TestHandleEnd_FinalizesActiveRecording(t *testing.T) {
 	}
 	require.NoError(t, handleEnd(ctx))
 
-	// recording state should be cleared (so subsequent ox calls don't see a
-	// zombie active recording). LoadRecordingStateForAgent returns nil with
-	// no error when the state file doesn't exist.
+	// Preserve the stopped marker until the daemon drains the native tail.
 	cleared, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	require.NoError(t, err)
-	assert.Nil(t, cleared, "handleEnd must clear recording state after dispatch")
+	require.NotNil(t, cleared, "failed IPC must leave a durable finalization job")
+	require.NotNil(t, cleared.StoppedAt)
+	assert.True(t, cleared.CaptureDrainPending)
 }
 
 // TestHandleEnd_Idempotent_NoStateAfterFirstCall verifies that handleEnd is
@@ -83,7 +87,9 @@ func TestHandleEnd_Idempotent_NoStateAfterFirstCall(t *testing.T) {
 
 	cleared, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	require.NoError(t, err)
-	assert.Nil(t, cleared, "recording state should remain cleared after multiple end calls")
+	require.NotNil(t, cleared)
+	require.NotNil(t, cleared.StoppedAt)
+	assert.True(t, cleared.CaptureDrainPending)
 }
 
 // TestHandleEnd_AlreadyStopped_NoOp verifies that handleEnd respects an
@@ -152,4 +158,23 @@ func TestHandleEnd_NoAgentID_NoError(t *testing.T) {
 func TestPhaseEnd_HasActiveBehavior(t *testing.T) {
 	assert.True(t, activePhaseBehavior[phaseEnd],
 		"phaseEnd must be marked active so dispatchPhase routes it to handleEnd")
+}
+
+func TestHandleEndReturnsPersistenceFailure(t *testing.T) {
+	root, repo := setupTestProject(t)
+	id := "OxEndPersist"
+	createActiveRecording(t, root, repo, id)
+	state, err := session.LoadRecordingStateForAgent(root, id)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	lock := fileutil.LockPath(filepath.Join(state.SessionPath, ".recording.json"))
+	if err := os.Remove(lock); err != nil && !os.IsNotExist(err) {
+		require.NoError(t, err)
+	}
+	require.NoError(t, os.Mkdir(lock, 0700))
+	err = handleEnd(&HookContext{Phase: phaseEnd, ProjectRoot: root, Marker: &SessionMarker{AgentID: id}})
+	require.ErrorContains(t, err, "persist session end")
+	state, err = session.LoadRecordingStateForAgent(root, id)
+	require.NoError(t, err)
+	require.Nil(t, state.StoppedAt)
 }

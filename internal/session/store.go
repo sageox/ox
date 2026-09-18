@@ -20,6 +20,7 @@ package session
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -50,26 +51,27 @@ type Store struct {
 // The repoContextPath should be the full path to the ledger directory
 // (e.g., {project}_sageox_ledger/).
 func NewStore(repoContextPath string) (*Store, error) {
+	store, err := OpenStoreReadOnly(repoContextPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(store.basePath, 0755); err != nil {
+		return nil, fmt.Errorf("create sessions dir=%s: %w", store.basePath, err)
+	}
+	return store, nil
+}
+
+// OpenStoreReadOnly resolves canonical store paths without creating directories.
+// Discovery and privacy checks must not bootstrap a missing Ledger.
+func OpenStoreReadOnly(repoContextPath string) (*Store, error) {
 	if repoContextPath == "" {
 		return nil, fmt.Errorf("%w: repo context path", ErrEmptyPath)
 	}
-
 	absPath, err := filepath.Abs(repoContextPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve repo context path=%s: %w", repoContextPath, err)
 	}
-
-	basePath := filepath.Join(absPath, "sessions")
-
-	// create base directory (session folders created on demand)
-	if err := os.MkdirAll(basePath, 0755); err != nil {
-		return nil, fmt.Errorf("create sessions dir=%s: %w", basePath, err)
-	}
-
-	return &Store{
-		basePath:      basePath,
-		cacheBasePath: filepath.Join(absPath, ".sageox", "cache", "sessions"),
-	}, nil
+	return &Store{basePath: filepath.Join(absPath, "sessions"), cacheBasePath: filepath.Join(absPath, ".sageox", "cache", "sessions")}, nil
 }
 
 // BasePath returns the base path where sessions are stored.
@@ -736,11 +738,11 @@ func (s *Store) PreserveSessionCache(sessionDir, originalCacheDir string) (strin
 		if lfs.IsPointerFile(src) {
 			continue // retain existing real content, never replace it with a stub
 		}
-		data, err := os.ReadFile(src)
-		if err != nil {
-			return "", fmt.Errorf("read session artifact %s: %w", entry.Name(), err)
-		}
-		if err := fileutil.AtomicWriteBytes(filepath.Join(cacheDir, entry.Name()), data, 0o600); err != nil {
+		if err := fileutil.AtomicCopyFile(filepath.Join(cacheDir, entry.Name()), src, 0o600); err != nil {
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) && pathErr.Path == src {
+				return "", fmt.Errorf("read session artifact %s: %w", entry.Name(), err)
+			}
 			return "", fmt.Errorf("preserve session artifact %s: %w", entry.Name(), err)
 		}
 	}
@@ -1037,27 +1039,8 @@ func ResolveOrMintSessionID(preserved, startMinted string) string {
 // the crash-safe-carrier read for paths where .recording.json is already
 // gone (recover, daemon orphan finalize).
 func ReadHeaderSessionID(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
-	if !scanner.Scan() {
-		return ""
-	}
-	var entry map[string]any
-	if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
-		return ""
-	}
-	var meta *StoreMeta
-	if metadata, ok := entry["metadata"].(map[string]any); ok && entry["type"] == "header" {
-		meta = ParseStoreMeta(metadata)
-	} else if m, ok := entry["_meta"].(map[string]any); ok {
-		meta = ParseStoreMeta(m)
-	}
-	if meta == nil {
+	meta, err := ReadSessionHeader(path)
+	if err != nil || meta == nil {
 		return ""
 	}
 	return meta.SessionID
@@ -1207,6 +1190,13 @@ func (s *Store) Prune(olderThan time.Duration) (int, error) {
 	for _, sessionName := range sessionNames {
 		sessionTime := parseFilenameTimestamp(sessionName)
 		if !sessionTime.IsZero() && sessionTime.Before(cutoff) {
+			// A pending explicit deletion is a privacy journal, not disposable cache.
+			if _, err := os.Stat(filepath.Join(s.GetSessionPath(sessionName), ".deletion-pending.json")); err == nil || !os.IsNotExist(err) {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(s.GetSessionPath(sessionName), ".capture-exclusion-pending.json")); err == nil || !os.IsNotExist(err) {
+				continue
+			}
 			if err := s.DeleteSession(sessionName); err == nil {
 				removed++
 			}

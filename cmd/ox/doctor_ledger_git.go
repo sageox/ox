@@ -486,6 +486,11 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 				return nil
 			}
 		}
+		if err := gitutil.RefuseSourcePublicationRebase(pullCtx, ledgerPath); err != nil {
+			pullCancel()
+			result = FailedCheck("Ledger branch status", "source publication pending", err.Error())
+			return nil
+		}
 		pullCmd := gitutil.NewNetworkCmd(pullCtx, "-C", ledgerPath, "pull", "--rebase", "--autostash")
 		output, err := pullCmd.CombinedOutput()
 		pullCancel()

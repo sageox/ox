@@ -16,9 +16,10 @@ type EnvProvider struct{}
 
 func (EnvProvider) Patch(_ context.Context) (*Patch, Source, error) {
 	p := &Patch{
-		DistillEnabled: envBoolPtr("FEATURE_MEMORY"),
-		TUIEnabled:     envBoolPtr("FEATURE_TUI"),
-		AttestEnabled:  envBoolPtr("FEATURE_ATTEST"),
+		SessionImportEnabled: envBoolPtr("FEATURE_SESSION_IMPORT"),
+		DistillEnabled:       envBoolPtr("FEATURE_MEMORY"),
+		TUIEnabled:           envBoolPtr("FEATURE_TUI"),
+		AttestEnabled:        envBoolPtr("FEATURE_ATTEST"),
 		// FEATURE_AUTH and FEATURE_CLOUD are account-level; not mapped to Flags.
 		// FEATURE_POST_MVP gates multiple unrelated features; callers continue to
 		// use auth.IsPostMVPEnabled() directly until those features are broken out.
@@ -44,7 +45,7 @@ func envBoolPtr(name string) *bool {
 
 // allNil reports whether every field of p is nil.
 func allNil(p *Patch) bool {
-	return p.CodeDBEnabled == nil &&
+	return p.SessionImportEnabled == nil && p.CodeDBEnabled == nil &&
 		p.WhisperEnabled == nil &&
 		p.DistillEnabled == nil &&
 		p.AutoDistill == nil &&

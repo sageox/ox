@@ -1,18 +1,14 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
-	"github.com/sageox/ox/internal/gitutil"
-	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
@@ -104,16 +100,11 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 	var localDeleted, ledgerDeleted bool
 	var warning string
 
-	// delete from local cache
-	if localExists && store != nil {
-		if deleteErr := store.DeleteSession(sessionName); deleteErr != nil {
-			slog.Warn("failed to delete session from local cache", "session", sessionName, "error", deleteErr)
-			warning = fmt.Sprintf("local delete failed: %v", deleteErr)
-		} else {
-			localDeleted = true
+	if localExists && !ledgerExists {
+		if err := preserveLocalDeletionIntent(store.GetSessionPath(sessionName), ledgerPath); err != nil {
+			return err
 		}
 	}
-
 	// delete from ledger (git rm, commit, push)
 	if ledgerExists {
 		if deleteErr := deleteSessionFromLedger(ledgerPath, sessionName, ledgerSessionDir); deleteErr != nil {
@@ -124,6 +115,16 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 			warning += fmt.Sprintf("ledger delete failed: %v", deleteErr)
 		} else {
 			ledgerDeleted = true
+		}
+	}
+
+	// delete from local cache
+	if localExists && store != nil && (!ledgerExists || ledgerDeleted) {
+		if deleteErr := store.DeleteSession(sessionName); deleteErr != nil {
+			slog.Warn("failed to delete session from local cache", "session", sessionName, "error", deleteErr)
+			warning = fmt.Sprintf("local delete failed: %v", deleteErr)
+		} else {
+			localDeleted = true
 		}
 	}
 
@@ -166,27 +167,6 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 // deleteSessionFromLedger removes the session folder from the ledger git repo,
 // commits the removal, and pushes. NEVER uses --force push.
 func deleteSessionFromLedger(ledgerPath, sessionName, sessionDir string) error {
-	// git rm -r the session folder
-	gitRm := exec.Command("git", "rm", "-r", "--force", filepath.Join("sessions", sessionName))
-	gitRm.Dir = ledgerPath
-	if out, err := gitRm.CombinedOutput(); err != nil {
-		return fmt.Errorf("git rm: %s: %w", string(out), err)
-	}
-
-	// commit
-	commitMsg := fmt.Sprintf("session: delete %s", sessionName)
-	gitCommit := exec.Command("git", "commit", "-m", commitMsg)
-	gitCommit.Dir = ledgerPath
-	if out, err := gitCommit.CombinedOutput(); err != nil {
-		return fmt.Errorf("git commit: %s: %w", string(out), err)
-	}
-
-	// push with retry — no --force: ledger history must never be rewritten
-	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
-		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
-	}); err != nil {
-		return fmt.Errorf("git push: %w", err)
-	}
-
-	return nil
+	_, err := batchDeleteSessionsFromLedger(ledgerPath, []string{sessionName})
+	return err
 }

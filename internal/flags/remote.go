@@ -28,12 +28,13 @@ type CLISettingsResponse struct {
 // being zero-valued to false, which would incorrectly override default-on flags
 // during rolling upgrades when the server hasn't added a new flag yet.
 type CLIFeatures struct {
-	CodeDB      *bool `json:"codedb,omitempty"`
-	Whisper     *bool `json:"whisper,omitempty"`
-	Distill     *bool `json:"distill,omitempty"`
-	AutoDistill *bool `json:"auto_distill,omitempty"`
-	TUI         *bool `json:"tui,omitempty"`
-	Attest      *bool `json:"attest,omitempty"`
+	SessionImport *bool `json:"session_import,omitempty"`
+	CodeDB        *bool `json:"codedb,omitempty"`
+	Whisper       *bool `json:"whisper,omitempty"`
+	Distill       *bool `json:"distill,omitempty"`
+	AutoDistill   *bool `json:"auto_distill,omitempty"`
+	TUI           *bool `json:"tui,omitempty"`
+	Attest        *bool `json:"attest,omitempty"`
 }
 
 // CLIKillswitches contains server-evaluated kill switch values.
@@ -59,6 +60,7 @@ func RemoteSettingsToPatch(r *CLISettingsResponse) *Patch {
 		return nil
 	}
 	return &Patch{
+		SessionImportEnabled:   r.Features.SessionImport,
 		CodeDBEnabled:          r.Features.CodeDB,
 		WhisperEnabled:         r.Features.Whisper,
 		DistillEnabled:         r.Features.Distill,

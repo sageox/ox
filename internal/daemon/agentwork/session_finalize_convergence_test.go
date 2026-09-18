@@ -96,11 +96,8 @@ func TestAntiEntropy_ConvergesAfterTransientPushFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cycle 1 Detect: %v", err)
 	}
-	if len(first) != 1 {
-		t.Fatalf("cycle 1 Detect found %d items, want 1 — fixture is not reaching the upload path", len(first))
-	}
-	if err := handler.ProcessResult(first[0], &RunResult{}); err == nil {
-		t.Fatal("cycle 1 reported success while the push was failing")
+	if len(first) != 0 {
+		t.Fatalf("failed raw publication must defer LLM work, got %d items", len(first))
 	}
 
 	cacheDir := filepath.Join(clonePath, ".sageox", "cache", "sessions", sessionName)

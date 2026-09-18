@@ -312,3 +312,37 @@ func TestCommitLedgerSnapshot_SparseCheckout(t *testing.T) {
 	assert.Equal(t, updated, headBlob(t, repo, "sessions/x/meta.json"))
 	assert.Equal(t, "plan\n", headBlob(t, repo, "data/plans/p.md"), "paths outside the pathspec must be preserved")
 }
+
+func TestCommitLedgerSessionDeletionLimitsExplicitAuthorization(t *testing.T) {
+	for _, wide := range []bool{false, true} {
+		t.Run(map[bool]string{false: "selected_scope", true: "unselected_deletion"}[wide], func(t *testing.T) {
+			repo := newSnapshotRepo(t)
+			for _, name := range []string{"raw.jsonl", "meta.json", "summary.json", "summary.md", "session.md", "context-trace.jsonl"} {
+				content := "{}\n"
+				if strings.HasSuffix(name, ".md") {
+					content = "artifact\n"
+				}
+				writeGitutilFixture(t, repo, "sessions/selected/"+name, content)
+			}
+			writeGitutilFixture(t, repo, "sessions/other/meta.json", cleanMeta)
+			gitInRepo(t, repo, "add", "sessions")
+			gitInRepo(t, repo, "commit", "-m", "sessions")
+			gitInRepo(t, repo, "rm", "-r", "sessions/selected", "sessions/other")
+			scope := []string{"sessions/selected"}
+			if wide {
+				scope = append(scope, "sessions/other")
+			}
+			committed, err := CommitLedgerSessionDeletion(context.Background(), repo, "explicit selected deletion", []string{"selected"}, scope...)
+			if wide {
+				require.ErrorContains(t, err, "unselected path")
+				require.False(t, committed)
+				require.True(t, headHasPath(t, repo, "sessions/selected/meta.json"))
+			} else {
+				require.NoError(t, err)
+				require.True(t, committed)
+				require.False(t, headHasPath(t, repo, "sessions/selected/meta.json"))
+				require.True(t, headHasPath(t, repo, "sessions/other/meta.json"))
+			}
+		})
+	}
+}

@@ -276,8 +276,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if existingMarker != nil && idempotent {
-		// idempotent mode: session already primed, output nothing
-		// this saves ~1k tokens on redundant prime calls
+		// Context delivery is idempotent; daemon liveness is not. In particular,
+		// a previous sandboxed prime may have written a marker without a daemon.
+		if root, err := findProjectRoot(); err == nil && config.IsInitialized(root) {
+			ensurePrimeCaptureDaemon(root)
+		}
 		return nil
 	}
 
@@ -1048,7 +1051,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// Daemon self-exits via inactivity timeout when heartbeats stop.
 	// Runs after output so agent gets its bootstrap response immediately.
 	if config.IsInitialized(projectRoot) {
-		_ = daemon.EnsureDaemonAttached()
+		ensurePrimeCaptureDaemon(projectRoot)
 	}
 
 	return err
@@ -2551,4 +2554,10 @@ func ensureClaudeHooks(projectRoot string) bool {
 		return false
 	}
 	return true
+}
+
+func ensurePrimeCaptureDaemon(projectRoot string) {
+	if err := daemon.EnsureDaemonAttached(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: capture daemon could not start: %v\nRun ox daemon start from a host terminal, then reopen your AI coworker in this repository and approve its SageOx hooks through its normal trust process. Verify with ox doctor --check.\n", err)
+	}
 }

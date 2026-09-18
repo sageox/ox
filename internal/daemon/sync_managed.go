@@ -864,6 +864,11 @@ func (s *SyncScheduler) fetchAndPullLocked(ctx context.Context, opts ManagedRepo
 			return ManagedRepoPullResult{FetchHeadTime: fetchHeadTime, Diverged: diverged, Skipped: true, SkipReason: skipReasonRebaseInProgress}
 		}
 
+		if err := gitutil.RefuseSourcePublicationRebase(ctx, path); err != nil {
+			logger.Warn("source publication requires reconciliation before pull", "error", err, "repo", repoName)
+			return ManagedRepoPullResult{FetchHeadTime: fetchHeadTime, Diverged: diverged, Err: fmt.Errorf("ledger source reconciliation required: %w", err)}
+		}
+
 		// --- Pull ---
 		_, pullSpan := perf.Start(ctx, "git_pull_rebase")
 		pullArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)

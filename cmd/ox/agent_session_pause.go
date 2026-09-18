@@ -48,6 +48,9 @@ func runAgentSessionPause(inst *agentinstance.Instance, _ []string) error {
 
 	// idempotent: already paused
 	if state.SuspendedAt != nil {
+		if err := excludeNativeCapture(state, "paused"); err != nil {
+			return fmt.Errorf("source exclusion synchronization pending: %w", err)
+		}
 		return emitPauseOutput(os.Stdout, &sessionPauseOutput{
 			Success:     true,
 			Type:        "session_pause",
@@ -83,10 +86,13 @@ func runAgentSessionPause(inst *agentinstance.Instance, _ []string) error {
 		pauseCount = s.PauseCount
 		sessionName = session.GetSessionName(s.SessionPath)
 		s.Lifecycle = append(s.Lifecycle, session.LifecycleEvent{
-			Action: session.LifecycleActionPause,
-			At:     now,
-			Seq:    seq,
+			Action:            session.LifecycleActionPause,
+			At:                now,
+			Offset:            s.SourceOffset,
+			SourceOffsetKnown: s.AdapterName == "codex" && s.SessionFile != "",
+			Seq:               seq,
 		})
+		*state = *s
 	}); err != nil {
 		return fmt.Errorf("failed to mark recording suspended: %w", err)
 	}
@@ -94,6 +100,10 @@ func runAgentSessionPause(inst *agentinstance.Instance, _ []string) error {
 	// write per-agent marker so /clear inheritance and cross-process detection work.
 	if err := session.MarkExplicitPause(projectRoot, inst.AgentID, seq); err != nil {
 		return fmt.Errorf("recording suspended but marker write failed: %w", err)
+	}
+
+	if err := excludeNativeCapture(state, "paused"); err != nil {
+		return fmt.Errorf("recording is paused; native history exclusion awaits synchronization: %w", err)
 	}
 
 	return emitPauseOutput(os.Stdout, &sessionPauseOutput{

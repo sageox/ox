@@ -392,3 +392,77 @@ func TestRewriteLedgerPathsNoLedgerDir(t *testing.T) {
 		t.Errorf("RawPath should be unchanged, got %q", result.RawPath)
 	}
 }
+
+func TestRewriteSecondaryPathsNoLedgerDir(t *testing.T) {
+	mfs := newMockFS()
+	result := &Result{
+		SummaryMDPath:    "/cache/summary.md",
+		LedgerSessionDir: "", // no ledger dir
+	}
+
+	RewriteSecondaryPaths(mfs, result)
+
+	if result.SummaryMDPath != "/cache/summary.md" {
+		t.Errorf("SummaryMDPath should be unchanged, got %q", result.SummaryMDPath)
+	}
+}
+
+// copierMockFS extends mockFileSystem with the optional FileCopier fast path,
+// so copyLedgerArtifact's streaming branch (used by OSFileSystem in production)
+// gets exercised without touching the real filesystem.
+type copierMockFS struct {
+	*mockFileSystem
+	copyErr map[string]error
+}
+
+func newCopierMockFS() *copierMockFS {
+	return &copierMockFS{mockFileSystem: newMockFS(), copyErr: make(map[string]error)}
+}
+
+func (m *copierMockFS) CopyFile(destination, source string, _ os.FileMode) error {
+	if err, ok := m.copyErr[source]; ok {
+		return err
+	}
+	data, ok := m.files[source]
+	if !ok {
+		return &os.PathError{Op: "open", Path: source, Err: os.ErrNotExist}
+	}
+	m.files[destination] = data
+	return nil
+}
+
+func TestCopySessionToLedgerViaFileCopier(t *testing.T) {
+	mfs := newCopierMockFS()
+	mfs.files["/cache/raw.jsonl"] = []byte(`{"test":"data"}`)
+
+	result := &Result{RawPath: "/cache/raw.jsonl", EntryCount: 5}
+
+	err := CopySessionToLedger(mfs, result, "/ledger", "session-copier")
+	require.NoError(t, err)
+
+	rawDst := filepath.Join("/ledger", "sessions", "session-copier", LedgerFileRaw)
+	assert.Equal(t, []byte(`{"test":"data"}`), mfs.files[rawDst])
+}
+
+func TestCopySessionToLedgerViaFileCopierSourceMissing(t *testing.T) {
+	mfs := newCopierMockFS()
+	result := &Result{RawPath: "/cache/missing.jsonl", EntryCount: 5}
+
+	err := CopySessionToLedger(mfs, result, "/ledger", "session-copier-missing")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read "+LedgerFileRaw)
+}
+
+func TestCopySessionToLedgerViaFileCopierDestinationFails(t *testing.T) {
+	mfs := newCopierMockFS()
+	mfs.files["/cache/raw.jsonl"] = []byte(`{"test":"data"}`)
+	mfs.copyErr["/cache/raw.jsonl"] = errors.New("disk full")
+
+	result := &Result{RawPath: "/cache/raw.jsonl", EntryCount: 5}
+
+	err := CopySessionToLedger(mfs, result, "/ledger", "session-copier-fail")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "copy "+LedgerFileRaw+" to ledger")
+}

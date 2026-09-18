@@ -1,11 +1,11 @@
 package lfs
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/sageox/ox/internal/session/pipeline"
 )
@@ -27,10 +27,10 @@ var ContentFiles = pipeline.LedgerContentFiles
 // responsibility — CLI and daemon resolve credentials differently).
 //
 // Flow:
-//  1. Read all content files from session dir
-//  2. Compute SHA256 OIDs + sizes
+//  1. Open content file snapshots from the session directory
+//  2. Stream SHA256 OIDs + sizes
 //  3. Call LFS batch API to get upload actions
-//  4. Upload all blobs in parallel
+//  4. Stream each missing blob from its validated file descriptor
 //  5. Return filename->FileRef map for meta.json
 //
 // The returned manifest is a filename->FileRef map (not UploadedRef) because it
@@ -38,77 +38,88 @@ var ContentFiles = pipeline.LedgerContentFiles
 // ARE uploaded on a nil-error return, so callers wrap it in AssertUploadedManifest
 // at the WritePointerFiles boundary — the one audited place upload is asserted.
 func UploadSessionFiles(client *Client, sessionPath string, logger *slog.Logger) (map[string]FileRef, error) {
+	return UploadSessionFilesContext(context.Background(), client, sessionPath, logger)
+}
+
+// UploadSessionFilesContext hashes and transmits immutable file descriptors, so
+// memory is bounded by transfer buffers rather than total conversation length.
+func UploadSessionFilesContext(ctx context.Context, client *Client, sessionPath string, logger *slog.Logger) (map[string]FileRef, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-
-	// read all content files that exist
-	files := make(map[string][]byte)     // bareOID -> content
-	fileRefs := make(map[string]FileRef) // filename -> ref
-	var batchObjects []BatchObject
-
+	refs := map[string]FileRef{}
+	snapshots := map[string]*uploadFileSnapshot{}
+	var opened []*uploadFileSnapshot
+	defer func() {
+		for _, snapshot := range opened {
+			_ = snapshot.file.Close()
+		}
+	}()
+	var objects []BatchObject
 	for _, name := range ContentFiles {
-		filePath := filepath.Join(sessionPath, name)
-
-		// if file is already an LFS pointer, extract its ref directly —
-		// don't re-upload the pointer text as content
-		if IsPointerFile(filePath) {
-			ref, err := ReadPointerFile(filePath)
+		path := filepath.Join(sessionPath, name)
+		if IsPointerFile(path) {
+			ref, err := ReadPointerFile(path)
 			if err != nil {
-				return nil, fmt.Errorf("read pointer %s: %w", name, err)
+				return nil, err
 			}
-			fileRefs[name] = ref
+			refs[name] = ref
 			continue
 		}
-
-		content, err := os.ReadFile(filePath)
+		snapshot, err := openUploadSnapshot(ctx, path)
+		if os.IsNotExist(err) {
+			continue
+		}
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue // skip files that don't exist
-			}
 			return nil, fmt.Errorf("read %s: %w", name, err)
 		}
-
-		ref := NewFileRef(content)
-		fileRefs[name] = ref
-		files[ref.BareOID()] = content
-		batchObjects = append(batchObjects, BatchObject{
-			OID:  ref.BareOID(),
-			Size: ref.Size,
-		})
-	}
-
-	if len(batchObjects) == 0 {
-		return fileRefs, nil // nothing to upload
-	}
-
-	logger.Info("uploading session to LFS", "path", sessionPath, "files", len(batchObjects))
-
-	// request upload URLs from LFS batch API
-	resp, err := client.BatchUpload(batchObjects)
-	if err != nil {
-		logger.Info("LFS batch API failed", "error", err, "path", sessionPath, "files", len(batchObjects))
-		return nil, fmt.Errorf("LFS batch upload: %w", err)
-	}
-
-	// upload blobs in parallel (up to 4 concurrent)
-	results := UploadAll(resp, files, 4)
-
-	// collect all errors so devs can see everything that failed
-	var uploadErrors []string
-	for _, r := range results {
-		if r.Error != nil {
-			logger.Info("LFS blob upload failed", "oid", r.OID, "error", r.Error)
-			uploadErrors = append(uploadErrors, fmt.Sprintf("OID %s: %s", r.OID, r.Error))
+		opened = append(opened, snapshot)
+		refs[name] = FileRef{Storage: StorageLFS, OID: "sha256:" + snapshot.oid, Size: snapshot.info.Size()}
+		if snapshots[snapshot.oid] == nil {
+			snapshots[snapshot.oid] = snapshot
+			objects = append(objects, BatchObject{OID: snapshot.oid, Size: snapshot.info.Size()})
 		}
 	}
-	if len(uploadErrors) > 0 {
-		return nil, fmt.Errorf("LFS upload failed (%d/%d files):\n  %s",
-			len(uploadErrors), len(results), strings.Join(uploadErrors, "\n  "))
+	if len(objects) == 0 {
+		return refs, nil
 	}
-
-	logger.Info("LFS upload complete", "path", sessionPath, "files", len(fileRefs))
-	return fileRefs, nil
+	response, err := client.doBatch(ctx, "upload", objects)
+	if err != nil {
+		return nil, fmt.Errorf("LFS batch upload: %w", err)
+	}
+	seen := map[string]bool{}
+	// Session artifacts are few; sequential streaming bounds open HTTP buffers and
+	// avoids retaining an entire transcript to support the old parallel byte API.
+	for _, object := range response.Objects {
+		snapshot := snapshots[object.OID]
+		if snapshot == nil || seen[object.OID] || object.Size != snapshot.info.Size() {
+			return nil, fmt.Errorf("LFS batch response does not match requested snapshot")
+		}
+		seen[object.OID] = true
+		if object.Error != nil {
+			return nil, fmt.Errorf("LFS object rejected: %s", object.Error.Message)
+		}
+		if object.Actions != nil && object.Actions.Upload != nil {
+			if err := uploadSnapshot(ctx, object.Actions.Upload, snapshot); err != nil {
+				return nil, err
+			}
+			if object.Actions.Verify != nil {
+				if err := VerifyObjectContext(ctx, object.Actions.Verify, object.OID, object.Size); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	if len(seen) != len(snapshots) {
+		return nil, fmt.Errorf("LFS batch omitted requested objects")
+	}
+	for _, snapshot := range opened {
+		if err := snapshot.checkUnchanged(); err != nil {
+			return nil, err
+		}
+	}
+	logger.Info("session LFS upload complete", "files", len(refs))
+	return refs, nil
 }
 
 // FindPointerStubsWithMissingBlobs checks which content files in sessionPath are

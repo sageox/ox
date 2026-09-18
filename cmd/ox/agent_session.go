@@ -34,6 +34,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/pipeline"
+	"github.com/sageox/ox/internal/sessionpublication"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
@@ -547,11 +548,14 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	var processResult *agentSessionResult
 	if state.SessionFile != "" {
 		processStart := time.Now()
-		if state.WatchMode == "tail" {
-			// IPC stop is advisory. Wait for the writer's file lock and reload
-			// its final cursor before draining, so an in-flight batch is not
-			// captured twice. A lock failure preserves the recording for retry.
-			err = fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+		// Serialize with the raw.jsonl writer's file lock so processAgentSession
+		// (RecoverRawAppend + drain) never runs concurrently with a hook or
+		// watcher still appending a batch under the same lock — stop is
+		// advisory and a capture can be in flight when it fires.
+		err = fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+			if state.WatchMode == "tail" {
+				// IPC stop is advisory. Reload the writer's final cursor before
+				// draining, so an in-flight batch is not captured twice.
 				latest, loadErr := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
 				if loadErr != nil {
 					return loadErr
@@ -561,13 +565,11 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 				}
 				latest.SessionFile = state.SessionFile
 				state = latest
-				var processErr error
-				processResult, processErr = processAgentSession(projectRoot, state)
-				return processErr
-			})
-		} else {
-			processResult, err = processAgentSession(projectRoot, state)
-		}
+			}
+			var processErr error
+			processResult, processErr = processAgentSession(projectRoot, state)
+			return processErr
+		})
 		timing["process_ms"] = time.Since(processStart).Milliseconds()
 		if err != nil {
 			// set marker so future ox agent prime knows doctor is needed
@@ -1023,6 +1025,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// resulting commit will break LFS linkage and the daemon's anti-entropy
 	// will start clobbering. See the 2026-04-25 post-mortem (bd ox-4ncz).
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	if err := session.RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
+		return nil, err
+	}
 	hasIncrementalEntries := rawJSONLHasEntries(rawPath)
 
 	if hasIncrementalEntries {
@@ -1430,6 +1435,23 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	// zero-turn draft and pushed, which a finalize-time `git pull --rebase`
 	// folds into our working tree. Those describe nothing and must never
 	// survive into the finalized session as if an LLM had read the transcript.
+	source, err := session.ReadCaptureSource(filepath.Dir(result.RawPath))
+	if err != nil {
+		return err
+	}
+	if source == nil {
+		cachedMeta, metaErr := lfs.ReadSessionMeta(filepath.Dir(result.RawPath))
+		if metaErr != nil && !errors.Is(metaErr, os.ErrNotExist) {
+			return metaErr
+		}
+		if cachedMeta != nil {
+			source = cachedMeta.Source
+		}
+	}
+	if err := session.CheckCapturePublication(context.Background(), ledgerPath, sessionName, result.RawPath, source); err != nil {
+		return err
+	}
+	priorPublication, _ := lfs.ReadSessionMeta(sessionDir)
 	preservedID, wasDraft, err := supersedeDraftForFinalize(ledgerPath, sessionName)
 	if err != nil {
 		return fmt.Errorf("preserve existing SessionID for %s: %w", sessionName, err)
@@ -1511,6 +1533,16 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 			return nil, fmt.Errorf("session metadata disappeared during upload")
 		}
 		current.Files = fileRefs
+		if source != nil {
+			current.Source = source
+			current.ProcessingStatus = "pending"
+		}
+		if priorPublication != nil && priorPublication.PublishedAt != nil {
+			current.PublishedAt = priorPublication.PublishedAt
+		} else if current.PublishedAt == nil {
+			now := time.Now().UTC()
+			current.PublishedAt = &now
+		}
 		meta = current // retain the redaction audit written before upload
 		return current, nil
 	}); err != nil {
@@ -1543,6 +1575,15 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		// set marker - session saved locally but not synced to remote
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("commit and push: %w", err)
+	}
+	if meta.Source != nil {
+		client, err := getLFSClient(projectRoot)
+		if err != nil {
+			return err
+		}
+		if err := sessionpublication.Verify(context.Background(), ledgerPath, sessionName, meta, client); err != nil {
+			return fmt.Errorf("publication verification pending: %w", err)
+		}
 	}
 	if recoveryCacheDir != "" {
 		if err := os.RemoveAll(recoveryCacheDir); err != nil {

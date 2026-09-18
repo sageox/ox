@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sageox/ox/internal/fileutil"
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/paths"
@@ -51,11 +54,12 @@ const (
 // order regardless of its native cursor type (byte offset, entry count, ULID).
 // Offset is a diagnostic for native adapter cursors.
 type LifecycleEvent struct {
-	Action LifecycleAction `json:"action"`
-	At     time.Time       `json:"at"`
-	Seq    int             `json:"seq,omitempty"`
-	Offset int64           `json:"offset,omitempty"`
-	Reason string          `json:"reason,omitempty"`
+	Action            LifecycleAction `json:"action"`
+	SourceOffsetKnown bool            `json:"source_offset_known,omitempty"`
+	At                time.Time       `json:"at"`
+	Seq               int             `json:"seq,omitempty"`
+	Offset            int64           `json:"offset,omitempty"`
+	Reason            string          `json:"reason,omitempty"`
 }
 
 // RecordingState tracks an active recording session.
@@ -101,12 +105,18 @@ type RecordingState struct {
 	Model          string `json:"model,omitempty"`           // LLM model for generic adapters where ReadMetadata returns nil
 	ParentPID      int    `json:"parent_pid,omitempty"`      // parent agent process ID for liveness detection
 	SourceOffset   int64  `json:"source_offset,omitempty"`   // byte offset in source file for incremental reading
-	StartOffset    int64  `json:"start_offset,omitempty"`    // source file byte offset when recording started (entries before this are pre-session)
-	Origin         string `json:"origin,omitempty"`          // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
-	CacheDir       string `json:"cache_dir,omitempty"`       // cache directory when recording was created (diagnostic breadcrumb)
+	// Committed with SourceOffset, so crash replay restores the same privacy state.
+	CommandRedactionVersion  int               `json:"command_redaction_version,omitempty"`
+	PendingCommandRedactions map[string]string `json:"pending_command_redactions,omitempty"`
+	StartOffset              int64             `json:"start_offset,omitempty"` // source file byte offset when recording started (entries before this are pre-session)
+	Origin                   string            `json:"origin,omitempty"`       // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
+	CacheDir                 string            `json:"cache_dir,omitempty"`    // cache directory when recording was created (diagnostic breadcrumb)
 
-	WatchMode string     `json:"watch_mode,omitempty"` // how entries are captured: "hook" (CLI-driven) or "tail" (daemon-driven)
-	StoppedAt *time.Time `json:"stopped_at,omitempty"` // set by ox session stop to signal daemon to finalize
+	WatchMode string `json:"watch_mode,omitempty"` // how entries are captured: "hook" (CLI-driven) or "tail" (daemon-driven)
+	// CaptureDrainPending distinguishes a fast hook stop from a CLI stop that
+	// has already drained and masked the final native records.
+	CaptureDrainPending bool       `json:"capture_drain_pending,omitempty"`
+	StoppedAt           *time.Time `json:"stopped_at,omitempty"` // set by ox session stop to signal daemon to finalize
 
 	// ADR-020 session pause/resume fields. Lifecycle is the durable timeline of
 	// session-entity transitions and is the source of truth for which raw.jsonl
@@ -255,7 +265,7 @@ func SaveRecordingState(projectRoot string, state *RecordingState) error {
 
 	// TODO(server-side): move to server-side for MVP+1; client should not write to ledger directly.
 	statePath := recordingStatePath(state.SessionPath)
-	if err := os.WriteFile(statePath, data, 0600); err != nil {
+	if err := fileutil.AtomicWriteBytes(statePath, data, 0600); err != nil {
 		return fmt.Errorf("write recording state file=%s: %w", statePath, err)
 	}
 
@@ -1189,11 +1199,8 @@ func UpdateRecordingStateForAgent(projectRoot, agentID string, updateFn func(*Re
 	if state == nil {
 		return ErrNotRecording
 	}
-	updateFn(state)
-	if err := SaveRecordingState(projectRoot, state); err != nil {
-		return fmt.Errorf("save recording state: %w", err)
-	}
-	return nil
+	return MutateRecordingStateFile(recordingStatePath(state.SessionPath), func(current *RecordingState) error { updateFn(current); return nil })
+
 }
 
 // UpdateRecordingState updates and persists the recording state.
@@ -1208,12 +1215,10 @@ func UpdateRecordingState(projectRoot string, updateFn func(*RecordingState)) er
 		return ErrNotRecording
 	}
 
-	updateFn(state)
-
-	if err := SaveRecordingState(projectRoot, state); err != nil {
-		return fmt.Errorf("save recording state: %w", err)
-	}
-	return nil
+	return MutateRecordingStateFile(recordingStatePath(state.SessionPath), func(current *RecordingState) error {
+		updateFn(current)
+		return nil
+	})
 }
 
 // StopRecording ends an active recording session for a specific agent.
@@ -1266,4 +1271,28 @@ func FindParentSessionPath(projectRoot string) string {
 		return ""
 	}
 	return state.SessionPath
+}
+
+// MutateRecordingStateFile serializes lifecycle changes with batch appends.
+// Without this lock a resume can select a sequence while a paused batch is
+// being written, or a cursor update can erase a concurrently persisted pause.
+func MutateRecordingStateFile(path string, update func(*RecordingState) error) error {
+	return fileutil.WithFileLock(context.Background(), path, func() error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var state RecordingState
+		if err = json.Unmarshal(data, &state); err != nil {
+			return err
+		}
+		if err = update(&state); err != nil {
+			return err
+		}
+		data, err = json.Marshal(state)
+		if err != nil {
+			return err
+		}
+		return fileutil.AtomicWriteBytes(path, data, 0600)
+	})
 }

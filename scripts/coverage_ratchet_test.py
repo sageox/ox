@@ -215,6 +215,61 @@ diff --git a/deleted.go b/deleted.go
             failures,
         )
 
+    def test_interface_with_callback_parameter_is_declaration_only(self):
+        """A `func` TYPE is not a function body, and must not fail the gate.
+
+        `pkg/sessionhistory/adapter.go` is a struct plus an interface whose
+        Stream method takes a `func(adapterprotocol.RawEntry) error` callback.
+        Matching the bare keyword read that as a function, so the
+        declaration-only skip never fired; because the package holds no other
+        file, the package fallback then hard-failed every edit to it -- the
+        same failure mode PR #909 hit with a const-only package.
+        """
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "pkg/contract").mkdir(parents=True)
+            (root / "pkg/contract/adapter.go").write_text(
+                "package contract\n\n"
+                "type Snapshot struct {\n\tSize int64\n}\n\n"
+                "type Adapter interface {\n"
+                "\tName() string\n"
+                "\tStream(ctx context.Context, path string,"
+                " emit func(RawEntry) error) (Snapshot, error)\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            # A func TYPE in a struct field and a standalone type declaration
+            # are equally uncoverable, and equally must not be read as bodies.
+            (root / "pkg/contract/types.go").write_text(
+                "package contract\n\n"
+                "type Handler func(int) error\n\n"
+                "type Hooks struct {\n\tOnDone func(error)\n}\n",
+                encoding="utf-8",
+            )
+            settings = {"minimum": 90, "excluded_paths": [], "exceptions": []}
+
+            with mock.patch("coverage_ratchet.Path", side_effect=lambda p: root / p):
+                _, failures, notices = coverage_ratchet.evaluate_changed_lines(
+                    {},
+                    {
+                        "pkg/contract/adapter.go": {8},
+                        "pkg/contract/types.go": {3},
+                    },
+                    settings,
+                )
+
+        self.assertEqual([], failures)
+        self.assertIn(
+            "SKIP pkg/contract/adapter.go: declaration-only file"
+            " has no coverable statements",
+            notices,
+        )
+        self.assertIn(
+            "SKIP pkg/contract/types.go: declaration-only file"
+            " has no coverable statements",
+            notices,
+        )
+
     @mock.patch("coverage_ratchet.subprocess.run")
     def test_changed_lines_diff_uses_merge_base(self, run):
         run.side_effect = [

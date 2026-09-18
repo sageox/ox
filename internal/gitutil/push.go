@@ -174,6 +174,11 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 		isNonFF := strings.Contains(outStr, "non-fast-forward") || strings.Contains(outStr, "rejected")
 
 		if isNonFF {
+			// Source receipts and tombstones are concurrency guards, not mergeable
+			// content. Even a conflict-free rebase can resurrect a deleted session.
+			if err := RefuseSourcePublicationRebase(ctx, repoPath); err != nil {
+				return err
+			}
 			log.Info("push failed (non-fast-forward), rebasing", "attempt", attempt, "output", outStr)
 			if attempt == maxRetries {
 				return fmt.Errorf("git push failed after %d attempts: %s", maxRetries, outStr)
