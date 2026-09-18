@@ -23,7 +23,7 @@ func TestExportCompatibilityFixtures(t *testing.T) {
 			if err = source.Validate(); err != nil {
 				t.Fatal(err)
 			}
-			record := Record{Version: 1, Agent: source.Agent, NativeSessionID: source.NativeSessionID, Generation: source.Generation, Coverage: []Coverage{{Start: 0, End: 120, SessionName: "export", RawOID: strings.Repeat("c", 64)}}}
+			record := Record{Version: 1, Agent: source.Agent, NativeSessionID: source.NativeSessionID, Generation: source.Generation, Coverage: []Coverage{{Start: 0, End: 120, SessionName: "export", RawOID: strings.Repeat("c", 64)}}, UpdatedAt: time.Now()}
 			excluded, err := record.CheckCoverage(&source, "export", strings.Repeat("c", 64))
 			if err != nil || excluded {
 				t.Fatalf("export not covered: %v %v", excluded, err)
@@ -183,6 +183,40 @@ func TestExcludeRejectsEmptyReason(t *testing.T) {
 	}
 	if len(record.Exclusions) != 0 {
 		t.Fatal("record mutated despite rejected exclusion")
+	}
+}
+
+func TestValidateRequiresUpdatedAtForContentBearingRecords(t *testing.T) {
+	base := Record{Version: 1, Agent: "codex", NativeSessionID: "0197d3f4-2c88-7a15-a9b0-4b5c6d7e8f04"}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("blank record should validate without updated_at: %v", err)
+	}
+	withCoverage := base
+	withCoverage.Generation = strings.Repeat("a", 64)
+	withCoverage.Coverage = []Coverage{{Start: 0, End: 1, SessionName: "export", RawOID: strings.Repeat("b", 64)}}
+	if withCoverage.Validate() == nil {
+		t.Fatal("coverage-bearing record without updated_at accepted")
+	}
+	withCoverage.UpdatedAt = time.Now()
+	if err := withCoverage.Validate(); err != nil {
+		t.Fatalf("coverage-bearing record with updated_at should validate: %v", err)
+	}
+}
+
+func TestValidateRejectsZeroExclusionTimestamp(t *testing.T) {
+	record := Record{
+		Version:         1,
+		Agent:           "codex",
+		NativeSessionID: "0197d3f4-2c88-7a15-a9b0-4b5c6d7e8f04",
+		Exclusions:      []Exclusion{{Start: 0, End: -1, Reason: "deleted"}},
+		UpdatedAt:       time.Now(),
+	}
+	if record.Validate() == nil {
+		t.Fatal("exclusion with zero created_at accepted")
+	}
+	record.Exclusions[0].CreatedAt = time.Now()
+	if err := record.Validate(); err != nil {
+		t.Fatalf("exclusion with valid created_at should validate: %v", err)
 	}
 }
 

@@ -94,6 +94,13 @@ func (r *Record) Validate() error {
 	if _, err := Path(r.NativeSessionID); err != nil {
 		return err
 	}
+	// A blank record precedes its first mutation (Exclude validates this prior
+	// state before it sets UpdatedAt), so UpdatedAt is only required once the
+	// record actually carries coverage, exclusions, or projections.
+	hasContent := len(r.Coverage) > 0 || len(r.Exclusions) > 0 || len(r.Projections) > 0 || r.ProjectionRevision != ""
+	if hasContent && r.UpdatedAt.IsZero() {
+		return fmt.Errorf("invalid source updated_at")
+	}
 	// Privacy intent can precede capture, so a record without coverage or
 	// projections may omit generation.
 	hasGenerationBoundData := len(r.Coverage) > 0 || len(r.Projections) > 0 || r.ProjectionRevision != ""
@@ -106,7 +113,7 @@ func (r *Record) Validate() error {
 		}
 	}
 	for _, e := range r.Exclusions {
-		if e.Start < 0 || (e.End != -1 && e.End <= e.Start) || e.Reason == "" {
+		if e.CreatedAt.IsZero() || e.Start < 0 || (e.End != -1 && e.End <= e.Start) || e.Reason == "" {
 			return fmt.Errorf("invalid source exclusion")
 		}
 	}
