@@ -120,6 +120,13 @@ const (
 	IssueTypeGCFailed                 = "gc_failed"
 	IssueTypeSessionConflictWedge     = "session_conflict_wedge"
 	IssueTypeSessionConflictRecovered = "session_conflict_recovered"
+	// IssueTypeRepoIntegrity: a managed clone is structurally unusable —
+	// git itself cannot read it (unreadable/corrupt .git/index, permission
+	// denied). Distinct from IssueTypeMergeConflict, which asserts a
+	// conflict was FOUND: this one asserts we could not find out, durably.
+	// Never RequiresConfirm — the remedy is a re-clone the agent or doctor
+	// can drive, not a human merge decision (#962).
+	IssueTypeRepoIntegrity = "repo_integrity"
 )
 
 // severityRank returns a numeric rank for sorting (higher = more severe).

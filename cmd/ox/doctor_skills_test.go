@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,6 +38,26 @@ func TestDescribeSkillConflicts(t *testing.T) {
 		if !strings.Contains(got, c.Reason) {
 			t.Errorf("describeSkillConflicts(%+v) = %q; missing reason %q", conflicts, got, c.Reason)
 		}
+	}
+}
+
+func TestCheckClaudeSkills_ReportsInvalidTeamSkillName(t *testing.T) {
+	_, team := stageApprovalRepo(t, "deploy", nil)
+	manifest := filepath.Join(team, "agents", "skills", "deploy", "SKILL.md")
+	if err := os.WriteFile(manifest, []byte("---\nname: deploy.\n---\n\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := checkClaudeSkills(false)
+	combined := got.message + " " + got.detail
+	if !strings.Contains(combined, "unusable team skills") || !strings.Contains(combined, "may not end with a dot") {
+		t.Fatalf("doctor omitted the invalid skill and reason: %+v", got)
+	}
+	if !strings.Contains(combined, "Rename") || !strings.Contains(combined, "Team Context") {
+		t.Fatalf("doctor omitted the rename remedy: %+v", got)
+	}
+	if strings.Contains(combined, "ox skills approve") {
+		t.Fatalf("doctor routed an invalid name to approval instead of rename: %+v", got)
 	}
 }
 

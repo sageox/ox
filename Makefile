@@ -304,6 +304,7 @@ test-fuzz: ## Run bounded fuzz smoke gates over untrusted parsers
 	@$(GO) test -race -run '^$$' -fuzz '^FuzzParseLayerName$$' -fuzztime=5s ./internal/conversation/format
 	@$(GO) test -race -run '^$$' -fuzz '^FuzzFolderName$$' -fuzztime=5s ./internal/conversation/read
 	@$(GO) test -race -run '^$$' -fuzz '^FuzzParseHistoryEntry$$' -fuzztime=5s ./internal/session
+	@$(GO) test -race -run '^$$' -fuzz '^FuzzRedactString_ScreenIsTransparent$$' -fuzztime=5s ./internal/session
 
 test-browser: ## Run real-browser E2E (build tag: browser) — drives headless Chrome; skips if no Chrome installed
 	$(call say,"Running real-browser E2E (requires Chrome/Chromium)...")

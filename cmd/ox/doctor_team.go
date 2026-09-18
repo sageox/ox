@@ -629,7 +629,7 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 		// failure, and it is invisible to a pattern check.
 		cfg := manifest.ParseFile(filepath.Join(tc.Path, ".sageox", "sync.manifest"), manifest.RepoKindTeamContext)
 		if missing := missingSparseTopLevelDirs(tc.Path, cfg); len(missing) > 0 {
-			localMissing := manifestIncludedMissingDirs(cfg, missing)
+			localMissing := locallyRepairableMissingDirs(cfg, missing)
 			if len(localMissing) > 0 {
 				needsFix++
 				if !fix {
@@ -678,7 +678,7 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 	}
 	if len(locallyRepairable) > 0 {
 		return FailedCheck("Team sparse checkout",
-			fmt.Sprintf("%d team context(s) exclude directories already included by their manifest: %s",
+			fmt.Sprintf("%d team context(s) exclude directories ox can restore locally: %s",
 				len(locallyRepairable), strings.Join(locallyRepairable, "; ")),
 			"Run `ox doctor --fix` to reapply the local sparse-checkout spec")
 	}
@@ -710,21 +710,51 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 			"        Run `ox doctor` to auto-fix (FixLevelAuto)")
 }
 
-func manifestIncludedMissingDirs(cfg *manifest.ManifestConfig, missing []string) []string {
-	if cfg == nil {
-		return nil
+// locallyRepairableMissingDirs returns missing directories that reapplying the
+// local sparse policy can restore. That is the union of paths the manifest
+// includes and paths ox itself requires, such as agents/. Required paths remain
+// repairable even when an older server manifest omits them, but an explicit
+// deny still wins. A map forms the union so a path present in both sources is
+// reported exactly once.
+func locallyRepairableMissingDirs(cfg *manifest.ManifestConfig, missing []string) []string {
+	repairable := make(map[string]bool)
+	addTopLevel := func(entries []string) {
+		for _, entry := range entries {
+			clean := strings.Trim(strings.TrimSpace(filepath.ToSlash(entry)), "/")
+			if clean == "" {
+				continue
+			}
+			repairable[strings.SplitN(clean, "/", 2)[0]] = true
+		}
 	}
-	included := make(map[string]bool)
-	for _, entry := range cfg.Includes {
-		clean := strings.Trim(strings.TrimSpace(filepath.ToSlash(entry)), "/")
-		if clean == "" {
+	if cfg != nil {
+		addTopLevel(cfg.Includes)
+	}
+	addTopLevel(manifest.RequiredIncludes(manifest.RepoKindTeamContext))
+
+	// Intersect the manifest/floor union with the sparse set that repair will
+	// actually apply. This preserves the canonical overlap behavior: a deny
+	// beneath a manifest include removes that include entirely, while a denied
+	// descendant of a required floor is re-excluded without removing the floor.
+	effectiveCfg := cfg
+	if effectiveCfg == nil {
+		effectiveCfg = &manifest.ManifestConfig{}
+	}
+	effective := make(map[string]bool)
+	for _, entry := range manifest.SparseSetFor(effectiveCfg, manifest.RepoKindTeamContext) {
+		if strings.HasPrefix(entry, "!") || entry == "/*" {
 			continue
 		}
-		included[strings.SplitN(clean, "/", 2)[0]] = true
+		clean := strings.Trim(strings.TrimSpace(filepath.ToSlash(entry)), "/")
+		if clean != "" {
+			effective[strings.SplitN(clean, "/", 2)[0]] = true
+		}
 	}
+
 	var local []string
 	for _, dir := range missing {
-		if included[strings.Trim(filepath.ToSlash(dir), "/")] {
+		clean := strings.Trim(filepath.ToSlash(dir), "/")
+		if repairable[clean] && effective[clean] {
 			local = append(local, dir)
 		}
 	}

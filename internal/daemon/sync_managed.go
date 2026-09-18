@@ -113,6 +113,27 @@ const (
 	// holds gitutil's per-clone lock past our wait budget. The clone is
 	// healthy — just in use — so this resolves itself next cycle. ADR-030.
 	skipReasonRepoLockBusy = "repo lock busy"
+	// skipReasonUnconfirmedConflict: autostash recovery reported an error
+	// before the pull ran, but a fresh re-read of the index found NO unmerged
+	// entries — so the error described the probe, not the repo. The clone is
+	// provably healthy; this cycle simply did no work. Deliberately a skip and
+	// NOT a zero-value result: a zero value is indistinguishable from a
+	// successful pull, so doPull would clear sync failures and stamp lastSync
+	// on a cycle that never synced.
+	skipReasonUnconfirmedConflict = "unconfirmed conflict"
+	// skipReasonUnconfirmedIndex: the re-read was cut short (daemon shutdown, or
+	// the confirmation's own budget) and therefore proved NOTHING about the
+	// clone — it is not evidence of health and not evidence of damage.
+	//
+	// It is the reason withheldUnprovenSuccess stamps on every cycle whose index
+	// state was never established, whether or not a pull ran: a pull that
+	// succeeded may still have failed to re-apply its autostash, and with no
+	// completed read nothing can tell that apart from a clean sync.
+	//
+	// It is a SEPARATE reason from skipReasonUnconfirmedConflict precisely so
+	// skipProvesIndexReadable keeps saying false for it: retiring a standing
+	// IssueTypeRepoIntegrity needs a read that actually completed.
+	skipReasonUnconfirmedIndex = "unconfirmed index read"
 )
 
 // fetchHeadRaceSignature is the (version-stable, prefix/suffix-agnostic)
@@ -140,6 +161,20 @@ type ManagedRepoPullResult struct {
 
 	// AutoResolved is true if rebase or autostash conflicts were auto-resolved.
 	AutoResolved bool
+
+	// PullRan reports whether the fetch+pull sequence actually executed this
+	// cycle. A cycle that pulled may have left local side effects that repeat
+	// on every retry — most importantly an autostash entry, whose unbounded
+	// accumulation is the whole reason doTeamSync's worktree-fingerprint
+	// suspension exists (#767). A cycle that returned before the pull cannot
+	// have caused any of that.
+	//
+	// It is a separate field and not something a caller may infer from Err:
+	// classifyAutostashFailure JOINS a probe failure onto whatever the pull
+	// already reported, so the same gitutil.ErrConflictProbeFailed sentinel
+	// appears both when nothing ran and when a pull ran and failed
+	// deterministically. Only this bool tells those two apart.
+	PullRan bool
 
 	// FetchHeadTime is the FETCH_HEAD mtime after fetch (zero if not fetched).
 	FetchHeadTime time.Time
@@ -242,6 +277,12 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 	// incident (COE: docs/coes/2026-09-02-daemon-git-sync-race-and-lfs-divergence.md).
 	var result ManagedRepoPullResult
 	var conflictErr error
+	// pullRan records whether fetchAndPullLocked actually executed, which the
+	// two ResolveAutostashConflicts call sites below cannot be told apart from
+	// conflictErr alone. It decides whether an unconfirmed conflictErr may
+	// downgrade the cycle to a skip: before the pull there is nothing to keep,
+	// after a successful pull the pull's own verdict is real and must stand.
+	var pullRan bool
 	lockErr := gitutil.WithRepoLock(ctx, path, func() error {
 		autoPaths := manifest.AutoResolvePaths(opts.ResolveRules)
 		denyPaths := manifest.AutoResolveDenyPaths(opts.ResolveRules)
@@ -270,6 +311,7 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 			}
 		}
 		result = s.fetchAndPullLocked(ctx, opts, path, repoName, logger)
+		pullRan = true
 		result.AutoResolved = result.AutoResolved || recovered
 		// Git can return zero after a successful rebase whose autostash failed
 		// to apply. Check the index even after success, including auto-resolution.
@@ -287,6 +329,182 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 		return ManagedRepoPullResult{Err: fmt.Errorf("acquire repo lock for %s: %w", repoName, lockErr)}
 	}
 	if conflictErr != nil {
+		classifyAutostashFailure(ctx, &result, conflictErr, pullRan, path, repoName, logger)
+	}
+	// Stamped AFTER classification, which replaces result wholesale on one
+	// branch — the field must describe this cycle, not survive by luck.
+	result.PullRan = pullRan
+	return result
+}
+
+// classifyAutostashFailure decides what an error from ResolveAutostashConflicts
+// actually proved, and folds that verdict into result.
+//
+// It never inspects conflictErr's shape, deliberately. The tempting shortcut —
+// "if it wraps context.DeadlineExceeded / context.Canceled, it's transient" —
+// does not work, because exec.CommandContext only returns the context error
+// when the context was ALREADY dead before Start; a deadline that strikes while
+// git is running surfaces as an *exec.ExitError reading "signal: killed", which
+// errors.Is(err, context.DeadlineExceeded) does NOT match (verified on go1.26).
+// So the error text cannot be trusted to name the cause, and an error-shape
+// allowlist is guaranteed to have holes. Re-reading the index is the only thing
+// that yields a fact, so this always does that (reprobeConfirmAttempts times,
+// because one failed read is itself not a fact) and branches on the indexProof
+// that read produced — see applyIndexProof, which holds the whole decision and
+// the single guarded exit that enforces this function's one invariant.
+//
+// The re-probe deliberately runs OUTSIDE gitutil.WithRepoLock, against
+// ResolveAutostashConflicts' documented "caller must hold the lock" contract.
+// Two reasons: `git ls-files --unmerged` is a read-only read of an index git
+// replaces atomically (write temp + rename), so a concurrent writer yields the
+// old or the new index but never a torn one; and taking the lock would make a
+// busy lock (an `ox doctor` running in another process) fail the probe, which
+// this function would then have to classify as "unreadable" — reintroducing
+// exactly the false alarm it exists to prevent.
+func classifyAutostashFailure(ctx context.Context, result *ManagedRepoPullResult, conflictErr error, pullRan bool, path, repoName string, logger *slog.Logger) {
+	conflicted, probeErr := reprobeIndexConflicts(ctx, path)
+	applyIndexProof(result, classifyIndexProof(conflicted, probeErr), conflictErr, probeErr, pullRan, path, repoName, logger)
+}
+
+// indexProof is what the confirmation re-read ESTABLISHED about the clone's
+// index. It is deliberately the only thing applyIndexProof branches on: a
+// (bool, error) pair invites "err != nil means broken" and "!conflicted means
+// clean", and both of those readings are how this bug keeps coming back.
+type indexProof int
+
+const (
+	// proofUnknown: the ladder stopped before reaching a verdict, because the
+	// daemon is shutting down or the confirmation burned its own budget. It is
+	// NOT "clean" and NOT "broken" — a read that never finished is evidence in
+	// neither direction, which is exactly why it must never leave a cycle
+	// looking like a completed sync.
+	proofUnknown indexProof = iota
+	// proofClean: a read RAN TO COMPLETION and found no unmerged entries, so
+	// conflictErr said nothing true about the index (the #962 timeout). This is
+	// the only proof under which a successful pull may stand as a success.
+	proofClean
+	// proofConflicted: a completed read found unmerged entries the resolver
+	// refused to auto-merge. The one state a human can adjudicate.
+	proofConflicted
+	// proofUnreadable: every one of reprobeConfirmAttempts reads ran to
+	// completion and failed. The clone is broken and stays broken.
+	proofUnreadable
+)
+
+// provesIndexState reports whether this proof positively established what the
+// index contains. The invariant enforced in withheldUnprovenSuccess is stricter
+// still (only proofClean may leave a success standing), but a caller asking
+// "did anything at all get read" wants this.
+func (p indexProof) provesIndexState() bool { return p != proofUnknown }
+
+// String feeds the index_verdict log field. "clean"/"unconfirmed" are kept
+// verbatim from the pre-enum logging so existing log queries keep matching.
+func (p indexProof) String() string {
+	switch p {
+	case proofClean:
+		return "clean"
+	case proofConflicted:
+		return "conflicted"
+	case proofUnreadable:
+		return "unreadable"
+	default:
+		return "unconfirmed"
+	}
+}
+
+// classifyIndexProof turns reprobeIndexConflicts' (bool, error) return into the
+// single fact the rest of the classification is allowed to see.
+//
+// The abandoned check comes FIRST and outranks the error: errProbeAbandoned is
+// returned with the last read's failure still wrapped in the chain, so testing
+// `probeErr != nil` before it would file a shutdown as a durably broken clone —
+// #962's "assert more than the probe proved" mistake, re-entered through the
+// shutdown door.
+func classifyIndexProof(conflicted bool, probeErr error) indexProof {
+	switch {
+	case errors.Is(probeErr, errProbeAbandoned):
+		return proofUnknown
+	case probeErr != nil:
+		return proofUnreadable
+	case conflicted:
+		return proofConflicted
+	default:
+		return proofClean
+	}
+}
+
+// applyIndexProof folds one indexProof into result and is the whole of
+// classifyAutostashFailure's decision, split out so it can be exercised over
+// the full (proof × pullRan × incoming result) cross-product without staging
+// real git index states.
+//
+// It ends in ONE guarded exit — withheldUnprovenSuccess — and that guard, not
+// the individual branches, is what upholds the invariant:
+//
+//	no cycle may leave here readable as a successful sync unless a read that
+//	ran to completion proved the index clean.
+//
+// probeErr is passed alongside proof purely so the log lines can still show
+// what the reads were failing with; nothing branches on it.
+func applyIndexProof(result *ManagedRepoPullResult, proof indexProof, conflictErr, probeErr error, pullRan bool, path, repoName string, logger *slog.Logger) {
+	switch proof {
+	case proofUnreadable:
+		// A DURABLE failure: git could not read this clone's index on any of
+		// reprobeConfirmAttempts fresh, generous reads, each of which ran to
+		// completion rather than being cut short. A corrupt .git/index, a
+		// permission problem, or a missing git binary fails this way forever, so
+		// staying quiet would hide a repo that never syncs again behind a status
+		// that reports perfect health. isValidGitRepo only runs
+		// `rev-parse --git-dir` and never reads the index, so nothing upstream
+		// catches it.
+		//
+		// "Durable" here is still a judgement, not a proof — which is why the
+		// resulting error must stay RETRYABLE downstream. doTeamSync routes it
+		// to bounded backoff rather than the permanent fingerprint suspension
+		// (see its pre-pull probe branch); doPull already does.
+		//
+		// Not IssueTypeMergeConflict/RequiresConfirm: we did NOT find conflicts,
+		// and the #962 remedy for a confirm-gated conflict — hand-editing the
+		// internal clone — is wrong here and unclearable. IssueTypeRepoIntegrity
+		// with RequiresConfirm false lets doctor and the agent act on it, and a
+		// later successful pull clears it.
+		//
+		// Skipped is forced off: doPull checks Skipped BEFORE Err, so leaving a
+		// stale skip (e.g. fetchAndPullLocked's rebase-in-progress) set here
+		// would swallow this error.
+		result.Skipped = false
+		result.SkipReason = ""
+		result.Err = errors.Join(result.Err, fmt.Errorf("read index for %s: %w", repoName, probeErr))
+		if result.Issue == nil {
+			result.Issue = &DaemonIssue{
+				Type:     IssueTypeRepoIntegrity,
+				Severity: SeverityError,
+				Repo:     repoName,
+				// No repoName prefix: FormatLine already renders "<repo>: ".
+				// Whitespace is collapsed because git reports index corruption
+				// over two lines ("error: bad index file sha1 signature" +
+				// "fatal: index file corrupt") and a Summary is rendered as one.
+				Summary: fmt.Sprintf("git cannot read the index at %s, so this repo is not syncing: %s",
+					filepath.Join(path, ".git", "index"),
+					strings.Join(strings.Fields(probeErr.Error()), " ")),
+			}
+		}
+		logger.Error("git index is unreadable, sync cannot proceed",
+			"repo", repoName, "path", path, "error", probeErr, "autostash_error", conflictErr)
+
+	case proofConflicted:
+		// The probe agreed: there really are unmerged entries the resolver
+		// refused to auto-merge. This is the one state a human can adjudicate.
+		//
+		// Skipped is forced off for the same reason proofUnreadable does it:
+		// doPull and pullTeamContext both test Skipped BEFORE Err, so any skip
+		// still set from fetchAndPullLocked — skipReasonRebaseInProgress is the
+		// reachable one, if an outside git process clears the rebase state
+		// between that check and this probe — would send the cycle down the
+		// skip path and swallow the conflict error and its issue entirely.
+		// Leaving the two branches asymmetric is what made this easy to miss.
+		result.Skipped = false
+		result.SkipReason = ""
 		result.Err = errors.Join(result.Err, conflictErr)
 		// Preserve an earlier pull classification, including session-wedge
 		// escalation, when autostash recovery reports an additional failure.
@@ -299,8 +517,256 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 				RequiresConfirm: true,
 			}
 		}
+
+	case proofClean, proofUnknown:
+		if !pullRan {
+			// conflictErr came from the pre-pull probe, so this cycle did no
+			// work at all: every path that assigns result before
+			// fetchAndPullLocked returns with conflictErr still nil, so result
+			// is zero-valued here and there is nothing to preserve. Returning
+			// that zero value is the regression this branch exists to prevent:
+			// doPull's success path would clear sync failures, clear issues,
+			// record a pull success and stamp lastSync for a cycle that never
+			// fetched a byte.
+			//
+			// The two skip reasons are NOT interchangeable: only the clean one
+			// carries a completed read, and skipProvesIndexReadable lets that
+			// one — and only that one — retire a standing integrity issue.
+			skipReason := skipReasonUnconfirmedIndex
+			if proof.provesIndexState() {
+				skipReason = skipReasonUnconfirmedConflict
+			}
+			*result = ManagedRepoPullResult{Skipped: true, SkipReason: skipReason}
+			logger.Warn("autostash recovery failed before the pull, retrying next cycle",
+				"repo", repoName, "path", path, "error", conflictErr,
+				"index_verdict", proof.String(), "probe_error", probeErr)
+			break
+		}
+		// conflictErr came from the post-pull probe and no conflict was
+		// confirmed, so the pull's own verdict (success, error, or skip) is the
+		// most this function knows — it is deliberately NOT overwritten here.
+		//
+		// That is only half an answer, and the half that was wrong before: when
+		// proof is proofUnknown the pull's "success" is not a verdict about the
+		// index at all. `git pull --rebase --autostash` exits zero after a
+		// rebase whose autostash re-apply left unmerged entries behind — the
+		// exact reason this cycle re-reads the index — so with no completed read
+		// a broken worktree and a clean one are the same bytes. The guard below
+		// is what stops that from being reported as a healthy sync.
+		logger.Warn("post-pull autostash check failed and no conflict was confirmed",
+			"repo", repoName, "path", path, "error", conflictErr,
+			"index_verdict", proof.String(), "probe_error", probeErr)
 	}
-	return result
+
+	// The single guarded exit. Every branch above funnels through it, so the
+	// invariant is enforced in one place rather than re-argued per case.
+	if withheldUnprovenSuccess(result, proof) {
+		logger.Warn("index state was never confirmed, so this cycle is not reported as a sync",
+			"repo", repoName, "path", path, "error", conflictErr,
+			"index_verdict", proof.String(), "probe_error", probeErr,
+			"skip_reason", result.SkipReason)
+	}
+}
+
+// resultReadsAsSuccess reports whether a consumer would take its success path
+// for this result. All three (doPull, pullTeamContext, syncBubble) branch on
+// Skipped first and Err second; a result that is neither IS a success to them,
+// whatever else it carries. The first two then clear sync failures, retire
+// IssueTypeRepoIntegrity, record a pull success and stamp lastSync — which is
+// why a success claimed without evidence is the expensive kind of wrong. The
+// bubble path only logs, so for it a downgrade costs a log level.
+func resultReadsAsSuccess(result *ManagedRepoPullResult) bool {
+	return !result.Skipped && result.Err == nil
+}
+
+// withheldUnprovenSuccess is applyIndexProof's single exit point and the only
+// place this file's invariant is enforced:
+//
+//	a result may leave classifyAutostashFailure readable as a completed sync
+//	ONLY when a read that ran to completion proved the index clean.
+//
+// It returns whether it had to intervene, so the caller can say so in the log.
+//
+// The test is written as a blanket "not proofClean" rather than "== proofUnknown"
+// on purpose. proofConflicted and proofUnreadable already set Err in their own
+// branches, so for them this is a backstop that changes nothing today — and a
+// backstop is the point. Three review rounds of this change each shipped one
+// variant of a single bug — a dropped probe failure returning a zero value, a
+// joined post-pull probe error routed to backoff, an abandoned confirmation
+// preserving a successful pull — and every one was a branch that forgot to fail
+// the cycle. Enumerating the proofs that MAY succeed, in one guard, is what the
+// next such branch runs into instead of shipping.
+//
+// The remedy is a SKIP and not an error, deliberately: nothing is known to be
+// wrong, so the cycle must stay ordinarily retryable. An error here would feed
+// the consecutive-failure backoff and — for a team context whose pull ran —
+// teamFailureTakesBackoff's permanent worktree-fingerprint suspension, turning
+// every laptop-lid-close into a repo that stops syncing. skipReasonUnconfirmedIndex
+// is the reason precisely because skipProvesIndexReadable says false for it: a
+// read that never finished must not retire a standing IssueTypeRepoIntegrity
+// either.
+//
+// Fields other than Skipped/SkipReason are left alone: FetchHeadTime, Diverged
+// and AutoResolved describe what the pull observed and stay true regardless of
+// what the index turned out to hold.
+func withheldUnprovenSuccess(result *ManagedRepoPullResult, proof indexProof) bool {
+	if proof == proofClean || !resultReadsAsSuccess(result) {
+		return false
+	}
+	result.Skipped = true
+	result.SkipReason = skipReasonUnconfirmedIndex
+	return true
+}
+
+// Bounds on the confirmation re-read. Together they decide when
+// classifyAutostashFailure is allowed to call a clone durably broken.
+const (
+	// reprobeConfirmAttempts is how many INDEPENDENT reads must fail before the
+	// index counts as unreadable. One failed read is not evidence of a durable
+	// fault: a fork that hits EAGAIN under resource pressure, a transient
+	// filesystem error, and a git killed mid-run all fail exactly the way a
+	// corrupt .git/index does, and the error text cannot tell them apart (see
+	// gitutil.ErrConflictProbeFailed). Concluding "durable" from one sample is
+	// #962's mistake pointed the other way — asserting more than the probe
+	// proved — and for a team context it used to end in permanent sync
+	// suspension (doTeamSync now backs off instead, but this is the first of
+	// the two guards). A corrupt index fails all three reads identically and in
+	// milliseconds, so the durable case still goes loud on the first cycle.
+	reprobeConfirmAttempts = 3
+
+	// reprobeRetryDelay paces those reads. Short on purpose: it only has to
+	// outlast an instantaneous fork/IO blip, and it is paid inside the sync
+	// cycle. Anything longer-lived is NOT this loop's job — the caller's
+	// bounded sync backoff retries the whole cycle minutes later. Skipped
+	// entirely once shutdown is observed: waiting out a blip is no longer worth
+	// anyone's time when the daemon is going away.
+	reprobeRetryDelay = 250 * time.Millisecond
+
+	// reprobeAttemptTimeout caps ONE read. Still generous — a local
+	// `git ls-files --unmerged` normally returns in milliseconds, so only a
+	// genuinely wedged git or a stalled filesystem can burn it. It is also the
+	// granularity at which this function ignores cancellation: a read already in
+	// flight is never abandoned, so this is the longest a daemon shutdown can
+	// wait on one read.
+	reprobeAttemptTimeout = 5 * time.Second
+
+	// reprobeTotalBudget caps the confirmation AS A WHOLE while the daemon is
+	// healthy. It is deliberately larger than the ladder's own arithmetic
+	// (reprobeConfirmAttempts×reprobeAttemptTimeout + the delays ≈ 15.5s) so it
+	// never truncates a healthy run — it is a ceiling, not a plan, and it exists
+	// because a per-attempt timeout is not a hard bound on wall time:
+	// exec.CommandContext kills the git process, but the command still waits for
+	// its output pipes to close, which a surviving grandchild (a credential
+	// helper, a filter process) can hold open past the deadline.
+	reprobeTotalBudget = 20 * time.Second
+
+	// reprobeShutdownDrain is all that is left of the budget once the sync
+	// context is observed canceled between two reads. Daemon shutdown waits on
+	// the scheduler goroutine, which waits on this call, so the full budget is
+	// the wrong thing to spend there — but returning immediately would be wrong
+	// too: a corrupt index fails every read in microseconds, and cutting the
+	// ladder short would hide it behind "unconfirmed" on the very cycle that
+	// should report it. A drain lets the fast, informative ladder finish and
+	// stops only the slow, uninformative one.
+	reprobeShutdownDrain = time.Second
+)
+
+// errProbeAbandoned marks a confirmation that stopped before reaching any
+// verdict, because the daemon is shutting down or the confirmation burned its
+// own budget. It is NOT evidence the index is broken, and callers MUST NOT
+// treat it as the durable failure a completed ladder reports — that would
+// reintroduce, from the shutdown side, exactly the "assert more than the probe
+// proved" mistake #962 was about.
+var errProbeAbandoned = errors.New("index confirmation abandoned before a verdict")
+
+// reprobeIndexConflicts re-reads repoPath's index on a context decoupled from
+// the sync cycle's, so a cancellation that killed the original probe cannot
+// also kill the confirmation. It retries a bounded number of times and returns
+// the LAST error only when every attempt failed. A non-nil error therefore
+// means the index could not be READ on any of them — never that it is clean.
+//
+// Cancellation is discarded for ONE read at a time, never for the whole
+// sequence. Per read that is the entire point: a dead parent context must not
+// get to decide "durable" (#962). For the sequence it would be a bug — team
+// sync waits on every bubble's confirmation serially and daemon shutdown waits
+// on the scheduler goroutine behind them, so an unbounded ladder is shutdown
+// latency multiplied by the number of wedged clones. The confirmation therefore
+// carries its own budget (reprobeTotalBudget), collapsed to
+// reprobeShutdownDrain the moment shutdown is observed between two reads.
+//
+// A ladder cut short by either deadline returns errProbeAbandoned: it proved
+// nothing, and the caller must not read it as a durable fault.
+func reprobeIndexConflicts(ctx context.Context, repoPath string) (bool, error) {
+	// Detached once: every attempt runs on it, so no attempt inherits the
+	// cancellation that may have killed the probe we are here to confirm.
+	detached := context.WithoutCancel(ctx)
+	deadline := time.Now().Add(reprobeTotalBudget)
+	draining := false
+
+	var lastErr error
+	for attempt := 1; attempt <= reprobeConfirmAttempts; attempt++ {
+		if attempt > 1 {
+			// lastErr is necessarily non-nil from here on: attempt 1 runs
+			// unconditionally and only a failed read reaches a second attempt.
+			if !draining && ctx.Err() != nil {
+				draining = true
+				deadline = time.Now().Add(reprobeShutdownDrain)
+			}
+			if !draining {
+				time.Sleep(reprobeRetryDelay)
+			}
+			if !time.Now().Before(deadline) {
+				return false, abandonedProbe(lastErr, draining)
+			}
+		}
+		attemptDeadline := time.Now().Add(reprobeAttemptTimeout)
+		if attemptDeadline.After(deadline) {
+			attemptDeadline = deadline
+		}
+		probeCtx, cancel := context.WithDeadline(detached, attemptDeadline)
+		conflicted, err := gitutil.HasUnmergedEntries(probeCtx, repoPath)
+		cancel()
+		if err == nil {
+			return conflicted, nil
+		}
+		lastErr = err
+	}
+	if !time.Now().Before(deadline) {
+		// The deadline struck DURING the final read, so that read's failure is
+		// the deadline's doing and proves no more than a cut-short ladder does.
+		return false, abandonedProbe(lastErr, draining)
+	}
+	return false, lastErr
+}
+
+// abandonedProbe tags why the confirmation stopped while keeping the last read
+// error in the chain, so a log line still shows what the reads were failing
+// with. lastErr is never nil at either call site.
+func abandonedProbe(lastErr error, draining bool) error {
+	why := "confirmation budget expired"
+	if draining {
+		why = "sync context canceled"
+	}
+	return fmt.Errorf("%w (%s): %w", errProbeAbandoned, why, lastErr)
+}
+
+// skipProvesIndexReadable reports whether a skip reason was only reachable
+// AFTER something successfully read this clone's index, which retires any
+// standing IssueTypeRepoIntegrity for it. "remote unchanged" and "recently
+// fetched" are decided after ResolveAutostashConflicts returned cleanly;
+// "unconfirmed conflict" is decided by a fresh re-read that found no unmerged
+// entries. The other skips prove nothing — the lock and rebase reasons return
+// before any index is read, and "unconfirmed index read" is the case where the
+// re-read was abandoned before it finished. Without this, a clone that was
+// repaired keeps a stale integrity issue forever once its remote stops
+// changing, because a skip never reaches the clear-on-successful-pull path.
+func skipProvesIndexReadable(reason string) bool {
+	switch reason {
+	case skipReasonRemoteUnchanged, skipReasonRecentlyFetched, skipReasonUnconfirmedConflict:
+		return true
+	default:
+		return false
+	}
 }
 
 // fetchAndPullLocked runs the fetch-then-pull sequence for pullManagedRepo.

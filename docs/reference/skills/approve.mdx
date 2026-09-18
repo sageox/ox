@@ -1,0 +1,55 @@
+---
+title: "ox skills approve"
+description: "CLI reference for ox skills approve"
+sidebar_position: 91
+---
+
+## ox skills approve
+
+Approve runnable team-skill content for this repository
+
+### Synopsis
+
+Approve runnable team-skill content that ox has withheld or omitted.
+
+Run without arguments to list what is waiting and why, including the exact file
+or line that made each one executable. Read that before deciding: a team skill
+comes from a remote any teammate can push to, and nothing on the pull path
+verifies signatures.
+
+An approval is pinned to the exact bytes you approved and is recorded in
+.sageox/team-skills.approvals.json, which is COMMITTED on purpose — the decision
+belongs to the project, is inherited by teammates, and is reviewable in a pull
+request. If the skill changes afterwards it returns to needing approval.
+
+Approving lets an AI coworker READ the skill. Bundled scripts are still dropped
+unless you also pass --allow-scripts, which is the larger, separate decision to
+put runnable files on disk. Omitting the flag preserves an existing scripts
+grant; pass --allow-scripts=false explicitly to revoke it.
+
+```
+ox skills approve [name...] [flags]
+```
+
+### Options
+
+```
+      --allow-scripts   Also materialize the skill's bundled scripts as runnable files
+  -h, --help            help for approve
+      --json            Emit machine-readable JSON
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
+```
+
+### SEE ALSO
+
+* [ox skills](/skills)	 - Inspect the skills your AI coworkers have

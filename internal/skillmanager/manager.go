@@ -5,11 +5,13 @@ package skillmanager
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -288,7 +290,8 @@ func LegacyBundles(repoRoot string, target adapterprotocol.SkillTarget) ([]strin
 		if !entry.IsDir() {
 			continue
 		}
-		data, readErr := readNoSymlink(filepath.Join(root, entry.Name(), skills.SkillFileName))
+		data, readErr := readRepoFile(repoRoot,
+			filepath.ToSlash(filepath.Join(target.Root, entry.Name(), skills.SkillFileName)))
 		if os.IsNotExist(readErr) {
 			continue
 		}
@@ -629,6 +632,52 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 		next.Targets = append(next.Targets, target)
 		for _, skill := range selectedSkills {
 			skillRoot := filepath.ToSlash(filepath.Join(target.Root, skill.Name))
+			// Defense in depth. A skill name reaches here from a team-context
+			// repository any teammate can push to, and it becomes a PATH:
+			// filepath.Join Cleans, so `..` segments walk out of a skills root that
+			// is only two segments deep, and the reserved-prefix ownership check
+			// below then rubber-stamps the escape because the name still carries the
+			// prefix. teamdocs.ValidTeamSkillName rejects such names at discovery;
+			// this is the backstop for any future source that builds names another
+			// way. Note the containment is against the TARGET root — ensureWithin's
+			// other callers only bound things to repoRoot, and every payload that
+			// matters (.claude/settings.json, .sageox/team-skills.approvals.json)
+			// is comfortably INSIDE the repo.
+			//
+			// Skip the one skill rather than failing: a hostile name must not take
+			// the rest of the catalog down with it, and plan.Warnings is not the
+			// lever here — Apply treats any warning as "do nothing at all", so one
+			// bad name would freeze every skill in the repository.
+			rootPath := filepath.FromSlash(target.Root)
+			skillRootPath := filepath.FromSlash(skillRoot)
+			relSkill, relErr := filepath.Rel(rootPath, skillRootPath)
+			if skill.Name == "" || relErr != nil || relSkill == "." || filepath.Dir(relSkill) != "." ||
+				filepath.IsAbs(relSkill) || ensureWithin(rootPath, skillRootPath) != nil {
+				// Logs the JOINED path, not the raw name: where the write would have
+				// landed is the actionable fact, and it is the thing a responder
+				// greps for after the fact.
+				slog.Warn("skills: refusing skill whose name escapes its target root",
+					"target", key, "root", target.Root, "skill_root", skillRoot)
+				continue
+			}
+			invalidFile := ""
+			hasInvalidFile := false
+			for _, file := range skill.Files {
+				filePath := filepath.FromSlash(file.Path)
+				joined := filepath.Join(skillRootPath, filePath)
+				relFile, fileErr := filepath.Rel(skillRootPath, joined)
+				if file.Path == "" || filepath.IsAbs(filePath) || fileErr != nil || relFile == "." ||
+					ensureWithin(skillRootPath, joined) != nil {
+					invalidFile = file.Path
+					hasInvalidFile = true
+					break
+				}
+			}
+			if hasInvalidFile {
+				slog.Warn("skills: refusing skill whose file escapes its skill root",
+					"target", key, "skill_root", skillRoot, "file", invalidFile)
+				continue
+			}
 			migrationOwned := false
 			skillPath := filepath.ToSlash(filepath.Join(skillRoot, skills.SkillFileName))
 			if _, locked := oldFiles[skillPath]; !locked {
@@ -801,6 +850,11 @@ func Apply(plan *ReconcilePlan) error {
 	if len(plan.Warnings) > 0 {
 		return nil
 	}
+	repo, err := os.OpenRoot(plan.repoRoot)
+	if err != nil {
+		return fmt.Errorf("open repository root: %w", err)
+	}
+	defer func() { _ = repo.Close() }()
 
 	// NEVER materialize a reserved-prefix file without the rule that hides it.
 	//
@@ -834,13 +888,13 @@ func Apply(plan *ReconcilePlan) error {
 	}
 
 	if len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 && !plan.lockChanged {
-		_ = os.Remove(journalPath(plan.repoRoot))
+		_ = removeRootFile(repo, journalRelativePath)
 		return nil
 	}
 	// Serialize the mutation itself. The no-op path above deliberately stays
 	// lock-free: it is the overwhelmingly common case (every healthy prime and
 	// doctor run reaches it) and it writes nothing but a journal removal.
-	unlock, acquired, lockErr := acquireApplyLock(plan.repoRoot)
+	unlock, acquired, lockErr := acquireApplyLockInRoot(repo)
 	if lockErr != nil {
 		return lockErr
 	}
@@ -848,7 +902,7 @@ func Apply(plan *ReconcilePlan) error {
 		return ErrApplyInProgress
 	}
 	defer unlock()
-	if err := ensureDir(plan.repoRoot, filepath.Dir(journalPath(plan.repoRoot))); err != nil {
+	if err := validatePlanActions(repo, plan); err != nil {
 		return err
 	}
 	journalBytes, err := json.MarshalIndent(plan.journal, "", "  ")
@@ -856,62 +910,41 @@ func Apply(plan *ReconcilePlan) error {
 		return err
 	}
 	journalBytes = append(journalBytes, '\n')
-	if err := atomicWriteNoSymlink(journalPath(plan.repoRoot), journalBytes, 0o600); err != nil {
+	if err := atomicWriteInRoot(repo, journalRelativePath, journalBytes, 0o600); err != nil {
 		return fmt.Errorf("write skill apply journal: %w", err)
 	}
 	for _, action := range append(append([]FileAction{}, plan.Creates...), plan.Updates...) {
-		if digestBytes(action.Content) != action.Digest {
-			return fmt.Errorf("skill action content digest changed for %s", action.Path)
-		}
-		path := filepath.Join(plan.repoRoot, filepath.FromSlash(action.Path))
-		if err := ensureDir(plan.repoRoot, filepath.Dir(path)); err != nil {
+		alreadyCurrent, err := validateWriteAction(repo, action)
+		if err != nil {
 			return err
 		}
-		actual, _, readErr := inspectRepoFile(plan.repoRoot, action.Path)
-		if readErr == nil {
-			actualDigest := digestBytes(actual)
-			if actualDigest == action.Digest {
-				continue
-			}
-			if action.PreviousDigest == "" || actualDigest != action.PreviousDigest {
-				return fmt.Errorf("skill file changed after planning: %s", action.Path)
-			}
-		} else if !os.IsNotExist(readErr) {
-			return readErr
-		} else if action.PreviousDigest != "" {
-			return fmt.Errorf("skill file disappeared after planning: %s", action.Path)
+		if alreadyCurrent {
+			continue
 		}
-		if err := atomicWriteNoSymlink(path, action.Content, action.Mode); err != nil {
+		if err := atomicWriteInRoot(repo, action.Path, action.Content, action.Mode); err != nil {
 			return fmt.Errorf("write skill file %s: %w", action.Path, err)
 		}
 	}
 	for _, action := range plan.Removes {
-		path := filepath.Join(plan.repoRoot, filepath.FromSlash(action.Path))
-		actual, _, readErr := inspectRepoFile(plan.repoRoot, action.Path)
-		if os.IsNotExist(readErr) {
+		alreadyAbsent, err := validateRemoveAction(repo, action)
+		if err != nil {
+			return err
+		}
+		if alreadyAbsent {
 			continue
 		}
-		if readErr != nil {
-			return readErr
-		}
-		if digestBytes(actual) != action.PreviousDigest {
-			return fmt.Errorf("skill file changed after planning: %s", action.Path)
-		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		if err := removeRootFile(repo, action.Path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove skill file %s: %w", action.Path, err)
 		}
-		removeEmptyParents(plan.repoRoot, filepath.Dir(path))
+		removeEmptyParentsInRoot(repo, filepath.Dir(filepath.FromSlash(action.Path)))
 	}
 	// Machine-local state is written on every apply — it records what this machine
 	// just materialized, and it is gitignored so writing it costs the user nothing.
-	if err := ensureDir(plan.repoRoot, filepath.Dir(StatePath(plan.repoRoot))); err != nil {
-		return err
-	}
 	stateBytes, err := marshalLocalState(plan.nextLock)
 	if err != nil {
 		return err
 	}
-	if err := atomicWriteNoSymlink(StatePath(plan.repoRoot), stateBytes, 0o600); err != nil {
+	if err := atomicWriteInRoot(repo, stateRelativePath, stateBytes, 0o600); err != nil {
 		return fmt.Errorf("write skills state: %w", err)
 	}
 
@@ -919,21 +952,74 @@ func Apply(plan *ReconcilePlan) error {
 	// changed. Writing it unconditionally would touch a tracked file on every
 	// reconcile — including the daemon's — which is the behavior #732 ruled out.
 	if plan.lockChanged {
-		if err := ensureDir(plan.repoRoot, filepath.Dir(LockPath(plan.repoRoot))); err != nil {
-			return err
-		}
 		lockBytes, err := marshalCommitted(plan.nextLock)
 		if err != nil {
 			return err
 		}
-		if err := atomicWriteNoSymlink(LockPath(plan.repoRoot), lockBytes, 0o644); err != nil {
+		if err := atomicWriteInRoot(repo, lockRelativePath, lockBytes, 0o644); err != nil {
 			return fmt.Errorf("write skills lockfile: %w", err)
 		}
 	}
-	if err := os.Remove(journalPath(plan.repoRoot)); err != nil && !os.IsNotExist(err) {
+	if err := removeRootFile(repo, journalRelativePath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove skill apply journal: %w", err)
 	}
 	return nil
+}
+
+// validatePlanActions rejects a stale plan before Apply writes its recovery
+// journal or any managed target. The per-action checks run again immediately
+// before each mutation because non-cooperating repository writers do not take
+// the apply lock and can still change a path after this preflight.
+func validatePlanActions(root *os.Root, plan *ReconcilePlan) error {
+	for _, action := range append(append([]FileAction{}, plan.Creates...), plan.Updates...) {
+		if _, err := validateWriteAction(root, action); err != nil {
+			return err
+		}
+	}
+	for _, action := range plan.Removes {
+		if _, err := validateRemoveAction(root, action); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateWriteAction(root *os.Root, action FileAction) (alreadyCurrent bool, err error) {
+	if digestBytes(action.Content) != action.Digest {
+		return false, fmt.Errorf("skill action content digest changed for %s", action.Path)
+	}
+	actual, _, readErr := inspectRootFile(root, action.Path)
+	if readErr == nil {
+		actualDigest := digestBytes(actual)
+		if actualDigest == action.Digest {
+			return true, nil
+		}
+		if action.PreviousDigest == "" || actualDigest != action.PreviousDigest {
+			return false, fmt.Errorf("skill file changed after planning: %s", action.Path)
+		}
+		return false, nil
+	}
+	if !os.IsNotExist(readErr) {
+		return false, readErr
+	}
+	if action.PreviousDigest != "" {
+		return false, fmt.Errorf("skill file disappeared after planning: %s", action.Path)
+	}
+	return false, nil
+}
+
+func validateRemoveAction(root *os.Root, action FileAction) (alreadyAbsent bool, err error) {
+	actual, _, readErr := inspectRootFile(root, action.Path)
+	if os.IsNotExist(readErr) {
+		return true, nil
+	}
+	if readErr != nil {
+		return false, readErr
+	}
+	if digestBytes(actual) != action.PreviousDigest {
+		return false, fmt.Errorf("skill file changed after planning: %s", action.Path)
+	}
+	return false, nil
 }
 
 // DesiredUpdate computes a desired-state mutation while the project manifest
@@ -1197,8 +1283,7 @@ func bundleIDs(refs []BundleRef) []string {
 }
 
 func readLock(repoRoot string) (lockFile, []byte, error) {
-	path := LockPath(repoRoot)
-	data, err := readNoSymlink(path)
+	data, err := readRepoFile(repoRoot, lockRelativePath)
 	if os.IsNotExist(err) {
 		return lockFile{}, nil, nil
 	}
@@ -1243,7 +1328,7 @@ func readLock(repoRoot string) (lockFile, []byte, error) {
 }
 
 func readJournal(repoRoot string) (applyJournal, error) {
-	data, err := readNoSymlink(journalPath(repoRoot))
+	data, err := readRepoFile(repoRoot, journalRelativePath)
 	if os.IsNotExist(err) {
 		return applyJournal{}, nil
 	}
@@ -1312,7 +1397,7 @@ func marshalLocalState(lock lockFile) ([]byte, error) {
 }
 
 func readLocalState(repoRoot string) (localState, error) {
-	data, err := readNoSymlink(StatePath(repoRoot))
+	data, err := readRepoFile(repoRoot, stateRelativePath)
 	if os.IsNotExist(err) {
 		return localState{}, nil
 	}
@@ -1402,19 +1487,12 @@ func validLegacyStamp(data []byte) bool {
 }
 
 func inspectRepoFile(repoRoot, relative string) ([]byte, fs.FileMode, error) {
-	path := filepath.Join(repoRoot, filepath.FromSlash(relative))
-	if err := ensureWithin(repoRoot, path); err != nil {
-		return nil, 0, err
-	}
-	info, err := os.Lstat(path)
+	root, err := os.OpenRoot(repoRoot)
 	if err != nil {
 		return nil, 0, err
 	}
-	if info.Mode()&fs.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, 0, fmt.Errorf("%w: %s", ErrNonRegularFile, path)
-	}
-	data, err := os.ReadFile(path)
-	return data, info.Mode(), err
+	defer func() { _ = root.Close() }()
+	return inspectRootFile(root, relative)
 }
 
 func readRepoFile(repoRoot, relative string) ([]byte, error) {
@@ -1431,35 +1509,137 @@ func readRepoFile(repoRoot, relative string) ([]byte, error) {
 // failure.
 var ErrNonRegularFile = errors.New("refusing non-regular or symlink file")
 
-func readNoSymlink(path string) ([]byte, error) {
-	info, err := os.Lstat(path)
+// openRepoDir returns a descriptor pinned to one real directory beneath root.
+// Each component is checked with Lstat, then identity-checked after OpenRoot so
+// a concurrent directory-to-symlink swap cannot redirect later operations.
+func openRepoDir(root *os.Root, relative string, create bool) (*os.Root, error) {
+	clean := filepath.Clean(filepath.FromSlash(relative))
+	if filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" || clean == ".." ||
+		strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("path escapes repository")
+	}
+	current, err := root.OpenRoot(".")
 	if err != nil {
 		return nil, err
 	}
-	if info.Mode()&fs.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w: %s", ErrNonRegularFile, path)
+	for _, part := range strings.Split(clean, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		info, statErr := current.Lstat(part)
+		if os.IsNotExist(statErr) && create {
+			if mkErr := current.Mkdir(part, 0o755); mkErr != nil && !os.IsExist(mkErr) {
+				_ = current.Close()
+				return nil, mkErr
+			}
+			info, statErr = current.Lstat(part)
+		}
+		if statErr != nil {
+			_ = current.Close()
+			return nil, statErr
+		}
+		if !info.IsDir() {
+			_ = current.Close()
+			return nil, fmt.Errorf("refusing non-directory or symlink path component %s", part)
+		}
+		child, openErr := current.OpenRoot(part)
+		if openErr != nil {
+			_ = current.Close()
+			return nil, openErr
+		}
+		actual, actualErr := child.Stat(".")
+		if actualErr != nil || !os.SameFile(info, actual) {
+			_ = child.Close()
+			_ = current.Close()
+			if actualErr != nil {
+				return nil, actualErr
+			}
+			return nil, fmt.Errorf("repository directory changed while opening %s", part)
+		}
+		_ = current.Close()
+		current = child
 	}
-	return os.ReadFile(path)
+	return current, nil
 }
 
-func atomicWriteNoSymlink(path string, content []byte, mode fs.FileMode) error {
-	if info, err := os.Lstat(path); err == nil && info.Mode()&fs.ModeSymlink != 0 {
-		return fmt.Errorf("refusing symlink %s", path)
-	} else if err != nil && !os.IsNotExist(err) {
-		return err
+func openRepoParent(root *os.Root, relative string, create bool) (*os.Root, string, error) {
+	clean := filepath.Clean(filepath.FromSlash(relative))
+	if clean == "." || filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" || clean == ".." ||
+		strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return nil, "", fmt.Errorf("path escapes repository")
 	}
-	// fileutil.AtomicWriteBytes intentionally follows symlinks for instruction
-	// files. Managed skill paths have the opposite contract, so use a local
-	// temp+rename: rename replaces a raced symlink instead of following it.
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".ox-skill-*")
+	base := filepath.Base(clean)
+	if base == "." || base == ".." || base == "" {
+		return nil, "", fmt.Errorf("invalid repository file path %q", relative)
+	}
+	parent, err := openRepoDir(root, filepath.Dir(clean), create)
+	return parent, base, err
+}
+
+func inspectRootFile(root *os.Root, relative string) ([]byte, fs.FileMode, error) {
+	parent, base, err := openRepoParent(root, relative, false)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = parent.Close() }()
+	info, err := parent.Lstat(base)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, 0, fmt.Errorf("%w: %s", ErrNonRegularFile, relative)
+	}
+	file, err := parent.Open(base)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = file.Close() }()
+	actual, err := file.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	if !actual.Mode().IsRegular() || !os.SameFile(info, actual) {
+		return nil, 0, fmt.Errorf("%w: %s changed while opening", ErrNonRegularFile, relative)
+	}
+	data, err := io.ReadAll(file)
+	return data, actual.Mode(), err
+}
+
+func createRootTemp(root *os.Root) (*os.File, string, error) {
+	for range 10 {
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return nil, "", err
+		}
+		name := ".ox-skill-" + hex.EncodeToString(nonce[:])
+		file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if os.IsExist(err) {
+			continue
+		}
+		return file, name, err
+	}
+	return nil, "", fmt.Errorf("skill temporary file name collision")
+}
+
+func atomicWriteInRoot(root *os.Root, relative string, content []byte, mode fs.FileMode) error {
+	parent, base, err := openRepoParent(root, relative, true)
 	if err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
+	defer func() { _ = parent.Close() }()
+	if info, statErr := parent.Lstat(base); statErr == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing non-regular or symlink file %s", relative)
+	} else if statErr != nil && !os.IsNotExist(statErr) {
+		return statErr
+	}
+	tmp, tmpName, err := createRootTemp(parent)
+	if err != nil {
+		return err
+	}
 	success := false
 	defer func() {
 		if !success {
-			_ = os.Remove(tmpPath)
+			_ = parent.Remove(tmpName)
 		}
 	}()
 	if _, err := tmp.Write(content); err != nil {
@@ -1470,17 +1650,17 @@ func atomicWriteNoSymlink(path string, content []byte, mode fs.FileMode) error {
 		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Chmod(mode); err != nil {
+	if err := tmp.Chmod(mode.Perm()); err != nil {
 		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := parent.Rename(tmpName, base); err != nil {
 		return err
 	}
-	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+	if dir, err := parent.Open("."); err == nil {
 		_ = dir.Sync()
 		_ = dir.Close()
 	}
@@ -1488,32 +1668,13 @@ func atomicWriteNoSymlink(path string, content []byte, mode fs.FileMode) error {
 	return nil
 }
 
-func ensureDir(root, dir string) error {
-	if err := ensureWithin(root, dir); err != nil {
+func removeRootFile(root *os.Root, relative string) error {
+	parent, base, err := openRepoParent(root, relative, false)
+	if err != nil {
 		return err
 	}
-	rel, _ := filepath.Rel(root, dir)
-	cur := root
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		if part == "." || part == "" {
-			continue
-		}
-		cur = filepath.Join(cur, part)
-		info, err := os.Lstat(cur)
-		if os.IsNotExist(err) {
-			if err := os.Mkdir(cur, 0o755); err != nil && !os.IsExist(err) {
-				return err
-			}
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if info.Mode()&fs.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("refusing non-directory or symlink path %s", cur)
-		}
-	}
-	return nil
+	defer func() { _ = parent.Close() }()
+	return parent.Remove(base)
 }
 
 func checkDir(root, dir string) error {
@@ -1549,9 +1710,17 @@ func ensureWithin(root, target string) error {
 	return nil
 }
 
-func removeEmptyParents(repoRoot, dir string) {
-	for dir != repoRoot {
-		if err := os.Remove(dir); err != nil {
+func removeEmptyParentsInRoot(root *os.Root, relative string) {
+	dir := filepath.Clean(relative)
+	if filepath.IsAbs(dir) || dir == ".." || strings.HasPrefix(dir, ".."+string(filepath.Separator)) {
+		return
+	}
+	for dir != "." && dir != "" {
+		info, err := root.Lstat(dir)
+		if err != nil || !info.IsDir() {
+			return
+		}
+		if err := root.Remove(dir); err != nil {
 			return
 		}
 		dir = filepath.Dir(dir)

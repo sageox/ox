@@ -104,10 +104,9 @@ func TestTriggerGCAsync_SingleFlight(t *testing.T) {
 // TestTriggerGC_RemainsSynchronousAfterRefactor proves TriggerGC's external
 // contract is unchanged by the runTriggerGC extraction: it still blocks
 // until the reclone finishes, still returns the same legacy fields, and
-// never sets the new async-only fields. defaultKBDoctorGC
-// (cmd/ox/doctor_kb.go) depends on this: it calls TriggerGC and
-// immediately rechecks disk state, which only works if GC has actually
-// finished by the time the call returns.
+// never sets the new async-only fields. CLI binaries that predate
+// trigger_gc_async depend on this: their `ox doctor --gc` prints the
+// reclone counts from this response.
 func TestTriggerGC_RemainsSynchronousAfterRefactor(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git clone operations")
@@ -158,7 +157,7 @@ func TestTriggerGC_RemainsSynchronousAfterRefactor(t *testing.T) {
 		"gcInProgress must be released synchronously before TriggerGC returns")
 
 	// the reclone must have actually completed by the time TriggerGC
-	// returns — this is the exact invariant defaultKBDoctorGC depends on.
+	// returns — the invariant those older CLIs depend on.
 	assert.FileExists(t, filepath.Join(cloneDir, "SOUL.md"))
 	assert.NoDirExists(t, cloneDir+".new")
 	assert.NoDirExists(t, cloneDir+".old")
