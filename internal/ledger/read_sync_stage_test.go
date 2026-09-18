@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -124,4 +125,53 @@ func TestReadSyncColdFailureReportsTheStageItKept(t *testing.T) {
 			require.Equal(t, int32(1), transfers["c"].Load())
 		})
 	}
+}
+
+// Failure prevented: an object is renamed into place and only then does its
+// directory sync fail, so the attempt reports it as a stub still to transfer
+// while a walk of the stage — verification's, or the next attempt's — counts
+// it hydrated. The failure is still reported; the count says what is on disk.
+func TestReadSyncColdFailureCountsAnObjectWhoseDirectorySyncFailed(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("directory permissions must reject reads for this failure injection")
+	}
+	content := []byte("object in place before its directory sync fails\n")
+	var f *readFixture
+	var transfers atomic.Int32
+	f = newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			grantReadLFSBatch(t, w, r)
+			return
+		}
+		transfers.Add(1)
+		// Hydration's walk has read this directory by now. Without read
+		// permission the rename into it still succeeds, and the directory sync
+		// after it cannot open it.
+		assert.NoError(t, os.Chmod(filepath.Join(readStagePath(f.opts.Path), "sessions/cold"), 0300))
+		_, _ = w.Write(content)
+	})
+	commitReadLFSPointer(t, f, "sessions/cold/session.md", content)
+	stage := readStagePath(f.opts.Path)
+	dir := filepath.Join(stage, "sessions/cold")
+	t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
+
+	result := ReadSync(context.Background(), f.opts)
+	if probe, err := os.Open(dir); err == nil {
+		_ = probe.Close()
+		t.Fatal("permission injection did not prevent reading the directory")
+	}
+	require.False(t, result.Ready, "%+v", result)
+	require.NotEmpty(t, result.ErrorClass, "the failed sync is still reported")
+	require.NoDirExists(t, f.opts.Path)
+	require.True(t, result.Resumable)
+	require.Equal(t, ReadHydration{State: "complete", Required: 1, Completed: 1}, result.Hydration, "%+v", result)
+
+	require.NoError(t, os.Chmod(dir, 0700))
+	transport, err := gitserver.NewReadTransport(f.opts.Endpoint, f.opts.RepoID, f.opts.ReadURL)
+	require.NoError(t, err)
+	onDisk := verifyReadCheckout(context.Background(), f.opts, transport, stage, result.Coverage.Paths)
+	require.Equal(t, onDisk.Hydration, result.Hydration, "the count is what a walk of the stage finds")
+	resumed := ReadSync(context.Background(), f.opts)
+	require.True(t, resumed.Ready, "%+v", resumed)
+	require.Equal(t, int32(1), transfers.Load(), "the object in place is not transferred again")
 }

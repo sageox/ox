@@ -62,9 +62,11 @@ type ReadSyncResult struct {
 	// Additive within schema_version 1; consumers keep matching on ErrorClass.
 	ErrorDetail *ReadFailureDetail `json:"error_detail,omitempty"`
 	// Resumable reports that the checkout is unpublished and this attempt left
-	// a stage bound to this repo identity, endpoint, and read URL. The next
-	// attempt continues from that stage, rather than cloning from empty, if the
-	// stage still verifies. Additive within schema_version 1.
+	// a stage bound to this repo identity, endpoint, and read URL. It describes
+	// the stage as the attempt left it, as Ready describes the checkout: the
+	// next attempt still proves the stage's worktree before continuing from it
+	// rather than cloning from empty, and replaces one that no longer matches
+	// its HEAD. Additive within schema_version 1.
 	Resumable bool `json:"resumable,omitempty"`
 }
 
@@ -144,7 +146,10 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 		workPath = readStagePath(opts.Path)
 		// Whichever return ends this attempt, report whether it leaves a stage
 		// to continue: that is how a consumer tells resume from restart. Publishing
-		// renames the stage away, so a published checkout never reports one.
+		// renames the stage away, so a published checkout never reports one. Only
+		// the binding is checked, not the worktree: proving that hashes every
+		// file, which an attempt whose budget expired can no longer do, and the
+		// next attempt proves it under the lock before trusting a byte of it.
 		defer func() { result.Resumable = boundReadStage(workPath, opts) }()
 		clone = !resumableReadStage(ctx, transport, workPath, opts, dirs)
 		if clone {
@@ -847,9 +852,11 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 				}
 				continue
 			}
-			if err := materializeEmptyReadObject(filepath.Join(dir, f.path)); err == nil {
+			landed, err := materializeEmptyReadObject(filepath.Join(dir, f.path))
+			if landed {
 				materialized++
-			} else if !skips.skip(ctx, err) {
+			}
+			if err != nil && !skips.skip(ctx, err) {
 				return err
 			}
 			continue
@@ -1016,7 +1023,9 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 }
 
 // materializeReadGrant downloads one granted file, and reports whether its
-// object is now in place and the failure this batch must account for.
+// object is now in place and the failure this batch must account for. The two
+// are independent: an object whose directory sync failed after its rename is
+// in place and reports that failure.
 //
 // A failure that stops hydration cancels the batch's other downloads, so a
 // grant the server has stopped honoring does not keep requesting objects that
@@ -1025,16 +1034,15 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 // exactly as it would have with one transfer at a time. The caller's own
 // cancellation is not that — ctx carries it too — and every download reports it.
 func materializeReadGrant(ctx, downloads context.Context, stop context.CancelFunc, dir string, grant readGrant) (bool, error) {
-	err := materializeReadObject(downloads, grant.action, dir, grant.file.path, grant.file.ref)
+	landed, err := materializeReadObject(downloads, grant.action, dir, grant.file.path, grant.file.ref)
 	switch {
 	case err == nil:
-		return true, nil
 	case downloads.Err() != nil && ctx.Err() == nil && errors.Is(err, context.Canceled):
-		return false, nil
+		err = nil
 	case stopsReadHydration(ctx, err):
 		stop()
 	}
-	return false, err
+	return landed, err
 }
 
 // downloadReadObject streams one object into f, retrying a transport failure.
@@ -1053,13 +1061,14 @@ func downloadReadObject(ctx context.Context, action *lfs.Action, f *os.File, ref
 	})
 }
 
-// materializeReadObject downloads one object into rel under dir. rel is the
-// repo-relative path a failure names; dir never appears in the detail.
-func materializeReadObject(ctx context.Context, action *lfs.Action, dir, rel string, ref lfs.FileRef) error {
+// materializeReadObject downloads one object into rel under dir, and reports
+// whether the object reached rel. rel is the repo-relative path a failure
+// names; dir never appears in the detail.
+func materializeReadObject(ctx context.Context, action *lfs.Action, dir, rel string, ref lfs.FileRef) (bool, error) {
 	path := filepath.Join(dir, rel)
 	f, err := os.CreateTemp(filepath.Dir(path), ".ox-read-object-*")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer os.Remove(f.Name())
 	defer f.Close()
@@ -1068,23 +1077,23 @@ func materializeReadObject(ctx context.Context, action *lfs.Action, dir, rel str
 		// object, and readErrorClass reports them ahead of any status. Returning
 		// them undecorated keeps the class and the detail describing one failure.
 		if errors.Is(err, auth.ErrReadTokenUnavailable) || ctx.Err() != nil {
-			return err
+			return false, err
 		}
 		var httpErr *lfs.HTTPError
 		if errors.As(err, &httpErr) {
 			// Wrapping keeps readErrorClass's own HTTPError handling: 401/403
 			// stays "denied", every other status stays "missing_hydration".
-			return &readFailure{err: err, detail: ReadFailureDetail{Reason: "download_refused",
+			return false, &readFailure{err: err, detail: ReadFailureDetail{Reason: "download_refused",
 				Path: rel, OID: ref.BareOID(), ServerCode: httpErr.StatusCode}}
 		}
-		return missingHydration(ReadFailureDetail{Reason: "download_failed", Path: rel, OID: ref.BareOID()})
+		return false, missingHydration(ReadFailureDetail{Reason: "download_failed", Path: rel, OID: ref.BareOID()})
 	}
 	info, err := f.Stat()
 	if err != nil {
-		return missingHydration(ReadFailureDetail{Reason: "download_stat_failed", Path: rel, OID: ref.BareOID()})
+		return false, missingHydration(ReadFailureDetail{Reason: "download_stat_failed", Path: rel, OID: ref.BareOID()})
 	}
 	if info.Size() != ref.Size {
-		return missingHydration(ReadFailureDetail{Reason: "downloaded_size_mismatch", Path: rel, OID: ref.BareOID(),
+		return false, missingHydration(ReadFailureDetail{Reason: "downloaded_size_mismatch", Path: rel, OID: ref.BareOID(),
 			ExpectedSize: readSize(ref.Size), ActualSize: readSize(info.Size())})
 	}
 	return commitReadObject(f, path)
@@ -1093,28 +1102,31 @@ func materializeReadObject(ctx context.Context, action *lfs.Action, dir, rel str
 // materializeEmptyReadObject replaces a size-0 pointer with the empty file it
 // describes, through the same durable path as a downloaded object, so a ready
 // receipt never covers a replacement that a crash could roll back to the pointer.
-func materializeEmptyReadObject(path string) error {
+func materializeEmptyReadObject(path string) (bool, error) {
 	f, err := os.CreateTemp(filepath.Dir(path), ".ox-read-object-*")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer os.Remove(f.Name())
 	defer f.Close()
 	return commitReadObject(f, path)
 }
 
-// commitReadObject makes the fully written temp file f durable at path.
-func commitReadObject(f *os.File, path string) error {
+// commitReadObject makes the fully written temp file f durable at path, and
+// reports whether f reached path. The two differ when the directory sync after
+// the rename fails: the object is in place, so a worktree walk counts it
+// hydrated, but a crash could still roll it back to the stub.
+func commitReadObject(f *os.File, path string) (bool, error) {
 	if err := f.Sync(); err != nil {
-		return err
+		return false, err
 	}
 	if err := f.Close(); err != nil {
-		return err
+		return false, err
 	}
 	if err := os.Rename(f.Name(), path); err != nil {
-		return err
+		return false, err
 	}
-	return syncReadDir(filepath.Dir(path))
+	return true, syncReadDir(filepath.Dir(path))
 }
 
 func verifyReadCheckout(ctx context.Context, opts ReadSyncOptions, transport *gitserver.ReadTransport, dir string, dirs []string) ReadSyncResult {
