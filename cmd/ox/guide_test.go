@@ -95,26 +95,59 @@ func TestGuideRawOutput(t *testing.T) {
 	}
 }
 
-// Invalid format combinations, missing topics, and failed writes must not report success.
-func TestGuideOutputErrors(t *testing.T) {
+// The default format must remain readable terminal output when JSON mode is off.
+func TestGuideTerminalOutput(t *testing.T) {
 	previousConfig := cfg
-	cfg = &config.Config{JSON: true}
+	cfg = &config.Config{}
 	t.Cleanup(func() { cfg = previousConfig })
 
 	for _, tt := range []struct {
-		name      string
-		args      []string
-		raw       bool
-		failWrite bool
-		wantError string
+		name string
+		args []string
+		want string
 	}{
-		{name: "catalog format conflict", raw: true, wantError: "--raw and --json cannot be combined"},
-		{name: "topic format conflict", args: []string{"team-rules"}, raw: true, wantError: "--raw and --json cannot be combined"},
-		{name: "missing topic", args: []string{"not-a-guide"}, wantError: `no bundled guide named "not-a-guide". Available:`},
-		{name: "catalog write failure", failWrite: true, wantError: "write failed"},
-		{name: "topic write failure", args: []string{"team-rules"}, failWrite: true, wantError: "write failed"},
+		{name: "catalog", want: "ox guides"},
+		{name: "topic", args: []string{"team-rules"}, want: "Team Rules"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("raw", false, "")
+			var output bytes.Buffer
+			cmd.SetOut(&output)
+			require.NoError(t, guideCmd.RunE(cmd, tt.args))
+			visible := stripANSI(output.String())
+			require.Contains(t, visible, tt.want)
+			require.NotContains(t, visible, "audience: both")
+			require.False(t, json.Valid(output.Bytes()), "default output should be terminal text")
+		})
+	}
+}
+
+// Invalid format combinations, missing topics, and failed writes must not report success.
+func TestGuideOutputErrors(t *testing.T) {
+	previousConfig := cfg
+	t.Cleanup(func() { cfg = previousConfig })
+
+	for _, tt := range []struct {
+		name       string
+		args       []string
+		jsonOutput bool
+		raw        bool
+		failWrite  bool
+		wantError  string
+	}{
+		{name: "catalog format conflict", jsonOutput: true, raw: true, wantError: "--raw and --json cannot be combined"},
+		{name: "topic format conflict", args: []string{"team-rules"}, jsonOutput: true, raw: true, wantError: "--raw and --json cannot be combined"},
+		{name: "missing topic", args: []string{"not-a-guide"}, jsonOutput: true, wantError: `no bundled guide named "not-a-guide". Available:`},
+		{name: "JSON catalog write failure", jsonOutput: true, failWrite: true, wantError: "write failed"},
+		{name: "JSON topic write failure", args: []string{"team-rules"}, jsonOutput: true, failWrite: true, wantError: "write failed"},
+		{name: "raw catalog write failure", raw: true, failWrite: true, wantError: "write failed"},
+		{name: "raw topic write failure", args: []string{"team-rules"}, raw: true, failWrite: true, wantError: "write failed"},
+		{name: "terminal catalog write failure", failWrite: true, wantError: "write failed"},
+		{name: "terminal topic write failure", args: []string{"team-rules"}, failWrite: true, wantError: "write failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg = &config.Config{JSON: tt.jsonOutput}
 			cmd := &cobra.Command{}
 			cmd.Flags().Bool("raw", tt.raw, "")
 			var output bytes.Buffer
