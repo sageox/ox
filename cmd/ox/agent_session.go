@@ -547,27 +547,20 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	var processResult *agentSessionResult
 	if state.SessionFile != "" {
 		processStart := time.Now()
-		if state.WatchMode == "tail" {
-			// IPC stop is advisory. Wait for the writer's file lock and reload
-			// its final cursor before draining, so an in-flight batch is not
-			// captured twice. A lock failure preserves the recording for retry.
-			err = fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
-				latest, loadErr := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
-				if loadErr != nil {
-					return loadErr
-				}
-				if latest == nil {
-					return session.ErrNotRecording
-				}
-				latest.SessionFile = state.SessionFile
-				state = latest
-				var processErr error
-				processResult, processErr = processAgentSession(projectRoot, state)
-				return processErr
-			})
-		} else {
-			processResult, err = processAgentSession(projectRoot, state)
-		}
+		// Serialize with the raw.jsonl writer's file lock so processAgentSession
+		// (RecoverRawAppend + drain) never runs concurrently with a hook or
+		// watcher still appending a batch under the same lock — stop is
+		// advisory and a capture can be in flight when it fires.
+		err = fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+			latest, loadErr := reloadRecordingForFinalDrain(projectRoot, state)
+			if loadErr != nil {
+				return loadErr
+			}
+			state = latest
+			var processErr error
+			processResult, processErr = processAgentSession(projectRoot, state)
+			return processErr
+		})
 		timing["process_ms"] = time.Since(processStart).Milliseconds()
 		if err != nil {
 			// set marker so future ox agent prime knows doctor is needed
@@ -1023,6 +1016,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// resulting commit will break LFS linkage and the daemon's anti-entropy
 	// will start clobbering. See the 2026-04-25 post-mortem (bd ox-4ncz).
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	if err := session.RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
+		return nil, err
+	}
 	hasIncrementalEntries := rawJSONLHasEntries(rawPath)
 
 	if hasIncrementalEntries {
@@ -2466,4 +2462,24 @@ func isGenericDropFileEmpty(state *session.RecordingState) bool {
 		return errors.Is(err, os.ErrNotExist)
 	}
 	return info.Size() == 0
+}
+
+// reloadRecordingForFinalDrain must run under the expected session's raw lock.
+// Hooks, like watchers, may commit a batch while stop waits for that lock.
+func reloadRecordingForFinalDrain(projectRoot string, expected *session.RecordingState) (*session.RecordingState, error) {
+	latest, err := session.LoadRecordingStateForAgent(projectRoot, expected.AgentID)
+	if err != nil {
+		return nil, err
+	}
+	if latest == nil {
+		return nil, session.ErrNotRecording
+	}
+	if latest.SessionPath != expected.SessionPath || latest.SessionID != expected.SessionID {
+		return nil, fmt.Errorf("recording changed while waiting to finalize")
+	}
+	// Stop may just have discovered a file that did not exist at recording start.
+	if expected.SessionFile != "" {
+		latest.SessionFile = expected.SessionFile
+	}
+	return latest, nil
 }
