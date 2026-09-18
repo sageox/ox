@@ -33,6 +33,33 @@ func TestRefuseSourcePublicationRebaseAllowsPullWithoutUpstream(t *testing.T) {
 		"no upstream means nothing is pending against it; refusing would wedge the pull forever")
 }
 
+// TestRefuseSourcePublicationRebaseErrorsWhenUpstreamConfiguredButUnresolvable
+// pins the other half of the no-upstream escape hatch. A branch that HAS
+// branch.*.remote/branch.*.merge but whose tracking ref cannot be resolved
+// (never fetched, refs pruned) fails `rev-parse @{upstream}` with the same
+// exit status as having no upstream at all. Treating it as "nothing to
+// compare" would silently skip this entire refusal and let a pending sourced
+// session be auto-rebased.
+// Failure prevented: source-bearing sessions rebased without reconciliation.
+func TestRefuseSourcePublicationRebaseErrorsWhenUpstreamConfiguredButUnresolvable(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "--quiet", "--initial-branch=main")
+	run(t, repo, "git", "config", "user.email", "test@test.local")
+	run(t, repo, "git", "config", "user.name", "Test")
+	run(t, repo, "git", "config", "commit.gpgsign", "false")
+	addCommit(t, repo, "AGENTS.md", "team\n", "seed")
+	run(t, repo, "git", "remote", "add", "origin", "https://127.0.0.1:1/x.git")
+	// Upstream configured, but origin/main was never fetched, so the tracking
+	// ref does not exist locally.
+	run(t, repo, "git", "config", "branch.main.remote", "origin")
+	run(t, repo, "git", "config", "branch.main.merge", "refs/heads/main")
+
+	err := RefuseSourcePublicationRebase(context.Background(), repo)
+	require.Error(t, err,
+		"a configured upstream that cannot be resolved must propagate, not silently skip the refusal")
+	require.ErrorContains(t, err, "inspect pending source publication")
+}
+
 func TestSourcePublicationDoesNotRebaseAfterRemoteDeletion(t *testing.T) {
 	repo, remote := initBareRemoteRepo(t)
 	dir := filepath.Join(repo, "sessions", "test")

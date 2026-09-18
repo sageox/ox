@@ -35,12 +35,26 @@ func CheckSourcePublication(ctx context.Context, repo string) error {
 // Git could replay their files without a textual conflict. Call before every
 // automatic pull/rebase, including ordinary daemon sync and doctor repair.
 func RefuseSourcePublicationRebase(ctx context.Context, repo string) error {
-	// No tracking branch means there is no upstream to compare against, so
+	// No configured upstream means there is nothing to compare against, so
 	// nothing can be pending publication against it. Refusing here instead
 	// would permanently block the pull for every managed clone that has a
 	// remote but no configured upstream -- a legitimate state, and one no
 	// amount of retrying resolves.
-	if _, err := RunGit(ctx, repo, "rev-parse", "--verify", "--quiet", "@{upstream}"); err != nil {
+	//
+	// Decided on branch config, NOT on whether `@{upstream}` resolves: those
+	// two failures are indistinguishable by exit status, and a CONFIGURED
+	// upstream whose tracking ref is missing (never fetched, refs pruned) must
+	// stay an error. Treating that as "no upstream" would silently skip this
+	// whole refusal and let a pending sourced session be auto-rebased.
+	branch, err := RunGit(ctx, repo, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return fmt.Errorf("inspect current branch: %w", err)
+	}
+	if strings.TrimSpace(branch) == "HEAD" {
+		// Detached HEAD carries no upstream by definition.
+		return nil
+	}
+	if _, err := RunGit(ctx, repo, "config", "--get", "branch."+strings.TrimSpace(branch)+".merge"); err != nil {
 		return nil
 	}
 	paths, err := RunGit(ctx, repo, "diff", "--name-only", "-z", "@{upstream}...HEAD")
