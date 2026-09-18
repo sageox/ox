@@ -73,14 +73,33 @@ func TestCodexRunnerDrainsLargeStderr(t *testing.T) {
 	assert.Equal(t, "complete", result.Output)
 }
 
+// TestCodexRunnerCancellation: canceling Run kills a prompt-bearing child that
+// is already running. The child announces itself before it is canceled, because
+// the probe shares the run's deadline: a short timeout alone can expire during
+// the probe and pass without ever reaching the worker.
 func TestCodexRunnerCancellation(t *testing.T) {
-	script := filepath.Join(t.TempDir(), "codex")
-	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nif [ \"$2\" = \"--help\" ]; then echo \"--sandbox --ephemeral --color --config\"; exit; fi\nsleep 30\n"), 0700))
+	dir := t.TempDir()
+	script := filepath.Join(dir, "codex")
+	started := filepath.Join(dir, "worker-started")
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nif [ \"$2\" = \"--help\" ]; then echo \"--sandbox --ephemeral --color --config\"; exit; fi\n: > \""+started+"\"\nsleep 30\n"), 0700))
 	r := &CodexRunner{binaryPath: script, logger: slog.Default()}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for ctx.Err() == nil {
+			if _, err := os.Stat(started); err == nil {
+				cancel()
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
 	start := time.Now()
-	_, err := r.Run(context.Background(), RunRequest{TimeoutOverride: 50 * time.Millisecond})
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	assert.Less(t, time.Since(start), 2*time.Second)
+	// The override only bounds a broken run; cancellation is what ends this one.
+	_, err := r.Run(ctx, RunRequest{TimeoutOverride: 10 * time.Second})
+	require.ErrorIs(t, err, context.Canceled)
+	require.FileExists(t, started)
+	assert.Less(t, time.Since(start), 5*time.Second)
 }
 
 // TestCodexRunnerTimeoutBoundsCapabilityProbe: a slow `codex exec --help` must
