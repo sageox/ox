@@ -53,7 +53,11 @@
   function post(path, payload, ok) {
     if (offline) { offlineNotice(); return; }
     fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Review-Token': token }, body: JSON.stringify(payload) })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); if (ok) ok(); })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json().catch(function () { return {}; });
+      })
+      .then(function (data) { if (ok) ok(data || {}); })
       .catch(function (e) {
         // a network-level failure means the server is gone — flip to
         // disconnected mode (marks stay in localStorage; nothing is lost)
@@ -209,7 +213,12 @@
         '<div class="rev-row"><button class="rev-accept">Accept</button><button class="rev-reopen">Reopen</button></div>';
       placePop(el);
       pop.querySelector('.rev-accept').onclick = function () { post('/accept', { anchor: a }, function () { closePop(); }); };
-      pop.querySelector('.rev-reopen').onclick = function () { post('/reopen', { anchor: a, note: pop.querySelector('.rev-note').value.trim() }, function () { closePop(); }); };
+      pop.querySelector('.rev-reopen').onclick = function () {
+        post('/reopen', { anchor: a, note: pop.querySelector('.rev-note').value.trim() }, function (data) {
+          closePop();
+          if (data.notified === false) toast('Reopened — but the plan’s authoring coworker could not be notified automatically. Tell them directly.');
+        });
+      };
       if (ev) ev.stopPropagation();
       return;
     }
@@ -262,7 +271,10 @@
     if (!who) { alert('Set your name first (the "Set name" button in the bar) — feedback is attributed per reviewer.'); return; }
     var p = { slug: slug, reviewer: who, items: items };
     if (live) {
-      post('/feedback', p, function () { marks = {}; save(); /* SSE reload will repaint */ });
+      post('/feedback', p, function (data) {
+        marks = {}; save(); /* SSE reload will repaint */
+        if (data.notified === false) toast('Sent — but the plan’s authoring coworker could not be notified automatically. Tell them directly.');
+      });
       return;
     }
     exportJSON(p);

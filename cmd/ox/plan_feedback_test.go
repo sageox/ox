@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/agenttask"
@@ -237,5 +240,43 @@ func TestEnqueuePlanFeedbackTask_GuardsEmptyArgs(t *testing.T) {
 		if n := len(activeTasks(t, root)); n != 0 {
 			t.Errorf("guarded no-op calls must not enqueue, got %d", n)
 		}
+	}
+}
+
+// TestEnqueuePlanFeedbackTask_SurfacesEnqueueFailure verifies an actual enqueue
+// failure (as opposed to "nobody to notify") is (a) returned to the caller and
+// (b) logged at Warn or above — not swallowed at Debug where nothing shows at
+// default log level.
+// Failure prevented (ox#968): human review feedback is saved, the human is
+// told it landed, and the authoring coworker is never notified — with no trace
+// at default log level and no way for a caller to know it happened.
+func TestEnqueuePlanFeedbackTask_SurfacesEnqueueFailure(t *testing.T) {
+	root := t.TempDir()
+	planDir := filepath.Join(root, "plan")
+	if err := os.MkdirAll(planDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestPlanMeta(t, planDir, &plan.Provenance{AgentID: "Ox#1", AgentType: "claude"})
+	// A regular file at .sageox makes agenttask.NewStore's MkdirAll fail on
+	// every attempt — a deterministic, structural enqueue failure (the retry
+	// inside enqueuePlanFeedbackTask cannot paper over it).
+	if err := os.WriteFile(filepath.Join(root, ".sageox"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	// Gate the handler at Warn: if the failure is still logged at Debug (the
+	// bug), nothing lands in `logs` and the assertion below fails — proving
+	// the level was actually raised, not just that some log call exists.
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	err := enqueuePlanFeedbackTask(root, planDir, "p", 1)
+	if err == nil {
+		t.Fatal("want an error when the task store cannot be opened, got nil")
+	}
+	if !strings.Contains(logs.String(), "enqueue notify task failed") {
+		t.Errorf("enqueue failure must be logged at Warn level or above; captured log output: %q", logs.String())
 	}
 }

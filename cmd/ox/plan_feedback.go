@@ -108,7 +108,9 @@ func runPlanFeedbackApply(cmd *cobra.Command, slug, from string) error {
 	if cerr := commitPlanToLedger(gitRoot, info.Dir); cerr != nil {
 		cli.PrintHint("feedback saved locally; ledger commit deferred: " + cerr.Error())
 	}
-	enqueuePlanFeedbackTask(gitRoot, info.Dir, slug, len(set.Items))
+	if err := enqueuePlanFeedbackTask(gitRoot, info.Dir, slug, len(set.Items)); err != nil {
+		cli.PrintWarning("could not notify the plan's authoring coworker automatically — tell them directly, or they'll miss this round of feedback")
+	}
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Applied %d feedback item(s) to %s\n\n", len(set.Items), cli.StyleFile.Render(path))
 	if _, derr := printPlanReviewDigest(cmd, info.Dir); derr != nil {
@@ -124,19 +126,26 @@ func runPlanFeedbackApply(cmd *cobra.Command, slug, from string) error {
 // protocol (read `ox plan feedback show <slug>`, address, resolve), never from
 // task text. Routed to the authoring agent TYPE (the queue targets a type, not an
 // instance) and deduped per (agent, plan) so repeated rounds don't pile up.
-// Best-effort: an unlinked plan, a missing queue, or a dedup hit is a silent
-// no-op — it never blocks the feedback that already landed in the ledger.
-func enqueuePlanFeedbackTask(gitRoot, planDir, slug string, items int) {
+//
+// An unlinked plan or a missing queue is a silent, error-free no-op — there is
+// nobody to notify. An actual enqueue failure is different: the feedback the
+// human just submitted already landed in the ledger, but the coworker will never
+// see it unless something surfaces the gap. It is retried once (the DedupKey
+// makes a repeat Add safe) since the one intermittent failure observed looked
+// like a transient store-open/lock error rather than a real, repeatable one; a
+// non-nil return still never blocks or reverts the feedback write — the caller
+// decides how (or whether) to tell the human.
+func enqueuePlanFeedbackTask(gitRoot, planDir, slug string, items int) error {
 	if gitRoot == "" || planDir == "" || slug == "" {
-		return
+		return nil
 	}
 	meta, err := plan.LoadMeta(planDir)
 	if err != nil || meta.Provenance == nil || meta.Provenance.AgentID == "" {
-		return // no authoring coworker recorded → nobody to notify
+		return nil // no authoring coworker recorded → nobody to notify
 	}
 	prov := meta.Provenance
 	title := fmt.Sprintf("Review feedback on plan %q (%d item(s) this round)", slug, items)
-	if _, err := agenttask.Enqueue(gitRoot, &agenttask.Task{
+	task := &agenttask.Task{
 		Title:       title,
 		Kind:        agenttask.KindPlanFeedback,
 		Priority:    30, // above routine chores: a human is waiting on the response
@@ -144,9 +153,18 @@ func enqueuePlanFeedbackTask(gitRoot, planDir, slug string, items int) {
 		TargetAgent: prov.AgentType, // type-level routing; "" = any coworker
 		DedupKey:    "plan-feedback:" + prov.AgentID + ":" + slug,
 		Payload:     map[string]string{"plan_slug": slug},
-	}); err != nil {
-		slog.Debug("plan feedback: enqueue notify task failed", "error", err, "slug", slug)
 	}
+	_, err = agenttask.Enqueue(gitRoot, task)
+	if err != nil {
+		time.Sleep(100 * time.Millisecond)
+		_, err = agenttask.Enqueue(gitRoot, task)
+	}
+	if err != nil {
+		slog.Warn("plan feedback: enqueue notify task failed — authoring coworker not notified",
+			"error", err, "slug", slug, "agent_id", prov.AgentID)
+		return err
+	}
+	return nil
 }
 
 func runPlanFeedbackShow(cmd *cobra.Command, slug string, jsonOut bool) error {
