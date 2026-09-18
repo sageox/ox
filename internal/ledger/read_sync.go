@@ -586,22 +586,31 @@ func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir stri
 			return nil, err
 		}
 		file := readFile{path: name, oid: fields[2]}
+		var malformed error
 		if len(pointer) != 0 {
 			if oid, pointerSize, err := lfs.ParsePointer(string(pointer)); err == nil {
 				file.pointer, file.ref = pointer, lfs.FileRef{OID: oid, Size: pointerSize}
 			} else if strings.HasPrefix(string(pointer), "version https://git-lfs.github.com/spec/v1\n") {
-				return nil, missingHydration(ReadFailureDetail{Reason: "malformed_pointer", Path: name})
+				malformed = missingHydration(ReadFailureDetail{Reason: "malformed_pointer", Path: name})
 			}
+		}
+		if gitOID == file.oid && malformed != nil {
+			// HEAD commits this pointer and it cannot be parsed, so no object can
+			// be hydrated in its place.
+			return nil, malformed
 		}
 		if gitOID != file.oid {
 			// Bytes that differ from HEAD's blob must be the object HEAD's pointer
 			// names, at that OID and size. Their shape cannot stand in for that
 			// check: an object's own content can be a pointer, which is what a
-			// file cleaned a second time stores. So a pointer here is a stale stub
+			// file cleaned a second time stores, including one this reader cannot
+			// parse. So bytes shaped like a pointer are a stale or malformed stub
 			// only once the check fails; any other file that fails it is a local
 			// edit.
 			mismatch := errors.New("dirty")
-			if len(file.pointer) != 0 {
+			if malformed != nil {
+				mismatch = malformed
+			} else if len(file.pointer) != 0 {
 				mismatch = missingHydration(ReadFailureDetail{Reason: "nested_stub", Path: name})
 			}
 			blobSize, err := runReadGit(ctx, transport, false, dir, "cat-file", "-s", file.oid)

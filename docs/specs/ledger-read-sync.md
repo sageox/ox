@@ -130,8 +130,8 @@ An `oid` or `expected_oid` is omitted when the value supplied for it is not a ca
 
 | `reason` | `error_class` | Condition |
 | --- | --- | --- |
-| `malformed_pointer` | `missing_hydration` | An LFS pointer in the checkout cannot be parsed. |
-| `nested_stub` | `missing_hydration` | A file's content is itself a pointer, and is neither the pointer HEAD commits nor the object that pointer names. Content decides, not shape: an object whose own content is a pointer — what a file cleaned a second time stores — hydrates to one and verifies by its SHA-256 and size like any other. |
+| `malformed_pointer` | `missing_hydration` | An LFS pointer in the checkout cannot be parsed: HEAD commits it, or it stands where the object HEAD's pointer names should be. |
+| `nested_stub` | `missing_hydration` | A file's content is itself a pointer, and is neither the pointer HEAD commits nor the object that pointer names. |
 | `empty_object_oid_mismatch` | `missing_hydration` | A size-0 pointer names an object other than the empty one. |
 | `shared_object_size_conflict` | `missing_hydration` | Two files name one object with different sizes. Carries `oid` and both declared sizes, and no `path`: the conflict belongs to the pair, and which pointer is wrong is not known until the object's bytes arrive. It is detected before the object is requested, so it is the failure a conflict reports — a later per-file `downloaded_size_mismatch` does not replace it. Identify the file still unmaterialized from the checkout, where it remains a pointer. |
 | `batch_response_incomplete` | `missing_hydration` | The batch response holds fewer objects than the batch. |
@@ -146,6 +146,8 @@ An `oid` or `expected_oid` is omitted when the value supplied for it is not a ca
 | `download_stat_failed` | `missing_hydration` | The downloaded object could not be inspected locally. |
 | `downloaded_size_mismatch` | `missing_hydration` | The downloaded bytes do not match the pointer's size. |
 | `object_not_materialized` | `missing_hydration` | Verification found a covered file still left as a stub. |
+
+`nested_stub` and `malformed_pointer` are decided by content, not shape. An object's own content can be a pointer — what a file cleaned a second time stores — so hydrating it writes one. A file whose bytes hash to the committed pointer's OID at its size is that object and verifies like any other, whether or not this reader can parse the pointer it holds.
 
 Detail obeys the same redaction rules as the rest of the result: no credential, credential-bearing URL, response body, or subprocess output. Server-supplied and pointer-supplied identifiers are validated before they are carried, never sanitized in place. There is no server message field. The client replaces a read route's per-object error prose with the status text for that error's code before any caller sees it, so a message field could only restate `server_code` and would misrepresent a client-generated string as the server's own.
 
