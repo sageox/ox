@@ -9,6 +9,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestRefuseSourcePublicationRebaseAllowsPullWithoutUpstream prevents the
+// refusal from turning a repo with no configured upstream into a repo that can
+// never pull. `git diff @{upstream}...HEAD` exits 128 there, and treating that
+// as "publication pending" blocks every managed clone in that state
+// permanently -- including team-context repos, which hold no sessions at all.
+// Failure prevented: daemon sync wedged for the lifetime of the clone.
+func TestRefuseSourcePublicationRebaseAllowsPullWithoutUpstream(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "--quiet", "--initial-branch=main")
+	run(t, repo, "git", "config", "user.email", "test@test.local")
+	run(t, repo, "git", "config", "user.name", "Test")
+	run(t, repo, "git", "config", "commit.gpgsign", "false")
+	addCommit(t, repo, "AGENTS.md", "team\n", "seed")
+	// A remote exists but no branch tracks it -- the state the fixture in
+	// internal/daemon's post-pull suspension test reproduces.
+	run(t, repo, "git", "remote", "add", "origin", "https://127.0.0.1:1/x.git")
+
+	_, err := RunGit(context.Background(), repo, "diff", "--name-only", "@{upstream}...HEAD")
+	require.Error(t, err, "fixture must actually lack an upstream, or this test proves nothing")
+
+	require.NoError(t, RefuseSourcePublicationRebase(context.Background(), repo),
+		"no upstream means nothing is pending against it; refusing would wedge the pull forever")
+}
+
 func TestSourcePublicationDoesNotRebaseAfterRemoteDeletion(t *testing.T) {
 	repo, remote := initBareRemoteRepo(t)
 	dir := filepath.Join(repo, "sessions", "test")

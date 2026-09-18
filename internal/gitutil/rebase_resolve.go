@@ -100,8 +100,8 @@ func resolveOneRebaseStep(ctx context.Context, repoPath string, safePrefixes []s
 	for path := range allPaths {
 		if isSessionMetaPath(path) {
 			for stage := 1; stage <= 3; stage++ {
-				b, e := exec.CommandContext(ctx, "git", "-C", repoPath, "show", fmt.Sprintf(":%d:%s", stage, path)).Output()
-				if e == nil && strings.Contains(string(b), `"source"`) {
+				b, e := readIndexStage(ctx, repoPath, stage, path)
+				if e == nil && strings.Contains(b, `"source"`) {
 					return false, fmt.Errorf("source-bearing metadata %q requires explicit reconciliation", path)
 				}
 			}

@@ -35,6 +35,14 @@ func CheckSourcePublication(ctx context.Context, repo string) error {
 // Git could replay their files without a textual conflict. Call before every
 // automatic pull/rebase, including ordinary daemon sync and doctor repair.
 func RefuseSourcePublicationRebase(ctx context.Context, repo string) error {
+	// No tracking branch means there is no upstream to compare against, so
+	// nothing can be pending publication against it. Refusing here instead
+	// would permanently block the pull for every managed clone that has a
+	// remote but no configured upstream -- a legitimate state, and one no
+	// amount of retrying resolves.
+	if _, err := RunGit(ctx, repo, "rev-parse", "--verify", "--quiet", "@{upstream}"); err != nil {
+		return nil
+	}
 	paths, err := RunGit(ctx, repo, "diff", "--name-only", "-z", "@{upstream}...HEAD")
 	if err != nil {
 		return fmt.Errorf("inspect pending source publication: %w", err)
