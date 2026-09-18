@@ -129,6 +129,9 @@ func TestReadSyncNativeLifecycle(t *testing.T) {
 	require.Equal(t, "denied", failed.ErrorClass)
 	require.True(t, failed.Ready, "%+v", failed)
 	require.Equal(t, warm.LastSuccessfulSync, failed.LastSuccessfulSync)
+	// Hydration never ran, so the counts are the ones verification took.
+	require.Equal(t, warm.Hydration, failed.Hydration)
+	require.Equal(t, warm.Coverage.Files, failed.Coverage.Files)
 	t.Setenv("SAGEOX_TOKEN", "")
 	local := CheckReadiness(ctx, f.opts.Path, f.opts.RepoID, f.opts.Endpoint)
 	require.True(t, local.Ready, "%+v", local)

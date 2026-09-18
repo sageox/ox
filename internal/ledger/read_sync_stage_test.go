@@ -127,6 +127,44 @@ func TestReadSyncColdFailureReportsTheStageItKept(t *testing.T) {
 	}
 }
 
+// Failure prevented: a cold sync lands every object and then fails
+// verification, and reports coverage.files 0 and hydration "unknown" — as if
+// it had transferred nothing. Verification replaces the result with its own,
+// and a verification that stops before it counts has no counts to give. A file
+// written into the stage while objects transfer stops it here; a budget that
+// expires while verification hashes the stage stops it the same way.
+func TestReadSyncColdVerificationFailureKeepsTheHydrationCounts(t *testing.T) {
+	content := []byte("an object that lands before verification fails\n")
+	var f *readFixture
+	f = newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			grantReadLFSBatch(t, w, r)
+			return
+		}
+		// Hydration's walk of the stage is behind it; verification's is not.
+		assert.NoError(t, os.WriteFile(filepath.Join(readStagePath(f.opts.Path), "sessions/stray.md"), []byte("not ox's\n"), 0600))
+		_, _ = w.Write(content)
+	})
+	commitReadLFSPointer(t, f, "sessions/cold/session.md", content)
+	stage := readStagePath(f.opts.Path)
+
+	result := ReadSync(context.Background(), f.opts)
+	require.False(t, result.Ready, "%+v", result)
+	require.Equal(t, "dirty", result.ErrorClass, "%+v", result)
+	require.True(t, result.Resumable, "%+v", result)
+	require.Equal(t, ReadHydration{State: "complete", Required: 1, Completed: 1}, result.Hydration, "%+v", result)
+
+	// Without the stray file, a walk of the stage verifies, and finds what the
+	// result reported.
+	require.NoError(t, os.Remove(filepath.Join(stage, "sessions/stray.md")))
+	transport, err := gitserver.NewReadTransport(f.opts.Endpoint, f.opts.RepoID, f.opts.ReadURL)
+	require.NoError(t, err)
+	onDisk := verifyReadCheckout(context.Background(), f.opts, transport, stage, result.Coverage.Paths)
+	require.True(t, onDisk.Ready, "%+v", onDisk)
+	require.Equal(t, onDisk.Coverage, result.Coverage, "coverage counts the stage as it is on disk")
+	require.Equal(t, onDisk.Hydration, result.Hydration, "hydration counts the stage as it is on disk")
+}
+
 // Failure prevented: an object is renamed into place and only then does its
 // directory sync fail, so the attempt reports it as a stub still to transfer
 // while a walk of the stage — verification's, or the next attempt's — counts

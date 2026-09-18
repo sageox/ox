@@ -264,7 +264,14 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 
 	// Verification can recover readiness after a remote failure, but only a
 	// completed fetch of this exact HEAD may establish new remote evidence.
-	result = verifyReadCheckout(ctx, opts, transport, workPath, dirs)
+	verified := verifyReadCheckout(ctx, opts, transport, workPath, dirs)
+	if verified.Hydration.State == "unknown" {
+		// Verification stopped before it counted — a file failed it, or the
+		// budget ran out while it walked — so the counts hydration took are the
+		// last this attempt has.
+		verified.Coverage, verified.Hydration = result.Coverage, result.Hydration
+	}
+	result = verified
 	if previous != nil && previous.Head == result.Head && validReadTime(previous.LastSuccessfulSync) {
 		result.LastSuccessfulSync = previous.LastSuccessfulSync
 	}
