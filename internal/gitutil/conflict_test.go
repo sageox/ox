@@ -2,10 +2,13 @@ package gitutil
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -510,7 +513,13 @@ func TestAutostashRecoveryWithoutReadableConflicts(t *testing.T) {
 				return err
 			})
 			if corrupt {
-				require.ErrorContains(t, err, "inspect unmerged index")
+				// An unreadable index is a probe FAILURE, not a conflict
+				// report, so gitutil tags it the same way it tags the #962
+				// timeout. Only the daemon re-reads the index to tell the
+				// durable case from the retryable one; gitutil's job here is
+				// just to stop the message asserting a conflict.
+				require.ErrorIs(t, err, ErrConflictProbeFailed)
+				require.ErrorContains(t, err, "could not determine index state")
 			} else {
 				require.NoError(t, err)
 			}
@@ -520,6 +529,65 @@ func TestAutostashRecoveryWithoutReadableConflicts(t *testing.T) {
 			afterIndex, err := os.ReadFile(indexPath)
 			require.NoError(t, err)
 			assert.Equal(t, index, afterIndex)
+		})
+	}
+}
+
+// A probe that FAILED must be distinguishable from a probe that FOUND
+// conflicts. Failure prevented (#962): a context deadline killed
+// `git ls-files --unmerged` mid-sync-cycle, the error was wrapped with text
+// asserting an unmerged index, and the daemon reported "has unresolved
+// conflicts" — behind a human-confirmation gate — on a clone whose index was
+// provably empty of them.
+func TestResolveAutostashConflicts_ProbeFailureIsTagged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index states")
+	}
+	repo := t.TempDir()
+	gitInRepo(t, repo, "init", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644))
+	gitInRepo(t, repo, "add", "base.txt")
+	gitInRepo(t, repo, "commit", "-m", "base")
+
+	tests := []struct {
+		name    string
+		ctx     func() (context.Context, context.CancelFunc)
+		wantErr error
+	}{
+		{
+			name: "canceled context",
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, func() {}
+			},
+			wantErr: context.Canceled,
+		},
+		{
+			name: "deadline already exceeded",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			},
+			wantErr: context.DeadlineExceeded,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Deliberately not under WithRepoLock: the lock takes the same
+			// context and would fail first, hiding the probe classification
+			// this test exists to pin. Nothing mutates before the probe.
+			ctx, cancel := tc.ctx()
+			defer cancel()
+
+			resolved, err := ResolveAutostashConflicts(ctx, repo, []string{"sessions/"}, nil)
+			assert.False(t, resolved)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrConflictProbeFailed,
+				"a failed probe must carry the sentinel so callers can branch on it")
+			assert.ErrorIs(t, err, tc.wantErr,
+				"the cancellation cause must survive to callers that retry on it")
+			assert.NotContains(t, err.Error(), "unresolved conflict",
+				"the message must not assert a conclusion the probe never reached")
 		})
 	}
 }
@@ -752,6 +820,59 @@ func TestAutostashRecoveryMergesBookkeepingCounters(t *testing.T) {
 			assert.Equal(t, string(after), gitInRepo(t, repo, "show", ":"+rel)+"\n")
 		})
 	}
+}
+
+// The sentinel must NOT be attached when the probe succeeded and the index
+// really is unmerged — otherwise the fix for #962 would silently suppress every
+// genuine conflict instead of just the false ones.
+func TestResolveAutostashConflicts_RealConflictIsNotTaggedAsProbeFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git index states")
+	}
+	repo := newUnmergedIndexRepo(t, "notes.txt")
+
+	conflicted, err := HasUnmergedEntries(context.Background(), repo)
+	require.NoError(t, err)
+	require.True(t, conflicted, "fixture must produce a genuinely unmerged index")
+
+	resolved, err := ResolveAutostashConflicts(context.Background(), repo, []string{"sessions/"}, nil)
+	assert.False(t, resolved)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrConflictProbeFailed,
+		"a probe that succeeded and found conflicts is a RESULT, not a failure")
+	assert.ErrorContains(t, err, "requires manual resolution")
+}
+
+// newUnmergedIndexRepo builds a repo whose index holds all three merge stages
+// for path — the state `git ls-files --unmerged` reports — without needing a
+// remote, a rebase, or a network. update-index --index-info is the only way to
+// write stage entries directly, which keeps the fixture deterministic.
+func newUnmergedIndexRepo(t *testing.T, path string) string {
+	t.Helper()
+	repo := t.TempDir()
+	gitInRepo(t, repo, "init", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, path), []byte("base\n"), 0o644))
+	gitInRepo(t, repo, "add", path)
+	gitInRepo(t, repo, "commit", "-m", "base")
+
+	hash := func(content string) string {
+		cmd := exec.Command("git", "hash-object", "-w", "--stdin")
+		cmd.Dir = repo
+		cmd.Stdin = strings.NewReader(content)
+		out, err := cmd.Output()
+		require.NoError(t, err)
+		return strings.TrimSpace(string(out))
+	}
+	stages := fmt.Sprintf("0 %s\t%s\n100644 %s 1\t%s\n100644 %s 2\t%s\n100644 %s 3\t%s\n",
+		strings.Repeat("0", 40), path,
+		hash("base\n"), path, hash("ours\n"), path, hash("theirs\n"), path)
+
+	cmd := exec.Command("git", "update-index", "--index-info")
+	cmd.Dir = repo
+	cmd.Stdin = strings.NewReader(stages)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return repo
 }
 
 // seedAutostashConflict reproduces the index state pull --autostash leaves

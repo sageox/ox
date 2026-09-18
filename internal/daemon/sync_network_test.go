@@ -588,7 +588,7 @@ func TestPullTeamContext_StaleLockFileDetection(t *testing.T) {
 	issues := NewIssueTracker()
 	scheduler.SetIssueTracker(issues)
 
-	err := scheduler.pullTeamContext(context.Background(), teamDir)
+	_, err := scheduler.pullTeamContext(context.Background(), teamDir)
 	assert.NoError(t, err, "pullTeamContext should return nil when skipping due to lock files")
 
 	// verify issue was reported with the team context repo name

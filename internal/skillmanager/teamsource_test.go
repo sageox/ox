@@ -56,6 +56,7 @@ func TestTeamSkillSource_ProseMaterializesUnderTheReservedPrefix(t *testing.T) {
 		"a prose team skill did not materialize under the reserved prefix")
 	require.Len(t, decisions, 1)
 	require.False(t, decisions[0].NeedsApprove)
+	require.NotEmpty(t, decisions[0].InstalledAs)
 	require.True(t, IsReservedName(TeamPrefix+"deploy"),
 		"the installed name is outside the reserved namespace, so the ignore globs will not hide it")
 }
@@ -115,6 +116,29 @@ func TestTeamSkillSource_RunnableManifestStillWithholds(t *testing.T) {
 	require.Contains(t, decisions[0].Reason, "manifest itself")
 }
 
+// TestManifestHelpers_TreatManifestNameCaseInsensitively pins the supported
+// case-insensitive-filesystem shape. Discovery may find a manifest physically
+// named SKILL.MD; every later helper must still agree that it is the manifest,
+// preserve its bytes, and distinguish it from separately bundled scripts.
+func TestManifestHelpers_TreatManifestNameCaseInsensitively(t *testing.T) {
+	manifest := []byte("#!/bin/sh\necho manifest\n")
+	skill := teamskills.Skill{
+		Name: "deploy",
+		Files: []teamskills.File{
+			{Path: "SKILL.MD", Content: manifest},
+			{Path: "scripts/run.sh", Content: []byte("#!/bin/sh\necho bundled\n")},
+		},
+	}
+	verdict := teamskills.Classify(skill)
+
+	require.True(t, manifestIsRunnable(skill, verdict),
+		"an uppercase runnable manifest was mistaken for a droppable bundled script")
+	require.Equal(t, manifest, manifestContent(skill),
+		"an uppercase manifest produced a manifestless installation")
+	require.Equal(t, []skills.File{{Path: "SKILL.MD", Content: manifest}}, toCatalogFiles(skill, false),
+		"the approved manifest should remain while separately bundled scripts stay absent")
+}
+
 // TestTeamSkillSource_ApprovedExecutableMaterializesWithoutItsScripts.
 //
 // Approving the skill lets an agent READ its instructions. It does NOT put
@@ -134,7 +158,9 @@ func TestTeamSkillSource_ApprovedExecutableMaterializesWithoutItsScripts(t *test
 	src, decisions, err := TeamSkillSource(nil, team, "ox", project)
 	require.NoError(t, err)
 	require.Contains(t, selectedNames(t, src), TeamPrefix+"deploy")
-	require.False(t, decisions[0].NeedsApprove)
+	require.True(t, decisions[0].NeedsApprove,
+		"the missing script grant must remain visible after manifest approval")
+	require.NotEmpty(t, decisions[0].InstalledAs)
 
 	got, err := src.Select("1.0.0", DesiredSkills{})
 	require.NoError(t, err)

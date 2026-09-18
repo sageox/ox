@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -356,6 +357,73 @@ func TestReadLFS_DeniedAndMissingRemainDistinct(t *testing.T) {
 		assert.Equal(t, 404, resp.Objects[0].Error.Code)
 		assert.NotContains(t, resp.Objects[0].Error.Message, readTestToken)
 	})
+}
+
+// Failure prevented: a read route's Retry-After never reaches the caller, so
+// read sync retries a refused request on its own schedule instead of the one
+// the server asked for (ox #982).
+func TestReadLFS_RefusalCarriesRetryAfter(t *testing.T) {
+	content := []byte("object behind a refusal")
+	oid := ComputeOID(content)
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var refuseBatch atomic.Bool
+			c, _ := readLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/batch") && !refuseBatch.Load() {
+					json.NewEncoder(w).Encode(BatchResponse{Objects: []BatchResponseObject{{OID: oid, Size: int64(len(content)),
+						Actions: &Actions{Download: &Action{Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + oid}}}}})
+					return
+				}
+				w.Header().Set("Retry-After", "7")
+				w.WriteHeader(status)
+				w.Write([]byte(readTestToken))
+			})
+			resp, err := c.BatchDownload([]BatchObject{{OID: oid, Size: int64(len(content))}})
+			require.NoError(t, err)
+			action := resp.Objects[0].Actions.Download
+			refuseBatch.Store(true)
+			_, batchErr := c.BatchDownload([]BatchObject{{OID: oid, Size: int64(len(content))}})
+			_, downloadErr := DownloadObject(action)
+			streamErr := DownloadToFileContext(context.Background(), action, io.Discard, true, oid)
+			for name, err := range map[string]error{"batch": batchErr, "download": downloadErr, "streamed download": streamErr} {
+				var httpErr *HTTPError
+				require.ErrorAs(t, err, &httpErr, name)
+				assert.Equal(t, &HTTPError{StatusCode: status, RetryAfter: 7 * time.Second}, httpErr, name)
+				assert.NotContains(t, err.Error(), readTestToken, name)
+			}
+		})
+	}
+}
+
+// Failure prevented: a Retry-After is misread, so a caller retries sooner than
+// the server asked, waits on a value it should have discarded, or — for a delay
+// too long for a Duration — overflows into a negative wait.
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	longest := math.MaxInt64 / time.Second * time.Second
+	for _, tc := range []struct {
+		name, value string
+		want        time.Duration
+	}{
+		{"absent", "", 0},
+		{"delay-seconds", "1", time.Second},
+		{"longer delay-seconds", "120", 2 * time.Minute},
+		{"zero names no wait", "0", 0},
+		{"negative", "-1", 0},
+		{"signed", "+1", 0},
+		{"fractional", "1.5", 0},
+		{"not a number", "soon", 0},
+		// Parsing reports what the server asked for; clamping is the caller's.
+		{"absurd but representable", "86400", 24 * time.Hour},
+		{"too long for a Duration saturates", "9999999999999", longest},
+		{"too long for any integer saturates", "99999999999999999999999", longest},
+		{"HTTP-date ahead", now.Add(90 * time.Second).Format(http.TimeFormat), 90 * time.Second},
+		{"HTTP-date already past", now.Add(-time.Minute).Format(http.TimeFormat), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, parseRetryAfter(tc.value, now))
+		})
+	}
 }
 
 // Failure prevented: upstream action headers or TAT escape to signed object storage.

@@ -331,7 +331,7 @@ func TestPullTeamContext_DivergedBranches_RebasesSuccessfully(t *testing.T) {
 
 	s := newPullTestScheduler(t, cloneDir)
 
-	err := s.pullTeamContext(context.Background(), cloneDir)
+	_, err := s.pullTeamContext(context.Background(), cloneDir)
 	assert.NoError(t, err, "pullTeamContext should rebase diverged branches")
 
 	// both files should exist after rebase
@@ -378,7 +378,7 @@ func TestPullTeamContext_ConflictReportsIssue(t *testing.T) {
 
 	s := newPullTestScheduler(t, cloneDir)
 
-	err := s.pullTeamContext(context.Background(), cloneDir)
+	_, err := s.pullTeamContext(context.Background(), cloneDir)
 	assert.Error(t, err, "pullTeamContext should fail on conflict (no auto-resolve for src/main.go)")
 
 	// team context uses fallback manifest which includes data/ auto-resolve,

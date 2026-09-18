@@ -1667,77 +1667,16 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			return nil
 		}
 
-		// Human-readable output mode
-		// Authentication Status - always show, includes endpoint
-		fmt.Print(renderAuthStatus(authFile))
-		switch authFollowUpHint(envTokenMalformed, authErr, len(auth.GetLoggedInEndpoints())) {
-		case authHintUnreachable:
-			fmt.Printf("  %s %s\n", statusWarningStyle.Render("⚠ could not reach the endpoint:"), statusMutedStyle.Render("auth state is unverified, not invalid"))
-		case authHintRefreshFailed:
-			fmt.Printf("  %s %s\n", statusWarningStyle.Render("⚠ token refresh failed:"), statusMutedStyle.Render("run `ox login` to re-authenticate"))
-		case authHintLogin:
-			// use contextual action hint matching help's visual style
-			cli.PrintActionHint("ox login", "Authenticate with "+cli.Wordmark(), 1)
+		// Human-readable output mode. --quiet suppresses this whole
+		// informational block (nothing here is an error) so
+		// `ox status --quiet; echo $?` is scriptable without --json.
+		isQuiet := cfg != nil && cfg.Quiet
+		if !isQuiet {
+			renderStatusHumanOutput(cwd, gitRoot, projectInitialized, localCfg, daemonStatus,
+				syncHistory, bubblesSummary, codeStats, client, authFile, userConfigDir, envTokenMalformed, authErr)
 		}
 
-		configDirSemantic := "error"
-		if pathExistsStatus(userConfigDir) {
-			configDirSemantic = "success"
-		}
-
-		configRows := [][]string{
-			{"User config dir", userConfigDir, configDirSemantic},
-		}
-		fmt.Print(renderTable("Configuration", configRows))
-
-		fmt.Print(renderProjectStatus(cwd, gitRoot, projectInitialized, codeStats))
-		if gitRoot != "" && !projectInitialized {
-			cli.PrintActionHint("ox init", "Initialize project for AI agent context", 2)
-		}
-		if gitRoot != "" && projectInitialized && codeStats == nil {
-			// no daemon connected — suggest manual indexing
-			cli.PrintActionHint("ox code index", "Index repo for local code search", 0)
-		}
-
-		// skip ledger/daemon sections when not in a git repo — nothing to show
-		if gitRoot != "" {
-
-			// Ledger + Team Context sections — repos from cloud API.
-			// Knowledge-bubbles summary is rendered inside renderGitReposSection
-			// (just above "Other Team Contexts") so the kb line is the
-			// last line of the project-state block, not sandwiched mid-header.
-			fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus, bubblesSummary, statusVerboseFlag))
-
-			// show daemon sync section
-			fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, localCfg, false, projectInitialized))
-
-			// show active AI coworkers with context stats
-			fmt.Print(renderAICoworkersSection(client))
-
-			// show pending scheduled agent tasks, if any
-			fmt.Print(renderAgentTasksSection(gitRoot))
-		}
-
-		// Calm update notice. refreshVersionCacheIfStale does a bounded live
-		// check so the notice reaches coworkers who never run the daemon (the
-		// daemon is otherwise the only cache writer).
-		//
-		// One dim line, at most once per release line per day, and only with a
-		// human watching. The old block printed a bold "Update available"
-		// banner, a hint line, AND an inline "Upgrade ox now?" prompt on every
-		// single `ox status` — three interruptions repeating forever for one
-		// fact. Dim rather than warning-colored on purpose: an available
-		// upgrade is news, not an alarm.
-		if vResult := refreshVersionCacheIfStale(6 * time.Hour); vResult != nil {
-			now := time.Now()
-			if line, due := calmUpdateNoticeDue(now); due {
-				fmt.Printf("\n%s\n", cli.StyleDim.Render(
-					formatCalmUpdateNotice(vResult.LatestVersion, vResult.CurrentVersion)))
-				updatenotice.RecordNotified(line, now)
-			}
-		}
-
-		// show contextual tip
+		// tips.MaybeShow already takes cfg.Quiet and no-ops accordingly.
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("status", tips.AlwaysShow, cfg.Quiet, !userCfg.AreTipsEnabled(), cfg.JSON)
 
@@ -1750,8 +1689,117 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		// thresholds, now visible from a plain `ox status` too.
 		emitDaemonIssueWarnings()
 
+		// Exit non-zero when the environment isn't fully set up, so a
+		// script can branch on `ox status` alone instead of parsing
+		// --json. JSON stays exit-0 (mirrors `ox doctor`): a JSON
+		// consumer branches on the auth/project fields in the payload,
+		// not the process exit code.
+		if cfg == nil || !cfg.JSON {
+			return statusExitError(authenticated, projectInitialized, authErr)
+		}
 		return nil
 	},
+}
+
+// statusExitError reports why `ox status` (non-JSON) should exit non-zero:
+// unauthenticated and/or an uninitialized project. Returns nil once both are
+// satisfied — the only state a script should treat as "everything is fine".
+//
+// authErr distinguishes "the endpoint never answered" from "no credential" —
+// same split authFollowUpHint makes for the human-readable hint just above,
+// and for the same reason: telling a script to `ox login` when the real
+// problem is a VPN/proxy/DNS fault is wrong advice, not just wrong tone.
+func statusExitError(authenticated, projectInitialized bool, authErr error) error {
+	unreachable := !authenticated && errors.Is(authErr, auth.ErrEndpointUnreachable)
+	switch {
+	case unreachable && !projectInitialized:
+		return fmt.Errorf("could not verify authentication (endpoint unreachable) and project not initialized — check connectivity and run `ox init`")
+	case unreachable:
+		return fmt.Errorf("could not verify authentication — endpoint unreachable, check connectivity")
+	case !authenticated && !projectInitialized:
+		return fmt.Errorf("not authenticated and project not initialized — run `ox login` and `ox init`")
+	case !authenticated:
+		return fmt.Errorf("not authenticated — run `ox login`")
+	case !projectInitialized:
+		return fmt.Errorf("project not initialized — run `ox init`")
+	default:
+		return nil
+	}
+}
+
+// renderStatusHumanOutput prints the full human-readable `ox status` body.
+// Split out of statusCmd.RunE so --quiet can skip it in one place.
+func renderStatusHumanOutput(cwd, gitRoot string, projectInitialized bool,
+	localCfg *config.LocalConfig, daemonStatus *daemon.StatusData, syncHistory []daemon.SyncEvent,
+	bubblesSummary statusBubblesSummary, codeStats *daemon.CodeDBStats, client *daemon.Client,
+	authFile, userConfigDir string, envTokenMalformed bool, authErr error) {
+	// Authentication Status - always show, includes endpoint
+	fmt.Print(renderAuthStatus(authFile))
+	switch authFollowUpHint(envTokenMalformed, authErr, len(auth.GetLoggedInEndpoints())) {
+	case authHintUnreachable:
+		fmt.Printf("  %s %s\n", statusWarningStyle.Render("⚠ could not reach the endpoint:"), statusMutedStyle.Render("auth state is unverified, not invalid"))
+	case authHintRefreshFailed:
+		fmt.Printf("  %s %s\n", statusWarningStyle.Render("⚠ token refresh failed:"), statusMutedStyle.Render("run `ox login` to re-authenticate"))
+	case authHintLogin:
+		// use contextual action hint matching help's visual style
+		cli.PrintActionHint("ox login", "Authenticate with "+cli.Wordmark(), 1)
+	}
+
+	configDirSemantic := "error"
+	if pathExistsStatus(userConfigDir) {
+		configDirSemantic = "success"
+	}
+
+	configRows := [][]string{
+		{"User config dir", userConfigDir, configDirSemantic},
+	}
+	fmt.Print(renderTable("Configuration", configRows))
+
+	fmt.Print(renderProjectStatus(cwd, gitRoot, projectInitialized, codeStats))
+	if gitRoot != "" && !projectInitialized {
+		cli.PrintActionHint("ox init", "Initialize project for AI agent context", 2)
+	}
+	if gitRoot != "" && projectInitialized && codeStats == nil {
+		// no daemon connected — suggest manual indexing
+		cli.PrintActionHint("ox code index", "Index repo for local code search", 0)
+	}
+
+	// skip ledger/daemon sections when not in a git repo — nothing to show
+	if gitRoot != "" {
+		// Ledger + Team Context sections — repos from cloud API.
+		// Knowledge-bubbles summary is rendered inside renderGitReposSection
+		// (just above "Other Team Contexts") so the kb line is the
+		// last line of the project-state block, not sandwiched mid-header.
+		fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus, bubblesSummary, statusVerboseFlag))
+
+		// show daemon sync section
+		fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, localCfg, false, projectInitialized))
+
+		// show active AI coworkers with context stats
+		fmt.Print(renderAICoworkersSection(client))
+
+		// show pending scheduled agent tasks, if any
+		fmt.Print(renderAgentTasksSection(gitRoot))
+	}
+
+	// Calm update notice. refreshVersionCacheIfStale does a bounded live
+	// check so the notice reaches coworkers who never run the daemon (the
+	// daemon is otherwise the only cache writer).
+	//
+	// One dim line, at most once per release line per day, and only with a
+	// human watching. The old block printed a bold "Update available"
+	// banner, a hint line, AND an inline "Upgrade ox now?" prompt on every
+	// single `ox status` — three interruptions repeating forever for one
+	// fact. Dim rather than warning-colored on purpose: an available
+	// upgrade is news, not an alarm.
+	if vResult := refreshVersionCacheIfStale(6 * time.Hour); vResult != nil {
+		now := time.Now()
+		if line, due := calmUpdateNoticeDue(now); due {
+			fmt.Printf("\n%s\n", cli.StyleDim.Render(
+				formatCalmUpdateNotice(vResult.LatestVersion, vResult.CurrentVersion)))
+			updatenotice.RecordNotified(line, now)
+		}
+	}
 }
 
 // buildStatusJSON constructs the JSON output structure for ox status --json.

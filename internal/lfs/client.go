@@ -13,8 +13,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,12 +55,37 @@ func NewReadClient(endpointURL, repoID, readURL string) (*Client, error) {
 }
 
 // HTTPError exposes status without reflecting response bodies or signed URLs.
+// RetryAfter is the wait the response's Retry-After header asked for, zero
+// when it names none that parses.
 type HTTPError struct {
 	StatusCode int
+	RetryAfter time.Duration
 }
 
 func (e *HTTPError) Error() string {
 	return fmt.Sprintf("LFS request returned HTTP %d", e.StatusCode)
+}
+
+func newHTTPError(resp *http.Response) *HTTPError {
+	return &HTTPError{StatusCode: resp.StatusCode, RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())}
+}
+
+// parseRetryAfter reads a Retry-After value in either form RFC 9110 allows,
+// delay-seconds or an HTTP-date. A missing or malformed value and a date
+// already past are zero. A delay too long for a Duration saturates rather than
+// overflowing: how much of it to honor is the caller's decision.
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+		const longest = math.MaxInt64 / time.Second // whole seconds a Duration can hold
+		if seconds > uint64(longest) {
+			return longest * time.Second
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if date, err := http.ParseTime(value); err == nil && date.After(now) {
+		return date.Sub(now)
+	}
+	return 0
 }
 
 // ErrBatchResponseUnusable reports a batch response the server delivered in
@@ -229,7 +256,7 @@ func (c *Client) doBatch(ctx context.Context, operation string, objects []BatchO
 	}
 	defer resp.Body.Close()
 	if c.readURL != "" && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
-		return nil, &HTTPError{StatusCode: resp.StatusCode}
+		return nil, newHTTPError(resp)
 	}
 
 	// Read-route batch metadata is bounded independently of the request deadline,

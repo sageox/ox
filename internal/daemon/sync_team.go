@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/perf"
@@ -216,6 +218,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 	type syncResult struct {
 		ws         WorkspaceState
 		err        error
+		pullRan    bool
 		duration   time.Duration
 		prePullSHA string
 	}
@@ -233,8 +236,8 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			defer wg.Done()
 			preSHA := s.captureHEAD(ws.Path)
 			start := time.Now()
-			pullErr := s.pullTeamContext(ctx, ws.Path)
-			results[idx] = syncResult{ws: ws, err: pullErr, duration: time.Since(start), prePullSHA: preSHA}
+			outcome, pullErr := s.pullTeamContext(ctx, ws.Path)
+			results[idx] = syncResult{ws: ws, err: pullErr, pullRan: outcome.PullRan, duration: time.Since(start), prePullSHA: preSHA}
 		}(i, t.ws)
 	}
 	wg.Wait()
@@ -246,16 +249,10 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 
 		if r.err != nil {
 			s.workspaceRegistry.SetWorkspaceError(r.ws.ID, r.err.Error())
-			// Permanent suspension is reserved for failures the LOCAL checkout
-			// causes deterministically (ADR-024 / issue #767: an LFS
-			// double-encode that no pull could ever settle, whose retries piled
-			// up autostash entries without bound). A network failure repeats
-			// identically too, but resolves on its own — suspending it stopped
-			// team-context sync for hours after a laptop sleep, while
-			// getErrorHint was still promising "Will retry automatically".
-			// Transient failures take the ordinary bounded backoff instead.
+			// See teamFailureTakesBackoff for why this is a two-input
+			// decision and not an error-shape test.
 			var suspended bool
-			if isTransientSyncError(r.err) {
+			if teamFailureTakesBackoff(r.err, r.pullRan) {
 				s.workspaceRegistry.RecordSyncFailure(r.ws.ID)
 			} else {
 				fingerprint, fpErr := worktreeFingerprint(ctx, r.ws.Path)
@@ -441,6 +438,41 @@ func worktreeFingerprint(ctx context.Context, repoPath string) (string, error) {
 	return fmt.Sprintf("%x", sum), nil
 }
 
+// teamFailureTakesBackoff decides how one failed team-context sync cycle is
+// recorded: true for the ordinary bounded exponential backoff, false for the
+// permanent worktree-fingerprint suspension.
+//
+// Permanent suspension is reserved for failures the LOCAL checkout causes
+// deterministically (ADR-024 / issue #767: an LFS double-encode that no pull
+// could ever settle, whose retries piled up autostash entries without bound).
+// A network failure repeats identically too, but resolves on its own —
+// suspending it stopped team-context sync for hours after a laptop sleep while
+// getErrorHint still promised "Will retry automatically" (#906).
+//
+// A PRE-pull index-probe failure joins the transient failures, even though it
+// is local. "git could not read the index" is produced identically by a corrupt
+// .git/index and by a momentary fork/IO/timeout blip, so nothing in the error
+// separates settled from unclassifiable and this codebase's retry rule makes it
+// retryable. It is also not the failure the fingerprint guard was built for:
+// #767's unbounded autostash pile needs a pull that RAN, and a probe that
+// aborted the cycle before any fetch leaves nothing to accumulate. The durable
+// case is not hidden by that — it is already loud as IssueTypeRepoIntegrity,
+// which a silent permanent suspension would only bury.
+//
+// pullRan is what makes that reasoning sound, and the sentinel alone is NOT
+// enough: classifyAutostashFailure JOINS gitutil.ErrConflictProbeFailed onto an
+// existing pull error, so a pull that ran, failed deterministically (a dirty
+// worktree it can never settle), and was then followed by a failed index read
+// carries the very same sentinel — and that is precisely the #767 case that
+// must reach suspension. The bool is a structural fact about the cycle that no
+// joined error chain can report.
+func teamFailureTakesBackoff(err error, pullRan bool) bool {
+	if isTransientSyncError(err) {
+		return true
+	}
+	return !pullRan && errors.Is(err, gitutil.ErrConflictProbeFailed)
+}
+
 // isTransientSyncError reports whether a failed pull is environmental —
 // network, DNS, or a server that was unreachable — rather than caused by the
 // local checkout. Transient failures must never trigger the permanent
@@ -486,8 +518,21 @@ func isTransientSyncError(err error) bool {
 	return false
 }
 
+// teamPullOutcome carries the structural facts about one team-context pull
+// that its error value cannot express. doTeamSync's retry routing needs to know
+// whether the cycle actually ran a pull, and no error chain can say so:
+// classifyAutostashFailure JOINS a failed index probe onto whatever the pull
+// already reported, so the same gitutil.ErrConflictProbeFailed sentinel turns
+// up both when nothing ran and when a pull ran and failed deterministically.
+type teamPullOutcome struct {
+	// PullRan mirrors ManagedRepoPullResult.PullRan for this cycle. False for
+	// every path that returns before the fetch+pull — including a corrupt-repo
+	// move-aside and every skip.
+	PullRan bool
+}
+
 // pullTeamContext performs a git pull on a single team context repo.
-// Returns nil if skipped due to recent fetch (by another daemon).
+// Returns a nil error if skipped due to recent fetch (by another daemon).
 //
 // Multi-daemon deduplication: Users often work on multiple repos that share
 // the same team context (e.g., 5-6 project repos all pointing to one team
@@ -503,7 +548,7 @@ func isTransientSyncError(err error) bool {
 // before and after to detect changes in key team context files (distilled discussions,
 // agent definitions, etc.). When changes are detected, a notification marker is written
 // so that CLI commands can "whisper" updates to agents.
-func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error {
+func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamPullOutcome, error) {
 	repoName := filepath.Base(path)
 
 	// compute FETCH_HEAD min age from manifest if available
@@ -531,6 +576,7 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		EnsureKBMergeAttrs: true, // shared kb resilience for team-context wedges
 		Logger:             s.logger,
 	})
+	outcome := teamPullOutcome{PullRan: result.PullRan}
 
 	// corrupt repo: move aside so background clone picks it up next cycle.
 	// The local path is now GONE, so this sync did not produce usable context —
@@ -543,9 +589,9 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 			"path", path, "backup", backupPath)
 		if err := os.Rename(path, backupPath); err != nil {
 			s.logger.Error("failed to move corrupt team context aside", "error", err)
-			return fmt.Errorf("corrupt team context at %s but rename failed: %w", path, err)
+			return outcome, fmt.Errorf("corrupt team context at %s but rename failed: %w", path, err)
 		}
-		return fmt.Errorf("team context repo was corrupt and moved aside for re-clone; re-run after the daemon re-clones it (path: %s)", path)
+		return outcome, fmt.Errorf("team context repo was corrupt and moved aside for re-clone; re-run after the daemon re-clones it (path: %s)", path)
 	}
 
 	// handle skip
@@ -555,6 +601,12 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		} else if s.issues != nil {
 			s.issues.ClearIssue(IssueTypeGitLock, repoName)
 		}
+		// Same reasoning as doPull: a skip only reachable after a successful
+		// index read retires a standing integrity issue, and skips never reach
+		// the clear-on-success path at the bottom of this function.
+		if s.issues != nil && skipProvesIndexReadable(result.SkipReason) {
+			s.issues.ClearIssue(IssueTypeRepoIntegrity, repoName)
+		}
 		// A rebase in progress leaves the working tree in a partial, possibly
 		// inconsistent state — the team context is NOT safely usable, so return an
 		// error rather than letting the caller report it as "synced". The other
@@ -563,9 +615,9 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		// present" means another live daemon is actively syncing this shared
 		// context (ox's multi-daemon dedup) while the files stay consistent.
 		if result.SkipReason == skipReasonRebaseInProgress {
-			return fmt.Errorf("team context not synced: rebase in progress (resolve the rebase, then re-run)")
+			return outcome, fmt.Errorf("team context not synced: rebase in progress (resolve the rebase, then re-run)")
 		}
-		return nil
+		return outcome, nil
 	}
 
 	// handle errors
@@ -578,7 +630,7 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 				s.issues.SetIssue(*result.Issue)
 			}
 		}
-		return result.Err
+		return outcome, result.Err
 	}
 
 	// clear lock issue on success
@@ -595,9 +647,12 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		// same stuck-rebase issue, keyed on this same repoName
 		// (ManagedRepoPullOpts.RepoName above). See sync.go's doPull.
 		s.issues.ClearIssue(IssueTypeRebaseStuck, repoName)
+		// Same reasoning as doPull: a completed pull proves the index is
+		// readable again, so the repo-integrity issue must not persist.
+		s.issues.ClearIssue(IssueTypeRepoIntegrity, repoName)
 	}
 
-	return nil
+	return outcome, nil
 }
 
 // applySparseCheckout reads the manifest from a team context repo and applies

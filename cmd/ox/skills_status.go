@@ -103,10 +103,11 @@ const (
 )
 
 type teamSkillStatus struct {
-	Name        string `json:"name"`
-	AppliesHere bool   `json:"applies_here"`
-	State       string `json:"state"`
-	Detail      string `json:"detail,omitempty"`
+	Name          string `json:"name"`
+	AppliesHere   bool   `json:"applies_here"`
+	State         string `json:"state"`
+	NeedsApproval bool   `json:"needs_approval"`
+	Detail        string `json:"detail,omitempty"`
 }
 
 func runSkillsStatus(cmd *cobra.Command, _ []string) error {
@@ -260,7 +261,9 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 			row.State = "unknown"
 			row.Detail = "could not compute the plan"
 		default:
-			row.State, row.Detail = installedState(gitRoot, targets, decisions[sk.Name], planned)
+			decision := decisions[sk.Name]
+			row.NeedsApproval = decision.NeedsApprove
+			row.State, row.Detail = installedState(gitRoot, targets, decision, planned)
 		}
 		out.TeamSkills = append(out.TeamSkills, row)
 	}
@@ -278,7 +281,10 @@ func skillsStatusGuidance(out skillsStatusOutput) string {
 	}
 	for _, s := range out.TeamSkills {
 		if s.State == skillWithheld {
-			return fmt.Sprintf("team skill %q is withheld: %s. Read the file it bundles before deciding to approve it.", s.Name, s.Detail)
+			return fmt.Sprintf("team skill %q is withheld: %s. Read the file it bundles, then run `ox skills approve %s`.", s.Name, s.Detail, s.Name)
+		}
+		if s.State == skillInstalled && s.NeedsApproval {
+			return fmt.Sprintf("team skill %q is installed without its bundled scripts: %s. Read them in your Team Context, then run `ox skills approve --allow-scripts %s`.", s.Name, s.Detail, s.Name)
 		}
 	}
 	for _, s := range out.TeamSkills {

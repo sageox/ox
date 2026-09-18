@@ -1373,6 +1373,15 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 			s.issues.ClearIssue(IssueTypeGitLock, "ledger")
 		}
 
+		// A skip that could only be reached by reading the index proves the
+		// clone is readable again, so a standing integrity issue is stale.
+		// Skips never reach the clear-on-success path below, so without this a
+		// repaired ledger whose remote has stopped changing would keep
+		// prompting for a repair it no longer needs.
+		if s.issues != nil && skipProvesIndexReadable(result.SkipReason) {
+			s.issues.ClearIssue(IssueTypeRepoIntegrity, "ledger")
+		}
+
 		// remote-unchanged or recently-fetched: update sync timestamps
 		if result.SkipReason == "remote unchanged" || result.SkipReason == "recently fetched" {
 			s.workspaceRegistry.ClearSyncFailures("ledger")
@@ -1450,6 +1459,11 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		// the daemon was restarted. A successful pull is proof the clone is
 		// not stuck, the same evidence the other issue types above rely on.
 		s.issues.ClearIssue(IssueTypeRebaseStuck, "ledger")
+		// A pull that reached this point read the index successfully, which
+		// is the exact fact IssueTypeRepoIntegrity denies. Without this
+		// clear the issue would outlive the repair, the way
+		// IssueTypeRebaseStuck did before ox-baz5.3.
+		s.issues.ClearIssue(IssueTypeRepoIntegrity, "ledger")
 	}
 
 	duration := time.Since(startTime)

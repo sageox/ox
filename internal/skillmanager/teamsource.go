@@ -76,12 +76,23 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 		return &teamCatalog{base: base, teamPath: teamPath, incomplete: reason}, nil, nil
 	}
 
-	discovered, err := teamdocs.DiscoverSkills(teamPath, repoSlug)
+	discovered, rejected, err := teamdocs.DiscoverSkillsWithRejections(teamPath, repoSlug)
 	if err != nil {
 		return nil, nil, fmt.Errorf("discover team skills: %w", err)
 	}
+
+	// Refusals are carried BEFORE the empty check and never gated on what else was
+	// found. A team whose only skill has an unusable name would otherwise get the
+	// silent empty result this decision list exists to prevent — the author would
+	// see their skill simply not appear, with nothing anywhere saying it was read.
+	// InstalledAs stays empty and NeedsApprove stays false: `ox skills approve`
+	// cannot help here, and sending the human there is worse than saying nothing.
+	var decisions []TeamSkillDecision
+	for _, r := range rejected {
+		decisions = append(decisions, TeamSkillDecision{Name: r.Name, Reason: r.NameError})
+	}
 	if len(discovered) == 0 {
-		return base, nil, nil
+		return base, decisions, nil
 	}
 
 	approvals, err := teamskills.LoadApprovals(projectRoot)
@@ -92,10 +103,7 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 		return nil, nil, fmt.Errorf("team skill approvals unreadable, refusing to materialize: %w", err)
 	}
 
-	var (
-		allowed   []skills.Skill
-		decisions []TeamSkillDecision
-	)
+	var allowed []skills.Skill
 	for _, ts := range discovered {
 		loaded, loadErr := loadTeamSkill(ts)
 		if loadErr != nil {
@@ -105,7 +113,9 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 			continue
 		}
 		verdict := teamskills.Classify(loaded)
-		needsApproval := approvals.Decide(ts.Name, verdict) == teamskills.DecisionNeedsApproval
+		manifestNeedsApproval := approvals.Decide(ts.Name, verdict) == teamskills.DecisionNeedsApproval
+		scriptsNeedApproval := verdictHasCapability(verdict, teamskills.CapBundledScript) &&
+			!approvals.ScriptsExecutable(ts.Name, verdict)
 
 		// The boundary is the FILE, not the skill. An unapproved script is dropped
 		// before it reaches disk and the prose installs anyway — an agent invited to
@@ -118,7 +128,7 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 		// The one case that still withholds is a manifest that is itself the
 		// runnable thing — an allowed-tools: grant or an inline command lives IN
 		// SKILL.md and cannot be dropped without rewriting the team's file.
-		if needsApproval && manifestIsRunnable(verdict) {
+		if manifestNeedsApproval && manifestIsRunnable(loaded, verdict) {
 			decisions = append(decisions, TeamSkillDecision{
 				Name: ts.Name, NeedsApprove: true,
 				Reason: "withheld, the manifest itself needs approval: " + verdict.Describe(),
@@ -133,7 +143,7 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 			Files:   toCatalogFiles(loaded, approvals.ScriptsExecutable(ts.Name, verdict)),
 		})
 		decision := TeamSkillDecision{Name: ts.Name, InstalledAs: installed}
-		if needsApproval {
+		if scriptsNeedApproval {
 			// Installed, minus its scripts. Still surfaced: the author expects the
 			// scripts to be there, and silence would read as "it all arrived."
 			decision.NeedsApprove = true
@@ -144,6 +154,15 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 
 	sort.Slice(allowed, func(i, j int) bool { return allowed[i].Name < allowed[j].Name })
 	return &teamCatalog{base: base, teamFiles: allowed, teamPath: teamPath}, decisions, nil
+}
+
+func verdictHasCapability(v teamskills.Verdict, want teamskills.Capability) bool {
+	for _, capability := range v.Capabilities {
+		if capability == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *teamCatalog) Digest() (string, error) {
@@ -222,10 +241,16 @@ func loadTeamSkill(ts teamdocs.TeamSkill) (teamskills.Skill, error) {
 // Bundled scripts are droppable one file at a time, so the prose can install
 // without them. A grant or command embedded in the manifest is not: the only
 // way to remove it is to rewrite the team's file, which ox does not do.
-func manifestIsRunnable(v teamskills.Verdict) bool {
+func manifestIsRunnable(s teamskills.Skill, v teamskills.Verdict) bool {
 	for _, c := range v.Capabilities {
 		if c != teamskills.CapBundledScript {
 			return true
+		}
+	}
+	for _, f := range s.Files {
+		if strings.EqualFold(f.Path, skills.SkillFileName) {
+			runnable, _ := teamskills.IsExecutableFile(f.Path, f.Content)
+			return runnable
 		}
 	}
 	return false
@@ -233,7 +258,7 @@ func manifestIsRunnable(v teamskills.Verdict) bool {
 
 func manifestContent(s teamskills.Skill) []byte {
 	for _, f := range s.Files {
-		if f.Path == "SKILL.md" {
+		if strings.EqualFold(f.Path, skills.SkillFileName) {
 			return f.Content
 		}
 	}
@@ -253,7 +278,10 @@ func toCatalogFiles(s teamskills.Skill, allowScripts bool) []skills.File {
 	var out []skills.File
 	for _, f := range s.Files {
 		clean := filepath.ToSlash(filepath.Clean(f.Path))
-		if !allowScripts {
+		// A runnable manifest reaches this point only after its digest-pinned
+		// manifest approval. --allow-scripts governs additional executable files,
+		// not whether that already-approved SKILL.md is silently dropped.
+		if !allowScripts && !strings.EqualFold(clean, skills.SkillFileName) {
 			if executable, _ := teamskills.IsExecutableFile(clean, f.Content); executable {
 				continue
 			}
@@ -392,16 +420,37 @@ func catalogForRepo(repoRoot string) (catalogSource, []TeamSkillDecision, error)
 	return TeamSkillSource(base, tc.Path, repotools.RepoSlug(repoRoot), repoRoot)
 }
 
-// WithheldTeamSkills returns the team skills this plan did NOT materialize
-// because they need a human's approval.
+// WithheldTeamSkills returns every team skill with an outstanding approval:
+// either the whole skill is withheld because its manifest is runnable, or its
+// readable files are installed while bundled scripts remain absent.
 //
-// Exported because a decision nobody renders is the same invisible failure as no
-// decision at all: from the repository, a skill held for approval and a skill
-// that was never authored look identical.
+// Exported because a decision nobody renders is invisible: a fully withheld
+// skill looks unauthored, and a partially installed one otherwise looks complete.
 func (plan *ReconcilePlan) WithheldTeamSkills() []TeamSkillDecision {
 	var out []TeamSkillDecision
 	for _, d := range plan.TeamSkills {
 		if d.NeedsApprove {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// UnusableTeamSkills returns the team skills ox discovered but CANNOT install —
+// an unusable name, or files it could not read — as opposed to the ones waiting
+// on an approval.
+//
+// Deliberately a second list rather than more entries in WithheldTeamSkills,
+// because the two need opposite next actions. A withheld skill is resolved by a
+// human reading it and running `ox skills approve`; an unusable one is resolved
+// by fixing it in the Team Context. Routing a refusal to the approval command is
+// worse than saying nothing: the human runs it, nothing changes, and the real
+// cause stays hidden. This is the same split `ox skills status` already renders
+// as `withheld` versus `unavailable`.
+func (plan *ReconcilePlan) UnusableTeamSkills() []TeamSkillDecision {
+	var out []TeamSkillDecision
+	for _, d := range plan.TeamSkills {
+		if !d.NeedsApprove && d.InstalledAs == "" {
 			out = append(out, d)
 		}
 	}
