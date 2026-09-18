@@ -718,8 +718,8 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 // reported exactly once.
 func locallyRepairableMissingDirs(cfg *manifest.ManifestConfig, missing []string) []string {
 	repairable := make(map[string]bool)
-	if cfg != nil {
-		for _, entry := range cfg.Includes {
+	addTopLevel := func(entries []string) {
+		for _, entry := range entries {
 			clean := strings.Trim(strings.TrimSpace(filepath.ToSlash(entry)), "/")
 			if clean == "" {
 				continue
@@ -727,17 +727,34 @@ func locallyRepairableMissingDirs(cfg *manifest.ManifestConfig, missing []string
 			repairable[strings.SplitN(clean, "/", 2)[0]] = true
 		}
 	}
-	for _, entry := range manifest.RequiredIncludes(manifest.RepoKindTeamContext) {
+	if cfg != nil {
+		addTopLevel(cfg.Includes)
+	}
+	addTopLevel(manifest.RequiredIncludes(manifest.RepoKindTeamContext))
+
+	// Intersect the manifest/floor union with the sparse set that repair will
+	// actually apply. This preserves the canonical overlap behavior: a deny
+	// beneath a manifest include removes that include entirely, while a denied
+	// descendant of a required floor is re-excluded without removing the floor.
+	effectiveCfg := cfg
+	if effectiveCfg == nil {
+		effectiveCfg = &manifest.ManifestConfig{}
+	}
+	effective := make(map[string]bool)
+	for _, entry := range manifest.SparseSetFor(effectiveCfg, manifest.RepoKindTeamContext) {
+		if strings.HasPrefix(entry, "!") || entry == "/*" {
+			continue
+		}
 		clean := strings.Trim(strings.TrimSpace(filepath.ToSlash(entry)), "/")
 		if clean != "" {
-			repairable[strings.SplitN(clean, "/", 2)[0]] = true
+			effective[strings.SplitN(clean, "/", 2)[0]] = true
 		}
 	}
 
 	var local []string
 	for _, dir := range missing {
 		clean := strings.Trim(filepath.ToSlash(dir), "/")
-		if repairable[clean] && !manifestPathDenied(clean, cfg) {
+		if repairable[clean] && effective[clean] {
 			local = append(local, dir)
 		}
 	}

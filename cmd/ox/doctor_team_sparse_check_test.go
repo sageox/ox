@@ -237,6 +237,22 @@ func TestLocallyRepairableMissingDirs_UnionDenyAndDedup(t *testing.T) {
 			missing: []string{"agents/", "memory/"},
 			want:    []string{"memory/"},
 		},
+		{
+			name: "nested deny removes overlapping manifest include",
+			cfg: &manifest.ManifestConfig{
+				Includes: []string{"docs/"},
+				Denies:   []string{"docs/private/"},
+			},
+			missing: []string{"docs/"},
+		},
+		{
+			name: "nested deny preserves required floor",
+			cfg: &manifest.ManifestConfig{
+				Denies: []string{"agents/private/"},
+			},
+			missing: []string{"agents/"},
+			want:    []string{"agents/"},
+		},
 	}
 
 	for _, tt := range tests {
