@@ -28,6 +28,7 @@ func TestCodexAuthenticationStreamsAndExitStatus(t *testing.T) {
 		{"warning_before_status", "printf 'host warning\\n' >&2; printf 'Logged in using ChatGPT\\n' >&2", true},
 		{"failed_exit", "printf 'Logged in using ChatGPT\\n'; exit 1", false},
 		{"not_logged_in", "printf 'Not logged in\\n' >&2", false},
+		{"unrecognized_status", "printf 'unrecognized status\\n'", false},
 		{"timeout", "sleep 5; printf 'Logged in using ChatGPT\\n'", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

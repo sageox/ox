@@ -1,3 +1,5 @@
+//go:build !windows
+
 package agentwork
 
 import (
@@ -12,6 +14,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Every test here executes an extensionless #!/bin/sh fixture as the codex
+// binary. Windows has no execution path for one, so the file is excluded there
+// rather than ported blind (.claude/rules/testing.md, "Prefer an honest skip").
+// Platform-independent runner tests live in codex_output_test.go.
 
 // TestCodexRunner_Run_PromptViaStdin verifies the prompt is delivered to the
 // codex subprocess via stdin and never appears as an argv element (security
@@ -76,40 +83,19 @@ func TestCodexRunnerCancellation(t *testing.T) {
 	assert.Less(t, time.Since(start), 2*time.Second)
 }
 
-func TestBoundedCodexOutput(t *testing.T) {
-	w := &boundedCodexOutput{limit: 3}
-	n, err := w.Write([]byte("abcdef"))
-	require.NoError(t, err)
-	assert.Equal(t, 6, n)
-	assert.Equal(t, "abc", w.buf.String())
-	assert.True(t, w.overflow)
-	n, err = w.Write([]byte("more"))
-	require.NoError(t, err)
-	assert.Equal(t, 4, n)
-	assert.Equal(t, "abc", w.buf.String())
-}
-
-func TestCodexLoginStatusStreams(t *testing.T) {
-	for _, tt := range []struct {
-		name, script  string
-		authenticated bool
-	}{
-		{"stdout", "printf 'Logged in using ChatGPT\\n'", true},
-		{"stderr", "printf 'Logged in using ChatGPT\\n' >&2", true},
-		{"failed with positive text", "printf 'Logged in using ChatGPT\\n' >&2; exit 1", false},
-		{"negative", "printf 'Not logged in\\n'", false},
-		{"unknown", "printf 'unrecognized status\\n'", false},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "codex"), []byte("#!/bin/sh\nif [ \"$2\" = \"--help\" ]; then echo \"--sandbox --ephemeral --color --config\"; exit; fi\n"+tt.script+"\n"), 0700))
-			t.Setenv("PATH", dir)
-			t.Setenv("OPENAI_API_KEY", "")
-			got := checkCodexUsability()
-			assert.True(t, got.Installed)
-			assert.Equal(t, tt.authenticated, got.Authenticated)
-		})
-	}
+// TestCodexRunnerTimeoutBoundsCapabilityProbe: a slow `codex exec --help` must
+// spend the caller's TimeoutOverride, not run ahead of it.
+// Failure prevented: daemon work overruns its requested limit by the probe's
+// own two-second allowance before the bounded child even starts.
+func TestCodexRunnerTimeoutBoundsCapabilityProbe(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "codex")
+	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nif [ \"$2\" = \"--help\" ]; then sleep 1; echo \"--sandbox --ephemeral --color --config\"; exit; fi\nprintf 'complete'\n"), 0700))
+	r := &CodexRunner{binaryPath: script, logger: slog.Default()}
+	start := time.Now()
+	_, err := r.Run(context.Background(), RunRequest{TimeoutOverride: 50 * time.Millisecond})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorContains(t, err, "codex timed out after 50ms")
+	assert.Less(t, time.Since(start), 900*time.Millisecond)
 }
 
 func TestCodexWorkerOverridesInheritedRecording(t *testing.T) {

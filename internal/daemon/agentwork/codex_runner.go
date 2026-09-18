@@ -54,12 +54,17 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 		timeout = req.TimeoutOverride
 	}
 
-	if err := r.checkCapabilities(ctx); err != nil {
-		return nil, err
-	}
-
+	// The probe spends the caller's budget too: TimeoutOverride bounds the whole
+	// Run, not only the prompt-bearing child.
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	if err := r.checkCapabilities(ctx); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("codex timed out after %s: %w", timeout, ctx.Err())
+		}
+		return nil, err
+	}
 
 	// The prompt is fed via stdin rather than as an argv element so the
 	// (potentially sensitive) session transcript does not appear in
