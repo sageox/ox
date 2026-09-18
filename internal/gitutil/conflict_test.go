@@ -523,3 +523,257 @@ func TestAutostashRecoveryWithoutReadableConflicts(t *testing.T) {
 		})
 	}
 }
+
+// TestAutostashRecoveryMergesBookkeepingCounters pins the field-level policy
+// from #956: summary_attempts is ox's own monotonic retry counter, written
+// daemon-side on BOTH sides of a pull --autostash, so it is the one conflict
+// class ox generates against itself — and before the policy it was the one
+// class auto-resolve refused, leaving an unmerged index that wedged ledger sync
+// until a human ran git by hand in the internal clone.
+//
+// The refuse cases matter as much as the merge cases. The blanket refusal is
+// what keeps a genuine content field from being silently half-discarded, so
+// every case below that is NOT summary_attempts-shaped must still leave the
+// worktree and index byte-identical.
+func TestAutostashRecoveryMergesBookkeepingCounters(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git stash conflicts")
+	}
+	for _, tc := range []struct {
+		name string
+		base string
+		// upstream lands as index stage 2 ("Updated upstream"); local is
+		// stashed and returns as stage 3 ("Stashed changes").
+		upstream   string
+		local      string
+		path       string
+		deny       []string
+		wantMerged string
+		// wantLiteral guards the re-encode: a counter that round-trips through
+		// float64 would come back as 2e+00 and stop being a counter.
+		wantLiteral string
+		wantErr     string
+	}{
+		{
+			name:        "counter 2 upstream vs 1 stashed resolves to the max",
+			base:        `{"title":"Ready","summary_attempts":0}`,
+			upstream:    `{"title":"Ready","summary_attempts":2}`,
+			local:       `{"title":"Ready","summary_attempts":1}`,
+			wantMerged:  `{"title":"Ready","summary_attempts":2}`,
+			wantLiteral: `"summary_attempts": 2`,
+		},
+		{
+			name:        "counter 3 upstream vs 2 stashed resolves to the max",
+			base:        `{"title":"Ready","summary_attempts":0}`,
+			upstream:    `{"title":"Ready","summary_attempts":3}`,
+			local:       `{"title":"Ready","summary_attempts":2}`,
+			wantMerged:  `{"title":"Ready","summary_attempts":3}`,
+			wantLiteral: `"summary_attempts": 3`,
+		},
+		{
+			// max, not "prefer ours": the stashed side can legitimately hold the
+			// higher count when the local daemon retried after the fetch.
+			name:        "stashed side wins when it holds the higher count",
+			base:        `{"title":"Ready","summary_attempts":0}`,
+			upstream:    `{"title":"Ready","summary_attempts":1}`,
+			local:       `{"title":"Ready","summary_attempts":4}`,
+			wantMerged:  `{"title":"Ready","summary_attempts":4}`,
+			wantLiteral: `"summary_attempts": 4`,
+		},
+		{
+			// The accepted undercount, pinned as understood behavior rather
+			// than left to be rediscovered. Divergent clones make DISTINCT
+			// attempts, so base 1 + one bump upstream + two bumps locally is
+			// four attempts and max records three. sum (5) or the three-way
+			// delta ours+theirs-base (4) would each fail here — which is the
+			// point: swapping the rule is a policy change with a cost
+			// (overcounting flips a live session to "unrecoverable" early),
+			// not a bug fix. See sessionMetaBookkeepingMerges.
+			name:        "divergent clones undercount: max is a lower bound, not the total",
+			base:        `{"title":"Ready","summary_attempts":1}`,
+			upstream:    `{"title":"Ready","summary_attempts":2}`,
+			local:       `{"title":"Ready","summary_attempts":3}`,
+			wantMerged:  `{"title":"Ready","summary_attempts":3}`,
+			wantLiteral: `"summary_attempts": 3`,
+		},
+		{
+			name:        "identical counters still merge the surrounding union",
+			base:        `{"title":"","summary_attempts":0}`,
+			upstream:    `{"title":"Ready","summary_attempts":2,"cloud_only":true}`,
+			local:       `{"title":"Ready","summary_attempts":2,"local_only":true}`,
+			wantMerged:  `{"title":"Ready","summary_attempts":2,"cloud_only":true,"local_only":true}`,
+			wantLiteral: `"summary_attempts": 2`,
+		},
+		{
+			// The policy resolves the counter but must not rescue the set: one
+			// unmergeable field still refuses the whole path.
+			name:     "counter alongside a differing content field still refuses",
+			base:     `{"summary":"","summary_attempts":0}`,
+			upstream: `{"summary":"upstream body","summary_attempts":2}`,
+			local:    `{"summary":"local body","summary_attempts":1}`,
+			wantErr:  "field summary differs",
+		},
+		{
+			// The RESET shape, and the reason max is safe here at all.
+			// summary_attempts is NOT globally monotonic: a successful
+			// summarization sets it back to 0 (session_finalize.go), as do
+			// RecoverEmptyTitleMeta and ResetInlineSummaryEligible. Across a
+			// reset max is actively WRONG — it would resurrect the stale 3 over
+			// the newer 0 and re-trip MaxSummaryAttempts a try early.
+			//
+			// What prevents that is not the counter rule but the fact that
+			// every resetting writer also writes summary_status, which has no
+			// merge rule and refuses the whole path first. Writers that BUMP
+			// the counter alone already exist and are fine; a writer that
+			// RESETS it alone would leave this case passing while the rule
+			// silently becomes unsound — so it is the canary for that change,
+			// not a guarantee against it.
+			name:     "a counter RESET paired with its status write still refuses",
+			base:     `{"summary_status":"pending","summary_attempts":0}`,
+			upstream: `{"summary_status":"unrecoverable","summary_attempts":3}`,
+			local:    `{"summary_status":"ok","summary_attempts":0}`,
+			wantErr:  "field summary_status differs",
+		},
+		{
+			name:     "differing validation_error still refuses",
+			base:     `{"validation_error":"","summary_attempts":0}`,
+			upstream: `{"validation_error":"missing transcript","summary_attempts":2}`,
+			local:    `{"validation_error":"model timeout","summary_attempts":1}`,
+			wantErr:  "field validation_error differs",
+		},
+		{
+			// Deliberately unhandled: summary_status is a state label with no
+			// total order, so no rule picks between these without inventing one.
+			name:     "differing summary_status still refuses",
+			base:     `{"summary_status":"pending","summary_attempts":0}`,
+			upstream: `{"summary_status":"failed","summary_attempts":2}`,
+			local:    `{"summary_status":"complete","summary_attempts":1}`,
+			wantErr:  "field summary_status differs",
+		},
+		{
+			name:     "non-integer counter is not a counter this rule understands",
+			base:     `{"title":"Ready","summary_attempts":0}`,
+			upstream: `{"title":"Ready","summary_attempts":2.5}`,
+			local:    `{"title":"Ready","summary_attempts":1}`,
+			wantErr:  "field summary_attempts differs",
+		},
+		{
+			// The mirror of the case above. mergeMonotonicCounter validates BOTH
+			// sides, but every other bad-value case here spoils whichever side
+			// is read first, so the second guard had never executed — the rule
+			// was only ever proven to reject a bad ours, not a bad theirs.
+			// Asymmetric validation is exactly the kind of gap that survives a
+			// green suite, so this pins the other half.
+			name:     "a non-integer counter on the OTHER side refuses too",
+			base:     `{"title":"Ready","summary_attempts":0}`,
+			upstream: `{"title":"Ready","summary_attempts":2}`,
+			local:    `{"title":"Ready","summary_attempts":1.5}`,
+			wantErr:  "field summary_attempts differs",
+		},
+		{
+			name:     "string-typed counter refuses rather than guessing",
+			base:     `{"title":"Ready","summary_attempts":"0"}`,
+			upstream: `{"title":"Ready","summary_attempts":"2"}`,
+			local:    `{"title":"Ready","summary_attempts":"1"}`,
+			wantErr:  "field summary_attempts differs",
+		},
+		{
+			name:     "deleted counter refuses before any merge rule applies",
+			base:     `{"title":"","summary_attempts":0}`,
+			upstream: `{"title":"Ready","summary_attempts":2}`,
+			local:    `{"title":"Ready"}`,
+			wantErr:  "was deleted",
+		},
+		{
+			// Scope check: the policy rides inside the sessions/<name>/meta.json
+			// guard, so a denied prefix keeps refusing even for a mergeable field.
+			name:     "denied prefix refuses a mergeable counter",
+			base:     `{"title":"Ready","summary_attempts":0}`,
+			upstream: `{"title":"Ready","summary_attempts":2}`,
+			local:    `{"title":"Ready","summary_attempts":1}`,
+			deny:     []string{"sessions/test/"},
+			wantErr:  "requires manual resolution",
+		},
+		{
+			name:     "other session artifact refuses a mergeable counter",
+			base:     `{"title":"Ready","summary_attempts":0}`,
+			upstream: `{"title":"Ready","summary_attempts":2}`,
+			local:    `{"title":"Ready","summary_attempts":1}`,
+			path:     "sessions/test/summary.json",
+			wantErr:  "requires manual resolution",
+		},
+		{
+			name:     "path outside sessions refuses a mergeable counter",
+			base:     `{"title":"Ready","summary_attempts":0}`,
+			upstream: `{"title":"Ready","summary_attempts":2}`,
+			local:    `{"title":"Ready","summary_attempts":1}`,
+			path:     "data/test/meta.json",
+			wantErr:  "requires manual resolution",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rel := tc.path
+			if rel == "" {
+				rel = "sessions/test/meta.json"
+			}
+			repo, path := seedAutostashConflict(t, rel, tc.base, tc.upstream, tc.local)
+			indexPath := filepath.Join(repo, ".git/index")
+			before, err := os.ReadFile(path)
+			require.NoError(t, err)
+			index, err := os.ReadFile(indexPath)
+			require.NoError(t, err)
+
+			var resolved bool
+			err = WithRepoLock(context.Background(), repo, func() error {
+				var err error
+				resolved, err = ResolveAutostashConflicts(context.Background(), repo, []string{"sessions/"}, tc.deny)
+				return err
+			})
+
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.False(t, resolved)
+				after, readErr := os.ReadFile(path)
+				require.NoError(t, readErr)
+				assert.Equal(t, before, after, "refused repair must not rewrite the worktree")
+				afterIndex, readErr := os.ReadFile(indexPath)
+				require.NoError(t, readErr)
+				assert.Equal(t, index, afterIndex, "refused repair must not touch the index")
+				return
+			}
+
+			require.NoError(t, err)
+			assert.True(t, resolved)
+			after, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.wantMerged, string(after))
+			assert.Contains(t, string(after), tc.wantLiteral, "counter must re-encode as an integer literal")
+			assert.Empty(t, gitInRepo(t, repo, "ls-files", "--unmerged"))
+			assert.Equal(t, string(after), gitInRepo(t, repo, "show", ":"+rel)+"\n")
+		})
+	}
+}
+
+// seedAutostashConflict reproduces the index state pull --autostash leaves
+// behind: base is committed, local is stashed, upstream is committed on top,
+// and applying the stash conflicts. Stage 2 therefore holds upstream ("Updated
+// upstream") and stage 3 holds local ("Stashed changes").
+func seedAutostashConflict(t *testing.T, rel, base, upstream, local string) (repo, path string) {
+	t.Helper()
+	repo = t.TempDir()
+	gitInRepo(t, repo, "init", "-b", "main")
+	path = filepath.Join(repo, filepath.FromSlash(rel))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(base+"\n"), 0o644))
+	gitInRepo(t, repo, "add", "--sparse", ".")
+	gitInRepo(t, repo, "commit", "-m", "base")
+	require.NoError(t, os.WriteFile(path, []byte(local+"\n"), 0o644))
+	gitInRepo(t, repo, "stash", "push", "-m", "autostash")
+	require.NoError(t, os.WriteFile(path, []byte(upstream+"\n"), 0o644))
+	gitInRepo(t, repo, "commit", "-am", "upstream")
+	cmd := exec.Command("git", "stash", "apply")
+	cmd.Dir = repo
+	out, err := cmd.CombinedOutput()
+	require.Error(t, err, "fixture must conflict: %s", out)
+	return repo, path
+}

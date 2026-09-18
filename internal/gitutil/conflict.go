@@ -302,8 +302,11 @@ func runPlumbing(ctx context.Context, repoPath string, stdin []byte, extraEnv []
 
 // ResolveAutostashConflicts clears formatting-only session metadata conflicts
 // left by pull --autostash, which can exit successfully with an unmerged index.
-// It preserves every field from both sides and refuses differing values,
-// deletions, other paths, active git operations, or edits made after the conflict.
+// It preserves every field from both sides and refuses differing values —
+// except for the small allowlist of ox-owned bookkeeping fields in
+// sessionMetaBookkeepingMerges, whose merge is mechanical rather than a choice
+// between two authors' content. Deletions, other paths, active git operations,
+// and edits made after the conflict are always refused.
 // The caller must hold WithRepoLock. No commits are made or stashes removed.
 func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixes, denyPrefixes []string) (bool, error) {
 	entries, err := listUnmergedEntries(ctx, repoPath)
@@ -363,7 +366,18 @@ func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixe
 		}
 		for key, value := range fields[3] {
 			if ours, exists := fields[2][key]; exists && !reflect.DeepEqual(ours, value) {
-				return false, fmt.Errorf("field %s differs in %s; manual resolution required", key, path)
+				// Differing values refuse by default. The narrow exception is
+				// ox's own bookkeeping, where the merge is mechanical rather
+				// than a choice between two authors' content — see
+				// sessionMetaBookkeepingMerges. Reached only for a path the
+				// guard above already confined to sessions/<name>/meta.json
+				// inside safePrefixes, so the policy cannot escape that tree.
+				merged, ok := mergeSessionMetaBookkeeping(key, ours, value)
+				if !ok {
+					return false, fmt.Errorf("field %s differs in %s; manual resolution required", key, path)
+				}
+				fields[2][key] = merged
+				continue
 			}
 			fields[2][key] = value
 		}
@@ -414,4 +428,126 @@ func ResolveAutostashConflicts(ctx context.Context, repoPath string, safePrefixe
 		}
 	}
 	return true, nil
+}
+
+// sessionMetaBookkeepingMerges is the complete allowlist of sessions/*/meta.json
+// fields whose two sides ox reconciles itself instead of refusing. It is
+// deliberately tiny and must stay that way: the blanket refusal above is what
+// stops a real content field — a summary body, a validation_error string, a
+// title — from being silently half-discarded, so this is not a general
+// "pick a side" heuristic and must never be widened into one.
+//
+// A field earns a place here only when a merge rule is mechanically correct
+// from the field's own semantics, not merely convenient.
+//
+// Deliberately absent: summary_status. #897 named it daemon-written bookkeeping
+// alongside summary_attempts, but it is a state label with no total order —
+// nothing picks between "failed" and "pending" without inventing policy — so it
+// keeps refusing.
+var sessionMetaBookkeepingMerges = map[string]func(ours, theirs any) (any, bool){
+	// summary_attempts is ox's own retry counter. Both sides of a
+	// pull --autostash have been counting the same session's attempts, which
+	// makes this the one conflict class ox reliably generates against itself
+	// (#956) — and, before this rule, the one class auto-resolve refused,
+	// wedging the index until a human ran git by hand in the ledger clone.
+	//
+	// max is a safe LOWER BOUND on the attempts made, not their true total.
+	// Every ledger clone runs autofix over the whole sessions/ tree
+	// (daemon checkSessionMetaTitles), so two clones retry the SAME session
+	// independently and their bumps are distinct attempts, not two views of
+	// one serialized counter: from a common base of 1, ours=2 with theirs=3
+	// is four attempts recorded as three.
+	//
+	// That undercount is chosen, not overlooked. It is bounded by the number
+	// of clones racing one session, it buys at most a few extra LLM calls
+	// before MaxSummaryAttempts bites, and checkSessionInlineSummaryRetry
+	// re-arms the cap daily regardless. The opposite error is far more
+	// expensive: a rule that can overshoot flips a still-summarizable session
+	// to "unrecoverable", which permanently demotes a teammate-visible title
+	// to the session-name slug. Spend tokens; do not discard summaries.
+	// TestAutostashRecoveryMergesBookkeepingCounters pins the undercount with
+	// "divergent clones undercount: max is a lower bound, not the total", so
+	// changing this rule is a deliberate policy change, not a bug fix.
+	//
+	// An exact rule does exist and is deliberately not used: stage 1 is the
+	// stash base, so ours+theirs-base would count both sides' bumps. It is
+	// exact only while stage 1 really is the common ancestor of both counters,
+	// and wherever that assumption slips the error flips to overcounting — the
+	// expensive direction above.
+	//
+	// Resets are a different hazard, and they are structurally out of reach
+	// twice over. summary_attempts is omitempty, so resetting it to 0 DELETES
+	// the key (meta_repair.go patches it exactly that way), and the deletion
+	// guard above refuses any base key missing from either side. Independently,
+	// all three resetting writers — session_finalize.go on a successful
+	// summarization, meta_repair.go RecoverEmptyTitleMeta on a recovered title,
+	// and ResetInlineSummaryEligible on a re-arm — write the counter atomically
+	// alongside summary_status and/or validation_error and/or title, none of
+	// which have a merge rule, so the loop above refuses on that key first.
+	// Both guards matter, because across a reset max is actively WRONG: the
+	// lower side is the LATER observation, and taking the higher resurrects a
+	// stale count that re-trips MaxSummaryAttempts a try early. The test cases
+	// "deleted counter refuses before any merge rule applies" and "a counter
+	// RESET paired with its status write still refuses" pin one guard each.
+	//
+	// Writers that BUMP the counter alone already exist — RecoverEmptyTitleMeta
+	// below the cap, and `ox session repair-meta-summary` on a session already
+	// marked failed_validation — which is precisely why this merge is reachable
+	// at all. A writer that RESETS it alone would invalidate the analysis
+	// above; give the counter a reset-aware merge (or an episode id) first.
+	"summary_attempts": mergeMonotonicCounter,
+}
+
+// mergeSessionMetaBookkeeping resolves one differing session-metadata field
+// when an ox-owned merge rule covers it. ok is false for every field outside
+// the allowlist and for any value the rule does not recognize, which returns
+// the caller to its refusal.
+func mergeSessionMetaBookkeeping(key string, ours, theirs any) (any, bool) {
+	merge, covered := sessionMetaBookkeepingMerges[key]
+	if !covered {
+		return nil, false
+	}
+	return merge(ours, theirs)
+}
+
+// mergeMonotonicCounter resolves two sides of a counter that never decreases
+// within one failure episode to the larger. The two sides may be independent
+// counts rather than two readings of one count, so the result is a lower bound
+// on the total — see sessionMetaBookkeepingMerges for why that direction is the
+// one worth erring in. The winning side is returned as-is (a json.Number from
+// the stage that produced it) so the merged file re-encodes the original
+// literal rather than a value round-tripped through float64.
+//
+// Anything that is not a non-negative JSON integer — a float, a string, a null
+// from an older writer — is not a counter this rule understands. Refusing there
+// costs only a manual resolution; guessing could overwrite a field that merely
+// shares the name.
+func mergeMonotonicCounter(ours, theirs any) (any, bool) {
+	left, ok := counterValue(ours)
+	if !ok {
+		return nil, false
+	}
+	right, ok := counterValue(theirs)
+	if !ok {
+		return nil, false
+	}
+	if right > left {
+		return theirs, true
+	}
+	return ours, true
+}
+
+// counterValue reads a counter from a conflict stage decoded with
+// json.Decoder.UseNumber, so an integral value arrives as json.Number and a
+// non-integral one is rejected by Int64 rather than silently truncated.
+func counterValue(value any) (int64, bool) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	n, err := number.Int64()
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
