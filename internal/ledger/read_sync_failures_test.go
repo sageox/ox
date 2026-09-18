@@ -187,23 +187,25 @@ func TestReadSyncRejectsBrokenCommitHistory(t *testing.T) {
 // Failure prevented: non-regular or unexpectedly missing tracked content is
 // silently overwritten instead of preserving local changes for the coworker.
 func TestReadSyncRejectsDamagedTrackedContent(t *testing.T) {
+	const tracked = "sessions/old/session.md"
 	for _, tc := range []struct {
 		name, errorClass string
+		detail           *ReadFailureDetail
 		damage           func(*testing.T, *readFixture, string)
 	}{
-		{"missing file", "dirty", func(t *testing.T, f *readFixture, path string) { require.NoError(t, os.Remove(path)) }},
-		{"directory replaces file", "dirty", func(t *testing.T, f *readFixture, path string) {
+		{"missing file", "dirty", nil, func(t *testing.T, f *readFixture, path string) { require.NoError(t, os.Remove(path)) }},
+		{"directory replaces file", "dirty", nil, func(t *testing.T, f *readFixture, path string) {
 			require.NoError(t, os.Remove(path))
 			require.NoError(t, os.Mkdir(path, 0700))
 		}},
-		{"staged work", "dirty", func(t *testing.T, f *readFixture, path string) {
+		{"staged work", "dirty", nil, func(t *testing.T, f *readFixture, path string) {
 			require.NoError(t, os.WriteFile(path, []byte("staged local work"), 0600))
 			readTestGit(t, f.opts.Path, "add", "--", path)
 		}},
-		{"malformed stub", "missing_hydration", func(t *testing.T, f *readFixture, path string) {
+		{"malformed stub", "missing_hydration", &ReadFailureDetail{Reason: "malformed_pointer", Path: tracked}, func(t *testing.T, f *readFixture, path string) {
 			require.NoError(t, os.WriteFile(path, []byte("version https://git-lfs.github.com/spec/v1\noid sha256:invalid\nsize not-a-number\n"), 0600))
 		}},
-		{"different stub", "missing_hydration", func(t *testing.T, f *readFixture, path string) {
+		{"different stub", "missing_hydration", &ReadFailureDetail{Reason: "nested_stub", Path: tracked}, func(t *testing.T, f *readFixture, path string) {
 			require.NoError(t, os.WriteFile(path, []byte(lfs.FormatPointer("sha256:"+lfs.ComputeOID([]byte("new")), 3)), 0600))
 		}},
 	} {
@@ -211,11 +213,12 @@ func TestReadSyncRejectsDamagedTrackedContent(t *testing.T) {
 			f := newReadFixture(t)
 			ctx := context.Background()
 			require.True(t, ReadSync(ctx, f.opts).Ready)
-			path := filepath.Join(f.opts.Path, "sessions/old/session.md")
+			path := filepath.Join(f.opts.Path, tracked)
 			tc.damage(t, f, path)
 			result := ReadSync(ctx, f.opts)
 			require.False(t, result.Ready)
 			require.Equal(t, tc.errorClass, result.ErrorClass)
+			require.Equal(t, tc.detail, result.ErrorDetail)
 		})
 	}
 }

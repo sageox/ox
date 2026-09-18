@@ -131,7 +131,7 @@ An `oid` or `expected_oid` is omitted when the value supplied for it is not a ca
 | `reason` | `error_class` | Condition |
 | --- | --- | --- |
 | `malformed_pointer` | `missing_hydration` | An LFS pointer in the checkout cannot be parsed. |
-| `nested_stub` | `missing_hydration` | A materialized file's content is itself a pointer, and not the one HEAD commits. |
+| `nested_stub` | `missing_hydration` | A file's content is itself a pointer, and is neither the pointer HEAD commits nor the object that pointer names. Content decides, not shape: an object whose own content is a pointer — what a file cleaned a second time stores — hydrates to one and verifies by its SHA-256 and size like any other. |
 | `empty_object_oid_mismatch` | `missing_hydration` | A size-0 pointer names an object other than the empty one. |
 | `shared_object_size_conflict` | `missing_hydration` | Two files name one object with different sizes. Carries `oid` and both declared sizes, and no `path`: the conflict belongs to the pair, and which pointer is wrong is not known until the object's bytes arrive. It is detected before the object is requested, so it is the failure a conflict reports — a later per-file `downloaded_size_mismatch` does not replace it. Identify the file still unmaterialized from the checkout, where it remains a pointer. |
 | `batch_response_incomplete` | `missing_hydration` | The batch response holds fewer objects than the batch. |

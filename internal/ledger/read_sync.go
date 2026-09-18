@@ -594,11 +594,15 @@ func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir stri
 			}
 		}
 		if gitOID != file.oid {
+			// Bytes that differ from HEAD's blob must be the object HEAD's pointer
+			// names, at that OID and size. Their shape cannot stand in for that
+			// check: an object's own content can be a pointer, which is what a
+			// file cleaned a second time stores. So a pointer here is a stale stub
+			// only once the check fails; any other file that fails it is a local
+			// edit.
+			mismatch := errors.New("dirty")
 			if len(file.pointer) != 0 {
-				// The worktree file is itself a pointer, and not the one HEAD
-				// commits. It names some other object, so it is not this file's
-				// content and no OID here would be the one worth reporting.
-				return nil, missingHydration(ReadFailureDetail{Reason: "nested_stub", Path: name})
+				mismatch = missingHydration(ReadFailureDetail{Reason: "nested_stub", Path: name})
 			}
 			blobSize, err := runReadGit(ctx, transport, false, dir, "cat-file", "-s", file.oid)
 			if err != nil {
@@ -606,7 +610,7 @@ func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir stri
 			}
 			n, err := strconv.ParseInt(blobSize, 10, 64)
 			if err != nil || n > 1024 {
-				return nil, errors.New("dirty")
+				return nil, mismatch
 			}
 			cmd, err := transport.LocalCommand(ctx, dir, "cat-file", "blob", file.oid)
 			if err != nil {
@@ -618,7 +622,7 @@ func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir stri
 			}
 			oid, pointerSize, err := lfs.ParsePointer(string(blob))
 			if err != nil || size != pointerSize || lfsOID != strings.TrimPrefix(oid, "sha256:") {
-				return nil, errors.New("dirty")
+				return nil, mismatch
 			}
 			file.pointer = blob
 			file.ref, file.hydrated = lfs.FileRef{OID: oid, Size: pointerSize}, true
