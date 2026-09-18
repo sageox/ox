@@ -459,8 +459,10 @@ func TestRootRelativeHelpersRejectUnsafeAndMalformedPaths(t *testing.T) {
 
 	escapeName := "outside-" + filepath.Base(repo)
 	outside := filepath.Join(filepath.Dir(repo), escapeName)
+	require.NoError(t, os.Mkdir(outside, 0o755))
+	t.Cleanup(func() { _ = os.Remove(outside) })
 	removeEmptyParentsInRoot(root, "../"+escapeName)
-	require.NoDirExists(t, outside, "invalid cleanup escaped the repository")
+	require.DirExists(t, outside, "invalid cleanup escaped the repository")
 }
 
 func TestApplyRejectsInvalidOrStaleActions(t *testing.T) {
@@ -479,6 +481,7 @@ func TestApplyRejectsInvalidOrStaleActions(t *testing.T) {
 			Path: "managed.txt", Content: []byte("new\n"), Digest: "sha256:not-the-content",
 		}}}
 		require.ErrorContains(t, Apply(plan), "action content digest changed")
+		require.NoFileExists(t, journalPath(repo), "a rejected plan wrote its recovery journal")
 	})
 
 	t.Run("updated file disappeared after planning", func(t *testing.T) {
@@ -488,6 +491,7 @@ func TestApplyRejectsInvalidOrStaleActions(t *testing.T) {
 			Path: "managed.txt", Content: content, Digest: digestBytes(content), PreviousDigest: digestBytes([]byte("old\n")),
 		}}}
 		require.ErrorContains(t, Apply(plan), "disappeared after planning")
+		require.NoFileExists(t, journalPath(repo), "a rejected plan wrote its recovery journal")
 	})
 
 	t.Run("removed file changed after planning", func(t *testing.T) {
@@ -497,6 +501,27 @@ func TestApplyRejectsInvalidOrStaleActions(t *testing.T) {
 			Path: "managed.txt", PreviousDigest: digestBytes([]byte("old\n")),
 		}}}
 		require.ErrorContains(t, Apply(plan), "changed after planning")
+		require.NoFileExists(t, journalPath(repo), "a rejected plan wrote its recovery journal")
+	})
+
+	t.Run("later invalid action prevents earlier valid write", func(t *testing.T) {
+		repo := t.TempDir()
+		firstContent := []byte("first\n")
+		secondContent := []byte("second\n")
+		first := "first.txt"
+		plan := &ReconcilePlan{
+			repoRoot: repo,
+			Creates:  []FileAction{{Path: first, Content: firstContent, Digest: digestBytes(firstContent), Mode: 0o644}},
+			Updates: []FileAction{{
+				Path: "missing.txt", Content: secondContent, Digest: digestBytes(secondContent),
+				PreviousDigest: digestBytes([]byte("old\n")), Mode: 0o644,
+			}},
+		}
+
+		require.ErrorContains(t, Apply(plan), "disappeared after planning")
+		require.NoFileExists(t, filepath.Join(repo, first),
+			"Apply partially wrote an earlier action before rejecting the stale plan")
+		require.NoFileExists(t, journalPath(repo), "a rejected plan wrote its recovery journal")
 	})
 }
 

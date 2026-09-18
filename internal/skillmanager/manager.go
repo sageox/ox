@@ -902,6 +902,9 @@ func Apply(plan *ReconcilePlan) error {
 		return ErrApplyInProgress
 	}
 	defer unlock()
+	if err := validatePlanActions(repo, plan); err != nil {
+		return err
+	}
 	journalBytes, err := json.MarshalIndent(plan.journal, "", "  ")
 	if err != nil {
 		return err
@@ -911,37 +914,24 @@ func Apply(plan *ReconcilePlan) error {
 		return fmt.Errorf("write skill apply journal: %w", err)
 	}
 	for _, action := range append(append([]FileAction{}, plan.Creates...), plan.Updates...) {
-		if digestBytes(action.Content) != action.Digest {
-			return fmt.Errorf("skill action content digest changed for %s", action.Path)
+		alreadyCurrent, err := validateWriteAction(repo, action)
+		if err != nil {
+			return err
 		}
-		actual, _, readErr := inspectRootFile(repo, action.Path)
-		if readErr == nil {
-			actualDigest := digestBytes(actual)
-			if actualDigest == action.Digest {
-				continue
-			}
-			if action.PreviousDigest == "" || actualDigest != action.PreviousDigest {
-				return fmt.Errorf("skill file changed after planning: %s", action.Path)
-			}
-		} else if !os.IsNotExist(readErr) {
-			return readErr
-		} else if action.PreviousDigest != "" {
-			return fmt.Errorf("skill file disappeared after planning: %s", action.Path)
+		if alreadyCurrent {
+			continue
 		}
 		if err := atomicWriteInRoot(repo, action.Path, action.Content, action.Mode); err != nil {
 			return fmt.Errorf("write skill file %s: %w", action.Path, err)
 		}
 	}
 	for _, action := range plan.Removes {
-		actual, _, readErr := inspectRootFile(repo, action.Path)
-		if os.IsNotExist(readErr) {
+		alreadyAbsent, err := validateRemoveAction(repo, action)
+		if err != nil {
+			return err
+		}
+		if alreadyAbsent {
 			continue
-		}
-		if readErr != nil {
-			return readErr
-		}
-		if digestBytes(actual) != action.PreviousDigest {
-			return fmt.Errorf("skill file changed after planning: %s", action.Path)
 		}
 		if err := removeRootFile(repo, action.Path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove skill file %s: %w", action.Path, err)
@@ -974,6 +964,62 @@ func Apply(plan *ReconcilePlan) error {
 		return fmt.Errorf("remove skill apply journal: %w", err)
 	}
 	return nil
+}
+
+// validatePlanActions rejects a stale plan before Apply writes its recovery
+// journal or any managed target. The per-action checks run again immediately
+// before each mutation because non-cooperating repository writers do not take
+// the apply lock and can still change a path after this preflight.
+func validatePlanActions(root *os.Root, plan *ReconcilePlan) error {
+	for _, action := range append(append([]FileAction{}, plan.Creates...), plan.Updates...) {
+		if _, err := validateWriteAction(root, action); err != nil {
+			return err
+		}
+	}
+	for _, action := range plan.Removes {
+		if _, err := validateRemoveAction(root, action); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateWriteAction(root *os.Root, action FileAction) (alreadyCurrent bool, err error) {
+	if digestBytes(action.Content) != action.Digest {
+		return false, fmt.Errorf("skill action content digest changed for %s", action.Path)
+	}
+	actual, _, readErr := inspectRootFile(root, action.Path)
+	if readErr == nil {
+		actualDigest := digestBytes(actual)
+		if actualDigest == action.Digest {
+			return true, nil
+		}
+		if action.PreviousDigest == "" || actualDigest != action.PreviousDigest {
+			return false, fmt.Errorf("skill file changed after planning: %s", action.Path)
+		}
+		return false, nil
+	}
+	if !os.IsNotExist(readErr) {
+		return false, readErr
+	}
+	if action.PreviousDigest != "" {
+		return false, fmt.Errorf("skill file disappeared after planning: %s", action.Path)
+	}
+	return false, nil
+}
+
+func validateRemoveAction(root *os.Root, action FileAction) (alreadyAbsent bool, err error) {
+	actual, _, readErr := inspectRootFile(root, action.Path)
+	if os.IsNotExist(readErr) {
+		return true, nil
+	}
+	if readErr != nil {
+		return false, readErr
+	}
+	if digestBytes(actual) != action.PreviousDigest {
+		return false, fmt.Errorf("skill file changed after planning: %s", action.Path)
+	}
+	return false, nil
 }
 
 // DesiredUpdate computes a desired-state mutation while the project manifest
