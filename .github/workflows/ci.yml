@@ -20,10 +20,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The changed-line coverage ratchet below diffs against the PR base
+          # commit, which a shallow clone does not contain.
+          fetch-depth: 0
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          # Cached explicitly below instead. setup-go derives its key from
+          # go.sum and shares that one entry with the lint job; GitHub never
+          # overwrites an existing key, so whichever job first missed it fixed
+          # the contents for as long as go.sum holds. lint builds no test
+          # binaries, so the entry this job restored carried no -race objects
+          # and every run recompiled the race-instrumented stdlib and
+          # dependencies before the first test ran (3m12s on run 35267514816).
+          cache: false
+
+      # This job is the sole writer of the shared Go cache. It builds the most
+      # expensive variants (-race, -cover), so an entry it saves also serves
+      # lint; the reverse is not true. Keep the key stable rather than rolling
+      # it per run: the repo sits at ~9GB of its 10GB Actions cache budget, and
+      # a fresh ~2.3GB build cache per run would evict the CodeQL and
+      # golangci-lint entries and cost more than it saves.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}
 
       - name: Configure git identity for tests
         run: |
@@ -56,12 +81,17 @@ jobs:
       - name: Test harness contracts
         run: make coverage-ratchet-test
 
-      - name: Full tests (PR gate)
+      # Full unit tier, compiled-binary acceptance, and digital twins — one
+      # instrumented pass. The Coverage workflow used to re-run these same three
+      # suites in a parallel job purely to collect coverage, so every PR paid for
+      # them twice (15m50s + 16m07s on run 35267514816). Instrumentation costs
+      # ~15-20%; a second uninstrumented run cost 100%.
+      - name: Full suites with coverage (PR gate)
         if: github.event_name == 'pull_request'
         run: |
           TEST_JUNIT=test-results.xml \
           TEST_TIMINGS=test-timings.json \
-          make test-all
+          make coverage-integration
 
       - name: Require requested test artifacts
         run: |
@@ -70,13 +100,35 @@ jobs:
           python3 -c 'import xml.etree.ElementTree as ET; root = ET.parse("test-results.xml").getroot(); assert any(root.iter("testcase")), "JUnit artifact has no test cases"'
           python3 scripts/test_metrics.py test-timings.json >/dev/null
 
-      - name: Compiled-binary acceptance (PR gate)
+      - name: Enforce risk-package coverage ratchets
         if: github.event_name == 'pull_request'
-        run: make test-acceptance
+        run: python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json
 
-      - name: Digital twins (PR gate)
+      - name: Enforce changed-line coverage
         if: github.event_name == 'pull_request'
-        run: make test-digital-twin
+        run: python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json --diff-base "${{ github.event.pull_request.base.sha }}"
+
+      - name: Upload coverage
+        if: always() && github.event_name == 'pull_request' && hashFiles('coverage-all.out') != ''
+        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
+        with:
+          files: coverage-all.out
+          flags: ox-cli
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+      # Codecov deprecated test-results-action in favor of this action with
+      # report_type: test_results; test-results-action has no node24 release.
+      # PR-only, matching what the Coverage workflow uploaded: a push to main
+      # runs the fast tier, and feeding that subset in would misrepresent which
+      # tests ran.
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && hashFiles('test-results.xml') != '' }}
+        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
+        with:
+          files: test-results.xml
+          report_type: test_results
+          token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Failure digest
         if: always() && hashFiles('test-results.xml') != ''
@@ -110,6 +162,19 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
+
+      # Restore-only, on the key the test job owns. This job finishes in about a
+      # minute, so under setup-go's shared cache it usually won the race to save
+      # and pinned the entry to a lint build — no test binaries, no -race
+      # objects — for as long as go.sum stayed put. Reading without writing keeps
+      # one entry in the budget and lets the expensive job decide its contents.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}
 
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:

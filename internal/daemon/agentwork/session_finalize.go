@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -325,6 +326,7 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 	// deduplicate across all scan dirs (prefer earlier-found copy)
 	seen := make(map[string]bool)
 	var items []*WorkItem
+	var skips detectSkipStats
 
 	mergeItems := func(newItems []*WorkItem) {
 		for _, item := range newItems {
@@ -340,8 +342,9 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 	if ghostResult := session.CleanupGhostSessionsInDir(ledgerCacheSessionsDir); ghostResult.Removed > 0 {
 		h.logger.Info("ghost cleanup (ledger cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
 	}
-	if cacheItems, err := h.detectInDir(ledgerCacheSessionsDir, ledgerPath); err == nil {
+	if cacheItems, cacheSkips, err := h.detectInDir(ledgerCacheSessionsDir, ledgerPath); err == nil {
 		mergeItems(cacheItems)
+		skips.merge(cacheSkips)
 	}
 
 	// 2. git-tracked ledger sessions — uploaded/finalized sessions
@@ -349,8 +352,9 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 	if ghostResult := session.CleanupGhostSessionsInDir(ledgerSessionsDir); ghostResult.Removed > 0 {
 		h.logger.Info("ghost cleanup (ledger): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
 	}
-	if ledgerItems, err := h.detectInDir(ledgerSessionsDir, ledgerPath); err == nil {
+	if ledgerItems, ledgerSkips, err := h.detectInDir(ledgerSessionsDir, ledgerPath); err == nil {
 		mergeItems(ledgerItems)
+		skips.merge(ledgerSkips)
 	}
 
 	// 3. XDG/legacy cache paths — older ox versions or different XDG_CACHE_HOME environments
@@ -373,24 +377,45 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 			if ghostResult := session.CleanupGhostSessionsInDir(dir); ghostResult.Removed > 0 {
 				h.logger.Info("ghost cleanup (xdg cache): removed abandoned recordings", "dir", dir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
 			}
-			if xdgItems, err := h.detectInDir(dir, ledgerPath); err == nil {
+			if xdgItems, xdgSkips, err := h.detectInDir(dir, ledgerPath); err == nil {
 				mergeItems(xdgItems)
+				skips.merge(xdgSkips)
 			}
 		}
 	}
 
-	h.logger.Info("session finalize detect complete", "ledger", ledgerPath, "items", len(items))
+	h.logger.Info("session finalize detect complete",
+		"ledger", ledgerPath,
+		"items", len(items),
+		"skipped_with_content", skips.total(),
+	)
+	// A separate Warn rather than more keys on the line above: `items=0` is
+	// indistinguishable from a healthy ledger, and this is the one condition
+	// where it is not. Names the sessions so the user can run
+	// `ox agent <id> session recover` on them without guessing.
+	if skips.total() > 0 {
+		h.logger.Warn("sessions skipped while holding transcript content",
+			"ledger", ledgerPath,
+			"draft_not_provably_abandoned", len(skips.unprovenDraft),
+			"unreadable_meta", len(skips.unreadableMeta),
+			"sessions", skips.names(),
+		)
+	}
 	return items, nil
 }
 
-// detectInDir scans a single sessions directory for sessions needing finalization.
-func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]*WorkItem, error) {
+// detectInDir scans a single sessions directory for sessions needing
+// finalization. The second return value reports sessions it deliberately
+// skipped while they still held transcript bytes — see detectSkipStats.
+func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]*WorkItem, detectSkipStats, error) {
+	var skips detectSkipStats
+
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, skips, nil
 		}
-		return nil, fmt.Errorf("read sessions dir: %w", err)
+		return nil, skips, fmt.Errorf("read sessions dir: %w", err)
 	}
 
 	var items []*WorkItem
@@ -408,24 +433,105 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		sessionDir := filepath.Join(sessionsDir, name)
 		rawPath := filepath.Join(sessionDir, artifactRaw)
 
-		// Never touch a draft placeholder (ADR-029). It is an in-progress
-		// marker for a live recording, not an unfinished session awaiting
-		// anti-entropy: it has no raw.jsonl to summarize and no artifacts to
-		// repair, and every work class below would either no-op noisily or
-		// write a failure stub into a directory the CLI is about to purge.
+		// Liveness probe FIRST, because the draft guard below depends on its
+		// verdict. .recording.json is the only signal of whether the client
+		// process that owns this directory still exists, and isStaleRecording
+		// reports both a verdict and the EVIDENCE behind it. Probing it here
+		// costs one stat for sessions that have no marker.
+		recPath := filepath.Join(sessionDir, recordingMarker)
+		recInfo, recStatErr := os.Stat(recPath)
+		hasRecordingMarker := recStatErr == nil
+		var (
+			recStale  bool
+			recAge    time.Duration
+			recMethod string
+		)
+		if hasRecordingMarker {
+			recStale, recAge, recMethod = isStaleRecording(recPath, recInfo, h.pidLookup, h.logger)
+		}
+		// Keyed on the METHOD, not on recStale. recStale is ALSO true for
+		// stalenessTimeThreshold, which fires exactly when no PID could be
+		// obtained — unreadable or unparseable marker, or a legacy marker
+		// predating parent_pid with no daemon state to fall back on — and
+		// therefore means "nobody could be asked and 24h passed", never "the
+		// owner died". Sessions here routinely run longer than 24h, so
+		// accepting it would reclaim a LIVE draft: detect would clear
+		// .recording.json and queue the transcript as it stands, dropping every
+		// entry the owner writes afterward. Only stalenessPIDDead asked the
+		// kernel about a real PID and got an answer.
 		//
-		// The !hasRaw guard further down would also skip a well-formed draft
-		// today, but only incidentally. Making it explicit means the safety
-		// survives a future change to that guard, and gives the regression
-		// test something real to assert against.
-		// Fails CLOSED. An unreadable meta.json here (torn write, rebase
-		// conflict markers) must SKIP, not fall through: falling through
-		// reaches recoverRawFromSessionFile, which writes real transcript
-		// bytes onto the git-tracked raw.jsonl and breaks LFS linkage for the
-		// whole team. Skipping only defers finalization to a human.
-		if _, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir); isDraft || metaErr != nil {
-			h.logger.Debug("skipping draft or unclassifiable session", "session", name, "err", metaErr)
+		// The time threshold remains acceptable for the NON-draft recovery
+		// further below, where it has always been the fallback and no
+		// still-live claim is being overridden.
+		abandoned := hasRecordingMarker && recMethod == stalenessPIDDead
+
+		_, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir)
+
+		// Fails CLOSED on an unreadable meta.json (torn write, rebase conflict
+		// markers). It must SKIP, never fall through: falling through reaches
+		// recoverRawFromSessionFile, which writes real transcript bytes onto
+		// the git-tracked raw.jsonl and breaks LFS linkage for the whole team.
+		// Skipping only defers finalization to a human.
+		//
+		// Its own branch and its own message deliberately: "draft" and
+		// "unparseable meta.json" are unrelated conditions, and sharing one
+		// Debug line between them is part of why #966 was unreadable in the
+		// logs.
+		if metaErr != nil {
+			// Warn only when bytes are actually stranded. A corrupt meta.json
+			// over an empty directory is a nuisance, not lost work, and this
+			// scan repeats every detectCooldown — warning on both would train
+			// the reader to ignore the line that matters.
+			if hasSessionContent(rawPath) {
+				skips.addUnreadableMeta(name)
+				h.logger.Warn("skipping session with unreadable meta.json, transcript stranded",
+					"session", name, "err", metaErr)
+			} else {
+				h.logger.Debug("skipping session with unreadable meta.json",
+					"session", name, "err", metaErr)
+			}
 			continue
+		}
+
+		// Never touch a LIVE draft placeholder (ADR-029). It is an in-progress
+		// marker for a recording the CLI still owns: every work class below
+		// would either no-op noisily or write a failure stub into a directory
+		// stageSessionInLedger is about to purge.
+		//
+		// But `draft: true` means "was live when last written", NOT "is live".
+		// The flag is set at start and cleared only by finalize, so a client
+		// process that dies in between freezes it set forever. Honoring it
+		// unconditionally made every such session permanently invisible to
+		// anti-entropy — two sessions holding 1151 and 628 entries sat
+		// unuploaded for 21h behind a healthy daemon (#966). The probe above is
+		// what separates the two cases, so only a draft with a dead-PID verdict
+		// is reclaimed here.
+		//
+		// A draft with no recording marker — or one whose staleness rests on
+		// age alone — stays skipped: absence of evidence is not proof of death,
+		// and the no-marker shape is precisely the ordinary git-tracked
+		// placeholder the CLI refreshes every turn.
+		//
+		// Letting an abandoned draft through does not weaken the LFS-linkage
+		// guarantee above. Recovery into the git-tracked ledger path is blocked
+		// separately below (`sessionsDir != <ledger>/sessions`) — that is the
+		// guard which actually keeps transcript bytes off the tracked
+		// raw.jsonl. This one only decides whether to look at all.
+		if isDraft && !abandoned {
+			if hasSessionContent(rawPath) {
+				skips.addUnprovenDraft(name)
+			}
+			h.logger.Debug("skipping draft placeholder with no proof of abandonment",
+				"session", name, "recording_marker", hasRecordingMarker,
+				"detection_method", recMethod)
+			continue
+		}
+		if isDraft {
+			h.logger.Info("draft session's recording process is gone, reclaiming for anti-entropy",
+				"session", name,
+				"recording_age", recAge.Round(time.Minute),
+				"detection_method", recMethod,
+			)
 		}
 
 		// raw.jsonl must exist and be committed/pushed to the ledger.
@@ -441,12 +547,9 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			hasRaw = true
 		}
 
-		// check for active recording
-		recPath := filepath.Join(sessionDir, recordingMarker)
-		if recInfo, statErr := os.Stat(recPath); statErr == nil {
-			// .recording.json exists — check if it's stale (abandoned)
-			stale, recAge, method := isStaleRecording(recPath, recInfo, h.pidLookup, h.logger)
-			if !stale {
+		// act on the recording marker probed above
+		if hasRecordingMarker {
+			if !recStale {
 				h.logger.Debug("skipping session with active recording", "session", name)
 				continue
 			}
@@ -484,7 +587,7 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			h.logger.Info("clearing stale recording for anti-entropy finalization",
 				"session", name,
 				"recording_age", recAge.Round(time.Hour),
-				"detection_method", method,
+				"detection_method", recMethod,
 			)
 		}
 
@@ -598,7 +701,84 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		})
 	}
 
-	return items, nil
+	return items, skips, nil
+}
+
+// detectSkipStats accumulates sessions detectInDir refused to queue even though
+// they still hold transcript bytes on disk.
+//
+// A skip with no content is routine — an empty draft placeholder, a header-only
+// stub. A skip WITH content means finished work is sitting on disk that
+// anti-entropy has decided not to touch, which is the single strongest anomaly
+// signal this scan produces. It was silent at Debug when #966 stranded two
+// sessions for 21h behind an `items=0` that read exactly like "all healthy", so
+// these are counted per scan and surfaced at Warn where `ox doctor` (which
+// routes the user to `ox daemon logs`) can show them.
+//
+// Keyed by session name so a session found in two scan dirs — the ledger cache
+// and the git-tracked ledger — counts once.
+type detectSkipStats struct {
+	// unprovenDraft: draft:true and the owning process could not be proven
+	// dead (live PID, or no .recording.json to check at all).
+	unprovenDraft map[string]bool
+	// unreadableMeta: meta.json could not be parsed, so the fail-closed arm
+	// skipped rather than risk recovering onto a git-tracked raw.jsonl.
+	unreadableMeta map[string]bool
+}
+
+func (s *detectSkipStats) addUnprovenDraft(name string) {
+	if s.unprovenDraft == nil {
+		s.unprovenDraft = make(map[string]bool)
+	}
+	s.unprovenDraft[name] = true
+}
+
+func (s *detectSkipStats) addUnreadableMeta(name string) {
+	if s.unreadableMeta == nil {
+		s.unreadableMeta = make(map[string]bool)
+	}
+	s.unreadableMeta[name] = true
+}
+
+func (s *detectSkipStats) merge(other detectSkipStats) {
+	for name := range other.unprovenDraft {
+		s.addUnprovenDraft(name)
+	}
+	for name := range other.unreadableMeta {
+		s.addUnreadableMeta(name)
+	}
+}
+
+// names returns every skipped session once, sorted, so the log line is stable
+// across runs and diffable between them.
+func (s *detectSkipStats) names() []string {
+	union := make(map[string]bool, len(s.unprovenDraft)+len(s.unreadableMeta))
+	maps.Copy(union, s.unprovenDraft)
+	maps.Copy(union, s.unreadableMeta)
+	out := make([]string, 0, len(union))
+	for name := range union {
+		out = append(out, name)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func (s *detectSkipStats) total() int { return len(s.names()) }
+
+// hasSessionContent reports whether a skipped session is stranding real
+// transcript bytes, and therefore whether its skip is an anomaly worth a Warn.
+//
+// It must agree with the finalization floor used further up
+// (session.HasSubstantiveEntries), so it delegates rather than reimplementing:
+// a "non-empty file" test counts the header-only raw.jsonl that every ordinary
+// per-turn draft placeholder carries, and warning on those each detectCooldown
+// would bury the signal this counter exists to raise. Cost is bounded — the
+// classifier stops after the second line and never reads a whole transcript.
+//
+// Fails toward WARNING: a present-but-unreadable raw.jsonl classifies as
+// substantive, because "we could not look" must not read as "nothing is there".
+func hasSessionContent(rawPath string) bool {
+	return session.HasSubstantiveEntries(rawPath)
 }
 
 // DetectOrphanedForAgent scans for recordings belonging to a specific agent
@@ -655,13 +835,18 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 
 			sessionDir := filepath.Join(sessionsDir, name)
 
-			// Never treat a draft placeholder as an orphan to recover, and fail
-			// CLOSED on an unreadable meta.json. This is the other detection
-			// path that can reach recoverRawFromSessionFile, which would write
-			// real transcript bytes onto the git-tracked raw.jsonl and break
-			// LFS linkage for the whole team. detectInDir got this guard; this
-			// function is scanned by the same directories and needs it too.
-			if _, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir); isDraft || metaErr != nil {
+			// Fail CLOSED on an unreadable meta.json. This is the other
+			// detection path that can reach recoverRawFromSessionFile, which
+			// would write real transcript bytes onto the git-tracked raw.jsonl
+			// and break LFS linkage for the whole team.
+			//
+			// The DRAFT half of this guard used to live here too, above the
+			// liveness cross-check below — the same ordering bug detectInDir
+			// had (#966). It now sits after that check; see there.
+			_, isDraft, metaErr := lfs.PreservedSessionIDAndDraft(sessionDir)
+			if metaErr != nil {
+				h.logger.Warn("skipping session with unreadable meta.json",
+					"session", name, "agent_id", agentID, "err", metaErr)
 				continue
 			}
 
@@ -707,6 +892,34 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 						continue
 					}
 				}
+			}
+
+			// Never treat a LIVE draft placeholder as an orphan to recover
+			// (ADR-029) — but `draft: true` only means "was live when last
+			// written", so an abandoned draft must still be reclaimable (#966).
+			// Placed below the cross-check above so the same PID evidence is
+			// available here; reclaiming requires POSITIVE proof the owner is
+			// gone (a recorded stop, or a PID that is no longer alive), never
+			// the mere absence of proof it is running.
+			//
+			// This does not weaken the LFS-linkage guarantee: recovery into the
+			// git-tracked ledger path is blocked separately below
+			// (`sessionsDir != <ledger>/sessions`).
+			if isDraft {
+				ownerPID := state.ParentPID
+				if ownerPID <= 0 {
+					ownerPID = heartbeatPID
+				}
+				ownerGone := state.StoppedAt != nil || (ownerPID > 0 && !isPIDAlive(ownerPID))
+				if !ownerGone {
+					h.logger.Debug("skipping draft placeholder with no proof of abandonment",
+						"session", name, "agent_id", agentID, "owner_pid", ownerPID,
+					)
+					continue
+				}
+				h.logger.Info("draft session's recording process is gone, reclaiming as orphan",
+					"session", name, "agent_id", agentID, "owner_pid", ownerPID,
+				)
 			}
 
 			// check if already fully finalized
@@ -1942,6 +2155,28 @@ func extractPayload(item *WorkItem) (*SessionFinalizePayload, error) {
 	return p, nil
 }
 
+// The `method` values isStaleRecording returns, naming the EVIDENCE behind its
+// verdict. Callers that only need "should this be finalized" read `stale`;
+// callers that need to know how strong the evidence is compare the method.
+//
+// Only stalenessPIDDead rests on an actual liveness check: a PID was available
+// and kill(pid, 0) refused it. That check reads ANY signal error as death,
+// which on Unix means ESRCH (gone) or EPERM — and EPERM can only arise here
+// from PID reuse by another user's process, in which case the original owner is
+// gone too.
+//
+// stalenessTimeThreshold is the opposite: it fires precisely when there was no
+// PID to ask (unreadable/unparseable marker, or a legacy marker predating
+// parent_pid with no daemon state to fall back on), so it means "nobody could
+// be asked, and it has been a long time" — never "the owner died".
+const (
+	stalenessPIDDead        = "pid_dead"
+	stalenessPIDDeadGrace   = "pid_dead_grace_period"
+	stalenessPIDAlive       = "pid_alive"
+	stalenessTimeThreshold  = "time_threshold"
+	stalenessTimeNotReached = "time_not_reached"
+)
+
 // isStaleRecording reads a .recording.json file and determines if the recording
 // is abandoned. Checks PID liveness first (instant detection), then falls back
 // to the 24h staleRecordingThreshold.
@@ -1955,9 +2190,9 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 		// can't read file — fall back to mod time
 		age = time.Since(info.ModTime())
 		if age > staleRecordingThreshold {
-			return true, age, "time_threshold"
+			return true, age, stalenessTimeThreshold
 		}
-		return false, age, "time_not_reached"
+		return false, age, stalenessTimeNotReached
 	}
 
 	var state struct {
@@ -1968,9 +2203,9 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
 		age = time.Since(info.ModTime())
 		if age > staleRecordingThreshold {
-			return true, age, "time_threshold"
+			return true, age, stalenessTimeThreshold
 		}
-		return false, age, "time_not_reached"
+		return false, age, stalenessTimeNotReached
 	}
 
 	// determine age
@@ -2000,13 +2235,13 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 			// transient shell PID. Don't mark stale until grace period expires.
 			if age < session.GhostGracePeriod {
 				logger.Debug("recording process dead but within grace period, skipping", "pid", pid, "age", age)
-				return false, age, "pid_dead_grace_period"
+				return false, age, stalenessPIDDeadGrace
 			}
 			logger.Debug("recording process dead, marking stale", "pid", pid, "age", age)
-			return true, age, "pid_dead"
+			return true, age, stalenessPIDDead
 		}
 		logger.Debug("recording process alive, skipping", "pid", pid)
-		return false, age, "pid_alive"
+		return false, age, stalenessPIDAlive
 	}
 
 	logger.Debug("no PID available, using time threshold", "session", filepath.Base(recPath))
@@ -2014,10 +2249,10 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	// fall back to time-based threshold
 	if age > staleRecordingThreshold {
 		logger.Debug("recording exceeded stale threshold", "age", age, "threshold", staleRecordingThreshold)
-		return true, age, "time_threshold"
+		return true, age, stalenessTimeThreshold
 	}
 	logger.Debug("recording within stale threshold", "age", age, "threshold", staleRecordingThreshold)
-	return false, age, "time_not_reached"
+	return false, age, stalenessTimeNotReached
 }
 
 // missingArtifacts returns the list of required artifacts not present in sessionDir.

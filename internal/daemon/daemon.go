@@ -1718,6 +1718,10 @@ func (s *daemonServiceImpl) TriggerGCAsync() *TriggerGCResponse {
 	return s.d.scheduler.TriggerGCAsync(s.d.ctx)
 }
 
+func (s *daemonServiceImpl) TriggerKBGC() {
+	s.d.scheduler.TriggerKBGC(s.d.ctx)
+}
+
 func (s *daemonServiceImpl) CodeIndex(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) {
 	if s.d.codedb == nil {
 		return nil, nil

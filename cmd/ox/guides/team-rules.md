@@ -48,6 +48,7 @@ Each file is markdown with YAML frontmatter:
 name: integration-tests-no-db-mocks
 description: Integration tests must hit a real database, not mocks.
 repos: ["sageox/ox", "sageox/cloud-api"]
+globs: ["**/*_test.go"]
 audience: ai
 visibility: indexed
 status: active
@@ -58,6 +59,42 @@ from-discussion: 2026-04-12-uuid7
 **How to apply:** Spin up the test container in `internal/testdb`...
 ```
 
+### `repos:` and `globs:` are different axes
+
+`repos:` is **which repositories** get the rule. `globs:` is **which files inside them**
+the rule is about. They are independent, and the combination most teams want is the one
+that had no expression before: applies everywhere, but only to certain files.
+
+| | Applies to any file | Scoped with `globs:` |
+|---|---|---|
+| **All team repos** (no `repos:`) | Escalation policy, review conventions | Go error-wrapping idioms (`**/*.go`), Terraform conventions (`**/*.tf`), migration rules (`migrations/**`) |
+| **Some repos** (`repos:` set) | "The billing service is PCI scope" | Schema rules in the two repos that own schemas |
+
+Before `globs:`, a Go-idioms rule had two bad options: load it in every session on every
+repo including the frontend ones, or copy it into each Go repo's local rules and let the
+copies drift. That second option is the problem team rules exist to solve, so the first
+was the honest choice — and it spent context in every session that never touched Go.
+
+Write globs either way; both forms parse:
+
+The inline-list form matches the style `repos:` already uses:
+
+```yaml
+globs: ["**/*.go", "**/*.mod"]
+```
+
+The bare comma form matches what Cursor, Copilot, and Cline use, so a rule
+copied out of `.cursor/rules` works unchanged:
+
+```yaml
+globs: **/*.go,**/*.mod
+```
+
+Today `globs:` is advisory: your AI coworker sees the scope in its prime context and
+applies the rule when it fits. Native path-triggered loading — where the agent's own
+harness loads the rule the moment you open a matching file — lands with rule sync-out.
+A rule you write now gains that automatically.
+
 ### Frontmatter fields
 
 | Field | Required | Values | Purpose |
@@ -65,6 +102,7 @@ from-discussion: 2026-04-12-uuid7
 | `name` | yes | kebab-case identifier | Stable handle for cross-references and `superseded-by`. |
 | `description` | yes | one short line | Shown in catalogs and indexed-tier prime output. |
 | `repos` | no | list of `owner/repo` slugs | Empty/absent = all team repos. Non-empty = only those repos. |
+| `globs` | no | path patterns | Which FILES the rule is about. Empty/absent = any file. |
 | `audience` | no | `ai` \| `human` \| `both` | Default `ai`. Filters out human-only rules from agent context. |
 | `visibility` | no | `always` \| `indexed` \| `hidden` | Default `indexed`. See below. |
 | `status` | no | `active` \| `draft` \| `superseded-by:<other-name>` | Default `active`. |

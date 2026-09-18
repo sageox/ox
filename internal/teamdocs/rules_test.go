@@ -3,6 +3,7 @@ package teamdocs
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -309,5 +310,170 @@ func TestReadRuleBody_NoFrontmatter(t *testing.T) {
 	}
 	if !strings.HasPrefix(body, "Just a body") {
 		t.Errorf("body without frontmatter should pass through: %q", body)
+	}
+}
+
+// TestDiscoverRules_Globs covers the scope field that lets a rule be
+// team-general AND path-scoped at the same time.
+//
+// That quadrant is real and had no expression before: Go error-wrapping idioms,
+// Terraform conventions, and SQL migration rules all apply to every repo on the
+// team but only to some files in them. Without globs: an author's only options
+// were to load the rule in every session or to duplicate it into each repo's
+// local rules — the copies-that-rot problem team rules exist to solve.
+func TestDiscoverRules_Globs(t *testing.T) {
+	tests := []struct {
+		name      string
+		globsLine string
+		want      []string
+	}{
+		{"absent", "", nil},
+		{"inline list, matching repos: style", `globs: ["**/*.go", "**/*.mod"]`, []string{"**/*.go", "**/*.mod"}},
+		// An author copying a rule out of .cursor/rules writes the bare comma form.
+		// Rejecting it would leave the rule unscoped — loading everywhere, which is
+		// the exact outcome globs: exists to prevent.
+		{"bare comma form, as Cursor and Copilot write it", "globs: **/*.go,**/*.mod", []string{"**/*.go", "**/*.mod"}},
+		{"single bare glob", "globs: migrations/**", []string{"migrations/**"}},
+		{"quoted single", `globs: "**/*.tf"`, []string{"**/*.tf"}},
+		// End to end: the literal hash must survive into the parsed glob, not just
+		// into the un-stripped value.
+		{"quoted entry containing a hash", `globs: ["**/*.go # generated sources"]`, []string{"**/*.go # generated sources"}},
+		{"empty value is not a scope", "globs:", nil},
+		{"empty list is not a scope", "globs: []", nil},
+		// The guide's own examples carried trailing comments. Parsed literally they
+		// produced glob entries named "Cursor" and "Copilot" — a rule scoped to
+		// files that cannot exist, so it silently never applies. Anyone copying the
+		// documentation got a rule that looked scoped and was not.
+		{"trailing comment on the bare form", "globs: **/*.go,**/*.mod   # matches Cursor, Copilot, Cline", []string{"**/*.go", "**/*.mod"}},
+		{"trailing comment on the inline form", `globs: ["**/*.go", "**/*.mod"]   # matches the repos: style`, []string{"**/*.go", "**/*.mod"}},
+		{"comment-only value is no scope", "globs: # TODO decide", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			body := "---\nname: scoped\ndescription: A scoped rule.\n"
+			if tt.globsLine != "" {
+				body += tt.globsLine + "\n"
+			}
+			body += "---\n\nUse errors.Is.\n"
+			writeRule(t, root, "agents/rules/scoped.md", body)
+
+			rules, err := DiscoverRules(root, "acme/api")
+			if err != nil {
+				t.Fatalf("DiscoverRules: %v", err)
+			}
+			if len(rules) != 1 {
+				t.Fatalf("got %d rules, want 1", len(rules))
+			}
+			if !slices.Equal(rules[0].Globs, tt.want) {
+				t.Errorf("Globs = %#v, want %#v", rules[0].Globs, tt.want)
+			}
+		})
+	}
+}
+
+// TestDiscoverRules_TrailingCommentsDoNotLeakIntoValues covers the whole
+// frontmatter surface, not just globs: extractValue did not strip comments
+// either, so `name: foo # note` carried the comment into the identifier that
+// cross-references and superseded-by resolve against.
+//
+// A value that OPENS with a quote keeps its `#`, because there it is literal
+// YAML and truncating would corrupt a description that legitimately contains one.
+func TestDiscoverRules_TrailingCommentsDoNotLeakIntoValues(t *testing.T) {
+	root := t.TempDir()
+	writeRule(t, root, "agents/rules/commented.md",
+		"---\nname: commented   # the identifier\ndescription: Wrap errors.   # why\nrepos: [\"acme/api\"]   # only the API\n---\n\nBody.\n")
+	writeRule(t, root, "agents/rules/quoted.md",
+		"---\nname: quoted\ndescription: \"Use #tags in commit messages\"\n---\n\nBody.\n")
+
+	rules, err := DiscoverRules(root, "acme/api")
+	if err != nil {
+		t.Fatalf("DiscoverRules: %v", err)
+	}
+	byName := map[string]TeamRule{}
+	for _, r := range rules {
+		byName[r.Name] = r
+	}
+
+	if _, ok := byName["commented"]; !ok {
+		t.Fatalf("the name carried its trailing comment; got %v", keysOf(byName))
+	}
+	if got := byName["commented"].Description; got != "Wrap errors." {
+		t.Errorf("Description = %q, want the comment stripped", got)
+	}
+	if got := byName["commented"].Repos; !slices.Equal(got, []string{"acme/api"}) {
+		t.Errorf("Repos = %#v, want the comment stripped", got)
+	}
+	if got := byName["quoted"].Description; got != "Use #tags in commit messages" {
+		t.Errorf("Description = %q — a quoted # is literal YAML and must survive", got)
+	}
+}
+
+// TestStripYAMLComment_QuoteEscapes: both escape forms must survive, or a value
+// is silently truncated at its first inner quote and the reader cannot tell.
+func TestStripYAMLComment_QuoteEscapes(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{"plain double", `"hello"`, `"hello"`},
+		{"plain single", `'hello'`, `'hello'`},
+		{"double then comment", `"hello"   # note`, `"hello"`},
+		{"single then comment", `'hello'   # note`, `'hello'`},
+		// YAML doubles a single quote to escape it. Scanning for the first quote
+		// truncated 'It''s fine' to It, and apostrophes in descriptions are common.
+		{"doubled single quote", `'It''s fine'`, `'It''s fine'`},
+		{"doubled single quote then comment", `'It''s fine'  # yes`, `'It''s fine'`},
+		{"backslash-escaped double quote", `"say \"hi\" now"`, `"say \"hi\" now"`},
+		// A # inside quotes is literal YAML, not a comment.
+		{"hash inside quotes", `"Use #tags here"`, `"Use #tags here"`},
+		{"unterminated stays whole", `"no closing quote`, `"no closing quote`},
+		{"unquoted with comment", `bare value  # note`, `bare value`},
+		{"comment only", `# nothing`, ``},
+		// A # inside a quoted entry of a flow sequence is literal. Cutting at the
+		// first " #" produced the unparseable `["**/*.go`, which told the agent a
+		// scope that matches nothing the author meant.
+		{"hash inside a quoted sequence entry", `["**/*.go # generated sources"]`, `["**/*.go # generated sources"]`},
+		{"sequence then comment", `["**/*.go", "**/*.mod"]   # note`, `["**/*.go", "**/*.mod"]`},
+		{"sequence with apostrophe entry", `['it''s', "b"]  # note`, `['it''s', "b"]`},
+		{"unterminated sequence stays whole", `["**/*.go"`, `["**/*.go"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripYAMLComment(tt.in); got != tt.want {
+				t.Errorf("stripYAMLComment(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func keysOf(m map[string]TeamRule) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestDiscoverRules_GlobsDoNotFilterDiscovery: globs describe WHERE a rule
+// applies inside a repo, not WHETHER the repo gets it. That is repos:.
+//
+// Conflating them would silently drop scoped rules from discovery, and the
+// symptom — a rule that exists in the team repo but never reaches anyone — is
+// the same one an unmaterialized checkout produces, so it would be diagnosed
+// as a sync problem rather than a filter bug.
+func TestDiscoverRules_GlobsDoNotFilterDiscovery(t *testing.T) {
+	root := t.TempDir()
+	writeRule(t, root, "agents/rules/go-idioms.md",
+		"---\nname: go-idioms\ndescription: Wrap errors.\nglobs: [\"**/*.go\"]\n---\n\nUse %w.\n")
+
+	rules, err := DiscoverRules(root, "acme/web-frontend")
+	if err != nil {
+		t.Fatalf("DiscoverRules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("a globbed rule was filtered out of a repo with no matching files yet: got %d rules", len(rules))
+	}
+	if !slices.Equal(rules[0].Globs, []string{"**/*.go"}) {
+		t.Errorf("Globs = %#v", rules[0].Globs)
 	}
 }

@@ -64,7 +64,9 @@ func TestPlan_TeamSkillsTravelTheWholeReconcilePath(t *testing.T) {
 		// wantInstalled is whether the skill's SKILL.md must exist afterwards.
 		wantInstalled bool
 		wantWithheld  bool
-		wantErr       string
+		// wantAbsent lists bundle files that must NOT be on disk.
+		wantAbsent []string
+		wantErr    string
 	}{
 		{
 			// A user with no team must be completely unaffected: the built-in
@@ -91,11 +93,11 @@ func TestPlan_TeamSkillsTravelTheWholeReconcilePath(t *testing.T) {
 			wantInstalled: true,
 		},
 		{
-			// The trust boundary, end to end: a skill shipping a script does not
-			// reach disk on the say-so of whoever pushed to the team remote — and
-			// the human is TOLD, because a skill withheld in silence is
-			// indistinguishable from a skill that was never authored.
-			name: "executable team skill is withheld and the decision is surfaced",
+			// The trust boundary, end to end: the SCRIPT does not reach disk on the
+			// say-so of whoever pushed to the team remote, but the prose does — and
+			// the human is TOLD the script is held, because an author who expects
+			// it to be there would otherwise read "installed" as "all of it."
+			name: "executable team skill installs without its script and says so",
 			stage: func(t *testing.T, _ string) string {
 				team := t.TempDir()
 				writeTeamSkill(t, team, skillName, "", map[string]string{
@@ -103,7 +105,9 @@ func TestPlan_TeamSkillsTravelTheWholeReconcilePath(t *testing.T) {
 				})
 				return team
 			},
-			wantWithheld: true,
+			wantInstalled: true,
+			wantWithheld:  true,
+			wantAbsent:    []string{"scripts/run.sh"},
 		},
 		{
 			// An approval store ox cannot parse is NOT an empty store. Reconciling
@@ -142,6 +146,10 @@ func TestPlan_TeamSkillsTravelTheWholeReconcilePath(t *testing.T) {
 			require.NoError(t, err)
 
 			manifest := filepath.Join(repo, installedDir, "SKILL.md")
+			for _, rel := range tt.wantAbsent {
+				require.NoFileExists(t, filepath.Join(repo, installedDir, filepath.FromSlash(rel)),
+					"an unapproved bundled file reached the repository")
+			}
 			if tt.wantInstalled {
 				require.FileExists(t, manifest,
 					"a prose team skill never reached the repository; the reconcile path is still projecting the built-in catalog alone")

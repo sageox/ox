@@ -55,6 +55,7 @@ const (
 	MsgTypeDoctor            = "doctor"              // trigger daemon health checks (anti-entropy, etc.)
 	MsgTypeTriggerGC         = "trigger_gc"          // force GC reclone for team contexts (synchronous)
 	MsgTypeTriggerGCAsync    = "trigger_gc_async"    // force GC reclone for team contexts (background, returns immediately)
+	MsgTypeTriggerKBGC       = "trigger_kb_gc"       // run the knowledge-bubble GC pass now (synchronous, no reclone)
 	MsgTypeCodeIndex         = "code_index"          // index local code with progress
 	MsgTypeCodeStatus        = "code_status"         // get code index status/stats
 	MsgTypeWhispers          = "whispers"            // query whisper entries for an agent
@@ -709,6 +710,7 @@ type DaemonService interface {
 	MarkErrors(ids []string)
 	TriggerGC() *TriggerGCResponse
 	TriggerGCAsync() *TriggerGCResponse
+	TriggerKBGC()
 	CodeIndex(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)
 	Doctor() *DoctorResponse
 	SessionFinalize(payload SessionFinalizeIPCPayload)
@@ -930,6 +932,10 @@ func (c *CallbackService) TriggerGCAsync() *TriggerGCResponse {
 	}
 	return nil
 }
+
+// TriggerKBGC is a no-op: nothing wires a kb GC handler into CallbackService.
+// The daemon serves trigger_kb_gc through daemonServiceImpl.
+func (c *CallbackService) TriggerKBGC() {}
 
 func (c *CallbackService) CodeIndex(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) {
 	c.mu.Lock()
@@ -1228,6 +1234,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeDoctor, handleDoctor)
 	router.Register(MsgTypeTriggerGC, handleTriggerGC)
 	router.Register(MsgTypeTriggerGCAsync, handleTriggerGCAsync)
+	router.Register(MsgTypeTriggerKBGC, handleTriggerKBGC)
 	router.Register(MsgTypeCodeIndex, handleCodeIndex)
 	router.Register(MsgTypeCodeStatus, handleCodeStatus)
 	router.Register(MsgTypeWhispers, handleWhispers)
@@ -1974,6 +1981,23 @@ func (c *Client) TriggerGCAsync() (*TriggerGCResponse, error) {
 		return nil, fmt.Errorf("unmarshal trigger_gc_async response: %w", err)
 	}
 	return &gcResp, nil
+}
+
+// TriggerKBGC asks the daemon to run its knowledge-bubble GC pass (orphan
+// triage into .trash/, then the trash reaper) and blocks until it finishes.
+// The pass reports nothing back; callers recheck disk. Unlike TriggerGC it
+// reclones nothing: apart from the kb API list, which kbGCTriage caps at 30s,
+// it only moves and deletes local directories. A daemon that predates this
+// message returns an "unknown message type" error.
+func (c *Client) TriggerKBGC() error {
+	resp, err := c.sendMessage(Message{Type: MsgTypeTriggerKBGC})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return errors.New(resp.Error)
+	}
+	return nil
 }
 
 // Whispers queries whisper entries for an agent from the daemon.

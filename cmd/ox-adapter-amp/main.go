@@ -91,7 +91,18 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 			adapterprotocol.CapIncrementalReader,
 			adapterprotocol.CapFileWatcher,
 			adapterprotocol.CapServeMode,
+			adapterprotocol.CapSkillsInstaller,
 		},
+		// Amp reads .agents/skills and .claude/skills; the canonical root is the one we write.
+		// One root, never a fan-out: a skill copied into several of an agent's
+		// discovery paths is several files to keep in sync and several answers
+		// when they drift. CanonicalizeTargets folds this key across adapters, so
+		// selecting Codex and Amp together still yields one directory.
+		SkillTargets: []adapterprotocol.SkillTarget{{
+			Key: "agents-project", Root: ".agents/skills",
+			Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
+			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
 		HookEnvValues: []string{"amp"},
 		ServeMode:     true,
 	}, nil

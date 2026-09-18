@@ -26,6 +26,7 @@ type TeamRule struct {
 	RelPath         string   `json:"rel_path"`                   // path relative to rules root (e.g., "backend/postgres.md")
 	AbsPath         string   `json:"abs_path"`                   // absolute path on disk
 	Repos           []string `json:"repos,omitempty"`            // repo filter; empty = all team repos
+	Globs           []string `json:"globs,omitempty"`            // path scope; empty = applies to any file
 	Audience        string   `json:"audience,omitempty"`         // "ai" | "human" | "both" (default: "ai")
 	Visibility      string   `json:"visibility"`                 // "always" | "indexed" | "hidden"
 	Status          string   `json:"status,omitempty"`           // "active" | "draft" | "superseded-by:<other>"
@@ -255,6 +256,7 @@ func walkRulesDir(absRoot string) ([]TeamRule, error) {
 			RelPath:        rel,
 			AbsPath:        path,
 			Repos:          fm.Repos,
+			Globs:          fm.Globs,
 			Audience:       fm.Audience,
 			Visibility:     fm.Visibility,
 			Status:         fm.Status,
@@ -340,6 +342,7 @@ type ruleFrontmatter struct {
 	Name           string
 	Description    string
 	Repos          []string
+	Globs          []string
 	Audience       string
 	Visibility     string
 	Status         string
@@ -394,8 +397,9 @@ func parseRuleFrontmatter(path string) ruleFrontmatter {
 		case strings.HasPrefix(line, "from-discussion:"):
 			fm.FromDiscussion = extractValue(line, "from-discussion:")
 		case strings.HasPrefix(line, "repos:"):
-			val := strings.TrimSpace(strings.TrimPrefix(line, "repos:"))
-			fm.Repos = parseInlineList(val)
+			fm.Repos = parseInlineList(stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(line, "repos:"))))
+		case strings.HasPrefix(line, "globs:"):
+			fm.Globs = parseGlobs(stripYAMLComment(strings.TrimSpace(strings.TrimPrefix(line, "globs:"))))
 		}
 
 		if lineCount > 30 {
@@ -404,6 +408,31 @@ func parseRuleFrontmatter(path string) ruleFrontmatter {
 	}
 
 	return fm
+}
+
+// parseGlobs parses the globs: field, accepting both the inline-list form that
+// repos: uses and the bare comma-separated form every other agent's rule format
+// uses (Cursor's globs:, Copilot's applyTo:, Cline's paths:).
+//
+// Accepting both is deliberate. An author copying a rule out of .cursor/rules
+// writes `globs: **/*.go,**/*.mod`, and rejecting that would mean the rule
+// silently applies everywhere — the failure mode is an unscoped rule loading in
+// every session, which is exactly what globs: exists to prevent.
+func parseGlobs(v string) []string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+	if strings.HasPrefix(v, "[") {
+		return parseInlineList(v)
+	}
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if trimmed := strings.Trim(strings.TrimSpace(part), `"'`); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // parseInlineList parses a YAML inline list like ["a", "b", "c"] or [a, b].

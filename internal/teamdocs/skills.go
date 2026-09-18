@@ -55,6 +55,31 @@ var SkillRoots = []string{"agents/skills", "coworkers/skills"}
 // addressed upstream by flooring agents/ into the sparse set rather than by
 // guessing here.
 func DiscoverSkills(teamPath, repoSlug string) ([]TeamSkill, error) {
+	published, err := PublishedSkills(teamPath)
+	if err != nil {
+		return nil, err
+	}
+	out := published[:0]
+	for _, s := range published {
+		if SkillAppliesToRepo(s, repoSlug) {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+// PublishedSkills returns every skill the team publishes to AI coworkers,
+// before the per-repo `repos:` filter is applied.
+//
+// Split out from DiscoverSkills so a diagnostic can tell "the team published
+// nothing" apart from "the team published this for other repos." Those are
+// indistinguishable once the filter has run, and they need opposite answers
+// from the human: author a skill, versus widen a `repos:` list.
+//
+// The audience/visibility/status filters are NOT repo-specific and stay here: a
+// draft or human-only skill is not published to coworkers anywhere, so surfacing
+// it as "available elsewhere" would be wrong too.
+func PublishedSkills(teamPath string) ([]TeamSkill, error) {
 	if teamPath == "" {
 		return nil, nil
 	}
@@ -94,9 +119,6 @@ func DiscoverSkills(teamPath, repoSlug string) ([]TeamSkill, error) {
 		if strings.HasPrefix(s.Status, RuleStatusSupersededPrefix) {
 			continue
 		}
-		if !skillAppliesToRepo(s, repoSlug) {
-			continue
-		}
 		filtered = append(filtered, s)
 	}
 	skills = filtered
@@ -105,14 +127,14 @@ func DiscoverSkills(teamPath, repoSlug string) ([]TeamSkill, error) {
 	return skills, nil
 }
 
-// skillAppliesToRepo applies the `repos:` filter with the same semantics as
+// SkillAppliesToRepo applies the `repos:` filter with the same semantics as
 // rules: an empty list means every repo, and an unknown slug matches only
 // unfiltered skills.
 //
 // The unknown-slug case is deliberately conservative. Defaulting to "include"
 // when ox cannot tell which repo it is in would push a team skill into
 // repositories its author never listed.
-func skillAppliesToRepo(s TeamSkill, repoSlug string) bool {
+func SkillAppliesToRepo(s TeamSkill, repoSlug string) bool {
 	if len(s.Repos) == 0 {
 		return true
 	}

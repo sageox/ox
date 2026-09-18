@@ -1614,3 +1614,52 @@ func TestOutputAgentPrimeXML_IsWellFormed(t *testing.T) {
 		})
 	}
 }
+
+// TestEmitTeamRules_Globs: a scoped rule must tell the agent what it is scoped
+// to, and an unscoped library must not pay for the feature existing.
+//
+// The second half is the load-bearing one. This table is emitted into every
+// session on every repo, so an always-present "Applies to" column would be a
+// permanent per-session tax on every customer in order to serve the ones using
+// globs. Prime is already trimmed to fit a 9,700-byte hook budget; columns that
+// carry nothing are exactly what gets something useful deferred out.
+func TestEmitTeamRules_Globs(t *testing.T) {
+	render := func(rules []teamdocs.TeamRule) string {
+		var sb strings.Builder
+		emitTeamRules(&sb, newBookkeeper(&sb), rules)
+		return sb.String()
+	}
+
+	t.Run("scoped indexed rule shows its scope", func(t *testing.T) {
+		out := render([]teamdocs.TeamRule{
+			{Name: "go-idioms", Description: "Wrap errors.", AbsPath: "/t/agents/rules/go-idioms.md",
+				Visibility: teamdocs.VisibilityIndexed, Globs: []string{"**/*.go", "**/*.mod"}},
+		})
+		if !strings.Contains(out, "Applies to") {
+			t.Errorf("scoped rule rendered without a scope column:\n%s", out)
+		}
+		if !strings.Contains(out, "**/*.go, **/*.mod") {
+			t.Errorf("the globs themselves are missing, so the agent cannot tell when the rule applies:\n%s", out)
+		}
+	})
+
+	t.Run("unscoped library pays nothing", func(t *testing.T) {
+		out := render([]teamdocs.TeamRule{
+			{Name: "escalation", Description: "Page the on-call.", AbsPath: "/t/agents/rules/escalation.md",
+				Visibility: teamdocs.VisibilityIndexed},
+		})
+		if strings.Contains(out, "Applies to") {
+			t.Errorf("a team with no scoped rules was charged for the globs column in every session:\n%s", out)
+		}
+	})
+
+	t.Run("always-tier rule carries globs as an attribute", func(t *testing.T) {
+		out := render([]teamdocs.TeamRule{
+			{Name: "tf", Description: "Use OpenTofu.", AbsPath: "/t/agents/rules/tf.md", Body: "Body.\n",
+				Visibility: teamdocs.VisibilityAlways, Globs: []string{"**/*.tf"}},
+		})
+		if !strings.Contains(out, `globs="**/*.tf"`) {
+			t.Errorf("an inlined rule did not say what it applies to, so the agent must apply it to everything:\n%s", out)
+		}
+	})
+}

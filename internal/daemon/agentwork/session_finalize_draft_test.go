@@ -1,6 +1,7 @@
 package agentwork
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -56,15 +57,33 @@ func writeFinalizedSession(t *testing.T, sessionDir string) {
 	}))
 }
 
-// staleRecordingMarker writes an abandoned recording marker.
-//
-// The PID is 999999999, matching this package's existing convention
-// (session_watcher_test.go: "PID that definitely doesn't exist"). NOT 999999 —
-// that is well under Linux's usual pid_max of 4194304, so on a busy machine it
-// can be a LIVE process. And the failure is silent rather than flaky: a live
-// PID makes isStaleRecording return not-stale, the function returns zero items
-// before ever reaching the draft guard, and the assertion passes even with the
-// guard deleted.
+// seedPublishedSessionID stamps a ses_ id onto an existing meta.json — the id a
+// /c/<id> link may already be pointing at from a PR body. Fixtures that assert
+// the id survives a reclaim MUST seed one first: writeFinalizedSession leaves
+// the field empty, and an assertion comparing "" to "" proves nothing.
+func seedPublishedSessionID(t *testing.T, sessionDir string) {
+	t.Helper()
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	require.NoError(t, err)
+	meta.SessionID = draftTestSessionID
+	require.NoError(t, lfs.WriteSessionMetaOnly(sessionDir, meta))
+}
+
+// writeHeaderOnlySession writes the routine placeholder shape: a raw.jsonl
+// holding only its metadata header, i.e. non-empty bytes but zero transcript
+// entries. Detection skips these as a matter of course, so they must not count
+// as stranded content.
+func writeHeaderOnlySession(t *testing.T, sessionDir string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"),
+		[]byte(`{"type":"header","metadata":{"version":"1.0","agent_id":"OxDraft"}}`+"\n"), 0644))
+	require.NoError(t, lfs.WriteSessionMetaOnly(sessionDir, &lfs.SessionMeta{
+		Version: "1.0", SessionName: filepath.Base(sessionDir),
+		AgentID: "OxDraft", AgentType: "claude-code", CreatedAt: time.Now().UTC(),
+	}))
+}
+
 // markDirAsDraft stamps draft:true onto an EXISTING meta.json, preserving
 // whatever else the directory holds.
 //
@@ -85,14 +104,64 @@ func markDirAsDraft(t *testing.T, sessionDir string) {
 	require.NoError(t, lfs.WriteSessionMetaOnly(sessionDir, meta))
 }
 
-func staleRecordingMarker(t *testing.T, sessionDir string, age time.Duration) {
+// recordingMarkerWithPID writes a recording marker naming a specific owner PID,
+// backdated by age.
+//
+// The PID is the whole point of these fixtures: since #966 the draft guard
+// consults process liveness, so a draft + dead PID is RECLAIMED and a draft +
+// live PID is SKIPPED. A fixture that does not pin the PID deliberately is
+// asserting on whichever behavior it accidentally selected.
+func recordingMarkerWithPID(t *testing.T, sessionDir string, age time.Duration, pid int) {
 	t.Helper()
-	body := `{"agent_id":"OxDraft","started_at":"` +
-		time.Now().Add(-age).UTC().Format(time.RFC3339) + `","parent_pid":999999999}`
+	writeRecordingMarker(t, sessionDir, age, fmt.Sprintf(
+		`{"agent_id":"OxDraft","started_at":%q,"parent_pid":%d}`,
+		time.Now().Add(-age).UTC().Format(time.RFC3339), pid))
+}
+
+// writeRecordingMarker drops body at .recording.json and backdates its mtime,
+// which is the age isStaleRecording falls back on when the marker carries no
+// usable started_at.
+func writeRecordingMarker(t *testing.T, sessionDir string, age time.Duration, body string) {
+	t.Helper()
 	path := filepath.Join(sessionDir, ".recording.json")
 	require.NoError(t, os.WriteFile(path, []byte(body), 0644))
 	old := time.Now().Add(-age)
 	require.NoError(t, os.Chtimes(path, old, old))
+}
+
+// staleRecordingMarker writes an ABANDONED recording marker — the owner process
+// is provably gone.
+//
+// 999999999 matches this package's existing convention
+// (session_watcher_test.go: "PID that definitely doesn't exist"). NOT 999999 —
+// that is well under Linux's usual pid_max of 4194304, so on a busy machine it
+// can be a LIVE process, and the resulting failure is silent rather than flaky.
+func staleRecordingMarker(t *testing.T, sessionDir string, age time.Duration) {
+	t.Helper()
+	recordingMarkerWithPID(t, sessionDir, age, 999999999)
+}
+
+// legacyRecordingMarker writes a marker with NO parent_pid — the rollout-compat
+// shape isStaleRecording explicitly still supports. With no PID in the marker
+// and no daemon pidLookup to fall back on there is nothing to ask about the
+// owner, so past 24h isStaleRecording reports stale via stalenessTimeThreshold.
+//
+// That verdict is AGE, not death: the owner may well be alive and still
+// writing. Fixtures built on it pin the rule that age alone never overrides a
+// draft's live claim.
+func legacyRecordingMarker(t *testing.T, sessionDir string, age time.Duration) {
+	t.Helper()
+	writeRecordingMarker(t, sessionDir, age, fmt.Sprintf(
+		`{"agent_id":"OxDraft","started_at":%q}`,
+		time.Now().Add(-age).UTC().Format(time.RFC3339)))
+}
+
+// liveRecordingMarker writes a marker whose owner process is THIS test binary,
+// i.e. demonstrably alive. Use it for any fixture asserting that a draft is
+// skipped: since #966 that is the only draft shape the guard still refuses.
+func liveRecordingMarker(t *testing.T, sessionDir string, age time.Duration) {
+	t.Helper()
+	recordingMarkerWithPID(t, sessionDir, age, os.Getpid())
 }
 
 // TestDetectInDir_SkipsDraftPlaceholders.
@@ -117,10 +186,14 @@ func TestDetectInDir_SkipsDraftPlaceholders(t *testing.T) {
 			setup: func(t *testing.T, dir string) { writeDraftMeta(t, dir) },
 		},
 		{
-			name: "draft with a stale recording marker",
+			// LIVE, deliberately. A draft whose recording process is still
+			// running is the one draft shape anti-entropy must never touch.
+			// The abandoned counterpart is reclaimed now and is covered in
+			// session_finalize_abandoned_draft_test.go.
+			name: "draft with a LIVE recording marker",
 			setup: func(t *testing.T, dir string) {
 				writeDraftMeta(t, dir)
-				staleRecordingMarker(t, dir, 26*time.Hour)
+				liveRecordingMarker(t, dir, 26*time.Hour)
 			},
 		},
 		{
@@ -134,6 +207,10 @@ func TestDetectInDir_SkipsDraftPlaceholders(t *testing.T) {
 			},
 		},
 		{
+			// Dead PID on purpose: the fail-closed arm must hold even when the
+			// liveness probe says "abandoned", because an unreadable meta.json
+			// is exactly the corruption class (#956) that makes recovery
+			// dangerous.
 			name: "unreadable meta fails CLOSED",
 			setup: func(t *testing.T, dir string) {
 				require.NoError(t, os.MkdirAll(dir, 0755))
@@ -155,6 +232,10 @@ func TestDetectInDir_SkipsDraftPlaceholders(t *testing.T) {
 			// Not hypothetical. The daemon's tail-watcher writes live
 			// transcripts into this same git-tracked directory, so a draft
 			// published while tail mode is running produces exactly this shape.
+			//
+			// No .recording.json here on purpose. Absence of a liveness signal
+			// is NOT proof of abandonment, so the post-#966 guard still refuses
+			// this directory — the reclaim path needs positive evidence.
 			name: "draft marked on a directory that ALSO holds a real transcript",
 			setup: func(t *testing.T, dir string) {
 				writeFinalizedSession(t, dir) // real raw.jsonl with substantive entries
@@ -203,6 +284,16 @@ func TestDetectInDir_SkipsDraftPlaceholders(t *testing.T) {
 // The second detection path that can reach recoverRawFromSessionFile. It scans
 // the same git-tracked sessions/ directory as detectInDir but is guarded only
 // by .recording.json presence, so it needed the same skip.
+//
+// Every fixture here names a LIVE owner PID. Since #966 the guard reclaims a
+// draft whose owner is provably dead, so "live" is the whole of the surviving
+// invariant; the reclaim half lives in
+// session_finalize_abandoned_draft_test.go.
+//
+// heartbeatPID is passed as os.Getpid() to match, which makes the pre-existing
+// ParentPID-vs-heartbeat cross-check a no-op (it only fires when the two
+// DIFFER). Without that, the cross-check would skip these directories before
+// the draft guard ever ran and the assertions would be vacuous.
 func TestDetectOrphanedForAgent_SkipsDraftPlaceholders(t *testing.T) {
 	h := NewSessionFinalizeHandlerForTest(slog.New(slog.DiscardHandler))
 
@@ -210,10 +301,10 @@ func TestDetectOrphanedForAgent_SkipsDraftPlaceholders(t *testing.T) {
 		ledgerPath := t.TempDir()
 		sessionDir := filepath.Join(ledgerPath, "sessions", "2026-01-01T00-00-testuser-OxD002")
 		writeDraftMeta(t, sessionDir)
-		staleRecordingMarker(t, sessionDir, 26*time.Hour)
+		liveRecordingMarker(t, sessionDir, 26*time.Hour)
 
-		assert.Empty(t, h.DetectOrphanedForAgent(ledgerPath, "OxDraft", 999999999),
-			"a draft must never be treated as an orphan to recover")
+		assert.Empty(t, h.DetectOrphanedForAgent(ledgerPath, "OxDraft", os.Getpid()),
+			"a live draft must never be treated as an orphan to recover")
 		assert.NoFileExists(t, filepath.Join(sessionDir, "raw.jsonl"))
 
 		meta, err := lfs.ReadSessionMeta(sessionDir)
@@ -226,9 +317,9 @@ func TestDetectOrphanedForAgent_SkipsDraftPlaceholders(t *testing.T) {
 		sessionDir := filepath.Join(ledgerPath, "sessions", "2026-01-01T00-00-testuser-OxD002")
 		writeFinalizedSession(t, sessionDir)
 		markDirAsDraft(t, sessionDir)
-		staleRecordingMarker(t, sessionDir, 26*time.Hour)
+		liveRecordingMarker(t, sessionDir, 26*time.Hour)
 
-		assert.Empty(t, h.DetectOrphanedForAgent(ledgerPath, "OxDraft", 999999999),
+		assert.Empty(t, h.DetectOrphanedForAgent(ledgerPath, "OxDraft", os.Getpid()),
 			"without the draft guard this directory produces orphan-recovery work")
 	})
 

@@ -105,10 +105,23 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 			continue
 		}
 		verdict := teamskills.Classify(loaded)
-		if approvals.Decide(ts.Name, verdict) == teamskills.DecisionNeedsApproval {
+		needsApproval := approvals.Decide(ts.Name, verdict) == teamskills.DecisionNeedsApproval
+
+		// The boundary is the FILE, not the skill. An unapproved script is dropped
+		// before it reaches disk and the prose installs anyway — an agent invited to
+		// `sh` a file that is not there does nothing. Withholding the whole skill
+		// gated the wrong thing: a script is the AUDITABLE form of risk, while prose
+		// saying "run curl … | sh" materializes with no gate at all, and so do team
+		// rules. Blocking the readable form and admitting the illegible one kept
+		// roughly a third of real skills off every machine for no safety gained.
+		//
+		// The one case that still withholds is a manifest that is itself the
+		// runnable thing — an allowed-tools: grant or an inline command lives IN
+		// SKILL.md and cannot be dropped without rewriting the team's file.
+		if needsApproval && manifestIsRunnable(verdict) {
 			decisions = append(decisions, TeamSkillDecision{
 				Name: ts.Name, NeedsApprove: true,
-				Reason: "needs approval: " + verdict.Describe(),
+				Reason: "withheld, the manifest itself needs approval: " + verdict.Describe(),
 			})
 			continue
 		}
@@ -119,7 +132,14 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 			Content: manifestContent(loaded),
 			Files:   toCatalogFiles(loaded, approvals.ScriptsExecutable(ts.Name, verdict)),
 		})
-		decisions = append(decisions, TeamSkillDecision{Name: ts.Name, InstalledAs: installed})
+		decision := TeamSkillDecision{Name: ts.Name, InstalledAs: installed}
+		if needsApproval {
+			// Installed, minus its scripts. Still surfaced: the author expects the
+			// scripts to be there, and silence would read as "it all arrived."
+			decision.NeedsApprove = true
+			decision.Reason = "installed without its scripts pending approval: " + verdict.Describe()
+		}
+		decisions = append(decisions, decision)
 	}
 
 	sort.Slice(allowed, func(i, j int) bool { return allowed[i].Name < allowed[j].Name })
@@ -196,6 +216,21 @@ func loadTeamSkill(ts teamdocs.TeamSkill) (teamskills.Skill, error) {
 	return out, nil
 }
 
+// manifestIsRunnable reports whether SKILL.md itself carries a capability —
+// as opposed to the skill merely bundling script files beside it.
+//
+// Bundled scripts are droppable one file at a time, so the prose can install
+// without them. A grant or command embedded in the manifest is not: the only
+// way to remove it is to rewrite the team's file, which ox does not do.
+func manifestIsRunnable(v teamskills.Verdict) bool {
+	for _, c := range v.Capabilities {
+		if c != teamskills.CapBundledScript {
+			return true
+		}
+	}
+	return false
+}
+
 func manifestContent(s teamskills.Skill) []byte {
 	for _, f := range s.Files {
 		if f.Path == "SKILL.md" {
@@ -256,6 +291,25 @@ func teamRevision(teamPath string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(sha))
+}
+
+// anySkillRootOnDisk reports whether any directory discovery would walk exists.
+// Keyed on teamdocs.SkillRoots, the same list DiscoverSkills uses, so a root can
+// never be walked by one and ignored by the other.
+func anySkillRootOnDisk(teamPath string) bool {
+	for _, root := range teamdocs.SkillRoots {
+		// The parent is what the sparse set includes ("agents/"), so a materialized
+		// parent with no skills yet is present, not blind.
+		parent := filepath.Dir(filepath.FromSlash(root))
+		// IsDir, not merely "exists": a regular FILE named agents/ makes
+		// os.ReadDir on agents/skills fail, so discovery is not authoritative
+		// there either. Accepting it would report the checkout healthy while
+		// every skill silently failed to load.
+		if info, err := os.Stat(filepath.Join(teamPath, parent)); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // ExpectedRevision computes what Plan would record for this repo, without
@@ -378,12 +432,17 @@ func unseeableTeamSkills(teamPath, repoSlug string) string {
 	if _, err := os.Stat(teamPath); err != nil {
 		return "team context checkout is not on disk yet"
 	}
-	// agents/ is where both team rules and team skills live. Its absence means the
-	// sparse checkout never materialized it (GH #862) — not that the team authored
-	// nothing. A team that genuinely has no agents/ has no skills either, so
-	// retaining nothing is the harmless outcome in that case.
-	if _, err := os.Stat(filepath.Join(teamPath, "agents")); err != nil {
-		return "team context agents/ directory is not materialized"
+	// Discovery walks BOTH roots — agents/skills is canonical, coworkers/skills is
+	// legacy — so blindness means neither is on disk. Checking only agents/ marked
+	// every pre-migration team permanently blind, which silently suppressed
+	// retirement for them forever: a skill the team deleted would never leave any
+	// of their machines, and nothing would say why.
+	//
+	// Their absence still means the sparse checkout never materialized the
+	// directory (GH #862) rather than that the team authored nothing. A team with
+	// neither root has no skills either, so retaining nothing is harmless there.
+	if !anySkillRootOnDisk(teamPath) {
+		return "no skills directory is materialized in the team context"
 	}
 	// Without a slug ox cannot evaluate any skill's repos: filter, so every
 	// targeted skill silently drops out — indistinguishable from the team

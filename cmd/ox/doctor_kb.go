@@ -2,9 +2,10 @@ package main
 
 // Knowledge-bubble doctor checks. Three independent checks per the kb plan:
 //
-//  1. Orphan kb dirs   — local <kbRoot>/<kb_id>/ exists but the API list
-//                        doesn't include it. AutoFix (FixLevelAuto) triggers
-//                        the daemon's kb-GC pass which moves orphans to .trash/.
+//  1. Orphan kb dirs   — local <kbRoot>/<kb_id>/ from this project's kb scopes
+//                        exists but the API list doesn't include it. AutoFix
+//                        (FixLevelAuto) triggers the daemon's kb-GC pass which
+//                        moves orphans to .trash/.
 //
 //  2. Failed-provision  — API row reports lifecycle_state="provision-failed".
 //                        Server-side issue, no client autofix; FixLevelCheckOnly
@@ -246,15 +247,21 @@ func defaultKBDoctorSync(_ context.Context) error {
 	return client.RequestSync()
 }
 
-// defaultKBDoctorGC asks the daemon to run an immediate GC pass which, as a
-// side effect, also runs the kb GC triage that move-asides orphan kb dirs.
-// Same daemon-not-running hint as the sync hook.
+// defaultKBDoctorGC asks the daemon to run its kb GC pass, which moves orphan
+// kb dirs to .trash/, and waits for it so the caller's recheck sees the
+// result. It must not use TriggerGC: that reclones every team context and the
+// ledger, and never runs kb GC. Same daemon-not-running hint as the sync hook.
 func defaultKBDoctorGC(_ context.Context) error {
 	if !daemon.IsRunning() {
 		return errors.New("daemon not running — run `ox daemon start` to enable kb GC")
 	}
-	client := daemon.NewClientForCurrentRepoWithTimeout(30 * time.Second)
-	_, err := client.TriggerGC()
+	// Longer than the 30s cap the daemon puts on its kb API list, so a slow
+	// API ends in a result instead of a client-side timeout.
+	client := daemon.NewClientForCurrentRepoWithTimeout(45 * time.Second)
+	err := client.TriggerKBGC()
+	if isUnknownMessageTypeErr(err) {
+		return errors.New("the running daemon predates on-demand kb GC — run `ox daemon restart`, then re-run `ox doctor`")
+	}
 	return err
 }
 
@@ -311,8 +318,8 @@ func readKBMeta(kbDir string) (kbMetaOnDisk, error) {
 // ----------------------------------------------------------------------
 
 // checkKBOrphans walks the kb root, fetches the API list, and reports any
-// local kb_id that the API no longer recognizes. AutoFix triggers the
-// daemon's kb-GC triage pass.
+// local bubble from this project's kb scopes that the API no longer lists.
+// AutoFix triggers the daemon's kb-GC triage pass.
 //
 // Skips entirely when the kb API is unavailable: we can't reason about
 // orphans without the source of truth. Skips when the kb root doesn't exist
@@ -357,9 +364,13 @@ func checkKBOrphans(fix bool) checkResult {
 		}
 	}
 
+	// The list covers only this project's scopes, so a bubble recorded under
+	// another scope is not this project's orphan. The daemon's triage applies
+	// the same rule and would leave it in place.
+	scopes := ambientKBScopes(findGitRoot())
 	var orphans []string
 	for _, id := range localIDs {
-		if _, ok := known[id]; !ok {
+		if _, ok := known[id]; !ok && daemon.KBListCovers(filepath.Join(root, id), scopes) {
 			orphans = append(orphans, id)
 		}
 	}
@@ -378,14 +389,20 @@ func checkKBOrphans(fix bool) checkResult {
 	// AutoFix path — kick the daemon's GC pass.
 	gcCtx, gcCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer gcCancel()
-	if gcErr := kbHookGC()(gcCtx); gcErr != nil {
+	gcErr := kbHookGC()(gcCtx)
+	if gcErr != nil {
 		kbHookLogger().Warn("kb_doctor orphan autofix failed", "error", gcErr, "orphans", len(orphans))
-		return FailedCheck(name, msg, fmt.Sprintf("Auto-fix failed: %v", gcErr))
 	}
 
-	// Recheck: confirm the orphans are gone from the canonical root.
+	// Recheck: confirm the orphans are gone from the canonical root. This runs
+	// even when the call failed, because the daemon does not abandon a pass
+	// when the client stops waiting for the response — so disk, not the IPC
+	// result, says whether the orphans were triaged.
 	postIDs, err := listLocalKBIDs(root)
 	if err != nil {
+		if gcErr != nil {
+			return FailedCheck(name, msg, kbAutoFixHint(gcErr))
+		}
 		// fix likely succeeded but we can't confirm — surface as warning.
 		return WarningCheck(name, "orphans triaged; recheck failed", err.Error())
 	}
@@ -400,9 +417,20 @@ func checkKBOrphans(fix bool) checkResult {
 		}
 	}
 	if len(stillPresent) > 0 {
+		if gcErr != nil {
+			return FailedCheck(name, msg, kbAutoFixHint(gcErr))
+		}
 		return FailedCheck(name,
 			fmt.Sprintf("%d orphan(s) still present after autofix", len(stillPresent)),
 			strings.Join(stillPresent, ", "))
+	}
+
+	if gcErr != nil {
+		// The daemon kept going after we stopped waiting for its response.
+		// Report what disk shows, not the move-aside we never saw confirmed.
+		kbHookLogger().Info("kb_doctor orphan autofix landed after the call failed",
+			"error", gcErr, "gone", len(orphans))
+		return PassedCheck(name, fmt.Sprintf("%d orphan(s) no longer in the kb root", len(orphans)))
 	}
 
 	kbHookLogger().Info("kb_doctor orphan autofix complete", "moved", len(orphans))
@@ -620,7 +648,7 @@ func runKBChecks(opts doctorOptions) []checkResult {
 // Both actually mean the same thing to a user: the daemon did not answer. So
 // say that, and name the command that shows why.
 func kbAutoFixHint(err error) string {
-	const nextStep = "The daemon did not complete the sync. Check it with:\n" +
+	const nextStep = "The daemon did not complete the auto-fix. Check it with:\n" +
 		"       ox daemon status"
 
 	if err == nil {

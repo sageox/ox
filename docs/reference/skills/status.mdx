@@ -1,30 +1,22 @@
 ---
-title: "ox team list"
-description: "CLI reference for ox team list"
-sidebar_position: 96
+title: "ox skills status"
+description: "CLI reference for ox skills status"
+sidebar_position: 91
 ---
 
-## ox team list
+## ox skills status
 
-List the teams you belong to
-
-### Synopsis
-
-List the teams you belong to and their Team Contexts.
-
-A Team Context is the team's permanent conversation store — recordings,
-discussions, sessions, and shared memory. It is not a knowledge bubble
-(`ox kb list` lists those; see ox ADR-028 for the distinction).
+Show which team skills reached this repository, and why the rest did not
 
 ```
-ox team list [flags]
+ox skills status [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for list
-      --json   Output as JSON
+  -h, --help   help for status
+      --json   Emit machine-readable JSON
 ```
 
 ### Options inherited from parent commands
@@ -40,4 +32,4 @@ ox team list [flags]
 
 ### SEE ALSO
 
-* [ox team](/team)	 - Work with your teams and coworkers
+* [ox skills](/skills)	 - Inspect the skills your AI coworkers have

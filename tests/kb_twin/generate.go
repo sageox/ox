@@ -159,6 +159,12 @@ func isolatedGitEnv() []string {
 // a copy of the bubble list with RepoURL filled in. This is the
 // glue that connects the scenario's declarative spec to a real
 // filesystem.
+// twinTeamID is the primary project's team: the one scope the scheduler
+// lists and the scope every generated bubble row records. Declared here, in a
+// non-test file, because generate.go is compiled without the test files when
+// the coverage run instruments this package.
+const twinTeamID = "team_twin"
+
 func resolveRepoURLs(d *scenarioRepoDir, bubbles []BubbleSpec) ([]api.KB, error) {
 	out := make([]api.KB, 0, len(bubbles))
 	for _, b := range bubbles {
@@ -169,6 +175,10 @@ func resolveRepoURLs(d *scenarioRepoDir, bubbles []BubbleSpec) ([]api.KB, error)
 			OwnerUserID: b.OwnerUserID,
 			ViewerRole:  b.ViewerRole,
 			RepoID:      b.RepoID,
+			// The scoped list API returns the scope it was asked for on
+			// every row; the scheduler lists the primary project's team.
+			ScopeType: api.KBScopeTypeTeam,
+			ScopeID:   twinTeamID,
 		}
 		switch {
 		case b.BadRepoURL:

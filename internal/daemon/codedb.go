@@ -67,6 +67,11 @@ type CodeDBManager struct {
 	lastDirtyRefresh time.Time
 	// dirtyTestHook is called at the start of RefreshDirtyOverlay; nil in production.
 	dirtyTestHook func()
+	// dirtyOpenHook is called immediately before codedb.Open in RefreshDirtyOverlay;
+	// nil in production. It exists so a test can assert that a canceled refresh
+	// never reaches the uncancellable open/teardown, which no observable side
+	// effect of a skipped open otherwise reveals.
+	dirtyOpenHook func()
 }
 
 // CodeDBStats tracks index statistics.
@@ -929,6 +934,24 @@ func (m *CodeDBManager) gcDirtyIndexes(dataDir string) {
 	}
 }
 
+// failDirtyOverlay records a dirty overlay failure. Zeroing lastDirtyRefresh is
+// what stops a later staleness check from trusting the earlier success this
+// failure superseded.
+func (m *CodeDBManager) failDirtyOverlay(summary string) {
+	m.mu.Lock()
+	m.lastDirtyRefresh = time.Time{}
+	tracker := m.issues
+	m.mu.Unlock()
+	if tracker != nil {
+		tracker.SetIssue(DaemonIssue{
+			Type:     IssueTypeDirtyOverlayFailed,
+			Severity: SeverityWarning,
+			Summary:  summary,
+			Since:    time.Now(),
+		})
+	}
+}
+
 // RefreshDirtyOverlay rebuilds only the dirty file overlay index (uncommitted files).
 // Non-blocking: if a dirty refresh or full index is already running, returns immediately.
 // This is much cheaper than CheckFreshness — no git history scan, no symbol/comment parsing.
@@ -953,6 +976,15 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 			m.dirtyTestHook()
 		}
 
+		// codedb.Open and the deferred db.Close take no context and are disk-bound,
+		// so entering the build with an already-canceled context pays a full Bleve
+		// open and teardown before BuildDirtyIndex reports the cancellation and the
+		// result is thrown away. Daemon shutdown is the caller that cancels.
+		if err := ctx.Err(); err != nil {
+			m.failDirtyOverlay(fmt.Sprintf("dirty overlay refresh canceled: %v", err))
+			return
+		}
+
 		m.mu.Lock()
 		projectRoot := m.projectRoot
 		m.mu.Unlock()
@@ -968,21 +1000,13 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 		}
 
 		start := time.Now()
+		if m.dirtyOpenHook != nil {
+			m.dirtyOpenHook()
+		}
 		db, err := codedb.Open(dataDir)
 		if err != nil {
 			m.logger.Warn("dirty overlay refresh: open failed", "error", err)
-			m.mu.Lock()
-			m.lastDirtyRefresh = time.Time{}
-			tracker := m.issues
-			m.mu.Unlock()
-			if tracker != nil {
-				tracker.SetIssue(DaemonIssue{
-					Type:     IssueTypeDirtyOverlayFailed,
-					Severity: SeverityWarning,
-					Summary:  fmt.Sprintf("dirty overlay refresh failed: %v", err),
-					Since:    time.Now(),
-				})
-			}
+			m.failDirtyOverlay(fmt.Sprintf("dirty overlay refresh failed: %v", err))
 			return
 		}
 		defer db.Close()
@@ -991,18 +1015,7 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 		dirtyCount, dirtyErr := db.BuildDirtyIndex(ctx, projectRoot, opts)
 		if dirtyErr != nil {
 			m.logger.Warn("dirty overlay refresh failed", "error", dirtyErr)
-			m.mu.Lock()
-			m.lastDirtyRefresh = time.Time{}
-			tracker := m.issues
-			m.mu.Unlock()
-			if tracker != nil {
-				tracker.SetIssue(DaemonIssue{
-					Type:     IssueTypeDirtyOverlayFailed,
-					Severity: SeverityWarning,
-					Summary:  fmt.Sprintf("dirty overlay refresh failed: %v", dirtyErr),
-					Since:    time.Now(),
-				})
-			}
+			m.failDirtyOverlay(fmt.Sprintf("dirty overlay refresh failed: %v", dirtyErr))
 			return
 		}
 

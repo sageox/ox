@@ -87,7 +87,25 @@ func describeWithheldTeamSkills(withheld []skillmanager.TeamSkillDecision) strin
 	for _, d := range withheld {
 		parts = append(parts, fmt.Sprintf("%s — %s", d.Name, d.Reason))
 	}
-	return fmt.Sprintf("%d team skill(s) withheld: %s", len(withheld), strings.Join(parts, "; "))
+	// Two different situations share NeedsApprove, and the count line must not
+	// collapse them: a skill installed without its scripts is on disk and usable;
+	// one whose manifest needs approval is not there at all.
+	var held, partial int
+	for _, d := range withheld {
+		if d.InstalledAs == "" {
+			held++
+		} else {
+			partial++
+		}
+	}
+	var summary []string
+	if held > 0 {
+		summary = append(summary, fmt.Sprintf("%d withheld", held))
+	}
+	if partial > 0 {
+		summary = append(summary, fmt.Sprintf("%d installed without scripts", partial))
+	}
+	return fmt.Sprintf("team skills %s: %s", strings.Join(summary, ", "), strings.Join(parts, "; "))
 }
 
 // teamSkillApprovalHint points at the committed approval store.
