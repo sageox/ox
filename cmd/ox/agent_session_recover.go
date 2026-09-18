@@ -95,10 +95,20 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 	// process session through the normal pipeline. Hold the raw.jsonl writer's
 	// file lock so this never races a hook or watcher still appending a batch
 	// under the same lock -- the recording may not actually be dead.
+	//
+	// The state handed in was loaded BEFORE the wait. A writer that held the
+	// lock may have committed a batch and advanced the cursor in the meantime;
+	// reconciling its journal against the stale cursor would truncate a
+	// committed batch, or re-import it and drop its redaction checkpoint.
+	// Reload under the lock, exactly as the stop path does.
 	var result *agentSessionResult
 	err := fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+		latest, reloadErr := reloadRecordingForFinalDrain(projectRoot, state)
+		if reloadErr != nil {
+			return reloadErr
+		}
 		var processErr error
-		result, processErr = processAgentSession(projectRoot, state)
+		result, processErr = processAgentSession(projectRoot, latest)
 		return processErr
 	})
 	if err != nil {
@@ -126,6 +136,20 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 	return outputRecoverJSON(output)
 }
 
+// reconcileCachedRawForRecovery settles any pending append journal against the
+// cursor as it stands once the capture lock is ours. The lock is released before
+// the interactive prompt: holding it across a human decision would stall a hook
+// or watcher that is still alive.
+func reconcileCachedRawForRecovery(projectRoot string, state *session.RecordingState, rawPath string) error {
+	return fileutil.WithFileLock(context.Background(), rawPath, func() error {
+		latest, err := reloadRecordingForFinalDrain(projectRoot, state)
+		if err != nil {
+			return err
+		}
+		return session.RecoverRawAppend(rawPath, latest.SourceOffset)
+	})
+}
+
 // recoverFromCache uploads raw.jsonl from cache when the adapter file is gone.
 // raw.jsonl is the source of truth -- all other artifacts (events, summary)
 // can be regenerated from it. This ensures no session data is lost even when
@@ -134,6 +158,17 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 // Interactive terminals get a confirmation prompt before uploading.
 // Non-interactive contexts (agents) auto-upload for backward compatibility.
 func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState, rawPath string) error {
+	// A crash between a batch write and its cursor commit leaves unacknowledged
+	// bytes on raw.jsonl, possibly holding credential output whose redaction
+	// checkpoint never landed. Reconcile before anything reads the file: what is
+	// read here is what gets published. Fail closed and keep the recording --
+	// an unprovable journal must not be uploaded, and clearing state would
+	// discard the only cursor that can later prove it.
+	if err := reconcileCachedRawForRecovery(projectRoot, state, rawPath); err != nil {
+		_ = doctor.SetNeedsDoctorAgent(projectRoot)
+		return fmt.Errorf("failed to reconcile cached session before recovery: %w", err)
+	}
+
 	// read raw session to get entry count and entries for summary prompt
 	stored, err := session.ReadSessionFromPath(rawPath)
 	if err != nil {

@@ -1,0 +1,308 @@
+//go:build !short
+
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/session"
+	"github.com/stretchr/testify/require"
+)
+
+// --- Recovery reconciles the append journal against the CURRENT cursor ---
+//
+// "Recover" runs against recordings that only look dead. Every path that reads
+// or publishes raw.jsonl must first settle the journal, and must do it with the
+// cursor as it stands once the capture lock is held -- not the copy loaded
+// before the wait.
+
+const committedHookEntry = "committed hook entry"
+
+// commitHookBatchLeavingJournal plays a hook that appended a batch, committed
+// its cursor, and died before deleting its journal. It returns the state as it
+// was loaded BEFORE that commit, which is what a waiting recover still holds.
+func commitHookBatchLeavingJournal(t *testing.T, projectRoot, agentID string) (stale *session.RecordingState, rawPath string) {
+	t.Helper()
+	stale, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.NotNil(t, stale)
+	rawPath = filepath.Join(stale.SessionPath, "raw.jsonl")
+	nextOffset := stale.SourceOffset + 100
+	require.NoError(t, fileutil.WithFileLock(context.Background(), rawPath, func() error {
+		writer, err := session.NewRawWriter(rawPath, projectRoot)
+		if err != nil {
+			return err
+		}
+		defer writer.Close()
+		if err = writer.BeginAppend(stale.SourceOffset, nextOffset); err != nil {
+			return err
+		}
+		if err = writer.WriteEntry(&session.Entry{Type: session.EntryTypeUser, Content: committedHookEntry}); err != nil {
+			return err
+		}
+		if err = writer.SealAppend(); err != nil {
+			return err
+		}
+		return session.UpdateRecordingStateAt(stale.SessionPath, func(current *session.RecordingState) {
+			current.SourceOffset = nextOffset
+			current.EntryCount++
+		})
+	}))
+	return stale, rawPath
+}
+
+// writeUnacknowledgedBatch plays a hook that wrote a batch and died BEFORE
+// committing its cursor: the bytes are on raw.jsonl, nothing vouches for them.
+func writeUnacknowledgedBatch(t *testing.T, projectRoot string, state *session.RecordingState, content string) {
+	t.Helper()
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	require.NoError(t, fileutil.WithFileLock(context.Background(), rawPath, func() error {
+		writer, err := session.NewRawWriter(rawPath, projectRoot)
+		if err != nil {
+			return err
+		}
+		defer writer.Close()
+		if err = writer.BeginAppend(state.SourceOffset, state.SourceOffset+100); err != nil {
+			return err
+		}
+		if err = writer.WriteEntry(&session.Entry{Type: session.EntryTypeTool, Content: content}); err != nil {
+			return err
+		}
+		return writer.Sync()
+	}))
+}
+
+// TestRecoverViaNormalStopKeepsABatchCommittedWhileItWaited verifies recovery
+// reconciles against the cursor committed while it waited for the capture lock.
+// Failure prevented: recover truncating a committed batch out of the session
+// because it judged the journal with a cursor loaded before the commit.
+func TestRecoverViaNormalStopKeepsABatchCommittedWhileItWaited(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	stale, rawPath := commitHookBatchLeavingJournal(t, projectRoot, agentID)
+
+	// The outcome of the wider stop pipeline is not under test; what it did to
+	// the committed batch is.
+	_ = recoverViaNormalStop(&agentinstance.Instance{AgentID: agentID}, projectRoot, stale)
+
+	after, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	require.Contains(t, string(after), committedHookEntry,
+		"recover rolled back a batch whose cursor was already committed")
+}
+
+// TestRecoverFromCacheDropsAnUnacknowledgedBatchBeforeReadingIt verifies cache
+// recovery settles the journal before it reads what it is about to publish.
+// Failure prevented: bytes from a batch that never committed -- so never got its
+// credential-redaction checkpoint -- being uploaded to the Ledger.
+func TestRecoverFromCacheDropsAnUnacknowledgedBatchBeforeReadingIt(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	const unacknowledged = "output of a batch that never committed"
+	writeUnacknowledgedBatch(t, projectRoot, state, unacknowledged)
+	before, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	require.Contains(t, string(before), unacknowledged, "fixture must leave the torn batch on disk")
+
+	require.NoError(t, reconcileCachedRawForRecovery(projectRoot, state, rawPath))
+
+	after, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	require.NotContains(t, string(after), unacknowledged)
+}
+
+// TestRecoverFromCacheKeepsABatchCommittedWhileItWaited is the other half of the
+// same contract: reconciling must not cost a batch that DID commit.
+// Failure prevented: cache recovery publishing a session with a committed batch
+// truncated away because it held a pre-commit cursor.
+func TestRecoverFromCacheKeepsABatchCommittedWhileItWaited(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	stale, rawPath := commitHookBatchLeavingJournal(t, projectRoot, agentID)
+
+	require.NoError(t, reconcileCachedRawForRecovery(projectRoot, stale, rawPath))
+
+	after, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	require.Contains(t, string(after), committedHookEntry)
+}
+
+// TestRecoverFromCacheRefusesAnUnprovableJournal verifies the fail-closed side:
+// a journal nothing can vouch for stops recovery, and the recording survives so
+// a later attempt (or doctor) still has the cursor needed to judge it.
+// Failure prevented: an unreconciled raw.jsonl uploaded anyway, and the state
+// that could have proven it deleted on the way out.
+func TestRecoverFromCacheRefusesAnUnprovableJournal(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	require.NoError(t, os.WriteFile(rawPath+".append.json", []byte("not a journal"), 0o600))
+
+	err = recoverFromCache(&agentinstance.Instance{AgentID: agentID}, projectRoot, state, rawPath)
+	require.ErrorContains(t, err, "reconcile cached session")
+
+	survivor, loadErr := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, survivor, "a refused recovery must not clear the recording")
+}
+
+// TestRecoverRefusesARecordingRestartedWhileItWaited verifies neither recovery
+// path acts on a recording that was replaced at the same path during the wait.
+// Failure prevented: recover finalizing, truncating, or clearing a NEW recording
+// on the strength of a stale copy of the old one.
+func TestRecoverRefusesARecordingRestartedWhileItWaited(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		recover func(inst *agentinstance.Instance, projectRoot string, stale *session.RecordingState) error
+	}{
+		{"normal stop", recoverViaNormalStop},
+		{"cache", func(inst *agentinstance.Instance, projectRoot string, stale *session.RecordingState) error {
+			return recoverFromCache(inst, projectRoot, stale, filepath.Join(stale.SessionPath, "raw.jsonl"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+			stale, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+			require.NoError(t, err)
+			restartedID := stale.SessionID + "-restarted"
+			require.NoError(t, session.UpdateRecordingStateAt(stale.SessionPath, func(current *session.RecordingState) {
+				current.SessionID = restartedID
+			}))
+
+			err = tc.recover(&agentinstance.Instance{AgentID: agentID}, projectRoot, stale)
+			require.ErrorContains(t, err, "recording changed")
+
+			survivor, loadErr := session.LoadRecordingStateForAgent(projectRoot, agentID)
+			require.NoError(t, loadErr)
+			require.NotNil(t, survivor, "the restarted recording must survive a refused recovery")
+			require.Equal(t, restartedID, survivor.SessionID)
+		})
+	}
+}
+
+// --- Lifecycle bookkeeping never reverts a committed capture checkpoint ---
+
+// TestRegistrationOutcomeDoesNotRevertACommittedCaptureCheckpoint verifies the
+// registration outcome is persisted as a narrow update. The per-turn path holds
+// a copy that is up to sessionSignalWait old by the time it saves.
+// Failure prevented: a stale whole-state save regressing the capture cursor and
+// forgetting a pending credential redaction, so the matching credential output
+// is later written unredacted.
+func TestRegistrationOutcomeDoesNotRevertACommittedCaptureCheckpoint(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	stale, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+
+	// A hook commits while the registration signal is still in flight.
+	committedOffset := stale.SourceOffset + 100
+	require.NoError(t, session.UpdateRecordingStateAt(stale.SessionPath, func(current *session.RecordingState) {
+		current.SourceOffset = committedOffset
+		current.PendingCommandRedactions = map[string]string{"call_1": "aws-secret-key"}
+	}))
+
+	stale.LifecycleRegistrationState = "pending"
+	stale.LifecycleRegistrationError = "server confirmation timed out"
+	persistLifecycleRegistration(stale)
+
+	latest, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", latest.LifecycleRegistrationState)
+	require.Equal(t, "server confirmation timed out", latest.LifecycleRegistrationError)
+	require.Equal(t, committedOffset, latest.SourceOffset, "registration bookkeeping regressed the capture cursor")
+	require.Equal(t, map[string]string{"call_1": "aws-secret-key"}, latest.PendingCommandRedactions,
+		"registration bookkeeping forgot a pending credential redaction")
+}
+
+// TestRegistrationOutcomeDoesNotResurrectAStoppedRecording covers the other way
+// a stale copy bites: the recording stopped while the signal was in flight.
+// Failure prevented: a ghost .recording.json that makes the agent look like it
+// is still recording and blocks its next session start.
+func TestRegistrationOutcomeDoesNotResurrectAStoppedRecording(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	stale, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.NoError(t, session.ClearRecordingStateForAgent(projectRoot, agentID))
+
+	stale.LifecycleRegistrationState = "confirmed"
+	persistLifecycleRegistration(stale)
+
+	_, statErr := os.Stat(filepath.Join(stale.SessionPath, ".recording.json"))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+// TestPlanSlugAppendWaitsForTheStateLock verifies the plan reverse-link is a
+// locked read-modify-write, not a reload-then-write beside the lock.
+// Failure prevented: a plan save landing inside a capture batch's state commit
+// and writing back the pre-commit cursor and redaction checkpoint.
+func TestPlanSlugAppendWaitsForTheStateLock(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	statePath := filepath.Join(state.SessionPath, ".recording.json")
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		// A capture batch mid-commit: it holds the lock and will advance the cursor.
+		holderDone <- session.MutateRecordingStateFile(statePath, func(current *session.RecordingState) error {
+			close(held)
+			<-release
+			current.SourceOffset += 100
+			return nil
+		})
+	}()
+	<-held
+
+	appended := make(chan error, 1)
+	go func() { appended <- session.AppendProducedPlan(projectRoot, state.SessionPath, "plan-slug") }()
+	select {
+	case <-appended:
+		t.Fatal("plan slug was written while a capture batch held the state lock")
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	close(release)
+	require.NoError(t, <-holderDone)
+	require.NoError(t, <-appended)
+
+	latest, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.Equal(t, state.SourceOffset+100, latest.SourceOffset, "plan save reverted the committed cursor")
+	require.Equal(t, []string{"plan-slug"}, latest.ProducedPlans)
+}
+
+// TestLockedStateUpdatesSurfaceWhatTheyCannotApply verifies the locked writers
+// report an unusable target instead of reading it as "nothing to do".
+// Failure prevented: a corrupt .recording.json silently swallowing plan links,
+// or an empty path mutating whatever happens to sit at the working directory.
+func TestLockedStateUpdatesSurfaceWhatTheyCannotApply(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+
+	require.ErrorIs(t, session.UpdateRecordingStateAt("", func(*session.RecordingState) {}), session.ErrEmptyPath)
+
+	require.NoError(t, os.WriteFile(filepath.Join(state.SessionPath, ".recording.json"), []byte("{torn"), 0o600))
+	require.ErrorContains(t, session.AppendProducedPlan(projectRoot, state.SessionPath, "plan-slug"), "update recording state")
+}
+
+// keep the journal shape honest: the fixtures above must produce a real journal,
+// or the "committed" tests would pass without ever reaching reconciliation.
+func TestRecoverFixturesLeaveARealJournal(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+	_, rawPath := commitHookBatchLeavingJournal(t, projectRoot, agentID)
+	data, err := os.ReadFile(rawPath + ".append.json")
+	require.NoError(t, err)
+	var journal map[string]any
+	require.NoError(t, json.Unmarshal(data, &journal))
+	require.NotEmpty(t, journal)
+}

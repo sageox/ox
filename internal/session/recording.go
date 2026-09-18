@@ -238,6 +238,14 @@ func recordingStatePath(sessionPath string) string {
 }
 
 // SaveRecordingState persists recording state to the session folder.
+//
+// This is a whole-file write of the caller's copy and takes no lock, so it is
+// for CREATING a recording only. Once a recording is live, hooks and the watcher
+// commit the capture cursor and the pending credential-redaction checkpoint
+// under the state lock; saving a copy loaded before such a commit silently
+// reverts both -- the cursor regresses and a pending redaction is forgotten, so
+// the matching credential output is written unredacted. Change a live recording
+// through UpdateRecordingStateAt / UpdateRecordingStateForAgent instead.
 func SaveRecordingState(projectRoot string, state *RecordingState) error {
 	if projectRoot == "" {
 		return fmt.Errorf("%w: project root", ErrEmptyPath)
@@ -472,27 +480,26 @@ func AppendProducedPlan(projectRoot, sessionPath, slug string) error {
 		return nil
 	}
 
+	// Read-modify-write under the state lock. "Reload right before writing"
+	// only narrows the window; a capture batch that commits its cursor and
+	// redaction checkpoint inside it would still be reverted.
 	statePath := recordingStatePath(sessionPath)
-	data, err := os.ReadFile(statePath)
+	err := MutateRecordingStateFile(statePath, func(state *RecordingState) error {
+		for _, existing := range state.ProducedPlans {
+			if existing == slug {
+				return nil // already recorded
+			}
+		}
+		state.ProducedPlans = append(state.ProducedPlans, slug)
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // recording already stopped — do NOT recreate it
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // recording already stopped — do NOT recreate it
-		}
-		return fmt.Errorf("read recording state file=%s: %w", statePath, err)
+		return fmt.Errorf("update recording state file=%s: %w", statePath, err)
 	}
-
-	var state RecordingState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return fmt.Errorf("parse recording state file=%s: %w", statePath, err)
-	}
-
-	for _, existing := range state.ProducedPlans {
-		if existing == slug {
-			return nil // already recorded
-		}
-	}
-	state.ProducedPlans = append(state.ProducedPlans, slug)
-	return SaveRecordingState(projectRoot, &state)
+	return nil
 }
 
 // ClearRecordingState removes the recording state file from the session folder.
@@ -1183,6 +1190,22 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	}
 
 	return state, nil
+}
+
+// UpdateRecordingStateAt applies updateFn to the recording stored under
+// sessionPath, as one read-modify-write under the state lock. Use it when the
+// caller already holds a loaded state: addressing the file by path cannot
+// retarget a different recording the way an agent lookup can. A recording that
+// has already stopped returns an error satisfying errors.Is(err, os.ErrNotExist)
+// and is never recreated.
+func UpdateRecordingStateAt(sessionPath string, updateFn func(*RecordingState)) error {
+	if sessionPath == "" {
+		return fmt.Errorf("%w: session path", ErrEmptyPath)
+	}
+	return MutateRecordingStateFile(recordingStatePath(sessionPath), func(current *RecordingState) error {
+		updateFn(current)
+		return nil
+	})
 }
 
 // UpdateRecordingStateForAgent updates recording state for a specific agent.

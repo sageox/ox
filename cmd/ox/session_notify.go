@@ -43,9 +43,7 @@ func notifySessionStartedAsync(projectRoot string, state *session.RecordingState
 	// the per-turn draft path re-fire this exactly once a real turn exists.
 	if !session.HasUserTurn(filepath.Join(state.SessionPath, "raw.jsonl")) {
 		state.LifecycleRegistrationState = "deferred"
-		if saveErr := session.SaveRecordingState(projectRoot, state); saveErr != nil {
-			slog.Debug("session registration deferred save failed", "session_id", state.SessionID, "error", saveErr)
-		}
+		persistLifecycleRegistration(state)
 		return
 	}
 
@@ -81,8 +79,21 @@ func notifySessionStartedAsync(projectRoot string, state *session.RecordingState
 		state.LifecycleRegistrationState = "confirmed"
 		state.LifecycleRegistrationError = ""
 	}
-	if saveErr := session.SaveRecordingState(projectRoot, state); saveErr != nil {
-		slog.Debug("session registration status save failed", "session_id", state.SessionID, "error", saveErr)
+	persistLifecycleRegistration(state)
+}
+
+// persistLifecycleRegistration writes ONLY the registration outcome, under the
+// state lock. The caller's copy can be up to sessionSignalWait stale by now, and
+// this runs on a live recording from the per-turn path: saving the whole copy
+// would revert any capture cursor or pending credential-redaction checkpoint a
+// hook or watcher committed while the signal was in flight.
+func persistLifecycleRegistration(state *session.RecordingState) {
+	err := session.UpdateRecordingStateAt(state.SessionPath, func(current *session.RecordingState) {
+		current.LifecycleRegistrationState = state.LifecycleRegistrationState
+		current.LifecycleRegistrationError = state.LifecycleRegistrationError
+	})
+	if err != nil {
+		slog.Debug("session registration status save failed", "session_id", state.SessionID, "error", err)
 	}
 }
 
