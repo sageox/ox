@@ -525,6 +525,42 @@ func TestApplyRejectsInvalidOrStaleActions(t *testing.T) {
 	})
 }
 
+func TestActionValidationReportsCurrentMissingAndUnreadableTargets(t *testing.T) {
+	repo := t.TempDir()
+	root, err := os.OpenRoot(repo)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, root.Close()) }()
+
+	current := []byte("current\n")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "current.txt"), current, 0o644))
+	alreadyCurrent, err := validateWriteAction(root, FileAction{
+		Path: "current.txt", Content: current, Digest: digestBytes(current),
+	})
+	require.NoError(t, err)
+	require.True(t, alreadyCurrent)
+
+	updated := []byte("updated\n")
+	alreadyCurrent, err = validateWriteAction(root, FileAction{
+		Path: "current.txt", Content: updated, Digest: digestBytes(updated),
+		PreviousDigest: digestBytes([]byte("stale\n")),
+	})
+	require.ErrorContains(t, err, "changed after planning")
+	require.False(t, alreadyCurrent)
+
+	require.NoError(t, os.Mkdir(filepath.Join(repo, "directory"), 0o755))
+	_, err = validateWriteAction(root, FileAction{
+		Path: "directory", Content: updated, Digest: digestBytes(updated),
+	})
+	require.Error(t, err)
+
+	alreadyAbsent, err := validateRemoveAction(root, FileAction{Path: "missing.txt"})
+	require.NoError(t, err)
+	require.True(t, alreadyAbsent)
+
+	_, err = validateRemoveAction(root, FileAction{Path: "directory"})
+	require.Error(t, err)
+}
+
 // TestForeignSymlinkDoesNotAbortSkillDiscovery pins the defect that made ox
 // skill rollout silently dead in any repo that keeps its own skills beside
 // ox's.
