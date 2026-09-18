@@ -56,6 +56,7 @@ func TestTeamSkillSource_ProseMaterializesUnderTheReservedPrefix(t *testing.T) {
 		"a prose team skill did not materialize under the reserved prefix")
 	require.Len(t, decisions, 1)
 	require.False(t, decisions[0].NeedsApprove)
+	require.NotEmpty(t, decisions[0].InstalledAs)
 	require.True(t, IsReservedName(TeamPrefix+"deploy"),
 		"the installed name is outside the reserved namespace, so the ignore globs will not hide it")
 }
@@ -134,7 +135,9 @@ func TestTeamSkillSource_ApprovedExecutableMaterializesWithoutItsScripts(t *test
 	src, decisions, err := TeamSkillSource(nil, team, "ox", project)
 	require.NoError(t, err)
 	require.Contains(t, selectedNames(t, src), TeamPrefix+"deploy")
-	require.False(t, decisions[0].NeedsApprove)
+	require.True(t, decisions[0].NeedsApprove,
+		"the missing script grant must remain visible after manifest approval")
+	require.NotEmpty(t, decisions[0].InstalledAs)
 
 	got, err := src.Select("1.0.0", DesiredSkills{})
 	require.NoError(t, err)

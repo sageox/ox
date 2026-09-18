@@ -25,13 +25,17 @@ func checkClaudeSkills(fix bool) checkResult {
 	if len(plan.Warnings) > 0 {
 		return WarningCheck("Agent skills", strings.Join(plan.Warnings, "; "), "Use the same or a newer ox version before reconciling")
 	}
+	if unusable := plan.UnusableTeamSkills(); len(unusable) > 0 {
+		return WarningCheck("Agent skills", describeUnusableTeamSkills(unusable),
+			"Rename each skill in the Team Context, including its directory and the name: key in SKILL.md")
+	}
 	if len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 && len(plan.Conflicts) == 0 && !plan.RetiredSelections {
 		// Converged is not the same as complete. A team skill withheld pending
 		// approval leaves the repository looking exactly as it would if nobody had
 		// authored it, so this is the one place a human finds out it exists.
 		if withheld := plan.WithheldTeamSkills(); len(withheld) > 0 {
 			return WarningCheck("Agent skills", describeWithheldTeamSkills(withheld),
-				teamSkillApprovalHint(gitRoot))
+				teamSkillApprovalHint(withheld))
 		}
 		return PassedCheck("Agent skills", fmt.Sprintf("%d managed files across %d native target(s)", plan.DesiredFileCount, plan.TargetCount))
 	}
@@ -51,11 +55,15 @@ func checkClaudeSkills(fix bool) checkResult {
 	if len(plan.Conflicts) > 0 {
 		return WarningCheck("Agent skills", fmt.Sprintf("reconciled with %d preserved conflict(s)", len(plan.Conflicts)), describeSkillConflicts(plan.Conflicts))
 	}
+	if unusable := plan.UnusableTeamSkills(); len(unusable) > 0 {
+		return WarningCheck("Agent skills", describeUnusableTeamSkills(unusable),
+			"Rename each skill in the Team Context, including its directory and the name: key in SKILL.md")
+	}
 	if withheld := plan.WithheldTeamSkills(); len(withheld) > 0 {
 		return WarningCheck("Agent skills",
 			fmt.Sprintf("reconciled %d file change(s); %s",
 				len(plan.Creates)+len(plan.Updates)+len(plan.Removes), describeWithheldTeamSkills(withheld)),
-			teamSkillApprovalHint(gitRoot))
+			teamSkillApprovalHint(withheld))
 	}
 	return PassedCheck("Agent skills", fmt.Sprintf("reconciled %d file change(s) across %d native target(s)", len(plan.Creates)+len(plan.Updates)+len(plan.Removes), plan.TargetCount))
 }
@@ -113,8 +121,23 @@ func describeWithheldTeamSkills(withheld []skillmanager.TeamSkillDecision) strin
 // existed and promising one would have been worse than silence. `ox skills
 // approve` now exists, so the hint names the action rather than asking a human
 // to hand-compute a sha256 into committed JSON.
-func teamSkillApprovalHint(string) string {
-	return "Review the skill in your team context, then run `ox skills approve` to see what is waiting and approve it"
+func teamSkillApprovalHint(withheld []skillmanager.TeamSkillDecision) string {
+	if len(withheld) == 0 {
+		return "Review the skill in the Team Context, then run `ox skills approve` to see what is waiting and approve it"
+	}
+	skill := withheld[0]
+	if skill.InstalledAs != "" {
+		return fmt.Sprintf("Review %s in the Team Context, then run `ox skills approve --allow-scripts %s`", skill.Name, skill.Name)
+	}
+	return fmt.Sprintf("Review %s in the Team Context, then run `ox skills approve %s`", skill.Name, skill.Name)
+}
+
+func describeUnusableTeamSkills(unusable []skillmanager.TeamSkillDecision) string {
+	parts := make([]string, 0, len(unusable))
+	for _, skill := range unusable {
+		parts = append(parts, fmt.Sprintf("%s — %s", skill.Name, skill.Reason))
+	}
+	return "unusable team skills: " + strings.Join(parts, "; ")
 }
 
 func describeSkillPlan(plan *skillmanager.ReconcilePlan) string {

@@ -12,8 +12,9 @@ import (
 // TeamSkillCandidate is one team skill that applies to a repository, paired with
 // the trust classification of the bytes sitting in the team checkout right now.
 type TeamSkillCandidate struct {
-	Name    string
-	Verdict teamskills.Verdict
+	Name             string
+	Verdict          teamskills.Verdict
+	ManifestRunnable bool
 	// LoadErr is set when the skill was discovered but could not be read. It is
 	// carried rather than returned so one unreadable skill does not hide every
 	// other skill's verdict — the approval surface has to be able to say "these
@@ -52,7 +53,11 @@ func ClassifyTeamSkills(repoRoot string) ([]TeamSkillCandidate, error) {
 			out = append(out, TeamSkillCandidate{Name: ts.Name, LoadErr: loadErr})
 			continue
 		}
-		out = append(out, TeamSkillCandidate{Name: ts.Name, Verdict: teamskills.Classify(loaded)})
+		verdict := teamskills.Classify(loaded)
+		out = append(out, TeamSkillCandidate{
+			Name: ts.Name, Verdict: verdict,
+			ManifestRunnable: manifestIsRunnable(loaded, verdict),
+		})
 	}
 	return out, nil
 }

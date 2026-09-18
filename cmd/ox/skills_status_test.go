@@ -312,3 +312,32 @@ func TestInstalledState_ScriptsHeldIsStillInstalled(t *testing.T) {
 	state, _ = installedState(repo, []string{".agents/skills"}, held, plannedPaths{})
 	require.Equal(t, skillWithheld, state)
 }
+
+func TestSkillsStatusGuidance_PartialInstallNamesScriptsApproval(t *testing.T) {
+	out := skillsStatusOutput{TeamSkills: []teamSkillStatus{{
+		Name: "deploy", AppliesHere: true, State: skillInstalled, NeedsApproval: true,
+		Detail: "installed without its scripts pending approval: bundled-script (scripts/run.sh)",
+	}}}
+	got := skillsStatusGuidance(out)
+	require.Contains(t, got, "ox skills approve --allow-scripts deploy")
+	require.NotContains(t, got, "Nothing to do")
+}
+
+func TestCollectSkillsStatus_ReportsInvalidTeamSkillName(t *testing.T) {
+	repo, team := stageApprovalRepo(t, "deploy", nil)
+	manifest := filepath.Join(team, "agents", "skills", "deploy", "SKILL.md")
+	require.NoError(t, os.WriteFile(manifest,
+		[]byte("---\nname: deploy.\n---\n\nbody\n"), 0o644))
+
+	out := collectSkillsStatus(repo)
+	var found *teamSkillStatus
+	for i := range out.TeamSkills {
+		if out.TeamSkills[i].Name == "deploy." {
+			found = &out.TeamSkills[i]
+		}
+	}
+	require.NotNil(t, found, "the refused skill vanished from status: %+v", out.TeamSkills)
+	require.Equal(t, skillUnavailable, found.State)
+	require.Contains(t, found.Detail, "may not end with a dot")
+	require.Contains(t, found.Detail, "rename it in the Team Context")
+}

@@ -629,6 +629,52 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 		next.Targets = append(next.Targets, target)
 		for _, skill := range selectedSkills {
 			skillRoot := filepath.ToSlash(filepath.Join(target.Root, skill.Name))
+			// Defense in depth. A skill name reaches here from a team-context
+			// repository any teammate can push to, and it becomes a PATH:
+			// filepath.Join Cleans, so `..` segments walk out of a skills root that
+			// is only two segments deep, and the reserved-prefix ownership check
+			// below then rubber-stamps the escape because the name still carries the
+			// prefix. teamdocs.ValidTeamSkillName rejects such names at discovery;
+			// this is the backstop for any future source that builds names another
+			// way. Note the containment is against the TARGET root — ensureWithin's
+			// other callers only bound things to repoRoot, and every payload that
+			// matters (.claude/settings.json, .sageox/team-skills.approvals.json)
+			// is comfortably INSIDE the repo.
+			//
+			// Skip the one skill rather than failing: a hostile name must not take
+			// the rest of the catalog down with it, and plan.Warnings is not the
+			// lever here — Apply treats any warning as "do nothing at all", so one
+			// bad name would freeze every skill in the repository.
+			rootPath := filepath.FromSlash(target.Root)
+			skillRootPath := filepath.FromSlash(skillRoot)
+			relSkill, relErr := filepath.Rel(rootPath, skillRootPath)
+			if skill.Name == "" || relErr != nil || relSkill == "." || filepath.Dir(relSkill) != "." ||
+				filepath.IsAbs(relSkill) || ensureWithin(rootPath, skillRootPath) != nil {
+				// Logs the JOINED path, not the raw name: where the write would have
+				// landed is the actionable fact, and it is the thing a responder
+				// greps for after the fact.
+				slog.Warn("skills: refusing skill whose name escapes its target root",
+					"target", key, "root", target.Root, "skill_root", skillRoot)
+				continue
+			}
+			invalidFile := ""
+			hasInvalidFile := false
+			for _, file := range skill.Files {
+				filePath := filepath.FromSlash(file.Path)
+				joined := filepath.Join(skillRootPath, filePath)
+				relFile, fileErr := filepath.Rel(skillRootPath, joined)
+				if file.Path == "" || filepath.IsAbs(filePath) || fileErr != nil || relFile == "." ||
+					ensureWithin(skillRootPath, joined) != nil {
+					invalidFile = file.Path
+					hasInvalidFile = true
+					break
+				}
+			}
+			if hasInvalidFile {
+				slog.Warn("skills: refusing skill whose file escapes its skill root",
+					"target", key, "skill_root", skillRoot, "file", invalidFile)
+				continue
+			}
 			migrationOwned := false
 			skillPath := filepath.ToSlash(filepath.Join(skillRoot, skills.SkillFileName))
 			if _, locked := oldFiles[skillPath]; !locked {
