@@ -76,7 +76,11 @@ func newHTTPError(resp *http.Response) *HTTPError {
 // overflowing: how much of it to honor is the caller's decision.
 func parseRetryAfter(value string, now time.Time) time.Duration {
 	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
-		return time.Duration(min(seconds, uint64(math.MaxInt64/time.Second))) * time.Second
+		const longest = math.MaxInt64 / time.Second // whole seconds a Duration can hold
+		if seconds > uint64(longest) {
+			return longest * time.Second
+		}
+		return time.Duration(seconds) * time.Second
 	}
 	if date, err := http.ParseTime(value); err == nil && date.After(now) {
 		return date.Sub(now)
