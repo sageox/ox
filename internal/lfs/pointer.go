@@ -40,7 +40,7 @@ func ParsePointer(content string) (oid string, size int64, err error) {
 		return "", 0, fmt.Errorf("not an LFS pointer: expected at least 3 lines, got %d", len(lines))
 	}
 
-	if !strings.HasPrefix(lines[0], "version ") || !strings.Contains(lines[0], "git-lfs") {
+	if !isVersionLine(lines[0]) {
 		return "", 0, fmt.Errorf("not an LFS pointer: missing version line")
 	}
 
@@ -306,12 +306,22 @@ func IsPointerFile(path string) bool {
 	return err == nil
 }
 
-// pointerShaped reports whether content has the shape of an LFS pointer: the
-// spec's version line, in under the 1024 bytes the spec requires a pointer to
+// isVersionLine reports whether line is an LFS pointer's version line, as
+// ParsePointer reads one: a line split on LF may still end in CR.
+func isVersionLine(line string) bool {
+	return strings.HasPrefix(line, "version ") && strings.Contains(line, "git-lfs")
+}
+
+// pointerShaped reports whether content has the shape of an LFS pointer: a
+// version line first, in under the 1024 bytes the spec requires a pointer to
 // be. Whether it parses is not asked. A pointer ParsePointer refuses, such as
 // one naming an object above MaxObjectSize, is still no file's content.
 func pointerShaped(content []byte) bool {
-	return len(content) < 1024 && bytes.HasPrefix(content, []byte("version "+pointerVersion+"\n"))
+	if len(content) >= 1024 {
+		return false
+	}
+	first, _, _ := strings.Cut(strings.TrimSpace(string(content)), "\n")
+	return isVersionLine(first)
 }
 
 // ReadPointerFile reads and parses an LFS pointer file, returning the FileRef.

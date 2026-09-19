@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -451,6 +452,8 @@ func TestUploadAll_RefusesPointerContent(t *testing.T) {
 		// ParsePointer refuses this one, so IsPointerFile does not see a pointer.
 		{"pointer to an object above the size limit", []byte(FormatPointer("sha256:"+plainOID, DefaultMaxObjectSize+1))},
 		{"malformed pointer", []byte("version https://git-lfs.github.com/spec/v1\noid sha256:" + plainOID + "\n")},
+		// A pointer checked out with CRLF line endings, which ParsePointer reads.
+		{"pointer with CRLF line endings", []byte(strings.ReplaceAll(FormatPointer("sha256:"+ComputeOID(nil), 0), "\n", "\r\n"))},
 	} {
 		for _, answer := range []string{"upload requested", "already stored", "left out"} {
 			t.Run(shape.name+"/"+answer, func(t *testing.T) {
