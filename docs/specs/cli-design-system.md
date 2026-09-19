@@ -2,6 +2,17 @@
 
 Unified design language for ox terminal output.
 
+## Output Streams
+
+`cli.PrintError` and `cli.PrintWarning` write diagnostics to stderr in both text
+and JSON modes. JSON diagnostics keep the `status` and `message` fields. This
+keeps stdout available for the command result, so a warning cannot turn a JSON
+document into multiple concatenated objects.
+
+`cli.PrintJSON` writes the command result to stdout. Writer-aware helpers such
+as `PrintWarningTo` honor their supplied writer. Command-specific JSON response
+envelopes remain part of the command's stdout contract.
+
 ## Color Palette
 
 Colors are sourced from `sageox-design` and generated into `internal/theme/generated.go`.
