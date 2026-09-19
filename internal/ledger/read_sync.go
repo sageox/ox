@@ -266,9 +266,9 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 	// completed fetch of this exact HEAD may establish new remote evidence.
 	verified := verifyReadCheckout(ctx, opts, transport, workPath, dirs)
 	if verified.Hydration.State == "unknown" {
-		// Verification stopped before it counted — a file failed it, or the
-		// budget ran out while it walked — so the counts hydration took are the
-		// last this attempt has.
+		// Verification returns before counting when HEAD, its history, or a
+		// file fails it, or when the budget runs out. The counts hydration took
+		// are then the last this attempt has.
 		verified.Coverage, verified.Hydration = result.Coverage, result.Hydration
 	}
 	result = verified
@@ -609,11 +609,10 @@ func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir stri
 		if gitOID != file.oid {
 			// Bytes that differ from HEAD's blob must be the object HEAD's pointer
 			// names, at that OID and size. Their shape cannot stand in for that
-			// check: an object's own content can be a pointer, which is what a
-			// file cleaned a second time stores, including one this reader cannot
-			// parse. So bytes shaped like a pointer are a stale or malformed stub
-			// only once the check fails; any other file that fails it is a local
-			// edit.
+			// check: an object's own content can be a pointer — what a file
+			// cleaned a second time stores — even one this reader cannot parse. So
+			// bytes shaped like a pointer are a stale or malformed stub only once
+			// the check fails; any other file that fails it is a local edit.
 			mismatch := errors.New("dirty")
 			if malformed != nil {
 				mismatch = malformed
