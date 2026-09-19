@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"testing"
@@ -95,84 +96,62 @@ func TestPrintSuccess_JSONMode(t *testing.T) {
 	assert.Contains(t, output, `"all good"`)
 }
 
-func TestPrintError_TextMode(t *testing.T) {
-	SetJSONMode(false)
-	defer SetJSONMode(false)
+// Diagnostics must remain visible without contaminating a piped command result.
+func TestDiagnosticsPreserveStdout(t *testing.T) {
+	for _, tt := range []struct {
+		status string
+		print  func(string)
+	}{
+		{status: "error", print: PrintError},
+		{status: "warning", print: PrintWarning},
+	} {
+		for _, jsonOutput := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%t", tt.status, jsonOutput), func(t *testing.T) {
+				oldStdout, oldStderr, oldJSON := os.Stdout, os.Stderr, jsonMode
+				t.Cleanup(func() {
+					os.Stdout, os.Stderr = oldStdout, oldStderr
+					SetJSONMode(oldJSON)
+				})
+				stdoutReader, stdoutWriter, err := os.Pipe()
+				require.NoError(t, err)
+				t.Cleanup(func() {
+					stdoutReader.Close()
+					stdoutWriter.Close()
+				})
+				stderrReader, stderrWriter, err := os.Pipe()
+				require.NoError(t, err)
+				t.Cleanup(func() {
+					stderrReader.Close()
+					stderrWriter.Close()
+				})
+				os.Stdout, os.Stderr = stdoutWriter, stderrWriter
+				SetJSONMode(jsonOutput)
 
-	old := os.Stderr
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stderr = w
+				tt.print("diagnostic message")
+				if jsonOutput {
+					PrintJSON(map[string]string{"result": "payload"})
+				} else {
+					fmt.Fprintln(os.Stdout, "payload")
+				}
 
-	PrintError("something broke")
+				require.NoError(t, stdoutWriter.Close())
+				require.NoError(t, stderrWriter.Close())
+				os.Stdout, os.Stderr = oldStdout, oldStderr
+				stdout, err := io.ReadAll(stdoutReader)
+				require.NoError(t, err)
+				stderr, err := io.ReadAll(stderrReader)
+				require.NoError(t, err)
 
-	w.Close()
-	os.Stderr = old
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
-
-	assert.Contains(t, buf.String(), "something broke")
-}
-
-func TestPrintError_JSONMode(t *testing.T) {
-	SetJSONMode(true)
-	defer SetJSONMode(false)
-
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stdout = w
-
-	PrintError("something broke")
-
-	w.Close()
-	os.Stdout = old
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
-
-	output := buf.String()
-	assert.Contains(t, output, `"error"`)
-	assert.Contains(t, output, `"something broke"`)
-}
-
-func TestPrintWarning_TextMode(t *testing.T) {
-	SetJSONMode(false)
-	defer SetJSONMode(false)
-
-	old := os.Stderr
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stderr = w
-
-	PrintWarning("heads up")
-
-	w.Close()
-	os.Stderr = old
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
-
-	assert.Contains(t, buf.String(), "heads up")
-}
-
-func TestPrintWarning_JSONMode(t *testing.T) {
-	SetJSONMode(true)
-	defer SetJSONMode(false)
-
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stdout = w
-
-	PrintWarning("heads up")
-
-	w.Close()
-	os.Stdout = old
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
-
-	output := buf.String()
-	assert.Contains(t, output, `"warning"`)
-	assert.Contains(t, output, `"heads up"`)
+				if jsonOutput {
+					assert.JSONEq(t, `{"result":"payload"}`, string(stdout))
+					assert.JSONEq(t, fmt.Sprintf(`{"status":%q,"message":"diagnostic message"}`, tt.status), string(stderr))
+				} else {
+					assert.Equal(t, "payload\n", string(stdout))
+					assert.Contains(t, string(stderr), "diagnostic message")
+				}
+			})
+		}
+	}
 }
 
 func TestPrintInfo_TextMode(t *testing.T) {
