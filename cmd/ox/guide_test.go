@@ -2,15 +2,74 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/prime"
+	"github.com/sageox/ox/internal/testguard"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
+
+// JSON selection must survive the real root command's environment and flag resolution.
+func TestGuideCLIJSONPrecedence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds and runs the ox binary")
+	}
+	oxBin := testguard.BuildOxBinary(t, repoPath("..", ".."))
+
+	for _, tt := range []struct {
+		name     string
+		envJSON  string
+		args     []string
+		wantJSON bool
+	}{
+		{name: "environment enables JSON", envJSON: "1", args: []string{"guide"}, wantJSON: true},
+		{name: "flag enables JSON", envJSON: "0", args: []string{"guide", "--json"}, wantJSON: true},
+		{name: "false flag overrides environment", envJSON: "1", args: []string{"guide", "--json=false", "--raw"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			env := []string{
+				"OX_JSON=" + tt.envJSON,
+				"OX_XDG_ENABLE=1",
+				"SAGEOX_ENDPOINT=http://127.0.0.1:1",
+				"HTTP_PROXY=http://127.0.0.1:1",
+				"HTTPS_PROXY=http://127.0.0.1:1",
+				"NO_PROXY=localhost,127.0.0.1",
+			}
+			for _, key := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"} {
+				env = append(env, key+"="+filepath.Join(dir, key))
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := testguard.OxCmdContext(t, ctx, oxBin, dir, env, tt.args...)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			output, err := cmd.Output()
+			require.NoError(t, err, "stderr: %s", stderr.String())
+			if tt.wantJSON {
+				var guides []map[string]string
+				require.NoError(t, json.Unmarshal(output, &guides), "output: %s", output)
+				require.NotEmpty(t, guides)
+				for _, guide := range guides {
+					require.NotEmpty(t, guide["topic"])
+					require.NotEmpty(t, guide["title"])
+				}
+				return
+			}
+			require.Contains(t, string(output), "team-rules\tTeam Rules\t")
+			for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+				require.Len(t, strings.Split(line, "\t"), 3)
+			}
+		})
+	}
+}
 
 // JSON consumers must receive one complete document for both the catalog and a topic.
 func TestGuideJSONOutput(t *testing.T) {
