@@ -326,10 +326,12 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 	}
 
 	// Deduplicate: when multiple hash-variant files exist for the same PR,
-	// keep only the path with the latest updated_at.
+	// keep only the path with the latest updated_at, preferring the variant
+	// that still lacks commits when that ties (see below).
 	type prPathInfo struct {
-		path      string
-		updatedAt time.Time
+		path       string
+		updatedAt  time.Time
+		hasCommits bool
 	}
 	bestByNumber := make(map[int]prPathInfo)
 
@@ -341,17 +343,32 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 		}
 
 		var stub struct {
-			Number    int       `json:"number"`
-			UpdatedAt time.Time `json:"updated_at"`
+			Number    int               `json:"number"`
+			UpdatedAt time.Time         `json:"updated_at"`
+			Commits   []json.RawMessage `json:"commits"`
 		}
 		if err := json.Unmarshal(data, &stub); err != nil {
 			logger.Warn("unmarshal PR file for backfill failed", "path", path, "error", err)
 			continue
 		}
 
+		cand := prPathInfo{path: path, updatedAt: stub.UpdatedAt, hasCommits: len(stub.Commits) > 0}
 		prev, exists := bestByNumber[stub.Number]
-		if !exists || stub.UpdatedAt.After(prev.updatedAt) {
-			bestByNumber[stub.Number] = prPathInfo{path: path, updatedAt: stub.UpdatedAt}
+
+		// On a tie, prefer the snapshot that still lacks commits. A ledger
+		// written before the supersede below existed can hold both variants of
+		// one GitHub state, and their updated_at is identical by construction.
+		// Picking the enriched one there would make this loop skip the PR (it
+		// already has commits) and strand the commit-less duplicate on disk
+		// forever — exactly the tie a reader can lose. Picking the commit-less
+		// one re-runs the enrichment and lets the supersede clean it up, so an
+		// already-broken ledger heals on the next backfill instead of needing
+		// the writer to have been fixed before the files were written.
+		better := !exists ||
+			cand.updatedAt.After(prev.updatedAt) ||
+			(cand.updatedAt.Equal(prev.updatedAt) && prev.hasCommits && !cand.hasCommits)
+		if better {
+			bestByNumber[stub.Number] = cand
 		}
 	}
 
@@ -384,9 +401,36 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 		}
 
 		pr.Commits = commits
-		if err := WriteGitHubPR(ledgerPath, &pr); err != nil {
+		newPath, err := writeGitHubPR(ledgerPath, &pr)
+		if err != nil {
 			logger.Warn("write backfilled PR failed", "pr", pr.Number, "error", err)
 			continue
+		}
+
+		// Drop the snapshot we just enriched. Both files describe the SAME
+		// GitHub state — backfilling commits does not change the PR upstream,
+		// so updated_at is identical in both — and every consumer that has to
+		// pick one (findLatestFile here, candidateBeats in
+		// internal/codedb/index, the dedup above) orders by updated_at first.
+		// With that key tied the choice falls through to mtime, which ties too
+		// when both writes land in the same tick, and the winner is then the
+		// content hash: a coin flip that can hand a reader the commit-less
+		// snapshot. Leaving a strictly-less-complete duplicate of the same
+		// state on disk is what makes the tie possible, so remove it.
+		//
+		// Deliberately NOT fixed by bumping pr.UpdatedAt: that field mirrors
+		// GitHub's own updated_at, and RebuildSyncStateFromFiles feeds the max
+		// of it into GitHubTypeSyncState.LastSyncAt, which is the `since`
+		// cursor for the next incremental fetch. Inflating it would make ox
+		// skip PRs updated between GitHub's timestamp and ours.
+		// The inequality is an invariant guard, not a reachable case: adding
+		// commits always changes the content, so it always changes the hash.
+		// It is here because the cost of it ever being wrong is deleting the
+		// snapshot we just wrote.
+		if newPath != info.path {
+			if rmErr := os.Remove(info.path); rmErr != nil && !os.IsNotExist(rmErr) {
+				logger.Warn("remove superseded PR snapshot failed", "pr", pr.Number, "path", info.path, "error", rmErr)
+			}
 		}
 
 		backfilled++
