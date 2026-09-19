@@ -1,11 +1,11 @@
 package lfs
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/sageox/ox/internal/session/pipeline"
 )
@@ -94,17 +94,18 @@ func UploadSessionFiles(client *Client, sessionPath string, logger *slog.Logger)
 	// upload blobs in parallel (up to 4 concurrent)
 	results := UploadAll(resp, files, 4)
 
-	// collect all errors so devs can see everything that failed
-	var uploadErrors []string
+	// collect all errors so devs can see everything that failed, and callers
+	// can still match each one with errors.Is
+	var uploadErrors []error
 	for _, r := range results {
 		if r.Error != nil {
 			logger.Info("LFS blob upload failed", "oid", r.OID, "error", r.Error)
-			uploadErrors = append(uploadErrors, fmt.Sprintf("OID %s: %s", r.OID, r.Error))
+			uploadErrors = append(uploadErrors, fmt.Errorf("OID %s: %w", r.OID, r.Error))
 		}
 	}
 	if len(uploadErrors) > 0 {
-		return nil, fmt.Errorf("LFS upload failed (%d/%d files):\n  %s",
-			len(uploadErrors), len(results), strings.Join(uploadErrors, "\n  "))
+		return nil, fmt.Errorf("LFS upload failed (%d/%d files): %w",
+			len(uploadErrors), len(results), errors.Join(uploadErrors...))
 	}
 
 	logger.Info("LFS upload complete", "path", sessionPath, "files", len(fileRefs))

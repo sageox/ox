@@ -341,7 +341,7 @@ func TestUploadSessionFiles_NeverUploadsAPointerItCannotParse(t *testing.T) {
 	serverURL = server.URL
 
 	_, err := UploadSessionFiles(NewClient(server.URL, "testuser", "testtoken"), sessionDir, nil)
-	require.ErrorContains(t, err, ErrPointerContent.Error())
+	require.ErrorIs(t, err, ErrPointerContent)
 	mu.Lock()
 	defer mu.Unlock()
 	require.False(t, put[ComputeOID([]byte(pointer))], "the pointer must never be stored as the transcript")
