@@ -144,6 +144,11 @@ func ComputeOID(content []byte) string {
 // same request returns the same bytes: retrying cannot change the answer.
 var ErrOIDMismatch = errors.New("OID mismatch")
 
+// ErrPointerContent reports content that is itself an LFS pointer. Stored as an
+// object, it makes the pointer committed for it resolve to another pointer
+// instead of the file it stands for.
+var ErrPointerContent = errors.New("content is an LFS pointer, not the file it points to")
+
 // UploadResult tracks the outcome of a single upload.
 type UploadResult struct {
 	OID   string
@@ -390,11 +395,22 @@ func UploadAll(resp *BatchResponse, files map[string][]byte, maxConcurrent int) 
 	}
 
 	var results []UploadResult
+	// Pointer content is refused whatever the response says about it: the
+	// server may already hold the object — every empty file stored this way is
+	// the same one — or leave it out, and either would read as uploaded.
+	for oid, content := range files {
+		if pointerShaped(content) {
+			results = append(results, UploadResult{OID: oid, Error: ErrPointerContent})
+		}
+	}
 	var mu sync.Mutex
 	sem := make(chan struct{}, maxConcurrent)
 	var wg sync.WaitGroup
 
 	for _, obj := range resp.Objects {
+		if pointerShaped(files[obj.OID]) {
+			continue // refused above
+		}
 		if obj.Error != nil {
 			mu.Lock()
 			results = append(results, UploadResult{

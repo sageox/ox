@@ -306,6 +306,14 @@ func IsPointerFile(path string) bool {
 	return err == nil
 }
 
+// pointerShaped reports whether content has the shape of an LFS pointer: the
+// spec's version line, in fewer than the 1024 bytes the spec allows a pointer.
+// Whether it parses is not asked. A pointer ParsePointer refuses, such as one
+// naming an object above MaxObjectSize, is still no file's content.
+func pointerShaped(content []byte) bool {
+	return len(content) < 1024 && bytes.HasPrefix(content, []byte("version "+pointerVersion+"\n"))
+}
+
 // ReadPointerFile reads and parses an LFS pointer file, returning the FileRef.
 func ReadPointerFile(path string) (FileRef, error) {
 	data, err := os.ReadFile(path)
