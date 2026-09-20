@@ -1,0 +1,196 @@
+---
+name: jev
+concerns: classification, routing, scoring, gating, ranking, relevance, latency, llm-cost, typed-decisions
+valid-through: 2026-12-31
+reviewed: 2026-09-20
+---
+
+# Jev / "System One" models — typed decisions instead of generated text
+
+**Valid through 2026-12-31.** Jev launched 2026-09-15 and this entry was written five
+days later. Pricing, rate limits, access model, and SDK coverage are the volatile
+claims — re-verify those before relying on them. The mechanism and the boundary below
+are stable.
+
+## The shape — read this even if you never call Jev
+
+**A large fraction of LLM calls in a mature codebase are not generation. They are
+decisions wearing a generation costume.** You send a prompt, get back text, parse it
+into a boolean or an enum, and throw the rest away. You pay frontier prices and
+frontier latency for a value that has, at most, a few bits of information in it.
+
+Three tells that a call site is decision-shaped:
+
+1. **You parse the output down to one field** — a `{"worth": bool}`, a `"yes"/"no"`, a
+   label from a fixed set, a 1–5 score.
+2. **`max_tokens` is tiny.** A call capped at 20 or 24 tokens is a classifier.
+3. **You wrote a validator** that rejects anything outside a set you already knew.
+
+Three design moves follow, and **all three are worth making whether or not you ever
+adopt a specific vendor**:
+
+- **Put a cheap gate in front of expensive generation.** If a summarizer is invoked and
+  its output discarded whenever some `skip` flag comes back true, the skip decision
+  should be its own cheap call. You are currently paying the expensive model to tell
+  you it had nothing to say.
+- **Type the decision at the seam.** Make the interface `(value T, confidence float64)`
+  rather than `(text string)`. That is the abstraction that lets you swap the
+  implementation — to a small model, a classifier, or back to a frontier LLM — without
+  touching the caller.
+- **Put a confidence band on it, and calibrate the band against your own labels.**
+  Not the vendor's.
+
+The rest of this entry is about one product. The three moves above outlive it.
+
+## What it actually is
+
+TypeSafe AI shipped **Jev** on 2026-09-15, naming the category "System One models." It
+is not a small LLM. It generates no text at all.
+
+You POST a `state` (a string, JSON object, or array of text) plus named `questions`, and
+get back typed values with probability distributions in a single parallel pass. There
+are exactly **three** question primitives and the list is closed:
+
+| Primitive | You supply | You get back |
+|---|---|---|
+| `noul` | instructions, optional true/false criteria | a probability, 0–1 |
+| `choice` | instructions, a map of ≤255 options → descriptions | the winning option, the full distribution, a confidence |
+| `score` | instructions, 2–10 **ordered** level descriptions | a probability-weighted score, the distribution, a confidence |
+
+There is no ranking type, no struct type, no multi-label type. You assemble those from
+primitives in your own code. Text only — images, audio and video are explicitly
+unsupported. 64k tokens per request, of which 32k is state plus the longest question.
+
+**Batch your questions.** The docs are explicit that additional questions barely change
+response time and cost only their own tokens. Ten questions in one request, never ten
+requests.
+
+Trained with what TypeSafe calls RLCD — reinforcement learning for calibrated decisions
+— which they contrast with RLHF and RLVR. No paper, no model card, no parameter count,
+no weights. Community reimplementations circulating under other names are **not** Jev;
+do not cite their architecture as though it were.
+
+## What the claims mean
+
+| Claim | Grade | What it actually means |
+|---|---|---|
+| "Mathematically cannot hallucinate" | A (vendor) | **It cannot emit a value outside the option set you supplied.** The output head *is* the type, so type errors are impossible by construction. This says nothing about whether the chosen value is correct. A confidently wrong boolean is still wrong. |
+| "Calibrated" | A (vendor) | Qualitative only — **TypeSafe publishes no ECE, no Brier score, no reliability diagram.** The `confidence` field is not even a model output; it is a concentration statistic derived from the distribution, and the docs say you are "never locked into our definition." |
+| "40–200x faster" (homepage: 193.6x / 444.6x) | A as a *claim* | Vendor-constructed: their workflows, built by their model-capabilities team, timed from their laptops, against LLMs wrapped in their own comparison shim. **All of this is disclosed by TypeSafe, to their credit**, along with the note that the gains are "on the higher end of real world gains." |
+| Independent speed/cost | B | ~5x faster and ~27x cheaper than Haiku 4.5 on one published benchmark; 5–18x reported by one adopter. **Plan with 5–25x.** |
+| $0.042 / M input tokens, output free | A | Confirmed on the pricing page. No documented free tier. TypeSafe concedes it "can't prove the pricing isn't subsidized." |
+| "Not trained on customer requests or responses" | A | Documented and unambiguous. **Zero data retention is a separate, enterprise-only commitment under DPA** — it is not the default. |
+| Accuracy | B | On TypeSafe's own four-workflow eval it lands **at or below** frontier models. Accuracy is explicitly not the pitch. |
+
+### The independent evidence, which is the important part
+
+- **Calibration degrades out of distribution, and the error flips sign by question
+  type.** A published study (methodology and raw responses open) found ECE 0.024 on a
+  public benchmark likely in training data, but on unseen rule-generated tickets:
+  **0.74 average confidence at 44.7% accuracy** on a policy task. Nouls came out
+  *under*confident (temperature ~0.66); choice and score came out *over*confident
+  (~3.3–3.4). **A single global confidence threshold is therefore unsafe** — calibrate
+  per question type against your own labels, and prefer raw max-probability to the
+  derived `confidence` field.
+- **On a 2,000-email phishing benchmark: Jev 62.6% accuracy, Claude Haiku 4.5 81.3%
+  — and a plain regex baseline 91.6%.** Task shape dominates. One practitioner reported
+  40.7% on bank-transaction classification and called it unusable for that purpose.
+- **Prompt injection works.** TypeSafe's own limitations page concedes the model
+  "doesn't treat data as hostile by default." If your `state` contains user- or
+  customer-authored text, this is the material risk — not type errors.
+- **One adopter found it 10–20x *more* expensive than a cheap frontier model** for email
+  classification, and slightly less accurate. The cost pitch depends entirely on the
+  ratio of state size to decision value.
+
+### TypeSafe's own limitations page is the best thing they published
+
+Read it before designing anything. It concedes: literal interpretation of scoping words
+and negations; **"not a calculator"** (counting and numeric precision unreliable);
+**dates read as text, not ordered quantities** (duration and comparison math
+unreliable); degraded multi-hop and double-negative handling; **accuracy falls as the
+state grows with content unrelated to the decision**; no adversarial robustness; and no
+structural invariants — `P(noul)` and `1 − P(not_noul)` are not comparable.
+
+## Where it applies — and where it does not
+
+**Good fit:** intent routing · relevance and re-ranking · spend gates in front of
+expensive work · guardrails on another model's output · confidence-gated escalation to
+a human or a bigger model · passage filtering · hierarchical classification by walking a
+tree of `choice` calls in your own code.
+
+**Bad fit — and these will tempt people, because their prompts look structured:**
+
+- **Anything whose output is prose.** Summaries, explanations, rewrites, code. It
+  generates no text; this is not a limitation to work around, it is the design.
+- **Multi-turn tool loops.** If your pipeline recovers from a bad answer by feeding the
+  error back for the model to re-read, a non-conversational model structurally cannot
+  participate.
+- **Decisions whose *reasoning* is the product.** You get a number, never a rationale.
+  For audited, regulated, or human-actionable verdicts — "this merge is unsafe
+  because…" — the explanation is often the deliverable, and losing it makes the verdict
+  unactionable.
+- **Arithmetic, counting, and date math.** Their own page says so.
+- **Anything where a cheap deterministic rule already wins.** See the regex beating it
+  at 91.6%. Measure the dumb baseline first.
+
+## What it costs
+
+$0.042/M input, output free, ~239ms measured median. Against a fast frontier tier that
+is roughly 1/25th the input price; against a *reasoning* tier on a call you only needed
+one bit from, the saving is larger and the latency win is the bigger prize.
+
+**The saving is only real where the state is small.** Cost scales with input tokens, so
+a decision over a 30k-token state is not cheap just because the answer is one bit. The
+wins concentrate where the state is compact and the call count is high.
+
+## Adopting it
+
+- **Access:** early access as of 2026-09-15; the docs imply open console signup and it
+  is already served through several AI gateways, which is the lowest-friction path. Not
+  GA in any formal sense — no published SLA, no status page, no region list, and rate
+  limits documented as changing without notice.
+- **SDKs: Python and JavaScript/TypeScript only. No official Go SDK and none
+  announced.** The wire format is three JSON shapes with no streaming and no tool loop,
+  so writing a small client is defensible and lower-risk than adopting a week-old
+  unaffiliated repository.
+- **Pin the version.** `jev-latest` is a moving alias. Pin an explicit version anywhere
+  decisions are cached, persisted, or compared over time.
+- **Errors:** 401 and 422 are your bug — fail loud, do not retry. 429 and 529 retry with
+  backoff and honor `Retry-After`.
+- **Set an aggressive per-attempt deadline.** If the claim is sub-second, a 10s client
+  default means a hung call blocks your hot path for 10s. Budget total, including
+  retries, against whatever your caller's budget actually is.
+- **A fallback is not optional.** No SLA, no status page, and a public outage report
+  already exceeding a default retry budget. Every question needs a deterministic
+  default — the conservative branch — plus a circuit breaker.
+- **Read the terms before any user or customer content goes over the wire.** No-training
+  is the documented default; **no-retention is not** and is gated behind an enterprise
+  agreement.
+- **TypeSafe publishes its own agent skill** for coding agents. Use it for API syntax.
+  This entry deliberately does not duplicate it.
+
+## Could not establish
+
+- Architecture: parameter count, layer count, whether it is encoder-only. No paper, no
+  model card. Descriptions of it as "an encoder with a classification head" are
+  inference, not disclosure.
+- Any vendor-published calibration metric.
+- What drives the 70–500ms range. State size is the likely dominant factor, inferred
+  from the vendor's note that extra questions are nearly free.
+- Formal GA status. The launch release says waitlist; the quickstart implies open
+  signup; gateways serve it now. Unreconciled.
+- SLA, uptime commitment, status page, region availability.
+- Whether failed requests are billed.
+- Minimums or committed-spend tiers.
+- Any independent reproduction of the headline speed multiples.
+- Whether adapter fine-tuning exists. Several secondary sources claim it; the vendor's
+  own docs say the opposite. **Treat the fine-tuning claim as false.**
+
+## Sources
+
+Vendor (A): typesafe.ai launch post and manifesto; docs.typesafe.ai — API reference,
+models, primitives, state, confidence, SDKs, legal, model-jaggedness, agent skill.
+Secondary (B): TechCrunch 2026-09-18; The Register 2026-09-16; DataCamp; DCVC funding
+announcement 2026-09-15; Vercel and Cloudflare gateway documentation; published
+independent OOD-calibration and phishing benchmarks with open methodology; Hacker News
+launch and follow-up threads. All accessed 2026-09-20.

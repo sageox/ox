@@ -6,7 +6,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
+	"strings"
 
+	"github.com/sageox/ox/extensions/skills"
 	"github.com/sageox/ox/internal/sageoxignore"
 )
 
@@ -51,16 +54,30 @@ func ScopedIgnoreFiles() []ScopedIgnoreFile {
 	ruleExact := "rules/" + CLIBase + ".md"
 	ruleGlob := "rules/" + CLIPrefix + "*"
 
+	// Catalog skills outside every prefix need an explicit line: a glob cannot
+	// reach them, and without one `ox skills install` drops untracked vendor files
+	// into the customer's git status that the reconciler can never reclaim.
+	var exactSkills []string
+	for _, bundle := range skills.Catalog {
+		for _, name := range bundle.SkillIDs {
+			if name == CommittedOnRamp || strings.HasPrefix(name, CLIPrefix) || strings.HasPrefix(name, TeamPrefix) {
+				continue
+			}
+			exactSkills = append(exactSkills, "skills/"+name+"/")
+		}
+	}
+	sort.Strings(exactSkills)
+
 	return []ScopedIgnoreFile{
-		{Dir: ".claude", Entries: []string{
+		{Dir: ".claude", Entries: append([]string{
 			skillGlob, ruleExact, ruleGlob,
 			// The command surface folded into skills in 0.15.0; the glob stays so a
 			// repository still holding pre-fold files keeps them out of diffs until
 			// the retirement sweep reaches it.
 			"commands/" + CLIPrefix + "*",
 			teamSkillGlob, teamRuleGlob,
-		}},
-		{Dir: ".agents", Entries: []string{skillGlob, teamSkillGlob}},
+		}, exactSkills...)},
+		{Dir: ".agents", Entries: append([]string{skillGlob, teamSkillGlob}, exactSkills...)},
 		{Dir: ".factory", Entries: []string{ruleExact, ruleGlob, teamRuleGlob}},
 	}
 }

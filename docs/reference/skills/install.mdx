@@ -1,0 +1,53 @@
+---
+title: "ox skills install"
+description: "CLI reference for ox skills install"
+sidebar_position: 93
+---
+
+## ox skills install
+
+Install skills ox ships into this repository
+
+### Synopsis
+
+Install skills ox ships into this repository.
+
+Run `ox skills catalog` to see the names. Default bundles are already
+installed; the ones marked available are what this command is for.
+
+The files land immediately, and your selection is recorded in
+.sageox/skills.lock.json. That file is part of the repository on purpose: the
+choice belongs to the project, so your coworkers get the same skills.
+
+With --team, the skill is copied into your Team Context instead, where it becomes
+your team's to edit and applies to every repository on the team. That is a SEED,
+not a managed install — ox writes the copy once and never overwrites it, so if
+the skill is already published this refuses rather than discarding your team's
+edits. Names are refused all-or-nothing: a typo cannot leave half a run applied.
+
+```
+ox skills install <name>... [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for install
+      --json   Emit machine-readable JSON
+      --team   Publish the skill to your Team Context instead, as a one-time seed the team then owns
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
+```
+
+### SEE ALSO
+
+* [ox skills](/skills)	 - Inspect the skills your AI coworkers have

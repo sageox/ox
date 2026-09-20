@@ -35,11 +35,14 @@ import (
 var skillsCmd = &cobra.Command{
 	Use:   "skills",
 	Short: "Inspect the skills your AI coworkers have",
-	Long: `Inspect the skills installed for this repository.
+	Long: `Inspect and manage the skills your AI coworkers have here.
 
-Skills come from two places: the ones ox itself ships, and the ones your team
-publishes to its Team Context. This command shows both, and — when a team skill
-is missing — which of the several possible reasons is the actual one.`,
+Skills reach a repository from three places: the ones ox itself ships, the ones
+your team publishes to its Team Context, and the ones you wrote yourself. "list"
+shows all three; "catalog" shows what ox offers and whether it is installed;
+"install" and "uninstall" change the set. "status" answers the harder question —
+when a team skill is missing, which of the several possible reasons is the
+actual one.`,
 }
 
 var skillsStatusCmd = &cobra.Command{

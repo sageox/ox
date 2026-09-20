@@ -1,21 +1,33 @@
 ---
-title: "ox skills status"
-description: "CLI reference for ox skills status"
-sidebar_position: 95
+title: "ox skills uninstall"
+description: "CLI reference for ox skills uninstall"
+sidebar_position: 96
 ---
 
-## ox skills status
+## ox skills uninstall
 
-Show which team skills reached this repository, and why the rest did not
+Remove skills ox installed in this repository
+
+### Synopsis
+
+Remove skills ox installed in this repository.
+
+The files go away and the name is dropped from .sageox/skills.lock.json, so the
+next reconcile does not put them back.
+
+Only skills ox owns can be removed this way. A skill you authored yourself is
+refused: ox has no record of it, no way to restore it, and no claim on it. A
+skill your team publishes is refused too — remove it in the Team Context, where
+it lives.
 
 ```
-ox skills status [flags]
+ox skills uninstall <name>... [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for status
+  -h, --help   help for uninstall
       --json   Emit machine-readable JSON
 ```
 
@@ -23,7 +35,6 @@ ox skills status [flags]
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
-      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)

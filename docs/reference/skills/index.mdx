@@ -10,11 +10,14 @@ Inspect the skills your AI coworkers have
 
 ### Synopsis
 
-Inspect the skills installed for this repository.
+Inspect and manage the skills your AI coworkers have here.
 
-Skills come from two places: the ones ox itself ships, and the ones your team
-publishes to its Team Context. This command shows both, and — when a team skill
-is missing — which of the several possible reasons is the actual one.
+Skills reach a repository from three places: the ones ox itself ships, the ones
+your team publishes to its Team Context, and the ones you wrote yourself. "list"
+shows all three; "catalog" shows what ox offers and whether it is installed;
+"install" and "uninstall" change the set. "status" answers the harder question —
+when a team skill is missing, which of the several possible reasons is the
+actual one.
 
 ### Options
 
@@ -39,4 +42,8 @@ is missing — which of the several possible reasons is the actual one.
 
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
 * [ox skills approve](/skills/approve)	 - Approve runnable team-skill content for this repository
+* [ox skills catalog](/skills/catalog)	 - Show the skills ox ships and whether each is installed here
+* [ox skills install](/skills/install)	 - Install skills ox ships into this repository
+* [ox skills list](/skills/list)	 - List every skill installed in this repository
 * [ox skills status](/skills/status)	 - Show which team skills reached this repository, and why the rest did not
+* [ox skills uninstall](/skills/uninstall)	 - Remove skills ox installed in this repository

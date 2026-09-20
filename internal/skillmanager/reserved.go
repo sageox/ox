@@ -1,6 +1,10 @@
 package skillmanager
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/sageox/ox/extensions/skills"
+)
 
 // Reserved namespaces. These three strings are the whole ownership contract, so
 // they live in one place: the installer, the ignore-file writer, the doctor
@@ -45,5 +49,24 @@ func IsReservedName(name string) bool {
 	name = strings.TrimSuffix(name, ".md")
 	return name == CLIBase ||
 		strings.HasPrefix(name, CLIPrefix) ||
-		strings.HasPrefix(name, TeamPrefix)
+		strings.HasPrefix(name, TeamPrefix) ||
+		isUnprefixedCatalogSkill(name)
+}
+
+// isUnprefixedCatalogSkill covers catalog skills that carry none of the prefixes
+// above. Curated knowledge skills are named for what they are ("post-cutoff"),
+// not for the binary that ships them: "ox-cli-" reads as a CLI relay and, worse,
+// survives a --team publish as "sageox-team-ox-cli-post-cutoff".
+//
+// The prefixes remain the contract for everything that CAN wear one — a prefix
+// costs no ignore-file churn when the next skill lands, and an explicit name does.
+// This is the narrow exception, and it is derived from the embedded catalog rather
+// than hand-listed so the two can never disagree.
+//
+// CommittedOnRamp is excluded: it is ox-authored but deliberately tracked.
+func isUnprefixedCatalogSkill(name string) bool {
+	if name == "" || name == CommittedOnRamp {
+		return false
+	}
+	return skills.IsKnown(name)
 }

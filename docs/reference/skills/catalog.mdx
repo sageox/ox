@@ -1,21 +1,32 @@
 ---
-title: "ox skills status"
-description: "CLI reference for ox skills status"
-sidebar_position: 95
+title: "ox skills catalog"
+description: "CLI reference for ox skills catalog"
+sidebar_position: 92
 ---
 
-## ox skills status
+## ox skills catalog
 
-Show which team skills reached this repository, and why the rest did not
+Show the skills ox ships and whether each is installed here
+
+### Synopsis
+
+Show the skills ox ships, grouped by bundle, and whether each is installed here.
+
+Bundles marked as defaults are installed into every project automatically. The
+rest are opt-in: they appear here as available until you ask for them.
+
+This lists only what the ox binary carries. To see everything your AI coworkers
+can actually reach in this repository — including your team's skills and your
+own — run `ox skills list`.
 
 ```
-ox skills status [flags]
+ox skills catalog [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for status
+  -h, --help   help for catalog
       --json   Emit machine-readable JSON
 ```
 
@@ -23,7 +34,6 @@ ox skills status [flags]
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
-      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)

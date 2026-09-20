@@ -1,21 +1,31 @@
 ---
-title: "ox skills status"
-description: "CLI reference for ox skills status"
-sidebar_position: 95
+title: "ox skills list"
+description: "CLI reference for ox skills list"
+sidebar_position: 94
 ---
 
-## ox skills status
+## ox skills list
 
-Show which team skills reached this repository, and why the rest did not
+List every skill installed in this repository
+
+### Synopsis
+
+List every skill installed in this repository, whoever installed it.
+
+Three provenances appear in one table: ox for the skills the CLI ships, team for
+the ones your Team Context publishes, and local for the ones a human authored
+here. ox owns only the first two and will never modify or remove a local skill.
+
+To see what ox ships that is NOT installed here, run `ox skills catalog`.
 
 ```
-ox skills status [flags]
+ox skills list [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for status
+  -h, --help   help for list
       --json   Emit machine-readable JSON
 ```
 
@@ -23,7 +33,6 @@ ox skills status [flags]
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
-      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
