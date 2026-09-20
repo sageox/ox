@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -523,8 +524,8 @@ func inputWithDefaultSimple(title, defaultVal string) (string, error) {
 
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
-	if err != nil && input == "" {
-		return defaultVal, nil
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
 	}
 
 	input = strings.TrimSpace(input)

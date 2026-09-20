@@ -101,6 +101,14 @@ func TestInputWithDefaultPreservesPipedValues(t *testing.T) {
 			})
 		})
 	}
+	t.Run("read error", func(t *testing.T) {
+		withStdin(t, "", func() {
+			require.NoError(t, os.Stdin.Close())
+			value, err := InputWithDefault("Email", "default@example.com")
+			assert.ErrorIs(t, err, os.ErrClosed)
+			assert.Empty(t, value)
+		})
+	})
 }
 
 // helper to create a KeyPressMsg for tests
