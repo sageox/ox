@@ -246,6 +246,12 @@ func TestNoInputCLI(t *testing.T) {
 				userContent := []byte("staged user work\n")
 				require.NoError(t, os.WriteFile(userFile, userContent, 0o600))
 				mustRunGit(t, repo, "add", "user.txt")
+				beforeUserBlob, err := runIsolatedGit(t, repo, "rev-parse", ":user.txt")
+				require.NoError(t, err)
+				unstagedUserContent := []byte("newer unstaged user work\n")
+				if tt.explicitTeam && tt.failure == "" {
+					require.NoError(t, os.WriteFile(userFile, unstagedUserContent, 0o600))
+				}
 				switch tt.failure {
 				case "seed":
 					require.NoError(t, os.WriteFile(filepath.Join(repo, ".sageox"), userContent, 0o600))
@@ -294,6 +300,18 @@ func TestNoInputCLI(t *testing.T) {
 					_, err = runIsolatedGit(t, repo, "rev-parse", "--verify", "HEAD")
 					require.NoError(t, err, "successful initialization must still create its seed commit")
 					assert.FileExists(t, filepath.Join(repo, ".sageox", "README.md"))
+					committedPaths, err := runIsolatedGit(t, repo, "ls-tree", "--name-only", "-r", "HEAD")
+					require.NoError(t, err)
+					assert.Equal(t, ".sageox/README.md", committedPaths, "the seed commit must contain only its README")
+					afterUserBlob, err := runIsolatedGit(t, repo, "rev-parse", ":user.txt")
+					require.NoError(t, err)
+					assert.Equal(t, beforeUserBlob, afterUserBlob, "initialization must preserve the staged user blob")
+					status, err := runIsolatedGit(t, repo, "status", "--porcelain", "--", "user.txt")
+					require.NoError(t, err)
+					assert.Equal(t, "AM user.txt", status, "user work must remain staged with its newer unstaged edits")
+					afterUser, err := os.ReadFile(userFile)
+					require.NoError(t, err)
+					assert.Equal(t, unstagedUserContent, afterUser)
 					return
 				}
 				require.Error(t, err, "output: %s", output)

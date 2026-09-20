@@ -92,6 +92,68 @@ func TestEnsureInitialCommit_EmptyRepo(t *testing.T) {
 	assert.Contains(t, string(out), "Initialize SageOx configuration")
 }
 
+// Seed commits must not consume unrelated staged files or their unstaged edits.
+func TestEnsureInitialCommit_PreservesStagedWork(t *testing.T) {
+	for _, tt := range []struct {
+		name, path, unstaged string
+		remove, failCommit   bool
+	}{
+		{name: "staged project file", path: "user work.txt"},
+		{name: "partially staged file", path: "user work.txt", unstaged: "newer unstaged work\n"},
+		{name: "staged SageOx directory file", path: ".sageox/notes.txt"},
+		{name: "file removed after staging", path: "removed.txt", remove: true},
+		{name: "failed commit", path: "user.txt", unstaged: "newer unstaged work\n", failCommit: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			repoDir := initEmptyGitRepo(t)
+			path := filepath.Join(repoDir, tt.path)
+			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+			const staged = "staged user work\n"
+			require.NoError(t, os.WriteFile(path, []byte(staged), 0644))
+			mustRunGit(t, repoDir, "add", "--", tt.path)
+			before, err := runIsolatedGit(t, repoDir, "ls-files", "--stage", "--", tt.path)
+			require.NoError(t, err)
+			require.NotEmpty(t, before)
+			working := staged
+			if tt.unstaged != "" {
+				working = tt.unstaged
+				require.NoError(t, os.WriteFile(path, []byte(working), 0644))
+			}
+			if tt.remove {
+				require.NoError(t, os.Remove(path))
+			}
+			if tt.failCommit {
+				mustRunGit(t, repoDir, "config", "commit.gpgSign", "true")
+				mustRunGit(t, repoDir, "config", "gpg.program", filepath.Join(repoDir, "missing-gpg"))
+			}
+
+			err = ensureInitialCommit(repoDir)
+			if tt.failCommit {
+				require.ErrorContains(t, err, "git commit:")
+				assert.False(t, hasCommits(repoDir))
+			} else {
+				require.NoError(t, err)
+				files, err := runIsolatedGit(t, repoDir, "ls-tree", "-r", "--name-only", "HEAD")
+				require.NoError(t, err)
+				assert.Equal(t, ".sageox/README.md", files, "the seed commit must contain only its generated README")
+			}
+			after, err := runIsolatedGit(t, repoDir, "ls-files", "--stage", "--", tt.path)
+			require.NoError(t, err)
+			assert.Equal(t, before, after, "preserve the original staged blob and mode")
+			pending, err := runIsolatedGit(t, repoDir, "diff", "--cached", "--name-only", "--", tt.path)
+			require.NoError(t, err)
+			assert.Equal(t, tt.path, pending, "the coworker's file must remain staged for their own commit")
+			if tt.remove {
+				assert.NoFileExists(t, path)
+			} else {
+				content, err := os.ReadFile(path)
+				require.NoError(t, err)
+				assert.Equal(t, working, string(content))
+			}
+		})
+	}
+}
+
 func TestEnsureInitialCommit_RepoWithExistingCommits(t *testing.T) {
 	repoDir := initEmptyGitRepo(t)
 

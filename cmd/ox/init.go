@@ -164,7 +164,8 @@ func hasCommits(gitRoot string) bool {
 
 // ensureInitialCommit creates a seed commit in an empty git repository so that
 // ox init can compute a fingerprint. It writes .sageox/README.md and commits
-// it. If the repo already has commits this is a no-op.
+// only that file, preserving unrelated staged work. If the repo already has
+// commits this is a no-op.
 //
 // The commit uses -c flags to supply a fallback author identity so it succeeds
 // even when the user has not configured git user.name / user.email.
@@ -194,12 +195,14 @@ func ensureInitialCommit(gitRoot string) error {
 		return fmt.Errorf("git add .sageox/README.md: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 
-	// commit with fallback identity so it works even without git config
+	// Scope the commit to the generated README so existing staged work stays staged.
+	// Use fallback identity so it works even without git config.
 	commitCmd := exec.Command(
 		"git",
 		"-c", "user.name="+constants.SageOxGitName,
 		"-c", "user.email="+constants.SageOxGitEmail,
-		"commit", "-m", "Initialize SageOx configuration",
+		"commit", "--only", "-m", "Initialize SageOx configuration",
+		"--", filepath.Join(".sageox", "README.md"),
 	)
 	commitCmd.Dir = gitRoot
 	if out, err := commitCmd.CombinedOutput(); err != nil {
