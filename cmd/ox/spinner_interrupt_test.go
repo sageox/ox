@@ -137,13 +137,16 @@ func TestSpinnerCLIInterrupt(t *testing.T) {
 	})
 
 	for _, tt := range []struct {
-		name    string
-		args    []string
-		message string
+		name      string
+		args      []string
+		message   string
+		blockType string
 	}{
-		{name: "workspace sync", args: []string{"sync"}, message: "Syncing via daemon..."},
-		{name: "one team", args: []string{"sync", "--team", "test-team"}, message: "Syncing team test-team via daemon..."},
-		{name: "all teams", args: []string{"sync", "--all-teams"}, message: "Syncing team contexts via daemon..."},
+		{name: "workspace sync", args: []string{"sync"}, message: "Syncing via daemon...", blockType: daemon.MsgTypeSync},
+		{name: "one team", args: []string{"sync", "--team", "test-team"}, message: "Syncing team test-team via daemon...", blockType: daemon.MsgTypeTeamSync},
+		{name: "all teams", args: []string{"sync", "--all-teams"}, message: "Syncing team contexts via daemon...", blockType: daemon.MsgTypeTeamSync},
+		{name: "export team sync", args: []string{"export", "--sync"}, message: "Syncing team contexts via daemon...", blockType: daemon.MsgTypeTeamSync},
+		{name: "export ledger sync", args: []string{"export", "--sync"}, message: "Syncing via daemon...", blockType: daemon.MsgTypeSync},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := t.TempDir()
@@ -156,8 +159,10 @@ func TestSpinnerCLIInterrupt(t *testing.T) {
 			t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 			release := make(chan struct{})
 			sock := startFakeDaemon(t, func(msg daemon.Message) daemon.Response {
-				if msg.Type == daemon.MsgTypeSync || msg.Type == daemon.MsgTypeTeamSync {
+				if msg.Type == tt.blockType {
 					<-release
+				}
+				if msg.Type == daemon.MsgTypeTeamSync {
 					return daemon.Response{Success: true, Data: json.RawMessage(`[{"team_id":"test-team","status":"synced"}]`)}
 				}
 				return daemon.Response{Success: true, Data: json.RawMessage(`{}`)}
@@ -169,8 +174,15 @@ func TestSpinnerCLIInterrupt(t *testing.T) {
 			require.NoError(t, os.Symlink(sock, socketPath))
 			output := runInterruptedCLI(t, oxBin, repo, []string{"XDG_RUNTIME_DIR=" + runtimeDir}, tt.args, tt.message)
 			assert.NotContains(t, output, "Synced via daemon")
-			assert.NotContains(t, output, "synced via daemon")
+			if tt.blockType == daemon.MsgTypeTeamSync {
+				assert.NotContains(t, output, "synced via daemon")
+				assert.NotContains(t, output, "Syncing via daemon...")
+			}
 			assert.NotContains(t, output, "older version")
+			assert.NotContains(t, output, "Sync failed")
+			assert.NotContains(t, output, "Team sync failed")
+			assert.NotContains(t, output, "Sync incomplete")
+			assert.NotContains(t, output, "Take your data with you")
 		})
 	}
 }

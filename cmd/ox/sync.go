@@ -229,6 +229,9 @@ func syncViaDaemon(_ context.Context, jsonOutput bool, result *SyncResult) error
 		client := daemon.NewClientForCurrentRepoWithTimeout(30 * time.Second)
 		err = client.SyncWithProgress(nil)
 	}
+	if errors.Is(err, tea.ErrInterrupted) {
+		return err
+	}
 
 	if err != nil {
 		if !jsonOutput {
@@ -436,6 +439,9 @@ func syncAllTeamContexts(_ context.Context, jsonOutput bool, result *SyncResult)
 		results, err = cli.WithSpinner("Syncing team contexts via daemon...", run)
 	} else {
 		results, err = run()
+	}
+	if errors.Is(err, tea.ErrInterrupted) {
+		return err
 	}
 
 	for _, r := range results {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
@@ -90,13 +91,17 @@ func runExport(cmd *cobra.Command, _ []string) error {
 	projectRoot, _ := findProjectRoot()
 
 	// --sync: ensure everything is checked out and fresh before we print paths.
-	// A sync failure is surfaced but never blocks the docs — the user still
+	// An ordinary sync failure is surfaced but never blocks the docs — the user still
 	// deserves to see where their data lives and how to reach it. Report the
 	// sync we ACTUALLY completed, not the one requested: a failed refresh must
 	// not claim synced=true in JSON, and must keep showing the refresh tip.
+	// Cancellation stops the command before rendering any export output.
 	syncSucceeded := false
 	if doSync {
 		if err := runExportSync(projectRoot, jsonOutput); err != nil {
+			if errors.Is(err, tea.ErrInterrupted) {
+				return err
+			}
 			if !jsonOutput {
 				cli.PrintWarning(fmt.Sprintf("Sync incomplete: %v", err))
 				cli.PrintHint("Showing current on-disk locations anyway.")
@@ -237,10 +242,16 @@ func runExportSync(projectRoot string, jsonOutput bool) error {
 	var problems []string
 
 	if err := syncAllTeamContexts(ctx, jsonOutput, &result); err != nil {
+		if errors.Is(err, tea.ErrInterrupted) {
+			return err
+		}
 		problems = append(problems, fmt.Sprintf("team contexts: %v", err))
 	}
 	if projectRoot != "" {
 		if err := syncViaDaemon(ctx, jsonOutput, &result); err != nil {
+			if errors.Is(err, tea.ErrInterrupted) {
+				return err
+			}
 			problems = append(problems, fmt.Sprintf("ledger: %v", err))
 		}
 	}
