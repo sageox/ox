@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/joho/godotenv"
 	"github.com/mattn/go-isatty"
@@ -175,6 +176,10 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 	var commandExit *commandExitError
 	if errors.As(err, &commandExit) {
 		return commandExit.ExitCode
+	}
+	if errors.Is(err, tea.ErrInterrupted) {
+		fmt.Fprintln(os.Stderr, "Interrupted.")
+		return 130
 	}
 	if headlessLedgerReadRequested(args) {
 		// Cobra flag parsing can fail before RunE. Keep even that path out

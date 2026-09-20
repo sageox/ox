@@ -53,6 +53,7 @@ endif
 ifneq ($(filter darwin linux,$(shell $(GO) env GOOS)),)
 # Exercise terminal output modes against the instrumented binary in CI.
 ACCEPTANCE_INTEGRATION_TESTS += TestConfigCLIOutputModes
+ACCEPTANCE_INTEGRATION_TESTS += TestSpinnerCLIInterrupt
 endif
 ACCEPTANCE_SLOW_TESTS := TestIncrementalE2E_SingleAgent TestIncrementalE2E_CtrlC_AntiEntropy
 TWIN_COVER_DIR ?=

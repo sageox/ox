@@ -515,7 +515,8 @@ func TestRunDoctorChecks_WithFixFlag(t *testing.T) {
 	dir := setupGitRepoWithFiles(t, map[string]string{"AGENTS.md": adapterBlockFixture})
 
 	// run with fix=true (can't cache this since it may have side effects)
-	categoriesWithFix := runDoctorChecks(context.Background(), doctorOptions{fix: true})
+	categoriesWithFix, err := runDoctorChecks(context.Background(), doctorOptions{fix: true})
+	require.NoError(t, err)
 	require.NotEmpty(t, categoriesWithFix, "runDoctorChecks(true) returned no categories")
 
 	// The flag reached the checks, and it reached them here rather than in the

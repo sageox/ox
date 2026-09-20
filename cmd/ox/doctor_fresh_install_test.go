@@ -67,7 +67,8 @@ func TestDoctorFreshInstall_NoWarnings(t *testing.T) {
 		verbose:  true, // see all checks for debugging
 		forceYes: true, // non-interactive
 	}
-	categories := runDoctorChecks(context.Background(), opts)
+	categories, err := runDoctorChecks(context.Background(), opts)
+	require.NoError(t, err)
 
 	// collect all warnings, failures, and fixable issues
 	var warnings []string
@@ -122,7 +123,8 @@ func TestDoctorFreshInstall_EmptyRepo_NoWarnings(t *testing.T) {
 		verbose:  true,
 		forceYes: true,
 	}
-	categories := runDoctorChecks(context.Background(), opts)
+	categories, err := runDoctorChecks(context.Background(), opts)
+	require.NoError(t, err)
 
 	// in an empty repo, we expect .sageox check to be skipped (not a warning)
 	// the user simply hasn't run init yet
@@ -357,7 +359,8 @@ func TestDoctorFreshCheckout_NoSideEffectDirectories(t *testing.T) {
 		verbose:  false,
 		forceYes: true,
 	}
-	_ = runDoctorChecks(context.Background(), opts)
+	_, err = runDoctorChecks(context.Background(), opts)
+	require.NoError(t, err)
 
 	// verify no new directories were created in the parent
 	afterEntries, err := os.ReadDir(parentDir)

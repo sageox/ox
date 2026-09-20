@@ -481,6 +481,9 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 	err = cli.WithSpinnerNoResult("Syncing git credentials...", func() error {
 		return fetchGitCredentialsWithRetry(client)
 	})
+	if errors.Is(err, tea.ErrInterrupted) {
+		return err
+	}
 	if err != nil {
 		// filter out confusing "run 'ox login'" advice since user just logged in
 		errMsg := err.Error()

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
@@ -248,19 +249,20 @@ func syncViaDaemon(_ context.Context, jsonOutput bool, result *SyncResult) error
 // teams at once and returns per-team results; we report the status of the
 // requested team specifically (not the bare success of the IPC round-trip).
 func syncTeamContext(_ context.Context, teamID string, jsonOutput bool, result *SyncResult) error {
-	var results []daemon.TeamSyncResult
-	run := func() error {
+	run := func() ([]daemon.TeamSyncResult, error) {
 		client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
-		var e error
-		results, e = client.TeamSyncWithProgress(nil)
-		return e
+		return client.TeamSyncWithProgress(nil)
 	}
 
+	var results []daemon.TeamSyncResult
 	var syncErr error
 	if !jsonOutput {
-		syncErr = cli.WithSpinnerNoResult(fmt.Sprintf("Syncing team %s via daemon...", teamID), run)
+		results, syncErr = cli.WithSpinner(fmt.Sprintf("Syncing team %s via daemon...", teamID), run)
 	} else {
-		syncErr = run()
+		results, syncErr = run()
+	}
+	if errors.Is(syncErr, tea.ErrInterrupted) {
+		return syncErr
 	}
 
 	tcResult := resolveTeamSyncResult(teamID, results, syncErr)
@@ -423,19 +425,17 @@ func legacyDaemonErrorMsg(daemonVersion string) error {
 // CLI delegates pull operations to daemon and reports the per-team results
 // returned by the daemon in the JSON output.
 func syncAllTeamContexts(_ context.Context, jsonOutput bool, result *SyncResult) error {
-	var results []daemon.TeamSyncResult
-	run := func() error {
+	run := func() ([]daemon.TeamSyncResult, error) {
 		client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
-		var e error
-		results, e = client.TeamSyncWithProgress(nil)
-		return e
+		return client.TeamSyncWithProgress(nil)
 	}
 
+	var results []daemon.TeamSyncResult
 	var err error
 	if !jsonOutput {
-		err = cli.WithSpinnerNoResult("Syncing team contexts via daemon...", run)
+		results, err = cli.WithSpinner("Syncing team contexts via daemon...", run)
 	} else {
-		err = run()
+		results, err = run()
 	}
 
 	for _, r := range results {

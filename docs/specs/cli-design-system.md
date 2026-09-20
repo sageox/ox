@@ -13,6 +13,17 @@ document into multiple concatenated objects.
 as `PrintWarningTo` honor their supplied writer. Command-specific JSON response
 envelopes remain part of the command's stdout contract.
 
+## Spinner Cancellation
+
+`cli.WithSpinner` returns `tea.ErrInterrupted` when dismissed before the operation
+finishes. Callers must preserve that error instead of retrying the operation or
+downgrading it to a warning. The command runner prints `Interrupted.` to stderr
+and exits with status 130, without attempting command correction.
+
+Cancellation stops waiting for a result; it does not roll back work or cancel a
+job already submitted to the daemon. Return results through the spinner callback
+instead of mutating caller-owned variables that could be read after interruption.
+
 ## Color Palette
 
 Colors are sourced from `sageox-design` and generated into `internal/theme/generated.go`.

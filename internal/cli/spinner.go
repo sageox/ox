@@ -49,9 +49,14 @@ func (m spinnerModel[T]) waitForResult() tea.Cmd {
 }
 
 func (m spinnerModel[T]) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.done {
+		return m, nil
+	}
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
+			m.done = true
+			m.output.Err = tea.ErrInterrupted
 			return m, tea.Quit
 		}
 	case SpinnerResult[T]:
@@ -76,7 +81,8 @@ func (m spinnerModel[T]) View() tea.View {
 // WithSpinner runs an async function with a spinner displayed.
 // Shows spinner after a short delay to avoid flicker for fast operations.
 // In non-interactive mode (CI or --no-interactive), runs without spinner.
-// Returns the result of the function.
+// Returns the result of the function, or tea.ErrInterrupted if dismissed before
+// the function finishes. Interrupting stops the wait, not the function itself.
 func WithSpinner[T any](message string, fn func() (T, error)) (T, error) {
 	// skip spinner in non-interactive mode (CI, --no-interactive)
 	if !IsInteractive() {
@@ -122,6 +128,10 @@ func WithSpinner[T any](message string, fn func() (T, error)) (T, error) {
 	}
 
 	final := finalModel.(spinnerModel[T])
+	if !final.done {
+		var zero T
+		return zero, tea.ErrInterrupted
+	}
 	return final.output.Value, final.output.Err
 }
 

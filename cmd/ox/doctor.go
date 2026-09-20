@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	lipgloss "charm.land/lipgloss/v2"
 
 	"github.com/sageox/ox/internal/auth"
@@ -37,6 +39,7 @@ type checkResult struct {
 	priority      string // "critical", "info", or "" (default warning)
 	message       string
 	detail        string        // action hint shown on next line with └─
+	err           error         // preserves interruption through diagnostic checks
 	detailRaw     bool          // if true, detail is pre-styled; skip MutedStyle wrapping
 	children      []checkResult // nested child checks shown with ⎿
 	fixLevel      FixLevel      // how fix should behave (from DoctorCheck metadata)
@@ -341,7 +344,10 @@ common issues, or --fix-slug to target specific checks.`,
 			renderDoctorHeader(cmd.OutOrStdout(), opts.fix)
 		}
 
-		categories := runDoctorChecks(cmd.Context(), opts)
+		categories, err := runDoctorChecks(cmd.Context(), opts)
+		if err != nil {
+			return err
+		}
 		hasFailed := displayDoctorResults(cmd, categories, opts)
 
 		// record doctor run timestamp for staleness tracking
@@ -686,11 +692,11 @@ func (p *doctorProgress) clear() {
 	fmt.Fprint(os.Stderr, "\r\033[K")
 }
 
-func runDoctorChecks(parent context.Context, opts doctorOptions) []checkCategory {
+func runDoctorChecks(parent context.Context, opts doctorOptions) ([]checkCategory, error) {
 	return runDoctorChecksWithState(parent, opts, detectDoctorState())
 }
 
-func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state doctorState) []checkCategory {
+func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state doctorState) ([]checkCategory, error) {
 	var categories []checkCategory
 	if parent == nil {
 		parent = context.Background()
@@ -894,7 +900,11 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 
 	// git repo paths check - suppress individual warnings when not logged in
 	if state.isAuthenticated {
-		gitRepoChecks = append(gitRepoChecks, checkGitRepoPaths(opts.shouldFix(CheckSlugGitRepoPaths)))
+		check := checkGitRepoPaths(opts.shouldFix(CheckSlugGitRepoPaths))
+		if errors.Is(check.err, tea.ErrInterrupted) {
+			return categories, check.err
+		}
+		gitRepoChecks = append(gitRepoChecks, check)
 	} else {
 		gitRepoChecks = append(gitRepoChecks, SkippedCheck("git repo paths", "requires login", ""))
 	}
@@ -1191,7 +1201,7 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	// enrich check results with fix metadata from registry
 	categories = enrichWithFixMetadata(categories)
 
-	return categories
+	return categories, nil
 }
 
 // enrichWithFixMetadata adds fixLevel and slug to check results from the DoctorCheckRegistry.

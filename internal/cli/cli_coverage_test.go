@@ -2,12 +2,19 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
+	"runtime"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/creack/pty"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/spf13/cobra"
@@ -65,6 +72,144 @@ func TestWithSpinnerNoResult_NonInteractive_Error(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Equal(t, "sync failed", err.Error())
+}
+
+// A dismissed spinner must not return an empty successful result. Hold the
+// operation until the real terminal displays the spinner, then finish or cancel.
+func TestWithSpinnerTerminalResults(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits for the spinner's display delay in a real terminal")
+	}
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("pseudo-terminal integration is supported on macOS and Linux")
+	}
+	t.Setenv("TERM", "xterm-256color")
+	opErr := errors.New("operation failed")
+	for _, tt := range []struct {
+		name      string
+		interrupt bool
+		noResult  bool
+		fast      bool
+		err       error
+	}{
+		{name: "completed result"},
+		{name: "operation error", err: opErr},
+		{name: "Ctrl+C", interrupt: true},
+		{name: "Ctrl+C without result", interrupt: true, noResult: true},
+		{name: "fast result", fast: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ptmx, tty, err := pty.Open()
+			require.NoError(t, err)
+			defer ptmx.Close()
+			defer tty.Close()
+			require.NoError(t, pty.Setsize(ptmx, &pty.Winsize{Rows: 24, Cols: 100}))
+			stdin, stdout, stderr, disabled := os.Stdin, os.Stdout, os.Stderr, noInteractive
+			os.Stdin, os.Stdout, os.Stderr, noInteractive = tty, tty, tty, false
+			defer func() { os.Stdin, os.Stdout, os.Stderr, noInteractive = stdin, stdout, stderr, disabled }()
+			require.True(t, IsInteractive(), "must exercise the interactive path")
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			release := make(chan struct{})
+			var once sync.Once
+			finish := func() { once.Do(func() { close(release) }) }
+			defer finish()
+			finished := make(chan struct{})
+			op := func() (string, error) {
+				defer close(finished)
+				if !tt.fast {
+					select {
+					case <-release:
+					case <-ctx.Done():
+						return "", ctx.Err()
+					}
+				}
+				return "completed value", tt.err
+			}
+
+			const message = "Waiting for test operation"
+			var output bytes.Buffer
+			readDone := make(chan error, 1)
+			go func() {
+				buf := make([]byte, 4096)
+				answered, acted := false, false
+				for {
+					n, readErr := ptmx.Read(buf)
+					output.Write(buf[:n])
+					if !answered && bytes.Contains(output.Bytes(), []byte(ansi.RequestPrimaryDeviceAttributes)) {
+						_, _ = ptmx.Write([]byte("\x1b]11;rgb:0000/0000/0000\a\x1b[?1;2c"))
+						answered = true
+					}
+					if !acted && bytes.Contains(output.Bytes(), []byte(message)) {
+						if tt.interrupt {
+							_, _ = ptmx.Write([]byte{3}) // Ctrl+C in raw terminal mode
+						} else {
+							finish()
+						}
+						acted = true
+					}
+					if readErr != nil {
+						readDone <- readErr
+						return
+					}
+				}
+			}()
+
+			var value string
+			if tt.noResult {
+				err = WithSpinnerNoResult(message, func() error { _, err := op(); return err })
+			} else {
+				value, err = WithSpinner(message, op)
+			}
+			os.Stdin, os.Stdout, os.Stderr, noInteractive = stdin, stdout, stderr, disabled
+			require.NoError(t, tty.Close())
+			readErr := <-readDone
+			require.True(t, errors.Is(readErr, io.EOF) || errors.Is(readErr, syscall.EIO), "terminal: %v", readErr)
+			require.NoError(t, ctx.Err(), "spinner failed to return promptly: %s", output.String())
+			if tt.interrupt {
+				assert.ErrorIs(t, err, tea.ErrInterrupted)
+				assert.Empty(t, value)
+				select {
+				case <-finished:
+					t.Error("interrupted wait must return before the operation finishes")
+				default:
+				}
+			} else {
+				assert.ErrorIs(t, err, tt.err)
+				assert.Equal(t, "completed value", value)
+			}
+			finish()
+			<-finished
+		})
+	}
+}
+
+// The quit command is asynchronous: a late result must not replace a Ctrl+C
+// already handled by the model, and late input must not discard a completed result.
+func TestSpinnerKeepsFirstTerminalOutcome(t *testing.T) {
+	interrupt := tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
+	result := SpinnerResult[string]{Value: "completed"}
+	for _, tt := range []struct {
+		name  string
+		msgs  []tea.Msg
+		value string
+		err   error
+	}{
+		{name: "result arrives after Ctrl+C", msgs: []tea.Msg{interrupt, result}, err: tea.ErrInterrupted},
+		{name: "Ctrl+C arrives after result", msgs: []tea.Msg{result, interrupt}, value: "completed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var model tea.Model = newSpinnerModel[string]("working")
+			for _, msg := range tt.msgs {
+				model, _ = model.Update(msg)
+			}
+			final := model.(spinnerModel[string])
+			assert.True(t, final.done)
+			assert.Equal(t, tt.value, final.output.Value)
+			assert.ErrorIs(t, final.output.Err, tt.err)
+		})
+	}
 }
 
 func TestTrackCommandCompletion_WithTelemetry(t *testing.T) {
