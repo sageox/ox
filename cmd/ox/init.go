@@ -318,26 +318,6 @@ func runInit() error {
 		return fmt.Errorf("not a git repository\n\nox init requires a git repository. Run:\n  git init\n  git commit --allow-empty -m \"Initial commit\"\n  ox init")
 	}
 
-	// ensure the repo has at least one commit (required for fingerprinting)
-	if err := ensureInitialCommit(gitRoot); err != nil {
-		return fmt.Errorf("failed to create initial commit: %w", err)
-	}
-
-	// compute fingerprint (now guaranteed to have at least one commit)
-	fingerprint, err := repotools.ComputeFingerprint()
-	if err != nil {
-		fmt.Fprintln(os.Stderr)
-		cli.PrintError("git repository has no commits")
-		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, cli.StyleDim.Render(fmt.Sprintf("%s requires at least one commit for repository fingerprinting.", cli.StyleCommand.Render("ox init"))))
-		return cli.ErrSilent
-	}
-
-	// offline-safe: remote hashes are optional; registration works for local-only repos
-	if hashErr := fingerprint.WithRemoteHashes(); hashErr != nil {
-		cli.PrintWarning(fmt.Sprintf("Could not add remote hashes: %v", hashErr))
-	}
-
 	// check if remote already has .sageox/ (prevents duplicate init race condition)
 	if !initForce {
 		found, stale, err := checkRemoteSageoxExists(gitRoot)
@@ -464,6 +444,26 @@ func runInit() error {
 				return nil
 			}
 		}
+	}
+
+	// Resolve required input before creating the seed commit or touching the index.
+	if err := ensureInitialCommit(gitRoot); err != nil {
+		return fmt.Errorf("failed to create initial commit: %w", err)
+	}
+
+	// compute fingerprint (now guaranteed to have at least one commit)
+	fingerprint, err := repotools.ComputeFingerprint()
+	if err != nil {
+		fmt.Fprintln(os.Stderr)
+		cli.PrintError("git repository has no commits")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, cli.StyleDim.Render(fmt.Sprintf("%s requires at least one commit for repository fingerprinting.", cli.StyleCommand.Render("ox init"))))
+		return cli.ErrSilent
+	}
+
+	// offline-safe: remote hashes are optional; registration works for local-only repos
+	if hashErr := fingerprint.WithRemoteHashes(); hashErr != nil {
+		cli.PrintWarning(fmt.Sprintf("Could not add remote hashes: %v", hashErr))
 	}
 
 	sageoxDir := filepath.Join(gitRoot, ".sageox")

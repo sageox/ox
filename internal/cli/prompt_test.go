@@ -75,6 +75,34 @@ func TestNoInputNeverWaitsForPromptAnswers(t *testing.T) {
 	}
 }
 
+// A pipe's final value must survive EOF even when it has no trailing newline.
+func TestInputWithDefaultPreservesPipedValues(t *testing.T) {
+	previousNoInteractive, previousNoInput := noInteractive, noInput
+	SetNoInteractive(true)
+	SetNoInput(false)
+	t.Cleanup(func() {
+		SetNoInteractive(previousNoInteractive)
+		SetNoInput(previousNoInput)
+	})
+	for _, tt := range []struct {
+		name, input, want string
+	}{
+		{"value at EOF", "alice@example.com", "alice@example.com"},
+		{"value with newline", " alice@example.com \n", "alice@example.com"},
+		{"empty EOF", "", "default@example.com"},
+		{"blank line", "\n", "default@example.com"},
+		{"whitespace at EOF", " \t", "default@example.com"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			withStdin(t, tt.input, func() {
+				value, err := InputWithDefault("Email", "default@example.com")
+				require.NoError(t, err)
+				assert.Equal(t, tt.want, value)
+			})
+		})
+	}
+}
+
 // helper to create a KeyPressMsg for tests
 func keyPress(code rune, mod tea.KeyMod, text string) tea.KeyPressMsg {
 	return tea.KeyPressMsg(tea.Key{Code: code, Mod: mod, Text: text})

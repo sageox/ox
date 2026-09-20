@@ -157,11 +157,30 @@ func TestNoInputCLI(t *testing.T) {
 	})
 
 	t.Run("endpoint selection", func(t *testing.T) {
-		for _, command := range []string{"login", "init"} {
-			t.Run(command, func(t *testing.T) {
+		for _, tt := range []struct {
+			name    string
+			command string
+			unborn  bool
+		}{
+			{name: "login", command: "login"},
+			{name: "init", command: "init"},
+			{name: "init unborn", command: "init", unborn: true},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
 				env := noInputCLIEnv(t)
 				env = append(env, "SAGEOX_ENDPOINT=") // reach the actual endpoint picker
-				repo := testGitRepo(t)
+				repo := t.TempDir()
+				mustRunGit(t, repo, "init")
+				if !tt.unborn {
+					mustRunGit(t, repo, "commit", "--allow-empty", "-m", "Initial commit")
+				}
+				userFile := filepath.Join(repo, "user.txt")
+				userContent := []byte("staged user work\n")
+				require.NoError(t, os.WriteFile(userFile, userContent, 0o600))
+				mustRunGit(t, repo, "add", "user.txt")
+				beforeIndex, err := os.ReadFile(filepath.Join(repo, ".git", "index"))
+				require.NoError(t, err)
+				beforeHead, _ := runIsolatedGit(t, repo, "rev-parse", "--verify", "HEAD")
 				var requests atomic.Int32
 				for range 2 {
 					server := testguard.SafeMockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +196,7 @@ func TestNoInputCLI(t *testing.T) {
 				before, err := os.ReadFile(authPath)
 				require.NoError(t, err)
 
-				output, err := runNoInputCLI(t, oxBin, repo, env, nil, command, "--no-input", "--yes")
+				output, err := runNoInputCLI(t, oxBin, repo, env, nil, tt.command, "--no-input", "--yes")
 				require.Error(t, err, "output: %s", output)
 				assert.Contains(t, output, "--no-input requires --endpoint <endpoint>")
 				after, err := os.ReadFile(authPath)
@@ -185,43 +204,134 @@ func TestNoInputCLI(t *testing.T) {
 				assert.Equal(t, before, after, "an unspecified endpoint must not change stored logins")
 				assert.Zero(t, requests.Load(), "an unspecified endpoint must not receive requests")
 				assert.False(t, config.IsInitialized(repo), "an unspecified endpoint must not initialize the project")
+				assert.NoFileExists(t, filepath.Join(repo, ".sageox", "README.md"))
+				afterIndex, err := os.ReadFile(filepath.Join(repo, ".git", "index"))
+				require.NoError(t, err)
+				assert.Equal(t, beforeIndex, afterIndex, "an unspecified endpoint must preserve the index")
+				afterUser, err := os.ReadFile(userFile)
+				require.NoError(t, err)
+				assert.Equal(t, userContent, afterUser)
+				afterHead, err := runIsolatedGit(t, repo, "rev-parse", "--verify", "HEAD")
+				if tt.unborn {
+					assert.Error(t, err, "an unspecified endpoint must leave HEAD unborn")
+				} else {
+					require.NoError(t, err)
+					assert.Equal(t, beforeHead, afterHead)
+				}
 			})
 		}
 	})
 
 	t.Run("init without teams explains how to continue", func(t *testing.T) {
-		env := noInputCLIEnv(t)
-		repo := testGitRepo(t)
-		var introspections, repoRequests, registrations atomic.Int32
-		server := testguard.SafeMockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			switch r.URL.Path {
-			case auth.IntrospectEndpoint:
-				introspections.Add(1)
-				_, _ = io.WriteString(w, `{"active":true,"principal_kind":"user","scope":"*","token_type":"Bearer","user":{"id":"test-user","email":"test@example.com"}}`)
-			case "/api/v1/cli/repos":
-				repoRequests.Add(1)
-				_, _ = io.WriteString(w, `{"repos":{},"teams":[]}`)
-			case "/api/v1/repo/init":
-				registrations.Add(1)
-				http.NotFound(w, r)
-			default:
-				http.NotFound(w, r)
-			}
-		}))
-		require.NoError(t, auth.SaveTokenForEndpoint(server.URL, &auth.StoredToken{
-			AccessToken: "test-access", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour),
-		}))
+		for _, tt := range []struct {
+			name         string
+			unborn       bool
+			explicitTeam bool
+			failure      string
+		}{
+			{name: "committed"},
+			{name: "unborn", unborn: true},
+			{name: "unborn with explicit team", unborn: true, explicitTeam: true},
+			{name: "seed path blocked", unborn: true, explicitTeam: true, failure: "seed"},
+			{name: "missing commit object", explicitTeam: true, failure: "fingerprint"},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				env := noInputCLIEnv(t)
+				repo := t.TempDir()
+				mustRunGit(t, repo, "init")
+				if !tt.unborn {
+					mustRunGit(t, repo, "commit", "--allow-empty", "-m", "Initial commit")
+				}
+				userFile := filepath.Join(repo, "user.txt")
+				userContent := []byte("staged user work\n")
+				require.NoError(t, os.WriteFile(userFile, userContent, 0o600))
+				mustRunGit(t, repo, "add", "user.txt")
+				switch tt.failure {
+				case "seed":
+					require.NoError(t, os.WriteFile(filepath.Join(repo, ".sageox"), userContent, 0o600))
+				case "fingerprint":
+					ref, err := runIsolatedGit(t, repo, "symbolic-ref", "HEAD")
+					require.NoError(t, err)
+					require.NoError(t, os.WriteFile(filepath.Join(repo, ".git", filepath.FromSlash(ref)), []byte(strings.Repeat("1", 40)+"\n"), 0o600))
+					_, err = runIsolatedGit(t, repo, "rev-parse", "--verify", "HEAD")
+					require.NoError(t, err, "the ref must resolve so seed creation is skipped")
+					_, err = runIsolatedGit(t, repo, "rev-list", "HEAD")
+					require.Error(t, err, "the missing object must prevent fingerprinting")
+				}
+				beforeIndex, err := os.ReadFile(filepath.Join(repo, ".git", "index"))
+				require.NoError(t, err)
+				beforeHead, _ := runIsolatedGit(t, repo, "rev-parse", "--verify", "HEAD")
+				var introspections, repoRequests, registrations atomic.Int32
+				server := testguard.SafeMockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					switch r.URL.Path {
+					case auth.IntrospectEndpoint:
+						introspections.Add(1)
+						_, _ = io.WriteString(w, `{"active":true,"principal_kind":"user","scope":"*","token_type":"Bearer","user":{"id":"test-user","email":"test@example.com"}}`)
+					case "/api/v1/cli/repos":
+						repoRequests.Add(1)
+						_, _ = io.WriteString(w, `{"repos":{},"teams":[]}`)
+					case "/api/v1/repo/init":
+						registrations.Add(1)
+						_, _ = io.WriteString(w, `{"repo_id":"repo-no-input","team_id":"team-no-input"}`)
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				require.NoError(t, auth.SaveTokenForEndpoint(server.URL, &auth.StoredToken{
+					AccessToken: "test-access", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour),
+				}))
 
-		output, err := runNoInputCLI(t, oxBin, repo, env, nil, "init", "--endpoint", server.URL, "--no-input")
-		require.Error(t, err, "output: %s", output)
-		assert.Contains(t, output, "no teams available; create a team first")
-		assert.Contains(t, output, "omit --no-input")
-		assert.Positive(t, introspections.Load(), "fixture must reach authenticated initialization")
-		assert.EqualValues(t, 1, repoRequests.Load(), "fixture must reach the actual zero-team response")
-		assert.Zero(t, registrations.Load(), "missing team choice must not register the project")
-		assert.False(t, config.IsInitialized(repo))
-		assert.NoFileExists(t, filepath.Join(repo, ".sageox", "config.json"))
+				args := []string{"init", "--endpoint", server.URL, "--no-input"}
+				if tt.explicitTeam {
+					args = append(args, "--team", "team-no-input", "--agents", "claude-code")
+				}
+				output, err := runNoInputCLI(t, oxBin, repo, env, nil, args...)
+				if tt.explicitTeam && tt.failure == "" {
+					require.NoError(t, err, "output: %s", output)
+					assert.EqualValues(t, 1, registrations.Load())
+					assert.True(t, config.IsInitialized(repo), "explicit choices must still initialize an unborn project")
+					_, err = runIsolatedGit(t, repo, "rev-parse", "--verify", "HEAD")
+					require.NoError(t, err, "successful initialization must still create its seed commit")
+					assert.FileExists(t, filepath.Join(repo, ".sageox", "README.md"))
+					return
+				}
+				require.Error(t, err, "output: %s", output)
+				switch tt.failure {
+				case "seed":
+					assert.Contains(t, output, "failed to create initial commit")
+					blockedFile, err := os.ReadFile(filepath.Join(repo, ".sageox"))
+					require.NoError(t, err)
+					assert.Equal(t, userContent, blockedFile)
+				case "fingerprint":
+					assert.Contains(t, output, "git repository has no commits")
+				default:
+					assert.Contains(t, output, "no teams available; create a team first")
+					assert.Contains(t, output, "omit --no-input")
+				}
+				assert.Positive(t, introspections.Load(), "fixture must reach authenticated initialization")
+				assert.EqualValues(t, 1, repoRequests.Load(), "fixture must reach the actual zero-team response")
+				assert.Zero(t, registrations.Load(), "failed initialization must not register the project")
+				assert.False(t, config.IsInitialized(repo))
+				if tt.failure != "seed" {
+					assert.NoFileExists(t, filepath.Join(repo, ".sageox", "config.json"))
+					assert.NoFileExists(t, filepath.Join(repo, ".sageox", "README.md"))
+				}
+				afterIndex, err := os.ReadFile(filepath.Join(repo, ".git", "index"))
+				require.NoError(t, err)
+				assert.Equal(t, beforeIndex, afterIndex, "failed initialization must preserve the index")
+				afterUser, err := os.ReadFile(userFile)
+				require.NoError(t, err)
+				assert.Equal(t, userContent, afterUser)
+				afterHead, err := runIsolatedGit(t, repo, "rev-parse", "--verify", "HEAD")
+				if tt.unborn {
+					assert.Error(t, err, "failed initialization must leave HEAD unborn")
+				} else {
+					require.NoError(t, err)
+					assert.Equal(t, beforeHead, afterHead)
+				}
+			})
+		}
 	})
 
 	t.Run("dashboard explains no-input conflict", func(t *testing.T) {
