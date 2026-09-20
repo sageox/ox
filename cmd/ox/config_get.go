@@ -280,7 +280,7 @@ func init() {
 }
 
 func runConfigList(cmd *cobra.Command, args []string) error {
-	jsonOutput, _ := cmd.Flags().GetBool("json")
+	jsonOutput := cfg != nil && cfg.JSON
 	projectRoot, _ := findProjectRoot()
 
 	var values []*ConfigValue

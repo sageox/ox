@@ -1,12 +1,178 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
+	"github.com/charmbracelet/x/ansi"
+	"github.com/creack/pty"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/term"
 )
+
+// The editor's fallback must emit settings in the resolved output mode.
+func TestConfigCommandListsSettings(t *testing.T) {
+	dir := setupIsolatedUserConfig(t)
+	t.Setenv("OX_USER_CONFIG", filepath.Join(dir, "user-config.yaml"))
+	t.Chdir(dir)
+	previousConfig := cfg
+	t.Cleanup(func() { cfg = previousConfig })
+
+	for _, mode := range []string{"text", "json"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg = &config.Config{JSON: mode == "json"}
+			var runErr error
+			output := captureRealStdout(t, func() { runErr = configCmd.RunE(configCmd, nil) })
+			require.NoError(t, runErr)
+			if mode == "json" {
+				var values []ConfigValue
+				require.NoError(t, json.Unmarshal(output, &values), "output: %s", output)
+				require.Len(t, values, len(AllSettings))
+				return
+			}
+			require.Contains(t, string(output), "Configuration Settings")
+			require.Contains(t, string(output), "session_recording:")
+		})
+	}
+}
+
+// A terminal on stdout must not open the editor when flags, CI, or stdin
+// require non-interactive output. Exercise the real CLI and flag resolution.
+func TestConfigCLIOutputModes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: builds and runs the ox binary in a pseudo-terminal")
+	}
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("pseudo-terminal integration is supported on macOS and Linux")
+	}
+	oxBin := testguard.BuildOxBinary(t, repoPath("..", ".."))
+
+	for _, tt := range []struct {
+		name       string
+		args       []string
+		env        []string
+		stdinPipe  bool
+		stdoutPipe bool
+		wantJSON   bool
+		wantTUI    bool
+	}{
+		{name: "no-interactive flag", args: []string{"--no-interactive"}},
+		{name: "CI", env: []string{"CI=true"}},
+		{name: "non-interactive environment", env: []string{"OX_NO_INTERACTIVE=1"}},
+		{name: "JSON flag", args: []string{"--json", "--no-interactive=false"}, wantJSON: true},
+		{name: "JSON environment", args: []string{"--no-interactive=false"}, env: []string{"OX_JSON=1"}, wantJSON: true},
+		{name: "false JSON flag overrides environment", args: []string{"--json=false", "--no-interactive"}, env: []string{"OX_JSON=1"}},
+		{name: "list JSON environment", args: []string{"list"}, env: []string{"OX_JSON=1"}, wantJSON: true},
+		{name: "piped JSON output", args: []string{"--json"}, stdoutPipe: true, wantJSON: true},
+		{name: "redirected stdin", args: []string{"--no-interactive=false"}, stdinPipe: true},
+		{name: "redirected stdout", args: []string{"--no-interactive=false"}, stdoutPipe: true},
+		{name: "interactive editor", wantTUI: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			env := []string{
+				"TERM=xterm-256color",
+				"NO_COLOR=1",
+				"OX_XDG_ENABLE=1",
+				"SAGEOX_ENDPOINT=http://127.0.0.1:1",
+				"HTTP_PROXY=http://127.0.0.1:1",
+				"HTTPS_PROXY=http://127.0.0.1:1",
+				"NO_PROXY=localhost,127.0.0.1",
+			}
+			for _, key := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"} {
+				env = append(env, key+"="+filepath.Join(dir, key))
+			}
+			env = append(env, tt.env...)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := testguard.OxCmdContext(t, ctx, oxBin, dir, env, append([]string{"config"}, tt.args...)...)
+
+			ptmx, tty, err := pty.Open()
+			require.NoError(t, err)
+			defer ptmx.Close()
+			defer tty.Close()
+			require.True(t, term.IsTerminal(int(tty.Fd())), "test must provide a real terminal")
+			require.NoError(t, pty.Setsize(ptmx, &pty.Winsize{Rows: 40, Cols: 120}))
+			cmd.Stdin, cmd.Stdout = tty, tty
+			if tt.stdinPipe {
+				cmd.Stdin = strings.NewReader("")
+			}
+			var stdout, stderr bytes.Buffer
+			if tt.stdoutPipe {
+				cmd.Stdout = &stdout
+			}
+			cmd.Stderr = &stderr
+			require.NoError(t, cmd.Start())
+			require.NoError(t, tty.Close()) // allow EOF once the child closes its copy
+
+			const enterAltScreen = "\x1b[?1049h"
+			var terminalOutput bytes.Buffer
+			readErrors := make(chan error, 1)
+			go func() {
+				buf := make([]byte, 4096)
+				backgroundAnswered := false
+				quitSent := false
+				for {
+					n, readErr := ptmx.Read(buf)
+					terminalOutput.Write(buf[:n])
+					if !backgroundAnswered && bytes.Contains(terminalOutput.Bytes(), []byte(ansi.RequestPrimaryDeviceAttributes)) {
+						// Answer Lip Gloss's startup probe as a terminal would.
+						_, _ = ptmx.Write([]byte("\x1b]11;rgb:0000/0000/0000\a\x1b[?1;2c"))
+						backgroundAnswered = true
+					}
+					if !quitSent && bytes.Contains(terminalOutput.Bytes(), []byte(enterAltScreen)) {
+						// Quit an editor that opens so a regression fails on output,
+						// rather than leaving a command waiting for keyboard input.
+						_, _ = ptmx.Write([]byte("q"))
+						quitSent = true
+					}
+					if readErr != nil {
+						readErrors <- readErr
+						return
+					}
+				}
+			}()
+			err = cmd.Wait()
+			readErr := <-readErrors
+			output := terminalOutput.Bytes()
+			// PTY hangup is EOF on macOS and EIO on Linux.
+			require.True(t, errors.Is(readErr, io.EOF) || errors.Is(readErr, syscall.EIO), "reading terminal: %v", readErr)
+			require.NoError(t, err, "stdout: %s\nstderr: %s", output, stderr.String())
+			if tt.stdoutPipe {
+				output = stdout.Bytes()
+			}
+			require.Equal(t, tt.wantTUI, bytes.Contains(output, []byte(enterAltScreen)), "output: %s", output)
+			if tt.wantTUI {
+				return
+			}
+			if tt.wantJSON {
+				if !tt.stdoutPipe {
+					// A PTY also captures terminal queries written to stdin.
+					// Check displayed JSON here, and raw JSON in the pipe case.
+					output = []byte(ansi.Strip(string(output)))
+				}
+				var values []ConfigValue
+				require.NoError(t, json.Unmarshal(output, &values), "output: %q", output)
+				require.Len(t, values, len(AllSettings))
+				return
+			}
+			require.Contains(t, string(output), "Configuration Settings")
+			require.Contains(t, string(output), "session_recording:")
+		})
+	}
+}
 
 func TestWrapText_BasicWrapping(t *testing.T) {
 	t.Parallel()
