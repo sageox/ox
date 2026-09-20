@@ -165,6 +165,9 @@ func selectLogoutEndpoints(loggedInEndpoints []string, all bool, specified strin
 		// --force with multiple endpoints: log out from all (non-interactive)
 		return loggedInEndpoints, nil
 	}
+	if cli.NoInput() {
+		return nil, fmt.Errorf("--no-input requires --endpoint <endpoint> or --all when logged into multiple endpoints")
+	}
 
 	// multiple endpoints - prompt for selection
 	fmt.Println()

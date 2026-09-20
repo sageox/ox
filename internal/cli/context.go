@@ -88,6 +88,9 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	if cmd.Flags().Changed("no-interactive") {
 		cfg.NoInteractive, _ = cmd.Flags().GetBool("no-interactive")
 	}
+	if cmd.Flags().Changed("no-input") {
+		cfg.NoInput, _ = cmd.Flags().GetBool("no-input")
+	}
 	// Picks up either the root persistent --yes or a command's own --yes/-y
 	// (doctor, team invite): cmd.Flags() merges both, local winning.
 	if cmd.Flags().Changed("yes") {
@@ -127,6 +130,7 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	// set global output mode
 	SetJSONMode(cfg.JSON)
 	SetNoInteractive(cfg.NoInteractive)
+	SetNoInput(cfg.NoInput)
 	SetAssumeYes(cfg.AssumeYes)
 	// Update notices are human-facing prose; either machine-output mode turns
 	// one into a parse error for whatever is reading the stream. Wired here so

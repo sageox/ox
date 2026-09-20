@@ -445,6 +445,9 @@ func runCoworkerRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	if !force {
+		if cli.NoInput() {
+			return fmt.Errorf("removing a coworker requires confirmation: pass --force when using --no-input")
+		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Remove coworker %q? [y/N] ", name)
 		var answer string
 		if _, err := fmt.Fscanln(cmd.InOrStdin(), &answer); err != nil || !strings.EqualFold(answer, "y") {

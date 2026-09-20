@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/spf13/cobra"
 )
@@ -155,6 +156,9 @@ func confirmNewEndpointTrust(cmd *cobra.Command, ep string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"WARNING: trusting new endpoint %s without prompt (OX_TRUST_ENDPOINT=1)\n", ep)
 		return saveTrustedEndpoint(ep)
+	}
+	if cli.NoInput() {
+		return fmt.Errorf("login to %s requires endpoint trust; omit --no-input to confirm, or set OX_TRUST_ENDPOINT=1", ep)
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(),

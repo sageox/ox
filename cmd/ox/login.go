@@ -239,6 +239,9 @@ func selectLoginEndpoint() (string, error) {
 	if len(endpoints) == 1 && !endpoints[0].IsValid {
 		return endpoints[0].URL, nil
 	}
+	if cli.NoInput() {
+		return "", fmt.Errorf("--no-input requires --endpoint <endpoint> to choose where to log in")
+	}
 
 	// show endpoint selection
 	fmt.Println("Select endpoint to authenticate:")

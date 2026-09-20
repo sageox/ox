@@ -404,6 +404,9 @@ func selectEndpointForUninstall(gitRoot string, endpoints []string) (string, boo
 		// with --force, uninstall from all endpoints
 		return "", true, nil
 	}
+	if cli.NoInput() {
+		return "", false, fmt.Errorf("multiple endpoints configured: pass --all with --no-input to select all endpoints")
+	}
 
 	// build options for selection
 	options := make([]string, 0, len(endpoints)+1)
@@ -818,6 +821,9 @@ func confirmUninstallGate(gitRoot, selectedEndpoint string, allEndpoints, force 
 	if force {
 		slog.Info("uninstall confirmation", "skipped", "force flag enabled")
 		return true, nil
+	}
+	if cli.NoInput() {
+		return false, fmt.Errorf("uninstall requires confirmation: pass --force when using --no-input")
 	}
 
 	repoName := filepath.Base(gitRoot)

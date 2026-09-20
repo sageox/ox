@@ -376,7 +376,10 @@ func runInit() error {
 			fmt.Printf("Using endpoint: %s\n", cli.StyleBold.Render(endpoint.NormalizeSlug(resolvedEndpoint)))
 		}
 	} else if os.Getenv(endpoint.EnvVar) == "" {
-		selectedEndpoint, needsLogin := selectInitEndpoint()
+		selectedEndpoint, needsLogin, err := selectInitEndpoint()
+		if err != nil {
+			return err
+		}
 		if selectedEndpoint != "" {
 			if needsLogin {
 				fmt.Println()
@@ -455,7 +458,7 @@ func runInit() error {
 		} else if reposResp != nil {
 			proceed, promptErr := promptNoTeams()
 			if promptErr != nil {
-				return fmt.Errorf("team selection canceled")
+				return fmt.Errorf("team selection canceled: %w", promptErr)
 			}
 			if !proceed {
 				return nil
@@ -2470,9 +2473,9 @@ type initEndpointInfo struct {
 }
 
 // selectInitEndpoint shows endpoint selection UI for ox init.
-// Returns (selectedEndpoint, needsLogin) where needsLogin is true if user must login first.
-// Returns ("", false) if only one valid endpoint or user cancels.
-func selectInitEndpoint() (string, bool) {
+// needsLogin is true if the user must log in first. Cancellation returns an
+// empty endpoint; --no-input returns an error when a choice is needed.
+func selectInitEndpoint() (string, bool, error) {
 	// get all endpoints with stored tokens (including expired)
 	storedEndpoints, err := auth.ListEndpoints()
 	if err != nil {
@@ -2510,13 +2513,16 @@ func selectInitEndpoint() (string, bool) {
 
 	// if only one endpoint and it's valid, use it without prompting
 	if len(endpoints) == 1 && endpoints[0].IsValid {
-		return endpoints[0].URL, false
+		return endpoints[0].URL, false, nil
 	}
 
 	// if only one endpoint and it's not valid, still need to show it so user knows to login
 	// but if there are no endpoints at all, return empty (will be caught by auth gate later)
 	if len(endpoints) == 0 {
-		return "", false
+		return "", false, nil
+	}
+	if cli.NoInput() {
+		return "", false, fmt.Errorf("--no-input requires --endpoint <endpoint> to choose where to initialize")
 	}
 
 	// show endpoint selection
@@ -2541,20 +2547,20 @@ func selectInitEndpoint() (string, bool) {
 
 	selected, err := cli.SelectOne("Endpoint:", options, 0)
 	if err != nil {
-		return "", false // canceled
+		return "", false, nil // canceled
 	}
 	if selected < 0 || selected >= len(endpoints) {
-		return "", false
+		return "", false, nil
 	}
 
 	selectedEp := endpoints[selected]
 
 	// if selected endpoint is not valid, tell user to login first
 	if !selectedEp.IsValid {
-		return selectedEp.URL, true
+		return selectedEp.URL, true, nil
 	}
 
-	return selectedEp.URL, false
+	return selectedEp.URL, false, nil
 }
 
 // teamNameForID best-effort resolves a team ID to its display name via the
@@ -2692,6 +2698,9 @@ func selectTeam(teams []api.TeamMembership, currentTeamID string) (string, strin
 // promptNoTeams handles the case where the API returns zero teams.
 // Offers to continue (server will auto-create a team) or open the dashboard.
 func promptNoTeams() (bool, error) {
+	if cli.NoInput() {
+		return false, fmt.Errorf("%w: no teams available; create a team first, or omit --no-input to choose how to continue", cli.ErrNoInteractiveInput)
+	}
 	ep := endpoint.Get()
 	fmt.Println()
 	fmt.Println(ui.RenderCategory("Team Setup"))

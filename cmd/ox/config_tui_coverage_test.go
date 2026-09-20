@@ -69,6 +69,9 @@ func TestConfigCLIOutputModes(t *testing.T) {
 		wantTUI    bool
 	}{
 		{name: "no-interactive flag", args: []string{"--no-interactive"}},
+		{name: "no-input flag", args: []string{"--no-input"}},
+		{name: "no-input overrides interactive UI", args: []string{"--no-input", "--no-interactive=false"}},
+		{name: "false no-input preserves interactive editor", args: []string{"--no-input=false"}, wantTUI: true},
 		{name: "CI", env: []string{"CI=true"}},
 		{name: "non-interactive environment", env: []string{"OX_NO_INTERACTIVE=1"}},
 		{name: "JSON flag", args: []string{"--json", "--no-interactive=false"}, wantJSON: true},

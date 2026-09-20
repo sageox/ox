@@ -124,6 +124,7 @@ func registerPersistentFlags() {
 	rootCmd.PersistentFlags().StringP("config", "c", "", "config file path (default: .sageox/config.yaml)")
 	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "generate CPU profile and execution trace for performance analysis (default: false)")
 	rootCmd.PersistentFlags().Bool("no-interactive", false, "disable spinners and TUI elements (auto-enabled when CI=true)")
+	rootCmd.PersistentFlags().Bool("no-input", false, "disable prompts and terminal UI; provide required input with arguments or flags")
 	// No -y shorthand here on purpose: `ox doctor -y` and `ox team invite -y`
 	// already bind their own, and a root-level shorthand would shadow them
 	// confusingly. Both local flags still feed the same global via NewContext.

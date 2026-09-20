@@ -13,6 +13,7 @@ type Config struct {
 	Text          bool // human-readable text output (overrides JSON default)
 	Review        bool // security audit mode: both human summary and machine output
 	NoInteractive bool // disable spinners and TUI elements (auto-enabled in CI/ephemeral)
+	NoInput       bool // disable prompts and terminal UI; set only by --no-input
 	// AssumeYes answers every confirmation prompt affirmatively. Unlike
 	// NoInteractive it is never inferred from the environment: CI and agent
 	// harnesses must not silently acquire consent to destructive operations,

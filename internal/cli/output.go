@@ -39,6 +39,7 @@ var backtickRegex = regexp.MustCompile("`([^`]+)`")
 
 var jsonMode bool
 var noInteractive bool
+var noInput bool
 var assumeYes bool
 
 func SetJSONMode(enabled bool) {
@@ -49,6 +50,17 @@ func SetJSONMode(enabled bool) {
 // When enabled, spinners and TUI elements are disabled.
 func SetNoInteractive(enabled bool) {
 	noInteractive = enabled
+}
+
+// SetNoInput disables prompts without treating missing input as consent.
+func SetNoInput(enabled bool) {
+	noInput = enabled
+}
+
+// NoInput reports whether --no-input forbids reading prompt answers from stdin.
+// Commands may still read data explicitly supplied through stdin.
+func NoInput() bool {
+	return noInput
 }
 
 // SetAssumeYes sets the global "answer yes to every confirmation" flag,
@@ -64,10 +76,10 @@ func AssumeYes() bool {
 }
 
 // IsInteractive returns true if interactive mode is enabled.
-// Interactive mode is disabled when --no-interactive flag is set, CI=true,
-// or stdin is not a terminal (e.g., running inside an AI agent).
+// Interactive mode is disabled by --no-input, --no-interactive, CI=true,
+// or stdin not being a terminal (e.g., running inside an AI coworker).
 func IsInteractive() bool {
-	if noInteractive {
+	if noInteractive || noInput {
 		return false
 	}
 	return isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
