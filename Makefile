@@ -49,6 +49,8 @@ ACCEPTANCE_SLOW_COVER_FLAGS = $(if $(strip $(ACCEPTANCE_GO_COVER_DIR)),-coverpro
 ACCEPTANCE_INTEGRATION_TESTS := TestCodeActivityE2E TestFreshInstall_MockServer_InitThenDoctor TestFreshInstall_MockServer_SyncUnavailableThenDoctorStillWorks
 ifneq ($(filter darwin linux freebsd,$(shell $(GO) env GOOS)),)
 ACCEPTANCE_INTEGRATION_TESTS += TestBackgroundDaemonSurvivesCommandCleanup
+endif
+ifneq ($(filter darwin linux,$(shell $(GO) env GOOS)),)
 # Exercise terminal output modes against the instrumented binary in CI.
 ACCEPTANCE_INTEGRATION_TESTS += TestConfigCLIOutputModes
 endif
