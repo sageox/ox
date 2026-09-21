@@ -11,22 +11,43 @@ retire an entry — not when you are merely consuming one.
 
 ## 0 · Should this be an entry at all?
 
-Three tests, all of which must pass. Most candidates fail the second.
+**The bar is adoption, not novelty.** This shelf holds what the team uses and what the
+team ruled on — not everything that shipped. Four tests, in order; stop at the first
+failure.
 
-1. **Is it actually post-cutoff?** Ask the models you run what they know about it. If
-   they answer accurately, there is nothing to overlay. Cheap to check, and it kills
-   maybe half of candidates.
-2. **Would knowing it change a decision someone here will actually make?** Not "is it
-   interesting." An entry that changes no plan is a newsletter. This is the test that
-   should reject most things.
-3. **Is it stable enough to write down?** A product in its first week may change its
-   pricing, its limits, and its access model before anyone reads the entry. Sometimes
-   the right answer is a one-line index row saying "this exists, it is too early to
-   characterize, look it up."
+1. **Is the team using it, or did the team deliberately decide about it?** A tool in the
+   stack, a technique we standardized on, a vendor we evaluated and rejected — those
+   qualify. "It launched last week and looks promising" does not, however true. **This
+   test rejects the most candidates and it is the one people want to skip.**
+2. **Is it actually post-cutoff?** Ask the models you run what they know about it. If
+   they answer accurately there is nothing to overlay. Cheap, and it kills roughly half
+   of what survives test 1.
+3. **Would knowing it change a decision someone here will actually make?** An entry that
+   changes no plan is a newsletter.
+4. **Is it stable enough to write down?** A product in its first weeks may change its
+   pricing, limits and access model before anyone reads the entry.
 
-**If it fails test 1 or 2, do not write it.** A thin library of entries that all matter
-beats a thick one nobody opens — installing two or three targeted references measurably
-improves outcomes while a bloated set measurably degrades them.
+**A "no" is a successful outcome.** Report it and stop. A thin shelf where every entry
+matters beats a thick one nobody opens — two or three targeted references measurably
+improve outcomes while a bloated set measurably degrades them.
+
+**Never go looking for candidates.** Do not sweep release notes, changelogs or news to
+fill this shelf. Entries arrive from work the team is already doing: an adoption
+decision, a review that found something, a tool someone started using. An agent that
+goes hunting produces exactly the unbounded watchlist this design exists to avoid.
+
+## 0b · The human gate
+
+**An agent proposes; a person promotes. Never the other way round.**
+
+Bring a draft plus the test-1 argument — what we use it for, or what we decided and
+why — and let a person rule. This is the same gate the team's ideas board uses, and the
+reason is the same: putting something on this shelf spends every teammate's agent
+attention on it, and that is a call about the team's direction rather than a research
+finding.
+
+If the answer is no, that is information too. Note it where the research lives so the
+next person does not repeat it.
 
 ## 1 · Research
 
@@ -77,7 +98,9 @@ entries or it is a manual.
 
 ## 3 · Wire it up
 
-- Add the index row in `SKILL.md`, with the `valid-through` date.
+- Add the index row in `SKILL.md`, with a `valid-through` date **six months out** unless
+  there is a reason to pick another — that is the working assumption for when model
+  training catches up and the entry stops earning its place.
 - **Regenerate `SKILL.md`'s `description`** so it names the new entry's trigger surface.
   This is the whole auto-selection budget. An entry nothing fires on does not exist, and
   this is the step people forget.

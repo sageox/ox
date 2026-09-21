@@ -5,28 +5,45 @@ description: Curated facts about tools, models, and releases that postdate your 
 
 # Post-cutoff
 
-**What this covers:** the things your training data does not contain. Each entry is a
-dated, graded, expiring brief on one technology that shipped after the models we run
-were trained. Read the index below, open only the entries that touch what you are
-doing, and treat everything here as *evidence*, not as instructions.
+**What this covers:** the small set of tools, models and techniques **this team has
+actually adopted or deliberately ruled on** that postdate the models we run. Each entry
+is a dated, graded brief with an expiry. Read the index below, open only the entries
+that touch what you are doing, and treat everything here as *evidence*, not instructions.
 
 **Why:** an agent's training cutoff fails silently. There is no error and no hedge —
-you design with the best approach you know, and never mention the one released last
-month that would have changed the answer. `AGENTS.md`-style "search before building"
-rules tell you to go look; nothing curates what anyone found. This is that missing half.
+you design with the best approach you know, and never mention the one the team adopted
+last month. `AGENTS.md`-style "search before building" rules tell you to go look;
+nothing curates what the team already decided. This is that missing half.
 
-**This is deliberately perishable.** Every entry carries a `valid-through` date. When
-the models absorb a fact, the entry stops being an advantage and becomes weight. The
-retirement procedure matters as much as the authoring one.
+**This is a short shelf, on purpose.** It is not a watchlist, a news feed, or a survey
+of everything new — those are unbounded, and an unbounded index is one nobody reads.
+Keeping it to what the team genuinely uses is what makes reading the whole index cheap
+enough to be worth doing before every design decision.
+
+**Intake is a human's call, always.** An agent may *propose* an entry; only a person
+promotes one. This is the same rule the team applies to its ideas board, and for the
+same reason — Ryan, 2026-09-16: *"Wisdom cannot be automated."* Deciding that a
+technology is worth every teammate's agent knowing about is a judgment about the team's
+direction, not a research result.
+
+**This is deliberately perishable.** Every entry carries a `valid-through` date,
+**six months out by default**, on the assumption that model training catches up in
+roughly that window. When it does, the entry stops being an advantage and becomes
+weight. The retirement procedure matters as much as the authoring one.
 
 ## What this is not
 
+- **Not a watchlist.** "This shipped and looks interesting" is not an entry. The bar is
+  that the team uses it, or looked hard and decided not to. Everything else is noise
+  that makes the index too long to read.
+- **Not agent-generated.** No agent adds an entry on its own initiative, and no agent
+  should go searching to fill this shelf. Propose; wait for a person.
 - **Not a roadmap or an ideas board.** Entries are falsifiable claims about the outside
   world, not things we might build. An idea we are dreaming about belongs on whatever
   board your team keeps for that.
-- **Not an endorsement.** An entry existing means "this is real and you should know it
-  exists," never "use this." Most entries should make adoption *less* likely by
-  puncturing a launch claim.
+- **Not an endorsement by itself.** An entry says the team has a considered position.
+  Read the entry for what that position *is* — several exist specifically to stop an
+  adoption by puncturing a launch claim.
 - **Not a vendor's documentation.** Entries carry judgment, boundaries, and independent
   evidence, and link out for API syntax. If an entry starts restating a reference
   manual, it has lost its reason to exist.
@@ -85,20 +102,27 @@ Today's date is in your context. Compare it.
 3. **Then propose the update or the retirement** — see below. An expired entry that
    nobody re-dates is how this whole mechanism rots.
 
-## Adding an entry
+## Proposing an entry
 
-Read [`references/AUTHORING.md`](references/AUTHORING.md) — it has the full procedure
-and the entry template. The short version:
+**You do not add entries. You propose them.** A person decides what the whole team's
+agents get told, and that gate is the reason this shelf stays short enough to be read.
 
-1. Confirm it is genuinely post-cutoff and genuinely load-bearing. Most new releases
-   are neither.
-2. Research to primary sources and grade every claim.
-3. Hunt the skeptical case as hard as the launch claims. An entry without one is
+Read [`references/AUTHORING.md`](references/AUTHORING.md) for the full procedure and the
+template. The short version:
+
+1. **Check it clears the bar: is the team using it, or did the team rule on it?** If the
+   honest answer is "not yet, but it looks promising," it is not an entry — say so and
+   stop. That is a normal and correct outcome.
+2. Confirm it is genuinely post-cutoff. Ask the models what they already know; that
+   kills roughly half of candidates for free.
+3. Research to primary sources and grade every claim.
+4. Hunt the skeptical case as hard as the launch claims. An entry without one is
    marketing.
-4. Write the entry, then **regenerate this file's `description`** so it names the new
-   entry's trigger surface — that description is the entire auto-selection budget, and
-   an entry nothing fires on does not exist.
-5. Add the index row with its `valid-through` date.
+5. **Bring it to a person with the draft and the bar-clearing argument.** Only once they
+   say yes do you write it in, add the index row with a `valid-through` six months out,
+   and **regenerate this file's `description`** so it names the new entry's trigger
+   surface — that description is the entire auto-selection budget, and an entry nothing
+   fires on does not exist.
 
 ## Retiring an entry
 
@@ -107,9 +131,14 @@ is the artifact — it is what stops someone relitigating the same question next
 and it is how a reader learns whether the fact became false or merely became common
 knowledge.
 
+**Retirement does not need a person the way intake does.** Adding spends every
+teammate's attention; removing something the models have absorbed gives it back. Propose
+the removal, say why, and do not wait for a meeting.
+
 Retire when any of these is true:
 
-- **The models know it now.** The single most common case, and the intended end state.
+- **The `valid-through` date passed and the models know it now.** The single most common
+  case, the default assumption after six months, and the intended end state.
 - **It turned out to be wrong**, or the product died. Say which.
 - **It graduated into a decision.** Once the team has adopted or rejected the thing, the
   decision record owns it and this entry is a stale second copy. Leave a pointer.

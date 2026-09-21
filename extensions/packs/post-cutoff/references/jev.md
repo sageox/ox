@@ -1,16 +1,26 @@
 ---
 name: jev
 concerns: classification, routing, scoring, gating, ranking, relevance, latency, llm-cost, typed-decisions
-valid-through: 2026-12-31
-reviewed: 2026-09-20
+valid-through: 2027-03-21
+reviewed: 2026-09-21
+diamond: true
+adopted: bugsy
 ---
 
 # Jev / "System One" models — typed decisions instead of generated text
 
-**Valid through 2026-12-31.** Jev launched 2026-09-15 and this entry was written five
-days later. Pricing, rate limits, access model, and SDK coverage are the volatile
-claims — re-verify those before relying on them. The mechanism and the boundary below
-are stable.
+**Valid through 2027-03-21.** Jev launched 2026-09-15. Pricing, rate limits, access
+model, and SDK coverage are the volatile claims — re-verify those before relying on
+them. The mechanism and the boundary below are stable.
+
+**We use this.** Jev is in production in **Bugsy**, the fleet's log-triage agent. This
+entry is not a survey of something interesting; it is the team's working knowledge of a
+tool already in the stack.
+
+**This is a diamond.** A technology that unlocks experiences and techniques well beyond
+what was previously possible, rather than doing a known thing slightly better. Media
+over QUIC was one. Temporal was one. Read a diamond's entry in full before designing in
+its area — the valuable part is usually a shape you have not considered, not a benchmark.
 
 ## The shape — read this even if you never call Jev
 
@@ -61,6 +71,79 @@ adopt a specific vendor**:
   somewhere, or you have bought calibration and thrown it away.
 
 The rest of this entry is about one product. The four moves above outlive it.
+
+## The one-line model: a control plane, not a brain
+
+**Jev is the control-plane decision model. Claude, Codex and friends are the reasoning
+and generation models.** Jev does not generate paragraphs — it makes typed decisions
+that software can use directly. Hold that split and the fit question stops being "is Jev
+smart enough" and becomes "is this a decision, or is it thinking".
+
+```
+                    ┌──────────────┐
+event / task ──────►│     JEV      │
+                    │ fast decision│
+                    └──────┬───────┘
+                           │
+             ┌─────────────┼──────────────┐
+             ▼             ▼              ▼
+          ignore       deterministic    expensive
+                         operation       reasoning
+                            │              │
+                            │        Claude / Codex /
+                            │        Gemini / etc.
+                            │              │
+                            └──────┬───────┘
+                                   ▼
+                              result/state
+                                   │
+                                   ▼
+                              ┌─────────┐
+                              │   JEV   │
+                              │ next?   │
+                              └─────────┘
+```
+
+The loop matters as much as the entry point: Jev decides what to spend on, the expensive
+model does the thinking, and Jev decides what happens next — so the reasoning model is
+invoked only where reasoning is the product.
+
+## When to reach for it — the classification
+
+**Use this table during planning.** If a step in your design appears in the top half,
+stop and consider Jev before writing another small LLM call.
+
+| Operation | Fit | Why |
+|---|---|---|
+| Which agent or tool should handle this? | **Excellent** | bounded `choice` |
+| Is this task complete? | **Excellent** | `noul` + confidence |
+| Continue / retry / escalate / stop? | **Excellent** | small `choice` |
+| Is this failure environmental or a real product bug? | **Excellent** | classification |
+| Which subsystem owns this issue? | **Excellent** | routing |
+| Is this log event worth investigating? | **Excellent** | cheap, very high volume |
+| Should an agent wake up at all? | **Excellent** | the cheapest possible gate |
+| Which model should handle this task? | **Excellent** | model routing |
+| Does this issue duplicate another? | **Good** | `noul` or `score` |
+| Does this PR satisfy rubric criterion X? | **Good** | independent per-criterion decisions |
+| Generate a fix | **No** | needs generation |
+| Debug a complicated failure | **No** | System-2 reasoning |
+| Write or review code | **No** | generative |
+| Plan an implementation | **No** | multi-step reasoning |
+
+**The research trigger, stated plainly:** when a plan calls for *intuition* or a *quick
+routing decision*, evaluate Jev. When it calls for *reasoning*, do not.
+
+### Named candidates, not yet ruled on
+
+Carried so the next person starts here rather than from scratch:
+
+- **Agent-loop control** — next tool/subagent, and continue/retry/escalate/stop.
+- **Context compaction and curation** — deciding what stays in a window.
+- **Browser agents for testing** — typed assertions and navigation choices instead of an
+  LLM judge (our Attest-shaped work).
+- **Real-time topic extraction and salience** — deciding *when* something in a live
+  conversation is worth acting on, e.g. when and what to draw on a live mural.
+- **Model routing** — picking the model per task.
 
 ## What it actually is
 
