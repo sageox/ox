@@ -59,8 +59,8 @@ func TestSyncResultFields_Coverage(t *testing.T) {
 	var result SyncResult
 	assert.False(t, result.Success)
 	assert.Empty(t, result.Mode)
-	assert.Nil(t, result.Ledger)
-	assert.Nil(t, result.TeamContexts)
+	assert.Nil(t, result.Transport.Ledger)
+	assert.Nil(t, result.Transport.TeamContexts)
 	assert.Empty(t, result.Error)
 }
 
@@ -114,21 +114,24 @@ func TestSyncResult_WithMultipleTeamContexts(t *testing.T) {
 	result := SyncResult{
 		Success: true,
 		Mode:    "daemon",
-		Ledger: &SyncLedgerResult{
-			Path:   "/data/ledger",
-			Status: "synced",
-		},
-		TeamContexts: []TeamContextSyncResult{
-			{TeamID: "team-1", Status: "synced"},
-			{TeamID: "team-2", Status: "error", Error: "not found"},
-			{TeamID: "team-3", Status: "skipped"},
+		Transport: SyncTransportResult{
+			Status: "failed",
+			Ledger: &SyncLedgerResult{
+				Path:   "/data/ledger",
+				Status: "synced",
+			},
+			TeamContexts: []TeamContextSyncResult{
+				{TeamID: "team-1", Status: "synced"},
+				{TeamID: "team-2", Status: "error", Error: "not found"},
+				{TeamID: "team-3", Status: "skipped"},
+			},
 		},
 	}
 
-	assert.Len(t, result.TeamContexts, 3)
-	assert.Equal(t, "synced", result.TeamContexts[0].Status)
-	assert.Equal(t, "error", result.TeamContexts[1].Status)
-	assert.Equal(t, "skipped", result.TeamContexts[2].Status)
+	assert.Len(t, result.Transport.TeamContexts, 3)
+	assert.Equal(t, "synced", result.Transport.TeamContexts[0].Status)
+	assert.Equal(t, "error", result.Transport.TeamContexts[1].Status)
+	assert.Equal(t, "skipped", result.Transport.TeamContexts[2].Status)
 }
 
 func TestSyncPathExists_ExistingFile(t *testing.T) {
