@@ -553,9 +553,16 @@ func rollbackTeamSeeds(teamPath string, relDirs []string) {
 // rules to another's history.
 func recordTeamPublish(ctx context.Context, teamPath string, relPaths, names []string) error {
 	for _, rel := range relPaths {
-		// --sparse is mandatory: a Team Context is a sparse checkout, and without
-		// it git refuses to stage a path outside the sparse definition — which is
-		// every path this command has just created.
+		// --sparse covers the Team Context whose cone does NOT reach these paths.
+		// Usually it does: manifest.SparseSetFor floors agents/ into the sparse set
+		// on every sync tick, and that floor is the whole reason team skills
+		// materialize on disk at all (GH #862). An explicit deny of agents/
+		// outranks the floor, and there git refuses to stage a path outside the
+		// sparse definition — which is what this flag is for.
+		//
+		// Do NOT read this as "agents/skills is outside the cone." It is not, and
+		// the check that refuses an already-published skill reads the worktree on
+		// exactly that basis.
 		if _, err := gitutil.RunGit(ctx, teamPath, "add", "--sparse", rel); err != nil {
 			return fmt.Errorf("record %s in the Team Context: %w", rel, err)
 		}
