@@ -37,6 +37,9 @@ func applyPatch(f *Flags, p *Patch) {
 	if p.AttestEnabled != nil {
 		f.AttestEnabled = *p.AttestEnabled
 	}
+	if p.PacksEnabled != nil {
+		f.PacksEnabled = *p.PacksEnabled
+	}
 	if p.DisableFileDeleteTools != nil {
 		f.DisableFileDeleteTools = *p.DisableFileDeleteTools
 	}

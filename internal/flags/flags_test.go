@@ -481,3 +481,56 @@ type testPatchProvider struct {
 func (p *testPatchProvider) Patch(_ context.Context) (*flags.Patch, flags.Source, error) {
 	return p.patch, flags.SourceEnv, nil
 }
+
+// TestPacksGate_DefaultsOffAndFollowsBothRolloutLevers pins the packs gate
+// across every layer that can move it. ADR-032 requires the mechanism to land
+// dark: a selection model is the hardest feature to take back, because once a
+// team records a choice, withdrawing the feature orphans the file that recorded
+// it — the exact situation the withdrawn `ox skills catalog | install` surface
+// created.
+//
+// Failure prevented: packs defaulting on, or becoming a developer-only escape
+// hatch that no central rollout can reach.
+func TestPacksGate_DefaultsOffAndFollowsBothRolloutLevers(t *testing.T) {
+	if flags.Defaults().PacksEnabled {
+		t.Error("PacksEnabled must default false: ADR-032 lands the mechanism dark")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		env    string // "" means leave FEATURE_PACKS unset
+		remote *bool
+		want   bool
+	}{
+		{name: "no opinion anywhere", want: false},
+		{name: "env enables for local work", env: "true", want: true},
+		{name: "env accepts 1", env: "1", want: true},
+		{name: "remote rollout enables centrally", remote: bp(true), want: true},
+		{name: "remote omits packs, default holds", remote: nil, want: false},
+		// The escape hatch cuts both ways, matching FEATURE_ATTEST: a developer
+		// must be able to switch packs off locally mid-rollout to reproduce what
+		// an un-flagged user sees.
+		{name: "env false overrides a server-side enable", env: "false", remote: bp(true), want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv("FEATURE_PACKS", tc.env)
+			} else {
+				t.Setenv("FEATURE_PACKS", "")
+			}
+
+			providers := []flags.Provider{}
+			if tc.remote != nil {
+				providers = append(providers, flags.DaemonProvider{CachedSettings: &flags.CLISettingsResponse{
+					Features:  flags.CLIFeatures{Packs: tc.remote},
+					FetchedAt: time.Now(),
+				}})
+			}
+			providers = append(providers, flags.EnvProvider{})
+
+			if got := flags.Resolve(context.Background(), providers...).PacksEnabled; got != tc.want {
+				t.Errorf("PacksEnabled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

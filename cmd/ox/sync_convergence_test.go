@@ -362,9 +362,54 @@ func TestExecuteSyncConvergence_RepoSlugUsesCanonicalOriginNotDirectoryNameFallb
 	require.True(t, found, "expected the scoped rule to appear in the convergence report")
 }
 
-func TestSyncHelp_ExplainsAutomation(t *testing.T) {
+// TestSyncHelp_PackCatalogParagraphFollowsTheGate is the whole point of the
+// packs gate. `ox packs` is not in this binary, so help that names it
+// unconditionally sends users to a command that answers "unknown command"
+// (#1028, #1029) — while deleting the paragraph outright loses a real rule the
+// moment the command does ship.
+//
+// Failure prevented: `ox sync --help` advertising a Pack Catalog this build
+// cannot reach, or silently dropping the boundary once it can.
+func TestSyncHelp_PackCatalogParagraphFollowsTheGate(t *testing.T) {
 	require.Contains(t, syncCmd.Short, "rarely needed")
-	require.Contains(t, syncCmd.Long, "The background daemon automatically")
+
+	for _, tc := range []struct {
+		name        string
+		packs       bool
+		wantVisible bool
+	}{
+		{name: "gate off (the shipped default)", packs: false, wantVisible: false},
+		{name: "gate on", packs: true, wantVisible: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			long := syncLong(tc.packs)
+
+			// Both halves must survive either way: the gate decides what the
+			// paragraph does, never whether the rest of the help is intact.
+			require.Contains(t, long, "You should RARELY need this command")
+			require.Contains(t, long, "The daemon syncs automatically on:")
+			require.Contains(t, long, "ledger-read-sync.md")
+
+			if tc.wantVisible {
+				require.Contains(t, long, "Pack-managed and hand-authored")
+				require.Contains(t, long, "does not check the Pack Catalog")
+				require.Contains(t, long, "ox packs update")
+			} else {
+				require.NotContains(t, long, "Pack-managed and hand-authored")
+				require.NotContains(t, long, "Pack Catalog")
+				require.NotContains(t, long, "ox packs")
+			}
+		})
+	}
+}
+
+// TestSyncHelp_DefaultLongMatchesTheGateOffRendering pins the registered
+// command to the gate-off text. Cobra renders Long before PersistentPreRunE, so
+// a command left holding gate-on help would advertise the catalog for one whole
+// invocation before anything could correct it — and `make docs` generates
+// docs/reference/sync.mdx from exactly this value.
+func TestSyncHelp_DefaultLongMatchesTheGateOffRendering(t *testing.T) {
+	require.Equal(t, syncLong(false), syncCmd.Long)
 }
 
 func TestConvergeAfterSessionBoundary_AppliesPendingTeamContent(t *testing.T) {

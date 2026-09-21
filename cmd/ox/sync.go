@@ -92,16 +92,35 @@ var syncCmd = &cobra.Command{
 	Use:   "sync",
 	Args:  cobra.NoArgs,
 	Short: "Manually sync ledger/team contexts (rarely needed)",
-	Long: `Manually synchronize your Ledger and Team Context, then converge the
+	Long:  syncLong(false),
+	RunE:  runSync,
+}
+
+// `ox sync --help` is assembled from two halves so the Pack Catalog paragraph
+// between them can be gated. Splitting it is what makes the gate a compile-time
+// guarantee: a hand-spliced anchor string would silently stop matching the day
+// someone reworded the surrounding help.
+const syncLongHead = `Manually synchronize your Ledger and Team Context, then converge the
 current repository with applicable Team Context artifacts.
 
 NOTE: You should RARELY need this command. The background daemon automatically
 keeps transport and local convergence synchronized. This command exists only for:
   - Troubleshooting sync issues
   - Triggering an immediate sync (this command itself forces sync)
-  - Diagnostic purposes
+  - Diagnostic purposes`
 
-The daemon syncs automatically on:
+// syncPacksHelp states the boundary between convergence and the Pack Catalog:
+// sync delivers Pack-managed content but never checks for new catalog releases.
+//
+// It is printed ONLY when the packs gate is on. `ox packs` is not in this
+// binary — ADR-032 designed it and #1013 left it as follow-up — so unconditional
+// help text sends a user to a command that answers "unknown command" (#1028,
+// #1029). The rule itself stays recorded in ADR-032 whether or not it is shown.
+const syncPacksHelp = `Convergence includes Pack-managed and hand-authored Team Context content through
+the same delivery path. It does not check the Pack Catalog for newer releases;
+use 'ox packs update' for catalog updates.`
+
+const syncLongTail = `The daemon syncs automatically on:
   - File changes in your project
   - Periodic intervals (configurable)
   - Session start/end events
@@ -119,8 +138,15 @@ Headless read-only mode runs a bounded ledger refresh without the daemon:
   ox sync --read-only --repo repo_<uuid> --check --json
 
 Read-only mode uses SAGEOX_TOKEN and SAGEOX_ENDPOINT, independent of the
-current project. See docs/specs/ledger-read-sync.md for the reader contract.`,
-	RunE: runSync,
+current project. See docs/specs/ledger-read-sync.md for the reader contract.`
+
+// syncLong assembles `ox sync --help`, including the Pack Catalog paragraph
+// only when the gate is on.
+func syncLong(packsEnabled bool) string {
+	if packsEnabled {
+		return syncLongHead + "\n\n" + syncPacksHelp + "\n\n" + syncLongTail
+	}
+	return syncLongHead + "\n\n" + syncLongTail
 }
 
 func init() {

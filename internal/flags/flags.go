@@ -33,6 +33,7 @@ type Flags struct {
 	AutoDistill    bool
 	TUIEnabled     bool
 	AttestEnabled  bool
+	PacksEnabled   bool
 
 	// Kill switches — default false (not activated).
 	// Any source setting these true disables the capability.
@@ -55,6 +56,7 @@ type Patch struct {
 	AutoDistill    *bool
 	TUIEnabled     *bool
 	AttestEnabled  *bool
+	PacksEnabled   *bool
 
 	DisableFileDeleteTools *bool
 	DisableShellExecTools  *bool
@@ -100,6 +102,10 @@ func Defaults() Flags {
 		AutoDistill:    false, // off until remote settings explicitly enables it
 		TUIEnabled:     false, // off until remote settings explicitly enables it
 		AttestEnabled:  false, // experimental; hidden and unregistered until enabled
+		// The Pack Catalog is a server-side surface `ox packs` does not yet
+		// reach. Off until a rollout enables it, so help text and commands
+		// cannot advertise a catalog this build cannot talk to (ADR-032).
+		PacksEnabled: false,
 	}
 }
 
