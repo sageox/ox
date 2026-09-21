@@ -200,12 +200,15 @@ type StoreMeta struct {
 	RepoID                 string `json:"repo_id,omitempty"`
 	OxVersion              string `json:"ox_version,omitempty"` // version of ox that created this session
 
-	// NativeSessions and StoppedAt make the header a crash-safe carrier for
+	// NativeSessions and StoppedAt make raw.jsonl a crash-safe carrier for
 	// the two recording fields that only exist in .recording.json while a
 	// session is live. The SessionEnd hook, /clear, and the daemon's orphan
-	// sweep all finalize AFTER that state file is gone, so they stamp these
-	// into the header (StampRawHeader) before clearing it and the daemon's
-	// meta.json writer copies them from here. Both omitempty: recordings
+	// sweep all finalize AFTER that state file is gone, so they append these
+	// on a footer record (StampRawCarrier) before clearing it — a live file
+	// is never rewritten, its appenders may still be open — and the reader
+	// folds the footer's values in here (foldFooterCarrier), where the
+	// daemon's meta.json writer picks them up. A file written whole at stop
+	// carries them on the header directly. Both omitempty: recordings
 	// started under an older binary carry neither.
 	NativeSessions []lfs.NativeSession `json:"native_sessions,omitempty"`
 	StoppedAt      *time.Time          `json:"stopped_at,omitempty"`
@@ -924,6 +927,7 @@ func (s *Store) readSessionFile(filePath, sessionType, sessionName string) (*Sto
 			}
 		case "footer":
 			session.Footer = entry
+			foldFooterCarrier(session.Meta, entry)
 		default:
 			// check for _meta header format (alternative header style)
 			if meta, ok := entry["_meta"].(map[string]any); ok {
@@ -996,6 +1000,7 @@ func ReadSessionFromPath(filePath string) (*StoredSession, error) {
 			}
 		case "footer":
 			session.Footer = entry
+			foldFooterCarrier(session.Meta, entry)
 		default:
 			// check for _meta header format (alternative header style)
 			if meta, ok := entry["_meta"].(map[string]any); ok {
@@ -1073,6 +1078,24 @@ func ReadHeaderSessionID(path string) string {
 	return meta.SessionID
 }
 
+// foldFooterCarrier copies the recording-carrier fields a finalize door
+// appended on a footer record (StampRawCarrier) into meta: native_sessions
+// and stopped_at. A later footer wins per field; a footer without them
+// leaves meta untouched. Nothing is folded into a nil meta — a raw.jsonl
+// with no header is already unusable to every consumer of these fields.
+func foldFooterCarrier(meta *StoreMeta, footer map[string]any) {
+	if meta == nil {
+		return
+	}
+	carrier := ParseStoreMeta(footer)
+	if len(carrier.NativeSessions) > 0 {
+		meta.NativeSessions = carrier.NativeSessions
+	}
+	if carrier.StoppedAt != nil {
+		meta.StoppedAt = carrier.StoppedAt
+	}
+}
+
 // ParseStoreMeta converts a map to StoreMeta struct.
 // Supports both standard format (version, agent_id, created_at) and
 // alternative format (schema_version, session_id, started_at).
@@ -1140,10 +1163,10 @@ func ParseStoreMeta(m map[string]any) *StoreMeta {
 			}
 		}
 	}
+	// RFC3339Nano also accepts a plain RFC3339 value, so one parse covers
+	// both the nanosecond form ox writes and a hand-written second-precision one.
 	if v, ok := m["stopped_at"].(string); ok && v != "" {
 		if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
-			meta.StoppedAt = &t
-		} else if t, err := time.Parse(time.RFC3339, v); err == nil {
 			meta.StoppedAt = &t
 		}
 	}

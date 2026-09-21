@@ -68,8 +68,8 @@ The header identifies the session and provides provenance metadata.
 | `repo_id` | string | no | SageOx repo ID for provenance |
 | `session_id` | string | no | The `ses_` recording identity minted at session start. The header is its **crash-safe carrier**: `.recording.json` is deleted at stop/abort, so an orphan-finalize can only recover this ID from here. Only `ses_`-prefixed values are accepted into this field — see the caution below. |
 | `ox_version` | string | no | Version of ox that created the session |
-| `native_sessions` | array | no | Every native coding-agent session id this recording observed, in first-seen order: `{"id","source","first_seen","last_seen"}` per sighting. `source` is the agent's SessionStart reason when it gives one (Claude Code: `startup`, `resume`, `clear`, `compact`). This is how an artifact labeled with the agent's own session id (a native transcript, a trace) is matched to a recording. Stamped into the header at finalize — and by the SessionEnd / `/clear` hooks before they clear the recording-state file — so a daemon-side finalize can copy it into `meta.json`. Absent on older recordings and for agents that expose no session id. |
-| `stopped_at` | ISO8601 | no | When the recording stopped. Stamped by whichever finalize door ended it (explicit stop, SessionEnd hook, daemon orphan sweep, recover). Absent on older recordings. |
+| `native_sessions` | array | no | Native coding-agent session ids the recording had observed when the header was written, in first-seen order: `{"id","source","first_seen","last_seen"}` per sighting. `source` is the agent's SessionStart reason when it gives one (Claude Code: `startup`, `resume`, `clear`, `compact`). This is how an artifact labeled with the agent's own session id (a native transcript, a trace) is matched to a recording. A file written whole at stop carries the full list here; a file recorded live carries only the id that started it here and the full list on the **footer** — a live `raw.jsonl` is never rewritten, because its appenders may still be open. Readers take the footer's list when present. Absent on older recordings and for agents that expose no session id. |
+| `stopped_at` | ISO8601 | no | When the recording stopped. Present when the file was written whole at stop; a file recorded live carries it on the **footer** instead. Absent on older recordings. |
 
 Example:
 ```json
@@ -223,6 +223,10 @@ The footer provides session summary statistics.
 | `type` | string | yes | Always `"footer"` |
 | `closed_at` | ISO8601 | yes | When the session was closed |
 | `entry_count` | integer | yes | Total entries written (excluding header/footer) |
+| `native_sessions` | array | no | Every native coding-agent session id the recording observed by the time it stopped, same shape as the header field. Appended by the finalize door that ended a live recording (explicit stop, SessionEnd hook, `/clear`, daemon reclaim) so a daemon-side finalize can copy it into `meta.json` after the recording-state file is gone. Readers prefer this over the header's list |
+| `stopped_at` | ISO8601 | no | When the recording stopped, as recorded by the door that appended this footer. Readers prefer this over the header's value |
+
+A finalize door **appends** this footer; it never rewrites the file. A live `raw.jsonl` can have open appenders (the daemon's tail watcher, a parallel hook), and replacing the file by rename would leave them writing into the unlinked inode, silently losing entries. A file may therefore carry more than one footer (a hook door's, then a later door's); readers take the last value of each field and never treat a footer as content.
 
 ## Complete Example
 

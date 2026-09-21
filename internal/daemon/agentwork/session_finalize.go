@@ -2469,6 +2469,27 @@ func validateStoredEntries(entries []map[string]any, logger *slog.Logger) []stri
 	return warnings
 }
 
+// stampCarrierBeforeReclaim appends the recording's native session ids and
+// stop time to raw.jsonl as a footer record, for the paths that leave the
+// captured file as it is and then remove the marker: once the marker is
+// gone, that footer is the only place the finalize handler can still read
+// the two fields from. Appended, never rewritten — the tail watcher may
+// still hold the file open. Best-effort: a legacy state carries no ids, an
+// LFS pointer is never appended to, and ResolveStoppedAt still finds a stop
+// time downstream when the stamp fails.
+func stampCarrierBeforeReclaim(logger *slog.Logger, sessionDir, rawPath string, state *session.RecordingState) {
+	if lfs.IsPointerFile(rawPath) {
+		return
+	}
+	stoppedAt := session.ResolveStoppedAt(state.StoppedAt, rawPath, time.Now())
+	if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
+		NativeSessions: state.NativeSessions,
+		StoppedAt:      stoppedAt,
+	}); err != nil {
+		logger.Debug("could not stamp raw.jsonl carrier before reclaim", "session_dir", sessionDir, "err", err)
+	}
+}
+
 // recoverRawFromSessionFile recovers missing capture and drains a dead tail
 // recording from its persisted cursor. The watcher must be stopped first.
 // false, nil means the source was verified empty; errors leave the marker and
@@ -2485,18 +2506,8 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 
 	hasRaw := session.HasSubstantiveEntries(rawPath)
 	if state.StoppedAt != nil || (hasRaw && state.WatchMode != "tail") {
-		// The marker is removed right after this returns; the header is the
-		// only place the finalize handler can still read the native session
-		// ids and stop time from. Best-effort — a legacy state carries no
-		// ids and ResolveStoppedAt still finds a stop time downstream.
-		if hasRaw && !lfs.IsPointerFile(rawPath) {
-			stoppedAt := session.ResolveStoppedAt(state.StoppedAt, rawPath, time.Now())
-			if err := session.StampRawHeader(rawPath, session.HeaderStamp{
-				NativeSessions: state.NativeSessions,
-				StoppedAt:      stoppedAt,
-			}); err != nil {
-				logger.Debug("could not stamp raw.jsonl header before reclaim", "session_dir", sessionDir, "err", err)
-			}
+		if hasRaw {
+			stampCarrierBeforeReclaim(logger, sessionDir, rawPath, &state)
 		}
 		return hasRaw, nil // CLI stop already selected and masked the recording
 	}
@@ -2608,7 +2619,15 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	entries := session.ConvertRawEntries(filtered)
 	ranges := session.BuildSegmentRanges(state.Lifecycle)
 	if len(entries) == 0 && len(ranges) == 0 {
-		return len(captured) > 0, nil
+		if len(captured) == 0 {
+			return false, nil
+		}
+		// Nothing new to import and no mask to apply: the captured file
+		// stands as it is. The marker still goes away right after, so the
+		// carrier has to be appended here too or a caught-up recording would
+		// finalize without its native ids.
+		stampCarrierBeforeReclaim(logger, sessionDir, rawPath, &state)
+		return true, nil
 	}
 
 	if header == nil {

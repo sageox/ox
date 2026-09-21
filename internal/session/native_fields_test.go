@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -100,86 +101,97 @@ func TestClaudeCodeToolPair_YieldsMatchingCallIDs(t *testing.T) {
 	assert.Equal(t, "ok", entries[1].ToolOutput)
 }
 
-// TestStampRawHeader rewrites only the first line: existing header keys and
-// every entry byte survive, both header dialects work, and the stamped values
-// read back through the production parser. Failure prevented: the SessionEnd
-// hook clears .recording.json, the daemon finalizes, and meta.json ends up
-// with no native session ids and no stop time because nothing carried them.
-func TestStampRawHeader(t *testing.T) {
-	stoppedAt := time.Date(2026, 9, 21, 12, 30, 0, 123456000, time.UTC)
+// TestStampRawCarrier appends one footer record and touches nothing else:
+// the bytes already in the file are a byte-for-byte prefix afterwards, the
+// reader folds the footer's fields into the metadata (a later footer wins),
+// a torn last line is closed before the footer, and a missing file or an
+// LFS pointer is refused. Customer failure it guards: a daemon-side finalize
+// that cannot learn the native ids or the stop time once .recording.json is
+// gone — or, worse, a stamp that corrupts or truncates the recording.
+func TestStampRawCarrier(t *testing.T) {
+	at := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	later := at.Add(time.Hour)
 	sessions := []lfs.NativeSession{
-		{ID: "sess-a", Source: "startup", FirstSeen: stoppedAt.Add(-time.Hour), LastSeen: stoppedAt.Add(-time.Hour)},
-		{ID: "sess-b", Source: "clear", FirstSeen: stoppedAt.Add(-time.Minute), LastSeen: stoppedAt.Add(-time.Minute)},
+		{ID: "cc-1", Source: "startup", FirstSeen: at.Add(-time.Hour), LastSeen: at.Add(-time.Hour)},
+		{ID: "cc-2", Source: "clear", FirstSeen: at.Add(-time.Minute), LastSeen: at.Add(-time.Minute)},
 	}
-	const body = "{\"type\":\"user\",\"content\":\"hello\",\"seq\":0}\n{\"type\":\"tool\",\"tool_name\":\"Bash\",\"call_id\":\"toolu_1\",\"seq\":1}\n"
+	native := `{"type":"header","metadata":{"version":"1.0","created_at":"2026-09-21T09:00:00Z","agent_id":"Ox1","session_id":"ses_01950000-0000-7000-8000-000000000001"}}` + "\n"
+	imported := `{"_meta":{"schema_version":"1","agent_type":"codex","started_at":"2026-09-21T09:00:00Z"}}` + "\n"
+	body := `{"type":"user","content":"hello"}` + "\n" + `{"type":"assistant","content":"hi"}` + "\n"
 
-	tests := []struct {
-		name   string
-		header string
+	for _, tc := range []struct {
+		name    string
+		before  string
+		entries int // parseable entries; a torn line is skipped by the reader
 	}{
-		{name: "native header", header: `{"type":"header","metadata":{"version":"1.0","created_at":"2026-09-21T11:00:00Z","agent_id":"Ox1234","session_id":"ses_019d0000-0000-7000-8000-000000000001","custom_key":"kept"}}`},
-		{name: "import dialect", header: `{"_meta":{"schema_version":"1","agent_type":"codex","recovered":true}}`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		{name: "native header", before: native + body, entries: 2},
+		{name: "import header", before: imported + body, entries: 2},
+		{name: "torn last line", before: native + `{"type":"user","content":"partial"`, entries: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			rawPath := filepath.Join(t.TempDir(), "raw.jsonl")
-			require.NoError(t, os.WriteFile(rawPath, []byte(tt.header+"\n"+body), 0o600))
+			require.NoError(t, os.WriteFile(rawPath, []byte(tc.before), 0o600))
 
-			require.NoError(t, StampRawHeader(rawPath, HeaderStamp{NativeSessions: sessions, StoppedAt: stoppedAt}))
+			require.NoError(t, StampRawCarrier(rawPath, CarrierStamp{NativeSessions: sessions, StoppedAt: at}))
 
 			data, err := os.ReadFile(rawPath)
 			require.NoError(t, err)
-			first, rest, _ := strings.Cut(string(data), "\n")
-			assert.Equal(t, body, rest, "entry bytes must be untouched")
-
-			var header map[string]any
-			require.NoError(t, json.Unmarshal([]byte(first), &header))
-			meta, _ := headerMetadata(header)
-			require.NotNil(t, meta)
-			if tt.name == "native header" {
-				assert.Equal(t, "kept", meta["custom_key"], "unknown header keys must survive")
-				assert.Equal(t, "Ox1234", meta["agent_id"])
-			} else {
-				assert.Equal(t, true, meta["recovered"], "unknown header keys must survive")
+			require.True(t, strings.HasPrefix(string(data), tc.before), "existing bytes must be untouched")
+			rest := strings.TrimPrefix(string(data), tc.before)
+			if !strings.HasSuffix(tc.before, "\n") {
+				require.True(t, strings.HasPrefix(rest, "\n"), "a torn last line must be closed before the footer")
+				rest = strings.TrimPrefix(rest, "\n")
 			}
+			var footer map[string]any
+			require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(rest)), &footer), "exactly one JSON line is appended: %q", rest)
+			assert.Equal(t, "footer", footer["type"])
+			assert.Equal(t, at.Format(time.RFC3339Nano), footer["stopped_at"])
+			assert.Equal(t, at.Format(time.RFC3339Nano), footer["closed_at"])
 
 			stored, err := ReadSessionFromPath(rawPath)
 			require.NoError(t, err)
 			require.NotNil(t, stored.Meta)
 			require.NotNil(t, stored.Meta.StoppedAt)
-			assert.True(t, stored.Meta.StoppedAt.Equal(stoppedAt), "got %s", stored.Meta.StoppedAt)
+			assert.True(t, stored.Meta.StoppedAt.Equal(at))
 			require.Len(t, stored.Meta.NativeSessions, 2)
-			assert.Equal(t, "sess-a", stored.Meta.NativeSessions[0].ID)
-			assert.Equal(t, "startup", stored.Meta.NativeSessions[0].Source)
-			assert.Equal(t, "sess-b", stored.Meta.NativeSessions[1].ID)
+			assert.Equal(t, "cc-2", stored.Meta.NativeSessions[1].ID)
 			assert.Equal(t, "clear", stored.Meta.NativeSessions[1].Source)
-			assert.Len(t, stored.Entries, 2)
+			assert.Len(t, stored.Entries, tc.entries, "footer records are framing, never entries")
+			if tc.name == "native header" {
+				assert.Equal(t, "Ox1", stored.Meta.AgentID, "header fields survive")
+				assert.Equal(t, "ses_01950000-0000-7000-8000-000000000001", stored.Meta.SessionID)
+			}
+
+			// a later door with a newer stop time wins; ids are kept when it has none
+			require.NoError(t, StampRawCarrier(rawPath, CarrierStamp{StoppedAt: later}))
+			stored, err = ReadSessionFromPath(rawPath)
+			require.NoError(t, err)
+			assert.True(t, stored.Meta.StoppedAt.Equal(later), "the last footer wins per field")
+			assert.Len(t, stored.Meta.NativeSessions, 2, "a footer without ids leaves the earlier ids in place")
 		})
 	}
 
-	t.Run("partial stamp leaves the other field alone", func(t *testing.T) {
+	t.Run("nothing to carry writes nothing", func(t *testing.T) {
 		rawPath := filepath.Join(t.TempDir(), "raw.jsonl")
-		require.NoError(t, os.WriteFile(rawPath, []byte(tests[0].header+"\n"+body), 0o600))
-		require.NoError(t, StampRawHeader(rawPath, HeaderStamp{NativeSessions: sessions}))
-		require.NoError(t, StampRawHeader(rawPath, HeaderStamp{StoppedAt: stoppedAt}))
-		stored, err := ReadSessionFromPath(rawPath)
+		require.NoError(t, os.WriteFile(rawPath, []byte(native+body), 0o600))
+		require.NoError(t, StampRawCarrier(rawPath, CarrierStamp{}))
+		data, err := os.ReadFile(rawPath)
 		require.NoError(t, err)
-		require.Len(t, stored.Meta.NativeSessions, 2, "a stop-time-only stamp must not erase the ids")
-		require.NotNil(t, stored.Meta.StoppedAt)
+		assert.Equal(t, native+body, string(data))
 	})
 
-	t.Run("refuses non-headers and missing files", func(t *testing.T) {
-		dir := t.TempDir()
-		assert.Error(t, StampRawHeader(filepath.Join(dir, "missing.jsonl"), HeaderStamp{StoppedAt: stoppedAt}))
-		noHeader := filepath.Join(dir, "raw.jsonl")
-		require.NoError(t, os.WriteFile(noHeader, []byte(body), 0o600))
-		assert.Error(t, StampRawHeader(noHeader, HeaderStamp{StoppedAt: stoppedAt}))
-		data, err := os.ReadFile(noHeader)
+	t.Run("missing file is an error", func(t *testing.T) {
+		err := StampRawCarrier(filepath.Join(t.TempDir(), "raw.jsonl"), CarrierStamp{StoppedAt: at})
+		require.Error(t, err)
+	})
+
+	t.Run("LFS pointer is refused", func(t *testing.T) {
+		rawPath := filepath.Join(t.TempDir(), "raw.jsonl")
+		require.NoError(t, os.WriteFile(rawPath, []byte("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 10\n"), 0o600))
+		require.Error(t, StampRawCarrier(rawPath, CarrierStamp{StoppedAt: at}))
+		data, err := os.ReadFile(rawPath)
 		require.NoError(t, err)
-		assert.Equal(t, body, string(data), "a refused stamp must write nothing")
-		pointer := filepath.Join(dir, "pointer.jsonl")
-		require.NoError(t, os.WriteFile(pointer, []byte("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 10\n"), 0o600))
-		assert.Error(t, StampRawHeader(pointer, HeaderStamp{StoppedAt: stoppedAt}), "never rewrite an LFS pointer")
+		assert.NotContains(t, string(data), "footer", "a pointer must never be appended to")
 	})
 }
 
@@ -328,4 +340,180 @@ func readRawLines(t *testing.T, path string) []map[string]any {
 		lines = append(lines, m)
 	}
 	return lines
+}
+
+// TestStampRawCarrier_KeepsEntriesFromAnOpenAppender is the customer failure
+// Greptile's T-Rex harness demonstrated on PR #1025: the daemon's tail watcher
+// keeps one O_APPEND descriptor on raw.jsonl for the life of a session, and a
+// parallel PostToolUse hook may hold another. A carrier stamp that replaces
+// the file by rename leaves those writers appending to the unlinked inode, so
+// every entry they accept after the stamp is silently lost. The stamp must
+// therefore append, never rewrite: an entry written through a descriptor that
+// was opened BEFORE the stamp still has to be in the named file afterwards.
+func TestStampRawCarrier_KeepsEntriesFromAnOpenAppender(t *testing.T) {
+	rawPath := filepath.Join(t.TempDir(), "raw.jsonl")
+	require.NoError(t, os.WriteFile(rawPath, []byte(`{"type":"header","metadata":{"version":"1.0","created_at":"2026-09-21T09:00:00Z"}}`+"\n"+
+		`{"type":"user","content":"before the stamp"}`+"\n"), 0o600))
+
+	// the watcher's long-lived descriptor, opened before the stamp
+	appender, err := os.OpenFile(rawPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	defer appender.Close()
+
+	stoppedAt := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, StampRawCarrier(rawPath, CarrierStamp{
+		NativeSessions: []lfs.NativeSession{{ID: "cc-race-1", Source: "startup", FirstSeen: stoppedAt, LastSeen: stoppedAt}},
+		StoppedAt:      stoppedAt,
+	}))
+
+	// an entry the watcher accepted after the stamp
+	_, err = appender.WriteString(`{"type":"assistant","content":"after the stamp"}` + "\n")
+	require.NoError(t, err)
+	require.NoError(t, appender.Sync())
+
+	stored, err := ReadSessionFromPath(rawPath)
+	require.NoError(t, err)
+	contents := make([]string, 0, len(stored.Entries))
+	for _, e := range stored.Entries {
+		contents = append(contents, e["content"].(string))
+	}
+	assert.Equal(t, []string{"before the stamp", "after the stamp"}, contents,
+		"an entry appended through a descriptor opened before the stamp must survive the stamp")
+	require.NotNil(t, stored.Meta)
+	require.NotNil(t, stored.Meta.StoppedAt, "the reader must surface the stamped stop time")
+	assert.True(t, stored.Meta.StoppedAt.Equal(stoppedAt))
+	require.Len(t, stored.Meta.NativeSessions, 1, "the reader must surface the stamped native ids")
+	assert.Equal(t, "cc-race-1", stored.Meta.NativeSessions[0].ID)
+}
+
+// TestReadRecordingStateFile: the daemon's finalize reads .recording.json by
+// directory, without searching. Missing is nil/nil (the normal case once a
+// hook door cleared it), malformed is an error (never a silently empty
+// state), present round-trips the carrier fields.
+func TestReadRecordingStateFile(t *testing.T) {
+	dir := t.TempDir()
+
+	state, err := ReadRecordingStateFile(dir)
+	require.NoError(t, err)
+	assert.Nil(t, state, "a cleared state file is not an error")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, recordingFile), []byte("{not json"), 0o600))
+	_, err = ReadRecordingStateFile(dir)
+	require.Error(t, err, "a malformed state file must not read as empty")
+
+	// a read failure that is not "missing" (a directory where the file
+	// belongs — portable, unlike chmod) is reported, never read as empty
+	unreadable := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(unreadable, recordingFile), 0o700))
+	_, err = ReadRecordingStateFile(unreadable)
+	require.Error(t, err, "an unreadable state file must not read as empty")
+
+	at := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	want := &RecordingState{AgentID: "OxRead", StoppedAt: &at,
+		NativeSessions: []NativeSession{{ID: "cc-read", Source: "startup", FirstSeen: at, LastSeen: at}}}
+	data, err := json.Marshal(want)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, recordingFile), data, 0o600))
+	state, err = ReadRecordingStateFile(dir)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, "OxRead", state.AgentID)
+	require.NotNil(t, state.StoppedAt)
+	assert.True(t, state.StoppedAt.Equal(at))
+	require.Len(t, state.NativeSessions, 1)
+	assert.Equal(t, "cc-read", state.NativeSessions[0].ID)
+}
+
+// TestCapturePriorHistory_KeepsCallID: a planning session imported through
+// capture-prior must keep the correlation between a tool call and its
+// result across the protocol conversion, the prior-history JSONL round trip,
+// and the history <-> session entry conversions. Without it an imported
+// session carries tool fields but no way to join a call to its result.
+func TestCapturePriorHistory_KeepsCallID(t *testing.T) {
+	const callID = "call_prior_01"
+	ts := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	history := ConvertProtocolEntriesToHistory([]adapterprotocol.RawEntry{
+		{Timestamp: ts, Role: adapterprotocol.RoleUser, Content: "run the tests"},
+		{Timestamp: ts, Role: adapterprotocol.RoleTool, ToolName: "bash", ToolInput: "go test ./...", CallID: callID},
+		{Timestamp: ts, Role: adapterprotocol.RoleTool, ToolOutput: "ok", CallID: callID},
+	}, "OxPrior", "claude-code")
+	require.Len(t, history.Entries, 3)
+	assert.Empty(t, history.Entries[0].CallID, "a message has no call id")
+	assert.Equal(t, callID, history.Entries[1].CallID, "the call keeps its id")
+	assert.Equal(t, callID, history.Entries[2].CallID, "the result keeps the same id")
+
+	path := filepath.Join(t.TempDir(), historyFilename)
+	require.NoError(t, WriteHistoryJSONL(path, history))
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, 2, strings.Count(string(raw), `"call_id":"`+callID+`"`), "both tool lines carry call_id on disk")
+	assert.NotContains(t, string(raw), `"call_id":""`, "entries without an id omit the key")
+
+	reloaded, err := ParseHistoryFile(path)
+	require.NoError(t, err)
+	require.Len(t, reloaded.Entries, 3)
+	assert.Equal(t, callID, reloaded.Entries[1].CallID)
+	assert.Equal(t, callID, reloaded.Entries[2].CallID)
+
+	sessionEntry := reloaded.Entries[1].ToSessionEntry()
+	assert.Equal(t, callID, sessionEntry.CallID, "history -> session keeps the id")
+	back := HistoryEntryFromSessionEntry(sessionEntry, 7, HistorySourceAdapterImport)
+	assert.Equal(t, callID, back.CallID, "session -> history keeps the id")
+}
+
+// TestStampRawCarrier_Guards pins the refusals that keep the stamp from
+// ever touching the wrong thing: no path, a path that is not a regular file,
+// and an empty file (nothing to close before the footer).
+func TestStampRawCarrier_Guards(t *testing.T) {
+	at := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+
+	require.Error(t, StampRawCarrier("", CarrierStamp{StoppedAt: at}), "an empty path is refused")
+
+	dir := t.TempDir()
+	require.Error(t, StampRawCarrier(dir, CarrierStamp{StoppedAt: at}), "a directory is not a recording")
+
+	empty := filepath.Join(t.TempDir(), "raw.jsonl")
+	require.NoError(t, os.WriteFile(empty, nil, 0o600))
+	require.NoError(t, StampRawCarrier(empty, CarrierStamp{StoppedAt: at}))
+	data, err := os.ReadFile(empty)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(string(data), `{"`), "an empty file gets the footer as its only line: %q", data)
+	assert.Contains(t, string(data), `"type":"footer"`)
+	assert.Equal(t, 1, strings.Count(string(data), "\n"), "no stray newline is inserted before the footer of an empty file")
+}
+
+// TestRecordingState_RecordNativeSession_NilReceiver: the hook calls this
+// through a state it may not have; a nil receiver must be a no-op, not a
+// panic inside a SessionStart hook.
+func TestRecordingState_RecordNativeSession_NilReceiver(t *testing.T) {
+	var state *RecordingState
+	state.RecordNativeSession("cc-1", "startup", time.Now())
+	assert.Nil(t, state)
+}
+
+// TestParseStoreMeta_MalformedNativeSessionsIsDropped: a header whose
+// native_sessions is not a list must not take the rest of the metadata
+// down with it — the field is dropped and everything else still parses.
+func TestParseStoreMeta_MalformedNativeSessionsIsDropped(t *testing.T) {
+	meta := ParseStoreMeta(map[string]any{
+		"version":         "1.0",
+		"created_at":      "2026-09-21T09:00:00Z",
+		"agent_id":        "OxBad",
+		"native_sessions": "not a list",
+		"stopped_at":      "2026-09-21T10:00:00Z", // second precision, no fraction
+	})
+	require.NotNil(t, meta)
+	assert.Equal(t, "OxBad", meta.AgentID)
+	assert.Empty(t, meta.NativeSessions, "a malformed list is dropped, not guessed at")
+	require.NotNil(t, meta.StoppedAt, "the other carrier field still parses")
+	assert.True(t, meta.StoppedAt.Equal(time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)))
+	assert.Nil(t, ParseStoreMeta(map[string]any{"version": "1.0", "stopped_at": "yesterday"}).StoppedAt, "an unparseable stop time is dropped")
+
+	meta = ParseStoreMeta(map[string]any{
+		"version":         "1.0",
+		"created_at":      "2026-09-21T09:00:00Z",
+		"native_sessions": []any{map[string]any{"id": 42}},
+	})
+	require.NotNil(t, meta)
+	assert.Empty(t, meta.NativeSessions, "an entry of the wrong shape drops the list")
 }

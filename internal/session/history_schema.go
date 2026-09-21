@@ -113,6 +113,11 @@ type HistoryEntry struct {
 	// IsError indicates the tool call failed (for tool entries)
 	IsError bool `json:"is_error,omitempty"`
 
+	// CallID is the agent's own identifier for a tool invocation, shared by
+	// the call entry and its result so the two can be joined (see
+	// SessionEntry.CallID). Empty when the source format has none.
+	CallID string `json:"call_id,omitempty"`
+
 	// Summary is a brief summary of this entry (optional)
 	Summary string `json:"summary,omitempty"`
 
@@ -336,6 +341,7 @@ func (e *HistoryEntry) ToSessionEntry() SessionEntry {
 		ToolInput:  e.ToolInput,
 		ToolOutput: e.ToolOutput,
 		IsError:    e.IsError,
+		CallID:     e.CallID,
 	}
 }
 
@@ -351,6 +357,7 @@ func HistoryEntryFromSessionEntry(e SessionEntry, seq int, source string) Histor
 		ToolInput:  e.ToolInput,
 		ToolOutput: e.ToolOutput,
 		IsError:    e.IsError,
+		CallID:     e.CallID,
 	}
 }
 

@@ -147,16 +147,18 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	}
 
 	// The header was written at start, before any /clear or resume could add
-	// a native session id and before the stop time existed. Stamp both now so
-	// the ledger copy of raw.jsonl is self-describing on its own (a daemon
-	// retry of this upload has no .recording.json to consult). Best-effort:
-	// meta.json gets the same values from state regardless.
+	// a native session id and before the stop time existed. Append both now
+	// as the footer so the ledger copy of raw.jsonl is self-describing on its
+	// own (a daemon retry of this upload has no .recording.json to consult).
+	// Appended rather than rewritten: a parallel PostToolUse hook may still
+	// hold the file open. Best-effort: meta.json gets the same values from
+	// state regardless.
 	stoppedAt := session.ResolveStoppedAt(state.StoppedAt, rawPath, time.Now())
-	if err := session.StampRawHeader(rawPath, session.HeaderStamp{
+	if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
 		NativeSessions: state.NativeSessions,
 		StoppedAt:      stoppedAt,
 	}); err != nil {
-		slog.Warn("finalize: could not stamp raw.jsonl header", "session", state.SessionPath, "error", err)
+		slog.Warn("finalize: could not stamp raw.jsonl carrier", "session", state.SessionPath, "error", err)
 	}
 
 	// read back the completed raw.jsonl to generate artifacts

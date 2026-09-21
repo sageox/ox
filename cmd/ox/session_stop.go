@@ -97,6 +97,9 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 			Content:   raw.Content,
 			ToolName:  raw.ToolName,
 			ToolInput: raw.ToolInput,
+			// the one key shared by the call entry, its result, the native
+			// transcript and the agent's trace — never drop it on this path
+			CallID: raw.CallID,
 		}
 
 		// map role to entry type

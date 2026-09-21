@@ -34,23 +34,23 @@ func recordNativeSessionForRecording(projectRoot, agentID, nativeID, source stri
 	}
 }
 
-// stampRecordingHeaderAtStop writes the recording's native session ids and
-// its stop time into the raw.jsonl header. Called by the finalize doors that
-// clear .recording.json before the daemon finalizes (SessionEnd, /clear):
-// once the state file is gone the header is the only carrier the daemon can
-// read those fields from. Best-effort — a stamp failure is logged, never
-// surfaced into the hook, and meta.json still gets whatever the daemon can
-// resolve on its own.
-func stampRecordingHeaderAtStop(state *session.RecordingState, stoppedAt time.Time) {
+// stampRecordingCarrierAtStop appends the recording's native session ids and
+// its stop time to raw.jsonl as a footer record. Called by the finalize doors
+// that clear .recording.json before the daemon finalizes (SessionEnd, /clear):
+// once the state file is gone that record is the only carrier the daemon can
+// read those fields from. Appended, never rewritten — the file may still have
+// open appenders. Best-effort: a stamp failure is logged, never surfaced into
+// the hook, and meta.json still gets whatever the daemon can resolve alone.
+func stampRecordingCarrierAtStop(state *session.RecordingState, stoppedAt time.Time) {
 	if state == nil || state.SessionPath == "" {
 		return
 	}
 	rawPath := filepath.Join(state.SessionPath, ledgerFileRaw)
-	if err := session.StampRawHeader(rawPath, session.HeaderStamp{
+	if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
 		NativeSessions: state.NativeSessions,
 		StoppedAt:      stoppedAt,
 	}); err != nil {
-		slog.Debug("could not stamp raw.jsonl header at stop", "session", state.SessionPath, "error", err)
+		slog.Debug("could not stamp raw.jsonl carrier at stop", "session", state.SessionPath, "error", err)
 	}
 }
 

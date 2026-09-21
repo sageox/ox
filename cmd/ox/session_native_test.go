@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -36,8 +37,8 @@ import (
 //     remote meta.json assertion;
 //   - drop `CallID: raw.CallID` from ConvertRawEntries → the same test fails
 //     on the uploaded raw.jsonl call_id pair;
-//   - drop stampRecordingHeaderAtStop from handleEnd → the SessionEnd case of
-//     TestSessionEndAndClear_HandHeaderToDaemonFinalize fails.
+//   - drop stampRecordingCarrierAtStop from handleEnd → the SessionEnd case of
+//     TestSessionEndAndClear_HandCarrierToDaemonFinalize fails.
 
 // nativeHookFixture is a project with auto session recording, a real ledger
 // clone of a real bare remote, and the Claude Code test adapter registered —
@@ -202,14 +203,23 @@ func TestSessionStop_NativeSessionsAndCallIDsReachBareRemote(t *testing.T) {
 	assert.True(t, meta.StoppedAt.After(meta.CreatedAt), "stopped_at=%s must be later than created_at=%s", meta.StoppedAt, meta.CreatedAt)
 	assert.True(t, meta.StoppedAt.Equal(stopRequested), "the requested stop time wins: got %s want %s", meta.StoppedAt, stopRequested)
 
-	// And: the uploaded raw.jsonl is self-describing on its own.
+	// And: the uploaded raw.jsonl is self-describing on its own — the stop
+	// appended a footer carrying both fields (never a header rewrite: a
+	// parallel hook may still hold the file open).
 	lines := parseJSONLBytes(t, uploadedRaw)
 	require.NotEmpty(t, lines)
-	header, ok := lines[0]["metadata"].(map[string]any)
+	_, ok := lines[0]["metadata"].(map[string]any)
 	require.True(t, ok, "first line must be the header: %v", lines[0])
-	headerNative, _ := header["native_sessions"].([]any)
-	assert.Len(t, headerNative, 2, "the raw.jsonl header carries the native ids too")
-	assert.NotEmpty(t, header["stopped_at"], "the raw.jsonl header carries the stop time too")
+	var footer map[string]any
+	for _, line := range lines {
+		if line["type"] == "footer" {
+			footer = line
+		}
+	}
+	require.NotNil(t, footer, "the uploaded raw.jsonl must carry the footer record; lines=%v", lines)
+	footerNative, _ := footer["native_sessions"].([]any)
+	assert.Len(t, footerNative, 2, "the raw.jsonl footer carries the native ids")
+	assert.NotEmpty(t, footer["stopped_at"], "the raw.jsonl footer carries the stop time")
 
 	var paired []map[string]any
 	for _, line := range lines {
@@ -222,12 +232,12 @@ func TestSessionStop_NativeSessionsAndCallIDsReachBareRemote(t *testing.T) {
 	assert.Equal(t, "ok", paired[1]["tool_output"], "the result entry carries the output")
 }
 
-// TestSessionEndAndClear_HandHeaderToDaemonFinalize: when Claude Code exits
+// TestSessionEndAndClear_HandCarrierToDaemonFinalize: when Claude Code exits
 // (SessionEnd) or Devon runs /clear with the hook installed, the recording is
 // finalized later by the daemon, after the recording-state file is gone. The
-// hook must leave the native ids and the stop time in the raw.jsonl header,
-// which is the only carrier the daemon can still read.
-func TestSessionEndAndClear_HandHeaderToDaemonFinalize(t *testing.T) {
+// hook must leave the native ids and the stop time in raw.jsonl — appended as
+// a footer record, the only carrier the daemon can still read.
+func TestSessionEndAndClear_HandCarrierToDaemonFinalize(t *testing.T) {
 	for _, door := range []struct {
 		name string
 		run  func(t *testing.T, ctx *HookContext, agentID string)
@@ -257,16 +267,16 @@ func TestSessionEndAndClear_HandHeaderToDaemonFinalize(t *testing.T) {
 
 			cleared, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 			require.NoError(t, err)
-			require.Nil(t, cleared, "precondition: the door clears the state file, so the header is all the daemon has")
+			require.Nil(t, cleared, "precondition: the door clears the state file, so raw.jsonl is all the daemon has")
 
 			stored, err := session.ReadSessionFromPath(rawPath)
 			require.NoError(t, err)
 			require.NotNil(t, stored.Meta)
-			require.Len(t, stored.Meta.NativeSessions, 2, "header must carry every native id")
+			require.Len(t, stored.Meta.NativeSessions, 2, "the carrier must list every native id")
 			assert.Equal(t, "cc-handoff-1", stored.Meta.NativeSessions[0].ID)
 			assert.Equal(t, "cc-handoff-2", stored.Meta.NativeSessions[1].ID)
 			assert.Equal(t, "clear", stored.Meta.NativeSessions[1].Source)
-			require.NotNil(t, stored.Meta.StoppedAt, "header must carry the stop time")
+			require.NotNil(t, stored.Meta.StoppedAt, "the carrier must hold the stop time")
 			assert.True(t, stored.Meta.StoppedAt.After(before))
 			assert.True(t, stored.Meta.StoppedAt.After(stored.Meta.CreatedAt))
 		})
@@ -515,4 +525,166 @@ func parseJSONLBytes(t *testing.T, data []byte) []map[string]any {
 		lines = append(lines, m)
 	}
 	return lines
+}
+
+// TestRawEntryMap: the one flat shape both reconstruct paths write. Every
+// optional field appears only when set — call_id included — so a reader
+// never sees an empty "call_id":"" and a tool call keeps its id.
+func TestRawEntryMap(t *testing.T) {
+	ts := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		entry session.Entry
+		want  map[string]any
+	}{
+		{name: "message carries only the base keys",
+			entry: session.Entry{Type: session.SessionEntryTypeUser, Content: "hi", Timestamp: ts},
+			want:  map[string]any{"type": "user", "content": "hi", "timestamp": ts}},
+		{name: "tool call and result carry the call id",
+			entry: session.Entry{Type: session.SessionEntryTypeTool, Timestamp: ts, ToolName: "Bash", ToolInput: "go test", ToolOutput: "ok", CallID: "toolu_1"},
+			want:  map[string]any{"type": "tool", "content": "", "timestamp": ts, "tool_name": "Bash", "tool_input": "go test", "tool_output": "ok", "call_id": "toolu_1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, rawEntryMap(tc.entry))
+		})
+	}
+}
+
+// TestDoctor_SessionNativeIds_Scoping covers the check's remaining exits:
+// no ledger, no sessions directory, the registry entry, and the "+N more"
+// truncation once more than five recordings are affected.
+func TestDoctor_SessionNativeIds_Scoping(t *testing.T) {
+	t.Run("no ledger is a skip", func(t *testing.T) {
+		projectRoot := t.TempDir()
+		runGit(t, projectRoot, "init", "--quiet")
+		t.Setenv("OX_XDG_ENABLE", "1")
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("XDG_DATA_HOME", t.TempDir())
+		t.Chdir(projectRoot)
+		got := checkSessionNativeSessions()
+		assert.True(t, got.skipped, "%+v", got)
+		assert.Contains(t, got.message, "no ledger")
+	})
+
+	t.Run("no sessions directory is a skip", func(t *testing.T) {
+		projectRoot, _ := draftReaperFixture(t)
+		t.Chdir(projectRoot)
+		got := checkSessionNativeSessions()
+		assert.True(t, got.skipped, "%+v", got)
+		assert.Contains(t, got.message, "no sessions directory")
+	})
+
+	t.Run("registered check-only entry runs the check", func(t *testing.T) {
+		projectRoot, _ := draftReaperFixture(t)
+		t.Chdir(projectRoot)
+		check := GetDoctorCheck(CheckSlugSessionNativeSessions)
+		require.NotNil(t, check)
+		assert.Equal(t, FixLevelCheckOnly, check.FixLevel)
+		got := check.Run(true)
+		assert.True(t, got.skipped, "fix=true must not change a report-only check: %+v", got)
+	})
+
+	t.Run("more than five affected recordings are summarized", func(t *testing.T) {
+		projectRoot, ledgerPath := draftReaperFixture(t)
+		t.Chdir(projectRoot)
+		stopped := time.Now().UTC()
+		// a stray file in sessions/ (the .gitignore, a lock) is not a session
+		require.NoError(t, os.MkdirAll(filepath.Join(ledgerPath, "sessions"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(ledgerPath, "sessions", ".gitignore"), []byte("*\n"), 0o644))
+		for i := 0; i < 7; i++ {
+			name := fmt.Sprintf("2026-09-%02dT00-00-user-Ox%d", i+1, i)
+			dir := filepath.Join(ledgerPath, "sessions", name)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			require.NoError(t, lfs.WriteSessionMetaOnly(dir, &lfs.SessionMeta{
+				Version: "1.0", SessionName: name, SessionID: sessionScopedID(name),
+				AgentID: "Ox1234", AgentType: "claude-code", CreatedAt: stopped.Add(-time.Hour), StoppedAt: &stopped,
+			}))
+		}
+		got := checkSessionNativeSessions()
+		assert.True(t, got.warning, "%+v", got)
+		assert.Contains(t, got.message, "7/7")
+		assert.Contains(t, got.message, "(+2 more)")
+	})
+}
+
+// TestRecordNativeSessionForRecording_BestEffort: the SessionStart append is
+// never allowed to fail the hook. A missing recording is a silent no-op; a
+// state file that cannot be parsed is logged and ignored (the recording is
+// left alone for doctor); empty inputs do nothing.
+func TestRecordNativeSessionForRecording_BestEffort(t *testing.T) {
+	projectRoot, repoID := setupTestProject(t)
+	const agentID = "OxBestEffort"
+
+	recordNativeSessionForRecording(projectRoot, agentID, "cc-1", "startup") // no recording: no-op
+	recordNativeSessionForRecording("", agentID, "cc-1", "startup")
+	recordNativeSessionForRecording(projectRoot, "", "cc-1", "startup")
+	recordNativeSessionForRecording(projectRoot, agentID, "", "startup")
+
+	createActiveRecording(t, projectRoot, repoID, agentID)
+	recordNativeSessionForRecording(projectRoot, agentID, "cc-1", "startup")
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Len(t, state.NativeSessions, 1)
+
+	// corrupt the state file: the append must log, not panic or wipe it
+	statePath := filepath.Join(state.SessionPath, ".recording.json")
+	require.NoError(t, os.WriteFile(statePath, []byte("{corrupt"), 0o600))
+	recordNativeSessionForRecording(projectRoot, agentID, "cc-2", "clear")
+	data, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+	assert.Equal(t, "{corrupt", string(data), "a state file the hook cannot parse is left for doctor, never overwritten")
+}
+
+// TestStampRecordingCarrierAtStop_Guards: a nil state or a state with no
+// session path has nothing to stamp and must not touch the filesystem.
+func TestStampRecordingCarrierAtStop_Guards(t *testing.T) {
+	stampRecordingCarrierAtStop(nil, time.Now())
+	stampRecordingCarrierAtStop(&session.RecordingState{}, time.Now())
+	// a session path whose raw.jsonl does not exist: logged, not fatal
+	stampRecordingCarrierAtStop(&session.RecordingState{SessionPath: t.TempDir(), NativeSessions: []session.NativeSession{{ID: "x"}}}, time.Now())
+}
+
+// TestProcessSession_WritesCallIDAndCarrier covers the legacy `ox session
+// stop` reconstruct path, which writes raw.jsonl whole at stop: the header it
+// writes carries the native ids and the stop time directly, and the tool
+// call and its result both carry the agent's call id.
+func TestProcessSession_WritesCallIDAndCarrier(t *testing.T) {
+	adapters.Register(&testClaudeCodeAdapter{})
+	t.Cleanup(func() { adapters.Unregister("claude-code") })
+	projectRoot, _ := setupTestProject(t)
+
+	const callID = "toolu_legacy_01"
+	at := time.Now().Add(time.Second)
+	sourceFile := filepath.Join(t.TempDir(), "session.jsonl")
+	appendLines(t, sourceFile,
+		`{"type":"user","timestamp":"`+at.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"Run the tests"}}`,
+		`{"type":"assistant","timestamp":"`+at.Add(time.Second).Format(time.RFC3339Nano)+`","message":{"role":"assistant","content":[{"type":"tool_use","id":"`+callID+`","name":"Bash","input":{"command":"go test ./..."}}]}}`,
+		`{"type":"user","timestamp":"`+at.Add(2*time.Second).Format(time.RFC3339Nano)+`","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"`+callID+`","content":"ok"}]}}`,
+	)
+	stopped := time.Now().UTC().Truncate(time.Second)
+	state := &session.RecordingState{
+		AgentID: "OxLegacy", AdapterName: "claude-code", SessionFile: sourceFile,
+		StartedAt: stopped.Add(-time.Hour), StoppedAt: &stopped,
+		NativeSessions: []session.NativeSession{{ID: "cc-legacy-1", Source: "startup", FirstSeen: stopped.Add(-time.Hour), LastSeen: stopped.Add(-time.Hour)}},
+	}
+	result, err := processSession(projectRoot, state)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 3, result.EntryCount)
+
+	stored, err := session.ReadSessionFromPath(result.RawPath)
+	require.NoError(t, err)
+	require.NotNil(t, stored.Meta)
+	require.Len(t, stored.Meta.NativeSessions, 1, "a file written whole at stop carries the ids on its header")
+	assert.Equal(t, "cc-legacy-1", stored.Meta.NativeSessions[0].ID)
+	require.NotNil(t, stored.Meta.StoppedAt)
+	assert.True(t, stored.Meta.StoppedAt.Equal(stopped))
+	var paired int
+	for _, e := range stored.Entries {
+		if e["call_id"] == callID {
+			paired++
+		}
+	}
+	assert.Equal(t, 2, paired, "the tool call and its result both carry the call id: %v", stored.Entries)
 }

@@ -346,8 +346,8 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 	}
 
 	// the daemon finalizes this recording after the state file below is
-	// gone; hand it the native session ids and the stop time via the header
-	stampRecordingHeaderAtStop(state, now)
+	// gone; hand it the native session ids and the stop time on a footer
+	stampRecordingCarrierAtStop(state, now)
 
 	// fire-and-forget IPC to daemon to finalize the stopped session
 	if state.SessionPath != "" {
@@ -423,8 +423,8 @@ func handleEnd(ctx *HookContext) error {
 	}
 
 	// the daemon finalizes this recording after the state file below is
-	// gone; hand it the native session ids and the stop time via the header
-	stampRecordingHeaderAtStop(state, now)
+	// gone; hand it the native session ids and the stop time on a footer
+	stampRecordingCarrierAtStop(state, now)
 
 	// dispatch delegated finalization via daemon IPC. Best-effort: if the
 	// daemon is unreachable, the daemon's anti-entropy sweep will still

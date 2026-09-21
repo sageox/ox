@@ -246,7 +246,7 @@ type SessionMeta struct {
 	// CreatedAt has always been recorded; without a stop time anything sliced
 	// at the end of a recording is meaningless. Precedence at finalize: the
 	// time the stop was requested (explicit stop, SessionEnd, /clear), else the
-	// stop time carried in the raw.jsonl header, else the last entry's
+	// stop time carried in raw.jsonl (header or footer), else the last entry's
 	// timestamp, else the raw.jsonl file's modification time, else the
 	// finalize time — see session.ResolveStoppedAt. Every step but the last
 	// is a property of the recording, so a retried upload writes the same

@@ -100,11 +100,11 @@
         "native_sessions": {
           "type": "array",
           "items": { "$ref": "#/$defs/nativeSession" },
-          "description": "Every native coding-agent session id this recording observed, in first-seen order. Stamped into the header at finalize (and at SessionEnd / clear, before the recording-state file is cleared) so a daemon-side finalize can copy it into meta.json. A recording can span several ids (/clear re-primes into the same recording when no hook stops it) and several recordings can share one id (stop and restart, resume). Absent on recordings made before the field existed and for agents that expose no session id."
+          "description": "Native coding-agent session ids this recording had observed when the header was written, in first-seen order. A file written whole at stop carries the full list here; a file recorded live carries the id that started the recording here and the full list on the footer (see footer.native_sessions), because a live raw.jsonl is never rewritten. Readers take the footer's list when present. A recording can span several ids (/clear re-primes into the same recording when no hook stops it) and several recordings can share one id (stop and restart, resume). Absent on recordings made before the field existed and for agents that expose no session id."
         },
         "stopped_at": {
           "$ref": "#/$defs/rfc3339",
-          "description": "When the recording stopped. Stamped by the finalize door that ended it; absent on recordings made before the field existed."
+          "description": "When the recording stopped. Present when the file was written whole at stop; a file recorded live carries it on the footer instead. Absent on recordings made before the field existed."
         }
       }
     },
@@ -130,7 +130,7 @@
 
     "footer": {
       "title": "Footer line",
-      "description": "Written at session close. Absent from imported and in-progress sessions.",
+      "description": "Written at session close, or appended by a finalize door as the carrier for native_sessions and stopped_at when the file may still have open appenders (a live raw.jsonl is never rewritten in place). Absent from imported and in-progress sessions. A file may carry more than one footer; readers take the last value of each field and never treat a footer as content.",
       "type": "object",
       "required": ["type"],
       "properties": {
@@ -140,6 +140,15 @@
           "type": "integer",
           "minimum": 0,
           "description": "Entries written, excluding header and footer. Not emitted by every writer; readers MUST tolerate its absence."
+        },
+        "native_sessions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nativeSession" },
+          "description": "Every native coding-agent session id the recording observed by the time it stopped, in first-seen order. Appended by the finalize door that ended a live recording (explicit stop, SessionEnd, /clear, daemon reclaim); readers prefer this over the header's list."
+        },
+        "stopped_at": {
+          "$ref": "#/$defs/rfc3339",
+          "description": "When the recording stopped, as recorded by the finalize door that appended this footer. Readers prefer this over the header's value."
         }
       }
     },
