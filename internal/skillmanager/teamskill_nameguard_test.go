@@ -132,6 +132,34 @@ func TestReconcile_TeamSkillNameCannotOverwriteTheApprovalStore(t *testing.T) {
 		"a prose team skill wrote the approval store, forging an approval that the repository then COMMITS to every teammate: %s", forged)
 }
 
+func TestReconcile_TeamSkillNameCollisionIsReportedAndStable(t *testing.T) {
+	repo := t.TempDir()
+	team := t.TempDir()
+	writeTeamSkillNamed(t, team, "aaa-shadow", "deploy", nil)
+	writeTeamSkillNamed(t, team, "deploy", "deploy", nil)
+	stageTeamWiredProject(t, repo, team)
+
+	target := sharedTarget()
+	plan, err := Reconcile(repo, "1.0.0", desiredFor(target), []adapterprotocol.SkillTarget{target})
+	require.NoError(t, err)
+	require.NoDirExists(t, filepath.Join(repo, target.Root, TeamPrefix+"deploy"),
+		"one side of a same-root collision silently won installation")
+	unusable := plan.UnusableTeamSkills()
+	require.Len(t, unusable, 1)
+	require.Contains(t, unusable[0].Reason, "collision")
+	require.Contains(t, unusable[0].Reason, "aaa-shadow")
+	require.Contains(t, unusable[0].Reason, "deploy")
+
+	second, err := Reconcile(repo, "1.0.0", desiredFor(target), []adapterprotocol.SkillTarget{target})
+	require.NoError(t, err)
+	require.Empty(t, second.Creates)
+	require.Empty(t, second.Updates)
+	require.Empty(t, second.Removes)
+	require.Empty(t, second.Conflicts,
+		"same-root collision did not converge deterministically across ticks")
+	require.Equal(t, unusable, second.UnusableTeamSkills())
+}
+
 // TestPlan_SkillNameThatEscapesItsTargetRootIsRefused is the defense-in-depth
 // half, proved independently of discovery.
 //
