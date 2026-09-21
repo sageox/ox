@@ -545,3 +545,73 @@ func TestSkillsPublish_RefusesASymlinkedParent(t *testing.T) {
 		})
 	}
 }
+
+// TestSkillsPublish_GuidanceAndRenderingAlwaysNameSomethingReal.
+//
+// Guidance is carried in the JSON as well as printed, so an AI coworker acts on
+// it unseen. A line that promises a command which does not exist sends a human
+// — or an agent — to a terminal to be told "unknown command" by the tool that
+// just told them to run it, and that is worse than silence. Every reachable
+// branch is checked, including the ones a successful publish never takes.
+func TestSkillsPublish_GuidanceAndRenderingAlwaysNameSomethingReal(t *testing.T) {
+	t.Run("published", func(t *testing.T) {
+		advice := skillsChangeGuidance(skillsChangeOutput{
+			TeamContext: "/tmp/team",
+			Skills:      []skillChangeRow{{Name: teamPublishSkill, State: skillChangePublished}},
+		})
+		require.Contains(t, advice, teamPublishSkill)
+		requireAdviceResolves(t, advice)
+	})
+
+	t.Run("nothing changed", func(t *testing.T) {
+		advice := skillsChangeGuidance(skillsChangeOutput{
+			Skills: []skillChangeRow{{Name: teamPublishSkill, State: "some-other-state"}},
+		})
+		require.Contains(t, advice, "Nothing changed")
+		requireAdviceResolves(t, advice)
+	})
+
+	t.Run("nothing to do", func(t *testing.T) {
+		advice := skillsChangeGuidance(newSkillsChangeOutput())
+		require.Contains(t, advice, "Nothing to do")
+		requireAdviceResolves(t, advice)
+	})
+
+	// The state column is padded so a multi-name run reads as two aligned
+	// columns rather than a ragged list.
+	t.Run("state column is padded to a fixed width", func(t *testing.T) {
+		require.Len(t, []rune(padChangeState("short")), changeStateColumn,
+			"a state narrower than the column must be padded out to it")
+		require.Equal(t, "verylongstatename", padChangeState("verylongstatename"),
+			"a state wider than the column must not be truncated")
+	})
+
+	t.Run("an unpublished row renders as unchanged, with its reason when there is one", func(t *testing.T) {
+		var buf strings.Builder
+		require.NoError(t, emitSkillsChange(&buf, skillsChangeOutput{Skills: []skillChangeRow{
+			{Name: "quiet", State: "some-other-state"},
+			{Name: "explained", State: "some-other-state", Detail: "already published by your team"},
+		}}, false))
+		out := buf.String()
+		require.Contains(t, out, "unchanged")
+		require.Contains(t, out, "quiet")
+		require.Contains(t, out, "already published by your team")
+	})
+}
+
+// TestSkillsPublish_RefusesWithoutATeamContext.
+//
+// Publishing into a Team Context this project has never been wired to would
+// have nowhere to write. The refusal has to name the command that diagnoses it,
+// because "nowhere to publish" is otherwise indistinguishable from a bug.
+func TestSkillsPublish_RefusesWithoutATeamContext(t *testing.T) {
+	repo := stageInstallRepo(t)
+	stageLocalPublishableSkill(t, repo, teamPublishSkill)
+
+	_, err := publishTeamSkillSeeds(repo, []string{teamPublishSkill}, []teamSkillSeed{{
+		name: teamPublishSkill, relDir: "agents/skills/" + teamPublishSkill,
+		files: []skills.File{{Path: skills.SkillFileName, Content: []byte("---\nname: x\ndescription: y\n---\n")}},
+	}})
+	require.ErrorContains(t, err, "no Team Context is configured")
+	requireAdviceResolves(t, err.Error())
+}

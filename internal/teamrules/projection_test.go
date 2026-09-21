@@ -354,6 +354,19 @@ func TestProjectionHelpers_DefensiveAndFallbackBranches(t *testing.T) {
 		require.NoError(t, os.WriteFile(projection, stampProjection([]byte("x")), 0o644))
 		require.True(t, HasNativeProjections(project))
 
+		// A reserved-looking DIRECTORY, and a reserved-prefixed file with the
+		// wrong extension, are both somebody else's: ox must walk past them
+		// rather than read them as its own projection.
+		bare := t.TempDir()
+		rulesDir := filepath.Join(bare, ".claude", "rules")
+		require.NoError(t, os.MkdirAll(filepath.Join(rulesDir, managedPrefix+"adir.md"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(rulesDir, managedPrefix+"a.txt"),
+			[]byte(legacyProjectionMarker+"\nbody\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "mine.md"),
+			[]byte(legacyProjectionMarker+"\nbody\n"), 0o644))
+		require.False(t, HasNativeProjections(bare),
+			"a directory, a foreign extension, and an unreserved name are none of them an ox projection")
+
 		rule := teamdocs.TeamRule{Name: "A Rule", RelPath: "a.md"}
 		_, ok := NativePath(project, "unknown", rule)
 		require.False(t, ok)
@@ -390,6 +403,12 @@ func TestProjectionHelpers_DefensiveAndFallbackBranches(t *testing.T) {
 			"the legacy renderer omitted empty descriptions")
 		require.False(t, legacyProjectionOwned([]byte("---\ndescription: `x`\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[0]),
 			"the legacy renderer emitted canonical strconv-quoted strings")
+		require.False(t, legacyProjectionOwned([]byte("---\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[0]),
+			"the legacy renderer never emitted an empty frontmatter block")
+		require.False(t, legacyProjectionOwned([]byte("---\ndescription: \"x\"\nalwaysApply: false\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[1]),
+			"alwaysApply must agree with whether globs were emitted, or the file is not the exact legacy format")
+		require.False(t, legacyProjectionOwned([]byte("---\ndescription: \"x\"\nstray\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[0]),
+			"a frontmatter line that is not key: value at all was never emitted by the legacy renderer")
 
 		emptySlug := nativeFilename(teamdocs.TeamRule{Name: "!!!", RelPath: "x"}, policies[0])
 		require.Contains(t, emptySlug, "sageox-team-rule-")

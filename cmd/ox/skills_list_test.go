@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode"
@@ -511,5 +512,63 @@ func TestSkillsListHelpers_CoverDefensiveAndFormattingBoundaries(t *testing.T) {
 		require.Empty(t, description)
 		require.False(t, owned)
 		require.False(t, isSkill)
+	})
+}
+
+// TestSkillsList_AnUnreadableManifestCostsTheDescriptionNotTheRow.
+//
+// A regular SKILL.md is what makes a directory a skill, so once the listing has
+// seen one, every later failure must cost the DESCRIPTION and never the row.
+// Dropping the skill instead would tell a coworker their skill is not installed
+// — over a permission bit — and send them to reinstall something already there.
+func TestSkillsList_AnUnreadableManifestCostsTheDescriptionNotTheRow(t *testing.T) {
+	// Chmod is the only lever that reaches this branch: a non-regular SKILL.md is
+	// refused earlier, at the Lstat, so it exercises a different path entirely.
+	// Windows maps only the read-only bit, so the file would stay readable and
+	// this test would pass while asserting nothing.
+	if runtime.GOOS == "windows" {
+		t.Skip("Chmod(0o000) does not remove read permission on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a 0000 file, so the permission branch is unreachable")
+	}
+	repo := t.TempDir()
+	dir := writeSkillDir(t, repo, approvalTargetRoot, "unreadable",
+		manifestWithDescription("unreadable", "you will never see this"))
+	manifest := filepath.Join(dir, "SKILL.md")
+	require.NoError(t, os.Chmod(manifest, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(manifest, 0o644) })
+
+	got := collectInstalledSkills(repo, []string{approvalTargetRoot})
+
+	require.Len(t, got.Skills, 1, "the skill was dropped from the listing over a permission bit")
+	require.Equal(t, "unreadable", got.Skills[0].Name)
+	require.Empty(t, got.Skills[0].Description, "an unreadable manifest cannot yield a description")
+}
+
+// TestResolveSkillRoots_FallsBackToDetectionOnlyWhenTheLockfileIsSilent.
+//
+// The committed lockfile is the authority, because it records what `ox init`
+// selected. Adapter detection shells out to whatever ox-adapter-* binaries are
+// on PATH, so it is a property of the developer's MACHINE, not of the
+// repository — it is the fallback for a repo that never ran `ox init`, and
+// nothing more.
+//
+// Deliberately asserts the contract and not a specific root: which adapters are
+// installed differs between a laptop and CI, and a test that pinned that would
+// fail for a reason that has nothing to do with this code.
+func TestResolveSkillRoots_FallsBackToDetectionOnlyWhenTheLockfileIsSilent(t *testing.T) {
+	t.Run("lockfile wins and detection never runs", func(t *testing.T) {
+		repo := stageInstallRepo(t)
+		roots, err := resolveSkillRoots(repo)
+		require.NoError(t, err)
+		require.Contains(t, roots, approvalTargetRoot,
+			"the committed selection must be what this command reports")
+	})
+
+	t.Run("no selection falls through to detection without failing", func(t *testing.T) {
+		roots, err := resolveSkillRoots(t.TempDir())
+		require.NoError(t, err, "a repository that never ran `ox init` is not an error")
+		require.Equal(t, dedupeStrings(roots), roots, "the fallback must still be deduplicated")
 	})
 }
