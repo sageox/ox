@@ -283,6 +283,65 @@ func TestTeamSkillSource_NoTeamPathIsANoOp(t *testing.T) {
 	require.NotNil(t, src)
 }
 
+// TestTeamSkillSource_ResolvedMatchesFreshDiscovery is the equivalence proof
+// for the shared-derivation seam (ox-jr82): a caller that already walked and
+// repo-filtered the team checkout — teamSkillSourceResolved's contract — gets
+// the identical catalog and decisions TeamSkillSource computes by walking it
+// again. If the two ever diverge, a resolved caller (teamconverge) and a
+// self-deriving caller (`ox skills status`, `ox doctor`) would disagree about
+// the same repository.
+func TestTeamSkillSource_ResolvedMatchesFreshDiscovery(t *testing.T) {
+	team := t.TempDir()
+	project := t.TempDir()
+	writeTeamSkill(t, team, "deploy", "", map[string]string{"scripts/run.sh": "#!/bin/sh\n"})
+	writeTeamSkill(t, team, "grants", "allowed-tools: Bash(rm:*)\n", nil)
+
+	fresh, freshDecisions, err := TeamSkillSource(nil, team, "ox", project)
+	require.NoError(t, err)
+
+	published, err := teamdocs.PublishedSkills(team)
+	require.NoError(t, err)
+	var applicable []teamdocs.TeamSkill
+	for _, s := range published {
+		if teamdocs.SkillAppliesToRepo(s, "ox") {
+			applicable = append(applicable, s)
+		}
+	}
+	require.Len(t, applicable, 2, "fixture invariant: both skills apply here")
+
+	got, gotDecisions, err := teamSkillSourceResolved(nil, team, "ox", project, applicable)
+	require.NoError(t, err)
+
+	require.Equal(t, selectedNames(t, fresh), selectedNames(t, got),
+		"a caller handing skillmanager an already-resolved team-skill set got a different catalog than a fresh walk")
+	require.Equal(t, freshDecisions, gotDecisions,
+		"a caller handing skillmanager an already-resolved team-skill set got different decisions than a fresh walk")
+}
+
+// TestTeamSkillSource_ResolvedStillBlindToUnmaterializedCheckout: the resolved
+// seam skips the CONTENT walk, never the cheap directory-presence check.
+// Without it, an empty resolved set from a not-yet-materialized sparse
+// checkout would read as "the team publishes nothing" and retire every
+// sageox-team-* file already on disk.
+func TestTeamSkillSource_ResolvedStillBlindToUnmaterializedCheckout(t *testing.T) {
+	team := t.TempDir() // exists, but agents/skills was never materialized
+	project := t.TempDir()
+
+	fresh, freshDecisions, err := TeamSkillSource(nil, team, "ox", project)
+	require.NoError(t, err)
+	freshCatalog, ok := fresh.(interface{ IncompleteReason() string })
+	require.True(t, ok, "an unmaterialized checkout must still report an IncompleteReason")
+	require.NotEmpty(t, freshCatalog.IncompleteReason())
+
+	got, gotDecisions, err := teamSkillSourceResolved(nil, team, "ox", project, nil)
+	require.NoError(t, err)
+	require.Equal(t, freshDecisions, gotDecisions)
+	gotCatalog, ok := got.(interface{ IncompleteReason() string })
+	require.True(t, ok, "the resolved seam must not skip the blindness check a fresh walk performs")
+	require.Equal(t, freshCatalog.IncompleteReason(), gotCatalog.IncompleteReason(),
+		"the resolved seam disagreed with a fresh walk about whether this checkout is blind")
+}
+
 // TestTeamSkillSource_RespectsRepoTargeting closes the acceptance criterion: a
 // skill lands in the repos its frontmatter targets and nowhere else.
 func TestTeamSkillSource_RespectsRepoTargeting(t *testing.T) {

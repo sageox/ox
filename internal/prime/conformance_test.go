@@ -41,11 +41,17 @@ import (
 // cmd/ox-adapter-<name>/main_test.go pin test (claude-code / codex / droid).
 // Adding or removing a capability requires updating BOTH this fixture AND that
 // adapter's pin test.
+//
+// That convention is not self-enforcing, and it did rot: this fixture carried
+// commands_installer for claude-code long after the adapter stopped declaring
+// it, because only five of the ten bundled adapters have a pin test and nothing
+// cross-checks the fixture against main.go. The durable guard for that drift is
+// TestBundledAdapters_CapabilitiesMatchBinary in internal/adapter; prefer adding
+// an adapter there over relying on this comment.
 var adapterCaps = map[string][]string{
 	"claude-code": {
 		adapterprotocol.CapSessionReader,
 		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapCommandsInstaller,
 		adapterprotocol.CapSkillsInstaller,
 		adapterprotocol.CapIncrementalReader,
 		adapterprotocol.CapFileWatcher,

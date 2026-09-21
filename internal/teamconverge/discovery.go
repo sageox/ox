@@ -42,6 +42,7 @@ func (d FilesystemDiscovery) Discover(ctx context.Context, request Request) (Sna
 			Kind: KindSkill, Name: skill.Name, SourcePath: rel,
 			Origin: Origin{Kind: OriginLoose}, Applicable: applicable, Required: true,
 			Visibility: skill.Visibility,
+			skill:      &skill,
 		}
 		if !applicable {
 			artifact.FilterReason = "repos filter does not include this repository"

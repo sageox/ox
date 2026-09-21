@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/internal/version"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/spf13/cobra"
 )
@@ -251,9 +252,30 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 			fmt.Sprintf("ox could not read the team's skills: %v", discoverErr))
 	}
 
+	// Hand the walk above to the plan instead of letting it re-walk
+	// teamdocs.PublishedSkills a second time (ox-jr82): this command already
+	// answered "what does the team publish" and "which of those are for this
+	// repo" just above, and a second independent walk could disagree with the
+	// first. RepoSlug MUST be the origin-derived identity, never the
+	// directory-name display fallback `slug` above — SkillAppliesToRepo fails
+	// closed on an empty slug, matching what the plan has always used
+	// internally. A discovery error leaves resolved nil, which asks the plan to
+	// walk the checkout itself exactly as it always has.
+	var resolved *skillmanager.TeamSkillsResolved
+	if discoverErr == nil {
+		authoritativeSlug, _ := repotools.RepoSlugFromRemote(gitRoot)
+		applicable := make([]teamdocs.TeamSkill, 0, len(published))
+		for _, sk := range published {
+			if teamdocs.SkillAppliesToRepo(sk, authoritativeSlug) {
+				applicable = append(applicable, sk)
+			}
+		}
+		resolved = &skillmanager.TeamSkillsResolved{TeamPath: tc.Path, RepoSlug: authoritativeSlug, Skills: applicable}
+	}
+
 	decisions := map[string]skillmanager.TeamSkillDecision{}
 	var planned plannedPaths
-	plan, planErr := planCommittedSkills(gitRoot)
+	plan, planErr := planCommittedSkillsResolved(gitRoot, resolved)
 	switch {
 	case planErr != nil:
 		out.Problems = append(out.Problems,
@@ -338,6 +360,19 @@ func skillsStatusGuidance(out skillsStatusOutput) string {
 		return fmt.Sprintf("Team skills are current. %d auto-installed as prose without approval; nothing is withheld.", out.Summary.AutoInstalledProse)
 	}
 	return "Team skills are current. Nothing to do."
+}
+
+// planCommittedSkillsResolved is planCommittedSkills (skill_reconcile.go) with
+// the TeamSkillsResolved seam skillmanager.PlanWithTeamSkills takes (ox-jr82):
+// a nil resolved behaves exactly like planCommittedSkills always has. It is
+// defined here, not alongside planCommittedSkills, because only this command
+// has already walked the team checkout and has a resolved set to offer.
+func planCommittedSkillsResolved(repoRoot string, resolved *skillmanager.TeamSkillsResolved) (*skillmanager.ReconcilePlan, error) {
+	desired, targets, err := committedSkillState(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	return skillmanager.PlanWithTeamSkills(repoRoot, version.Version, desired, targets, resolved)
 }
 
 // skillTargetRoots reads the repo's selected skill roots, distinguishing "no

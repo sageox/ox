@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"sort"
 	"testing"
 )
 
@@ -273,5 +274,105 @@ func TestAdapterBinaries_Unique(t *testing.T) {
 			t.Errorf("duplicate binary name: %q (adapter: %s)", a.Binary, a.Name)
 		}
 		seen[a.Binary] = true
+	}
+}
+
+// --- H. Capability parity with bundled binaries ---
+
+// bundledCapabilities is the ground-truth capability set each bundled
+// adapter's cmd/ox-adapter-<name>/main.go declares in its handleInfo()
+// Capabilities slice. package main is not importable from this test package,
+// so each set below is hand-verified against the binary's source (grep
+// "Capabilities:" in cmd/ox-adapter-<name>/main.go) rather than derived.
+//
+// TRADEOFF: a hermetic table, not a build-and-exec of all ten binaries, keeps
+// this test in the fast tier (`go test ./internal/adapter/...`, no build tag)
+// instead of a ~10-binary-compile slow tier. The repo already accepts this
+// tradeoff for the same drift class: internal/prime/conformance_test.go
+// carries an equivalent adapterCaps fixture, cross-checked against five of
+// these binaries via a per-adapter "CapabilitiesPinned" test in their own
+// main_test.go (claude-code, codex, droid, omp, goose). amp, gemini, opencode,
+// aider, and pi have no such pin test yet — for those five this table is the
+// only guard, so it must be updated by hand whenever their main.go's
+// Capabilities slice changes. tests/adapters/capability_contract_test.go
+// (build tag "slow") separately proves a different thing: that a declared
+// capability is actually wired to a working subcommand, not that
+// registry.yaml agrees with main.go.
+var bundledCapabilities = map[string][]string{
+	"claude-code": {"session_reader", "hook_installer", "skills_installer", "incremental_reader", "file_watcher", "serve_mode", "session_importer", "capture_prior"},
+	"gemini":      {"session_reader", "hook_installer", "skills_installer", "incremental_reader", "file_watcher", "serve_mode", "session_importer"},
+	"codex":       {"session_reader", "hook_installer", "skills_installer", "incremental_reader", "file_watcher", "serve_mode", "session_importer"},
+	"amp":         {"session_reader", "session_importer", "hook_installer", "incremental_reader", "file_watcher", "serve_mode", "skills_installer"},
+	"opencode":    {"session_reader", "hook_installer", "incremental_reader", "session_importer", "serve_mode", "skills_installer"}, // no file_watcher: see main.go
+	"pi":          {"session_reader", "hook_installer", "incremental_reader", "file_watcher", "session_importer", "serve_mode", "skills_installer"},
+	"omp":         {"session_reader", "hook_installer", "skills_installer", "incremental_reader", "file_watcher", "session_importer", "serve_mode"},
+	"aider":       {"session_reader", "hook_installer", "incremental_reader", "file_watcher", "session_importer", "serve_mode"}, // no skills_installer: aider has no SkillTargets
+	"droid":       {"session_reader", "hook_installer", "incremental_reader", "file_watcher", "serve_mode", "session_importer", "skills_installer"},
+	"goose":       {"session_reader", "hook_installer", "incremental_reader", "session_importer", "capture_prior", "serve_mode", "skills_installer"}, // no file_watcher: virtual "goose:<id>" handle
+}
+
+// TestBundledAdapters_CapabilitiesMatchBinary verifies registry.yaml — what
+// `ox adapter list` shows users — advertises exactly the capabilities each
+// bundled adapter binary declares, no more and no fewer.
+// Failure prevented: `ox adapter list` silently drifting from what a binary
+// can actually do (ox-ii9q). Before this test, registry.yaml omitted
+// skills_installer for nine of the ten bundled adapters despite their
+// binaries all declaring it, and one adapter's entry over-claimed a
+// capability (file_watcher) its binary never declares.
+func TestBundledAdapters_CapabilitiesMatchBinary(t *testing.T) {
+	reg, err := LoadEmbeddedRegistry()
+	if err != nil {
+		t.Fatalf("LoadEmbeddedRegistry() error: %v", err)
+	}
+
+	for _, a := range reg.Adapters {
+		if !a.Bundled {
+			// Non-bundled/community entries (repo: sageox/ox-adapters) have no
+			// binary in this repo to compare against — skip explicitly rather
+			// than silently, per registry.yaml's "External (non-bundled)
+			// adapters" section.
+			continue
+		}
+		a := a
+		t.Run(a.Name, func(t *testing.T) {
+			want, ok := bundledCapabilities[a.Name]
+			if !ok {
+				t.Fatalf("adapter %q is bundled but has no entry in bundledCapabilities — add its ground-truth set", a.Name)
+			}
+			assertCapabilitySetsEqual(t, a.Name, a.Capabilities, want)
+		})
+	}
+}
+
+// assertCapabilitySetsEqual compares two capability lists as sets (order does
+// not matter) and reports exactly what is missing and what is extra, so a
+// failure names the drift instead of just the fact of it.
+func assertCapabilitySetsEqual(t *testing.T, name string, got, want []string) {
+	t.Helper()
+	gotSet := make(map[string]bool, len(got))
+	for _, c := range got {
+		gotSet[c] = true
+	}
+	wantSet := make(map[string]bool, len(want))
+	for _, c := range want {
+		wantSet[c] = true
+	}
+
+	var missing, extra []string
+	for c := range wantSet {
+		if !gotSet[c] {
+			missing = append(missing, c)
+		}
+	}
+	for c := range gotSet {
+		if !wantSet[c] {
+			extra = append(extra, c)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(extra)
+
+	if len(missing) > 0 || len(extra) > 0 {
+		t.Errorf("registry.yaml capabilities for %q drifted from its binary: missing=%v extra=%v", name, missing, extra)
 	}
 }

@@ -66,6 +66,13 @@ type Artifact struct {
 	// against what discovery already parsed under the same snapshot lease.
 	// Unexported: never part of the Artifact JSON shape.
 	rule *teamdocs.TeamRule
+
+	// skill carries the already-discovered Team Skill for KindSkill artifacts,
+	// mirroring rule above (ox-jr82): convergeSkills hands this set to
+	// skillmanager instead of letting it re-walk teamdocs.PublishedSkills under
+	// a second, independent lease that could disagree with this one.
+	// Unexported: never part of the Artifact JSON shape.
+	skill *teamdocs.TeamSkill
 }
 
 // Snapshot pins every outcome in a report to one Team Context commit.

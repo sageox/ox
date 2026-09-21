@@ -336,6 +336,127 @@ func TestConvergeSkills_ConfigurationAndModeBoundaries(t *testing.T) {
 	})
 }
 
+// TestConvergeSkills_UsesDiscoveredArtifactsInsteadOfReDeriving is the
+// red-first proof for ox-jr82.
+//
+// convergeSkills used to hand skillmanager an IDENTITY transform, which let
+// skillmanager re-walk and re-filter the team checkout on its own — a SECOND,
+// independent derivation of "which team skills apply here" beside the one
+// FilesystemDiscovery already computed for this artifact set. The two can
+// disagree: this fixture publishes a skill whose `repos:` filter excludes the
+// real repository slug, so a FRESH internal walk excludes it too, while the
+// artifact handed to convergeSkills claims (as discovery already decided,
+// however it got there) that it applies here.
+//
+// Before the fix, skillmanager's own re-derivation found nothing for this
+// name, so the decisions map produced by the fresh walk had no entry for it —
+// triggering the (now-deleted) "skill reconcile did not report this artifact"
+// fabrication. After the fix, convergeSkills hands skillmanager the SAME
+// resolved set it was given, so the skill installs.
+func TestConvergeSkills_UsesDiscoveredArtifactsInsteadOfReDeriving(t *testing.T) {
+	project, team := t.TempDir(), t.TempDir()
+	wireHandlerTeamContext(t, project, team)
+	targets, err := skillmanager.CanonicalizeTargets(project, []adapterprotocol.SkillTarget{{
+		Key:        "shared",
+		Root:       ".agents/skills",
+		Format:     adapterprotocol.SkillFormatAgentSkillsV1,
+		Scope:      adapterprotocol.SkillScopeProject,
+		LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+	}})
+	require.NoError(t, err)
+	_, err = skillmanager.Reconcile(project, version.Version, skillmanager.DefaultDesired(targets), targets)
+	require.NoError(t, err)
+
+	gitTeam(t, team, "init", "-q")
+	gitTeam(t, team, "config", "user.email", "test@sageox.ai")
+	gitTeam(t, team, "config", "user.name", "test")
+	gitTeam(t, team, "config", "commit.gpgsign", "false")
+	writeTeamFile(t, team, "agents/skills/targeted/SKILL.md",
+		"---\nname: targeted\ndescription: only for another repo\nrepos: [\"acme/other\"]\n---\n\nOnly for another repo.\n")
+	gitTeam(t, team, "add", "-A")
+	gitTeam(t, team, "commit", "-q", "-m", "team context")
+
+	published, err := teamdocs.PublishedSkills(team)
+	require.NoError(t, err)
+	require.Len(t, published, 1)
+	require.False(t, teamdocs.SkillAppliesToRepo(published[0], "acme/api"),
+		"fixture invariant: a fresh internal walk with the real repo slug must exclude this skill")
+
+	// Discovery already decided this artifact applies here. convergeSkills must
+	// install exactly what it was handed, not silently re-derive applicability
+	// and disagree with its own report.
+	artifact := Artifact{
+		Kind: KindSkill, Name: published[0].Name, Applicable: true,
+		skill: &published[0],
+	}
+
+	outcomes, err := convergeSkills(context.Background(), Request{
+		ProjectRoot: project, RepoSlug: "acme/api", Mode: ModeExplicit,
+	}, Snapshot{Path: team}, []Artifact{artifact})
+	require.NoError(t, err)
+	require.Len(t, outcomes, 1)
+	require.NotEqual(t, StateError, outcomes[0].State,
+		"convergeSkills re-derived team skills internally and disagreed with what discovery already resolved: %+v", outcomes[0])
+	require.Equal(t, StateApplied, outcomes[0].State)
+	require.Equal(t, "sageox-team-targeted", outcomes[0].InstalledAs)
+	require.FileExists(t, filepath.Join(project, ".agents", "skills", "sageox-team-targeted", "SKILL.md"))
+}
+
+// TestConverge_FiltersTeamSkillWhoseReposExcludesThisRepository is the
+// end-to-end proof that sharing the derivation (ox-jr82) did not delete the
+// filtered diagnostic settled decision #2 requires: a team skill whose
+// `repos:` excludes this repository must still surface as StateFiltered, not
+// vanish as if the team published nothing.
+func TestConverge_FiltersTeamSkillWhoseReposExcludesThisRepository(t *testing.T) {
+	project := t.TempDir()
+	gitTeam(t, project, "init", "-q")
+	gitTeam(t, project, "remote", "add", "origin", "https://github.com/acme/api.git")
+	targets, err := skillmanager.CanonicalizeTargets(project, []adapterprotocol.SkillTarget{{
+		Key:        "shared",
+		Root:       ".agents/skills",
+		Format:     adapterprotocol.SkillFormatAgentSkillsV1,
+		Scope:      adapterprotocol.SkillScopeProject,
+		LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+	}})
+	require.NoError(t, err)
+	_, err = skillmanager.Reconcile(project, version.Version, skillmanager.DefaultDesired(targets), targets)
+	require.NoError(t, err)
+
+	team := t.TempDir()
+	gitTeam(t, team, "init", "-q")
+	gitTeam(t, team, "config", "user.email", "test@sageox.ai")
+	gitTeam(t, team, "config", "user.name", "test")
+	gitTeam(t, team, "config", "commit.gpgsign", "false")
+	writeTeamFile(t, team, "agents/skills/deploy/SKILL.md", "---\nname: deploy\ndescription: deploy safely\n---\n\nDeploy safely.\n")
+	writeTeamFile(t, team, "agents/skills/other-repo-only/SKILL.md",
+		"---\nname: other-repo-only\ndescription: not for this repo\nrepos: [\"acme/other\"]\n---\n\nNot for this repo.\n")
+	gitTeam(t, team, "add", "-A")
+	gitTeam(t, team, "commit", "-q", "-m", "team context")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.json"),
+		[]byte(`{"config_version":"2","repo_id":"repo_test","team_id":"team_test","team_name":"Test"}`+"\n"), 0o644))
+	local := fmt.Sprintf("[[team_contexts]]\nteam_id = %q\nteam_name = %q\npath = %q\n", "team_test", "Test", team)
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.local.toml"), []byte(local), 0o600))
+
+	report, err := Converge(context.Background(), Request{
+		ProjectRoot: project, TeamPath: team, RepoSlug: "acme/api", Mode: ModeExplicit,
+	})
+	require.NoError(t, err)
+	require.True(t, report.Converged(), "%+v", report.Outcomes)
+	require.Len(t, report.Outcomes, 2)
+
+	byName := map[string]Outcome{}
+	for _, o := range report.Outcomes {
+		byName[o.Name] = o
+	}
+	require.Equal(t, StateApplied, byName["deploy"].State)
+	require.Equal(t, "sageox-team-deploy", byName["deploy"].InstalledAs)
+	require.Equal(t, StateFiltered, byName["other-repo-only"].State,
+		"a repos:-filtered team skill vanished instead of surfacing as filtered")
+	require.Contains(t, byName["other-repo-only"].Detail, "repos filter")
+}
+
 func TestConvergeRules_EmptyAndPrimeFallbackPaths(t *testing.T) {
 	outcomes, err := convergeRules(context.Background(), Request{
 		ProjectRoot: t.TempDir(), Mode: ModeExplicit,

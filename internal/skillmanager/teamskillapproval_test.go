@@ -2,9 +2,11 @@ package skillmanager
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/teamskills"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/stretchr/testify/require"
@@ -453,4 +455,84 @@ func TestClassifyTeamSkills_NoTeamContextIsNotAnError(t *testing.T) {
 	candidates, err := ClassifyTeamSkills(t.TempDir())
 	require.NoError(t, err)
 	require.Empty(t, candidates)
+}
+
+// TestClassifyTeamSkills_UsesTheOriginSlugNotTheDirectoryName pins the identity
+// half of the agreement asserted by TestClassifyTeamSkills_AgreesWithTheReconcilePath.
+//
+// The failure it prevents: a checkout with no origin remote. ClassifyTeamSkills
+// used repotools.RepoSlug, whose fallback is the working directory's NAME, while
+// catalogForRepo filters with repotools.RepoSlugFromRemote, which has no
+// fallback and returns "". A team skill whose `repos:` list happens to contain
+// the local folder name therefore looked approvable to `ox skills approve` and
+// was simultaneously invisible to the reconcile path — an approval that can
+// never be satisfied, i.e. the "gate that stays closed forever with no way to
+// tell why" the loader comment above warns about.
+//
+// Both subtests share one fixture and differ ONLY in whether an origin remote
+// exists, so a passing pair proves the slug is what decides, not some unrelated
+// discovery gate.
+func TestClassifyTeamSkills_UsesTheOriginSlugNotTheDirectoryName(t *testing.T) {
+	t.Parallel()
+
+	const dirName = "totally-unrelated-folder"
+
+	stage := func(t *testing.T, origin string) string {
+		t.Helper()
+		team := t.TempDir()
+		repo := filepath.Join(t.TempDir(), dirName)
+		require.NoError(t, os.MkdirAll(repo, 0o755))
+		run := func(args ...string) {
+			t.Helper()
+			cmd := exec.Command("git", args...)
+			cmd.Dir = repo
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, "git %v: %s", args, out)
+		}
+		run("init", "-q")
+		if origin != "" {
+			run("remote", "add", "origin", origin)
+		}
+
+		// Inline list is the only form the frontmatter parser accepts, and the
+		// only form cmd/ox/guides/team-rules.md documents.
+		// Two entries on purpose. The first can ONLY be matched by the degraded
+		// directory-name slug; the second is the real owner/repo identity that
+		// repotools.RepoSlugFromRemote derives. One fixture therefore serves both
+		// the defect case and its positive control.
+		writeTeamSkill(t, team, "deploy",
+			"repos: [\""+dirName+"\", \"acme/"+dirName+"\"]\n", nil)
+
+		const teamID = "team_slug_identity_test"
+		require.NoError(t, config.SaveProjectConfig(repo, &config.ProjectConfig{
+			ProjectID: "proj_slug_identity", WorkspaceID: "ws_slug_identity",
+			TeamID: teamID, TeamName: "Slug Identity Team",
+		}))
+		require.NoError(t, config.SaveLocalConfig(repo, &config.LocalConfig{
+			TeamContexts: []config.TeamContext{{
+				TeamID: teamID, TeamName: "Slug Identity Team",
+				Slug: "slug-identity-team", Path: team,
+			}},
+		}))
+		return repo
+	}
+
+	t.Run("no origin: the directory name is not an identity", func(t *testing.T) {
+		t.Parallel()
+		candidates, err := ClassifyTeamSkills(stage(t, ""))
+		require.NoError(t, err)
+		require.Empty(t, candidates,
+			"approval matched a repos: entry against the working directory's name; "+
+				"the reconcile path resolves an empty slug and would never install it")
+	})
+
+	t.Run("origin matches repos: entry", func(t *testing.T) {
+		t.Parallel()
+		repo := stage(t, "https://github.com/acme/"+dirName+".git")
+		candidates, err := ClassifyTeamSkills(repo)
+		require.NoError(t, err)
+		require.Len(t, candidates, 1,
+			"positive control: an origin-derived slug that matches repos: must classify")
+		require.Equal(t, "deploy", candidates[0].Name)
+	})
 }
