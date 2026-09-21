@@ -43,22 +43,21 @@ func TestReadFromOffset_WiredInOneShotMode(t *testing.T) {
 	}
 }
 
+// TestInfoDeclaresOMPInstalledSurfaces proves handleInfo() actually wires
+// adapterprotocol.OMPCapabilities — the canonical source in
+// pkg/adapterprotocol/capabilities.go — into the response, alongside the
+// skill target OMP declares.
 func TestInfoDeclaresOMPInstalledSurfaces(t *testing.T) {
 	info, err := handleInfo()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{
-		adapterprotocol.CapSessionReader:     true,
-		adapterprotocol.CapHookInstaller:     true,
-		adapterprotocol.CapSkillsInstaller:   true,
-		adapterprotocol.CapIncrementalReader: true,
-		adapterprotocol.CapFileWatcher:       true,
-		adapterprotocol.CapSessionImporter:   true,
-		adapterprotocol.CapServeMode:         true,
+	want := make(map[string]bool, len(adapterprotocol.OMPCapabilities))
+	for _, c := range adapterprotocol.OMPCapabilities {
+		want[c] = true
 	}
 	if len(info.Capabilities) != len(want) {
-		t.Fatalf("capabilities = %v, want %v", info.Capabilities, want)
+		t.Fatalf("capabilities = %v, want %v", info.Capabilities, adapterprotocol.OMPCapabilities)
 	}
 	for _, capability := range info.Capabilities {
 		if !want[capability] {

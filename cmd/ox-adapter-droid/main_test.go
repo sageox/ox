@@ -10,32 +10,18 @@ import (
 	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
-// TestHandleInfo_CapabilitiesPinned pins this binary's declared capabilities to
-// the set the cross-agent conformance fixture mirrors
-// (internal/prime/conformance_test.go). Rule projection is declared separately
-// through RuleTargets, not as an imperative capability. If handleInfo() drifts,
-// this fails so the conformance fixture cannot silently fall out of sync.
-//
-// KEEP IN SYNC: the want set below must match the "droid" entry in adapterCaps
-// in internal/prime/conformance_test.go. Adding/removing a capability requires
-// updating BOTH places. Comparison is order-insensitive (a set) so the two
-// fixtures need not list caps in the same order.
+// TestHandleInfo_CapabilitiesPinned proves handleInfo() actually wires
+// adapterprotocol.DroidCapabilities — the canonical source in
+// pkg/adapterprotocol/capabilities.go — into the response. Rule projection is
+// declared separately through RuleTargets, not as an imperative capability.
+// The capability set itself lives in exactly one place now; this test only
+// guards the wiring.
 func TestHandleInfo_CapabilitiesPinned(t *testing.T) {
-	want := []string{
-		adapterprotocol.CapSkillsInstaller,
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapFileWatcher,
-		adapterprotocol.CapServeMode,
-		adapterprotocol.CapSessionImporter,
-	}
-
 	info, err := handleInfo()
 	if err != nil {
 		t.Fatalf("handleInfo() error: %v", err)
 	}
-	assertCapabilitySetsEqual(t, "droid", info.Capabilities, want)
+	assertCapabilitySetsEqual(t, "droid", info.Capabilities, adapterprotocol.DroidCapabilities)
 }
 
 func TestRuleTargets_SingleCanonicalRoot(t *testing.T) {

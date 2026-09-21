@@ -3,6 +3,8 @@ package adapter
 import (
 	"sort"
 	"testing"
+
+	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
 // --- A. Embedded registry parsing ---
@@ -279,41 +281,17 @@ func TestAdapterBinaries_Unique(t *testing.T) {
 
 // --- H. Capability parity with bundled binaries ---
 
-// bundledCapabilities is the ground-truth capability set each bundled
-// adapter's cmd/ox-adapter-<name>/main.go declares in its handleInfo()
-// Capabilities slice. package main is not importable from this test package,
-// so each set below is hand-verified against the binary's source (grep
-// "Capabilities:" in cmd/ox-adapter-<name>/main.go) rather than derived.
-//
-// TRADEOFF: a hermetic table, not a build-and-exec of all ten binaries, keeps
-// this test in the fast tier (`go test ./internal/adapter/...`, no build tag)
-// instead of a ~10-binary-compile slow tier. The repo already accepts this
-// tradeoff for the same drift class: internal/prime/conformance_test.go
-// carries an equivalent adapterCaps fixture, cross-checked against five of
-// these binaries via a per-adapter "CapabilitiesPinned" test in their own
-// main_test.go (claude-code, codex, droid, omp, goose). amp, gemini, opencode,
-// aider, and pi have no such pin test yet — for those five this table is the
-// only guard, so it must be updated by hand whenever their main.go's
-// Capabilities slice changes. tests/adapters/capability_contract_test.go
-// (build tag "slow") separately proves a different thing: that a declared
-// capability is actually wired to a working subcommand, not that
-// registry.yaml agrees with main.go.
-var bundledCapabilities = map[string][]string{
-	"claude-code": {"session_reader", "hook_installer", "skills_installer", "incremental_reader", "file_watcher", "serve_mode", "session_importer", "capture_prior"},
-	"gemini":      {"session_reader", "hook_installer", "skills_installer", "incremental_reader", "file_watcher", "serve_mode", "session_importer"},
-	"codex":       {"session_reader", "hook_installer", "skills_installer", "incremental_reader", "file_watcher", "serve_mode", "session_importer"},
-	"amp":         {"session_reader", "session_importer", "hook_installer", "incremental_reader", "file_watcher", "serve_mode", "skills_installer"},
-	"opencode":    {"session_reader", "hook_installer", "incremental_reader", "session_importer", "serve_mode", "skills_installer"}, // no file_watcher: see main.go
-	"pi":          {"session_reader", "hook_installer", "incremental_reader", "file_watcher", "session_importer", "serve_mode", "skills_installer"},
-	"omp":         {"session_reader", "hook_installer", "skills_installer", "incremental_reader", "file_watcher", "session_importer", "serve_mode"},
-	"aider":       {"session_reader", "hook_installer", "incremental_reader", "file_watcher", "session_importer", "serve_mode"}, // no skills_installer: aider has no SkillTargets
-	"droid":       {"session_reader", "hook_installer", "incremental_reader", "file_watcher", "serve_mode", "session_importer", "skills_installer"},
-	"goose":       {"session_reader", "hook_installer", "incremental_reader", "session_importer", "capture_prior", "serve_mode", "skills_installer"}, // no file_watcher: virtual "goose:<id>" handle
-}
-
 // TestBundledAdapters_CapabilitiesMatchBinary verifies registry.yaml — what
 // `ox adapter list` shows users — advertises exactly the capabilities each
 // bundled adapter binary declares, no more and no fewer.
+//
+// registry.yaml is data consumed at runtime via go:embed; it cannot import
+// Go, so it cannot itself resolve from adapterprotocol.BundledAdapterCapabilities
+// (that map is now the single source every bundled adapter's own main.go
+// compiles against directly). This test is the one unavoidable "does X agree
+// with Y" check that binds the YAML artifact to that source; it is not
+// license to add another one elsewhere.
+//
 // Failure prevented: `ox adapter list` silently drifting from what a binary
 // can actually do (ox-ii9q). Before this test, registry.yaml omitted
 // skills_installer for nine of the ten bundled adapters despite their
@@ -335,9 +313,9 @@ func TestBundledAdapters_CapabilitiesMatchBinary(t *testing.T) {
 		}
 		a := a
 		t.Run(a.Name, func(t *testing.T) {
-			want, ok := bundledCapabilities[a.Name]
+			want, ok := adapterprotocol.BundledAdapterCapabilities[a.Name]
 			if !ok {
-				t.Fatalf("adapter %q is bundled but has no entry in bundledCapabilities — add its ground-truth set", a.Name)
+				t.Fatalf("adapter %q is bundled but has no entry in adapterprotocol.BundledAdapterCapabilities — add its ground-truth set there", a.Name)
 			}
 			assertCapabilitySetsEqual(t, a.Name, a.Capabilities, want)
 		})

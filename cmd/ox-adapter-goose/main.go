@@ -53,17 +53,7 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		DisplayName:     adapterDisplay,
 		Version:         adapterVersion,
 		Type:            adapterprotocol.TypeSession,
-		Capabilities: []string{
-			adapterprotocol.CapSessionReader,
-			adapterprotocol.CapHookInstaller,
-			adapterprotocol.CapIncrementalReader,
-			adapterprotocol.CapSessionImporter,
-			adapterprotocol.CapCapturePrior,
-			adapterprotocol.CapServeMode,
-			adapterprotocol.CapSkillsInstaller,
-		},
-		// No CapFileWatcher: the session handle is virtual ("goose:<id>"), so
-		// there is no path for fsnotify to watch. Recording is hook-driven.
+		Capabilities:    adapterprotocol.GooseCapabilities,
 		// Goose reads .agents/skills at project scope, with .goose/skills as a legacy path.
 		// One root, never a fan-out: a skill copied into several of an agent's
 		// discovery paths is several files to keep in sync and several answers

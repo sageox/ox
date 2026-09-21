@@ -242,11 +242,35 @@ func HasNativeProjections(projectRoot string) bool {
 // session start never duplicates an owned native file while convergence is
 // repairing stale bytes.
 func ForPrime(projectRoot, agent string, rules []teamdocs.TeamRule) []teamdocs.TeamRule {
+	// Protection is probed at most once, lazily, and only if some rule actually
+	// has a native file worth suppressing. Reconcile uses this same probe, so the
+	// two halves of the exactly-once contract cannot answer differently — a
+	// cheaper second signal here would be a new source of truth, which is the
+	// defect class this whole path keeps producing.
+	protected, probed := false, false
+	rootProtected := func(p policy) bool {
+		if !probed {
+			probed = true
+			protected = managedPathIgnored(context.Background(), projectRoot,
+				filepath.ToSlash(filepath.Join(p.Root, managedPrefix+"probe"+p.Extension)))
+		}
+		return protected
+	}
+
 	out := make([]teamdocs.TeamRule, 0, len(rules))
 	for _, rule := range rules {
 		mode := ModeForAgent(agent, rule)
 		if mode == DeliveryNative && nativePresent(projectRoot, agent, rule) {
-			continue
+			// A native file ox owns is only "delivered" while Reconcile can still
+			// maintain it. Once the root loses its ignore rule, Reconcile refuses
+			// the whole root and the file freezes at whatever text it last held —
+			// so suppressing prime here would strand the rule on a stale copy
+			// forever, reaching the coworker through neither surface honestly.
+			// Falling through delivers it twice in that state, which is the safe
+			// direction: duplicated beats silently frozen.
+			if p, ok := policyFor(agent); !ok || rootProtected(p) {
+				continue
+			}
 		}
 		copy := rule
 		if mode == DeliveryPrimeIndexed || len(rule.Globs) > 0 {

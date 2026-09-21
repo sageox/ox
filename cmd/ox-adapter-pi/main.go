@@ -67,15 +67,7 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		DisplayName:     adapterDisplay,
 		Version:         adapterVersion,
 		Type:            adapterprotocol.TypeSession,
-		Capabilities: []string{
-			adapterprotocol.CapSessionReader,
-			adapterprotocol.CapHookInstaller,
-			adapterprotocol.CapIncrementalReader,
-			adapterprotocol.CapFileWatcher,
-			adapterprotocol.CapSessionImporter,
-			adapterprotocol.CapServeMode,
-			adapterprotocol.CapSkillsInstaller,
-		},
+		Capabilities:    adapterprotocol.PiCapabilities,
 		// pi reads .agents/skills in the cwd and its ancestors, plus .pi/skills.
 		// One root, never a fan-out: a skill copied into several of an agent's
 		// discovery paths is several files to keep in sync and several answers
