@@ -1,5 +1,14 @@
 # Native-First, Project-Scoped Asset Inventory
 
+> **Amended by [ADR-032](../adr/ADR-032-pack-catalog-team-scoped.md) (2026-09-21).**
+> This document is written project-scoped throughout, and that remains correct for
+> ox's OWN runtime assets — the `ox-cli-*` relays, the lifecycle commands, and the
+> committed `sageox` on-ramp. It is no longer correct for optional catalog content:
+> a team selects packs once, into Team Context, and repositories never select
+> catalog content themselves. `ox skills catalog | install | uninstall` were
+> withdrawn before release. The full rewrite is tracked as `ox-hvnc.9`.
+
+
 SageOx authors each playbook once in the portable Agent Skills layout:
 
 ```text
