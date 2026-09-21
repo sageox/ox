@@ -878,6 +878,9 @@ func mapEntriesToTyped(mapEntries []map[string]any) []session.Entry {
 		if id, ok := m["call_id"].(string); ok {
 			entry.CallID = id
 		}
+		if isError, ok := m["is_error"].(bool); ok {
+			entry.IsError = isError
+		}
 
 		entries = append(entries, entry)
 	}

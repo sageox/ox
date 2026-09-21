@@ -221,8 +221,8 @@ The footer provides session summary statistics.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `type` | string | yes | Always `"footer"` |
-| `closed_at` | ISO8601 | yes | When the session was closed |
-| `entry_count` | integer | yes | Total entries written (excluding header/footer) |
+| `closed_at` | ISO8601 | no | When the session was closed. Written by the close-time footer; a carrier footer may omit it |
+| `entry_count` | integer | no | Total entries written (excluding header/footer). Not emitted by every writer; readers MUST tolerate its absence |
 | `native_sessions` | array | no | Every native coding-agent session id the recording observed by the time it stopped, same shape as the header field. Appended by the finalize door that ended a live recording (explicit stop, SessionEnd hook, `/clear`, daemon reclaim) so a daemon-side finalize can copy it into `meta.json` after the recording-state file is gone. Readers prefer this over the header's list |
 | `stopped_at` | ISO8601 | no | When the recording stopped, as recorded by the door that appended this footer. Readers prefer this over the header's value |
 

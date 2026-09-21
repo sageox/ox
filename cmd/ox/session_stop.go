@@ -93,10 +93,12 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 	entries := make([]session.Entry, 0, len(rawEntries))
 	for _, raw := range rawEntries {
 		entry := session.Entry{
-			Timestamp: raw.Timestamp,
-			Content:   raw.Content,
-			ToolName:  raw.ToolName,
-			ToolInput: raw.ToolInput,
+			Timestamp:  raw.Timestamp,
+			Content:    raw.Content,
+			ToolName:   raw.ToolName,
+			ToolInput:  raw.ToolInput,
+			ToolOutput: raw.ToolOutput,
+			IsError:    raw.IsError,
 			// the one key shared by the call entry, its result, the native
 			// transcript and the agent's trace — never drop it on this path
 			CallID: raw.CallID,

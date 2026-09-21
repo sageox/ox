@@ -171,6 +171,43 @@ func TestStampRawCarrier(t *testing.T) {
 		})
 	}
 
+	t.Run("footers merge per field", func(t *testing.T) {
+		rawPath := filepath.Join(t.TempDir(), "raw.jsonl")
+		closeFooter := `{"type":"footer","closed_at":"2026-09-21T11:00:00Z","entry_count":2,"exit_reason":"interrupted"}` + "\n"
+		require.NoError(t, os.WriteFile(rawPath, []byte(native+body+closeFooter), 0o600))
+		require.NoError(t, StampRawCarrier(rawPath, CarrierStamp{NativeSessions: sessions, StoppedAt: at}))
+		stored, err := ReadSessionFromPath(rawPath)
+		require.NoError(t, err)
+		assert.Equal(t, "interrupted", stored.Footer["exit_reason"], "fields of the earlier footer survive the carrier")
+		assert.Equal(t, float64(2), stored.Footer["entry_count"])
+		assert.Equal(t, at.Format(time.RFC3339Nano), stored.Footer["closed_at"], "the later footer wins the fields it carries")
+		require.NotNil(t, stored.Meta.StoppedAt)
+		assert.True(t, stored.Meta.StoppedAt.Equal(at))
+	})
+
+	t.Run("a present empty list overrides, an absent one does not", func(t *testing.T) {
+		rawPath := filepath.Join(t.TempDir(), "raw.jsonl")
+		headerWithIDs := `{"type":"header","metadata":{"version":"1.0","created_at":"2026-09-21T09:00:00Z","native_sessions":[{"id":"cc-old","first_seen":"2026-09-21T09:00:00Z","last_seen":"2026-09-21T09:00:00Z"}]}}` + "\n"
+		require.NoError(t, os.WriteFile(rawPath, []byte(headerWithIDs+body), 0o600))
+
+		// a door with no ids of its own writes no list at all ...
+		require.NoError(t, StampRawCarrier(rawPath, CarrierStamp{NativeSessions: []lfs.NativeSession{}, StoppedAt: at}))
+		stored, err := ReadSessionFromPath(rawPath)
+		require.NoError(t, err)
+		require.Len(t, stored.Meta.NativeSessions, 1, "an omitted list leaves the header's ids alone")
+		assert.Equal(t, "cc-old", stored.Meta.NativeSessions[0].ID)
+
+		// ... whereas an explicit empty list on disk is a deliberate override
+		f, err := os.OpenFile(rawPath, os.O_APPEND|os.O_WRONLY, 0o600)
+		require.NoError(t, err)
+		_, err = f.WriteString(`{"type":"footer","native_sessions":[]}` + "\n")
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+		stored, err = ReadSessionFromPath(rawPath)
+		require.NoError(t, err)
+		assert.Empty(t, stored.Meta.NativeSessions, "a present empty list overrides the earlier ids")
+	})
+
 	t.Run("nothing to carry writes nothing", func(t *testing.T) {
 		rawPath := filepath.Join(t.TempDir(), "raw.jsonl")
 		require.NoError(t, os.WriteFile(rawPath, []byte(native+body), 0o600))

@@ -1007,6 +1007,9 @@ func rawEntryMap(entry session.Entry) map[string]any {
 	if entry.ToolOutput != "" {
 		data["tool_output"] = entry.ToolOutput
 	}
+	if entry.IsError {
+		data["is_error"] = true
+	}
 	if entry.CallID != "" {
 		data["call_id"] = entry.CallID
 	}

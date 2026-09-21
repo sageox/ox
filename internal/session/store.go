@@ -926,7 +926,7 @@ func (s *Store) readSessionFile(filePath, sessionType, sessionName string) (*Sto
 				session.Meta = ParseStoreMeta(metadata)
 			}
 		case "footer":
-			session.Footer = entry
+			session.Footer = mergeFooter(session.Footer, entry)
 			foldFooterCarrier(session.Meta, entry)
 		default:
 			// check for _meta header format (alternative header style)
@@ -999,7 +999,7 @@ func ReadSessionFromPath(filePath string) (*StoredSession, error) {
 				session.Meta = ParseStoreMeta(metadata)
 			}
 		case "footer":
-			session.Footer = entry
+			session.Footer = mergeFooter(session.Footer, entry)
 			foldFooterCarrier(session.Meta, entry)
 		default:
 			// check for _meta header format (alternative header style)
@@ -1078,22 +1078,64 @@ func ReadHeaderSessionID(path string) string {
 	return meta.SessionID
 }
 
+// mergeFooter folds a footer record into the footer accumulated so far. A
+// file can carry more than one footer — the close-time footer with
+// entry_count or exit_reason, then a carrier footer a finalize door appended
+// (StampRawCarrier) — and the documented rule is last value per FIELD, so a
+// later footer must never erase fields it does not itself carry.
+func mergeFooter(acc, footer map[string]any) map[string]any {
+	if acc == nil {
+		acc = make(map[string]any, len(footer))
+	}
+	for k, v := range footer {
+		acc[k] = v
+	}
+	return acc
+}
+
 // foldFooterCarrier copies the recording-carrier fields a finalize door
 // appended on a footer record (StampRawCarrier) into meta: native_sessions
 // and stopped_at. A later footer wins per field; a footer without them
-// leaves meta untouched. Nothing is folded into a nil meta — a raw.jsonl
-// with no header is already unusable to every consumer of these fields.
+// leaves meta untouched. Presence is what counts, not length: a footer that
+// carries an explicit empty list is a statement that the recording observed
+// no ids and overrides an earlier list, while a footer that omits the key —
+// or carries one that does not decode — leaves the earlier list alone.
+// Nothing is folded into a nil meta — a raw.jsonl with no header is already
+// unusable to every consumer of these fields.
 func foldFooterCarrier(meta *StoreMeta, footer map[string]any) {
 	if meta == nil {
 		return
 	}
-	carrier := ParseStoreMeta(footer)
-	if len(carrier.NativeSessions) > 0 {
-		meta.NativeSessions = carrier.NativeSessions
+	if sessions, present := decodeNativeSessions(footer); present {
+		meta.NativeSessions = sessions
 	}
+	carrier := ParseStoreMeta(footer)
 	if carrier.StoppedAt != nil {
 		meta.StoppedAt = carrier.StoppedAt
 	}
+}
+
+// decodeNativeSessions returns the native_sessions list carried by m and
+// whether the key was present AND decoded. Decoding goes through JSON so the
+// same struct tags that wrote the list read it back; a malformed list reports
+// absent so the rest of the metadata is still usable.
+func decodeNativeSessions(m map[string]any) ([]lfs.NativeSession, bool) {
+	raw, ok := m["native_sessions"]
+	if !ok || raw == nil {
+		return nil, false
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil, false
+	}
+	var sessions []lfs.NativeSession
+	if err := json.Unmarshal(data, &sessions); err != nil {
+		return nil, false
+	}
+	if sessions == nil {
+		sessions = []lfs.NativeSession{}
+	}
+	return sessions, true
 }
 
 // ParseStoreMeta converts a map to StoreMeta struct.
@@ -1155,13 +1197,8 @@ func ParseStoreMeta(m map[string]any) *StoreMeta {
 	// tags that wrote them read them back (no hand-rolled field mapping to
 	// drift). A malformed list is dropped rather than failing the whole
 	// header — the rest of the metadata is still worth having.
-	if raw, ok := m["native_sessions"]; ok && raw != nil {
-		if data, err := json.Marshal(raw); err == nil {
-			var sessions []lfs.NativeSession
-			if err := json.Unmarshal(data, &sessions); err == nil {
-				meta.NativeSessions = sessions
-			}
-		}
+	if sessions, present := decodeNativeSessions(m); present && len(sessions) > 0 {
+		meta.NativeSessions = sessions
 	}
 	// RFC3339Nano also accepts a plain RFC3339 value, so one parse covers
 	// both the nanosecond form ox writes and a hand-written second-precision one.

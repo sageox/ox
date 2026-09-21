@@ -36,8 +36,10 @@ type CarrierStamp struct {
 // The record is a footer ({"type":"footer",...}): the one line kind every
 // raw.jsonl reader already treats as framing rather than content, so a
 // consumer that predates the carrier skips it instead of rendering it as a
-// turn. A file may end up with more than one footer; readers take the last
-// value of each field.
+// turn. A file may end up with more than one footer; readers merge them and
+// take the last value of each field. An empty native-session list is never
+// written — a present empty list reads as a deliberate override, and a door
+// that merely has no ids must not erase ones an earlier line carried.
 //
 // Every byte goes through RawWriter like any other raw.jsonl write; the
 // only content is ox-minted ids and timestamps, never conversation text.
@@ -62,7 +64,7 @@ func StampRawCarrier(rawPath string, stamp CarrierStamp) error {
 		record["closed_at"] = at
 		record["stopped_at"] = at
 	}
-	if stamp.NativeSessions != nil {
+	if len(stamp.NativeSessions) > 0 {
 		data, err := json.Marshal(stamp.NativeSessions)
 		if err != nil {
 			return fmt.Errorf("stamp raw carrier: encode native sessions: %w", err)

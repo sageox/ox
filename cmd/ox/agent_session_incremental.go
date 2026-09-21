@@ -210,6 +210,9 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		if callID, ok := rawMap["call_id"].(string); ok {
 			entry.CallID = callID
 		}
+		if isError, ok := rawMap["is_error"].(bool); ok {
+			entry.IsError = isError
+		}
 		sessionEntries = append(sessionEntries, entry)
 	}
 

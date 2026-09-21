@@ -543,6 +543,9 @@ func TestRawEntryMap(t *testing.T) {
 		{name: "tool call and result carry the call id",
 			entry: session.Entry{Type: session.SessionEntryTypeTool, Timestamp: ts, ToolName: "Bash", ToolInput: "go test", ToolOutput: "ok", CallID: "toolu_1"},
 			want:  map[string]any{"type": "tool", "content": "", "timestamp": ts, "tool_name": "Bash", "tool_input": "go test", "tool_output": "ok", "call_id": "toolu_1"}},
+		{name: "a failed result keeps its failure flag",
+			entry: session.Entry{Type: session.SessionEntryTypeTool, Timestamp: ts, ToolOutput: "exit status 1", IsError: true, CallID: "toolu_2"},
+			want:  map[string]any{"type": "tool", "content": "", "timestamp": ts, "tool_output": "exit status 1", "is_error": true, "call_id": "toolu_2"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, rawEntryMap(tc.entry))
@@ -660,7 +663,7 @@ func TestProcessSession_WritesCallIDAndCarrier(t *testing.T) {
 	appendLines(t, sourceFile,
 		`{"type":"user","timestamp":"`+at.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"Run the tests"}}`,
 		`{"type":"assistant","timestamp":"`+at.Add(time.Second).Format(time.RFC3339Nano)+`","message":{"role":"assistant","content":[{"type":"tool_use","id":"`+callID+`","name":"Bash","input":{"command":"go test ./..."}}]}}`,
-		`{"type":"user","timestamp":"`+at.Add(2*time.Second).Format(time.RFC3339Nano)+`","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"`+callID+`","content":"ok"}]}}`,
+		`{"type":"user","timestamp":"`+at.Add(2*time.Second).Format(time.RFC3339Nano)+`","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"`+callID+`","content":"FAIL: exit status 1","is_error":true}]}}`,
 	)
 	stopped := time.Now().UTC().Truncate(time.Second)
 	state := &session.RecordingState{
@@ -680,11 +683,13 @@ func TestProcessSession_WritesCallIDAndCarrier(t *testing.T) {
 	assert.Equal(t, "cc-legacy-1", stored.Meta.NativeSessions[0].ID)
 	require.NotNil(t, stored.Meta.StoppedAt)
 	assert.True(t, stored.Meta.StoppedAt.Equal(stopped))
-	var paired int
+	var paired []map[string]any
 	for _, e := range stored.Entries {
 		if e["call_id"] == callID {
-			paired++
+			paired = append(paired, e)
 		}
 	}
-	assert.Equal(t, 2, paired, "the tool call and its result both carry the call id: %v", stored.Entries)
+	require.Len(t, paired, 2, "the tool call and its result both carry the call id: %v", stored.Entries)
+	assert.Equal(t, "FAIL: exit status 1", paired[1]["tool_output"], "a failed result keeps its output on the legacy path")
+	assert.Equal(t, true, paired[1]["is_error"], "a failed result keeps its failure flag on the legacy path")
 }
