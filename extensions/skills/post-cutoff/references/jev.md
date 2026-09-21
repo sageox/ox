@@ -121,7 +121,7 @@ stop and consider Jev before writing another small LLM call.
 | Is this failure environmental or a real product bug? | **Excellent** | classification |
 | Which subsystem owns this issue? | **Excellent** | routing |
 | Is this log event worth investigating? | **Excellent** | cheap, very high volume |
-| Should an agent wake up at all? | **Excellent** | the cheapest possible gate |
+| Should an agent wake up at all? | **Untried** | shape fits, but no published implementation exists — the nearest analogue is a live act-vs-idle gate |
 | Which model should handle this task? | **Excellent** | model routing |
 | Does this issue duplicate another? | **Good** | `noul` or `score` |
 | Does this PR satisfy rubric criterion X? | **Good** | independent per-criterion decisions |
@@ -133,7 +133,58 @@ stop and consider Jev before writing another small LLM call.
 **The research trigger, stated plainly:** when a plan calls for *intuition* or a *quick
 routing decision*, evaluate Jev. When it calls for *reasoning*, do not.
 
-### Named candidates, not yet ruled on
+## Field-tested patterns, with numbers
+
+Published, independently-measured uses. Grades: **A** = the project's own code/docs,
+**B** = independent practitioner with methodology.
+
+| Pattern | Shape | Measured | Grade |
+|---|---|---|---|
+| **Gate an agent's "done" claim** at the stop hook | 3 `noul` + 1 `choice` | AUROC **0.976** vs 0.777 for a wording baseline; 346ms p50; $0.00005/question | A/B |
+| **Pre-execution tool-call risk gate** (allow / ask / deny) | `choice` + `noul` + `score` | 3 holds per 1,000 calls over 18,075 guarded calls; rule violations **6 → 0** across 150 paired runs | A/B |
+| **Model / tier routing** | `choice` over tiers | **95.0% vs 73.75%** tier match against a Haiku classifier; 5.43x faster; **96% cheaper** | B |
+| **Replace an LLM judge at 100% sampling** | `noul`/`score` per rubric item | **91.5% agreement** with Claude Fable 5.1 at **$160/M graded answers vs $33,000/M**; separately 98.3% vs a trained classifier's 98.4% on 18,514 emails | B |
+| **Live-stream salience — act now vs wait** | `noul is_command` + `noul complete` + silence timer | **300–550ms** per decision, **$0.00008**/request, 2–4 requests per spoken sentence | A |
+| **Per-sentence scoring of a live transcript** | 5 `noul` per sentence | 90-minute session: 1,191 calls, 5,955 answers, **$0.0497 total**, ~0.4s median | A |
+| **Browser/UI agent navigation** | two `choice` heads, one round trip | CDP calls **1,092 → 101** (~91% fewer); median 9.45s → 7.09s | A |
+| **Mobile QA assertions without an LLM judge** | `choice` over enumerated actions | full test run **14s**, **$0.0023** | B |
+| **Context compaction** (keep / truncate / drop) | 2 `noul` per tool-call pair | pattern clear; **no benchmarks published** — the author's own guidance is to use something else if reduction is under 25% | A pattern / unmeasured |
+| **Bulk row filtering** | `noul` battery + `score` | **1,500+ rows/sec**, ~$4.20 per 100M tokens | A |
+| **Log/event triage** | `noul` + `score` + `choice`, one call per collapsed batch | design published; **no accuracy figures** | A pattern / unmeasured |
+
+**Our mural case has a published analogue.** `jev-canvas` does live voice → canvas with
+exactly the shape we would need: a `noul` for "is this actionable", a second `noul` for
+"is the utterance finished", a `choice` for what/where, and a ~900ms silence wait before
+committing. At 300–550ms and $0.00008 a decision, the economics of deciding *when* to
+draw on a live mural are already demonstrated by someone else.
+
+## Gotchas that will bite you
+
+These are not in the launch material and you would not guess them. Each is independently
+measured.
+
+- **Option position changes the answer.** First-position accuracy **88%** vs
+  fourth-position **57.4%** across 24 permutations of the same question. Randomize or
+  fix option order deliberately, and never let it carry meaning.
+- **Questions in one request cannot consume each other's answers.** Batching is free but
+  the questions must be *independent*. In one study the prerequisite answers were right
+  and the final dependent action wrong in **25 of 25 calls** — a failure that looks like
+  reasoning and is not. Chain across requests, or fold the logic into your own code.
+- **It cannot abstain.** There is no "I don't know"; it returns the least-wrong option.
+  The abstain band is yours to build out of the probability — see the design moves above.
+  This is the single most important consequence of the typed-output design.
+- **Lost in the middle.** A fact placed mid-state was found **1 of 6** times versus 6 of
+  6 at the start or end. Put the decisive material at an edge.
+- **It cannot extract values.** The API rejects anything that is not `noul`/`choice`/
+  `score` — no names, amounts, dates or IDs. Propose candidates and validate with a
+  `noul` instead.
+- **Graded relevance ranking is conditional.** Passes 6/6 calibration gates on one
+  corpus and fails 4/6 on another; two-decimal quantization creates ties. Verify on
+  *your* data before ranking with it.
+- **Never let it make a permission decision.** State is not treated as hostile; injection
+  in a ticket body moves the answer. Enforce authorization in code, before the call.
+
+## Named candidates, not yet ruled on
 
 Carried so the next person starts here rather than from scratch:
 
@@ -142,7 +193,8 @@ Carried so the next person starts here rather than from scratch:
 - **Browser agents for testing** — typed assertions and navigation choices instead of an
   LLM judge (our Attest-shaped work).
 - **Real-time topic extraction and salience** — deciding *when* something in a live
-  conversation is worth acting on, e.g. when and what to draw on a live mural.
+  conversation is worth acting on, e.g. when and what to draw on a live mural. **Start
+  from the `jev-canvas` precedent above rather than from scratch.**
 - **Model routing** — picking the model per task.
 
 ## What it actually is
@@ -180,7 +232,7 @@ do not cite their architecture as though it were.
 | "Mathematically cannot hallucinate" | A (vendor) | **It cannot emit a value outside the option set you supplied.** The output head *is* the type, so type errors are impossible by construction. This says nothing about whether the chosen value is correct. A confidently wrong boolean is still wrong. |
 | "Calibrated" | A (vendor) | Qualitative only — **TypeSafe publishes no ECE, no Brier score, no reliability diagram.** The `confidence` field is not even a model output; it is a concentration statistic derived from the distribution, and the docs say you are "never locked into our definition." |
 | "40–200x faster" (homepage: 193.6x / 444.6x) | A as a *claim* | Vendor-constructed: their workflows, built by their model-capabilities team, timed from their laptops, against LLMs wrapped in their own comparison shim. **All of this is disclosed by TypeSafe, to their credit**, along with the note that the gains are "on the higher end of real world gains." |
-| Independent speed/cost | B | ~5x faster and ~27x cheaper than Haiku 4.5 on one published benchmark; 5–18x reported by one adopter. **Plan with 5–25x.** |
+| Independent speed/cost | B | ~5x faster and ~27x cheaper than Haiku 4.5 on one published benchmark; 5–18x reported by one adopter. **Plan with 3–11x faster and 20–100x cheaper** — that is where every independent measurement lands. |
 | $0.042 / M input tokens, output free | A | Confirmed on the pricing page. No documented free tier. TypeSafe concedes it "can't prove the pricing isn't subsidized." |
 | "Not trained on customer requests or responses" | A | Documented and unambiguous. **Zero data retention is a separate, enterprise-only commitment under DPA** — it is not the default. |
 | Accuracy | B | On TypeSafe's own four-workflow eval it lands **at or below** frontier models. Accuracy is explicitly not the pitch. |
@@ -256,8 +308,9 @@ wins concentrate where the state is compact and the call count is high.
   availability; it does not commit to any.
 - **SDKs: Python and JavaScript/TypeScript only. No official Go SDK and none
   announced.** The wire format is three JSON shapes with no streaming and no tool loop,
-  so writing a small client is defensible and lower-risk than adopting a week-old
-  unaffiliated repository.
+  so writing a small client is a proven path rather than a gamble — `agent-beacon` is a
+  Go project that simply POSTs to `/v1/systemone` and does fine. Community `typesafe-go`
+  and `typesafe-java` clients also exist, unaffiliated.
 - **Pin the version.** `jev-latest` is a moving alias. Pin an explicit version anywhere
   decisions are cached, persisted, or compared over time.
 - **Errors:** 401 and 422 are your bug — fail loud, do not retry. 429 and 529 retry with
