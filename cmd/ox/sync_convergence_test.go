@@ -364,6 +364,7 @@ func TestExecuteSyncConvergence_RepoSlugUsesCanonicalOriginNotDirectoryNameFallb
 
 func TestSyncHelp_ExplainsAutomation(t *testing.T) {
 	require.Contains(t, syncCmd.Short, "rarely needed")
+	require.Contains(t, syncCmd.Long, "The background daemon automatically")
 }
 
 func TestConvergeAfterSessionBoundary_AppliesPendingTeamContent(t *testing.T) {
