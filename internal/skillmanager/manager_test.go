@@ -52,6 +52,27 @@ func fakeSkill(version string, suffix string) skills.Skill {
 	return skills.Skill{Name: "test-skill", Content: files[0].Content, Files: files, Version: version}
 }
 
+func TestIsTeamOwnedPathRequiresTargetContainment(t *testing.T) {
+	target := sharedTarget()
+	targets := map[string]adapterprotocol.SkillTarget{target.Key: target}
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "contained Team Skill", path: ".agents/skills/sageox-team-deploy/SKILL.md", want: true},
+		{name: "contained user skill", path: ".agents/skills/deploy/SKILL.md", want: false},
+		{name: "reserved prefix outside target", path: ".claude/sageox-team-deploy/SKILL.md", want: false},
+		{name: "lexical escape carrying prefix", path: ".agents/skills/../../sageox-team-deploy/SKILL.md", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := managedFile{Target: target.Key, Path: tt.path}
+			require.Equal(t, tt.want, isTeamOwnedPath(targets, file))
+		})
+	}
+}
+
 func TestCanonicalizeTargetsDeduplicatesSharedProjection(t *testing.T) {
 	repo := t.TempDir()
 	codex := sharedTarget()

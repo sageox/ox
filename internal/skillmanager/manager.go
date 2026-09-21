@@ -807,6 +807,11 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 				// reported. Customizing means forking to a name of your own OUTSIDE
 				// the prefixes.
 				//
+				// This name-only grant is safe ONLY because the skill-root and file
+				// containment checks at the top of this loop have already proved path
+				// stays beneath target.Root. IsReclaimableName does not inspect a path;
+				// never reuse this arm before those checks or without an equivalent.
+				//
 				// `locked` and `migrationOwned` earn it by RECORD: this exact file has
 				// a lockfile digest, or the skill verified against a legacy stamp or
 				// the recovery journal above. That is what keeps an unprefixed catalog
@@ -2153,9 +2158,14 @@ func conflictSkills(root string, conflicts []Conflict) []string {
 
 // isTeamOwnedPath reports whether a managed file belongs to a team-sourced
 // skill, by reading the skill directory name out of the path under its target's
-// root. Keyed on the reserved prefix rather than on provenance recorded in the
+// root. skillName is the containment gate: an out-of-root path returns "" and
+// can never earn Team ownership from a prefix elsewhere in the path. The prefix
+// test below classifies only that already-contained first path segment.
+//
+// Keyed on the reserved prefix rather than on provenance recorded in the
 // lockfile, because the lockfile does not record provenance and adding it would
-// change the committed half.
+// change the committed half. Keep the containment gate and prefix classification
+// together; the prefix alone is not a resolved-path ownership proof.
 func isTeamOwnedPath(targetByKey map[string]adapterprotocol.SkillTarget, file managedFile) bool {
 	target, ok := targetByKey[file.Target]
 	if !ok {
