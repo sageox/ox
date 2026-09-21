@@ -171,10 +171,10 @@ func OxCapabilities() []Capability {
 }
 
 // additiveSkills names on-disk skills that are intentionally OUTSIDE the
-// conformance table in OxCapabilities(). They are additive Layer-2 ergonomics:
-// a Claude-only skill whose deterministic floor is already carried by a separate
-// floor-class entry, so the skill itself is not a conformance surface (its
-// absence on Codex/Droid is the documented additive case, not a regression).
+// conformance table in OxCapabilities(). Most are additive Layer-2 ergonomics:
+// a skill whose deterministic floor is already carried by a separate floor-class
+// entry. The allowlist also holds explicitly opt-in catalog skills, whose absence
+// from an adapter is a project choice rather than a conformance regression.
 //
 // Keeping the allowlist explicit closes the disk→table direction of the
 // conformance contract: TestEveryOnDiskSurfaceIsAccounted walks the commands and
@@ -184,6 +184,7 @@ func OxCapabilities() []Capability {
 //
 // The map value documents WHY each skill is additive rather than a table row.
 var additiveSkills = map[string]string{
+	"post-cutoff":          "explicitly opt-in catalog knowledge skill; it is not part of the default cross-agent capability floor",
 	"ox-cli-consult":       "additive Layer-2 ergonomics; its deterministic floor is the consult-first floor entry (ConsultRoutes), so it is not a separate conformance surface",
 	"ox-cli-decision":      "additive Layer-2 ergonomics; its deterministic floor is the decision-record-guidance floor entry plus the consult-first decision route, so it is not a separate conformance surface",
 	"ox-cli-skill-manager": "native Agent Skills lifecycle guidance; the deterministic installer and ownership rules live in ox CLI code rather than this playbook",
