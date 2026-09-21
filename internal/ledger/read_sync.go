@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha1" //nolint:gosec // Git object identity uses Git's SHA-1 blob format.
 	"crypto/sha256"
@@ -554,6 +555,11 @@ func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir stri
 			}
 		}
 	}
+	blobs, err := startReadBlobs(ctx, transport, dir)
+	if err != nil {
+		return nil, err
+	}
+	defer blobs.close()
 	var files []readFile
 	for _, entry := range strings.Split(tree, "\x00") {
 		if err := ctx.Err(); err != nil {
@@ -619,19 +625,8 @@ func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir stri
 			} else if len(file.pointer) != 0 {
 				mismatch = missingHydration(ReadFailureDetail{Reason: "nested_stub", Path: name})
 			}
-			blobSize, err := runReadGit(ctx, transport, false, dir, "cat-file", "-s", file.oid)
-			if err != nil {
-				return nil, err
-			}
-			n, err := strconv.ParseInt(blobSize, 10, 64)
-			if err != nil || n > 1024 {
-				return nil, mismatch
-			}
-			cmd, err := transport.LocalCommand(ctx, dir, "cat-file", "blob", file.oid)
-			if err != nil {
-				return nil, err
-			}
-			blob, err := cmd.Output()
+			// A blob too large to be a pointer comes back nil, which does not parse.
+			blob, err := blobs.small(file.oid, 1024)
 			if err != nil {
 				return nil, err
 			}
@@ -645,6 +640,70 @@ func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir stri
 		files = append(files, file)
 	}
 	return files, nil
+}
+
+// readBlobs answers one readFiles pass's object lookups through a single
+// `git cat-file --batch`, instead of two Git processes per hydrated file
+// (ox #1022).
+type readBlobs struct {
+	cmd *exec.Cmd
+	in  io.WriteCloser
+	out *bufio.Reader
+}
+
+func startReadBlobs(ctx context.Context, transport *gitserver.ReadTransport, dir string) (*readBlobs, error) {
+	cmd, err := transport.LocalCommand(ctx, dir, "cat-file", "--batch")
+	if err != nil {
+		return nil, err
+	}
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return &readBlobs{cmd: cmd, in: in, out: bufio.NewReader(out)}, nil
+}
+
+// small returns the content of blob oid, or nil when it is larger than limit.
+// A larger blob is read past, so the next lookup starts at its own answer.
+func (b *readBlobs) small(oid string, limit int64) ([]byte, error) {
+	if _, err := io.WriteString(b.in, oid+"\n"); err != nil {
+		return nil, err
+	}
+	header, err := b.out.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	// "<oid> blob <size>", then the content and a newline. An object that is
+	// not present locally answers "<oid> missing" instead.
+	fields := strings.Fields(header)
+	if len(fields) != 3 || fields[0] != oid || fields[1] != "blob" {
+		return nil, fmt.Errorf("cat-file %s: unexpected answer", oid)
+	}
+	size, err := strconv.ParseInt(fields[2], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	if size > limit {
+		_, err := io.CopyN(io.Discard, b.out, size+1)
+		return nil, err
+	}
+	blob := make([]byte, size+1)
+	if _, err := io.ReadFull(b.out, blob); err != nil {
+		return nil, err
+	}
+	return blob[:size], nil
+}
+
+func (b *readBlobs) close() {
+	_ = b.in.Close()
+	_ = b.cmd.Wait()
 }
 
 func hashReadFile(ctx context.Context, path string, length int) (gitOID, lfsOID string, size int64, pointer []byte, err error) {
@@ -709,16 +768,28 @@ func dehydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport,
 	if err != nil {
 		return err
 	}
+	// next maps each path in target to its object, listed once rather than
+	// looked up per hydrated file (ox #1022).
+	next := map[string]string{}
+	if target != "" {
+		tree, err := runReadGit(ctx, transport, false, dir, "ls-tree", "-r", "-z", "--full-tree", target)
+		if err != nil {
+			return err
+		}
+		for _, entry := range strings.Split(tree, "\x00") {
+			meta, name, _ := strings.Cut(entry, "\t")
+			if fields := strings.Fields(meta); len(fields) == 3 {
+				next[name] = fields[2]
+			}
+		}
+	}
 	for _, f := range files {
 		if f.hydrated {
-			if target != "" {
-				// Git preserves local hydration when the committed pointer is
-				// unchanged. Leave those bytes available even if a later object's
-				// download fails, and avoid re-downloading them on every refresh.
-				next, err := runReadGit(ctx, transport, false, dir, "rev-parse", "--verify", target+":"+f.path)
-				if err == nil && next == f.oid {
-					continue
-				}
+			// Git preserves local hydration when the committed pointer is
+			// unchanged. Leave those bytes available even if a later object's
+			// download fails, and avoid re-downloading them on every refresh.
+			if next[f.path] == f.oid {
+				continue
 			}
 			// Changing/deleting a pointer must not destroy the previously read
 			// large object. A hard link retains the verified inode before the
