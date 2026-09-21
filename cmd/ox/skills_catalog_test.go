@@ -13,6 +13,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func catalogRowNamed(t *testing.T, out skillsCatalogOutput, name string) catalogSkillRow {
+	t.Helper()
+	for _, bundle := range out.Bundles {
+		for _, row := range bundle.Skills {
+			if row.Name == name {
+				return row
+			}
+		}
+	}
+	t.Fatalf("catalog has no row named %q", name)
+	return catalogSkillRow{}
+}
+
+func selectCatalogNameInLock(t *testing.T, repo, name string) {
+	t.Helper()
+	lockPath := skillmanager.LockPath(repo)
+	data, err := os.ReadFile(lockPath)
+	require.NoError(t, err)
+	var lock map[string]any
+	require.NoError(t, json.Unmarshal(data, &lock))
+	desired, ok := lock["desired"].(map[string]any)
+	require.True(t, ok)
+	names, _ := desired["names"].([]any)
+	desired["names"] = append(names, name)
+	data, err = json.Marshal(lock)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(lockPath, data, 0o644))
+}
+
 // TestCollectSkillsCatalog_SeparatesWhatIsHereFromWhatCouldBe.
 //
 // This is the whole command. Until the first non-default bundle existed nothing
@@ -20,9 +49,8 @@ import (
 // a compiled-in constant; the two states have to be told apart against a real
 // repository or the surface means nothing.
 func TestCollectSkillsCatalog_SeparatesWhatIsHereFromWhatCouldBe(t *testing.T) {
-	repo := t.TempDir()
-	const root = ".claude/skills"
-	writeSkillDir(t, repo, root, "ox-cli-plan", manifestWithDescription("ox-cli-plan", "plan things"))
+	repo := stageInstallRepo(t)
+	const root = approvalTargetRoot
 
 	got, err := collectSkillsCatalog(repo, []string{root})
 	require.NoError(t, err)
@@ -36,10 +64,10 @@ func TestCollectSkillsCatalog_SeparatesWhatIsHereFromWhatCouldBe(t *testing.T) {
 		}
 	}
 
-	require.Equal(t, skillInstalled, rows["ox-cli-plan"].Status)
+	require.Equal(t, skillCatalogProjected, rows["ox-cli-plan"].Status)
+	require.True(t, rows["ox-cli-plan"].Selected)
+	require.True(t, rows["ox-cli-plan"].Projected)
 	require.Equal(t, skillAvailable, rows[catalogOptInSkill].Status)
-	require.Equal(t, skillAvailable, rows["ox-cli-viz"].Status,
-		"a skill ox ships that is not on disk must read as available, not installed")
 
 	require.Equal(t, "core", rows["ox-cli-plan"].Bundle,
 		"the row does not say how the skill would be selected")
@@ -49,13 +77,97 @@ func TestCollectSkillsCatalog_SeparatesWhatIsHereFromWhatCouldBe(t *testing.T) {
 	require.NotEmpty(t, bundles["team"].Description, "a bundle with no description cannot be chosen")
 }
 
+func TestCollectSkillsCatalog_DistinguishesSelectionProjectionAndNameMatches(t *testing.T) {
+	t.Run("selected but not projected", func(t *testing.T) {
+		repo := t.TempDir()
+		stageSelectedTarget(t, repo)
+
+		got, err := collectSkillsCatalog(repo, []string{approvalTargetRoot})
+		require.NoError(t, err)
+		row := catalogRowNamed(t, got, "ox-cli-plan")
+		require.Equal(t, skillCatalogSelected, row.Status)
+		require.True(t, row.Selected)
+		require.False(t, row.Projected)
+	})
+
+	t.Run("selected but conflicting", func(t *testing.T) {
+		repo := t.TempDir()
+		stageSelectedTarget(t, repo)
+		selectCatalogNameInLock(t, repo, catalogOptInSkill)
+		writeSkillDir(t, repo, approvalTargetRoot, catalogOptInSkill,
+			manifestWithDescription(catalogOptInSkill, "mine"))
+
+		got, err := collectSkillsCatalog(repo, []string{approvalTargetRoot})
+		require.NoError(t, err)
+		row := catalogRowNamed(t, got, catalogOptInSkill)
+		require.Equal(t, skillCatalogConflict, row.Status)
+		require.True(t, row.Selected)
+		require.True(t, row.Conflicting)
+		require.False(t, row.Projected)
+	})
+
+	t.Run("unselected same-name local skill", func(t *testing.T) {
+		repo := t.TempDir()
+		stageSelectedTarget(t, repo)
+		writeSkillDir(t, repo, approvalTargetRoot, catalogOptInSkill,
+			manifestWithDescription(catalogOptInSkill, "mine"))
+
+		got, err := collectSkillsCatalog(repo, []string{approvalTargetRoot})
+		require.NoError(t, err)
+		row := catalogRowNamed(t, got, catalogOptInSkill)
+		require.Equal(t, skillCatalogNameMatch, row.Status)
+		require.False(t, row.Selected)
+		require.True(t, row.NameMatch)
+		require.False(t, row.Projected)
+		require.Contains(t, row.Detail, "does not own")
+	})
+
+	t.Run("selected collision without a valid manifest", func(t *testing.T) {
+		repo := t.TempDir()
+		stageSelectedTarget(t, repo)
+		selectCatalogNameInLock(t, repo, catalogOptInSkill)
+		dir := filepath.Join(repo, approvalTargetRoot, catalogOptInSkill)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("mine, but malformed"), 0o644))
+
+		got, err := collectSkillsCatalog(repo, []string{approvalTargetRoot})
+		require.NoError(t, err)
+		row := catalogRowNamed(t, got, catalogOptInSkill)
+		require.Equal(t, skillCatalogConflict, row.Status,
+			"a same-name manifest stopped being a conflict merely because its frontmatter was malformed")
+	})
+}
+
+func TestCollectSkillsCatalog_UsesOwnershipPlanForManagedDrift(t *testing.T) {
+	repo := stageInstallRepo(t)
+	_, err := runSkillsChange(t, skillsInstallCmd, catalogOptInSkill)
+	require.NoError(t, err)
+
+	manifest := filepath.Join(installedSkillDirPath(repo, catalogOptInSkill), "SKILL.md")
+	file, err := os.OpenFile(manifest, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = file.WriteString("\nlocally edited drift\n")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	got, err := collectSkillsCatalog(repo, []string{approvalTargetRoot})
+	require.NoError(t, err)
+	row := catalogRowNamed(t, got, catalogOptInSkill)
+	require.Equal(t, skillCatalogSelected, row.Status,
+		"repairable drift is selected-but-stale, not an unowned conflict")
+	require.True(t, row.Selected)
+	require.False(t, row.Projected)
+	require.False(t, row.Conflicting)
+}
+
 // TestCollectSkillsCatalog_UnreadableRootFailsInsteadOfPublishingAnIncompleteCatalog.
 //
 // collectInstalledSkills reports a root it genuinely could not read in
 // .Problems, separately from .Skills. Reading only .Skills — as this function
 // once did — would take the silence at face value: a skill sitting in that
-// unreadable root is invisible to `installed`, so it comes back "available"
-// and the guidance tells the reader to install something they already have.
+// unreadable root makes ownership unknowable, so a same-named skill could come
+// back "available" and the guidance would tell the reader to install into a
+// collision.
 // The fix is to fail the whole catalog rather than answer confidently with a
 // hole in it; `ox skills list` already owns partial reporting for this exact
 // condition.
@@ -133,9 +245,9 @@ func TestSkillsCatalogGuidance_HandsBackARunnableNextAction(t *testing.T) {
 			"guidance must name the install command, not merely describe the state: %q", got.Guidance)
 	})
 
-	t.Run("everything is installed", func(t *testing.T) {
+	t.Run("everything is projected", func(t *testing.T) {
 		got := skillsCatalogGuidance(skillsCatalogOutput{Bundles: []catalogBundleGroup{{
-			ID: "core", Skills: []catalogSkillRow{{Name: "ox-cli-plan", Status: skillInstalled}},
+			ID: "core", Skills: []catalogSkillRow{{Name: "ox-cli-plan", Status: skillCatalogProjected}},
 		}}})
 		requireAdviceResolves(t, got)
 		require.NotContains(t, got, "ox skills install",
@@ -146,7 +258,20 @@ func TestSkillsCatalogGuidance_HandsBackARunnableNextAction(t *testing.T) {
 		got := skillsCatalogGuidance(skillsCatalogOutput{Bundles: []catalogBundleGroup{{
 			ID: "team", Skills: []catalogSkillRow{{Name: "post-cutoff", Status: skillAvailable}},
 		}}})
-		require.Contains(t, got, "1 of the 1 skills ox ships is not installed")
+		require.Contains(t, got, "1 of the 1 skills ox ships is available for selection")
+	})
+
+	t.Run("conflict takes priority over installation advice", func(t *testing.T) {
+		got := skillsCatalogGuidance(skillsCatalogOutput{Bundles: []catalogBundleGroup{{
+			ID: "team", Skills: []catalogSkillRow{
+				{Name: "post-cutoff", Status: skillCatalogConflict},
+				{Name: "other", Status: skillAvailable},
+			},
+		}}})
+		requireAdviceResolves(t, got)
+		require.Contains(t, got, "same-named content")
+		require.NotContains(t, got, "ox skills install",
+			"installing while a selected collision exists would only repeat the failure")
 	})
 }
 
@@ -198,16 +323,16 @@ func TestEmitSkillsCatalog_FitsEightyColumns(t *testing.T) {
 	require.Contains(t, stripANSI(rendered), "Curated team skills, installed on request")
 }
 
-func TestEmitSkillsCatalog_StylesInstalledRows(t *testing.T) {
+func TestEmitSkillsCatalog_StylesProjectedRows(t *testing.T) {
 	out := skillsCatalogOutput{
 		Bundles: []catalogBundleGroup{{
 			ID: "team", Description: "Team workflows", Default: false,
-			Skills: []catalogSkillRow{{Name: "post-cutoff", Status: skillInstalled, Description: "Review dates"}},
+			Skills: []catalogSkillRow{{Name: "post-cutoff", Status: skillCatalogProjected, Description: "Review dates"}},
 		}},
 	}
 	var buf strings.Builder
 	require.NoError(t, emitSkillsCatalog(&buf, out, false))
-	require.Contains(t, stripANSI(buf.String()), "installed")
+	require.Contains(t, stripANSI(buf.String()), "projected")
 }
 
 // TestSkillsCatalogJSON_AlwaysAnswersEveryQuestionItCanAnswer, asserted against
@@ -235,5 +360,12 @@ func TestSkillsCatalogJSON_AlwaysAnswersEveryQuestionItCanAnswer(t *testing.T) {
 		list, hasSkills := bundle["skills"]
 		require.True(t, hasSkills)
 		require.NotNil(t, list, "`skills` was null rather than an empty array: %v", bundle)
+		for _, rawRow := range list.([]any) {
+			row := rawRow.(map[string]any)
+			for _, key := range []string{"selected", "projected", "conflicting", "name_match"} {
+				_, present := row[key]
+				require.True(t, present, "%q is absent from catalog row: %v", key, row)
+			}
+		}
 	}
 }
