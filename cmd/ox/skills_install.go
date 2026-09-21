@@ -246,8 +246,7 @@ func installCatalogSkills(repoRoot string, names []string) (skillsChangeOutput, 
 			}, func(plan *skillmanager.ReconcilePlan) error {
 				for _, conflict := range plan.Conflicts {
 					for _, name := range add {
-						needle := "/skills/" + name + "/"
-						if strings.Contains("/"+filepath.ToSlash(conflict.Path), needle) {
+						if conflictBelongsToSkill(conflict.Path, skillRoots, name) {
 							return fmt.Errorf("%q conflicts with existing content at %s; nothing was installed", name, conflict.Path)
 						}
 					}
@@ -263,6 +262,17 @@ func installCatalogSkills(repoRoot string, names []string) (skillsChangeOutput, 
 
 	out.Guidance = skillsChangeGuidance(out)
 	return out, nil
+}
+
+func conflictBelongsToSkill(conflictPath string, roots []string, name string) bool {
+	conflictPath = filepath.ToSlash(filepath.Clean(conflictPath))
+	for _, root := range roots {
+		skillDir := filepath.ToSlash(filepath.Join(root, name))
+		if conflictPath == skillDir || strings.HasPrefix(conflictPath, skillDir+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // uninstallCatalogSkills drops names from the committed selection and lets

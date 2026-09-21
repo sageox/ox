@@ -123,7 +123,7 @@ type doctorOptions struct {
 // When fixSlugs has entries, returns true only if slug is in the list.
 func (opts doctorOptions) shouldFix(slug string) bool {
 	// auto-fix checks always apply their fix (they're non-destructive and always safe)
-	if check, ok := DoctorCheckRegistry[slug]; ok && check.IsAutoFixable() {
+	if check := GetDoctorCheck(slug); check != nil && check.IsAutoFixable() {
 		return true
 	}
 	if len(opts.fixSlugs) == 0 {
@@ -400,9 +400,12 @@ var gcCmd = &cobra.Command{
 
 // getAvailableSlugs returns a sorted list of all registered check slugs.
 func getAvailableSlugs() []string {
-	var slugs []string
+	slugs := make([]string, 0, len(DoctorCheckRegistry)+len(DoctorCheckAliases))
 	for slug := range DoctorCheckRegistry {
 		slugs = append(slugs, slug)
+	}
+	for alias := range DoctorCheckAliases {
+		slugs = append(slugs, alias)
 	}
 	sort.Strings(slugs)
 	return slugs

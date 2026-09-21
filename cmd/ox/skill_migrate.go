@@ -409,7 +409,7 @@ func trackedAgentPaths(repoRoot string) ([]string, error) {
 		".cursor/rules", ".github/instructions", ".clinerules",
 		".kiro/steering", ".windsurf/rules",
 		".claude/.gitignore", ".agents/.gitignore", ".factory/.gitignore",
-		".cursor/.gitignore", ".github/.gitignore", ".clinerules/.gitignore",
+		".cursor/.gitignore", ".github/instructions/.gitignore", ".clinerules/.gitignore",
 		".kiro/.gitignore", ".windsurf/.gitignore"}
 	cmd := exec.Command("git", args...)
 	cmd.Dir = repoRoot

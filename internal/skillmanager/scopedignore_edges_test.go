@@ -123,6 +123,35 @@ func TestScopedIgnoreFiles_DoesNotReserveUnselectedCatalogNames(t *testing.T) {
 	}
 }
 
+func TestScopedIgnoreFiles_CopilotRuleRequiresInstructionsDirectory(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	written, err := EnsureScopedIgnoreFiles(repo)
+	if err != nil {
+		t.Fatalf("ensure with only .github: %v", err)
+	}
+	if len(written) != 0 {
+		t.Fatalf("a generic .github directory acquired agent-specific footprint: %v", written)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".github", ".gitignore")); !os.IsNotExist(err) {
+		t.Fatalf("generic .github directory acquired .gitignore: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(repo, ".github", "instructions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	written, err = EnsureScopedIgnoreFiles(repo)
+	if err != nil {
+		t.Fatalf("ensure with Copilot instructions root: %v", err)
+	}
+	want := filepath.Join(".github", "instructions", ".gitignore")
+	if len(written) != 1 || written[0].Rel != want {
+		t.Fatalf("expected only %s, got %v", want, written)
+	}
+}
+
 // IsManagedOnlyScopedIgnore decides whether the migration may adopt an untracked
 // .gitignore into a commit automatically. Adopting one that also holds the user's
 // own rules would commit their bytes on their behalf, in a housekeeping commit

@@ -43,6 +43,23 @@ func stageInstallRepo(t *testing.T) string {
 	return repo
 }
 
+func stageInstallRepoWithCustomRoot(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	gitInitRepo(t, repo)
+	gitOutput(t, repo, "remote", "add", "origin", "https://github.com/acme/install-custom-test.git")
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".sageox"), 0o755))
+	lock := `{"schema_version":2,` +
+		`"desired":{"bundles":["core"],"targets":["custom-project"]},` +
+		`"targets":[{"key":"custom-project","root":".custom",` +
+		`"format":"agent-skills/v1","scope":"project","link_policy":"reject"}]}`
+	require.NoError(t, os.WriteFile(skillmanager.LockPath(repo), []byte(lock), 0o644))
+	_, err := reconcileExactSelectedSkills(repo)
+	require.NoError(t, err, "establish the custom-target baseline")
+	t.Chdir(repo)
+	return repo
+}
+
 func gitInitRepo(t *testing.T, dir string) {
 	t.Helper()
 	for _, args := range [][]string{
@@ -240,6 +257,23 @@ func TestSkillsInstall_NameCollisionDoesNotSelectOrHideLocalSkill(t *testing.T) 
 	require.NoError(t, readErr)
 	require.NotContains(t, string(ignore), "skills/post-cutoff/",
 		"a refused collision hid the local skill from git")
+}
+
+func TestSkillsInstall_NameCollisionUsesSelectedCustomRoot(t *testing.T) {
+	repo := stageInstallRepoWithCustomRoot(t)
+	local := filepath.Join(repo, ".custom", catalogOptInSkill)
+	require.NoError(t, os.MkdirAll(local, 0o755))
+	manifest := filepath.Join(local, "SKILL.md")
+	mine := []byte("---\nname: post-cutoff\ndescription: mine\n---\n\nlocal research\n")
+	require.NoError(t, os.WriteFile(manifest, mine, 0o644))
+
+	_, err := runSkillsChange(t, skillsInstallCmd, catalogOptInSkill)
+	require.ErrorContains(t, err, "conflicts with existing content")
+	require.NotContains(t, lockedNames(t, repo), catalogOptInSkill,
+		"a collision outside a conventional /skills/ root still committed the selection")
+	data, readErr := os.ReadFile(manifest)
+	require.NoError(t, readErr)
+	require.Equal(t, mine, data, "a refused custom-root collision changed the local skill")
 }
 
 // TestSkillsUninstall_NeverDeletesASkillOxDoesNotOwn.

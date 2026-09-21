@@ -79,7 +79,7 @@ func scopedIgnoreFiles(exactSkills []string) []ScopedIgnoreFile {
 		// three, so supporting a tool never creates its directory in an unrelated
 		// repository.
 		{Dir: ".cursor", Entries: []string{"rules/" + TeamPrefix + "*"}},
-		{Dir: ".github", Entries: []string{"instructions/" + TeamPrefix + "*"}},
+		{Dir: ".github/instructions", Entries: []string{TeamPrefix + "*"}},
 		{Dir: ".clinerules", Entries: []string{TeamPrefix + "*"}},
 		{Dir: ".kiro", Entries: []string{"steering/" + TeamPrefix + "*"}},
 		{Dir: ".windsurf", Entries: []string{"rules/" + TeamPrefix + "*"}},

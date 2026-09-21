@@ -45,11 +45,11 @@ func checkOxIgnoreRulesIn(gitRoot string, fix bool) checkResult {
 			".factory/rules/ox-cli.md",
 			".factory/rules/sageox-team-probe.md",
 		},
-		".cursor":     {".cursor/rules/sageox-team-probe.mdc"},
-		".github":     {".github/instructions/sageox-team-probe.md"},
-		".clinerules": {".clinerules/sageox-team-probe.md"},
-		".kiro":       {".kiro/steering/sageox-team-probe.md"},
-		".windsurf":   {".windsurf/rules/sageox-team-probe.md"},
+		".cursor":              {".cursor/rules/sageox-team-probe.mdc"},
+		".github/instructions": {".github/instructions/sageox-team-probe.md"},
+		".clinerules":          {".clinerules/sageox-team-probe.md"},
+		".kiro":                {".kiro/steering/sageox-team-probe.md"},
+		".windsurf":            {".windsurf/rules/sageox-team-probe.md"},
 	}
 
 	var broken []string

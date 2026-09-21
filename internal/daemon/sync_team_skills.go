@@ -4,12 +4,15 @@ import (
 	"context"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/sageox/ox/internal/teamdocs"
 )
+
+const automaticConvergenceTimeout = 30 * time.Second
 
 // teamSkillsTouched reports whether a team-context pull changed anything under a
 // skills root.
@@ -106,7 +109,9 @@ func (s *SyncScheduler) reconcileTeamSkills(changed []string) {
 		s.logger.Error("team convergence coordinator unavailable", "repo", repoRoot, "error", err)
 		return
 	}
-	report, err := coordinator.Converge(context.Background(), teamconverge.Request{
+	ctx, cancel := context.WithTimeout(context.Background(), automaticConvergenceTimeout)
+	defer cancel()
+	report, err := coordinator.Converge(ctx, teamconverge.Request{
 		ProjectRoot: repoRoot,
 		TeamPath:    team.Path,
 		RepoSlug:    repotools.RepoSlug(repoRoot),

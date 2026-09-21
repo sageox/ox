@@ -251,7 +251,11 @@ func bootstrapLegacySkillState(repoRoot string, desired skillmanager.DesiredSkil
 	// catalog diff replace current files and retire removed ones. No filename
 	// sweep is needed, and repositories that never selected the adapter remain
 	// untouched.
-	for _, target := range declaredRuleTargets(repoRoot) {
+	ruleTargets, ruleTargetsErr := declaredRuleTargets(repoRoot)
+	if ruleTargetsErr != nil {
+		return skillmanager.DesiredSkills{}, nil, ruleTargetsErr
+	}
+	for _, target := range ruleTargets {
 		selected, selectErr := skillmanager.HasLegacyRules(repoRoot, target)
 		if selectErr != nil {
 			return skillmanager.DesiredSkills{}, nil, selectErr
@@ -269,18 +273,18 @@ func bootstrapLegacySkillState(repoRoot string, desired skillmanager.DesiredSkil
 	return desired, targets, nil
 }
 
-func declaredRuleTargets(repoRoot string) []adapterprotocol.SkillTarget {
+func declaredRuleTargets(repoRoot string) ([]adapterprotocol.SkillTarget, error) {
+	return declaredRuleTargetsFromAdapters(repoRoot, adapters.DiscoverExternalAdapters())
+}
+
+func declaredRuleTargetsFromAdapters(repoRoot string, external []*adapters.ExternalAdapter) ([]adapterprotocol.SkillTarget, error) {
 	var targets []adapterprotocol.SkillTarget
-	for _, adapter := range adapters.DiscoverExternalAdapters() {
+	for _, adapter := range external {
 		if info := adapter.Info(); info != nil {
 			targets = append(targets, info.RuleTargets...)
 		}
 	}
-	canonical, err := skillmanager.CanonicalizeTargets(repoRoot, targets)
-	if err != nil {
-		return nil
-	}
-	return canonical
+	return skillmanager.CanonicalizeTargets(repoRoot, targets)
 }
 
 // hasLegacyOxCommands reports whether .claude/commands holds a file ox installed.
@@ -338,7 +342,11 @@ func uninstallManagedSkills(repoRoot string) (*skillmanager.ReconcilePlan, error
 	if err != nil {
 		return nil, err
 	}
-	detected = append(detected, declaredRuleTargets(repoRoot)...)
+	ruleTargets, err := declaredRuleTargets(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	detected = append(detected, ruleTargets...)
 	return skillmanager.ReconcileUpdate(repoRoot, version.Version, func(current skillmanager.DesiredSkills, currentTargets []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
 		currentTargets = append(currentTargets, detected...)
 		var err error

@@ -169,4 +169,5 @@ func init() {
 		Description: "Reconciles project-selected native skill and rule targets",
 		Run:         checkClaudeSkills,
 	})
+	RegisterDoctorCheckAlias(CheckSlugAdapterRules, CheckSlugClaudeSkills)
 }

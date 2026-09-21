@@ -84,14 +84,18 @@ func TestFilesystemDiscovery_ReportsEachBoundaryFailure(t *testing.T) {
 	t.Run("rules", func(t *testing.T) {
 		team := t.TempDir()
 		require.NoError(t, os.MkdirAll(filepath.Join(team, "agents"), 0o755))
-		require.NoError(t, os.Symlink("rules", filepath.Join(team, "agents", "rules")))
+		if err := os.Symlink("rules", filepath.Join(team, "agents", "rules")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
 		_, _, err := discovery.Discover(context.Background(), Request{TeamPath: team, TeamCommit: "abc"})
 		require.ErrorContains(t, err, "discover Team Context rules")
 	})
 
 	t.Run("docs", func(t *testing.T) {
 		team := t.TempDir()
-		require.NoError(t, os.Symlink("docs", filepath.Join(team, "docs")))
+		if err := os.Symlink("docs", filepath.Join(team, "docs")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
 		_, _, err := discovery.Discover(context.Background(), Request{TeamPath: team, TeamCommit: "abc"})
 		require.ErrorContains(t, err, "discover Team Context docs")
 	})
