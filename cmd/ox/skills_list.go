@@ -60,7 +60,7 @@ Three provenances appear in one table: ox for the skills the CLI ships, team for
 the ones your Team Context publishes, and local for the ones a human authored
 here. ox owns only the first two and will never modify or remove a local skill.
 
-To see what ox ships that is NOT installed here, run ` + "`ox skills catalog`" + `.`,
+If a skill your team publishes is missing here, ` + "`ox skills status`" + ` says why.`,
 	RunE: runSkillsList,
 }
 
@@ -317,13 +317,13 @@ func skillsListGuidance(out skillsListOutput) string {
 		for _, root := range out.Roots {
 			safe = append(safe, sanitizeCell(root))
 		}
-		return "No skills are installed in " + strings.Join(safe, ", ") + " — run `ox skills catalog` to see what ox ships."
+		return "No skills are installed in " + strings.Join(safe, ", ") + " — run `ox skills status` to see why."
 	}
 	counts := map[string]int{}
 	for _, row := range out.Skills {
 		counts[row.Provenance]++
 	}
-	return fmt.Sprintf("%s installed: %d from ox, %d from your team, %d your own. Run `ox skills catalog` to see what else ox ships.",
+	return fmt.Sprintf("%s installed: %d from ox, %d from your team, %d your own. Run `ox skills status` to see what your team publishes and whether it reached this repository.",
 		pluralSkills(len(out.Skills)), counts[provenanceOx], counts[provenanceTeam], counts[provenanceLocal])
 }
 
@@ -339,7 +339,7 @@ func emitSkillsList(w io.Writer, out skillsListOutput, asJSON bool) error {
 		for _, row := range out.Skills {
 			// Sanitized HERE and not on the way in: Name is the real on-disk
 			// directory name everywhere else — a map key in this file, and what
-			// refuseSkillsOxDoesNotOwn matches a user's argument against — so a
+			// publish matches a user's argument against — so a
 			// scrubbed copy stored in the struct would quietly stop matching the
 			// directory it names. It is also a name ox did not choose: a checked-out
 			// repository can hold a skill directory whose name embeds CSI or OSC
@@ -481,7 +481,7 @@ func skillManifestDescription(rootDir *os.Root, name string) (description string
 //   - The listings want TEXT, so a block scalar's indented continuation lines
 //     are folded in. Rendering the literal ">-" in a description column would
 //     make every folded skill in ox's own catalog look broken.
-//   - `ox skills install --team` wants the SHAPE, because the team-side parser
+//   - `ox skills publish` wants the SHAPE, because the team-side parser
 //     has no block-scalar support for `description:` at all — it would store the
 //     marker and drop the text. folded is what lets that command refuse rather
 //     than publish a skill whose activation surface reads ">-".

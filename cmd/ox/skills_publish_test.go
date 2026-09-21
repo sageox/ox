@@ -117,8 +117,14 @@ func TestSkillsPublish_RefusesAnythingItCannotSafelyOwnOrCopy(t *testing.T) {
 	})
 
 	t.Run("selected unprefixed catalog skill", func(t *testing.T) {
-		_, team := stageTeamPublishRepo(t)
-		_, err := runSkillsChange(t, skillsInstallCmd, catalogOptInSkill)
+		repo, team := stageTeamPublishRepo(t)
+		// Select it the way reconcile does. What matters to this claim is that ox
+		// MANAGES the on-disk copy, not which command recorded the selection.
+		_, err := skillmanager.ReconcileUpdate(repo, version.Version,
+			func(desired skillmanager.DesiredSkills, targets []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
+				desired.Names = append(desired.Names, catalogOptInSkill)
+				return desired, targets, nil
+			})
 		require.NoError(t, err)
 
 		_, err = runSkillsChange(t, skillsPublishCmd, catalogOptInSkill)

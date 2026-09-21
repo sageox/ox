@@ -10,7 +10,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -19,41 +18,27 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/skillmanager"
-	"github.com/sageox/ox/internal/teamdocs"
-	"github.com/sageox/ox/internal/version"
-	"github.com/sageox/ox/pkg/adapterprotocol"
-	"github.com/spf13/cobra"
 )
 
-// skills_install.go — `ox skills install` and `ox skills uninstall`.
+// skills_publish_seed.go — the Team Context write path shared by `ox skills
+// publish`.
 //
-// The write half of the catalog surface. `ox skills catalog` can now report a
-// skill as available rather than installed — the `team` bundle is the first that
-// does not default on — and a report with no way to act on it is the same
-// dead-end `ox skills approve` was built to remove.
+// Publishing seeds a copy of a skill into the Team Context and then STOPS
+// owning it: the team edits it, the team's history carries it, and ox never
+// writes over it again. That is deliberately not how a managed install behaves,
+// because overwriting would discard a teammate's edits on every publish.
 //
-// Two things keep these commands honest:
+// This file is the one implementation of the collision, locking, rollback, and
+// commit rules for that checkout — the same checkout the daemon mutates — so a
+// second caller cannot invent a second set.
 //
-//   - They go through the SAME reconcile entry point every other install path
-//     uses. A second installer would be a second definition of what ox owns, and
-//     the lockfile is the only record that lets ox later remove what it wrote.
-//   - They finish the job in one command. Recording a selection and then telling
-//     the human to run `ox doctor --fix` leaves the repository in exactly the
-//     state the install was meant to end, which reads as the install not having
-//     worked.
-//
-// `--team` is deliberately NOT symmetric with the rest. It seeds a copy into the
-// Team Context and then stops owning it: the team edits it, the team's history
-// carries it, and ox never writes over it again. Treating it as a managed
-// install would mean overwriting a teammate's edits on every publish.
+// It previously also carried `ox skills install` / `ox skills uninstall`, the
+// repository-scoped half of the catalog surface. Those are gone: catalog
+// content is chosen once for a team, never per repository, and the replacement
+// is `ox packs` writing into Team Context (ADR-032). Nothing here selects
+// catalog content.
 
-const (
-	skillChangeInstalled    = "installed"
-	skillChangeAlready      = "already-installed"
-	skillChangePublished    = "published"
-	skillChangeUninstalled  = "uninstalled"
-	skillChangeNotInstalled = "not-installed"
-)
+const skillChangePublished = "published"
 
 // teamSkillsPublishRoot is the CANONICAL skills root inside a Team Context.
 // Discovery also walks the legacy coworkers/skills, but nothing new is ever
@@ -72,61 +57,10 @@ const teamSkillsPublishRoot = "agents/skills"
 // a prompt that appears to have hung.
 const teamPublishTimeout = 30 * time.Second
 
-var skillsInstallCmd = &cobra.Command{
-	Use:     "install <name>...",
-	Aliases: []string{"add"},
-	Short:   "Install skills ox ships into this repository",
-	Long: `Install skills ox ships into this repository.
-
-Run ` + "`ox skills catalog`" + ` to see the names. Default bundles are already
-installed; the ones marked available are what this command is for.
-
-The files land immediately, and your selection is recorded in
-.sageox/skills.lock.json. That file is part of the repository on purpose: the
-choice belongs to the project, so your coworkers get the same skills.
-
-With --team, the skill is copied into your Team Context instead, where it becomes
-your team's to edit and applies to every repository on the team. That is a SEED,
-not a managed install — ox writes the copy once and never overwrites it, so if
-the skill is already published this refuses rather than discarding your team's
-edits. Names are refused all-or-nothing: a typo cannot leave half a run applied.`,
-	Args: cobra.MinimumNArgs(1),
-	RunE: runSkillsInstall,
-}
-
-var skillsUninstallCmd = &cobra.Command{
-	Use:     "uninstall <name>...",
-	Aliases: []string{"remove"},
-	Short:   "Remove skills ox installed in this repository",
-	Long: `Remove skills ox installed in this repository.
-
-The files go away and the name is dropped from .sageox/skills.lock.json, so the
-next reconcile does not put them back.
-
-Only skills ox owns can be removed this way. A skill you authored yourself is
-refused: ox has no record of it, no way to restore it, and no claim on it. A
-skill your team publishes is refused too — remove it in the Team Context, where
-it lives.`,
-	Args: cobra.MinimumNArgs(1),
-	RunE: runSkillsUninstall,
-}
-
-func init() {
-	skillsInstallCmd.Flags().Bool("team", false,
-		"Publish the skill to your Team Context instead, as a one-time seed the team then owns")
-	skillsInstallCmd.Flags().Bool("json", false, "Emit machine-readable JSON")
-	skillsUninstallCmd.Flags().Bool("json", false, "Emit machine-readable JSON")
-	skillsCmd.AddCommand(skillsInstallCmd, skillsUninstallCmd)
-}
-
 // skillChangeRow is one name's outcome, in both renderings.
 type skillChangeRow struct {
-	Name  string `json:"name"`
-	State string `json:"state"`
-	// Bundle names the selection responsible when a skill is already installed
-	// without having been asked for by name. Without it, "already-installed" is
-	// indistinguishable from a repeated install.
-	Bundle string `json:"bundle,omitempty"`
+	Name   string `json:"name"`
+	State  string `json:"state"`
 	Detail string `json:"detail,omitempty"`
 }
 
@@ -159,262 +93,6 @@ type teamSkillSeed struct {
 
 func newSkillsChangeOutput() skillsChangeOutput {
 	return skillsChangeOutput{Skills: []skillChangeRow{}, Written: []string{}, Removed: []string{}}
-}
-
-func runSkillsInstall(cmd *cobra.Command, args []string) error {
-	asJSON, _ := cmd.Flags().GetBool("json")
-	toTeam, _ := cmd.Flags().GetBool("team")
-
-	gitRoot := findGitRoot()
-	if gitRoot == "" {
-		return fmt.Errorf("not inside a git repository")
-	}
-
-	change := installCatalogSkills
-	if toTeam {
-		change = publishCatalogSkillsToTeam
-	}
-	out, err := change(gitRoot, args)
-	if err != nil {
-		return err
-	}
-	return emitSkillsChange(cmd.OutOrStdout(), out, asJSON)
-}
-
-func runSkillsUninstall(cmd *cobra.Command, args []string) error {
-	asJSON, _ := cmd.Flags().GetBool("json")
-
-	gitRoot := findGitRoot()
-	if gitRoot == "" {
-		return fmt.Errorf("not inside a git repository")
-	}
-
-	out, err := uninstallCatalogSkills(gitRoot, args)
-	if err != nil {
-		return err
-	}
-	return emitSkillsChange(cmd.OutOrStdout(), out, asJSON)
-}
-
-// installCatalogSkills adds names to this repository's committed selection and
-// materializes them. repoRoot is a parameter rather than something this goes
-// looking for, so the decision is testable without faking a command.
-func installCatalogSkills(repoRoot string, names []string) (skillsChangeOutput, error) {
-	out := newSkillsChangeOutput()
-	names, err := validateCatalogNames(names)
-	if err != nil {
-		return out, err
-	}
-
-	desired, _, err := skillmanager.LoadDesired(repoRoot)
-	if err != nil {
-		return out, err
-	}
-	skillRoots, err := skillTargetRoots(repoRoot)
-	if err != nil {
-		return out, err
-	}
-	if len(skillRoots) == 0 {
-		return out, fmt.Errorf("this repository has not selected an AI coworker, so there is nowhere to put a skill — run `ox init`")
-	}
-	selected, err := selectedCatalogNames(desired)
-	if err != nil {
-		return out, err
-	}
-
-	var add []string
-	for _, name := range names {
-		if selected[name] {
-			out.Skills = append(out.Skills, skillChangeRow{
-				Name: name, State: skillChangeAlready, Bundle: bundleSelecting(desired, name),
-			})
-			continue
-		}
-		add = append(add, name)
-		out.Skills = append(out.Skills, skillChangeRow{Name: name, State: skillChangeInstalled})
-	}
-
-	if len(add) > 0 {
-		// The existing reconcile entry point, with a mutation that only appends
-		// names. A second installer would be a second definition of what ox owns,
-		// and the lockfile is the only record that lets ox later remove what it
-		// wrote.
-		plan, reconcileErr := skillmanager.ReconcileUpdateGated(repoRoot, version.Version,
-			func(current skillmanager.DesiredSkills, targets []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
-				current.Names = append(current.Names, add...)
-				return current, targets, nil
-			}, func(plan *skillmanager.ReconcilePlan) error {
-				for _, conflict := range plan.Conflicts {
-					for _, name := range add {
-						if conflictBelongsToSkill(conflict.Path, skillRoots, name) {
-							return fmt.Errorf("%q conflicts with existing content at %s; nothing was installed", name, conflict.Path)
-						}
-					}
-				}
-				return nil
-			})
-		if reconcileErr != nil {
-			return out, fmt.Errorf("install %s: %w", strings.Join(add, ", "), reconcileErr)
-		}
-		out.Written = orEmptyStrings(plan.WrittenPaths())
-		out.Removed = orEmptyStrings(plan.RemovedPaths())
-	}
-
-	out.Guidance = skillsChangeGuidance(out)
-	return out, nil
-}
-
-func conflictBelongsToSkill(conflictPath string, roots []string, name string) bool {
-	conflictPath = filepath.ToSlash(filepath.Clean(conflictPath))
-	for _, root := range roots {
-		skillDir := filepath.ToSlash(filepath.Join(root, name))
-		if conflictPath == skillDir || strings.HasPrefix(conflictPath, skillDir+"/") {
-			return true
-		}
-	}
-	return false
-}
-
-// uninstallCatalogSkills drops names from the committed selection and lets
-// reconcile remove the files ox owns.
-func uninstallCatalogSkills(repoRoot string, names []string) (skillsChangeOutput, error) {
-	out := newSkillsChangeOutput()
-
-	desired, targets, err := skillmanager.LoadDesired(repoRoot)
-	if err != nil {
-		return out, err
-	}
-	roots := make([]string, 0, len(targets))
-	for _, target := range targets {
-		if target.Format == adapterprotocol.SkillFormatAgentSkillsV1 {
-			roots = append(roots, target.Root)
-		}
-	}
-	// Classified BEFORE the catalog check, because "you wrote this yourself" is a
-	// far more useful answer than "ox ships no such skill" — and it is the one
-	// that stops a name collision from deleting a human's work.
-	if err := refuseSkillsOxDoesNotOwn(repoRoot, roots, names); err != nil {
-		return out, err
-	}
-
-	names, err = validateCatalogNames(names)
-	if err != nil {
-		return out, err
-	}
-	selected, err := selectedCatalogNames(desired)
-	if err != nil {
-		return out, err
-	}
-
-	var drop []string
-	for _, name := range names {
-		if !selected[name] {
-			out.Skills = append(out.Skills, skillChangeRow{
-				Name: name, State: skillChangeNotInstalled,
-				Detail: "this repository has not selected it",
-			})
-			continue
-		}
-		// Dropping the NAME of a bundle-selected skill changes nothing: the bundle
-		// still selects it and reconcile reinstalls it on the spot. Reporting
-		// success would be the worst outcome available — the command says the skill
-		// is gone while the file is still on disk. The lockfile has no per-skill
-		// exclusion, so the bundle really is the unit, and saying so beats
-		// inventing a flag that cannot work.
-		if bundle := bundleSelecting(desired, name); bundle != "" {
-			return out, fmt.Errorf("%q is part of the %q bundle, which this repository selected as a whole — ox has no way to drop one skill out of a bundle, so the file would come straight back%s",
-				name, bundle, nothingChangedSuffix(names))
-		}
-		drop = append(drop, name)
-		out.Skills = append(out.Skills, skillChangeRow{Name: name, State: skillChangeUninstalled})
-	}
-
-	if len(drop) > 0 {
-		plan, reconcileErr := skillmanager.ReconcileUpdate(repoRoot, version.Version,
-			func(current skillmanager.DesiredSkills, currentTargets []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
-				current.Names = slices.DeleteFunc(current.Names, func(n string) bool { return slices.Contains(drop, n) })
-				return current, currentTargets, nil
-			})
-		if reconcileErr != nil {
-			return out, fmt.Errorf("uninstall %s: %w", strings.Join(drop, ", "), reconcileErr)
-		}
-		out.Written = orEmptyStrings(plan.WrittenPaths())
-		out.Removed = orEmptyStrings(plan.RemovedPaths())
-	}
-
-	out.Guidance = skillsChangeGuidance(out)
-	return out, nil
-}
-
-// refuseSkillsOxDoesNotOwn stops an uninstall that would delete a file ox has no
-// claim on.
-//
-// A hand-authored skill is the majority of what sits in a real repository's
-// skills directory. ox has no record of it, no copy to restore from, and no
-// ownership stamp on it — deleting one because the name matched is unrecoverable
-// loss from a command the human believed was scoped to ox's own files.
-func refuseSkillsOxDoesNotOwn(repoRoot string, roots, names []string) error {
-	if len(roots) == 0 {
-		return nil
-	}
-	installed := map[string]installedSkillRow{}
-	for _, row := range collectInstalledSkills(repoRoot, roots).Skills {
-		installed[row.Name] = row
-	}
-	for _, name := range names {
-		row, ok := installed[name]
-		if !ok {
-			continue
-		}
-		switch row.Provenance {
-		case provenanceLocal:
-			where := name
-			if len(row.Roots) > 0 {
-				where = path.Join(row.Roots[0], name)
-			}
-			return fmt.Errorf("%q is your own skill, not one ox installed — ox never removes a skill it does not own. Delete %s yourself if you want it gone%s",
-				name, where, nothingChangedSuffix(names))
-		case provenanceTeam:
-			return fmt.Errorf("%q came from your team's Team Context, not from ox's catalog — remove it there and it leaves every repository on the team. Run `ox skills status` to see where it comes from%s",
-				name, nothingChangedSuffix(names))
-		}
-	}
-	return nil
-}
-
-// publishCatalogSkillsToTeam seeds ox's copy of each skill into the Team Context.
-//
-// A seed, not a managed install: after this the team owns the copy. That is why
-// an existing directory is refused rather than overwritten — a publish that
-// clobbered a teammate's edits would destroy the only thing publishing is for.
-func publishCatalogSkillsToTeam(repoRoot string, names []string) (skillsChangeOutput, error) {
-	out := newSkillsChangeOutput()
-	names, err := validateCatalogNames(names)
-	if err != nil {
-		return out, err
-	}
-
-	// Resolve every catalog input before taking the Team Context lock. On-disk
-	// collision checks happen again inside the lock below: two publishers can both
-	// observe an absent directory before either has acquired the lock.
-	seeds := make([]teamSkillSeed, 0, len(names))
-	for _, name := range names {
-		if !teamdocs.ValidTeamSkillName(name) {
-			// Defense in depth: the name becomes a directory inside someone else's
-			// checkout, and the team side will refuse to install what it cannot name.
-			return out, fmt.Errorf("%q is not a name a Team Context can carry", name)
-		}
-		relDir := path.Join(teamSkillsPublishRoot, name)
-		files, readErr := catalogSkillFiles(name)
-		if readErr != nil {
-			return out, readErr
-		}
-		if err := refuseUnpublishableDescription(name, files); err != nil {
-			return out, err
-		}
-		seeds = append(seeds, teamSkillSeed{name: name, relDir: relDir, files: files})
-	}
-	return publishTeamSkillSeeds(repoRoot, names, seeds)
 }
 
 // publishTeamSkillSeeds performs the Team Context transaction shared by every
@@ -645,94 +323,6 @@ func recordTeamPublish(ctx context.Context, teamPath string, relPaths, names []s
 	return nil
 }
 
-// refuseUnpublishableDescription rejects a skill whose description the Team
-// Context parser cannot read.
-//
-// That parser (internal/teamdocs.parseRuleFrontmatter) has no block-scalar
-// support for `description:`: given `description: >-` it stores the marker and
-// drops the text on the indented lines below. The skill would then sit in every
-// teammate's repository with ">-" as its activation surface — present, installed
-// and invisible to every agent, which is worse than not publishing it, because
-// nothing anywhere reports a failure.
-func refuseUnpublishableDescription(name string, files []skills.File) error {
-	for _, file := range files {
-		if file.Path != skills.SkillFileName {
-			continue
-		}
-		description, folded := manifestDescription(file.Content)
-		switch {
-		case folded:
-			return fmt.Errorf("%q cannot be published as it stands: its description is a multi-line YAML block, and a Team Context reads `description:` as a single line only. Rewrite it as one line in extensions/skills/%s/%s first",
-				name, name, skills.SkillFileName)
-		case description == "":
-			return fmt.Errorf("%q cannot be published as it stands: a Team Context reads `description:` from the first 30 lines of frontmatter and found none. Add one to extensions/skills/%s/%s first",
-				name, name, skills.SkillFileName)
-		}
-		return nil
-	}
-	return fmt.Errorf("the catalog entry for %q has no %s", name, skills.SkillFileName)
-}
-
-// catalogSkillFiles reads one skill's complete directory out of the embedded
-// source tree — the manifest plus references/, assets/ and scripts/.
-func catalogSkillFiles(name string) ([]skills.File, error) {
-	var files []skills.File
-	err := fs.WalkDir(skills.FS, name, func(p string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil || d.IsDir() {
-			return walkErr
-		}
-		content, readErr := fs.ReadFile(skills.FS, p)
-		if readErr != nil {
-			return readErr
-		}
-		files = append(files, skills.File{Path: strings.TrimPrefix(p, name+"/"), Content: content})
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("read the catalog entry for %q: %w", name, err)
-	}
-	return files, nil
-}
-
-// validateCatalogNames refuses the WHOLE run on the first name ox does not ship,
-// before anything is written, and returns the names deduplicated.
-//
-// All-or-nothing matches `ox skills approve`: a typo in the last name must not
-// leave the earlier ones applied with no record of which. Deduplication matters
-// for the same reason it does there — `install x x` reporting one row as
-// installed and a second as already-installed reads as two skills, or as a race.
-func validateCatalogNames(names []string) ([]string, error) {
-	seen := make(map[string]bool, len(names))
-	unique := make([]string, 0, len(names))
-	for _, name := range names {
-		switch {
-		case skills.IsRetired(name):
-			// Checked before IsKnown: a retired name was correct in a previous
-			// release, and reporting it as merely unknown sends someone hunting for a
-			// typo that is not there.
-			return nil, fmt.Errorf("ox no longer ships %q — it was retired%s", name, nothingChangedSuffix(names))
-		case !skills.IsKnown(name):
-			return nil, fmt.Errorf("ox ships no skill named %q — run `ox skills catalog` to see what it does ship%s", name, nothingChangedSuffix(names))
-		}
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		unique = append(unique, name)
-	}
-	return unique, nil
-}
-
-// orEmptyStrings keeps a nil slice out of the wire contract. The reconcile plan
-// returns nil for "no files", and json.Marshal renders that as null — which a
-// reader cannot tell apart from a key this ox does not populate.
-func orEmptyStrings(values []string) []string {
-	if values == nil {
-		return []string{}
-	}
-	return values
-}
-
 // nothingChangedSuffix says the run was all-or-nothing, but only when more than
 // one name was given — that is the only case where a reader could reasonably
 // wonder whether the earlier names took effect.
@@ -768,21 +358,6 @@ func selectedCatalogNames(desired skillmanager.DesiredSkills) (map[string]bool, 
 	return selected, nil
 }
 
-// bundleSelecting names the selected bundle that carries a skill, or "" when the
-// skill is not reached by any bundle this repository selected.
-func bundleSelecting(desired skillmanager.DesiredSkills, name string) string {
-	selected := make(map[string]bool, len(desired.Bundles))
-	for _, bundle := range desired.Bundles {
-		selected[bundle.ID] = true
-	}
-	for _, bundle := range skills.Catalog {
-		if selected[bundle.ID] && slices.Contains(bundle.SkillIDs, name) {
-			return bundle.ID
-		}
-	}
-	return ""
-}
-
 // skillsChangeGuidance is the single next action, carried in the JSON so an AI
 // coworker reading this gets the same answer a human reads off the terminal.
 //
@@ -790,55 +365,30 @@ func bundleSelecting(desired skillmanager.DesiredSkills, name string) string {
 // skill is installed, printed after a run that installed nothing, teaches a
 // reader that the line means nothing.
 func skillsChangeGuidance(out skillsChangeOutput) string {
-	var installed, published, removed, unchanged []string
+	var published, unchanged []string
 	for _, row := range out.Skills {
-		switch row.State {
-		case skillChangeInstalled:
-			installed = append(installed, row.Name)
-		case skillChangePublished:
+		if row.State == skillChangePublished {
 			published = append(published, row.Name)
-		case skillChangeUninstalled:
-			removed = append(removed, row.Name)
-		default:
-			unchanged = append(unchanged, row.Name)
+			continue
 		}
+		unchanged = append(unchanged, row.Name)
 	}
 	switch {
 	case len(published) > 0:
 		// No mention of where it landed beyond the Team Context: the path is on the
 		// row, and the actionable facts are that the team now owns the copy and
-		// targeting remains explicit in the manifest. Catalog seeds have no repos:
-		// key and therefore correctly take the stated all-repositories default.
+		// targeting remains explicit in the manifest.
 		return fmt.Sprintf("%s published to your Team Context — it is your team's to edit now. Its `repos:` metadata controls where it arrives; without `repos:` it reaches every repository on the team. Distribution is automatic; run `ox sync` in this repository only if you need it immediately, then `ox skills status` to verify it.",
 			strings.Join(published, ", "))
-	case len(installed) > 0:
-		return fmt.Sprintf("%s installed — your AI coworkers can use %s now. The choice is recorded in %s, which travels with the repository, so your coworkers get the same skills. Run `ox skills list` to see everything installed here.",
-			strings.Join(installed, ", "), itOrThem(len(installed)), lockfileDisplayPath())
-	case len(removed) > 0:
-		return fmt.Sprintf("%s removed from this repository. Run `ox skills catalog` to see what ox ships.", strings.Join(removed, ", "))
 	case len(unchanged) > 0:
-		return "Nothing changed. Run `ox skills list` to see what is already installed here."
+		return "Nothing changed. Run `ox skills list` to see what is already available here."
 	}
-	return "Nothing to do. Run `ox skills catalog` to see what ox ships."
+	return "Nothing to do. Run `ox skills list` to see what is available here."
 }
 
-// lockfileDisplayPath is the repository-relative lockfile path, derived from the
-// manager's own constant rather than retyped, so the text a human reads and the
-// file ox actually writes cannot drift apart.
-func lockfileDisplayPath() string {
-	return filepath.ToSlash(skillmanager.LockPath(""))
-}
-
-func itOrThem(n int) string {
-	if n == 1 {
-		return "it"
-	}
-	return "them"
-}
-
-// changeStateColumn is the width of the widest state word ("uninstalled"), so a
-// run that both installs and removes still reads as two aligned columns.
-const changeStateColumn = 11
+// changeStateColumn is the width of the widest state word ("published"), so a
+// multi-name run still reads as two aligned columns.
+const changeStateColumn = 9
 
 func padChangeState(state string) string {
 	if pad := changeStateColumn - len([]rune(state)); pad > 0 {
@@ -855,16 +405,13 @@ func emitSkillsChange(w io.Writer, out skillsChangeOutput, asJSON bool) error {
 
 	for _, row := range out.Skills {
 		switch row.State {
-		case skillChangeInstalled, skillChangePublished, skillChangeUninstalled:
+		case skillChangePublished:
 			p("%s %s", cli.StyleSuccess.Render(padChangeState(row.State)), row.Name)
 			if row.Detail != "" {
 				p("  into        %s", row.Detail)
 			}
 		default:
 			detail := row.Detail
-			if detail == "" && row.Bundle != "" {
-				detail = "selected by the " + row.Bundle + " bundle"
-			}
 			p("%-*s %s", changeStateColumn, "unchanged", row.Name)
 			if detail != "" {
 				p("  %s", detail)

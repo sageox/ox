@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,15 +12,34 @@ import (
 	"github.com/sageox/ox/extensions/skills"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitutil"
-	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
-// catalogOptInSkill is the one skill ox ships in a NON-default bundle, and
-// therefore the only one for which "available but not installed" is reachable.
-// Every install/uninstall round trip below turns on that property.
+// catalogOptInSkill is the one skill ox ships in a NON-default bundle, so it is
+// the only catalog name for which "shipped but not present in this repository"
+// is reachable. Sibling suites use it for that property.
 const catalogOptInSkill = "post-cutoff"
+
+// teamPublishSkill is the hand-authored skill the Team Context transaction
+// tests below publish. It is deliberately NOT a catalog name: publishing is for
+// content a human wrote in their repository, and ox refuses to publish a skill
+// it manages itself.
+const teamPublishSkill = "deploy-check"
+
+// stageLocalPublishableSkill writes a hand-authored skill into the repository's
+// selected skill root, with a bundled reference file so a publish that copies
+// the manifest and drops the rest is visible.
+func stageLocalPublishableSkill(t *testing.T, repo, name string) string {
+	t.Helper()
+	dir := installedSkillDirPath(repo, name)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "references"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, skills.SkillFileName),
+		[]byte("---\nname: "+name+"\ndescription: Check a deploy before it ships.\n---\n\nRun the checklist.\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "references", "AUTHORING.md"),
+		[]byte("# Authoring\n"), 0o644))
+	return dir
+}
 
 // stageInstallRepo builds a real git repo with a skill target already pinned in
 // the committed lockfile, reconciles it to the default baseline, and chdirs in
@@ -39,23 +57,6 @@ func stageInstallRepo(t *testing.T) string {
 	stageSelectedTarget(t, repo)
 	_, err := reconcileExactSelectedSkills(repo)
 	require.NoError(t, err, "establish the installed baseline")
-	t.Chdir(repo)
-	return repo
-}
-
-func stageInstallRepoWithCustomRoot(t *testing.T) string {
-	t.Helper()
-	repo := t.TempDir()
-	gitInitRepo(t, repo)
-	gitOutput(t, repo, "remote", "add", "origin", "https://github.com/acme/install-custom-test.git")
-	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".sageox"), 0o755))
-	lock := `{"schema_version":2,` +
-		`"desired":{"bundles":["core"],"targets":["custom-project"]},` +
-		`"targets":[{"key":"custom-project","root":".custom",` +
-		`"format":"agent-skills/v1","scope":"project","link_policy":"reject"}]}`
-	require.NoError(t, os.WriteFile(skillmanager.LockPath(repo), []byte(lock), 0o644))
-	_, err := reconcileExactSelectedSkills(repo)
-	require.NoError(t, err, "establish the custom-target baseline")
 	t.Chdir(repo)
 	return repo
 }
@@ -141,242 +142,20 @@ func installedSkillDirPath(repo, name string) string {
 	return filepath.Join(repo, filepath.FromSlash(approvalTargetRoot), name)
 }
 
-// lockedNames reads the committed selection back off disk. Asserting against the
-// FILE rather than the in-memory decision is what proves the choice survives the
-// process — a selection that is not recorded is a selection the next reconcile
-// silently undoes.
-func lockedNames(t *testing.T, repo string) []string {
-	t.Helper()
-	data, err := os.ReadFile(skillmanager.LockPath(repo))
-	require.NoError(t, err)
-	var lock struct {
-		Desired struct {
-			Names []string `json:"names"`
-		} `json:"desired"`
-	}
-	require.NoError(t, json.Unmarshal(data, &lock))
-	return lock.Desired.Names
-}
-
-func skillsJSON(t *testing.T, cmd *cobra.Command, args ...string) map[string]any {
-	t.Helper()
-	out, err := runSkillsChange(t, cmd, append([]string{"--json"}, args...)...)
-	require.NoError(t, err)
-	var got map[string]any
-	require.NoError(t, json.Unmarshal([]byte(out), &got), "output was not JSON: %q", out)
-	return got
-}
-
-// TestSkillsInstall_RecordsTheChoiceAndLandsTheFiles is the behavioral core.
-//
-// Both halves matter and they fail independently. Recording the name without
-// reconciling leaves the repository in exactly the state the install was meant
-// to end — the skill still absent — which reads as the command not having
-// worked. Reconciling without recording installs a file the next reconcile
-// deletes.
-func TestSkillsInstall_RecordsTheChoiceAndLandsTheFiles(t *testing.T) {
-	repo := stageInstallRepo(t)
-
-	require.NoDirExists(t, installedSkillDirPath(repo, catalogOptInSkill),
-		"the opt-in skill must start absent or this test proves nothing")
-
-	out, err := runSkillsChange(t, skillsInstallCmd, catalogOptInSkill)
-	require.NoError(t, err, "output: %s", out)
-
-	require.Contains(t, lockedNames(t, repo), catalogOptInSkill,
-		"the name is not in the committed selection, so the next reconcile removes the files again")
-	require.FileExists(t, filepath.Join(installedSkillDirPath(repo, catalogOptInSkill), "SKILL.md"),
-		"the skill was selected but never materialized")
-}
-
-// TestSkillsUninstall_DropsTheChoiceAndRemovesTheFiles is the symmetric half.
-func TestSkillsUninstall_DropsTheChoiceAndRemovesTheFiles(t *testing.T) {
-	repo := stageInstallRepo(t)
-
-	_, err := runSkillsChange(t, skillsInstallCmd, catalogOptInSkill)
-	require.NoError(t, err)
-	require.FileExists(t, filepath.Join(installedSkillDirPath(repo, catalogOptInSkill), "SKILL.md"))
-
-	out, err := runSkillsChange(t, skillsUninstallCmd, catalogOptInSkill)
-	require.NoError(t, err, "output: %s", out)
-
-	require.NotContains(t, lockedNames(t, repo), catalogOptInSkill,
-		"the name is still selected, so the next reconcile puts the files back")
-	require.NoDirExists(t, installedSkillDirPath(repo, catalogOptInSkill),
-		"ox left behind files it owns and was told to remove")
-}
-
-// TestSkillsInstall_IsAllOrNothingOnABadName mirrors `ox skills approve`: a typo
-// in the last name must not leave the earlier ones half-installed with no record
-// of which.
-func TestSkillsInstall_IsAllOrNothingOnABadName(t *testing.T) {
-	t.Run("unknown", func(t *testing.T) {
-		repo := stageInstallRepo(t)
-
-		_, err := runSkillsChange(t, skillsInstallCmd, catalogOptInSkill, "no-such-skill")
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "no-such-skill")
-		require.Contains(t, err.Error(), "nothing was changed")
-
-		require.NotContains(t, lockedNames(t, repo), catalogOptInSkill)
-		require.NoDirExists(t, installedSkillDirPath(repo, catalogOptInSkill))
-	})
-
-	t.Run("retired", func(t *testing.T) {
-		repo := stageInstallRepo(t)
-
-		// `ox-plan` is a real retired name: it shipped before the 0.15.0 rename.
-		// Reporting it as merely unknown would send someone hunting for a typo in a
-		// name that was correct last release.
-		_, err := runSkillsChange(t, skillsInstallCmd, "ox-plan")
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "retired",
-			"a retired name must be distinguishable from a typo: %v", err)
-
-		require.Empty(t, lockedNames(t, repo))
-	})
-}
-
-func TestSkillsInstall_NameCollisionDoesNotSelectOrHideLocalSkill(t *testing.T) {
-	repo := stageInstallRepo(t)
-	local := installedSkillDirPath(repo, catalogOptInSkill)
-	require.NoError(t, os.MkdirAll(local, 0o755))
-	manifest := filepath.Join(local, "SKILL.md")
-	mine := []byte("---\nname: post-cutoff\ndescription: mine\n---\n\nlocal research\n")
-	require.NoError(t, os.WriteFile(manifest, mine, 0o644))
-
-	_, err := runSkillsChange(t, skillsInstallCmd, catalogOptInSkill)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "conflicts with existing content")
-	require.NotContains(t, lockedNames(t, repo), catalogOptInSkill,
-		"a refused collision still committed the catalog selection")
-	data, readErr := os.ReadFile(manifest)
-	require.NoError(t, readErr)
-	require.Equal(t, mine, data, "a refused collision changed the local skill")
-	ignore, readErr := os.ReadFile(filepath.Join(repo, ".claude", ".gitignore"))
-	require.NoError(t, readErr)
-	require.NotContains(t, string(ignore), "skills/post-cutoff/",
-		"a refused collision hid the local skill from git")
-}
-
-func TestSkillsInstall_NameCollisionUsesSelectedCustomRoot(t *testing.T) {
-	repo := stageInstallRepoWithCustomRoot(t)
-	local := filepath.Join(repo, ".custom", catalogOptInSkill)
-	require.NoError(t, os.MkdirAll(local, 0o755))
-	manifest := filepath.Join(local, "SKILL.md")
-	mine := []byte("---\nname: post-cutoff\ndescription: mine\n---\n\nlocal research\n")
-	require.NoError(t, os.WriteFile(manifest, mine, 0o644))
-
-	_, err := runSkillsChange(t, skillsInstallCmd, catalogOptInSkill)
-	require.ErrorContains(t, err, "conflicts with existing content")
-	require.NotContains(t, lockedNames(t, repo), catalogOptInSkill,
-		"a collision outside a conventional /skills/ root still committed the selection")
-	data, readErr := os.ReadFile(manifest)
-	require.NoError(t, readErr)
-	require.Equal(t, mine, data, "a refused custom-root collision changed the local skill")
-}
-
-// TestSkillsUninstall_NeverDeletesASkillOxDoesNotOwn.
-//
-// A hand-authored skill is the majority of what is in a real repository's skills
-// directory, and ox has no record of it, no way to restore it, and no claim on
-// it. Deleting one on a name collision would be unrecoverable data loss from a
-// command the human believed was scoped to ox's own files.
-func TestSkillsUninstall_NeverDeletesASkillOxDoesNotOwn(t *testing.T) {
-	repo := stageInstallRepo(t)
-
-	local := installedSkillDirPath(repo, "my-own-skill")
-	require.NoError(t, os.MkdirAll(local, 0o755))
-	manifest := filepath.Join(local, "SKILL.md")
-	require.NoError(t, os.WriteFile(manifest,
-		[]byte("---\nname: my-own-skill\ndescription: mine\n---\n\nbody\n"), 0o644))
-
-	_, err := runSkillsChange(t, skillsUninstallCmd, "my-own-skill")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "my-own-skill")
-	require.FileExists(t, manifest, "ox deleted a skill it does not own")
-}
-
-// TestSkillsUninstall_RefusesASkillSelectedByABundle.
-//
-// Dropping the NAME of a bundle-selected skill changes nothing: the bundle still
-// selects it, so reconcile reinstalls it on the spot. Reporting success there
-// would be the worst available outcome — the command says the skill is gone and
-// the file is still on disk.
-func TestSkillsUninstall_RefusesASkillSelectedByABundle(t *testing.T) {
-	repo := stageInstallRepo(t)
-
-	installed := filepath.Join(installedSkillDirPath(repo, "ox-cli-plan"), "SKILL.md")
-	require.FileExists(t, installed, "the baseline must already hold a bundle-selected skill")
-
-	_, err := runSkillsChange(t, skillsUninstallCmd, "ox-cli-plan")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "core", "the refusal does not name the bundle responsible: %v", err)
-	require.FileExists(t, installed)
-}
-
-// TestSkillsChange_JSONAlwaysAnswersEveryQuestionItCanAnswer is the wire
-// contract, asserted against the BYTES an AI coworker parses.
-//
-// Every array is present and `[]` when empty, and guidance travels in the
-// payload. A key that appears only sometimes forces every reader to guess
-// whether its absence means "none" or "this ox does not report that."
-func TestSkillsChange_JSONAlwaysAnswersEveryQuestionItCanAnswer(t *testing.T) {
-	stageInstallRepo(t)
-
-	got := skillsJSON(t, skillsInstallCmd, catalogOptInSkill)
-
-	for _, key := range []string{"skills", "written", "removed"} {
-		raw, ok := got[key]
-		require.True(t, ok, "the %q key is absent, so a reader cannot tell empty from unreported: %v", key, got)
-		require.NotNil(t, raw, "%q was null rather than an empty array: %v", key, got)
-		_, isList := raw.([]any)
-		require.True(t, isList, "%q is not an array: %T", key, raw)
-	}
-	require.NotEmpty(t, got["guidance"], "guidance must travel in the payload, not only in the terminal rendering")
-
-	rows, ok := got["skills"].([]any)
-	require.True(t, ok)
-	require.Len(t, rows, 1)
-	row, ok := rows[0].(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, catalogOptInSkill, row["name"])
-	require.Equal(t, skillChangeInstalled, row["state"])
-}
-
-// TestSkillsInstall_SaysTheChoiceIsSharedWithoutGitJargon.
-//
-// .sageox/skills.lock.json is committed on purpose, and a reader has to know
-// their choice reaches their coworkers. Saying so in git vocabulary teaches
-// people plumbing they should never need — git is an implementation detail here
-// (see the header of skills_status.go's sibling, cmd/ox/session_commit.go).
-func TestSkillsInstall_SaysTheChoiceIsSharedWithoutGitJargon(t *testing.T) {
-	stageInstallRepo(t)
-
-	out, err := runSkillsChange(t, skillsInstallCmd, catalogOptInSkill)
-	require.NoError(t, err)
-
-	require.Contains(t, out, "skills.lock.json",
-		"the output never names the file that carries the choice: %q", out)
-	for _, jargon := range []string{"commit", "push", "git "} {
-		require.NotContains(t, strings.ToLower(out), jargon,
-			"user-facing text leaks git vocabulary %q: %q", jargon, out)
-	}
-}
-
-// TestSkillsInstallTeam_SeedsThePublishedCopyExactlyOnce.
+// TestSkillsPublish_SeedsThePublishedCopyExactlyOnce.
 //
 // `--team` is a seed, not a managed install: ox writes the files once and the
 // team owns the copy from then on. Overwriting would silently discard whatever
 // the team edited into it, which is the one thing publishing is supposed to
 // enable.
-func TestSkillsInstallTeam_SeedsThePublishedCopyExactlyOnce(t *testing.T) {
-	_, team := stageTeamPublishRepo(t)
+func TestSkillsPublish_SeedsThePublishedCopyExactlyOnce(t *testing.T) {
+	repo, team := stageTeamPublishRepo(t)
+	stageLocalPublishableSkill(t, repo, teamPublishSkill)
 
-	out, err := runSkillsChange(t, skillsInstallCmd, "--team", catalogOptInSkill)
+	out, err := runSkillsChange(t, skillsPublishCmd, teamPublishSkill)
 	require.NoError(t, err, "output: %s", out)
 
-	published := filepath.Join(team, "agents", "skills", catalogOptInSkill)
+	published := filepath.Join(team, "agents", "skills", teamPublishSkill)
 	require.FileExists(t, filepath.Join(published, "SKILL.md"))
 	require.FileExists(t, filepath.Join(published, "references", "AUTHORING.md"),
 		"publishing copied the manifest but dropped the skill's bundled references")
@@ -386,13 +165,13 @@ func TestSkillsInstallTeam_SeedsThePublishedCopyExactlyOnce(t *testing.T) {
 	// to push — a push would fail the command outright.
 	require.Empty(t, gitOutput(t, team, "status", "--porcelain"),
 		"the published files were left unrecorded in the Team Context")
-	require.Contains(t, gitOutput(t, team, "log", "-1", "--pretty=%s"), catalogOptInSkill)
+	require.Contains(t, gitOutput(t, team, "log", "-1", "--pretty=%s"), teamPublishSkill)
 
 	// The team's copy is theirs now. A hand edit must survive a second publish.
 	manifest := filepath.Join(published, "SKILL.md")
 	require.NoError(t, os.WriteFile(manifest, []byte("---\nname: post-cutoff\ndescription: ours now\n---\n"), 0o644))
 
-	_, err = runSkillsChange(t, skillsInstallCmd, "--team", catalogOptInSkill)
+	_, err = runSkillsChange(t, skillsPublishCmd, teamPublishSkill)
 	require.Error(t, err, "a second publish silently overwrote the team's own copy")
 	require.Contains(t, err.Error(), "already published")
 
@@ -401,24 +180,28 @@ func TestSkillsInstallTeam_SeedsThePublishedCopyExactlyOnce(t *testing.T) {
 	require.Contains(t, string(data), "ours now")
 }
 
-// TestSkillsInstallTeam_RefusesAFoldedDescription.
+// TestSkillsPublish_RefusesAFoldedDescription.
 //
 // The Team Context frontmatter reader has no block-scalar support for
 // `description:`. Publishing a skill whose description is folded stores the
 // literal ">-" as its activation surface, so the skill is on disk and invisible
 // to every agent — the worst kind of failure, because it looks like a success.
-func TestSkillsInstallTeam_RefusesAFoldedDescription(t *testing.T) {
-	_, team := stageTeamPublishRepo(t)
+func TestSkillsPublish_RefusesAFoldedDescription(t *testing.T) {
+	repo, team := stageTeamPublishRepo(t)
 
-	// ox-cli-plan's own description is a folded scalar in the shipped catalog.
-	_, err := runSkillsChange(t, skillsInstallCmd, "--team", "ox-cli-plan")
+	local := installedSkillDirPath(repo, "folded-desc")
+	require.NoError(t, os.MkdirAll(local, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(local, skills.SkillFileName),
+		[]byte("---\nname: folded-desc\ndescription: >-\n  Spread across\n  two lines.\n---\n\nBody.\n"), 0o644))
+
+	_, err := runSkillsChange(t, skillsPublishCmd, "folded-desc")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "single line",
+	require.Contains(t, err.Error(), "one line",
 		"the refusal does not say what is wrong or how to fix it: %v", err)
-	require.NoDirExists(t, filepath.Join(team, "agents", "skills", "ox-cli-plan"))
+	require.NoDirExists(t, filepath.Join(team, "agents", "skills", "folded-desc"))
 }
 
-// TestSkillsInstallTeam_AFailedPublishCanBeRetried.
+// TestSkillsPublish_AFailedPublishCanBeRetried.
 //
 // The files are written before git records them, and the pre-flight refuses any
 // skill whose directory already exists. Those two facts together turn a seed left
@@ -426,8 +209,9 @@ func TestSkillsInstallTeam_RefusesAFoldedDescription(t *testing.T) {
 // publish can never be run again, and the only thing ox says about it is that the
 // skill is "already published" — to a team that has never seen it. The human has
 // to know to delete a directory in a checkout they did not know they had.
-func TestSkillsInstallTeam_AFailedPublishCanBeRetried(t *testing.T) {
-	_, team := stageTeamPublishRepo(t)
+func TestSkillsPublish_AFailedPublishCanBeRetried(t *testing.T) {
+	repo, team := stageTeamPublishRepo(t)
+	stageLocalPublishableSkill(t, repo, teamPublishSkill)
 
 	// A directory where git must write a file. Portable in a way chmod and hook
 	// scripts are not (no exec bit, no permission semantics, no global config),
@@ -437,10 +221,10 @@ func TestSkillsInstallTeam_AFailedPublishCanBeRetried(t *testing.T) {
 	require.NoError(t, os.RemoveAll(editMsg))
 	require.NoError(t, os.Mkdir(editMsg, 0o755))
 
-	_, err := runSkillsChange(t, skillsInstallCmd, "--team", catalogOptInSkill)
+	_, err := runSkillsChange(t, skillsPublishCmd, teamPublishSkill)
 	require.Error(t, err, "the commit cannot have succeeded with COMMIT_EDITMSG unwritable")
 
-	published := filepath.Join(team, "agents", "skills", catalogOptInSkill)
+	published := filepath.Join(team, "agents", "skills", teamPublishSkill)
 	require.NoDirExists(t, published,
 		"the failed publish left its seed on disk, so every retry is refused as already published")
 	require.Empty(t, gitOutput(t, team, "diff", "--cached", "--name-only"),
@@ -450,58 +234,60 @@ func TestSkillsInstallTeam_AFailedPublishCanBeRetried(t *testing.T) {
 	// the command again.
 	require.NoError(t, os.RemoveAll(editMsg))
 
-	out, retryErr := runSkillsChange(t, skillsInstallCmd, "--team", catalogOptInSkill)
+	out, retryErr := runSkillsChange(t, skillsPublishCmd, teamPublishSkill)
 	require.NoError(t, retryErr, "the retry was refused after a failure the human did not cause: %s", out)
 	require.FileExists(t, filepath.Join(published, "SKILL.md"))
-	require.Contains(t, gitOutput(t, team, "log", "-1", "--pretty=%s"), catalogOptInSkill)
+	require.Contains(t, gitOutput(t, team, "log", "-1", "--pretty=%s"), teamPublishSkill)
 }
 
-// TestSkillsInstallTeam_RollsBackInATeamContextWithNoHistory.
+// TestSkillsPublish_RollsBackInATeamContextWithNoHistory.
 //
 // A Team Context that has been created but never committed into has no HEAD, and
 // the rollback cannot restore an index from a commit that does not exist. It is
 // the same customer promise as the retry above — a failed publish leaves nothing
 // behind — reached through the branch that a repository's first publish takes.
-func TestSkillsInstallTeam_RollsBackInATeamContextWithNoHistory(t *testing.T) {
+func TestSkillsPublish_RollsBackInATeamContextWithNoHistory(t *testing.T) {
 	repo := stageInstallRepo(t)
 	team := t.TempDir()
 	gitInitRepo(t, team) // no commit, so HEAD is unborn
 	sparseTeamCheckout(t, team)
 	wireTeamContext(t, repo, team)
+	stageLocalPublishableSkill(t, repo, teamPublishSkill)
 
 	editMsg := filepath.Join(team, ".git", "COMMIT_EDITMSG")
 	require.NoError(t, os.RemoveAll(editMsg))
 	require.NoError(t, os.Mkdir(editMsg, 0o755))
 
-	_, err := runSkillsChange(t, skillsInstallCmd, "--team", catalogOptInSkill)
+	_, err := runSkillsChange(t, skillsPublishCmd, teamPublishSkill)
 	require.Error(t, err)
 
-	require.NoDirExists(t, filepath.Join(team, "agents", "skills", catalogOptInSkill))
+	require.NoDirExists(t, filepath.Join(team, "agents", "skills", teamPublishSkill))
 	// ls-files rather than a diff: there is no HEAD to diff against, and the index
 	// is the thing that decides what the team's first commit will contain.
 	require.Empty(t, gitOutput(t, team, "ls-files", "--", "agents"),
 		"the failed publish stayed in the index, so the team's first commit carries a skill ox failed to publish")
 }
 
-// TestSkillsInstallTeam_CommitsOnlyWhatItPublished.
+// TestSkillsPublish_CommitsOnlyWhatItPublished.
 //
 // A Team Context is a checkout a human works in, so its index can already hold a
 // change of theirs. A commit that swept that in would put their unfinished work
 // into the team's history under a message about a skill — authored by them,
 // pushed by the daemon, and discovered later by someone doing archeology on a
 // commit that claims to be about something else.
-func TestSkillsInstallTeam_CommitsOnlyWhatItPublished(t *testing.T) {
-	_, team := stageTeamPublishRepo(t)
+func TestSkillsPublish_CommitsOnlyWhatItPublished(t *testing.T) {
+	repo, team := stageTeamPublishRepo(t)
+	stageLocalPublishableSkill(t, repo, teamPublishSkill)
 
 	theirs := filepath.Join(team, "README.md")
 	require.NoError(t, os.WriteFile(theirs, []byte("team\ntheir unfinished edit\n"), 0o644))
 	gitOutput(t, team, "add", "README.md")
 
-	out, err := runSkillsChange(t, skillsInstallCmd, "--team", catalogOptInSkill)
+	out, err := runSkillsChange(t, skillsPublishCmd, teamPublishSkill)
 	require.NoError(t, err, "output: %s", out)
 
 	committed := gitOutput(t, team, "show", "--pretty=format:", "--name-only", "HEAD")
-	require.Contains(t, committed, "agents/skills/"+catalogOptInSkill+"/SKILL.md",
+	require.Contains(t, committed, "agents/skills/"+teamPublishSkill+"/SKILL.md",
 		"the publish did not record what it published")
 	require.NotContains(t, committed, "README.md",
 		"ox swept the team's own staged work into a commit titled for its publish")
@@ -509,7 +295,7 @@ func TestSkillsInstallTeam_CommitsOnlyWhatItPublished(t *testing.T) {
 		"the team's staged change did not survive the publish")
 }
 
-// TestSkillsInstallTeam_WaitsForTheTeamContextLock.
+// TestSkillsPublish_WaitsForTheTeamContextLock.
 //
 // The daemon fetches, pulls and rebases the same checkout under
 // gitutil.WithRepoLock. A publish that ignored it could stage against an index
@@ -519,8 +305,9 @@ func TestSkillsInstallTeam_CommitsOnlyWhatItPublished(t *testing.T) {
 // The lock is asserted over the FILE WRITES as well as the commit: holding it
 // only for the git transaction would still let a rebase run against a tree full
 // of untracked files this command had already put there.
-func TestSkillsInstallTeam_WaitsForTheTeamContextLock(t *testing.T) {
+func TestSkillsPublish_WaitsForTheTeamContextLock(t *testing.T) {
 	repo, team := stageTeamPublishRepo(t)
+	stageLocalPublishableSkill(t, repo, teamPublishSkill)
 
 	held := make(chan struct{})
 	release := make(chan struct{})
@@ -534,11 +321,11 @@ func TestSkillsInstallTeam_WaitsForTheTeamContextLock(t *testing.T) {
 	}()
 	<-held
 
-	// publishCatalogSkillsToTeam rather than the cobra command: require's
+	// publishRepoSkillsToTeam rather than the cobra command: require's
 	// FailNow is not callable from a non-test goroutine.
 	published := make(chan error, 1)
 	go func() {
-		_, err := publishCatalogSkillsToTeam(repo, []string{catalogOptInSkill})
+		_, err := publishRepoSkillsToTeam(repo, []string{teamPublishSkill})
 		published <- err
 	}()
 
@@ -547,22 +334,23 @@ func TestSkillsInstallTeam_WaitsForTheTeamContextLock(t *testing.T) {
 		t.Fatalf("the publish ran straight through a lock another ox process was holding: %v", err)
 	case <-time.After(250 * time.Millisecond):
 	}
-	require.NoDirExists(t, filepath.Join(team, "agents", "skills", catalogOptInSkill),
+	require.NoDirExists(t, filepath.Join(team, "agents", "skills", teamPublishSkill),
 		"the publish wrote into the Team Context while another ox process held it")
 
 	close(release)
 	require.NoError(t, <-holder)
 	require.NoError(t, <-published, "the publish failed once the lock was free")
-	require.Contains(t, gitOutput(t, team, "log", "-1", "--pretty=%s"), catalogOptInSkill)
+	require.Contains(t, gitOutput(t, team, "log", "-1", "--pretty=%s"), teamPublishSkill)
 }
 
-// TestSkillsInstallTeam_ConcurrentPublishersDoNotClobberCommittedSeed proves
+// TestSkillsPublish_ConcurrentPublishersDoNotClobberCommittedSeed proves
 // the existence check is covered by the same lock as the writes. If both
 // callers inspect before locking, both see an empty destination; the loser then
 // overwrites the winner, gets "nothing to commit", and its rollback deletes the
 // winner's committed files from the worktree.
-func TestSkillsInstallTeam_ConcurrentPublishersDoNotClobberCommittedSeed(t *testing.T) {
+func TestSkillsPublish_ConcurrentPublishersDoNotClobberCommittedSeed(t *testing.T) {
 	repo, team := stageTeamPublishRepo(t)
+	stageLocalPublishableSkill(t, repo, teamPublishSkill)
 
 	held := make(chan struct{})
 	release := make(chan struct{})
@@ -579,7 +367,7 @@ func TestSkillsInstallTeam_ConcurrentPublishersDoNotClobberCommittedSeed(t *test
 	results := make(chan error, 2)
 	for range 2 {
 		go func() {
-			_, err := publishCatalogSkillsToTeam(repo, []string{catalogOptInSkill})
+			_, err := publishRepoSkillsToTeam(repo, []string{teamPublishSkill})
 			results <- err
 		}()
 	}
@@ -602,7 +390,7 @@ func TestSkillsInstallTeam_ConcurrentPublishersDoNotClobberCommittedSeed(t *test
 	}
 	require.Equal(t, 1, succeeded, "exactly one publisher must create the team skill")
 	require.Equal(t, 1, refused, "the publisher that acquires the lock second must refuse")
-	require.FileExists(t, filepath.Join(team, "agents", "skills", catalogOptInSkill, "SKILL.md"),
+	require.FileExists(t, filepath.Join(team, "agents", "skills", teamPublishSkill, "SKILL.md"),
 		"the losing publisher's rollback removed the winning publisher's committed seed")
 	require.Equal(t, "2", strings.TrimSpace(gitOutput(t, team, "rev-list", "--count", "HEAD")),
 		"concurrent publishers created more than one publish commit")
@@ -660,134 +448,6 @@ func gitOutput(t *testing.T, dir string, args ...string) string {
 	return string(out)
 }
 
-// TestSkillsCommands_ResolveThroughRootCmd guards the failure the sibling
-// approval command already guards: a complete implementation with no way to
-// reach it.
-//
-// Resolved through rootCmd rather than by walking skillsCmd's own children.
-// Walking skillsCmd stays green when `rootCmd.AddCommand(skillsCmd)` is deleted
-// — the entire `ox skills` family would vanish from the binary while the test
-// that claims to guard reachability kept passing.
-func TestSkillsCommands_ResolveThroughRootCmd(t *testing.T) {
-	for _, tc := range []struct {
-		path []string
-		want *cobra.Command
-	}{
-		{[]string{"skills", "list"}, skillsListCmd},
-		{[]string{"skills", "catalog"}, skillsCatalogCmd},
-		{[]string{"skills", "install"}, skillsInstallCmd},
-		{[]string{"skills", "add"}, skillsInstallCmd},
-		{[]string{"skills", "uninstall"}, skillsUninstallCmd},
-		{[]string{"skills", "remove"}, skillsUninstallCmd},
-	} {
-		t.Run(strings.Join(tc.path, " "), func(t *testing.T) {
-			found, args, err := rootCmd.Find(tc.path)
-			require.NoError(t, err)
-			require.Empty(t, args)
-			require.Same(t, tc.want, found, "`ox %s` does not resolve to its command", strings.Join(tc.path, " "))
-			require.True(t, found.Runnable())
-		})
-	}
-}
-
-// TestSkillsChangeAdviceNamesCommandsThatExist: guidance that promises a command
-// which does not exist is worse than silence — it sends a human to a terminal to
-// be told "unknown command" by the tool that just told them to run it.
-func TestSkillsChangeAdviceNamesCommandsThatExist(t *testing.T) {
-	t.Run("install", func(t *testing.T) {
-		requireAdviceResolves(t, skillsChangeGuidance(skillsChangeOutput{
-			Skills: []skillChangeRow{{Name: "post-cutoff", State: skillChangeInstalled}},
-		}))
-	})
-	t.Run("team publish", func(t *testing.T) {
-		requireAdviceResolves(t, skillsChangeGuidance(skillsChangeOutput{
-			TeamContext: "/tmp/team",
-			Skills:      []skillChangeRow{{Name: "post-cutoff", State: skillChangePublished}},
-		}))
-	})
-	t.Run("uninstall", func(t *testing.T) {
-		requireAdviceResolves(t, skillsChangeGuidance(skillsChangeOutput{
-			Skills: []skillChangeRow{{Name: "post-cutoff", State: skillChangeUninstalled}},
-		}))
-	})
-	t.Run("nothing to do", func(t *testing.T) {
-		requireAdviceResolves(t, skillsChangeGuidance(skillsChangeOutput{
-			Skills: []skillChangeRow{{Name: "post-cutoff", State: skillChangeAlready}},
-		}))
-	})
-}
-
-func TestSkillsChange_CommandAndErrorBoundaries(t *testing.T) {
-	t.Run("install outside a repository", func(t *testing.T) {
-		chdirOutsideGit(t)
-		_, err := runSkillsChange(t, skillsInstallCmd, catalogOptInSkill)
-		require.ErrorContains(t, err, "not inside a git repository")
-	})
-
-	t.Run("uninstall outside a repository", func(t *testing.T) {
-		chdirOutsideGit(t)
-		_, err := runSkillsChange(t, skillsUninstallCmd, catalogOptInSkill)
-		require.ErrorContains(t, err, "not inside a git repository")
-	})
-
-	t.Run("team publish without Team Context", func(t *testing.T) {
-		stageInstallRepo(t)
-		_, err := runSkillsChange(t, skillsInstallCmd, "--team", catalogOptInSkill)
-		require.ErrorContains(t, err, "no Team Context is configured")
-	})
-}
-
-func TestSkillsChange_SelectionAndOwnershipBoundaries(t *testing.T) {
-	t.Run("malformed lock fails install and uninstall", func(t *testing.T) {
-		repo := stageInstallRepo(t)
-		require.NoError(t, os.WriteFile(skillmanager.LockPath(repo), []byte("{broken"), 0o644))
-		_, err := installCatalogSkills(repo, []string{catalogOptInSkill})
-		require.Error(t, err)
-		_, err = uninstallCatalogSkills(repo, []string{catalogOptInSkill})
-		require.Error(t, err)
-	})
-
-	t.Run("install needs a selected target", func(t *testing.T) {
-		repo := t.TempDir()
-		_, err := installCatalogSkills(repo, []string{catalogOptInSkill})
-		require.ErrorContains(t, err, "nowhere to put a skill")
-	})
-
-	t.Run("repeat install and absent uninstall are explicit no-ops", func(t *testing.T) {
-		repo := stageInstallRepo(t)
-		_, err := installCatalogSkills(repo, []string{catalogOptInSkill})
-		require.NoError(t, err)
-		again, err := installCatalogSkills(repo, []string{catalogOptInSkill})
-		require.NoError(t, err)
-		require.Equal(t, skillChangeAlready, again.Skills[0].State)
-
-		repo = stageInstallRepo(t)
-		out, err := uninstallCatalogSkills(repo, []string{catalogOptInSkill})
-		require.NoError(t, err)
-		require.Equal(t, skillChangeNotInstalled, out.Skills[0].State)
-	})
-
-	t.Run("ownership check handles empty roots missing names and team skills", func(t *testing.T) {
-		require.NoError(t, refuseSkillsOxDoesNotOwn(t.TempDir(), nil, []string{"anything"}))
-		repo := t.TempDir()
-		require.NoError(t, refuseSkillsOxDoesNotOwn(repo, []string{approvalTargetRoot}, []string{"missing"}))
-
-		const teamName = "sageox-team-deploy"
-		writeSkillDir(t, repo, approvalTargetRoot, teamName, manifestWithDescription(teamName, "team skill"))
-		err := refuseSkillsOxDoesNotOwn(repo, []string{approvalTargetRoot}, []string{teamName, "other"})
-		require.ErrorContains(t, err, "Team Context")
-		require.Contains(t, err.Error(), "nothing was changed")
-	})
-
-	t.Run("catalog helpers deduplicate and reject unknown bundles", func(t *testing.T) {
-		names, err := validateCatalogNames([]string{catalogOptInSkill, catalogOptInSkill})
-		require.NoError(t, err)
-		require.Equal(t, []string{catalogOptInSkill}, names)
-		_, err = selectedCatalogNames(skillmanager.DesiredSkills{Bundles: []skillmanager.BundleRef{{ID: "missing"}}})
-		require.Error(t, err)
-	})
-}
-
 func TestPublishTeamSkillSeeds_FilesystemAndGitBoundaries(t *testing.T) {
 	seed := teamSkillSeed{name: "demo", relDir: "agents/skills/demo", files: []skills.File{{
 		Path: skills.SkillFileName, Content: []byte("---\nname: demo\ndescription: demo\n---\n"),
@@ -812,68 +472,20 @@ func TestPublishTeamSkillSeeds_FilesystemAndGitBoundaries(t *testing.T) {
 	rollbackTeamSeeds(t.TempDir(), nil)
 }
 
-func TestCatalogSkillHelpers_ReportMalformedEntries(t *testing.T) {
-	t.Run("missing description", func(t *testing.T) {
-		err := refuseUnpublishableDescription("broken", []skills.File{{
-			Path: skills.SkillFileName, Content: []byte("---\nname: broken\n---\n"),
-		}})
-		require.ErrorContains(t, err, "found none")
-	})
-
-	t.Run("missing manifest", func(t *testing.T) {
-		err := refuseUnpublishableDescription("broken", []skills.File{{Path: "references/note.md", Content: []byte("note")}})
-		require.ErrorContains(t, err, "has no SKILL.md")
-	})
-
-	t.Run("unknown embedded directory", func(t *testing.T) {
-		_, err := catalogSkillFiles("definitely-not-in-the-catalog")
-		require.ErrorContains(t, err, "read the catalog entry")
-	})
-}
-
-func TestSkillsChange_RenderingEdges(t *testing.T) {
-	t.Run("empty guidance", func(t *testing.T) {
-		require.Contains(t, skillsChangeGuidance(newSkillsChangeOutput()), "Nothing to do")
-	})
-
-	t.Run("plural install", func(t *testing.T) {
-		guidance := skillsChangeGuidance(skillsChangeOutput{Skills: []skillChangeRow{
-			{Name: "a", State: skillChangeInstalled},
-			{Name: "b", State: skillChangeInstalled},
-		}})
-		require.Contains(t, guidance, "use them now")
-	})
-
-	t.Run("unchanged bundle detail", func(t *testing.T) {
-		var buf strings.Builder
-		require.NoError(t, emitSkillsChange(&buf, skillsChangeOutput{Skills: []skillChangeRow{{
-			Name: "ox-cli-plan", State: skillChangeAlready, Bundle: "core",
-		}}}, false))
-		require.Contains(t, buf.String(), "selected by the core bundle")
-	})
-
-	t.Run("unchanged explicit detail", func(t *testing.T) {
-		var buf strings.Builder
-		require.NoError(t, emitSkillsChange(&buf, skillsChangeOutput{Skills: []skillChangeRow{{
-			Name: "post-cutoff", State: skillChangeNotInstalled, Detail: "not selected",
-		}}}, false))
-		require.Contains(t, buf.String(), "not selected")
-	})
-}
-
-// TestSkillsInstallTeam_RefusesASparseExcludedPublishedSkill.
+// TestSkillsPublish_RefusesASparseExcludedPublishedSkill.
 //
 // A Team Context is a SPARSE checkout, so a skill tracked in git can be absent
 // from the worktree. A worktree-only existence check calls that destination free
 // and the path-scoped commit then replaces the team's existing skill in history —
 // a silent overwrite of content ox promises to seed exactly once.
-func TestSkillsInstallTeam_RefusesASparseExcludedPublishedSkill(t *testing.T) {
-	_, team := stageTeamPublishRepo(t)
+func TestSkillsPublish_RefusesASparseExcludedPublishedSkill(t *testing.T) {
+	repo, team := stageTeamPublishRepo(t)
+	stageLocalPublishableSkill(t, repo, teamPublishSkill)
 
 	// Publish once, the ordinary way, so the skill is real history.
-	out, err := runSkillsChange(t, skillsInstallCmd, "--team", catalogOptInSkill)
+	out, err := runSkillsChange(t, skillsPublishCmd, teamPublishSkill)
 	require.NoError(t, err, "output: %s", out)
-	published := filepath.Join(team, "agents", "skills", catalogOptInSkill)
+	published := filepath.Join(team, "agents", "skills", teamPublishSkill)
 	require.FileExists(t, filepath.Join(published, "SKILL.md"))
 	original := gitOutput(t, team, "rev-parse", "HEAD")
 
@@ -884,36 +496,37 @@ func TestSkillsInstallTeam_RefusesASparseExcludedPublishedSkill(t *testing.T) {
 	gitOutput(t, team, "sparse-checkout", "set", "docs")
 	require.NoDirExists(t, published,
 		"the fixture proves nothing unless sparse checkout actually removed the worktree copy")
-	require.NotEmpty(t, gitOutput(t, team, "ls-files", "--", "agents/skills/"+catalogOptInSkill),
+	require.NotEmpty(t, gitOutput(t, team, "ls-files", "--", "agents/skills/"+teamPublishSkill),
 		"git must still track the skill or this is not the sparse case")
 
-	_, err = runSkillsChange(t, skillsInstallCmd, "--team", catalogOptInSkill)
+	_, err = runSkillsChange(t, skillsPublishCmd, teamPublishSkill)
 	require.Error(t, err, "a sparse-excluded skill was overwritten instead of refused")
 	require.Contains(t, err.Error(), "already published")
 	require.Equal(t, original, gitOutput(t, team, "rev-parse", "HEAD"),
 		"the refusal still wrote a commit over the team's existing skill")
 }
 
-// TestSkillsInstallTeam_RefusesASymlinkedParent.
+// TestSkillsPublish_RefusesASymlinkedParent.
 //
 // A Team Context is a remote-controlled clone. If an intermediate component —
 // "agents" or "agents/skills" — is a symlink out of the tree, MkdirAll and
 // WriteFile follow it and deposit the skill outside the checkout entirely, where
 // the staging failure afterwards cleans up the wrong place.
-func TestSkillsInstallTeam_RefusesASymlinkedParent(t *testing.T) {
+func TestSkillsPublish_RefusesASymlinkedParent(t *testing.T) {
 	for _, tc := range []struct{ name, link string }{
 		{name: "agents is a link", link: "agents"},
 		{name: "agents/skills is a link", link: filepath.Join("agents", "skills")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, team := stageTeamPublishRepo(t)
+			repo, team := stageTeamPublishRepo(t)
+			stageLocalPublishableSkill(t, repo, teamPublishSkill)
 
 			outside := t.TempDir()
 			linkPath := filepath.Join(team, tc.link)
 			require.NoError(t, os.MkdirAll(filepath.Dir(linkPath), 0o755))
 			require.NoError(t, os.Symlink(outside, linkPath))
 
-			_, err := runSkillsChange(t, skillsInstallCmd, "--team", catalogOptInSkill)
+			_, err := runSkillsChange(t, skillsPublishCmd, teamPublishSkill)
 			require.Error(t, err, "publishing followed a symlink out of the Team Context")
 
 			// Refused AT THE BOUNDARY, not downstream. An "error occurred" assertion

@@ -276,10 +276,11 @@ func TestSyncHelp_ExplainsAutomationAndPackBoundary(t *testing.T) {
 
 func TestConvergeAfterSessionBoundary_AppliesPendingTeamContent(t *testing.T) {
 	repo, _ := stageTeamPublishRepo(t)
-	_, err := publishCatalogSkillsToTeam(repo, []string{catalogOptInSkill})
+	stageLocalPublishableSkill(t, repo, teamPublishSkill)
+	_, err := publishRepoSkillsToTeam(repo, []string{teamPublishSkill})
 	require.NoError(t, err)
 
-	installed := filepath.Join(repo, ".claude", "skills", "sageox-team-"+catalogOptInSkill, "SKILL.md")
+	installed := filepath.Join(repo, ".claude", "skills", "sageox-team-"+teamPublishSkill, "SKILL.md")
 	require.NoFileExists(t, installed)
 	convergeAfterSessionBoundary(repo)
 	require.FileExists(t, installed)

@@ -235,7 +235,7 @@ func TestEmitSkillsList_RepositoryControlledTextCannotForgeTerminalOutput(t *tes
 		require.Len(t, got.Skills, 1)
 		require.Equal(t, hostileName, got.Skills[0].Name,
 			"the STORED name must stay the real directory name: it is a map key here and is what "+
-				"refuseSkillsOxDoesNotOwn matches a user's argument against")
+				"publish matches a user's argument against")
 
 		var buf strings.Builder
 		require.NoError(t, emitSkillsList(&buf, got, false))
@@ -299,7 +299,7 @@ func TestEmitSkillsList_RepositoryControlledTextCannotForgeTerminalOutput(t *tes
 // TestManifestDescription_ReadsTextButReportsShape.
 //
 // Two callers need different halves of this one read: the listings want the
-// TEXT, and `ox skills install --team` needs to know the value was a block
+// TEXT, and `ox skills publish` needs to know the value was a block
 // scalar, because a Team Context stores the marker and drops the text.
 func TestManifestDescription_ReadsTextButReportsShape(t *testing.T) {
 	for _, tc := range []struct {

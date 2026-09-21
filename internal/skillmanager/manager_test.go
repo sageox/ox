@@ -1548,13 +1548,13 @@ func TestApplyRefusesWhenTheIgnoreFileIsADirectory(t *testing.T) {
 // destroys work that exists in no other copy, and because the installer also
 // gitignores the directory the loss never appears in `git status` or a diff.
 //
-// Failure prevented: `ox skills install post-cutoff` replaces the user's own
+// Failure prevented: a selection that names post-cutoff replaces the user's own
 // post-cutoff SKILL.md with ox's, reports no conflict, and leaves no trace.
 func TestPlan_UnprefixedCatalogNameNeverEatsAHandAuthoredSkill(t *testing.T) {
 	repo := t.TempDir()
 	target := sharedTarget()
 	targets := []adapterprotocol.SkillTarget{target}
-	// Exactly what `ox skills install post-cutoff` records: an opt-in NAME, not a
+	// Exactly what a selection of post-cutoff records: an opt-in NAME, not a
 	// bundle — post-cutoff lives in the non-default "team" bundle.
 	desired := DesiredSkills{Names: []string{"post-cutoff"}, Targets: []string{target.Key}}
 
