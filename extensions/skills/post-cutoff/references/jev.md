@@ -26,7 +26,12 @@ Three tells that a call site is decision-shaped:
 2. **`max_tokens` is tiny.** A call capped at 20 or 24 tokens is a classifier.
 3. **You wrote a validator** that rejects anything outside a set you already knew.
 
-Three design moves follow, and **all three are worth making whether or not you ever
+And one inverse tell, which is where the *new* capability is rather than the saving:
+**a hand-rolled heuristic whose comment explains that it exists because a model was
+too slow or too expensive.** Those comments are a map of the decisions a team already
+wanted to make well and could not afford to. They are worth grepping for.
+
+Four design moves follow, and **all four are worth making whether or not you ever
 adopt a specific vendor**:
 
 - **Put a cheap gate in front of expensive generation.** If a summarizer is invoked and
@@ -39,8 +44,23 @@ adopt a specific vendor**:
   touching the caller.
 - **Put a confidence band on it, and calibrate the band against your own labels.**
   Not the vendor's.
+- **Make abstention a first-class outcome, distinct from a negative one.** This is the
+  failure a typed-decision model actively invites, because its output is a *value* and
+  a value has no way to say "I could not tell". The moment an input the decision
+  depends on is missing, "cannot evaluate" collapses into "no" — and downstream that
+  reads as a confident verdict nobody checked.
 
-The rest of this entry is about one product. The three moves above outlive it.
+  Worked example, found in this codebase rather than imagined: a skill-distribution
+  path resolved a repository's identity and passed it to a filter. When the identity
+  could not be resolved the filter returned "does not apply" — the same answer it gives
+  for a genuine non-match — so every targeted item silently vanished, and a retirement
+  pass would have deleted them as un-published. The fix was not a better filter; it was
+  giving the unknown case its own state, which suppressed removals while still serving
+  everything that needed no identity at all. A calibrated probability gives you that
+  band for free, but only if you *spend* it: pick an abstain range and route it
+  somewhere, or you have bought calibration and thrown it away.
+
+The rest of this entry is about one product. The four moves above outlive it.
 
 ## What it actually is
 
