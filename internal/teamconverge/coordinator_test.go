@@ -96,6 +96,18 @@ func TestCoordinator_FailsClosedOnHandlerGaps(t *testing.T) {
 	}
 }
 
+func TestCoordinator_PreservesRetryableHandlerFailureAsPending(t *testing.T) {
+	artifact := Artifact{Kind: KindSkill, Name: "deploy", SourcePath: "agents/skills/deploy", Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: true}
+	handler := echoHandler{kind: KindSkill, err: &RetryableError{Err: errors.New("lock busy")}}
+	coordinator, err := New(staticDiscovery{snapshot: Snapshot{Commit: "abc"}, artifacts: []Artifact{artifact}}, handler)
+	require.NoError(t, err)
+	report, err := coordinator.Converge(context.Background(), Request{})
+	require.NoError(t, err)
+	require.Len(t, report.Outcomes, 1)
+	require.Equal(t, StatePending, report.Outcomes[0].State)
+	require.False(t, report.Converged())
+}
+
 func TestCoordinator_DuplicateOwnershipIsAConflictBeforeDelivery(t *testing.T) {
 	artifacts := []Artifact{
 		{Kind: KindRule, Name: "security", SourcePath: "agents/rules/security.md", Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: true},

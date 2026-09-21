@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/spf13/cobra"
 )
@@ -64,11 +65,12 @@ func init() {
 // than only in the human rendering, so Codex and Droid get the next action too —
 // the CLI owns behavior, skills are thin relays over it.
 type skillsStatusOutput struct {
-	TeamContext *teamContextStatus `json:"team_context"`
-	Repo        repoSkillStatus    `json:"repo"`
-	TeamSkills  []teamSkillStatus  `json:"team_skills"`
-	Problems    []string           `json:"problems,omitempty"`
-	Guidance    string             `json:"guidance,omitempty"`
+	TeamContext *teamContextStatus          `json:"team_context"`
+	Convergence *teamconverge.PendingRecord `json:"convergence,omitempty"`
+	Repo        repoSkillStatus             `json:"repo"`
+	TeamSkills  []teamSkillStatus           `json:"team_skills"`
+	Problems    []string                    `json:"problems,omitempty"`
+	Guidance    string                      `json:"guidance,omitempty"`
 }
 
 type teamContextStatus struct {
@@ -136,6 +138,19 @@ func runSkillsStatus(cmd *cobra.Command, _ []string) error {
 // the JSON shape are both testable without a terminal.
 func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 	out := skillsStatusOutput{TeamSkills: []teamSkillStatus{}}
+	pending, pendingErr := teamconverge.LoadPending(gitRoot)
+	if pendingErr != nil {
+		out.Problems = append(out.Problems, fmt.Sprintf("Team Context convergence status is unreadable: %v", pendingErr))
+	} else if pending != nil {
+		out.Convergence = pending
+		if pending.Status == teamconverge.PendingRetry {
+			out.Problems = append(out.Problems, fmt.Sprintf(
+				"Team Context convergence is pending and will retry automatically (attempt %d): %s", pending.Attempts, pending.Reason))
+		} else {
+			out.Problems = append(out.Problems, fmt.Sprintf(
+				"Team Context convergence failed and needs attention: %s", pending.Reason))
+		}
+	}
 
 	slug := repotools.RepoSlug(gitRoot)
 	fromRemote := slug != filepath.Base(gitRoot)
@@ -437,6 +452,16 @@ func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsSta
 		}
 	} else {
 		p("%s  none configured for this project", cli.StyleAccent.Render("Team Context"))
+	}
+	if out.Convergence != nil {
+		p("  convergence  %s (attempt %d)", out.Convergence.Status, out.Convergence.Attempts)
+		if out.Convergence.TeamCommit != "" {
+			commit := out.Convergence.TeamCommit
+			if len(commit) > 12 {
+				commit = commit[:12]
+			}
+			p("  source       %s", commit)
+		}
 	}
 
 	p("")

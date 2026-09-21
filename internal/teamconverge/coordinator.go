@@ -2,6 +2,7 @@ package teamconverge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -102,8 +103,13 @@ func (c *Coordinator) Converge(ctx context.Context, request Request) (Report, er
 		}
 		outcomes, handleErr := handler.Converge(ctx, request, snapshot, items)
 		if handleErr != nil {
+			state := StateError
+			var retryable *RetryableError
+			if errors.As(handleErr, &retryable) {
+				state = StatePending
+			}
 			for _, artifact := range items {
-				report.Outcomes = append(report.Outcomes, outcomeFor(snapshot, artifact, StateError, "", handleErr.Error()))
+				report.Outcomes = append(report.Outcomes, outcomeFor(snapshot, artifact, state, "", handleErr.Error()))
 			}
 			continue
 		}

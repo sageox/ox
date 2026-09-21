@@ -21,6 +21,7 @@ const (
 	StateApplied         OutcomeState = "applied"
 	StateIndexed         OutcomeState = "indexed"
 	StateInjected        OutcomeState = "injected"
+	StatePending         OutcomeState = "pending"
 	StatePendingApproval OutcomeState = "pending_approval"
 	StateUnsupported     OutcomeState = "unsupported"
 	StateFiltered        OutcomeState = "filtered"
@@ -131,3 +132,12 @@ type Handler interface {
 	Kind() ArtifactKind
 	Converge(context.Context, Request, Snapshot, []Artifact) ([]Outcome, error)
 }
+
+// RetryableError marks a handler failure that should remain pending and be
+// retried without waiting for another Team Context commit.
+type RetryableError struct {
+	Err error
+}
+
+func (e *RetryableError) Error() string { return e.Err.Error() }
+func (e *RetryableError) Unwrap() error { return e.Err }

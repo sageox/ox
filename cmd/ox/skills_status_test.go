@@ -9,6 +9,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,6 +80,26 @@ func TestCollectSkillsStatus_DistinguishesTheFailureModes(t *testing.T) {
 		require.False(t, out.Repo.SlugFromRemote)
 		require.Contains(t, strings.Join(out.Problems, "\n"), "cannot match here")
 	})
+}
+
+func TestCollectSkillsStatus_ExposesPendingVersusFailedConvergence(t *testing.T) {
+	for _, status := range []teamconverge.PendingStatus{teamconverge.PendingRetry, teamconverge.PendingFailed} {
+		t.Run(string(status), func(t *testing.T) {
+			repo := t.TempDir()
+			report := teamconverge.Report{Snapshot: teamconverge.Snapshot{Path: "/team", Commit: "abcdef1234567890"}}
+			_, err := teamconverge.SavePending(repo, status, report, "fixture reason")
+			require.NoError(t, err)
+
+			out := collectSkillsStatus(repo)
+			require.NotNil(t, out.Convergence)
+			require.Equal(t, status, out.Convergence.Status)
+			require.Contains(t, strings.Join(out.Problems, "\n"), string(status))
+			var rendered strings.Builder
+			renderSkillsStatus(&rendered, out)
+			require.Contains(t, rendered.String(), "convergence  "+string(status))
+			require.Contains(t, rendered.String(), "abcdef123456")
+		})
+	}
 }
 
 // writeTeamSkillFixture stages a published skill in a team checkout.

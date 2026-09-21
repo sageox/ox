@@ -1,7 +1,19 @@
 package daemon
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
+
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/internal/teamconverge"
+	"github.com/sageox/ox/internal/version"
+	"github.com/sageox/ox/pkg/adapterprotocol"
+	"github.com/stretchr/testify/require"
 )
 
 // TestTeamSkillsTouched is the whole trigger for the daemon's team-skill
@@ -93,4 +105,75 @@ func TestTeamArtifactsTouched(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTeamConvergence_RetriesPendingLockContentionWithoutNewCommit(t *testing.T) {
+	project := t.TempDir()
+	targets, err := skillmanager.CanonicalizeTargets(project, []adapterprotocol.SkillTarget{{
+		Key: "shared", Root: ".agents/skills", Format: adapterprotocol.SkillFormatAgentSkillsV1,
+		Scope: adapterprotocol.SkillScopeProject, LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+	}})
+	require.NoError(t, err)
+	_, err = skillmanager.Reconcile(project, version.Version, skillmanager.DefaultDesired(targets), targets)
+	require.NoError(t, err)
+
+	team := t.TempDir()
+	runTeamGit(t, team, "init", "-q")
+	runTeamGit(t, team, "config", "user.email", "test@sageox.ai")
+	runTeamGit(t, team, "config", "user.name", "test")
+	runTeamGit(t, team, "config", "commit.gpgsign", "false")
+	manifest := filepath.Join(team, "agents", "skills", "deploy", "SKILL.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(manifest), 0o755))
+	require.NoError(t, os.WriteFile(manifest,
+		[]byte("---\nname: deploy\ndescription: deploy safely\n---\n\nDeploy safely.\n"), 0o644))
+	runTeamGit(t, team, "add", "-A")
+	runTeamGit(t, team, "commit", "-q", "-m", "team skill")
+
+	require.NoError(t, config.SaveProjectConfig(project, &config.ProjectConfig{
+		ConfigVersion: config.CurrentConfigVersion, TeamID: "team_test", TeamName: "Test",
+	}))
+	require.NoError(t, config.SaveLocalConfig(project, &config.LocalConfig{TeamContexts: []config.TeamContext{{
+		TeamID: "team_test", TeamName: "Test", Path: team,
+	}}}))
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- fileutil.WithFileLock(context.Background(), skillmanager.LockPath(project), func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+
+	scheduler := newTestScheduler(project)
+	scheduler.reconcileTeamSkills([]string{"agents/skills/deploy/SKILL.md"})
+	pending, err := teamconverge.LoadPending(project)
+	require.NoError(t, err)
+	require.NotNil(t, pending, "lock contention was forgotten after the changed commit was consumed")
+	require.Equal(t, teamconverge.PendingRetry, pending.Status)
+	require.Equal(t, 1, pending.Attempts)
+	require.NoFileExists(t, filepath.Join(project, ".agents", "skills", "sageox-team-deploy", "SKILL.md"))
+
+	close(release)
+	require.NoError(t, <-done)
+	// No changed paths and no new Team Context commit: only the durable marker can
+	// cause this cycle to retry. Recreate the scheduler to prove a daemon restart
+	// does not lose the work.
+	scheduler = newTestScheduler(project)
+	scheduler.reconcileTeamSkills(nil)
+	require.FileExists(t, filepath.Join(project, ".agents", "skills", "sageox-team-deploy", "SKILL.md"))
+	pending, err = teamconverge.LoadPending(project)
+	require.NoError(t, err)
+	require.Nil(t, pending, "verified convergence did not clear the pending marker")
+}
+
+func runTeamGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %v: %s", args, out)
 }

@@ -2,6 +2,7 @@ package teamconverge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -81,6 +82,9 @@ func (SkillHandler) Converge(_ context.Context, request Request, snapshot Snapsh
 		plan, err = skillmanager.ReconcileUpdateNonBlocking(request.ProjectRoot, version.Version, identity)
 	}
 	if err != nil {
+		if errors.Is(err, skillmanager.ErrApplyInProgress) {
+			return nil, &RetryableError{Err: err}
+		}
 		return nil, err
 	}
 	if plan == nil {

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/config"
@@ -83,9 +84,6 @@ func teamArtifactsTouched(changed []string) bool {
 // reconciling team content from here cannot pin a repo to a previous release's
 // CLI skills.
 func (s *SyncScheduler) reconcileTeamSkills(changed []string) {
-	if !teamArtifactsTouched(changed) {
-		return
-	}
 	repoRoot := s.config.ProjectRoot
 	if repoRoot == "" {
 		return
@@ -93,6 +91,15 @@ func (s *SyncScheduler) reconcileTeamSkills(changed []string) {
 	team := config.FindRepoTeamContext(repoRoot)
 	if team == nil || team.Path == "" {
 		s.logger.Debug("team artifacts changed but repo has no Team Context", "repo", repoRoot)
+		return
+	}
+	pending, pendingErr := teamconverge.LoadPending(repoRoot)
+	if pendingErr != nil {
+		s.logger.Warn("team convergence state unreadable", "repo", repoRoot, "error", pendingErr)
+	}
+	retryIncomplete := pending != nil &&
+		filepath.Clean(pending.TeamPath) == filepath.Clean(team.Path)
+	if !teamArtifactsTouched(changed) && !retryIncomplete {
 		return
 	}
 	coordinator, err := teamconverge.NewDefault()
@@ -108,7 +115,24 @@ func (s *SyncScheduler) reconcileTeamSkills(changed []string) {
 	})
 	if err != nil {
 		s.logger.Warn("team context convergence failed", "repo", repoRoot, "error", err)
+		retryReport := teamconverge.Report{Snapshot: teamconverge.Snapshot{Path: team.Path}}
+		if pending != nil {
+			retryReport.Snapshot.Commit = pending.TeamCommit
+		}
+		if _, saveErr := teamconverge.SavePending(repoRoot, teamconverge.PendingRetry, retryReport, err.Error()); saveErr != nil {
+			s.logger.Warn("could not persist pending team convergence", "repo", repoRoot, "error", saveErr)
+		}
 		return
+	}
+	if report.Converged() {
+		if clearErr := teamconverge.ClearPending(repoRoot); clearErr != nil {
+			s.logger.Warn("could not clear completed team convergence state", "repo", repoRoot, "error", clearErr)
+		}
+	} else {
+		status := teamconverge.PendingStatusFor(report)
+		if _, saveErr := teamconverge.SavePending(repoRoot, status, report, teamconverge.FailureReason(report)); saveErr != nil {
+			s.logger.Warn("could not persist incomplete team convergence", "repo", repoRoot, "error", saveErr)
+		}
 	}
 
 	counts := map[teamconverge.OutcomeState]int{}
