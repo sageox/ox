@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/version"
@@ -16,34 +17,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// TestResolveUpgradeTarget_ExplicitFlagWins verifies operator-supplied
-// version takes priority over GitHub-API resolution. This is the safest
-// path — operator-chosen tags are auditable.
-func TestResolveUpgradeTarget_ExplicitFlagWins(t *testing.T) {
-	t.Setenv("OX_UPGRADE_REQUIRE_PIN", "")
-	target, err := resolveUpgradeTarget("v0.42.0")
-	require.NoError(t, err)
-	assert.Equal(t, "v0.42.0", target)
-}
-
-// TestResolveUpgradeTarget_RequirePinRefusesLatest verifies the strict
-// mode envelope: when OX_UPGRADE_REQUIRE_PIN=1, no flag means no upgrade.
-func TestResolveUpgradeTarget_RequirePinRefusesLatest(t *testing.T) {
-	t.Setenv("OX_UPGRADE_REQUIRE_PIN", "1")
-	_, err := resolveUpgradeTarget("")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "OX_UPGRADE_REQUIRE_PIN")
-}
-
-// TestResolveUpgradeTarget_RequirePinAcceptsExplicit verifies the strict
-// mode lets explicit tags through.
-func TestResolveUpgradeTarget_RequirePinAcceptsExplicit(t *testing.T) {
-	t.Setenv("OX_UPGRADE_REQUIRE_PIN", "1")
-	target, err := resolveUpgradeTarget("v1.0.0")
-	require.NoError(t, err)
-	assert.Equal(t, "v1.0.0", target)
-}
 
 func TestValidateUpgradeTarget(t *testing.T) {
 	tests := []struct {
@@ -92,9 +65,9 @@ func TestValidateUpgradeTarget(t *testing.T) {
 	}
 }
 
-// Explicit pins must reach the requested installer without a latest-release gate,
-// and unsupported methods must reject them before consulting that gate.
-func TestUpgradePinnedTargetSelection(t *testing.T) {
+// The selected release must match the installer arguments and reported result,
+// whether it came from an explicit pin, the cache, or a live release lookup.
+func TestUpgradeTargetSelection(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: runs isolated package-manager subprocesses")
 	}
@@ -109,6 +82,7 @@ func TestUpgradePinnedTargetSelection(t *testing.T) {
 		name          string
 		method        installMethod
 		cached        string
+		latest        string
 		target        string
 		offline       bool
 		installerExit int
@@ -141,6 +115,13 @@ func TestUpgradePinnedTargetSelection(t *testing.T) {
 		{name: "go newer pin with newer cache", method: installGoInstall, cached: "v99.0.0", target: "v0.43.0", wantStatus: "upgraded", wantNew: "0.43.0", wantInstall: true},
 		{name: "go failed pin with newer cache", method: installGoInstall, cached: "v99.0.0", target: "v0.43.0", installerExit: 37, wantStatus: "failed", wantNew: "0.43.0", wantMessage: "exit status 37", wantInstall: true},
 		{name: "go strict pin while offline", method: installGoInstall, target: "v0.43.0", offline: true, requirePin: true, wantStatus: "upgraded", wantNew: "0.43.0", wantInstall: true},
+		{name: "go cached release while offline", method: installGoInstall, cached: "v0.43.0", offline: true, wantStatus: "upgraded", wantNew: "0.43.0", wantInstall: true},
+		{name: "go cached release with newer latest", method: installGoInstall, cached: "v0.43.0", latest: "v0.44.0", wantStatus: "upgraded", wantNew: "0.43.0", wantInstall: true},
+		{name: "go live release without cache", method: installGoInstall, latest: "v0.43.0", wantStatus: "upgraded", wantNew: "0.43.0", wantInstall: true, wantFetch: true},
+		{name: "go failed cached release install", method: installGoInstall, cached: "v0.43.0", installerExit: 37, wantStatus: "failed", wantNew: "0.43.0", wantMessage: "exit status 37", wantInstall: true},
+		{name: "go unavailable release without cache", method: installGoInstall, offline: true, wantStatus: "failed", wantMessage: "latest lookup unavailable", wantFetch: true},
+		{name: "go live release requires explicit pin", method: installGoInstall, latest: "v0.43.0", requirePin: true, wantStatus: "failed", wantNew: "0.43.0", wantMessage: "OX_UPGRADE_REQUIRE_PIN=1", wantFetch: true},
+		{name: "go already current needs no pin", method: installGoInstall, requirePin: true, wantStatus: "up-to-date", wantFetch: true},
 		{name: "no target still checks latest", method: installSource, wantStatus: "up-to-date", wantFetch: true},
 		{name: "no target preserves manual upgrade", method: installSource, cached: "v99.0.0", wantStatus: "manual", wantNew: "99.0.0"},
 		{name: "no target preserves strict pin requirement", method: installGoInstall, cached: "v99.0.0", requirePin: true, wantStatus: "failed", wantNew: "99.0.0", wantMessage: "OX_UPGRADE_REQUIRE_PIN=1"},
@@ -191,6 +172,9 @@ func TestUpgradePinnedTargetSelection(t *testing.T) {
 				if tt.offline {
 					return "", errors.New("latest lookup unavailable")
 				}
+				if tt.latest != "" {
+					return tt.latest, nil
+				}
 				return "v0.42.0", nil
 			}
 			t.Cleanup(func() { latestReleaseFetcher = oldFetcher })
@@ -227,17 +211,17 @@ func TestUpgradePinnedTargetSelection(t *testing.T) {
 			if tt.wantFetch {
 				assert.Equal(t, 1, fetches)
 			} else {
-				assert.Zero(t, fetches, "an explicit target must not depend on the latest release")
+				assert.Zero(t, fetches, "an explicit or cached target must not depend on the latest release")
 			}
 			argsPath := filepath.Join(os.Getenv("HOME"), "install-args")
 			if tt.wantInstall {
 				args, err := os.ReadFile(argsPath)
-				if assert.NoError(t, err, "the explicit target must reach the installer") {
-					assert.Contains(t, string(args), "install\ngithub.com/sageox/ox/cmd/ox@"+tt.target+"\n")
-					for _, pkg := range adapterPackages {
-						assert.Contains(t, string(args), pkg+"@"+tt.target+"\n")
-					}
+				require.NoError(t, err, "the selected target must reach the installer")
+				wantArgs := []string{"install", "github.com/sageox/ox/cmd/ox@v" + tt.wantNew}
+				for _, pkg := range adapterPackages {
+					wantArgs = append(wantArgs, pkg+"@v"+tt.wantNew)
 				}
+				assert.Equal(t, strings.Join(wantArgs, "\n")+"\n", string(args))
 			} else {
 				assert.NoFileExists(t, argsPath)
 			}

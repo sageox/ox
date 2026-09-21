@@ -59,10 +59,6 @@ func init() {
 	upgradeCmd.Flags().Bool("json", false, "output as JSON")
 	upgradeCmd.Flags().String("target", "",
 		"pin upgrade to a specific version tag (e.g. v0.18.0); empty = latest from GitHub releases API")
-	// ox-zbi5: when this env var is set, refuse to upgrade with an @latest
-	// target. Forces operators to specify a pinned version, defeating the
-	// "compromised GOPROXY serves backdoored bytes for @latest" path.
-	// Defaults off so the typical interactive upgrade still works.
 }
 
 func runUpgrade(cmd *cobra.Command, _ []string) error {
@@ -131,7 +127,13 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	case installHomebrew:
 		err = upgradeViaHomebrew(jsonOutput)
 	case installGoInstall:
-		err = upgradeViaGoInstallWithTarget(jsonOutput, target)
+		// Require an operator-supplied pin, even when the release check selected
+		// a concrete version. A cached or API-selected release is not explicit.
+		if target == "" && os.Getenv("OX_UPGRADE_REQUIRE_PIN") == "1" {
+			err = fmt.Errorf("OX_UPGRADE_REQUIRE_PIN=1 set: pass --target=<version> explicitly")
+		} else {
+			err = upgradeViaGoInstallWithTarget(jsonOutput, "v"+newVersion)
+		}
 	case installSource:
 		result.Status = "manual"
 		result.Message = "Dev build detected. Use 'make build && make install' to upgrade."
@@ -272,42 +274,7 @@ var adapterPackages = []string{
 	"github.com/sageox/ox/cmd/ox-adapter-goose",
 }
 
-// resolveUpgradeTarget returns the version tag to install. Per ox-zbi5:
-//   - --target=<tag> wins (operator explicit choice).
-//   - Else fetch the latest tag from the GitHub releases API and pin to it.
-//   - When OX_UPGRADE_REQUIRE_PIN=1, refuse @latest entirely; the operator
-//     MUST specify --target. Defends against a compromised GOPROXY by
-//     forcing an explicit version that the operator chose out-of-band.
-//
-// Returns "latest" as a fall-through ONLY when the require-pin gate is
-// not set AND the GitHub release fetch failed; callers see this and can
-// warn loudly before invoking go install.
-func resolveUpgradeTarget(targetFlag string) (string, error) {
-	if targetFlag != "" {
-		return targetFlag, nil
-	}
-	if os.Getenv("OX_UPGRADE_REQUIRE_PIN") == "1" {
-		return "", fmt.Errorf("OX_UPGRADE_REQUIRE_PIN=1 set: pass --target=<version> explicitly")
-	}
-	if tag, err := getLatestGitHubRelease(); err == nil && tag != "" {
-		return tag, nil
-	}
-	return "latest", nil
-}
-
-func upgradeViaGoInstallWithTarget(quiet bool, targetFlag string) error {
-	target, err := resolveUpgradeTarget(targetFlag)
-	if err != nil {
-		return err
-	}
-	if target == "latest" && !quiet {
-		fmt.Fprintln(os.Stderr, cli.StyleDim.Render(
-			"WARNING: upgrading to @latest because the GitHub releases API "+
-				"could not be reached. The bytes go install fetches are "+
-				"determined by GOPROXY. To pin: pass --target=v0.x.y or "+
-				"set OX_UPGRADE_REQUIRE_PIN=1."))
-	}
-
+func upgradeViaGoInstallWithTarget(quiet bool, target string) error {
 	// install ox and all bundled adapters in one invocation, pinned to the
 	// same target version so their protocol versions stay in sync.
 	args := []string{"install", "github.com/sageox/ox/cmd/ox@" + target}
