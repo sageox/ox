@@ -81,6 +81,13 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 	if err != nil {
 		return nil, nil, fmt.Errorf("discover team skills: %w", err)
 	}
+	// An unknown slug is partial visibility, not an empty team source. Untargeted
+	// skills are still authoritative and may be added; targeted skills cannot be
+	// evaluated, so removals must remain suppressed until identity returns.
+	retained := ""
+	if repoSlug == "" {
+		retained = "this repository's slug could not be determined, so targeted team skills were left in place"
+	}
 
 	// Refusals are carried BEFORE the empty check and never gated on what else was
 	// found. A team whose only skill has an unusable name would otherwise get the
@@ -93,6 +100,9 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 		decisions = append(decisions, TeamSkillDecision{Name: r.Name, Reason: r.NameError})
 	}
 	if len(discovered) == 0 {
+		if retained != "" {
+			return &teamCatalog{base: base, teamPath: teamPath, incomplete: retained}, decisions, nil
+		}
 		return base, decisions, nil
 	}
 
@@ -156,7 +166,7 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 	}
 
 	sort.Slice(allowed, func(i, j int) bool { return allowed[i].Name < allowed[j].Name })
-	return &teamCatalog{base: base, teamFiles: allowed, teamPath: teamPath}, decisions, nil
+	return &teamCatalog{base: base, teamFiles: allowed, teamPath: teamPath, incomplete: retained}, decisions, nil
 }
 
 func verdictHasCapability(v teamskills.Verdict, want teamskills.Capability) bool {
@@ -500,11 +510,15 @@ func unseeableTeamSkills(teamPath, repoSlug string) string {
 	if !anySkillRootOnDisk(teamPath) {
 		return "no skills directory is materialized in the team context"
 	}
-	// Without a slug ox cannot evaluate any skill's repos: filter, so every
-	// targeted skill silently drops out — indistinguishable from the team
-	// un-publishing them.
-	if repoSlug == "" {
-		return "this repository's slug could not be determined"
-	}
+	// An unknown slug is deliberately NOT blindness. It stops ox evaluating a
+	// repos: filter, so TARGETED skills cannot be resolved — but untargeted ones
+	// need no slug and must still reach a repository that simply has no origin
+	// remote (a local-only checkout, a clone before its remote is added, every
+	// test fixture). Treating the whole source as unseeable there shipped zero
+	// team skills to those repositories.
+	//
+	// The targeted half is handled by marking the populated catalog incomplete in
+	// TeamSkillSource, which suppresses REMOVALS only — so a targeted skill
+	// already on disk is retained rather than retired while origin is missing.
 	return ""
 }

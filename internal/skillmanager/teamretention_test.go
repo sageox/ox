@@ -152,6 +152,31 @@ func TestTeamSkillsSurviveRepositorySlugFallback(t *testing.T) {
 		"targeted team skill was deleted when the canonical repository slug disappeared")
 }
 
+// An unknown slug hides only repos:-targeted skills. Untargeted skills require
+// no repository identity and must still be added while removals stay guarded.
+func TestUntargetedTeamSkillsStillInstallWithoutRepositorySlug(t *testing.T) {
+	t.Parallel()
+
+	const skillName = "team-wide"
+	repo := t.TempDir()
+	teamPath := t.TempDir()
+	writeTeamSkill(t, teamPath, skillName, "", nil)
+	stageTeamWiredProject(t, repo, teamPath)
+
+	cmd := exec.Command("git", "remote", "remove", "origin")
+	cmd.Dir = repo
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "remove origin: %s", out)
+
+	target := sharedTarget()
+	plan, err := Reconcile(repo, "1.0.0", desiredFor(target), []adapterprotocol.SkillTarget{target})
+	require.NoError(t, err)
+	require.FileExists(t, filepath.Join(repo, ".agents", "skills", TeamPrefix+skillName, "SKILL.md"),
+		"an untargeted skill was withheld even though it needs no repository slug")
+	require.Contains(t, plan.RetainedTeamReason(), "slug",
+		"targeted removals were not guarded while repository identity was unknown")
+}
+
 // TestLegacyCoworkersRootIsNotBlindness is a regression test for a bug that
 // shipped: the blindness check stat'd only `agents/`, but discovery walks
 // `agents/skills` AND the legacy `coworkers/skills`.
