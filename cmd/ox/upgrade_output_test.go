@@ -68,6 +68,34 @@ func TestOutputUpgradeResult_JSONCarriesTheMachineFields(t *testing.T) {
 	}
 }
 
+// Failure exit handling must preserve successful text output and its restart guidance.
+func TestOutputUpgradeResult_SuccessfulText(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		stopped int
+	}{
+		{name: "no running daemons"},
+		{name: "old daemons stopped", stopped: 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out := captureUpgradeOutput(t, upgradeResult{
+				Status:         "upgraded",
+				Message:        "Upgraded to v0.15.0",
+				ReleaseURL:     "https://example.invalid/releases/v0.15.0",
+				DaemonsStopped: tt.stopped,
+			}, false)
+			assert.Contains(t, out, "Upgraded to v0.15.0")
+			assert.Contains(t, out, "https://example.invalid/releases/v0.15.0")
+			assert.Contains(t, out, "Restart your terminal")
+			if tt.stopped > 0 {
+				assert.Contains(t, out, "stopped so they restart on the new version")
+			} else {
+				assert.NotContains(t, out, "Daemons:")
+			}
+		})
+	}
+}
+
 // TestOutputUpgradeResult_UpToDateSaysSoWithoutClaimingAnUpgrade: reporting an
 // upgrade that did not happen would send someone hunting for a version change
 // that was never made.
