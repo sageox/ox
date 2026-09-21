@@ -1,7 +1,7 @@
 ---
 title: "ox sync"
 description: "CLI reference for ox sync"
-sidebar_position: 98
+sidebar_position: 99
 ---
 
 ## ox sync
@@ -10,13 +10,18 @@ Manually sync ledger/team contexts (rarely needed)
 
 ### Synopsis
 
-Manually synchronize your ledger and team context repositories.
+Manually synchronize your Ledger and Team Context, then converge the
+current repository with applicable Team Context artifacts.
 
 NOTE: You should RARELY need this command. The background daemon automatically
-keeps your ledger and team contexts synchronized. This command exists only for:
+keeps transport and local convergence synchronized. This command exists only for:
   - Troubleshooting sync issues
   - Triggering an immediate sync (this command itself forces sync)
   - Diagnostic purposes
+
+Convergence includes Pack-managed and hand-authored Team Context content through
+the same delivery path. It does not check the Pack Catalog for newer releases;
+use 'ox packs update' for catalog updates.
 
 The daemon syncs automatically on:
   - File changes in your project
@@ -27,7 +32,7 @@ Ordinary sync requires the daemon. Pull operations are handled by the daemon
 to ensure consistent sync behavior and proper locking.
 
 Examples:
-  ox sync              # sync all workspaces (rarely needed)
+  ox sync              # sync Ledger + Team Context, then converge this repo
   ox sync --team acme  # sync specific team context
   ox sync --all-teams  # sync all team contexts
 
