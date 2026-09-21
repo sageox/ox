@@ -432,7 +432,11 @@ func reconcileRoot(ctx context.Context, projectRoot, rootPath string, p policy, 
 			return nil, nil, readErr
 		}
 		rel := filepath.ToSlash(filepath.Join(p.Root, name))
-		if managedPathTracked(ctx, projectRoot, rel) {
+		tracked, trackErr := managedPathTracked(ctx, projectRoot, rel)
+		if trackErr != nil {
+			return nil, nil, trackErr
+		}
+		if tracked {
 			return nil, nil, fmt.Errorf("%w: refusing to update tracked Team Rule projection %s", ErrProjectionConflict, rel)
 		}
 		if readErr == nil && !projectionOwned(current, p) {
@@ -452,7 +456,11 @@ func reconcileRoot(ctx context.Context, projectRoot, rootPath string, p policy, 
 			continue
 		}
 		rel := filepath.ToSlash(filepath.Join(p.Root, name))
-		if managedPathTracked(ctx, projectRoot, rel) {
+		tracked, trackErr := managedPathTracked(ctx, projectRoot, rel)
+		if trackErr != nil {
+			return nil, nil, trackErr
+		}
+		if tracked {
 			return nil, nil, fmt.Errorf("%w: refusing to remove tracked Team Rule projection %s", ErrProjectionConflict, rel)
 		}
 		current, readErr := root.ReadFile(name)
@@ -472,10 +480,36 @@ func reconcileRoot(ctx context.Context, projectRoot, rootPath string, p policy, 
 	return written, removed, nil
 }
 
-func managedPathTracked(ctx context.Context, projectRoot, rel string) bool {
+// managedPathTracked reports whether git tracks rel inside projectRoot.
+//
+// `git ls-files --error-unmatch` exits 1 for the ordinary "no tracked path
+// matched" answer and reserves every other outcome for a real failure: a
+// canceled context, a git that is missing or too old, an unreadable index.
+// Collapsing those into "untracked" is what let reconcile overwrite or delete a
+// TRACKED projection, report it applied, and clear the pending state — leaving
+// an uncommitted rule change with nothing scheduled to revisit it. So only exit
+// 1 means untracked; anything else is returned as an error, which reaches the
+// convergence coordinator unwrapped by ErrProjectionConflict and is therefore
+// retried rather than settled.
+//
+// The context check comes first on purpose: killing the child on cancellation
+// surfaces as a signal on Unix and as exit code 1 on Windows, so an expired
+// deadline would otherwise be indistinguishable from a genuine "not tracked".
+func managedPathTracked(ctx context.Context, projectRoot, rel string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "ls-files", "--error-unmatch", "--", rel)
 	cmd.Dir = projectRoot
-	return cmd.Run() == nil
+	runErr := cmd.Run()
+	if runErr == nil {
+		return true, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, fmt.Errorf("check whether %s is tracked: %w", rel, ctxErr)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("check whether %s is tracked: %w", rel, runErr)
 }
 
 func atomicWrite(root *os.Root, name string, content []byte) error {

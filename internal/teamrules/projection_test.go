@@ -5,8 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/stretchr/testify/require"
@@ -429,4 +431,105 @@ func TestReconcileRoot_DefensiveFilesystemBranches(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(retired, "child"), []byte("x"), 0o644))
 	_, _, err = reconcileRoot(context.Background(), project, rootPath, p, nil)
 	require.Error(t, err)
+}
+
+// TestReconcile_FailedTrackedCheckNeverReadsAsUntracked is the red-first proof
+// for the tracked-path conflation: `git ls-files --error-unmatch` used to be
+// consulted as `cmd.Run() == nil`, so a canceled context — the ordinary outcome
+// when automatic convergence hits its deadline — looked exactly like "git does
+// not track this path". Reconcile then overwrote or deleted a TRACKED rule
+// projection and reported it applied, leaving an uncommitted rule change in the
+// working tree with no pending state scheduled to revisit it.
+//
+// The assertion that matters is not merely "an error came back": it is that the
+// error is NOT ErrProjectionConflict, because the convergence coordinator
+// settles conflicts and retries everything else. A deadline must retry.
+//
+// Cancellation is driven by a SIGNAL, not a timeout. A fixed deadline racing
+// real work is flaky in the direction that matters least — it expires before
+// the run reaches `git ls-files` at all, the ignore probe reports the root
+// unprotected, reconcileRoot never runs, and the test fails against correct
+// code. Here the git shim announces that it reached `ls-files` and then blocks;
+// only then does the test cancel, so the cancellation always lands inside the
+// call under test.
+func TestReconcile_FailedTrackedCheckNeverReadsAsUntracked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the shim that blocks git ls-files is a POSIX shell script")
+	}
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+
+	project := t.TempDir()
+	rulesRoot := filepath.Join(project, ".claude", "rules")
+	require.NoError(t, os.MkdirAll(rulesRoot, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"),
+		[]byte(".claude/rules/sageox-team-*\n"), 0o644))
+	gitInit := exec.Command(realGit, "init", "-q")
+	gitInit.Dir = project
+	require.NoError(t, gitInit.Run())
+
+	source := filepath.Join(t.TempDir(), "security.md")
+	require.NoError(t, os.WriteFile(source, []byte("New body.\n"), 0o644))
+	rule := teamdocs.TeamRule{
+		Name: "security", RelPath: "security.md", AbsPath: source,
+		Visibility: teamdocs.VisibilityAlways,
+	}
+	native, ok := NativePath(project, "claude", rule)
+	require.True(t, ok)
+	require.NoError(t, os.WriteFile(native, []byte("tracked body\n"), 0o644))
+	gitAdd := exec.Command(realGit, "add", "-f", "--",
+		filepath.ToSlash(strings.TrimPrefix(native, project+string(filepath.Separator))))
+	gitAdd.Dir = project
+	require.NoError(t, gitAdd.Run())
+
+	// Block only `ls-files`. The ignore probe (`check-ignore`) must still answer
+	// instantly, or reconcileRoot is never reached and the test proves nothing.
+	shimDir := t.TempDir()
+	reached := filepath.Join(shimDir, "ls-files-reached")
+	shim := "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"ls-files\" ]; then : > " + reached + "; sleep 300; break; fi\ndone\nexec " + realGit + " \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(shimDir, "git"), []byte(shim), 0o755))
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// cancelDuringTrackedCheck runs one Reconcile, waits until the shim reports
+	// that git reached `ls-files`, cancels there, and returns what Reconcile said.
+	cancelDuringTrackedCheck := func(t *testing.T, rules []teamdocs.TeamRule) error {
+		t.Helper()
+		require.NoError(t, os.RemoveAll(reached))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			_, reconcileErr := Reconcile(ctx, project, rules)
+			done <- reconcileErr
+		}()
+		require.Eventually(t, func() bool {
+			_, statErr := os.Stat(reached)
+			return statErr == nil
+		}, 30*time.Second, 5*time.Millisecond, "reconcile never reached the tracked-path check")
+		cancel()
+		select {
+		case reconcileErr := <-done:
+			return reconcileErr
+		case <-time.After(30 * time.Second):
+			t.Fatal("reconcile did not return after its context was canceled")
+			return nil
+		}
+	}
+
+	assertRetryable := func(t *testing.T, err error) {
+		t.Helper()
+		require.Error(t, err, "a git check that never answered must not be reported as success")
+		require.NotErrorIs(t, err, ErrProjectionConflict,
+			"a failed tracked-check must stay retryable; ErrProjectionConflict settles it and the retry never happens")
+	}
+
+	assertRetryable(t, cancelDuringTrackedCheck(t, []teamdocs.TeamRule{rule}))
+	content, readErr := os.ReadFile(native)
+	require.NoError(t, readErr)
+	require.Equal(t, "tracked body\n", string(content),
+		"the tracked projection was overwritten while the tracked-check was unanswered")
+
+	assertRetryable(t, cancelDuringTrackedCheck(t, nil))
+	require.FileExists(t, native,
+		"the tracked projection was removed while the tracked-check was unanswered")
 }
