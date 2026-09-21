@@ -147,6 +147,16 @@ type skillsChangeOutput struct {
 	Guidance    string `json:"guidance"`
 }
 
+// teamSkillSeed is one complete skill ready to copy into the canonical Team
+// Context root. Catalog publishing and repository-skill publishing deliberately
+// converge here: there must be one collision, locking, rollback, and commit
+// implementation for the checkout the daemon also mutates.
+type teamSkillSeed struct {
+	name   string
+	relDir string
+	files  []skills.File
+}
+
 func newSkillsChangeOutput() skillsChangeOutput {
 	return skillsChangeOutput{Skills: []skillChangeRow{}, Written: []string{}, Removed: []string{}}
 }
@@ -368,21 +378,10 @@ func publishCatalogSkillsToTeam(repoRoot string, names []string) (skillsChangeOu
 		return out, err
 	}
 
-	tc := config.FindRepoTeamContext(repoRoot)
-	if tc == nil || tc.Path == "" {
-		return out, fmt.Errorf("no Team Context is configured for this project, so there is nowhere to publish — run `ox skills status` to see why")
-	}
-	out.TeamContext = tc.Path
-
 	// Resolve every catalog input before taking the Team Context lock. On-disk
 	// collision checks happen again inside the lock below: two publishers can both
 	// observe an absent directory before either has acquired the lock.
-	type seed struct {
-		name   string
-		relDir string
-		files  []skills.File
-	}
-	seeds := make([]seed, 0, len(names))
+	seeds := make([]teamSkillSeed, 0, len(names))
 	for _, name := range names {
 		if !teamdocs.ValidTeamSkillName(name) {
 			// Defense in depth: the name becomes a directory inside someone else's
@@ -397,8 +396,21 @@ func publishCatalogSkillsToTeam(repoRoot string, names []string) (skillsChangeOu
 		if err := refuseUnpublishableDescription(name, files); err != nil {
 			return out, err
 		}
-		seeds = append(seeds, seed{name: name, relDir: relDir, files: files})
+		seeds = append(seeds, teamSkillSeed{name: name, relDir: relDir, files: files})
 	}
+	return publishTeamSkillSeeds(repoRoot, names, seeds)
+}
+
+// publishTeamSkillSeeds performs the Team Context transaction shared by every
+// publishing surface. Callers must fully resolve and validate their sources
+// first, so a bad final name cannot leave an earlier name partially published.
+func publishTeamSkillSeeds(repoRoot string, names []string, seeds []teamSkillSeed) (skillsChangeOutput, error) {
+	out := newSkillsChangeOutput()
+	tc := config.FindRepoTeamContext(repoRoot)
+	if tc == nil || tc.Path == "" {
+		return out, fmt.Errorf("no Team Context is configured for this project, so there is nowhere to publish — run `ox skills status` to see why")
+	}
+	out.TeamContext = tc.Path
 
 	ctx, cancel := context.WithTimeout(context.Background(), teamPublishTimeout)
 	defer cancel()
@@ -778,8 +790,10 @@ func skillsChangeGuidance(out skillsChangeOutput) string {
 	switch {
 	case len(published) > 0:
 		// No mention of where it landed beyond the Team Context: the path is on the
-		// row, and the actionable fact is that the team now owns the copy.
-		return fmt.Sprintf("%s published to your Team Context — it is your team's to edit now, and reaches every repository on the team. Run `ox skills status` there to watch it arrive.",
+		// row, and the actionable facts are that the team now owns the copy and
+		// targeting remains explicit in the manifest. Catalog seeds have no repos:
+		// key and therefore correctly take the stated all-repositories default.
+		return fmt.Sprintf("%s published to your Team Context — it is your team's to edit now. Its `repos:` metadata controls where it arrives; without `repos:` it reaches every repository on the team. Distribution is automatic; run `ox sync` in this repository only if you need it immediately, then `ox skills status` to verify it.",
 			strings.Join(published, ", "))
 	case len(installed) > 0:
 		return fmt.Sprintf("%s installed — your AI coworkers can use %s now. The choice is recorded in %s, which travels with the repository, so your coworkers get the same skills. Run `ox skills list` to see everything installed here.",
