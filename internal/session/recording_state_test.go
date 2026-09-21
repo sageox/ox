@@ -658,3 +658,52 @@ func TestSaveRecordingState_PersistsAndLeavesNoArtifacts(t *testing.T) {
 	assert.Equal(t, "OxAtomic", loaded.AgentID)
 	assert.Equal(t, state.SessionPath, loaded.SessionPath)
 }
+
+func TestHasLiveRecording_IsStrictAndChecksProcessLiveness(t *testing.T) {
+	t.Run("live recording", func(t *testing.T) {
+		project, sessionsBase := setupRecordingTestWithSessionsBase(t, t.TempDir())
+		state := &RecordingState{
+			AgentID: "OxLive", StartedAt: time.Now(), ParentPID: os.Getpid(),
+			SessionPath: filepath.Join(sessionsBase, "live"),
+		}
+		require.NoError(t, SaveRecordingState(project, state))
+		live, err := HasLiveRecording(project)
+		require.NoError(t, err)
+		require.True(t, live)
+	})
+
+	t.Run("dead recording does not defer forever", func(t *testing.T) {
+		project, sessionsBase := setupRecordingTestWithSessionsBase(t, t.TempDir())
+		state := &RecordingState{
+			AgentID: "OxDead", StartedAt: time.Now(), ParentPID: 99999999,
+			SessionPath: filepath.Join(sessionsBase, "dead"),
+		}
+		require.NoError(t, SaveRecordingState(project, state))
+		live, err := HasLiveRecording(project)
+		require.NoError(t, err)
+		require.False(t, live)
+	})
+
+	t.Run("old recording without PID does not defer forever", func(t *testing.T) {
+		project, sessionsBase := setupRecordingTestWithSessionsBase(t, t.TempDir())
+		state := &RecordingState{
+			AgentID: "OxLegacyDead", StartedAt: time.Now().Add(-2 * ghostHeuristicAge),
+			SessionPath: filepath.Join(sessionsBase, "legacy-dead"),
+		}
+		require.NoError(t, SaveRecordingState(project, state))
+		live, err := HasLiveRecording(project)
+		require.NoError(t, err)
+		require.False(t, live)
+	})
+
+	t.Run("corrupt marker fails closed", func(t *testing.T) {
+		project, sessionsBase := setupRecordingTestWithSessionsBase(t, t.TempDir())
+		dir := filepath.Join(sessionsBase, "possibly-live")
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, recordingFile), []byte(`{"agent_id":`), 0o600))
+		live, err := HasLiveRecording(project)
+		require.Error(t, err)
+		require.False(t, live)
+		require.Contains(t, err.Error(), "parse recording state")
+	})
+}

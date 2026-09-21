@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/version"
@@ -45,6 +46,15 @@ type SkillHandler struct{}
 func (SkillHandler) Kind() ArtifactKind { return KindSkill }
 
 func (SkillHandler) Converge(_ context.Context, request Request, snapshot Snapshot, artifacts []Artifact) ([]Outcome, error) {
+	if request.Mode == ModeAutomatic {
+		live, err := session.HasLiveRecording(request.ProjectRoot)
+		if err != nil {
+			return nil, &RetryableError{Err: fmt.Errorf("inspect active sessions: %w", err)}
+		}
+		if live {
+			return nil, &RetryableError{Err: errors.New("active AI coworker session keeps the current skill snapshot stable")}
+		}
+	}
 	configured := config.FindRepoTeamContext(request.ProjectRoot)
 	if configured == nil || configured.Path == "" {
 		return nil, fmt.Errorf("no Team Context is configured for this repository")
@@ -135,5 +145,9 @@ func skillConflicted(plan *skillmanager.ReconcilePlan, installedAs string) bool 
 }
 
 func NewDefault() (*Coordinator, error) {
-	return New(FilesystemDiscovery{}, SkillHandler{}, NewDiscoveryHandler(KindRule), NewDiscoveryHandler(KindContext))
+	coordinator, err := New(FilesystemDiscovery{}, SkillHandler{}, NewDiscoveryHandler(KindRule), NewDiscoveryHandler(KindContext))
+	if coordinator != nil {
+		coordinator.lockSnapshot = true
+	}
+	return coordinator, err
 }

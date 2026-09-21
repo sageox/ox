@@ -138,7 +138,7 @@ func (s *SyncScheduler) reconcileTeamSkills(changed []string) {
 	counts := map[teamconverge.OutcomeState]int{}
 	for _, outcome := range report.Outcomes {
 		counts[outcome.State]++
-		if outcome.State == teamconverge.StateError || outcome.State == teamconverge.StateConflict ||
+		if outcome.State == teamconverge.StatePending || outcome.State == teamconverge.StateError || outcome.State == teamconverge.StateConflict ||
 			outcome.State == teamconverge.StateUnsupported || outcome.State == teamconverge.StatePendingApproval {
 			s.logger.Warn("team artifact not converged",
 				"repo", repoRoot, "kind", outcome.Kind, "name", outcome.Name,
@@ -152,6 +152,7 @@ func (s *SyncScheduler) reconcileTeamSkills(changed []string) {
 		"applied", counts[teamconverge.StateApplied],
 		"indexed", counts[teamconverge.StateIndexed],
 		"injected", counts[teamconverge.StateInjected],
+		"pending", counts[teamconverge.StatePending],
 		"pending_approval", counts[teamconverge.StatePendingApproval],
 		"unsupported", counts[teamconverge.StateUnsupported],
 		"conflicts", counts[teamconverge.StateConflict],

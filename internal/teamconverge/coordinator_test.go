@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,6 +29,40 @@ type echoHandler struct {
 	delivery string
 	err      error
 	drop     bool
+}
+
+type leaseProbeDiscovery struct {
+	file            string
+	entered         chan struct{}
+	writerAttempted chan struct{}
+	first           string
+	second          string
+}
+
+func (d *leaseProbeDiscovery) Discover(context.Context, Request) (Snapshot, []Artifact, error) {
+	first, err := os.ReadFile(d.file)
+	if err != nil {
+		return Snapshot{}, nil, err
+	}
+	d.first = string(first)
+	close(d.entered)
+	<-d.writerAttempted
+	// Give the writer ample time to acquire the lease if convergence failed to
+	// take it first. The writer is local filesystem I/O, so this is not timing
+	// the lock itself; it only exposes a missing lock as a deterministic change.
+	time.Sleep(50 * time.Millisecond)
+	second, err := os.ReadFile(d.file)
+	if err != nil {
+		return Snapshot{}, nil, err
+	}
+	d.second = string(second)
+	if d.first != d.second {
+		return Snapshot{}, nil, errors.New("mixed Team Context snapshot")
+	}
+	return Snapshot{Path: filepath.Dir(d.file), Commit: "snapshot-a"}, []Artifact{{
+		Kind: KindRule, Name: "security", SourcePath: "agents/rules/security.md",
+		Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: true,
+	}}, nil
 }
 
 func (h echoHandler) Kind() ArtifactKind { return h.kind }
@@ -70,6 +108,64 @@ func TestCoordinator_PackAndLooseArtifactsUseTheSameHandler(t *testing.T) {
 	require.Equal(t, StateFiltered, byName["other-repo"].State)
 	require.Equal(t, StateUnsupported, byName["github"].State)
 	require.False(t, report.Converged(), "a required unsupported tool was reported as fully converged")
+}
+
+func TestCoordinator_HoldsOneTeamContextSnapshotLeaseThroughDelivery(t *testing.T) {
+	team := t.TempDir()
+	file := filepath.Join(team, "security.md")
+	require.NoError(t, os.WriteFile(file, []byte("snapshot-a"), 0o644))
+	discovery := &leaseProbeDiscovery{
+		file: file, entered: make(chan struct{}), writerAttempted: make(chan struct{}),
+	}
+	coordinator, err := New(discovery, echoHandler{kind: KindRule, state: StateIndexed})
+	require.NoError(t, err)
+	coordinator.lockSnapshot = true
+
+	writerDone := make(chan error, 1)
+	go func() {
+		<-discovery.entered
+		close(discovery.writerAttempted)
+		writerDone <- gitutil.WithRepoLock(context.Background(), team, func() error {
+			return os.WriteFile(file, []byte("snapshot-b"), 0o644)
+		})
+	}()
+
+	report, err := coordinator.Converge(context.Background(), Request{TeamPath: team, Mode: ModeExplicit})
+	require.NoError(t, err)
+	require.True(t, report.Converged())
+	require.Equal(t, "snapshot-a", discovery.first)
+	require.Equal(t, "snapshot-a", discovery.second)
+	require.NoError(t, <-writerDone)
+	final, err := os.ReadFile(file)
+	require.NoError(t, err)
+	require.Equal(t, "snapshot-b", string(final), "writer should proceed after convergence releases the lease")
+}
+
+func TestCoordinator_AutomaticSnapshotContentionIsRetryable(t *testing.T) {
+	team := t.TempDir()
+	discovery := staticDiscovery{snapshot: Snapshot{Path: team, Commit: "abc"}}
+	coordinator, err := New(discovery)
+	require.NoError(t, err)
+	coordinator.lockSnapshot = true
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_ = gitutil.WithRepoLock(context.Background(), team, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+
+	started := time.Now()
+	_, err = coordinator.Converge(context.Background(), Request{TeamPath: team, Mode: ModeAutomatic})
+	close(release)
+	require.Error(t, err)
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable)
+	require.Less(t, time.Since(started), time.Second)
 }
 
 func TestCoordinator_FailsClosedOnHandlerGaps(t *testing.T) {

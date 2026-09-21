@@ -600,6 +600,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 			_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			return fmt.Errorf("failed to finalize recording stop: %w", err)
 		}
+		convergeAfterSessionBoundary(projectRoot)
 	} else if state.SessionFile == "" {
 		// session file not found — recording state preserved for recovery
 		slog.Info("recording state preserved for recovery", "agent_id", inst.AgentID, "adapter", state.AdapterName)

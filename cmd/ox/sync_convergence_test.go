@@ -40,7 +40,7 @@ func TestExecuteSyncConvergence_PersistsFailedOutcome(t *testing.T) {
 
 	result, err := executeSyncConvergence(context.Background(), stubSyncConverger{report: report}, projectRoot,
 		config.TeamContext{TeamID: "team_acme", TeamName: "Acme", Path: teamPath},
-		RepositoryConvergenceSyncResult{TeamID: "team_acme", TeamPath: teamPath})
+		RepositoryConvergenceSyncResult{TeamID: "team_acme", TeamPath: teamPath}, teamconverge.ModeExplicit)
 	require.Error(t, err)
 	require.Equal(t, "failed", result.Status)
 	require.NotNil(t, result.Report)
@@ -64,7 +64,7 @@ func TestExecuteSyncConvergence_PersistsRetryableErrorAsPending(t *testing.T) {
 		report: report,
 		err:    errors.New("projection lock is busy"),
 	}, projectRoot, config.TeamContext{TeamID: "team_acme", Path: teamPath},
-		RepositoryConvergenceSyncResult{TeamID: "team_acme", TeamPath: teamPath})
+		RepositoryConvergenceSyncResult{TeamID: "team_acme", TeamPath: teamPath}, teamconverge.ModeExplicit)
 	require.Error(t, err)
 	require.Equal(t, "pending", result.Status)
 
@@ -97,7 +97,7 @@ func TestExecuteSyncConvergence_ClearsPendingOnlyAfterVerifiedSuccess(t *testing
 	}
 	result, err := executeSyncConvergence(context.Background(), stubSyncConverger{report: successReport}, projectRoot,
 		config.TeamContext{TeamID: "team_acme", Path: teamPath},
-		RepositoryConvergenceSyncResult{TeamID: "team_acme", TeamPath: teamPath})
+		RepositoryConvergenceSyncResult{TeamID: "team_acme", TeamPath: teamPath}, teamconverge.ModeExplicit)
 	require.NoError(t, err)
 	require.Equal(t, "converged", result.Status)
 	pending, loadErr := teamconverge.LoadPending(projectRoot)
@@ -159,4 +159,18 @@ func TestSyncHelp_ExplainsAutomationAndPackBoundary(t *testing.T) {
 	require.Contains(t, syncCmd.Short, "rarely needed")
 	require.Contains(t, syncCmd.Long, "Pack-managed and hand-authored")
 	require.Contains(t, syncCmd.Long, "does not check the Pack Catalog")
+}
+
+func TestConvergeAfterSessionBoundary_AppliesPendingTeamContent(t *testing.T) {
+	repo, _ := stageTeamPublishRepo(t)
+	_, err := publishCatalogSkillsToTeam(repo, []string{catalogOptInSkill})
+	require.NoError(t, err)
+
+	installed := filepath.Join(repo, ".claude", "skills", "sageox-team-"+catalogOptInSkill, "SKILL.md")
+	require.NoFileExists(t, installed)
+	convergeAfterSessionBoundary(repo)
+	require.FileExists(t, installed)
+	pending, err := teamconverge.LoadPending(repo)
+	require.NoError(t, err)
+	require.Nil(t, pending)
 }

@@ -7,11 +7,17 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/sageox/ox/internal/gitutil"
 )
 
+const automaticSnapshotLockWait = 250 * time.Millisecond
+
 type Coordinator struct {
-	discovery Discovery
-	handlers  map[ArtifactKind]Handler
+	discovery    Discovery
+	handlers     map[ArtifactKind]Handler
+	lockSnapshot bool
 }
 
 func New(discovery Discovery, handlers ...Handler) (*Coordinator, error) {
@@ -36,12 +42,50 @@ func New(discovery Discovery, handlers ...Handler) (*Coordinator, error) {
 }
 
 func (c *Coordinator) Converge(ctx context.Context, request Request) (Report, error) {
-	report := Report{
+	if !c.lockSnapshot {
+		return c.convergeLocked(ctx, request)
+	}
+	if request.TeamPath == "" {
+		return newReport(request), fmt.Errorf("team context path is required")
+	}
+
+	// Pulls, Team Context publishers, and convergence share this per-clone
+	// lease. Holding it through both discovery and handler byte loading makes
+	// the report one immutable HEAD/worktree snapshot instead of a mix of two
+	// commits. Automatic work only waits briefly; contention is durable pending
+	// work, never a reason to stall the daemon scheduler.
+	lockCtx := ctx
+	cancel := func() {}
+	if request.Mode == ModeAutomatic {
+		lockCtx, cancel = context.WithTimeout(ctx, automaticSnapshotLockWait)
+	}
+	defer cancel()
+
+	report := newReport(request)
+	acquired := false
+	err := gitutil.WithRepoLock(lockCtx, request.TeamPath, func() error {
+		acquired = true
+		var convergeErr error
+		report, convergeErr = c.convergeLocked(ctx, request)
+		return convergeErr
+	})
+	if err != nil && !acquired && gitutil.IsRepoLockBusy(err) {
+		return report, &RetryableError{Err: fmt.Errorf("team context snapshot is busy: %w", err)}
+	}
+	return report, err
+}
+
+func newReport(request Request) Report {
+	return Report{
 		SchemaVersion: ReportSchemaVersion,
 		ProjectRoot:   request.ProjectRoot,
 		RepoSlug:      request.RepoSlug,
 		Outcomes:      []Outcome{},
 	}
+}
+
+func (c *Coordinator) convergeLocked(ctx context.Context, request Request) (Report, error) {
+	report := newReport(request)
 	snapshot, artifacts, err := c.discovery.Discover(ctx, request)
 	if err != nil {
 		return report, err

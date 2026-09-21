@@ -529,6 +529,54 @@ func IsRecording(projectRoot string) bool {
 	return err == nil && state != nil
 }
 
+// HasLiveRecording reports whether any active recording for the repository is
+// still owned by a live AI coworker process. A stale recording marker is not a
+// live session and must not defer convergence forever.
+func HasLiveRecording(projectRoot string) (bool, error) {
+	if projectRoot == "" {
+		return false, fmt.Errorf("%w: project root", ErrEmptyPath)
+	}
+	seen := map[string]struct{}{}
+	for _, sessionsDir := range sessionsSearchPaths(projectRoot) {
+		entries, err := os.ReadDir(sessionsDir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("inspect recording directory %s: %w", sessionsDir, err)
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			recordingPath := filepath.Join(sessionsDir, entry.Name(), recordingFile)
+			canonicalKey := recordingPath
+			if resolved, resolveErr := filepath.EvalSymlinks(recordingPath); resolveErr == nil {
+				canonicalKey = resolved
+			}
+			if _, ok := seen[canonicalKey]; ok {
+				continue
+			}
+			data, readErr := os.ReadFile(recordingPath)
+			if errors.Is(readErr, os.ErrNotExist) {
+				continue
+			}
+			if readErr != nil {
+				return false, fmt.Errorf("read recording state %s: %w", recordingPath, readErr)
+			}
+			var state RecordingState
+			if unmarshalErr := json.Unmarshal(data, &state); unmarshalErr != nil {
+				return false, fmt.Errorf("parse recording state %s: %w", recordingPath, unmarshalErr)
+			}
+			seen[canonicalKey] = struct{}{}
+			if !isAbandoned(state.ParentPID, state.StartedAt) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // resolveSessionsWritePath returns the single canonical directory for writing
 // session data (markers, recording state). Prefers ledger cache, falls back to
 // XDG cache. Returns "" if no writable path can be resolved.

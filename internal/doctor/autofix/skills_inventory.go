@@ -56,7 +56,7 @@ func checkSkillsInventoryDrift(ctx context.Context, repoPath string) CheckResult
 	// A LIVE recording session is reading these files right now. Merely finding
 	// a state file is insufficient: crashed sessions leave .recording.json behind,
 	// and treating that tombstone as live disables this repair forever.
-	recording, recordingErr := hasLiveRecording(repoPath)
+	recording, recordingErr := session.HasLiveRecording(repoPath)
 	if recordingErr != nil {
 		res.Summary = "skipped: could not inspect recording sessions"
 		return res
@@ -157,19 +157,6 @@ func checkSkillsInventoryDrift(ctx context.Context, repoPath string) CheckResult
 	res.Status = StatusFixed
 	res.Summary = fmt.Sprintf("reconciled %d ox-managed skill file(s)", changed)
 	return res
-}
-
-func hasLiveRecording(repoPath string) (bool, error) {
-	states, err := session.LoadAllRecordingStates(repoPath)
-	if err != nil {
-		return false, err
-	}
-	for _, state := range states {
-		if state.IsAgentAlive() {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 // trackedPlanPaths returns the planned paths that git currently tracks.

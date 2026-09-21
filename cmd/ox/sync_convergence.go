@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/repotools"
@@ -69,7 +70,7 @@ func runSyncConvergence(ctx context.Context, selectedTeam string, result *SyncRe
 		return fmt.Errorf("initialize Team Context convergence: %w", err)
 	}
 
-	repository, err = executeSyncConvergence(ctx, coordinator, projectRoot, *team, repository)
+	repository, err = executeSyncConvergence(ctx, coordinator, projectRoot, *team, repository, teamconverge.ModeExplicit)
 	result.Convergence.Status = repository.Status
 	result.Convergence.Repositories = append(result.Convergence.Repositories, repository)
 	return err
@@ -94,12 +95,13 @@ func executeSyncConvergence(
 	projectRoot string,
 	team config.TeamContext,
 	repository RepositoryConvergenceSyncResult,
+	mode teamconverge.Mode,
 ) (RepositoryConvergenceSyncResult, error) {
 	report, convergeErr := coordinator.Converge(ctx, teamconverge.Request{
 		ProjectRoot: projectRoot,
 		TeamPath:    team.Path,
 		RepoSlug:    repotools.RepoSlug(projectRoot),
-		Mode:        teamconverge.ModeExplicit,
+		Mode:        mode,
 	})
 	repository.Report = &report
 	if convergeErr != nil {
@@ -137,4 +139,27 @@ func executeSyncConvergence(
 	}
 	repository.Status = "converged"
 	return repository, nil
+}
+
+// convergeAfterSessionBoundary consumes pending Team Context work as soon as
+// the last live AI coworker releases the repository. It is best effort: session
+// completion must never fail because local projection is contended or broken,
+// and executeSyncConvergence persists either condition for the daemon retry.
+func convergeAfterSessionBoundary(projectRoot string) {
+	team := config.FindRepoTeamContext(projectRoot)
+	if team == nil || team.Path == "" {
+		return
+	}
+	coordinator, err := teamconverge.NewDefault()
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _ = executeSyncConvergence(ctx, coordinator, projectRoot, *team, RepositoryConvergenceSyncResult{
+		Repository: repotools.RepoSlug(projectRoot),
+		TeamID:     team.TeamID,
+		TeamName:   team.TeamName,
+		TeamPath:   team.Path,
+	}, teamconverge.ModeAutomatic)
 }
