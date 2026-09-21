@@ -20,6 +20,17 @@ import (
 // document apply in one path and not the other, which is indistinguishable from
 // the document being missing.
 func RepoSlug(projectRoot string) string {
+	if slug, ok := RepoSlugFromRemote(projectRoot); ok {
+		return slug
+	}
+	return filepath.Base(projectRoot)
+}
+
+// RepoSlugFromRemote returns the canonical owner/repo slug derived from origin.
+// The boolean is false when the result would only be RepoSlug's directory-name
+// fallback. Callers applying a repos: filter need this distinction: a fallback
+// is useful display context, but it is not an authoritative repository identity.
+func RepoSlugFromRemote(projectRoot string) (string, bool) {
 	cmd := exec.Command("git", "remote", "get-url", "origin")
 	cmd.Dir = projectRoot
 	out, err := cmd.Output()
@@ -33,8 +44,8 @@ func RepoSlug(projectRoot string) string {
 		url = strings.TrimSuffix(url, ".git")
 		parts := strings.Split(url, "/")
 		if len(parts) >= 2 {
-			return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+			return parts[len(parts)-2] + "/" + parts[len(parts)-1], true
 		}
 	}
-	return filepath.Base(projectRoot)
+	return "", false
 }

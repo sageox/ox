@@ -419,8 +419,12 @@ func catalogForRepo(repoRoot string) (catalogSource, []TeamSkillDecision, error)
 	}
 
 	// The slug costs a `git remote get-url`, so it is resolved only once a team
-	// context is known to exist — the population that can actually use it.
-	return TeamSkillSource(base, tc.Path, repotools.RepoSlug(repoRoot), repoRoot)
+	// context is known to exist — the population that can actually use it. A
+	// directory-name fallback is useful for display, but cannot authoritatively
+	// evaluate repos: filters: treating it as a negative match would retire every
+	// targeted team skill when origin is temporarily unavailable.
+	repoSlug, _ := repotools.RepoSlugFromRemote(repoRoot)
+	return TeamSkillSource(base, tc.Path, repoSlug, repoRoot)
 }
 
 // WithheldTeamSkills returns every team skill with an outstanding approval:

@@ -161,6 +161,35 @@ func TestReconcileSkillInventoryIfStale_CurrentInventoryDoesNoWork(t *testing.T)
 	}
 }
 
+// TestReconcileSkillInventoryIfStale_TwoUnchangedPrimesBuildOnePlan proves the
+// complete session sequence, not just the steady-state half: the first prime
+// sees an old recorded revision and plans/applies once; the next prime sees the
+// revision that apply recorded and returns before planning.
+//
+// Deleting the restored file between calls is intentional observability. A
+// second plan would notice and restore it, while the revision-only fast path
+// leaves local drift for doctor/daemon repair.
+func TestReconcileSkillInventoryIfStale_TwoUnchangedPrimesBuildOnePlan(t *testing.T) {
+	repoRoot, managedFile := installSkillsForTest(t)
+	removeManaged(t, managedFile)
+	setLockRevision(t, repoRoot, "revision-from-an-older-release")
+
+	if changed := reconcileSkillInventoryIfStale(repoRoot); changed == 0 {
+		t.Fatal("first prime did not plan the stale inventory")
+	}
+	if !managedExists(t, managedFile) {
+		t.Fatal("first prime did not apply its plan")
+	}
+
+	removeManaged(t, managedFile)
+	if changed := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
+		t.Fatalf("second unchanged prime planned work: changed=%d", changed)
+	}
+	if managedExists(t, managedFile) {
+		t.Fatal("second unchanged prime rebuilt the plan instead of taking the revision fast path")
+	}
+}
+
 // TestReconcileSkillInventoryIfStale_NeverInstallsIntoAnUnselectedRepo guards the
 // boundary that keeps prime from being an installer. A repo that never ran
 // `ox init`, or whose owner deliberately selected no skill targets, must come out
