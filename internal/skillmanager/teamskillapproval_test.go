@@ -310,7 +310,6 @@ func TestApproval_NarrowingToInstructionsOnlySweepsTheScript(t *testing.T) {
 // gitignored and inside a reserved namespace, where the same plan already asserts
 // ox owns the bytes unconditionally, so the two halves disagree.
 func TestApproval_SweepsAStaleCopyThatWasEditedLocally(t *testing.T) {
-	t.Skip("ox-zrpi.1: a locally edited installed team-skill file is preserved and dropped from ox's inventory forever, so a withdrawn approval never sweeps it")
 	t.Parallel()
 
 	const skillName = "deploy"

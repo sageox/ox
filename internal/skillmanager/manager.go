@@ -870,6 +870,15 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 		if action, ok := journalFiles[oldFile.Path]; ok && (actualDigest == action.PreviousDigest || actualDigest == action.Digest) {
 			owned = true
 		}
+		// Team Skills live in a reserved, gitignored namespace whose bytes ox
+		// owns unconditionally. Apply the same contract during retirement that
+		// the active-file path applies above: a local edit must not turn a
+		// now-withheld executable into an unmanaged file that survives forever.
+		// The incomplete-source guard above still wins, so a temporarily blind
+		// Team Context never causes destructive cleanup.
+		if isTeamOwnedPath(targetByKey, oldFile) {
+			owned = true
+		}
 		if !owned {
 			plan.addConflict(oldFile.Target, oldFile.Path, "retired managed file was modified and will be preserved")
 			plan.Preserves = append(plan.Preserves, oldFile.Path)
