@@ -652,22 +652,41 @@ func TestNativeRecovery_HonorsPauseAndRedaction(t *testing.T) {
 }
 
 // Stopped recordings already applied masks and selected the recording window;
-// recovery must never import later native activity back into them.
+// recovery must never import later native activity back into them. The one
+// thing the sweep does touch is the header line: it stamps the recording's
+// native session ids and stop time there because the marker it read them from
+// is removed right after, and the finalize handler has nowhere else to look.
 func TestNativeRecovery_LeavesStoppedRecordingUnchanged(t *testing.T) {
 	ledgerPath := t.TempDir()
 	sessionDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", "stopped-OxStop")
 	require.NoError(t, os.MkdirAll(sessionDir, 0700))
-	stopped := time.Now()
-	state := session.RecordingState{AgentID: "OxStop", AdapterName: "codex", WatchMode: "tail", StoppedAt: &stopped}
+	stopped := time.Now().UTC().Truncate(time.Second)
+	state := session.RecordingState{
+		AgentID: "OxStop", AdapterName: "codex", WatchMode: "tail", StoppedAt: &stopped,
+		NativeSessions: []session.NativeSession{{ID: "codex-thread-1", Source: "startup", FirstSeen: stopped.Add(-time.Hour), LastSeen: stopped.Add(-time.Hour)}},
+	}
 	writeRecordingState(t, filepath.Join(sessionDir, recordingMarker), state)
-	const raw = "{\"_meta\":{\"agent_type\":\"codex\"}}\n{\"type\":\"assistant\",\"content\":\"captured\"}\n"
+	const header = "{\"_meta\":{\"agent_type\":\"codex\"}}\n"
+	const body = "{\"type\":\"assistant\",\"content\":\"captured\"}\n"
 	rawPath := filepath.Join(sessionDir, artifactRaw)
-	require.NoError(t, os.WriteFile(rawPath, []byte(raw), 0600))
+	require.NoError(t, os.WriteFile(rawPath, []byte(header+body), 0600))
 	handler := NewSessionFinalizeHandlerForTest(nil)
 	require.Len(t, handler.DetectOrphanedForAgent(ledgerPath, state.AgentID, 0), 1)
 	data, err := os.ReadFile(rawPath)
 	require.NoError(t, err)
-	assert.Equal(t, raw, string(data))
+	firstLine, rest, found := strings.Cut(string(data), "\n")
+	require.True(t, found)
+	assert.Equal(t, body, rest, "entries must be byte-identical: no import, no second mask")
+
+	stored, err := session.ReadSessionFromPath(rawPath)
+	require.NoError(t, err)
+	require.NotNil(t, stored.Meta, "header must still parse: %s", firstLine)
+	assert.Equal(t, "codex", stored.Meta.AgentType, "existing header keys must survive the stamp")
+	require.NotNil(t, stored.Meta.StoppedAt, "the sweep must hand the stop time to the finalize handler via the header")
+	assert.True(t, stored.Meta.StoppedAt.Equal(stopped), "stopped_at=%s want %s", stored.Meta.StoppedAt, stopped)
+	require.Len(t, stored.Meta.NativeSessions, 1)
+	assert.Equal(t, "codex-thread-1", stored.Meta.NativeSessions[0].ID)
+	assert.Equal(t, "startup", stored.Meta.NativeSessions[0].Source)
 }
 
 // A successful read proving the native log empty must still release the stub

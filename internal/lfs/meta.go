@@ -230,6 +230,29 @@ type SessionMeta struct {
 	// treated as pre-linkage and never blocking. omitempty for round-trip.
 	LinkageStatus string `json:"linkage_status,omitempty"`
 
+	// NativeSessions lists every native coding-agent session id this recording
+	// observed, in first-seen order. It is how an external artifact labeled
+	// with the agent's own session id (a Claude Code trace, a native transcript)
+	// is matched to a recording. One recording can span several ids (/clear
+	// re-primes into the same recording when no hook stops it) and several
+	// recordings can share one id (stop and restart, resume), so this is a
+	// list, not a scalar. Accumulated in RecordingState.NativeSessions on every
+	// SessionStart and folded in at finalize by every door (explicit stop,
+	// SessionEnd hook, daemon orphan sweep, recover). Agents that expose no id
+	// record nothing here. omitempty so older meta.json files round-trip.
+	NativeSessions []NativeSession `json:"native_sessions,omitempty"`
+
+	// StoppedAt is when the recording stopped, set by every finalize door.
+	// CreatedAt has always been recorded; without a stop time anything sliced
+	// at the end of a recording is meaningless. Precedence at finalize: the
+	// time the stop was requested (explicit stop, SessionEnd, /clear), else the
+	// stop time carried in the raw.jsonl header, else the last entry's
+	// timestamp, else the raw.jsonl file's modification time, else the
+	// finalize time — see session.ResolveStoppedAt. Every step but the last
+	// is a property of the recording, so a retried upload writes the same
+	// value. omitempty for legacy round-trip.
+	StoppedAt *time.Time `json:"stopped_at,omitempty"`
+
 	// Draft marks this meta.json as an EARLY PLACEHOLDER published while the
 	// recording is still in progress — not a finalized session record. It
 	// exists so https://<endpoint>/c/<session_id> resolves for links already
@@ -509,6 +532,43 @@ func ValidateRelativePath(name string) error {
 	return nil
 }
 
+// NativeSession is one native coding-agent session id observed by a
+// recording, with where it came from and when. Source is the agent's own
+// SessionStart reason when it provides one (Claude Code: startup, resume,
+// clear, compact) and empty otherwise. FirstSeen/LastSeen bracket the
+// SessionStart events that reported this id; LastSeen advances on every
+// repeat sighting (compact re-reports the same id).
+type NativeSession struct {
+	ID        string    `json:"id"`
+	Source    string    `json:"source,omitempty"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+}
+
+// RecordNativeSession appends id to sessions or, when id is already listed,
+// advances that entry's LastSeen (and fills an empty Source). Returns the
+// updated slice. An empty id is ignored so callers can pass whatever the
+// agent gave them without guarding. Shared by the live RecordingState and
+// any test that builds the list by hand so the dedup rule has one home.
+func RecordNativeSession(sessions []NativeSession, id, source string, at time.Time) []NativeSession {
+	if id == "" {
+		return sessions
+	}
+	for i := range sessions {
+		if sessions[i].ID != id {
+			continue
+		}
+		if at.After(sessions[i].LastSeen) {
+			sessions[i].LastSeen = at
+		}
+		if sessions[i].Source == "" {
+			sessions[i].Source = source
+		}
+		return sessions
+	}
+	return append(sessions, NativeSession{ID: id, Source: source, FirstSeen: at, LastSeen: at})
+}
+
 // SessionMetaBuilder constructs SessionMeta with required fields and optional setters.
 type SessionMetaBuilder struct {
 	meta SessionMeta
@@ -586,6 +646,25 @@ func (b *SessionMetaBuilder) LinkedPRs(prs []string) *SessionMetaBuilder {
 // LinkedIssues sets the GitHub issue references for this session.
 func (b *SessionMetaBuilder) LinkedIssues(issues []string) *SessionMetaBuilder {
 	b.meta.LinkedIssues = issues
+	return b
+}
+
+// NativeSessions sets the native coding-agent session ids observed during
+// the recording. Caller passes RecordingState.NativeSessions (or the list
+// recovered from the raw.jsonl header when the state file is already gone).
+func (b *SessionMetaBuilder) NativeSessions(sessions []NativeSession) *SessionMetaBuilder {
+	b.meta.NativeSessions = sessions
+	return b
+}
+
+// StoppedAt stamps the recording stop time. A zero time is ignored so a
+// door that could not resolve one leaves the field absent rather than
+// writing 0001-01-01.
+func (b *SessionMetaBuilder) StoppedAt(t time.Time) *SessionMetaBuilder {
+	if t.IsZero() {
+		return b
+	}
+	b.meta.StoppedAt = &t
 	return b
 }
 

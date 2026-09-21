@@ -121,6 +121,11 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 	results = append(results, checkSessionProducedCommitsStaleness())
 	results = append(results, checkPRAttributionCoverage())
 
+	// native session ids: report-only, so a SessionStart path that stopped
+	// recording the agent's own session id is visible instead of silently
+	// producing recordings that cannot be matched to the agent's transcript.
+	results = append(results, checkSessionNativeSessions())
+
 	return results
 }
 

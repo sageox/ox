@@ -103,7 +103,32 @@ func (a *testClaudeCodeAdapter) parseLine(line []byte) []adapters.RawEntry {
 				Raw:       line,
 			}}
 		}
-		return nil
+		// array form: tool_result blocks carry the call id back (mirrors the
+		// real adapter's extractToolResults)
+		var blocks []struct {
+			Type      string `json:"type"`
+			ToolUseID string `json:"tool_use_id"`
+			Content   string `json:"content"`
+			IsError   bool   `json:"is_error"`
+		}
+		if err := json.Unmarshal(raw.Message.Content, &blocks); err != nil {
+			return nil
+		}
+		var entries []adapters.RawEntry
+		for _, b := range blocks {
+			if b.Type != "tool_result" {
+				continue
+			}
+			entries = append(entries, adapters.RawEntry{
+				Timestamp:  ts,
+				Role:       "tool",
+				ToolOutput: b.Content,
+				IsError:    b.IsError,
+				CallID:     b.ToolUseID,
+				Raw:        line,
+			})
+		}
+		return entries
 
 	case "assistant":
 		// content is array of blocks

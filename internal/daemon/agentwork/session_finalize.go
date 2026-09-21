@@ -1633,6 +1633,22 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 			next.ContinuedFromSessionID = stored.Meta.ContinuedFromSessionID
 		}
 
+		// native session ids + stop time. The header is the carrier for both
+		// once .recording.json is gone (SessionEnd / clear hooks and the
+		// orphan sweep stamp it before clearing); a still-present state file
+		// (IPC finalize racing the hook's clear) is read as well. Preserve-if-
+		// present: a value a CLI door already wrote is never overwritten with
+		// a weaker estimate, and stopped_at is always resolved so no finalized
+		// session leaves here without one.
+		nativeSessions, stoppedAt := recordingCarrierFields(payload.SessionDir, stored)
+		if len(next.NativeSessions) == 0 && len(nativeSessions) > 0 {
+			next.NativeSessions = nativeSessions
+		}
+		if next.StoppedAt == nil {
+			resolved := session.ResolveStoppedAt(stoppedAt, payload.RawPath, time.Now())
+			next.StoppedAt = &resolved
+		}
+
 		// Clear the draft placeholder markers (ADR-029). MANDATORY on this
 		// path, not defensive: `next := current` above deliberately preserves
 		// every field the daemon does not own, which is correct for
@@ -2081,6 +2097,8 @@ func (h *SessionFinalizeHandler) synthesizeMeta(sessionDir, sessionName string) 
 
 	var agentID, agentType, username, headerSessionID, continuedFromSessionID string
 	var createdAt time.Time
+	var nativeSessions []lfs.NativeSession
+	var stoppedAt *time.Time
 	if stored, err := session.ReadSessionFromPath(rawPath); err == nil && stored != nil && stored.Meta != nil {
 		agentID = stored.Meta.AgentID
 		agentType = stored.Meta.AgentType
@@ -2088,6 +2106,7 @@ func (h *SessionFinalizeHandler) synthesizeMeta(sessionDir, sessionName string) 
 		createdAt = stored.Meta.CreatedAt
 		headerSessionID = stored.Meta.SessionID
 		continuedFromSessionID = stored.Meta.ContinuedFromSessionID
+		nativeSessions, stoppedAt = recordingCarrierFields(sessionDir, stored)
 	}
 	// Crash-safe carrier read: a recording written by an older writer can fail
 	// to parse into StoreMeta while its raw first line still carries the ID.
@@ -2111,7 +2130,33 @@ func (h *SessionFinalizeHandler) synthesizeMeta(sessionDir, sessionName string) 
 		SessionID(session.ResolveOrMintSessionID("", headerSessionID)).
 		ContinuedFromSessionID(continuedFromSessionID).
 		StopReason(session.StopReasonRecovered).
+		NativeSessions(nativeSessions).
+		StoppedAt(session.ResolveStoppedAt(stoppedAt, rawPath, time.Now())).
 		Build()
+}
+
+// recordingCarrierFields returns the native session ids and the requested
+// stop time for a session being finalized by the daemon, from the two
+// carriers it may still have: a .recording.json that has not been cleared
+// yet (wins — it is the live source), else the raw.jsonl header a CLI door
+// stamped before clearing it. Either may be absent; a nil stop time means
+// "no door recorded one" and the caller falls through ResolveStoppedAt.
+func recordingCarrierFields(sessionDir string, stored *session.StoredSession) ([]lfs.NativeSession, *time.Time) {
+	var nativeSessions []lfs.NativeSession
+	var stoppedAt *time.Time
+	if state, err := session.ReadRecordingStateFile(sessionDir); err == nil && state != nil {
+		nativeSessions = state.NativeSessions
+		stoppedAt = state.StoppedAt
+	}
+	if stored != nil && stored.Meta != nil {
+		if len(nativeSessions) == 0 {
+			nativeSessions = stored.Meta.NativeSessions
+		}
+		if stoppedAt == nil {
+			stoppedAt = stored.Meta.StoppedAt
+		}
+	}
+	return nativeSessions, stoppedAt
 }
 
 // runGit executes a git command in the ledger directory.
@@ -2440,6 +2485,19 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 
 	hasRaw := session.HasSubstantiveEntries(rawPath)
 	if state.StoppedAt != nil || (hasRaw && state.WatchMode != "tail") {
+		// The marker is removed right after this returns; the header is the
+		// only place the finalize handler can still read the native session
+		// ids and stop time from. Best-effort — a legacy state carries no
+		// ids and ResolveStoppedAt still finds a stop time downstream.
+		if hasRaw && !lfs.IsPointerFile(rawPath) {
+			stoppedAt := session.ResolveStoppedAt(state.StoppedAt, rawPath, time.Now())
+			if err := session.StampRawHeader(rawPath, session.HeaderStamp{
+				NativeSessions: state.NativeSessions,
+				StoppedAt:      stoppedAt,
+			}); err != nil {
+				logger.Debug("could not stamp raw.jsonl header before reclaim", "session_dir", sessionDir, "err", err)
+			}
+		}
 		return hasRaw, nil // CLI stop already selected and masked the recording
 	}
 	if lfs.IsPointerFile(rawPath) {
@@ -2570,6 +2628,29 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		return false, fmt.Errorf("captured session has an invalid metadata header")
 	}
 	meta["recovered"] = true
+	// same hand-off as the early-return path above: the marker goes away
+	// after this rewrite, so the header carries the ids and stop time
+	if nativeJSON, err := json.Marshal(state.NativeSessions); err == nil && len(state.NativeSessions) > 0 {
+		var generic any
+		if json.Unmarshal(nativeJSON, &generic) == nil {
+			meta["native_sessions"] = generic
+		}
+	}
+	if _, has := meta["stopped_at"]; !has {
+		// no door asked for this stop: the best estimate is the newest entry
+		// about to be written (captured prefix or freshly drained), never the
+		// sweep time that noticed the dead owner hours later
+		stoppedAt := session.ResolveStoppedAt(state.StoppedAt, rawPath, time.Time{})
+		for _, e := range entries {
+			if e.Timestamp.After(stoppedAt) {
+				stoppedAt = e.Timestamp.UTC()
+			}
+		}
+		if stoppedAt.IsZero() {
+			stoppedAt = time.Now().UTC()
+		}
+		meta["stopped_at"] = stoppedAt.Format(time.RFC3339Nano)
+	}
 
 	// Atomic replacement preserves the captured prefix on any source or write
 	// failure. All newly imported content passes through RawWriter's full

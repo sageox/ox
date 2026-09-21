@@ -406,6 +406,7 @@ func ensurePrimeBeforeSession(agentID string) {
 // Usage: ox agent <id> session stop
 func runAgentSessionStop(inst *agentinstance.Instance) error {
 	stopStart := time.Now()
+	stopRequestedAt := stopStart.UTC() // the recording's stop time, folded into meta.json
 	timing := make(map[string]int64)
 
 	// verify redaction signature before stopping - warn if tampered
@@ -561,11 +562,17 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 				}
 				latest.SessionFile = state.SessionFile
 				state = latest
+				// in-memory only: the stop was requested at stopStart, and every
+				// meta.json/header writer below reads state.StoppedAt through
+				// session.ResolveStoppedAt. Never persisted — a saved StoppedAt
+				// is the daemon's "owner gone, reclaim me" signal.
+				state.StoppedAt = &stopRequestedAt
 				var processErr error
 				processResult, processErr = processAgentSession(projectRoot, state)
 				return processErr
 			})
 		} else {
+			state.StoppedAt = &stopRequestedAt
 			processResult, err = processAgentSession(projectRoot, state)
 		}
 		timing["process_ms"] = time.Since(processStart).Milliseconds()
@@ -981,6 +988,31 @@ type agentSessionResult = pipeline.Result
 // Summary generation is agent-driven (via summary_prompt in session stop output),
 // and push-summary writes it to the ledger. Doctor detects missing summaries
 // by scanning the ledger directly.
+// rawEntryMap is the flat WriteRaw shape for one reconstructed entry. Shared by
+// the two reconstruct paths (processAgentSession, processSession) so a field
+// added to SessionEntry cannot reach one file and not the other — call_id was
+// exactly such a drop before this helper existed.
+func rawEntryMap(entry session.Entry) map[string]any {
+	data := map[string]any{
+		"type":      string(entry.Type),
+		"content":   entry.Content,
+		"timestamp": entry.Timestamp,
+	}
+	if entry.ToolName != "" {
+		data["tool_name"] = entry.ToolName
+	}
+	if entry.ToolInput != "" {
+		data["tool_input"] = entry.ToolInput
+	}
+	if entry.ToolOutput != "" {
+		data["tool_output"] = entry.ToolOutput
+	}
+	if entry.CallID != "" {
+		data["call_id"] = entry.CallID
+	}
+	return data
+}
+
 func processAgentSession(projectRoot string, state *session.RecordingState) (*agentSessionResult, error) {
 	result := &agentSessionResult{}
 
@@ -1141,6 +1173,8 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		Username:               identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
 		RepoID:                 repoID,
 		OxVersion:              version.Version,
+		NativeSessions:         state.NativeSessions,
+		StoppedAt:              state.StoppedAt,
 	}
 	if err := rawWriter.WriteHeader(meta); err != nil {
 		rawWriter.Close()
@@ -1149,21 +1183,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 
 	// write entries
 	for _, entry := range entries {
-		data := map[string]any{
-			"type":      string(entry.Type),
-			"content":   entry.Content,
-			"timestamp": entry.Timestamp,
-		}
-		if entry.ToolName != "" {
-			data["tool_name"] = entry.ToolName
-		}
-		if entry.ToolInput != "" {
-			data["tool_input"] = entry.ToolInput
-		}
-		if entry.ToolOutput != "" {
-			data["tool_output"] = entry.ToolOutput
-		}
-		if err := rawWriter.WriteRaw(data); err != nil {
+		if err := rawWriter.WriteRaw(rawEntryMap(entry)); err != nil {
 			rawWriter.Close()
 			return nil, fmt.Errorf("failed to write entry: %w", err)
 		}
@@ -1469,6 +1489,8 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		ProducedPlans(state.ProducedPlans).
 		LinkedPRs(state.LinkedPRs).
 		LinkedIssues(state.LinkedIssues).
+		NativeSessions(state.NativeSessions).
+		StoppedAt(session.ResolveStoppedAt(requestedStopTime(state, sessionDir), result.RawPath, time.Now())).
 		// staged: meta.json is being written here, BEFORE the LFS upload +
 		// git push below. The transition to uploaded (and the notify) happens
 		// only after commitAndPushLedger succeeds — see the M5 block at the

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/agentx"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/sessionid"
 )
@@ -64,7 +65,15 @@ type RecordingState struct {
 	AgentID string `json:"agent_id"`
 	// AgentSessionID identifies the native session independently of its file's
 	// modification time, including when the daemon retries discovery later.
+	// It is the CURRENT native id (the one adapters look up by); the full
+	// history of ids this recording has seen lives in NativeSessions.
 	AgentSessionID string `json:"agent_session_id,omitempty"`
+	// NativeSessions is every native coding-agent session id this recording
+	// has observed, appended on each SessionStart via RecordNativeSession and
+	// folded into meta.json at finalize. See lfs.SessionMeta.NativeSessions
+	// for why it is a list. omitempty so older .recording.json files
+	// round-trip unchanged.
+	NativeSessions []NativeSession `json:"native_sessions,omitempty"`
 	// SessionID is the durable ses_<UUIDv7> recording identity, minted once at
 	// StartRecording and reused verbatim by every finalize path (stop, recover,
 	// daemon). It exists from t=0 so conversation URLs (/c/<ses_id>) circulated
@@ -231,6 +240,44 @@ func (r *RecordingState) IsSubagent() bool {
 		return false
 	}
 	return r.ParentSessionPath != "" || r.Origin == "subagent"
+}
+
+// NativeSession is the per-recording native session id record. Defined in
+// lfs so meta.json and the raw.jsonl header share one type; aliased here so
+// recording-side code reads naturally.
+type NativeSession = lfs.NativeSession
+
+// RecordNativeSession notes that the agent reported native session id at
+// time at (source is the agent's SessionStart reason, or "" when it gave
+// none). Dedups by id — a repeat sighting advances LastSeen — and makes id
+// the current AgentSessionID so adapter lookups follow the agent across a
+// /clear that re-primes into this same recording. Empty ids are a no-op:
+// agents without a native id record an empty list, never an error.
+func (r *RecordingState) RecordNativeSession(id, source string, at time.Time) {
+	if r == nil || id == "" {
+		return
+	}
+	r.NativeSessions = lfs.RecordNativeSession(r.NativeSessions, id, source, at)
+	r.AgentSessionID = id
+}
+
+// ReadRecordingStateFile reads the .recording.json inside sessionDir. Unlike
+// LoadRecordingState* it does not search — it is for callers that already
+// hold a session directory (the daemon's finalize path) and want the state
+// only if it is still there. Returns nil, nil when the file does not exist.
+func ReadRecordingStateFile(sessionDir string) (*RecordingState, error) {
+	data, err := os.ReadFile(recordingStatePath(sessionDir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read recording state: %w", err)
+	}
+	var state RecordingState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("parse recording state: %w", err)
+	}
+	return &state, nil
 }
 
 // recordingStatePath returns the path to .recording.json for the given session folder.
@@ -1054,18 +1101,22 @@ func loadRecordingStatesFromDir(sessionsDir string) ([]*RecordingState, error) {
 
 // StartRecordingOptions contains options for starting a recording.
 type StartRecordingOptions struct {
-	AgentID          string
-	AgentSessionID   string
-	AdapterName      string
-	SessionFile      string // source file from adapter (Claude Code JSONL)
-	OutputFile       string // output file being recorded
-	Title            string
-	Username         string // attribution slug for paths — via identity.AttributionUsername(). NOT an email.
-	RepoContextPath  string // path to repo context directory (for storing sessions)
-	ReminderInterval int    // defaults to DefaultReminderInterval if 0
-	FilterMode       string // "infra" or "all" - controls event filtering on stop
-	WorkspacePath    string // git root / project directory
-	Branch           string // git branch at recording start
+	AgentID        string
+	AgentSessionID string
+	// AgentSessionSource is the agent's reason for the SessionStart that
+	// supplied AgentSessionID (Claude Code: startup, resume, clear, compact).
+	// Recorded alongside the id in NativeSessions; "" when unknown.
+	AgentSessionSource string
+	AdapterName        string
+	SessionFile        string // source file from adapter (Claude Code JSONL)
+	OutputFile         string // output file being recorded
+	Title              string
+	Username           string // attribution slug for paths — via identity.AttributionUsername(). NOT an email.
+	RepoContextPath    string // path to repo context directory (for storing sessions)
+	ReminderInterval   int    // defaults to DefaultReminderInterval if 0
+	FilterMode         string // "infra" or "all" - controls event filtering on stop
+	WorkspacePath      string // git root / project directory
+	Branch             string // git branch at recording start
 
 	// Parent session tracking for subagent workflows
 	ParentSessionPath string // path to parent's session folder (optional)
@@ -1224,6 +1275,11 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	if state.ParentPID <= 0 {
 		state.ParentPID = os.Getppid()
 	}
+
+	// the native id that started this recording is its first observed
+	// session; later SessionStarts (resume, clear, compact) append via
+	// RecordNativeSession in the hook.
+	state.RecordNativeSession(opts.AgentSessionID, opts.AgentSessionSource, state.StartedAt)
 
 	if err := SaveRecordingState(projectRoot, state); err != nil {
 		return nil, err

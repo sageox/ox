@@ -46,6 +46,7 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 		Username:               identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
 		RepoID:                 repoID,
 		OxVersion:              version.Version,
+		NativeSessions:         state.NativeSessions,
 	}
 
 	// enrich with adapter metadata if available
@@ -145,6 +146,19 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		}
 	}
 
+	// The header was written at start, before any /clear or resume could add
+	// a native session id and before the stop time existed. Stamp both now so
+	// the ledger copy of raw.jsonl is self-describing on its own (a daemon
+	// retry of this upload has no .recording.json to consult). Best-effort:
+	// meta.json gets the same values from state regardless.
+	stoppedAt := session.ResolveStoppedAt(state.StoppedAt, rawPath, time.Now())
+	if err := session.StampRawHeader(rawPath, session.HeaderStamp{
+		NativeSessions: state.NativeSessions,
+		StoppedAt:      stoppedAt,
+	}); err != nil {
+		slog.Warn("finalize: could not stamp raw.jsonl header", "session", state.SessionPath, "error", err)
+	}
+
 	// read back the completed raw.jsonl to generate artifacts
 	storedSession, err := session.ReadSessionFromPath(rawPath)
 	if err != nil {
@@ -190,6 +204,9 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		}
 		if toolOutput, ok := rawMap["tool_output"].(string); ok {
 			entry.ToolOutput = toolOutput
+		}
+		if callID, ok := rawMap["call_id"].(string); ok {
+			entry.CallID = callID
 		}
 		sessionEntries = append(sessionEntries, entry)
 	}

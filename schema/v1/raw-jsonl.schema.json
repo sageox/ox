@@ -96,7 +96,29 @@
           "description": "Accepted as an alias for username by the reader; prefer username when writing."
         },
         "repo_id": { "type": "string", "description": "SageOx repo id, for provenance." },
-        "ox_version": { "type": "string", "description": "Version of ox that created the session." }
+        "ox_version": { "type": "string", "description": "Version of ox that created the session." },
+        "native_sessions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nativeSession" },
+          "description": "Every native coding-agent session id this recording observed, in first-seen order. Stamped into the header at finalize (and at SessionEnd / clear, before the recording-state file is cleared) so a daemon-side finalize can copy it into meta.json. A recording can span several ids (/clear re-primes into the same recording when no hook stops it) and several recordings can share one id (stop and restart, resume). Absent on recordings made before the field existed and for agents that expose no session id."
+        },
+        "stopped_at": {
+          "$ref": "#/$defs/rfc3339",
+          "description": "When the recording stopped. Stamped by the finalize door that ended it; absent on recordings made before the field existed."
+        }
+      }
+    },
+
+    "nativeSession": {
+      "title": "Native session id sighting",
+      "description": "One native coding-agent session id and when the recording saw it. Mirrors lfs.NativeSession; the same shape appears in meta.json's native_sessions.",
+      "type": "object",
+      "required": ["id", "first_seen", "last_seen"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "description": "The agent's own session identifier (Claude Code session_id, CODEX_THREAD_ID, ...)." },
+        "source": { "type": "string", "description": "The agent's SessionStart reason when it gives one — Claude Code: startup, resume, clear, compact. Absent when the agent reported none." },
+        "first_seen": { "$ref": "#/$defs/rfc3339" },
+        "last_seen": { "$ref": "#/$defs/rfc3339", "description": "Advances on every repeat sighting of the same id (compact re-reports it)." }
       }
     },
 
@@ -162,6 +184,12 @@
         "tool_output": {
           "type": ["string", "object"],
           "description": "Tool result. Same string-or-object split as tool_input."
+        },
+        "is_error": { "type": "boolean", "description": "The tool call failed. Omitted when false." },
+        "call_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The agent's own identifier for a tool invocation, carried by BOTH the call entry and its result entry so the two can be joined — and joined to the agent's native transcript and trace, which label the same invocation with the same id. Source per adapter: Claude Code tool_use.id / tool_result.tool_use_id; Codex call_id. Absent for adapters whose format has no such id and on entries recorded before the field existed."
         },
         "coworker_name": { "type": "string", "description": "Coworker/subagent name, when the entry is attributable to one." },
         "coworker_model": { "type": "string", "description": "Coworker model tier." },

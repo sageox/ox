@@ -450,6 +450,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	phaseStart = time.Now()
 	continuedFromSessionID := recordingSessionIDFromMarker(existingMarker)
 	sessionStat := startSessionRecording(projectRoot, agentID, agentType, parentAgentID, continuedFromSessionID, agentSessionID)
+	// a prime that lands on an existing recording (CLAUDE.md-driven re-prime
+	// after /clear, hookless agents) is also a native session sighting
+	recordNativeSessionForRecording(projectRoot, agentID, agentSessionID, hookSource)
 	recordingSessionID := recordingSessionIDForMarker(projectRoot, agentID, continuedFromSessionID)
 	timing["session_start"] = time.Since(phaseStart).Milliseconds()
 

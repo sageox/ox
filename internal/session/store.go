@@ -199,6 +199,16 @@ type StoreMeta struct {
 	Username               string `json:"username,omitempty"`      // privacy-safe display name — via identity.AttributionDisplayName(). NOT an email.
 	RepoID                 string `json:"repo_id,omitempty"`
 	OxVersion              string `json:"ox_version,omitempty"` // version of ox that created this session
+
+	// NativeSessions and StoppedAt make the header a crash-safe carrier for
+	// the two recording fields that only exist in .recording.json while a
+	// session is live. The SessionEnd hook, /clear, and the daemon's orphan
+	// sweep all finalize AFTER that state file is gone, so they stamp these
+	// into the header (StampRawHeader) before clearing it and the daemon's
+	// meta.json writer copies them from here. Both omitempty: recordings
+	// started under an older binary carry neither.
+	NativeSessions []lfs.NativeSession `json:"native_sessions,omitempty"`
+	StoppedAt      *time.Time          `json:"stopped_at,omitempty"`
 }
 
 // Writable is an interface for entries that can be written to a session.
@@ -1116,6 +1126,26 @@ func ParseStoreMeta(m map[string]any) *StoreMeta {
 	}
 	if v, ok := m["ox_version"].(string); ok {
 		meta.OxVersion = v
+	}
+
+	// native_sessions / stopped_at: decode through JSON so the same struct
+	// tags that wrote them read them back (no hand-rolled field mapping to
+	// drift). A malformed list is dropped rather than failing the whole
+	// header — the rest of the metadata is still worth having.
+	if raw, ok := m["native_sessions"]; ok && raw != nil {
+		if data, err := json.Marshal(raw); err == nil {
+			var sessions []lfs.NativeSession
+			if err := json.Unmarshal(data, &sessions); err == nil {
+				meta.NativeSessions = sessions
+			}
+		}
+	}
+	if v, ok := m["stopped_at"].(string); ok && v != "" {
+		if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+			meta.StoppedAt = &t
+		} else if t, err := time.Parse(time.RFC3339, v); err == nil {
+			meta.StoppedAt = &t
+		}
 	}
 
 	// created_at (or started_at)

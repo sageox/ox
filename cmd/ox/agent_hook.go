@@ -345,6 +345,10 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 		slog.Debug("hook: clear could not set StoppedAt", "agent_id", agentID, "error", updateErr)
 	}
 
+	// the daemon finalizes this recording after the state file below is
+	// gone; hand it the native session ids and the stop time via the header
+	stampRecordingHeaderAtStop(state, now)
+
 	// fire-and-forget IPC to daemon to finalize the stopped session
 	if state.SessionPath != "" {
 		if ledgerPath := deriveLedgerPath(state.SessionPath); ledgerPath != "" {
@@ -417,6 +421,10 @@ func handleEnd(ctx *HookContext) error {
 	}); updateErr != nil {
 		slog.Debug("hook: end could not set StoppedAt", "agent_id", agentID, "error", updateErr)
 	}
+
+	// the daemon finalizes this recording after the state file below is
+	// gone; hand it the native session ids and the stop time via the header
+	stampRecordingHeaderAtStop(state, now)
 
 	// dispatch delegated finalization via daemon IPC. Best-effort: if the
 	// daemon is unreachable, the daemon's anti-entropy sweep will still
@@ -923,9 +931,19 @@ func startSessionRecordingIfConfigured(ctx *HookContext) {
 		agentID = ctx.Marker.AgentID
 		agentSessionID = ctx.Marker.AgentSessionID
 	}
-	if ctx.Input != nil && ctx.Input.SessionID != "" {
-		agentSessionID = ctx.Input.SessionID
+	source := ""
+	if ctx.Input != nil {
+		if ctx.Input.SessionID != "" {
+			agentSessionID = ctx.Input.SessionID
+		}
+		source = ctx.Input.Source
 	}
 
 	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, "", recordingSessionIDFromMarker(ctx.Marker), agentSessionID)
+
+	// every SessionStart — startup, resume, clear, compact — reports the
+	// agent's current native session id; append it (with its reason) to the
+	// live recording so a recording that outlives a /clear lists every id it
+	// spanned, and a repeat sighting (compact) advances last_seen.
+	recordNativeSessionForRecording(ctx.ProjectRoot, agentID, agentSessionID, source)
 }
