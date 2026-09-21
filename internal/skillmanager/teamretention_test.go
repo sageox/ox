@@ -52,6 +52,8 @@ func TestTeamSkillsSurviveABlindTeamCheckout(t *testing.T) {
 			_, err := Reconcile(repo, "1.0.0", desiredFor(target), []adapterprotocol.SkillTarget{target})
 			require.NoError(t, err)
 			require.FileExists(t, filepath.Join(repo, installed), "setup failed: the skill never installed")
+			require.NoError(t, os.Remove(StatePath(repo)),
+				"fixture must prove the reserved-namespace recovery scan also honors blindness")
 
 			blind(t, teamPath)
 

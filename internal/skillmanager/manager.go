@@ -897,6 +897,28 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 		plan.Removes = append(plan.Removes, retired...)
 	}
 
+	// Local state is disposable, so it cannot be the only inventory capable of
+	// retiring a Team Skill. When Team Context discovery is authoritative, the
+	// reserved namespace itself proves ownership: sweep regular files that exist
+	// under sageox-team-* but are absent from desired state. If discovery is
+	// incomplete, do nothing — an unseen source is not an authoritative deletion.
+	if plan.teamIncomplete == "" {
+		scheduled := make(map[string]struct{}, len(plan.Removes))
+		for _, action := range plan.Removes {
+			scheduled[action.Path] = struct{}{}
+		}
+		for _, key := range keys {
+			orphaned, orphanErr := orphanedTeamFiles(repoRoot, targetByKey[key], desiredPaths, oldFiles, scheduled)
+			if orphanErr != nil {
+				return nil, orphanErr
+			}
+			for _, action := range orphaned {
+				scheduled[action.Path] = struct{}{}
+			}
+			plan.Removes = append(plan.Removes, orphaned...)
+		}
+	}
+
 	neededTargets := stringSet(next.Desired.Targets)
 	for _, file := range next.ManagedFiles {
 		neededTargets[file.Target] = struct{}{}
@@ -1689,6 +1711,87 @@ func retiredLegacyFiles(repoRoot string, target adapterprotocol.SkillTarget, des
 		}
 		if validLegacyStamp(data) {
 			actions = append(actions, FileAction{TargetKey: target.Key, Path: path, PreviousDigest: digestBytes(data)})
+		}
+	}
+	return actions, nil
+}
+
+// orphanedTeamFiles rebuilds the removable half of the Team Skill inventory
+// from the reserved on-disk namespace when machine-local state is missing.
+// Every path returned is a regular file read through descriptor-pinned roots;
+// symlinks and other foreign filesystem objects are never followed.
+func orphanedTeamFiles(repoRoot string, target adapterprotocol.SkillTarget, desired map[string]struct{}, old map[string]managedFile, scheduled map[string]struct{}) ([]FileAction, error) {
+	repo, err := os.OpenRoot(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = repo.Close() }()
+
+	targetRoot, err := openRepoDir(repo, target.Root, false)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = targetRoot.Close() }()
+
+	dir, err := targetRoot.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	var actions []FileAction
+	for _, skillEntry := range entries {
+		if !skillEntry.IsDir() || !strings.HasPrefix(skillEntry.Name(), TeamPrefix) {
+			continue
+		}
+		skillRoot, openErr := openRepoDir(targetRoot, skillEntry.Name(), false)
+		if openErr != nil {
+			return nil, openErr
+		}
+		walkErr := fs.WalkDir(skillRoot.FS(), ".", func(path string, walkEntry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if path == "." || walkEntry.IsDir() {
+				return nil
+			}
+			info, infoErr := walkEntry.Info()
+			if infoErr != nil {
+				return infoErr
+			}
+			if !info.Mode().IsRegular() {
+				return nil
+			}
+
+			relative := filepath.ToSlash(filepath.Join(target.Root, skillEntry.Name(), filepath.FromSlash(path)))
+			if _, wanted := desired[relative]; wanted {
+				return nil
+			}
+			if _, tracked := old[relative]; tracked {
+				return nil
+			}
+			if _, exists := scheduled[relative]; exists {
+				return nil
+			}
+			content, _, inspectErr := inspectRootFile(skillRoot, filepath.FromSlash(path))
+			if inspectErr != nil {
+				return inspectErr
+			}
+			actions = append(actions, FileAction{
+				TargetKey: target.Key, Path: relative, PreviousDigest: digestBytes(content),
+			})
+			return nil
+		})
+		_ = skillRoot.Close()
+		if walkErr != nil {
+			return nil, walkErr
 		}
 	}
 	return actions, nil
