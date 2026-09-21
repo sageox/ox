@@ -58,12 +58,14 @@ func TestUpgradeBinaryTarget(t *testing.T) {
 		t.Skip("short: exercises the binary installer over local HTTPS")
 	}
 	for _, tt := range []struct {
-		name   string
-		target string
-		cached string
+		name    string
+		target  string
+		cached  string
+		version string
 	}{
-		{"no cache and offline release lookup", "v0.42.0", ""},
-		{"different cached release", "0.42.0", "v99.0.0"},
+		{"no cache and offline release lookup", "v0.42.0", "", "0.42.0"},
+		{"different cached release", "0.42.0", "v99.0.0", "0.42.0"},
+		{"prerelease with metadata", "v0.42.0-rc.1+build.7", "", "0.42.0-rc.1+build.7"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			noInputCLIEnv(t)
@@ -115,13 +117,13 @@ func TestUpgradeBinaryTarget(t *testing.T) {
 			require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
 			assert.Equal(t, installBinary, got.InstallMethod)
 			assert.Equal(t, "failed", got.Status)
-			assert.Equal(t, "0.42.0", got.NewVersion)
-			assert.Equal(t, "https://github.com/sageox/ox/releases/tag/v0.42.0", got.ReleaseURL)
+			assert.Equal(t, tt.version, got.NewVersion)
+			assert.Equal(t, "https://github.com/sageox/ox/releases/tag/v"+tt.version, got.ReleaseURL)
 			assert.Contains(t, got.Message, "fetch checksums")
 			assert.False(t, fetched, "an explicit pin must not fetch the latest release")
 			select {
 			case request := <-requests:
-				assert.Equal(t, "github.com/sageox/ox/releases/download/v0.42.0/checksums.txt", request)
+				assert.Equal(t, "github.com/sageox/ox/releases/download/v"+tt.version+"/checksums.txt", request)
 			default:
 				t.Error("the requested release was never fetched")
 			}

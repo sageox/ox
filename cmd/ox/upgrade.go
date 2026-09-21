@@ -44,7 +44,8 @@ var upgradeCmd = &cobra.Command{
 	Short: "Upgrade ox to the latest or a specific version",
 	Long: `Detect how ox was installed and upgrade using the appropriate method: Homebrew, go install, or an in-place download that verifies and replaces the binary.
 
-Targets must be release versions such as v0.18.0.
+Targets must be release versions such as v0.18.0. Go installations require the
+v prefix and do not accept build metadata other than +incompatible.
 For Go and direct binary installations, --target installs the specified release
 without checking the latest release. It can reinstall the current version or
 select an older release. Homebrew and source installations do not support --target.
@@ -173,7 +174,10 @@ func validateUpgradeTarget(method installMethod, target string) error {
 	if method != installGoInstall && method != installBinary {
 		return fmt.Errorf("--target is supported only for go-install and binary installations; %s upgrades cannot safely honor a pinned release", method)
 	}
-	if !upgrade.IsValidVersion(strings.TrimPrefix(target, "v")) {
+	// Go treats noncanonical spellings as revision queries, which can follow branches.
+	_, metadata, _ := strings.Cut(target, "+")
+	goRevision := method == installGoInstall && (!strings.HasPrefix(target, "v") || (metadata != "" && metadata != "incompatible"))
+	if goRevision || !upgrade.IsValidVersion(strings.TrimPrefix(target, "v")) {
 		return fmt.Errorf("--target must be a release version such as v0.18.0; got %q", target)
 	}
 	return nil

@@ -36,14 +36,14 @@ import (
 	"github.com/sageox/ox/internal/useragent"
 )
 
-// versionRe bounds the target version to a semver-ish shape BEFORE it is
-// interpolated into a download URL. Without this, a crafted --target (e.g.
-// "../../evil" or a full URL) could redirect the download off the release
-// path. Accepts "1.2.3" and common suffixes ("1.2.3-rc1", "1.2.3-next").
-var versionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$`)
+// versionRe validates SemVer before constructing download URLs or Go version
+// queries. Merely URL-safe values can resolve to moving branches in Go.
+// Grammar: https://semver.org/#is-there-a-suggested-regular-expression-regex-to-check-a-semver-string
+var versionRe = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)` +
+	`(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?` +
+	`(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$`)
 
-// IsValidVersion reports whether an unprefixed release version is safe to use
-// in a release download URL.
+// IsValidVersion reports whether version is a full, unprefixed semantic version.
 func IsValidVersion(version string) bool {
 	return versionRe.MatchString(version)
 }

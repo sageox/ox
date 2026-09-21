@@ -191,7 +191,7 @@ func TestReplaceRunningBinary_RejectsMalformedVersion(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "ox"), "OLD-ox")
 
-	for _, bad := range []string{"../../evil", "https://evil.example/x", "1.2", "1.2.3/../x", "1.2.3 ", "v1.2.3"} {
+	for _, bad := range []string{"../../evil", "https://evil.example/x", "1.2", "1.2.3/../x", "1.2.3 ", "v1.2.3", "01.2.3", "1.2.3.next", "1.2.3-01", "1.2.3-rc..1", "1.2.3+build..7"} {
 		cfg := baseConfig(dir, "http://127.0.0.1:1")
 		cfg.Version = bad
 		err := ReplaceRunningBinary(context.Background(), cfg)
