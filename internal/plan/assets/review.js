@@ -251,12 +251,14 @@
 
   // Review chrome is never a mark-up target. The rail and orphan list are <li>s
   // and would otherwise match SELECTOR, hijacking their own click handlers.
-  var CHROME = '.rev-bar, .rev-rail, .rev-orphans, .rev-pop, .rev-toast, .rev-offline-bar';
+  var CHROME = '.rev-bar, .rev-rail, .rev-orphans, .rev-toast, .rev-offline-bar';
   function onClick(ev) {
     if (!on) return;
-    if (ev.target.closest(CHROME)) return;
+    if (pop && pop.contains(ev.target)) return;
+    // any click outside the note dismisses it; only page content opens one
+    if (ev.target.closest(CHROME)) { closePop(); return; }
     var el = ev.target.closest(SELECTOR);
-    if (!el) { closePop(); return; } // click-away dismisses an open note
+    if (!el) { closePop(); return; }
     ev.preventDefault();
     openPop(el, ev);
   }
@@ -342,11 +344,12 @@
   }
   function toast(msg) {
     if (toastEl) toastEl.remove();
-    toastEl = document.createElement('div');
-    toastEl.className = 'rev-toast';
-    toastEl.textContent = msg;
-    document.body.appendChild(toastEl);
-    setTimeout(function () { if (toastEl) { toastEl.remove(); toastEl = null; } }, 8000);
+    var el = toastEl = document.createElement('div');
+    el.className = 'rev-toast';
+    el.textContent = msg;
+    document.body.appendChild(el);
+    // this toast only: a newer one may have replaced it before the timer fires
+    setTimeout(function () { el.remove(); if (toastEl === el) toastEl = null; }, 8000);
   }
   // While offline, poll /healthz; the instant the server is back, reload —
   // stable port + persisted token mean the same origin serves fresh state, and
@@ -403,9 +406,17 @@
   // adds no key map) get the same keys. Esc peels one layer at a time — an
   // open note first, then the mode — and fires while typing in the note too;
   // that is the point of Esc. `r` toggles the mode from anywhere but a text field.
+  // Keys are shared with the page: one an earlier listener marked handled (an
+  // authored inspector closing on Esc) is left alone, and one acted on here is
+  // marked handled so later listeners that honor defaultPrevented skip it.
   function typing(e) { var t = e.target; return !!t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable); }
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') { if (pop) closePop(); else if (on) setReview(false); return; }
+    if (e.defaultPrevented) return;
+    if (e.key === 'Escape') {
+      if (pop) { closePop(); e.preventDefault(); }
+      else if (on) { setReview(false); e.preventDefault(); }
+      return;
+    }
     if (e.key === 'r' && !typing(e) && !e.metaKey && !e.ctrlKey && !e.altKey) { setReview(!on); e.preventDefault(); }
   });
 

@@ -144,8 +144,10 @@ and to ungrouped review anchors.
   prior-art / expert-routing chips plus surfaced context; (b) the **footer
   credit**; (c) the full **live review loop** — click any element to attach a
   mark, content-hash anchored so it works on arbitrary authored markup, served
-  via `ox plan review <slug>`. It reserves two keys: `r` toggles review mode,
-  `Esc` closes an open note and then the mode — authored pages must not bind them.
+  via `ox plan review <slug>`. It binds two keys: `r` toggles review mode, and
+  `Esc` closes an open note, then the mode. A page handler that acts on either
+  key should call `preventDefault()` — the chrome ignores a keypress an earlier
+  listener marked handled, and marks the ones it acts on.
 - Injection is **idempotent and append-only** — re-rendering replaces the marker
   block and never touches authored markup.
 - `--artifact` serves/writes the authored page **verbatim**, zero injection.

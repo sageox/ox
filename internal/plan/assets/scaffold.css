@@ -306,10 +306,13 @@ table.flagm td:first-child{font-family:"Spline Sans Mono",ui-monospace,SFMono-Re
 .rev-bar .rev-who{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--faint)}
 .rev-bar .rev-who:hover{color:var(--sage);border-color:var(--sage)}
 /* the mode is visible without a hover: crosshair page-wide, sage-bordered bar.
-   Review chrome keeps its normal cursor — clicks there never mark up. */
+   Review chrome keeps its normal cursor and gets no target outline — clicks
+   there never mark up. The li rules outrank the generic li:hover target rule. */
 body.rev-on{cursor:crosshair}
 body.rev-on .rev-bar{border-color:var(--sage)}
 body.rev-on .rev-bar,body.rev-on .rev-rail,body.rev-on .rev-pop,body.rev-on .rev-orphans,body.rev-on .rev-toast,body.rev-on .rev-offline-bar{cursor:auto}
+body.rev-on .rev-rail li:hover{outline:none;cursor:pointer}
+body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}
 body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.rev-on tr:hover,body.rev-on .ox-chip:hover,body.rev-on .stat:hover,body.rev-on .bar-row:hover{outline:1px dashed var(--sage);outline-offset:2px;cursor:crosshair}
 /* inline mark glyph — redundant encoding: distinct GLYPH per status, color reinforces (never color alone) */
 .rev-marked,.rev-committed{position:relative;box-shadow:inset 3px 0 0 var(--hair)}

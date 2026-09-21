@@ -81,8 +81,9 @@ func TestReviewSW_OfflineShellContract(t *testing.T) {
 // its exit in view, and survives the live loop: the toggle relabels to "Exit
 // review", entry shows a toast that names Esc, Esc closes the note then the
 // mode, `r` toggles the mode (handled ONCE — review.js, not scaffold.js, so
-// authored HTML plans get it too), the mode is restored silently across a live
-// reload but scoped to the tab, and review chrome is never a mark-up target.
+// authored HTML plans get it too), keys are shared with the page through
+// defaultPrevented, the mode is restored silently across a live reload but
+// scoped to the tab, and review chrome is never a mark-up target.
 // The real-browser proofs are TestBrowser_ReviewModeExitIsVisibleAndEscapable,
 // TestBrowser_ReviewModeSurvivesLiveReload and TestBrowser_ReviewKeysWorkOnAuthoredPlan
 // (cmd/ox, build tag `browser`); this is the hermetic guard CI sees.
@@ -98,12 +99,15 @@ func TestReviewJS_ModeExitContract(t *testing.T) {
 	for _, want := range []string{
 		"on ? 'Exit review' : 'Review'",                              // the button becomes the exit
 		"Esc or Exit review to leave",                                // entry toast names both exits
-		"if (pop) closePop(); else if (on) setReview(false);",        // Esc: note first, then mode
+		"if (e.defaultPrevented) return;",                            // a key the page already handled is left alone
+		"if (pop) { closePop(); e.preventDefault(); }",               // Esc: note first…
+		"else if (on) { setReview(false); e.preventDefault(); }",     // …then mode, marked handled
 		"if (e.key === 'r' && !typing(e)",                            // r toggles, not from a text field
 		"sessionStorage.setItem(ON_KEY, '1')",                        // persisted per tab, not per browser
 		"if (sessionStorage.getItem(ON_KEY)) setReview(true, true);", // restored silently after a reload
-		"if (ev.target.closest(CHROME)) return;",                     // bar/rail/orphans never mark up
+		"if (ev.target.closest(CHROME)) { closePop(); return; }",     // chrome clicks dismiss a note, never open one
 		"if (!el) { closePop(); return; }",                           // click-away dismisses a note
+		"if (toastEl === el) toastEl = null;",                        // a toast timer removes only its own toast
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("review.js missing %q", want)
@@ -115,5 +119,35 @@ func TestReviewJS_ModeExitContract(t *testing.T) {
 	}
 	if strings.Contains(string(sc), "e.key==='r'") {
 		t.Error("scaffold.js handles r too — one keypress would toggle review mode twice")
+	}
+}
+
+// TestReviewCSS_ModeStylingInBothPageKinds pins the review-mode styling in both
+// stylesheets: scaffold.css (markdown-derived pages) and chrome.css (authored
+// HTML plans) each carry their own copy. The browser tests render the scaffold
+// page only, so this is what keeps the authored-page copy from drifting.
+// Failure prevented: on authored plans only, review mode is invisible until a
+// hover, or the comments rail looks like a mark-up target.
+func TestReviewCSS_ModeStylingInBothPageKinds(t *testing.T) {
+	for _, f := range []struct {
+		name string
+		read func(string) ([]byte, error)
+	}{
+		{"assets/scaffold.css", renderAssets.ReadFile},
+		{"assets/chrome.css", chromeAssets.ReadFile},
+	} {
+		b, err := f.read(f.name)
+		if err != nil {
+			t.Fatalf("read %s: %v", f.name, err)
+		}
+		for _, want := range []string{
+			"body.rev-on{cursor:crosshair}",                               // the mode is visible without a hover
+			"body.rev-on .rev-rail li:hover{outline:none;cursor:pointer}", // rail rows are not targets
+			"body.rev-on .rev-orphans li:hover{outline:none;cursor:auto}", // nor are orphan rows
+		} {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("%s missing %q", f.name, want)
+			}
+		}
 	}
 }

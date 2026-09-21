@@ -103,12 +103,20 @@ func serveLivePlanReview(t *testing.T) (url, planDir string, bc *broadcaster) {
 // serveAuthoredPlanReview is serveLivePlanReview for an AUTHORED HTML plan of
 // record: no scaffold — the page gets only the injected ox chrome (chrome.js +
 // review.js), which is exactly what a coworker-authored plan runs in a browser.
+// The page carries its own Esc handling, the way an authored inspector would: a
+// #inspector panel its document-level listener closes on Esc (marking the key
+// handled), and a window-level counter of Esc presses nothing handled.
 func serveAuthoredPlanReview(t *testing.T) (url, planDir string, bc *broadcaster) {
 	t.Helper()
 	gitRoot := newPlanStatusTestRepo(t)
 	html := []byte(`<!doctype html><html><head><meta charset="utf-8"><title>Authored Roundtrip</title>` +
 		`<meta name="ox-plan-slug" content="authored-roundtrip"></head><body><h1>Authored Roundtrip</h1>` +
-		`<section id="risks"><h2>Risks</h2><p>The retry path can double-fire under load.</p></section></body></html>`)
+		`<section id="risks"><h2>Risks</h2><p>The retry path can double-fire under load.</p></section>` +
+		`<aside id="inspector" hidden>retry budget: 3</aside>` +
+		`<script>document.addEventListener('keydown',function(e){var p=document.getElementById('inspector');` +
+		`if(e.key==='Escape'&&!e.defaultPrevented&&!p.hidden){p.hidden=true;e.preventDefault();}});` +
+		`window.addEventListener('keydown',function(e){if(e.key==='Escape'&&!e.defaultPrevented)` +
+		`document.body.dataset.pageEsc=String((+document.body.dataset.pageEsc||0)+1);});</script></body></html>`)
 	dir := savePlanArtifacts(gitRoot, plan.Input{Raw: "# Authored Roundtrip\n\n## Risks\n\nThe retry path can double-fire under load.\n"}, plan.Result{}, html, plan.PrimaryHTML)
 	if dir == "" {
 		t.Fatal("savePlanArtifacts returned empty dir — the authored plan was not saved")
@@ -318,11 +326,13 @@ func TestBrowser_UnsentMarkSurvivesReconnect(t *testing.T) {
 
 // TestBrowser_ReviewModeExitIsVisibleAndEscapable proves a reviewer can always
 // tell they are in review mode and always get out: entering announces itself
-// and relabels the toggle to the way out; Esc closes an open note first and the
-// mode second (even from inside the note's textarea); clicking away from a note
-// dismisses it; and the comments rail — itself a list — never becomes a mark-up
-// target. Failure prevented: a reviewer clicks Review, sees only a green
-// button, and has no visible way back to reading the plan.
+// and relabels the toggle to the way out, and the announcement keeps its full
+// lifetime across a quick exit and re-entry; Esc closes an open note first and
+// the mode second (even from inside the note's textarea); any click outside a
+// note dismisses it, including one on the comments rail; and the rail — itself
+// a list — is never a mark-up target, by click or by hover styling.
+// Failure prevented: a reviewer clicks Review, sees only a green button, and has
+// no visible way back to reading the plan.
 func TestBrowser_ReviewModeExitIsVisibleAndEscapable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: launches a real headless Chrome")
@@ -348,8 +358,14 @@ func TestBrowser_ReviewModeExitIsVisibleAndEscapable(t *testing.T) {
 	const inMode = `document.body.classList.contains('rev-on')`
 	const noteOpen = `!!document.querySelector('.rev-pop')`
 	const toastText = `(function(){var t=document.querySelector('.rev-toast');return t?t.textContent:'';})()`
-	var seeded, onAfterEnter, noteAfterEsc, onAfterEsc, onAfterSecondEsc, noteAfterClickAway, noteAfterRailClick, railFlashed bool
-	var labelOn, labelOff, toast string
+	// The toast's 8s timers are captured instead of scheduled, so the test fires
+	// each one when it chooses rather than waiting out the lifetime.
+	const toastTimerHook = `(function(){window.__toastTimers=[];var real=window.setTimeout;` +
+		`window.setTimeout=function(fn,ms){if(ms===8000){window.__toastTimers.push(fn);return 0;}return real.apply(window,arguments);};return true;})()`
+	var seeded, hooked, onAfterEnter, noteAfterEsc, onAfterEsc, onAfterSecondEsc, toastAfterStaleTimer, toastAfterOwnTimer, noteAfterClickAway, noteAfterRailClick, railFlashed bool
+	var labelOn, labelOff, toast, railHover string
+	var timersAfterEnter int
+	var railBox struct{ X, Y float64 }
 
 	// Entering: the mode announces itself and the button becomes the exit.
 	if err := chromedp.Run(ctx,
@@ -358,15 +374,20 @@ func TestBrowser_ReviewModeExitIsVisibleAndEscapable(t *testing.T) {
 		chromedp.Evaluate(`(function(){try{localStorage.setItem('ox-plan-reviewer','Devon');localStorage.setItem('ox-plan-rev-seen','1');return true;}catch(e){return false;}})()`, &seeded),
 		chromedp.Reload(),
 		chromedp.WaitVisible(".rev-toggle", chromedp.ByQuery),
+		chromedp.Evaluate(toastTimerHook, &hooked),
 		chromedp.Click(".rev-toggle", chromedp.ByQuery),
 		chromedp.Evaluate(toastText, &toast),
+		chromedp.Evaluate(`window.__toastTimers.length`, &timersAfterEnter),
 		chromedp.Text(".rev-toggle", &labelOn, chromedp.ByQuery),
 		chromedp.Evaluate(inMode, &onAfterEnter),
 	); err != nil {
 		t.Fatalf("entering review mode failed: %v", err)
 	}
-	if !seeded {
-		t.Fatal("could not seed reviewer identity in the browser")
+	if !seeded || !hooked {
+		t.Fatalf("could not prepare the browser: seeded=%v hooked=%v", seeded, hooked)
+	}
+	if timersAfterEnter != 1 {
+		t.Fatalf("the toast-timer hook caught %d timers on entry, want 1 — if the toast lifetime changed, update the hook", timersAfterEnter)
 	}
 	if !onAfterEnter || strings.TrimSpace(labelOn) != "Exit review" {
 		t.Fatalf("entering review mode must relabel the toggle to the exit: on=%v label=%q", onAfterEnter, labelOn)
@@ -396,9 +417,24 @@ func TestBrowser_ReviewModeExitIsVisibleAndEscapable(t *testing.T) {
 		t.Fatalf("second Esc must leave review mode and restore the label: on=%v label=%q", onAfterSecondEsc, labelOff)
 	}
 
-	// Clicking away from an open note dismisses it (the title is not a target).
+	// Re-entering replaces the entry toast. The first entry's timer firing late
+	// must not take the replacement down with it; the replacement's own timer does.
 	if err := chromedp.Run(ctx,
 		chromedp.Click(".rev-toggle", chromedp.ByQuery),
+		chromedp.Evaluate(`window.__toastTimers[0]();!!document.querySelector('.rev-toast')`, &toastAfterStaleTimer),
+		chromedp.Evaluate(`window.__toastTimers[1]();!!document.querySelector('.rev-toast')`, &toastAfterOwnTimer),
+	); err != nil {
+		t.Fatalf("re-entering review mode failed: %v", err)
+	}
+	if !toastAfterStaleTimer {
+		t.Fatal("an earlier toast's timer must not remove the toast that replaced it")
+	}
+	if toastAfterOwnTimer {
+		t.Fatal("a toast's own timer must remove it")
+	}
+
+	// Clicking away from an open note dismisses it (the title is not a target).
+	if err := chromedp.Run(ctx,
 		chromedp.Click("section#sec-1", chromedp.ByQuery),
 		chromedp.WaitVisible(".rev-pop .rev-note", chromedp.ByQuery),
 		chromedp.Click("main > h1", chromedp.ByQuery),
@@ -410,23 +446,35 @@ func TestBrowser_ReviewModeExitIsVisibleAndEscapable(t *testing.T) {
 		t.Fatal("clicking away from an open note must dismiss it")
 	}
 
-	// The comments rail is review chrome, not a mark-up target.
+	// The comments rail is review chrome: with another note open, clicking a row
+	// dismisses that note like any click outside it, scrolls to the row's mark,
+	// and opens no note on the row itself. Hovering a row shows no target styling.
 	if err := chromedp.Run(ctx,
 		chromedp.Click("section#sec-1", chromedp.ByQuery),
 		chromedp.WaitVisible(".rev-pop .rev-save", chromedp.ByQuery),
 		chromedp.Click(".rev-pop .rev-save", chromedp.ByQuery),
 		chromedp.WaitVisible(".rev-rail-item", chromedp.ByQuery),
+		chromedp.Click("section#sec-2", chromedp.ByQuery),
+		chromedp.WaitVisible(".rev-pop .rev-note", chromedp.ByQuery),
 		chromedp.Click(".rev-rail-item", chromedp.ByQuery),
 		chromedp.Evaluate(noteOpen, &noteAfterRailClick),
 		chromedp.Evaluate(`document.querySelector('section#sec-1').classList.contains('rev-flash')`, &railFlashed),
+		chromedp.Evaluate(`(function(){var r=document.querySelector('.rev-rail-item').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};})()`, &railBox),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return chromedp.MouseEvent("mouseMoved", railBox.X, railBox.Y).Do(ctx)
+		}),
+		chromedp.Evaluate(`(function(){var s=getComputedStyle(document.querySelector('.rev-rail-item'));return s.outlineStyle+' '+s.cursor;})()`, &railHover),
 	); err != nil {
 		t.Fatalf("rail interaction failed: %v", err)
 	}
 	if noteAfterRailClick {
-		t.Fatal("clicking a comments-rail row must not open a note on the row itself")
+		t.Fatal("a rail-row click must leave no note open — neither the one already open nor a new one on the row")
 	}
 	if !railFlashed {
 		t.Fatal("the rail click never reached the row's own scroll-to handler — either something covered the row (vacuous) or review mode swallowed the click")
+	}
+	if railHover != "none pointer" {
+		t.Fatalf("a hovered rail row must not look like a mark-up target (want no outline, pointer cursor), got %q", railHover)
 	}
 }
 
@@ -514,10 +562,15 @@ func TestBrowser_ReviewModeSurvivesLiveReload(t *testing.T) {
 
 // TestBrowser_ReviewKeysWorkOnAuthoredPlan proves the keyboard entry and exit on
 // an AUTHORED HTML plan — the page kind that carries no scaffold and therefore
-// no scaffold key map, only the injected chrome. Asserts the page really is the
-// authored one (no scaffold nav) so a scaffold fallback could not pass it.
+// no scaffold key map, only the injected chrome — and that Esc shares the key
+// with the page's own Esc handling one layer per press: the page's open
+// inspector closes first, the next Esc leaves review mode without also reaching
+// the page, and an Esc review mode has no use for still reaches the page.
+// Asserts the page really is the authored one (no scaffold nav) so a scaffold
+// fallback could not pass it.
 // Failure prevented: `r`/Esc work on markdown plans and silently do nothing on
-// the authored pages the plan skill steers coworkers toward.
+// the authored pages the plan skill steers coworkers toward — or one Esc closes
+// the page's inspector AND drops the reviewer out of review mode.
 func TestBrowser_ReviewKeysWorkOnAuthoredPlan(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: launches a real headless Chrome")
@@ -538,8 +591,11 @@ func TestBrowser_ReviewKeysWorkOnAuthoredPlan(t *testing.T) {
 	t.Cleanup(cancelTimeout)
 
 	const inMode = `document.body.classList.contains('rev-on')`
-	var authored, onAfterKey, onAfterEsc bool
+	const inspectorOpen = `!document.getElementById('inspector').hidden`
+	const pageEsc = `+(document.body.dataset.pageEsc||0)`
+	var authored, onAfterKey, noteAfterEsc0, onAfterEsc0, inspectorAfterEsc1, onAfterEsc1, onAfterEsc2 bool
 	var labelOn string
+	var pageEscAfterEsc0, pageEscAfterEsc2, pageEscAfterEsc3 int
 
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(base+"/"),
@@ -548,8 +604,6 @@ func TestBrowser_ReviewKeysWorkOnAuthoredPlan(t *testing.T) {
 		chromedp.KeyEvent("r"),
 		chromedp.Evaluate(inMode, &onAfterKey),
 		chromedp.Text(".rev-toggle", &labelOn, chromedp.ByQuery),
-		chromedp.KeyEvent(kb.Escape),
-		chromedp.Evaluate(inMode, &onAfterEsc),
 	); err != nil {
 		t.Fatalf("authored-plan key interaction failed: %v", err)
 	}
@@ -559,8 +613,55 @@ func TestBrowser_ReviewKeysWorkOnAuthoredPlan(t *testing.T) {
 	if !onAfterKey || strings.TrimSpace(labelOn) != "Exit review" {
 		t.Fatalf("r must enter review mode on an authored plan: on=%v label=%q", onAfterKey, labelOn)
 	}
-	if onAfterEsc {
+
+	// Esc #0 closes an open note and is marked handled: the page never sees it.
+	// (The authored-page selector targets the paragraph, not the section.)
+	if err := chromedp.Run(ctx,
+		chromedp.Click("section#risks p", chromedp.ByQuery),
+		chromedp.WaitVisible(".rev-pop .rev-note", chromedp.ByQuery),
+		chromedp.KeyEvent(kb.Escape),
+		chromedp.Evaluate(`!!document.querySelector('.rev-pop')`, &noteAfterEsc0),
+		chromedp.Evaluate(inMode, &onAfterEsc0),
+		chromedp.Evaluate(pageEsc, &pageEscAfterEsc0),
+	); err != nil {
+		t.Fatalf("authored-plan note Esc interaction failed: %v", err)
+	}
+	if noteAfterEsc0 || !onAfterEsc0 {
+		t.Fatalf("Esc must close the open note and keep review mode: note=%v on=%v", noteAfterEsc0, onAfterEsc0)
+	}
+	if pageEscAfterEsc0 != 0 {
+		t.Fatalf("the Esc that closed the note must be marked handled, not also reach the page: page saw %d", pageEscAfterEsc0)
+	}
+
+	// The reader has the page's own inspector open while reviewing. Esc #1 is the
+	// page's: its inspector closes and review mode stays. Esc #2 leaves review
+	// mode and is marked handled, so the page does not also act on it. Esc #3 has
+	// no review layer left to close, so it reaches the page.
+	var ignored any
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`document.getElementById('inspector').hidden=false`, &ignored),
+		chromedp.KeyEvent(kb.Escape),
+		chromedp.Evaluate(inspectorOpen, &inspectorAfterEsc1),
+		chromedp.Evaluate(inMode, &onAfterEsc1),
+		chromedp.KeyEvent(kb.Escape),
+		chromedp.Evaluate(inMode, &onAfterEsc2),
+		chromedp.Evaluate(pageEsc, &pageEscAfterEsc2),
+		chromedp.KeyEvent(kb.Escape),
+		chromedp.Evaluate(pageEsc, &pageEscAfterEsc3),
+	); err != nil {
+		t.Fatalf("authored-plan Esc interaction failed: %v", err)
+	}
+	if inspectorAfterEsc1 || !onAfterEsc1 {
+		t.Fatalf("an Esc the page used to close its inspector must not also leave review mode: inspector=%v on=%v", inspectorAfterEsc1, onAfterEsc1)
+	}
+	if onAfterEsc2 {
 		t.Fatal("Esc must leave review mode on an authored plan")
+	}
+	if pageEscAfterEsc2 != 0 {
+		t.Fatalf("the Esc that left review mode must be marked handled, not also reach the page: page saw %d", pageEscAfterEsc2)
+	}
+	if pageEscAfterEsc3 != 1 {
+		t.Fatalf("an Esc review mode has no use for must still reach the page: page saw %d", pageEscAfterEsc3)
 	}
 }
 
