@@ -42,8 +42,11 @@ var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
 	Args:  cobra.NoArgs,
 	Short: "Upgrade ox to the latest version",
-	Long:  "Detect how ox was installed and upgrade using the appropriate method: Homebrew, go install, or an in-place download that verifies and replaces the binary.",
-	RunE:  runUpgrade,
+	Long: `Detect how ox was installed and upgrade using the appropriate method: Homebrew, go install, or an in-place download that verifies and replaces the binary.
+
+Failed update checks and installations exit with status 1. With --json,
+stdout contains only the result; installer logs are written to stderr.`,
+	RunE: runUpgrade,
 }
 
 func init() {
@@ -59,26 +62,38 @@ func init() {
 func runUpgrade(cmd *cobra.Command, _ []string) error {
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 	method := detectInstallMethod()
-
-	// check if update is available
-	vResult := checkVersionFromCache()
-
-	if vResult == nil {
-		// no cache — try a live check
-		latestTag, err := getLatestGitHubRelease()
-		if err == nil {
-			writeVersionCacheFromDoctor(latestTag)
-			vResult = checkVersionFromCache()
-		}
-	}
-
 	result := upgradeResult{
 		PreviousVersion: version.Version,
 		InstallMethod:   method,
 	}
 
-	// treat "no cache" and "already current" the same
-	if vResult == nil || !vResult.UpdateAvailable {
+	// check if update is available
+	vResult := checkVersionFromCache()
+
+	if vResult == nil {
+		// No cached update is available; check the current release directly.
+		latestTag, err := latestReleaseFetcher()
+		if err == nil && strings.TrimPrefix(latestTag, "v") == "" {
+			err = errors.New("GitHub returned an empty release tag")
+		}
+		if err != nil {
+			result.Status = "failed"
+			result.Message = fmt.Sprintf("could not check for updates: %v", err)
+			return outputUpgradeResult(cmd, result, jsonOutput)
+		}
+
+		latest := strings.TrimPrefix(latestTag, "v")
+		current := strings.TrimPrefix(version.Version, "v")
+		vResult = &versionCheckResult{
+			UpdateAvailable: isNewerVersion(latest, current),
+			LatestVersion:   latest,
+			CurrentVersion:  current,
+		}
+		// Caching is best effort; the live result must survive a cache write failure.
+		writeVersionCacheFromDoctor(latestTag)
+	}
+
+	if !vResult.UpdateAvailable {
 		result.Status = "up-to-date"
 		result.Message = fmt.Sprintf("ox v%s is already the latest version", version.Version)
 		return outputUpgradeResult(cmd, result, jsonOutput)
@@ -158,31 +173,36 @@ func outputUpgradeResult(cmd *cobra.Command, result upgradeResult, jsonOutput bo
 	if jsonOutput {
 		encoder := json.NewEncoder(cmd.OutOrStdout())
 		encoder.SetIndent("", "  ")
-		return encoder.Encode(result)
-	}
-
-	switch result.Status {
-	case "up-to-date":
-		fmt.Printf("%s %s\n",
-			cli.StyleSuccess.Render("✓"),
-			result.Message)
-	case "upgraded":
-		fmt.Printf("\n%s %s\n", cli.StyleSuccess.Render("✓"), result.Message)
-		fmt.Printf("%s %s\n", cli.StyleDim.Render("Release notes:"), result.ReleaseURL)
-		if result.DaemonsStopped > 0 {
-			fmt.Printf("%s %s\n", cli.StyleDim.Render("Daemons:"),
-				"stopped so they restart on the new version (they respawn on demand)")
+		if err := encoder.Encode(result); err != nil {
+			return err
 		}
-		fmt.Printf("%s %s\n", cli.StyleDim.Render("Tip:"), "Restart your terminal to pick up the new binary in this shell")
-	case "manual":
-		fmt.Printf("\n%s\n", result.Message)
-		if result.ReleaseURL != "" {
+	} else {
+		switch result.Status {
+		case "up-to-date":
+			fmt.Printf("%s %s\n",
+				cli.StyleSuccess.Render("✓"),
+				result.Message)
+		case "upgraded":
+			fmt.Printf("\n%s %s\n", cli.StyleSuccess.Render("✓"), result.Message)
 			fmt.Printf("%s %s\n", cli.StyleDim.Render("Release notes:"), result.ReleaseURL)
+			if result.DaemonsStopped > 0 {
+				fmt.Printf("%s %s\n", cli.StyleDim.Render("Daemons:"),
+					"stopped so they restart on the new version (they respawn on demand)")
+			}
+			fmt.Printf("%s %s\n", cli.StyleDim.Render("Tip:"), "Restart your terminal to pick up the new binary in this shell")
+		case "manual":
+			fmt.Printf("\n%s\n", result.Message)
+			if result.ReleaseURL != "" {
+				fmt.Printf("%s %s\n", cli.StyleDim.Render("Release notes:"), result.ReleaseURL)
+			}
+		case "failed":
+			fmt.Fprintf(cmd.ErrOrStderr(), "\n%s %s\n", cli.StyleWarning.Render("✗"), result.Message)
 		}
-	case "failed":
-		fmt.Printf("\n%s %s\n", cli.StyleWarning.Render("✗"), result.Message)
 	}
 
+	if result.Status == "failed" {
+		return &commandExitError{ExitCode: 1, Message: result.Message}
+	}
 	return nil
 }
 
@@ -216,6 +236,9 @@ func upgradeViaHomebrew(quiet bool) error {
 	}
 	cmd := exec.Command("brew", "upgrade", "sageox/tap/ox")
 	cmd.Stdout = os.Stdout
+	if quiet {
+		cmd.Stdout = os.Stderr
+	}
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
@@ -282,6 +305,9 @@ func upgradeViaGoInstallWithTarget(quiet bool, targetFlag string) error {
 	}
 	cmd := exec.Command("go", args...)
 	cmd.Stdout = os.Stdout
+	if quiet {
+		cmd.Stdout = os.Stderr
+	}
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }

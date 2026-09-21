@@ -3,10 +3,17 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDetectInstallMethod_DevBuild(t *testing.T) {
@@ -40,6 +47,67 @@ func TestOutputUpgradeResultJSONIncludesPostUpgradeMaintenance(t *testing.T) {
 	}
 	if got.DaemonsStopped != 2 {
 		t.Fatalf("daemons_stopped = %d, want 2", got.DaemonsStopped)
+	}
+}
+
+// Installer logs must remain visible without corrupting JSON stdout, even on failure.
+func TestUpgradeInstallerOutputStreams(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: runs package-manager subprocesses")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("fake installers use POSIX shell scripts; PATH isolation requires executable scripts")
+	}
+
+	for _, installer := range []struct {
+		name string
+		run  func(bool) error
+	}{
+		{"brew", upgradeViaHomebrew},
+		{"go", func(quiet bool) error { return upgradeViaGoInstallWithTarget(quiet, "v0.99.0") }},
+	} {
+		for _, mode := range []struct {
+			name  string
+			quiet bool
+		}{
+			{"human", false},
+			{"json", true},
+		} {
+			for _, exitCode := range []int{0, 37} {
+				t.Run(fmt.Sprintf("%s/%s/exit_%d", installer.name, mode.name, exitCode), func(t *testing.T) {
+					binDir := t.TempDir()
+					fakePath := filepath.Join(binDir, installer.name)
+					script := fmt.Sprintf("#!/bin/sh\nprintf 'installer stdout\\n'\nprintf 'installer stderr\\n' >&2\nexit %d\n", exitCode)
+					require.NoError(t, os.WriteFile(fakePath, []byte(script), 0o755))
+					t.Setenv("PATH", binDir)
+					resolved, err := exec.LookPath(installer.name)
+					require.NoError(t, err)
+					require.Equal(t, fakePath, resolved, "must never invoke a real package manager")
+
+					var runErr error
+					var stderr string
+					stdout := captureStdoutForPlanCLI(t, func() {
+						stderr = captureStderr(t, func() { runErr = installer.run(mode.quiet) })
+					})
+					if exitCode == 0 {
+						require.NoError(t, runErr)
+					} else {
+						var exitErr *exec.ExitError
+						require.ErrorAs(t, runErr, &exitErr)
+						assert.Equal(t, exitCode, exitErr.ExitCode())
+					}
+					if mode.quiet {
+						assert.Empty(t, stdout, "installer logs must not contaminate JSON stdout")
+						assert.Contains(t, stderr, "installer stdout\n")
+						assert.Contains(t, stderr, "installer stderr\n")
+					} else {
+						assert.Contains(t, stdout, "Running:")
+						assert.Contains(t, stdout, "installer stdout\n")
+						assert.Equal(t, "installer stderr\n", stderr)
+					}
+				})
+			}
+		}
 	}
 }
 

@@ -2,13 +2,22 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/testguard"
+	"github.com/sageox/ox/internal/updatenotice"
+	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // captureUpgradeOutput redirects os.Stdout as well as the cobra writer.
@@ -87,5 +96,149 @@ func TestOutputUpgradeResult_ManualPathStillTellsTheUserWhatToDo(t *testing.T) {
 
 	if !strings.Contains(out, "brew upgrade") {
 		t.Errorf("manual path did not surface the instruction:\n%s", out)
+	}
+}
+
+// Failed upgrades must fail the command after rendering exactly one diagnostic.
+func TestUpgradeFailureOutput(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		name := "text"
+		if jsonOutput {
+			name = "json"
+		}
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			result := upgradeResult{Status: "failed", Message: "installer failed"}
+			err := outputUpgradeResult(cmd, result, jsonOutput)
+			var exit *commandExitError
+			require.ErrorAs(t, err, &exit)
+			assert.Equal(t, 1, exit.ExitCode)
+			if jsonOutput {
+				var got upgradeResult
+				require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+				assert.Equal(t, result, got)
+				assert.Empty(t, stderr.String())
+			} else {
+				assert.Empty(t, stdout.String())
+				assert.Equal(t, 1, strings.Count(stderr.String(), result.Message))
+			}
+		})
+	}
+	t.Run("JSON write failure", func(t *testing.T) {
+		cmd := &cobra.Command{}
+		cmd.SetOut(failingWriter{})
+		err := outputUpgradeResult(cmd, upgradeResult{Status: "failed", Message: "installer failed"}, true)
+		require.ErrorContains(t, err, "write failed")
+		var exit *commandExitError
+		assert.False(t, errors.As(err, &exit), "an unwritten result must not suppress the output error")
+	})
+}
+
+// A failed lookup or cache write must never turn an unknown/newer version into
+// an "already latest" claim. Successful lookups and cached updates still work.
+func TestUpgradeVersionCheckOutcome(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		cached     string
+		latest     string
+		fetchError bool
+		blockCache bool
+		wantStatus string
+		wantNew    string
+		wantFetch  bool
+	}{
+		{name: "lookup unavailable", fetchError: true, wantStatus: "failed", wantFetch: true},
+		{name: "lookup unavailable with current cache", cached: version.Version, fetchError: true, wantStatus: "failed", wantFetch: true},
+		{name: "missing release tag", wantStatus: "failed", wantFetch: true},
+		{name: "empty version after prefix", latest: "v", wantStatus: "failed", wantFetch: true},
+		{name: "already current", latest: "v" + strings.TrimPrefix(version.Version, "v"), wantStatus: "up-to-date", wantFetch: true},
+		{name: "running newer than release", latest: "v0.0.1", wantStatus: "up-to-date", wantFetch: true},
+		{name: "new release", latest: "v99.0.0", wantStatus: "manual", wantNew: "99.0.0", wantFetch: true},
+		{name: "new release with unwritable cache", latest: "v99.0.0", blockCache: true, wantStatus: "manual", wantNew: "99.0.0", wantFetch: true},
+		{name: "cached update", cached: "v99.0.0", wantStatus: "manual", wantNew: "99.0.0"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			useTestCacheDir(t)
+			if tt.cached != "" {
+				writeTestVersionCache(t, &versionCacheData{LatestVersion: tt.cached, CheckedAt: time.Now()})
+			}
+			if tt.blockCache {
+				updatenotice.Path = t.TempDir() // a directory cannot be overwritten as a cache file
+			}
+			oldFetcher := latestReleaseFetcher
+			fetched := false
+			latestReleaseFetcher = func() (string, error) {
+				fetched = true
+				if tt.fetchError {
+					return "", errors.New("release lookup unavailable")
+				}
+				return tt.latest, nil
+			}
+			t.Cleanup(func() { latestReleaseFetcher = oldFetcher })
+
+			var stdout bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("json", true, "")
+			cmd.Flags().String("target", "", "")
+			cmd.SetOut(&stdout)
+			err := runUpgrade(cmd, nil)
+			if tt.wantStatus == "failed" {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			var got upgradeResult
+			require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+			assert.Equal(t, tt.wantStatus, got.Status)
+			assert.Equal(t, tt.wantNew, got.NewVersion)
+			assert.Equal(t, tt.wantFetch, fetched)
+			if tt.fetchError {
+				assert.Contains(t, got.Message, "release lookup unavailable")
+			}
+		})
+	}
+}
+
+// Exercise main's exit handling: an offline update check must fail in both
+// output modes without reporting that an unchecked version is current.
+func TestUpgradeCLI(t *testing.T) {
+	skipIntegration(t)
+	oxBin := testguard.BuildOxBinary(t, repoPath("..", ".."))
+	for _, jsonOutput := range []bool{false, true} {
+		name := "text"
+		if jsonOutput {
+			name = "json"
+		}
+		t.Run(name, func(t *testing.T) {
+			env := noInputCLIEnv(t) // empty cache and an unreachable proxy, never a real install
+			args := []string{"upgrade"}
+			if jsonOutput {
+				args = append(args, "--json")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := testguard.OxCmdContext(t, ctx, oxBin, t.TempDir(), env, args...)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			require.NoError(t, ctx.Err(), "stdout=%s stderr=%s", stdout.String(), stderr.String())
+			var exit *exec.ExitError
+			require.ErrorAs(t, err, &exit, "stdout=%s stderr=%s", stdout.String(), stderr.String())
+			assert.Equal(t, 1, exit.ExitCode())
+			if jsonOutput {
+				var got upgradeResult
+				require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+				assert.Equal(t, "failed", got.Status)
+				assert.Contains(t, got.Message, "check for updates")
+				assert.NotContains(t, stderr.String(), "check for updates", "the error should appear only in the JSON result")
+			} else {
+				assert.Empty(t, stdout.String())
+				assert.Equal(t, 1, strings.Count(stderr.String(), "check for updates"))
+			}
+		})
 	}
 }

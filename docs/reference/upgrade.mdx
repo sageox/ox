@@ -12,6 +12,9 @@ Upgrade ox to the latest version
 
 Detect how ox was installed and upgrade using the appropriate method: Homebrew, go install, or an in-place download that verifies and replaces the binary.
 
+Failed update checks and installations exit with status 1. With --json,
+stdout contains only the result; installer logs are written to stderr.
+
 ```
 ox upgrade [flags]
 ```
