@@ -31,3 +31,23 @@ func TestSelectRejectsUnknownFormat(t *testing.T) {
 	_, err := Select(adapterprotocol.SkillTarget{Format: "unknown"})
 	require.ErrorContains(t, err, "unsupported rule target format")
 }
+
+func TestDigestAndLegacyDescriptionsAreStableAndDefensive(t *testing.T) {
+	t.Parallel()
+	digest, err := Digest()
+	require.NoError(t, err)
+	require.Len(t, digest, 64)
+	require.Equal(t, digest, mustDigest(t))
+
+	descriptions := LegacyDescriptions()
+	require.Equal(t, []string{PrimaryDescription, TeamContextDescription}, descriptions)
+	descriptions[0] = "mutated by caller"
+	require.Equal(t, PrimaryDescription, LegacyDescriptions()[0])
+}
+
+func mustDigest(t *testing.T) string {
+	t.Helper()
+	digest, err := Digest()
+	require.NoError(t, err)
+	return digest
+}

@@ -64,3 +64,35 @@ func TestFilesystemDiscovery_ProducesTypedSnapshotInventory(t *testing.T) {
 	require.Equal(t, "always", byKey["rule/security"].Visibility)
 	require.Equal(t, "docs/architecture.md", byKey["context/architecture.md"].SourcePath)
 }
+
+func TestFilesystemDiscovery_ReportsEachBoundaryFailure(t *testing.T) {
+	discovery := FilesystemDiscovery{}
+	_, _, err := discovery.Discover(context.Background(), Request{})
+	require.ErrorContains(t, err, "path is required")
+
+	_, _, err = discovery.Discover(context.Background(), Request{TeamPath: t.TempDir()})
+	require.ErrorContains(t, err, "resolve Team Context commit")
+
+	t.Run("skills", func(t *testing.T) {
+		team := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(team, "agents"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(team, "agents", "skills"), []byte("not a directory"), 0o644))
+		_, _, err := discovery.Discover(context.Background(), Request{TeamPath: team, TeamCommit: "abc"})
+		require.ErrorContains(t, err, "discover Team Context skills")
+	})
+
+	t.Run("rules", func(t *testing.T) {
+		team := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(team, "agents"), 0o755))
+		require.NoError(t, os.Symlink("rules", filepath.Join(team, "agents", "rules")))
+		_, _, err := discovery.Discover(context.Background(), Request{TeamPath: team, TeamCommit: "abc"})
+		require.ErrorContains(t, err, "discover Team Context rules")
+	})
+
+	t.Run("docs", func(t *testing.T) {
+		team := t.TempDir()
+		require.NoError(t, os.Symlink("docs", filepath.Join(team, "docs")))
+		_, _, err := discovery.Discover(context.Background(), Request{TeamPath: team, TeamCommit: "abc"})
+		require.ErrorContains(t, err, "discover Team Context docs")
+	})
+}

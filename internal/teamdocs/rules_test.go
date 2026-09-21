@@ -535,6 +535,33 @@ func TestPublishedRules_KeepsRepoScopedRules(t *testing.T) {
 	}
 }
 
+func TestAnyRuleRootOnDisk_DistinguishesSparseParents(t *testing.T) {
+	team := t.TempDir()
+	if AnyRuleRootOnDisk(team) {
+		t.Fatal("an empty sparse checkout was treated as authoritative")
+	}
+	if err := os.MkdirAll(filepath.Join(team, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !AnyRuleRootOnDisk(team) {
+		t.Fatal("a materialized canonical parent was not detected")
+	}
+}
+
+func TestReadRuleBody_PublicWrapper(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rule.md")
+	if err := os.WriteFile(path, []byte("---\nname: test\n---\n\nBody.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body, err := ReadRuleBody(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "Body.\n" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
 // TestDiscoverRules_PropagatesDiscoveryError: a rules root that cannot be read
 // is an error, never an empty list. Prime silently applying zero team rules
 // because a directory was unreadable is the failure mode nobody notices.

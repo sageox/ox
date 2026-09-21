@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamdocs"
@@ -295,4 +296,119 @@ func TestRuleHandler_RetainsProjectionWhenSparseRulesAreBlind(t *testing.T) {
 	}, Snapshot{Path: team}, nil)
 	require.ErrorContains(t, err, "not materialized")
 	require.FileExists(t, native, "a blind sparse checkout was mistaken for authoritative retirement")
+}
+
+func TestDiscoveryHandler_DistinguishesInlineRulesFromIndexedArtifacts(t *testing.T) {
+	handler := NewDiscoveryHandler(KindRule)
+	require.Equal(t, KindRule, handler.Kind())
+	outcomes, err := handler.Converge(context.Background(), Request{}, Snapshot{Commit: "abc"}, []Artifact{
+		{Kind: KindRule, Name: "always", Visibility: teamdocs.VisibilityAlways},
+		{Kind: KindRule, Name: "indexed", Visibility: teamdocs.VisibilityIndexed},
+	})
+	require.NoError(t, err)
+	require.Len(t, outcomes, 2)
+	require.Equal(t, "prime-inline", outcomes[0].Delivery)
+	require.Contains(t, outcomes[0].Detail, "next session boundary")
+	require.Equal(t, "prime-index", outcomes[1].Delivery)
+}
+
+func TestSkillHandler_ConfigurationAndModeBoundaries(t *testing.T) {
+	handler := SkillHandler{}
+	require.Equal(t, KindSkill, handler.Kind())
+	artifact := Artifact{Kind: KindSkill, Name: "deploy", Applicable: true}
+
+	t.Run("repository without team context", func(t *testing.T) {
+		_, err := handler.Converge(context.Background(), Request{
+			ProjectRoot: t.TempDir(), Mode: ModeExplicit,
+		}, Snapshot{Path: t.TempDir()}, []Artifact{artifact})
+		require.ErrorContains(t, err, "no Team Context")
+	})
+
+	t.Run("snapshot must match configured team context", func(t *testing.T) {
+		project, configured := t.TempDir(), t.TempDir()
+		wireHandlerTeamContext(t, project, configured)
+		_, err := handler.Converge(context.Background(), Request{
+			ProjectRoot: project, Mode: ModeExplicit,
+		}, Snapshot{Path: t.TempDir()}, []Artifact{artifact})
+		require.ErrorContains(t, err, "does not match snapshot")
+	})
+
+	t.Run("repository without native target is reported unsupported", func(t *testing.T) {
+		project, team := t.TempDir(), t.TempDir()
+		wireHandlerTeamContext(t, project, team)
+		outcomes, err := handler.Converge(context.Background(), Request{
+			ProjectRoot: project, Mode: ModeExplicit,
+		}, Snapshot{Path: team}, []Artifact{artifact})
+		require.NoError(t, err)
+		require.Len(t, outcomes, 1)
+		require.Equal(t, StateUnsupported, outcomes[0].State)
+		require.Contains(t, outcomes[0].Detail, "ox init")
+	})
+
+	t.Run("inspect mode cannot mutate selected targets", func(t *testing.T) {
+		project, team := t.TempDir(), t.TempDir()
+		wireHandlerTeamContext(t, project, team)
+		targets, err := skillmanager.CanonicalizeTargets(project, []adapterprotocol.SkillTarget{{
+			Key: "shared", Root: ".agents/skills", Format: adapterprotocol.SkillFormatAgentSkillsV1,
+			Scope: adapterprotocol.SkillScopeProject, LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}})
+		require.NoError(t, err)
+		_, err = skillmanager.Reconcile(project, version.Version, skillmanager.DefaultDesired(targets), targets)
+		require.NoError(t, err)
+		_, err = handler.Converge(context.Background(), Request{
+			ProjectRoot: project, Mode: ModeInspect,
+		}, Snapshot{Path: team}, []Artifact{artifact})
+		require.ErrorContains(t, err, "inspect mode")
+	})
+}
+
+func TestRuleHandler_EmptyInspectAndPrimeFallbackPaths(t *testing.T) {
+	handler := RuleHandler{}
+	require.Equal(t, KindRule, handler.Kind())
+
+	outcomes, err := handler.Converge(context.Background(), Request{
+		ProjectRoot: t.TempDir(), Mode: ModeExplicit,
+	}, Snapshot{Path: t.TempDir()}, nil)
+	require.NoError(t, err)
+	require.Empty(t, outcomes)
+
+	artifact := Artifact{
+		Kind: KindRule, Name: "security", Applicable: true,
+		Visibility: teamdocs.VisibilityAlways,
+	}
+	_, err = handler.Converge(context.Background(), Request{
+		ProjectRoot: t.TempDir(), Mode: ModeInspect,
+	}, Snapshot{Path: t.TempDir()}, []Artifact{artifact})
+	require.ErrorContains(t, err, "inspect mode")
+
+	outcomes, err = handler.Converge(context.Background(), Request{
+		ProjectRoot: t.TempDir(), Mode: ModeExplicit,
+	}, Snapshot{Path: t.TempDir()}, []Artifact{artifact})
+	require.NoError(t, err)
+	require.Len(t, outcomes, 1)
+	require.Equal(t, StatePending, outcomes[0].State)
+	require.Contains(t, outcomes[0].Detail, "no rules directory")
+
+	project, team := t.TempDir(), t.TempDir()
+	writeTeamFile(t, team, "agents/rules/security.md", "---\nname: security\ndescription: Secure defaults\nvisibility: always\n---\n\nNever log secrets.\n")
+	outcomes, err = handler.Converge(context.Background(), Request{
+		ProjectRoot: project, Mode: ModeExplicit,
+	}, Snapshot{Path: team}, []Artifact{artifact})
+	require.NoError(t, err)
+	require.Len(t, outcomes, 1)
+	require.Equal(t, StateIndexed, outcomes[0].State)
+	require.Equal(t, "prime-inline", outcomes[0].Delivery)
+	require.Contains(t, outcomes[0].Detail, "next session boundary")
+}
+
+func wireHandlerTeamContext(t *testing.T, project, team string) {
+	t.Helper()
+	require.NoError(t, config.SaveProjectConfig(project, &config.ProjectConfig{
+		ProjectID: "proj_handler", RepoID: "repo_handler", TeamID: "team_handler", TeamName: "Handler Team",
+	}))
+	require.NoError(t, config.SaveLocalConfig(project, &config.LocalConfig{
+		TeamContexts: []config.TeamContext{{
+			TeamID: "team_handler", TeamName: "Handler Team", Slug: "handler-team", Path: team,
+		}},
+	}))
 }

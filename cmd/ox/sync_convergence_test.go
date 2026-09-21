@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -105,6 +106,43 @@ func TestExecuteSyncConvergence_ClearsPendingOnlyAfterVerifiedSuccess(t *testing
 	require.Nil(t, pending)
 }
 
+func TestExecuteSyncConvergence_ReportsPersistenceFailures(t *testing.T) {
+	team := config.TeamContext{TeamID: "team_acme", Path: "/team"}
+	projectFile := filepath.Join(t.TempDir(), "project-file")
+	require.NoError(t, os.WriteFile(projectFile, []byte("not a directory"), 0o600))
+
+	t.Run("retry state", func(t *testing.T) {
+		result, err := executeSyncConvergence(context.Background(), stubSyncConverger{
+			err: errors.New("busy"),
+		}, projectFile, team, RepositoryConvergenceSyncResult{}, teamconverge.ModeExplicit)
+		require.ErrorContains(t, err, "persist retry state")
+		require.Equal(t, "failed", result.Status)
+		require.NotNil(t, result.Report)
+		require.Equal(t, team.Path, result.Report.Snapshot.Path)
+	})
+
+	t.Run("failed outcome state", func(t *testing.T) {
+		report := teamconverge.Report{Outcomes: []teamconverge.Outcome{{
+			Kind: teamconverge.KindTool, Name: "deploy", State: teamconverge.StateUnsupported, Required: true,
+		}}}
+		result, err := executeSyncConvergence(context.Background(), stubSyncConverger{report: report},
+			projectFile, team, RepositoryConvergenceSyncResult{}, teamconverge.ModeExplicit)
+		require.ErrorContains(t, err, "persist retry state")
+		require.Equal(t, "failed", result.Status)
+	})
+
+	t.Run("completed state cannot be cleared", func(t *testing.T) {
+		project := t.TempDir()
+		pendingPath := teamconverge.PendingPath(project)
+		require.NoError(t, os.MkdirAll(pendingPath, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(pendingPath, "child"), []byte("x"), 0o600))
+		result, err := executeSyncConvergence(context.Background(), stubSyncConverger{}, project,
+			team, RepositoryConvergenceSyncResult{}, teamconverge.ModeExplicit)
+		require.ErrorContains(t, err, "clear completed convergence state")
+		require.Equal(t, "failed", result.Status)
+	})
+}
+
 func TestSyncResult_SeparatesTransportAndConvergence(t *testing.T) {
 	result := SyncResult{
 		SchemaVersion: syncResultSchemaVersion,
@@ -153,6 +191,81 @@ func TestFindTeamTransport_MatchesOwningTeamByPath(t *testing.T) {
 	got := findTeamTransport(results, config.TeamContext{TeamID: "team_acme", Path: "/contexts/team_acme"})
 	require.NotNil(t, got)
 	require.Equal(t, "synced", got.Status)
+}
+
+func TestFindTeamTransport_FallsBackToTeamIDAndReportsMisses(t *testing.T) {
+	results := []TeamContextSyncResult{{TeamID: "team_acme", Status: "skipped"}}
+	got := findTeamTransport(results, config.TeamContext{TeamID: "team_acme", Path: "/different/path"})
+	require.NotNil(t, got)
+	require.Equal(t, "skipped", got.Status)
+	require.Nil(t, findTeamTransport(results, config.TeamContext{TeamID: "team_other"}))
+}
+
+func TestRunSyncConvergence_RepositoryAndTransportBoundaries(t *testing.T) {
+	t.Run("outside initialized repository", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		result := SyncResult{}
+		require.NoError(t, runSyncConvergence(context.Background(), "", &result))
+		require.Equal(t, "skipped", result.Convergence.Status)
+		require.Contains(t, result.Convergence.Detail, "not inside")
+	})
+
+	t.Run("initialized repository without team context", func(t *testing.T) {
+		repo := t.TempDir()
+		gitInitRepo(t, repo)
+		require.NoError(t, config.SaveProjectConfig(repo, &config.ProjectConfig{
+			ProjectID: "proj_no_team", RepoID: "repo_no_team",
+		}))
+		t.Chdir(repo)
+		result := SyncResult{}
+		require.NoError(t, runSyncConvergence(context.Background(), "", &result))
+		require.Equal(t, "skipped", result.Convergence.Status)
+		require.Contains(t, result.Convergence.Detail, "no local Team Context")
+	})
+
+	t.Run("targeted sync for another team", func(t *testing.T) {
+		repo, _ := stageTeamPublishRepo(t)
+		t.Chdir(repo)
+		result := SyncResult{}
+		require.NoError(t, runSyncConvergence(context.Background(), "team_other", &result))
+		require.Equal(t, "skipped", result.Convergence.Status)
+		require.Contains(t, result.Convergence.Detail, "does not own")
+	})
+
+	t.Run("default sync requires owning transport result", func(t *testing.T) {
+		repo, _ := stageTeamPublishRepo(t)
+		t.Chdir(repo)
+		result := SyncResult{}
+		err := runSyncConvergence(context.Background(), "", &result)
+		require.ErrorContains(t, err, "not reported by transport")
+		require.Equal(t, "failed", result.Convergence.Status)
+		require.Len(t, result.Convergence.Repositories, 1)
+		require.Equal(t, "failed", result.Convergence.Repositories[0].Status)
+	})
+
+	t.Run("non-ready owning transport blocks projection", func(t *testing.T) {
+		repo, team := stageTeamPublishRepo(t)
+		t.Chdir(repo)
+		result := SyncResult{Transport: SyncTransportResult{TeamContexts: []TeamContextSyncResult{{
+			TeamID: "team_publish_test", Path: team, Status: "cloning",
+		}}}}
+		err := runSyncConvergence(context.Background(), "", &result)
+		require.ErrorContains(t, err, "transport is cloning")
+		require.Equal(t, "failed", result.Convergence.Status)
+	})
+
+	t.Run("ready owning transport converges", func(t *testing.T) {
+		repo, team := stageTeamPublishRepo(t)
+		t.Chdir(repo)
+		result := SyncResult{Transport: SyncTransportResult{TeamContexts: []TeamContextSyncResult{{
+			TeamID: "team_publish_test", TeamName: "Publish Test Team", Path: team, Status: "synced",
+		}}}}
+		require.NoError(t, runSyncConvergence(context.Background(), "", &result))
+		require.Equal(t, "converged", result.Convergence.Status)
+		require.Len(t, result.Convergence.Repositories, 1)
+		require.Equal(t, "converged", result.Convergence.Repositories[0].Status)
+		require.Equal(t, team, result.Convergence.Repositories[0].TeamPath)
+	})
 }
 
 func TestSyncHelp_ExplainsAutomationAndPackBoundary(t *testing.T) {

@@ -65,6 +65,49 @@ func TestEnsureBlock_RepeatedCallsAreByteIdentical(t *testing.T) {
 	}
 }
 
+func TestEnsureBlockInRoot_WritesAndUpdatesRootRelativeFile(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	defer root.Close()
+
+	changed, created, err := EnsureBlockInRoot(root, ".gitignore", []string{"skills/ox-cli-*/"})
+	if err != nil {
+		t.Fatalf("create rooted block: %v", err)
+	}
+	if !changed || !created {
+		t.Fatalf("first rooted write = changed %v, created %v", changed, created)
+	}
+	changed, created, err = EnsureBlockInRoot(root, ".gitignore", oxEntries)
+	if err != nil {
+		t.Fatalf("update rooted block: %v", err)
+	}
+	if !changed || created {
+		t.Fatalf("rooted update = changed %v, created %v", changed, created)
+	}
+	got := read(t, filepath.Join(dir, ".gitignore"))
+	for _, entry := range oxEntries {
+		if !strings.Contains(got, entry) {
+			t.Errorf("rooted block is missing %q", entry)
+		}
+	}
+}
+
+func TestHasManagedBlock_RequiresTheExactManagedEntries(t *testing.T) {
+	content := []byte("# user rule\n" + renderBlock(oxEntries) + "build/\n")
+	if !HasManagedBlock(content, oxEntries) {
+		t.Fatal("exact managed block was not detected among user rules")
+	}
+	if HasManagedBlock(content, []string{"different/"}) {
+		t.Fatal("a block with different entries was accepted")
+	}
+	if HasManagedBlock([]byte("# no block\n"), oxEntries) {
+		t.Fatal("content without a managed block was accepted")
+	}
+}
+
 // TestEnsureBlock_NeverTouchesUserRules is the data-safety guarantee. Ordering in
 // a .gitignore is semantically significant (a later negation overrides an earlier
 // ignore), so reordering a user's rules can silently change which files git

@@ -7,7 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/agentx"
+	"github.com/sageox/ox/extensions/skills"
+	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/internal/version"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/stretchr/testify/require"
 )
@@ -177,6 +181,86 @@ func TestSkillsPublishCommand_ResolvesThroughRoot(t *testing.T) {
 	require.Empty(t, args)
 	require.Same(t, skillsPublishCmd, found)
 	require.True(t, found.Runnable())
+}
+
+func TestSkillsPublish_RequiresRepositoryAndSelectedSkillRoot(t *testing.T) {
+	chdirOutsideGit(t)
+	_, err := runSkillsChange(t, skillsPublishCmd, "local-skill")
+	require.ErrorContains(t, err, "not inside a git repository")
+
+	repo := t.TempDir()
+	gitInitRepo(t, repo)
+	ruleTarget := adapterprotocol.SkillTarget{
+		Key: "rules-only", Root: ".rules-only", Format: adapterprotocol.RuleFormatMarkdownV1,
+		Scope: adapterprotocol.SkillScopeProject, LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+	}
+	targets, err := skillmanager.CanonicalizeTargets(repo, []adapterprotocol.SkillTarget{ruleTarget})
+	require.NoError(t, err)
+	_, err = skillmanager.Reconcile(repo, version.Version,
+		skillmanager.AddTargets(skillmanager.DesiredSkills{}, targets...), targets)
+	require.NoError(t, err)
+	_, err = publishRepoSkillsToTeam(repo, []string{"local-skill"})
+	require.ErrorContains(t, err, "no skills directory")
+}
+
+func TestPublishSourceHelpers_RejectEscapesNonDirectoriesAndLinkedFiles(t *testing.T) {
+	repoPath := t.TempDir()
+	repo, err := os.OpenRoot(repoPath)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	_, err = openPublishSourceDir(repo, "../escape")
+	require.ErrorContains(t, err, "escapes repository")
+	require.NoError(t, os.WriteFile(filepath.Join(repoPath, "not-a-directory"), []byte("x"), 0o644))
+	_, err = openPublishSourceDir(repo, "not-a-directory/skill")
+	require.ErrorContains(t, err, "non-directory")
+
+	skillDir := filepath.Join(repoPath, "skill")
+	require.NoError(t, os.Mkdir(skillDir, 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(repoPath, "not-a-directory"), filepath.Join(skillDir, "linked.md")))
+	dir, err := os.OpenRoot(skillDir)
+	require.NoError(t, err)
+	defer dir.Close()
+	_, err = readPublishSourceFiles(dir)
+	require.ErrorContains(t, err, "symlink")
+}
+
+func TestPublishManifestValidation_CoversOwnershipAndShapeFailures(t *testing.T) {
+	valid := []byte("---\nname: release-check\ndescription: Verify a release.\n---\n")
+	managed := agentx.StampedContent(valid, version.Version, "ox")
+	for _, tc := range []struct {
+		name  string
+		files []skills.File
+		want  string
+	}{
+		{name: "missing manifest", files: []skills.File{{Path: "notes.md", Content: []byte("notes")}}, want: "no SKILL.md"},
+		{name: "managed manifest", files: []skills.File{{Path: skills.SkillFileName, Content: managed}}, want: "managed by ox"},
+		{name: "missing description", files: []skills.File{{Path: skills.SkillFileName, Content: []byte("---\nname: release-check\n---\n")}}, want: "no single-line description"},
+		{name: "folded description", files: []skills.File{{Path: skills.SkillFileName, Content: []byte("---\nname: release-check\ndescription: >-\n  folded\n---\n")}}, want: "multi-line YAML block"},
+		{name: "incomplete repos", files: []skills.File{{Path: skills.SkillFileName, Content: []byte("---\nname: release-check\ndescription: Verify.\nrepos: [\"acme/widget\"\n---\n")}}, want: "incomplete inline list"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.ErrorContains(t, validatePublishManifest("release-check", tc.files), tc.want)
+		})
+	}
+	require.NoError(t, validatePublishManifest("release-check", []skills.File{{Path: skills.SkillFileName, Content: valid}}))
+}
+
+func TestPublishManifestFieldAndSkillEqualityEdges(t *testing.T) {
+	value, present := publishManifestField([]byte("not frontmatter\nname: ignored\n"), "name")
+	require.False(t, present)
+	require.Empty(t, value)
+	value, present = publishManifestField([]byte("---\nname: 'release-check' # inline comment\n---\n"), "name")
+	require.True(t, present)
+	require.Equal(t, "release-check", value)
+	_, present = publishManifestField([]byte("---\ndescription: done\n---\nname: too-late\n"), "name")
+	require.False(t, present)
+
+	one := []skills.File{{Path: "SKILL.md", Content: []byte("same")}}
+	require.True(t, sameSkillFiles(one, append([]skills.File(nil), one...)))
+	require.False(t, sameSkillFiles(one, nil))
+	require.False(t, sameSkillFiles(one, []skills.File{{Path: "other.md", Content: []byte("same")}}))
+	require.False(t, sameSkillFiles(one, []skills.File{{Path: "SKILL.md", Content: []byte("different")}}))
 }
 
 func mustReadString(t *testing.T, path string) string {

@@ -457,3 +457,59 @@ func TestSkillsListGuidance_NamesCommandsThatExist(t *testing.T) {
 		require.Contains(t, got.Guidance, "1 skill installed", "the count is wrong or unpluralized: %q", got.Guidance)
 	})
 }
+
+func TestSkillsListHelpers_CoverDefensiveAndFormattingBoundaries(t *testing.T) {
+	t.Run("an invalid repository root becomes a reported problem", func(t *testing.T) {
+		rows, problems := inventorySkillRoots(filepath.Join(t.TempDir(), "missing"), []string{".agents/skills"})
+		require.Empty(t, rows)
+		require.Len(t, problems, 1)
+		require.Contains(t, problems[0], "could not open this repository")
+	})
+
+	t.Run("mixed ownership across roots is conservatively local", func(t *testing.T) {
+		repo := t.TempDir()
+		const name = "post-cutoff"
+		writeSkillDir(t, repo, ".agents/skills", name, manifestWithDescription(name, "local"))
+		owned := manifestWithDescription(name, "managed") + string(agentx.StampedContent([]byte("managed body"), "0.16.0", "ox"))
+		writeSkillDir(t, repo, ".claude/skills", name, owned)
+
+		got := collectInstalledSkills(repo, []string{".agents/skills", ".claude/skills"})
+		require.Len(t, got.Skills, 1)
+		require.Equal(t, provenanceLocal, got.Skills[0].Provenance)
+		require.Len(t, got.Skills[0].Roots, 2)
+	})
+
+	t.Run("renderer separates rows problems and guidance", func(t *testing.T) {
+		out := skillsListOutput{
+			Skills:   []installedSkillRow{{Name: "mine", Provenance: provenanceLocal, Description: "local skill"}},
+			Problems: []string{"one selected directory was unreadable"},
+			Guidance: "Run ox doctor to repair it.",
+		}
+		var buf strings.Builder
+		require.NoError(t, emitSkillsList(&buf, out, false))
+		rendered := stripANSI(buf.String())
+		require.Contains(t, rendered, "Directories ox could not read")
+		require.Contains(t, rendered, "Run ox doctor")
+		require.Contains(t, rendered, "\n\n")
+	})
+
+	t.Run("manifest and cell helpers stop at their exact boundaries", func(t *testing.T) {
+		description, folded := manifestDescription([]byte("---\ndescription: >-\n  first line\nnext: key\n  ignored\n---\n"))
+		require.Equal(t, "first line", description)
+		require.True(t, folded)
+		require.Equal(t, "a b", sanitizeCell("a\tb"))
+		require.Equal(t, "a", truncateCell("abc", 1))
+		require.Equal(t, []string{"a", "b"}, dedupeStrings([]string{"a", "a", "b"}))
+	})
+
+	t.Run("missing skill directory is not a skill", func(t *testing.T) {
+		repo, err := os.OpenRoot(t.TempDir())
+		require.NoError(t, err)
+		defer func() { require.NoError(t, repo.Close()) }()
+
+		description, owned, isSkill := skillManifestDescription(repo, "missing")
+		require.Empty(t, description)
+		require.False(t, owned)
+		require.False(t, isSkill)
+	})
+}

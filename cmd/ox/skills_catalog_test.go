@@ -369,3 +369,80 @@ func TestSkillsCatalogJSON_AlwaysAnswersEveryQuestionItCanAnswer(t *testing.T) {
 		}
 	}
 }
+
+func TestCatalogHelpers_CoverDefensiveAndPresentationBoundaries(t *testing.T) {
+	t.Run("plan states ignore unrelated paths and preserve both signals", func(t *testing.T) {
+		require.Empty(t, catalogPlanStates(nil, []string{".agents/skills"}))
+
+		plan := &skillmanager.ReconcilePlan{
+			Creates: []skillmanager.FileAction{
+				{Path: ".agents/skills/alpha/SKILL.md"},
+				{Path: "elsewhere/ignored/SKILL.md"},
+			},
+			Updates:   []skillmanager.FileAction{{Path: ".agents/skills/beta/SKILL.md"}},
+			Removes:   []skillmanager.FileAction{{Path: ".agents/skills/gamma/SKILL.md"}},
+			Conflicts: []skillmanager.Conflict{{Path: ".agents/skills/alpha/SKILL.md"}},
+		}
+		got := catalogPlanStates(plan, []string{".agents/skills"})
+		require.Equal(t, catalogPlanState{pending: true, conflicting: true}, got["alpha"])
+		require.True(t, got["beta"].pending)
+		require.True(t, got["gamma"].pending)
+		require.NotContains(t, got, "ignored")
+		require.Empty(t, catalogSkillNameFromPath("somewhere/else/SKILL.md", []string{".agents/skills"}))
+	})
+
+	t.Run("filesystem and embedded catalog errors retain context", func(t *testing.T) {
+		_, err := catalogNamePresence(filepath.Join(t.TempDir(), "missing"), nil, "alpha")
+		require.ErrorContains(t, err, "open repository")
+
+		_, err = catalogSkillDescription("does-not-exist")
+		require.ErrorContains(t, err, "does-not-exist")
+	})
+
+	t.Run("guidance prioritizes incomplete selections and name matches", func(t *testing.T) {
+		selected := skillsCatalogGuidance(skillsCatalogOutput{Bundles: []catalogBundleGroup{{
+			Skills: []catalogSkillRow{
+				{Name: "one", Status: skillCatalogSelected},
+				{Name: "two", Status: skillCatalogSelected},
+			},
+		}}})
+		require.Contains(t, selected, "2 catalog skills are selected")
+
+		matches := skillsCatalogGuidance(skillsCatalogOutput{Bundles: []catalogBundleGroup{{
+			Skills: []catalogSkillRow{
+				{Name: "one", Status: skillCatalogNameMatch},
+				{Name: "two", Status: skillAvailable},
+			},
+		}}})
+		require.Contains(t, matches, "1 catalog name only")
+		require.NotContains(t, matches, "ox skills install")
+	})
+
+	t.Run("renderer handles every warning style and bundle separator", func(t *testing.T) {
+		out := skillsCatalogOutput{
+			Bundles: []catalogBundleGroup{
+				{
+					ID: "default", Description: "Always present", Default: true,
+					Skills: []catalogSkillRow{
+						{Name: "selected", Status: skillCatalogSelected, Description: "pending"},
+						{Name: "conflict", Status: skillCatalogConflict, Description: "blocked"},
+					},
+				},
+				{
+					ID: "optional", Description: "Optional", Default: false,
+					Skills: []catalogSkillRow{{Name: "match", Status: skillCatalogNameMatch, Description: "local"}},
+				},
+			},
+			Guidance: "Resolve the selected conflicts before continuing.",
+		}
+		var buf strings.Builder
+		require.NoError(t, emitSkillsCatalog(&buf, out, false))
+		rendered := stripANSI(buf.String())
+		require.Contains(t, rendered, "on by default")
+		require.Contains(t, rendered, "opt-in")
+		require.Contains(t, rendered, "selected")
+		require.Contains(t, rendered, "conflicting")
+		require.Contains(t, rendered, "name-match")
+		require.Equal(t, "already-long", padStatus("already-long", "already-long"))
+	})
+}

@@ -25,6 +25,14 @@ import (
 
 const syncResultSchemaVersion = 1
 
+var (
+	ensureDaemonForSync    = ensureDaemonRunning
+	syncLedgerForSync      = syncViaDaemon
+	syncTeamForSync        = syncTeamContext
+	syncAllTeamsForSync    = syncAllTeamContexts
+	convergeRepositorySync = runSyncConvergence
+)
+
 // SyncResult is the versioned JSON output for ordinary sync operations.
 // Transport and convergence are separate because a successful pull does not
 // mean Team Context artifacts reached the current repository.
@@ -159,7 +167,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 		Transport:     SyncTransportResult{Status: "failed"},
 		Convergence:   SyncConvergenceResult{Status: "skipped"},
 	}
-	if err := ensureDaemonRunning(jsonOutput); err != nil {
+	if err := ensureDaemonForSync(jsonOutput); err != nil {
 		result.Transport.Error = err.Error()
 		result.Convergence.Detail = "transport unavailable"
 		result.Error = err.Error()
@@ -172,14 +180,14 @@ func runSync(cmd *cobra.Command, args []string) error {
 	var transportProblems []string
 
 	if teamID != "" {
-		if err := syncTeamContext(ctx, teamID, jsonOutput, &result); err != nil {
+		if err := syncTeamForSync(ctx, teamID, jsonOutput, &result); err != nil {
 			if errors.Is(err, tea.ErrInterrupted) {
 				return err
 			}
 			transportProblems = append(transportProblems, err.Error())
 		}
 	} else if allTeams {
-		if err := syncAllTeamContexts(ctx, jsonOutput, &result); err != nil {
+		if err := syncAllTeamsForSync(ctx, jsonOutput, &result); err != nil {
 			if errors.Is(err, tea.ErrInterrupted) {
 				return err
 			}
@@ -188,13 +196,13 @@ func runSync(cmd *cobra.Command, args []string) error {
 	} else {
 		// The default promise is the whole current-repository path: Ledger and
 		// Team Context transport, followed by local convergence.
-		if err := syncViaDaemon(ctx, jsonOutput, &result); err != nil {
+		if err := syncLedgerForSync(ctx, jsonOutput, &result); err != nil {
 			if errors.Is(err, tea.ErrInterrupted) {
 				return err
 			}
 			transportProblems = append(transportProblems, err.Error())
 		}
-		if err := syncAllTeamContexts(ctx, jsonOutput, &result); err != nil {
+		if err := syncAllTeamsForSync(ctx, jsonOutput, &result); err != nil {
 			if errors.Is(err, tea.ErrInterrupted) {
 				return err
 			}
@@ -211,7 +219,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 		result.Transport.Status = "synced"
 	}
 
-	convergenceErr := runSyncConvergence(ctx, teamID, &result)
+	convergenceErr := convergeRepositorySync(ctx, teamID, &result)
 	problems := append([]string(nil), transportProblems...)
 	if convergenceErr != nil {
 		problems = append(problems, convergenceErr.Error())

@@ -207,3 +207,96 @@ func TestReconcile_DroidScopedRuleFallsBackWithoutWriting(t *testing.T) {
 	require.Equal(t, teamdocs.VisibilityIndexed, prime[0].Visibility)
 	require.Empty(t, prime[0].Body)
 }
+
+func TestProjectionHelpers_DefensiveAndFallbackBranches(t *testing.T) {
+	t.Run("non-directory and unprotected roots do not receive writes", func(t *testing.T) {
+		project := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(project, ".claude"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(project, ".claude", "rules"), []byte("file"), 0o644))
+		result, err := Reconcile(context.Background(), project, nil)
+		require.NoError(t, err)
+		require.Empty(t, result.Written)
+
+		project = t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(project, ".claude", "rules"), 0o755))
+		git := exec.Command("git", "init", "-q")
+		git.Dir = project
+		require.NoError(t, git.Run())
+		source := filepath.Join(t.TempDir(), "rule.md")
+		require.NoError(t, os.WriteFile(source, []byte("Body.\n"), 0o644))
+		rule := teamdocs.TeamRule{Name: "security", AbsPath: source, Visibility: teamdocs.VisibilityAlways}
+		result, err = Reconcile(context.Background(), project, []teamdocs.TeamRule{rule})
+		require.NoError(t, err)
+		require.Empty(t, result.NativeAgents[rule.Name])
+		require.Contains(t, result.Fallbacks[rule.Name][0].Reason, "not ignored")
+	})
+
+	t.Run("native projection detection and aliases", func(t *testing.T) {
+		project := t.TempDir()
+		require.False(t, HasNativeProjections(project))
+		require.NoError(t, os.MkdirAll(filepath.Join(project, ".claude", "rules"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(project, ".claude", "rules", "sageox-team-a.md"), []byte("x"), 0o644))
+		require.True(t, HasNativeProjections(project))
+
+		rule := teamdocs.TeamRule{Name: "A Rule", RelPath: "a.md"}
+		_, ok := NativePath(project, "unknown", rule)
+		require.False(t, ok)
+		claude, ok := NativePath(project, "claude-code", rule)
+		require.True(t, ok)
+		require.Contains(t, claude, ".claude")
+	})
+
+	t.Run("render and filename boundaries", func(t *testing.T) {
+		_, err := render(teamdocs.TeamRule{AbsPath: filepath.Join(t.TempDir(), "missing")}, policies[0])
+		require.Error(t, err)
+
+		source := filepath.Join(t.TempDir(), "rule.md")
+		require.NoError(t, os.WriteFile(source, []byte("Body without newline"), 0o644))
+		content, err := render(teamdocs.TeamRule{
+			Name: "Rule", Description: "description", AbsPath: source,
+		}, policy{GlobField: "globs", AlwaysApplyField: "alwaysApply"})
+		require.NoError(t, err)
+		require.True(t, strings.HasSuffix(string(content), "\n"))
+		require.Contains(t, string(content), "alwaysApply: true")
+
+		emptySlug := nativeFilename(teamdocs.TeamRule{Name: "!!!", RelPath: "x"}, policies[0])
+		require.Contains(t, emptySlug, "sageox-team-rule-")
+		longSlug := nativeFilename(teamdocs.TeamRule{Name: strings.Repeat("Long Name ", 10), RelPath: "x"}, policies[0])
+		stem := strings.TrimSuffix(strings.TrimPrefix(longSlug, managedPrefix), policies[0].Extension)
+		slug := stem[:strings.LastIndex(stem, "-")]
+		require.LessOrEqual(t, len(slug), 40)
+	})
+}
+
+func TestReconcileRoot_DefensiveFilesystemBranches(t *testing.T) {
+	project := t.TempDir()
+	rootPath := filepath.Join(project, "rules")
+	require.NoError(t, os.MkdirAll(rootPath, 0o755))
+	p := policy{Root: "rules", Extension: ".md"}
+
+	_, _, err := reconcileRoot(context.Background(), project, filepath.Join(project, "missing"), p, nil)
+	require.Error(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(rootPath, "same.md"), []byte("same"), 0o644))
+	written, removed, err := reconcileRoot(context.Background(), project, rootPath, p, map[string][]byte{"same.md": []byte("same")})
+	require.NoError(t, err)
+	require.Empty(t, written)
+	require.Empty(t, removed)
+
+	require.NoError(t, os.Mkdir(filepath.Join(rootPath, "blocked.md"), 0o755))
+	_, _, err = reconcileRoot(context.Background(), project, rootPath, p, map[string][]byte{"blocked.md": []byte("new")})
+	require.Error(t, err)
+
+	root, err := os.OpenRoot(rootPath)
+	require.NoError(t, err)
+	defer root.Close()
+	require.Error(t, atomicWrite(root, "missing/child.md", []byte("x")))
+	require.NoError(t, os.Mkdir(filepath.Join(rootPath, "destination.md"), 0o755))
+	require.Error(t, atomicWrite(root, "destination.md", []byte("x")))
+
+	retired := filepath.Join(rootPath, managedPrefix+"retired.md")
+	require.NoError(t, os.Mkdir(retired, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(retired, "child"), []byte("x"), 0o644))
+	_, _, err = reconcileRoot(context.Background(), project, rootPath, p, nil)
+	require.Error(t, err)
+}

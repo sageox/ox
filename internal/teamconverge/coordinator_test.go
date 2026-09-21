@@ -260,3 +260,42 @@ func TestWriteText_ExplainsOriginDeliveryAndFailure(t *testing.T) {
 	require.Contains(t, out.String(), "rule/security: injected via prime-inline (pack secure@1.2.0)")
 	require.Contains(t, out.String(), "tool/github: unsupported (loose) — no handler")
 }
+
+func TestCoordinator_ConstructorAndDiscoveryErrors(t *testing.T) {
+	_, err := New(nil)
+	require.ErrorContains(t, err, "discovery is required")
+	_, err = New(staticDiscovery{}, nil)
+	require.ErrorContains(t, err, "nil Team Context")
+	_, err = New(staticDiscovery{}, echoHandler{})
+	require.ErrorContains(t, err, "no artifact kind")
+	_, err = New(staticDiscovery{}, echoHandler{kind: KindRule}, echoHandler{kind: KindRule})
+	require.ErrorContains(t, err, "duplicate")
+
+	coordinator, err := New(staticDiscovery{})
+	require.NoError(t, err)
+	coordinator.lockSnapshot = true
+	_, err = coordinator.Converge(context.Background(), Request{})
+	require.ErrorContains(t, err, "team context path is required")
+
+	coordinator, err = New(staticDiscovery{err: errors.New("discovery failed")})
+	require.NoError(t, err)
+	_, err = coordinator.Converge(context.Background(), Request{})
+	require.ErrorContains(t, err, "discovery failed")
+}
+
+func TestCoordinator_RejectsEveryInvalidArtifactIdentity(t *testing.T) {
+	artifacts := []Artifact{
+		{Kind: "unknown", Name: "x", SourcePath: "x", Origin: Origin{Kind: OriginLoose}, Applicable: true},
+		{Kind: KindRule, Name: " x", SourcePath: "x", Origin: Origin{Kind: OriginLoose}, Applicable: true},
+		{Kind: KindRule, Name: "missing-pack", SourcePath: "x", Origin: Origin{Kind: OriginPack}, Applicable: true},
+		{Kind: KindRule, Name: "unknown-origin", SourcePath: "x", Origin: Origin{Kind: "unknown"}, Applicable: true},
+	}
+	coordinator, err := New(staticDiscovery{snapshot: Snapshot{Commit: "abc"}, artifacts: artifacts})
+	require.NoError(t, err)
+	report, err := coordinator.Converge(context.Background(), Request{})
+	require.NoError(t, err)
+	require.Len(t, report.Outcomes, len(artifacts))
+	for _, outcome := range report.Outcomes {
+		require.Equal(t, StateError, outcome.State)
+	}
+}

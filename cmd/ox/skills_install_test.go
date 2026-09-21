@@ -703,6 +703,81 @@ func TestSkillsChange_CommandAndErrorBoundaries(t *testing.T) {
 	})
 }
 
+func TestSkillsChange_SelectionAndOwnershipBoundaries(t *testing.T) {
+	t.Run("malformed lock fails install and uninstall", func(t *testing.T) {
+		repo := stageInstallRepo(t)
+		require.NoError(t, os.WriteFile(skillmanager.LockPath(repo), []byte("{broken"), 0o644))
+		_, err := installCatalogSkills(repo, []string{catalogOptInSkill})
+		require.Error(t, err)
+		_, err = uninstallCatalogSkills(repo, []string{catalogOptInSkill})
+		require.Error(t, err)
+	})
+
+	t.Run("install needs a selected target", func(t *testing.T) {
+		repo := t.TempDir()
+		_, err := installCatalogSkills(repo, []string{catalogOptInSkill})
+		require.ErrorContains(t, err, "nowhere to put a skill")
+	})
+
+	t.Run("repeat install and absent uninstall are explicit no-ops", func(t *testing.T) {
+		repo := stageInstallRepo(t)
+		_, err := installCatalogSkills(repo, []string{catalogOptInSkill})
+		require.NoError(t, err)
+		again, err := installCatalogSkills(repo, []string{catalogOptInSkill})
+		require.NoError(t, err)
+		require.Equal(t, skillChangeAlready, again.Skills[0].State)
+
+		repo = stageInstallRepo(t)
+		out, err := uninstallCatalogSkills(repo, []string{catalogOptInSkill})
+		require.NoError(t, err)
+		require.Equal(t, skillChangeNotInstalled, out.Skills[0].State)
+	})
+
+	t.Run("ownership check handles empty roots missing names and team skills", func(t *testing.T) {
+		require.NoError(t, refuseSkillsOxDoesNotOwn(t.TempDir(), nil, []string{"anything"}))
+		repo := t.TempDir()
+		require.NoError(t, refuseSkillsOxDoesNotOwn(repo, []string{approvalTargetRoot}, []string{"missing"}))
+
+		const teamName = "sageox-team-deploy"
+		writeSkillDir(t, repo, approvalTargetRoot, teamName, manifestWithDescription(teamName, "team skill"))
+		err := refuseSkillsOxDoesNotOwn(repo, []string{approvalTargetRoot}, []string{teamName, "other"})
+		require.ErrorContains(t, err, "Team Context")
+		require.Contains(t, err.Error(), "nothing was changed")
+	})
+
+	t.Run("catalog helpers deduplicate and reject unknown bundles", func(t *testing.T) {
+		names, err := validateCatalogNames([]string{catalogOptInSkill, catalogOptInSkill})
+		require.NoError(t, err)
+		require.Equal(t, []string{catalogOptInSkill}, names)
+		_, err = selectedCatalogNames(skillmanager.DesiredSkills{Bundles: []skillmanager.BundleRef{{ID: "missing"}}})
+		require.Error(t, err)
+	})
+}
+
+func TestPublishTeamSkillSeeds_FilesystemAndGitBoundaries(t *testing.T) {
+	seed := teamSkillSeed{name: "demo", relDir: "agents/skills/demo", files: []skills.File{{
+		Path: skills.SkillFileName, Content: []byte("---\nname: demo\ndescription: demo\n---\n"),
+	}}}
+
+	t.Run("configured path cannot be opened", func(t *testing.T) {
+		repo := t.TempDir()
+		teamFile := filepath.Join(t.TempDir(), "team-file")
+		require.NoError(t, os.WriteFile(teamFile, []byte("not a directory"), 0o600))
+		wireTeamContext(t, repo, teamFile)
+		_, err := publishTeamSkillSeeds(repo, []string{"demo"}, []teamSkillSeed{seed})
+		require.ErrorContains(t, err, "open team context")
+	})
+
+	t.Run("non-git Team Context cannot claim an absent destination", func(t *testing.T) {
+		repo, team := t.TempDir(), t.TempDir()
+		wireTeamContext(t, repo, team)
+		_, err := publishTeamSkillSeeds(repo, []string{"demo"}, []teamSkillSeed{seed})
+		require.Error(t, err)
+	})
+
+	rollbackTeamSeeds(t.TempDir(), nil)
+}
+
 func TestCatalogSkillHelpers_ReportMalformedEntries(t *testing.T) {
 	t.Run("missing description", func(t *testing.T) {
 		err := refuseUnpublishableDescription("broken", []skills.File{{

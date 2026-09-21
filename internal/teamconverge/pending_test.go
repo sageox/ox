@@ -1,8 +1,11 @@
 package teamconverge
 
 import (
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -59,4 +62,63 @@ func TestPendingStatusFor_DistinguishesRetryFromHumanFailure(t *testing.T) {
 		report := Report{Outcomes: []Outcome{{State: state, Required: true}}}
 		require.Equal(t, PendingFailed, PendingStatusFor(report), state)
 	}
+}
+
+func TestPendingHelpers_ReportMalformedAndFilesystemState(t *testing.T) {
+	t.Run("unsupported schema", func(t *testing.T) {
+		project := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Dir(PendingPath(project)), 0o700))
+		require.NoError(t, os.WriteFile(PendingPath(project), []byte(`{"schema_version":99}`), 0o600))
+		_, err := LoadPending(project)
+		require.ErrorContains(t, err, "unsupported")
+	})
+
+	t.Run("pending path is unreadable", func(t *testing.T) {
+		project := t.TempDir()
+		require.NoError(t, os.MkdirAll(PendingPath(project), 0o700))
+		_, err := LoadPending(project)
+		require.ErrorContains(t, err, "read Team Context convergence state")
+	})
+
+	t.Run("project root cannot contain cache", func(t *testing.T) {
+		project := filepath.Join(t.TempDir(), "project-file")
+		require.NoError(t, os.WriteFile(project, []byte("not a directory"), 0o600))
+		_, err := SavePending(project, PendingRetry, Report{}, "retry")
+		require.ErrorContains(t, err, "create Team Context convergence cache")
+	})
+}
+
+func TestFailureReason_CoversTypedFallbacks(t *testing.T) {
+	require.Equal(t, "pending: skill/deploy", FailureReason(Report{Outcomes: []Outcome{{
+		State: StatePending, Kind: KindSkill, Name: "deploy",
+	}}}))
+	require.Equal(t, "unsupported: tool/deploy", FailureReason(Report{Outcomes: []Outcome{{
+		State: StateUnsupported, Kind: KindTool, Name: "deploy", Required: true,
+	}}}))
+	require.Equal(t, "explicit detail", FailureReason(Report{Outcomes: []Outcome{{
+		State: StateUnsupported, Kind: KindTool, Name: "deploy", Required: true, Detail: "explicit detail",
+	}}}))
+	require.Equal(t, "Team Context convergence is incomplete", FailureReason(Report{Outcomes: []Outcome{{
+		State: StateUnsupported, Required: false,
+	}}}))
+}
+
+type convergenceFailWriter struct{}
+
+func (convergenceFailWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+func TestWriteText_EmptyAndWriterFailures(t *testing.T) {
+	var buf strings.Builder
+	require.NoError(t, WriteText(&buf, Report{Snapshot: Snapshot{Commit: "123456789012345"}}))
+	require.Contains(t, buf.String(), "123456789012")
+	require.Contains(t, buf.String(), "No applicable artifacts")
+
+	err := WriteText(convergenceFailWriter{}, Report{})
+	require.ErrorContains(t, err, "write failed")
+	err = WriteText(io.MultiWriter(convergenceFailWriter{}), Report{Outcomes: []Outcome{{Kind: KindRule, Name: "x"}}})
+	require.ErrorContains(t, err, "write failed")
+
+	retry := &RetryableError{Err: errors.New("busy")}
+	require.EqualError(t, retry, "busy")
+	require.ErrorIs(t, retry, retry.Err)
 }
