@@ -418,18 +418,46 @@ func publishCatalogSkillsToTeam(repoRoot string, names []string) (skillsChangeOu
 	lockErr := gitutil.WithRepoLock(ctx, tc.Path, func() error {
 		acquired = true
 
+		// Every write below goes through a handle rooted at the checkout, never
+		// through a joined absolute path. A Team Context is a remote-controlled
+		// clone: if "agents" or "agents/skills" is a symlink pointing out of the
+		// tree, MkdirAll and WriteFile would follow it and deposit the embedded
+		// skill outside the checkout entirely — the staging failure afterwards
+		// cleans up the wrong place. os.Root refuses to traverse out and is the
+		// same defense teamsource.go already applies on the read side.
+		root, rootErr := os.OpenRoot(tc.Path)
+		if rootErr != nil {
+			return fmt.Errorf("open team context: %w", rootErr)
+		}
+		defer func() { _ = root.Close() }()
+
 		// This check is part of the critical section, not just a pre-flight. If two
 		// publishers queued for the same name, the second must see the first one's
 		// commit and refuse before writing. Lstat also treats a broken symlink as an
 		// existing path instead of following it into a write outside the checkout.
+		//
+		// The worktree alone is not the answer. A Team Context is a SPARSE checkout,
+		// so a skill that is tracked in git can be absent from disk — and then a
+		// worktree-only check calls the destination free, and the path-scoped commit
+		// below replaces the team's existing skill in history. Ask git too.
 		for _, s := range seeds {
-			absDir := filepath.Join(tc.Path, filepath.FromSlash(s.relDir))
-			switch _, statErr := os.Lstat(absDir); {
+			switch _, statErr := root.Lstat(filepath.FromSlash(s.relDir)); {
 			case statErr == nil:
 				return fmt.Errorf("%q is already published at %s in your Team Context — ox seeds a team copy once and never writes over it. Edit it there, or delete it first%s",
 					s.name, s.relDir, nothingChangedSuffix(names))
 			case !errors.Is(statErr, fs.ErrNotExist):
-				return fmt.Errorf("inspect %s: %w", absDir, statErr)
+				return fmt.Errorf("inspect %s: %w", s.relDir, statErr)
+			}
+			// Reuses init.go's helper: `ls-files --error-unmatch` over a directory
+			// pathspec succeeds when anything under it is tracked, which is exactly
+			// the sparse-excluded case os.Lstat cannot see.
+			tracked, trackedErr := gitTracksPath(tc.Path, s.relDir)
+			if trackedErr != nil {
+				return trackedErr
+			}
+			if tracked {
+				return fmt.Errorf("%q is already published at %s in your Team Context — it is tracked in git but not checked out here (a sparse checkout). ox seeds a team copy once and never writes over it%s",
+					s.name, s.relDir, nothingChangedSuffix(names))
 			}
 		}
 
@@ -452,13 +480,12 @@ func publishCatalogSkillsToTeam(repoRoot string, names []string) (skillsChangeOu
 
 		for _, s := range seeds {
 			seededDirs = append(seededDirs, s.relDir)
-			absDir := filepath.Join(tc.Path, filepath.FromSlash(s.relDir))
 			for _, file := range s.files {
-				dest := filepath.Join(absDir, filepath.FromSlash(file.Path))
-				if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+				dest := filepath.Join(filepath.FromSlash(s.relDir), filepath.FromSlash(file.Path))
+				if err := root.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 					return fmt.Errorf("create %s: %w", filepath.Dir(dest), err)
 				}
-				if err := os.WriteFile(dest, file.Content, 0o644); err != nil {
+				if err := root.WriteFile(dest, file.Content, 0o644); err != nil {
 					return fmt.Errorf("write %s: %w", dest, err)
 				}
 				// Per FILE, matching what the install path reports. A caller diffing the

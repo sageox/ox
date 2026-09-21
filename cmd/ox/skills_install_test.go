@@ -750,3 +750,75 @@ func TestSkillsChange_RenderingEdges(t *testing.T) {
 		require.Contains(t, buf.String(), "not selected")
 	})
 }
+
+// TestSkillsInstallTeam_RefusesASparseExcludedPublishedSkill.
+//
+// A Team Context is a SPARSE checkout, so a skill tracked in git can be absent
+// from the worktree. A worktree-only existence check calls that destination free
+// and the path-scoped commit then replaces the team's existing skill in history —
+// a silent overwrite of content ox promises to seed exactly once.
+func TestSkillsInstallTeam_RefusesASparseExcludedPublishedSkill(t *testing.T) {
+	_, team := stageTeamPublishRepo(t)
+
+	// Publish once, the ordinary way, so the skill is real history.
+	out, err := runSkillsChange(t, skillsInstallCmd, "--team", catalogOptInSkill)
+	require.NoError(t, err, "output: %s", out)
+	published := filepath.Join(team, "agents", "skills", catalogOptInSkill)
+	require.FileExists(t, filepath.Join(published, "SKILL.md"))
+	original := gitOutput(t, team, "rev-parse", "HEAD")
+
+	// Now exclude it from the cone. Git still tracks every file; the worktree
+	// no longer holds them, which is exactly the state a teammate's checkout is
+	// in when their sparse set does not cover agents/.
+	gitOutput(t, team, "sparse-checkout", "init", "--cone")
+	gitOutput(t, team, "sparse-checkout", "set", "docs")
+	require.NoDirExists(t, published,
+		"the fixture proves nothing unless sparse checkout actually removed the worktree copy")
+	require.NotEmpty(t, gitOutput(t, team, "ls-files", "--", "agents/skills/"+catalogOptInSkill),
+		"git must still track the skill or this is not the sparse case")
+
+	_, err = runSkillsChange(t, skillsInstallCmd, "--team", catalogOptInSkill)
+	require.Error(t, err, "a sparse-excluded skill was overwritten instead of refused")
+	require.Contains(t, err.Error(), "already published")
+	require.Equal(t, original, gitOutput(t, team, "rev-parse", "HEAD"),
+		"the refusal still wrote a commit over the team's existing skill")
+}
+
+// TestSkillsInstallTeam_RefusesASymlinkedParent.
+//
+// A Team Context is a remote-controlled clone. If an intermediate component —
+// "agents" or "agents/skills" — is a symlink out of the tree, MkdirAll and
+// WriteFile follow it and deposit the skill outside the checkout entirely, where
+// the staging failure afterwards cleans up the wrong place.
+func TestSkillsInstallTeam_RefusesASymlinkedParent(t *testing.T) {
+	for _, tc := range []struct{ name, link string }{
+		{name: "agents is a link", link: "agents"},
+		{name: "agents/skills is a link", link: filepath.Join("agents", "skills")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, team := stageTeamPublishRepo(t)
+
+			outside := t.TempDir()
+			linkPath := filepath.Join(team, tc.link)
+			require.NoError(t, os.MkdirAll(filepath.Dir(linkPath), 0o755))
+			require.NoError(t, os.Symlink(outside, linkPath))
+
+			_, err := runSkillsChange(t, skillsInstallCmd, "--team", catalogOptInSkill)
+			require.Error(t, err, "publishing followed a symlink out of the Team Context")
+
+			// Refused AT THE BOUNDARY, not downstream. An "error occurred" assertion
+			// is not enough here: without the root handle the files are written
+			// outside first and the run still fails later at git staging, so the only
+			// thing that distinguishes fixed from broken is WHICH error comes back.
+			require.Contains(t, err.Error(), "escapes",
+				"the run failed for some other reason, so the symlink was still followed: %v", err)
+
+			// And nothing is left behind outside the checkout. This catches the
+			// agents-symlink case specifically, where rollback deletes the seeded
+			// directory through the link but leaves its parent standing.
+			entries, readErr := os.ReadDir(outside)
+			require.NoError(t, readErr)
+			require.Empty(t, entries, "publishing created files outside the Team Context")
+		})
+	}
+}
