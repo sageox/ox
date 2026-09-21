@@ -40,6 +40,7 @@ type upgradeResult struct {
 
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
+	Args:  cobra.NoArgs,
 	Short: "Upgrade ox to the latest version",
 	Long:  "Detect how ox was installed and upgrade using the appropriate method: Homebrew, go install, or an in-place download that verifies and replaces the binary.",
 	RunE:  runUpgrade,

@@ -52,6 +52,7 @@ type TeamContextSyncResult struct {
 
 var syncCmd = &cobra.Command{
 	Use:   "sync",
+	Args:  cobra.NoArgs,
 	Short: "Manually sync ledger/team contexts (rarely needed)",
 	Long: `Manually synchronize your ledger and team context repositories.
 

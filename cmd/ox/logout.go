@@ -23,6 +23,7 @@ var (
 
 var logoutCmd = &cobra.Command{
 	Use:   "logout",
+	Args:  cobra.NoArgs,
 	Short: "Log out of SageOx",
 	Long:  "Remove local authentication token and log out of SageOx.",
 	RunE: func(cmd *cobra.Command, args []string) error {

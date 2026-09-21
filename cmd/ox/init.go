@@ -109,6 +109,7 @@ func ensureSageoxConfig(gitRoot string) configResult {
 
 var initCmd = &cobra.Command{
 	Use:   "init",
+	Args:  cobra.NoArgs,
 	Short: "Initialize SageOx for this repository",
 	Long: `Initialize SageOx for this repository.
 

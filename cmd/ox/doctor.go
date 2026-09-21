@@ -147,6 +147,7 @@ type doctorState struct {
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
+	Args:  cobra.NoArgs,
 	Short: "Run diagnostics on ox installation and configuration",
 	Long: `Run comprehensive diagnostics on your ox installation, project configuration,
 git health, agent environment, and connected services. Use --fix to auto-repair

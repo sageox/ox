@@ -48,6 +48,14 @@ ox uninstall --local-only --force --no-input
 ox config --no-input
 ```
 
+## Argument Validation
+
+Flag-only commands that change state (`init`, `login`, `logout`, `uninstall`,
+`sync`, `upgrade`, and `doctor`) use `cobra.NoArgs` to reject unused positional
+arguments before their handlers run. A stray path must not silently select the
+current repository, and `--force false` must not proceed with force enabled.
+Use `--force=false` to explicitly disable a boolean flag.
+
 ## Color Palette
 
 Colors are sourced from `sageox-design` and generated into `internal/theme/generated.go`.

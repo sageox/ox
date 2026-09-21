@@ -147,6 +147,7 @@ func getAlternativeEndpoints(currentEndpoint string) []string {
 
 var loginCmd = &cobra.Command{
 	Use:   "login",
+	Args:  cobra.NoArgs,
 	Short: "Authenticate with sageox.ai",
 	Long:  "Authenticate with sageox.ai to access premium features and sync your configuration.",
 	RunE: func(cmd *cobra.Command, args []string) error {

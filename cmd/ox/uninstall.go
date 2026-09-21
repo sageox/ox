@@ -32,6 +32,7 @@ var (
 
 var uninstallCmd = &cobra.Command{
 	Use:   "uninstall",
+	Args:  cobra.NoArgs,
 	Short: "Remove SageOx from this repository",
 	Long: `Completely remove SageOx from this repository by removing the .sageox directory,
 git hooks, and agent integration files.

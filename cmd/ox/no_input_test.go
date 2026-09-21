@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -38,6 +39,9 @@ func TestNoInputCLI(t *testing.T) {
 			{name: "ignores piped consent", args: []string{"--no-input"}, endpoints: 1, input: "y\n", wantError: []string{cli.ErrConfirmationRequired.Error()}},
 			{name: "requires endpoint choice", args: []string{"--no-input"}, endpoints: 2, wantError: []string{"--no-input requires --endpoint", "--all"}},
 			{name: "yes cannot choose endpoint", args: []string{"--no-input", "--yes"}, endpoints: 2, wantError: []string{"--no-input requires --endpoint", "--all"}},
+			{name: "split false is rejected before logout", args: []string{"--no-input", "--force", "false"}, endpoints: 2, wantError: []string{`unknown command "false"`}},
+			{name: "stray endpoint is rejected before logout", args: []string{"--no-input", "--force", "other-endpoint"}, endpoints: 2, wantError: []string{`unknown command "other-endpoint"`}},
+			{name: "explicit false still requires consent", args: []string{"--no-input", "--force=false"}, endpoints: 1, wantError: []string{cli.ErrConfirmationRequired.Error()}},
 			{name: "yes authorizes single endpoint", args: []string{"--no-input", "--yes"}, endpoints: 1},
 			{name: "all and yes authorize every endpoint", args: []string{"--no-input", "--all", "--yes"}, endpoints: 2},
 			{name: "force authorizes every endpoint", args: []string{"--no-input", "--force"}, endpoints: 2},
@@ -97,13 +101,17 @@ func TestNoInputCLI(t *testing.T) {
 
 	t.Run("typed uninstall", func(t *testing.T) {
 		for _, tt := range []struct {
-			name      string
-			args      []string
-			input     string
-			wantError bool
+			name       string
+			args       []string
+			input      string
+			invalidArg string
+			wantError  bool
 		}{
 			{name: "requires explicit force", args: []string{"--no-input"}, wantError: true},
 			{name: "yes cannot replace typed confirmation", args: []string{"--no-input", "--yes"}, wantError: true},
+			{name: "split false is rejected before uninstall", args: []string{"--no-input", "--dry-run", "--force", "false"}, invalidArg: "false", wantError: true},
+			{name: "stray target is rejected before uninstall", args: []string{"--no-input", "--dry-run", "other-repo"}, invalidArg: "other-repo", wantError: true},
+			{name: "explicit false still requires confirmation", args: []string{"--no-input", "--force=false"}, wantError: true},
 			{name: "force authorizes uninstall", args: []string{"--no-input", "--force"}},
 			{name: "no-interactive still accepts piped confirmation", args: []string{"--no-interactive"}, input: "uninstall"},
 		} {
@@ -122,9 +130,14 @@ func TestNoInputCLI(t *testing.T) {
 				output, runErr := runNoInputCLI(t, oxBin, repo, env, input, append([]string{"uninstall", "--local-only"}, tt.args...)...)
 				if tt.wantError {
 					require.Error(t, runErr, "output: %s", output)
-					assert.Contains(t, output, "uninstall requires confirmation")
-					assert.Contains(t, output, "--force")
-					assert.Contains(t, output, "--no-input")
+					if tt.invalidArg != "" {
+						assert.Contains(t, output, `unknown command "`+tt.invalidArg+`"`)
+						assert.NotContains(t, output, "Files to be removed:", "argument errors must stop before previewing uninstall")
+					} else {
+						assert.Contains(t, output, "uninstall requires confirmation")
+						assert.Contains(t, output, "--force")
+						assert.Contains(t, output, "--no-input")
+					}
 					after, err := os.ReadFile(configPath)
 					require.NoError(t, err)
 					assert.Equal(t, before, after, "missing consent must preserve the installation")
@@ -442,6 +455,29 @@ func TestNoInputCLI(t *testing.T) {
 		assert.Equal(t, payload, result.Input)
 		assert.Equal(t, payload, result.Output)
 	})
+}
+
+// Reject unexpected arguments before any command handler can authenticate,
+// modify a repository, start the daemon, or attempt an upgrade.
+func TestUnexpectedArgumentsCLI(t *testing.T) {
+	skipIntegration(t)
+	oxBin := testguard.BuildOxBinary(t, repoPath("..", ".."))
+	for _, command := range []string{"init", "login", "logout", "uninstall", "sync", "upgrade", "doctor"} {
+		t.Run(command, func(t *testing.T) {
+			env := noInputCLIEnv(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := testguard.OxCmdContext(t, ctx, oxBin, t.TempDir(), env,
+				command, "unexpected-argument", "--no-input")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			require.NoError(t, ctx.Err(), "stdout: %s\nstderr: %s", stdout.String(), stderr.String())
+			assert.Error(t, err, "stdout: %s\nstderr: %s", stdout.String(), stderr.String())
+			assert.Empty(t, stdout.String(), "argument errors must not produce normal command output")
+			assert.Contains(t, stderr.String(), `unknown command "unexpected-argument" for "ox `+command+`"`)
+		})
+	}
 }
 
 // Project config currently stores one endpoint, so the multi-endpoint chooser
