@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/stretchr/testify/require"
@@ -119,6 +120,160 @@ func TestCollectInstalledSkills_AnUnreadableRootIsReportedNotSilentlyEmpty(t *te
 		require.Contains(t, got.Problems[0], ".agents/skills")
 		require.Equal(t, got.Problems[0], got.Guidance,
 			"a root ox cannot read must become the next action, not a footnote")
+	})
+}
+
+// TestCollectInstalledSkills_WillNotReadThroughARootOutsideTheRepository.
+//
+// The customer failure this prevents: `ox skills list` in a repository someone
+// else authored reads, and PRINTS, SKILL.md files from somewhere else on the
+// reader's machine. A skill root is repository-controlled — it comes out of the
+// committed lockfile — and a repository can ship that root as a symlink. Only
+// the root STRING is validated anywhere, so the escape happens at resolution
+// time, after every check has already passed.
+func TestCollectInstalledSkills_WillNotReadThroughARootOutsideTheRepository(t *testing.T) {
+	const stolenDescription = "secrets from outside the repository"
+
+	// plantEscapingRoot returns a repo whose only selected skill root is a
+	// symlink to a directory outside it holding a real, readable skill.
+	plantEscapingRoot := func(t *testing.T, absolute bool) string {
+		t.Helper()
+		base := t.TempDir()
+		repo, outside := filepath.Join(base, "repo"), filepath.Join(base, "outside")
+		require.NoError(t, os.MkdirAll(filepath.Join(outside, "stolen"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(outside, "stolen", "SKILL.md"),
+			[]byte(manifestWithDescription("stolen", stolenDescription)), 0o644))
+		require.NoError(t, os.MkdirAll(filepath.Join(repo, ".claude"), 0o755))
+
+		target := outside
+		if !absolute {
+			// The realistic shape: a relative link a repository can actually commit.
+			target = filepath.Join("..", "..", "outside")
+		}
+		require.NoError(t, os.Symlink(target, filepath.Join(repo, ".claude", "skills")))
+		return repo
+	}
+
+	for _, tc := range []struct {
+		name     string
+		absolute bool
+	}{
+		{name: "absolute symlink", absolute: true},
+		{name: "relative symlink", absolute: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := collectInstalledSkills(plantEscapingRoot(t, tc.absolute), []string{".claude/skills"})
+
+			require.Empty(t, got.Skills,
+				"ox followed a skill root out of the repository and inventoried what it found there")
+			require.Len(t, got.Problems, 1,
+				"a root ox refuses to read must be reported: refusing silently renders the same as an empty root")
+
+			for _, asJSON := range []bool{false, true} {
+				var buf strings.Builder
+				require.NoError(t, emitSkillsList(&buf, got, asJSON))
+				require.NotContains(t, buf.String(), stolenDescription,
+					"json=%v: a SKILL.md description from outside the repository reached the reader", asJSON)
+				require.NotContains(t, buf.String(), "stolen",
+					"json=%v: a skill name from outside the repository reached the reader", asJSON)
+			}
+		})
+	}
+}
+
+// TestEmitSkillsList_RepositoryControlledTextCannotForgeTerminalOutput.
+//
+// The customer failure this prevents: running `ox skills list` in a repository
+// someone else authored lets that repository write arbitrary escape sequences
+// to the terminal. A skill directory name and a lockfile skill root are both
+// chosen by the repository, and both are printed verbatim. On a POSIX terminal
+// an embedded OSC can rewrite the window title or push text into the clipboard,
+// and a CSI can erase and reforge the rest of the row — so the table stops being
+// evidence of what is installed.
+func TestEmitSkillsList_RepositoryControlledTextCannotForgeTerminalOutput(t *testing.T) {
+	// An OSC (title set, BEL-terminated) followed by a CSI (erase line): between
+	// them, everything a hostile name needs to both act and hide.
+	const hostileName = "evil\x1b]0;pwned\x07\x1b[2Kskill"
+
+	rowContaining := func(t *testing.T, rendered, needle string) string {
+		t.Helper()
+		for _, line := range strings.Split(rendered, "\n") {
+			if strings.Contains(line, needle) {
+				return line
+			}
+		}
+		require.FailNowf(t, "row not found",
+			"the skill vanished from the table instead of being rendered safely: %q", rendered)
+		return ""
+	}
+
+	t.Run("a hostile skill directory name is scrubbed at the cell", func(t *testing.T) {
+		repo := t.TempDir()
+		writeSkillDir(t, repo, ".claude/skills", hostileName, manifestWithDescription("evil", "looks harmless"))
+
+		got := collectInstalledSkills(repo, []string{".claude/skills"})
+
+		require.Len(t, got.Skills, 1)
+		require.Equal(t, hostileName, got.Skills[0].Name,
+			"the STORED name must stay the real directory name: it is a map key here and is what "+
+				"refuseSkillsOxDoesNotOwn matches a user's argument against")
+
+		var buf strings.Builder
+		require.NoError(t, emitSkillsList(&buf, got, false))
+
+		row := rowContaining(t, buf.String(), "evil")
+		for _, r := range row {
+			require.True(t, unicode.IsPrint(r),
+				"the rendered row carries control byte %q, so the repository can forge terminal output: %q", r, row)
+		}
+		// The inert remains of the sequences stay: sanitizeCell drops the bytes a
+		// terminal ACTS on and keeps everything a reader can see, so the row still
+		// identifies the directory rather than turning into a blank.
+		require.Contains(t, row, "evil]0;pwned[2Kskill",
+			"the row must still name the skill — only the control bytes should be gone")
+	})
+
+	t.Run("control bytes are removed before the cell is clipped", func(t *testing.T) {
+		// Clipping first spends the whole name column on bytes that render as
+		// nothing, so the reader sees a name cut far shorter than the column is
+		// wide — and the clip can land in the middle of an escape sequence.
+		name := strings.Repeat("\x1b", nameColumn) + "visible-name"
+		repo := t.TempDir()
+		writeSkillDir(t, repo, ".claude/skills", name, manifestWithDescription("v", "d"))
+
+		var buf strings.Builder
+		require.NoError(t, emitSkillsList(&buf, collectInstalledSkills(repo, []string{".claude/skills"}), false))
+
+		require.Contains(t, rowContaining(t, buf.String(), "visible"), "visible-name",
+			"the name was clipped before it was sanitized, so the column budget went to invisible bytes")
+	})
+
+	t.Run("a hostile skill root cannot forge the problem line", func(t *testing.T) {
+		repo := t.TempDir()
+		root := "evil\x1b]0;pwned\x07root"
+		// A regular file where a directory belongs: the existing "root ox cannot
+		// read" path, reached with a repository-controlled name.
+		require.NoError(t, os.WriteFile(filepath.Join(repo, root), []byte("not a directory"), 0o644))
+
+		got := collectInstalledSkills(repo, []string{root})
+
+		require.Len(t, got.Problems, 1)
+		for _, r := range got.Problems[0] {
+			require.True(t, unicode.IsPrint(r) || r == ' ',
+				"the problem line carries control byte %q: %q", r, got.Problems[0])
+		}
+	})
+
+	t.Run("a hostile skill root cannot forge the guidance line", func(t *testing.T) {
+		// A selected root that was never materialized: no problem, but the guidance
+		// names the roots so the reader knows where ox looked.
+		got := collectInstalledSkills(t.TempDir(), []string{"evil\x1b]0;pwned\x07/skills"})
+
+		require.Empty(t, got.Problems)
+		for _, r := range got.Guidance {
+			require.True(t, unicode.IsPrint(r) || r == ' ',
+				"the guidance line carries control byte %q: %q", r, got.Guidance)
+		}
 	})
 }
 

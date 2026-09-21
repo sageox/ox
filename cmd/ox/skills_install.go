@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -59,10 +60,16 @@ const (
 // written there — see teamdocs.SkillRoots.
 const teamSkillsPublishRoot = "agents/skills"
 
-// teamPublishTimeout bounds the two git invocations against the Team Context.
-// Matches the other two commands that write into that checkout (ox coworker add,
-// ox memory put); it is generous for a local commit and short enough that a
+// teamPublishTimeout bounds the whole Team Context transaction: the wait for the
+// repository lock, the file writes it guards, and the git invocations that record
+// them. Matches the other two commands that write into that checkout (ox coworker
+// add, ox memory put); it is generous for a local commit and short enough that a
 // wedged index does not hang a terminal indefinitely.
+//
+// Deliberately shorter than gitutil.RepoLockTimeout, which is sized for a daemon
+// that can afford to wait two minutes for a peer. A human at a terminal cannot:
+// "the Team Context is busy, try again" after 30 seconds is a better answer than
+// a prompt that appears to have hung.
 const teamPublishTimeout = 30 * time.Second
 
 var skillsInstallCmd = &cobra.Command{
@@ -357,8 +364,9 @@ func publishCatalogSkillsToTeam(repoRoot string, names []string) (skillsChangeOu
 	}
 	out.TeamContext = tc.Path
 
-	// Everything is resolved and refused BEFORE a byte is written, so a run naming
-	// several skills is all-or-nothing.
+	// Resolve every catalog input before taking the Team Context lock. On-disk
+	// collision checks happen again inside the lock below: two publishers can both
+	// observe an absent directory before either has acquired the lock.
 	type seed struct {
 		name   string
 		relDir string
@@ -372,15 +380,6 @@ func publishCatalogSkillsToTeam(repoRoot string, names []string) (skillsChangeOu
 			return out, fmt.Errorf("%q is not a name a Team Context can carry", name)
 		}
 		relDir := path.Join(teamSkillsPublishRoot, name)
-		absDir := filepath.Join(tc.Path, filepath.FromSlash(relDir))
-		switch _, statErr := os.Stat(absDir); {
-		case statErr == nil:
-			return out, fmt.Errorf("%q is already published at %s in your Team Context — ox seeds a team copy once and never writes over it. Edit it there, or delete it first%s",
-				name, relDir, nothingChangedSuffix(names))
-		case !errors.Is(statErr, fs.ErrNotExist):
-			return out, fmt.Errorf("inspect %s: %w", absDir, statErr)
-		}
-
 		files, readErr := catalogSkillFiles(name)
 		if readErr != nil {
 			return out, readErr
@@ -391,48 +390,168 @@ func publishCatalogSkillsToTeam(repoRoot string, names []string) (skillsChangeOu
 		seeds = append(seeds, seed{name: name, relDir: relDir, files: files})
 	}
 
-	for _, s := range seeds {
-		absDir := filepath.Join(tc.Path, filepath.FromSlash(s.relDir))
-		for _, file := range s.files {
-			dest := filepath.Join(absDir, filepath.FromSlash(file.Path))
-			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-				return out, fmt.Errorf("create %s: %w", filepath.Dir(dest), err)
-			}
-			if err := os.WriteFile(dest, file.Content, 0o644); err != nil {
-				return out, fmt.Errorf("write %s: %w", dest, err)
-			}
-			// Per FILE, matching what the install path reports. A caller diffing the
-			// two runs should not have to know that one lists directories.
-			out.Written = append(out.Written, path.Join(s.relDir, file.Path))
-		}
-		out.Skills = append(out.Skills, skillChangeRow{
-			Name: s.name, State: skillChangePublished, Detail: s.relDir,
-		})
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), teamPublishTimeout)
+	defer cancel()
 
-	relPaths := make([]string, 0, len(seeds))
-	for _, s := range seeds {
-		relPaths = append(relPaths, s.relDir)
-	}
-	if err := recordTeamPublish(tc.Path, relPaths, names); err != nil {
-		return out, err
+	// ONE critical section, from the first byte written to the commit that records
+	// it — the advisory lock every mutating operation on a managed clone takes
+	// (ADR-030 D1), including the daemon's own fetch, pull and rebase of this same
+	// Team Context.
+	//
+	// It starts at the WRITES, not at the first `git add`, for two reasons. A
+	// daemon rebase landing in the gap would be reconciling a tree already full of
+	// untracked files it knows nothing about. And the rollback below has to put
+	// the index back under the same lock it was disturbed under — WithRepoLock is
+	// not re-entrant, so a rollback that acquired it again would block on itself
+	// until the deadline and then leave the mess it was called to clean up.
+	acquired := false
+	lockErr := gitutil.WithRepoLock(ctx, tc.Path, func() error {
+		acquired = true
+
+		// This check is part of the critical section, not just a pre-flight. If two
+		// publishers queued for the same name, the second must see the first one's
+		// commit and refuse before writing. Lstat also treats a broken symlink as an
+		// existing path instead of following it into a write outside the checkout.
+		for _, s := range seeds {
+			absDir := filepath.Join(tc.Path, filepath.FromSlash(s.relDir))
+			switch _, statErr := os.Lstat(absDir); {
+			case statErr == nil:
+				return fmt.Errorf("%q is already published at %s in your Team Context — ox seeds a team copy once and never writes over it. Edit it there, or delete it first%s",
+					s.name, s.relDir, nothingChangedSuffix(names))
+			case !errors.Is(statErr, fs.ErrNotExist):
+				return fmt.Errorf("inspect %s: %w", absDir, statErr)
+			}
+		}
+
+		// Past this point the Team Context holds bytes no commit carries yet. A
+		// seed left behind is not a stray file: the pre-flight above refuses a
+		// directory that already exists, so the next attempt is told the skill is
+		// "already published" to a team that has never seen it. The deferred
+		// rollback, rather than a call at each return, is what makes that true of
+		// every failure path below — including ones added later.
+		//
+		// seededDirs is appended to BEFORE the first byte of each directory is
+		// written, so a failure part-way through one seed still takes it back.
+		seededDirs := make([]string, 0, len(seeds))
+		committed := false
+		defer func() {
+			if !committed {
+				rollbackTeamSeeds(tc.Path, seededDirs)
+			}
+		}()
+
+		for _, s := range seeds {
+			seededDirs = append(seededDirs, s.relDir)
+			absDir := filepath.Join(tc.Path, filepath.FromSlash(s.relDir))
+			for _, file := range s.files {
+				dest := filepath.Join(absDir, filepath.FromSlash(file.Path))
+				if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+					return fmt.Errorf("create %s: %w", filepath.Dir(dest), err)
+				}
+				if err := os.WriteFile(dest, file.Content, 0o644); err != nil {
+					return fmt.Errorf("write %s: %w", dest, err)
+				}
+				// Per FILE, matching what the install path reports. A caller diffing the
+				// two runs should not have to know that one lists directories.
+				out.Written = append(out.Written, path.Join(s.relDir, file.Path))
+			}
+			out.Skills = append(out.Skills, skillChangeRow{
+				Name: s.name, State: skillChangePublished, Detail: s.relDir,
+			})
+		}
+
+		if err := recordTeamPublish(ctx, tc.Path, seededDirs, names); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	})
+	if lockErr != nil {
+		// Only when fn never ran: an error raised INSIDE it can carry a context
+		// deadline of its own, and IsRepoLockBusy cannot tell the two apart. Told
+		// "publish failed" for a clone that is merely busy, a human goes looking for
+		// damage that is not there; told "it is syncing" when the commit actually
+		// failed, they retry forever.
+		if !acquired && gitutil.IsRepoLockBusy(lockErr) {
+			return out, fmt.Errorf("your Team Context at %s is syncing right now, so ox did not publish into it — try again in a moment", tc.Path)
+		}
+		return out, lockErr
 	}
 
 	out.Guidance = skillsChangeGuidance(out)
 	return out, nil
 }
 
+// rollbackTeamSeeds puts the Team Context back the way this publish found it:
+// the seeded directories gone from disk, and their paths out of the index.
+//
+// Best effort, and deliberately unable to report failure. It only ever runs on a
+// path that already has a real error to tell the human about, and an error about
+// the handling of an error is how the cause gets lost. Whatever it cannot undo is
+// logged, and nothing else.
+//
+// Removing each directory whole is both complete and safe, and it is the
+// collision check in publishCatalogSkillsToTeam that makes it so: it refuses
+// every name whose directory already exists, UNDER THE SAME LOCK, so everything
+// on disk underneath a seeded directory was written by this invocation. Move
+// that check back outside the lock and this turns into a delete of a peer's
+// freshly committed files.
+//
+// The index is a separate question — a Team Context is a sparse checkout, where a
+// path can be in the index and absent from disk — so it is restored from HEAD
+// rather than assumed to have been empty.
+//
+// The caller holds the repository lock; this does not take it (WithRepoLock is
+// not re-entrant).
+func rollbackTeamSeeds(teamPath string, relDirs []string) {
+	if len(relDirs) == 0 {
+		return
+	}
+	for _, rel := range relDirs {
+		absDir := filepath.Join(teamPath, filepath.FromSlash(rel))
+		if err := os.RemoveAll(absDir); err != nil {
+			slog.Warn("team publish rollback incomplete", "step", "remove", "path", absDir, "error", err)
+		}
+	}
+
+	// A FRESH deadline, not the caller's. An expired context is one of the very
+	// failures this rollback exists to clean up after, and reusing it would leave
+	// the seed behind exactly when it matters most.
+	ctx, cancel := context.WithTimeout(context.Background(), teamPublishTimeout)
+	defer cancel()
+
+	// `git reset` needs a commit to restore the index entries FROM. A Team Context
+	// that exists but has never been committed into has no HEAD, and `reset HEAD`
+	// there is a fatal on older git; every entry under these paths was staged by
+	// this invocation anyway, so drop them outright instead.
+	//
+	// --sparse on that drop is mandatory and is NOT symmetric with the reset:
+	// `git rm --cached --ignore-unmatch` without it exits 0 having done NOTHING to
+	// a path outside the sparse cone — which is every path this command stages.
+	// A rollback that silently succeeds at nothing is worse than no rollback.
+	unstage := []string{"reset", "--quiet", "HEAD", "--"}
+	if _, err := gitutil.RunGit(ctx, teamPath, "rev-parse", "--verify", "--quiet", "HEAD"); err != nil {
+		unstage = []string{"rm", "--cached", "-r", "--quiet", "--ignore-unmatch", "--sparse", "--"}
+	}
+	if _, err := gitutil.RunGit(ctx, teamPath, append(unstage, relDirs...)...); err != nil {
+		slog.Warn("team publish rollback incomplete", "step", "unstage", "team_context", teamPath, "error", err)
+	}
+}
+
 // recordTeamPublish writes the new files into the Team Context's own history so
-// a teammate's next sync sees them.
+// a teammate's next sync sees them. The caller holds the repository lock and owns
+// the deadline; this takes neither.
 //
 // Deliberately does NOT push. Nothing in cmd/ox pushes a team context; the
 // daemon owns that leg, and a command that pushed here would fail on every
 // machine whose credentials are not loaded — after having already written the
 // files, leaving the human with a half-finished publish and a git error.
-func recordTeamPublish(teamPath string, relPaths, names []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), teamPublishTimeout)
-	defer cancel()
-
+//
+// NOT gitutil.CommitLedgerSnapshot, which looks like the same job: that helper
+// carries Ledger blob validation and the ADR-024 sacred-deletion backstop, and
+// neither governs a Team Context. Borrowing it would apply one repository kind's
+// rules to another's history.
+func recordTeamPublish(ctx context.Context, teamPath string, relPaths, names []string) error {
 	for _, rel := range relPaths {
 		// --sparse is mandatory: a Team Context is a sparse checkout, and without
 		// it git refuses to stage a path outside the sparse definition — which is
@@ -441,8 +560,14 @@ func recordTeamPublish(teamPath string, relPaths, names []string) error {
 			return fmt.Errorf("record %s in the Team Context: %w", rel, err)
 		}
 	}
+	// Scoped to the paths this invocation staged. A Team Context is a checkout a
+	// human also works in, so its index can already hold a change of theirs; a
+	// bare `git commit` would carry that into the team's history under a message
+	// about a skill, authored by them and pushed by the daemon. `--` keeps a path
+	// that happens to look like a revision from being read as one.
 	message := "add team skill: " + strings.Join(names, ", ")
-	if _, err := gitutil.RunGit(ctx, teamPath, "commit", "-m", message); err != nil {
+	args := append([]string{"commit", "-m", message, "--"}, relPaths...)
+	if _, err := gitutil.RunGit(ctx, teamPath, args...); err != nil {
 		return fmt.Errorf("record the published skills in the Team Context: %w", err)
 	}
 	return nil

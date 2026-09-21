@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -43,6 +46,40 @@ func TestCollectSkillsCatalog_SeparatesWhatIsHereFromWhatCouldBe(t *testing.T) {
 		"the opt-in bundle must not report itself as a default or nothing is ever available")
 	require.True(t, bundles["core"].Default)
 	require.NotEmpty(t, bundles["team"].Description, "a bundle with no description cannot be chosen")
+}
+
+// TestCollectSkillsCatalog_UnreadableRootFailsInsteadOfPublishingAnIncompleteCatalog.
+//
+// collectInstalledSkills reports a root it genuinely could not read in
+// .Problems, separately from .Skills. Reading only .Skills — as this function
+// once did — would take the silence at face value: a skill sitting in that
+// unreadable root is invisible to `installed`, so it comes back "available"
+// and the guidance tells the reader to install something they already have.
+// The fix is to fail the whole catalog rather than answer confidently with a
+// hole in it; `ox skills list` already owns partial reporting for this exact
+// condition.
+func TestCollectSkillsCatalog_UnreadableRootFailsInsteadOfPublishingAnIncompleteCatalog(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod does not deny reads on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod does not deny reads")
+	}
+
+	repo := t.TempDir()
+	const root = ".claude/skills"
+	writeSkillDir(t, repo, root, "ox-cli-plan", manifestWithDescription("ox-cli-plan", "plan things"))
+
+	rootDir := filepath.Join(repo, filepath.FromSlash(root))
+	require.NoError(t, os.Chmod(rootDir, 0o000))
+	// Restore before TempDir cleanup tries to remove it, and restore it even if
+	// the assertions below fail first.
+	t.Cleanup(func() { _ = os.Chmod(rootDir, 0o755) })
+
+	_, err := collectSkillsCatalog(repo, []string{root})
+	require.Error(t, err,
+		"a skill sitting in a root ox could not read must not be silently reported as available")
+	require.Contains(t, err.Error(), root, "the error must name which root ox could not read")
 }
 
 // TestCollectSkillsCatalog_EveryShippedSkillHasADescription.

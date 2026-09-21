@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -132,50 +134,7 @@ func resolveSkillRoots(repoRoot string) ([]string, error) {
 // process.
 func collectInstalledSkills(repoRoot string, roots []string) skillsListOutput {
 	out := skillsListOutput{Roots: dedupeStrings(roots), Skills: []installedSkillRow{}, Problems: []string{}}
-
-	// Indexed by name, not by (root, name): the same skill in two roots is one
-	// skill with two homes, and two rows would read as two skills.
-	byName := map[string]*installedSkillRow{}
-	for _, root := range out.Roots {
-		dir := filepath.Join(repoRoot, filepath.FromSlash(root))
-		entries, err := os.ReadDir(dir)
-		if os.IsNotExist(err) {
-			// A selected root that was never materialized is a normal state for a
-			// fresh checkout, and `ox skills status` is the surface that explains it.
-			continue
-		}
-		if err != nil {
-			// Not silently empty: an unreadable root and an empty one look identical
-			// in the table, and they need opposite fixes.
-			out.Problems = append(out.Problems, fmt.Sprintf("ox could not read the skills directory %s: %v", root, err))
-			continue
-		}
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			manifest := filepath.Join(dir, entry.Name(), skills.SkillFileName)
-			info, statErr := os.Lstat(manifest)
-			if statErr != nil || !info.Mode().IsRegular() {
-				continue // not a skill, or a manifest ox will not read through a symlink
-			}
-			row, ok := byName[entry.Name()]
-			if !ok {
-				row = &installedSkillRow{
-					Name:        entry.Name(),
-					Provenance:  skillProvenance(entry.Name()),
-					Description: manifestDescriptionFile(manifest),
-					Roots:       []string{},
-				}
-				byName[entry.Name()] = row
-			}
-			row.Roots = append(row.Roots, root)
-		}
-	}
-
-	for _, row := range byName {
-		out.Skills = append(out.Skills, *row)
-	}
+	out.Skills, out.Problems = inventorySkillRoots(repoRoot, out.Roots)
 	sort.Slice(out.Skills, func(i, j int) bool {
 		if a, b := provenanceRank[out.Skills[i].Provenance], provenanceRank[out.Skills[j].Provenance]; a != b {
 			return a < b
@@ -184,6 +143,124 @@ func collectInstalledSkills(repoRoot string, roots []string) skillsListOutput {
 	})
 	out.Guidance = skillsListGuidance(out)
 	return out
+}
+
+// inventorySkillRoots walks the selected roots and returns one row per skill
+// found, plus a line for every root it could not read.
+//
+// Every read below goes through a handle pinned to repoRoot rather than through
+// a joined path, and that is a security property rather than a style choice.
+// CanonicalizeTargets vets the root STRING; nothing vets what the string
+// RESOLVES to. A repository that ships `.claude/skills` as a symlink out of the
+// checkout would have os.ReadDir follow it without complaint, and `ox skills
+// list` would then publish some unrelated directory's SKILL.md descriptions to
+// stdout and to --json — a repository-controlled read of files nobody asked
+// about. os.Root resolves each component against the held descriptor and
+// refuses any resolution that leaves the tree, so the escape is impossible
+// rather than merely narrow: the swap has no window to land in.
+//
+// The per-component Lstat-and-identity-check dance skillmanager.openRepoDir
+// performs is deliberately NOT repeated here. That code is about to WRITE files
+// ox owns, so it refuses any symlinked component outright; this one only reads,
+// and a link that resolves back inside the repository is still the
+// repository's own content.
+func inventorySkillRoots(repoRoot string, roots []string) ([]installedSkillRow, []string) {
+	rows := []installedSkillRow{}
+	problems := []string{}
+
+	repo, err := os.OpenRoot(repoRoot)
+	if err != nil {
+		return rows, append(problems,
+			sanitizeCell(fmt.Sprintf("ox could not open this repository to inventory its skills: %v", err)))
+	}
+	defer func() { _ = repo.Close() }()
+
+	// Indexed by name, not by (root, name): the same skill in two roots is one
+	// skill with two homes, and two rows would read as two skills.
+	byName := map[string]*installedSkillRow{}
+	for _, root := range roots {
+		found, readErr := readSkillRoot(repo, root)
+		if errors.Is(readErr, fs.ErrNotExist) {
+			// A selected root that was never materialized is a normal state for a
+			// fresh checkout, and `ox skills status` is the surface that explains it.
+			continue
+		}
+		if readErr != nil {
+			// Not silently empty: an unreadable root and an empty one look identical
+			// in the table, and they need opposite fixes. A root that resolves
+			// outside the repository arrives here too, and saying so out loud beats
+			// both reading it and dropping it without a word.
+			problems = append(problems, skillRootProblem(root, readErr))
+			continue
+		}
+		for _, skill := range found {
+			row, ok := byName[skill.name]
+			if !ok {
+				row = &installedSkillRow{
+					Name:        skill.name,
+					Provenance:  skillProvenance(skill.name),
+					Description: skill.description,
+					Roots:       []string{},
+				}
+				byName[skill.name] = row
+			}
+			row.Roots = append(row.Roots, root)
+		}
+	}
+	for _, row := range byName {
+		rows = append(rows, *row)
+	}
+	return rows, problems
+}
+
+// skillOnDisk is one directory under a skill root that carries a manifest ox
+// will actually read.
+type skillOnDisk struct {
+	name        string
+	description string
+}
+
+// readSkillRoot enumerates one selected root through a handle pinned inside
+// repo. A root that does not exist comes back as fs.ErrNotExist so the caller
+// can keep that case silent; everything else is a genuine problem to report.
+func readSkillRoot(repo *os.Root, root string) ([]skillOnDisk, error) {
+	dir, err := repo.OpenRoot(filepath.FromSlash(root))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = dir.Close() }()
+
+	entries, err := fs.ReadDir(dir.FS(), ".")
+	if err != nil {
+		return nil, err
+	}
+	found := make([]skillOnDisk, 0, len(entries))
+	for _, entry := range entries {
+		// IsDir is Lstat-shaped on a directory listing, so a symlinked "skill
+		// directory" simply is not one — the same answer ox gives a symlinked
+		// manifest below.
+		if !entry.IsDir() {
+			continue
+		}
+		description, isSkill := skillManifestDescription(dir, entry.Name())
+		if !isSkill {
+			continue
+		}
+		found = append(found, skillOnDisk{name: entry.Name(), description: description})
+	}
+	return found, nil
+}
+
+// skillRootProblem phrases an unreadable skill root for a human.
+//
+// The root name is authored by the committed lockfile and the error text
+// carries it again, so both halves of this sentence are repository-controlled
+// and both are written straight to a terminal — the same control-byte hazard
+// sanitizeCell exists for on the description column. Sanitizing the finished
+// sentence rather than only the root is what covers the path the os.Root error
+// brings along with it.
+func skillRootProblem(root string, err error) string {
+	return sanitizeCell(fmt.Sprintf("ox could not read the skills directory %s: %v", root, err))
 }
 
 // skillProvenance answers "who owns this directory?"
@@ -224,7 +301,14 @@ func skillsListGuidance(out skillsListOutput) string {
 		return "This repository has not selected an AI coworker, so no skills are installed — run `ox init`."
 	}
 	if len(out.Skills) == 0 {
-		return "No skills are installed in " + strings.Join(out.Roots, ", ") + " — run `ox skills catalog` to see what ox ships."
+		// The roots are lockfile-authored, so naming them here carries the same
+		// control-byte hazard as a skill directory name, and this sentence is
+		// written straight to the terminal.
+		safe := make([]string, 0, len(out.Roots))
+		for _, root := range out.Roots {
+			safe = append(safe, sanitizeCell(root))
+		}
+		return "No skills are installed in " + strings.Join(safe, ", ") + " — run `ox skills catalog` to see what ox ships."
 	}
 	counts := map[string]int{}
 	for _, row := range out.Skills {
@@ -244,8 +328,20 @@ func emitSkillsList(w io.Writer, out skillsListOutput, asJSON bool) error {
 		p("%s", cli.StyleAccent.Render(fmt.Sprintf("%-*s  %-*s  %s",
 			provenanceColumn, "PROVENANCE", nameColumn, "NAME", "DESCRIPTION")))
 		for _, row := range out.Skills {
+			// Sanitized HERE and not on the way in: Name is the real on-disk
+			// directory name everywhere else — a map key in this file, and what
+			// refuseSkillsOxDoesNotOwn matches a user's argument against — so a
+			// scrubbed copy stored in the struct would quietly stop matching the
+			// directory it names. It is also a name ox did not choose: a checked-out
+			// repository can hold a skill directory whose name embeds CSI or OSC
+			// bytes, which on a POSIX terminal can forge a row, rewrite the window
+			// title, or push text into the clipboard. Sanitizing BEFORE truncating
+			// matters twice: the clip cannot land mid-escape-sequence, and the column
+			// budget is spent on characters the reader can actually see.
+			//
+			// --json needs none of this; encoding/json escapes control bytes itself.
 			p("%-*s  %-*s  %s", provenanceColumn, row.Provenance,
-				nameColumn, truncateCell(row.Name, nameColumn),
+				nameColumn, truncateCell(sanitizeCell(row.Name), nameColumn),
 				truncateCell(row.Description, listDescriptionColumn))
 		}
 	}
@@ -320,16 +416,50 @@ func encodeSkillsJSON(w io.Writer, payload any) error {
 	return enc.Encode(payload)
 }
 
-// manifestDescriptionFile reads a SKILL.md's description, tolerating an
-// unreadable file: a listing must not fail because one skill's manifest is
-// missing a permission bit.
-func manifestDescriptionFile(path string) string {
-	data, err := os.ReadFile(path)
+// skillManifestDescription reads one skill's SKILL.md through a handle pinned
+// to that skill's own directory, and reports whether the directory is a skill
+// at all. A directory with no manifest is not one — otherwise a skill's own
+// references/ subdirectory would be listed as a skill in its own right.
+//
+// The Lstat decides the no-symlink policy and the SameFile check is what makes
+// the decision stick. Lstat-then-read is two syscalls, and in the window
+// between them the manifest can be replaced by a symlink that the read would
+// follow; comparing the file ox actually opened against the one it inspected
+// collapses that window into a refusal. skillmanager.inspectRootFile performs
+// the same dance for the files ox owns. It is not shared with this because the
+// two disagree about what a refusal MEANS: there, a file ox cannot read is
+// fatal, because ox is about to reconcile it; here it is an answer, because
+// whatever that directory holds, it is not a skill this listing can describe.
+func skillManifestDescription(rootDir *os.Root, name string) (description string, isSkill bool) {
+	dir, err := rootDir.OpenRoot(name)
 	if err != nil {
-		return ""
+		return "", false
 	}
-	description, _ := manifestDescription(data)
-	return description
+	defer func() { _ = dir.Close() }()
+
+	info, err := dir.Lstat(skills.SkillFileName)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false // not a skill, or a manifest ox will not read through a symlink
+	}
+	// Past this point the directory IS a skill — a regular SKILL.md is what makes
+	// one — so every remaining failure costs the description and never the row. A
+	// listing must not drop a skill because its manifest is missing a permission
+	// bit; a row with an empty description is still an answer.
+	file, err := dir.Open(skills.SkillFileName)
+	if err != nil {
+		return "", true
+	}
+	defer func() { _ = file.Close() }()
+	actual, err := file.Stat()
+	if err != nil || !actual.Mode().IsRegular() || !os.SameFile(info, actual) {
+		return "", true // swapped between the Lstat and the open; ox declines to read it
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return "", true
+	}
+	description, _ = manifestDescription(data)
+	return description, true
 }
 
 // manifestDescription extracts `description:` from an Agent Skills manifest.

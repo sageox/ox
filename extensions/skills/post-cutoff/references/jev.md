@@ -147,8 +147,10 @@ wins concentrate where the state is compact and the call count is high.
 
 - **Access:** early access as of 2026-09-15; the docs imply open console signup and it
   is already served through several AI gateways, which is the lowest-friction path. Not
-  GA in any formal sense — no published SLA, no status page, no region list, and rate
-  limits documented as changing without notice.
+  GA in any formal sense — no published SLA, no region list, and rate limits documented
+  as changing without notice. A vendor status page does exist (status.typesafe.ai,
+  covering `api.typesafe.ai` and `console.typesafe.ai`), but a status page reports
+  availability; it does not commit to any.
 - **SDKs: Python and JavaScript/TypeScript only. No official Go SDK and none
   announced.** The wire format is three JSON shapes with no streaming and no tool loop,
   so writing a small client is defensible and lower-risk than adopting a week-old
@@ -160,9 +162,11 @@ wins concentrate where the state is compact and the call count is high.
 - **Set an aggressive per-attempt deadline.** If the claim is sub-second, a 10s client
   default means a hung call blocks your hot path for 10s. Budget total, including
   retries, against whatever your caller's budget actually is.
-- **A fallback is not optional.** No SLA, no status page, and a public outage report
-  already exceeding a default retry budget. Every question needs a deterministic
-  default — the conservative branch — plus a circuit breaker.
+- **A fallback is not optional.** No SLA, a public outage report already exceeding a
+  default retry budget, and a vendor status page whose own 90-day history shows
+  repeated short API outages — 99.86% for `api.typesafe.ai` as of 2026-09-20. Every
+  question needs a deterministic default — the conservative branch — plus a circuit
+  breaker.
 - **Read the terms before any user or customer content goes over the wire.** No-training
   is the documented default; **no-retention is not** and is gated behind an enterprise
   agreement.
@@ -179,7 +183,8 @@ wins concentrate where the state is compact and the call count is high.
   from the vendor's note that extra questions are nearly free.
 - Formal GA status. The launch release says waitlist; the quickstart implies open
   signup; gateways serve it now. Unreconciled.
-- SLA, uptime commitment, status page, region availability.
+- SLA, uptime commitment, region availability. The status page publishes a measured
+  record, not a commitment, and names no regions.
 - Whether failed requests are billed.
 - Minimums or committed-spend tiers.
 - Any independent reproduction of the headline speed multiples.
@@ -189,7 +194,9 @@ wins concentrate where the state is compact and the call count is high.
 ## Sources
 
 Vendor (A): typesafe.ai launch post and manifesto; docs.typesafe.ai — API reference,
-models, primitives, state, confidence, SDKs, legal, model-jaggedness, agent skill.
+models, primitives, state, confidence, SDKs, legal, model-jaggedness, agent skill;
+status.typesafe.ai — 90-day availability history for `api.typesafe.ai` and
+`console.typesafe.ai`.
 Secondary (B): TechCrunch 2026-09-18; The Register 2026-09-16; DataCamp; DCVC funding
 announcement 2026-09-15; Vercel and Cloudflare gateway documentation; published
 independent OOD-calibration and phishing benchmarks with open methodology; Hacker News

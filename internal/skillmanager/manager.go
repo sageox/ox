@@ -687,25 +687,44 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 						actualDigest := digestBytes(data)
 						migrationOwned = migrationOwned || actualDigest == action.PreviousDigest || actualDigest == action.Digest
 					}
-					// A skill whose NAME is in a reserved namespace is ox's by contract,
-					// so an unrecorded copy on disk is reclaimed rather than preserved.
-					// This is the 0.15.0 inversion: preserve-on-edit was right while
-					// these files were TRACKED (an edit showed up in git diff, so it was
-					// visible and plausibly deliberate), and becomes harmful once they
-					// are gitignored — a preserved edit is then permanent silent drift
-					// that no teammate can see and ox can never repair.
-					// The reclaim keys on skill.Name — ox's OWN catalog name, which is
-					// always reserved — so on a case-insensitive filesystem (macOS APFS
-					// by default, and Windows) it would reclaim a directory that is not
-					// actually named a reserved name. A user skill at `OX-CLI-Plan` is
+					// This is the first-install reclaim, and it is the one place ox
+					// takes a file on the strength of its NAME alone: it runs only when
+					// the skill is absent from the lockfile, i.e. exactly when ox holds
+					// no recorded claim on what is sitting there.
+					//
+					// A PREFIXED name is ox's by contract, so an unrecorded copy on disk
+					// is reclaimed rather than preserved. This is the 0.15.0 inversion:
+					// preserve-on-edit was right while these files were TRACKED (an edit
+					// showed up in git diff, so it was visible and plausibly deliberate),
+					// and becomes harmful once they are gitignored — a preserved edit is
+					// then permanent silent drift that no teammate can see and ox can
+					// never repair.
+					//
+					// The predicate is IsReclaimableName, NOT IsReservedName, and the
+					// difference is load-bearing. Reserved-ness also covers unprefixed
+					// catalog names like "post-cutoff", because ox does write and
+					// gitignore those. But an unprefixed name carries no namespace signal
+					// whatsoever — it names what the skill IS, and a repository may
+					// already hold a hand-authored skill at that exact path. Reclaiming
+					// on that basis destroys the only copy of someone's work, reports
+					// nothing, and hides the wreckage behind the ignore entry ox just
+					// wrote. Those names earn ownership only from the three recorded
+					// claims checked directly above — lockfile digest, recovery journal,
+					// legacy stamp — and a same-name stranger falls through to the
+					// conflict-and-preserve branch below.
+					//
+					// The reclaim keys on skill.Name — ox's OWN catalog name, which always
+					// satisfies the predicate — so on a case-insensitive filesystem (macOS
+					// APFS by default, and Windows) it would reclaim a directory that is
+					// not actually named a reserved name. A user skill at `OX-CLI-Plan` is
 					// the same directory on disk as `ox-cli-plan`, but it is theirs:
-					// IsReservedName("OX-CLI-Plan") is false, and git's `skills/ox-cli-*/`
-					// ignore glob is case-sensitive, so it was never even ignored. Without
-					// this check ox overwrites their SKILL.md with its own, reports no
-					// conflict, and the next commit ships ox's content from their tracked
-					// file. Falling through leaves migrationOwned false, which routes to
-					// the conflict-and-preserve branch below.
-					if !migrationOwned && IsReservedName(skill.Name) &&
+					// IsReclaimableName("OX-CLI-Plan") is false, and git's
+					// `skills/ox-cli-*/` ignore glob is case-sensitive, so it was never
+					// even ignored. Without this check ox overwrites their SKILL.md with
+					// its own, reports no conflict, and the next commit ships ox's content
+					// from their tracked file. Falling through leaves migrationOwned false,
+					// which routes to the conflict-and-preserve branch below.
+					if !migrationOwned && IsReclaimableName(skill.Name) &&
 						!caseVariantDirOnDisk(repoRoot, skillRoot, skill.Name) {
 						migrationOwned = true
 					}
@@ -746,12 +765,33 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 				if !owned && migrationOwned && (file.Path == skills.SkillFileName || actualDigest == want) {
 					owned = true
 				}
-				// Inside a reserved namespace ox owns the bytes unconditionally: a
-				// local edit is restored on the next reconcile rather than becoming a
-				// preserved conflict. Editing one of these files to experiment is fine
-				// and expected — truth is restored, nothing is reported. Customizing
-				// means forking to a name of your own OUTSIDE the prefixes.
-				if !owned && IsReservedName(skill.Name) {
+				// The last ownership arm, and the one that decides whether a local edit
+				// is REPAIRED or reported. Three things earn that, and a bare catalog
+				// name is not among them.
+				//
+				// A prefixed name earns it outright: inside a namespace ox declared,
+				// ox owns the bytes unconditionally, so experimenting with one of
+				// these files is fine and expected — truth is restored, nothing is
+				// reported. Customizing means forking to a name of your own OUTSIDE
+				// the prefixes.
+				//
+				// `locked` and `migrationOwned` earn it by RECORD: this exact file has
+				// a lockfile digest, or the skill verified against a legacy stamp or
+				// the recovery journal above. That is what keeps an unprefixed catalog
+				// skill ox genuinely installed repairable — an edit to it is drift in
+				// a gitignored file, exactly the case the 0.15.0 inversion is for.
+				//
+				// Nothing else may reach here, and the reason is a second door into
+				// the reclaim's room. The reclaim runs only when SKILL.md is readable;
+				// when it is ABSENT the whole block is skipped, so a directory ox has
+				// no record of arrives here with migrationOwned false and `locked`
+				// false. Keying on the catalog name alone would then overwrite a
+				// hand-authored sibling — post-cutoff/references/jev.md written by a
+				// human, taken because the folder shares a name with something ox
+				// ships. It falls to conflict-and-preserve below instead. A first
+				// install is unaffected: a file that does not exist routes to Creates
+				// above and never reaches this arm at all.
+				if !owned && (IsReclaimableName(skill.Name) || migrationOwned || locked) {
 					owned = true
 				}
 				if !owned {

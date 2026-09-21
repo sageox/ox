@@ -104,8 +104,22 @@ func runSkillsCatalog(cmd *cobra.Command, _ []string) error {
 // half-installed skill as available here would tell a reader to install
 // something they already have.
 func collectSkillsCatalog(repoRoot string, roots []string) (skillsCatalogOutput, error) {
+	listing := collectInstalledSkills(repoRoot, roots)
+	if len(listing.Problems) > 0 {
+		// A root collectInstalledSkills could not read is invisible to `installed`
+		// below, so a skill sitting in it would come back "available" here even
+		// though it is already on disk — worse than the half-installed case this
+		// function already declines to judge, because the advice is not just
+		// incomplete, it is wrong. A root that simply never got materialized is NOT
+		// a problem (collectInstalledSkills skips that silently), so this only
+		// fires on a genuine read failure. `ox skills list` already owns reporting
+		// that failure alongside whatever it could still read; this command has no
+		// partial mode, so it fails outright instead of guessing.
+		return skillsCatalogOutput{}, fmt.Errorf("%s — fix its permissions, then re-run `ox skills catalog`", listing.Problems[0])
+	}
+
 	installed := map[string]bool{}
-	for _, row := range collectInstalledSkills(repoRoot, roots).Skills {
+	for _, row := range listing.Skills {
 		installed[row.Name] = true
 	}
 

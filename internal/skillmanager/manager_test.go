@@ -1491,3 +1491,128 @@ func TestApplyRefusesWhenTheIgnoreFileIsADirectory(t *testing.T) {
 		require.Empty(t, entries, "ox half-installed skills despite refusing")
 	}
 }
+
+// TestPlan_UnprefixedCatalogNameNeverEatsAHandAuthoredSkill is the data-loss
+// proof for catalog skills that carry NO reserved prefix.
+//
+// "post-cutoff" is named for what it is, not for the binary that ships it, so a
+// repository can already hold a hand-authored skill at exactly that path — the
+// name is ordinary English and nobody was ever told to stay off it. None of the
+// three recorded claims exist here: no lock entry, no recovery-journal entry, no
+// legacy stamp. Claiming the directory on the strength of its NAME therefore
+// destroys work that exists in no other copy, and because the installer also
+// gitignores the directory the loss never appears in `git status` or a diff.
+//
+// Failure prevented: `ox skills install post-cutoff` replaces the user's own
+// post-cutoff SKILL.md with ox's, reports no conflict, and leaves no trace.
+func TestPlan_UnprefixedCatalogNameNeverEatsAHandAuthoredSkill(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	// Exactly what `ox skills install post-cutoff` records: an opt-in NAME, not a
+	// bundle — post-cutoff lives in the non-default "team" bundle.
+	desired := DesiredSkills{Names: []string{"post-cutoff"}, Targets: []string{target.Key}}
+
+	skillPath := filepath.Join(repo, ".agents", "skills", "post-cutoff", "SKILL.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(skillPath), 0o755))
+	handAuthored := []byte("---\nname: post-cutoff\ndescription: notes I wrote myself\n---\nMY RESEARCH NOTES\n")
+	require.NoError(t, os.WriteFile(skillPath, handAuthored, 0o644))
+
+	plan, err := Plan(repo, "1.0.0", desired, targets)
+	require.NoError(t, err)
+	require.Contains(t, conflictPaths(plan.Conflicts), filepath.FromSlash(".agents/skills/post-cutoff/SKILL.md"),
+		"an unrecorded same-name directory must be reported as a conflict, not claimed on the strength of its name")
+	for _, action := range plan.Updates {
+		require.NotEqual(t, ".agents/skills/post-cutoff/SKILL.md", action.Path,
+			"the plan queued an overwrite of a file ox never wrote and has no recorded claim on")
+	}
+
+	require.NoError(t, Apply(plan))
+	after, err := os.ReadFile(skillPath)
+	require.NoError(t, err)
+	// Markers rather than whole-file equality: ox's post-cutoff SKILL.md is
+	// thousands of words, and dumping it makes the failure unreadable.
+	require.Contains(t, string(after), "MY RESEARCH NOTES",
+		"ox destroyed a hand-authored skill it had no recorded claim on")
+	require.NotContains(t, string(after), "Curated facts about tools",
+		"the user's file now holds ox's catalog content")
+}
+
+// TestPlan_InstalledCatalogSkillIsStillRestoredAfterALocalEdit bounds the proof
+// above, and is the reason the first-install reclaim and the per-file ownership
+// rule are two different predicates rather than one.
+//
+// Once ox HAS a recorded claim — the lock entry Apply wrote — an unprefixed
+// catalog skill keeps the 0.15.0 behavior in full: a local edit is restored on
+// the next reconcile rather than hardening into a permanent conflict, because
+// the file is gitignored and a preserved edit would be silent drift no teammate
+// can see. Narrowing what ox may claim on FIRST install must not narrow what ox
+// maintains afterwards.
+func TestPlan_InstalledCatalogSkillIsStillRestoredAfterALocalEdit(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	desired := DesiredSkills{Names: []string{"post-cutoff"}, Targets: []string{target.Key}}
+
+	plan, err := Plan(repo, "1.0.0", desired, targets)
+	require.NoError(t, err)
+	require.NoError(t, Apply(plan))
+
+	skillPath := filepath.Join(repo, ".agents", "skills", "post-cutoff", "SKILL.md")
+	original, err := os.ReadFile(skillPath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(skillPath, append(original, []byte("\nlocal edit\n")...), 0o644))
+
+	plan, err = Plan(repo, "1.0.0", desired, targets)
+	require.NoError(t, err)
+	require.NotContains(t, conflictPaths(plan.Conflicts), filepath.FromSlash(".agents/skills/post-cutoff/SKILL.md"),
+		"an edit to a skill ox installed must be repaired, not reported as a conflict forever")
+	require.NoError(t, Apply(plan))
+
+	after, err := os.ReadFile(skillPath)
+	require.NoError(t, err)
+	require.NotContains(t, string(after), "local edit",
+		"ox failed to restore the shipped content of a catalog skill it installed")
+}
+
+// TestPlan_UnprefixedCatalogSiblingIsPreservedWhenSkillFileIsAbsent closes the
+// second door into the same room.
+//
+// The first-install reclaim only runs when SKILL.md is READABLE. When it is
+// absent the whole block is skipped, so a directory ox has no record of reaches
+// the per-file loop with nothing recorded about it at all — and the per-file
+// ownership arm would then take a hand-authored sibling on the strength of the
+// catalog name alone. Same defect class as the reclaim, one path over.
+//
+// A directory holding reference material but no manifest is not exotic: it is
+// what a half-written skill looks like, and what a skill looks like mid-rename.
+//
+// Failure prevented: ox overwrites a user's post-cutoff/references/jev.md while
+// reporting nothing, because SKILL.md happened not to exist beside it.
+func TestPlan_UnprefixedCatalogSiblingIsPreservedWhenSkillFileIsAbsent(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	desired := DesiredSkills{Names: []string{"post-cutoff"}, Targets: []string{target.Key}}
+
+	// A path ox genuinely ships, holding content ox did not write — and no
+	// SKILL.md anywhere in the directory, so nothing records a claim.
+	sibling := filepath.Join(repo, ".agents", "skills", "post-cutoff", "references", "jev.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(sibling), 0o755))
+	mine := []byte("# my own notes on jev\n\nMY RESEARCH NOTES\n")
+	require.NoError(t, os.WriteFile(sibling, mine, 0o644))
+
+	plan, err := Plan(repo, "1.0.0", desired, targets)
+	require.NoError(t, err)
+	require.Contains(t, conflictPaths(plan.Conflicts), filepath.FromSlash(".agents/skills/post-cutoff/references/jev.md"),
+		"a hand-authored file ox has no record of must be reported, not claimed because the directory shares a catalog name")
+	for _, action := range plan.Updates {
+		require.NotEqual(t, ".agents/skills/post-cutoff/references/jev.md", action.Path,
+			"the plan queued an overwrite of user content ox has no recorded claim on")
+	}
+
+	require.NoError(t, Apply(plan))
+	after, err := os.ReadFile(sibling)
+	require.NoError(t, err)
+	require.Equal(t, mine, after, "ox destroyed a hand-authored file that merely sat in a catalog-named directory")
+}
