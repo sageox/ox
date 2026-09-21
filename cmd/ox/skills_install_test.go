@@ -62,6 +62,19 @@ func gitInitRepo(t *testing.T, dir string) {
 	}
 }
 
+// chdirOutsideGit establishes and proves the precondition for command tests
+// that exercise repository-discovery failures. GIT_CEILING_DIRECTORIES keeps
+// the test honest even when a developer points TMPDIR somewhere beneath a
+// worktree: Git must stop before inspecting the temporary directory's parent.
+func chdirOutsideGit(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	probe := exec.Command("git", "-C", dir, "rev-parse", "--is-inside-work-tree")
+	require.Error(t, probe.Run(), "fixture must not resolve through an ancestor Git worktree")
+	t.Chdir(dir)
+}
+
 // runSkillsChange drives a command the way a terminal does: cobra parses the
 // flags, cobra validates the positional arguments, and the command's own RunE
 // runs. Anything less does not exercise the flag surface a human types.
@@ -649,13 +662,13 @@ func TestSkillsChangeAdviceNamesCommandsThatExist(t *testing.T) {
 
 func TestSkillsChange_CommandAndErrorBoundaries(t *testing.T) {
 	t.Run("install outside a repository", func(t *testing.T) {
-		t.Chdir(t.TempDir())
+		chdirOutsideGit(t)
 		_, err := runSkillsChange(t, skillsInstallCmd, catalogOptInSkill)
 		require.ErrorContains(t, err, "not inside a git repository")
 	})
 
 	t.Run("uninstall outside a repository", func(t *testing.T) {
-		t.Chdir(t.TempDir())
+		chdirOutsideGit(t)
 		_, err := runSkillsChange(t, skillsUninstallCmd, catalogOptInSkill)
 		require.ErrorContains(t, err, "not inside a git repository")
 	})

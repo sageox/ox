@@ -165,7 +165,7 @@ func TestRunSkillsCatalog_DrivesTheRealCommand(t *testing.T) {
 	})
 
 	t.Run("outside a repository", func(t *testing.T) {
-		t.Chdir(t.TempDir())
+		chdirOutsideGit(t)
 		_, err := runSkillsChange(t, skillsCatalogCmd)
 		require.ErrorContains(t, err, "not inside a git repository")
 	})
