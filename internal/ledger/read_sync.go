@@ -701,6 +701,8 @@ func (b *readBlobs) small(oid string, limit int64) ([]byte, error) {
 	return blob[:size], nil
 }
 
+// close waits for Git to exit at the end of its input, which it reaches only
+// once small has read every answer to its end.
 func (b *readBlobs) close() {
 	_ = b.in.Close()
 	_ = b.cmd.Wait()

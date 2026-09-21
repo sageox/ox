@@ -324,6 +324,31 @@ func TestReadSyncDehydrationRetainsVerifiedObjectsAcrossRetries(t *testing.T) {
 	}
 }
 
+// Failure prevented: a refresh that cannot list the revision it is moving to
+// still turns hydrated files back into pointers, so the failed refresh costs
+// every one of those objects a download again.
+func TestReadSyncDehydrationStopsWhenItsTargetCannotBeListed(t *testing.T) {
+	const path = "sessions/kept/raw.jsonl"
+	content := []byte("hydrated before the refresh\n")
+	f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			grantReadLFSBatch(t, w, r)
+			return
+		}
+		_, _ = w.Write(content)
+	})
+	commitReadLFSPointer(t, f, path, content)
+	ctx := context.Background()
+	require.True(t, ReadSync(ctx, f.opts).Ready)
+	transport, err := gitserver.NewReadTransport(f.opts.Endpoint, f.opts.RepoID, f.opts.ReadURL)
+	require.NoError(t, err)
+
+	require.Error(t, dehydrateReadFiles(ctx, transport, f.opts.Path, "refs/ox/missing", sparseCheckoutDirs()))
+	kept, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+	require.NoError(t, err)
+	require.Equal(t, content, kept, "the hydrated object stays in place")
+}
+
 // Failure prevented: Git's stat cache or the pointer-size optimization hides
 // edits in larger tracked files, including files at the repository root.
 func TestReadSyncVerifiesLargePlainFilesAndRootContent(t *testing.T) {
