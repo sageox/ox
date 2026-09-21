@@ -393,6 +393,33 @@ func TestSkillsListJSON_AlwaysAnswersEveryQuestionItCanAnswer(t *testing.T) {
 	require.NotEmpty(t, got["guidance"], "guidance must travel in the payload for the agents that read it")
 }
 
+// TestRunSkillsList_DrivesTheRealCommand guards the repository and lockfile
+// boundary that the collector tests intentionally bypass.
+func TestRunSkillsList_DrivesTheRealCommand(t *testing.T) {
+	t.Run("json success", func(t *testing.T) {
+		stageInstallRepo(t)
+		out, err := runSkillsChange(t, skillsListCmd, "--json")
+		require.NoError(t, err)
+		var got skillsListOutput
+		require.NoError(t, json.Unmarshal([]byte(out), &got))
+		require.NotEmpty(t, got.Roots)
+		require.NotEmpty(t, got.Skills)
+	})
+
+	t.Run("outside a repository", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		_, err := runSkillsChange(t, skillsListCmd)
+		require.ErrorContains(t, err, "not inside a git repository")
+	})
+
+	t.Run("unreadable selection", func(t *testing.T) {
+		repo := stageInstallRepo(t)
+		require.NoError(t, os.WriteFile(skillmanager.LockPath(repo), []byte("{broken"), 0o644))
+		_, err := runSkillsChange(t, skillsListCmd)
+		require.Error(t, err)
+	})
+}
+
 // TestSkillsListGuidance_NamesCommandsThatExist: promising a command that does
 // not exist is worse than silence.
 func TestSkillsListGuidance_NamesCommandsThatExist(t *testing.T) {

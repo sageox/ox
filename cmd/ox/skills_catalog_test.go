@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/extensions/skills"
+	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/stretchr/testify/require"
 )
 
@@ -140,6 +141,41 @@ func TestSkillsCatalogGuidance_HandsBackARunnableNextAction(t *testing.T) {
 		require.NotContains(t, got, "ox skills install",
 			"telling someone to install when nothing is available is advice that cannot be followed")
 	})
+
+	t.Run("one skill is available", func(t *testing.T) {
+		got := skillsCatalogGuidance(skillsCatalogOutput{Bundles: []catalogBundleGroup{{
+			ID: "team", Skills: []catalogSkillRow{{Name: "post-cutoff", Status: skillAvailable}},
+		}}})
+		require.Contains(t, got, "1 of the 1 skills ox ships is not installed")
+	})
+}
+
+// TestRunSkillsCatalog_DrivesTheRealCommand covers the command boundary rather
+// than only its collector and renderer. The boundary owns repository discovery,
+// lockfile errors, flag parsing, and wiring the result to stdout; any one of
+// those can break while the pure helpers below stay green.
+func TestRunSkillsCatalog_DrivesTheRealCommand(t *testing.T) {
+	t.Run("json success", func(t *testing.T) {
+		stageInstallRepo(t)
+		out, err := runSkillsChange(t, skillsCatalogCmd, "--json")
+		require.NoError(t, err)
+		var got skillsCatalogOutput
+		require.NoError(t, json.Unmarshal([]byte(out), &got))
+		require.NotEmpty(t, got.Bundles)
+	})
+
+	t.Run("outside a repository", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		_, err := runSkillsChange(t, skillsCatalogCmd)
+		require.ErrorContains(t, err, "not inside a git repository")
+	})
+
+	t.Run("unreadable selection", func(t *testing.T) {
+		repo := stageInstallRepo(t)
+		require.NoError(t, os.WriteFile(skillmanager.LockPath(repo), []byte("{broken"), 0o644))
+		_, err := runSkillsChange(t, skillsCatalogCmd)
+		require.Error(t, err)
+	})
 }
 
 // TestEmitSkillsCatalog_FitsEightyColumns, measured on the ANSI-stripped output:
@@ -160,6 +196,18 @@ func TestEmitSkillsCatalog_FitsEightyColumns(t *testing.T) {
 	// would count escape bytes as characters and knock the description out of
 	// alignment on every installed row.
 	require.Contains(t, stripANSI(rendered), "Curated team skills, installed on request")
+}
+
+func TestEmitSkillsCatalog_StylesInstalledRows(t *testing.T) {
+	out := skillsCatalogOutput{
+		Bundles: []catalogBundleGroup{{
+			ID: "team", Description: "Team workflows", Default: false,
+			Skills: []catalogSkillRow{{Name: "post-cutoff", Status: skillInstalled, Description: "Review dates"}},
+		}},
+	}
+	var buf strings.Builder
+	require.NoError(t, emitSkillsCatalog(&buf, out, false))
+	require.Contains(t, stripANSI(buf.String()), "installed")
 }
 
 // TestSkillsCatalogJSON_AlwaysAnswersEveryQuestionItCanAnswer, asserted against

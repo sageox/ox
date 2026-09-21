@@ -1616,3 +1616,185 @@ func TestPlan_UnprefixedCatalogSiblingIsPreservedWhenSkillFileIsAbsent(t *testin
 	require.NoError(t, err)
 	require.Equal(t, mine, after, "ox destroyed a hand-authored file that merely sat in a catalog-named directory")
 }
+
+// installedPostCutoff installs the one unprefixed catalog skill into a scratch
+// repo and returns the repo root, its desired selection, and its targets. The
+// local-state tests below all start from a genuine ox install rather than a
+// hand-built fixture: the whole question is whether ox can recognize its OWN
+// materialized copy, so the copy has to be one ox actually wrote.
+func installedPostCutoff(t *testing.T) (string, DesiredSkills, []adapterprotocol.SkillTarget) {
+	t.Helper()
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	desired := DesiredSkills{Names: []string{"post-cutoff"}, Targets: []string{target.Key}}
+
+	plan, err := Plan(repo, "1.0.0", desired, targets)
+	require.NoError(t, err)
+	require.NoError(t, Apply(plan))
+	require.FileExists(t, filepath.Join(repo, ".agents", "skills", "post-cutoff", "SKILL.md"),
+		"precondition: the skill must be installed before local state can be lost")
+	return repo, desired, targets
+}
+
+// TestPlan_InstalledCatalogSkillSurvivesLocalStateLoss is the durability proof.
+//
+// Per-file ownership digests live in .sageox/cache/skills-state.json, which is
+// machine-local derived data: missing and corrupt both resolve to EMPTY state by
+// design, and that is the right call for a cache. But an unprefixed catalog skill
+// had no other ownership signal, so losing the cache stranded it — ox could no
+// longer tell its own copy from a stranger, reported a conflict forever, and
+// could never ship it an update again. The prefixed skills never had this problem
+// because their name carries the proof.
+//
+// Failure prevented: a customer deletes or corrupts a CACHE file and their
+// post-cutoff skill silently stops receiving updates, permanently.
+func TestPlan_InstalledCatalogSkillSurvivesLocalStateLoss(t *testing.T) {
+	skillPath := filepath.FromSlash(".agents/skills/post-cutoff/SKILL.md")
+	referencePath := ".agents/skills/post-cutoff/references/jev.md"
+
+	for _, tc := range []struct {
+		name    string
+		loseIt  func(t *testing.T, statePath string)
+		summary string
+	}{
+		{
+			name:    "missing",
+			loseIt:  func(t *testing.T, statePath string) { require.NoError(t, os.Remove(statePath)) },
+			summary: "the cache file was deleted",
+		},
+		{
+			name: "corrupt",
+			loseIt: func(t *testing.T, statePath string) {
+				require.NoError(t, os.WriteFile(statePath, []byte("{not json at all"), 0o600))
+			},
+			summary: "the cache file was truncated or corrupted",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, desired, targets := installedPostCutoff(t)
+
+			statePath := filepath.Join(repo, filepath.FromSlash(".sageox/cache/skills-state.json"))
+			require.FileExists(t, statePath, "precondition: a successful apply must have written local state")
+			tc.loseIt(t, statePath)
+
+			// Drift ox must still be able to repair: a supporting file of its own
+			// skill, edited after the state was lost.
+			reference := filepath.Join(repo, filepath.FromSlash(referencePath))
+			require.NoError(t, os.WriteFile(reference, []byte("clobbered\n"), 0o644))
+
+			plan, err := Plan(repo, "1.0.0", desired, targets)
+			require.NoError(t, err)
+			require.NotContains(t, conflictPaths(plan.Conflicts), skillPath,
+				"ox no longer recognizes a skill it installed itself once "+tc.summary)
+
+			var updated bool
+			for _, action := range plan.Updates {
+				if action.Path == referencePath {
+					updated = true
+				}
+			}
+			require.True(t, updated,
+				"ox cannot repair its own catalog skill after "+tc.summary+"; the customer stops receiving updates")
+
+			require.NoError(t, Apply(plan))
+			after, err := os.ReadFile(reference)
+			require.NoError(t, err)
+			require.NotContains(t, string(after), "clobbered", "the repair did not reach disk")
+		})
+	}
+}
+
+// TestPlan_CatalogSkillFromAnOlderReleaseIsStillOxs is the version-independence
+// half, and the reason the ownership signal is a self-verifying stamp rather than
+// "the bytes match what ox ships today".
+//
+// Content equality would recognize only a copy ox wrote from the CURRENT catalog.
+// The case that matters is the opposite one: local state is gone AND the catalog
+// has moved on, so the copy on disk is an older release's. That is precisely when
+// an update is owed, and precisely when a name-blind check would refuse to give
+// it. A stamp covers the body it sits above, so it keeps verifying whatever
+// release wrote it.
+func TestPlan_CatalogSkillFromAnOlderReleaseIsStillOxs(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	desired := DesiredSkills{Names: []string{"post-cutoff"}, Targets: []string{target.Key}}
+
+	// What an earlier ox materialized: its own frontmatter, then a stamp covering
+	// the body that followed it. Built from the agentx primitive rather than from
+	// ox's own writer, so this asserts the on-disk SHAPE and not an implementation.
+	oldBody := []byte("# Post-cutoff\n\nthe 2025 edition of this skill\n")
+	frontmatter := []byte("---\nname: post-cutoff\ndescription: an older release\n---\n")
+	onDisk := append(frontmatter, agentx.StampedContent(oldBody, "0.9.0", stampPrefix)...)
+
+	skillFile := filepath.Join(repo, ".agents", "skills", "post-cutoff", "SKILL.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(skillFile), 0o755))
+	require.NoError(t, os.WriteFile(skillFile, onDisk, 0o644))
+
+	plan, err := Plan(repo, "1.0.0", desired, targets)
+	require.NoError(t, err)
+	require.NotContains(t, conflictPaths(plan.Conflicts), filepath.FromSlash(".agents/skills/post-cutoff/SKILL.md"),
+		"ox refused to recognize a copy an earlier release of ox wrote")
+
+	var updated bool
+	for _, action := range plan.Updates {
+		if action.Path == ".agents/skills/post-cutoff/SKILL.md" {
+			updated = true
+		}
+	}
+	require.True(t, updated, "ox cannot update a catalog skill it installed before the content changed")
+}
+
+// TestPlan_ForgedOrMissingStampNeverEstablishesOwnership is the guard on the fix
+// above, and the regression that would quietly undo the original data-loss fix.
+//
+// A durable ownership signal is only worth having if it is VERIFIED. A stamp
+// whose hash does not cover the body below it proves nothing — that is exactly
+// what a formerly-managed file looks like after a human edits it, and what a
+// copied-and-pasted stamp line looks like. Both must land in conflict-and-preserve
+// alongside the plainly hand-authored case.
+func TestPlan_ForgedOrMissingStampNeverEstablishesOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content []byte
+		why     string
+	}{
+		{
+			name:    "no stamp at all",
+			content: []byte("---\nname: post-cutoff\ndescription: notes I wrote myself\n---\n\nMY RESEARCH NOTES\n"),
+			why:     "a hand-authored skill was claimed because its name matches the catalog",
+		},
+		{
+			name: "stamp that does not cover its body",
+			content: append(
+				[]byte("---\nname: post-cutoff\ndescription: notes I wrote myself\n---\n"),
+				append(
+					agentx.StampedContent([]byte("something else entirely\n"), "0.9.0", stampPrefix),
+					[]byte("MY RESEARCH NOTES\n")...,
+				)...,
+			),
+			why: "a stamp was trusted without verifying it against the body it sits above",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			target := sharedTarget()
+			targets := []adapterprotocol.SkillTarget{target}
+			desired := DesiredSkills{Names: []string{"post-cutoff"}, Targets: []string{target.Key}}
+
+			skillFile := filepath.Join(repo, ".agents", "skills", "post-cutoff", "SKILL.md")
+			require.NoError(t, os.MkdirAll(filepath.Dir(skillFile), 0o755))
+			require.NoError(t, os.WriteFile(skillFile, tc.content, 0o644))
+
+			plan, err := Plan(repo, "1.0.0", desired, targets)
+			require.NoError(t, err)
+			require.Contains(t, conflictPaths(plan.Conflicts), filepath.FromSlash(".agents/skills/post-cutoff/SKILL.md"), tc.why)
+
+			require.NoError(t, Apply(plan))
+			after, err := os.ReadFile(skillFile)
+			require.NoError(t, err)
+			require.Contains(t, string(after), "MY RESEARCH NOTES", tc.why)
+		})
+	}
+}

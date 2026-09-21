@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/extensions/skills"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/skillmanager"
@@ -643,5 +644,74 @@ func TestSkillsChangeAdviceNamesCommandsThatExist(t *testing.T) {
 		requireAdviceResolves(t, skillsChangeGuidance(skillsChangeOutput{
 			Skills: []skillChangeRow{{Name: "post-cutoff", State: skillChangeAlready}},
 		}))
+	})
+}
+
+func TestSkillsChange_CommandAndErrorBoundaries(t *testing.T) {
+	t.Run("install outside a repository", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		_, err := runSkillsChange(t, skillsInstallCmd, catalogOptInSkill)
+		require.ErrorContains(t, err, "not inside a git repository")
+	})
+
+	t.Run("uninstall outside a repository", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		_, err := runSkillsChange(t, skillsUninstallCmd, catalogOptInSkill)
+		require.ErrorContains(t, err, "not inside a git repository")
+	})
+
+	t.Run("team publish without Team Context", func(t *testing.T) {
+		stageInstallRepo(t)
+		_, err := runSkillsChange(t, skillsInstallCmd, "--team", catalogOptInSkill)
+		require.ErrorContains(t, err, "no Team Context is configured")
+	})
+}
+
+func TestCatalogSkillHelpers_ReportMalformedEntries(t *testing.T) {
+	t.Run("missing description", func(t *testing.T) {
+		err := refuseUnpublishableDescription("broken", []skills.File{{
+			Path: skills.SkillFileName, Content: []byte("---\nname: broken\n---\n"),
+		}})
+		require.ErrorContains(t, err, "found none")
+	})
+
+	t.Run("missing manifest", func(t *testing.T) {
+		err := refuseUnpublishableDescription("broken", []skills.File{{Path: "references/note.md", Content: []byte("note")}})
+		require.ErrorContains(t, err, "has no SKILL.md")
+	})
+
+	t.Run("unknown embedded directory", func(t *testing.T) {
+		_, err := catalogSkillFiles("definitely-not-in-the-catalog")
+		require.ErrorContains(t, err, "read the catalog entry")
+	})
+}
+
+func TestSkillsChange_RenderingEdges(t *testing.T) {
+	t.Run("empty guidance", func(t *testing.T) {
+		require.Contains(t, skillsChangeGuidance(newSkillsChangeOutput()), "Nothing to do")
+	})
+
+	t.Run("plural install", func(t *testing.T) {
+		guidance := skillsChangeGuidance(skillsChangeOutput{Skills: []skillChangeRow{
+			{Name: "a", State: skillChangeInstalled},
+			{Name: "b", State: skillChangeInstalled},
+		}})
+		require.Contains(t, guidance, "use them now")
+	})
+
+	t.Run("unchanged bundle detail", func(t *testing.T) {
+		var buf strings.Builder
+		require.NoError(t, emitSkillsChange(&buf, skillsChangeOutput{Skills: []skillChangeRow{{
+			Name: "ox-cli-plan", State: skillChangeAlready, Bundle: "core",
+		}}}, false))
+		require.Contains(t, buf.String(), "selected by the core bundle")
+	})
+
+	t.Run("unchanged explicit detail", func(t *testing.T) {
+		var buf strings.Builder
+		require.NoError(t, emitSkillsChange(&buf, skillsChangeOutput{Skills: []skillChangeRow{{
+			Name: "post-cutoff", State: skillChangeNotInstalled, Detail: "not selected",
+		}}}, false))
+		require.Contains(t, buf.String(), "not selected")
 	})
 }
