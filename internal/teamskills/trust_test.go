@@ -160,6 +160,39 @@ func TestClassify_RunnableFilesOutsideRootScriptsAreStillExecutable(t *testing.T
 	}
 }
 
+// TestClassify_ExecutableBuildAndHookSurfacesAreNotProse covers runnable files
+// that have neither a shebang nor one of the traditional script extensions.
+// Skill instructions can invoke every one directly, so materializing them as
+// inert prose would bypass the digest-pinned approval boundary.
+func TestClassify_ExecutableBuildAndHookSurfacesAreNotProse(t *testing.T) {
+	cases := []string{
+		"Makefile",
+		"makefile",
+		"justfile",
+		"Taskfile.yml",
+		"Dockerfile",
+		"launch.command",
+		"deploy.tf",
+		"build.gradle",
+		"script.applescript",
+		"hooks/preflight",
+		"nested/hooks/after.md",
+	}
+	for _, file := range cases {
+		t.Run(file, func(t *testing.T) {
+			s := prose("x")
+			s.Files = append(s.Files, File{Path: file, Content: md("echo runnable\n")})
+			v := Classify(s)
+			if !v.Executable || !hasCapability(v, CapBundledScript) {
+				t.Fatalf("%q classified as prose; it would materialize without approval: %s", file, v.Describe())
+			}
+			if executable, _ := IsExecutableFile(file, md("echo runnable\n")); !executable {
+				t.Fatalf("shared materialization predicate disagrees that %q is executable", file)
+			}
+		})
+	}
+}
+
 // TestClassify_OrdinaryAssetsAreStillProse is the other direction. Flagging every
 // attachment would make approval routine, and a rubber-stamped gate is no gate.
 func TestClassify_OrdinaryAssetsAreStillProse(t *testing.T) {
