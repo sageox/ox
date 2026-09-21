@@ -49,6 +49,38 @@ weight. The retirement procedure matters as much as the authoring one.
   manual, it has lost its reason to exist.
 - **Not a skill finder.** This is knowledge, not tooling.
 
+## Diamonds
+
+Some entries are ordinary: a tool we adopted, useful to know, mildly better than what it
+replaced. A few are **diamonds** — technologies that unlock experiences and techniques
+far beyond what was previously possible, rather than doing a known thing slightly
+better. Media over QUIC was one. Temporal was one. Jev looks like one.
+
+An entry marks itself with `diamond: true`. It means: **read this one in full before
+designing in its area**, because the valuable part is a shape you have not considered,
+not a benchmark. A diamond changes what is worth attempting; an ordinary entry changes
+which library you call.
+
+**This is the same word the team's ideas board uses, deliberately, and the two do not
+collide** — they differ by origin. A Horizons diamond is *a bet we might make*. A
+post-cutoff diamond is *something that already landed in the world and we picked it up*.
+One is ambition; this one is arrival.
+
+## Two clocks, and only one of them is enforced
+
+- **Entry-level** — each `references/*.md` carries its own `valid-through`. This is
+  convention: the agent reads it, says so when it has passed, and proposes a refresh or
+  a retirement. Most decay happens here, because the shelf outlives any one entry.
+- **Skill-level** — a `valid-through` in this file's frontmatter marks the *whole skill*
+  as temporary. **ox parses this and reports it**, so a skill that was only ever meant to
+  bridge a training gap surfaces for removal instead of quietly becoming furniture.
+  **An expired skill is reported, never auto-deleted** — a date is a prompt, and deleting
+  a team's knowledge on a timer is the silent-disappearance failure this whole design
+  exists to prevent.
+
+This skill carries no skill-level date: the *procedure* does not expire, only its
+entries do. A single-technology team skill usually should carry one.
+
 ## When to read an entry
 
 Open the index when you are about to:
@@ -63,13 +95,15 @@ Open the index when you are about to:
 
 | Entry | What it is | Read it when | Valid through |
 |---|---|---|---|
-| [`references/jev.md`](references/jev.md) | TypeSafe **Jev** and the "System One" model class — typed decisions with probabilities in 70–500ms instead of generated text | you are designing a classifier, router, relevance check, spend gate, or any LLM call whose output you immediately parse down to one field | **2026-12-31** |
+| [`references/jev.md`](references/jev.md) **◆** | TypeSafe **Jev** — the control-plane decision model: typed decisions with probabilities in 70–500ms instead of generated text. **In production in Bugsy.** | a plan calls for *intuition* or a *quick routing decision*: classifying, routing, gating spend, scoring, choosing the next tool, or any LLM call whose output you immediately parse down to one field | **2027-03-21** |
 
-At scale, filter rather than scan — every entry's frontmatter is greppable:
+**◆ marks a diamond.** At scale, filter rather than scan — every entry's frontmatter is
+greppable:
 
 ```bash
 grep -l 'concerns:.*classif' references/*.md
 grep -H 'valid-through:' references/*.md | sort -t: -k3
+grep -l 'diamond: true' references/*.md
 ```
 
 ## How to read an entry
