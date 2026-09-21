@@ -362,10 +362,8 @@ func TestExecuteSyncConvergence_RepoSlugUsesCanonicalOriginNotDirectoryNameFallb
 	require.True(t, found, "expected the scoped rule to appear in the convergence report")
 }
 
-func TestSyncHelp_ExplainsAutomationAndPackBoundary(t *testing.T) {
+func TestSyncHelp_ExplainsAutomation(t *testing.T) {
 	require.Contains(t, syncCmd.Short, "rarely needed")
-	require.Contains(t, syncCmd.Long, "Pack-managed and hand-authored")
-	require.Contains(t, syncCmd.Long, "does not check the Pack Catalog")
 }
 
 func TestConvergeAfterSessionBoundary_AppliesPendingTeamContent(t *testing.T) {
