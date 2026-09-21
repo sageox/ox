@@ -773,11 +773,6 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 		checkAgentsIntegrationWithFix(os.Stdout, opts.shouldFix(CheckSlugClaudeCodeHooks)),
 		checkInstructionFileMarkers(),
 	}
-	// detect adapter rules drift across all rules-installing adapters (claude, droid);
-	// runs unconditionally and is skipped gracefully when no rules adapter is present
-	if rulesCheck := checkAdapterRules(opts.shouldFix(CheckSlugAdapterRules)); !rulesCheck.skipped {
-		integrationChecks = append(integrationChecks, rulesCheck)
-	}
 	if detectClaudeCode() {
 		integrationChecks = append(integrationChecks, checkClaudeCodeHooks(opts.shouldFix(CheckSlugClaudeCodeHooks)))
 		// validate hook commands after checking hooks exist
@@ -828,7 +823,8 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	if legacyFix && legacyRoot != "" {
 		legacyPreflight = migrationBlocker(legacyRoot)
 	}
-	integrationChecks = append(integrationChecks, checkClaudeSkills(opts.shouldFix(CheckSlugClaudeSkills)))
+	integrationChecks = append(integrationChecks, checkClaudeSkills(
+		opts.shouldFix(CheckSlugClaudeSkills) || opts.shouldFix(CheckSlugAdapterRules)))
 	legacyCheck, legacyPending := checkLegacyOxFilesWithPreflight(legacyRoot, legacyFix, legacyPreflight)
 	// The ox-managed inventory: keep ox's own files ignored, report any that are
 	// still tracked, and run the one-time untrack migration. Registering a check

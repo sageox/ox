@@ -83,12 +83,12 @@ adapters:
 
   - name: droid
     display_name: Droid
-    description: Reads Factory Droid sessions, installs Droid hooks and team rules
+    description: Reads Factory Droid sessions and installs Droid hooks
     type: session
     bundled: true
     binary: ox-adapter-droid
     repo: sageox/ox
-    capabilities: [session_reader, hook_installer, rules_installer, incremental_reader, file_watcher, serve_mode, session_importer]
+    capabilities: [session_reader, hook_installer, skills_installer, incremental_reader, file_watcher, serve_mode, session_importer]
     detect_commands: [droid]
 
   # Goose declares no file_watcher: sessions live in SQLite behind a virtual

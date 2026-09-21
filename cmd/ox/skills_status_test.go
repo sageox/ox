@@ -390,3 +390,27 @@ func TestCollectSkillsStatus_ReportsInvalidTeamSkillName(t *testing.T) {
 	require.Contains(t, found.Detail, "may not end with a dot")
 	require.Contains(t, found.Detail, "rename it in the Team Context")
 }
+
+func TestSkillTargetRootsExcludesRuleTargets(t *testing.T) {
+	t.Parallel()
+
+	repo := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".sageox", "skills.lock.json"), []byte(`{
+  "schema_version": 2,
+  "desired": {
+    "bundles": [],
+    "targets": ["claude-project", "claude-rules"]
+  },
+  "targets": [
+    {"key":"claude-project","root":".claude/skills","format":"agent-skills/v1","scope":"project","link_policy":"reject"},
+    {"key":"claude-rules","root":".claude/rules","format":"markdown-rules/v1","scope":"project","link_policy":"reject"}
+  ]
+}
+`), 0o644))
+
+	roots, err := skillTargetRoots(repo)
+	require.NoError(t, err)
+	require.Equal(t, []string{".claude/skills"}, roots,
+		"skills commands must never treat a native rules directory as a skills root")
+}

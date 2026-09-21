@@ -45,9 +45,6 @@ var adapterConfig = adapterruntime.Config{
 	Read:           handleRead,
 	ReadMetadata:   handleReadMetadata,
 	Diagnose:       handleDiagnose,
-	InstallRules:   handleInstallRules,
-	CheckRules:     handleCheckRules,
-	UninstallRules: handleUninstallRules,
 	FindSession:    handleFindSession,
 	ReadFromOffset: handleReadFromOffset,
 	ImportSession:  handleImportSession,
@@ -77,7 +74,6 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		Capabilities: []string{
 			adapterprotocol.CapSessionReader,
 			adapterprotocol.CapHookInstaller,
-			adapterprotocol.CapRulesInstaller,
 			adapterprotocol.CapIncrementalReader,
 			adapterprotocol.CapFileWatcher,
 			adapterprotocol.CapServeMode,
@@ -92,6 +88,11 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		SkillTargets: []adapterprotocol.SkillTarget{{
 			Key: "agents-project", Root: ".agents/skills",
 			Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
+			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
+		RuleTargets: []adapterprotocol.SkillTarget{{
+			Key: "droid-rules", Root: ".factory/rules",
+			Format: adapterprotocol.RuleFormatMarkdownV1, Scope: adapterprotocol.SkillScopeProject,
 			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
 		}},
 		HookEnvValues: []string{"droid"},

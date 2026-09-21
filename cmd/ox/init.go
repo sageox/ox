@@ -790,8 +790,8 @@ func runInit() error {
 		tracker.trackForceStage(hookFile)
 	}
 
-	// commands and rules are installed by external adapters via CapCommandsInstaller/CapRulesInstaller
-	// (see installAgentHooks → ea.InstallCommands / ea.InstallRules)
+	// Commands remain an adapter compatibility surface. Skills and ox-owned
+	// rules are projected together by the central inventory reconciler.
 
 	// single summary line for the entire integration section
 	if !initQuiet {
@@ -2215,7 +2215,7 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 		}
 	}
 
-	// install hooks + rules only for agents the user selected
+	// Install integrations only for AI coworkers the user selected.
 	externalAdapters := adapters.DiscoverExternalAdapters()
 	var selectedSkillAdapters []*adapters.ExternalAdapter
 	for _, ea := range externalAdapters {
@@ -2225,8 +2225,8 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 		// OpenCode hooks are already installed above: InstallProjectOpenCodeHooks
 		// resolves this same adapter and calls InstallHooks on it, so running the
 		// generic path too would repeat the identical call and double-report the
-		// plugin in installedHooks. Rules/commands/skills below are not installed
-		// by the built-in helper, so they still run for opencode.
+		// plugin in installedHooks. Commands and inventory targets below are not
+		// installed by the built-in helper, so they still run for opencode.
 		if ea.HasCapability(adapterprotocol.CapHookInstaller) && ea.Name() != "opencode" {
 			result, err := ea.InstallHooks(gitRoot, "project")
 			if err != nil {
@@ -2236,20 +2236,6 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			} else if result.Installed {
 				if !quiet {
 					cli.PrintSuccess(fmt.Sprintf("Installed %s hooks", ea.Name()))
-				}
-				installedHooks = append(installedHooks, result.FilesWritten...)
-			}
-		}
-
-		if ea.HasCapability(adapterprotocol.CapRulesInstaller) {
-			result, err := ea.InstallRules(gitRoot, version.Version)
-			if err != nil {
-				if !quiet {
-					cli.PrintWarning(fmt.Sprintf("Could not install %s rules: %v", ea.Name(), err))
-				}
-			} else if result.Installed {
-				if !quiet {
-					cli.PrintSuccess(fmt.Sprintf("Installed %s rules", ea.Name()))
 				}
 				installedHooks = append(installedHooks, result.FilesWritten...)
 			}
@@ -2276,32 +2262,45 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			}
 		}
 
-		if ea.HasCapability(adapterprotocol.CapSkillsInstaller) {
-			if len(ea.Info().SkillTargets) > 0 {
-				selectedSkillAdapters = append(selectedSkillAdapters, ea)
-			} else {
-				// One-release compatibility for third-party adapters that have not
-				// adopted target descriptors yet.
-				result, err := ea.InstallSkills(gitRoot, version.Version)
-				if err != nil {
-					if !quiet {
-						cli.PrintWarning(fmt.Sprintf("Could not install legacy %s skills: %v", ea.Name(), err))
-					}
-				} else {
-					installedHooks = append(installedHooks, result.FilesWritten...)
+		info := ea.Info()
+		if (info == nil || len(info.RuleTargets) == 0) && ea.HasCapability(adapterprotocol.CapRulesInstaller) {
+			// One-release compatibility for third-party protocol-v1 adapters.
+			// Built-in adapters declare rule targets and are reconciled below.
+			result, err := ea.InstallRules(gitRoot, version.Version)
+			if err != nil {
+				if !quiet {
+					cli.PrintWarning(fmt.Sprintf("Could not install legacy %s rules: %v", ea.Name(), err))
 				}
+			} else {
+				installedHooks = append(installedHooks, result.FilesWritten...)
+			}
+		}
+
+		if info != nil && (len(info.SkillTargets) > 0 || len(info.RuleTargets) > 0) {
+			selectedSkillAdapters = append(selectedSkillAdapters, ea)
+		}
+		if (info == nil || len(info.SkillTargets) == 0) && ea.HasCapability(adapterprotocol.CapSkillsInstaller) {
+			// One-release compatibility for third-party adapters that have not
+			// adopted target descriptors yet.
+			result, err := ea.InstallSkills(gitRoot, version.Version)
+			if err != nil {
+				if !quiet {
+					cli.PrintWarning(fmt.Sprintf("Could not install legacy %s skills: %v", ea.Name(), err))
+				}
+			} else {
+				installedHooks = append(installedHooks, result.FilesWritten...)
 			}
 		}
 	}
 	if targets, err := skillTargetsForAdapters(gitRoot, selectedSkillAdapters); err != nil {
 		if !quiet {
-			cli.PrintWarning(fmt.Sprintf("Could not resolve Agent Skills targets: %v", err))
+			cli.PrintWarning(fmt.Sprintf("Could not resolve AI coworker inventory targets: %v", err))
 		}
 	} else if len(targets) > 0 {
 		plan, err := reconcileSelectedSkills(gitRoot, targets)
 		if err != nil {
 			if !quiet {
-				cli.PrintWarning(fmt.Sprintf("Could not reconcile Agent Skills: %v", err))
+				cli.PrintWarning(fmt.Sprintf("Could not reconcile AI coworker assets: %v", err))
 			}
 		} else {
 			written := plan.WrittenPaths()
@@ -2312,11 +2311,11 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			if !quiet {
 				switch {
 				case len(plan.Conflicts) > 0:
-					cli.PrintWarning(fmt.Sprintf("Reconciled Agent Skills with %d preserved conflict(s)", len(plan.Conflicts)))
+					cli.PrintWarning(fmt.Sprintf("Reconciled AI coworker assets with %d preserved conflict(s)", len(plan.Conflicts)))
 				case len(written) > 0:
-					cli.PrintSuccess(fmt.Sprintf("Installed %d Agent Skills file(s) across %d native target(s)", len(written), len(targets)))
+					cli.PrintSuccess(fmt.Sprintf("Installed %d AI coworker asset file(s) across %d native target(s)", len(written), len(targets)))
 				default:
-					cli.PrintPreserved("Agent Skills already up to date")
+					cli.PrintPreserved("AI coworker assets already up to date")
 				}
 			}
 		}

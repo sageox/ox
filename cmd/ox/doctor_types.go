@@ -166,7 +166,7 @@ const (
 	CheckSlugOxIgnoreRules    = "ox-ignore-rules"
 	CheckSlugOxFilesUntracked = "ox-files-untracked"
 
-	// Rules checks
+	// Deprecated alias: ox-owned rules now share the native inventory check.
 	CheckSlugAdapterRules = "adapter-rules"
 
 	// Session checks

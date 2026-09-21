@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func findModuleRoot(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	require.True(t, ok, "runtime.Caller failed")
+	dir := filepath.Dir(thisFile)
+	for {
+		if data, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil &&
+			strings.Contains(string(data), "github.com/sageox/ox") {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		require.NotEqual(t, parent, dir, "could not find ox module root")
+		dir = parent
+	}
+}
 
 func TestResolvePhase(t *testing.T) {
 	tests := []struct {

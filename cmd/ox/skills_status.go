@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/spf13/cobra"
 )
 
@@ -162,9 +163,9 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 	fromRemote := slug != filepath.Base(gitRoot)
 	out.Repo = repoSkillStatus{Slug: slug, SlugFromRemote: fromRemote}
 
-	_, _, selected := skillmanager.InstalledSource(gitRoot)
-	out.Repo.Selected = selected
 	targets, desiredErr := skillTargetRoots(gitRoot)
+	selected := len(targets) > 0
+	out.Repo.Selected = selected
 	out.Repo.Targets = targets
 	if desiredErr != nil {
 		// A missing lockfile is a valid empty state; anything else means ox cannot
@@ -347,7 +348,9 @@ func skillTargetRoots(gitRoot string) ([]string, error) {
 	}
 	roots := make([]string, 0, len(targets))
 	for _, t := range targets {
-		roots = append(roots, t.Root)
+		if t.Format == adapterprotocol.SkillFormatAgentSkillsV1 {
+			roots = append(roots, t.Root)
+		}
 	}
 	return roots, nil
 }

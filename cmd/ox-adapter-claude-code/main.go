@@ -31,9 +31,6 @@ func main() {
 		Read:            handleRead,
 		ReadMetadata:    handleReadMetadata,
 		Diagnose:        handleDiagnose,
-		InstallRules:    handleInstallRules,
-		CheckRules:      handleCheckRules,
-		UninstallRules:  handleUninstallRules,
 		InstallSkills:   handleInstallSkills,
 		CheckSkills:     handleCheckSkills,
 		UninstallSkills: handleUninstallSkills,
@@ -76,7 +73,6 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		Capabilities: []string{
 			adapterprotocol.CapSessionReader,
 			adapterprotocol.CapHookInstaller,
-			adapterprotocol.CapRulesInstaller,
 			adapterprotocol.CapSkillsInstaller,
 			adapterprotocol.CapIncrementalReader,
 			adapterprotocol.CapFileWatcher,
@@ -88,6 +84,11 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		SkillTargets: []adapterprotocol.SkillTarget{{
 			Key: "claude-project", Root: ".claude/skills",
 			Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
+			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
+		RuleTargets: []adapterprotocol.SkillTarget{{
+			Key: "claude-rules", Root: ".claude/rules",
+			Format: adapterprotocol.RuleFormatMarkdownV1, Scope: adapterprotocol.SkillScopeProject,
 			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
 		}},
 		ServeMode: true,

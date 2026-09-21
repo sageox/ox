@@ -5,8 +5,8 @@ package prime
 // The two-tier-product risk this guards against: ox is rich on Claude Code
 // (Layer-2 commands + skills) but can silently become thin on Codex/Droid if a
 // behavior meant to be portable (Layer-1 "floor") ends up living only inside a
-// Claude-only command/skill body. Codex declares NEITHER a commands installer
-// NOR a rules installer, so anything not carried by Layer 1 (the `ox agent
+// Claude-only command/skill body. Codex declares no commands installer or
+// native rule target, so anything not carried by Layer 1 (the `ox agent
 // prime` output) is invisible to Codex users.
 //
 // The contract proven here:
@@ -16,8 +16,8 @@ package prime
 //     installer; skill-class only on a skills installer. Their ABSENCE on
 //     Codex/Droid is the documented Layer-2 additive case, NOT a failure.
 //   - Floor capabilities resolve on ALL adapters (they ride Layer 1).
-//   - Codex regression lock: Codex declares native skills but no command/rule
-//     installers, while every floor capability still reaches it via Layer 1.
+//   - Codex regression lock: Codex declares native skills but no command
+//     installer, while every floor capability still reaches it via Layer 1.
 
 import (
 	"sort"
@@ -45,7 +45,6 @@ var adapterCaps = map[string][]string{
 	"claude-code": {
 		adapterprotocol.CapSessionReader,
 		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapRulesInstaller,
 		adapterprotocol.CapCommandsInstaller,
 		adapterprotocol.CapSkillsInstaller,
 		adapterprotocol.CapIncrementalReader,
@@ -76,7 +75,6 @@ var adapterCaps = map[string][]string{
 		adapterprotocol.CapSkillsInstaller,
 		adapterprotocol.CapSessionReader,
 		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapRulesInstaller,
 		adapterprotocol.CapIncrementalReader,
 		adapterprotocol.CapFileWatcher,
 		adapterprotocol.CapServeMode,
@@ -220,7 +218,7 @@ func TestResolution(t *testing.T) {
 }
 
 // TestCodexFloorLock is the explicit "Codex users get the floor" regression
-// lock. Codex has native Agent Skills but no command/rule installer, and every
+// lock. Codex has native Agent Skills but no command installer, and every
 // floor capability still reaches it via Layer 1 (Layer1Source set).
 func TestCodexFloorLock(t *testing.T) {
 	const codex = "codex"

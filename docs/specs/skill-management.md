@@ -1,4 +1,4 @@
-# Native-First, Project-Scoped Skill Management
+# Native-First, Project-Scoped Asset Inventory
 
 SageOx authors each playbook once in the portable Agent Skills layout:
 
@@ -15,9 +15,14 @@ The embedded catalog is the built-in source of truth. `core`, `onramp`, and
 extend the catalog later, but must use the same Plan/Apply engine rather than
 introduce a second installer or activation framework.
 
+ox-owned runtime rules use that same inventory. Their catalog lives in
+`extensions/rulecatalog/`; adapters declare native rule targets but do not
+install, update, or retire catalog files themselves.
+
 ## Native targets
 
-Adapters declare target descriptors instead of independently managing files:
+Adapters declare skill and rule target descriptors instead of independently
+managing files:
 
 ```go
 type SkillTarget struct {
@@ -40,6 +45,16 @@ canonical root and format. Codex and Gemini therefore produce one shared
 | Gemini CLI | `.agents/skills/<skill>/` | Portable Agent Skills (shared with Codex) |
 | AI coworker without native skills | None | Future Skill Bridge; not implemented speculatively |
 
+| AI coworker | Rule target | Format |
+|---|---|---|
+| Claude Code | `.claude/rules/*.md` | Native Markdown rules |
+| Factory Droid | `.factory/rules/*.md` | Native Markdown rules |
+
+`skill_targets` and `rule_targets` share the descriptor vocabulary. The format
+discriminator selects catalog materialization: `agent-skills/v1` produces a
+skill directory tree; `markdown-rules/v1` produces rule files directly beneath
+the target root.
+
 All managed targets are project-scoped, and every managed file is GITIGNORED
 under a reserved namespace (ADR-031) — with exactly one exception, the committed
 `sageox` on-ramp skill, which is the only SageOx artifact present on a machine
@@ -51,10 +66,10 @@ bootloader, or an MCP page-fault path.
 
 ## Desired state and ownership
 
-`.sageox/skills.lock.json` records:
+`.sageox/skills.lock.json` records the complete native asset inventory:
 
 - built-in source revision and ox version;
-- selected bundle IDs and target keys;
+- selected skill bundle IDs and native target keys;
 - normalized target descriptor snapshots;
 - every managed file's repository-relative path, SHA-256 digest, and mode.
 
@@ -74,9 +89,11 @@ where a preserved edit is permanent silent drift. Overwrite is not delete,
 though: ox removes only what it can prove it wrote, so unrecognized content
 inside a reserved namespace is reported, never swept.
 
-The lockfile—not an inline comment—is the ownership source. Existing
-`ox-hash` stamps are accepted for one-release migration only when their body
-hash verifies. New projections contain clean canonical Agent Skills content.
+The lockfile—not an inline comment—is the ownership source. Existing `ox-hash`
+skill stamps and agentx rule stamps are accepted only as migration evidence
+when their body and generated frontmatter verify. Migration discovers verified
+rule content rather than maintaining a list of old filenames. New projections
+contain clean canonical content with no ownership stamp.
 
 `Plan` is deterministic, read-only, and considers the complete skill tree:
 `SKILL.md`, references, assets, and scripts. It classifies creates, updates,
@@ -106,7 +123,7 @@ distinguishes interrupted SageOx writes from coincidentally similar user files.
 
 ## Lifecycle
 
-- `ox init` adds only the targets selected for that invocation and persists
+- `ox init` adds only the skill and rule targets selected for that invocation and persists
   them. It never equates later agent detection with authorization.
 - `ox doctor` plans only committed targets. For the one-release migration, a
   target with a valid legacy stamp may bootstrap selection.
@@ -126,8 +143,9 @@ The daemon does not schedule an AI coworker to perform deterministic skill
 repair. Explicit lifecycle commands own reconciliation. Current desired state
 produces an empty plan and no daemon task.
 
-The imperative adapter RPCs remain for one compatibility release. Built-in
-adapters and CLI workflows use target descriptors and central reconciliation.
+The compatibility adapter RPCs remain in protocol v1 for third-party adapters.
+Built-in adapters no longer advertise or implement rule installer RPCs; all
+built-in CLI workflows use target descriptors and central reconciliation.
 
 ## Team Context follow-on
 

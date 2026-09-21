@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/adapterstamp"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/spf13/cobra"
 )
 
@@ -123,7 +124,9 @@ func resolveSkillRoots(repoRoot string) ([]string, error) {
 			return nil, detectErr
 		}
 		for _, target := range detected {
-			roots = append(roots, target.Root)
+			if target.Format == adapterprotocol.SkillFormatAgentSkillsV1 {
+				roots = append(roots, target.Root)
+			}
 		}
 	}
 	return dedupeStrings(roots), nil

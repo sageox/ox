@@ -210,7 +210,11 @@ func installCatalogSkills(repoRoot string, names []string) (skillsChangeOutput, 
 	if err != nil {
 		return out, err
 	}
-	if len(desired.Targets) == 0 {
+	skillRoots, err := skillTargetRoots(repoRoot)
+	if err != nil {
+		return out, err
+	}
+	if len(skillRoots) == 0 {
 		return out, fmt.Errorf("this repository has not selected an AI coworker, so there is nowhere to put a skill — run `ox init`")
 	}
 	selected, err := selectedCatalogNames(desired)
@@ -272,7 +276,9 @@ func uninstallCatalogSkills(repoRoot string, names []string) (skillsChangeOutput
 	}
 	roots := make([]string, 0, len(targets))
 	for _, target := range targets {
-		roots = append(roots, target.Root)
+		if target.Format == adapterprotocol.SkillFormatAgentSkillsV1 {
+			roots = append(roots, target.Root)
+		}
 	}
 	// Classified BEFORE the catalog check, because "you wrote this yourself" is a
 	// far more useful answer than "ox ships no such skill" — and it is the one

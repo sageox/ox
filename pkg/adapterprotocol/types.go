@@ -21,7 +21,7 @@ const ProtocolVersion = 1
 // revision. Bumped when wire-level changes are made (new event types,
 // new HelloResponse fields) without changing the major ProtocolVersion.
 // Adapters can use this for fine-grained capability negotiation.
-const ProtocolDate = "2026-08-15"
+const ProtocolDate = "2026-09-21"
 
 // --- Adapter types ---
 
@@ -49,9 +49,10 @@ const (
 	CapCapturePrior       = "capture_prior"
 )
 
-// Native project skill target vocabulary.
+// Native project inventory target vocabulary.
 const (
 	SkillFormatAgentSkillsV1 = "agent-skills/v1"
+	RuleFormatMarkdownV1     = "markdown-rules/v1"
 	SkillScopeProject        = "project"
 	SkillLinkPolicyReject    = "reject"
 )
@@ -84,10 +85,16 @@ type InfoResponse struct {
 	// ox CLI canonicalizes and deduplicates these descriptors before planning,
 	// so multiple adapters may safely advertise the same shared target.
 	SkillTargets []SkillTarget `json:"skill_targets,omitempty"`
+	// RuleTargets describes native, project-scoped rule roots. Rules use the
+	// same target descriptor and central inventory as skills; adapters only
+	// declare location and format, never install catalog content themselves.
+	RuleTargets []SkillTarget `json:"rule_targets,omitempty"`
 }
 
-// SkillTarget describes a native Agent Skills projection owned by the host.
-// Root is repository-relative; absolute and escaping paths are rejected.
+// SkillTarget describes a native asset projection owned by the host. The name
+// is retained for protocol-v1 compatibility; Format distinguishes Agent Skills
+// trees from flat Markdown rule catalogs. Root is repository-relative;
+// absolute and escaping paths are rejected.
 type SkillTarget struct {
 	Key        string `json:"key"`
 	Root       string `json:"root"`

@@ -19,7 +19,6 @@ func TestHandleInfo_CapabilitiesPinned(t *testing.T) {
 	want := []string{
 		adapterprotocol.CapSessionReader,
 		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapRulesInstaller,
 		adapterprotocol.CapSkillsInstaller,
 		adapterprotocol.CapIncrementalReader,
 		adapterprotocol.CapFileWatcher,
@@ -35,6 +34,9 @@ func TestHandleInfo_CapabilitiesPinned(t *testing.T) {
 	assertCapabilitySetsEqual(t, "claude-code", info.Capabilities, want)
 	if len(info.SkillTargets) != 1 || info.SkillTargets[0].Key != "claude-project" || info.SkillTargets[0].Root != ".claude/skills" {
 		t.Fatalf("claude skill targets = %#v, want claude-project target", info.SkillTargets)
+	}
+	if len(info.RuleTargets) != 1 || info.RuleTargets[0].Key != "claude-rules" || info.RuleTargets[0].Root != ".claude/rules" {
+		t.Fatalf("claude rule targets = %#v, want claude-rules target", info.RuleTargets)
 	}
 }
 

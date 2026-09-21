@@ -16,15 +16,17 @@ import (
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
-// skillTargetsForAdapters resolves native target descriptors and deduplicates
-// shared projections such as Codex and Gemini's .agents/skills root.
+// skillTargetsForAdapters resolves every native inventory target declared by
+// adapters. The historical name remains because callers already use it, but
+// the returned descriptors now cover both Agent Skills and ox-owned rules.
 func skillTargetsForAdapters(repoRoot string, candidates []*adapters.ExternalAdapter) ([]adapterprotocol.SkillTarget, error) {
 	var targets []adapterprotocol.SkillTarget
 	for _, adapter := range candidates {
-		if !adapter.HasCapability(adapterprotocol.CapSkillsInstaller) || adapter.Info() == nil {
+		if adapter.Info() == nil {
 			continue
 		}
 		targets = append(targets, adapter.Info().SkillTargets...)
+		targets = append(targets, adapter.Info().RuleTargets...)
 	}
 	return skillmanager.CanonicalizeTargets(repoRoot, targets)
 }
@@ -32,7 +34,8 @@ func skillTargetsForAdapters(repoRoot string, candidates []*adapters.ExternalAda
 func detectedSkillTargets(repoRoot string) ([]adapterprotocol.SkillTarget, error) {
 	var candidates []*adapters.ExternalAdapter
 	for _, adapter := range adapters.DiscoverExternalAdapters() {
-		if adapter.HasCapability(adapterprotocol.CapSkillsInstaller) && adapter.Detect() {
+		info := adapter.Info()
+		if info != nil && (len(info.SkillTargets) > 0 || len(info.RuleTargets) > 0) && adapter.Detect() {
 			candidates = append(candidates, adapter)
 		}
 	}
@@ -136,8 +139,10 @@ func planCommittedSkills(repoRoot string) (*skillmanager.ReconcilePlan, error) {
 func reconcileCommittedSkills(repoRoot string) (*skillmanager.ReconcilePlan, error) {
 	plan, err := skillmanager.ReconcileUpdate(repoRoot, version.Version, func(current skillmanager.DesiredSkills, currentTargets []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
 		current, _ = skillmanager.RemoveRetiredSelections(current)
-		if len(current.Targets) == 0 {
-			return bootstrapLegacySkillState(repoRoot, current, currentTargets)
+		var err error
+		current, currentTargets, err = bootstrapLegacySkillState(repoRoot, current, currentTargets)
+		if err != nil {
+			return current, currentTargets, err
 		}
 		// Re-assert the DEFAULT bundles. Without this a bundle introduced by a new
 		// release never reaches an existing project: the lockfile records the
@@ -203,6 +208,9 @@ func bootstrapLegacySkillState(repoRoot string, desired skillmanager.DesiredSkil
 			return skillmanager.DesiredSkills{}, nil, detectErr
 		}
 		for _, target := range candidates {
+			if target.Format != adapterprotocol.SkillFormatAgentSkillsV1 {
+				continue
+			}
 			legacyBundles, legacyErr := skillmanager.LegacyBundles(repoRoot, target)
 			if legacyErr != nil {
 				return skillmanager.DesiredSkills{}, nil, legacyErr
@@ -238,7 +246,41 @@ func bootstrapLegacySkillState(repoRoot string, desired skillmanager.DesiredSkil
 			}
 		}
 	}
+	// Adapter-installed rules predate the shared inventory. Their verified stamp
+	// is the authorization signal: adopt that native target, then let the normal
+	// catalog diff replace current files and retire removed ones. No filename
+	// sweep is needed, and repositories that never selected the adapter remain
+	// untouched.
+	for _, target := range declaredRuleTargets(repoRoot) {
+		selected, selectErr := skillmanager.HasLegacyRules(repoRoot, target)
+		if selectErr != nil {
+			return skillmanager.DesiredSkills{}, nil, selectErr
+		}
+		if selected {
+			targets = append(targets, target)
+			desired = skillmanager.AddTargets(desired, target)
+		}
+	}
+	var canonicalErr error
+	targets, canonicalErr = skillmanager.CanonicalizeTargets(repoRoot, targets)
+	if canonicalErr != nil {
+		return skillmanager.DesiredSkills{}, nil, canonicalErr
+	}
 	return desired, targets, nil
+}
+
+func declaredRuleTargets(repoRoot string) []adapterprotocol.SkillTarget {
+	var targets []adapterprotocol.SkillTarget
+	for _, adapter := range adapters.DiscoverExternalAdapters() {
+		if info := adapter.Info(); info != nil {
+			targets = append(targets, info.RuleTargets...)
+		}
+	}
+	canonical, err := skillmanager.CanonicalizeTargets(repoRoot, targets)
+	if err != nil {
+		return nil
+	}
+	return canonical
 }
 
 // hasLegacyOxCommands reports whether .claude/commands holds a file ox installed.
@@ -296,6 +338,7 @@ func uninstallManagedSkills(repoRoot string) (*skillmanager.ReconcilePlan, error
 	if err != nil {
 		return nil, err
 	}
+	detected = append(detected, declaredRuleTargets(repoRoot)...)
 	return skillmanager.ReconcileUpdate(repoRoot, version.Version, func(current skillmanager.DesiredSkills, currentTargets []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
 		currentTargets = append(currentTargets, detected...)
 		var err error
