@@ -99,7 +99,8 @@
     });
   });
 })();
-// keyboard map: 1-9 jump to tab, [ / ] prev-next tab, t theme, r review toggle.
+// keyboard map: 1-9 jump to tab, [ / ] prev-next tab, t theme. Review keys
+// (r, Esc) live in review.js, which authored HTML plans load too.
 // Skipped while typing in an input/textarea (review notes).
 (function(){
   function typing(e){var t=e.target;return t&&(t.tagName==='TEXTAREA'||t.tagName==='INPUT'||t.isContentEditable);}
@@ -107,7 +108,6 @@
     if(typing(e)||e.metaKey||e.ctrlKey||e.altKey)return;
     var tabs=[].slice.call(document.querySelectorAll('.tabbar button[data-tab]'));
     if(e.key==='t'){var b=document.getElementById('themeBtn');if(b){b.click();e.preventDefault();}return;}
-    if(e.key==='r'){var r=document.querySelector('.rev-bar .rev-toggle');if(r){r.click();e.preventDefault();}return;}
     if(!tabs.length)return;
     var cur=tabs.findIndex(function(b){return b.getAttribute('aria-current')==='true';});
     if(e.key>='1'&&e.key<='9'){var i=+e.key-1;if(tabs[i]){tabs[i].click();e.preventDefault();}return;}

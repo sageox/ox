@@ -76,3 +76,44 @@ func TestReviewSW_OfflineShellContract(t *testing.T) {
 		}
 	}
 }
+
+// TestReviewJS_ModeExitContract pins that review mode announces itself, keeps
+// its exit in view, and survives the live loop: the toggle relabels to "Exit
+// review", entry shows a toast that names Esc, Esc closes the note then the
+// mode, `r` toggles the mode (handled ONCE — review.js, not scaffold.js, so
+// authored HTML plans get it too), the mode is restored silently across a live
+// reload but scoped to the tab, and review chrome is never a mark-up target.
+// The real-browser proofs are TestBrowser_ReviewModeExitIsVisibleAndEscapable,
+// TestBrowser_ReviewModeSurvivesLiveReload and TestBrowser_ReviewKeysWorkOnAuthoredPlan
+// (cmd/ox, build tag `browser`); this is the hermetic guard CI sees.
+// Failure prevented: a reviewer clicks Review, sees only a green button, and has
+// no visible way back to reading the plan — or gets dropped out of review mode
+// by every agent fix.
+func TestReviewJS_ModeExitContract(t *testing.T) {
+	b, err := renderAssets.ReadFile("assets/review.js")
+	if err != nil {
+		t.Fatalf("read review.js: %v", err)
+	}
+	s := string(b)
+	for _, want := range []string{
+		"on ? 'Exit review' : 'Review'",                              // the button becomes the exit
+		"Esc or Exit review to leave",                                // entry toast names both exits
+		"if (pop) closePop(); else if (on) setReview(false);",        // Esc: note first, then mode
+		"if (e.key === 'r' && !typing(e)",                            // r toggles, not from a text field
+		"sessionStorage.setItem(ON_KEY, '1')",                        // persisted per tab, not per browser
+		"if (sessionStorage.getItem(ON_KEY)) setReview(true, true);", // restored silently after a reload
+		"if (ev.target.closest(CHROME)) return;",                     // bar/rail/orphans never mark up
+		"if (!el) { closePop(); return; }",                           // click-away dismisses a note
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("review.js missing %q", want)
+		}
+	}
+	sc, err := renderAssets.ReadFile("assets/scaffold.js")
+	if err != nil {
+		t.Fatalf("read scaffold.js: %v", err)
+	}
+	if strings.Contains(string(sc), "e.key==='r'") {
+		t.Error("scaffold.js handles r too — one keypress would toggle review mode twice")
+	}
+}

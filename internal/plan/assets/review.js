@@ -15,6 +15,7 @@
   var token = body.getAttribute('data-review-token') || '';
   var live = base !== '';
   var KEY = 'ox-plan-fb:' + slug;
+  var ON_KEY = 'ox-plan-rev-on:' + slug; // sessionStorage: survives a reload, not a new tab
   var STATUS = [
     { id: 'approve', glyph: '✓' },
     { id: 'request-change', glyph: '✎' },
@@ -248,11 +249,14 @@
     pop.style.left = (window.scrollX + Math.min(r.left, window.innerWidth - 300)) + 'px';
   }
 
+  // Review chrome is never a mark-up target. The rail and orphan list are <li>s
+  // and would otherwise match SELECTOR, hijacking their own click handlers.
+  var CHROME = '.rev-bar, .rev-rail, .rev-orphans, .rev-pop, .rev-toast, .rev-offline-bar';
   function onClick(ev) {
     if (!on) return;
-    if (pop && pop.contains(ev.target)) return;
+    if (ev.target.closest(CHROME)) return;
     var el = ev.target.closest(SELECTOR);
-    if (!el) return;
+    if (!el) { closePop(); return; } // click-away dismisses an open note
     ev.preventDefault();
     openPop(el, ev);
   }
@@ -376,16 +380,34 @@
   function updateWho() { if (whoEl) whoEl.textContent = reviewer ? ('You: ' + reviewer) : 'Set name'; }
   updateWho();
   if (whoEl) whoEl.onclick = function () { var n = (prompt('Your name (shown to teammates on this plan):', reviewer) || '').trim(); if (n) { reviewer = n; try { localStorage.setItem('ox-plan-reviewer', reviewer); } catch (e) {} updateWho(); paint(); } };
-  bar.querySelector('.rev-toggle').onclick = function () {
-    on = !on; body.classList.toggle('rev-on', on); this.classList.toggle('on', on);
-    if (!on) closePop();
+  // Review is a mode: while on, clicks mark up instead of navigating. A mode has
+  // to announce itself on entry and keep its exit in view — otherwise the only
+  // signal is a green button and nothing visibly changes until a hover.
+  var toggleEl = bar.querySelector('.rev-toggle');
+  function setReview(next, silent) {
+    on = next; body.classList.toggle('rev-on', on); toggleEl.classList.toggle('on', on);
+    toggleEl.textContent = on ? 'Exit review' : 'Review';
+    toggleEl.title = on ? 'Leave review mode (Esc)' : 'Enter review mode (r)';
+    if (on && !silent) toast('Review mode — click any section, item, or row to mark it up. Esc or Exit review to leave.');
+    if (!on) { closePop(); if (toastEl) { toastEl.remove(); toastEl = null; } }
     try { localStorage.setItem('ox-plan-rev-seen', '1'); } catch (e) {}
+    try { if (on) sessionStorage.setItem(ON_KEY, '1'); else sessionStorage.removeItem(ON_KEY); } catch (e) {}
     if (hintBubble) { hintBubble.remove(); hintBubble = null; }
     renderRail();
-  };
+  }
+  toggleEl.onclick = function () { setReview(!on); };
   bar.querySelector('.rev-submit').onclick = submit;
   if (live) bar.querySelector('.rev-approve').onclick = approve;
   document.addEventListener('click', onClick, true);
+  // Keyboard, here rather than scaffold.js so authored HTML plans (chrome.js
+  // adds no key map) get the same keys. Esc peels one layer at a time — an
+  // open note first, then the mode — and fires while typing in the note too;
+  // that is the point of Esc. `r` toggles the mode from anywhere but a text field.
+  function typing(e) { var t = e.target; return !!t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable); }
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { if (pop) closePop(); else if (on) setReview(false); return; }
+    if (e.key === 'r' && !typing(e) && !e.metaKey && !e.ctrlKey && !e.altKey) { setReview(!on); e.preventDefault(); }
+  });
 
   // first-visit discoverability: a one-time pointer at the Review toggle.
   var hintBubble = null;
@@ -431,4 +453,8 @@
   }
 
   paint();
+  // A live reload — the agent addressed an item, or the server came back — must
+  // not drop a reviewer mid-review back to reading mode. Restored silently: the
+  // reviewer did not just enter, so no entry toast.
+  try { if (sessionStorage.getItem(ON_KEY)) setReview(true, true); } catch (e) {}
 })();
