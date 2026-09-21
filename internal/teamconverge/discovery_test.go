@@ -1,0 +1,66 @@
+package teamconverge
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+func writeTeamFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+}
+
+func gitTeam(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %v: %s", args, out)
+	return string(out)
+}
+
+func TestFilesystemDiscovery_ProducesTypedSnapshotInventory(t *testing.T) {
+	team := t.TempDir()
+	gitTeam(t, team, "init", "-q")
+	gitTeam(t, team, "config", "user.email", "test@sageox.ai")
+	gitTeam(t, team, "config", "user.name", "test")
+	gitTeam(t, team, "config", "commit.gpgsign", "false")
+	writeTeamFile(t, team, "agents/skills/deploy/SKILL.md", "---\nname: deploy\ndescription: deploy safely\nrepos: [api]\n---\n\nDo it.\n")
+	writeTeamFile(t, team, "agents/skills/mobile/SKILL.md", "---\nname: mobile\ndescription: mobile only\nrepos: [ios]\n---\n")
+	writeTeamFile(t, team, "agents/rules/security.md", "---\nname: security\ndescription: secure defaults\nvisibility: always\n---\n\nNever log secrets.\n")
+	writeTeamFile(t, team, "docs/architecture.md", "---\ntitle: Architecture\ndescription: System map\n---\n\n# Architecture\n")
+	gitTeam(t, team, "add", "-A")
+	gitTeam(t, team, "commit", "-q", "-m", "team context")
+	commit := gitTeam(t, team, "rev-parse", "HEAD")
+
+	discovery := FilesystemDiscovery{ResolveOrigin: func(path string) Origin {
+		if path == "agents/rules/security.md" {
+			return Origin{Kind: OriginPack, Pack: "secure-defaults", PackVersion: "1.0.0"}
+		}
+		return Origin{Kind: OriginLoose}
+	}}
+	snapshot, artifacts, err := discovery.Discover(context.Background(), Request{TeamPath: team, RepoSlug: "api"})
+	require.NoError(t, err)
+	require.Equal(t, filepath.Clean(team), filepath.Clean(snapshot.Path))
+	require.Equal(t, commit[:len(commit)-1], snapshot.Commit)
+	require.Len(t, artifacts, 4)
+
+	byKey := map[string]Artifact{}
+	for _, artifact := range artifacts {
+		byKey[string(artifact.Kind)+"/"+artifact.Name] = artifact
+		require.NotEmpty(t, artifact.SourcePath)
+		require.False(t, filepath.IsAbs(artifact.SourcePath))
+	}
+	require.True(t, byKey["skill/deploy"].Applicable)
+	require.False(t, byKey["skill/mobile"].Applicable)
+	require.Equal(t, OriginPack, byKey["rule/security"].Origin.Kind)
+	require.Equal(t, "always", byKey["rule/security"].Visibility)
+	require.Equal(t, "docs/architecture.md", byKey["context/architecture.md"].SourcePath)
+}

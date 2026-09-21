@@ -68,3 +68,29 @@ func TestTeamSkillsTouched(t *testing.T) {
 		})
 	}
 }
+
+func TestTeamArtifactsTouched(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "agents/skills/deploy/SKILL.md", want: true},
+		{path: "agents/rules/security.md", want: true},
+		{path: "coworkers/rules/legacy.md", want: true},
+		{path: "docs/architecture.md", want: true},
+		{path: "agents/tools/github.json", want: true},
+		{path: "agents/profiles/reviewer.md", want: true},
+		{path: "agents/commands/release.md", want: true},
+		{path: "docs-archive/architecture.md", want: false},
+		{path: "MEMORY.md", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			t.Parallel()
+			if got := teamArtifactsTouched([]string{tt.path}); got != tt.want {
+				t.Fatalf("teamArtifactsTouched(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
