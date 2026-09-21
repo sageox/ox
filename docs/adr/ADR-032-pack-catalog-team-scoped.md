@@ -41,7 +41,7 @@ Three reasons, in order of weight:
 2. **The layout already exists.** `extensions/skills/<name>/references/` is validated and materialized today; `post-cutoff` ships that way.
 3. **The proposed path did not work.** `teamdocs.DiscoverDocs` skips directories (`internal/teamdocs/discover.go:43`), so anything under `docs/packs/` would have been invisible to the team-docs catalog, to `ox agent prime`, and to the convergence coordinator — a silent nothing, not an error.
 
-`agents/tools/` is deferred for the same class of reason: `teamconverge.KindTool` has no handler and resolves to `unsupported`, so the path would be a promise with no mechanism behind it.
+`agents/tools/` is deferred for the same class of reason: there is no tool artifact kind and no handler behind one, so the path would be a promise with no mechanism behind it. (A `KindTool` enum value existed when this was written, but it had no producer and no handler; the PR that ratified this ADR deleted it rather than ship an unreachable promise.)
 
 ### D3 — Pack artifacts co-mingle; the lock carries provenance
 
@@ -57,8 +57,8 @@ Ownership is recorded in a committed lock, not inferred from the path:
 
 This buys three things a namespaced root would not:
 
-- **No consumer changes.** `internal/teamconverge` already carries `Origin{Kind: OriginPack, Pack, PackVersion, Digest}` and a `FilesystemDiscovery.ResolveOrigin` seam that is nil today. Packs plug in by supplying one function; discovery, prime, `ox sync` rendering, and `ox skills status` need nothing.
-- **No fourth reserved namespace.** Pack skills are Team Skills, so they project into repositories under the existing `sageox-team-` prefix (ADR-031 §1) and are covered by the existing `skills/sageox-team-*/` ignore glob. The per-name exact-ignore mechanism that unprefixed catalog names require (`unprefixedCatalogSkills`, `internal/skillmanager/manager.go:268`) is retired rather than extended — that mechanism mutates a **tracked** `.claude/.gitignore` on every selection change and self-heals only on a `repairTrackedSetup` apply.
+- **Almost no consumer changes.** `internal/teamconverge` carries an `Origin` record with `Pack`, `PackVersion`, and `Digest` fields on every artifact and outcome, so the reporting path is already pack-shaped. The `OriginPack` constant and the `ResolveOrigin` discovery seam were written ahead of packs and deleted in this PR, because nothing could populate them and an unreachable seam is not a design benefit. Packs reintroduce both in the PR that needs them — one constant and one resolver function — after which discovery, prime, `ox sync` rendering, and `ox skills status` need nothing further. The substance of this bullet is unchanged: no new namespace and no new discoverer.
+- **No fourth reserved namespace.** Pack skills are Team Skills, so they project into repositories under the existing `sageox-team-` prefix (ADR-031 §1) and are covered by the existing `skills/sageox-team-*/` ignore glob. The per-name exact-ignore mechanism that unprefixed catalog names required (`unprefixedCatalogSkills`) was retired rather than extended, and is **deleted as of this PR** — it mutated a **tracked** `.claude/.gitignore` on every selection change and self-healed only on a `repairTrackedSetup` apply.
 - **One collision rule.** A pack file colliding by name with an existing **hand-authored** file is a namespace collision, not an edit: install refuses it by name, mutating nothing. Only paths the lock already owns are ever overwritten.
 
 ### D4 — Updates overwrite; Team Context git history is the undo
@@ -112,7 +112,7 @@ Sparse checkout needs no change: `.sageox/`, `agents/`, and `docs/` are already 
 ## References
 
 - `docs/specs/skill-management.md` — written project-scoped throughout; amended by D1, rewrite tracked as `ox-hvnc.9`
-- `internal/teamconverge/types.go` — `OriginPack`, `KindTool`, `Origin`
+- `internal/teamconverge/types.go` — `Origin` (its `Pack`/`PackVersion`/`Digest` fields survive; `OriginPack` and `KindTool` were deleted as unreachable in the PR that ratified this ADR)
 - `internal/gitserver/gitignore.go` — the Team Context ignore allow-list of D5
 - `internal/teamdocs/discover.go` — the directory-skipping reader of D2
 - Beads: epic `ox-hvnc` (Pack Catalog), epic `ox-tzzg` (unified convergence), `ox-xfku` (end-to-end lifecycle proof)

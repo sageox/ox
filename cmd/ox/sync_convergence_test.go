@@ -14,13 +14,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type stubSyncConverger struct {
-	report teamconverge.Report
-	err    error
-}
-
-func (s stubSyncConverger) Converge(context.Context, teamconverge.Request) (teamconverge.Report, error) {
-	return s.report, s.err
+// stubConverge builds a teamConvergeFunc returning fixed results. executeSyncConvergence
+// takes teamconverge.Converge as a function value (not a one-method interface), so
+// a closure substitutes directly without a throwaway stub type.
+func stubConverge(report teamconverge.Report, err error) teamConvergeFunc {
+	return func(context.Context, teamconverge.Request) (teamconverge.Report, error) {
+		return report, err
+	}
 }
 
 func TestExecuteSyncConvergence_PersistsFailedOutcome(t *testing.T) {
@@ -32,16 +32,16 @@ func TestExecuteSyncConvergence_PersistsFailedOutcome(t *testing.T) {
 		RepoSlug:      "acme/widget",
 		Snapshot:      teamconverge.Snapshot{Path: teamPath, Commit: "abc123"},
 		Outcomes: []teamconverge.Outcome{{
-			Kind: teamconverge.KindTool, Name: "deploy", SourcePath: "agents/tools/deploy.yaml",
+			Kind: teamconverge.KindSkill, Name: "deploy", SourcePath: "agents/skills/deploy",
 			SourceCommit: "abc123", Origin: teamconverge.Origin{Kind: teamconverge.OriginLoose},
 			State: teamconverge.StateUnsupported, Required: true,
-			Detail: "no delivery handler supports this artifact type",
+			Detail: "this repository has no native skill target",
 		}},
 	}
 
-	result, err := executeSyncConvergence(context.Background(), stubSyncConverger{report: report}, projectRoot,
+	result, err := executeSyncConvergence(context.Background(), stubConverge(report, nil), projectRoot,
 		config.TeamContext{TeamID: "team_acme", TeamName: "Acme", Path: teamPath},
-		RepositoryConvergenceSyncResult{TeamID: "team_acme", TeamPath: teamPath}, teamconverge.ModeExplicit)
+		RepositoryConvergenceSyncResult{TeamID: "team_acme", TeamPath: teamPath}, teamconverge.ModeExplicit, true)
 	require.Error(t, err)
 	require.Equal(t, "failed", result.Status)
 	require.NotNil(t, result.Report)
@@ -53,7 +53,7 @@ func TestExecuteSyncConvergence_PersistsFailedOutcome(t *testing.T) {
 	require.Equal(t, "abc123", pending.TeamCommit)
 }
 
-func TestExecuteSyncConvergence_PersistsRetryableErrorAsPending(t *testing.T) {
+func TestExecuteSyncConvergence_PersistsBusyErrorAsPending(t *testing.T) {
 	projectRoot := t.TempDir()
 	teamPath := filepath.Join(t.TempDir(), "team")
 	report := teamconverge.Report{
@@ -61,11 +61,10 @@ func TestExecuteSyncConvergence_PersistsRetryableErrorAsPending(t *testing.T) {
 		Snapshot:      teamconverge.Snapshot{Path: teamPath, Commit: "def456"},
 	}
 
-	result, err := executeSyncConvergence(context.Background(), stubSyncConverger{
-		report: report,
-		err:    errors.New("projection lock is busy"),
-	}, projectRoot, config.TeamContext{TeamID: "team_acme", Path: teamPath},
-		RepositoryConvergenceSyncResult{TeamID: "team_acme", TeamPath: teamPath}, teamconverge.ModeExplicit)
+	result, err := executeSyncConvergence(context.Background(),
+		stubConverge(report, errors.New("projection lock is busy")),
+		projectRoot, config.TeamContext{TeamID: "team_acme", Path: teamPath},
+		RepositoryConvergenceSyncResult{TeamID: "team_acme", TeamPath: teamPath}, teamconverge.ModeExplicit, true)
 	require.Error(t, err)
 	require.Equal(t, "pending", result.Status)
 
@@ -96,9 +95,9 @@ func TestExecuteSyncConvergence_ClearsPendingOnlyAfterVerifiedSuccess(t *testing
 			Required: true, Origin: teamconverge.Origin{Kind: teamconverge.OriginLoose},
 		}},
 	}
-	result, err := executeSyncConvergence(context.Background(), stubSyncConverger{report: successReport}, projectRoot,
+	result, err := executeSyncConvergence(context.Background(), stubConverge(successReport, nil), projectRoot,
 		config.TeamContext{TeamID: "team_acme", Path: teamPath},
-		RepositoryConvergenceSyncResult{TeamID: "team_acme", TeamPath: teamPath}, teamconverge.ModeExplicit)
+		RepositoryConvergenceSyncResult{TeamID: "team_acme", TeamPath: teamPath}, teamconverge.ModeExplicit, true)
 	require.NoError(t, err)
 	require.Equal(t, "converged", result.Status)
 	pending, loadErr := teamconverge.LoadPending(projectRoot)
@@ -112,9 +111,9 @@ func TestExecuteSyncConvergence_ReportsPersistenceFailures(t *testing.T) {
 	require.NoError(t, os.WriteFile(projectFile, []byte("not a directory"), 0o600))
 
 	t.Run("retry state", func(t *testing.T) {
-		result, err := executeSyncConvergence(context.Background(), stubSyncConverger{
-			err: errors.New("busy"),
-		}, projectFile, team, RepositoryConvergenceSyncResult{}, teamconverge.ModeExplicit)
+		result, err := executeSyncConvergence(context.Background(),
+			stubConverge(teamconverge.Report{}, errors.New("busy")),
+			projectFile, team, RepositoryConvergenceSyncResult{}, teamconverge.ModeExplicit, true)
 		require.ErrorContains(t, err, "persist retry state")
 		require.Equal(t, "failed", result.Status)
 		require.NotNil(t, result.Report)
@@ -123,10 +122,10 @@ func TestExecuteSyncConvergence_ReportsPersistenceFailures(t *testing.T) {
 
 	t.Run("failed outcome state", func(t *testing.T) {
 		report := teamconverge.Report{Outcomes: []teamconverge.Outcome{{
-			Kind: teamconverge.KindTool, Name: "deploy", State: teamconverge.StateUnsupported, Required: true,
+			Kind: teamconverge.KindSkill, Name: "deploy", State: teamconverge.StateUnsupported, Required: true,
 		}}}
-		result, err := executeSyncConvergence(context.Background(), stubSyncConverger{report: report},
-			projectFile, team, RepositoryConvergenceSyncResult{}, teamconverge.ModeExplicit)
+		result, err := executeSyncConvergence(context.Background(), stubConverge(report, nil),
+			projectFile, team, RepositoryConvergenceSyncResult{}, teamconverge.ModeExplicit, true)
 		require.ErrorContains(t, err, "persist retry state")
 		require.Equal(t, "failed", result.Status)
 	})
@@ -136,10 +135,64 @@ func TestExecuteSyncConvergence_ReportsPersistenceFailures(t *testing.T) {
 		pendingPath := teamconverge.PendingPath(project)
 		require.NoError(t, os.MkdirAll(pendingPath, 0o700))
 		require.NoError(t, os.WriteFile(filepath.Join(pendingPath, "child"), []byte("x"), 0o600))
-		result, err := executeSyncConvergence(context.Background(), stubSyncConverger{}, project,
-			team, RepositoryConvergenceSyncResult{}, teamconverge.ModeExplicit)
+		result, err := executeSyncConvergence(context.Background(), stubConverge(teamconverge.Report{}, nil), project,
+			team, RepositoryConvergenceSyncResult{}, teamconverge.ModeExplicit, true)
 		require.ErrorContains(t, err, "clear completed convergence state")
 		require.Equal(t, "failed", result.Status)
+	})
+}
+
+// TestExecuteSyncConvergence_SessionBoundaryDoesNotPersist covers the class of
+// bug where a best-effort convergence call spends a shared, bounded resource
+// on work nobody is waiting for: convergeAfterSessionBoundary always discards
+// its result (cmd/ox/sync_convergence.go), so if executeSyncConvergence still
+// wrote pending/failed state for it, ordinary session-stop churn would burn
+// the daemon's automatic retry budget (teamconverge.MaxAutomaticConvergenceAttempts)
+// for an outcome nobody reads. persist=false must leave no trace on disk,
+// whether the call fails, reports incomplete, or fully converges.
+func TestExecuteSyncConvergence_SessionBoundaryDoesNotPersist(t *testing.T) {
+	team := config.TeamContext{TeamID: "team_acme", Path: "/team"}
+
+	t.Run("error path", func(t *testing.T) {
+		projectRoot := t.TempDir()
+		_, err := executeSyncConvergence(context.Background(),
+			stubConverge(teamconverge.Report{}, errors.New("busy")),
+			projectRoot, team, RepositoryConvergenceSyncResult{}, teamconverge.ModeAutomatic, false)
+		require.Error(t, err)
+		pending, loadErr := teamconverge.LoadPending(projectRoot)
+		require.NoError(t, loadErr)
+		require.Nil(t, pending, "a discarded session-boundary error must not spend the retry budget")
+	})
+
+	t.Run("not-converged path", func(t *testing.T) {
+		projectRoot := t.TempDir()
+		report := teamconverge.Report{Outcomes: []teamconverge.Outcome{{
+			Kind: teamconverge.KindSkill, Name: "deploy", State: teamconverge.StatePending, Required: true,
+		}}}
+		_, err := executeSyncConvergence(context.Background(), stubConverge(report, nil),
+			projectRoot, team, RepositoryConvergenceSyncResult{}, teamconverge.ModeAutomatic, false)
+		require.Error(t, err)
+		pending, loadErr := teamconverge.LoadPending(projectRoot)
+		require.NoError(t, loadErr)
+		require.Nil(t, pending, "a discarded session-boundary pending outcome must not spend the retry budget")
+	})
+
+	t.Run("converged path leaves a pre-existing record alone", func(t *testing.T) {
+		projectRoot := t.TempDir()
+		stale := teamconverge.Report{Outcomes: []teamconverge.Outcome{{
+			Kind: teamconverge.KindSkill, Name: "deploy", State: teamconverge.StatePending, Required: true,
+		}}}
+		_, err := teamconverge.SavePending(projectRoot, teamconverge.PendingRetry, stale, "stale")
+		require.NoError(t, err)
+
+		successReport := teamconverge.Report{Snapshot: teamconverge.Snapshot{Path: team.Path, Commit: "new"}}
+		result, err := executeSyncConvergence(context.Background(), stubConverge(successReport, nil),
+			projectRoot, team, RepositoryConvergenceSyncResult{}, teamconverge.ModeAutomatic, false)
+		require.NoError(t, err)
+		require.Equal(t, "converged", result.Status)
+		pending, loadErr := teamconverge.LoadPending(projectRoot)
+		require.NoError(t, loadErr)
+		require.NotNil(t, pending, "persist=false must not clear a pre-existing pending record either")
 	})
 }
 
@@ -266,6 +319,47 @@ func TestRunSyncConvergence_RepositoryAndTransportBoundaries(t *testing.T) {
 		require.Equal(t, "converged", result.Convergence.Repositories[0].Status)
 		require.Equal(t, team, result.Convergence.Repositories[0].TeamPath)
 	})
+}
+
+// TestExecuteSyncConvergence_RepoSlugUsesCanonicalOriginNotDirectoryNameFallback
+// covers the class of bug where convergence and prime disagree about "this
+// repository": teamdocs.RuleAppliesToRepo/SkillAppliesToRepo fail closed on an
+// empty repo slug, so only a canonical origin-derived identity may gate a
+// repos: filter. repotools.RepoSlug's directory-name fallback has no
+// relationship to the team's repos: naming, so if it reached
+// teamconverge.Request.RepoSlug, a clone with no origin remote (or a worktree
+// where the remote lookup fails) could natively project a rule that prime
+// would exclude.
+func TestExecuteSyncConvergence_RepoSlugUsesCanonicalOriginNotDirectoryNameFallback(t *testing.T) {
+	repo := t.TempDir()
+	gitInitRepo(t, repo) // deliberately no origin remote
+	dirName := filepath.Base(repo)
+
+	team := t.TempDir()
+	gitInitRepo(t, team)
+	require.NoError(t, os.MkdirAll(filepath.Join(team, "agents", "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(team, "agents", "rules", "scoped.md"),
+		[]byte("---\nname: scoped\ndescription: repo-scoped rule\nrepos: [\""+dirName+"\"]\nvisibility: always\n---\n\nBody.\n"), 0o644))
+	gitOutput(t, team, "add", "-A")
+	gitOutput(t, team, "commit", "-q", "-m", "add scoped rule")
+	wireTeamContext(t, repo, team)
+
+	result, err := executeSyncConvergence(context.Background(), teamconverge.Converge, repo,
+		config.TeamContext{TeamID: "team_publish_test", TeamName: "Publish Test Team", Path: team},
+		RepositoryConvergenceSyncResult{TeamID: "team_publish_test", TeamPath: team}, teamconverge.ModeExplicit, true)
+	require.NoError(t, err)
+	require.NotNil(t, result.Report)
+
+	var found bool
+	for _, outcome := range result.Report.Outcomes {
+		if outcome.Name != "scoped" {
+			continue
+		}
+		found = true
+		require.Equal(t, teamconverge.StateFiltered, outcome.State,
+			"a repos:-scoped rule matched the working directory's basename instead of the canonical origin identity")
+	}
+	require.True(t, found, "expected the scoped rule to appear in the convergence report")
 }
 
 func TestSyncHelp_ExplainsAutomationAndPackBoundary(t *testing.T) {

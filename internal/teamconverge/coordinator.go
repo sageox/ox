@@ -14,46 +14,31 @@ import (
 
 const automaticSnapshotLockWait = 250 * time.Millisecond
 
-type Coordinator struct {
-	discovery    Discovery
-	handlers     map[ArtifactKind]Handler
-	lockSnapshot bool
+// Converge discovers this repository's applicable Team Context artifacts and
+// delivers them through each kind's one production mechanism: Team Skills
+// reconcile natively (convergeSkills), Team Rules project natively or fall
+// back to prime (convergeRules), and Team Context docs index for prime
+// (indexForPrime).
+func Converge(ctx context.Context, request Request) (Report, error) {
+	return convergeLocked(ctx, request, FilesystemDiscovery{})
 }
 
-func New(discovery Discovery, handlers ...Handler) (*Coordinator, error) {
-	if discovery == nil {
-		return nil, fmt.Errorf("team context discovery is required")
-	}
-	c := &Coordinator{discovery: discovery, handlers: map[ArtifactKind]Handler{}}
-	for _, handler := range handlers {
-		if handler == nil {
-			return nil, fmt.Errorf("nil Team Context convergence handler")
-		}
-		kind := handler.Kind()
-		if kind == "" {
-			return nil, fmt.Errorf("team context convergence handler has no artifact kind")
-		}
-		if _, exists := c.handlers[kind]; exists {
-			return nil, fmt.Errorf("duplicate Team Context convergence handler for %s", kind)
-		}
-		c.handlers[kind] = handler
-	}
-	return c, nil
-}
-
-func (c *Coordinator) Converge(ctx context.Context, request Request) (Report, error) {
-	if !c.lockSnapshot {
-		return c.convergeLocked(ctx, request)
-	}
+// convergeLocked wraps converge with the per-clone git lease. Pulls, Team
+// Context publishers, and convergence share this lease. Holding it through
+// both discovery and delivery makes a report one immutable HEAD/worktree
+// snapshot instead of a mix of two commits. Automatic work only waits
+// briefly; contention is durable pending work, never a reason to stall the
+// daemon scheduler.
+//
+// Split from converge so tests can exercise the lease against a fake
+// Discovery without a real git Team Context, and so the pure validation and
+// delivery-dispatch logic in converge can be tested without paying for a
+// lock (or a TeamPath) at all.
+func convergeLocked(ctx context.Context, request Request, discovery Discovery) (Report, error) {
 	if request.TeamPath == "" {
 		return newReport(request), fmt.Errorf("team context path is required")
 	}
 
-	// Pulls, Team Context publishers, and convergence share this per-clone
-	// lease. Holding it through both discovery and handler byte loading makes
-	// the report one immutable HEAD/worktree snapshot instead of a mix of two
-	// commits. Automatic work only waits briefly; contention is durable pending
-	// work, never a reason to stall the daemon scheduler.
 	lockCtx := ctx
 	cancel := func() {}
 	if request.Mode == ModeAutomatic {
@@ -66,11 +51,11 @@ func (c *Coordinator) Converge(ctx context.Context, request Request) (Report, er
 	err := gitutil.WithRepoLock(lockCtx, request.TeamPath, func() error {
 		acquired = true
 		var convergeErr error
-		report, convergeErr = c.convergeLocked(ctx, request)
+		report, convergeErr = converge(ctx, request, discovery)
 		return convergeErr
 	})
 	if err != nil && !acquired && gitutil.IsRepoLockBusy(err) {
-		return report, &RetryableError{Err: fmt.Errorf("team context snapshot is busy: %w", err)}
+		return report, fmt.Errorf("team context snapshot is busy: %w", err)
 	}
 	return report, err
 }
@@ -84,15 +69,15 @@ func newReport(request Request) Report {
 	}
 }
 
-func (c *Coordinator) convergeLocked(ctx context.Context, request Request) (Report, error) {
+// converge is the pure discover-validate-deliver core, with no git lease.
+func converge(ctx context.Context, request Request, discovery Discovery) (Report, error) {
 	report := newReport(request)
-	snapshot, artifacts, err := c.discovery.Discover(ctx, request)
+	snapshot, artifacts, err := discovery.Discover(ctx, request)
 	if err != nil {
 		return report, err
 	}
 	report.Snapshot = snapshot
 
-	artifacts = append(artifacts, request.Additional...)
 	sort.Slice(artifacts, func(i, j int) bool {
 		if artifacts[i].Kind != artifacts[j].Kind {
 			return artifacts[i].Kind < artifacts[j].Kind
@@ -130,55 +115,34 @@ func (c *Coordinator) convergeLocked(ctx context.Context, request Request) (Repo
 		}
 	}
 
-	// Lifecycle handlers must run even when desired state is empty. Otherwise a
-	// deleted or newly-filtered Team Skill/Rule leaves its last native projection
-	// on disk forever: discovery has no applicable item to group, so the very
-	// handler that owns retirement would never be called.
-	kindSet := map[ArtifactKind]bool{}
-	for kind := range grouped {
-		kindSet[kind] = true
-	}
-	for kind := range c.handlers {
-		kindSet[kind] = true
-	}
-	var kinds []ArtifactKind
-	for kind := range kindSet {
-		kinds = append(kinds, kind)
-	}
-	sort.Slice(kinds, func(i, j int) bool { return kinds[i] < kinds[j] })
-	for _, kind := range kinds {
-		items := grouped[kind]
-		handler := c.handlers[kind]
-		if handler == nil {
-			for _, artifact := range items {
-				report.Outcomes = append(report.Outcomes, outcomeFor(snapshot, artifact, StateUnsupported, "",
-					"no delivery handler supports this artifact type"))
-			}
-			continue
+	// Each kind's delivery function runs unconditionally, even with an empty
+	// desired set: otherwise a deleted or newly-filtered Team Skill/Rule
+	// leaves its last native projection on disk forever, since there would be
+	// no applicable artifact to trigger retirement.
+	//
+	// Dispatch order is alphabetical by kind (context, rule, skill) to match
+	// the prior handler-map coordinator, which iterated a sorted kindSet. When
+	// two kinds both hard-abort on an empty desired set in the same call (e.g.
+	// a live session blocks both Team Skills and Team Rules retirement), this
+	// order decides which one's error reaches the caller.
+	for _, kind := range [...]struct {
+		kind ArtifactKind
+		fn   func(context.Context, Request, Snapshot, []Artifact) ([]Outcome, error)
+	}{
+		{KindContext, indexForPrime},
+		{KindRule, convergeRules},
+		{KindSkill, convergeSkills},
+	} {
+		items := grouped[kind.kind]
+		outcomes, handleErr := kind.fn(ctx, request, snapshot, items)
+		if handleErr != nil && len(items) == 0 {
+			// Empty desired state is still lifecycle work: retiring the last
+			// rule or skill. With no artifact row to attach an error to,
+			// swallowing it would falsely report convergence and discard the
+			// only retry signal.
+			return report, handleErr
 		}
-		outcomes, handleErr := handler.Converge(ctx, request, snapshot, items)
-		if handleErr != nil {
-			// Empty desired state is still lifecycle work: retiring the last rule or
-			// skill. With no artifact row to attach an error to, swallowing it would
-			// falsely report convergence and discard the only retry signal.
-			if len(items) == 0 {
-				return report, handleErr
-			}
-			// Unknown failures are retryable by default. Handlers enumerate
-			// content/capability failures as explicit settled outcomes; treating an
-			// unclassified I/O or implementation error as terminal would silently
-			// strand work that can recover. The durable scheduler bounds retries.
-			state := StatePending
-			var settled *settledError
-			if errors.As(handleErr, &settled) {
-				state = settled.State
-			}
-			for _, artifact := range items {
-				report.Outcomes = append(report.Outcomes, outcomeFor(snapshot, artifact, state, "", handleErr.Error()))
-			}
-			continue
-		}
-		report.Outcomes = append(report.Outcomes, validateHandlerOutcomes(snapshot, items, outcomes)...)
+		report.Outcomes = append(report.Outcomes, classify(snapshot, items, outcomes, handleErr)...)
 	}
 
 	sort.Slice(report.Outcomes, func(i, j int) bool {
@@ -190,13 +154,32 @@ func (c *Coordinator) convergeLocked(ctx context.Context, request Request) (Repo
 	return report, nil
 }
 
+// classify turns one kind's delivery result into report outcomes. An
+// unclassified error defaults every item to StatePending — recoverable by
+// default — while a *settledError names its own terminal state.
+func classify(snapshot Snapshot, items []Artifact, outcomes []Outcome, err error) []Outcome {
+	if err == nil {
+		return outcomes
+	}
+	state := StatePending
+	var settled *settledError
+	if errors.As(err, &settled) {
+		state = settled.State
+	}
+	result := make([]Outcome, 0, len(items))
+	for _, artifact := range items {
+		result = append(result, outcomeFor(snapshot, artifact, state, "", err.Error()))
+	}
+	return result
+}
+
 func artifactClaimKey(artifact Artifact) string {
 	return strings.ToLower(string(artifact.Kind)) + "\x00" + strings.ToLower(artifact.Name)
 }
 
 func validateArtifact(artifact Artifact) error {
 	switch artifact.Kind {
-	case KindSkill, KindRule, KindContext, KindTool:
+	case KindSkill, KindRule, KindContext:
 	default:
 		return fmt.Errorf("unsupported artifact kind %q", artifact.Kind)
 	}
@@ -208,41 +191,10 @@ func validateArtifact(artifact Artifact) error {
 		path.Clean(source) != source || source == "." || strings.HasPrefix(source, "../") {
 		return fmt.Errorf("artifact source path %q is not normalized and Team Context-relative", source)
 	}
-	switch artifact.Origin.Kind {
-	case OriginLoose:
-	case OriginPack:
-		if artifact.Origin.Pack == "" {
-			return fmt.Errorf("pack-owned artifact has no Pack identity")
-		}
-	default:
+	if artifact.Origin.Kind != OriginLoose {
 		return fmt.Errorf("artifact has unknown origin %q", artifact.Origin.Kind)
 	}
 	return nil
-}
-
-func validateHandlerOutcomes(snapshot Snapshot, artifacts []Artifact, outcomes []Outcome) []Outcome {
-	byName := make(map[string][]Outcome, len(outcomes))
-	for _, outcome := range outcomes {
-		byName[outcome.Name] = append(byName[outcome.Name], outcome)
-	}
-	validated := make([]Outcome, 0, len(artifacts))
-	for _, artifact := range artifacts {
-		matches := byName[artifact.Name]
-		if len(matches) != 1 {
-			validated = append(validated, outcomeFor(snapshot, artifact, StateError, "",
-				fmt.Sprintf("delivery handler returned %d outcomes; expected exactly one", len(matches))))
-			continue
-		}
-		outcome := matches[0]
-		outcome.Kind = artifact.Kind
-		outcome.Name = artifact.Name
-		outcome.SourcePath = artifact.SourcePath
-		outcome.SourceCommit = snapshot.Commit
-		outcome.Origin = artifact.Origin
-		outcome.Required = artifact.Required
-		validated = append(validated, outcome)
-	}
-	return validated
 }
 
 func outcomeFor(snapshot Snapshot, artifact Artifact, state OutcomeState, delivery, detail string) Outcome {

@@ -39,10 +39,11 @@ func TestCollectInstalledSkills_ClassifiesEveryProvenance(t *testing.T) {
 	writeSkillDir(t, repo, root, skillmanager.CommittedOnRamp, manifestWithDescription("sageox", "the on-ramp"))
 	writeSkillDir(t, repo, root, skillmanager.TeamPrefix+"deploy", manifestWithDescription("sageox-team-deploy", "how we deploy"))
 	writeSkillDir(t, repo, root, "my-own-skill", manifestWithDescription("my-own-skill", "mine, hand written"))
-	// Shipped by ox in the opt-in bundle, but carrying NO ownership evidence.
-	// Catalog membership is availability, not provenance: this is deliberately a
-	// local skill until a verified install stamp proves ox wrote these bytes.
-	writeSkillDir(t, repo, root, catalogOptInSkill, manifestWithDescription(catalogOptInSkill, "curated facts"))
+	// An ordinary, unprefixed name — the shape an ox catalog skill takes — but
+	// carrying NO ownership evidence. A catalog-shaped NAME is availability, not
+	// provenance: this is deliberately a local skill until a verified install
+	// stamp proves ox wrote these bytes.
+	writeSkillDir(t, repo, root, unprefixedSkillName, manifestWithDescription(unprefixedSkillName, "curated facts"))
 
 	got := collectInstalledSkills(repo, []string{root})
 
@@ -56,8 +57,8 @@ func TestCollectInstalledSkills_ClassifiesEveryProvenance(t *testing.T) {
 		"the committed on-ramp is deliberately unprefixed; a prefix-only rule files ox's own file under local")
 	require.Equal(t, provenanceTeam, byName[skillmanager.TeamPrefix+"deploy"].Provenance)
 	require.Equal(t, provenanceLocal, byName["my-own-skill"].Provenance)
-	require.Equal(t, provenanceLocal, byName[catalogOptInSkill].Provenance,
-		"a catalog name alone claimed a hand-authored skill")
+	require.Equal(t, provenanceLocal, byName[unprefixedSkillName].Provenance,
+		"an unprefixed name alone claimed a hand-authored skill")
 
 	require.Equal(t, "mine, hand written", byName["my-own-skill"].Description,
 		"the description column is empty, so a reader cannot tell what a local skill is for")
@@ -71,10 +72,10 @@ func TestCollectInstalledSkills_ClassifiesEveryProvenance(t *testing.T) {
 func TestCollectInstalledSkills_UnprefixedOxSkillNeedsOwnershipEvidence(t *testing.T) {
 	repo := t.TempDir()
 	const root = ".agents/skills"
-	preamble := "---\nname: post-cutoff\ndescription: curated facts\n---\n"
+	preamble := "---\nname: " + unprefixedSkillName + "\ndescription: curated facts\n---\n"
 	body := []byte("\nmanaged body\n")
 	manifest := preamble + string(agentx.StampedContent(body, "0.16.0", "ox"))
-	writeSkillDir(t, repo, root, catalogOptInSkill, manifest)
+	writeSkillDir(t, repo, root, unprefixedSkillName, manifest)
 
 	got := collectInstalledSkills(repo, []string{root})
 
@@ -500,7 +501,7 @@ func TestSkillsListHelpers_CoverDefensiveAndFormattingBoundaries(t *testing.T) {
 		require.True(t, folded)
 		require.Equal(t, "a b", sanitizeCell("a\tb"))
 		require.Equal(t, "a", truncateCell("abc", 1))
-		require.Equal(t, []string{"a", "b"}, dedupeStrings([]string{"a", "a", "b"}))
+		require.Equal(t, []string{"a", "b"}, dedupeNames([]string{"a", "a", "b"}))
 	})
 
 	t.Run("missing skill directory is not a skill", func(t *testing.T) {
@@ -569,6 +570,6 @@ func TestResolveSkillRoots_FallsBackToDetectionOnlyWhenTheLockfileIsSilent(t *te
 	t.Run("no selection falls through to detection without failing", func(t *testing.T) {
 		roots, err := resolveSkillRoots(t.TempDir())
 		require.NoError(t, err, "a repository that never ran `ox init` is not an error")
-		require.Equal(t, dedupeStrings(roots), roots, "the fallback must still be deduplicated")
+		require.Equal(t, dedupeNames(roots), roots, "the fallback must still be deduplicated")
 	})
 }

@@ -10,13 +10,11 @@ import (
 	"github.com/sageox/ox/internal/teamdocs"
 )
 
-// OriginResolver maps a normalized Team Context path to Pack ownership. A nil
-// resolver means the artifact was authored directly by the team.
-type OriginResolver func(sourcePath string) Origin
-
-type FilesystemDiscovery struct {
-	ResolveOrigin OriginResolver
-}
+// FilesystemDiscovery is ox's one production Discovery: it walks a Team
+// Context git checkout for typed artifacts. Every artifact it produces is
+// loose (hand-authored) — there is no Pack producer yet, so origin is always
+// OriginLoose.
+type FilesystemDiscovery struct{}
 
 func (d FilesystemDiscovery) Discover(ctx context.Context, request Request) (Snapshot, []Artifact, error) {
 	if request.TeamPath == "" {
@@ -42,7 +40,7 @@ func (d FilesystemDiscovery) Discover(ctx context.Context, request Request) (Sna
 		applicable := teamdocs.SkillAppliesToRepo(skill, request.RepoSlug)
 		artifact := Artifact{
 			Kind: KindSkill, Name: skill.Name, SourcePath: rel,
-			Origin: d.origin(rel), Applicable: applicable, Required: true,
+			Origin: Origin{Kind: OriginLoose}, Applicable: applicable, Required: true,
 			Visibility: skill.Visibility,
 		}
 		if !applicable {
@@ -60,9 +58,10 @@ func (d FilesystemDiscovery) Discover(ctx context.Context, request Request) (Sna
 		applicable := teamdocs.RuleAppliesToRepo(rule, request.RepoSlug)
 		artifact := Artifact{
 			Kind: KindRule, Name: rule.Name, SourcePath: rel,
-			Origin: d.origin(rel), Applicable: applicable, Required: true,
+			Origin: Origin{Kind: OriginLoose}, Applicable: applicable, Required: true,
 			Visibility: rule.Visibility, Description: rule.Description,
 			Globs: append([]string(nil), rule.Globs...),
+			rule:  &rule,
 		}
 		if !applicable {
 			artifact.FilterReason = "repos filter does not include this repository"
@@ -78,20 +77,11 @@ func (d FilesystemDiscovery) Discover(ctx context.Context, request Request) (Sna
 		rel := sourceRel(request.TeamPath, doc.Path)
 		artifacts = append(artifacts, Artifact{
 			Kind: KindContext, Name: doc.Name, SourcePath: rel,
-			Origin: d.origin(rel), Applicable: true, Required: true,
+			Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: true,
 			Visibility: doc.Visibility,
 		})
 	}
 	return snapshot, artifacts, nil
-}
-
-func (d FilesystemDiscovery) origin(sourcePath string) Origin {
-	if d.ResolveOrigin != nil {
-		if origin := d.ResolveOrigin(sourcePath); origin.Kind != "" {
-			return origin
-		}
-	}
-	return Origin{Kind: OriginLoose}
 }
 
 func sourceRel(root, path string) string {

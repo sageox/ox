@@ -39,14 +39,14 @@ type ScopedIgnoreFile struct {
 // present before reconciliation writes any derived file, so an ox-managed cache
 // can never appear in the customer's pull request.
 func ScopedIgnoreFiles() []ScopedIgnoreFile {
-	return scopedIgnoreFiles(nil)
+	return scopedIgnoreFiles()
 }
 
-// scopedIgnoreFiles adds exact rules only for unprefixed catalog skills this
-// repository actually selected. Catalog availability is not ownership: putting
-// every known name here would hide an unrelated local skill before the coworker
-// selected anything.
-func scopedIgnoreFiles(exactSkills []string) []ScopedIgnoreFile {
+// scopedIgnoreFiles lists the ignore rules for every agent directory ox writes
+// into. Every entry is a stable prefix glob or the one exact ox-cli.md rule name
+// — never a per-skill name — so the set never depends on what a repository
+// selected.
+func scopedIgnoreFiles() []ScopedIgnoreFile {
 	skillGlob := "skills/" + CLIPrefix + "*/"
 	teamSkillGlob := "skills/" + TeamPrefix + "*/"
 	teamRuleGlob := "rules/" + TeamPrefix + "*"
@@ -58,21 +58,16 @@ func scopedIgnoreFiles(exactSkills []string) []ScopedIgnoreFile {
 	ruleExact := "rules/" + CLIBase + ".md"
 	ruleGlob := "rules/" + CLIPrefix + "*"
 
-	exactEntries := make([]string, 0, len(exactSkills))
-	for _, name := range sortedUnique(exactSkills) {
-		exactEntries = append(exactEntries, "skills/"+name+"/")
-	}
-
 	return []ScopedIgnoreFile{
-		{Dir: ".claude", Entries: append([]string{
+		{Dir: ".claude", Entries: []string{
 			skillGlob, ruleExact, ruleGlob,
 			// The command surface folded into skills in 0.15.0; the glob stays so a
 			// repository still holding pre-fold files keeps them out of diffs until
 			// the retirement sweep reaches it.
 			"commands/" + CLIPrefix + "*",
 			teamSkillGlob, teamRuleGlob,
-		}, exactEntries...)},
-		{Dir: ".agents", Entries: append([]string{skillGlob, teamSkillGlob}, exactEntries...)},
+		}},
+		{Dir: ".agents", Entries: []string{skillGlob, teamSkillGlob}},
 		{Dir: ".factory", Entries: []string{ruleExact, ruleGlob, teamRuleGlob}},
 		// Team Rules use each tool's native rule root only when the format can
 		// preserve semantics. These entries are existence-gated like the original
@@ -105,16 +100,7 @@ type IgnoreFileResult struct {
 }
 
 func EnsureScopedIgnoreFiles(repoRoot string) ([]IgnoreFileResult, error) {
-	desired, _, err := LoadDesired(repoRoot)
-	if err != nil {
-		return nil, err
-	}
-	files := scopedIgnoreFiles(unprefixedCatalogSkills(desiredLock{
-		Bundles: bundleIDs(desired.Bundles),
-		Names:   desired.Names,
-		Targets: desired.Targets,
-	}))
-	written, _, err := ensureScopedIgnoreFilesIn(repoRoot, nil, files)
+	written, _, err := ensureScopedIgnoreFilesIn(repoRoot, nil, ScopedIgnoreFiles())
 	return written, err
 }
 

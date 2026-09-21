@@ -45,6 +45,47 @@ func TestDigestAndLegacyDescriptionsAreStableAndDefensive(t *testing.T) {
 	require.Equal(t, PrimaryDescription, LegacyDescriptions()[0])
 }
 
+// TestCatalogIsLineEndingPinned: the catalog is embedded from the checkout, so
+// a Windows clone that materialized these files with CRLF would make a
+// Windows-built ox write different bytes AND report a different Digest than
+// every other build — which the skills lockfile reads as drift that no repair
+// can settle. Without normalization the failure is invisible on Linux and macOS
+// and permanent on Windows.
+func TestCatalogIsLineEndingPinned(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no rendered rule carries CRLF", func(t *testing.T) {
+		files, err := Select(adapterprotocol.SkillTarget{
+			Key: "droid-rules", Root: ".factory/rules",
+			Format: adapterprotocol.RuleFormatMarkdownV1,
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, files)
+		for _, file := range files {
+			require.NotContains(t, string(file.Content), "\r\n",
+				"rule %s would be written with CRLF", file.Path)
+		}
+	})
+
+	t.Run("normalizeEOL rewrites CRLF and leaves LF alone", func(t *testing.T) {
+		tests := []struct {
+			name string
+			in   string
+			want string
+		}{
+			{"crlf frontmatter", "---\r\ndescription: x\r\n---\r\n", "---\ndescription: x\n---\n"},
+			{"already lf", "---\ndescription: x\n", "---\ndescription: x\n"},
+			{"lone cr is not a line ending", "a\rb", "a\rb"},
+			{"empty", "", ""},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				require.Equal(t, tt.want, string(normalizeEOL([]byte(tt.in))))
+			})
+		}
+	})
+}
+
 func mustDigest(t *testing.T) string {
 	t.Helper()
 	digest, err := Digest()

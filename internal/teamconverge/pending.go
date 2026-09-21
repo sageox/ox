@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -80,14 +81,36 @@ func SavePending(projectRoot string, status PendingStatus, report Report, reason
 	}
 	var record *PendingRecord
 	err := fileutil.WithFileLock(context.Background(), path, func() error {
-		previous, _ := LoadPending(projectRoot)
+		previous, loadErr := LoadPending(projectRoot)
+		if loadErr != nil {
+			// A corrupt record must not silently reset the retry budget without a
+			// trace: fall back to "no prior record" (attempts restart at 1), but
+			// say so, since that's otherwise indistinguishable from a fresh repo.
+			slog.Warn("team convergence pending record unreadable; retry budget reset", "project_root", projectRoot, "error", loadErr)
+		}
+
+		// The attempt counter is keyed on TeamPath alone, not (TeamPath, TeamCommit).
+		// TeamCommit is not always known: a convergence that fails before discovery
+		// completes has no commit to report, and keying on the pair let that unknown
+		// state masquerade as a commit change and silently reset the budget whenever
+		// automatic retries alternated between an error and a reported-pending
+		// result. A commit is treated as "changed" only when both the previous and
+		// the new value are known and differ — an unknown/empty commit neither
+		// resets the counter nor overwrites the last known commit.
+		commit := report.Snapshot.Commit
 		attempts := 1
-		if previous != nil && previous.TeamPath == report.Snapshot.Path && previous.TeamCommit == report.Snapshot.Commit {
+		if previous != nil && previous.TeamPath == report.Snapshot.Path {
 			attempts = previous.Attempts + 1
+			switch {
+			case commit == "":
+				commit = previous.TeamCommit
+			case previous.TeamCommit != "" && commit != previous.TeamCommit:
+				attempts = 1 // a real, new commit is materially new work
+			}
 		}
 		record = &PendingRecord{
 			SchemaVersion: pendingSchemaVersion,
-			Status:        status, TeamPath: report.Snapshot.Path, TeamCommit: report.Snapshot.Commit,
+			Status:        status, TeamPath: report.Snapshot.Path, TeamCommit: commit,
 			Attempts: attempts, LastAttempt: time.Now().UTC(), Reason: reason,
 			Outcomes: append([]Outcome(nil), report.Outcomes...),
 		}

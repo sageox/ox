@@ -11,6 +11,8 @@ import (
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamconverge"
+	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/internal/teamrules"
 	"github.com/sageox/ox/internal/version"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/stretchr/testify/require"
@@ -216,6 +218,58 @@ func TestTeamConvergence_DoesNotRetrySettledOrExhaustedWorkWithoutAChange(t *tes
 				"an unchanged daemon pass spent a retry outside the automatic budget")
 		})
 	}
+}
+
+// TestReconcileTeamSkills_RuleRepoFilterUsesCanonicalOriginNotDirectoryName
+// covers the class of bug where convergence and prime disagree about "this
+// repository": teamdocs.RuleAppliesToRepo/SkillAppliesToRepo (internal/teamdocs)
+// fail closed on an empty repo slug, so only a canonical origin-derived
+// identity may gate a repos: filter. repotools.RepoSlug's directory-name
+// fallback has no relationship to the team's repos: naming, so if it reached
+// teamconverge.Request.RepoSlug here, a clone with no origin remote could
+// natively project a Team Rule that prime (cmd/ox/agent_prime.go) would
+// exclude — two halves of the same "exactly once" contract disagreeing about
+// who "this repository" is.
+func TestReconcileTeamSkills_RuleRepoFilterUsesCanonicalOriginNotDirectoryName(t *testing.T) {
+	project := t.TempDir()
+	runTeamGit(t, project, "init", "-q")
+	// Deliberately no origin remote: repotools.RepoSlug's directory-name
+	// fallback is the failure mode under test. A native rule root makes a
+	// wrongly-applicable rule observable as a file on disk.
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".claude", "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".claude", ".gitignore"),
+		[]byte("rules/sageox-team-*\n"), 0o644))
+	dirName := filepath.Base(project)
+
+	team := t.TempDir()
+	runTeamGit(t, team, "init", "-q")
+	runTeamGit(t, team, "config", "user.email", "test@sageox.ai")
+	runTeamGit(t, team, "config", "user.name", "test")
+	runTeamGit(t, team, "config", "commit.gpgsign", "false")
+	rule := filepath.Join(team, "agents", "rules", "scoped.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(rule), 0o755))
+	require.NoError(t, os.WriteFile(rule,
+		[]byte("---\nname: scoped\ndescription: repo-scoped rule\nrepos: [\""+dirName+"\"]\nglobs: [\"**/*.go\"]\nvisibility: always\n---\n\nBody.\n"),
+		0o644))
+	runTeamGit(t, team, "add", "-A")
+	runTeamGit(t, team, "commit", "-q", "-m", "add scoped rule")
+
+	require.NoError(t, config.SaveProjectConfig(project, &config.ProjectConfig{
+		ConfigVersion: config.CurrentConfigVersion, RepoID: "repo_test", TeamID: "team_test", TeamName: "Test",
+	}))
+	require.NoError(t, config.SaveLocalConfig(project, &config.LocalConfig{TeamContexts: []config.TeamContext{{
+		TeamID: "team_test", TeamName: "Test", Path: team,
+	}}}))
+
+	newTestScheduler(project).reconcileTeamSkills([]string{"agents/rules/scoped.md"})
+
+	rules, err := teamdocs.PublishedRules(team)
+	require.NoError(t, err)
+	require.Len(t, rules, 1)
+	native, ok := teamrules.NativePath(project, "claude", rules[0])
+	require.True(t, ok)
+	require.NoFileExists(t, native,
+		"a repos:-scoped rule matched the working directory's basename instead of the canonical origin identity")
 }
 
 func runTeamGit(t *testing.T, dir string, args ...string) {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -41,10 +40,10 @@ var skillsCmd = &cobra.Command{
 
 Skills reach a repository from three places: the ones ox itself ships, the ones
 your team publishes to its Team Context, and the ones you wrote yourself. "list"
-shows all three; "catalog" shows what ox offers and whether it is installed;
-"install" and "uninstall" change the set. "status" answers the harder question —
-when a team skill is missing, which of the several possible reasons is the
-actual one.`,
+shows all three. "status" answers the harder question — when a team skill is
+missing, which of the several possible reasons is the actual one. "approve" and
+"revoke" are the trust boundary for runnable team-skill content; "publish" sends
+a skill you wrote the other way, into your team's Team Context.`,
 }
 
 var skillsStatusCmd = &cobra.Command{
@@ -133,9 +132,7 @@ func runSkillsStatus(cmd *cobra.Command, _ []string) error {
 	out := collectSkillsStatus(gitRoot)
 
 	if asJSON {
-		enc := json.NewEncoder(cmd.OutOrStdout())
-		enc.SetIndent("", "  ")
-		return enc.Encode(out)
+		return encodeSkillsJSON(cmd.OutOrStdout(), out)
 	}
 	renderSkillsStatus(cmd.OutOrStdout(), out)
 	return nil
@@ -458,7 +455,7 @@ func roundedAge(t time.Time) string {
 }
 
 func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsStatusOutput) {
-	p := func(format string, args ...any) { fmt.Fprintf(w, format+"\n", args...) }
+	p := skillsPrintf(w)
 
 	if out.TeamContext != nil {
 		name := out.TeamContext.Name
@@ -515,10 +512,7 @@ func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsSta
 
 	if len(out.Problems) > 0 {
 		p("")
-		p("%s", cli.StyleWarning.Render("Why something may be missing"))
-		for _, problem := range out.Problems {
-			p("  • %s", problem)
-		}
+		writeSkillsProblems(w, cli.StyleWarning.Render("Why something may be missing"), out.Problems)
 	}
 }
 

@@ -30,6 +30,9 @@ package main
 //   - main.go does NOT reference these handlers and does NOT advertise
 //     CapRulesInstaller. Honest about lack of support.
 //   - When/if Pi ships a first-class modular rules directory, flip wiring.
+//   - The RPCs these handlers implement are DEPRECATED and scheduled for
+//     removal in ox 0.18.0 — see the note on
+//     adapterprotocol.CapRulesInstaller. Wire nothing new to them.
 
 import (
 	"github.com/sageox/ox/pkg/adapterprotocol"

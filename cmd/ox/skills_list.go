@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -35,10 +34,6 @@ import (
 // question ("where did my skill go?") has no answer anywhere in the tool. So
 // this walks the skill roots on disk and classifies what it finds, rather than
 // rendering ox's record of what it installed.
-//
-// `list` is deliberately not `catalog` with a flag. They answer different
-// questions — "what do my agents have" versus "what could I add" — and only one
-// of them is about this repository's disk.
 
 const (
 	provenanceOx    = "ox"
@@ -129,7 +124,7 @@ func resolveSkillRoots(repoRoot string) ([]string, error) {
 			}
 		}
 	}
-	return dedupeStrings(roots), nil
+	return dedupeNames(roots), nil
 }
 
 // collectInstalledSkills walks the skill roots and classifies what is there,
@@ -137,7 +132,7 @@ func resolveSkillRoots(repoRoot string) ([]string, error) {
 // looking for, so a test can point it at a scratch repo without moving the
 // process.
 func collectInstalledSkills(repoRoot string, roots []string) skillsListOutput {
-	out := skillsListOutput{Roots: dedupeStrings(roots), Skills: []installedSkillRow{}, Problems: []string{}}
+	out := skillsListOutput{Roots: dedupeNames(roots), Skills: []installedSkillRow{}, Problems: []string{}}
 	out.Skills, out.Problems = inventorySkillRoots(repoRoot, out.Roots)
 	sort.Slice(out.Skills, func(i, j int) bool {
 		if a, b := provenanceRank[out.Skills[i].Provenance], provenanceRank[out.Skills[j].Provenance]; a != b {
@@ -331,7 +326,7 @@ func emitSkillsList(w io.Writer, out skillsListOutput, asJSON bool) error {
 	if asJSON {
 		return encodeSkillsJSON(w, out)
 	}
-	p := func(format string, args ...any) { fmt.Fprintf(w, format+"\n", args...) }
+	p := skillsPrintf(w)
 
 	if len(out.Skills) > 0 {
 		p("%s", cli.StyleAccent.Render(fmt.Sprintf("%-*s  %-*s  %s",
@@ -339,7 +334,7 @@ func emitSkillsList(w io.Writer, out skillsListOutput, asJSON bool) error {
 		for _, row := range out.Skills {
 			// Sanitized HERE and not on the way in: Name is the real on-disk
 			// directory name everywhere else — a map key in this file, and what
-			// publish matches a user's argument against — so a
+			// `validatePublishNames` matches a user's argument against — so a
 			// scrubbed copy stored in the struct would quietly stop matching the
 			// directory it names. It is also a name ox did not choose: a checked-out
 			// repository can hold a skill directory whose name embeds CSI or OSC
@@ -359,10 +354,7 @@ func emitSkillsList(w io.Writer, out skillsListOutput, asJSON bool) error {
 		if len(out.Skills) > 0 {
 			p("")
 		}
-		p("%s", cli.StyleError.Render("Directories ox could not read"))
-		for _, problem := range out.Problems {
-			writeWrapped(w, "  • ", "    ", problem)
-		}
+		writeSkillsProblems(w, cli.StyleError.Render("Directories ox could not read"), out.Problems)
 	}
 
 	if out.Guidance != "" {
@@ -374,56 +366,19 @@ func emitSkillsList(w io.Writer, out skillsListOutput, asJSON bool) error {
 	return nil
 }
 
-// writeWrapped prints text broken on spaces so no line runs past
-// skillsTableWidth, with first prefixing the opening line and cont every
-// continuation.
-//
-// A long word is never split: a path, a filename, or a backticked command broken
-// across two lines cannot be copied out of the terminal, and every guidance
-// string in this family exists to be copied.
-func writeWrapped(w io.Writer, first, cont, text string) {
-	prefix := first
-	line := ""
-	flush := func() {
-		fmt.Fprintf(w, "%s%s\n", prefix, line)
-		prefix, line = cont, ""
-	}
-	for _, word := range strings.Fields(text) {
-		switch {
-		case line == "":
-			line = word
-		case len([]rune(prefix))+len([]rune(line))+1+len([]rune(word)) <= skillsTableWidth:
-			line += " " + word
-		default:
-			flush()
-			line = word
-		}
-	}
-	if line != "" {
-		flush()
-	}
-}
-
 // Column widths for the tables in this command family.
 //
-// They are derived from skillsTableWidth rather than typed as literals so a
-// change to one cannot silently push a row past the edge — a table that wraps is
-// not a table, and the wrap only shows up on someone else's terminal.
+// They are derived from skillsTableWidth (skills_out.go) rather than typed as
+// literals so a change to one cannot silently push a row past the edge — a
+// table that wraps is not a table, and the wrap only shows up on someone
+// else's terminal.
 const (
-	skillsTableWidth = 80
-
 	provenanceColumn = 10 // len("PROVENANCE")
 	nameColumn       = 26
 	// Two two-space gutters, plus one column left spare: some terminals wrap when
 	// the last cell is written rather than after it.
 	listDescriptionColumn = skillsTableWidth - provenanceColumn - nameColumn - 5
 )
-
-func encodeSkillsJSON(w io.Writer, payload any) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(payload)
-}
 
 // skillManifestDescription reads one skill's SKILL.md through a handle pinned
 // to that skill's own directory, and reports whether the directory is a skill
@@ -483,8 +438,8 @@ func skillManifestDescription(rootDir *os.Root, name string) (description string
 //     make every folded skill in ox's own catalog look broken.
 //   - `ox skills publish` wants the SHAPE, because the team-side parser
 //     has no block-scalar support for `description:` at all — it would store the
-//     marker and drop the text. folded is what lets that command refuse rather
-//     than publish a skill whose activation surface reads ">-".
+//     marker and drop the text. folded is what lets it refuse rather than send a
+//     skill whose activation surface reads ">-" to the team.
 func manifestDescription(content []byte) (description string, folded bool) {
 	scanner := bufio.NewScanner(bytes.NewReader(content))
 	// A description is one long line; the default 64KB token limit is ample, but
@@ -553,19 +508,6 @@ func truncateCell(s string, width int) string {
 		return string(runes[:width])
 	}
 	return string(runes[:width-1]) + "…"
-}
-
-func dedupeStrings(values []string) []string {
-	seen := make(map[string]bool, len(values))
-	out := make([]string, 0, len(values))
-	for _, v := range values {
-		if seen[v] {
-			continue
-		}
-		seen[v] = true
-		out = append(out, v)
-	}
-	return out
 }
 
 func pluralSkills(n int) string {

@@ -40,12 +40,7 @@ func TestFilesystemDiscovery_ProducesTypedSnapshotInventory(t *testing.T) {
 	gitTeam(t, team, "commit", "-q", "-m", "team context")
 	commit := gitTeam(t, team, "rev-parse", "HEAD")
 
-	discovery := FilesystemDiscovery{ResolveOrigin: func(path string) Origin {
-		if path == "agents/rules/security.md" {
-			return Origin{Kind: OriginPack, Pack: "secure-defaults", PackVersion: "1.0.0"}
-		}
-		return Origin{Kind: OriginLoose}
-	}}
+	discovery := FilesystemDiscovery{}
 	snapshot, artifacts, err := discovery.Discover(context.Background(), Request{TeamPath: team, RepoSlug: "api"})
 	require.NoError(t, err)
 	require.Equal(t, filepath.Clean(team), filepath.Clean(snapshot.Path))
@@ -60,7 +55,7 @@ func TestFilesystemDiscovery_ProducesTypedSnapshotInventory(t *testing.T) {
 	}
 	require.True(t, byKey["skill/deploy"].Applicable)
 	require.False(t, byKey["skill/mobile"].Applicable)
-	require.Equal(t, OriginPack, byKey["rule/security"].Origin.Kind)
+	require.Equal(t, OriginLoose, byKey["rule/security"].Origin.Kind)
 	require.Equal(t, "always", byKey["rule/security"].Visibility)
 	require.Equal(t, "docs/architecture.md", byKey["context/architecture.md"].SourcePath)
 }

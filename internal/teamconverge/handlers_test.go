@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestDefaultCoordinator_ConvergesSkillsAndReportsRuleContextDelivery(t *testing.T) {
+func TestConverge_ConvergesSkillsAndReportsRuleContextDelivery(t *testing.T) {
 	project := t.TempDir()
 	gitTeam(t, project, "init", "-q")
 	gitTeam(t, project, "remote", "add", "origin", "https://github.com/acme/api.git")
@@ -50,9 +50,7 @@ func TestDefaultCoordinator_ConvergesSkillsAndReportsRuleContextDelivery(t *test
 	local := fmt.Sprintf("[[team_contexts]]\nteam_id = %q\nteam_name = %q\npath = %q\n", "team_test", "Test", team)
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.local.toml"), []byte(local), 0o600))
 
-	coordinator, err := NewDefault()
-	require.NoError(t, err)
-	report, err := coordinator.Converge(context.Background(), Request{
+	report, err := Converge(context.Background(), Request{
 		ProjectRoot: project,
 		TeamPath:    team,
 		RepoSlug:    "api",
@@ -81,7 +79,7 @@ func TestDefaultCoordinator_ConvergesSkillsAndReportsRuleContextDelivery(t *test
 		"projection state %q must name Team Context commit %s", revision, report.Snapshot.Commit)
 }
 
-func TestDefaultCoordinator_DefersSkillChangesUntilSessionBoundary(t *testing.T) {
+func TestConverge_DefersSkillChangesUntilSessionBoundary(t *testing.T) {
 	project := t.TempDir()
 	gitTeam(t, project, "init", "-q")
 	gitTeam(t, project, "remote", "add", "origin", "https://github.com/acme/api.git")
@@ -116,9 +114,7 @@ func TestDefaultCoordinator_DefersSkillChangesUntilSessionBoundary(t *testing.T)
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.local.toml"), []byte(local), 0o600))
 	installed := filepath.Join(project, ".agents", "skills", "sageox-team-deploy", "SKILL.md")
 
-	coordinator, err := NewDefault()
-	require.NoError(t, err)
-	report, err := coordinator.Converge(context.Background(), Request{
+	report, err := Converge(context.Background(), Request{
 		ProjectRoot: project, TeamPath: team, RepoSlug: "api", Mode: ModeExplicit,
 	})
 	require.NoError(t, err)
@@ -137,7 +133,7 @@ func TestDefaultCoordinator_DefersSkillChangesUntilSessionBoundary(t *testing.T)
 	writeTeamFile(t, team, "agents/skills/deploy/SKILL.md", "---\nname: deploy\ndescription: deploy safely\n---\n\nVersion two.\n")
 	gitTeam(t, team, "add", "-A")
 	gitTeam(t, team, "commit", "-q", "-m", "update team context")
-	report, err = coordinator.Converge(context.Background(), Request{
+	report, err = Converge(context.Background(), Request{
 		ProjectRoot: project, TeamPath: team, RepoSlug: "api", Mode: ModeAutomatic,
 	})
 	require.NoError(t, err)
@@ -151,7 +147,7 @@ func TestDefaultCoordinator_DefersSkillChangesUntilSessionBoundary(t *testing.T)
 	require.NotContains(t, string(during), "Version two")
 
 	require.NoError(t, session.ClearRecordingStateForAgent(project, recording.AgentID))
-	report, err = coordinator.Converge(context.Background(), Request{
+	report, err = Converge(context.Background(), Request{
 		ProjectRoot: project, TeamPath: team, RepoSlug: "api", Mode: ModeAutomatic,
 	})
 	require.NoError(t, err)
@@ -162,7 +158,7 @@ func TestDefaultCoordinator_DefersSkillChangesUntilSessionBoundary(t *testing.T)
 	require.Contains(t, string(after), "Version two")
 }
 
-func TestDefaultCoordinator_ProjectsTeamRuleExactlyOnceAndConvergesFilteringAndRemoval(t *testing.T) {
+func TestConverge_ProjectsTeamRuleExactlyOnceAndConvergesFilteringAndRemoval(t *testing.T) {
 	project := t.TempDir()
 	cacheDir := t.TempDir()
 	t.Setenv("OX_XDG_ENABLE", "1")
@@ -190,9 +186,7 @@ func TestDefaultCoordinator_ProjectsTeamRuleExactlyOnceAndConvergesFilteringAndR
 	local := fmt.Sprintf("[[team_contexts]]\nteam_id = %q\nteam_name = %q\npath = %q\n", "team_test", "Test", team)
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.local.toml"), []byte(local), 0o600))
 
-	coordinator, err := NewDefault()
-	require.NoError(t, err)
-	report, err := coordinator.Converge(context.Background(), Request{
+	report, err := Converge(context.Background(), Request{
 		ProjectRoot: project, TeamPath: team, RepoSlug: "acme/api", Mode: ModeExplicit,
 	})
 	require.NoError(t, err)
@@ -228,14 +222,14 @@ func TestDefaultCoordinator_ProjectsTeamRuleExactlyOnceAndConvergesFilteringAndR
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = session.ClearRecordingStateForAgent(project, recording.AgentID) })
-	_, err = coordinator.Converge(context.Background(), Request{
+	_, err = Converge(context.Background(), Request{
 		ProjectRoot: project, TeamPath: team, RepoSlug: "acme/api", Mode: ModeAutomatic,
 	})
 	require.ErrorContains(t, err, "current rule snapshot")
 	require.FileExists(t, native, "background convergence retired a rule during an active session")
 	require.NoError(t, session.ClearRecordingStateForAgent(project, recording.AgentID))
 
-	report, err = coordinator.Converge(context.Background(), Request{
+	report, err = Converge(context.Background(), Request{
 		ProjectRoot: project, TeamPath: team, RepoSlug: "acme/api", Mode: ModeExplicit,
 	})
 	require.NoError(t, err)
@@ -247,7 +241,7 @@ func TestDefaultCoordinator_ProjectsTeamRuleExactlyOnceAndConvergesFilteringAndR
 	writeTeamFile(t, team, "agents/rules/go-style.md", "---\nname: go-style\ndescription: Go conventions\nglobs: [\"**/*.go\"]\nvisibility: always\n---\n\nUse gofmt.\n")
 	gitTeam(t, team, "add", "-A")
 	gitTeam(t, team, "commit", "-q", "-m", "restore rule")
-	_, err = coordinator.Converge(context.Background(), Request{
+	_, err = Converge(context.Background(), Request{
 		ProjectRoot: project, TeamPath: team, RepoSlug: "acme/api", Mode: ModeExplicit,
 	})
 	require.NoError(t, err)
@@ -256,7 +250,7 @@ func TestDefaultCoordinator_ProjectsTeamRuleExactlyOnceAndConvergesFilteringAndR
 	require.NoError(t, os.Remove(filepath.Join(team, "agents", "rules", "go-style.md")))
 	gitTeam(t, team, "add", "-A")
 	gitTeam(t, team, "commit", "-q", "-m", "retire rule")
-	report, err = coordinator.Converge(context.Background(), Request{
+	report, err = Converge(context.Background(), Request{
 		ProjectRoot: project, TeamPath: team, RepoSlug: "acme/api", Mode: ModeExplicit,
 	})
 	require.NoError(t, err)
@@ -264,7 +258,7 @@ func TestDefaultCoordinator_ProjectsTeamRuleExactlyOnceAndConvergesFilteringAndR
 	require.NoFileExists(t, native, "a retired native Team Rule survived an empty discovery result")
 }
 
-func TestRuleHandler_RetainsProjectionWhenSparseRulesAreBlind(t *testing.T) {
+func TestConvergeRules_RetainsProjectionWhenSparseRulesAreBlind(t *testing.T) {
 	project := t.TempDir()
 	rulesRoot := filepath.Join(project, ".claude", "rules")
 	require.NoError(t, os.MkdirAll(rulesRoot, 0o755))
@@ -280,9 +274,9 @@ func TestRuleHandler_RetainsProjectionWhenSparseRulesAreBlind(t *testing.T) {
 	artifact := Artifact{
 		Kind: KindRule, Name: rules[0].Name, Applicable: true,
 		Visibility: rules[0].Visibility, Description: rules[0].Description,
+		rule: &rules[0],
 	}
-	handler := RuleHandler{}
-	_, err = handler.Converge(context.Background(), Request{
+	_, err = convergeRules(context.Background(), Request{
 		ProjectRoot: project, Mode: ModeExplicit,
 	}, Snapshot{Path: team}, []Artifact{artifact})
 	require.NoError(t, err)
@@ -291,17 +285,15 @@ func TestRuleHandler_RetainsProjectionWhenSparseRulesAreBlind(t *testing.T) {
 	require.FileExists(t, native)
 
 	require.NoError(t, os.RemoveAll(filepath.Join(team, "agents")))
-	_, err = handler.Converge(context.Background(), Request{
+	_, err = convergeRules(context.Background(), Request{
 		ProjectRoot: project, Mode: ModeExplicit,
 	}, Snapshot{Path: team}, nil)
 	require.ErrorContains(t, err, "not materialized")
 	require.FileExists(t, native, "a blind sparse checkout was mistaken for authoritative retirement")
 }
 
-func TestDiscoveryHandler_DistinguishesInlineRulesFromIndexedArtifacts(t *testing.T) {
-	handler := NewDiscoveryHandler(KindRule)
-	require.Equal(t, KindRule, handler.Kind())
-	outcomes, err := handler.Converge(context.Background(), Request{}, Snapshot{Commit: "abc"}, []Artifact{
+func TestIndexForPrime_DistinguishesInlineRulesFromIndexedArtifacts(t *testing.T) {
+	outcomes, err := indexForPrime(context.Background(), Request{}, Snapshot{Commit: "abc"}, []Artifact{
 		{Kind: KindRule, Name: "always", Visibility: teamdocs.VisibilityAlways},
 		{Kind: KindRule, Name: "indexed", Visibility: teamdocs.VisibilityIndexed},
 	})
@@ -312,13 +304,11 @@ func TestDiscoveryHandler_DistinguishesInlineRulesFromIndexedArtifacts(t *testin
 	require.Equal(t, "prime-index", outcomes[1].Delivery)
 }
 
-func TestSkillHandler_ConfigurationAndModeBoundaries(t *testing.T) {
-	handler := SkillHandler{}
-	require.Equal(t, KindSkill, handler.Kind())
+func TestConvergeSkills_ConfigurationAndModeBoundaries(t *testing.T) {
 	artifact := Artifact{Kind: KindSkill, Name: "deploy", Applicable: true}
 
 	t.Run("repository without team context", func(t *testing.T) {
-		_, err := handler.Converge(context.Background(), Request{
+		_, err := convergeSkills(context.Background(), Request{
 			ProjectRoot: t.TempDir(), Mode: ModeExplicit,
 		}, Snapshot{Path: t.TempDir()}, []Artifact{artifact})
 		require.ErrorContains(t, err, "no Team Context")
@@ -327,7 +317,7 @@ func TestSkillHandler_ConfigurationAndModeBoundaries(t *testing.T) {
 	t.Run("snapshot must match configured team context", func(t *testing.T) {
 		project, configured := t.TempDir(), t.TempDir()
 		wireHandlerTeamContext(t, project, configured)
-		_, err := handler.Converge(context.Background(), Request{
+		_, err := convergeSkills(context.Background(), Request{
 			ProjectRoot: project, Mode: ModeExplicit,
 		}, Snapshot{Path: t.TempDir()}, []Artifact{artifact})
 		require.ErrorContains(t, err, "does not match snapshot")
@@ -336,7 +326,7 @@ func TestSkillHandler_ConfigurationAndModeBoundaries(t *testing.T) {
 	t.Run("repository without native target is reported unsupported", func(t *testing.T) {
 		project, team := t.TempDir(), t.TempDir()
 		wireHandlerTeamContext(t, project, team)
-		outcomes, err := handler.Converge(context.Background(), Request{
+		outcomes, err := convergeSkills(context.Background(), Request{
 			ProjectRoot: project, Mode: ModeExplicit,
 		}, Snapshot{Path: team}, []Artifact{artifact})
 		require.NoError(t, err)
@@ -344,46 +334,22 @@ func TestSkillHandler_ConfigurationAndModeBoundaries(t *testing.T) {
 		require.Equal(t, StateUnsupported, outcomes[0].State)
 		require.Contains(t, outcomes[0].Detail, "ox init")
 	})
-
-	t.Run("inspect mode cannot mutate selected targets", func(t *testing.T) {
-		project, team := t.TempDir(), t.TempDir()
-		wireHandlerTeamContext(t, project, team)
-		targets, err := skillmanager.CanonicalizeTargets(project, []adapterprotocol.SkillTarget{{
-			Key: "shared", Root: ".agents/skills", Format: adapterprotocol.SkillFormatAgentSkillsV1,
-			Scope: adapterprotocol.SkillScopeProject, LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
-		}})
-		require.NoError(t, err)
-		_, err = skillmanager.Reconcile(project, version.Version, skillmanager.DefaultDesired(targets), targets)
-		require.NoError(t, err)
-		_, err = handler.Converge(context.Background(), Request{
-			ProjectRoot: project, Mode: ModeInspect,
-		}, Snapshot{Path: team}, []Artifact{artifact})
-		require.ErrorContains(t, err, "inspect mode")
-	})
 }
 
-func TestRuleHandler_EmptyInspectAndPrimeFallbackPaths(t *testing.T) {
-	handler := RuleHandler{}
-	require.Equal(t, KindRule, handler.Kind())
-
-	outcomes, err := handler.Converge(context.Background(), Request{
+func TestConvergeRules_EmptyAndPrimeFallbackPaths(t *testing.T) {
+	outcomes, err := convergeRules(context.Background(), Request{
 		ProjectRoot: t.TempDir(), Mode: ModeExplicit,
 	}, Snapshot{Path: t.TempDir()}, nil)
 	require.NoError(t, err)
 	require.Empty(t, outcomes)
 
-	artifact := Artifact{
+	unmaterialized := Artifact{
 		Kind: KindRule, Name: "security", Applicable: true,
 		Visibility: teamdocs.VisibilityAlways,
 	}
-	_, err = handler.Converge(context.Background(), Request{
-		ProjectRoot: t.TempDir(), Mode: ModeInspect,
-	}, Snapshot{Path: t.TempDir()}, []Artifact{artifact})
-	require.ErrorContains(t, err, "inspect mode")
-
-	outcomes, err = handler.Converge(context.Background(), Request{
+	outcomes, err = convergeRules(context.Background(), Request{
 		ProjectRoot: t.TempDir(), Mode: ModeExplicit,
-	}, Snapshot{Path: t.TempDir()}, []Artifact{artifact})
+	}, Snapshot{Path: t.TempDir()}, []Artifact{unmaterialized})
 	require.NoError(t, err)
 	require.Len(t, outcomes, 1)
 	require.Equal(t, StatePending, outcomes[0].State)
@@ -391,9 +357,16 @@ func TestRuleHandler_EmptyInspectAndPrimeFallbackPaths(t *testing.T) {
 
 	project, team := t.TempDir(), t.TempDir()
 	writeTeamFile(t, team, "agents/rules/security.md", "---\nname: security\ndescription: Secure defaults\nvisibility: always\n---\n\nNever log secrets.\n")
-	outcomes, err = handler.Converge(context.Background(), Request{
+	rules, err := teamdocs.PublishedRules(team)
+	require.NoError(t, err)
+	require.Len(t, rules, 1)
+	materialized := Artifact{
+		Kind: KindRule, Name: "security", Applicable: true,
+		Visibility: teamdocs.VisibilityAlways, rule: &rules[0],
+	}
+	outcomes, err = convergeRules(context.Background(), Request{
 		ProjectRoot: project, Mode: ModeExplicit,
-	}, Snapshot{Path: team}, []Artifact{artifact})
+	}, Snapshot{Path: team}, []Artifact{materialized})
 	require.NoError(t, err)
 	require.Len(t, outcomes, 1)
 	require.Equal(t, StateIndexed, outcomes[0].State)

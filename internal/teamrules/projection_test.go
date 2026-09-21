@@ -81,8 +81,13 @@ func TestReconcile_ProjectsOnceAndRemovesRetiredRules(t *testing.T) {
 	// lazy index entry. The same rule therefore reaches either agent exactly once.
 	require.Empty(t, ForPrime(project, "claude", []teamdocs.TeamRule{rule}))
 	require.NoError(t, os.WriteFile(native, []byte("locally modified\n"), 0o644))
-	require.Empty(t, ForPrime(project, "claude", []teamdocs.TeamRule{rule}),
-		"an existing native projection must not be duplicated through prime while repair is pending")
+	// Once the native file no longer verifies as ox's own projection, ForPrime
+	// must stop treating it as delivered: Reconcile also refuses to touch this
+	// path (asserted below), so if ForPrime kept suppressing prime delivery
+	// here the coworker would receive the rule through NEITHER surface.
+	claudeAfterConflict := ForPrime(project, "claude", []teamdocs.TeamRule{rule})
+	require.Len(t, claudeAfterConflict, 1, "an unowned native file must not suppress prime delivery")
+	require.Equal(t, teamdocs.VisibilityIndexed, claudeAfterConflict[0].Visibility)
 	codex := ForPrime(project, "codex", []teamdocs.TeamRule{rule})
 	require.Len(t, codex, 1)
 	require.Equal(t, teamdocs.VisibilityIndexed, codex[0].Visibility)
@@ -148,57 +153,6 @@ func TestReconcile_PreservesUntrackedReservedFilesWithoutOwnershipProof(t *testi
 		got, readErr := os.ReadFile(localPath)
 		require.NoError(t, readErr)
 		require.Equal(t, local, string(got))
-	})
-}
-
-func TestReconcile_MigratesLegacyCommentOnlyProjections(t *testing.T) {
-	setup := func(t *testing.T) (string, string, teamdocs.TeamRule) {
-		t.Helper()
-		project := t.TempDir()
-		rulesRoot := filepath.Join(project, ".claude", "rules")
-		require.NoError(t, os.MkdirAll(rulesRoot, 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"),
-			[]byte(".claude/rules/sageox-team-*\n"), 0o644))
-		git := exec.Command("git", "init", "-q")
-		git.Dir = project
-		require.NoError(t, git.Run())
-
-		source := filepath.Join(t.TempDir(), "security.md")
-		require.NoError(t, os.WriteFile(source, []byte("Current body.\n"), 0o644))
-		rule := teamdocs.TeamRule{
-			Name: "security", Description: "Current description", RelPath: "security.md", AbsPath: source,
-			Visibility: teamdocs.VisibilityAlways,
-		}
-		return project, rulesRoot, rule
-	}
-
-	t.Run("update replaces exact legacy format with verified projection", func(t *testing.T) {
-		project, _, rule := setup(t)
-		native, ok := NativePath(project, "claude", rule)
-		require.True(t, ok)
-		legacy := "---\ndescription: \"Old description\"\n---\n\n" + legacyProjectionMarker + "\nOld body.\n"
-		require.True(t, legacyProjectionOwned([]byte(legacy), policies[0]), "test fixture must match the exact legacy format")
-		require.NoError(t, os.WriteFile(native, []byte(legacy), 0o644))
-
-		_, err := Reconcile(context.Background(), project, []teamdocs.TeamRule{rule})
-		require.NoError(t, err)
-		got, readErr := os.ReadFile(native)
-		require.NoError(t, readErr)
-		require.True(t, verifiedProjection(got))
-		require.Contains(t, string(got), "Current body.")
-		require.NotContains(t, string(got), "Old body.")
-	})
-
-	t.Run("retirement removes exact legacy format", func(t *testing.T) {
-		project, rulesRoot, _ := setup(t)
-		legacyPath := filepath.Join(rulesRoot, "sageox-team-retired.md")
-		require.NoError(t, os.WriteFile(legacyPath,
-			[]byte(legacyProjectionMarker+"\nOld body.\n"), 0o644))
-
-		result, err := Reconcile(context.Background(), project, nil)
-		require.NoError(t, err)
-		require.Contains(t, result.Removed, ".claude/rules/sageox-team-retired.md")
-		require.NoFileExists(t, legacyPath)
 	})
 }
 
@@ -349,8 +303,6 @@ func TestProjectionHelpers_DefensiveAndFallbackBranches(t *testing.T) {
 		projection := filepath.Join(project, ".claude", "rules", "sageox-team-a.md")
 		require.NoError(t, os.WriteFile(projection, []byte("x"), 0o644))
 		require.False(t, HasNativeProjections(project), "a reserved name is not ownership proof")
-		require.NoError(t, os.WriteFile(projection, []byte(legacyProjectionMarker+"\nlegacy\n"), 0o644))
-		require.True(t, HasNativeProjections(project), "the exact preceding ox format must remain migratable")
 		require.NoError(t, os.WriteFile(projection, stampProjection([]byte("x")), 0o644))
 		require.True(t, HasNativeProjections(project))
 
@@ -361,9 +313,9 @@ func TestProjectionHelpers_DefensiveAndFallbackBranches(t *testing.T) {
 		rulesDir := filepath.Join(bare, ".claude", "rules")
 		require.NoError(t, os.MkdirAll(filepath.Join(rulesDir, managedPrefix+"adir.md"), 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(rulesDir, managedPrefix+"a.txt"),
-			[]byte(legacyProjectionMarker+"\nbody\n"), 0o644))
+			stampProjection([]byte("body")), 0o644))
 		require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "mine.md"),
-			[]byte(legacyProjectionMarker+"\nbody\n"), 0o644))
+			stampProjection([]byte("body")), 0o644))
 		require.False(t, HasNativeProjections(bare),
 			"a directory, a foreign extension, and an unreserved name are none of them an ox projection")
 
@@ -390,25 +342,6 @@ func TestProjectionHelpers_DefensiveAndFallbackBranches(t *testing.T) {
 		require.True(t, verifiedProjection(content))
 		require.False(t, verifiedProjection(append(append([]byte(nil), content...), []byte("edited\n")...)))
 		require.False(t, verifiedProjection([]byte("unstamped\n")))
-		require.True(t, legacyProjectionOwned([]byte(legacyProjectionMarker+"\nbody\n"), policies[0]))
-		require.True(t, legacyProjectionOwned([]byte("---\ndescription: \"x\"\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[0]))
-		require.True(t, legacyProjectionOwned([]byte("---\ndescription: \"x\"\nglobs: \"**/*.go\"\nalwaysApply: false\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[1]))
-		require.True(t, legacyProjectionOwned([]byte(legacyProjectionMarker+"\nbody\n"+legacyProjectionMarker+"\n"), policies[0]),
-			"a rule body may itself contain the legacy marker")
-		require.False(t, legacyProjectionOwned([]byte("user text\n"+legacyProjectionMarker+"\nbody\n"), policies[0]),
-			"the old marker embedded in user content is not the exact legacy format")
-		require.False(t, legacyProjectionOwned([]byte("---\napplyTo: \"**/*.go\"\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[0]),
-			"another agent's legacy frontmatter is not an exact format match")
-		require.False(t, legacyProjectionOwned([]byte("---\ndescription: \"\"\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[0]),
-			"the legacy renderer omitted empty descriptions")
-		require.False(t, legacyProjectionOwned([]byte("---\ndescription: `x`\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[0]),
-			"the legacy renderer emitted canonical strconv-quoted strings")
-		require.False(t, legacyProjectionOwned([]byte("---\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[0]),
-			"the legacy renderer never emitted an empty frontmatter block")
-		require.False(t, legacyProjectionOwned([]byte("---\ndescription: \"x\"\nalwaysApply: false\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[1]),
-			"alwaysApply must agree with whether globs were emitted, or the file is not the exact legacy format")
-		require.False(t, legacyProjectionOwned([]byte("---\ndescription: \"x\"\nstray\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[0]),
-			"a frontmatter line that is not key: value at all was never emitted by the legacy renderer")
 
 		emptySlug := nativeFilename(teamdocs.TeamRule{Name: "!!!", RelPath: "x"}, policies[0])
 		require.Contains(t, emptySlug, "sageox-team-rule-")
@@ -551,4 +484,131 @@ func TestReconcile_FailedTrackedCheckNeverReadsAsUntracked(t *testing.T) {
 	assertRetryable(t, cancelDuringTrackedCheck(t, nil))
 	require.FileExists(t, native,
 		"the tracked projection was removed while the tracked-check was unanswered")
+}
+
+// TestForPrime_DeliversRuleWhenNativeFileIsAConflict is the red-first proof for
+// the zero-delivery bug: nativePresent used to accept ANY file sitting at a
+// projection's path as "present" via a bare os.Stat, with no ownership check.
+// A foreign or tracked file there therefore made BOTH Reconcile refuse to
+// write it (a conflict) AND ForPrime believe the native copy already covered
+// the rule — the coworker received the rule through NEITHER surface. Both
+// halves of "ox owns this file" (reconcileRoot's projectionOwned check, and
+// this) must agree, or the gap reopens.
+func TestForPrime_DeliversRuleWhenNativeFileIsAConflict(t *testing.T) {
+	setup := func(t *testing.T) (string, teamdocs.TeamRule) {
+		t.Helper()
+		project := t.TempDir()
+		rulesRoot := filepath.Join(project, ".claude", "rules")
+		require.NoError(t, os.MkdirAll(rulesRoot, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"),
+			[]byte(".claude/rules/sageox-team-*\n"), 0o644))
+		git := exec.Command("git", "init", "-q")
+		git.Dir = project
+		require.NoError(t, git.Run())
+
+		source := filepath.Join(t.TempDir(), "foo.md")
+		require.NoError(t, os.WriteFile(source, []byte("Canonical body.\n"), 0o644))
+		rule := teamdocs.TeamRule{
+			Name: "foo", RelPath: "foo.md", AbsPath: source,
+			Visibility: teamdocs.VisibilityAlways,
+		}
+		return project, rule
+	}
+
+	t.Run("tracked foreign file", func(t *testing.T) {
+		project, rule := setup(t)
+		native, ok := NativePath(project, "claude", rule)
+		require.True(t, ok)
+		require.NoError(t, os.WriteFile(native, []byte("hand-authored\n"), 0o644))
+		git := exec.Command("git", "add", "-f", "--",
+			filepath.ToSlash(strings.TrimPrefix(native, project+string(filepath.Separator))))
+		git.Dir = project
+		require.NoError(t, git.Run())
+
+		_, err := Reconcile(context.Background(), project, []teamdocs.TeamRule{rule})
+		require.ErrorIs(t, err, ErrProjectionConflict)
+
+		prime := ForPrime(project, "claude", []teamdocs.TeamRule{rule})
+		require.Len(t, prime, 1, "a tracked conflicting native file must not suppress prime delivery")
+		require.Equal(t, rule.Name, prime[0].Name)
+	})
+
+	t.Run("untracked foreign file", func(t *testing.T) {
+		project, rule := setup(t)
+		native, ok := NativePath(project, "claude", rule)
+		require.True(t, ok)
+		require.NoError(t, os.WriteFile(native, []byte("hand-authored\n"), 0o644))
+
+		_, err := Reconcile(context.Background(), project, []teamdocs.TeamRule{rule})
+		require.ErrorIs(t, err, ErrProjectionConflict)
+
+		prime := ForPrime(project, "claude", []teamdocs.TeamRule{rule})
+		require.Len(t, prime, 1, "an untracked conflicting native file must not suppress prime delivery")
+		require.Equal(t, rule.Name, prime[0].Name)
+	})
+}
+
+// TestReconcile_ConflictInOneRootDoesNotBlockOthers is the red-first proof for
+// the partial-apply bug: reconcileRoot used to abort on the FIRST per-file
+// conflict, discarding written/removed for files it had already handled in
+// that root, and Reconcile then returned immediately — so no later policy in
+// the table (.cursor, .kiro, .windsurf, ...) ever ran, even though their roots
+// had nothing wrong with them.
+func TestReconcile_ConflictInOneRootDoesNotBlockOthers(t *testing.T) {
+	project := t.TempDir()
+	claudeRoot := filepath.Join(project, ".claude", "rules")
+	cursorRoot := filepath.Join(project, ".cursor", "rules")
+	require.NoError(t, os.MkdirAll(claudeRoot, 0o755))
+	require.NoError(t, os.MkdirAll(cursorRoot, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"), []byte(strings.Join([]string{
+		".claude/rules/sageox-team-*",
+		".cursor/rules/sageox-team-*",
+	}, "\n")+"\n"), 0o644))
+	git := exec.Command("git", "init", "-q")
+	git.Dir = project
+	require.NoError(t, git.Run())
+
+	sourceRoot := t.TempDir()
+	conflictedPath := filepath.Join(sourceRoot, "conflicted.md")
+	cleanPath := filepath.Join(sourceRoot, "clean.md")
+	require.NoError(t, os.WriteFile(conflictedPath, []byte("Conflicted body.\n"), 0o644))
+	require.NoError(t, os.WriteFile(cleanPath, []byte("Clean body.\n"), 0o644))
+	conflicted := teamdocs.TeamRule{
+		Name: "conflicted", RelPath: "conflicted.md", AbsPath: conflictedPath,
+		Visibility: teamdocs.VisibilityAlways,
+	}
+	clean := teamdocs.TeamRule{
+		Name: "clean", RelPath: "clean.md", AbsPath: cleanPath,
+		Visibility: teamdocs.VisibilityAlways,
+	}
+
+	// Occupy the "conflicted" rule's Claude projection path with unowned
+	// content before ever reconciling, so the very first Reconcile call must
+	// refuse it while Cursor's root — untouched, and otherwise identical — has
+	// nothing standing in its way.
+	conflictNative, ok := NativePath(project, "claude", conflicted)
+	require.True(t, ok)
+	require.NoError(t, os.WriteFile(conflictNative, []byte("hand-authored\n"), 0o644))
+
+	result, err := Reconcile(context.Background(), project, []teamdocs.TeamRule{conflicted, clean})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrProjectionConflict)
+
+	cleanClaude, ok := NativePath(project, "claude", clean)
+	require.True(t, ok)
+	require.FileExists(t, cleanClaude, "the clean rule in the SAME root as the conflict must still land")
+	cleanCursor, ok := NativePath(project, "cursor", clean)
+	require.True(t, ok)
+	require.FileExists(t, cleanCursor)
+	conflictedCursor, ok := NativePath(project, "cursor", conflicted)
+	require.True(t, ok)
+	require.FileExists(t, conflictedCursor, "cursor's root has no conflict of its own and must still converge")
+
+	require.Contains(t, result.Written, filepath.ToSlash(filepath.Join(".claude", "rules", filepath.Base(cleanClaude))))
+	require.Contains(t, result.Written, filepath.ToSlash(filepath.Join(".cursor", "rules", filepath.Base(cleanCursor))))
+	require.Contains(t, result.Written, filepath.ToSlash(filepath.Join(".cursor", "rules", filepath.Base(conflictedCursor))))
+
+	content, readErr := os.ReadFile(conflictNative)
+	require.NoError(t, readErr)
+	require.Equal(t, "hand-authored\n", string(content), "the conflicting file itself must be left untouched")
 }

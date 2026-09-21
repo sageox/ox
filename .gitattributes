@@ -6,7 +6,15 @@
 .sageox/** linguist-language=SageOx
 *.ox linguist-language=SageOx
 
-# The skill catalog is embedded from the checkout at build time, and its
-# frontmatter parser expects LF. Without this, git on Windows checks these out
-# with CRLF and a Windows-built ox rejects its own catalog.
+# The skill and rule catalogs are embedded from the checkout at build time, and
+# their frontmatter parsers expect LF. Without this, git on Windows checks these
+# out with CRLF and a Windows-built ox rejects its own catalog. The rule catalog
+# carries a second failure: it records a content digest per projected file in
+# the tracked skills lockfile, so a Windows build and a Linux build would each
+# read the other's rules as drift and rewrite them, forever.
+# extensions/packs is pinned before it is embedded on purpose: the pin only
+# protects checkouts made AFTER it lands, so adding it the day the directory
+# appears is the only moment it is free.
 extensions/skills/**/*.md text eol=lf
+extensions/rulecatalog/**/*.md text eol=lf
+extensions/packs/**/*.md text eol=lf

@@ -16,18 +16,12 @@ import (
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
-// DiscoveryHandler records delivery through prime's existing discovery path.
-// It does not copy rules or context into agent-native roots, preventing the same
-// artifact from being delivered both natively and through prime.
-type DiscoveryHandler struct {
-	kind ArtifactKind
-}
-
-func NewDiscoveryHandler(kind ArtifactKind) DiscoveryHandler { return DiscoveryHandler{kind: kind} }
-
-func (h DiscoveryHandler) Kind() ArtifactKind { return h.kind }
-
-func (h DiscoveryHandler) Converge(_ context.Context, _ Request, snapshot Snapshot, artifacts []Artifact) ([]Outcome, error) {
+// indexForPrime records delivery through prime's existing discovery path. It
+// does not copy content into agent-native roots, preventing the same artifact
+// from being delivered both natively and through prime. It is the delivery
+// mechanism for Team Context docs (KindContext); Team Rules fall back to it
+// too (see convergeRules) when no agent can preserve a rule's scope natively.
+func indexForPrime(_ context.Context, _ Request, snapshot Snapshot, artifacts []Artifact) ([]Outcome, error) {
 	outcomes := make([]Outcome, 0, len(artifacts))
 	for _, artifact := range artifacts {
 		state := StateIndexed
@@ -42,18 +36,16 @@ func (h DiscoveryHandler) Converge(_ context.Context, _ Request, snapshot Snapsh
 	return outcomes, nil
 }
 
-type SkillHandler struct{}
-
-func (SkillHandler) Kind() ArtifactKind { return KindSkill }
-
-func (SkillHandler) Converge(_ context.Context, request Request, snapshot Snapshot, artifacts []Artifact) ([]Outcome, error) {
+// convergeSkills is Team Skills' one production delivery mechanism: native
+// reconciliation through skillmanager.
+func convergeSkills(_ context.Context, request Request, snapshot Snapshot, artifacts []Artifact) ([]Outcome, error) {
 	if request.Mode == ModeAutomatic {
 		live, err := session.HasLiveRecording(request.ProjectRoot)
 		if err != nil {
-			return nil, &RetryableError{Err: fmt.Errorf("inspect active sessions: %w", err)}
+			return nil, fmt.Errorf("inspect active sessions: %w", err)
 		}
 		if live {
-			return nil, &RetryableError{Err: errors.New("active AI coworker session keeps the current skill snapshot stable")}
+			return nil, errors.New("active AI coworker session keeps the current skill snapshot stable")
 		}
 	}
 	configured := config.FindRepoTeamContext(request.ProjectRoot)
@@ -84,18 +76,12 @@ func (SkillHandler) Converge(_ context.Context, request Request, snapshot Snapsh
 		return desired, targets, nil
 	}
 	var plan *skillmanager.ReconcilePlan
-	switch request.Mode {
-	case ModeInspect:
-		return nil, &settledError{State: StateError, Err: errors.New("inspect mode cannot apply Team Skills")}
-	case ModeExplicit:
+	if request.Mode == ModeExplicit {
 		plan, err = skillmanager.ReconcileUpdate(request.ProjectRoot, version.Version, identity)
-	default:
+	} else {
 		plan, err = skillmanager.ReconcileUpdateNonBlocking(request.ProjectRoot, version.Version, identity)
 	}
 	if err != nil {
-		if errors.Is(err, skillmanager.ErrApplyInProgress) {
-			return nil, &RetryableError{Err: err}
-		}
 		return nil, err
 	}
 	if plan == nil {
@@ -132,11 +118,9 @@ func (SkillHandler) Converge(_ context.Context, request Request, snapshot Snapsh
 	return outcomes, nil
 }
 
-type RuleHandler struct{}
-
-func (RuleHandler) Kind() ArtifactKind { return KindRule }
-
-func (RuleHandler) Converge(ctx context.Context, request Request, snapshot Snapshot, artifacts []Artifact) ([]Outcome, error) {
+// convergeRules is Team Rules' delivery mechanism: native projection where an
+// agent can preserve the rule's scope, indexed/inline through prime otherwise.
+func convergeRules(ctx context.Context, request Request, snapshot Snapshot, artifacts []Artifact) ([]Outcome, error) {
 	hasNative := teamrules.HasNativeProjections(request.ProjectRoot)
 	if len(artifacts) == 0 && !hasNative {
 		return []Outcome{}, nil
@@ -144,14 +128,11 @@ func (RuleHandler) Converge(ctx context.Context, request Request, snapshot Snaps
 	if request.Mode == ModeAutomatic {
 		live, err := session.HasLiveRecording(request.ProjectRoot)
 		if err != nil {
-			return nil, &RetryableError{Err: fmt.Errorf("inspect active sessions: %w", err)}
+			return nil, fmt.Errorf("inspect active sessions: %w", err)
 		}
 		if live {
-			return nil, &RetryableError{Err: errors.New("active AI coworker session keeps the current rule snapshot stable")}
+			return nil, errors.New("active AI coworker session keeps the current rule snapshot stable")
 		}
-	}
-	if request.Mode == ModeInspect {
-		return nil, &settledError{State: StateError, Err: errors.New("inspect mode cannot apply Team Rules")}
 	}
 
 	// An absent rules root is not an authoritative empty set. Team Context uses
@@ -159,7 +140,7 @@ func (RuleHandler) Converge(ctx context.Context, request Request, snapshot Snaps
 	// disk, sweeping native files would turn a partial checkout into retirement.
 	if !teamdocs.AnyRuleRootOnDisk(snapshot.Path) {
 		if len(artifacts) == 0 && hasNative {
-			return nil, &RetryableError{Err: errors.New("rules are not materialized in Team Context; retaining existing native Team Rules")}
+			return nil, errors.New("rules are not materialized in Team Context; retaining existing native Team Rules")
 		}
 		outcomes := make([]Outcome, 0, len(artifacts))
 		for _, artifact := range artifacts {
@@ -169,18 +150,13 @@ func (RuleHandler) Converge(ctx context.Context, request Request, snapshot Snaps
 		return outcomes, nil
 	}
 
-	published, err := teamdocs.PublishedRules(snapshot.Path)
-	if err != nil {
-		return nil, fmt.Errorf("read Team Rules for projection: %w", err)
-	}
-	byName := make(map[string]teamdocs.TeamRule, len(published))
-	for _, rule := range published {
-		byName[rule.Name] = rule
-	}
+	// Discovery already parsed every published rule under this same snapshot
+	// lease; artifact.rule carries that parse forward instead of re-reading
+	// and re-joining teamdocs.PublishedRules here.
 	wanted := make([]teamdocs.TeamRule, 0, len(artifacts))
 	for _, artifact := range artifacts {
-		if rule, ok := byName[artifact.Name]; ok {
-			wanted = append(wanted, rule)
+		if artifact.rule != nil {
+			wanted = append(wanted, *artifact.rule)
 		}
 	}
 
@@ -226,12 +202,4 @@ func skillConflicted(plan *skillmanager.ReconcilePlan, installedAs string) bool 
 		}
 	}
 	return false
-}
-
-func NewDefault() (*Coordinator, error) {
-	coordinator, err := New(FilesystemDiscovery{}, SkillHandler{}, RuleHandler{}, NewDiscoveryHandler(KindContext))
-	if coordinator != nil {
-		coordinator.lockSnapshot = true
-	}
-	return coordinator, err
 }

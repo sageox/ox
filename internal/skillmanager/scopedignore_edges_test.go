@@ -3,6 +3,7 @@ package skillmanager
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -113,11 +114,20 @@ func TestScopedIgnoreFiles_CoversTheRuleNameWithNoTrailingHyphen(t *testing.T) {
 	}
 }
 
-func TestScopedIgnoreFiles_DoesNotReserveUnselectedCatalogNames(t *testing.T) {
+// TestScopedIgnoreFiles_EmitsOnlyPrefixGlobsAndTheOxCLIRuleName is the
+// structural replacement for the old per-name guard. scopedIgnoreFiles no
+// longer accepts a name list at all, so every entry it can ever emit is either
+// a stable prefix glob or the one exact "ox-cli.md" rule name — there is no
+// code path left that could reserve an unselected catalog name.
+func TestScopedIgnoreFiles_EmitsOnlyPrefixGlobsAndTheOxCLIRuleName(t *testing.T) {
+	ruleExact := "rules/" + CLIBase + ".md"
 	for _, f := range ScopedIgnoreFiles() {
 		for _, entry := range f.Entries {
-			if entry == "skills/post-cutoff/" {
-				t.Fatalf("%s globally hides an unselected catalog name: %v", f.Dir, f.Entries)
+			if entry == ruleExact {
+				continue
+			}
+			if !strings.HasSuffix(strings.TrimSuffix(entry, "/"), "*") {
+				t.Fatalf("%s has entry %q that is neither a prefix glob nor the exact ox-cli rule name", f.Dir, entry)
 			}
 		}
 	}

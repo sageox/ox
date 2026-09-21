@@ -2266,6 +2266,8 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 		if (info == nil || len(info.RuleTargets) == 0) && ea.HasCapability(adapterprotocol.CapRulesInstaller) {
 			// One-release compatibility for third-party protocol-v1 adapters.
 			// Built-in adapters declare rule targets and are reconciled below.
+			// Scheduled removal in ox 0.18.0 — see the deprecation note on
+			// adapterprotocol.CapRulesInstaller.
 			result, err := ea.InstallRules(gitRoot, version.Version)
 			if err != nil {
 				if !quiet {

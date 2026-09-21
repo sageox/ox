@@ -25,7 +25,9 @@ request. If the skill changes afterwards it returns to needing approval.
 Approving lets an AI coworker READ the skill. Bundled scripts are still dropped
 unless you also pass --allow-scripts, which is the larger, separate decision to
 put runnable files on disk. Omitting the flag preserves an existing scripts
-grant; pass --allow-scripts=false explicitly to revoke it.
+grant; pass --allow-scripts=false explicitly to revoke it — the skill stays
+approved for its instructions. To withdraw the whole approval instead, run
+`ox skills revoke <name>`.
 
 ```
 ox skills approve [name...] [flags]

@@ -31,14 +31,6 @@ func TestBuiltInRuleCatalogAndLegacyRuleBoundaries(t *testing.T) {
 	require.False(t, found)
 }
 
-func TestFrontmatterEnd_CoversMalformedAndTerminalFences(t *testing.T) {
-	require.Zero(t, frontmatterEnd([]byte("body only\n")))
-	require.Zero(t, frontmatterEnd([]byte("---\nunterminated")))
-	require.Equal(t, len("---\nname: x\n---"), frontmatterEnd([]byte("---\nname: x\n---")))
-	require.Equal(t, len("---\nname: x\n---\n"), frontmatterEnd([]byte("---\nname: x\n---\nbody\n")))
-	require.Zero(t, frontmatterEnd([]byte("---\nname: x\n")))
-}
-
 func TestInventoryDiscovery_ReportsInvalidRootsAndMissingTargets(t *testing.T) {
 	target := adapterprotocol.SkillTarget{
 		Key: "claude-rules", Root: ".claude/rules", Format: adapterprotocol.RuleFormatMarkdownV1,

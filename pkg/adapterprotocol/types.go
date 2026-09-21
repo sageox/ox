@@ -43,10 +43,23 @@ const (
 	CapSessionImporter    = "session_importer"
 	CapServeMode          = "serve_mode"
 	CapSubagentController = "subagent_controller"
-	CapRulesInstaller     = "rules_installer"
-	CapCommandsInstaller  = "commands_installer"
-	CapSkillsInstaller    = "skills_installer"
-	CapCapturePrior       = "capture_prior"
+	// DEPRECATED — scheduled for removal in ox 0.18.0. Announced in ox 0.6.2
+	// and superseded in ox 0.17.0 by the declarative InfoResponse.RuleTargets
+	// descriptor. No ox-bundled adapter declares it any more; ox honors it for
+	// one release so a third-party protocol-v1 adapter written against the
+	// 0.6.2 announcement keeps installing its rules while it migrates to
+	// rule_targets. The window and the migration path are stated for adapter
+	// authors in docs/guides/adapter-authoring.md.
+	//
+	// The machine-readable "Deprecated:" prefix is deliberately NOT used here:
+	// every remaining caller IS the compatibility path this window exists to
+	// preserve, so staticcheck SA1019 would fail the build on the very code
+	// being kept. Restore the prefix in the same change that deletes the
+	// window.
+	CapRulesInstaller    = "rules_installer"
+	CapCommandsInstaller = "commands_installer"
+	CapSkillsInstaller   = "skills_installer"
+	CapCapturePrior      = "capture_prior"
 )
 
 // Native project inventory target vocabulary.
@@ -140,12 +153,23 @@ type UninstallHooksResponse struct {
 }
 
 // RulesParams are passed to install-rules, check-rules, and uninstall-rules.
+//
+// DEPRECATED — scheduled for removal in ox 0.18.0. The install-rules /
+// check-rules / uninstall-rules RPCs were announced in ox 0.6.2 and superseded
+// in ox 0.17.0 by RuleTargets. Under the target model an adapter declares only
+// where its rules live and in what format, and ox reconciles the content
+// centrally from its own catalog — adapters no longer write rule files
+// themselves. Declare rule_targets instead. See CapRulesInstaller for the
+// compatibility window and why the "Deprecated:" prefix is withheld.
 type RulesParams struct {
 	RepoRoot string `json:"repo_root"`
 	Version  string `json:"version"` // ox version for stamped content
 }
 
 // InstallRulesResponse is returned by `install-rules`.
+//
+// DEPRECATED — scheduled for removal in ox 0.18.0; declare rule_targets
+// instead. See RulesParams.
 type InstallRulesResponse struct {
 	Installed bool `json:"installed"`
 	// FilesWritten lists the files this install wrote. Each entry MUST be
@@ -156,6 +180,9 @@ type InstallRulesResponse struct {
 }
 
 // CheckRulesResponse is returned by `check-rules`.
+//
+// DEPRECATED — scheduled for removal in ox 0.18.0; declare rule_targets
+// instead. See RulesParams.
 type CheckRulesResponse struct {
 	Installed bool     `json:"installed"`
 	Missing   []string `json:"missing,omitempty"`
@@ -164,6 +191,9 @@ type CheckRulesResponse struct {
 }
 
 // UninstallRulesResponse is returned by `uninstall-rules`.
+//
+// DEPRECATED — scheduled for removal in ox 0.18.0; declare rule_targets
+// instead. See RulesParams.
 type UninstallRulesResponse struct {
 	Uninstalled  bool     `json:"uninstalled"`
 	FilesRemoved []string `json:"files_removed"`

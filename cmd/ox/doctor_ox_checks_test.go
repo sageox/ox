@@ -345,3 +345,53 @@ func TestCheckLegacyOxFilesIn_DefersWhileAGitOperationIsInFlight(t *testing.T) {
 		t.Error("the migration touched the index during an in-flight merge")
 	}
 }
+
+// TestCanonicalFixSlugs_RetiredSpellingReachesItsReplacement: `adapter-rules`
+// is the retired public spelling of `claude-skills`. Resolving it once, at
+// parse time, is what lets every downstream membership test compare canonical
+// names only. Without it each call site has to hand-OR both spellings — and the
+// next alias someone registers would then silently fix nothing, with no failing
+// test to say so.
+func TestCanonicalFixSlugs_RetiredSpellingReachesItsReplacement(t *testing.T) {
+	got := canonicalFixSlugs([]string{
+		CheckSlugAdapterRules,
+		CheckSlugLedgerPathMismatch,
+		"claude-code:hooks-missing",
+		"not-a-real-slug",
+	})
+	want := []string{
+		CheckSlugClaudeSkills,
+		CheckSlugLedgerPathMismatch,
+		"claude-code:hooks-missing", // adapter slugs are not registry checks
+		"not-a-real-slug",           // left alone so validation echoes the typo
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("--fix-slug canonicalization wrong:\n got %v\nwant %v", got, want)
+	}
+
+	// The customer claim: `ox doctor --fix-slug=adapter-rules` drives the
+	// claude-skills check, and nothing else.
+	opts := doctorOptions{
+		fix:      true,
+		fixSlugs: canonicalFixSlugs([]string{CheckSlugAdapterRules}),
+	}
+	if !opts.shouldFix(CheckSlugClaudeSkills) {
+		t.Error("--fix-slug=adapter-rules no longer drives the claude-skills check")
+	}
+	if opts.shouldFix(CheckSlugLedgerPathMismatch) {
+		t.Error("--fix-slug=adapter-rules leaked into an unrelated check")
+	}
+}
+
+// TestCanonicalFixSlugs_EmptyMeansFixAll: an empty slug list is the "--fix
+// applies to everything" signal. Canonicalizing must not turn it into a
+// non-nil empty slice that some future length check reads differently.
+func TestCanonicalFixSlugs_EmptyMeansFixAll(t *testing.T) {
+	if got := canonicalFixSlugs(nil); got != nil {
+		t.Errorf("nil slug list became %#v", got)
+	}
+	opts := doctorOptions{fix: true, fixSlugs: canonicalFixSlugs(nil)}
+	if !opts.shouldFix(CheckSlugLedgerPathMismatch) {
+		t.Error("--fix with no slugs stopped applying to all checks")
+	}
+}

@@ -815,6 +815,9 @@ func installAdapterInventory(gitRoot, adapterName string) error {
 	}
 	info := ea.Info()
 	if (info == nil || len(info.RuleTargets) == 0) && ea.HasCapability(adapterprotocol.CapRulesInstaller) {
+		// One-release compatibility for third-party protocol-v1 adapters,
+		// matching the same branch in init.go. Scheduled removal in ox 0.18.0
+		// — see the deprecation note on adapterprotocol.CapRulesInstaller.
 		result, installErr := ea.InstallRules(gitRoot, version.Version)
 		if installErr != nil {
 			return installErr

@@ -335,7 +335,7 @@ common issues, or --fix-slug to target specific checks.`,
 
 		opts := doctorOptions{
 			fix:      fix || len(fixSlugs) > 0, // --fix-slug implies fix mode
-			fixSlugs: fixSlugs,
+			fixSlugs: canonicalFixSlugs(fixSlugs),
 			forceYes: forceYes,
 			verbose:  verbose,
 		}
@@ -396,6 +396,26 @@ var gcCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return runGC(cmd)
 	},
+}
+
+// canonicalFixSlugs resolves retired public slugs to the check that replaced
+// them, so every membership test downstream compares canonical names only.
+// Users keep typing the retired spelling and nothing past this point has to
+// know that — without it, each call site has to hand-OR both spellings, which
+// means the NEXT alias silently fixes nothing. Unknown and adapter slugs pass
+// through untouched so validation still reports what the user actually typed.
+func canonicalFixSlugs(slugs []string) []string {
+	if len(slugs) == 0 {
+		return slugs
+	}
+	canonical := make([]string, 0, len(slugs))
+	for _, slug := range slugs {
+		if replacement, ok := DoctorCheckAliases[slug]; ok {
+			slug = replacement
+		}
+		canonical = append(canonical, slug)
+	}
+	return canonical
 }
 
 // getAvailableSlugs returns a sorted list of all registered check slugs.
@@ -826,8 +846,7 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	if legacyFix && legacyRoot != "" {
 		legacyPreflight = migrationBlocker(legacyRoot)
 	}
-	integrationChecks = append(integrationChecks, checkClaudeSkills(
-		opts.shouldFix(CheckSlugClaudeSkills) || opts.shouldFix(CheckSlugAdapterRules)))
+	integrationChecks = append(integrationChecks, checkClaudeSkills(opts.shouldFix(CheckSlugClaudeSkills)))
 	legacyCheck, legacyPending := checkLegacyOxFilesWithPreflight(legacyRoot, legacyFix, legacyPreflight)
 	// The ox-managed inventory: keep ox's own files ignored, report any that are
 	// still tracked, and run the one-time untrack migration. Registering a check

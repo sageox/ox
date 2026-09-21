@@ -210,6 +210,13 @@ func (r *RecordingState) Duration() time.Duration {
 // IsAgentAlive checks if the recording agent's parent process is still running.
 // Uses kill(pid, 0) for instant liveness detection.
 // Returns true if no PID is recorded (assume alive for backward compat).
+//
+// This is the OPTIMISTIC predicate — when it cannot tell, it assumes alive.
+// isAbandoned (classify.go) is its pessimistic twin: a PID-less marker older
+// than ghostHeuristicAge counts as abandoned. Reach for isAbandoned anywhere
+// treating a crash tombstone as live would disable a repair forever; reach for
+// IsAgentAlive where acting on a session that is actually alive costs more than
+// waiting one more cycle.
 func (r *RecordingState) IsAgentAlive() bool {
 	if r == nil || r.ParentPID <= 0 {
 		return true // no PID recorded — assume alive
@@ -299,21 +306,30 @@ func LoadRecordingState(projectRoot string) (*RecordingState, error) {
 	return nil, nil // no recording state found
 }
 
-// LoadAllRecordingStates returns all active recording states by searching for
-// .recording.json in session folders. Unlike LoadRecordingState which returns
-// only the first match, this returns all concurrent recordings (e.g., from
-// multiple worktrees or agents).
-func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
+// walkRecordingStates decodes every .recording.json under the project's session
+// search paths, deduplicating by canonical file path, and hands each decoded
+// state to visit. Returning false from visit stops the walk immediately.
+//
+// strict decides what an unreadable or unparseable marker means, and the two
+// answers are both correct for their caller. A lenient walk is enumerating
+// sessions to report on, so one corrupt file must never hide every other
+// recording. A strict walk is answering "does a live coworker own this
+// repository right now", and has to fail closed: a marker it cannot read might
+// belong to a session that is reading these very files, and converging
+// underneath one is the exact failure the question exists to prevent.
+func walkRecordingStates(projectRoot string, strict bool, visit func(*RecordingState) bool) error {
 	if projectRoot == "" {
-		return nil, fmt.Errorf("%w: project root", ErrEmptyPath)
+		return fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
 
 	seen := make(map[string]struct{}) // deduplicate by canonical recording file path
-	var states []*RecordingState
 
 	for _, sessionsDir := range sessionsSearchPaths(projectRoot) {
 		entries, err := os.ReadDir(sessionsDir)
 		if err != nil {
+			if strict && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("inspect recording directory %s: %w", sessionsDir, err)
+			}
 			continue
 		}
 
@@ -324,28 +340,51 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 
 			recordingPath := filepath.Join(sessionsDir, entry.Name(), recordingFile)
 			canonicalKey := recordingPath
-			if resolved, err := filepath.EvalSymlinks(recordingPath); err == nil {
+			if resolved, resolveErr := filepath.EvalSymlinks(recordingPath); resolveErr == nil {
 				canonicalKey = resolved
 			}
 			if _, ok := seen[canonicalKey]; ok {
 				continue
 			}
 
-			data, err := os.ReadFile(recordingPath)
-			if err != nil {
+			data, readErr := os.ReadFile(recordingPath)
+			if readErr != nil {
+				if strict && !errors.Is(readErr, os.ErrNotExist) {
+					return fmt.Errorf("read recording state %s: %w", recordingPath, readErr)
+				}
 				continue
 			}
 
 			var state RecordingState
-			if err := json.Unmarshal(data, &state); err != nil {
+			if unmarshalErr := json.Unmarshal(data, &state); unmarshalErr != nil {
+				if strict {
+					return fmt.Errorf("parse recording state %s: %w", recordingPath, unmarshalErr)
+				}
 				continue
 			}
 
 			seen[canonicalKey] = struct{}{}
-			states = append(states, &state)
+			if !visit(&state) {
+				return nil
+			}
 		}
 	}
 
+	return nil
+}
+
+// LoadAllRecordingStates returns all active recording states by searching for
+// .recording.json in session folders. Unlike LoadRecordingState which returns
+// only the first match, this returns all concurrent recordings (e.g., from
+// multiple worktrees or agents). Markers it cannot read or parse are skipped.
+func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
+	var states []*RecordingState
+	if err := walkRecordingStates(projectRoot, false, func(state *RecordingState) bool {
+		states = append(states, state)
+		return true
+	}); err != nil {
+		return nil, err
+	}
 	return states, nil
 }
 
@@ -533,48 +572,14 @@ func IsRecording(projectRoot string) bool {
 // still owned by a live AI coworker process. A stale recording marker is not a
 // live session and must not defer convergence forever.
 func HasLiveRecording(projectRoot string) (bool, error) {
-	if projectRoot == "" {
-		return false, fmt.Errorf("%w: project root", ErrEmptyPath)
+	live := false
+	if err := walkRecordingStates(projectRoot, true, func(state *RecordingState) bool {
+		live = !isAbandoned(state.ParentPID, state.StartedAt)
+		return !live // the first live owner answers the question
+	}); err != nil {
+		return false, err
 	}
-	seen := map[string]struct{}{}
-	for _, sessionsDir := range sessionsSearchPaths(projectRoot) {
-		entries, err := os.ReadDir(sessionsDir)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return false, fmt.Errorf("inspect recording directory %s: %w", sessionsDir, err)
-		}
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			recordingPath := filepath.Join(sessionsDir, entry.Name(), recordingFile)
-			canonicalKey := recordingPath
-			if resolved, resolveErr := filepath.EvalSymlinks(recordingPath); resolveErr == nil {
-				canonicalKey = resolved
-			}
-			if _, ok := seen[canonicalKey]; ok {
-				continue
-			}
-			data, readErr := os.ReadFile(recordingPath)
-			if errors.Is(readErr, os.ErrNotExist) {
-				continue
-			}
-			if readErr != nil {
-				return false, fmt.Errorf("read recording state %s: %w", recordingPath, readErr)
-			}
-			var state RecordingState
-			if unmarshalErr := json.Unmarshal(data, &state); unmarshalErr != nil {
-				return false, fmt.Errorf("parse recording state %s: %w", recordingPath, unmarshalErr)
-			}
-			seen[canonicalKey] = struct{}{}
-			if !isAbandoned(state.ParentPID, state.StartedAt) {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
+	return live, nil
 }
 
 // resolveSessionsWritePath returns the single canonical directory for writing

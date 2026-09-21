@@ -2,7 +2,11 @@
 // into one product repository.
 package teamconverge
 
-import "context"
+import (
+	"context"
+
+	"github.com/sageox/ox/internal/teamdocs"
+)
 
 const ReportSchemaVersion = 1
 
@@ -12,7 +16,6 @@ const (
 	KindSkill   ArtifactKind = "skill"
 	KindRule    ArtifactKind = "rule"
 	KindContext ArtifactKind = "context"
-	KindTool    ArtifactKind = "tool"
 )
 
 type OutcomeState string
@@ -20,7 +23,6 @@ type OutcomeState string
 const (
 	StateApplied         OutcomeState = "applied"
 	StateIndexed         OutcomeState = "indexed"
-	StateInjected        OutcomeState = "injected"
 	StatePending         OutcomeState = "pending"
 	StatePendingApproval OutcomeState = "pending_approval"
 	StateUnsupported     OutcomeState = "unsupported"
@@ -33,12 +35,12 @@ type OriginKind string
 
 const (
 	OriginLoose OriginKind = "loose"
-	OriginPack  OriginKind = "pack"
 )
 
-// Origin identifies who owns the canonical Team Context artifact. Pack origin
-// affects diagnostics and update ownership only; delivery eligibility is
-// determined from the same Artifact fields as a hand-authored loose artifact.
+// Origin identifies who owns the canonical Team Context artifact. Every
+// artifact discovered today is loose (hand-authored); Pack/PackVersion/Digest
+// stay part of the shape so a future Pack Catalog producer does not need a
+// schema bump.
 type Origin struct {
 	Kind        OriginKind `json:"kind"`
 	Pack        string     `json:"pack,omitempty"`
@@ -58,6 +60,12 @@ type Artifact struct {
 	Description  string       `json:"description,omitempty"`
 	Globs        []string     `json:"globs,omitempty"`
 	FilterReason string       `json:"filter_reason,omitempty"`
+
+	// rule carries the already-parsed Team Rule for KindRule artifacts, so
+	// convergeRules does not re-read and re-join teamdocs.PublishedRules
+	// against what discovery already parsed under the same snapshot lease.
+	// Unexported: never part of the Artifact JSON shape.
+	rule *teamdocs.TeamRule
 }
 
 // Snapshot pins every outcome in a report to one Team Context commit.
@@ -71,7 +79,6 @@ type Mode string
 const (
 	ModeAutomatic Mode = "automatic"
 	ModeExplicit  Mode = "explicit"
-	ModeInspect   Mode = "inspect"
 )
 
 type Request struct {
@@ -80,7 +87,6 @@ type Request struct {
 	RepoSlug    string
 	TeamCommit  string
 	Mode        Mode
-	Additional  []Artifact
 }
 
 // Outcome explains both the state and delivery mechanism for one artifact.
@@ -107,12 +113,12 @@ type Report struct {
 }
 
 // Converged is false for every state that needs action or retry. A filtered
-// artifact is intentionally absent here, and indexed/injected content is a
-// valid delivery mode rather than a lesser success.
+// artifact is intentionally absent here, and indexed content is a valid
+// delivery mode rather than a lesser success.
 func (r Report) Converged() bool {
 	for _, outcome := range r.Outcomes {
 		switch outcome.State {
-		case StateApplied, StateIndexed, StateInjected, StateFiltered:
+		case StateApplied, StateIndexed, StateFiltered:
 			continue
 		case StateUnsupported:
 			if !outcome.Required {
@@ -126,23 +132,13 @@ func (r Report) Converged() bool {
 	return true
 }
 
+// Discovery finds this repository's applicable Team Context artifacts.
+// FilesystemDiscovery is the only production implementation; the interface
+// exists so package tests can substitute fixed artifacts without a real git
+// Team Context checkout.
 type Discovery interface {
 	Discover(context.Context, Request) (Snapshot, []Artifact, error)
 }
-
-type Handler interface {
-	Kind() ArtifactKind
-	Converge(context.Context, Request, Snapshot, []Artifact) ([]Outcome, error)
-}
-
-// RetryableError marks a handler failure that should remain pending and be
-// retried without waiting for another Team Context commit.
-type RetryableError struct {
-	Err error
-}
-
-func (e *RetryableError) Error() string { return e.Err.Error() }
-func (e *RetryableError) Unwrap() error { return e.Err }
 
 // settledError marks a handler failure whose recovery requires a source or
 // local configuration change. Unmarked errors remain retryable by default.

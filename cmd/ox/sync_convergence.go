@@ -12,9 +12,11 @@ import (
 	"github.com/sageox/ox/internal/teamconverge"
 )
 
-type syncConverger interface {
-	Converge(context.Context, teamconverge.Request) (teamconverge.Report, error)
-}
+// teamConvergeFunc matches teamconverge.Converge's signature. executeSyncConvergence
+// takes this as a function value — teamconverge.Converge has exactly one
+// production implementation, so a func type lets tests substitute a closure
+// directly instead of a throwaway stub type satisfying a one-method interface.
+type teamConvergeFunc func(context.Context, teamconverge.Request) (teamconverge.Report, error)
 
 // runSyncConvergence applies the current repository's owning Team Context only.
 // Other teams visible to a coworker are transport-only: they do not own this
@@ -61,16 +63,7 @@ func runSyncConvergence(ctx context.Context, selectedTeam string, result *SyncRe
 		return errors.New(repository.Error)
 	}
 
-	coordinator, err := teamconverge.NewDefault()
-	if err != nil {
-		repository.Status = "failed"
-		repository.Error = err.Error()
-		result.Convergence.Status = "failed"
-		result.Convergence.Repositories = append(result.Convergence.Repositories, repository)
-		return fmt.Errorf("initialize Team Context convergence: %w", err)
-	}
-
-	repository, err = executeSyncConvergence(ctx, coordinator, projectRoot, *team, repository, teamconverge.ModeExplicit)
+	repository, err = executeSyncConvergence(ctx, teamconverge.Converge, projectRoot, *team, repository, teamconverge.ModeExplicit, true)
 	result.Convergence.Status = repository.Status
 	result.Convergence.Repositories = append(result.Convergence.Repositories, repository)
 	return err
@@ -89,18 +82,32 @@ func findTeamTransport(results []TeamContextSyncResult, team config.TeamContext)
 	return nil
 }
 
+// executeSyncConvergence converges one repository. When persist is true, the
+// resulting pending/failed/converged state is written to disk for the
+// daemon's automatic retry budget (teamconverge.MaxAutomaticConvergenceAttempts);
+// when false, the outcome is returned but never saved or cleared — see
+// convergeAfterSessionBoundary, whose caller already discards the result and
+// must not spend the shared retry budget on it.
 func executeSyncConvergence(
 	ctx context.Context,
-	coordinator syncConverger,
+	converge teamConvergeFunc,
 	projectRoot string,
 	team config.TeamContext,
 	repository RepositoryConvergenceSyncResult,
 	mode teamconverge.Mode,
+	persist bool,
 ) (RepositoryConvergenceSyncResult, error) {
-	report, convergeErr := coordinator.Converge(ctx, teamconverge.Request{
+	// RuleAppliesToRepo/SkillAppliesToRepo (internal/teamdocs) fail closed on an
+	// empty slug, so only a canonical origin-derived identity may gate a repos:
+	// filter here — matching prime's discoverTeamContext (cmd/ox/agent_prime.go).
+	// repotools.RepoSlug's directory-name fallback is retained for the display-only
+	// RepositoryConvergenceSyncResult.Repository field above and must not reach a
+	// repos: decision, or convergence and prime disagree about "this repository".
+	repoSlug, _ := repotools.RepoSlugFromRemote(projectRoot)
+	report, convergeErr := converge(ctx, teamconverge.Request{
 		ProjectRoot: projectRoot,
 		TeamPath:    team.Path,
-		RepoSlug:    repotools.RepoSlug(projectRoot),
+		RepoSlug:    repoSlug,
 		Mode:        mode,
 	})
 	repository.Report = &report
@@ -110,6 +117,9 @@ func executeSyncConvergence(
 		if report.Snapshot.Path == "" {
 			report.Snapshot.Path = team.Path
 			repository.Report = &report
+		}
+		if !persist {
+			return repository, fmt.Errorf("team context convergence pending: %w", convergeErr)
 		}
 		if _, saveErr := teamconverge.SavePending(projectRoot, teamconverge.PendingRetry, report, convergeErr.Error()); saveErr != nil {
 			repository.Status = "failed"
@@ -124,6 +134,9 @@ func executeSyncConvergence(
 		reason := teamconverge.FailureReason(report)
 		repository.Status = string(status)
 		repository.Error = reason
+		if !persist {
+			return repository, fmt.Errorf("team context convergence %s: %s", status, reason)
+		}
 		if _, saveErr := teamconverge.SavePending(projectRoot, status, report, reason); saveErr != nil {
 			repository.Status = "failed"
 			repository.Error = fmt.Sprintf("%s; persist retry state: %v", reason, saveErr)
@@ -132,34 +145,35 @@ func executeSyncConvergence(
 		return repository, fmt.Errorf("team context convergence %s: %s", status, reason)
 	}
 
-	if err := teamconverge.ClearPending(projectRoot); err != nil {
-		repository.Status = "failed"
-		repository.Error = fmt.Sprintf("clear completed convergence state: %v", err)
-		return repository, errors.New(repository.Error)
+	if persist {
+		if err := teamconverge.ClearPending(projectRoot); err != nil {
+			repository.Status = "failed"
+			repository.Error = fmt.Sprintf("clear completed convergence state: %v", err)
+			return repository, errors.New(repository.Error)
+		}
 	}
 	repository.Status = "converged"
 	return repository, nil
 }
 
 // convergeAfterSessionBoundary consumes pending Team Context work as soon as
-// the last live AI coworker releases the repository. It is best effort: session
-// completion must never fail because local projection is contended or broken,
-// and executeSyncConvergence persists either condition for the daemon retry.
+// the last live AI coworker releases the repository. It is best effort:
+// session completion must never fail because local projection is contended or
+// broken, and its result is discarded (persist=false) rather than saved —
+// this runs on ordinary session-stop churn in ModeAutomatic with a 250ms lock
+// cap, and persisting a contended or incomplete outcome here would spend the
+// daemon's bounded automatic-retry budget on work nobody is waiting on.
 func convergeAfterSessionBoundary(projectRoot string) {
 	team := config.FindRepoTeamContext(projectRoot)
 	if team == nil || team.Path == "" {
 		return
 	}
-	coordinator, err := teamconverge.NewDefault()
-	if err != nil {
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, _ = executeSyncConvergence(ctx, coordinator, projectRoot, *team, RepositoryConvergenceSyncResult{
+	_, _ = executeSyncConvergence(ctx, teamconverge.Converge, projectRoot, *team, RepositoryConvergenceSyncResult{
 		Repository: repotools.RepoSlug(projectRoot),
 		TeamID:     team.TeamID,
 		TeamName:   team.TeamName,
 		TeamPath:   team.Path,
-	}, teamconverge.ModeAutomatic)
+	}, teamconverge.ModeAutomatic, false)
 }

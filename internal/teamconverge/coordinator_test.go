@@ -23,14 +23,11 @@ func (d staticDiscovery) Discover(context.Context, Request) (Snapshot, []Artifac
 	return d.snapshot, append([]Artifact(nil), d.artifacts...), d.err
 }
 
-type echoHandler struct {
-	kind     ArtifactKind
-	state    OutcomeState
-	delivery string
-	err      error
-	drop     bool
-}
-
+// leaseProbeDiscovery proves converge holds the per-clone git lease across
+// discovery and delivery: it snapshots the team file once entering Discover,
+// signals an external writer to attempt the same lease, and snapshots again
+// after giving that writer time to run. Both reads must match if the lease
+// actually excluded the writer.
 type leaseProbeDiscovery struct {
 	file            string
 	entered         chan struct{}
@@ -59,67 +56,24 @@ func (d *leaseProbeDiscovery) Discover(context.Context, Request) (Snapshot, []Ar
 	if d.first != d.second {
 		return Snapshot{}, nil, errors.New("mixed Team Context snapshot")
 	}
+	// KindContext: indexForPrime echoes StateIndexed for any artifact
+	// regardless of what is materialized on disk, so this fixture can prove
+	// the lease without a real rules/skills layout under the probed file.
 	return Snapshot{Path: filepath.Dir(d.file), Commit: "snapshot-a"}, []Artifact{{
-		Kind: KindRule, Name: "security", SourcePath: "agents/rules/security.md",
+		Kind: KindContext, Name: "security", SourcePath: "docs/security.md",
 		Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: true,
 	}}, nil
 }
 
-func (h echoHandler) Kind() ArtifactKind { return h.kind }
-
-func (h echoHandler) Converge(_ context.Context, _ Request, snapshot Snapshot, artifacts []Artifact) ([]Outcome, error) {
-	if h.err != nil {
-		return nil, h.err
-	}
-	if h.drop {
-		return nil, nil
-	}
-	out := make([]Outcome, 0, len(artifacts))
-	for _, artifact := range artifacts {
-		out = append(out, outcomeFor(snapshot, artifact, h.state, h.delivery, ""))
-	}
-	return out, nil
-}
-
-func TestCoordinator_PackAndLooseArtifactsUseTheSameHandler(t *testing.T) {
-	snapshot := Snapshot{Path: "/team", Commit: "abc123"}
-	discovery := staticDiscovery{snapshot: snapshot, artifacts: []Artifact{
-		{Kind: KindRule, Name: "loose", SourcePath: "agents/rules/loose.md", Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: true},
-		{Kind: KindRule, Name: "packed", SourcePath: "agents/rules/packed.md", Origin: Origin{Kind: OriginPack, Pack: "secure-defaults", PackVersion: "1.2.0"}, Applicable: true, Required: true},
-		{Kind: KindRule, Name: "other-repo", SourcePath: "agents/rules/other.md", Origin: Origin{Kind: OriginLoose}, FilterReason: "other repository"},
-		{Kind: KindTool, Name: "github", SourcePath: "agents/tools/github.json", Origin: Origin{Kind: OriginPack, Pack: "github"}, Applicable: true, Required: true},
-	}}
-	coordinator, err := New(discovery, echoHandler{kind: KindRule, state: StateIndexed, delivery: "prime-index"})
-	require.NoError(t, err)
-
-	report, err := coordinator.Converge(context.Background(), Request{ProjectRoot: "/repo", RepoSlug: "api"})
-	require.NoError(t, err)
-	require.Equal(t, snapshot, report.Snapshot)
-	require.Len(t, report.Outcomes, 4)
-
-	byName := map[string]Outcome{}
-	for _, outcome := range report.Outcomes {
-		byName[outcome.Name] = outcome
-		require.Equal(t, snapshot.Commit, outcome.SourceCommit)
-	}
-	require.Equal(t, StateIndexed, byName["loose"].State)
-	require.Equal(t, StateIndexed, byName["packed"].State)
-	require.Equal(t, OriginPack, byName["packed"].Origin.Kind)
-	require.Equal(t, StateFiltered, byName["other-repo"].State)
-	require.Equal(t, StateUnsupported, byName["github"].State)
-	require.False(t, report.Converged(), "a required unsupported tool was reported as fully converged")
-}
-
-func TestCoordinator_HoldsOneTeamContextSnapshotLeaseThroughDelivery(t *testing.T) {
+func TestConvergeLocked_HoldsOneTeamContextSnapshotLeaseThroughDelivery(t *testing.T) {
 	team := t.TempDir()
 	file := filepath.Join(team, "security.md")
 	require.NoError(t, os.WriteFile(file, []byte("snapshot-a"), 0o644))
+	project := t.TempDir()
+	wireHandlerTeamContext(t, project, team)
 	discovery := &leaseProbeDiscovery{
 		file: file, entered: make(chan struct{}), writerAttempted: make(chan struct{}),
 	}
-	coordinator, err := New(discovery, echoHandler{kind: KindRule, state: StateIndexed})
-	require.NoError(t, err)
-	coordinator.lockSnapshot = true
 
 	writerDone := make(chan error, 1)
 	go func() {
@@ -130,9 +84,9 @@ func TestCoordinator_HoldsOneTeamContextSnapshotLeaseThroughDelivery(t *testing.
 		})
 	}()
 
-	report, err := coordinator.Converge(context.Background(), Request{TeamPath: team, Mode: ModeExplicit})
+	report, err := convergeLocked(context.Background(), Request{ProjectRoot: project, TeamPath: team, Mode: ModeExplicit}, discovery)
 	require.NoError(t, err)
-	require.True(t, report.Converged())
+	require.True(t, report.Converged(), "%+v", report.Outcomes)
 	require.Equal(t, "snapshot-a", discovery.first)
 	require.Equal(t, "snapshot-a", discovery.second)
 	require.NoError(t, <-writerDone)
@@ -141,12 +95,9 @@ func TestCoordinator_HoldsOneTeamContextSnapshotLeaseThroughDelivery(t *testing.
 	require.Equal(t, "snapshot-b", string(final), "writer should proceed after convergence releases the lease")
 }
 
-func TestCoordinator_AutomaticSnapshotContentionIsRetryable(t *testing.T) {
+func TestConvergeLocked_AutomaticSnapshotContentionIsRetryable(t *testing.T) {
 	team := t.TempDir()
 	discovery := staticDiscovery{snapshot: Snapshot{Path: team, Commit: "abc"}}
-	coordinator, err := New(discovery)
-	require.NoError(t, err)
-	coordinator.lockSnapshot = true
 
 	held := make(chan struct{})
 	release := make(chan struct{})
@@ -160,86 +111,88 @@ func TestCoordinator_AutomaticSnapshotContentionIsRetryable(t *testing.T) {
 	<-held
 
 	started := time.Now()
-	_, err = coordinator.Converge(context.Background(), Request{TeamPath: team, Mode: ModeAutomatic})
+	// Lock contention is decided before Discover ever runs, so this never
+	// reaches convergeSkills/convergeRules/indexForPrime — no project wiring
+	// is needed for this Request.
+	_, err := convergeLocked(context.Background(), Request{TeamPath: team, Mode: ModeAutomatic}, discovery)
 	close(release)
 	require.Error(t, err)
-	var retryable *RetryableError
-	require.ErrorAs(t, err, &retryable)
+	require.Contains(t, err.Error(), "busy")
 	require.Less(t, time.Since(started), time.Second)
 }
 
-func TestCoordinator_FailsClosedOnHandlerGaps(t *testing.T) {
-	artifact := Artifact{Kind: KindSkill, Name: "deploy", SourcePath: "agents/skills/deploy", Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: true}
-	tests := []struct {
-		name    string
-		handler Handler
-		detail  string
-		state   OutcomeState
-	}{
-		{name: "unclassified handler error retries", handler: echoHandler{kind: KindSkill, err: errors.New("apply failed")}, detail: "apply failed", state: StatePending},
-		{name: "enumerated settled error", handler: echoHandler{kind: KindSkill, err: &settledError{State: StateConflict, Err: errors.New("local collision")}}, detail: "local collision", state: StateConflict},
-		{name: "missing outcome is settled", handler: echoHandler{kind: KindSkill, drop: true}, detail: "expected exactly one", state: StateError},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			coordinator, err := New(staticDiscovery{snapshot: Snapshot{Commit: "abc"}, artifacts: []Artifact{artifact}}, tt.handler)
-			require.NoError(t, err)
-			report, err := coordinator.Converge(context.Background(), Request{})
-			require.NoError(t, err)
-			require.Len(t, report.Outcomes, 1)
-			require.Equal(t, tt.state, report.Outcomes[0].State)
-			require.Contains(t, report.Outcomes[0].Detail, tt.detail)
-			require.False(t, report.Converged())
-		})
-	}
+func TestConvergeLocked_RequiresTeamPath(t *testing.T) {
+	_, err := convergeLocked(context.Background(), Request{}, staticDiscovery{})
+	require.ErrorContains(t, err, "team context path is required")
 }
 
-func TestCoordinator_PreservesRetryableHandlerFailureAsPending(t *testing.T) {
+func TestConverge_PropagatesDiscoveryError(t *testing.T) {
+	_, err := converge(context.Background(), Request{}, staticDiscovery{err: errors.New("discovery failed")})
+	require.ErrorContains(t, err, "discovery failed")
+}
+
+func TestClassify_DefaultsUnknownErrorsToPendingAndHonorsSettledState(t *testing.T) {
+	snapshot := Snapshot{Commit: "abc"}
+	items := []Artifact{{Kind: KindSkill, Name: "deploy"}}
+
+	t.Run("nil error returns the delivery outcomes unchanged", func(t *testing.T) {
+		outcomes := []Outcome{{Kind: KindSkill, Name: "deploy", State: StateApplied}}
+		require.Equal(t, outcomes, classify(snapshot, items, outcomes, nil))
+	})
+	t.Run("unclassified error defaults every item to pending", func(t *testing.T) {
+		got := classify(snapshot, items, nil, errors.New("apply failed"))
+		require.Len(t, got, 1)
+		require.Equal(t, StatePending, got[0].State)
+		require.Equal(t, "apply failed", got[0].Detail)
+	})
+	t.Run("settled error keeps its own state", func(t *testing.T) {
+		got := classify(snapshot, items, nil, &settledError{State: StateConflict, Err: errors.New("collision")})
+		require.Len(t, got, 1)
+		require.Equal(t, StateConflict, got[0].State)
+		require.Equal(t, "collision", got[0].Detail)
+	})
+}
+
+// TestConverge_ClassifiesRealDeliveryFailureThroughSettledError proves the
+// classify wiring end to end (not just the pure classify unit test above):
+// a real convergeSkills settled failure — no Team Context configured — lands
+// in the report as StateError with the failure's own detail.
+func TestConverge_ClassifiesRealDeliveryFailureThroughSettledError(t *testing.T) {
 	artifact := Artifact{Kind: KindSkill, Name: "deploy", SourcePath: "agents/skills/deploy", Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: true}
-	handler := echoHandler{kind: KindSkill, err: &RetryableError{Err: errors.New("lock busy")}}
-	coordinator, err := New(staticDiscovery{snapshot: Snapshot{Commit: "abc"}, artifacts: []Artifact{artifact}}, handler)
-	require.NoError(t, err)
-	report, err := coordinator.Converge(context.Background(), Request{})
+	report, err := converge(context.Background(), Request{ProjectRoot: t.TempDir()},
+		staticDiscovery{snapshot: Snapshot{Commit: "abc"}, artifacts: []Artifact{artifact}})
 	require.NoError(t, err)
 	require.Len(t, report.Outcomes, 1)
-	require.Equal(t, StatePending, report.Outcomes[0].State)
+	require.Equal(t, StateError, report.Outcomes[0].State)
+	require.Contains(t, report.Outcomes[0].Detail, "no Team Context is configured")
 	require.False(t, report.Converged())
 }
 
-func TestCoordinator_DuplicateOwnershipIsAConflictBeforeDelivery(t *testing.T) {
+func TestConverge_DuplicateOwnershipIsAConflictBeforeDelivery(t *testing.T) {
+	project, team := t.TempDir(), t.TempDir()
+	wireHandlerTeamContext(t, project, team)
 	artifacts := []Artifact{
 		{Kind: KindRule, Name: "security", SourcePath: "agents/rules/security.md", Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: true},
-		{Kind: KindRule, Name: "security", SourcePath: "packs/security.md", Origin: Origin{Kind: OriginPack, Pack: "secure"}, Applicable: true, Required: true},
+		{Kind: KindRule, Name: "security", SourcePath: "packs/security.md", Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: true},
 	}
-	coordinator, err := New(staticDiscovery{snapshot: Snapshot{Commit: "abc"}, artifacts: artifacts},
-		echoHandler{kind: KindRule, state: StateIndexed})
-	require.NoError(t, err)
-	report, err := coordinator.Converge(context.Background(), Request{})
+	report, err := converge(context.Background(), Request{ProjectRoot: project},
+		staticDiscovery{snapshot: Snapshot{Path: team, Commit: "abc"}, artifacts: artifacts})
 	require.NoError(t, err)
 	require.Len(t, report.Outcomes, 1)
 	require.Equal(t, StateConflict, report.Outcomes[0].State)
 	require.False(t, report.Converged())
 }
 
-func TestCoordinator_OptionalUnsupportedArtifactDoesNotFailConvergence(t *testing.T) {
-	artifact := Artifact{Kind: KindTool, Name: "optional", SourcePath: "agents/tools/optional.json", Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: false}
-	coordinator, err := New(staticDiscovery{snapshot: Snapshot{Commit: "abc"}, artifacts: []Artifact{artifact}})
-	require.NoError(t, err)
-	report, err := coordinator.Converge(context.Background(), Request{})
-	require.NoError(t, err)
-	require.True(t, report.Converged())
-}
-
-func TestCoordinator_RejectsUnsafeArtifactIdentityBeforeDelivery(t *testing.T) {
+func TestConverge_RejectsUnsafeArtifactIdentityBeforeDelivery(t *testing.T) {
+	project, team := t.TempDir(), t.TempDir()
+	wireHandlerTeamContext(t, project, team)
 	artifacts := []Artifact{
 		{Kind: KindRule, Name: "escape", SourcePath: "../outside.md", Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: true},
 		{Kind: KindRule, Name: "Security", SourcePath: "agents/rules/one.md", Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: true},
-		{Kind: KindRule, Name: "security", SourcePath: "agents/rules/two.md", Origin: Origin{Kind: OriginPack, Pack: "secure"}, Applicable: true, Required: true},
+		{Kind: KindRule, Name: "security", SourcePath: "agents/rules/two.md", Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: true},
 	}
-	coordinator, err := New(staticDiscovery{snapshot: Snapshot{Commit: "abc"}, artifacts: artifacts},
-		echoHandler{kind: KindRule, state: StateIndexed})
-	require.NoError(t, err)
-	report, err := coordinator.Converge(context.Background(), Request{})
+	report, err := converge(context.Background(), Request{ProjectRoot: project},
+		staticDiscovery{snapshot: Snapshot{Path: team, Commit: "abc"}, artifacts: artifacts})
 	require.NoError(t, err)
 	require.Len(t, report.Outcomes, 2)
 	byState := map[OutcomeState]Outcome{}
@@ -247,57 +200,42 @@ func TestCoordinator_RejectsUnsafeArtifactIdentityBeforeDelivery(t *testing.T) {
 		byState[outcome.State] = outcome
 	}
 	require.Contains(t, byState[StateError].Detail, "not normalized")
-	require.Equal(t, "Security", byState[StateConflict].Name)
+	require.Equal(t, "Security", byState[StateConflict].Name, "case-insensitive claim collision reports the first sorted name")
 	require.False(t, report.Converged())
 }
 
-func TestWriteText_ExplainsOriginDeliveryAndFailure(t *testing.T) {
-	report := Report{Snapshot: Snapshot{Commit: "0123456789abcdef"}, Outcomes: []Outcome{
-		{Kind: KindRule, Name: "security", State: StateInjected, Delivery: "prime-inline", Origin: Origin{Kind: OriginPack, Pack: "secure", PackVersion: "1.2.0"}},
-		{Kind: KindTool, Name: "github", State: StateUnsupported, Origin: Origin{Kind: OriginLoose}, Detail: "no handler"},
-	}}
-	var out bytes.Buffer
-	require.NoError(t, WriteText(&out, report))
-	require.Contains(t, out.String(), "0123456789ab")
-	require.Contains(t, out.String(), "rule/security: injected via prime-inline (pack secure@1.2.0)")
-	require.Contains(t, out.String(), "tool/github: unsupported (loose) — no handler")
-}
-
-func TestCoordinator_ConstructorAndDiscoveryErrors(t *testing.T) {
-	_, err := New(nil)
-	require.ErrorContains(t, err, "discovery is required")
-	_, err = New(staticDiscovery{}, nil)
-	require.ErrorContains(t, err, "nil Team Context")
-	_, err = New(staticDiscovery{}, echoHandler{})
-	require.ErrorContains(t, err, "no artifact kind")
-	_, err = New(staticDiscovery{}, echoHandler{kind: KindRule}, echoHandler{kind: KindRule})
-	require.ErrorContains(t, err, "duplicate")
-
-	coordinator, err := New(staticDiscovery{})
-	require.NoError(t, err)
-	coordinator.lockSnapshot = true
-	_, err = coordinator.Converge(context.Background(), Request{})
-	require.ErrorContains(t, err, "team context path is required")
-
-	coordinator, err = New(staticDiscovery{err: errors.New("discovery failed")})
-	require.NoError(t, err)
-	_, err = coordinator.Converge(context.Background(), Request{})
-	require.ErrorContains(t, err, "discovery failed")
-}
-
-func TestCoordinator_RejectsEveryInvalidArtifactIdentity(t *testing.T) {
+func TestConverge_RejectsEveryInvalidArtifactIdentity(t *testing.T) {
+	project, team := t.TempDir(), t.TempDir()
+	wireHandlerTeamContext(t, project, team)
 	artifacts := []Artifact{
 		{Kind: "unknown", Name: "x", SourcePath: "x", Origin: Origin{Kind: OriginLoose}, Applicable: true},
 		{Kind: KindRule, Name: " x", SourcePath: "x", Origin: Origin{Kind: OriginLoose}, Applicable: true},
-		{Kind: KindRule, Name: "missing-pack", SourcePath: "x", Origin: Origin{Kind: OriginPack}, Applicable: true},
 		{Kind: KindRule, Name: "unknown-origin", SourcePath: "x", Origin: Origin{Kind: "unknown"}, Applicable: true},
 	}
-	coordinator, err := New(staticDiscovery{snapshot: Snapshot{Commit: "abc"}, artifacts: artifacts})
-	require.NoError(t, err)
-	report, err := coordinator.Converge(context.Background(), Request{})
+	report, err := converge(context.Background(), Request{ProjectRoot: project},
+		staticDiscovery{snapshot: Snapshot{Path: team, Commit: "abc"}, artifacts: artifacts})
 	require.NoError(t, err)
 	require.Len(t, report.Outcomes, len(artifacts))
 	for _, outcome := range report.Outcomes {
 		require.Equal(t, StateError, outcome.State)
 	}
+}
+
+func TestReport_ConvergedTreatsOptionalUnsupportedAsSuccessButRequiredAsFailure(t *testing.T) {
+	optional := Report{Outcomes: []Outcome{{State: StateUnsupported, Required: false}}}
+	require.True(t, optional.Converged())
+	required := Report{Outcomes: []Outcome{{State: StateUnsupported, Required: true}}}
+	require.False(t, required.Converged())
+}
+
+func TestWriteText_ExplainsDeliveryAndFailure(t *testing.T) {
+	report := Report{Snapshot: Snapshot{Commit: "0123456789abcdef"}, Outcomes: []Outcome{
+		{Kind: KindRule, Name: "security", State: StateIndexed, Delivery: "prime-inline"},
+		{Kind: KindSkill, Name: "deploy", State: StateUnsupported, Detail: "no native skill target"},
+	}}
+	var out bytes.Buffer
+	require.NoError(t, WriteText(&out, report))
+	require.Contains(t, out.String(), "0123456789ab")
+	require.Contains(t, out.String(), "rule/security: indexed via prime-inline")
+	require.Contains(t, out.String(), "skill/deploy: unsupported — no native skill target")
 }

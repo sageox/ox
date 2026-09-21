@@ -104,17 +104,18 @@ func (s *SyncScheduler) reconcileTeamSkills(changed []string) {
 	if !teamArtifactsTouched(changed) && !retryIncomplete {
 		return
 	}
-	coordinator, err := teamconverge.NewDefault()
-	if err != nil {
-		s.logger.Error("team convergence coordinator unavailable", "repo", repoRoot, "error", err)
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), automaticConvergenceTimeout)
 	defer cancel()
-	report, err := coordinator.Converge(ctx, teamconverge.Request{
+	// RuleAppliesToRepo/SkillAppliesToRepo (internal/teamdocs) fail closed on an
+	// empty slug, so only a canonical origin-derived identity may gate a repos:
+	// filter here — matching prime's discoverTeamContext (cmd/ox/agent_prime.go).
+	// RepoSlug's directory-name fallback is display-only and must not reach a
+	// repos: decision, or convergence and prime disagree about "this repository".
+	repoSlug, _ := repotools.RepoSlugFromRemote(repoRoot)
+	report, err := teamconverge.Converge(ctx, teamconverge.Request{
 		ProjectRoot: repoRoot,
 		TeamPath:    team.Path,
-		RepoSlug:    repotools.RepoSlug(repoRoot),
+		RepoSlug:    repoSlug,
 		Mode:        teamconverge.ModeAutomatic,
 	})
 	if err != nil {
@@ -155,7 +156,6 @@ func (s *SyncScheduler) reconcileTeamSkills(changed []string) {
 		"artifacts", len(report.Outcomes),
 		"applied", counts[teamconverge.StateApplied],
 		"indexed", counts[teamconverge.StateIndexed],
-		"injected", counts[teamconverge.StateInjected],
 		"pending", counts[teamconverge.StatePending],
 		"pending_approval", counts[teamconverge.StatePendingApproval],
 		"unsupported", counts[teamconverge.StateUnsupported],

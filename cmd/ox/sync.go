@@ -145,6 +145,22 @@ func init() {
 	syncCmd.GroupID = "auth" // group with ledger and other auth-related commands
 }
 
+// collectTransportProblem folds one transport step's result into the running
+// problem list. An interactive interrupt must abort the whole command
+// immediately, so it is returned unmodified rather than collected; every
+// other error is appended to problems and swallowed here, so the remaining
+// transport steps still run.
+func collectTransportProblem(err error, problems *[]string) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, tea.ErrInterrupted) {
+		return err
+	}
+	*problems = append(*problems, err.Error())
+	return nil
+}
+
 func runSync(cmd *cobra.Command, args []string) error {
 	readOnly, _ := cmd.Flags().GetBool("read-only")
 	if readOnly || cmd.Flags().Changed("repo") || cmd.Flags().Changed("timeout") || cmd.Flags().Changed("check") {
@@ -180,33 +196,21 @@ func runSync(cmd *cobra.Command, args []string) error {
 	var transportProblems []string
 
 	if teamID != "" {
-		if err := syncTeamForSync(ctx, teamID, jsonOutput, &result); err != nil {
-			if errors.Is(err, tea.ErrInterrupted) {
-				return err
-			}
-			transportProblems = append(transportProblems, err.Error())
+		if err := collectTransportProblem(syncTeamForSync(ctx, teamID, jsonOutput, &result), &transportProblems); err != nil {
+			return err
 		}
 	} else if allTeams {
-		if err := syncAllTeamsForSync(ctx, jsonOutput, &result); err != nil {
-			if errors.Is(err, tea.ErrInterrupted) {
-				return err
-			}
-			transportProblems = append(transportProblems, err.Error())
+		if err := collectTransportProblem(syncAllTeamsForSync(ctx, jsonOutput, &result), &transportProblems); err != nil {
+			return err
 		}
 	} else {
 		// The default promise is the whole current-repository path: Ledger and
 		// Team Context transport, followed by local convergence.
-		if err := syncLedgerForSync(ctx, jsonOutput, &result); err != nil {
-			if errors.Is(err, tea.ErrInterrupted) {
-				return err
-			}
-			transportProblems = append(transportProblems, err.Error())
+		if err := collectTransportProblem(syncLedgerForSync(ctx, jsonOutput, &result), &transportProblems); err != nil {
+			return err
 		}
-		if err := syncAllTeamsForSync(ctx, jsonOutput, &result); err != nil {
-			if errors.Is(err, tea.ErrInterrupted) {
-				return err
-			}
-			transportProblems = append(transportProblems, err.Error())
+		if err := collectTransportProblem(syncAllTeamsForSync(ctx, jsonOutput, &result), &transportProblems); err != nil {
+			return err
 		}
 	}
 

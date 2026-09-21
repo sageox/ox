@@ -22,10 +22,9 @@ import (
 )
 
 const (
-	managedPrefix          = "sageox-team-"
-	projectionStampPrefix  = "<!-- ox-team-rule-sha256:"
-	projectionStampSuffix  = "; managed by ox from Team Context; edit the source rule, not this projection. -->"
-	legacyProjectionMarker = "<!-- Managed by ox from Team Context; edit the source rule, not this projection. -->"
+	managedPrefix         = "sageox-team-"
+	projectionStampPrefix = "<!-- ox-team-rule-sha256:"
+	projectionStampSuffix = "; managed by ox from Team Context; edit the source rule, not this projection. -->"
 )
 
 // ErrProjectionConflict marks a native rule path that ox cannot safely claim.
@@ -111,6 +110,13 @@ func ModeForAgent(agent string, rule teamdocs.TeamRule) DeliveryMode {
 // happen to use the reserved filename prefix.
 func Reconcile(ctx context.Context, projectRoot string, rules []teamdocs.TeamRule) (Result, error) {
 	result := newResult()
+	// A per-file conflict in one policy's root (a hand-authored or tracked file
+	// sitting at a projection's path) must not stop every LATER policy from
+	// converging, so errors are accumulated across the whole table and reported
+	// only once every policy has run. Kept separate from genuine I/O/git-check
+	// failures, which stay retryable rather than settled — see the merge below.
+	var conflictErrs []error
+	var hardErrs []error
 	for _, p := range policies {
 		rootPath := filepath.Join(projectRoot, filepath.FromSlash(p.Root))
 		info, err := os.Stat(rootPath)
@@ -156,15 +162,20 @@ func Reconcile(ctx context.Context, projectRoot string, rules []teamdocs.TeamRul
 		if !protected {
 			continue
 		}
-		written, removed, err := reconcileRoot(ctx, projectRoot, rootPath, p, desired)
-		if err != nil {
-			return result, fmt.Errorf("reconcile %s Team Rules: %w", p.Agent, err)
-		}
+		written, removed, rErr := reconcileRoot(ctx, projectRoot, rootPath, p, desired)
 		for _, name := range written {
 			result.Written = append(result.Written, filepath.ToSlash(filepath.Join(p.Root, name)))
 		}
 		for _, name := range removed {
 			result.Removed = append(result.Removed, filepath.ToSlash(filepath.Join(p.Root, name)))
+		}
+		if rErr != nil {
+			wrapped := fmt.Errorf("reconcile %s Team Rules: %w", p.Agent, rErr)
+			if errors.Is(rErr, ErrProjectionConflict) {
+				conflictErrs = append(conflictErrs, wrapped)
+			} else {
+				hardErrs = append(hardErrs, wrapped)
+			}
 		}
 	}
 	for name := range result.NativeAgents {
@@ -177,6 +188,24 @@ func Reconcile(ctx context.Context, projectRoot string, rules []teamdocs.TeamRul
 	}
 	sort.Strings(result.Written)
 	sort.Strings(result.Removed)
+
+	if len(hardErrs) > 0 {
+		joined := errors.Join(hardErrs...)
+		if len(conflictErrs) > 0 {
+			// A retryable I/O failure alongside a settled conflict must be
+			// reported as retryable: errors.Is(err, ErrProjectionConflict)
+			// matches if ANY error in the chain matches, so folding conflictErrs
+			// in here via %w would make the whole batch look settled and the
+			// I/O failure would never be retried. The conflict count is noted in
+			// the message only, outside the %w chain; it resurfaces cleanly on
+			// the next retry once the I/O failure clears.
+			return result, fmt.Errorf("%w (plus %d Team Rule projection conflict(s) pending retry)", joined, len(conflictErrs))
+		}
+		return result, joined
+	}
+	if len(conflictErrs) > 0 {
+		return result, errors.Join(conflictErrs...)
+	}
 	return result, nil
 }
 
@@ -199,7 +228,7 @@ func HasNativeProjections(projectRoot string) bool {
 				continue
 			}
 			content, readErr := os.ReadFile(filepath.Join(rootPath, entry.Name()))
-			if readErr == nil && projectionOwned(content, p) {
+			if readErr == nil && projectionOwned(content) {
 				return true
 			}
 		}
@@ -207,10 +236,11 @@ func HasNativeProjections(projectRoot string) bool {
 	return false
 }
 
-// ForPrime removes rules already present in the active agent's native root and
-// converts any scoped fallback to indexed delivery. It is the second half of the
-// exactly-once contract: projection chooses native-or-prime; session start never
-// duplicates an owned native file while convergence is repairing stale bytes.
+// ForPrime removes rules already owned by a projection in the active agent's
+// native root and converts any scoped fallback to indexed delivery. It is the
+// second half of the exactly-once contract: projection chooses native-or-prime;
+// session start never duplicates an owned native file while convergence is
+// repairing stale bytes.
 func ForPrime(projectRoot, agent string, rules []teamdocs.TeamRule) []teamdocs.TeamRule {
 	out := make([]teamdocs.TeamRule, 0, len(rules))
 	for _, rule := range rules {
@@ -242,10 +272,25 @@ func NativePath(projectRoot, agent string, rule teamdocs.TeamRule) (string, bool
 	return filepath.Join(projectRoot, filepath.FromSlash(p.Root), nativeFilename(rule, p)), true
 }
 
+// nativePresent reports whether the native root already carries this rule's
+// OWN projection, using the same ownership predicate reconcileRoot uses to
+// decide whether it may write there. A bare Stat used to treat ANY file at
+// the path as "present" — foreign or git-tracked content included — so
+// reconcileRoot would refuse to write it as a conflict while ForPrime, seeing
+// only that a file existed, suppressed prime delivery for the same rule: it
+// reached neither surface. A read error (missing file, permission denied) is
+// treated as "not present", the safe direction: delivering a rule twice via
+// prime is recoverable, delivering it zero times is not.
 func nativePresent(projectRoot, agent string, rule teamdocs.TeamRule) bool {
-	path, _ := NativePath(projectRoot, agent, rule)
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
+	path, ok := NativePath(projectRoot, agent, rule)
+	if !ok {
+		return false
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return projectionOwned(content)
 }
 
 func policyFor(agent string) (policy, bool) {
@@ -321,64 +366,12 @@ func verifiedProjection(content []byte) bool {
 	return gotHash == wantHash
 }
 
-func projectionOwned(content []byte, p policy) bool {
-	return verifiedProjection(content) || legacyProjectionOwned(content, p)
-}
-
-// legacyProjectionOwned recognizes only the exact comment-only format emitted
-// by the immediately preceding Team Rule projector. This is a one-way migration
-// path: the next update rewrites it with a full-file digest, while arbitrary
-// reserved filenames and marker text embedded in user content remain unowned.
-func legacyProjectionOwned(content []byte, p policy) bool {
-	content = bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n"))
-	if len(content) == 0 || content[len(content)-1] != '\n' {
-		return false
-	}
-	markerLine := []byte(legacyProjectionMarker + "\n")
-	markerOffset := bytes.Index(content, markerLine)
-	if markerOffset < 0 {
-		return false
-	}
-	if markerOffset == 0 {
-		return p.AlwaysApplyField == ""
-	}
-	preamble := string(content[:markerOffset])
-	if !strings.HasPrefix(preamble, "---\n") || !strings.HasSuffix(preamble, "\n---\n\n") {
-		return false
-	}
-	frontmatter := strings.TrimSuffix(strings.TrimPrefix(preamble, "---\n"), "\n---\n\n")
-	if frontmatter == "" {
-		return false
-	}
-	lines := strings.Split(frontmatter, "\n")
-	next := 0
-	if key, value, ok := legacyQuotedField(lines[next]); ok && key == "description" && value != "" {
-		next++
-	}
-	hasGlobs := false
-	if next < len(lines) && p.GlobField != "" {
-		if key, value, ok := legacyQuotedField(lines[next]); ok && key == p.GlobField && value != "" {
-			hasGlobs = true
-			next++
-		}
-	}
-	if p.AlwaysApplyField != "" {
-		want := fmt.Sprintf("%s: %t", p.AlwaysApplyField, !hasGlobs)
-		if next >= len(lines) || lines[next] != want {
-			return false
-		}
-		next++
-	}
-	return next == len(lines)
-}
-
-func legacyQuotedField(line string) (key, value string, ok bool) {
-	key, quoted, ok := strings.Cut(line, ": ")
-	if !ok {
-		return "", "", false
-	}
-	value, err := strconv.Unquote(quoted)
-	return key, value, err == nil && quoted == strconv.Quote(value)
+// projectionOwned reports whether content is a Team Rule projection ox itself
+// wrote, and may therefore safely rewrite or delete. It stays a named
+// predicate distinct from verifiedProjection so call sites read as an
+// ownership check rather than a hash check.
+func projectionOwned(content []byte) bool {
+	return verifiedProjection(content)
 }
 
 func nativeFilename(rule teamdocs.TeamRule, p policy) string {
@@ -412,6 +405,17 @@ func managedPathIgnored(ctx context.Context, projectRoot, rel string) bool {
 	return cmd.Run() == nil
 }
 
+// reconcileRoot converges a single agent's rule root. A per-file conflict (a
+// path git tracks, or one holding content ox did not write) is recorded and
+// skipped rather than aborting the whole root: one hand-authored file must
+// not block every other rule in the same root from landing. Genuine I/O and
+// git-check failures are different — they abort this root's reconciliation
+// immediately, since there is no safe way to keep going once the filesystem
+// or git itself stops answering reliably.
+//
+// desired is a map, so its keys are visited in sorted order: Go's randomized
+// map iteration would otherwise make "which files land before a conflict"
+// nondeterministic run to run.
 func reconcileRoot(ctx context.Context, projectRoot, rootPath string, p policy, desired map[string][]byte) (written, removed []string, err error) {
 	root, err := os.OpenRoot(rootPath)
 	if err != nil {
@@ -423,27 +427,38 @@ func reconcileRoot(ctx context.Context, projectRoot, rootPath string, p policy, 
 	if err != nil {
 		return nil, nil, err
 	}
-	for name, content := range desired {
+
+	names := make([]string, 0, len(desired))
+	for name := range desired {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var conflicts []error
+	for _, name := range names {
+		content := desired[name]
 		current, readErr := root.ReadFile(name)
 		if readErr == nil && bytes.Equal(current, content) {
 			continue
 		}
 		if readErr != nil && !os.IsNotExist(readErr) {
-			return nil, nil, readErr
+			return written, removed, readErr
 		}
 		rel := filepath.ToSlash(filepath.Join(p.Root, name))
 		tracked, trackErr := managedPathTracked(ctx, projectRoot, rel)
 		if trackErr != nil {
-			return nil, nil, trackErr
+			return written, removed, trackErr
 		}
 		if tracked {
-			return nil, nil, fmt.Errorf("%w: refusing to update tracked Team Rule projection %s", ErrProjectionConflict, rel)
+			conflicts = append(conflicts, fmt.Errorf("%w: refusing to update tracked Team Rule projection %s", ErrProjectionConflict, rel))
+			continue
 		}
-		if readErr == nil && !projectionOwned(current, p) {
-			return nil, nil, fmt.Errorf("%w: refusing to update %s: existing file is not a verified ox projection", ErrProjectionConflict, rel)
+		if readErr == nil && !projectionOwned(current) {
+			conflicts = append(conflicts, fmt.Errorf("%w: refusing to update %s: existing file is not a verified ox projection", ErrProjectionConflict, rel))
+			continue
 		}
 		if err := atomicWrite(root, name, content); err != nil {
-			return nil, nil, err
+			return written, removed, err
 		}
 		written = append(written, name)
 	}
@@ -458,26 +473,28 @@ func reconcileRoot(ctx context.Context, projectRoot, rootPath string, p policy, 
 		rel := filepath.ToSlash(filepath.Join(p.Root, name))
 		tracked, trackErr := managedPathTracked(ctx, projectRoot, rel)
 		if trackErr != nil {
-			return nil, nil, trackErr
+			return written, removed, trackErr
 		}
 		if tracked {
-			return nil, nil, fmt.Errorf("%w: refusing to remove tracked Team Rule projection %s", ErrProjectionConflict, rel)
+			conflicts = append(conflicts, fmt.Errorf("%w: refusing to remove tracked Team Rule projection %s", ErrProjectionConflict, rel))
+			continue
 		}
 		current, readErr := root.ReadFile(name)
 		if readErr != nil {
-			return nil, nil, readErr
+			return written, removed, readErr
 		}
-		if !projectionOwned(current, p) {
-			return nil, nil, fmt.Errorf("%w: refusing to remove %s: existing file is not a verified ox projection", ErrProjectionConflict, rel)
+		if !projectionOwned(current) {
+			conflicts = append(conflicts, fmt.Errorf("%w: refusing to remove %s: existing file is not a verified ox projection", ErrProjectionConflict, rel))
+			continue
 		}
 		if err := root.Remove(name); err != nil && !os.IsNotExist(err) {
-			return nil, nil, err
+			return written, removed, err
 		}
 		removed = append(removed, name)
 	}
 	sort.Strings(written)
 	sort.Strings(removed)
-	return written, removed, nil
+	return written, removed, errors.Join(conflicts...)
 }
 
 // managedPathTracked reports whether git tracks rel inside projectRoot.

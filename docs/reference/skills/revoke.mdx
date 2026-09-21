@@ -22,6 +22,10 @@ unapproved name refuses the run before any approval changes. If cleanup cannot
 finish, the approval stays revoked and the command returns an error so the next
 reconcile can finish removing the installed content.
 
+This withdraws the whole approval. To keep a skill's instructions approved and
+withdraw only its bundled scripts, run `ox skills approve --allow-scripts=false <name>`
+instead.
+
 ```
 ox skills revoke <name>... [flags]
 ```

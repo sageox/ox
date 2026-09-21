@@ -7,6 +7,7 @@
 package rulecatalog
 
 import (
+	"bytes"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -36,10 +37,33 @@ func LegacyDescriptions() []string {
 }
 
 //go:embed ox-cli.md
-var primaryRule []byte
+var embeddedPrimaryRule []byte
 
 //go:embed ox-cli-use-team-context.md
-var teamContextRule []byte
+var embeddedTeamContextRule []byte
+
+// The catalog is embedded from the checkout at BUILD time, and git on Windows
+// checks .md files out with CRLF by default. Normalizing once here — rather
+// than at each use — is what makes it impossible for Select and Digest to
+// disagree about the same source bytes. A Windows-built ox would otherwise
+// WRITE CRLF rules and record their CRLF digests in the tracked skills
+// lockfile, so a teammate's Linux build reads them as drift, rewrites them,
+// and the two builds rewrite each other forever. The .gitattributes pin covers
+// the same hazard but only for checkouts made after it landed.
+var (
+	primaryRule     = normalizeEOL(embeddedPrimaryRule)
+	teamContextRule = normalizeEOL(embeddedTeamContextRule)
+)
+
+// normalizeEOL rewrites CRLF to LF. Deliberately a local copy of
+// extensions/skills/catalog.go's normalizeEOL: the two catalogs are independent
+// embed roots, and sharing five lines would couple them for no gain.
+func normalizeEOL(b []byte) []byte {
+	if !bytes.Contains(b, []byte("\r\n")) {
+		return b
+	}
+	return bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
+}
 
 // Select renders the built-in catalog for one native rule target.
 func Select(target adapterprotocol.SkillTarget) ([]File, error) {

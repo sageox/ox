@@ -47,6 +47,56 @@ func TestPendingRecord_NewCommitResetsAttempts(t *testing.T) {
 	require.Equal(t, 1, record.Attempts)
 }
 
+// TestPendingRecord_UnknownCommitOnErrorPathDoesNotResetAttempts covers the
+// class of bug where the automatic retry budget (MaxAutomaticConvergenceAttempts)
+// fails to bound anything: a convergence that errors before discovery
+// completes (e.g. a busy git lock) has no commit to report and previously
+// saved Snapshot.Commit == "", while a convergence that ran but reported
+// pending work saved the real commit. Keying attempts on the (path, commit)
+// pair let that legitimate gap in knowledge look like a changed commit and
+// silently reset Attempts to 1 on every alternation — so a repository stuck
+// alternating between the two never reached the cap and never stopped
+// auto-retrying every daemon tick.
+func TestPendingRecord_UnknownCommitOnErrorPathDoesNotResetAttempts(t *testing.T) {
+	project := t.TempDir()
+	errorPath := Report{Snapshot: Snapshot{Path: "/team", Commit: ""}}
+	pendingPath := Report{Snapshot: Snapshot{Path: "/team", Commit: "real-commit"}}
+
+	// First attempt: discovery fails before a commit is known.
+	record, err := SavePending(project, PendingRetry, errorPath, "lock busy")
+	require.NoError(t, err)
+	require.Equal(t, 1, record.Attempts)
+	require.Empty(t, record.TeamCommit)
+
+	// Second attempt: convergence ran and reported pending work at the real
+	// commit. This must count as attempt 2 of the SAME episode, not reset.
+	record, err = SavePending(project, PendingRetry, pendingPath, "still pending")
+	require.NoError(t, err)
+	require.Equal(t, 2, record.Attempts, "a newly-observed commit after an unknown one must not reset the budget")
+	require.Equal(t, "real-commit", record.TeamCommit)
+
+	// Third attempt: the daemon carries the last known commit forward on the
+	// error path (as internal/daemon/sync_team_skills.go does), so this also
+	// must not reset — and reaches the automatic budget cap.
+	record, err = SavePending(project, PendingRetry, Report{Snapshot: Snapshot{Path: "/team", Commit: "real-commit"}}, "lock busy again")
+	require.NoError(t, err)
+	require.Equal(t, MaxAutomaticConvergenceAttempts, record.Attempts)
+	require.False(t, AutomaticRetryAllowed(record, "/team"), "the automatic budget must be exhausted, not reset by the alternation")
+
+	// A fourth attempt at the same commit keeps counting past the cap rather
+	// than resetting — SavePending only records; the daemon decides not to
+	// retry via AutomaticRetryAllowed above.
+	record, err = SavePending(project, PendingRetry, pendingPath, "still pending")
+	require.NoError(t, err)
+	require.Equal(t, MaxAutomaticConvergenceAttempts+1, record.Attempts)
+	require.False(t, AutomaticRetryAllowed(record, "/team"))
+
+	// A genuinely new, non-empty commit is materially new work and resets the budget.
+	record, err = SavePending(project, PendingRetry, Report{Snapshot: Snapshot{Path: "/team", Commit: "new-commit"}}, "fresh work")
+	require.NoError(t, err)
+	require.Equal(t, 1, record.Attempts, "a real new commit must still reset the budget")
+}
+
 func TestAutomaticRetryAllowed_RequiresRetryableSameTeamWithinBudget(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -125,11 +175,11 @@ func TestFailureReason_CoversTypedFallbacks(t *testing.T) {
 	require.Equal(t, "pending: skill/deploy", FailureReason(Report{Outcomes: []Outcome{{
 		State: StatePending, Kind: KindSkill, Name: "deploy",
 	}}}))
-	require.Equal(t, "unsupported: tool/deploy", FailureReason(Report{Outcomes: []Outcome{{
-		State: StateUnsupported, Kind: KindTool, Name: "deploy", Required: true,
+	require.Equal(t, "unsupported: skill/deploy", FailureReason(Report{Outcomes: []Outcome{{
+		State: StateUnsupported, Kind: KindSkill, Name: "deploy", Required: true,
 	}}}))
 	require.Equal(t, "explicit detail", FailureReason(Report{Outcomes: []Outcome{{
-		State: StateUnsupported, Kind: KindTool, Name: "deploy", Required: true, Detail: "explicit detail",
+		State: StateUnsupported, Kind: KindSkill, Name: "deploy", Required: true, Detail: "explicit detail",
 	}}}))
 	require.Equal(t, "Team Context convergence is incomplete", FailureReason(Report{Outcomes: []Outcome{{
 		State: StateUnsupported, Required: false,
@@ -150,8 +200,4 @@ func TestWriteText_EmptyAndWriterFailures(t *testing.T) {
 	require.ErrorContains(t, err, "write failed")
 	err = WriteText(io.MultiWriter(convergenceFailWriter{}), Report{Outcomes: []Outcome{{Kind: KindRule, Name: "x"}}})
 	require.ErrorContains(t, err, "write failed")
-
-	retry := &RetryableError{Err: errors.New("busy")}
-	require.EqualError(t, retry, "busy")
-	require.ErrorIs(t, retry, retry.Err)
 }

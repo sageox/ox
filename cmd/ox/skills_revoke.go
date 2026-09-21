@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -28,7 +27,11 @@ remain installed.
 Revocation is all-or-nothing across the names in one invocation: a misspelled or
 unapproved name refuses the run before any approval changes. If cleanup cannot
 finish, the approval stays revoked and the command returns an error so the next
-reconcile can finish removing the installed content.`,
+reconcile can finish removing the installed content.
+
+This withdraws the whole approval. To keep a skill's instructions approved and
+withdraw only its bundled scripts, run ` + "`ox skills approve --allow-scripts=false <name>`" + `
+instead.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runSkillsRevoke,
 }
@@ -69,7 +72,8 @@ func executeRevocations(gitRoot string, names []string) (skillsRevokeOutput, err
 			return err
 		}
 
-		names = uniqueSortedNames(names)
+		names = dedupeNames(names)
+		sort.Strings(names)
 		approved := make(map[string]struct{}, len(store.Approvals))
 		for _, approval := range store.Approvals {
 			approved[approval.Name] = struct{}{}
@@ -103,19 +107,6 @@ func executeRevocations(gitRoot string, names []string) (skillsRevokeOutput, err
 	return output, err
 }
 
-func uniqueSortedNames(names []string) []string {
-	set := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		set[name] = struct{}{}
-	}
-	out := make([]string, 0, len(set))
-	for name := range set {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
-}
-
 func approvedNamesSuffix(approved map[string]struct{}) string {
 	if len(approved) == 0 {
 		return "; this repository has no Team Skill approvals"
@@ -130,9 +121,7 @@ func approvedNamesSuffix(approved map[string]struct{}) string {
 
 func emitRevocations(w io.Writer, output skillsRevokeOutput, asJSON bool) error {
 	if asJSON {
-		encoder := json.NewEncoder(w)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(output)
+		return encodeSkillsJSON(w, output)
 	}
 	for _, name := range output.Revoked {
 		fmt.Fprintf(w, "%s %s\n", cli.StyleSuccess.Render("revoked"), name)

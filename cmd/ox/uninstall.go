@@ -696,6 +696,10 @@ func cleanupAgentFiles(gitRoot string) error {
 				slog.Warn("failed to remove commands", "adapter", ea.Name(), "error", err)
 			}
 		}
+		// Teardown half of the rules-installer compatibility window: only a
+		// third-party protocol-v1 adapter still declares the capability, and it
+		// owns rule files ox's own reconciler never wrote. Scheduled removal in
+		// ox 0.18.0 — see the deprecation note on adapterprotocol.CapRulesInstaller.
 		if ea.HasCapability(adapterprotocol.CapRulesInstaller) {
 			if uninstallDryRun {
 				slog.Info("would remove rules", "adapter", ea.Name())
