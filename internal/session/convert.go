@@ -33,6 +33,7 @@ func ConvertRawEntries(rawEntries []adapters.RawEntry) []Entry {
 		entry := Entry{
 			Timestamp:  raw.Timestamp,
 			Content:    raw.Content,
+			CallID:     raw.CallID,
 			ToolName:   raw.ToolName,
 			ToolInput:  raw.ToolInput,
 			ToolOutput: raw.ToolOutput,

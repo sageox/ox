@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/prime"
@@ -618,6 +619,51 @@ func handleAfterTool(ctx *HookContext) error {
 		return nil // not recording for this agent, silent noop
 	}
 
+	// Serialize the read cursor and append transaction with the watcher and
+	// recovery. Reload after locking so concurrent hooks cannot replay a batch.
+	return fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+		return captureHookEntries(ctx, agentID, state.SessionPath, state.SessionID)
+	})
+}
+
+// captureHookEntries drains new entries under the raw.jsonl lock acquired by
+// the caller for expectedSessionPath. It reloads recording state itself, but
+// a stop/start cycle for this agent can swap in a new SessionPath between the
+// caller's read and this reload (StartRecording can immediately mint a fresh
+// session after a stale, incomplete stop). If that happens, the lock we're
+// holding is for the wrong raw.jsonl -- writing here would race whatever
+// legitimately holds the new session's lock. Skip this invocation instead;
+// the next hook call reloads state and locks the current session correctly.
+//
+// SessionPath alone is not a reliable generation check: it's minute-granular
+// (GenerateSessionName), so a stop immediately followed by a restart for the
+// same agent within the same minute mints an IDENTICAL path. expectedSessionID
+// is the durable per-recording identity minted once at StartRecording, so it
+// still distinguishes the two generations when the path collides; fall back
+// to the path comparison only for a pre-SessionID recording (empty on both
+// sides).
+func captureHookEntries(ctx *HookContext, agentID, expectedSessionPath, expectedSessionID string) error {
+	// The stop command sets this before waiting for the raw lock. A hook
+	// queued behind its final drain must never append to finalized content.
+	if session.HasExplicitStop(ctx.ProjectRoot, agentID) {
+		return nil
+	}
+	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
+	if err != nil || state == nil || state.StoppedAt != nil {
+		return err
+	}
+	changed := state.SessionPath != expectedSessionPath
+	if expectedSessionID != "" || state.SessionID != "" {
+		changed = state.SessionID != expectedSessionID
+	}
+	if changed {
+		slog.Debug("hook: afterTool session changed since lock acquired, skipping", "agentID", agentID, "lockedPath", expectedSessionPath, "currentPath", state.SessionPath, "lockedSessionID", expectedSessionID, "currentSessionID", state.SessionID)
+		return nil
+	}
+	if err := session.RecoverRawAppend(filepath.Join(state.SessionPath, "raw.jsonl"), state.SourceOffset); err != nil {
+		return err
+	}
+
 	// Track every afterTool invocation + its terminal reason so `ox session status`
 	// can distinguish a healthy idle session (status=ok) from a broken recording
 	// (status=session-file-not-found, adapter-missing, etc.) when EntryCount=0.
@@ -766,7 +812,16 @@ func handleAfterTool(ctx *HookContext) error {
 		}
 	}
 
-	if appendErr := appendRedactedEntries(rawPath, sessionEntries); appendErr != nil {
+	writer, writeErr := session.NewRawWriter(rawPath, ctx.ProjectRoot)
+	if writeErr != nil {
+		return writeErr
+	}
+	appendErr := writer.AppendRecordingBatch(filepath.Join(state.SessionPath, ".recording.json"), sessionEntries, newOffset)
+	closeErr := writer.Close()
+	if appendErr == nil {
+		appendErr = closeErr
+	}
+	if appendErr != nil {
 		slog.Info("hook: append entries failed", "agentID", agentID, "path", rawPath, "error", appendErr)
 		recordHookStatus("append-failed")
 		return nil // non-fatal
@@ -774,8 +829,6 @@ func handleAfterTool(ctx *HookContext) error {
 
 	now := time.Now().UTC()
 	_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
-		s.SourceOffset = newOffset
-		s.EntryCount += len(sessionEntries)
 		s.HookInvocations++
 		s.LastHookStatus = "ok"
 		s.LastHookAt = &now

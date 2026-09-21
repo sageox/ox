@@ -1,6 +1,8 @@
 package session
 
 import (
+	"encoding/json"
+	"path/filepath"
 	"strings"
 )
 
@@ -26,6 +28,11 @@ type CommandRedactionRule struct {
 	// Convention: "[REDACTED:credential-output:<short-name>]"
 	Slug string
 }
+
+// maxPendingCommandRedactions bounds unmatched credential calls, live and
+// restored alike. One constant: a checkpoint limit that drifted above the live
+// bound would restore more pending calls than capture would ever have kept.
+const maxPendingCommandRedactions = 4096
 
 // DefaultCommandRedactions returns the built-in allowlist of credential-
 // emitting commands whose output should be redacted wholesale. Adding a
@@ -59,7 +66,9 @@ func DefaultCommandRedactions() []CommandRedactionRule {
 // run CommandRedactor first (cheap prefix match, broad coverage), then
 // Redactor on whatever remains.
 type CommandRedactor struct {
-	rules []CommandRedactionRule
+	rules    []CommandRedactionRule
+	pending  map[string]string
+	overflow bool
 }
 
 // NewCommandRedactor returns a redactor with the default ruleset.
@@ -76,7 +85,50 @@ func NewCommandRedactorWithRules(rules []CommandRedactionRule) *CommandRedactor 
 // The match is on the START of the trimmed ToolInput so any flags or
 // extra args after the command don't defeat the prefix.
 func (c *CommandRedactor) matchRule(toolInput string) string {
-	trimmed := strings.TrimLeft(toolInput, " \t\n")
+	for _, command := range commandInputs(toolInput) {
+		if slug := c.matchCommand(command); slug != "" {
+			return slug
+		}
+	}
+	return ""
+}
+
+// Native shell tools encode commands either as text or argv. Inspect shell -c
+// scripts too; joining argv alone would leave the shell executable as a prefix.
+func commandInputs(toolInput string) []string {
+	commands := []string{toolInput}
+	var input struct {
+		Cmd     json.RawMessage `json:"cmd"`
+		Command json.RawMessage `json:"command"`
+	}
+	if json.Unmarshal([]byte(toolInput), &input) != nil {
+		return commands
+	}
+	for _, raw := range []json.RawMessage{input.Cmd, input.Command} {
+		var text string
+		if json.Unmarshal(raw, &text) == nil {
+			commands = append(commands, text)
+			continue
+		}
+		var argv []string
+		if json.Unmarshal(raw, &argv) != nil || len(argv) == 0 {
+			continue
+		}
+		commands = append(commands, strings.Join(argv, " "))
+		if len(argv) >= 3 {
+			switch filepath.Base(argv[0]) {
+			case "sh", "bash", "zsh", "dash", "ksh":
+				if argv[1] == "-c" || argv[1] == "-lc" {
+					commands = append(commands, argv[2])
+				}
+			}
+		}
+	}
+	return commands
+}
+
+func (c *CommandRedactor) matchCommand(command string) string {
+	trimmed := strings.TrimSpace(command)
 	for _, r := range c.rules {
 		if r.Prefix == "" {
 			continue
@@ -104,10 +156,30 @@ func (c *CommandRedactor) matchRule(toolInput string) string {
 // rule. Also clears Content for tool entries — some agents stash a copy
 // of the output there. Returns true if any redaction was applied.
 func (c *CommandRedactor) RedactEntry(entry *SessionEntry) bool {
-	if entry == nil || entry.ToolInput == "" {
+	if entry == nil {
 		return false
 	}
 	slug := c.matchRule(entry.ToolInput)
+	if entry.CallID != "" {
+		if slug != "" && entry.ToolOutput == "" {
+			if c.pending == nil {
+				c.pending = make(map[string]string)
+			}
+			// Only slugs are retained, never credential-bearing commands or output.
+			// Bound unmatched calls so corrupt history cannot consume unbounded memory.
+			if len(c.pending) >= maxPendingCommandRedactions {
+				c.overflow = true
+			} else {
+				c.pending[entry.CallID] = slug
+			}
+		}
+		if entry.ToolOutput != "" {
+			if known := c.pending[entry.CallID]; known != "" {
+				slug = known
+			}
+			delete(c.pending, entry.CallID)
+		}
+	}
 	if slug == "" {
 		return false
 	}

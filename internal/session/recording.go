@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sageox/ox/internal/fileutil"
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/paths"
@@ -24,6 +27,11 @@ var (
 
 	// ErrNoLedger is returned when session recording is attempted but no ledger is configured
 	ErrNoLedger = errors.New("no ledger configured for this project")
+
+	// ErrRecordingChanged is returned when the recording at a session path is no
+	// longer the one the caller loaded. Session names are minute-granular, so a
+	// recording restarted within the minute reuses the path of the one it replaced.
+	ErrRecordingChanged = errors.New("recording changed")
 )
 
 const recordingFile = ".recording.json"
@@ -101,9 +109,12 @@ type RecordingState struct {
 	Model          string `json:"model,omitempty"`           // LLM model for generic adapters where ReadMetadata returns nil
 	ParentPID      int    `json:"parent_pid,omitempty"`      // parent agent process ID for liveness detection
 	SourceOffset   int64  `json:"source_offset,omitempty"`   // byte offset in source file for incremental reading
-	StartOffset    int64  `json:"start_offset,omitempty"`    // source file byte offset when recording started (entries before this are pre-session)
-	Origin         string `json:"origin,omitempty"`          // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
-	CacheDir       string `json:"cache_dir,omitempty"`       // cache directory when recording was created (diagnostic breadcrumb)
+	// Committed with SourceOffset, so crash replay restores the same privacy state.
+	CommandRedactionVersion  int               `json:"command_redaction_version,omitempty"`
+	PendingCommandRedactions map[string]string `json:"pending_command_redactions,omitempty"`
+	StartOffset              int64             `json:"start_offset,omitempty"` // source file byte offset when recording started (entries before this are pre-session)
+	Origin                   string            `json:"origin,omitempty"`       // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
+	CacheDir                 string            `json:"cache_dir,omitempty"`    // cache directory when recording was created (diagnostic breadcrumb)
 
 	WatchMode string     `json:"watch_mode,omitempty"` // how entries are captured: "hook" (CLI-driven) or "tail" (daemon-driven)
 	StoppedAt *time.Time `json:"stopped_at,omitempty"` // set by ox session stop to signal daemon to finalize
@@ -232,6 +243,14 @@ func recordingStatePath(sessionPath string) string {
 }
 
 // SaveRecordingState persists recording state to the session folder.
+//
+// This is a whole-file write of the caller's copy and takes no lock, so it is
+// for CREATING a recording only. Once a recording is live, hooks and the watcher
+// commit the capture cursor and the pending credential-redaction checkpoint
+// under the state lock; saving a copy loaded before such a commit silently
+// reverts both -- the cursor regresses and a pending redaction is forgotten, so
+// the matching credential output is written unredacted. Change a live recording
+// through UpdateRecordingStateAt / UpdateRecordingStateForAgent instead.
 func SaveRecordingState(projectRoot string, state *RecordingState) error {
 	if projectRoot == "" {
 		return fmt.Errorf("%w: project root", ErrEmptyPath)
@@ -255,7 +274,7 @@ func SaveRecordingState(projectRoot string, state *RecordingState) error {
 
 	// TODO(server-side): move to server-side for MVP+1; client should not write to ledger directly.
 	statePath := recordingStatePath(state.SessionPath)
-	if err := os.WriteFile(statePath, data, 0600); err != nil {
+	if err := fileutil.AtomicWriteBytes(statePath, data, 0600); err != nil {
 		return fmt.Errorf("write recording state file=%s: %w", statePath, err)
 	}
 
@@ -423,11 +442,43 @@ func ClearRecordingStateForAgent(projectRoot, agentID string) error {
 	if state == nil {
 		return nil // idempotent: nothing to clear
 	}
-	statePath := recordingStatePath(state.SessionPath)
-	if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove recording state file=%s: %w", statePath, err)
+	return ClearRecordingStateAt(state.SessionPath, state.SessionID)
+}
+
+// ClearRecordingStateAt removes the recording sessionID stored under sessionPath
+// and no other. Finalizers call it while still holding the capture lock, naming
+// the recording they just processed: an agent lookup made after the lock is
+// released can find -- and delete -- a recording that replaced it in the
+// meantime. The path alone is not an identity either: session names are
+// minute-granular, so a recording restarted within the minute reuses it.
+//
+// The remove runs under the state lock so it cannot land between a concurrent
+// updater's read and its atomic write, which would bring the file straight back
+// as a ghost recording. Idempotent.
+func ClearRecordingStateAt(sessionPath, sessionID string) error {
+	if sessionPath == "" {
+		return fmt.Errorf("%w: session path", ErrEmptyPath)
 	}
-	return nil
+	statePath := recordingStatePath(sessionPath)
+	return fileutil.WithFileLock(context.Background(), statePath, func() error {
+		data, err := os.ReadFile(statePath)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read recording state file=%s: %w", statePath, err)
+		}
+		// An unparseable state identifies nothing and is cleared as before; a
+		// readable one naming another recording is not ours to remove.
+		var current RecordingState
+		if json.Unmarshal(data, &current) == nil && current.SessionID != sessionID {
+			return nil
+		}
+		if err := os.Remove(statePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove recording state file=%s: %w", statePath, err)
+		}
+		return nil
+	})
 }
 
 // AppendProducedPlan records a plan slug on the recording at sessionPath — the
@@ -466,27 +517,26 @@ func AppendProducedPlan(projectRoot, sessionPath, slug string) error {
 		return nil
 	}
 
+	// Read-modify-write under the state lock. "Reload right before writing"
+	// only narrows the window; a capture batch that commits its cursor and
+	// redaction checkpoint inside it would still be reverted.
 	statePath := recordingStatePath(sessionPath)
-	data, err := os.ReadFile(statePath)
+	err := MutateRecordingStateFile(statePath, func(state *RecordingState) error {
+		for _, existing := range state.ProducedPlans {
+			if existing == slug {
+				return nil // already recorded
+			}
+		}
+		state.ProducedPlans = append(state.ProducedPlans, slug)
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // recording already stopped — do NOT recreate it
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // recording already stopped — do NOT recreate it
-		}
-		return fmt.Errorf("read recording state file=%s: %w", statePath, err)
+		return fmt.Errorf("update recording state file=%s: %w", statePath, err)
 	}
-
-	var state RecordingState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return fmt.Errorf("parse recording state file=%s: %w", statePath, err)
-	}
-
-	for _, existing := range state.ProducedPlans {
-		if existing == slug {
-			return nil // already recorded
-		}
-	}
-	state.ProducedPlans = append(state.ProducedPlans, slug)
-	return SaveRecordingState(projectRoot, &state)
+	return nil
 }
 
 // ClearRecordingState removes the recording state file from the session folder.
@@ -1179,6 +1229,28 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	return state, nil
 }
 
+// UpdateRecordingStateAt applies updateFn to the recording sessionID stored under
+// sessionPath, as one read-modify-write under the state lock. Use it when the
+// caller already holds a loaded state, and pass that state's identity: the caller
+// may have been away for a while (a network signal, a prompt), and neither an
+// agent lookup nor the path alone says the recording is still the same one.
+//
+// A recording that has stopped returns an error satisfying
+// errors.Is(err, os.ErrNotExist) and is never recreated; one that was replaced
+// returns ErrRecordingChanged and is left untouched.
+func UpdateRecordingStateAt(sessionPath, sessionID string, updateFn func(*RecordingState)) error {
+	if sessionPath == "" {
+		return fmt.Errorf("%w: session path", ErrEmptyPath)
+	}
+	return MutateRecordingStateFile(recordingStatePath(sessionPath), func(current *RecordingState) error {
+		if current.SessionID != sessionID {
+			return ErrRecordingChanged
+		}
+		updateFn(current)
+		return nil
+	})
+}
+
 // UpdateRecordingStateForAgent updates recording state for a specific agent.
 // Safe for concurrent use: only touches this agent's .recording.json.
 func UpdateRecordingStateForAgent(projectRoot, agentID string, updateFn func(*RecordingState)) error {
@@ -1189,11 +1261,8 @@ func UpdateRecordingStateForAgent(projectRoot, agentID string, updateFn func(*Re
 	if state == nil {
 		return ErrNotRecording
 	}
-	updateFn(state)
-	if err := SaveRecordingState(projectRoot, state); err != nil {
-		return fmt.Errorf("save recording state: %w", err)
-	}
-	return nil
+	return MutateRecordingStateFile(recordingStatePath(state.SessionPath), func(current *RecordingState) error { updateFn(current); return nil })
+
 }
 
 // UpdateRecordingState updates and persists the recording state.
@@ -1208,12 +1277,10 @@ func UpdateRecordingState(projectRoot string, updateFn func(*RecordingState)) er
 		return ErrNotRecording
 	}
 
-	updateFn(state)
-
-	if err := SaveRecordingState(projectRoot, state); err != nil {
-		return fmt.Errorf("save recording state: %w", err)
-	}
-	return nil
+	return MutateRecordingStateFile(recordingStatePath(state.SessionPath), func(current *RecordingState) error {
+		updateFn(current)
+		return nil
+	})
 }
 
 // StopRecording ends an active recording session for a specific agent.
@@ -1266,4 +1333,28 @@ func FindParentSessionPath(projectRoot string) string {
 		return ""
 	}
 	return state.SessionPath
+}
+
+// MutateRecordingStateFile serializes lifecycle changes with batch appends.
+// Without this lock a resume can select a sequence while a paused batch is
+// being written, or a cursor update can erase a concurrently persisted pause.
+func MutateRecordingStateFile(path string, update func(*RecordingState) error) error {
+	return fileutil.WithFileLock(context.Background(), path, func() error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var state RecordingState
+		if err = json.Unmarshal(data, &state); err != nil {
+			return err
+		}
+		if err = update(&state); err != nil {
+			return err
+		}
+		data, err = json.Marshal(state)
+		if err != nil {
+			return err
+		}
+		return fileutil.AtomicWriteBytes(path, data, 0600)
+	})
 }

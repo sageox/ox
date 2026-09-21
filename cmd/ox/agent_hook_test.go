@@ -901,6 +901,46 @@ func TestAfterTool_NilMarkerSkipsGracefully(t *testing.T) {
 	assert.NoError(t, err, "handleAfterTool should noop gracefully with nil marker")
 }
 
+// TestCaptureHookEntries_SkipsOnSessionIDCollisionWithSamePath prevents a
+// stop immediately followed by a restart for the same agent within the same
+// UTC minute from mixing two recordings' entries. GenerateSessionName is
+// minute-granular, so the two generations can land on the IDENTICAL
+// SessionPath -- a path-only staleness check (the original fix for this
+// hook) cannot distinguish them. SessionID is minted once per StartRecording
+// and must be the tiebreaker.
+func TestCaptureHookEntries_SkipsOnSessionIDCollisionWithSamePath(t *testing.T) {
+	projectRoot, agentID, _ := setupHandleAfterToolTest(t)
+
+	original, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.NotEmpty(t, original.SessionID, "fixture recording must have a SessionID for this test to be meaningful")
+
+	// Simulate the restart: a new generation overwrites .recording.json at
+	// the SAME SessionPath (the minute-granular collision) with a fresh
+	// SessionID and a reset cursor.
+	restarted := *original
+	restarted.SessionID = original.SessionID + "-restarted"
+	restarted.SourceOffset = 0
+	restarted.HookInvocations = 0
+	require.NoError(t, session.SaveRecordingState(projectRoot, &restarted))
+
+	ctx := &HookContext{
+		Phase:       phaseAfterTool,
+		ProjectRoot: projectRoot,
+		Marker:      &SessionMarker{AgentID: agentID},
+	}
+
+	// Call with the ORIGINAL generation's path+SessionID, as if handleAfterTool
+	// had loaded it just before the restart raced in.
+	err = captureHookEntries(ctx, agentID, original.SessionPath, original.SessionID)
+	require.NoError(t, err, "a stale generation must be skipped silently, not errored")
+
+	current, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.Equal(t, restarted.SessionID, current.SessionID, "current generation must be untouched")
+	assert.Equal(t, 0, current.HookInvocations, "a skipped stale-generation call must not record a hook invocation against the new generation")
+}
+
 // readJSONLFile reads a JSONL file and returns parsed lines.
 func readJSONLFile(t *testing.T, path string) []map[string]any {
 	t.Helper()

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -494,4 +495,203 @@ func TestRawWriter_JSONLOutputIsValid(t *testing.T) {
 		err := json.Unmarshal([]byte(line), &got)
 		assert.NoError(t, err, "line %d is invalid JSON: %s", i, line)
 	}
+}
+
+// TestWriteEntriesWritesEveryEntryInOrder prevents a batch importer (e.g.
+// planning-history capture) from silently dropping or reordering entries
+// when handed a slice instead of calling WriteEntry one at a time.
+func TestWriteEntriesWritesEveryEntryInOrder(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raw.jsonl")
+	w, err := NewRawWriter(path, "")
+	require.NoError(t, err)
+	entries := []SessionEntry{
+		{Type: EntryTypeUser, Content: "first"},
+		{Type: EntryTypeUser, Content: "second"},
+		{Type: EntryTypeUser, Content: "third"},
+	}
+	require.NoError(t, w.WriteEntries(entries))
+	require.NoError(t, w.CloseAndSync())
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	require.Len(t, lines, 3)
+	for i, want := range []string{"first", "second", "third"} {
+		var got map[string]any
+		require.NoError(t, json.Unmarshal([]byte(lines[i]), &got))
+		require.Equal(t, want, got["content"])
+	}
+}
+
+// TestWriteEntriesStopsAtFirstError prevents a batch write from silently
+// swallowing a mid-batch failure (e.g. writer closed underneath it) — the
+// caller relies on the returned error to know it must reconcile partial
+// output rather than assume every entry landed.
+func TestWriteEntriesStopsAtFirstError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raw.jsonl")
+	w, err := NewRawWriter(path, "")
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	err = w.WriteEntries([]SessionEntry{{Type: EntryTypeUser, Content: "will fail"}})
+	require.ErrorContains(t, err, "already closed")
+}
+
+// TestApplyPatternToSliceRedactsSecretsInsideNestedArrays prevents
+// WriteRaw's layer-3 pass from missing credentials nested inside a JSON
+// array of objects (e.g. a planning-history "content" array of blocks) —
+// applyPatternToMap alone only recurses into map/slice VALUES, so the slice
+// branch is what makes an array of maps get walked at all.
+func TestApplyPatternToSliceRedactsSecretsInsideNestedArrays(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raw.jsonl")
+	w, err := NewRawWriter(path, "")
+	require.NoError(t, err)
+	data := map[string]any{
+		"blocks": []any{
+			map[string]any{"text": "unrelated"},
+			map[string]any{"text": "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH"},
+			[]any{"nested list value with sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH"},
+		},
+	}
+	require.NoError(t, w.WriteRaw(data))
+	require.NoError(t, w.CloseAndSync())
+
+	out, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NotContains(t, string(out), "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH")
+	require.Contains(t, string(out), "[REDACTED_OPENAI_PROJECT_KEY]")
+}
+
+// TestWriteRawRejectsNilWriterOrData prevents a nil receiver or nil payload
+// from panicking deep inside the redactor instead of surfacing a clear error
+// to the caller (mirrors the same guard already proven for WriteEntry).
+func TestWriteRawRejectsNilWriterOrData(t *testing.T) {
+	var nilWriter *RawWriter
+	require.ErrorContains(t, nilWriter.WriteRaw(map[string]any{"a": "b"}), "nil")
+
+	dir := t.TempDir()
+	w, err := NewRawWriter(filepath.Join(dir, "raw.jsonl"), "")
+	require.NoError(t, err)
+	require.ErrorContains(t, w.WriteRaw(nil), "nil data")
+
+	require.NoError(t, w.Close())
+	require.ErrorContains(t, w.WriteRaw(map[string]any{"a": "b"}), "already closed")
+}
+
+// TestCloseAndSyncReturnsSyncErrorButStillMarksClosed prevents a failed
+// fsync (e.g. disk error, or the fd was closed out from under the writer)
+// from leaving the writer in a state where a caller could keep writing to
+// (or double-close) an already-broken file descriptor.
+func TestCloseAndSyncReturnsSyncErrorButStillMarksClosed(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewRawWriter(filepath.Join(dir, "raw.jsonl"), "")
+	require.NoError(t, err)
+	// Close the underlying fd directly, bypassing w.closed, so the next
+	// Sync() call fails with "file already closed" instead of no-op'ing.
+	require.NoError(t, w.file.Close())
+
+	require.Error(t, w.CloseAndSync())
+	require.True(t, w.closed, "writer must be marked closed even when Sync fails")
+	// A second call must be a safe no-op, not a second attempt to close.
+	require.NoError(t, w.CloseAndSync())
+}
+
+// TestNewRawSnapshotWriterTruncatesExistingContent proves the
+// redact/regenerate rewrite path actually starts from empty — if it
+// appended instead of truncating, a redaction pass would leave the
+// original unredacted bytes in place ahead of the rewritten ones.
+func TestNewRawSnapshotWriterTruncatesExistingContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raw.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte("stale content that must not survive\n"), 0600))
+
+	w, err := NewRawSnapshotWriter(path, "")
+	require.NoError(t, err)
+	require.NoError(t, w.WriteEntry(&SessionEntry{Type: EntryTypeUser, Content: "fresh"}))
+	require.NoError(t, w.CloseAndSync())
+
+	out, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NotContains(t, string(out), "stale content")
+	require.Contains(t, string(out), "fresh")
+}
+
+// TestNewRawFileWriterSurfacesOpenFileError prevents a writer-construction
+// failure (e.g. parent directory doesn't exist) from being silently
+// swallowed — the caller must see the OpenFile error, not a usable-looking
+// writer that fails on the first WriteEntry instead.
+func TestNewRawFileWriterSurfacesOpenFileError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing-parent", "raw.jsonl")
+	_, err := NewRawWriter(path, "")
+	require.Error(t, err)
+}
+
+// TestNewRawWriterWithProjectRootLoadsCustomRedactionRules proves passing a
+// non-empty projectRoot actually routes through NewRedactorWithCustomRules
+// (not just the built-in NewRedactor), so a project's .sageox/REDACT.md
+// custom rule takes effect for a session recorded inside that project.
+func TestNewRawWriterWithProjectRootLoadsCustomRedactionRules(t *testing.T) {
+	projectRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(projectRoot, ".sageox"), 0755))
+	redactMD := "```redact\nregex \"custom-secret-[0-9]+\" -> [REDACTED_CUSTOM_TOKEN]\n```\n"
+	require.NoError(t, os.WriteFile(filepath.Join(projectRoot, ".sageox", "REDACT.md"), []byte(redactMD), 0600))
+
+	path := filepath.Join(t.TempDir(), "raw.jsonl")
+	w, err := NewRawWriter(path, projectRoot)
+	require.NoError(t, err)
+	require.NoError(t, w.WriteEntry(&SessionEntry{Type: EntryTypeUser, Content: "saw custom-secret-12345 in output"}))
+	require.NoError(t, w.CloseAndSync())
+
+	out, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NotContains(t, string(out), "custom-secret-12345")
+}
+
+// TestAsWriterBypassesRedactionStack documents and pins the asWriter
+// contract: bytes written through it reach the file completely unredacted.
+// If this ever changed silently, a caller relying on the documented bypass
+// for pre-redacted content could start double-processing or corrupting it.
+func TestAsWriterBypassesRedactionStack(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raw.jsonl")
+	w, err := NewRawWriter(path, "")
+	require.NoError(t, err)
+	_, err = w.asWriter().Write([]byte("AKIAIOSFODNN7EXAMPLE unredacted\n"))
+	require.NoError(t, err)
+	require.NoError(t, w.CloseAndSync())
+
+	out, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(out), "AKIAIOSFODNN7EXAMPLE", "asWriter must bypass redaction by contract")
+}
+
+// TestAppendRecordingBatchRejectsNonAdvancingCursor prevents a stale or
+// replayed batch from silently rewinding the capture cursor — per the
+// session-streaming dense-seq-fold invariant, the persisted SourceOffset
+// must be monotonic or replay reconstruction and live assignment can diverge.
+func TestAppendRecordingBatchRejectsNonAdvancingCursor(t *testing.T) {
+	dir := t.TempDir()
+	raw := filepath.Join(dir, "raw.jsonl")
+	statePath := filepath.Join(dir, ".recording.json")
+	require.NoError(t, fileutil.AtomicWriteJSON(statePath, &RecordingState{SessionPath: dir, SourceOffset: 100}, 0600))
+
+	w, err := NewRawWriter(raw, "")
+	require.NoError(t, err)
+	defer w.Close()
+
+	rawBefore, err := os.ReadFile(raw)
+	require.NoError(t, err)
+	stateBefore, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+
+	err = w.AppendRecordingBatch(statePath, []Entry{{Type: EntryTypeUser, Content: "x"}}, 50)
+	require.ErrorContains(t, err, "did not advance")
+
+	rawAfter, err := os.ReadFile(raw)
+	require.NoError(t, err)
+	stateAfter, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+	require.Equal(t, rawBefore, rawAfter, "rejected batch must not write any entries to raw.jsonl")
+	require.Equal(t, stateBefore, stateAfter, "rejected batch must not persist a new cursor to .recording.json")
 }

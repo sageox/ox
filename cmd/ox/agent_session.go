@@ -547,27 +547,29 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	var processResult *agentSessionResult
 	if state.SessionFile != "" {
 		processStart := time.Now()
-		if state.WatchMode == "tail" {
-			// IPC stop is advisory. Wait for the writer's file lock and reload
-			// its final cursor before draining, so an in-flight batch is not
-			// captured twice. A lock failure preserves the recording for retry.
-			err = fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
-				latest, loadErr := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
-				if loadErr != nil {
-					return loadErr
-				}
-				if latest == nil {
-					return session.ErrNotRecording
-				}
-				latest.SessionFile = state.SessionFile
-				state = latest
-				var processErr error
-				processResult, processErr = processAgentSession(projectRoot, state)
+		// Serialize with the raw.jsonl writer's file lock so processAgentSession
+		// (RecoverRawAppend + drain) never runs concurrently with a hook or
+		// watcher still appending a batch under the same lock — stop is
+		// advisory and a capture can be in flight when it fires.
+		err = fileutil.WithFileLock(context.Background(), filepath.Join(state.SessionPath, "raw.jsonl"), func() error {
+			latest, loadErr := reloadRecordingForFinalDrain(projectRoot, state)
+			if loadErr != nil {
+				return loadErr
+			}
+			state = latest
+			var processErr error
+			if processResult, processErr = processAgentSession(projectRoot, state); processErr != nil {
 				return processErr
-			})
-		} else {
-			processResult, err = processAgentSession(projectRoot, state)
-		}
+			}
+			// Clear before releasing the lock, and clear THIS recording: a hook
+			// queued on the lock re-reads the state once it gets in. Left in
+			// place, it would append a batch after the final drain that nothing
+			// will ever upload. See ClearRecordingStateAt.
+			if clearErr := session.ClearRecordingStateAt(state.SessionPath, state.SessionID); clearErr != nil {
+				return fmt.Errorf("finalize recording stop: %w", clearErr)
+			}
+			return nil
+		})
 		timing["process_ms"] = time.Since(processStart).Milliseconds()
 		if err != nil {
 			// set marker so future ox agent prime knows doctor is needed
@@ -595,8 +597,9 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// only clear recording state when processing succeeded or session was explicitly stopped
 	// with no data. Preserve state when session file discovery failed — it contains
 	// breadcrumbs (WorkspacePath, AdapterName, StartedAt) needed for recovery.
-	if processResult != nil || state.SessionFile == "" && state.AdapterName == "" {
-		if err := session.ClearRecordingStateForAgent(projectRoot, inst.AgentID); err != nil {
+	// A processed recording was already cleared under the capture lock above.
+	if processResult == nil && state.SessionFile == "" && state.AdapterName == "" {
+		if err := session.ClearRecordingStateAt(state.SessionPath, state.SessionID); err != nil {
 			_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			return fmt.Errorf("failed to finalize recording stop: %w", err)
 		}
@@ -1023,6 +1026,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// resulting commit will break LFS linkage and the daemon's anti-entropy
 	// will start clobbering. See the 2026-04-25 post-mortem (bd ox-4ncz).
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	if err := session.RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
+		return nil, err
+	}
 	hasIncrementalEntries := rawJSONLHasEntries(rawPath)
 
 	if hasIncrementalEntries {
@@ -2466,4 +2472,29 @@ func isGenericDropFileEmpty(state *session.RecordingState) bool {
 		return errors.Is(err, os.ErrNotExist)
 	}
 	return info.Size() == 0
+}
+
+// reloadRecordingForFinalDrain must run under the expected session's raw lock.
+// Hooks, like watchers, may commit a batch while stop waits for that lock.
+func reloadRecordingForFinalDrain(projectRoot string, expected *session.RecordingState) (*session.RecordingState, error) {
+	latest, err := session.LoadRecordingStateForAgent(projectRoot, expected.AgentID)
+	if err != nil {
+		return nil, err
+	}
+	if latest == nil {
+		return nil, session.ErrNotRecording
+	}
+	if latest.SessionPath != expected.SessionPath || latest.SessionID != expected.SessionID {
+		return nil, fmt.Errorf("recording changed while waiting to finalize")
+	}
+	// Stop may just have discovered a file that did not exist at recording
+	// start; nothing is persisted for it yet, so carry it over. A PERSISTED file
+	// is different: SourceOffset is a byte cursor into it, and a hook that
+	// rediscovered the source while we waited committed the two together.
+	// Overwriting only the file would aim that cursor at the wrong transcript
+	// and the drain would skip or tear entries -- the persisted pair wins.
+	if latest.SessionFile == "" {
+		latest.SessionFile = expected.SessionFile
+	}
+	return latest, nil
 }
