@@ -100,6 +100,24 @@ Sparse checkout needs no change: `.sageox/`, `agents/`, and `docs/` are already 
 
 **Costs.** `ox skills catalog | install | uninstall` are withdrawn before anyone could use them, so the only way to select catalog content is `ox packs`, which does not exist yet — there is a window in which `post-cutoff` ships in the binary and nothing can select it. A team that hand-edits a pack file loses that edit on the next update and must recover it from Team Context history.
 
+**The mechanism ships behind a flag.** Every `ox packs` entry point — the command, its
+sync leg, and any reconcile path that reads a pack file — must consult
+`flags.Get().PacksEnabled` and no-op when it reports false. It already gates the `ox
+sync` help text, which is why that help must not advertise a catalog this build cannot
+reach.
+
+The flag **defaults off** (`flags.Defaults()`), is overridable by `FEATURE_PACKS` for
+local work, and can be turned on centrally through remote settings — a rollout lever
+rather than a developer-only escape hatch. That asymmetry is deliberate: mature
+capabilities in that struct default *on*, and packs does not, because a selection model
+is the hardest feature to take back. Once a repository or a team records a choice,
+withdrawing the feature orphans the file that recorded it — exactly the situation
+`ox skills catalog | install | uninstall` created and this ADR is cleaning up. Landing
+the successor dark means the next partial merge cannot repeat it.
+
+Delete the flag once `ox packs` is complete and rolled out; a permanent flag is a
+permanent branch of untested behaviour.
+
 **Accepted risks.** Overwrite-on-update is only as forgiving as Team Context history is reachable; if a team never pulls, the pre-update content still exists but nobody is looking at it. `ox packs` must therefore say plainly, before it overwrites, which owned files were modified.
 
 ## Related decisions

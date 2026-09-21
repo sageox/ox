@@ -108,6 +108,7 @@ same prime fallback.
 | `audience` | no | `ai` \| `human` \| `both` | Default `ai`. Filters out human-only rules from agent context. |
 | `visibility` | no | `always` \| `indexed` \| `hidden` | Default `indexed`. See below. |
 | `status` | no | `active` \| `draft` \| `superseded-by:<other-name>` | Default `active`. |
+| `valid-through` | no | `YYYY-MM-DD` | Shelf life. Empty means evergreen. Parsed and reported, never enforced by deletion — see below. |
 | `from-discussion` | no | discussion id | Optional provenance link into `<team-context>/discussions/`. |
 
 ### Visibility tiers
@@ -115,6 +116,34 @@ same prime fallback.
 - **`always`** — full body is delivered every session, natively where possible and otherwise inline through `ox agent prime`. Reserve for hot, short, universally-applicable rules (security, escalation).
 - **`indexed`** (default, recommended) — only `name + description + path` appears in prime, unless `globs:` enables faithful native path activation. AI coworkers read indexed rules on demand.
 - **`hidden`** — not surfaced unless explicitly named. Use for drafts, archived rules, work-in-progress.
+
+### `valid-through:` — shelf life for knowledge that rots
+
+Most rules are evergreen: a convention about error wrapping does not expire. Some are
+not. A rule or skill that describes **the outside world** — a tool released after the
+models were trained, a vendor's current limits, a workaround for someone else's bug —
+stops being an advantage the moment the world moves, and an index full of entries nobody
+rechecks is an index nobody reads.
+
+```yaml
+valid-through: 2027-03-21
+```
+
+**An expired entry is reported, never withheld and never deleted.** A date is a prompt
+to re-verify or retire, and silently removing a team's published knowledge on a timer
+would be the same unexplained-disappearance failure the name guard exists to prevent: a
+teammate would watch a rule vanish with nothing, anywhere, saying it was ever there.
+
+Six months is a reasonable default for anything pegged to a fast-moving external tool.
+Pick a date you would actually want to be asked about.
+
+Two clocks are worth keeping distinct:
+
+- **A dated whole skill or rule** — the entire thing was only ever meant to bridge a gap,
+  and should surface for removal rather than quietly becoming furniture.
+- **A dated entry inside a skill** — the skill is evergreen but its `references/` rot
+  individually. ox does not read those; the skill's own body should tell an agent to
+  check them and say so when one has passed.
 
 ### One source, one delivery path
 
