@@ -42,6 +42,12 @@ import (
 // path. Accepts "1.2.3" and common suffixes ("1.2.3-rc1", "1.2.3-next").
 var versionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$`)
 
+// IsValidVersion reports whether an unprefixed release version is safe to use
+// in a release download URL.
+func IsValidVersion(version string) bool {
+	return versionRe.MatchString(version)
+}
+
 // ErrNotWritable is returned when the directory holding the ox binary cannot be
 // written to (e.g. /usr/local/bin owned by root). Callers should surface a hint
 // to re-run with elevated permissions rather than failing opaquely.
@@ -146,7 +152,7 @@ func ReplaceRunningBinary(ctx context.Context, cfg Config) error {
 	if cfg.Version == "" {
 		return errors.New("upgrade: empty target version")
 	}
-	if !versionRe.MatchString(cfg.Version) {
+	if !IsValidVersion(cfg.Version) {
 		return fmt.Errorf("upgrade: invalid target version %q", cfg.Version)
 	}
 

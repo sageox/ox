@@ -52,9 +52,19 @@ func TestValidateUpgradeTarget(t *testing.T) {
 		want   bool
 	}{
 		{installGoInstall, "v0.42.0", false},
+		{installGoInstall, "v0.42.0-rc.1", false},
+		{installGoInstall, "latest", true},
+		{installGoInstall, "v", true},
+		{installGoInstall, "main", true},
+		{installGoInstall, "v0.42", true},
 		// binary (self-replace) installs can now honor a pinned tag by
 		// downloading that release's tarball — no longer an error.
 		{installBinary, "v0.42.0", false},
+		{installBinary, "0.42.0", false},
+		{installBinary, "v0.42.0-rc.1", false},
+		{installBinary, "latest", true},
+		{installBinary, "v", true},
+		{installBinary, "../../release", true},
 		{installHomebrew, "v0.42.0", true},
 		{installSource, "v0.42.0", true},
 		{installBinary, "", false},
@@ -103,6 +113,10 @@ func TestUpgradePinnedTargetSelection(t *testing.T) {
 		{name: "homebrew pin while current", method: installHomebrew, target: "v0.43.0", wantStatus: "failed", wantMessage: "homebrew upgrades cannot safely honor a pinned release"},
 		{name: "homebrew pin while offline", method: installHomebrew, target: "v0.43.0", offline: true, wantStatus: "failed", wantMessage: "homebrew upgrades cannot safely honor a pinned release"},
 		{name: "go pin without cache", method: installGoInstall, target: "v0.43.0", wantStatus: "upgraded", wantNew: "0.43.0", wantInstall: true},
+		{name: "go floating target", method: installGoInstall, target: "latest", wantStatus: "failed", wantMessage: "--target must be a release version"},
+		{name: "go empty target version", method: installGoInstall, target: "v", wantStatus: "failed", wantMessage: "--target must be a release version"},
+		{name: "binary floating target", method: installBinary, target: "latest", wantStatus: "failed", wantMessage: "--target must be a release version"},
+		{name: "binary empty target version", method: installBinary, target: "v", wantStatus: "failed", wantMessage: "--target must be a release version"},
 		{name: "go pin while offline", method: installGoInstall, target: "v0.43.0", offline: true, wantStatus: "upgraded", wantNew: "0.43.0", wantInstall: true},
 		{name: "go pin with current cache", method: installGoInstall, cached: "v0.42.0", target: "v0.43.0", wantStatus: "upgraded", wantNew: "0.43.0", wantInstall: true},
 		{name: "go current pin without update", method: installGoInstall, target: "v0.42.0", wantStatus: "upgraded", wantNew: "0.42.0", wantInstall: true},
