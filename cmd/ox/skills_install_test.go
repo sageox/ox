@@ -219,6 +219,28 @@ func TestSkillsInstall_IsAllOrNothingOnABadName(t *testing.T) {
 	})
 }
 
+func TestSkillsInstall_NameCollisionDoesNotSelectOrHideLocalSkill(t *testing.T) {
+	repo := stageInstallRepo(t)
+	local := installedSkillDirPath(repo, catalogOptInSkill)
+	require.NoError(t, os.MkdirAll(local, 0o755))
+	manifest := filepath.Join(local, "SKILL.md")
+	mine := []byte("---\nname: post-cutoff\ndescription: mine\n---\n\nlocal research\n")
+	require.NoError(t, os.WriteFile(manifest, mine, 0o644))
+
+	_, err := runSkillsChange(t, skillsInstallCmd, catalogOptInSkill)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "conflicts with existing content")
+	require.NotContains(t, lockedNames(t, repo), catalogOptInSkill,
+		"a refused collision still committed the catalog selection")
+	data, readErr := os.ReadFile(manifest)
+	require.NoError(t, readErr)
+	require.Equal(t, mine, data, "a refused collision changed the local skill")
+	ignore, readErr := os.ReadFile(filepath.Join(repo, ".claude", ".gitignore"))
+	require.NoError(t, readErr)
+	require.NotContains(t, string(ignore), "skills/post-cutoff/",
+		"a refused collision hid the local skill from git")
+}
+
 // TestSkillsUninstall_NeverDeletesASkillOxDoesNotOwn.
 //
 // A hand-authored skill is the majority of what is in a real repository's skills

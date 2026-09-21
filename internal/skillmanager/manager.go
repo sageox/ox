@@ -247,6 +247,44 @@ func intersectDirs(names []string, want map[string]bool) []string {
 	return out
 }
 
+// unprefixedCatalogSkills returns only selected catalog names that need exact
+// ignore rules. Prefix-owned assets use stable globs; the committed on-ramp is
+// deliberately tracked. A name merely present in the catalog never appears here
+// unless this repository selected it.
+func unprefixedCatalogSkills(desired desiredLock) []string {
+	names := append([]string{}, desired.Names...)
+	if bundled, err := skills.BundleNames(desired.Bundles); err == nil {
+		names = append(names, bundled...)
+	}
+	var exact []string
+	for _, name := range sortedUnique(names) {
+		if name != CommittedOnRamp && skills.IsKnown(name) && !IsReclaimableName(name) {
+			exact = append(exact, name)
+		}
+	}
+	return exact
+}
+
+// ignoreFilesForApply keeps exact protection around an unprefixed catalog skill
+// until its removal finishes. desiredOnly is used afterwards to retire obsolete
+// exact rules, so an unselected catalog name immediately returns to user space.
+func (plan *ReconcilePlan) ignoreFilesForApply(desiredOnly bool) []ScopedIgnoreFile {
+	exact := unprefixedCatalogSkills(plan.nextLock.Desired)
+	if !desiredOnly {
+		for _, action := range plan.Removes {
+			parts := strings.Split(filepath.ToSlash(action.Path), "/")
+			for i := 0; i+1 < len(parts); i++ {
+				name := parts[i+1]
+				if parts[i] == "skills" && skills.IsKnown(name) && name != CommittedOnRamp && !IsReclaimableName(name) {
+					exact = append(exact, name)
+					break
+				}
+			}
+		}
+	}
+	return scopedIgnoreFiles(sortedUnique(exact))
+}
+
 // WrittenPaths returns repository-relative files created or updated by Apply.
 func (plan *ReconcilePlan) WrittenPaths() []string {
 	return actionPaths(plan.Creates, plan.Updates)
@@ -700,18 +738,12 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 					// then permanent silent drift that no teammate can see and ox can
 					// never repair.
 					//
-					// The predicate is IsReclaimableName, NOT IsReservedName, and the
-					// difference is load-bearing. Reserved-ness also covers unprefixed
-					// catalog names like "post-cutoff", because ox does write and
-					// gitignore those. But an unprefixed name carries no namespace signal
+					// The predicate is IsReclaimableName, never catalog membership. An
+					// unprefixed name such as "post-cutoff" carries no namespace signal
 					// whatsoever — it names what the skill IS, and a repository may
-					// already hold a hand-authored skill at that exact path. Reclaiming
-					// on that basis destroys the only copy of someone's work, reports
-					// nothing, and hides the wreckage behind the ignore entry ox just
-					// wrote. Those names earn ownership only from the three recorded
-					// claims checked directly above — lockfile digest, recovery journal,
-					// legacy stamp — and a same-name stranger falls through to the
-					// conflict-and-preserve branch below.
+					// already hold a hand-authored skill at that exact path. Such names
+					// earn ownership only from the three recorded claims checked directly
+					// above — lockfile digest, recovery journal, or legacy stamp.
 					//
 					// The reclaim keys on skill.Name — ox's OWN catalog name, which always
 					// satisfies the predicate — so on a case-insensitive filesystem (macOS
@@ -884,6 +916,18 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 // the lockfile is committed last. The journal makes old and new action digests
 // valid recovery states if the process exits between those steps.
 func Apply(plan *ReconcilePlan) error {
+	return apply(plan, true)
+}
+
+// applyAutomatic applies only machine-local projection changes. Automatic
+// callers run at session start and from daemon ticks, where changing a tracked
+// .gitignore or selection lock is surprising repository churn. Explicit
+// lifecycle commands continue to use Apply, which owns repository setup.
+func applyAutomatic(plan *ReconcilePlan) error {
+	return apply(plan, false)
+}
+
+func apply(plan *ReconcilePlan, repairTrackedSetup bool) error {
 	if plan == nil {
 		return fmt.Errorf("nil skill reconcile plan")
 	}
@@ -910,11 +954,23 @@ func Apply(plan *ReconcilePlan) error {
 	// already current can still be missing the ignore file, and that is exactly the
 	// state that quietly commits vendor files.
 	//
-	// Best-effort. A repository that cannot take the ignore block still gets its
-	// skills; failing the whole reconcile over it would be a worse trade.
-	_, unprotected, err := EnsureScopedIgnoreFilesForDirs(plan.repoRoot, plan.agentDirs())
-	if err != nil {
-		slog.Debug("skills: could not write ox ignore rules", "repo", plan.repoRoot, "error", err)
+	// Repair is best-effort when no file will be materialized. For a target ox is
+	// about to write, the proof below is mandatory.
+	var unprotected []string
+	ignoreFiles := plan.ignoreFilesForApply(false)
+	if repairTrackedSetup {
+		_, unprotected, err = ensureScopedIgnoreFilesIn(plan.repoRoot, plan.agentDirs(), ignoreFiles)
+		if err != nil {
+			slog.Debug("skills: could not write ox ignore rules", "repo", plan.repoRoot, "error", err)
+		}
+	} else {
+		if plan.lockChanged {
+			return fmt.Errorf("automatic skill reconcile requires a tracked selection update; run `ox doctor`")
+		}
+		unprotected, err = unprotectedScopedIgnoreDirs(plan.repoRoot, plan.materializingDirs(), ignoreFiles)
+		if err != nil {
+			return err
+		}
 	}
 	// Best-effort ONLY where nothing is being materialized. If ox is about to write
 	// reserved-prefix files into a directory it could not protect — a symlinked
@@ -998,6 +1054,13 @@ func Apply(plan *ReconcilePlan) error {
 		}
 		if err := atomicWriteInRoot(repo, lockRelativePath, lockBytes, 0o644); err != nil {
 			return fmt.Errorf("write skills lockfile: %w", err)
+		}
+	}
+	if repairTrackedSetup {
+		// Remove exact rules whose selection was removed only after the protected
+		// files are gone. Failure is non-fatal and visible to doctor as stale setup.
+		if _, _, cleanupErr := ensureScopedIgnoreFilesIn(plan.repoRoot, plan.agentDirs(), plan.ignoreFilesForApply(true)); cleanupErr != nil {
+			slog.Debug("skills: could not retire obsolete ox ignore rules", "repo", plan.repoRoot, "error", cleanupErr)
 		}
 	}
 	if err := removeRootFile(repo, journalRelativePath); err != nil && !os.IsNotExist(err) {
@@ -1121,7 +1184,7 @@ func ReconcileUpdateNonBlocking(repoRoot, version string, update DesiredUpdate) 
 		if err != nil {
 			return err
 		}
-		return Apply(plan)
+		return applyAutomatic(plan)
 	})
 	var timeout *fileutil.ErrLockTimeout
 	if errors.As(err, &timeout) {
@@ -1347,15 +1410,14 @@ func selectDesiredSkills(version string, desired DesiredSkills) ([]skills.Skill,
 // `want` is derived from, so digests, the lockfile, and the journal all agree and
 // no drift is manufactured.
 //
-// Scope is deliberately the narrowest that closes the gap: reserved but NOT
-// reclaimable. Prefixed skills gain nothing from a stamp, and CommittedOnRamp is
-// excluded by IsReservedName already — it is TRACKED, and cmd/ox compares it
-// byte-for-byte against the canonical manifest during migration, which a stamp
-// would break.
+// Scope is deliberately the narrowest that closes the gap: catalog-known but
+// outside every reclaimable namespace. Prefixed skills gain nothing from a
+// stamp, and CommittedOnRamp is tracked, so stamping it would break migration's
+// byte-for-byte comparison with the canonical manifest.
 func markUnprefixedOwnership(selected []skills.Skill) []skills.Skill {
 	for i := range selected {
 		skill := &selected[i]
-		if IsReclaimableName(skill.Name) || !IsReservedName(skill.Name) {
+		if IsReclaimableName(skill.Name) || skill.Name == CommittedOnRamp || !skills.IsKnown(skill.Name) {
 			continue
 		}
 		for j := range skill.Files {

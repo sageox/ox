@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/sageox/agentx"
 )
 
 // gitIgnores asks git itself whether a path is ignored.
@@ -179,6 +181,29 @@ func TestIsReservedManagedPath_OwnershipBoundary(t *testing.T) {
 		if got != c.reserved {
 			t.Errorf("%s: got reserved=%v want %v (%s)", c.rel, got, c.reserved, c.why)
 		}
+	}
+}
+
+func TestIsReservedManagedPath_UnprefixedInstallNeedsVerifiedOwnership(t *testing.T) {
+	root := t.TempDir()
+	rel := ".claude/skills/post-cutoff/SKILL.md"
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	preamble := []byte("---\nname: post-cutoff\ndescription: curated facts\n---\n")
+	owned := append(preamble, agentx.StampedContent([]byte("\nmanaged body\n"), "1.0.0", "ox")...)
+	if err := os.WriteFile(path, owned, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !isReservedManagedPath(root, path) {
+		t.Fatal("init would force-stage an unprefixed skill whose ownership stamp verifies")
+	}
+	if err := os.WriteFile(path, append(preamble, []byte("\nlocal body\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if isReservedManagedPath(root, path) {
+		t.Fatal("a catalog name alone hid a local skill from staging")
 	}
 }
 

@@ -6,10 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
-	"strings"
 
-	"github.com/sageox/ox/extensions/skills"
 	"github.com/sageox/ox/internal/sageoxignore"
 )
 
@@ -43,6 +40,14 @@ type ScopedIgnoreFile struct {
 // and it means the team-sync release never has to touch a customer's ignore file
 // again — one fewer commit into somebody's repository, forever.
 func ScopedIgnoreFiles() []ScopedIgnoreFile {
+	return scopedIgnoreFiles(nil)
+}
+
+// scopedIgnoreFiles adds exact rules only for unprefixed catalog skills this
+// repository actually selected. Catalog availability is not ownership: putting
+// every known name here would hide an unrelated local skill before the coworker
+// selected anything.
+func scopedIgnoreFiles(exactSkills []string) []ScopedIgnoreFile {
 	skillGlob := "skills/" + CLIPrefix + "*/"
 	teamSkillGlob := "skills/" + TeamPrefix + "*/"
 	teamRuleGlob := "rules/" + TeamPrefix + "*"
@@ -54,19 +59,10 @@ func ScopedIgnoreFiles() []ScopedIgnoreFile {
 	ruleExact := "rules/" + CLIBase + ".md"
 	ruleGlob := "rules/" + CLIPrefix + "*"
 
-	// Catalog skills outside every prefix need an explicit line: a glob cannot
-	// reach them, and without one `ox skills install` drops untracked vendor files
-	// into the customer's git status that the reconciler can never reclaim.
-	var exactSkills []string
-	for _, bundle := range skills.Catalog {
-		for _, name := range bundle.SkillIDs {
-			if name == CommittedOnRamp || strings.HasPrefix(name, CLIPrefix) || strings.HasPrefix(name, TeamPrefix) {
-				continue
-			}
-			exactSkills = append(exactSkills, "skills/"+name+"/")
-		}
+	exactEntries := make([]string, 0, len(exactSkills))
+	for _, name := range sortedUnique(exactSkills) {
+		exactEntries = append(exactEntries, "skills/"+name+"/")
 	}
-	sort.Strings(exactSkills)
 
 	return []ScopedIgnoreFile{
 		{Dir: ".claude", Entries: append([]string{
@@ -76,8 +72,8 @@ func ScopedIgnoreFiles() []ScopedIgnoreFile {
 			// the retirement sweep reaches it.
 			"commands/" + CLIPrefix + "*",
 			teamSkillGlob, teamRuleGlob,
-		}, exactSkills...)},
-		{Dir: ".agents", Entries: append([]string{skillGlob, teamSkillGlob}, exactSkills...)},
+		}, exactEntries...)},
+		{Dir: ".agents", Entries: append([]string{skillGlob, teamSkillGlob}, exactEntries...)},
 		{Dir: ".factory", Entries: []string{ruleExact, ruleGlob, teamRuleGlob}},
 	}
 }
@@ -101,7 +97,16 @@ type IgnoreFileResult struct {
 }
 
 func EnsureScopedIgnoreFiles(repoRoot string) ([]IgnoreFileResult, error) {
-	written, _, err := ensureScopedIgnoreFilesIn(repoRoot, nil)
+	desired, _, err := LoadDesired(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	files := scopedIgnoreFiles(unprefixedCatalogSkills(desiredLock{
+		Bundles: bundleIDs(desired.Bundles),
+		Names:   desired.Names,
+		Targets: desired.Targets,
+	}))
+	written, _, err := ensureScopedIgnoreFilesIn(repoRoot, nil, files)
 	return written, err
 }
 
@@ -120,10 +125,10 @@ func EnsureScopedIgnoreFiles(repoRoot string) ([]IgnoreFileResult, error) {
 // NOT proceed — the files would land visible to git with no rule hiding them,
 // which is the exact state that puts vendor files in a customer's pull request.
 func EnsureScopedIgnoreFilesForDirs(repoRoot string, force map[string]bool) ([]IgnoreFileResult, []string, error) {
-	return ensureScopedIgnoreFilesIn(repoRoot, force)
+	return ensureScopedIgnoreFilesIn(repoRoot, force, ScopedIgnoreFiles())
 }
 
-func ensureScopedIgnoreFilesIn(repoRoot string, force map[string]bool) ([]IgnoreFileResult, []string, error) {
+func ensureScopedIgnoreFilesIn(repoRoot string, force map[string]bool, files []ScopedIgnoreFile) ([]IgnoreFileResult, []string, error) {
 	// Anchor every operation to the repository root.
 	//
 	// Checking a path with Lstat and then writing it by path leaves a window in
@@ -138,7 +143,7 @@ func ensureScopedIgnoreFilesIn(repoRoot string, force map[string]bool) ([]Ignore
 
 	var written []IgnoreFileResult
 	var unprotected []string
-	for _, f := range ScopedIgnoreFiles() {
+	for _, f := range files {
 		// Lstat, not Stat: Stat follows symlinks, so a repository that makes an
 		// agent directory a symlink could steer ox into writing outside repoRoot.
 		info, err := root.Lstat(f.Dir)
@@ -183,6 +188,41 @@ func ensureScopedIgnoreFilesIn(repoRoot string, force map[string]bool) ([]Ignore
 		}
 	}
 	return written, unprotected, nil
+}
+
+// unprotectedScopedIgnoreDirs inspects, but never repairs, the managed ignore
+// policy for required agent directories. It is intentionally used by automatic
+// reconciliation: session start and daemon ticks may update machine-local,
+// gitignored projections, but they must never create a tracked repository diff.
+func unprotectedScopedIgnoreDirs(repoRoot string, required map[string]bool, files []ScopedIgnoreFile) ([]string, error) {
+	root, err := os.OpenRoot(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("open repository root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	var unprotected []string
+	for _, f := range files {
+		if !required[f.Dir] {
+			continue
+		}
+		info, statErr := root.Lstat(f.Dir)
+		if statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			unprotected = append(unprotected, f.Dir)
+			continue
+		}
+		name := path.Join(f.Dir, ".gitignore")
+		info, statErr = root.Lstat(name)
+		if statErr != nil || !info.Mode().IsRegular() {
+			unprotected = append(unprotected, f.Dir)
+			continue
+		}
+		data, readErr := root.ReadFile(name)
+		if readErr != nil || !sageoxignore.HasManagedBlock(data, f.Entries) {
+			unprotected = append(unprotected, f.Dir)
+		}
+	}
+	return unprotected, nil
 }
 
 // IsManagedOnlyScopedIgnore reports whether rel names one of the scoped ignore

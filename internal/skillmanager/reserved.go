@@ -1,10 +1,6 @@
 package skillmanager
 
-import (
-	"strings"
-
-	"github.com/sageox/ox/extensions/skills"
-)
+import "strings"
 
 // Reserved namespaces. These three strings are the whole ownership contract, so
 // they live in one place: the installer, the ignore-file writer, the doctor
@@ -36,12 +32,12 @@ const (
 	CommittedOnRamp = "sageox"
 )
 
-// IsReservedName reports whether a skill/rule/command basename is one ox ships.
+// IsReservedName reports whether a skill/rule/command basename belongs to an
+// ox-owned namespace.
 //
-// This answers the REPORTING and IGNORING question: "does ox write this name, so
-// git should not see it and `ox skills list` should attribute it to ox?" It is
-// deliberately the wider of the two predicates in this file, because being wrong
-// about it costs a stray line in `git status`, not a lost file.
+// This answers the name-only REPORTING and IGNORING question. Unprefixed catalog
+// entries are deliberately absent: availability is not ownership. They need a
+// committed selection plus an exact ignore rule, or a verified in-band stamp.
 //
 // It is NOT the ownership predicate. Anything that decides whether ox may
 // OVERWRITE bytes it has no record of writing must call IsReclaimableName
@@ -57,20 +53,16 @@ func IsReservedName(name string) bool {
 	name = strings.TrimSuffix(name, ".md")
 	return name == CLIBase ||
 		strings.HasPrefix(name, CLIPrefix) ||
-		strings.HasPrefix(name, TeamPrefix) ||
-		isUnprefixedCatalogSkill(name)
+		strings.HasPrefix(name, TeamPrefix)
 }
 
 // IsReclaimableName reports whether a name BY ITSELF is enough for ox to claim a
 // skill directory it has no record of ever writing.
 //
-// This is strictly narrower than IsReservedName, and the gap between them is the
-// entire point — do not "simplify" them back into one. IsReservedName answers a
-// harmless question (write it, hide it from git, attribute it in a listing). This
-// one answers a destructive question: may ox overwrite a file the user wrote, on
-// the strength of the name alone, inside a directory it has just gitignored so
-// the loss leaves no trace? Handing the destructive answer to every caller that
-// only needed the harmless one is how hand-authored work disappears.
+// It intentionally remains a separate predicate from IsReservedName even while
+// their namespace sets match: this one authorizes destructive overwrite, while
+// the other classifies a path. Future reporting exceptions must not silently
+// widen the destructive boundary again.
 //
 // Only the PREFIXED namespaces qualify. "ox-cli-" and "sageox-team-" are
 // namespaces ox declared and told people to stay out of, so a directory wearing
@@ -92,26 +84,4 @@ func IsReclaimableName(name string) bool {
 	return name == CLIBase ||
 		strings.HasPrefix(name, CLIPrefix) ||
 		strings.HasPrefix(name, TeamPrefix)
-}
-
-// isUnprefixedCatalogSkill covers catalog skills that carry none of the prefixes
-// above. It widens reserved-ness only — gitignore entries, the migration sweep,
-// provenance reporting — and never ownership; IsReclaimableName above is where
-// that line is drawn and why.
-//
-// Curated knowledge skills are named for what they are ("post-cutoff"),
-// not for the binary that ships them: "ox-cli-" reads as a CLI relay and, worse,
-// survives a --team publish as "sageox-team-ox-cli-post-cutoff".
-//
-// The prefixes remain the contract for everything that CAN wear one — a prefix
-// costs no ignore-file churn when the next skill lands, and an explicit name does.
-// This is the narrow exception, and it is derived from the embedded catalog rather
-// than hand-listed so the two can never disagree.
-//
-// CommittedOnRamp is excluded: it is ox-authored but deliberately tracked.
-func isUnprefixedCatalogSkill(name string) bool {
-	if name == "" || name == CommittedOnRamp {
-		return false
-	}
-	return skills.IsKnown(name)
 }

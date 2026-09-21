@@ -8,6 +8,7 @@ import (
 	"testing"
 	"unicode"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/stretchr/testify/require"
 )
@@ -37,9 +38,9 @@ func TestCollectInstalledSkills_ClassifiesEveryProvenance(t *testing.T) {
 	writeSkillDir(t, repo, root, skillmanager.CommittedOnRamp, manifestWithDescription("sageox", "the on-ramp"))
 	writeSkillDir(t, repo, root, skillmanager.TeamPrefix+"deploy", manifestWithDescription("sageox-team-deploy", "how we deploy"))
 	writeSkillDir(t, repo, root, "my-own-skill", manifestWithDescription("my-own-skill", "mine, hand written"))
-	// Shipped by ox in the opt-in bundle, and carrying NO reserved prefix. Naming
-	// alone cannot classify it, which is the whole reason skillProvenance consults
-	// the catalog.
+	// Shipped by ox in the opt-in bundle, but carrying NO ownership evidence.
+	// Catalog membership is availability, not provenance: this is deliberately a
+	// local skill until a verified install stamp proves ox wrote these bytes.
 	writeSkillDir(t, repo, root, catalogOptInSkill, manifestWithDescription(catalogOptInSkill, "curated facts"))
 
 	got := collectInstalledSkills(repo, []string{root})
@@ -54,12 +55,30 @@ func TestCollectInstalledSkills_ClassifiesEveryProvenance(t *testing.T) {
 		"the committed on-ramp is deliberately unprefixed; a prefix-only rule files ox's own file under local")
 	require.Equal(t, provenanceTeam, byName[skillmanager.TeamPrefix+"deploy"].Provenance)
 	require.Equal(t, provenanceLocal, byName["my-own-skill"].Provenance)
-	require.Equal(t, provenanceOx, byName[catalogOptInSkill].Provenance,
-		"a catalog skill with no reserved prefix was reported as the human's own work")
+	require.Equal(t, provenanceLocal, byName[catalogOptInSkill].Provenance,
+		"a catalog name alone claimed a hand-authored skill")
 
 	require.Equal(t, "mine, hand written", byName["my-own-skill"].Description,
 		"the description column is empty, so a reader cannot tell what a local skill is for")
 	require.Empty(t, got.Problems)
+}
+
+// TestCollectInstalledSkills_UnprefixedOxSkillNeedsOwnershipEvidence proves the
+// other side of the catalog-name boundary: an older repository-scoped install is
+// still attributable after local state is lost because its verified in-band
+// stamp proves who wrote the bytes.
+func TestCollectInstalledSkills_UnprefixedOxSkillNeedsOwnershipEvidence(t *testing.T) {
+	repo := t.TempDir()
+	const root = ".agents/skills"
+	preamble := "---\nname: post-cutoff\ndescription: curated facts\n---\n"
+	body := []byte("\nmanaged body\n")
+	manifest := preamble + string(agentx.StampedContent(body, "0.16.0", "ox"))
+	writeSkillDir(t, repo, root, catalogOptInSkill, manifest)
+
+	got := collectInstalledSkills(repo, []string{root})
+
+	require.Len(t, got.Skills, 1)
+	require.Equal(t, provenanceOx, got.Skills[0].Provenance)
 }
 
 // TestCollectInstalledSkills_OneSkillInTwoRootsIsOneRow: a repo wired to both

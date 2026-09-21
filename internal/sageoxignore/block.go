@@ -206,3 +206,16 @@ func findBlock(content string) (begin, end int, ok bool) {
 func IsManagedOnly(content []byte, entries []string) bool {
 	return string(content) == renderBlock(entries)
 }
+
+// HasManagedBlock reports whether content contains a well-formed ox-managed
+// block with exactly entries. Bytes outside the block belong to the user and do
+// not affect the answer.
+//
+// This is the read-only counterpart to EnsureBlock. Session-start and daemon
+// reconciliation use it to prove that already-committed ignore policy protects
+// a materialization target without rewriting a tracked file themselves.
+func HasManagedBlock(content []byte, entries []string) bool {
+	text := string(content)
+	begin, end, ok := findBlock(text)
+	return ok && text[begin:end] == renderBlock(entries)
+}

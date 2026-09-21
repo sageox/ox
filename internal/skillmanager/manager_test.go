@@ -1043,6 +1043,14 @@ func TestReconcileUpdateNonBlocking_DoesTheWorkWhenUncontended(t *testing.T) {
 	repo := t.TempDir()
 	target := sharedTarget()
 	targets := []adapterprotocol.SkillTarget{target}
+	initial, err := ReconcileUpdate(repo, "1.0.0",
+		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return DefaultDesired(targets), targets, nil
+		})
+	require.NoError(t, err)
+	require.NotEmpty(t, initial.WrittenPaths())
+	missing := filepath.Join(repo, filepath.FromSlash(initial.WrittenPaths()[0]))
+	require.NoError(t, os.Remove(missing))
 
 	plan, err := ReconcileUpdateNonBlocking(repo, "1.0.0",
 		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
@@ -1050,9 +1058,25 @@ func TestReconcileUpdateNonBlocking_DoesTheWorkWhenUncontended(t *testing.T) {
 		})
 	require.NoError(t, err, "an uncontended reconcile must not report a timeout")
 	require.NotNil(t, plan)
+	require.FileExists(t, missing, "automatic reconcile did not restore the gitignored projection")
 
 	_, err = os.Stat(filepath.Join(repo, ".agents", ".gitignore"))
 	require.NoError(t, err, "the ignore rule must exist beside anything materialized")
+}
+
+func TestReconcileUpdateNonBlocking_DoesNotCreateTrackedSetup(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+
+	_, err := ReconcileUpdateNonBlocking(repo, "1.0.0",
+		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return DefaultDesired(targets), targets, nil
+		})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "tracked selection update")
+	_, statErr := os.Stat(filepath.Join(repo, ".agents"))
+	require.True(t, os.IsNotExist(statErr), "automatic reconcile created tracked repository setup")
 }
 
 // TestReconcileUpdateNonBlocking_YieldsRatherThanStallingASession is the whole
@@ -1635,6 +1659,36 @@ func installedPostCutoff(t *testing.T) (string, DesiredSkills, []adapterprotocol
 	require.FileExists(t, filepath.Join(repo, ".agents", "skills", "post-cutoff", "SKILL.md"),
 		"precondition: the skill must be installed before local state can be lost")
 	return repo, desired, targets
+}
+
+func TestApply_ExactIgnoreFollowsUnprefixedSelection(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	desired := DesiredSkills{Names: []string{"post-cutoff"}, Targets: []string{target.Key}}
+
+	plan, err := Plan(repo, "1.0.0", desired, targets)
+	require.NoError(t, err)
+	require.NoError(t, Apply(plan))
+	ignore := filepath.Join(repo, ".agents", ".gitignore")
+	data, err := os.ReadFile(ignore)
+	require.NoError(t, err)
+	require.Contains(t, string(data), "skills/post-cutoff/")
+	_, err = EnsureScopedIgnoreFiles(repo)
+	require.NoError(t, err)
+	data, err = os.ReadFile(ignore)
+	require.NoError(t, err)
+	require.Contains(t, string(data), "skills/post-cutoff/",
+		"doctor-style ignore repair forgot the repository's selected exact names")
+
+	plan, err = Plan(repo, "1.0.0", DesiredSkills{Targets: []string{target.Key}}, targets)
+	require.NoError(t, err)
+	require.NoError(t, Apply(plan))
+	data, err = os.ReadFile(ignore)
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "skills/post-cutoff/",
+		"removing the selection left an ordinary local name globally hidden")
+	require.NoDirExists(t, filepath.Join(repo, ".agents", "skills", "post-cutoff"))
 }
 
 // TestPlan_InstalledCatalogSkillSurvivesLocalStateLoss is the durability proof.

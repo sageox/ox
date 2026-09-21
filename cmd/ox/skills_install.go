@@ -225,10 +225,20 @@ func installCatalogSkills(repoRoot string, names []string) (skillsChangeOutput, 
 		// names. A second installer would be a second definition of what ox owns,
 		// and the lockfile is the only record that lets ox later remove what it
 		// wrote.
-		plan, reconcileErr := skillmanager.ReconcileUpdate(repoRoot, version.Version,
+		plan, reconcileErr := skillmanager.ReconcileUpdateGated(repoRoot, version.Version,
 			func(current skillmanager.DesiredSkills, targets []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
 				current.Names = append(current.Names, add...)
 				return current, targets, nil
+			}, func(plan *skillmanager.ReconcilePlan) error {
+				for _, conflict := range plan.Conflicts {
+					for _, name := range add {
+						needle := "/skills/" + name + "/"
+						if strings.Contains("/"+filepath.ToSlash(conflict.Path), needle) {
+							return fmt.Errorf("%q conflicts with existing content at %s; nothing was installed", name, conflict.Path)
+						}
+					}
+				}
+				return nil
 			})
 		if reconcileErr != nil {
 			return out, fmt.Errorf("install %s: %w", strings.Join(add, ", "), reconcileErr)

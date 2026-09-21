@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/sageox/ox/extensions/skills"
+	"github.com/sageox/ox/internal/adapterstamp"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/spf13/cobra"
@@ -198,11 +199,17 @@ func inventorySkillRoots(repoRoot string, roots []string) ([]installedSkillRow, 
 			if !ok {
 				row = &installedSkillRow{
 					Name:        skill.name,
-					Provenance:  skillProvenance(skill.name),
+					Provenance:  skillProvenance(skill.name, skill.oxOwned),
 					Description: skill.description,
 					Roots:       []string{},
 				}
 				byName[skill.name] = row
+			} else if row.Provenance != skillProvenance(skill.name, skill.oxOwned) {
+				// The same name has different ownership evidence in two roots. Calling
+				// the combined row ox-owned would misattribute the unowned copy and
+				// promise that ox can safely repair or remove it. Local is the
+				// conservative answer until status reports the cross-root divergence.
+				row.Provenance = provenanceLocal
 			}
 			row.Roots = append(row.Roots, root)
 		}
@@ -218,6 +225,7 @@ func inventorySkillRoots(repoRoot string, roots []string) ([]installedSkillRow, 
 type skillOnDisk struct {
 	name        string
 	description string
+	oxOwned     bool
 }
 
 // readSkillRoot enumerates one selected root through a handle pinned inside
@@ -242,11 +250,11 @@ func readSkillRoot(repo *os.Root, root string) ([]skillOnDisk, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		description, isSkill := skillManifestDescription(dir, entry.Name())
+		description, oxOwned, isSkill := skillManifestDescription(dir, entry.Name())
 		if !isSkill {
 			continue
 		}
-		found = append(found, skillOnDisk{name: entry.Name(), description: description})
+		found = append(found, skillOnDisk{name: entry.Name(), description: description, oxOwned: oxOwned})
 	}
 	return found, nil
 }
@@ -271,22 +279,20 @@ func skillRootProblem(root string, err error) string {
 //   - The committed on-ramp is deliberately UNPREFIXED so it can never match a
 //     reserved glob, so it needs an exact-match arm or ox's own file lands under
 //     `local`.
-//   - The catalog may ship a skill under a name in no reserved namespace at all —
-//     `post-cutoff`, the first entry in the opt-in `team` bundle, is one. Nothing
-//     about its name says ox, so the catalog itself has to be asked, last.
+//   - An older repository-scoped catalog install may be unprefixed. Its verified
+//     in-band ownership stamp, not its catalog name, proves that ox wrote it.
 //
-// That final arm means a hand-authored skill that happens to share a name with
-// one ox ships is reported as ox's. That is the lesser error: ox's reconcile
-// already claims the path, so calling it `local` would promise a protection the
-// installer does not actually give.
-func skillProvenance(name string) string {
+// A catalog-name lookup is deliberately absent. Catalog discovery and ownership
+// are different facts: a hand-authored skill does not become ox's because a later
+// release happens to offer a Pack with the same ordinary-language name.
+func skillProvenance(name string, oxOwned bool) string {
 	switch {
 	case strings.HasPrefix(name, skillmanager.TeamPrefix):
 		return provenanceTeam
 	case name == skillmanager.CommittedOnRamp || name == skillmanager.CLIBase ||
 		strings.HasPrefix(name, skillmanager.CLIPrefix):
 		return provenanceOx
-	case skills.IsKnown(name):
+	case oxOwned:
 		return provenanceOx
 	default:
 		return provenanceLocal
@@ -430,16 +436,16 @@ func encodeSkillsJSON(w io.Writer, payload any) error {
 // two disagree about what a refusal MEANS: there, a file ox cannot read is
 // fatal, because ox is about to reconcile it; here it is an answer, because
 // whatever that directory holds, it is not a skill this listing can describe.
-func skillManifestDescription(rootDir *os.Root, name string) (description string, isSkill bool) {
+func skillManifestDescription(rootDir *os.Root, name string) (description string, oxOwned bool, isSkill bool) {
 	dir, err := rootDir.OpenRoot(name)
 	if err != nil {
-		return "", false
+		return "", false, false
 	}
 	defer func() { _ = dir.Close() }()
 
 	info, err := dir.Lstat(skills.SkillFileName)
 	if err != nil || !info.Mode().IsRegular() {
-		return "", false // not a skill, or a manifest ox will not read through a symlink
+		return "", false, false // not a skill, or a manifest ox will not read through a symlink
 	}
 	// Past this point the directory IS a skill — a regular SKILL.md is what makes
 	// one — so every remaining failure costs the description and never the row. A
@@ -447,19 +453,19 @@ func skillManifestDescription(rootDir *os.Root, name string) (description string
 	// bit; a row with an empty description is still an answer.
 	file, err := dir.Open(skills.SkillFileName)
 	if err != nil {
-		return "", true
+		return "", false, true
 	}
 	defer func() { _ = file.Close() }()
 	actual, err := file.Stat()
 	if err != nil || !actual.Mode().IsRegular() || !os.SameFile(info, actual) {
-		return "", true // swapped between the Lstat and the open; ox declines to read it
+		return "", false, true // swapped between the Lstat and the open; ox declines to read it
 	}
 	data, err := io.ReadAll(file)
 	if err != nil {
-		return "", true
+		return "", false, true
 	}
 	description, _ = manifestDescription(data)
-	return description, true
+	return description, adapterstamp.StampVerifies(data, "ox"), true
 }
 
 // manifestDescription extracts `description:` from an Agent Skills manifest.

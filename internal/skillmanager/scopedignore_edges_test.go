@@ -113,6 +113,16 @@ func TestScopedIgnoreFiles_CoversTheRuleNameWithNoTrailingHyphen(t *testing.T) {
 	}
 }
 
+func TestScopedIgnoreFiles_DoesNotReserveUnselectedCatalogNames(t *testing.T) {
+	for _, f := range ScopedIgnoreFiles() {
+		for _, entry := range f.Entries {
+			if entry == "skills/post-cutoff/" {
+				t.Fatalf("%s globally hides an unselected catalog name: %v", f.Dir, f.Entries)
+			}
+		}
+	}
+}
+
 // IsManagedOnlyScopedIgnore decides whether the migration may adopt an untracked
 // .gitignore into a commit automatically. Adopting one that also holds the user's
 // own rules would commit their bytes on their behalf, in a housekeeping commit

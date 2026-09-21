@@ -44,22 +44,6 @@ func reconcileSkillInventoryIfStale(projectRoot string) (changed int) {
 		// install; prime must not silently install into a repo that never asked.
 		return 0
 	}
-	// SELF-HEAL, before the staleness compare.
-	//
-	// The compare short-circuits when the recorded revision matches, so a
-	// repository whose skills are already current never reaches Apply — and Apply
-	// is where the ignore rule gets written. A repository materialized by a build
-	// that predates that invariant is therefore stuck: reserved-prefix files on
-	// disk, no rule hiding them, and nothing on the session path that would ever
-	// notice. That state has been observed in real checkouts, one `git add -A`
-	// away from committing the vendor rename.
-	//
-	// Existence-gated, so it never creates an agent directory the project does not
-	// already use, and idempotent, so the common case is three Lstats and no write.
-	if _, err := skillmanager.EnsureScopedIgnoreFiles(projectRoot); err != nil {
-		slog.Debug("skills: could not write ox ignore rules at prime", "error", err)
-	}
-
 	// Must be the SAME value the planner records, hence one shared function.
 	// Comparing against the built-in catalog digest alone was the bug: once a
 	// team context existed the planner recorded a team component too, the two
