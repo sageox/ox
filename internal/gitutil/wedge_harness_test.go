@@ -299,7 +299,7 @@ func TestWedge_PointerNeverLosesToHydratedContent(t *testing.T) {
 // path swept them.
 func TestWedge_StaleLockBlocksPushForever(t *testing.T) {
 	t.Parallel()
-	for _, lock := range []string{"index.lock", "next-index-13088.lock", "shallow.lock"} {
+	for _, lock := range []string{"index.lock", deadPIDLockName, "shallow.lock"} {
 		t.Run(lock, func(t *testing.T) {
 			f := newLedgerFixture(t)
 			p := filepath.Join(f.local, ".git", lock)
