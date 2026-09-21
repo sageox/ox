@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/teamdocs"
 )
@@ -236,6 +237,19 @@ func HasNativeProjections(projectRoot string) bool {
 	return false
 }
 
+// primeProbeTimeout bounds the single `git check-ignore` ForPrime runs. Prime is
+// the SessionStart critical path, and this is the only subprocess on it — an
+// unbounded one turns a wedged git (an index lock, a stalled network mount)
+// into a coding session that never starts.
+//
+// A timeout falls to "not protected", which is the SAME direction the decision
+// below already takes when the answer is genuinely no: deliver the rule through
+// prime rather than suppress it. Timing out therefore costs a duplicated rule,
+// never a silently missing one.
+//
+// It is a var so a test can shrink it; nothing in production reassigns it.
+var primeProbeTimeout = 2 * time.Second
+
 // ForPrime removes rules already owned by a projection in the active agent's
 // native root and converts any scoped fallback to indexed delivery. It is the
 // second half of the exactly-once contract: projection chooses native-or-prime;
@@ -251,7 +265,9 @@ func ForPrime(projectRoot, agent string, rules []teamdocs.TeamRule) []teamdocs.T
 	rootProtected := func(p policy) bool {
 		if !probed {
 			probed = true
-			protected = managedPathIgnored(context.Background(), projectRoot,
+			ctx, cancel := context.WithTimeout(context.Background(), primeProbeTimeout)
+			defer cancel()
+			protected = managedPathIgnored(ctx, projectRoot,
 				filepath.ToSlash(filepath.Join(p.Root, managedPrefix+"probe"+p.Extension)))
 		}
 		return protected
