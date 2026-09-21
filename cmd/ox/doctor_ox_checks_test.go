@@ -71,6 +71,29 @@ func TestCheckOxIgnoreRulesIn_UserNegationIsReportedNotFought(t *testing.T) {
 	}
 }
 
+func TestCheckOxIgnoreRulesIn_ProbesTeamSkillNamespace(t *testing.T) {
+	root := newIgnoreTestRepo(t)
+	touch(t, root, ".claude/skills/sageox-team-probe/SKILL.md")
+	if _, err := ensureScopedIgnoreFiles(root); err != nil {
+		t.Fatalf("ensureScopedIgnoreFiles: %v", err)
+	}
+	deeper := filepath.Join(root, ".claude", "skills", ".gitignore")
+	if err := os.WriteFile(deeper, []byte("!sageox-team-probe/\n"), 0o644); err != nil {
+		t.Fatalf("write deeper ignore: %v", err)
+	}
+
+	res := checkOxIgnoreRulesIn(root, true)
+	if !res.warning || !strings.Contains(res.message, "still not ignored") {
+		t.Fatalf("team namespace override was not reported: message=%q detail=%q", res.message, res.detail)
+	}
+	if !gitIgnores(t, root, ".claude/skills/ox-cli-plan/SKILL.md") {
+		t.Error("fixture unexpectedly broke the runtime namespace too")
+	}
+	if gitIgnores(t, root, ".claude/skills/sageox-team-probe/SKILL.md") {
+		t.Error("fixture did not expose the Team Skill ignore override")
+	}
+}
+
 // TestCheckOxIgnoreRulesIn_NoFootprintInUnusedAgentDirs: a Claude-only repo must
 // not sprout .agents/ or .factory/ just because a check ran.
 func TestCheckOxIgnoreRulesIn_NoFootprintInUnusedAgentDirs(t *testing.T) {
