@@ -22,10 +22,11 @@ import (
 // Silence is the failure mode this exists to prevent: a skill held for approval
 // and a skill that was never discovered look identical from the repository.
 type TeamSkillDecision struct {
-	Name         string
-	InstalledAs  string
-	NeedsApprove bool
-	Reason       string
+	Name               string
+	InstalledAs        string
+	NeedsApprove       bool
+	AutoInstalledProse bool
+	Reason             string
 }
 
 // teamCatalog unions the binary's built-in catalog with the team skills this
@@ -142,7 +143,9 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 			Content: manifestContent(loaded),
 			Files:   toCatalogFiles(loaded, approvals.ScriptsExecutable(ts.Name, verdict)),
 		})
-		decision := TeamSkillDecision{Name: ts.Name, InstalledAs: installed}
+		decision := TeamSkillDecision{
+			Name: ts.Name, InstalledAs: installed, AutoInstalledProse: !verdict.Executable,
+		}
 		if scriptsNeedApproval {
 			// Installed, minus its scripts. Still surfaced: the author expects the
 			// scripts to be there, and silence would read as "it all arrived."

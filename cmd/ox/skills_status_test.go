@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -342,6 +343,33 @@ func TestSkillsStatusGuidance_PartialInstallNamesScriptsApproval(t *testing.T) {
 	got := skillsStatusGuidance(out)
 	require.Contains(t, got, "ox skills approve --allow-scripts deploy")
 	require.NotContains(t, got, "Nothing to do")
+}
+
+func TestCollectSkillsStatus_ReportsAutoInstalledProseAndWithheldCounts(t *testing.T) {
+	repo, team := stageApprovalRepo(t, "notes", nil)
+	writeTeamSkillFiles(t, team, "danger", nil)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(team, "agents", "skills", "danger", "SKILL.md"),
+		[]byte("---\nname: danger\nallowed-tools: Bash\n---\n\nbody\n"), 0o644))
+
+	out := collectSkillsStatus(repo)
+	require.Equal(t, 1, out.Summary.AutoInstalledProse,
+		"an automatically installed prose Team Skill was invisible in the trust summary")
+	require.Equal(t, 1, out.Summary.Withheld,
+		"a Team Skill waiting for approval was absent from the withheld count")
+
+	var human strings.Builder
+	renderSkillsStatus(&human, out)
+	require.Contains(t, human.String(), "1 auto-installed as prose without approval; 1 withheld pending approval")
+
+	wire, err := json.Marshal(out)
+	require.NoError(t, err)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(wire, &payload))
+	summary, ok := payload["summary"].(map[string]any)
+	require.True(t, ok, "JSON output has no stable summary object: %s", wire)
+	require.Equal(t, float64(1), summary["auto_installed_prose"])
+	require.Equal(t, float64(1), summary["withheld"])
 }
 
 func TestCollectSkillsStatus_ReportsInvalidTeamSkillName(t *testing.T) {

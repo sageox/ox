@@ -56,6 +56,7 @@ func TestTeamSkillSource_ProseMaterializesUnderTheReservedPrefix(t *testing.T) {
 		"a prose team skill did not materialize under the reserved prefix")
 	require.Len(t, decisions, 1)
 	require.False(t, decisions[0].NeedsApprove)
+	require.True(t, decisions[0].AutoInstalledProse)
 	require.NotEmpty(t, decisions[0].InstalledAs)
 	require.True(t, IsReservedName(TeamPrefix+"deploy"),
 		"the installed name is outside the reserved namespace, so the ignore globs will not hide it")
@@ -92,6 +93,8 @@ func TestTeamSkillSource_ScriptsAreDroppedNotTheSkill(t *testing.T) {
 	require.Len(t, decisions, 1)
 	require.Equal(t, TeamPrefix+"deploy", decisions[0].InstalledAs, "installed skill has no InstalledAs")
 	require.True(t, decisions[0].NeedsApprove, "the author must still be told the scripts are held")
+	require.False(t, decisions[0].AutoInstalledProse,
+		"an executable skill with only its scripts held was reported as prose")
 	require.Contains(t, decisions[0].Reason, "without its scripts")
 	require.Contains(t, decisions[0].Reason, "bundled-script",
 		"the decision does not tell the human what they would be approving: %q", decisions[0].Reason)
@@ -160,6 +163,8 @@ func TestTeamSkillSource_ApprovedExecutableMaterializesWithoutItsScripts(t *test
 	require.Contains(t, selectedNames(t, src), TeamPrefix+"deploy")
 	require.True(t, decisions[0].NeedsApprove,
 		"the missing script grant must remain visible after manifest approval")
+	require.False(t, decisions[0].AutoInstalledProse,
+		"an executable skill with a recorded approval was reported as auto-installed prose")
 	require.NotEmpty(t, decisions[0].InstalledAs)
 
 	got, err := src.Select("1.0.0", DesiredSkills{})

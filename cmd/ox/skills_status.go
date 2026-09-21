@@ -68,9 +68,15 @@ type skillsStatusOutput struct {
 	TeamContext *teamContextStatus          `json:"team_context"`
 	Convergence *teamconverge.PendingRecord `json:"convergence,omitempty"`
 	Repo        repoSkillStatus             `json:"repo"`
+	Summary     teamSkillSummary            `json:"summary"`
 	TeamSkills  []teamSkillStatus           `json:"team_skills"`
 	Problems    []string                    `json:"problems,omitempty"`
 	Guidance    string                      `json:"guidance,omitempty"`
+}
+
+type teamSkillSummary struct {
+	AutoInstalledProse int `json:"auto_installed_prose"`
+	Withheld           int `json:"withheld"`
 }
 
 type teamContextStatus struct {
@@ -282,6 +288,12 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 			decision := decisions[sk.Name]
 			row.NeedsApproval = decision.NeedsApprove
 			row.State, row.Detail = installedState(gitRoot, targets, decision, planned)
+			if row.State == skillInstalled && decision.AutoInstalledProse {
+				out.Summary.AutoInstalledProse++
+			}
+			if decision.NeedsApprove {
+				out.Summary.Withheld++
+			}
 		}
 		out.TeamSkills = append(out.TeamSkills, row)
 	}
@@ -319,6 +331,9 @@ func skillsStatusGuidance(out skillsStatusOutput) string {
 	}
 	if out.TeamContext == nil {
 		return "This project has no Team Context, so there are no team skills to install."
+	}
+	if out.Summary.AutoInstalledProse > 0 {
+		return fmt.Sprintf("Team skills are current. %d auto-installed as prose without approval; nothing is withheld.", out.Summary.AutoInstalledProse)
 	}
 	return "Team skills are current. Nothing to do."
 }
@@ -480,6 +495,8 @@ func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsSta
 		p("%s  none found", cli.StyleAccent.Render("Team skills"))
 	} else {
 		p("%s", cli.StyleAccent.Render("Team skills"))
+		p("  trust summary            %d auto-installed as prose without approval; %d withheld pending approval",
+			out.Summary.AutoInstalledProse, out.Summary.Withheld)
 		for _, s := range out.TeamSkills {
 			detail := s.Detail
 			if detail != "" {
