@@ -35,6 +35,7 @@ func stageInstallRepo(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()
 	gitInitRepo(t, repo)
+	gitOutput(t, repo, "remote", "add", "origin", "https://github.com/acme/install-test.git")
 	stageSelectedTarget(t, repo)
 	_, err := reconcileExactSelectedSkills(repo)
 	require.NoError(t, err, "establish the installed baseline")
@@ -607,7 +608,7 @@ func wireTeamContext(t *testing.T, repo, team string) {
 	const teamID = "team_publish_test"
 	require.NoError(t, config.SaveProjectConfig(repo, &config.ProjectConfig{
 		ProjectID: "proj_publish", WorkspaceID: "ws_publish",
-		TeamID: teamID, TeamName: "Publish Test Team",
+		RepoID: "repo_publish", TeamID: teamID, TeamName: "Publish Test Team",
 	}))
 	require.NoError(t, config.SaveLocalConfig(repo, &config.LocalConfig{
 		TeamContexts: []config.TeamContext{{

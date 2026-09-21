@@ -199,6 +199,13 @@ const (
 
 func classifyLegacyPath(repoRoot, rel string) legacyClass {
 	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) == 2 && parts[0] == ".clinerules" {
+		name := strings.TrimSuffix(parts[1], ".md")
+		if skillmanager.IsReclaimableName(name) {
+			return legacyReserved
+		}
+		return legacyUserOwned
+	}
 	if len(parts) < 3 {
 		return legacyUserOwned
 	}
@@ -245,7 +252,8 @@ func classifyLegacyPath(repoRoot, rel string) legacyClass {
 			return legacySuperseded
 		}
 		return legacyUserOwned
-	case ".claude/rules", ".factory/rules", ".agents/rules":
+	case ".claude/rules", ".factory/rules", ".agents/rules",
+		".cursor/rules", ".github/instructions", ".kiro/steering", ".windsurf/rules":
 		// Same narrowing, same reason as the skills arm above: untracking is
 		// destructive, so only a prefixed name proves ownership. Every rule ox
 		// writes is prefixed — the exact "ox-cli.md", plus "ox-cli-*" and
@@ -398,7 +406,11 @@ func trackedAgentPaths(repoRoot string) ([]string, error) {
 	args := []string{"ls-files", "-z", "--",
 		".claude/skills", ".claude/rules", ".claude/commands",
 		".agents/skills", ".agents/rules", ".factory/rules",
-		".claude/.gitignore", ".agents/.gitignore", ".factory/.gitignore"}
+		".cursor/rules", ".github/instructions", ".clinerules",
+		".kiro/steering", ".windsurf/rules",
+		".claude/.gitignore", ".agents/.gitignore", ".factory/.gitignore",
+		".cursor/.gitignore", ".github/.gitignore", ".clinerules/.gitignore",
+		".kiro/.gitignore", ".windsurf/.gitignore"}
 	cmd := exec.Command("git", args...)
 	cmd.Dir = repoRoot
 	out, err := cmd.Output()

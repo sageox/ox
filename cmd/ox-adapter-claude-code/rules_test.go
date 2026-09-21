@@ -541,4 +541,8 @@ func TestPointerRule_TellsTheTruthAboutTeamContent(t *testing.T) {
 	// the absolute-path instruction is only honest because prime emits AbsPath
 	assert.Contains(t, body, "absolute path",
 		"pointer rule tells agents to Read the absolute path; prime must keep emitting one")
+	assert.Contains(t, body, "exactly one delivery path")
+	assert.Contains(t, body, "sageox-team-*")
+	assert.NotContains(t, body, "will not auto-sync",
+		"pointer rule must describe hybrid native-or-prime delivery")
 }

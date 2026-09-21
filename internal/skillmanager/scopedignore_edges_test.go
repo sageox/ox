@@ -98,8 +98,8 @@ func TestEnsureScopedIgnoreFiles_MissingRepoRootIsAnError(t *testing.T) {
 // pull request.
 func TestScopedIgnoreFiles_CoversTheRuleNameWithNoTrailingHyphen(t *testing.T) {
 	for _, f := range ScopedIgnoreFiles() {
-		if f.Dir == ".agents" {
-			continue // skills-only projection; it has no rules root
+		if f.Dir != ".claude" && f.Dir != ".factory" {
+			continue // runtime ox-cli rules exist only on these two surfaces
 		}
 		var exact bool
 		for _, e := range f.Entries {

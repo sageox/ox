@@ -68,8 +68,9 @@ func teamArtifactsTouched(changed []string) bool {
 // was already current does no work at all.
 //
 // The 30-minute `skills-inventory-drift` autofix check remains an anti-entropy
-// floor for skill projections. Rules and context use prime discovery, so their
-// coordinator outcomes record the delivery path without writing a duplicate.
+// floor for skill projections. Rules use a hybrid delivery policy: native-safe
+// rules are mirrored into ignored agent rule roots, while prime remains the
+// fallback for formats that cannot preserve scope. Context stays indexed.
 //
 // NON-BLOCKING ON PURPOSE. This runs on the sync scheduler's goroutine, between a
 // pull and the rest of the cycle. ReconcileUpdateNonBlocking yields

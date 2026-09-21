@@ -45,6 +45,7 @@ func stageApprovalRepo(t *testing.T, skillName string, extra map[string]string) 
 
 	for _, args := range [][]string{
 		{"init"}, {"config", "user.email", "t@test.sageox.ai"}, {"config", "user.name", "t"},
+		{"remote", "add", "origin", "https://github.com/acme/approve-test.git"},
 	} {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = repo // never the developer's own repo
@@ -56,7 +57,7 @@ func stageApprovalRepo(t *testing.T, skillName string, extra map[string]string) 
 	const teamID = "team_approve_test"
 	require.NoError(t, config.SaveProjectConfig(repo, &config.ProjectConfig{
 		ProjectID: "proj_approve", WorkspaceID: "ws_approve",
-		TeamID: teamID, TeamName: "Approve Test Team",
+		RepoID: "repo_approve", TeamID: teamID, TeamName: "Approve Test Team",
 	}))
 	require.NoError(t, config.SaveLocalConfig(repo, &config.LocalConfig{
 		TeamContexts: []config.TeamContext{{

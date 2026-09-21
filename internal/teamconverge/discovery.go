@@ -61,7 +61,8 @@ func (d FilesystemDiscovery) Discover(ctx context.Context, request Request) (Sna
 		artifact := Artifact{
 			Kind: KindRule, Name: rule.Name, SourcePath: rel,
 			Origin: d.origin(rel), Applicable: applicable, Required: true,
-			Visibility: rule.Visibility,
+			Visibility: rule.Visibility, Description: rule.Description,
+			Globs: append([]string(nil), rule.Globs...),
 		}
 		if !applicable {
 			artifact.FilterReason = "repos filter does not include this repository"

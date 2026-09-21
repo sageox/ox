@@ -109,6 +109,8 @@ func TestTeamArtifactsTouched(t *testing.T) {
 
 func TestTeamConvergence_RetriesPendingLockContentionWithoutNewCommit(t *testing.T) {
 	project := t.TempDir()
+	runTeamGit(t, project, "init", "-q")
+	runTeamGit(t, project, "remote", "add", "origin", "https://github.com/acme/api.git")
 	targets, err := skillmanager.CanonicalizeTargets(project, []adapterprotocol.SkillTarget{{
 		Key: "shared", Root: ".agents/skills", Format: adapterprotocol.SkillFormatAgentSkillsV1,
 		Scope: adapterprotocol.SkillScopeProject, LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
@@ -130,7 +132,7 @@ func TestTeamConvergence_RetriesPendingLockContentionWithoutNewCommit(t *testing
 	runTeamGit(t, team, "commit", "-q", "-m", "team skill")
 
 	require.NoError(t, config.SaveProjectConfig(project, &config.ProjectConfig{
-		ConfigVersion: config.CurrentConfigVersion, TeamID: "team_test", TeamName: "Test",
+		ConfigVersion: config.CurrentConfigVersion, RepoID: "repo_test", TeamID: "team_test", TeamName: "Test",
 	}))
 	require.NoError(t, config.SaveLocalConfig(project, &config.LocalConfig{TeamContexts: []config.TeamContext{{
 		TeamID: "team_test", TeamName: "Test", Path: team,
@@ -164,9 +166,9 @@ func TestTeamConvergence_RetriesPendingLockContentionWithoutNewCommit(t *testing
 	// does not lose the work.
 	scheduler = newTestScheduler(project)
 	scheduler.reconcileTeamSkills(nil)
-	require.FileExists(t, filepath.Join(project, ".agents", "skills", "sageox-team-deploy", "SKILL.md"))
 	pending, err = teamconverge.LoadPending(project)
 	require.NoError(t, err)
+	require.FileExists(t, filepath.Join(project, ".agents", "skills", "sageox-team-deploy", "SKILL.md"))
 	require.Nil(t, pending, "verified convergence did not clear the pending marker")
 }
 

@@ -518,6 +518,11 @@ func TestStageAll_NeverStagesReservedOxArtifacts(t *testing.T) {
 		".claude/rules/ox-cli.md",
 		".claude/rules/ox-cli-use-team-context.md",
 		".agents/skills/ox-cli-recap/SKILL.md",
+		".cursor/rules/sageox-team-security.mdc",
+		".github/instructions/sageox-team-security.md",
+		".clinerules/sageox-team-security.md",
+		".kiro/steering/sageox-team-security.md",
+		".windsurf/rules/sageox-team-security.md",
 	}
 	mustStage := []string{
 		".claude/settings.json",

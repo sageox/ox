@@ -41,6 +41,9 @@ func isReservedManagedPath(repoRoot, absPath string) bool {
 		return false
 	}
 	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) == 2 && parts[0] == ".clinerules" {
+		return skillmanager.IsReservedName(parts[1])
+	}
 	if len(parts) < 3 {
 		return false
 	}
@@ -56,7 +59,8 @@ func isReservedManagedPath(repoRoot, absPath string) bool {
 		manifest := filepath.Join(repoRoot, parts[0], parts[1], parts[2], "SKILL.md")
 		data, readErr := os.ReadFile(manifest)
 		return readErr == nil && adapterstamp.StampVerifies(data, "ox")
-	case ".claude/rules", ".factory/rules", ".agents/rules", ".claude/commands":
+	case ".claude/rules", ".factory/rules", ".agents/rules", ".claude/commands",
+		".cursor/rules", ".github/instructions", ".kiro/steering", ".windsurf/rules":
 		// A rule or command file: ownership is decided by the basename. A nested
 		// legacy path (rules/sageox/foo.md) is deliberately NOT reserved — it is
 		// retired by the adapter's legacy sweep, not hidden from git.

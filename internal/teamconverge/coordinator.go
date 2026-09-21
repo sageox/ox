@@ -130,8 +130,19 @@ func (c *Coordinator) convergeLocked(ctx context.Context, request Request) (Repo
 		}
 	}
 
-	var kinds []ArtifactKind
+	// Lifecycle handlers must run even when desired state is empty. Otherwise a
+	// deleted or newly-filtered Team Skill/Rule leaves its last native projection
+	// on disk forever: discovery has no applicable item to group, so the very
+	// handler that owns retirement would never be called.
+	kindSet := map[ArtifactKind]bool{}
 	for kind := range grouped {
+		kindSet[kind] = true
+	}
+	for kind := range c.handlers {
+		kindSet[kind] = true
+	}
+	var kinds []ArtifactKind
+	for kind := range kindSet {
 		kinds = append(kinds, kind)
 	}
 	sort.Slice(kinds, func(i, j int) bool { return kinds[i] < kinds[j] })
@@ -147,6 +158,12 @@ func (c *Coordinator) convergeLocked(ctx context.Context, request Request) (Repo
 		}
 		outcomes, handleErr := handler.Converge(ctx, request, snapshot, items)
 		if handleErr != nil {
+			// Empty desired state is still lifecycle work: retiring the last rule or
+			// skill. With no artifact row to attach an error to, swallowing it would
+			// falsely report convergence and discard the only retry signal.
+			if len(items) == 0 {
+				return report, handleErr
+			}
 			state := StateError
 			var retryable *RetryableError
 			if errors.As(handleErr, &retryable) {

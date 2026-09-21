@@ -39,6 +39,7 @@ import (
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/sessionid"
 	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/internal/teamrules"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/tokens"
@@ -502,7 +503,18 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// discover team context if configured
 	phaseStart = time.Now()
 	repoSlug := repoSlugFromRemoteOrDir(projectRoot)
-	teamCtx := discoverTeamContext(projectRoot, repoSlug)
+	// The directory-name fallback is useful display context, but it is not an
+	// authoritative identity for repos: filters. With no canonical origin, pass
+	// an unknown slug so targeted rules stay out instead of being misclassified
+	// against an unrelated local directory name.
+	ruleRepoSlug, _ := repotools.RepoSlugFromRemote(projectRoot)
+	teamCtx := discoverTeamContext(projectRoot, ruleRepoSlug)
+	if teamCtx != nil {
+		// A rule current in this agent's native rule root is omitted here; every
+		// other rule retains its prime fallback. This is the exactly-once seam
+		// between background projection and session-start delivery.
+		teamCtx.TeamRules = teamrules.ForPrime(projectRoot, agentType, teamCtx.TeamRules)
+	}
 
 	// check team context staleness
 	checkTeamContextStaleness(teamCtx, projectRoot)

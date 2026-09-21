@@ -55,6 +55,8 @@ type Artifact struct {
 	Applicable   bool         `json:"applicable"`
 	Required     bool         `json:"required"`
 	Visibility   string       `json:"visibility,omitempty"`
+	Description  string       `json:"description,omitempty"`
+	Globs        []string     `json:"globs,omitempty"`
 	FilterReason string       `json:"filter_reason,omitempty"`
 }
 

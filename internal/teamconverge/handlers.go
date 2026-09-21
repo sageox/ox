@@ -11,6 +11,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/internal/teamrules"
 	"github.com/sageox/ox/internal/version"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
@@ -131,6 +132,86 @@ func (SkillHandler) Converge(_ context.Context, request Request, snapshot Snapsh
 	return outcomes, nil
 }
 
+type RuleHandler struct{}
+
+func (RuleHandler) Kind() ArtifactKind { return KindRule }
+
+func (RuleHandler) Converge(ctx context.Context, request Request, snapshot Snapshot, artifacts []Artifact) ([]Outcome, error) {
+	hasNative := teamrules.HasNativeProjections(request.ProjectRoot)
+	if len(artifacts) == 0 && !hasNative {
+		return []Outcome{}, nil
+	}
+	if request.Mode == ModeAutomatic {
+		live, err := session.HasLiveRecording(request.ProjectRoot)
+		if err != nil {
+			return nil, &RetryableError{Err: fmt.Errorf("inspect active sessions: %w", err)}
+		}
+		if live {
+			return nil, &RetryableError{Err: errors.New("active AI coworker session keeps the current rule snapshot stable")}
+		}
+	}
+	if request.Mode == ModeInspect {
+		return nil, fmt.Errorf("inspect mode cannot apply Team Rules")
+	}
+
+	// An absent rules root is not an authoritative empty set. Team Context uses
+	// sparse checkout; if neither agents/ nor the legacy coworkers/ parent is on
+	// disk, sweeping native files would turn a partial checkout into retirement.
+	if !teamdocs.AnyRuleRootOnDisk(snapshot.Path) {
+		if len(artifacts) == 0 && hasNative {
+			return nil, &RetryableError{Err: errors.New("rules are not materialized in Team Context; retaining existing native Team Rules")}
+		}
+		outcomes := make([]Outcome, 0, len(artifacts))
+		for _, artifact := range artifacts {
+			outcomes = append(outcomes, outcomeFor(snapshot, artifact, StatePending, "",
+				"no rules directory is materialized in the Team Context"))
+		}
+		return outcomes, nil
+	}
+
+	published, err := teamdocs.PublishedRules(snapshot.Path)
+	if err != nil {
+		return nil, fmt.Errorf("read Team Rules for projection: %w", err)
+	}
+	byName := make(map[string]teamdocs.TeamRule, len(published))
+	for _, rule := range published {
+		byName[rule.Name] = rule
+	}
+	wanted := make([]teamdocs.TeamRule, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		if rule, ok := byName[artifact.Name]; ok {
+			wanted = append(wanted, rule)
+		}
+	}
+
+	result, err := teamrules.Reconcile(ctx, request.ProjectRoot, wanted)
+	if err != nil {
+		return nil, err
+	}
+	outcomes := make([]Outcome, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		native := result.NativeAgents[artifact.Name]
+		fallbacks := result.Fallbacks[artifact.Name]
+		detailParts := make([]string, 0, len(fallbacks))
+		for _, fallback := range fallbacks {
+			detailParts = append(detailParts, fallback.Agent+": "+fallback.Reason)
+		}
+		if len(native) > 0 {
+			outcomes = append(outcomes, outcomeFor(snapshot, artifact, StateApplied,
+				"native-rule:"+strings.Join(native, ","), strings.Join(detailParts, "; ")))
+			continue
+		}
+		delivery := "prime-index"
+		detail := strings.Join(detailParts, "; ")
+		if len(artifact.Globs) == 0 && artifact.Visibility == teamdocs.VisibilityAlways {
+			delivery = "prime-inline"
+			detail = strings.TrimSpace(detail + " ready for injection at the next session boundary")
+		}
+		outcomes = append(outcomes, outcomeFor(snapshot, artifact, StateIndexed, delivery, detail))
+	}
+	return outcomes, nil
+}
+
 func skillConflicted(plan *skillmanager.ReconcilePlan, installedAs string) bool {
 	if installedAs == "" {
 		return false
@@ -145,7 +226,7 @@ func skillConflicted(plan *skillmanager.ReconcilePlan, installedAs string) bool 
 }
 
 func NewDefault() (*Coordinator, error) {
-	coordinator, err := New(FilesystemDiscovery{}, SkillHandler{}, NewDiscoveryHandler(KindRule), NewDiscoveryHandler(KindContext))
+	coordinator, err := New(FilesystemDiscovery{}, SkillHandler{}, RuleHandler{}, NewDiscoveryHandler(KindContext))
 	if coordinator != nil {
 		coordinator.lockSnapshot = true
 	}

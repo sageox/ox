@@ -35,10 +35,9 @@ type ScopedIgnoreFile struct {
 
 // ScopedIgnoreFiles returns the ignore files for the agent directories ox writes.
 //
-// The sageox-team-* globs ship from day one even though that source is not
-// implemented yet. Reserving a namespace before anything can occupy it is free,
-// and it means the team-sync release never has to touch a customer's ignore file
-// again — one fewer commit into somebody's repository, forever.
+// The sageox-team-* globs protect Team Skill and Team Rule projections. They are
+// present before reconciliation writes any derived file, so an ox-managed cache
+// can never appear in the customer's pull request.
 func ScopedIgnoreFiles() []ScopedIgnoreFile {
 	return scopedIgnoreFiles(nil)
 }
@@ -75,6 +74,15 @@ func scopedIgnoreFiles(exactSkills []string) []ScopedIgnoreFile {
 		}, exactEntries...)},
 		{Dir: ".agents", Entries: append([]string{skillGlob, teamSkillGlob}, exactEntries...)},
 		{Dir: ".factory", Entries: []string{ruleExact, ruleGlob, teamRuleGlob}},
+		// Team Rules use each tool's native rule root only when the format can
+		// preserve semantics. These entries are existence-gated like the original
+		// three, so supporting a tool never creates its directory in an unrelated
+		// repository.
+		{Dir: ".cursor", Entries: []string{"rules/" + TeamPrefix + "*"}},
+		{Dir: ".github", Entries: []string{"instructions/" + TeamPrefix + "*"}},
+		{Dir: ".clinerules", Entries: []string{TeamPrefix + "*"}},
+		{Dir: ".kiro", Entries: []string{"steering/" + TeamPrefix + "*"}},
+		{Dir: ".windsurf", Entries: []string{"rules/" + TeamPrefix + "*"}},
 	}
 }
 

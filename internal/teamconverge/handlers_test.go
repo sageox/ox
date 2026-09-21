@@ -10,6 +10,8 @@ import (
 
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/internal/teamrules"
 	"github.com/sageox/ox/internal/version"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/stretchr/testify/require"
@@ -17,6 +19,8 @@ import (
 
 func TestDefaultCoordinator_ConvergesSkillsAndReportsRuleContextDelivery(t *testing.T) {
 	project := t.TempDir()
+	gitTeam(t, project, "init", "-q")
+	gitTeam(t, project, "remote", "add", "origin", "https://github.com/acme/api.git")
 	targets, err := skillmanager.CanonicalizeTargets(project, []adapterprotocol.SkillTarget{{
 		Key:        "shared",
 		Root:       ".agents/skills",
@@ -41,7 +45,7 @@ func TestDefaultCoordinator_ConvergesSkillsAndReportsRuleContextDelivery(t *test
 
 	require.NoError(t, os.MkdirAll(filepath.Join(project, ".sageox"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.json"),
-		[]byte(`{"config_version":"2","team_id":"team_test","team_name":"Test"}`+"\n"), 0o644))
+		[]byte(`{"config_version":"2","repo_id":"repo_test","team_id":"team_test","team_name":"Test"}`+"\n"), 0o644))
 	local := fmt.Sprintf("[[team_contexts]]\nteam_id = %q\nteam_name = %q\npath = %q\n", "team_test", "Test", team)
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.local.toml"), []byte(local), 0o600))
 
@@ -78,6 +82,8 @@ func TestDefaultCoordinator_ConvergesSkillsAndReportsRuleContextDelivery(t *test
 
 func TestDefaultCoordinator_DefersSkillChangesUntilSessionBoundary(t *testing.T) {
 	project := t.TempDir()
+	gitTeam(t, project, "init", "-q")
+	gitTeam(t, project, "remote", "add", "origin", "https://github.com/acme/api.git")
 	cacheDir := t.TempDir()
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("HOME", cacheDir)
@@ -153,4 +159,140 @@ func TestDefaultCoordinator_DefersSkillChangesUntilSessionBoundary(t *testing.T)
 	after, err := os.ReadFile(installed)
 	require.NoError(t, err)
 	require.Contains(t, string(after), "Version two")
+}
+
+func TestDefaultCoordinator_ProjectsTeamRuleExactlyOnceAndConvergesFilteringAndRemoval(t *testing.T) {
+	project := t.TempDir()
+	cacheDir := t.TempDir()
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("HOME", cacheDir)
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	gitTeam(t, project, "init", "-q")
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".claude", "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".claude", ".gitignore"),
+		[]byte("rules/sageox-team-*\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".factory", "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".factory", ".gitignore"),
+		[]byte("rules/sageox-team-*\n"), 0o644))
+
+	team := t.TempDir()
+	gitTeam(t, team, "init", "-q")
+	gitTeam(t, team, "config", "user.email", "test@sageox.ai")
+	gitTeam(t, team, "config", "user.name", "test")
+	gitTeam(t, team, "config", "commit.gpgsign", "false")
+	writeTeamFile(t, team, "agents/rules/go-style.md", "---\nname: go-style\ndescription: Go conventions\nglobs: [\"**/*.go\"]\nvisibility: always\n---\n\nUse gofmt.\n")
+	gitTeam(t, team, "add", "-A")
+	gitTeam(t, team, "commit", "-q", "-m", "add rule")
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.json"),
+		[]byte(`{"config_version":"2","repo_id":"repo_test","team_id":"team_test","team_name":"Test"}`+"\n"), 0o644))
+	local := fmt.Sprintf("[[team_contexts]]\nteam_id = %q\nteam_name = %q\npath = %q\n", "team_test", "Test", team)
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.local.toml"), []byte(local), 0o600))
+
+	coordinator, err := NewDefault()
+	require.NoError(t, err)
+	report, err := coordinator.Converge(context.Background(), Request{
+		ProjectRoot: project, TeamPath: team, RepoSlug: "acme/api", Mode: ModeExplicit,
+	})
+	require.NoError(t, err)
+	require.True(t, report.Converged(), "%+v", report.Outcomes)
+	require.Len(t, report.Outcomes, 1)
+	require.Equal(t, StateApplied, report.Outcomes[0].State)
+	require.Contains(t, report.Outcomes[0].Delivery, "claude")
+	require.Contains(t, report.Outcomes[0].Detail, "droid",
+		"status must explain why Droid uses the indexed fallback")
+
+	rules, err := teamdocs.DiscoverRules(team, "acme/api")
+	require.NoError(t, err)
+	require.Len(t, rules, 1)
+	native, ok := teamrules.NativePath(project, "claude", rules[0])
+	require.True(t, ok)
+	require.FileExists(t, native)
+	require.Empty(t, teamrules.ForPrime(project, "claude", rules),
+		"Claude received the same rule through both native projection and prime")
+	require.Len(t, teamrules.ForPrime(project, "codex", rules), 1,
+		"Codex has no native rule target, so prime must remain its delivery path")
+	require.Len(t, teamrules.ForPrime(project, "droid", rules), 1,
+		"Droid cannot preserve globs natively, so prime must retain an indexed fallback")
+	droidNative, ok := teamrules.NativePath(project, "droid", rules[0])
+	require.True(t, ok)
+	require.NoFileExists(t, droidNative, "a scoped rule was flattened into Droid's unscoped native format")
+
+	writeTeamFile(t, team, "agents/rules/go-style.md", "---\nname: go-style\ndescription: Go conventions\nrepos: [\"acme/other\"]\nglobs: [\"**/*.go\"]\nvisibility: always\n---\n\nUse gofmt.\n")
+	gitTeam(t, team, "add", "-A")
+	gitTeam(t, team, "commit", "-q", "-m", "filter rule")
+	recording, err := session.StartRecording(project, session.StartRecordingOptions{
+		AgentID: "OxLiveRuleBoundary", WorkspacePath: project,
+		ParentPID: os.Getpid(), AgentType: "claude",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = session.ClearRecordingStateForAgent(project, recording.AgentID) })
+	_, err = coordinator.Converge(context.Background(), Request{
+		ProjectRoot: project, TeamPath: team, RepoSlug: "acme/api", Mode: ModeAutomatic,
+	})
+	require.ErrorContains(t, err, "current rule snapshot")
+	require.FileExists(t, native, "background convergence retired a rule during an active session")
+	require.NoError(t, session.ClearRecordingStateForAgent(project, recording.AgentID))
+
+	report, err = coordinator.Converge(context.Background(), Request{
+		ProjectRoot: project, TeamPath: team, RepoSlug: "acme/api", Mode: ModeExplicit,
+	})
+	require.NoError(t, err)
+	require.True(t, report.Converged(), "%+v", report.Outcomes)
+	require.NoFileExists(t, native, "a filtered native Team Rule survived convergence")
+	require.Len(t, report.Outcomes, 1)
+	require.Equal(t, StateFiltered, report.Outcomes[0].State)
+
+	writeTeamFile(t, team, "agents/rules/go-style.md", "---\nname: go-style\ndescription: Go conventions\nglobs: [\"**/*.go\"]\nvisibility: always\n---\n\nUse gofmt.\n")
+	gitTeam(t, team, "add", "-A")
+	gitTeam(t, team, "commit", "-q", "-m", "restore rule")
+	_, err = coordinator.Converge(context.Background(), Request{
+		ProjectRoot: project, TeamPath: team, RepoSlug: "acme/api", Mode: ModeExplicit,
+	})
+	require.NoError(t, err)
+	require.FileExists(t, native)
+
+	require.NoError(t, os.Remove(filepath.Join(team, "agents", "rules", "go-style.md")))
+	gitTeam(t, team, "add", "-A")
+	gitTeam(t, team, "commit", "-q", "-m", "retire rule")
+	report, err = coordinator.Converge(context.Background(), Request{
+		ProjectRoot: project, TeamPath: team, RepoSlug: "acme/api", Mode: ModeExplicit,
+	})
+	require.NoError(t, err)
+	require.True(t, report.Converged(), "%+v", report.Outcomes)
+	require.NoFileExists(t, native, "a retired native Team Rule survived an empty discovery result")
+}
+
+func TestRuleHandler_RetainsProjectionWhenSparseRulesAreBlind(t *testing.T) {
+	project := t.TempDir()
+	rulesRoot := filepath.Join(project, ".claude", "rules")
+	require.NoError(t, os.MkdirAll(rulesRoot, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"),
+		[]byte(".claude/rules/sageox-team-*\n"), 0o644))
+	gitTeam(t, project, "init", "-q")
+
+	team := t.TempDir()
+	writeTeamFile(t, team, "agents/rules/security.md", "---\nname: security\ndescription: Security policy\nvisibility: always\n---\n\nNever log secrets.\n")
+	rules, err := teamdocs.PublishedRules(team)
+	require.NoError(t, err)
+	require.Len(t, rules, 1)
+	artifact := Artifact{
+		Kind: KindRule, Name: rules[0].Name, Applicable: true,
+		Visibility: rules[0].Visibility, Description: rules[0].Description,
+	}
+	handler := RuleHandler{}
+	_, err = handler.Converge(context.Background(), Request{
+		ProjectRoot: project, Mode: ModeExplicit,
+	}, Snapshot{Path: team}, []Artifact{artifact})
+	require.NoError(t, err)
+	native, ok := teamrules.NativePath(project, "claude", rules[0])
+	require.True(t, ok)
+	require.FileExists(t, native)
+
+	require.NoError(t, os.RemoveAll(filepath.Join(team, "agents")))
+	_, err = handler.Converge(context.Background(), Request{
+		ProjectRoot: project, Mode: ModeExplicit,
+	}, Snapshot{Path: team}, nil)
+	require.ErrorContains(t, err, "not materialized")
+	require.FileExists(t, native, "a blind sparse checkout was mistaken for authoritative retirement")
 }

@@ -256,16 +256,16 @@ Attribution is **conditional**: attribute to SageOx only when SageOx-delivered t
 
 // useTeamContextContent is the pointer rule installed at
 // .factory/rules/sageox/use-team-context.md. See
-// cmd/ox-adapter-claude-code/rules.go for the full rationale —
-// content is identical because the message ("more rules live in the
-// team-context repo, here's how to find them") is agent-agnostic.
+// cmd/ox-adapter-claude-code/rules.go for the full rationale. The source model
+// is agent-agnostic; delivery is selected per rule based on native capabilities.
 var useTeamContextContent = []byte(`# Team Context — More Rules Live Outside This Repo
 
 This repo uses SageOx. Behavioral rules and conventions that apply to your
 WHOLE TEAM (not just this repo) live in your team's SageOx team-context
-repo, NOT in ` + "`.factory/rules/`" + `. SageOx will not auto-sync them here —
-that would create stale-mirror and naming-conflict problems. Instead,
-read them on demand from the canonical location.
+repo. That repo is the source of truth. ox may place ignored, managed
+` + "`sageox-team-*`" + ` projections in ` + "`.factory/rules/`" + ` when Droid can
+preserve a rule's semantics. Never edit those projections; edit the Team Context
+source instead.
 
 ## Where team rules live
 
@@ -288,13 +288,16 @@ Typical layout:
 
 ## How to discover and read them
 
-` + "`ox agent prime`" + ` already inlines:
-- Team AGENTS.md / CLAUDE.md
-- ` + "`visibility: always`" + ` team rules (full body)
-- Team MEMORY.md
+Each rule has exactly one delivery path for the active AI coworker:
+- Unscoped, native-compatible rules already projected into
+  ` + "`.factory/rules/`" + ` load there and are omitted from ` + "`ox agent prime`" + `.
+- Scoped rules cannot be represented faithfully by Droid's native format, so
+  prime catalogs them for on-demand use instead of making them always-on.
+- Other ` + "`visibility: always`" + ` rules are inlined by prime.
 
-` + "`ox agent prime`" + ` also catalogs (name + description + path only):
-- ` + "`visibility: indexed`" + ` team rules — read on demand via the path
+` + "`ox agent prime`" + ` also includes:
+- Team AGENTS.md / CLAUDE.md
+- Team MEMORY.md
 
 To read an indexed team rule: use the file-read tool with the absolute
 path shown in the prime output's ` + "`<team-rules>`" + ` block.
@@ -319,11 +322,10 @@ Team rules apply to every supported AI coding agent (Claude, Codex, Amp,
 Cursor, Droid, etc.) used by teammates running ox — but only for
 teammates running ox.
 
-## Why this rule exists (instead of syncing team rules here)
+## Why this pointer still exists
 
-Syncing team rules from team-context into ` + "`.factory/rules/`" + ` would
-require continuous mirror semantics, namespace management to avoid
-project-local conflicts, and per-adapter coverage. Pointing here keeps
-the team-context repo as the single source of truth and works uniformly
-across every coding agent that supports rules.
+Native projection is an optimization, not the catalog. This pointer covers
+indexed rules, scoped fallbacks, Team Context navigation, and the authoring
+workflow. ox owns continuous mirror cleanup and the reserved
+` + "`sageox-team-*`" + ` namespace; the Team Context file remains canonical.
 `)

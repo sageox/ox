@@ -335,4 +335,8 @@ func TestPointerRule_TellsTheTruthAboutTeamContent(t *testing.T) {
 	flat := strings.Join(strings.Fields(body), " ")
 	assert.Contains(t, flat, "absolute path shown in the prime output",
 		"pointer rule tells agents to read the absolute path; prime must keep emitting one")
+	assert.Contains(t, body, "exactly one delivery path")
+	assert.Contains(t, body, "sageox-team-*")
+	assert.NotContains(t, body, "will not auto-sync",
+		"pointer rule must describe hybrid native-or-prime delivery")
 }

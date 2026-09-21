@@ -4,7 +4,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +18,8 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/internal/teamrules"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 
 	"github.com/stretchr/testify/assert"
@@ -70,6 +74,43 @@ func TestRunAgentPrime_RunsEndToEndAndRecordsSkillTiming(t *testing.T) {
 		"prime must record skill-inventory timing on every run")
 	assert.Contains(t, out, "\"agent_id\"",
 		"prime must issue an agent identity — without it every downstream ox command fails")
+}
+
+func TestRunAgentPrime_OmitsAnExistingNativeTeamRule(t *testing.T) {
+	env := initializedE2E(t)
+	teamDir := t.TempDir()
+	rulePath := filepath.Join(teamDir, "agents", "rules", "security.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(rulePath), 0o755))
+	require.NoError(t, os.WriteFile(rulePath, []byte("---\nname: security\ndescription: Security policy\nvisibility: always\n---\n\nNEVER_LOG_E2E_SECRET_MARKER\n"), 0o644))
+	localCfg := fmt.Sprintf("\n[[team_contexts]]\nteam_id = %q\nteam_name = %q\nslug = %q\npath = %q\nlast_sync = 0001-01-01T00:00:00Z\n",
+		env.TeamID, "E2E Team", "e2e-team", teamDir)
+	require.NoError(t, os.WriteFile(filepath.Join(env.Root, ".sageox", "config.local.toml"), []byte(localCfg), 0o600))
+
+	require.NoError(t, os.MkdirAll(filepath.Join(env.Root, ".claude", "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(env.Root, ".claude", ".gitignore"),
+		[]byte("rules/sageox-team-*\n"), 0o644))
+	rules, err := teamdocs.DiscoverRules(teamDir, "")
+	require.NoError(t, err)
+	result, err := teamrules.Reconcile(context.Background(), env.Root, rules)
+	require.NoError(t, err)
+	require.Contains(t, result.NativeAgents["security"], "claude")
+
+	var buf bytes.Buffer
+	cmd := agentPrimeCmd
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	require.NoError(t, cmd.Flags().Set("agent", "claude-code"))
+	require.NoError(t, cmd.Flags().Set("format", "xml"))
+	t.Cleanup(func() {
+		_ = cmd.Flags().Set("agent", "")
+		_ = cmd.Flags().Set("format", "")
+		cmd.SetOut(nil)
+		cmd.SetErr(nil)
+	})
+
+	require.NoError(t, runAgentPrime(cmd, nil))
+	require.NotContains(t, buf.String(), "NEVER_LOG_E2E_SECRET_MARKER",
+		"the native Team Rule was duplicated through prime")
 }
 
 // TestRunAgentPrime_ReconcilesWhenTheRecordedRevisionIsStale covers the branch

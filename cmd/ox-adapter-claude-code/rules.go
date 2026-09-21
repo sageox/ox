@@ -25,10 +25,10 @@ import (
 // cannot be covered by the same one-line rule, so flattening is a prerequisite
 // for keeping rules out of the customer's pull requests.
 //
-// Design note (rule pointer pattern), unchanged: rather than mirroring every team
-// rule into .claude/rules/, the adapter installs ONE pointer rule that teaches
-// the agent to discover team rules in their canonical home
-// (<team-context>/agents/rules/). Team rules stay where the team writes them.
+// Design note (hybrid rule delivery): the adapter installs ONE pointer rule for
+// indexed discovery and authoring guidance. ox may also project a Team Rule into
+// the ignored sageox-team-* namespace when Claude's native format preserves its
+// semantics. Team Context remains canonical; projections are derived caches.
 const sageoxRulesNamespace = "sageox"
 
 const (
@@ -319,21 +319,16 @@ Your session becomes part of the project ledger — teammates learn from it.
 `)
 
 // useTeamContextContent is the pointer rule installed at
-// .claude/rules/sageox/use-team-context.md. It tells the agent that
-// team-wide rules, conventions, and knowledge are NOT in this repo's
-// .claude/rules/ — they live in the team-context repo and are loaded
-// either via `ox agent prime` (always) or via on-demand reads.
-//
-// The rule deliberately does NOT duplicate team content into Claude's
-// rule store. It points to the canonical location and explains how to
-// fetch the parts the agent needs.
+// .claude/rules/sageox/use-team-context.md. It points to the canonical Team
+// Context source and explains the native-or-prime exactly-once delivery model.
 var useTeamContextContent = []byte(`# Team Context — More Rules Live Outside This Repo
 
 This repo uses SageOx. Behavioral rules and conventions that apply to your
 WHOLE TEAM (not just this repo) live in your team's SageOx team-context
-repo, NOT in ` + "`.claude/rules/`" + `. SageOx will not auto-sync them here —
-that would create stale-mirror and naming-conflict problems. Instead,
-read them on demand from the canonical location.
+repo. That repo is the source of truth. ox may place ignored, managed
+` + "`sageox-team-*`" + ` projections in ` + "`.claude/rules/`" + ` so Claude can apply
+compatible rules natively. Never edit those projections; edit the Team Context
+source instead.
 
 ## Where team rules live
 
@@ -356,13 +351,16 @@ Typical layout:
 
 ## How to discover and read them
 
-` + "`ox agent prime`" + ` already inlines:
-- Team AGENTS.md / CLAUDE.md
-- ` + "`visibility: always`" + ` team rules (full body)
-- Team MEMORY.md
+Each rule has exactly one delivery path for the active AI coworker:
+- Native-compatible rules already projected into ` + "`.claude/rules/`" + ` load there
+  and are omitted from ` + "`ox agent prime`" + `.
+- Other ` + "`visibility: always`" + ` rules are inlined by prime.
+- ` + "`visibility: indexed`" + ` rules are cataloged by prime (name, description,
+  and path) and read on demand.
 
-` + "`ox agent prime`" + ` also catalogs (name + description + path only):
-- ` + "`visibility: indexed`" + ` team rules — read on demand via the path
+` + "`ox agent prime`" + ` also includes:
+- Team AGENTS.md / CLAUDE.md
+- Team MEMORY.md
 
 To read an indexed team rule: use the Read tool with the absolute path
 shown in the prime output's ` + "`<team-rules>`" + ` block.
@@ -389,13 +387,10 @@ running ox. Project-local ` + "`.claude/rules/`" + ` only reaches Claude
 users. That asymmetry is the reason to promote durable conventions
 team-wide.
 
-## Why this rule exists (instead of syncing team rules here)
+## Why this pointer still exists
 
-Syncing team rules from team-context into ` + "`.claude/rules/`" + ` would
-require: continuous mirror semantics (write on change, remove on
-disappearance), namespace management to avoid project-local conflicts,
-and per-adapter coverage (Claude has rules; Codex / Amp don't yet).
-Pointing here instead keeps the team-context repo as the single source
-of truth and works uniformly across every coding agent that supports
-rules.
+Native projection is an optimization, not the catalog. This pointer covers
+indexed rules, delivery fallbacks, Team Context navigation, and the authoring
+workflow. ox owns continuous mirror cleanup and the reserved
+` + "`sageox-team-*`" + ` namespace; the Team Context file remains canonical.
 `)

@@ -94,6 +94,57 @@ func TestCheckOxIgnoreRulesIn_ProbesTeamSkillNamespace(t *testing.T) {
 	}
 }
 
+func TestCheckOxIgnoreRulesIn_ProbesNativeTeamRuleNamespace(t *testing.T) {
+	root := newIgnoreTestRepo(t)
+	touch(t, root, ".claude/rules/sageox-team-probe.md")
+	if _, err := ensureScopedIgnoreFiles(root); err != nil {
+		t.Fatalf("ensureScopedIgnoreFiles: %v", err)
+	}
+	deeper := filepath.Join(root, ".claude", "rules", ".gitignore")
+	if err := os.MkdirAll(filepath.Dir(deeper), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(deeper, []byte("!sageox-team-probe.md\n"), 0o644); err != nil {
+		t.Fatalf("write deeper ignore: %v", err)
+	}
+
+	res := checkOxIgnoreRulesIn(root, true)
+	if !res.warning || !strings.Contains(res.message, "still not ignored") {
+		t.Fatalf("Team Rule namespace override was not reported: message=%q detail=%q", res.message, res.detail)
+	}
+	if gitIgnores(t, root, ".claude/rules/sageox-team-probe.md") {
+		t.Error("fixture did not expose the Team Rule ignore override")
+	}
+}
+
+func TestCheckOxIgnoreRulesIn_RepairsEveryNativeTeamRuleNamespace(t *testing.T) {
+	root := newIgnoreTestRepo(t)
+	projections := []string{
+		".claude/rules/sageox-team-probe.md",
+		".cursor/rules/sageox-team-probe.mdc",
+		".github/instructions/sageox-team-probe.md",
+		".clinerules/sageox-team-probe.md",
+		".kiro/steering/sageox-team-probe.md",
+		".factory/rules/sageox-team-probe.md",
+		".windsurf/rules/sageox-team-probe.md",
+	}
+	for _, rel := range projections {
+		touch(t, root, rel)
+	}
+	if got := checkOxIgnoreRulesIn(root, false); got.passed {
+		t.Fatalf("unprotected Team Rule surfaces reported healthy: %s / %s", got.message, got.detail)
+	}
+	res := checkOxIgnoreRulesIn(root, true)
+	if !res.passed || res.warning {
+		t.Fatalf("--fix did not protect every Team Rule surface: %s / %s", res.message, res.detail)
+	}
+	for _, rel := range projections {
+		if !gitIgnores(t, root, rel) {
+			t.Errorf("Team Rule projection remains visible to git: %s", rel)
+		}
+	}
+}
+
 // TestCheckOxIgnoreRulesIn_NoFootprintInUnusedAgentDirs: a Claude-only repo must
 // not sprout .agents/ or .factory/ just because a check ran.
 func TestCheckOxIgnoreRulesIn_NoFootprintInUnusedAgentDirs(t *testing.T) {

@@ -125,6 +125,24 @@ func TestClassifyLegacyPath_NestedLegacyRulesInEveryRulesRoot(t *testing.T) {
 	}
 }
 
+func TestClassifyLegacyPath_ClaimsTeamRuleProjectionsOnEveryNativeSurface(t *testing.T) {
+	root := classifyRepo(t)
+	for _, rel := range []string{
+		".claude/rules/sageox-team-security.md",
+		".cursor/rules/sageox-team-security.mdc",
+		".github/instructions/sageox-team-security.md",
+		".clinerules/sageox-team-security.md",
+		".kiro/steering/sageox-team-security.md",
+		".factory/rules/sageox-team-security.md",
+		".windsurf/rules/sageox-team-security.md",
+	} {
+		put(t, root, rel, []byte("managed projection\n"))
+		if got := classifyLegacyPath(root, rel); got != legacyReserved {
+			t.Errorf("%s classified %v, want legacyReserved", rel, got)
+		}
+	}
+}
+
 // TestPlainStampVerifies_RequiresTheStampOnLineOne: without the prefix check, a
 // file whose body verifies but which has user-authored bytes inserted ABOVE the
 // stamp would be claimed by ox and deleted.
