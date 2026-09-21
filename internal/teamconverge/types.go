@@ -143,3 +143,13 @@ type RetryableError struct {
 
 func (e *RetryableError) Error() string { return e.Err.Error() }
 func (e *RetryableError) Unwrap() error { return e.Err }
+
+// settledError marks a handler failure whose recovery requires a source or
+// local configuration change. Unmarked errors remain retryable by default.
+type settledError struct {
+	State OutcomeState
+	Err   error
+}
+
+func (e *settledError) Error() string { return e.Err.Error() }
+func (e *settledError) Unwrap() error { return e.Err }

@@ -58,7 +58,7 @@ func (SkillHandler) Converge(_ context.Context, request Request, snapshot Snapsh
 	}
 	configured := config.FindRepoTeamContext(request.ProjectRoot)
 	if configured == nil || configured.Path == "" {
-		return nil, fmt.Errorf("no Team Context is configured for this repository")
+		return nil, &settledError{State: StateError, Err: fmt.Errorf("no Team Context is configured for this repository")}
 	}
 	want, err := filepath.Abs(snapshot.Path)
 	if err != nil {
@@ -69,7 +69,7 @@ func (SkillHandler) Converge(_ context.Context, request Request, snapshot Snapsh
 		return nil, err
 	}
 	if filepath.Clean(want) != filepath.Clean(got) {
-		return nil, fmt.Errorf("configured Team Context %s does not match snapshot %s", got, want)
+		return nil, &settledError{State: StateError, Err: fmt.Errorf("configured Team Context %s does not match snapshot %s", got, want)}
 	}
 	if _, _, selected := skillmanager.InstalledSource(request.ProjectRoot); !selected {
 		outcomes := make([]Outcome, 0, len(artifacts))
@@ -86,7 +86,7 @@ func (SkillHandler) Converge(_ context.Context, request Request, snapshot Snapsh
 	var plan *skillmanager.ReconcilePlan
 	switch request.Mode {
 	case ModeInspect:
-		return nil, fmt.Errorf("inspect mode cannot apply Team Skills")
+		return nil, &settledError{State: StateError, Err: errors.New("inspect mode cannot apply Team Skills")}
 	case ModeExplicit:
 		plan, err = skillmanager.ReconcileUpdate(request.ProjectRoot, version.Version, identity)
 	default:
@@ -102,7 +102,7 @@ func (SkillHandler) Converge(_ context.Context, request Request, snapshot Snapsh
 		return nil, fmt.Errorf("skill reconcile returned no plan")
 	}
 	if len(plan.Warnings) > 0 {
-		return nil, fmt.Errorf("skill reconcile refused: %s", strings.Join(plan.Warnings, "; "))
+		return nil, &settledError{State: StateError, Err: fmt.Errorf("skill reconcile refused: %s", strings.Join(plan.Warnings, "; "))}
 	}
 
 	decisions := make(map[string]skillmanager.TeamSkillDecision, len(plan.TeamSkills))
@@ -151,7 +151,7 @@ func (RuleHandler) Converge(ctx context.Context, request Request, snapshot Snaps
 		}
 	}
 	if request.Mode == ModeInspect {
-		return nil, fmt.Errorf("inspect mode cannot apply Team Rules")
+		return nil, &settledError{State: StateError, Err: errors.New("inspect mode cannot apply Team Rules")}
 	}
 
 	// An absent rules root is not an authoritative empty set. Team Context uses
@@ -186,6 +186,9 @@ func (RuleHandler) Converge(ctx context.Context, request Request, snapshot Snaps
 
 	result, err := teamrules.Reconcile(ctx, request.ProjectRoot, wanted)
 	if err != nil {
+		if errors.Is(err, teamrules.ErrProjectionConflict) {
+			return nil, &settledError{State: StateConflict, Err: err}
+		}
 		return nil, err
 	}
 	outcomes := make([]Outcome, 0, len(artifacts))

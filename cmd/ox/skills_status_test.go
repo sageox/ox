@@ -103,6 +103,20 @@ func TestCollectSkillsStatus_ExposesPendingVersusFailedConvergence(t *testing.T)
 	}
 }
 
+func TestCollectSkillsStatus_DoesNotPromiseRetriesAfterBudgetIsExhausted(t *testing.T) {
+	repo := t.TempDir()
+	report := teamconverge.Report{Snapshot: teamconverge.Snapshot{Path: "/team", Commit: "abcdef"}}
+	for range teamconverge.MaxAutomaticConvergenceAttempts {
+		_, err := teamconverge.SavePending(repo, teamconverge.PendingRetry, report, "still busy")
+		require.NoError(t, err)
+	}
+
+	out := collectSkillsStatus(repo)
+	problems := strings.Join(out.Problems, "\n")
+	require.Contains(t, problems, "automatic retry limit reached")
+	require.NotContains(t, problems, "will retry automatically")
+}
+
 // writeTeamSkillFixture stages a published skill in a team checkout.
 func writeTeamSkillFixture(t *testing.T, teamPath, name, frontmatterExtra string) {
 	t.Helper()

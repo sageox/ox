@@ -73,6 +73,7 @@ func TestReconcile_ProjectsOnceAndRemovesRetiredRules(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(content), `globs: "**/*.go"`)
 	require.Contains(t, string(content), "Use gofmt.")
+	require.True(t, verifiedProjection(content))
 
 	// A current native copy suppresses prime for Claude, while Codex receives a
 	// lazy index entry. The same rule therefore reaches either agent exactly once.
@@ -86,9 +87,66 @@ func TestReconcile_ProjectsOnceAndRemovesRetiredRules(t *testing.T) {
 	require.Empty(t, codex[0].Body)
 
 	result, err = Reconcile(context.Background(), project, nil)
+	require.ErrorContains(t, err, "not a verified ox projection")
+	require.FileExists(t, native, "a locally edited projection must be preserved")
+
+	// Retirement is safe once the exact managed projection is restored.
+	require.NoError(t, os.WriteFile(native, content, 0o644))
+	result, err = Reconcile(context.Background(), project, nil)
 	require.NoError(t, err)
 	require.Contains(t, result.Removed, filepath.ToSlash(filepath.Join(".claude", "rules", filepath.Base(native))))
 	require.NoFileExists(t, native, "a retired Team Rule survived native reconciliation")
+}
+
+func TestReconcile_PreservesUntrackedReservedFilesWithoutOwnershipProof(t *testing.T) {
+	setup := func(t *testing.T) (string, string, teamdocs.TeamRule) {
+		t.Helper()
+		project := t.TempDir()
+		rulesRoot := filepath.Join(project, ".claude", "rules")
+		require.NoError(t, os.MkdirAll(rulesRoot, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"),
+			[]byte(".claude/rules/sageox-team-*\n"), 0o644))
+		git := exec.Command("git", "init", "-q")
+		git.Dir = project
+		require.NoError(t, git.Run())
+
+		source := filepath.Join(t.TempDir(), "security.md")
+		require.NoError(t, os.WriteFile(source, []byte("Canonical body.\n"), 0o644))
+		rule := teamdocs.TeamRule{
+			Name: "security", RelPath: "security.md", AbsPath: source,
+			Visibility: teamdocs.VisibilityAlways,
+		}
+		return project, rulesRoot, rule
+	}
+
+	t.Run("desired filename collision", func(t *testing.T) {
+		project, _, rule := setup(t)
+		native, ok := NativePath(project, "claude", rule)
+		require.True(t, ok)
+		const local = "hand-authored local rule\n"
+		require.NoError(t, os.WriteFile(native, []byte(local), 0o644))
+
+		_, err := Reconcile(context.Background(), project, []teamdocs.TeamRule{rule})
+		require.ErrorContains(t, err, "not a verified ox projection")
+		require.ErrorIs(t, err, ErrProjectionConflict)
+		got, readErr := os.ReadFile(native)
+		require.NoError(t, readErr)
+		require.Equal(t, local, string(got))
+	})
+
+	t.Run("retired reserved filename", func(t *testing.T) {
+		project, rulesRoot, _ := setup(t)
+		localPath := filepath.Join(rulesRoot, "sageox-team-hand-authored.md")
+		const local = "hand-authored retired rule\n"
+		require.NoError(t, os.WriteFile(localPath, []byte(local), 0o644))
+
+		_, err := Reconcile(context.Background(), project, nil)
+		require.ErrorContains(t, err, "not a verified ox projection")
+		require.ErrorIs(t, err, ErrProjectionConflict)
+		got, readErr := os.ReadFile(localPath)
+		require.NoError(t, readErr)
+		require.Equal(t, local, string(got))
+	})
 }
 
 func TestReconcile_EachSupportedAgentGetsExactlyOneDelivery(t *testing.T) {
@@ -235,7 +293,10 @@ func TestProjectionHelpers_DefensiveAndFallbackBranches(t *testing.T) {
 		project := t.TempDir()
 		require.False(t, HasNativeProjections(project))
 		require.NoError(t, os.MkdirAll(filepath.Join(project, ".claude", "rules"), 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(project, ".claude", "rules", "sageox-team-a.md"), []byte("x"), 0o644))
+		projection := filepath.Join(project, ".claude", "rules", "sageox-team-a.md")
+		require.NoError(t, os.WriteFile(projection, []byte("x"), 0o644))
+		require.False(t, HasNativeProjections(project), "a reserved name is not ownership proof")
+		require.NoError(t, os.WriteFile(projection, stampProjection([]byte("x")), 0o644))
 		require.True(t, HasNativeProjections(project))
 
 		rule := teamdocs.TeamRule{Name: "A Rule", RelPath: "a.md"}
@@ -258,6 +319,9 @@ func TestProjectionHelpers_DefensiveAndFallbackBranches(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, strings.HasSuffix(string(content), "\n"))
 		require.Contains(t, string(content), "alwaysApply: true")
+		require.True(t, verifiedProjection(content))
+		require.False(t, verifiedProjection(append(append([]byte(nil), content...), []byte("edited\n")...)))
+		require.False(t, verifiedProjection([]byte("unstamped\n")))
 
 		emptySlug := nativeFilename(teamdocs.TeamRule{Name: "!!!", RelPath: "x"}, policies[0])
 		require.Contains(t, emptySlug, "sageox-team-rule-")

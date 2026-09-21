@@ -150,9 +150,13 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 		out.Problems = append(out.Problems, fmt.Sprintf("Team Context convergence status is unreadable: %v", pendingErr))
 	} else if pending != nil {
 		out.Convergence = pending
-		if pending.Status == teamconverge.PendingRetry {
+		if teamconverge.AutomaticRetryAllowed(pending, pending.TeamPath) {
 			out.Problems = append(out.Problems, fmt.Sprintf(
 				"Team Context convergence is pending and will retry automatically (attempt %d): %s", pending.Attempts, pending.Reason))
+		} else if pending.Status == teamconverge.PendingRetry {
+			out.Problems = append(out.Problems, fmt.Sprintf(
+				"Team Context convergence is pending after %d attempts; automatic retry limit reached — run `ox sync`: %s",
+				pending.Attempts, pending.Reason))
 		} else {
 			out.Problems = append(out.Problems, fmt.Sprintf(
 				"Team Context convergence failed and needs attention: %s", pending.Reason))

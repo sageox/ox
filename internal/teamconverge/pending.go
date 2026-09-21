@@ -13,9 +13,22 @@ import (
 )
 
 const (
-	pendingSchemaVersion = 1
-	pendingRelativePath  = ".sageox/cache/team-convergence.json"
+	pendingSchemaVersion            = 1
+	pendingRelativePath             = ".sageox/cache/team-convergence.json"
+	MaxAutomaticConvergenceAttempts = 3
 )
+
+// AutomaticRetryAllowed reports whether the daemon may spend another retry on
+// a durable convergence failure. The initial failed convergence is attempt one;
+// at most two unchanged sync passes follow it. A new Team Context commit resets
+// the counter through SavePending, while explicit `ox sync` remains available
+// after the automatic budget is exhausted.
+func AutomaticRetryAllowed(record *PendingRecord, teamPath string) bool {
+	return record != nil && record.Status == PendingRetry &&
+		record.Attempts < MaxAutomaticConvergenceAttempts &&
+		record.TeamPath != "" && teamPath != "" &&
+		filepath.Clean(record.TeamPath) == filepath.Clean(teamPath)
+}
 
 type PendingStatus string
 
@@ -98,9 +111,9 @@ func ClearPending(projectRoot string) error {
 }
 
 // PendingStatusFor distinguishes transient work from content or capability
-// failures that need human action. Both remain eligible for the scheduler's
-// bounded anti-entropy retry so a local approval/fix can converge without a new
-// Team Context commit.
+// failures that need human action. Only PendingRetry is eligible for the
+// scheduler's bounded anti-entropy retry; settled failures wait for an explicit
+// sync or a new Team Context artifact change.
 func PendingStatusFor(report Report) PendingStatus {
 	for _, outcome := range report.Outcomes {
 		if outcome.State == StateError || outcome.State == StateConflict ||

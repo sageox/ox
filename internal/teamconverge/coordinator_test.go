@@ -174,9 +174,11 @@ func TestCoordinator_FailsClosedOnHandlerGaps(t *testing.T) {
 		name    string
 		handler Handler
 		detail  string
+		state   OutcomeState
 	}{
-		{name: "handler error", handler: echoHandler{kind: KindSkill, err: errors.New("apply failed")}, detail: "apply failed"},
-		{name: "missing outcome", handler: echoHandler{kind: KindSkill, drop: true}, detail: "expected exactly one"},
+		{name: "unclassified handler error retries", handler: echoHandler{kind: KindSkill, err: errors.New("apply failed")}, detail: "apply failed", state: StatePending},
+		{name: "enumerated settled error", handler: echoHandler{kind: KindSkill, err: &settledError{State: StateConflict, Err: errors.New("local collision")}}, detail: "local collision", state: StateConflict},
+		{name: "missing outcome is settled", handler: echoHandler{kind: KindSkill, drop: true}, detail: "expected exactly one", state: StateError},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -185,7 +187,7 @@ func TestCoordinator_FailsClosedOnHandlerGaps(t *testing.T) {
 			report, err := coordinator.Converge(context.Background(), Request{})
 			require.NoError(t, err)
 			require.Len(t, report.Outcomes, 1)
-			require.Equal(t, StateError, report.Outcomes[0].State)
+			require.Equal(t, tt.state, report.Outcomes[0].State)
 			require.Contains(t, report.Outcomes[0].Detail, tt.detail)
 			require.False(t, report.Converged())
 		})

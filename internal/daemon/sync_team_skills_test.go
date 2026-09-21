@@ -172,6 +172,52 @@ func TestTeamConvergence_RetriesPendingLockContentionWithoutNewCommit(t *testing
 	require.Nil(t, pending, "verified convergence did not clear the pending marker")
 }
 
+func TestTeamConvergence_DoesNotRetrySettledOrExhaustedWorkWithoutAChange(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   teamconverge.PendingStatus
+		attempts int
+	}{
+		{name: "settled failure", status: teamconverge.PendingFailed, attempts: 1},
+		{name: "automatic budget exhausted", status: teamconverge.PendingRetry, attempts: teamconverge.MaxAutomaticConvergenceAttempts},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			project := t.TempDir()
+			runTeamGit(t, project, "init", "-q")
+			team := t.TempDir()
+			runTeamGit(t, team, "init", "-q")
+			runTeamGit(t, team, "config", "user.email", "test@sageox.ai")
+			runTeamGit(t, team, "config", "user.name", "test")
+			runTeamGit(t, team, "config", "commit.gpgsign", "false")
+			require.NoError(t, os.WriteFile(filepath.Join(team, "README.md"), []byte("team\n"), 0o644))
+			runTeamGit(t, team, "add", "README.md")
+			runTeamGit(t, team, "commit", "-q", "-m", "team")
+
+			require.NoError(t, config.SaveProjectConfig(project, &config.ProjectConfig{
+				ConfigVersion: config.CurrentConfigVersion, RepoID: "repo_test", TeamID: "team_test", TeamName: "Test",
+			}))
+			require.NoError(t, config.SaveLocalConfig(project, &config.LocalConfig{TeamContexts: []config.TeamContext{{
+				TeamID: "team_test", TeamName: "Test", Path: team,
+			}}}))
+
+			report := teamconverge.Report{Snapshot: teamconverge.Snapshot{Path: team, Commit: "same"}}
+			for range tt.attempts {
+				_, err := teamconverge.SavePending(project, tt.status, report, "fixture failure")
+				require.NoError(t, err)
+			}
+
+			newTestScheduler(project).reconcileTeamSkills(nil)
+			pending, err := teamconverge.LoadPending(project)
+			require.NoError(t, err)
+			require.NotNil(t, pending)
+			require.Equal(t, tt.status, pending.Status)
+			require.Equal(t, tt.attempts, pending.Attempts,
+				"an unchanged daemon pass spent a retry outside the automatic budget")
+		})
+	}
+}
+
 func runTeamGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

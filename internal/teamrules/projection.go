@@ -4,9 +4,11 @@
 package teamrules
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -19,7 +21,16 @@ import (
 	"github.com/sageox/ox/internal/teamdocs"
 )
 
-const managedPrefix = "sageox-team-"
+const (
+	managedPrefix         = "sageox-team-"
+	projectionStampPrefix = "<!-- ox-team-rule-sha256:"
+	projectionStampSuffix = "; managed by ox from Team Context; edit the source rule, not this projection. -->"
+)
+
+// ErrProjectionConflict marks a native rule path that ox cannot safely claim.
+// The caller should surface it as settled human-action work, not retry it as an
+// environmental failure.
+var ErrProjectionConflict = errors.New("existing repository content blocks Team Rule projection")
 
 type DeliveryMode string
 
@@ -94,7 +105,9 @@ func ModeForAgent(agent string, rule teamdocs.TeamRule) DeliveryMode {
 
 // Reconcile mirrors the native-compatible subset into every agent rule root
 // already present and protected by gitignore. Reserved files absent from desired
-// state are removed, so filtering and retirement converge rather than append.
+// state are removed when their content hash verifies that ox created them, so
+// filtering and retirement converge without claiming hand-authored files that
+// happen to use the reserved filename prefix.
 func Reconcile(ctx context.Context, projectRoot string, rules []teamdocs.TeamRule) (Result, error) {
 	result := newResult()
 	for _, p := range policies {
@@ -178,7 +191,14 @@ func HasNativeProjections(projectRoot string) bool {
 			continue
 		}
 		for _, entry := range entries {
-			if strings.HasPrefix(entry.Name(), managedPrefix) && strings.HasSuffix(entry.Name(), p.Extension) {
+			if !strings.HasPrefix(entry.Name(), managedPrefix) || !strings.HasSuffix(entry.Name(), p.Extension) {
+				continue
+			}
+			if !entry.Type().IsRegular() {
+				continue
+			}
+			content, readErr := os.ReadFile(filepath.Join(rootPath, entry.Name()))
+			if readErr == nil && verifiedProjection(content) {
 				return true
 			}
 		}
@@ -259,7 +279,6 @@ func render(rule teamdocs.TeamRule, p policy) ([]byte, error) {
 		}
 		lines = append(lines, "---", "")
 	}
-	lines = append(lines, "<!-- Managed by ox from Team Context; edit the source rule, not this projection. -->")
 	if body != "" {
 		lines = append(lines, body)
 	}
@@ -267,7 +286,38 @@ func render(rule teamdocs.TeamRule, p policy) ([]byte, error) {
 	if !strings.HasSuffix(out, "\n") {
 		out += "\n"
 	}
-	return []byte(out), nil
+	return stampProjection([]byte(out)), nil
+}
+
+// stampProjection records ownership without requiring a machine-local
+// inventory. The trailer covers every byte before it, including frontmatter,
+// so a local edit invalidates ownership and reconciliation preserves the file.
+func stampProjection(content []byte) []byte {
+	content = bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n"))
+	if len(content) == 0 || content[len(content)-1] != '\n' {
+		content = append(content, '\n')
+	}
+	sum := sha256.Sum256(content)
+	stamp := fmt.Sprintf("%s%x%s\n", projectionStampPrefix, sum, projectionStampSuffix)
+	return append(append([]byte(nil), content...), []byte(stamp)...)
+}
+
+func verifiedProjection(content []byte) bool {
+	content = bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n"))
+	marker := []byte("\n" + projectionStampPrefix)
+	markerOffset := bytes.LastIndex(content, marker)
+	if markerOffset < 0 {
+		return false
+	}
+	payload := content[:markerOffset+1]
+	stamp := content[markerOffset+1:]
+	wantLength := len(projectionStampPrefix) + sha256.Size*2 + len(projectionStampSuffix) + 1
+	if len(stamp) != wantLength || !bytes.HasSuffix(stamp, []byte(projectionStampSuffix+"\n")) {
+		return false
+	}
+	wantHash := fmt.Sprintf("%x", sha256.Sum256(payload))
+	gotHash := string(stamp[len(projectionStampPrefix) : len(projectionStampPrefix)+sha256.Size*2])
+	return gotHash == wantHash
 }
 
 func nativeFilename(rule teamdocs.TeamRule, p policy) string {
@@ -314,7 +364,7 @@ func reconcileRoot(ctx context.Context, projectRoot, rootPath string, p policy, 
 	}
 	for name, content := range desired {
 		current, readErr := root.ReadFile(name)
-		if readErr == nil && string(current) == string(content) {
+		if readErr == nil && bytes.Equal(current, content) {
 			continue
 		}
 		if readErr != nil && !os.IsNotExist(readErr) {
@@ -322,7 +372,10 @@ func reconcileRoot(ctx context.Context, projectRoot, rootPath string, p policy, 
 		}
 		rel := filepath.ToSlash(filepath.Join(p.Root, name))
 		if managedPathTracked(ctx, projectRoot, rel) {
-			return nil, nil, fmt.Errorf("refusing to update tracked Team Rule projection %s", rel)
+			return nil, nil, fmt.Errorf("%w: refusing to update tracked Team Rule projection %s", ErrProjectionConflict, rel)
+		}
+		if readErr == nil && !verifiedProjection(current) {
+			return nil, nil, fmt.Errorf("%w: refusing to update %s: existing file is not a verified ox projection", ErrProjectionConflict, rel)
 		}
 		if err := atomicWrite(root, name, content); err != nil {
 			return nil, nil, err
@@ -339,7 +392,14 @@ func reconcileRoot(ctx context.Context, projectRoot, rootPath string, p policy, 
 		}
 		rel := filepath.ToSlash(filepath.Join(p.Root, name))
 		if managedPathTracked(ctx, projectRoot, rel) {
-			return nil, nil, fmt.Errorf("refusing to remove tracked Team Rule projection %s", rel)
+			return nil, nil, fmt.Errorf("%w: refusing to remove tracked Team Rule projection %s", ErrProjectionConflict, rel)
+		}
+		current, readErr := root.ReadFile(name)
+		if readErr != nil {
+			return nil, nil, readErr
+		}
+		if !verifiedProjection(current) {
+			return nil, nil, fmt.Errorf("%w: refusing to remove %s: existing file is not a verified ox projection", ErrProjectionConflict, rel)
 		}
 		if err := root.Remove(name); err != nil && !os.IsNotExist(err) {
 			return nil, nil, err

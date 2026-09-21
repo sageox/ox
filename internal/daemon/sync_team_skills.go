@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"path"
-	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/config"
@@ -98,8 +97,7 @@ func (s *SyncScheduler) reconcileTeamSkills(changed []string) {
 	if pendingErr != nil {
 		s.logger.Warn("team convergence state unreadable", "repo", repoRoot, "error", pendingErr)
 	}
-	retryIncomplete := pending != nil &&
-		filepath.Clean(pending.TeamPath) == filepath.Clean(team.Path)
+	retryIncomplete := teamconverge.AutomaticRetryAllowed(pending, team.Path)
 	if !teamArtifactsTouched(changed) && !retryIncomplete {
 		return
 	}

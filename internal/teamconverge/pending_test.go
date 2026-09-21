@@ -47,6 +47,39 @@ func TestPendingRecord_NewCommitResetsAttempts(t *testing.T) {
 	require.Equal(t, 1, record.Attempts)
 }
 
+func TestAutomaticRetryAllowed_RequiresRetryableSameTeamWithinBudget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		record *PendingRecord
+		team   string
+		want   bool
+	}{
+		{name: "missing record"},
+		{name: "retryable work", record: &PendingRecord{
+			Status: PendingRetry, TeamPath: "/team", Attempts: MaxAutomaticConvergenceAttempts - 1,
+		}, team: "/team", want: true},
+		{name: "settled failure", record: &PendingRecord{
+			Status: PendingFailed, TeamPath: "/team", Attempts: 1,
+		}, team: "/team"},
+		{name: "budget exhausted", record: &PendingRecord{
+			Status: PendingRetry, TeamPath: "/team", Attempts: MaxAutomaticConvergenceAttempts,
+		}, team: "/team"},
+		{name: "different team", record: &PendingRecord{
+			Status: PendingRetry, TeamPath: "/other", Attempts: 1,
+		}, team: "/team"},
+		{name: "empty team path", record: &PendingRecord{
+			Status: PendingRetry, TeamPath: "", Attempts: 1,
+		}, team: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, AutomaticRetryAllowed(tt.record, tt.team))
+		})
+	}
+}
+
 func TestLoadPending_RejectsCorruptState(t *testing.T) {
 	project := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Dir(PendingPath(project)), 0o700))

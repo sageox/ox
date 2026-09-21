@@ -164,10 +164,14 @@ func (c *Coordinator) convergeLocked(ctx context.Context, request Request) (Repo
 			if len(items) == 0 {
 				return report, handleErr
 			}
-			state := StateError
-			var retryable *RetryableError
-			if errors.As(handleErr, &retryable) {
-				state = StatePending
+			// Unknown failures are retryable by default. Handlers enumerate
+			// content/capability failures as explicit settled outcomes; treating an
+			// unclassified I/O or implementation error as terminal would silently
+			// strand work that can recover. The durable scheduler bounds retries.
+			state := StatePending
+			var settled *settledError
+			if errors.As(handleErr, &settled) {
+				state = settled.State
 			}
 			for _, artifact := range items {
 				report.Outcomes = append(report.Outcomes, outcomeFor(snapshot, artifact, state, "", handleErr.Error()))
