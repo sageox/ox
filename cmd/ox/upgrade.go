@@ -41,8 +41,12 @@ type upgradeResult struct {
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
 	Args:  cobra.NoArgs,
-	Short: "Upgrade ox to the latest version",
+	Short: "Upgrade ox to the latest or a specific version",
 	Long: `Detect how ox was installed and upgrade using the appropriate method: Homebrew, go install, or an in-place download that verifies and replaces the binary.
+
+For Go and direct binary installations, --target installs the specified release
+without checking the latest release. It can reinstall the current version or
+select an older release. Homebrew and source installations do not support --target.
 
 Failed update checks and installations exit with status 1. With --json,
 stdout contains only the result; installer logs are written to stderr.`,
@@ -61,62 +65,65 @@ func init() {
 
 func runUpgrade(cmd *cobra.Command, _ []string) error {
 	jsonOutput, _ := cmd.Flags().GetBool("json")
+	target, _ := cmd.Flags().GetString("target")
 	method := detectInstallMethod()
 	result := upgradeResult{
 		PreviousVersion: version.Version,
 		InstallMethod:   method,
 	}
 
-	// check if update is available
-	vResult := checkVersionFromCache()
-
-	if vResult == nil {
-		// No cached update is available; check the current release directly.
-		latestTag, err := latestReleaseFetcher()
-		if err == nil && strings.TrimPrefix(latestTag, "v") == "" {
-			err = errors.New("GitHub returned an empty release tag")
-		}
-		if err != nil {
-			result.Status = "failed"
-			result.Message = fmt.Sprintf("could not check for updates: %v", err)
-			return outputUpgradeResult(cmd, result, jsonOutput)
-		}
-
-		latest := strings.TrimPrefix(latestTag, "v")
-		current := strings.TrimPrefix(version.Version, "v")
-		vResult = &versionCheckResult{
-			UpdateAvailable: isNewerVersion(latest, current),
-			LatestVersion:   latest,
-			CurrentVersion:  current,
-		}
-		// Caching is best effort; the live result must survive a cache write failure.
-		writeVersionCacheFromDoctor(latestTag)
-	}
-
-	if !vResult.UpdateAvailable {
-		result.Status = "up-to-date"
-		result.Message = fmt.Sprintf("ox v%s is already the latest version", version.Version)
-		return outputUpgradeResult(cmd, result, jsonOutput)
-	}
-
-	result.NewVersion = vResult.LatestVersion
-	result.ReleaseURL = fmt.Sprintf("https://github.com/sageox/ox/releases/tag/v%s", vResult.LatestVersion)
-
-	if !jsonOutput {
-		fmt.Printf("%s v%s → v%s\n\n",
-			cli.StyleBrand.Render("ox"),
-			cli.StyleDim.Render(vResult.CurrentVersion),
-			cli.StyleSuccess.Render(vResult.LatestVersion))
-		fmt.Printf("%s %s\n", cli.StyleDim.Render("Install method:"), string(method))
-	}
-
-	// perform upgrade based on install method
-	target, _ := cmd.Flags().GetString("target")
 	if err := validateUpgradeTarget(method, target); err != nil {
 		result.Status = "failed"
 		result.Message = err.Error()
 		return outputUpgradeResult(cmd, result, jsonOutput)
 	}
+
+	newVersion := strings.TrimPrefix(target, "v")
+	if target == "" {
+		vResult := checkVersionFromCache()
+		if vResult == nil {
+			// No cached update is available; check the current release directly.
+			latestTag, err := latestReleaseFetcher()
+			if err == nil && strings.TrimPrefix(latestTag, "v") == "" {
+				err = errors.New("GitHub returned an empty release tag")
+			}
+			if err != nil {
+				result.Status = "failed"
+				result.Message = fmt.Sprintf("could not check for updates: %v", err)
+				return outputUpgradeResult(cmd, result, jsonOutput)
+			}
+
+			latest := strings.TrimPrefix(latestTag, "v")
+			current := strings.TrimPrefix(version.Version, "v")
+			vResult = &versionCheckResult{
+				UpdateAvailable: isNewerVersion(latest, current),
+				LatestVersion:   latest,
+				CurrentVersion:  current,
+			}
+			// Caching is best effort; the live result must survive a cache write failure.
+			writeVersionCacheFromDoctor(latestTag)
+		}
+
+		if !vResult.UpdateAvailable {
+			result.Status = "up-to-date"
+			result.Message = fmt.Sprintf("ox v%s is already the latest version", version.Version)
+			return outputUpgradeResult(cmd, result, jsonOutput)
+		}
+		newVersion = vResult.LatestVersion
+	}
+
+	result.NewVersion = newVersion
+	result.ReleaseURL = fmt.Sprintf("https://github.com/sageox/ox/releases/tag/v%s", newVersion)
+
+	if !jsonOutput {
+		fmt.Printf("%s v%s → v%s\n\n",
+			cli.StyleBrand.Render("ox"),
+			cli.StyleDim.Render(strings.TrimPrefix(version.Version, "v")),
+			cli.StyleSuccess.Render(newVersion))
+		fmt.Printf("%s %s\n", cli.StyleDim.Render("Install method:"), string(method))
+	}
+
+	// perform upgrade based on install method
 	var err error
 	switch method {
 	case installHomebrew:
@@ -128,11 +135,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		result.Message = "Dev build detected. Use 'make build && make install' to upgrade."
 		return outputUpgradeResult(cmd, result, jsonOutput)
 	case installBinary:
-		upgradeVersion := vResult.LatestVersion
-		if target != "" {
-			upgradeVersion = strings.TrimPrefix(target, "v")
-		}
-		err = upgradeViaSelfReplace(jsonOutput, upgradeVersion)
+		err = upgradeViaSelfReplace(jsonOutput, newVersion)
 	}
 
 	if err != nil {
@@ -146,7 +149,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	clearVersionCacheAfterUpgrade()
 
 	result.Status = "upgraded"
-	result.Message = fmt.Sprintf("Upgraded to v%s", vResult.LatestVersion)
+	result.Message = fmt.Sprintf("Upgraded to v%s", newVersion)
 	// This process still contains the OLD compiled-in version and skill catalog,
 	// even after brew/go install/self-replace updates the executable on disk. It
 	// may safely stop old daemons, but must leave inventory reconciliation to the

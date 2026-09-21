@@ -6,8 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +49,84 @@ func captureUpgradeOutput(t *testing.T, result upgradeResult, jsonOut bool) stri
 		t.Fatalf("outputUpgradeResult: %v", outErr)
 	}
 	return buf.String() + string(piped)
+}
+
+// Binary pins must reach the requested release independently of the latest
+// release cache/API, and failures must identify the release actually requested.
+func TestUpgradeBinaryTarget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: exercises the binary installer over local HTTPS")
+	}
+	for _, tt := range []struct {
+		name   string
+		target string
+		cached string
+	}{
+		{"no cache and offline release lookup", "v0.42.0", ""},
+		{"different cached release", "0.42.0", "v99.0.0"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			noInputCLIEnv(t)
+			t.Setenv("PATH", t.TempDir()) // no Homebrew or Go installation to detect
+			useTestCacheDir(t)
+			if tt.cached != "" {
+				writeTestVersionCache(t, &versionCacheData{LatestVersion: tt.cached, CheckedAt: time.Now()})
+			}
+			oldVersion, oldBuildDate := version.Version, version.BuildDate
+			version.Version, version.BuildDate = "0.16.0", "2026-09-21T00:00:00Z"
+			t.Cleanup(func() { version.Version, version.BuildDate = oldVersion, oldBuildDate })
+			oldFetcher := latestReleaseFetcher
+			fetched := false
+			latestReleaseFetcher = func() (string, error) {
+				fetched = true
+				return "", errors.New("latest release unavailable")
+			}
+			t.Cleanup(func() { latestReleaseFetcher = oldFetcher })
+
+			requests := make(chan string, 1)
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests <- r.Host + r.URL.Path
+				// Refuse the download before staging or replacing any binary.
+				http.Error(w, "release unavailable", http.StatusNotFound)
+			}))
+			t.Cleanup(server.Close)
+			transport := server.Client().Transport.(*http.Transport).Clone()
+			transport.TLSClientConfig.ServerName = server.Certificate().DNSNames[0]
+			transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+			}
+			oldTransport := http.DefaultTransport
+			http.DefaultTransport = transport
+			t.Cleanup(func() {
+				http.DefaultTransport = oldTransport
+				transport.CloseIdleConnections()
+			})
+
+			var stdout bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("json", true, "")
+			cmd.Flags().String("target", tt.target, "")
+			cmd.SetOut(&stdout)
+			err := runUpgrade(cmd, nil)
+			var exit *commandExitError
+			require.ErrorAs(t, err, &exit)
+			assert.Equal(t, 1, exit.ExitCode)
+			var got upgradeResult
+			require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+			assert.Equal(t, installBinary, got.InstallMethod)
+			assert.Equal(t, "failed", got.Status)
+			assert.Equal(t, "0.42.0", got.NewVersion)
+			assert.Equal(t, "https://github.com/sageox/ox/releases/tag/v0.42.0", got.ReleaseURL)
+			assert.Contains(t, got.Message, "fetch checksums")
+			assert.False(t, fetched, "an explicit pin must not fetch the latest release")
+			select {
+			case request := <-requests:
+				assert.Equal(t, "github.com/sageox/ox/releases/download/v0.42.0/checksums.txt", request)
+			default:
+				t.Error("the requested release was never fetched")
+			}
+		})
+	}
 }
 
 // TestOutputUpgradeResult_JSONCarriesTheMachineFields: `ox upgrade --json` is a
@@ -230,43 +313,63 @@ func TestUpgradeVersionCheckOutcome(t *testing.T) {
 	}
 }
 
-// Exercise main's exit handling: an offline update check must fail in both
-// output modes without reporting that an unchecked version is current.
+// Offline checks and unsupported targets must fail once in both output modes;
+// target validation must not depend on a successful release lookup.
 func TestUpgradeCLI(t *testing.T) {
 	skipIntegration(t)
 	oxBin := testguard.BuildOxBinary(t, repoPath("..", ".."))
-	for _, jsonOutput := range []bool{false, true} {
-		name := "text"
-		if jsonOutput {
-			name = "json"
+	for _, tt := range []struct {
+		name    string
+		target  string
+		message string
+	}{
+		{"offline lookup", "", "check for updates"},
+		{"unsupported target", "v99.0.0", "--target is supported only"},
+	} {
+		for _, jsonOutput := range []bool{false, true} {
+			name := "text"
+			if jsonOutput {
+				name = "json"
+			}
+			t.Run(tt.name+"/"+name, func(t *testing.T) {
+				env := noInputCLIEnv(t) // empty cache and an unreachable proxy, never a real install
+				args := []string{"upgrade"}
+				if tt.target != "" {
+					if runtime.GOOS == "windows" {
+						t.Skip("fake Homebrew detection uses a POSIX shell script")
+					}
+					binDir := t.TempDir()
+					// Release builds detect Homebrew; development builds detect source.
+					// Both must reject the target without running an installer.
+					require.NoError(t, os.WriteFile(filepath.Join(binDir, "brew"), []byte("#!/bin/sh\nif [ \"$1\" = list ]; then exit 0; fi\nexit 91\n"), 0o700))
+					env = append(env, "PATH="+binDir)
+					args = append(args, "--target="+tt.target)
+				}
+				if jsonOutput {
+					args = append(args, "--json")
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				cmd := testguard.OxCmdContext(t, ctx, oxBin, t.TempDir(), env, args...)
+				var stdout, stderr bytes.Buffer
+				cmd.Stdout = &stdout
+				cmd.Stderr = &stderr
+				err := cmd.Run()
+				require.NoError(t, ctx.Err(), "stdout=%s stderr=%s", stdout.String(), stderr.String())
+				var exit *exec.ExitError
+				require.ErrorAs(t, err, &exit, "stdout=%s stderr=%s", stdout.String(), stderr.String())
+				assert.Equal(t, 1, exit.ExitCode())
+				if jsonOutput {
+					var got upgradeResult
+					require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+					assert.Equal(t, "failed", got.Status)
+					assert.Contains(t, got.Message, tt.message)
+					assert.NotContains(t, stderr.String(), tt.message, "the error should appear only in the JSON result")
+				} else {
+					assert.Empty(t, stdout.String())
+					assert.Equal(t, 1, strings.Count(stderr.String(), tt.message))
+				}
+			})
 		}
-		t.Run(name, func(t *testing.T) {
-			env := noInputCLIEnv(t) // empty cache and an unreachable proxy, never a real install
-			args := []string{"upgrade"}
-			if jsonOutput {
-				args = append(args, "--json")
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			cmd := testguard.OxCmdContext(t, ctx, oxBin, t.TempDir(), env, args...)
-			var stdout, stderr bytes.Buffer
-			cmd.Stdout = &stdout
-			cmd.Stderr = &stderr
-			err := cmd.Run()
-			require.NoError(t, ctx.Err(), "stdout=%s stderr=%s", stdout.String(), stderr.String())
-			var exit *exec.ExitError
-			require.ErrorAs(t, err, &exit, "stdout=%s stderr=%s", stdout.String(), stderr.String())
-			assert.Equal(t, 1, exit.ExitCode())
-			if jsonOutput {
-				var got upgradeResult
-				require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
-				assert.Equal(t, "failed", got.Status)
-				assert.Contains(t, got.Message, "check for updates")
-				assert.NotContains(t, stderr.String(), "check for updates", "the error should appear only in the JSON result")
-			} else {
-				assert.Empty(t, stdout.String())
-				assert.Equal(t, 1, strings.Count(stderr.String(), "check for updates"))
-			}
-		})
 	}
 }
