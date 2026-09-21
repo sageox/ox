@@ -149,6 +149,57 @@ func TestReconcile_PreservesUntrackedReservedFilesWithoutOwnershipProof(t *testi
 	})
 }
 
+func TestReconcile_MigratesLegacyCommentOnlyProjections(t *testing.T) {
+	setup := func(t *testing.T) (string, string, teamdocs.TeamRule) {
+		t.Helper()
+		project := t.TempDir()
+		rulesRoot := filepath.Join(project, ".claude", "rules")
+		require.NoError(t, os.MkdirAll(rulesRoot, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"),
+			[]byte(".claude/rules/sageox-team-*\n"), 0o644))
+		git := exec.Command("git", "init", "-q")
+		git.Dir = project
+		require.NoError(t, git.Run())
+
+		source := filepath.Join(t.TempDir(), "security.md")
+		require.NoError(t, os.WriteFile(source, []byte("Current body.\n"), 0o644))
+		rule := teamdocs.TeamRule{
+			Name: "security", Description: "Current description", RelPath: "security.md", AbsPath: source,
+			Visibility: teamdocs.VisibilityAlways,
+		}
+		return project, rulesRoot, rule
+	}
+
+	t.Run("update replaces exact legacy format with verified projection", func(t *testing.T) {
+		project, _, rule := setup(t)
+		native, ok := NativePath(project, "claude", rule)
+		require.True(t, ok)
+		legacy := "---\ndescription: \"Old description\"\n---\n\n" + legacyProjectionMarker + "\nOld body.\n"
+		require.True(t, legacyProjectionOwned([]byte(legacy), policies[0]), "test fixture must match the exact legacy format")
+		require.NoError(t, os.WriteFile(native, []byte(legacy), 0o644))
+
+		_, err := Reconcile(context.Background(), project, []teamdocs.TeamRule{rule})
+		require.NoError(t, err)
+		got, readErr := os.ReadFile(native)
+		require.NoError(t, readErr)
+		require.True(t, verifiedProjection(got))
+		require.Contains(t, string(got), "Current body.")
+		require.NotContains(t, string(got), "Old body.")
+	})
+
+	t.Run("retirement removes exact legacy format", func(t *testing.T) {
+		project, rulesRoot, _ := setup(t)
+		legacyPath := filepath.Join(rulesRoot, "sageox-team-retired.md")
+		require.NoError(t, os.WriteFile(legacyPath,
+			[]byte(legacyProjectionMarker+"\nOld body.\n"), 0o644))
+
+		result, err := Reconcile(context.Background(), project, nil)
+		require.NoError(t, err)
+		require.Contains(t, result.Removed, ".claude/rules/sageox-team-retired.md")
+		require.NoFileExists(t, legacyPath)
+	})
+}
+
 func TestReconcile_EachSupportedAgentGetsExactlyOneDelivery(t *testing.T) {
 	project := t.TempDir()
 	nativeAgents := []string{"claude", "cursor", "copilot", "cline", "kiro", "droid", "windsurf"}
@@ -296,6 +347,8 @@ func TestProjectionHelpers_DefensiveAndFallbackBranches(t *testing.T) {
 		projection := filepath.Join(project, ".claude", "rules", "sageox-team-a.md")
 		require.NoError(t, os.WriteFile(projection, []byte("x"), 0o644))
 		require.False(t, HasNativeProjections(project), "a reserved name is not ownership proof")
+		require.NoError(t, os.WriteFile(projection, []byte(legacyProjectionMarker+"\nlegacy\n"), 0o644))
+		require.True(t, HasNativeProjections(project), "the exact preceding ox format must remain migratable")
 		require.NoError(t, os.WriteFile(projection, stampProjection([]byte("x")), 0o644))
 		require.True(t, HasNativeProjections(project))
 
@@ -322,6 +375,19 @@ func TestProjectionHelpers_DefensiveAndFallbackBranches(t *testing.T) {
 		require.True(t, verifiedProjection(content))
 		require.False(t, verifiedProjection(append(append([]byte(nil), content...), []byte("edited\n")...)))
 		require.False(t, verifiedProjection([]byte("unstamped\n")))
+		require.True(t, legacyProjectionOwned([]byte(legacyProjectionMarker+"\nbody\n"), policies[0]))
+		require.True(t, legacyProjectionOwned([]byte("---\ndescription: \"x\"\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[0]))
+		require.True(t, legacyProjectionOwned([]byte("---\ndescription: \"x\"\nglobs: \"**/*.go\"\nalwaysApply: false\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[1]))
+		require.True(t, legacyProjectionOwned([]byte(legacyProjectionMarker+"\nbody\n"+legacyProjectionMarker+"\n"), policies[0]),
+			"a rule body may itself contain the legacy marker")
+		require.False(t, legacyProjectionOwned([]byte("user text\n"+legacyProjectionMarker+"\nbody\n"), policies[0]),
+			"the old marker embedded in user content is not the exact legacy format")
+		require.False(t, legacyProjectionOwned([]byte("---\napplyTo: \"**/*.go\"\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[0]),
+			"another agent's legacy frontmatter is not an exact format match")
+		require.False(t, legacyProjectionOwned([]byte("---\ndescription: \"\"\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[0]),
+			"the legacy renderer omitted empty descriptions")
+		require.False(t, legacyProjectionOwned([]byte("---\ndescription: `x`\n---\n\n"+legacyProjectionMarker+"\nbody\n"), policies[0]),
+			"the legacy renderer emitted canonical strconv-quoted strings")
 
 		emptySlug := nativeFilename(teamdocs.TeamRule{Name: "!!!", RelPath: "x"}, policies[0])
 		require.Contains(t, emptySlug, "sageox-team-rule-")

@@ -22,9 +22,10 @@ import (
 )
 
 const (
-	managedPrefix         = "sageox-team-"
-	projectionStampPrefix = "<!-- ox-team-rule-sha256:"
-	projectionStampSuffix = "; managed by ox from Team Context; edit the source rule, not this projection. -->"
+	managedPrefix          = "sageox-team-"
+	projectionStampPrefix  = "<!-- ox-team-rule-sha256:"
+	projectionStampSuffix  = "; managed by ox from Team Context; edit the source rule, not this projection. -->"
+	legacyProjectionMarker = "<!-- Managed by ox from Team Context; edit the source rule, not this projection. -->"
 )
 
 // ErrProjectionConflict marks a native rule path that ox cannot safely claim.
@@ -198,7 +199,7 @@ func HasNativeProjections(projectRoot string) bool {
 				continue
 			}
 			content, readErr := os.ReadFile(filepath.Join(rootPath, entry.Name()))
-			if readErr == nil && verifiedProjection(content) {
+			if readErr == nil && projectionOwned(content, p) {
 				return true
 			}
 		}
@@ -320,6 +321,66 @@ func verifiedProjection(content []byte) bool {
 	return gotHash == wantHash
 }
 
+func projectionOwned(content []byte, p policy) bool {
+	return verifiedProjection(content) || legacyProjectionOwned(content, p)
+}
+
+// legacyProjectionOwned recognizes only the exact comment-only format emitted
+// by the immediately preceding Team Rule projector. This is a one-way migration
+// path: the next update rewrites it with a full-file digest, while arbitrary
+// reserved filenames and marker text embedded in user content remain unowned.
+func legacyProjectionOwned(content []byte, p policy) bool {
+	content = bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n"))
+	if len(content) == 0 || content[len(content)-1] != '\n' {
+		return false
+	}
+	markerLine := []byte(legacyProjectionMarker + "\n")
+	markerOffset := bytes.Index(content, markerLine)
+	if markerOffset < 0 {
+		return false
+	}
+	if markerOffset == 0 {
+		return p.AlwaysApplyField == ""
+	}
+	preamble := string(content[:markerOffset])
+	if !strings.HasPrefix(preamble, "---\n") || !strings.HasSuffix(preamble, "\n---\n\n") {
+		return false
+	}
+	frontmatter := strings.TrimSuffix(strings.TrimPrefix(preamble, "---\n"), "\n---\n\n")
+	if frontmatter == "" {
+		return false
+	}
+	lines := strings.Split(frontmatter, "\n")
+	next := 0
+	if key, value, ok := legacyQuotedField(lines[next]); ok && key == "description" && value != "" {
+		next++
+	}
+	hasGlobs := false
+	if next < len(lines) && p.GlobField != "" {
+		if key, value, ok := legacyQuotedField(lines[next]); ok && key == p.GlobField && value != "" {
+			hasGlobs = true
+			next++
+		}
+	}
+	if p.AlwaysApplyField != "" {
+		want := fmt.Sprintf("%s: %t", p.AlwaysApplyField, !hasGlobs)
+		if next >= len(lines) || lines[next] != want {
+			return false
+		}
+		next++
+	}
+	return next == len(lines)
+}
+
+func legacyQuotedField(line string) (key, value string, ok bool) {
+	key, quoted, ok := strings.Cut(line, ": ")
+	if !ok {
+		return "", "", false
+	}
+	value, err := strconv.Unquote(quoted)
+	return key, value, err == nil && quoted == strconv.Quote(value)
+}
+
 func nativeFilename(rule teamdocs.TeamRule, p policy) string {
 	base := strings.ToLower(rule.Name)
 	var clean strings.Builder
@@ -374,7 +435,7 @@ func reconcileRoot(ctx context.Context, projectRoot, rootPath string, p policy, 
 		if managedPathTracked(ctx, projectRoot, rel) {
 			return nil, nil, fmt.Errorf("%w: refusing to update tracked Team Rule projection %s", ErrProjectionConflict, rel)
 		}
-		if readErr == nil && !verifiedProjection(current) {
+		if readErr == nil && !projectionOwned(current, p) {
 			return nil, nil, fmt.Errorf("%w: refusing to update %s: existing file is not a verified ox projection", ErrProjectionConflict, rel)
 		}
 		if err := atomicWrite(root, name, content); err != nil {
@@ -398,7 +459,7 @@ func reconcileRoot(ctx context.Context, projectRoot, rootPath string, p policy, 
 		if readErr != nil {
 			return nil, nil, readErr
 		}
-		if !verifiedProjection(current) {
+		if !projectionOwned(current, p) {
 			return nil, nil, fmt.Errorf("%w: refusing to remove %s: existing file is not a verified ox projection", ErrProjectionConflict, rel)
 		}
 		if err := root.Remove(name); err != nil && !os.IsNotExist(err) {
