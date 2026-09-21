@@ -32,6 +32,16 @@ type TeamSkill struct {
 	Audience    string   `json:"audience,omitempty"`
 	Visibility  string   `json:"visibility"`
 	Status      string   `json:"status,omitempty"`
+	// ValidThrough is an optional YYYY-MM-DD shelf life. Knowledge that describes
+	// the outside world rots: a brief on a tool released after the models were
+	// trained stops being an advantage once training catches up, and an index full
+	// of entries nobody rechecks is one nobody reads. Empty means evergreen.
+	//
+	// An expired skill is REPORTED, never withheld or deleted. A date is a prompt
+	// to re-verify or retire, and silently removing a team's published knowledge on
+	// a timer would be the same unexplained-disappearance failure NameError exists
+	// to prevent.
+	ValidThrough string `json:"valid_through,omitempty"`
 	// Files are the skill's own files, relative to AbsDir, sorted. Populated so a
 	// caller can classify and materialize without re-walking the tree.
 	Files []string `json:"files,omitempty"`
@@ -344,16 +354,17 @@ func walkSkillsDir(absRoot string) ([]TeamSkill, error) {
 		}
 
 		skills = append(skills, TeamSkill{
-			Name:        name,
-			NameError:   nameErr,
-			Description: fm.Description,
-			RelPath:     filepath.ToSlash(filepath.Join(e.Name(), skillManifestName)),
-			AbsDir:      dir,
-			Repos:       fm.Repos,
-			Audience:    fm.Audience,
-			Visibility:  defaultString(fm.Visibility, DefaultRuleVisibility),
-			Status:      fm.Status,
-			Files:       files,
+			Name:         name,
+			NameError:    nameErr,
+			Description:  fm.Description,
+			RelPath:      filepath.ToSlash(filepath.Join(e.Name(), skillManifestName)),
+			AbsDir:       dir,
+			Repos:        fm.Repos,
+			Audience:     fm.Audience,
+			Visibility:   defaultString(fm.Visibility, DefaultRuleVisibility),
+			Status:       fm.Status,
+			ValidThrough: fm.ValidThrough,
+			Files:        files,
 		})
 	}
 	return skills, nil

@@ -360,6 +360,7 @@ type ruleFrontmatter struct {
 	Visibility     string
 	Status         string
 	FromDiscussion string
+	ValidThrough   string
 }
 
 // parseRuleFrontmatter does minimal YAML extraction sufficient for the rule
@@ -407,6 +408,8 @@ func parseRuleFrontmatter(path string) ruleFrontmatter {
 			fm.Visibility = extractValue(line, "visibility:")
 		case strings.HasPrefix(line, "status:"):
 			fm.Status = extractValue(line, "status:")
+		case strings.HasPrefix(line, "valid-through:"):
+			fm.ValidThrough = extractValue(line, "valid-through:")
 		case strings.HasPrefix(line, "from-discussion:"):
 			fm.FromDiscussion = extractValue(line, "from-discussion:")
 		case strings.HasPrefix(line, "repos:"):
