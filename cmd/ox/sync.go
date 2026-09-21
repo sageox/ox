@@ -173,19 +173,31 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	if teamID != "" {
 		if err := syncTeamContext(ctx, teamID, jsonOutput, &result); err != nil {
+			if errors.Is(err, tea.ErrInterrupted) {
+				return err
+			}
 			transportProblems = append(transportProblems, err.Error())
 		}
 	} else if allTeams {
 		if err := syncAllTeamContexts(ctx, jsonOutput, &result); err != nil {
+			if errors.Is(err, tea.ErrInterrupted) {
+				return err
+			}
 			transportProblems = append(transportProblems, err.Error())
 		}
 	} else {
 		// The default promise is the whole current-repository path: Ledger and
 		// Team Context transport, followed by local convergence.
 		if err := syncViaDaemon(ctx, jsonOutput, &result); err != nil {
+			if errors.Is(err, tea.ErrInterrupted) {
+				return err
+			}
 			transportProblems = append(transportProblems, err.Error())
 		}
 		if err := syncAllTeamContexts(ctx, jsonOutput, &result); err != nil {
+			if errors.Is(err, tea.ErrInterrupted) {
+				return err
+			}
 			transportProblems = append(transportProblems, err.Error())
 		}
 	}
