@@ -33,7 +33,7 @@ Consequently `ox skills catalog`, `ox skills install`, and `ox skills uninstall`
 
 ### D2 — Add-on-supplied context lives inside a skill
 
-An add-on carries three things a team is selecting together: **skills** (what a coworker should do and when), **rules** (conventions it follows), and **context** (the curated reference material it reads while doing it). The context is not incidental packaging — for several add-ons it *is* the payload, and the skill around it is the activation surface that gets it read.
+An add-on carries three things a team is selecting together: **skills** (what a coworker should do and when), **rules** (conventions it follows), and **context** (the reference material those skills carry). "Context" here is skill-scoped and means neither the Team Context nor free-floating documents — it is what one skill needs in order to be worth following. It is not incidental packaging: for several add-ons it *is* the payload, and the skill around it is the activation surface that gets it read.
 
 Context therefore travels **inside a skill**, in its `references/`, `assets/` and `scripts/`. There is no free-standing "context" artifact type and no `docs/add-ons/` directory.
 

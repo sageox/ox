@@ -36,21 +36,25 @@ import (
 var addonsCmd = &cobra.Command{
 	Use:     "addons",
 	Aliases: []string{"addon"},
-	Short:   "Install skills, rules, and context your whole team shares",
+	Short:   "Install skills, rules, and the context each skill carries",
 	Long: `Browse, install, update and remove Add-ons for your team.
 
 An add-on is a versioned bundle of three things your team selects once:
 
   skills   what an AI coworker should DO, and when
   rules    conventions it should follow
-  context  the curated reference material it reads while doing it
+  context  the reference material those skills carry with them
 
-That third one is the point people miss. An add-on is not just instructions —
-it carries the briefs, tables, examples and source material a coworker actually
-needs, as files inside the skill (its ` + "`references/`" + ` and ` + "`assets/`" + `). Context
-ships inside a skill rather than as loose documents on purpose: a document
-nothing points at is never opened, while context bundled into a skill is found
-exactly when the skill is.
+That third one is the point people miss, so be precise about what it means
+here: NOT your Team Context, and not arbitrary documents. It is the material
+a specific skill needs in order to be worth following — the briefs, tables,
+examples and source material that ship inside that skill, in its
+` + "`references/`" + ` and ` + "`assets/`" + `.
+
+Bundling it into the skill is deliberate. A document nothing points at is
+never opened; material carried by a skill is found exactly when that skill
+is. So an add-on hands a coworker the instruction and the evidence together,
+rather than an instruction and a hope that it goes looking.
 
 It installs into your Team Context — never into a single repository — so every
 repository on the team receives it, and every teammate's AI coworker sees the

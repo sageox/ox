@@ -181,12 +181,16 @@ An add-on packages three things:
 |---|---|
 | **Skills** | what an AI coworker should do, and when to do it |
 | **Rules** | conventions it should follow |
-| **Context** | the curated reference material it reads while doing it — briefs, tables, examples, source material |
+| **Context** | the reference material *those skills carry* — briefs, tables, examples, source material |
 
 **The context is the part that is easy to miss, and often the most valuable.**
-An add-on is not a bundle of instructions with a pointer to documentation
-elsewhere; the material travels *with* the skill, as files under its
-`references/` and `assets/`. `post-cutoff-jev` is the clearest example: the
+
+Be precise about what it is NOT, because ox uses the word "context" for
+something else: this is **not your Team Context**, and it is not arbitrary
+shared documents. It is *skill-scoped* — the material one specific skill needs
+in order to be worth following, travelling with it as files under its
+`references/` and `assets/`. An add-on hands a coworker the instruction and the
+evidence together, rather than an instruction and a hope that it goes looking. `post-cutoff-jev` is the clearest example: the
 skill is a page of routing ("read this before designing a classifier"), and the
 value is the graded, dated brief sitting beside it in `references/jev.md`.
 
