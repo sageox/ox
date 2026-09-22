@@ -362,27 +362,27 @@ func TestExecuteSyncConvergence_RepoSlugUsesCanonicalOriginNotDirectoryNameFallb
 	require.True(t, found, "expected the scoped rule to appear in the convergence report")
 }
 
-// TestSyncHelp_PackCatalogParagraphFollowsTheGate is the whole point of the
-// packs gate. `ox packs` is not in this binary, so help that names it
+// TestSyncHelp_AddonCatalogParagraphFollowsTheGate is the whole point of the
+// addons gate. `ox addons` is not in this binary, so help that names it
 // unconditionally sends users to a command that answers "unknown command"
 // (#1028, #1029) — while deleting the paragraph outright loses a real rule the
 // moment the command does ship.
 //
-// Failure prevented: `ox sync --help` advertising a Pack Catalog this build
+// Failure prevented: `ox sync --help` advertising a Add-on Catalog this build
 // cannot reach, or silently dropping the boundary once it can.
-func TestSyncHelp_PackCatalogParagraphFollowsTheGate(t *testing.T) {
+func TestSyncHelp_AddonCatalogParagraphFollowsTheGate(t *testing.T) {
 	require.Contains(t, syncCmd.Short, "rarely needed")
 
 	for _, tc := range []struct {
 		name        string
-		packs       bool
+		addons      bool
 		wantVisible bool
 	}{
-		{name: "gate off (the shipped default)", packs: false, wantVisible: false},
-		{name: "gate on", packs: true, wantVisible: true},
+		{name: "gate off (the shipped default)", addons: false, wantVisible: false},
+		{name: "gate on", addons: true, wantVisible: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			long := syncLong(tc.packs)
+			long := syncLong(tc.addons)
 
 			// Both halves must survive either way: the gate decides what the
 			// paragraph does, never whether the rest of the help is intact.
@@ -391,12 +391,12 @@ func TestSyncHelp_PackCatalogParagraphFollowsTheGate(t *testing.T) {
 			require.Contains(t, long, "ledger-read-sync.md")
 
 			if tc.wantVisible {
-				require.Contains(t, long, "Pack-managed and hand-authored")
-				require.Contains(t, long, "does not check the Pack Catalog")
+				require.Contains(t, long, "Add-on-managed and hand-authored")
+				require.Contains(t, long, "does not check the Add-on Catalog")
 			} else {
-				require.NotContains(t, long, "Pack-managed and hand-authored")
-				require.NotContains(t, long, "Pack Catalog")
-				require.NotContains(t, long, "ox packs")
+				require.NotContains(t, long, "Add-on-managed and hand-authored")
+				require.NotContains(t, long, "Add-on Catalog")
+				require.NotContains(t, long, "ox addons")
 			}
 		})
 	}

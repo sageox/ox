@@ -96,7 +96,7 @@ var syncCmd = &cobra.Command{
 	RunE:  runSync,
 }
 
-// `ox sync --help` is assembled from two halves so the Pack Catalog paragraph
+// `ox sync --help` is assembled from two halves so the Add-on Catalog paragraph
 // between them can be gated. Splitting it is what makes the gate a compile-time
 // guarantee: a hand-spliced anchor string would silently stop matching the day
 // someone reworded the surrounding help.
@@ -109,21 +109,21 @@ keeps transport and local convergence synchronized. This command exists only for
   - Triggering an immediate sync (this command itself forces sync)
   - Diagnostic purposes`
 
-// syncPacksHelp states the boundary between convergence and the Pack Catalog:
-// sync delivers Pack-managed content but never checks for new catalog releases.
+// syncAddonsHelp states the boundary between convergence and the Add-on Catalog:
+// sync delivers Add-on-managed content but never checks for new catalog releases.
 //
-// It is printed ONLY when the packs gate is on. Unconditionally, it would name a
-// Pack Catalog this build cannot reach (#1028, #1029); the rule stays recorded in
+// It is printed ONLY when the addons gate is on. Unconditionally, it would name an
+// Add-on Catalog this build cannot reach (#1028, #1029); the rule stays recorded in
 // ADR-032 either way.
 //
 // It deliberately names NO command. The gate can be switched on today — for
-// dogfooding, or mid-rollout — while `ox packs` is still follow-up work, so help
+// dogfooding, or mid-rollout — while `ox addons` is still follow-up work, so help
 // that told a user which command to run would send them to "unknown command" in
-// exactly the state the flag is meant to make safe. Whoever ships `ox packs`
+// exactly the state the flag is meant to make safe. Whoever ships `ox addons`
 // restores the pointer alongside the command; until then
-// TestPacksHelpNamesNoUnregisteredCommand holds the line.
-const syncPacksHelp = `Convergence includes Pack-managed and hand-authored Team Context content through
-the same delivery path. It does not check the Pack Catalog for newer releases.`
+// TestAddonsHelpNamesNoUnregisteredCommand holds the line.
+const syncAddonsHelp = `Convergence includes Add-on-managed and hand-authored Team Context content through
+the same delivery path. It does not check the Add-on Catalog for newer releases.`
 
 const syncLongTail = `The daemon syncs automatically on:
   - File changes in your project
@@ -145,11 +145,11 @@ Headless read-only mode runs a bounded ledger refresh without the daemon:
 Read-only mode uses SAGEOX_TOKEN and SAGEOX_ENDPOINT, independent of the
 current project. See docs/specs/ledger-read-sync.md for the reader contract.`
 
-// syncLong assembles `ox sync --help`, including the Pack Catalog paragraph
+// syncLong assembles `ox sync --help`, including the Add-on Catalog paragraph
 // only when the gate is on.
-func syncLong(packsEnabled bool) string {
-	if packsEnabled {
-		return syncLongHead + "\n\n" + syncPacksHelp + "\n\n" + syncLongTail
+func syncLong(addonsEnabled bool) string {
+	if addonsEnabled {
+		return syncLongHead + "\n\n" + syncAddonsHelp + "\n\n" + syncLongTail
 	}
 	return syncLongHead + "\n\n" + syncLongTail
 }

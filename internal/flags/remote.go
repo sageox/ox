@@ -34,7 +34,7 @@ type CLIFeatures struct {
 	AutoDistill *bool `json:"auto_distill,omitempty"`
 	TUI         *bool `json:"tui,omitempty"`
 	Attest      *bool `json:"attest,omitempty"`
-	Packs       *bool `json:"packs,omitempty"`
+	Addons      *bool `json:"addons,omitempty"`
 }
 
 // CLIKillswitches contains server-evaluated kill switch values.
@@ -66,7 +66,7 @@ func RemoteSettingsToPatch(r *CLISettingsResponse) *Patch {
 		AutoDistill:            r.Features.AutoDistill,
 		TUIEnabled:             r.Features.TUI,
 		AttestEnabled:          r.Features.Attest,
-		PacksEnabled:           r.Features.Packs,
+		AddonsEnabled:          r.Features.Addons,
 		DisableFileDeleteTools: boolPtr(r.Killswitches.DisableFileDeleteTools),
 		DisableShellExecTools:  boolPtr(r.Killswitches.DisableShellExecTools),
 		PrimeAppend:            strPtr(r.PrimeAppend),

@@ -38,14 +38,14 @@ const (
 )
 
 // Origin identifies who owns the canonical Team Context artifact. Every
-// artifact discovered today is loose (hand-authored); Pack/PackVersion/Digest
-// stay part of the shape so a future Pack Catalog producer does not need a
+// artifact discovered today is loose (hand-authored); Addon/AddonVersion/Digest
+// stay part of the shape so a future Add-on Catalog producer does not need a
 // schema bump.
 type Origin struct {
-	Kind        OriginKind `json:"kind"`
-	Pack        string     `json:"pack,omitempty"`
-	PackVersion string     `json:"pack_version,omitempty"`
-	Digest      string     `json:"digest,omitempty"`
+	Kind         OriginKind `json:"kind"`
+	Addon        string     `json:"addon,omitempty"`
+	AddonVersion string     `json:"addon_version,omitempty"`
+	Digest       string     `json:"digest,omitempty"`
 }
 
 // Artifact is one normalized item discovered from a Team Context snapshot.

@@ -1,6 +1,6 @@
 # Native-First, Project-Scoped Asset Inventory
 
-> **Amended by [ADR-032](../adr/ADR-032-pack-catalog-team-scoped.md) (2026-09-21).**
+> **Amended by [ADR-032](../adr/ADR-032-addon-catalog-team-scoped.md) (2026-09-21).**
 > This document is written project-scoped throughout, and that remains correct for
 > ox's OWN runtime assets — the `ox-cli-*` relays, the lifecycle commands, and the
 > committed `sageox` on-ramp. It is no longer correct for optional catalog content:
