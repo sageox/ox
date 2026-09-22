@@ -13,6 +13,7 @@ import (
 
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/session/pipeline"
 )
 
 // ReconcileResult describes what ReconcileUnpushedPointers found and fixed.
@@ -278,7 +279,8 @@ func reconcileUnpushedPointers(ctx context.Context, ledgerPath string, logger *s
 }
 
 // prepareMissingPointerMetadata removes only matching missing-object references,
-// preserving every other field (including fields from newer clients). Parse all
+// clearing trace metadata when either attachment is removed and preserving all
+// unrelated fields (including fields from newer clients). Parse all
 // manifests before touching pointers so corrupt or mismatched metadata fails safe.
 func prepareMissingPointerMetadata(ledgerPath string, missing map[string]FileRef) (map[string][]byte, error) {
 	manifests := make(map[string]map[string]json.RawMessage)
@@ -337,6 +339,12 @@ func prepareMissingPointerMetadata(ledgerPath string, missing map[string]FileRef
 			delete(files, name)
 			changed[metaPath] = true
 		}
+		if pipeline.IsTraceFile(name) {
+			if _, exists := manifests[metaPath]["trace"]; exists {
+				delete(manifests[metaPath], "trace")
+				changed[metaPath] = true
+			}
+		}
 	}
 	result := make(map[string][]byte)
 	for metaPath, files := range filesByManifest {
@@ -348,7 +356,9 @@ func prepareMissingPointerMetadata(ledgerPath string, missing map[string]FileRef
 			return nil, err
 		}
 		meta := manifests[metaPath]
-		meta["files"] = encodedFiles
+		if files != nil {
+			meta["files"] = encodedFiles
+		}
 		content, err := json.MarshalIndent(meta, "", "  ")
 		if err != nil {
 			return nil, err

@@ -14,7 +14,6 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
-	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 )
@@ -169,16 +168,16 @@ func findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath string) ([]orphanedS
 
 			recState.SessionPath = sessionDir
 			stoppedAt := session.ResolveStoppedAt(recState.StoppedAt, filepath.Join(sessionDir, ledgerFileRaw), time.Now())
-			recState.RecordTraceBoundary("stop", stoppedAt)
-			if recState.Trace != nil {
-				recState.StoppedAt = &stoppedAt
-				// Retain the first observed stop even if appending the raw carrier fails.
-				if err := fileutil.AtomicWriteJSON(recordingPath, &recState, 0600); err != nil {
-					slog.Warn("trace recovery boundary not persisted", "session", sessionName, "error", err)
-					continue
-				}
-			}
-			if err := stampRecordingCarrierAtStop(&recState, stoppedAt); err != nil && recState.Trace != nil {
+			// Reclaim can happen hours after the recording died. A stop timestamp
+			// cannot identify its spool EOF: another recording may already share
+			// the native session. Preserve only boundaries captured while live;
+			// a missing durable stop makes trace materialization fail closed.
+			if err := session.StampRawCarrier(filepath.Join(sessionDir, ledgerFileRaw), session.CarrierStamp{
+				NativeSessions: recState.NativeSessions,
+				StoppedAt:      stoppedAt,
+				TraceCapture:   recState.Trace,
+			}); err != nil && recState.Trace != nil {
+				slog.Warn("trace recovery carrier not persisted", "session", sessionName, "error", err)
 				continue
 			}
 			_ = os.Remove(recordingPath)
@@ -457,13 +456,14 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 		if traceErr != nil {
 			slog.Warn("trace retry upload skipped", "error", traceErr)
 		}
-		if fileRefs == nil {
-			fileRefs = make(map[string]lfs.FileRef)
-		}
-		for name, ref := range traceRefs {
-			fileRefs[name] = ref
-		}
-		if len(traceRefs) != 2 {
+		if traceErr == nil && len(traceRefs) == 2 {
+			if fileRefs == nil {
+				fileRefs = make(map[string]lfs.FileRef)
+			}
+			for name, ref := range traceRefs {
+				fileRefs[name] = ref
+			}
+		} else {
 			traceMeta = nil
 		}
 	} else {

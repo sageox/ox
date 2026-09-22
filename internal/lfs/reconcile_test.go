@@ -2,6 +2,7 @@ package lfs
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/session/pipeline"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -591,6 +593,77 @@ func TestReconcile_RemovesMissingArtifactReference(t *testing.T) {
 			assert.NoFileExists(t, rawPath)
 			assert.JSONEq(t, `{"title":"Keep title","future_field":{"keep":true},"files":{"summary.json":{"storage":"git","size":2}}}`, git(t, ledger, "show", "HEAD:sessions/missing/meta.json"))
 			assert.Equal(t, "{}", git(t, ledger, "show", "HEAD:sessions/missing/summary.json"))
+			assert.Equal(t, 1, unpushedCount(t, ledger))
+		})
+	}
+}
+
+func TestReconcile_MissingTraceClearsAttachmentMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		artifact      string
+		omitReference bool
+		omitFiles     bool
+		wantTrace     bool
+	}{
+		{name: "missing spans", artifact: pipeline.LedgerFileTraceSpans},
+		{name: "missing events", artifact: pipeline.LedgerFileTraceEvents},
+		{name: "unregistered missing trace", artifact: pipeline.LedgerFileTraceSpans, omitReference: true},
+		{name: "missing files manifest", artifact: pipeline.LedgerFileTraceEvents, omitFiles: true},
+		{name: "missing ordinary artifact preserves trace", artifact: "raw.jsonl", wantTrace: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger, _ := initLedgerWithRemote(t)
+			sessionDir := filepath.Join(ledger, "sessions", "trace-repair")
+			require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+			oid := strings.Repeat("a", 64)
+			retainedOID := strings.Repeat("b", 64)
+			retainedArtifact := pipeline.LedgerFileTraceSpans
+			if tc.artifact == retainedArtifact {
+				retainedArtifact = pipeline.LedgerFileTraceEvents
+			}
+			retainedPointer := FormatPointer("sha256:"+retainedOID, 84)
+			require.NoError(t, os.WriteFile(filepath.Join(sessionDir, retainedArtifact), []byte(retainedPointer), 0o644))
+			artifactPath := filepath.Join(sessionDir, tc.artifact)
+			require.NoError(t, os.WriteFile(artifactPath, []byte(FormatPointer("sha256:"+oid, 42)), 0o644))
+			metadata := map[string]any{
+				"title":        "Keep title",
+				"future_field": map[string]any{"keep": true},
+				"trace":        map[string]any{"spans": 443, "events": 17, "future_trace_field": true},
+			}
+			files := map[string]any{
+				"summary.json":   map[string]any{"storage": "git", "size": 2},
+				retainedArtifact: FileRef{OID: "sha256:" + retainedOID, Size: 84},
+			}
+			if !tc.omitReference {
+				files[tc.artifact] = FileRef{OID: "sha256:" + oid, Size: 42}
+			}
+			if !tc.omitFiles {
+				metadata["files"] = files
+			}
+			data, err := json.Marshal(metadata)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "meta.json"), data, 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.json"), []byte(`{}`), 0o644))
+			git(t, ledger, "add", "sessions/")
+			git(t, ledger, "commit", "-m", "missing trace artifact", "--no-verify")
+
+			client := fakeLFSDownloadServer(t, map[string]int{oid: http.StatusNotFound})
+			result, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
+			require.NoError(t, err)
+			assert.Equal(t, 1, result.Replaced)
+			assert.NoFileExists(t, artifactPath)
+			want := `{"title":"Keep title","future_field":{"keep":true}`
+			if tc.wantTrace {
+				want += `,"trace":{"spans":443,"events":17,"future_trace_field":true}`
+			}
+			if !tc.omitFiles {
+				want += `,"files":{"summary.json":{"storage":"git","size":2},"` + retainedArtifact + `":{"oid":"sha256:` + retainedOID + `","size":84}}`
+			}
+			want += `}`
+			assert.JSONEq(t, want, git(t, ledger, "show", "HEAD:sessions/trace-repair/meta.json"))
+			assert.Equal(t, "{}", git(t, ledger, "show", "HEAD:sessions/trace-repair/summary.json"))
+			assert.Equal(t, strings.TrimSpace(retainedPointer), git(t, ledger, "show", "HEAD:sessions/trace-repair/"+retainedArtifact))
 			assert.Equal(t, 1, unpushedCount(t, ledger))
 		})
 	}

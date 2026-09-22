@@ -20,7 +20,7 @@ import (
 func TestTraceAttachmentAndFailureIsolation(t *testing.T) {
 	for _, door := range []string{"stop", "doctor"} {
 		t.Run(door, func(t *testing.T) {
-			for _, mode := range []string{"success", "upload-failure", "invalid-boundary"} {
+			for _, mode := range []string{"success", "upload-failure", "partial-refs-error", "partial-refs-nil", "invalid-boundary"} {
 				t.Run(mode, func(t *testing.T) {
 					f := newSessionUploadFixture(t)
 					const id = "12345678-1234-4234-8234-123456789abc"
@@ -46,6 +46,13 @@ func TestTraceAttachmentAndFailureIsolation(t *testing.T) {
 						}
 						if mode == "upload-failure" {
 							return nil, errors.New("trace-only outage")
+						}
+						if mode == "partial-refs-error" || mode == "partial-refs-nil" {
+							refs := map[string]lfs.FileRef{pipeline.LedgerFileTraceSpans: lfs.NewFileRef([]byte("partial"))}
+							if mode == "partial-refs-error" {
+								return refs, errors.New("second pointer failed")
+							}
+							return refs, nil
 						}
 						// Stand-in upload service confirms bytes; real Batch API behavior is
 						// covered by lfs.TestTracePublishNeverCopiesContentIntoLedger.
@@ -84,6 +91,7 @@ func TestTraceAttachmentAndFailureIsolation(t *testing.T) {
 						} else {
 							_, err := os.Stat(path)
 							require.True(t, os.IsNotExist(err))
+							require.NotContains(t, meta.Files, name)
 						}
 					}
 				})

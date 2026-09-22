@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -42,7 +46,9 @@ func doctorTraceFixture(t *testing.T, headerCapture bool) (string, string, *mode
 
 func TestTraceDoctorStaleMarkerPreservesBoundaries(t *testing.T) {
 	ledger, cache, capture, span := doctorTraceFixture(t, false)
-	state := session.RecordingState{AgentID: "OxTraceDoctor", StartedAt: capture.Boundaries[0].At, AgentSessionID: doctorTraceID, NativeSessions: []session.NativeSession{{ID: doctorTraceID}}, Trace: capture}
+	stoppedAt := capture.Boundaries[0].At.Add(time.Minute)
+	capture.Boundaries = append(capture.Boundaries, model.Boundary{Action: "stop", At: stoppedAt, Offsets: map[string]model.Offsets{doctorTraceID: {Spans: int64(len(span))}}})
+	state := session.RecordingState{AgentID: "OxTraceDoctor", StartedAt: capture.Boundaries[0].At, StoppedAt: &stoppedAt, AgentSessionID: doctorTraceID, NativeSessions: []session.NativeSession{{ID: doctorTraceID}}, Trace: capture}
 	data, err := json.Marshal(state)
 	require.NoError(t, err)
 	marker := filepath.Join(cache, ".recording.json")
@@ -64,6 +70,59 @@ func TestTraceDoctorStaleMarkerPreservesBoundaries(t *testing.T) {
 	require.Equal(t, meta.TraceCapture, orphans[0].Meta.TraceCapture)
 	require.Equal(t, doctorTraceID, meta.NativeSessions[0].ID)
 	require.NotNil(t, meta.StoppedAt)
+}
+
+// A native Claude session can contain multiple recordings. Reclaiming the old
+// marker must not attach bytes emitted by a subsequent recording in that spool.
+func TestTraceDoctorReclaimDoesNotCaptureLaterRecording(t *testing.T) {
+	for _, durableStop := range []bool{false, true} {
+		t.Run(fmt.Sprintf("durable-stop=%t", durableStop), func(t *testing.T) {
+			ledger, cache, capture, first := doctorTraceFixture(t, false)
+			stoppedAt := capture.Boundaries[0].At.Add(time.Minute)
+			state := session.RecordingState{AgentID: "OxTraceDoctor", StartedAt: capture.Boundaries[0].At, StoppedAt: &stoppedAt, NativeSessions: []session.NativeSession{{ID: doctorTraceID}}, Trace: capture}
+			if durableStop {
+				state.RecordTraceBoundary("stop", stoppedAt)
+			}
+			data, err := json.Marshal(state)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(cache, ".recording.json"), data, 0600))
+
+			later := session.RecordingState{NativeSessions: state.NativeSessions, Trace: &model.Capture{}}
+			later.RecordTraceBoundary("start", time.Now().Add(-time.Minute))
+			second := bytes.ReplaceAll(first, []byte("before-crash"), []byte("LATER_RECORDING_PRIVATE"))
+			require.NoError(t, os.WriteFile(filepath.Join(paths.TraceSpoolDir(), doctorTraceID, "traces.jsonl"), append(append([]byte(nil), first...), second...), 0600))
+			later.RecordTraceBoundary("stop", time.Now())
+
+			orphans, err := findOrphanedSessionsInDir(filepath.Dir(cache), ledger)
+			require.NoError(t, err)
+			require.Len(t, orphans, 1)
+			require.Equal(t, 1, orphans[0].EntryCount, "ordinary recording remains recoverable")
+			traceCache, prepared := prepareRetryTraces(ledger, orphans[0])
+			if durableStop {
+				require.NotNil(t, prepared)
+				require.Equal(t, int64(1), prepared.Spans)
+				require.Equal(t, []model.ByteRange{{0, int64(len(first))}}, prepared.NativeSessions[0].SpansBytes)
+				file, err := os.Open(filepath.Join(traceCache, materialize.SpansFile))
+				require.NoError(t, err)
+				defer file.Close()
+				gz, err := gzip.NewReader(file)
+				require.NoError(t, err)
+				plain, err := io.ReadAll(gz)
+				require.NoError(t, err)
+				require.NoError(t, gz.Close())
+				require.Contains(t, string(plain), "before-crash")
+				require.NotContains(t, string(plain), "LATER_RECORDING_PRIVATE")
+			} else {
+				require.Nil(t, prepared, "StoppedAt alone cannot prove a stop byte offset")
+				require.Empty(t, traceCache)
+				require.Len(t, orphans[0].Meta.TraceCapture.Boundaries, 1)
+			}
+			_, next, err := session.MaterializeTraces(ledger, "2026-09-24T10-00-test-OxTraceLater", later.Trace)
+			require.NoError(t, err)
+			require.Equal(t, int64(1), next.Spans)
+			require.Equal(t, []model.ByteRange{{int64(len(first)), int64(len(first) + len(second))}}, next.NativeSessions[0].SpansBytes)
+		})
+	}
 }
 
 func TestTraceDoctorRawOnlyMissingStopFailsClosed(t *testing.T) {
@@ -90,7 +149,9 @@ func TestTraceDoctorRawOnlyMissingStopFailsClosed(t *testing.T) {
 
 func TestTraceDoctorStampFailureRetainsFrozenMarker(t *testing.T) {
 	ledger, cache, capture, span := doctorTraceFixture(t, false)
-	state := session.RecordingState{AgentID: "OxTraceDoctor", StartedAt: capture.Boundaries[0].At, AgentSessionID: doctorTraceID, NativeSessions: []session.NativeSession{{ID: doctorTraceID}}, Trace: capture}
+	stoppedAt := capture.Boundaries[0].At.Add(time.Minute)
+	capture.Boundaries = append(capture.Boundaries, model.Boundary{Action: "stop", At: stoppedAt, Offsets: map[string]model.Offsets{doctorTraceID: {Spans: int64(len(span))}}})
+	state := session.RecordingState{AgentID: "OxTraceDoctor", StartedAt: capture.Boundaries[0].At, StoppedAt: &stoppedAt, AgentSessionID: doctorTraceID, NativeSessions: []session.NativeSession{{ID: doctorTraceID}}, Trace: capture}
 	data, err := json.Marshal(state)
 	require.NoError(t, err)
 	marker := filepath.Join(cache, ".recording.json")

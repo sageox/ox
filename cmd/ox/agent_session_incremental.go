@@ -47,6 +47,7 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 		RepoID:                 repoID,
 		OxVersion:              version.Version,
 		NativeSessions:         state.NativeSessions,
+		TraceCapture:           state.Trace,
 	}
 
 	// enrich with adapter metadata if available

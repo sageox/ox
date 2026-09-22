@@ -1456,13 +1456,11 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		return nil
 	}
 
-	// write meta.json and attempt LFS upload before committing the pointer files.
-	// Non-nil error means a fatal precondition failed (e.g., corrupt
-	// existing meta.json that would force a SessionID rotation if we
-	// continued); abort the entire finalize flow rather than stage/commit.
+	// Persist metadata and confirm LFS uploads before staging pointer files.
+	// Keep the cache recoverable if metadata or upload preparation fails.
 	fileRefs, err := h.writeMetaAndUploadLFS(payload, stored, summaryResp)
 	if err != nil {
-		h.logger.Warn("session finalize aborted to preserve existing meta.json invariants", "session", sessionName, "err", err)
+		h.logger.Warn("session finalize deferred until metadata and uploads are ready", "session", sessionName, "err", err)
 		return nil
 	}
 
@@ -1498,16 +1496,9 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	return nil
 }
 
-// writeMetaAndUploadLFS writes meta.json and attempts LFS upload for a finalized session.
-// LFS upload is best-effort: on failure, content files remain as regular blobs.
-// Returns the LFS file refs so the caller can commit pointers in the first push.
-//
-// The error return is reserved for fatal conditions where finalization MUST
-// abort before staging/committing — currently only when PreservedSessionID
-// fails on a corrupt/unreadable existing meta.json (proceeding would
-// silently rotate a SessionID we cannot verify). All other failures (LFS
-// client, upload, write) are best-effort — the function returns
-// (nil, nil) and the caller proceeds with the raw-content commit fallback.
+// writeMetaAndUploadLFS persists metadata and confirms LFS uploads before any
+// session artifacts are staged. Failed uploads leave local content for retry;
+// automatic finalization never changes an LFS artifact to Git storage.
 func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizePayload, stored *session.StoredSession, summaryResp *session.SummarizeResponse) (map[string]lfs.FileRef, error) {
 	sessionName := filepath.Base(payload.SessionDir)
 	traceCache, traceMeta := h.prepareTraces(payload, stored)
@@ -1697,15 +1688,14 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		meta = next
 		return next, nil
 	}); err != nil {
-		h.logger.Warn("meta.json write failed", "session", sessionName, "err", err)
-		return nil, nil
+		return nil, fmt.Errorf("write session metadata: %w", err)
 	}
 
 	if agentID != "" {
 		_ = session.CleanupSageoxScore(agentID)
 	}
 
-	// attempt LFS upload (best-effort)
+	// Confirm LFS upload before allowing publication.
 	if h.skipLFS || h.projectRoot == "" {
 		return nil, nil
 	}
@@ -1713,14 +1703,12 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	ep := endpoint.GetForProject(h.projectRoot)
 	client, err := lfs.NewClientFromLedger(payload.LedgerPath, ep)
 	if err != nil {
-		h.logger.Warn("LFS client creation failed, committing raw content as fallback", "session", sessionName, "err", err)
-		return nil, nil
+		return nil, fmt.Errorf("create session LFS client: %w", err)
 	}
 
 	fileRefs, err := lfs.UploadSessionFiles(client, payload.SessionDir, h.logger)
 	if err != nil {
-		h.logger.Warn("LFS upload failed, committing raw content as fallback", "session", sessionName, "err", err)
-		return nil, nil
+		return nil, fmt.Errorf("upload session content: %w", err)
 	}
 	traceMeta = h.uploadPreparedTraces(client, traceCache, traceMeta, fileRefs)
 
@@ -1752,8 +1740,7 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		}
 		return base, nil
 	}); err != nil {
-		h.logger.Warn("meta.json update with LFS refs failed", "session", sessionName, "err", err)
-		return nil, nil
+		return nil, fmt.Errorf("write uploaded session references: %w", err)
 	}
 
 	return fileRefs, nil
@@ -1912,17 +1899,17 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 		return nil
 	}
 
-	// LFS upload and meta.json update (best-effort — fallback to regular git blob)
+	// Failed LFS uploads defer publication; keep source content for retry.
 	var fileRefs map[string]lfs.FileRef
 	if !h.skipLFS && h.projectRoot != "" {
 		ep := endpoint.GetForProject(h.projectRoot)
 		client, err := lfs.NewClientFromLedger(payload.LedgerPath, ep)
 		if err != nil {
-			h.logger.Warn("upload-only: LFS client creation failed, committing raw content", "session", sessionName, "err", err)
+			return fmt.Errorf("upload-only: create LFS client: %w", err)
 		} else {
 			refs, err := lfs.UploadSessionFiles(client, payload.SessionDir, h.logger)
 			if err != nil {
-				h.logger.Warn("upload-only: LFS upload failed, committing raw content", "session", sessionName, "err", err)
+				return fmt.Errorf("upload-only: upload session content: %w", err)
 			} else {
 				fileRefs = refs
 				if !payload.omitTraces {
@@ -1955,7 +1942,7 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 							}
 							return current, nil
 						}); err != nil {
-						h.logger.Warn("upload-only: meta.json LFS update failed", "session", sessionName, "err", err)
+						return fmt.Errorf("upload-only: write uploaded references: %w", err)
 					}
 				}
 			}
@@ -2530,7 +2517,9 @@ func stampCarrierBeforeReclaim(logger *slog.Logger, sessionDir, rawPath string, 
 		return
 	}
 	stoppedAt := session.ResolveStoppedAt(state.StoppedAt, rawPath, time.Now())
-	state.RecordTraceBoundary("stop", stoppedAt)
+	// A reclaimed recording has no live stop observation. Later recordings can
+	// share this native spool, so never turn its current EOF into an old stop.
+	// Preserve a durable boundary when present; otherwise traces fail closed.
 	if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
 		NativeSessions: state.NativeSessions,
 		StoppedAt:      stoppedAt,

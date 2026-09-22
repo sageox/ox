@@ -102,7 +102,9 @@ Two recordings within one Claude session therefore get separate attachments;
 paused bytes and later arrivals are excluded. A retry uses the original stop
 boundary. Unknown boundaries omit the affected range instead of widening it.
 A raw file without a completed stop boundary omits traces: its header may predate
-pauses, so recovery cannot safely infer the missing history.
+pauses, so recovery cannot safely infer the missing history. Stale-marker and
+orphan recovery preserve an already recorded stop offset; they never use the
+current spool size as the end of an earlier recording.
 
 Finalization writes `trace-spans.jsonl.gz` and `trace-events.jsonl.gz` to the
 Ledger's local session cache. It removes `user.email`, `user.id`,
@@ -120,7 +122,9 @@ at materialization are counted without waiting for more exports.
 
 Explicit stop, SessionEnd, and orphan recovery use the same materialization step.
 Trace processing or upload errors are logged and do not prevent the ordinary
-recording upload. Recordings started before opt-in receive no trace attachment.
+recording upload. If an ordinary recording upload fails, finalization keeps local
+content for retry and defers the Git commit until LFS confirms the upload.
+Recordings started before opt-in receive no trace attachment.
 
 Only OTLP HTTP JSON is supported, optionally gzip-compressed. Requests are limited
 to 8 MiB on the wire and after decompression. Multi-session exports are split by

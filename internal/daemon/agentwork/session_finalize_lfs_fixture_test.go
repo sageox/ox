@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,11 +17,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type localFinalizeLFS struct {
+	batchUnavailable atomic.Bool
+	blobUnavailable  atomic.Bool
+}
+
 // enableLocalFinalizeLFS keeps git-behavior fixtures on the real publication
 // path. Skipping LFS would test a raw-content fallback the commit guard forbids.
 // Only LFS HTTP is mocked; pointer preparation and git commits remain real.
-func enableLocalFinalizeLFS(t *testing.T, handler *SessionFinalizeHandler, ledgerPath string, missingOIDs ...string) {
+func enableLocalFinalizeLFS(t *testing.T, handler *SessionFinalizeHandler, ledgerPath string, missingOIDs ...string) *localFinalizeLFS {
 	t.Helper()
+	service := &localFinalizeLFS{}
 	previousConfig := gitserver.TestSetConfigDirOverride(t.TempDir())
 	t.Cleanup(func() { gitserver.TestSetConfigDirOverride(previousConfig) })
 	previousFileStorage := gitserver.TestSetForceFileStorage(true)
@@ -29,6 +36,10 @@ func enableLocalFinalizeLFS(t *testing.T, handler *SessionFinalizeHandler, ledge
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/objects/batch"):
+			if service.batchUnavailable.Load() {
+				http.Error(w, "LFS batch unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			var request struct {
 				Objects   []lfs.BatchObject `json:"objects"`
 				Operation string            `json:"operation"`
@@ -48,6 +59,10 @@ func enableLocalFinalizeLFS(t *testing.T, handler *SessionFinalizeHandler, ledge
 			w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
 			_ = json.NewEncoder(w).Encode(response)
 		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/objects/"):
+			if service.blobUnavailable.Load() {
+				http.Error(w, "LFS blob upload unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			data, err := io.ReadAll(r.Body)
 			if err != nil || lfs.ComputeOID(data) != filepath.Base(r.URL.Path) {
 				http.Error(w, "invalid content", http.StatusBadRequest)
@@ -67,4 +82,5 @@ func enableLocalFinalizeLFS(t *testing.T, handler *SessionFinalizeHandler, ledge
 	runGitCmd(t, ledgerPath, "remote", "set-url", "--push", "origin", pushURL)
 	handler.skipLFS = false
 	handler.projectRoot = t.TempDir()
+	return service
 }

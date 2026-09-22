@@ -26,7 +26,7 @@ import (
 )
 
 func TestTraceFinalizeDoorsPublishPointers(t *testing.T) {
-	for _, door := range []string{"normal", "orphan-upload-only", "invalid-trace", "missing-stop"} {
+	for _, door := range []string{"normal", "orphan-upload-only", "invalid-trace", "missing-stop", "orphan-missing-stop"} {
 		t.Run(door, func(t *testing.T) {
 			t.Setenv("XDG_CACHE_HOME", t.TempDir())
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -88,20 +88,29 @@ func TestTraceFinalizeDoorsPublishPointers(t *testing.T) {
 			require.NoError(t, os.MkdirAll(spool, 0700))
 			require.NoError(t, os.WriteFile(filepath.Join(spool, "traces.jsonl"), spans, 0600))
 			require.NoError(t, os.WriteFile(filepath.Join(spool, "logs.jsonl"), events, 0600))
-			// Orphan recovery obtains complete state from its marker before reclaim.
-			if door != "orphan-upload-only" && door != "missing-stop" {
+			// Only a live stop can capture the immutable boundary before reclaim.
+			if door != "missing-stop" && door != "orphan-missing-stop" {
 				capture.Boundaries = append(capture.Boundaries, model.Boundary{Action: "stop", At: now, Offsets: map[string]model.Offsets{nativeID: {Spans: int64(len(spans)), Events: int64(len(events))}}})
 			}
 			meta := session.StoreMeta{AgentID: "OxTraceDoor", AgentType: "claude-code", Username: "test", CreatedAt: now.Add(-time.Minute), NativeSessions: []lfs.NativeSession{{ID: nativeID, FirstSeen: now.Add(-time.Minute), LastSeen: now}}, TraceCapture: capture}
+			if door == "orphan-upload-only" {
+				// The header predates the live stop; reclaim must carry the
+				// complete durable marker without taking a new observation.
+				meta.TraceCapture = &model.Capture{Boundaries: capture.Boundaries[:1]}
+			}
 			header, err := json.Marshal(map[string]any{"type": "header", "metadata": meta})
 			require.NoError(t, err)
 			raw := append(header, []byte("\n{\"type\":\"user\",\"content\":\"Implement the session trace attachment feature with byte offsets and pointer-only Ledger uploads.\",\"seq\":1}\n{\"type\":\"assistant\",\"content\":\"Implemented the feature and validated local trace capture.\",\"seq\":2}\n")...)
 			require.NoError(t, os.WriteFile(filepath.Join(cache, "raw.jsonl"), raw, 0600))
-			if door == "orphan-upload-only" {
+			if door == "orphan-upload-only" || door == "orphan-missing-stop" {
 				state := session.RecordingState{SessionPath: cache, Trace: capture, NativeSessions: meta.NativeSessions, StoppedAt: &now}
 				stateData, err := json.Marshal(state)
 				require.NoError(t, err)
 				require.NoError(t, os.WriteFile(filepath.Join(cache, ".recording.json"), stateData, 0600))
+				// A subsequent recording in the same native session has already
+				// emitted bytes before the dead recording is reclaimed.
+				later := []byte(`{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"LATER_RECORDING_PRIVATE"}]}]}]}` + "\n")
+				require.NoError(t, os.WriteFile(filepath.Join(spool, "traces.jsonl"), append(append([]byte(nil), spans...), later...), 0600))
 				stampCarrierBeforeReclaim(slog.Default(), cache, filepath.Join(cache, "raw.jsonl"), &state)
 			}
 
@@ -119,7 +128,7 @@ func TestTraceFinalizeDoorsPublishPointers(t *testing.T) {
 					require.Equal(t, "stop", last.Action)
 					require.Equal(t, model.Offsets{Spans: int64(len(spans)), Events: int64(len(events))}, last.Offsets[nativeID])
 				}
-				if door == "invalid-trace" || door == "missing-stop" {
+				if door == "invalid-trace" || door == "missing-stop" || door == "orphan-missing-stop" {
 					return
 				}
 				for _, file := range []string{materialize.SpansFile, materialize.EventsFile} {
@@ -127,7 +136,7 @@ func TestTraceFinalizeDoorsPublishPointers(t *testing.T) {
 					require.True(t, lfs.IsPointerFile(filepath.Join(ledger, "sessions", name, file)), "tracked trace paths must be pointers before commit")
 				}
 			}
-			payload := &SessionFinalizePayload{SessionDir: cache, RawPath: filepath.Join(cache, "raw.jsonl"), LedgerPath: ledger, UploadOnly: door == "orphan-upload-only"}
+			payload := &SessionFinalizePayload{SessionDir: cache, RawPath: filepath.Join(cache, "raw.jsonl"), LedgerPath: ledger, UploadOnly: door == "orphan-upload-only" || door == "orphan-missing-stop"}
 			result := &RunResult{Output: `{"title":"Trace attachment implemented","summary":"Implemented session trace attachments with byte windows and local validation.","key_actions":["implemented trace capture"],"outcome":"success","topics_found":["tracing"],"quality_score":0.8,"score_reason":"Feature implementation"}`}
 			require.NoError(t, handler.ProcessResult(&WorkItem{ID: "trace-finalize", Type: sessionFinalizeType, Payload: payload}, result))
 			require.True(t, staged, "actual finalization door must stage a commit")
@@ -135,7 +144,7 @@ func TestTraceFinalizeDoorsPublishPointers(t *testing.T) {
 			finalMeta, err := lfs.ReadSessionMeta(tracked)
 			require.NoError(t, err)
 			require.Contains(t, finalMeta.Files, "raw.jsonl", "ordinary recording upload must survive trace failure")
-			if door == "invalid-trace" || door == "missing-stop" {
+			if door == "invalid-trace" || door == "missing-stop" || door == "orphan-missing-stop" {
 				require.Nil(t, finalMeta.Trace)
 				require.NotContains(t, finalMeta.Files, materialize.SpansFile)
 				require.NoFileExists(t, filepath.Join(tracked, materialize.SpansFile))
@@ -160,6 +169,7 @@ func TestTraceFinalizeDoorsPublishPointers(t *testing.T) {
 				require.NoError(t, err)
 				require.NoError(t, gz.Close())
 				require.NotContains(t, string(plain), "PRIVATE_EMAIL")
+				require.NotContains(t, string(plain), "LATER_RECORDING_PRIVATE")
 			}
 		})
 	}

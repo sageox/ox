@@ -1548,13 +1548,14 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		if traceErr != nil {
 			slog.Warn("trace upload skipped", "error", traceErr)
 		}
-		if fileRefs == nil {
-			fileRefs = make(map[string]lfs.FileRef)
-		}
-		for name, ref := range traceRefs {
-			fileRefs[name] = ref
-		}
-		if len(traceRefs) != 2 {
+		if traceErr == nil && len(traceRefs) == 2 {
+			if fileRefs == nil {
+				fileRefs = make(map[string]lfs.FileRef)
+			}
+			for name, ref := range traceRefs {
+				fileRefs[name] = ref
+			}
+		} else {
 			traceMeta = nil
 		}
 	} else {
