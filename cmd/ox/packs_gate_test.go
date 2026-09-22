@@ -94,3 +94,63 @@ func TestPacksHelpNamesNoUnregisteredCommand(t *testing.T) {
 			"drop the pointer or register the command:\n%s", gateOn)
 	}
 }
+
+// TestPacksGateLeavesEverySkillsMechanismAvailable pins the blast radius of the
+// packs gate to zero. The Pack Catalog is a *selection* surface layered on top
+// of skills delivery; skills delivery itself — `ox sync`, team convergence, and
+// the whole `ox skills` command family — predates packs and must keep working
+// identically whether the gate is open or shut.
+//
+// Failure prevented: a future change gating skills machinery behind
+// FEATURE_PACKS, so turning packs off (the default) silently stops delivering
+// team skills a team already depends on. That failure would be invisible in the
+// gate-off default everyone runs.
+func TestPacksGateLeavesEverySkillsMechanismAvailable(t *testing.T) {
+	restore := flagsSnapshot{flags.Get()}
+	t.Cleanup(func() { flags.Init(context.Background(), restore) })
+
+	// syncFeatureGatedCommands below REWRITES syncCmd.Long, which is process-wide
+	// state a later test in this package asserts on. Restoring it is not tidiness:
+	// without this the gate-on pass leaks and
+	// TestSyncHelp_DefaultLongMatchesTheGateOffRendering fails somewhere else,
+	// which is the worst shape of test bug — it moves the failure.
+	longBefore := syncCmd.Long
+	t.Cleanup(func() { syncCmd.Long = longBefore })
+
+	// Named explicitly rather than derived from the command tree: deriving the
+	// expectation from the thing under test would keep passing if a command
+	// disappeared from both sides at once.
+	mechanisms := [][]string{
+		{"sync"},
+		{"skills", "list"},
+		{"skills", "status"},
+		{"skills", "publish"},
+		{"skills", "approve"},
+		{"skills", "revoke"},
+	}
+
+	for _, packs := range []bool{false, true} {
+		t.Run(map[bool]string{false: "gate off", true: "gate on"}[packs], func(t *testing.T) {
+			f := flagsSnapshot{flags.Defaults()}
+			f.PacksEnabled = packs
+			flags.Init(context.Background(), f)
+			if flags.Get().PacksEnabled != packs {
+				t.Fatalf("fixture did not take: PacksEnabled=%v, want %v", flags.Get().PacksEnabled, packs)
+			}
+			syncFeatureGatedCommands(rootCmd)
+
+			for _, path := range mechanisms {
+				cmd, _, err := rootCmd.Find(path)
+				if err != nil || cmd == nil || cmd.Name() != path[len(path)-1] {
+					t.Errorf("`ox %s` is unreachable with PacksEnabled=%v — the packs gate must not "+
+						"cover skills delivery (err=%v)", strings.Join(path, " "), packs, err)
+					continue
+				}
+				if cmd.RunE == nil && cmd.Run == nil {
+					t.Errorf("`ox %s` resolved but has no runnable action with PacksEnabled=%v",
+						strings.Join(path, " "), packs)
+				}
+			}
+		})
+	}
+}
