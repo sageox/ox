@@ -145,3 +145,38 @@ cat > "`+marker+`"
 	_, err = os.Stat(marker)
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
+
+// TestCodexRunnerProbeTimeoutIsNotACapabilityFailure pins the boundary that
+// made TestCodexRunnerCancellation flaky in `make test-release`.
+//
+// The capability probe carries its own deadline on top of the caller's. When
+// only THAT deadline expires, exec.CommandContext kills the child and cmd.Run
+// returns "signal: killed", wrapping nothing — while the caller's context is
+// still healthy, so Run's ctx.Err() guard does not fire. The failure therefore
+// surfaced as "cannot verify Codex worker isolation; update Codex and retry",
+// which is advice for a completely different problem.
+//
+// Failure prevented: a loaded machine tells the user their Codex install is
+// broken. That is what happened here — the probe was killed at 2s while this
+// package ran beside cmd/ox and ledger.
+func TestCodexRunnerProbeTimeoutIsNotACapabilityFailure(t *testing.T) {
+	prev := codexProbeTimeout
+	codexProbeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { codexProbeTimeout = prev })
+
+	script := filepath.Join(t.TempDir(), "codex")
+	// --help hangs, so only the probe's own deadline can end this.
+	require.NoError(t, os.WriteFile(script,
+		[]byte("#!/bin/sh\nif [ \"$2\" = \"--help\" ]; then sleep 30; fi\n"), 0700))
+
+	r := &CodexRunner{binaryPath: script, logger: slog.Default()}
+	// Caller budget far exceeds the probe budget, so the outer context stays
+	// healthy and cannot mask the probe's own expiry.
+	_, err := r.Run(context.Background(), RunRequest{TimeoutOverride: 30 * time.Second})
+
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "update Codex and retry",
+		"a probe timeout must not be reported as a broken Codex install")
+	require.ErrorIs(t, err, context.DeadlineExceeded,
+		"a probe timeout must be recognizable as a timeout")
+}

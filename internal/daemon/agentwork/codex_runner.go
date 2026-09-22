@@ -125,10 +125,21 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 	}, nil
 }
 
+// codexProbeTimeout bounds `codex exec --help` on its own, in addition to the
+// caller's budget.
+//
+// It was 2s, which is ample for a help screen on an idle machine and a false
+// negative on a busy one: during a full `make test-release` this package runs
+// beside cmd/ox and ledger, process spawn alone exceeded it, and the probe was
+// killed. A probe that fails under load tells the user their Codex install is
+// broken when nothing is wrong with it. A variable so tests can shrink it.
+var codexProbeTimeout = 10 * time.Second
+
 // Probe without session content before sending a prompt. Never retry with broader
 // permissions when an older installation lacks the isolation flags we require.
 func (r *CodexRunner) checkCapabilities(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, codexProbeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, r.binaryPath, "exec", "--help")
 	output := &boundedCodexOutput{limit: 64 * 1024}
@@ -136,6 +147,17 @@ func (r *CodexRunner) checkCapabilities(ctx context.Context) error {
 	cmd.WaitDelay = time.Second
 	setProcAttr(cmd)
 	if err := cmd.Run(); err != nil {
+		// "We could not ASK" is not "Codex answered and lacks the flag".
+		// exec.CommandContext kills the child when the probe's own deadline
+		// expires, and cmd.Run then returns "signal: killed" — which wraps
+		// nothing. Reporting that as a capability failure told a user on a
+		// loaded machine to go update a Codex that was perfectly fine, and hid
+		// the real cause. The parent's own cancellation/timeout is left to the
+		// caller, which already wraps ctx.Err().
+		if parent.Err() == nil && ctx.Err() != nil {
+			return fmt.Errorf("could not verify Codex worker isolation within %s (is the machine under heavy load?): %w",
+				codexProbeTimeout, ctx.Err())
+		}
 		return fmt.Errorf("cannot verify Codex worker isolation; update Codex and retry: %w", err)
 	}
 	if output.overflow {
