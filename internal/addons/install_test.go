@@ -101,7 +101,13 @@ func (p *fakeProvider) register(name, version string, files ...File) {
 		p.versions[name] = map[string]Resolved{}
 	}
 	p.versions[name][version] = Resolved{
-		Descriptor: Descriptor{Name: name, Version: version, Source: p.source, Digest: "digest:" + name + ":" + version},
+		// A REAL digest over the files, not a synthetic label. validateResolved
+		// now verifies the advertised digest against the bytes (a provider
+		// could otherwise advertise the digest a team reviewed and ship
+		// different content), so a fake with a made-up digest is a fake the
+		// installer correctly refuses. Tests that want the mismatch REJECTED
+		// set Digest explicitly after registering.
+		Descriptor: Descriptor{Name: name, Version: version, Source: p.source, Digest: addonDigest(files)},
 		Files:      files,
 	}
 	p.latest[name] = version

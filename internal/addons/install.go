@@ -293,6 +293,22 @@ func validateResolved(name string, resolved Resolved) ([]File, error) {
 		return nil, fmt.Errorf("%q resolved with no files", name)
 	}
 
+	// The advertised digest must match the bytes. It is what the lock records
+	// as the team's selection, what a reviewer approved, and what
+	// `ox addons list` compares to decide whether an update is available —
+	// recorded verbatim until now, so a provider could advertise the digest a
+	// team reviewed and ship different content, and every consumer downstream
+	// would trust the label rather than the bytes. Per-file digests were
+	// already recomputed from what gets written; this closes the last place a
+	// provider claim was taken at face value.
+	if resolved.Digest == "" {
+		return nil, fmt.Errorf("%q advertises no digest, so its content cannot be pinned", name)
+	}
+	if got := addonDigest(resolved.Files); got != resolved.Digest {
+		return nil, fmt.Errorf("%q advertises digest %s but its content hashes to %s — refusing content that does not match what it claims to be",
+			name, resolved.Digest, got)
+	}
+
 	seen := make(map[string]bool, len(resolved.Files))
 	files := make([]File, len(resolved.Files))
 	for i, f := range resolved.Files {
@@ -344,17 +360,24 @@ func contentDigest(content []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// fileMode clamps a Provider-supplied mode to plain permission bits — no
-// setuid/setgid/sticky, no type bits — defaulting to 0o644. Untrusted input
-// (ADR-032 third-party authorship section) should not be able to hand this
-// package a mode it did not intend to write.
-func fileMode(m uint32) fs.FileMode {
-	perm := fs.FileMode(m) & 0o777
-	if perm == 0 {
-		return 0o644
-	}
-	return perm
-}
+// fileMode is 0o644 for every add-on file, unconditionally — the
+// Provider-supplied mode is deliberately ignored.
+//
+// It used to honor the permission bits, so a provider supplying 0o755 got an
+// executable file in the Team Context for free. catalog.go already states the
+// rule this now implements: "the installer must set it explicitly from
+// HasScripts, not trust Mode."
+//
+// Nothing is lost by refusing. The Team Context copy is source material that
+// convergence projects into repositories; whether a script is ever runnable is
+// decided downstream by `ox skills approve --allow-scripts`, on the projected
+// copy, by a human. An executable bit here would pre-empt that decision for a
+// file that arrived over a path where, per ADR-032's third-party authorship
+// section, nothing verifies signatures.
+//
+// The embedded provider hardcodes 0o644 and embed.FS cannot carry +x anyway,
+// so this closes the gap before a remote provider can walk through it.
+func fileMode(uint32) fs.FileMode { return 0o644 }
 
 // transaction is the state one Install, Update, or Remove call mutates while
 // holding the Team Context's advisory repository lock. The apply functions
@@ -601,12 +624,33 @@ func commitTeamWrite(ctx context.Context, teamPath string, written, removed []st
 			return fmt.Errorf("record %s in the Team Context: %w", rel, err)
 		}
 	}
+	// Only removals git ACTUALLY knew about may go into the commit pathspec.
+	//
+	// `git commit -- <pathspec>` aborts the whole commit when any one pathspec
+	// matches nothing git knows — it does not skip it. So a path the lock owns
+	// that a human already `git rm`'d would abort every commit that mentions
+	// it, which means `ox addons remove` (and an update that drops that path)
+	// fails, rolls back, leaves the lock intact, and fails again identically
+	// on every retry: the add-on becomes permanently unremovable from a single
+	// hand-deleted file.
+	//
+	// The two steps above are already tolerant of that state — tx.remove
+	// ignores fs.ErrNotExist and the unstage passes --ignore-unmatch. This is
+	// the third step, which used to throw that tolerance away.
+	committableRemovals := make([]string, 0, len(removed))
 	for _, rel := range removed {
+		known, err := gitTracksPath(ctx, teamPath, rel)
+		if err != nil {
+			return fmt.Errorf("check whether git tracks %s: %w", rel, err)
+		}
 		if _, err := gitutil.RunGit(ctx, teamPath, "rm", "--cached", "--sparse", "--ignore-unmatch", "--", rel); err != nil {
 			return fmt.Errorf("record removal of %s in the Team Context: %w", rel, err)
 		}
+		if known {
+			committableRemovals = append(committableRemovals, rel)
+		}
 	}
-	all := append(append([]string{}, written...), removed...)
+	all := append(append([]string{}, written...), committableRemovals...)
 	if len(all) == 0 {
 		return nil
 	}

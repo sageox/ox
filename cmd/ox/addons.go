@@ -49,10 +49,11 @@ Team Context git history is the undo. ox never overwrites a file it does not
 own — a name that collides with something hand-authored is refused, not merged.
 
 Add-ons may be published by SageOx, by your own team, or in future by a third
-party. Content that arrives with runnable scripts still needs
-` + "`ox skills approve`" + ` before an AI coworker may read it, and
-` + "`--allow-scripts`" + ` before anything lands on disk as executable — installing
-an add-on grants neither.`,
+party. Add-on files are written non-executable, always — a provider cannot
+choose otherwise. Content that arrives with runnable scripts still needs
+` + "`ox skills approve <name>`" + ` before an AI coworker may read it, and that
+command's ` + "`--allow-scripts`" + ` before anything becomes runnable. Installing an
+add-on grants neither.`,
 }
 
 var addonsListCmd = &cobra.Command{
