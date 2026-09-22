@@ -179,6 +179,7 @@ func TestShippedSkillContent_StaysUsable(t *testing.T) {
 		require.False(t, strings.HasPrefix(strings.TrimPrefix(desc, "description: "), ">"),
 			"%s description must be single-line; a folded scalar breaks Team Context publishing", addon)
 	}
+
 }
 
 // --- B. resolveFromFS/listFromFS against synthetic trees ---
