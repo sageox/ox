@@ -43,12 +43,14 @@ jobs:
           fi
 
   # Reads the release gate's stages from the Makefile at the tag, so the
-  # verify-inrepo jobs run exactly the stages `make test-release` runs.
+  # verify-inrepo jobs run exactly the stages `make test-release` runs, and
+  # records the commit the tag names so every later job can refuse a moved tag.
   plan-release-stages:
     if: github.repository == 'sageox/ox'
     runs-on: ubuntu-latest
     outputs:
-      stages: ${{ steps.stages.outputs.stages }}
+      stages: ${{ steps.plan.outputs.stages }}
+      sha: ${{ steps.plan.outputs.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -63,16 +65,19 @@ jobs:
           go-version-file: 'go.mod'
           cache: false
 
-      - name: Read release stages
-        id: stages
+      # A stage must be a plain target name: "-n" or "V=1" would let
+      # `make "$STAGE"` exit 0 without running any tests.
+      - name: Plan release stages
+        id: plan
         run: |
-          stages=$(make -s release-stages)
+          stages=$(make -s release-stages) || stages=""
           echo "Release stages: $stages"
-          jq -e 'type == "array" and length > 0' <<<"$stages" >/dev/null || {
-            echo "::error::make release-stages did not return a non-empty JSON array."
+          jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and test("^[a-z][a-z0-9-]*$"))' <<<"$stages" >/dev/null || {
+            echo "::error::make release-stages did not return a non-empty list of target names. A tag cut before release stages existed releases with its own workflow: gh workflow run release.yml --ref $RELEASE_TAG -f tag=$RELEASE_TAG"
             exit 1
           }
           echo "stages=$stages" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   verify-inrepo:
     if: github.repository == 'sageox/ox'
@@ -90,11 +95,35 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      # A re-run keeps the stages that passed, so a tag moved in between
+      # would mix results from two commits.
+      - name: Require the planned commit
+        env:
+          PLANNED_SHA: ${{ needs.plan-release-stages.outputs.sha }}
+        run: |
+          head=$(git rev-parse HEAD)
+          if [ -z "$PLANNED_SHA" ] || [ "$head" != "$PLANNED_SHA" ]; then
+            echo "::error::$RELEASE_TAG names $head, but this release was planned for ${PLANNED_SHA:-no commit}. Dispatch the release again."
+            exit 1
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          # Under setup-go's shared entry the ~2-minute fuzz stage would save
+          # first and pin the cache to a near-empty build. Read the entry
+          # ci.yml's test job owns instead, without writing.
+          cache: false
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}
 
       - name: Configure git identity for tests
         run: |
@@ -111,7 +140,7 @@ jobs:
 
   build-and-release:
     if: github.repository == 'sageox/ox'
-    needs: verify-inrepo
+    needs: [verify-inrepo, plan-release-stages]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -121,6 +150,17 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
+
+      # Ship only the commit the verify-inrepo stages tested.
+      - name: Require the planned commit
+        env:
+          PLANNED_SHA: ${{ needs.plan-release-stages.outputs.sha }}
+        run: |
+          head=$(git rev-parse HEAD)
+          if [ -z "$PLANNED_SHA" ] || [ "$head" != "$PLANNED_SHA" ]; then
+            echo "::error::$RELEASE_TAG names $head, but this release was planned for ${PLANNED_SHA:-no commit}. Dispatch the release again."
+            exit 1
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
