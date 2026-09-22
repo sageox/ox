@@ -1,9 +1,8 @@
 package addons
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,28 +115,45 @@ func TestEmbeddedProvider_Resolve_DigestDeterministic(t *testing.T) {
 // lost nothing. These hashes were captured from the pre-move originals with
 // `shasum -a 256` before the move; if the move (or any later edit) changes a
 // single byte, this fails instead of silently shipping drifted content.
-func TestMovedSkillContent_ByteIdentical(t *testing.T) {
-	tests := []struct {
-		path string // relative to extensions/addons/post-cutoff/skills/post-cutoff/
-		want string
-	}{
-		{"SKILL.md", "1cc197c6c79b0167537711bdd22fbc7f53c74f0822fa87a09a7d24ce62108aaf"},
-		{"references/AUTHORING.md", "1d6bf10ce0d15c6cfdff3a48520b22f1caf42353c9d782cdfec9278be3015b39"},
-		{"references/jev.md", "33f393df4c997698e60a48bda0dc19a10f9fc59f2535bb4d6c5c0733eb557952"},
-	}
+func TestShippedSkillContent_StaysUsable(t *testing.T) {
+	// This replaced a SHA-256 byte-pin that proved the packs -> addons move was
+	// lossless. That move is merged and verified, and a permanent byte-pin on
+	// this content is actively wrong: the skill documents its own refresh and
+	// retirement procedure, so entries are SUPPOSED to change. A hash you update
+	// every time it fires is not a guard, it is a chore that launders the change
+	// it was meant to catch.
+	//
+	// What must hold forever instead: the files are present, and the manifest
+	// still satisfies the two fields the catalog validator actually reads.
+	files := []string{"SKILL.md", "references/AUTHORING.md", "references/jev.md"}
 
 	root, err := os.Getwd()
 	require.NoError(t, err)
 	root = filepath.Join(root, "..", "..", "extensions", "addons", "post-cutoff", "skills", "post-cutoff")
 
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(tt.path)))
-			require.NoError(t, err)
-			sum := sha256.Sum256(content)
-			require.Equal(t, tt.want, hex.EncodeToString(sum[:]), "content drifted from the pre-move original")
+	for _, rel := range files {
+		t.Run(rel, func(t *testing.T) {
+			content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+			require.NoError(t, err, "a shipped add-on file went missing")
+			require.NotEmpty(t, bytes.TrimSpace(content), "shipped add-on file is empty")
 		})
 	}
+
+	manifest, err := os.ReadFile(filepath.Join(root, "SKILL.md"))
+	require.NoError(t, err)
+	lines := strings.Split(string(manifest), "\n")
+	require.Greater(t, len(lines), 3, "SKILL.md has no frontmatter block")
+	require.Equal(t, "---", lines[0], "SKILL.md must open with frontmatter")
+	require.Equal(t, "name: post-cutoff", strings.TrimSpace(lines[1]),
+		"frontmatter name must equal the directory name or the catalog validator rejects it")
+
+	desc := strings.TrimSpace(lines[2])
+	require.True(t, strings.HasPrefix(desc, "description: "), "description must be the third line")
+	require.NotEmpty(t, strings.TrimPrefix(desc, "description: "), "description is the whole auto-selection budget")
+	// Team Context parses frontmatter line-by-line with no folded-scalar support,
+	// so a `>-` block would publish the literal ">-" as the activation surface.
+	require.False(t, strings.HasPrefix(strings.TrimPrefix(desc, "description: "), ">"),
+		"description must be single-line; a folded scalar breaks Team Context publishing")
 }
 
 // --- B. resolveFromFS/listFromFS against synthetic trees ---
