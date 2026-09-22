@@ -39,7 +39,20 @@ var Catalog = []Bundle{
 	// which moved to extensions/addons/post-cutoff/. This also closed GH #1028:
 	// nothing in the CLI could ever select a Default: false bundle, since the
 	// commands that would have were withdrawn before release (PR #1013).
-	{ID: "lifecycle", Description: "Explicit ox lifecycle and diagnostic slash surfaces", Default: true, SkillIDs: []string{"ox-cli-cart", "ox-cli-cart-done", "ox-cli-cart-drop", "ox-cli-cart-start", "ox-cli-doctor", "ox-cli-init", "ox-cli-prime", "ox-cli-session-abort", "ox-cli-session-list", "ox-cli-session-start", "ox-cli-session-status", "ox-cli-session-stop", "ox-cli-status"}},
+	{ID: "lifecycle", Description: "Explicit ox lifecycle and diagnostic slash surfaces", Default: true, SkillIDs: []string{"ox-cli-attest", "ox-cli-doctor", "ox-cli-init", "ox-cli-prime", "ox-cli-session-abort", "ox-cli-session-list", "ox-cli-session-start", "ox-cli-session-status", "ox-cli-session-stop", "ox-cli-status"}},
+	// Carts is experimental and gated behind FEATURE_CARTS. These four skills
+	// used to sit in "lifecycle" (Default: true), so they installed for
+	// everyone — teaching an AI coworker to run `ox carts …`, which then
+	// refuses because the feature is off. A skill for a disabled command is
+	// worse than a missing one: the coworker follows it and hits a wall it
+	// cannot diagnose.
+	//
+	// Default is false and the gate lives at the composition point
+	// (cmd/ox/skill_reconcile.go's enabledBundleIDs), not here: this file is a
+	// declarative catalog, and which features a binary has turned on is not a
+	// property of the catalog. Same split as syncFeatureGatedCommands, which
+	// decides command registration rather than putting flags in the commands.
+	{ID: "carts", Description: "Cart lifecycle slash surfaces (requires FEATURE_CARTS)", Default: false, SkillIDs: []string{"ox-cli-cart", "ox-cli-cart-done", "ox-cli-cart-drop", "ox-cli-cart-start"}},
 }
 
 // Retired names ox once installed and no longer ships.

@@ -30,14 +30,17 @@ func TestEmbeddedProvider_Source(t *testing.T) {
 // Failure prevented: an add-on silently disappearing from the embedded tree,
 // or a third arriving without anyone deciding it should be in the catalog a
 // customer sees.
-func TestEmbeddedProvider_List_ReturnsBothBuiltInAddons(t *testing.T) {
+func TestEmbeddedProvider_List_ReturnsTheBuiltInAddons(t *testing.T) {
 	descriptors, err := NewEmbeddedProvider().List(context.Background())
 	require.NoError(t, err)
-	require.Len(t, descriptors, 2, "extensions/addons ships post-cutoff and post-cutoff-jev")
+	require.Len(t, descriptors, 3, "extensions/addons ships agent-toolkit, post-cutoff and post-cutoff-jev")
 
 	// List is contractually sorted by name.
-	names := []string{descriptors[0].Name, descriptors[1].Name}
-	require.Equal(t, []string{"post-cutoff", "post-cutoff-jev"}, names)
+	names := make([]string, 0, len(descriptors))
+	for _, d := range descriptors {
+		names = append(names, d.Name)
+	}
+	require.Equal(t, []string{"agent-toolkit", "post-cutoff", "post-cutoff-jev"}, names)
 
 	for _, d := range descriptors {
 		require.NotEmpty(t, d.Version, "%s must pin a version", d.Name)

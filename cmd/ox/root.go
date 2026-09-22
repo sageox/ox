@@ -548,6 +548,7 @@ func syncFeatureGatedCommands(root *cobra.Command) {
 	setCommandRegistered(root, bulletinCmd, flags.Get().BulletinEnabled)
 	setCommandRegistered(sessionCmd, sessionTraceCmd, flags.Get().TraceEnabled)
 	syncTraceDoctorCheck()
+	setCommandRegistered(root, cartsCmd, auth.IsCartsEnabled())
 
 }
 

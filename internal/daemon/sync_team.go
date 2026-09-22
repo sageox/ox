@@ -510,6 +510,22 @@ func isTransientSyncError(err error) bool {
 		"502 bad gateway",
 		"503 service unavailable",
 		"504 gateway",
+		// Git's OWN wording for an HTTP error, which is what actually reaches
+		// this function. git-remote-https reports
+		//   "The requested URL returned error: 503"
+		// and never the reason phrase, so the three markers above — written
+		// from how a browser or proxy phrases it — matched nothing. A real
+		// sageox.ai 503 was therefore classified as a HARD failure: no retry,
+		// and the operator told their sync "failed" for an outage that would
+		// have cleared itself.
+		"returned error: 500",
+		"returned error: 502",
+		"returned error: 503",
+		"returned error: 504",
+		// A 5xx often returns an HTML error page where git expects the smart-HTTP
+		// protocol, and git reports the parse failure rather than the status.
+		// Same cause, same retryable answer.
+		"expected flush after ref listing",
 	} {
 		if strings.Contains(msg, marker) {
 			return true

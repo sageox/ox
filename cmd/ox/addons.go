@@ -190,27 +190,109 @@ func runAddonsList(cmd *cobra.Command, _ []string) error {
 	return renderAddonRows(cmd.OutOrStdout(), rows)
 }
 
+// addonSummaryWidth bounds the single-line summary shown under each row.
+// A Descriptor's Summary is written as an agent's auto-selection budget — it
+// can run past 300 characters — and dumping it whole reads as a wall of text
+// whose end a human cannot distinguish from a truncation. One line, clipped
+// with intent, with the full text one `--json` away, is the fix.
+const addonSummaryWidth = skillsTableWidth - 2 // 2-space indent, no trailing spare needed on the last cell
+
+// addonStateText is the STATE column's text — always present, so meaning
+// never depends on color alone (NO_COLOR, ansi256 fallback, a colorblind
+// reader all get the same answer from the word itself).
+func addonStateText(r addonRow) string {
+	switch {
+	case r.Installed != "" && r.UpdateAvailable:
+		return "⚠ update available"
+	case r.Installed != "":
+		return "✓ installed"
+	default:
+		return "available"
+	}
+}
+
+// addonStateStyled applies the semantic color layered on top of addonStateText.
+func addonStateStyled(r addonRow) string {
+	text := addonStateText(r)
+	switch {
+	case r.Installed != "" && r.UpdateAvailable:
+		return cli.StyleWarning.Render(text)
+	case r.Installed != "":
+		return cli.StyleSuccess.Render(text)
+	default:
+		return cli.StyleDim.Render(text)
+	}
+}
+
+// addonVersionCell shows the version story in one field: the catalog version
+// when nothing is installed yet, the installed version when it is current,
+// or the installed→available transition when an update is sitting there —
+// so the STATE column's "update available" always has a concrete answer to
+// "update to what" right next to it.
+func addonVersionCell(r addonRow) string {
+	switch {
+	case r.Installed != "" && r.UpdateAvailable:
+		return r.Installed + " → " + r.Available
+	case r.Installed != "":
+		return r.Installed
+	default:
+		return r.Available
+	}
+}
+
+// addonColumnWidths sizes NAME and VERSION from their header text and their
+// widest cell. STATE is never padded — it is always the last thing on its
+// line, so nothing downstream depends on its width, and padding a styled
+// string with %-*s would count invisible ANSI bytes as columns and silently
+// misalign every row after it.
+func addonColumnWidths(rows []addonRow) (name, version int) {
+	name, version = len("NAME"), len("VERSION")
+	for _, r := range rows {
+		if n := len([]rune(r.Name)); n > name {
+			name = n
+		}
+		if n := len([]rune(addonVersionCell(r))); n > version {
+			version = n
+		}
+	}
+	return name, version
+}
+
 func renderAddonRows(out io.Writer, rows []addonRow) error {
 	if len(rows) == 0 {
 		fmt.Fprintln(out, "No add-ons are available in this build's catalog.")
 		return nil
 	}
+
+	installed := 0
 	for _, r := range rows {
-		state := "available"
-		switch {
-		case r.Installed != "" && r.UpdateAvailable:
-			state = "installed " + r.Installed + " · update available"
-		case r.Installed != "":
-			state = "installed " + r.Installed
-		}
-		fmt.Fprintf(out, "%-18s %-12s %s\n", r.Name, r.Available, state)
-		if strings.TrimSpace(r.Summary) != "" {
-			fmt.Fprintf(out, "  %s\n", r.Summary)
-		}
-		if r.HasScripts {
-			fmt.Fprintf(out, "  carries runnable scripts — `ox skills approve %s --allow-scripts` gates them\n", r.Name)
+		if r.Installed != "" {
+			installed++
 		}
 	}
+
+	p := skillsPrintf(out)
+	p("%s", cli.StyleGroupHeader.Render("Add-ons"))
+	p("%s", cli.StyleDim.Render(strings.Repeat("─", len("Add-ons"))))
+	p("%s", cli.StyleDim.Render(fmt.Sprintf("%d in this build's catalog · %d installed", len(rows), installed)))
+	p("")
+
+	nameWidth, versionWidth := addonColumnWidths(rows)
+	p("%s", cli.StyleAccent.Render(fmt.Sprintf("%-*s  %-*s  %s", nameWidth, "NAME", versionWidth, "VERSION", "STATE")))
+
+	for _, r := range rows {
+		p("%-*s  %-*s  %s", nameWidth, r.Name, versionWidth, addonVersionCell(r), addonStateStyled(r))
+		if summary := strings.TrimSpace(r.Summary); summary != "" {
+			p("  %s", cli.StyleDim.Render(truncateWords(summary, addonSummaryWidth)))
+		}
+		if r.HasScripts {
+			p("  %s", cli.StyleWarning.Render("⚠ runnable scripts — approve before an AI coworker reads them:"))
+			p("    %s", cli.StyleDim.Render(fmt.Sprintf("ox skills approve %s --allow-scripts", r.Name)))
+		}
+		p("")
+	}
+
+	p("%s", cli.StyleDim.Render("Full descriptions: `ox addons list --json`"))
 	return nil
 }
 
@@ -270,13 +352,14 @@ func runAddonOp(cmd *cobra.Command, name string, op func(teamPath string) (addon
 }
 
 func renderAddonResult(out io.Writer, teamPath string, r addons.Result) error {
+	ok := cli.StyleSuccess.Render("✓")
 	switch r.Op {
 	case addons.OpRemove:
-		fmt.Fprintf(out, "Removed %s from your Team Context (%d file(s)).\n", r.Addon, len(r.Removed))
+		fmt.Fprintf(out, "%s Removed %s from your Team Context (%d file(s)).\n", ok, r.Addon, len(r.Removed))
 	case addons.OpUpdate:
-		fmt.Fprintf(out, "Updated %s to %s (%d written, %d removed).\n", r.Addon, r.Version, len(r.Written), len(r.Removed))
+		fmt.Fprintf(out, "%s Updated %s to %s (%d written, %d removed).\n", ok, r.Addon, r.Version, len(r.Written), len(r.Removed))
 	default:
-		fmt.Fprintf(out, "Installed %s %s (%d file(s)).\n", r.Addon, r.Version, len(r.Written))
+		fmt.Fprintf(out, "%s Installed %s %s (%d file(s)).\n", ok, r.Addon, r.Version, len(r.Written))
 	}
 
 	// Named BEFORE the success guidance, not after: this is the one thing in
@@ -285,11 +368,20 @@ func renderAddonResult(out io.Writer, teamPath string, r addons.Result) error {
 	if len(r.Modified) > 0 {
 		cli.PrintWarning(fmt.Sprintf("your team had edited %d file(s) this add-on owns; the new version replaced them: %s",
 			len(r.Modified), strings.Join(r.Modified, ", ")))
-		fmt.Fprintf(out, "  Recover any of them with `git -C %s log -p -- <path>`.\n", teamPath)
+		// Plain, not backticked, and on its own line: teamPath is a real
+		// absolute path with no shorter substitute, so this can legitimately
+		// run past 80 columns on a deep checkout — but it must never look like
+		// a fixed-width command that got cut off mid-token.
+		fmt.Fprintf(out, "  Recover with: git -C %s log -p -- <path>\n", teamPath)
 	}
 
 	if r.Op != addons.OpRemove {
-		fmt.Fprintln(out, "Distribution is automatic — run `ox sync` only if you need it immediately, then `ox skills status` to verify.")
+		// Two short lines, not one long one: the original single sentence ran
+		// past 80 columns with two backticked commands in it, so a plain
+		// terminal wrapped it wherever it landed — including mid-command,
+		// which reads exactly like truncated output.
+		fmt.Fprintln(out, "Distribution is automatic — run `ox sync` if you need it now.")
+		fmt.Fprintln(out, "Verify with `ox skills status`.")
 	}
 	return nil
 }

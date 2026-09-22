@@ -500,14 +500,17 @@ func init() {
 	cartsCmd.AddCommand(cartsReopenCmd)
 	cartsCmd.AddCommand(cartsDepCmd)
 
-	// Hide carts from --help until the feature is enabled. Execution is gated
-	// independently in openCartsStore, so an explicit `ox carts …` still errors
-	// cleanly when disabled.
-	if !auth.IsCartsEnabled() {
-		cartsCmd.Hidden = true
-	}
-
-	rootCmd.AddCommand(cartsCmd)
+	// NOT registered here: carts is registered by syncFeatureGatedCommands once
+	// FEATURE_CARTS has resolved, exactly like `ox scout` and `ox bulletin`.
+	//
+	// Hidden:true was not enough. It removes carts from `ox --help` but leaves
+	// the command resolvable, so `ox carts` still ran and printed its own help
+	// with exit 0 — a disabled feature that answers when you ask for it is not
+	// hidden, it is merely unlisted. Unregistering makes it report "unknown
+	// command", which is the honest answer when the feature is off.
+	//
+	// Execution stays gated independently in openCartsStore, so this is
+	// defense in depth rather than a replacement for it.
 }
 
 // --- helpers ---

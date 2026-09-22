@@ -41,10 +41,48 @@ const (
 	provenanceLocal = "local"
 )
 
-// provenanceRank groups the table: ox's own rows, then the team's, then the
-// human's. Alphabetical across all three interleaves them, which buries the
-// question a reader actually has ("which of these are mine?").
-var provenanceRank = map[string]int{provenanceOx: 0, provenanceTeam: 1, provenanceLocal: 2}
+// provenanceRank groups the table: the team's rows first, then the human's
+// own, then ox's. ox's own skills are the least interesting thing on this
+// page — they are the CLI's routine tool-use wrappers — so they sort last
+// instead of dominating the top. Alphabetical across all three interleaves
+// them, which buries the question a reader actually has ("did my team's
+// skills arrive? what's mine?").
+var provenanceRank = map[string]int{provenanceTeam: 0, provenanceLocal: 1, provenanceOx: 2}
+
+// skillGroups is the fixed display order and human label for each
+// provenance. All three always render, even at zero, so "did my team's
+// skills arrive" is answerable by looking, not by counting rows that aren't
+// there. provenanceLocal displays as "yours": the on-disk classification
+// stays "local" (it is also the conservative fallback for ambiguous
+// cross-root ownership — see installedSkillRow.Ambiguous), but "local" reads
+// as a technical term to a human and the table should say what the summary
+// line already says: these are the skills you authored.
+var skillGroups = []struct{ provenance, label string }{
+	{provenanceTeam, "team"},
+	{provenanceLocal, "yours"},
+	{provenanceOx, "ox"},
+}
+
+// curatedOxSkills is a hand-curated allowlist of ox's own skills worth
+// surfacing by default: the ones that teach a coworker something they would
+// not discover from ordinary tool use — consulting team memory before
+// answering, visual explanations, the skill manager, plan authoring, and the
+// value recap. Every other ox skill is a routine CLI
+// wrapper — session start/stop, status, doctor, and the like — and is noise
+// in a list whose job is "what do I have that matters." `ox skills list
+// --all` still shows every one of them, and --json always does.
+//
+// This is an editorial decision, not something derived from the catalog:
+// update it by hand when a new ox skill earns a place here.
+var curatedOxSkills = map[string]bool{
+	// Consulting team memory BEFORE answering is the habit that changes an
+	// answer's quality most, and it is the least discoverable from tool use.
+	"ox-cli-consult":       true,
+	"ox-cli-viz":           true,
+	"ox-cli-skill-manager": true,
+	"ox-cli-plan":          true,
+	"ox-cli-recap":         true,
+}
 
 var skillsListCmd = &cobra.Command{
 	Use:   "list",
@@ -61,6 +99,7 @@ If a skill your team publishes is missing here, ` + "`ox skills status`" + ` say
 
 func init() {
 	skillsListCmd.Flags().Bool("json", false, "Emit machine-readable JSON")
+	skillsListCmd.Flags().Bool("all", false, "Show every ox skill, including the routine tool-use wrappers hidden by default")
 	skillsCmd.AddCommand(skillsListCmd)
 }
 
@@ -76,6 +115,12 @@ type installedSkillRow struct {
 	// wired to both Claude Code and Codex has two, and a skill present in only
 	// one of them is a real, invisible half-install.
 	Roots []string `json:"roots"`
+	// Ambiguous is true when this name carried conflicting ownership evidence
+	// across two roots (inventorySkillRoots downgrades Provenance to "local"
+	// as the conservative answer in that case). Without this flag that row is
+	// indistinguishable from an ordinary hand-authored skill, which is a
+	// different fact told with the same word.
+	Ambiguous bool `json:"ambiguous,omitempty"`
 }
 
 type skillsListOutput struct {
@@ -87,6 +132,7 @@ type skillsListOutput struct {
 
 func runSkillsList(cmd *cobra.Command, _ []string) error {
 	asJSON, _ := cmd.Flags().GetBool("json")
+	showAllOx, _ := cmd.Flags().GetBool("all")
 
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
@@ -97,7 +143,7 @@ func runSkillsList(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return emitSkillsList(cmd.OutOrStdout(), collectInstalledSkills(gitRoot, roots), asJSON)
+	return emitSkillsList(cmd.OutOrStdout(), collectInstalledSkills(gitRoot, roots), asJSON, showAllOx)
 }
 
 // resolveSkillRoots returns the skill directories this repository actually uses.
@@ -206,8 +252,11 @@ func inventorySkillRoots(repoRoot string, roots []string) ([]installedSkillRow, 
 				// The same name has different ownership evidence in two roots. Calling
 				// the combined row ox-owned would misattribute the unowned copy and
 				// promise that ox can safely repair or remove it. Local is the
-				// conservative answer until status reports the cross-root divergence.
+				// conservative answer until status reports the cross-root divergence —
+				// and Ambiguous is what keeps that answer from reading exactly like an
+				// ordinary hand-authored skill in the rendered table.
 				row.Provenance = provenanceLocal
+				row.Ambiguous = true
 			}
 			row.Roots = append(row.Roots, root)
 		}
@@ -297,12 +346,18 @@ func skillProvenance(name string, oxOwned bool) string {
 	}
 }
 
+// skillsListGuidance is a single line, always short enough to fit one
+// 80-column terminal row without wrapping. A wrapped guidance line has
+// bitten this command twice: a long sentence broke apart between the two
+// words of a backticked command name, and the half-line left on screen read
+// exactly like truncated output. Counts belong to the table (each group
+// header already states its own), so this says only what to do next.
 func skillsListGuidance(out skillsListOutput) string {
 	if len(out.Problems) > 0 {
 		return out.Problems[0]
 	}
 	if len(out.Roots) == 0 {
-		return "This repository has not selected an AI coworker, so no skills are installed — run `ox init`."
+		return "No AI coworker is selected for this repository — run `ox init`."
 	}
 	if len(out.Skills) == 0 {
 		// The roots are lockfile-authored, so naming them here carries the same
@@ -312,41 +367,83 @@ func skillsListGuidance(out skillsListOutput) string {
 		for _, root := range out.Roots {
 			safe = append(safe, sanitizeCell(root))
 		}
-		return "No skills are installed in " + strings.Join(safe, ", ") + " — run `ox skills status` to see why."
+		return "No skills in " + strings.Join(safe, ", ") + " — run `ox skills status`."
 	}
-	counts := map[string]int{}
-	for _, row := range out.Skills {
-		counts[row.Provenance]++
-	}
-	return fmt.Sprintf("%s installed: %d from ox, %d from your team, %d your own. Run `ox skills status` to see what your team publishes and whether it reached this repository.",
-		pluralSkills(len(out.Skills)), counts[provenanceOx], counts[provenanceTeam], counts[provenanceLocal])
+	return fmt.Sprintf("%s installed — run `ox skills status` for team publish state.", pluralSkills(len(out.Skills)))
 }
 
-func emitSkillsList(w io.Writer, out skillsListOutput, asJSON bool) error {
+// emitSkillsList renders the collected inventory. showAllOx controls only the
+// human table: it hides ox's routine tool-use wrappers by default (see
+// curatedOxSkills) behind a "+N more" note naming the escape hatch. --json
+// never filters — collectInstalledSkills already answers "is X really
+// installed" with full fidelity, and a debugging agent needs that, not the
+// curated view.
+func emitSkillsList(w io.Writer, out skillsListOutput, asJSON bool, showAllOx bool) error {
 	if asJSON {
 		return encodeSkillsJSON(w, out)
 	}
 	p := skillsPrintf(w)
 
+	p("%s", cli.StyleGroupHeader.Render("Skills"))
+	p("%s", cli.StyleDim.Render(strings.Repeat("─", len("Skills"))))
+
 	if len(out.Skills) > 0 {
-		p("%s", cli.StyleAccent.Render(fmt.Sprintf("%-*s  %-*s  %s",
-			provenanceColumn, "PROVENANCE", nameColumn, "NAME", "DESCRIPTION")))
+		p("")
+		p("  %s", cli.StyleAccent.Render(fmt.Sprintf("%-*s  %s", nameColumn, "NAME", "DESCRIPTION")))
+
+		byProvenance := map[string][]installedSkillRow{}
 		for _, row := range out.Skills {
-			// Sanitized HERE and not on the way in: Name is the real on-disk
-			// directory name everywhere else — a map key in this file, and what
-			// `validatePublishNames` matches a user's argument against — so a
-			// scrubbed copy stored in the struct would quietly stop matching the
-			// directory it names. It is also a name ox did not choose: a checked-out
-			// repository can hold a skill directory whose name embeds CSI or OSC
-			// bytes, which on a POSIX terminal can forge a row, rewrite the window
-			// title, or push text into the clipboard. Sanitizing BEFORE truncating
-			// matters twice: the clip cannot land mid-escape-sequence, and the column
-			// budget is spent on characters the reader can actually see.
-			//
-			// --json needs none of this; encoding/json escapes control bytes itself.
-			p("%-*s  %-*s  %s", provenanceColumn, row.Provenance,
-				nameColumn, truncateCell(sanitizeCell(row.Name), nameColumn),
-				truncateCell(row.Description, listDescriptionColumn))
+			byProvenance[row.Provenance] = append(byProvenance[row.Provenance], row)
+		}
+
+		for i, group := range skillGroups {
+			rows := byProvenance[group.provenance]
+			if i > 0 {
+				p("")
+			}
+			p("%s", cli.StyleBold.Render(fmt.Sprintf("%s · %d", group.label, len(rows))))
+
+			shown, hidden := rows, 0
+			if group.provenance == provenanceOx && !showAllOx {
+				shown = nil
+				for _, row := range rows {
+					if curatedOxSkills[row.Name] {
+						shown = append(shown, row)
+					} else {
+						hidden++
+					}
+				}
+			}
+
+			for _, row := range shown {
+				// Sanitized HERE and not on the way in: Name is the real on-disk
+				// directory name everywhere else — a map key in this file, and what
+				// `validatePublishNames` matches a user's argument against — so a
+				// scrubbed copy stored in the struct would quietly stop matching the
+				// directory it names. It is also a name ox did not choose: a checked-out
+				// repository can hold a skill directory whose name embeds CSI or OSC
+				// bytes, which on a POSIX terminal can forge a row, rewrite the window
+				// title, or push text into the clipboard. Sanitizing BEFORE truncating
+				// matters twice: the clip cannot land mid-escape-sequence, and the column
+				// budget is spent on characters the reader can actually see.
+				//
+				// --json needs none of this; encoding/json escapes control bytes itself.
+				// Description is already sanitized at the source (manifestDescription).
+				p("  %-*s  %s", nameColumn, truncateCell(sanitizeCell(row.Name), nameColumn),
+					cli.StyleDim.Render(truncateWords(row.Description, listDescriptionColumn)))
+				if row.Ambiguous {
+					p("    %s", cli.StyleWarning.Render(fmt.Sprintf(
+						"⚠ ambiguous ownership across %d roots — see `ox skills status`", len(row.Roots))))
+				}
+			}
+			if hidden > 0 {
+				word := "skill"
+				if hidden != 1 {
+					word = "skills"
+				}
+				p("    %s", cli.StyleDim.Render(fmt.Sprintf(
+					"+%d more ox %s — `ox skills list --all`", hidden, word)))
+			}
 		}
 	}
 
@@ -363,6 +460,10 @@ func emitSkillsList(w io.Writer, out skillsListOutput, asJSON bool) error {
 		}
 		writeWrapped(w, "", "", out.Guidance)
 	}
+	if len(out.Skills) > 0 {
+		p("")
+		p("%s", cli.StyleDim.Render("Full descriptions: `ox skills list --json`"))
+	}
 	return nil
 }
 
@@ -373,11 +474,10 @@ func emitSkillsList(w io.Writer, out skillsListOutput, asJSON bool) error {
 // table that wraps is not a table, and the wrap only shows up on someone
 // else's terminal.
 const (
-	provenanceColumn = 10 // len("PROVENANCE")
-	nameColumn       = 26
-	// Two two-space gutters, plus one column left spare: some terminals wrap when
-	// the last cell is written rather than after it.
-	listDescriptionColumn = skillsTableWidth - provenanceColumn - nameColumn - 5
+	nameColumn = 26
+	// 2-space row indent, one 2-space gutter, plus one column left spare: some
+	// terminals wrap when the last cell is written rather than after it.
+	listDescriptionColumn = skillsTableWidth - nameColumn - 5
 )
 
 // skillManifestDescription reads one skill's SKILL.md through a handle pinned
@@ -508,6 +608,30 @@ func truncateCell(s string, width int) string {
 		return string(runes[:width])
 	}
 	return string(runes[:width-1]) + "…"
+}
+
+// truncateWords clips prose to width runes like truncateCell, but prefers to
+// land the cut on a space so a clipped description reads as whole words
+// followed by an unmistakable ellipsis rather than a word sheared in half —
+// a description column that always cuts mid-word trains the reader to
+// distrust every row's ending. Falls back to a hard clip when no space
+// exists in the back half of the budget (one very long token), so the
+// column still respects width either way.
+func truncateWords(s string, width int) string {
+	runes := []rune(s)
+	if len(runes) <= width {
+		return s
+	}
+	if width <= 1 {
+		return string(runes[:width])
+	}
+	cut := width - 1 // reserve one column for the ellipsis
+	for i := cut; i > cut/2; i-- {
+		if runes[i] == ' ' {
+			return string(runes[:i]) + "…"
+		}
+	}
+	return string(runes[:cut]) + "…"
 }
 
 func pluralSkills(n int) string {

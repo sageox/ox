@@ -192,7 +192,7 @@ func TestCollectInstalledSkills_WillNotReadThroughARootOutsideTheRepository(t *t
 
 			for _, asJSON := range []bool{false, true} {
 				var buf strings.Builder
-				require.NoError(t, emitSkillsList(&buf, got, asJSON))
+				require.NoError(t, emitSkillsList(&buf, got, asJSON, false))
 				require.NotContains(t, buf.String(), stolenDescription,
 					"json=%v: a SKILL.md description from outside the repository reached the reader", asJSON)
 				require.NotContains(t, buf.String(), "stolen",
@@ -240,7 +240,7 @@ func TestEmitSkillsList_RepositoryControlledTextCannotForgeTerminalOutput(t *tes
 				"publish matches a user's argument against")
 
 		var buf strings.Builder
-		require.NoError(t, emitSkillsList(&buf, got, false))
+		require.NoError(t, emitSkillsList(&buf, got, false, false))
 
 		row := rowContaining(t, buf.String(), "evil")
 		for _, r := range row {
@@ -263,7 +263,7 @@ func TestEmitSkillsList_RepositoryControlledTextCannotForgeTerminalOutput(t *tes
 		writeSkillDir(t, repo, ".claude/skills", name, manifestWithDescription("v", "d"))
 
 		var buf strings.Builder
-		require.NoError(t, emitSkillsList(&buf, collectInstalledSkills(repo, []string{".claude/skills"}), false))
+		require.NoError(t, emitSkillsList(&buf, collectInstalledSkills(repo, []string{".claude/skills"}), false, false))
 
 		require.Contains(t, rowContaining(t, buf.String(), "visible"), "visible-name",
 			"the name was clipped before it was sanitized, so the column budget went to invisible bytes")
@@ -378,7 +378,11 @@ func TestEmitSkillsList_FitsEightyColumns(t *testing.T) {
 	out := skillsListOutput{
 		Roots: []string{".claude/skills"},
 		Skills: []installedSkillRow{
-			{Name: "ox-cli-session-review", Provenance: provenanceOx,
+			// provenanceTeam, not provenanceOx: an uncurated ox skill is hidden
+			// by default (see TestEmitSkillsList_CuratesOxSkillsByDefault), which
+			// would make this row vanish from the table this test renders and
+			// prove nothing about width.
+			{Name: "team-skill-review", Provenance: provenanceTeam,
 				Description: strings.Repeat("a very long description that keeps going ", 8)},
 			{Name: strings.Repeat("long-skill-name-", 6), Provenance: provenanceLocal, Description: "short"},
 		},
@@ -387,7 +391,7 @@ func TestEmitSkillsList_FitsEightyColumns(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	require.NoError(t, emitSkillsList(&buf, out, false))
+	require.NoError(t, emitSkillsList(&buf, out, false, false))
 
 	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
 		require.LessOrEqual(t, len([]rune(stripANSI(line))), skillsTableWidth,
@@ -401,7 +405,7 @@ func TestEmitSkillsList_FitsEightyColumns(t *testing.T) {
 // BYTES rather than the struct that produced them.
 func TestSkillsListJSON_AlwaysAnswersEveryQuestionItCanAnswer(t *testing.T) {
 	var buf strings.Builder
-	require.NoError(t, emitSkillsList(&buf, collectInstalledSkills(t.TempDir(), nil), true))
+	require.NoError(t, emitSkillsList(&buf, collectInstalledSkills(t.TempDir(), nil), true, false))
 
 	var got map[string]any
 	require.NoError(t, json.Unmarshal([]byte(buf.String()), &got), "output was not JSON: %q", buf.String())
@@ -488,7 +492,7 @@ func TestSkillsListHelpers_CoverDefensiveAndFormattingBoundaries(t *testing.T) {
 			Guidance: "Run ox doctor to repair it.",
 		}
 		var buf strings.Builder
-		require.NoError(t, emitSkillsList(&buf, out, false))
+		require.NoError(t, emitSkillsList(&buf, out, false, false))
 		rendered := stripANSI(buf.String())
 		require.Contains(t, rendered, "Directories ox could not read")
 		require.Contains(t, rendered, "Run ox doctor")
