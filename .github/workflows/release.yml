@@ -31,16 +31,63 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      release_id: ${{ steps.draft.outputs.release_id }}
     steps:
-      - name: Require an existing human-reviewed draft
+      - name: Require immutable release tags
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          is_draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')
-          if [ "$is_draft" != "true" ]; then
-            echo "::error::Release $RELEASE_TAG must exist as a reviewed draft before dispatch."
+          if [[ "$RELEASE_TAG" != v* ]]; then
+            echo "::error::Release tags must start with v so the immutable release-tag ruleset applies."
             exit 1
           fi
+
+          rulesets=$(gh api "repos/$GITHUB_REPOSITORY/rulesets")
+          ruleset_id=$(jq -r '
+            [.[] | select(
+              .name == "Immutable release tags" and
+              .enforcement == "active"
+            )][0].id // empty
+          ' <<<"$rulesets")
+          if [ -z "$ruleset_id" ]; then
+            echo "::error::The active Immutable release tags ruleset is missing."
+            exit 1
+          fi
+
+          ruleset=$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id")
+          jq -e '
+            .target == "tag" and
+            .enforcement == "active" and
+            .current_user_can_bypass == "never" and
+            (.conditions.ref_name.include | index("refs/tags/v*")) != null and
+            (.conditions.ref_name.exclude | length) == 0 and
+            ([.rules[].type] | index("update")) != null and
+            ([.rules[].type] | index("deletion")) != null
+          ' <<<"$ruleset" >/dev/null || {
+            echo "::error::The Immutable release tags ruleset must block this workflow from updating or deleting refs/tags/v*."
+            exit 1
+          }
+
+      - name: Require an existing human-reviewed draft
+        id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json databaseId,isDraft,name,tagName) || {
+            echo "::error::Release $RELEASE_TAG must exist as a reviewed draft before dispatch."
+            exit 1
+          }
+          jq -e --arg tag "$RELEASE_TAG" '
+            .isDraft == true and
+            .tagName == $tag and
+            .name == $tag and
+            (.databaseId | type == "number")
+          ' <<<"$release" >/dev/null || {
+            echo "::error::Release $RELEASE_TAG must be a reviewed draft whose name and tag are both $RELEASE_TAG."
+            exit 1
+          }
+          echo "release_id=$(jq -r '.databaseId' <<<"$release")" >> "$GITHUB_OUTPUT"
 
   # Reads the release gate's stages from the Makefile at the tag, so the
   # verify-inrepo jobs run exactly the stages `make test-release` runs, and
@@ -55,7 +102,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           persist-credentials: false
 
       # Parsing the Makefile runs `go env`; nothing is built here, so no module cache.
@@ -94,7 +141,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ env.RELEASE_TAG }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           persist-credentials: false
 
       # A re-run keeps the stages that passed, so a tag moved in between
@@ -138,18 +185,21 @@ jobs:
           STAGE: ${{ matrix.stage }}
         run: make "$STAGE"
 
-  build-and-release:
+  build-release-assets:
     if: github.repository == 'sageox/ox'
-    needs: [verify-inrepo, plan-release-stages]
+    needs: [verify-draft, verify-inrepo, plan-release-stages]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      asset_names: ${{ steps.assets.outputs.asset_names }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ env.RELEASE_TAG }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
 
       # Ship only the commit the verify-inrepo stages tested.
       - name: Require the planned commit
@@ -196,35 +246,231 @@ jobs:
         env:
           SAGEOX_CLI_SIGNING_KEY: ${{ secrets.SAGEOX_CLI_SIGNING_KEY }}
 
-      - name: Build and upload binaries
+      # Generate every release artifact, including the Homebrew formula, but
+      # do not let GoReleaser choose or publish a release by name. The next
+      # step uploads assets directly to the reviewed release ID.
+      - name: Build release artifacts
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: release -f .config/goreleaser.yml --clean
+          args: release -f .config/goreleaser.yml --clean --skip=publish
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SAGEOX_CLI_PUBLIC_KEY: ${{ steps.sign.outputs.SAGEOX_CLI_PUBLIC_KEY }}
           SAGEOX_CLI_SIGNATURES: ${{ steps.sign.outputs.SAGEOX_CLI_SIGNATURES }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
-      - name: Release summary
-        run: |
-          {
-            echo "## Release ${{ env.RELEASE_TAG }}"
-            echo ""
-            echo "**Status:** Published"
-            echo ""
-            echo "**Signed artifacts:**"
-            go run ./scripts/sign-manifest --list 2>/dev/null | sed 's/^/- /'
-            echo ""
-            echo "[View Release](https://github.com/sageox/ox/releases/tag/${{ env.RELEASE_TAG }})"
-          } >> "$GITHUB_STEP_SUMMARY"
+      # Keep formula publication independently retryable after the release is
+      # immutable. This artifact is private to the workflow run.
+      - name: Save the Homebrew formula
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: homebrew-formula
+          path: dist/homebrew/ox.rb
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+      - name: Upload assets to the approved draft
+        id: assets
         env:
-          SAGEOX_CLI_SIGNING_KEY: ${{ secrets.SAGEOX_CLI_SIGNING_KEY }}
+          APPROVED_RELEASE_ID: ${{ needs.verify-draft.outputs.release_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$APPROVED_RELEASE_ID" in
+            ''|*[!0-9]*)
+              echo "::error::The approved release ID is missing or invalid. Dispatch the release again."
+              exit 1
+              ;;
+          esac
+
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/$APPROVED_RELEASE_ID") || {
+            echo "::error::The approved draft release no longer exists. Dispatch the release again."
+            exit 1
+          }
+          jq -e --arg id "$APPROVED_RELEASE_ID" --arg tag "$RELEASE_TAG" '
+            .id == ($id | tonumber) and
+            .draft == true and
+            .tag_name == $tag and
+            .name == $tag
+          ' <<<"$release" >/dev/null || {
+            echo "::error::The approved draft changed. Nothing was uploaded."
+            exit 1
+          }
+
+          jq -e '
+            [.[] | select(.type == "Archive" or .type == "Checksum")] as $assets |
+            ($assets | map(select(.type == "Archive")) | length) > 0 and
+            ($assets | map(select(.type == "Checksum")) | length) == 1 and
+            ($assets | map(.name) | length) == ($assets | map(.name) | unique | length) and
+            all($assets[];
+              (.name | type == "string" and test("^[A-Za-z0-9._-]+$")) and
+              (.path | type == "string" and test("^dist/[A-Za-z0-9._/-]+$") and (contains("/../") | not))
+            )
+          ' dist/artifacts.json >/dev/null || {
+            echo "::error::GoReleaser produced an invalid release-asset manifest."
+            exit 1
+          }
+
+          mapfile -t assets < <(jq -r '
+            .[] |
+            select(.type == "Archive" or .type == "Checksum") |
+            [.name, .path] | @tsv
+          ' dist/artifacts.json)
+          for entry in "${assets[@]}"; do
+            IFS=$'\t' read -r name path <<<"$entry"
+            if [ ! -f "$path" ]; then
+              echo "::error::Release asset $path is missing."
+              exit 1
+            fi
+            existing_id=$(jq -r --arg name "$name" '
+              [.assets[]? | select(.name == $name)][0].id // empty
+            ' <<<"$release")
+            if [ -n "$existing_id" ]; then
+              gh api --method DELETE \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$existing_id"
+            fi
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "Content-Type: application/octet-stream" \
+              --data-binary "@$path" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$APPROVED_RELEASE_ID/assets?name=$name" \
+              >/dev/null
+          done
+          echo "asset_names=$(jq -c '[.[] | select(.type == "Archive" or .type == "Checksum") | .name]' dist/artifacts.json)" >> "$GITHUB_OUTPUT"
+
+  # This is intentionally a terminal, idempotent job. If GitHub publishes the
+  # release but the API response is lost, a failed-job rerun verifies the exact
+  # immutable release and succeeds without rebuilding or changing it.
+  publish-release:
+    if: github.repository == 'sageox/ox'
+    needs: [verify-draft, plan-release-stages, build-release-assets]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the approved draft
+        env:
+          APPROVED_RELEASE_ID: ${{ needs.verify-draft.outputs.release_id }}
+          ASSET_NAMES: ${{ needs.build-release-assets.outputs.asset_names }}
+          GH_TOKEN: ${{ github.token }}
+          PLANNED_SHA: ${{ needs.plan-release-stages.outputs.sha }}
+        run: |
+          case "$APPROVED_RELEASE_ID" in
+            ''|*[!0-9]*)
+              echo "::error::The approved release ID is missing or invalid. Dispatch the release again."
+              exit 1
+              ;;
+          esac
+          jq -e '
+            type == "array" and
+            length > 0 and
+            all(.[]; type == "string" and test("^[A-Za-z0-9._-]+$"))
+          ' <<<"$ASSET_NAMES" >/dev/null || {
+            echo "::error::The release asset list is missing or invalid."
+            exit 1
+          }
+
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/$APPROVED_RELEASE_ID") || {
+            echo "::error::The approved release no longer exists. Dispatch the release again."
+            exit 1
+          }
+          jq -e --arg id "$APPROVED_RELEASE_ID" --arg tag "$RELEASE_TAG" '
+            .id == ($id | tonumber) and
+            .tag_name == $tag and
+            .name == $tag and
+            (
+              (.draft == true and (.immutable // false) == false) or
+              (.draft == false and .immutable == true)
+            )
+          ' <<<"$release" >/dev/null || {
+            echo "::error::The approved release changed or was published without immutability."
+            exit 1
+          }
+
+          while IFS= read -r name; do
+            jq -e --arg name "$name" '
+              any(.assets[]?; .name == $name and .state == "uploaded")
+            ' <<<"$release" >/dev/null || {
+              echo "::error::The approved release is missing $name."
+              exit 1
+            }
+          done < <(jq -r '.[]' <<<"$ASSET_NAMES")
+
+          remote_refs=$(git ls-remote --exit-code \
+            "https://github.com/$GITHUB_REPOSITORY.git" \
+            "refs/tags/$RELEASE_TAG" \
+            "refs/tags/$RELEASE_TAG^{}") || {
+            echo "::error::Tag $RELEASE_TAG no longer exists."
+            exit 1
+          }
+          remote_sha=$(awk '
+            $2 ~ /\^\{\}$/ { peeled = $1; next }
+            { direct = $1 }
+            END { if (peeled != "") print peeled; else print direct }
+          ' <<<"$remote_refs")
+          if [ -z "$PLANNED_SHA" ] || [ "$remote_sha" != "$PLANNED_SHA" ]; then
+            echo "::error::$RELEASE_TAG names ${remote_sha:-no commit}, but this release was tested at ${PLANNED_SHA:-no commit}."
+            exit 1
+          fi
+
+          if [ "$(jq -r '.draft' <<<"$release")" = "false" ]; then
+            exit 0
+          fi
+
+          published=$(gh api --method PATCH \
+            "repos/$GITHUB_REPOSITORY/releases/$APPROVED_RELEASE_ID" \
+            -F draft=false)
+          jq -e --arg id "$APPROVED_RELEASE_ID" --arg tag "$RELEASE_TAG" '
+            .id == ($id | tonumber) and
+            .draft == false and
+            .immutable == true and
+            .tag_name == $tag and
+            .name == $tag
+          ' <<<"$published" >/dev/null || {
+            echo "::error::GitHub did not make the approved release immutable."
+            exit 1
+          }
+
+  # The formula must never advertise draft assets. Keeping this in its own job
+  # lets a tap failure retry without rebuilding or changing the release.
+  publish-homebrew:
+    needs: [build-release-assets, publish-release]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download the Homebrew formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name homebrew-formula \
+            --dir homebrew
+
+      - name: Publish the Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          if [ ! -f homebrew/ox.rb ]; then
+            echo "::error::The generated Homebrew formula is missing."
+            exit 1
+          fi
+
+          current_sha=$(gh api repos/sageox/homebrew-tap/contents/ox.rb --jq .sha)
+          content=$(base64 -w 0 homebrew/ox.rb)
+          jq -n \
+            --arg message "Brew formula update for ox version $RELEASE_TAG" \
+            --arg content "$content" \
+            --arg sha "$current_sha" \
+            '{message: $message, content: $content, sha: $sha}' |
+            gh api --method PUT repos/sageox/homebrew-tap/contents/ox.rb --input - >/dev/null
 
   publish-docs:
-    needs: build-and-release
+    needs: publish-release
     permissions:
       contents: read
       packages: write
