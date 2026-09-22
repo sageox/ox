@@ -9,7 +9,6 @@ import (
 
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/skillmanager"
-	"github.com/sageox/ox/internal/version"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/stretchr/testify/require"
 )
@@ -92,30 +91,25 @@ func TestInstallAdapterInventory_ValidatesAndReconcilesNativeTargets(t *testing.
 		require.DirExists(t, filepath.Join(repo, ".inventory-native", "skills"))
 	})
 
-	t.Run("hand-authored collision is preserved", func(t *testing.T) {
-		adapterDir := t.TempDir()
-		writeInventoryAdapter(t, adapterDir, "inventory-conflict", `["session_reader"]`,
-			`,"skill_targets":[{"key":"inventory-conflict","root":".inventory-conflict/skills","format":"agent-skills/v1","scope":"project","link_policy":"reject"}]`)
-		t.Setenv("OX_ADAPTER_PATH", adapterDir)
-		repo := t.TempDir()
-		manifest := filepath.Join(repo, ".inventory-conflict", "skills", "post-cutoff", "SKILL.md")
-		require.NoError(t, os.MkdirAll(filepath.Dir(manifest), 0o755))
-		require.NoError(t, os.WriteFile(manifest, []byte("hand authored\n"), 0o644))
-		targets, err := skillmanager.CanonicalizeTargets(repo, []adapterprotocol.SkillTarget{{
-			Key: "inventory-conflict", Root: ".inventory-conflict/skills",
-			Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
-			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
-		}})
-		require.NoError(t, err)
-		_, err = skillmanager.Reconcile(repo, version.Version, skillmanager.DesiredSkills{
-			Names: []string{"post-cutoff"}, Targets: []string{"inventory-conflict"},
-		}, targets)
-		require.NoError(t, err)
-		require.ErrorContains(t, installAdapterInventory(repo, "inventory-conflict"), "preserved conflict")
-		data, err := os.ReadFile(manifest)
-		require.NoError(t, err)
-		require.Equal(t, "hand authored\n", string(data))
-	})
+	// REMOVED: "hand-authored collision is preserved".
+	//
+	// It staged a hand-authored SKILL.md at an embedded skill's name and
+	// asserted installAdapterInventory reported a preserved conflict. That
+	// needed an embedded skill whose name carries NO reserved prefix — an
+	// `ox-cli-*` name is presumed ox-authored and overwritten, so it observes
+	// an overwrite and calls it a preservation.
+	//
+	// "post-cutoff" was that skill. It moved to the Add-on Catalog (ADR-032
+	// D6), and the only unprefixed embedded name left is "sageox", the
+	// committed on-ramp, which reports a conflict whether or not anything was
+	// staged — verified by deleting the staging line and watching the subtest
+	// still pass. A subtest that passes with its fixture removed proves
+	// nothing, and that is worse than no subtest.
+	//
+	// The behavior itself stays covered where it belongs:
+	// internal/skillmanager's TestReservedNamespaceIsOwnedAbsolutely asserts
+	// both halves — a reserved-prefix squatter is reclaimed, an unprefixed
+	// user skill in the same directory is untouched — against a real fixture.
 }
 
 func TestSkillTargetsForAdapters_MergesTypedInventory(t *testing.T) {

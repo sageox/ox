@@ -542,12 +542,12 @@ func initFeatureFlags(cmd *cobra.Command) {
 func syncFeatureGatedCommands(root *cobra.Command) {
 	setCommandRegistered(root, scoutCmd, auth.IsScoutEnabled())
 
-	// The Add-on Catalog has no command in this binary yet, so the only add-on
-	// surface to gate is help text. It is re-rendered here, alongside command
-	// registration, because both must settle before cobra renders anything —
-	// and because whichever PR ships `ox addons` adds its setCommandRegistered
-	// line next to this one, against the same already-resolved flag.
-	syncCmd.Long = syncLong(flags.Get().AddonsEnabled)
+	// `ox addons` and the Pack-boundary paragraph in `ox sync --help` are two
+	// faces of the same gate, so they settle together, here, before cobra
+	// resolves or renders anything.
+	addonsEnabled := flags.Get().AddonsEnabled
+	setCommandRegistered(root, addonsCmd, addonsEnabled)
+	syncCmd.Long = syncLong(addonsEnabled)
 }
 
 func setCommandRegistered(root, command *cobra.Command, enabled bool) {

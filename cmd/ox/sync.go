@@ -116,14 +116,16 @@ keeps transport and local convergence synchronized. This command exists only for
 // Add-on Catalog this build cannot reach (#1028, #1029); the rule stays recorded in
 // ADR-032 either way.
 //
-// It deliberately names NO command. The gate can be switched on today — for
-// dogfooding, or mid-rollout — while `ox addons` is still follow-up work, so help
-// that told a user which command to run would send them to "unknown command" in
-// exactly the state the flag is meant to make safe. Whoever ships `ox addons`
-// restores the pointer alongside the command; until then
-// TestAddonsHelpNamesNoUnregisteredCommand holds the line.
+// It names `ox addons update`, which is now safe to name: the same gate that
+// prints this paragraph registers that command (syncFeatureGatedCommands in
+// root.go), so the two cannot disagree. The pointer was deliberately absent
+// while the command was still follow-up work — help that sent a user to
+// "unknown command" in exactly the state the flag exists to make safe.
+// TestAddonsHelpNamesNoUnregisteredCommand enforces that pairing in both
+// directions.
 const syncAddonsHelp = `Convergence includes Add-on-managed and hand-authored Team Context content through
-the same delivery path. It does not check the Add-on Catalog for newer releases.`
+the same delivery path. It does not check the Add-on Catalog for newer releases;
+use 'ox addons update' for catalog updates.`
 
 const syncLongTail = `The daemon syncs automatically on:
   - File changes in your project

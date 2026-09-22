@@ -79,19 +79,33 @@ func TestAddonsHelpNamesNoUnregisteredCommand(t *testing.T) {
 		t.Fatal("fixture did not take: AddonsEnabled is off, so this proves nothing")
 	}
 
-	gateOn := syncLong(true)
+	// Drive the REAL wiring, not syncLong directly. Help text and command
+	// registration are two outputs of one function; asserting on the text
+	// while skipping the registration half is how this test passed while the
+	// pairing it claims to guard was broken.
+	longBefore := syncCmd.Long
+	t.Cleanup(func() { syncCmd.Long = longBefore })
+	syncFeatureGatedCommands(rootCmd)
+
+	gateOn := syncCmd.Long
 	if !strings.Contains(gateOn, "Add-on Catalog") {
 		t.Fatal("fixture did not take: gate-on help carries no add-on paragraph, so this proves nothing")
 	}
 
 	cmd, _, err := rootCmd.Find([]string{"addons"})
 	registered := err == nil && cmd != nil && cmd.Name() == "addons"
-	if registered {
-		return // `ox addons` exists; naming it is now correct.
-	}
-	if strings.Contains(gateOn, "ox addons") {
+
+	if strings.Contains(gateOn, "ox addons") && !registered {
 		t.Errorf("gate-on `ox sync --help` names `ox addons`, but no such command is registered — "+
 			"drop the pointer or register the command:\n%s", gateOn)
+	}
+
+	// The inverse half, which only became testable once the command shipped:
+	// registering the verb while the help stays silent about it hides the one
+	// instruction a dogfooder with the gate on actually needs.
+	if registered && !strings.Contains(gateOn, "ox addons update") {
+		t.Errorf("`ox addons` is registered but gate-on `ox sync --help` never names it — "+
+			"restore the `ox addons update` pointer:\n%s", gateOn)
 	}
 }
 
