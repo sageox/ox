@@ -7,12 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Your team can install a curated add-on once and every teammate's AI coworker gets it, and the things ox tells you about your coworkers and your team rules are now true.
+## [0.17.1] - 2026-09-22
+
+Your team can install a curated add-on once and every teammate's AI coworker gets it, what ox tells you about your coworkers and your team rules is now true, and the lists you read every day fit on a screen.
 
 ### New
 
 - **`ox addons` — install a curated add-on once, for the whole team** — pick an add-on and ox writes it into your Team Context, so every repo on the team receives it and every teammate's AI coworker sees the same selection. `ox sync` distributes it; there is no per-repo step and no second sync command to learn. Two add-ons ship today: `post-cutoff`, a shelf of what your team has adopted that postdates your model's training, and `post-cutoff-jev`, one brief on typed-decision models.
 - **Updates replace, and say what they replaced** — `ox addons update` overwrites the files an add-on owns and drops the ones its new version stopped shipping. If your team edited one, ox names it before overwriting so the change is one `git log -p` away instead of silently gone. ox never touches a file it doesn't own: a name that collides with something you wrote is refused, not merged.
+- **An add-on is skills, rules, and the context each skill carries** — the context is the point: it ships *inside* the skill that needs it, so an AI coworker reads it exactly when the work calls for it. It is not a dump into your Team Context.
+- **`ox skills list` shows the skills you actually chose** — your team's first, yours next, and only ox's most useful ones last, with the rest a `--all` away. Descriptions now get up to three lines instead of stopping mid-sentence, and it points you at `ox addons` when you want more.
+- **`ox addons list` and `ox skills status` read like a page, not a dump** — full descriptions, aligned columns, relative sync times, and nothing repeated back at you that the heading already said.
+- **`ox status` lists your other teams as a table** — one line per team with visibility, membership, and sync state, so the team that needs attention is the one that looks different. `--verbose` keeps the detailed cards.
+- **`--json` is readable when you run it yourself** — syntax-colored at a terminal, and byte-exact plain JSON the moment it is piped, redirected, or read by an AI coworker.
 
 ### Fixed
 
@@ -21,6 +28,9 @@ Your team can install a curated add-on once and every teammate's AI coworker get
 - **A team rule can no longer stop reaching anyone** — if a repo's ignore rules stopped covering the managed rule folder, the rule froze in place *and* went unmentioned at session start, arriving through neither path while both looked healthy. It now always arrives at least once.
 - **A stuck `git` can no longer hang session start** — the check ox runs while priming had no time limit, so a wedged index lock or stalled network drive meant a coding session that simply never began.
 - **An approval that could never be satisfied** — in a checkout with no `origin` remote, a team skill could look approvable to `ox skills approve` while being invisible to the reconciler that had to act on it.
+- **A syncing outage no longer looks like a broken setup** — when the server returns an error, ox now recognizes it as temporary and retries, instead of suspending sync and telling you to go fix a checkout that was never wrong.
+- **A false data-loss alarm is gone** — renaming plans (which `ox plan backfill` does routinely) was reported as a wipe of your saved plans and sessions, on every check, for as long as the commit stayed in recent history. ox now asks whether anything was actually lost.
+- **Commands you don't have access to are hidden, not just unlisted** — a feature-gated command no longer appears in help or completions for accounts that cannot run it.
 
 ## [0.17.0] - 2026-09-21
 
