@@ -464,6 +464,16 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// mark explicit stop BEFORE daemon RPC so anti-entropy cannot restart
 	// the watcher in the window between RPC and mark
+	if state.Trace != nil {
+		if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
+			s.RecordTraceBoundary("stop", stopRequestedAt)
+			state.Trace = s.Trace
+		}); err != nil {
+			slog.Warn("persist trace stop boundary failed", "error", err)
+			state.Trace = nil // uncertainty must omit traces, never broaden their window
+		}
+	}
+	traceAtStop := state.Trace
 	if err := session.MarkExplicitStop(projectRoot, inst.AgentID); err != nil {
 		return fmt.Errorf("mark session stopped: %w", err)
 	}
@@ -560,6 +570,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 				}
 				latest.SessionFile = state.SessionFile
 				state = latest
+				state.Trace = traceAtStop
 				// in-memory only: the stop was requested at stopStart, and every
 				// meta.json/header writer below reads state.StoppedAt through
 				// session.ResolveStoppedAt. Never persisted — a saved StoppedAt
@@ -1175,6 +1186,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		OxVersion:              version.Version,
 		NativeSessions:         state.NativeSessions,
 		StoppedAt:              state.StoppedAt,
+		TraceCapture:           state.Trace,
 	}
 	if err := rawWriter.WriteHeader(meta); err != nil {
 		rawWriter.Close()
@@ -1474,6 +1486,11 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 	}
 
 	sessionID := session.ResolveOrMintSessionID(preservedID, state.SessionID)
+	traceCache, traceMeta, traceErr := session.MaterializeTraces(ledgerPath, sessionName, state.Trace)
+	if traceErr != nil {
+		slog.Warn("trace materialization skipped", "error", traceErr)
+		traceMeta = nil
+	}
 
 	// write meta.json first (before LFS upload) to preserve session metadata even if LFS fails
 	projectEndpoint := endpoint.GetForProject(projectRoot)
@@ -1526,6 +1543,23 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 		}
 		return fmt.Errorf("LFS upload: %w", err)
 	}
+	if traceMeta != nil && effects.uploadTraces != nil {
+		traceRefs, traceErr := effects.uploadTraces(projectRoot, traceCache, sessionDir)
+		if traceErr != nil {
+			slog.Warn("trace upload skipped", "error", traceErr)
+		}
+		if fileRefs == nil {
+			fileRefs = make(map[string]lfs.FileRef)
+		}
+		for name, ref := range traceRefs {
+			fileRefs[name] = ref
+		}
+		if len(traceRefs) != 2 {
+			traceMeta = nil
+		}
+	} else {
+		traceMeta = nil
+	}
 
 	// Persist the uploaded refs before preparing the ledger copy for git.
 	// The source cache retains the real content through any push failure.
@@ -1534,6 +1568,9 @@ func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionRe
 			return nil, fmt.Errorf("session metadata disappeared during upload")
 		}
 		current.Files = fileRefs
+		if traceMeta != nil {
+			current.Trace = traceMeta
+		}
 		meta = current // retain the redaction audit written before upload
 		return current, nil
 	}); err != nil {

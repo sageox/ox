@@ -102,9 +102,43 @@
           "items": { "$ref": "#/$defs/nativeSession" },
           "description": "Native coding-agent session ids this recording had observed when the header was written, in first-seen order. A file written whole at stop carries the full list here; a file recorded live carries the id that started the recording here and the full list on the footer (see footer.native_sessions), because a live raw.jsonl is never rewritten. Readers take the footer's list when present. A recording can span several ids (/clear re-primes into the same recording when no hook stops it) and several recordings can share one id (stop and restart, resume). Absent on recordings made before the field existed and for agents that expose no session id."
         },
+        "trace_capture": { "$ref": "#/$defs/traceCapture" },
         "stopped_at": {
           "$ref": "#/$defs/rfc3339",
           "description": "When the recording stopped. Present when the file was written whole at stop; a file recorded live carries it on the footer instead. Absent on recordings made before the field existed."
+        }
+      }
+    },
+
+    "traceCapture": {
+      "title": "Local trace byte boundaries",
+      "description": "Present only for Claude Code recordings opted into trace capture at start. Carried in the header and superseded by a later footer so finalization retries use fixed windows. Missing session offsets are unknown, never zero; unknown endpoints exclude the range.",
+      "type": "object",
+      "required": ["boundaries"],
+      "properties": {
+        "errors": { "type": "array", "items": { "type": "string" } },
+        "boundaries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["action", "at", "offsets"],
+            "properties": {
+              "action": { "enum": ["start", "pause", "resume", "stop", "native-session"] },
+              "at": { "$ref": "#/$defs/rfc3339" },
+              "offsets": {
+                "type": "object",
+                "description": "Native-session UUID keys map to complete request boundaries in the original uncompressed spool. A missing spool file has an explicit zero offset.",
+                "additionalProperties": {
+                  "type": "object",
+                  "required": ["spans", "events"],
+                  "properties": {
+                    "spans": { "type": "integer", "minimum": 0 },
+                    "events": { "type": "integer", "minimum": 0 }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -146,6 +180,7 @@
           "items": { "$ref": "#/$defs/nativeSession" },
           "description": "Every native coding-agent session id the recording observed by the time it stopped, in first-seen order. Appended by the finalize door that ended a live recording (explicit stop, SessionEnd, /clear, daemon reclaim); readers prefer this over the header's list."
         },
+        "trace_capture": { "$ref": "#/$defs/traceCapture" },
         "stopped_at": {
           "$ref": "#/$defs/rfc3339",
           "description": "When the recording stopped, as recorded by the finalize door that appended this footer. Readers prefer this over the header's value."

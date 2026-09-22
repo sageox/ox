@@ -13,6 +13,7 @@ Your team can install a curated add-on once and every teammate's AI coworker get
 
 ### New
 
+- **Experimental Claude Code trace attachments** — opted-in recordings can include compressed execution traces and events in the Ledger, with identity attributes removed. Paused intervals are excluded, retries preserve the stop boundary, and trace failures do not block the recording. Enablement remains local; no project settings are changed.
 - **`ox addons` — install a curated add-on once, for the whole team** — pick an add-on and ox writes it into your Team Context, so every repo on the team receives it and every teammate's AI coworker sees the same selection. `ox sync` distributes it; there is no per-repo step and no second sync command to learn. Two add-ons ship today: `post-cutoff`, a shelf of what your team has adopted that postdates your model's training, and `post-cutoff-jev`, one brief on typed-decision models.
 - **Updates replace, and say what they replaced** — `ox addons update` overwrites the files an add-on owns and drops the ones its new version stopped shipping. If your team edited one, ox names it before overwriting so the change is one `git log -p` away instead of silently gone. ox never touches a file it doesn't own: a name that collides with something you wrote is refused, not merged.
 - **An add-on is skills, rules, and the context each skill carries** — the context is the point: it ships *inside* the skill that needs it, so an AI coworker reads it exactly when the work calls for it. It is not a dump into your Team Context.

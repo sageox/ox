@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/sessionid"
+	"github.com/sageox/ox/internal/trace/model"
 )
 
 var (
@@ -62,7 +63,10 @@ type LifecycleEvent struct {
 // RecordingState tracks an active recording session.
 // Stored in sessions/<session-name>/.recording.json
 type RecordingState struct {
-	AgentID string `json:"agent_id"`
+	// Trace freezes consent and byte windows at recording start; nil preserves
+	// legacy and non-Claude sessions without opting them into trace uploads.
+	Trace   *model.Capture `json:"trace_capture,omitempty"`
+	AgentID string         `json:"agent_id"`
 	// AgentSessionID identifies the native session independently of its file's
 	// modification time, including when the daemon retries discovery later.
 	// It is the CURRENT native id (the one adapters look up by); the full
@@ -257,8 +261,12 @@ func (r *RecordingState) RecordNativeSession(id, source string, at time.Time) {
 	if r == nil || id == "" {
 		return
 	}
+	previousCount := len(r.NativeSessions)
 	r.NativeSessions = lfs.RecordNativeSession(r.NativeSessions, id, source, at)
 	r.AgentSessionID = id
+	if len(r.NativeSessions) > previousCount {
+		r.RecordTraceBoundary("native-session", at)
+	}
 }
 
 // ReadRecordingStateFile reads the .recording.json inside sessionDir. Unlike
@@ -1280,6 +1288,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	// session; later SessionStarts (resume, clear, compact) append via
 	// RecordNativeSession in the hook.
 	state.RecordNativeSession(opts.AgentSessionID, opts.AgentSessionSource, state.StartedAt)
+	state.initializeTraceCapture()
 
 	if err := SaveRecordingState(projectRoot, state); err != nil {
 		return nil, err

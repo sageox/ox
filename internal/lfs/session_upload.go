@@ -60,6 +60,11 @@ func UploadSessionFiles(client *Client, sessionPath string, logger *slog.Logger)
 			fileRefs[name] = ref
 			continue
 		}
+		// Trace artifacts have a stricter cache-only path. Never upload an
+		// accidental real trace file from the tracked session directory.
+		if pipeline.IsTraceFile(name) {
+			continue
+		}
 
 		content, err := os.ReadFile(filePath)
 		if err != nil {
@@ -160,18 +165,17 @@ func FindPointerStubsWithMissingBlobs(client *Client, sessionPath string, logger
 		return nil
 	}
 
-	// build OID → filename map for error reporting
-	oidToFile := make(map[string]string, len(toCheck))
+	// Multiple artifact names may reference the same missing object. Report
+	// every name so an optional trace cannot hide a missing ordinary artifact.
+	oidToFiles := make(map[string][]string, len(toCheck))
 	for _, p := range toCheck {
-		oidToFile[p.obj.OID] = p.filename
+		oidToFiles[p.obj.OID] = append(oidToFiles[p.obj.OID], p.filename)
 	}
 
 	var missing []string
 	for _, obj := range resp.Objects {
 		if obj.Error != nil {
-			if name, ok := oidToFile[obj.OID]; ok {
-				missing = append(missing, name)
-			}
+			missing = append(missing, oidToFiles[obj.OID]...)
 		}
 	}
 	return missing

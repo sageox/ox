@@ -341,14 +341,16 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 	// set StoppedAt to signal this session is complete
 	now := time.Now()
 	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+		s.RecordTraceBoundary("stop", now)
 		s.StoppedAt = &now
+		state = s
 	}); updateErr != nil {
 		slog.Debug("hook: clear could not set StoppedAt", "agent_id", agentID, "error", updateErr)
 	}
 
 	// the daemon finalizes this recording after the state file below is
 	// gone; hand it the native session ids and the stop time on a footer
-	stampRecordingCarrierAtStop(state, now)
+	_ = stampRecordingCarrierAtStop(state, now)
 
 	// fire-and-forget IPC to daemon to finalize the stopped session
 	if state.SessionPath != "" {
@@ -418,14 +420,16 @@ func handleEnd(ctx *HookContext) error {
 
 	now := time.Now()
 	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+		s.RecordTraceBoundary("stop", now)
 		s.StoppedAt = &now
+		state = s
 	}); updateErr != nil {
 		slog.Debug("hook: end could not set StoppedAt", "agent_id", agentID, "error", updateErr)
 	}
 
 	// the daemon finalizes this recording after the state file below is
 	// gone; hand it the native session ids and the stop time on a footer
-	stampRecordingCarrierAtStop(state, now)
+	_ = stampRecordingCarrierAtStop(state, now)
 
 	// dispatch delegated finalization via daemon IPC. Best-effort: if the
 	// daemon is unreachable, the daemon's anti-entropy sweep will still

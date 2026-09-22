@@ -113,15 +113,15 @@ func TestReconcile_PlanOnlyPointerIsScanned(t *testing.T) {
 	assert.Equal(t, 1, result.ScannedPointers, "a plan-only pointer must be scanned")
 }
 
-// TestReconcile_BlanksMissingPlanPointerAndSquashes exercises the actual recovery
-// core for a plan pointer: a 404 blob → the pointer is blanked to empty bytes and
+// TestReconcile_RemovesMissingPlanPointerAndSquashes exercises the actual recovery
+// core for a plan pointer: a 404 blob → the broken pointer artifact is removed and
 // the unpushed history is squashed so the poisoned OID leaves the push pack.
 //
 // Failure prevented: the plan-walk tests above assert only ScannedPointers; this
-// drives the blank+squash that unblocks a wedged ledger — the whole point of the
+// drives the removal+squash that unblocks a wedged ledger — the whole point of the
 // #810 reconcile extension. A regression that scanned plan pointers but failed to
-// blank/squash them would leave the ledger stuck.
-func TestReconcile_BlanksMissingPlanPointerAndSquashes(t *testing.T) {
+// remove/squash them would leave the ledger stuck.
+func TestReconcile_RemovesMissingPlanPointerAndSquashes(t *testing.T) {
 	ledger, _ := initLedgerWithRemote(t)
 
 	oid := strings.Repeat("d", 64)
@@ -137,13 +137,11 @@ func TestReconcile_BlanksMissingPlanPointerAndSquashes(t *testing.T) {
 		func() (*Client, error) { return client, nil })
 	require.NoError(t, err)
 
-	assert.Equal(t, 1, result.Replaced, "the orphaned plan pointer must be blanked")
+	assert.Equal(t, 1, result.Replaced, "the orphaned plan pointer must be removed")
 	assert.True(t, result.Squashed, "unpushed commits collapse to one")
 
-	info, err := os.Stat(htmlPath)
-	require.NoError(t, err)
-	assert.Zero(t, info.Size(), "blanked plan.html must be empty (content acknowledged gone)")
-	assert.Equal(t, 1, unpushedCount(t, ledger), "history squashed to a single unpushed commit")
+	assert.NoFileExists(t, htmlPath)
+	assert.Equal(t, 0, unpushedCount(t, ledger), "removing the only unpublished artifact returns to upstream")
 }
 
 // TestReconcile_TransientErrorNeverBlanks pins the destructive-op guard for BOTH

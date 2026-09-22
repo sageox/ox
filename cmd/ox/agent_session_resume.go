@@ -78,6 +78,7 @@ func runAgentSessionResume(inst *agentinstance.Instance, _ []string) error {
 		excluded = computeExcludedSinceLastPause(s.Lifecycle, resumeSeq)
 		sessionName = session.GetSessionName(s.SessionPath)
 		s.SuspendedAt = nil
+		s.RecordTraceBoundary("resume", now)
 		s.Lifecycle = append(s.Lifecycle, session.LifecycleEvent{
 			Action: session.LifecycleActionResume,
 			At:     now,

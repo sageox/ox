@@ -19,6 +19,8 @@ const (
 	LedgerFileSessionMD    = "session.md"
 	LedgerFilePlan         = "plan.md"             // may contain multiple plans as separate Markdown sections
 	LedgerFileContextTrace = "context-trace.jsonl" // context influence trace (what context was provided and what influenced decisions)
+	LedgerFileTraceSpans   = "trace-spans.jsonl.gz"
+	LedgerFileTraceEvents  = "trace-events.jsonl.gz"
 )
 
 // LedgerContentFiles is the canonical ordered list of session artifact
@@ -40,6 +42,14 @@ var LedgerContentFiles = []string{
 	LedgerFileSessionMD,
 	LedgerFilePlan,
 	LedgerFileContextTrace,
+	LedgerFileTraceSpans,
+	LedgerFileTraceEvents,
+}
+
+// IsTraceFile identifies cache-only artifacts. They must be uploaded before a
+// pointer is written to the Ledger; generic content-copy paths must skip them.
+func IsTraceFile(name string) bool {
+	return name == LedgerFileTraceSpans || name == LedgerFileTraceEvents
 }
 
 // Result contains outcomes from session processing.

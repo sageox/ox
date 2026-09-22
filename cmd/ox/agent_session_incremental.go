@@ -156,6 +156,7 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	stoppedAt := session.ResolveStoppedAt(state.StoppedAt, rawPath, time.Now())
 	if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
 		NativeSessions: state.NativeSessions,
+		TraceCapture:   state.Trace,
 		StoppedAt:      stoppedAt,
 	}); err != nil {
 		slog.Warn("finalize: could not stamp raw.jsonl carrier", "session", state.SessionPath, "error", err)

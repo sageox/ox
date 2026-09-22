@@ -41,17 +41,21 @@ func recordNativeSessionForRecording(projectRoot, agentID, nativeID, source stri
 // read those fields from. Appended, never rewritten — the file may still have
 // open appenders. Best-effort: a stamp failure is logged, never surfaced into
 // the hook, and meta.json still gets whatever the daemon can resolve alone.
-func stampRecordingCarrierAtStop(state *session.RecordingState, stoppedAt time.Time) {
+func stampRecordingCarrierAtStop(state *session.RecordingState, stoppedAt time.Time) error {
 	if state == nil || state.SessionPath == "" {
-		return
+		return nil
 	}
+	state.RecordTraceBoundary("stop", stoppedAt)
 	rawPath := filepath.Join(state.SessionPath, ledgerFileRaw)
 	if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
 		NativeSessions: state.NativeSessions,
+		TraceCapture:   state.Trace,
 		StoppedAt:      stoppedAt,
 	}); err != nil {
 		slog.Debug("could not stamp raw.jsonl carrier at stop", "session", state.SessionPath, "error", err)
+		return err
 	}
+	return nil
 }
 
 // requestedStopTime is the stop time the explicit-stop door hands to

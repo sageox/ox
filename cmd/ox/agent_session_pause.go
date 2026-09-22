@@ -82,6 +82,7 @@ func runAgentSessionPause(inst *agentinstance.Instance, _ []string) error {
 		s.PauseCount++
 		pauseCount = s.PauseCount
 		sessionName = session.GetSessionName(s.SessionPath)
+		s.RecordTraceBoundary("pause", now)
 		s.Lifecycle = append(s.Lifecycle, session.LifecycleEvent{
 			Action: session.LifecycleActionPause,
 			At:     now,

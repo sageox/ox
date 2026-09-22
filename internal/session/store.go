@@ -31,6 +31,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/sessionid"
+	"github.com/sageox/ox/internal/trace/model"
 )
 
 const (
@@ -211,6 +212,7 @@ type StoreMeta struct {
 	// carries them on the header directly. Both omitempty: recordings
 	// started under an older binary carry neither.
 	NativeSessions []lfs.NativeSession `json:"native_sessions,omitempty"`
+	TraceCapture   *model.Capture      `json:"trace_capture,omitempty"`
 	StoppedAt      *time.Time          `json:"stopped_at,omitempty"`
 }
 
@@ -1110,6 +1112,9 @@ func foldFooterCarrier(meta *StoreMeta, footer map[string]any) {
 		meta.NativeSessions = sessions
 	}
 	carrier := ParseStoreMeta(footer)
+	if carrier.TraceCapture != nil {
+		meta.TraceCapture = carrier.TraceCapture
+	}
 	if carrier.StoppedAt != nil {
 		meta.StoppedAt = carrier.StoppedAt
 	}
@@ -1199,6 +1204,14 @@ func ParseStoreMeta(m map[string]any) *StoreMeta {
 	// header — the rest of the metadata is still worth having.
 	if sessions, present := decodeNativeSessions(m); present && len(sessions) > 0 {
 		meta.NativeSessions = sessions
+	}
+	if raw, ok := m["trace_capture"]; ok && raw != nil {
+		if data, err := json.Marshal(raw); err == nil {
+			var capture model.Capture
+			if json.Unmarshal(data, &capture) == nil {
+				meta.TraceCapture = &capture
+			}
+		}
 	}
 	// RFC3339Nano also accepts a plain RFC3339 value, so one parse covers
 	// both the nanosecond form ox writes and a hand-written second-precision one.

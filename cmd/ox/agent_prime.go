@@ -1429,6 +1429,7 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID, conti
 			s.InheritedPause = true
 			s.InheritedFromSession = priorSession
 			s.PauseCount++
+			s.RecordTraceBoundary("pause", now)
 			s.Lifecycle = append(s.Lifecycle, session.LifecycleEvent{
 				Action: session.LifecycleActionPause,
 				At:     now,

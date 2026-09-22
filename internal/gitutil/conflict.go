@@ -10,9 +10,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/lfs/pointer"
+	"github.com/sageox/ox/internal/session/pipeline"
 )
 
 // ConflictMarkerStart is git's textual conflict marker. We look for it as a
@@ -71,12 +74,24 @@ func HasConflictMarkersBytes(data []byte) bool {
 // ValidateLedgerBlob rejects bytes that an automatic Ledger writer must never
 // publish. Conflict markers are invalid in every Ledger artifact; session
 // metadata additionally has a structural JSON contract that Git cannot enforce.
+// Canonical LFS artifact names must contain pointers. Storage=git exceptions
+// are applied only by the tree validator after reading the committed manifest.
 //
 // Keep this check content-only so both staged-index validators and immutable
 // tree commits can enforce the same invariant without re-reading the worktree.
 func ValidateLedgerBlob(path string, data []byte) error {
+	return validateLedgerBlob(path, data, "")
+}
+
+// storage must come from meta.json in the immutable tree being validated.
+func validateLedgerBlob(path string, data []byte, storage string) error {
 	if HasConflictMarkersBytes(data) {
 		return fmt.Errorf("%s contains an unresolved conflict", path)
+	}
+	if isSessionContentPath(path) && storage != "git" {
+		if _, _, err := pointer.Parse(string(data)); err != nil {
+			return fmt.Errorf("%s must contain an LFS pointer (upload content before committing): %w", path, err)
+		}
 	}
 	if isSessionMetaPath(path) {
 		var object map[string]json.RawMessage
@@ -170,11 +185,60 @@ func validateLedgerTree(ctx context.Context, repoPath, parent, tree string, path
 		if err != nil {
 			return fmt.Errorf("inspect staged Ledger blob %s: %w", entry.path, err)
 		}
-		if err := ValidateLedgerBlob(entry.path, blob); err != nil {
+		storage := ""
+		if isSessionContentPath(entry.path) {
+			storage, err = ledgerContentStorage(ctx, repoPath, tree, entry.path)
+			if err != nil {
+				return fmt.Errorf("inspect staged Ledger storage for %s: %w", entry.path, err)
+			}
+		}
+		if err := validateLedgerBlob(entry.path, blob, storage); err != nil {
 			return fmt.Errorf("refusing automatic Ledger commit: %w", err)
 		}
 	}
 	return nil
+}
+
+// ledgerContentStorage reads the sibling manifest from the exact commit tree.
+// Looking at the worktree (or even the mutable index) here would let an
+// uncommitted storage=git declaration bypass the content guard.
+func ledgerContentStorage(ctx context.Context, repoPath, tree, contentPath string) (string, error) {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(contentPath)), "/")
+	metaPath := strings.Join(parts[:2], "/") + "/meta.json"
+	raw, err := cleanGitOutput(ctx, repoPath, "ls-tree", "-z", tree, "--", metaPath)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) == 0 {
+		return "", nil
+	}
+	fields := strings.Fields(strings.SplitN(string(raw), "\t", 2)[0])
+	if len(fields) != 3 {
+		return "", fmt.Errorf("invalid metadata tree entry")
+	}
+	if err := ValidateLedgerEntryMode(metaPath, fields[0]); err != nil {
+		return "", err
+	}
+	data, err := cleanGitOutput(ctx, repoPath, "cat-file", "blob", fields[2])
+	if err != nil {
+		return "", err
+	}
+	if err := ValidateLedgerBlob(metaPath, data); err != nil {
+		return "", err
+	}
+	var meta struct {
+		Files map[string]struct {
+			Storage string `json:"storage"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", err
+	}
+	return meta.Files[strings.Join(parts[2:], "/")].Storage, nil
+}
+
+func isSessionContentPath(path string) bool {
+	return isSessionPath(path) && slices.Contains(pipeline.LedgerContentFiles, filepath.Base(path))
 }
 
 // treeEntry is one non-deleted path in a tree delta: its destination mode and

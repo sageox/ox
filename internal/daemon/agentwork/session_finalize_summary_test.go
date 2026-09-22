@@ -421,7 +421,8 @@ func TestProcessResult_WithRealGitRepo(t *testing.T) {
 	rawPath := filepath.Join(sessionDir, "raw.jsonl")
 
 	handler := NewSessionFinalizeHandler(slog.Default())
-	// skipGit=false — exercises the real git commit path
+	enableLocalFinalizeLFS(t, handler, ledgerPath)
+	// skipGit=false — exercises real upload, pointer preparation, and commit
 
 	llmOutput := `{"title":"Git Test","summary":"Testing git commit path.","key_actions":["tested git"],"outcome":"success","topics_found":["git"],"quality_score":0.9}`
 
@@ -449,6 +450,7 @@ func TestProcessResult_WithRealGitRepo(t *testing.T) {
 	require.FileExists(t, filepath.Join(sessionDir, "summary.md"))
 	require.FileExists(t, filepath.Join(sessionDir, "summary.json"))
 	require.FileExists(t, filepath.Join(sessionDir, "session.md"))
+	require.True(t, lfs.IsPointerFile(filepath.Join(sessionDir, "session.md")), "publication must commit pointers after successful LFS upload")
 
 	// verify git commit was made — should have >1 commit now
 	out, gitErr := exec.Command("git", "-C", ledgerPath, "log", "--oneline").CombinedOutput()
@@ -1110,13 +1112,9 @@ func createTestSessionInGitRepo(t *testing.T, sessionName string) (string, strin
 		t.Skip("git not available")
 	}
 
-	ledgerPath := t.TempDir()
-
-	// init git repo with isolated config to avoid host git settings (gpgsign, hooksPath, etc.)
-	require.NoError(t, exec.Command("git", "init", "--initial-branch=main", ledgerPath).Run())
-	require.NoError(t, exec.Command("git", "-C", ledgerPath, "config", "user.email", "test@test.com").Run())
-	require.NoError(t, exec.Command("git", "-C", ledgerPath, "config", "user.name", "Test").Run())
-	require.NoError(t, exec.Command("git", "-C", ledgerPath, "config", "commit.gpgsign", "false").Run())
+	// A local bare remote lets the full publication path succeed while LFS
+	// is served by enableLocalFinalizeLFS. All Git identity stays in temp repos.
+	_, ledgerPath := setupBareAndCloneLedger(t)
 
 	// create sessions dir and raw.jsonl
 	sessionsDir := filepath.Join(ledgerPath, "sessions", sessionName)

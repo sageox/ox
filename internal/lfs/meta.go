@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/trace/model"
 )
 
 // legacySessionNamespace is the UUIDv5 namespace for synthesizing session
@@ -241,6 +242,10 @@ type SessionMeta struct {
 	// SessionEnd hook, daemon orphan sweep, recover). Agents that expose no id
 	// record nothing here. omitempty so older meta.json files round-trip.
 	NativeSessions []NativeSession `json:"native_sessions,omitempty"`
+
+	// Trace describes optional locally captured, identity-scrubbed OTLP files.
+	// Legacy recordings omit it; unknown capture observations remain null.
+	Trace *model.Metadata `json:"trace,omitempty"`
 
 	// StoppedAt is when the recording stopped, set by every finalize door.
 	// CreatedAt has always been recorded; without a stop time anything sliced

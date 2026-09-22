@@ -327,11 +327,9 @@ func TestReconcile_PreservesRecoverableSessionCache(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, 2, result.Replaced, "unrecoverable missing objects must still be reconciled")
 				assert.True(t, result.Squashed)
-				assert.Equal(t, 1, unpushedCount(t, ledger))
+				assert.Equal(t, 0, unpushedCount(t, ledger), "removing the only unpublished additions returns to upstream")
 				for _, path := range []string{rawPath, planPath} {
-					content, readErr := os.ReadFile(path)
-					require.NoError(t, readErr)
-					assert.Empty(t, content)
+					assert.NoFileExists(t, path)
 				}
 			}
 		})
@@ -554,4 +552,46 @@ func TestReconcile_MixedContent_OnlyPointersScanned(t *testing.T) {
 	assert.Error(t, err) // LFS client creation fails
 	assert.Equal(t, 1, result.ScannedPointers,
 		"only the actual pointer file should be scanned, not metadata or regular content")
+}
+
+func TestReconcile_RemovesMissingArtifactReference(t *testing.T) {
+	for _, tc := range []struct {
+		name, metadataOID string
+		refused           bool
+	}{
+		{name: "remove missing reference and preserve other fields", metadataOID: strings.Repeat("a", 64)},
+		{name: "mismatched metadata fails before deletion", metadataOID: strings.Repeat("b", 64), refused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger, _ := initLedgerWithRemote(t)
+			sessionDir := filepath.Join(ledger, "sessions", "missing")
+			require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+			rawPath := filepath.Join(sessionDir, "raw.jsonl")
+			metaPath := filepath.Join(sessionDir, "meta.json")
+			oid := strings.Repeat("a", 64)
+			pointer := FormatPointer("sha256:"+oid, 42)
+			metadata := `{"title":"Keep title","future_field":{"keep":true},"files":{"raw.jsonl":{"oid":"sha256:` + tc.metadataOID + `","size":42},"summary.json":{"storage":"git","size":2}}}`
+			require.NoError(t, os.WriteFile(rawPath, []byte(pointer), 0o644))
+			require.NoError(t, os.WriteFile(metaPath, []byte(metadata), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.json"), []byte(`{}`), 0o644))
+			git(t, ledger, "add", "sessions/")
+			git(t, ledger, "commit", "-m", "missing artifact", "--no-verify")
+			before := git(t, ledger, "rev-parse", "HEAD")
+			client := fakeLFSDownloadServer(t, map[string]int{oid: http.StatusNotFound})
+			_, err := reconcileUnpushedPointers(context.Background(), ledger, nil, func() (*Client, error) { return client, nil })
+			if tc.refused {
+				require.ErrorContains(t, err, "disagrees with missing pointer")
+				require.Equal(t, before, git(t, ledger, "rev-parse", "HEAD"))
+				content, readErr := os.ReadFile(rawPath)
+				require.NoError(t, readErr)
+				assert.Equal(t, pointer, string(content))
+				return
+			}
+			require.NoError(t, err)
+			assert.NoFileExists(t, rawPath)
+			assert.JSONEq(t, `{"title":"Keep title","future_field":{"keep":true},"files":{"summary.json":{"storage":"git","size":2}}}`, git(t, ledger, "show", "HEAD:sessions/missing/meta.json"))
+			assert.Equal(t, "{}", git(t, ledger, "show", "HEAD:sessions/missing/summary.json"))
+			assert.Equal(t, 1, unpushedCount(t, ledger))
+		})
+	}
 }
