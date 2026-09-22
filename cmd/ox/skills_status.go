@@ -78,6 +78,7 @@ type skillsStatusOutput struct {
 type teamSkillSummary struct {
 	AutoInstalledProse int `json:"auto_installed_prose"`
 	Withheld           int `json:"withheld"`
+	Expired            int `json:"expired"`
 }
 
 type teamContextStatus struct {
@@ -120,6 +121,17 @@ type teamSkillStatus struct {
 	State         string `json:"state"`
 	NeedsApproval bool   `json:"needs_approval"`
 	Detail        string `json:"detail,omitempty"`
+
+	// ValidThrough, Expired and ExpiredDays report shelf life. Reporting is the
+	// WHOLE mechanism: ox never withholds or deletes an expired skill, because a
+	// date is a prompt to re-verify, and removing a team's published knowledge on
+	// a timer is the unexplained-disappearance failure this command exists to make
+	// impossible. Expired is not omitempty — false is the answer to "is this
+	// stale", and an absent key cannot be told apart from an ox too old to report.
+	ValidThrough    string `json:"valid_through,omitempty"`
+	Expired         bool   `json:"expired"`
+	ExpiredDays     int    `json:"expired_days,omitempty"`
+	MalformedExpiry bool   `json:"malformed_expiry,omitempty"`
 }
 
 func runSkillsStatus(cmd *cobra.Command, _ []string) error {
@@ -298,6 +310,12 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 
 	for _, sk := range published {
 		row := teamSkillStatus{Name: sk.Name, AppliesHere: teamdocs.SkillAppliesToRepo(sk, slug)}
+		row.ValidThrough = sk.ValidThrough
+		if days, ok := teamdocs.ExpiredOn(sk.ValidThrough, time.Now()); ok {
+			row.Expired, row.ExpiredDays = true, days
+			out.Summary.Expired++
+		}
+		row.MalformedExpiry = teamdocs.MalformedExpiry(sk.ValidThrough)
 		switch {
 		case !row.AppliesHere:
 			// Without this row the skill is invisible, and "the team published
@@ -329,6 +347,26 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 // skillsStatusGuidance is the single next action, for an AI coworker reading the
 // JSON. One action, not a menu: a list of things that might help is a list the
 // caller has to triage, which is the work this command exists to have already done.
+// expiryNote renders shelf life inline on a skill's row. Expired skills stay
+// installed and keep being read, so this is a prompt and never a state: showing
+// it as a state would imply ox withheld something, which it never does for a date.
+func expiryNote(s teamSkillStatus) string {
+	switch {
+	case s.MalformedExpiry:
+		return fmt.Sprintf(" (valid-through %q is not YYYY-MM-DD)", s.ValidThrough)
+	case s.Expired:
+		return fmt.Sprintf(" (expired %d %s ago)", s.ExpiredDays, plural(s.ExpiredDays, "day", "days"))
+	}
+	return ""
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
 func skillsStatusGuidance(out skillsStatusOutput) string {
 	if len(out.Problems) > 0 {
 		return out.Problems[0]
@@ -358,6 +396,11 @@ func skillsStatusGuidance(out skillsStatusOutput) string {
 	}
 	if out.Summary.AutoInstalledProse > 0 {
 		return fmt.Sprintf("Team skills are current. %d auto-installed as prose without approval; nothing is withheld.", out.Summary.AutoInstalledProse)
+	}
+	if out.Summary.Expired > 0 {
+		// Last, deliberately: an expired skill is working correctly and still being
+		// read. It ranks below anything that is actually broken or withheld.
+		return fmt.Sprintf("%d team skill(s) are past their valid-through date. They still install and still load — re-verify the claims you rely on, then refresh the date or retire the entry.", out.Summary.Expired)
 	}
 	return "Team skills are current. Nothing to do."
 }
@@ -536,12 +579,16 @@ func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsSta
 		p("%s", cli.StyleAccent.Render("Team skills"))
 		p("  trust summary            %d auto-installed as prose without approval; %d withheld pending approval",
 			out.Summary.AutoInstalledProse, out.Summary.Withheld)
+		if out.Summary.Expired > 0 {
+			p("  shelf life               %s", cli.StyleWarning.Render(
+				fmt.Sprintf("%d past its valid-through date — still installed, still read; re-verify or retire", out.Summary.Expired)))
+		}
 		for _, s := range out.TeamSkills {
 			detail := s.Detail
 			if detail != "" {
 				detail = " — " + detail
 			}
-			p("  %-24s %s%s", s.Name, s.State, detail)
+			p("  %-24s %s%s%s", s.Name, s.State, expiryNote(s), detail)
 		}
 	}
 

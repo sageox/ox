@@ -428,3 +428,99 @@ func TestSkillTargetRootsExcludesRuleTargets(t *testing.T) {
 	require.Equal(t, []string{".claude/skills"}, roots,
 		"skills commands must never treat a native rules directory as a skills root")
 }
+
+// TestCollectSkillsStatus_ExpiredSkillIsReportedNotWithheld is the whole shelf-life
+// contract in one test.
+//
+// An expired entry must stay installed and keep being read — ox reports the date
+// and nothing else. Withholding or deleting on a timer would be the same
+// unexplained-disappearance failure this command exists to make impossible: a
+// teammate would watch a skill vanish with nothing, anywhere, saying it was there.
+func TestCollectSkillsStatus_ExpiredSkillIsReportedNotWithheld(t *testing.T) {
+	repo := t.TempDir()
+	teamPath := t.TempDir()
+	writeTeamSkillFixture(t, teamPath, "stale-brief", "valid-through: 2020-01-01\n")
+	stageStatusTeam(t, repo, teamPath)
+
+	out := collectSkillsStatus(repo)
+
+	require.Len(t, out.TeamSkills, 1)
+	row := out.TeamSkills[0]
+	require.True(t, row.Expired, "a skill years past its valid-through date was not reported as expired")
+	require.Greater(t, row.ExpiredDays, 365, "expired_days should count real days overdue")
+	require.Equal(t, "2020-01-01", row.ValidThrough)
+	require.Equal(t, 1, out.Summary.Expired)
+
+	require.NotEqual(t, skillWithheld, row.State,
+		"expiry withheld a skill; a date is a prompt to re-verify, never a gate")
+	require.False(t, row.NeedsApproval, "expiry must not masquerade as an approval requirement")
+}
+
+// TestSkillsStatusGuidance_ExpiryRanksBelowRealBreakage pins the ORDER, which is
+// the part that is easy to get wrong later.
+//
+// An expired skill is working: it installed, it loads, an agent is reading it.
+// A withheld skill or an uninitialized repo is not. Surfacing the date ahead of
+// either would spend the one guidance line on the least urgent thing on screen.
+func TestSkillsStatusGuidance_ExpiryRanksBelowRealBreakage(t *testing.T) {
+	expired := teamSkillStatus{Name: "stale-brief", AppliesHere: true, State: skillInstalled, Expired: true, ExpiredDays: 400}
+
+	// A present, materialized Team Context is required or an earlier branch —
+	// "this project has no Team Context" — correctly outranks the expiry note.
+	ctx := &teamContextStatus{Present: true, SkillsMaterialized: true}
+
+	t.Run("expiry is named when nothing else is wrong", func(t *testing.T) {
+		out := skillsStatusOutput{TeamContext: ctx, TeamSkills: []teamSkillStatus{expired}}
+		out.Summary.Expired = 1
+		g := skillsStatusGuidance(out)
+		require.Contains(t, g, "valid-through", "the date is invisible unless someone reads JSON")
+		require.NotContains(t, g, "Nothing to do", "claimed everything was current with a stale entry on the shelf")
+	})
+
+	t.Run("a withheld skill outranks it", func(t *testing.T) {
+		out := skillsStatusOutput{TeamContext: ctx, TeamSkills: []teamSkillStatus{
+			{Name: "gated", AppliesHere: true, State: skillWithheld, NeedsApproval: true, Detail: "bundles a script"},
+			expired,
+		}}
+		out.Summary.Expired = 1
+		require.Contains(t, skillsStatusGuidance(out), "withheld",
+			"an expiry note displaced a skill that is not reaching the repository at all")
+	})
+
+	t.Run("a real problem outranks it", func(t *testing.T) {
+		out := skillsStatusOutput{TeamContext: ctx, TeamSkills: []teamSkillStatus{expired}, Problems: []string{"run `ox init`"}}
+		out.Summary.Expired = 1
+		require.Equal(t, "run `ox init`", skillsStatusGuidance(out))
+	})
+}
+
+// A future date is not a finding. Reporting one would train people to ignore the
+// field, which costs more than the field is worth.
+func TestCollectSkillsStatus_FutureExpiryIsSilent(t *testing.T) {
+	repo := t.TempDir()
+	teamPath := t.TempDir()
+	writeTeamSkillFixture(t, teamPath, "fresh-brief", "valid-through: 2099-01-01\n")
+	stageStatusTeam(t, repo, teamPath)
+
+	out := collectSkillsStatus(repo)
+
+	require.Len(t, out.TeamSkills, 1)
+	require.False(t, out.TeamSkills[0].Expired)
+	require.Equal(t, 0, out.Summary.Expired)
+	require.NotContains(t, out.Guidance, "valid-through")
+}
+
+// A typo must not retire a team's knowledge, and must not pass silently either.
+func TestCollectSkillsStatus_MalformedExpiryIsFlaggedNotExpired(t *testing.T) {
+	repo := t.TempDir()
+	teamPath := t.TempDir()
+	writeTeamSkillFixture(t, teamPath, "typo-brief", "valid-through: March 2027\n")
+	stageStatusTeam(t, repo, teamPath)
+
+	out := collectSkillsStatus(repo)
+
+	require.Len(t, out.TeamSkills, 1)
+	require.False(t, out.TeamSkills[0].Expired, "an unparseable date retired a skill")
+	require.True(t, out.TeamSkills[0].MalformedExpiry, "an unparseable date passed silently as evergreen")
+	require.Equal(t, 0, out.Summary.Expired)
+}
