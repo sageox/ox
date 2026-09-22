@@ -50,9 +50,14 @@ the ones its new version no longer ships: they are not yours to edit, and your
 Team Context git history is the undo. ox never overwrites a file it does not
 own — a name that collides with something hand-authored is refused, not merged.
 
-Add-ons may be published by SageOx, by your own team, or in future by a third
-party. Add-on files are written non-executable, always — a provider cannot
-choose otherwise. Content that arrives with runnable scripts still needs
+Today every add-on comes from the catalog compiled into this ox binary, so
+` + "`ox addons list`" + ` shows what this build ships and nothing else — not
+team-published skills (those are ` + "`ox skills publish`" + `) and not any remote
+source. Add-ons from outside this binary are future work and will arrive behind
+their own opt-in.
+
+Add-on files are written non-executable, always — a provider cannot choose
+otherwise. Content that arrives with runnable scripts still needs
 ` + "`ox skills approve <name>`" + ` before an AI coworker may read it, and that
 command's ` + "`--allow-scripts`" + ` before anything becomes runnable. Installing an
 add-on grants neither.`,

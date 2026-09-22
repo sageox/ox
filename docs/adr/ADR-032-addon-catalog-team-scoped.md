@@ -98,7 +98,7 @@ Sparse checkout needs no change: `.sageox/`, `agents/`, and `docs/` are already 
 
 **Good.** One selection per team instead of one per repository. Retirement becomes possible, because there is exactly one place to retire from. The convergence pipeline needs one function, not a new subsystem. No new reserved namespace, and the tracked-`.gitignore` churn of unprefixed catalog names goes away with the surface that required it.
 
-**Costs.** `ox skills catalog | install | uninstall` are withdrawn before anyone could use them, so the only way to select catalog content is `ox addons`, which does not exist yet — there is a window in which `post-cutoff` ships in the binary and nothing can select it. A team that hand-edits an add-on file loses that edit on the next update and must recover it from Team Context history.
+**Costs.** `ox skills catalog | install | uninstall` are withdrawn before anyone could use them. *Between this ADR and the 2026-09-22 amendment below,* `ox addons` did not yet exist, so there was a window in which `post-cutoff` shipped in the binary and nothing could select it — that window is closed; `ox addons` is an ordinary command. The standing cost remains: a team that hand-edits an add-on file loses that edit on the next update and must recover it from Team Context history.
 
 **AMENDED 2026-09-22 — the mechanism no longer ships behind a flag; the
 PROVIDER does.**
