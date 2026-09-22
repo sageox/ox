@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,6 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/sageox/ox/internal/cli"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/session"
@@ -181,7 +182,7 @@ func runSessionTraceStatus(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if traceJSONOutput(cmd) {
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(status)
+		return cli.PrintJSONTo(cmd.OutOrStdout(), status)
 	}
 	return printSessionTraceStatus(cmd.OutOrStdout(), status)
 }
@@ -236,7 +237,7 @@ func runSessionTraceDisable(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("trace opt-in cleared, but receiver cleanup failed: %w", err)
 	}
 	if traceJSONOutput(cmd) {
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]bool{"enabled": false, "purged": purge})
+		return cli.PrintJSONTo(cmd.OutOrStdout(), map[string]bool{"enabled": false, "purged": purge})
 	}
 	if purge {
 		fmt.Fprintln(cmd.OutOrStdout(), "Trace receiver disabled; local traces deleted.")
