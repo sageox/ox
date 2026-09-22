@@ -101,9 +101,16 @@ type TeamContextInfo struct {
 	TeamRules []teamdocs.TeamRule `json:"team_rules,omitempty"`
 
 	// v4 Team Memory
-	MemoryContent        string   `json:"memory_content,omitempty"`         // full MEMORY.md content (always inlined)
-	SoulHint             string   `json:"soul_hint,omitempty"`              // path to SOUL.md (reference, not inlined)
-	TeamHint             string   `json:"team_hint,omitempty"`              // path to TEAM.md (reference, not inlined)
+	MemoryContent string `json:"memory_content,omitempty"` // full MEMORY.md content (always inlined)
+	SoulHint      string `json:"soul_hint,omitempty"`      // path to SOUL.md (reference, not inlined)
+	TeamHint      string `json:"team_hint,omitempty"`      // path to TEAM.md (reference, not inlined)
+	// BulletinHint is the absolute path of the local team bulletin board
+	// directory, <team>/bulletin/general/posts. A pointer only: post bodies
+	// are never inlined. Set only when <team>/bulletin exists in the
+	// checkout (the posts dir itself may be absent after every post
+	// expired). Not gated on the publish flag — reads continue when
+	// publishing is off.
+	BulletinHint         string   `json:"bulletin_hint,omitempty"`
 	MemoryDaily          []string `json:"memory_daily,omitempty"`           // available daily summary files
 	MemoryWeekly         []string `json:"memory_weekly,omitempty"`          // available weekly summary files
 	MemoryMonthly        []string `json:"memory_monthly,omitempty"`         // available monthly summary files

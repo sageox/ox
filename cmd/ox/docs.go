@@ -84,7 +84,7 @@ func prepareDocsCommandTree(root *cobra.Command) {
 	root.CompletionOptions.DisableDefaultCmd = true
 	for _, child := range root.Commands() {
 		switch child.Name() {
-		case "attest", "scout", "memory", "completion":
+		case "attest", "bulletin", "scout", "memory", "completion":
 			root.RemoveCommand(child)
 		case "carts", "cart-analyze":
 			child.Hidden = true

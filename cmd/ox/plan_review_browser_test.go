@@ -21,6 +21,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -662,6 +663,154 @@ func TestBrowser_ReviewKeysWorkOnAuthoredPlan(t *testing.T) {
 	}
 	if pageEscAfterEsc3 != 1 {
 		t.Fatalf("an Esc review mode has no use for must still reach the page: page saw %d", pageEscAfterEsc3)
+	}
+}
+
+// TestBrowser_CommentsRailMinimizes proves a reviewer can get the comments rail
+// off the plan it floats over and bring it back: Hide shrinks it to a Show
+// button that still carries the count and uncovers the page beneath; a live
+// reload keeps it hidden; Show brings the comments back; and in a narrow
+// window, where the rail ends the page, the Show button stays clear of the
+// review bar. It runs on both page kinds because each carries its own copy of
+// the rail styles.
+// Failure prevented: the rail covers plan text with no way to read what is
+// behind it, or every agent fix pops it back open over the text.
+func TestBrowser_CommentsRailMinimizes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: launches a real headless Chrome")
+	}
+	chromePath := findChromePath()
+	if chromePath == "" {
+		t.Skip("no Chrome/Chromium binary found — skipping real-browser E2E")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		serve  func(*testing.T) (string, string, *broadcaster)
+		target string // an element review mode marks up on this page kind
+	}{
+		{"markdown plan", serveLivePlanReview, "section#sec-1"},
+		{"authored plan", serveAuthoredPlanReview, "section#risks p"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base, _, _ := tc.serve(t)
+
+			// Above 1400px the rail is the fixed panel floating over the page.
+			allocOpts := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.ExecPath(chromePath), chromedp.WindowSize(1600, 1000))
+			allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocOpts...)
+			t.Cleanup(cancelAlloc)
+			ctx, cancelCtx := chromedp.NewContext(allocCtx)
+			t.Cleanup(cancelCtx)
+			ctx, cancelTimeout := context.WithTimeout(ctx, 45*time.Second)
+			t.Cleanup(cancelTimeout)
+
+			var seeded, coveredOpen, coveredMin, shrunk, coveredAfterReload, coveredReopened bool
+			var count string
+			var row struct{ X, Y float64 }
+
+			if err := chromedp.Run(ctx,
+				chromedp.Navigate(base+"/"),
+				chromedp.WaitVisible(".rev-toggle", chromedp.ByQuery),
+				chromedp.Evaluate(`(function(){try{localStorage.setItem('ox-plan-reviewer','Riley');localStorage.setItem('ox-plan-rev-seen','1');return true;}catch(e){return false;}})()`, &seeded),
+				chromedp.Reload(),
+				chromedp.WaitVisible(".rev-toggle", chromedp.ByQuery),
+				chromedp.Click(".rev-toggle", chromedp.ByQuery),
+				chromedp.Click(tc.target, chromedp.ByQuery),
+				chromedp.WaitVisible(".rev-pop .rev-save", chromedp.ByQuery),
+				chromedp.Click(".rev-pop .rev-save", chromedp.ByQuery),
+				chromedp.WaitVisible(".rev-rail-item", chromedp.ByQuery),
+				chromedp.Evaluate(`(function(){var r=document.querySelector('.rev-rail-item').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};})()`, &row),
+			); err != nil {
+				t.Fatalf("leaving a comment failed: %v", err)
+			}
+			if !seeded {
+				t.Fatal("could not seed reviewer identity in the browser")
+			}
+
+			// Whether the rail, rather than the page, is what sits at the spot
+			// its first comment occupied while expanded.
+			covered := fmt.Sprintf(`(function(){var e=document.elementFromPoint(%f,%f);return !!(e&&e.closest('.rev-rail'));})()`, row.X, row.Y)
+
+			if err := chromedp.Run(ctx,
+				chromedp.Evaluate(covered, &coveredOpen),
+				chromedp.Click(".rev-rail-hide", chromedp.ByQuery),
+				chromedp.Evaluate(covered, &coveredMin),
+				chromedp.Evaluate(`(function(){var r=document.querySelector('.rev-rail').getBoundingClientRect(),s=document.querySelector('.rev-rail-show');return !!s&&r.width<=s.getBoundingClientRect().width+2;})()`, &shrunk),
+				chromedp.Evaluate(`(document.querySelector('.rev-rail-show')||{}).textContent||''`, &count),
+			); err != nil {
+				t.Fatalf("hiding the rail failed: %v", err)
+			}
+			if !coveredOpen {
+				t.Fatal("the open rail does not cover its own first comment — the Hide check below would be vacuous")
+			}
+			if coveredMin {
+				t.Fatal("hiding the rail must uncover the page behind it")
+			}
+			if !shrunk {
+				t.Fatal("hidden, the rail must shrink to its Show button")
+			}
+			if strings.TrimSpace(count) != "1" {
+				t.Fatalf("the Show button must still say how many comments there are, got %q", count)
+			}
+
+			// The live reload the agent's fixes trigger.
+			if err := chromedp.Run(ctx,
+				chromedp.Reload(),
+				chromedp.WaitVisible(".rev-rail", chromedp.ByQuery),
+				chromedp.Evaluate(covered, &coveredAfterReload),
+			); err != nil {
+				t.Fatalf("reload failed: %v", err)
+			}
+			if coveredAfterReload {
+				t.Fatal("a live reload must keep the rail hidden")
+			}
+
+			if err := chromedp.Run(ctx,
+				chromedp.Click(".rev-rail-show", chromedp.ByQuery),
+				chromedp.Evaluate(covered, &coveredReopened),
+			); err != nil {
+				t.Fatalf("showing the rail failed: %v", err)
+			}
+			if !coveredReopened {
+				t.Fatal("Show must bring the comments back")
+			}
+
+			// By keyboard: Enter on Hide leaves focus on Show, so a second Enter
+			// brings the comments straight back.
+			var focusOnShow, coveredByKeyboard bool
+			if err := chromedp.Run(ctx,
+				chromedp.Focus(".rev-rail-hide", chromedp.ByQuery),
+				chromedp.KeyEvent(kb.Enter),
+				chromedp.Evaluate(`document.activeElement===document.querySelector('.rev-rail-show')`, &focusOnShow),
+				chromedp.KeyEvent(kb.Enter),
+				chromedp.Evaluate(covered, &coveredByKeyboard),
+			); err != nil {
+				t.Fatalf("keyboard toggle failed: %v", err)
+			}
+			if !focusOnShow {
+				t.Fatal("after Hide, keyboard focus must land on the Show button that replaced it")
+			}
+			if !coveredByKeyboard {
+				t.Fatal("Enter on Show must bring the comments back")
+			}
+
+			// Below 1400px the rail ends the page instead of floating. Hidden
+			// there and scrolled to the end, its Show button must sit above the
+			// fixed review bar. 'instant' overrides the scaffold's smooth scrolling.
+			var countClear bool
+			var ignored any
+			if err := chromedp.Run(ctx,
+				chromedp.Click(".rev-rail-hide", chromedp.ByQuery),
+				chromedp.EmulateViewport(1100, 800),
+				chromedp.Evaluate(`window.scrollTo({top:document.documentElement.scrollHeight,behavior:'instant'})`, &ignored),
+				chromedp.Evaluate(`(function(){var n=document.querySelector('.rev-rail-show').getBoundingClientRect(),b=document.querySelector('.rev-bar').getBoundingClientRect();return n.top>=0&&n.bottom<=b.top;})()`, &countClear),
+			); err != nil {
+				t.Fatalf("narrow-window check failed: %v", err)
+			}
+			if !countClear {
+				t.Fatal("in a narrow window the Show button must not be hidden under the review bar")
+			}
+		})
 	}
 }
 

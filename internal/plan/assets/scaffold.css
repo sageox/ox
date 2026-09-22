@@ -361,6 +361,13 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
    right gutter; each row scroll-jumps to its anchored element. */
 .rev-rail{position:fixed;top:64px;right:18px;z-index:55;width:266px;max-height:calc(100vh - 100px);overflow-y:auto;background:var(--panel);border:1px solid var(--hair);border-radius:10px;padding:10px 12px;box-shadow:var(--shadow)}
 .rev-rail-h{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+/* Hide shrinks the rail to the Show button (comment icon + count), as tall as
+   the theme toggle above it, so the plan under the rail can be read */
+.rev-rail-hide{margin-left:auto;background:var(--panel2);border:1px solid var(--hair2);border-radius:6px;color:var(--dim);padding:2px 8px;font:11px/1.4 "Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:none;letter-spacing:0;cursor:pointer}
+.rev-rail-hide:hover{color:var(--ink)}
+.rev-rail.rev-rail-min{width:fit-content;padding:0;border-radius:8px}
+.rev-rail-show{display:flex;align-items:center;gap:6px;height:32px;padding:0 10px;background:none;border:0;color:var(--dim);font:12px/1 "Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer}
+.rev-rail-show:hover{color:var(--ink)}
 .rev-rail-n{background:var(--panel2);border:1px solid var(--hair2);border-radius:8px;padding:0 6px;font-size:10.5px;color:var(--faint)}
 .rev-rail-empty{color:var(--faint);font-size:12px;line-height:1.5}
 .rev-rail-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
@@ -383,8 +390,9 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .rev-rail-tag.wontfix{color:var(--faint)}
 .rev-flash{animation:rev-flash 1.2s ease-out}
 @keyframes rev-flash{0%{background:var(--amber)}100%{background:transparent}}
-/* narrow viewports: the fixed rail would cover the prose, so drop it into flow */
-@media(max-width:1400px){.rev-rail{position:static;width:auto;max-height:none;margin:24px 16px 0;right:auto;top:auto}}
+/* narrow viewports: the fixed rail would cover the prose, so drop it into flow;
+   the bottom margin keeps it above the fixed review bar when scrolled to the end */
+@media(max-width:1400px){.rev-rail{position:static;width:auto;max-height:none;margin:24px 16px 72px;right:auto;top:auto}}
 @media print{.rev-bar,.toggle,.rev-orphans,.rev-hint,.rev-rail{display:none}}
 
 /* partition maps — partition-bar (proportional) + partition-map (ordered, log rail).

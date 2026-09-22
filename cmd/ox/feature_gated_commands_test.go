@@ -129,6 +129,7 @@ func (s flagsSnapshot) Patch(context.Context) (*flags.Patch, flags.Source, error
 		TUIEnabled:             &s.TUIEnabled,
 		AttestEnabled:          &s.AttestEnabled,
 		AddonsEnabled:          &s.AddonsEnabled,
+		BulletinEnabled:        &s.BulletinEnabled,
 		DisableFileDeleteTools: &s.DisableFileDeleteTools,
 		DisableShellExecTools:  &s.DisableShellExecTools,
 		PrimeAppend:            &s.PrimeAppend,

@@ -16,6 +16,7 @@
   var live = base !== '';
   var KEY = 'ox-plan-fb:' + slug;
   var ON_KEY = 'ox-plan-rev-on:' + slug; // sessionStorage: survives a reload, not a new tab
+  var MIN_KEY = 'ox-plan-rail-min:' + slug; // sessionStorage, like ON_KEY
   var STATUS = [
     { id: 'approve', glyph: '✓' },
     { id: 'request-change', glyph: '✎' },
@@ -135,6 +136,17 @@
   // --- comments rail: surface the note TEXT in the right gutter (not just a
   // margin glyph), each row scroll-jumping to its anchored element on click ---
   var rail;
+  // Hide shrinks the rail to a Show button (comment icon + count) so the plan
+  // under it can be read; kept per tab, so a live reload doesn't reopen it.
+  var railMin = false;
+  try { railMin = !!sessionStorage.getItem(MIN_KEY); } catch (e) {}
+  var BUBBLE = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h10A1.5 1.5 0 0 1 14.5 4v6a1.5 1.5 0 0 1-1.5 1.5H7.5L4 14.5v-3H3A1.5 1.5 0 0 1 1.5 10V4A1.5 1.5 0 0 1 3 2.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+  function toggleRail() {
+    railMin = !railMin;
+    try { if (railMin) sessionStorage.setItem(MIN_KEY, '1'); else sessionStorage.removeItem(MIN_KEY); } catch (e) {}
+    renderRail();
+    rail.querySelector('.rev-rail-show, .rev-rail-hide').focus(); // the clicked button was just replaced
+  }
   function flashEl(el) {
     el.classList.add('rev-flash');
     setTimeout(function () { el.classList.remove('rev-flash'); }, 1200);
@@ -163,16 +175,25 @@
     return rows;
   }
   function renderRail() {
-    if (!rail) { rail = document.createElement('aside'); rail.className = 'rev-rail'; document.body.appendChild(rail); }
+    if (!rail) {
+      rail = document.createElement('aside'); rail.className = 'rev-rail'; document.body.appendChild(rail);
+      rail.addEventListener('click', function (ev) { if (ev.target.closest('.rev-rail-show, .rev-rail-hide')) toggleRail(); });
+    }
     var rows = railRows();
     // hidden when there's nothing to read and we're not actively reviewing.
     if (!on && !rows.length) { rail.style.display = 'none'; rail.innerHTML = ''; return; }
     rail.style.display = '';
-    if (!rows.length) {
-      rail.innerHTML = '<div class="rev-rail-h">Comments</div><div class="rev-rail-empty">Click any section, risk, or row to leave a comment.</div>';
+    rail.classList.toggle('rev-rail-min', railMin);
+    if (railMin) {
+      rail.innerHTML = '<button class="rev-rail-show" title="Show comments" aria-label="Show comments (' + rows.length + ')">' + BUBBLE + rows.length + '</button>';
       return;
     }
-    var html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + '</span></div><ul class="rev-rail-list">';
+    var hide = '<button class="rev-rail-hide" title="Hide comments">Hide</button>';
+    if (!rows.length) {
+      rail.innerHTML = '<div class="rev-rail-h">Comments' + hide + '</div><div class="rev-rail-empty">Click any section, risk, or row to leave a comment.</div>';
+      return;
+    }
+    var html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + '</span>' + hide + '</div><ul class="rev-rail-list">';
     rows.forEach(function (r, i) {
       var tag = '';
       if (r.unsent) tag = '<span class="rev-rail-tag unsent">unsent</span>';

@@ -40,6 +40,9 @@ func applyPatch(f *Flags, p *Patch) {
 	if p.AddonsEnabled != nil {
 		f.AddonsEnabled = *p.AddonsEnabled
 	}
+	if p.BulletinEnabled != nil {
+		f.BulletinEnabled = *p.BulletinEnabled
+	}
 	if p.DisableFileDeleteTools != nil {
 		f.DisableFileDeleteTools = *p.DisableFileDeleteTools
 	}

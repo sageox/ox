@@ -34,6 +34,10 @@ type Flags struct {
 	TUIEnabled     bool
 	AttestEnabled  bool
 	AddonsEnabled  bool
+	// BulletinEnabled gates `ox bulletin`. It is a server-enrolled pilot:
+	// default off, and deliberately without a FEATURE_* env override, so
+	// nothing local can turn it on.
+	BulletinEnabled bool
 
 	// Kill switches — default false (not activated).
 	// Any source setting these true disables the capability.
@@ -50,13 +54,14 @@ type Flags struct {
 // Nil fields mean "no opinion" — they are skipped during merge.
 // NOTE: When adding fields, also update allNil() in env.go and applyPatch() in resolve.go.
 type Patch struct {
-	CodeDBEnabled  *bool
-	WhisperEnabled *bool
-	DistillEnabled *bool
-	AutoDistill    *bool
-	TUIEnabled     *bool
-	AttestEnabled  *bool
-	AddonsEnabled  *bool
+	CodeDBEnabled   *bool
+	WhisperEnabled  *bool
+	DistillEnabled  *bool
+	AutoDistill     *bool
+	TUIEnabled      *bool
+	AttestEnabled   *bool
+	AddonsEnabled   *bool
+	BulletinEnabled *bool
 
 	DisableFileDeleteTools *bool
 	DisableShellExecTools  *bool
@@ -96,12 +101,13 @@ type Provider interface {
 // Experimental gates and kill switches are off; string fields are empty.
 func Defaults() Flags {
 	return Flags{
-		CodeDBEnabled:  true,
-		WhisperEnabled: true,
-		DistillEnabled: true,
-		AutoDistill:    false, // off until remote settings explicitly enables it
-		TUIEnabled:     false, // off until remote settings explicitly enables it
-		AttestEnabled:  false, // experimental; hidden and unregistered until enabled
+		CodeDBEnabled:   true,
+		WhisperEnabled:  true,
+		DistillEnabled:  true,
+		AutoDistill:     false, // off until remote settings explicitly enables it
+		TUIEnabled:      false, // off until remote settings explicitly enables it
+		AttestEnabled:   false, // experimental; hidden and unregistered until enabled
+		BulletinEnabled: false, // server-enrolled pilot; no env override by design
 		// The Add-on Catalog is a server-side surface `ox addons` does not yet
 		// reach. Off until a rollout enables it, so help text and commands
 		// cannot advertise a catalog this build cannot talk to (ADR-032).

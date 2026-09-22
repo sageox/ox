@@ -52,6 +52,7 @@ func allNil(p *Patch) bool {
 		p.TUIEnabled == nil &&
 		p.AttestEnabled == nil &&
 		p.AddonsEnabled == nil &&
+		p.BulletinEnabled == nil &&
 		p.DisableFileDeleteTools == nil &&
 		p.DisableShellExecTools == nil &&
 		p.PrimeAppend == nil

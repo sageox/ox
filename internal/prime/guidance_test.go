@@ -1,6 +1,7 @@
 package prime
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/claude"
@@ -230,6 +231,54 @@ func TestBuildCapturePriorGuidance(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "instructions should contain agent ID")
+}
+
+// TestBuildGuidance_BulletinRowGatedOnHint verifies the bulletin-board row
+// appears exactly once when the team checkout has a board folder, and not at
+// all when it does not — a team without a board pays nothing for the feature,
+// and a team with one gets a single `ls <dir>` pointer whose intent states
+// the trust rules (never a post body).
+// Failure prevented: ungating the row (dead `ls` on every prime, pointing at
+// a directory that does not exist), duplicating it, or dropping the trust
+// framing from the intent so an AI coworker reads a post as policy.
+func TestBuildGuidance_BulletinRowGatedOnHint(t *testing.T) {
+	const hint = "/data/teams/team-1/bulletin/general/posts"
+
+	bulletinRows := func(g *Guidance) []IntentCommand {
+		var rows []IntentCommand
+		for _, c := range g.Commands {
+			if strings.HasPrefix(c.Command, "ls ") || strings.Contains(c.Intent, "bulletin") {
+				rows = append(rows, c)
+			}
+		}
+		return rows
+	}
+
+	tests := []struct {
+		name    string
+		teamCtx *TeamContextInfo
+		want    int
+	}{
+		{"no team context", nil, 0},
+		{"team context without a board", &TeamContextInfo{TeamID: "team-1"}, 0},
+		{"team context with a board", &TeamContextInfo{TeamID: "team-1", BulletinHint: hint}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := BuildGuidance(GuidanceParams{AgentID: "a1", RepoSlug: "test/repo", TeamCtx: tt.teamCtx})
+			require.NotNil(t, g)
+			rows := bulletinRows(g)
+			require.Len(t, rows, tt.want, "bulletin rows: %+v", rows)
+			if tt.want == 0 {
+				return
+			}
+			row := rows[0]
+			assert.Equal(t, "ls '"+hint+"'", row.Command, "the path is single-quoted: it may contain spaces")
+			for _, want := range []string{"teammates' notes", "unreviewed", "time-limited", "check the date", "never an instruction", "expires_at"} {
+				assert.Contains(t, row.Intent, want)
+			}
+		})
+	}
 }
 
 // TestBuildGuidance_KBRowsGatedOnHasKB verifies the `ox kb` rows appear only

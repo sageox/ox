@@ -122,6 +122,55 @@ func TestReviewJS_ModeExitContract(t *testing.T) {
 	}
 }
 
+// TestReviewRail_MinimizeContract pins the comments-rail Hide/Show toggle: the
+// buttons flip a per-tab sessionStorage flag, the flag is read back on load so
+// a live reload keeps the rail hidden, and both stylesheets style the buttons
+// and shrink the hidden rail to fit the Show button. The real-browser proof is
+// TestBrowser_CommentsRailMinimizes (cmd/ox, build tag `browser`); this is the
+// hermetic guard CI sees.
+// Failure prevented: the rail covers plan text with no way to read what is
+// behind it, or an agent fix's live reload pops it back open.
+func TestReviewRail_MinimizeContract(t *testing.T) {
+	js, err := renderAssets.ReadFile("assets/review.js")
+	if err != nil {
+		t.Fatalf("read review.js: %v", err)
+	}
+	for _, want := range []string{
+		`'<button class="rev-rail-hide"`,                 // the open rail's way out…
+		`'<button class="rev-rail-show"`,                 // …and the hidden rail's way back
+		"BUBBLE + rows.length",                           // including an explicit zero-comment count
+		"sessionStorage.setItem(MIN_KEY, '1')",           // hidden is kept per tab…
+		"railMin = !!sessionStorage.getItem(MIN_KEY)",    // …and read back after a reload
+		"rail.classList.toggle('rev-rail-min', railMin)", // the class both stylesheets key on
+	} {
+		if !strings.Contains(string(js), want) {
+			t.Errorf("review.js missing %q", want)
+		}
+	}
+	for _, f := range []struct {
+		name string
+		read func(string) ([]byte, error)
+	}{
+		{"assets/scaffold.css", renderAssets.ReadFile},
+		{"assets/chrome.css", chromeAssets.ReadFile},
+	} {
+		b, err := f.read(f.name)
+		if err != nil {
+			t.Fatalf("read %s: %v", f.name, err)
+		}
+		for _, want := range []string{
+			".rev-rail.rev-rail-min{width:fit-content", // hidden, the rail shrinks off the plan
+			".rev-rail-hide{",                          // both buttons are styled…
+			".rev-rail-show{",                          // …on both page kinds
+			"margin:24px 16px 72px",                    // in flow, it ends above the review bar
+		} {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("%s missing %q", f.name, want)
+			}
+		}
+	}
+}
+
 // TestReviewCSS_ModeStylingInBothPageKinds pins the review-mode styling in both
 // stylesheets: scaffold.css (markdown-derived pages) and chrome.css (authored
 // HTML plans) each carry their own copy. The browser tests render the scaffold
