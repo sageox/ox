@@ -170,7 +170,7 @@ built-in CLI workflows use target descriptors and central reconciliation.
 
 ## Part 2 — the Add-on Catalog (team-scoped)
 
-**Status: ships behind `FEATURE_ADDONS`, default OFF.** See "The flag gate,"
+**Status: shipped and public.** `ox addons` is an ordinary command. See "Where the gate went,"
 below, before running any command in this section.
 
 ### What an add-on is
@@ -295,30 +295,36 @@ third parties. Nothing about the mechanism assumes who wrote the content:
   in the first place: adopting a third party's add-on is a judgment made once,
   visible in Team Context git history, and reviewable in a pull request.
 
-### The flag gate
+### Where the gate went
 
-Every `ox addons` entry point — the command, its Team Context write, and any
-reconcile path that reads an add-on file — is gated on `FEATURE_ADDONS`,
-which **defaults off**. Below the gate, `ox addons` is not merely hidden: it
-is not registered as a command at all, so running it reports an unknown
-command rather than a disabled one, and `ox sync --help` does not mention a
-catalog the build cannot reach.
+`ox addons` used to sit behind `FEATURE_ADDONS`, default off. **It no longer
+does** — the flag is deleted, and the command is registered and discoverable
+like any other (ADR-032, amended 2026-09-22).
 
-Turn it on locally for the session:
+The reasoning is worth keeping, because it explains where the gate moved
+rather than that the caution was abandoned:
 
-```bash
-export FEATURE_ADDONS=1
-```
+- **A gate holds back untrusted bytes.** The only provider today is embedded —
+  add-ons compiled into the binary from content in this repository, which every
+  reviewer of it has already seen. There are no untrusted bytes to hold back,
+  so the flag guarded a mechanism that could only install content we wrote.
+- **The caution moved to the provider.** A remote or third-party provider will
+  land behind its own flag, default off. That is where untrusted content enters,
+  and it is where two known gaps now block: the Unicode-normalization collision
+  that can record a lock naming two files where one exists (macOS/APFS), and the
+  absence of secret scanning on the Team Context write path.
 
-Production rollout is a centrally-managed remote setting, not a
-developer-only escape hatch — see ADR-032 for why the default stays off until
-the surface is complete and rolled out (a selection model is the hardest
-kind of feature to take back once a team has recorded a choice against it).
+Nothing else changed. The selection is still team-scoped, still
+overwrite-on-update, and Team Context git history is still the undo.
 
 ### Command reference
 
-All examples below assume the gate is on. `<name>` in these examples is
-`post-cutoff`, the one add-on shipped in this build's embedded catalog.
+`<name>` in these examples is `post-cutoff`. This build's embedded catalog
+ships two add-ons: `post-cutoff` (the shelf — grading, expiry, and the
+human-only intake procedure) and `post-cutoff-jev` (one brief, on TypeSafe
+Jev). They are separate so a team can take the shelf without adopting an
+opinion on one vendor, or take the brief without adopting the procedure;
+neither requires the other.
 
 | Command | Effect | Flags |
 |---|---|---|

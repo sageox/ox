@@ -19,7 +19,6 @@ func (EnvProvider) Patch(_ context.Context) (*Patch, Source, error) {
 		DistillEnabled: envBoolPtr("FEATURE_MEMORY"),
 		TUIEnabled:     envBoolPtr("FEATURE_TUI"),
 		AttestEnabled:  envBoolPtr("FEATURE_ATTEST"),
-		AddonsEnabled:  envBoolPtr("FEATURE_ADDONS"),
 		// FEATURE_AUTH and FEATURE_CLOUD are account-level; not mapped to Flags.
 		// FEATURE_POST_MVP gates multiple unrelated features; callers continue to
 		// use auth.IsPostMVPEnabled() directly until those features are broken out.
@@ -51,7 +50,6 @@ func allNil(p *Patch) bool {
 		p.AutoDistill == nil &&
 		p.TUIEnabled == nil &&
 		p.AttestEnabled == nil &&
-		p.AddonsEnabled == nil &&
 		p.BulletinEnabled == nil &&
 		p.DisableFileDeleteTools == nil &&
 		p.DisableShellExecTools == nil &&

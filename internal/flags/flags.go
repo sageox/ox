@@ -60,7 +60,6 @@ type Patch struct {
 	AutoDistill     *bool
 	TUIEnabled      *bool
 	AttestEnabled   *bool
-	AddonsEnabled   *bool
 	BulletinEnabled *bool
 
 	DisableFileDeleteTools *bool
@@ -108,10 +107,6 @@ func Defaults() Flags {
 		TUIEnabled:      false, // off until remote settings explicitly enables it
 		AttestEnabled:   false, // experimental; hidden and unregistered until enabled
 		BulletinEnabled: false, // server-enrolled pilot; no env override by design
-		// The Add-on Catalog is a server-side surface `ox addons` does not yet
-		// reach. Off until a rollout enables it, so help text and commands
-		// cannot advertise a catalog this build cannot talk to (ADR-032).
-		AddonsEnabled: false,
 	}
 }
 

@@ -18,24 +18,37 @@ func TestEmbeddedProvider_Source(t *testing.T) {
 	require.Equal(t, SourceBuiltin, NewEmbeddedProvider().Source())
 }
 
-// TestEmbeddedProvider_List_ReturnsPostCutoff verifies the one add-on shipped
-// today lists with a non-empty version and summary, sorted (trivially, with
-// one entry) by name.
-func TestEmbeddedProvider_List_ReturnsPostCutoff(t *testing.T) {
+// TestEmbeddedProvider_List_ReturnsBothBuiltInAddons pins the shipped catalog.
+//
+// Two add-ons, deliberately: `post-cutoff` is the shelf (grading, expiry, the
+// human-only intake procedure) and `post-cutoff-jev` is one brief. They are
+// separate so a team can take the shelf without adopting an opinion on one
+// vendor, or take the brief without adopting the shelf's procedure — and the
+// lock format has no `requires` field, so the brief restates the framing it
+// needs rather than depending on the shelf.
+//
+// Failure prevented: an add-on silently disappearing from the embedded tree,
+// or a third arriving without anyone deciding it should be in the catalog a
+// customer sees.
+func TestEmbeddedProvider_List_ReturnsBothBuiltInAddons(t *testing.T) {
 	descriptors, err := NewEmbeddedProvider().List(context.Background())
 	require.NoError(t, err)
-	require.Len(t, descriptors, 1, "extensions/addons ships exactly post-cutoff today")
+	require.Len(t, descriptors, 2, "extensions/addons ships post-cutoff and post-cutoff-jev")
 
-	d := descriptors[0]
-	require.Equal(t, "post-cutoff", d.Name)
-	require.NotEmpty(t, d.Version)
-	require.NotEmpty(t, d.Summary)
-	require.Equal(t, SourceBuiltin, d.Source)
-	require.NotEmpty(t, d.Digest)
-	require.Equal(t, []string{"post-cutoff"}, d.Skills)
-	require.Empty(t, d.Rules)
-	require.Equal(t, []ArtifactKind{KindSkill}, d.Kinds)
-	require.False(t, d.HasScripts)
+	// List is contractually sorted by name.
+	names := []string{descriptors[0].Name, descriptors[1].Name}
+	require.Equal(t, []string{"post-cutoff", "post-cutoff-jev"}, names)
+
+	for _, d := range descriptors {
+		require.NotEmpty(t, d.Version, "%s must pin a version", d.Name)
+		require.NotEmpty(t, d.Summary, "%s must carry a summary", d.Name)
+		require.Equal(t, SourceBuiltin, d.Source)
+		require.NotEmpty(t, d.Digest, "%s must be pinnable", d.Name)
+		require.Equal(t, []string{d.Name}, d.Skills, "%s ships one skill of the same name", d.Name)
+		require.Empty(t, d.Rules)
+		require.Equal(t, []ArtifactKind{KindSkill}, d.Kinds)
+		require.False(t, d.HasScripts, "neither built-in add-on ships scripts")
+	}
 }
 
 // TestEmbeddedProvider_Resolve_FilesUnderAgents verifies every resolved file
@@ -125,35 +138,47 @@ func TestShippedSkillContent_StaysUsable(t *testing.T) {
 	//
 	// What must hold forever instead: the files are present, and the manifest
 	// still satisfies the two fields the catalog validator actually reads.
-	files := []string{"SKILL.md", "references/AUTHORING.md", "references/jev.md"}
-
-	root, err := os.Getwd()
-	require.NoError(t, err)
-	root = filepath.Join(root, "..", "..", "extensions", "addons", "post-cutoff", "skills", "post-cutoff")
-
-	for _, rel := range files {
-		t.Run(rel, func(t *testing.T) {
-			content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
-			require.NoError(t, err, "a shipped add-on file went missing")
-			require.NotEmpty(t, bytes.TrimSpace(content), "shipped add-on file is empty")
-		})
+	// Both shipped add-ons, each with the files it actually carries. jev.md
+	// moved out of post-cutoff into its own add-on: the shelf and one brief are
+	// separately selectable, so neither can be asserted against the other's tree.
+	addons := map[string][]string{
+		"post-cutoff":     {"SKILL.md", "references/AUTHORING.md"},
+		"post-cutoff-jev": {"SKILL.md", "references/jev.md"},
 	}
 
-	manifest, err := os.ReadFile(filepath.Join(root, "SKILL.md"))
+	wd, err := os.Getwd()
 	require.NoError(t, err)
-	lines := strings.Split(string(manifest), "\n")
-	require.Greater(t, len(lines), 3, "SKILL.md has no frontmatter block")
-	require.Equal(t, "---", lines[0], "SKILL.md must open with frontmatter")
-	require.Equal(t, "name: post-cutoff", strings.TrimSpace(lines[1]),
-		"frontmatter name must equal the directory name or the catalog validator rejects it")
 
-	desc := strings.TrimSpace(lines[2])
-	require.True(t, strings.HasPrefix(desc, "description: "), "description must be the third line")
-	require.NotEmpty(t, strings.TrimPrefix(desc, "description: "), "description is the whole auto-selection budget")
-	// Team Context parses frontmatter line-by-line with no folded-scalar support,
-	// so a `>-` block would publish the literal ">-" as the activation surface.
-	require.False(t, strings.HasPrefix(strings.TrimPrefix(desc, "description: "), ">"),
-		"description must be single-line; a folded scalar breaks Team Context publishing")
+	for addon, files := range addons {
+		root := filepath.Join(wd, "..", "..", "extensions", "addons", addon, "skills", addon)
+
+		for _, rel := range files {
+			t.Run(addon+"/"+rel, func(t *testing.T) {
+				content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+				require.NoError(t, err, "a shipped add-on file went missing")
+				require.NotEmpty(t, bytes.TrimSpace(content), "shipped add-on file is empty")
+			})
+		}
+
+		manifest, err := os.ReadFile(filepath.Join(root, "SKILL.md"))
+		require.NoError(t, err)
+		lines := strings.Split(string(manifest), "\n")
+		require.Greater(t, len(lines), 3, "%s SKILL.md has no frontmatter block", addon)
+		require.Equal(t, "---", lines[0], "%s SKILL.md must open with frontmatter", addon)
+		require.Equal(t, "name: "+addon, strings.TrimSpace(lines[1]),
+			"frontmatter name must equal the directory name or the catalog validator rejects it")
+
+		desc := strings.TrimSpace(lines[2])
+		require.True(t, strings.HasPrefix(desc, "description: "), "%s description must be the third line", addon)
+		require.NotEmpty(t, strings.TrimPrefix(desc, "description: "), "description is the whole auto-selection budget")
+
+		// Team Context parses frontmatter line-by-line with no folded-scalar
+		// support, so a `>-` block would publish the literal ">-" as the
+		// activation surface — the whole budget an agent uses to decide whether
+		// to read the skill at all.
+		require.False(t, strings.HasPrefix(strings.TrimPrefix(desc, "description: "), ">"),
+			"%s description must be single-line; a folded scalar breaks Team Context publishing", addon)
+	}
 }
 
 // --- B. resolveFromFS/listFromFS against synthetic trees ---

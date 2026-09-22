@@ -547,12 +547,6 @@ func syncFeatureGatedCommands(root *cobra.Command) {
 	setCommandRegistered(root, scoutCmd, auth.IsScoutEnabled())
 	setCommandRegistered(root, bulletinCmd, flags.Get().BulletinEnabled)
 
-	// `ox addons` and the Add-on Catalog paragraph in `ox sync --help` are two
-	// faces of the same gate, so they settle together, here, before cobra
-	// resolves or renders anything.
-	addonsEnabled := flags.Get().AddonsEnabled
-	setCommandRegistered(root, addonsCmd, addonsEnabled)
-	syncCmd.Long = syncLong(addonsEnabled)
 }
 
 func setCommandRegistered(root, command *cobra.Command, enabled bool) {

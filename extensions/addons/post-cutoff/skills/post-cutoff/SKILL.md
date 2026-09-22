@@ -1,6 +1,6 @@
 ---
 name: post-cutoff
-description: What THIS TEAM has adopted or ruled on that postdates your training cutoff — a small, human-curated set, not a watchlist. Read BEFORE choosing an approach, picking a model, designing a classifier/router/gate, or evaluating a vendor. Current entries: TypeSafe Jev and the System One typed-decision model class. Also the procedure for proposing and retiring entries.
+description: What THIS TEAM has adopted or ruled on that postdates your training cutoff — a small, human-curated set, not a watchlist. Read BEFORE choosing an approach, picking a model, designing a classifier/router/gate, or evaluating a vendor. Also the procedure for proposing and retiring entries. Individual briefs ship as their own add-ons — see post-cutoff-jev.
 ---
 
 # Post-cutoff
@@ -95,7 +95,12 @@ Open the index when you are about to:
 
 | Entry | What it is | Read it when | Valid through |
 |---|---|---|---|
-| [`references/jev.md`](references/jev.md) **◆** | TypeSafe **Jev** — the control-plane decision model: typed decisions with probabilities in 70–500ms instead of generated text. **In production in Bugsy.** | a plan calls for *intuition* or a *quick routing decision*: classifying, routing, gating spend, scoring, choosing the next tool, or any LLM call whose output you immediately parse down to one field | **2027-03-21** |
+| _(none in this add-on yet)_ | Entries ship as their own add-ons so a team can take one without taking all of them. | — | — |
+
+**Available briefs:** `post-cutoff-jev` — TypeSafe **Jev**, the control-plane decision
+model: typed decisions with probabilities in 70–500ms instead of generated text. **In
+production in Bugsy.** Read it when a plan calls for intuition or a quick routing
+decision. Install with `ox addons install post-cutoff-jev`.
 
 **◆ marks a diamond.** At scale, filter rather than scan — every entry's frontmatter is
 greppable:

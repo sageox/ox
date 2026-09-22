@@ -26,10 +26,12 @@ import (
 // hand-authored team content already travels — which is why installing an
 // add-on needs no repository-side step and offers none.
 //
-// The whole surface is registered only when the add-ons gate is on
-// (syncFeatureGatedCommands in root.go). Cobra resolves commands and renders
-// help before PersistentPreRunE, so a RunE-only guard would still advertise
-// these verbs and a Hidden-only guard would still let them run.
+// This surface used to be registered only behind FEATURE_ADDONS. The flag is
+// gone (ADR-032, amended): gating the MECHANISM guarded nothing, because the
+// only provider is compiled into this binary and ships bytes we wrote. The
+// risk a gate exists to hold back is untrusted content, so the gate moved to
+// the thing that will actually introduce it — a remote/third-party provider,
+// which lands behind its own flag, default off.
 
 var addonsCmd = &cobra.Command{
 	Use:     "addons",
@@ -96,8 +98,7 @@ func init() {
 	}
 	addonsInstallCmd.Flags().String("version", "", "Install an exact version instead of the catalog's current one")
 	addonsCmd.AddCommand(addonsListCmd, addonsInstallCmd, addonsUpdateCmd, addonsRemoveCmd)
-	// NOT rootCmd.AddCommand: addonsCmd is registered by
-	// syncFeatureGatedCommands once the add-ons gate has resolved.
+	rootCmd.AddCommand(addonsCmd)
 }
 
 // teamContextForAddons resolves the Team Context every add-on verb writes.

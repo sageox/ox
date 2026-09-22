@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/addons"
-	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/stretchr/testify/require"
@@ -157,15 +156,9 @@ func TestAddonsRemove_TakesBackOnlyWhatItOwns(t *testing.T) {
 }
 
 // TestAddonsCLI_ListReportsTheBuiltInAddon drives the command surface itself,
-// with the gate on, so the JSON contract another tool would parse is exercised
-// rather than assumed.
+// so the JSON contract another tool would parse is exercised rather than
+// assumed. No flag setup: `ox addons` is an ordinary command now.
 func TestAddonsCLI_ListReportsTheBuiltInAddon(t *testing.T) {
-	restore := flagsSnapshot{flags.Get()}
-	t.Cleanup(func() { flags.Init(context.Background(), restore) })
-	on := flagsSnapshot{flags.Defaults()}
-	on.AddonsEnabled = true
-	flags.Init(context.Background(), on)
-
 	var out bytes.Buffer
 	cmd := addonsListCmd
 	cmd.SetOut(&out)

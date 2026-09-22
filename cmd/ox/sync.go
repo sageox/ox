@@ -92,7 +92,7 @@ var syncCmd = &cobra.Command{
 	Use:   "sync",
 	Args:  cobra.NoArgs,
 	Short: "Manually sync ledger/team contexts (rarely needed)",
-	Long:  syncLong(false),
+	Long:  syncLong(),
 	RunE:  runSync,
 }
 
@@ -147,13 +147,11 @@ Headless read-only mode runs a bounded ledger refresh without the daemon:
 Read-only mode uses SAGEOX_TOKEN and SAGEOX_ENDPOINT, independent of the
 current project. See docs/specs/ledger-read-sync.md for the reader contract.`
 
-// syncLong assembles `ox sync --help`, including the Add-on Catalog paragraph
-// only when the gate is on.
-func syncLong(addonsEnabled bool) string {
-	if addonsEnabled {
-		return syncLongHead + "\n\n" + syncAddonsHelp + "\n\n" + syncLongTail
-	}
-	return syncLongHead + "\n\n" + syncLongTail
+// syncLong assembles `ox sync --help`. The Add-on Catalog paragraph is
+// unconditional: `ox addons` is an ordinary command now, so naming it is
+// always correct.
+func syncLong() string {
+	return syncLongHead + "\n\n" + syncAddonsHelp + "\n\n" + syncLongTail
 }
 
 func init() {

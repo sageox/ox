@@ -100,23 +100,41 @@ Sparse checkout needs no change: `.sageox/`, `agents/`, and `docs/` are already 
 
 **Costs.** `ox skills catalog | install | uninstall` are withdrawn before anyone could use them, so the only way to select catalog content is `ox addons`, which does not exist yet — there is a window in which `post-cutoff` ships in the binary and nothing can select it. A team that hand-edits an add-on file loses that edit on the next update and must recover it from Team Context history.
 
-**The mechanism ships behind a flag.** Every `ox addons` entry point — the command, its
-sync leg, and any reconcile path that reads an add-on file — must consult
-`flags.Get().AddonsEnabled` and no-op when it reports false. It already gates the `ox
-sync` help text, which is why that help must not advertise a catalog this build cannot
-reach.
+**AMENDED 2026-09-22 — the mechanism no longer ships behind a flag; the
+PROVIDER does.**
 
-The flag **defaults off** (`flags.Defaults()`), is overridable by `FEATURE_ADDONS` for
-local work, and can be turned on centrally through remote settings — a rollout lever
-rather than a developer-only escape hatch. That asymmetry is deliberate: mature
-capabilities in that struct default *on*, and add-ons does not, because a selection model
-is the hardest feature to take back. Once a repository or a team records a choice,
-withdrawing the feature orphans the file that recorded it — exactly the situation
-`ox skills catalog | install | uninstall` created and this ADR is cleaning up. Landing
-the successor dark means the next partial merge cannot repeat it.
+The original ruling put `FEATURE_ADDONS` in front of every `ox addons` entry
+point, default off, on the reasoning that a selection model is the hardest
+feature to take back. That reasoning was right about the risk and wrong about
+where it lives.
 
-Delete the flag once `ox addons` is complete and rolled out; a permanent flag is a
-permanent branch of untested behaviour.
+The risk a gate holds back is **untrusted bytes**. With only the embedded
+provider — add-ons compiled into the binary from content in this repository,
+which every reviewer of this repository has already seen — there are none. So
+the flag gated a mechanism that could only ever install content we wrote, while
+the thing that will actually introduce untrusted content shipped ungated by
+construction, because it does not exist yet.
+
+Ryan, 2026-09-22: *"Just make addons no longer a feature flag."*
+
+What replaces it:
+
+- **`ox addons` is an ordinary, discoverable command.** Registered at init like
+  every other command, present in `ox --help`, no `Hidden`, no flag. `AddonsEnabled`,
+  `FEATURE_ADDONS`, and the `features.addons` settings key are deleted rather
+  than left inert — a flag nothing reads is a lie about what is configurable.
+- **A remote or third-party provider lands behind its OWN flag, default off.**
+  That is the gate that guards untrusted bytes, and it is where the deferred
+  work now blocks.
+- **Two known gaps block that provider's PR, explicitly:** the Unicode
+  normalization collision that can record a lock naming two files where one
+  exists (macOS/APFS), and the absence of any secret scanning on the Team
+  Context write path (ox-hvnc.7). Neither is reachable while the only provider
+  ships ASCII filenames we authored; both become live the day one does not.
+
+Nothing about D1–D6 changes. The selection is still team-scoped, still
+overwrite-on-update, still recorded in a committed lock, and Team Context git
+history is still the undo.
 
 **Accepted risks.** Overwrite-on-update is only as forgiving as Team Context history is reachable; if a team never pulls, the pre-update content still exists but nobody is looking at it. `ox addons` must therefore say plainly, before it overwrites, which owned files were modified.
 
