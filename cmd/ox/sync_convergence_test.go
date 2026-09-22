@@ -393,7 +393,6 @@ func TestSyncHelp_PackCatalogParagraphFollowsTheGate(t *testing.T) {
 			if tc.wantVisible {
 				require.Contains(t, long, "Pack-managed and hand-authored")
 				require.Contains(t, long, "does not check the Pack Catalog")
-				require.Contains(t, long, "ox packs update")
 			} else {
 				require.NotContains(t, long, "Pack-managed and hand-authored")
 				require.NotContains(t, long, "Pack Catalog")

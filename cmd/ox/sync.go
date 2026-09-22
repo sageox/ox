@@ -112,13 +112,18 @@ keeps transport and local convergence synchronized. This command exists only for
 // syncPacksHelp states the boundary between convergence and the Pack Catalog:
 // sync delivers Pack-managed content but never checks for new catalog releases.
 //
-// It is printed ONLY when the packs gate is on. `ox packs` is not in this
-// binary — ADR-032 designed it and #1013 left it as follow-up — so unconditional
-// help text sends a user to a command that answers "unknown command" (#1028,
-// #1029). The rule itself stays recorded in ADR-032 whether or not it is shown.
+// It is printed ONLY when the packs gate is on. Unconditionally, it would name a
+// Pack Catalog this build cannot reach (#1028, #1029); the rule stays recorded in
+// ADR-032 either way.
+//
+// It deliberately names NO command. The gate can be switched on today — for
+// dogfooding, or mid-rollout — while `ox packs` is still follow-up work, so help
+// that told a user which command to run would send them to "unknown command" in
+// exactly the state the flag is meant to make safe. Whoever ships `ox packs`
+// restores the pointer alongside the command; until then
+// TestPacksHelpNamesNoUnregisteredCommand holds the line.
 const syncPacksHelp = `Convergence includes Pack-managed and hand-authored Team Context content through
-the same delivery path. It does not check the Pack Catalog for newer releases;
-use 'ox packs update' for catalog updates.`
+the same delivery path. It does not check the Pack Catalog for newer releases.`
 
 const syncLongTail = `The daemon syncs automatically on:
   - File changes in your project
