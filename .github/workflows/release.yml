@@ -42,10 +42,48 @@ jobs:
             exit 1
           fi
 
+  # Reads the release gate's stages from the Makefile at the tag, so the
+  # verify-inrepo jobs run exactly the stages `make test-release` runs.
+  plan-release-stages:
+    if: github.repository == 'sageox/ox'
+    runs-on: ubuntu-latest
+    outputs:
+      stages: ${{ steps.stages.outputs.stages }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      # Parsing the Makefile runs `go env`; nothing is built here, so no module cache.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Read release stages
+        id: stages
+        run: |
+          stages=$(make -s release-stages)
+          echo "Release stages: $stages"
+          jq -e 'type == "array" and length > 0' <<<"$stages" >/dev/null || {
+            echo "::error::make release-stages did not return a non-empty JSON array."
+            exit 1
+          }
+          echo "stages=$stages" >> "$GITHUB_OUTPUT"
+
   verify-inrepo:
     if: github.repository == 'sageox/ox'
-    needs: verify-draft
+    needs: [verify-draft, plan-release-stages]
     runs-on: ubuntu-latest
+    strategy:
+      # Every stage reports even when another fails, and re-running failed
+      # jobs repeats only the stage that failed.
+      fail-fast: false
+      matrix:
+        stage: ${{ fromJSON(needs.plan-release-stages.outputs.stages) }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,8 +104,10 @@ jobs:
       - name: Install pinned test runner
         run: go install gotest.tools/gotestsum@v1.13.0
 
-      - name: Run enforceable release tiers
-        run: make test-release
+      - name: Run release stage
+        env:
+          STAGE: ${{ matrix.stage }}
+        run: make "$STAGE"
 
   build-and-release:
     if: github.repository == 'sageox/ox'

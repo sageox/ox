@@ -1,7 +1,7 @@
 # Makefile for ox CLI tool
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open check-test-tiers test-tiers
-.PHONY: help build build-ox build-adapters build-acceptance install install-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
+.PHONY: help build build-ox build-adapters build-acceptance install install-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
 GO := go
@@ -371,12 +371,23 @@ test-acceptance-run:
 		-run '^($(subst $(space),|,$(strip $(ACCEPTANCE_SLOW_TESTS))))$$' \
 		./cmd/ox
 
+# The release gate's independent stages. `make test-release` runs them in order;
+# release.yml reads this list with `make release-stages` and runs each stage as
+# its own parallel job, so CI cannot skip a stage that `make test-release` runs.
+RELEASE_STAGES := test-release-coverage test-slow test-fuzz
+
 test-release: check-test-tiers ## Run every enforceable in-repo release tier sequentially
+	@for stage in $(RELEASE_STAGES); do $(MAKE) $$stage || exit 1; done
+
+# One stage, not three: the ratchet reads the profile merged from the full,
+# acceptance, and digital-twin runs.
+test-release-coverage: check-test-tiers ## Release stage: full, acceptance, and digital-twin tiers under the merged coverage ratchets
 	@$(MAKE) coverage-ratchet-test
 	@$(MAKE) coverage-integration
 	@python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json
-	@$(MAKE) test-slow
-	@$(MAKE) test-fuzz
+
+release-stages: ## Print the release gate's stages as a JSON array (the release workflow's job matrix)
+	@python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' $(RELEASE_STAGES)
 
 test-agents: ## Drive real coding agents and read their transcripts back through ox (opt-in, costs API calls)
 	$(call say,"Driving real coding agents — requires each agent installed and authenticated...")
