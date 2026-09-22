@@ -95,7 +95,12 @@ func TestTeamSkillSource_ScriptsAreDroppedNotTheSkill(t *testing.T) {
 	require.True(t, decisions[0].NeedsApprove, "the author must still be told the scripts are held")
 	require.False(t, decisions[0].AutoInstalledProse,
 		"an executable skill with only its scripts held was reported as prose")
-	require.Contains(t, decisions[0].Reason, "without its scripts")
+	// The reason must name what is HELD, not restate the install state — every
+	// caller reports that separately. Asserted on "scripts" + "pending
+	// approval" rather than one sentence, so a rewording stays free but a
+	// reason that stops naming the scripts does not.
+	require.Contains(t, decisions[0].Reason, "scripts")
+	require.Contains(t, decisions[0].Reason, "pending approval")
 	require.Contains(t, decisions[0].Reason, "bundled-script",
 		"the decision does not tell the human what they would be approving: %q", decisions[0].Reason)
 }

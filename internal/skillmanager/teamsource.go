@@ -220,7 +220,9 @@ func buildTeamCatalog(base catalogSource, teamPath, repoSlug, projectRoot string
 			// Installed, minus its scripts. Still surfaced: the author expects the
 			// scripts to be there, and silence would read as "it all arrived."
 			decision.NeedsApprove = true
-			decision.Reason = "installed without its scripts pending approval: " + verdict.Describe()
+			// The state is reported separately by every caller, so this says what is
+			// WITHHELD rather than repeating that the skill installed.
+			decision.Reason = "scripts withheld pending approval: " + verdict.Describe()
 		}
 		decisions = append(decisions, decision)
 	}

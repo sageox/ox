@@ -374,7 +374,11 @@ func TestCollectSkillsStatus_ReportsAutoInstalledProseAndWithheldCounts(t *testi
 
 	var human strings.Builder
 	renderSkillsStatus(&human, out)
-	require.Contains(t, human.String(), "1 auto-installed as prose without approval; 1 withheld pending approval")
+	// Both counts must reach the human view. Asserted as two independent
+	// substrings rather than one sentence: the phrasing is a presentation
+	// choice, but a count that silently stops rendering is the bug.
+	require.Contains(t, human.String(), "1 withheld pending approval")
+	require.Contains(t, human.String(), "1 auto-installed as prose")
 
 	wire, err := json.Marshal(out)
 	require.NoError(t, err)

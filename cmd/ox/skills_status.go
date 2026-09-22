@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/internal/status"
 	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/version"
@@ -506,59 +507,87 @@ func roundedAge(t time.Time) string {
 	return fmt.Sprintf("%dh", int(d.Hours()))
 }
 
+// statusLabel is the width of the label column. Every section uses the same
+// one so the values line up down the whole screen — three sections with three
+// different label widths read as three unrelated blocks.
+const statusLabel = 12
+
 func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsStatusOutput) {
 	p := skillsPrintf(w)
+	// kv prints one indented label/value pair; section prints an un-indented
+	// heading whose value lands in the SAME column. The +2 is the kv indent:
+	// without it every heading's value sat two columns left of the rows under
+	// it, which is exactly enough misalignment to read as a mistake.
+	kv := func(label, format string, args ...any) {
+		p("  %-*s %s", statusLabel, label, fmt.Sprintf(format, args...))
+	}
+	section := func(label, format string, args ...any) {
+		p("%s %s", cli.StyleAccent.Render(fmt.Sprintf("%-*s", statusLabel+2, label)), fmt.Sprintf(format, args...))
+	}
+
+	p("%s", cli.StyleGroupHeader.Render("Skills status"))
+	p("%s", cli.StyleDim.Render(strings.Repeat("─", len("Skills status"))))
+	p("")
 
 	if out.TeamContext != nil {
 		name := out.TeamContext.Name
 		if name == "" {
 			name = "(unnamed)"
 		}
-		p("%s  %s", cli.StyleAccent.Render("Team Context"), name)
-		p("  path         %s", out.TeamContext.Path)
-		p("  checkout     %s", presence(out.TeamContext.Present))
-		p("  skill roots  %s", materialized(out.TeamContext.SkillsMaterialized))
+		section("Team Context", "%s", name)
+		kv("path", "%s", homeRelative(out.TeamContext.Path))
+		// Checkout and skill roots share a line while both are healthy: two
+		// lines saying "fine" is two lines of nothing. They split apart the
+		// moment either is not, which is when the detail earns its space.
+		if out.TeamContext.Present && out.TeamContext.SkillsMaterialized {
+			kv("checkout", "on disk · skill roots materialized")
+		} else {
+			kv("checkout", "%s", presence(out.TeamContext.Present))
+			kv("skill roots", "%s", materialized(out.TeamContext.SkillsMaterialized))
+		}
 		if out.TeamContext.LastSync != "" {
-			p("  last sync    %s", out.TeamContext.LastSync)
+			kv("synced", "%s", relativeSyncAge(out.TeamContext.LastSync))
 		}
 	} else {
-		p("%s  none configured for this project", cli.StyleAccent.Render("Team Context"))
+		section("Team Context", "none configured for this project")
 	}
 	if out.Convergence != nil {
-		p("  convergence  %s (attempt %d)", out.Convergence.Status, out.Convergence.Attempts)
+		kv("convergence", "%s (attempt %d)", out.Convergence.Status, out.Convergence.Attempts)
 		if out.Convergence.TeamCommit != "" {
 			commit := out.Convergence.TeamCommit
 			if len(commit) > 12 {
 				commit = commit[:12]
 			}
-			p("  source       %s", commit)
+			kv("source", "%s", commit)
 		}
 	}
 
 	p("")
-	p("%s  %s", cli.StyleAccent.Render("This repo"), out.Repo.Slug)
+	section("This repo", "%s", out.Repo.Slug)
 	if !out.Repo.SlugFromRemote {
-		p("  slug         from the directory name — no recognized remote")
+		kv("slug", "from the directory name — no recognized remote")
 	}
 	if len(out.Repo.Targets) > 0 {
-		p("  targets      %s", strings.Join(out.Repo.Targets, ", "))
+		kv("targets", "%s", strings.Join(out.Repo.Targets, ", "))
 	} else {
-		p("  targets      none — run `ox init`")
+		kv("targets", "none — run `ox init`")
 	}
 
 	p("")
 	if len(out.TeamSkills) == 0 {
-		p("%s  none found", cli.StyleAccent.Render("Team skills"))
+		section("Team skills", "none found")
 	} else {
-		p("%s", cli.StyleAccent.Render("Team skills"))
-		p("  trust summary            %d auto-installed as prose without approval; %d withheld pending approval",
-			out.Summary.AutoInstalledProse, out.Summary.Withheld)
+		section("Team skills", "%s", trustSummary(out.Summary))
 		for _, s := range out.TeamSkills {
-			detail := s.Detail
-			if detail != "" {
-				detail = " — " + detail
+			// The team prefix is dropped for the same reason as `ox skills
+			// list`: the heading already says these are the team's.
+			kv(strings.TrimPrefix(s.Name, skillmanager.TeamPrefix), "%s", s.State)
+			// The reason hangs under the state rather than trailing it on one
+			// line. A trust verdict names files and capabilities, so it runs
+			// well past 80 columns and was wrapping wherever the terminal chose.
+			for _, line := range wrapWords(s.Detail, skillsTableWidth-statusLabel-3) {
+				p("  %-*s %s", statusLabel, "", cli.StyleDim.Render(line))
 			}
-			p("  %-24s %s%s", s.Name, s.State, detail)
 		}
 	}
 
@@ -566,6 +595,49 @@ func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsSta
 		p("")
 		writeSkillsProblems(w, cli.StyleWarning.Render("Why something may be missing"), out.Problems)
 	}
+}
+
+// trustSummary states what still needs a human, and says so in as few words as
+// the facts allow. Reporting every counter including the zeros ("0
+// auto-installed as prose without approval; 1 withheld pending approval") made
+// the reader parse two clauses to find the one that was true.
+func trustSummary(s teamSkillSummary) string {
+	var parts []string
+	if s.Withheld > 0 {
+		parts = append(parts, fmt.Sprintf("%d withheld pending approval", s.Withheld))
+	}
+	if s.AutoInstalledProse > 0 {
+		parts = append(parts, fmt.Sprintf("%d auto-installed as prose", s.AutoInstalledProse))
+	}
+	if len(parts) == 0 {
+		return "all approved"
+	}
+	return strings.Join(parts, " · ")
+}
+
+// relativeSyncAge renders a stored RFC3339 timestamp as an age. "2m ago"
+// answers the question a reader actually has ("is this current?"); an ISO
+// timestamp makes them subtract.
+func relativeSyncAge(rfc3339 string) string {
+	t, err := time.Parse(time.RFC3339, rfc3339)
+	if err != nil {
+		return rfc3339 // unparseable: show what we stored rather than nothing
+	}
+	return status.FormatTimeAgo(t)
+}
+
+// homeRelative shortens a path under the user's home directory to ~/…, which
+// is how a human refers to it anyway. Returns the input unchanged when it is
+// not under home, or when home cannot be determined.
+func homeRelative(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if rest, ok := strings.CutPrefix(path, home+string(filepath.Separator)); ok {
+		return "~" + string(filepath.Separator) + rest
+	}
+	return path
 }
 
 func presence(ok bool) string {

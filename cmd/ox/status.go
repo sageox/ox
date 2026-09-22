@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -135,6 +134,105 @@ func renderVisibilityWithAccess(visibility, accessLevel string) string {
 		s += statusMutedStyle.Render(fmt.Sprintf(" (✓ %s)", accessLevel))
 	}
 	return s
+}
+
+// teamContextRow reduces one team context to the four cells of the compact
+// table: name, visibility, membership, sync state.
+//
+// It reads the same sources the card renderers do — the API's visibility and
+// access level, and the checkout on disk — rather than reformatting their
+// output, so the two views can disagree only if the underlying facts do.
+func teamContextRow(name, visibility, accessLevel, checkoutPath string, daemonStatus *daemon.StatusData) [4]string {
+	if visibility == "" {
+		visibility = "private"
+	}
+
+	// Membership is split out of the visibility cell so the common case is a
+	// single glyph. "private (✓ member)" repeated down a column is the same
+	// claim made twice.
+	member := "—"
+	switch {
+	case accessLevel == "viewer":
+		member = "read-only"
+	case accessLevel != "":
+		member = "✓ " + accessLevel
+	}
+
+	return [4]string{name, visibility, member, teamContextSyncCell(checkoutPath, daemonStatus)}
+}
+
+// cloudTeamContextRow builds a table row for a cloud-listed team. Visibility
+// and access level live on the team DETAIL response, not on RepoInfo, and
+// default to private/member exactly as the card renderer does — a team the
+// detail call did not cover must not render as though it had no membership.
+func cloudTeamContextRow(info api.RepoInfo, teamDetail map[string]api.RepoDetailTeamContext, projectEndpoint string, daemonStatus *daemon.StatusData) [4]string {
+	visibility, accessLevel := "private", "member"
+	if detail, ok := teamDetail[info.StableID()]; ok {
+		if detail.Visibility != "" {
+			visibility = detail.Visibility
+		}
+		if detail.AccessLevel != "" {
+			accessLevel = detail.AccessLevel
+		}
+	}
+	return teamContextRow(info.Name, visibility, accessLevel,
+		paths.TeamContextDir(info.StableID(), projectEndpoint), daemonStatus)
+}
+
+// teamContextSyncCell answers "is this team's checkout current?" in one cell.
+//
+// Staleness outranks a clean tree: a checkout with nothing uncommitted that
+// has not synced in days is the failure this column exists to surface, and
+// reporting it as "✓ synced" is how a stalled sync stays invisible.
+func teamContextSyncCell(checkoutPath string, daemonStatus *daemon.StatusData) string {
+	if _, err := os.Stat(filepath.Join(checkoutPath, ".git")); err != nil {
+		if daemonStatus.IsBootstrapping() {
+			return "⟳ cloning"
+		}
+		return "⚠ not cloned"
+	}
+	syncState := daemon.LoadSyncState(checkoutPath)
+	if syncState.IsStale(daemon.DefaultStalenessThreshold) && !syncState.LastSync.IsZero() {
+		return "⚠ stale " + status.FormatTimeAgo(syncState.LastSync)
+	}
+	repoStatus := getGitRepoStatus(checkoutPath, time.Time{}, false)
+	switch {
+	case repoStatus.Error != "":
+		return "⚠ unreadable"
+	case repoStatus.UncommittedCount > 0:
+		return fmt.Sprintf("%d uncommitted", repoStatus.UncommittedCount)
+	}
+	return "✓ synced"
+}
+
+// teamContextTableColumns bounds each cell so the table fits 80 columns
+// (design rule 12). NAME takes the remainder and is the only cell allowed to
+// be long, because it is the only one a reader scans by.
+const (
+	// Wide enough for the HEADER, not just the values: "VISIBILITY" is longer
+	// than "private", and a header that overflows its own column shifts every
+	// column right of it out of alignment with its data.
+	tcVisibilityColumn = 10
+	tcMemberColumn     = 9
+	tcSyncColumn       = 16
+	tcNameColumn       = 80 - tcVisibilityColumn - tcMemberColumn - tcSyncColumn - 3
+)
+
+// renderTeamContextTable renders the compact one-row-per-team view.
+func renderTeamContextTable(rows [][4]string) string {
+	var b strings.Builder
+	b.WriteString(statusMutedStyle.Render(fmt.Sprintf("%-*s %-*s %-*s %s",
+		tcNameColumn, "TEAM", tcVisibilityColumn, "VISIBILITY", tcMemberColumn, "MEMBER", "SYNCED")))
+	b.WriteString("\n")
+	for _, r := range rows {
+		fmt.Fprintf(&b, "%-*s %-*s %-*s %s",
+			tcNameColumn, truncateCell(sanitizeCell(r[0]), tcNameColumn),
+			tcVisibilityColumn, truncateCell(r[1], tcVisibilityColumn),
+			tcMemberColumn, truncateCell(r[2], tcMemberColumn),
+			truncateCell(r[3], tcSyncColumn))
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // renderTable renders a section with a header and key-value rows
@@ -963,22 +1061,48 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			render    func()
 			notCloned bool
 			name      string
+			// path is the checkout directory, and the identity a team is
+			// deduped by: the same team can arrive from both the cloud list
+			// and the repo-detail response.
+			path string
+			// row is the compact-table form of the same team: name,
+			// visibility, membership, sync. Built here rather than parsed back
+			// out of the card text, which would make the table a screen-scrape
+			// of a renderer that is free to change.
+			row [4]string
 		}
 		merged := make([]otherTCEntry, 0, len(otherCloudTCs)+len(otherDetailTCs))
+		// Dedupe on the checkout path. The card renderers guard this
+		// internally (renderedTeams), so the duplicate was invisible until the
+		// table rendered rows directly and printed the same team twice.
+		// Deduping here fixes both views from one place.
+		mergedSeen := make(map[string]bool, cap(merged))
+		add := func(e otherTCEntry) {
+			if mergedSeen[e.path] {
+				return
+			}
+			mergedSeen[e.path] = true
+			merged = append(merged, e)
+		}
 		for _, entry := range otherCloudTCs {
 			info := entry.info
-			merged = append(merged, otherTCEntry{
+			add(otherTCEntry{
 				render:    func() { renderCloudTC(info, verbose, false) },
 				notCloned: notCloned(info.StableID()),
 				name:      info.Name,
+				path:      paths.TeamContextDir(info.StableID(), projectEndpoint),
+				row:       cloudTeamContextRow(info, teamDetail, projectEndpoint, daemonStatus),
 			})
 		}
 		for _, entry := range otherDetailTCs {
 			info := entry.info
-			merged = append(merged, otherTCEntry{
+			add(otherTCEntry{
 				render:    func() { renderDetailTC(info, verbose, false) },
 				notCloned: notCloned(info.StableID()),
 				name:      info.Name,
+				path:      paths.TeamContextDir(info.StableID(), projectEndpoint),
+				row: teamContextRow(info.Name, info.Visibility, info.AccessLevel,
+					paths.TeamContextDir(info.StableID(), projectEndpoint), daemonStatus),
 			})
 		}
 		sort.SliceStable(merged, func(i, j int) bool {
@@ -994,9 +1118,28 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString(statusMutedStyle.Render("───────────────────"))
 		b.WriteString("\n")
 
-		for _, entry := range merged {
-			hasAnyTeams = true
-			entry.render()
+		// Compact table by default, cards under --verbose.
+		//
+		// A card is the right shape for ONE team (the repo's), where every
+		// field earns its line. For the list it was four lines each, and a
+		// typical account has nine teams: 36 lines saying "private, member,
+		// synced" nine times, which buries the one row that is not. The table
+		// puts those nine rows on nine lines, so an anomaly is the thing that
+		// looks different rather than the thing you scroll for.
+		//
+		// --verbose keeps the cards, and with them the Path, Remote, and
+		// remediation-hint rows that have no column here.
+		hasAnyTeams = true
+		if verbose {
+			for _, entry := range merged {
+				entry.render()
+			}
+		} else {
+			rows := make([][4]string, 0, len(merged))
+			for _, entry := range merged {
+				rows = append(rows, entry.row)
+			}
+			b.WriteString(renderTeamContextTable(rows))
 		}
 	}
 
@@ -1659,12 +1802,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			output := buildStatusJSON(authenticated, authErr, token, endpointSlug, authFile, authFileExists,
 				userConfigDir, projectRoot, sageoxDir, projectInitialized, localCfg, gitRoot, repoDetail, codeStats,
 				daemonStatus, client, bubblesSummary)
-			jsonBytes, err := json.MarshalIndent(output, "", "  ")
-			if err != nil {
-				return fmt.Errorf("failed to marshal JSON: %w", err)
-			}
-			fmt.Println(string(jsonBytes))
-			return nil
+			return cli.PrintJSONTo(os.Stdout, output)
 		}
 
 		// Human-readable output mode. --quiet suppresses this whole

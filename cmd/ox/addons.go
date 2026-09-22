@@ -213,6 +213,11 @@ func runAddonsList(cmd *cobra.Command, _ []string) error {
 // with intent, with the full text one `--json` away, is the fix.
 const addonSummaryWidth = skillsTableWidth - 2 // 2-space indent, no trailing spare needed on the last cell
 
+// addonSummaryLines is how much room a summary gets before it is ellipsized.
+// One line cut every add-on mid-sentence; three fits the descriptions ox ships
+// without turning the list into a wall.
+const addonSummaryLines = 3
+
 // addonStateText is the STATE column's text — always present, so meaning
 // never depends on color alone (NO_COLOR, ansi256 fallback, a colorblind
 // reader all get the same answer from the word itself).
@@ -298,8 +303,8 @@ func renderAddonRows(out io.Writer, rows []addonRow) error {
 
 	for _, r := range rows {
 		p("%-*s  %-*s  %s", nameWidth, r.Name, versionWidth, addonVersionCell(r), addonStateStyled(r))
-		if summary := strings.TrimSpace(r.Summary); summary != "" {
-			p("  %s", cli.StyleDim.Render(truncateWords(summary, addonSummaryWidth)))
+		for _, line := range wrapCapped(r.Summary, addonSummaryWidth, addonSummaryLines) {
+			p("  %s", cli.StyleDim.Render(line))
 		}
 		if r.HasScripts {
 			p("  %s", cli.StyleWarning.Render("⚠ runnable scripts — approve before an AI coworker reads them:"))
@@ -308,7 +313,7 @@ func renderAddonRows(out io.Writer, rows []addonRow) error {
 		p("")
 	}
 
-	p("%s", cli.StyleDim.Render("Full descriptions: `ox addons list --json`"))
+	p("%s", cli.StyleDim.Render("Install one with `ox addons install <name>` · machine-readable: `--json`"))
 	return nil
 }
 

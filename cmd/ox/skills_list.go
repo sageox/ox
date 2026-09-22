@@ -401,7 +401,7 @@ func emitSkillsList(w io.Writer, out skillsListOutput, asJSON bool, showAllOx bo
 			if i > 0 {
 				p("")
 			}
-			p("%s", cli.StyleBold.Render(fmt.Sprintf("%s · %d", group.label, len(rows))))
+			p("%s", cli.StyleBold.Render(group.label))
 
 			shown, hidden := rows, 0
 			if group.provenance == provenanceOx && !showAllOx {
@@ -429,8 +429,20 @@ func emitSkillsList(w io.Writer, out skillsListOutput, asJSON bool, showAllOx bo
 				//
 				// --json needs none of this; encoding/json escapes control bytes itself.
 				// Description is already sanitized at the source (manifestDescription).
-				p("  %-*s  %s", nameColumn, truncateCell(sanitizeCell(row.Name), nameColumn),
-					cli.StyleDim.Render(truncateWords(row.Description, listDescriptionColumn)))
+				name := truncateCell(sanitizeCell(displaySkillName(row)), nameColumn)
+				desc := wrapCapped(row.Description, listDescriptionColumn, listDescriptionLines)
+				if len(desc) == 0 {
+					desc = []string{""}
+				}
+				for j, line := range desc {
+					if j == 0 {
+						p("  %-*s  %s", nameColumn, name, cli.StyleDim.Render(line))
+						continue
+					}
+					// Continuation lines hang under the description column so the
+					// name column still reads as a single scannable list.
+					p("  %-*s  %s", nameColumn, "", cli.StyleDim.Render(line))
+				}
 				if row.Ambiguous {
 					p("    %s", cli.StyleWarning.Render(fmt.Sprintf(
 						"⚠ ambiguous ownership across %d roots — see `ox skills status`", len(row.Roots))))
@@ -462,9 +474,24 @@ func emitSkillsList(w io.Writer, out skillsListOutput, asJSON bool, showAllOx bo
 	}
 	if len(out.Skills) > 0 {
 		p("")
-		p("%s", cli.StyleDim.Render("Full descriptions: `ox skills list --json`"))
+		p("%s", cli.StyleDim.Render("More skills for your team: `ox addons` · full text: `ox skills list --json`"))
 	}
 	return nil
+}
+
+// displaySkillName is what the NAME column shows. Team skills drop the
+// "sageox-team-" prefix: the row is already under a "team" heading, so the
+// prefix repeats that on every line while eating 12 of 26 columns — the widest
+// piece of pure redundancy in the table.
+//
+// Display only. Everywhere a name is matched, keyed, or written to disk it
+// stays the real directory name; see the sanitizeCell note above for why a
+// scrubbed copy must never be stored back on the row.
+func displaySkillName(row installedSkillRow) string {
+	if row.Provenance == provenanceTeam {
+		return strings.TrimPrefix(row.Name, skillmanager.TeamPrefix)
+	}
+	return row.Name
 }
 
 // Column widths for the tables in this command family.
@@ -478,6 +505,9 @@ const (
 	// 2-space row indent, one 2-space gutter, plus one column left spare: some
 	// terminals wrap when the last cell is written rather than after it.
 	listDescriptionColumn = skillsTableWidth - nameColumn - 5
+	// listDescriptionLines caps a wrapped description. One line cut every entry
+	// mid-sentence; three tells a reader what the skill is for.
+	listDescriptionLines = 3
 )
 
 // skillManifestDescription reads one skill's SKILL.md through a handle pinned
@@ -610,33 +640,52 @@ func truncateCell(s string, width int) string {
 	return string(runes[:width-1]) + "…"
 }
 
-// truncateWords clips prose to width runes like truncateCell, but prefers to
-// land the cut on a space so a clipped description reads as whole words
-// followed by an unmistakable ellipsis rather than a word sheared in half —
-// a description column that always cuts mid-word trains the reader to
-// distrust every row's ending. Falls back to a hard clip when no space
-// exists in the back half of the budget (one very long token), so the
-// column still respects width either way.
-func truncateWords(s string, width int) string {
-	runes := []rune(s)
-	if len(runes) <= width {
-		return s
-	}
-	if width <= 1 {
-		return string(runes[:width])
-	}
-	cut := width - 1 // reserve one column for the ellipsis
-	for i := cut; i > cut/2; i-- {
-		if runes[i] == ' ' {
-			return string(runes[:i]) + "…"
-		}
-	}
-	return string(runes[:cut]) + "…"
-}
-
 func pluralSkills(n int) string {
 	if n == 1 {
 		return "1 skill"
 	}
 	return fmt.Sprintf("%d skills", n)
+}
+
+// wrapCapped wraps s to width columns and caps the result at maxLines,
+// ellipsizing the last line when the text does not fit.
+//
+// This replaced a single-line truncateWords for descriptions, which cut every
+// entry after ~60 characters — the column was too narrow to inform and wide
+// enough to be noise, and every row ending in "…" trained the reader to
+// distrust the output. Three lines fits the descriptions ox actually ships; a
+// longer catalog is a problem to solve when there is one.
+//
+// Ryan, 2026-09-22: "Each add-on should have up to 3-lines of text today. We
+// will worry about long lists of addons when that becomes a problem."
+func wrapCapped(s string, width, maxLines int) []string {
+	if width <= 0 || maxLines <= 0 {
+		return nil
+	}
+	lines := wrapWords(strings.TrimSpace(s), width)
+	if len(lines) <= maxLines {
+		return lines
+	}
+	lines = lines[:maxLines]
+	lines[maxLines-1] = ellipsize(lines[maxLines-1], width)
+	return lines
+}
+
+// ellipsize trims a line to make room for a trailing ellipsis, breaking on a
+// space when one is close enough that the cut reads as intentional.
+func ellipsize(s string, width int) string {
+	runes := []rune(strings.TrimSpace(s))
+	if width <= 1 {
+		return "…"
+	}
+	if len(runes) < width {
+		return string(runes) + "…"
+	}
+	cut := width - 1
+	for i := cut; i > cut/2; i-- {
+		if runes[i] == ' ' {
+			return strings.TrimRight(string(runes[:i]), " ") + "…"
+		}
+	}
+	return string(runes[:cut]) + "…"
 }
