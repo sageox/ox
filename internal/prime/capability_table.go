@@ -176,15 +176,21 @@ func OxCapabilities() []Capability {
 // entry. The allowlist also holds explicitly opt-in catalog skills, whose absence
 // from an adapter is a project choice rather than a conformance regression.
 //
-// Keeping the allowlist explicit closes the disk→table direction of the
-// conformance contract: TestEveryOnDiskSurfaceIsAccounted walks the commands and
-// skills directories and fails if any on-disk surface is neither an
-// OxCapabilities() row NOR listed here — so a future un-accounted skill/command
-// can never silently escape the contract.
+// Keeping the allowlist explicit closes BOTH directions of the conformance
+// contract:
+//
+//   - disk→table: TestEveryOnDiskSurfaceIsAccounted walks the commands and
+//     skills directories and fails if any on-disk surface is neither an
+//     OxCapabilities() row NOR listed here, so a future un-accounted
+//     skill/command can never silently escape the contract.
+//   - table→disk: TestAdditiveSkillsAllExistOnDisk fails on an entry naming a
+//     skill that is no longer there. That direction was open until `post-cutoff`
+//     moved to extensions/addons/ (ADR-032 D6) and left an allowlist entry
+//     excusing a surface that had ceased to exist — an allowlist nobody checks
+//     back is how a dead exemption outlives the thing it exempted.
 //
 // The map value documents WHY each skill is additive rather than a table row.
 var additiveSkills = map[string]string{
-	"post-cutoff":          "explicitly opt-in catalog knowledge skill; it is not part of the default cross-agent capability floor",
 	"ox-cli-consult":       "additive Layer-2 ergonomics; its deterministic floor is the consult-first floor entry (ConsultRoutes), so it is not a separate conformance surface",
 	"ox-cli-decision":      "additive Layer-2 ergonomics; its deterministic floor is the decision-record-guidance floor entry plus the consult-first decision route, so it is not a separate conformance surface",
 	"ox-cli-skill-manager": "native Agent Skills lifecycle guidance; the deterministic installer and ownership rules live in ox CLI code rather than this playbook",

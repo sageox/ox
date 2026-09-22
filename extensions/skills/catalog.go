@@ -33,12 +33,12 @@ type Bundle struct {
 var Catalog = []Bundle{
 	{ID: "core", Description: "Everyday SageOx workflows and skill manager", Default: true, SkillIDs: []string{"ox-cli-consult", "ox-cli-conversation", "ox-cli-decision", "ox-cli-plan", "ox-cli-pr-header", "ox-cli-recap", "ox-cli-session-review", "ox-cli-skill-manager", "ox-cli-viz"}},
 	{ID: "onramp", Description: "The single committed SageOx on-ramp skill", Default: true, SkillIDs: []string{"sageox"}},
-	// team holds curated skills that are NOT ox CLI wrappers — knowledge and
-	// procedure a team opts into, rather than plumbing every ox user needs. It is
-	// the first non-default bundle: with every bundle defaulting on, nothing was
-	// ever "available but not installed", so there was no state for a catalog to
-	// show and no meaning to an install.
-	{ID: "team", Description: "Curated team skills, installed on request", Default: false, SkillIDs: []string{"post-cutoff"}},
+	// A "team" bundle of curated, non-CLI-wrapper skills (post-cutoff) used to
+	// live here with Default: false. Per ADR-032 D6, curated team knowledge is
+	// not an ox runtime asset — it is optional, team-selected catalog content,
+	// which moved to extensions/addons/post-cutoff/. This also closed GH #1028:
+	// nothing in the CLI could ever select a Default: false bundle, since the
+	// commands that would have were withdrawn before release (PR #1013).
 	{ID: "lifecycle", Description: "Explicit ox lifecycle and diagnostic slash surfaces", Default: true, SkillIDs: []string{"ox-cli-cart", "ox-cli-cart-done", "ox-cli-cart-drop", "ox-cli-cart-start", "ox-cli-doctor", "ox-cli-init", "ox-cli-prime", "ox-cli-session-abort", "ox-cli-session-list", "ox-cli-session-start", "ox-cli-session-status", "ox-cli-session-stop", "ox-cli-status"}},
 }
 

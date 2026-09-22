@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sageox/ox/internal/addons"
 )
 
 // runGit runs a git command in the given directory and fails the test on error.
@@ -219,6 +221,62 @@ func TestEnsureCheckoutGitignore_ForceCommittedFilesStayTracked(t *testing.T) {
 		"daemon-written files should be ignored, got: %s", output)
 }
 
+// TestEnsureCheckoutGitignore_AddOnsLockReIncluded is the regression test for
+// ADR-032 D5's first silent-failure trap: .sageox/.gitignore is deny-all, so a
+// lock file left off the allow-list is silently never committed and never
+// reaches a teammate — no error, nothing in the logs. A test that only checks
+// the entry is a substring of checkoutRequiredEntries proves nothing about
+// actual git behavior; this drives the real writer and asks real git.
+func TestEnsureCheckoutGitignore_AddOnsLockReIncluded(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dir := setupGitRepoWithSageox(t)
+	require.NoError(t, EnsureCheckoutGitignore(dir))
+
+	lockRel := addons.LockRelativePath // ".sageox/add-ons.lock.json"
+	scratchRel := ".sageox/scratch-cache.json"
+
+	// git check-ignore evaluates a pattern against a path; the target file
+	// need not exist on disk. Exit 1 with no output means "not ignored" —
+	// exactly what the team's add-ons selection needs to be committable.
+	lockOut, lockErr := exec.Command("git", "-C", dir, "check-ignore", lockRel).CombinedOutput()
+	assert.Error(t, lockErr,
+		"add-ons.lock.json must NOT be ignored by .sageox/.gitignore (ADR-032 D5), git check-ignore matched: %s", lockOut)
+
+	// a sibling scratch file has no re-include entry and must remain caught by
+	// the deny-all `*` baseline — proves the allow-list entry is scoped to the
+	// lock file, not a blanket unignore of .sageox/.
+	scratchOut, scratchErr := exec.Command("git", "-C", dir, "check-ignore", scratchRel).CombinedOutput()
+	require.NoError(t, scratchErr, "sibling scratch file should remain ignored by the deny-all baseline: %s", scratchOut)
+	assert.Equal(t, scratchRel, strings.TrimSpace(string(scratchOut)))
+}
+
+// TestEnsureCheckoutGitignore_AddOnsLockCommittable proves the practical
+// consequence of the allow-list entry end to end: once .sageox/.gitignore is
+// written, an actual add-ons.lock.json on disk shows up as stageable/committed
+// rather than as an untracked-and-ignored file `git status --porcelain` (and
+// therefore `ox addons`) would silently drop.
+func TestEnsureCheckoutGitignore_AddOnsLockCommittable(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dir := setupGitRepoWithSageox(t)
+	require.NoError(t, EnsureCheckoutGitignore(dir))
+
+	lockAbs := filepath.Join(dir, filepath.FromSlash(addons.LockRelativePath))
+	require.NoError(t, os.MkdirAll(filepath.Dir(lockAbs), 0755))
+	require.NoError(t, os.WriteFile(lockAbs, []byte(`{"schema_version":1,"addons":[]}`), 0644))
+
+	runGit(t, dir, "add", "--sparse", addons.LockRelativePath)
+	staged, err := exec.Command("git", "-C", dir, "diff", "--cached", "--name-only").Output()
+	require.NoError(t, err)
+	assert.Contains(t, strings.Split(strings.TrimSpace(string(staged)), "\n"), addons.LockRelativePath,
+		"add-ons.lock.json must be stageable, not silently ignored")
+}
+
 func TestCheckoutGitignoreNeedsFix_NoSageoxDir(t *testing.T) {
 	dir := t.TempDir()
 	assert.False(t, CheckoutGitignoreNeedsFix(dir))
@@ -257,8 +315,11 @@ func TestCheckoutGitignoreNeedsFix_Complete(t *testing.T) {
 	sageoxDir := filepath.Join(dir, ".sageox")
 	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
 
-	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, ".gitignore"),
-		[]byte("*\n!.gitignore\n!sync.manifest\n"), 0644))
+	// build from checkoutRequiredEntries itself, not a hardcoded literal list —
+	// a second copy of the same fact drifts the moment a new entry (e.g. the
+	// add-ons lock allow-list) is added and this test forgets to follow.
+	content := strings.Join(checkoutRequiredEntries, "\n") + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, ".gitignore"), []byte(content), 0644))
 	assert.False(t, CheckoutGitignoreNeedsFix(dir), "should not need fix when all entries present")
 }
 

@@ -7,8 +7,11 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/addons"
 )
 
 // checkoutRequiredEntries are the entries that must be present in .sageox/.gitignore
@@ -21,12 +24,17 @@ import (
 // are automatically ignored without needing a gitignore update.
 //
 // Re-included committed files:
-//   - !.gitignore:      the gitignore itself (must be committed to propagate)
-//   - !sync.manifest:   sparse checkout manifest (read during clone phase 1)
+//   - !.gitignore:          the gitignore itself (must be committed to propagate)
+//   - !sync.manifest:       sparse checkout manifest (read during clone phase 1)
+//   - !add-ons.lock.json:   the team's Add-on Catalog selection (ADR-032 D5). Derived
+//     from addons.LockRelativePath rather than hardcoded, so the two never drift.
+//     Without this entry, `ox addons install|update` writes a lock this deny-all
+//     gitignore silently swallows: never committed, never reaches a teammate, no error.
 var checkoutRequiredEntries = []string{
 	"*",
 	"!.gitignore",
 	"!sync.manifest",
+	"!" + path.Base(addons.LockRelativePath),
 }
 
 // rejGitignoreEntry is the root-.gitignore pattern that keeps `git apply

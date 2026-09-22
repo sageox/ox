@@ -35,6 +35,10 @@ type OriginKind string
 
 const (
 	OriginLoose OriginKind = "loose"
+	// OriginAddon marks an artifact the Add-on Catalog installed: a path the
+	// committed .sageox/add-ons.lock.json owns (ADR-032 D3). Reintroduced by
+	// the PR that needs it, per ADR-032 D3 — see origin.go for the resolver.
+	OriginAddon OriginKind = "addon"
 )
 
 // Origin identifies who owns the canonical Team Context artifact. Every
