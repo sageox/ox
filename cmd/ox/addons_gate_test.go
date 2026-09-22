@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"strings"
 	"testing"
 )
@@ -96,5 +97,67 @@ func TestAddonsIsPublic(t *testing.T) {
 	}
 	if cmd.Hidden {
 		t.Error("`ox addons` must be discoverable in `ox --help`, not Hidden")
+	}
+}
+
+// TestWithdrawnVerbsFailLoudly pins the message a user gets when they follow a
+// stale doc.
+//
+// `ox skills catalog | install | uninstall` were withdrawn before release
+// (ADR-032 D1, GH #1028), so blog posts, older READMEs and scripts will keep
+// reaching for them. Cobra's default for an unmatched token on a parent with no
+// Run is to swallow it as an argument and print generic help — which reads like
+// the command did something. It exits non-zero, so a script does notice, but a
+// human reading the output does not.
+//
+// Failure prevented: someone concluding `ox skills install` "worked but printed
+// help", instead of learning the verb is gone and which verbs replaced it.
+func TestWithdrawnVerbsFailLoudly(t *testing.T) {
+	for _, tc := range []struct{ parent, verb string }{
+		{"skills", "catalog"},
+		{"skills", "install"},
+		{"skills", "uninstall"},
+		{"addons", "bogus"},
+	} {
+		t.Run(tc.parent+" "+tc.verb, func(t *testing.T) {
+			cmd, _, err := rootCmd.Find([]string{tc.parent})
+			if err != nil || cmd == nil {
+				t.Fatalf("`ox %s` must exist: %v", tc.parent, err)
+			}
+			if cmd.RunE == nil {
+				t.Fatalf("`ox %s` has no RunE, so an unknown verb falls through to generic help", tc.parent)
+			}
+
+			runErr := cmd.RunE(cmd, []string{tc.verb})
+			if runErr == nil {
+				t.Fatalf("`ox %s %s` must fail, not print help and look successful", tc.parent, tc.verb)
+			}
+			if !strings.Contains(runErr.Error(), tc.verb) {
+				t.Errorf("the error must NAME the verb the user typed, got: %v", runErr)
+			}
+			if !strings.Contains(runErr.Error(), "--help") {
+				t.Errorf("the error must point at what does exist, got: %v", runErr)
+			}
+		})
+	}
+}
+
+// TestBareParentsStillPrintHelp is the other half: making unknown verbs fail
+// must not turn a bare `ox skills` into an error. That is the discovery path.
+func TestBareParentsStillPrintHelp(t *testing.T) {
+	for _, parent := range []string{"skills", "addons"} {
+		t.Run(parent, func(t *testing.T) {
+			cmd, _, err := rootCmd.Find([]string{parent})
+			if err != nil || cmd == nil {
+				t.Fatalf("`ox %s` must exist: %v", parent, err)
+			}
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			t.Cleanup(func() { cmd.SetOut(nil); cmd.SetErr(nil) })
+
+			if runErr := cmd.RunE(cmd, nil); runErr != nil {
+				t.Errorf("bare `ox %s` must print help, not error: %v", parent, runErr)
+			}
+		})
 	}
 }

@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Your team can install a curated add-on once and every teammate's AI coworker gets it, and the things ox tells you about your coworkers and your team rules are now true.
+
+### New
+
+- **`ox addons` — install a curated add-on once, for the whole team** — pick an add-on and ox writes it into your Team Context, so every repo on the team receives it and every teammate's AI coworker sees the same selection. `ox sync` distributes it; there is no per-repo step and no second sync command to learn. Two add-ons ship today: `post-cutoff`, a shelf of what your team has adopted that postdates your model's training, and `post-cutoff-jev`, one brief on typed-decision models.
+- **Updates replace, and say what they replaced** — `ox addons update` overwrites the files an add-on owns and drops the ones its new version stopped shipping. If your team edited one, ox names it before overwriting so the change is one `git log -p` away instead of silently gone. ox never touches a file it doesn't own: a name that collides with something you wrote is refused, not merged.
+
+### Fixed
+
+- **`ox adapter list` tells the truth about your AI coworkers** — it understated what 8 of the 10 bundled adapters can do, including Claude Code, so anyone choosing a coding agent from that table was reading fiction.
+- **A team rule can no longer stop reaching anyone** — if a repo's ignore rules stopped covering the managed rule folder, the rule froze in place *and* went unmentioned at session start, arriving through neither path while both looked healthy. It now always arrives at least once.
+- **A stuck `git` can no longer hang session start** — the check ox runs while priming had no time limit, so a wedged index lock or stalled network drive meant a coding session that simply never began.
+- **An approval that could never be satisfied** — in a checkout with no `origin` remote, a team skill could look approvable to `ox skills approve` while being invisible to the reconciler that had to act on it.
+
 ## [0.17.0] - 2026-09-21
 
 Team rules now load natively in your coding tool and a skill you wrote can reach your whole team with one command, ox behaves predictably when a script, CI job, or AI coworker is driving it, and refreshing a large Ledger takes seconds instead of hours.

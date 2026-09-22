@@ -45,6 +45,23 @@ shows all three. "status" answers the harder question — when a team skill is
 missing, which of the several possible reasons is the actual one. "approve" and
 "revoke" are the trust boundary for runnable team-skill content; "publish" sends
 a skill you wrote the other way, into your team's Team Context.`,
+	// An unknown verb must SAY so. `ox skills catalog|install|uninstall` were
+	// withdrawn before release (ADR-032 D1, GH #1028), so a stale doc, blog
+	// post, or script will keep reaching for them — and cobra's default is to
+	// swallow the token as an argument and print generic help, which reads like
+	// the command ran. Name it, and point at what does exist.
+	Args: cobra.ArbitraryArgs,
+	RunE: runSkillsDispatch,
+}
+
+// runSkillsDispatch prints help for a bare `ox skills` and fails loudly on an
+// unknown verb. A valid subcommand is routed by cobra before RunE is reached,
+// so anything arriving here is a token cobra could not match.
+func runSkillsDispatch(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return cmd.Help()
+	}
+	return fmt.Errorf("unknown subcommand %q for %q\nRun 'ox skills --help' to see available commands", args[0], cmd.CommandPath())
 }
 
 var skillsStatusCmd = &cobra.Command{

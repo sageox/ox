@@ -56,6 +56,20 @@ choose otherwise. Content that arrives with runnable scripts still needs
 ` + "`ox skills approve <name>`" + ` before an AI coworker may read it, and that
 command's ` + "`--allow-scripts`" + ` before anything becomes runnable. Installing an
 add-on grants neither.`,
+	// Same reasoning as `ox skills`: an unknown verb is named rather than
+	// swallowed into generic help that reads like the command ran.
+	Args: cobra.ArbitraryArgs,
+	RunE: runAddonsDispatch,
+}
+
+// runAddonsDispatch prints help for a bare `ox addons` and fails loudly on an
+// unknown verb. Valid subcommands are routed by cobra before RunE is reached,
+// so anything arriving here is a token cobra could not match.
+func runAddonsDispatch(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return cmd.Help()
+	}
+	return fmt.Errorf("unknown subcommand %q for %q\nRun 'ox addons --help' to see available commands", args[0], cmd.CommandPath())
 }
 
 var addonsListCmd = &cobra.Command{
