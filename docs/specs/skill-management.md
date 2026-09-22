@@ -1,13 +1,19 @@
-# Native-First, Project-Scoped Asset Inventory
+# Native-First Asset Inventory, and the Team-Scoped Add-on Catalog
 
-> **Amended by [ADR-032](../adr/ADR-032-pack-catalog-team-scoped.md) (2026-09-21).**
-> This document is written project-scoped throughout, and that remains correct for
-> ox's OWN runtime assets — the `ox-cli-*` relays, the lifecycle commands, and the
-> committed `sageox` on-ramp. It is no longer correct for optional catalog content:
-> a team selects packs once, into Team Context, and repositories never select
-> catalog content themselves. `ox skills catalog | install | uninstall` were
-> withdrawn before release. The full rewrite is tracked as `ox-hvnc.9`.
+> **Amended by [ADR-032](../adr/ADR-032-addon-catalog-team-scoped.md) (2026-09-21).**
+> This document previously described ox's own runtime assets in project-scoped
+> terms throughout, and left team-selected content as an open follow-on
+> ("Team Context follow-on", below). ADR-032 settled that follow-on: an
+> optional catalog exists, and it is **team-scoped**, never per-repository.
+> This rewrite reflects the decision. **Part 1** covers ox's own runtime
+> skills and rules — still correctly project-scoped, unchanged by the ADR.
+> **Part 2** covers the Add-on Catalog. The project-scoped surface this
+> document once anticipated (`ox skills catalog | install | uninstall`) was
+> withdrawn before release in favor of it.
 
+---
+
+## Part 1 — ox's own runtime skills and rules (project-scoped)
 
 SageOx authors each playbook once in the portable Agent Skills layout:
 
@@ -19,16 +25,20 @@ extensions/skills/<skill>/
   scripts/        # optional
 ```
 
-The embedded catalog is the built-in source of truth. `core`, `onramp`, and
-`lifecycle` are selected by default. Authenticated Team Context sources may
-extend the catalog later, but must use the same Plan/Apply engine rather than
-introduce a second installer or activation framework.
+This embedded catalog is ox's own content — the `ox-cli-*` relays, the
+lifecycle commands, and the committed `sageox` on-ramp — compiled into the
+binary. Internally it is grouped into three bundles (`core`, `onramp`,
+`lifecycle`), all selected by default; a team never chooses among them, and
+`ox init` / `ox doctor` keep them current automatically as the installed
+binary upgrades. "Bundle" here is an implementation detail of this one
+catalog (`extensions/skills/catalog.go`) — it is not a name a user ever
+selects or sees, and it is not the same thing as an add-on (Part 2).
 
 ox-owned runtime rules use that same inventory. Their catalog lives in
 `extensions/rulecatalog/`; adapters declare native rule targets but do not
 install, update, or retire catalog files themselves.
 
-## Native targets
+### Native targets
 
 Adapters declare skill and rule target descriptors instead of independently
 managing files:
@@ -73,7 +83,7 @@ All managed targets are project-scoped. Native discovery and activation remain
 authoritative; SageOx does not replace vendor-trained routing with hooks, a
 bootloader, or an MCP page-fault path.
 
-## Desired state and ownership
+### Desired state and ownership
 
 `.sageox/skills.lock.json` records the complete native asset inventory:
 
@@ -130,7 +140,7 @@ lockfile commit, the next Plan accepts only the previous or journaled digest,
 finishes the operation, commits the manifest, and removes the journal. This
 distinguishes interrupted SageOx writes from coincidentally similar user files.
 
-## Lifecycle
+### Lifecycle
 
 - `ox init` adds only the skill and rule targets selected for that invocation and persists
   them. It never equates later agent detection with authorization.
@@ -156,13 +166,238 @@ The compatibility adapter RPCs remain in protocol v1 for third-party adapters.
 Built-in adapters no longer advertise or implement rule installer RPCs; all
 built-in CLI workflows use target descriptors and central reconciliation.
 
-## Team Context follow-on
+---
 
-Team Context transport is a separate authenticated source boundary. A future
-manifest must identify bundle, revision, file digests, provenance, and script
-approval policy. It will feed the existing portable catalog and Plan/Apply
-engine. The API source of truth and storage ergonomics require their own human
-review and are intentionally not selected here.
+## Part 2 — the Add-on Catalog (team-scoped)
+
+**Status: shipped and public.** `ox addons` is an ordinary command. See "Where the gate went,"
+below, before running any command in this section.
+
+### What an add-on is
+
+An add-on packages **skills** (with their own `references/`, `assets/`,
+`scripts/`) and **rules** — nothing else. There is no free-standing "context"
+artifact type and no tool-artifact kind; both were considered and rejected
+(ADR-032 D2), because context with no skill around it has no activation
+trigger, and a tool kind would have shipped with no handler behind it.
+
+A team selects an add-on once. Every repository on the team then receives it,
+and every teammate's AI coworker sees the same selection — the opposite of
+the withdrawn model, where the same content was chosen once per repository
+and drifted per repository as a result.
+
+### Where it lives, and the one rule that follows from it
+
+`ox addons install | update | remove` write into the **Team Context**
+checkout and nothing else. A product repository carries no add-on selection
+and can never make one — "which Team Context" is the only location question
+the command asks (`ox status` explains why one isn't configured, if that's
+the failure).
+
+`ox sync` is the separate, origin-agnostic distribution step. It transports
+and converges add-on-installed and hand-authored Team Context content through
+one pipeline, and it never checks the catalog for a newer version on its own.
+There is no `ox addons sync` and no `ox skills sync`, now or ever — one
+synchronization concept:
+
+> `ox addons` chooses and updates what the team owns.
+> `ox sync` distributes everything the team owns.
+
+```mermaid
+flowchart LR
+    A["ox addons install / update / remove"] -->|writes committed lock + files| B[Team Context checkout]
+    B -->|"ox sync (or automatic propagation)"| C[Product repository A]
+    B -->|"ox sync (or automatic propagation)"| D[Product repository B]
+```
+
+Consequently, `ox skills catalog`, `ox skills install`, and `ox skills
+uninstall` are withdrawn before release — they proposed exactly the
+repository-scoped selection this section replaces. `ox skills list | status |
+approve | revoke | publish` remain: they are diagnostics, capability
+approval, and hand-authored publishing, none of which select catalog content.
+
+### Co-mingled roots, provenance in the lock
+
+Add-on-installed skills land in `agents/skills/<name>/` and rules in
+`agents/rules/<name>.md` in the Team Context — the same roots hand-authored
+team content uses. There is no `agents/add-ons/<addon>/` namespace and no
+`docs/add-ons/` directory.
+
+Ownership is recorded in a committed lock, not inferred from the path:
+
+| Path | Role |
+|---|---|
+| `<team-context>/.sageox/add-ons.lock.json` | committed; per add-on: source, version, digest, install time, owned paths, per-file digests |
+| `<team-context>/agents/skills/<name>/` | canonical Team Skills, add-on-installed or hand-authored |
+| `<team-context>/agents/rules/<name>.md` | canonical Team Rules, add-on-installed or hand-authored |
+
+**One collision rule:** an add-on file colliding by name with an existing
+hand-authored file is a namespace collision, not an edit — install refuses it
+by name and mutates nothing. Only paths the lock already owns are ever
+overwritten.
+
+When an add-on's Team Skills and Team Rules reach a product repository, they
+project through the same target-descriptor mechanism Part 1 describes,
+reserved under the `sageox-team-*` prefix (ADR-031). **Delivery mechanics vary
+by artifact and by AI coworker, the same way Part 1's native-target table
+varies by coworker** — the promise is that a supported coworker can use the
+Team Context content that applies to it, not that every coworker materializes
+every artifact identically.
+
+### Update overwrites; Team Context git history is the undo
+
+**Add-on-installed files are not yours to edit.** `ox addons update`
+overwrites every owned path unconditionally and removes owned paths the new
+version drops. There is no three-way merge, no conflict state, no `ox addons
+diff`, no `--keep-team`, no `--accept-upstream`. Someone who wants to
+customize copies the file to a new, hand-managed name instead.
+
+The per-file digests in the lock exist for **honesty, not resolution**: they
+let `ox addons update` say which owned files your team modified, before it
+overwrites them. The recovery story is Team Context's own git history — an
+overwritten edit is one `git log -p` away, in a history teammates already
+share.
+
+```mermaid
+sequenceDiagram
+    participant Teammate
+    participant TeamContext as Team Context (git)
+    participant Addons as ox addons update
+
+    Teammate->>TeamContext: hand-edits an add-on-owned file
+    Addons->>TeamContext: compares current digest to the lock
+    Addons-->>Teammate: warns which owned files were modified
+    Addons->>TeamContext: overwrites every owned path; removes dropped ones
+    Teammate->>TeamContext: git log -p -- <path>  (recovers the edit)
+```
+
+An add-on update also interacts with skill approval: overwriting owned bytes
+means a previously approved add-on skill whose content changed returns to
+*needing approval* again — the pin names bytes, not names, so `ox addons
+update` surfaces this rather than silently re-approving.
+
+### Third-party authorship
+
+An add-on's author is not necessarily SageOx, and not necessarily the team
+installing it. Three populations are anticipated: add-ons SageOx publishes,
+add-ons a team authors for itself, and — in the future — add-ons published by
+third parties. Nothing about the mechanism assumes who wrote the content:
+
+- **Third-party bytes are untrusted input.** They route through the existing
+  digest-pinned approval gate — `ox skills approve`, with runnable scripts a
+  second, separate decision behind `--allow-scripts`. Installing an add-on
+  grants neither by itself. Nothing on the pull path verifies signatures
+  today, which is precisely why that gate exists.
+- **Provenance is already recorded.** The lock carries `addon`, `version`,
+  and `digest` per owned path, so "who supplied this file, at which version"
+  is answerable without a new namespace.
+- **Trust is a team-level decision**, which is why the catalog is team-scoped
+  in the first place: adopting a third party's add-on is a judgment made once,
+  visible in Team Context git history, and reviewable in a pull request.
+
+### Where the gate went
+
+`ox addons` used to sit behind `FEATURE_ADDONS`, default off. **It no longer
+does** — the flag is deleted, and the command is registered and discoverable
+like any other (ADR-032, amended 2026-09-22).
+
+The reasoning is worth keeping, because it explains where the gate moved
+rather than that the caution was abandoned:
+
+- **A gate holds back untrusted bytes.** The only provider today is embedded —
+  add-ons compiled into the binary from content in this repository, which every
+  reviewer of it has already seen. There are no untrusted bytes to hold back,
+  so the flag guarded a mechanism that could only install content we wrote.
+- **The caution moved to the provider.** A remote or third-party provider will
+  land behind its own flag, default off. That is where untrusted content enters,
+  and it is where two known gaps now block: the Unicode-normalization collision
+  that can record a lock naming two files where one exists (macOS/APFS), and the
+  absence of secret scanning on the Team Context write path.
+
+Nothing else changed. The selection is still team-scoped, still
+overwrite-on-update, and Team Context git history is still the undo.
+
+### Command reference
+
+`<name>` in these examples is `post-cutoff`. This build's embedded catalog
+ships two add-ons: `post-cutoff` (the shelf — grading, expiry, and the
+human-only intake procedure) and `post-cutoff-jev` (one brief, on TypeSafe
+Jev). They are separate so a team can take the shelf without adopting an
+opinion on one vendor, or take the brief without adopting the procedure;
+neither requires the other.
+
+| Command | Effect | Flags |
+|---|---|---|
+| `ox addons list` | Show every add-on in the catalog and, for each, whether this team has it installed and whether an update is available | `--json` |
+| `ox addons install <name>` | Install into Team Context; refuses by name on a collision with hand-authored content | `--version <v>`, `--json` |
+| `ox addons update <name>` | Overwrite every file the add-on owns to the catalog's current version; remove owned files the new version drops; warn about any edits about to be replaced | `--json` |
+| `ox addons remove <name>` | Remove the add-on's owned files from Team Context | `--json` |
+
+**Browse offline.** `ox addons list` reads the catalog compiled into the ox
+binary (`SourceBuiltin`) — no network call, no Team Context required. If no
+Team Context is configured yet, the installed column is simply empty rather
+than the command failing:
+
+```bash
+ox addons list
+```
+
+**Install.**
+
+```bash
+ox addons install post-cutoff
+# Installed post-cutoff 1.0.0 (3 file(s)).
+# Distribution is automatic — run `ox sync` only if you need it immediately,
+# then `ox skills status` to verify.
+```
+
+**Automatic propagation, or force it now.** Every mutating verb ends with the
+same guidance: the daemon converges Team Context content into repositories on
+its own schedule, so no follow-up step is required. To see the change in a
+repository immediately:
+
+```bash
+ox sync
+ox skills status
+```
+
+**Update overwrites an edited file.** If a teammate hand-edited a file the
+add-on owns, `ox addons update` still overwrites it — and says so before
+moving on:
+
+```bash
+ox addons update post-cutoff
+# (1.1.0 is illustrative — the catalog ships post-cutoff 1.0.0 today, so an
+#  update is a no-op until a newer version exists.)
+# Updated post-cutoff to 1.1.0 (3 written, 0 removed).
+#   warning: your team had edited 1 file(s) this add-on owns; the new version
+#   replaced them: agents/skills/post-cutoff/SKILL.md
+#   Recover any of them with `git -C <team-context-path> log -p -- <path>`.
+```
+
+**Removal.**
+
+```bash
+ox addons remove post-cutoff
+# Removed post-cutoff from your Team Context (3 file(s)).
+```
+
+### What has not shipped yet
+
+- **Remote or third-party providers.** `Provider` is an interface for exactly
+  this reason, but the only implementation today is the embedded, compiled-in
+  catalog (`SourceBuiltin`). Third-party authorship (above) is a design
+  target, not a working code path yet.
+- **`ox addons diff`.** ADR-032 D4 rejects a merge model outright — Team
+  Context git history is the undo — so this is not partial work toward a
+  future command, it is a deliberately absent one.
+- **A tool-artifact kind.** Considered and removed before release (ADR-032
+  D2); an add-on ships skills and rules only.
+- **Secret scanning of add-on content.** Untrusted bytes route through the
+  existing `ox skills approve` gate (above); there is no additional
+  content-scanning step specific to add-ons.
+
+---
 
 ## Skill Bridge follow-on
 

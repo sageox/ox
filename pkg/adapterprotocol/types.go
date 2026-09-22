@@ -58,8 +58,14 @@ const (
 	// window.
 	CapRulesInstaller    = "rules_installer"
 	CapCommandsInstaller = "commands_installer"
-	CapSkillsInstaller   = "skills_installer"
-	CapCapturePrior      = "capture_prior"
+	// Unlike CapRulesInstaller, this capability is NOT deprecated and carries
+	// no removal version: nine of ox's ten bundled adapters still declare it,
+	// and ox falls back to the imperative install-skills/check-skills/
+	// uninstall-skills RPCs whenever an adapter's InfoResponse.SkillTargets is
+	// empty. It becomes a removal candidate only once bundled and third-party
+	// adapters alike stop declaring it — see docs/guides/adapter-authoring.md.
+	CapSkillsInstaller = "skills_installer"
+	CapCapturePrior    = "capture_prior"
 )
 
 // Native project inventory target vocabulary.

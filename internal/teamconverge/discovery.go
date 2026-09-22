@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/addons"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/teamdocs"
 )
@@ -31,6 +32,20 @@ func (d FilesystemDiscovery) Discover(ctx context.Context, request Request) (Sna
 	snapshot := Snapshot{Path: request.TeamPath, Commit: commit}
 	var artifacts []Artifact
 
+	// Loaded ONCE per pass, not per artifact: this walk produces every skill,
+	// rule and doc in the Team Context, and re-reading the lock for each one
+	// turns a single file read into a tax proportional to team content on
+	// every `ox sync`.
+	//
+	// A read failure is returned, never swallowed. Treating an unreadable lock
+	// as "no add-ons" would reattribute every add-on artifact to the team and
+	// look exactly like a Team Context that has none.
+	lock, err := addons.LoadLock(request.TeamPath)
+	if err != nil {
+		return Snapshot{}, nil, fmt.Errorf("read add-on selection: %w", err)
+	}
+	origins := NewOriginResolver(lock)
+
 	publishedSkills, err := teamdocs.PublishedSkills(request.TeamPath)
 	if err != nil {
 		return Snapshot{}, nil, fmt.Errorf("discover Team Context skills: %w", err)
@@ -40,8 +55,9 @@ func (d FilesystemDiscovery) Discover(ctx context.Context, request Request) (Sna
 		applicable := teamdocs.SkillAppliesToRepo(skill, request.RepoSlug)
 		artifact := Artifact{
 			Kind: KindSkill, Name: skill.Name, SourcePath: rel,
-			Origin: Origin{Kind: OriginLoose}, Applicable: applicable, Required: true,
+			Origin: origins.Resolve(rel), Applicable: applicable, Required: true,
 			Visibility: skill.Visibility,
+			skill:      &skill,
 		}
 		if !applicable {
 			artifact.FilterReason = "repos filter does not include this repository"
@@ -58,7 +74,7 @@ func (d FilesystemDiscovery) Discover(ctx context.Context, request Request) (Sna
 		applicable := teamdocs.RuleAppliesToRepo(rule, request.RepoSlug)
 		artifact := Artifact{
 			Kind: KindRule, Name: rule.Name, SourcePath: rel,
-			Origin: Origin{Kind: OriginLoose}, Applicable: applicable, Required: true,
+			Origin: origins.Resolve(rel), Applicable: applicable, Required: true,
 			Visibility: rule.Visibility, Description: rule.Description,
 			Globs: append([]string(nil), rule.Globs...),
 			rule:  &rule,
@@ -77,7 +93,7 @@ func (d FilesystemDiscovery) Discover(ctx context.Context, request Request) (Sna
 		rel := sourceRel(request.TeamPath, doc.Path)
 		artifacts = append(artifacts, Artifact{
 			Kind: KindContext, Name: doc.Name, SourcePath: rel,
-			Origin: Origin{Kind: OriginLoose}, Applicable: true, Required: true,
+			Origin: origins.Resolve(rel), Applicable: true, Required: true,
 			Visibility: doc.Visibility,
 		})
 	}

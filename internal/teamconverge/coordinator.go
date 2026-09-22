@@ -191,7 +191,14 @@ func validateArtifact(artifact Artifact) error {
 		path.Clean(source) != source || source == "." || strings.HasPrefix(source, "../") {
 		return fmt.Errorf("artifact source path %q is not normalized and Team Context-relative", source)
 	}
-	if artifact.Origin.Kind != OriginLoose {
+	// OriginAddon must pass. This guard predates the Add-on Catalog, when
+	// OriginLoose was the only kind anything could produce; left as-is it
+	// rejects every add-on-installed artifact as "unknown origin" and the
+	// feature delivers nothing. Unknown kinds are still refused — the point is
+	// an allow-list of kinds that exist, not an open door.
+	switch artifact.Origin.Kind {
+	case OriginLoose, OriginAddon:
+	default:
 		return fmt.Errorf("artifact has unknown origin %q", artifact.Origin.Kind)
 	}
 	return nil

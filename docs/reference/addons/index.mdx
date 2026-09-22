@@ -1,0 +1,67 @@
+---
+title: "ox addons"
+description: "CLI reference for ox addons"
+sidebar_position: 11
+---
+
+## ox addons
+
+Choose and update the add-ons your team owns
+
+### Synopsis
+
+Browse, install, update and remove Add-ons for your team.
+
+An add-on is a versioned bundle of skills and rules your team selects once. It
+installs into your Team Context — never into a single repository — so every
+repository on the team receives it, and every teammate's AI coworker sees the
+same selection. `ox sync` distributes it; this command chooses it.
+
+Add-on content is pinned to an exact version and digest until someone runs
+`ox addons update`. An update replaces the files the add-on owns and drops
+the ones its new version no longer ships: they are not yours to edit, and your
+Team Context git history is the undo. ox never overwrites a file it does not
+own — a name that collides with something hand-authored is refused, not merged.
+
+Today every add-on comes from the catalog compiled into this ox binary, so
+`ox addons list` shows what this build ships and nothing else — not
+team-published skills (those are `ox skills publish`) and not any remote
+source. Add-ons from outside this binary are future work and will arrive behind
+their own opt-in.
+
+Add-on files are written non-executable, always — a provider cannot choose
+otherwise. Content that arrives with runnable scripts still needs
+`ox skills approve <name>` before an AI coworker may read it, and that
+command's `--allow-scripts` before anything becomes runnable. Installing an
+add-on grants neither.
+
+```
+ox addons [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for addons
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
+```
+
+### SEE ALSO
+
+* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox addons install](/addons/install)	 - Install an add-on into your Team Context
+* [ox addons list](/addons/list)	 - Show available add-ons and which ones this team has installed
+* [ox addons remove](/addons/remove)	 - Remove an installed add-on from your Team Context
+* [ox addons update](/addons/update)	 - Update an installed add-on to the catalog's current version

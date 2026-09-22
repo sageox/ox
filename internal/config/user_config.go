@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sageox/ox/internal/ephemeral"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
 	"gopkg.in/yaml.v3"
 )
@@ -302,6 +303,8 @@ func (c *AgentWorkerConfig) WithDefaults() *AgentWorkerConfig {
 
 // UserConfig holds user-level configuration from config.yaml
 type UserConfig struct {
+	// Trace is a persistent, machine-local receiver opt-in. It does not configure Claude Code.
+	Trace             *TraceConfig `yaml:"trace,omitempty"`
 	DisplayName       string       `yaml:"display_name,omitempty"`
 	TipsEnabled       *bool        `yaml:"tips_enabled,omitempty"`
 	TelemetryEnabled  *bool        `yaml:"telemetry_enabled,omitempty"`
@@ -676,15 +679,10 @@ func SaveUserConfig(cfg *UserConfig) error {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
 
-	tempPath := configPath + ".tmp"
-
-	if err := os.WriteFile(tempPath, data, 0600); err != nil {
-		return fmt.Errorf("writing temp config: %w", err)
-	}
-
-	if err := os.Rename(tempPath, configPath); err != nil {
-		os.Remove(tempPath)
-		return fmt.Errorf("renaming temp config: %w", err)
+	// Unique temporary files let independent CLI invocations save atomically
+	// without renaming or removing each other's in-flight writes.
+	if err := fileutil.AtomicWriteBytes(configPath, data, 0600); err != nil {
+		return fmt.Errorf("writing user config: %w", err)
 	}
 
 	return nil

@@ -175,9 +175,24 @@ func runInfo() {
 
 **`skill_targets`** — optional native Agent Skills discovery roots. Roots must
 be project-relative. Multiple adapters may declare the same target key/root;
-ox writes that projection once. New adapters should use target descriptors;
-the imperative install/check/uninstall RPCs remain available to protocol-v1
-third-party adapters.
+ox writes that projection once. New adapters should use target descriptors.
+
+Unlike `rules_installer` below, the imperative `install-skills` /
+`check-skills` / `uninstall-skills` RPCs have **no scheduled removal**, and the
+difference is worth understanding because it is not arbitrary:
+
+- `rules_installer` could be dated because **no adapter declares it any more**.
+  Removing it changes nothing anyone advertises.
+- `skills_installer` cannot be, because **nine of ox's ten bundled adapters
+  still declare it**. Every one of those nine also declares `skill_targets`, so
+  ox never actually takes the RPC path for a bundled adapter — the fallback in
+  `cmd/ox/init.go` fires only for an adapter whose `Info()` reports no
+  `skill_targets`, which today means a third-party one. Dating the capability
+  would still be a promise ox cannot keep: it would change what nine adapters
+  advertise, and it would cut off third-party adapters still on the RPC path,
+  whose number ox has no way to observe.
+
+It gets a removal version once adapters stop declaring the capability.
 
 **`rule_targets`** — optional native rule roots. Built-in rule content comes
 from ox's catalog and is reconciled by the same digest-owned Plan/Apply engine

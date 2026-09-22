@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/teamdocs"
 )
@@ -236,17 +237,56 @@ func HasNativeProjections(projectRoot string) bool {
 	return false
 }
 
+// primeProbeTimeout bounds the single `git check-ignore` ForPrime runs. Prime is
+// the SessionStart critical path, and this is the only subprocess on it — an
+// unbounded one turns a wedged git (an index lock, a stalled network mount)
+// into a coding session that never starts.
+//
+// A timeout falls to "not protected", which is the SAME direction the decision
+// below already takes when the answer is genuinely no: deliver the rule through
+// prime rather than suppress it. Timing out therefore costs a duplicated rule,
+// never a silently missing one.
+//
+// It is a var so a test can shrink it; nothing in production reassigns it.
+var primeProbeTimeout = 2 * time.Second
+
 // ForPrime removes rules already owned by a projection in the active agent's
 // native root and converts any scoped fallback to indexed delivery. It is the
 // second half of the exactly-once contract: projection chooses native-or-prime;
 // session start never duplicates an owned native file while convergence is
 // repairing stale bytes.
 func ForPrime(projectRoot, agent string, rules []teamdocs.TeamRule) []teamdocs.TeamRule {
+	// Protection is probed at most once, lazily, and only if some rule actually
+	// has a native file worth suppressing. Reconcile uses this same probe, so the
+	// two halves of the exactly-once contract cannot answer differently — a
+	// cheaper second signal here would be a new source of truth, which is the
+	// defect class this whole path keeps producing.
+	protected, probed := false, false
+	rootProtected := func(p policy) bool {
+		if !probed {
+			probed = true
+			ctx, cancel := context.WithTimeout(context.Background(), primeProbeTimeout)
+			defer cancel()
+			protected = managedPathIgnored(ctx, projectRoot,
+				filepath.ToSlash(filepath.Join(p.Root, managedPrefix+"probe"+p.Extension)))
+		}
+		return protected
+	}
+
 	out := make([]teamdocs.TeamRule, 0, len(rules))
 	for _, rule := range rules {
 		mode := ModeForAgent(agent, rule)
 		if mode == DeliveryNative && nativePresent(projectRoot, agent, rule) {
-			continue
+			// A native file ox owns is only "delivered" while Reconcile can still
+			// maintain it. Once the root loses its ignore rule, Reconcile refuses
+			// the whole root and the file freezes at whatever text it last held —
+			// so suppressing prime here would strand the rule on a stale copy
+			// forever, reaching the coworker through neither surface honestly.
+			// Falling through delivers it twice in that state, which is the safe
+			// direction: duplicated beats silently frozen.
+			if p, ok := policyFor(agent); !ok || rootProtected(p) {
+				continue
+			}
 		}
 		copy := rule
 		if mode == DeliveryPrimeIndexed || len(rule.Globs) > 0 {

@@ -2282,8 +2282,13 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			selectedSkillAdapters = append(selectedSkillAdapters, ea)
 		}
 		if (info == nil || len(info.SkillTargets) == 0) && ea.HasCapability(adapterprotocol.CapSkillsInstaller) {
-			// One-release compatibility for third-party adapters that have not
-			// adopted target descriptors yet.
+			// Compatibility for third-party adapters that have not adopted
+			// target descriptors yet. Deliberately undated, unlike the rules
+			// branch above: every bundled adapter that declares
+			// CapSkillsInstaller also declares skill_targets, so this branch is
+			// third-party-only — and ox cannot observe how many such adapters
+			// exist. See the skill_targets section of
+			// docs/guides/adapter-authoring.md.
 			result, err := ea.InstallSkills(gitRoot, version.Version)
 			if err != nil {
 				if !quiet {

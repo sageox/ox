@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/internal/version"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/spf13/cobra"
 )
@@ -44,6 +45,23 @@ shows all three. "status" answers the harder question — when a team skill is
 missing, which of the several possible reasons is the actual one. "approve" and
 "revoke" are the trust boundary for runnable team-skill content; "publish" sends
 a skill you wrote the other way, into your team's Team Context.`,
+	// An unknown verb must SAY so. `ox skills catalog|install|uninstall` were
+	// withdrawn before release (ADR-032 D1, GH #1028), so a stale doc, blog
+	// post, or script will keep reaching for them — and cobra's default is to
+	// swallow the token as an argument and print generic help, which reads like
+	// the command ran. Name it, and point at what does exist.
+	Args: cobra.ArbitraryArgs,
+	RunE: runSkillsDispatch,
+}
+
+// runSkillsDispatch prints help for a bare `ox skills` and fails loudly on an
+// unknown verb. A valid subcommand is routed by cobra before RunE is reached,
+// so anything arriving here is a token cobra could not match.
+func runSkillsDispatch(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return cmd.Help()
+	}
+	return fmt.Errorf("unknown subcommand %q for %q\nRun 'ox skills --help' to see available commands", args[0], cmd.CommandPath())
 }
 
 var skillsStatusCmd = &cobra.Command{
@@ -251,9 +269,30 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 			fmt.Sprintf("ox could not read the team's skills: %v", discoverErr))
 	}
 
+	// Hand the walk above to the plan instead of letting it re-walk
+	// teamdocs.PublishedSkills a second time (ox-jr82): this command already
+	// answered "what does the team publish" and "which of those are for this
+	// repo" just above, and a second independent walk could disagree with the
+	// first. RepoSlug MUST be the origin-derived identity, never the
+	// directory-name display fallback `slug` above — SkillAppliesToRepo fails
+	// closed on an empty slug, matching what the plan has always used
+	// internally. A discovery error leaves resolved nil, which asks the plan to
+	// walk the checkout itself exactly as it always has.
+	var resolved *skillmanager.TeamSkillsResolved
+	if discoverErr == nil {
+		authoritativeSlug, _ := repotools.RepoSlugFromRemote(gitRoot)
+		applicable := make([]teamdocs.TeamSkill, 0, len(published))
+		for _, sk := range published {
+			if teamdocs.SkillAppliesToRepo(sk, authoritativeSlug) {
+				applicable = append(applicable, sk)
+			}
+		}
+		resolved = &skillmanager.TeamSkillsResolved{TeamPath: tc.Path, RepoSlug: authoritativeSlug, Skills: applicable}
+	}
+
 	decisions := map[string]skillmanager.TeamSkillDecision{}
 	var planned plannedPaths
-	plan, planErr := planCommittedSkills(gitRoot)
+	plan, planErr := planCommittedSkillsResolved(gitRoot, resolved)
 	switch {
 	case planErr != nil:
 		out.Problems = append(out.Problems,
@@ -338,6 +377,19 @@ func skillsStatusGuidance(out skillsStatusOutput) string {
 		return fmt.Sprintf("Team skills are current. %d auto-installed as prose without approval; nothing is withheld.", out.Summary.AutoInstalledProse)
 	}
 	return "Team skills are current. Nothing to do."
+}
+
+// planCommittedSkillsResolved is planCommittedSkills (skill_reconcile.go) with
+// the TeamSkillsResolved seam skillmanager.PlanWithTeamSkills takes (ox-jr82):
+// a nil resolved behaves exactly like planCommittedSkills always has. It is
+// defined here, not alongside planCommittedSkills, because only this command
+// has already walked the team checkout and has a resolved set to offer.
+func planCommittedSkillsResolved(repoRoot string, resolved *skillmanager.TeamSkillsResolved) (*skillmanager.ReconcilePlan, error) {
+	desired, targets, err := committedSkillState(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	return skillmanager.PlanWithTeamSkills(repoRoot, version.Version, desired, targets, resolved)
 }
 
 // skillTargetRoots reads the repo's selected skill roots, distinguishing "no

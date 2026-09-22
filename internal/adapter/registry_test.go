@@ -1,7 +1,10 @@
 package adapter
 
 import (
+	"sort"
 	"testing"
+
+	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
 // --- A. Embedded registry parsing ---
@@ -273,5 +276,81 @@ func TestAdapterBinaries_Unique(t *testing.T) {
 			t.Errorf("duplicate binary name: %q (adapter: %s)", a.Binary, a.Name)
 		}
 		seen[a.Binary] = true
+	}
+}
+
+// --- H. Capability parity with bundled binaries ---
+
+// TestBundledAdapters_CapabilitiesMatchBinary verifies registry.yaml — what
+// `ox adapter list` shows users — advertises exactly the capabilities each
+// bundled adapter binary declares, no more and no fewer.
+//
+// registry.yaml is data consumed at runtime via go:embed; it cannot import
+// Go, so it cannot itself resolve from adapterprotocol.BundledAdapterCapabilities
+// (that map is now the single source every bundled adapter's own main.go
+// compiles against directly). This test is the one unavoidable "does X agree
+// with Y" check that binds the YAML artifact to that source; it is not
+// license to add another one elsewhere.
+//
+// Failure prevented: `ox adapter list` silently drifting from what a binary
+// can actually do (ox-ii9q). Before this test, registry.yaml omitted
+// skills_installer for nine of the ten bundled adapters despite their
+// binaries all declaring it, and one adapter's entry over-claimed a
+// capability (file_watcher) its binary never declares.
+func TestBundledAdapters_CapabilitiesMatchBinary(t *testing.T) {
+	reg, err := LoadEmbeddedRegistry()
+	if err != nil {
+		t.Fatalf("LoadEmbeddedRegistry() error: %v", err)
+	}
+
+	for _, a := range reg.Adapters {
+		if !a.Bundled {
+			// Non-bundled/community entries (repo: sageox/ox-adapters) have no
+			// binary in this repo to compare against — skip explicitly rather
+			// than silently, per registry.yaml's "External (non-bundled)
+			// adapters" section.
+			continue
+		}
+		a := a
+		t.Run(a.Name, func(t *testing.T) {
+			want, ok := adapterprotocol.BundledAdapterCapabilities[a.Name]
+			if !ok {
+				t.Fatalf("adapter %q is bundled but has no entry in adapterprotocol.BundledAdapterCapabilities — add its ground-truth set there", a.Name)
+			}
+			assertCapabilitySetsEqual(t, a.Name, a.Capabilities, want)
+		})
+	}
+}
+
+// assertCapabilitySetsEqual compares two capability lists as sets (order does
+// not matter) and reports exactly what is missing and what is extra, so a
+// failure names the drift instead of just the fact of it.
+func assertCapabilitySetsEqual(t *testing.T, name string, got, want []string) {
+	t.Helper()
+	gotSet := make(map[string]bool, len(got))
+	for _, c := range got {
+		gotSet[c] = true
+	}
+	wantSet := make(map[string]bool, len(want))
+	for _, c := range want {
+		wantSet[c] = true
+	}
+
+	var missing, extra []string
+	for c := range wantSet {
+		if !gotSet[c] {
+			missing = append(missing, c)
+		}
+	}
+	for c := range gotSet {
+		if !wantSet[c] {
+			extra = append(extra, c)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(extra)
+
+	if len(missing) > 0 || len(extra) > 0 {
+		t.Errorf("registry.yaml capabilities for %q drifted from its binary: missing=%v extra=%v", name, missing, extra)
 	}
 }

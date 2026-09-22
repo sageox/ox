@@ -438,6 +438,19 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 				bk.charge(prime.BudgetSourceSageox)
 			}
 
+			// team bulletin board — a pointer and the reading rules, nothing
+			// else. No rows and no bodies: posts are teammates' unreviewed,
+			// time-limited notes, and prime must never copy one into an AI
+			// coworker's standing context. Emitted whenever the board folder
+			// exists, independent of the docs catalog above. The framing is
+			// ours; the path is one line, so the whole element is charged to
+			// the sageox bucket. Attribute values, so escapeXML (quotes too).
+			if output.TeamContext.BulletinHint != "" {
+				fmt.Fprintf(&sb, "\n<bulletin dir=\"%s\" hint=\"%s\"/>\n",
+					escapeXML(output.TeamContext.BulletinHint), escapeXML(prime.BulletinReadingHint))
+				bk.charge(prime.BudgetSourceSageox)
+			}
+
 			// team rules: framing is ours, bodies and rows are team data.
 			// emitTeamRules charges its own buckets through the bookkeeper.
 			if len(output.TeamContext.TeamRules) > 0 {

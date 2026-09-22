@@ -26,6 +26,7 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ephemeral"
+	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/ledger"
@@ -1198,6 +1199,7 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 		CodeDBExists:     statErr == nil,
 		MemoryEnabled:    auth.IsMemoryEnabled(),
 		MurmuringEnabled: config.MurmuringEnabled(projectRoot),
+		BulletinEnabled:  flags.Get().BulletinEnabled,
 		AgentType:        agentType,
 		HasKB:            hasKB,
 	})
@@ -1932,6 +1934,17 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 			}
 		}
 
+		// team bulletin board — a pointer plus the reading rules. Post bodies
+		// are never read or printed here; the coworker lists the directory
+		// and opens a post on demand.
+		if output.TeamContext.BulletinHint != "" {
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "## Team Bulletin Board (read on demand — not preloaded)")
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintf(cmd.OutOrStdout(), "  Dir: %s\n", output.TeamContext.BulletinHint)
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", prime.BulletinReadingHint)
+		}
+
 		// always emit team context guidance — may sync after prime runs
 		fmt.Fprintln(cmd.OutOrStdout())
 		fmt.Fprintln(cmd.OutOrStdout(), "**Team context available** — team-wide recorded meetings and decisions")
@@ -2236,6 +2249,16 @@ func loadTeamMemory(info *teamContextInfo, teamDir string) {
 	guidePath := filepath.Join(teamDir, "memory", "GUIDE.md")
 	if _, err := os.Stat(guidePath); err == nil {
 		info.ObservationGuideHint = guidePath
+	}
+
+	// bulletin/<board>/posts — team bulletin board, reference pointer only.
+	// Post bodies are teammates' unreviewed, time-limited notes and are never
+	// read here. The gate is the board folder itself: the posts dir may be
+	// absent after every post expired, and the hint still points there so a
+	// coworker knows where the next post will land. Not gated on the publish
+	// flag — reads continue when publishing is off.
+	if st, err := os.Stat(filepath.Join(teamDir, "bulletin")); err == nil && st.IsDir() {
+		info.BulletinHint = filepath.Join(teamDir, filepath.FromSlash(prime.BulletinPostsRelDir(prime.BulletinDefaultBoard)))
 	}
 
 	// discover memory timeline files for progressive disclosure

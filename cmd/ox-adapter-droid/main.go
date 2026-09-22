@@ -71,15 +71,7 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		DisplayName:     adapterDisplay,
 		Version:         adapterVersion,
 		Type:            adapterprotocol.TypeSession,
-		Capabilities: []string{
-			adapterprotocol.CapSessionReader,
-			adapterprotocol.CapHookInstaller,
-			adapterprotocol.CapIncrementalReader,
-			adapterprotocol.CapFileWatcher,
-			adapterprotocol.CapServeMode,
-			adapterprotocol.CapSessionImporter,
-			adapterprotocol.CapSkillsInstaller,
-		},
+		Capabilities:    adapterprotocol.DroidCapabilities,
 		// Factory Droid reads .factory/skills natively plus .agents/skills as an alias.
 		// One root, never a fan-out: a skill copied into several of an agent's
 		// discovery paths is several files to keep in sync and several answers

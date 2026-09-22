@@ -72,14 +72,30 @@ func convergeSkills(_ context.Context, request Request, snapshot Snapshot, artif
 		return outcomes, nil
 	}
 
+	// identity is a no-op on ox's OWN desired bundles/names/targets — it is
+	// deliberately not the team-skill seam. Team skills reach skillmanager
+	// through resolved below: this repository's artifacts already ARE the
+	// discovered, repo-filtered set (the coordinator only groups Applicable
+	// ones here), so skillmanager is handed that set directly instead of
+	// re-walking teamdocs.PublishedSkills under a second, independent lease
+	// that could disagree with this one (ox-jr82).
 	identity := func(desired skillmanager.DesiredSkills, targets []adapterprotocol.SkillTarget) (skillmanager.DesiredSkills, []adapterprotocol.SkillTarget, error) {
 		return desired, targets, nil
 	}
+	resolvedSkills := make([]teamdocs.TeamSkill, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		if artifact.skill != nil {
+			resolvedSkills = append(resolvedSkills, *artifact.skill)
+		}
+	}
+	resolved := &skillmanager.TeamSkillsResolved{
+		TeamPath: configured.Path, RepoSlug: request.RepoSlug, Skills: resolvedSkills,
+	}
 	var plan *skillmanager.ReconcilePlan
 	if request.Mode == ModeExplicit {
-		plan, err = skillmanager.ReconcileUpdate(request.ProjectRoot, version.Version, identity)
+		plan, err = skillmanager.ReconcileUpdateWithTeamSkills(request.ProjectRoot, version.Version, identity, resolved)
 	} else {
-		plan, err = skillmanager.ReconcileUpdateNonBlocking(request.ProjectRoot, version.Version, identity)
+		plan, err = skillmanager.ReconcileUpdateNonBlockingWithTeamSkills(request.ProjectRoot, version.Version, identity, resolved)
 	}
 	if err != nil {
 		return nil, err
@@ -97,11 +113,11 @@ func convergeSkills(_ context.Context, request Request, snapshot Snapshot, artif
 	}
 	outcomes := make([]Outcome, 0, len(artifacts))
 	for _, artifact := range artifacts {
-		decision, ok := decisions[artifact.Name]
-		if !ok {
-			outcomes = append(outcomes, outcomeFor(snapshot, artifact, StateError, "", "skill reconcile did not report this artifact"))
-			continue
-		}
+		// No "not reported" fallback: resolved above is built from these SAME
+		// artifacts, and skillmanager emits exactly one TeamSkillDecision per
+		// entry it was handed (installed, withheld, or unusable) — so a miss
+		// here is no longer reachable. See TestConvergeSkills_UsesDiscoveredArtifactsInsteadOfReDeriving.
+		decision := decisions[artifact.Name]
 		outcome := outcomeFor(snapshot, artifact, StateApplied, "native-skill", decision.Reason)
 		outcome.InstalledAs = decision.InstalledAs
 		switch {

@@ -1,7 +1,7 @@
 ---
 title: "ox sync"
 description: "CLI reference for ox sync"
-sidebar_position: 97
+sidebar_position: 102
 ---
 
 ## ox sync
@@ -18,6 +18,10 @@ keeps transport and local convergence synchronized. This command exists only for
   - Troubleshooting sync issues
   - Triggering an immediate sync (this command itself forces sync)
   - Diagnostic purposes
+
+Convergence includes Add-on-managed and hand-authored Team Context content through
+the same delivery path. It does not check the Add-on Catalog for newer releases;
+use 'ox addons update' for catalog updates.
 
 The daemon syncs automatically on:
   - File changes in your project

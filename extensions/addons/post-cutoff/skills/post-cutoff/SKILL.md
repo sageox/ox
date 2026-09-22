@@ -1,6 +1,6 @@
 ---
 name: post-cutoff
-description: Curated facts about tools, models, and releases that postdate your training cutoff — read BEFORE choosing an approach, picking a model, designing a classifier/router/gate, evaluating a vendor, or planning a feature. Current entries: TypeSafe Jev and the System One typed-decision model class. Also the procedure for adding and retiring entries.
+description: What THIS TEAM has adopted or ruled on that postdates your training cutoff — a small, human-curated set, not a watchlist. Read BEFORE choosing an approach, picking a model, designing a classifier/router/gate, or evaluating a vendor. Also the procedure for proposing and retiring entries. Individual briefs ship as their own add-ons — see post-cutoff-jev.
 ---
 
 # Post-cutoff
@@ -95,15 +95,29 @@ Open the index when you are about to:
 
 | Entry | What it is | Read it when | Valid through |
 |---|---|---|---|
-| [`references/jev.md`](references/jev.md) **◆** | TypeSafe **Jev** — the control-plane decision model: typed decisions with probabilities in 70–500ms instead of generated text. **In production in Bugsy.** | a plan calls for *intuition* or a *quick routing decision*: classifying, routing, gating spend, scoring, choosing the next tool, or any LLM call whose output you immediately parse down to one field | **2027-03-21** |
+| _(none in this add-on yet)_ | Entries ship as their own add-ons so a team can take one without taking all of them. | — | — |
 
-**◆ marks a diamond.** At scale, filter rather than scan — every entry's frontmatter is
-greppable:
+**Available briefs:** `post-cutoff-jev` — TypeSafe **Jev**, the control-plane decision
+model: typed decisions with probabilities in 70–500ms instead of generated text. **In
+production in Bugsy.** Read it when a plan calls for intuition or a quick routing
+decision. Install with `ox addons install post-cutoff-jev`.
+
+**◆ marks a diamond.** At scale, filter rather than scan. Each brief is its own
+add-on, so once installed they sit beside this skill in your Team Context — grep
+across the family rather than this add-on's own `references/`, which holds only
+the authoring guide:
 
 ```bash
-grep -l 'concerns:.*classif' references/*.md
-grep -H 'valid-through:' references/*.md | sort -t: -k3
-grep -l 'diamond: true' references/*.md
+# from your Team Context root; `ox status` prints its path
+grep -rl 'concerns:.*classif'  agents/skills/post-cutoff-*/references/
+grep -rH 'valid-through:'      agents/skills/post-cutoff-*/references/ | sort -t: -k3
+grep -rl 'diamond: true'       agents/skills/post-cutoff-*/references/
+```
+
+To see what exists before installing anything, use the catalog instead:
+
+```bash
+ox addons list
 ```
 
 ## How to read an entry
@@ -152,15 +166,31 @@ template. The short version:
 3. Research to primary sources and grade every claim.
 4. Hunt the skeptical case as hard as the launch claims. An entry without one is
    marketing.
-5. **Bring it to a person with the draft and the bar-clearing argument.** Only once they
-   say yes do you write it in, add the index row with a `valid-through` six months out,
-   and **regenerate this file's `description`** so it names the new entry's trigger
-   surface — that description is the entire auto-selection budget, and an entry nothing
-   fires on does not exist.
+5. **Bring it to a person with the draft and the bar-clearing argument.** Only once
+   they say yes does it ship — and it ships as **its own add-on**, not as a file
+   inside this one:
+
+   - Create `extensions/addons/post-cutoff-<topic>/` with an `addon.yaml` and
+     `skills/post-cutoff-<topic>/SKILL.md` carrying the brief, plus its
+     `references/<topic>.md` with the graded claims and a `valid-through` six
+     months out.
+   - **Write that skill's own `description`** so it names the new brief's trigger
+     surface. That description is the entire auto-selection budget for the brief,
+     and a brief nothing fires on does not exist.
+   - **Make it standalone.** The lock format has no `requires` field
+     (ADR-032 refused dependency resolution), so a brief restates the small amount
+     of framing it needs rather than assuming this shelf is installed.
+   - Add a row to **Available briefs** above so someone reading the shelf can find it.
+
+   **Do not** add the brief to this add-on's `references/`, and do not rewrite this
+   file's `description` to name it. Separate add-ons are the point: a team takes
+   the brief it needs without taking an opinion on every vendor, and this
+   description stays about the shelf.
 
 ## Retiring an entry
 
-**Never delete an entry. Move it to `references/retired/` with the reason.** The reason
+**Never delete an entry. Move it to its own add-on's `references/retired/` with the
+reason, and drop its row from Available briefs above.** The reason
 is the artifact — it is what stops someone relitigating the same question next quarter,
 and it is how a reader learns whether the fact became false or merely became common
 knowledge.

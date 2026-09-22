@@ -1,0 +1,18 @@
+# Add-on manifest — see the sibling post-cutoff add-on for why this file carries
+# only what catalog.go cannot derive from the tree.
+#
+# This is a SEPARATE add-on rather than a second skill inside post-cutoff so a
+# team can take the shelf without taking an opinion on one vendor's technology,
+# or take this brief without adopting the shelf's intake procedure. The lock
+# format has no `requires` field on purpose (ADR-032 refused npm-shaped
+# dependency resolution), so this add-on is standalone: it restates the small
+# amount of framing it needs rather than depending on post-cutoff being
+# installed.
+name: post-cutoff-jev
+version: 1.0.0
+summary: >-
+  TypeSafe Jev and the System One typed-decision model class — typed
+  decisions with probabilities in 70-500ms instead of generated text.
+  Read BEFORE designing a classifier, router, gate, scorer, or any LLM
+  call whose output you immediately parse down to one field. In
+  production in Bugsy. Valid through 2027-03-21.

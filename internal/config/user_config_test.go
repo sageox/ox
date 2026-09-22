@@ -217,6 +217,32 @@ func TestLoadUserConfig_CorruptYAML(t *testing.T) {
 	assert.Error(t, err, "corrupt YAML should return an error")
 }
 
+// Independent trace-enable invocations used to race on config.yaml.tmp, leaving
+// one command failing at rename despite both saving a valid configuration.
+func TestSaveUserConfigConcurrentAtomicWrites(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv(EnvUserConfig, configPath)
+	const writers = 16
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	for range writers {
+		go func() {
+			<-start
+			errs <- SaveUserConfig(&UserConfig{Trace: &TraceConfig{Enabled: true, Port: 14318}})
+		}()
+	}
+	close(start)
+	for range writers {
+		require.NoError(t, <-errs)
+	}
+	cfg, err := LoadUserConfig()
+	require.NoError(t, err)
+	require.True(t, cfg.Trace.Enabled)
+	entries, err := os.ReadDir(filepath.Dir(configPath))
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "temporary writes must be cleaned up")
+}
+
 func TestLoadConfig_EnvOnly(t *testing.T) {
 	// Load() should read from env vars only, not config files
 	t.Setenv("OX_VERBOSE", "1")

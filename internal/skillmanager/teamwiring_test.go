@@ -13,6 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// canonicalFixtureOrigin is the origin every well-formed fixture gets. Its slug
+// is "acme/api", which is what a `repos:` entry must name to match.
+const canonicalFixtureOrigin = "https://github.com/acme/api.git"
+
 // stageTeamWiredProject writes the two config files FindRepoTeamContext reads,
 // so catalogForRepo resolves teamPath for this project.
 //
@@ -26,6 +30,20 @@ func stageTeamWiredProject(t *testing.T, projectRoot, teamPath string) {
 	// Production repositories normally have a canonical origin. Give fixtures
 	// one too, so tests that intend to exercise a readable Team Context do not
 	// accidentally exercise the degraded directory-name slug fallback instead.
+	stageTeamWiredProjectWithOrigin(t, projectRoot, teamPath, canonicalFixtureOrigin)
+}
+
+// stageTeamWiredProjectWithOrigin is stageTeamWiredProject with the repository
+// IDENTITY made an explicit parameter rather than a normalized-away constant.
+//
+// An empty origin stages the degraded state the caller above deliberately rules
+// out: a git repository with no canonical remote, where repotools.RepoSlugFromRemote
+// returns "" and every `repos:`-targeted team skill becomes unresolvable. That
+// is not an exotic state — a local-only checkout, a clone before its remote is
+// added, and an origin that was renamed all land there — and it is precisely
+// where the approval command and the reconcile path last disagreed.
+func stageTeamWiredProjectWithOrigin(t *testing.T, projectRoot, teamPath, origin string) {
+	t.Helper()
 	git := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
@@ -34,10 +52,12 @@ func stageTeamWiredProject(t *testing.T, projectRoot, teamPath string) {
 		require.NoError(t, err, "git %v: %s", args, out)
 	}
 	git("init", "-q")
-	remote := exec.Command("git", "remote", "get-url", "origin")
-	remote.Dir = projectRoot
-	if err := remote.Run(); err != nil {
-		git("remote", "add", "origin", "https://github.com/acme/api.git")
+	if origin != "" {
+		remote := exec.Command("git", "remote", "get-url", "origin")
+		remote.Dir = projectRoot
+		if err := remote.Run(); err != nil {
+			git("remote", "add", "origin", origin)
+		}
 	}
 
 	const teamID = "team_wiring_test"

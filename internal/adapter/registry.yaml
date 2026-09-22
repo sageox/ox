@@ -8,7 +8,7 @@ adapters:
     bundled: true
     binary: ox-adapter-claude-code
     repo: sageox/ox
-    capabilities: [session_reader, hook_installer, incremental_reader, file_watcher, serve_mode]
+    capabilities: [session_reader, hook_installer, skills_installer, incremental_reader, file_watcher, serve_mode, session_importer, capture_prior]
     detect_commands: [claude]
 
   - name: gemini
@@ -18,7 +18,7 @@ adapters:
     bundled: true
     binary: ox-adapter-gemini
     repo: sageox/ox
-    capabilities: [session_reader, hook_installer, incremental_reader, file_watcher, serve_mode]
+    capabilities: [session_reader, hook_installer, skills_installer, incremental_reader, file_watcher, serve_mode, session_importer]
     detect_commands: [gemini]
 
   - name: codex
@@ -28,7 +28,7 @@ adapters:
     bundled: true
     binary: ox-adapter-codex
     repo: sageox/ox
-    capabilities: [session_reader, hook_installer, incremental_reader, file_watcher, serve_mode]
+    capabilities: [session_reader, hook_installer, skills_installer, incremental_reader, file_watcher, serve_mode, session_importer]
     detect_commands: [codex]
 
   - name: amp
@@ -38,7 +38,7 @@ adapters:
     bundled: true
     binary: ox-adapter-amp
     repo: sageox/ox
-    capabilities: [session_reader, hook_installer, incremental_reader, file_watcher, serve_mode]
+    capabilities: [session_reader, hook_installer, skills_installer, incremental_reader, file_watcher, serve_mode, session_importer]
     detect_commands: [amp]
 
   - name: opencode
@@ -48,7 +48,7 @@ adapters:
     bundled: true
     binary: ox-adapter-opencode
     repo: sageox/ox
-    capabilities: [session_reader, hook_installer, incremental_reader, serve_mode]
+    capabilities: [session_reader, hook_installer, skills_installer, incremental_reader, serve_mode, session_importer]
     detect_commands: [opencode]
 
   - name: pi
@@ -58,7 +58,7 @@ adapters:
     bundled: true
     binary: ox-adapter-pi
     repo: sageox/ox
-    capabilities: [session_reader, hook_installer, incremental_reader, file_watcher, serve_mode]
+    capabilities: [session_reader, hook_installer, skills_installer, incremental_reader, file_watcher, serve_mode, session_importer]
     detect_commands: [pi]
 
   - name: omp
@@ -78,7 +78,7 @@ adapters:
     bundled: true
     binary: ox-adapter-aider
     repo: sageox/ox
-    capabilities: [session_reader, hook_installer, incremental_reader, file_watcher, serve_mode]
+    capabilities: [session_reader, hook_installer, incremental_reader, file_watcher, serve_mode, session_importer]
     detect_commands: [aider]
 
   - name: droid
@@ -100,7 +100,7 @@ adapters:
     bundled: true
     binary: ox-adapter-goose
     repo: sageox/ox
-    capabilities: [session_reader, hook_installer, incremental_reader, serve_mode, session_importer, capture_prior]
+    capabilities: [session_reader, hook_installer, skills_installer, incremental_reader, serve_mode, session_importer, capture_prior]
     detect_commands: [goose]
 
   # --- External (non-bundled) adapters ---

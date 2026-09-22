@@ -28,74 +28,16 @@ import (
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
-// adapterCaps is a hermetic fixture mirroring each adapter's installed-surface
-// capability set as declared by its handleInfo() in cmd/ox-adapter-*/main.go.
-// package main is not importable here, so we encode the cap sets locally and
-// pin them to the real binaries via the per-adapter guard tests
-// (cmd/ox-adapter-*/main_test.go), which compare handleInfo().Capabilities
-// against these exact sets (order-insensitively, as sets). If a binary's caps
-// drift from this fixture, those guard tests fail — so this fixture cannot
-// silently rot.
-//
-// KEEP IN SYNC: each entry below must match the `want` set in the corresponding
-// cmd/ox-adapter-<name>/main_test.go pin test (claude-code / codex / droid).
-// Adding or removing a capability requires updating BOTH this fixture AND that
-// adapter's pin test.
-var adapterCaps = map[string][]string{
-	"claude-code": {
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapCommandsInstaller,
-		adapterprotocol.CapSkillsInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapFileWatcher,
-		adapterprotocol.CapServeMode,
-		adapterprotocol.CapSessionImporter,
-		adapterprotocol.CapCapturePrior,
-	},
-	"codex": {
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapSkillsInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapFileWatcher,
-		adapterprotocol.CapServeMode,
-		adapterprotocol.CapSessionImporter,
-	},
-	"omp": {
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapSkillsInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapFileWatcher,
-		adapterprotocol.CapServeMode,
-		adapterprotocol.CapSessionImporter,
-	},
-	"droid": {
-		adapterprotocol.CapSkillsInstaller,
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapFileWatcher,
-		adapterprotocol.CapServeMode,
-		adapterprotocol.CapSessionImporter,
-	},
-	// No CapFileWatcher: Goose sessions are SQLite rows behind a virtual
-	// "goose:<id>" handle, so there is no path for fsnotify to watch.
-	"goose": {
-		adapterprotocol.CapSkillsInstaller,
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapServeMode,
-		adapterprotocol.CapSessionImporter,
-		adapterprotocol.CapCapturePrior,
-	},
-}
-
-// hasCap reports whether the adapter declares the given capability.
+// hasCap reports whether the adapter declares the given capability, resolving
+// from adapterprotocol.BundledAdapterCapabilities — the single source of
+// truth for adapter capability sets. This
+// package used to carry its own hand-copied adapterCaps fixture that only
+// covered five of the ten bundled adapters and rotted at least once (it kept
+// commands_installer for claude-code long after the adapter stopped declaring
+// it); resolving from the shared source instead of a local copy makes that
+// drift structurally impossible.
 func hasCap(adapter, cap string) bool {
-	for _, c := range adapterCaps[adapter] {
+	for _, c := range adapterprotocol.BundledAdapterCapabilities[adapter] {
 		if c == cap {
 			return true
 		}
@@ -253,10 +195,11 @@ func TestCodexFloorLock(t *testing.T) {
 	}
 }
 
-// sortedAdapters returns the fixture adapter names in deterministic order.
+// sortedAdapters returns every bundled adapter's name, in deterministic
+// order, from adapterprotocol.BundledAdapterCapabilities.
 func sortedAdapters() []string {
-	names := make([]string, 0, len(adapterCaps))
-	for name := range adapterCaps {
+	names := make([]string, 0, len(adapterprotocol.BundledAdapterCapabilities))
+	for name := range adapterprotocol.BundledAdapterCapabilities {
 		names = append(names, name)
 	}
 	sort.Strings(names)

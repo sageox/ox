@@ -362,9 +362,34 @@ func TestExecuteSyncConvergence_RepoSlugUsesCanonicalOriginNotDirectoryNameFallb
 	require.True(t, found, "expected the scoped rule to appear in the convergence report")
 }
 
-func TestSyncHelp_ExplainsAutomation(t *testing.T) {
+// TestSyncHelp_NamesTheAddonCatalogBoundary pins the rule `ox sync --help`
+// states: convergence delivers add-on-managed content, but never checks the
+// catalog for new releases. That boundary is why there is no `ox addons sync`.
+//
+// This used to be a two-case table over the FEATURE_ADDONS gate. The flag is
+// gone, so the paragraph is unconditional and the table had one row left.
+func TestSyncHelp_NamesTheAddonCatalogBoundary(t *testing.T) {
 	require.Contains(t, syncCmd.Short, "rarely needed")
-	require.Contains(t, syncCmd.Long, "The background daemon automatically")
+
+	long := syncLong()
+	// Both halves must survive: the paragraph never displaces the rest.
+	require.Contains(t, long, "You should RARELY need this command")
+	require.Contains(t, long, "The background daemon automatically")
+	require.Contains(t, long, "The daemon syncs automatically on:")
+	require.Contains(t, long, "ledger-read-sync.md")
+
+	require.Contains(t, long, "Add-on-managed and hand-authored")
+	require.Contains(t, long, "does not check the Add-on Catalog")
+	require.Contains(t, long, "ox addons update")
+}
+
+// TestSyncHelp_RegisteredLongMatchesTheAssembler pins the registered command
+// to what syncLong() produces. Cobra renders Long before PersistentPreRunE, so
+// a command left holding gate-on help would advertise the catalog for one whole
+// invocation before anything could correct it — and `make docs` generates
+// docs/reference/sync.mdx from exactly this value.
+func TestSyncHelp_RegisteredLongMatchesTheAssembler(t *testing.T) {
+	require.Equal(t, syncLong(), syncCmd.Long)
 }
 
 func TestConvergeAfterSessionBoundary_AppliesPendingTeamContent(t *testing.T) {

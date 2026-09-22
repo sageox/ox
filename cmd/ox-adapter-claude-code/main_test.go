@@ -6,32 +6,17 @@ import (
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
-// TestHandleInfo_CapabilitiesPinned pins this binary's declared capabilities to
-// the set the cross-agent conformance fixture mirrors
-// (internal/prime/conformance_test.go). If handleInfo() drifts, this fails — so
-// the conformance fixture cannot silently fall out of sync with the binary.
-//
-// KEEP IN SYNC: the want set below must match the "claude-code" entry in
-// adapterCaps in internal/prime/conformance_test.go. Adding/removing a
-// capability requires updating BOTH places. Comparison is order-insensitive
-// (a set) so the two fixtures need not list caps in the same order.
+// TestHandleInfo_CapabilitiesPinned proves handleInfo() actually wires
+// adapterprotocol.ClaudeCodeCapabilities — the canonical source in
+// pkg/adapterprotocol/capabilities.go — into the response, rather than a
+// stale or hand-edited literal. The capability set itself lives in exactly
+// one place now; this test only guards the wiring.
 func TestHandleInfo_CapabilitiesPinned(t *testing.T) {
-	want := []string{
-		adapterprotocol.CapSessionReader,
-		adapterprotocol.CapHookInstaller,
-		adapterprotocol.CapSkillsInstaller,
-		adapterprotocol.CapIncrementalReader,
-		adapterprotocol.CapFileWatcher,
-		adapterprotocol.CapServeMode,
-		adapterprotocol.CapSessionImporter,
-		adapterprotocol.CapCapturePrior,
-	}
-
 	info, err := handleInfo()
 	if err != nil {
 		t.Fatalf("handleInfo() error: %v", err)
 	}
-	assertCapabilitySetsEqual(t, "claude-code", info.Capabilities, want)
+	assertCapabilitySetsEqual(t, "claude-code", info.Capabilities, adapterprotocol.ClaudeCodeCapabilities)
 	if len(info.SkillTargets) != 1 || info.SkillTargets[0].Key != "claude-project" || info.SkillTargets[0].Root != ".claude/skills" {
 		t.Fatalf("claude skill targets = %#v, want claude-project target", info.SkillTargets)
 	}

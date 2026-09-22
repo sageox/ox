@@ -151,3 +151,22 @@ func TestOutputAgentPrimeXML_HookBudgetTrimsAndWritesFullBundle(t *testing.T) {
 	_, statErr := os.Stat(out.HookFullBundlePath)
 	assert.True(t, os.IsNotExist(statErr), "a direct invocation must not write a bundle")
 }
+
+// A self-closing element (`<bulletin dir="…" hint="…"/>`) must open no
+// section. openTag's attribute class admits the trailing slash, so before
+// the guard the line was taken as an opening tag whose closing line never
+// comes, and every later child of the split parent — team rules, indexed
+// rules, memory — vanished from the trim candidates.
+//
+// Failure prevented: a hook-driven prime that has a bulletin board could not
+// shed its team rules or memory under the hook cap, so a normal 14–24 KB
+// prime would be cut by the host mid-document instead of trimmed by section.
+func TestTopLevelSections_SelfClosingLineOpensNoSection(t *testing.T) {
+	doc := "<ox-prime>\n\n<team-knowledge>\n\n<docs>\nx\n</docs>\n\n<bulletin dir=\"/t/bulletin/general/posts\" hint=\"notes, check expires_at\"/>\n\n<team-rules>\n<rule name=\"a\">\nbody\n</rule>\n</team-rules>\n\n<memory>\nm\n</memory>\n\n</team-knowledge>\n\n</ox-prime>\n"
+	var names []string
+	for _, s := range trimCandidates(doc) {
+		names = append(names, s.name)
+	}
+	assert.Equal(t, []string{"team-knowledge/docs", "team-knowledge/team-rules", "team-knowledge/memory"}, names,
+		"every child after the self-closing bulletin line must still be a trim candidate")
+}

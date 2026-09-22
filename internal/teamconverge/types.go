@@ -35,17 +35,21 @@ type OriginKind string
 
 const (
 	OriginLoose OriginKind = "loose"
+	// OriginAddon marks an artifact the Add-on Catalog installed: a path the
+	// committed .sageox/add-ons.lock.json owns (ADR-032 D3). Reintroduced by
+	// the PR that needs it, per ADR-032 D3 — see origin.go for the resolver.
+	OriginAddon OriginKind = "addon"
 )
 
 // Origin identifies who owns the canonical Team Context artifact. Every
-// artifact discovered today is loose (hand-authored); Pack/PackVersion/Digest
-// stay part of the shape so a future Pack Catalog producer does not need a
+// artifact discovered today is loose (hand-authored); Addon/AddonVersion/Digest
+// stay part of the shape so a future Add-on Catalog producer does not need a
 // schema bump.
 type Origin struct {
-	Kind        OriginKind `json:"kind"`
-	Pack        string     `json:"pack,omitempty"`
-	PackVersion string     `json:"pack_version,omitempty"`
-	Digest      string     `json:"digest,omitempty"`
+	Kind         OriginKind `json:"kind"`
+	Addon        string     `json:"addon,omitempty"`
+	AddonVersion string     `json:"addon_version,omitempty"`
+	Digest       string     `json:"digest,omitempty"`
 }
 
 // Artifact is one normalized item discovered from a Team Context snapshot.
@@ -66,6 +70,13 @@ type Artifact struct {
 	// against what discovery already parsed under the same snapshot lease.
 	// Unexported: never part of the Artifact JSON shape.
 	rule *teamdocs.TeamRule
+
+	// skill carries the already-discovered Team Skill for KindSkill artifacts,
+	// mirroring rule above (ox-jr82): convergeSkills hands this set to
+	// skillmanager instead of letting it re-walk teamdocs.PublishedSkills under
+	// a second, independent lease that could disagree with this one.
+	// Unexported: never part of the Artifact JSON shape.
+	skill *teamdocs.TeamSkill
 }
 
 // Snapshot pins every outcome in a report to one Team Context commit.

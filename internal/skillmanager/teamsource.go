@@ -81,6 +81,66 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 	if err != nil {
 		return nil, nil, fmt.Errorf("discover team skills: %w", err)
 	}
+	return buildTeamCatalog(base, teamPath, repoSlug, projectRoot, discovered, rejected)
+}
+
+// TeamSkillsResolved carries a team-skill discovery a caller already performed
+// and repo-filtered under its own snapshot lease — currently only
+// teamconverge's FilesystemDiscovery (ox-jr82) — so catalogForRepo does not
+// re-walk teamdocs.PublishedSkills a second time only to reach the same
+// answer, or worse, a DIFFERENT one if the checkout moved between the two
+// walks.
+//
+// Skills must be exactly the APPLICABLE set: teamdocs.SkillAppliesToRepo
+// already evaluated against RepoSlug. The full published set, including
+// inapplicable skills, is discovery's own concern (it renders StateFiltered)
+// and is never passed here.
+type TeamSkillsResolved struct {
+	// TeamPath is cross-checked against config.FindRepoTeamContext's answer for
+	// repoRoot; a mismatch means the resolved set is stale or for the wrong
+	// project, and catalogForRepoResolved falls back to walking it itself
+	// rather than trusting data that does not name the same checkout.
+	TeamPath string
+	// RepoSlug MUST be the origin-derived identity (repotools.RepoSlugFromRemote),
+	// never the directory-name display fallback: SkillAppliesToRepo fails closed
+	// on an empty slug, and a fallback slug could match a repos: filter by
+	// directory-name coincidence that the real repository identity would not.
+	RepoSlug string
+	Skills   []teamdocs.TeamSkill
+}
+
+// teamSkillSourceResolved is TeamSkillSource for a caller that already walked
+// and repo-filtered the team checkout (see TeamSkillsResolved). It still runs
+// unseeableTeamSkills: that is a cheap directory-presence stat, not the
+// content walk this seam exists to avoid repeating, and it is what stops a
+// not-yet-materialized sparse checkout from reading as "the team publishes
+// nothing" and retiring every sageox-team-* file already on disk.
+func teamSkillSourceResolved(base catalogSource, teamPath, repoSlug, projectRoot string, resolved []teamdocs.TeamSkill) (catalogSource, []TeamSkillDecision, error) {
+	if base == nil {
+		base = builtInCatalog{}
+	}
+	if reason := unseeableTeamSkills(teamPath, repoSlug); reason != "" {
+		return &teamCatalog{base: base, teamPath: teamPath, incomplete: reason}, nil, nil
+	}
+	// The NameError split mirrors teamdocs.DiscoverSkillsWithRejections exactly,
+	// applied to data already in hand rather than re-walked from disk.
+	var discovered, rejected []teamdocs.TeamSkill
+	for _, s := range resolved {
+		if s.NameError != "" {
+			rejected = append(rejected, s)
+			continue
+		}
+		discovered = append(discovered, s)
+	}
+	return buildTeamCatalog(base, teamPath, repoSlug, projectRoot, discovered, rejected)
+}
+
+// buildTeamCatalog turns a repo-filtered installable/rejected split into the
+// materializable catalog: classification, approvals, and the decision list a
+// human-facing diagnostic renders. Shared by TeamSkillSource, which computes
+// the split by walking the checkout, and teamSkillSourceResolved, which
+// receives it already computed.
+func buildTeamCatalog(base catalogSource, teamPath, repoSlug, projectRoot string, discovered, rejected []teamdocs.TeamSkill) (catalogSource, []TeamSkillDecision, error) {
 	// An unknown slug is partial visibility, not an empty team source. Untargeted
 	// skills are still authoritative and may be added; targeted skills cannot be
 	// evaluated, so removals must remain suppressed until identity returns.
@@ -386,10 +446,14 @@ func ExpectedRevision(repoRoot string) (string, error) {
 //     find the checkout. It matches THIS project's team_id and never guesses a
 //     cross-team context, so a machine with several teams cannot leak one team's
 //     skills into another team's repository.
-//   - repotools.RepoSlug is what prime feeds to teamdocs.DiscoverRules. Skills
-//     reuse the rules' `repos:` frontmatter contract verbatim, so they must be
-//     filtered against the same slug; deriving it a second way is how the same
-//     document comes to apply to rules but not to skills.
+//   - repotools.RepoSlugFromRemote is what prime feeds to
+//     teamdocs.DiscoverRules. Skills reuse the rules' `repos:` frontmatter
+//     contract verbatim, so they must be filtered against the same slug;
+//     deriving it a second way is how the same document comes to apply to rules
+//     but not to skills. It is deliberately the ORIGIN-derived identity with no
+//     directory-name fallback: a fallback slug is useful display context but is
+//     not an authoritative repository identity, and matching a team's `repos:`
+//     list against a local folder name is a false positive waiting to happen.
 //
 // Threading them through Plan instead would push the resolution onto every
 // caller — the adapters, the daemon autofix tick, `ox init` — and each would get
@@ -405,6 +469,18 @@ func ExpectedRevision(repoRoot string) (string, error) {
 // shape teamskills.LoadApprovals already refuses; the cost here is deletion of
 // working content rather than materialization of unapproved content.
 func catalogForRepo(repoRoot string) (catalogSource, []TeamSkillDecision, error) {
+	return catalogForRepoResolved(repoRoot, nil)
+}
+
+// catalogForRepoResolved is catalogForRepo with an optional TeamSkillsResolved
+// seam (ox-jr82): a nil resolved means exactly what catalogForRepo always did
+// — walk the team checkout here. A non-nil resolved is trusted for the skill
+// list and repo slug ONLY once TeamPath is confirmed to name the SAME checkout
+// config.FindRepoTeamContext resolves for repoRoot; every other check
+// (repoRoot empty, no team context configured, checkout not yet cloned) still
+// runs unconditionally, so a caller supplying resolved is never less safe than
+// one that does not.
+func catalogForRepoResolved(repoRoot string, resolved *TeamSkillsResolved) (catalogSource, []TeamSkillDecision, error) {
 	base := catalogSource(builtInCatalog{})
 	// Every early exit returns a teamCatalog carrying a REASON, never the bare
 	// base. Returning base says "authoritatively, this team publishes no skills",
@@ -426,6 +502,10 @@ func catalogForRepo(repoRoot string) (catalogSource, []TeamSkillDecision, error)
 			return &teamCatalog{base: base, teamPath: tc.Path, incomplete: "team context checkout is not on disk yet"}, nil, nil
 		}
 		return nil, nil, fmt.Errorf("stat team context %s: %w", tc.Path, err)
+	}
+
+	if resolved != nil && resolved.TeamPath == tc.Path {
+		return teamSkillSourceResolved(base, tc.Path, resolved.RepoSlug, repoRoot, resolved.Skills)
 	}
 
 	// The slug costs a `git remote get-url`, so it is resolved only once a team

@@ -269,3 +269,33 @@ func TestOxVizSkillActivatesForMaterialPRWriting(t *testing.T) {
 		}
 	}
 }
+
+// TestAdditiveSkillsAllExistOnDisk closes the table→disk direction that
+// TestEveryOnDiskSurfaceIsAccounted leaves open.
+//
+// That test asks "is every on-disk surface accounted for?" — it cannot notice an
+// allowlist entry for a surface that no longer exists. `post-cutoff` was exactly
+// that: it moved out of extensions/skills/ into the Add-on Catalog
+// (extensions/addons/, ADR-032 D6) and its additiveSkills entry stayed behind,
+// still excusing it from the conformance table. Nothing failed, because nothing
+// looked in this direction.
+//
+// Failure prevented: a dead exemption outliving the thing it exempted, so a
+// later skill reusing that name inherits an excuse nobody granted it.
+func TestAdditiveSkillsAllExistOnDisk(t *testing.T) {
+	root := repoRoot(t)
+
+	for id, reason := range additiveSkills {
+		skill := filepath.Join(root, "extensions", "skills", id, "SKILL.md")
+		command := filepath.Join(root, "extensions", "claude", "commands", id+".md")
+
+		_, skillErr := os.Stat(skill)
+		_, commandErr := os.Stat(command)
+		if skillErr == nil || commandErr == nil {
+			continue
+		}
+		t.Errorf("additiveSkills excuses %q from the conformance table, but no such surface is on disk "+
+			"(looked for %s and %s) — remove the entry, or restore the surface (reason on file: %q)",
+			id, skill, command, reason)
+	}
+}

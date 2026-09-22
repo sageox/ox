@@ -1,0 +1,37 @@
+---
+title: "ox addons install"
+description: "CLI reference for ox addons install"
+sidebar_position: 12
+---
+
+## ox addons install
+
+Install an add-on into your Team Context
+
+```
+ox addons install <name> [flags]
+```
+
+### Options
+
+```
+  -h, --help             help for install
+      --json             Emit machine-readable JSON
+      --version string   Install an exact version instead of the catalog's current one
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
+```
+
+### SEE ALSO
+
+* [ox addons](/addons)	 - Choose and update the add-ons your team owns

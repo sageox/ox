@@ -126,6 +126,15 @@ func topLevelSections(xml string) []primeSection {
 		trimmed := strings.TrimRight(line, "\n")
 		switch {
 		case current == "":
+			// A self-closing element (`<bulletin dir="…" hint="…"/>`) opens
+			// nothing: openTag's attribute class admits the trailing slash, so
+			// without this check the line would be taken as an opening tag
+			// whose `</bulletin>` never arrives, and every section after it
+			// inside a split parent would be swallowed into that pseudo-section
+			// and never offered for trimming.
+			if strings.HasSuffix(trimmed, "/>") {
+				break
+			}
 			if m := openTag.FindStringSubmatch(trimmed); m != nil && m[1] != "ox-prime" {
 				current, start = m[1], offset
 			}

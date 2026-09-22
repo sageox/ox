@@ -98,12 +98,28 @@ entries or it is a manual.
 
 ## 3 · Wire it up
 
-- Add the index row in `SKILL.md`, with a `valid-through` date **six months out** unless
-  there is a reason to pick another — that is the working assumption for when model
-  training catches up and the entry stops earning its place.
-- **Regenerate `SKILL.md`'s `description`** so it names the new entry's trigger surface.
-  This is the whole auto-selection budget. An entry nothing fires on does not exist, and
-  this is the step people forget.
+**Each brief is its own add-on.** It does not go into the `post-cutoff` add-on's
+`references/` — that directory holds this authoring guide and nothing else. Create:
+
+```
+extensions/addons/post-cutoff-<topic>/
+  addon.yaml                                   name, version, summary
+  skills/post-cutoff-<topic>/SKILL.md          the routing surface
+  skills/post-cutoff-<topic>/references/<topic>.md   the graded claims
+```
+
+- Give `<topic>.md` a `valid-through` date **six months out** unless there is a reason
+  to pick another — that is the working assumption for when model training catches up
+  and the entry stops earning its place.
+- **Write the new skill's own `description`** so it names that brief's trigger surface.
+  This is the whole auto-selection budget for the brief. An entry nothing fires on does
+  not exist, and this is the step people forget. Do **not** rewrite the `post-cutoff`
+  shelf's description to name it — the shelf's description is about the shelf.
+- **Make it standalone.** The add-on lock format has no `requires` field (ADR-032
+  refused dependency resolution on purpose), so the brief restates the small amount of
+  framing it needs rather than assuming the shelf is installed alongside it.
+- Add a row to the shelf's **Available briefs** list in `post-cutoff`'s `SKILL.md`, so a
+  reader who has the shelf can discover the brief.
 - Keep the description **single-line**. Team-context publishing parses only the first 30
   frontmatter lines with prefix matching and no folded-scalar support, so a `>-` block
   silently becomes the literal string `>-`.
@@ -127,8 +143,9 @@ number is unmeasured and someone has since measured it, fix the hedge in the sam
 
 ## 5 · Retiring
 
-Move to `references/retired/<name>.md`, add a `retired:` date and a `reason:` line, drop
-the index row, regenerate the description. **Never delete.** Someone will ask about this
+Move to the brief's own `references/retired/<name>.md`, add a `retired:` date and a
+`reason:` line, and drop its row from the shelf's **Available briefs** list. Retire the
+whole add-on only if nothing in it survives. **Never delete.** Someone will ask about this
 technology again, and "we looked, here is what we found, here is why it stopped
 mattering" is the most valuable possible answer.
 
