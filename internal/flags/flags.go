@@ -33,6 +33,7 @@ type Flags struct {
 	AutoDistill    bool
 	TUIEnabled     bool
 	AttestEnabled  bool
+	TraceEnabled   bool
 	AddonsEnabled  bool
 	// BulletinEnabled gates `ox bulletin`. It is a server-enrolled pilot:
 	// default off, and deliberately without a FEATURE_* env override, so
@@ -60,6 +61,7 @@ type Patch struct {
 	AutoDistill     *bool
 	TUIEnabled      *bool
 	AttestEnabled   *bool
+	TraceEnabled    *bool
 	BulletinEnabled *bool
 
 	DisableFileDeleteTools *bool
@@ -106,6 +108,7 @@ func Defaults() Flags {
 		AutoDistill:     false, // off until remote settings explicitly enables it
 		TUIEnabled:      false, // off until remote settings explicitly enables it
 		AttestEnabled:   false, // experimental; hidden and unregistered until enabled
+		TraceEnabled:    false, // local trace capture pilot; explicit opt-in also required
 		BulletinEnabled: false, // server-enrolled pilot; no env override by design
 	}
 }

@@ -269,6 +269,7 @@ func emitStartupBanner(w io.Writer, ctx *HookContext) {
 // (covering agents without hooks), and we call it again here as a safety net.
 // startSessionRecording is idempotent (checks session.IsRecording first).
 func handleStart(ctx *HookContext) error {
+	startTraceReceiverForHook(ctx)
 	emitStartupBanner(os.Stdout, ctx)
 
 	source := ""

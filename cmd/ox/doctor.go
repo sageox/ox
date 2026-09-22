@@ -846,6 +846,9 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 	if legacyFix && legacyRoot != "" {
 		legacyPreflight = migrationBlocker(legacyRoot)
 	}
+	if check := GetDoctorCheck(CheckSlugSessionTrace); check != nil {
+		integrationChecks = append(integrationChecks, check.Run(opts.shouldFix(CheckSlugSessionTrace)))
+	}
 	integrationChecks = append(integrationChecks, checkClaudeSkills(opts.shouldFix(CheckSlugClaudeSkills)))
 	legacyCheck, legacyPending := checkLegacyOxFilesWithPreflight(legacyRoot, legacyFix, legacyPreflight)
 	// The ox-managed inventory: keep ox's own files ignored, report any that are

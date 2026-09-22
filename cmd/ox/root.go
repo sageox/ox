@@ -546,6 +546,8 @@ func initFeatureFlags(cmd *cobra.Command) {
 func syncFeatureGatedCommands(root *cobra.Command) {
 	setCommandRegistered(root, scoutCmd, auth.IsScoutEnabled())
 	setCommandRegistered(root, bulletinCmd, flags.Get().BulletinEnabled)
+	setCommandRegistered(sessionCmd, sessionTraceCmd, flags.Get().TraceEnabled)
+	syncTraceDoctorCheck()
 
 }
 
