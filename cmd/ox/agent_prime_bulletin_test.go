@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -10,12 +11,76 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/prime"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Posting is a server capability, independent of whether Team Context has
+// synced. Exercise the real flag-to-guidance wiring and all output formats.
+func TestAgentPrime_BulletinPostingDiscovery(t *testing.T) {
+	for _, enrolled := range []bool{false, true} {
+		for _, state := range []string{"no checkout", "no board", "local posts"} {
+			name := state + "/disabled"
+			if enrolled {
+				name = state + "/enrolled"
+			}
+			t.Run(name, func(t *testing.T) {
+				bulletinGateFixture(t)
+				flags.Init(context.Background(), flags.DaemonProvider{CachedSettings: &flags.CLISettingsResponse{
+					Features: flags.CLIFeatures{Bulletin: &enrolled}, FetchedAt: time.Now(),
+				}})
+				root := t.TempDir()
+				var info *teamContextInfo
+				if state != "no checkout" {
+					info = &teamContextInfo{TeamID: "team-1"}
+					if state == "local posts" {
+						plantBulletinPost(t, root)
+					}
+					loadTeamMemory(info, root)
+				}
+				output := agentPrimeOutput{
+					AgentID: "Oxtest", Status: "fresh", TeamContext: info,
+					Guidance: buildGuidance("Oxtest", root, info, nil, "codex", false),
+				}
+				for _, format := range []string{"xml", "text", "json"} {
+					t.Run(format, func(t *testing.T) {
+						var buf bytes.Buffer
+						cmd := &cobra.Command{}
+						cmd.SetOut(&buf)
+						switch format {
+						case "xml":
+							_, err := outputAgentPrimeXML(cmd, output)
+							require.NoError(t, err)
+							requireWellFormedXML(t, buf.String())
+						case "text":
+							require.NoError(t, outputAgentPrimeText(cmd, output))
+						case "json":
+							require.NoError(t, json.NewEncoder(&buf).Encode(output))
+						}
+						got := buf.String()
+						for _, command := range []string{"ox bulletin post", "--ttl 14d --json", "ox guide bulletin"} {
+							if enrolled {
+								assert.Contains(t, got, command)
+							} else {
+								assert.NotContains(t, got, command)
+							}
+						}
+						if state == "local posts" {
+							assert.Contains(t, got, "expires_at", "reading stays available without publishing enrollment")
+						}
+						assert.NotContains(t, got, bulletinBodyMarker)
+						assert.NotContains(t, got, bulletinMetaMarker)
+					})
+				}
+			})
+		}
+	}
+}
 
 // The bulletin board is the one Team Context surface whose content nobody
 // reviews before it lands. Prime may point an AI coworker at the folder; it

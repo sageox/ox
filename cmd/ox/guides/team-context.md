@@ -74,10 +74,11 @@ When you edit team context files directly (e.g., dropping a new rule into `agent
 | A team-wide rule for AI coworkers | Drop a file in `agents/rules/`, commit, push. See `ox guide team-rules`. |
 | An onboarding doc, architecture write-up, or video | `ox import <file-or-url>` |
 | A short transient coordination signal (e.g., "rebuilding migrations now") | `ox murmur --scope=team --topic=<topic> "<message>"` (lasts 24h) |
-| A time-limited note for the whole team (announcement, release notes, a heads-up) | `ox bulletin post <file> --ttl 14d` (pilot; the command appears once the server enrolls you) |
+| A time-limited note for the whole team (announcement, release notes, a heads-up) | `ox bulletin post <file> --ttl 14d --json` (pilot). See `ox guide bulletin` for posting, reading, and availability. |
 
 ## See also
 
+- `ox guide bulletin` — publish and read time-limited team notes
 - `ox guide team-rules` — file format and publishing workflow for modular rules
 - `ox guide agents-md` — how the root AGENTS.md and CLAUDE.md fit in
 - `ox guide murmur-vs-rule` — when to murmur (transient) vs. publish a durable rule

@@ -301,6 +301,7 @@ func TestGuideTopicsReferencedByPrime_Exist(t *testing.T) {
 
 	// topic -> the prime text that points at it
 	referenced := map[string]string{
+		"bulletin":          "prime.BuildGuidance (server-enrolled posting commands)",
 		"knowledge-bubbles": "prime.KBGuidanceText (the <knowledge-bubbles> block)",
 		"conversations":     "prime.KBGuidanceText (the citation-walking pointer)",
 	}

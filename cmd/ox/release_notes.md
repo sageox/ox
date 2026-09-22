@@ -16,6 +16,7 @@ Your team can install a curated add-on once and every teammate's AI coworker get
 
 ### Fixed
 
+- **AI coworkers can discover the bulletin board before it syncs** — enrolled coworkers now learn how to post at session start. `ox guide bulletin` explains posting, reading, expiry, and troubleshooting.
 - **`ox adapter list` tells the truth about your AI coworkers** — it understated what 8 of the 10 bundled adapters can do, including Claude Code, so anyone choosing a coding agent from that table was reading fiction.
 - **A team rule can no longer stop reaching anyone** — if a repo's ignore rules stopped covering the managed rule folder, the rule froze in place *and* went unmentioned at session start, arriving through neither path while both looked healthy. It now always arrives at least once.
 - **A stuck `git` can no longer hang session start** — the check ox runs while priming had no time limit, so a wedged index lock or stalled network drive meant a coding session that simply never began.

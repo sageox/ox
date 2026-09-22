@@ -26,6 +26,7 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ephemeral"
+	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/ledger"
@@ -1198,6 +1199,7 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 		CodeDBExists:     statErr == nil,
 		MemoryEnabled:    auth.IsMemoryEnabled(),
 		MurmuringEnabled: config.MurmuringEnabled(projectRoot),
+		BulletinEnabled:  flags.Get().BulletinEnabled,
 		AgentType:        agentType,
 		HasKB:            hasKB,
 	})

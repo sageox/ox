@@ -15,6 +15,7 @@ type GuidanceParams struct {
 	CodeDBExists     bool             // true if code search index exists on disk
 	MemoryEnabled    bool             // true if memory feature is enabled
 	MurmuringEnabled bool             // true if murmuring: "auto" is set for this project
+	BulletinEnabled  bool             // server-enrolled publishing pilot; independent of local sync
 	AgentType        string           // detected/claimed agent type; drives plan-enrichment tiering
 	HasKB            bool             // true if at least one knowledge bubble is mounted for this caller
 }
@@ -33,6 +34,18 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 		cmds = append(cmds, IntentCommand{
 			Intent:  "team context (team-wide, all repos): recorded meetings, architecture decisions, conventions",
 			Command: "ox agent team-ctx [slug]",
+		})
+	}
+
+	// Publishing goes through the server, so discovery must survive an empty
+	// board or a missing checkout. Use the same gate as command registration.
+	if p.BulletinEnabled {
+		cmds = append(cmds, IntentCommand{
+			Intent:  "publish a time-limited team bulletin (announcement, release notes, heads-up) when requested; Markdown or HTML; works before local sync",
+			Command: "ox bulletin post <file> --ttl 14d --json",
+		}, IntentCommand{
+			Intent:  "bulletin board: when to post, choose an expiry, read teammates' notes, troubleshoot availability",
+			Command: "ox guide bulletin",
 		})
 	}
 

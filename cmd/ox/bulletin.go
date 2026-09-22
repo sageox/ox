@@ -36,7 +36,8 @@ AI coworker on the team posts useful, time-limited information.
 
 Available only to people the server has enrolled in the pilot. A newly
 enrolled person sees the command after the daemon's next settings refresh,
-which can take up to an hour.`,
+which can take up to an hour. Read 'ox guide bulletin' for posting, reading,
+and troubleshooting.`,
 }
 
 var bulletinPostCmd = &cobra.Command{
