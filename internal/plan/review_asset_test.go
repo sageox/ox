@@ -138,6 +138,7 @@ func TestReviewRail_MinimizeContract(t *testing.T) {
 	for _, want := range []string{
 		`'<button class="rev-rail-hide"`,                 // the open rail's way out…
 		`'<button class="rev-rail-show"`,                 // …and the hidden rail's way back
+		"BUBBLE + rows.length",                           // including an explicit zero-comment count
 		"sessionStorage.setItem(MIN_KEY, '1')",           // hidden is kept per tab…
 		"railMin = !!sessionStorage.getItem(MIN_KEY)",    // …and read back after a reload
 		"rail.classList.toggle('rev-rail-min', railMin)", // the class both stylesheets key on

@@ -185,7 +185,7 @@
     rail.style.display = '';
     rail.classList.toggle('rev-rail-min', railMin);
     if (railMin) {
-      rail.innerHTML = '<button class="rev-rail-show" title="Show comments" aria-label="Show comments (' + rows.length + ')">' + BUBBLE + (rows.length || '') + '</button>';
+      rail.innerHTML = '<button class="rev-rail-show" title="Show comments" aria-label="Show comments (' + rows.length + ')">' + BUBBLE + rows.length + '</button>';
       return;
     }
     var hide = '<button class="rev-rail-hide" title="Hide comments">Hide</button>';
