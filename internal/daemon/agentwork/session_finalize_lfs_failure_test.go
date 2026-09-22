@@ -21,7 +21,7 @@ func TestSessionFinalize_LFSFailurePreservesCacheUntilRetry(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	for _, door := range []string{"regular", "upload-only"} {
+	for _, door := range []string{"regular", "upload-only", "upload-only-draft"} {
 		for _, failure := range []string{"client", "batch", "blob"} {
 			t.Run(door+"/"+failure, func(t *testing.T) {
 				barePath, ledgerPath := setupBareAndCloneLedger(t)
@@ -31,6 +31,14 @@ func TestSessionFinalize_LFSFailurePreservesCacheUntilRetry(t *testing.T) {
 					for _, artifact := range requiredArtifacts {
 						require.NoError(t, os.Remove(filepath.Join(cacheDir, artifact)))
 					}
+				}
+				if door == "upload-only-draft" {
+					// Legacy raw has no ID; the committed draft is its only carrier.
+					require.NoFileExists(t, filepath.Join(cacheDir, "meta.json"))
+					writeDraftMeta(t, filepath.Join(ledgerPath, "sessions", sessionName))
+					runGitCmd(t, ledgerPath, "add", "sessions")
+					runGitCmd(t, ledgerPath, "commit", "-m", "publish session draft")
+					runGitCmd(t, ledgerPath, "push", "origin", "HEAD")
 				}
 				handler := newGitBackedHandler()
 				service := enableLocalFinalizeLFS(t, handler, ledgerPath)
@@ -64,6 +72,11 @@ func TestSessionFinalize_LFSFailurePreservesCacheUntilRetry(t *testing.T) {
 				raw, err := os.ReadFile(filepath.Join(cacheDir, "raw.jsonl"))
 				require.NoError(t, err, "the original cache is required for retry")
 				assert.Equal(t, testRawContent, string(raw))
+				if door == "upload-only-draft" {
+					meta, err := lfs.ReadSessionMeta(cacheDir)
+					require.NoError(t, err)
+					require.Equal(t, draftTestSessionID, meta.SessionID, "draft identity must survive outside the discarded payload")
+				}
 
 				if failure == "client" {
 					gitserver.TestSetConfigDirOverride(credentialDir)
@@ -81,6 +94,11 @@ func TestSessionFinalize_LFSFailurePreservesCacheUntilRetry(t *testing.T) {
 				require.NoError(t, err, "the recovered session must publish an LFS pointer")
 				assert.Equal(t, "sha256:"+lfs.ComputeOID(raw), oid)
 				assert.Equal(t, int64(len(raw)), size)
+				if door == "upload-only-draft" {
+					meta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", sessionName))
+					require.NoError(t, err)
+					assert.Equal(t, draftTestSessionID, meta.SessionID, "Detect retry must retain the published session link")
+				}
 				settled, err := handler.Detect(ledgerPath)
 				require.NoError(t, err)
 				assert.Empty(t, settled, "the retry must converge once LFS recovers")

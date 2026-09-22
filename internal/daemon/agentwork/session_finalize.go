@@ -1823,6 +1823,19 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 		// (legacy or imported). Purging first and resolving later would mint a
 		// fresh id and 404 a /c/ link already published in a PR body.
 		if draftID != "" {
+			// The payload does not survive a failed upload and a fresh Detect.
+			// Make the cache a durable identity carrier before purging the draft.
+			if err := lfs.MutateSessionMeta(context.Background(), cacheDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+				if current == nil {
+					current = h.synthesizeMeta(cacheDir, sessionName)
+					current.SessionID = session.ResolveSessionID(session.ReadHeaderSessionID(filepath.Join(cacheDir, "raw.jsonl")), draftID)
+				} else if current.SessionID == "" {
+					current.SessionID = draftID
+				}
+				return current, nil
+			}); err != nil {
+				return "", fmt.Errorf("preserve draft session identity: %w", err)
+			}
 			payload.PreservedSessionID = draftID
 		}
 		if rmErr := h.runGit(payload.LedgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--",
