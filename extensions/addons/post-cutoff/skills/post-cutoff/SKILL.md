@@ -1,6 +1,6 @@
 ---
 name: post-cutoff
-description: Curated facts about tools, models, and releases that postdate your training cutoff — read BEFORE choosing an approach, picking a model, designing a classifier/router/gate, evaluating a vendor, or planning a feature. Current entries: TypeSafe Jev and the System One typed-decision model class. Also the procedure for adding and retiring entries.
+description: What THIS TEAM has adopted or ruled on that postdates your training cutoff — a small, human-curated set, not a watchlist. Read BEFORE choosing an approach, picking a model, designing a classifier/router/gate, or evaluating a vendor. Current entries: TypeSafe Jev and the System One typed-decision model class. Also the procedure for proposing and retiring entries.
 ---
 
 # Post-cutoff
