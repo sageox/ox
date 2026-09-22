@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -806,6 +807,14 @@ func runGitStatus(dir string) (string, error) {
 // This is what catches a manifest whose include list is short. A pattern check
 // can only confirm the patterns it knows to look for; this compares the commit
 // against reality, so it catches an omission nobody anticipated.
+//
+// Each include is checked at its own depth. A top-level include such as
+// agents/ promises everything beneath it; a nested include such as
+// bulletin/general/posts/ promises only that subtree. Tracked files outside
+// every include — the board's archive/, for one — are absent by design, and
+// counting them once produced a false failure on any board whose posts had
+// all expired: the only files left under bulletin/ were archived, none were on
+// disk, and doctor blamed the sync list for a directory it had never promised.
 func missingSparseTopLevelDirs(repoPath string, cfg *manifest.ManifestConfig) []string {
 	cmd := exec.Command("git", "ls-tree", "-d", "--name-only", "HEAD")
 	cmd.Dir = repoPath
@@ -816,16 +825,17 @@ func missingSparseTopLevelDirs(repoPath string, cfg *manifest.ManifestConfig) []
 	expected := expectedTeamTopLevelDirs(cfg)
 	var missing []string
 	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if name == "" || !expected[name] {
+		if name == "" || !expected.top(name) {
 			continue
 		}
 		// Directory presence is NOT evidence the content materialized: an excluded
 		// directory can exist purely because of untracked local files beside it. Look
-		// for a tracked child that the manifest does not explicitly deny, and require
-		// at least one such child to exist in the working tree.
+		// for a tracked child that some include actually reaches and the manifest
+		// does not explicitly deny, and require at least one such child to exist in
+		// the working tree.
 		var hasExpectedChild, materialized bool
 		for _, child := range trackedChildren(repoPath, name) {
-			if manifestPathDenied(child, cfg) {
+			if !expected.covers(child) || manifestPathDenied(child, cfg) {
 				continue
 			}
 			hasExpectedChild = true
@@ -841,19 +851,51 @@ func missingSparseTopLevelDirs(repoPath string, cfg *manifest.ManifestConfig) []
 	return missing
 }
 
+// expectedTeamDirs maps each expected top-level directory to the include paths
+// (cleaned, slash-trimmed, root-relative) that reach into it. A top-level
+// include registers itself ("agents" -> ["agents"]); a nested include registers
+// under its first segment while keeping its full path
+// ("bulletin/general/posts/" -> "bulletin": ["bulletin/general/posts"]), so the
+// child filter can tell promised content from a sibling that was never synced.
+type expectedTeamDirs map[string][]string
+
+// top reports whether name is a top-level directory some include reaches into.
+func (e expectedTeamDirs) top(name string) bool {
+	return len(e[name]) > 0
+}
+
+// covers reports whether a tracked path lies under some include. A path is
+// covered when it equals an include or sits beneath it on a path boundary —
+// gitignore semantics, where "memory/rollups" matches both a file of that name
+// and everything under a directory of that name, and never "memory/rollupsX".
+func (e expectedTeamDirs) covers(rel string) bool {
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	for _, inc := range e[strings.SplitN(rel, "/", 2)[0]] {
+		if rel == inc || strings.HasPrefix(rel, inc+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // expectedTeamTopLevelDirs is the product-level team-context shape plus any
-// additional top-level directory the current manifest explicitly includes.
-// Restricting the check to this set keeps intentionally sparse trees such as
-// data/ and assets/ from being diagnosed merely because they exist in HEAD.
-func expectedTeamTopLevelDirs(cfg *manifest.ManifestConfig) map[string]bool {
-	expected := make(map[string]bool)
+// additional path the current manifest explicitly includes, grouped by
+// top-level directory. Restricting the check to this set keeps intentionally
+// sparse trees such as data/ and assets/ from being diagnosed merely because
+// they exist in HEAD.
+func expectedTeamTopLevelDirs(cfg *manifest.ManifestConfig) expectedTeamDirs {
+	expected := make(expectedTeamDirs)
 	add := func(entries []string) {
 		for _, entry := range entries {
 			clean := strings.Trim(strings.TrimSpace(filepath.ToSlash(entry)), "/")
 			if clean == "" {
 				continue
 			}
-			expected[strings.SplitN(clean, "/", 2)[0]] = true
+			top := strings.SplitN(clean, "/", 2)[0]
+			if slices.Contains(expected[top], clean) {
+				continue
+			}
+			expected[top] = append(expected[top], clean)
 		}
 	}
 	add(manifest.FallbackConfigFor(manifest.RepoKindTeamContext).Includes)

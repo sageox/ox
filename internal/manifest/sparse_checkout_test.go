@@ -256,3 +256,66 @@ func TestSparseCheckout_BareFilePatternDoesNotLeakNestedMatches(t *testing.T) {
 			"%s must not materialize: knowledge/ is not in the include set", leaked)
 	}
 }
+
+// TestSparseCheckout_NestedIncludeMaterializesPostsNotArchive drives real git
+// with the patterns ComputeSparseSet emits for the bulletin board entry.
+//
+// bulletin/general/posts/ is the first three-component include ox ships. Every
+// earlier include was a top-level directory or a root file, so the existing
+// tests only ever proved that a nested include is anchored correctly as a
+// pattern string — never that a no-cone sparse checkout materializes exactly
+// that subtree. The board's sibling archive/ holds expired posts and must stay
+// off disk, and each post ships with a .meta.json sidecar that must land beside
+// it, or the expiry check readers rely on has nothing to read.
+//
+// Failure prevented: a sparse checkout that pulls the archive onto every
+// machine, or one that drops the sidecar and leaves posts undated.
+func TestSparseCheckout_NestedIncludeMaterializesPostsNotArchive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	const sha = "7c4a8d09ca3762af61e59520943dc26494f8941b7c4a8d09ca3762af61e59520" // fake, 64 hex
+	post := "bulletin/general/posts/notes-" + sha + ".md"
+	sidecar := "bulletin/general/posts/notes-" + sha + ".meta.json"
+	archived := "bulletin/general/archive/ab/old-" + sha + ".md"
+
+	dir := t.TempDir()
+	initGitRepo(t, dir, map[string]string{
+		post:               "# Notes\n\nactive post\n",
+		sidecar:            `{"expires_at":"2026-10-05T22:41:07Z"}`,
+		archived:           "# Old\n\nexpired post\n",
+		"data/raw.txt":     "raw data content",
+		"memory/MEMORY.md": "memory",
+		"README.md":        "root",
+	})
+
+	cfg := &ManifestConfig{
+		Includes: []string{"memory/", "bulletin/general/posts/"},
+		Denies:   []string{"data/"},
+	}
+	sparseSet := ComputeSparseSet(cfg)
+	require.Contains(t, sparseSet, "/bulletin/general/posts/", "pattern computation is the precondition, not the claim")
+
+	// Mirror the real clone path: init no-cone, set the computed patterns, then
+	// checkout HEAD to materialize exactly what the patterns select.
+	runGit(t, dir, "sparse-checkout", "init", "--no-cone")
+	runGit(t, dir, append([]string{"sparse-checkout", "set", "--no-cone"}, sparseSet...)...)
+	runGit(t, dir, "checkout", "HEAD")
+
+	assert.FileExists(t, filepath.Join(dir, filepath.FromSlash(post)),
+		"the post body must materialize under the nested include")
+	assert.FileExists(t, filepath.Join(dir, filepath.FromSlash(sidecar)),
+		"the .meta.json sidecar must land beside its post")
+	assert.FileExists(t, filepath.Join(dir, "memory", "MEMORY.md"),
+		"a sibling top-level include must still materialize")
+	assert.FileExists(t, filepath.Join(dir, "README.md"),
+		"root-level files must still materialize via /*")
+
+	_, err := os.Stat(filepath.Join(dir, filepath.FromSlash(archived)))
+	assert.True(t, os.IsNotExist(err), "the archive must not sync: %s", archived)
+	_, err = os.Stat(filepath.Join(dir, "bulletin", "general", "archive"))
+	assert.True(t, os.IsNotExist(err), "bulletin/general/archive/ must not exist at all")
+	_, err = os.Stat(filepath.Join(dir, "data"))
+	assert.True(t, os.IsNotExist(err), "the denied data/ tree must not materialize")
+}

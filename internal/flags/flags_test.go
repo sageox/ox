@@ -35,6 +35,9 @@ func TestDefaults(t *testing.T) {
 	if d.AttestEnabled {
 		t.Error("AttestEnabled should default false")
 	}
+	if d.BulletinEnabled {
+		t.Error("BulletinEnabled should default false (server-enrolled pilot)")
+	}
 	if d.DisableFileDeleteTools {
 		t.Error("DisableFileDeleteTools should default false")
 	}
@@ -132,9 +135,10 @@ func TestDaemonProviderNilSettings(t *testing.T) {
 func TestDaemonProviderStaleCache(t *testing.T) {
 	stale := &flags.CLISettingsResponse{
 		Features: flags.CLIFeatures{
-			CodeDB:  bp(false), // server wanted codedb off
-			Whisper: bp(true),
-			Distill: bp(true),
+			CodeDB:   bp(false), // server wanted codedb off
+			Whisper:  bp(true),
+			Distill:  bp(true),
+			Bulletin: bp(true), // pilot enrollment that a dead daemon must not keep alive
 		},
 		FetchedAt: time.Now().Add(-3 * time.Hour), // older than 2× max age
 	}
@@ -143,6 +147,9 @@ func TestDaemonProviderStaleCache(t *testing.T) {
 	// stale cache should be ignored — defaults apply
 	if !f.CodeDBEnabled {
 		t.Error("stale cache should be ignored; CodeDBEnabled should be default true")
+	}
+	if f.BulletinEnabled {
+		t.Error("stale cache should be ignored; BulletinEnabled should be default false")
 	}
 }
 
@@ -208,6 +215,9 @@ func TestRemoteSettingsOmittedFieldsPreserveDefaults(t *testing.T) {
 	if patch.AttestEnabled != nil {
 		t.Error("AttestEnabled should be nil for omitted field")
 	}
+	if patch.BulletinEnabled != nil {
+		t.Error("BulletinEnabled should be nil for omitted field")
+	}
 
 	// resolve should preserve defaults for omitted fields
 	f := flags.Resolve(context.Background(), flags.DaemonProvider{
@@ -224,6 +234,9 @@ func TestRemoteSettingsOmittedFieldsPreserveDefaults(t *testing.T) {
 	}
 	if f.AttestEnabled {
 		t.Error("AttestEnabled should remain default false (omitted)")
+	}
+	if f.BulletinEnabled {
+		t.Error("BulletinEnabled should remain default false (omitted)")
 	}
 }
 
@@ -480,4 +493,87 @@ type testPatchProvider struct {
 
 func (p *testPatchProvider) Patch(_ context.Context) (*flags.Patch, flags.Source, error) {
 	return p.patch, flags.SourceEnv, nil
+}
+
+// TestBulletinFlagResolvesFromRemotePayload decodes real settings payloads
+// through DaemonProvider and Resolve — the same path the CLI walks at startup —
+// for the four shapes the server can send for features.bulletin.
+//
+// Failure prevented: a JSON null (team service token: no person to evaluate)
+// or an absent key being decoded as an opinionated false, or a true never
+// reaching Flags — so a pilot member never sees `ox bulletin`, or a rolling
+// upgrade flips the gate on a machine the server never enrolled.
+func TestBulletinFlagResolvesFromRemotePayload(t *testing.T) {
+	tests := []struct {
+		name        string
+		features    string
+		wantOpinion *bool // nil means the patch must carry no opinion
+		wantEnabled bool
+	}{
+		{name: "null (team service token)", features: `{"bulletin":null}`, wantOpinion: nil, wantEnabled: false},
+		{name: "absent key", features: `{}`, wantOpinion: nil, wantEnabled: false},
+		{name: "false", features: `{"bulletin":false}`, wantOpinion: bp(false), wantEnabled: false},
+		{name: "true", features: `{"bulletin":true}`, wantOpinion: bp(true), wantEnabled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := `{"features":` + tt.features + `,"killswitches":{},"fetched_at":"` +
+				time.Now().UTC().Format(time.RFC3339) + `"}`
+			var resp flags.CLISettingsResponse
+			if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+				t.Fatalf("unmarshal %s: %v", raw, err)
+			}
+
+			patch := flags.RemoteSettingsToPatch(&resp)
+			switch {
+			case tt.wantOpinion == nil && patch.BulletinEnabled != nil:
+				t.Errorf("BulletinEnabled patch = %v, want nil (no opinion)", *patch.BulletinEnabled)
+			case tt.wantOpinion != nil && patch.BulletinEnabled == nil:
+				t.Errorf("BulletinEnabled patch = nil, want %v", *tt.wantOpinion)
+			case tt.wantOpinion != nil && *patch.BulletinEnabled != *tt.wantOpinion:
+				t.Errorf("BulletinEnabled patch = %v, want %v", *patch.BulletinEnabled, *tt.wantOpinion)
+			}
+
+			f := flags.Resolve(context.Background(), flags.DaemonProvider{CachedSettings: &resp})
+			if f.BulletinEnabled != tt.wantEnabled {
+				t.Errorf("BulletinEnabled = %v, want %v", f.BulletinEnabled, tt.wantEnabled)
+			}
+		})
+	}
+}
+
+// TestEnvProviderHasNoOpinionOnBulletin proves the pilot gate has no local
+// override: FEATURE_BULLETIN in the environment is ignored by design, both on
+// its own and layered over a server-side decision.
+//
+// Failure prevented: someone wiring FEATURE_BULLETIN into EnvProvider and
+// letting a laptop enable (or re-enable) a server-enrolled pilot command.
+func TestEnvProviderHasNoOpinionOnBulletin(t *testing.T) {
+	for _, val := range []string{"true", "1", "yes"} {
+		t.Setenv("FEATURE_BULLETIN", val)
+
+		patch, _, err := flags.EnvProvider{}.Patch(context.Background())
+		if err != nil {
+			t.Fatalf("EnvProvider.Patch: %v", err)
+		}
+		if patch != nil && patch.BulletinEnabled != nil {
+			t.Errorf("FEATURE_BULLETIN=%q produced an env opinion %v; EnvProvider must have none", val, *patch.BulletinEnabled)
+		}
+
+		f := flags.Resolve(context.Background(), flags.EnvProvider{})
+		if f.BulletinEnabled {
+			t.Errorf("FEATURE_BULLETIN=%q enabled the bulletin pilot", val)
+		}
+	}
+
+	// layered over an explicit server-side false, env must still lose
+	t.Setenv("FEATURE_BULLETIN", "true")
+	remote := flags.DaemonProvider{CachedSettings: &flags.CLISettingsResponse{
+		Features:  flags.CLIFeatures{Bulletin: bp(false)},
+		FetchedAt: time.Now(),
+	}}
+	f := flags.Resolve(context.Background(), remote, flags.EnvProvider{})
+	if f.BulletinEnabled {
+		t.Error("FEATURE_BULLETIN=true overrode a server-side false")
+	}
 }

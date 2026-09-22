@@ -42,6 +42,7 @@ acceptance/
   plan-enrichment/        # enrich-while-drafting, render, the review loop, nudges
   murmur/                 # publishing WIP, whisper delivery to other coworkers
   team-context/           # ox agent team-ctx, ox query, searching team knowledge
+  bulletin/               # ox bulletin post, pilot enrollment, board reading guidance, quiet-board health
   code-intelligence/      # ox code search, ox code insights before planning
   knowledge-bubbles/      # ox kb list / inspect / locate bubbles
   upgrade/                # ox upgrade, version-mismatch detection, doctor self-heal

@@ -50,6 +50,7 @@ func allNil(p *Patch) bool {
 		p.AutoDistill == nil &&
 		p.TUIEnabled == nil &&
 		p.AttestEnabled == nil &&
+		p.BulletinEnabled == nil &&
 		p.DisableFileDeleteTools == nil &&
 		p.DisableShellExecTools == nil &&
 		p.PrimeAppend == nil

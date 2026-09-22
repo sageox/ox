@@ -69,6 +69,13 @@ has initialized the repository".
 | team-context/team-ctx.feature | `ox agent team-ctx [slug]`, `ox coworker list` / load | Distilled team discussions/decisions/conventions; expert-coworker load |
 | team-context/query.feature | `ox query` (`--local`, `--json`) | Search across discussions, decisions, docs, prior sessions; offline cached-Ledger search |
 
+## Bulletin Board
+
+| Feature | ox surface | SageOx touchpoint |
+|---|---|---|
+| bulletin/publish-post.feature | `ox bulletin post <file> --ttl` (`--title`, `--slug`, `--format`, `--board`, `--team`, `--yes`, `--json`); the command is present only for people the server has enrolled | Server-side publish into the team's Team Context repo (the laptop never writes the post); per-person pilot enrollment via the cached CLI settings, refreshed hourly; the next Team Context sync delivers the post to teammates |
+| bulletin/publish-post.feature (reading + health) | `ox agent prime`, `ox guide team-context`, `ox doctor` | Board pointer and trust framing from the local Team Context checkout (no cloud call; never inlines a post body); sync brings down active posts but never the archive; doctor treats a board holding only archived posts as healthy |
+
 ## Code Intelligence
 
 | Feature | ox surface | SageOx touchpoint |
@@ -102,3 +109,4 @@ runner:
 | Seed prior sessions/discussions on a topic | team-context/query.feature, session-recording/auto-record.feature | Make recall and prior-art signals fire |
 | Make the configured endpoint unreachable | auth/headless-login.feature, murmur/publish-wip.feature | Drive the network-error and daemon-down fallbacks |
 | Age a murmur past its expiry | murmur/whisper-delivery.feature | Verify expired murmurs are not whispered |
+| Enroll or unenroll a persona in the bulletin pilot; age a post past its expiry | bulletin/publish-post.feature | Make `ox bulletin` appear or vanish after the next settings refresh; move a post from active to archived so sync and doctor see a quiet board |
