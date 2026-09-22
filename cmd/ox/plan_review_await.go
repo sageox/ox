@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/plan"
 	"github.com/spf13/cobra"
 )
@@ -180,9 +180,7 @@ func emitAwait(cmd *cobra.Command, slug string, res awaitResult) error {
 	if res.Open == nil {
 		res.Open = []plan.MergedItem{}
 	}
-	enc := json.NewEncoder(cmd.OutOrStdout())
-	enc.SetIndent("", "  ")
-	return enc.Encode(res)
+	return cli.PrintJSONTo(cmd.OutOrStdout(), res)
 }
 
 func init() {

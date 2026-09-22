@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -813,14 +812,10 @@ func planAuthors(gitRoot string) []string {
 // plumbing path the plan-exit hook and the agent call. It makes NO network/LLM
 // call (Enrich is pure-local).
 func writePlanJSON(cmd *cobra.Command, result plan.Result) error {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(result); err != nil {
+	if err := cli.PrintJSONTo(cmd.OutOrStdout(), result); err != nil {
 		return fmt.Errorf("encode plan result: %w", err)
 	}
-	_, err := buf.WriteTo(cmd.OutOrStdout())
-	return err
+	return nil
 }
 
 // writePlanHuman prints a concise summary: signal counts plus one line per
@@ -1272,12 +1267,10 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 		return fmt.Errorf("list plans: %w", err)
 	}
 	if jsonOut {
-		enc := json.NewEncoder(out)
-		enc.SetIndent("", "  ")
 		if plans == nil {
 			plans = []plan.PlanInfo{}
 		}
-		return enc.Encode(plans)
+		return cli.PrintJSONTo(out, plans)
 	}
 	if len(plans) == 0 {
 		fmt.Fprintln(out, "No saved plans yet. Run 'ox plan enrich --text' on an implementation plan to capture one.")

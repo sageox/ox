@@ -283,13 +283,12 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		fmt.Println("--- Machine Output ---")
 	}
 
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
+	jsonOut, err := cli.MarshalJSONIndent(output)
 	if err != nil {
 		return fmt.Errorf("format start JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.WriteJSONBytes(os.Stdout, jsonOut)
 }
 
 // buildSessionStartOutput constructs the JSON output for session start.
@@ -458,10 +457,9 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 				fmt.Sprintf("Re-run: ox agent %s session stop", inst.AgentID),
 			},
 		}
-		jsonOut, _ := json.MarshalIndent(retry, "", "  ")
+		jsonOut, _ := cli.MarshalJSONIndent(retry)
 		trackContextBytes(int64(len(jsonOut)))
-		fmt.Println(string(jsonOut))
-		return nil
+		return cli.WriteJSONBytes(os.Stdout, jsonOut)
 	}
 
 	// mark explicit stop BEFORE daemon RPC so anti-entropy cannot restart
@@ -940,13 +938,12 @@ func outputSessionStopJSON(projectRoot string, inst *agentinstance.Instance, sta
 		output.UploadWarning = "no session file found — session data was not uploaded to ledger"
 		output.Guidance = "Session stopped but no conversation data was found. The session recording may be empty. Run 'ox doctor' to check for recoverable sessions."
 	}
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
+	jsonOut, err := cli.MarshalJSONIndent(output)
 	if err != nil {
 		return fmt.Errorf("format stop JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.WriteJSONBytes(os.Stdout, jsonOut)
 }
 
 // sessionStopOutput aliases pipeline.StopOutput for backward compat within package main.
@@ -1734,13 +1731,12 @@ func runAgentSessionRemind(inst *agentinstance.Instance) error {
 			AgentID: inst.AgentID,
 			Message: message,
 		}
-		jsonOut, err := json.MarshalIndent(output, "", "  ")
+		jsonOut, err := cli.MarshalJSONIndent(output)
 		if err != nil {
 			return fmt.Errorf("format remind JSON: %w", err)
 		}
 		trackContextBytes(int64(len(jsonOut)))
-		fmt.Println(string(jsonOut))
-		return nil
+		return cli.WriteJSONBytes(os.Stdout, jsonOut)
 	}
 
 	if cfg.Text {
@@ -1756,13 +1752,12 @@ func runAgentSessionRemind(inst *agentinstance.Instance) error {
 		AgentID: inst.AgentID,
 		Message: message,
 	}
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
+	jsonOut, err := cli.MarshalJSONIndent(output)
 	if err != nil {
 		return fmt.Errorf("format remind JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.WriteJSONBytes(os.Stdout, jsonOut)
 }
 
 // sessionSummarizeOutput aliases pipeline.SummarizeOutput for backward compat within package main.
@@ -1901,13 +1896,12 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 			FilePath:      filePath,
 			SummaryPrompt: summaryPrompt,
 		}
-		jsonOut, err := json.MarshalIndent(output, "", "  ")
+		jsonOut, err := cli.MarshalJSONIndent(output)
 		if err != nil {
 			return fmt.Errorf("format summarize JSON: %w", err)
 		}
 		trackContextBytes(int64(len(jsonOut)))
-		fmt.Println(string(jsonOut))
-		return nil
+		return cli.WriteJSONBytes(os.Stdout, jsonOut)
 	}
 
 	if cfg.Text {
@@ -1931,13 +1925,12 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 		FilePath:      filePath,
 		SummaryPrompt: summaryPrompt,
 	}
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
+	jsonOut, err := cli.MarshalJSONIndent(output)
 	if err != nil {
 		return fmt.Errorf("format summarize JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.WriteJSONBytes(os.Stdout, jsonOut)
 }
 
 // mapRoleToEntryType delegates to session.MapRoleToEntryType.
@@ -2072,13 +2065,12 @@ func runAgentSessionRecord(inst *agentinstance.Instance, args []string) error {
 			TotalCount: totalCount,
 			SessionID:  session.GetSessionName(state.SessionPath),
 		}
-		jsonOut, err := json.MarshalIndent(output, "", "  ")
+		jsonOut, err := cli.MarshalJSONIndent(output)
 		if err != nil {
 			return fmt.Errorf("format record JSON: %w", err)
 		}
 		trackContextBytes(int64(len(jsonOut)))
-		fmt.Println(string(jsonOut))
-		return nil
+		return cli.WriteJSONBytes(os.Stdout, jsonOut)
 	}
 
 	if cfg.Text {
@@ -2097,13 +2089,12 @@ func runAgentSessionRecord(inst *agentinstance.Instance, args []string) error {
 		TotalCount: totalCount,
 		SessionID:  session.GetSessionName(state.SessionPath),
 	}
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
+	jsonOut, err := cli.MarshalJSONIndent(output)
 	if err != nil {
 		return fmt.Errorf("format record JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.WriteJSONBytes(os.Stdout, jsonOut)
 }
 
 // sessionPlanOutput is the JSON output for the plan command.
@@ -2197,10 +2188,9 @@ func runAgentSessionPlan(inst *agentinstance.Instance) error {
 			DiagramCount: len(diagrams),
 			Diagrams:     diagrams,
 		}
-		jsonOut, _ := json.MarshalIndent(output, "", "  ")
+		jsonOut, _ := cli.MarshalJSONIndent(output)
 		trackContextBytes(int64(len(jsonOut)))
-		fmt.Println(string(jsonOut))
-		return nil
+		return cli.WriteJSONBytes(os.Stdout, jsonOut)
 	}
 
 	if cfg.Text {
@@ -2220,10 +2210,9 @@ func runAgentSessionPlan(inst *agentinstance.Instance) error {
 		DiagramCount: len(diagrams),
 		Diagrams:     diagrams,
 	}
-	jsonOut, _ := json.MarshalIndent(output, "", "  ")
+	jsonOut, _ := cli.MarshalJSONIndent(output)
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.WriteJSONBytes(os.Stdout, jsonOut)
 }
 
 // readPlanFromStdin reads all content from stdin.

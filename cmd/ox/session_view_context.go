@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -278,9 +277,7 @@ func viewContextTraceJSON(w io.Writer, events []contexttrace.Event, sessionName 
 		Events:      events,
 	}
 
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(out)
+	return cli.PrintJSONTo(w, out)
 }
 
 func formatTraceTimestamp(ts string) string {

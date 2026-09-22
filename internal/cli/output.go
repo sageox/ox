@@ -108,14 +108,6 @@ func IsHeadless() bool {
 	return false
 }
 
-func PrintJSON(v any) {
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(v); err != nil {
-		fmt.Fprintf(os.Stderr, "error encoding JSON: %v\n", err)
-	}
-}
-
 func PrintSuccess(msg string) {
 	PrintSuccessTo(os.Stdout, msg)
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/glance"
 	"github.com/spf13/cobra"
 )
@@ -194,9 +194,7 @@ func glanceActivity(ledgerPath, repo string, since, until time.Time) (glance.Act
 }
 
 func outputGlanceJSON(w io.Writer, data glance.ActivityData) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(data)
+	return cli.PrintJSONTo(w, data)
 }
 
 // glanceRepoName returns the repo name from the project root, falling back to cwd basename.

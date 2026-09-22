@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -74,9 +73,7 @@ exits non-zero so callers cannot mistake partial retrieval for a verified miss.`
 		if text {
 			err = writeDecisionHuman(cmd, result)
 		} else {
-			enc := json.NewEncoder(cmd.OutOrStdout())
-			enc.SetIndent("", "  ")
-			err = enc.Encode(result)
+			err = cli.PrintJSONTo(cmd.OutOrStdout(), result)
 		}
 		if err != nil {
 			return err

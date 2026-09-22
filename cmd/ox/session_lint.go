@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/ui"
 	"github.com/sageox/ox/pkg/adapterprotocol"
@@ -299,9 +300,7 @@ func lintAllSessions(w io.Writer, sessionsDir string, jsonOutput bool, opts ...l
 // printLintResults outputs lint results to w as JSON or human-readable text.
 func printLintResults(w io.Writer, results []lintResult, jsonOutput bool) error {
 	if jsonOutput {
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		return enc.Encode(results)
+		return cli.PrintJSONTo(w, results)
 	}
 
 	allValid := true

@@ -9,8 +9,11 @@ and JSON modes. JSON diagnostics keep the `status` and `message` fields. This
 keeps stdout available for the command result, so a warning cannot turn a JSON
 document into multiple concatenated objects.
 
-`cli.PrintJSON` writes the command result to stdout. Writer-aware helpers such
-as `PrintWarningTo` honor their supplied writer. Command-specific JSON response
+`cli.PrintJSON` writes the command result to stdout, syntax-colored when a
+human is reading it at a terminal and byte-exact plain JSON whenever the output
+is piped, redirected, or captured by an AI coworker. It is the only JSON
+printer; see `.claude/rules/json-output.md`. Writer-aware helpers such as
+`PrintWarningTo` honor their supplied writer. Command-specific JSON response
 envelopes remain part of the command's stdout contract.
 
 ## Spinner Cancellation

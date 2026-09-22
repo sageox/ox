@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -199,7 +198,7 @@ func runCoworkerList(cmd *cobra.Command, args []string) error {
 				Source:    "none",
 				Endpoint:  currentEndpoint,
 			}
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(output)
+			return cli.PrintJSONTo(cmd.OutOrStdout(), output)
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "No team context configured.")
 		fmt.Fprintln(cmd.OutOrStdout(), "Run 'ox init' to set up team context.")
@@ -230,9 +229,7 @@ func runCoworkerList(cmd *cobra.Command, args []string) error {
 			Endpoint:  currentEndpoint,
 			Teams:     []string{tc.TeamID},
 		}
-		encoder := json.NewEncoder(cmd.OutOrStdout())
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(output)
+		return cli.PrintJSONTo(cmd.OutOrStdout(), output)
 	}
 
 	// resolve display name for team
@@ -337,9 +334,7 @@ func runCoworkerLoad(cmd *cobra.Command, args []string) error {
 			TeamName:    foundTeam.TeamName,
 			Loaded:      true,
 		}
-		encoder := json.NewEncoder(cmd.OutOrStdout())
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(output)
+		return cli.PrintJSONTo(cmd.OutOrStdout(), output)
 	}
 
 	// text output - emit full content for agent consumption

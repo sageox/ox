@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -340,13 +339,12 @@ func buildNextSteps(output *AgentDoctorOutput) []string {
 
 // outputAgentDoctorJSON outputs the doctor results as JSON
 func outputAgentDoctorJSON(w io.Writer, output *AgentDoctorOutput) error {
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
+	jsonOut, err := cli.MarshalJSONIndent(output)
 	if err != nil {
 		return fmt.Errorf("format doctor JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Fprintln(w, string(jsonOut))
-	return nil
+	return cli.WriteJSONBytes(w, jsonOut)
 }
 
 // outputAgentDoctorText outputs the doctor results as human-readable text

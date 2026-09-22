@@ -95,8 +95,8 @@ func runCodeActivity(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	fmt.Fprintln(cmd.OutOrStdout(), string(data))
-	return nil
+	data = append(data, '\n')
+	return cli.WriteJSONBytes(cmd.OutOrStdout(), data)
 }
 
 // parseSinceFlag parses a --since flag value as either a duration (7d, 24h)

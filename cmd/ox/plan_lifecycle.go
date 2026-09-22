@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -180,7 +179,7 @@ func runPlanLifecycleVerbOnDir(cmd *cobra.Command, gitRoot, planDir, slug string
 
 	status := currentPlanStatus(planDir)
 	if jsonOut {
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(planLifecycleResult{Changed: changed, Status: status})
+		return cli.PrintJSONTo(cmd.OutOrStdout(), planLifecycleResult{Changed: changed, Status: status})
 	}
 	return writePlanLifecycleHuman(cmd, slug, changed, status)
 }
@@ -247,7 +246,7 @@ func runPlanStatusOnDir(cmd *cobra.Command, planDir, topic, slug string, jsonOut
 	folded := plan.Fold(events)
 
 	if jsonOut {
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(planStatusJSON{
+		return cli.PrintJSONTo(cmd.OutOrStdout(), planStatusJSON{
 			PlanID:     folded.PlanID,
 			Slug:       slug,
 			Status:     folded.Status,

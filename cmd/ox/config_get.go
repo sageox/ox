@@ -1,8 +1,8 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/sageox/ox/internal/cli"
@@ -40,12 +40,7 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 	}
 
 	if jsonOutput {
-		out, err := json.MarshalIndent(cv, "", "  ")
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(out))
-		return nil
+		return cli.PrintJSONTo(os.Stdout, cv)
 	}
 
 	// human-readable output with override chain
@@ -293,12 +288,7 @@ func runConfigList(cmd *cobra.Command, args []string) error {
 	}
 
 	if jsonOutput {
-		out, err := json.MarshalIndent(values, "", "  ")
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(out))
-		return nil
+		return cli.PrintJSONTo(os.Stdout, values)
 	}
 
 	// group by category

@@ -547,10 +547,5 @@ func emitAbortOutput(w io.Writer, agentID, sessionName string, draftDeleted bool
 		}
 	}
 
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return fmt.Errorf("format abort JSON: %w", err)
-	}
-	fmt.Fprintln(w, string(jsonOut))
-	return nil
+	return cli.PrintJSONTo(w, output)
 }

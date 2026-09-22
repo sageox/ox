@@ -225,9 +225,7 @@ func outputCaptureResult(result *session.CaptureResult) error {
 		}
 		fmt.Println()
 		fmt.Println("--- Machine Output ---")
-		jsonOut, _ := output.ToJSON()
-		fmt.Println(string(jsonOut))
-		return nil
+		return cli.PrintJSONTo(os.Stdout, output)
 	}
 
 	if cfg.Text {
@@ -244,12 +242,7 @@ func outputCaptureResult(result *session.CaptureResult) error {
 		return nil
 	}
 
-	jsonOut, err := output.ToJSON()
-	if err != nil {
-		return fmt.Errorf("format JSON output: %w", err)
-	}
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.PrintJSONTo(os.Stdout, output)
 }
 
 // parseSessionID extracts --session-id value from args.

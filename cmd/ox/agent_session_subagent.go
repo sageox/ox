@@ -129,9 +129,7 @@ func runAgentSessionSubagentComplete(inst *agentinstance.Instance, args []string
 			ParentSessionPath: parentPath,
 			Message:           fmt.Sprintf("Registered as subagent #%d", subagentCount),
 		}
-		jsonOut, _ := json.MarshalIndent(output, "", "  ")
-		fmt.Println(string(jsonOut))
-		return nil
+		return cli.PrintJSONTo(os.Stdout, output)
 	}
 
 	if cfg.Text {
@@ -151,9 +149,7 @@ func runAgentSessionSubagentComplete(inst *agentinstance.Instance, args []string
 		ParentSessionPath: parentPath,
 		Message:           fmt.Sprintf("Registered as subagent #%d", subagentCount),
 	}
-	jsonOut, _ := json.MarshalIndent(output, "", "  ")
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.PrintJSONTo(os.Stdout, output)
 }
 
 // runAgentSessionSubagentList lists subagent sessions for the current session.
@@ -227,9 +223,7 @@ func runAgentSessionSubagentList(inst *agentinstance.Instance) error {
 		"subagents": subagents,
 		"summary":   summary,
 	}
-	jsonOut, _ := json.MarshalIndent(output, "", "  ")
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.PrintJSONTo(os.Stdout, output)
 }
 
 // parseFlag extracts a flag value from args (--flag value or --flag=value).

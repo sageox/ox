@@ -47,6 +47,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/lfs"
@@ -94,11 +95,9 @@ func runSessionPushSummary(cmd *cobra.Command, args []string) error {
 
 	result := pushSummaryToLedger(filePath, sessionDir)
 
-	jsonOut, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
+	if err := cli.PrintJSONTo(os.Stdout, result); err != nil {
 		return fmt.Errorf("format JSON: %w", err)
 	}
-	fmt.Println(string(jsonOut))
 
 	if !result.Success {
 		return fmt.Errorf("%s", result.Error)

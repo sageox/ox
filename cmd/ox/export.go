@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -115,9 +114,7 @@ func runExport(cmd *cobra.Command, _ []string) error {
 	teams := collectTeamContexts(projectRoot)
 
 	if jsonOutput {
-		enc := json.NewEncoder(out)
-		enc.SetIndent("", "  ")
-		return enc.Encode(buildExportOutput(ledgers, teams, syncSucceeded))
+		return cli.PrintJSONTo(out, buildExportOutput(ledgers, teams, syncSucceeded))
 	}
 
 	renderExportHuman(out, ledgers, teams, syncSucceeded)

@@ -100,7 +100,7 @@ func runRecap(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 		outputBytes = buf.Len()
-		if _, err := buf.WriteTo(os.Stdout); err != nil {
+		if err := cli.WriteJSONBytes(os.Stdout, buf.Bytes()); err != nil {
 			return err
 		}
 	} else {

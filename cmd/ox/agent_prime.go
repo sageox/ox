@@ -1594,14 +1594,15 @@ func outputAgentPrime(cmd *cobra.Command, textMode, reviewMode bool, output agen
 	switch formatFlag {
 	case "json":
 		// legacy JSON output for debugging and programmatic consumers
-		cw := agentinstance.NewCountingWriter(cmd.OutOrStdout())
-		encoder := json.NewEncoder(cw)
-		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(output); err != nil {
+		jsonOut, err := cli.MarshalJSONIndent(output)
+		if err != nil {
+			return err
+		}
+		if err := cli.WriteJSONBytes(cmd.OutOrStdout(), jsonOut); err != nil {
 			return err
 		}
 		// prime is not dispatched via runWithAgentID, send heartbeat directly
-		if bytes := cw.BytesWritten(); bytes > 0 && output.AgentID != "" {
+		if bytes := int64(len(jsonOut)); bytes > 0 && output.AgentID != "" {
 			sendContextHeartbeat(output.AgentID, bytes, "prime")
 		}
 		return nil
@@ -1836,6 +1837,10 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 		fmt.Fprintln(cmd.OutOrStdout())
 		fmt.Fprintln(cmd.OutOrStdout(), "---TEAM_CONTEXT---")
 		teamJSON, _ := json.Marshal(output.TeamContext)
+		// Deliberately NOT themed: this is a compact machine payload between
+		// parse markers, read by the adapter, not a document a human scans.
+		// Color would buy nothing and risks feeding escape bytes to the parser
+		// if this ever runs on a pty. See .claude/rules/json-output.md.
 		fmt.Fprintln(cmd.OutOrStdout(), string(teamJSON))
 		fmt.Fprintln(cmd.OutOrStdout(), "---END_TEAM_CONTEXT---")
 

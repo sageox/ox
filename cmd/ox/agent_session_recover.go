@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -311,10 +310,5 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 }
 
 func outputRecoverJSON(output *sessionRecoverOutput) error {
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return fmt.Errorf("format recover JSON: %w", err)
-	}
-	fmt.Println(string(jsonOut))
-	return nil
+	return cli.PrintJSONTo(os.Stdout, output)
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -70,9 +69,7 @@ func outputInstancesJSON(w io.Writer, instances []daemon.InstanceInfo, err error
 		out.Instances = []daemon.InstanceInfo{}
 	}
 
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(out)
+	return cli.PrintJSONTo(w, out)
 }
 
 func outputInstancesTable(w io.Writer, instances []daemon.InstanceInfo) error {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -226,9 +225,7 @@ func runPlanFeedbackShow(cmd *cobra.Command, slug string, jsonOut bool) error {
 		if items == nil {
 			items = []plan.MergedItem{}
 		}
-		enc := json.NewEncoder(cmd.OutOrStdout())
-		enc.SetIndent("", "  ")
-		return enc.Encode(items)
+		return cli.PrintJSONTo(cmd.OutOrStdout(), items)
 	}
 	shown, derr := printPlanReviewDigest(cmd, info.Dir)
 	if derr != nil {

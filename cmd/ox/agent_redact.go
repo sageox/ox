@@ -2,12 +2,12 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/signing"
 	"github.com/sageox/ox/internal/ui"
@@ -178,12 +178,7 @@ func runAgentRedactPolicy(cmd *cobra.Command, args []string) error {
 		policy.ParseErrors = []string{}
 	}
 
-	data, err := json.MarshalIndent(policy, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal JSON: %w", err)
-	}
-	fmt.Println(string(data))
-	return nil
+	return cli.PrintJSONTo(os.Stdout, policy)
 }
 
 func renderRedactPolicyText(sources []redactSourceJSON, total int, errors []string, sigResult *signing.VerificationResult) error {
@@ -287,11 +282,9 @@ func runAgentRedactTest(cmd *cobra.Command, args []string) error {
 		Redacted: input != output,
 	}
 
-	data, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal JSON: %w", err)
+	if err := cli.PrintJSONTo(os.Stdout, result); err != nil {
+		return err
 	}
-	fmt.Println(string(data))
 
 	// emit parse errors to stderr
 	for _, e := range parseErrors {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -262,9 +261,7 @@ func writeRosterJSON(w io.Writer, resp *api.TeamRosterResponse, available bool) 
 			env.Members = resp.Members
 		}
 	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(env)
+	return cli.PrintJSONTo(w, env)
 }
 
 func renderRosterTable(w io.Writer, resp *api.TeamRosterResponse, label string) {
@@ -574,9 +571,7 @@ func writeTeamShowJSON(w io.Writer, c teamCard, count int, countKnown bool, dash
 		DashboardURL:       dashboard,
 		Published:          c.published,
 	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(env)
+	return cli.PrintJSONTo(w, env)
 }
 
 func renderTeamShow(w io.Writer, c teamCard, count int, countKnown bool, dashboard string) {

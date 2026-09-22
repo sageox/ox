@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -226,7 +225,7 @@ common issues, or --fix-slug to target specific checks.`,
 		// short-circuit: not in a git repo
 		if gitRoot == "" {
 			if cfg != nil && cfg.JSON {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(JSONDoctorOutput{
+				return cli.PrintJSONTo(cmd.OutOrStdout(), JSONDoctorOutput{
 					Summary: JSONSummary{Failed: 1, HasFailed: true},
 					Categories: []JSONCategory{{
 						Name: "Setup",
@@ -270,7 +269,7 @@ common issues, or --fix-slug to target specific checks.`,
 						Message: "not initialized — run 'ox init' to set up this project",
 					})
 				}
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(JSONDoctorOutput{
+				return cli.PrintJSONTo(cmd.OutOrStdout(), JSONDoctorOutput{
 					Summary:    JSONSummary{Failed: len(checks), HasFailed: true},
 					Categories: []JSONCategory{{Name: "Setup", Checks: checks}},
 				})
@@ -1472,9 +1471,7 @@ func displayJSONResults(cmd *cobra.Command, categories []checkCategory) bool {
 		AvailableFixes: jsonFixes,
 	}
 
-	encoder := json.NewEncoder(cmd.OutOrStdout())
-	encoder.SetIndent("", "  ")
-	_ = encoder.Encode(output)
+	_ = cli.PrintJSONTo(cmd.OutOrStdout(), output)
 
 	return hasFailed
 }

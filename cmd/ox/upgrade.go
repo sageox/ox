@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -187,9 +186,7 @@ func validateUpgradeTarget(method installMethod, target string) error {
 
 func outputUpgradeResult(cmd *cobra.Command, result upgradeResult, jsonOutput bool) error {
 	if jsonOutput {
-		encoder := json.NewEncoder(cmd.OutOrStdout())
-		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(result); err != nil {
+		if err := cli.PrintJSONTo(cmd.OutOrStdout(), result); err != nil {
 			return err
 		}
 	} else {

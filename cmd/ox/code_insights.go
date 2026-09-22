@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/repotools"
@@ -128,7 +129,7 @@ var codeInsightsCmd = &cobra.Command{
 				return err
 			}
 			outputBytes = buf.Len()
-			if _, err := buf.WriteTo(os.Stdout); err != nil {
+			if err := cli.WriteJSONBytes(os.Stdout, buf.Bytes()); err != nil {
 				return err
 			}
 		} else {

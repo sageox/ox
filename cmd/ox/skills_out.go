@@ -1,10 +1,11 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/sageox/ox/internal/cli"
 )
 
 // skills_out.go — rendering and encoding helpers shared by every `ox skills …`
@@ -19,12 +20,13 @@ func skillsPrintf(w io.Writer) func(format string, args ...any) {
 	return func(format string, args ...any) { fmt.Fprintf(w, format+"\n", args...) }
 }
 
-// encodeSkillsJSON is the one `--json` encoder for every `ox skills` command:
-// two-space indent, one trailing newline.
+// encodeSkillsJSON is the one `--json` encoder for every `ox skills` and
+// `ox addons` command. It delegates to cli.PrintJSONTo so these payloads get
+// the same treatment as the rest of ox: two-space indent, one trailing
+// newline, and syntax color when a human is reading at a terminal — never when
+// the output is piped, redirected, or captured by an AI coworker.
 func encodeSkillsJSON(w io.Writer, payload any) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(payload)
+	return cli.PrintJSONTo(w, payload)
 }
 
 // dedupeNames removes duplicates, preserving first-seen order. Order matters

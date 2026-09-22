@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
@@ -151,7 +151,7 @@ func runReadSync(cmd *cobra.Command, args []string) error {
 
 func finishReadSync(cmd *cobra.Command, result ledger.ReadSyncResult, jsonOutput bool, code int) error {
 	if jsonOutput {
-		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(result); err != nil {
+		if err := cli.PrintJSONTo(cmd.OutOrStdout(), result); err != nil {
 			return &commandExitError{ExitCode: 1, Message: err.Error()}
 		}
 	} else if code == 0 {

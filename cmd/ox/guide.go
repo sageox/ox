@@ -3,13 +3,13 @@ package main
 import (
 	"bufio"
 	"embed"
-	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"sort"
 	"strings"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -170,9 +170,7 @@ func listGuides(w io.Writer, raw, jsonOutput bool) error {
 	}
 
 	if jsonOutput {
-		encoder := json.NewEncoder(w)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(guides)
+		return cli.PrintJSONTo(w, guides)
 	}
 
 	if raw {
@@ -236,9 +234,7 @@ func showGuide(w io.Writer, topic string, raw, jsonOutput bool) error {
 		if title == "" {
 			title = topic
 		}
-		encoder := json.NewEncoder(w)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(guideEntry{
+		return cli.PrintJSONTo(w, guideEntry{
 			Topic:       topic,
 			Title:       title,
 			Description: desc,
