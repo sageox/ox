@@ -175,11 +175,34 @@ below, before running any command in this section.
 
 ### What an add-on is
 
-An add-on packages **skills** (with their own `references/`, `assets/`,
-`scripts/`) and **rules** — nothing else. There is no free-standing "context"
-artifact type and no tool-artifact kind; both were considered and rejected
-(ADR-032 D2), because context with no skill around it has no activation
-trigger, and a tool kind would have shipped with no handler behind it.
+An add-on packages three things:
+
+| | What it is |
+|---|---|
+| **Skills** | what an AI coworker should do, and when to do it |
+| **Rules** | conventions it should follow |
+| **Context** | the curated reference material it reads while doing it — briefs, tables, examples, source material |
+
+**The context is the part that is easy to miss, and often the most valuable.**
+An add-on is not a bundle of instructions with a pointer to documentation
+elsewhere; the material travels *with* the skill, as files under its
+`references/` and `assets/`. `post-cutoff-jev` is the clearest example: the
+skill is a page of routing ("read this before designing a classifier"), and the
+value is the graded, dated brief sitting beside it in `references/jev.md`.
+
+Context ships **inside a skill** rather than as a free-standing artifact type,
+and that is a deliberate ruling (ADR-032 D2) rather than a packaging accident:
+
+- **A loose document has no activation trigger.** An agent never learns *when*
+  to read it, so it goes unread. Context bundled into a skill is discovered
+  exactly when the skill is — the whole premise of progressive disclosure.
+- **The path that was proposed did not work.** `teamdocs.DiscoverDocs` skips
+  directories, so anything under a `docs/add-ons/` tree would have been
+  invisible to the team-docs catalog, to `ox agent prime`, and to convergence —
+  a silent nothing, not an error.
+
+A tool-artifact kind was rejected for a related reason: it would have shipped
+with no handler behind it.
 
 A team selects an add-on once. Every repository on the team then receives it,
 and every teammate's AI coworker sees the same selection — the opposite of
