@@ -33,7 +33,7 @@ Consequently `ox skills catalog`, `ox skills install`, and `ox skills uninstall`
 
 ### D2 — Add-on-supplied context lives inside a skill
 
-A add-on carries **skills** (with their own `references/`, `assets/`, `scripts/`) and **rules**. There is no free-standing "context" artifact type and no `docs/add-ons/` directory.
+An add-on carries **skills** (with their own `references/`, `assets/`, `scripts/`) and **rules**. There is no free-standing "context" artifact type and no `docs/add-ons/` directory.
 
 Three reasons, in order of weight:
 
@@ -59,7 +59,7 @@ This buys three things a namespaced root would not:
 
 - **Almost no consumer changes.** `internal/teamconverge` carries an `Origin` record with `Addon`, `AddonVersion`, and `Digest` fields on every artifact and outcome, so the reporting path is already add-on-shaped. The `OriginAddon` constant and the `ResolveOrigin` discovery seam were written ahead of add-ons and deleted in this PR, because nothing could populate them and an unreachable seam is not a design benefit. Add-ons reintroduce both in the PR that needs them — one constant and one resolver function — after which discovery, prime, `ox sync` rendering, and `ox skills status` need nothing further. The substance of this bullet is unchanged: no new namespace and no new discoverer.
 - **No fourth reserved namespace.** Add-on skills are Team Skills, so they project into repositories under the existing `sageox-team-` prefix (ADR-031 §1) and are covered by the existing `skills/sageox-team-*/` ignore glob. The per-name exact-ignore mechanism that unprefixed catalog names required (`unprefixedCatalogSkills`) was retired rather than extended, and is **deleted as of this PR** — it mutated a **tracked** `.claude/.gitignore` on every selection change and self-healed only on a `repairTrackedSetup` apply.
-- **One collision rule.** A add-on file colliding by name with an existing **hand-authored** file is a namespace collision, not an edit: install refuses it by name, mutating nothing. Only paths the lock already owns are ever overwritten.
+- **One collision rule.** An add-on file colliding by name with an existing **hand-authored** file is a namespace collision, not an edit: install refuses it by name, mutating nothing. Only paths the lock already owns are ever overwritten.
 
 ### D4 — Updates overwrite; Team Context git history is the undo
 

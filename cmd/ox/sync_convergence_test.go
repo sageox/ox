@@ -368,7 +368,7 @@ func TestExecuteSyncConvergence_RepoSlugUsesCanonicalOriginNotDirectoryNameFallb
 // (#1028, #1029) — while deleting the paragraph outright loses a real rule the
 // moment the command does ship.
 //
-// Failure prevented: `ox sync --help` advertising a Add-on Catalog this build
+// Failure prevented: `ox sync --help` advertising an Add-on Catalog this build
 // cannot reach, or silently dropping the boundary once it can.
 func TestSyncHelp_AddonCatalogParagraphFollowsTheGate(t *testing.T) {
 	require.Contains(t, syncCmd.Short, "rarely needed")
