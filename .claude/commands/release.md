@@ -202,12 +202,36 @@ starts `.github/workflows/release.yml`; its verification job
 must pass before GoReleaser uploads artifacts and publishes the existing draft.
 Do not publish the draft manually.
 
+### Step 8b: Publish the notes to the public changelog
+
+A GitHub release is not the announcement. The same notes must appear on
+**https://sageox.ai/changelog** under the **CLI** surface, or the release is
+invisible to anyone who does not watch the repo.
+
+This is authored in the internal marketing repository using its
+`changelog-entry` skill — run that skill there; do not hand-roll the entry. Give
+it the version, the published release URL, and the user-facing bullets from this
+release's notes.
+
+Two things to carry over, both easy to get wrong:
+
+- **Trim anything users cannot reach.** Feature-flagged work that defaults off
+  (a server-enrolled pilot, an experiment) belongs in neither the GitHub release
+  nor the changelog. Check the flag's default before writing the bullet, not
+  after.
+- **Rewrite, do not paste.** The changelog is shorter than the release notes —
+  a handful of bullets, each one user-visible behavior, leading with the outcome.
+
+Verify the entry appears under the CLI filter at
+https://sageox.ai/changelog once the marketing site deploys.
+
 ### Step 9: Final Instructions
 
 After completing all steps, tell the user:
 
 1. **Watch the explicitly dispatched release workflow.**
 2. **Verify the draft was published with signed artifacts** only after all enforced tiers passed.
+3. **Verify the entry is live** on https://sageox.ai/changelog under the CLI surface.
 
 ## Important Rules
 
@@ -218,3 +242,5 @@ After completing all steps, tell the user:
 - ALWAYS ask user to confirm version before bumping
 - Draft release notes are human-reviewed; the explicitly dispatched verified workflow publishes
 - ALL changes go through a PR - never commit directly to main
+- A release is not done when the GitHub release publishes; it is done when the
+  notes are live on https://sageox.ai/changelog

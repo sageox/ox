@@ -42,6 +42,10 @@ empty :=
 space := $(empty) $(empty)
 comma := ,
 ACCEPTANCE_DIR := $(abspath tmp/acceptance)
+# Coverage-instrumented acceptance binary + its adapter set, isolated from bin/
+# for the reason documented on build-cover.
+COVER_BIN_DIR := $(abspath tmp/acceptance-cover)
+COVER_OX_BIN := $(COVER_BIN_DIR)/$(BINARY_NAME)
 ACCEPTANCE_OX_BIN ?= $(ACCEPTANCE_DIR)/$(BINARY_NAME)
 ACCEPTANCE_GO_COVER_DIR ?=
 ACCEPTANCE_INTEGRATION_COVER_FLAGS = $(if $(strip $(ACCEPTANCE_GO_COVER_DIR)),-coverprofile=$(ACCEPTANCE_GO_COVER_DIR)/integration-test.out -covermode=atomic,)
@@ -342,7 +346,7 @@ test-acceptance-cover: check-test-tiers build-cover ## Acceptance journeys throu
 	@mkdir -p $(COVERDIR)/integration
 	@OX_TEST_GOCOVERDIR="$(abspath $(COVERDIR)/integration)" \
 		$(MAKE) --no-print-directory test-acceptance-run \
-			"ACCEPTANCE_OX_BIN=$(abspath bin/$(BINARY_NAME)-cover)" \
+			"ACCEPTANCE_OX_BIN=$(COVER_OX_BIN)" \
 			"ACCEPTANCE_GO_COVER_DIR=$(COVERDIR)"
 	@test -s $(COVERDIR)/integration-test.out || { echo "ERROR: integration acceptance produced no Go coverage profile"; exit 1; }
 	@test -s $(COVERDIR)/slow-test.out || { echo "ERROR: session acceptance produced no Go coverage profile"; exit 1; }
@@ -667,13 +671,21 @@ coverage-ratchet-diff: test-all ## Enforce package + changed-line coverage vs CO
 coverage-ratchet-test: ## Test the coverage ratchet parser and failure semantics
 	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py
 
+# The instrumented binary lands in its OWN directory, not shared bin/, because
+# ox discovers adapters as siblings of the running binary. In bin/ it saw every
+# adapter a previous `make build` left behind (all ten), while
+# build-acceptance's tmp/acceptance/ holds exactly two — so the same acceptance
+# journeys ran against a different adapter set depending on which target
+# invoked them, and the coverage run failed on a Pi prime block the plain run
+# never produced. Mirroring build-acceptance keeps instrumentation the only
+# difference between the two.
 build-cover: ## Build ox binary with coverage instrumentation
-	@rm -rf $(COVERDIR)/integration $(COVERDIR)/merged
-	@mkdir -p bin $(COVERDIR)/integration
-	@$(GO) build -cover -covermode=atomic $(LDFLAGS) -o bin/$(BINARY_NAME)-cover ./cmd/ox
-	@$(GO) build $(ADAPTER_LDFLAGS) -o bin/ox-adapter-claude-code ./cmd/ox-adapter-claude-code
-	@echo "Instrumented binary: bin/$(BINARY_NAME)-cover"
-	@echo "Run with: GOCOVERDIR=$(COVERDIR)/integration bin/$(BINARY_NAME)-cover ..."
+	@rm -rf $(COVERDIR)/integration $(COVERDIR)/merged "$(COVER_BIN_DIR)"
+	@mkdir -p "$(COVER_BIN_DIR)" $(COVERDIR)/integration
+	@$(GO) build -cover -covermode=atomic $(LDFLAGS) -o "$(COVER_OX_BIN)" ./cmd/ox
+	@$(GO) build $(ADAPTER_LDFLAGS) -o "$(COVER_BIN_DIR)/ox-adapter-claude-code" ./cmd/ox-adapter-claude-code
+	@echo "Instrumented binary: $(COVER_OX_BIN)"
+	@echo "Run with: GOCOVERDIR=$(COVERDIR)/integration $(COVER_OX_BIN) ..."
 
 coverage-integration: ## Run acceptance through instrumented ox and merge full + binary coverage
 	@rm -f coverage-all.out coverage-all.out.provenance.json
