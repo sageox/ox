@@ -3,6 +3,7 @@ package ledger
 import (
 	"errors"
 	"net/http"
+	"runtime"
 	"testing"
 	"time"
 
@@ -65,13 +66,13 @@ func TestReadLimiterFollowsRefusals(t *testing.T) {
 func TestReadLimiterHoldsBackDownloadsOverTheBound(t *testing.T) {
 	l := newReadLimiter()
 	for range readHydrationConcurrency {
-		l.acquire()
+		l.acquire(false)
 	}
 	l.observe(&lfs.HTTPError{StatusCode: http.StatusServiceUnavailable}, false)
 	l.release() // the refused download gives its slot up while it waits
 	acquired := make(chan struct{})
 	go func() {
-		l.acquire()
+		l.acquire(false)
 		acquired <- struct{}{}
 	}()
 	select {
@@ -87,7 +88,7 @@ func TestReadLimiterHoldsBackDownloadsOverTheBound(t *testing.T) {
 	}
 
 	go func() {
-		l.acquire()
+		l.acquire(false)
 		acquired <- struct{}{}
 	}()
 	l.observe(nil, true) // the refused download's retry succeeds
@@ -99,4 +100,44 @@ func TestReadLimiterHoldsBackDownloadsOverTheBound(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("a raised bound woke no waiting download")
 	}
+}
+
+// Failure prevented: fresh downloads take each slot a transfer frees before a
+// refused download's retry gets to run, so the retry, and the bound held until
+// it runs, wait out the rest of the batch. On a busy CI runner the client then
+// stays at the server's old cap after the server stops refusing, which is how
+// TestReadSyncLFSConcurrencyFollowsTheServersBound failed there.
+func TestReadLimiterDueRetryGoesAheadOfFreshDownloads(t *testing.T) {
+	// With one processor the goroutine that frees the slot keeps running and
+	// asks for it again before the woken retry is scheduled: the losing
+	// interleaving becomes the only one.
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	l := newReadLimiter()
+	l.limit = 1
+	l.acquire(false) // a transfer holds the only slot
+
+	var order []string
+	retried := make(chan struct{})
+	go func() {
+		defer close(retried)
+		l.acquire(true) // a refused download, past its Retry-After
+		order = append(order, "retry")
+		l.release()
+	}()
+	for {
+		l.mu.Lock()
+		due := l.due
+		l.mu.Unlock()
+		if due == 1 {
+			break
+		}
+		runtime.Gosched()
+	}
+
+	l.release()      // the transfer ends
+	l.acquire(false) // and a fresh download asks for the slot it freed
+	order = append(order, "fresh")
+	l.release()
+	<-retried
+	require.Equal(t, []string{"retry", "fresh"}, order)
 }

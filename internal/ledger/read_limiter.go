@@ -32,12 +32,19 @@ func readRefusal(err error) (retryAfter time.Duration, refused bool) {
 // refused download is still waiting: its retry is the probe of whether the
 // server has room again, and probing ahead of it parks one download after
 // another for a Retry-After each.
+//
+// So a retry whose Retry-After is over takes the next free slot ahead of any
+// fresh download. Without that, on a busy scheduler a fresh download reaches
+// each freed slot before the woken retry runs, the retry waits out the rest of
+// the batch, and the bound stays at the server's old cap after the server has
+// stopped refusing.
 type readLimiter struct {
 	mu      sync.Mutex
-	freed   *sync.Cond // broadcast when a slot frees or the bound rises
+	freed   *sync.Cond // broadcast when a slot frees, the bound rises, or the last due retry takes a slot
 	limit   int        // requests that may be at the server at once
 	held    int        // requests at the server
 	waiting int        // refused downloads that have not retried yet
+	due     int        // of those, the ones past their Retry-After, waiting only for a slot
 	streak  int        // successes since the bound last changed
 }
 
@@ -47,11 +54,23 @@ func newReadLimiter() *readLimiter {
 	return l
 }
 
-func (l *readLimiter) acquire() {
+// acquire waits for a slot at the server. retry says the request repeats a
+// refused one, which goes ahead of fresh downloads.
+func (l *readLimiter) acquire(retry bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for l.held >= l.limit {
-		l.freed.Wait()
+	if retry {
+		l.due++
+		for l.held >= l.limit {
+			l.freed.Wait()
+		}
+		if l.due--; l.due == 0 {
+			l.freed.Broadcast()
+		}
+	} else {
+		for l.held >= l.limit || l.due > 0 {
+			l.freed.Wait()
+		}
 	}
 	l.held++
 }

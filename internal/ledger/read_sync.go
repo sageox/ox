@@ -1263,7 +1263,7 @@ func downloadReadObject(ctx context.Context, limiter *readLimiter, action *lfs.A
 		if err := f.Truncate(0); err != nil {
 			return err
 		}
-		limiter.acquire()
+		limiter.acquire(refused)
 		defer limiter.release()
 		err := lfs.DownloadToFileContext(ctx, action, f, true, ref.BareOID())
 		limiter.observe(err, refused)
