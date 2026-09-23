@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -304,89 +305,7 @@ func TestAcquireGCLock_StaleLockRecovered(t *testing.T) {
 }
 
 // =============================================================================
-// GC helpers: copyFile, copyDir
-// =============================================================================
-
-func TestCopyFile(t *testing.T) {
-	dir := t.TempDir()
-	srcPath := filepath.Join(dir, "source.txt")
-	dstPath := filepath.Join(dir, "dest.txt")
-
-	content := "test file content\nwith multiple lines\n"
-	require.NoError(t, os.WriteFile(srcPath, []byte(content), 0644))
-
-	require.NoError(t, copyFile(srcPath, dstPath))
-
-	got, err := os.ReadFile(dstPath)
-	require.NoError(t, err)
-	assert.Equal(t, content, string(got))
-
-	// verify mode is preserved
-	srcInfo, _ := os.Stat(srcPath)
-	dstInfo, _ := os.Stat(dstPath)
-	assert.Equal(t, srcInfo.Mode(), dstInfo.Mode())
-}
-
-func TestCopyFile_MissingSrc(t *testing.T) {
-	dir := t.TempDir()
-	err := copyFile(filepath.Join(dir, "nonexistent"), filepath.Join(dir, "dst"))
-	assert.Error(t, err)
-}
-
-func TestCopyFile_BinaryContent(t *testing.T) {
-	dir := t.TempDir()
-	srcPath := filepath.Join(dir, "binary.bin")
-	dstPath := filepath.Join(dir, "copy.bin")
-
-	data := make([]byte, 256)
-	for i := range 256 {
-		data[i] = byte(i)
-	}
-	require.NoError(t, os.WriteFile(srcPath, data, 0755))
-
-	require.NoError(t, copyFile(srcPath, dstPath))
-
-	got, err := os.ReadFile(dstPath)
-	require.NoError(t, err)
-	assert.Equal(t, data, got)
-}
-
-func TestCopyDir(t *testing.T) {
-	srcDir := t.TempDir()
-	dstDir := filepath.Join(t.TempDir(), "copy")
-
-	// create a nested structure
-	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "sub", "deep"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "root.txt"), []byte("root"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "sub", "mid.txt"), []byte("mid"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "sub", "deep", "leaf.txt"), []byte("leaf"), 0644))
-
-	require.NoError(t, copyDir(srcDir, dstDir))
-
-	// verify all files copied
-	got, err := os.ReadFile(filepath.Join(dstDir, "root.txt"))
-	require.NoError(t, err)
-	assert.Equal(t, "root", string(got))
-
-	got, err = os.ReadFile(filepath.Join(dstDir, "sub", "mid.txt"))
-	require.NoError(t, err)
-	assert.Equal(t, "mid", string(got))
-
-	got, err = os.ReadFile(filepath.Join(dstDir, "sub", "deep", "leaf.txt"))
-	require.NoError(t, err)
-	assert.Equal(t, "leaf", string(got))
-}
-
-func TestCopyDir_EmptyDir(t *testing.T) {
-	srcDir := t.TempDir()
-	dstDir := filepath.Join(t.TempDir(), "empty-copy")
-
-	require.NoError(t, copyDir(srcDir, dstDir))
-	assert.DirExists(t, dstDir)
-}
-
-// =============================================================================
-// GC helpers: gcPreserveCache, gcRestoreCache
+// GC helpers: ledger.PreserveCache, ledger.RestoreCache
 // =============================================================================
 
 func TestGCPreserveCache_NoCacheDir(t *testing.T) {
@@ -394,7 +313,7 @@ func TestGCPreserveCache_NoCacheDir(t *testing.T) {
 	backupDir := filepath.Join(t.TempDir(), "backup")
 
 	// no .sageox/cache/ exists — should return nil (nothing to preserve)
-	err := gcPreserveCache(srcRepo, backupDir)
+	err := ledger.PreserveCache(srcRepo, backupDir)
 	assert.NoError(t, err)
 	assert.NoDirExists(t, backupDir)
 }
@@ -407,7 +326,7 @@ func TestGCPreserveCache_WithCache(t *testing.T) {
 
 	backupDir := filepath.Join(t.TempDir(), "backup")
 
-	err := gcPreserveCache(srcRepo, backupDir)
+	err := ledger.PreserveCache(srcRepo, backupDir)
 	require.NoError(t, err)
 
 	// verify backup contains the file
@@ -421,7 +340,7 @@ func TestGCRestoreCache_NoBackup(t *testing.T) {
 	backupDir := filepath.Join(t.TempDir(), "nonexistent-backup")
 
 	// no backup exists — should return nil (nothing to restore)
-	err := gcRestoreCache(backupDir, dstRepo)
+	err := ledger.RestoreCache(backupDir, dstRepo)
 	assert.NoError(t, err)
 }
 
@@ -435,14 +354,14 @@ func TestGCPreserveAndRestoreCache_Roundtrip(t *testing.T) {
 	backupDir := filepath.Join(t.TempDir(), "gc-cache-backup")
 
 	// preserve
-	require.NoError(t, gcPreserveCache(srcRepo, backupDir))
+	require.NoError(t, ledger.PreserveCache(srcRepo, backupDir))
 
 	// simulate reclone: new repo with no cache
 	dstRepo := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dstRepo, ".sageox"), 0755))
 
 	// restore
-	require.NoError(t, gcRestoreCache(backupDir, dstRepo))
+	require.NoError(t, ledger.RestoreCache(backupDir, dstRepo))
 
 	// verify restored files
 	got, err := os.ReadFile(filepath.Join(dstRepo, ".sageox", "cache", "index.db"))

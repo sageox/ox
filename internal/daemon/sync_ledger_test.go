@@ -843,7 +843,7 @@ func TestGcRestoreCache_FailureRetainsBackup(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git clone operations")
 	}
-	// unit test: gcRestoreCache fails when destination is unwritable,
+	// unit test: ledger.RestoreCache fails when destination is unwritable,
 	// and the backup dir is NOT removed by the caller on error.
 	backupDir := filepath.Join(t.TempDir(), "cache-backup")
 	require.NoError(t, os.MkdirAll(filepath.Join(backupDir, "codedb"), 0755))
@@ -854,7 +854,7 @@ func TestGcRestoreCache_FailureRetainsBackup(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dstRepo, ".sageox"), []byte("blocker"), 0444))
 	t.Cleanup(func() { os.Chmod(filepath.Join(dstRepo, ".sageox"), 0755) })
 
-	err := gcRestoreCache(backupDir, dstRepo)
+	err := ledger.RestoreCache(backupDir, dstRepo)
 	require.Error(t, err, "restore should fail when .sageox is a file, not a directory")
 
 	// backup must still exist for manual recovery
@@ -868,11 +868,11 @@ func TestGcPreserveCache_NoCacheReturnsNil(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git clone operations")
 	}
-	// unit test: gcPreserveCache returns nil when no cache exists
+	// unit test: ledger.PreserveCache returns nil when no cache exists
 	srcRepo := t.TempDir()
 	backupDir := filepath.Join(t.TempDir(), "backup")
 
-	err := gcPreserveCache(srcRepo, backupDir)
+	err := ledger.PreserveCache(srcRepo, backupDir)
 	require.NoError(t, err, "should succeed when no cache exists")
 	assert.NoDirExists(t, backupDir, "no backup should be created when no cache exists")
 }

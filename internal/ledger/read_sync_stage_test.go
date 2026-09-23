@@ -213,3 +213,170 @@ func TestReadSyncColdFailureCountsAnObjectWhoseDirectorySyncFailed(t *testing.T)
 	require.True(t, resumed.Ready, "%+v", resumed)
 	require.Equal(t, int32(1), transfers.Load(), "the object in place is not transferred again")
 }
+
+// Failure prevented: a consumer that builds the code index before its first
+// read sync leaves ox's own cache at the checkout path, and every sync after
+// that refuses the path in about a second as "interrupted", with nothing in
+// the result saying why (ox #1045). A path holding only that cache is cloned
+// like an absent one, and the cache survives into the checkout.
+func TestReadSyncAdoptsAPathHoldingOnlyItsOwnCache(t *testing.T) {
+	f := newReadFixture(t)
+	ctx := context.Background()
+	index := map[string]string{
+		".sageox/cache/codedb/metadata.db":      "sqlite-data",
+		".sageox/cache/codedb/bleve/code/store": "bleve-store",
+	}
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		// seed adds what files cannot express, once the path exists.
+		seed func(t *testing.T, opts ReadSyncOptions)
+	}{
+		{name: "code index", files: index},
+		{name: "empty directory"},
+		{name: "empty .sageox", seed: func(t *testing.T, opts ReadSyncOptions) {
+			require.NoError(t, os.Mkdir(filepath.Join(opts.Path, ".sageox"), 0700))
+		}},
+		{name: "receipt of a checkout no longer there", files: index, seed: func(t *testing.T, opts ReadSyncOptions) {
+			// A receipt describes the checkout beside it. Carried in with the
+			// cache, it must not stand in for the one this sync publishes.
+			stale := readReceipt{ReadSyncResult: newReadResult(opts), ReadURL: opts.ReadURL}
+			observed := time.Now().Add(-24 * time.Hour).UTC()
+			stale.Ready, stale.Head, stale.LastSuccessfulSync = true, strings.Repeat("0", 40), &observed
+			data, err := json.Marshal(stale)
+			require.NoError(t, err)
+			require.NoError(t, os.MkdirAll(filepath.Join(opts.Path, ".sageox/cache/read-sync"), 0700))
+			require.NoError(t, os.WriteFile(filepath.Join(opts.Path, readReceiptRelative), data, 0600))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := f.opts
+			opts.Path = filepath.Join(t.TempDir(), "checkout")
+			require.NoError(t, os.Mkdir(opts.Path, 0700))
+			for name, content := range tc.files {
+				require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(opts.Path, name)), 0700))
+				require.NoError(t, os.WriteFile(filepath.Join(opts.Path, name), []byte(content), 0600))
+			}
+			if tc.seed != nil {
+				tc.seed(t, opts)
+			}
+
+			result := ReadSync(ctx, opts)
+			require.True(t, result.Ready, "%+v", result)
+			require.Empty(t, result.ErrorClass)
+			require.NotNil(t, result.LastSuccessfulSync)
+			require.False(t, result.Resumable, "publishing consumes the stage")
+			require.NoDirExists(t, readStagePath(opts.Path))
+			require.FileExists(t, filepath.Join(opts.Path, "data/plans/plan/plan.md"))
+			assertReadCache := func(t *testing.T) {
+				t.Helper()
+				for name, content := range tc.files {
+					actual, err := os.ReadFile(filepath.Join(opts.Path, name))
+					require.NoError(t, err)
+					require.Equal(t, content, string(actual), "the cache survives the sync")
+				}
+			}
+			assertReadCache(t)
+			receipt := loadReadReceipt(opts.Path, opts.RepoID, opts.Endpoint)
+			require.NotNil(t, receipt)
+			require.Equal(t, result.Head, receipt.Head)
+			require.Equal(t, result.LastSuccessfulSync, receipt.LastSuccessfulSync)
+
+			// The published checkout verifies with the cache inside it, and a
+			// warm refresh keeps the cache where the code index expects it.
+			require.True(t, CheckReadiness(ctx, opts.Path, opts.RepoID, opts.Endpoint).Ready)
+			warm := ReadSync(ctx, opts)
+			require.True(t, warm.Ready, "%+v", warm)
+			assertReadCache(t)
+		})
+	}
+}
+
+// Failure prevented: adopting a cache-only path changes what a canceled sync
+// reports, or removes the cache before a checkout holding its copy is
+// published, so a canceled attempt loses the code index it was carrying.
+func TestReadSyncAdoptionCanceledMidHydrationResumes(t *testing.T) {
+	content := []byte("an object the canceled attempt never receives\n")
+	var holding atomic.Bool
+	holding.Store(true)
+	requested := make(chan struct{}, 1)
+	f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			grantReadLFSBatch(t, w, r)
+			return
+		}
+		if holding.Load() {
+			select {
+			case requested <- struct{}{}:
+			default:
+			}
+			<-r.Context().Done()
+			return
+		}
+		_, _ = w.Write(content)
+	})
+	commitReadLFSPointer(t, f, "sessions/cold/session.md", content)
+	index := filepath.Join(f.opts.Path, ".sageox/cache/codedb/metadata.db")
+	require.NoError(t, os.MkdirAll(filepath.Dir(index), 0700))
+	require.NoError(t, os.WriteFile(index, []byte("index built before the first sync"), 0600))
+	before := readTestTree(t, f.opts.Path)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan ReadSyncResult, 1)
+	go func() { finished <- ReadSync(ctx, f.opts) }()
+	select {
+	case <-requested:
+	case result := <-finished:
+		t.Fatalf("the sync ended before hydration requested its object: %+v", result)
+	case <-time.After(30 * time.Second):
+		t.Fatal("hydration never requested its object")
+	}
+	cancel()
+	result := <-finished
+	require.False(t, result.Ready)
+	require.Equal(t, "interrupted", result.ErrorClass)
+	require.True(t, result.Resumable, "%+v", result)
+	require.Equal(t, before, readTestTree(t, f.opts.Path), "a canceled attempt leaves the adopted path as it found it")
+
+	holding.Store(false)
+	resumed := ReadSync(context.Background(), f.opts)
+	require.True(t, resumed.Ready, "%+v", resumed)
+	actual, err := os.ReadFile(index)
+	require.NoError(t, err)
+	require.Equal(t, "index built before the first sync", string(actual))
+	hydrated, err := os.ReadFile(filepath.Join(f.opts.Path, "sessions/cold/session.md"))
+	require.NoError(t, err)
+	require.Equal(t, content, hydrated)
+}
+
+// Failure prevented: adoption is decided before a clone that can run for many
+// minutes. Deleting the path at publication on the strength of that decision
+// destroys whatever was written there meanwhile.
+func TestReadSyncAdoptionRefusesAPathThatGainedContent(t *testing.T) {
+	content := []byte("an object that lands while the path gains a file\n")
+	var f *readFixture
+	f = newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			grantReadLFSBatch(t, w, r)
+			return
+		}
+		assert.NoError(t, os.WriteFile(filepath.Join(f.opts.Path, "notes.md"), []byte("written mid-sync"), 0600))
+		_, _ = w.Write(content)
+	})
+	commitReadLFSPointer(t, f, "sessions/cold/session.md", content)
+	index := filepath.Join(f.opts.Path, ".sageox/cache/codedb/metadata.db")
+	require.NoError(t, os.MkdirAll(filepath.Dir(index), 0700))
+	require.NoError(t, os.WriteFile(index, []byte("index built before the first sync"), 0600))
+
+	result := ReadSync(context.Background(), f.opts)
+	require.False(t, result.Ready, "%+v", result)
+	require.Equal(t, "path_occupied", result.ErrorClass)
+	require.True(t, result.Resumable, "the verified stage is kept for when the path is cleared")
+	notes, err := os.ReadFile(filepath.Join(f.opts.Path, "notes.md"))
+	require.NoError(t, err)
+	require.Equal(t, "written mid-sync", string(notes))
+	actual, err := os.ReadFile(index)
+	require.NoError(t, err)
+	require.Equal(t, "index built before the first sync", string(actual))
+}

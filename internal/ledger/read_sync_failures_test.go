@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,34 +22,93 @@ import (
 )
 
 // Failure prevented: malformed destinations overwrite unrelated local data or
-// become a published checkout after validation fails.
+// become a published checkout after validation fails, or a path ox cannot
+// claim is refused as "interrupted" — the class a consumer retries — so a
+// condition no retry changes is retried forever (ox #1045).
 func TestReadSyncRejectsUnownedDestinations(t *testing.T) {
 	f := newReadFixture(t)
+	write := func(t *testing.T, path, content string) {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0600))
+	}
 	for _, tc := range []struct {
 		name, errorClass string
 		prepare          func(*testing.T, *ReadSyncOptions)
 	}{
 		{"relative path", "invalid_arguments", func(t *testing.T, opts *ReadSyncOptions) { opts.Path = "relative" }},
 		{"wrong authority", "invalid_arguments", func(t *testing.T, opts *ReadSyncOptions) { opts.ReadURL = "https://example.invalid/ledger.git" }},
-		{"regular file", "interrupted", func(t *testing.T, opts *ReadSyncOptions) {
+		{"regular file", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
 			require.NoError(t, os.WriteFile(opts.Path, []byte("owned by someone else"), 0600))
 		}},
-		{"empty directory", "interrupted", func(t *testing.T, opts *ReadSyncOptions) { require.NoError(t, os.Mkdir(opts.Path, 0700)) }},
-		{"parent is a file", "interrupted", func(t *testing.T, opts *ReadSyncOptions) {
+		{"parent is a file", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
 			require.NoError(t, os.WriteFile(opts.Path, []byte("parent"), 0600))
 			opts.Path = filepath.Join(opts.Path, "checkout")
+		}},
+		{"symlink to a directory", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
+			require.NoError(t, os.Symlink(t.TempDir(), opts.Path))
+		}},
+		{"someone else's files", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
+			write(t, filepath.Join(opts.Path, "notes.md"), "not ox's")
+		}},
+		{"cache beside someone else's files", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
+			write(t, filepath.Join(opts.Path, ".sageox/cache/codedb/metadata.db"), "index")
+			write(t, filepath.Join(opts.Path, "sessions/draft/session.md"), "not ox's")
+		}},
+		{"cache beside other .sageox content", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
+			write(t, filepath.Join(opts.Path, ".sageox/cache/codedb/metadata.db"), "index")
+			write(t, filepath.Join(opts.Path, ".sageox/config.json"), "{}")
+		}},
+		{"cache is a symlink", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
+			require.NoError(t, os.MkdirAll(filepath.Join(opts.Path, ".sageox"), 0700))
+			require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(opts.Path, ".sageox/cache")))
+		}},
+		{"Git worktree link", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
+			write(t, filepath.Join(opts.Path, ".git"), "gitdir: /elsewhere/.git/worktrees/checkout\n")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := f.opts
-			opts.Path = filepath.Join(t.TempDir(), "checkout")
+			root := t.TempDir()
+			opts.Path = filepath.Join(root, "checkout")
 			tc.prepare(t, &opts)
+			before := readTestTree(t, root)
 			result := ReadSync(context.Background(), opts)
 			require.False(t, result.Ready)
 			require.Equal(t, tc.errorClass, result.ErrorClass)
 			require.Nil(t, result.LastSuccessfulSync)
+			require.Equal(t, before, readTestTree(t, root), "a refused path, and everything beside it, stays exactly as it was")
 		})
 	}
+}
+
+// readTestTree records every entry under root: each file's content, each
+// symlink's target, and each directory.
+func readTestTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	tree := map[string]string{}
+	require.NoError(t, filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.Type()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			tree[rel] = "symlink " + target
+			return err
+		case d.IsDir():
+			tree[rel] = "dir"
+		default:
+			data, err := os.ReadFile(path)
+			tree[rel] = "file " + string(data)
+			return err
+		}
+		return nil
+	}))
+	return tree
 }
 
 // Failure prevented: cancellation while another creator holds the lock poisons

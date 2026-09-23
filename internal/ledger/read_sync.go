@@ -152,14 +152,24 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 	dirs := sparseCheckoutDirs()
 	result.Coverage.Paths = dirs
 	workPath := opts.Path
-	staged := false
+	// adopted marks an existing path holding nothing but ox's own cache. It is
+	// cloned like an absent path, and publishing carries its cache into the
+	// checkout that replaces it.
+	staged, adopted := false, false
+	var previous *readReceipt
 	if _, err := os.Lstat(opts.Path); os.IsNotExist(err) {
 		staged = true
-	} else if err != nil || !safeReadDirectory(opts.Path) || !Exists(opts.Path) {
-		result.ErrorClass = "interrupted"
+	} else if safeReadDirectory(opts.Path) && Exists(opts.Path) {
+		previous = loadReadReceipt(opts.Path, opts.RepoID, opts.Endpoint)
+	} else if readCacheOnly(opts.Path) {
+		staged, adopted = true, true
+	} else {
+		// ox cannot claim what holds this path and will not remove it, so no
+		// retry succeeds until someone clears it. That permanence is what
+		// separates this class from "interrupted".
+		result.ErrorClass = "path_occupied"
 		return result
 	}
-	previous := loadReadReceipt(opts.Path, opts.RepoID, opts.Endpoint)
 	clone := false
 	if staged {
 		if err := os.MkdirAll(filepath.Dir(opts.Path), 0700); err != nil {
@@ -285,6 +295,14 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 	if staged && !result.Ready {
 		return result
 	}
+	if adopted {
+		// Copied before the receipt below is written, so a receipt the adopted
+		// cache carries is overwritten rather than published.
+		if err := RestoreCache(filepath.Join(opts.Path, ".sageox", "cache"), workPath); err != nil {
+			result.Ready, result.ErrorClass = false, "interrupted"
+			return result
+		}
+	}
 	if err := publishReadReceipt(workPath, readReceipt{ReadSyncResult: result, ReadURL: opts.ReadURL}, nil); err != nil {
 		// Verification or hydration above may have recorded a detail and a skip
 		// summary. The failure now being reported is this write, not those
@@ -293,6 +311,20 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 		return result
 	}
 	if staged {
+		if adopted {
+			// What the path held was judged before the clone began. Removing
+			// it is authorized only by what it holds now: ox's cache and
+			// nothing else. As in the daemon's reclone, a write to that cache
+			// after the copy above is lost.
+			if _, err := os.Lstat(opts.Path); err == nil && !readCacheOnly(opts.Path) {
+				result.Ready, result.ErrorClass = false, "path_occupied"
+				return result
+			}
+			if err := os.RemoveAll(opts.Path); err != nil {
+				result.Ready, result.ErrorClass = false, "interrupted"
+				return result
+			}
+		}
 		if err := os.Rename(workPath, opts.Path); err != nil {
 			result.Ready, result.ErrorClass = false, "interrupted"
 			return result
@@ -1536,6 +1568,31 @@ func syncReadDir(path string) error {
 func safeReadDirectory(path string) bool {
 	info, err := os.Lstat(path)
 	return err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0
+}
+
+// readCacheOnly reports whether path is a directory holding nothing but ox's
+// own cache, .sageox/cache, or nothing at all. The code index lives at
+// <ledger path>/.sageox/cache/codedb, so a consumer that indexes code before
+// its first read sync creates the checkout path with only that inside. Each
+// level must be a real directory, as ox creates them: a symlink in place of one
+// holds content that lives somewhere else, and would be copied as a link
+// rather than as the cache.
+func readCacheOnly(path string) bool {
+	dir := path
+	for _, next := range []string{".sageox", "cache"} {
+		if !safeReadDirectory(dir) {
+			return false
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) > 1 || len(entries) == 1 && entries[0].Name() != next {
+			return false
+		}
+		if len(entries) == 0 {
+			return true
+		}
+		dir = filepath.Join(dir, next)
+	}
+	return safeReadDirectory(dir)
 }
 
 func safeReadParents(root, dir string) bool {
