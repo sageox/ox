@@ -178,6 +178,13 @@ instead of a dead-end file/clipboard export — pass --static for a read-only pa
 		open, _ := cmd.Flags().GetBool("open")
 		artifact, _ := cmd.Flags().GetBool("artifact")
 		static, _ := cmd.Flags().GetBool("static")
+		// Validate at the command boundary, not on one branch of it: the saved
+		// path below legitimately ignores --kind (the stored kind wins), so
+		// validating only on the fresh path let a typo through unnoticed there.
+		renderKind, kerr := kindFlag(cmd)
+		if kerr != nil {
+			return kerr
+		}
 		if len(args) == 1 {
 			slug := args[0]
 			// A human opening a SAVED plan gets the live review LOOP by default, so
@@ -190,10 +197,6 @@ instead of a dead-end file/clipboard export — pass --static for a read-only pa
 			return runPlanRenderSaved(cmd, slug, out, open, artifact)
 		}
 		file, _ := cmd.Flags().GetString("file")
-		renderKind, kerr := kindFlag(cmd)
-		if kerr != nil {
-			return kerr
-		}
 		return runPlanRenderFresh(cmd, file, out, open, artifact, renderKind)
 	},
 }

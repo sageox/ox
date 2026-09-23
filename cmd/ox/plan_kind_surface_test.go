@@ -264,3 +264,34 @@ func TestPlanSaveFile_MarkdownConfirmationNamesTheKind(t *testing.T) {
 		t.Errorf("confirmation must name what was saved, got: %s", out.String())
 	}
 }
+
+// TestPlanRenderCmd_RejectsUnknownKindOnSavedRender pins validation at the
+// COMMAND boundary rather than on one branch of it. `ox plan render <slug>`
+// returns through the saved-artifact path, which legitimately ignores --kind
+// (the stored kind wins). Validating only on the fresh-render branch therefore
+// made `--kind reivew` silently accepted there — the same typo-swallowing the
+// flag was added to prevent, just one path over.
+func TestPlanRenderCmd_RejectsUnknownKindOnSavedRender(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "test")
+	gitRoot := newPlanStatusTestRepo(t)
+
+	dir := savePlanArtifacts(gitRoot, plan.Input{Raw: "# Saved kind guard\n"}, plan.Result{}, []byte(authoredKindPage), plan.PrimaryHTML)
+	if dir == "" {
+		t.Fatal("save failed")
+	}
+
+	cmd := planRenderCmd
+	cmd.SetOut(&bytes.Buffer{})
+	setKindFlags(t, cmd, map[string]string{
+		"kind":   "reivew",
+		"output": filepath.Join(t.TempDir(), "out.html"),
+	})
+
+	err := cmd.RunE(cmd, []string{filepath.Base(dir)})
+	if err == nil {
+		t.Fatal("an unknown --kind must be refused on the saved-render path too, not silently ignored")
+	}
+	if !strings.Contains(err.Error(), "reivew") {
+		t.Errorf("error must echo the bad kind: %v", err)
+	}
+}
