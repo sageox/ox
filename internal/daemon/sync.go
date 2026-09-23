@@ -265,7 +265,7 @@ type SyncScheduler struct {
 // syncError tracks a sync error with timestamp.
 type syncError struct {
 	Time    time.Time
-	Repo    string // "ledger", or a failed clone's CheckoutPayload.RepoType; what clearErrors matches
+	Repo    string // what clearErrors matches: "ledger", or a team context's directory name
 	Message string
 }
 
@@ -2388,7 +2388,9 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			mCfg, err := s.twoPhaseClone(cloneCtx, cloneURL, payload.RepoPath, progress)
 			if err != nil {
 				s.logger.Error("checkout: two-phase clone failed", "error", err)
-				s.recordError(payload.RepoType, fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
+				// Keyed by pullTeamContext's repoName, the key clearErrors is
+				// called with once this team context syncs.
+				s.recordError(filepath.Base(payload.RepoPath), fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
 				return err
 			}
 			if mCfg != nil {

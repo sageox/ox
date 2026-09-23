@@ -662,6 +662,7 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamP
 		// readable again, so the repo-integrity issue must not persist.
 		s.issues.ClearIssue(IssueTypeRepoIntegrity, repoName)
 	}
+	s.clearErrors(repoName)
 
 	return outcome, nil
 }

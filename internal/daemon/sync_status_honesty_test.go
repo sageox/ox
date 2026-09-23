@@ -180,6 +180,62 @@ func TestDoPull_FixedWedgeStopsReportingItsFailure(t *testing.T) {
 	}
 }
 
+// A team context whose clone failed, and that was cloned later, must stop
+// reporting the clone failure once it syncs.
+//
+// Failure prevented: the clone error was recorded under the repo type, a key
+// that nothing proving the team context healthy ever cleared, so "Last error:
+// clone team-context failed" and the Warning it caused stayed for up to an
+// hour beside a team context that was syncing.
+func TestPullTeamContext_ClonedTeamStopsReportingItsCloneFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git clone and pull")
+	}
+	for _, tc := range []struct {
+		name string
+		// remoteAdvances pushes a commit after the clone, so the sync runs a
+		// real pull instead of the "remote unchanged" skip.
+		remoteAdvances bool
+	}{
+		{name: "remote unchanged since the clone"},
+		{name: "remote advanced since the clone", remoteAdvances: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateCredentials(t)
+			s := newTestScheduler(t.TempDir())
+			s.issues = NewIssueTracker()
+			teamDir := filepath.Join(t.TempDir(), "team_recovers")
+
+			// The first clone cannot reach the server.
+			_, err := s.Checkout(CheckoutPayload{CloneURL: "http://127.0.0.1:1/team.git", RepoPath: teamDir, RepoType: "team-context"}, nil)
+			require.Error(t, err)
+			lastErr, _ := s.LastError()
+			require.Contains(t, lastErr, "clone team-context failed", "the clone failure must be reported while it lasts")
+
+			// A later clone succeeds.
+			bare, writer := initBareRepo(t, "team")
+			require.NoError(t, os.WriteFile(filepath.Join(writer, "TEAM.md"), []byte("team\n"), 0o644))
+			gitInDir(t, writer, "add", "TEAM.md")
+			gitInDir(t, writer, "commit", "-m", "seed")
+			gitInDir(t, writer, "push", "origin", "main")
+			require.NoError(t, os.RemoveAll(teamDir))
+			gitInDir(t, filepath.Dir(teamDir), "clone", bare, teamDir)
+			if tc.remoteAdvances {
+				require.NoError(t, os.WriteFile(filepath.Join(writer, "NEXT.md"), []byte("next\n"), 0o644))
+				gitInDir(t, writer, "add", "NEXT.md")
+				gitInDir(t, writer, "commit", "-m", "next")
+				gitInDir(t, writer, "push", "origin", "main")
+			}
+
+			_, err = s.pullTeamContext(context.Background(), teamDir)
+			require.NoError(t, err)
+			lastErr, _ = s.LastError()
+			assert.Empty(t, lastErr, "the clone failure must not outlive a team context that syncs")
+			assert.Zero(t, s.RecentErrorCount())
+		})
+	}
+}
+
 // An API-discovered team context must NOT be written into config.local.toml.
 //
 // Failure prevented: a revoked team coming back. CleanupRevokedTeamContexts

@@ -26,8 +26,9 @@ The `ox daemon status` command has been redesigned with modern TUI best practice
 - **Warning**: 1-4 errors OR 10+ pending changes
 - **Healthy**: No issues
 
-A ledger error stops counting once the ledger syncs again, so a fixed ledger
-does not hold the status at Warning for the rest of the hour.
+An error stops counting once the Ledger or team context it came from syncs
+again, so a fixed repo does not hold the status at Warning for the rest of the
+hour.
 
 ### 2. Semantic Color Usage
 

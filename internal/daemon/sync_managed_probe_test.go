@@ -517,7 +517,7 @@ func TestClearDisprovedBySkip(t *testing.T) {
 				s.issues.SetIssue(DaemonIssue{Type: typ, Severity: SeverityError, Repo: "ledger"})
 				s.issues.SetIssue(DaemonIssue{Type: typ, Severity: SeverityError, Repo: "team_other"})
 			}
-			s.recordError("team-context", "clone team-context failed")
+			s.recordError("team_other", "clone team-context failed")
 			s.recordError("ledger", "pull failed")
 
 			s.clearDisprovedBySkip("ledger", tc.reason)
