@@ -411,16 +411,14 @@ func (m *SessionWatcherManager) runWatcher(
 					"session", aw.sessionName, "offset", cursor, "error", readErr)
 			case len(entries) > 0:
 				converted := session.ConvertRawEntries(entries)
-				if writeErr := writeEntries(rw, converted); writeErr != nil {
-					// the cursor must NOT advance past entries that never reached
-					// the ledger: doing so marks them consumed and they are gone
-					// for good. Leaving it where it is costs a re-read.
-					m.logger.Error("catch-up write failed; leaving the cursor in place so the entries can be recovered",
+				if writeErr := rw.AppendCheckpointed(converted, func() error {
+					return m.persistOffset(aw, newOffset, len(converted))
+				}); writeErr != nil {
+					m.logger.Error("catch-up checkpoint failed; stopping with the cursor unadvanced",
 						"session", aw.sessionName, "offset", cursor, "error", writeErr)
 					return nil
 				}
 				cursor = newOffset
-				m.persistOffset(aw, cursor, len(converted))
 				m.logger.Info("catch-up read recovered entries",
 					"session", aw.sessionName,
 					"entries", len(entries),
@@ -541,19 +539,15 @@ func (m *SessionWatcherManager) pollSession(
 		}
 
 		converted := session.ConvertRawEntries(entries)
-		if writeErr := writeEntries(rw, converted); writeErr != nil {
-			// Advancing here would mark entries consumed that never reached
-			// the ledger, and the adapter would resume past them — they are
-			// unrecoverable. Stop with the cursor where it is so a restart
-			// re-reads them; a duplicated batch is visible and fixable, a
-			// silently dropped one is not.
-			m.logger.Error("write to raw.jsonl failed; stopping this recording with the cursor unadvanced so the entries can be recovered",
+		if writeErr := rw.AppendCheckpointed(converted, func() error {
+			return m.persistOffset(aw, newOffset, len(converted))
+		}); writeErr != nil {
+			m.logger.Error("recording checkpoint failed; stopping with the cursor unadvanced",
 				"session", aw.sessionName, "adapter", aw.adapterName, "offset", offset, "error", writeErr)
 			return
 		}
 
 		offset = newOffset
-		m.persistOffset(aw, offset, len(converted))
 	}
 }
 
@@ -572,28 +566,29 @@ func writeEntries(rw *session.RawWriter, entries []session.Entry) error {
 // persistOffset updates SourceOffset and EntryCount in .recording.json.
 // Publishes complete JSON with a unique temporary file. This prevents byte
 // corruption; whole-state read-modify-write updates remain last-writer-wins.
-// Best-effort: errors are logged but don't stop the watcher.
-func (m *SessionWatcherManager) persistOffset(aw *activeWatcher, offset int64, entryDelta int) {
+// Errors must reach the batch writer so it can roll back before advancing.
+func (m *SessionWatcherManager) persistOffset(aw *activeWatcher, offset int64, entryDelta int) error {
 	recPath := filepath.Join(aw.cachePath, recordingMarker)
 	data, err := os.ReadFile(recPath)
 	if err != nil {
-		return
+		return fmt.Errorf("read recording checkpoint: %w", err)
 	}
 	var state session.RecordingState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return
+		return fmt.Errorf("parse recording checkpoint: %w", err)
 	}
 	state.SourceOffset = offset
 	state.EntryCount += entryDelta
 	updated, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		return
+		return fmt.Errorf("encode recording checkpoint: %w", err)
 	}
 	// A shared .tmp name lets another watcher keep writing to the same inode
 	// after it has been renamed into place, corrupting the published state.
 	if err := fileutil.AtomicWriteBytes(recPath, updated, 0600); err != nil {
-		m.logger.Debug("failed to persist recording offset", "session", aw.sessionName, "error", err)
+		return fmt.Errorf("publish recording checkpoint: %w", err)
 	}
+	return nil
 }
 
 // resolveAdapter returns the adapter for the given name.

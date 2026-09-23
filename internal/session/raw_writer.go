@@ -1,11 +1,14 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+
+	"github.com/sageox/ox/internal/fileutil"
 )
 
 // RawWriter is the SINGLE supported way to write entries to a session's
@@ -118,6 +121,10 @@ func newRawWriterFromFile(f *os.File, projectRoot string) *RawWriter {
 // upload, summarize), they all see the redacted form. To keep an
 // un-redacted copy, copy before WriteEntry.
 func (w *RawWriter) WriteEntry(entry *SessionEntry) error {
+	return w.withAppendLock(func() error { return w.writeEntry(entry) })
+}
+
+func (w *RawWriter) writeEntry(entry *SessionEntry) error {
 	if w == nil {
 		return fmt.Errorf("raw writer: nil")
 	}
@@ -196,6 +203,10 @@ func (w *RawWriter) WriteEntries(entries []SessionEntry) error {
 // with the wire-format JSON). Same three-layer redaction; recursive
 // RedactMap handles the nested-string-values case.
 func (w *RawWriter) WriteRaw(data map[string]any) error {
+	return w.withAppendLock(func() error { return w.writeRaw(data) })
+}
+
+func (w *RawWriter) writeRaw(data map[string]any) error {
 	if w == nil {
 		return fmt.Errorf("raw writer: nil")
 	}
@@ -294,4 +305,19 @@ func (w *RawWriter) CloseAndSync() error {
 //nolint:unused // reserved for in-package bypass use; expected unused warning until first caller
 func (w *RawWriter) asWriter() io.Writer {
 	return w.file
+}
+
+// withRawAppendLock serializes individual appends with checkpoint rollback.
+// This is separate from the watcher's lifetime raw-file lock: hooks must be
+// able to append a footer while the watcher is alive. Lock files use the
+// existing fileutil temporary lock directory, never the session directory.
+func withRawAppendLock(path string, fn func() error) error {
+	return fileutil.WithFileLock(context.Background(), path+".append", fn)
+}
+
+func (w *RawWriter) withAppendLock(fn func() error) error {
+	if w == nil {
+		return fmt.Errorf("raw writer: nil")
+	}
+	return withRawAppendLock(w.file.Name(), fn)
 }

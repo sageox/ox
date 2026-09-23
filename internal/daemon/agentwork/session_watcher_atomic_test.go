@@ -27,7 +27,7 @@ func TestWatcherStatePublishDoesNotReusePendingWriterFile(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = pending.Close() })
 			mgr := newTestWatcherManager(t)
-			mgr.persistOffset(&activeWatcher{cachePath: dir, sessionName: "test"}, 0, count-9)
+			require.NoError(t, mgr.persistOffset(&activeWatcher{cachePath: dir, sessionName: "test"}, 0, count-9))
 			_, err = pending.Write(short)
 			require.NoError(t, err)
 			require.NoError(t, pending.Close())

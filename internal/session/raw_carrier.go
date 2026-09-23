@@ -52,6 +52,11 @@ func StampRawCarrier(rawPath string, stamp CarrierStamp) error {
 	if rawPath == "" {
 		return errors.New("stamp raw carrier: empty path")
 	}
+	return withRawAppendLock(rawPath, func() error { return stampRawCarrier(rawPath, stamp) })
+}
+
+// The append lock covers the newline repair as well as the footer itself.
+func stampRawCarrier(rawPath string, stamp CarrierStamp) error {
 	if lfs.IsPointerFile(rawPath) {
 		return fmt.Errorf("stamp raw carrier: %s is an LFS pointer", rawPath)
 	}
@@ -103,7 +108,7 @@ func StampRawCarrier(rawPath string, stamp CarrierStamp) error {
 	if err != nil {
 		return fmt.Errorf("stamp raw carrier: open: %w", err)
 	}
-	if err := w.WriteRaw(record); err != nil {
+	if err := w.writeRaw(record); err != nil {
 		_ = w.Close()
 		return fmt.Errorf("stamp raw carrier: append: %w", err)
 	}
