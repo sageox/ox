@@ -109,9 +109,15 @@ text-safe ones.
 
 A plan is any work a team executes against — a design direction, a GTM or launch
 sequence, a rollout, an engineering change. `ox plan save --kind` records which
-one it is: `plan` (default) | `mockup` | `review` | `evidence`. Everything in
-this document applies to all four; nothing here assumes the reader or the
-executor is an engineer.
+one it is: `plan` (default) | `mockup` | `review` | `evidence`. Nothing here
+assumes the reader or the executor is an engineer.
+
+Most of this document is shared: the design register, the authoring contract,
+and the hero-visual expectation hold for every kind. Two requirements are
+plan-only, and `ox plan lint` enforces them that way — the **device mockup** for
+a user-facing surface, and the **execution-depth appendix**. A mockup already
+*is* the proposal a device mockup would ask for, and a mockup, review sheet or
+evidence page has no second reader to relocate depth for.
 
 ## The human-attention contract
 
