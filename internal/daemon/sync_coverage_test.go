@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sageox/ox/internal/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -305,7 +304,7 @@ func TestAcquireGCLock_StaleLockRecovered(t *testing.T) {
 }
 
 // =============================================================================
-// GC helpers: ledger.PreserveCache, ledger.RestoreCache
+// GC helpers: gcPreserveCache, gcRestoreCache
 // =============================================================================
 
 func TestGCPreserveCache_NoCacheDir(t *testing.T) {
@@ -313,7 +312,7 @@ func TestGCPreserveCache_NoCacheDir(t *testing.T) {
 	backupDir := filepath.Join(t.TempDir(), "backup")
 
 	// no .sageox/cache/ exists — should return nil (nothing to preserve)
-	err := ledger.PreserveCache(srcRepo, backupDir)
+	err := gcPreserveCache(srcRepo, backupDir)
 	assert.NoError(t, err)
 	assert.NoDirExists(t, backupDir)
 }
@@ -326,7 +325,7 @@ func TestGCPreserveCache_WithCache(t *testing.T) {
 
 	backupDir := filepath.Join(t.TempDir(), "backup")
 
-	err := ledger.PreserveCache(srcRepo, backupDir)
+	err := gcPreserveCache(srcRepo, backupDir)
 	require.NoError(t, err)
 
 	// verify backup contains the file
@@ -340,7 +339,7 @@ func TestGCRestoreCache_NoBackup(t *testing.T) {
 	backupDir := filepath.Join(t.TempDir(), "nonexistent-backup")
 
 	// no backup exists — should return nil (nothing to restore)
-	err := ledger.RestoreCache(backupDir, dstRepo)
+	err := gcRestoreCache(backupDir, dstRepo)
 	assert.NoError(t, err)
 }
 
@@ -354,14 +353,14 @@ func TestGCPreserveAndRestoreCache_Roundtrip(t *testing.T) {
 	backupDir := filepath.Join(t.TempDir(), "gc-cache-backup")
 
 	// preserve
-	require.NoError(t, ledger.PreserveCache(srcRepo, backupDir))
+	require.NoError(t, gcPreserveCache(srcRepo, backupDir))
 
 	// simulate reclone: new repo with no cache
 	dstRepo := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dstRepo, ".sageox"), 0755))
 
 	// restore
-	require.NoError(t, ledger.RestoreCache(backupDir, dstRepo))
+	require.NoError(t, gcRestoreCache(backupDir, dstRepo))
 
 	// verify restored files
 	got, err := os.ReadFile(filepath.Join(dstRepo, ".sageox", "cache", "index.db"))

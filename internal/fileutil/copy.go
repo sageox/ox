@@ -42,10 +42,13 @@ func CopyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-
-	_, err = io.Copy(out, in)
-	return err
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	// Callers delete the source once a copy succeeds, so a write the
+	// filesystem only reports on close must fail the copy.
+	return out.Close()
 }
 
 // CopyDir recursively copies a directory tree from src to dst.

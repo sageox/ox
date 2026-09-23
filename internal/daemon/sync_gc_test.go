@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sageox/ox/internal/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -216,7 +215,7 @@ func TestGC_PreserveRestoreCache(t *testing.T) {
 	backupDir := filepath.Join(t.TempDir(), "cache-backup")
 
 	// preserve
-	err := ledger.PreserveCache(repoDir, backupDir)
+	err := gcPreserveCache(repoDir, backupDir)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(backupDir, "codedb", "index.db"))
@@ -227,7 +226,7 @@ func TestGC_PreserveRestoreCache(t *testing.T) {
 	newRepo := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(newRepo, ".sageox"), 0755))
 
-	err = ledger.RestoreCache(backupDir, newRepo)
+	err = gcRestoreCache(backupDir, newRepo)
 	require.NoError(t, err)
 
 	data, err = os.ReadFile(filepath.Join(newRepo, ".sageox", "cache", "codedb", "index.db"))
@@ -240,7 +239,7 @@ func TestGC_PreserveCache_NoCacheDir(t *testing.T) {
 	repoDir := t.TempDir()
 	backupDir := filepath.Join(t.TempDir(), "cache-backup")
 
-	err := ledger.PreserveCache(repoDir, backupDir)
+	err := gcPreserveCache(repoDir, backupDir)
 	require.NoError(t, err)
 
 	_, statErr := os.Stat(backupDir)

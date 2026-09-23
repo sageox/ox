@@ -1,8 +1,10 @@
 package fileutil
 
 import (
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -85,4 +87,82 @@ func TestCopyDir_EmptyDir(t *testing.T) {
 
 	require.NoError(t, CopyDir(srcDir, dstDir))
 	assert.DirExists(t, dstDir)
+}
+
+// Failure prevented: a symlink in a copied tree is dereferenced, so a link to a
+// host file (e.g. /etc/shadow) lands that file's content in a checkout.
+func TestCopyFile_RecreatesSymlinkWithoutReadingItsTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs a privilege Windows test runners lack")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "secret")
+	require.NoError(t, os.WriteFile(target, []byte("host file"), 0600))
+	link := filepath.Join(dir, "link")
+	require.NoError(t, os.Symlink(target, link))
+	dst := filepath.Join(dir, "copy")
+
+	require.NoError(t, CopyFile(link, dst))
+
+	info, err := os.Lstat(dst)
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&os.ModeSymlink, "the copy is a link, not the target's bytes")
+	got, err := os.Readlink(dst)
+	require.NoError(t, err)
+	assert.Equal(t, target, got)
+}
+
+// Failure prevented: copying a socket, FIFO, or device blocks or reads without
+// end instead of being skipped.
+func TestCopyFile_SkipsNonRegularFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix domain socket files are the non-regular file this test uses")
+	}
+	// A socket path must fit sockaddr_un (104 bytes on macOS), which a
+	// t.TempDir path can exceed.
+	dir, err := os.MkdirTemp("", "cp")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s")
+	listener, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	dst := filepath.Join(dir, "copy")
+
+	require.NoError(t, CopyFile(sock, dst))
+	_, err = os.Lstat(dst)
+	assert.True(t, os.IsNotExist(err), "nothing is written for a non-regular file")
+}
+
+// Failure prevented: a copy that could not read its source or write its
+// destination reports success, and the caller deletes the original.
+func TestCopyFile_ReportsEveryFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T, dir string) (src, dst string)
+	}{
+		{"source unreadable", func(t *testing.T, dir string) (string, string) {
+			if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+				t.Skip("file permissions must reject reads for this failure injection")
+			}
+			src := filepath.Join(dir, "src")
+			require.NoError(t, os.WriteFile(src, []byte("data"), 0000))
+			return src, filepath.Join(dir, "dst")
+		}},
+		{"destination directory missing", func(t *testing.T, dir string) (string, string) {
+			src := filepath.Join(dir, "src")
+			require.NoError(t, os.WriteFile(src, []byte("data"), 0600))
+			return src, filepath.Join(dir, "missing", "dst")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src, dst := tc.prepare(t, t.TempDir())
+			assert.Error(t, CopyFile(src, dst))
+		})
+	}
+}
+
+func TestCopyDir_MissingSrc(t *testing.T) {
+	dir := t.TempDir()
+	assert.Error(t, CopyDir(filepath.Join(dir, "missing"), filepath.Join(dir, "copy")))
 }

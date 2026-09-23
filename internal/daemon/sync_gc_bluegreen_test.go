@@ -5,13 +5,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sageox/ox/internal/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // --------------------------------------------------------------------------
-// ledger.PreserveCache + ledger.RestoreCache — defense-in-depth for codedb survival
+// gcPreserveCache + gcRestoreCache — defense-in-depth for codedb survival
 // --------------------------------------------------------------------------
 
 func TestGCPreserveRestore_CacheIntegrity(t *testing.T) {
@@ -33,13 +32,13 @@ func TestGCPreserveRestore_CacheIntegrity(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(bleveDir, "store"), []byte("bleve-store"), 0o644))
 
 	// preserve
-	require.NoError(t, ledger.PreserveCache(srcRepo, backupDir))
+	require.NoError(t, gcPreserveCache(srcRepo, backupDir))
 
 	// simulate GC destroying old repo
 	require.NoError(t, os.RemoveAll(srcRepo))
 
 	// restore to new location
-	require.NoError(t, ledger.RestoreCache(backupDir, dstRepo))
+	require.NoError(t, gcRestoreCache(backupDir, dstRepo))
 
 	// verify all files survived with correct content
 	got, err := os.ReadFile(filepath.Join(dstRepo, ".sageox", "cache", "codedb", "metadata.db"))
@@ -59,7 +58,7 @@ func TestGCPreserveCache_NoCacheDir_Noop(t *testing.T) {
 	srcRepo := t.TempDir()
 	backupDir := filepath.Join(t.TempDir(), "backup")
 
-	err := ledger.PreserveCache(srcRepo, backupDir)
+	err := gcPreserveCache(srcRepo, backupDir)
 	assert.NoError(t, err)
 
 	// backup dir should NOT be created when there's nothing to preserve
@@ -73,7 +72,7 @@ func TestGCRestoreCache_NoBackup_Noop(t *testing.T) {
 	t.Parallel()
 
 	dstRepo := t.TempDir()
-	err := ledger.RestoreCache("/nonexistent/backup", dstRepo)
+	err := gcRestoreCache("/nonexistent/backup", dstRepo)
 	assert.NoError(t, err)
 }
 

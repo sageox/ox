@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sageox/ox/internal/ledger"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 	"github.com/stretchr/testify/require"
 )
@@ -284,7 +283,7 @@ func TestGCPreservesWhisperDB(t *testing.T) {
 	}
 
 	// preserve
-	if err := ledger.PreserveCache(srcRepo, backupDir); err != nil {
+	if err := gcPreserveCache(srcRepo, backupDir); err != nil {
 		t.Fatalf("preserve: %v", err)
 	}
 
@@ -295,7 +294,7 @@ func TestGCPreservesWhisperDB(t *testing.T) {
 	}
 
 	// restore to new location
-	if err := ledger.RestoreCache(backupDir, dstRepo); err != nil {
+	if err := gcRestoreCache(backupDir, dstRepo); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 
@@ -332,10 +331,10 @@ func TestGCPreservesCodeDB(t *testing.T) {
 	}
 
 	// preserve + restore
-	if err := ledger.PreserveCache(srcRepo, backupDir); err != nil {
+	if err := gcPreserveCache(srcRepo, backupDir); err != nil {
 		t.Fatalf("preserve: %v", err)
 	}
-	if err := ledger.RestoreCache(backupDir, dstRepo); err != nil {
+	if err := gcRestoreCache(backupDir, dstRepo); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 
@@ -374,10 +373,10 @@ func TestGCPreservesMultipleDBs(t *testing.T) {
 		}
 	}
 
-	if err := ledger.PreserveCache(srcRepo, backupDir); err != nil {
+	if err := gcPreserveCache(srcRepo, backupDir); err != nil {
 		t.Fatalf("preserve: %v", err)
 	}
-	if err := ledger.RestoreCache(backupDir, dstRepo); err != nil {
+	if err := gcRestoreCache(backupDir, dstRepo); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 
@@ -397,7 +396,7 @@ func TestGCPreserveNoCacheDir(t *testing.T) {
 	backupDir := t.TempDir()
 
 	// no .sageox/cache/ — should succeed silently
-	err := ledger.PreserveCache(srcRepo, backupDir)
+	err := gcPreserveCache(srcRepo, backupDir)
 	if err != nil {
 		t.Fatalf("expected no error when cache dir absent, got %v", err)
 	}
@@ -408,7 +407,7 @@ func TestGCRestoreEmptyBackup(t *testing.T) {
 	dstRepo := t.TempDir()
 
 	// empty backup — should succeed silently
-	err := ledger.RestoreCache(backupDir, dstRepo)
+	err := gcRestoreCache(backupDir, dstRepo)
 	if err != nil {
 		t.Fatalf("expected no error restoring empty backup, got %v", err)
 	}

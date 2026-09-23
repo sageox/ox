@@ -25,9 +25,13 @@ func PreserveCache(srcRepo, cacheBackupDir string) error {
 }
 
 // RestoreCache copies a preserved cache into dstRepo's .sageox/cache/ directory.
+// Only a backup that does not exist counts as nothing to restore: callers
+// delete the backup once a restore succeeds.
 func RestoreCache(cacheBackupDir, dstRepo string) error {
-	if _, err := os.Stat(cacheBackupDir); err != nil {
+	if _, err := os.Stat(cacheBackupDir); os.IsNotExist(err) {
 		return nil // no backup to restore
+	} else if err != nil {
+		return err
 	}
 	dstCache := filepath.Join(dstRepo, ".sageox", "cache")
 	if err := os.MkdirAll(filepath.Dir(dstCache), 0755); err != nil {

@@ -637,7 +637,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		// backup — taking sync-state.json with it, which is the file a
 		// non-owner daemon reads to learn when a team context last synced.
 		if _, statErr := os.Stat(cacheBackupDir); statErr == nil {
-			if applyErr := ledger.RestoreCache(cacheBackupDir, ws.Path); applyErr != nil {
+			if applyErr := gcRestoreCache(cacheBackupDir, ws.Path); applyErr != nil {
 				s.logger.Error("gc: failed to restore orphaned cache backup, preserving for manual recovery",
 					"path", ws.Path, "cache_backup", cacheBackupDir, "error", applyErr)
 				return gcFailed, false
@@ -754,7 +754,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	// in daemon.go Status). Dropping it on reclone left every follower daemon
 	// reporting a healthy team context as "not synced".
 	hasCache := false
-	if err := ledger.PreserveCache(ws.Path, cacheBackupDir); err != nil {
+	if err := gcPreserveCache(ws.Path, cacheBackupDir); err != nil {
 		s.logger.Warn("gc: skipping reclone, cannot preserve cache",
 			"path", ws.Path, "error", err)
 		return gcFailed, false
@@ -926,7 +926,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 
 	// --- phase 1.5: restore cache ---
 	if hasCache {
-		if err := ledger.RestoreCache(cacheBackupDir, ws.Path); err != nil {
+		if err := gcRestoreCache(cacheBackupDir, ws.Path); err != nil {
 			// keep backup so manual recovery is possible
 			s.logger.Error("gc: failed to restore cache, backup retained",
 				"path", ws.Path, "backup", cacheBackupDir, "error", err)
@@ -1209,7 +1209,7 @@ func (s *SyncScheduler) gcCaptureUntracked(ctx context.Context, repoPath, destDi
 			continue
 		}
 
-		if err := fileutil.CopyFile(srcPath, dstPath); err != nil {
+		if err := copyFile(srcPath, dstPath); err != nil {
 			s.logger.Warn("gc: failed to copy untracked file", "path", relPath, "error", err)
 			continue
 		}
@@ -1323,7 +1323,7 @@ func (s *SyncScheduler) gcRestoreUntracked(repoPath, untrackedDir string) error 
 			return nil
 		}
 
-		if err := fileutil.CopyFile(path, dstPath); err != nil {
+		if err := copyFile(path, dstPath); err != nil {
 			s.logger.Warn("gc: failed to restore untracked file", "path", relPath, "error", err)
 			if firstErr == nil {
 				firstErr = err
@@ -1396,6 +1396,15 @@ func (s *SyncScheduler) validateLedgerGCClone(repoPath string) bool {
 
 	return true
 }
+
+// Cache preservation and file copying moved to shared packages so ledger read
+// sync preserves a cache through the same code (ox #1045). The GC keeps its
+// names for them.
+var (
+	gcPreserveCache = ledger.PreserveCache
+	gcRestoreCache  = ledger.RestoreCache
+	copyFile        = fileutil.CopyFile
+)
 
 // reopenWhisperStoreAfterGC reopens the ledger whisper store after a
 // successful GC reclone. The rename-swap invalidates the old sql.DB handle

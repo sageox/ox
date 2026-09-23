@@ -380,3 +380,133 @@ func TestReadSyncAdoptionRefusesAPathThatGainedContent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "index built before the first sync", string(actual))
 }
+
+// Failure prevented: a cache file ox cannot read passes adoption and then
+// fails the copy at publication — after the whole clone, and as
+// "interrupted", the class a consumer retries — so every attempt repeats the
+// clone and fails the same way.
+func TestReadSyncRefusesACacheItCannotRead(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("file permissions must reject reads for this failure injection")
+	}
+	f := newReadFixture(t)
+	index := filepath.Join(f.opts.Path, ".sageox/cache/codedb/metadata.db")
+	require.NoError(t, os.MkdirAll(filepath.Dir(index), 0700))
+	require.NoError(t, os.WriteFile(index, []byte("index built before the first sync"), 0000))
+
+	result := ReadSync(context.Background(), f.opts)
+	require.False(t, result.Ready)
+	require.Equal(t, "path_occupied", result.ErrorClass)
+	require.NoDirExists(t, readStagePath(f.opts.Path), "refused before cloning")
+	info, err := os.Lstat(index)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0), info.Mode().Perm(), "the file is left as it was")
+}
+
+// Failure prevented: a cache copy that fails at publication removes the
+// adopted path anyway, or leaves no stage to continue from, so the code index
+// or the clone is lost.
+func TestReadSyncAdoptionCopyFailureKeepsThePathAndTheStage(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("directory permissions must reject writes for this failure injection")
+	}
+	content := []byte("an object that lands before the cache copy fails\n")
+	var f *readFixture
+	f = newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			grantReadLFSBatch(t, w, r)
+			return
+		}
+		// The stage's receipt already sits in its cache directory. Without write
+		// permission there, copying the adopted cache in fails.
+		assert.NoError(t, os.Chmod(filepath.Join(readStagePath(f.opts.Path), ".sageox/cache"), 0500))
+		_, _ = w.Write(content)
+	})
+	commitReadLFSPointer(t, f, "sessions/cold/session.md", content)
+	stageCache := filepath.Join(readStagePath(f.opts.Path), ".sageox/cache")
+	t.Cleanup(func() { _ = os.Chmod(stageCache, 0700) })
+	index := filepath.Join(f.opts.Path, ".sageox/cache/codedb/metadata.db")
+	require.NoError(t, os.MkdirAll(filepath.Dir(index), 0700))
+	require.NoError(t, os.WriteFile(index, []byte("index built before the first sync"), 0600))
+	before := readTestTree(t, f.opts.Path)
+
+	result := ReadSync(context.Background(), f.opts)
+	require.False(t, result.Ready, "%+v", result)
+	require.Equal(t, "interrupted", result.ErrorClass)
+	require.True(t, result.Resumable, "%+v", result)
+	require.Equal(t, before, readTestTree(t, f.opts.Path), "the adopted path is left as it was")
+
+	require.NoError(t, os.Chmod(stageCache, 0700))
+	resumed := ReadSync(context.Background(), f.opts)
+	require.True(t, resumed.Ready, "%+v", resumed)
+	actual, err := os.ReadFile(index)
+	require.NoError(t, err)
+	require.Equal(t, "index built before the first sync", string(actual))
+}
+
+// Failure prevented: an adopted path ox cannot clear is reported as
+// "interrupted", the class a consumer retries, though no retry can clear it.
+func TestReadSyncAdoptedPathItCannotClearIsOccupied(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("directory permissions must reject removal for this failure injection")
+	}
+	for _, tc := range []struct {
+		name string
+		// locked is the directory, relative to the checkout path, whose entries
+		// cannot be removed. It stays readable, so the cache is adopted and copied.
+		locked string
+	}{
+		{"files in the cache", ".sageox/cache/codedb"},
+		{"the path itself", "."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReadFixture(t)
+			index := filepath.Join(f.opts.Path, ".sageox/cache/codedb/metadata.db")
+			require.NoError(t, os.MkdirAll(filepath.Dir(index), 0700))
+			require.NoError(t, os.WriteFile(index, []byte("index built before the first sync"), 0600))
+			locked := filepath.Join(f.opts.Path, tc.locked)
+			require.NoError(t, os.Chmod(locked, 0500))
+			t.Cleanup(func() { _ = os.Chmod(locked, 0700) })
+
+			result := ReadSync(context.Background(), f.opts)
+			require.False(t, result.Ready, "%+v", result)
+			require.Equal(t, "path_occupied", result.ErrorClass)
+			require.True(t, result.Resumable, "the verified stage is kept for when the path is cleared")
+
+			require.NoError(t, os.Chmod(locked, 0700))
+			resumed := ReadSync(context.Background(), f.opts)
+			require.True(t, resumed.Ready, "%+v", resumed)
+			actual, err := os.ReadFile(index)
+			require.NoError(t, err)
+			require.Equal(t, "index built before the first sync", string(actual), "the stage's copy of the cache is what gets published")
+		})
+	}
+}
+
+// Failure prevented: an adopted path someone removes mid-sync is reported as
+// occupied at publication, a condition that sends a consumer to clear a path
+// that is already clear.
+func TestReadSyncPublishesWhenTheAdoptedPathIsRemovedMidSync(t *testing.T) {
+	content := []byte("an object that lands after the adopted path is gone\n")
+	var f *readFixture
+	f = newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			grantReadLFSBatch(t, w, r)
+			return
+		}
+		assert.NoError(t, os.RemoveAll(f.opts.Path))
+		_, _ = w.Write(content)
+	})
+	commitReadLFSPointer(t, f, "sessions/cold/session.md", content)
+	index := filepath.Join(f.opts.Path, ".sageox/cache/codedb/metadata.db")
+	require.NoError(t, os.MkdirAll(filepath.Dir(index), 0700))
+	require.NoError(t, os.WriteFile(index, []byte("removed before publication"), 0600))
+
+	result := ReadSync(context.Background(), f.opts)
+	require.True(t, result.Ready, "%+v", result)
+	require.Empty(t, result.ErrorClass)
+	require.NoFileExists(t, index, "nothing was left to carry over")
+	hydrated, err := os.ReadFile(filepath.Join(f.opts.Path, "sessions/cold/session.md"))
+	require.NoError(t, err)
+	require.Equal(t, content, hydrated)
+}
