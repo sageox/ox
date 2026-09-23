@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/fileutil"
@@ -312,6 +313,11 @@ func (w *RawWriter) asWriter() io.Writer {
 // able to append a footer while the watcher is alive. Lock files use the
 // existing fileutil temporary lock directory, never the session directory.
 func withRawAppendLock(path string, fn func() error) error {
+	// Resolve aliases before fileutil makes the key absolute and hashes it.
+	// Keep the original path on failure so the writer reports its I/O error.
+	if canonical, err := filepath.EvalSymlinks(path); err == nil {
+		path = canonical
+	}
 	return fileutil.WithFileLock(context.Background(), path+".append", fn)
 }
 

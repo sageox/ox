@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -62,7 +63,7 @@ func TestRawCheckpointPreservesPrefixAndRetriesRedactedBatch(t *testing.T) {
 // A stop hook can stamp a footer while the watcher is publishing a cursor.
 // Rollback must neither delete that footer nor another appender's entries.
 func TestRawCheckpointRollbackPreservesConcurrentAppenders(t *testing.T) {
-	for _, kind := range []string{"entry", "raw", "carrier"} {
+	for _, kind := range []string{"entry", "raw", "carrier", "carrier-directory-alias", "carrier-file-alias"} {
 		t.Run(kind, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "raw.jsonl")
 			w, err := NewRawWriter(path, "")
@@ -71,6 +72,24 @@ func TestRawCheckpointRollbackPreservesConcurrentAppenders(t *testing.T) {
 			other, err := NewRawWriter(path, "")
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = other.Close() })
+			carrierPath := path
+			if kind == "carrier-directory-alias" || kind == "carrier-file-alias" {
+				alias := filepath.Join(t.TempDir(), "alias")
+				target := path
+				if kind == "carrier-directory-alias" {
+					target = filepath.Dir(path)
+				}
+				if err := os.Symlink(target, alias); err != nil {
+					if runtime.GOOS == "windows" {
+						t.Skipf("symlinks unavailable: %v", err)
+					}
+					require.NoError(t, err)
+				}
+				carrierPath = alias
+				if kind == "carrier-directory-alias" {
+					carrierPath = filepath.Join(alias, "raw.jsonl")
+				}
+			}
 			started := make(chan struct{})
 			done := make(chan error, 1)
 			checkpointErr := errors.New("checkpoint blocked")
@@ -82,8 +101,8 @@ func TestRawCheckpointRollbackPreservesConcurrentAppenders(t *testing.T) {
 						done <- other.WriteEntry(&Entry{Type: EntryTypeUser, Content: "concurrent append"})
 					case "raw":
 						done <- other.WriteRaw(map[string]any{"type": "user", "content": "concurrent append"})
-					case "carrier":
-						done <- StampRawCarrier(path, CarrierStamp{StoppedAt: time.Now()})
+					case "carrier", "carrier-directory-alias", "carrier-file-alias":
+						done <- StampRawCarrier(carrierPath, CarrierStamp{StoppedAt: time.Now()})
 					}
 				}()
 				<-started
@@ -106,7 +125,7 @@ func TestRawCheckpointRollbackPreservesConcurrentAppenders(t *testing.T) {
 			data, err := os.ReadFile(path)
 			require.NoError(t, err)
 			require.NotContains(t, string(data), "uncommitted batch")
-			if kind == "carrier" {
+			if kind != "entry" && kind != "raw" {
 				require.Contains(t, string(data), `"type":"footer"`)
 			} else {
 				require.Contains(t, string(data), "concurrent append")
