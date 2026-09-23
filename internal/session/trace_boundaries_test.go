@@ -35,8 +35,14 @@ func TestTraceBoundariesOptInFrozenAtStart(t *testing.T) {
 	}{
 		{"opted-in", "claude-code", "claude-code", true, true},
 		{"adapter-fallback", "", "claude-code", true, true},
+		{"prime-adapter-alias", "", "claude", true, true},
+		{"explicit-agent-alias", "claude", "claude-code", true, true},
+		{"display-name", "Claude Code", "claude", true, true},
+		{"alias-opted-out", "", "claude", false, false},
 		{"opted-out", "claude-code", "claude-code", false, false},
 		{"other-agent", "codex", "claude-code", true, false},
+		{"other-agent-with-alias", "codex", "claude", true, false},
+		{"other-adapter", "", "codex", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			traceBoundaryEnvironment(t, tc.enabled)

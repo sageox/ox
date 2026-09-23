@@ -7,6 +7,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/trace/model"
 	"github.com/sageox/ox/internal/trace/receiver"
 )
@@ -14,7 +15,13 @@ import (
 // initializeTraceCapture freezes opt-in for this recording. Existing recordings
 // and non-Claude sessions never acquire trace capture merely because config changes.
 func (r *RecordingState) initializeTraceCapture() {
-	if r.AgentType != "claude-code" && (r.AgentType != "" || r.AdapterName != "claude-code") {
+	agentType := r.AgentType
+	if agentType == "" {
+		agentType = r.AdapterName
+	}
+	// Auto-prime uses the detection alias "claude". Apply the same alias
+	// resolution as adapter lookup before deciding whether capture is supported.
+	if adapters.CanonicalAdapterName(agentType) != "claude-code" {
 		return
 	}
 	cfg, err := config.LoadUserConfig()

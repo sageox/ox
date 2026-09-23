@@ -20,6 +20,13 @@ import (
 // trace pause before writing the raw header, so a recovered recording cannot
 // expose exports produced while the inherited pause remains in effect.
 func TestTracePrimeInheritsPauseBeforeDurableHeader(t *testing.T) {
+	for _, agentType := range []string{"claude", "claude-code"} {
+		t.Run(agentType, func(t *testing.T) { testTracePrimeInheritsPauseBeforeDurableHeader(t, agentType) })
+	}
+}
+
+func tracePrimeEnvironment(t *testing.T) (string, string) {
+	t.Helper()
 	project, _ := setupTestProject(t)
 	t.Chdir(project)
 	t.Setenv("OX_XDG_DISABLE", "")
@@ -37,11 +44,17 @@ func TestTracePrimeInheritsPauseBeforeDurableHeader(t *testing.T) {
 	ledgerPath, err := ledger.DefaultPath()
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Join(ledgerPath, ".git"), 0700))
+	return project, ledgerPath
+}
+
+func testTracePrimeInheritsPauseBeforeDurableHeader(t *testing.T, agentType string) {
+	t.Helper()
+	project, ledgerPath := tracePrimeEnvironment(t)
 	const agentID = "OxTracePausedPrime"
 	const nativeID = "55555555-5555-4555-8555-555555555555"
 	require.NoError(t, session.MarkExplicitPause(project, agentID, 7))
 
-	status := startSessionRecording(project, agentID, "claude-code", "", "", nativeID)
+	status := startSessionRecording(project, agentID, agentType, "", "", nativeID)
 	require.NotNil(t, status)
 	require.True(t, status.AutoStarted)
 	state, err := session.LoadRecordingStateForAgent(project, agentID)
@@ -81,4 +94,36 @@ func TestTracePrimeInheritsPauseBeforeDurableHeader(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, gz.Close())
 	require.Empty(t, plain, "exports from the inherited pause must never enter attachments")
+}
+
+// Auto-prime receives "claude" from detection, not the canonical adapter name.
+// The resulting durable recording must carry enough state to build attachments.
+func TestTracePrimeAliasMaterializesCapturedSpans(t *testing.T) {
+	project, ledgerPath := tracePrimeEnvironment(t)
+	const agentID = "OxTraceAlias"
+	const nativeID = "66666666-6666-4666-8666-666666666666"
+	status := startSessionRecording(project, agentID, "claude", "", "", nativeID)
+	require.NotNil(t, status)
+	require.True(t, status.AutoStarted)
+	state, err := session.LoadRecordingStateForAgent(project, agentID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+
+	spool := filepath.Join(paths.TraceSpoolDir(), nativeID)
+	require.NoError(t, os.MkdirAll(spool, 0700))
+	span := []byte(`{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"captured"}]}]}]}` + "\n")
+	event := []byte(`{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"body":{"stringValue":"captured"}}]}]}]}` + "\n")
+	require.NoError(t, os.WriteFile(filepath.Join(spool, "traces.jsonl"), span, 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(spool, "logs.jsonl"), event, 0600))
+	require.NoError(t, stampRecordingCarrierAtStop(state, time.Now()))
+	stored, err := session.ReadSessionFromPath(filepath.Join(state.SessionPath, "raw.jsonl"))
+	require.NoError(t, err)
+	require.NotNil(t, stored.Meta.TraceCapture, "auto-start must persist trace consent and boundaries")
+	cache, trace, err := session.MaterializeTraces(ledgerPath, filepath.Base(state.SessionPath), stored.Meta.TraceCapture)
+	require.NoError(t, err)
+	require.NotNil(t, trace)
+	require.EqualValues(t, 1, trace.Spans)
+	require.EqualValues(t, 1, trace.Events)
+	require.FileExists(t, filepath.Join(cache, materialize.SpansFile))
+	require.FileExists(t, filepath.Join(cache, materialize.EventsFile))
 }
