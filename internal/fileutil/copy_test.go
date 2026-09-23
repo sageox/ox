@@ -31,12 +31,6 @@ func TestCopyFile(t *testing.T) {
 	assert.Equal(t, srcInfo.Mode(), dstInfo.Mode())
 }
 
-func TestCopyFile_MissingSrc(t *testing.T) {
-	dir := t.TempDir()
-	err := CopyFile(filepath.Join(dir, "nonexistent"), filepath.Join(dir, "dst"))
-	assert.Error(t, err)
-}
-
 func TestCopyFile_BinaryContent(t *testing.T) {
 	dir := t.TempDir()
 	srcPath := filepath.Join(dir, "binary.bin")
@@ -141,6 +135,9 @@ func TestCopyFile_ReportsEveryFailure(t *testing.T) {
 		name    string
 		prepare func(t *testing.T, dir string) (src, dst string)
 	}{
+		{"source missing", func(t *testing.T, dir string) (string, string) {
+			return filepath.Join(dir, "nonexistent"), filepath.Join(dir, "dst")
+		}},
 		{"source unreadable", func(t *testing.T, dir string) (string, string) {
 			if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 				t.Skip("file permissions must reject reads for this failure injection")

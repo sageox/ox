@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -243,10 +244,7 @@ func TestReadSyncAdoptsAPathHoldingOnlyItsOwnCache(t *testing.T) {
 			stale := readReceipt{ReadSyncResult: newReadResult(opts), ReadURL: opts.ReadURL}
 			observed := time.Now().Add(-24 * time.Hour).UTC()
 			stale.Ready, stale.Head, stale.LastSuccessfulSync = true, strings.Repeat("0", 40), &observed
-			data, err := json.Marshal(stale)
-			require.NoError(t, err)
-			require.NoError(t, os.MkdirAll(filepath.Join(opts.Path, ".sageox/cache/read-sync"), 0700))
-			require.NoError(t, os.WriteFile(filepath.Join(opts.Path, readReceiptRelative), data, 0600))
+			require.NoError(t, publishReadReceipt(opts.Path, stale, nil))
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -254,8 +252,7 @@ func TestReadSyncAdoptsAPathHoldingOnlyItsOwnCache(t *testing.T) {
 			opts.Path = filepath.Join(t.TempDir(), "checkout")
 			require.NoError(t, os.Mkdir(opts.Path, 0700))
 			for name, content := range tc.files {
-				require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(opts.Path, name)), 0700))
-				require.NoError(t, os.WriteFile(filepath.Join(opts.Path, name), []byte(content), 0600))
+				writeReadTestFile(t, filepath.Join(opts.Path, name), content)
 			}
 			if tc.seed != nil {
 				tc.seed(t, opts)
@@ -317,8 +314,7 @@ func TestReadSyncAdoptionCanceledMidHydrationResumes(t *testing.T) {
 	})
 	commitReadLFSPointer(t, f, "sessions/cold/session.md", content)
 	index := filepath.Join(f.opts.Path, ".sageox/cache/codedb/metadata.db")
-	require.NoError(t, os.MkdirAll(filepath.Dir(index), 0700))
-	require.NoError(t, os.WriteFile(index, []byte("index built before the first sync"), 0600))
+	writeReadTestFile(t, index, "index built before the first sync")
 	before := readTestTree(t, f.opts.Path)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -366,8 +362,7 @@ func TestReadSyncAdoptionRefusesAPathThatGainedContent(t *testing.T) {
 	})
 	commitReadLFSPointer(t, f, "sessions/cold/session.md", content)
 	index := filepath.Join(f.opts.Path, ".sageox/cache/codedb/metadata.db")
-	require.NoError(t, os.MkdirAll(filepath.Dir(index), 0700))
-	require.NoError(t, os.WriteFile(index, []byte("index built before the first sync"), 0600))
+	writeReadTestFile(t, index, "index built before the first sync")
 
 	result := ReadSync(context.Background(), f.opts)
 	require.False(t, result.Ready, "%+v", result)
@@ -383,16 +378,16 @@ func TestReadSyncAdoptionRefusesAPathThatGainedContent(t *testing.T) {
 
 // Failure prevented: a cache file ox cannot read passes adoption and then
 // fails the copy at publication — after the whole clone, and as
-// "interrupted", the class a consumer retries — so every attempt repeats the
-// clone and fails the same way.
+// "interrupted", the class a consumer retries — so every attempt fails the
+// same way.
 func TestReadSyncRefusesACacheItCannotRead(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("file permissions must reject reads for this failure injection")
 	}
 	f := newReadFixture(t)
 	index := filepath.Join(f.opts.Path, ".sageox/cache/codedb/metadata.db")
-	require.NoError(t, os.MkdirAll(filepath.Dir(index), 0700))
-	require.NoError(t, os.WriteFile(index, []byte("index built before the first sync"), 0000))
+	writeReadTestFile(t, index, "index built before the first sync")
+	require.NoError(t, os.Chmod(index, 0000))
 
 	result := ReadSync(context.Background(), f.opts)
 	require.False(t, result.Ready)
@@ -426,8 +421,7 @@ func TestReadSyncAdoptionCopyFailureKeepsThePathAndTheStage(t *testing.T) {
 	stageCache := filepath.Join(readStagePath(f.opts.Path), ".sageox/cache")
 	t.Cleanup(func() { _ = os.Chmod(stageCache, 0700) })
 	index := filepath.Join(f.opts.Path, ".sageox/cache/codedb/metadata.db")
-	require.NoError(t, os.MkdirAll(filepath.Dir(index), 0700))
-	require.NoError(t, os.WriteFile(index, []byte("index built before the first sync"), 0600))
+	writeReadTestFile(t, index, "index built before the first sync")
 	before := readTestTree(t, f.opts.Path)
 
 	result := ReadSync(context.Background(), f.opts)
@@ -450,6 +444,7 @@ func TestReadSyncAdoptedPathItCannotClearIsOccupied(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("directory permissions must reject removal for this failure injection")
 	}
+	f := newReadFixture(t)
 	for _, tc := range []struct {
 		name string
 		// locked is the directory, relative to the checkout path, whose entries
@@ -460,21 +455,21 @@ func TestReadSyncAdoptedPathItCannotClearIsOccupied(t *testing.T) {
 		{"the path itself", "."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newReadFixture(t)
-			index := filepath.Join(f.opts.Path, ".sageox/cache/codedb/metadata.db")
-			require.NoError(t, os.MkdirAll(filepath.Dir(index), 0700))
-			require.NoError(t, os.WriteFile(index, []byte("index built before the first sync"), 0600))
-			locked := filepath.Join(f.opts.Path, tc.locked)
+			opts := f.opts
+			opts.Path = filepath.Join(t.TempDir(), "checkout")
+			index := filepath.Join(opts.Path, ".sageox/cache/codedb/metadata.db")
+			writeReadTestFile(t, index, "index built before the first sync")
+			locked := filepath.Join(opts.Path, tc.locked)
 			require.NoError(t, os.Chmod(locked, 0500))
 			t.Cleanup(func() { _ = os.Chmod(locked, 0700) })
 
-			result := ReadSync(context.Background(), f.opts)
+			result := ReadSync(context.Background(), opts)
 			require.False(t, result.Ready, "%+v", result)
 			require.Equal(t, "path_occupied", result.ErrorClass)
 			require.True(t, result.Resumable, "the verified stage is kept for when the path is cleared")
 
 			require.NoError(t, os.Chmod(locked, 0700))
-			resumed := ReadSync(context.Background(), f.opts)
+			resumed := ReadSync(context.Background(), opts)
 			require.True(t, resumed.Ready, "%+v", resumed)
 			actual, err := os.ReadFile(index)
 			require.NoError(t, err)
@@ -483,30 +478,90 @@ func TestReadSyncAdoptedPathItCannotClearIsOccupied(t *testing.T) {
 	}
 }
 
-// Failure prevented: an adopted path someone removes mid-sync is reported as
-// occupied at publication, a condition that sends a consumer to clear a path
-// that is already clear.
-func TestReadSyncPublishesWhenTheAdoptedPathIsRemovedMidSync(t *testing.T) {
-	content := []byte("an object that lands after the adopted path is gone\n")
-	var f *readFixture
-	f = newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/batch") {
-			grantReadLFSBatch(t, w, r)
-			return
-		}
-		assert.NoError(t, os.RemoveAll(f.opts.Path))
-		_, _ = w.Write(content)
-	})
-	commitReadLFSPointer(t, f, "sessions/cold/session.md", content)
-	index := filepath.Join(f.opts.Path, ".sageox/cache/codedb/metadata.db")
-	require.NoError(t, os.MkdirAll(filepath.Dir(index), 0700))
-	require.NoError(t, os.WriteFile(index, []byte("removed before publication"), 0600))
+// Failure prevented: publication acts on what the path held when the clone
+// began rather than on what it holds now. A path someone removed mid-sync is
+// reported as occupied, sending a consumer to clear a path that is already
+// clear; a code index built mid-sync makes the rename fail, and the attempt
+// with it.
+func TestReadSyncPublishesWhatThePathHoldsNow(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// before is the index at the path when the sync starts, "" for none;
+		// change is what happens to the path while objects transfer.
+		before string
+		change func(path string) error
+		// after is the index the published checkout holds, "" for none.
+		after string
+	}{
+		{name: "path removed", before: "removed before publication", change: os.RemoveAll},
+		{name: "index built", change: func(path string) error {
+			index := filepath.Join(path, ".sageox/cache/codedb/metadata.db")
+			if err := os.MkdirAll(filepath.Dir(index), 0700); err != nil {
+				return err
+			}
+			return os.WriteFile(index, []byte("built during the first sync"), 0600)
+		}, after: "built during the first sync"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content := []byte("an object that lands after the path changed\n")
+			var f *readFixture
+			f = newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/batch") {
+					grantReadLFSBatch(t, w, r)
+					return
+				}
+				assert.NoError(t, tc.change(f.opts.Path))
+				_, _ = w.Write(content)
+			})
+			commitReadLFSPointer(t, f, "sessions/cold/session.md", content)
+			index := filepath.Join(f.opts.Path, ".sageox/cache/codedb/metadata.db")
+			if tc.before != "" {
+				writeReadTestFile(t, index, tc.before)
+			}
 
-	result := ReadSync(context.Background(), f.opts)
-	require.True(t, result.Ready, "%+v", result)
-	require.Empty(t, result.ErrorClass)
-	require.NoFileExists(t, index, "nothing was left to carry over")
-	hydrated, err := os.ReadFile(filepath.Join(f.opts.Path, "sessions/cold/session.md"))
-	require.NoError(t, err)
-	require.Equal(t, content, hydrated)
+			result := ReadSync(context.Background(), f.opts)
+			require.True(t, result.Ready, "%+v", result)
+			require.Empty(t, result.ErrorClass)
+			if tc.after == "" {
+				require.NoFileExists(t, index, "nothing was left to carry over")
+			} else {
+				actual, err := os.ReadFile(index)
+				require.NoError(t, err)
+				require.Equal(t, tc.after, string(actual), "the index built mid-sync is carried over")
+			}
+			hydrated, err := os.ReadFile(filepath.Join(f.opts.Path, "sessions/cold/session.md"))
+			require.NoError(t, err)
+			require.Equal(t, content, hydrated)
+		})
+	}
+}
+
+// Failure prevented: the code indexer creates and deletes files in the cache
+// while a sync inspects it, and a file vanishing between the listing and the
+// open reads as unreadable, so a cache that only ox ever writes is refused as
+// path_occupied, a class a consumer does not retry.
+func TestReadCacheOnlyToleratesFilesVanishingMidWalk(t *testing.T) {
+	path := t.TempDir()
+	segments := filepath.Join(path, ".sageox/cache/codedb/bleve")
+	require.NoError(t, os.MkdirAll(segments, 0700))
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// A segment directory and its file, created and merged away.
+			dir := filepath.Join(segments, strconv.Itoa(i%8))
+			_ = os.MkdirAll(dir, 0700)
+			_ = os.WriteFile(filepath.Join(dir, "segment"), nil, 0600)
+			_ = os.RemoveAll(dir)
+		}
+	}()
+	defer func() { close(stop); <-done }()
+	for range 200 {
+		require.True(t, readCacheOnly(path), "a file that vanished mid-walk is not someone else's content")
+	}
 }

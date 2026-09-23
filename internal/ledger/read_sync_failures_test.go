@@ -27,10 +27,6 @@ import (
 // condition no retry changes is retried forever (ox #1045).
 func TestReadSyncRejectsUnownedDestinations(t *testing.T) {
 	f := newReadFixture(t)
-	write := func(t *testing.T, path, content string) {
-		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
-		require.NoError(t, os.WriteFile(path, []byte(content), 0600))
-	}
 	for _, tc := range []struct {
 		name, errorClass string
 		prepare          func(*testing.T, *ReadSyncOptions)
@@ -48,22 +44,22 @@ func TestReadSyncRejectsUnownedDestinations(t *testing.T) {
 			require.NoError(t, os.Symlink(t.TempDir(), opts.Path))
 		}},
 		{"someone else's files", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
-			write(t, filepath.Join(opts.Path, "notes.md"), "not ox's")
+			writeReadTestFile(t, filepath.Join(opts.Path, "notes.md"), "not ox's")
 		}},
 		{"cache beside someone else's files", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
-			write(t, filepath.Join(opts.Path, ".sageox/cache/codedb/metadata.db"), "index")
-			write(t, filepath.Join(opts.Path, "sessions/draft/session.md"), "not ox's")
+			writeReadTestFile(t, filepath.Join(opts.Path, ".sageox/cache/codedb/metadata.db"), "index")
+			writeReadTestFile(t, filepath.Join(opts.Path, "sessions/draft/session.md"), "not ox's")
 		}},
 		{"cache beside other .sageox content", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
-			write(t, filepath.Join(opts.Path, ".sageox/cache/codedb/metadata.db"), "index")
-			write(t, filepath.Join(opts.Path, ".sageox/config.json"), "{}")
+			writeReadTestFile(t, filepath.Join(opts.Path, ".sageox/cache/codedb/metadata.db"), "index")
+			writeReadTestFile(t, filepath.Join(opts.Path, ".sageox/config.json"), "{}")
 		}},
 		{"cache is a symlink", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
 			require.NoError(t, os.MkdirAll(filepath.Join(opts.Path, ".sageox"), 0700))
 			require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(opts.Path, ".sageox/cache")))
 		}},
 		{"Git worktree link", "path_occupied", func(t *testing.T, opts *ReadSyncOptions) {
-			write(t, filepath.Join(opts.Path, ".git"), "gitdir: /elsewhere/.git/worktrees/checkout\n")
+			writeReadTestFile(t, filepath.Join(opts.Path, ".git"), "gitdir: /elsewhere/.git/worktrees/checkout\n")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -79,6 +75,13 @@ func TestReadSyncRejectsUnownedDestinations(t *testing.T) {
 			require.Equal(t, before, readTestTree(t, root), "a refused path, and everything beside it, stays exactly as it was")
 		})
 	}
+}
+
+// writeReadTestFile writes content to path, creating its parent directories.
+func writeReadTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0600))
 }
 
 // readTestTree records every entry under root: each file's content, each

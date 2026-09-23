@@ -9,13 +9,9 @@ import (
 )
 
 // PreserveCache copies the .sageox/cache/ directory from a checkout to a
-// backup location. The cache is gitignored and holds derived data that is
-// expensive to rebuild, such as codedb indexes. Returns nil if no cache exists
-// (nothing to preserve).
-//
-// The daemon's blue-green reclone preserves ledger and team-context caches
-// through this and RestoreCache; read sync restores an adopted cache through
-// RestoreCache.
+// backup location. The cache is gitignored local state that a fresh clone does
+// not bring back, such as codedb indexes and session recordings. Returns nil
+// if no cache exists (nothing to preserve).
 func PreserveCache(srcRepo, cacheBackupDir string) error {
 	cacheDir := filepath.Join(srcRepo, ".sageox", "cache")
 	if _, err := os.Stat(cacheDir); err != nil {

@@ -20,8 +20,7 @@ func TestPreserveAndRestoreCache(t *testing.T) {
 	require.NoError(t, RestoreCache(backup, t.TempDir()), "no backup is nothing to restore")
 
 	index := filepath.Join(".sageox", "cache", "codedb", "metadata.db")
-	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(src, index)), 0700))
-	require.NoError(t, os.WriteFile(filepath.Join(src, index), []byte("sqlite-data"), 0600))
+	writeReadTestFile(t, filepath.Join(src, index), "sqlite-data")
 	require.NoError(t, PreserveCache(src, backup))
 	dst := t.TempDir()
 	require.NoError(t, RestoreCache(backup, dst))

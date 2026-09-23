@@ -19,11 +19,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/glance"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
@@ -268,9 +270,10 @@ func TestHostedReadersServeTheMaterializedLedger(t *testing.T) {
 // reads its ledger (ox #1045).
 func TestHostedReadSyncKeepsACodeIndexBuiltBeforeTheFirstSync(t *testing.T) {
 	f := serveHostedLedger(t)
-	path, _, class := selectHostedLedger(readSyncTestRepoID)
+	path, ep, class := selectHostedLedger(readSyncTestRepoID)
 	require.Empty(t, class)
-	index := filepath.Join(path, ".sageox", "cache", "codedb", "metadata.db")
+	// Where the code indexer writes, so this test follows it if it ever moves.
+	index := filepath.Join(paths.CodeDBSharedDir(readSyncTestRepoID, ep), store.MetadataDBFile)
 	require.NoError(t, os.MkdirAll(filepath.Dir(index), 0o700))
 	require.NoError(t, os.WriteFile(index, []byte("index built before the first sync"), 0o600))
 
