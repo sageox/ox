@@ -338,7 +338,10 @@ func TestFaultDaemon_Slow_ChunkedResponse(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	err := daemon.IsHealthy()
+	// This checks framing, not the separate 100ms health-probe deadline.
+	// The fixture emits a byte every 500us; scheduler delays under race/coverage
+	// can easily consume that health budget before the newline arrives.
+	err := daemon.NewClientWithSocketAndTimeout(d.SocketPath(), 5*time.Second).Ping()
 	assert.NoError(t, err, "chunked response should be handled by bufio.Reader")
 }
 

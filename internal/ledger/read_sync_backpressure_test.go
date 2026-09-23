@@ -194,6 +194,10 @@ func TestReadSyncLFSConcurrencyFollowsTheServersBound(t *testing.T) {
 	var inFlight, served atomic.Int32
 	var mu sync.Mutex
 	var arrivals []arrival
+	firstWaveReady := make(chan struct{})
+	recoveredOverlap := make(chan struct{})
+	pendingRetries := make(map[string]bool)
+	recoveryArrivals, recoveryHeld := 0, 0
 	f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/batch") {
 			grantReadLFSBatch(t, w, r)
@@ -205,7 +209,45 @@ func TestReadSyncLFSConcurrencyFollowsTheServersBound(t *testing.T) {
 		defer inFlight.Add(-1)
 		mu.Lock()
 		arrivals = append(arrivals, arrival{time.Now(), concurrent, capped})
+		arrivalNumber := len(arrivals)
+		if arrivalNumber == readHydrationConcurrency {
+			close(firstWaveReady)
+		}
+		oid := filepath.Base(r.URL.Path)
+		if capped && concurrent > bound {
+			pendingRetries[oid] = true
+		} else {
+			delete(pendingRetries, oid)
+		}
+		// Let all refused objects return and successes raise the bound before
+		// holding a recovery wave. Otherwise the barrier could itself prevent
+		// the successes that are required to widen the limit.
+		if !capped && len(pendingRetries) == 0 {
+			recoveryArrivals++
+		}
+		holdRecovery := recoveryArrivals > 2*readHydrationConcurrency
+		if holdRecovery {
+			recoveryHeld++
+			if recoveryHeld == bound+2 {
+				close(recoveredOverlap)
+			}
+		}
 		mu.Unlock()
+		// Require actual overlap instead of assuming a 100ms sleep makes
+		// enough handlers run together on a busy race/coverage runner.
+		var ready <-chan struct{}
+		if arrivalNumber <= readHydrationConcurrency {
+			ready = firstWaveReady
+		} else if holdRecovery {
+			ready = recoveredOverlap
+		}
+		if ready != nil {
+			select {
+			case <-ready:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		// A refusal is answered at once, as the read route answers it; a
 		// transfer takes long enough that concurrent requests overlap observably.
 		if capped && concurrent > bound {
@@ -223,7 +265,9 @@ func TestReadSyncLFSConcurrencyFollowsTheServersBound(t *testing.T) {
 		commitReadLFSPointer(t, f, fmt.Sprintf("sessions/bounded/object-%03d.md", i), content)
 	}
 
-	result := ReadSync(context.Background(), f.opts)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	result := ReadSync(ctx, f.opts)
 	require.True(t, result.Ready, "%+v", result)
 	require.Equal(t, ReadHydration{State: "complete", Required: objects, Completed: objects}, result.Hydration)
 
