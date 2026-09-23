@@ -617,12 +617,7 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) (teamP
 		} else if s.issues != nil {
 			s.issues.ClearIssue(IssueTypeGitLock, repoName)
 		}
-		// Same reasoning as doPull: a skip only reachable after a successful
-		// index read retires a standing integrity issue, and skips never reach
-		// the clear-on-success path at the bottom of this function.
-		if s.issues != nil && skipProvesIndexReadable(result.SkipReason) {
-			s.issues.ClearIssue(IssueTypeRepoIntegrity, repoName)
-		}
+		s.clearDisprovedBySkip(repoName, result.SkipReason)
 		// A rebase in progress leaves the working tree in a partial, possibly
 		// inconsistent state — the team context is NOT safely usable, so return an
 		// error rather than letting the caller report it as "synced". The other

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,7 +81,7 @@ func TestLastError_WindowedToMatchRecentErrorCount(t *testing.T) {
 	t.Parallel()
 	s := &SyncScheduler{maxRecentErrs: 10}
 
-	s.recordError("fetch failed: Could not resolve host: git.example.ai")
+	s.recordError("ledger", "fetch failed: Could not resolve host: git.example.ai")
 	msg, when := s.LastError()
 	assert.NotEmpty(t, msg, "a fresh error must be reported")
 	assert.False(t, when.IsZero())
@@ -96,6 +97,87 @@ func TestLastError_WindowedToMatchRecentErrorCount(t *testing.T) {
 	assert.True(t, when.IsZero())
 	assert.Equal(t, 0, s.RecentErrorCount(),
 		"LastError and RecentErrorCount must never disagree about what is recent")
+}
+
+// A ledger wedged on a session conflict that auto-resolve refuses, then fixed
+// by hand, must stop reporting the wedge on the next cycle that finds it
+// healthy.
+//
+// Failure prevented: `ox daemon status` showing "Last error: field title
+// differs ...", "has unresolved conflicts" and "Sync suspended after 3
+// consecutive failures" beside a ledger it reported as synced seconds ago. The
+// pull that wedged had already moved HEAD to the remote tip, so until the
+// remote moves again every cycle skips as "remote unchanged", and only a
+// completed pull cleared those issues; the error log was never cleared at all,
+// only aged out after an hour.
+func TestDoPull_FixedWedgeStopsReportingItsFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git conflict and recovery")
+	}
+	for _, tc := range []struct {
+		name string
+		// remoteAdvances pushes an unrelated commit after the fix, so the
+		// recovery cycle runs a real pull instead of the "remote unchanged" skip.
+		remoteAdvances bool
+	}{
+		{name: "remote unchanged since the fix"},
+		{name: "remote advanced since the fix", remoteAdvances: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ledgerDir := filepath.Join(t.TempDir(), "ledger")
+			require.NoError(t, os.MkdirAll(ledgerDir, 0o755))
+			setupGitRepo(t, ledgerDir)
+			remote := bareRepoPath(ledgerDir)
+			s := newPullTestScheduler(t, ledgerDir)
+			ctx := context.Background()
+
+			const rel = "sessions/s1/meta.json"
+			require.NoError(t, os.MkdirAll(filepath.Join(ledgerDir, "sessions", "s1"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, rel), []byte(`{"session_id":"s1","title":""}`+"\n"), 0o644))
+			gitCmd(t, ledgerDir, "add", rel)
+			gitCmd(t, ledgerDir, "commit", "-m", "seed session")
+			gitCmd(t, ledgerDir, "push", "origin", "HEAD:main")
+
+			// Two writers title the same session differently. Auto-resolve
+			// refuses to choose, so the pull leaves an unmerged autostash.
+			pushFromSeparateClone(t, remote, rel, `{"session_id":"s1","title":"Remote title"}`+"\n")
+			local := []byte(`{"session_id":"s1","title":"Local title"}` + "\n")
+			require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, rel), local, 0o644))
+
+			err := s.doPull(ctx, nil, false, false)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "field title differs")
+			_, conflicted := s.issues.GetIssue(IssueTypeMergeConflict, "ledger")
+			require.True(t, conflicted, "the wedge must be reported while it lasts")
+			lastErr, _ := s.LastError()
+			require.Contains(t, lastErr, "field title differs")
+
+			// The next cycle lands inside the failure backoff.
+			require.NoError(t, s.doPull(ctx, nil, false, false))
+			_, backedOff := s.issues.GetIssue(IssueTypeSyncBackoff, "ledger")
+			require.True(t, backedOff, "the backoff must be reported while it lasts")
+
+			// A coworker keeps the local title and drops the autostash.
+			require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, rel), local, 0o644))
+			gitCmd(t, ledgerDir, "add", rel)
+			gitCmd(t, ledgerDir, "stash", "drop")
+			if tc.remoteAdvances {
+				pushFromSeparateClone(t, remote, "next.txt", "after the fix\n")
+				// A scheduled retry runs outside the cross-daemon fetch dedup window.
+				old := time.Now().Add(-time.Hour)
+				require.NoError(t, os.Chtimes(filepath.Join(ledgerDir, ".git", "FETCH_HEAD"), old, old))
+			}
+
+			// The backoff elapses and the scheduled retry finds the ledger healthy.
+			s.workspaceRegistry.workspaces["ledger"].NextSyncAttempt = time.Now().Add(-time.Minute)
+			require.NoError(t, s.doPull(ctx, nil, false, false))
+
+			assert.Empty(t, s.issues.GetIssues(), "a fixed ledger has no issue left to report")
+			lastErr, _ = s.LastError()
+			assert.Empty(t, lastErr, "the wedge's error must not outlive the fix")
+			assert.Zero(t, s.RecentErrorCount(), "fixed errors must not keep the status at Warning")
+		})
+	}
 }
 
 // An API-discovered team context must NOT be written into config.local.toml.
