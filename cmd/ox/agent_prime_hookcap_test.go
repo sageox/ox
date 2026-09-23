@@ -83,9 +83,27 @@ func TestFitPrimeToHookCap_FitsAndKeepsWhatMattersMost(t *testing.T) {
 		assert.Contains(t, trimmed, "- "+name, "deferred section %s must be named in the pointer", name)
 		assert.NotContains(t, trimmed, "<"+name+">", "deferred section %s must not also be emitted", name)
 	}
-	// low-priority reference material goes first
-	assert.Contains(t, deferred, "context-budget")
-	assert.Contains(t, deferred, "visualization-guidance")
+	// Low-priority reference material goes first. Asserted as a rank boundary
+	// rather than a fixed list of section names: this fixture sits ~1 KB over
+	// budget, so which tail section loses the byte race shifts whenever prime
+	// copy changes by a few dozen bytes, and the swap pass legitimately keeps a
+	// small low-priority section it cannot trade for a larger high-priority one.
+	// What must never shift is the boundary — nothing a coworker needs before
+	// its first action may be deferred while reference material is kept.
+	rank := make(map[string]int, len(hookCapSectionPriority))
+	for i, name := range hookCapSectionPriority {
+		rank[name] = i
+	}
+	rankOf := func(name string) int { // unlisted sections defer first, as in the trimmer
+		if r, ok := rank[name]; ok {
+			return r
+		}
+		return len(hookCapSectionPriority)
+	}
+	for _, name := range deferred {
+		assert.Greater(t, rankOf(name), rankOf("commands"),
+			"%s outranks the reference tier and must survive the trim", name)
+	}
 }
 
 func TestFitPrimeToHookCap_UnderBudgetIsUntouched(t *testing.T) {

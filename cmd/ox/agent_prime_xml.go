@@ -807,7 +807,7 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 		sb.WriteString("</plan-enrichment-guidance>\n")
 		return
 	}
-	sb.WriteString("Plan non-trivial work (multi-file OR architectural OR hotspot/open-PR OR ~5+ steps): run `ox plan enrich` WHILE drafting — JSON team context (collisions, prior art, expert routing) at zero LLM/network cost. This is your default plan-enrichment call.\n")
+	sb.WriteString("Plan any non-trivial work — design, GTM, rollout, engineering (multi-file OR architectural OR hotspot/open-PR OR ~5+ steps): run `ox plan enrich` WHILE drafting — JSON team context (collisions, prior art, expert routing) at zero LLM/network cost. This is your default plan-enrichment call.\n")
 	// HTML + review loop are HUMAN-opt-in: the agent recommends, the human runs.
 	// The authored page leads; ox supplies canonical storage, enrichment chrome,
 	// and review without becoming a second renderer or source of truth.

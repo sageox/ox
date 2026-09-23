@@ -51,8 +51,9 @@ recording, and register the AI coworker for a session. Done at session start,
 after context compaction, and after a context clear.
 
 **Plan Enrichment** — Folding deterministic SageOx team-context signals
-(collisions with in-flight work, prior art, expert routing) into an
-implementation plan **while it is being drafted**, before the human sees it.
+(collisions with in-flight work, prior art, expert routing) into a plan — of any
+kind: design, GTM, rollout, engineering — **while it is being drafted**, before
+the human sees it.
 `ox plan enrich` computes these locally — no LLM, no network call.
 
 **Collision** — A plan-enrichment signal that the work a plan proposes overlaps

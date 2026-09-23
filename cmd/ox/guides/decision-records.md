@@ -55,4 +55,4 @@ Decision Records are read for years; they shouldn't read like a changelog for a 
 ## See also
 
 - `ox decision enrich --help` — full command reference
-- `ox guide plan-enrichment` — the parallel consult-and-credit contract for implementation plans
+- `ox guide plan-enrichment` — the parallel consult-and-credit contract for plans

@@ -30,7 +30,7 @@ func TestRenderFreshHTML_ArtifactVerbatim(t *testing.T) {
 
 	cmd := planRenderCmd
 	cmd.SetOut(&bytes.Buffer{})
-	if err := runPlanRenderFresh(cmd, planPath, outPath, false, true); err != nil {
+	if err := runPlanRenderFresh(cmd, planPath, outPath, false, true, ""); err != nil {
 		t.Fatalf("runPlanRenderFresh: %v", err)
 	}
 	got, err := os.ReadFile(outPath)
@@ -60,7 +60,7 @@ func TestRenderFreshHTML_InjectsChrome(t *testing.T) {
 
 	cmd := planRenderCmd
 	cmd.SetOut(&bytes.Buffer{})
-	if err := runPlanRenderFresh(cmd, planPath, outPath, false, false); err != nil {
+	if err := runPlanRenderFresh(cmd, planPath, outPath, false, false, ""); err != nil {
 		t.Fatalf("runPlanRenderFresh: %v", err)
 	}
 	got, err := os.ReadFile(outPath)
@@ -109,7 +109,7 @@ func TestRenderFresh_BundlesCompanionNextToOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cmd.Flags().Set("file", "") })
-	if err := runPlanRenderFresh(cmd, planPath, outPath, false, false); err != nil {
+	if err := runPlanRenderFresh(cmd, planPath, outPath, false, false, ""); err != nil {
 		t.Fatalf("runPlanRenderFresh: %v", err)
 	}
 

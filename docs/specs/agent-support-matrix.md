@@ -60,7 +60,8 @@ Agent-specific hooks (`ox integrate install --<agent>`) are *additive* — they 
 
 ## Plan Enrichment (`ox plan`)
 
-`ox plan` enriches an agent-generated implementation plan with deterministic
+`ox plan` enriches an agent-generated plan of any kind — design, GTM, rollout,
+engineering — with deterministic
 SageOx signals (collision / prior-art / expert-route). `ox plan --json` is the
 plumbing path: 0 tokens, no LLM, no network — it computes badges locally. There
 are three graduated levels of exposure:

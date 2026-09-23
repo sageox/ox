@@ -11,11 +11,13 @@ description: >-
   (contract + quality bar: docs/specs/plan-authoring-html.md) — and into
   reasoning the `ox plan enrich` context bundle into CITED, section-anchored
   judgment badges (optional, via --annotations). Markdown-first survives only as
-  the quick path for small, low-stakes plans. Use whenever the user wants a plan
-  rendered or visualized as HTML — "render the plan", "make an HTML plan",
-  "show / visualize the plan", "turn this plan into a page", "plan as HTML",
-  or when `ox plan` reports material signals and the user
-  confirms. Whether to render at all is decided by the `ox plan` JSON
+  the quick path for small, low-stakes plans. A plan here is any work a team
+  executes — a design direction or mockup, a GTM or launch sequence, a rollout,
+  an engineering change. Use whenever the user wants a plan rendered or
+  visualized as HTML — "render the plan", "make an HTML plan", "show / visualize
+  the plan", "turn this plan into a page", "plan as HTML", "page for the launch
+  plan", "visualize the rollout" — or when `ox plan` reports material signals and
+  the user confirms. Whether to render at all is decided by the `ox plan` JSON
   (signals.material, guidance) plus the user's confirmation / the `plan.html`
   config setting — not by this skill.
 ---

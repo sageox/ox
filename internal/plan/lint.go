@@ -324,6 +324,29 @@ type CraftReport struct {
 // don't tell" holds even when the form differs from the hint), so a
 // well-visualized plan is never nagged for the wrong diagram shape.
 func CraftRealization(res Result, htmlBytes []byte) CraftReport {
+	return CraftRealizationFor(KindPlan, res, htmlBytes)
+}
+
+// CraftRealizationFor is CraftRealization for a specific artifact kind.
+//
+// Two of the three craft expectations are PLAN-shaped and only plan-shaped:
+//
+//   - the mockup nudge asks the author to PROPOSE a user-facing surface. A
+//     mockup artifact IS that proposal, so asking it for a mockup is circular
+//     — and that is exactly what a real `--kind mockup` save printed.
+//   - the progressive-disclosure nudge serves a plan's SECOND reader, the
+//     implementer who needs exact files, edits and gotchas kept out of the
+//     approver's way. A mockup, a review sheet and an evidence page have no
+//     such reader; there is nothing to relocate.
+//
+// The hero-visual expectation is kind-agnostic and survives for every kind: an
+// artifact of any kind that draws nothing is a prose wall.
+//
+// A suppressed expectation is not COUNTED either — folding it into Emitted
+// would report a permanent miss against the hint→realization metric that no
+// author could ever close.
+func CraftRealizationFor(kind ArtifactKind, res Result, htmlBytes []byte) CraftReport {
+	planShaped := KindOrDefault(kind) == KindPlan
 	var rep CraftReport
 	if len(htmlBytes) == 0 {
 		return rep
@@ -357,7 +380,7 @@ func CraftRealization(res Result, htmlBytes []byte) CraftReport {
 
 	// The plan changes a user-facing surface (detected at enrich) — realized only
 	// by an actual device mockup.
-	if res.MockupSection != "" {
+	if planShaped && res.MockupSection != "" {
 		rep.Emitted++
 		if craftDeviceRe.MatchString(h) {
 			rep.Realized++
@@ -374,7 +397,7 @@ func CraftRealization(res Result, htmlBytes []byte) CraftReport {
 	// A material plan serves two readers. The visual decision layer is for the
 	// approver; exact edits and gotchas remain available to the implementer in a
 	// single collapsed appendix instead of competing for first-scan attention.
-	if res.Signals.Material || res.Signals.NonTrivial {
+	if planShaped && (res.Signals.Material || res.Signals.NonTrivial) {
 		rep.Emitted++
 		if hasImplementationDisclosure(h) {
 			rep.Realized++
@@ -392,4 +415,9 @@ func CraftRealization(res Result, htmlBytes []byte) CraftReport {
 // printed (never blocking) after a render.
 func LintCraft(res Result, htmlBytes []byte) []Finding {
 	return CraftRealization(res, htmlBytes).Gaps
+}
+
+// LintCraftFor is LintCraft for a specific artifact kind.
+func LintCraftFor(kind ArtifactKind, res Result, htmlBytes []byte) []Finding {
+	return CraftRealizationFor(kind, res, htmlBytes).Gaps
 }

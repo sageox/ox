@@ -6,7 +6,7 @@ audience: ai
 
 # Plan Enrichment
 
-When you produce an implementation plan for non-trivial work — multi-file, architectural, touching a hotspot or open PR, or roughly 5+ steps — SageOx can fold in team context automatically, at zero LLM cost, before you present it.
+When you produce a plan for non-trivial work of any kind — a design direction, a GTM or launch sequence, a rollout, an engineering change; multi-file, architectural, touching a hotspot or open PR, or roughly 5+ steps — SageOx can fold in team context automatically, at zero LLM cost, before you present it.
 
 ## The two calls
 

@@ -1,7 +1,7 @@
 # Business Action: Enrich a Plan
 
 **Actor:** An AI coworker (e.g., Avery)
-**Goal:** Fold the team's context into an implementation plan before a human sees it
+**Goal:** Fold the team's context into a plan — design, GTM, rollout, engineering — before a human sees it
 **Preconditions:**
 - In a session for the team, drafting a plan in plan mode
 

@@ -26,8 +26,9 @@ import (
 // (save, lint, viz, feedback) are Hidden and taught via `ox agent prime`.
 var planCmd = &cobra.Command{
 	Use:   "plan",
-	Short: "Work with implementation plans (enrich, render, review)",
-	Long: `Work with SageOx-enriched implementation plans.
+	Short: "Work with plans (enrich, render, review)",
+	Long: `Work with SageOx-enriched plans: design, GTM, rollout, engineering — any
+plan your team executes against.
 
   enrich   compute team-context signals for a plan (JSON for AI coworkers)
   render   render a plan to a self-contained HTML page for human review
@@ -55,8 +56,8 @@ inline review loop — those are human-opt-in, never auto-run.`,
 // the human summary. Deterministic + network-free.
 var planEnrichCmd = &cobra.Command{
 	Use:   "enrich",
-	Short: "Enrich an implementation plan with SageOx team context (JSON by default)",
-	Long: `Enrich an agent-generated implementation plan with deterministic SageOx
+	Short: "Enrich a plan with SageOx team context (JSON by default)",
+	Long: `Enrich an agent-generated plan with deterministic SageOx
 signals (collision, prior-art, expert-routing) and a context bundle the agent
 can reason over. ox computes badges locally — no LLM or network call.
 
@@ -189,7 +190,11 @@ instead of a dead-end file/clipboard export — pass --static for a read-only pa
 			return runPlanRenderSaved(cmd, slug, out, open, artifact)
 		}
 		file, _ := cmd.Flags().GetString("file")
-		return runPlanRenderFresh(cmd, file, out, open, artifact)
+		renderKind, kerr := kindFlag(cmd)
+		if kerr != nil {
+			return kerr
+		}
+		return runPlanRenderFresh(cmd, file, out, open, artifact, renderKind)
 	},
 }
 
@@ -247,7 +252,11 @@ mark must be self-contained (no live remote avatar). Advisory by default; pass
 			if len(args) > 0 {
 				return fmt.Errorf("pass either <slug> or --file, not both")
 			}
-			return runPlanLintFile(cmd, file, strict)
+			lintKind, kerr := kindFlag(cmd)
+			if kerr != nil {
+				return kerr
+			}
+			return runPlanLintFile(cmd, file, strict, lintKind)
 		}
 		if len(args) == 0 {
 			return fmt.Errorf("pass a saved plan <slug>, or --file <plan.html> to lint before saving")
@@ -513,6 +522,18 @@ func collabCount(c *plan.CollabSignals, field string) int {
 	return 0
 }
 
+// kindFlag reads and validates --kind for every command that accepts one.
+// Three commands take it (save, lint, render) and an unvalidated kind is not a
+// harmless typo: `--kind reivew` would silently persist as kind=plan, which is
+// exactly the failure the flag exists to prevent.
+func kindFlag(cmd *cobra.Command) (string, error) {
+	k, _ := cmd.Flags().GetString("kind")
+	if !plan.ValidKind(k) {
+		return "", fmt.Errorf("unknown --kind %q; want one of: %s", k, strings.Join(plan.AllKinds(), ", "))
+	}
+	return k, nil
+}
+
 // runPlanSave persists either the preferred single plan-of-record file or the
 // legacy markdown + annotations pair. The old --plan + --html dual-source path
 // is rejected: it could store authored HTML without marking it canonical, so a
@@ -521,14 +542,12 @@ func runPlanSave(cmd *cobra.Command) error {
 	planPath, _ := cmd.Flags().GetString("plan")
 	annPath, _ := cmd.Flags().GetString("annotations")
 	htmlPath, _ := cmd.Flags().GetString("html")
-	kind, _ := cmd.Flags().GetString("kind")
-
 	// --kind is validated ONCE, here, before either route runs: the legacy
 	// route used to never look at it at all, so `--kind bogus` was accepted in
 	// silence and `--kind review` persisted as kind=plan.
-	if !plan.ValidKind(kind) {
-		return fmt.Errorf("unknown --kind %q; want one of: %s",
-			kind, strings.Join(plan.AllKinds(), ", "))
+	kind, kerr := kindFlag(cmd)
+	if kerr != nil {
+		return kerr
 	}
 
 	// --file: the plan-of-record path. An authored .html page saves as
@@ -628,9 +647,9 @@ func runPlanSaveFile(cmd *cobra.Command, filePath, annPath, kind string) error {
 			return fmt.Errorf("save plan: no ledger configured for %q or write failed", gitRoot)
 		}
 		slog.Info("plan_saved", "dir", dir, "primary", "html", "annotations", len(result.Annotations))
-		fmt.Fprintf(out, "Saved HTML-primary plan to ledger: %s\n", dir)
+		fmt.Fprintf(out, "Saved HTML-primary %s to ledger: %s\n", savedNoun(kind), dir)
 		checked := plan.InjectChrome(data, plan.BuildChromeData(result, plan.RenderOptions{Slug: filepath.Base(dir)}))
-		for _, f := range append(plan.LintRender(checked, result), plan.LintCraft(result, data)...) {
+		for _, f := range append(plan.LintRender(checked, result), plan.LintCraftFor(plan.ArtifactKind(kind), result, data)...) {
 			cli.PrintHint(fmt.Sprintf("plan-lint [%s]: %s", f.Rule, f.Message))
 		}
 		cli.PrintHint("plan.md was DERIVED from the page (regenerated on save — never hand-edit it). Open the live review loop: `ox plan review " + filepath.Base(dir) + "`.")
@@ -645,7 +664,7 @@ func runPlanSaveFile(cmd *cobra.Command, filePath, annPath, kind string) error {
 		return fmt.Errorf("save plan: no ledger configured for %q or write failed", gitRoot)
 	}
 	slog.Info("plan_saved", "dir", dir, "primary", "md", "annotations", len(result.Annotations))
-	fmt.Fprintf(out, "Saved plan to ledger: %s\n", dir)
+	fmt.Fprintf(out, "Saved %s to ledger: %s\n", savedNoun(kind), dir)
 	return nil
 }
 
@@ -655,7 +674,15 @@ func runPlanSaveFile(cmd *cobra.Command, filePath, annPath, kind string) error {
 // computed enrichment; the attribution/session check is skipped, since an
 // unsaved page has no recorded session to link to yet — and per the false-negative
 // lesson below, a skipped check is reported as skipped, never as a pass.
-func runPlanLintFile(cmd *cobra.Command, filePath string, strict bool) error {
+
+// savedNoun names what was just saved, so the confirmation line matches the
+// --kind the author passed. Telling someone who saved a mockup that ox "saved a
+// plan" is the same single-noun collapse ArtifactKind exists to end.
+func savedNoun(kind string) string {
+	return string(plan.KindOrDefault(plan.ArtifactKind(kind)))
+}
+
+func runPlanLintFile(cmd *cobra.Command, filePath string, strict bool, kind string) error {
 	out := cmd.OutOrStdout()
 	html, err := os.ReadFile(filePath)
 	if err != nil {
@@ -680,7 +707,7 @@ func runPlanLintFile(cmd *cobra.Command, filePath string, strict bool) error {
 	//   - the session link needs a recorded session this page does not have yet.
 	var findings []plan.Finding
 	var skipped []string
-	for _, f := range append(plan.LintRender(checked, res), plan.LintCraft(res, html)...) {
+	for _, f := range append(plan.LintRender(checked, res), plan.LintCraftFor(plan.ArtifactKind(kind), res, html)...) {
 		if f.Rule == "branding.ox-marker" {
 			skipped = append(skipped, f.Rule)
 			continue
@@ -741,7 +768,14 @@ func runPlanLint(cmd *cobra.Command, slug string, strict bool) error {
 		}
 		lintHTML = plan.InjectChrome(html, plan.BuildChromeData(res, opts))
 	}
-	findings := append(plan.LintRender(lintHTML, res), plan.LintCraft(res, html)...)
+	// The saved artifact records WHAT it is; the craft expectations differ by
+	// kind (a mockup is not asked to contain a mockup). A meta we could not
+	// read degrades to KindPlan, which is the strictest reading.
+	var savedKind plan.ArtifactKind
+	if metaErr == nil {
+		savedKind = meta.Kind
+	}
+	findings := append(plan.LintRender(lintHTML, res), plan.LintCraftFor(savedKind, res, html)...)
 	sessionChecked := false
 	if metaErr == nil && meta.Provenance != nil && meta.Provenance.SessionID != "" {
 		sessionChecked = true
@@ -908,7 +942,7 @@ func priorArtURLResolver(gitRoot string) func(refKind, ref string) string {
 	}
 }
 
-func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact bool) error {
+func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact bool, kind string) error {
 	in, err := plan.Resolve(file, cmd.InOrStdin())
 	if err != nil {
 		return err
@@ -921,7 +955,7 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact
 	// HTML-primary: an authored page is the plan of record — derive markdown,
 	// enrich via the derived sections, inject chrome (never wrap/re-render).
 	if plan.LooksLikeHTML(in.Raw) {
-		return runPlanRenderFreshHTML(cmd, in, outPath, open, artifact)
+		return runPlanRenderFreshHTML(cmd, in, outPath, open, artifact, kind)
 	}
 	gitRoot := findGitRoot()
 	result := plan.Enrich(context.Background(), in, gitRoot)
@@ -946,7 +980,7 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact
 	// Cross-agent design-craft check: did the render realize the visual craft ox
 	// expected at enrich (a suggested diagram, a user-facing surface)? Record the
 	// hint→realization metric, then surface any gaps as advisory nudges — never blocks.
-	craft := plan.CraftRealization(result, htmlBytes)
+	craft := plan.CraftRealizationFor(plan.ArtifactKind(kind), result, htmlBytes)
 	plan.RecordPlanCraft(craft)
 	for _, f := range craft.Gaps {
 		cli.PrintHint(fmt.Sprintf("plan-craft [%s]: %s", f.Rule, f.Message))
@@ -988,7 +1022,7 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact
 // (meta.primary=html), and emits the page with the ox chrome INJECTED —
 // enrichment overlay + footer credit + review layer appended before </body>,
 // author markup untouched. --artifact emits the authored bytes VERBATIM.
-func runPlanRenderFreshHTML(cmd *cobra.Command, in plan.Input, outPath string, open, artifact bool) error {
+func runPlanRenderFreshHTML(cmd *cobra.Command, in plan.Input, outPath string, open, artifact bool, kind string) error {
 	authored := []byte(in.Raw)
 	name := "plan"
 	if in.Path != "" {
@@ -1027,8 +1061,8 @@ func runPlanRenderFreshHTML(cmd *cobra.Command, in plan.Input, outPath string, o
 		// The AUTHORED bytes are canonical in the ledger (plan.md is the derived
 		// projection); chrome is injected per render/serve, never stored — that
 		// is what keeps injection idempotent and --artifact verbatim.
-		if dir := savePlanArtifacts(gitRoot, mdIn, result, authored, plan.PrimaryHTML); dir != "" {
-			cli.PrintHint("Saved HTML-primary plan (markdown derived from the page) — live review loop: `ox plan review " + filepath.Base(dir) + "`.")
+		if dir := savePlanArtifacts(gitRoot, mdIn, result, authored, plan.PrimaryHTML, withKind(kind)); dir != "" {
+			cli.PrintHint("Saved HTML-primary " + savedNoun(kind) + " (markdown derived from the page) — live review loop: `ox plan review " + filepath.Base(dir) + "`.")
 			if len(companions) > 0 {
 				if names, cerr := plan.CopyCompanions(companions, dir); cerr != nil {
 					cli.PrintHint("could not bundle companion(s): " + cerr.Error())
@@ -1273,7 +1307,7 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 		return cli.PrintJSONTo(out, plans)
 	}
 	if len(plans) == 0 {
-		fmt.Fprintln(out, "No saved plans yet. Run 'ox plan enrich --text' on an implementation plan to capture one.")
+		fmt.Fprintln(out, "No saved plans yet. Run 'ox plan enrich --text' on a plan to capture one.")
 		// Deliberately NOT a bare return: a project whose only plan-shaped
 		// artifact is an authored page nobody saved is precisely the shape the
 		// artifact discovery exists for, and the old early return made it the
@@ -1546,6 +1580,7 @@ func init() {
 	// render: single HTML entry point.
 	planRenderCmd.Flags().String("file", "", "plan source file when no slug is given (default: stdin, else newest ~/.claude/plans/*.md)")
 	planRenderCmd.Flags().StringP("output", "o", "", "write the rendered HTML to this path")
+	planRenderCmd.Flags().String("kind", "", "what the artifact IS: plan (default) | mockup | review | evidence — recorded with the render when it is persisted")
 	planRenderCmd.Flags().Bool("open", false, "open the rendered HTML in your browser")
 	planRenderCmd.Flags().Bool("static", false, "with --open on a saved plan, open a read-only static page instead of launching the live review loop")
 	planRenderCmd.Flags().Bool("artifact", false, "render a strictly self-contained, CSP-safe page for publishing as a Claude Code Artifact (no external fonts/scripts, no review loop; enrichment links preserved)")
@@ -1560,6 +1595,7 @@ func init() {
 	planSaveCmd.Flags().String("annotations", "", "merged annotations.json: enrich badges + AI-coworker judgment badges (required with --plan; optional with --file, which self-enriches)")
 	planSaveCmd.Flags().String("html", "", "deprecated and rejected: save authored HTML canonically with --file plan.html")
 
+	planLintCmd.Flags().String("kind", "", "what the artifact IS: plan (default) | mockup | review | evidence — a mockup is not asked to contain a mockup")
 	planLintCmd.Flags().Bool("strict", false, "exit non-zero on attribution, visual-craft, progressive-disclosure, or self-contained findings")
 
 	// lifecycle verbs: thin sugar over plan.AppendPlanEvent (internal/plan/lifecycle.go).

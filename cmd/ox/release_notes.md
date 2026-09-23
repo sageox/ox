@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Plans are for any work your team executes, and now say so** — `ox plan --help` described "implementation plans", so a designer, a product marketer, or anyone planning a rollout reasonably concluded Plans was not for them. It always was: `ox plan save --kind` takes `plan`, `mockup`, `review`, or `evidence`. The help text, the guidance every AI coworker receives at prime, and the plan skill now name design, GTM, rollout, and engineering work alike.
+
+### Fixed
+
+- **Saving a mockup no longer asks you to add a mockup** — `ox plan save --kind mockup` ran a plan's craft checks against it and told the author their mockup had no mockup, and that a visual proposal needed a collapsed "Implementation notes" appendix for its implementer. Both expectations are plan-shaped: one asks you to *propose* a surface, the other serves a plan's second reader. A mockup, a review sheet, and an evidence page have neither, so they no longer fire — while the one check that applies to every kind, *did this page draw anything at all*, still does. `ox plan lint` and `ox plan render` take `--kind` too, so the check you get before saving is the check you get after.
+- **ox names what you actually saved** — saving a mockup said "Saved plan to ledger", which is the single-noun collapse `--kind` exists to end.
+
 ## [0.17.1] - 2026-09-22
 
 Your team can install a curated add-on once and every teammate's AI coworker gets it, what ox tells you about your coworkers and your team rules is now true, and the lists you read every day fit on a screen.

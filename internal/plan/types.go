@@ -1,7 +1,7 @@
-// Package plan enriches agent-generated implementation plans with SageOx team
-// context. ox computes DETERMINISTIC badges locally (zero LLM tokens) and
-// assembles a context bundle; the client agent does any inference. ox NEVER
-// makes an LLM or network call in this path.
+// Package plan enriches agent-generated plans of any kind — design, GTM,
+// rollout, engineering — with SageOx team context. ox computes DETERMINISTIC
+// badges locally (zero LLM tokens) and assembles a context bundle; the client
+// agent does any inference. ox NEVER makes an LLM or network call in this path.
 //
 // Architecture:
 //   - Detectors produce deterministic Annotations from local data (collision,

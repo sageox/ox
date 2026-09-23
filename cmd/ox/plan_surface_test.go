@@ -68,3 +68,34 @@ func TestPlanFeedbackResolve_PositionalSlug(t *testing.T) {
 		t.Error("resolve must not have a --slug flag (slug is positional)")
 	}
 }
+
+// TestPlanHelp_NounIsAnyPlanNotJustImplementation pins the framing of the plan
+// surface: `ox plan save --kind` already accepts plan|mockup|review|evidence, so
+// help text that says "implementation plans" tells a designer, a PMM, or anyone
+// planning a rollout that Plans is not for them. Failure prevented (GH #1041):
+// the copy silently re-narrows to engineering and the non-engineering kinds
+// become a hidden capability again.
+func TestPlanHelp_NounIsAnyPlanNotJustImplementation(t *testing.T) {
+	for _, tc := range []struct {
+		where string
+		text  string
+	}{
+		{"planCmd.Short", planCmd.Short},
+		{"planCmd.Long", planCmd.Long},
+		{"planEnrichCmd.Short", planEnrichCmd.Short},
+		{"planEnrichCmd.Long", planEnrichCmd.Long},
+	} {
+		if strings.Contains(strings.ToLower(tc.text), "implementation plan") {
+			t.Errorf("%s calls a plan an \"implementation plan\" — a plan is any work the team executes (design, GTM, rollout, engineering): %q", tc.where, tc.text)
+		}
+	}
+
+	// Dropping the adjective is not enough on its own: a bare "plans" with an
+	// engineering-only body reads the same way. The Long must name the kinds.
+	long := strings.ToLower(planCmd.Long)
+	for _, kind := range []string{"design", "gtm", "rollout"} {
+		if !strings.Contains(long, kind) {
+			t.Errorf("planCmd.Long must name %q among the kinds of plan ox supports, so a non-engineering reader sees themselves in it", kind)
+		}
+	}
+}

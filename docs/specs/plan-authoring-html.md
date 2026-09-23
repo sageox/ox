@@ -105,6 +105,14 @@ successor. Do not introduce a second brand hue.
 ramps' mid stops are *fill* values — sage-700 lands at 4.31:1 and warning-600 at
 3.16:1 as text on cream, both under WCAG AA. The values above are the corrected
 text-safe ones.
+## What counts as a plan
+
+A plan is any work a team executes against — a design direction, a GTM or launch
+sequence, a rollout, an engineering change. `ox plan save --kind` records which
+one it is: `plan` (default) | `mockup` | `review` | `evidence`. Everything in
+this document applies to all four; nothing here assumes the reader or the
+executor is an engineer.
+
 ## The human-attention contract
 
 A material plan has two readers and therefore two layers:
@@ -113,13 +121,19 @@ A material plan has two readers and therefore two layers:
    trade-offs, and one meaningful hero visualization that explains the system's
    topology, sequence, state, or comparison. Decorative icons and wordmarks do
    not count as a visualization.
-2. **Implementation depth (collapsed initially):** exactly one closed
+2. **Execution depth (collapsed initially):** exactly one closed
    `<details><summary>Implementation notes</summary>...</details>` appendix at
-   the end with exact files, edits, rollout mechanics, and gotchas.
+   the end with the exact steps — files and edits for an engineering change,
+   channels and sequencing for a launch, surfaces and states for a design
+   direction — plus rollout mechanics and gotchas. **The summary text is the
+   literal string `Implementation notes` regardless of the plan's kind**: ox
+   lint (`internal/plan/lint.go`) and the markdown extractor key on it, so it is
+   a section name, not a claim about who executes.
 
 Do not average the two audiences into a long document. Keep the depth, but move
 it behind native progressive disclosure so the approver's first scan stays
-visual and the implementing AI coworker still has precise instructions.
+visual and whoever executes — an AI coworker, an engineer, a marketer — still
+has precise instructions.
 
 ## The minimal authoring contract
 

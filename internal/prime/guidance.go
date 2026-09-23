@@ -196,7 +196,7 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 		// lighter: surface that plans can be enriched + browsed, without
 		// promising a real-time nudge this tier can't fire.
 		cmds = append(cmds, IntentCommand{
-			Intent:  "enrich an implementation plan with team context ('ox plan'), or browse prior plans for this repo",
+			Intent:  "enrich a plan of any kind — design, GTM, rollout, engineering — with team context ('ox plan'), or browse prior plans for this repo",
 			Command: "ox plan list",
 		})
 	default: // TierGold, TierSilver, TierUnknown (baseline) — active enrich command
