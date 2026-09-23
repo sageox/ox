@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/agentx"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/sessionid"
@@ -274,16 +275,17 @@ func (r *RecordingState) RecordNativeSession(id, source string, at time.Time) {
 // hold a session directory (the daemon's finalize path) and want the state
 // only if it is still there. Returns nil, nil when the file does not exist.
 func ReadRecordingStateFile(sessionDir string) (*RecordingState, error) {
-	data, err := os.ReadFile(recordingStatePath(sessionDir))
+	statePath := recordingStatePath(sessionDir)
+	data, err := os.ReadFile(statePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read recording state: %w", err)
+		return nil, fmt.Errorf("read recording state file=%s: %w", statePath, err)
 	}
 	var state RecordingState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("parse recording state: %w", err)
+		return nil, fmt.Errorf("parse recording state file=%s: %w", statePath, err)
 	}
 	return &state, nil
 }
@@ -317,7 +319,9 @@ func SaveRecordingState(projectRoot string, state *RecordingState) error {
 
 	// TODO(server-side): move to server-side for MVP+1; client should not write to ledger directly.
 	statePath := recordingStatePath(state.SessionPath)
-	if err := os.WriteFile(statePath, data, 0600); err != nil {
+	// Publish a complete snapshot on a new inode. Concurrent in-place writes
+	// can otherwise leave the tail of a longer JSON object after a shorter one.
+	if err := fileutil.AtomicWriteBytes(statePath, data, 0600); err != nil {
 		return fmt.Errorf("write recording state file=%s: %w", statePath, err)
 	}
 

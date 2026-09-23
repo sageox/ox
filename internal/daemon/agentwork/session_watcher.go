@@ -570,7 +570,8 @@ func writeEntries(rw *session.RawWriter, entries []session.Entry) error {
 }
 
 // persistOffset updates SourceOffset and EntryCount in .recording.json.
-// Uses atomic write (temp file + rename) to avoid races with CLI writes.
+// Publishes complete JSON with a unique temporary file. This prevents byte
+// corruption; whole-state read-modify-write updates remain last-writer-wins.
 // Best-effort: errors are logged but don't stop the watcher.
 func (m *SessionWatcherManager) persistOffset(aw *activeWatcher, offset int64, entryDelta int) {
 	recPath := filepath.Join(aw.cachePath, recordingMarker)
@@ -588,16 +589,10 @@ func (m *SessionWatcherManager) persistOffset(aw *activeWatcher, offset int64, e
 	if err != nil {
 		return
 	}
-	// atomic write: write to temp file then rename to avoid partial writes
-	// and reduce the race window with CLI writes to the same file
-	tmpPath := recPath + ".tmp"
-	if err := os.WriteFile(tmpPath, updated, 0600); err != nil {
-		m.logger.Debug("failed to write temp offset file", "session", aw.sessionName, "error", err)
-		return
-	}
-	if err := os.Rename(tmpPath, recPath); err != nil {
-		m.logger.Debug("failed to rename temp offset file", "session", aw.sessionName, "error", err)
-		_ = os.Remove(tmpPath)
+	// A shared .tmp name lets another watcher keep writing to the same inode
+	// after it has been renamed into place, corrupting the published state.
+	if err := fileutil.AtomicWriteBytes(recPath, updated, 0600); err != nil {
+		m.logger.Debug("failed to persist recording offset", "session", aw.sessionName, "error", err)
 	}
 }
 
