@@ -196,26 +196,28 @@ func (r *Receiver) Serve(ctx context.Context, listener net.Listener) error {
 func (r *Receiver) prunePeriodically(stop <-chan struct{}) {
 	daily := time.NewTicker(24 * time.Hour)
 	defer daily.Stop()
-	// The startup scan runs BEFORE the first stop check, unconditionally.
+	// Prune FIRST, then wait. The startup scan is not conditional on stop.
 	//
 	// Serve closes stop from a defer, so a receiver that exits quickly — an idle
 	// timeout, or a canceled context — can close it before this goroutine is ever
-	// scheduled. With the stop check first, that ordering skipped the startup
-	// retention scan entirely: the one scan this worker exists to guarantee, lost
-	// to whether the scheduler got here in time.
+	// scheduled. Checking stop before the first prune made that ordering skip the
+	// startup retention scan entirely: the one scan this worker exists to
+	// guarantee, lost to whether the scheduler got here in time.
 	//
 	// It costs shutdown nothing. Serve never waits on this goroutine (the prune
 	// callback has no cancellation contract, as the caller documents), so the scan
-	// is already detached; running it always makes the guarantee real instead of
+	// is already detached; running it first makes the guarantee real instead of
 	// probabilistic.
-	r.prune()
+	//
+	// One call site, deliberately: a second `r.prune()` after the select would be
+	// reachable only once the 24-hour ticker fires, so no test could ever cover it.
 	for {
+		r.prune()
 		select {
 		case <-stop:
 			return
 		case <-daily.C:
 		}
-		r.prune()
 	}
 }
 
