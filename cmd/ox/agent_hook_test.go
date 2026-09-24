@@ -112,51 +112,6 @@ func TestRunAgentHook_NoArgs(t *testing.T) {
 
 // --- P0 #1: handleAfterTool direct unit tests ---
 
-// setupHandleAfterToolTest creates a project with an active recording and a
-// Claude Code source JSONL file, returning everything needed to call handleAfterTool directly.
-func setupHandleAfterToolTest(t *testing.T) (projectRoot string, agentID string, sourceFile string) {
-	t.Helper()
-
-	adapters.Register(&testClaudeCodeAdapter{})
-	t.Cleanup(func() { adapters.Unregister("claude-code") })
-
-	cacheDir := t.TempDir()
-	projectRoot = t.TempDir()
-
-	sageoxDir := filepath.Join(projectRoot, ".sageox")
-	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
-	cfg := `{"config_version":"2","repo_id":"test-repo-hook","endpoint":"http://test.sageox.local","session_publishing":"manual"}`
-	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
-
-	t.Setenv("OX_XDG_ENABLE", "1")
-	t.Setenv("HOME", cacheDir)
-	t.Setenv("XDG_CACHE_HOME", cacheDir)
-	t.Setenv("XDG_DATA_HOME", cacheDir)
-
-	agentID = "OxHook1"
-	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
-		AgentID:     agentID,
-		AdapterName: "claude-code",
-		Username:    "testuser",
-	})
-	require.NoError(t, err)
-
-	// create a source JSONL file (simulates Claude Code's session file)
-	sourceDir := t.TempDir()
-	sourceFile = filepath.Join(sourceDir, "session.jsonl")
-	require.NoError(t, os.WriteFile(sourceFile, []byte(""), 0644))
-
-	// update recording state with source file and session path
-	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
-		s.SessionFile = sourceFile
-	}))
-
-	// write the raw.jsonl header
-	require.NoError(t, writeRawHeader(projectRoot, state))
-
-	return projectRoot, agentID, sourceFile
-}
-
 func buildCodexCaptureAdapter(t *testing.T) string {
 	t.Helper()
 	if testing.Short() {
@@ -479,8 +434,9 @@ func TestHandleAfterTool_PreStartContentLeak_ByOffset(t *testing.T) {
 
 	// these entries have future timestamps but exist in the file BEFORE recording starts
 	futureTs := time.Now().Add(1 * time.Hour)
-	preContent := `{"type":"user","timestamp":"` + futureTs.Format(time.RFC3339Nano) + `","message":{"role":"user","content":"Old session message"}}` + "\n"
-	preContent += `{"type":"assistant","timestamp":"` + futureTs.Add(time.Second).Format(time.RFC3339Nano) + `","message":{"role":"assistant","content":[{"type":"text","text":"Old response"}]}}` + "\n"
+	preContent := fmt.Sprintf("{\"type\":\"session\",\"sessionId\":\"session\",\"cwd\":%q}\n", projectRoot)
+	preContent += fmt.Sprintf(`{"type":"user","sessionId":"session","cwd":%q,"timestamp":"%s","message":{"role":"user","content":"Old session message"}}`+"\n", projectRoot, futureTs.Format(time.RFC3339Nano))
+	preContent += fmt.Sprintf(`{"type":"assistant","sessionId":"session","cwd":%q,"timestamp":"%s","message":{"role":"assistant","content":[{"type":"text","text":"Old response"}]}}`+"\n", projectRoot, futureTs.Add(time.Second).Format(time.RFC3339Nano))
 	require.NoError(t, os.WriteFile(sourceFile, []byte(preContent), 0644))
 
 	// record file size BEFORE recording starts — this is StartOffset
@@ -733,14 +689,61 @@ func TestAppendEntries_DataOnDiskAfterReturn(t *testing.T) {
 
 // --- helpers ---
 
+func TestHandleAfterTool_QuarantinesForeignClaudeTurn(t *testing.T) {
+	projectRoot, agentID, sourceFile := setupHandleAfterToolTest(t)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	now := state.StartedAt.Add(time.Second)
+	appendClaudeEntries(t, sourceFile, now,
+		`{"type":"user","timestamp":"`+now.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"safe turn"}}`)
+	ctx := &HookContext{Phase: phaseAfterTool, ProjectRoot: projectRoot, Marker: &SessionMarker{AgentID: agentID}}
+	require.NoError(t, handleAfterTool(ctx))
+	state, err = session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.Greater(t, state.SourceOffset, int64(0))
+	before, err := os.ReadFile(filepath.Join(state.SessionPath, "raw.jsonl"))
+	require.NoError(t, err)
+	foreign := fmt.Sprintf(`{"type":"user","sessionId":"session","cwd":%q,"timestamp":%q,"message":{"role":"user","content":"foreign turn"}}`+"\n", filepath.Dir(projectRoot), now.Add(time.Second).Format(time.RFC3339Nano))
+	f, err := os.OpenFile(sourceFile, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString(foreign)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	require.NoError(t, handleAfterTool(ctx))
+	quarantined, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+	require.True(t, quarantined.SourceRejected)
+	require.Equal(t, "source-repo-mismatch", quarantined.LastHookStatus)
+	require.Equal(t, state.SourceOffset, quarantined.SourceOffset)
+	require.NoError(t, handleAfterTool(ctx)) // no repeated scan of the rejected source
+	after, err := os.ReadFile(filepath.Join(state.SessionPath, "raw.jsonl"))
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+}
+
 // appendClaudeEntries appends raw Claude Code JSONL lines to a source file.
 func appendClaudeEntries(t *testing.T, path string, _ time.Time, lines ...string) {
 	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var header struct {
+		Cwd string `json:"cwd"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(strings.SplitN(string(data), "\n", 2)[0]), &header))
+	require.NotEmpty(t, header.Cwd)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	require.NoError(t, err)
 	defer f.Close()
 	for _, line := range lines {
-		_, err := f.WriteString(line + "\n")
+		// Native Claude turns include both fields, even when the fixture only
+		// cares about content. Keep capture tests faithful to that boundary.
+		var record map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		record["sessionId"] = strings.TrimSuffix(filepath.Base(path), ".jsonl")
+		record["cwd"] = header.Cwd
+		encoded, err := json.Marshal(record)
+		require.NoError(t, err)
+		_, err = f.Write(append(encoded, '\n'))
 		require.NoError(t, err)
 	}
 }

@@ -11,6 +11,9 @@ import (
 // agentEnvVarsToSave lists all env vars that might indicate an agent context
 var agentEnvVarsToSave = []string{
 	"AGENT_ENV",
+	"PI_CODING_AGENT", // Pi sets this in every subprocess, including Go tests.
+	"PI_CODING_AGENT_DIR",
+	"PI_SESSION_ID",
 	"CLAUDECODE", // Claude Code sets this to "1"
 	"CLAUDE_CODE",
 	"CURSOR_AGENT",

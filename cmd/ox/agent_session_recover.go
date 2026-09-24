@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/claudesource"
 )
 
 // sessionRecoverOutput is the JSON output format for session recover.
@@ -56,6 +58,12 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 	if state == nil {
 		return fmt.Errorf("no stale recording to recover\nRun 'ox agent %s session start' to begin a new recording", inst.AgentID)
 	}
+	if state.SourceRejected {
+		return fmt.Errorf("claude source has untrusted repository ownership; recording and cache preserved for manual review")
+	}
+	if state.AdapterName == "claude-code" && state.SessionFile == "" && state.WatchMode != "tail" {
+		return fmt.Errorf("claude hook source not yet verified; recording and cache preserved for retry")
+	}
 
 	slog.Info("recovering stale session", "agent_id", state.AgentID, "session_path", state.SessionPath)
 
@@ -93,6 +101,11 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 	// process session through the normal pipeline
 	result, err := processAgentSession(projectRoot, state)
 	if err != nil {
+		if errors.Is(err, claudesource.ErrUntrustedSource) {
+			if markErr := session.MarkSourceRejected(projectRoot, state.AgentID); markErr != nil {
+				return fmt.Errorf("quarantine untrusted recovery source: %w", errors.Join(err, markErr))
+			}
+		}
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("failed to process session: %w", err)
 	}
@@ -125,6 +138,9 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 // Interactive terminals get a confirmation prompt before uploading.
 // Non-interactive contexts (agents) auto-upload for backward compatibility.
 func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState, rawPath string) error {
+	if state.SourceRejected {
+		return fmt.Errorf("claude source has untrusted repository ownership; cache preserved for manual review")
+	}
 	// read raw session to get entry count and entries for summary prompt
 	stored, err := session.ReadSessionFromPath(rawPath)
 	if err != nil {

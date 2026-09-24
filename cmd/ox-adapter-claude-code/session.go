@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/session/claudesource"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
 )
@@ -106,30 +107,12 @@ func handleReadMetadata(p adapterprotocol.ReadParams) (*adapterprotocol.ReadMeta
 }
 
 func readSessionFile(path string) ([]adapterprotocol.RawEntry, *adapterprotocol.SessionMetadata, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open session file: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	var entries []adapterprotocol.RawEntry
 	meta := &adapterprotocol.SessionMetadata{}
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
+	entries, _, err := adapterruntime.TailJSONL(path, 0, func(line []byte) ([]adapterprotocol.RawEntry, error) {
 		parsed, err := parseLine(line)
 		if err != nil {
-			continue
+			return nil, err
 		}
-		entries = append(entries, parsed...)
-
-		// extract metadata
 		var raw claudeCodeEntry
 		if json.Unmarshal(line, &raw) == nil {
 			if raw.Version != "" && meta.AgentVersion == "" {
@@ -139,56 +122,15 @@ func readSessionFile(path string) ([]adapterprotocol.RawEntry, *adapterprotocol.
 				meta.Model = raw.Message.Model
 			}
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("error reading session file: %w", err)
-	}
-
-	return entries, meta, nil
+		return parsed, nil
+	})
+	return entries, meta, err
 }
 
 func readFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, offset, fmt.Errorf("failed to open session file: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	if offset > 0 {
-		if _, err := f.Seek(offset, 0); err != nil {
-			return nil, offset, fmt.Errorf("failed to seek: %w", err)
-		}
-	}
-
-	var entries []adapterprotocol.RawEntry
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		parsed, err := parseLine(line)
-		if err != nil {
-			continue
-		}
-		entries = append(entries, parsed...)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, offset, fmt.Errorf("error reading session file: %w", err)
-	}
-
-	// calculate new offset
-	newOffset := offset
-	if info, err := f.Stat(); err == nil {
-		newOffset = info.Size()
-	}
-
-	return entries, newOffset, nil
+	// Keep a trailing partial record unconsumed; otherwise a concurrent Claude
+	// write can make validation pass while this reader silently drops the turn.
+	return adapterruntime.TailJSONL(path, offset, parseLine)
 }
 
 func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, int64, error) {
@@ -205,10 +147,6 @@ func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, i
 	projectHash := claudeProjectHash(repoRoot)
 	projectDir := filepath.Join(projectsDir, projectHash)
 
-	if _, err := os.Stat(projectDir); os.IsNotExist(err) {
-		return "", 0, fmt.Errorf("no sessions for project %s", repoRoot)
-	}
-
 	// direct lookup via agent session ID: Claude Code files are {sessionId}.jsonl
 	if agentSessionID != "" {
 		// Trust boundary: AgentSessionID arrives via the adapterprotocol JSON-RPC
@@ -221,17 +159,25 @@ func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, i
 			return "", 0, err
 		}
 		candidate := filepath.Join(projectDir, agentSessionID+".jsonl")
-		if _, err := os.Stat(candidate); err == nil {
-			sinceTime := time.Time{}
-			if since != "" {
-				if t, err := time.Parse(time.RFC3339, since); err == nil {
-					sinceTime = t
-				}
+		if info, err := os.Lstat(candidate); err == nil && info.Mode().IsRegular() {
+			if claudesource.Validate(candidate, repoRoot, agentSessionID) != nil {
+				return "", 0, fmt.Errorf("session %s has invalid repository metadata", agentSessionID)
 			}
-			offset := findStartOffset(candidate, sinceTime)
-			return candidate, offset, nil
+			return candidate, findStartOffset(candidate, parseSessionSince(since)), nil
 		}
-		// fall through to timestamp-based scanning
+		// Resumed Claude sessions can stay in their original project bucket.
+		// A matching filename elsewhere is not evidence of repo ownership:
+		// reject mixed/foreign cwd metadata rather than leak it into this Ledger.
+		if other, err := findClaudeSessionInOtherBucket(projectsDir, projectHash, repoRoot, agentSessionID); err != nil {
+			return "", 0, err
+		} else if other != "" {
+			return other, findStartOffset(other, parseSessionSince(since)), nil
+		}
+		return "", 0, fmt.Errorf("session %s not found for project %s", agentSessionID, repoRoot)
+	}
+
+	if _, err := os.Stat(projectDir); err != nil {
+		return "", 0, fmt.Errorf("no sessions for project %s: %w", repoRoot, err)
 	}
 
 	sinceTime := time.Time{}
@@ -279,12 +225,11 @@ func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, i
 		return candidates[i].modTime.After(candidates[j].modTime)
 	})
 
-	if agentID == "" {
-		return candidates[0].path, 0, nil
-	}
-
 	for _, c := range candidates {
-		if sessionContainsAgentID(c.path, agentID) {
+		if (agentID == "" || sessionContainsAgentID(c.path, agentID)) && claudesource.Validate(c.path, repoRoot, "") == nil {
+			if agentID == "" {
+				return c.path, 0, nil
+			}
 			offset := findStartOffset(c.path, sinceTime)
 			return c.path, offset, nil
 		}
@@ -299,6 +244,34 @@ func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, i
 	// the caller can decide (retry, prompt the user, fall through to a
 	// different lookup). See SECREVIEW llm-trust LOW.
 	return "", 0, fmt.Errorf("no session file contains agentID %q", agentID)
+}
+
+func parseSessionSince(since string) time.Time {
+	t, _ := time.Parse(time.RFC3339, since)
+	return t
+}
+
+func findClaudeSessionInOtherBucket(projectsDir, ownBucket, repoRoot, sessionID string) (string, error) {
+	dirs, err := os.ReadDir(projectsDir)
+	if err != nil {
+		return "", err
+	}
+	var match string
+	for _, dir := range dirs {
+		if !dir.IsDir() || dir.Name() == ownBucket {
+			continue
+		}
+		path := filepath.Join(projectsDir, dir.Name(), sessionID+".jsonl")
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || claudesource.Validate(path, repoRoot, sessionID) != nil {
+			continue
+		}
+		if match != "" {
+			return "", fmt.Errorf("session %s has multiple valid project buckets", sessionID)
+		}
+		match = path
+	}
+	return match, nil
 }
 
 func sessionContainsAgentID(path, agentID string) bool {

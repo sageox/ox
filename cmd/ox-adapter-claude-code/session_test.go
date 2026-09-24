@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,15 @@ import (
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
+
+func existingClaudeTestRepo(t *testing.T) string {
+	t.Helper()
+	repo, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repo
+}
 
 // --- A. Direct lookup via agent_session_id ---
 
@@ -25,7 +35,7 @@ func TestFindSessionFile_RejectsTraversalInAgentSessionID(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	repoRoot := "/tmp/test-repo"
+	repoRoot := existingClaudeTestRepo(t)
 	projectHash := claudeProjectHash(repoRoot)
 	projectDir := filepath.Join(home, ".claude", "projects", projectHash)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -69,7 +79,7 @@ func TestFindSessionFile_DirectLookup(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	repoRoot := "/tmp/test-repo"
+	repoRoot := existingClaudeTestRepo(t)
 	projectHash := claudeProjectHash(repoRoot)
 	projectDir := filepath.Join(home, ".claude", "projects", projectHash)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -78,7 +88,7 @@ func TestFindSessionFile_DirectLookup(t *testing.T) {
 
 	sessionID := "d8a6d16b-10fe-4c0f-865f-7e05b74e405d"
 	sessionFile := filepath.Join(projectDir, sessionID+".jsonl")
-	if err := os.WriteFile(sessionFile, []byte(`{"type":"user","timestamp":"2026-04-02T10:30:00Z","message":{"role":"user","content":"hello"}}`+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(sessionFile, []byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":%q,"timestamp":"2026-04-02T10:30:00Z","message":{"role":"user","content":"hello"}}`+"\n", sessionID, repoRoot)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -91,14 +101,12 @@ func TestFindSessionFile_DirectLookup(t *testing.T) {
 	}
 }
 
-// TestFindSessionFile_DirectLookup_InvalidFallsBack verifies that an invalid
-// agent session ID gracefully falls back to timestamp-based scanning.
-// Failure prevented: error returned instead of fallback when session ID doesn't match a file.
-func TestFindSessionFile_DirectLookup_InvalidFallsBack(t *testing.T) {
+// An exact session ID must not fall back to an unrelated file in the same bucket.
+func TestFindSessionFile_DirectLookup_RefusesDifferentSession(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	repoRoot := "/tmp/test-repo"
+	repoRoot := existingClaudeTestRepo(t)
 	projectHash := claudeProjectHash(repoRoot)
 	projectDir := filepath.Join(home, ".claude", "projects", projectHash)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -111,13 +119,10 @@ func TestFindSessionFile_DirectLookup_InvalidFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// use a non-existent session ID -- should fall back to most recent file
+	// A missing ID must not capture a different session, even in this repo.
 	got, _, err := findSessionFile(repoRoot, "", "", "nonexistent-session-id")
-	if err != nil {
-		t.Fatalf("findSessionFile: %v", err)
-	}
-	if got != realFile {
-		t.Errorf("got %q, want %q (fallback to most recent)", got, realFile)
+	if err == nil || got != "" {
+		t.Errorf("got %q, %v; want not found (other file: %q)", got, err, realFile)
 	}
 }
 
@@ -130,7 +135,7 @@ func TestFindSessionFile_TimestampFallback(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	repoRoot := "/tmp/test-repo"
+	repoRoot := existingClaudeTestRepo(t)
 	projectHash := claudeProjectHash(repoRoot)
 	projectDir := filepath.Join(home, ".claude", "projects", projectHash)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -141,7 +146,7 @@ func TestFindSessionFile_TimestampFallback(t *testing.T) {
 	olderFile := filepath.Join(projectDir, "older-session.jsonl")
 	newerFile := filepath.Join(projectDir, "newer-session.jsonl")
 
-	content := []byte(`{"type":"user","timestamp":"2026-04-02T10:30:00Z","message":{"role":"user","content":"hello"}}` + "\n")
+	content := []byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":%q,"timestamp":"2026-04-02T10:30:00Z","message":{"role":"user","content":"hello"}}`+"\n", "older-session", repoRoot))
 	if err := os.WriteFile(olderFile, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +155,7 @@ func TestFindSessionFile_TimestampFallback(t *testing.T) {
 	if err := os.Chtimes(olderFile, past, past); err != nil {
 		t.Fatal(err)
 	}
+	content = []byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":%q,"timestamp":"2026-04-02T10:30:00Z","message":{"role":"user","content":"hello"}}`+"\n", "newer-session", repoRoot))
 	if err := os.WriteFile(newerFile, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +181,7 @@ func TestFindSessionFile_MtimeBoundary_ExactMatch(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	repoRoot := "/tmp/test-repo-boundary"
+	repoRoot := existingClaudeTestRepo(t)
 	projectHash := claudeProjectHash(repoRoot)
 	projectDir := filepath.Join(home, ".claude", "projects", projectHash)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -185,7 +191,7 @@ func TestFindSessionFile_MtimeBoundary_ExactMatch(t *testing.T) {
 	sinceTime := time.Date(2026, 4, 8, 6, 30, 5, 0, time.UTC)
 
 	sessionFile := filepath.Join(projectDir, "boundary-session.jsonl")
-	content := []byte(`{"type":"user","timestamp":"2026-04-08T06:30:05Z","message":{"role":"user","content":"hello"}}` + "\n")
+	content := []byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":%q,"timestamp":"2026-04-08T06:30:05Z","message":{"role":"user","content":"hello"}}`+"\n", "boundary-session", repoRoot))
 	if err := os.WriteFile(sessionFile, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +216,7 @@ func TestFindSessionFile_MtimeBuffer(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	repoRoot := "/tmp/test-repo-buffer"
+	repoRoot := existingClaudeTestRepo(t)
 	projectHash := claudeProjectHash(repoRoot)
 	projectDir := filepath.Join(home, ".claude", "projects", projectHash)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -221,7 +227,7 @@ func TestFindSessionFile_MtimeBuffer(t *testing.T) {
 
 	// file mtime is 20 seconds before sinceTime — within the 30s buffer
 	withinBuffer := filepath.Join(projectDir, "within-buffer.jsonl")
-	content := []byte(`{"type":"user","timestamp":"2026-04-08T06:29:45Z","message":{"role":"user","content":"hello"}}` + "\n")
+	content := []byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":%q,"timestamp":"2026-04-08T06:29:45Z","message":{"role":"user","content":"hello"}}`+"\n", "within-buffer", repoRoot))
 	if err := os.WriteFile(withinBuffer, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -242,6 +248,7 @@ func TestFindSessionFile_MtimeBuffer(t *testing.T) {
 	// the buffer subtracts 30s, so mtime == (since - 30s) should pass (>= comparison)
 	_ = os.Remove(withinBuffer)
 	atBoundary := filepath.Join(projectDir, "at-boundary.jsonl")
+	content = []byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":%q,"timestamp":"2026-04-08T06:29:45Z","message":{"role":"user","content":"hello"}}`+"\n", "at-boundary", repoRoot))
 	if err := os.WriteFile(atBoundary, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +291,7 @@ func TestFindSessionFile_DirectLookup_RespectsOffset(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	repoRoot := "/tmp/test-repo"
+	repoRoot := existingClaudeTestRepo(t)
 	projectHash := claudeProjectHash(repoRoot)
 	projectDir := filepath.Join(home, ".claude", "projects", projectHash)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -292,8 +299,8 @@ func TestFindSessionFile_DirectLookup_RespectsOffset(t *testing.T) {
 	}
 
 	sessionID := "offset-test-session"
-	line1 := `{"type":"user","timestamp":"2026-04-02T09:00:00Z","message":{"role":"user","content":"old"}}` + "\n"
-	line2 := `{"type":"user","timestamp":"2026-04-02T11:00:00Z","message":{"role":"user","content":"new"}}` + "\n"
+	line1 := fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":%q,"timestamp":"2026-04-02T09:00:00Z","message":{"role":"user","content":"old"}}`+"\n", sessionID, repoRoot)
+	line2 := fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":%q,"timestamp":"2026-04-02T11:00:00Z","message":{"role":"user","content":"new"}}`+"\n", sessionID, repoRoot)
 	sessionFile := filepath.Join(projectDir, sessionID+".jsonl")
 	if err := os.WriteFile(sessionFile, []byte(line1+line2), 0o644); err != nil {
 		t.Fatal(err)
@@ -347,7 +354,7 @@ func TestFindSessionFile_SymlinkResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content := []byte(`{"type":"user","timestamp":"2026-04-02T10:30:00Z","message":{"role":"user","content":"hello"}}` + "\n")
+	content := []byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":%q,"timestamp":"2026-04-02T10:30:00Z","message":{"role":"user","content":"hello"}}`+"\n", "symlink-test-session", realRepo))
 	sessionFile := filepath.Join(projectDir, "symlink-test-session.jsonl")
 	if err := os.WriteFile(sessionFile, content, 0o644); err != nil {
 		t.Fatal(err)
@@ -402,7 +409,7 @@ func TestFindSessionFile_SymlinkResolution_DirectLookup(t *testing.T) {
 	}
 
 	sessionID := "direct-symlink-session"
-	content := []byte(`{"type":"user","timestamp":"2026-04-02T10:30:00Z","message":{"role":"user","content":"hello"}}` + "\n")
+	content := []byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":%q,"timestamp":"2026-04-02T10:30:00Z","message":{"role":"user","content":"hello"}}`+"\n", sessionID, realRepo))
 	sessionFile := filepath.Join(projectDir, sessionID+".jsonl")
 	if err := os.WriteFile(sessionFile, content, 0o644); err != nil {
 		t.Fatal(err)
@@ -453,7 +460,7 @@ func TestFindSessionFile_SymlinkResolution_MultiLevel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content := []byte(`{"type":"user","timestamp":"2026-04-02T10:30:00Z","message":{"role":"user","content":"hello"}}` + "\n")
+	content := []byte(fmt.Sprintf(`{"type":"user","sessionId":%q,"cwd":%q,"timestamp":"2026-04-02T10:30:00Z","message":{"role":"user","content":"hello"}}`+"\n", "multi-level", realRepo))
 	sessionFile := filepath.Join(projectDir, "multi-level.jsonl")
 	if err := os.WriteFile(sessionFile, content, 0o644); err != nil {
 		t.Fatal(err)

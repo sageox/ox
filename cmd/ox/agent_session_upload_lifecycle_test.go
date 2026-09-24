@@ -429,16 +429,21 @@ func TestSessionUpload_ScansContentBeforeLFS(t *testing.T) {
 	}
 }
 
-// A line longer than the old 4 MiB scanner buffer but under the file-size cap
-// must be inspected and redacted, not refused: doctor re-runs the same scan on
-// the same bytes, so a refusal here would strand the session permanently.
+// The routine gate checks lines above bufio.Scanner's default 64 KiB limit.
+// The 4 MiB former-buffer regression is exercised in the slow tier because
+// race-instrumented secret regexes on multi-megabyte lines exceed the fast tier's budget.
 func TestSessionUpload_ScansLongLinesUnderSizeCap(t *testing.T) {
+	testSessionUploadScansLongLines(t, 128*1024)
+}
+
+func testSessionUploadScansLongLines(t *testing.T, lineLength int) {
+	t.Helper()
 	for _, mode := range []string{"stop", "doctor"} {
 		t.Run(mode, func(t *testing.T) {
 			fixture := newSessionUploadFixture(t)
 			t.Setenv("OX_ALLOW_SECRETS", "")
 			const canary = "AKIAIOSFODNN7EXAMPLE"
-			longLine := strings.Repeat("x", 4*1024*1024+1024) + " " + canary
+			longLine := strings.Repeat("x", lineLength) + " " + canary
 			require.Less(t, len(longLine), prePushScannerSizeCap, "the line must stay under the file cap so the file is scanned")
 			oversized := []byte(strings.ReplaceAll(string(fixture.rawContent), "preserve me", longLine))
 			require.NoError(t, os.WriteFile(fixture.result.RawPath, oversized, 0o600))

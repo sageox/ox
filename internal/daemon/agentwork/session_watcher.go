@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/claudesource"
 )
 
 // ErrSessionFileShape is returned when a session file is neither an absolute
@@ -265,10 +266,11 @@ func (m *SessionWatcherManager) DetectAndRestart(ledgerPath string) int {
 		if err := json.Unmarshal(data, &state); err != nil {
 			continue
 		}
-		if state.WatchMode != "tail" || state.StoppedAt != nil || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
+		if state.WatchMode != "tail" || state.StoppedAt != nil || state.SourceRejected || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
 			continue
 		}
-		if state.AdapterName == "" {
+		if state.AdapterName == "" || ((state.AdapterName == "claude-code" || state.AdapterName == "pi") && state.WorkspacePath == "") {
+			// These adapters cannot validate repository ownership without a root.
 			continue
 		}
 		// don't restart watchers for dead agents — let session_finalize handle them
@@ -378,7 +380,13 @@ func (m *SessionWatcherManager) runWatcher(
 		if err := json.Unmarshal(data, &state); err != nil {
 			return err
 		}
-		if state.StoppedAt != nil || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
+		if state.StoppedAt != nil || state.SourceRejected || session.HasExplicitStop(state.WorkspacePath, state.AgentID) {
+			return nil
+		}
+		// A restarted watcher may inherit an unverified cached path/offset. Check
+		// its entire source once before trusting only appended ranges in this run.
+		if err := validateWatcherSource(aw); err != nil {
+			m.rejectWatcherSource(aw, err)
 			return nil
 		}
 
@@ -404,12 +412,25 @@ func (m *SessionWatcherManager) runWatcher(
 
 		// catch-up: read entries between the persisted offset and now
 		if reader, ok := adapter.(adapters.IncrementalReader); ok && cursor > 0 {
+			var sourceSnapshot os.FileInfo
+			if aw.adapterName == "claude-code" {
+				var snapshotErr error
+				sourceSnapshot, snapshotErr = claudesource.Snapshot(aw.sessionFile)
+				if snapshotErr != nil {
+					m.logger.Warn("catch-up source not available", "session", aw.sessionName, "error", snapshotErr)
+					return nil
+				}
+			}
 			entries, newOffset, readErr := reader.ReadFromOffset(aw.sessionFile, cursor)
 			switch {
 			case readErr != nil:
 				m.logger.Warn("catch-up read failed; continuing from the persisted offset",
 					"session", aw.sessionName, "offset", cursor, "error", readErr)
 			case len(entries) > 0:
+				if err := validateWatcherSourceFrom(aw, cursor, sourceSnapshot); err != nil {
+					m.rejectWatcherSource(aw, err)
+					return nil
+				}
 				converted := session.ConvertRawEntries(entries)
 				if writeErr := rw.AppendCheckpointed(converted, func() error {
 					return m.persistOffset(aw, newOffset, len(converted))
@@ -485,6 +506,29 @@ func (m *SessionWatcherManager) runWatcher(
 	}
 }
 
+func (m *SessionWatcherManager) rejectWatcherSource(aw *activeWatcher, err error) {
+	m.logger.Warn("session source failed ownership check; leaving cursor unchanged", "session", aw.sessionName, "error", err)
+	if errors.Is(err, claudesource.ErrUntrustedSource) {
+		if markErr := session.MarkSourceRejected(aw.projectRoot, aw.agentID); markErr != nil {
+			m.logger.Warn("failed to quarantine session source", "session", aw.sessionName, "error", markErr)
+		}
+	}
+}
+
+func validateWatcherSource(aw *activeWatcher) error {
+	if aw.adapterName != "claude-code" {
+		return nil
+	}
+	return claudesource.Validate(aw.sessionFile, aw.projectRoot, "")
+}
+
+func validateWatcherSourceFrom(aw *activeWatcher, offset int64, snapshot os.FileInfo) error {
+	if aw.adapterName != "claude-code" {
+		return nil
+	}
+	return claudesource.ValidateRead(aw.sessionFile, aw.projectRoot, "", offset, false, snapshot)
+}
+
 // pollInterval is how often a session is re-read to advance its resume cursor.
 const pollInterval = 2 * time.Second
 
@@ -513,6 +557,15 @@ func (m *SessionWatcherManager) pollSession(
 			return
 		}
 
+		var sourceSnapshot os.FileInfo
+		if aw.adapterName == "claude-code" {
+			var snapshotErr error
+			sourceSnapshot, snapshotErr = claudesource.Snapshot(aw.sessionFile)
+			if snapshotErr != nil {
+				m.logger.Warn("session source not available", "session", aw.sessionName, "error", snapshotErr)
+				continue
+			}
+		}
 		entries, newOffset, err := reader.ReadFromOffset(aw.sessionFile, offset)
 		if err != nil {
 			m.logger.Warn("handle-based session read failed",
@@ -523,6 +576,10 @@ func (m *SessionWatcherManager) pollSession(
 			// nothing new; do NOT persist, so a cursor that went backwards or
 			// stalled cannot be written over a good one
 			continue
+		}
+		if err := validateWatcherSourceFrom(aw, offset, sourceSnapshot); err != nil {
+			m.rejectWatcherSource(aw, err)
+			return
 		}
 
 		// Check the cursor BEFORE writing. An adapter that returns rows without
