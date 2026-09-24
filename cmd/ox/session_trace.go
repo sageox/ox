@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -185,25 +184,6 @@ func runSessionTraceStatus(cmd *cobra.Command, _ []string) error {
 		return cli.PrintJSONTo(cmd.OutOrStdout(), status)
 	}
 	return printSessionTraceStatus(cmd.OutOrStdout(), status)
-}
-
-func printSessionTraceStatus(w io.Writer, status sessionTraceStatus) error {
-	fmt.Fprintf(w, "Trace opt-in: %t\nReceiver listening: %t (127.0.0.1:%d)\nLocal traces: %s\nSessions: %d; bytes: %d\n",
-		status.Enabled, status.Running, status.Port, status.SpoolPath, status.Sessions, status.Bytes)
-	if status.LastReceiptAgeSeconds != nil {
-		fmt.Fprintf(w, "Last receipt: %ds ago\n", *status.LastReceiptAgeSeconds)
-	}
-	fmt.Fprintf(w, "Local exporter configuration ready: %t\n", status.Exporter.Ready)
-	for _, warning := range append(status.Warnings, status.Exporter.Issues...) {
-		fmt.Fprintf(w, "Warning: %s\n", warning)
-	}
-	for _, note := range status.Exporter.Notes {
-		fmt.Fprintln(w, note)
-	}
-	if !status.Exporter.Ready {
-		fmt.Fprintf(w, "\nLaunch Claude Code from your shell with:\n%s\n", traceLaunchExample(status.Port))
-	}
-	return nil
 }
 
 func traceLaunchExample(port int) string {

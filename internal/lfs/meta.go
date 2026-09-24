@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/trace/model"
 )
 
@@ -873,12 +874,15 @@ func ReadSessionMeta(sessionPath string) (*SessionMeta, error) {
 			// errors instead).
 			return nil, fmt.Errorf("meta.json not found in %s: %w", sessionPath, err)
 		}
-		return nil, fmt.Errorf("read session meta: %w", err)
+		return nil, fmt.Errorf("read session meta file=%s: %w", metaPath, err)
 	}
 
 	var meta SessionMeta
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, fmt.Errorf("parse session meta: %w", err)
+		if gitutil.HasConflictMarkersBytes(data) {
+			return nil, fmt.Errorf("parse session meta file=%s: unresolved Git conflict markers: %w", metaPath, err)
+		}
+		return nil, fmt.Errorf("parse session meta file=%s: %w", metaPath, err)
 	}
 
 	for filename := range meta.Files {

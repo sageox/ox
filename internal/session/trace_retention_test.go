@@ -90,3 +90,26 @@ func TestTraceRetentionRawCarrierBothHeaderDialects(t *testing.T) {
 		})
 	}
 }
+
+// The spool is global: an unreadable manifest in another project's Ledger
+// must stop pruning and identify that manifest, not blame the active recording.
+func TestTraceRetentionReportsConflictedManifest(t *testing.T) {
+	for _, location := range []string{"cache", "ledger"} {
+		t.Run(location, func(t *testing.T) {
+			cache := t.TempDir()
+			ledger := t.TempDir()
+			require.NoError(t, os.Mkdir(filepath.Join(cache, "pending"), 0700))
+			base := cache
+			if location == "ledger" {
+				base = ledger
+				require.NoError(t, os.Mkdir(filepath.Join(base, "pending"), 0700))
+			}
+			path := filepath.Join(base, "pending", "meta.json")
+			conflict := "{\n<<<<<<< Updated upstream\n\"summary_attempts\": 2\n=======\n\"summary_attempts\": 3\n>>>>>>> Stashed changes\n}"
+			require.NoError(t, os.WriteFile(path, []byte(conflict), 0600))
+			err := protectTraceReferences(cache, []string{ledger}, map[string]bool{})
+			require.ErrorContains(t, err, path)
+			require.ErrorContains(t, err, "unresolved Git conflict markers")
+		})
+	}
+}
