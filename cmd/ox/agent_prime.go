@@ -558,8 +558,13 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// reads it. The healthy path is a lockfile read and two comparisons; a plan is
 	// only built once a mismatch is proven. Failures never reach the session.
 	skillReconcileStart := time.Now()
-	if n := reconcileSkillInventoryIfStale(projectRoot); n > 0 {
-		timing["skills_reconciled"] = int64(n)
+	reconciled, withheldDecisions := reconcileSkillInventoryIfStale(projectRoot)
+	if reconciled > 0 {
+		timing["skills_reconciled"] = int64(reconciled)
+	}
+	withheldTeamSkills := make([]prime.WithheldSkill, 0, len(withheldDecisions))
+	for _, d := range withheldDecisions {
+		withheldTeamSkills = append(withheldTeamSkills, prime.WithheldSkill{Name: d.Name, Reason: d.Reason})
 	}
 	timing["skills_reconcile"] = time.Since(skillReconcileStart).Milliseconds()
 
@@ -676,6 +681,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	output := agentPrimeOutput{
 		Status:             "fresh",
 		AgentID:            agentID,
+		WithheldTeamSkills: withheldTeamSkills,
 		Guidance:           guidance,
 		SessionID:          inst.ServerSessionID,
 		AgentType:          agentType,

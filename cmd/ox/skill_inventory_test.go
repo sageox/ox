@@ -107,7 +107,7 @@ func TestReconcileSkillInventoryIfStale_RepairsAfterUpgrade(t *testing.T) {
 	removeManaged(t, managedFile)
 	setLockRevision(t, repoRoot, "revision-from-an-older-release")
 
-	changed := reconcileSkillInventoryIfStale(repoRoot)
+	changed, _ := reconcileSkillInventoryIfStale(repoRoot)
 	if changed == 0 {
 		t.Fatalf("stale revision did not trigger a reconcile")
 	}
@@ -152,7 +152,7 @@ func TestReconcileSkillInventoryIfStale_CurrentInventoryDoesNoWork(t *testing.T)
 	removeManaged(t, managedFile)
 	// Deliberately do NOT touch the lockfile: revision and version both match.
 
-	if changed := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
+	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
 		t.Errorf("prime planned work for an up-to-date inventory: changed=%d", changed)
 	}
 	if managedExists(t, managedFile) {
@@ -197,7 +197,7 @@ func TestReconcileSkillInventoryIfStale_TwoUnchangedPrimesBuildOnePlan(t *testin
 func TestReconcileSkillInventoryIfStale_NeverInstallsIntoAnUnselectedRepo(t *testing.T) {
 	repoRoot := t.TempDir()
 
-	if changed := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
+	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
 		t.Errorf("prime installed into a repo with no selected targets: changed=%d", changed)
 	}
 	for _, dir := range []string{".claude", ".agents", ".sageox"} {
@@ -220,7 +220,7 @@ func TestReconcileSkillInventoryIfStale_ToleratesMalformedLockfile(t *testing.T)
 		t.Fatalf("write malformed state: %v", err)
 	}
 
-	if changed := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
+	if changed, _ := reconcileSkillInventoryIfStale(repoRoot); changed != 0 {
 		t.Errorf("malformed lockfile should yield no work, got changed=%d", changed)
 	}
 }
@@ -236,7 +236,7 @@ func TestReconcileSkillInventoryIfStale_DoesNotRepairTrackedIgnoreAtSessionStart
 		_ = os.Remove(filepath.Join(repoRoot, dir, ".gitignore"))
 	}
 
-	changed := reconcileSkillInventoryIfStale(repoRoot)
+	changed, _ := reconcileSkillInventoryIfStale(repoRoot)
 	if changed != 0 {
 		t.Errorf("healing the ignore rule must not require a reconcile; got changed=%d", changed)
 	}
