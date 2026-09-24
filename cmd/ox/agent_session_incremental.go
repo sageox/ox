@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/claudesource"
 	"github.com/sageox/ox/internal/version"
 )
 
@@ -108,10 +109,28 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 			slog.Info("finalize: final drain", "source", state.SessionFile, "file_size", fi.Size(), "read_offset", readOffset, "start_offset", state.StartOffset)
 		}
 
+		var sourceSnapshot os.FileInfo
+		if state.AdapterName == "claude-code" {
+			var snapshotErr error
+			sourceSnapshot, snapshotErr = claudesource.Snapshot(state.SessionFile)
+			if snapshotErr != nil {
+				return nil, fmt.Errorf("stat native session before final drain: %w", snapshotErr)
+			}
+		}
 		entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, readOffset)
 		if readErr != nil {
 			return nil, fmt.Errorf("read final session entries: %w", readErr)
-		} else if len(entries) > 0 {
+		}
+		if state.AdapterName == "claude-code" {
+			repoRoot := state.WorkspacePath
+			if repoRoot == "" {
+				repoRoot = projectRoot
+			}
+			if err := claudesource.ValidateRead(state.SessionFile, repoRoot, state.AgentSessionID, 0, true, sourceSnapshot); err != nil {
+				return nil, fmt.Errorf("claude source changed repository during final drain: %w", err)
+			}
+		}
+		if len(entries) > 0 {
 			slog.Info("finalize: drain result", "entries_read", len(entries), "new_offset", newOffset)
 
 			// filter entries by timestamp — strict After() to prevent boundary leaks

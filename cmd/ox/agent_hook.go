@@ -23,6 +23,7 @@ import (
 	"github.com/sageox/ox/internal/selfexec"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/claudesource"
 )
 
 // ReadHookInput reads hook input from stdin.
@@ -631,6 +632,10 @@ func handleAfterTool(ctx *HookContext) error {
 		return nil // not recording for this agent, silent noop
 	}
 
+	if state.SourceRejected {
+		return nil // preserved for manual ownership review; do not retry the native source
+	}
+
 	// Track every afterTool invocation + its terminal reason so `ox session status`
 	// can distinguish a healthy idle session (status=ok) from a broken recording
 	// (status=session-file-not-found, adapter-missing, etc.) when EntryCount=0.
@@ -714,16 +719,42 @@ func handleAfterTool(ctx *HookContext) error {
 		readOffset = state.StartOffset
 	}
 
+	var sourceSnapshot os.FileInfo
+	if state.AdapterName == "claude-code" {
+		var snapshotErr error
+		sourceSnapshot, snapshotErr = claudesource.Snapshot(state.SessionFile)
+		if snapshotErr != nil {
+			recordHookStatus("read-error")
+			return nil
+		}
+	}
 	entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, readOffset)
 	if readErr != nil {
 		slog.Info("hook: incremental read failed", "agentID", agentID, "adapter", state.AdapterName, "file", state.SessionFile, "offset", readOffset, "error", readErr)
 		recordHookStatus("read-error")
 		return nil // non-fatal, will catch up at stop
 	}
-
 	if len(entries) == 0 {
 		recordHookStatus("no-new-entries")
 		return nil
+	}
+	if state.AdapterName == "claude-code" {
+		repoRoot := state.WorkspacePath
+		if repoRoot == "" {
+			repoRoot = ctx.ProjectRoot
+		}
+		// Only the newly read records can be appended by this hook. Require
+		// ownership on each captured turn; finalization rechecks the whole file.
+		if err := claudesource.ValidateRead(state.SessionFile, repoRoot, state.AgentSessionID, readOffset, false, sourceSnapshot); err != nil {
+			slog.Info("hook: Claude source crossed repository boundary", "agentID", agentID, "error", err)
+			if errors.Is(err, claudesource.ErrUntrustedSource) {
+				if markErr := session.MarkSourceRejected(ctx.ProjectRoot, agentID); markErr != nil {
+					slog.Warn("hook: failed to quarantine source", "agentID", agentID, "error", markErr)
+				}
+			}
+			recordHookStatus("source-repo-mismatch")
+			return nil
+		}
 	}
 
 	// filter entries by timestamp — strict After() to prevent boundary leaks

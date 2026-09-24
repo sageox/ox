@@ -115,9 +115,12 @@ type RecordingState struct {
 	Model          string `json:"model,omitempty"`           // LLM model for generic adapters where ReadMetadata returns nil
 	ParentPID      int    `json:"parent_pid,omitempty"`      // parent agent process ID for liveness detection
 	SourceOffset   int64  `json:"source_offset,omitempty"`   // byte offset in source file for incremental reading
-	StartOffset    int64  `json:"start_offset,omitempty"`    // source file byte offset when recording started (entries before this are pre-session)
-	Origin         string `json:"origin,omitempty"`          // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
-	CacheDir       string `json:"cache_dir,omitempty"`       // cache directory when recording was created (diagnostic breadcrumb)
+	// Preserve a rejected native source and captured prefix for manual ownership
+	// review, but do not keep retrying or publish a mixed-repository session.
+	SourceRejected bool   `json:"source_rejected,omitempty"`
+	StartOffset    int64  `json:"start_offset,omitempty"` // source file byte offset when recording started (entries before this are pre-session)
+	Origin         string `json:"origin,omitempty"`       // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
+	CacheDir       string `json:"cache_dir,omitempty"`    // cache directory when recording was created (diagnostic breadcrumb)
 
 	WatchMode string     `json:"watch_mode,omitempty"` // how entries are captured: "hook" (CLI-driven) or "tail" (daemon-driven)
 	StoppedAt *time.Time `json:"stopped_at,omitempty"` // set by ox session stop to signal daemon to finalize
@@ -824,6 +827,9 @@ func cleanupStaleEmptyRecordings(projectRoot string) {
 	}
 
 	for _, state := range states {
+		if state.SourceRejected {
+			continue // a quarantined source is not a disposable empty stub
+		}
 		if time.Since(state.StartedAt) < staleEmptyThreshold {
 			continue
 		}
@@ -831,8 +837,9 @@ func cleanupStaleEmptyRecordings(projectRoot string) {
 			continue
 		}
 		// A native log can hold the session even when the watcher never wrote
-		// an entry. Let finalization read it before classifying this as empty.
-		if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail") {
+		// an entry. Claude hook discovery can fail with an unverifiable cwd,
+		// leaving SessionFile empty despite a real native conversation.
+		if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail" || state.AdapterName == "claude-code") {
 			continue
 		}
 		// only clean phantom stubs — a header-only or missing raw.jsonl. Since
@@ -898,7 +905,7 @@ func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
 	var result GhostCleanupResult
 
 	for _, state := range states {
-		if state.SessionPath == "" {
+		if state.SessionPath == "" || state.SourceRejected {
 			continue
 		}
 
@@ -918,8 +925,8 @@ func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
 		if !state.StartedAt.IsZero() && time.Since(state.StartedAt) < GhostGracePeriod {
 			continue
 		}
-		if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail") {
-			continue // native source must be checked by finalization first
+		if state.AdapterName != "" && (state.SessionFile != "" || state.WatchMode == "tail" || state.AdapterName == "claude-code") {
+			continue // native source may exist even before hook discovery succeeds
 		}
 
 		// parent is dead — check if there's any recoverable data. Classify
@@ -1163,6 +1170,11 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		return nil, fmt.Errorf("check recording state project=%s: %w", projectRoot, err)
 	}
 	if existing != nil {
+		// A rejected source is evidence for manual recovery, not an empty
+		// retry stub that a later prime may replace automatically.
+		if existing.SourceRejected {
+			return nil, fmt.Errorf("%w: agent_id=%s source quarantined for manual ownership review", ErrAlreadyRecording, opts.AgentID)
+		}
 		if existing.StopIncomplete {
 			// previous stop returned retry but agent restarted — clear stale state
 			slog.Info("clearing incomplete stop state", "agent_id", existing.AgentID)
@@ -1316,6 +1328,15 @@ func UpdateRecordingStateForAgent(projectRoot, agentID string, updateFn func(*Re
 		return fmt.Errorf("save recording state: %w", err)
 	}
 	return nil
+}
+
+// MarkSourceRejected quarantines an ambiguous recording without deleting the
+// native source or captured prefix. Only a confirmed ownership violation should
+// use this; transient discovery failures must remain retryable.
+func MarkSourceRejected(projectRoot, agentID string) error {
+	return UpdateRecordingStateForAgent(projectRoot, agentID, func(s *RecordingState) {
+		s.SourceRejected = true
+	})
 }
 
 // UpdateRecordingState updates and persists the recording state.
