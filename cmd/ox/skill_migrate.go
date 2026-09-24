@@ -255,10 +255,14 @@ func classifyLegacyPath(repoRoot, rel string) legacyClass {
 	case ".claude/rules", ".factory/rules", ".agents/rules",
 		".cursor/rules", ".github/instructions", ".kiro/steering", ".windsurf/rules":
 		// Same narrowing, same reason as the skills arm above: untracking is
-		// destructive, so only a prefixed name proves ownership. Every rule ox
-		// writes is prefixed — the exact "ox-cli.md", plus "ox-cli-*" and
+		// destructive, so only a DECLARED namespace proves ownership. The names ox
+		// may claim on sight are the exact "ox-cli.md", "ox-cli-*", and the legacy
 		// "sageox-team-*" — so a user rule that happens to share a catalog skill's
 		// name is no longer swept out of their repository.
+		//
+		// The current "-team" suffix is deliberately absent: it is ordinary English
+		// (ADR-033), so a rule wearing it may be the user's, and untracking theirs
+		// is not recoverable.
 		if skillmanager.IsReclaimableName(name) {
 			return legacyReserved
 		}

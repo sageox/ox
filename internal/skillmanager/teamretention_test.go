@@ -26,7 +26,7 @@ func TestTeamSkillsSurviveABlindTeamCheckout(t *testing.T) {
 	t.Parallel()
 
 	const skillName = "deploy"
-	installed := filepath.Join(".agents", "skills", TeamPrefix+skillName, "SKILL.md")
+	installed := filepath.Join(".agents", "skills", skillName+TeamSuffix, "SKILL.md")
 
 	blindings := map[string]func(t *testing.T, teamPath string){
 		// The daemon owns this checkout. A reclone, a GC, or a machine restore
@@ -83,7 +83,7 @@ func TestRetiredTeamSkillIsStillRemovedWhenTheCheckoutIsVisible(t *testing.T) {
 	t.Parallel()
 
 	const skillName = "deploy"
-	installed := filepath.Join(".agents", "skills", TeamPrefix+skillName, "SKILL.md")
+	installed := filepath.Join(".agents", "skills", skillName+TeamSuffix, "SKILL.md")
 
 	repo := t.TempDir()
 	teamPath := t.TempDir()
@@ -118,7 +118,7 @@ func TestTeamSkillsSurviveRepositorySlugFallback(t *testing.T) {
 	t.Parallel()
 
 	const skillName = "deploy"
-	installed := filepath.Join(".agents", "skills", TeamPrefix+skillName, "SKILL.md")
+	installed := filepath.Join(".agents", "skills", skillName+TeamSuffix, "SKILL.md")
 
 	repo := t.TempDir()
 	teamPath := t.TempDir()
@@ -171,7 +171,7 @@ func TestUntargetedTeamSkillsStillInstallWithoutRepositorySlug(t *testing.T) {
 	target := sharedTarget()
 	plan, err := Reconcile(repo, "1.0.0", desiredFor(target), []adapterprotocol.SkillTarget{target})
 	require.NoError(t, err)
-	require.FileExists(t, filepath.Join(repo, ".agents", "skills", TeamPrefix+skillName, "SKILL.md"),
+	require.FileExists(t, filepath.Join(repo, ".agents", "skills", skillName+TeamSuffix, "SKILL.md"),
 		"an untargeted skill was withheld even though it needs no repository slug")
 	require.Contains(t, plan.RetainedTeamReason(), "slug",
 		"targeted removals were not guarded while repository identity was unknown")

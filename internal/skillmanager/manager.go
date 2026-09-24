@@ -667,6 +667,14 @@ func planWithCatalogs(repoRoot, version string, desired DesiredSkills, targets [
 		oldFiles[file.Path] = file
 	}
 	journalFiles := journalOwnership(journal)
+	// One git call for every skill root, before the per-target loop, so a
+	// repository with thirty skills does not pay thirty process spawns per plan.
+	// An error here fails the whole plan on purpose — building a plan on the guess
+	// that nothing is tracked is how a reconcile silently overwrites committed work.
+	trackedDirs, err := trackedSkillDirs(repoRoot, targets)
+	if err != nil {
+		return nil, fmt.Errorf("determine which skill directories git tracks: %w", err)
+	}
 	desiredPaths := map[string]struct{}{}
 	plan.TargetCount = len(selectedTargets)
 
@@ -695,7 +703,7 @@ func planWithCatalogs(repoRoot, version string, desired DesiredSkills, targets [
 			}
 			continue
 		}
-		if err := planSkillTarget(repoRoot, target, selectedSkills, oldFiles, journalFiles, desiredPaths, plan, &next); err != nil {
+		if err := planSkillTarget(repoRoot, target, selectedSkills, oldFiles, journalFiles, trackedDirs, desiredPaths, plan, &next); err != nil {
 			return nil, err
 		}
 	}
@@ -1577,6 +1585,23 @@ func retiredLegacyFiles(repoRoot string, target adapterprotocol.SkillTarget, des
 	return actions, nil
 }
 
+// teamProjectionOwnedOnDisk reports whether a team-named skill directory is one ox
+// can prove it wrote, using only what is on disk.
+//
+// A legacy `sageox-team-*` name is ox's by contract. Anything else must present a
+// verified TeamSkillStamp in its SKILL.md: a manifest that is missing, unreadable,
+// edited, or never stamped belongs to somebody else and is left alone.
+func teamProjectionOwnedOnDisk(skillRoot *os.Root, name string) bool {
+	if strings.HasPrefix(name, LegacyTeamPrefix) {
+		return true
+	}
+	data, _, err := inspectRootFile(skillRoot, skills.SkillFileName)
+	if err != nil {
+		return false
+	}
+	return TeamSkillStamp.Verifies(data)
+}
+
 // orphanedTeamFiles rebuilds the removable half of the Team Skill inventory
 // from the reserved on-disk namespace when machine-local state is missing.
 // Every path returned is a regular file read through descriptor-pinned roots;
@@ -1609,12 +1634,29 @@ func orphanedTeamFiles(repoRoot string, target adapterprotocol.SkillTarget, desi
 
 	var actions []FileAction
 	for _, skillEntry := range entries {
-		if !skillEntry.IsDir() || !strings.HasPrefix(skillEntry.Name(), TeamPrefix) {
+		if !skillEntry.IsDir() || !IsTeamProjectionName(skillEntry.Name()) {
 			continue
 		}
 		skillRoot, openErr := openRepoDir(targetRoot, skillEntry.Name(), false)
 		if openErr != nil {
 			return nil, openErr
+		}
+		// The name got us this far; only PROOF gets us to a deletion.
+		//
+		// This sweep exists for the case where machine-local state is gone, so it
+		// walks the disk rather than the lockfile — which means the guard cannot be
+		// "is it recorded". Under the old prefix the name itself was the proof:
+		// `sageox-team-*` was a namespace ox declared and told people to stay out
+		// of. `-team` is ordinary English, and sweeping every `*-team` directory
+		// would delete a hand-authored `notify-team` that is gitignored, absent
+		// from the lockfile, and therefore unrecoverable.
+		//
+		// So a suffixed directory must carry ox's own verified manifest stamp.
+		// Legacy-prefixed directories keep the by-contract claim, which is what
+		// makes the one-time migration off the prefix sweep itself.
+		if !teamProjectionOwnedOnDisk(skillRoot, skillEntry.Name()) {
+			_ = skillRoot.Close()
+			continue
 		}
 		walkErr := fs.WalkDir(skillRoot.FS(), ".", func(path string, walkEntry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
@@ -1804,7 +1846,7 @@ func isTeamOwnedPath(targetByKey map[string]adapterprotocol.SkillTarget, file ma
 	if !ok {
 		return false
 	}
-	return strings.HasPrefix(skillName(target.Root, file.Path), TeamPrefix)
+	return IsTeamProjectionName(skillName(target.Root, file.Path))
 }
 
 func skillName(root, path string) string {

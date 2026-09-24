@@ -71,7 +71,7 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 	if reason := unseeableTeamSkills(teamPath, repoSlug); reason != "" {
 		// Deliberately still a teamCatalog, not the bare base. Returning base here
 		// was the original shape, and it is the bug: base reports an authoritative
-		// empty team half, so the planner retires every sageox-team-* file already
+		// empty team half, so the planner retires every team projection already
 		// on disk. A project whose daemon has not finished its first clone would
 		// have its team playbooks deleted for the crime of being early.
 		return &teamCatalog{base: base, teamPath: teamPath, incomplete: reason}, nil, nil
@@ -114,7 +114,7 @@ type TeamSkillsResolved struct {
 // unseeableTeamSkills: that is a cheap directory-presence stat, not the
 // content walk this seam exists to avoid repeating, and it is what stops a
 // not-yet-materialized sparse checkout from reading as "the team publishes
-// nothing" and retiring every sageox-team-* file already on disk.
+// nothing" and retiring every team projection already on disk.
 func teamSkillSourceResolved(base catalogSource, teamPath, repoSlug, projectRoot string, resolved []teamdocs.TeamSkill) (catalogSource, []TeamSkillDecision, error) {
 	if base == nil {
 		base = builtInCatalog{}
@@ -207,11 +207,17 @@ func buildTeamCatalog(base catalogSource, teamPath, repoSlug, projectRoot string
 			continue
 		}
 
-		installed := TeamPrefix + ts.Name
+		// SUFFIX, not prefix: the agent derives its slash name from this directory, so
+		// a prefix renamed every team skill out from under its own documentation.
+		installed := ts.Name + TeamSuffix
+		files := toCatalogFiles(loaded, approvals.ScriptsExecutable(ts.Name, verdict))
 		allowed = append(allowed, skills.Skill{
-			Name:    installed,
-			Content: manifestContent(loaded),
-			Files:   toCatalogFiles(loaded, approvals.ScriptsExecutable(ts.Name, verdict)),
+			Name: installed,
+			// Read back out of files rather than from loaded: the manifest in files
+			// carries the ownership stamp, and two copies of SKILL.md that differ by
+			// a trailer is how a digest comparison starts failing against itself.
+			Content: manifestContent(files),
+			Files:   files,
 		})
 		decision := TeamSkillDecision{
 			Name: ts.Name, InstalledAs: installed, AutoInstalledProse: !verdict.Executable,
@@ -331,8 +337,8 @@ func manifestIsRunnable(s teamskills.Skill, v teamskills.Verdict) bool {
 	return false
 }
 
-func manifestContent(s teamskills.Skill) []byte {
-	for _, f := range s.Files {
+func manifestContent(files []skills.File) []byte {
+	for _, f := range files {
 		if strings.EqualFold(f.Path, skills.SkillFileName) {
 			return f.Content
 		}
@@ -361,7 +367,21 @@ func toCatalogFiles(s teamskills.Skill, allowScripts bool) []skills.File {
 				continue
 			}
 		}
-		out = append(out, skills.File{Path: clean, Content: f.Content})
+		content := f.Content
+		// Stamp the manifest, and ONLY the manifest. Now that team skills install
+		// under their real name plus a "-team" suffix, the directory name no longer
+		// proves ox wrote it — `notify-team` is a name a human might reasonably have
+		// picked. The stamp is what lets a reconcile on a machine with no local
+		// inventory tell an ox projection from a stranger, instead of either
+		// clobbering the stranger or conflicting on its own file forever.
+		//
+		// References and assets are left alone: they may be any format at all,
+		// including bytes a trailing HTML comment would corrupt. The manifest claims
+		// the directory; the lockfile digests cover what is inside it.
+		if strings.EqualFold(clean, skills.SkillFileName) {
+			content = TeamSkillStamp.Apply(content)
+		}
+		out = append(out, skills.File{Path: clean, Content: content})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
@@ -466,7 +486,7 @@ func ExpectedRevision(repoRoot string) (string, error) {
 // the overwhelmingly common case and it must never fail a reconcile. A team
 // context that EXISTS but cannot be read is an error, and the reason is stronger
 // than tidiness — falling back to the built-in catalog would compute "no team
-// skills are desired" and Apply would then DELETE the sageox-team-* files
+// skills are desired" and Apply would then DELETE the team projections
 // already on disk. Guessing "empty" on an unanswered question is the fail-open
 // shape teamskills.LoadApprovals already refuses; the cost here is deletion of
 // working content rather than materialization of unapproved content.
@@ -486,7 +506,7 @@ func catalogForRepoResolved(repoRoot string, resolved *TeamSkillsResolved) (cata
 	base := catalogSource(builtInCatalog{})
 	// Every early exit returns a teamCatalog carrying a REASON, never the bare
 	// base. Returning base says "authoritatively, this team publishes no skills",
-	// and the planner acts on that by retiring every sageox-team-* file on disk.
+	// and the planner acts on that by retiring every team projection on disk.
 	// A repo with no team context configured, or whose daemon has not finished
 	// its first clone, would have its team skills deleted for being early.
 	if repoRoot == "" {

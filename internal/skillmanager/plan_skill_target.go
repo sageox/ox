@@ -15,7 +15,7 @@ import (
 // create / update / preserve / conflict for each file and records ownership
 // in next.ManagedFiles. Extracted verbatim from planWithCatalogs; target.Key
 // stands in for the loop-local "key" the original shared with its caller.
-func planSkillTarget(repoRoot string, target adapterprotocol.SkillTarget, selectedSkills []skills.Skill, oldFiles map[string]managedFile, journalFiles map[string]journalAction, desiredPaths map[string]struct{}, plan *ReconcilePlan, next *lockFile) error {
+func planSkillTarget(repoRoot string, target adapterprotocol.SkillTarget, selectedSkills []skills.Skill, oldFiles map[string]managedFile, journalFiles map[string]journalAction, trackedDirs map[string]struct{}, desiredPaths map[string]struct{}, plan *ReconcilePlan, next *lockFile) error {
 	if target.Format != adapterprotocol.SkillFormatAgentSkillsV1 {
 		return fmt.Errorf("unsupported inventory target format %q", target.Format)
 	}
@@ -68,11 +68,43 @@ func planSkillTarget(repoRoot string, target adapterprotocol.SkillTarget, select
 				"target", target.Key, "skill_root", skillRoot, "file", invalidFile)
 			continue
 		}
+		// A skill directory git already TRACKS was put there by a human, on
+		// purpose, and committed. Ox must not write inside it — an overwrite would
+		// show up as an uncommitted change to somebody's committed work, with
+		// nothing scheduled to ever revisit it.
+		//
+		// This gate did not exist while every ox-owned skill wore a reserved
+		// PREFIX, because the name alone answered "is this mine?". Team Skills now
+		// install as `<name>-team`, and `notify-team` is a name a person may
+		// reasonably have chosen, so the question needs a real answer.
+		//
+		// Two exemptions, both deliberate. A reclaimable name (`ox-cli-*`, the
+		// legacy `sageox-team-*`) is ox's by contract and is still TRACKED in any
+		// repository that has not yet run the ADR-031 untrack migration — refusing
+		// there would freeze ox's own skills until someone ran `ox doctor --fix`.
+		// And the committed on-ramp is tracked by design; it is the one artifact
+		// that must reach a machine with no CLI installed.
+		if _, isTracked := trackedDirs[skillRoot]; isTracked &&
+			!IsReclaimableName(skill.Name) && skill.Name != CommittedOnRamp {
+			plan.addConflict(target.Key, skillRoot, "a checked-in skill owns this name")
+			for _, file := range skill.Files {
+				path := filepath.ToSlash(filepath.Join(skillRoot, file.Path))
+				desiredPaths[path] = struct{}{}
+				plan.Preserves = append(plan.Preserves, path)
+			}
+			continue
+		}
+
 		migrationOwned := false
 		skillPath := filepath.ToSlash(filepath.Join(skillRoot, skills.SkillFileName))
 		if _, locked := oldFiles[skillPath]; !locked {
 			if data, readErr := readRepoFile(repoRoot, skillPath); readErr == nil {
-				migrationOwned = validLegacyStamp(data)
+				// A verified Team Skill stamp is ox's own signature on this exact
+				// manifest. It is the ownership proof that survives a wiped
+				// .sageox/cache/ — which is routine, the cache being disposable by
+				// design — now that the directory name proves nothing. Without it a
+				// cache wipe would turn every team skill into a permanent conflict.
+				migrationOwned = validLegacyStamp(data) || TeamSkillStamp.Verifies(data)
 				if action, ok := journalFiles[skillPath]; ok {
 					actualDigest := digestBytes(data)
 					migrationOwned = migrationOwned || actualDigest == action.PreviousDigest || actualDigest == action.Digest

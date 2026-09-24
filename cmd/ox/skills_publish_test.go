@@ -330,6 +330,21 @@ func TestSkillsPublish_RefusesAnythingItCannotSafelyOwnOrCopy(t *testing.T) {
 		require.NoDirExists(t, filepath.Join(team, "agents", "skills", "ox-cli-plan"))
 	})
 
+	// Publishing `onboard-team` would install it back as `onboard-team-team`, so
+	// the name is refused — but it is the AUTHOR'S skill, not ox's, and the
+	// message has to say which. "managed by ox" would send them hunting for a
+	// conflict that does not exist.
+	t.Run("a name already wearing the team suffix", func(t *testing.T) {
+		repo, team := stageTeamPublishRepo(t)
+		stageLocalPublishableSkill(t, repo, "onboard"+skillmanager.TeamSuffix)
+
+		_, err := runSkillsChange(t, skillsPublishCmd, "onboard"+skillmanager.TeamSuffix)
+		require.ErrorContains(t, err, "rename it before publishing")
+		require.NotContains(t, err.Error(), "managed by ox",
+			"the author's own skill was described as ox's")
+		require.NoDirExists(t, filepath.Join(team, "agents", "skills", "onboard"+skillmanager.TeamSuffix))
+	})
+
 	t.Run("selected unprefixed name", func(t *testing.T) {
 		repo, team := stageTeamPublishRepo(t)
 		// Recorded directly in the committed lockfile rather than through a real

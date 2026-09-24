@@ -150,6 +150,14 @@ func validatePublishNames(names []string) ([]string, error) {
 			return nil, fmt.Errorf("%q is not a safe team skill name; use lowercase letters, digits, dots, underscores, and hyphens, with no `..`%s",
 				name, allOrNothingSuffix(names, "changed"))
 		}
+		// Two different refusals wear the same predicate, and saying so matters:
+		// `ox-cli-plan` is ox's file, while `onboard-team` is the author's own
+		// skill whose NAME is spoken for. Telling someone their skill "is managed
+		// by ox" when it is not sends them looking for a conflict that isn't there.
+		if strings.HasSuffix(name, skillmanager.TeamSuffix) {
+			return nil, fmt.Errorf("%q already ends in %q, which is how ox names the copy it installs from your Team Context — rename it before publishing%s",
+				name, skillmanager.TeamSuffix, allOrNothingSuffix(names, "changed"))
+		}
 		if skillmanager.IsReservedName(name) || name == skillmanager.CommittedOnRamp {
 			return nil, fmt.Errorf("%q is managed by ox and cannot be published as a hand-authored team skill%s",
 				name, allOrNothingSuffix(names, "changed"))

@@ -73,7 +73,7 @@ func sweepRetiredFiles(repoRoot string, keys []string, targetByKey map[string]ad
 	// Local state is disposable, so it cannot be the only inventory capable of
 	// retiring a Team Skill. When Team Context discovery is authoritative, the
 	// reserved namespace itself proves ownership: sweep regular files that exist
-	// under sageox-team-* but are absent from desired state. If discovery is
+	// in the team namespace but are absent from desired state. If discovery is
 	// incomplete, do nothing — an unseen source is not an authoritative deletion.
 	if plan.teamIncomplete == "" {
 		scheduled := make(map[string]struct{}, len(plan.Removes))

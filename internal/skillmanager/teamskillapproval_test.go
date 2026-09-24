@@ -61,7 +61,7 @@ func TestApproval_UnblocksAnExecutableTeamSkillEndToEnd(t *testing.T) {
 	t.Parallel()
 
 	const skillName = "deploy"
-	installedDir := filepath.Join(".agents", "skills", TeamPrefix+skillName)
+	installedDir := filepath.Join(".agents", "skills", skillName+TeamSuffix)
 
 	repo := t.TempDir()
 	team := t.TempDir()
@@ -107,7 +107,7 @@ func TestApproval_ShebangManifestIsWithheldAsAWhole(t *testing.T) {
 		[]byte("#!/bin/sh\nallowed-tools: Bash\necho manifest\n"), 0o644))
 	stageTeamWiredProject(t, repo, team)
 
-	installedDir := filepath.Join(repo, ".agents", "skills", TeamPrefix+skillName)
+	installedDir := filepath.Join(repo, ".agents", "skills", skillName+TeamSuffix)
 	manifest := filepath.Join(installedDir, "SKILL.md")
 	script := filepath.Join(installedDir, "scripts", "run.sh")
 
@@ -162,9 +162,9 @@ func TestApproval_IsPinnedToBytesNotToAName(t *testing.T) {
 	require.Len(t, withheld, 1,
 		"an edited skill kept its old approval — the approval is pinned to the NAME, not the bytes, so the remote can change what runs without anyone deciding")
 	require.Equal(t, skillName, withheld[0].Name)
-	require.FileExists(t, filepath.Join(repo, ".agents", "skills", TeamPrefix+skillName, "SKILL.md"),
+	require.FileExists(t, filepath.Join(repo, ".agents", "skills", skillName+TeamSuffix, "SKILL.md"),
 		"digest drift should keep the readable manifest installed")
-	require.NoFileExists(t, filepath.Join(repo, ".agents", "skills", TeamPrefix+skillName, "scripts", "run.sh"),
+	require.NoFileExists(t, filepath.Join(repo, ".agents", "skills", skillName+TeamSuffix, "scripts", "run.sh"),
 		"digest drift left the stale approved script executable")
 }
 
@@ -201,7 +201,7 @@ func TestApproval_FlippingBackToWithheldSweepsTheStaleCopy(t *testing.T) {
 
 	const skillName = "deploy"
 	const approvedScript = "#!/bin/sh\necho deploying\n"
-	installedDir := filepath.Join(".agents", "skills", TeamPrefix+skillName)
+	installedDir := filepath.Join(".agents", "skills", skillName+TeamSuffix)
 	scriptRel := filepath.ToSlash(filepath.Join(installedDir, "scripts", "run.sh"))
 
 	repo := t.TempDir()
@@ -256,7 +256,7 @@ func TestApproval_NarrowingToInstructionsOnlySweepsTheScript(t *testing.T) {
 	t.Parallel()
 
 	const skillName = "deploy"
-	installedDir := filepath.Join(".agents", "skills", TeamPrefix+skillName)
+	installedDir := filepath.Join(".agents", "skills", skillName+TeamSuffix)
 	manifestRel := filepath.ToSlash(filepath.Join(installedDir, "SKILL.md"))
 	scriptRel := filepath.ToSlash(filepath.Join(installedDir, "scripts", "run.sh"))
 
@@ -315,7 +315,7 @@ func TestApproval_SweepsAStaleCopyThatWasEditedLocally(t *testing.T) {
 	t.Parallel()
 
 	const skillName = "deploy"
-	installedDir := filepath.Join(".agents", "skills", TeamPrefix+skillName)
+	installedDir := filepath.Join(".agents", "skills", skillName+TeamSuffix)
 
 	repo := t.TempDir()
 	team := t.TempDir()
@@ -377,7 +377,7 @@ func TestApproval_SweepsAStaleCopyAfterLocalStateIsLost(t *testing.T) {
 	t.Parallel()
 
 	const skillName = "deploy"
-	installedDir := filepath.Join(".agents", "skills", TeamPrefix+skillName)
+	installedDir := filepath.Join(".agents", "skills", skillName+TeamSuffix)
 
 	repo := t.TempDir()
 	team := t.TempDir()

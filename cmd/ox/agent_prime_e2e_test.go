@@ -89,7 +89,7 @@ func TestRunAgentPrime_OmitsAnExistingNativeTeamRule(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(filepath.Join(env.Root, ".claude", "rules"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(env.Root, ".claude", ".gitignore"),
-		[]byte("rules/sageox-team-*\n"), 0o644))
+		[]byte("rules/*-team.md\n"), 0o644))
 	rules, err := teamdocs.DiscoverRules(teamDir, "")
 	require.NoError(t, err)
 	result, err := teamrules.Reconcile(context.Background(), env.Root, rules)

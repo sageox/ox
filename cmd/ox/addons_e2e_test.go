@@ -9,6 +9,7 @@ import (
 
 	"github.com/sageox/ox/internal/addons"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/stretchr/testify/require"
 )
@@ -48,7 +49,7 @@ func TestAddonsInstall_ReachesACoworkerEndToEnd(t *testing.T) {
 		"fixture must carry real ignore rules, or the D5 assertion below is decoration")
 
 	const addon = "post-cutoff"
-	installed := filepath.Join(repo, ".claude", "skills", "sageox-team-"+addon, "SKILL.md")
+	installed := filepath.Join(repo, ".claude", "skills", addon+skillmanager.TeamSuffix, "SKILL.md")
 	require.NoFileExists(t, installed, "fixture must start with nothing installed, or this proves nothing")
 
 	// --- the team chooses the add-on, through the real command path ---

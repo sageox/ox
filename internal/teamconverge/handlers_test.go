@@ -67,12 +67,12 @@ func TestConverge_ConvergesSkillsAndReportsRuleContextDelivery(t *testing.T) {
 		require.Equal(t, report.Snapshot.Commit, outcome.SourceCommit)
 	}
 	require.Equal(t, StateApplied, byKey["skill/deploy"].State)
-	require.Equal(t, "sageox-team-deploy", byKey["skill/deploy"].InstalledAs)
+	require.Equal(t, "deploy"+skillmanager.TeamSuffix, byKey["skill/deploy"].InstalledAs)
 	require.Equal(t, StateIndexed, byKey["rule/security"].State)
 	require.Equal(t, "prime-inline", byKey["rule/security"].Delivery)
 	require.Contains(t, byKey["rule/security"].Detail, "next session boundary")
 	require.Equal(t, StateIndexed, byKey["context/architecture.md"].State)
-	require.FileExists(t, filepath.Join(project, ".agents", "skills", "sageox-team-deploy", "SKILL.md"))
+	require.FileExists(t, filepath.Join(project, ".agents", "skills", "deploy"+skillmanager.TeamSuffix, "SKILL.md"))
 	revision, _, selected := skillmanager.InstalledSource(project)
 	require.True(t, selected)
 	require.True(t, strings.Contains(revision, report.Snapshot.Commit),
@@ -112,7 +112,7 @@ func TestConverge_DefersSkillChangesUntilSessionBoundary(t *testing.T) {
 		[]byte(`{"config_version":"2","repo_id":"repo_test","team_id":"team_test","team_name":"Test"}`+"\n"), 0o644))
 	local := fmt.Sprintf("[[team_contexts]]\nteam_id = %q\nteam_name = %q\npath = %q\n", "team_test", "Test", team)
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".sageox", "config.local.toml"), []byte(local), 0o600))
-	installed := filepath.Join(project, ".agents", "skills", "sageox-team-deploy", "SKILL.md")
+	installed := filepath.Join(project, ".agents", "skills", "deploy"+skillmanager.TeamSuffix, "SKILL.md")
 
 	report, err := Converge(context.Background(), Request{
 		ProjectRoot: project, TeamPath: team, RepoSlug: "api", Mode: ModeExplicit,
@@ -167,10 +167,10 @@ func TestConverge_ProjectsTeamRuleExactlyOnceAndConvergesFilteringAndRemoval(t *
 	gitTeam(t, project, "init", "-q")
 	require.NoError(t, os.MkdirAll(filepath.Join(project, ".claude", "rules"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".claude", ".gitignore"),
-		[]byte("rules/sageox-team-*\n"), 0o644))
+		[]byte("rules/*-team.md\n"), 0o644))
 	require.NoError(t, os.MkdirAll(filepath.Join(project, ".factory", "rules"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".factory", ".gitignore"),
-		[]byte("rules/sageox-team-*\n"), 0o644))
+		[]byte("rules/*-team.md\n"), 0o644))
 
 	team := t.TempDir()
 	gitTeam(t, team, "init", "-q")
@@ -263,7 +263,7 @@ func TestConvergeRules_RetainsProjectionWhenSparseRulesAreBlind(t *testing.T) {
 	rulesRoot := filepath.Join(project, ".claude", "rules")
 	require.NoError(t, os.MkdirAll(rulesRoot, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"),
-		[]byte(".claude/rules/sageox-team-*\n"), 0o644))
+		[]byte(".claude/rules/*-team.md\n"), 0o644))
 	gitTeam(t, project, "init", "-q")
 
 	team := t.TempDir()
@@ -398,8 +398,8 @@ func TestConvergeSkills_UsesDiscoveredArtifactsInsteadOfReDeriving(t *testing.T)
 	require.NotEqual(t, StateError, outcomes[0].State,
 		"convergeSkills re-derived team skills internally and disagreed with what discovery already resolved: %+v", outcomes[0])
 	require.Equal(t, StateApplied, outcomes[0].State)
-	require.Equal(t, "sageox-team-targeted", outcomes[0].InstalledAs)
-	require.FileExists(t, filepath.Join(project, ".agents", "skills", "sageox-team-targeted", "SKILL.md"))
+	require.Equal(t, "targeted"+skillmanager.TeamSuffix, outcomes[0].InstalledAs)
+	require.FileExists(t, filepath.Join(project, ".agents", "skills", "targeted"+skillmanager.TeamSuffix, "SKILL.md"))
 }
 
 // TestConverge_FiltersTeamSkillWhoseReposExcludesThisRepository is the
@@ -451,7 +451,7 @@ func TestConverge_FiltersTeamSkillWhoseReposExcludesThisRepository(t *testing.T)
 		byName[o.Name] = o
 	}
 	require.Equal(t, StateApplied, byName["deploy"].State)
-	require.Equal(t, "sageox-team-deploy", byName["deploy"].InstalledAs)
+	require.Equal(t, "deploy"+skillmanager.TeamSuffix, byName["deploy"].InstalledAs)
 	require.Equal(t, StateFiltered, byName["other-repo-only"].State,
 		"a repos:-filtered team skill vanished instead of surfacing as filtered")
 	require.Contains(t, byName["other-repo-only"].Detail, "repos filter")

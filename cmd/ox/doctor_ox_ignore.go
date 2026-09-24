@@ -29,27 +29,40 @@ func checkOxIgnoreRules(fix bool) checkResult {
 func checkOxIgnoreRulesIn(gitRoot string, fix bool) checkResult {
 
 	// Representative paths for every reserved namespace ox projects into each
-	// agent directory. Checking only ox-cli-* lets a broken sageox-team-* rule
-	// report healthy while Team Skills leak into git status.
+	// agent directory. Checking only ox-cli-* lets a broken team rule report
+	// healthy while Team Skills and Team Rules leak into git status.
+	//
+	// Both namespace shapes are probed. Team content projects under the "-team"
+	// SUFFIX now, and a repository upgrading from the "sageox-team-" prefix still
+	// holds files under the old one until reconcile sweeps them — a check that
+	// probed only the new shape would call that repository healthy while its old
+	// files sat visible in `git status`.
 	probes := map[string][]string{
 		".claude": {
 			".claude/skills/ox-cli-probe/SKILL.md",
+			".claude/skills/probe-team/SKILL.md",
+			".claude/rules/probe-team.md",
 			".claude/skills/sageox-team-probe/SKILL.md",
 			".claude/rules/sageox-team-probe.md",
 		},
 		".agents": {
 			".agents/skills/ox-cli-probe/SKILL.md",
+			".agents/skills/probe-team/SKILL.md",
 			".agents/skills/sageox-team-probe/SKILL.md",
 		},
 		".factory": {
 			".factory/rules/ox-cli.md",
+			".factory/rules/probe-team.md",
 			".factory/rules/sageox-team-probe.md",
 		},
-		".cursor":              {".cursor/rules/sageox-team-probe.mdc"},
-		".github/instructions": {".github/instructions/sageox-team-probe.md"},
-		".clinerules":          {".clinerules/sageox-team-probe.md"},
-		".kiro":                {".kiro/steering/sageox-team-probe.md"},
-		".windsurf":            {".windsurf/rules/sageox-team-probe.md"},
+		".cursor": {".cursor/rules/probe-team.mdc", ".cursor/rules/sageox-team-probe.mdc"},
+		".github/instructions": {
+			".github/instructions/probe-team.md",
+			".github/instructions/sageox-team-probe.md",
+		},
+		".clinerules": {".clinerules/probe-team.md", ".clinerules/sageox-team-probe.md"},
+		".kiro":       {".kiro/steering/probe-team.md", ".kiro/steering/sageox-team-probe.md"},
+		".windsurf":   {".windsurf/rules/probe-team.md", ".windsurf/rules/sageox-team-probe.md"},
 	}
 
 	var broken []string

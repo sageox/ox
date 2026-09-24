@@ -52,13 +52,13 @@ func TestTeamSkillSource_ProseMaterializesUnderTheReservedPrefix(t *testing.T) {
 	require.NoError(t, err)
 
 	names := selectedNames(t, src)
-	require.Contains(t, names, TeamPrefix+"deploy",
+	require.Contains(t, names, "deploy"+TeamSuffix,
 		"a prose team skill did not materialize under the reserved prefix")
 	require.Len(t, decisions, 1)
 	require.False(t, decisions[0].NeedsApprove)
 	require.True(t, decisions[0].AutoInstalledProse)
 	require.NotEmpty(t, decisions[0].InstalledAs)
-	require.True(t, IsReservedName(TeamPrefix+"deploy"),
+	require.True(t, IsReservedName("deploy"+TeamSuffix),
 		"the installed name is outside the reserved namespace, so the ignore globs will not hide it")
 }
 
@@ -81,7 +81,7 @@ func TestTeamSkillSource_ScriptsAreDroppedNotTheSkill(t *testing.T) {
 
 	var got *skills.Skill
 	for i := range selected {
-		if selected[i].Name == TeamPrefix+"deploy" {
+		if selected[i].Name == "deploy"+TeamSuffix {
 			got = &selected[i]
 		}
 	}
@@ -91,7 +91,7 @@ func TestTeamSkillSource_ScriptsAreDroppedNotTheSkill(t *testing.T) {
 	}
 
 	require.Len(t, decisions, 1)
-	require.Equal(t, TeamPrefix+"deploy", decisions[0].InstalledAs, "installed skill has no InstalledAs")
+	require.Equal(t, "deploy"+TeamSuffix, decisions[0].InstalledAs, "installed skill has no InstalledAs")
 	require.True(t, decisions[0].NeedsApprove, "the author must still be told the scripts are held")
 	require.False(t, decisions[0].AutoInstalledProse,
 		"an executable skill with only its scripts held was reported as prose")
@@ -116,7 +116,7 @@ func TestTeamSkillSource_RunnableManifestStillWithholds(t *testing.T) {
 
 	src, decisions, err := TeamSkillSource(nil, team, "ox", project)
 	require.NoError(t, err)
-	require.NotContains(t, selectedNames(t, src), TeamPrefix+"grants",
+	require.NotContains(t, selectedNames(t, src), "grants"+TeamSuffix,
 		"a manifest carrying an allowed-tools grant was materialized without approval")
 	require.Len(t, decisions, 1)
 	require.True(t, decisions[0].NeedsApprove)
@@ -141,10 +141,18 @@ func TestManifestHelpers_TreatManifestNameCaseInsensitively(t *testing.T) {
 
 	require.True(t, manifestIsRunnable(skill, verdict),
 		"an uppercase runnable manifest was mistaken for a droppable bundled script")
-	require.Equal(t, manifest, manifestContent(skill),
-		"an uppercase manifest produced a manifestless installation")
-	require.Equal(t, []skills.File{{Path: "SKILL.MD", Content: manifest}}, toCatalogFiles(skill, false),
+
+	// The manifest is STAMPED on the way out — that trailer is what proves ox
+	// wrote the directory once the name stopped proving it — so the expectation is
+	// the stamped form, and the same bytes must come back through manifestContent.
+	stamped := TeamSkillStamp.Apply(manifest)
+	files := toCatalogFiles(skill, false)
+	require.Equal(t, []skills.File{{Path: "SKILL.MD", Content: stamped}}, files,
 		"the approved manifest should remain while separately bundled scripts stay absent")
+	require.Equal(t, stamped, manifestContent(files),
+		"an uppercase manifest produced a manifestless installation")
+	require.True(t, TeamSkillStamp.Verifies(stamped),
+		"a manifest ox just wrote must verify as ox's own")
 }
 
 // TestTeamSkillSource_ApprovedExecutableMaterializesWithoutItsScripts.
@@ -165,7 +173,7 @@ func TestTeamSkillSource_ApprovedExecutableMaterializesWithoutItsScripts(t *test
 
 	src, decisions, err := TeamSkillSource(nil, team, "ox", project)
 	require.NoError(t, err)
-	require.Contains(t, selectedNames(t, src), TeamPrefix+"deploy")
+	require.Contains(t, selectedNames(t, src), "deploy"+TeamSuffix)
 	require.True(t, decisions[0].NeedsApprove,
 		"the missing script grant must remain visible after manifest approval")
 	require.False(t, decisions[0].AutoInstalledProse,
@@ -356,12 +364,12 @@ func TestTeamSkillSource_RespectsRepoTargeting(t *testing.T) {
 
 	src, _, err := TeamSkillSource(nil, team, "ox", project)
 	require.NoError(t, err)
-	require.NotContains(t, selectedNames(t, src), TeamPrefix+"deploy",
+	require.NotContains(t, selectedNames(t, src), "deploy"+TeamSuffix,
 		"a team skill landed in a repository its frontmatter did not target")
 
 	src, _, err = TeamSkillSource(nil, team, "speaker", project)
 	require.NoError(t, err)
-	require.Contains(t, selectedNames(t, src), TeamPrefix+"deploy")
+	require.Contains(t, selectedNames(t, src), "deploy"+TeamSuffix)
 }
 
 func loadForTest(t *testing.T, teamPath, name string) teamskills.Skill {

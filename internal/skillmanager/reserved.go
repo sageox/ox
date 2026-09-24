@@ -2,11 +2,11 @@ package skillmanager
 
 import "strings"
 
-// Reserved namespaces. These three strings are the whole ownership contract, so
-// they live in one place: the installer, the ignore-file writer, the doctor
-// checks, and the migration all have to agree on them exactly, and a copy that
-// drifts by one character would either strand files in git or sweep files ox does
-// not own.
+// Reserved namespaces. These strings are the whole ownership contract, so they
+// live in one place: the installer, the ignore-file writer, the doctor checks, the
+// Team Rule projector, and the migration all have to agree on them exactly, and a
+// copy that drifts by one character would either strand files in git or sweep
+// files ox does not own.
 const (
 	// CLIBase is the exact reserved name ox uses for its primary rule file
 	// (.claude/rules/ox-cli.md). It has no trailing hyphen, so a glob written as
@@ -19,11 +19,30 @@ const (
 	// skills (ox-kb, ox-cart), and a bare prefix would claim those too.
 	CLIPrefix = CLIBase + "-"
 
-	// TeamPrefix marks content synced from a team context. "sageox-" is used
-	// rather than another "ox-" family name because it is unmistakably
-	// vendor-owned, and team content carries a different trust story than
-	// binary-anchored content.
-	TeamPrefix = "sageox-team-"
+	// TeamSuffix marks content projected out of a team context — every Team Skill
+	// directory and every Team Rule file, with no per-artifact exception.
+	//
+	// It is a SUFFIX because an agent's slash name derives from the DIRECTORY, not
+	// from the skill's own frontmatter `name:`. Under the old prefix a team skill
+	// named `fork-scout` installed as `sageox-team-fork-scout`, so a teammate had to
+	// type `/sageox-team-fork-scout` while the skill's own description — copied
+	// verbatim from the team's file, which ox does not rewrite — still told them to
+	// type `/fork-scout`. Every team skill's documentation was wrong the moment it
+	// synced. A suffix puts the real name first and keeps the namespace.
+	//
+	// It stays a fixed string rather than a per-skill name so the gitignore entries
+	// remain stable globs (`skills/*-team/`, `rules/*-team.md`). A per-name ignore
+	// list would churn a COMMITTED file every time the team added a skill, which is
+	// the pull-request noise ADR-031 exists to remove.
+	TeamSuffix = "-team"
+
+	// LegacyTeamPrefix is the namespace team content used before the suffix.
+	//
+	// It survives for exactly one purpose: sweeping directories and files ox wrote
+	// under the old scheme. Nothing materializes under it any more. Unlike
+	// TeamSuffix it is still RECLAIMABLE by name — ox declared that namespace and
+	// told people to stay out of it, so a directory wearing it is ox's by contract.
+	LegacyTeamPrefix = "sageox-team-"
 
 	// CommittedOnRamp is the ONE surface that stays committed to the repository.
 	// It is unprefixed on purpose so it can never match a reserved glob — it must
@@ -31,6 +50,38 @@ const (
 	// the CLI is not installed.
 	CommittedOnRamp = "sageox"
 )
+
+// ruleProjectionExtensions are the file extensions a Team Rule projection can
+// carry. They are stripped before a name is classified so `security-9f2a-team.mdc`
+// (Cursor) is recognized exactly like `security-9f2a-team.md` (everyone else).
+//
+// The list is explicit rather than filepath.Ext because a skill DIRECTORY name may
+// legitimately contain a dot (TeamSkillNamePattern admits `.`), and Ext would
+// happily amputate `foo.bar-team` down to `foo`.
+var ruleProjectionExtensions = []string{".md", ".mdc"}
+
+// reservedBaseName strips a rule projection's extension, leaving the name the
+// reserved-namespace tests actually classify.
+func reservedBaseName(name string) string {
+	for _, ext := range ruleProjectionExtensions {
+		if strings.HasSuffix(name, ext) {
+			return strings.TrimSuffix(name, ext)
+		}
+	}
+	return name
+}
+
+// IsTeamProjectionName reports whether a skill directory or rule file basename
+// belongs to a Team Context projection, under either the current suffix or the
+// legacy prefix.
+//
+// It answers the CLASSIFICATION question — "is this row team content?" — for
+// reporting, gitignoring, and the retirement sweep. It does NOT authorize
+// overwriting anything; see IsReclaimableName.
+func IsTeamProjectionName(name string) bool {
+	name = reservedBaseName(name)
+	return strings.HasSuffix(name, TeamSuffix) || strings.HasPrefix(name, LegacyTeamPrefix)
+}
 
 // IsReservedName reports whether a skill/rule/command basename belongs to an
 // ox-owned namespace.
@@ -50,38 +101,42 @@ const (
 // deliberately tracked, so callers that gitignore or sweep reserved paths must
 // leave it alone.
 func IsReservedName(name string) bool {
-	name = strings.TrimSuffix(name, ".md")
-	return name == CLIBase ||
-		strings.HasPrefix(name, CLIPrefix) ||
-		strings.HasPrefix(name, TeamPrefix)
+	base := reservedBaseName(name)
+	return base == CLIBase ||
+		strings.HasPrefix(base, CLIPrefix) ||
+		IsTeamProjectionName(name)
 }
 
 // IsReclaimableName reports whether a name BY ITSELF is enough for ox to claim a
 // skill directory it has no record of ever writing.
 //
-// It intentionally remains a separate predicate from IsReservedName even while
-// their namespace sets match: this one authorizes destructive overwrite, while
-// the other classifies a path. Future reporting exceptions must not silently
-// widen the destructive boundary again.
+// It intentionally remains a separate predicate from IsReservedName, and since the
+// team suffix landed their namespace sets genuinely differ: this one authorizes
+// destructive overwrite, while the other classifies a path.
 //
-// Only the PREFIXED namespaces qualify. "ox-cli-" and "sageox-team-" are
-// namespaces ox declared and told people to stay out of, so a directory wearing
-// one is ox's by contract even with no lockfile entry — the 0.15.0 inversion,
-// reasoned out at the first-install reclaim in Plan.
+// Only namespaces ox DECLARED and told people to stay out of qualify. "ox-cli-"
+// and the legacy "sageox-team-" are such namespaces, so a directory wearing one is
+// ox's by contract even with no lockfile entry — the 0.15.0 inversion, reasoned out
+// at the first-install reclaim in Plan.
 //
-// An unprefixed catalog name never qualifies, however certainly ox ships it.
-// "post-cutoff" is ordinary English naming what the skill IS, not who authored
-// it; a repository can already hold a hand-authored skill at exactly that path,
-// written by someone who was never told the name was spoken for. Those names
-// must earn ownership the honest way — a recorded lockfile digest, a recovery
-// journal entry, or a legacy stamp — and a same-name stranger is reported as a
-// conflict and left alone.
+// TeamSuffix deliberately does NOT qualify. "-team" is ordinary English: a
+// repository can already hold a hand-authored `notify-team` or `onboard-team`
+// skill, written by someone who was never told the name was spoken for. Those
+// directories are gitignored and absent from the lockfile, so destroying one would
+// be unrecoverable. Team projections earn ownership the honest way instead — a
+// verified in-band projection stamp, a recorded lockfile digest, or a recovery
+// journal entry — and a same-name stranger is reported as a conflict and left
+// alone.
+//
+// An unprefixed catalog name never qualifies either, however certainly ox ships
+// it. "post-cutoff" is ordinary English naming what the skill IS, not who authored
+// it.
 //
 // CommittedOnRamp is excluded for the same reason it is excluded above: ox
 // authors it, but it is tracked rather than owned-and-hidden.
 func IsReclaimableName(name string) bool {
-	name = strings.TrimSuffix(name, ".md")
-	return name == CLIBase ||
-		strings.HasPrefix(name, CLIPrefix) ||
-		strings.HasPrefix(name, TeamPrefix)
+	base := reservedBaseName(name)
+	return base == CLIBase ||
+		strings.HasPrefix(base, CLIPrefix) ||
+		strings.HasPrefix(base, LegacyTeamPrefix)
 }

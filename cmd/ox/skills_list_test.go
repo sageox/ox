@@ -37,7 +37,13 @@ func TestCollectInstalledSkills_ClassifiesEveryProvenance(t *testing.T) {
 	const root = ".claude/skills"
 	writeSkillDir(t, repo, root, skillmanager.CLIPrefix+"plan", manifestWithDescription("ox-cli-plan", "plan things"))
 	writeSkillDir(t, repo, root, skillmanager.CommittedOnRamp, manifestWithDescription("sageox", "the on-ramp"))
-	writeSkillDir(t, repo, root, skillmanager.TeamPrefix+"deploy", manifestWithDescription("sageox-team-deploy", "how we deploy"))
+	// A Team Skill is proved by its STAMP, not by its name. "-team" is ordinary
+	// English, so an unstamped `deploy-team` is somebody's hand-authored skill and
+	// must classify as local — see the negative control below.
+	writeSkillDir(t, repo, root, "deploy"+skillmanager.TeamSuffix,
+		string(skillmanager.TeamSkillStamp.Apply([]byte(manifestWithDescription("deploy", "how we deploy")))))
+	writeSkillDir(t, repo, root, "notify"+skillmanager.TeamSuffix,
+		manifestWithDescription("notify-team", "mine, and it merely LOOKS like team content"))
 	writeSkillDir(t, repo, root, "my-own-skill", manifestWithDescription("my-own-skill", "mine, hand written"))
 	// An ordinary, unprefixed name — the shape an ox catalog skill takes — but
 	// carrying NO ownership evidence. A catalog-shaped NAME is availability, not
@@ -51,11 +57,13 @@ func TestCollectInstalledSkills_ClassifiesEveryProvenance(t *testing.T) {
 	for _, row := range got.Skills {
 		byName[row.Name] = row
 	}
-	require.Len(t, byName, 5)
+	require.Len(t, byName, 6)
 	require.Equal(t, provenanceOx, byName[skillmanager.CLIPrefix+"plan"].Provenance)
 	require.Equal(t, provenanceOx, byName[skillmanager.CommittedOnRamp].Provenance,
 		"the committed on-ramp is deliberately unprefixed; a prefix-only rule files ox's own file under local")
-	require.Equal(t, provenanceTeam, byName[skillmanager.TeamPrefix+"deploy"].Provenance)
+	require.Equal(t, provenanceTeam, byName["deploy"+skillmanager.TeamSuffix].Provenance)
+	require.Equal(t, provenanceLocal, byName["notify"+skillmanager.TeamSuffix].Provenance,
+		"a name wearing the team suffix without ox's stamp belongs to whoever wrote it")
 	require.Equal(t, provenanceLocal, byName["my-own-skill"].Provenance)
 	require.Equal(t, provenanceLocal, byName[unprefixedSkillName].Provenance,
 		"an unprefixed name alone claimed a hand-authored skill")
@@ -513,9 +521,9 @@ func TestSkillsListHelpers_CoverDefensiveAndFormattingBoundaries(t *testing.T) {
 		require.NoError(t, err)
 		defer func() { require.NoError(t, repo.Close()) }()
 
-		description, owned, isSkill := skillManifestDescription(repo, "missing")
+		description, provenance, isSkill := skillManifestDescription(repo, "missing")
 		require.Empty(t, description)
-		require.False(t, owned)
+		require.Empty(t, provenance)
 		require.False(t, isSkill)
 	})
 }

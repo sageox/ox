@@ -39,7 +39,7 @@ func installedTeamSkills(t *testing.T, repo string) []string {
 		if !e.IsDir() {
 			continue
 		}
-		if rest, ok := strings.CutPrefix(e.Name(), TeamPrefix); ok {
+		if rest, ok := strings.CutSuffix(e.Name(), TeamSuffix); ok {
 			names = append(names, rest)
 		}
 	}
@@ -118,7 +118,7 @@ func TestClassifyTeamSkills_AgreesWithTheReconcilePathWithoutAnOrigin(t *testing
 		// classified by ClassifyTeamSkills must satisfy the reconcile path. If
 		// the two loaders collected different files the digests would differ and
 		// the script would stay withheld forever with the approval recorded.
-		script := filepath.Join(repo, ".agents", "skills", TeamPrefix+untargeted, "scripts", "run.sh")
+		script := filepath.Join(repo, ".agents", "skills", untargeted+TeamSuffix, "scripts", "run.sh")
 		require.NoFileExists(t, script, "setup failed: an unapproved script reached the repository")
 		require.Len(t, reconcileOnce(t, repo).WithheldTeamSkills(), 1,
 			"setup failed: the executable skill was never withheld, so approving it proves nothing")
@@ -206,8 +206,8 @@ func TestReconcile_TeamSkillReachesEveryTargetAndLeavesNoneBehind(t *testing.T) 
 	_, err := Reconcile(repo, "1.0.0", desired, targets)
 	require.NoError(t, err)
 	manifests := []string{
-		filepath.Join(repo, ".agents", "skills", TeamPrefix+"deploy", "SKILL.md"),
-		filepath.Join(repo, ".claude", "skills", TeamPrefix+"deploy", "SKILL.md"),
+		filepath.Join(repo, ".agents", "skills", "deploy"+TeamSuffix, "SKILL.md"),
+		filepath.Join(repo, ".claude", "skills", "deploy"+TeamSuffix, "SKILL.md"),
 	}
 	for _, m := range manifests {
 		require.FileExists(t, m, "a team skill reached only some of the configured targets")

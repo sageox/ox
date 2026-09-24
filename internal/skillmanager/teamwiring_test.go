@@ -92,7 +92,7 @@ func TestPlan_TeamSkillsTravelTheWholeReconcilePath(t *testing.T) {
 	t.Parallel()
 
 	const skillName = "deploy"
-	installedDir := filepath.Join(".agents", "skills", TeamPrefix+skillName)
+	installedDir := filepath.Join(".agents", "skills", skillName+TeamSuffix)
 
 	tests := []struct {
 		name string

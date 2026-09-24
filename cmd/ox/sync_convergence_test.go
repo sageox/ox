@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/stretchr/testify/require"
 )
@@ -398,7 +399,7 @@ func TestConvergeAfterSessionBoundary_AppliesPendingTeamContent(t *testing.T) {
 	_, err := publishRepoSkillsToTeam(repo, []string{teamPublishSkill})
 	require.NoError(t, err)
 
-	installed := filepath.Join(repo, ".claude", "skills", "sageox-team-"+teamPublishSkill, "SKILL.md")
+	installed := filepath.Join(repo, ".claude", "skills", teamPublishSkill+skillmanager.TeamSuffix, "SKILL.md")
 	require.NoFileExists(t, installed)
 	convergeAfterSessionBoundary(repo)
 	require.FileExists(t, installed)

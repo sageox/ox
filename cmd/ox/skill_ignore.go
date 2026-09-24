@@ -75,7 +75,7 @@ func isReservedManagedPath(repoRoot, absPath string) bool {
 // stageableInstalledPaths filters adapter-written paths down to the ones that
 // belong in git.
 //
-// Reserved ox-cli-* / sageox-team-* artifacts are gitignored working-tree state,
+// Reserved ox-cli-* / *-team artifacts are gitignored working-tree state,
 // materialized locally on every machine from the binary's own catalog. Staging
 // them is exactly what put vendor files into customers' pull requests on every
 // release, and an ignore rule is useless while something still force-adds the

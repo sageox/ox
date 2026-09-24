@@ -88,7 +88,7 @@ var RuleRoots = []string{"agents/rules", "coworkers/rules"}
 // Results are sorted by RelPath for stable output.
 //
 // Native projection is a derived cache, never the source of truth. The
-// teamrules package owns its reserved sageox-team-* namespace and retires
+// teamrules package owns its reserved *-team namespace and retires
 // projections when a rule is removed or filtered out. Prime suppresses only
 // the active agent's existing projection, preserving exactly-one delivery.
 func DiscoverRules(teamPath, repoSlug string) ([]TeamRule, error) {

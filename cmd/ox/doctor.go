@@ -859,6 +859,12 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 		legacyCheck,
 		checkOxIgnoreRules(ignoreFix),
 		checkOxFilesNotTracked(opts.shouldFix(CheckSlugOxFilesUntracked)),
+		// The other side of those ignore rules: a hand-authored skill whose name
+		// ends in "-team" matches the Team Context glob and silently stops reaching
+		// git. Nothing above can see it — it is not ox-managed, so no plan mentions
+		// it — and it keeps working locally, so the author only finds out when a
+		// teammate asks where their skill went.
+		checkTeamSuffixShadow(opts.shouldFix(CheckSlugTeamSuffixShadow)),
 	)
 	if detectAmp() {
 		integrationChecks = append(integrationChecks, checkAmpHooks(opts.shouldFix(CheckSlugAmpHooks)))

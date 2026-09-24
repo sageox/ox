@@ -159,7 +159,7 @@ func TestTeamConvergence_RetriesPendingLockContentionWithoutNewCommit(t *testing
 	require.NotNil(t, pending, "lock contention was forgotten after the changed commit was consumed")
 	require.Equal(t, teamconverge.PendingRetry, pending.Status)
 	require.Equal(t, 1, pending.Attempts)
-	require.NoFileExists(t, filepath.Join(project, ".agents", "skills", "sageox-team-deploy", "SKILL.md"))
+	require.NoFileExists(t, filepath.Join(project, ".agents", "skills", "deploy"+skillmanager.TeamSuffix, "SKILL.md"))
 
 	close(release)
 	require.NoError(t, <-done)
@@ -170,7 +170,7 @@ func TestTeamConvergence_RetriesPendingLockContentionWithoutNewCommit(t *testing
 	scheduler.reconcileTeamSkills(nil)
 	pending, err = teamconverge.LoadPending(project)
 	require.NoError(t, err)
-	require.FileExists(t, filepath.Join(project, ".agents", "skills", "sageox-team-deploy", "SKILL.md"))
+	require.FileExists(t, filepath.Join(project, ".agents", "skills", "deploy"+skillmanager.TeamSuffix, "SKILL.md"))
 	require.Nil(t, pending, "verified convergence did not clear the pending marker")
 }
 
@@ -238,7 +238,7 @@ func TestReconcileTeamSkills_RuleRepoFilterUsesCanonicalOriginNotDirectoryName(t
 	// wrongly-applicable rule observable as a file on disk.
 	require.NoError(t, os.MkdirAll(filepath.Join(project, ".claude", "rules"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".claude", ".gitignore"),
-		[]byte("rules/sageox-team-*\n"), 0o644))
+		[]byte("rules/*-team.md\n"), 0o644))
 	dirName := filepath.Base(project)
 
 	team := t.TempDir()

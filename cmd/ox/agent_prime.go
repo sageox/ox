@@ -848,7 +848,13 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		output.MurmurDirective = "Murmuring is ENABLED. Proactively publish WIP to teammates:\n" +
 			"  • At START of significant work — say what you're about to do\n" +
 			"  • After architectural decisions — what you decided and why\n" +
-			"  • Command: ox murmur --topic=wip \"concise description (≤500 bytes)\"\n" +
+			// "publishes, never writes" is load-bearing, not reassurance. A murmur
+			// touches no file in the repository — it posts a short-lived signal to
+			// teammates — but agents running under a plan/read-only mode classify any
+			// unfamiliar command as a mutation and skip it, so the coordination
+			// signal goes missing in exactly the sessions that are planning work
+			// other people need to know about.
+			"  • Command: ox murmur --topic=wip \"concise description (≤500 bytes)\" — publishes a signal, writes no repository file, safe in plan/read-only mode\n" +
 			fmt.Sprintf("  • Stay in sync: run `ox agent %s heartbeat` every ~20 tool calls during long tasks\n", agentID) +
 			"Run your first murmur NOW: describe what the user asked and which code areas you expect to touch."
 	}

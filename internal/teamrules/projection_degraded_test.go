@@ -51,7 +51,7 @@ func stageRuleRoot(t *testing.T, protection ruleRootProtection) (string, teamdoc
 	switch protection {
 	case protectedRoot:
 		require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"),
-			[]byte(".claude/rules/sageox-team-*\n"), 0o644))
+			[]byte(".claude/rules/*-team.md\n"), 0o644))
 	case unignoredRoot:
 		// An ignore file that exists and covers something else entirely: the
 		// realistic shape of the mistake, not an empty file.
@@ -151,14 +151,14 @@ func TestReconcile_UnprotectedRootHandsTheRuleToPrimeForReal(t *testing.T) {
 // That makes replacing the `git check-ignore` subprocess with an in-process
 // ignore matcher — an obvious optimization, since this runs per rule root on
 // the convergence tick — silently load-bearing: a pure pattern matcher would
-// answer "ignored" and ox would begin creating and DELETING sageox-team-*.md
+// answer "ignored" and ox would begin creating and DELETING *-team.md
 // files in an arbitrary directory on the machine. This test is what catches it.
 func TestReconcile_SymlinkedRuleRootNeverWritesOutsideTheRepository(t *testing.T) {
 	t.Parallel()
 
 	patterns := map[string]string{
-		"repo-relative pattern": ".claude/rules/sageox-team-*\n",
-		"recursive pattern":     "**/sageox-team-*\n",
+		"repo-relative pattern": ".claude/rules/*-team.md\n",
+		"recursive pattern":     "**/*-team.md\n",
 		"whole-directory":       ".claude/**\n",
 	}
 
@@ -204,7 +204,7 @@ func TestReconcile_SymlinkedRuleRootNeverWritesOutsideTheRepository(t *testing.T
 //
 // Observed (probe run 2026-09-21, this fixture without the skip):
 //
-//	phase 1 protected:   Reconcile writes .claude/rules/sageox-team-security-*.md
+//	phase 1 protected:   Reconcile writes .claude/rules/security-*-team.md
 //	                     ForPrime("claude") -> 0 rules   (correct: native owns it)
 //	phase 2 unprotected: Reconcile -> Written=[] Removed=[]
 //	                     Fallbacks[security] = "native rule root exists but Team

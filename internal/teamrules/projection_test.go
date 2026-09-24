@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/stretchr/testify/require"
 )
@@ -52,7 +53,7 @@ func TestReconcile_ProjectsOnceAndRemovesRetiredRules(t *testing.T) {
 	rulesRoot := filepath.Join(project, ".claude", "rules")
 	require.NoError(t, os.MkdirAll(rulesRoot, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".claude", ".gitignore"),
-		[]byte("rules/sageox-team-*\n"), 0o644))
+		[]byte("rules/*-team.md\n"), 0o644))
 	git := exec.Command("git", "init", "-q")
 	git.Dir = project
 	require.NoError(t, git.Run())
@@ -112,7 +113,7 @@ func TestReconcile_PreservesUntrackedReservedFilesWithoutOwnershipProof(t *testi
 		rulesRoot := filepath.Join(project, ".claude", "rules")
 		require.NoError(t, os.MkdirAll(rulesRoot, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"),
-			[]byte(".claude/rules/sageox-team-*\n"), 0o644))
+			[]byte(".claude/rules/*-team.md\n"), 0o644))
 		git := exec.Command("git", "init", "-q")
 		git.Dir = project
 		require.NoError(t, git.Run())
@@ -143,7 +144,7 @@ func TestReconcile_PreservesUntrackedReservedFilesWithoutOwnershipProof(t *testi
 
 	t.Run("retired reserved filename", func(t *testing.T) {
 		project, rulesRoot, _ := setup(t)
-		localPath := filepath.Join(rulesRoot, "sageox-team-hand-authored.md")
+		localPath := filepath.Join(rulesRoot, "hand-authored-team.md")
 		const local = "hand-authored retired rule\n"
 		require.NoError(t, os.WriteFile(localPath, []byte(local), 0o644))
 
@@ -165,13 +166,13 @@ func TestReconcile_EachSupportedAgentGetsExactlyOneDelivery(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Join(project, filepath.FromSlash(p.Root)), 0o755))
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"), []byte(strings.Join([]string{
-		".claude/rules/sageox-team-*",
-		".cursor/rules/sageox-team-*",
-		".github/instructions/sageox-team-*",
-		".clinerules/sageox-team-*",
-		".kiro/steering/sageox-team-*",
-		".factory/rules/sageox-team-*",
-		".windsurf/rules/sageox-team-*",
+		".claude/rules/*-team.md",
+		".cursor/rules/*-team.mdc",
+		".github/instructions/*-team.md",
+		".clinerules/*-team.md",
+		".kiro/steering/*-team.md",
+		".factory/rules/*-team.md",
+		".windsurf/rules/*-team.md",
 	}, "\n")+"\n"), 0o644))
 	git := exec.Command("git", "init", "-q")
 	git.Dir = project
@@ -214,7 +215,7 @@ func TestReconcile_RefusesToChangeTrackedProjection(t *testing.T) {
 	rulesRoot := filepath.Join(project, ".claude", "rules")
 	require.NoError(t, os.MkdirAll(rulesRoot, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"),
-		[]byte(".claude/rules/sageox-team-*\n"), 0o644))
+		[]byte(".claude/rules/*-team.md\n"), 0o644))
 	git := exec.Command("git", "init", "-q")
 	git.Dir = project
 	require.NoError(t, git.Run())
@@ -247,7 +248,7 @@ func TestReconcile_DroidScopedRuleFallsBackWithoutWriting(t *testing.T) {
 	project := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(project, ".factory", "rules"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".factory", ".gitignore"),
-		[]byte("rules/sageox-team-*\n"), 0o644))
+		[]byte("rules/*-team.md\n"), 0o644))
 	git := exec.Command("git", "init", "-q")
 	git.Dir = project
 	require.NoError(t, git.Run())
@@ -300,7 +301,7 @@ func TestProjectionHelpers_DefensiveAndFallbackBranches(t *testing.T) {
 		project := t.TempDir()
 		require.False(t, HasNativeProjections(project))
 		require.NoError(t, os.MkdirAll(filepath.Join(project, ".claude", "rules"), 0o755))
-		projection := filepath.Join(project, ".claude", "rules", "sageox-team-a.md")
+		projection := filepath.Join(project, ".claude", "rules", "a-team.md")
 		require.NoError(t, os.WriteFile(projection, []byte("x"), 0o644))
 		require.False(t, HasNativeProjections(project), "a reserved name is not ownership proof")
 		require.NoError(t, os.WriteFile(projection, stampProjection([]byte("x")), 0o644))
@@ -311,8 +312,8 @@ func TestProjectionHelpers_DefensiveAndFallbackBranches(t *testing.T) {
 		// rather than read them as its own projection.
 		bare := t.TempDir()
 		rulesDir := filepath.Join(bare, ".claude", "rules")
-		require.NoError(t, os.MkdirAll(filepath.Join(rulesDir, managedPrefix+"adir.md"), 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(rulesDir, managedPrefix+"a.txt"),
+		require.NoError(t, os.MkdirAll(filepath.Join(rulesDir, "adir"+skillmanager.TeamSuffix+".md"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "a"+skillmanager.TeamSuffix+".txt"),
 			stampProjection([]byte("body")), 0o644))
 		require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "mine.md"),
 			stampProjection([]byte("body")), 0o644))
@@ -344,9 +345,11 @@ func TestProjectionHelpers_DefensiveAndFallbackBranches(t *testing.T) {
 		require.False(t, verifiedProjection([]byte("unstamped\n")))
 
 		emptySlug := nativeFilename(teamdocs.TeamRule{Name: "!!!", RelPath: "x"}, policies[0])
-		require.Contains(t, emptySlug, "sageox-team-rule-")
+		require.Contains(t, emptySlug, "rule-")
+		require.True(t, strings.HasSuffix(emptySlug, skillmanager.TeamSuffix+policies[0].Extension),
+			"a projection is named by its SUFFIX: %s", emptySlug)
 		longSlug := nativeFilename(teamdocs.TeamRule{Name: strings.Repeat("Long Name ", 10), RelPath: "x"}, policies[0])
-		stem := strings.TrimSuffix(strings.TrimPrefix(longSlug, managedPrefix), policies[0].Extension)
+		stem := strings.TrimSuffix(strings.TrimSuffix(longSlug, policies[0].Extension), skillmanager.TeamSuffix)
 		slug := stem[:strings.LastIndex(stem, "-")]
 		require.LessOrEqual(t, len(slug), 40)
 	})
@@ -378,7 +381,7 @@ func TestReconcileRoot_DefensiveFilesystemBranches(t *testing.T) {
 	require.NoError(t, os.Mkdir(filepath.Join(rootPath, "destination.md"), 0o755))
 	require.Error(t, atomicWrite(root, "destination.md", []byte("x")))
 
-	retired := filepath.Join(rootPath, managedPrefix+"retired.md")
+	retired := filepath.Join(rootPath, "retired"+skillmanager.TeamSuffix+".md")
 	require.NoError(t, os.Mkdir(retired, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(retired, "child"), []byte("x"), 0o644))
 	_, _, err = reconcileRoot(context.Background(), project, rootPath, p, nil)
@@ -415,7 +418,7 @@ func TestReconcile_FailedTrackedCheckNeverReadsAsUntracked(t *testing.T) {
 	rulesRoot := filepath.Join(project, ".claude", "rules")
 	require.NoError(t, os.MkdirAll(rulesRoot, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"),
-		[]byte(".claude/rules/sageox-team-*\n"), 0o644))
+		[]byte(".claude/rules/*-team.md\n"), 0o644))
 	gitInit := exec.Command(realGit, "init", "-q")
 	gitInit.Dir = project
 	require.NoError(t, gitInit.Run())
@@ -501,7 +504,7 @@ func TestForPrime_DeliversRuleWhenNativeFileIsAConflict(t *testing.T) {
 		rulesRoot := filepath.Join(project, ".claude", "rules")
 		require.NoError(t, os.MkdirAll(rulesRoot, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"),
-			[]byte(".claude/rules/sageox-team-*\n"), 0o644))
+			[]byte(".claude/rules/*-team.md\n"), 0o644))
 		git := exec.Command("git", "init", "-q")
 		git.Dir = project
 		require.NoError(t, git.Run())
@@ -561,8 +564,8 @@ func TestReconcile_ConflictInOneRootDoesNotBlockOthers(t *testing.T) {
 	require.NoError(t, os.MkdirAll(claudeRoot, 0o755))
 	require.NoError(t, os.MkdirAll(cursorRoot, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".gitignore"), []byte(strings.Join([]string{
-		".claude/rules/sageox-team-*",
-		".cursor/rules/sageox-team-*",
+		".claude/rules/*-team.md",
+		".cursor/rules/*-team.mdc",
 	}, "\n")+"\n"), 0o644))
 	git := exec.Command("git", "init", "-q")
 	git.Dir = project

@@ -10,11 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Plans are for any work your team executes, and now say so** — `ox plan --help` described "implementation plans", so a designer, a product marketer, or anyone planning a rollout reasonably concluded Plans was not for them. It always was: `ox plan save --kind` takes `plan`, `mockup`, `review`, or `evidence`. The help text, the guidance every AI coworker receives at prime, and the plan skill now name design, GTM, rollout, and engineering work alike.
+- **A team's skill keeps its own name** — a skill your team publishes as `grill-me` now installs as `grill-me-team`, not `sageox-team-grill-me`. AI coworkers derive a skill's slash name from its directory, so the old prefix renamed every team skill out from under its own instructions: the description said `/grill-me` and only `/sageox-team-grill-me` worked. `ox skills list` and `ox skills status` now print the name that actually resolves instead of a prettier one that doesn't, and `--json` carries both. Team Rules move the same way, so one rule covers everything from Team Context: it ends in `-team`. Directories from the old scheme are swept on the next reconcile — nothing to run.
 
 ### Fixed
 
 - **Saving a mockup no longer asks you to add a mockup** — `ox plan save --kind mockup` ran a plan's craft checks against it and told the author their mockup had no mockup, and that a visual proposal needed a collapsed "Implementation notes" appendix for its implementer. Both expectations are plan-shaped: one asks you to *propose* a surface, the other serves a plan's second reader. A mockup, a review sheet, and an evidence page have neither, so they no longer fire — while the one check that applies to every kind, *did this page draw anything at all*, still does. `ox plan lint` and `ox plan render` take `--kind` too, so the check you get before saving is the check you get after.
 - **ox names what you actually saved** — saving a mockup said "Saved plan to ledger", which is the single-noun collapse `--kind` exists to end.
+- **A skill you checked in is never overwritten by your team's** — if your repo already has a committed skill at the name a team skill wants, ox leaves your bytes alone and reports the clash instead of quietly replacing them. Ownership is now proved by a stamp ox writes and by git, rather than assumed from a name, so a hand-authored `notify-team` is safe too.
+- **`ox doctor` tells you when your own skill is hidden from git** — the team namespace is a `*-team` glob, and a skill you named that way stops reaching teammates without anything looking wrong. Doctor names it and offers both fixes.
+- **`ox murmur` says it is safe to run while planning** — it publishes a signal and writes no file in your repository, but AI coworkers in plan mode were treating it as a change and skipping it, so teammates stopped hearing what was about to be touched.
 
 ## [0.17.1] - 2026-09-22
 

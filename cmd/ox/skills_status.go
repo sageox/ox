@@ -130,10 +130,16 @@ const (
 	skillWithheld      = "withheld"       // executable, awaiting approval
 	skillUnavailable   = "unavailable"    // discovered but ox could not use it
 	skillNotApplicable = "not applicable" // published, but its repos: excludes this repo
+	skillConflict      = "conflict"       // something ox does not own already holds the name
 )
 
 type teamSkillStatus struct {
-	Name          string `json:"name"`
+	Name string `json:"name"`
+	// InstalledAs is the DIRECTORY the skill occupies, which is also the name an
+	// AI coworker types to invoke it — `fork-scout` is published as
+	// `fork-scout-team`. Reporting only the team-side name left a reader with a
+	// name that does not resolve anywhere.
+	InstalledAs   string `json:"installed_as,omitempty"`
 	AppliesHere   bool   `json:"applies_here"`
 	State         string `json:"state"`
 	NeedsApproval bool   `json:"needs_approval"`
@@ -308,6 +314,9 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 		for _, action := range plan.Updates {
 			planned.updated = append(planned.updated, action.Path)
 		}
+		for _, conflict := range plan.Conflicts {
+			planned.conflicted = append(planned.conflicted, conflictedPath{Path: conflict.Path, Reason: conflict.Reason})
+		}
 		if reason := plan.RetainedTeamReason(); reason != "" {
 			out.Problems = append(out.Problems,
 				fmt.Sprintf("team skills already installed here are being RETAINED rather than refreshed: %s", reason))
@@ -328,6 +337,7 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 			row.Detail = "could not compute the plan"
 		default:
 			decision := decisions[sk.Name]
+			row.InstalledAs = decision.InstalledAs
 			row.NeedsApproval = decision.NeedsApprove
 			row.State, row.Detail = installedState(gitRoot, targets, decision, planned)
 			if row.State == skillInstalled && decision.AutoInstalledProse {
@@ -448,6 +458,14 @@ func installedState(gitRoot string, targets []string, d skillmanager.TeamSkillDe
 	var incomplete, outdated []string
 	for _, root := range targets {
 		dir := path.Join(root, d.InstalledAs) + "/"
+		// Conflict is checked FIRST and returns immediately. Every other state below
+		// ends in "run `ox doctor --fix`", and for a conflict that advice is false:
+		// reconcile preserves conflicting content by design, so --fix will report the
+		// same conflict forever. Telling someone to run a command that cannot help is
+		// worse than telling them nothing.
+		if reason, blocked := planned.conflicts(dir); blocked {
+			return skillConflict, reason + " (" + root + ") — rename yours, or remove it to let the team's copy land"
+		}
 		switch {
 		case planned.creates(dir):
 			incomplete = append(incomplete, root)
@@ -483,12 +501,35 @@ func manifestPresent(gitRoot, dir string) bool {
 // missing or stale bundled file — a reference doc, an asset — counts as not
 // installed too. The manifest being present says nothing about the rest.
 type plannedPaths struct {
-	created []string
-	updated []string
+	created    []string
+	updated    []string
+	conflicted []conflictedPath
+}
+
+// conflictedPath keeps the reason attached to the path. A conflict without its
+// reason is the least actionable diagnostic ox can produce: the reader learns
+// that something is wrong and nothing about which of the several possible
+// somethings it is.
+type conflictedPath struct {
+	Path   string
+	Reason string
 }
 
 func (p plannedPaths) creates(dir string) bool { return hasPrefixIn(p.created, dir) }
 func (p plannedPaths) updates(dir string) bool { return hasPrefixIn(p.updated, dir) }
+
+// conflicts matches a conflict recorded on the skill DIRECTORY as well as one
+// recorded on a file inside it. The checked-in-skill refusal names the directory,
+// because it declines before it ever looks at a file.
+func (p plannedPaths) conflicts(dir string) (string, bool) {
+	trimmed := strings.TrimSuffix(dir, "/")
+	for _, candidate := range p.conflicted {
+		if candidate.Path == trimmed || strings.HasPrefix(candidate.Path, dir) {
+			return candidate.Reason, true
+		}
+	}
+	return "", false
+}
 
 func hasPrefixIn(paths []string, dir string) bool {
 	for _, candidate := range paths {
@@ -579,9 +620,15 @@ func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsSta
 	} else {
 		section("Team skills", "%s", trustSummary(out.Summary))
 		for _, s := range out.TeamSkills {
-			// The team prefix is dropped for the same reason as `ox skills
-			// list`: the heading already says these are the team's.
-			kv(strings.TrimPrefix(s.Name, skillmanager.TeamPrefix), "%s", s.State)
+			// The INSTALLED name, when there is one: that directory is what an AI
+			// coworker actually types, and it is the fact a reader came here for.
+			// Printing the team-side name alone handed them a name that resolves
+			// nowhere — `fork-scout` is invoked as `fork-scout-team`.
+			label := s.Name
+			if s.InstalledAs != "" && s.InstalledAs != s.Name {
+				label = s.InstalledAs
+			}
+			kv(label, "%s", s.State)
 			// The reason hangs under the state rather than trailing it on one
 			// line. A trust verdict names files and capabilities, so it runs
 			// well past 80 columns and was wrapping wherever the terminal chose.

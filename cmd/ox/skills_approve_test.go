@@ -27,7 +27,7 @@ const approvalTargetRoot = ".claude/skills"
 
 // installedSkillDir is the directory an approved team skill materializes into.
 func installedSkillDir(repo, skillName string) string {
-	return filepath.Join(repo, filepath.FromSlash(approvalTargetRoot), skillmanager.TeamPrefix+skillName)
+	return filepath.Join(repo, filepath.FromSlash(approvalTargetRoot), skillName+skillmanager.TeamSuffix)
 }
 
 // stageApprovalRepo builds a real git repo wired to a team checkout holding one
@@ -390,7 +390,7 @@ func TestSkillsApprove_DigestDriftSweepsEverySelectedTarget(t *testing.T) {
 
 	roots := []string{".claude/skills", ".agents/skills"}
 	for _, root := range roots {
-		installed := filepath.Join(repo, filepath.FromSlash(root), skillmanager.TeamPrefix+"deploy")
+		installed := filepath.Join(repo, filepath.FromSlash(root), "deploy"+skillmanager.TeamSuffix)
 		require.FileExists(t, filepath.Join(installed, "SKILL.md"))
 		script := filepath.Join(installed, "scripts", "run.sh")
 		require.FileExists(t, script, "approval did not materialize the script in %s", root)
@@ -409,7 +409,7 @@ func TestSkillsApprove_DigestDriftSweepsEverySelectedTarget(t *testing.T) {
 		"the stale executable was not scheduled for removal from every selected target")
 
 	for _, root := range roots {
-		installed := filepath.Join(repo, filepath.FromSlash(root), skillmanager.TeamPrefix+"deploy")
+		installed := filepath.Join(repo, filepath.FromSlash(root), "deploy"+skillmanager.TeamSuffix)
 		require.FileExists(t, filepath.Join(installed, "SKILL.md"),
 			"revocation removed readable instructions from %s", root)
 		require.NoFileExists(t, filepath.Join(installed, "scripts", "run.sh"),
@@ -851,7 +851,7 @@ func requireAdviceResolves(t *testing.T, advice string) {
 func TestSkillAdviceNamesCommandsThatExist(t *testing.T) {
 	t.Run("ox doctor", func(t *testing.T) {
 		requireAdviceResolves(t, teamSkillApprovalHint([]skillmanager.TeamSkillDecision{{
-			Name: "deploy", InstalledAs: skillmanager.TeamPrefix + "deploy", NeedsApprove: true,
+			Name: "deploy", InstalledAs: "deploy" + skillmanager.TeamSuffix, NeedsApprove: true,
 		}}))
 	})
 

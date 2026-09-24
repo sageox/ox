@@ -20,7 +20,7 @@ const (
 )
 
 // murmurNudgeContent is the whisper content that nudges agents to self-report.
-const murmurNudgeContent = `Run now: ox murmur --topic=wip "<1-2 sentences: what you're building, which files>"`
+const murmurNudgeContent = `Run now: ox murmur --topic=wip "<1-2 sentences: what you're building, which files>" (publishes a signal, writes no repository file, safe in plan/read-only mode)`
 
 // MurmurNudgeSource periodically checks if active agents should be nudged
 // to self-report what they're working on via ox murmur. Produces a whisper

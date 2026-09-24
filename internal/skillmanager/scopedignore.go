@@ -35,21 +35,39 @@ type ScopedIgnoreFile struct {
 
 // ScopedIgnoreFiles returns the ignore files for the agent directories ox writes.
 //
-// The sageox-team-* globs protect Team Skill and Team Rule projections. They are
-// present before reconciliation writes any derived file, so an ox-managed cache
-// can never appear in the customer's pull request.
+// The *-team globs protect Team Skill and Team Rule projections. They are present
+// before reconciliation writes any derived file, so an ox-managed cache can never
+// appear in the customer's pull request.
 func ScopedIgnoreFiles() []ScopedIgnoreFile {
 	return scopedIgnoreFiles()
 }
 
+// teamRuleGlob is the ignore pattern for Team Rule projections under root, whose
+// files are named <slug>-<hash>-team<ext>.
+//
+// The extension is part of the pattern, which it did not have to be under the old
+// prefix: `sageox-team-*` matched a projection whatever it was called, but the
+// namespace marker now sits BEFORE the extension, so `*-team` alone would miss
+// every file. Cursor's `.mdc` is the one that makes this concrete — a pattern
+// hard-coded to `.md` would leave every Cursor Team Rule visible in git.
+func teamRuleGlob(dir, ext string) string {
+	return dir + "*" + TeamSuffix + ext
+}
+
 // scopedIgnoreFiles lists the ignore rules for every agent directory ox writes
-// into. Every entry is a stable prefix glob or the one exact ox-cli.md rule name
-// — never a per-skill name — so the set never depends on what a repository
-// selected.
+// into. Every entry is a stable glob or the one exact ox-cli.md rule name — never
+// a per-skill name — so the set never depends on what a repository selected, and
+// the committed .gitignore never changes when a team adds or drops a skill.
+//
+// Each root also keeps its legacy `sageox-team-*` pattern for one release. A
+// repository that upgrades mid-reconcile holds files under both schemes for a few
+// seconds, and the window in which an old projection is visible to git is exactly
+// the window in which someone runs `git add -A`.
 func scopedIgnoreFiles() []ScopedIgnoreFile {
 	skillGlob := "skills/" + CLIPrefix + "*/"
-	teamSkillGlob := "skills/" + TeamPrefix + "*/"
-	teamRuleGlob := "rules/" + TeamPrefix + "*"
+	teamSkillGlob := "skills/*" + TeamSuffix + "/"
+	legacyTeamSkillGlob := "skills/" + LegacyTeamPrefix + "*/"
+	legacyTeamRuleGlob := "rules/" + LegacyTeamPrefix + "*"
 	// Two rule patterns, not one. The primary rule is named exactly "ox-cli.md",
 	// which "ox-cli-*" does NOT match — and the miss would be silent, leaving that
 	// one file visible in every pull request. A bare "ox-cli*" would match, but it
@@ -65,19 +83,32 @@ func scopedIgnoreFiles() []ScopedIgnoreFile {
 			// repository still holding pre-fold files keeps them out of diffs until
 			// the retirement sweep reaches it.
 			"commands/" + CLIPrefix + "*",
-			teamSkillGlob, teamRuleGlob,
+			teamSkillGlob, teamRuleGlob("rules/", ".md"),
+			legacyTeamSkillGlob, legacyTeamRuleGlob,
 		}},
-		{Dir: ".agents", Entries: []string{skillGlob, teamSkillGlob}},
-		{Dir: ".factory", Entries: []string{ruleExact, ruleGlob, teamRuleGlob}},
+		{Dir: ".agents", Entries: []string{skillGlob, teamSkillGlob, legacyTeamSkillGlob}},
+		{Dir: ".factory", Entries: []string{
+			ruleExact, ruleGlob, teamRuleGlob("rules/", ".md"), legacyTeamRuleGlob,
+		}},
 		// Team Rules use each tool's native rule root only when the format can
 		// preserve semantics. These entries are existence-gated like the original
 		// three, so supporting a tool never creates its directory in an unrelated
 		// repository.
-		{Dir: ".cursor", Entries: []string{"rules/" + TeamPrefix + "*"}},
-		{Dir: ".github/instructions", Entries: []string{TeamPrefix + "*"}},
-		{Dir: ".clinerules", Entries: []string{TeamPrefix + "*"}},
-		{Dir: ".kiro", Entries: []string{"steering/" + TeamPrefix + "*"}},
-		{Dir: ".windsurf", Entries: []string{"rules/" + TeamPrefix + "*"}},
+		{Dir: ".cursor", Entries: []string{
+			teamRuleGlob("rules/", ".mdc"), legacyTeamRuleGlob,
+		}},
+		{Dir: ".github/instructions", Entries: []string{
+			teamRuleGlob("", ".md"), LegacyTeamPrefix + "*",
+		}},
+		{Dir: ".clinerules", Entries: []string{
+			teamRuleGlob("", ".md"), LegacyTeamPrefix + "*",
+		}},
+		{Dir: ".kiro", Entries: []string{
+			teamRuleGlob("steering/", ".md"), "steering/" + LegacyTeamPrefix + "*",
+		}},
+		{Dir: ".windsurf", Entries: []string{
+			teamRuleGlob("rules/", ".md"), legacyTeamRuleGlob,
+		}},
 	}
 }
 

@@ -1,5 +1,13 @@
 # ADR-031 — The ox CLI skill & rule inventory: reserved namespaces, gitignored materialization
 
+> **Amended by [ADR-033](ADR-033-team-namespace-suffix.md) (2026-09-23).** Team
+> Context content is namespaced by a `-team` SUFFIX, not the `sageox-team-`
+> prefix §1 reserved: an agent derives a skill's slash name from its DIRECTORY, so
+> the prefix renamed every team skill out from under the description ox had just
+> copied verbatim. §4's reclaim-by-name no longer applies to that namespace —
+> `-team` is ordinary English, so ownership is proved by an in-band stamp and by
+> git instead. Everything below stands for `ox-cli-*`.
+
 **Status:** Accepted — approved by Ryan Snodgrass on 2026-09-07 as path-location and data-ergonomics owner. Both gated decisions were ruled on explicitly: **(8)** ox may write the single untrack commit at `FixLevelAuto`, and **(5)** the scoped ox-owned `.gitignore` files are the right home for the ignore rules.
 
 **Date:** 2026-09-07 · **Supersedes:** nothing · **Amends:** ADR-023 (two-layer skill injection), `docs/specs/skill-management.md`

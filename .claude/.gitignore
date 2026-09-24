@@ -3,6 +3,8 @@ skills/ox-cli-*/
 rules/ox-cli.md
 rules/ox-cli-*
 commands/ox-cli-*
+skills/*-team/
+rules/*-team.md
 skills/sageox-team-*/
 rules/sageox-team-*
 # <<< ox-managed <<<

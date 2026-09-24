@@ -65,15 +65,15 @@ const skillManifestName = "SKILL.md"
 // repository any teammate can push to, over a pull path that verifies no
 // signature — and downstream it becomes a DIRECTORY NAME inside the customer's
 // repository. filepath.Join Cleans as it joins, so `..` segments in a name walk
-// up out of a skills root that is only two segments deep, and the reserved-prefix
+// up out of a skills root that is only two segments deep, and a namespace-based
 // ownership check then rubber-stamps the escape because the name still carries
-// the prefix. Landing on .claude/settings.json is arbitrary code execution
+// the namespace marker. Landing on .claude/settings.json is arbitrary code execution
 // (PreToolUse hook, reconciled automatically on the team pull); landing on
 // .sageox/team-skills.approvals.json forges approvals that the repo COMMITS and
 // every teammate then pulls.
 //
 // Lowercase-only because a case-insensitive filesystem resolves `Deploy` and
-// `deploy` to one directory while the reserved-prefix ignore globs are
+// `deploy` to one directory while the namespace ignore globs are
 // case-sensitive — the same collision caseVariantDirOnDisk already guards in the
 // installer. One canonical case is the only way both can be right.
 const TeamSkillNamePattern = `^[a-z0-9][a-z0-9._-]*$`
@@ -88,7 +88,8 @@ var teamSkillNameRE = regexp.MustCompile(TeamSkillNamePattern)
 // being fixed.
 func ValidTeamSkillName(name string) bool {
 	// `..` is checked separately because the pattern alone admits it mid-name
-	// (`sageox-team-..`), and no legitimate skill name has ever needed it.
+	// (`..-team` once the suffix is appended), and no legitimate skill name has
+	// ever needed it.
 	return len(name) >= 1 && len(name) <= MaxTeamSkillNameBytes &&
 		!strings.Contains(name, "..") && !strings.HasSuffix(name, ".") &&
 		teamSkillNameRE.MatchString(name)

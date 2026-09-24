@@ -243,12 +243,12 @@ func inventorySkillRoots(repoRoot string, roots []string) ([]installedSkillRow, 
 			if !ok {
 				row = &installedSkillRow{
 					Name:        skill.name,
-					Provenance:  skillProvenance(skill.name, skill.oxOwned),
+					Provenance:  skill.provenance,
 					Description: skill.description,
 					Roots:       []string{},
 				}
 				byName[skill.name] = row
-			} else if row.Provenance != skillProvenance(skill.name, skill.oxOwned) {
+			} else if row.Provenance != skill.provenance {
 				// The same name has different ownership evidence in two roots. Calling
 				// the combined row ox-owned would misattribute the unowned copy and
 				// promise that ox can safely repair or remove it. Local is the
@@ -272,7 +272,7 @@ func inventorySkillRoots(repoRoot string, roots []string) ([]installedSkillRow, 
 type skillOnDisk struct {
 	name        string
 	description string
-	oxOwned     bool
+	provenance  string
 }
 
 // readSkillRoot enumerates one selected root through a handle pinned inside
@@ -297,11 +297,11 @@ func readSkillRoot(repo *os.Root, root string) ([]skillOnDisk, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		description, oxOwned, isSkill := skillManifestDescription(dir, entry.Name())
+		description, provenance, isSkill := skillManifestDescription(dir, entry.Name())
 		if !isSkill {
 			continue
 		}
-		found = append(found, skillOnDisk{name: entry.Name(), description: description, oxOwned: oxOwned})
+		found = append(found, skillOnDisk{name: entry.Name(), description: description, provenance: provenance})
 	}
 	return found, nil
 }
@@ -320,26 +320,35 @@ func skillRootProblem(root string, err error) string {
 
 // skillProvenance answers "who owns this directory?"
 //
-// The reserved namespaces are the ownership contract (skillmanager.IsReservedName)
-// and settle almost every row. Two things they do not settle:
+// Ownership is read from EVIDENCE — a verified in-band stamp — plus the two
+// namespaces ox declared and told people to stay out of. It is deliberately not
+// read from the team suffix: `-team` is ordinary English, so a hand-authored
+// `notify-team` wears the same name shape as a projection and calling it ox's
+// would promise a repair ox has no right to perform.
+//
+// Three things the namespaces do not settle:
 //
 //   - The committed on-ramp is deliberately UNPREFIXED so it can never match a
 //     reserved glob, so it needs an exact-match arm or ox's own file lands under
 //     `local`.
 //   - An older repository-scoped catalog install may be unprefixed. Its verified
 //     in-band ownership stamp, not its catalog name, proves that ox wrote it.
+//   - A Team Skill installs as `<name>-team`, so only its TeamSkillStamp
+//     distinguishes it from a skill someone wrote by hand.
 //
 // A catalog-name lookup is deliberately absent. Catalog discovery and ownership
 // are different facts: a hand-authored skill does not become ox's because a later
 // release happens to offer a Pack with the same ordinary-language name.
-func skillProvenance(name string, oxOwned bool) string {
+func skillProvenance(name string, manifest []byte) string {
 	switch {
-	case strings.HasPrefix(name, skillmanager.TeamPrefix):
+	case skillmanager.TeamSkillStamp.Verifies(manifest):
+		return provenanceTeam
+	case strings.HasPrefix(name, skillmanager.LegacyTeamPrefix):
 		return provenanceTeam
 	case name == skillmanager.CommittedOnRamp || name == skillmanager.CLIBase ||
 		strings.HasPrefix(name, skillmanager.CLIPrefix):
 		return provenanceOx
-	case oxOwned:
+	case adapterstamp.StampVerifies(manifest, "ox"):
 		return provenanceOx
 	default:
 		return provenanceLocal
@@ -479,18 +488,16 @@ func emitSkillsList(w io.Writer, out skillsListOutput, asJSON bool, showAllOx bo
 	return nil
 }
 
-// displaySkillName is what the NAME column shows. Team skills drop the
-// "sageox-team-" prefix: the row is already under a "team" heading, so the
-// prefix repeats that on every line while eating 12 of 26 columns — the widest
-// piece of pure redundancy in the table.
+// displaySkillName is what the NAME column shows: the real directory name, for
+// every row.
 //
-// Display only. Everywhere a name is matched, keyed, or written to disk it
-// stays the real directory name; see the sanitizeCell note above for why a
-// scrubbed copy must never be stored back on the row.
+// It used to strip the "sageox-team-" prefix, on the reasoning that the row was
+// already under a "team" heading. That was a quiet lie — an agent's slash name
+// derives from the DIRECTORY, so `ox skills list` printed `fork-scout` while the
+// only name that resolved was `/sageox-team-fork-scout`. The namespace moved to a
+// "-team" suffix precisely so the honest name and the invocable name are the same
+// string, which leaves nothing here to hide.
 func displaySkillName(row installedSkillRow) string {
-	if row.Provenance == provenanceTeam {
-		return strings.TrimPrefix(row.Name, skillmanager.TeamPrefix)
-	}
 	return row.Name
 }
 
@@ -524,16 +531,16 @@ const (
 // two disagree about what a refusal MEANS: there, a file ox cannot read is
 // fatal, because ox is about to reconcile it; here it is an answer, because
 // whatever that directory holds, it is not a skill this listing can describe.
-func skillManifestDescription(rootDir *os.Root, name string) (description string, oxOwned bool, isSkill bool) {
+func skillManifestDescription(rootDir *os.Root, name string) (description string, provenance string, isSkill bool) {
 	dir, err := rootDir.OpenRoot(name)
 	if err != nil {
-		return "", false, false
+		return "", "", false
 	}
 	defer func() { _ = dir.Close() }()
 
 	info, err := dir.Lstat(skills.SkillFileName)
 	if err != nil || !info.Mode().IsRegular() {
-		return "", false, false // not a skill, or a manifest ox will not read through a symlink
+		return "", "", false // not a skill, or a manifest ox will not read through a symlink
 	}
 	// Past this point the directory IS a skill — a regular SKILL.md is what makes
 	// one — so every remaining failure costs the description and never the row. A
@@ -541,19 +548,19 @@ func skillManifestDescription(rootDir *os.Root, name string) (description string
 	// bit; a row with an empty description is still an answer.
 	file, err := dir.Open(skills.SkillFileName)
 	if err != nil {
-		return "", false, true
+		return "", skillProvenance(name, nil), true
 	}
 	defer func() { _ = file.Close() }()
 	actual, err := file.Stat()
 	if err != nil || !actual.Mode().IsRegular() || !os.SameFile(info, actual) {
-		return "", false, true // swapped between the Lstat and the open; ox declines to read it
+		return "", skillProvenance(name, nil), true // swapped between the Lstat and the open; ox declines to read it
 	}
 	data, err := io.ReadAll(file)
 	if err != nil {
-		return "", false, true
+		return "", skillProvenance(name, nil), true
 	}
 	description, _ = manifestDescription(data)
-	return description, adapterstamp.StampVerifies(data, "ox"), true
+	return description, skillProvenance(name, data), true
 }
 
 // manifestDescription extracts `description:` from an Agent Skills manifest.

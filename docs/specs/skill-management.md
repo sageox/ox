@@ -100,19 +100,35 @@ materialized. Without that split the manifest alone would keep producing a
 tracked diff on every content-bearing release, even though every file it
 describes is invisible to git. Schema-1 manifests migrate on read.
 
-Inside the reserved namespaces (`ox-cli-*`, `sageox-team-*`) ox owns the bytes
-ABSOLUTELY: a local edit is restored on the next reconcile rather than preserved
-as a conflict. Preserve-on-edit was correct while these files were tracked — an
+Inside the reserved namespaces ox owns the bytes ABSOLUTELY: a local edit is
+restored on the next reconcile rather than preserved as a conflict.
+
+AMENDED by [ADR-033](../adr/ADR-033-team-namespace-suffix.md): the namespaces are
+`ox-cli-*` and `*-team` (Team Context content moved from a `sageox-team-` prefix
+to a `-team` suffix, so an agent's slash name keeps the skill's real name). Only
+`ox-cli-*` and the legacy `sageox-team-*` are owned BY NAME. `-team` is ordinary
+English — `notify-team` is a name a person may pick — so a `*-team` path is owned
+only when ox can prove it: a verified stamp, a lockfile digest, or a journal
+entry. A path git tracks is never written at all. Preserve-on-edit was correct while these files were tracked — an
 edit showed up in `git diff` — and becomes harmful once they are gitignored,
 where a preserved edit is permanent silent drift. Overwrite is not delete,
 though: ox removes only what it can prove it wrote, so unrecognized content
 inside a reserved namespace is reported, never swept.
 
-The lockfile—not an inline comment—is the ownership source. Existing `ox-hash`
+The lockfile is the ownership source for BUILT-IN skills. Existing `ox-hash`
 skill stamps and agentx rule stamps are accepted only as migration evidence
 when their body and generated frontmatter verify. Migration discovers verified
-rule content rather than maintaining a list of old filenames. New projections
+rule content rather than maintaining a list of old filenames. Built-in projections
 contain clean canonical content with no ownership stamp.
+
+AMENDED by ADR-033 for TEAM content, which the lockfile alone cannot cover: the
+lockfile's machine-local half is disposable by design, so after a cache wipe a
+gitignored projection has no proof of authorship left. The reserved prefix used to
+be that proof. Team Rules already carried an in-band stamp for this reason; Team
+Skill manifests now carry `<!-- ox-team-skill-sha256:… -->` on the same terms. The
+stamp covers every byte above it, so a local edit invalidates the claim instead of
+inheriting it. Only `SKILL.md` is stamped — references and assets may be any
+format, including bytes a trailing HTML comment would corrupt.
 
 `Plan` is deterministic, read-only, and considers the complete skill tree:
 `SKILL.md`, references, assets, and scripts. It classifies creates, updates,
@@ -264,8 +280,8 @@ by name and mutates nothing. Only paths the lock already owns are ever
 overwritten.
 
 When an add-on's Team Skills and Team Rules reach a product repository, they
-project through the same target-descriptor mechanism Part 1 describes,
-reserved under the `sageox-team-*` prefix (ADR-031). **Delivery mechanics vary
+project through the same target-descriptor mechanism Part 1 describes, reserved
+under the `-team` suffix (ADR-033, amending ADR-031's `sageox-team-*` prefix). **Delivery mechanics vary
 by artifact and by AI coworker, the same way Part 1's native-target table
 varies by coworker** — the promise is that a supported coworker can use the
 Team Context content that applies to it, not that every coworker materializes

@@ -114,21 +114,55 @@ func TestScopedIgnoreFiles_CoversTheRuleNameWithNoTrailingHyphen(t *testing.T) {
 	}
 }
 
-// TestScopedIgnoreFiles_EmitsOnlyPrefixGlobsAndTheOxCLIRuleName is the
+// TestScopedIgnoreFiles_EmitsOnlyWildcardGlobsAndTheOxCLIRuleName is the
 // structural replacement for the old per-name guard. scopedIgnoreFiles no
 // longer accepts a name list at all, so every entry it can ever emit is either
-// a stable prefix glob or the one exact "ox-cli.md" rule name — there is no
+// a stable wildcard glob or the one exact "ox-cli.md" rule name — there is no
 // code path left that could reserve an unselected catalog name.
-func TestScopedIgnoreFiles_EmitsOnlyPrefixGlobsAndTheOxCLIRuleName(t *testing.T) {
+//
+// The wildcard may now sit in the MIDDLE of an entry ("skills/*-team/",
+// "rules/*-team.mdc") rather than only at the end, because Team Context content
+// is namespaced by suffix. What the test actually protects is unchanged and is
+// the whole point: an entry must never name one specific skill or rule. A
+// per-name ignore list would churn a COMMITTED file every time the team added a
+// skill, which is the pull-request noise this design exists to remove.
+func TestScopedIgnoreFiles_EmitsOnlyWildcardGlobsAndTheOxCLIRuleName(t *testing.T) {
 	ruleExact := "rules/" + CLIBase + ".md"
 	for _, f := range ScopedIgnoreFiles() {
 		for _, entry := range f.Entries {
 			if entry == ruleExact {
 				continue
 			}
-			if !strings.HasSuffix(strings.TrimSuffix(entry, "/"), "*") {
-				t.Fatalf("%s has entry %q that is neither a prefix glob nor the exact ox-cli rule name", f.Dir, entry)
+			if !strings.Contains(entry, "*") {
+				t.Fatalf("%s has entry %q that is neither a wildcard glob nor the exact ox-cli rule name", f.Dir, entry)
 			}
+		}
+	}
+}
+
+// TestScopedIgnoreFiles_CoverEveryTeamNamespaceShape pins that both the current
+// suffix and the legacy prefix are ignored in every root that can hold team
+// content.
+//
+// A repository upgrading across this change holds files under BOTH shapes until
+// reconcile sweeps the old ones, and the window in which an unignored projection
+// is visible to git is exactly the window in which somebody runs `git add -A`.
+func TestScopedIgnoreFiles_CoverEveryTeamNamespaceShape(t *testing.T) {
+	for _, f := range ScopedIgnoreFiles() {
+		var suffix, legacy bool
+		for _, entry := range f.Entries {
+			if strings.Contains(entry, "*"+TeamSuffix) {
+				suffix = true
+			}
+			if strings.Contains(entry, LegacyTeamPrefix) {
+				legacy = true
+			}
+		}
+		if !suffix {
+			t.Errorf("%s ignores no *%s pattern; new team content would be visible to git: %v", f.Dir, TeamSuffix, f.Entries)
+		}
+		if !legacy {
+			t.Errorf("%s ignores no %s pattern; content from before the rename would be visible to git: %v", f.Dir, LegacyTeamPrefix, f.Entries)
 		}
 	}
 }

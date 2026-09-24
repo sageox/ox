@@ -27,6 +27,10 @@ When starting significant work or making architectural decisions:
 Murmurs are lightweight, ephemeral coordination signals. Your teammates'
 murmurs appear as whispers in your context — read them to avoid conflicts.
 
+`ox murmur` writes no file in the repository and changes no git state. It is
+safe to run from a plan-mode or read-only session, which is when teammates most
+need to know what you are about to touch.
+
 ### Learn from Your Team
 
 Before diving into unfamiliar code or making design decisions:
