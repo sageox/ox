@@ -27,5 +27,6 @@ Fix Claude and Pi adapter discovery for sessions stored in a different native pr
 - [x] Isolate Pi runtime signals in agent-detection tests so they pass inside Pi as well as CI.
 - [x] Preserve upstream draft-liveness and native carrier-stamping behavior while integrating Claude quarantine and safe hook recovery.
 - [x] Describe the user-visible capture fix in the Unreleased changelog.
+- [x] Add per-turn repository and session identity to the simulated Claude slow-test fixture; rerun all three incremental component tests with `-race`, plus `make lint` and `make test`. Full `make test-preflight` timed out during the broad suite after 20 minutes without a failing test verdict.
 
 The existing Claude session contains parent/sibling cwd records, so this strict cross-bucket lookup intentionally rejects it. Handling mixed-repository sessions is deferred.

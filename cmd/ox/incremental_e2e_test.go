@@ -548,14 +548,20 @@ func runOxHook(t *testing.T, oxBin string, env e2eEnv, agentID, event, sessionID
 	return string(out)
 }
 
+type claudeE2ESource struct {
+	path      string
+	repoRoot  string
+	sessionID string
+}
+
 // createClaudeSourceFile creates a fake Claude Code JSONL file at the path
 // the claude-code adapter's FindSessionFile would look for it.
-func createClaudeSourceFile(t *testing.T, env e2eEnv) string {
+func createClaudeSourceFile(t *testing.T, env e2eEnv) claudeE2ESource {
 	t.Helper()
 	return createClaudeSourceFileNamed(t, env, "session.jsonl")
 }
 
-func createClaudeSourceFileNamed(t *testing.T, env e2eEnv, filename string) string {
+func createClaudeSourceFileNamed(t *testing.T, env e2eEnv, filename string) claudeE2ESource {
 	t.Helper()
 
 	// Claude Code stores files at ~/.claude/projects/<hash>/<session>.jsonl
@@ -573,7 +579,7 @@ func createClaudeSourceFileNamed(t *testing.T, env e2eEnv, filename string) stri
 	sourceFile := filepath.Join(projectDir, filename)
 	require.NoError(t, os.WriteFile(sourceFile, []byte(""), 0644))
 
-	return sourceFile
+	return claudeE2ESource{path: sourceFile, repoRoot: realWorkspace, sessionID: strings.TrimSuffix(filename, ".jsonl")}
 }
 
 func writeE2ESessionMarker(t *testing.T, env e2eEnv, agentID, sessionID string) {
@@ -601,13 +607,23 @@ func writeE2ESessionMarker(t *testing.T, env e2eEnv, agentID, sessionID string) 
 	})
 }
 
-func writeClaudeEntry(t *testing.T, sourceFile, jsonLine string) {
+func writeClaudeEntry(t *testing.T, source claudeE2ESource, jsonLine string) {
 	t.Helper()
-	f, err := os.OpenFile(sourceFile, os.O_WRONLY|os.O_APPEND, 0644)
+	var entry map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(jsonLine), &entry))
+	// Each turn needs its own identity: a valid header cannot prove later turns stayed in this repo.
+	cwd, err := json.Marshal(source.repoRoot)
 	require.NoError(t, err)
-	_, err = f.WriteString(jsonLine + "\n")
+	id, err := json.Marshal(source.sessionID)
 	require.NoError(t, err)
-	f.Close()
+	entry["cwd"], entry["sessionId"] = cwd, id
+	data, err := json.Marshal(entry)
+	require.NoError(t, err)
+	f, err := os.OpenFile(source.path, os.O_WRONLY|os.O_APPEND, 0644)
+	require.NoError(t, err)
+	_, err = f.Write(append(data, '\n'))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
 }
 
 func claudeUserEntry(ts, content string) string {
