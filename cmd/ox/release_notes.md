@@ -7,18 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+## [0.18.0] - 2026-09-24
 
-- **Plans are for any work your team executes, and now say so** — `ox plan --help` described "implementation plans", so a designer, a product marketer, or anyone planning a rollout reasonably concluded Plans was not for them. It always was: `ox plan save --kind` takes `plan`, `mockup`, `review`, or `evidence`. The help text, the guidance every AI coworker receives at prime, and the plan skill now name design, GTM, rollout, and engineering work alike.
-- **A team's skill keeps its own name** — a skill your team publishes as `grill-me` now installs as `grill-me-team`, not `sageox-team-grill-me`. AI coworkers derive a skill's slash name from its directory, so the old prefix renamed every team skill out from under its own instructions: the description said `/grill-me` and only `/sageox-team-grill-me` worked. `ox skills list` and `ox skills status` now print the name that actually resolves instead of a prettier one that doesn't, and `--json` carries both. Team Rules move the same way, so one rule covers everything from Team Context: it ends in `-team`. Directories from the old scheme are swept on the next reconcile — nothing to run.
+Team skills now lead with their own name, plans are for any work your team executes, and `ox upgrade` confirms you actually got the new version.
+
+### New
+
+- **Experimental Claude Code trace attachments** — opted-in recordings can include compressed execution traces and events in the Ledger, with identity attributes removed. Paused intervals are excluded, retries preserve the stop boundary, and trace failures do not block the recording. Enablement remains local; no project settings are changed.
+
+### Improved
+
+- **Team skills lead with their own name** — a skill your team publishes as `grill-me` is now `/grill-me-team` instead of `/sageox-team-grill-me`, and `ox skills list` shows the name that actually works. Team Rules take the same `-team` suffix; old directories are removed automatically.
+- **Plans are for any work your team executes** — `ox plan` help and the guidance your AI coworker gets now name design, GTM, rollout, and engineering plans alike, not just implementation plans.
+
+### Deprecated
+
+- **External adapters: `rules_installer` removal is postponed** — 0.17.0 said this release would stop calling it; ox still does, for adapters that declare no `rule_targets`. Declare `rule_targets` now: the fallback will be removed in a later release.
 
 ### Fixed
 
-- **Saving a mockup no longer asks you to add a mockup** — `ox plan save --kind mockup` ran a plan's craft checks against it and told the author their mockup had no mockup, and that a visual proposal needed a collapsed "Implementation notes" appendix for its implementer. Both expectations are plan-shaped: one asks you to *propose* a surface, the other serves a plan's second reader. A mockup, a review sheet, and an evidence page have neither, so they no longer fire — while the one check that applies to every kind, *did this page draw anything at all*, still does. `ox plan lint` and `ox plan render` take `--kind` too, so the check you get before saving is the check you get after.
-- **ox names what you actually saved** — saving a mockup said "Saved plan to ledger", which is the single-noun collapse `--kind` exists to end.
-- **A skill you checked in is never overwritten by your team's** — if your repo already has a committed skill at the name a team skill wants, ox leaves your bytes alone and reports the clash instead of quietly replacing them. Ownership is now proved by a stamp ox writes and by git, rather than assumed from a name, so a hand-authored `notify-team` is safe too.
-- **`ox doctor` tells you when your own skill is hidden from git** — the team namespace is a `*-team` glob, and a skill you named that way stops reaching teammates without anything looking wrong. Doctor names it and offers both fixes.
-- **`ox murmur` says it is safe to run while planning** — the note goes to your Ledger, never your project's files or git history, but AI coworkers in plan mode were treating it as a change to your repo and skipping it, so teammates stopped hearing what was about to be touched.
+- **`ox upgrade` and the installer confirm you're on the new ox** — both could report success while an older ox kept running; now they check the ox your shell runs and name the stale copy if it isn't the new one. `go install` works again, too.
+- **Status stops reporting a Ledger problem after it's fixed** — once a Ledger you repaired syncs again, `ox status`, `ox daemon status`, and `ox doctor` stop showing its conflict, suspended sync, and last error.
+- **A team skill never overwrites one you wrote** — if your repo already has a committed skill at the name a team skill wants, ox leaves it alone and reports the clash, and `ox doctor` warns when git hides a skill you named `*-team` from your teammates.
+- **Plan checks fit what you saved** — saving a mockup, review sheet, or evidence page no longer runs plan-only checks or says it saved a plan, and `ox plan lint` and `ox plan render` take `--kind` so the check before saving matches the one after.
+- **`ox murmur` says it's safe to run while planning** — its note goes to your Ledger, never your project, but AI coworkers in plan mode were skipping it as if it changed your repo.
+- **Concurrent updates no longer leave a recording's state unreadable** — two ox processes updating the same recording at once could corrupt its saved state; errors about it now also name the file.
 
 ## [0.17.1] - 2026-09-22
 
@@ -26,7 +39,6 @@ Your team can install a curated add-on once and every teammate's AI coworker get
 
 ### New
 
-- **Experimental Claude Code trace attachments** — opted-in recordings can include compressed execution traces and events in the Ledger, with identity attributes removed. Paused intervals are excluded, retries preserve the stop boundary, and trace failures do not block the recording. Enablement remains local; no project settings are changed.
 - **`ox addons` — install a curated add-on once, for the whole team** — pick an add-on and ox writes it into your Team Context, so every repo on the team receives it and every teammate's AI coworker sees the same selection. `ox sync` distributes it; there is no per-repo step and no second sync command to learn. Three add-ons ship today: `agent-toolkit`, for standing up a hosted AI chat agent across Slack and Nostr; `post-cutoff`, a shelf of what your team has adopted that postdates your model's training; and `post-cutoff-jev`, one brief on typed-decision models.
 - **Updates replace, and say what they replaced** — `ox addons update` overwrites the files an add-on owns and drops the ones its new version stopped shipping. If your team edited one, ox names it before overwriting so the change is one `git log -p` away instead of silently gone. ox never touches a file it doesn't own: a name that collides with something you wrote is refused, not merged.
 - **An add-on is skills, rules, and the context each skill carries** — the context is the point: it ships *inside* the skill that needs it, so an AI coworker reads it exactly when the work calls for it. It is not a dump into your Team Context.
