@@ -495,9 +495,15 @@ finish_install() {
         exit 1
     fi
 
+    local version_output
+    if ! version_output=$("$LAST_INSTALL_PATH" version 2>&1); then
+        log_error "$LAST_INSTALL_PATH was installed but does not run: $version_output"
+        exit 1
+    fi
+
     log_success "$BINARY is installed and ready!"
     echo ""
-    "$LAST_INSTALL_PATH" version 2>/dev/null || echo "$BINARY (development build)"
+    echo "$version_output"
     echo ""
     echo "Get started:"
     echo "  cd your-project"

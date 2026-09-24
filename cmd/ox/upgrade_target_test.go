@@ -86,6 +86,7 @@ func TestUpgradeTargetSelection(t *testing.T) {
 		target        string
 		offline       bool
 		installerExit int
+		staleOx       bool // the install lands behind an older ox on PATH
 		requirePin    bool
 		wantStatus    string
 		wantNew       string
@@ -114,6 +115,7 @@ func TestUpgradeTargetSelection(t *testing.T) {
 		{name: "go current pin with newer cache", method: installGoInstall, cached: "v99.0.0", target: "v0.42.0", wantStatus: "upgraded", wantNew: "0.42.0", wantInstall: true},
 		{name: "go newer pin with newer cache", method: installGoInstall, cached: "v99.0.0", target: "v0.43.0", wantStatus: "upgraded", wantNew: "0.43.0", wantInstall: true},
 		{name: "go failed pin with newer cache", method: installGoInstall, cached: "v99.0.0", target: "v0.43.0", installerExit: 37, wantStatus: "failed", wantNew: "0.43.0", wantMessage: "exit status 37", wantInstall: true},
+		{name: "go install behind an older ox on PATH", method: installGoInstall, target: "v0.43.0", staleOx: true, wantStatus: "failed", wantNew: "0.43.0", wantMessage: "reports v0.42.0, not v0.43.0: another ox comes first on PATH", wantInstall: true},
 		{name: "go strict pin while offline", method: installGoInstall, target: "v0.43.0", offline: true, requirePin: true, wantStatus: "upgraded", wantNew: "0.43.0", wantInstall: true},
 		{name: "go cached release while offline", method: installGoInstall, cached: "v0.43.0", offline: true, wantStatus: "upgraded", wantNew: "0.43.0", wantInstall: true},
 		{name: "go cached release with newer latest", method: installGoInstall, cached: "v0.43.0", latest: "v0.44.0", wantStatus: "upgraded", wantNew: "0.43.0", wantInstall: true},
@@ -142,15 +144,24 @@ func TestUpgradeTargetSelection(t *testing.T) {
 			t.Cleanup(func() { installMethodDetector = oldDetector })
 			binDir := t.TempDir()
 			t.Setenv("PATH", binDir)
+			// The ox on PATH reports whatever version was last installed. The
+			// scripts use only shell builtins: PATH holds nothing but binDir.
+			require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("HOME"), "ox-version"), []byte("0.42.0\n"), 0o600))
+			install := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/install-args\"\n"
+			goInstall := install
+			if tt.installerExit == 0 && !tt.staleOx {
+				goInstall += "printf '%s\\n' \"${2##*@v}\" > \"$HOME/ox-version\"\n"
+			}
 			for name, script := range map[string]string{
-				"brew": fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > \"$HOME/install-args\"\nexit %d\n", tt.installerExit),
-				"go":   fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > \"$HOME/install-args\"\nexit %d\n", tt.installerExit),
+				"brew": install + fmt.Sprintf("exit %d\n", tt.installerExit),
+				"go":   goInstall + fmt.Sprintf("exit %d\n", tt.installerExit),
+				"ox":   "#!/bin/sh\nread -r v < \"$HOME/ox-version\"\nprintf '{\"version\": \"%s\"}\\n' \"$v\"\n",
 			} {
 				path := filepath.Join(binDir, name)
 				require.NoError(t, os.WriteFile(path, []byte(script), 0o700))
 				resolved, err := exec.LookPath(name)
 				require.NoError(t, err)
-				require.Equal(t, path, resolved, "must never invoke a real package manager")
+				require.Equal(t, path, resolved, "must never run a real installer or ox")
 			}
 			oldFetcher := latestReleaseFetcher
 			fetches := 0

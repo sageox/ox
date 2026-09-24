@@ -5,8 +5,8 @@
 #      corresponding GitHub release was ever tagged/published. Left unnoticed,
 #      GET /releases/latest (and the update-notify chain that reads it) keeps
 #      pointing at the old version even though version.go says otherwise.
-#   2. The latest release has no checksums.txt, so install.sh and `ox upgrade`
-#      cannot install it. Only release.yml uploads binaries; a draft published
+#   2. The latest release lacks checksums.txt or an ox_*.tar.gz archive, so
+#      install.sh and `ox upgrade` cannot install it. Only release.yml uploads binaries; a draft published
 #      any other way goes out without them, and an immutable release cannot
 #      be given them afterwards (v0.17.1).
 #   3. The Homebrew tap's formula version is not the latest release.
@@ -159,7 +159,10 @@ if [ -n "$LATEST" ] && version_gt "$CURRENT" "$LATEST"; then
 fi
 
 if [ -n "$LATEST" ] && [ -n "$API_OUTPUT" ]; then
-  if [ "$(jq -r '[.assets[]?.name] | index("checksums.txt") != null' <<<"$API_OUTPUT")" != "true" ]; then
+  if [ "$(jq -r '
+    ([.assets[]?.name] | index("checksums.txt") != null) and
+    any(.assets[]?.name; startswith("ox_") and endswith(".tar.gz"))
+  ' <<<"$API_OUTPUT")" != "true" ]; then
     add_problem "**v$LATEST** is the latest release but has no binaries, so \`install.sh\` and \`ox upgrade\` cannot install it. Only \`release.yml\` uploads them, and a published release is immutable: mark the newest release that has binaries as latest (\`gh release edit <tag> --latest\`), then ship a new version through \`release.yml\`."
   fi
 
