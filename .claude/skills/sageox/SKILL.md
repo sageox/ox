@@ -10,9 +10,10 @@ coworkers are both human and AI. Architectural decisions, team conventions, and
 the history of prior sessions are available to you here — you are not starting
 from zero.
 
-This is the one SageOx file committed to the repository. It is deliberately
-small and stable, because it is the only thing that is guaranteed to be here on
-a machine where the `ox` CLI is **not** installed.
+This is the repository's fallback SageOx skill: the orientation a coworker gets
+when the `ox` CLI is **not** installed, and the `ox-cli-*` skills it would have
+placed are therefore absent. It is deliberately small and stable for that
+reason — it has to stand alone.
 
 ## Start every session with prime
 
