@@ -157,3 +157,63 @@ func TestProcessAgentSession_RejectsTurnAppendedDuringRead(t *testing.T) {
 		t.Fatalf("read must not produce raw data before validating, stat error: %v", err)
 	}
 }
+
+func TestHandleAfterTool_MissingClaudeSourceKeepsRecordingRetryable(t *testing.T) {
+	repo, agentID, source := setupHandleAfterToolTest(t)
+	state, err := session.LoadRecordingStateForAgent(repo, agentID)
+	if err != nil || state == nil {
+		t.Fatalf("load recording state: %v", err)
+	}
+	raw := filepath.Join(state.SessionPath, "raw.jsonl")
+	before, err := os.ReadFile(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(source); err != nil {
+		t.Fatal(err)
+	}
+	if err := handleAfterTool(&HookContext{Phase: phaseAfterTool, AgentType: "claude-code", ProjectRoot: repo, Marker: &SessionMarker{AgentID: agentID}}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := session.LoadRecordingStateForAgent(repo, agentID)
+	if err != nil || after == nil || after.SourceRejected || after.SourceOffset != state.SourceOffset || after.SessionFile != source {
+		t.Fatalf("missing native source must retain a retryable marker, state=%+v, error=%v", after, err)
+	}
+	contents, err := os.ReadFile(raw)
+	if err != nil || string(contents) != string(before) {
+		t.Fatalf("missing source must not change cached capture: %v", err)
+	}
+}
+
+func TestFinalizeIncrementalSession_MissingClaudeSourcePreservesRaw(t *testing.T) {
+	repo := t.TempDir()
+	raw := filepath.Join(t.TempDir(), "raw.jsonl")
+	original := []byte("preserved raw capture")
+	if err := os.WriteFile(raw, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := &session.RecordingState{AdapterName: "claude-code", SessionFile: filepath.Join(t.TempDir(), "missing.jsonl")}
+	if _, err := finalizeIncrementalSession(repo, state, raw, &testClaudeCodeAdapter{}, &agentSessionResult{}); err == nil || !strings.Contains(err.Error(), "stat native session before final drain") {
+		t.Fatalf("missing native source must block final import before reading raw capture: %v", err)
+	}
+	contents, err := os.ReadFile(raw)
+	if err != nil || string(contents) != string(original) {
+		t.Fatalf("failed final drain must preserve raw capture: %v", err)
+	}
+}
+
+func TestRecoverFromCache_RefusesQuarantinedSource(t *testing.T) {
+	raw := filepath.Join(t.TempDir(), "raw.jsonl")
+	original := []byte("unpublished raw capture")
+	if err := os.WriteFile(raw, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := &session.RecordingState{AgentID: "OxQuarantined", SourceRejected: true}
+	if err := recoverFromCache(&agentinstance.Instance{AgentID: state.AgentID}, t.TempDir(), state, raw); err == nil || !strings.Contains(err.Error(), "untrusted repository ownership") {
+		t.Fatalf("a quarantined native source must never upload its cached prefix: %v", err)
+	}
+	contents, err := os.ReadFile(raw)
+	if err != nil || string(contents) != string(original) {
+		t.Fatalf("quarantined cache must remain intact: %v", err)
+	}
+}

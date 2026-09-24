@@ -37,6 +37,21 @@ func TestFindSessionFile_ResumedSessionInOldBucket(t *testing.T) {
 	if err != nil || got != path {
 		t.Fatalf("resumed session: got %q, %v; want %q", got, err, path)
 	}
+	// Two valid buckets cannot be disambiguated by recency or directory name.
+	duplicateDir := filepath.Join(home, ".claude", "projects", claudeProjectHash(home))
+	if err := os.MkdirAll(duplicateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := filepath.Join(duplicateDir, id+".jsonl")
+	if err := os.WriteFile(duplicate, []byte(fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", id, repo)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := findSessionFile(repo, "", "", id); err == nil {
+		t.Fatalf("ambiguous native session returned %q", got)
+	}
+	if err := os.Remove(duplicate); err != nil {
+		t.Fatal(err)
+	}
 	// A transcript that also worked in the parent cannot be assigned wholesale
 	// to the child repo, even when its filename matches the exact session ID.
 	write(repo, filepath.Dir(repo))
@@ -152,5 +167,65 @@ func TestFindSessionFile_ExactIDDoesNotFallBackToNewest(t *testing.T) {
 	}
 	if got, _, err := findSessionFile(repo, "", "", "missing"); err == nil {
 		t.Fatalf("different session returned %q", got)
+	}
+}
+
+func TestFindSessionFile_AgentScopedLookupKeepsTheRecordingBoundary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := filepath.Join(home, "repo")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bucket := filepath.Join(home, ".claude", "projects", claudeProjectHash(repo))
+	if err := os.MkdirAll(bucket, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+	const id = "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"
+	before := fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q,\"timestamp\":%q,\"message\":{\"role\":\"user\",\"content\":\"older turn\"}}\n", id, repo, since.Add(-time.Minute).Format(time.RFC3339))
+	after := fmt.Sprintf("{\"type\":\"assistant\",\"sessionId\":%q,\"cwd\":%q,\"timestamp\":%q,\"message\":{\"role\":\"assistant\",\"content\":\"Agent OxSelected is working\"}}\n", id, repo, since.Add(10*time.Second).Format(time.RFC3339))
+	owned := filepath.Join(bucket, id+".jsonl")
+	if err := os.WriteFile(owned, []byte(before+after), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(bucket, "other.jsonl")
+	if err := os.WriteFile(other, []byte(fmt.Sprintf("{\"type\":\"user\",\"sessionId\":\"other\",\"cwd\":%q,\"message\":{\"role\":\"user\",\"content\":\"Agent OxOther\"}}\n", repo)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, offset, err := findSessionFile(repo, "OxSelected", since.Format(time.RFC3339), "")
+	if err != nil || got != owned || offset != int64(len(before)) {
+		t.Fatalf("agent-scoped lookup: got %q at %d, error %v; want %q at %d", got, offset, err, owned, len(before))
+	}
+}
+
+func TestReadSessionFile_MetadataDoesNotConsumePartialTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "owned.jsonl")
+	complete := `{"type":"assistant","version":"2.1","message":{"role":"assistant","model":"claude-test","content":[{"type":"text","text":"captured"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(complete+`{"type":"user","message":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, metadata, err := readSessionFile(path)
+	if err != nil || len(entries) != 1 || entries[0].Content != "captured" || metadata.AgentVersion != "2.1" || metadata.Model != "claude-test" {
+		t.Fatalf("complete prefix should retain metadata and turn: entries=%+v, metadata=%+v, err=%v", entries, metadata, err)
+	}
+}
+
+func TestFindSessionFile_AbsentProjectDirectoryDoesNotGuess(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := filepath.Join(home, "repo")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"", "77b16b24-5b7d-4598-aacf-4c9afeb4b5ca"} {
+		got, _, err := findSessionFile(repo, "", "", id)
+		if err == nil || got != "" {
+			t.Fatalf("missing Claude project directory returned %q for native ID %q: %v", got, id, err)
+		}
 	}
 }

@@ -125,3 +125,62 @@ func TestFindPiSession_RefusesMissingOrWrongHeader(t *testing.T) {
 		}
 	}
 }
+
+func TestFindPiSession_LegacyAndUnscopedIdentity(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := filepath.Join(home, "repo")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyDir := piProjectDirs(filepath.Join(home, ".pi", "agent", "sessions"), repo)[1]
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const id = "01a0d3eb-fd67-721d-8288-0641a6cc84a9"
+	path := filepath.Join(legacyDir, id+".jsonl")
+	data := fmt.Sprintf("{\"type\":\"session\",\"id\":%q,\"cwd\":%q}\n{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Agent OxSelected\"}]}}\n", id, repo)
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// An unrelated filename must not win an exact-ID lookup; a symlink is
+	// never a candidate, even when it points to a valid session.
+	other := fmt.Sprintf("{\"type\":\"session\",\"id\":%q,\"cwd\":%q}\n{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Agent OxOther\"}]}}\n", id, repo)
+	if err := os.WriteFile(filepath.Join(legacyDir, "other.jsonl"), []byte(other), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(path, filepath.Join(legacyDir, "linked.jsonl")); err != nil {
+		// Some platforms disallow symlinks; keep the legacy-path assertions runnable.
+		t.Logf("symlink fixture unavailable: %v", err)
+	}
+	for _, tc := range []struct{ repo, agent, id string }{
+		{repo: repo, id: id},
+		{repo: repo, agent: "OxSelected"},
+		{agent: "OxSelected", id: id},
+	} {
+		got, err := findPiSession(tc.repo, tc.agent, "", tc.id)
+		if err != nil || got != path {
+			t.Fatalf("lookup repo=%q agent=%q id=%q: got %q, %v; want %q", tc.repo, tc.agent, tc.id, got, err, path)
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := findPiSession(repo, "OxSelected", "", ""); err == nil {
+		t.Fatalf("symlink or unrelated file impersonated the removed session: %q", got)
+	}
+}
+
+func TestPiSessionMatches_MissingOrEmptyFileIsNotOwned(t *testing.T) {
+	repo := t.TempDir()
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if piSessionMatches(path, repo, "session") {
+		t.Fatal("missing native session was accepted")
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if piSessionMatches(path, repo, "session") {
+		t.Fatal("empty native session was accepted")
+	}
+}

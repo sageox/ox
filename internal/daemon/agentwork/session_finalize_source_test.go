@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +36,38 @@ func TestRecoverUndiscoveredClaudeHookSourcePreservesMarker(t *testing.T) {
 	got, err := os.ReadFile(rawPath)
 	if err != nil || !bytes.Equal(got, header) {
 		t.Fatalf("uncertain source must retain cached header: %v", err)
+	}
+}
+
+func TestRecoverClaudeHookMissingNativeFileKeepsMarker(t *testing.T) {
+	project := t.TempDir()
+	sessionDir := t.TempDir()
+	recPath := filepath.Join(sessionDir, recordingMarker)
+	rawPath := filepath.Join(sessionDir, artifactRaw)
+	// A header alone is not a captured prefix; only substantive turns exercise
+	// the hook-mode final validation before marker cleanup.
+	header := []byte(`{"type":"header","metadata":{}}` + "\n" + `{"type":"user","content":"captured prefix"}` + "\n")
+	if err := os.WriteFile(rawPath, header, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRecordingState(t, recPath, session.RecordingState{
+		AgentID: "OxMissingNative", AdapterName: "claude-code", WatchMode: "hook",
+		WorkspacePath: project, SessionFile: filepath.Join(t.TempDir(), "missing.jsonl"),
+	})
+	before, err := os.ReadFile(recPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered, err := recoverRawFromSessionFile(slog.Default(), recPath, sessionDir, rawPath); recovered || err == nil || !strings.Contains(err.Error(), "stat Claude hook source before finalization") {
+		t.Fatalf("missing hook source must defer after inspecting captured prefix, recovered=%v err=%v", recovered, err)
+	}
+	marker, err := os.ReadFile(recPath)
+	if err != nil || !bytes.Equal(marker, before) {
+		t.Fatalf("native source loss must not clear the recovery marker: %v", err)
+	}
+	got, err := os.ReadFile(rawPath)
+	if err != nil || !bytes.Equal(got, header) {
+		t.Fatalf("native source loss must preserve captured prefix: %v", err)
 	}
 }
 
