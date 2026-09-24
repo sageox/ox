@@ -74,9 +74,9 @@ func TestUpgradeTargetSelection(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake installers use POSIX shell scripts; PATH isolation requires executable scripts")
 	}
-	oldVersion, oldBuildDate := version.Version, version.BuildDate
+	oldVersion := version.Version
 	version.Version = "0.42.0"
-	t.Cleanup(func() { version.Version, version.BuildDate = oldVersion, oldBuildDate })
+	t.Cleanup(func() { version.Version = oldVersion })
 
 	for _, tt := range []struct {
 		name          string
@@ -137,27 +137,14 @@ func TestUpgradeTargetSelection(t *testing.T) {
 			if tt.cached != "" {
 				writeTestVersionCache(t, &versionCacheData{LatestVersion: tt.cached})
 			}
-			version.BuildDate = "2026-09-21T00:00:00Z"
-			if tt.method == installSource {
-				version.BuildDate = "unknown"
-			}
+			oldDetector := installMethodDetector
+			installMethodDetector = func() installMethod { return tt.method }
+			t.Cleanup(func() { installMethodDetector = oldDetector })
 			binDir := t.TempDir()
 			t.Setenv("PATH", binDir)
-			binary, err := os.Executable()
-			require.NoError(t, err)
-			binary, err = filepath.EvalSymlinks(binary)
-			require.NoError(t, err)
-			t.Setenv("GOBIN", "")
-			if tt.method == installGoInstall {
-				t.Setenv("GOBIN", filepath.Dir(binary))
-			}
-			brewListExit := 1
-			if tt.method == installHomebrew {
-				brewListExit = 0
-			}
 			for name, script := range map[string]string{
-				"brew": fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = list ]; then exit %d; fi\nprintf '%%s\\n' \"$@\" > \"$HOME/install-args\"\nexit %d\n", brewListExit, tt.installerExit),
-				"go":   fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = env ]; then if [ \"$2\" = GOBIN ]; then printf '%%s\\n' \"$GOBIN\"; fi; exit 0; fi\nprintf '%%s\\n' \"$@\" > \"$HOME/install-args\"\nexit %d\n", tt.installerExit),
+				"brew": fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > \"$HOME/install-args\"\nexit %d\n", tt.installerExit),
+				"go":   fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > \"$HOME/install-args\"\nexit %d\n", tt.installerExit),
 			} {
 				path := filepath.Join(binDir, name)
 				require.NoError(t, os.WriteFile(path, []byte(script), 0o700))
@@ -184,7 +171,7 @@ func TestUpgradeTargetSelection(t *testing.T) {
 			cmd.Flags().Bool("json", true, "")
 			cmd.Flags().String("target", tt.target, "")
 			cmd.SetOut(&stdout)
-			err = runUpgrade(cmd, nil)
+			err := runUpgrade(cmd, nil)
 			if tt.wantStatus == "failed" {
 				var exit *commandExitError
 				if assert.ErrorAs(t, err, &exit) {

@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -49,6 +51,11 @@ For Go and direct binary installations, --target installs the specified release
 without checking the latest release. It can reinstall the current version or
 select an older release. Homebrew and source installations do not support --target.
 
+When ox is on PATH, the upgrade succeeds only if that ox then reports the new
+version. An installer can finish without changing it: Homebrew does when its
+tap does not have the release yet, and an ox earlier on PATH hides one
+upgraded elsewhere.
+
 Failed update checks and installations exit with status 1. With --json,
 stdout contains only the result; installer logs are written to stderr.`,
 	RunE: runUpgrade,
@@ -63,7 +70,7 @@ func init() {
 func runUpgrade(cmd *cobra.Command, _ []string) error {
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 	target, _ := cmd.Flags().GetString("target")
-	method := detectInstallMethod()
+	method := installMethodDetector()
 	result := upgradeResult{
 		PreviousVersion: version.Version,
 		InstallMethod:   method,
@@ -139,6 +146,16 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		return outputUpgradeResult(cmd, result, jsonOutput)
 	case installBinary:
 		err = upgradeViaSelfReplace(jsonOutput, newVersion)
+	}
+	if err == nil {
+		var installed string
+		installed, err = confirmUpgradeOnPath(method, strings.TrimPrefix(version.Version, "v"), newVersion)
+		if err == nil && installed != newVersion {
+			// Homebrew installed a newer release than the one selected.
+			newVersion = installed
+			result.NewVersion = newVersion
+			result.ReleaseURL = fmt.Sprintf("https://github.com/sageox/ox/releases/tag/v%s", newVersion)
+		}
 	}
 
 	if err != nil {
@@ -243,6 +260,43 @@ func upgradeViaSelfReplace(quiet bool, targetVersion string) error {
 	return err
 }
 
+// confirmUpgradeOnPath checks the ox a shell now resolves and returns the
+// version it reports. That must be want, except under Homebrew, which installs
+// whatever its tap has, so any version newer than from counts. An installer
+// can exit 0 without changing that binary: brew does when its sageox/tap
+// formula has no newer version, and an ox earlier on PATH shadows one upgraded
+// in another directory.
+func confirmUpgradeOnPath(method installMethod, from, want string) (string, error) {
+	path, err := exec.LookPath("ox")
+	if errors.Is(err, exec.ErrNotFound) {
+		// No ox on PATH means no `ox` for a shell to run, so nothing to confirm.
+		return want, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("could not confirm the upgrade: %w", err)
+	}
+	// Bounded because this runs whatever PATH resolves as "ox".
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "version", "--json").Output()
+	if err != nil {
+		return "", fmt.Errorf("could not confirm the upgrade: %s version --json: %w", path, err)
+	}
+	var info versionInfo
+	if err := json.Unmarshal(out, &info); err != nil {
+		return "", fmt.Errorf("could not confirm the upgrade: %s version --json: %w", path, err)
+	}
+	got := strings.TrimPrefix(info.Version, "v")
+	if got == want || (method == installHomebrew && isNewerVersion(got, from)) {
+		return got, nil
+	}
+	cause := "another ox comes first on PATH"
+	if method == installHomebrew {
+		cause = "Homebrew's sageox/tap does not have it yet (brew exits successfully without upgrading), or " + cause
+	}
+	return "", fmt.Errorf("ox on PATH (%s) reports v%s, not v%s: %s", path, got, want, cause)
+}
+
 func upgradeViaHomebrew(quiet bool) error {
 	if !quiet {
 		fmt.Printf("%s brew upgrade sageox/tap/ox\n", cli.StyleDim.Render("Running:"))
@@ -290,8 +344,22 @@ func upgradeViaGoInstallWithTarget(quiet bool, target string) error {
 	return cmd.Run()
 }
 
-// detectInstallMethod determines how ox was installed by examining the binary path.
+// installMethodDetector and readBuildInfo are indirected so tests can choose
+// the install method and describe a `go install` build.
+var (
+	installMethodDetector = detectInstallMethod
+	readBuildInfo         = debug.ReadBuildInfo
+)
+
+// detectInstallMethod determines how ox was installed from its build info and
+// binary path.
 func detectInstallMethod() installMethod {
+	// `go install …@version` sets no ldflags, so BuildDate is "unknown" as in a
+	// dev build, but only a downloaded module has its checksum recorded.
+	if info, ok := readBuildInfo(); ok && info.Main.Sum != "" {
+		return installGoInstall
+	}
+
 	// dev build check
 	if version.BuildDate == "unknown" || version.BuildDate == "" {
 		return installSource
@@ -307,7 +375,6 @@ func detectInstallMethod() installMethod {
 	}
 	oxPath, _ = filepath.EvalSymlinks(oxPath)
 
-	// homebrew check: try brew list first (authoritative)
 	if isHomebrewInstall(oxPath) {
 		return installHomebrew
 	}
@@ -320,26 +387,13 @@ func detectInstallMethod() installMethod {
 	return installBinary
 }
 
-// homebrewPrefixes are common Homebrew install path prefixes.
-var homebrewPrefixes = []string{
-	"/opt/homebrew/",
-	"/usr/local/Cellar/",
-	"/home/linuxbrew/.linuxbrew/",
-}
-
+// isHomebrewInstall reports whether oxPath, with symlinks resolved, is in a
+// keg of the ox formula; every Homebrew prefix keeps kegs under
+// <prefix>/Cellar/<formula>/<version>/. It deliberately does not ask brew
+// whether the formula is installed: that is true even when the running ox is
+// a different install, and upgrading the brew copy would leave it unchanged.
 func isHomebrewInstall(oxPath string) bool {
-	// fast path: check common Homebrew prefixes
-	for _, prefix := range homebrewPrefixes {
-		if strings.HasPrefix(oxPath, prefix) {
-			return true
-		}
-	}
-
-	// slow path: ask brew directly (handles custom prefixes)
-	cmd := exec.Command("brew", "list", "sageox/tap/ox")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Run() == nil
+	return strings.Contains(oxPath, "/Cellar/ox/")
 }
 
 func isGoInstall(oxPath string) bool {

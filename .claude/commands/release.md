@@ -200,7 +200,10 @@ gh workflow run release.yml -f tag=v0.X.0
 Tag pushes intentionally do not trigger publication. The explicit dispatch
 starts `.github/workflows/release.yml`; its verification job
 must pass before GoReleaser uploads artifacts and publishes the existing draft.
-Do not publish the draft manually.
+Do not publish the draft manually: since #848 (Aug 31, 2026) publishing starts
+no build, and releases here are immutable, so a draft published by hand never
+gets binaries and the only fix is a new version. That is how v0.17.1 shipped
+without binaries.
 
 ### Step 8b: Publish the notes to the public changelog
 

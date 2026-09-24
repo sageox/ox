@@ -341,9 +341,10 @@ func TestUpgradeCLI(t *testing.T) {
 						t.Skip("fake Homebrew detection uses a POSIX shell script")
 					}
 					binDir := t.TempDir()
-					// Release builds detect Homebrew; development builds detect source.
-					// Both must reject the target without running an installer.
-					require.NoError(t, os.WriteFile(filepath.Join(binDir, "brew"), []byte("#!/bin/sh\nif [ \"$1\" = list ]; then exit 0; fi\nexit 91\n"), 0o700))
+					// The test binary is a development build, so it detects a
+					// source install and must reject the target; this brew fails
+					// if any installer runs.
+					require.NoError(t, os.WriteFile(filepath.Join(binDir, "brew"), []byte("#!/bin/sh\nexit 91\n"), 0o700))
 					env = append(env, "PATH="+binDir)
 					args = append(args, "--target="+tt.target)
 				}

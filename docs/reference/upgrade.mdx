@@ -18,6 +18,11 @@ For Go and direct binary installations, --target installs the specified release
 without checking the latest release. It can reinstall the current version or
 select an older release. Homebrew and source installations do not support --target.
 
+When ox is on PATH, the upgrade succeeds only if that ox then reports the new
+version. An installer can finish without changing it: Homebrew does when its
+tap does not have the release yet, and an ox earlier on PATH hides one
+upgraded elsewhere.
+
 Failed update checks and installations exit with status 1. With --json,
 stdout contains only the result; installer logs are written to stderr.
 
