@@ -163,7 +163,7 @@ if [ -n "$LATEST" ] && [ -n "$API_OUTPUT" ]; then
     ([.assets[]?.name] | index("checksums.txt") != null) and
     any(.assets[]?.name; startswith("ox_") and endswith(".tar.gz"))
   ' <<<"$API_OUTPUT")" != "true" ]; then
-    add_problem "**v$LATEST** is the latest release but has no binaries, so \`install.sh\` and \`ox upgrade\` cannot install it. Only \`release.yml\` uploads them, and a published release is immutable: mark the newest release that has binaries as latest (\`gh release edit <tag> --latest\`), then ship a new version through \`release.yml\`."
+    add_problem "**v$LATEST** is the latest release but lacks the files \`install.sh\` and \`ox upgrade\` need (\`checksums.txt\` and the \`ox_*.tar.gz\` archives), so they cannot install it. Only \`release.yml\` uploads them, and a published release is immutable: mark the newest release that has them as latest (\`gh release edit <tag> --latest\`), then ship a new version through \`release.yml\`."
   fi
 
   # release.yml updates the tap in a job after it publishes, so a release under
