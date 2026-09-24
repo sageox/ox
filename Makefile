@@ -503,7 +503,13 @@ check-codedb-guarded-open: ## Ensure codedb opens user repos only via internal/c
 		exit 1; \
 	fi
 
-test-preflight: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open ## Pre-PR quality gate: lint + all unit tests + slow tests (lint/test-all/test-slow run concurrently)
+test-preflight: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open docs-check ## Pre-PR quality gate: lint + all unit tests + slow tests + generated-doc freshness (lint/test-all/test-slow run concurrently)
+	@# docs-check is a PREREQUISITE, not part of the -j group below: it is seconds
+	@# of work, and running it first means a stale reference doc fails in the time
+	@# it takes to read the error rather than after a 20-minute test run. It landed
+	@# here because it was CI-only — every author discovered stale generated docs
+	@# from a red check on a merged PR, which is the exact feedback loop a pre-PR
+	@# gate exists to remove.
 	$(call say,"Running lint, full tests, and slow tests concurrently...")
 	@# lint and the test binaries don't share any output file (test-all writes
 	@# coverage.out; test-slow and lint don't touch it), so running them
