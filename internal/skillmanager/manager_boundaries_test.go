@@ -39,14 +39,14 @@ func TestInventoryDiscovery_ReportsInvalidRootsAndMissingTargets(t *testing.T) {
 	missingRepo := filepath.Join(t.TempDir(), "missing")
 	_, err := discoverLegacyRules(missingRepo, map[string]adapterprotocol.SkillTarget{target.Key: target}, nil)
 	require.Error(t, err)
-	_, err = orphanedTeamFiles(missingRepo, target, nil, nil, nil)
+	_, err = orphanedTeamFiles(missingRepo, target, nil, nil, nil, nil)
 	require.Error(t, err)
 
 	repo := t.TempDir()
 	legacy, err := discoverLegacyRules(repo, map[string]adapterprotocol.SkillTarget{target.Key: target}, nil)
 	require.NoError(t, err)
 	require.Empty(t, legacy)
-	orphans, err := orphanedTeamFiles(repo, target, nil, nil, nil)
+	orphans, err := orphanedTeamFiles(repo, target, nil, nil, nil, nil)
 	require.NoError(t, err)
 	require.Empty(t, orphans)
 
@@ -54,6 +54,6 @@ func TestInventoryDiscovery_ReportsInvalidRootsAndMissingTargets(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(repo, ".claude", "rules"), []byte("not a directory"), 0o644))
 	_, err = discoverLegacyRules(repo, map[string]adapterprotocol.SkillTarget{target.Key: target}, nil)
 	require.ErrorContains(t, err, "discover legacy rules")
-	_, err = orphanedTeamFiles(repo, target, nil, nil, nil)
+	_, err = orphanedTeamFiles(repo, target, nil, nil, nil, nil)
 	require.Error(t, err)
 }

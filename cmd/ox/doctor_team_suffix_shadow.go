@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -65,6 +66,22 @@ func checkTeamSuffixShadowIn(gitRoot string, _ bool) checkResult {
 			if skillmanager.TeamSkillStamp.Verifies(manifest) {
 				continue // ox's own projection, correctly hidden
 			}
+			// ASK git, do not infer. The name and the ignore block together look
+			// like enough, and they are not: after the author follows this check's
+			// own advice and runs `git add -f`, the file is tracked and no longer
+			// ignored — but a name-based check would keep warning about it forever,
+			// which teaches people to ignore the checker. The same inference also
+			// fires in a root that has no ignore block at all.
+			//
+			// Deliberately WITHOUT --no-index, the opposite of gitPathIsIgnored:
+			// there the question is "do the rules cover this path" during a
+			// migration that has not untracked it yet, here it is "is this file
+			// actually missing from git right now", and a tracked path must answer
+			// no.
+			rel := root + "/" + entry.Name() + "/" + skills.SkillFileName
+			if !gitPathIsIgnoredRespectingIndex(gitRoot, rel) {
+				continue
+			}
 			// Sanitized here, not at render time. A skill directory name is
 			// repository-controlled and this string goes straight to a terminal, so
 			// an embedded escape could hide the rest of the diagnostic — the same
@@ -81,6 +98,16 @@ func checkTeamSuffixShadowIn(gitRoot string, _ bool) checkResult {
 			len(shadowed), skillmanager.TeamSuffix, strings.Join(shadowed, ", ")),
 		fmt.Sprintf("Rename each one so it does not end in %q, or run `git add -f <path>` to commit it deliberately",
 			skillmanager.TeamSuffix))
+}
+
+// gitPathIsIgnoredRespectingIndex reports whether git currently ignores rel.
+//
+// A tracked path answers false however the ignore rules read, which is the whole
+// point here and the reason this cannot share gitPathIsIgnored's --no-index.
+func gitPathIsIgnoredRespectingIndex(repoRoot, rel string) bool {
+	cmd := exec.Command("git", "check-ignore", "-q", "--", rel)
+	cmd.Dir = repoRoot
+	return cmd.Run() == nil
 }
 
 func init() {

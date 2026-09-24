@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/extensions/skills"
 	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/stretchr/testify/require"
 )
@@ -56,4 +57,31 @@ func TestCheckTeamSuffixShadow_PassesWhenNothingIsHidden(t *testing.T) {
 
 	result := checkTeamSuffixShadowIn(repo, false)
 	require.True(t, result.passed, result.message)
+}
+
+// TestCheckTeamSuffixShadow_StopsWarningOnceTheSkillIsTracked is the case that
+// makes this check ask git instead of inferring from the name.
+//
+// The check's own remedy is `git add -f <path>`. A name-based check keeps warning
+// after the author follows it — the file is tracked, the problem is gone, and the
+// diagnostic still fires forever. A checker that cannot be satisfied is a checker
+// people learn to scroll past, which costs far more than the one warning it saves.
+func TestCheckTeamSuffixShadow_StopsWarningOnceTheSkillIsTracked(t *testing.T) {
+	repo, _ := stageTeamPublishRepo(t)
+	rel := ".claude/skills/notify" + skillmanager.TeamSuffix + "/" + skills.SkillFileName
+	path := filepath.Join(repo, filepath.FromSlash(rel))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path,
+		[]byte("---\nname: notify-team\ndescription: pings on-call\n---\n\nbody\n"), 0o644))
+
+	// Untracked and matching the namespace glob: this is the state worth warning about.
+	require.True(t, checkTeamSuffixShadowIn(repo, false).warning,
+		"an untracked skill hidden by the namespace should be reported")
+
+	// The author takes the advice.
+	gitOutput(t, repo, "add", "-f", "--", rel)
+
+	result := checkTeamSuffixShadowIn(repo, false)
+	require.True(t, result.passed,
+		"the warning survived the fix it recommended: %s", result.message)
 }

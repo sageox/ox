@@ -1,13 +1,15 @@
 package skillmanager
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
@@ -53,16 +55,30 @@ func trackedSkillDirs(repoRoot string, targets []adapterprotocol.SkillTarget) (m
 	if len(roots) == 0 {
 		return map[string]struct{}{}, nil
 	}
-	if !gitutil.IsGitRepo(repoRoot) {
-		return map[string]struct{}{}, nil
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), trackedProbeTimeout)
 	defer cancel()
+
+	// Ask git where it is, rather than looking for a .git entry at repoRoot.
+	//
+	// A stat-based check answers "is repoRoot itself a repository root", and that
+	// is the wrong question: a project root nested BELOW the work-tree root has no
+	// .git of its own, so the check says "not a repository", the tracked set comes
+	// back empty, and reconciliation overwrites committed skills believing nothing
+	// is tracked. That is the precise fail-open this whole probe exists to prevent,
+	// reintroduced by the gate in front of it.
+	inside, err := insideWorkTree(ctx, repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	if !inside {
+		return map[string]struct{}{}, nil
+	}
 	// -z because a path may contain anything a filesystem allows, including a
 	// newline, and git quotes such paths in its default output. Splitting quoted
 	// output on "\n" would silently mis-parse exactly the adversarial names this
 	// package already guards elsewhere.
+	// Pathspecs and output are both relative to cmd.Dir, so a nested repoRoot
+	// yields exactly the repo-root-relative keys this function promises.
 	args := append([]string{"ls-files", "-z", "--"}, roots...)
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = repoRoot
@@ -97,4 +113,34 @@ func trackedSkillDirs(repoRoot string, targets []adapterprotocol.SkillTarget) (m
 		}
 	}
 	return dirs, nil
+}
+
+// insideWorkTree reports whether dir sits inside a git work tree.
+//
+// "Not a repository" is an ANSWER — a plain directory has nothing tracked, and
+// failing the plan there would break `ox` for anyone running it outside git for no
+// safety gained. Every other failure is an ERROR, because "git broke" and "nothing
+// is tracked" must never collapse into the same result: that collapse is how a
+// reconcile deletes committed work and reports success.
+//
+// The two are told apart by git's own message rather than by exit status alone,
+// since exit 128 also covers a corrupt index and an unreadable object store —
+// states where treating the repository as empty would be actively dangerous.
+func insideWorkTree(ctx context.Context, dir string) (bool, error) {
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-inside-work-tree")
+	cmd.Dir = dir
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(out)) == "true", nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, fmt.Errorf("locate the git work tree for %s: %w", dir, ctxErr)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && strings.Contains(stderr.String(), "not a git repository") {
+		return false, nil
+	}
+	return false, fmt.Errorf("locate the git work tree for %s: %w", dir, err)
 }

@@ -26,9 +26,10 @@ var murmurCmd = &cobra.Command{
 	Long: `Murmur publishes a short-lived coordination signal that other AI coworkers
 on the same repo (or team) will hear as a whisper.
 
-It writes no file in your repository and changes no git state, so it is safe to
-run from a plan-mode or otherwise read-only session — which is exactly when
-teammates most need to know what you are about to touch.
+The murmur itself is written to your Ledger or Team Context checkout, which the
+daemon commits and syncs — but it never touches your project's files or git
+history. That is what makes it safe to run from a plan-mode session, which is
+exactly when teammates most need to know what you are about to touch.
 
 Examples:
   ox murmur --topic=lint "ESLint rule failing in src/auth/"

@@ -222,3 +222,84 @@ func TestTrackedSkillDirs_AnswersWithoutGuessing(t *testing.T) {
 		}, got, "a loose file in the skills root must not register as a skill directory")
 	})
 }
+
+// TestTrackedSkillDirs_FindsTrackedDirsFromANestedProjectRoot pins the discovery
+// question the probe has to ask git rather than answer itself.
+//
+// A stat for `.git` at repoRoot answers "is this the work-tree ROOT", which is a
+// different question. A project root nested below the work-tree root has no `.git`
+// of its own, so a stat-based gate reports "not a repository", the tracked set
+// comes back EMPTY, and reconciliation proceeds to overwrite committed skills
+// believing nothing is tracked — the exact fail-open this probe exists to prevent,
+// reintroduced by the gate standing in front of it.
+func TestTrackedSkillDirs_FindsTrackedDirsFromANestedProjectRoot(t *testing.T) {
+	t.Parallel()
+	worktree := t.TempDir()
+	stageTeamWiredProject(t, worktree, t.TempDir())
+
+	// The project lives BELOW the git root — a monorepo package, a nested service.
+	project := filepath.Join(worktree, "services", "api")
+	rel := filepath.Join("services", "api", ".agents", "skills", "deploy"+TeamSuffix, "SKILL.md")
+	path := filepath.Join(worktree, rel)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("x\n"), 0o644))
+	commitInRepo(t, worktree, "add nested skill", filepath.ToSlash(rel))
+
+	got, err := trackedSkillDirs(project, []adapterprotocol.SkillTarget{sharedTarget()})
+	require.NoError(t, err)
+	require.Contains(t, got, ".agents/skills/deploy"+TeamSuffix,
+		"a project root below the work-tree root reported nothing tracked, so reconcile would overwrite committed work")
+}
+
+// TestReconcile_CommittedTeamSkillIsNeverRETIRED covers the deleting half of this
+// package, which had no tracked check at all.
+//
+// Being recorded in the lockfile proves ox WROTE a file. It says nothing about
+// whether somebody has since committed it. A team skill that was installed,
+// committed, and then retired upstream — or filtered out by a `repos:` change —
+// is exactly that shape, and without this guard reconcile removes it, leaving an
+// uncommitted deletion in somebody's index that nothing is scheduled to revisit.
+func TestReconcile_CommittedTeamSkillIsNeverRetired(t *testing.T) {
+	const skillName = "deploy"
+	installedDir := filepath.Join(".agents", "skills", skillName+TeamSuffix)
+	manifest := filepath.Join(installedDir, "SKILL.md")
+
+	repo := t.TempDir()
+	team := t.TempDir()
+	writeTeamSkill(t, team, skillName, "", nil)
+	stageTeamWiredProject(t, repo, team)
+
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+
+	// Install it for real, so the lockfile records ox's ownership.
+	_, err := Reconcile(repo, "1.0.0", desiredFor(target), targets)
+	require.NoError(t, err)
+	require.FileExists(t, filepath.Join(repo, manifest))
+
+	// The team commits the projection — plausible in any repo that wants its
+	// coworkers' skills reviewable, and the state `git add -f` produces.
+	commitInRepo(t, repo, "commit the team skill", filepath.ToSlash(manifest))
+	before, readErr := os.ReadFile(filepath.Join(repo, manifest))
+	require.NoError(t, readErr)
+
+	// Upstream retires it: the team's copy is gone, so it leaves desired state.
+	require.NoError(t, os.RemoveAll(filepath.Join(team, "agents", "skills", skillName)))
+
+	plan, err := Reconcile(repo, "1.0.0", desiredFor(target), targets)
+	require.NoError(t, err)
+
+	after, readErr := os.ReadFile(filepath.Join(repo, manifest))
+	require.NoError(t, readErr,
+		"ox deleted a skill git tracks; the deletion is now staged in somebody's index with nothing to revisit it")
+	require.Equal(t, string(before), string(after))
+
+	var reasons []string
+	for _, conflict := range plan.Conflicts {
+		if strings.Contains(conflict.Path, skillName+TeamSuffix) {
+			reasons = append(reasons, conflict.Reason)
+		}
+	}
+	require.NotEmpty(t, reasons, "the refusal to retire a tracked skill was silent")
+	require.Contains(t, strings.Join(reasons, " "), "checked-in")
+}

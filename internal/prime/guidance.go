@@ -242,7 +242,7 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 	// murmur — publish WIP when auto-murmuring is enabled for this repo
 	if p.MurmuringEnabled {
 		cmds = append(cmds, IntentCommand{
-			Intent:  "publish what you're working on to team (murmur enabled): tell teammates your WIP, active files, and architectural changes — publishes a signal, writes no repository file, safe in plan/read-only mode",
+			Intent:  "publish what you're working on to team (murmur enabled): tell teammates your WIP, active files, and architectural changes — the note goes to the Ledger, never your project's files or git history, so it is safe in plan mode",
 			Command: `ox murmur --topic=wip "describe: what you're building/fixing, which code areas you're modifying, and any architectural changes"`,
 		})
 	}

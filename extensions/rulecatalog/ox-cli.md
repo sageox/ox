@@ -27,9 +27,10 @@ When starting significant work or making architectural decisions:
 Murmurs are lightweight, ephemeral coordination signals. Your teammates'
 murmurs appear as whispers in your context — read them to avoid conflicts.
 
-`ox murmur` writes no file in the repository and changes no git state. It is
-safe to run from a plan-mode or read-only session, which is when teammates most
-need to know what you are about to touch.
+`ox murmur` writes the note to your Ledger or Team Context checkout, which the
+daemon commits and syncs — it never touches your project's files or git history.
+That is what makes it safe to run from a plan-mode session, which is when
+teammates most need to know what you are about to touch.
 
 ### Learn from Your Team
 

@@ -708,11 +708,11 @@ func planWithCatalogs(repoRoot, version string, desired DesiredSkills, targets [
 		}
 	}
 
-	if err := retireManagedFiles(repoRoot, targetByKey, old.ManagedFiles, journalFiles, desiredPaths, plan, &next); err != nil {
+	if err := retireManagedFiles(repoRoot, targetByKey, old.ManagedFiles, journalFiles, trackedDirs, desiredPaths, plan, &next); err != nil {
 		return nil, err
 	}
 
-	if err := sweepRetiredFiles(repoRoot, keys, targetByKey, desiredPaths, oldFiles, plan); err != nil {
+	if err := sweepRetiredFiles(repoRoot, keys, targetByKey, desiredPaths, oldFiles, trackedDirs, plan); err != nil {
 		return nil, err
 	}
 
@@ -1606,7 +1606,7 @@ func teamProjectionOwnedOnDisk(skillRoot *os.Root, name string) bool {
 // from the reserved on-disk namespace when machine-local state is missing.
 // Every path returned is a regular file read through descriptor-pinned roots;
 // symlinks and other foreign filesystem objects are never followed.
-func orphanedTeamFiles(repoRoot string, target adapterprotocol.SkillTarget, desired map[string]struct{}, old map[string]managedFile, scheduled map[string]struct{}) ([]FileAction, error) {
+func orphanedTeamFiles(repoRoot string, target adapterprotocol.SkillTarget, desired map[string]struct{}, old map[string]managedFile, scheduled map[string]struct{}, trackedDirs map[string]struct{}) ([]FileAction, error) {
 	repo, err := os.OpenRoot(repoRoot)
 	if err != nil {
 		return nil, err
@@ -1655,6 +1655,16 @@ func orphanedTeamFiles(repoRoot string, target adapterprotocol.SkillTarget, desi
 		// Legacy-prefixed directories keep the by-contract claim, which is what
 		// makes the one-time migration off the prefix sweep itself.
 		if !teamProjectionOwnedOnDisk(skillRoot, skillEntry.Name()) {
+			_ = skillRoot.Close()
+			continue
+		}
+		// Even a directory ox can prove it wrote is off limits once git tracks it.
+		// The stamp answers "did ox author these bytes"; it cannot answer "has a
+		// human since committed them", and deleting a tracked file leaves an
+		// uncommitted deletion in somebody's index with nothing scheduled to
+		// revisit it.
+		if _, tracked := trackedDirs[filepath.ToSlash(filepath.Join(target.Root, skillEntry.Name()))]; tracked &&
+			!IsReclaimableName(skillEntry.Name()) && skillEntry.Name() != CommittedOnRamp {
 			_ = skillRoot.Close()
 			continue
 		}

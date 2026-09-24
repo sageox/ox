@@ -111,13 +111,26 @@ This reverses `docs/specs/skill-management.md`'s *"New projections contain clean
 canonical content with no ownership stamp"* for team skills. That sentence was
 written when the prefix carried the proof; it cannot survive the prefix.
 
-### 4. A skill git tracks is never written
+### 4. A skill git tracks is neither written nor deleted
 
-Ox now asks git, once per plan, which skill directories are tracked, and refuses
-to write inside one it does not own by contract. A tracked path was committed by
-a human deliberately; overwriting it produces an uncommitted diff against
-somebody's committed work with nothing scheduled to revisit it — the failure Team
-Rules already guarded against and skills did not.
+Ox asks git, once per plan, which skill directories are tracked, and refuses to
+touch one it does not own by contract. A tracked path was committed by a human
+deliberately; overwriting it produces an uncommitted diff against somebody's
+committed work with nothing scheduled to revisit it — the failure Team Rules
+already guarded against and skills did not.
+
+**The guard covers every removal path, not just the write path.** Being recorded
+in the lockfile proves ox WROTE a file; it says nothing about whether somebody has
+since committed it. A team skill that was installed, committed, and then retired
+upstream — or filtered out by a `repos:` change — is exactly that shape, and
+retiring it would stage a deletion in somebody's index. So `retireManagedFiles`,
+the legacy sweep, and `orphanedTeamFiles` all consult the same tracked set.
+
+The question is put to git itself (`rev-parse --is-inside-work-tree`, then one
+`git ls-files` for every skill root), not to a stat for `.git` at the project
+root: a project nested below the work-tree root has no `.git` of its own, and a
+stat-based check would report "not a repository", hand back an empty set, and
+fail open precisely where the guard matters.
 
 Two exemptions, both deliberate: a reclaimable name (`ox-cli-*`, legacy
 `sageox-team-*`) is still tracked in any repository that has not yet run the

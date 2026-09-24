@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ox names what you actually saved** — saving a mockup said "Saved plan to ledger", which is the single-noun collapse `--kind` exists to end.
 - **A skill you checked in is never overwritten by your team's** — if your repo already has a committed skill at the name a team skill wants, ox leaves your bytes alone and reports the clash instead of quietly replacing them. Ownership is now proved by a stamp ox writes and by git, rather than assumed from a name, so a hand-authored `notify-team` is safe too.
 - **`ox doctor` tells you when your own skill is hidden from git** — the team namespace is a `*-team` glob, and a skill you named that way stops reaching teammates without anything looking wrong. Doctor names it and offers both fixes.
-- **`ox murmur` says it is safe to run while planning** — it publishes a signal and writes no file in your repository, but AI coworkers in plan mode were treating it as a change and skipping it, so teammates stopped hearing what was about to be touched.
+- **`ox murmur` says it is safe to run while planning** — the note goes to your Ledger, never your project's files or git history, but AI coworkers in plan mode were treating it as a change to your repo and skipping it, so teammates stopped hearing what was about to be touched.
 
 ## [0.17.1] - 2026-09-22
 
