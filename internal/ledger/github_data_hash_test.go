@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -290,4 +291,55 @@ func TestWriteGitHubPR_FilenameFormat(t *testing.T) {
 
 	name := entries[0].Name()
 	assert.Regexp(t, `^409-[0-9a-f]{8}\.json$`, name)
+}
+
+// --- D. writeGitHubPR error paths ---
+//
+// These two returns predate the PR that gave writeGitHubPR a path result; the
+// signature change (`return err` -> `return "", err`) is what pulled them into
+// a diff. They are cheap to reach, so they are reached rather than waived.
+
+// TestWriteGitHubPR_CreateDirFails verifies the caller sees why the snapshot
+// was not written when the date directory cannot be created.
+// Failure prevented: a sync that silently drops a PR because a stray file sits
+// where its date directory belongs.
+func TestWriteGitHubPR_CreateDirFails(t *testing.T) {
+	tmp := t.TempDir()
+	now := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	// occupy the date directory's own path with a regular file
+	dir := DateDir(tmp, now, "pr")
+	require.NoError(t, os.MkdirAll(filepath.Dir(dir), 0755))
+	require.NoError(t, os.WriteFile(dir, []byte("not a directory"), 0644))
+
+	err := WriteGitHubPR(tmp, &PRFile{
+		Number: 410, Title: "Blocked", State: "open", Author: "alice",
+		CreatedAt: now, UpdatedAt: now,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "create pr dir")
+}
+
+// TestWriteGitHubPR_WriteFails verifies the caller sees why the snapshot was
+// not written when the date directory rejects the write.
+// Failure prevented: a sync reporting success while the snapshot never reached
+// disk.
+func TestWriteGitHubPR_WriteFails(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("directory write permission is not enforced for this user/platform")
+	}
+	tmp := t.TempDir()
+	now := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	dir := DateDir(tmp, now, "pr")
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	require.NoError(t, os.Chmod(dir, 0555))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+
+	err := WriteGitHubPR(tmp, &PRFile{
+		Number: 411, Title: "Read-only", State: "open", Author: "alice",
+		CreatedAt: now, UpdatedAt: now,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "write PR 411")
 }
