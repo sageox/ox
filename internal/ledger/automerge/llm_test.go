@@ -105,6 +105,25 @@ func TestMergeOneWithLLM_RejectsOutputWithMarkers(t *testing.T) {
 	}
 }
 
+// TestMergeOneWithLLM_RejectsOutputWithOrphanedTail covers a model that strips
+// the opening marker but leaves the "=======" and ">>>>>>>" lines.
+// Failure prevented: the half-merged output is written and staged as resolved.
+func TestMergeOneWithLLM_RejectsOutputWithOrphanedTail(t *testing.T) {
+	t.Parallel()
+	repo := initTestRepo(t, t.TempDir())
+	path := "a.txt"
+	writeFile(t, repo, path, "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> br\n")
+
+	r := New(Options{LLMBinary: "fake"})
+	r.runLLM = func(ctx context.Context, binary, prompt string) (string, error) {
+		return "ours\n=======\ntheirs\n>>>>>>> br\n", nil
+	}
+	err := r.mergeOneWithLLM(context.Background(), repo, path)
+	if err == nil || !strings.Contains(err.Error(), "conflict markers") {
+		t.Fatalf("expected conflict-marker rejection, got: %v", err)
+	}
+}
+
 func TestMergeOneWithLLM_WritesAndStages(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

@@ -31,11 +31,6 @@ import (
 	"github.com/sageox/ox/internal/gitutil"
 )
 
-// conflictMarkerStart is git's textual conflict marker. We look for it as
-// a line prefix to determine whether union (or any other in-place driver)
-// has fully resolved the working-tree content.
-const conflictMarkerStart = "<<<<<<<"
-
 // ErrLLMUnavailable is returned by tier helpers when no LLM binary is
 // configured or discoverable on PATH. It is a sentinel: callers can decide
 // whether to treat it as a hard failure or as "skip this tier."
@@ -228,7 +223,7 @@ func (r *Resolver) tryUnionTier(ctx context.Context, repoPath string, paths []st
 			remaining = append(remaining, p)
 			continue
 		}
-		if hasConflictMarkers(data) {
+		if gitutil.HasConflictMarkersBytes(data) {
 			remaining = append(remaining, p)
 			continue
 		}
@@ -244,20 +239,6 @@ func (r *Resolver) tryUnionTier(ctx context.Context, repoPath string, paths []st
 	}
 
 	return remaining, nil
-}
-
-// hasConflictMarkers returns true if the file content has a git conflict
-// marker at the start of any line.
-func hasConflictMarkers(data []byte) bool {
-	if !strings.Contains(string(data), conflictMarkerStart) {
-		return false
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, conflictMarkerStart) {
-			return true
-		}
-	}
-	return false
 }
 
 // time used in Options.LLMTimeout default — keeps import live.

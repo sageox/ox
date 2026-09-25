@@ -6,7 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
+
+	"github.com/sageox/ox/internal/gitutil"
 )
 
 // legacyNumberPattern matches old-format filenames: NNN.json (no hash suffix).
@@ -32,7 +33,7 @@ func RepairConflictMarkerFiles(ledgerPath string, logger *slog.Logger) (int, err
 				continue
 			}
 
-			if !strings.Contains(string(data), "<<<<<<<") {
+			if !gitutil.HasConflictMarkersBytes(data) {
 				continue
 			}
 
@@ -69,7 +70,7 @@ func MigrateLegacyGitHubFiles(ledgerPath string, logger *slog.Logger) (migrated,
 				continue
 			}
 
-			if strings.Contains(string(data), "<<<<<<<") {
+			if gitutil.HasConflictMarkersBytes(data) {
 				logger.Warn("deleting corrupted file with conflict markers", "path", path)
 				if rmErr := os.Remove(path); rmErr != nil {
 					return migrated, deleted, fmt.Errorf("remove corrupted file %s: %w", path, rmErr)
@@ -130,7 +131,7 @@ func ScanLegacyGitHubFiles(ledgerPath string) (legacyFiles, corruptedFiles []str
 				rel = path
 			}
 
-			if strings.Contains(string(data), "<<<<<<<") {
+			if gitutil.HasConflictMarkersBytes(data) {
 				corruptedFiles = append(corruptedFiles, rel)
 				continue
 			}
