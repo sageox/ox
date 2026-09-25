@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -97,6 +98,13 @@ type ReposResponse struct {
 // TeamMembershipsFromRepos derives team memberships from the repos map.
 // Each repo with type "team-context" represents a team the user belongs to.
 // Falls back to the Teams array if populated.
+//
+// The derived list is sorted; the declared Teams array is returned in server order.
+// Repos is a map, and Go randomizes map iteration order per process, so an unsorted
+// derived list has no stable order at all. Callers that take the first match — ox
+// init --team resolves a slug or name against this list — would otherwise resolve
+// the same string to a different team on a different run, with identical input and
+// no way to tell from the output.
 func (r *ReposResponse) TeamMembershipsFromRepos() []TeamMembership {
 	if len(r.Teams) > 0 {
 		return r.Teams
@@ -112,6 +120,12 @@ func (r *ReposResponse) TeamMembershipsFromRepos() []TeamMembership {
 			Slug: repo.Slug,
 		})
 	}
+	sort.Slice(teams, func(i, j int) bool {
+		if teams[i].ID != teams[j].ID {
+			return teams[i].ID < teams[j].ID
+		}
+		return teams[i].Name < teams[j].Name
+	})
 	return teams
 }
 

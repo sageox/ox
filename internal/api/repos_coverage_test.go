@@ -405,3 +405,47 @@ func TestRepoClient_Endpoint(t *testing.T) {
 	client := &RepoClient{baseURL: "https://sageox.ai"}
 	assert.Equal(t, "https://sageox.ai", client.Endpoint())
 }
+
+// TestTeamMembershipsFromRepos_DerivedOrderIsStable pins the ordering of the
+// derived path. Repos is a map and Go randomizes map iteration order per process,
+// so without the sort this list has no defined order — and ox init --team resolves
+// a user-typed slug or name against it by taking the first match. Two teams that
+// share a name would then bind the repo to a different tenant on a different run,
+// with identical input and nothing in the output to distinguish the two.
+//
+// Iterating here rather than asserting once is deliberate: a single call can agree
+// with sorted order by chance.
+func TestTeamMembershipsFromRepos_DerivedOrderIsStable(t *testing.T) {
+	t.Parallel()
+
+	resp := ReposResponse{Repos: map[string]RepoInfo{}}
+	for _, id := range []string{"team_d", "team_a", "team_c", "team_b", "team_e", "team_f"} {
+		resp.Repos[id] = RepoInfo{Name: id, Type: "team-context", TeamID: id, Slug: id}
+	}
+	want := []string{"team_a", "team_b", "team_c", "team_d", "team_e", "team_f"}
+
+	for i := 0; i < 50; i++ {
+		var got []string
+		for _, tm := range resp.TeamMembershipsFromRepos() {
+			got = append(got, tm.ID)
+		}
+		require.Equal(t, want, got, "derived membership order must not depend on map iteration")
+	}
+}
+
+// TestTeamMembershipsFromRepos_DeclaredOrderIsPreserved is the counterweight: only
+// the derived path is sorted. The Teams array is the server's own answer and its
+// order is the server's to choose.
+func TestTeamMembershipsFromRepos_DeclaredOrderIsPreserved(t *testing.T) {
+	t.Parallel()
+
+	resp := ReposResponse{Teams: []TeamMembership{
+		{ID: "team_z", Name: "Zulu"},
+		{ID: "team_a", Name: "Alpha"},
+	}}
+
+	got := resp.TeamMembershipsFromRepos()
+	require.Len(t, got, 2)
+	assert.Equal(t, "team_z", got[0].ID, "the declared array must not be reordered")
+	assert.Equal(t, "team_a", got[1].ID)
+}
