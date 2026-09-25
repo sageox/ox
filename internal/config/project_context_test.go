@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -607,10 +608,18 @@ func TestProjectContext_LocalhostEndpoint(t *testing.T) {
 	// `…LocalhostEndpoint880806410/…`, where "88080" contains "8080": a real red
 	// build, on a machine that had done nothing wrong, for a port that was
 	// correctly stripped.
+	// Containment is asserted explicitly, not inferred from the absence of an
+	// error. filepath.Rel succeeds for a target OUTSIDE its base and returns a
+	// path starting with "..", so require.NoError alone would let a path that
+	// escaped tempHome through — and such a path could still contain "localhost"
+	// and omit "8080", passing both assertions below for entirely the wrong
+	// reason. That is the same defect this helper was written to remove.
 	relative := func(path string) string {
 		t.Helper()
 		rel, relErr := filepath.Rel(tempHome, path)
 		require.NoError(t, relErr, "path %q is expected to live under the test HOME", path)
+		require.False(t, rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)),
+			"path %q escaped the test HOME %q (relative: %q)", path, tempHome, rel)
 		return rel
 	}
 
