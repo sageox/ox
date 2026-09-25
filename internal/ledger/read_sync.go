@@ -1412,11 +1412,18 @@ func verifyReadCheckout(ctx context.Context, opts ReadSyncOptions, transport *gi
 	shallow, err := runReadGit(ctx, transport, false, dir, "rev-parse", "--is-shallow-repository")
 	if err != nil || shallow != "false" {
 		result.History, result.ErrorClass = "shallow", "incomplete_history"
+		if err != nil && readInterrupted(ctx, err) {
+			// A check the budget or a signal killed says nothing about history.
+			result.History, result.ErrorClass = "unknown", "interrupted"
+		}
 		return result
 	}
 	result.History = "full"
 	if _, err := runReadGit(ctx, transport, false, dir, "rev-list", "--count", "HEAD"); err != nil {
 		result.History, result.ErrorClass = "unknown", "incomplete_history"
+		if readInterrupted(ctx, err) {
+			result.ErrorClass = "interrupted"
+		}
 		return result
 	}
 	files, err := readFiles(ctx, transport, dir, dirs, true)
