@@ -81,7 +81,7 @@ Output is JSON by default (the AI-coworker/plumbing path). Use --text for a huma
 		}
 		// An authored HTML plan enriches via its DERIVED markdown — the
 		// detectors are section/file-keyed and must never parse raw HTML.
-		if plan.LooksLikeHTML(in.Raw) {
+		if plan.LooksLikeHTML(in.Path, in.Raw) {
 			p := plan.Parse(plan.ExtractMarkdown([]byte(in.Raw)))
 			p.Path = in.Path
 			in = p
@@ -640,7 +640,7 @@ func runPlanSaveFile(cmd *cobra.Command, filePath, annPath, kind string) error {
 		return plan.Enrich(context.Background(), in, gitRoot)
 	}
 
-	if plan.LooksLikeHTML(string(data)) {
+	if plan.LooksLikeHTML(filePath, string(data)) {
 		derived := plan.ExtractMarkdown(data)
 		mdIn := plan.Parse(derived)
 		mdIn.Path = filePath
@@ -685,13 +685,14 @@ func savedNoun(kind string) string {
 	return string(plan.KindOrDefault(plan.ArtifactKind(kind)))
 }
 
+// runPlanLintFile lints an authored HTML plan page and refuses a file that is not one.
 func runPlanLintFile(cmd *cobra.Command, filePath string, strict bool, kind string) error {
 	out := cmd.OutOrStdout()
 	html, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("read %q: %w", filePath, err)
 	}
-	if !plan.LooksLikeHTML(string(html)) {
+	if !plan.LooksLikeHTML(filePath, string(html)) {
 		return fmt.Errorf("%q does not look like an authored HTML page", filePath)
 	}
 
@@ -945,6 +946,7 @@ func priorArtURLResolver(gitRoot string) func(refKind, ref string) string {
 	}
 }
 
+// runPlanRenderFresh renders a plan from --file or stdin, serving an authored HTML page as the plan of record.
 func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact bool, kind string) error {
 	in, err := plan.Resolve(file, cmd.InOrStdin())
 	if err != nil {
@@ -957,7 +959,7 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact
 	}
 	// HTML-primary: an authored page is the plan of record — derive markdown,
 	// enrich via the derived sections, inject chrome (never wrap/re-render).
-	if plan.LooksLikeHTML(in.Raw) {
+	if plan.LooksLikeHTML(in.Path, in.Raw) {
 		return runPlanRenderFreshHTML(cmd, in, outPath, open, artifact, kind)
 	}
 	gitRoot := findGitRoot()
