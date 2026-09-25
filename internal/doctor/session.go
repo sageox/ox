@@ -1133,6 +1133,11 @@ func (c *SessionAutoStageCheck) findUnstagedSessionFiles(ledgerPath string) []st
 		status := line[:2]
 		filename := strings.TrimSpace(line[3:])
 
+		// never stage while a conflict is unresolved: `git add sessions/` would mark it resolved with markers (#1055)
+		if strings.Contains(status, "U") || status == "AA" || status == "DD" {
+			return nil
+		}
+
 		// check if this is an untracked directory (e.g., "?? sessions/")
 		// when the entire sessions/ directory is untracked, git shows the directory
 		// not the individual files - but we should still stage them
