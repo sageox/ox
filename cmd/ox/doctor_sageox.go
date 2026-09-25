@@ -29,6 +29,7 @@ session.jsonl
 sessions/
 .needs-doctor
 .needs-doctor-agent
+.session-recovery.json
 
 # Ignore agent instance state (ephemeral, per-user)
 agent_instances/
@@ -62,6 +63,7 @@ var requiredGitignoreEntries = []string{
 	"sessions/",
 	".needs-doctor",
 	".needs-doctor-agent",
+	".session-recovery.json",
 	"agent_instances/",
 	"agent_tasks/",
 	"config.local.toml",

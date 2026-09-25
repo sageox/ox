@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -185,8 +186,14 @@ func checkGitRepoState() checkResult {
 		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 		hasUnstaged := false
 		count := 0
+		var perMachine []string
 		for _, line := range lines {
 			if line == "" {
+				continue
+			}
+			// a file ox's own .gitignore excludes is per-machine state, not config to commit (#1062)
+			if len(line) > 3 && slices.Contains(requiredGitignoreEntries, filepath.Base(line[3:])) {
+				perMachine = append(perMachine, line[3:])
 				continue
 			}
 			count++
@@ -194,6 +201,11 @@ func checkGitRepoState() checkResult {
 			if len(line) >= 2 && line[1] != ' ' {
 				hasUnstaged = true
 			}
+		}
+		if len(perMachine) > 0 {
+			return WarningCheck("Repo state",
+				fmt.Sprintf("%d per-machine file(s) in the index under .sageox/", len(perMachine)),
+				"Do not commit these; unstage with 'git rm --cached "+strings.Join(perMachine, " ")+"'")
 		}
 		if count > 0 {
 			if hasUnstaged {

@@ -58,6 +58,10 @@ func GetSageoxFilesToCommit() []string {
 		matches, err := filepath.Glob(filepath.Join(sageoxDir, pattern))
 		if err == nil {
 			for _, match := range matches {
+				// git add -f would override ox's own ignore rules, so skip what they ignore
+				if slices.Contains(requiredGitignoreEntries, filepath.Base(match)) {
+					continue
+				}
 				// convert to relative path
 				relPath, err := filepath.Rel(repoRoot, match)
 				if err != nil {
