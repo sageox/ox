@@ -29,10 +29,10 @@ type MetaRepairOutcome struct {
 }
 
 // RecoverEmptyTitleMeta inspects one session's meta.json for the
-// post-Apr-27 empty-title failure shape (meta.title=="" with status !=
-// unrecoverable). When summary.json carries a real title, promotes it
-// back into meta and stamps SummaryStatus=ok. Otherwise increments
-// SummaryAttempts and, at MaxSummaryAttempts, flips status to
+// post-Apr-27 empty-title failure shape. Draft and pending sessions still
+// legitimately lack a title and are skipped. When summary.json carries a real
+// title, promotes it back into meta and stamps SummaryStatus=ok. Otherwise
+// increments SummaryAttempts and, at MaxSummaryAttempts, flips status to
 // unrecoverable so future calls early-exit.
 //
 // This is the daemon-safe empty-title repair. The explicit CLI
@@ -67,6 +67,13 @@ func RecoverEmptyTitleMeta(sessionDir string, dryRun bool) MetaRepairOutcome {
 		// permanently marking real work as unsummarizable. It would also dirty the
 		// ledger worktree mid-recording for a file the CLI is about to purge.
 		if meta.IsDraft() {
+			out.Skipped = true
+			return nil, nil
+		}
+		// Raw publication marks a session pending before summarization runs.
+		// Even an existing summary.json does not make this metadata-repair pass
+		// responsible for completion; only the summarization path may settle it.
+		if meta.SummaryStatus == "pending" {
 			out.Skipped = true
 			return nil, nil
 		}

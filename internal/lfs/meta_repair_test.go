@@ -377,6 +377,42 @@ func TestRecoverEmptyTitleMeta_HealthyMetaSkipped(t *testing.T) {
 	assert.Equal(t, "Real Title", got.Title, "must not overwrite a healthy title")
 }
 
+func TestRecoverEmptyTitleMeta_PendingSkipped(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		hasSummary   bool
+		summaryTitle string
+		attempts     int
+	}{
+		{name: "summary missing", attempts: MaxSummaryAttempts - 1},
+		{name: "summary present", hasSummary: true, summaryTitle: "Generated title"},
+		{name: "summary empty", hasSummary: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTestMeta(t, dir, &SessionMeta{SummaryStatus: "pending", SummaryAttempts: tc.attempts})
+			if tc.hasSummary {
+				writeTestSummary(t, dir, tc.summaryTitle)
+			}
+			metaPath := filepath.Join(dir, "meta.json")
+			before, err := os.ReadFile(metaPath)
+			require.NoError(t, err)
+
+			for range MaxSummaryAttempts + 1 {
+				out := RecoverEmptyTitleMeta(dir, false)
+				assert.True(t, out.Skipped)
+				assert.False(t, out.RecoveredFromJSON)
+				assert.False(t, out.BumpedAttempts)
+				assert.False(t, out.FlippedTerminal)
+				assert.Empty(t, out.Error)
+				after, err := os.ReadFile(metaPath)
+				require.NoError(t, err)
+				assert.Equal(t, before, after, "pending metadata must remain byte-identical")
+			}
+		})
+	}
+}
+
 // TestRecoverEmptyTitleMeta_UnrecoverableTerminalSkipped covers the
 // terminal state. After MaxSummaryAttempts the daemon stamps
 // SummaryStatus=unrecoverable; subsequent autofix passes must NOT

@@ -42,7 +42,7 @@ func Default() *Registry {
 	})
 	r.Register(&Check{
 		Slug:        "session-meta-titles",
-		Description: "Recover empty meta.title from summary.json on finalized sessions; cap retries at MaxSummaryAttempts",
+		Description: "Recover empty meta.title from summary.json after summarization; skip draft and pending sessions",
 		MinInterval: 30 * time.Minute,
 		BlastRadius: "single ledger; per-session meta.json rewrite, bounded by MaxSummaryAttempts",
 		Run:         checkSessionMetaTitles,
@@ -305,9 +305,10 @@ func checkSessionInlineSummaryRetry(_ context.Context, repoPath string) CheckRes
 // checkSessionMetaTitles is the daemon-side empty-title repair. It
 // resolves the ledger for repoPath, walks sessions/, and runs
 // lfs.RecoverEmptyTitleMeta on each session whose meta.title is
-// empty. Recovers from summary.json when possible; otherwise
-// increments the bounded attempt counter and at lfs.MaxSummaryAttempts
-// flips status to "unrecoverable" so the next pass short-circuits.
+// empty. Draft and pending sessions are left to their recording and
+// summarization paths. For other sessions, it recovers from summary.json
+// when possible; otherwise it increments the bounded attempt counter and at
+// lfs.MaxSummaryAttempts flips status to "unrecoverable".
 //
 // Why per-ledger and not per-session: the autofix scheduler iterates
 // repoPaths (workspaces). The session repair lives on the LEDGER
