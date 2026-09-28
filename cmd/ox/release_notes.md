@@ -13,7 +13,7 @@ Sessions that never captured any work stay out of your Ledger again, and ox now 
 
 ### Privacy
 
-- **ox now sends usage data to PostHog** — which commands run, how long they take, and whether they worked, counted per install and per team; never your code, arguments, file paths, or error messages. `ox config get telemetry` shows exactly what's sent, and `ox config set telemetry off` or `DO_NOT_TRACK=1` turns it off.
+- **ox now sends usage data to PostHog** — which commands run, how long they take, and whether they worked, counted per install and per team; never your code, arguments, file paths, or error messages. `ox config get telemetry` lists what's sent, and `ox config set telemetry off` or `DO_NOT_TRACK=1` turns it off.
 
 ### Fixed
 
