@@ -33,6 +33,9 @@ type ConversationRow struct {
 	ActionItemCount int      `json:"action_item_count"`
 	Topics          []string `json:"topics,omitempty"`
 	HasDistillation bool     `json:"has_distillation"`
+	// HasKeyframes marks a screen recording (INDEX.json's has_keyframes):
+	// its transcript can carry frames and pointing with --frames.
+	HasKeyframes bool `json:"has_keyframes,omitempty"`
 }
 
 // ListData is the list envelope payload.
@@ -119,6 +122,7 @@ func (r *Reader) listRow(root *os.Root, rw row) ConversationRow {
 		ActionItemCount: rw.entry.ActionItemCount,
 		Topics:          rw.entry.Topics,
 		HasDistillation: rw.hasDistillation,
+		HasKeyframes:    rw.entry.HasKeyframes,
 	}
 	if id, err := ParseID(rw.entry.RecordingID); err == nil {
 		cr.ConversationID = id.ConversationID
@@ -129,7 +133,15 @@ func (r *Reader) listRow(root *os.Root, rw row) ConversationRow {
 	return cr
 }
 
-// guidanceShow names the L1 rung for a specific conversation.
-func guidanceShow(conversationID string) string {
-	return fmt.Sprintf("Topics: ox conversation topics %s. Transcript: ox conversation transcript %s --cues N-M.", conversationID, conversationID)
+// framesHint points at --frames for a screen recording.
+const framesHint = "Screen recording: add --frames to see what was on screen and pointed at."
+
+// guidanceShow names the L1 rung for a specific conversation; a screen
+// recording also gets the --frames hint.
+func guidanceShow(conversationID string, screen bool) string {
+	g := fmt.Sprintf("Topics: ox conversation topics %s. Transcript: ox conversation transcript %s --cues N-M.", conversationID, conversationID)
+	if screen {
+		g += " " + framesHint
+	}
+	return g
 }

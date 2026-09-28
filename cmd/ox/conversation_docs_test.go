@@ -102,6 +102,7 @@ func TestConversationReferenceDocs_Committed(t *testing.T) {
 				"--from string",
 				"--to string",
 				"--full",
+				"--frames",
 				// the --full escape hatch must keep telling agents it is
 				// meant for humans (plan D15).
 				"intended for humans",
