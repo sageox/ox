@@ -37,7 +37,7 @@ func runConversationTopics(cmd *cobra.Command, args []string) error {
 	}
 	if len(args) != 1 {
 		return conversationUsageExit(cmd.OutOrStdout(), format, conversationUsageErrorCode,
-			"topics takes exactly one <id> (cnv_<uuidv7>, rec_<uuidv7>, or a sageox:// citation URI)")
+			"topics takes exactly one <id> (cnv_<uuidv7>, rec_<uuidv7>, a sageox:// citation URI, or a sageox.ai recording link)")
 	}
 
 	reader, openErr := openConversationReader()

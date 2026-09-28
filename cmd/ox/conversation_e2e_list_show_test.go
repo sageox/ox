@@ -230,6 +230,39 @@ func TestConversationE2E_InvalidIDs(t *testing.T) {
 	}
 }
 
+// TestConversationE2E_PastedLinks proves a sageox.ai link pasted from a
+// browser or a desktop receipt opens the same conversation as its id, at the
+// binary level, for every command that takes an id.
+// Failure prevented: an AI coworker handed a link has no local way in and
+// falls back to web-fetching a sign-in wall.
+func TestConversationE2E_PastedLinks(t *testing.T) {
+	t.Parallel()
+	e2e := setupConversationE2E(t)
+	rec := "rec_" + convE2EFullUUID
+
+	for _, link := range []string{
+		"https://sageox.ai/c/" + rec,
+		"https://sageox.ai/c/" + convE2EFullCnv + "?from=desktop",
+		"https://sageox.ai/team/team_x/media/recordings/" + rec + "/transcript",
+		"https://sageox.ai/kb/kb_x/recordings/" + rec,
+	} {
+		out, exit := e2e.Run(t, "conversation", "show", link)
+		require.Equal(t, 0, exit, "link %s\nout:\n%s", link, out)
+		env, _ := decodeConversationEnvelope(t, out)
+		require.True(t, env.Success, "link %s", link)
+	}
+
+	out, exit := e2e.Run(t, "conversation", "transcript", "https://sageox.ai/c/"+rec, "--cues", "1-2")
+	require.Equal(t, 0, exit, "out:\n%s", out)
+
+	out, exit = e2e.Run(t, "conversation", "show", "https://sageox.ai/s/rs-opaque")
+	require.Equal(t, 2, exit, "share links are usage errors\nout:\n%s", out)
+	env, _ := decodeConversationEnvelope(t, out)
+	require.NotNil(t, env.Error)
+	require.Equal(t, "share_link_unresolvable", env.Error.Code)
+	require.Contains(t, env.Guidance, "recording page URL")
+}
+
 // TestConversationE2E_IndexMiss proves a strictly valid id with no live
 // index entry hard-fails with the typed not_indexed error and the "not
 // indexed yet" copy (D3) — a runtime failure (exit 1), not a usage error.

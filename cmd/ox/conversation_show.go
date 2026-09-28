@@ -15,7 +15,7 @@ import (
 var conversationShowCmd = &cobra.Command{
 	Use:           "show <id>",
 	Short:         "Show one conversation's metadata and human summary",
-	Long:          "Metadata plus the human summary of one conversation. A conversation without a summary yet is data, not an error: the summary block reports available=false with a typed reason. Accepts cnv_<uuidv7>, rec_<uuidv7>, or a sageox:// citation URI.",
+	Long:          "Metadata plus the human summary of one conversation. A conversation without a summary yet is data, not an error: the summary block reports available=false with a typed reason. Accepts cnv_<uuidv7>, rec_<uuidv7>, a sageox:// citation URI, or a pasted sageox.ai recording link (…/c/rec_…, …/recordings/rec_…).",
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Args:          cobra.ArbitraryArgs,
@@ -36,7 +36,7 @@ func runConversationShow(cmd *cobra.Command, args []string) error {
 	}
 	if len(args) != 1 {
 		return conversationUsageExit(cmd.OutOrStdout(), format, conversationUsageErrorCode,
-			"show takes exactly one <id> (cnv_<uuidv7>, rec_<uuidv7>, or a sageox:// citation URI)")
+			"show takes exactly one <id> (cnv_<uuidv7>, rec_<uuidv7>, a sageox:// citation URI, or a sageox.ai recording link)")
 	}
 
 	reader, openErr := openConversationReader()

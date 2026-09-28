@@ -64,7 +64,7 @@ func runConversationTranscript(cmd *cobra.Command, args []string) error {
 	}
 	if len(args) != 1 {
 		return conversationUsageExit(cmd.OutOrStdout(), format, conversationUsageErrorCode,
-			"transcript takes exactly one <id> (cnv_<uuidv7>, rec_<uuidv7>, or a sageox:// citation URI)")
+			"transcript takes exactly one <id> (cnv_<uuidv7>, rec_<uuidv7>, a sageox:// citation URI, or a sageox.ai recording link)")
 	}
 	opts, selErr := resolveTranscriptSelectors(flags)
 	if selErr != nil {

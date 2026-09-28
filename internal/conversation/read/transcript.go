@@ -79,7 +79,7 @@ func (r *Reader) Transcript(rawID string, opts TranscriptOptions) *Envelope {
 	if selErr := validateSelectors(opts); selErr != nil {
 		return r.finishError(start, selErr, nil)
 	}
-	_, droot, lookErr := r.lookup(id.RecordingID)
+	_, droot, lookErr := r.lookup(id)
 	if lookErr != nil {
 		return r.finishError(start, lookErr, nil)
 	}

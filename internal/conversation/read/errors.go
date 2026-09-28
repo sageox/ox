@@ -9,6 +9,10 @@ const (
 	// UUIDv7 or sageox:// citation URI (D16), or a topic id is not a strictly
 	// valid tp_ UUIDv7 (D21).
 	ErrCodeInvalidID = "invalid_id"
+	// ErrCodeShareLinkUnresolvable: the input is a sageox.ai share link
+	// (/s/{token}). The token is opaque and no local data maps it to a
+	// recording, so the caller must supply the recording page URL or id.
+	ErrCodeShareLinkUnresolvable = "share_link_unresolvable"
 	// ErrCodeNoTeamContext: no local team-context checkout is resolvable for
 	// this repo — covers ephemeral mode and pre-first-sync states (D14, D18).
 	ErrCodeNoTeamContext = "no_team_context"
@@ -63,7 +67,9 @@ func newError(code, message string) *Error {
 func errorGuidance(code string) string {
 	switch code {
 	case ErrCodeInvalidID:
-		return "Copy a valid id from ox conversation list (cnv_/rec_ UUIDv7 or a sageox:// citation URI)."
+		return "Copy a valid id from ox conversation list (cnv_/rec_ UUIDv7, a sageox:// citation URI, or a sageox.ai recording link)."
+	case ErrCodeShareLinkUnresolvable:
+		return "Open the share link in a browser, then pass the recording page URL (…/recordings/rec_…) or its rec_ id to ox conversation show."
 	case ErrCodeNoTeamContext:
 		return "Check team-context sync with ox status; retry after the first sync completes."
 	case ErrCodeNotIndexed:

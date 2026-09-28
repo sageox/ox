@@ -186,6 +186,8 @@ func TestConversationUsageErrors(t *testing.T) {
 		{"invalid id", "show", []string{"not-an-id"}, read.ErrCodeInvalidID},
 		{"bare uuid rejected", "show", []string{"019ff2f5-2079-7be1-b05e-8caad2772e61"}, read.ErrCodeInvalidID},
 		{"bad topic id", "topic", []string{convTestFullCnv, "hiring"}, read.ErrCodeInvalidID},
+		{"foreign host link", "show", []string{"https://example.com/c/" + convTestFullCnv}, read.ErrCodeInvalidID},
+		{"share link", "show", []string{"https://sageox.ai/s/rs-abc123"}, read.ErrCodeShareLinkUnresolvable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

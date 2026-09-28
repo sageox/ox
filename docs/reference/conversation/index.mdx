@@ -19,8 +19,13 @@ Each JSON envelope's guidance field names the next step, and token_estimate
 reports what reading the payload costs. With no subcommand, behaves like
 `ox conversation list`.
 
-Accepted ids: cnv_<uuidv7>, rec_<uuidv7>, or a full sageox:// citation URI
-copied from a distillation atom.
+Accepted ids: cnv_<uuidv7>, rec_<uuidv7>, a full sageox:// citation URI
+copied from a distillation atom, or a pasted sageox.ai recording link:
+  https://sageox.ai/c/rec_…
+  https://sageox.ai/team/<team>/media/recordings/rec_…[/transcript]
+  https://sageox.ai/kb/<kb>/recordings/rec_…
+Share links (https://sageox.ai/s/…) cannot be resolved yet: open one and
+paste the recording page URL or its rec_ id instead.
 
 ```
 ox conversation [flags]

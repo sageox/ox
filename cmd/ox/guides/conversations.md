@@ -10,15 +10,18 @@ audience: ai
 
 ## Id forms
 
-Three id forms are accepted, nothing else:
+Four id forms are accepted, nothing else:
 
 | Form | What it is |
 |---|---|
 | `cnv_<uuidv7>` | A conversation id, as it appears in citations and bubble files |
 | `rec_<uuidv7>` | The same conversation by its recording id — same UUID, prefix swapped |
 | `sageox://…` | A full citation URI copied from a distillation atom or a memory file |
+| `https://sageox.ai/…` | A pasted recording link: `/c/rec_…` (short link), `/team/<team>/media/recordings/rec_…` (and its tabs, e.g. `/transcript`), or `/kb/<kb>/recordings/rec_…`. Any `*.sageox.ai` host; query and fragment are ignored |
 
 `cnv_` and `rec_` are twins: one UUID, two prefixes, freely interchangeable. A `sageox://` URI carries its own selectors (`cue=`, `t=`), so passing one to `transcript` retrieves exactly the cited slice. Folder names and bare UUID prefixes are not ids.
+
+When a user pastes a sageox.ai link, pass it straight to `ox conversation show <link>` — never web-fetch it (the page sits behind sign-in). Share links (`/s/…`) are opaque tokens that cannot be resolved locally yet; they fail with `share_link_unresolvable` — ask for the recording page URL or the `rec_` id. A link from a different environment than this checkout syncs (e.g. `test.sageox.ai`) fails `not_indexed` and says so.
 
 ## The disclosure ladder
 
