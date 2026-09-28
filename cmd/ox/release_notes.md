@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-28
+
+Sessions that never captured any work stay out of your Ledger again, and ox now sends usage data, which you can turn off.
+
+### Privacy
+
+- **ox now sends usage data to PostHog** — which commands run, how long they take, and whether they worked, counted per install and per team; never your code, arguments, file paths, or error messages. `ox config get telemetry` shows exactly what's sent, and `ox config set telemetry off` or `DO_NOT_TRACK=1` turns it off.
+
+### Fixed
+
+- **Recordings with no work in them stay out of your Ledger** — since 0.17.0, a session that ended before anything happened, such as the short-lived helper processes some launchers start beside each chat, was summarized and saved as a blank, untitled session. ox skips them again.
+
 ## [0.18.0] - 2026-09-24
 
 Team skills now lead with their own name, plans are for any work your team executes, and `ox upgrade` confirms you actually got the new version.
