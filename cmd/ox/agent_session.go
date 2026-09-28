@@ -1067,7 +1067,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// resulting commit will break LFS linkage and the daemon's anti-entropy
 	// will start clobbering. See the 2026-04-25 post-mortem (bd ox-4ncz).
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
-	hasIncrementalEntries := rawJSONLHasEntries(rawPath)
+	hasIncrementalEntries := session.HasSubstantiveEntries(rawPath)
 
 	if hasIncrementalEntries {
 		// incremental hooks already wrote entries -- do final drain, write footer, and generate artifacts
@@ -2461,26 +2461,6 @@ func getSessionTermsNotice() string {
 	_ = config.SaveUserConfig(userCfg)
 
 	return sessionTermsNotice
-}
-
-// rawJSONLHasEntries returns true if raw.jsonl exists and contains more than
-// just a header line, indicating incremental hooks have appended entries.
-func rawJSONLHasEntries(rawPath string) bool {
-	f, err := os.Open(rawPath)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	lineCount := 0
-	for scanner.Scan() {
-		lineCount++
-		if lineCount > 1 {
-			return true // more than just the header
-		}
-	}
-	return false
 }
 
 // needsGenericDropFile returns true when a generic adapter session needs a drop

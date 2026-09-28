@@ -669,8 +669,9 @@ func TestDetect_SkipsHeaderOnlySessions(t *testing.T) {
 	}
 
 	// raw.jsonl with ONLY the metadata header — no real session content
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
 	headerOnly := `{"metadata":{"agent_id":"OxHDR0","agent_type":"claude","version":"1.0"},"type":"header"}` + "\n"
-	if err := os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(headerOnly), 0644); err != nil {
+	if err := os.WriteFile(rawPath, []byte(headerOnly), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -682,6 +683,24 @@ func TestDetect_SkipsHeaderOnlySessions(t *testing.T) {
 	if len(items) != 0 {
 		t.Errorf("expected 0 items for header-only session, got %d — "+
 			"header-only sessions should be skipped to prevent ghost stubs in the ledger", len(items))
+	}
+
+	// The SessionEnd door stamps a carrier footer (#1025) before the daemon
+	// looks at the file; header + footer must be skipped the same way.
+	now := time.Now().UTC()
+	if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
+		StoppedAt:      now,
+		NativeSessions: []lfs.NativeSession{{ID: "cc-1", Source: "startup", FirstSeen: now, LastSeen: now}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	items, err = handler.Detect(ledgerPath)
+	if err != nil {
+		t.Fatalf("Detect after footer failed: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("expected 0 items after the carrier footer, got %d — a recording that never "+
+			"captured a turn must not be finalized because a finalize door stamped it", len(items))
 	}
 }
 
@@ -991,41 +1010,5 @@ func TestDetect_EmptyTitleSummaryStubTriggersRetry(t *testing.T) {
 	}
 	if len(payload.Missing) != len(requiredArtifacts) {
 		t.Errorf("expected all artifacts in Missing for full regeneration, got %v", payload.Missing)
-	}
-}
-
-// TestDetect_SkipsRecordingClosedByCarrierFooter: a coworker's agent starts
-// and exits without a single prompt (a launcher's helper process, a resumed
-// workspace closed untouched). The SessionEnd hook stamps the carrier footer
-// (#1025), so the daemon sees header + footer. Anti-entropy must treat that
-// exactly like the one-line file above: nothing to summarize, upload or commit.
-func TestDetect_SkipsRecordingClosedByCarrierFooter(t *testing.T) {
-	handler := NewSessionFinalizeHandler(slog.Default())
-
-	ledgerPath := t.TempDir()
-	sessionDir := filepath.Join(ledgerPath, "sessions", "2026-09-28T04-15-testuser-OxzGT4")
-	if err := os.MkdirAll(sessionDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	rawPath := filepath.Join(sessionDir, "raw.jsonl")
-	header := `{"metadata":{"agent_id":"OxzGT4","agent_type":"claude-code","version":"1.0"},"type":"header"}` + "\n"
-	if err := os.WriteFile(rawPath, []byte(header), 0644); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
-		StoppedAt:      now,
-		NativeSessions: []lfs.NativeSession{{ID: "5a0b7989-e539-4c99-979f-b1d4cb19d697", Source: "startup", FirstSeen: now, LastSeen: now}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	items, err := handler.Detect(ledgerPath)
-	if err != nil {
-		t.Fatalf("Detect failed: %v", err)
-	}
-	if len(items) != 0 {
-		t.Errorf("expected 0 items, got %d — a recording that never captured a turn must not be "+
-			"finalized just because a finalize door stamped its carrier footer", len(items))
 	}
 }

@@ -228,9 +228,9 @@ type RawKind int
 const (
 	// RawMissing: the file does not exist or cannot be read.
 	RawMissing RawKind = iota
-	// RawHeaderOnly: exists, but holds no conversation entry — the metadata
-	// header line and at most the framing a finalize door appends (a footer).
-	// A recording that never captured anything.
+	// RawHeaderOnly: exists, but holds no content line — only the metadata
+	// header and framing (isFramingLine). A recording that never captured
+	// anything.
 	RawHeaderOnly
 	// RawSubstantive: real transcript content, safe to summarize.
 	RawSubstantive
@@ -268,19 +268,13 @@ func ClassifyRawFile(rawPath string) RawKind {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 
-	// Line 1 is the header by position. Past it, only framing is skipped: a
-	// blank line or a {"type":"footer"} record. Every finalize door appends
-	// that footer (StampRawCarrier) before the daemon classifies the file, so
-	// a recording that never captured a turn arrives as header + footer; a
-	// line count called that content (#1025), and the daemon summarized,
-	// uploaded and committed the empty recording.
-	first := true
-	for scanner.Scan() {
-		if first {
-			first = false
-			continue
-		}
-		if !isFramingLine(scanner.Bytes()) {
+	// The SessionEnd and /clear doors (stampRecordingCarrierAtStop) append a
+	// footer before the daemon classifies the file, so header + footer must
+	// still read as header-only. A PostToolUse hook can append a turn before
+	// any header exists (handleAfterTool tolerates a failed header write), so
+	// line 1 is skipped only when it is a header.
+	for i := 0; scanner.Scan(); i++ {
+		if !isFramingLine(scanner.Bytes(), i == 0) {
 			return RawSubstantive
 		}
 	}
@@ -295,22 +289,24 @@ func ClassifyRawFile(rawPath string) RawKind {
 	return RawHeaderOnly
 }
 
-// isFramingLine reports whether a raw.jsonl line past the header carries no
-// conversation: blank, or a footer record. Anything else counts as content,
-// including bytes that are not JSON — what cannot be read must never classify
-// as a deletable phantom.
-func isFramingLine(line []byte) bool {
+// isFramingLine reports whether a raw.jsonl line is framing rather than
+// content: blank, a header or footer record, an import's _meta line, or — on
+// the first line only — a typeless legacy metadata header. Every content entry
+// carries a type. Keys match exactly, as in ReadSessionFromPath. A line that
+// is not JSON is content: a torn footer costs one empty summary, a misread
+// turn would cost the recording.
+func isFramingLine(line []byte, first bool) bool {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 {
 		return true
 	}
-	var rec struct {
-		Type string `json:"type"`
-	}
+	var rec map[string]json.RawMessage
 	if json.Unmarshal(line, &rec) != nil {
 		return false
 	}
-	return rec.Type == "footer"
+	typ := string(rec["type"])
+	_, hasMeta := rec["_meta"]
+	return typ == `"footer"` || typ == `"header"` || hasMeta || (first && typ == "")
 }
 
 // HasUserTurn reports whether a raw.jsonl file contains at least one user turn
@@ -362,8 +358,8 @@ func HasUserTurn(rawPath string) bool {
 }
 
 // HasSubstantiveEntries returns true if a raw.jsonl file holds at least one
-// conversation entry beyond the metadata header and any footer. A file with
-// none has no real session content and should not be uploaded or finalized.
+// content line past the metadata header and framing (isFramingLine). A file
+// with none has no real session content and should not be uploaded or finalized.
 //
 // A content-store pointer stub is NOT substantive: the bytes present are a
 // reference, not a transcript. Callers that need to distinguish "no data"
@@ -372,33 +368,6 @@ func HasUserTurn(rawPath string) bool {
 // This is the canonical check — use it everywhere instead of inline line counting.
 func HasSubstantiveEntries(rawPath string) bool {
 	return ClassifyRawFile(rawPath) == RawSubstantive
-}
-
-// CountSubstantiveEntries counts lines in a raw.jsonl that are actual session
-// entries, excluding the metadata header (first line). Returns 0 for header-only
-// files or files that don't exist.
-func CountSubstantiveEntries(rawPath string) int {
-	f, err := os.Open(rawPath)
-	if err != nil {
-		return 0
-	}
-	defer f.Close()
-
-	count := 0
-	isFirst := true
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
-	for scanner.Scan() {
-		if isFirst {
-			isFirst = false
-			continue // skip metadata header
-		}
-		if isFramingLine(scanner.Bytes()) {
-			continue
-		}
-		count++
-	}
-	return count
 }
 
 // RawJSONLHasData checks if a raw.jsonl file exists on disk and has content.
