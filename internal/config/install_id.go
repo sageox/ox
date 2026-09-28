@@ -1,11 +1,9 @@
 package config
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/fileutil"
@@ -44,27 +42,39 @@ func InstallID() (string, error) {
 		return id, nil
 	}
 
-	// First use. The lock makes concurrent first runs, such as a SessionStart
-	// hook and the daemon it starts, settle on one ID instead of each saving
-	// its own. Its holder only reads and writes this small file, so a wait
-	// longer than a second means locking itself is failing (for example, a
-	// lock directory that belongs to another user), and saving unlocked still
-	// beats an ID that changes on every run.
-	id := uuid.NewString()
-	save := func() error {
-		if existing := readInstallID(path); existing != "" {
-			id = existing
-			return nil
-		}
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
-		return fileutil.AtomicWriteBytes(path, []byte(id+"\n"), 0o600)
+	return saveNewInstallID(dir, path, uuid.NewString())
+}
+
+// saveNewInstallID saves id unless another process saved an ID first, and
+// returns the ID the file ends up holding. The ID is written to a temporary
+// file and hard-linked into place: the link either publishes a complete file
+// or fails because one already exists, so concurrent first runs (a
+// SessionStart hook and the daemon it starts) all settle on one ID.
+func saveNewInstallID(dir, path, id string) (string, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return id, err
 	}
-	if err := fileutil.WithFileLockTimeout(context.Background(), path, time.Second, save); err != nil {
-		return id, save()
+	tmp, err := os.CreateTemp(dir, "."+installIDFile+"-*")
+	if err != nil {
+		return id, err
 	}
-	return id, nil
+	defer os.Remove(tmp.Name())
+	_, err = tmp.WriteString(id + "\n")
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return id, err
+	}
+	if os.Link(tmp.Name(), path) == nil {
+		return id, nil
+	}
+	if existing := readInstallID(path); existing != "" {
+		return existing, nil
+	}
+	// A damaged file, or a filesystem without hard links: replace it. Only
+	// two such runs racing each other could still disagree, once.
+	return id, fileutil.AtomicWriteBytes(path, []byte(id+"\n"), 0o600)
 }
 
 // readInstallID returns "" unless the file holds a UUID, so a damaged file is

@@ -37,6 +37,10 @@ func TestInstallID_SameIDOnEveryCall(t *testing.T) {
 	saved, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, first+"\n", string(saved))
+	entries, err := os.ReadDir(filepath.Dir(path))
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "the temporary file the ID was written through is gone")
+	assert.Equal(t, installIDFile, entries[0].Name())
 }
 
 // Failure prevented: upgrading ox gives an install that already has a
@@ -116,27 +120,6 @@ func TestInstallID_UnsavableIDIsReportedAsAnError(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.NotEmpty(t, id, "callers that only label one process can still use it")
-}
-
-// Failure prevented: where file locking fails (on a shared machine, a lock
-// directory that belongs to another user), the ID is never saved and every
-// run counts as a new install.
-func TestInstallID_SavedEvenWhenLockingFails(t *testing.T) {
-	path := isolateInstallID(t)
-	tmp := t.TempDir()
-	// A file where the lock directory should be makes every lock fail.
-	require.NoError(t, os.WriteFile(filepath.Join(tmp, "sageox-locks"), nil, 0o600))
-	for _, v := range []string{"TMPDIR", "TMP", "TEMP"} {
-		t.Setenv(v, tmp)
-	}
-
-	first, err := InstallID()
-	require.NoError(t, err)
-	second, err := InstallID()
-	require.NoError(t, err)
-
-	assert.Equal(t, first, second)
-	assert.FileExists(t, path)
 }
 
 // Failure prevented: with no home directory the config directory resolves to a

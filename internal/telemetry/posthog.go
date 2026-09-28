@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -27,9 +28,16 @@ var (
 	postHogHost string
 )
 
-// PostHogSenderArg, as os.Args[1], makes ox post one PostHog event and exit
-// instead of running a command. main checks for it before any other setup.
+// PostHogSenderArg, as os.Args[1], makes ox post the PostHog event on its
+// stdin and exit instead of running a command. main checks for it before any
+// other setup.
 const PostHogSenderArg = "__posthog-send"
+
+// postHogMaxPayload bounds an event. CapturePostHog writes the event into a
+// pipe before the sender starts, and a write that fits in the pipe's buffer
+// (at least 4 KiB on the platforms ox builds for) cannot block the command.
+// An event is under 1 KiB.
+const postHogMaxPayload = 4096
 
 // postHogSendTimeout bounds the detached sender. Nothing waits on it.
 const postHogSendTimeout = 10 * time.Second
@@ -88,11 +96,24 @@ func CapturePostHog(event string, props map[string]any) {
 		Timestamp:  time.Now().UTC(),
 		Properties: props,
 	})
-	if err != nil {
+	if err != nil || len(payload) > postHogMaxPayload {
 		return
 	}
 	exe, err := postHogExecutable()
 	if err != nil {
+		return
+	}
+	// The event reaches the sender on stdin, not in its arguments, which any
+	// local user can read from the process list. It is written and the pipe
+	// closed before the sender starts, so the kernel holds the whole event
+	// even after this command exits.
+	stdin, w, err := os.Pipe()
+	if err != nil {
+		return
+	}
+	defer stdin.Close()
+	_, err = w.Write(payload)
+	if closeErr := w.Close(); err != nil || closeErr != nil {
 		return
 	}
 	// Stdout and Stderr stay nil (/dev/null). A sender holding this command's
@@ -100,25 +121,30 @@ func CapturePostHog(event string, props map[string]any) {
 	// upload finished. proc.Detach does nothing on Windows, which has no ox
 	// release (.config/goreleaser.yml); a Windows build would need its own
 	// creation flags so the sender opens no console window.
-	cmd := exec.Command(exe, PostHogSenderArg, string(payload))
+	cmd := exec.Command(exe, PostHogSenderArg)
+	cmd.Stdin = stdin
 	proc.Detach(cmd)
 	if err := cmd.Start(); err == nil {
 		_ = cmd.Process.Release()
 	}
 }
 
-// RunPostHogSender posts one event built by CapturePostHog. It runs in the
-// detached process and reports nothing, because nothing is waiting for it.
+// RunPostHogSender posts the event CapturePostHog wrote to stdin. It runs in
+// the detached process and reports nothing, because nothing is waiting for it.
 // When every sender slot is taken it drops the event instead of adding
 // another waiting process.
-func RunPostHogSender(event string) {
+func RunPostHogSender(stdin io.Reader) {
 	if !PostHogConfigured() {
+		return
+	}
+	event, err := io.ReadAll(io.LimitReader(stdin, postHogMaxPayload))
+	if err != nil {
 		return
 	}
 	body, err := json.Marshal(struct {
 		APIKey string            `json:"api_key"`
 		Batch  []json.RawMessage `json:"batch"`
-	}{postHogKey, []json.RawMessage{json.RawMessage(event)}})
+	}{postHogKey, []json.RawMessage{event}})
 	if err != nil {
 		return
 	}

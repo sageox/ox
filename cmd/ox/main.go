@@ -102,10 +102,10 @@ func init() {
 }
 
 func main() {
-	// A detached sender started by telemetry.CapturePostHog: post the event and
-	// exit before any command setup.
-	if len(os.Args) == 3 && os.Args[1] == telemetry.PostHogSenderArg {
-		telemetry.RunPostHogSender(os.Args[2])
+	// A detached sender started by telemetry.CapturePostHog: post the event on
+	// stdin and exit before any command setup.
+	if len(os.Args) == 2 && os.Args[1] == telemetry.PostHogSenderArg {
+		telemetry.RunPostHogSender(os.Stdin)
 		return
 	}
 

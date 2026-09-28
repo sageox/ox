@@ -34,10 +34,10 @@ const (
 // sendTo makes it postHogExecutable, and CapturePostHog starts it with
 // PostHogSenderArg.
 func TestMain(m *testing.M) {
-	if len(os.Args) == 3 && os.Args[1] == PostHogSenderArg {
+	if len(os.Args) == 2 && os.Args[1] == PostHogSenderArg {
 		postHogKey = os.Getenv(testPostHogKeyEnv)
 		postHogHost = os.Getenv(testPostHogHostEnv)
-		RunPostHogSender(os.Args[2])
+		RunPostHogSender(os.Stdin)
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
@@ -164,7 +164,7 @@ func TestRunPostHogSender_PostsNothingItCannotSend(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			setPostHog(t, tt.key, tt.host, mustNotStart(t))
-			RunPostHogSender(tt.event)
+			RunPostHogSender(strings.NewReader(tt.event))
 		})
 	}
 	assert.Zero(t, posts.Load())
@@ -222,12 +222,12 @@ func TestRunPostHogSender_DropsTheEventWhenEverySlotIsBusy(t *testing.T) {
 	}
 	taken.Wait()
 
-	RunPostHogSender(`{"event":"ox command run"}`)
+	RunPostHogSender(strings.NewReader(`{"event":"ox command run"}`))
 	assert.Zero(t, posts.Load(), "with every slot busy the event is dropped")
 
 	close(release)
 	done.Wait()
-	RunPostHogSender(`{"event":"ox command run"}`)
+	RunPostHogSender(strings.NewReader(`{"event":"ox command run"}`))
 	assert.Equal(t, int32(1), posts.Load(), "a free slot sends again")
 }
 
@@ -283,4 +283,13 @@ func TestEnabled_EnvironmentThenSavedSetting(t *testing.T) {
 			assert.Equal(t, tt.want, Enabled())
 		})
 	}
+}
+
+// Failure prevented: an event too big for a pipe's buffer blocks the command
+// while it writes the event for the sender.
+func TestCapturePostHog_OversizedEventStartsNothing(t *testing.T) {
+	isolateConfig(t)
+	setPostHog(t, "phc_test", "https://posthog.test", mustNotStart(t))
+
+	CapturePostHog("ox command run", map[string]any{"flags": strings.Repeat("x", postHogMaxPayload)})
 }
