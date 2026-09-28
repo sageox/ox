@@ -65,6 +65,7 @@ type keyframesFile struct {
 		ContentType      string  `json:"content_type"`
 		Description      string  `json:"description"`
 		Filename         string  `json:"filename"`
+		S3Key            string  `json:"s3_key"`
 	} `json:"keyframes"`
 }
 
@@ -154,7 +155,7 @@ func (r *Reader) attachFrames(droot *os.Root, folder string, all []vtt.Cue, out 
 			ContentType: cleanScreenText(f.ContentType),
 			Description: cleanScreenText(f.Description),
 		}
-		if rel, ok := keyframeImagePath(droot, f.Filename); ok {
+		if rel, ok := keyframeImagePath(droot, keyframeImageName(f.Filename, f.S3Key)); ok {
 			frame.Image = filepath.Join(r.discussionsRoot, folder, filepath.FromSlash(rel))
 			frame.FetchCommand = "ox fetch " + shellQuoteIfNeeded(frame.Image)
 		}
@@ -238,6 +239,17 @@ func owningCue(all []vtt.Cue, at time.Duration) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// keyframeImageName picks the repo-relative image name for a keyframe.
+// Current manifests carry `filename` (keyframes/NNN-hash.jpg); the earliest
+// ones carry only `s3_key`, whose basename is the same file under keyframes/.
+// Either way the result is untrusted and goes through keyframeImagePath.
+func keyframeImageName(filename, s3Key string) string {
+	if filename != "" || s3Key == "" {
+		return filename
+	}
+	return "keyframes/" + path.Base(s3Key)
 }
 
 // keyframeImagePath validates keyframes.json's untrusted filename: a local

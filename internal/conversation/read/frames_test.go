@@ -101,6 +101,41 @@ func TestFramesImagePathIsGuarded(t *testing.T) {
 	}
 }
 
+// TestKeyframeImageNameFallsBackToS3Key: the earliest manifests carry only
+// s3_key; its basename names the same file under keyframes/, and the result
+// still passes the image-path guard (a traversal basename does not).
+func TestKeyframeImageNameFallsBackToS3Key(t *testing.T) {
+	cases := []struct{ filename, s3Key, want string }{
+		{"keyframes/001-a.jpg", "recordings/r/keyframes/999-z.jpg", "keyframes/001-a.jpg"},
+		{"", "recordings/r/keyframes/000-99c199e9.jpg", "keyframes/000-99c199e9.jpg"},
+		{"", "", ""},
+	}
+	for _, c := range cases {
+		if got := keyframeImageName(c.filename, c.s3Key); got != c.want {
+			t.Errorf("keyframeImageName(%q, %q) = %q, want %q", c.filename, c.s3Key, got, c.want)
+		}
+	}
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "keyframes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keyframes", "000-99c199e9.jpg"), []byte("stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if rel, ok := keyframeImagePath(root, keyframeImageName("", "recordings/r/keyframes/000-99c199e9.jpg")); !ok || rel != "keyframes/000-99c199e9.jpg" {
+		t.Errorf("s3_key fallback not resolved: %q %v", rel, ok)
+	}
+	if _, ok := keyframeImagePath(root, keyframeImageName("", "recordings/r/keyframes/..")); ok {
+		t.Error("a traversal s3_key basename resolved to an image")
+	}
+}
+
 // TestFramesRespectCueWindow: a --cues window carries only its own frames
 // and pointing, and a frame owned by a cue outside the window is not
 // re-homed onto the window's edge cue.
