@@ -110,6 +110,10 @@ func OxCapabilities() []Capability {
 					Cue:     `A decision record (ADR/DDR) is being created, edited, or cited by number`,
 					Command: "`ox decision enrich --topic \"<subject>\"` (new) / `--file <dr.md>` (edit) — related DRs, numbering, ref verification.",
 				},
+				{
+					Cue:     `A pasted sageox.ai recording link (…/c/rec_…, …/recordings/rec_…)`,
+					Command: "`ox conversation show <link>` — never web-fetch it (sign-in wall). A screen walkthrough: then `ox conversation transcript <link> --frames`.",
+				},
 			},
 		},
 		{
