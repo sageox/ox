@@ -376,6 +376,9 @@ type UserConfig struct {
 	// warning threshold (default 1). Combined with PATExpiryWarningThresholdPct
 	// via max(). Set to 0 with pct==0 to disable warnings entirely.
 	PATExpiryWarningMinDays *int `yaml:"pat_expiry_warning_min_days,omitempty"`
+
+	// TelemetryNoticeShown records that the one-time telemetry notice was shown.
+	TelemetryNoticeShown *bool `yaml:"telemetry_notice_shown,omitempty"`
 }
 
 // PATExpiryWarningDefaults returns the default warning threshold (5%) and
@@ -443,6 +446,16 @@ func (c *UserConfig) HasSeenSessionTerms() bool {
 // SetSessionTermsShown records whether the user has seen the session recording notice.
 func (c *UserConfig) SetSessionTermsShown(shown bool) {
 	c.SessionTermsShown = &shown
+}
+
+// HasSeenTelemetryNotice returns true if the one-time telemetry notice has been shown.
+func (c *UserConfig) HasSeenTelemetryNotice() bool {
+	return c.TelemetryNoticeShown != nil && *c.TelemetryNoticeShown
+}
+
+// SetTelemetryNoticeShown records whether the one-time telemetry notice has been shown.
+func (c *UserConfig) SetTelemetryNoticeShown(shown bool) {
+	c.TelemetryNoticeShown = &shown
 }
 
 // IsTelemetryEnabled returns true if telemetry is enabled (default: true)

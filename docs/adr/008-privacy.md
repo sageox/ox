@@ -11,6 +11,7 @@
 **Status:** Accepted (aspirational in parts — see banner and checklist above)
 **Date:** 2025-12-22
 **Deciders:** SageOx Engineering
+**Amended:** 2026-09-27 — usage events also go to PostHog, keyed by a persistent install ID and tagged with the repository's and team's SageOx IDs (see "Addendum (2026-09-27): PostHog usage events" at the end)
 
 ## Implementation status (added 2026-09-10)
 
@@ -25,9 +26,9 @@ not an exhaustive line-by-line reconciliation.
 | `~/.config/sageox/telemetry.json` state file, `{"enabled": ..., "disabled_at": ...}` | **Does not exist.** The opt-out is a field (`telemetry_enabled`) in the ordinary user config file, `~/.config/sageox/config.yaml` — no dedicated telemetry state file, no `disabled_at` timestamp. |
 | `ox init --offline` | **Not implemented.** `ox init` has no `--offline` flag today. |
 | `ox deregister` | **Not implemented.** No such command exists. |
-| First-run telemetry notice ("ox collects anonymous usage telemetry...") | **Not implemented.** No first-run notice is shown. |
+| First-run telemetry notice ("ox collects anonymous usage telemetry...") | **Implemented 2026-09-27, with different text.** A two-line notice goes to stderr once per install, the first time a person runs ox at a terminal; AI coworker transcripts and `--json` output never get it (`showTelemetryNoticeOnce` in `cmd/ox/telemetry_posthog.go`). It points to `ox config get telemetry`, since `ox telemetry` does not exist. |
 | Quarterly transparency report | **Not implemented.** Never published. |
-| "What We NEVER Collect" table: **Machine identifiers** | **Inaccurate as written.** `internal/telemetry/types.go`'s `Event.RepoID` is sent on every telemetry event — a per-repository identifier that lets events be correlated over time for that repo. It is not a hardware ID, but the table's blanket "machine identifiers: never" reads stronger than what the code actually does. |
+| "What We NEVER Collect" table: **Machine identifiers** | **Inaccurate as written.** `internal/telemetry/types.go`'s `Event.RepoID` is sent on every telemetry event — a per-repository identifier that lets events be correlated over time for that repo. It is not a hardware ID, but the table's blanket "machine identifiers: never" reads stronger than what the code actually does. Since 2026-09-27, PostHog events also carry a persistent random install ID and, inside an initialized repository, its repo and team IDs; see the addendum. |
 | **Precedence:** "Config file > Environment variable > Default" | **Backwards.** `internal/telemetry/client.go`'s `NewClient` checks `DO_NOT_TRACK` and `SAGEOX_TELEMETRY` **before** falling back to the config file — env wins, not config. |
 | `export SAGEOX_TELEMETRY=0` / `=1` | **Wrong values.** The real check is `strings.EqualFold(os.Getenv("SAGEOX_TELEMETRY"), "false")` — only the literal string `false` (any case) disables telemetry. Setting `SAGEOX_TELEMETRY=0` as this ADR instructs does **not** disable anything; it silently falls through to the config file. |
 | `ox cache clear` / `ox cache clear --user` | **Not implemented.** No `ox cache` command exists. |
@@ -449,3 +450,47 @@ what ox sent before device labels existed.
 | Prompt delivery | None (download only) | `--offline` flag |
 | Version check | ox version, OS | `ox config set check_updates false` |
 | Device label (`ox login`) | `user@host` — local OS account + short hostname, shown only to that user | `SAGEOX_NO_DEVICE_LABEL=1` |
+
+---
+
+## Addendum (2026-09-27): PostHog usage events
+
+**Decided by:** Madhur Shrimal, 2026-09-27. Amends §1 (Telemetry) and the "Session-only IDs over persistent IDs" tradeoff, for PostHog events only.
+
+### Context
+
+The SageOx telemetry endpoint (`/api/v1/telemetry`) labels each event with a random ID minted per invocation, as this ADR decided. That supports counting commands, but not the questions product analytics exist to answer: how many installs are active, whether they come back, where setup stalls, and which teams use ox. The first three need an ID that stays the same for an install; the last needs the team. SageOx already uses PostHog for server-side feature flags.
+
+### Decision
+
+- **D1.** ox sends one PostHog event, `ox command run`, per command. Only release builds send: the project key and host are set by ldflags in `.config/goreleaser.yml`, and every other build leaves them empty.
+- **D2.** Events are keyed by an install ID: a random UUID saved as `client_id` in ox's config directory on first use, and read back by the CLI and the daemon on every later run (`config.InstallID`). It is not derived from the hardware, the OS account, or the SageOx account. `SAGEOX_CLIENT_ID` overrides it; deleting the file gives the next run a new ID. The SageOx endpoint keeps its per-invocation IDs.
+- **D3.** An event creates no PostHog person profile (`$process_person_profile: false`), turns off GeoIP (`$geoip_disable: true`), and carries only: the command path, the names of the flags given, success, exit code, an error category (interrupted, auth, version_unsupported, timeout, network, usage, other), duration, ox version, OS, CPU architecture, whether a person, an AI coworker, or CI ran it (and which AI coworker), whether the repository is initialized, the ephemeral-mode reason, and, inside an initialized repository, its `repo_id` and `team_id` from `.sageox/config.json`. It never carries argument or flag values, paths, error text, the team's name, or the endpoint URL.
+- **D4.** Commands that run automatically are not sent: coding-agent hooks other than SessionStart and SessionEnd, the git credential helper, git hooks, and any ox started by another ox (a hook running prime or a local query, sync starting the daemon). Each ox sets `OX_STARTED_BY_OX` for the processes it starts.
+- **D5.** Sending never delays or alters the command. At exit, ox starts a detached copy of itself that posts the event and gives up after 10 seconds. At most four senders run at once; when all four are busy (for example, on a network that silently drops packets to PostHog) the event is dropped. Builds without a PostHog key skip the event entirely, and a failure while capturing is recovered and ignored.
+- **D6.** The existing opt-outs cover these events: `ox config set telemetry off`, `DO_NOT_TRACK=1`, and `SAGEOX_TELEMETRY=false`. They are checked again when the command ends, so turning telemetry off does not report itself. The first-run notice this ADR promised now ships (see the status table).
+
+### Consequences
+
+- Active installs, retention, and setup funnels become measurable per install, and usage per repository and team.
+- The events are pseudonymous, not anonymous. The repository and team IDs mean nothing to PostHog, but SageOx can map them to a team, and for a one-person team, to a person. No names, emails, or login details are sent.
+- An environment that does not keep ox's config directory, such as a fresh container, gets a new ID each time. The `actor` and `ephemeral` properties let those events be filtered out.
+- "IP addresses: never" now depends on the PostHog project's IP data capture setting being "discard". Every request necessarily reaches PostHog from the client's IP.
+- The privacy policy should name PostHog as a processor of usage data.
+
+### Alternatives considered
+
+- **posthog-go inside the command.** It sends from a background timer, so a command that exits first loses the event unless it waits in `Close()`. Measured 2026-09-24: at least 100 ms per command, about 190 ms counting a fresh HTTPS round trip to PostHog, and 10.1 s on a network that silently drops the connection. Rejected.
+- **Relaying through the SageOx endpoint.** Least client code, but it makes PostHog depend on the SageOx backend. Rejected, because PostHog was wanted as an independent destination.
+- **Identifying logged-in users.** It would make these events personal and needs a policy decision. Deferred.
+- **Hashing the repository and team IDs.** They are already opaque outside SageOx, and SageOx could hash its own IDs to join them, so a hash would hide them from no one. Rejected.
+- **PostHog group analytics (`$groups`).** A paid add-on that does not apply to events without a person profile. Breaking events down by the `team_id` property counts usage per team without it. Not used.
+
+ADR-027 (consultation-attribution privacy) governs who-read-what data in the Ledger. These events carry no Ledger content and no reader identity, so it is unaffected.
+
+### References
+
+- `internal/config/install_id.go`: the install ID
+- `internal/telemetry/posthog.go`: capture and the detached sender
+- `cmd/ox/telemetry_posthog.go`: what an event contains, the skip list, and the first-run notice
+- `cmd/ox/telemetry_posthog_e2e_test.go`: a release-style build reporting commands under one install ID and honoring `DO_NOT_TRACK`

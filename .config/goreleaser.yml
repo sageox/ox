@@ -27,6 +27,8 @@ builds:
       - -X github.com/sageox/ox/internal/version.BuildDate={{.Date}}
       - -X 'github.com/sageox/ox/internal/signing.EmbeddedPublicKey={{ .Env.SAGEOX_CLI_PUBLIC_KEY }}'
       - -X 'github.com/sageox/ox/internal/signing.EmbeddedSignatures={{ .Env.SAGEOX_CLI_SIGNATURES }}'
+      - -X 'github.com/sageox/ox/internal/telemetry.postHogKey={{ index .Env "POSTHOG_PROJECT_KEY" }}'
+      - -X 'github.com/sageox/ox/internal/telemetry.postHogHost={{ index .Env "POSTHOG_HOST" }}'
 
   - id: ox-linux-arm64
     main: ./cmd/ox
@@ -44,6 +46,8 @@ builds:
       - -X github.com/sageox/ox/internal/version.BuildDate={{.Date}}
       - -X 'github.com/sageox/ox/internal/signing.EmbeddedPublicKey={{ .Env.SAGEOX_CLI_PUBLIC_KEY }}'
       - -X 'github.com/sageox/ox/internal/signing.EmbeddedSignatures={{ .Env.SAGEOX_CLI_SIGNATURES }}'
+      - -X 'github.com/sageox/ox/internal/telemetry.postHogKey={{ index .Env "POSTHOG_PROJECT_KEY" }}'
+      - -X 'github.com/sageox/ox/internal/telemetry.postHogHost={{ index .Env "POSTHOG_HOST" }}'
 
   - id: ox-darwin-amd64
     main: ./cmd/ox
@@ -61,6 +65,8 @@ builds:
       - -X github.com/sageox/ox/internal/version.BuildDate={{.Date}}
       - -X 'github.com/sageox/ox/internal/signing.EmbeddedPublicKey={{ .Env.SAGEOX_CLI_PUBLIC_KEY }}'
       - -X 'github.com/sageox/ox/internal/signing.EmbeddedSignatures={{ .Env.SAGEOX_CLI_SIGNATURES }}'
+      - -X 'github.com/sageox/ox/internal/telemetry.postHogKey={{ index .Env "POSTHOG_PROJECT_KEY" }}'
+      - -X 'github.com/sageox/ox/internal/telemetry.postHogHost={{ index .Env "POSTHOG_HOST" }}'
 
   - id: ox-darwin-arm64
     main: ./cmd/ox
@@ -78,6 +84,8 @@ builds:
       - -X github.com/sageox/ox/internal/version.BuildDate={{.Date}}
       - -X 'github.com/sageox/ox/internal/signing.EmbeddedPublicKey={{ .Env.SAGEOX_CLI_PUBLIC_KEY }}'
       - -X 'github.com/sageox/ox/internal/signing.EmbeddedSignatures={{ .Env.SAGEOX_CLI_SIGNATURES }}'
+      - -X 'github.com/sageox/ox/internal/telemetry.postHogKey={{ index .Env "POSTHOG_PROJECT_KEY" }}'
+      - -X 'github.com/sageox/ox/internal/telemetry.postHogHost={{ index .Env "POSTHOG_HOST" }}'
 
   - id: ox-freebsd-amd64
     main: ./cmd/ox
@@ -95,6 +103,8 @@ builds:
       - -X github.com/sageox/ox/internal/version.BuildDate={{.Date}}
       - -X 'github.com/sageox/ox/internal/signing.EmbeddedPublicKey={{ .Env.SAGEOX_CLI_PUBLIC_KEY }}'
       - -X 'github.com/sageox/ox/internal/signing.EmbeddedSignatures={{ .Env.SAGEOX_CLI_SIGNATURES }}'
+      - -X 'github.com/sageox/ox/internal/telemetry.postHogKey={{ index .Env "POSTHOG_PROJECT_KEY" }}'
+      - -X 'github.com/sageox/ox/internal/telemetry.postHogHost={{ index .Env "POSTHOG_HOST" }}'
 
   # --- Bundled adapters ---
   # Adapters don't need signing ldflags. They define their own version constants.

@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/observability"
+	"github.com/sageox/ox/internal/telemetry"
 
 	// registers all supported agents for detection
 	_ "github.com/sageox/agentx/setup"
@@ -101,6 +102,18 @@ func init() {
 }
 
 func main() {
+	// A detached sender started by telemetry.CapturePostHog: post the event and
+	// exit before any command setup.
+	if len(os.Args) == 3 && os.Args[1] == telemetry.PostHogSenderArg {
+		telemetry.RunPostHogSender(os.Args[2])
+		return
+	}
+
+	// Read before setting: this process was started by another ox only if
+	// the marker was already there.
+	startedByOx = os.Getenv(envStartedByOx) != ""
+	_ = os.Setenv(envStartedByOx, "1") // Setenv fails only on an invalid name
+
 	// load .env files if present (silently ignore if not found)
 	// order: .env.local (highest priority), .env (base config)
 	// supports FEATURE_CLOUD, FEATURE_AUTH, SAGEOX_API, etc.
@@ -113,6 +126,9 @@ func main() {
 
 	args := applyCatalogTokenRewrites(os.Args[1:], loadFlagAliases(defaultCatalogJSON))
 	exitCode := executeWithFrictionRecovery(args, 0)
+	// Before the trace flush below, which can take seconds and must not count
+	// toward the command's reported duration.
+	capturePostHogCommand(exitCode, os.Stderr)
 
 	// Record cli.exit_code on the root OTel span and flush. This runs on
 	// both success and error paths so failed commands appear in traces
@@ -164,6 +180,9 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 	}
 
 	err := rootCmd.Execute()
+	if cliCtx != nil {
+		cliCtx.Err = err
+	}
 	if err == nil {
 		return 0
 	}

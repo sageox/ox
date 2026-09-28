@@ -695,3 +695,19 @@ func TestLoadUserConfig_QualityThresholds(t *testing.T) {
 	assert.InDelta(t, 0.5, cfg.AgentWorker.GetQualityUploadThreshold(), 0.001)
 	assert.InDelta(t, 0.15, cfg.AgentWorker.GetQualityDiscardThreshold(), 0.001)
 }
+
+// Failure prevented: the notice flag does not survive a save and load (a wrong
+// YAML tag), so the one-time telemetry notice appears on every run.
+func TestUserConfig_TelemetryNoticeShownSurvivesSaveAndLoad(t *testing.T) {
+	t.Setenv(EnvUserConfig, filepath.Join(t.TempDir(), "config.yaml"))
+	cfg, err := LoadUserConfig()
+	require.NoError(t, err)
+	require.False(t, cfg.HasSeenTelemetryNotice())
+
+	cfg.SetTelemetryNoticeShown(true)
+	require.NoError(t, SaveUserConfig(cfg))
+	reloaded, err := LoadUserConfig()
+
+	require.NoError(t, err)
+	assert.True(t, reloaded.HasSeenTelemetryNotice())
+}
