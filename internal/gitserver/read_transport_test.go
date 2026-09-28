@@ -235,6 +235,51 @@ func TestReadTransportRejectsUntrustedConfiguration(t *testing.T) {
 	require.Contains(t, cmd.Env, "GIT_NO_LAZY_FETCH=1")
 }
 
+// Failure prevented: every command spent extra Git processes re-inspecting an
+// unchanged config (ox #1022), or a config changed after its inspection is
+// trusted without being inspected again.
+func TestReadTransportInspectsConfigOncePerChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("counts Git processes through a POSIX shell wrapper on PATH")
+	}
+	git, err := exec.LookPath("git")
+	require.NoError(t, err)
+	bin, log := t.TempDir(), filepath.Join(t.TempDir(), "inspections")
+	require.NoError(t, os.WriteFile(log, nil, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\necho >> '"+log+"'\nexec '"+git+"' \"$@\"\n"), 0o700))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	inspections := func() int {
+		data, err := os.ReadFile(log)
+		require.NoError(t, err)
+		return strings.Count(string(data), "\n")
+	}
+	readURL := "https://sageox.ai/api/v1/cli/repos/" + readTestRepoID + "/ledger.git"
+	transport, err := NewReadTransport("https://sageox.ai", readTestRepoID, readURL)
+	require.NoError(t, err)
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, ".git"), 0o700))
+	configPath := filepath.Join(dir, ".git", "config")
+	require.NoError(t, os.WriteFile(configPath, []byte("[core]\nbare = false\n"), 0o600))
+
+	for range 3 {
+		_, err := transport.LocalCommand(context.Background(), dir, "status", "--porcelain")
+		require.NoError(t, err)
+	}
+	require.Equal(t, 1, inspections(), "an unchanged config is inspected once")
+
+	require.NoError(t, os.WriteFile(configPath, []byte("[core]\nfsmonitor = evil-command\n"), 0o600))
+	_, err = transport.LocalCommand(context.Background(), dir, "status", "--porcelain")
+	require.ErrorIs(t, err, ErrUnsafeReadTransport, "a changed config is inspected again")
+	require.Equal(t, 2, inspections())
+
+	require.NoError(t, os.WriteFile(configPath, []byte("[core]\nbare = false\n"), 0o600))
+	next, err := NewReadTransport("https://sageox.ai", readTestRepoID, readURL)
+	require.NoError(t, err)
+	_, err = next.LocalCommand(context.Background(), dir, "status", "--porcelain")
+	require.NoError(t, err)
+	require.Equal(t, 3, inspections(), "each operation inspects the config itself")
+}
+
 // Failure prevented: safe-looking argv loses auth in lazy Git children, shallow
 // history hides older content, or a reused transport keeps revoked credentials.
 func TestReadTransportNativeGitCloneFetchHistoryAndLazyObjects(t *testing.T) {

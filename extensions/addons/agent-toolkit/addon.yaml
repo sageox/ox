@@ -1,0 +1,15 @@
+# Add-on manifest — see the sibling post-cutoff add-on for why this file carries
+# only what catalog.go cannot derive from the tree.
+#
+# agent-toolkit is a SEPARATE SageOx product (github.com/sageox/agent-toolkit,
+# public), not an ox surface — nothing in ox's Go source references it. It ships
+# as an optional add-on rather than a built-in ox skill because a team should be
+# able to not have it: guidance for a product you do not run is noise in every
+# repository it reaches (ADR-032 D6).
+name: agent-toolkit
+version: 1.0.0
+summary: >-
+  Stand up a safe, hosted AI chat agent that runs live across Buzz/Nostr,
+  Slack, and a local console from one process and identity. Read BEFORE
+  building a chat bot, wiring an agent into Slack or Nostr, or hand-rolling
+  message routing, identity, memory, or approval guards for an agent.

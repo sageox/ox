@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
@@ -211,6 +212,9 @@ func runSessionAudit(cmd *cobra.Command, args []string) error {
 // runSessionRedact is the cobra entrypoint for the destructive
 // interactive surface. Pins DryRun=false; rewrite proceeds.
 func runSessionRedact(cmd *cobra.Command, args []string) error {
+	if cli.NoInput() {
+		return fmt.Errorf("session redact requires interactive input; omit --no-input or use 'ox session audit' to scan without changes")
+	}
 	ledgerPath, err := resolveLedgerPathForSessionCmd(redactLedgerPath)
 	if err != nil {
 		return err

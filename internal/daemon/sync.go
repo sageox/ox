@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -264,6 +265,7 @@ type SyncScheduler struct {
 // syncError tracks a sync error with timestamp.
 type syncError struct {
 	Time    time.Time
+	Repo    string // what clearErrors matches: "ledger", or a team context's directory name
 	Message string
 }
 
@@ -682,12 +684,13 @@ type SyncStatistics struct {
 }
 
 // recordError records a sync error for diagnostics.
-func (s *SyncScheduler) recordError(msg string) {
+func (s *SyncScheduler) recordError(repo, msg string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.recentErrors = append(s.recentErrors, syncError{
 		Time:    time.Now(),
+		Repo:    repo,
 		Message: msg,
 	})
 
@@ -695,6 +698,18 @@ func (s *SyncScheduler) recordError(msg string) {
 	if len(s.recentErrors) > s.maxRecentErrs {
 		s.recentErrors = s.recentErrors[len(s.recentErrors)-s.maxRecentErrs:]
 	}
+}
+
+// clearErrors drops repo's recorded errors once it syncs again. Without it the
+// status kept a fixed repo's last error, its error count, and the Warning that
+// count produces for up to recentErrorWindow.
+func (s *SyncScheduler) clearErrors(repo string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.recentErrors = slices.DeleteFunc(s.recentErrors, func(e syncError) bool {
+		return e.Repo == repo
+	})
 }
 
 // recentErrorWindow bounds how far back "recent" reaches for both the error
@@ -1373,18 +1388,15 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 			s.issues.ClearIssue(IssueTypeGitLock, "ledger")
 		}
 
-		// A skip that could only be reached by reading the index proves the
-		// clone is readable again, so a standing integrity issue is stale.
-		// Skips never reach the clear-on-success path below, so without this a
-		// repaired ledger whose remote has stopped changing would keep
-		// prompting for a repair it no longer needs.
-		if s.issues != nil && skipProvesIndexReadable(result.SkipReason) {
-			s.issues.ClearIssue(IssueTypeRepoIntegrity, "ledger")
-		}
+		s.clearDisprovedBySkip("ledger", result.SkipReason)
 
 		// remote-unchanged or recently-fetched: update sync timestamps
 		if result.SkipReason == "remote unchanged" || result.SkipReason == "recently fetched" {
 			s.workspaceRegistry.ClearSyncFailures("ledger")
+			if s.issues != nil {
+				// ClearSyncFailures just ended the backoff this issue reports.
+				s.issues.ClearIssue(IssueTypeSyncBackoff, "ledger")
+			}
 			s.mu.Lock()
 			s.lastSync = time.Now()
 			s.mu.Unlock()
@@ -1406,7 +1418,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 
 	// handle errors
 	if result.Err != nil {
-		s.recordError(result.Err.Error())
+		s.recordError("ledger", result.Err.Error())
 		s.metrics.RecordPullFailure()
 		s.workspaceRegistry.RecordSyncFailure("ledger")
 		s.recordSyncStateFailure(s.config.LedgerPath)
@@ -1446,6 +1458,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 
 	// sync succeeded - clear all failure-related issues
 	s.workspaceRegistry.ClearSyncFailures("ledger")
+	s.clearErrors("ledger")
 	if s.issues != nil {
 		s.issues.ClearIssue(IssueTypeMergeConflict, "ledger")
 		s.issues.ClearIssue(IssueTypeSyncBackoff, "ledger")
@@ -2375,7 +2388,9 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			mCfg, err := s.twoPhaseClone(cloneCtx, cloneURL, payload.RepoPath, progress)
 			if err != nil {
 				s.logger.Error("checkout: two-phase clone failed", "error", err)
-				s.recordError(fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
+				// Keyed by pullTeamContext's repoName, the key clearErrors is
+				// called with once this team context syncs.
+				s.recordError(filepath.Base(payload.RepoPath), fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
 				return err
 			}
 			if mCfg != nil {
@@ -2441,7 +2456,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		if output, err := cloneCmd.CombinedOutput(); err != nil {
 			sanitizedOutput := gitutil.SanitizeOutput(string(output))
 			s.logger.Error("checkout: clone failed", "error", err, "output", sanitizedOutput)
-			s.recordError(fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
+			s.recordError(payload.RepoType, fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
 			if sanitizedOutput != "" {
 				return fmt.Errorf("git clone failed: %s", sanitizedOutput)
 			}

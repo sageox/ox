@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -155,4 +159,192 @@ func TestFetchAndRenderRoster_AuthErrorSurfaces(t *testing.T) {
 	err := fetchAndRenderRoster(context.Background(), &buf, lister, "team_abc", "Acme", false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, api.ErrUnauthorized)
+}
+
+// writeTeamFile drops one file inside a team-context checkout, creating
+// whatever directories it needs.
+func writeTeamFile(t *testing.T, teamPath, relPath, content string) {
+	t.Helper()
+	abs := filepath.Join(teamPath, filepath.FromSlash(relPath))
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(abs), err)
+	}
+	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", abs, err)
+	}
+}
+
+// TestReadPublishedContent_DistinguishesAbsentFromEmpty: "nothing listed" and
+// "nothing published" are different facts. The author of a rule that is not
+// showing up needs to know which — an absent checkout is a sync problem, an
+// empty one means they have not published yet.
+func TestReadPublishedContent_DistinguishesAbsentFromEmpty(t *testing.T) {
+	if got := readPublishedContent(""); got != nil {
+		t.Errorf("an unknown team path reported published content: %+v", got)
+	}
+
+	if got := readPublishedContent(filepath.Join(t.TempDir(), "never-cloned")); got != nil {
+		t.Errorf("an absent checkout reported published content: %+v", got)
+	}
+
+	empty := t.TempDir()
+	got := readPublishedContent(empty)
+	if got == nil {
+		t.Fatal("a present-but-empty checkout was reported as absent")
+	}
+	if len(got.Rules) != 0 || len(got.Skills) != 0 {
+		t.Errorf("empty checkout listed content: %+v", got)
+	}
+}
+
+// TestReadPublishedContent_ListsWhatIsOnDisk reads a real checkout, because
+// the card's whole claim is about content the team actually published — an
+// empty temp dir cannot tell us the rule and skill lists are wired to
+// discovery at all.
+func TestReadPublishedContent_ListsWhatIsOnDisk(t *testing.T) {
+	team := t.TempDir()
+	writeTeamFile(t, team, "agents/rules/escalation-policy.md",
+		"---\nname: escalation-policy\ndescription: who to page\n---\nBody.\n")
+	writeTeamFile(t, team, "agents/skills/fork-scout/SKILL.md",
+		"---\nname: fork-scout\ndescription: scouts forks\nrepos: [\"acme/api\"]\n---\nBody.\n")
+
+	got := readPublishedContent(team)
+	if got == nil {
+		t.Fatal("a populated checkout was reported as absent")
+	}
+
+	if len(got.Rules) != 1 || got.Rules[0].Name != "escalation-policy" {
+		t.Fatalf("Rules = %+v", got.Rules)
+	}
+	if !got.Rules[0].AllRepos || len(got.Rules[0].Repos) != 0 {
+		t.Errorf("a rule with no repos: list did not report all-repos reach: %+v", got.Rules[0])
+	}
+	if got.Rules[0].Description != "who to page" {
+		t.Errorf("Rules[0].Description = %q", got.Rules[0].Description)
+	}
+
+	if len(got.Skills) != 1 || got.Skills[0].Name != "fork-scout" {
+		t.Fatalf("Skills = %+v", got.Skills)
+	}
+	if got.Skills[0].AllRepos {
+		t.Errorf("a repo-scoped skill claimed all-repos reach: %+v", got.Skills[0])
+	}
+	if !slices.Equal(got.Skills[0].Repos, []string{"acme/api"}) {
+		t.Errorf("Skills[0].Repos = %v", got.Skills[0].Repos)
+	}
+}
+
+// TestReadPublishedContent_UnreadableIsNotEmpty is the honesty case. When one
+// half of discovery fails, rendering the other half would print "Rules: none
+// published" over a directory we could not open — and the author of a rule
+// that is not showing up would read that as "I never published it." Absent
+// says "something is wrong here" instead.
+func TestReadPublishedContent_UnreadableIsNotEmpty(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on Windows")
+	}
+	team := t.TempDir()
+
+	// skills read fine ...
+	writeTeamFile(t, team, "agents/skills/fork-scout/SKILL.md",
+		"---\nname: fork-scout\ndescription: scouts forks\n---\nBody.\n")
+
+	// ... while the rules root is a symlink to itself, so stat returns ELOOP.
+	if err := os.Symlink("rules", filepath.Join(team, "agents", "rules")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if got := readPublishedContent(team); got != nil {
+		t.Errorf("an unreadable rules root was rendered as published content: %+v", got)
+	}
+}
+
+// TestWriteTeamShowJSON_PublishedContract pins the shape `ox team show --json`
+// promises. Every published item carries every field, and a team-wide item
+// says so with a flag — an empty repos array on its own reads as "reaches
+// nothing", which is exactly backwards and exactly the misreading this
+// section exists to prevent.
+func TestWriteTeamShowJSON_PublishedContract(t *testing.T) {
+	card := teamCard{
+		teamID: "team_acme",
+		name:   "Acme",
+		path:   "/tmp/acme",
+		published: &publishedContent{
+			Rules:  []publishedItem{newPublishedItem("escalation-policy", "", nil)},
+			Skills: []publishedItem{newPublishedItem("fork-scout", "scouts forks", []string{"acme/api", "acme/worker"})},
+		},
+	}
+
+	var buf bytes.Buffer
+	require.NoError(t, writeTeamShowJSON(&buf, card, 3, true, "https://sageox.ai/team/team_acme"))
+
+	assert.Contains(t, buf.String(), `"repos": []`, "a team-wide rule must carry an explicit empty repos list")
+	assert.NotContains(t, buf.String(), `"repos": null`, "repos must never marshal as null")
+
+	var env struct {
+		Published *struct {
+			Rules  []map[string]json.RawMessage `json:"rules"`
+			Skills []map[string]json.RawMessage `json:"skills"`
+		} `json:"published"`
+	}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &env))
+	require.NotNil(t, env.Published)
+	require.Len(t, env.Published.Rules, 1)
+	require.Len(t, env.Published.Skills, 1)
+
+	for _, item := range []map[string]json.RawMessage{env.Published.Rules[0], env.Published.Skills[0]} {
+		for _, field := range []string{"name", "description", "repos", "all_repos"} {
+			assert.Contains(t, item, field, "every published item carries every field")
+		}
+	}
+
+	rule := env.Published.Rules[0]
+	assert.JSONEq(t, `""`, string(rule["description"]), "an empty description is emitted, not omitted")
+	assert.JSONEq(t, `[]`, string(rule["repos"]))
+	assert.JSONEq(t, `true`, string(rule["all_repos"]), "no repos: list means every repo on the team")
+
+	skill := env.Published.Skills[0]
+	assert.JSONEq(t, `["acme/api","acme/worker"]`, string(skill["repos"]))
+	assert.JSONEq(t, `false`, string(skill["all_repos"]))
+}
+
+// TestWriteTeamShowJSON_OmitsPublishedWhenAbsent: an absent checkout must not
+// produce an empty published object, which a consumer would read as "this
+// team publishes nothing."
+func TestWriteTeamShowJSON_OmitsPublishedWhenAbsent(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, writeTeamShowJSON(&buf, teamCard{teamID: "team_acme", name: "Acme"}, 0, false, ""))
+
+	var env map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &env))
+	assert.NotContains(t, env, "published")
+}
+
+// TestRenderPublished_SaysWhereEachReaches is the card's one new claim: which
+// repos a rule or skill applies to. Empty repos: means EVERY repo on the team,
+// which is what an author usually wants and often did not realize they got.
+func TestRenderPublished_SaysWhereEachReaches(t *testing.T) {
+	var sb strings.Builder
+	renderPublished(&sb, &publishedContent{
+		Rules:  []publishedItem{{Name: "escalation"}},
+		Skills: []publishedItem{{Name: "deploy", Repos: []string{"acme/api", "acme/worker"}}},
+	})
+	out := sb.String()
+	for _, want := range []string{"escalation", "all repos", "deploy", "acme/api, acme/worker"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+
+	sb.Reset()
+	renderPublished(&sb, &publishedContent{Rules: []publishedItem{}, Skills: []publishedItem{}})
+	if !strings.Contains(sb.String(), "none published") {
+		t.Errorf("an empty section did not say so:\n%s", sb.String())
+	}
+
+	sb.Reset()
+	renderPublished(&sb, nil)
+	if sb.String() != "" {
+		t.Errorf("an absent checkout rendered a section:\n%q", sb.String())
+	}
 }

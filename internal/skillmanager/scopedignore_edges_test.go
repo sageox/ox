@@ -3,6 +3,7 @@ package skillmanager
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -98,8 +99,8 @@ func TestEnsureScopedIgnoreFiles_MissingRepoRootIsAnError(t *testing.T) {
 // pull request.
 func TestScopedIgnoreFiles_CoversTheRuleNameWithNoTrailingHyphen(t *testing.T) {
 	for _, f := range ScopedIgnoreFiles() {
-		if f.Dir == ".agents" {
-			continue // skills-only projection; it has no rules root
+		if f.Dir != ".claude" && f.Dir != ".factory" {
+			continue // runtime ox-cli rules exist only on these two surfaces
 		}
 		var exact bool
 		for _, e := range f.Entries {
@@ -110,6 +111,88 @@ func TestScopedIgnoreFiles_CoversTheRuleNameWithNoTrailingHyphen(t *testing.T) {
 		if !exact {
 			t.Errorf("%s has no exact rule for %s.md; the glob alone does not match it: %v", f.Dir, CLIBase, f.Entries)
 		}
+	}
+}
+
+// TestScopedIgnoreFiles_EmitsOnlyWildcardGlobsAndTheOxCLIRuleName is the
+// structural replacement for the old per-name guard. scopedIgnoreFiles no
+// longer accepts a name list at all, so every entry it can ever emit is either
+// a stable wildcard glob or the one exact "ox-cli.md" rule name — there is no
+// code path left that could reserve an unselected catalog name.
+//
+// The wildcard may now sit in the MIDDLE of an entry ("skills/*-team/",
+// "rules/*-team.mdc") rather than only at the end, because Team Context content
+// is namespaced by suffix. What the test actually protects is unchanged and is
+// the whole point: an entry must never name one specific skill or rule. A
+// per-name ignore list would churn a COMMITTED file every time the team added a
+// skill, which is the pull-request noise this design exists to remove.
+func TestScopedIgnoreFiles_EmitsOnlyWildcardGlobsAndTheOxCLIRuleName(t *testing.T) {
+	ruleExact := "rules/" + CLIBase + ".md"
+	for _, f := range ScopedIgnoreFiles() {
+		for _, entry := range f.Entries {
+			if entry == ruleExact {
+				continue
+			}
+			if !strings.Contains(entry, "*") {
+				t.Fatalf("%s has entry %q that is neither a wildcard glob nor the exact ox-cli rule name", f.Dir, entry)
+			}
+		}
+	}
+}
+
+// TestScopedIgnoreFiles_CoverEveryTeamNamespaceShape pins that both the current
+// suffix and the legacy prefix are ignored in every root that can hold team
+// content.
+//
+// A repository upgrading across this change holds files under BOTH shapes until
+// reconcile sweeps the old ones, and the window in which an unignored projection
+// is visible to git is exactly the window in which somebody runs `git add -A`.
+func TestScopedIgnoreFiles_CoverEveryTeamNamespaceShape(t *testing.T) {
+	for _, f := range ScopedIgnoreFiles() {
+		var suffix, legacy bool
+		for _, entry := range f.Entries {
+			if strings.Contains(entry, "*"+TeamSuffix) {
+				suffix = true
+			}
+			if strings.Contains(entry, LegacyTeamPrefix) {
+				legacy = true
+			}
+		}
+		if !suffix {
+			t.Errorf("%s ignores no *%s pattern; new team content would be visible to git: %v", f.Dir, TeamSuffix, f.Entries)
+		}
+		if !legacy {
+			t.Errorf("%s ignores no %s pattern; content from before the rename would be visible to git: %v", f.Dir, LegacyTeamPrefix, f.Entries)
+		}
+	}
+}
+
+func TestScopedIgnoreFiles_CopilotRuleRequiresInstructionsDirectory(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	written, err := EnsureScopedIgnoreFiles(repo)
+	if err != nil {
+		t.Fatalf("ensure with only .github: %v", err)
+	}
+	if len(written) != 0 {
+		t.Fatalf("a generic .github directory acquired agent-specific footprint: %v", written)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".github", ".gitignore")); !os.IsNotExist(err) {
+		t.Fatalf("generic .github directory acquired .gitignore: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(repo, ".github", "instructions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	written, err = EnsureScopedIgnoreFiles(repo)
+	if err != nil {
+		t.Fatalf("ensure with Copilot instructions root: %v", err)
+	}
+	want := filepath.Join(".github", "instructions", ".gitignore")
+	if len(written) != 1 || written[0].Rel != want {
+		t.Fatalf("expected only %s, got %v", want, written)
 	}
 }
 

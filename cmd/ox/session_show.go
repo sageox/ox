@@ -214,15 +214,12 @@ func convertStoredSession(st *session.StoredSession) *sessionShowData {
 }
 
 func showRawSession(w io.Writer, t *sessionShowData, limit int) error {
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
-
 	// if showing with limit, only include limited entries
 	if limit > 0 && len(t.Entries) > limit {
 		t.Entries = t.Entries[:limit]
 	}
 
-	return encoder.Encode(t)
+	return cli.PrintJSONTo(w, t)
 }
 
 func showFormattedSession(w io.Writer, t *sessionShowData, metadataOnly bool, limit int) error {

@@ -10,6 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 // TeamSkill is a skill authored in a team-context repository under
@@ -29,6 +32,16 @@ type TeamSkill struct {
 	Audience    string   `json:"audience,omitempty"`
 	Visibility  string   `json:"visibility"`
 	Status      string   `json:"status,omitempty"`
+	// ValidThrough is an optional YYYY-MM-DD shelf life. Knowledge that describes
+	// the outside world rots: a brief on a tool released after the models were
+	// trained stops being an advantage once training catches up, and an index full
+	// of entries nobody rechecks is one nobody reads. Empty means evergreen.
+	//
+	// An expired skill is REPORTED, never withheld or deleted. A date is a prompt
+	// to re-verify or retire, and silently removing a team's published knowledge on
+	// a timer would be the same unexplained-disappearance failure NameError exists
+	// to prevent.
+	ValidThrough string `json:"valid_through,omitempty"`
 	// Files are the skill's own files, relative to AbsDir, sorted. Populated so a
 	// caller can classify and materialize without re-walking the tree.
 	Files []string `json:"files,omitempty"`
@@ -52,15 +65,15 @@ const skillManifestName = "SKILL.md"
 // repository any teammate can push to, over a pull path that verifies no
 // signature — and downstream it becomes a DIRECTORY NAME inside the customer's
 // repository. filepath.Join Cleans as it joins, so `..` segments in a name walk
-// up out of a skills root that is only two segments deep, and the reserved-prefix
+// up out of a skills root that is only two segments deep, and a namespace-based
 // ownership check then rubber-stamps the escape because the name still carries
-// the prefix. Landing on .claude/settings.json is arbitrary code execution
+// the namespace marker. Landing on .claude/settings.json is arbitrary code execution
 // (PreToolUse hook, reconciled automatically on the team pull); landing on
 // .sageox/team-skills.approvals.json forges approvals that the repo COMMITS and
 // every teammate then pulls.
 //
 // Lowercase-only because a case-insensitive filesystem resolves `Deploy` and
-// `deploy` to one directory while the reserved-prefix ignore globs are
+// `deploy` to one directory while the namespace ignore globs are
 // case-sensitive — the same collision caseVariantDirOnDisk already guards in the
 // installer. One canonical case is the only way both can be right.
 const TeamSkillNamePattern = `^[a-z0-9][a-z0-9._-]*$`
@@ -75,7 +88,8 @@ var teamSkillNameRE = regexp.MustCompile(TeamSkillNamePattern)
 // being fixed.
 func ValidTeamSkillName(name string) bool {
 	// `..` is checked separately because the pattern alone admits it mid-name
-	// (`sageox-team-..`), and no legitimate skill name has ever needed it.
+	// (`..-team` once the suffix is appended), and no legitimate skill name has
+	// ever needed it.
 	return len(name) >= 1 && len(name) <= MaxTeamSkillNameBytes &&
 		!strings.Contains(name, "..") && !strings.HasSuffix(name, ".") &&
 		teamSkillNameRE.MatchString(name)
@@ -205,41 +219,71 @@ func PublishedSkills(teamPath string) ([]TeamSkill, error) {
 		if err != nil {
 			return nil, err
 		}
-		skills = append(skills, discovered...)
+		published := discovered[:0]
+		for _, skill := range discovered {
+			if skill.Audience == RuleAudienceHuman || skill.Visibility == VisibilityHidden ||
+				skill.Status == RuleStatusDraft || strings.HasPrefix(skill.Status, RuleStatusSupersededPrefix) {
+				continue
+			}
+			published = append(published, skill)
+		}
+		markSkillNameCollisions(published)
+		skills = append(skills, published...)
 	}
 
-	// Dedupe by name; agents/skills is walked first, so it wins.
+	// Dedupe by filesystem identity; agents/skills is walked first, so it wins.
+	// Case and Unicode normalization variants resolve to one directory on common
+	// macOS/Windows filesystems and therefore belong to one identity here too.
 	seen := make(map[string]bool, len(skills))
 	deduped := skills[:0]
 	for _, s := range skills {
-		if seen[s.Name] {
+		identity := skillNameIdentity(s.Name)
+		if seen[identity] {
 			continue
 		}
-		seen[s.Name] = true
+		seen[identity] = true
 		deduped = append(deduped, s)
 	}
 	skills = deduped
 
-	filtered := skills[:0]
-	for _, s := range skills {
-		if s.Audience == RuleAudienceHuman {
-			continue
-		}
-		if s.Visibility == VisibilityHidden {
-			continue
-		}
-		if s.Status == RuleStatusDraft {
-			continue
-		}
-		if strings.HasPrefix(s.Status, RuleStatusSupersededPrefix) {
-			continue
-		}
-		filtered = append(filtered, s)
-	}
-	skills = filtered
-
 	sort.Slice(skills, func(i, j int) bool { return skills[i].Name < skills[j].Name })
 	return skills, nil
+}
+
+// markSkillNameCollisions rejects every same-root skill that resolves to one
+// installed identity. Cross-root duplicates retain the intentional canonical-
+// root precedence above; within one root there is no legitimate winner.
+func markSkillNameCollisions(skills []TeamSkill) {
+	groups := make(map[string][]int, len(skills))
+	for i := range skills {
+		identity := skillNameIdentity(skills[i].Name)
+		groups[identity] = append(groups[identity], i)
+	}
+	for identity, indexes := range groups {
+		if len(indexes) < 2 {
+			continue
+		}
+		locations := make([]string, 0, len(indexes))
+		for _, index := range indexes {
+			locations = append(locations, safeDisplayName(filepath.Dir(skills[index].RelPath)))
+		}
+		sort.Strings(locations)
+		reason := fmt.Sprintf("unusable name: team skill name collision: directories %s all resolve to %q — rename the directories and their name: keys in the Team Context",
+			strings.Join(locations, ", "), safeDisplayName(identity))
+		for _, index := range indexes {
+			if skills[index].NameError != "" {
+				skills[index].NameError += "; " + reason
+			} else {
+				skills[index].NameError = reason
+			}
+		}
+		slog.Warn("team skills refused: installed-name collision",
+			"name", safeDisplayName(identity), "directories", locations)
+	}
+}
+
+func skillNameIdentity(name string) string {
+	return norm.NFC.String(cases.Fold().String(norm.NFC.String(name)))
 }
 
 // SkillAppliesToRepo applies the `repos:` filter with the same semantics as
@@ -311,16 +355,17 @@ func walkSkillsDir(absRoot string) ([]TeamSkill, error) {
 		}
 
 		skills = append(skills, TeamSkill{
-			Name:        name,
-			NameError:   nameErr,
-			Description: fm.Description,
-			RelPath:     filepath.ToSlash(filepath.Join(e.Name(), skillManifestName)),
-			AbsDir:      dir,
-			Repos:       fm.Repos,
-			Audience:    fm.Audience,
-			Visibility:  defaultString(fm.Visibility, DefaultRuleVisibility),
-			Status:      fm.Status,
-			Files:       files,
+			Name:         name,
+			NameError:    nameErr,
+			Description:  fm.Description,
+			RelPath:      filepath.ToSlash(filepath.Join(e.Name(), skillManifestName)),
+			AbsDir:       dir,
+			Repos:        fm.Repos,
+			Audience:     fm.Audience,
+			Visibility:   defaultString(fm.Visibility, DefaultRuleVisibility),
+			Status:       fm.Status,
+			ValidThrough: fm.ValidThrough,
+			Files:        files,
 		})
 	}
 	return skills, nil

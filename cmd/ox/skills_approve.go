@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -54,7 +53,9 @@ request. If the skill changes afterwards it returns to needing approval.
 Approving lets an AI coworker READ the skill. Bundled scripts are still dropped
 unless you also pass --allow-scripts, which is the larger, separate decision to
 put runnable files on disk. Omitting the flag preserves an existing scripts
-grant; pass --allow-scripts=false explicitly to revoke it.`,
+grant; pass --allow-scripts=false explicitly to revoke it — the skill stays
+approved for its instructions. To withdraw the whole approval instead, run
+` + "`ox skills revoke <name>`" + `.`,
 	RunE: runSkillsApprove,
 }
 
@@ -231,23 +232,19 @@ func decideApprovals(req approveRequest) (approveDecision, error) {
 		byName[c.Name] = c
 	}
 
-	seen := make(map[string]bool, len(req.Names))
-	for _, name := range req.Names {
+	// Deduped up front rather than skipped mid-loop: one decision, one row.
+	// Without it, `approve deploy deploy` reported the skill as approved and
+	// then as already-approved by its own second pass, which reads as two
+	// skills or as a race.
+	for _, name := range dedupeNames(req.Names) {
 		c, ok := byName[name]
 		if !ok {
 			// Refused before anything is persisted, so a run naming several skills
 			// is all-or-nothing: a typo in the last name cannot leave the earlier
 			// ones half-approved with no record of which.
 			return approveDecision{}, fmt.Errorf("no team skill named %q applies to this repository%s%s",
-				name, availableSuffix(candidates), nothingApprovedSuffix(req.Names))
+				name, availableSuffix(candidates), allOrNothingSuffix(req.Names, "approved"))
 		}
-		if seen[name] {
-			// One decision, one row. Without this, `approve deploy deploy` reported
-			// the skill as approved and then as already-approved by its own first
-			// pass, which reads as two skills or as a race.
-			continue
-		}
-		seen[name] = true
 
 		switch {
 		case c.LoadErr != nil:
@@ -439,23 +436,11 @@ func availableSuffix(candidates []skillmanager.TeamSkillCandidate) string {
 	return "; it sees: " + strings.Join(names, ", ")
 }
 
-// nothingApprovedSuffix says the run was all-or-nothing, but only when more than
-// one name was given — that is the only case where a reader could reasonably
-// wonder whether the earlier names took effect.
-func nothingApprovedSuffix(names []string) string {
-	if len(names) < 2 {
-		return ""
-	}
-	return "; nothing was approved"
-}
-
 func emitApprovals(w io.Writer, out skillsApproveOutput, asJSON bool) error {
 	if asJSON {
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		return enc.Encode(out)
+		return encodeSkillsJSON(w, out)
 	}
-	p := func(format string, args ...any) { fmt.Fprintf(w, format+"\n", args...) }
+	p := skillsPrintf(w)
 
 	for _, row := range out.Approved {
 		switch row.State {

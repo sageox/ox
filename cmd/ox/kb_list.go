@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -410,7 +409,5 @@ func emitKBListWarningFooter(w io.Writer, warnings []kb.Warning) {
 // it's hardcoded to os.Stdout, which makes the renderer untestable via a
 // captured buffer.
 func writeJSONIndent(w io.Writer, v any) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
+	return cli.PrintJSONTo(w, v)
 }

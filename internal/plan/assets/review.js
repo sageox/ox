@@ -15,6 +15,8 @@
   var token = body.getAttribute('data-review-token') || '';
   var live = base !== '';
   var KEY = 'ox-plan-fb:' + slug;
+  var ON_KEY = 'ox-plan-rev-on:' + slug; // sessionStorage: survives a reload, not a new tab
+  var MIN_KEY = 'ox-plan-rail-min:' + slug; // sessionStorage, like ON_KEY
   var STATUS = [
     { id: 'approve', glyph: '✓' },
     { id: 'request-change', glyph: '✎' },
@@ -53,7 +55,11 @@
   function post(path, payload, ok) {
     if (offline) { offlineNotice(); return; }
     fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Review-Token': token }, body: JSON.stringify(payload) })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); if (ok) ok(); })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json().catch(function () { return {}; });
+      })
+      .then(function (data) { if (ok) ok(data || {}); })
       .catch(function (e) {
         // a network-level failure means the server is gone — flip to
         // disconnected mode (marks stay in localStorage; nothing is lost)
@@ -130,6 +136,17 @@
   // --- comments rail: surface the note TEXT in the right gutter (not just a
   // margin glyph), each row scroll-jumping to its anchored element on click ---
   var rail;
+  // Hide shrinks the rail to a Show button (comment icon + count) so the plan
+  // under it can be read; kept per tab, so a live reload doesn't reopen it.
+  var railMin = false;
+  try { railMin = !!sessionStorage.getItem(MIN_KEY); } catch (e) {}
+  var BUBBLE = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h10A1.5 1.5 0 0 1 14.5 4v6a1.5 1.5 0 0 1-1.5 1.5H7.5L4 14.5v-3H3A1.5 1.5 0 0 1 1.5 10V4A1.5 1.5 0 0 1 3 2.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+  function toggleRail() {
+    railMin = !railMin;
+    try { if (railMin) sessionStorage.setItem(MIN_KEY, '1'); else sessionStorage.removeItem(MIN_KEY); } catch (e) {}
+    renderRail();
+    rail.querySelector('.rev-rail-show, .rev-rail-hide').focus(); // the clicked button was just replaced
+  }
   function flashEl(el) {
     el.classList.add('rev-flash');
     setTimeout(function () { el.classList.remove('rev-flash'); }, 1200);
@@ -158,16 +175,25 @@
     return rows;
   }
   function renderRail() {
-    if (!rail) { rail = document.createElement('aside'); rail.className = 'rev-rail'; document.body.appendChild(rail); }
+    if (!rail) {
+      rail = document.createElement('aside'); rail.className = 'rev-rail'; document.body.appendChild(rail);
+      rail.addEventListener('click', function (ev) { if (ev.target.closest('.rev-rail-show, .rev-rail-hide')) toggleRail(); });
+    }
     var rows = railRows();
     // hidden when there's nothing to read and we're not actively reviewing.
     if (!on && !rows.length) { rail.style.display = 'none'; rail.innerHTML = ''; return; }
     rail.style.display = '';
-    if (!rows.length) {
-      rail.innerHTML = '<div class="rev-rail-h">Comments</div><div class="rev-rail-empty">Click any section, risk, or row to leave a comment.</div>';
+    rail.classList.toggle('rev-rail-min', railMin);
+    if (railMin) {
+      rail.innerHTML = '<button class="rev-rail-show" title="Show comments" aria-label="Show comments (' + rows.length + ')">' + BUBBLE + rows.length + '</button>';
       return;
     }
-    var html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + '</span></div><ul class="rev-rail-list">';
+    var hide = '<button class="rev-rail-hide" title="Hide comments">Hide</button>';
+    if (!rows.length) {
+      rail.innerHTML = '<div class="rev-rail-h">Comments' + hide + '</div><div class="rev-rail-empty">Click any section, risk, or row to leave a comment.</div>';
+      return;
+    }
+    var html = '<div class="rev-rail-h">Comments <span class="rev-rail-n">' + rows.length + '</span>' + hide + '</div><ul class="rev-rail-list">';
     rows.forEach(function (r, i) {
       var tag = '';
       if (r.unsent) tag = '<span class="rev-rail-tag unsent">unsent</span>';
@@ -209,7 +235,12 @@
         '<div class="rev-row"><button class="rev-accept">Accept</button><button class="rev-reopen">Reopen</button></div>';
       placePop(el);
       pop.querySelector('.rev-accept').onclick = function () { post('/accept', { anchor: a }, function () { closePop(); }); };
-      pop.querySelector('.rev-reopen').onclick = function () { post('/reopen', { anchor: a, note: pop.querySelector('.rev-note').value.trim() }, function () { closePop(); }); };
+      pop.querySelector('.rev-reopen').onclick = function () {
+        post('/reopen', { anchor: a, note: pop.querySelector('.rev-note').value.trim() }, function (data) {
+          closePop();
+          if (data.notified === false) toast('Reopened — but the plan’s authoring coworker could not be notified automatically. Tell them directly.');
+        });
+      };
       if (ev) ev.stopPropagation();
       return;
     }
@@ -239,11 +270,16 @@
     pop.style.left = (window.scrollX + Math.min(r.left, window.innerWidth - 300)) + 'px';
   }
 
+  // Review chrome is never a mark-up target. The rail and orphan list are <li>s
+  // and would otherwise match SELECTOR, hijacking their own click handlers.
+  var CHROME = '.rev-bar, .rev-rail, .rev-orphans, .rev-toast, .rev-offline-bar';
   function onClick(ev) {
     if (!on) return;
     if (pop && pop.contains(ev.target)) return;
+    // any click outside the note dismisses it; only page content opens one
+    if (ev.target.closest(CHROME)) { closePop(); return; }
     var el = ev.target.closest(SELECTOR);
-    if (!el) return;
+    if (!el) { closePop(); return; }
     ev.preventDefault();
     openPop(el, ev);
   }
@@ -262,7 +298,10 @@
     if (!who) { alert('Set your name first (the "Set name" button in the bar) — feedback is attributed per reviewer.'); return; }
     var p = { slug: slug, reviewer: who, items: items };
     if (live) {
-      post('/feedback', p, function () { marks = {}; save(); /* SSE reload will repaint */ });
+      post('/feedback', p, function (data) {
+        marks = {}; save(); /* SSE reload will repaint */
+        if (data.notified === false) toast('Sent — but the plan’s authoring coworker could not be notified automatically. Tell them directly.');
+      });
       return;
     }
     exportJSON(p);
@@ -326,11 +365,12 @@
   }
   function toast(msg) {
     if (toastEl) toastEl.remove();
-    toastEl = document.createElement('div');
-    toastEl.className = 'rev-toast';
-    toastEl.textContent = msg;
-    document.body.appendChild(toastEl);
-    setTimeout(function () { if (toastEl) { toastEl.remove(); toastEl = null; } }, 8000);
+    var el = toastEl = document.createElement('div');
+    el.className = 'rev-toast';
+    el.textContent = msg;
+    document.body.appendChild(el);
+    // this toast only: a newer one may have replaced it before the timer fires
+    setTimeout(function () { el.remove(); if (toastEl === el) toastEl = null; }, 8000);
   }
   // While offline, poll /healthz; the instant the server is back, reload —
   // stable port + persisted token mean the same origin serves fresh state, and
@@ -364,16 +404,42 @@
   function updateWho() { if (whoEl) whoEl.textContent = reviewer ? ('You: ' + reviewer) : 'Set name'; }
   updateWho();
   if (whoEl) whoEl.onclick = function () { var n = (prompt('Your name (shown to teammates on this plan):', reviewer) || '').trim(); if (n) { reviewer = n; try { localStorage.setItem('ox-plan-reviewer', reviewer); } catch (e) {} updateWho(); paint(); } };
-  bar.querySelector('.rev-toggle').onclick = function () {
-    on = !on; body.classList.toggle('rev-on', on); this.classList.toggle('on', on);
-    if (!on) closePop();
+  // Review is a mode: while on, clicks mark up instead of navigating. A mode has
+  // to announce itself on entry and keep its exit in view — otherwise the only
+  // signal is a green button and nothing visibly changes until a hover.
+  var toggleEl = bar.querySelector('.rev-toggle');
+  function setReview(next, silent) {
+    on = next; body.classList.toggle('rev-on', on); toggleEl.classList.toggle('on', on);
+    toggleEl.textContent = on ? 'Exit review' : 'Review';
+    toggleEl.title = on ? 'Leave review mode (Esc)' : 'Enter review mode (r)';
+    if (on && !silent) toast('Review mode — click any section, item, or row to mark it up. Esc or Exit review to leave.');
+    if (!on) { closePop(); if (toastEl) { toastEl.remove(); toastEl = null; } }
     try { localStorage.setItem('ox-plan-rev-seen', '1'); } catch (e) {}
+    try { if (on) sessionStorage.setItem(ON_KEY, '1'); else sessionStorage.removeItem(ON_KEY); } catch (e) {}
     if (hintBubble) { hintBubble.remove(); hintBubble = null; }
     renderRail();
-  };
+  }
+  toggleEl.onclick = function () { setReview(!on); };
   bar.querySelector('.rev-submit').onclick = submit;
   if (live) bar.querySelector('.rev-approve').onclick = approve;
   document.addEventListener('click', onClick, true);
+  // Keyboard, here rather than scaffold.js so authored HTML plans (chrome.js
+  // adds no key map) get the same keys. Esc peels one layer at a time — an
+  // open note first, then the mode — and fires while typing in the note too;
+  // that is the point of Esc. `r` toggles the mode from anywhere but a text field.
+  // Keys are shared with the page: one an earlier listener marked handled (an
+  // authored inspector closing on Esc) is left alone, and one acted on here is
+  // marked handled so later listeners that honor defaultPrevented skip it.
+  function typing(e) { var t = e.target; return !!t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable); }
+  document.addEventListener('keydown', function (e) {
+    if (e.defaultPrevented) return;
+    if (e.key === 'Escape') {
+      if (pop) { closePop(); e.preventDefault(); }
+      else if (on) { setReview(false); e.preventDefault(); }
+      return;
+    }
+    if (e.key === 'r' && !typing(e) && !e.metaKey && !e.ctrlKey && !e.altKey) { setReview(!on); e.preventDefault(); }
+  });
 
   // first-visit discoverability: a one-time pointer at the Review toggle.
   var hintBubble = null;
@@ -419,4 +485,8 @@
   }
 
   paint();
+  // A live reload — the agent addressed an item, or the server came back — must
+  // not drop a reviewer mid-review back to reading mode. Restored silently: the
+  // reviewer did not just enter, so no entry toast.
+  try { if (sessionStorage.getItem(ON_KEY)) setReview(true, true); } catch (e) {}
 })();

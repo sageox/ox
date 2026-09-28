@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -91,7 +90,7 @@ func runTeams(cmd *cobra.Command, args []string) error {
 
 	if len(teams) == 0 {
 		if jsonMode {
-			return json.NewEncoder(out).Encode(teamsOutput{
+			return cli.PrintJSONTo(out, teamsOutput{
 				Teams:    []teamEntry{},
 				Guidance: "No teams found. Run 'ox login' then 'ox init' to set up.",
 			})
@@ -109,9 +108,7 @@ func runTeams(cmd *cobra.Command, args []string) error {
 			Teams:       entries,
 			Guidance:    "Use 'ox team show <slug>' for one team's details, or 'ox team members' for its coworkers.",
 		}
-		encoder := json.NewEncoder(out)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(output)
+		return cli.PrintJSONTo(out, output)
 	}
 
 	// compute root dir — path is always root/team_id so no need to show per-team

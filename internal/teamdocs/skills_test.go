@@ -133,6 +133,65 @@ func TestDiscoverSkills_CanonicalRootWinsOverLegacy(t *testing.T) {
 	}
 }
 
+// TestDiscoverSkills_SameRootNameCollisionsAreRejected prevents first-entry
+// shadowing and case/normalization flip-flops. Two directories in one root have
+// no legitimate precedence, so neither may reach installation.
+func TestDiscoverSkills_SameRootNameCollisionsAreRejected(t *testing.T) {
+	tests := []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{name: "exact declared name", first: "deploy", second: "deploy"},
+		{name: "case variant", first: "Deploy", second: "deploy"},
+		{name: "unicode normalization variant", first: "caf\u00e9", second: "cafe\u0301"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			team := t.TempDir()
+			writeSkill(t, team, "agents/skills", "aaa-shadow", "name: "+tt.first+"\n", nil)
+			writeSkill(t, team, "agents/skills", "deploy", "name: "+tt.second+"\n", nil)
+
+			for pass := 0; pass < 3; pass++ {
+				installable, rejected, err := DiscoverSkillsWithRejections(team, "ox")
+				if err != nil {
+					t.Fatalf("pass %d: DiscoverSkillsWithRejections: %v", pass, err)
+				}
+				if len(installable) != 0 {
+					t.Fatalf("pass %d: a colliding identity reached installation: %v", pass, names(installable))
+				}
+				if len(rejected) != 1 {
+					t.Fatalf("pass %d: collision was not reported deterministically: %+v", pass, rejected)
+				}
+				reason := rejected[0].NameError
+				for _, want := range []string{"collision", "aaa-shadow", "deploy", "rename"} {
+					if !strings.Contains(reason, want) {
+						t.Errorf("pass %d: collision reason %q does not contain %q", pass, reason, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestDiscoverSkills_NonPublishedDuplicateDoesNotBlockLiveSkill(t *testing.T) {
+	team := t.TempDir()
+	writeSkill(t, team, "agents/skills", "aaa-draft", "name: deploy\nstatus: draft\n", nil)
+	writeSkill(t, team, "agents/skills", "deploy", "name: deploy\n", nil)
+
+	installable, rejected, err := DiscoverSkillsWithRejections(team, "ox")
+	if err != nil {
+		t.Fatalf("DiscoverSkillsWithRejections: %v", err)
+	}
+	if len(rejected) != 0 {
+		t.Fatalf("a draft entry manufactured a collision: %+v", rejected)
+	}
+	if len(installable) != 1 || installable[0].Name != "deploy" {
+		t.Fatalf("a draft entry suppressed the live skill: %v", names(installable))
+	}
+}
+
 // TestDiscoverSkills_CollectsTheSkillsOwnFilesForClassification: the trust model
 // classifies on content, so discovery must report bundled scripts.
 func TestDiscoverSkills_CollectsTheSkillsOwnFilesForClassification(t *testing.T) {

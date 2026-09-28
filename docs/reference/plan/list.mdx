@@ -1,7 +1,7 @@
 ---
 title: "ox plan list"
 description: "CLI reference for ox plan list"
-sidebar_position: 63
+sidebar_position: 68
 ---
 
 ## ox plan list
@@ -23,6 +23,7 @@ ox plan list [flags]
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
@@ -32,4 +33,4 @@ ox plan list [flags]
 
 ### SEE ALSO
 
-* [ox plan](/plan)	 - Work with implementation plans (enrich, render, review)
+* [ox plan](/plan)	 - Work with plans (enrich, render, review)

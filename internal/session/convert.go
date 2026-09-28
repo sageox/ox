@@ -33,11 +33,11 @@ func ConvertRawEntries(rawEntries []adapters.RawEntry) []Entry {
 		entry := Entry{
 			Timestamp:  raw.Timestamp,
 			Content:    raw.Content,
-			CallID:     raw.CallID,
 			ToolName:   raw.ToolName,
 			ToolInput:  raw.ToolInput,
 			ToolOutput: raw.ToolOutput,
 			IsError:    raw.IsError,
+			CallID:     raw.CallID,
 		}
 		entry.Type = MapRoleToEntryType(raw.Role)
 		entries = append(entries, entry)
@@ -81,6 +81,7 @@ func ConvertProtocolEntriesToHistory(entries []adapterprotocol.RawEntry, agentID
 			ToolInput:  raw.ToolInput,
 			ToolOutput: raw.ToolOutput,
 			IsError:    raw.IsError,
+			CallID:     raw.CallID,
 		}
 
 		history.Entries = append(history.Entries, entry)

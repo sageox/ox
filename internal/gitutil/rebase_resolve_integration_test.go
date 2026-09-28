@@ -15,7 +15,8 @@ import (
 // gitInRepo runs a git command in the given directory with isolated config.
 func gitInRepo(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	// Keep the test runner's inherited GC/maintenance isolation settings.
+	cmd := exec.Command("git", append([]string{"-c", "commit.gpgsign=false"}, args...)...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), // safe: git subprocess in temp dir, not ox CLI
 		"GIT_CONFIG_NOSYSTEM=1",
@@ -23,8 +24,6 @@ func gitInRepo(t *testing.T, dir string, args ...string) string {
 		"GIT_AUTHOR_EMAIL=test@test.com",
 		"GIT_COMMITTER_NAME=test",
 		"GIT_COMMITTER_EMAIL=test@test.com",
-		"GIT_CONFIG_COUNT=1",
-		"GIT_CONFIG_KEY_0=commit.gpgsign", "GIT_CONFIG_VALUE_0=false",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

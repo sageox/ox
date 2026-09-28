@@ -4,9 +4,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +19,8 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/internal/teamrules"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 
 	"github.com/stretchr/testify/assert"
@@ -70,6 +75,43 @@ func TestRunAgentPrime_RunsEndToEndAndRecordsSkillTiming(t *testing.T) {
 		"prime must record skill-inventory timing on every run")
 	assert.Contains(t, out, "\"agent_id\"",
 		"prime must issue an agent identity — without it every downstream ox command fails")
+}
+
+func TestRunAgentPrime_OmitsAnExistingNativeTeamRule(t *testing.T) {
+	env := initializedE2E(t)
+	teamDir := t.TempDir()
+	rulePath := filepath.Join(teamDir, "agents", "rules", "security.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(rulePath), 0o755))
+	require.NoError(t, os.WriteFile(rulePath, []byte("---\nname: security\ndescription: Security policy\nvisibility: always\n---\n\nNEVER_LOG_E2E_SECRET_MARKER\n"), 0o644))
+	localCfg := fmt.Sprintf("\n[[team_contexts]]\nteam_id = %q\nteam_name = %q\nslug = %q\npath = %q\nlast_sync = 0001-01-01T00:00:00Z\n",
+		env.TeamID, "E2E Team", "e2e-team", teamDir)
+	require.NoError(t, os.WriteFile(filepath.Join(env.Root, ".sageox", "config.local.toml"), []byte(localCfg), 0o600))
+
+	require.NoError(t, os.MkdirAll(filepath.Join(env.Root, ".claude", "rules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(env.Root, ".claude", ".gitignore"),
+		[]byte("rules/*-team.md\n"), 0o644))
+	rules, err := teamdocs.DiscoverRules(teamDir, "")
+	require.NoError(t, err)
+	result, err := teamrules.Reconcile(context.Background(), env.Root, rules)
+	require.NoError(t, err)
+	require.Contains(t, result.NativeAgents["security"], "claude")
+
+	var buf bytes.Buffer
+	cmd := agentPrimeCmd
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	require.NoError(t, cmd.Flags().Set("agent", "claude-code"))
+	require.NoError(t, cmd.Flags().Set("format", "xml"))
+	t.Cleanup(func() {
+		_ = cmd.Flags().Set("agent", "")
+		_ = cmd.Flags().Set("format", "")
+		cmd.SetOut(nil)
+		cmd.SetErr(nil)
+	})
+
+	require.NoError(t, runAgentPrime(cmd, nil))
+	require.NotContains(t, buf.String(), "NEVER_LOG_E2E_SECRET_MARKER",
+		"the native Team Rule was duplicated through prime")
 }
 
 // TestRunAgentPrime_ReconcilesWhenTheRecordedRevisionIsStale covers the branch
@@ -156,8 +198,8 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 			name = "state write recovers"
 		}
 		t.Run(name, func(t *testing.T) {
-			if readOnlyState && os.Geteuid() == 0 {
-				t.Skip("root can write files despite read-only permissions")
+			if readOnlyState && (os.Geteuid() == 0 || runtime.GOOS == "windows") {
+				t.Skip("requires enforced Unix directory permissions for write-failure injection")
 			}
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 			t.Setenv("XDG_DATA_HOME", t.TempDir())
@@ -192,12 +234,11 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 			require.Empty(t, first.SessionFile)
 			rawBefore, err := os.ReadFile(filepath.Join(first.SessionPath, "raw.jsonl"))
 			require.NoError(t, err)
-			markerPath := filepath.Join(first.SessionPath, ".recording.json")
-			// Atomic state replacement needs directory write access, not write
-			// permission on the old inode. Exercise the actual failure boundary.
 			if readOnlyState {
-				require.NoError(t, os.Chmod(filepath.Dir(markerPath), 0o500))
-				t.Cleanup(func() { _ = os.Chmod(filepath.Dir(markerPath), 0o700) })
+				// Atomic replacement depends on directory permissions, not the
+				// old inode's mode. Keep the state readable but prevent publishing.
+				require.NoError(t, os.Chmod(first.SessionPath, 0o500))
+				t.Cleanup(func() { _ = os.Chmod(first.SessionPath, 0o755) })
 			}
 
 			// Learn the native ID while its file is still unavailable. Keep it for daemon discovery.
@@ -235,7 +276,7 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, pending)
 				assert.Empty(t, pending.SessionFile, "discovery must preserve a recording when its source path cannot yet be saved")
-				require.NoError(t, os.Chmod(filepath.Dir(markerPath), 0o700))
+				require.NoError(t, os.Chmod(first.SessionPath, 0o755))
 				require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", "", "", nativeID))
 			}
 			found, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)

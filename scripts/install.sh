@@ -393,7 +393,10 @@ install_with_go() {
         if [ -n "$gobin" ]; then
             bin_dir="$gobin"
         else
-            bin_dir="$(go env GOPATH)/bin"
+            # GOPATH can list several directories; go install uses the first.
+            local gopath
+            gopath=$(go env GOPATH)
+            bin_dir="${gopath%%:*}/bin"
         fi
         LAST_INSTALL_PATH="$bin_dir/$BINARY"
 
@@ -430,7 +433,9 @@ build_from_source() {
             build_targets="$build_targets ./cmd/${adapter}"
         done
 
-        if go build $build_targets; then
+        # Without -o, building several packages compiles them and discards
+        # the binaries.
+        if go build -o . $build_targets && [[ -f "$BINARY" ]]; then
             # Determine install location
             local install_dir
             if [[ -w /usr/local/bin ]]; then
@@ -472,23 +477,41 @@ build_from_source() {
     fi
 }
 
-# Verify installation
-verify_installation() {
-    if command -v "$BINARY" &> /dev/null; then
-        log_success "$BINARY is installed and ready!"
-        echo ""
-        $BINARY version 2>/dev/null || echo "$BINARY (development build)"
-        echo ""
-        echo "Get started:"
-        echo "  cd your-project"
-        echo "  $BINARY login"
-        echo "  $BINARY init"
-        echo ""
-        return 0
-    else
-        log_error "$BINARY was installed but is not in PATH"
-        return 1
+# Report the install and exit. Succeeds only when running `ox` starts the
+# binary just installed: an ox earlier on PATH would otherwise keep running
+# while this script reports success.
+finish_install() {
+    local on_path
+    on_path=$(command -v "$BINARY" 2>/dev/null) || true
+
+    if [[ -z "$on_path" ]]; then
+        log_error "$BINARY was installed to $LAST_INSTALL_PATH but is not in PATH"
+        print_path_warning "$LAST_INSTALL_PATH"
+        exit 1
     fi
+    if [[ ! "$on_path" -ef "$LAST_INSTALL_PATH" ]]; then
+        log_error "Running '$BINARY' starts $on_path, not the $BINARY just installed at $LAST_INSTALL_PATH"
+        echo "Remove that other $BINARY, or put $(dirname "$LAST_INSTALL_PATH") ahead of $(dirname "$on_path") on PATH."
+        exit 1
+    fi
+
+    local version_output
+    if ! version_output=$("$LAST_INSTALL_PATH" version 2>&1); then
+        log_error "$LAST_INSTALL_PATH was installed but does not run: $version_output"
+        exit 1
+    fi
+
+    log_success "$BINARY is installed and ready!"
+    echo ""
+    echo "$version_output"
+    echo ""
+    echo "Get started:"
+    echo "  cd your-project"
+    echo "  $BINARY login"
+    echo "  $BINARY init"
+    echo ""
+    print_doctor_hint
+    exit 0
 }
 
 # Main installation flow
@@ -504,10 +527,7 @@ main() {
 
     # Try downloading from GitHub releases first
     if install_from_release "$platform"; then
-        verify_installation
-        print_path_warning "$LAST_INSTALL_PATH"
-        print_doctor_hint
-        exit 0
+        finish_install
     fi
 
     log_warning "Failed to install from releases, trying alternative methods..."
@@ -515,10 +535,7 @@ main() {
     # Try go install as fallback
     if check_go; then
         if install_with_go; then
-            verify_installation
-            print_path_warning "$LAST_INSTALL_PATH"
-            print_doctor_hint
-            exit 0
+            finish_install
         fi
     fi
 
@@ -540,10 +557,7 @@ main() {
     fi
 
     if build_from_source; then
-        verify_installation
-        print_path_warning "$LAST_INSTALL_PATH"
-        print_doctor_hint
-        exit 0
+        finish_install
     fi
 
     # All methods failed

@@ -438,6 +438,19 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 				bk.charge(prime.BudgetSourceSageox)
 			}
 
+			// team bulletin board — a pointer and the reading rules, nothing
+			// else. No rows and no bodies: posts are teammates' unreviewed,
+			// time-limited notes, and prime must never copy one into an AI
+			// coworker's standing context. Emitted whenever the board folder
+			// exists, independent of the docs catalog above. The framing is
+			// ours; the path is one line, so the whole element is charged to
+			// the sageox bucket. Attribute values, so escapeXML (quotes too).
+			if output.TeamContext.BulletinHint != "" {
+				fmt.Fprintf(&sb, "\n<bulletin dir=\"%s\" hint=\"%s\"/>\n",
+					escapeXML(output.TeamContext.BulletinHint), escapeXML(prime.BulletinReadingHint))
+				bk.charge(prime.BudgetSourceSageox)
+			}
+
 			// team rules: framing is ours, bodies and rows are team data.
 			// emitTeamRules charges its own buckets through the bookkeeper.
 			if len(output.TeamContext.TeamRules) > 0 {
@@ -794,7 +807,7 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 		sb.WriteString("</plan-enrichment-guidance>\n")
 		return
 	}
-	sb.WriteString("Plan non-trivial work (multi-file OR architectural OR hotspot/open-PR OR ~5+ steps): run `ox plan enrich` WHILE drafting — JSON team context (collisions, prior art, expert routing) at zero LLM/network cost. This is your default plan-enrichment call.\n")
+	sb.WriteString("Plan any non-trivial work — design, GTM, rollout, engineering (multi-file OR architectural OR hotspot/open-PR OR ~5+ steps): run `ox plan enrich` WHILE drafting — JSON team context (collisions, prior art, expert routing) at zero LLM/network cost. This is your default plan-enrichment call.\n")
 	// HTML + review loop are HUMAN-opt-in: the agent recommends, the human runs.
 	// The authored page leads; ox supplies canonical storage, enrichment chrome,
 	// and review without becoming a second renderer or source of truth.

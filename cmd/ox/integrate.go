@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"log/slog"
-
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/constants"
@@ -165,7 +163,9 @@ func runIntegrateInteractive() error {
 				if err := InstallProjectClaudeHooks(gitRoot); err != nil {
 					return err
 				}
-				installAdapterRules(gitRoot)
+				if err := installAdapterInventory(gitRoot, "claude-code"); err != nil {
+					return err
+				}
 				return InstallGitHooks(gitRoot)
 			},
 		},
@@ -186,7 +186,10 @@ func runIntegrateInteractive() error {
 			displayName: label,
 			installed:   checkExternalAdapterHooks(adapterName, false),
 			installFn: func() error {
-				return installExternalAdapterHooks(adapterName, false)
+				if err := installExternalAdapterHooks(adapterName, false); err != nil {
+					return err
+				}
+				return installAdapterInventory(gitRoot, adapterName)
 			},
 		})
 	}
@@ -322,6 +325,11 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		if err := installDroidHooks(integrateUserFlag); err != nil {
 			return fmt.Errorf("installing Factory Droid integration: %w", err)
 		}
+		if !integrateUserFlag {
+			if err := installAdapterInventory(findGitRoot(), "droid"); err != nil {
+				return fmt.Errorf("installing Factory Droid assets: %w", err)
+			}
+		}
 
 		location := "project"
 		if integrateUserFlag {
@@ -410,8 +418,9 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 	fmt.Println("Installed lifecycle hooks to .claude/settings.json:")
 	fmt.Println("  - SessionStart, PreCompact, PostToolUse, Stop, SessionEnd, UserPromptSubmit")
 
-	// install rules via adapters that support it
-	installAdapterRules(gitRoot)
+	if err := installAdapterInventory(gitRoot, "claude-code"); err != nil {
+		return fmt.Errorf("installing Claude Code assets: %w", err)
+	}
 
 	// install git commit hooks (prepare-commit-msg for trailers)
 	if err := InstallGitHooks(gitRoot); err != nil {
@@ -789,23 +798,50 @@ func uninstallAllIntegrations(force bool) error {
 	return nil
 }
 
-// installAdapterRules discovers adapters with rules_installer capability and
-// installs their rules into the project.
-func installAdapterRules(gitRoot string) {
-	for _, ea := range adapters.DiscoverExternalAdapters() {
-		if !ea.HasCapability(adapterprotocol.CapRulesInstaller) {
-			continue
+// installAdapterInventory adds one selected adapter's native skill and rule
+// targets to the repository's shared desired state, then reconciles both in one
+// atomic Plan/Apply operation.
+func installAdapterInventory(gitRoot, adapterName string) error {
+	if gitRoot == "" {
+		return fmt.Errorf("not in a git repository")
+	}
+	ea, err := resolveExternalAdapter(adapterName)
+	if err != nil {
+		return err
+	}
+	targets, err := skillTargetsForAdapters(gitRoot, []*adapters.ExternalAdapter{ea})
+	if err != nil {
+		return err
+	}
+	info := ea.Info()
+	if (info == nil || len(info.RuleTargets) == 0) && ea.HasCapability(adapterprotocol.CapRulesInstaller) {
+		// One-release compatibility for third-party protocol-v1 adapters,
+		// matching the same branch in init.go. Scheduled removal in ox 0.18.0
+		// — see the deprecation note on adapterprotocol.CapRulesInstaller.
+		result, installErr := ea.InstallRules(gitRoot, version.Version)
+		if installErr != nil {
+			return installErr
 		}
-		resp, err := ea.InstallRules(gitRoot, version.Version)
-		if err != nil {
-			slog.Warn("failed to install rules", "adapter", ea.Name(), "error", err)
-			continue
-		}
-		if resp.Installed && len(resp.FilesWritten) > 0 {
+		if result.Installed && len(result.FilesWritten) > 0 {
 			fmt.Printf("%s %s rules installed (%s)\n",
-				ui.PassStyle.Render("✓"), ea.Name(), strings.Join(resp.FilesWritten, ", "))
+				ui.PassStyle.Render("✓"), ea.Name(), strings.Join(result.FilesWritten, ", "))
 		}
 	}
+	if len(targets) == 0 {
+		return nil
+	}
+	plan, err := reconcileSelectedSkills(gitRoot, targets)
+	if err != nil {
+		return err
+	}
+	if len(plan.Conflicts) > 0 {
+		return fmt.Errorf("reconciled with %d preserved conflict(s)", len(plan.Conflicts))
+	}
+	if written := plan.WrittenPaths(); len(written) > 0 {
+		fmt.Printf("%s %s assets installed (%s)\n",
+			ui.PassStyle.Render("✓"), ea.Name(), strings.Join(written, ", "))
+	}
+	return nil
 }
 
 func init() {

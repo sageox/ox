@@ -1,7 +1,7 @@
 ---
 title: "ox plan review"
 description: "CLI reference for ox plan review"
-sidebar_position: 66
+sidebar_position: 71
 ---
 
 ## ox plan review
@@ -40,6 +40,7 @@ ox plan review <slug> [flags]
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
       --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
@@ -49,5 +50,5 @@ ox plan review <slug> [flags]
 
 ### SEE ALSO
 
-* [ox plan](/plan)	 - Work with implementation plans (enrich, render, review)
+* [ox plan](/plan)	 - Work with plans (enrich, render, review)
 * [ox plan review await](/plan/review/await)	 - Block until reviewers submit feedback, then print open items as JSON (agent loop)

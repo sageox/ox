@@ -337,7 +337,7 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 		}
 	})
 
-	post := func(path string, fn func(body []byte) (int, error)) {
+	post := func(path string, fn func(body []byte) (map[string]any, int, error)) {
 		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -352,55 +352,63 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 				http.Error(w, "read error", http.StatusBadRequest)
 				return
 			}
-			code, err := fn(body)
+			extra, code, err := fn(body)
 			if err != nil {
 				http.Error(w, err.Error(), code)
 				return
 			}
-			bc.broadcast() // repaint the submitter's own tab too
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"ok":true}`))
+			resp := map[string]any{"ok": true}
+			for k, v := range extra {
+				resp[k] = v
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+			// Broadcast the reload AFTER the response is written: the submitter's
+			// own tab reloads on this same SSE push, and a reload racing ahead of
+			// the fetch callback could wipe a notified:false toast before it ever
+			// shows.
+			bc.broadcast()
 		})
 	}
 
-	post("/feedback", func(body []byte) (int, error) {
+	post("/feedback", func(body []byte) (map[string]any, int, error) {
 		set, err := plan.ParseFeedback(body)
 		if err != nil {
-			return http.StatusBadRequest, err
+			return nil, http.StatusBadRequest, err
 		}
 		set.Slug = slug
 		if _, err := plan.SaveFeedback(planDir, set, time.Now()); err != nil {
-			return http.StatusInternalServerError, err
+			return nil, http.StatusInternalServerError, err
 		}
 		commitPlanBestEffort(gitRoot, planDir)
-		enqueuePlanFeedbackTask(gitRoot, planDir, slug, len(set.Items))
+		notifyErr := enqueuePlanFeedbackTask(gitRoot, planDir, slug, len(set.Items))
 		select {
 		case rounds <- len(set.Items):
 		default:
 		}
-		return 0, nil
+		return map[string]any{"notified": notifyErr == nil}, 0, nil
 	})
 
-	post("/accept", func(body []byte) (int, error) {
+	post("/accept", func(body []byte) (map[string]any, int, error) {
 		anchor, err := anchorFromBody(body)
 		if err != nil {
-			return http.StatusBadRequest, err
+			return nil, http.StatusBadRequest, err
 		}
 		r := plan.Resolution{Anchor: anchor, State: plan.ResolutionVerified, Note: "accepted by reviewer"}
 		if err := plan.AppendResolution(planDir, r, time.Now()); err != nil {
-			return http.StatusInternalServerError, err
+			return nil, http.StatusInternalServerError, err
 		}
 		commitPlanBestEffort(gitRoot, planDir)
-		return 0, nil
+		return nil, 0, nil
 	})
 
-	post("/reopen", func(body []byte) (int, error) {
+	post("/reopen", func(body []byte) (map[string]any, int, error) {
 		var in struct {
 			Anchor string `json:"anchor"`
 			Note   string `json:"note"`
 		}
 		if err := json.Unmarshal(body, &in); err != nil || in.Anchor == "" {
-			return http.StatusBadRequest, fmt.Errorf("reopen needs an anchor")
+			return nil, http.StatusBadRequest, fmt.Errorf("reopen needs an anchor")
 		}
 		note := in.Note
 		if note == "" {
@@ -410,20 +418,20 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 			{Anchor: in.Anchor, Status: plan.FeedbackRequestChange, Note: note},
 		}}
 		if _, err := plan.SaveFeedback(planDir, set, time.Now()); err != nil {
-			return http.StatusInternalServerError, err
+			return nil, http.StatusInternalServerError, err
 		}
 		commitPlanBestEffort(gitRoot, planDir)
 		// a reopen is a fresh open item — re-notify, so feedback isn't stranded if
 		// the authoring coworker's session already ended between rounds.
-		enqueuePlanFeedbackTask(gitRoot, planDir, slug, 1)
+		notifyErr := enqueuePlanFeedbackTask(gitRoot, planDir, slug, 1)
 		select {
 		case rounds <- 1:
 		default:
 		}
-		return 0, nil
+		return map[string]any{"notified": notifyErr == nil}, 0, nil
 	})
 
-	post("/approve", func(body []byte) (int, error) {
+	post("/approve", func(body []byte) (map[string]any, int, error) {
 		// Same engine `ox plan approve` uses (internal/plan/lifecycle.go) — a
 		// browser Approve click and the CLI verb are one mechanism, never two.
 		// changed is only used to gate the best-effort activity notify below;
@@ -436,7 +444,7 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 		defer cancel()
 		changed, err := plan.AppendPlanEvent(ctx, planDir, plan.EventApproved, fields)
 		if err != nil {
-			return http.StatusInternalServerError, err
+			return nil, http.StatusInternalServerError, err
 		}
 		if changed {
 			// Async: this handler serves a browser request, and the review
@@ -450,7 +458,7 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 		case approved <- struct{}{}:
 		default:
 		}
-		return 0, nil
+		return nil, 0, nil
 	})
 
 	return mux

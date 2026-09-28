@@ -111,6 +111,9 @@ func ConfirmUninstall(repoName string, force bool) error {
 	if force {
 		return nil
 	}
+	if noInput {
+		return fmt.Errorf("%w: pass --force to confirm uninstall with --no-input", ErrNoInteractiveInput)
+	}
 
 	fmt.Println(StyleWarning.Render("⚠  This operation affects ALL users of this repository"))
 	fmt.Println()
@@ -146,6 +149,9 @@ func ConfirmDangerousOperation(operationName, exactMatch string, force bool) err
 	if force {
 		return nil
 	}
+	if noInput {
+		return fmt.Errorf("%w: pass --force to confirm %s with --no-input", ErrNoInteractiveInput, operationName)
+	}
 
 	fmt.Printf("Type %s to confirm %s: ",
 		StyleCommand.Render(exactMatch),
@@ -179,12 +185,16 @@ var ErrConfirmationRequired = errors.New("confirmation required: re-run in a ter
 // ConfirmYesNo displays a yes/no prompt and loops until valid input.
 // Returns true if user confirms with y/yes, false for n/no.
 // Empty input uses the default specified by defaultYes.
+// With --no-input, declines unless --yes was explicitly supplied.
 //
-// When no input can be gathered at all, this silently returns defaultYes —
+// Otherwise, when no input can be gathered at all, this silently returns defaultYes —
 // unchanged from its long-standing behavior, preserved here for every existing
 // caller. Callers for whom that silent guess has a real cost should call
 // ConfirmYesNoRequired instead.
 func ConfirmYesNo(prompt string, defaultYes bool) bool {
+	if noInput {
+		return AssumeYes()
+	}
 	answer, answered := confirmYesNoCore(prompt, defaultYes)
 	if !answered {
 		return defaultYes
@@ -217,11 +227,12 @@ func ConfirmYesNoRequired(prompt string, defaultYes, force bool) (bool, error) {
 // terminal or piped in — as opposed to a fallback returned because stdin was
 // closed, empty, or unreadable.
 //
-// Note it does not consult IsInteractive(): `echo y | ox …` is a legitimate
-// answer even with no TTY, and rejecting it would break every scripted caller
-// that answers honestly. The distinction that matters is whether an answer
-// arrived, not whether a terminal was attached.
+// Only --no-input forbids reading an answer. Do not gate on IsInteractive():
+// piped answers remain valid without a TTY and with --no-interactive.
 func confirmYesNoCore(prompt string, defaultYes bool) (answer bool, answered bool) {
+	if noInput {
+		return false, false
+	}
 	suffix := "[y/N]"
 	if defaultYes {
 		suffix = "[Y/n]"

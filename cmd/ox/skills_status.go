@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -14,7 +13,11 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/internal/status"
+	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/internal/version"
+	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/spf13/cobra"
 )
 
@@ -35,11 +38,31 @@ import (
 var skillsCmd = &cobra.Command{
 	Use:   "skills",
 	Short: "Inspect the skills your AI coworkers have",
-	Long: `Inspect the skills installed for this repository.
+	Long: `Inspect and manage the skills your AI coworkers have here.
 
-Skills come from two places: the ones ox itself ships, and the ones your team
-publishes to its Team Context. This command shows both, and — when a team skill
-is missing — which of the several possible reasons is the actual one.`,
+Skills reach a repository from three places: the ones ox itself ships, the ones
+your team publishes to its Team Context, and the ones you wrote yourself. "list"
+shows all three. "status" answers the harder question — when a team skill is
+missing, which of the several possible reasons is the actual one. "approve" and
+"revoke" are the trust boundary for runnable team-skill content; "publish" sends
+a skill you wrote the other way, into your team's Team Context.`,
+	// An unknown verb must SAY so. `ox skills catalog|install|uninstall` were
+	// withdrawn before release (ADR-032 D1, GH #1028), so a stale doc, blog
+	// post, or script will keep reaching for them — and cobra's default is to
+	// swallow the token as an argument and print generic help, which reads like
+	// the command ran. Name it, and point at what does exist.
+	Args: cobra.ArbitraryArgs,
+	RunE: runSkillsDispatch,
+}
+
+// runSkillsDispatch prints help for a bare `ox skills` and fails loudly on an
+// unknown verb. A valid subcommand is routed by cobra before RunE is reached,
+// so anything arriving here is a token cobra could not match.
+func runSkillsDispatch(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return cmd.Help()
+	}
+	return fmt.Errorf("unknown subcommand %q for %q\nRun 'ox skills --help' to see available commands", args[0], cmd.CommandPath())
 }
 
 var skillsStatusCmd = &cobra.Command{
@@ -61,11 +84,18 @@ func init() {
 // than only in the human rendering, so Codex and Droid get the next action too —
 // the CLI owns behavior, skills are thin relays over it.
 type skillsStatusOutput struct {
-	TeamContext *teamContextStatus `json:"team_context"`
-	Repo        repoSkillStatus    `json:"repo"`
-	TeamSkills  []teamSkillStatus  `json:"team_skills"`
-	Problems    []string           `json:"problems,omitempty"`
-	Guidance    string             `json:"guidance,omitempty"`
+	TeamContext *teamContextStatus          `json:"team_context"`
+	Convergence *teamconverge.PendingRecord `json:"convergence,omitempty"`
+	Repo        repoSkillStatus             `json:"repo"`
+	Summary     teamSkillSummary            `json:"summary"`
+	TeamSkills  []teamSkillStatus           `json:"team_skills"`
+	Problems    []string                    `json:"problems,omitempty"`
+	Guidance    string                      `json:"guidance,omitempty"`
+}
+
+type teamSkillSummary struct {
+	AutoInstalledProse int `json:"auto_installed_prose"`
+	Withheld           int `json:"withheld"`
 }
 
 type teamContextStatus struct {
@@ -100,10 +130,16 @@ const (
 	skillWithheld      = "withheld"       // executable, awaiting approval
 	skillUnavailable   = "unavailable"    // discovered but ox could not use it
 	skillNotApplicable = "not applicable" // published, but its repos: excludes this repo
+	skillConflict      = "conflict"       // something ox does not own already holds the name
 )
 
 type teamSkillStatus struct {
-	Name          string `json:"name"`
+	Name string `json:"name"`
+	// InstalledAs is the DIRECTORY the skill occupies, which is also the name an
+	// AI coworker types to invoke it — `fork-scout` is published as
+	// `fork-scout-team`. Reporting only the team-side name left a reader with a
+	// name that does not resolve anywhere.
+	InstalledAs   string `json:"installed_as,omitempty"`
 	AppliesHere   bool   `json:"applies_here"`
 	State         string `json:"state"`
 	NeedsApproval bool   `json:"needs_approval"`
@@ -121,9 +157,7 @@ func runSkillsStatus(cmd *cobra.Command, _ []string) error {
 	out := collectSkillsStatus(gitRoot)
 
 	if asJSON {
-		enc := json.NewEncoder(cmd.OutOrStdout())
-		enc.SetIndent("", "  ")
-		return enc.Encode(out)
+		return encodeSkillsJSON(cmd.OutOrStdout(), out)
 	}
 	renderSkillsStatus(cmd.OutOrStdout(), out)
 	return nil
@@ -133,14 +167,31 @@ func runSkillsStatus(cmd *cobra.Command, _ []string) error {
 // the JSON shape are both testable without a terminal.
 func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 	out := skillsStatusOutput{TeamSkills: []teamSkillStatus{}}
+	pending, pendingErr := teamconverge.LoadPending(gitRoot)
+	if pendingErr != nil {
+		out.Problems = append(out.Problems, fmt.Sprintf("Team Context convergence status is unreadable: %v", pendingErr))
+	} else if pending != nil {
+		out.Convergence = pending
+		if teamconverge.AutomaticRetryAllowed(pending, pending.TeamPath) {
+			out.Problems = append(out.Problems, fmt.Sprintf(
+				"Team Context convergence is pending and will retry automatically (attempt %d): %s", pending.Attempts, pending.Reason))
+		} else if pending.Status == teamconverge.PendingRetry {
+			out.Problems = append(out.Problems, fmt.Sprintf(
+				"Team Context convergence is pending after %d attempts; automatic retry limit reached — run `ox sync`: %s",
+				pending.Attempts, pending.Reason))
+		} else {
+			out.Problems = append(out.Problems, fmt.Sprintf(
+				"Team Context convergence failed and needs attention: %s", pending.Reason))
+		}
+	}
 
 	slug := repotools.RepoSlug(gitRoot)
 	fromRemote := slug != filepath.Base(gitRoot)
 	out.Repo = repoSkillStatus{Slug: slug, SlugFromRemote: fromRemote}
 
-	_, _, selected := skillmanager.InstalledSource(gitRoot)
-	out.Repo.Selected = selected
 	targets, desiredErr := skillTargetRoots(gitRoot)
+	selected := len(targets) > 0
+	out.Repo.Selected = selected
 	out.Repo.Targets = targets
 	if desiredErr != nil {
 		// A missing lockfile is a valid empty state; anything else means ox cannot
@@ -225,9 +276,30 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 			fmt.Sprintf("ox could not read the team's skills: %v", discoverErr))
 	}
 
+	// Hand the walk above to the plan instead of letting it re-walk
+	// teamdocs.PublishedSkills a second time (ox-jr82): this command already
+	// answered "what does the team publish" and "which of those are for this
+	// repo" just above, and a second independent walk could disagree with the
+	// first. RepoSlug MUST be the origin-derived identity, never the
+	// directory-name display fallback `slug` above — SkillAppliesToRepo fails
+	// closed on an empty slug, matching what the plan has always used
+	// internally. A discovery error leaves resolved nil, which asks the plan to
+	// walk the checkout itself exactly as it always has.
+	var resolved *skillmanager.TeamSkillsResolved
+	if discoverErr == nil {
+		authoritativeSlug, _ := repotools.RepoSlugFromRemote(gitRoot)
+		applicable := make([]teamdocs.TeamSkill, 0, len(published))
+		for _, sk := range published {
+			if teamdocs.SkillAppliesToRepo(sk, authoritativeSlug) {
+				applicable = append(applicable, sk)
+			}
+		}
+		resolved = &skillmanager.TeamSkillsResolved{TeamPath: tc.Path, RepoSlug: authoritativeSlug, Skills: applicable}
+	}
+
 	decisions := map[string]skillmanager.TeamSkillDecision{}
 	var planned plannedPaths
-	plan, planErr := planCommittedSkills(gitRoot)
+	plan, planErr := planCommittedSkillsResolved(gitRoot, resolved)
 	switch {
 	case planErr != nil:
 		out.Problems = append(out.Problems,
@@ -241,6 +313,9 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 		}
 		for _, action := range plan.Updates {
 			planned.updated = append(planned.updated, action.Path)
+		}
+		for _, conflict := range plan.Conflicts {
+			planned.conflicted = append(planned.conflicted, conflictedPath{Path: conflict.Path, Reason: conflict.Reason})
 		}
 		if reason := plan.RetainedTeamReason(); reason != "" {
 			out.Problems = append(out.Problems,
@@ -262,8 +337,15 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 			row.Detail = "could not compute the plan"
 		default:
 			decision := decisions[sk.Name]
+			row.InstalledAs = decision.InstalledAs
 			row.NeedsApproval = decision.NeedsApprove
 			row.State, row.Detail = installedState(gitRoot, targets, decision, planned)
+			if row.State == skillInstalled && decision.AutoInstalledProse {
+				out.Summary.AutoInstalledProse++
+			}
+			if decision.NeedsApprove {
+				out.Summary.Withheld++
+			}
 		}
 		out.TeamSkills = append(out.TeamSkills, row)
 	}
@@ -302,7 +384,23 @@ func skillsStatusGuidance(out skillsStatusOutput) string {
 	if out.TeamContext == nil {
 		return "This project has no Team Context, so there are no team skills to install."
 	}
+	if out.Summary.AutoInstalledProse > 0 {
+		return fmt.Sprintf("Team skills are current. %d auto-installed as prose without approval; nothing is withheld.", out.Summary.AutoInstalledProse)
+	}
 	return "Team skills are current. Nothing to do."
+}
+
+// planCommittedSkillsResolved is planCommittedSkills (skill_reconcile.go) with
+// the TeamSkillsResolved seam skillmanager.PlanWithTeamSkills takes (ox-jr82):
+// a nil resolved behaves exactly like planCommittedSkills always has. It is
+// defined here, not alongside planCommittedSkills, because only this command
+// has already walked the team checkout and has a resolved set to offer.
+func planCommittedSkillsResolved(repoRoot string, resolved *skillmanager.TeamSkillsResolved) (*skillmanager.ReconcilePlan, error) {
+	desired, targets, err := committedSkillState(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	return skillmanager.PlanWithTeamSkills(repoRoot, version.Version, desired, targets, resolved)
 }
 
 // skillTargetRoots reads the repo's selected skill roots, distinguishing "no
@@ -314,7 +412,9 @@ func skillTargetRoots(gitRoot string) ([]string, error) {
 	}
 	roots := make([]string, 0, len(targets))
 	for _, t := range targets {
-		roots = append(roots, t.Root)
+		if t.Format == adapterprotocol.SkillFormatAgentSkillsV1 {
+			roots = append(roots, t.Root)
+		}
 	}
 	return roots, nil
 }
@@ -358,6 +458,14 @@ func installedState(gitRoot string, targets []string, d skillmanager.TeamSkillDe
 	var incomplete, outdated []string
 	for _, root := range targets {
 		dir := path.Join(root, d.InstalledAs) + "/"
+		// Conflict is checked FIRST and returns immediately. Every other state below
+		// ends in "run `ox doctor --fix`", and for a conflict that advice is false:
+		// reconcile preserves conflicting content by design, so --fix will report the
+		// same conflict forever. Telling someone to run a command that cannot help is
+		// worse than telling them nothing.
+		if reason, blocked := planned.conflicts(dir); blocked {
+			return skillConflict, reason + " (" + root + ") — rename yours, or remove it to let the team's copy land"
+		}
 		switch {
 		case planned.creates(dir):
 			incomplete = append(incomplete, root)
@@ -393,12 +501,35 @@ func manifestPresent(gitRoot, dir string) bool {
 // missing or stale bundled file — a reference doc, an asset — counts as not
 // installed too. The manifest being present says nothing about the rest.
 type plannedPaths struct {
-	created []string
-	updated []string
+	created    []string
+	updated    []string
+	conflicted []conflictedPath
+}
+
+// conflictedPath keeps the reason attached to the path. A conflict without its
+// reason is the least actionable diagnostic ox can produce: the reader learns
+// that something is wrong and nothing about which of the several possible
+// somethings it is.
+type conflictedPath struct {
+	Path   string
+	Reason string
 }
 
 func (p plannedPaths) creates(dir string) bool { return hasPrefixIn(p.created, dir) }
 func (p plannedPaths) updates(dir string) bool { return hasPrefixIn(p.updated, dir) }
+
+// conflicts matches a conflict recorded on the skill DIRECTORY as well as one
+// recorded on a file inside it. The checked-in-skill refusal names the directory,
+// because it declines before it ever looks at a file.
+func (p plannedPaths) conflicts(dir string) (string, bool) {
+	trimmed := strings.TrimSuffix(dir, "/")
+	for _, candidate := range p.conflicted {
+		if candidate.Path == trimmed || strings.HasPrefix(candidate.Path, dir) {
+			return candidate.Reason, true
+		}
+	}
+	return "", false
+}
 
 func hasPrefixIn(paths []string, dir string) bool {
 	for _, candidate := range paths {
@@ -417,57 +548,143 @@ func roundedAge(t time.Time) string {
 	return fmt.Sprintf("%dh", int(d.Hours()))
 }
 
+// statusLabel is the width of the label column. Every section uses the same
+// one so the values line up down the whole screen — three sections with three
+// different label widths read as three unrelated blocks.
+const statusLabel = 12
+
 func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsStatusOutput) {
-	p := func(format string, args ...any) { fmt.Fprintf(w, format+"\n", args...) }
+	p := skillsPrintf(w)
+	// kv prints one indented label/value pair; section prints an un-indented
+	// heading whose value lands in the SAME column. The +2 is the kv indent:
+	// without it every heading's value sat two columns left of the rows under
+	// it, which is exactly enough misalignment to read as a mistake.
+	kv := func(label, format string, args ...any) {
+		p("  %-*s %s", statusLabel, label, fmt.Sprintf(format, args...))
+	}
+	section := func(label, format string, args ...any) {
+		p("%s %s", cli.StyleAccent.Render(fmt.Sprintf("%-*s", statusLabel+2, label)), fmt.Sprintf(format, args...))
+	}
+
+	p("%s", cli.StyleGroupHeader.Render("Skills status"))
+	p("%s", cli.StyleDim.Render(strings.Repeat("─", len("Skills status"))))
+	p("")
 
 	if out.TeamContext != nil {
 		name := out.TeamContext.Name
 		if name == "" {
 			name = "(unnamed)"
 		}
-		p("%s  %s", cli.StyleAccent.Render("Team Context"), name)
-		p("  path         %s", out.TeamContext.Path)
-		p("  checkout     %s", presence(out.TeamContext.Present))
-		p("  skill roots  %s", materialized(out.TeamContext.SkillsMaterialized))
+		section("Team Context", "%s", name)
+		kv("path", "%s", homeRelative(out.TeamContext.Path))
+		// Checkout and skill roots share a line while both are healthy: two
+		// lines saying "fine" is two lines of nothing. They split apart the
+		// moment either is not, which is when the detail earns its space.
+		if out.TeamContext.Present && out.TeamContext.SkillsMaterialized {
+			kv("checkout", "on disk · skill roots materialized")
+		} else {
+			kv("checkout", "%s", presence(out.TeamContext.Present))
+			kv("skill roots", "%s", materialized(out.TeamContext.SkillsMaterialized))
+		}
 		if out.TeamContext.LastSync != "" {
-			p("  last sync    %s", out.TeamContext.LastSync)
+			kv("synced", "%s", relativeSyncAge(out.TeamContext.LastSync))
 		}
 	} else {
-		p("%s  none configured for this project", cli.StyleAccent.Render("Team Context"))
+		section("Team Context", "none configured for this project")
+	}
+	if out.Convergence != nil {
+		kv("convergence", "%s (attempt %d)", out.Convergence.Status, out.Convergence.Attempts)
+		if out.Convergence.TeamCommit != "" {
+			commit := out.Convergence.TeamCommit
+			if len(commit) > 12 {
+				commit = commit[:12]
+			}
+			kv("source", "%s", commit)
+		}
 	}
 
 	p("")
-	p("%s  %s", cli.StyleAccent.Render("This repo"), out.Repo.Slug)
+	section("This repo", "%s", out.Repo.Slug)
 	if !out.Repo.SlugFromRemote {
-		p("  slug         from the directory name — no recognized remote")
+		kv("slug", "from the directory name — no recognized remote")
 	}
 	if len(out.Repo.Targets) > 0 {
-		p("  targets      %s", strings.Join(out.Repo.Targets, ", "))
+		kv("targets", "%s", strings.Join(out.Repo.Targets, ", "))
 	} else {
-		p("  targets      none — run `ox init`")
+		kv("targets", "none — run `ox init`")
 	}
 
 	p("")
 	if len(out.TeamSkills) == 0 {
-		p("%s  none found", cli.StyleAccent.Render("Team skills"))
+		section("Team skills", "none found")
 	} else {
-		p("%s", cli.StyleAccent.Render("Team skills"))
+		section("Team skills", "%s", trustSummary(out.Summary))
 		for _, s := range out.TeamSkills {
-			detail := s.Detail
-			if detail != "" {
-				detail = " — " + detail
+			// The INSTALLED name, when there is one: that directory is what an AI
+			// coworker actually types, and it is the fact a reader came here for.
+			// Printing the team-side name alone handed them a name that resolves
+			// nowhere — `fork-scout` is invoked as `fork-scout-team`.
+			label := s.Name
+			if s.InstalledAs != "" && s.InstalledAs != s.Name {
+				label = s.InstalledAs
 			}
-			p("  %-24s %s%s", s.Name, s.State, detail)
+			kv(label, "%s", s.State)
+			// The reason hangs under the state rather than trailing it on one
+			// line. A trust verdict names files and capabilities, so it runs
+			// well past 80 columns and was wrapping wherever the terminal chose.
+			for _, line := range wrapWords(s.Detail, skillsTableWidth-statusLabel-3) {
+				p("  %-*s %s", statusLabel, "", cli.StyleDim.Render(line))
+			}
 		}
 	}
 
 	if len(out.Problems) > 0 {
 		p("")
-		p("%s", cli.StyleWarning.Render("Why something may be missing"))
-		for _, problem := range out.Problems {
-			p("  • %s", problem)
-		}
+		writeSkillsProblems(w, cli.StyleWarning.Render("Why something may be missing"), out.Problems)
 	}
+}
+
+// trustSummary states what still needs a human, and says so in as few words as
+// the facts allow. Reporting every counter including the zeros ("0
+// auto-installed as prose without approval; 1 withheld pending approval") made
+// the reader parse two clauses to find the one that was true.
+func trustSummary(s teamSkillSummary) string {
+	var parts []string
+	if s.Withheld > 0 {
+		parts = append(parts, fmt.Sprintf("%d withheld pending approval", s.Withheld))
+	}
+	if s.AutoInstalledProse > 0 {
+		parts = append(parts, fmt.Sprintf("%d auto-installed as prose", s.AutoInstalledProse))
+	}
+	if len(parts) == 0 {
+		return "all approved"
+	}
+	return strings.Join(parts, " · ")
+}
+
+// relativeSyncAge renders a stored RFC3339 timestamp as an age. "2m ago"
+// answers the question a reader actually has ("is this current?"); an ISO
+// timestamp makes them subtract.
+func relativeSyncAge(rfc3339 string) string {
+	t, err := time.Parse(time.RFC3339, rfc3339)
+	if err != nil {
+		return rfc3339 // unparseable: show what we stored rather than nothing
+	}
+	return status.FormatTimeAgo(t)
+}
+
+// homeRelative shortens a path under the user's home directory to ~/…, which
+// is how a human refers to it anyway. Returns the input unchanged when it is
+// not under home, or when home cannot be determined.
+func homeRelative(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if rest, ok := strings.CutPrefix(path, home+string(filepath.Separator)); ok {
+		return "~" + string(filepath.Separator) + rest
+	}
+	return path
 }
 
 func presence(ok bool) string {

@@ -46,6 +46,8 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 		Username:               identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
 		RepoID:                 repoID,
 		OxVersion:              version.Version,
+		NativeSessions:         state.NativeSessions,
+		TraceCapture:           state.Trace,
 	}
 
 	// enrich with adapter metadata if available
@@ -150,6 +152,22 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		}
 	}
 
+	// The header was written at start, before any /clear or resume could add
+	// a native session id and before the stop time existed. Append both now
+	// as the footer so the ledger copy of raw.jsonl is self-describing on its
+	// own (a daemon retry of this upload has no .recording.json to consult).
+	// Appended rather than rewritten: a parallel PostToolUse hook may still
+	// hold the file open. Best-effort: meta.json gets the same values from
+	// state regardless.
+	stoppedAt := session.ResolveStoppedAt(state.StoppedAt, rawPath, time.Now())
+	if err := session.StampRawCarrier(rawPath, session.CarrierStamp{
+		NativeSessions: state.NativeSessions,
+		TraceCapture:   state.Trace,
+		StoppedAt:      stoppedAt,
+	}); err != nil {
+		slog.Warn("finalize: could not stamp raw.jsonl carrier", "session", state.SessionPath, "error", err)
+	}
+
 	// read back the completed raw.jsonl to generate artifacts
 	storedSession, err := session.ReadSessionFromPath(rawPath)
 	if err != nil {
@@ -195,6 +213,12 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		}
 		if toolOutput, ok := rawMap["tool_output"].(string); ok {
 			entry.ToolOutput = toolOutput
+		}
+		if callID, ok := rawMap["call_id"].(string); ok {
+			entry.CallID = callID
+		}
+		if isError, ok := rawMap["is_error"].(bool); ok {
+			entry.IsError = isError
 		}
 		sessionEntries = append(sessionEntries, entry)
 	}

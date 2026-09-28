@@ -203,3 +203,73 @@ func TestCraftRealization_MaterialPlanNeedsHeroVisual(t *testing.T) {
 		t.Fatal("an accessible authored hero visual must satisfy the material-plan requirement")
 	}
 }
+
+// TestCraftRealization_KindAware pins the defect this fixes: the craft
+// expectations were written for a PLAN and applied to every artifact kind, so
+// saving a design mockup with `--kind mockup` nagged the author to add a mockup
+// and to relocate implementation notes into a collapsed appendix.
+//
+// Two of the three expectations are plan-shaped and only plan-shaped:
+//   - the mockup nudge asks the author to PROPOSE a surface; a mockup artifact
+//     IS that proposal, so the ask is circular;
+//   - the progressive-disclosure nudge serves a plan's second reader (the
+//     implementer, who needs exact files and gotchas); a mockup, a review sheet
+//     and an evidence page have no such reader.
+//
+// The hero-visual expectation is kind-agnostic and survives for every kind — a
+// mockup that is a prose wall is a real defect.
+//
+// Failure prevented: `ox plan save --file page.html --kind mockup` printing
+// `craft.missing-mockup` at the author. Observed 2026-09-22 on a real save.
+func TestCraftRealization_KindAware(t *testing.T) {
+	// Material + a detected user-facing surface + a page that drew a chart but
+	// no device frame and no <details> appendix: under KindPlan this is two
+	// genuine gaps.
+	res := Result{MockupSection: "Before & after", Signals: SignalSummary{Material: true}}
+	page := []byte(`<html><body><section><h2>Before &amp; after</h2>` +
+		`<figure class="barc"><div class="bar-row"></div></figure></section></body></html>`)
+
+	t.Run("plan keeps both plan-shaped expectations", func(t *testing.T) {
+		gaps := LintCraftFor(KindPlan, res, page)
+		for _, want := range []string{"craft.missing-mockup", "craft.missing-progressive-disclosure"} {
+			if !hasRule(gaps, want) {
+				t.Errorf("KindPlan must still emit %s", want)
+			}
+		}
+	})
+
+	// Empty kind is KindPlan — every artifact saved before kinds existed keeps
+	// its old behavior (mirrors KindOrDefault).
+	t.Run("empty kind behaves as plan", func(t *testing.T) {
+		if !hasRule(LintCraftFor("", res, page), "craft.missing-mockup") {
+			t.Error("empty kind must behave as KindPlan")
+		}
+	})
+
+	for _, kind := range []ArtifactKind{KindMockup, KindReview, KindEvidence} {
+		t.Run(string(kind)+" drops the plan-shaped expectations", func(t *testing.T) {
+			rep := CraftRealizationFor(kind, res, page)
+			for _, banned := range []string{"craft.missing-mockup", "craft.missing-progressive-disclosure"} {
+				if hasRule(rep.Gaps, banned) {
+					t.Errorf("%s must not emit %s — that expectation is plan-shaped", kind, banned)
+				}
+			}
+			// A suppressed expectation must not be COUNTED either, or the
+			// hint→realization metric quietly reports a miss nobody can fix.
+			if rep.Emitted != 1 {
+				t.Errorf("%s: expected only the hero-visual expectation to be emitted, got emitted=%d", kind, rep.Emitted)
+			}
+			if rep.Realized != 1 {
+				t.Errorf("%s: the page drew a chart, so the hero-visual expectation is realized; got realized=%d", kind, rep.Realized)
+			}
+		})
+	}
+
+	// The kind-agnostic expectation still bites: a prose-only mockup is a real gap.
+	t.Run("hero visual still required for a mockup", func(t *testing.T) {
+		barren := []byte(`<html><body><section><h2>Before</h2><p>prose only</p></section></body></html>`)
+		if !hasRule(LintCraftFor(KindMockup, res, barren), "craft.missing-hero-visual") {
+			t.Error("a prose-only mockup must still be nagged for drawing nothing")
+		}
+	})
+}

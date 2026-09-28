@@ -52,6 +52,39 @@ func fakeSkill(version string, suffix string) skills.Skill {
 	return skills.Skill{Name: "test-skill", Content: files[0].Content, Files: files, Version: version}
 }
 
+// unprefixedFixtureSkill returns a synthetic catalog skill whose name carries
+// no reserved prefix — exercising the same first-install reclaim and per-file
+// ownership arms a real unprefixed catalog skill does, without the test
+// depending on what the real embedded catalog happens to ship today.
+func unprefixedFixtureSkill(version, body string) skills.Skill {
+	files := []skills.File{
+		{Path: "SKILL.md", Content: []byte("---\nname: widget\ndescription: fixture\n---\n" + body + "\n")},
+		{Path: "references/jev.md", Content: []byte("shipped reference content\n")},
+	}
+	return skills.Skill{Name: "widget", Content: files[0].Content, Files: files, Version: version}
+}
+
+func TestIsTeamOwnedPathRequiresTargetContainment(t *testing.T) {
+	target := sharedTarget()
+	targets := map[string]adapterprotocol.SkillTarget{target.Key: target}
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "contained Team Skill", path: ".agents/skills/sageox-team-deploy/SKILL.md", want: true},
+		{name: "contained user skill", path: ".agents/skills/deploy/SKILL.md", want: false},
+		{name: "reserved prefix outside target", path: ".claude/sageox-team-deploy/SKILL.md", want: false},
+		{name: "lexical escape carrying prefix", path: ".agents/skills/../../sageox-team-deploy/SKILL.md", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := managedFile{Target: target.Key, Path: tt.path}
+			require.Equal(t, tt.want, isTeamOwnedPath(targets, file))
+		})
+	}
+}
+
 func TestCanonicalizeTargetsDeduplicatesSharedProjection(t *testing.T) {
 	repo := t.TempDir()
 	codex := sharedTarget()
@@ -1043,6 +1076,14 @@ func TestReconcileUpdateNonBlocking_DoesTheWorkWhenUncontended(t *testing.T) {
 	repo := t.TempDir()
 	target := sharedTarget()
 	targets := []adapterprotocol.SkillTarget{target}
+	initial, err := ReconcileUpdate(repo, "1.0.0",
+		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return DefaultDesired(targets), targets, nil
+		})
+	require.NoError(t, err)
+	require.NotEmpty(t, initial.WrittenPaths())
+	missing := filepath.Join(repo, filepath.FromSlash(initial.WrittenPaths()[0]))
+	require.NoError(t, os.Remove(missing))
 
 	plan, err := ReconcileUpdateNonBlocking(repo, "1.0.0",
 		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
@@ -1050,9 +1091,25 @@ func TestReconcileUpdateNonBlocking_DoesTheWorkWhenUncontended(t *testing.T) {
 		})
 	require.NoError(t, err, "an uncontended reconcile must not report a timeout")
 	require.NotNil(t, plan)
+	require.FileExists(t, missing, "automatic reconcile did not restore the gitignored projection")
 
 	_, err = os.Stat(filepath.Join(repo, ".agents", ".gitignore"))
 	require.NoError(t, err, "the ignore rule must exist beside anything materialized")
+}
+
+func TestReconcileUpdateNonBlocking_DoesNotCreateTrackedSetup(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+
+	_, err := ReconcileUpdateNonBlocking(repo, "1.0.0",
+		func(d DesiredSkills, ct []adapterprotocol.SkillTarget) (DesiredSkills, []adapterprotocol.SkillTarget, error) {
+			return DefaultDesired(targets), targets, nil
+		})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "tracked selection update")
+	_, statErr := os.Stat(filepath.Join(repo, ".agents"))
+	require.True(t, os.IsNotExist(statErr), "automatic reconcile created tracked repository setup")
 }
 
 // TestReconcileUpdateNonBlocking_YieldsRatherThanStallingASession is the whole
@@ -1490,4 +1547,127 @@ func TestApplyRefusesWhenTheIgnoreFileIsADirectory(t *testing.T) {
 	if entries, readErr := os.ReadDir(filepath.Join(repo, ".agents", "skills")); readErr == nil {
 		require.Empty(t, entries, "ox half-installed skills despite refusing")
 	}
+}
+
+// TestPlan_UnprefixedCatalogNameNeverEatsAHandAuthoredSkill is the data-loss
+// proof for catalog skills that carry NO reserved prefix.
+//
+// An unprefixed catalog name is ordinary English — nobody was ever told to
+// stay off it — so a repository can already hold a hand-authored skill at
+// exactly that path. None of the three recorded claims exist here: no lock
+// entry, no recovery-journal entry, no legacy stamp. Claiming the directory on
+// the strength of its NAME therefore destroys work that exists in no other
+// copy.
+//
+// Failure prevented: a selection that names an unprefixed catalog skill
+// replaces the user's own SKILL.md with ox's, reports no conflict, and leaves
+// no trace.
+func TestPlan_UnprefixedCatalogNameNeverEatsAHandAuthoredSkill(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	source := fakeCatalog{revision: "rev-1", skill: unprefixedFixtureSkill("1.0.0", "SHIPPED BY OX")}
+	desired := DesiredSkills{Targets: []string{target.Key}}
+
+	skillPath := filepath.Join(repo, ".agents", "skills", "widget", "SKILL.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(skillPath), 0o755))
+	handAuthored := []byte("---\nname: widget\ndescription: notes I wrote myself\n---\nMY RESEARCH NOTES\n")
+	require.NoError(t, os.WriteFile(skillPath, handAuthored, 0o644))
+
+	plan, err := planWithSource(repo, "1.0.0", desired, targets, source)
+	require.NoError(t, err)
+	require.Contains(t, conflictPaths(plan.Conflicts), filepath.FromSlash(".agents/skills/widget/SKILL.md"),
+		"an unrecorded same-name directory must be reported as a conflict, not claimed on the strength of its name")
+	for _, action := range plan.Updates {
+		require.NotEqual(t, ".agents/skills/widget/SKILL.md", action.Path,
+			"the plan queued an overwrite of a file ox never wrote and has no recorded claim on")
+	}
+
+	require.NoError(t, Apply(plan))
+	after, err := os.ReadFile(skillPath)
+	require.NoError(t, err)
+	require.Contains(t, string(after), "MY RESEARCH NOTES",
+		"ox destroyed a hand-authored skill it had no recorded claim on")
+	require.NotContains(t, string(after), "SHIPPED BY OX",
+		"the user's file now holds ox's catalog content")
+}
+
+// TestPlan_InstalledCatalogSkillIsStillRestoredAfterALocalEdit bounds the proof
+// above, and is the reason the first-install reclaim and the per-file ownership
+// rule are two different predicates rather than one.
+//
+// Once ox HAS a recorded claim — the lock entry Apply wrote — an unprefixed
+// catalog skill keeps the 0.15.0 behavior in full: a local edit is restored on
+// the next reconcile rather than hardening into a permanent conflict. Narrowing
+// what ox may claim on FIRST install must not narrow what ox maintains
+// afterwards.
+func TestPlan_InstalledCatalogSkillIsStillRestoredAfterALocalEdit(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	source := fakeCatalog{revision: "rev-1", skill: unprefixedFixtureSkill("1.0.0", "SHIPPED BY OX")}
+	desired := DesiredSkills{Targets: []string{target.Key}}
+
+	plan, err := planWithSource(repo, "1.0.0", desired, targets, source)
+	require.NoError(t, err)
+	require.NoError(t, Apply(plan))
+
+	skillPath := filepath.Join(repo, ".agents", "skills", "widget", "SKILL.md")
+	original, err := os.ReadFile(skillPath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(skillPath, append(original, []byte("\nlocal edit\n")...), 0o644))
+
+	plan, err = planWithSource(repo, "1.0.0", desired, targets, source)
+	require.NoError(t, err)
+	require.NotContains(t, conflictPaths(plan.Conflicts), filepath.FromSlash(".agents/skills/widget/SKILL.md"),
+		"an edit to a skill ox installed must be repaired, not reported as a conflict forever")
+	require.NoError(t, Apply(plan))
+
+	after, err := os.ReadFile(skillPath)
+	require.NoError(t, err)
+	require.NotContains(t, string(after), "local edit",
+		"ox failed to restore the shipped content of a catalog skill it installed")
+}
+
+// TestPlan_UnprefixedCatalogSiblingIsPreservedWhenSkillFileIsAbsent closes the
+// second door into the same room.
+//
+// The first-install reclaim only runs when SKILL.md is READABLE. When it is
+// absent the whole block is skipped, so a directory ox has no record of reaches
+// the per-file loop with nothing recorded about it at all — and the per-file
+// ownership arm would then take a hand-authored sibling on the strength of the
+// catalog name alone. Same defect class as the reclaim, one path over.
+//
+// A directory holding reference material but no manifest is not exotic: it is
+// what a half-written skill looks like, and what a skill looks like mid-rename.
+//
+// Failure prevented: ox overwrites a user's widget/references/jev.md while
+// reporting nothing, because SKILL.md happened not to exist beside it.
+func TestPlan_UnprefixedCatalogSiblingIsPreservedWhenSkillFileIsAbsent(t *testing.T) {
+	repo := t.TempDir()
+	target := sharedTarget()
+	targets := []adapterprotocol.SkillTarget{target}
+	source := fakeCatalog{revision: "rev-1", skill: unprefixedFixtureSkill("1.0.0", "SHIPPED BY OX")}
+	desired := DesiredSkills{Targets: []string{target.Key}}
+
+	// A path ox genuinely ships, holding content ox did not write — and no
+	// SKILL.md anywhere in the directory, so nothing records a claim.
+	sibling := filepath.Join(repo, ".agents", "skills", "widget", "references", "jev.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(sibling), 0o755))
+	mine := []byte("# my own notes on jev\n\nMY RESEARCH NOTES\n")
+	require.NoError(t, os.WriteFile(sibling, mine, 0o644))
+
+	plan, err := planWithSource(repo, "1.0.0", desired, targets, source)
+	require.NoError(t, err)
+	require.Contains(t, conflictPaths(plan.Conflicts), filepath.FromSlash(".agents/skills/widget/references/jev.md"),
+		"a hand-authored file ox has no record of must be reported, not claimed because the directory shares a catalog name")
+	for _, action := range plan.Updates {
+		require.NotEqual(t, ".agents/skills/widget/references/jev.md", action.Path,
+			"the plan queued an overwrite of user content ox has no recorded claim on")
+	}
+
+	require.NoError(t, Apply(plan))
+	after, err := os.ReadFile(sibling)
+	require.NoError(t, err)
+	require.Equal(t, mine, after, "ox destroyed a hand-authored file that merely sat in a catalog-named directory")
 }

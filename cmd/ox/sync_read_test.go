@@ -288,6 +288,7 @@ func TestReadSyncProcessIgnoresDotenvAndSanitizesParserErrors(t *testing.T) {
 	}{
 		{"dotenv", "denied", []string{"--repo", readSyncTestRepoID}, 1},
 		{"parser", "invalid_arguments", []string{"--unknown=" + validTeamToken}, 2},
+		{"positional", "invalid_arguments", []string{"--repo", readSyncTestRepoID, validTeamToken}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

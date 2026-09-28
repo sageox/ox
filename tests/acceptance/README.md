@@ -34,17 +34,23 @@ eval case in a `See also:` line so the promise and its uptake proof stay linked.
 
 ```text
 acceptance/
-  install/                # build & install, ox on PATH, version, first run
-  auth/                   # login, logout, device-code / headless login, tokens
-  onboarding/             # ox init, commit .sageox/, ox status, ox doctor
-  priming/                # ox agent prime at start / after compaction / clear
-  session-recording/      # auto-record on prime, pause/resume, list/view, finalize
-  plan-enrichment/        # enrich-while-drafting, render, the review loop, nudges
-  murmur/                 # publishing WIP, whisper delivery to other coworkers
-  team-context/           # ox agent team-ctx, ox query, searching team knowledge
-  code-intelligence/      # ox code search, ox code insights before planning
-  knowledge-bubbles/      # ox kb list / inspect / locate bubbles
-  upgrade/                # ox upgrade, version-mismatch detection, doctor self-heal
+  features/
+    install/              # build & install, ox on PATH, version, first run
+    auth/                 # login, logout, device-code / headless login, tokens
+    onboarding/           # ox init, commit .sageox/, ox status, ox doctor
+    priming/              # ox agent prime at start / after compaction / clear
+    session-recording/    # auto-record on prime, pause/resume, list/view, finalize
+    plan-enrichment/      # enrich-while-drafting, render, the review loop, nudges
+    murmur/               # publishing WIP, whisper delivery to other coworkers
+    team-context/         # ox agent team-ctx, ox query, searching team knowledge
+    bulletin/             # ox bulletin post, pilot enrollment, board reading guidance, quiet-board health
+    code-intelligence/    # ox code search, ox code insights before planning
+    knowledge-bubbles/    # ox kb list / inspect / locate bubbles
+    upgrade/              # ox upgrade, version-mismatch detection, doctor self-heal
+    config/               # configuration precedence and settings
+    decision-records/     # ox decision enrich, ADR/DDR authoring
+    pr-header/            # ox pr header credit line
+    redaction/            # secret redaction in captured sessions
   business-actions/       # named user journeys (one-paragraph stubs in v1)
   system-interactions/    # feature -> ox subcommand / SageOx API touchpoint map
   glossary.md             # ox domain terminology (canonical SageOx terms)

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
@@ -1396,28 +1397,14 @@ func (s *SyncScheduler) validateLedgerGCClone(repoPath string) bool {
 	return true
 }
 
-// gcPreserveCache copies the .sageox/cache/ directory from the old clone to a temp location.
-// Cache is gitignored and contains codedb indexes that are expensive to rebuild.
-// Returns nil if no cache exists (nothing to preserve).
-func gcPreserveCache(srcRepo, cacheBackupDir string) error {
-	cacheDir := filepath.Join(srcRepo, ".sageox", "cache")
-	if _, err := os.Stat(cacheDir); err != nil {
-		return nil // no cache to preserve
-	}
-	return copyDir(cacheDir, cacheBackupDir)
-}
-
-// gcRestoreCache copies preserved cache back into the new clone's .sageox/cache/ directory.
-func gcRestoreCache(cacheBackupDir, dstRepo string) error {
-	if _, err := os.Stat(cacheBackupDir); err != nil {
-		return nil // no backup to restore
-	}
-	dstCache := filepath.Join(dstRepo, ".sageox", "cache")
-	if err := os.MkdirAll(filepath.Dir(dstCache), 0755); err != nil {
-		return fmt.Errorf("create .sageox dir: %w", err)
-	}
-	return copyDir(cacheBackupDir, dstCache)
-}
+// Cache preservation and file copying moved to shared packages so ledger read
+// sync preserves a cache through the same code (ox #1045). The GC keeps its
+// names for them.
+var (
+	gcPreserveCache = ledger.PreserveCache
+	gcRestoreCache  = ledger.RestoreCache
+	copyFile        = fileutil.CopyFile
+)
 
 // reopenWhisperStoreAfterGC reopens the ledger whisper store after a
 // successful GC reclone. The rename-swap invalidates the old sql.DB handle
@@ -1444,65 +1431,4 @@ func (s *SyncScheduler) reopenWhisperStoreAfterGC() {
 	if err := registry.ReopenLedgerStore(dbPath); err != nil {
 		s.logger.Error("gc: failed to reopen whisper store after ledger reclone", "error", err)
 	}
-}
-
-// copyFile copies src to dst, preserving file mode.
-// Uses Lstat to avoid following symlinks — a symlink is recreated as a symlink,
-// never dereferenced. This prevents a rogue symlink (e.g., pointing to /etc/shadow)
-// from exfiltrating host files into the repo during GC backup.
-func copyFile(src, dst string) error {
-	info, err := os.Lstat(src)
-	if err != nil {
-		return err
-	}
-
-	// recreate symlinks as symlinks, never dereference
-	if info.Mode()&os.ModeSymlink != 0 {
-		target, err := os.Readlink(src)
-		if err != nil {
-			return fmt.Errorf("readlink %s: %w", src, err)
-		}
-		return os.Symlink(target, dst)
-	}
-
-	// skip non-regular files (devices, sockets, etc.)
-	if !info.Mode().IsRegular() {
-		return nil
-	}
-
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, in)
-	return err
-}
-
-// copyDir recursively copies a directory tree from src to dst.
-func copyDir(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		relPath, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		dstPath := filepath.Join(dst, relPath)
-
-		if d.IsDir() {
-			return os.MkdirAll(dstPath, 0755)
-		}
-
-		return copyFile(path, dstPath)
-	})
 }

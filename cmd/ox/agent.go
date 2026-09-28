@@ -441,8 +441,9 @@ func dispatchedCommandPath(subargs []string) []string {
 }
 
 // renameDispatcherSpan rewrites the active root span name to
-// "ox agent <parts...>" and attaches an ox.command.subcommand attribute
-// with the joined parts. Empty parts are skipped — calling with no
+// "ox agent <parts...>", attaches an ox.command.subcommand attribute
+// with the joined parts, and makes "agent <parts...>" the command path
+// usage telemetry reports. Empty parts are skipped — calling with no
 // parts is a no-op.
 func renameDispatcherSpan(parts ...string) {
 	// Filter empty tokens so a missing hook phase ("ox agent hook"
@@ -458,6 +459,9 @@ func renameDispatcherSpan(parts ...string) {
 	}
 	sub := strings.Join(clean, " ")
 	observability.RenameRootSpan("ox agent "+sub, sub)
+	if cliCtx != nil {
+		cliCtx.SetCommandPath("agent " + sub)
+	}
 }
 
 // agentSubcommands are commands valid inside `runWithAgentID`.

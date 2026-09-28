@@ -15,7 +15,8 @@ import (
 // Team rules apply to every supported AI coding agent (Claude, Codex, Amp,
 // Cursor, etc.) used by teammates running ox. They are the team-scope cousin
 // of Claude's .claude/rules/<topic>.md — modular, one concern per file, and
-// loaded into agent context via ox agent prime.
+// delivered through one adapter-selected path: an ignored native projection
+// where the agent can preserve the rule's semantics, otherwise ox agent prime.
 //
 // Subdirectories under agents/rules/ are walked recursively. The relative
 // path is preserved so organization (e.g., backend/postgres.md) stays
@@ -61,6 +62,11 @@ const DefaultRuleAudience = RuleAudienceAI
 // to think about cost.
 const DefaultRuleVisibility = VisibilityIndexed
 
+// RuleRoots are the canonical and legacy Team Context rule locations. Every
+// discovery and blindness check shares this list so one can never walk a root
+// the other silently ignores.
+var RuleRoots = []string{"agents/rules", "coworkers/rules"}
+
 // DiscoverRules walks the team context for behavioral rule files under
 // agents/rules/**/*.md (preferred) and coworkers/rules/**/*.md (legacy
 // fallback for any teams that adopted that location early). Subdirectories
@@ -81,58 +87,57 @@ const DefaultRuleVisibility = VisibilityIndexed
 //
 // Results are sorted by RelPath for stable output.
 //
-// TODO(sync-out): A future daemon-driven optimization could sync filtered,
-// repo-scoped team rules OUT of team context and into each cloned repo's
-// agent-native rules directory (e.g., .claude/sageox-team-<slug>/rules/
-// for Claude, .cursor/rules/sageox-team-<slug>/ for Cursor). That would
-// let team rules participate in the agent's NATIVE rule-loading machinery
-// (Claude's `paths:`-scoped lazy loading, Cursor's `globs:` matching,
-// etc.) instead of being delivered up front via prime XML.
-//
-// Implementation considerations when picking this up:
-//
-//  1. Adapter dispatch — each agent has its own rules dir convention.
-//     The pkg/adapterprotocol RulesParams + handleInstallRules pattern
-//     already abstracts this (cmd/ox-adapter-claude-code/rules.go is the
-//     reference implementation). Sync-out would extend the rule file
-//     list passed to handleInstallRules with discovered team rules.
-//
-//  2. Namespace — write to a sageox-team-<slug>/ subdirectory under the
-//     agent's rules dir, never directly into .claude/rules/ root, to
-//     avoid colliding with project-local rules of the same name and to
-//     make cleanup unambiguous.
-//
-//  3. Lifecycle — daemon writes on team-context sync (after pull), and
-//     on repo-open. Daemon removes files for rules that disappear from
-//     team context (true mirror, not append-only). At prime time the
-//     sync state is read-only.
-//
-//  4. Filtering — apply the same repos:/audience:/status: filters here
-//     that DiscoverRules already applies, so a teammate working in
-//     repo A doesn't get repo B's rules synced into their working tree.
-//
-//  5. Multi-adapter coverage — today only ox-adapter-claude-code and
-//     ox-adapter-droid implement handleInstallRules. Other adapters
-//     (codex, amp, aider, gemini, opencode, pi) need rules.go before
-//     they can participate. Tracking the gap is the prerequisite for
-//     a uniform sync-out story.
-//
-//  6. Per-user knowledge bubble — when the user-context bubble lands,
-//     sync-out for user rules has the same shape but reads from the
-//     user-context location and tags entries with audience: ai,
-//     source: user (so the budget accounting in agent_prime_xml.go
-//     attributes them correctly to BudgetSourceUser).
-//
-// Not implemented yet; this comment IS the design memo until someone
-// picks up the work.
+// Native projection is a derived cache, never the source of truth. The
+// teamrules package owns its reserved *-team namespace and retires
+// projections when a rule is removed or filtered out. Prime suppresses only
+// the active agent's existing projection, preserving exactly-one delivery.
 func DiscoverRules(teamPath, repoSlug string) ([]TeamRule, error) {
+	published, err := PublishedRules(teamPath)
+	if err != nil {
+		return nil, err
+	}
+
+	rules := published[:0]
+	for _, r := range published {
+		if RuleAppliesToRepo(r, repoSlug) {
+			rules = append(rules, r)
+		}
+	}
+
+	// load body + estimate tokens for visibility: always
+	for i := range rules {
+		if rules[i].Visibility != VisibilityAlways {
+			continue
+		}
+		body, err := readRuleBody(rules[i].AbsPath)
+		if err != nil {
+			// missing or unreadable bodies are skipped silently — prime
+			// must never fail because a single rule file is malformed
+			continue
+		}
+		rules[i].Body = body
+		rules[i].EstimatedTokens = estimateTokens(body)
+	}
+
+	return rules, nil
+}
+
+// PublishedRules returns every rule the team publishes to AI coworkers, before
+// the per-repo `repos:` filter is applied and without loading bodies.
+//
+// Split out from DiscoverRules for the same reason PublishedSkills was: a
+// human asking "which repos does this rule reach?" needs the list BEFORE the
+// filter has removed the answer. The audience/visibility/status filters are not
+// repo-specific and stay here — a draft or human-only rule is not published
+// anywhere, so listing it as "available elsewhere" would be wrong too.
+func PublishedRules(teamPath string) ([]TeamRule, error) {
 	if teamPath == "" {
 		return nil, nil
 	}
 
 	var rules []TeamRule
 
-	for _, rulesRoot := range []string{"agents/rules", "coworkers/rules"} {
+	for _, rulesRoot := range RuleRoots {
 		root := filepath.Join(teamPath, rulesRoot)
 		discovered, err := walkRulesDir(root)
 		if err != nil {
@@ -153,7 +158,7 @@ func DiscoverRules(teamPath, repoSlug string) ([]TeamRule, error) {
 	}
 	rules = deduped
 
-	// filter by audience, status, visibility, and repos
+	// filter by audience, status, and visibility — never by repo
 	filtered := rules[:0]
 	for _, r := range rules {
 		if r.Audience == RuleAudienceHuman {
@@ -168,33 +173,28 @@ func DiscoverRules(teamPath, repoSlug string) ([]TeamRule, error) {
 		if strings.HasPrefix(r.Status, RuleStatusSupersededPrefix) {
 			continue
 		}
-		if !ruleAppliesToRepo(r, repoSlug) {
-			continue
-		}
 		filtered = append(filtered, r)
 	}
 	rules = filtered
-
-	// load body + estimate tokens for visibility: always
-	for i := range rules {
-		if rules[i].Visibility != VisibilityAlways {
-			continue
-		}
-		body, err := readRuleBody(rules[i].AbsPath)
-		if err != nil {
-			// missing or unreadable bodies are skipped silently — prime
-			// must never fail because a single rule file is malformed
-			continue
-		}
-		rules[i].Body = body
-		rules[i].EstimatedTokens = estimateTokens(body)
-	}
 
 	sort.Slice(rules, func(i, j int) bool {
 		return rules[i].RelPath < rules[j].RelPath
 	})
 
 	return rules, nil
+}
+
+// AnyRuleRootOnDisk reports whether sparse checkout materialized a parent that
+// rule discovery can authoritatively treat as empty. The parent (agents/ or
+// coworkers/) is the sparse-set unit, matching Team Skill retention behavior.
+func AnyRuleRootOnDisk(teamPath string) bool {
+	for _, root := range RuleRoots {
+		parent := filepath.Dir(filepath.FromSlash(root))
+		if info, err := os.Stat(filepath.Join(teamPath, parent)); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // walkRulesDir recursively walks a rules root directory. Each rule's
@@ -220,6 +220,12 @@ func walkRulesDir(absRoot string) ([]TeamRule, error) {
 			return nil
 		}
 		if d.IsDir() {
+			return nil
+		}
+		// Team Context is shared input. Never follow a rule-file symlink: its
+		// target can escape the clone and turn arbitrary local files into agent
+		// instructions or native projections.
+		if d.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
 		name := d.Name()
@@ -271,11 +277,11 @@ func walkRulesDir(absRoot string) ([]TeamRule, error) {
 	return rules, nil
 }
 
-// ruleAppliesToRepo reports whether a rule's repos: filter matches the
+// RuleAppliesToRepo reports whether a rule's repos: filter matches the
 // current repo slug. Empty repos: means "all team repos." Empty repoSlug
 // means we don't know what repo we're in — be permissive and include
 // non-filtered rules so the agent still gets team-wide guidance.
-func ruleAppliesToRepo(r TeamRule, repoSlug string) bool {
+func RuleAppliesToRepo(r TeamRule, repoSlug string) bool {
 	if len(r.Repos) == 0 {
 		return true
 	}
@@ -328,6 +334,13 @@ func readRuleBody(path string) (string, error) {
 	}
 }
 
+// ReadRuleBody returns a Team Rule's markdown body without YAML frontmatter.
+// Native projection uses the same parser as prime so the two delivery modes can
+// never disagree about which bytes constitute the rule.
+func ReadRuleBody(path string) (string, error) {
+	return readRuleBody(path)
+}
+
 // estimateTokens is a cheap rule-of-thumb estimator (len/4). Avoids pulling
 // in a tokenizer dependency for what is just a hygiene signal.
 func estimateTokens(s string) int {
@@ -347,6 +360,7 @@ type ruleFrontmatter struct {
 	Visibility     string
 	Status         string
 	FromDiscussion string
+	ValidThrough   string
 }
 
 // parseRuleFrontmatter does minimal YAML extraction sufficient for the rule
@@ -394,6 +408,8 @@ func parseRuleFrontmatter(path string) ruleFrontmatter {
 			fm.Visibility = extractValue(line, "visibility:")
 		case strings.HasPrefix(line, "status:"):
 			fm.Status = extractValue(line, "status:")
+		case strings.HasPrefix(line, "valid-through:"):
+			fm.ValidThrough = extractValue(line, "valid-through:")
 		case strings.HasPrefix(line, "from-discussion:"):
 			fm.FromDiscussion = extractValue(line, "from-discussion:")
 		case strings.HasPrefix(line, "repos:"):

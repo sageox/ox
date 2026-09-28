@@ -26,6 +26,10 @@ The `ox daemon status` command has been redesigned with modern TUI best practice
 - **Warning**: 1-4 errors OR 10+ pending changes
 - **Healthy**: No issues
 
+An error stops counting once the Ledger or team context it came from syncs
+again, so a fixed repo does not hold the status at Warning for the rest of the
+hour.
+
 ### 2. Semantic Color Usage
 
 Following ANSI color conventions:

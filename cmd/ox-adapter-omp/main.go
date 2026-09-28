@@ -59,16 +59,8 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		DisplayName:     adapterDisplay,
 		Version:         adapterVersion,
 		Type:            adapterprotocol.TypeSession,
-		Capabilities: []string{
-			adapterprotocol.CapSessionReader,
-			adapterprotocol.CapHookInstaller,
-			adapterprotocol.CapSkillsInstaller,
-			adapterprotocol.CapIncrementalReader,
-			adapterprotocol.CapFileWatcher,
-			adapterprotocol.CapSessionImporter,
-			adapterprotocol.CapServeMode,
-		},
-		HookEnvValues: []string{"omp"},
+		Capabilities:    adapterprotocol.OMPCapabilities,
+		HookEnvValues:   []string{"omp"},
 		SkillTargets: []adapterprotocol.SkillTarget{{
 			Key:        "agents-project",
 			Root:       ".agents/skills",

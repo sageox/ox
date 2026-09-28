@@ -355,7 +355,9 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 		return client.GetRepos()
 	})
 	if err != nil {
-		return FailedCheck("git repo paths", "API error", err.Error())
+		result := FailedCheck("git repo paths", "API error", err.Error())
+		result.err = err
+		return result
 	}
 	if repos != nil {
 		if err := saveGitCredentialsFromRepos(repos, projectEndpoint); err != nil {

@@ -1,7 +1,7 @@
 ---
 title: "ox plan view"
 description: "CLI reference for ox plan view"
-sidebar_position: 70
+sidebar_position: 75
 ---
 
 ## ox plan view
@@ -23,6 +23,7 @@ ox plan view <slug> [flags]
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
       --json             output in JSON format (default: false)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
@@ -32,4 +33,4 @@ ox plan view <slug> [flags]
 
 ### SEE ALSO
 
-* [ox plan](/plan)	 - Work with implementation plans (enrich, render, review)
+* [ox plan](/plan)	 - Work with plans (enrich, render, review)

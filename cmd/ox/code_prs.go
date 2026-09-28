@@ -130,8 +130,8 @@ func runCodePRs(cmd *cobra.Command, _ []string) error {
 			}
 		}
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), string(out))
-	return nil
+	out = append(out, '\n')
+	return cli.WriteJSONBytes(cmd.OutOrStdout(), out)
 }
 
 type triagePRResponse struct {

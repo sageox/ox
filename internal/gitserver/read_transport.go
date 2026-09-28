@@ -73,17 +73,21 @@ func ValidateReadRequestURL(endpointURL, repoID, readURL, requestURL string) err
 
 // ReadTransport holds non-secret discovery identity. Commands install a scoped
 // helper only for their lifetime, including child Git processes for lazy fetch.
+// Each operation creates its own transport and uses it from one goroutine.
 type ReadTransport struct {
 	endpoint string
 	repoID   string
 	readURL  string
+	// validated maps each config file to the bytes last proven safe, so a
+	// command re-inspects a config only when it has changed (ox #1022).
+	validated map[string]string
 }
 
 func NewReadTransport(endpointURL, repoID, readURL string) (*ReadTransport, error) {
 	if err := ValidateReadURL(endpointURL, repoID, readURL); err != nil {
 		return nil, err
 	}
-	return &ReadTransport{endpoint: endpointURL, repoID: repoID, readURL: readURL}, nil
+	return &ReadTransport{endpoint: endpointURL, repoID: repoID, readURL: readURL, validated: map[string]string{}}, nil
 }
 
 // Command prepares a Git operation with the currently selected TAT. Callers
@@ -175,7 +179,17 @@ func (t *ReadTransport) validateConfig(ctx context.Context, dir string, env []st
 		if err != nil || !info.Mode().IsRegular() {
 			return ErrUnsafeReadTransport
 		}
-		cmd := exec.CommandContext(ctx, "git", "config", "--file", configPath, "--no-includes", "--null", "--list")
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			return ErrUnsafeReadTransport
+		}
+		config := string(data)
+		if validated, ok := t.validated[configPath]; ok && validated == config {
+			continue
+		}
+		// Git parses the bytes remembered below, not a second read of the file.
+		cmd := exec.CommandContext(ctx, "git", "config", "--file", "-", "--no-includes", "--null", "--list")
+		cmd.Stdin = strings.NewReader(config)
 		cmd.Env = env
 		configureReadProcess(cmd)
 		cmd.WaitDelay = 5 * time.Second
@@ -196,6 +210,7 @@ func (t *ReadTransport) validateConfig(ctx context.Context, dir string, env []st
 				return ErrUnsafeReadTransport
 			}
 		}
+		t.validated[configPath] = config
 	}
 	return nil
 }

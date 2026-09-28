@@ -105,6 +105,20 @@ successor. Do not introduce a second brand hue.
 ramps' mid stops are *fill* values — sage-700 lands at 4.31:1 and warning-600 at
 3.16:1 as text on cream, both under WCAG AA. The values above are the corrected
 text-safe ones.
+## What counts as a plan
+
+A plan is any work a team executes against — a design direction, a GTM or launch
+sequence, a rollout, an engineering change. `ox plan save --kind` records which
+one it is: `plan` (default) | `mockup` | `review` | `evidence`. Nothing here
+assumes the reader or the executor is an engineer.
+
+Most of this document is shared: the design register, the authoring contract,
+and the hero-visual expectation hold for every kind. Two requirements are
+plan-only, and `ox plan lint` enforces them that way — the **device mockup** for
+a user-facing surface, and the **execution-depth appendix**. A mockup already
+*is* the proposal a device mockup would ask for, and a mockup, review sheet or
+evidence page has no second reader to relocate depth for.
+
 ## The human-attention contract
 
 A material plan has two readers and therefore two layers:
@@ -113,13 +127,19 @@ A material plan has two readers and therefore two layers:
    trade-offs, and one meaningful hero visualization that explains the system's
    topology, sequence, state, or comparison. Decorative icons and wordmarks do
    not count as a visualization.
-2. **Implementation depth (collapsed initially):** exactly one closed
+2. **Execution depth (collapsed initially):** exactly one closed
    `<details><summary>Implementation notes</summary>...</details>` appendix at
-   the end with exact files, edits, rollout mechanics, and gotchas.
+   the end with the exact steps — files and edits for an engineering change,
+   channels and sequencing for a launch, surfaces and states for a design
+   direction — plus rollout mechanics and gotchas. **The summary text is the
+   literal string `Implementation notes` regardless of the plan's kind**: ox
+   lint (`internal/plan/lint.go`) and the markdown extractor key on it, so it is
+   a section name, not a claim about who executes.
 
 Do not average the two audiences into a long document. Keep the depth, but move
 it behind native progressive disclosure so the approver's first scan stays
-visual and the implementing AI coworker still has precise instructions.
+visual and whoever executes — an AI coworker, an engineer, a marketer — still
+has precise instructions.
 
 ## The minimal authoring contract
 
@@ -144,7 +164,10 @@ and to ungrouped review anchors.
   prior-art / expert-routing chips plus surfaced context; (b) the **footer
   credit**; (c) the full **live review loop** — click any element to attach a
   mark, content-hash anchored so it works on arbitrary authored markup, served
-  via `ox plan review <slug>`.
+  via `ox plan review <slug>`. It binds two keys: `r` toggles review mode, and
+  `Esc` closes an open note, then the mode. A page handler that acts on either
+  key should call `preventDefault()` — the chrome ignores a keypress an earlier
+  listener marked handled, and marks the ones it acts on.
 - Injection is **idempotent and append-only** — re-rendering replaces the marker
   block and never touches authored markup.
 - `--artifact` serves/writes the authored page **verbatim**, zero injection.

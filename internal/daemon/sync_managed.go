@@ -751,21 +751,43 @@ func abandonedProbe(lastErr error, draining bool) error {
 }
 
 // skipProvesIndexReadable reports whether a skip reason was only reachable
-// AFTER something successfully read this clone's index, which retires any
-// standing IssueTypeRepoIntegrity for it. "remote unchanged" and "recently
-// fetched" are decided after ResolveAutostashConflicts returned cleanly;
-// "unconfirmed conflict" is decided by a fresh re-read that found no unmerged
-// entries. The other skips prove nothing — the lock and rebase reasons return
-// before any index is read, and "unconfirmed index read" is the case where the
-// re-read was abandoned before it finished. Without this, a clone that was
-// repaired keeps a stale integrity issue forever once its remote stops
-// changing, because a skip never reaches the clear-on-successful-pull path.
+// AFTER something successfully read this clone's index and found no unmerged
+// entries in it. "remote unchanged" and "recently fetched" are decided after
+// ResolveAutostashConflicts returned (false, nil), which it does only for an
+// index with no unmerged entries; "unconfirmed conflict" is decided by a fresh
+// re-read that found none. The other skips prove nothing — the lock and rebase
+// reasons return before any index is read, and "unconfirmed index read" is the
+// case where the re-read was abandoned before it finished.
 func skipProvesIndexReadable(reason string) bool {
 	switch reason {
 	case skipReasonRemoteUnchanged, skipReasonRecentlyFetched, skipReasonUnconfirmedConflict:
 		return true
 	default:
 		return false
+	}
+}
+
+// clearDisprovedBySkip retires the errors and issues that a skip's own checks
+// just disproved. Skips return before the clear-on-success blocks in doPull
+// and pullTeamContext, so without this a repo fixed while its remote stood
+// still would keep reporting the failure until the remote next changed.
+func (s *SyncScheduler) clearDisprovedBySkip(repo, reason string) {
+	if reason == skipReasonRemoteUnchanged {
+		// HEAD is already the remote tip, where a successful pull leaves it, so
+		// no local commit is left to rebase. "recently fetched" proves less: the
+		// fetch that wrote FETCH_HEAD may belong to a pull that then failed.
+		s.clearErrors(repo)
+		if s.issues != nil {
+			s.issues.ClearIssue(IssueTypeDiverged, repo)
+			s.issues.ClearIssue(IssueTypeSessionConflictWedge, repo)
+		}
+	}
+	if s.issues != nil && skipProvesIndexReadable(reason) {
+		// recoverPreexistingRebase left no rebase in progress, and the index
+		// has no unmerged entries.
+		s.issues.ClearIssue(IssueTypeRepoIntegrity, repo)
+		s.issues.ClearIssue(IssueTypeMergeConflict, repo)
+		s.issues.ClearIssue(IssueTypeRebaseStuck, repo)
 	}
 }
 

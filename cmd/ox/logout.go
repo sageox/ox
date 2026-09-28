@@ -23,6 +23,7 @@ var (
 
 var logoutCmd = &cobra.Command{
 	Use:   "logout",
+	Args:  cobra.NoArgs,
 	Short: "Log out of SageOx",
 	Long:  "Remove local authentication token and log out of SageOx.",
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -164,6 +165,9 @@ func selectLogoutEndpoints(loggedInEndpoints []string, all bool, specified strin
 	case force:
 		// --force with multiple endpoints: log out from all (non-interactive)
 		return loggedInEndpoints, nil
+	}
+	if cli.NoInput() {
+		return nil, fmt.Errorf("--no-input requires --endpoint <endpoint> or --all when logged into multiple endpoints")
 	}
 
 	// multiple endpoints - prompt for selection

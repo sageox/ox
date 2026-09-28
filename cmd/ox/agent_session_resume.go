@@ -1,13 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -78,6 +78,7 @@ func runAgentSessionResume(inst *agentinstance.Instance, _ []string) error {
 		excluded = computeExcludedSinceLastPause(s.Lifecycle, resumeSeq)
 		sessionName = session.GetSessionName(s.SessionPath)
 		s.SuspendedAt = nil
+		s.RecordTraceBoundary("resume", now)
 		s.Lifecycle = append(s.Lifecycle, session.LifecycleEvent{
 			Action: session.LifecycleActionResume,
 			At:     now,
@@ -163,10 +164,5 @@ func emitResumeOutput(w io.Writer, output *sessionResumeOutput) error {
 			return nil
 		}
 	}
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return fmt.Errorf("format resume JSON: %w", err)
-	}
-	fmt.Fprintln(w, string(jsonOut))
-	return nil
+	return cli.PrintJSONTo(w, output)
 }

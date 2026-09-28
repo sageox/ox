@@ -64,7 +64,7 @@ func AtomicWriteBytes(filePath string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("chmod: %w", err)
 	}
 
-	if err := os.Rename(tmpPath, writePath); err != nil {
+	if err := replaceFile(tmpPath, writePath); err != nil {
 		return fmt.Errorf("rename: %w", err)
 	}
 
@@ -120,7 +120,7 @@ func AtomicWriteJSON(filePath string, data any, perm os.FileMode) error {
 		return fmt.Errorf("chmod: %w", err)
 	}
 
-	if err := os.Rename(tmpPath, filePath); err != nil {
+	if err := replaceFile(tmpPath, filePath); err != nil {
 		return fmt.Errorf("rename: %w", err)
 	}
 

@@ -101,18 +101,32 @@ func checkCodexUsability() AgentUsability {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, codexPath, "login", "status")
-	out, err := cmd.Output()
+	// Current Codex prints successful login status to stderr; older builds
+	// used stdout. Keep both bounded, and never accept text from a failed probe.
+	outputBuffer := &boundedCodexOutput{limit: 64 * 1024}
+	cmd.Stdout, cmd.Stderr = outputBuffer, outputBuffer
+	cmd.WaitDelay = time.Second
+	setProcAttr(cmd)
+	err = cmd.Run()
+	if ctx.Err() != nil {
+		result.AuthDetail = "authentication check timed out"
+		return result
+	}
 	if err != nil {
 		result.AuthDetail = "not logged in"
 		return result
 	}
-
-	output := strings.TrimSpace(string(out))
-	if strings.Contains(strings.ToLower(output), "logged in") {
-		result.Authenticated = true
-		// extract auth method from output (e.g. "Logged in using ChatGPT")
-		result.AuthDetail = output
-		return result
+	if !outputBuffer.overflow {
+		// A host warning may precede the status on either stream. Match a
+		// complete status line after verifying the command's successful exit.
+		for _, line := range strings.Split(outputBuffer.buf.String(), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(strings.ToLower(line), "logged in using ") {
+				result.Authenticated = true
+				result.AuthDetail = line
+				return result
+			}
+		}
 	}
 
 	result.AuthDetail = "not logged in"

@@ -41,7 +41,14 @@ func ClassifyTeamSkills(repoRoot string) ([]TeamSkillCandidate, error) {
 	// which is the honest answer: there is nothing to approve yet. The caller
 	// distinguishes that from "the team publishes nothing" by way of
 	// `ox skills status`, which already separates those five cases.
-	discovered, err := teamdocs.DiscoverSkills(tc.Path, repotools.RepoSlug(repoRoot))
+	// The ORIGIN-derived slug, never the directory-name fallback: this must be
+	// the same identity catalogForRepo filters with (teamsource.go), or approval
+	// classifies one set of candidates while Plan installs another. In a checkout
+	// with no origin remote the fallback is the working directory's name, which
+	// no team's `repos:` frontmatter has any reason to match — so the two sides
+	// would disagree exactly where the comment above says they must not.
+	repoSlug, _ := repotools.RepoSlugFromRemote(repoRoot)
+	discovered, err := teamdocs.DiscoverSkills(tc.Path, repoSlug)
 	if err != nil {
 		return nil, fmt.Errorf("discover team skills: %w", err)
 	}

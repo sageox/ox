@@ -41,6 +41,7 @@ func TestProcessResult_RealGit(t *testing.T) {
 	handler.skipLFS = true // no LFS server
 	handler.skipGit = false
 	handler.ledgerMu = &sync.Mutex{}
+	enableLocalFinalizeLFS(t, handler, clonePath)
 
 	stored, err := session.ReadSessionFromPath(filepath.Join(sessionDir, "raw.jsonl"))
 	if err != nil {
@@ -115,6 +116,7 @@ func TestProcessResult_PushFailPreservesArtifacts(t *testing.T) {
 	handler.skipLFS = true
 	handler.skipGit = false
 	handler.ledgerMu = &sync.Mutex{}
+	enableLocalFinalizeLFS(t, handler, clonePath)
 
 	stored, err := session.ReadSessionFromPath(filepath.Join(sessionDir, "raw.jsonl"))
 	if err != nil {

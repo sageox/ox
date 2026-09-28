@@ -39,6 +39,7 @@ var backtickRegex = regexp.MustCompile("`([^`]+)`")
 
 var jsonMode bool
 var noInteractive bool
+var noInput bool
 var assumeYes bool
 
 func SetJSONMode(enabled bool) {
@@ -49,6 +50,17 @@ func SetJSONMode(enabled bool) {
 // When enabled, spinners and TUI elements are disabled.
 func SetNoInteractive(enabled bool) {
 	noInteractive = enabled
+}
+
+// SetNoInput disables prompts without treating missing input as consent.
+func SetNoInput(enabled bool) {
+	noInput = enabled
+}
+
+// NoInput reports whether --no-input forbids reading prompt answers from stdin.
+// Commands may still read data explicitly supplied through stdin.
+func NoInput() bool {
+	return noInput
 }
 
 // SetAssumeYes sets the global "answer yes to every confirmation" flag,
@@ -64,10 +76,10 @@ func AssumeYes() bool {
 }
 
 // IsInteractive returns true if interactive mode is enabled.
-// Interactive mode is disabled when --no-interactive flag is set, CI=true,
-// or stdin is not a terminal (e.g., running inside an AI agent).
+// Interactive mode is disabled by --no-input, --no-interactive, CI=true,
+// or stdin not being a terminal (e.g., running inside an AI coworker).
 func IsInteractive() bool {
-	if noInteractive {
+	if noInteractive || noInput {
 		return false
 	}
 	return isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
@@ -94,14 +106,6 @@ func IsHeadless() bool {
 	}
 
 	return false
-}
-
-func PrintJSON(v any) {
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(v); err != nil {
-		fmt.Fprintf(os.Stderr, "error encoding JSON: %v\n", err)
-	}
 }
 
 func PrintSuccess(msg string) {
@@ -144,21 +148,12 @@ func PrintPreservedTo(w io.Writer, msg string) {
 	fmt.Fprintf(w, "%s %s\n", preservedStyle.Render("✓"), msg)
 }
 
+// PrintError writes an error to stderr in both text and JSON modes.
 func PrintError(msg string) {
-	// Preserves historical split: JSON to stdout, text to stderr.
-	if jsonMode {
-		PrintJSON(map[string]any{
-			"status":  "error",
-			"message": msg,
-		})
-		return
-	}
 	PrintErrorTo(os.Stderr, msg)
 }
 
-// PrintErrorTo writes an error message to w. Parallel-safe. Always writes
-// the formatted text (or JSON in jsonMode) to w — does not split between
-// stdout/stderr like the package-level PrintError does.
+// PrintErrorTo writes an error to w as formatted text or JSON. Parallel-safe.
 func PrintErrorTo(w io.Writer, msg string) {
 	if jsonMode {
 		enc := json.NewEncoder(w)
@@ -172,19 +167,12 @@ func PrintErrorTo(w io.Writer, msg string) {
 	fmt.Fprintf(w, "%s %s\n", errorStyle.Render("✗"), msg)
 }
 
+// PrintWarning writes a warning to stderr in both text and JSON modes.
 func PrintWarning(msg string) {
-	if jsonMode {
-		PrintJSON(map[string]any{
-			"status":  "warning",
-			"message": msg,
-		})
-		return
-	}
 	PrintWarningTo(os.Stderr, msg)
 }
 
-// PrintWarningTo writes a warning to w. Parallel-safe. Always writes to w
-// (does not split between stdout/stderr like the package-level PrintWarning).
+// PrintWarningTo writes a warning to w as formatted text or JSON. Parallel-safe.
 func PrintWarningTo(w io.Writer, msg string) {
 	if jsonMode {
 		enc := json.NewEncoder(w)

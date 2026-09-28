@@ -24,6 +24,21 @@ Feature: Building and Installing ox
       Then the `ox` command is available in a new shell
       And running `ox` with no arguments prints the top-level help
 
+  Rule: The install script reports success only when `ox` runs the new install
+
+    Scenario: Devon runs the install script while an older ox comes first on the PATH
+      Given Devon already has an older ox earlier on the PATH
+      When Devon runs the install script
+      Then the installer reports that `ox` still starts the older ox
+      And the installer names both binaries and how to fix the PATH
+
+    Scenario: Devon runs the install script when no release binary is available
+      Given the latest release has no prebuilt binary for Devon's platform
+      And Devon has Go installed
+      When Devon runs the install script
+      Then the installer installs ox with Go instead of a download
+      And the version it prints is the build it just installed
+
   Rule: ox version reports the installed build
 
     Scenario: Devon confirms the installed version

@@ -116,6 +116,23 @@ func (s *ApprovalStore) Approve(name string, v Verdict, allowScripts bool) {
 	})
 }
 
+// Revoke removes every approval recorded for name and reports whether the
+// store changed. Removing all matches also repairs a hand-edited store that
+// accidentally contains duplicate entries.
+func (s *ApprovalStore) Revoke(name string) bool {
+	next := s.Approvals[:0]
+	revoked := false
+	for _, approval := range s.Approvals {
+		if approval.Name == name {
+			revoked = true
+			continue
+		}
+		next = append(next, approval)
+	}
+	s.Approvals = next
+	return revoked
+}
+
 // Decision is what ox should do with one discovered team skill.
 type Decision int
 

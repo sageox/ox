@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -431,6 +433,64 @@ func TestUploadAll_MissingContent(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Error(t, results[0].Error)
 	assert.Contains(t, results[0].Error.Error(), "no content for OID")
+}
+
+// Failure prevented: bytes that are themselves an LFS pointer are stored as an
+// object's content, so the pointer committed for them resolves to another
+// pointer instead of the file (ox #767, #1000). The server's answer cannot
+// matter: it may already hold the object — every empty file stored this way
+// is the same one — or leave it out of its response, and either reads as
+// uploaded.
+func TestUploadAll_RefusesPointerContent(t *testing.T) {
+	plain := []byte("session content\n")
+	plainOID := ComputeOID(plain)
+	for _, shape := range []struct {
+		name    string
+		content []byte
+	}{
+		{"pointer to the empty object", []byte(FormatPointer("sha256:"+ComputeOID(nil), 0))},
+		// ParsePointer refuses this one, so IsPointerFile does not see a pointer.
+		{"pointer to an object above the size limit", []byte(FormatPointer("sha256:"+plainOID, DefaultMaxObjectSize+1))},
+		{"malformed pointer", []byte("version https://git-lfs.github.com/spec/v1\noid sha256:" + plainOID + "\n")},
+		// A pointer checked out with CRLF line endings, which ParsePointer reads.
+		{"pointer with CRLF line endings", []byte(strings.ReplaceAll(FormatPointer("sha256:"+ComputeOID(nil), 0), "\n", "\r\n"))},
+	} {
+		for _, answer := range []string{"upload requested", "already stored", "left out"} {
+			t.Run(shape.name+"/"+answer, func(t *testing.T) {
+				var mu sync.Mutex
+				put := map[string]bool{}
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					mu.Lock()
+					put[r.URL.Path[1:]] = true
+					mu.Unlock()
+				}))
+				defer server.Close()
+				pointerOID := ComputeOID(shape.content)
+				granted := func(oid string, size int) BatchResponseObject {
+					return BatchResponseObject{OID: oid, Size: int64(size), Actions: &Actions{Upload: &Action{Href: server.URL + "/" + oid}}}
+				}
+				resp := &BatchResponse{Objects: []BatchResponseObject{granted(plainOID, len(plain))}}
+				switch answer {
+				case "upload requested":
+					resp.Objects = append(resp.Objects, granted(pointerOID, len(shape.content)))
+				case "already stored":
+					resp.Objects = append(resp.Objects, BatchResponseObject{OID: pointerOID, Size: int64(len(shape.content))})
+				}
+
+				results := UploadAll(resp, map[string][]byte{plainOID: plain, pointerOID: shape.content}, 2)
+				outcome := map[string]error{}
+				for _, r := range results {
+					outcome[r.OID] = r.Error
+				}
+				require.ErrorIs(t, outcome[pointerOID], ErrPointerContent)
+				require.NoError(t, outcome[plainOID])
+				mu.Lock()
+				defer mu.Unlock()
+				require.False(t, put[pointerOID], "pointer content never reaches the server")
+				require.True(t, put[plainOID], "the rest of the upload still goes ahead")
+			})
+		}
+	}
 }
 
 func TestSharedHTTPClient_ConnectionReuse(t *testing.T) {

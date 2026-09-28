@@ -27,6 +27,11 @@ func TestInfoResponse_RoundTrip(t *testing.T) {
 			Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
 			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
 		}},
+		RuleTargets: []adapterprotocol.SkillTarget{{
+			Key: "claude-rules", Root: ".claude/rules",
+			Format: adapterprotocol.RuleFormatMarkdownV1, Scope: adapterprotocol.SkillScopeProject,
+			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
 		ServeMode: true,
 	}
 
@@ -54,6 +59,9 @@ func TestInfoResponse_RoundTrip(t *testing.T) {
 	}
 	if len(got.SkillTargets) != 1 || got.SkillTargets[0] != want.SkillTargets[0] {
 		t.Errorf("SkillTargets = %#v, want %#v", got.SkillTargets, want.SkillTargets)
+	}
+	if len(got.RuleTargets) != 1 || got.RuleTargets[0] != want.RuleTargets[0] {
+		t.Errorf("RuleTargets = %#v, want %#v", got.RuleTargets, want.RuleTargets)
 	}
 }
 

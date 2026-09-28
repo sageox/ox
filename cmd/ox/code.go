@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/search"
 	"github.com/sageox/ox/internal/codedb/store"
@@ -254,13 +253,11 @@ func runCodeSearch(cmd *cobra.Command, query string) error {
 		snippetLen = defaultSnippetLen
 	}
 
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetIndent("", "  ")
-
+	var jsonOut []byte
 	if fullJSON {
 		resp := &combinedQueryResponse{CodeResults: results}
-		if err := enc.Encode(resp); err != nil {
+		jsonOut, err = cli.MarshalJSONIndent(resp)
+		if err != nil {
 			return fmt.Errorf("encode: %w", err)
 		}
 	} else {
@@ -273,7 +270,8 @@ func runCodeSearch(cmd *cobra.Command, query string) error {
 			}
 			compact.Guidance += "Tip: refine with `type:symbol` for defs, `calledby:<name>`/`calls:<name>` for the resolved call graph, `type:pr`/`type:issue` for indexed GitHub records, or `before:`/`after:` to scope by time."
 		}
-		if err := enc.Encode(compact); err != nil {
+		jsonOut, err = cli.MarshalJSONIndent(compact)
+		if err != nil {
 			return fmt.Errorf("encode: %w", err)
 		}
 	}
@@ -284,8 +282,8 @@ func runCodeSearch(cmd *cobra.Command, query string) error {
 			len(results), formatSearchLatency(searchElapsed), dirtyCount)
 	}
 
-	outputBytes := buf.Len()
-	if _, err := buf.WriteTo(os.Stdout); err != nil {
+	outputBytes := len(jsonOut)
+	if err := cli.WriteJSONBytes(os.Stdout, jsonOut); err != nil {
 		return err
 	}
 
@@ -329,9 +327,7 @@ func emitIndexNotReadyJSON(cmd *cobra.Command, status, message, fallback string)
 		Message:      message,
 		FallbackHint: fallback,
 	}
-	enc := json.NewEncoder(cmd.OutOrStdout())
-	enc.SetIndent("", "  ")
-	return enc.Encode(resp)
+	return cli.PrintJSONTo(cmd.OutOrStdout(), resp)
 }
 
 // isBareQuery returns true when the query string carries no DSL filters and
@@ -771,9 +767,7 @@ var codeStatusCmd = &cobra.Command{
 					Commits: r.commits, Blobs: r.blobs,
 				})
 			}
-			enc := json.NewEncoder(cmd.OutOrStdout())
-			enc.SetIndent("", "  ")
-			return enc.Encode(out)
+			return cli.PrintJSONTo(cmd.OutOrStdout(), out)
 		}
 
 		// detect GitHub remote for repo identity

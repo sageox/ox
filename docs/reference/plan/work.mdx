@@ -1,7 +1,7 @@
 ---
 title: "ox plan work"
 description: "CLI reference for ox plan work"
-sidebar_position: 71
+sidebar_position: 76
 ---
 
 ## ox plan work
@@ -30,6 +30,7 @@ ox plan work <slug> [flags]
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
@@ -39,4 +40,4 @@ ox plan work <slug> [flags]
 
 ### SEE ALSO
 
-* [ox plan](/plan)	 - Work with implementation plans (enrich, render, review)
+* [ox plan](/plan)	 - Work with plans (enrich, render, review)

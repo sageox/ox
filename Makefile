@@ -1,7 +1,7 @@
 # Makefile for ox CLI tool
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open check-test-tiers test-tiers
-.PHONY: help build build-ox build-adapters build-acceptance install install-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
+.PHONY: help build build-ox build-adapters build-acceptance install install-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-release-coverage release-stages test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin eval eval-smoke eval-no-bash eval-scaffold-check test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
 GO := go
@@ -42,13 +42,22 @@ empty :=
 space := $(empty) $(empty)
 comma := ,
 ACCEPTANCE_DIR := $(abspath tmp/acceptance)
+# Coverage-instrumented acceptance binary + its adapter set, isolated from bin/
+# for the reason documented on build-cover.
+COVER_BIN_DIR := $(abspath tmp/acceptance-cover)
+COVER_OX_BIN := $(COVER_BIN_DIR)/$(BINARY_NAME)
 ACCEPTANCE_OX_BIN ?= $(ACCEPTANCE_DIR)/$(BINARY_NAME)
 ACCEPTANCE_GO_COVER_DIR ?=
 ACCEPTANCE_INTEGRATION_COVER_FLAGS = $(if $(strip $(ACCEPTANCE_GO_COVER_DIR)),-coverprofile=$(ACCEPTANCE_GO_COVER_DIR)/integration-test.out -covermode=atomic,)
 ACCEPTANCE_SLOW_COVER_FLAGS = $(if $(strip $(ACCEPTANCE_GO_COVER_DIR)),-coverprofile=$(ACCEPTANCE_GO_COVER_DIR)/slow-test.out -covermode=atomic,)
-ACCEPTANCE_INTEGRATION_TESTS := TestCodeActivityE2E TestFreshInstall_MockServer_InitThenDoctor TestFreshInstall_MockServer_SyncUnavailableThenDoctorStillWorks
+ACCEPTANCE_INTEGRATION_TESTS := TestCodeActivityE2E TestFreshInstall_MockServer_InitThenDoctor TestFreshInstall_MockServer_SyncUnavailableThenDoctorStillWorks TestNoInputCLI TestUnexpectedArgumentsCLI TestUpgradeCLI
 ifneq ($(filter darwin linux freebsd,$(shell $(GO) env GOOS)),)
 ACCEPTANCE_INTEGRATION_TESTS += TestBackgroundDaemonSurvivesCommandCleanup
+endif
+ifneq ($(filter darwin linux,$(shell $(GO) env GOOS)),)
+# Exercise terminal output modes against the instrumented binary in CI.
+ACCEPTANCE_INTEGRATION_TESTS += TestConfigCLIOutputModes
+ACCEPTANCE_INTEGRATION_TESTS += TestSpinnerCLIInterrupt
 endif
 ACCEPTANCE_SLOW_TESTS := TestIncrementalE2E_SingleAgent TestIncrementalE2E_CtrlC_AntiEntropy
 TWIN_COVER_DIR ?=
@@ -337,7 +346,7 @@ test-acceptance-cover: check-test-tiers build-cover ## Acceptance journeys throu
 	@mkdir -p $(COVERDIR)/integration
 	@OX_TEST_GOCOVERDIR="$(abspath $(COVERDIR)/integration)" \
 		$(MAKE) --no-print-directory test-acceptance-run \
-			"ACCEPTANCE_OX_BIN=$(abspath bin/$(BINARY_NAME)-cover)" \
+			"ACCEPTANCE_OX_BIN=$(COVER_OX_BIN)" \
 			"ACCEPTANCE_GO_COVER_DIR=$(COVERDIR)"
 	@test -s $(COVERDIR)/integration-test.out || { echo "ERROR: integration acceptance produced no Go coverage profile"; exit 1; }
 	@test -s $(COVERDIR)/slow-test.out || { echo "ERROR: session acceptance produced no Go coverage profile"; exit 1; }
@@ -366,12 +375,23 @@ test-acceptance-run:
 		-run '^($(subst $(space),|,$(strip $(ACCEPTANCE_SLOW_TESTS))))$$' \
 		./cmd/ox
 
+# The release gate's independent stages. `make test-release` runs them in order;
+# release.yml reads this list with `make release-stages` and runs each stage as
+# its own parallel job, so CI cannot skip a stage that `make test-release` runs.
+RELEASE_STAGES := test-release-coverage test-slow test-fuzz
+
 test-release: check-test-tiers ## Run every enforceable in-repo release tier sequentially
+	@for stage in $(RELEASE_STAGES); do $(MAKE) $$stage || exit 1; done
+
+# One stage, not three: the ratchet reads the profile merged from the full,
+# acceptance, and digital-twin runs.
+test-release-coverage: check-test-tiers ## Release stage: full, acceptance, and digital-twin tiers under the merged coverage ratchets
 	@$(MAKE) coverage-ratchet-test
 	@$(MAKE) coverage-integration
 	@python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json
-	@$(MAKE) test-slow
-	@$(MAKE) test-fuzz
+
+release-stages: ## Print the release gate's stages as a JSON array (the release workflow's job matrix)
+	@python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' $(RELEASE_STAGES)
 
 test-agents: ## Drive real coding agents and read their transcripts back through ox (opt-in, costs API calls)
 	$(call say,"Driving real coding agents — requires each agent installed and authenticated...")
@@ -483,7 +503,13 @@ check-codedb-guarded-open: ## Ensure codedb opens user repos only via internal/c
 		exit 1; \
 	fi
 
-test-preflight: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open ## Pre-PR quality gate: lint + all unit tests + slow tests (lint/test-all/test-slow run concurrently)
+test-preflight: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open docs-check ## Pre-PR quality gate: lint + all unit tests + slow tests + generated-doc freshness (lint/test-all/test-slow run concurrently)
+	@# docs-check is a PREREQUISITE, not part of the -j group below: it is seconds
+	@# of work, and running it first means a stale reference doc fails in the time
+	@# it takes to read the error rather than after a 20-minute test run. It landed
+	@# here because it was CI-only — every author discovered stale generated docs
+	@# from a red check on a merged PR, which is the exact feedback loop a pre-PR
+	@# gate exists to remove.
 	$(call say,"Running lint, full tests, and slow tests concurrently...")
 	@# lint and the test binaries don't share any output file (test-all writes
 	@# coverage.out; test-slow and lint don't touch it), so running them
@@ -651,13 +677,21 @@ coverage-ratchet-diff: test-all ## Enforce package + changed-line coverage vs CO
 coverage-ratchet-test: ## Test the coverage ratchet parser and failure semantics
 	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py
 
+# The instrumented binary lands in its OWN directory, not shared bin/, because
+# ox discovers adapters as siblings of the running binary. In bin/ it saw every
+# adapter a previous `make build` left behind (all ten), while
+# build-acceptance's tmp/acceptance/ holds exactly two — so the same acceptance
+# journeys ran against a different adapter set depending on which target
+# invoked them, and the coverage run failed on a Pi prime block the plain run
+# never produced. Mirroring build-acceptance keeps instrumentation the only
+# difference between the two.
 build-cover: ## Build ox binary with coverage instrumentation
-	@rm -rf $(COVERDIR)/integration $(COVERDIR)/merged
-	@mkdir -p bin $(COVERDIR)/integration
-	@$(GO) build -cover -covermode=atomic $(LDFLAGS) -o bin/$(BINARY_NAME)-cover ./cmd/ox
-	@$(GO) build $(ADAPTER_LDFLAGS) -o bin/ox-adapter-claude-code ./cmd/ox-adapter-claude-code
-	@echo "Instrumented binary: bin/$(BINARY_NAME)-cover"
-	@echo "Run with: GOCOVERDIR=$(COVERDIR)/integration bin/$(BINARY_NAME)-cover ..."
+	@rm -rf $(COVERDIR)/integration $(COVERDIR)/merged "$(COVER_BIN_DIR)"
+	@mkdir -p "$(COVER_BIN_DIR)" $(COVERDIR)/integration
+	@$(GO) build -cover -covermode=atomic $(LDFLAGS) -o "$(COVER_OX_BIN)" ./cmd/ox
+	@$(GO) build $(ADAPTER_LDFLAGS) -o "$(COVER_BIN_DIR)/ox-adapter-claude-code" ./cmd/ox-adapter-claude-code
+	@echo "Instrumented binary: $(COVER_OX_BIN)"
+	@echo "Run with: GOCOVERDIR=$(COVERDIR)/integration $(COVER_OX_BIN) ..."
 
 coverage-integration: ## Run acceptance through instrumented ox and merge full + binary coverage
 	@rm -f coverage-all.out coverage-all.out.provenance.json

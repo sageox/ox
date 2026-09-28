@@ -83,9 +83,27 @@ func TestFitPrimeToHookCap_FitsAndKeepsWhatMattersMost(t *testing.T) {
 		assert.Contains(t, trimmed, "- "+name, "deferred section %s must be named in the pointer", name)
 		assert.NotContains(t, trimmed, "<"+name+">", "deferred section %s must not also be emitted", name)
 	}
-	// low-priority reference material goes first
-	assert.Contains(t, deferred, "context-budget")
-	assert.Contains(t, deferred, "visualization-guidance")
+	// Low-priority reference material goes first. Asserted as a rank boundary
+	// rather than a fixed list of section names: this fixture sits ~1 KB over
+	// budget, so which tail section loses the byte race shifts whenever prime
+	// copy changes by a few dozen bytes, and the swap pass legitimately keeps a
+	// small low-priority section it cannot trade for a larger high-priority one.
+	// What must never shift is the boundary — nothing a coworker needs before
+	// its first action may be deferred while reference material is kept.
+	rank := make(map[string]int, len(hookCapSectionPriority))
+	for i, name := range hookCapSectionPriority {
+		rank[name] = i
+	}
+	rankOf := func(name string) int { // unlisted sections defer first, as in the trimmer
+		if r, ok := rank[name]; ok {
+			return r
+		}
+		return len(hookCapSectionPriority)
+	}
+	for _, name := range deferred {
+		assert.Greater(t, rankOf(name), rankOf("commands"),
+			"%s outranks the reference tier and must survive the trim", name)
+	}
 }
 
 func TestFitPrimeToHookCap_UnderBudgetIsUntouched(t *testing.T) {
@@ -150,4 +168,23 @@ func TestOutputAgentPrimeXML_HookBudgetTrimsAndWritesFullBundle(t *testing.T) {
 	assert.NotContains(t, buf.String(), "<deferred")
 	_, statErr := os.Stat(out.HookFullBundlePath)
 	assert.True(t, os.IsNotExist(statErr), "a direct invocation must not write a bundle")
+}
+
+// A self-closing element (`<bulletin dir="…" hint="…"/>`) must open no
+// section. openTag's attribute class admits the trailing slash, so before
+// the guard the line was taken as an opening tag whose closing line never
+// comes, and every later child of the split parent — team rules, indexed
+// rules, memory — vanished from the trim candidates.
+//
+// Failure prevented: a hook-driven prime that has a bulletin board could not
+// shed its team rules or memory under the hook cap, so a normal 14–24 KB
+// prime would be cut by the host mid-document instead of trimmed by section.
+func TestTopLevelSections_SelfClosingLineOpensNoSection(t *testing.T) {
+	doc := "<ox-prime>\n\n<team-knowledge>\n\n<docs>\nx\n</docs>\n\n<bulletin dir=\"/t/bulletin/general/posts\" hint=\"notes, check expires_at\"/>\n\n<team-rules>\n<rule name=\"a\">\nbody\n</rule>\n</team-rules>\n\n<memory>\nm\n</memory>\n\n</team-knowledge>\n\n</ox-prime>\n"
+	var names []string
+	for _, s := range trimCandidates(doc) {
+		names = append(names, s.name)
+	}
+	assert.Equal(t, []string{"team-knowledge/docs", "team-knowledge/team-rules", "team-knowledge/memory"}, names,
+		"every child after the self-closing bulletin line must still be a trim candidate")
 }

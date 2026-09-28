@@ -2,6 +2,7 @@ package skillmanager
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -11,6 +12,10 @@ import (
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/stretchr/testify/require"
 )
+
+// canonicalFixtureOrigin is the origin every well-formed fixture gets. Its slug
+// is "acme/api", which is what a `repos:` entry must name to match.
+const canonicalFixtureOrigin = "https://github.com/acme/api.git"
 
 // stageTeamWiredProject writes the two config files FindRepoTeamContext reads,
 // so catalogForRepo resolves teamPath for this project.
@@ -22,6 +27,39 @@ import (
 // .sageox/ does not exist yet and will not create it.
 func stageTeamWiredProject(t *testing.T, projectRoot, teamPath string) {
 	t.Helper()
+	// Production repositories normally have a canonical origin. Give fixtures
+	// one too, so tests that intend to exercise a readable Team Context do not
+	// accidentally exercise the degraded directory-name slug fallback instead.
+	stageTeamWiredProjectWithOrigin(t, projectRoot, teamPath, canonicalFixtureOrigin)
+}
+
+// stageTeamWiredProjectWithOrigin is stageTeamWiredProject with the repository
+// IDENTITY made an explicit parameter rather than a normalized-away constant.
+//
+// An empty origin stages the degraded state the caller above deliberately rules
+// out: a git repository with no canonical remote, where repotools.RepoSlugFromRemote
+// returns "" and every `repos:`-targeted team skill becomes unresolvable. That
+// is not an exotic state — a local-only checkout, a clone before its remote is
+// added, and an origin that was renamed all land there — and it is precisely
+// where the approval command and the reconcile path last disagreed.
+func stageTeamWiredProjectWithOrigin(t *testing.T, projectRoot, teamPath, origin string) {
+	t.Helper()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = projectRoot
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	git("init", "-q")
+	if origin != "" {
+		remote := exec.Command("git", "remote", "get-url", "origin")
+		remote.Dir = projectRoot
+		if err := remote.Run(); err != nil {
+			git("remote", "add", "origin", origin)
+		}
+	}
+
 	const teamID = "team_wiring_test"
 	require.NoError(t, config.SaveProjectConfig(projectRoot, &config.ProjectConfig{
 		ProjectID:   "proj_wiring_test",
@@ -54,7 +92,7 @@ func TestPlan_TeamSkillsTravelTheWholeReconcilePath(t *testing.T) {
 	t.Parallel()
 
 	const skillName = "deploy"
-	installedDir := filepath.Join(".agents", "skills", TeamPrefix+skillName)
+	installedDir := filepath.Join(".agents", "skills", skillName+TeamSuffix)
 
 	tests := []struct {
 		name string
@@ -204,4 +242,58 @@ func TestPlan_TeamContextThatExistsButCannotBeReadIsAnError(t *testing.T) {
 	target := sharedTarget()
 	_, err := Reconcile(repo, "1.0.0", desiredFor(target), []adapterprotocol.SkillTarget{target})
 	require.Error(t, err, "an unreadable team skills directory was treated as an empty one")
+}
+
+// TestReconcile_TeamContentChangeLeavesCommittedLockByteIdentical pins the
+// daemon-tick invariant for the real Team Context source. Team checkout commits,
+// file digests, and installed bytes are machine-local projection state; only the
+// human's target/bundle selection belongs in the tracked lockfile.
+func TestReconcile_TeamContentChangeLeavesCommittedLockByteIdentical(t *testing.T) {
+	repo := t.TempDir()
+	team := t.TempDir()
+
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = team
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	git("init", "-q", "-b", "main")
+	git("config", "user.email", "test@example.com")
+	git("config", "user.name", "Test")
+	git("config", "commit.gpgsign", "false")
+	writeTeamSkill(t, team, "deploy", "", nil)
+	git("add", ".")
+	git("commit", "-q", "-m", "add deploy")
+	stageTeamWiredProject(t, repo, team)
+
+	target := sharedTarget()
+	desired := desiredFor(target)
+	targets := []adapterprotocol.SkillTarget{target}
+	_, err := Reconcile(repo, "1.0.0", desired, targets)
+	require.NoError(t, err)
+	lockBefore, err := os.ReadFile(LockPath(repo))
+	require.NoError(t, err)
+	stateBefore, err := os.ReadFile(StatePath(repo))
+	require.NoError(t, err)
+
+	manifest := filepath.Join(team, "agents", "skills", "deploy", "SKILL.md")
+	require.NoError(t, os.WriteFile(manifest,
+		[]byte("---\nname: deploy\n---\n\nchanged team content\n"), 0o644))
+	git("add", ".")
+	git("commit", "-q", "-m", "update deploy")
+
+	plan, err := Reconcile(repo, "1.0.0", desired, targets)
+	require.NoError(t, err)
+	require.NotEmpty(t, plan.Updates, "fixture did not project the changed team content")
+	lockAfter, err := os.ReadFile(LockPath(repo))
+	require.NoError(t, err)
+	require.Equal(t, lockBefore, lockAfter,
+		"a Team Context content change rewrote the tracked selection lockfile")
+
+	stateAfter, err := os.ReadFile(StatePath(repo))
+	require.NoError(t, err)
+	require.NotEqual(t, stateBefore, stateAfter,
+		"machine-local state did not record the new Team Context revision")
 }

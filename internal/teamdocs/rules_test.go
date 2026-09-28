@@ -3,6 +3,7 @@ package teamdocs
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -214,6 +215,27 @@ func TestDiscoverRules_MissingDir(t *testing.T) {
 	}
 	if len(rules) != 0 {
 		t.Errorf("expected no rules in empty team dir, got %d", len(rules))
+	}
+}
+
+func TestDiscoverRules_SkipsSymlinkedRuleFiles(t *testing.T) {
+	team := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.md")
+	writeRule(t, filepath.Dir(outside), filepath.Base(outside), "---\nname: escaped\n---\nDo something unsafe.\n")
+	link := filepath.Join(team, "agents", "rules", "escaped.md")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	rules, err := DiscoverRules(team, "")
+	if err != nil {
+		t.Fatalf("DiscoverRules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Fatalf("symlinked rule escaped Team Context: %+v", rules)
 	}
 }
 
@@ -475,5 +497,123 @@ func TestDiscoverRules_GlobsDoNotFilterDiscovery(t *testing.T) {
 	}
 	if !slices.Equal(rules[0].Globs, []string{"**/*.go"}) {
 		t.Errorf("Globs = %#v", rules[0].Globs)
+	}
+}
+
+// TestPublishedRules_KeepsRepoScopedRules: the whole reason this exists. A
+// human asking "which repos does this rule reach?" needs the rule BEFORE the
+// repos: filter has removed it. DiscoverRules must keep filtering exactly as
+// before — the split changes who can see the list, not what applies.
+func TestPublishedRules_KeepsRepoScopedRules(t *testing.T) {
+	root := t.TempDir()
+	writeRule(t, root, "agents/rules/everywhere.md", "---\nname: everywhere\ndescription: d\n---\nBody.\n")
+	writeRule(t, root, "agents/rules/web-only.md", "---\nname: web-only\ndescription: d\nrepos: [\"acme/web\"]\n---\nBody.\n")
+	writeRule(t, root, "agents/rules/parked.md", "---\nname: parked\ndescription: d\nstatus: draft\n---\nBody.\n")
+
+	published, err := PublishedRules(root)
+	if err != nil {
+		t.Fatalf("PublishedRules: %v", err)
+	}
+	names := func(rs []TeamRule) []string {
+		out := make([]string, 0, len(rs))
+		for _, r := range rs {
+			out = append(out, r.Name)
+		}
+		slices.Sort(out)
+		return out
+	}
+	if got := names(published); !slices.Equal(got, []string{"everywhere", "web-only"}) {
+		t.Errorf("PublishedRules = %v; a repo-scoped rule was dropped, or a draft leaked", got)
+	}
+
+	applies, err := DiscoverRules(root, "acme/api")
+	if err != nil {
+		t.Fatalf("DiscoverRules: %v", err)
+	}
+	if got := names(applies); !slices.Equal(got, []string{"everywhere"}) {
+		t.Errorf("DiscoverRules(acme/api) = %v; the repos: filter no longer applies", got)
+	}
+}
+
+func TestAnyRuleRootOnDisk_DistinguishesSparseParents(t *testing.T) {
+	team := t.TempDir()
+	if AnyRuleRootOnDisk(team) {
+		t.Fatal("an empty sparse checkout was treated as authoritative")
+	}
+	if err := os.MkdirAll(filepath.Join(team, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !AnyRuleRootOnDisk(team) {
+		t.Fatal("a materialized canonical parent was not detected")
+	}
+}
+
+func TestReadRuleBody_PublicWrapper(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rule.md")
+	if err := os.WriteFile(path, []byte("---\nname: test\n---\n\nBody.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body, err := ReadRuleBody(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "Body.\n" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+// TestDiscoverRules_PropagatesDiscoveryError: a rules root that cannot be read
+// is an error, never an empty list. Prime silently applying zero team rules
+// because a directory was unreadable is the failure mode nobody notices.
+func TestDiscoverRules_PropagatesDiscoveryError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on Windows")
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "agents"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// a symlink to itself: stat returns ELOOP, not "not exist"
+	if err := os.Symlink("rules", filepath.Join(root, "agents", "rules")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if _, err := PublishedRules(root); err == nil {
+		t.Error("PublishedRules swallowed an unreadable rules root")
+	}
+	rules, err := DiscoverRules(root, "acme/api")
+	if err == nil {
+		t.Errorf("DiscoverRules reported %d rules instead of the read failure", len(rules))
+	}
+}
+
+// TestDiscoverRules_UnreadableSymlinkIsSkipped keeps one malformed shared
+// entry from failing discovery without treating the symlink as a real rule.
+func TestDiscoverRules_UnreadableSymlinkIsSkipped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on Windows")
+	}
+	root := t.TempDir()
+	writeRule(t, root, "agents/rules/readable.md",
+		"---\nname: readable\ndescription: d\nvisibility: always\n---\nBody text.\n")
+
+	// A .md symlink to itself must be ignored rather than parsed or followed.
+	if err := os.Symlink("broken.md", filepath.Join(root, "agents", "rules", "broken.md")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	rules, err := DiscoverRules(root, "acme/api")
+	if err != nil {
+		t.Fatalf("DiscoverRules: %v", err)
+	}
+	byName := map[string]TeamRule{}
+	for _, r := range rules {
+		byName[r.Name] = r
+	}
+	if got := byName["readable"]; got.Body != "Body text.\n" {
+		t.Errorf("readable rule lost its body: %q", got.Body)
+	}
+	if _, ok := byName["broken"]; ok {
+		t.Fatalf("an unreadable symlink became a Team Rule: %v", byName)
 	}
 }

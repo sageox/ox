@@ -68,6 +68,8 @@ The header identifies the session and provides provenance metadata.
 | `repo_id` | string | no | SageOx repo ID for provenance |
 | `session_id` | string | no | The `ses_` recording identity minted at session start. The header is its **crash-safe carrier**: `.recording.json` is deleted at stop/abort, so an orphan-finalize can only recover this ID from here. Only `ses_`-prefixed values are accepted into this field — see the caution below. |
 | `ox_version` | string | no | Version of ox that created the session |
+| `native_sessions` | array | no | Native coding-agent session ids the recording had observed when the header was written, in first-seen order: `{"id","source","first_seen","last_seen"}` per sighting. `source` is the agent's SessionStart reason when it gives one (Claude Code: `startup`, `resume`, `clear`, `compact`). This is how an artifact labeled with the agent's own session id (a native transcript, a trace) is matched to a recording. A file written whole at stop carries the full list here; a file recorded live carries only the id that started it here and the full list on the **footer** — a live `raw.jsonl` is never rewritten, because its appenders may still be open. Readers take the footer's list when present. Absent on older recordings and for agents that expose no session id. |
+| `stopped_at` | ISO8601 | no | When the recording stopped. Present when the file was written whole at stop; a file recorded live carries it on the **footer** instead. Absent on older recordings. |
 
 Example:
 ```json
@@ -112,6 +114,8 @@ Each entry represents a conversation turn or tool invocation. Entries are writte
 | `tool_name` | string | no | Tool name (only for `tool` entries). Import dialect uses **`tool`** |
 | `tool_input` | string **or object** | no | Tool input. ox writes a string (often itself JSON); the import dialect writes a decoded object. A reader that checks only for a string silently drops every imported tool call's arguments |
 | `tool_output` | string **or object** | no | Tool output. Same string-or-object split as `tool_input` |
+| `is_error` | boolean | no | The tool call failed. Omitted when false |
+| `call_id` | string | no | The agent's own identifier for a tool invocation. Carried by **both** the call entry and its result entry so the two can be joined — and joined to the agent's native transcript and trace, which label the same invocation with the same id. Source per adapter: Claude Code `tool_use.id` / `tool_result.tool_use_id`; Codex `call_id`. Absent for adapters whose format has no such id and on entries recorded before the field existed |
 | `coworker_name` | string | no | Coworker/subagent name if applicable |
 | `coworker_model` | string | no | Coworker model tier (sonnet, opus, haiku) |
 | `data` | object | no | Nested payload written by `WriteEntry()` (as opposed to the flat `WriteRaw()` shape). Typically carries `role` and `content` |
@@ -193,9 +197,10 @@ Assistant response:
 {"type":"assistant","content":"I'll investigate the login flow...","timestamp":"2026-01-06T14:32:05Z","seq":1,"eid":"k9Qm2"}
 ```
 
-Tool call:
+Tool call and its result (joined by `call_id`):
 ```json
-{"type":"tool","content":"","tool_name":"bash","tool_input":"go test ./...","tool_output":"ok  github.com/user/repo 1.234s","timestamp":"2026-01-06T14:32:10Z","seq":2,"eid":"Tn4pL"}
+{"type":"tool","content":"","tool_name":"bash","tool_input":"go test ./...","call_id":"toolu_01Ab3","timestamp":"2026-01-06T14:32:10Z","seq":2,"eid":"Tn4pL"}
+{"type":"tool","content":"","tool_output":"ok  github.com/user/repo 1.234s","call_id":"toolu_01Ab3","timestamp":"2026-01-06T14:32:11Z","seq":3,"eid":"Q8mNd"}
 ```
 
 System message (coworker load):
@@ -216,8 +221,12 @@ The footer provides session summary statistics.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `type` | string | yes | Always `"footer"` |
-| `closed_at` | ISO8601 | yes | When the session was closed |
-| `entry_count` | integer | yes | Total entries written (excluding header/footer) |
+| `closed_at` | ISO8601 | no | When the session was closed. Written by the close-time footer; a carrier footer may omit it |
+| `entry_count` | integer | no | Total entries written (excluding header/footer). Not emitted by every writer; readers MUST tolerate its absence |
+| `native_sessions` | array | no | Every native coding-agent session id the recording observed by the time it stopped, same shape as the header field. Appended by the finalize door that ended a live recording (explicit stop, SessionEnd hook, `/clear`, daemon reclaim) so a daemon-side finalize can copy it into `meta.json` after the recording-state file is gone. Readers prefer this over the header's list |
+| `stopped_at` | ISO8601 | no | When the recording stopped, as recorded by the door that appended this footer. Readers prefer this over the header's value |
+
+A finalize door **appends** this footer; it never rewrites the file. A live `raw.jsonl` can have open appenders (the daemon's tail watcher, a parallel hook), and replacing the file by rename would leave them writing into the unlinked inode, silently losing entries. A file may therefore carry more than one footer (a hook door's, then a later door's); readers take the last value of each field and never treat a footer as content.
 
 ## Complete Example
 

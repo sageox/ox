@@ -13,7 +13,7 @@ Team rules are conventions, policies, and decisions that apply to **every AI cow
 A SageOx team rule applies to:
 
 - **All teammates who run `ox`** in a repo associated with the team. Teammates who don't use `ox` will not see it (same as `.claude/rules/` only reaching Claude users).
-- **All AI coworkers those teammates use** — Claude Code, Codex, Gemini, Droid, OpenCode, Amp, etc. SageOx works regardless of which AI coworker tool is connected; the rule loads via `ox agent prime`.
+- **All AI coworkers those teammates use** — Claude Code, Codex, Gemini, Droid, OpenCode, Amp, etc. ox selects a native projection or `ox agent prime` fallback for each tool.
 
 ## When to use a team rule vs. a project-local rule
 
@@ -90,10 +90,12 @@ copied out of `.cursor/rules` works unchanged:
 globs: **/*.go,**/*.mod
 ```
 
-Today `globs:` is advisory: your AI coworker sees the scope in its prime context and
-applies the rule when it fits. Native path-triggered loading — where the agent's own
-harness loads the rule the moment you open a matching file — lands with rule sync-out.
-A rule you write now gains that automatically.
+When the active tool has a faithful native glob field, ox projects the rule into its
+existing rule root and the tool activates it for matching files. Claude, Cursor,
+Copilot, Cline, and Kiro support that path. Droid and Windsurf have native rule roots
+but no glob field, so ox keeps a scoped rule indexed through prime rather than
+silently turning it into an always-on rule. Tools without a native rule root use the
+same prime fallback.
 
 ### Frontmatter fields
 
@@ -106,15 +108,55 @@ A rule you write now gains that automatically.
 | `audience` | no | `ai` \| `human` \| `both` | Default `ai`. Filters out human-only rules from agent context. |
 | `visibility` | no | `always` \| `indexed` \| `hidden` | Default `indexed`. See below. |
 | `status` | no | `active` \| `draft` \| `superseded-by:<other-name>` | Default `active`. |
+| `valid-through` | no | `YYYY-MM-DD` | Shelf life. Empty means evergreen. Parsed and reported, never enforced by deletion — see below. |
 | `from-discussion` | no | discussion id | Optional provenance link into `<team-context>/discussions/`. |
 
 ### Visibility tiers
 
-- **`always`** — full body inlined into `ox agent prime` every session. Reserve for hot, short, universally-applicable rules (security, escalation). This costs context tokens for every teammate on every session.
-- **`indexed`** (default, recommended) — only `name + description + path` appears in prime. Agents read the file on demand when relevant. Keeps prime context small as your library grows.
+- **`always`** — full body is delivered every session, natively where possible and otherwise inline through `ox agent prime`. Reserve for hot, short, universally-applicable rules (security, escalation).
+- **`indexed`** (default, recommended) — only `name + description + path` appears in prime, unless `globs:` enables faithful native path activation. AI coworkers read indexed rules on demand.
 - **`hidden`** — not surfaced unless explicitly named. Use for drafts, archived rules, work-in-progress.
 
-> **Why no path-scoping (`paths:` like Claude has):** Claude rule files support a `paths:` glob list that defers loading until Claude reads a matching file. SageOx's prime runs once at session start, before file access happens — we can't replicate Claude's per-file lazy loading. The closest scoping we offer is `repos:`, plus `visibility: indexed` for on-demand reads.
+### `valid-through:` — shelf life for knowledge that rots
+
+Most rules are evergreen: a convention about error wrapping does not expire. Some are
+not. A rule or skill that describes **the outside world** — a tool released after the
+models were trained, a vendor's current limits, a workaround for someone else's bug —
+stops being an advantage the moment the world moves, and an index full of entries nobody
+rechecks is an index nobody reads.
+
+```yaml
+valid-through: 2027-03-21
+```
+
+**An expired entry is reported, never withheld and never deleted.** A date is a prompt
+to re-verify or retire, and silently removing a team's published knowledge on a timer
+would be the same unexplained-disappearance failure the name guard exists to prevent: a
+teammate would watch a rule vanish with nothing, anywhere, saying it was ever there.
+
+Six months is a reasonable default for anything pegged to a fast-moving external tool.
+Pick a date you would actually want to be asked about.
+
+Two clocks are worth keeping distinct:
+
+- **A dated whole skill or rule** — the entire thing was only ever meant to bridge a gap,
+  and should surface for removal rather than quietly becoming furniture.
+- **A dated entry inside a skill** — the skill is evergreen but its `references/` rot
+  individually. ox does not read those; the skill's own body should tell an agent to
+  check them and say so when one has passed.
+
+### One source, one delivery path
+
+The Team Context file is always canonical. During `ox sync` and after Team Context
+updates, ox mirrors native-compatible rules into reserved `sageox-team-*` files only
+when that tool's rule root already exists and the managed path is ignored by git.
+Removing a rule, changing its `repos:` filter, or superseding it removes the derived
+projection. Do not edit a projection; edit the Team Context source.
+
+At session start, prime knows which AI coworker is active. An existing native
+projection is omitted from prime; everything else keeps its inline or indexed
+fallback. This prevents duplicate native-plus-prime delivery. Scoped rules are never
+flattened into an unscoped native format.
 
 ## Size guidance
 
@@ -150,7 +192,9 @@ git commit -m "Add rule: integration tests must hit real DB"
 git push
 ```
 
-On their next `ox agent prime`, every teammate's AI coworker will see the new rule (full body if `always`, catalog entry if `indexed`).
+The background Team Context sync applies the new rule automatically. Run `ox sync`
+for immediate convergence. At the next session boundary, every AI coworker receives
+the rule through its selected native, inline, or indexed path.
 
 ## See also
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -136,12 +137,7 @@ func runAgentSessionLog(w io.Writer, inst *agentinstance.Instance, args []string
 		Success: true,
 		Seq:     seq,
 	}
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return fmt.Errorf("format log JSON: %w", err)
-	}
-	fmt.Fprintln(w, string(jsonOut))
-	return nil
+	return cli.PrintJSONTo(w, output)
 }
 
 // sessionLogTargetFile determines which file to append log entries to.

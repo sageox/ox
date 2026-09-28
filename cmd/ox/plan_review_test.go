@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -32,6 +34,14 @@ func newTestReviewServer(t *testing.T, planDir string) (*httptest.Server, chan i
 
 func reviewPOST(t *testing.T, url, token, body string) int {
 	t.Helper()
+	code, _ := reviewPOSTBody(t, url, token, body)
+	return code
+}
+
+// reviewPOSTBody is reviewPOST plus the response body, for handlers (like
+// /feedback and /reopen) whose JSON carries more than the bare {"ok":true}.
+func reviewPOSTBody(t *testing.T, url, token, body string) (int, string) {
+	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
@@ -41,8 +51,9 @@ func reviewPOST(t *testing.T, url, token, body string) int {
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
-	resp.Body.Close()
-	return resp.StatusCode
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
 }
 
 // TestRenderSavedReviewPage_PreservesLegacyAuthoredHTML guards the regression
@@ -326,6 +337,64 @@ func TestReviewLoop_RejectsBadJSON(t *testing.T) {
 	}
 }
 
+// TestReviewLoop_MissingAnchorIsBadRequest verifies /accept and /reopen both
+// reject a body with no anchor as 400, not a panic or a silent no-op.
+func TestReviewLoop_MissingAnchorIsBadRequest(t *testing.T) {
+	dir := t.TempDir()
+	srv, _, _ := newTestReviewServer(t, dir)
+	for _, path := range []string{"/accept", "/reopen"} {
+		if code := reviewPOST(t, srv.URL+path, "secret", "{}"); code != http.StatusBadRequest {
+			t.Errorf("%s with no anchor should be 400, got %d", path, code)
+		}
+	}
+}
+
+// TestReviewLoop_FeedbackAndReopenSurfaceSaveFailure verifies /feedback and
+// /reopen both report 500 — not a false 200 — when the underlying
+// plan.SaveFeedback write fails, so a human is never told a round was saved
+// when it wasn't.
+func TestReviewLoop_FeedbackAndReopenSurfaceSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	// A regular file where SaveFeedback expects to MkdirAll a "feedback"
+	// subdirectory fails deterministically on every platform (unlike chmod,
+	// which no-ops on Windows).
+	if err := os.WriteFile(filepath.Join(dir, "feedback"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, _, _ := newTestReviewServer(t, dir)
+	if code := reviewPOST(t, srv.URL+"/feedback", "secret", `{"items":[{"anchor":"h1","status":"comment"}]}`); code != http.StatusInternalServerError {
+		t.Errorf("/feedback with a blocked feedback dir should be 500, got %d", code)
+	}
+	if code := reviewPOST(t, srv.URL+"/reopen", "secret", `{"anchor":"h1"}`); code != http.StatusInternalServerError {
+		t.Errorf("/reopen with a blocked feedback dir should be 500, got %d", code)
+	}
+}
+
+// TestReviewLoop_AcceptSurfacesAppendResolutionFailure mirrors the above for
+// /accept's plan.AppendResolution write, which MkdirAlls the same "feedback"
+// subdirectory.
+func TestReviewLoop_AcceptSurfacesAppendResolutionFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "feedback"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv, _, _ := newTestReviewServer(t, dir)
+	if code := reviewPOST(t, srv.URL+"/accept", "secret", `{"anchor":"h1"}`); code != http.StatusInternalServerError {
+		t.Errorf("/accept with a blocked feedback dir should be 500, got %d", code)
+	}
+}
+
+// TestReviewLoop_ApproveSurfacesAppendPlanEventFailure verifies /approve
+// reports 500 — not a false "approved" — when the plan has no recorded
+// history to append the approval event to.
+func TestReviewLoop_ApproveSurfacesAppendPlanEventFailure(t *testing.T) {
+	dir := t.TempDir() // no plan.Save / AppendEvent ever ran here — no history
+	srv, _, _ := newTestReviewServer(t, dir)
+	if code := reviewPOST(t, srv.URL+"/approve", "secret", "{}"); code != http.StatusInternalServerError {
+		t.Errorf("/approve with no plan history should be 500, got %d", code)
+	}
+}
+
 // TestBroadcaster_FansOut verifies a broadcast reaches every subscriber and a
 // busy subscriber never blocks the broadcaster. Failure prevented: the live
 // reload stalls because one slow SSE client wedges the fan-out.
@@ -419,6 +488,64 @@ func TestReviewLoop_FeedbackPersistsWhenNotifyIsNoop(t *testing.T) {
 	}
 	if agenttask.QueueExists(gitRoot) {
 		t.Error("an unlinked plan must not enqueue a task")
+	}
+}
+
+// TestReviewLoop_FeedbackReportsNotifiedTrueOnSuccess verifies the /feedback
+// response carries notified:true when the enqueue succeeds, so the browser
+// only ever warns on an actual failure, not on every round.
+func TestReviewLoop_FeedbackReportsNotifiedTrueOnSuccess(t *testing.T) {
+	srv, _, _ := newNotifyingReviewServer(t)
+	code, body := reviewPOSTBody(t, srv.URL+"/feedback", "secret", `{"items":[{"anchor":"h1","status":"comment","note":"x"}]}`)
+	if code != http.StatusOK {
+		t.Fatalf("submit: %d", code)
+	}
+	if !strings.Contains(body, `"notified":true`) {
+		t.Errorf("response must report notified:true on a successful enqueue, got %q", body)
+	}
+}
+
+// TestReviewLoop_FeedbackReportsNotifiedFalseOnEnqueueFailure verifies the
+// /feedback and /reopen responses tell the browser when the authoring
+// coworker could NOT be notified, so the review page can warn the human
+// instead of looking like the loop is fully closed.
+// Failure prevented: a human submits feedback, the round is saved, the
+// browser shows success, and the human never learns the coworker was never
+// told — which is exactly what ox#968 reported (silently swallowed at Debug).
+func TestReviewLoop_FeedbackReportsNotifiedFalseOnEnqueueFailure(t *testing.T) {
+	gitRoot := t.TempDir()
+	planDir := filepath.Join(gitRoot, "plandir")
+	if err := os.MkdirAll(planDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestPlanMeta(t, planDir, &plan.Provenance{AgentID: "Ox#5", AgentType: "claude-code"})
+	// A regular file at .sageox makes agenttask.NewStore's MkdirAll fail on
+	// every attempt (structural, not transient) — a deterministic enqueue
+	// failure without touching the plan's own files.
+	if err := os.WriteFile(filepath.Join(gitRoot, ".sageox"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := liveReviewHandler(gitRoot, "p", planDir, "http://x", "secret", newBroadcaster(), make(chan int, 8), make(chan struct{}, 1))
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	code, body := reviewPOSTBody(t, srv.URL+"/feedback", "secret", `{"items":[{"anchor":"h1","status":"flag","note":"y"}]}`)
+	if code != http.StatusOK {
+		t.Fatalf("submit: %d", code)
+	}
+	if !strings.Contains(body, `"notified":false`) {
+		t.Errorf("response must report notified:false when enqueue fails, got %q", body)
+	}
+	if sets, _ := plan.LoadAllFeedback(planDir); len(sets) != 1 {
+		t.Errorf("the round must still persist even though notify failed, got %d", len(sets))
+	}
+
+	code, body = reviewPOSTBody(t, srv.URL+"/reopen", "secret", `{"anchor":"h1","note":"again"}`)
+	if code != http.StatusOK {
+		t.Fatalf("reopen: %d", code)
+	}
+	if !strings.Contains(body, `"notified":false`) {
+		t.Errorf("reopen response must report notified:false when enqueue fails, got %q", body)
 	}
 }
 

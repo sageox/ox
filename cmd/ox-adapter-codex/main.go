@@ -79,16 +79,8 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		DisplayName:     adapterDisplay,
 		Version:         adapterVersion,
 		Type:            adapterprotocol.TypeSession,
-		Capabilities: []string{
-			adapterprotocol.CapSessionReader,
-			adapterprotocol.CapHookInstaller,
-			adapterprotocol.CapSkillsInstaller,
-			adapterprotocol.CapIncrementalReader,
-			adapterprotocol.CapFileWatcher,
-			adapterprotocol.CapServeMode,
-			adapterprotocol.CapSessionImporter,
-		},
-		HookEnvValues: []string{"codex"},
+		Capabilities:    adapterprotocol.CodexCapabilities,
+		HookEnvValues:   []string{"codex"},
 		SkillTargets: []adapterprotocol.SkillTarget{{
 			Key: "agents-project", Root: ".agents/skills",
 			Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,

@@ -22,10 +22,11 @@ import (
 // Silence is the failure mode this exists to prevent: a skill held for approval
 // and a skill that was never discovered look identical from the repository.
 type TeamSkillDecision struct {
-	Name         string
-	InstalledAs  string
-	NeedsApprove bool
-	Reason       string
+	Name               string
+	InstalledAs        string
+	NeedsApprove       bool
+	AutoInstalledProse bool
+	Reason             string
 }
 
 // teamCatalog unions the binary's built-in catalog with the team skills this
@@ -70,7 +71,7 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 	if reason := unseeableTeamSkills(teamPath, repoSlug); reason != "" {
 		// Deliberately still a teamCatalog, not the bare base. Returning base here
 		// was the original shape, and it is the bug: base reports an authoritative
-		// empty team half, so the planner retires every sageox-team-* file already
+		// empty team half, so the planner retires every team projection already
 		// on disk. A project whose daemon has not finished its first clone would
 		// have its team playbooks deleted for the crime of being early.
 		return &teamCatalog{base: base, teamPath: teamPath, incomplete: reason}, nil, nil
@@ -79,6 +80,73 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 	discovered, rejected, err := teamdocs.DiscoverSkillsWithRejections(teamPath, repoSlug)
 	if err != nil {
 		return nil, nil, fmt.Errorf("discover team skills: %w", err)
+	}
+	return buildTeamCatalog(base, teamPath, repoSlug, projectRoot, discovered, rejected)
+}
+
+// TeamSkillsResolved carries a team-skill discovery a caller already performed
+// and repo-filtered under its own snapshot lease — currently only
+// teamconverge's FilesystemDiscovery (ox-jr82) — so catalogForRepo does not
+// re-walk teamdocs.PublishedSkills a second time only to reach the same
+// answer, or worse, a DIFFERENT one if the checkout moved between the two
+// walks.
+//
+// Skills must be exactly the APPLICABLE set: teamdocs.SkillAppliesToRepo
+// already evaluated against RepoSlug. The full published set, including
+// inapplicable skills, is discovery's own concern (it renders StateFiltered)
+// and is never passed here.
+type TeamSkillsResolved struct {
+	// TeamPath is cross-checked against config.FindRepoTeamContext's answer for
+	// repoRoot; a mismatch means the resolved set is stale or for the wrong
+	// project, and catalogForRepoResolved falls back to walking it itself
+	// rather than trusting data that does not name the same checkout.
+	TeamPath string
+	// RepoSlug MUST be the origin-derived identity (repotools.RepoSlugFromRemote),
+	// never the directory-name display fallback: SkillAppliesToRepo fails closed
+	// on an empty slug, and a fallback slug could match a repos: filter by
+	// directory-name coincidence that the real repository identity would not.
+	RepoSlug string
+	Skills   []teamdocs.TeamSkill
+}
+
+// teamSkillSourceResolved is TeamSkillSource for a caller that already walked
+// and repo-filtered the team checkout (see TeamSkillsResolved). It still runs
+// unseeableTeamSkills: that is a cheap directory-presence stat, not the
+// content walk this seam exists to avoid repeating, and it is what stops a
+// not-yet-materialized sparse checkout from reading as "the team publishes
+// nothing" and retiring every team projection already on disk.
+func teamSkillSourceResolved(base catalogSource, teamPath, repoSlug, projectRoot string, resolved []teamdocs.TeamSkill) (catalogSource, []TeamSkillDecision, error) {
+	if base == nil {
+		base = builtInCatalog{}
+	}
+	if reason := unseeableTeamSkills(teamPath, repoSlug); reason != "" {
+		return &teamCatalog{base: base, teamPath: teamPath, incomplete: reason}, nil, nil
+	}
+	// The NameError split mirrors teamdocs.DiscoverSkillsWithRejections exactly,
+	// applied to data already in hand rather than re-walked from disk.
+	var discovered, rejected []teamdocs.TeamSkill
+	for _, s := range resolved {
+		if s.NameError != "" {
+			rejected = append(rejected, s)
+			continue
+		}
+		discovered = append(discovered, s)
+	}
+	return buildTeamCatalog(base, teamPath, repoSlug, projectRoot, discovered, rejected)
+}
+
+// buildTeamCatalog turns a repo-filtered installable/rejected split into the
+// materializable catalog: classification, approvals, and the decision list a
+// human-facing diagnostic renders. Shared by TeamSkillSource, which computes
+// the split by walking the checkout, and teamSkillSourceResolved, which
+// receives it already computed.
+func buildTeamCatalog(base catalogSource, teamPath, repoSlug, projectRoot string, discovered, rejected []teamdocs.TeamSkill) (catalogSource, []TeamSkillDecision, error) {
+	// An unknown slug is partial visibility, not an empty team source. Untargeted
+	// skills are still authoritative and may be added; targeted skills cannot be
+	// evaluated, so removals must remain suppressed until identity returns.
+	retained := ""
+	if repoSlug == "" {
+		retained = "this repository's slug could not be determined, so targeted team skills were left in place"
 	}
 
 	// Refusals are carried BEFORE the empty check and never gated on what else was
@@ -92,6 +160,9 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 		decisions = append(decisions, TeamSkillDecision{Name: r.Name, Reason: r.NameError})
 	}
 	if len(discovered) == 0 {
+		if retained != "" {
+			return &teamCatalog{base: base, teamPath: teamPath, incomplete: retained}, decisions, nil
+		}
 		return base, decisions, nil
 	}
 
@@ -136,24 +207,34 @@ func TeamSkillSource(base catalogSource, teamPath, repoSlug, projectRoot string)
 			continue
 		}
 
-		installed := TeamPrefix + ts.Name
+		// SUFFIX, not prefix: the agent derives its slash name from this directory, so
+		// a prefix renamed every team skill out from under its own documentation.
+		installed := ts.Name + TeamSuffix
+		files := toCatalogFiles(loaded, approvals.ScriptsExecutable(ts.Name, verdict))
 		allowed = append(allowed, skills.Skill{
-			Name:    installed,
-			Content: manifestContent(loaded),
-			Files:   toCatalogFiles(loaded, approvals.ScriptsExecutable(ts.Name, verdict)),
+			Name: installed,
+			// Read back out of files rather than from loaded: the manifest in files
+			// carries the ownership stamp, and two copies of SKILL.md that differ by
+			// a trailer is how a digest comparison starts failing against itself.
+			Content: manifestContent(files),
+			Files:   files,
 		})
-		decision := TeamSkillDecision{Name: ts.Name, InstalledAs: installed}
+		decision := TeamSkillDecision{
+			Name: ts.Name, InstalledAs: installed, AutoInstalledProse: !verdict.Executable,
+		}
 		if scriptsNeedApproval {
 			// Installed, minus its scripts. Still surfaced: the author expects the
 			// scripts to be there, and silence would read as "it all arrived."
 			decision.NeedsApprove = true
-			decision.Reason = "installed without its scripts pending approval: " + verdict.Describe()
+			// The state is reported separately by every caller, so this says what is
+			// WITHHELD rather than repeating that the skill installed.
+			decision.Reason = "scripts withheld pending approval: " + verdict.Describe()
 		}
 		decisions = append(decisions, decision)
 	}
 
 	sort.Slice(allowed, func(i, j int) bool { return allowed[i].Name < allowed[j].Name })
-	return &teamCatalog{base: base, teamFiles: allowed, teamPath: teamPath}, decisions, nil
+	return &teamCatalog{base: base, teamFiles: allowed, teamPath: teamPath, incomplete: retained}, decisions, nil
 }
 
 func verdictHasCapability(v teamskills.Verdict, want teamskills.Capability) bool {
@@ -256,8 +337,8 @@ func manifestIsRunnable(s teamskills.Skill, v teamskills.Verdict) bool {
 	return false
 }
 
-func manifestContent(s teamskills.Skill) []byte {
-	for _, f := range s.Files {
+func manifestContent(files []skills.File) []byte {
+	for _, f := range files {
 		if strings.EqualFold(f.Path, skills.SkillFileName) {
 			return f.Content
 		}
@@ -286,7 +367,21 @@ func toCatalogFiles(s teamskills.Skill, allowScripts bool) []skills.File {
 				continue
 			}
 		}
-		out = append(out, skills.File{Path: clean, Content: f.Content})
+		content := f.Content
+		// Stamp the manifest, and ONLY the manifest. Now that team skills install
+		// under their real name plus a "-team" suffix, the directory name no longer
+		// proves ox wrote it — `notify-team` is a name a human might reasonably have
+		// picked. The stamp is what lets a reconcile on a machine with no local
+		// inventory tell an ox projection from a stranger, instead of either
+		// clobbering the stranger or conflicting on its own file forever.
+		//
+		// References and assets are left alone: they may be any format at all,
+		// including bytes a trailing HTML comment would corrupt. The manifest claims
+		// the directory; the lockfile digests cover what is inside it.
+		if strings.EqualFold(clean, skills.SkillFileName) {
+			content = TeamSkillStamp.Apply(content)
+		}
+		out = append(out, skills.File{Path: clean, Content: content})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
@@ -373,10 +468,14 @@ func ExpectedRevision(repoRoot string) (string, error) {
 //     find the checkout. It matches THIS project's team_id and never guesses a
 //     cross-team context, so a machine with several teams cannot leak one team's
 //     skills into another team's repository.
-//   - repotools.RepoSlug is what prime feeds to teamdocs.DiscoverRules. Skills
-//     reuse the rules' `repos:` frontmatter contract verbatim, so they must be
-//     filtered against the same slug; deriving it a second way is how the same
-//     document comes to apply to rules but not to skills.
+//   - repotools.RepoSlugFromRemote is what prime feeds to
+//     teamdocs.DiscoverRules. Skills reuse the rules' `repos:` frontmatter
+//     contract verbatim, so they must be filtered against the same slug;
+//     deriving it a second way is how the same document comes to apply to rules
+//     but not to skills. It is deliberately the ORIGIN-derived identity with no
+//     directory-name fallback: a fallback slug is useful display context but is
+//     not an authoritative repository identity, and matching a team's `repos:`
+//     list against a local folder name is a false positive waiting to happen.
 //
 // Threading them through Plan instead would push the resolution onto every
 // caller — the adapters, the daemon autofix tick, `ox init` — and each would get
@@ -387,15 +486,27 @@ func ExpectedRevision(repoRoot string) (string, error) {
 // the overwhelmingly common case and it must never fail a reconcile. A team
 // context that EXISTS but cannot be read is an error, and the reason is stronger
 // than tidiness — falling back to the built-in catalog would compute "no team
-// skills are desired" and Apply would then DELETE the sageox-team-* files
+// skills are desired" and Apply would then DELETE the team projections
 // already on disk. Guessing "empty" on an unanswered question is the fail-open
 // shape teamskills.LoadApprovals already refuses; the cost here is deletion of
 // working content rather than materialization of unapproved content.
 func catalogForRepo(repoRoot string) (catalogSource, []TeamSkillDecision, error) {
+	return catalogForRepoResolved(repoRoot, nil)
+}
+
+// catalogForRepoResolved is catalogForRepo with an optional TeamSkillsResolved
+// seam (ox-jr82): a nil resolved means exactly what catalogForRepo always did
+// — walk the team checkout here. A non-nil resolved is trusted for the skill
+// list and repo slug ONLY once TeamPath is confirmed to name the SAME checkout
+// config.FindRepoTeamContext resolves for repoRoot; every other check
+// (repoRoot empty, no team context configured, checkout not yet cloned) still
+// runs unconditionally, so a caller supplying resolved is never less safe than
+// one that does not.
+func catalogForRepoResolved(repoRoot string, resolved *TeamSkillsResolved) (catalogSource, []TeamSkillDecision, error) {
 	base := catalogSource(builtInCatalog{})
 	// Every early exit returns a teamCatalog carrying a REASON, never the bare
 	// base. Returning base says "authoritatively, this team publishes no skills",
-	// and the planner acts on that by retiring every sageox-team-* file on disk.
+	// and the planner acts on that by retiring every team projection on disk.
 	// A repo with no team context configured, or whose daemon has not finished
 	// its first clone, would have its team skills deleted for being early.
 	if repoRoot == "" {
@@ -415,9 +526,17 @@ func catalogForRepo(repoRoot string) (catalogSource, []TeamSkillDecision, error)
 		return nil, nil, fmt.Errorf("stat team context %s: %w", tc.Path, err)
 	}
 
+	if resolved != nil && resolved.TeamPath == tc.Path {
+		return teamSkillSourceResolved(base, tc.Path, resolved.RepoSlug, repoRoot, resolved.Skills)
+	}
+
 	// The slug costs a `git remote get-url`, so it is resolved only once a team
-	// context is known to exist — the population that can actually use it.
-	return TeamSkillSource(base, tc.Path, repotools.RepoSlug(repoRoot), repoRoot)
+	// context is known to exist — the population that can actually use it. A
+	// directory-name fallback is useful for display, but cannot authoritatively
+	// evaluate repos: filters: treating it as a negative match would retire every
+	// targeted team skill when origin is temporarily unavailable.
+	repoSlug, _ := repotools.RepoSlugFromRemote(repoRoot)
+	return TeamSkillSource(base, tc.Path, repoSlug, repoRoot)
 }
 
 // WithheldTeamSkills returns every team skill with an outstanding approval:
@@ -493,11 +612,15 @@ func unseeableTeamSkills(teamPath, repoSlug string) string {
 	if !anySkillRootOnDisk(teamPath) {
 		return "no skills directory is materialized in the team context"
 	}
-	// Without a slug ox cannot evaluate any skill's repos: filter, so every
-	// targeted skill silently drops out — indistinguishable from the team
-	// un-publishing them.
-	if repoSlug == "" {
-		return "this repository's slug could not be determined"
-	}
+	// An unknown slug is deliberately NOT blindness. It stops ox evaluating a
+	// repos: filter, so TARGETED skills cannot be resolved — but untargeted ones
+	// need no slug and must still reach a repository that simply has no origin
+	// remote (a local-only checkout, a clone before its remote is added, every
+	// test fixture). Treating the whole source as unseeable there shipped zero
+	// team skills to those repositories.
+	//
+	// The targeted half is handled by marking the populated catalog incomplete in
+	// TeamSkillSource, which suppresses REMOVALS only — so a targeted skill
+	// already on disk is retained rather than retired while origin is missing.
 	return ""
 }

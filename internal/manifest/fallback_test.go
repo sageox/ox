@@ -3,6 +3,7 @@ package manifest
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,7 +21,7 @@ func TestFallbackConfigFor_KB(t *testing.T) {
 	assert.ElementsMatch(t, []string{".sageox/", "AGENTS.md", "knowledge/"}, cfg.Includes,
 		"kb fallback must be exactly control-plane + AGENTS.md + knowledge/")
 
-	for _, teamOnly := range []string{"SOUL.md", "TEAM.md", "MEMORY.md", "memory/", "docs/", "agents/", "coworkers/", "discussions/", "agent-context/"} {
+	for _, teamOnly := range []string{"SOUL.md", "TEAM.md", "MEMORY.md", "memory/", "docs/", "agents/", "coworkers/", "discussions/", "agent-context/", "bulletin/general/posts/"} {
 		assert.NotContains(t, cfg.Includes, teamOnly,
 			"kb fallback must not inherit team-context path %q", teamOnly)
 	}
@@ -37,8 +38,43 @@ func TestFallbackConfigFor_TeamContext(t *testing.T) {
 	assert.Contains(t, cfg.Includes, "SOUL.md")
 	assert.Contains(t, cfg.Includes, "discussions/")
 	assert.Contains(t, cfg.Includes, "agents/", "team rules must survive manifest fallback")
+	assert.Contains(t, cfg.Includes, "bulletin/general/posts/",
+		"active bulletin posts must survive manifest fallback")
+	assert.NotContains(t, cfg.Includes, "bulletin/",
+		"the fallback must name the posts/ subtree, never the whole board (archive/ must not sync)")
 	assert.NotContains(t, cfg.Includes, "knowledge/",
 		"team-context fallback must not include the bubble knowledge/ tree")
+}
+
+// TestComputeSparseSet_TeamContextFallbackScopesBulletinToPosts pins the shape
+// of the bulletin entry once it has been turned into sparse-checkout patterns.
+//
+// The board holds two subtrees: posts/ (active, synced) and archive/ (expired,
+// never synced). A pattern that names "/bulletin/" would pull the archive down
+// onto every machine; a pattern that is not root-anchored would match a
+// same-named path nested anywhere. Both are one careless edit away.
+//
+// Failure prevented: expired posts silently reaching every AI coworker's
+// Team Context checkout because the fallback include widened to the board root.
+func TestComputeSparseSet_TeamContextFallbackScopesBulletinToPosts(t *testing.T) {
+	t.Parallel()
+	result := ComputeSparseSet(FallbackConfigFor(RepoKindTeamContext))
+
+	assert.Contains(t, result, "/bulletin/general/posts/",
+		"the posts subtree must be root-anchored in the sparse set")
+	for _, pattern := range result {
+		if !strings.HasPrefix(pattern, "/bulletin") {
+			continue
+		}
+		assert.Equal(t, "/bulletin/general/posts/", pattern,
+			"the only bulletin pattern must be the posts subtree; %q would sync the archive", pattern)
+	}
+
+	kb := ComputeSparseSet(FallbackConfigFor(RepoKindKB))
+	for _, pattern := range kb {
+		assert.False(t, strings.HasPrefix(pattern, "/bulletin"),
+			"a knowledge bubble has no bulletin board; got %q", pattern)
+	}
 }
 
 // A RepoKind with no case in fallbackIncludesFor must panic, not silently

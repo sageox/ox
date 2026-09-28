@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
@@ -16,17 +18,54 @@ import (
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/selfexec"
+	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
 
-// SyncResult represents the JSON output for sync operations.
+const syncResultSchemaVersion = 1
+
+var (
+	ensureDaemonForSync    = ensureDaemonRunning
+	syncLedgerForSync      = syncViaDaemon
+	syncTeamForSync        = syncTeamContext
+	syncAllTeamsForSync    = syncAllTeamContexts
+	convergeRepositorySync = runSyncConvergence
+)
+
+// SyncResult is the versioned JSON output for ordinary sync operations.
+// Transport and convergence are separate because a successful pull does not
+// mean Team Context artifacts reached the current repository.
 type SyncResult struct {
-	Success      bool                    `json:"success"`
-	Mode         string                  `json:"mode"` // "daemon" or "direct"
+	SchemaVersion int                   `json:"schema_version"`
+	Success       bool                  `json:"success"`
+	Mode          string                `json:"mode"` // "daemon" or "direct"
+	Transport     SyncTransportResult   `json:"transport"`
+	Convergence   SyncConvergenceResult `json:"convergence"`
+	Error         string                `json:"error,omitempty"`
+}
+
+type SyncTransportResult struct {
+	Status       string                  `json:"status"` // "synced" or "failed"
 	Ledger       *SyncLedgerResult       `json:"ledger,omitempty"`
 	TeamContexts []TeamContextSyncResult `json:"team_contexts,omitempty"`
 	Error        string                  `json:"error,omitempty"`
+}
+
+type SyncConvergenceResult struct {
+	Status       string                            `json:"status"` // "converged", "pending", "failed", or "skipped"
+	Repositories []RepositoryConvergenceSyncResult `json:"repositories,omitempty"`
+	Detail       string                            `json:"detail,omitempty"`
+}
+
+type RepositoryConvergenceSyncResult struct {
+	Repository string               `json:"repository,omitempty"`
+	TeamID     string               `json:"team_id"`
+	TeamName   string               `json:"team_name,omitempty"`
+	TeamPath   string               `json:"team_path"`
+	Status     string               `json:"status"` // "converged", "pending", "failed", or "skipped"
+	Report     *teamconverge.Report `json:"report,omitempty"`
+	Error      string               `json:"error,omitempty"`
 }
 
 // SyncLedgerResult represents sync result for the ledger.
@@ -51,16 +90,44 @@ type TeamContextSyncResult struct {
 
 var syncCmd = &cobra.Command{
 	Use:   "sync",
+	Args:  cobra.NoArgs,
 	Short: "Manually sync ledger/team contexts (rarely needed)",
-	Long: `Manually synchronize your ledger and team context repositories.
+	Long:  syncLong(),
+	RunE:  runSync,
+}
+
+// `ox sync --help` is assembled from two halves so the Add-on Catalog paragraph
+// between them can be gated. Splitting it is what makes the gate a compile-time
+// guarantee: a hand-spliced anchor string would silently stop matching the day
+// someone reworded the surrounding help.
+const syncLongHead = `Manually synchronize your Ledger and Team Context, then converge the
+current repository with applicable Team Context artifacts.
 
 NOTE: You should RARELY need this command. The background daemon automatically
-keeps your ledger and team contexts synchronized. This command exists only for:
+keeps transport and local convergence synchronized. This command exists only for:
   - Troubleshooting sync issues
   - Triggering an immediate sync (this command itself forces sync)
-  - Diagnostic purposes
+  - Diagnostic purposes`
 
-The daemon syncs automatically on:
+// syncAddonsHelp states the boundary between convergence and the Add-on Catalog:
+// sync delivers Add-on-managed content but never checks for new catalog releases.
+//
+// It is printed ONLY when the addons gate is on. Unconditionally, it would name an
+// Add-on Catalog this build cannot reach (#1028, #1029); the rule stays recorded in
+// ADR-032 either way.
+//
+// It names `ox addons update`, which is now safe to name: the same gate that
+// prints this paragraph registers that command (syncFeatureGatedCommands in
+// root.go), so the two cannot disagree. The pointer was deliberately absent
+// while the command was still follow-up work — help that sent a user to
+// "unknown command" in exactly the state the flag exists to make safe.
+// TestAddonsHelpNamesNoUnregisteredCommand enforces that pairing in both
+// directions.
+const syncAddonsHelp = `Convergence includes Add-on-managed and hand-authored Team Context content through
+the same delivery path. It does not check the Add-on Catalog for newer releases;
+use 'ox addons update' for catalog updates.`
+
+const syncLongTail = `The daemon syncs automatically on:
   - File changes in your project
   - Periodic intervals (configurable)
   - Session start/end events
@@ -69,7 +136,7 @@ Ordinary sync requires the daemon. Pull operations are handled by the daemon
 to ensure consistent sync behavior and proper locking.
 
 Examples:
-  ox sync              # sync all workspaces (rarely needed)
+  ox sync              # sync Ledger + Team Context, then converge this repo
   ox sync --team acme  # sync specific team context
   ox sync --all-teams  # sync all team contexts
 
@@ -78,8 +145,13 @@ Headless read-only mode runs a bounded ledger refresh without the daemon:
   ox sync --read-only --repo repo_<uuid> --check --json
 
 Read-only mode uses SAGEOX_TOKEN and SAGEOX_ENDPOINT, independent of the
-current project. See docs/specs/ledger-read-sync.md for the reader contract.`,
-	RunE: runSync,
+current project. See docs/specs/ledger-read-sync.md for the reader contract.`
+
+// syncLong assembles `ox sync --help`. The Add-on Catalog paragraph is
+// unconditional: `ox addons` is an ordinary command now, so naming it is
+// always correct.
+func syncLong() string {
+	return syncLongHead + "\n\n" + syncAddonsHelp + "\n\n" + syncLongTail
 }
 
 func init() {
@@ -100,6 +172,22 @@ func init() {
 	syncCmd.GroupID = "auth" // group with ledger and other auth-related commands
 }
 
+// collectTransportProblem folds one transport step's result into the running
+// problem list. An interactive interrupt must abort the whole command
+// immediately, so it is returned unmodified rather than collected; every
+// other error is appended to problems and swallowed here, so the remaining
+// transport steps still run.
+func collectTransportProblem(err error, problems *[]string) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, tea.ErrInterrupted) {
+		return err
+	}
+	*problems = append(*problems, err.Error())
+	return nil
+}
+
 func runSync(cmd *cobra.Command, args []string) error {
 	readOnly, _ := cmd.Flags().GetBool("read-only")
 	if readOnly || cmd.Flags().Changed("repo") || cmd.Flags().Changed("timeout") || cmd.Flags().Changed("check") {
@@ -116,82 +204,62 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return removeTeamContext(removeTeamID, jsonOutput)
 	}
 
-	// CLI delegates pull operations to daemon.
-	// This ensures consistent sync behavior and proper locking.
-	//
-	// Per IPC architecture philosophy (docs/specs/ipc-architecture.md):
-	// sync requires daemon for pull operations, but we auto-start the daemon
-	// rather than erroring - this improves UX while maintaining the architecture.
-	//
-	// Use IsHealthyQuick() to detect both "not running" AND "running but hung".
-	if err := daemon.IsHealthy(); err != nil {
-		if !jsonOutput {
-			fmt.Println("Starting daemon...")
-		}
-
-		// auto-start daemon in background
-		if err := autoStartDaemon(); err != nil {
-			if jsonOutput {
-				cli.PrintJSON(map[string]any{
-					"success": false,
-					"error":   fmt.Sprintf("failed to start daemon: %v", err),
-					"hint":    "Try starting manually with 'ox daemon start'",
-				})
-			} else {
-				cli.PrintError(fmt.Sprintf("Failed to start daemon: %v", err))
-				cli.PrintHint("Try starting manually with 'ox daemon start'")
-			}
-			return fmt.Errorf("failed to start daemon: %w", err)
-		}
-
-		// wait for daemon to be healthy (max 5 seconds)
-		ready := false
-		for i := 0; i < 50; i++ {
-			if daemon.IsHealthy() == nil {
-				ready = true
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		if !ready {
-			if jsonOutput {
-				cli.PrintJSON(map[string]any{
-					"success": false,
-					"error":   "daemon did not start in time",
-					"hint":    "Try starting manually with 'ox daemon start'",
-				})
-			} else {
-				cli.PrintError("Daemon did not start in time")
-				cli.PrintHint("Try starting manually with 'ox daemon start'")
-			}
-			return fmt.Errorf("daemon did not start in time")
-		}
-	}
-
 	result := SyncResult{
-		Mode: "daemon",
+		SchemaVersion: syncResultSchemaVersion,
+		Mode:          "daemon",
+		Transport:     SyncTransportResult{Status: "failed"},
+		Convergence:   SyncConvergenceResult{Status: "skipped"},
+	}
+	if err := ensureDaemonForSync(jsonOutput); err != nil {
+		result.Transport.Error = err.Error()
+		result.Convergence.Detail = "transport unavailable"
+		result.Error = err.Error()
+		return finishSync(cmd, result, jsonOutput, err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 90*time.Second)
 	defer cancel()
 
-	var syncErr error
+	var transportProblems []string
 
 	if teamID != "" {
-		// sync specific team context
-		syncErr = syncTeamContext(ctx, teamID, jsonOutput, &result)
+		if err := collectTransportProblem(syncTeamForSync(ctx, teamID, jsonOutput, &result), &transportProblems); err != nil {
+			return err
+		}
 	} else if allTeams {
-		// sync all team contexts
-		syncErr = syncAllTeamContexts(ctx, jsonOutput, &result)
+		if err := collectTransportProblem(syncAllTeamsForSync(ctx, jsonOutput, &result), &transportProblems); err != nil {
+			return err
+		}
 	} else {
-		// default: sync all workspaces via daemon
-		syncErr = syncViaDaemon(ctx, jsonOutput, &result)
+		// The default promise is the whole current-repository path: Ledger and
+		// Team Context transport, followed by local convergence.
+		if err := collectTransportProblem(syncLedgerForSync(ctx, jsonOutput, &result), &transportProblems); err != nil {
+			return err
+		}
+		if err := collectTransportProblem(syncAllTeamsForSync(ctx, jsonOutput, &result), &transportProblems); err != nil {
+			return err
+		}
 	}
 
-	result.Success = syncErr == nil
-	if syncErr != nil {
-		result.Error = syncErr.Error()
+	var transportErr error
+	if len(transportProblems) > 0 {
+		result.Transport.Status = "failed"
+		result.Transport.Error = strings.Join(transportProblems, "; ")
+		transportErr = errors.New(result.Transport.Error)
+	} else {
+		result.Transport.Status = "synced"
 	}
+
+	convergenceErr := convergeRepositorySync(ctx, teamID, &result)
+	problems := append([]string(nil), transportProblems...)
+	if convergenceErr != nil {
+		problems = append(problems, convergenceErr.Error())
+	}
+	result.Success = len(problems) == 0
+	if len(problems) > 0 {
+		result.Error = strings.Join(problems, "; ")
+	}
+	operationErr := errors.Join(transportErr, convergenceErr)
 
 	// surface daemon health issues (e.g. a wedged session conflict) beyond
 	// just `ox agent <id>` — same warnings, same severity thresholds, now
@@ -201,16 +269,74 @@ func runSync(cmd *cobra.Command, args []string) error {
 		emitDaemonIssueWarnings()
 	}
 
-	// output result
+	return finishSync(cmd, result, jsonOutput, operationErr)
+}
+
+func finishSync(cmd *cobra.Command, result SyncResult, jsonOutput bool, operationErr error) error {
 	if jsonOutput {
 		cli.PrintJSON(result)
-		if syncErr != nil {
+		if operationErr != nil {
 			return cli.ErrSilent
 		}
 		return nil
 	}
+	if err := writeSyncResultText(cmd.OutOrStdout(), result); err != nil && operationErr == nil {
+		return err
+	}
+	return operationErr
+}
 
-	return syncErr
+func writeSyncResultText(w io.Writer, result SyncResult) error {
+	if _, err := fmt.Fprintf(w, "Transport: %s\n", result.Transport.Status); err != nil {
+		return err
+	}
+	if result.Transport.Ledger != nil {
+		if _, err := fmt.Fprintf(w, "  Ledger: %s\n", result.Transport.Ledger.Status); err != nil {
+			return err
+		}
+	}
+	for _, team := range result.Transport.TeamContexts {
+		name := team.TeamName
+		if name == "" {
+			name = team.TeamID
+		}
+		if _, err := fmt.Fprintf(w, "  Team Context %s: %s\n", name, team.Status); err != nil {
+			return err
+		}
+	}
+	if result.Transport.Error != "" {
+		if _, err := fmt.Fprintf(w, "  Error: %s\n", result.Transport.Error); err != nil {
+			return err
+		}
+	}
+
+	if _, err := fmt.Fprintf(w, "Convergence: %s\n", result.Convergence.Status); err != nil {
+		return err
+	}
+	for _, repository := range result.Convergence.Repositories {
+		label := repository.Repository
+		if label == "" {
+			label = repository.TeamID
+		}
+		if _, err := fmt.Fprintf(w, "  %s: %s\n", label, repository.Status); err != nil {
+			return err
+		}
+		if repository.Report != nil {
+			if err := teamconverge.WriteText(w, *repository.Report); err != nil {
+				return err
+			}
+		}
+		if repository.Error != "" {
+			if _, err := fmt.Fprintf(w, "  Error: %s\n", repository.Error); err != nil {
+				return err
+			}
+		}
+	}
+	if result.Convergence.Detail != "" {
+		_, err := fmt.Fprintf(w, "  %s\n", result.Convergence.Detail)
+		return err
+	}
+	return nil
 }
 
 // syncViaDaemon triggers a sync via the daemon.
@@ -228,18 +354,16 @@ func syncViaDaemon(_ context.Context, jsonOutput bool, result *SyncResult) error
 		client := daemon.NewClientForCurrentRepoWithTimeout(30 * time.Second)
 		err = client.SyncWithProgress(nil)
 	}
+	if errors.Is(err, tea.ErrInterrupted) {
+		return err
+	}
 
 	if err != nil {
-		if !jsonOutput {
-			cli.PrintError(fmt.Sprintf("Sync failed: %v", err))
-		}
+		result.Transport.Ledger = &SyncLedgerResult{Status: "error", Error: err.Error()}
 		return fmt.Errorf("daemon sync: %w", err)
 	}
 
-	result.Ledger = &SyncLedgerResult{Status: "synced"}
-	if !jsonOutput {
-		cli.PrintSuccess("Synced via daemon")
-	}
+	result.Transport.Ledger = &SyncLedgerResult{Status: "synced"}
 	return nil
 }
 
@@ -248,19 +372,20 @@ func syncViaDaemon(_ context.Context, jsonOutput bool, result *SyncResult) error
 // teams at once and returns per-team results; we report the status of the
 // requested team specifically (not the bare success of the IPC round-trip).
 func syncTeamContext(_ context.Context, teamID string, jsonOutput bool, result *SyncResult) error {
-	var results []daemon.TeamSyncResult
-	run := func() error {
+	run := func() ([]daemon.TeamSyncResult, error) {
 		client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
-		var e error
-		results, e = client.TeamSyncWithProgress(nil)
-		return e
+		return client.TeamSyncWithProgress(nil)
 	}
 
+	var results []daemon.TeamSyncResult
 	var syncErr error
 	if !jsonOutput {
-		syncErr = cli.WithSpinnerNoResult(fmt.Sprintf("Syncing team %s via daemon...", teamID), run)
+		results, syncErr = cli.WithSpinner(fmt.Sprintf("Syncing team %s via daemon...", teamID), run)
 	} else {
-		syncErr = run()
+		results, syncErr = run()
+	}
+	if errors.Is(syncErr, tea.ErrInterrupted) {
+		return syncErr
 	}
 
 	tcResult := resolveTeamSyncResult(teamID, results, syncErr)
@@ -269,7 +394,7 @@ func syncTeamContext(_ context.Context, teamID string, jsonOutput bool, result *
 	if tcResult.Status == "unknown" {
 		tcResult.Error = legacyDaemonError().Error()
 	}
-	result.TeamContexts = append(result.TeamContexts, tcResult)
+	result.Transport.TeamContexts = append(result.Transport.TeamContexts, tcResult)
 
 	// The command succeeds only when the requested team context is locally
 	// usable: "synced" (pulled) or "skipped" (already up to date and present).
@@ -285,24 +410,12 @@ func syncTeamContext(_ context.Context, teamID string, jsonOutput bool, result *
 	// requested team's status, so it can't fail this targeted request.
 	switch tcResult.Status {
 	case "synced":
-		if !jsonOutput {
-			cli.PrintSuccess(fmt.Sprintf("Team %s synced via daemon", teamID))
-		}
 		return nil
 	case "skipped":
-		if !jsonOutput {
-			cli.PrintSuccess(fmt.Sprintf("Team %s already up to date", teamID))
-		}
 		return nil
 	case "cloning":
-		if !jsonOutput {
-			cli.PrintError(fmt.Sprintf("Team %s clone in progress (not yet available); re-run shortly", teamID))
-		}
 		return fmt.Errorf("team %s clone in progress (not yet available)", teamID)
 	default: // error, not_found, ambiguous, unknown
-		if !jsonOutput {
-			cli.PrintError(fmt.Sprintf("Team sync failed: %v", tcResult.Error))
-		}
 		return errors.New(tcResult.Error)
 	}
 }
@@ -423,23 +536,24 @@ func legacyDaemonErrorMsg(daemonVersion string) error {
 // CLI delegates pull operations to daemon and reports the per-team results
 // returned by the daemon in the JSON output.
 func syncAllTeamContexts(_ context.Context, jsonOutput bool, result *SyncResult) error {
-	var results []daemon.TeamSyncResult
-	run := func() error {
+	run := func() ([]daemon.TeamSyncResult, error) {
 		client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
-		var e error
-		results, e = client.TeamSyncWithProgress(nil)
-		return e
+		return client.TeamSyncWithProgress(nil)
 	}
 
+	var results []daemon.TeamSyncResult
 	var err error
 	if !jsonOutput {
-		err = cli.WithSpinnerNoResult("Syncing team contexts via daemon...", run)
+		results, err = cli.WithSpinner("Syncing team contexts via daemon...", run)
 	} else {
-		err = run()
+		results, err = run()
+	}
+	if errors.Is(err, tea.ErrInterrupted) {
+		return err
 	}
 
 	for _, r := range results {
-		result.TeamContexts = append(result.TeamContexts, TeamContextSyncResult{
+		result.Transport.TeamContexts = append(result.Transport.TeamContexts, TeamContextSyncResult{
 			TeamID:   r.TeamID,
 			TeamName: r.TeamName,
 			TeamSlug: r.TeamSlug,
@@ -454,9 +568,6 @@ func syncAllTeamContexts(_ context.Context, jsonOutput bool, result *SyncResult)
 	// config) and aggregated per-team failures, regardless of whether the daemon
 	// also sent (possibly empty) per-team data.
 	if err != nil {
-		if !jsonOutput {
-			cli.PrintError(fmt.Sprintf("Team sync failed: %v", err))
-		}
 		return err
 	}
 
@@ -466,9 +577,6 @@ func syncAllTeamContexts(_ context.Context, jsonOutput bool, result *SyncResult)
 	// with zero teams sends `[]`, which is non-nil and falls through to success.)
 	if results == nil {
 		retErr := legacyDaemonError()
-		if !jsonOutput {
-			cli.PrintError(fmt.Sprintf("Team sync failed: %v", retErr))
-		}
 		return retErr
 	}
 
@@ -478,14 +586,7 @@ func syncAllTeamContexts(_ context.Context, jsonOutput bool, result *SyncResult)
 	// — otherwise downstream commands could proceed against missing/stale context.
 	if notReady := notReadyTeams(results); len(notReady) > 0 {
 		msg := fmt.Sprintf("team context(s) not ready: %s", strings.Join(notReady, ", "))
-		if !jsonOutput {
-			cli.PrintError(msg)
-		}
 		return errors.New(msg)
-	}
-
-	if !jsonOutput {
-		cli.PrintSuccess("Team contexts synced via daemon")
 	}
 
 	return nil

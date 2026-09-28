@@ -1,11 +1,13 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/fileutil"
@@ -109,6 +111,10 @@ func newRawWriterFromFile(f *os.File, projectRoot string) *RawWriter {
 // upload, summarize), they all see the redacted form. To keep an
 // un-redacted copy, copy before WriteEntry.
 func (w *RawWriter) WriteEntry(entry *SessionEntry) error {
+	return w.withAppendLock(func() error { return w.writeEntry(entry) })
+}
+
+func (w *RawWriter) writeEntry(entry *SessionEntry) error {
 	if w == nil {
 		return fmt.Errorf("raw writer: nil")
 	}
@@ -190,6 +196,10 @@ func (w *RawWriter) WriteEntries(entries []SessionEntry) error {
 // with the wire-format JSON). Same three-layer redaction; recursive
 // RedactMap handles the nested-string-values case.
 func (w *RawWriter) WriteRaw(data map[string]any) error {
+	return w.withAppendLock(func() error { return w.writeRaw(data) })
+}
+
+func (w *RawWriter) writeRaw(data map[string]any) error {
 	if w == nil {
 		return fmt.Errorf("raw writer: nil")
 	}
@@ -383,6 +393,13 @@ func (w *RawWriter) FinishAppend() error { return os.Remove(w.file.Name() + ".ap
 // after raw fsync; if its atomic replacement survived, its batch must survive too.
 // Call under the capture lock before reading, stopping, or reopening the writer.
 func RecoverRawAppend(path string, persistedOffset int64) error {
+	// Under the append lock as well: a rollback truncates, and a carrier stamp
+	// (StampRawCarrier) holds only that lock. Without it the truncate could
+	// take a footer appended after the journal was written.
+	return withRawAppendLock(path, func() error { return recoverRawAppend(path, persistedOffset) })
+}
+
+func recoverRawAppend(path string, persistedOffset int64) error {
 	checkpointPath := path + ".append.json"
 	data, err := os.ReadFile(checkpointPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -442,7 +459,17 @@ func RecoverRawAppend(path string, persistedOffset int64) error {
 
 // AppendRecordingBatch requires the raw capture lock; the nested state lock
 // keeps a pause/resume from crossing the batch's sequence/cursor boundary.
+//
+// The whole journal sequence -- begin, entries, seal, cursor commit, finish --
+// runs under one hold of the append lock, so a carrier stamp cannot land
+// between the sizes the journal records and the size recovery later checks.
+// Entries go through writeEntry: the lock is not re-entrant, and it is
+// already held. Lock order everywhere is raw capture -> append -> state.
 func (w *RawWriter) AppendRecordingBatch(statePath string, entries []Entry, newOffset int64) error {
+	return w.withAppendLock(func() error { return w.appendRecordingBatch(statePath, entries, newOffset) })
+}
+
+func (w *RawWriter) appendRecordingBatch(statePath string, entries []Entry, newOffset int64) error {
 	err := MutateRecordingStateFile(statePath, func(state *RecordingState) error {
 		if newOffset <= state.SourceOffset {
 			return fmt.Errorf("capture cursor did not advance")
@@ -454,7 +481,7 @@ func (w *RawWriter) AppendRecordingBatch(statePath string, entries []Entry, newO
 			return err
 		}
 		for i := range entries {
-			if err := w.WriteEntry(&entries[i]); err != nil {
+			if err := w.writeEntry(&entries[i]); err != nil {
 				return err
 			}
 		}
@@ -471,4 +498,28 @@ func (w *RawWriter) AppendRecordingBatch(statePath string, entries []Entry, newO
 		return err
 	}
 	return w.FinishAppend()
+}
+
+// withRawAppendLock serializes individual appends with checkpoint rollback.
+// This is separate from the watcher's lifetime raw-file lock: hooks must be
+// able to append a footer while the watcher is alive. Lock files use the
+// existing fileutil temporary lock directory, never the session directory.
+func withRawAppendLock(path string, fn func() error) error {
+	// Resolve aliases before fileutil makes the key absolute and hashes it.
+	// Keep the original path on failure so the writer reports its I/O error.
+	if canonical, err := filepath.EvalSymlinks(path); err == nil {
+		path = canonical
+	}
+	return fileutil.WithFileLock(context.Background(), path+".append", fn)
+}
+
+func (w *RawWriter) withAppendLock(fn func() error) error {
+	if w == nil {
+		return fmt.Errorf("raw writer: nil")
+	}
+	// A stream writer (NewRawStreamWriter) has no shared file to serialize on.
+	if w.file == nil {
+		return fn()
+	}
+	return withRawAppendLock(w.file.Name(), fn)
 }

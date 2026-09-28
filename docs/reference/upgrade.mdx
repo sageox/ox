@@ -1,16 +1,30 @@
 ---
 title: "ox upgrade"
 description: "CLI reference for ox upgrade"
-sidebar_position: 102
+sidebar_position: 110
 ---
 
 ## ox upgrade
 
-Upgrade ox to the latest version
+Upgrade ox to the latest or a specific version
 
 ### Synopsis
 
 Detect how ox was installed and upgrade using the appropriate method: Homebrew, go install, or an in-place download that verifies and replaces the binary.
+
+Targets must be release versions such as v0.18.0. Go installations require the
+v prefix and do not accept build metadata other than +incompatible.
+For Go and direct binary installations, --target installs the specified release
+without checking the latest release. It can reinstall the current version or
+select an older release. Homebrew and source installations do not support --target.
+
+When ox is on PATH, the upgrade succeeds only if that ox then reports the new
+version. An installer can finish without changing it: Homebrew does when its
+tap does not have the release yet, and an ox earlier on PATH hides one
+upgraded elsewhere.
+
+Failed update checks and installations exit with status 1. With --json,
+stdout contains only the result; installer logs are written to stderr.
 
 ```
 ox upgrade [flags]
@@ -28,6 +42,7 @@ ox upgrade [flags]
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)

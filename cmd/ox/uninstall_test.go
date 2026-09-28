@@ -8,11 +8,12 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestUninstall_NotInstalled tests uninstall when SageOx is not installed
+// A failed uninstall must report diagnostics on stderr without polluting stdout.
 func TestUninstall_NotInstalled(t *testing.T) {
 	gitRoot, cleanup := setupTempGitRepo(t)
 	defer cleanup()
@@ -25,9 +26,29 @@ func TestUninstall_NotInstalled(t *testing.T) {
 	_, err := os.Stat(sageoxDir)
 	assert.True(t, os.IsNotExist(err), "expected .sageox to not exist")
 
-	// runUninstall should fail because SageOx is not installed
-	// we can't call runUninstall directly because it uses global flags
-	// instead we verify the expected behavior through the uninstall package
+	for _, tt := range []struct {
+		name string
+		json bool
+	}{
+		{name: "text"},
+		{name: "json", json: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cli.SetJSONMode(tt.json)
+			t.Cleanup(func() { cli.SetJSONMode(false) })
+			var runErr error
+			var stderr string
+			stdout := captureRealStdout(t, func() {
+				stderr = captureStderr(t, func() { runErr = runUninstall() })
+			})
+			require.ErrorContains(t, runErr, "sageox not installed")
+			assert.Empty(t, stdout, "diagnostics must not become command output")
+			assert.Contains(t, stderr, "SageOx is not installed in this repository")
+			if tt.json {
+				assert.Contains(t, stderr, `"status": "error"`)
+			}
+		})
+	}
 }
 
 // TestShowPreview_NoSageoxDir tests showPreview when .sageox doesn't exist

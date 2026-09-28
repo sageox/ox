@@ -383,12 +383,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 
 // emitImportJSON writes an importResult as indented JSON to stdout.
 func emitImportJSON(cmd *cobra.Command, result importResult) error {
-	out, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal import result: %w", err)
-	}
-	_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(out))
-	return nil
+	return cli.PrintJSONTo(cmd.OutOrStdout(), result)
 }
 
 // resolveImportTitle returns the explicit --title when set, otherwise the
@@ -794,9 +789,7 @@ func runImportURL(cmd *cobra.Command, url string, jsonOutput bool) error {
 	}
 
 	if jsonOutput {
-		out, _ := json.MarshalIndent(resp, "", "  ")
-		fmt.Fprintln(cmd.OutOrStdout(), string(out))
-		return nil
+		return cli.PrintJSONTo(cmd.OutOrStdout(), resp)
 	}
 
 	cli.PrintSuccess("Import started")
@@ -830,10 +823,17 @@ func runImportStatus(cmd *cobra.Command, jsonOutput bool) error {
 		if resp == nil {
 			// row not yet created — show as "starting"
 			if jsonOutput {
+				starting := struct {
+					ID     string `json:"id"`
+					Status string `json:"status"`
+				}{ID: recordingID, Status: "starting"}
 				if importFlags.watch {
-					fmt.Fprintf(cmd.OutOrStdout(), "{\"id\":%q,\"status\":\"starting\"}\n", recordingID)
+					// JSONL: one compact JSON object per line for streaming
+					out, _ := json.Marshal(starting)
+					out = append(out, '\n')
+					_ = cli.WriteJSONBytes(cmd.OutOrStdout(), out)
 				} else {
-					fmt.Fprintf(cmd.OutOrStdout(), "{\n  \"id\": %q,\n  \"status\": \"starting\"\n}\n", recordingID)
+					_ = cli.PrintJSONTo(cmd.OutOrStdout(), starting)
 				}
 			} else {
 				fmt.Fprintf(cmd.OutOrStdout(), "Recording: %s\nStatus:    starting\n", recordingID)
@@ -849,10 +849,10 @@ func runImportStatus(cmd *cobra.Command, jsonOutput bool) error {
 			if importFlags.watch {
 				// JSONL: one compact JSON object per line for streaming
 				out, _ := json.Marshal(resp)
-				fmt.Fprintln(cmd.OutOrStdout(), string(out))
+				out = append(out, '\n')
+				_ = cli.WriteJSONBytes(cmd.OutOrStdout(), out)
 			} else {
-				out, _ := json.MarshalIndent(resp, "", "  ")
-				fmt.Fprintln(cmd.OutOrStdout(), string(out))
+				_ = cli.PrintJSONTo(cmd.OutOrStdout(), resp)
 			}
 		} else {
 			printVideoStatus(cmd, resp)
@@ -915,9 +915,7 @@ func runImportList(cmd *cobra.Command, jsonOutput bool) error {
 	}
 
 	if jsonOutput {
-		out, _ := json.MarshalIndent(resp, "", "  ")
-		fmt.Fprintln(cmd.OutOrStdout(), string(out))
-		return nil
+		return cli.PrintJSONTo(cmd.OutOrStdout(), resp)
 	}
 
 	if len(resp.Recordings) == 0 {

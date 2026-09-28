@@ -224,7 +224,7 @@ Full detail: [Privacy Policy](https://sageox.ai/privacy) ·
 | Query past sessions, discussions, and code — across agents and machines | ✅ | `ox query "..."` | [query](docs/reference/query.mdx) |
 | Auto-recorded coworker sessions | ✅ | `ox agent prime`, `ox session list` | [session capture](docs/architecture/session-capture-architecture.md) |
 | Real-time coordination signals between coworkers | ✅ | `ox murmur "..."` | — |
-| Team-context-enriched implementation plans | ✅ | `ox plan enrich`, `ox plan render` | [plan](docs/reference/plan) |
+| Team-context-enriched plans (design, GTM, rollout, engineering) | ✅ | `ox plan enrich`, `ox plan render` | [plan](docs/reference/plan) |
 | Planning-relevant code insights (hotspots, contention) | ✅ | `ox code insights` | — |
 | Load an expert AI coworker into context | ✅ | `ox coworker load <name>` | — |
 | Diagnose and auto-fix your setup | ✅ | `ox doctor --fix` | [doctor](docs/reference/doctor.mdx) |

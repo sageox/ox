@@ -31,7 +31,9 @@ func TestMockDaemon_Basic(t *testing.T) {
 			LedgerPath: "/test/ledger",
 		}
 
-		client := daemon.NewClientForCurrentRepo()
+		// This checks response contents, not the production 50ms latency budget.
+		// Race/coverage instrumentation and CI scheduling need more headroom.
+		client := daemon.NewClientForCurrentRepoWithTimeout(time.Second)
 		status, err := client.Status()
 		require.NoError(t, err)
 		assert.True(t, status.Running)

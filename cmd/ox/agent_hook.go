@@ -270,6 +270,7 @@ func emitStartupBanner(w io.Writer, ctx *HookContext) {
 // (covering agents without hooks), and we call it again here as a safety net.
 // startSessionRecording is idempotent (checks session.IsRecording first).
 func handleStart(ctx *HookContext) error {
+	startTraceReceiverForHook(ctx)
 	emitStartupBanner(os.Stdout, ctx)
 
 	source := ""
@@ -341,10 +342,16 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 	// set StoppedAt to signal this session is complete
 	now := time.Now()
 	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+		s.RecordTraceBoundary("stop", now)
 		s.StoppedAt = &now
+		state = s
 	}); updateErr != nil {
 		slog.Debug("hook: clear could not set StoppedAt", "agent_id", agentID, "error", updateErr)
 	}
+
+	// the daemon finalizes this recording after the state file below is
+	// gone; hand it the native session ids and the stop time on a footer
+	_ = stampRecordingCarrierAtStop(state, now)
 
 	// fire-and-forget IPC to daemon to finalize the stopped session
 	if state.SessionPath != "" {
@@ -414,10 +421,16 @@ func handleEnd(ctx *HookContext) error {
 
 	now := time.Now()
 	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+		s.RecordTraceBoundary("stop", now)
 		s.StoppedAt = &now
+		state = s
 	}); updateErr != nil {
 		slog.Debug("hook: end could not set StoppedAt", "agent_id", agentID, "error", updateErr)
 	}
+
+	// the daemon finalizes this recording after the state file below is
+	// gone; hand it the native session ids and the stop time on a footer
+	_ = stampRecordingCarrierAtStop(state, now)
 
 	// dispatch delegated finalization via daemon IPC. Best-effort: if the
 	// daemon is unreachable, the daemon's anti-entropy sweep will still
@@ -976,9 +989,19 @@ func startSessionRecordingIfConfigured(ctx *HookContext) {
 		agentID = ctx.Marker.AgentID
 		agentSessionID = ctx.Marker.AgentSessionID
 	}
-	if ctx.Input != nil && ctx.Input.SessionID != "" {
-		agentSessionID = ctx.Input.SessionID
+	source := ""
+	if ctx.Input != nil {
+		if ctx.Input.SessionID != "" {
+			agentSessionID = ctx.Input.SessionID
+		}
+		source = ctx.Input.Source
 	}
 
 	startSessionRecording(ctx.ProjectRoot, agentID, ctx.AgentType, "", recordingSessionIDFromMarker(ctx.Marker), agentSessionID)
+
+	// every SessionStart — startup, resume, clear, compact — reports the
+	// agent's current native session id; append it (with its reason) to the
+	// live recording so a recording that outlives a /clear lists every id it
+	// spanned, and a repeat sighting (compact) advances last_seen.
+	recordNativeSessionForRecording(ctx.ProjectRoot, agentID, agentSessionID, source)
 }

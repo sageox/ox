@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/search"
 	"github.com/sageox/ox/internal/config"
@@ -262,7 +263,7 @@ func writeQueryResponse(combined *combinedQueryResponse, qa *queryArgs) (int, er
 	}
 
 	outputBytes := buf.Len()
-	_, err := buf.WriteTo(os.Stdout)
+	err := cli.WriteJSONBytes(os.Stdout, buf.Bytes())
 	return outputBytes, err
 }
 

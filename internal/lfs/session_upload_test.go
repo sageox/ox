@@ -301,6 +301,52 @@ func TestUploadSessionFiles_UploadFailure(t *testing.T) {
 	}
 }
 
+// Failure prevented: a session file that is a pointer this client cannot parse
+// — here one naming an object above its size limit — slips past the pointer
+// check, is read as the file's content, and is uploaded, so the pointer
+// committed for it resolves to a pointer instead of the session. An empty file
+// took this path until ParsePointer accepted size 0 (#934), which is how the
+// object ox #1000 found got into a ledger.
+func TestUploadSessionFiles_NeverUploadsAPointerItCannotParse(t *testing.T) {
+	t.Setenv("OX_LFS_MAX_OBJECT_SIZE", "")
+	sessionDir := t.TempDir()
+	pointer := FormatPointer("sha256:"+ComputeOID([]byte("a very large transcript")), DefaultMaxObjectSize+1)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(pointer), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.md"), []byte("# Summary\n"), 0644))
+	require.False(t, IsPointerFile(filepath.Join(sessionDir, "raw.jsonl")), "the pointer check must miss this file for the test to mean anything")
+
+	var mu sync.Mutex
+	put := map[string]bool{}
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/info/lfs/objects/batch" {
+			var req struct {
+				Objects []BatchObject `json:"objects"`
+			}
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			resp := BatchResponse{Transfer: "basic"}
+			for _, obj := range req.Objects {
+				resp.Objects = append(resp.Objects, BatchResponseObject{OID: obj.OID, Size: obj.Size,
+					Actions: &Actions{Upload: &Action{Href: serverURL + "/upload/" + obj.OID}}})
+			}
+			w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
+			require.NoError(t, json.NewEncoder(w).Encode(resp))
+			return
+		}
+		mu.Lock()
+		put[filepath.Base(r.URL.Path)] = true
+		mu.Unlock()
+	}))
+	defer server.Close()
+	serverURL = server.URL
+
+	_, err := UploadSessionFiles(NewClient(server.URL, "testuser", "testtoken"), sessionDir, nil)
+	require.ErrorIs(t, err, ErrPointerContent)
+	mu.Lock()
+	defer mu.Unlock()
+	require.False(t, put[ComputeOID([]byte(pointer))], "the pointer must never be stored as the transcript")
+}
+
 func TestUploadSessionFiles_PartialFailure(t *testing.T) {
 	// two files: raw.jsonl upload succeeds, summary.md upload fails with 500
 	sessionDir := t.TempDir()

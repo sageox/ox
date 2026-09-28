@@ -1,16 +1,16 @@
 ---
 title: "ox plan enrich"
 description: "CLI reference for ox plan enrich"
-sidebar_position: 62
+sidebar_position: 67
 ---
 
 ## ox plan enrich
 
-Enrich an implementation plan with SageOx team context (JSON by default)
+Enrich a plan with SageOx team context (JSON by default)
 
 ### Synopsis
 
-Enrich an agent-generated implementation plan with deterministic SageOx
+Enrich an agent-generated plan with deterministic SageOx
 signals (collision, prior-art, expert-routing) and a context bundle the agent
 can reason over. ox computes badges locally — no LLM or network call.
 
@@ -41,6 +41,7 @@ ox plan enrich [flags]
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
@@ -50,4 +51,4 @@ ox plan enrich [flags]
 
 ### SEE ALSO
 
-* [ox plan](/plan)	 - Work with implementation plans (enrich, render, review)
+* [ox plan](/plan)	 - Work with plans (enrich, render, review)

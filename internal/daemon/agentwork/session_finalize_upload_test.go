@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/stretchr/testify/require"
 )
 
 // rawContent is a minimal valid session with substantive entries.
@@ -313,6 +314,7 @@ func TestProcessResult_UploadOnly_CommitsToGit(t *testing.T) {
 	handler.skipLFS = true
 	handler.skipGit = false
 	handler.ledgerMu = &sync.Mutex{}
+	enableLocalFinalizeLFS(t, handler, clonePath)
 
 	item := &WorkItem{
 		ID:   "test-upload-only-git",
@@ -372,6 +374,7 @@ func TestProcessResult_RegularFinalize_StagesToLedger(t *testing.T) {
 	handler.skipLFS = true
 	handler.skipGit = false
 	handler.ledgerMu = &sync.Mutex{}
+	enableLocalFinalizeLFS(t, handler, clonePath)
 
 	llmOutput := `{"title":"Test Session","summary":"A test session.","quality_score":0.8,"score_reason":"fine","outcome":"success","key_actions":["did something"]}`
 
@@ -438,6 +441,7 @@ func TestProcessResult_RegularFinalize_CachePreservedOnPushFail(t *testing.T) {
 	handler.skipLFS = true
 	handler.skipGit = false
 	handler.ledgerMu = &sync.Mutex{}
+	enableLocalFinalizeLFS(t, handler, clonePath)
 
 	llmOutput := `{"title":"Test","summary":"A test.","quality_score":0.8,"score_reason":"fine","outcome":"success","key_actions":["did something"]}`
 	item := &WorkItem{
@@ -498,6 +502,7 @@ func TestProcessResult_UploadOnly_CachePreservedOnPushFail(t *testing.T) {
 	handler.skipLFS = true
 	handler.skipGit = false
 	handler.ledgerMu = &sync.Mutex{}
+	enableLocalFinalizeLFS(t, handler, clonePath)
 
 	item := &WorkItem{
 		ID:   "test-upload-push-fail",
@@ -754,7 +759,7 @@ func TestGitCommitAndPush_CommitsStagedBytesNotWorktree(t *testing.T) {
 		SessionDir: sessionDir,
 		RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
 		LedgerPath: ledgerPath,
-	}, nil)
+	}, map[string]lfs.FileRef{"raw.jsonl": lfs.NewFileRef([]byte(testRawContent))})
 	if !pushed {
 		t.Fatal("a clean staged session must commit and push")
 	}
@@ -767,4 +772,22 @@ func TestGitCommitAndPush_CommitsStagedBytesNotWorktree(t *testing.T) {
 	if subject != "finalize session "+sessionName {
 		t.Fatalf("unexpected commit subject: %q", subject)
 	}
+}
+
+// A failed/skipped LFS upload must leave the recording recoverable locally;
+// the daemon must never publish real raw bytes as a fallback git artifact.
+func TestGitCommitAndPush_RefusesUnuploadedArtifacts(t *testing.T) {
+	_, ledgerPath := setupBareAndCloneLedger(t)
+	sessionDir := filepath.Join(ledgerPath, "sessions", "unuploaded")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "meta.json"), []byte(`{"title":"Pending upload"}`), 0o644))
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	require.NoError(t, os.WriteFile(rawPath, []byte(testRawContent), 0o644))
+	before := gitOutput(t, ledgerPath, "rev-parse", "HEAD")
+	handler := newGitBackedHandler()
+	require.False(t, handler.gitCommitAndPush(&SessionFinalizePayload{SessionDir: sessionDir, RawPath: rawPath, LedgerPath: ledgerPath}, nil))
+	require.Equal(t, before, gitOutput(t, ledgerPath, "rev-parse", "HEAD"))
+	content, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	require.Equal(t, testRawContent, string(content))
 }

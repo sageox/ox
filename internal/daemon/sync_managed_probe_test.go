@@ -484,6 +484,61 @@ func TestSkipProvesIndexReadable(t *testing.T) {
 	}
 }
 
+// Each skip retires exactly what its own checks disproved. The negative cells
+// matter most: "recently fetched" never compared HEAD with the remote, so a
+// divergence and the error log must survive it, and the lock and rebase skips
+// return before reading the index at all. No skip may touch another repo.
+func TestClearDisprovedBySkip(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		reason      string
+		indexClean  bool // the index-state issues retire
+		atRemoteTip bool // the divergence issues and the ledger's errors retire
+	}{
+		{skipReasonRemoteUnchanged, true, true},
+		{skipReasonRecentlyFetched, true, false},
+		{skipReasonUnconfirmedConflict, true, false},
+		{skipReasonUnconfirmedIndex, false, false},
+		{skipReasonRebaseInProgress, false, false},
+		{skipReasonLockFilesPresent, false, false},
+		{skipReasonRepoLockBusy, false, false},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			t.Parallel()
+			retires := map[string]bool{
+				IssueTypeRepoIntegrity:        tc.indexClean,
+				IssueTypeMergeConflict:        tc.indexClean,
+				IssueTypeRebaseStuck:          tc.indexClean,
+				IssueTypeDiverged:             tc.atRemoteTip,
+				IssueTypeSessionConflictWedge: tc.atRemoteTip,
+			}
+			s := &SyncScheduler{maxRecentErrs: 10, issues: NewIssueTracker()}
+			for typ := range retires {
+				s.issues.SetIssue(DaemonIssue{Type: typ, Severity: SeverityError, Repo: "ledger"})
+				s.issues.SetIssue(DaemonIssue{Type: typ, Severity: SeverityError, Repo: "team_other"})
+			}
+			s.recordError("team_other", "clone team-context failed")
+			s.recordError("ledger", "pull failed")
+
+			s.clearDisprovedBySkip("ledger", tc.reason)
+
+			for typ, retired := range retires {
+				_, still := s.issues.GetIssue(typ, "ledger")
+				assert.Equal(t, !retired, still, typ)
+				_, other := s.issues.GetIssue(typ, "team_other")
+				assert.True(t, other, "another repo's %s must survive", typ)
+			}
+			wantLast, wantCount := "pull failed", 2
+			if tc.atRemoteTip {
+				wantLast, wantCount = "clone team-context failed", 1
+			}
+			lastErr, _ := s.LastError()
+			assert.Equal(t, wantLast, lastErr, "only the ledger's own error may retire")
+			assert.Equal(t, wantCount, s.RecentErrorCount())
+		})
+	}
+}
+
 // --- F. The confirmation's own budget (PR #974 review) ---
 //
 // The confirmation ignores cancellation on purpose, but ignoring it for the

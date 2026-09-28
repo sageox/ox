@@ -2,6 +2,63 @@
 
 Unified design language for ox terminal output.
 
+## Output Streams
+
+`cli.PrintError` and `cli.PrintWarning` write diagnostics to stderr in both text
+and JSON modes. JSON diagnostics keep the `status` and `message` fields. This
+keeps stdout available for the command result, so a warning cannot turn a JSON
+document into multiple concatenated objects.
+
+`cli.PrintJSON` writes the command result to stdout, syntax-colored when a
+human is reading it at a terminal and byte-exact plain JSON whenever the output
+is piped, redirected, or captured by an AI coworker. It is the only JSON
+printer; see `.claude/rules/json-output.md`. Writer-aware helpers such as
+`PrintWarningTo` honor their supplied writer. Command-specific JSON response
+envelopes remain part of the command's stdout contract.
+
+## Spinner Cancellation
+
+`cli.WithSpinner` returns `tea.ErrInterrupted` when dismissed before the operation
+finishes. Callers must preserve that error instead of retrying the operation or
+downgrading it to a warning. The command runner prints `Interrupted.` to stderr
+and exits with status 130, without attempting command correction.
+
+Cancellation stops waiting for a result; it does not roll back work or cancel a
+job already submitted to the daemon. Return results through the spinner callback
+instead of mutating caller-owned variables that could be read after interruption.
+
+## Prompts and Automation
+
+`--no-input` disables prompts, spinners, and terminal editors. Required choices
+must come from arguments or flags; missing choices fail with guidance. The shared
+`cli.ConfirmYesNo` helper declines optional confirmations unless `--yes` was
+supplied. Commands retain their existing unattended behavior and defaults, such
+as sending an invitation when its team and recipients are provided.
+
+Where supported, `--yes` authorizes yes/no confirmations. Commands such as
+`ox uninstall` and `ox coworker remove` still require their own `--force` flag.
+`--yes` does not choose an endpoint or grant first-use endpoint trust. `ox session redact`
+requires interactive decisions; use `ox session audit` for an unattended scan.
+
+`--no-interactive` only disables spinners and terminal UI; numbered and text
+prompts still accept piped answers. Preserve that behavior for existing scripts.
+`--no-input` also leaves explicit stdin data and protocol input available, such
+as session imports and Git credential requests.
+
+```sh
+ox logout --all --yes --no-input
+ox uninstall --local-only --force --no-input
+ox config --no-input
+```
+
+## Argument Validation
+
+Flag-only commands that change state (`init`, `login`, `logout`, `uninstall`,
+`sync`, `upgrade`, and `doctor`) use `cobra.NoArgs` to reject unused positional
+arguments before their handlers run. A stray path must not silently select the
+current repository, and `--force false` must not proceed with force enabled.
+Use `--force=false` to explicitly disable a boolean flag.
+
 ## Color Palette
 
 Colors are sourced from `sageox-design` and generated into `internal/theme/generated.go`.
@@ -142,6 +199,9 @@ Only show flags in help where they apply.
 | `--quiet`, `-q` | Suppress non-error output |
 | `--json` | Output in JSON format |
 | `--config`, `-c` | Config file path |
+| `--no-input` | Disable prompts and terminal UI; require explicit input |
+| `--no-interactive` | Disable spinners and terminal UI; allow piped answers |
+| `--yes` | Authorize yes/no confirmations |
 
 ### Command-Specific Flags
 

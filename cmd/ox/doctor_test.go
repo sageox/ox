@@ -30,7 +30,9 @@ func getCachedDoctorChecks(t *testing.T) []checkCategory {
 	}
 	cachedCategoriesOnce.Do(func() {
 		cachedDoctorState = detectDoctorState()
-		cachedCategories = runDoctorChecksWithState(context.Background(), doctorOptions{fix: false}, cachedDoctorState)
+		var err error
+		cachedCategories, err = runDoctorChecksWithState(context.Background(), doctorOptions{fix: false}, cachedDoctorState)
+		require.NoError(t, err)
 	})
 	return cachedCategories
 }

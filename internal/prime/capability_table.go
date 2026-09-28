@@ -171,21 +171,29 @@ func OxCapabilities() []Capability {
 }
 
 // additiveSkills names on-disk skills that are intentionally OUTSIDE the
-// conformance table in OxCapabilities(). They are additive Layer-2 ergonomics:
-// a Claude-only skill whose deterministic floor is already carried by a separate
-// floor-class entry, so the skill itself is not a conformance surface (its
-// absence on Codex/Droid is the documented additive case, not a regression).
+// conformance table in OxCapabilities(). Most are additive Layer-2 ergonomics:
+// a skill whose deterministic floor is already carried by a separate floor-class
+// entry. The allowlist also holds explicitly opt-in catalog skills, whose absence
+// from an adapter is a project choice rather than a conformance regression.
 //
-// Keeping the allowlist explicit closes the disk→table direction of the
-// conformance contract: TestEveryOnDiskSurfaceIsAccounted walks the commands and
-// skills directories and fails if any on-disk surface is neither an
-// OxCapabilities() row NOR listed here — so a future un-accounted skill/command
-// can never silently escape the contract.
+// Keeping the allowlist explicit closes BOTH directions of the conformance
+// contract:
+//
+//   - disk→table: TestEveryOnDiskSurfaceIsAccounted walks the commands and
+//     skills directories and fails if any on-disk surface is neither an
+//     OxCapabilities() row NOR listed here, so a future un-accounted
+//     skill/command can never silently escape the contract.
+//   - table→disk: TestAdditiveSkillsAllExistOnDisk fails on an entry naming a
+//     skill that is no longer there. That direction was open until `post-cutoff`
+//     moved to extensions/addons/ (ADR-032 D6) and left an allowlist entry
+//     excusing a surface that had ceased to exist — an allowlist nobody checks
+//     back is how a dead exemption outlives the thing it exempted.
 //
 // The map value documents WHY each skill is additive rather than a table row.
 var additiveSkills = map[string]string{
 	"ox-cli-consult":       "additive Layer-2 ergonomics; its deterministic floor is the consult-first floor entry (ConsultRoutes), so it is not a separate conformance surface",
 	"ox-cli-decision":      "additive Layer-2 ergonomics; its deterministic floor is the decision-record-guidance floor entry plus the consult-first decision route, so it is not a separate conformance surface",
+	"ox-cli-attest":        "thin relay over `ox attest publish`; the deterministic behavior (frozen-export-only, resume journal, deterministic ZIP) lives in the command, so the skill is guidance rather than a separate conformance surface",
 	"ox-cli-skill-manager": "native Agent Skills lifecycle guidance; the deterministic installer and ownership rules live in ox CLI code rather than this playbook",
 	"ox-cli-viz":           "additive Layer-2 ergonomics; its deterministic floor is the visualization-guidance entry and the live ox viz pr output, so it is not a separate conformance surface",
 	"ox-cli-pr-header":     "additive Layer-2 ergonomics; its deterministic floor is the `ox pr header` command output plus the PR-header pointer in the prime attribution guidance, so the skill itself is not a separate conformance surface",

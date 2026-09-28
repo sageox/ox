@@ -1,11 +1,11 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/prheader"
@@ -183,7 +183,7 @@ func runPRHeader(cmd *cobra.Command, _ []string) error {
 	markup := prheader.Render(in)
 
 	if flagBool(cmd, "json") {
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(prHeaderResponse{
+		return cli.PrintJSONTo(cmd.OutOrStdout(), prHeaderResponse{
 			Markdown:    markup,
 			Team:        in.TeamName,
 			Sessions:    sessionURLs,

@@ -1,12 +1,12 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -61,19 +61,15 @@ func showSessionScore(agentID string) error {
 			"score":   nil,
 			"message": "No score reported for this session",
 		}
-		jsonOut, err := json.MarshalIndent(out, "", "  ")
-		if err != nil {
+		if err := cli.PrintJSONTo(os.Stdout, out); err != nil {
 			return fmt.Errorf("format JSON: %w", err)
 		}
-		fmt.Println(string(jsonOut))
 		return nil
 	}
 
-	jsonOut, err := json.MarshalIndent(sf, "", "  ")
-	if err != nil {
+	if err := cli.PrintJSONTo(os.Stdout, sf); err != nil {
 		return fmt.Errorf("format JSON: %w", err)
 	}
-	fmt.Println(string(jsonOut))
 	return nil
 }
 
@@ -119,10 +115,8 @@ func outputScoreResult(score float64, category, reason string) error {
 		out["reason"] = reason
 	}
 
-	jsonOut, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
+	if err := cli.PrintJSONTo(os.Stdout, out); err != nil {
 		return fmt.Errorf("format JSON: %w", err)
 	}
-	fmt.Println(string(jsonOut))
 	return nil
 }
