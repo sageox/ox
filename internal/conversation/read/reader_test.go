@@ -195,6 +195,30 @@ func TestLinkFromOtherEnvironmentExplainsMiss(t *testing.T) {
 	}
 }
 
+// TestNotIndexedMessageSanitizesLinkHost: LinkHost is derived from pasted
+// input; before it is echoed into an envelope (and a terminal) it is
+// truncated and stripped of escape/control characters.
+func TestNotIndexedMessageSanitizesLinkHost(t *testing.T) {
+	r := testReader(t)
+	r.SetSyncHost("sageox.ai")
+	hostile := "\x1b]0;pwned\x07\x1b[31m" + strings.Repeat("a", 300) + ".sageox.ai"
+	id, perr := ParseID(unknownCnv)
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	id.LinkHost = hostile
+	_, _, err := r.lookup(id)
+	if err == nil || err.Code != ErrCodeNotIndexed {
+		t.Fatalf("lookup = %+v, want not_indexed", err)
+	}
+	if strings.ContainsAny(err.Message, "\x1b\x07") {
+		t.Errorf("message carries control characters: %q", err.Message)
+	}
+	if strings.Contains(err.Message, strings.Repeat("a", 100)) {
+		t.Errorf("message echoes the host unbounded (%d bytes)", len(err.Message))
+	}
+}
+
 // fakeResolver exercises the D3 fallback seam.
 type fakeResolver struct {
 	folder string

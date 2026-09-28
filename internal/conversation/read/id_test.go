@@ -64,6 +64,15 @@ func TestParseID(t *testing.T) {
 	}
 }
 
+// TestParseIDTrimsBareIDs: a bare id pasted with a trailing newline is the
+// same id.
+func TestParseIDTrimsBareIDs(t *testing.T) {
+	id, err := ParseID(" " + fullCnv + "\n")
+	if err != nil || id.RecordingID != fullRec {
+		t.Fatalf("ParseID(padded cnv) = %+v, %v", id, err)
+	}
+}
+
 func TestParseIDCarriesSelectors(t *testing.T) {
 	id, err := ParseID("sageox://" + fullCnv + "/" + fullClyr + "@2#cue=5-6")
 	if err != nil {
@@ -127,6 +136,11 @@ func TestParseIDLinks(t *testing.T) {
 		{name: "test subdomain kept", raw: "https://test.sageox.ai/c/" + fullRec, wantRec: fullRec, wantHost: "test.sageox.ai"},
 		{name: "www prefix normalized", raw: "https://www.sageox.ai/c/" + fullRec, wantRec: fullRec, wantHost: "sageox.ai"},
 		{name: "app prefix on test normalized", raw: "https://app.test.sageox.ai/c/" + fullRec, wantRec: fullRec, wantHost: "test.sageox.ai"},
+		{name: "pasted with surrounding whitespace", raw: "  https://sageox.ai/c/" + fullRec + "\n", wantRec: fullRec, wantHost: "sageox.ai"},
+		{name: "pasted with CRLF", raw: "https://sageox.ai/c/" + fullRec + "\r\n", wantRec: fullRec, wantHost: "sageox.ai"},
+		{name: "trailing-dot FQDN", raw: "https://sageox.ai./c/" + fullRec, wantRec: fullRec, wantHost: "sageox.ai"},
+		{name: "trailing-dot subdomain", raw: "https://test.sageox.ai./c/" + fullRec, wantRec: fullRec, wantHost: "test.sageox.ai"},
+		{name: "trailing-dot lookalike", raw: "https://sageox.ai.evil.com./c/" + fullRec, wantErr: ErrCodeInvalidID},
 		{name: "foreign host", raw: "https://example.com/c/" + fullRec, wantErr: ErrCodeInvalidID},
 		{name: "lookalike suffix host", raw: "https://sageox.ai.evil.com/c/" + fullRec, wantErr: ErrCodeInvalidID},
 		{name: "lookalike prefix host", raw: "https://evilsageox.ai/c/" + fullRec, wantErr: ErrCodeInvalidID},

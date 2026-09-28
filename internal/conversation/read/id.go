@@ -49,6 +49,9 @@ const acceptedIDForms = "cnv_<uuidv7>, rec_<uuidv7>, a sageox:// citation URI, o
 // recording, and that segment passes the same rec_/cnv_ validation as a bare
 // id.
 func ParseID(raw string) (*ID, *Error) {
+	// Pasted input routinely carries a trailing newline or surrounding
+	// spaces; no valid id form contains whitespace, so trimming is safe.
+	raw = strings.TrimSpace(raw)
 	switch {
 	case hasLinkScheme(raw):
 		return parseLink(raw)
@@ -140,7 +143,9 @@ func parseLink(raw string) (*ID, *Error) {
 // (endpoint.NormalizeSlug: lowercased, port dropped, api./www./app./git.
 // stripped), so app.sageox.ai and sageox.ai compare equal.
 func linkHost(u *url.URL) string {
-	h := strings.ToLower(u.Hostname())
+	// A trailing dot is the fully-qualified spelling of the same host
+	// (sageox.ai. == sageox.ai).
+	h := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 	if h == "" {
 		return ""
 	}

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/conversation/format"
 	"github.com/sageox/ox/internal/endpoint"
@@ -215,7 +216,8 @@ func (r *Reader) lookup(id *ID) (row, *os.Root, *Error) {
 	}
 	msg := fmt.Sprintf("%s is not indexed yet in this team's %s; the index is written when summarization completes — try again after the next sync", recordingID, format.IndexFileName)
 	if id.LinkHost != "" && r.syncHost != "" && id.LinkHost != r.syncHost {
-		msg = fmt.Sprintf("%s is not indexed here: this link is from %s, but this checkout syncs %s", recordingID, id.LinkHost, r.syncHost)
+		msg = fmt.Sprintf("%s is not indexed here: this link is from %s, but this checkout syncs %s",
+			recordingID, cli.SanitizeTerminalText(truncateID(id.LinkHost)), cli.SanitizeTerminalText(truncateID(r.syncHost)))
 	}
 	return row{}, nil, newError(ErrCodeNotIndexed, msg)
 }
