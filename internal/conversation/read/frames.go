@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -45,9 +46,12 @@ type TranscriptFrame struct {
 	ContentType string `json:"content_type,omitempty"`
 	// Description is the one-sentence account of what is on screen.
 	Description string `json:"description,omitempty"`
-	// Image is the local path of the frame image. In a synced checkout the
-	// file is a stub; `ox fetch <image>` downloads the real bytes.
+	// Image is the local path of the frame image, for programmatic use. In a
+	// synced checkout the file is a stub.
 	Image string `json:"image,omitempty"`
+	// FetchCommand is the ready-to-run, shell-quoted `ox fetch` command
+	// that downloads Image's real bytes.
+	FetchCommand string `json:"fetch_command,omitempty"`
 }
 
 // keyframesFile is the subset of keyframes.json this reader consumes.
@@ -129,11 +133,13 @@ func (r *Reader) attachFrames(droot *os.Root, folder string, all []vtt.Cue, out 
 	sort.SliceStable(frames, func(i, j int) bool { return frames[i].TimestampSeconds < frames[j].TimestampSeconds })
 
 	pos := servedPositions(out)
+	outOfRange := 0
 	for _, f := range frames {
-		if f.TimestampSeconds < 0 {
+		at, ok := secondsOffset(f.TimestampSeconds)
+		if !ok {
+			outOfRange++
 			continue
 		}
-		at := time.Duration(f.TimestampSeconds * float64(time.Second))
 		owner, ok := owningCue(all, at)
 		if !ok {
 			continue
@@ -150,9 +156,42 @@ func (r *Reader) attachFrames(droot *os.Root, folder string, all []vtt.Cue, out 
 		}
 		if rel, ok := keyframeImagePath(droot, f.Filename); ok {
 			frame.Image = filepath.Join(r.discussionsRoot, folder, filepath.FromSlash(rel))
+			frame.FetchCommand = "ox fetch " + shellQuoteIfNeeded(frame.Image)
 		}
 		out[i].Frames = append(out[i].Frames, frame)
 	}
+	if outOfRange > 0 {
+		*warnings = append(*warnings, fmt.Sprintf("%s: %d frames with an out-of-range timestamp skipped", KeyframesFileName, outOfRange))
+	}
+}
+
+// maxMediaOffset bounds any media-clock offset read from screen data. No
+// recording runs two days; anything beyond is corrupt, and bounding it
+// before the float-to-Duration conversion keeps that conversion from
+// overflowing.
+const maxMediaOffset = 48 * time.Hour
+
+// secondsOffset converts an untrusted seconds value to a media offset,
+// rejecting non-finite, negative, and out-of-range values.
+func secondsOffset(sec float64) (time.Duration, bool) {
+	if math.IsNaN(sec) || sec < 0 || sec > maxMediaOffset.Seconds() {
+		return 0, false
+	}
+	return time.Duration(sec * float64(time.Second)), true
+}
+
+// shellQuoteIfNeeded single-quotes a path containing anything beyond a
+// conservative safe set, so a printed ox fetch command can be pasted or
+// executed as-is even when a folder name carries $, backticks, ; or spaces.
+func shellQuoteIfNeeded(p string) string {
+	safe := p != "" && !strings.ContainsFunc(p, func(r rune) bool {
+		return !strings.ContainsRune("/.-_~+,@", r) &&
+			(r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9')
+	})
+	if safe {
+		return p
+	}
+	return "'" + strings.ReplaceAll(p, "'", `'\''`) + "'"
 }
 
 // servedPositions maps a served cue's 1-based ordinal to its index in out.
@@ -164,23 +203,41 @@ func servedPositions(out []TranscriptCue) map[int]int {
 	return pos
 }
 
-// owningCue returns the ordinal of the cue that owns instant at: the cue
-// whose [Start, End) contains it, else the nearest cue starting before it,
-// else the first cue.
+// owningCue returns the ordinal of the cue that owns instant at: among the
+// cues with a usable interval (malformed cues keep Start=End=0 and are
+// ignored), the one starting nearest before or at the instant — so an
+// instant inside a cue belongs to it, and one in a gap or after the last cue
+// belongs to the cue that precedes it. An instant before every cue belongs
+// to the earliest cue. File order is not trusted: out-of-order VTT resolves
+// by start time.
 func owningCue(all []vtt.Cue, at time.Duration) (int, bool) {
-	if len(all) == 0 {
+	var preceding, earliest *vtt.Cue
+	for i := range all {
+		c := &all[i]
+		if !c.HasTiming() {
+			continue
+		}
+		if earliest == nil || c.Start < earliest.Start {
+			earliest = c
+		}
+		if c.Start > at {
+			continue
+		}
+		// Latest start wins; on a tie, prefer the cue that still contains
+		// the instant, then file order.
+		if preceding == nil || c.Start > preceding.Start ||
+			(c.Start == preceding.Start && at < c.End && at >= preceding.End) {
+			preceding = c
+		}
+	}
+	switch {
+	case preceding != nil:
+		return preceding.Index, true
+	case earliest != nil:
+		return earliest.Index, true
+	default:
 		return 0, false
 	}
-	owner := all[0].Index
-	for _, c := range all {
-		if c.Start <= at && at < c.End {
-			return c.Index, true
-		}
-		if c.Start <= at {
-			owner = c.Index
-		}
-	}
-	return owner, true
 }
 
 // keyframeImagePath validates keyframes.json's untrusted filename: a local

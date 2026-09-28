@@ -3,10 +3,14 @@ package read
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/internal/vtt"
 )
 
 // Screen-walkthrough fixture: testdata/walkthrough/discussions holds one
@@ -76,7 +80,10 @@ func TestFramesAttachToOwningCue(t *testing.T) {
 	if f.Image != wantImage {
 		t.Errorf("frame 1 image = %q, want %q", f.Image, wantImage)
 	}
-	if !strings.Contains(env.Guidance, "ox fetch") {
+	if f.FetchCommand != "ox fetch "+wantImage {
+		t.Errorf("frame 1 fetch_command = %q", f.FetchCommand)
+	}
+	if !strings.Contains(env.Guidance, "fetch_command") {
 		t.Errorf("guidance does not say how to fetch an image: %q", env.Guidance)
 	}
 }
@@ -290,21 +297,54 @@ func TestSymlinkedSidecarIsRefused(t *testing.T) {
 	}
 }
 
-// TestOversizedSidecarIsBoundedAndReported: a sidecar past the row cap is
-// cut, and the cut is reported.
+// TestOversizedSidecarIsBoundedAndReported: a sidecar past the kept-row
+// bound is cut, and the cut is reported.
 func TestOversizedSidecarIsBoundedAndReported(t *testing.T) {
 	root := copyTree(t, walkthroughRoot)
-	sidecar := filepath.Join(root, walkthroughFolder, filepath.FromSlash(pointerLayerDir), "pointer.jsonl")
 	var b strings.Builder
 	for i := 0; i < maxSidecarRows+10; i++ {
-		b.WriteString(`{"t_ms":1000,"vis":false}` + "\n")
+		b.WriteString(`{"t_ms":1000,"vis":true,"dwell_ms":5,"ax_ref":"n1"}` + "\n")
 	}
-	if err := os.WriteFile(sidecar, []byte(b.String()), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeWalkthroughFile(t, root, pointerLayerDir+"/pointer.jsonl", b.String())
 	env, _ := walkthroughTranscript(t, root, TranscriptOptions{Frames: true})
-	if !hasWarningContaining(env.Warnings, "rows; the rest were not read") {
-		t.Errorf("warnings = %v, want the row cap reported", env.Warnings)
+	if !hasWarningContaining(env.Warnings, "usable rows; the rest were not read") {
+		t.Errorf("warnings = %v, want the kept-row bound reported", env.Warnings)
+	}
+}
+
+// TestSidecarScanBoundIsReported: the scan bound (lines read, kept or not)
+// bites and says so.
+func TestSidecarScanBoundIsReported(t *testing.T) {
+	orig := maxSidecarScanRows
+	t.Cleanup(func() { maxSidecarScanRows = orig })
+	maxSidecarScanRows = 3
+	env, _ := walkthroughTranscript(t, walkthroughRoot, TranscriptOptions{Frames: true})
+	if !hasWarningContaining(env.Warnings, "has more than 3 rows") {
+		t.Errorf("warnings = %v, want the scan bound reported", env.Warnings)
+	}
+}
+
+// TestSidecarByteCapDropsPartialRow: when the byte cap cuts a row in half,
+// the half row is dropped (not parsed, not counted malformed) and the cut is
+// reported; the complete rows before it are still used.
+func TestSidecarByteCapDropsPartialRow(t *testing.T) {
+	root := copyTree(t, walkthroughRoot)
+	row1 := `{"t_ms":1000,"vis":true,"dwell_ms":700,"ax_ref":"n1"}` + "\n"
+	row2 := `{"t_ms":6000,"vis":true,"dwell_ms":700,"ax_ref":"n2"}` + "\n"
+	writeWalkthroughFile(t, root, pointerLayerDir+"/pointer.jsonl", row1+row2)
+	orig := maxSidecarBytes
+	t.Cleanup(func() { maxSidecarBytes = orig })
+	maxSidecarBytes = int64(len(row1) + len(row2)/2)
+
+	env, data := walkthroughTranscript(t, root, TranscriptOptions{Frames: true})
+	if !hasWarningContaining(env.Warnings, "exceeds") {
+		t.Errorf("warnings = %v, want the byte cap reported", env.Warnings)
+	}
+	if hasWarningContaining(env.Warnings, "malformed") {
+		t.Errorf("the cut row was parsed as malformed: %v", env.Warnings)
+	}
+	if len(data.Cues[0].Pointing) != 1 || len(data.Cues[1].Pointing) != 0 {
+		t.Errorf("pointing = %+v / %+v, want only the complete first row used", data.Cues[0].Pointing, data.Cues[1].Pointing)
 	}
 }
 
@@ -322,5 +362,282 @@ func TestShowAndListFlagScreenRecordings(t *testing.T) {
 	}
 	if g := testReader(t).Show(fullCnv).Guidance; strings.Contains(g, "--frames") {
 		t.Errorf("audio show guidance suggests --frames: %q", g)
+	}
+}
+
+// writeWalkthroughFile writes rel (slash-separated, relative to the staged
+// walkthrough folder) in a staged copy of the fixture.
+func writeWalkthroughFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	p := filepath.Join(root, walkthroughFolder, filepath.FromSlash(rel))
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// --- E. Cue ownership and clocks ---
+
+// TestOwningCueNearestPreceding: an instant in a gap or after the last cue
+// belongs to the cue that starts nearest before it — by start time, not
+// file order — and malformed cues (Start=End=0) never own anything.
+// Failure prevented: a frame in a pause is pinned to the wrong sentence, or
+// to a malformed cue at the end of the file.
+func TestOwningCueNearestPreceding(t *testing.T) {
+	sec := func(n float64) time.Duration { return time.Duration(n * float64(time.Second)) }
+	cues := []vtt.Cue{
+		{Index: 1, Start: 0, End: sec(5)},
+		{Index: 2, Start: sec(10), End: sec(15)},
+		{Index: 3}, // malformed timing
+	}
+	outOfOrder := []vtt.Cue{
+		{Index: 1, Start: sec(10), End: sec(15)},
+		{Index: 2, Start: 0, End: sec(5)},
+		{Index: 3}, // malformed timing
+	}
+	tests := []struct {
+		name string
+		cues []vtt.Cue
+		at   time.Duration
+		want int
+	}{
+		{"inside first", cues, sec(2), 1},
+		{"gap goes to preceding", cues, sec(7), 1},
+		{"inside second", cues, sec(12), 2},
+		{"after last goes to last timed cue", cues, sec(20), 2},
+		{"out of order: gap", outOfOrder, sec(7), 2},
+		{"out of order: after last", outOfOrder, sec(20), 1},
+		{"out of order: inside", outOfOrder, sec(1), 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := owningCue(tt.cues, tt.at)
+			if !ok || got != tt.want {
+				t.Errorf("owningCue(%v) = %d,%v, want %d", tt.at, got, ok, tt.want)
+			}
+		})
+	}
+	if _, ok := owningCue([]vtt.Cue{{Index: 1}}, sec(1)); ok {
+		t.Error("a transcript of only malformed cues owned an instant")
+	}
+}
+
+// gappedTranscript has a gap at [5,10) and ends at 15 s.
+const gappedTranscript = `WEBVTT
+
+1
+00:00:00.000 --> 00:00:05.000
+<v Speaker 1>First.
+
+2
+00:00:10.000 --> 00:00:15.000
+<v Speaker 1>Second.
+`
+
+// TestPointingInGapsAttachesToPrecedingCue: pointer samples in a gap between
+// cues or after the last cue attach to the preceding cue, as frames do —
+// and still only for cues in the served window.
+func TestPointingInGapsAttachesToPrecedingCue(t *testing.T) {
+	root := copyTree(t, walkthroughRoot)
+	writeWalkthroughFile(t, root, "transcript.vtt", gappedTranscript)
+	writeWalkthroughFile(t, root, pointerLayerDir+"/pointer.jsonl",
+		`{"t_ms":7000,"vis":true,"dwell_ms":900,"ax_ref":"n1"}`+"\n"+
+			`{"t_ms":20000,"vis":true,"dwell_ms":900,"ax_ref":"n2"}`+"\n")
+
+	_, data := walkthroughTranscript(t, root, TranscriptOptions{Frames: true})
+	if p := data.Cues[0].Pointing; len(p) != 1 || p[0].At != "00:00:07.000" {
+		t.Errorf("cue 1 pointing = %+v, want the 7 s gap sample", p)
+	}
+	if p := data.Cues[1].Pointing; len(p) != 1 || p[0].At != "00:00:20.000" {
+		t.Errorf("cue 2 pointing = %+v, want the 20 s after-last sample", p)
+	}
+	// Frames follow the same rule: the 6 s frame sits in the gap.
+	if f := data.Cues[0].Frames; len(f) != 2 {
+		t.Errorf("cue 1 frames = %+v, want the 1.5 s and 6 s frames", f)
+	}
+
+	_, only1 := walkthroughTranscript(t, root, TranscriptOptions{CueFirst: 1, CueLast: 1, Frames: true})
+	if len(only1.Cues) != 1 || len(only1.Cues[0].Pointing) != 1 || only1.Cues[0].Pointing[0].At != "00:00:07.000" {
+		t.Errorf("window 1-1 pointing = %+v, want only cue 1's sample", only1.Cues)
+	}
+}
+
+// TestPointingTUTCBeatsTMS: when t_utc and t_ms disagree, t_utc − t0 is the
+// media time.
+func TestPointingTUTCBeatsTMS(t *testing.T) {
+	root := copyTree(t, walkthroughRoot)
+	writeWalkthroughFile(t, root, pointerLayerDir+"/pointer.jsonl",
+		`{"t_utc":"2026-08-18T01:00:12.000Z","t_ms":1000,"vis":true,"dwell_ms":900,"ax_ref":"n3"}`+"\n")
+	_, data := walkthroughTranscript(t, root, TranscriptOptions{Frames: true})
+	if len(data.Cues[0].Pointing) != 0 {
+		t.Errorf("sample placed by t_ms (1 s): %+v", data.Cues[0].Pointing)
+	}
+	if p := data.Cues[2].Pointing; len(p) != 1 || p[0].At != "00:00:12.000" {
+		t.Errorf("cue 3 pointing = %+v, want the sample at t_utc 12 s", p)
+	}
+}
+
+// TestLayerClockBeatsManifestClock: a layer's own clock.t0 is the origin its
+// rows are measured against, even when the conversation manifest differs.
+func TestLayerClockBeatsManifestClock(t *testing.T) {
+	root := copyTree(t, walkthroughRoot)
+	envPath := pointerLayerDir + "/layer.json"
+	raw, err := os.ReadFile(filepath.Join(root, walkthroughFolder, filepath.FromSlash(envPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Layer origin 5 s after the manifest's.
+	writeWalkthroughFile(t, root, envPath, strings.Replace(string(raw), `"t0": "2026-08-18T01:00:00Z"`, `"t0": "2026-08-18T01:00:05Z"`, 1))
+	writeWalkthroughFile(t, root, pointerLayerDir+"/pointer.jsonl",
+		`{"t_utc":"2026-08-18T01:00:06.000Z","vis":true,"dwell_ms":900,"ax_ref":"n1"}`+"\n")
+	_, data := walkthroughTranscript(t, root, TranscriptOptions{Frames: true})
+	if p := data.Cues[0].Pointing; len(p) != 1 || p[0].At != "00:00:01.000" {
+		t.Errorf("cue 1 pointing = %+v, want 1 s (layer t0), not 6 s (manifest t0)", p)
+	}
+}
+
+// TestNoClockOriginIsNamedNotMalformed: AX rows carry only t_utc. With no
+// parseable origin anywhere, the warning must name that cause instead of
+// calling every node malformed.
+func TestNoClockOriginIsNamedNotMalformed(t *testing.T) {
+	root := copyTree(t, walkthroughRoot)
+	for _, rel := range []string{pointerLayerDir + "/layer.json", "layers/ax-tree.clyr_019ffe10-0000-7000-8000-0000000000a2/layer.json", "layers.json"} {
+		p := filepath.Join(root, walkthroughFolder, filepath.FromSlash(rel))
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixed := strings.ReplaceAll(string(raw), `"2026-08-18T01:00:00Z"`, `""`)
+		if err := os.WriteFile(p, []byte(fixed), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env, data := walkthroughTranscript(t, root, TranscriptOptions{Frames: true})
+	if !hasWarningContaining(env.Warnings, "no usable clock origin") {
+		t.Errorf("warnings = %v, want the missing clock origin named", env.Warnings)
+	}
+	for _, w := range env.Warnings {
+		if strings.Contains(w, "ax.jsonl") && strings.Contains(w, "malformed") {
+			t.Errorf("AX rows counted as malformed: %s", w)
+		}
+	}
+	// The five node rows for pointed-at elements (n1 twice, n2, n3, n4).
+	if !hasWarningContaining(env.Warnings, "ax.jsonl: 5 rows skipped") {
+		t.Errorf("warnings = %v, want the pointed-at AX nodes reported as clockless", env.Warnings)
+	}
+	// Pointer rows still place by t_ms; their elements are just unnamed.
+	if p := data.Cues[1].Pointing; len(p) == 0 || !p[0].Unnamed {
+		t.Errorf("cue 2 pointing = %+v, want samples placed by t_ms, unnamed", p)
+	}
+}
+
+// TestOutOfRangeTimestampsAreRejected: absurd or non-finite timestamps are
+// counted malformed/skipped before conversion instead of overflowing into a
+// plausible-looking offset.
+func TestOutOfRangeTimestampsAreRejected(t *testing.T) {
+	root := copyTree(t, walkthroughRoot)
+	writeWalkthroughFile(t, root, pointerLayerDir+"/pointer.jsonl",
+		`{"t_ms":1e300,"vis":true,"dwell_ms":900,"ax_ref":"n1"}`+"\n"+
+			`{"t_utc":1e30,"vis":true,"dwell_ms":900,"ax_ref":"n1"}`+"\n"+
+			`{"t_ms":-60000,"vis":true,"dwell_ms":900,"ax_ref":"n1"}`+"\n"+
+			`{"t_utc":"2026-08-18T00:59:59.500Z","vis":true,"dwell_ms":900,"ax_ref":"n1"}`+"\n")
+	kf := `{"keyframes":[{"timestamp_seconds":1e300,"description":"far"},{"timestamp_seconds":-1,"description":"before"},{"timestamp_seconds":2,"description":"ok"}]}`
+	writeWalkthroughFile(t, root, "keyframes.json", kf)
+
+	env, data := walkthroughTranscript(t, root, TranscriptOptions{Frames: true})
+	if !hasWarningContaining(env.Warnings, "pointer.jsonl: 3 malformed rows skipped") {
+		t.Errorf("warnings = %v, want 3 out-of-range pointer rows counted", env.Warnings)
+	}
+	if !hasWarningContaining(env.Warnings, "2 frames with an out-of-range timestamp skipped") {
+		t.Errorf("warnings = %v, want 2 out-of-range frames counted", env.Warnings)
+	}
+	// Half a second before t0 is clock skew: clamped to 0, kept.
+	if p := data.Cues[0].Pointing; len(p) != 1 || p[0].At != "00:00:00.000" {
+		t.Errorf("cue 1 pointing = %+v, want the slightly-early row clamped to 0", p)
+	}
+	if f := data.Cues[0].Frames; len(f) != 1 || f[0].Description != "ok" {
+		t.Errorf("cue 1 frames = %+v, want only the in-range frame", f)
+	}
+}
+
+// TestSidecarRefFallsThroughToDefault: a content ref that exists but is not
+// a regular file does not stop the search; the default sidecar is read.
+func TestSidecarRefFallsThroughToDefault(t *testing.T) {
+	root := copyTree(t, walkthroughRoot)
+	envPath := pointerLayerDir + "/layer.json"
+	raw, err := os.ReadFile(filepath.Join(root, walkthroughFolder, filepath.FromSlash(envPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWalkthroughFile(t, root, envPath, strings.Replace(string(raw), `"path": "pointer.jsonl"`, `"path": "custom.jsonl"`, 1))
+	// A directory where the ref points: fails on every platform.
+	if err := os.Mkdir(filepath.Join(root, walkthroughFolder, filepath.FromSlash(pointerLayerDir), "custom.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env, data := walkthroughTranscript(t, root, TranscriptOptions{Frames: true})
+	if len(data.Cues[1].Pointing) != 2 {
+		t.Errorf("cue 2 pointing = %+v, want the default sidecar read", data.Cues[1].Pointing)
+	}
+	if hasWarningContaining(env.Warnings, "sidecar unreadable") {
+		t.Errorf("fell-through ref still reported unreadable: %v", env.Warnings)
+	}
+}
+
+// TestFetchCommandIsShellSafe: a folder name is customer-controlled; the
+// fetch_command must hand the exact path to ox fetch through a POSIX shell
+// even when the name carries $, a backtick, ; and a space.
+func TestFetchCommandIsShellSafe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fetch_command is POSIX-shell quoted; no sh to round-trip through on Windows")
+	}
+	src := copyTree(t, walkthroughRoot)
+	hostile := "2026-08-18 $(touch pwned); `id` $HOME"
+	if err := os.Rename(filepath.Join(src, walkthroughFolder), filepath.Join(src, hostile)); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := os.ReadFile(filepath.Join(src, "INDEX.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	quotedName, _ := json.Marshal(hostile)
+	idx = []byte(strings.Replace(string(idx), `"`+walkthroughFolder+`"`, string(quotedName), 1))
+	if err := os.WriteFile(filepath.Join(src, "INDEX.json"), idx, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, data := walkthroughTranscript(t, src, TranscriptOptions{Frames: true})
+	f := data.Cues[0].Frames[0]
+	if !strings.Contains(f.Image, hostile) {
+		t.Fatalf("image = %q, want the hostile folder in the path", f.Image)
+	}
+	arg, ok := strings.CutPrefix(f.FetchCommand, "ox fetch ")
+	if !ok {
+		t.Fatalf("fetch_command = %q", f.FetchCommand)
+	}
+	dir := t.TempDir()
+	cmd := exec.Command("/bin/sh", "-c", "printf '%s' "+arg)
+	cmd.Dir = dir
+	got, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("sh: %v", err)
+	}
+	if string(got) != f.Image {
+		t.Errorf("shell saw %q, want %q", got, f.Image)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pwned")); err == nil {
+		t.Error("fetch_command executed an embedded command substitution")
+	}
+}
+
+func TestShellQuoteIfNeeded(t *testing.T) {
+	cases := map[string]string{
+		"/home/u/.sageox/data/keyframes/001.jpg": "/home/u/.sageox/data/keyframes/001.jpg",
+		"/Users/a b/k.jpg":                       "'/Users/a b/k.jpg'",
+		"/tmp/it's/k.jpg":                        `'/tmp/it'\''s/k.jpg'`,
+		"/tmp/$(rm -rf)/k.jpg":                   "'/tmp/$(rm -rf)/k.jpg'",
+	}
+	for in, want := range cases {
+		if got := shellQuoteIfNeeded(in); got != want {
+			t.Errorf("shellQuoteIfNeeded(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

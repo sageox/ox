@@ -451,17 +451,3 @@ func TestConversationTranscriptFramesText(t *testing.T) {
 		t.Errorf("guidance lacks the --frames hint:\n%s", plain)
 	}
 }
-
-func TestShellQuoteIfNeeded(t *testing.T) {
-	cases := map[string]string{
-		"/home/u/.sageox/data/keyframes/001.jpg": "/home/u/.sageox/data/keyframes/001.jpg",
-		"/Users/a b/k.jpg":                       "'/Users/a b/k.jpg'",
-		"/tmp/it's/k.jpg":                        `'/tmp/it'\''s/k.jpg'`,
-		"/tmp/$(rm -rf)/k.jpg":                   "'/tmp/$(rm -rf)/k.jpg'",
-	}
-	for in, want := range cases {
-		if got := shellQuoteIfNeeded(in); got != want {
-			t.Errorf("shellQuoteIfNeeded(%q) = %q, want %q", in, got, want)
-		}
-	}
-}

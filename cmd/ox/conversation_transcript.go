@@ -260,8 +260,8 @@ func renderTranscriptScreenLines(w io.Writer, c read.TranscriptCue) {
 			desc = "(no description)"
 		}
 		fmt.Fprintf(w, "%s%s %s\n", indent, cli.StyleDim.Render(label+":"), desc)
-		if f.Image != "" {
-			fmt.Fprintf(w, "%s%s ox fetch %s\n", indent, cli.StyleDim.Render("image:"), shellQuoteIfNeeded(f.Image))
+		if f.FetchCommand != "" {
+			fmt.Fprintf(w, "%s%s %s\n", indent, cli.StyleDim.Render("image:"), f.FetchCommand)
 		}
 	}
 	for _, p := range c.Pointing {
@@ -280,17 +280,4 @@ func renderTranscriptScreenLines(w io.Writer, c read.TranscriptCue) {
 		}
 		fmt.Fprintf(w, "%s%s %s\n", indent, cli.StyleDim.Render(fmt.Sprintf("pointing at (%s %s):", p.Action, p.At)), target)
 	}
-}
-
-// shellQuoteIfNeeded single-quotes a path containing anything beyond a
-// conservative safe set, so the printed ox fetch line can be pasted as-is.
-func shellQuoteIfNeeded(p string) string {
-	safe := !strings.ContainsFunc(p, func(r rune) bool {
-		return !strings.ContainsRune("/.-_~+,@", r) &&
-			(r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9')
-	})
-	if safe && p != "" {
-		return p
-	}
-	return "'" + strings.ReplaceAll(p, "'", `'\''`) + "'"
 }
