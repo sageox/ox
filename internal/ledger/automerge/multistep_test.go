@@ -2,10 +2,12 @@ package automerge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -94,5 +96,106 @@ func TestResolve_CarriesRebaseThroughSequentialConflicts(t *testing.T) {
 	}
 	if resolvedSteps < steps {
 		t.Errorf("resolved %d conflicting step(s), want %d", resolvedSteps, steps)
+	}
+}
+
+// Progress must be decided by the rebase's own step counter, not by whether the
+// index happens to hold unmerged entries.
+//
+// "Unmerged entries exist" is a proxy, and it fails open: if a step halts with
+// entries no tier staged, treating that as progress hands the same step back to
+// the caller forever, burning a git subprocess per pass up to maxResolvePasses.
+// The step id is the fact the proxy was standing in for.
+func TestRebaseStepID_TracksStepsAndDistinguishesUnknown(t *testing.T) {
+	t.Parallel()
+
+	clean := initTestRepo(t, t.TempDir())
+	if got := rebaseStepID(clean); got != "" {
+		t.Errorf("no rebase in progress should read as unknown, got %q", got)
+	}
+
+	repo := makeMultiStepRebaseConflict(t, "notes/log.md", 3)
+	first := rebaseStepID(repo)
+	if first == "" {
+		t.Fatal("mid-rebase step id must be readable, got empty (would disable progress detection)")
+	}
+
+	// Resolve the halted step by taking the incoming side, then advance.
+	for _, p := range listConflicted(t, repo) {
+		mustGit(t, repo, "checkout", "--theirs", "--", p)
+		mustGit(t, repo, "add", "--", p)
+	}
+	runGitAllowFail(repo, "-c", "commit.gpgsign=false", "rebase", "--continue")
+
+	if second := rebaseStepID(repo); second == first {
+		t.Errorf("step id did not change after advancing the rebase: %q — progress would be invisible", second)
+	}
+}
+
+func listConflicted(t *testing.T, repo string) []string {
+	t.Helper()
+	out := mustGit(t, repo, "diff", "--name-only", "--diff-filter=U")
+	var paths []string
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			paths = append(paths, l)
+		}
+	}
+	return paths
+}
+
+// A step that cannot advance must surface an error, never a false "progress"
+// signal. Returning progress here is what lets the caller's loop hand the same
+// step back forever, burning a git subprocess per pass to maxResolvePasses.
+func TestContinueRebase_StuckStepReportsErrorInsteadOfProgress(t *testing.T) {
+	t.Parallel()
+	repo := makeMultiStepRebaseConflict(t, "notes/log.md", 2)
+
+	// Deliberately leave the conflict unstaged: git will refuse this step, and
+	// the step id will not move.
+	before := rebaseStepID(repo)
+	r := New(Options{})
+	done, err := r.continueRebase(context.Background(), repo)
+
+	if done {
+		t.Fatal("a refused step must not report the rebase finished")
+	}
+	if err == nil {
+		t.Fatal("a step that cannot advance must return an error, not (false, nil) progress")
+	}
+	if got := rebaseStepID(repo); got != before {
+		t.Errorf("step id moved (%q -> %q); fixture no longer reproduces a stuck step", before, got)
+	}
+	if !strings.Contains(err.Error(), "made no progress") {
+		t.Errorf("error should name the stall, got: %v", err)
+	}
+}
+
+// A later pass that finds a clean index has nothing for any tier to stage, so it
+// must hand the step to continueRebase rather than report ErrNoConflicts — that
+// sentinel means "the caller had nothing to do", which is only true on entry.
+func TestResolveOneStep_LaterPassWithCleanIndexDelegatesToContinue(t *testing.T) {
+	t.Parallel()
+	repo := makeMultiStepRebaseConflict(t, "notes/log.md", 2)
+
+	// Resolve and stage the halted step so the index is clean while the rebase
+	// is still in progress — the exact state a later pass observes.
+	for _, p := range listConflicted(t, repo) {
+		mustGit(t, repo, "checkout", "--theirs", "--", p)
+		mustGit(t, repo, "add", "--", p)
+	}
+
+	r := New(Options{})
+	done, err := r.resolveOneStep(context.Background(), repo, false)
+
+	if errors.Is(err, ErrNoConflicts) {
+		t.Fatal("a later pass must not report ErrNoConflicts; that is an entry-only verdict")
+	}
+	if err != nil {
+		t.Fatalf("staged step should advance or finish, got: %v", err)
+	}
+	// Either the rebase finished (done) or it advanced to the next conflict.
+	if !done && !rebaseStillInProgress(t, repo) {
+		t.Error("reported not-done while no rebase state remains")
 	}
 }

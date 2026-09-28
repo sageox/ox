@@ -221,6 +221,7 @@ func (r *Resolver) resolveOneStep(ctx context.Context, repoPath string, first bo
 // LC_ALL/LANG pin git's output language, and gpgsign is disabled so a signing
 // prompt cannot block a loop that may run hundreds of times.
 func (r *Resolver) continueRebase(ctx context.Context, repoPath string) (bool, error) {
+	before := rebaseStepID(repoPath)
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath,
 		"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "rebase", "--continue")
 	cmd.Dir = repoPath
@@ -231,17 +232,41 @@ func (r *Resolver) continueRebase(ctx context.Context, repoPath string) (bool, e
 		r.logger.Info("automerge.done", "repo", repoPath)
 		return true, nil
 	}
+	// Progress is "the rebase moved to a different step", nothing else.
+	//
+	// Unmerged entries are NOT a progress signal. listConflictedPaths reads the
+	// working tree (`git diff --diff-filter=U`) while an unmerged-index probe
+	// reads the index (`git ls-files --unmerged`), and the two disagree on
+	// rename and delete conflicts. When they disagree, this function sees an
+	// unmerged index, calls it progress, and hands back a step no tier staged —
+	// so the caller re-enters, git refuses the same step again, and the loop
+	// spins to maxResolvePasses burning a git subprocess per pass.
+	after := rebaseStepID(repoPath)
+	if before != "" && after != "" && after != before {
+		return false, nil // the rebase genuinely advanced
+	}
 	if err == nil {
-		return false, nil // advanced cleanly; more steps remain
+		return false, nil // git reported success; let the next pass re-probe
 	}
-	// Still mid-rebase AND git errored: fresh conflicts mean the step was
-	// committed and the next one halted. That is progress the caller's loop
-	// handles, not a failure to abort on.
-	unmerged, listErr := gitutil.HasUnmergedEntries(ctx, repoPath)
-	if listErr == nil && unmerged {
-		return false, nil
+	// Same step AND git errored: this step cannot advance. Say so, so the
+	// caller aborts and restores a clean state instead of spinning.
+	return false, fmt.Errorf("rebase --continue made no progress at step %q: %s: %w",
+		after, strings.TrimSpace(string(out)), err)
+}
+
+// rebaseStepID identifies the rebase's current step. Empty when it cannot be
+// read, which callers must treat as "unknown", never as "unchanged".
+//
+// HEAD is deliberately not used: an empty or skipped commit advances the rebase
+// without moving HEAD, so HEAD would report a stall that isn't one.
+func rebaseStepID(repoPath string) string {
+	for _, rel := range []string{"rebase-merge/msgnum", "rebase-apply/next"} {
+		data, err := os.ReadFile(filepath.Join(repoPath, ".git", filepath.FromSlash(rel)))
+		if err == nil {
+			return rel + ":" + strings.TrimSpace(string(data))
+		}
 	}
-	return false, fmt.Errorf("rebase --continue: %s: %w", strings.TrimSpace(string(out)), err)
+	return ""
 }
 
 func (r *Resolver) allUnderSafePrefixes(paths []string) bool {
