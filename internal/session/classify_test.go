@@ -197,6 +197,7 @@ func TestCountSubstantiveEntries(t *testing.T) {
 		{"header only", `{"metadata":{}}` + "\n", 0},
 		{"header plus one", `{"metadata":{}}` + "\n" + `{"type":"user"}` + "\n", 1},
 		{"header plus three", `{"metadata":{}}` + "\n" + `{"type":"user"}` + "\n" + `{"type":"assistant"}` + "\n" + `{"entry_count":2}` + "\n", 3},
+		{"header plus entry plus carrier footer", `{"metadata":{}}` + "\n" + `{"type":"user"}` + "\n" + `{"type":"footer","stopped_at":"2026-09-28T04:15:30Z"}` + "\n", 1},
 		{"nonexistent", "", 0},
 	}
 
@@ -346,4 +347,61 @@ func TestIsPIDAlive(t *testing.T) {
 
 	// very large PID — almost certainly dead
 	assert.False(t, isPIDAlive(99999999))
+}
+
+// TestClassifyRawFile_FramingLinesAreNotContent pins the rule every finalize,
+// anti-entropy and phantom-reaper gate leans on: only a conversation entry
+// makes a raw.jsonl substantive. Since #1025 each finalize door appends a
+// {"type":"footer"} carrier before the daemon looks at the file, so a
+// recording that never captured a turn is header + footer, two lines.
+// Counting lines classified that as content: the daemon summarized an empty
+// transcript, uploaded it and committed a blank session to the Ledger, one per
+// throwaway agent process.
+func TestClassifyRawFile_FramingLinesAreNotContent(t *testing.T) {
+	header := `{"metadata":{"agent_id":"Ox1"}}` + "\n"
+	footer := `{"closed_at":"2026-09-28T04:15:30Z","native_sessions":[{"id":"5a0b7989-e539-4c99-979f-b1d4cb19d697","source":"startup","first_seen":"2026-09-28T04:15:29Z","last_seen":"2026-09-28T04:15:30Z"}],"stopped_at":"2026-09-28T04:15:30Z","type":"footer"}` + "\n"
+	user := `{"type":"user","content":"hello"}` + "\n"
+
+	tests := []struct {
+		name    string
+		content string
+		want    RawKind
+	}{
+		{"header plus carrier footer", header + footer, RawHeaderOnly},
+		{"header plus two footers", header + footer + footer, RawHeaderOnly},
+		{"header plus blank line", header + "\n", RawHeaderOnly},
+		{"header, footer, then a turn", header + footer + user, RawSubstantive},
+		{"header, turn, then footer", header + user + footer, RawSubstantive},
+		// fail safe: a line we cannot read is never a deletable phantom
+		{"header plus a line that is not JSON", header + "not json\n", RawSubstantive},
+		{"header plus an entry of unknown type", header + `{"type":"message"}` + "\n", RawSubstantive},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "raw.jsonl")
+			require.NoError(t, os.WriteFile(path, []byte(tt.content), 0o600))
+			assert.Equal(t, tt.want, ClassifyRawFile(path))
+		})
+	}
+}
+
+// TestClassifyRawFile_RealCarrierStampKeepsHeaderOnly drives the actual
+// finalize-door writer so the classifier and StampRawCarrier cannot drift
+// apart again: a header-only recording stays header-only after the stamp and
+// becomes substantive only once a turn lands.
+func TestClassifyRawFile_RealCarrierStampKeepsHeaderOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raw.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(`{"type":"header","metadata":{"agent_id":"Ox1"}}`+"\n"), 0o600))
+	require.Equal(t, RawHeaderOnly, ClassifyRawFile(path), "precondition")
+
+	require.NoError(t, StampRawCarrier(path, CarrierStamp{StoppedAt: time.Date(2026, 9, 28, 4, 15, 30, 0, time.UTC)}))
+	assert.Equal(t, RawHeaderOnly, ClassifyRawFile(path), "a carrier footer is framing, not a turn")
+	assert.False(t, HasSubstantiveEntries(path))
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	_, err = f.WriteString(`{"type":"user","content":"hello"}` + "\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	assert.Equal(t, RawSubstantive, ClassifyRawFile(path))
 }

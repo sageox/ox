@@ -693,3 +693,34 @@ func TestProcessSession_WritesCallIDAndCarrier(t *testing.T) {
 	assert.Equal(t, "FAIL: exit status 1", paired[1]["tool_output"], "a failed result keeps its output on the legacy path")
 	assert.Equal(t, true, paired[1]["is_error"], "a failed result keeps its failure flag on the legacy path")
 }
+
+// TestSessionEnd_NeverPromptedRecordingStaysEmptyForTheDaemon: Devon's
+// launcher starts a Claude Code process that exits before a single prompt
+// (Conductor does this beside every chat). The SessionEnd door stamps the
+// carrier footer and hands the file to the daemon, which must still recognize
+// a recording with nothing in it; otherwise it summarizes an empty transcript
+// and commits a blank session to the team Ledger.
+func TestSessionEnd_NeverPromptedRecordingStaysEmptyForTheDaemon(t *testing.T) {
+	projectRoot, _ := setupTestProject(t)
+	const agentID = "OxEmpty"
+	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+		AgentID: agentID, AdapterName: "claude-code", Username: "testuser",
+		AgentSessionID: "cc-empty-1", AgentSessionSource: "startup",
+	})
+	require.NoError(t, err)
+	require.NoError(t, writeRawHeader(projectRoot, state))
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	require.Equal(t, session.RawHeaderOnly, session.ClassifyRawFile(rawPath), "precondition: no turn captured")
+
+	require.NoError(t, handleEnd(&HookContext{
+		Phase: phaseEnd, AgentType: "claude-code", ProjectRoot: projectRoot,
+		Marker: &SessionMarker{AgentID: agentID},
+	}))
+
+	stored, err := session.ReadSessionFromPath(rawPath)
+	require.NoError(t, err)
+	require.NotNil(t, stored.Meta.StoppedAt, "precondition: the door stamped its carrier footer")
+	assert.Equal(t, session.RawHeaderOnly, session.ClassifyRawFile(rawPath),
+		"after SessionEnd the daemon must still see a recording with no turns, not content to summarize and upload")
+	assert.False(t, session.HasSubstantiveEntries(rawPath))
+}
