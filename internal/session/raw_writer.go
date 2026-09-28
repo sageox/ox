@@ -392,11 +392,55 @@ func (w *RawWriter) FinishAppend() error { return os.Remove(w.file.Name() + ".ap
 // RecoverRawAppend discards only an unacknowledged batch. A cursor is committed
 // after raw fsync; if its atomic replacement survived, its batch must survive too.
 // Call under the capture lock before reading, stopping, or reopening the writer.
+//
+// Carrier footers (StampRawCarrier) are the one thing that may legitimately
+// land on raw.jsonl between a crash and this recovery: a SessionEnd hook or
+// `session native` stamps them without consulting the journal. They carry only
+// identifiers and timestamps, never batch content, so a rollback keeps them and
+// a committed check accepts them as the only bytes allowed past the sealed size.
 func RecoverRawAppend(path string, persistedOffset int64) error {
-	// Under the append lock as well: a rollback truncates, and a carrier stamp
-	// (StampRawCarrier) holds only that lock. Without it the truncate could
-	// take a footer appended after the journal was written.
+	// Under the append lock as well: a stamp holds only that lock, and a
+	// rollback must not truncate underneath one that is mid-write.
 	return withRawAppendLock(path, func() error { return recoverRawAppend(path, persistedOffset) })
+}
+
+// footerTailAfter returns the complete footer lines found past offset. Anything
+// else there -- a complete non-footer line, or a torn partial line -- is
+// reported in other; the caller decides whether that content is the batch
+// being rolled back (dropped) or a conflict with a committed batch (refused).
+func footerTailAfter(path string, offset int64) (footers []byte, other bool, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	if _, err = f.Seek(offset, io.SeekStart); err != nil {
+		return nil, false, err
+	}
+	tail, err := io.ReadAll(f)
+	if err != nil {
+		return nil, false, err
+	}
+	for len(tail) > 0 {
+		nl := strings.IndexByte(string(tail), '\n')
+		if nl < 0 {
+			return footers, true, nil // torn partial line
+		}
+		line, rest := tail[:nl+1], tail[nl+1:]
+		tail = rest
+		if strings.TrimSpace(string(line)) == "" {
+			continue
+		}
+		var record struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(line, &record) != nil || record.Type != "footer" {
+			other = true
+			continue
+		}
+		footers = append(footers, line...)
+	}
+	return footers, other, nil
 }
 
 func recoverRawAppend(path string, persistedOffset int64) error {
@@ -429,11 +473,20 @@ func recoverRawAppend(path string, persistedOffset int64) error {
 		if info.Size() < checkpoint.RawSize {
 			return fmt.Errorf("captured file was truncated")
 		}
+		// Everything past the journal's size is the batch that never committed,
+		// except footers stamped after the crash: those go back on the end.
+		footers, _, err := footerTailAfter(path, checkpoint.RawSize)
+		if err != nil {
+			return err
+		}
 		f, err := os.OpenFile(path, os.O_WRONLY, 0)
 		if err != nil {
 			return err
 		}
-		if err = f.Truncate(checkpoint.RawSize); err == nil {
+		if err = f.Truncate(checkpoint.RawSize); err == nil && len(footers) > 0 {
+			_, err = f.WriteAt(footers, checkpoint.RawSize)
+		}
+		if err == nil {
 			err = f.Sync()
 		}
 		closeErr := f.Close()
@@ -448,8 +501,19 @@ func recoverRawAppend(path string, persistedOffset int64) error {
 		if err != nil {
 			return err
 		}
-		if checkpoint.FinalSize == nil || info.Size() != *checkpoint.FinalSize {
+		if checkpoint.FinalSize == nil || info.Size() < *checkpoint.FinalSize {
 			return fmt.Errorf("committed capture size conflicts with pending batch")
+		}
+		// A file longer than it was sealed at is only explained by footers
+		// stamped since; any other content means it is not the file that was sealed.
+		if info.Size() > *checkpoint.FinalSize {
+			_, other, err := footerTailAfter(path, *checkpoint.FinalSize)
+			if err != nil {
+				return err
+			}
+			if other {
+				return fmt.Errorf("committed capture size conflicts with pending batch")
+			}
 		}
 	default:
 		return fmt.Errorf("capture cursor conflicts with pending batch")

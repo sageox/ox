@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/fileutil"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/require"
 )
 
@@ -274,3 +276,127 @@ func (discard) Write(p []byte) (int, error) { return len(p), nil }
 func strPtr(s string) *string { return &s }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+// --- E. Recovery and carrier footers ---
+//
+// A carrier footer (StampRawCarrier) is the one write that legitimately lands
+// on raw.jsonl between a crash and the next recovery: a SessionEnd hook or
+// `session native` stamps without consulting the journal. Recovery must neither
+// truncate it away nor refuse the file because of it.
+
+const rawHeaderLine = "{\"type\":\"header\"}\n"
+
+func stampNativeFooter(t *testing.T, raw, id string) {
+	t.Helper()
+	require.NoError(t, StampRawCarrier(raw, CarrierStamp{NativeSessions: []lfs.NativeSession{{ID: id}}}))
+}
+
+// TestRollbackKeepsAFooterStampedAfterTheCrash verifies the rollback drops the
+// unacknowledged batch and nothing else.
+// Failure prevented: a native-session footer stamped by the SessionEnd hook
+// removed by the next recovery, so the daemon finalizes without the ids it
+// carried and the session's /c/ page never learns its native id.
+func TestRollbackKeepsAFooterStampedAfterTheCrash(t *testing.T) {
+	raw := filepath.Join(t.TempDir(), "raw.jsonl")
+	require.NoError(t, os.WriteFile(raw, []byte(rawHeaderLine), 0o600))
+	// A hook died mid-batch: journal at the header's size, cursor never
+	// committed, a torn entry on disk. Then the end hook stamped a footer.
+	journal, err := json.Marshal(rawAppendCheckpoint{RawSize: int64(len(rawHeaderLine)), OldOffset: 0, NewOffset: 10})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(raw+".append.json", journal, 0o600))
+	require.NoError(t, os.WriteFile(raw, []byte(rawHeaderLine+"{\"type\":\"tool\",\"content\":\"torn\"}\n{\"type\":\"tool\",\"content\":\"half"), 0o600))
+	stampNativeFooter(t, raw, "native-1")
+
+	require.NoError(t, RecoverRawAppend(raw, 0))
+
+	after, err := os.ReadFile(raw)
+	require.NoError(t, err)
+	require.NotContains(t, string(after), "torn", "the unacknowledged batch must still be rolled back")
+	require.NotContains(t, string(after), "half", "a torn partial entry is part of the batch")
+	require.Contains(t, string(after), "native-1", "the rollback took the footer stamped after the crash")
+	require.True(t, strings.HasPrefix(string(after), rawHeaderLine))
+	require.NoFileExists(t, raw+".append.json")
+	// What is left must still read as a session with one footer and no entries.
+	stored, err := ReadSessionFromPath(raw)
+	require.NoError(t, err)
+	require.Empty(t, stored.Entries)
+}
+
+// TestCommittedBatchAcceptsOnlyFootersPastItsSealedSize verifies the committed
+// check tolerates footers stamped after the seal and nothing else.
+// Failure prevented: a committed recording refused forever ("size conflicts")
+// because a footer landed before the journal was removed -- and, the other way,
+// a replaced longer file accepted as the one that was sealed.
+func TestCommittedBatchAcceptsOnlyFootersPastItsSealedSize(t *testing.T) {
+	sealed := func(t *testing.T) (raw string) {
+		t.Helper()
+		raw = filepath.Join(t.TempDir(), "raw.jsonl")
+		body := rawHeaderLine + "{\"type\":\"user\",\"content\":\"committed\"}\n"
+		require.NoError(t, os.WriteFile(raw, []byte(body), 0o600))
+		size := int64(len(body))
+		journal, err := json.Marshal(rawAppendCheckpoint{RawSize: int64(len(rawHeaderLine)), OldOffset: 0, NewOffset: 10, FinalSize: &size})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(raw+".append.json", journal, 0o600))
+		return raw
+	}
+	t.Run("footer stamped after the seal", func(t *testing.T) {
+		raw := sealed(t)
+		stampNativeFooter(t, raw, "native-2")
+		require.NoError(t, RecoverRawAppend(raw, 10))
+		require.NoFileExists(t, raw+".append.json")
+		after, err := os.ReadFile(raw)
+		require.NoError(t, err)
+		require.Contains(t, string(after), "committed")
+		require.Contains(t, string(after), "native-2")
+	})
+	t.Run("other content past the seal is refused", func(t *testing.T) {
+		raw := sealed(t)
+		f, err := os.OpenFile(raw, os.O_WRONLY|os.O_APPEND, 0o600)
+		require.NoError(t, err)
+		_, err = f.WriteString("{\"type\":\"user\",\"content\":\"not sealed\"}\n")
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+		require.ErrorContains(t, RecoverRawAppend(raw, 10), "conflicts with pending batch")
+		require.FileExists(t, raw+".append.json")
+	})
+}
+
+// TestJournalRollbackCannotTakeAConcurrentFooter verifies a rollback cannot run
+// while a stamp is mid-write: both hold the append lock.
+// Failure prevented: a footer half-written when the truncate lands, leaving a
+// torn line the next stamp "repairs" into garbage.
+func TestJournalRollbackCannotTakeAConcurrentFooter(t *testing.T) {
+	raw := filepath.Join(t.TempDir(), "raw.jsonl")
+	require.NoError(t, os.WriteFile(raw, []byte(rawHeaderLine+"{\"type\":\"tool\",\"content\":\"torn\"}\n"), 0o600))
+	journal, err := json.Marshal(rawAppendCheckpoint{RawSize: int64(len(rawHeaderLine)), OldOffset: 0, NewOffset: 10})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(raw+".append.json", journal, 0o600))
+
+	held := make(chan struct{})
+	release := make(chan struct{})
+	stampDone := make(chan error, 1)
+	go func() {
+		stampDone <- withRawAppendLock(raw, func() error {
+			close(held)
+			<-release
+			return stampRawCarrier(raw, CarrierStamp{NativeSessions: []lfs.NativeSession{{ID: "native-3"}}})
+		})
+	}()
+	<-held
+
+	recovered := make(chan error, 1)
+	go func() { recovered <- RecoverRawAppend(raw, 0) }()
+	select {
+	case <-recovered:
+		t.Fatal("recovery ran while a carrier stamp held the append lock")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	close(release)
+	require.NoError(t, <-stampDone)
+	require.NoError(t, <-recovered)
+	after, err := os.ReadFile(raw)
+	require.NoError(t, err)
+	require.NotContains(t, string(after), "torn")
+	require.Contains(t, string(after), "native-3")
+}
