@@ -285,14 +285,10 @@ func renderTranscriptScreenLines(w io.Writer, c read.TranscriptCue) {
 // shellQuoteIfNeeded single-quotes a path containing anything beyond a
 // conservative safe set, so the printed ox fetch line can be pasted as-is.
 func shellQuoteIfNeeded(p string) string {
-	safe := true
-	for _, r := range p {
-		if !(r == '/' || r == '.' || r == '-' || r == '_' || r == '~' || r == '+' || r == ',' || r == '@' ||
-			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
-			safe = false
-			break
-		}
-	}
+	safe := !strings.ContainsFunc(p, func(r rune) bool {
+		return !strings.ContainsRune("/.-_~+,@", r) &&
+			(r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9')
+	})
 	if safe && p != "" {
 		return p
 	}
