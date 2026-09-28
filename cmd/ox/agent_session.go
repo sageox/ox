@@ -1362,7 +1362,8 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		// async mode: copy files to ledger dir locally, signal daemon to upload+finalize
 		if result.EntryCount == 0 {
 			// nothing to upload — skip copy and daemon signal entirely.
-			// the 1-line header-only raw.jsonl written at session start is not worth committing.
+			// the header-only raw.jsonl written at session start (plus any footer a
+			// finalize door stamped) is not worth committing.
 			slog.Info("async upload skipped: session has no entries", "session", sessionName)
 		} else if copyErr := copySessionCacheToLedger(result, ledgerPath, sessionName); copyErr != nil {
 			slog.Warn("async copy to ledger failed", "error", copyErr)
