@@ -290,11 +290,12 @@ func ClassifyRawFile(rawPath string) RawKind {
 }
 
 // isFramingLine reports whether a raw.jsonl line is framing rather than
-// content: blank, a header or footer record, an import's _meta line, or — on
-// the first line only — a typeless legacy metadata header. Every content entry
-// carries a type. Keys match exactly, as in ReadSessionFromPath. A line that
-// is not JSON is content: a torn footer costs one empty summary, a misread
-// turn would cost the recording.
+// content: blank, a header or footer record, or an untyped record that is an
+// import's _meta line or — on the first line only — a legacy metadata header.
+// Every content entry carries a type, so a typed record is content unless its
+// type says header or footer. Keys match exactly, as in ReadSessionFromPath.
+// A line that is not JSON is content: a torn footer costs one empty summary,
+// a misread turn would cost the recording.
 func isFramingLine(line []byte, first bool) bool {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 {
@@ -304,9 +305,16 @@ func isFramingLine(line []byte, first bool) bool {
 	if json.Unmarshal(line, &rec) != nil {
 		return false
 	}
-	typ := string(rec["type"])
-	_, hasMeta := rec["_meta"]
-	return typ == `"footer"` || typ == `"header"` || hasMeta || (first && typ == "")
+	rawType, typed := rec["type"]
+	if !typed {
+		_, hasMeta := rec["_meta"]
+		return first || hasMeta
+	}
+	var typ string
+	if json.Unmarshal(rawType, &typ) != nil {
+		return false // typed, but not a string: content
+	}
+	return typ == "footer" || typ == "header"
 }
 
 // HasUserTurn reports whether a raw.jsonl file contains at least one user turn

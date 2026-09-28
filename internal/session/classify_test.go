@@ -362,6 +362,11 @@ func TestClassifyRawFile_FramingLinesAreNotContent(t *testing.T) {
 		// a retried stop can append a second header (generic_jsonl.go tolerates it); still framing
 		{"duplicate header then footer", header + header + footer, RawHeaderOnly},
 		{"header, turn, duplicate header", header + user + header, RawSubstantive},
+		// a typed record is content even when it carries an _meta key
+		{"typed entry with _meta is content", header + `{"type":"user","_meta":{"x":1}}` + "\n", RawSubstantive},
+		// the type string is decoded, not compared as raw bytes
+		{"escaped header type is framing", `{"type":"\u0068eader"}` + "\n" + footer, RawHeaderOnly},
+		{"non-string type is content", header + `{"type":7}` + "\n", RawSubstantive},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
