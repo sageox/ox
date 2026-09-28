@@ -1077,7 +1077,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	if err := session.RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
 		return nil, err
 	}
-	hasIncrementalEntries := rawJSONLHasEntries(rawPath)
+	hasIncrementalEntries := session.HasSubstantiveEntries(rawPath)
 
 	if hasIncrementalEntries {
 		// incremental hooks already wrote entries -- do final drain, write footer, and generate artifacts
@@ -1372,7 +1372,8 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		// async mode: copy files to ledger dir locally, signal daemon to upload+finalize
 		if result.EntryCount == 0 {
 			// nothing to upload — skip copy and daemon signal entirely.
-			// the 1-line header-only raw.jsonl written at session start is not worth committing.
+			// the header-only raw.jsonl written at session start (plus any footer a
+			// finalize door stamped) is not worth committing.
 			slog.Info("async upload skipped: session has no entries", "session", sessionName)
 		} else if copyErr := copySessionCacheToLedger(result, ledgerPath, sessionName); copyErr != nil {
 			slog.Warn("async copy to ledger failed", "error", copyErr)
@@ -2471,26 +2472,6 @@ func getSessionTermsNotice() string {
 	_ = config.SaveUserConfig(userCfg)
 
 	return sessionTermsNotice
-}
-
-// rawJSONLHasEntries returns true if raw.jsonl exists and contains more than
-// just a header line, indicating incremental hooks have appended entries.
-func rawJSONLHasEntries(rawPath string) bool {
-	f, err := os.Open(rawPath)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	lineCount := 0
-	for scanner.Scan() {
-		lineCount++
-		if lineCount > 1 {
-			return true // more than just the header
-		}
-	}
-	return false
 }
 
 // needsGenericDropFile returns true when a generic adapter session needs a drop

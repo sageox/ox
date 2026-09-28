@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -139,57 +137,6 @@ func TestConvertStoredEntries_Coverage(t *testing.T) {
 		}
 		if entries[0].Content != "" {
 			t.Errorf("expected empty content, got %q", entries[0].Content)
-		}
-	})
-}
-
-func TestRawJSONLHasEntries_Coverage(t *testing.T) {
-	t.Parallel()
-
-	t.Run("nonexistent file", func(t *testing.T) {
-		t.Parallel()
-		if rawJSONLHasEntries("/does/not/exist.jsonl") {
-			t.Error("expected false for nonexistent file")
-		}
-	})
-
-	t.Run("empty file", func(t *testing.T) {
-		t.Parallel()
-		f := filepath.Join(t.TempDir(), "raw.jsonl")
-		os.WriteFile(f, []byte(""), 0644)
-		if rawJSONLHasEntries(f) {
-			t.Error("expected false for empty file")
-		}
-	})
-
-	t.Run("header only", func(t *testing.T) {
-		t.Parallel()
-		f := filepath.Join(t.TempDir(), "raw.jsonl")
-		os.WriteFile(f, []byte(`{"_meta":{"version":"1"}}`+"\n"), 0644)
-		if rawJSONLHasEntries(f) {
-			t.Error("expected false for header-only file")
-		}
-	})
-
-	t.Run("header plus entry", func(t *testing.T) {
-		t.Parallel()
-		f := filepath.Join(t.TempDir(), "raw.jsonl")
-		os.WriteFile(f, []byte(`{"_meta":{"version":"1"}}`+"\n"+`{"type":"user","content":"hi"}`+"\n"), 0644)
-		if !rawJSONLHasEntries(f) {
-			t.Error("expected true for file with entries beyond header")
-		}
-	})
-
-	t.Run("multiple entries", func(t *testing.T) {
-		t.Parallel()
-		f := filepath.Join(t.TempDir(), "raw.jsonl")
-		lines := `{"header":true}
-{"type":"user","content":"a"}
-{"type":"assistant","content":"b"}
-`
-		os.WriteFile(f, []byte(lines), 0644)
-		if !rawJSONLHasEntries(f) {
-			t.Error("expected true for file with multiple lines")
 		}
 	})
 }

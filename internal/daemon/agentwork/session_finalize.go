@@ -778,7 +778,7 @@ func (s *detectSkipStats) total() int { return len(s.names()) }
 // a "non-empty file" test counts the header-only raw.jsonl that every ordinary
 // per-turn draft placeholder carries, and warning on those each detectCooldown
 // would bury the signal this counter exists to raise. Cost is bounded — the
-// classifier stops after the second line and never reads a whole transcript.
+// classifier stops at the first content line and never reads a whole transcript.
 //
 // Fails toward WARNING: a present-but-unreadable raw.jsonl classifies as
 // substantive, because "we could not look" must not read as "nothing is there".

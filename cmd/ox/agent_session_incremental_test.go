@@ -241,49 +241,6 @@ func TestAppendRedactedEntries(t *testing.T) {
 	})
 }
 
-// --- rawJSONLHasEntries tests ---
-
-func TestRawJSONLHasEntries(t *testing.T) {
-	t.Run("false for nonexistent file", func(t *testing.T) {
-		assert.False(t, rawJSONLHasEntries("/nonexistent/raw.jsonl"))
-	})
-
-	t.Run("false for empty file", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		rawPath := filepath.Join(tmpDir, "raw.jsonl")
-		require.NoError(t, os.WriteFile(rawPath, []byte{}, 0644))
-		assert.False(t, rawJSONLHasEntries(rawPath))
-	})
-
-	t.Run("false for header-only file", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		rawPath := filepath.Join(tmpDir, "raw.jsonl")
-		header := `{"type":"header","metadata":{"version":"1.0"}}` + "\n"
-		require.NoError(t, os.WriteFile(rawPath, []byte(header), 0644))
-		assert.False(t, rawJSONLHasEntries(rawPath))
-	})
-
-	t.Run("true for header plus one entry", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		rawPath := filepath.Join(tmpDir, "raw.jsonl")
-		content := `{"type":"header","metadata":{"version":"1.0"}}` + "\n" +
-			`{"type":"user","content":"hello"}` + "\n"
-		require.NoError(t, os.WriteFile(rawPath, []byte(content), 0644))
-		assert.True(t, rawJSONLHasEntries(rawPath))
-	})
-
-	t.Run("true for multiple entries", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		rawPath := filepath.Join(tmpDir, "raw.jsonl")
-		content := `{"type":"header"}` + "\n" +
-			`{"type":"user","content":"a"}` + "\n" +
-			`{"type":"assistant","content":"b"}` + "\n" +
-			`{"type":"user","content":"c"}` + "\n"
-		require.NoError(t, os.WriteFile(rawPath, []byte(content), 0644))
-		assert.True(t, rawJSONLHasEntries(rawPath))
-	})
-}
-
 // --- Single Claude agent scenario ---
 
 func TestSingleAgentIncrementalRecording(t *testing.T) {
@@ -326,8 +283,8 @@ func TestSingleAgentIncrementalRecording(t *testing.T) {
 		assert.Equal(t, "assistant", lines[i+1]["type"])
 	}
 
-	// verify rawJSONLHasEntries detects content
-	assert.True(t, rawJSONLHasEntries(rawPath))
+	// verify the canonical classifier detects content
+	assert.True(t, session.HasSubstantiveEntries(rawPath))
 
 	// verify recording state can be loaded
 	loaded, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
@@ -660,8 +617,8 @@ func TestNoHooksFiredFallbackDetection(t *testing.T) {
 
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
 
-	// rawJSONLHasEntries should return false (only header, no entries)
-	assert.False(t, rawJSONLHasEntries(rawPath),
+	// the canonical classifier should report no content (only header, no entries)
+	assert.False(t, session.HasSubstantiveEntries(rawPath),
 		"header-only file should not count as having entries")
 
 	// this signals processAgentSession to fall back to batch reading
@@ -798,34 +755,6 @@ func TestAppendLargeEntries(t *testing.T) {
 
 // --- Empty session stop path ---
 
-func TestRawJSONLHasEntries_EmptyFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	rawPath := filepath.Join(tmpDir, "raw.jsonl")
-	require.NoError(t, os.WriteFile(rawPath, []byte{}, 0644))
-	assert.False(t, rawJSONLHasEntries(rawPath))
-}
-
-func TestRawJSONLHasEntries_HeaderOnly(t *testing.T) {
-	tmpDir := t.TempDir()
-	rawPath := filepath.Join(tmpDir, "raw.jsonl")
-	header := `{"_meta":{"schema_version":"1","agent_type":"claude-code"}}` + "\n"
-	require.NoError(t, os.WriteFile(rawPath, []byte(header), 0644))
-	assert.False(t, rawJSONLHasEntries(rawPath))
-}
-
-func TestRawJSONLHasEntries_WithContent(t *testing.T) {
-	tmpDir := t.TempDir()
-	rawPath := filepath.Join(tmpDir, "raw.jsonl")
-	content := `{"_meta":{"schema_version":"1","agent_type":"claude-code"}}` + "\n" +
-		`{"type":"user","content":"hello world","timestamp":"2026-01-01T00:00:00Z"}` + "\n"
-	require.NoError(t, os.WriteFile(rawPath, []byte(content), 0644))
-	assert.True(t, rawJSONLHasEntries(rawPath))
-}
-
-func TestRawJSONLHasEntries_MissingFile(t *testing.T) {
-	assert.False(t, rawJSONLHasEntries(filepath.Join(t.TempDir(), "does-not-exist.jsonl")))
-}
-
 func TestFinalizeIncrementalSession_EmptySession(t *testing.T) {
 	adapters.Register(&testClaudeCodeAdapter{})
 	t.Cleanup(func() { adapters.Unregister("claude-code") })
@@ -839,7 +768,7 @@ func TestFinalizeIncrementalSession_EmptySession(t *testing.T) {
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
 
 	// confirm raw.jsonl has no entries beyond the header
-	assert.False(t, rawJSONLHasEntries(rawPath))
+	assert.False(t, session.HasSubstantiveEntries(rawPath))
 
 	adapter, err := adapters.GetAdapter("claude-code")
 	require.NoError(t, err)
