@@ -20,6 +20,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
@@ -1851,15 +1852,15 @@ func statusExitError(authenticated, projectInitialized bool, authErr error) erro
 	unreachable := !authenticated && errors.Is(authErr, auth.ErrEndpointUnreachable)
 	switch {
 	case unreachable && !projectInitialized:
-		return fmt.Errorf("could not verify authentication (endpoint unreachable) and project not initialized — check connectivity and run `ox init`")
+		return errkind.Errorf(errkind.NotInitialized, "could not verify authentication (endpoint unreachable) and project not initialized — check connectivity and run `ox init`")
 	case unreachable:
-		return fmt.Errorf("could not verify authentication — endpoint unreachable, check connectivity")
+		return errkind.Errorf(errkind.Network, "could not verify authentication — endpoint unreachable, check connectivity")
 	case !authenticated && !projectInitialized:
-		return fmt.Errorf("not authenticated and project not initialized — run `ox login` and `ox init`")
+		return errkind.Errorf(errkind.NotLoggedIn, "not authenticated and project not initialized — run `ox login` and `ox init`")
 	case !authenticated:
-		return fmt.Errorf("not authenticated — run `ox login`")
+		return errkind.Errorf(errkind.NotLoggedIn, "not authenticated — run `ox login`")
 	case !projectInitialized:
-		return fmt.Errorf("project not initialized — run `ox init`")
+		return errkind.Errorf(errkind.NotInitialized, "project not initialized — run `ox init`")
 	default:
 		return nil
 	}

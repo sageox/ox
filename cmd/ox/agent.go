@@ -21,6 +21,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/prime"
@@ -294,9 +295,9 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 	// span as "ox agent" surfaces these as a distinct bucket of
 	// "could not parse" failures in the trace backend.
 	if msg := agentinstance.ClassifyBadID(firstArg); msg != "" {
-		return fmt.Errorf("%s", msg)
+		return errkind.Errorf(errkind.Usage, "%s", msg)
 	}
-	return fmt.Errorf("unknown command or invalid agent_id: %s\nRun 'ox agent --help' for usage", firstArg)
+	return errkind.Errorf(errkind.Usage, "unknown command or invalid agent_id: %s\nRun 'ox agent --help' for usage", firstArg)
 }
 
 // resolveImplicitAgentID resolves `ox agent session ...` and the other
@@ -513,7 +514,7 @@ func reinjectFlags(cmd *cobra.Command, args []string, flagNames ...string) []str
 // runWithAgentID executes a command using the specified agent instance
 func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("missing command after agent_id\nUsage: ox agent %s <command>", agentID)
+		return errkind.Errorf(errkind.Usage, "missing command after agent_id\nUsage: ox agent %s <command>", agentID)
 	}
 
 	// quick health check - non-blocking if daemon unavailable
@@ -558,7 +559,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		return runAgentDoctor(cmd.OutOrStdout(), inst)
 	case "session":
 		if len(subargs) == 0 {
-			return fmt.Errorf("session requires a subcommand\nUsage: ox agent %s session <start|stop|abort|delete|log|remind|summarize|record|plan|context-trace|import|capture-prior|subagent-complete|subagent-list|recover>", inst.AgentID)
+			return errkind.Errorf(errkind.Usage, "session requires a subcommand\nUsage: ox agent %s session <start|stop|abort|delete|log|remind|summarize|record|plan|context-trace|import|capture-prior|subagent-complete|subagent-list|recover>", inst.AgentID)
 		}
 		sessionCmd := subargs[0]
 		sessionArgs := subargs[1:]
@@ -587,7 +588,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		case "summarize":
 			return runAgentSessionSummarize(inst, sessionArgs)
 		case "html":
-			return fmt.Errorf("session html command has been removed; use the web viewer at sageox.ai")
+			return errkind.Errorf(errkind.Usage, "session html command has been removed; use the web viewer at sageox.ai")
 		case "record":
 			return runAgentSessionRecord(inst, sessionArgs)
 		case "log":
@@ -615,7 +616,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		case "delete":
 			return runAgentSessionDelete(inst, cmd, sessionArgs)
 		default:
-			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, pause, resume, delete, log, remind, summarize, record, plan, context-trace, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
+			return errkind.Errorf(errkind.Usage, "unknown session command: %s\nAvailable: start, stop, abort, pause, resume, delete, log, remind, summarize, record, plan, context-trace, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
 		}
 	case "tasks":
 		// Same reinjection mechanism as session subcommands above:
@@ -650,7 +651,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		if auth.IsMemoryEnabled() {
 			available = "distill, " + available
 		}
-		return fmt.Errorf("unknown command: %s\nAvailable: %s", subcommand, available)
+		return errkind.Errorf(errkind.Usage, "unknown command: %s\nAvailable: %s", subcommand, available)
 	}
 }
 

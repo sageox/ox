@@ -24,6 +24,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
@@ -97,7 +98,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	// verify SageOx is initialized in this project
 	if !config.IsInitialized(projectRoot) {
-		return fmt.Errorf("SageOx not initialized in this project\nRun 'ox init' first to set up session recording")
+		return errkind.Errorf(errkind.NotInitialized, "SageOx not initialized in this project\nRun 'ox init' first to set up session recording")
 	}
 
 	// NOTE: No OAuth gate here. Session recording only needs a Git PAT for upload

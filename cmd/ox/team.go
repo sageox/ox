@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/spf13/cobra"
 )
@@ -200,7 +201,7 @@ func runTeamMembers(cmd *cobra.Command, args []string) error {
 	// (GetTokenForEndpoint would have sent it stale and eaten a 401).
 	token, err := auth.EnsureValidTokenForEndpoint(ep, 300)
 	if err != nil || token == nil || token.AccessToken == "" {
-		return fmt.Errorf("not authenticated — run 'ox login' first")
+		return errkind.Errorf(errkind.NotLoggedIn, "not authenticated — run 'ox login' first")
 	}
 	client := api.NewRepoClientForProject(projectRoot).WithAuthToken(token.AccessToken)
 

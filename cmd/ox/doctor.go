@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/doctor/checks"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/perf"
 	"github.com/sageox/ox/internal/tips"
@@ -381,10 +383,31 @@ common issues, or --fix-slug to target specific checks.`,
 		_ = auth.CheckAndWarnExpiry(cmd.Context(), projectEndpoint, os.Stderr)
 
 		if hasFailed && (cfg == nil || !cfg.JSON) {
-			return fmt.Errorf("some checks failed")
+			return errkind.WithDetail(errkind.ChecksFailed,
+				strings.Join(failedCheckCategories(categories), ","),
+				errors.New("some checks failed"))
 		}
 		return nil
 	},
+}
+
+// failedCheckCategories names the categories holding a failed check, in
+// report order. Usage telemetry sends them, and they are fixed names; a
+// check's own name can carry a repository name or a path.
+func failedCheckCategories(categories []checkCategory) []string {
+	var names []string
+	for _, cat := range categories {
+		if slices.ContainsFunc(cat.checks, checkFailed) && !slices.Contains(names, cat.name) {
+			names = append(names, cat.name)
+		}
+	}
+	return names
+}
+
+// checkFailed is the failure the report counts: a check or a child check
+// that neither passed nor was skipped.
+func checkFailed(c checkResult) bool {
+	return (!c.passed && !c.skipped) || slices.ContainsFunc(c.children, checkFailed)
 }
 
 var gcCmd = &cobra.Command{

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Privacy
+
+- **Usage data now says which failure it was** — when a command fails, its event names the failure in ox's own wording or by its error type, with no values filled in: never arguments, paths, or anything you typed. `ox config get telemetry` lists what's sent.
+
 ## [0.19.0] - 2026-09-28
 
 Sessions that never captured any work stay out of your Ledger again, and ox now sends usage data, which you can turn off.

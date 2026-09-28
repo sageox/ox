@@ -7,14 +7,15 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"reflect"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/sageox/ox/internal/api"
-	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ephemeral"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/spf13/cobra"
@@ -78,10 +79,10 @@ func skipPostHogCommand(path string) bool {
 }
 
 // postHogCommandProps describes an invocation without anything the user
-// typed: no argument or flag values, paths, or error text. Inside a repository
-// set up for SageOx it adds the repository's and team's SageOx IDs, which let
-// usage be counted per team; SageOx can map them to the team, so these events
-// are not anonymous at the team level.
+// typed: no argument or flag values, paths, or values from an error message.
+// Inside a repository set up for SageOx it adds the repository's and team's
+// SageOx IDs, which let usage be counted per team; SageOx can map them to the
+// team, so these events are not anonymous at the team level.
 func postHogCommandProps(c *cli.Context, path string, exitCode int) map[string]any {
 	actor, agentType := oxActorDetector{}.DetectActor()
 	if agentType == "ci" { // friction files CI under the agent actor
@@ -111,6 +112,9 @@ func postHogCommandProps(c *cli.Context, path string, exitCode int) map[string]a
 	}
 	if kind := postHogErrorKind(c.Err, exitCode); kind != "" {
 		props["error_kind"] = kind
+		if detail := postHogErrorDetail(c.Err); detail != "" {
+			props["error_detail"] = detail
+		}
 	}
 	return props
 }
@@ -123,27 +127,64 @@ func setFlagNames(cmd *cobra.Command) []string {
 }
 
 // postHogErrorKind classifies a failure without its message, which can carry
-// paths and other user input.
+// paths and other user input. An error ox created carries its kind
+// (errkind.Errorf); the rest are classified from the standard library's
+// errors and the exit code.
 func postHogErrorKind(err error, exitCode int) string {
 	var netErr net.Error
+	var opErr *net.OpError
 	switch {
 	case exitCode == 0:
 		return ""
 	case exitCode == 130, errors.Is(err, context.Canceled):
-		return "interrupted"
-	case errors.Is(err, api.ErrUnauthorized), errors.Is(err, auth.ErrEnvTokenMalformed):
-		return "auth"
-	case errors.Is(err, api.ErrVersionUnsupported):
-		return "version_unsupported"
+		return string(errkind.Interrupted)
+	case errkind.Of(err) != "":
+		return string(errkind.Of(err))
+	// The daemon's socket is the only unix socket ox dials, so this is the
+	// daemon down or not answering. Checked before net.Error, which an
+	// OpError also satisfies.
+	case errors.As(err, &opErr) && opErr.Net == "unix":
+		return string(errkind.Daemon)
 	case errors.Is(err, context.DeadlineExceeded):
-		return "timeout"
+		return string(errkind.Timeout)
 	case errors.As(err, &netErr):
-		return "network"
+		return string(errkind.Network)
 	case exitCode == 2:
-		return "usage"
+		return string(errkind.Usage)
 	default:
-		return "other"
+		return string(errkind.Other)
 	}
+}
+
+// postHogMaxDetail bounds error_detail, so a long detail cannot push the
+// event past the 4 KiB limit at which CapturePostHog drops it.
+const postHogMaxDetail = 200
+
+// postHogErrorDetail names which failure it was, with no value from its
+// message: the detail an error ox created carries (errkind), else the
+// operating system's description of an OS error in the chain, else the Go
+// type at the bottom of the chain. A plain message has no detail.
+func postHogErrorDetail(err error) string {
+	detail := errkind.DetailOf(err)
+	var errno syscall.Errno
+	switch {
+	case detail != "" || err == nil:
+	case errors.As(err, &errno):
+		detail = "syscall.Errno: " + errno.Error()
+	default:
+		root := err
+		for next := errors.Unwrap(root); next != nil; next = errors.Unwrap(root) {
+			root = next
+		}
+		// The errors and fmt packages' types hold only a message, or a join.
+		if t := reflect.TypeOf(root).String(); !strings.HasPrefix(t, "*errors.") && !strings.HasPrefix(t, "*fmt.") {
+			detail = t
+		}
+	}
+	if len(detail) > postHogMaxDetail {
+		detail = strings.ToValidUTF8(detail[:postHogMaxDetail], "")
+	}
+	return detail
 }
 
 // telemetryNotice is shown once per install, the first time a person runs ox
