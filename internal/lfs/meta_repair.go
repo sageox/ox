@@ -21,7 +21,7 @@ import (
 // caller can ignore the rest.
 type MetaRepairOutcome struct {
 	SessionName       string
-	Skipped           bool   // meta.json was already healthy or terminal
+	Skipped           bool   // meta.json needs no repair or is still in flight
 	RecoveredFromJSON bool   // pulled a clean title out of summary.json
 	BumpedAttempts    bool   // no recovery available; SummaryAttempts incremented
 	FlippedTerminal   bool   // hit MaxSummaryAttempts; status set to unrecoverable
@@ -41,8 +41,8 @@ type MetaRepairOutcome struct {
 // fields under the shared metadata lock, retaining all other JSON data.
 //
 // Idempotency contract: running this repeatedly on a healthy meta is a
-// no-op (Skipped=true, no write). Running it repeatedly on an
-// unrecoverable meta is also a no-op. Running it on a fixable meta
+// no-op (Skipped=true, no write). The same holds for draft, pending, and
+// unrecoverable metadata. Running it on a fixable meta
 // applies the fix once and then early-exits on subsequent calls.
 //
 // dryRun=true returns the outcome without writing meta.json.

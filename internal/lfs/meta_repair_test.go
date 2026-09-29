@@ -377,6 +377,8 @@ func TestRecoverEmptyTitleMeta_HealthyMetaSkipped(t *testing.T) {
 	assert.Equal(t, "Real Title", got.Title, "must not overwrite a healthy title")
 }
 
+// TestRecoverEmptyTitleMeta_PendingSkipped verifies that pending metadata stays
+// unchanged even when a summary.json has appeared before summarization settles.
 func TestRecoverEmptyTitleMeta_PendingSkipped(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

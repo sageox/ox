@@ -49,6 +49,45 @@ func TestRepairMetaSummary_CleanMetaIsSkipped_Idempotency(t *testing.T) {
 		"a clean meta.json must not be rewritten (idempotency: avoids ledger-mtime churn)")
 }
 
+// TestRepairMetaSummary_PendingSessionIsSkipped keeps the CLI repair from
+// spending a summarization attempt before the summary worker has run.
+func TestRepairMetaSummary_PendingSessionIsSkipped(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		summaryTitle string
+	}{
+		{name: "summary missing"},
+		{name: "summary present", summaryTitle: "Generated title"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sd := t.TempDir()
+			require.NoError(t, writeRawMeta(sd, map[string]any{
+				"version": "1.0", "session_name": "s", "agent_id": "Ox", "agent_type": "claude-code",
+				"created_at":       time.Now().Format(time.RFC3339Nano),
+				"summary_status":   sessionsummary.SummaryStatusPending,
+				"summary_attempts": lfs.MaxSummaryAttempts - 1,
+			}))
+			if tc.summaryTitle != "" {
+				body, err := json.Marshal(map[string]string{"title": tc.summaryTitle})
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(filepath.Join(sd, "summary.json"), body, 0o644))
+			}
+			metaPath := filepath.Join(sd, "meta.json")
+			before, err := os.ReadFile(metaPath)
+			require.NoError(t, err)
+
+			for range lfs.MaxSummaryAttempts + 1 {
+				out := repairSessionMetaSummary(sd, false)
+				require.Empty(t, out.Error)
+				assert.True(t, out.Skipped)
+				after, err := os.ReadFile(metaPath)
+				require.NoError(t, err)
+				assert.Equal(t, before, after, "pending metadata must remain byte-identical")
+			}
+		})
+	}
+}
+
 // TestRepairMetaSummary_NoSummaryJSON_ClearsAndMarksFailedValidation:
 // the leaky meta has no clean replacement available. Expected behavior:
 // clear user-visible fields, stamp summary_status=failed_validation,

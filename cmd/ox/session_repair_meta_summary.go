@@ -47,6 +47,8 @@ Action per session:
     (ops-facing) when no clean replacement is available.
   - Preserve meta.Files (OID manifest) verbatim — we never re-upload LFS.
 
+Draft and pending sessions are left to their recording and summarization paths.
+
 Idempotent: a meta.json that's already clean is left untouched.
 
 Examples:
@@ -71,7 +73,7 @@ type repairOutcome struct {
 	ChangedSummary    bool
 	ChangedStatus     bool
 	RecoveredFromJSON bool   // recovered title from summary.json
-	Skipped           bool   // already clean
+	Skipped           bool   // no repair needed or summarization still pending
 	Error             string // non-empty when the session couldn't be processed
 }
 
@@ -153,8 +155,9 @@ func runSessionRepairMetaSummary(cmd *cobra.Command, _ []string) error {
 //     fields to "" and stamp SummaryStatus=failed_validation. Move the
 //     diagnostic prose (the original leaky meta.summary, when present) into
 //     meta.validation_error so ops can still find it.
-//   - Anything already clean is skipped without rewriting meta.json (the
-//     idempotency contract — running daily must not churn mtimes).
+//   - Anything already clean or awaiting summarization is skipped without
+//     rewriting meta.json (the idempotency contract — running daily must not
+//     churn mtimes).
 func repairSessionMetaSummary(sessionDir string, dryRun bool) repairOutcome {
 	name := filepath.Base(sessionDir)
 	oc := repairOutcome{SessionName: name}
@@ -183,6 +186,13 @@ func repairSessionMetaSummary(sessionDir string, dryRun bool) repairOutcome {
 	// writer-invariant — so every live draft is reported as an error. Same
 	// guard RecoverEmptyTitleMeta carries; this is its near-duplicate.
 	if meta.IsDraft() {
+		oc.Skipped = true
+		return oc
+	}
+	// A published session can still be awaiting summarization. Leave its
+	// empty title and retry budget to the summarization path, just as the
+	// daemon's automatic title repair does.
+	if meta.SummaryStatus == sessionsummary.SummaryStatusPending {
 		oc.Skipped = true
 		return oc
 	}

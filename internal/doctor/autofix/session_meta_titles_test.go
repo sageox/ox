@@ -56,6 +56,8 @@ func TestRepairLedgerSessionTitles_HealthyLedgerIsClean(t *testing.T) {
 	assert.Equal(t, StatusClean, res.Status, "all-healthy ledger must report clean")
 }
 
+// TestRepairLedgerSessionTitles_PendingLedgerIsClean verifies that repeated
+// doctor passes leave an in-flight summary untouched and report clean.
 func TestRepairLedgerSessionTitles_PendingLedgerIsClean(t *testing.T) {
 	sessionsDir := filepath.Join(t.TempDir(), "sessions")
 	dir := seedSession(t, sessionsDir, "2026-09-17T04-58-test-OxPEND",
