@@ -6,11 +6,11 @@ audience: ai
 
 # Conversations
 
-`ox conversation` reads the active team's recorded conversations — meetings, discussions, and recorded coding sessions — **straight from the team-context checkout already on disk**. The daemon keeps that checkout synced; the CLI never pulls, never writes, and works fully logged out. Every command returns a JSON envelope by default (add `--text` for a human rendering) whose `guidance` field names the next step and whose `token_estimate` reports what reading the payload costs.
+`ox conversation` reads the active team's recorded conversations — meetings, discussions, and recorded coding sessions — **straight from the team-context checkout already on disk**. The daemon keeps that checkout synced; the CLI never pulls, never writes, and works fully logged out (resolving a share link is the one online step). Every command returns a JSON envelope by default (add `--text` for a human rendering) whose `guidance` field names the next step and whose `token_estimate` reports what reading the payload costs.
 
 ## Id forms
 
-Four id forms are accepted, nothing else:
+Five id forms are accepted, nothing else:
 
 | Form | What it is |
 |---|---|
@@ -18,10 +18,11 @@ Four id forms are accepted, nothing else:
 | `rec_<uuidv7>` | The same conversation by its recording id — same UUID, prefix swapped |
 | `sageox://…` | A full citation URI copied from a distillation atom or a memory file |
 | `https://sageox.ai/…` | A pasted recording link: `/c/rec_…` (short link), `/team/<team>/media/recordings/rec_…` (and its tabs, e.g. `/transcript`), or `/kb/<kb>/recordings/rec_…`. Any `*.sageox.ai` host; query and fragment are ignored |
+| `https://sageox.ai/s/…` | A share link. Resolved **online**, with one lookup, when you are logged in to the link's environment (`ox login`); the discussion is then read locally as usual. Logged out, paste the recording page URL or the `rec_` id instead |
 
 `cnv_` and `rec_` are twins: one UUID, two prefixes, freely interchangeable. A `sageox://` URI carries its own selectors (`cue=`, `t=`), so passing one to `transcript` retrieves exactly the cited slice. Folder names and bare UUID prefixes are not ids.
 
-When a user pastes a sageox.ai link, pass it straight to `ox conversation show <link>` — never web-fetch it (the page sits behind sign-in). Share links (`/s/…`) are opaque tokens that cannot be resolved locally yet; they fail with `share_link_unresolvable` — ask for the recording page URL or the `rec_` id. A link from a different environment than this checkout syncs (e.g. `test.sageox.ai`) fails `not_indexed` and says so.
+When a user pastes a sageox.ai link, pass it straight to `ox conversation show <link>` — never web-fetch it (the page sits behind sign-in). Share links (`/s/…`) carry an opaque token: ox looks it up on the SageOx endpoint you are logged in to for that link's host, and never sends it anywhere else. When the lookup cannot run or fails — logged out, share revoked or not shared with your team, a server without the lookup, a network error — it fails with `share_link_unresolvable` and the reason; ask for the recording page URL or the `rec_` id. A share for something other than a discussion fails with `share_link_not_discussion`. A link from a different environment than this checkout syncs (e.g. `test.sageox.ai`) fails `not_indexed` and says so.
 
 ## The disclosure ladder
 
