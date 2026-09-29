@@ -112,7 +112,7 @@ func OxCapabilities() []Capability {
 				},
 				{
 					Cue:     `A pasted sageox.ai recording link (…/c/rec_…, …/recordings/rec_…)`,
-					Command: "`ox conversation show <link>` — never web-fetch it (sign-in wall). A screen walkthrough: then `ox conversation transcript <link> --frames`.",
+					Command: "`ox conversation show <link>` — never web-fetch it (sign-in wall). Requires `ox login` and team membership; on `not_authenticated` / `no_team_access`, stop and tell the user. A screen walkthrough: then `ox conversation transcript <link> --frames`.",
 				},
 			},
 		},

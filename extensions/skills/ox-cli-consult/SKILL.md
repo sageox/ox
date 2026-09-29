@@ -9,7 +9,8 @@ description: >-
   than a slow one — check first, then answer. Routes the cue to the right corpus:
   recency to `ox session list`, conceptual to `ox query`, code-provenance to
   `ox code search`, decision-record work to `ox decision enrich`, a pasted
-  sageox.ai recording link to `ox conversation show`.
+  sageox.ai recording link to `ox conversation show` (requires sign-in and
+  membership in the repo's team).
 ---
 
 <!-- Thin by design. The authoritative consult-first reflex — the cues, the

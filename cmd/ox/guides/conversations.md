@@ -6,7 +6,7 @@ audience: ai
 
 # Conversations
 
-`ox conversation` reads the active team's recorded conversations — meetings, discussions, and recorded coding sessions — **straight from the team-context checkout already on disk**. The daemon keeps that checkout synced; the CLI never pulls, never writes, and works fully logged out (resolving a share link is the one online step). Every command returns a JSON envelope by default (add `--text` for a human rendering) whose `guidance` field names the next step and whose `token_estimate` reports what reading the payload costs.
+`ox conversation` reads the active team's recorded conversations — meetings, discussions, and recorded coding sessions — **straight from the team-context checkout already on disk**. The daemon keeps that checkout synced; the CLI never pulls and never writes. It does require `ox login`: before reading anything, ox confirms you are signed in and that SageOx still lists you as a member of the repo's team. That confirmation is cached for up to an hour, so offline reads keep working within the hour and are refused after it. Every command returns a JSON envelope by default (add `--text` for a human rendering) whose `guidance` field names the next step and whose `token_estimate` reports what reading the payload costs.
 
 ## Id forms
 
@@ -18,11 +18,23 @@ Five id forms are accepted, nothing else:
 | `rec_<uuidv7>` | The same conversation by its recording id — same UUID, prefix swapped |
 | `sageox://…` | A full citation URI copied from a distillation atom or a memory file |
 | `https://sageox.ai/…` | A pasted recording link: `/c/rec_…` (short link), `/team/<team>/media/recordings/rec_…` (and its tabs, e.g. `/transcript`), or `/kb/<kb>/recordings/rec_…`. Any `*.sageox.ai` host; query and fragment are ignored |
-| `https://sageox.ai/s/…` | A share link. Resolved **online**, with one lookup, when you are logged in to the link's environment (`ox login`); the discussion is then read locally as usual. Logged out, paste the recording page URL or the `rec_` id instead |
+| `https://sageox.ai/s/…` | A share link. Resolved **online**, with one lookup, when you are logged in to the link's environment (`ox login`); the discussion is then read locally as usual. If the lookup cannot run, paste the recording page URL or the `rec_` id instead |
 
 `cnv_` and `rec_` are twins: one UUID, two prefixes, freely interchangeable. A `sageox://` URI carries its own selectors (`cue=`, `t=`), so passing one to `transcript` retrieves exactly the cited slice. Folder names and bare UUID prefixes are not ids.
 
 When a user pastes a sageox.ai link, pass it straight to `ox conversation show <link>` — never web-fetch it (the page sits behind sign-in). Share links (`/s/…`) carry an opaque token: ox looks it up on the SageOx endpoint you are logged in to for that link's host, and never sends it anywhere else. When the lookup cannot run or fails — logged out, share revoked or not shared with your team, a server without the lookup, a network error — it fails with `share_link_unresolvable` and the reason; ask for the recording page URL or the `rec_` id. A share for something other than a discussion fails with `share_link_not_discussion`. A link from a different environment than this checkout syncs (e.g. `test.sageox.ai`) fails `not_indexed` and says so.
+
+## Access
+
+No id or link opens anything by itself. Every command checks access first and refuses before reading a file:
+
+| Code | Meaning | What to do |
+|---|---|---|
+| `not_authenticated` | Not signed in, or the sign-in expired or was rejected | Stop and ask the user to run `ox login`. Do not web-fetch the link or look for the content elsewhere |
+| `no_team_access` | Signed in, but SageOx says this account is not a member of the repo's team | Stop and tell the user; a team admin can invite them |
+| `access_unverified` | Membership could not be confirmed (offline, timeout, server error) and no confirmation from the last hour is cached. `retryable: true` | Retry once the network is back |
+
+`ox agent team-ctx` applies the same check.
 
 ## The disclosure ladder
 
