@@ -32,6 +32,30 @@ const (
 // credential rotation.
 var ErrEndpointUnreachable = errors.New("introspection endpoint unreachable")
 
+// ErrTokenRejected marks an introspection answer of 401 or 403: the server
+// was reached and refused the credential. It is the third outcome next to
+// success and ErrEndpointUnreachable, so a caller can tell "sign in again"
+// from "the server is having a bad day" (a 5xx is neither) without parsing
+// the message. The error text itself is unchanged.
+var ErrTokenRejected = errors.New("token rejected by server")
+
+// rejectedError keeps the original message and adds ErrTokenRejected to the
+// chain for errors.Is.
+type rejectedError struct{ err error }
+
+func (e *rejectedError) Error() string { return e.err.Error() }
+func (e *rejectedError) Unwrap() []error {
+	return []error{e.err, ErrTokenRejected}
+}
+
+// rejectedByStatus tags err with ErrTokenRejected when status is 401 or 403.
+func rejectedByStatus(status int, err error) error {
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return &rejectedError{err: err}
+	}
+	return err
+}
+
 // maxIntrospectBody bounds the response body we are willing to buffer. A
 // legitimate introspection response is a few hundred bytes; 1 MiB leaves an
 // enormous margin while keeping a hostile or misconfigured endpoint from
@@ -210,13 +234,13 @@ func Introspect(ep, accessToken string) (*IntrospectResult, error) {
 			// in its error body would leak it there. Do not "simplify" this
 			// into the redactedBody call above — they cover different sinks.
 			if errResp.ErrorDescription != "" {
-				return nil, fmt.Errorf("server rejected token: %s", logger.RedactSecrets(errResp.ErrorDescription))
+				return nil, rejectedByStatus(resp.StatusCode, fmt.Errorf("server rejected token: %s", logger.RedactSecrets(errResp.ErrorDescription)))
 			}
 			if errResp.Error != "" {
-				return nil, fmt.Errorf("server rejected token: %s", logger.RedactSecrets(errResp.Error))
+				return nil, rejectedByStatus(resp.StatusCode, fmt.Errorf("server rejected token: %s", logger.RedactSecrets(errResp.Error)))
 			}
 		}
-		return nil, fmt.Errorf("server rejected token (HTTP %d)", resp.StatusCode)
+		return nil, rejectedByStatus(resp.StatusCode, fmt.Errorf("server rejected token (HTTP %d)", resp.StatusCode))
 	}
 
 	var result IntrospectResult
