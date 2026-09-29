@@ -16,6 +16,9 @@ func TestErrorEnvelopeCarriesGuidanceAndTokenEstimate(t *testing.T) {
 		ErrCodeShareLinkUnresolvable,
 		ErrCodeShareLinkNotDiscussion,
 		ErrCodeNoTeamContext,
+		ErrCodeNotAuthenticated,
+		ErrCodeNoTeamAccess,
+		ErrCodeAccessUnverified,
 		ErrCodeNotIndexed,
 		ErrCodeNoDistillation,
 		ErrCodeTranscriptNotAvailable,
@@ -59,19 +62,20 @@ func TestFinishErrorMatchesErrorEnvelopeContract(t *testing.T) {
 	}
 }
 
-// TestNewErrorRetryableContract pins the documented contract: read_error is
-// the only retryable code. Failure prevented: agents branching on retryable
-// either retry stable facts (invalid ids, missing data) or give up on
-// transient filesystem failures.
+// TestNewErrorRetryableContract pins the documented contract: read_error and
+// access_unverified are the only retryable codes. Failure prevented: agents
+// branching on retryable either retry stable facts (invalid ids, missing data,
+// a refused sign-in or membership) or give up on transient failures.
 func TestNewErrorRetryableContract(t *testing.T) {
 	codes := []string{
 		ErrCodeInvalidID, ErrCodeNoTeamContext, ErrCodeNotIndexed,
 		ErrCodeNoDistillation, ErrCodeTranscriptNotAvailable,
 		ErrCodeTopicNotFound, ErrCodeInvalidSelector, ErrCodeReadError,
+		ErrCodeNotAuthenticated, ErrCodeNoTeamAccess, ErrCodeAccessUnverified,
 	}
 	for _, code := range codes {
 		got := newError(code, "m").Retryable
-		want := code == ErrCodeReadError
+		want := code == ErrCodeReadError || code == ErrCodeAccessUnverified
 		if got != want {
 			t.Errorf("newError(%s).Retryable = %v, want %v", code, got, want)
 		}

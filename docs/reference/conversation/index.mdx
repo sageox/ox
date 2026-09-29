@@ -12,8 +12,10 @@ Read recorded team conversations from the local Team Context
 
 Read-only commands for browsing recorded team conversations locally:
 summaries, transcript slices, and distillation topics, served from the
-team-context checkout the daemon keeps synced. Works fully logged out
-(a share link is the one input that needs a login to resolve).
+team-context checkout the daemon keeps synced. Requires `ox login`: ox
+confirms you are signed in and a member of the repo's team (checked with
+SageOx at most once an hour; offline, a confirmation from the last hour
+still counts) before it reads anything.
 
 Commands disclose progressively: list -> show -> topics -> topic -> transcript.
 Each JSON envelope's guidance field names the next step, and token_estimate
@@ -27,8 +29,8 @@ copied from a distillation atom, or a pasted sageox.ai recording link:
   https://sageox.ai/kb/<kb>/recordings/rec_…
 Share links (https://sageox.ai/s/…) resolve online when you are logged in
 to the link's environment (one lookup; the discussion itself is still read
-locally). Logged out, open one and paste the recording page URL or its rec_
-id instead.
+locally). A link or id never grants access on its own: signed out, or
+outside the team, every form is refused the same way.
 
 ```
 ox conversation [flags]

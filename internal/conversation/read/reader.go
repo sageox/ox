@@ -4,8 +4,11 @@
 // guard, disclosure windows, and envelope assembly (plan of record, step 4).
 //
 // The package reads what is on disk and never pulls (D14): the daemon owns
-// sync, last_sync is surfaced from local team-context state, and the whole
-// path works logged out. Team-context content is untrusted (customer
+// sync, and last_sync is surfaced from local team-context state. It does not
+// decide who may read: the command layer gates every Reader behind
+// internal/teamaccess (signed in, and a member of the team per the server,
+// confirmed within the last hour), so nothing here runs for a caller who is
+// signed out or outside the team. Team-context content is untrusted (customer
 // writable): every id is strictly validated and every folder path passes the
 // join guard before it touches the filesystem.
 package read
