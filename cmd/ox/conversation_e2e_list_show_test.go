@@ -261,6 +261,10 @@ func TestConversationE2E_PastedLinks(t *testing.T) {
 	require.NotNil(t, env.Error)
 	require.Equal(t, "share_link_unresolvable", env.Error.Code)
 	require.Contains(t, env.Guidance, "recording page URL")
+	// The harness home has no login, so the link is never looked up online:
+	// the reason says so and names the way to make it resolve.
+	require.Contains(t, env.Error.Message, "not logged in to sageox.ai")
+	require.Contains(t, env.Error.Message, "ox login")
 }
 
 // TestConversationE2E_IndexMiss proves a strictly valid id with no live

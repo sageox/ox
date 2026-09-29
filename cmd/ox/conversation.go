@@ -25,7 +25,8 @@ var conversationCmd = &cobra.Command{
 	Short:   "Read recorded team conversations from the local Team Context",
 	Long: `Read-only commands for browsing recorded team conversations locally:
 summaries, transcript slices, and distillation topics, served from the
-team-context checkout the daemon keeps synced. Works fully logged out.
+team-context checkout the daemon keeps synced. Works fully logged out
+(a share link is the one input that needs a login to resolve).
 
 Commands disclose progressively: list -> show -> topics -> topic -> transcript.
 Each JSON envelope's guidance field names the next step, and token_estimate
@@ -37,8 +38,10 @@ copied from a distillation atom, or a pasted sageox.ai recording link:
   https://sageox.ai/c/rec_…
   https://sageox.ai/team/<team>/media/recordings/rec_…[/transcript]
   https://sageox.ai/kb/<kb>/recordings/rec_…
-Share links (https://sageox.ai/s/…) cannot be resolved yet: open one and
-paste the recording page URL or its rec_ id instead.`,
+Share links (https://sageox.ai/s/…) resolve online when you are logged in
+to the link's environment (one lookup; the discussion itself is still read
+locally). Logged out, open one and paste the recording page URL or its rec_
+id instead.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Args:          cobra.NoArgs,
@@ -149,7 +152,7 @@ func conversationExitCode(e *read.Error) int {
 		return 0
 	}
 	switch e.Code {
-	case read.ErrCodeInvalidID, read.ErrCodeInvalidSelector, read.ErrCodeShareLinkUnresolvable:
+	case read.ErrCodeInvalidID, read.ErrCodeInvalidSelector, read.ErrCodeShareLinkUnresolvable, read.ErrCodeShareLinkNotDiscussion:
 		return 2
 	default:
 		return 1

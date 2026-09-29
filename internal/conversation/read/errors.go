@@ -10,9 +10,15 @@ const (
 	// valid tp_ UUIDv7 (D21).
 	ErrCodeInvalidID = "invalid_id"
 	// ErrCodeShareLinkUnresolvable: the input is a sageox.ai share link
-	// (/s/{token}). The token is opaque and no local data maps it to a
-	// recording, so the caller must supply the recording page URL or id.
+	// (/s/{token}) that could not be resolved to a recording. The token is
+	// opaque and no local data maps it; the command layer resolves it online
+	// when the user is logged in to the link's environment, and every failure
+	// of that lookup (logged out, share not found, server without the lookup,
+	// network) lands here with the reason in the message.
 	ErrCodeShareLinkUnresolvable = "share_link_unresolvable"
+	// ErrCodeShareLinkNotDiscussion: a share link resolved, but to something
+	// other than a recorded discussion, which is all ox conversation reads.
+	ErrCodeShareLinkNotDiscussion = "share_link_not_discussion"
 	// ErrCodeNoTeamContext: no local team-context checkout is resolvable for
 	// this repo — covers ephemeral mode and pre-first-sync states (D14, D18).
 	ErrCodeNoTeamContext = "no_team_context"
@@ -69,7 +75,9 @@ func errorGuidance(code string) string {
 	case ErrCodeInvalidID:
 		return "Copy a valid id from ox conversation list (cnv_/rec_ UUIDv7, a sageox:// citation URI, or a sageox.ai recording link)."
 	case ErrCodeShareLinkUnresolvable:
-		return "Open the share link in a browser, then pass the recording page URL (…/recordings/rec_…) or its rec_ id to ox conversation show."
+		return "A share link resolves online when you are logged in to its SageOx environment (ox login); otherwise open the share link in a browser and pass the recording page URL (…/recordings/rec_…) or its rec_ id to ox conversation show."
+	case ErrCodeShareLinkNotDiscussion:
+		return "This share link is not for a recorded discussion; open it in a browser, or pass a recording link or rec_ id to ox conversation show."
 	case ErrCodeNoTeamContext:
 		return "Check team-context sync with ox status; retry after the first sync completes."
 	case ErrCodeNotIndexed:

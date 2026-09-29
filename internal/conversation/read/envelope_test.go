@@ -13,6 +13,8 @@ import (
 func TestErrorEnvelopeCarriesGuidanceAndTokenEstimate(t *testing.T) {
 	codes := []string{
 		ErrCodeInvalidID,
+		ErrCodeShareLinkUnresolvable,
+		ErrCodeShareLinkNotDiscussion,
 		ErrCodeNoTeamContext,
 		ErrCodeNotIndexed,
 		ErrCodeNoDistillation,

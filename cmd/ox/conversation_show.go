@@ -43,7 +43,11 @@ func runConversationShow(cmd *cobra.Command, args []string) error {
 	if openErr != nil {
 		return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(openErr), nil)
 	}
-	env := reader.Show(args[0])
+	idArg, shareErr := resolveConversationIDArg(conversationContext(cmd), args[0])
+	if shareErr != nil {
+		return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(shareErr), nil)
+	}
+	env := reader.Show(idArg)
 	return finishConversationEnvelope(cmd.OutOrStdout(), format, env, renderConversationShowText)
 }
 

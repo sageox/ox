@@ -83,7 +83,11 @@ func runConversationTranscript(cmd *cobra.Command, args []string) error {
 	if openErr != nil {
 		return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(openErr), nil)
 	}
-	env := reader.Transcript(args[0], opts)
+	idArg, shareErr := resolveConversationIDArg(conversationContext(cmd), args[0])
+	if shareErr != nil {
+		return finishConversationEnvelope(cmd.OutOrStdout(), format, read.ErrorEnvelope(shareErr), nil)
+	}
+	env := reader.Transcript(idArg, opts)
 	return finishConversationEnvelope(cmd.OutOrStdout(), format, env, renderConversationTranscriptText)
 }
 

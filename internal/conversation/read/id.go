@@ -99,7 +99,9 @@ func hasLinkScheme(raw string) bool {
 //	/kb/{kb}/recordings/{rec_}[/...]               knowledge-base recording
 //
 // A /s/{token} share link is recognized but cannot be resolved locally: the
-// token is opaque, so it gets its own typed code rather than invalid_id.
+// token is opaque, so it gets its own typed code rather than invalid_id. The
+// command layer may resolve one online first (see ParseShareLink); this
+// package never touches the network.
 func parseLink(raw string) (*ID, *Error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" {
@@ -115,8 +117,12 @@ func parseLink(raw string) (*ID, *Error) {
 	var candidate string
 	switch {
 	case len(segs) >= 1 && segs[0] == "s":
+		if len(segs) != 2 || !isShareToken(segs[1]) {
+			return nil, newError(ErrCodeInvalidID,
+				fmt.Sprintf("%q is not a valid share link; use %s", truncateID(raw), acceptedIDForms))
+		}
 		return nil, newError(ErrCodeShareLinkUnresolvable,
-			fmt.Sprintf("%q is a share link, which ox cannot resolve to a recording yet; open it in a browser and paste the recording page URL (…/recordings/rec_…) or the rec_ id instead", truncateID(raw)))
+			fmt.Sprintf("%q is a share link, which cannot be resolved offline; open it in a browser and paste the recording page URL (…/recordings/rec_…) or the rec_ id instead", truncateID(raw)))
 	case len(segs) == 2 && segs[0] == "c":
 		candidate = segs[1]
 	case len(segs) >= 5 && segs[0] == "team" && segs[2] == "media" && segs[3] == "recordings":
@@ -137,6 +143,58 @@ func parseLink(raw string) (*ID, *Error) {
 	}
 	id.LinkHost = host
 	return id, nil
+}
+
+// Share-token bounds. The token is opaque, so the grammar is deliberately
+// narrow — URL-safe characters only, bounded length — which lets it be placed
+// in a request path without any escaping ambiguity and rules out dot-segments,
+// separators, and percent-encoding before a single byte leaves the machine.
+const (
+	minShareTokenLen = 4
+	maxShareTokenLen = 128
+)
+
+// isShareToken reports whether tok is a syntactically valid share token:
+// 4-128 characters from [A-Za-z0-9_-].
+func isShareToken(tok string) bool {
+	if len(tok) < minShareTokenLen || len(tok) > maxShareTokenLen {
+		return false
+	}
+	for i := 0; i < len(tok); i++ {
+		c := tok[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ParseShareLink reports whether raw is a sageox.ai share link
+// (https://<host>/s/{token}) with a strictly valid token, returning the
+// normalized link host and the token. It is pure and offline: resolving the
+// token to a recording is a network step that belongs to the caller, which
+// must only ever send it to an endpoint the user is logged in to — never to a
+// host taken from the link alone. Query and fragment are ignored.
+func ParseShareLink(raw string) (host, token string, ok bool) {
+	raw = strings.TrimSpace(raw)
+	if !hasLinkScheme(raw) {
+		return "", "", false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", "", false
+	}
+	host = linkHost(u)
+	if host != sageoxHost && !strings.HasSuffix(host, "."+sageoxHost) {
+		return "", "", false
+	}
+	segs := strings.FieldsFunc(u.Path, func(r rune) bool { return r == '/' })
+	if len(segs) != 2 || segs[0] != "s" || !isShareToken(segs[1]) {
+		return "", "", false
+	}
+	return host, segs[1], true
 }
 
 // linkHost returns the link's host normalized the canonical way

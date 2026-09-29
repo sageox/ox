@@ -250,11 +250,12 @@ func TestPickPointerSamples(t *testing.T) {
 	}
 }
 
-// TestShareLinkGuidance: the share-link error tells the reader what to paste
-// instead, rather than the generic invalid-id advice.
+// TestShareLinkGuidance: the share-link error names both ways forward — log
+// in so the link resolves online, or paste the recording page URL / rec_ id
+// instead — rather than the generic invalid-id advice.
 func TestShareLinkGuidance(t *testing.T) {
 	g := errorGuidance(ErrCodeShareLinkUnresolvable)
-	for _, want := range []string{"share link", "rec_"} {
+	for _, want := range []string{"share link", "rec_", "ox login", "recording page URL"} {
 		if !strings.Contains(g, want) {
 			t.Errorf("share-link guidance %q lacks %q", g, want)
 		}

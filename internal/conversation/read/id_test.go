@@ -146,6 +146,9 @@ func TestParseIDLinks(t *testing.T) {
 		{name: "lookalike prefix host", raw: "https://evilsageox.ai/c/" + fullRec, wantErr: ErrCodeInvalidID},
 		{name: "userinfo trick", raw: "https://sageox.ai@evil.com/c/" + fullRec, wantErr: ErrCodeInvalidID},
 		{name: "share link", raw: "https://sageox.ai/s/rs-abc123", wantErr: ErrCodeShareLinkUnresolvable},
+		{name: "share link with bad token chars", raw: "https://sageox.ai/s/rs.abc%2F123", wantErr: ErrCodeInvalidID},
+		{name: "share link with extra segment", raw: "https://sageox.ai/s/rs-abc123/x", wantErr: ErrCodeInvalidID},
+		{name: "share link without token", raw: "https://sageox.ai/s/", wantErr: ErrCodeInvalidID},
 		{name: "junk path", raw: "https://sageox.ai/pricing", wantErr: ErrCodeInvalidID},
 		{name: "root path", raw: "https://sageox.ai/", wantErr: ErrCodeInvalidID},
 		{name: "short link with extra segment", raw: "https://sageox.ai/c/" + fullRec + "/x", wantErr: ErrCodeInvalidID},
@@ -199,5 +202,56 @@ func TestInvalidIDMessageNamesLinkForms(t *testing.T) {
 	_, err := ParseID("not-an-id")
 	if err == nil || !strings.Contains(err.Message, "sageox.ai/c/rec_") {
 		t.Fatalf("invalid_id message does not name link forms: %v", err)
+	}
+}
+
+// TestParseShareLink pins the offline half of share-link resolution: which
+// inputs the command layer may treat as a share token and which host it is
+// bound to. Failure prevented: a crafted link smuggling separators,
+// dot-segments, or percent-encoding into the token, or a lookalike host,
+// reaching a request path or picking the endpoint a credential is sent to.
+func TestParseShareLink(t *testing.T) {
+	long := strings.Repeat("a", 128)
+	tests := []struct {
+		name      string
+		raw       string
+		wantOK    bool
+		wantHost  string
+		wantToken string
+	}{
+		{name: "prod", raw: "https://sageox.ai/s/rs-abc123", wantOK: true, wantHost: "sageox.ai", wantToken: "rs-abc123"},
+		{name: "test env", raw: "https://test.sageox.ai/s/rs_A-9z", wantOK: true, wantHost: "test.sageox.ai", wantToken: "rs_A-9z"},
+		{name: "app prefix normalized", raw: "https://app.sageox.ai/s/rs-abc123", wantOK: true, wantHost: "sageox.ai", wantToken: "rs-abc123"},
+		{name: "query, fragment, trailing slash, whitespace", raw: "  https://sageox.ai/s/rs-abc123/?x=1#y\n", wantOK: true, wantHost: "sageox.ai", wantToken: "rs-abc123"},
+		{name: "max length", raw: "https://sageox.ai/s/" + long, wantOK: true, wantHost: "sageox.ai", wantToken: long},
+		{name: "too long", raw: "https://sageox.ai/s/" + long + "a"},
+		{name: "too short", raw: "https://sageox.ai/s/abc"},
+		{name: "encoded slash", raw: "https://sageox.ai/s/rs%2Fabc123"},
+		{name: "dot segment", raw: "https://sageox.ai/s/.."},
+		{name: "dot in token", raw: "https://sageox.ai/s/rs.abc123"},
+		{name: "percent in token", raw: "https://sageox.ai/s/rs%25abc123"},
+		{name: "extra segment", raw: "https://sageox.ai/s/rs-abc123/target"},
+		{name: "foreign host", raw: "https://example.com/s/rs-abc123"},
+		{name: "lookalike host", raw: "https://sageox.ai.evil.com/s/rs-abc123"},
+		{name: "userinfo trick", raw: "https://sageox.ai@evil.com/s/rs-abc123"},
+		{name: "recording link is not a share link", raw: "https://sageox.ai/c/rec_019ff2f5-2079-7be1-b05e-8caad2772e61"},
+		{name: "bare id", raw: "rec_019ff2f5-2079-7be1-b05e-8caad2772e61"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			host, token, ok := ParseShareLink(tt.raw)
+			if ok != tt.wantOK {
+				t.Fatalf("ParseShareLink(%q) ok = %v, want %v (host %q token %q)", tt.raw, ok, tt.wantOK, host, token)
+			}
+			if !ok {
+				if host != "" || token != "" {
+					t.Errorf("rejected link leaked host %q / token %q", host, token)
+				}
+				return
+			}
+			if host != tt.wantHost || token != tt.wantToken {
+				t.Errorf("got host %q token %q, want %q / %q", host, token, tt.wantHost, tt.wantToken)
+			}
+		})
 	}
 }

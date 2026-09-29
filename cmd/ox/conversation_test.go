@@ -39,6 +39,8 @@ type convTestEnvelope struct {
 // fixture corpus for the test's duration (cwd of a cmd/ox test is cmd/ox).
 func useConversationTestReader(t *testing.T) {
 	t.Helper()
+	// A share-link row would otherwise consult the developer's real login.
+	isolateConversationAuth(t)
 	orig := openConversationReader
 	t.Cleanup(func() { openConversationReader = orig })
 	openConversationReader = func() (*read.Reader, *read.Error) {
