@@ -31,7 +31,7 @@ These commands do not edit Claude Code settings or upload traces to the Ledger.
 Start the receiver before Claude Code to avoid missing early startup events.`,
 	// Local capture works without login, project initialization, the sync daemon,
 	// or an OTLP exporter for ox itself. In particular, serve must not start those.
-	PersistentPreRunE: func(_ *cobra.Command, _ []string) error { return nil },
+	PersistentPreRunE: applyConfigFlag,
 }
 
 var sessionTraceEnableCmd = &cobra.Command{

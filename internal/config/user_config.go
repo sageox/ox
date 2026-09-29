@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -575,7 +576,10 @@ func (c *UserConfig) SetMurmurReceive(mode string) {
 func LoadUserConfig() (*UserConfig, error) {
 	// OX_USER_CONFIG overrides all path discovery — for CI/ephemeral environments
 	if envPath := os.Getenv(EnvUserConfig); envPath != "" {
-		cfg, err := loadUserConfigFromFile(envPath)
+		cfg, err := LoadUserConfigFile(envPath)
+		if errors.Is(err, os.ErrNotExist) {
+			err = nil // an absent environment-selected file still means defaults
+		}
 		publishEphemeralPreference(cfg)
 		return cfg, err
 	}
@@ -625,19 +629,17 @@ func LoadUserConfigFrom(configDir string) (*UserConfig, error) {
 	return &cfg, nil
 }
 
-// loadUserConfigFromFile loads user config from an explicit file path.
-func loadUserConfigFromFile(path string) (*UserConfig, error) {
+// LoadUserConfigFile loads an explicitly selected user config file.
+// Unlike default path discovery, a missing file is an error.
+func LoadUserConfigFile(path string) (*UserConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return &UserConfig{}, nil
-		}
-		return &UserConfig{}, fmt.Errorf("reading config from OX_USER_CONFIG=%s: %w", path, err)
+		return &UserConfig{}, fmt.Errorf("reading user config %q: %w", path, err)
 	}
 
 	var cfg UserConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return &UserConfig{}, fmt.Errorf("parsing config from OX_USER_CONFIG=%s: %w", path, err)
+		return &UserConfig{}, fmt.Errorf("parsing user config %q: %w", path, err)
 	}
 
 	return &cfg, nil
