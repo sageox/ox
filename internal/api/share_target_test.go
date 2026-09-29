@@ -59,3 +59,20 @@ func TestGetShareTarget_NotFoundBodyDistinguishesDenialFromMissingRoute(t *testi
 		})
 	}
 }
+
+// TestGetShareTarget_ForbiddenIsItsOwnError: a 403 means the share is not for
+// this account, which is neither a broken lookup nor a rejected login.
+// Failure prevented: "not shared with you" reported as a generic HTTP failure.
+func TestGetShareTarget_ForbiddenIsItsOwnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+	_, err := NewRepoClientWithEndpoint(srv.URL).WithAuthToken("tok").GetShareTarget(context.Background(), "rs-abc123")
+	if !errors.Is(err, ErrShareForbidden) {
+		t.Fatalf("err = %v, want ErrShareForbidden", err)
+	}
+	if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrShareLookupUnavailable) {
+		t.Errorf("403 must not read as a login or availability failure: %v", err)
+	}
+}

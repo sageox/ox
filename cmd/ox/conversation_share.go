@@ -19,7 +19,8 @@ import (
 // Share links (https://<host>.sageox.ai/s/{token}) carry an opaque token, so
 // resolving one to a recording takes one authenticated API call. That step
 // lives here, in the command layer, because internal/conversation/read is
-// pure and offline by contract ("never pulls, works logged out").
+// pure and offline by contract (it never pulls; the access gate in
+// openConversationReader runs before this).
 //
 // Trust rule: the link only ever contributes its token and its host. The
 // token is sent to an endpoint the user is already logged in to whose host
@@ -35,6 +36,10 @@ var shareLookupTimeout = 5 * time.Second
 // it at an httptest server while the endpoint and its stored credential stay
 // real.
 var shareLookupBaseURL = func(ep string) string { return ep }
+
+// shareRefresh renews a credential the lookup answered 401 for. A variable
+// so tests can keep the refresh off the real endpoint.
+var shareRefresh = auth.Handle401ErrorForEndpoint
 
 // shareRecordingEntity is the ShareTarget.EntityType of a recorded discussion.
 const shareRecordingEntity = "recording"
@@ -65,6 +70,14 @@ func resolveConversationIDArg(ctx context.Context, raw string) (string, *read.Er
 		WithAuthToken(stored.AccessToken).
 		WithTimeout(shareLookupTimeout)
 	target, err := client.GetShareTarget(ctx, token)
+	if errors.Is(err, api.ErrUnauthorized) {
+		// One reactive refresh, as other authenticated commands do: the
+		// token can be revoked or rotated server-side after the local
+		// expiry check passed.
+		if refreshed, rerr := shareRefresh(stored, ep); rerr == nil && refreshed != nil && refreshed.AccessToken != "" {
+			target, err = client.WithAuthToken(refreshed.AccessToken).GetShareTarget(ctx, token)
+		}
+	}
 	if err != nil {
 		return "", shareUnresolvable(raw, shareLookupFailureReason(host, err))
 	}
@@ -116,6 +129,8 @@ func shareLookupFailureReason(host string, err error) string {
 	switch {
 	case errors.Is(err, api.ErrShareNotFound):
 		return "the share was not found — it may be revoked or expired, or not shared with your team"
+	case errors.Is(err, api.ErrShareForbidden):
+		return "the share is not available to your account — it was not shared with you, or you are not a member of the team that owns it"
 	case errors.Is(err, api.ErrShareLookupUnsupported):
 		return fmt.Sprintf("%s doesn't support share lookups yet", host)
 	case errors.Is(err, api.ErrUnauthorized):

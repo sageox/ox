@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,6 +41,13 @@ func isolateConversationAuth(t *testing.T) {
 	t.Setenv("OX_XDG_DISABLE", "")
 	t.Setenv(auth.EnvVarToken, "")
 	t.Setenv("SAGEOX_ENDPOINT", "")
+	// A 401 from the lookup triggers one refresh against the stored
+	// endpoint; never let that reach a real server from a unit test.
+	origRefresh := shareRefresh
+	t.Cleanup(func() { shareRefresh = origRefresh })
+	shareRefresh = func(*auth.StoredToken, string) (*auth.StoredToken, error) {
+		return nil, errors.New("refresh disabled in tests")
+	}
 }
 
 // useWalkthroughReader points the command layer at the walkthrough fixture
@@ -293,6 +302,11 @@ func TestConversationShareLink_LookupFailuresDegrade(t *testing.T) {
 			wantReason: "rejected your login; run `ox login`",
 		},
 		{
+			name:       "forbidden",
+			handler:    func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusForbidden) },
+			wantReason: "not available to your account",
+		},
+		{
 			name:       "server error",
 			handler:    func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) },
 			wantReason: "could not be reached",
@@ -403,4 +417,33 @@ func TestConversationShareLink_MalformedEntityID(t *testing.T) {
 			assert.False(t, strings.Contains(stdout, "evil"), "untrusted server output must not be echoed")
 		})
 	}
+}
+
+// TestConversationShareLink_401RefreshesOnce: a lookup answered 401 is
+// retried once with a refreshed credential. Failure prevented: a token
+// rotated server-side since the local expiry check failing every share link
+// until the user re-logs.
+func TestConversationShareLink_401RefreshesOnce(t *testing.T) {
+	useWalkthroughReader(t)
+	saveShareTestLogin(t, shareTestEndpoint, "tok-stale")
+	var refreshes atomic.Int32
+	shareRefresh = func(tok *auth.StoredToken, ep string) (*auth.StoredToken, error) {
+		refreshes.Add(1)
+		assert.Equal(t, "tok-stale", tok.AccessToken)
+		return &auth.StoredToken{AccessToken: "tok-fresh"}, nil
+	}
+	srv := newShareLookupServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tok-fresh" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		writeShareTarget(w, "recording", shareTestWalkthroughRec)
+	})
+
+	stdout, _, err := runConversationInProc(t, "show", shareTestLink)
+	require.NoError(t, err, stdout)
+	assert.True(t, decodeConvEnvelope(t, stdout).Success, stdout)
+	assert.Equal(t, int32(1), refreshes.Load())
+	_, auths := srv.requests()
+	assert.Equal(t, []string{"Bearer tok-stale", "Bearer tok-fresh"}, auths)
 }

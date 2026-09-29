@@ -44,6 +44,10 @@ var (
 	// ErrShareLookupUnsupported: the server does not serve the lookup (a 404
 	// without the documented body, 405, or 501) — an older deployment.
 	ErrShareLookupUnsupported = errors.New("share lookup not supported by this server")
+	// ErrShareForbidden: the server answered 403 — the share exists for
+	// someone, but not for this account (not shared with you, or you are not
+	// a member of the owning team).
+	ErrShareForbidden = errors.New("share not available to this account")
 	// ErrShareLookupUnavailable: transport failure, timeout, or 5xx.
 	ErrShareLookupUnavailable = errors.New("share lookup unavailable")
 )
@@ -61,7 +65,8 @@ type ShareTarget struct {
 // GetShareTarget resolves a share token with GET /api/v1/shares/{token}/target.
 //
 // Errors: ErrShareNotFound (documented 404), ErrShareLookupUnsupported (route
-// missing), ErrUnauthorized (401), ErrShareLookupUnavailable (transport,
+// missing), ErrUnauthorized (401), ErrShareForbidden (403),
+// ErrShareLookupUnavailable (transport,
 // timeout, 5xx), ErrVersionUnsupported (426); anything else is a plain error.
 // Redirects are never followed: the credential goes to this client's endpoint
 // and nowhere else.
@@ -130,6 +135,11 @@ func (c *RepoClient) GetShareTarget(ctx context.Context, token string) (*ShareTa
 		return nil, ErrShareLookupUnsupported
 	case resp.StatusCode == http.StatusUnauthorized:
 		return nil, ErrUnauthorized
+	case resp.StatusCode == http.StatusForbidden:
+		// Not the documented denial (that is a uniform 404), but a server or
+		// proxy that answers "you may not see this" gets told apart from a
+		// broken lookup.
+		return nil, ErrShareForbidden
 	case resp.StatusCode >= 500:
 		return nil, fmt.Errorf("%w: server returned %d", ErrShareLookupUnavailable, resp.StatusCode)
 	default:
