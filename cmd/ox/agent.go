@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -295,7 +296,7 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 	// span as "ox agent" surfaces these as a distinct bucket of
 	// "could not parse" failures in the trace backend.
 	if msg := agentinstance.ClassifyBadID(firstArg); msg != "" {
-		return errkind.Errorf(errkind.Usage, "%s", msg)
+		return errkind.WithDetail(errkind.Usage, "invalid agent ID", errors.New(msg))
 	}
 	return errkind.Errorf(errkind.Usage, "unknown command or invalid agent_id: %s\nRun 'ox agent --help' for usage", firstArg)
 }

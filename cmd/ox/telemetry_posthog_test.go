@@ -111,19 +111,23 @@ func TestPostHogErrorKind_AgentDispatcherMistakesAreUsage(t *testing.T) {
 	const agentID = "OxUse1"
 	registerTestInstance(t, projectRoot, agentID)
 
-	for _, args := range [][]string{
-		{"Ox12345", "session", "stop"},
-		{"no-such-command"},
-		{agentID},
-		{agentID, "no-such-command"},
-		{agentID, "session"},
-		{agentID, "session", "status"},
-		{agentID, "session", "html"},
+	for _, tt := range []struct {
+		args   []string
+		detail string
+	}{
+		{[]string{"Ox12345", "session", "stop"}, "invalid agent ID"},
+		{[]string{"no-such-command"}, "unknown command or invalid agent_id: %s"},
+		{[]string{agentID}, "missing command after agent_id"},
+		{[]string{agentID, "no-such-command"}, "unknown command: %s"},
+		{[]string{agentID, "session"}, "session requires a subcommand"},
+		{[]string{agentID, "session", "status"}, "unknown session command: %s"},
+		{[]string{agentID, "session", "html"}, "session html command has been removed; use the web viewer at sageox.ai"},
 	} {
-		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			err := runAgentDispatcher(&cobra.Command{}, args)
+		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
+			err := runAgentDispatcher(&cobra.Command{}, tt.args)
 			require.Error(t, err)
 			assert.Equal(t, "usage", postHogErrorKind(err, 1), "error: %v", err)
+			assert.Equal(t, tt.detail, postHogErrorDetail(err))
 		})
 	}
 }
@@ -144,6 +148,16 @@ func TestPostHogErrorKind_SetupFailures(t *testing.T) {
 	}))
 	uninitialized := t.TempDir()
 	initGitRepo(t, uninitialized)
+	// An expired token whose refresh cannot reach the server.
+	const unreachable = "http://127.0.0.1:1"
+	refreshing := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(refreshing, ".sageox"), 0o755))
+	require.NoError(t, config.SaveProjectConfig(refreshing, &config.ProjectConfig{
+		RepoID: "repo_test123", TeamID: "team_test456", Endpoint: unreachable,
+	}))
+	require.NoError(t, auth.SaveTokenForEndpoint(unreachable, &auth.StoredToken{
+		AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(-time.Hour),
+	}))
 	// ox import finds the team's context checkout before it asks for
 	// credentials.
 	require.NoError(t, os.MkdirAll(config.DefaultTeamContextPath("team_test456", ep), 0o755))
@@ -180,6 +194,11 @@ func TestPostHogErrorKind_SetupFailures(t *testing.T) {
 			return err
 		}, errkind.NotLoggedIn},
 		{"team members", initialized, func() error { return runTeamMembers(teamMembers, nil) }, errkind.NotLoggedIn},
+		{"agent query, refresh unreachable", refreshing, func() error {
+			_, err := queryTeamContext(&queryArgs{query: "q"}, refreshing, "OxUse1", "claude")
+			return err
+		}, errkind.Network},
+		{"team members, refresh unreachable", refreshing, func() error { return runTeamMembers(teamMembers, nil) }, errkind.Network},
 		{"import", initialized, func() error {
 			_, _, _, _, err := resolveImportContext(context.Background())
 			return err

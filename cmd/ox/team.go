@@ -200,7 +200,10 @@ func runTeamMembers(cmd *cobra.Command, args []string) error {
 	// EnsureValidTokenForEndpoint also proactively refreshes a near-expired token
 	// (GetTokenForEndpoint would have sent it stale and eaten a 401).
 	token, err := auth.EnsureValidTokenForEndpoint(ep, 300)
-	if err != nil || token == nil || token.AccessToken == "" {
+	if err != nil {
+		return fmt.Errorf("load credentials: %w", err)
+	}
+	if token == nil || token.AccessToken == "" {
 		return errkind.Errorf(errkind.NotLoggedIn, "not authenticated — run 'ox login' first")
 	}
 	client := api.NewRepoClientForProject(projectRoot).WithAuthToken(token.AccessToken)
