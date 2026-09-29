@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -545,8 +547,11 @@ func TestBackfillPRCommits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read PR 500: %v", err)
 	}
+	// Fatal, not Error: the next line indexes Commits[0]. As an Errorf this
+	// panicked the whole package on any failure here, reporting one defect as
+	// eight and burying it under unrelated collateral.
 	if len(got500.Commits) != 1 {
-		t.Errorf("expected 1 commit for PR 500, got %d", len(got500.Commits))
+		t.Fatalf("expected 1 commit for PR 500, got %d", len(got500.Commits))
 	}
 	if got500.Commits[0].SHA != "eee555" {
 		t.Errorf("expected commit SHA 'eee555', got %q", got500.Commits[0].SHA)
@@ -1294,4 +1299,366 @@ func readIssueFile(t *testing.T, ledgerPath string, number int, createdAt time.T
 		t.Fatalf("unmarshal issue %d: %v", number, err)
 	}
 	return &issue
+}
+
+// TestBackfillPRCommits_LeavesNoCommitlessSnapshot is the regression test for
+// the defect TestBackfillPRCommits only exposed by chance.
+//
+// Backfilling does not change the PR on GitHub, so the enriched snapshot
+// carries the same updated_at as the one it came from. Every consumer that has
+// to pick one snapshot orders by updated_at, falls through to mtime (equal too,
+// when both writes land in one tick) and lands on the content-hash filename.
+// Which hash sorts first is effectively random, so the original test passed or
+// failed on a coin flip and a reader could be handed the commit-less version.
+//
+// Asserting the CLASS rather than the instance: no surviving snapshot for this
+// PR may lack the commits. That holds no matter which one a consumer picks, and
+// it stays true if the tiebreak order is ever changed again.
+func TestBackfillPRCommits_LeavesNoCommitlessSnapshot(t *testing.T) {
+	ledgerPath := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	pr := &PRFile{
+		Number: 700, Title: "Merged without commits", State: "merged", Author: "alice",
+		CreatedAt: now, UpdatedAt: now, MergedAt: &now, MergeCommit: "abc123",
+	}
+	if err := WriteGitHubPR(ledgerPath, pr); err != nil {
+		t.Fatalf("write PR: %v", err)
+	}
+
+	fetcher := &mockFetcher{prCommits: map[int][]FetchedPRCommit{
+		700: {{SHA: "fff777", Author: "alice", Date: now, Msg: "backfilled commit"}},
+	}}
+
+	backfilled, err := BackfillPRCommits(context.Background(), fetcher, ledgerPath, "org", "repo", slog.Default())
+	if err != nil {
+		t.Fatalf("BackfillPRCommits: %v", err)
+	}
+	if backfilled != 1 {
+		t.Fatalf("expected 1 backfilled, got %d", backfilled)
+	}
+
+	snapshots := snapshotsForPR(t, ledgerPath, now, 700)
+	if len(snapshots) == 0 {
+		t.Fatalf("no snapshot survived the backfill")
+	}
+	for path, snap := range snapshots {
+		if len(snap.Commits) != 1 {
+			t.Errorf("snapshot %s has %d commits, want 1 — a consumer that picks this file sees a merged PR with no commits",
+				filepath.Base(path), len(snap.Commits))
+		}
+	}
+
+	// and the same state is not duplicated: one GitHub state, one snapshot
+	if len(snapshots) != 1 {
+		t.Errorf("expected the enriched snapshot to supersede the one it replaced, found %d snapshots for PR 700", len(snapshots))
+	}
+}
+
+// TestBackfillPRCommits_KeepsSnapshotsOfOtherStates guards the blast radius of
+// the removal above: only the exact snapshot that was enriched may go. An
+// earlier snapshot recording a genuinely different GitHub state (an older
+// updated_at) is history, not a duplicate.
+func TestBackfillPRCommits_KeepsSnapshotsOfOtherStates(t *testing.T) {
+	ledgerPath := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+	earlier := now.Add(-48 * time.Hour)
+
+	// the same PR as it looked while still open, two days ago
+	openPR := &PRFile{
+		Number: 800, Title: "Still open then", State: "open", Author: "bob",
+		CreatedAt: now, UpdatedAt: earlier,
+	}
+	if err := WriteGitHubPR(ledgerPath, openPR); err != nil {
+		t.Fatalf("write open snapshot: %v", err)
+	}
+
+	mergedPR := &PRFile{
+		Number: 800, Title: "Merged now", State: "merged", Author: "bob",
+		CreatedAt: now, UpdatedAt: now, MergedAt: &now, MergeCommit: "def456",
+	}
+	if err := WriteGitHubPR(ledgerPath, mergedPR); err != nil {
+		t.Fatalf("write merged snapshot: %v", err)
+	}
+
+	fetcher := &mockFetcher{prCommits: map[int][]FetchedPRCommit{
+		800: {{SHA: "aaa888", Author: "bob", Date: now, Msg: "backfilled commit"}},
+	}}
+
+	if _, err := BackfillPRCommits(context.Background(), fetcher, ledgerPath, "org", "repo", slog.Default()); err != nil {
+		t.Fatalf("BackfillPRCommits: %v", err)
+	}
+
+	var sawEarlier, sawEnriched bool
+	for _, snap := range snapshotsForPR(t, ledgerPath, now, 800) {
+		switch {
+		case snap.UpdatedAt.Equal(earlier):
+			sawEarlier = true
+		case snap.UpdatedAt.Equal(now) && len(snap.Commits) == 1:
+			sawEnriched = true
+		default:
+			t.Errorf("unexpected surviving snapshot: updated_at=%s commits=%d", snap.UpdatedAt, len(snap.Commits))
+		}
+	}
+	if !sawEarlier {
+		t.Error("the older open-state snapshot was removed; only the snapshot that was enriched may be superseded")
+	}
+	if !sawEnriched {
+		t.Error("the enriched snapshot is missing")
+	}
+}
+
+// TestFindLatestFile_TotalOrderOnFullTie pins the last tiebreak key. Two
+// snapshots can tie on updated_at (same GitHub state) and on mtime (written in
+// one tick), and before this the winner was whichever name os.ReadDir yielded
+// first. The order must be total, and must agree with candidateBeats in
+// internal/codedb/index — which prefers the greater path — or the two readers
+// disagree about which snapshot is current.
+func TestFindLatestFile_TotalOrderOnFullTie(t *testing.T) {
+	ledgerPath := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// same number, same updated_at, different content => two hash filenames
+	for _, title := range []string{"alpha", "omega"} {
+		if err := WriteGitHubPR(ledgerPath, &PRFile{
+			Number: 900, Title: title, State: "merged", Author: "carol",
+			CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("write %s: %v", title, err)
+		}
+	}
+
+	dir := DateDir(ledgerPath, now, "pr")
+	paths := hashSnapshotPaths(t, dir, 900)
+	if len(paths) != 2 {
+		t.Fatalf("expected 2 snapshots to tie-break between, got %d", len(paths))
+	}
+
+	// force the mtime tiebreak to tie as well, which is what happens when both
+	// writes land in the same filesystem tick
+	stamp := time.Now().Add(-time.Hour)
+	for _, p := range paths {
+		if err := os.Chtimes(p, stamp, stamp); err != nil {
+			t.Fatalf("chtimes %s: %v", p, err)
+		}
+	}
+
+	want := paths[len(paths)-1] // hashSnapshotPaths returns them sorted
+	for i := 0; i < 5; i++ {
+		got, err := findLatestFile(dir, 900)
+		if err != nil {
+			t.Fatalf("findLatestFile: %v", err)
+		}
+		if got != want {
+			t.Fatalf("call %d returned %s, want %s — the tie must resolve to the greater path, deterministically",
+				i, filepath.Base(got), filepath.Base(want))
+		}
+	}
+}
+
+// snapshotsForPR returns every content-hash snapshot on disk for a PR number,
+// keyed by path.
+func snapshotsForPR(t *testing.T, ledgerPath string, createdAt time.Time, number int) map[string]*PRFile {
+	t.Helper()
+	dir := DateDir(ledgerPath, createdAt, "pr")
+	out := make(map[string]*PRFile)
+	for _, path := range hashSnapshotPaths(t, dir, number) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		var pr PRFile
+		if err := json.Unmarshal(data, &pr); err != nil {
+			t.Fatalf("unmarshal %s: %v", path, err)
+		}
+		out[path] = &pr
+	}
+	return out
+}
+
+// hashSnapshotPaths lists the {number}-{hash}.json files in dir, sorted.
+func hashSnapshotPaths(t *testing.T, dir string, number int) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir %s: %v", dir, err)
+	}
+	var paths []string
+	prefix := fmt.Sprintf("%d-", number)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), prefix) || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		paths = append(paths, filepath.Join(dir, e.Name()))
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// TestBackfillPRCommits_HealsLedgerAlreadyHoldingBothSnapshots covers the
+// ledgers that were written before the supersede above existed. Those already
+// hold both variants of one GitHub state, and no future write will clear them:
+// backfilling never changes the PR upstream, so the two files carry the same
+// updated_at forever, and the reader's tiebreak can keep handing out the
+// commit-less one.
+//
+// The dedup that chooses which snapshot to enrich therefore has to prefer the
+// commit-less variant on a tie. ListGitHubDataFiles walks lexically, so the
+// enriched snapshot is placed FIRST here — the order in which "keep the first
+// one seen" picks exactly wrong, skips the PR for already having commits, and
+// strands the duplicate. The ledger must heal on the next backfill instead.
+func TestBackfillPRCommits_HealsLedgerAlreadyHoldingBothSnapshots(t *testing.T) {
+	ledgerPath := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	commits := []PRCommit{{SHA: "ccc600", Author: "dana", Date: now, Msg: "backfilled commit"}}
+	commitless := &PRFile{
+		Number: 600, Title: "Merged before commits were synced", State: "merged", Author: "dana",
+		CreatedAt: now, UpdatedAt: now, MergedAt: &now, MergeCommit: "600head",
+	}
+	enriched := *commitless
+	enriched.Commits = commits
+
+	// the enriched snapshot lands under its real content hash, always [0-9a-f]
+	if err := WriteGitHubPR(ledgerPath, &enriched); err != nil {
+		t.Fatalf("write enriched snapshot: %v", err)
+	}
+	dir := DateDir(ledgerPath, now, "pr")
+
+	// ...and the stranded commit-less one under a name that is guaranteed to
+	// sort after it, so the walk yields the enriched snapshot first
+	data, err := json.MarshalIndent(redactPR(commitless), "", "  ")
+	if err != nil {
+		t.Fatalf("marshal commit-less snapshot: %v", err)
+	}
+	strandedPath := filepath.Join(dir, "600-zzzzzzzz.json")
+	if err := os.WriteFile(strandedPath, data, 0644); err != nil {
+		t.Fatalf("write commit-less snapshot: %v", err)
+	}
+
+	fetcher := &mockFetcher{prCommits: map[int][]FetchedPRCommit{
+		600: {FetchedPRCommit(commits[0])},
+	}}
+
+	backfilled, err := BackfillPRCommits(context.Background(), fetcher, ledgerPath, "org", "repo", slog.Default())
+	if err != nil {
+		t.Fatalf("BackfillPRCommits: %v", err)
+	}
+	if backfilled != 1 {
+		t.Fatalf("expected the stranded snapshot to be re-enriched, got %d backfilled", backfilled)
+	}
+
+	snapshots := snapshotsForPR(t, ledgerPath, now, 600)
+	if _, stillThere := snapshots[strandedPath]; stillThere {
+		t.Error("the commit-less snapshot survived; a reader can still be handed a merged PR with no commits")
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("expected one snapshot for the one GitHub state, found %d", len(snapshots))
+	}
+	for path, snap := range snapshots {
+		if len(snap.Commits) != 1 {
+			t.Errorf("snapshot %s has %d commits, want 1", filepath.Base(path), len(snap.Commits))
+		}
+	}
+}
+
+// TestBackfillPRCommits_SurvivesRemoveFailure pins the failure mode of the
+// supersede itself: removing the snapshot we replaced is cleanup, not the
+// point of the operation. If the remove fails the commits are already on disk,
+// so the backfill must be reported as done rather than retried or lost.
+func TestBackfillPRCommits_SurvivesRemoveFailure(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("directory write permission is not enforced for this user/platform")
+	}
+	ledgerPath := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	commits := []PRCommit{{SHA: "ddd650", Author: "erin", Date: now, Msg: "backfilled commit"}}
+	commitless := &PRFile{
+		Number: 650, Title: "Merged before commits were synced", State: "merged", Author: "erin",
+		CreatedAt: now, UpdatedAt: now, MergedAt: &now, MergeCommit: "650head",
+	}
+	enriched := *commitless
+	enriched.Commits = commits
+
+	if err := WriteGitHubPR(ledgerPath, commitless); err != nil {
+		t.Fatalf("write commit-less snapshot: %v", err)
+	}
+	if err := WriteGitHubPR(ledgerPath, &enriched); err != nil {
+		t.Fatalf("write enriched snapshot: %v", err)
+	}
+
+	// the enriched content is already on disk, so the re-write is a no-op and
+	// the only thing the read-only directory can break is the remove
+	dir := DateDir(ledgerPath, now, "pr")
+	if err := os.Chmod(dir, 0555); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+
+	fetcher := &mockFetcher{prCommits: map[int][]FetchedPRCommit{
+		650: {FetchedPRCommit(commits[0])},
+	}}
+
+	backfilled, err := BackfillPRCommits(context.Background(), fetcher, ledgerPath, "org", "repo", slog.Default())
+	if err != nil {
+		t.Fatalf("BackfillPRCommits: %v", err)
+	}
+	if backfilled != 1 {
+		t.Errorf("expected the backfill to count as done despite the failed cleanup, got %d", backfilled)
+	}
+	if len(snapshotsForPR(t, ledgerPath, now, 650)) != 2 {
+		t.Error("expected both snapshots to remain when the cleanup could not run")
+	}
+}
+
+// TestBackfillPRCommits_KeepsSnapshotWhenWriteFails pins what a failed
+// enriched write must leave behind: the PR counted as NOT backfilled, and its
+// existing snapshot untouched, so the next run retries from it. A write error
+// that fell through instead would run the supersede below against a
+// replacement that never reached disk.
+func TestBackfillPRCommits_KeepsSnapshotWhenWriteFails(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("directory write permission is not enforced for this user/platform")
+	}
+	ledgerPath := t.TempDir()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	pr := &PRFile{
+		Number: 660, Title: "Merged before commits were synced", State: "merged", Author: "frank",
+		CreatedAt: now, UpdatedAt: now, MergedAt: &now, MergeCommit: "660head",
+	}
+	if err := WriteGitHubPR(ledgerPath, pr); err != nil {
+		t.Fatalf("write PR: %v", err)
+	}
+
+	// the enriched content is NOT on disk, so the re-write has to create a new
+	// file — which the read-only directory refuses
+	dir := DateDir(ledgerPath, now, "pr")
+	if err := os.Chmod(dir, 0555); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+
+	fetcher := &mockFetcher{prCommits: map[int][]FetchedPRCommit{
+		660: {{SHA: "eee660", Author: "frank", Date: now, Msg: "backfilled commit"}},
+	}}
+
+	backfilled, err := BackfillPRCommits(context.Background(), fetcher, ledgerPath, "org", "repo", slog.Default())
+	if err != nil {
+		t.Fatalf("BackfillPRCommits: %v", err)
+	}
+	if backfilled != 0 {
+		t.Errorf("expected the failed write to count as not backfilled, got %d", backfilled)
+	}
+
+	snapshots := snapshotsForPR(t, ledgerPath, now, 660)
+	if len(snapshots) != 1 {
+		t.Fatalf("expected the original snapshot to survive a failed write, found %d", len(snapshots))
+	}
+	for path, snap := range snapshots {
+		if snap.Number != 660 || snap.State != "merged" {
+			t.Errorf("snapshot %s was altered: %+v", filepath.Base(path), snap)
+		}
+	}
 }

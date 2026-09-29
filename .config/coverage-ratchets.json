@@ -8,6 +8,16 @@
     ],
     "exceptions": [
       {
+        "path": "internal/ledger/github_data.go",
+        "reason": "PR #936: writeGitHubPR now returns the snapshot path, so its pre-existing marshal error return re-entered the diff; PRFile is plain data and json.MarshalIndent cannot fail on it. The create-dir and write error returns are directly tested.",
+        "expires": "2026-10-21"
+      },
+      {
+        "path": "internal/ledger/github_sync.go",
+        "reason": "PR #936: the remove-superseded-snapshot warn is not portably reachable (the write and the remove share a directory, so anything that breaks the remove breaks the write first). Survival of a failed remove is tested where the platform allows.",
+        "expires": "2026-10-21"
+      },
+      {
         "path": "cmd/ox/agent_session.go",
         "reason": "Durable score write and retry preservation are directly tested; the orchestration call site awaits the ox-ilrr.7 lifecycle seam",
         "expires": "2026-09-30"
