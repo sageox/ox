@@ -58,10 +58,30 @@ decision, don't just state it:
   lights up, a docked explainer updates.
 - **Animated timelines** with toggles.
 - **Side-by-side comparison panes** and **verdict cards**.
-- **Self-contained single file** — inline CSS/JS, no external dependencies.
+- **Self-contained single file** — inline CSS and inline SVG, no external
+  dependencies.
 
 A plan page that merely reformats prose has missed the point; the page should do
 work a document cannot.
+
+### Interactivity is CSS-only
+
+The hosted viewer at `https://<endpoint>/plan/<pln_id>` — the link `ox plan save`
+prints, and the one teammates actually open — **strips `<script>`**. A page whose
+tabs, inspectors, or toggles need JavaScript arrives there inert. Build every
+interaction from CSS state instead:
+
+| Interaction | CSS-only pattern |
+|---|---|
+| Tabs / segmented views | hidden `<input type="radio">` per tab + `:checked ~` or `:has(#tab-2:checked)` to show the panel |
+| Toggles, before/after, layer switches | `<input type="checkbox">` + `:has(:checked)` |
+| Field inspectors, linked highlights | `:hover`, `:focus-within`, `:has(.field:hover)` on a shared ancestor |
+| Progressive disclosure | `<details><summary>` (also the Implementation notes appendix) |
+| Diagrams, charts, timelines | inline `<svg>` (CSS transitions for motion) |
+
+A script may still enhance the page in the local `ox plan render` loop, but the
+page must be complete without it. ox's own review chrome is injected by ox and is
+not subject to this rule.
 
 ## The design register (not optional)
 
@@ -235,10 +255,11 @@ rediscovered, and the first one is also caught by the `mermaid.font-race` lint.
 ## Trust posture
 
 The plan is the developer's **own local content rendered locally for that
-developer**: the review server binds `127.0.0.1` and is token-gated, so author
-scripting is a feature, not a threat — the interactivity is the point.
+developer**: the review server binds `127.0.0.1` and is token-gated, so an
+author script is not a threat locally — but it is an enhancement only, because
+the hosted viewer strips `<script>` (see *Interactivity is CSS-only*).
 `--artifact` is the strict export for when the page needs to travel beyond the
 local loop: a fully self-contained page — no external fonts, scripts, or
-network fetches; CSS and JS inline. Self-contained is the whole claim: there is
+network fetches; CSS inline. Self-contained is the whole claim: there is
 no CSP nonce/hash handling, so a strict host CSP that disallows
 `unsafe-inline` will still block the page's inline styles and scripts.

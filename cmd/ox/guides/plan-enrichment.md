@@ -25,6 +25,24 @@ For material work, author a purpose-built visual `plan.html`; then pass that pag
 - `ox plan render --file plan.html` injects prior art, collisions, expert routing, knowledge bubbles, team memory, attribution, and the review loop without rewriting the authored page.
 - `ox plan review <slug>` reopens that same visual argument; it must never regenerate a generic page from the derived markdown.
 
+The same path saves every artifact a teammate should see, not only plans:
+`ox plan save --file page.html --kind plan|mockup|review|evidence`. A mockup,
+review sheet, or evidence page belongs in the ledger exactly as much as a plan.
+
+Interactivity must be CSS-only (radio/checkbox + `:has()`, `<details>`, inline
+SVG): the hosted viewer at `/plan/<pln_id>` strips `<script>`. See
+`docs/specs/plan-authoring-html.md`.
+
+### Saved means shared
+
+`ox plan save` commits AND pushes, then prints the share link
+(`https://<endpoint>/plan/<pln_id>`). If it prints **NOT SHARED** (or `--json`
+reports `"share": {"shared": false, "reason": ..., "fix": ...}`), the plan is
+only on this machine — run the printed fix (usually `ox doctor --fix`) before
+telling anyone to open the link. Re-saving a page with the same
+`<meta name="ox-plan-slug">` (or `--slug`) records a new revision of the same
+plan and keeps its link.
+
 Never use the rejected legacy `--plan + --html` pair. It creates two candidate
 sources of truth and historically allowed review to discard the authored page.
 
@@ -64,7 +82,8 @@ first ten minutes into a wall of text.
 ## Verify before you're done
 
 ```bash
-ox plan lint <slug> [--strict]
+ox plan lint --file plan.html   # BEFORE the first save
+ox plan lint <slug> [--strict]  # after saving
 ```
 
 Checks the rendered page for SageOx attribution, meaningful-visual realization,

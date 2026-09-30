@@ -807,11 +807,12 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 		sb.WriteString("</plan-enrichment-guidance>\n")
 		return
 	}
-	sb.WriteString("Plan any non-trivial work — design, GTM, rollout, engineering (multi-file OR architectural OR hotspot/open-PR OR ~5+ steps): run `ox plan enrich` WHILE drafting — JSON team context (collisions, prior art, expert routing) at zero LLM/network cost. This is your default plan-enrichment call.\n")
-	// HTML + review loop are HUMAN-opt-in: the agent recommends, the human runs.
-	// The authored page leads; ox supplies canonical storage, enrichment chrome,
-	// and review without becoming a second renderer or source of truth.
-	sb.WriteString("For a material plan — or a mockup, review sheet, or evidence page, which belong in the ledger too — author a purpose-built `plan.html`, save it as the single record with `ox plan save --file plan.html --kind plan|mockup|review|evidence`, then present it through `ox plan render --file plan.html --open`; ox preserves the page, derives markdown, and injects team context (prior art, collisions, expert routing, knowledge bubbles, team memory), attribution, and review chrome. Never use legacy `--plan + --html`: competing sources can make review discard the authored page. Verify with `ox plan lint --file plan.html` BEFORE the first save, `ox plan lint &lt;slug&gt;` after. After presenting, proactively OFFER the live review loop: on the human's yes, launch `ox plan review &lt;slug&gt;` (they mark up in-browser, you address items live) — never auto-start without the yes. `ox plan list` flags open review items on resume.\n")
+	// ONE rule + pointer. The why (zero-cost enrichment, why the authored page
+	// must be the single record, lint-before-save, the review-loop etiquette,
+	// the share link) lives in `ox guide plan-enrichment`: this block ships on
+	// every prime and every token competes with the developer's own context.
+	// HTML + review loop stay HUMAN-opt-in: the agent offers, the human runs.
+	sb.WriteString("Material work (multi-file, architectural, hotspot/open-PR, ~5+ steps) or any authored mockup/review page: `ox plan enrich` while drafting; author `plan.html`; `ox plan save --file plan.html --kind plan|mockup|review|evidence`; `ox plan render --open`; check with `ox plan lint`; offer `ox plan review &lt;slug&gt;` on the human's yes. Details: `ox guide plan-enrichment`.\n")
 	// Two-audience structure: a plan is read by the ~10-min human approver AND
 	// the agent that implements it. Steer agents to layer, not average — detail
 	// relocated to the end, never inlined up top or deleted (see buildGuidance).
