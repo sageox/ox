@@ -1860,6 +1860,10 @@ func (h *SessionFinalizeHandler) stageSessionInLedger(payload *SessionFinalizePa
 		if entry.IsDir() || pipeline.IsTraceFile(entry.Name()) || strings.HasPrefix(entry.Name(), ".trace-") {
 			continue
 		}
+		// Machine-local capture state never enters the shared Ledger.
+		if session.IsRawAppendJournal(entry.Name()) {
+			continue
+		}
 		src := filepath.Join(payload.SessionDir, entry.Name())
 		dst := filepath.Join(destDir, entry.Name())
 		if err := copySessionFile(src, dst); err != nil {
@@ -2554,6 +2558,14 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 	var state session.RecordingState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return false, fmt.Errorf("parse recording state: %w", err)
+	}
+	// A capture that died mid-batch leaves raw.jsonl.append.json beside the
+	// transcript. Settle it against the persisted cursor before anything reads
+	// raw.jsonl, as the hook, stop, recover and watcher paths do: roll back an
+	// unacknowledged batch or confirm a committed one, then drop the journal.
+	// An unprovable journal fails closed and defers this recovery.
+	if err := session.RecoverRawAppend(rawPath, state.SourceOffset); err != nil {
+		return false, fmt.Errorf("recover capture batch journal: %w", err)
 	}
 
 	hasRaw := session.HasSubstantiveEntries(rawPath)

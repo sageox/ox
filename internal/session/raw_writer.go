@@ -335,6 +335,16 @@ func newRawFileWriter(path, projectRoot string, flags int) (*RawWriter, error) {
 	return w, nil
 }
 
+// rawAppendJournalSuffix names the batch journal kept beside raw.jsonl while a
+// capture batch is in flight. It is machine-local recovery state, never
+// session content, so it must not travel with the session into the Ledger.
+const rawAppendJournalSuffix = ".append.json"
+
+// IsRawAppendJournal reports whether a file name is a capture batch journal.
+func IsRawAppendJournal(name string) bool {
+	return strings.HasSuffix(name, rawAppendJournalSuffix)
+}
+
 type rawAppendCheckpoint struct {
 	RawSize   int64  `json:"raw_size"`
 	FinalSize *int64 `json:"final_size,omitempty"`
@@ -353,7 +363,7 @@ func (w *RawWriter) BeginAppend(oldOffset, newOffset int64) error {
 	if err != nil {
 		return err
 	}
-	return fileutil.AtomicWriteBytes(w.file.Name()+".append.json", data, 0600)
+	return fileutil.AtomicWriteBytes(w.file.Name()+rawAppendJournalSuffix, data, 0600)
 }
 
 // SealAppend persists the exact fsynced output length before the cursor can
@@ -362,7 +372,7 @@ func (w *RawWriter) SealAppend() error {
 	if err := w.Sync(); err != nil {
 		return err
 	}
-	path := w.file.Name() + ".append.json"
+	path := w.file.Name() + rawAppendJournalSuffix
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -387,7 +397,7 @@ func (w *RawWriter) SealAppend() error {
 	return fileutil.AtomicWriteBytes(path, data, 0600)
 }
 
-func (w *RawWriter) FinishAppend() error { return os.Remove(w.file.Name() + ".append.json") }
+func (w *RawWriter) FinishAppend() error { return os.Remove(w.file.Name() + rawAppendJournalSuffix) }
 
 // RecoverRawAppend discards only an unacknowledged batch. A cursor is committed
 // after raw fsync; if its atomic replacement survived, its batch must survive too.
@@ -444,7 +454,7 @@ func footerTailAfter(path string, offset int64) (footers []byte, other bool, err
 }
 
 func recoverRawAppend(path string, persistedOffset int64) error {
-	checkpointPath := path + ".append.json"
+	checkpointPath := path + rawAppendJournalSuffix
 	data, err := os.ReadFile(checkpointPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
