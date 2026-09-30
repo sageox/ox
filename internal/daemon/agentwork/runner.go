@@ -28,6 +28,11 @@ type RunRequest struct {
 	// the work item has all the information it needs to proceed without
 	// generating a prompt (e.g., upload-only session recovery).
 	SkipLLM bool
+	// Isolated runs the CLI for untrusted input, such as an imported native
+	// transcript: no tools, hooks, plugins, MCP servers, project instructions
+	// or user config, no persisted session, and recording off. A CLI too old
+	// to isolate fails the run; it is never retried with broader permissions.
+	Isolated bool
 }
 
 // RunResult captures the outcome of an agent invocation.

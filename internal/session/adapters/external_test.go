@@ -408,3 +408,31 @@ func TestExternalAdapter_Watch_InvalidPath(t *testing.T) {
 		t.Error("expected error for nonexistent path, got nil")
 	}
 }
+
+// An import reads a whole months-long transcript in one call; the default
+// 10s one-shot deadline is sized for a live capture batch, not that.
+func TestExternalAdapter_ReadWithTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: drives an external adapter subprocess")
+	}
+	script := filepath.Join(t.TempDir(), "ox-adapter-slow")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 0.3\nprintf '{\"entries\":[{\"timestamp\":\"2026-04-02T10:30:00Z\",\"role\":\"user\",\"content\":\"hello\"}]}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ea := NewExternalAdapterWithInfo(script, &adapterprotocol.InfoResponse{Name: "slow"})
+	ea.oneShotTimeout = 20 * time.Millisecond
+
+	if _, err := ea.Read("session"); !errors.Is(err, ErrAdapterTimeout) {
+		t.Fatalf("Read error = %v, want ErrAdapterTimeout under the default deadline", err)
+	}
+	entries, err := ea.ReadWithTimeout("session", 5*time.Second)
+	if err != nil {
+		t.Fatalf("ReadWithTimeout: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Content != "hello" {
+		t.Fatalf("entries = %+v, want the one user entry", entries)
+	}
+	if _, err := ea.ReadWithTimeout("session", 20*time.Millisecond); !errors.Is(err, ErrAdapterTimeout) {
+		t.Fatalf("ReadWithTimeout error = %v, want ErrAdapterTimeout past its own deadline", err)
+	}
+}

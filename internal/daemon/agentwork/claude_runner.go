@@ -143,7 +143,15 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	// permission prompt and produces narration that fails validation,
 	// resulting in the failure-marker-stub output that clobbered 31
 	// Phase 2 sessions on 2026-04-25 (bd ox-5cc9, ox-91sl).
-	args := []string{"--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"}
+	args := []string{"--output-format", "stream-json", "--verbose"}
+	if req.Isolated {
+		if err := checkClaudeIsolation(ctx, r.binaryPath); err != nil {
+			return nil, err
+		}
+		args = append(args, claudeIsolatedArgs()...)
+	} else {
+		args = append(args, "--permission-mode", "bypassPermissions")
+	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}
@@ -156,6 +164,9 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	cmd.Stdin = strings.NewReader(req.Prompt)
+	if req.Isolated {
+		cmd.Env = append(os.Environ(), isolatedEnv...)
+	}
 	if req.WorkDir != "" {
 		cmd.Dir = req.WorkDir
 	}
