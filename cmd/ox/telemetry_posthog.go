@@ -83,7 +83,8 @@ func skipPostHogCommand(path string) bool {
 // Inside a repository set up for SageOx it adds the repository's and team's
 // SageOx IDs, which let usage be counted per team; SageOx can map them to the
 // team, so these events are not anonymous at the team level. What a command
-// recorded about how it ended (cli.Context.SetOutcome) is added last.
+// recorded about how it ended (cli.Context.SetOutcome) is added last, never
+// replacing a property above.
 func postHogCommandProps(c *cli.Context, path string, exitCode int) map[string]any {
 	actor, agentType := oxActorDetector{}.DetectActor()
 	if agentType == "ci" { // friction files CI under the agent actor
@@ -118,7 +119,9 @@ func postHogCommandProps(c *cli.Context, path string, exitCode int) map[string]a
 		}
 	}
 	for k, v := range c.Outcome() {
-		props[k] = v
+		if _, set := props[k]; !set {
+			props[k] = v
+		}
 	}
 	return props
 }
