@@ -30,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -213,14 +214,24 @@ const (
 	KindEvidence ArtifactKind = "evidence"
 )
 
+// allKinds is the single list every `--kind` hint and ValidKind read, so a
+// hint can never name a subset that makes a valid kind look unsupported.
+var allKinds = []ArtifactKind{KindPlan, KindMockup, KindReview, KindEvidence}
+
+// KindsHint is the `--kind` value spelling for CLI hints: "plan|mockup|...".
+func KindsHint() string {
+	names := make([]string, len(allKinds))
+	for i, k := range allKinds {
+		names[i] = string(k)
+	}
+	return strings.Join(names, "|")
+}
+
 // ValidKind reports whether k is a known artifact kind. Empty is valid and
 // means KindPlan, so every plan saved before kinds existed keeps working.
 func ValidKind(k string) bool {
-	switch ArtifactKind(strings.ToLower(strings.TrimSpace(k))) {
-	case "", KindPlan, KindMockup, KindReview, KindEvidence:
-		return true
-	}
-	return false
+	norm := ArtifactKind(strings.ToLower(strings.TrimSpace(k)))
+	return norm == "" || slices.Contains(allKinds, norm)
 }
 
 // KindOrDefault normalizes a kind, mapping empty to KindPlan.
@@ -241,38 +252,39 @@ func AllKinds() []string {
 // and realized plans are skipped — those lifecycle states are deliberate and a
 // later save must not silently reopen them. Fail-open: any read error yields
 // "no prior", which restores the derive-from-topic behavior.
-func priorSaveOfSource(ledger, sourcePath string) (Meta, bool) {
+func priorSaveOfSource(ledger, sourcePath string) (string, Meta, bool) {
 	if strings.TrimSpace(sourcePath) == "" {
-		return Meta{}, false
+		return "", Meta{}, false
 	}
 	plansDir := paths.LedgerPlansDir(ledger)
 	if plansDir == "" {
-		return Meta{}, false
+		return "", Meta{}, false
 	}
 	entries, err := os.ReadDir(plansDir)
 	if err != nil {
-		return Meta{}, false
+		return "", Meta{}, false
 	}
 	var best Meta
+	var bestDir string
 	var found bool
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		m, err := readMeta(filepath.Join(plansDir, e.Name()))
+		dir := filepath.Join(plansDir, e.Name())
+		m, err := readMeta(dir)
 		if err != nil || m.SourcePlanPath != sourcePath {
 			continue
 		}
-		switch m.Status {
-		case PlanStatusSuperseded, PlanStatusAbandoned, PlanStatusRealized:
+		if isClosedStatus(m.Status) {
 			continue
 		}
 		// Most recent wins when a source path has been saved more than once.
 		if !found || m.CreatedAt.After(best.CreatedAt) {
-			best, found = m, true
+			best, bestDir, found = m, dir, true
 		}
 	}
-	return best, found
+	return bestDir, best, found
 }
 
 // Save writes a captured plan into the ledger under data/plans/<dated-slug>/.
@@ -561,7 +573,7 @@ func ResolveSaveDir(gitRoot string, meta Meta) (string, error) {
 //
 // Revising in place never destroys the prior version: the ledger is git, and
 // the CLI commits any not-yet-committed prior revision before Save overwrites
-// it (see savePlanArtifacts).
+// it — or refuses the save when it cannot (see savePlanArtifacts).
 func resolveSaveDir(ledger string, meta Meta) (string, Meta, error) {
 	plansDir := paths.LedgerPlansDir(ledger)
 	if meta.Slug != "" {
@@ -590,15 +602,49 @@ func resolveSaveDir(ledger string, meta Meta) (string, Meta, error) {
 		// source file — observed in the field as two entries five minutes
 		// apart with identical source_plan_path and session, which the human
 		// then had to reconcile with `ox plan supersede` by hand.
-		if prior, ok := priorSaveOfSource(ledger, meta.SourcePlanPath); ok {
+		if priorDir, prior, ok := priorSaveOfSource(ledger, meta.SourcePlanPath); ok {
 			meta.Slug = prior.Slug
-			meta.CreatedAt = prior.CreatedAt // keep the dir name stable
-		} else {
-			meta.Slug = Slugify(meta.Topic)
+			meta.CreatedAt = prior.CreatedAt
+			// The prior's ACTUAL dir, not one recomputed from slug+date: a
+			// plan allocated a -N suffix (below) would otherwise recompute to
+			// the closed plan it stepped around.
+			return priorDir, meta, nil
 		}
+		meta.Slug = Slugify(meta.Topic)
 	}
-	dirName := fmt.Sprintf("%s-%s", meta.CreatedAt.UTC().Format("2006-01-02"), meta.Slug)
-	return filepath.Join(plansDir, dirName), meta, nil
+	return freshPlanDir(plansDir, meta.CreatedAt.UTC().Format("2006-01-02")+"-", meta.Slug), meta, nil
+}
+
+// freshPlanDir returns <datePrefix><slug>, or the first free -2, -3, ...
+// variant when that dir already holds a CLOSED plan (superseded, abandoned,
+// realized). Writing into it would overwrite the closed plan's page, reuse its
+// pln_ id, and log this save as its revision — reopening a plan the team
+// deliberately closed. A LIVE dir at that name is returned as-is: that is the
+// derived-slug same-day re-save, which revises in place by design. meta.Slug
+// keeps the unsuffixed slug so later saves and lookups still find the plan by
+// the slug its author used.
+func freshPlanDir(plansDir, datePrefix, slug string) string {
+	base := filepath.Join(plansDir, datePrefix+slug)
+	candidate := base
+	for n := 2; ; n++ {
+		if _, err := os.Stat(filepath.Join(candidate, planMetaFile)); err != nil {
+			return candidate // no saved plan here (a meta-less dir is not a plan)
+		}
+		if !isClosedStatus(CurrentStatus(candidate)) {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s-%d", base, n)
+	}
+}
+
+// isClosedStatus reports whether a plan's lifecycle is deliberately over, so
+// saves never reopen it and slug lookups prefer a live sibling.
+func isClosedStatus(s PlanStatus) bool {
+	switch s {
+	case PlanStatusSuperseded, PlanStatusAbandoned, PlanStatusRealized:
+		return true
+	}
+	return false
 }
 
 // livePlanDirsForSlug lists every saved plan dir named by slug (meta.json slug
@@ -626,8 +672,7 @@ func livePlanDirsForSlug(plansDir, slug string) []string {
 		if m.Slug != slug && slugFromDirName(e.Name()) != slug {
 			continue
 		}
-		switch CurrentStatus(dir) {
-		case PlanStatusSuperseded, PlanStatusAbandoned, PlanStatusRealized:
+		if isClosedStatus(CurrentStatus(dir)) {
 			continue
 		}
 		out = append(out, dir)
@@ -1041,10 +1086,23 @@ func resolvePlanDir(plansDir, slug string) (string, string, error) {
 		return "", "", fmt.Errorf("plan %q not found", slug)
 	case 1:
 		return filepath.Join(plansDir, matches[0]), matches[0], nil
-	default:
-		sort.Strings(matches)
-		return "", "", &AmbiguousSlugError{Slug: slug, Candidates: matches}
 	}
+	// Several dirs share the slug. The normal supersede-then-resave flow leaves
+	// exactly this shape (closed old plan + live new one), and save already
+	// resolves to the live one — so lookups do too. Only a genuine tie among
+	// live plans (or among closed ones) is refused; the full directory name
+	// still addresses any of them.
+	var live []string
+	for _, name := range matches {
+		if !isClosedStatus(CurrentStatus(filepath.Join(plansDir, name))) {
+			live = append(live, name)
+		}
+	}
+	if len(live) == 1 {
+		return filepath.Join(plansDir, live[0]), live[0], nil
+	}
+	sort.Strings(matches)
+	return "", "", &AmbiguousSlugError{Slug: slug, Candidates: matches}
 }
 
 // datedDirRe matches the YYYY-MM-DD- prefix of a plan directory name.

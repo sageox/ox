@@ -26,6 +26,8 @@ func TestCodexPlanFromStop(t *testing.T) {
 		{"unterminated block", mk("plan", "<proposed_plan>half"), ""},
 		{"no last message", []byte(`{"hook_event_name":"Stop","permission_mode":"plan"}`), ""},
 		{"not json", []byte("nope"), ""},
+		{"empty payload", nil, ""},
+		{"close tag without open", mk("plan", "done</proposed_plan>"), ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -74,5 +76,44 @@ func TestMaybeCaptureCodexPlan_ReusesEnrichPathOnce(t *testing.T) {
 	maybeCaptureCodexPlan(ctx, "Oxcx")
 	if calls != 1 {
 		t.Error("the Stop capture is Codex-only; Claude Code uses ExitPlanMode")
+	}
+}
+
+// TestMaybeCaptureCodexPlan_FailedCaptureRetries verifies a failed capture
+// leaves no dedupe marker, so the next Stop restating the plan tries again,
+// and that a Stop with no plan never reaches enrichment.
+// Failure prevented: one transient enrich failure permanently marking a plan
+// "captured" that was never saved.
+func TestMaybeCaptureCodexPlan_FailedCaptureRetries(t *testing.T) {
+	tests := []struct {
+		name      string
+		msg       string
+		agentID   string
+		enrichOK  bool
+		wantCalls int
+	}{
+		{name: "failed capture retries on the next Stop", msg: "<proposed_plan># P</proposed_plan>", agentID: "Oxcx", wantCalls: 2},
+		{name: "no plan block never enriches", msg: "Which database?", agentID: "Oxcx", enrichOK: true, wantCalls: 0},
+		{name: "no agent id is a no-op", msg: "<proposed_plan># P</proposed_plan>", agentID: "", enrichOK: true, wantCalls: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			calls := 0
+			prev := runPlanEnrichment
+			runPlanEnrichment = func(string) (planJSONResult, bool) {
+				calls++
+				return planJSONResult{}, tt.enrichOK
+			}
+			t.Cleanup(func() { runPlanEnrichment = prev })
+
+			raw, _ := json.Marshal(map[string]any{"last_assistant_message": tt.msg})
+			ctx := &HookContext{AgentType: "codex", ProjectRoot: root, Input: &AgentHookInput{RawBytes: raw}}
+			maybeCaptureCodexPlan(ctx, tt.agentID)
+			maybeCaptureCodexPlan(ctx, tt.agentID)
+			if calls != tt.wantCalls {
+				t.Errorf("enrich calls = %d, want %d", calls, tt.wantCalls)
+			}
+		})
 	}
 }

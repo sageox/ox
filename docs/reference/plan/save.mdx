@@ -12,17 +12,17 @@ Save a plan, mockup, or review page to the ledger and share it
 
 Persist a plan to the ledger and push it so teammates can open it.
 
-Prints the shareable link (https://<endpoint>/plan/<pln_id>) and says loudly —
+Prints the shareable link (https://ENDPOINT/plan/PLN_ID) and says loudly —
 on stderr, and as "share":{"shared":false,"reason":...,"fix":...} under --json —
 when the plan was saved locally but NOT pushed (ledger diverged, push failed,
 mid-rebase), with the command that fixes it.
 
-Re-saving a page whose <meta name="ox-plan-slug"> (or --slug) names an existing
+Re-saving a page whose ox-plan-slug meta tag (or --slug) names an existing
 open plan records a new REVISION of that plan (same id and link), never a fork.
 A slug that matches more than one saved plan is refused with the candidates.
 
 PREFERRED — HTML as the plan of record:
-  --file <plan.html>   an authored, self-contained interactive page. ox stores it
+  --file plan.html    an authored, self-contained interactive page. ox stores it
                        as the canonical artifact (meta primary=html), DERIVES
                        plan.md from it (regenerated on save — never hand-edit),
                        and computes deterministic enrichment itself when no
@@ -30,7 +30,7 @@ PREFERRED — HTML as the plan of record:
                        docs/specs/plan-authoring-html.md
 
 Quick plans:
-  --file <plan.md>     markdown-primary; annotations optional (self-enriches)
+  --file plan.md      markdown-primary; annotations optional (self-enriches)
 
 Legacy markdown-only path:
   --plan        the plan markdown (with --annotations, required together)

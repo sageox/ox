@@ -462,7 +462,7 @@ func emitWrittenPageNudge(w io.Writer, projectRoot, agentID, toolName string, to
 // context, so it is sanitized exactly like the plan nudge's target.
 func unsavedArtifactNudgeLine(artifact string) string {
 	return fmt.Sprintf(
-		"Saved nothing yet: `ox plan save --file %s --kind mockup|review|plan`. Teammates can't see it otherwise.",
-		reminderSafePlanTarget(artifact),
+		"Saved nothing yet: `ox plan save --file %s --kind %s`. Teammates can't see it otherwise.",
+		reminderSafePlanTarget(artifact), plan.KindsHint(),
 	)
 }

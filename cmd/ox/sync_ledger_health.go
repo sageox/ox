@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +50,10 @@ type ledgerSyncFacts struct {
 	StaleLocks       []string
 	Ahead, Behind    int
 	UpstreamKnown    bool
+	// InspectErr is set when the ledger could not be looked at (daemon status
+	// failed, .git unreadable). It is a blocker: "could not look" must not
+	// fall through to "synced".
+	InspectErr error
 }
 
 // classifyLedgerSync returns the reasons the ledger is not synced, or nil when
@@ -58,6 +64,9 @@ type ledgerSyncFacts struct {
 // because a pull that landed leaves nothing behind the tracking ref.
 func classifyLedgerSync(f ledgerSyncFacts) []string {
 	var reasons []string
+	if f.InspectErr != nil {
+		reasons = append(reasons, fmt.Sprintf("could not verify ledger state: %v", f.InspectErr))
+	}
 	seen := map[string]bool{}
 	for _, issue := range f.Issues {
 		if issue.Repo != "ledger" || !blockingLedgerIssueTypes[issue.Type] {
@@ -114,11 +123,16 @@ func staleLedgerLocks(ledgerPath string, now time.Time) []string {
 }
 
 // gatherLedgerSyncFacts reads the daemon's ledger issues and the ledger's
-// on-disk state. A missing daemon status or ledger path yields empty facts:
-// "could not look" is not evidence of a problem, and the IPC already
-// succeeded.
-func gatherLedgerSyncFacts(status *daemon.StatusData) ledgerSyncFacts {
+// on-disk state. Expected absence — no ledger path reported, ledger not cloned
+// — yields empty facts. A failed status call or an unreadable .git is recorded
+// as InspectErr instead: after a skipped pull, "could not look" is exactly the
+// case where claiming "synced" would be wrong.
+func gatherLedgerSyncFacts(status *daemon.StatusData, statusErr error) ledgerSyncFacts {
 	var f ledgerSyncFacts
+	if statusErr != nil {
+		f.InspectErr = fmt.Errorf("daemon status: %w", statusErr)
+		return f
+	}
 	if status == nil {
 		return f
 	}
@@ -128,6 +142,9 @@ func gatherLedgerSyncFacts(status *daemon.StatusData) ledgerSyncFacts {
 		return f
 	}
 	if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			f.InspectErr = fmt.Errorf("inspect ledger: %w", err)
+		}
 		return f
 	}
 	f.RebaseInProgress = gitutil.IsRebaseInProgress(path)
@@ -137,12 +154,12 @@ func gatherLedgerSyncFacts(status *daemon.StatusData) ledgerSyncFacts {
 }
 
 // ledgerStatusForSync is indirected so tests never probe a real daemon.
-var ledgerStatusForSync = func() *daemon.StatusData {
+var ledgerStatusForSync = func() (*daemon.StatusData, error) {
 	// Same client the sync itself used, so the status is for this repo's
 	// daemon, not whichever daemon TryConnect happens to reach.
 	status, err := daemon.NewClientForCurrentRepoWithTimeout(5 * time.Second).Status()
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("query daemon status: %w", err)
 	}
-	return status
+	return status, nil
 }

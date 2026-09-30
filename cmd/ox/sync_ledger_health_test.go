@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -135,8 +137,99 @@ func TestStaleLedgerLocks_OnlyReportsOldLocks(t *testing.T) {
 	require.Equal(t, []string{"index.lock"}, staleLedgerLocks(ledger, now))
 }
 
-func TestGatherLedgerSyncFacts_NoStatusOrPathIsEmpty(t *testing.T) {
+func TestGatherLedgerSyncFacts(t *testing.T) {
 	t.Parallel()
-	require.Empty(t, classifyLedgerSync(gatherLedgerSyncFacts(nil)))
-	require.Empty(t, classifyLedgerSync(gatherLedgerSyncFacts(&daemon.StatusData{LedgerPath: filepath.Join(t.TempDir(), "missing")})))
+
+	cloned := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(cloned, ".git"), 0o755))
+
+	tests := []struct {
+		name      string
+		status    *daemon.StatusData
+		statusErr error
+		wantErr   string // substring of the single reason; "" = synced
+	}{
+		{name: "no status and no error is empty", status: nil},
+		{name: "no ledger path is empty", status: &daemon.StatusData{}},
+		{name: "ledger not cloned is empty", status: &daemon.StatusData{LedgerPath: filepath.Join(t.TempDir(), "missing")}},
+		{name: "cloned clean ledger is empty", status: &daemon.StatusData{LedgerPath: cloned}},
+		{
+			name:      "status timeout is not synced",
+			statusErr: errors.New("i/o timeout"),
+			wantErr:   "could not verify ledger state: daemon status: i/o timeout",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reasons := classifyLedgerSync(gatherLedgerSyncFacts(tt.status, tt.statusErr))
+			if tt.wantErr == "" {
+				require.Empty(t, reasons)
+				return
+			}
+			require.Len(t, reasons, 1)
+			require.Contains(t, reasons[0], tt.wantErr)
+		})
+	}
+
+	t.Run("unreadable ledger is not synced", func(t *testing.T) {
+		t.Parallel()
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("needs POSIX permissions and a non-root user")
+		}
+		ledger := filepath.Join(t.TempDir(), "ledger")
+		require.NoError(t, os.MkdirAll(filepath.Join(ledger, ".git"), 0o755))
+		require.NoError(t, os.Chmod(ledger, 0o000))
+		t.Cleanup(func() { _ = os.Chmod(ledger, 0o755) })
+
+		reasons := classifyLedgerSync(gatherLedgerSyncFacts(&daemon.StatusData{LedgerPath: ledger}, nil))
+		require.Len(t, reasons, 1)
+		require.Contains(t, reasons[0], "could not verify ledger state: inspect ledger:")
+	})
+}
+
+// TestRecordLedgerSyncVerdict verifies the transport line `ox sync` prints
+// after a successful IPC. Failure prevented: "Ledger: synced" on a ledger in
+// backoff, or when the daemon status needed to check it timed out.
+func TestRecordLedgerSyncVerdict(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		status     *daemon.StatusData
+		statusErr  error
+		wantStatus string
+		wantErr    string
+	}{
+		{name: "nothing contradicts synced", status: &daemon.StatusData{}, wantStatus: "synced"},
+		{
+			name: "daemon backoff is not synced",
+			status: &daemon.StatusData{Issues: []daemon.DaemonIssue{
+				{Type: daemon.IssueTypeSyncBackoff, Repo: "ledger", Summary: "Sync suspended"},
+			}},
+			wantStatus: ledgerSyncStatusNotSynced,
+			wantErr:    "ledger not synced: Sync suspended; run `ox doctor`",
+		},
+		{
+			name:       "status timeout is not synced",
+			statusErr:  errors.New("i/o timeout"),
+			wantStatus: ledgerSyncStatusNotSynced,
+			wantErr:    "could not verify ledger state",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var result SyncResult
+			err := recordLedgerSyncVerdict(&result, tt.status, tt.statusErr)
+			require.NotNil(t, result.Transport.Ledger)
+			require.Equal(t, tt.wantStatus, result.Transport.Ledger.Status)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				require.Empty(t, result.Transport.Ledger.Error)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+			require.NotEmpty(t, result.Transport.Ledger.Error)
+		})
+	}
 }

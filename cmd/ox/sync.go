@@ -377,12 +377,19 @@ func syncViaDaemon(_ context.Context, jsonOutput bool, result *SyncResult) error
 
 	// The IPC succeeding only means the daemon accepted the request; its ledger
 	// pull returns nil for every skip. Verify before claiming "synced".
-	if reasons := classifyLedgerSync(gatherLedgerSyncFacts(ledgerStatusForSync())); len(reasons) > 0 {
+	status, statusErr := ledgerStatusForSync()
+	return recordLedgerSyncVerdict(result, status, statusErr)
+}
+
+// recordLedgerSyncVerdict sets the ledger's transport result from what the
+// daemon status and the ledger on disk actually show, and returns an error
+// whenever that is anything other than "synced".
+func recordLedgerSyncVerdict(result *SyncResult, status *daemon.StatusData, statusErr error) error {
+	if reasons := classifyLedgerSync(gatherLedgerSyncFacts(status, statusErr)); len(reasons) > 0 {
 		msg := ledgerNotSyncedError(reasons)
 		result.Transport.Ledger = &SyncLedgerResult{Status: ledgerSyncStatusNotSynced, Error: msg}
 		return fmt.Errorf("ledger not synced: %s", msg)
 	}
-
 	result.Transport.Ledger = &SyncLedgerResult{Status: "synced"}
 	return nil
 }

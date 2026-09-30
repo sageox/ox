@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -202,4 +203,206 @@ func TestList_CarriesPlanID(t *testing.T) {
 
 func writeMetaForTest(dir string, m Meta) error {
 	return MutatePlanMeta(context.Background(), dir, func(*Meta) (*Meta, error) { return &m, nil })
+}
+
+// TestSave_SameDayClosedPlanGetsFreshDir verifies a save whose dated dir name
+// is already held by a CLOSED plan steps around it instead of writing into it.
+// Failure prevented: supersede a plan, save its replacement the same day under
+// the same slug, and the "replacement" overwrites the closed plan's page,
+// reuses its pln_ id, and is logged as that plan's revision.
+func TestSave_SameDayClosedPlanGetsFreshDir(t *testing.T) {
+	day := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		close EventKind
+		meta  func() Meta // the replacement save
+	}{
+		{
+			name:  "explicit slug after supersede",
+			close: EventSuperseded,
+			meta:  func() Meta { return Meta{Topic: "Revision target", Slug: "dup", CreatedAt: day, Primary: PrimaryHTML} },
+		},
+		{
+			name:  "derived slug after abandon",
+			close: EventAbandoned,
+			meta:  func() Meta { return Meta{Topic: "dup", CreatedAt: day, SourcePlanPath: "/src/other.html"} },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger := t.TempDir()
+			withLedger(t, ledger)
+			closed := saveWithSlug(t, "dup", day, "closed body")
+			if _, err := AppendPlanEvent(context.Background(), closed, tt.close, PlanEventFields{Reason: "replaced", SupersededBy: "replacement-plan"}); err != nil {
+				t.Fatal(err)
+			}
+			closedEvents, err := LoadEvents(closed)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			dir, _, err := Save("/fake/git/root", Input{Raw: "replacement body"}, Result{}, nil, tt.meta())
+			if err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			if dir == closed {
+				t.Fatalf("replacement wrote into the closed plan's dir %s", filepath.Base(closed))
+			}
+			if got, want := filepath.Base(dir), "2026-09-23-dup-2"; got != want {
+				t.Errorf("dir = %s, want %s", got, want)
+			}
+			body, err := os.ReadFile(filepath.Join(closed, planMDFile))
+			if err != nil || string(body) != "closed body" {
+				t.Errorf("closed plan.md = %q (err %v), want it untouched", body, err)
+			}
+			after, err := LoadEvents(closed)
+			if err != nil || len(after) != len(closedEvents) {
+				t.Errorf("closed plan gained events: %d -> %d", len(closedEvents), len(after))
+			}
+			fresh, err := LoadEvents(dir)
+			if err != nil || len(fresh) != 1 || fresh[0].Kind != EventCreated {
+				t.Fatalf("replacement events = %+v, want one created", fresh)
+			}
+			if fresh[0].PlanID == closedEvents[0].PlanID {
+				t.Error("replacement reused the closed plan's pln_ id")
+			}
+
+			// The next save of the same page revises the replacement, never
+			// the closed plan its dir name was stepped around.
+			again, _, err := Save("/fake/git/root", Input{Raw: "replacement v2"}, Result{}, nil, tt.meta())
+			if err != nil {
+				t.Fatalf("re-save: %v", err)
+			}
+			if again != dir {
+				t.Errorf("re-save landed in %s, want the replacement %s", filepath.Base(again), filepath.Base(dir))
+			}
+		})
+	}
+}
+
+// TestResolvePlanDir_PrefersSoleLivePlan verifies lookups follow save's rule:
+// after supersede-then-resave, the slug names the one live plan.
+// Failure prevented: `ox plan status <slug>` / approve / view refused as
+// ambiguous right after the standard supersede flow.
+func TestResolvePlanDir_PrefersSoleLivePlan(t *testing.T) {
+	day1 := time.Date(2026, 9, 21, 9, 0, 0, 0, time.UTC)
+	day2 := time.Date(2026, 9, 22, 9, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name     string
+		closeNew bool // also close the newer plan: two closed, zero live
+		wantBase string
+		wantAmb  bool
+	}{
+		{name: "one closed + one live resolves to live", wantBase: "2026-09-22-dup"},
+		{name: "all closed stays ambiguous", closeNew: true, wantAmb: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger := t.TempDir()
+			withLedger(t, ledger)
+			plansDir := filepath.Join(ledger, "data", "plans")
+			old := saveWithSlug(t, "dup", day1, "old")
+			if _, err := AppendPlanEvent(context.Background(), old, EventSuperseded, PlanEventFields{Reason: "replaced", SupersededBy: "replacement-plan"}); err != nil {
+				t.Fatal(err)
+			}
+			newer := saveWithSlug(t, "dup", day2, "new")
+			if tt.closeNew {
+				if _, err := AppendPlanEvent(context.Background(), newer, EventAbandoned, PlanEventFields{Reason: "dropped"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			dir, name, err := resolvePlanDir(plansDir, "dup")
+			if tt.wantAmb {
+				var amb *AmbiguousSlugError
+				if !errors.As(err, &amb) || len(amb.Candidates) != 2 {
+					t.Fatalf("err = %v, want AmbiguousSlugError naming both", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolvePlanDir: %v", err)
+			}
+			if name != tt.wantBase || dir != newer {
+				t.Errorf("resolved %s, want %s", name, tt.wantBase)
+			}
+			// the closed plan stays addressable by its full dir name
+			if _, n, err := resolvePlanDir(plansDir, filepath.Base(old)); err != nil || n != filepath.Base(old) {
+				t.Errorf("full dir name of the closed plan: %s err=%v", n, err)
+			}
+		})
+	}
+}
+
+// TestResolveSaveDir_MatchesSave verifies the CLI's pre-save probe names the
+// exact dir Save then writes, and fails the same way Save does without a
+// ledger. Failure prevented: the prior-revision snapshot guarding one dir
+// while Save overwrites another.
+func TestResolveSaveDir_MatchesSave(t *testing.T) {
+	day := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+	closed := saveWithSlug(t, "dup", day, "closed")
+	if _, err := AppendPlanEvent(context.Background(), closed, EventAbandoned, PlanEventFields{Reason: "dropped"}); err != nil {
+		t.Fatal(err)
+	}
+
+	meta := Meta{Topic: "Revision target", Slug: "dup", CreatedAt: day}
+	probe, err := ResolveSaveDir("/fake/git/root", meta)
+	if err != nil {
+		t.Fatalf("ResolveSaveDir: %v", err)
+	}
+	saved, _, err := Save("/fake/git/root", Input{Raw: "x"}, Result{}, nil, meta)
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if probe != saved {
+		t.Errorf("probe %s != saved %s", filepath.Base(probe), filepath.Base(saved))
+	}
+
+	// zero CreatedAt defaults to now rather than the zero date
+	if d, err := ResolveSaveDir("/fake/git/root", Meta{Topic: "Fresh topic"}); err != nil || filepath.Base(d)[:4] == "0001" {
+		t.Errorf("zero CreatedAt resolved to %s (err %v)", filepath.Base(d), err)
+	}
+
+	withLedger(t, "")
+	if _, err := ResolveSaveDir("/fake/git/root", meta); err == nil {
+		t.Error("no ledger must be an error, not a guessed dir")
+	}
+}
+
+// TestAmbiguousSlugError_NamesCandidatesAndFix verifies the refusal tells the
+// user which dirs collide and how to pick one.
+func TestAmbiguousSlugError_NamesCandidatesAndFix(t *testing.T) {
+	err := &AmbiguousSlugError{Slug: "dup", Candidates: []string{"2026-09-21-dup", "2026-09-22-dup"}}
+	msg := err.Error()
+	for _, want := range []string{`"dup"`, "2 saved plans", "2026-09-21-dup, 2026-09-22-dup", "full directory name"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q missing %q", msg, want)
+		}
+	}
+}
+
+// TestKindsHint_ListsExactlyTheValidKinds verifies every `--kind` hint names
+// every accepted kind and nothing else. Failure prevented: a hint listing a
+// subset, so a coworker concludes a valid kind (evidence) is unsupported.
+func TestKindsHint_ListsExactlyTheValidKinds(t *testing.T) {
+	hint := KindsHint()
+	if hint != "plan|mockup|review|evidence" {
+		t.Errorf("KindsHint = %q", hint)
+	}
+	for _, k := range strings.Split(hint, "|") {
+		if !ValidKind(k) {
+			t.Errorf("hint names %q, which ValidKind rejects", k)
+		}
+	}
+	for _, k := range []string{"", " Mockup ", "EVIDENCE"} {
+		if !ValidKind(k) {
+			t.Errorf("ValidKind(%q) = false, want true", k)
+		}
+	}
+	if ValidKind("design") {
+		t.Error("ValidKind accepted an unknown kind")
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -617,17 +618,30 @@ func checkLedgerGitLockFiles() checkResult {
 	if ledgerPath == "" {
 		return SkippedCheck(name, "no ledger configured", "")
 	}
-	gitDir := filepath.Join(ledgerPath, ".git")
-	if info, err := os.Stat(gitDir); err != nil || !info.IsDir() {
+	return ledgerGitLockFilesResult(name, filepath.Join(ledgerPath, ".git"), time.Now())
+}
+
+// ledgerGitLockFilesResult skips only a ledger that is genuinely not cloned.
+// A permission or I/O error on .git is reported, not skipped: "could not look"
+// must not read as "nothing to see" on the check meant to explain a stuck ledger.
+func ledgerGitLockFilesResult(name, gitDir string, now time.Time) checkResult {
+	info, err := os.Stat(gitDir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return SkippedCheck(name, "ledger not cloned", "")
+	case err != nil:
+		return FailedCheck(name, "cannot inspect ledger git dir", fmt.Sprintf("stat %s: %v", gitDir, err))
+	case !info.IsDir():
 		return SkippedCheck(name, "ledger not cloned", "")
 	}
-	return gitLockFilesResult(name, gitDir, time.Now())
+	return gitLockFilesResult(name, gitDir, now)
 }
 
 // gitLockFilesResult reports git lock files in gitDir. Locks older than an hour
 // fail; younger ones warn, since a live git may still hold them. The remove
-// command lists each full path: a one-element brace expansion ({index.lock})
-// is not expanded by the shell, so the old form named a file that does not exist.
+// command lists each full path, shell-quoted: a one-element brace expansion
+// ({index.lock}) is not expanded by the shell, so the old form named a file that
+// does not exist, and an unquoted path with a space would split into two targets.
 func gitLockFilesResult(name, gitDir string, now time.Time) checkResult {
 	var found, paths, oldLocks []string
 	oneHourAgo := now.Add(-1 * time.Hour)
@@ -638,7 +652,7 @@ func gitLockFilesResult(name, gitDir string, now time.Time) checkResult {
 			continue
 		}
 		found = append(found, lock)
-		paths = append(paths, path)
+		paths = append(paths, shellQuote(path))
 		if info.ModTime().Before(oneHourAgo) {
 			oldLocks = append(oldLocks, lock)
 		}
@@ -651,7 +665,7 @@ func gitLockFilesResult(name, gitDir string, now time.Time) checkResult {
 	detail := fmt.Sprintf(
 		"Lock files found: %s\n"+
 			"If no git commands are running, remove with:\n"+
-			"  rm %s",
+			"  rm -- %s",
 		strings.Join(found, ", "),
 		strings.Join(paths, " "))
 

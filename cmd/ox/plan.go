@@ -210,17 +210,17 @@ var planSaveCmd = &cobra.Command{
 	Short: "Save a plan, mockup, or review page to the ledger and share it",
 	Long: `Persist a plan to the ledger and push it so teammates can open it.
 
-Prints the shareable link (https://<endpoint>/plan/<pln_id>) and says loudly —
+Prints the shareable link (https://ENDPOINT/plan/PLN_ID) and says loudly —
 on stderr, and as "share":{"shared":false,"reason":...,"fix":...} under --json —
 when the plan was saved locally but NOT pushed (ledger diverged, push failed,
 mid-rebase), with the command that fixes it.
 
-Re-saving a page whose <meta name="ox-plan-slug"> (or --slug) names an existing
+Re-saving a page whose ox-plan-slug meta tag (or --slug) names an existing
 open plan records a new REVISION of that plan (same id and link), never a fork.
 A slug that matches more than one saved plan is refused with the candidates.
 
 PREFERRED — HTML as the plan of record:
-  --file <plan.html>   an authored, self-contained interactive page. ox stores it
+  --file plan.html    an authored, self-contained interactive page. ox stores it
                        as the canonical artifact (meta primary=html), DERIVES
                        plan.md from it (regenerated on save — never hand-edit),
                        and computes deterministic enrichment itself when no
@@ -228,7 +228,7 @@ PREFERRED — HTML as the plan of record:
                        docs/specs/plan-authoring-html.md
 
 Quick plans:
-  --file <plan.md>     markdown-primary; annotations optional (self-enriches)
+  --file plan.md      markdown-primary; annotations optional (self-enriches)
 
 Legacy markdown-only path:
   --plan        the plan markdown (with --annotations, required together)
@@ -413,12 +413,16 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 	// A revision overwrites the plan dir in place. If an earlier save of it
 	// never got committed (its push/commit failed), that prior revision exists
 	// only in the working tree — commit it locally first so it stays
-	// recoverable from ledger history. Best-effort: on failure the save still
-	// proceeds (a stuck plan beats a lost one) but says so loudly.
+	// recoverable from ledger history. If that snapshot fails (e.g. a held
+	// index.lock), REFUSE the save: overwriting would destroy the only copy of
+	// the prior revision (Sacred tier), while refusing loses nothing — the new
+	// revision is still in its source file and saves once the ledger is fixed.
 	if target, rerr := plan.ResolveSaveDir(gitRoot, meta); rerr == nil {
 		if _, serr := os.Stat(filepath.Join(target, "meta.json")); serr == nil {
 			if err := snapshotPriorRevision(gitRoot, target); err != nil {
-				slog.Warn("plan: could not snapshot uncommitted prior revision before revising", "error", err, "dir", target)
+				report.Err = fmt.Errorf("prior revision of %s is uncommitted and could not be snapshotted, so it was NOT overwritten (fix the ledger with `ox doctor`, then save again): %w", filepath.Base(target), err)
+				slog.Warn("plan: refused revision, prior revision could not be snapshotted", "error", err, "dir", target)
+				return ""
 			}
 		}
 	}
@@ -1489,8 +1493,8 @@ func printUnsavedArtifactHint(gitRoot string) {
 		return
 	}
 	cli.PrintHint(fmt.Sprintf(
-		"%d self-contained page(s) authored here are not in the ledger (e.g. %s) — `ox plan save --file <page> --kind mockup|review|evidence`.",
-		len(arts), filepath.Base(arts[0])))
+		"%d self-contained page(s) authored here are not in the ledger (e.g. %s) — `ox plan save --file <page> --kind %s`.",
+		len(arts), filepath.Base(arts[0]), plan.KindsHint()))
 }
 
 // openReviewCount returns the number of OPEN, actionable review items for a plan

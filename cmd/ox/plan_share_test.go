@@ -298,3 +298,34 @@ func TestLifecycleVerb_CommitsAndPushes(t *testing.T) {
 		t.Errorf("approved event not on the remote: %v\n%s", err, show)
 	}
 }
+
+// TestPlanShareHelpers_NeverGuess verifies the share helpers report "unknown"
+// rather than inventing a link, id, or revision. Failure prevented: a printed
+// share link pointing at a plan that does not exist.
+func TestPlanShareHelpers_NeverGuess(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "no-such-plan")
+	if got := planShareURL("", ""); got != "" {
+		t.Errorf("planShareURL with no id = %q, want empty", got)
+	}
+	if got := planIDForDir(missing); got != "" {
+		t.Errorf("planIDForDir(missing) = %q, want empty", got)
+	}
+	if got := planRevisionCount(missing); got != 0 {
+		t.Errorf("planRevisionCount(missing) = %d, want 0", got)
+	}
+}
+
+// TestSharePlanDir_NoLedgerIsNotShared verifies a repo with no ledger reports
+// NOT SHARED with the fix. Failure prevented: a save in an unconfigured repo
+// claiming teammates can see it.
+func TestSharePlanDir_NoLedgerIsNotShared(t *testing.T) {
+	prev := daemonRunningFn
+	daemonRunningFn = func() bool { return true }
+	t.Cleanup(func() { daemonRunningFn = prev })
+
+	st := sharePlanDir(t.TempDir(), filepath.Join(t.TempDir(), "plan"))
+	if st.Shared || st.Committed || st.Fix != planDoctorFix || !strings.Contains(st.Reason, "no ledger") {
+		t.Errorf("verdict = %+v, want not shared / no ledger / doctor fix", st)
+	}
+}

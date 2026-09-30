@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -155,7 +156,7 @@ func TestEmitWrittenPageNudge_SameTurnOnce(t *testing.T) {
 	}
 	if payload.HookSpecificOutput.HookEventName != "PostToolUse" ||
 		!strings.Contains(payload.HookSpecificOutput.AdditionalContext, "Saved nothing yet") ||
-		!strings.Contains(payload.HookSpecificOutput.AdditionalContext, "--kind mockup|review|plan") {
+		!strings.Contains(payload.HookSpecificOutput.AdditionalContext, "--kind plan|mockup|review|evidence") {
 		t.Errorf("payload = %+v", payload)
 	}
 	if emitWrittenPageNudge(&second, root, "Ox1", "Edit", input) || second.Len() != 0 {
@@ -229,5 +230,92 @@ func TestArmUnsavedPlanFromPrompt(t *testing.T) {
 				t.Errorf("nudge line = %q", unsavedPlanNudgeLine(st))
 			}
 		})
+	}
+}
+
+// TestEmitWrittenPageNudge_Skips pins every case where the same-turn nudge
+// must stay silent. Each one is a false positive the agent would otherwise be
+// told to "save": a fragment, a non-page, a file that vanished — plus a nudge
+// that could not be delivered, which must report false rather than claim it spoke.
+// Failure prevented: PostToolUse stdout carrying a nudge for a page that is not
+// an authored artifact, or a half-written envelope Claude Code cannot parse.
+func TestEmitWrittenPageNudge_Skips(t *testing.T) {
+	root := t.TempDir()
+
+	small := filepath.Join(root, "small.html")
+	if err := os.WriteFile(small, []byte("<!doctype html><style></style>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	unstyled := filepath.Join(root, "unstyled.html")
+	if err := os.WriteFile(unstyled, []byte("<!doctype html>"+strings.Repeat("<p>x</p>", 3000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dirPage := filepath.Join(root, "dir.html")
+	if err := os.MkdirAll(dirPage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	page := filepath.Join(root, "page.html")
+	authoredPage(t, page)
+
+	input := func(p string) []byte { return []byte(`{"file_path":"` + p + `"}`) }
+	tests := []struct {
+		name        string
+		projectRoot string
+		tool        string
+		path        string
+		w           io.Writer
+	}{
+		{name: "no project root", projectRoot: "", tool: "Write", path: page},
+		{name: "read is not a write", projectRoot: root, tool: "Read", path: page},
+		{name: "missing file", projectRoot: root, tool: "Write", path: filepath.Join(root, "gone.html")},
+		{name: "directory named .html", projectRoot: root, tool: "Write", path: dirPage},
+		{name: "fragment under the size floor", projectRoot: root, tool: "Write", path: small},
+		{name: "unstyled page is not authored", projectRoot: root, tool: "Write", path: unstyled},
+		{name: "undeliverable nudge reports false", projectRoot: root, tool: "Write", path: page, w: failingWriter{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := tt.w
+			if w == nil {
+				w = &buf
+			}
+			if emitWrittenPageNudge(w, tt.projectRoot, "OxSkip", tt.tool, input(tt.path)) {
+				t.Fatal("nudge emitted, want silence")
+			}
+			if buf.Len() != 0 {
+				t.Errorf("stdout = %q, want nothing", buf.String())
+			}
+		})
+	}
+}
+
+// TestArmUnsavedPlanFromPrompt_NeverOverwrites verifies a prompt never clobbers
+// an existing stamp, and that an unresolvable target is a silent no-op.
+// Failure prevented: a follow-up plan-mode prompt replacing an enrich-armed
+// stamp (topic, material signals) with the bare placeholder, or resetting a
+// nudge that was already delivered.
+func TestArmUnsavedPlanFromPrompt_NeverOverwrites(t *testing.T) {
+	root := t.TempDir()
+	path := planUnsavedPath(root, "Oxcx")
+	prior := unsavedPlanStamp{Topic: "retry budget redesign", Material: true, ArmedAt: time.Now().UTC()}
+	data, _ := json.Marshal(prior)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	armUnsavedPlanFromPrompt(root, "Oxcx", []byte(`{"prompt":"p","permission_mode":"plan"}`))
+	st, ok := readUnsavedPlanStamp(path)
+	if !ok || st.Topic != prior.Topic || st.FromPrompt {
+		t.Errorf("prompt overwrote the enrich-armed stamp: %+v", st)
+	}
+
+	// No project root / agent: nowhere to arm, and no panic.
+	armUnsavedPlanFromPrompt("", "", []byte(`{"permission_mode":"plan"}`))
+	if planSourceAlreadySaved(root, "") {
+		t.Error("an empty source path must never count as saved")
 	}
 }
