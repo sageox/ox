@@ -3,14 +3,17 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/plan"
 )
 
@@ -43,10 +46,12 @@ const (
 	// nag on every prompt.
 	artifactNudgeCacheSubdir = "artifact-nudged"
 
-	// artifactMinBytes skips fragments and test scaffolding. An authored,
-	// self-contained page with inline CSS carries real weight; the review sheet
-	// that motivated this was ~168 KB.
-	artifactMinBytes = 20 * 1024
+	// artifactMinBytes skips fragments and test scaffolding. 8 KB, down from
+	// 20 KB: a compact CSS-only mockup or review sheet authored in one turn
+	// lands at 8–15 KB and was never mentioned. Lowering it is safe only
+	// because candidates must now also be written by this session (see
+	// filterSessionWritten) — the size gate is no longer the main noise filter.
+	artifactMinBytes = 8 * 1024
 
 	// artifactMaxAge bounds the scan to work from roughly this session. An
 	// artifact authored last month is not news.
@@ -157,11 +162,15 @@ func savedSourcePaths(gitRoot string) map[string]bool {
 // the walk's own view of the tree — a directory component can be swapped for a
 // symlink between the walk's stat and the open — so the read happens once the
 // tree is no longer being enumerated.
-func findUnsavedArtifacts(projectRoot string, now time.Time) []string {
+//
+// since, when non-zero, is when this session began (the prime marker's
+// PrimedAt): a page last modified before it was not written by this session.
+func findUnsavedArtifacts(projectRoot string, now, since time.Time) []string {
 	if projectRoot == "" {
 		return nil
 	}
 	claimed := savedSourcePaths(projectRoot)
+	ledger := artifactLedgerRoot(projectRoot)
 	rootDepth := strings.Count(filepath.Clean(projectRoot), string(os.PathSeparator))
 
 	var candidates []string
@@ -188,8 +197,11 @@ func findUnsavedArtifacts(projectRoot string, now time.Time) []string {
 		if now.Sub(info.ModTime()) > artifactMaxAge {
 			return nil
 		}
+		if !since.IsZero() && info.ModTime().Before(since) {
+			return nil
+		}
 		abs, err := normalizeArtifactPath(path)
-		if err != nil || claimed[abs] {
+		if err != nil || claimed[abs] || isUnderDir(abs, ledger) {
 			return nil
 		}
 		candidates = append(candidates, abs)
@@ -199,6 +211,7 @@ func findUnsavedArtifacts(projectRoot string, now time.Time) []string {
 		return nil
 	})
 
+	candidates = filterSessionWritten(projectRoot, candidates)
 	var found []string
 	for _, abs := range candidates {
 		if !looksAuthoredPage(artifactHead(abs)) {
@@ -210,6 +223,101 @@ func findUnsavedArtifacts(projectRoot string, now time.Time) []string {
 		}
 	}
 	return found
+}
+
+// filterSessionWritten drops candidates git says are tracked AND unmodified.
+// Those are pages that were merely present in the tree — a checkout or a new
+// worktree stamps every tracked file with a fresh mtime, which is how a
+// committed agents/buzz/index.html was reported as "a page you authored".
+// Untracked, ignored (.context/ scratch pages), staged, and modified files are
+// kept: something wrote them since the last commit.
+//
+// If git cannot answer (not a repo, git missing) every candidate is kept —
+// "could not look" must not silently become "nothing to report".
+func filterSessionWritten(projectRoot string, candidates []string) []string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	prefixOut, err := exec.Command("git", "-C", projectRoot, "rev-parse", "--show-prefix").Output()
+	if err != nil {
+		slog.Debug("hook: artifact nudge could not ask git, keeping all candidates", "err", err)
+		return candidates
+	}
+	prefix := strings.TrimSpace(string(prefixOut))
+	args := []string{"--literal-pathspecs", "-C", projectRoot, "status", "--porcelain=v1", "-z",
+		// traditional + untracked=all lists an ignored FILE by name; "matching"
+		// collapses it to its ignored parent dir (".context/"), which the
+		// prefix match below also handles.
+		"--untracked-files=all", "--ignored=traditional", "--"}
+	rels := make(map[string]string, len(candidates)) // repo-relative -> abs
+	for _, abs := range candidates {
+		rel, rerr := filepath.Rel(projectRoot, abs)
+		if rerr != nil {
+			continue
+		}
+		rel = filepath.ToSlash(rel)
+		rels[prefix+rel] = abs
+		args = append(args, rel)
+	}
+	out, err := exec.Command("git", args...).Output()
+	if err != nil {
+		slog.Debug("hook: artifact nudge git status failed, keeping all candidates", "err", err)
+		return candidates
+	}
+	touched := map[string]bool{}
+	for _, rec := range strings.Split(string(out), "\x00") {
+		if len(rec) < 4 {
+			continue // empty tail, or the source half of a rename record
+		}
+		p := rec[3:]
+		if abs, ok := rels[p]; ok {
+			touched[abs] = true
+			continue
+		}
+		if strings.HasSuffix(p, "/") { // a whole untracked/ignored directory
+			for rel, abs := range rels {
+				if strings.HasPrefix(rel, p) {
+					touched[abs] = true
+				}
+			}
+		}
+	}
+	var kept []string
+	for _, abs := range candidates {
+		if touched[abs] {
+			kept = append(kept, abs)
+		}
+	}
+	slog.Debug("hook: artifact nudge session-written filter", "before", len(candidates), "after", len(kept))
+	return kept
+}
+
+// artifactLedgerRoot is the project's ledger checkout, or "". Pages inside the
+// ledger are saved plans by definition; nudging to save one is always wrong.
+func artifactLedgerRoot(projectRoot string) string {
+	ctx, err := config.LoadProjectContext(projectRoot)
+	if err != nil || ctx == nil {
+		return ""
+	}
+	p := ctx.DefaultLedgerPath()
+	if p == "" {
+		return ""
+	}
+	abs, err := normalizeArtifactPath(p)
+	if err != nil {
+		return ""
+	}
+	return abs
+}
+
+// isUnderDir reports whether path is dir or inside it. Both must already be
+// normalized absolute paths; an empty dir contains nothing.
+func isUnderDir(path, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // artifactHead reads the opening bytes of a candidate. Called only after the
@@ -246,25 +354,13 @@ func artifactNudgedPath(projectRoot, agentID, artifact string) string {
 
 // emitUnsavedArtifactNudge tells the model about a self-contained page it
 // authored and never saved. At most once per artifact path.
-func emitUnsavedArtifactNudge(w io.Writer, projectRoot, agentID string) {
+// since is the session start (zero when unknown); see findUnsavedArtifacts.
+func emitUnsavedArtifactNudge(w io.Writer, projectRoot, agentID string, since time.Time) {
 	if projectRoot == "" {
 		return
 	}
-	for _, art := range findUnsavedArtifacts(projectRoot, time.Now()) {
-		marker := artifactNudgedPath(projectRoot, agentID, art)
-		if marker == "" {
-			continue
-		}
-		if _, err := os.Stat(marker); err == nil {
-			continue // already mentioned
-		}
-		if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
-			continue
-		}
-		// Mark BEFORE speaking: an unheard reminder beats one that repeats on
-		// every prompt.
-		if err := os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
-			slog.Debug("hook: could not mark artifact nudge", "err", err)
+	for _, art := range findUnsavedArtifacts(projectRoot, time.Now(), since) {
+		if !markArtifactNudged(projectRoot, agentID, art) {
 			continue
 		}
 		fmt.Fprintf(w, "<system-reminder>[ox] %s</system-reminder>\n", unsavedArtifactNudgeLine(art))
@@ -272,12 +368,101 @@ func emitUnsavedArtifactNudge(w io.Writer, projectRoot, agentID string) {
 	}
 }
 
+// markArtifactNudged records that art has been mentioned and reports whether
+// the caller should speak now (false when already mentioned or unmarkable).
+// Mark BEFORE speaking: an unheard reminder beats one that repeats forever.
+func markArtifactNudged(projectRoot, agentID, art string) bool {
+	marker := artifactNudgedPath(projectRoot, agentID, art)
+	if marker == "" {
+		return false
+	}
+	if _, err := os.Stat(marker); err == nil {
+		return false
+	}
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		return false
+	}
+	if err := os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
+		slog.Debug("hook: could not mark artifact nudge", "err", err)
+		return false
+	}
+	return true
+}
+
+// writtenPageTools are the Claude Code tools whose tool_input.file_path names
+// a file the model just wrote.
+var writtenPageTools = map[string]bool{"Write": true, "Edit": true, "MultiEdit": true}
+
+// writtenPageFromToolInput returns the .html file a Write/Edit/MultiEdit call
+// just wrote, or "" for any other tool or payload.
+func writtenPageFromToolInput(toolName string, toolInput []byte) string {
+	if !writtenPageTools[toolName] || len(toolInput) == 0 {
+		return ""
+	}
+	var ti struct {
+		FilePath string `json:"file_path"`
+	}
+	if err := json.Unmarshal(toolInput, &ti); err != nil {
+		return ""
+	}
+	if !strings.EqualFold(filepath.Ext(ti.FilePath), ".html") {
+		return ""
+	}
+	return ti.FilePath
+}
+
+// emitWrittenPageNudge is the SAME-TURN page nudge. The prompt-hook nudge
+// above fires on the human's NEXT prompt — after the agent has already told
+// them "done" and often after the session ended. This fires on the
+// PostToolUse of the Write itself, while the agent can still act on it.
+//
+// Plain PostToolUse stdout is discarded by Claude Code (agent_hook.go table),
+// so this uses the one PostToolUse channel it does inject: the JSON
+// hookSpecificOutput.additionalContext envelope. stdout must then be exactly
+// that JSON document, so the caller must write nothing else on this call.
+// Returns whether it emitted.
+func emitWrittenPageNudge(w io.Writer, projectRoot, agentID, toolName string, toolInput []byte) bool {
+	path := writtenPageFromToolInput(toolName, toolInput)
+	if path == "" || projectRoot == "" {
+		return false
+	}
+	abs, err := normalizeArtifactPath(path)
+	if err != nil {
+		return false
+	}
+	if isUnderDir(abs, artifactLedgerRoot(projectRoot)) || savedSourcePaths(projectRoot)[abs] {
+		return false
+	}
+	info, err := os.Stat(abs)
+	if err != nil || info.IsDir() || info.Size() < artifactMinBytes {
+		return false
+	}
+	if !looksAuthoredPage(artifactHead(abs)) {
+		return false
+	}
+	if !markArtifactNudged(projectRoot, agentID, abs) {
+		return false
+	}
+	payload := map[string]any{
+		"hookSpecificOutput": map[string]any{
+			"hookEventName":     "PostToolUse",
+			"additionalContext": "[ox] " + unsavedArtifactNudgeLine(abs),
+		},
+	}
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		slog.Debug("hook: written-page nudge emit failed", "err", err)
+		return false
+	}
+	slog.Info("hook: written-page nudge emitted", "agent_id", agentID, "bytes", info.Size())
+	return true
+}
+
 // unsavedArtifactNudgeLine names the artifact, the command, and what is lost
 // otherwise. The path is attacker-influenced and crosses into trusted model
 // context, so it is sanitized exactly like the plan nudge's target.
 func unsavedArtifactNudgeLine(artifact string) string {
 	return fmt.Sprintf(
-		"You authored a self-contained page (%s) that is not in the ledger. Save it — `ox plan save --file %s --kind mockup|review|evidence` — or it dies with this session's working tree; a mockup or review sheet belongs in the ledger exactly as much as a plan does.",
-		reminderSafePlanTarget(artifact), reminderSafePlanTarget(artifact),
+		"Saved nothing yet: `ox plan save --file %s --kind mockup|review|plan`. Teammates can't see it otherwise.",
+		reminderSafePlanTarget(artifact),
 	)
 }

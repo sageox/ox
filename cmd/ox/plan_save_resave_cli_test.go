@@ -104,7 +104,7 @@ func writeAuthoredPage(t *testing.T, path, title string) {
 	fmt.Fprintf(&body, "</head><body>\n<h1>%s</h1>\n", title)
 	body.WriteString("<h2>Decision</h2><p>Ship the narrower change.</p>\n")
 	body.WriteString("<h2>Risk</h2><p>The ledger grows a duplicate directory.</p>\n")
-	// Pad past artifactMinBytes (20 KiB) so findUnsavedArtifacts considers it
+	// Pad past artifactMinBytes so findUnsavedArtifacts considers it
 	// an authored page rather than a fragment.
 	body.WriteString("<!-- ")
 	body.WriteString(strings.Repeat("padding to clear the authored-page size floor. ", 600))

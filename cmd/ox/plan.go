@@ -1357,7 +1357,7 @@ func runPlanList(cmd *cobra.Command, jsonOut bool) error {
 // ledger) so the two can never drift again. Never called on the --json path:
 // hint text on stdout would corrupt a scripted parse.
 func printUnsavedArtifactHint(gitRoot string) {
-	arts := findUnsavedArtifacts(gitRoot, time.Now())
+	arts := findUnsavedArtifacts(gitRoot, time.Now(), time.Time{})
 	if len(arts) == 0 {
 		return
 	}
