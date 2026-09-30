@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -354,35 +355,61 @@ func residualSecret(projectRoot, dir string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if containsSecret(redactor, name, data) {
+		found, err := containsSecret(redactor, name, data)
+		if err != nil {
+			return "", err
+		}
+		if found {
 			return name, nil
 		}
 	}
 	return "", nil
 }
 
-// containsSecret checks decoded text: JSON files are scanned value by value,
-// as the writer redacted them, so escaping cannot hide or fake a match.
-func containsSecret(r *session.Redactor, name string, data []byte) bool {
-	if !strings.HasSuffix(name, ".json") && !strings.HasSuffix(name, ".jsonl") {
-		return r.ContainsSecrets(string(data))
+// containsSecret checks decoded text, as the writer redacted it, so escaping
+// cannot hide or fake a match: a JSON artifact as one document (meta.json and
+// summary.json are indented, so their lines are fragments), a JSONL artifact
+// record by record. An artifact that does not decode cannot be scanned, and
+// is an error, so the session is held rather than published unscanned.
+func containsSecret(r *session.Redactor, name string, data []byte) (bool, error) {
+	switch {
+	case strings.HasSuffix(name, ".jsonl"):
+		for i, line := range bytes.Split(data, []byte("\n")) {
+			if len(bytes.TrimSpace(line)) == 0 {
+				continue
+			}
+			found, err := jsonContainsSecret(r, line)
+			if err != nil {
+				return false, fmt.Errorf("cannot scan %s line %d: %w", name, i+1, err)
+			}
+			if found {
+				return true, nil
+			}
+		}
+		return false, nil
+	case strings.HasSuffix(name, ".json"):
+		found, err := jsonContainsSecret(r, data)
+		if err != nil {
+			return false, fmt.Errorf("cannot scan %s: %w", name, err)
+		}
+		return found, nil
+	default:
+		return r.ContainsSecrets(string(data)), nil
+	}
+}
+
+func jsonContainsSecret(r *session.Redactor, data []byte) (bool, error) {
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return false, err
 	}
 	found := false
-	for _, line := range strings.Split(string(data), "\n") {
-		var value any
-		if json.Unmarshal([]byte(line), &value) != nil {
-			continue
+	nativeimport.WalkStrings(value, func(s string) {
+		if !found && r.ContainsSecrets(s) {
+			found = true
 		}
-		nativeimport.WalkStrings(value, func(s string) {
-			if !found && r.ContainsSecrets(s) {
-				found = true
-			}
-		})
-		if found {
-			return true
-		}
-	}
-	return false
+	})
+	return found, nil
 }
 
 // checkImportStaging refuses anything but the known artifacts, and any LFS

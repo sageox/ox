@@ -924,36 +924,50 @@ func TestImportE2E_SessionsNotWorthSharingStayLocal(t *testing.T) {
 
 // The summarizer sees only the redacted transcript, but what it writes is
 // untrusted too. A summary that carries a credential pattern holds its
-// session: nothing of it reaches LFS, where the Ledger's pre-push gate, which
-// only reads git objects, would never see it.
+// session, wherever the model put it: in text the markdown shows, or in a
+// field only summary.json carries. Nothing of it reaches LFS, where the
+// Ledger's pre-push gate, which reads only git objects, would never see it.
 //
 // Failure prevented: a key a model repeated in its summary published in the
-// uploaded summary.md.
+// uploaded summary.md, or committed in summary.json past a scan that could
+// not read indented JSON.
 func TestImportE2E_SummaryThatRepeatsASecretIsHeld(t *testing.T) {
-	f := newImportFixture(t)
 	const key = "AKIAIOSFODNN7EXAMPLE" // AWS's published example key
-	start := time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC)
-	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: start, prompt: loginPrompt, reply: "Fixed the cookie."})
-	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexA, start: start.Add(time.Hour), prompt: pushPrompt, reply: "Rotated it."})
-	f.summarizer.reply = func(prompt string) string {
-		if !strings.Contains(prompt, pushPrompt) {
-			return ""
-		}
-		return jsonLine(t, map[string]any{
-			"title": "Rotate the leaked deploy key", "outcome": "success", "key_actions": []string{"Rotated the key"},
-			"summary": "Found the key " + key + " in the push log and rotated it.",
+	for _, tc := range []struct {
+		name, field, wantFile string
+	}{
+		{"in the summary text", "summary", "meta.json"},
+		{"only in a field no markdown shows", "score_reason", "summary.json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newImportFixture(t)
+			start := time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC)
+			f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: start, prompt: loginPrompt, reply: "Fixed the cookie."})
+			f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexA, start: start.Add(time.Hour), prompt: pushPrompt, reply: "Rotated it."})
+			f.summarizer.reply = func(prompt string) string {
+				if !strings.Contains(prompt, pushPrompt) {
+					return ""
+				}
+				reply := map[string]any{
+					"title": "Rotate the leaked deploy key", "outcome": "success", "key_actions": []string{"Rotated the key"},
+					"summary": "Found the leaked key in the push log and rotated it.",
+				}
+				reply[tc.field] = "The key " + key + " was in the push log."
+				return jsonLine(t, reply)
+			}
+
+			r := f.run(t, importOptions{yes: true, jsonOut: true})
+			assert.ErrorIs(t, r.err, cli.ErrSilent)
+			held := r.session(t, e2eCodexA)
+			assert.Equal(t, "failed", held.Outcome)
+			assert.Contains(t, held.Detail, "possible secret remains in "+tc.wantFile)
+			assert.Equal(t, "uploaded", r.session(t, e2eClaudeA).Outcome, "negative control")
+			assert.Zero(t, f.store.holding(key), "the key never reached the LFS store")
+			assertRemoteObjectsCleanOf(t, f.barePath, key)
+			assert.Equal(t, []string{r.session(t, e2eClaudeA).SessionName}, remoteSessionDirs(t, f.barePath))
+			assert.NotContains(t, runGit(t, f.ledgerPath, "log", "--all", "-p"), key, "nor any local commit")
 		})
 	}
-
-	r := f.run(t, importOptions{yes: true, jsonOut: true})
-	assert.ErrorIs(t, r.err, cli.ErrSilent)
-	held := r.session(t, e2eCodexA)
-	assert.Equal(t, "failed", held.Outcome)
-	assert.Contains(t, held.Detail, "possible secret remains")
-	assert.Equal(t, "uploaded", r.session(t, e2eClaudeA).Outcome, "negative control")
-	assert.Zero(t, f.store.holding(key), "the key never reached the LFS store")
-	assertRemoteObjectsCleanOf(t, f.barePath, key)
-	assert.Equal(t, []string{r.session(t, e2eClaudeA).SessionName}, remoteSessionDirs(t, f.barePath))
 }
 
 // A push fails partway through a run. Its sessions stay pending, the next
