@@ -97,6 +97,12 @@ type SessionFinalizePayload struct {
 	// rationale; the trigger conditions are intentionally conservative
 	// to avoid skipping real sessions.
 	prefilterSummary *session.SummarizeResponse `json:"-"`
+
+	// emptyTranscript is set by BuildPrompt for a re-armed download of a
+	// session already in the Ledger whose transcript holds no conversation
+	// (see isEmptyLedgerTranscript). ProcessResult settles it as a brief
+	// session without the LLM.
+	emptyTranscript bool `json:"-"`
 }
 
 // SessionFinalizeHandler detects and finalizes incomplete sessions in the ledger.
@@ -601,8 +607,10 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			continue
 		}
 
-		// skip raw.jsonl files with zero substantive entries (header-only)
-		if !session.HasSubstantiveEntries(rawPath) {
+		// skip raw.jsonl files with zero substantive entries (header-only),
+		// except a re-armed download of an empty session already in the
+		// Ledger: that one is settled once, without the LLM (GH #1106).
+		if !session.HasSubstantiveEntries(rawPath) && !isEmptyLedgerTranscript(sessionDir, rawPath, ledgerPath) {
 			h.logger.Debug("skipping header-only session", "session", name)
 			continue
 		}
@@ -1029,6 +1037,22 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 		return RunRequest{SkipLLM: true}, nil
 	}
 
+	// No conversation to summarize: settle the session without the LLM.
+	if isEmptyLedgerTranscript(payload.SessionDir, payload.RawPath, payload.LedgerPath) {
+		payload.emptyTranscript = true
+		sessionName := filepath.Base(payload.SessionDir)
+		h.logger.Info("session has no conversation, settling without LLM", "session", sessionName)
+		if h.telemetry != nil {
+			h.telemetry.Record("summarization_skipped", map[string]any{
+				"session_hash": sessionsummary.SessionHash(sessionName),
+				"reason":       emptyTranscriptReason,
+				"entry_count":  0,
+				"skip_kind":    "empty_transcript",
+			})
+		}
+		return RunRequest{SkipLLM: true}, nil
+	}
+
 	stored, err := session.ReadSessionFromPath(payload.RawPath)
 	if err != nil {
 		return RunRequest{}, fmt.Errorf("read session %s: %w", payload.RawPath, err)
@@ -1193,7 +1217,13 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	// uploading the stub would defeat the entire optimization.
 	//
 	// See pkg/sessionsummary/prefilter.go for the heuristics and rationale.
-	if payload.prefilterSummary != nil {
+	if payload.emptyTranscript {
+		// Nothing was scored, so the quality gate routes this to upload. The
+		// discard route would delete the download and leave the Ledger entry
+		// in its failed state.
+		summaryResp = emptyTranscriptSummary()
+		scored = false
+	} else if payload.prefilterSummary != nil {
 		summaryResp = payload.prefilterSummary
 		scored = true
 		h.logger.Info("session prefilter skipped LLM summarization",
@@ -1460,7 +1490,9 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	// paths, file paths, model output text, or anything derived from
 	// the user's conversation. Validators that aggregate this server-side
 	// rely on this guarantee.
-	h.emitSummarizationTelemetry(sessionName, "delegated", result, summaryResp, scored)
+	if !payload.emptyTranscript {
+		h.emitSummarizationTelemetry(sessionName, "delegated", result, summaryResp, scored)
+	}
 
 	if disposition == session.QualityLocalOnly {
 		h.logger.Info("session below upload threshold, keeping locally",
@@ -1563,6 +1595,13 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	if preservedSessionID == "" && payload.PreservedSessionID != "" {
 		preservedSessionID = payload.PreservedSessionID
 	}
+	// A download of a session already in the Ledger has no meta.json of its
+	// own. Keep the id the team already resolves, or /c/ links 404.
+	if preservedSessionID == "" {
+		if ledgerMeta := ledgerMetaForDownload(payload); ledgerMeta != nil {
+			preservedSessionID = ledgerMeta.EffectiveSessionID()
+		}
+	}
 	// start-minted ID carried in the raw.jsonl header so conversation URLs
 	// circulated during the live session (commit trailers, PR bodies) keep
 	// resolving after a daemon-side finalize
@@ -1602,6 +1641,9 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	var meta *lfs.SessionMeta
 	if err := lfs.MutateSessionMeta(context.Background(), payload.SessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 		next := current
+		if next == nil {
+			next = ledgerMetaForDownload(payload)
+		}
 		if next == nil {
 			// no meta.json yet — seed one; there is nothing to preserve.
 			next = lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).Build()
@@ -1799,6 +1841,82 @@ func isGitTrackedLedgerSession(sessionDir, ledgerPath string) bool {
 func isInLedgerCacheDir(sessionDir, ledgerPath string) bool {
 	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions")
 	return strings.HasPrefix(filepath.Clean(sessionDir)+string(filepath.Separator), filepath.Clean(cacheDir)+string(filepath.Separator))
+}
+
+// emptyTranscriptReason explains why a session was settled without the LLM.
+const emptyTranscriptReason = "empty transcript: no conversation was recorded"
+
+// emptyTranscriptSummary is the result recorded for a session with no
+// conversation: the same "Brief session" title the prefilter and the in-place
+// skip use, with status ok so no retry path picks it up again.
+func emptyTranscriptSummary() *session.SummarizeResponse {
+	return &session.SummarizeResponse{
+		Title:         "Brief session",
+		Summary:       "No conversation was recorded in this session.",
+		ScoreReason:   emptyTranscriptReason,
+		SummaryStatus: sessionsummary.SummaryStatusOK,
+	}
+}
+
+// isEmptyLedgerTranscript reports whether a ledger-cache folder is a re-armed
+// download of a session already in the Ledger whose transcript holds no
+// conversation (GH #1106). ox 0.17/0.18 uploaded such recordings before stop
+// learned to drop them (#1082); each is settled once instead of retried
+// forever. Every condition fails closed:
+//   - the folder is in the ledger cache and is either asked for (the re-arm's
+//     .needs-summary request) or already settled here and waiting to be
+//     published (its own meta.json at status ok, after a failed push). A
+//     read-only download has neither; a stale meta.json in any other state
+//     is never published over the Ledger's;
+//   - the Ledger's meta.json exists and is not a draft, so a new empty
+//     recording, which has no ledger entry, is never published;
+//   - the transcript matches the Ledger's manifest byte for byte, so a stale
+//     local copy can never settle a session that has a conversation;
+//   - the classifier #1082 uses finds no conversation in it.
+func isEmptyLedgerTranscript(sessionDir, rawPath, ledgerPath string) bool {
+	if ledgerPath == "" || !isInLedgerCacheDir(sessionDir, ledgerPath) {
+		return false
+	}
+	if !session.HasNeedsSummaryMarker(sessionDir) {
+		own, err := lfs.ReadSessionMeta(sessionDir)
+		if err != nil || own == nil || own.SummaryStatus != sessionsummary.SummaryStatusOK {
+			return false
+		}
+	}
+	ledgerMeta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", filepath.Base(sessionDir)))
+	if err != nil || ledgerMeta == nil || ledgerMeta.IsDraft() {
+		return false
+	}
+	ref, ok := ledgerMeta.Files["raw.jsonl"]
+	if !ok || ref.OID == "" {
+		return false
+	}
+	info, err := os.Stat(rawPath)
+	if err != nil || info.Size() != ref.Size {
+		return false
+	}
+	data, err := os.ReadFile(rawPath)
+	if err != nil || lfs.NewFileRef(data).BareOID() != ref.BareOID() {
+		return false
+	}
+	return session.ClassifyRawFile(rawPath) == session.RawHeaderOnly
+}
+
+// ledgerMetaForDownload returns the Ledger's meta.json when the folder being
+// finalized is a download of a session already in the Ledger, so the result
+// starts from the team's record rather than a blank one. Staging copies the
+// folder over sessions/<name>/, so a blank start would erase every field this
+// path does not own (repo_id, user_id, model, linkage). Drafts are left to the
+// draft purge in stageSessionInLedger.
+func ledgerMetaForDownload(payload *SessionFinalizePayload) *lfs.SessionMeta {
+	if payload.LedgerPath == "" || !isInLedgerCacheDir(payload.SessionDir, payload.LedgerPath) {
+		return nil
+	}
+	meta, err := lfs.ReadSessionMeta(filepath.Join(payload.LedgerPath, "sessions", filepath.Base(payload.SessionDir)))
+	if err != nil || meta == nil || meta.IsDraft() {
+		return nil
+	}
+	return meta
 }
 
 // stageSessionInLedger prepares a ledger copy and returns the cache to retain

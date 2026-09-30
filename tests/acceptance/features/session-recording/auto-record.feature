@@ -55,3 +55,19 @@ Feature: Recording a Session to the Ledger
       When ox's background checks and "ox doctor" run many times on every teammate's machine
       Then the session is still recorded as having one failed attempt
       And no teammate's machine has a local change to that session waiting to be committed
+
+  Rule: A session that captured no conversation is settled once
+
+    Scenario: Riley's empty session from an older ox is settled and left alone
+      Given Riley's session reached the Ledger with no conversation in it
+      And summarizing it failed because there was nothing to summarize
+      When ox's background checks run on Riley's machine
+      Then the session is recorded as a brief session with no retry pending
+      And no summary is requested from the AI model
+      And the rest of the session's record is unchanged
+      And Riley's machine has no local change to that session waiting to be committed
+
+    Scenario: A new session that captured no conversation stays off the Ledger
+      Given Quinn started and stopped a session without any conversation
+      When ox's background checks run on Quinn's machine
+      Then the session does not appear in the Ledger
