@@ -74,7 +74,7 @@ func (e *expertDetector) Detect(ctx context.Context, in Input, gitRoot string) (
 		return nil, nil
 	}
 
-	db, err := codedb.OpenSQLOnly(dataDir)
+	db, err := codedb.OpenSQLReadOnly(dataDir)
 	if err != nil {
 		slog.Debug("plan expert: open codedb failed", "error", err)
 		return nil, nil
