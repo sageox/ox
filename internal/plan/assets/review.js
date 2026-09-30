@@ -341,22 +341,27 @@
   // textIndex joins the page's text nodes — never review chrome, glyphs, or
   // scripts — into one string, remembering where each starts, so a quote is
   // found across inline markup and mapped back to a DOM Range. Text split by
-  // anything but inline markup (cells, items, paragraphs) is joined with a
-  // newline, even where the markup has no whitespace between the elements, so
-  // the end of one cell and the start of the next never read as one word.
+  // anything but inline markup (cells, items, paragraphs, a <br> or an <img>)
+  // is joined with a newline, even where the markup has no whitespace between
+  // the elements, so the end of one cell and the start of the next never read
+  // as one word.
   function textIndex() {
-    var nodes = [], text = '', prev = null;
-    var w = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    var nodes = [], text = '', prev = null, brk = false;
+    var w = document.createTreeWalker(body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
     for (var n = w.nextNode(); n; n = w.nextNode()) {
+      // entering one splits the text around it; inlineBetween catches the
+      // elements the walk leaves, which it never reports
+      if (n.nodeType === 1) { if (!INLINE.test(n.tagName)) brk = true; continue; }
       if (!n.parentElement || n.parentElement.closest(NOT_TEXT)) continue;
-      if (prev && !inlineBetween(prev, n)) text += '\n';
+      if (prev && (brk || !inlineBetween(prev, n))) text += '\n';
+      brk = false;
       nodes.push({ node: n, start: text.length });
       text += n.data;
       prev = n;
     }
     return { nodes: nodes, text: text };
   }
-  var INLINE = /^(A|ABBR|B|BDI|BDO|CITE|CODE|DATA|DEL|DFN|EM|I|INS|KBD|MARK|Q|S|SAMP|SMALL|SPAN|STRONG|SUB|SUP|TIME|U|VAR)$/;
+  var INLINE = /^(A|ABBR|B|BDI|BDO|CITE|CODE|DATA|DEL|DFN|EM|I|INS|KBD|MARK|Q|S|SAMP|SMALL|SPAN|STRONG|SUB|SUP|TIME|U|VAR|WBR)$/;
   // inlineBetween: whether every element from each text node up to their
   // common ancestor is inline markup, i.e. the two run on as one line of text.
   function inlineBetween(a, b) {

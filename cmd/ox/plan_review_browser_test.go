@@ -108,8 +108,9 @@ func serveLivePlanReview(t *testing.T) (url, planDir string, bc *broadcaster) {
 // #inspector panel its document-level listener closes on Esc (marking the key
 // handled), and a window-level counter of Esc presses nothing handled. Its
 // figure's image is a click target that, like any image, leaves a text
-// selection in place, and its table's cells sit side by side with no
-// whitespace between them, as generated markup often does.
+// selection in place, and its table's cells — like the two lines around its
+// <br> — sit side by side with no whitespace between them, as generated markup
+// often does.
 func serveAuthoredPlanReview(t *testing.T) (url, planDir string, bc *broadcaster) {
 	t.Helper()
 	gitRoot := newPlanStatusTestRepo(t)
@@ -117,7 +118,7 @@ func serveAuthoredPlanReview(t *testing.T) (url, planDir string, bc *broadcaster
 		`<meta name="ox-plan-slug" content="authored-roundtrip"></head><body><h1>Authored Roundtrip</h1>` +
 		`<section id="risks"><h2>Risks</h2><p>The retry path can double-fire under load.</p>` +
 		`<figure><img alt="retry budget" width="160" height="60" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=="></figure>` +
-		`<table><tr><td>Budget</td><td>three</td></tr></table></section>` +
+		`<table><tr><td>Budget</td><td>three</td></tr></table><p>limit<br>five</p></section>` +
 		`<aside id="inspector" hidden>retry budget: 3</aside>` +
 		`<script>document.addEventListener('keydown',function(e){var p=document.getElementById('inspector');` +
 		`if(e.key==='Escape'&&!e.defaultPrevented&&!p.hidden){p.hidden=true;e.preventDefault();}});` +
@@ -1331,11 +1332,11 @@ func TestBrowser_LeftoverSelectionDoesNotHijackAClick(t *testing.T) {
 
 // TestBrowser_HighlightStopsAtElementEdges proves a highlight takes only the
 // words the reviewer picked when the markup runs elements together: on an
-// authored plan whose table cells sit side by side with no whitespace between
-// them, Quinn double-clicks the word in one cell, and the note quotes that word
-// alone, which saving then tints.
-// Failure prevented: the note, and the agent, get the word glued to the next
-// cell's text — words that appear nowhere on the page.
+// authored plan whose table cells, and the lines around a <br>, sit side by
+// side with no whitespace between them, Quinn double-clicks a word next to each
+// edge, and each note quotes that word alone; saving the cell's tints it.
+// Failure prevented: the note, and the agent, get the word glued to the text
+// across the edge — words that appear nowhere on the page.
 func TestBrowser_HighlightStopsAtElementEdges(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: launches a real headless Chrome")
@@ -1391,6 +1392,23 @@ func TestBrowser_HighlightStopsAtElementEdges(t *testing.T) {
 	}
 	if painted != "three" {
 		t.Fatalf("saving must tint the cell's word alone, got %q", painted)
+	}
+
+	// a <br> is an edge too: it sits beside the text, not around it
+	var line struct{ X1, Y1, X2, Y2 float64 }
+	if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(phraseBox, "section#risks", "five"), &line)); err != nil || line.X1 == 0 {
+		t.Fatalf("locate the word after the <br>: %v %+v", err, line)
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.MouseClickXY((line.X1+line.X2)/2, line.Y1),
+		chromedp.MouseClickXY((line.X1+line.X2)/2, line.Y1, chromedp.ClickCount(2)),
+		chromedp.Evaluate(`(function(){var q=document.querySelector('.rev-pop .rev-quote');return q?q.textContent:'';})()`, &quote),
+		chromedp.Evaluate(`(function(){var t=document.querySelector('.rev-toast');return t?t.textContent:'';})()`, &toast),
+	); err != nil {
+		t.Fatalf("double-clicking the word after the <br> failed: %v", err)
+	}
+	if quote != "five" {
+		t.Fatalf("the note must quote the word after the <br> alone, got %q (toast %q)", quote, toast)
 	}
 }
 

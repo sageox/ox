@@ -203,7 +203,7 @@ func TestReviewJS_HighlightContract(t *testing.T) {
 		"var rects = qRanges[a].range.getClientRects();",                                                      // a click opens a highlight only on its own words
 		"if (t.quote) marks[a].quote = t.quote;",                                                              // the words travel with the mark
 		"(/^\\w/.test(q) ? '(^|\\\\W)' : '()')",                                                               // word edges match only at word boundaries…
-		"if (prev && !inlineBetween(prev, n)) text += '\\n';",                                                 // …and text split by more than inline markup stays apart
+		"if (prev && (brk || !inlineBetween(prev, n))) text += '\\n';",                                        // …and text split by more than inline markup stays apart
 		"if (n > 1) return { refuse:",                                                                         // a repeated word names no one place
 		"var r = t.rect || { left: ev.clientX, bottom: ev.clientY };",                                         // the note opens below, never over
 		"if (!r.at) { openPop({ a: r.a, section: r.section, label: r.label, quote: r.quote }, ev); return; }", // a comment with no text left opens from its row
