@@ -620,3 +620,49 @@ func TestFlexTime_UnmarshalJSON(t *testing.T) {
 		})
 	}
 }
+
+// TestIntrospect_RejectedIsTagged: a 401 or 403 carries ErrTokenRejected with
+// the message unchanged; a 5xx and an unreachable endpoint do not. Failure
+// prevented: the read gate telling a user to sign in again because the
+// server had a bad minute, or passing a rejected token as "unverified".
+func TestIntrospect_RejectedIsTagged(t *testing.T) {
+	t.Setenv("OX_ALLOW_PLAINTEXT_ENDPOINT", "1")
+	tests := []struct {
+		status   int
+		body     string
+		rejected bool
+		wantMsg  string
+	}{
+		{http.StatusUnauthorized, "", true, "server rejected token (HTTP 401)"},
+		{http.StatusUnauthorized, `{"error":"invalid_token"}`, true, "server rejected token: invalid_token"},
+		{http.StatusForbidden, `{"error_description":"revoked"}`, true, "server rejected token: revoked"},
+		{http.StatusBadGateway, "", false, "server rejected token (HTTP 502)"},
+	}
+	for _, tt := range tests {
+		t.Run(http.StatusText(tt.status)+tt.body, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+			_, err := Introspect(srv.URL, "oxp_test_4bDZfN")
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := errors.Is(err, ErrTokenRejected); got != tt.rejected {
+				t.Errorf("errors.Is(ErrTokenRejected) = %v, want %v (err: %v)", got, tt.rejected, err)
+			}
+			if err.Error() != tt.wantMsg {
+				t.Errorf("message = %q, want %q", err.Error(), tt.wantMsg)
+			}
+		})
+	}
+
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	if _, err := Introspect(deadURL, "oxp_test_4bDZfN"); errors.Is(err, ErrTokenRejected) {
+		t.Errorf("an unreachable endpoint is not a rejection: %v", err)
+	}
+}

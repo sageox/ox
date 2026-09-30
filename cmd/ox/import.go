@@ -19,6 +19,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
@@ -752,7 +753,7 @@ func resolveImportContext(ctx context.Context) (contextType, contextID string, c
 		return "", "", nil, "", fmt.Errorf("failed to read auth store: %w", err)
 	}
 	if storedToken == nil || storedToken.AccessToken == "" {
-		return "", "", nil, "", fmt.Errorf("not authenticated — run 'ox login' first")
+		return "", "", nil, "", errkind.Errorf(errkind.NotLoggedIn, "not authenticated — run 'ox login' first")
 	}
 
 	client = api.NewRepoClientWithEndpoint(ep).WithAuthToken(storedToken.AccessToken)

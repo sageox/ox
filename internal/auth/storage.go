@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -18,7 +19,7 @@ import (
 // errors.Is: "the credential you named is unusable" and "you have no
 // credential" call for different advice, and conflating them sends a CI
 // operator to `ox login` when the fix is to re-copy a service token.
-var ErrEnvTokenMalformed = errors.New("SAGEOX_TOKEN is set but its value failed a local format check")
+var ErrEnvTokenMalformed = errkind.Errorf(errkind.Auth, "SAGEOX_TOKEN is set but its value failed a local format check")
 
 // UserInfo contains user information from the authentication provider
 type UserInfo struct {

@@ -50,6 +50,22 @@ Points to a user config file directly. Useful when there's no home directory (co
 export OX_USER_CONFIG=/etc/sageox/pipeline-config.yaml
 ```
 
+For a single invocation, `--config <file>` (or `-c <file>`) takes precedence
+over `OX_USER_CONFIG` and the default user config location:
+
+```bash
+ox --config /etc/sageox/pipeline-config.yaml config get session_recording
+ox --config /etc/sageox/pipeline-config.yaml config set session_recording disabled
+```
+
+The flag requires an existing, readable YAML file and fails on missing or malformed
+files before running the command. User-level reads and writes use that file;
+`config set/unset --repo` and `--team` still target the current project's repo and
+team files. Setting-specific environment overrides such as `OX_SESSION_RECORDING`
+keep their existing priority over stored preferences.
+Hosted Ledger reads reject `--config`; they use the explicit endpoint and token
+contract described in [Ledger read sync](../specs/ledger-read-sync.md).
+
 The config file uses the same YAML format as `~/.config/sageox/config.yaml`:
 
 ```yaml

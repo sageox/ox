@@ -168,6 +168,57 @@ func TestLookupMissIsNotIndexed(t *testing.T) {
 	}
 }
 
+// TestLinkFromOtherEnvironmentExplainsMiss: a link pasted from
+// test.sageox.ai into a checkout that syncs sageox.ai must say so, instead of
+// the generic "try after the next sync" (which would never succeed).
+func TestLinkFromOtherEnvironmentExplainsMiss(t *testing.T) {
+	r := testReader(t)
+	r.SetSyncHost("sageox.ai")
+	env := r.Show("https://test.sageox.ai/c/" + unknownCnv)
+	if env.Error == nil || env.Error.Code != ErrCodeNotIndexed {
+		t.Fatalf("envelope = %+v, want not_indexed", env)
+	}
+	if !strings.Contains(env.Error.Message, "test.sageox.ai") || !strings.Contains(env.Error.Message, "syncs sageox.ai") {
+		t.Errorf("message does not name both environments: %q", env.Error.Message)
+	}
+
+	// Same environment: the ordinary not-indexed wording, no env claim.
+	env = r.Show("https://sageox.ai/c/" + unknownCnv)
+	if env.Error == nil || strings.Contains(env.Error.Message, "this link is from") {
+		t.Errorf("same-environment miss claims an environment mismatch: %+v", env.Error)
+	}
+
+	// A resolvable link serves the conversation like the bare id.
+	env = r.Show("https://sageox.ai/team/t1/media/recordings/" + fullRec + "/transcript")
+	if !env.Success {
+		t.Fatalf("link to an indexed recording failed: %+v", env.Error)
+	}
+}
+
+// TestNotIndexedMessageSanitizesLinkHost: LinkHost is derived from pasted
+// input; before it is echoed into an envelope (and a terminal) it is
+// truncated and stripped of escape/control characters.
+func TestNotIndexedMessageSanitizesLinkHost(t *testing.T) {
+	r := testReader(t)
+	r.SetSyncHost("sageox.ai")
+	hostile := "\x1b]0;pwned\x07\x1b[31m" + strings.Repeat("a", 300) + ".sageox.ai"
+	id, perr := ParseID(unknownCnv)
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	id.LinkHost = hostile
+	_, _, err := r.lookup(id)
+	if err == nil || err.Code != ErrCodeNotIndexed {
+		t.Fatalf("lookup = %+v, want not_indexed", err)
+	}
+	if strings.ContainsAny(err.Message, "\x1b\x07") {
+		t.Errorf("message carries control characters: %q", err.Message)
+	}
+	if strings.Contains(err.Message, strings.Repeat("a", 100)) {
+		t.Errorf("message echoes the host unbounded (%d bytes)", len(err.Message))
+	}
+}
+
 // fakeResolver exercises the D3 fallback seam.
 type fakeResolver struct {
 	folder string

@@ -6,17 +6,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/updatenotice"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -63,8 +69,14 @@ func (timeoutErr) Error() string   { return "i/o timeout" }
 func (timeoutErr) Timeout() bool   { return true }
 func (timeoutErr) Temporary() bool { return false }
 
+// Failure prevented: a daemon that is down, doctor reporting failed checks,
+// or a mistyped subcommand is filed as a network failure or as "other",
+// hiding which failures are ox's to fix.
 func TestPostHogErrorKind(t *testing.T) {
 	var netErr net.Error = timeoutErr{}
+	// What the daemon client returns when nothing listens on its socket.
+	daemonDown := daemon.NewClientWithSocket(filepath.Join(t.TempDir(), "d.sock")).Ping()
+	require.Error(t, daemonDown)
 	tests := []struct {
 		name     string
 		err      error
@@ -77,9 +89,12 @@ func TestPostHogErrorKind(t *testing.T) {
 		{"unauthorized", fmt.Errorf("list teams: %w", api.ErrUnauthorized), 1, "auth"},
 		{"malformed env token", fmt.Errorf("load: %w", auth.ErrEnvTokenMalformed), 1, "auth"},
 		{"version unsupported", fmt.Errorf("prime: %w", api.ErrVersionUnsupported), 1, "version_unsupported"},
+		{"daemon down", fmt.Errorf("daemon sync: %w", daemonDown), 1, "daemon"},
 		{"deadline", fmt.Errorf("fetch: %w", context.DeadlineExceeded), 1, "timeout"},
 		{"network", fmt.Errorf("dial: %w", netErr), 1, "network"},
+		{"connection refused", fmt.Errorf("fetch: %w", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}), 1, "network"},
 		{"usage", errors.New("usage error"), 2, "usage"},
+		{"kind ox attached", fmt.Errorf("doctor: %w", errkind.Errorf(errkind.ChecksFailed, "some checks failed")), 1, "checks_failed"},
 		{"anything else", errors.New("/Users/someone/secret-project: boom"), 1, "other"},
 	}
 	for _, tt := range tests {
@@ -87,6 +102,161 @@ func TestPostHogErrorKind(t *testing.T) {
 			assert.Equal(t, tt.want, postHogErrorKind(tt.err, tt.exitCode))
 		})
 	}
+}
+
+// Failure prevented: an AI coworker guessing at `ox agent` subcommands is
+// reported as the command failing, and its retries mark the install wedged.
+func TestPostHogErrorKind_AgentDispatcherMistakesAreUsage(t *testing.T) {
+	projectRoot := pauseResumeProject(t)
+	const agentID = "OxUse1"
+	registerTestInstance(t, projectRoot, agentID)
+
+	for _, tt := range []struct {
+		args   []string
+		detail string
+	}{
+		{[]string{"Ox12345", "session", "stop"}, "invalid agent ID"},
+		{[]string{"no-such-command"}, "unknown command or invalid agent_id: %s"},
+		{[]string{agentID}, "missing command after agent_id"},
+		{[]string{agentID, "no-such-command"}, "unknown command: %s"},
+		{[]string{agentID, "session"}, "session requires a subcommand"},
+		{[]string{agentID, "session", "status"}, "unknown session command: %s"},
+		{[]string{agentID, "session", "html"}, "session html command has been removed; use the web viewer at sageox.ai"},
+	} {
+		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
+			err := runAgentDispatcher(&cobra.Command{}, tt.args)
+			require.Error(t, err)
+			assert.Equal(t, "usage", postHogErrorKind(err, 1), "error: %v", err)
+			assert.Equal(t, tt.detail, postHogErrorDetail(err))
+		})
+	}
+}
+
+// Failure prevented: a coworker who has not run `ox login` or `ox init`, or
+// whose credentials the server rejected, is counted as "other" instead of at
+// the step where setup stopped.
+func TestPostHogErrorKind_SetupFailures(t *testing.T) {
+	withIsolatedConfig(t) // no stored credentials for any endpoint
+	t.Setenv("SAGEOX_TOKEN", "")
+	const ep = "https://test.sageox.local"
+
+	initialized := t.TempDir()
+	initGitRepo(t, initialized)
+	require.NoError(t, os.MkdirAll(filepath.Join(initialized, ".sageox"), 0o755))
+	require.NoError(t, config.SaveProjectConfig(initialized, &config.ProjectConfig{
+		RepoID: "repo_test123", TeamID: "team_test456", Endpoint: ep,
+	}))
+	uninitialized := t.TempDir()
+	initGitRepo(t, uninitialized)
+	// An expired token whose refresh cannot reach the server.
+	const unreachable = "http://127.0.0.1:1"
+	refreshing := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(refreshing, ".sageox"), 0o755))
+	require.NoError(t, config.SaveProjectConfig(refreshing, &config.ProjectConfig{
+		RepoID: "repo_test123", TeamID: "team_test456", Endpoint: unreachable,
+	}))
+	require.NoError(t, auth.SaveTokenForEndpoint(unreachable, &auth.StoredToken{
+		AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(-time.Hour),
+	}))
+	// ox import finds the team's context checkout before it asks for
+	// credentials.
+	require.NoError(t, os.MkdirAll(config.DefaultTeamContextPath("team_test456", ep), 0o755))
+	prevImportFlags := importFlags
+	importFlags = importFlagsT{}
+	t.Cleanup(func() { importFlags = prevImportFlags })
+
+	teamMembers := &cobra.Command{}
+	teamMembers.Flags().String("team", "team_test456", "")
+	teamMembers.Flags().Bool("json", false, "")
+
+	tests := []struct {
+		name string
+		dir  string // working directory and project root
+		run  func() error
+		want errkind.Kind
+	}{
+		{"kb describe, credentials rejected", initialized, func() error {
+			return handleKBDescribeError(io.Discard, api.ErrUnauthorized, "bubble", false)
+		}, errkind.Auth},
+		{"kb search, credentials rejected", initialized, func() error {
+			return handleKBSearchError(io.Discard, api.ErrUnauthorized, false)
+		}, errkind.Auth},
+		{"team context URL", initialized, func() error {
+			_, err := fetchTeamContextURLWithError("team_test456", ep)
+			return err
+		}, errkind.NotLoggedIn},
+		{"ledger URL", initialized, func() error {
+			_, err := fetchLedgerURLWithError(ep)
+			return err
+		}, errkind.NotLoggedIn},
+		{"agent query", initialized, func() error {
+			_, err := queryTeamContext(&queryArgs{query: "q"}, initialized, "OxUse1", "claude")
+			return err
+		}, errkind.NotLoggedIn},
+		{"team members", initialized, func() error { return runTeamMembers(teamMembers, nil) }, errkind.NotLoggedIn},
+		{"agent query, refresh unreachable", refreshing, func() error {
+			_, err := queryTeamContext(&queryArgs{query: "q"}, refreshing, "OxUse1", "claude")
+			return err
+		}, errkind.Network},
+		{"team members, refresh unreachable", refreshing, func() error { return runTeamMembers(teamMembers, nil) }, errkind.Network},
+		{"import", initialized, func() error {
+			_, _, _, _, err := resolveImportContext(context.Background())
+			return err
+		}, errkind.NotLoggedIn},
+		{"agent session start", uninitialized, func() error { return runAgentSessionStart(nil, nil) }, errkind.NotInitialized},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Chdir(tt.dir)
+			t.Setenv("OX_PROJECT_ROOT", tt.dir)
+			err := tt.run()
+			require.Error(t, err)
+			assert.Equal(t, string(tt.want), postHogErrorKind(err, 1), "error: %v", err)
+		})
+	}
+}
+
+// Failure prevented: every failure of one kind looks alike in PostHog, or a
+// value filled into an error message (a typed argument, a path) reaches it.
+func TestPostHogErrorDetail(t *testing.T) {
+	_, missingFile := os.Open(filepath.Join(t.TempDir(), "sk-live-TOKEN"))
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"kind declared on a sentinel", fmt.Errorf("list teams: %w", api.ErrUnauthorized), "authentication required: run 'ox login' first"},
+		{"file error, not its path", fmt.Errorf("read config: %w", missingFile), "syscall.Errno: no such file or directory"},
+		{"typed cause", fmt.Errorf("fetch: %w", context.DeadlineExceeded), "context.deadlineExceededError"},
+		{"OS error in a join", errors.Join(errors.New("sk-live-TOKEN rejected"), missingFile), "syscall.Errno: no such file or directory"},
+		{"wrapped plain message", fmt.Errorf("sync: %w", errors.New("sk-live-TOKEN rejected")), ""},
+		{"join of plain messages", errors.Join(errors.New("sk-live-TOKEN"), errors.New("b")), ""},
+		{"nil", nil, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := postHogErrorDetail(tt.err)
+			assert.Equal(t, tt.want, got)
+			assert.NotContains(t, got, "sk-live-TOKEN")
+		})
+	}
+
+	long := postHogErrorDetail(errkind.WithDetail(errkind.Other, strings.Repeat("—", 100), errors.New("x")))
+	assert.LessOrEqual(t, len(long), postHogMaxDetail)
+	assert.True(t, utf8.ValidString(long), "cut on a character boundary")
+}
+
+// Failure prevented: doctor's detail names a check (whose name can hold a
+// repository name or path), repeats a category, or misses a failed child.
+func TestFailedCheckCategories(t *testing.T) {
+	categories := []checkCategory{
+		{name: "Authentication", checks: []checkResult{{passed: true}}},
+		{name: "Daemon", checks: []checkResult{{name: "acme-secret repo", passed: false}}},
+		{name: "Updates", checks: []checkResult{{skipped: true}}},
+		{name: "Sessions", checks: []checkResult{{passed: true, children: []checkResult{{passed: false}}}}},
+		{name: "Daemon", checks: []checkResult{{passed: false}}},
+	}
+	assert.Equal(t, []string{"Daemon", "Sessions"}, failedCheckCategories(categories))
 }
 
 // Failure prevented: arguments, flag values, paths, or error text (which can
@@ -120,6 +290,7 @@ func TestPostHogCommandProps_SendNothingTheUserTyped(t *testing.T) {
 	assert.Equal(t, false, props["success"])
 	assert.Equal(t, 1, props["exit_code"])
 	assert.Equal(t, "other", props["error_kind"])
+	assert.NotContains(t, props, "error_detail", "a plain message names no failure")
 	assert.GreaterOrEqual(t, props["duration_ms"], int64(1500))
 	assert.Equal(t, false, props["repo_initialized"])
 	assert.NotContains(t, props, "repo_id", "outside a repository there is none")

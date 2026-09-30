@@ -17,6 +17,10 @@ Without a subcommand, opens the editor when stdin and stdout are terminals.
 With --no-interactive, in CI, or with redirected input/output, lists settings
 instead. With --json, prints the settings as JSON.
 
+Use --config <file> to select an existing user preferences file for reads and
+user-level writes. It overrides OX_USER_CONFIG and normal user config discovery.
+Repo and team files are still selected by the current project and --repo/--team.
+
 Commands:
   ox config                            Interactive config editor (TUI)
   ox config list                       List all settings with values

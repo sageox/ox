@@ -31,6 +31,7 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/spf13/cobra"
 )
@@ -234,7 +235,7 @@ func handleKBSearchError(w io.Writer, err error, jsonOutput bool) error {
 		return cli.ErrSilent
 	}
 	if errors.Is(err, api.ErrUnauthorized) {
-		return fmt.Errorf("not authenticated — run 'ox login'")
+		return errkind.Errorf(errkind.Auth, "not authenticated — run 'ox login'")
 	}
 	// Wrap so an unclassified failure (e.g. a bare context deadline) names
 	// which call failed; errors.Is/As still see the cause.

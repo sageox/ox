@@ -2,7 +2,7 @@
 
 // conversation_e2e_list_show_test.go — hermetic binary-level scenarios for
 // `ox conversation list` and `ox conversation show`, plus the environment
-// scenarios shared by the whole family (id validation, logged-out reads,
+// scenarios shared by the whole family (id validation, the access gate,
 // index-miss copy, ephemeral no_team_context).
 //
 // Harness + fixture stager: conversation_e2e_harness_test.go.
@@ -10,9 +10,17 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/testguard"
 	"github.com/stretchr/testify/require"
 )
 
@@ -230,6 +238,43 @@ func TestConversationE2E_InvalidIDs(t *testing.T) {
 	}
 }
 
+// TestConversationE2E_PastedLinks proves a sageox.ai link pasted from a
+// browser or a desktop receipt opens the same conversation as its id, at the
+// binary level, for every command that takes an id.
+// Failure prevented: an AI coworker handed a link has no local way in and
+// falls back to web-fetching a sign-in wall.
+func TestConversationE2E_PastedLinks(t *testing.T) {
+	t.Parallel()
+	e2e := setupConversationE2E(t)
+	rec := "rec_" + convE2EFullUUID
+
+	for _, link := range []string{
+		"https://sageox.ai/c/" + rec,
+		"https://sageox.ai/c/" + convE2EFullCnv + "?from=desktop",
+		"https://sageox.ai/team/team_x/media/recordings/" + rec + "/transcript",
+		"https://sageox.ai/kb/kb_x/recordings/" + rec,
+	} {
+		out, exit := e2e.Run(t, "conversation", "show", link)
+		require.Equal(t, 0, exit, "link %s\nout:\n%s", link, out)
+		env, _ := decodeConversationEnvelope(t, out)
+		require.True(t, env.Success, "link %s", link)
+	}
+
+	out, exit := e2e.Run(t, "conversation", "transcript", "https://sageox.ai/c/"+rec, "--cues", "1-2")
+	require.Equal(t, 0, exit, "out:\n%s", out)
+
+	out, exit = e2e.Run(t, "conversation", "show", "https://sageox.ai/s/rs-opaque")
+	require.Equal(t, 2, exit, "share links are usage errors\nout:\n%s", out)
+	env, _ := decodeConversationEnvelope(t, out)
+	require.NotNil(t, env.Error)
+	require.Equal(t, "share_link_unresolvable", env.Error.Code)
+	require.Contains(t, env.Guidance, "recording page URL")
+	// The harness home has no login, so the link is never looked up online:
+	// the reason says so and names the way to make it resolve.
+	require.Contains(t, env.Error.Message, "not logged in to sageox.ai")
+	require.Contains(t, env.Error.Message, "ox login")
+}
+
 // TestConversationE2E_IndexMiss proves a strictly valid id with no live
 // index entry hard-fails with the typed not_indexed error and the "not
 // indexed yet" copy (D3) — a runtime failure (exit 1), not a usage error.
@@ -246,29 +291,143 @@ func TestConversationE2E_IndexMiss(t *testing.T) {
 	require.Contains(t, env.Error.Message, "not indexed yet", "error copy must say why and imply the fix is server-side")
 }
 
-// TestConversationE2E_LoggedOut proves the whole local read path works with
-// no auth on the machine (D14): auth.json deleted, reads still succeed.
-// Failure prevented: an auth or network dependency sneaking into the
-// local-first path.
+// TestConversationE2E_LoggedOut proves a logged-out machine whose team
+// checkout is still on disk reads nothing: every read, by every id form,
+// refuses with not_authenticated and no team content in the output — even
+// with a membership confirmation still cached from before the logout.
+// Failure prevented: a leaked id or pasted link giving content to anyone
+// holding the machine, after `ox logout`.
 func TestConversationE2E_LoggedOut(t *testing.T) {
 	t.Parallel()
 	e2e := setupConversationE2E(t)
 	removeConversationAuth(t, e2e)
 
-	out, exit := e2e.Run(t, "conversation", "list")
-	require.Equal(t, 0, exit, "logged-out list failed\nout:\n%s", out)
-	env, _ := decodeConversationEnvelope(t, out)
-	require.True(t, env.Success)
+	for _, args := range [][]string{
+		{"conversation", "list"},
+		{"conversation", "show", convE2EFullCnv},
+		{"conversation", "show", "https://sageox.ai/c/" + convE2EFullRec},
+		{"conversation", "transcript", convE2EFullCnv, "--cues", "1-2"},
+		{"conversation", "topics", convE2EFullCnv},
+	} {
+		out, exit := e2e.Run(t, args...)
+		require.Equal(t, 1, exit, "%v\nout:\n%s", args, out)
+		env, _ := decodeConversationEnvelope(t, out)
+		require.False(t, env.Success, "%v", args)
+		require.NotNil(t, env.Error, "%v", args)
+		require.Equal(t, "not_authenticated", env.Error.Code, "%v", args)
+		require.Contains(t, env.Error.Message, "ox login")
+		require.Nil(t, env.Data, "%v: no payload on a refusal", args)
+		require.NotContains(t, out, convE2EFullRec, "%v: no team content in the output", args)
+	}
+}
 
-	out, exit = e2e.Run(t, "conversation", "show", convE2EFullCnv)
-	require.Equal(t, 0, exit, "logged-out show failed\nout:\n%s", out)
-	env, _ = decodeConversationEnvelope(t, out)
-	require.True(t, env.Success)
+// conversationAccessServer plays GET /api/v1/cli/repos for the gate: it
+// reports membership in the listed teams, or 503 when down.
+func conversationAccessServer(t *testing.T, down bool, teams ...string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	srv := testguard.SafeMockServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/cli/repos" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		calls.Add(1)
+		if down {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+conversationFakeAccessToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		rows := make([]map[string]string, 0, len(teams))
+		for _, id := range teams {
+			rows = append(rows, map[string]string{"id": id, "name": id})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"teams": rows})
+	}))
+	return srv, &calls
+}
 
-	out, exit = e2e.Run(t, "conversation", "transcript", convE2EFullCnv, "--cues", "1-2")
-	require.Equal(t, 0, exit, "logged-out transcript failed\nout:\n%s", out)
-	env, _ = decodeConversationEnvelope(t, out)
-	require.True(t, env.Success)
+// useConversationAccessServer points the harness at srv: the endpoint, and
+// the login stored for it. The seeded confirmation (for test.sageox.ai) no
+// longer applies, so the binary must ask srv.
+func useConversationAccessServer(t *testing.T, e2e *conversationE2E, srv *httptest.Server) {
+	t.Helper()
+	e2e.env = append(e2e.env, "SAGEOX_ENDPOINT="+srv.URL)
+	data, err := json.Marshal(map[string]any{"tokens": map[string]any{
+		srv.URL: map[string]any{
+			"access_token": conversationFakeAccessToken,
+			"token_type":   "Bearer",
+			"expires_at":   time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+		},
+	}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(e2e.configHome, "sageox", "auth.json"), data, 0o600))
+}
+
+// TestConversationE2E_AccessThroughServer drives the compiled binary's gate
+// against a fake SageOx: a member reads (and the second read is served from
+// the hour-long cache), a non-member is refused with no_team_access, and a
+// server that cannot confirm is access_unverified (retryable).
+func TestConversationE2E_AccessThroughServer(t *testing.T) {
+	t.Parallel()
+
+	t.Run("member", func(t *testing.T) {
+		t.Parallel()
+		e2e := setupConversationE2E(t)
+		srv, calls := conversationAccessServer(t, false, e2e.primaryTeam.id)
+		useConversationAccessServer(t, e2e, srv)
+
+		for range 2 {
+			out, exit := e2e.Run(t, "conversation", "show", convE2EFullCnv)
+			require.Equal(t, 0, exit, "out:\n%s", out)
+			env, _ := decodeConversationEnvelope(t, out)
+			require.True(t, env.Success, "out:\n%s", out)
+		}
+		require.Equal(t, int32(1), calls.Load(), "one membership call, then the cache")
+	})
+
+	t.Run("not a member", func(t *testing.T) {
+		t.Parallel()
+		e2e := setupConversationE2E(t)
+		srv, _ := conversationAccessServer(t, false, "team_someone_else")
+		useConversationAccessServer(t, e2e, srv)
+
+		out, exit := e2e.Run(t, "conversation", "show", "https://sageox.ai/c/"+convE2EFullRec)
+		require.Equal(t, 1, exit, "out:\n%s", out)
+		env, _ := decodeConversationEnvelope(t, out)
+		require.NotNil(t, env.Error)
+		require.Equal(t, "no_team_access", env.Error.Code)
+		require.False(t, env.Error.Retryable)
+		require.NotContains(t, out, convE2EFullRec)
+	})
+
+	t.Run("server cannot confirm", func(t *testing.T) {
+		t.Parallel()
+		e2e := setupConversationE2E(t)
+		srv, _ := conversationAccessServer(t, true)
+		useConversationAccessServer(t, e2e, srv)
+
+		out, exit := e2e.Run(t, "conversation", "list")
+		require.Equal(t, 1, exit, "out:\n%s", out)
+		env, _ := decodeConversationEnvelope(t, out)
+		require.NotNil(t, env.Error)
+		require.Equal(t, "access_unverified", env.Error.Code)
+		require.True(t, env.Error.Retryable)
+	})
+
+	t.Run("team-ctx refused", func(t *testing.T) {
+		t.Parallel()
+		e2e := setupConversationE2E(t)
+		removeConversationAuth(t, e2e)
+
+		out, exit := e2e.Run(t, "agent", "team-ctx")
+		require.Equal(t, 1, exit, "out:\n%s", out)
+		require.Contains(t, out, "not_authenticated")
+		require.NotContains(t, out, "Recent Discussions")
+	})
 }
 
 // TestConversationE2E_EphemeralNoTeamContext proves the typed

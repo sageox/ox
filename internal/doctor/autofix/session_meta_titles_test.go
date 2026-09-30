@@ -56,6 +56,25 @@ func TestRepairLedgerSessionTitles_HealthyLedgerIsClean(t *testing.T) {
 	assert.Equal(t, StatusClean, res.Status, "all-healthy ledger must report clean")
 }
 
+// TestRepairLedgerSessionTitles_PendingLedgerIsClean verifies that repeated
+// doctor passes leave an in-flight summary untouched and report clean.
+func TestRepairLedgerSessionTitles_PendingLedgerIsClean(t *testing.T) {
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	dir := seedSession(t, sessionsDir, "2026-09-17T04-58-test-OxPEND",
+		&lfs.SessionMeta{SummaryStatus: "pending", SummaryAttempts: lfs.MaxSummaryAttempts - 1}, "")
+	metaPath := filepath.Join(dir, "meta.json")
+	before, err := os.ReadFile(metaPath)
+	require.NoError(t, err)
+
+	for range lfs.MaxSummaryAttempts + 1 {
+		res := repairLedgerSessionTitles(sessionsDir, "/fake/repo")
+		assert.Equal(t, StatusClean, res.Status, "pending summary belongs to the summarization path")
+		after, err := os.ReadFile(metaPath)
+		require.NoError(t, err)
+		assert.Equal(t, before, after, "autofix must not consume summary attempts")
+	}
+}
+
 // TestRepairLedgerSessionTitles_RecoversFromSummaryJSON is the happy
 // path proof that the daemon's autofix scheduler can fix the user's
 // existing broken sessions on its own once a clean summary.json

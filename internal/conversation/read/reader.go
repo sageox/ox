@@ -4,8 +4,11 @@
 // guard, disclosure windows, and envelope assembly (plan of record, step 4).
 //
 // The package reads what is on disk and never pulls (D14): the daemon owns
-// sync, last_sync is surfaced from local team-context state, and the whole
-// path works logged out. Team-context content is untrusted (customer
+// sync, and last_sync is surfaced from local team-context state. It does not
+// decide who may read: the command layer gates every Reader behind
+// internal/teamaccess (signed in, and a member of the team per the server,
+// confirmed within the last hour), so nothing here runs for a caller who is
+// signed out or outside the team. Team-context content is untrusted (customer
 // writable): every id is strictly validated and every folder path passes the
 // join guard before it touches the filesystem.
 package read
@@ -18,8 +21,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/conversation/format"
+	"github.com/sageox/ox/internal/endpoint"
 )
 
 // DiscussionsDirName is the conversations subtree of a team-context checkout.
@@ -46,6 +51,10 @@ type Reader struct {
 	lastSync        time.Time
 	fallback        FolderResolver
 	now             func() time.Time
+	// syncHost is the normalized host this checkout syncs from (e.g.
+	// "sageox.ai"); empty when unknown. Only used to explain a not-found
+	// for a link pasted from a different environment.
+	syncHost string
 }
 
 // Open resolves the repo's active team context via the canonical helpers
@@ -59,8 +68,16 @@ func Open(projectRoot string) (*Reader, *Error) {
 		return nil, newError(ErrCodeNoTeamContext,
 			"no local team context for this repo (ephemeral mode, or the daemon has not synced yet); conversation reads need a synced team-context checkout")
 	}
-	return New(filepath.Join(tc.Path, DiscussionsDirName), tc.LastSync), nil
+	r := New(filepath.Join(tc.Path, DiscussionsDirName), tc.LastSync)
+	if ep := endpoint.GetForProject(projectRoot); ep != "" {
+		r.syncHost = endpoint.NormalizeSlug(ep)
+	}
+	return r, nil
 }
+
+// SetSyncHost records the host this checkout syncs from, for tests and
+// harnesses that build a Reader with New.
+func (r *Reader) SetSyncHost(host string) { r.syncHost = host }
 
 // New builds a Reader directly over a discussions root. Open is the normal
 // entry point; New exists for tests and harnesses that stage a root
@@ -157,7 +174,8 @@ func (r *Reader) loadRows(root *os.Root) (rows []row, totalIndexed int, err *Err
 // owns it and must Close it. A miss consults the fallback seam when
 // installed, then hard-fails with the typed not_indexed error (D3) — clear
 // copy, no local scan crutch.
-func (r *Reader) lookup(recordingID string) (row, *os.Root, *Error) {
+func (r *Reader) lookup(id *ID) (row, *os.Root, *Error) {
+	recordingID := id.RecordingID
 	root, rootErr := r.openDiscussionsRoot()
 	if rootErr != nil {
 		return row{}, nil, rootErr
@@ -199,8 +217,12 @@ func (r *Reader) lookup(recordingID string) (row, *os.Root, *Error) {
 			}
 		}
 	}
-	return row{}, nil, newError(ErrCodeNotIndexed,
-		fmt.Sprintf("%s is not indexed yet in this team's %s; the index is written when summarization completes — try again after the next sync", recordingID, format.IndexFileName))
+	msg := fmt.Sprintf("%s is not indexed yet in this team's %s; the index is written when summarization completes — try again after the next sync", recordingID, format.IndexFileName)
+	if id.LinkHost != "" && r.syncHost != "" && id.LinkHost != r.syncHost {
+		msg = fmt.Sprintf("%s is not indexed here: this link is from %s, but this checkout syncs %s",
+			recordingID, cli.SanitizeTerminalText(truncateID(id.LinkHost)), cli.SanitizeTerminalText(truncateID(r.syncHost)))
+	}
+	return row{}, nil, newError(ErrCodeNotIndexed, msg)
 }
 
 // statHasDistillation checks distillation/distillation.jsonl under a guarded

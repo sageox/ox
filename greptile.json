@@ -1,6 +1,7 @@
 {
   "triggerOnUpdates": false,
   "triggerOnDrafts": false,
+  "statusCheck": true,
   "strictness": 2,
   "commentTypes": [
     "logic",

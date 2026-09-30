@@ -95,6 +95,16 @@ func TestPostHog_ReleaseBuildReportsCommandsUnderOneInstallID(t *testing.T) {
 	assert.Equal(t, false, props["$process_person_profile"])
 	assert.Equal(t, true, props["$geoip_disable"])
 
+	// A failure reports its kind and which failure it was: here an agent ID
+	// with no command after it.
+	output, code, _ = testguard.RunOx(t, bin, workDir, env, "agent", "OxAbcd")
+	require.Equal(t, 1, code, output)
+	failed, ok := nextEvent()["properties"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, false, failed["success"])
+	assert.Equal(t, "usage", failed["error_kind"])
+	assert.Equal(t, "missing command after agent_id", failed["error_detail"])
+
 	// Neither an opted-out user nor an ox started by another ox (a hook's
 	// prime, sync starting the daemon) reports anything.
 	for _, quiet := range []string{"DO_NOT_TRACK=1", envStartedByOx + "=1"} {

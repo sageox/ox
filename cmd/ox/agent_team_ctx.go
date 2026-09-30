@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/vtt"
 	"github.com/sageox/ox/pkg/discussion"
@@ -29,6 +31,10 @@ With a team slug: outputs that specific team's context.
 
 Lists the 15 most recent discussion files (read them for full detail),
 then outputs the distilled summary from agent-context/distilled-discussions.md.
+
+Requires ` + "`ox login`" + ` and membership in the team (confirmed with SageOx
+at most once an hour; offline, a confirmation from the last hour still
+counts). Signed out or outside the team, nothing is printed.
 
 Output includes a content hash (team-ctx:<hash>) - if this marker is already
 in your context, you don't need to re-run this command.
@@ -57,6 +63,18 @@ func runAgentTeamCtx(cmd *cobra.Command, args []string) error {
 		if tc == nil {
 			return fmt.Errorf("no team context configured for this project")
 		}
+	}
+
+	// Same gate as ox conversation: the checkout on disk is not proof the
+	// person running ox may read it. Refuse before listing a single file.
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if accessErr := teamAccessGate(ctx, projectRoot, tc); accessErr != nil {
+		msg := fmt.Sprintf("%s: %s", accessErr.Code, accessErr.Message)
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s %s\n", cli.StyleError.Render("Error:"), msg)
+		return &commandExitError{ExitCode: 1, Message: msg}
 	}
 
 	cw := agentinstance.NewCountingWriter(cmd.OutOrStdout())

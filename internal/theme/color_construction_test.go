@@ -37,6 +37,19 @@ func TestNoRawLipglossColorOutsideTUI(t *testing.T) {
 			if name := info.Name(); name == ".git" || name == "vendor" || name == "node_modules" {
 				return filepath.SkipDir
 			}
+			// A nested checkout is a different working tree, not this repo's
+			// source. Agent tooling creates them inside the repo — Claude Code
+			// under .claude/worktrees/, conductor under .context/ — so walking
+			// into one makes this guard report violations from files the commit
+			// under test never touched, and the failure names paths the author
+			// cannot act on. Detect them structurally, by the .git entry every
+			// checkout carries, rather than hardcoding each tool's directory
+			// name as it appears.
+			if path != root {
+				if _, statErr := os.Stat(filepath.Join(path, ".git")); statErr == nil {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -15,7 +16,9 @@ import (
 // -- so `ox status && <next step>` was meaningless in a script. This is the
 // red-first proof: before statusExitError existed, RunE always returned nil
 // here regardless of authenticated/projectInitialized, so every case below
-// would report a nil error.
+// would report a nil error. Each failure also carries the kind usage
+// telemetry reports it under, so a coworker stuck before `ox login` or
+// `ox init` is counted as that, not as "other".
 func TestStatusExitError(t *testing.T) {
 	t.Parallel()
 
@@ -27,6 +30,7 @@ func TestStatusExitError(t *testing.T) {
 		wantErr            bool
 		wantSubstr         string
 		wantNotSubstr      string
+		wantKind           errkind.Kind
 	}{
 		{
 			name:               "healthy: authenticated and initialized exits clean",
@@ -40,6 +44,7 @@ func TestStatusExitError(t *testing.T) {
 			projectInitialized: true,
 			wantErr:            true,
 			wantSubstr:         "not authenticated",
+			wantKind:           errkind.NotLoggedIn,
 		},
 		{
 			name:               "authenticated but uninitialized still fails",
@@ -47,6 +52,7 @@ func TestStatusExitError(t *testing.T) {
 			projectInitialized: false,
 			wantErr:            true,
 			wantSubstr:         "not initialized",
+			wantKind:           errkind.NotInitialized,
 		},
 		{
 			name:               "neither authenticated nor initialized (e.g. empty dir) fails",
@@ -54,6 +60,7 @@ func TestStatusExitError(t *testing.T) {
 			projectInitialized: false,
 			wantErr:            true,
 			wantSubstr:         "not authenticated",
+			wantKind:           errkind.NotLoggedIn,
 		},
 		{
 			// https://github.com/sageox/ox/pull/979#discussion — Greptile: a
@@ -67,6 +74,7 @@ func TestStatusExitError(t *testing.T) {
 			wantErr:            true,
 			wantSubstr:         "endpoint unreachable",
 			wantNotSubstr:      "ox login",
+			wantKind:           errkind.Network,
 		},
 		{
 			name:               "unreachable endpoint and uninitialized reports both, not login",
@@ -76,6 +84,7 @@ func TestStatusExitError(t *testing.T) {
 			wantErr:            true,
 			wantSubstr:         "endpoint unreachable",
 			wantNotSubstr:      "ox login",
+			wantKind:           errkind.NotInitialized,
 		},
 		{
 			// A non-connectivity auth error (e.g. token refresh rejected) is a
@@ -86,6 +95,7 @@ func TestStatusExitError(t *testing.T) {
 			authErr:            errors.New("token refresh rejected"),
 			wantErr:            true,
 			wantSubstr:         "not authenticated",
+			wantKind:           errkind.NotLoggedIn,
 		},
 	}
 
@@ -99,6 +109,7 @@ func TestStatusExitError(t *testing.T) {
 			}
 			if assert.Error(t, err) {
 				assert.Contains(t, err.Error(), tt.wantSubstr)
+				assert.Equal(t, tt.wantKind, errkind.Of(err))
 				if tt.wantNotSubstr != "" {
 					assert.NotContains(t, err.Error(), tt.wantNotSubstr)
 				}
