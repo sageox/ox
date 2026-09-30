@@ -473,3 +473,29 @@ func TestParseConversationUntil_DateIncludesWholeDay(t *testing.T) {
 		t.Error("an unparseable --until must be a usage error")
 	}
 }
+
+// TestTranscriptTextShowsSanitizedSpeakerNames: a human or agent reading the
+// text transcript sees who spoke. Failure prevented: the renderer keeps
+// printing opaque usr_ ids when a name was resolved, or writes a
+// team-controlled name raw so its escape sequences repaint the terminal.
+func TestTranscriptTextShowsSanitizedSpeakerNames(t *testing.T) {
+	env := &read.Envelope{Success: true, Data: &read.TranscriptData{
+		Pinning: read.PinningUnpinned,
+		Cues: []read.TranscriptCue{
+			{N: 1, Start: "00:00:01.000", Speaker: "usr_ryan000000000000000000000", SpeakerName: "Ryan \x1b[2JSnodgrass", Text: "named"},
+			{N: 2, Start: "00:00:05.000", Speaker: "usr_emory00000000000000000000", Text: "unnamed"},
+		},
+	}}
+	var buf bytes.Buffer
+	renderConversationTranscriptText(&buf, env)
+	out := buf.String()
+	if !strings.Contains(out, "Ryan Snodgrass") || strings.Contains(out, "usr_ryan") {
+		t.Errorf("resolved cue must show the name, not the id:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b[2J") {
+		t.Errorf("speaker name reached the terminal unsanitized:\n%q", out)
+	}
+	if !strings.Contains(out, "usr_emory00000000000000000000") {
+		t.Errorf("unresolved cue must fall back to the raw tag:\n%s", out)
+	}
+}

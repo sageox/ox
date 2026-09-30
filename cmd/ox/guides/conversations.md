@@ -90,7 +90,7 @@ Claims in knowledge-bubble memory files and distillation atoms carry `sageox://`
 
 1. **Topic citation** (`…#topic=tp_<id>`) — run `ox conversation topics <cnv_id>` for the overview, then `ox conversation topic <cnv_id> <tp_id>` for the atoms behind the claim. Each atom carries its own quote — usually all the grounding you need.
 2. **Transcript citation** (`…&cue=N-M`) — pass the whole URI: `ox conversation transcript 'sageox://…'` (quote it — `&` splits shell words). The cited cues come back as a bounded slice.
-3. **Read the cues** — the slice is what the team actually said, with speaker ids and timestamps.
+3. **Read the cues** — the slice is what the team actually said, with speaker names (`speaker_name`, resolved from the word timeline; the raw id stays in `speaker`) and timestamps.
 
 Stop at whichever rung answers the question; do not fetch a transcript to verify a claim an atom's quote already grounds.
 
