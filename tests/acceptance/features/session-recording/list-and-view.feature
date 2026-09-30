@@ -24,6 +24,16 @@ Feature: Listing and Viewing Past Sessions
       Then ox fetches the session content so it becomes local
       And ox then renders the session for him to read
 
+  Rule: Reading a teammate's session never rewrites it
+
+    Scenario: Devon downloads Riley's finished session to read it
+      Given Riley's session is already summarized on the Ledger
+      When Devon downloads that session to read it
+      And ox keeps running in the background on Devon's machine
+      Then the Ledger still shows Riley's title and summary
+      And no new change to the session is published from Devon's machine
+      And the downloaded copy stays on Devon's machine to read
+
   Rule: A session renders in the reader's preferred format
 
     Scenario Outline: Devon reads a session in his chosen format

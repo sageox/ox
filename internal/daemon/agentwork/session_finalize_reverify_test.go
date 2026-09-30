@@ -30,7 +30,7 @@ func TestWorkNoLongerNeeded(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "summary.md"), []byte("x"), 0644); err != nil {
 			t.Fatal(err)
 		}
-		if h.workNoLongerNeeded(dir) {
+		if h.workNoLongerNeeded(dir, "") {
 			t.Error("missing summary.json must be reported as still-needed")
 		}
 	})
@@ -42,7 +42,7 @@ func TestWorkNoLongerNeeded(t *testing.T) {
 			"summary.md":   "# real",
 			"session.md":   "# real",
 		})
-		if !h.workNoLongerNeeded(dir) {
+		if !h.workNoLongerNeeded(dir, "") {
 			t.Error("session with all artifacts and a real title MUST be skipped — without this, the daemon clobbers the good summary")
 		}
 	})
@@ -60,7 +60,7 @@ func TestWorkNoLongerNeeded(t *testing.T) {
 			"summary.md":   "# stub",
 			"session.md":   "# stub",
 		})
-		if h.workNoLongerNeeded(dir) {
+		if h.workNoLongerNeeded(dir, "") {
 			t.Error("an empty-title summary indicates a stub from a prior failed round; the daemon SHOULD redo this work, not skip it")
 		}
 	})
@@ -73,7 +73,7 @@ func TestWorkNoLongerNeeded(t *testing.T) {
 			"session.md":     "x",
 			".needs-summary": `{}`,
 		})
-		if h.workNoLongerNeeded(dir) {
+		if h.workNoLongerNeeded(dir, "") {
 			t.Error("a session with the .needs-summary marker still set requires finalization regardless of artifact presence")
 		}
 	})
@@ -85,7 +85,7 @@ func TestWorkNoLongerNeeded(t *testing.T) {
 			"summary.md":   "x",
 			"session.md":   "x",
 		})
-		if h.workNoLongerNeeded(dir) {
+		if h.workNoLongerNeeded(dir, "") {
 			t.Error("a malformed summary.json must NOT be treated as done; better to re-run finalize than persist garbage")
 		}
 	})

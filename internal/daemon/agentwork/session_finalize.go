@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -606,6 +607,13 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 			continue
 		}
 
+		// Someone downloaded this session to read it. Summarizing it here would
+		// push a new title and summary over the team's (GH #1107).
+		if isDownloadedCopy(sessionDir, ledgerPath) {
+			h.logger.Debug("skipping downloaded session copy", "session", name)
+			continue
+		}
+
 		missing := missingArtifacts(sessionDir)
 		if len(missing) == 0 {
 			// All artifact files exist on disk. Check whether they are stubs
@@ -660,7 +668,8 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 
 			// Truly finalized. Presence in the ledger cache IS the pending marker:
 			// processUploadOnly prunes the cache dir only after a verified commit
-			// and push, so anything still here has not landed.
+			// and push, so anything still here has not landed. (Read-only
+			// downloads share the cache and were filtered out above.)
 			//
 			// This used to also require sessions/<name>/meta.json to be absent,
 			// which made completion depend on a file whose write is not tied to a
@@ -1013,6 +1022,13 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 		return RunRequest{SkipLLM: true}, nil
 	}
 
+	// Same check ProcessResult makes, made before the LLM rather than after
+	// it: the work may have landed, or the folder become a read-only
+	// download, since Detect. ProcessResult sees the same answer and returns.
+	if h.workNoLongerNeeded(payload.SessionDir, payload.LedgerPath) {
+		return RunRequest{SkipLLM: true}, nil
+	}
+
 	stored, err := session.ReadSessionFromPath(payload.RawPath)
 	if err != nil {
 		return RunRequest{}, fmt.Errorf("read session %s: %w", payload.RawPath, err)
@@ -1142,7 +1158,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	// Observed 2026-04-25 Phase 2: 31 of 71 freshly regen'd summaries got
 	// clobbered ~30s after the regen commits. Filed as bd ox-91sl.
 	sessionName := filepath.Base(payload.SessionDir)
-	if h.workNoLongerNeeded(payload.SessionDir) {
+	if h.workNoLongerNeeded(payload.SessionDir, payload.LedgerPath) {
 		h.logger.Info("session no longer needs finalization, skipping (work landed via another path)",
 			"session", sessionName,
 		)
@@ -2433,7 +2449,73 @@ func (h *SessionFinalizeHandler) shouldRetryEmptySummary(sessionDir string) bool
 	return strings.TrimSpace(head.Title) == ""
 }
 
-func (h *SessionFinalizeHandler) workNoLongerNeeded(sessionDir string) bool {
+// isDownloadedCopy reports whether a ledger-cache folder is a read-only copy
+// of a session someone downloaded to read, rather than this machine's
+// unfinished work (GH #1107).
+//
+// The finalize scan otherwise treats every folder in the ledger cache as
+// pending work. A download has the same shape — a real raw.jsonl and no
+// summary.json, which is a plain git file and never downloaded — so the scan
+// re-summarized it and pushed the new title and summary over the one the
+// team already had.
+//
+// In order:
+//  1. Outside the ledger cache: not a download.
+//  2. Own meta.json or a .needs-summary request: this machine's work — a push
+//     that has not landed, a `session stop`, a recovery, or a retry.
+//  3. Download marker: a download.
+//  4. summary.json present: not a download (downloads never fetch it).
+//  5. The ledger's meta.json shows a summary was already attempted: a download
+//     made before the marker existed. Unreadable counts as attempted, matching
+//     the scan's fail-closed rule for unreadable meta. Absent means the session
+//     has not reached the ledger yet, so the folder is local work.
+func isDownloadedCopy(sessionDir, ledgerPath string) bool {
+	if ledgerPath == "" || !isInLedgerCacheDir(sessionDir, ledgerPath) {
+		return false
+	}
+	if _, err := os.Lstat(filepath.Join(sessionDir, "meta.json")); err == nil {
+		return false
+	}
+	if session.HasNeedsSummaryMarker(sessionDir) {
+		return false
+	}
+	if lfs.HasDownloadedMarker(sessionDir) {
+		return true
+	}
+	if _, err := os.Lstat(filepath.Join(sessionDir, artifactSummJSON)); err == nil {
+		return false
+	}
+	ledgerMeta, err := lfs.ReadSessionMeta(filepath.Join(ledgerPath, "sessions", filepath.Base(sessionDir)))
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	return summaryAttempted(ledgerMeta)
+}
+
+// summaryAttempted reports whether a ledger meta.json records a summary
+// attempt: a title, or a status the finalize worker writes after running.
+// A draft placeholder never carries either (ADR-029).
+func summaryAttempted(meta *lfs.SessionMeta) bool {
+	if meta == nil || meta.IsDraft() {
+		return false
+	}
+	if strings.TrimSpace(meta.Title) != "" {
+		return true
+	}
+	switch meta.SummaryStatus {
+	case sessionsummary.SummaryStatusOK,
+		sessionsummary.SummaryStatusFailedValidation,
+		sessionsummary.SummaryStatusUnrecoverable:
+		return true
+	}
+	return false
+}
+
+func (h *SessionFinalizeHandler) workNoLongerNeeded(sessionDir, ledgerPath string) bool {
+	// A read-only download can appear between Detect and processing.
+	if isDownloadedCopy(sessionDir, ledgerPath) {
+		return true
+	}
 	if len(missingArtifacts(sessionDir)) > 0 {
 		return false
 	}
