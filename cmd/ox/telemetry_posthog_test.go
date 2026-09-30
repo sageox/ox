@@ -338,6 +338,22 @@ func TestPostHogCommandProps_SageoxDirectoryAloneIsNotInitialized(t *testing.T) 
 	assert.NotContains(t, props, "repo_id")
 }
 
+// Failure prevented: a command records how it ended (whether a review was
+// approved or abandoned, which its exit code cannot say) and the event leaves
+// it out.
+func TestPostHogCommandProps_CarriesHowTheCommandEnded(t *testing.T) {
+	withIsolatedConfig(t)
+	c := &cli.Context{Cmd: &cobra.Command{Use: "review"}, CommandStartTime: time.Now()}
+	c.SetOutcome("review_outcome", "approved")
+	c.SetOutcome("highlights", 1)
+
+	props := postHogCommandProps(c, "plan review", 0)
+
+	assert.Equal(t, "approved", props["review_outcome"])
+	assert.Equal(t, 1, props["highlights"])
+	assert.Equal(t, "plan review", props["command"])
+}
+
 // Failure prevented: a successful command is reported with an error kind.
 func TestPostHogCommandProps_SuccessHasNoErrorKind(t *testing.T) {
 	withIsolatedConfig(t)

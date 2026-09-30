@@ -82,7 +82,8 @@ func skipPostHogCommand(path string) bool {
 // typed: no argument or flag values, paths, or values from an error message.
 // Inside a repository set up for SageOx it adds the repository's and team's
 // SageOx IDs, which let usage be counted per team; SageOx can map them to the
-// team, so these events are not anonymous at the team level.
+// team, so these events are not anonymous at the team level. What a command
+// recorded about how it ended (cli.Context.SetOutcome) is added last.
 func postHogCommandProps(c *cli.Context, path string, exitCode int) map[string]any {
 	actor, agentType := oxActorDetector{}.DetectActor()
 	if agentType == "ci" { // friction files CI under the agent actor
@@ -115,6 +116,9 @@ func postHogCommandProps(c *cli.Context, path string, exitCode int) map[string]a
 		if detail := postHogErrorDetail(c.Err); detail != "" {
 			props["error_detail"] = detail
 		}
+	}
+	for k, v := range c.Outcome() {
+		props[k] = v
 	}
 	return props
 }
