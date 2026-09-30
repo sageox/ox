@@ -14,6 +14,10 @@ Run comprehensive diagnostics on your ox installation, project configuration,
 git health, agent environment, and connected services. Use --fix to auto-repair
 common issues, or --fix-slug to target specific checks.
 
+Exits 1 if any check fails or required setup is missing, including with --json.
+Warnings and skipped checks alone exit 0. JSON output remains a single report;
+read summary.has_failed for the result and the process exit code for scripting.
+
 ```
 ox doctor [flags]
 ```

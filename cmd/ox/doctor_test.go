@@ -1,14 +1,155 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/errkind"
+	"github.com/sageox/ox/internal/testguard"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// A failed doctor report must stop a shell pipeline in text and JSON modes,
+// including setup failures that return before the regular checks run.
+func TestDoctorExitCLI(t *testing.T) {
+	skipIntegration(t)
+	oxBin := testguard.BuildOxBinary(t, repoPath("..", ".."))
+	for _, scenario := range []string{"outside_repo", "uninitialized", "unauthenticated", "failed_checks"} {
+		modes := []string{"text", "json", "env_json"}
+		if scenario == "outside_repo" || scenario == "uninitialized" {
+			modes = append(modes, "unwritable_json")
+		}
+		for _, mode := range modes {
+			t.Run(scenario+"/"+mode, func(t *testing.T) {
+				env := append(noInputCLIEnv(t), "OX_NO_DAEMON=1", "FEATURE_CLOUD=false", "FEATURE_AUTH=false", "OX_JSON=")
+				dir := t.TempDir()
+				if scenario != "outside_repo" {
+					dir = testGitRepo(t)
+				}
+				if scenario == "unauthenticated" || scenario == "failed_checks" {
+					project := config.GetDefaultProjectConfig()
+					project.RepoID = "repo_doctor_exit"
+					require.NoError(t, config.SaveProjectConfig(dir, project))
+				}
+				if scenario == "unauthenticated" {
+					env = append(env, "FEATURE_AUTH=true")
+				}
+				args := []string{"doctor", "--no-input", "--no-interactive"}
+				switch mode {
+				case "json", "unwritable_json":
+					args = append(args, "--json")
+				case "env_json":
+					env = append(env, "OX_JSON=1")
+				}
+				if mode == "unwritable_json" {
+					// The normal ANSI-stripping proxy swallows downstream errors.
+					// Use the existing direct-output mode to reach doctor's writer.
+					env = append(env, "CLICOLOR_FORCE=1")
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				cmd := testguard.OxCmdContext(t, ctx, oxBin, dir, env, args...)
+				var stdout, stderr bytes.Buffer
+				cmd.Stdout, cmd.Stderr = &stdout, &stderr
+				if mode == "unwritable_json" {
+					// A read-only stdout descriptor must surface the write error,
+					// not replace it with a silent "checks failed" exit.
+					path := filepath.Join(t.TempDir(), "report.json")
+					require.NoError(t, os.WriteFile(path, nil, 0o600))
+					file, err := os.Open(path)
+					require.NoError(t, err)
+					t.Cleanup(func() { _ = file.Close() })
+					cmd.Stdout = file
+				}
+				err := cmd.Run()
+				require.NoError(t, ctx.Err(), "doctor timed out: %s", stderr.String())
+				var exitErr *exec.ExitError
+				if assert.ErrorAs(t, err, &exitErr, "failed doctor report exited successfully: %s", stdout.String()) {
+					assert.Equal(t, 1, exitErr.ExitCode())
+				}
+				if mode == "unwritable_json" {
+					assert.Contains(t, stderr.String(), "Error:")
+					assert.Contains(t, stderr.String(), "write")
+					return
+				}
+				if mode == "text" {
+					assert.NotEmpty(t, stdout.String(), "retain the human-readable report")
+					return
+				}
+				var report JSONDoctorOutput
+				require.NoError(t, json.Unmarshal(stdout.Bytes(), &report), "stdout must contain exactly one JSON report: %s", stdout.String())
+				assert.True(t, report.Summary.HasFailed)
+				assert.Positive(t, report.Summary.Failed)
+				assert.NotContains(t, stderr.String(), "Error:", "the JSON report already explains the failed checks")
+				if scenario == "failed_checks" {
+					assert.Greater(t, len(report.Categories), 1, "must reach the regular check pipeline, not the setup gate")
+				} else {
+					require.Len(t, report.Categories, 1)
+					assert.Equal(t, "Setup", report.Categories[0].Name)
+				}
+			})
+		}
+	}
+}
+
+// Healthy, warning-only, and skipped reports must stay successful; failures,
+// including child checks, must retain their category and machine-readable exit.
+func TestDoctorReportExitStatus(t *testing.T) {
+	oldCfg := cfg
+	t.Cleanup(func() { cfg = oldCfg })
+	tests := []struct {
+		name   string
+		check  checkResult
+		failed bool
+	}{
+		{"healthy", PassedCheck("check", "ok"), false},
+		{"warning", WarningCheck("check", "warning", ""), false},
+		{"skipped", SkippedCheck("check", "not applicable", ""), false},
+		{"failed", FailedCheck("check", "broken", "repair it"), true},
+		{"failed child", checkResult{name: "parent", passed: true, children: []checkResult{FailedCheck("child", "broken", "repair it")}}, true},
+		{"skipped child", checkResult{name: "parent", passed: true, children: []checkResult{SkippedCheck("child", "not applicable", "")}}, false},
+	}
+	for _, mode := range []string{"text", "json"} {
+		for _, tt := range tests {
+			t.Run(mode+"/"+tt.name, func(t *testing.T) {
+				cfg = &config.Config{JSON: mode == "json"}
+				categories := []checkCategory{{name: "Setup", checks: []checkResult{tt.check}}}
+				cmd := &cobra.Command{}
+				var stdout bytes.Buffer
+				cmd.SetOut(&stdout)
+				hasFailed := displayDoctorResults(cmd, categories, doctorOptions{verbose: true})
+				assert.Equal(t, tt.failed, hasFailed)
+				err := doctorExitError(hasFailed, strings.Join(failedCheckCategories(categories), ","))
+				if cfg.JSON {
+					var report JSONDoctorOutput
+					require.NoError(t, json.Unmarshal(stdout.Bytes(), &report))
+					assert.Equal(t, tt.failed, report.Summary.HasFailed)
+				}
+				if !tt.failed {
+					require.NoError(t, err)
+					return
+				}
+				require.ErrorContains(t, err, "some checks failed")
+				assert.Equal(t, errkind.ChecksFailed, errkind.Of(err))
+				assert.Equal(t, "Setup", errkind.DetailOf(err))
+				if cfg.JSON {
+					assert.Equal(t, 1, exitCodeOf(t, err))
+				}
+			})
+		}
+	}
+}
 
 // cachedDoctorChecks caches runDoctorChecks result for tests that only need to
 // verify structure/behavior, not test multiple scenarios. This saves ~60s in test time.
