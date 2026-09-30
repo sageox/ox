@@ -2,6 +2,7 @@ package autofix
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,30 +99,55 @@ func TestRepairLedgerSessionTitles_RecoversFromSummaryJSON(t *testing.T) {
 	assert.Equal(t, 0, got.SummaryAttempts)
 }
 
-// TestRepairLedgerSessionTitles_FlipsToTerminalAtCap drives a session
-// from one-shy-of-cap to the unrecoverable terminal state and proves
-// the autofix loop will short-circuit on the next pass. This is the
-// guard against unbounded LLM retry spend on permanently-broken
-// sessions.
-func TestRepairLedgerSessionTitles_FlipsToTerminalAtCap(t *testing.T) {
-	ledger := t.TempDir()
-	sessionsDir := filepath.Join(ledger, "sessions")
-	require.NoError(t, os.MkdirAll(sessionsDir, 0o755))
-	dir := seedSession(t, sessionsDir, "2026-05-01T10-00-test-OxCAPP",
-		&lfs.SessionMeta{Title: "", SummaryStatus: "failed_validation", SummaryAttempts: lfs.MaxSummaryAttempts - 1},
-		"") // empty summary.json title — no recovery available
+// TestRepairLedgerSessionTitles_NeverCountsSummaryAttempts: a failed summary
+// with nothing to recover is left for the summarizer, however many times the
+// check runs. Failure prevented: the check used to add an attempt per pass and
+// mark the session unrecoverable about an hour after one real failure, as an
+// uncommitted edit on every clone (GH #1107).
+func TestRepairLedgerSessionTitles_NeverCountsSummaryAttempts(t *testing.T) {
+	for attempts := range lfs.MaxSummaryAttempts {
+		t.Run(fmt.Sprintf("attempts=%d", attempts), func(t *testing.T) {
+			sessionsDir := t.TempDir()
+			dir := seedSession(t, sessionsDir, "2026-05-01T10-00-test-OxFAIL",
+				&lfs.SessionMeta{SummaryStatus: "failed_validation", SummaryAttempts: attempts,
+					ValidationError: "content validation failed: title too short"},
+				"") // no summary.json title: nothing to recover
+			before, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+			require.NoError(t, err)
+
+			for range lfs.MaxSummaryAttempts + 1 {
+				res := repairLedgerSessionTitles(sessionsDir, "/fake/repo")
+				assert.Equal(t, StatusClean, res.Status)
+			}
+
+			after, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+			require.NoError(t, err)
+			assert.Equal(t, string(before), string(after), "meta.json must stay byte-identical")
+		})
+	}
+}
+
+// TestRepairLedgerSessionTitles_MovesLeakedDiagnostic: the tidy-up that
+// survives the attempt counter's removal still runs, without counting.
+func TestRepairLedgerSessionTitles_MovesLeakedDiagnostic(t *testing.T) {
+	sessionsDir := t.TempDir()
+	dir := filepath.Join(sessionsDir, "2026-05-01T10-00-test-OxLEAK")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	const leaked = "Summary failed content validation: title too short"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"),
+		[]byte(`{"version":"1.0","session_name":"2026-05-01T10-00-test-OxLEAK","summary":"`+leaked+`","summary_status":"failed_validation","summary_attempts":1}`), 0o644))
 
 	res := repairLedgerSessionTitles(sessionsDir, "/fake/repo")
-	assert.Equal(t, StatusFixed, res.Status, "flipping a session to terminal counts as a fix (loop closes)")
-	assert.Contains(t, res.Summary, "flipped_terminal=1")
+	assert.Equal(t, StatusFixed, res.Status)
+	assert.Contains(t, res.Summary, "moved_diagnostic=1")
 
 	got, err := lfs.ReadSessionMeta(dir)
 	require.NoError(t, err)
-	assert.Equal(t, "unrecoverable", got.SummaryStatus)
-
-	// Next pass — terminal session must be skipped, not re-flagged.
-	res2 := repairLedgerSessionTitles(sessionsDir, "/fake/repo")
-	assert.Equal(t, StatusClean, res2.Status, "terminal sessions must short-circuit subsequent autofix passes")
+	assert.Empty(t, got.Summary)
+	assert.Equal(t, leaked, got.ValidationError)
+	assert.Equal(t, "failed_validation", got.SummaryStatus)
+	assert.Equal(t, 1, got.SummaryAttempts, "moving a diagnostic is not a summary attempt")
+	assert.Equal(t, StatusClean, repairLedgerSessionTitles(sessionsDir, "/fake/repo").Status, "second pass must be a no-op")
 }
 
 // TestRepairLedgerSessionTitles_MissingDirIsClean covers the common
@@ -131,24 +157,6 @@ func TestRepairLedgerSessionTitles_FlipsToTerminalAtCap(t *testing.T) {
 func TestRepairLedgerSessionTitles_MissingDirIsClean(t *testing.T) {
 	res := repairLedgerSessionTitles(filepath.Join(t.TempDir(), "no-such-dir"), "/fake/repo")
 	assert.Equal(t, StatusClean, res.Status, "missing sessions dir is normal during clone — must not error")
-}
-
-// TestRepairLedgerSessionTitles_BumpsOnlyReportFound proves the
-// observability split: a pass that only bumps attempt counters
-// (no recoveries, no terminal flips) reports as StatusFound, not
-// StatusFixed. We didn't actually fix anything yet, but a human/ops
-// dashboard should still see the activity.
-func TestRepairLedgerSessionTitles_BumpsOnlyReportFound(t *testing.T) {
-	ledger := t.TempDir()
-	sessionsDir := filepath.Join(ledger, "sessions")
-	require.NoError(t, os.MkdirAll(sessionsDir, 0o755))
-	seedSession(t, sessionsDir, "2026-05-01T10-00-test-OxBUMP",
-		&lfs.SessionMeta{Title: "", SummaryStatus: "failed_validation", SummaryAttempts: 0},
-		"")
-
-	res := repairLedgerSessionTitles(sessionsDir, "/fake/repo")
-	assert.Equal(t, StatusFound, res.Status, "pure-bump pass must surface as Found, not Fixed")
-	assert.Contains(t, res.Summary, "bumped=1")
 }
 
 // Successful repairs must not clear the warning for remaining corrupt sessions.

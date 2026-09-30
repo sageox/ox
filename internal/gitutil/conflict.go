@@ -573,10 +573,11 @@ var sessionMetaBookkeepingMerges = map[string]func(ours, theirs any) (any, bool)
 	// "deleted counter refuses before any merge rule applies" and "a counter
 	// RESET paired with its status write still refuses" pin one guard each.
 	//
-	// Writers that BUMP the counter alone already exist — RecoverEmptyTitleMeta
-	// below the cap, and `ox session repair-meta-summary` on a session already
-	// marked failed_validation — which is precisely why this merge is reachable
-	// at all. A writer that RESETS it alone would invalidate the analysis
+	// Writers that BUMP the counter alone existed before GH #1107 —
+	// RecoverEmptyTitleMeta below the cap, and `ox session repair-meta-summary`
+	// on a session already marked failed_validation. Teammates on those ox
+	// versions keep producing such edits until they upgrade, which is precisely
+	// why this merge is still reachable. A writer that RESETS it alone would invalidate the analysis
 	// above; give the counter a reset-aware merge (or an episode id) first.
 	"summary_attempts": mergeMonotonicCounter,
 }

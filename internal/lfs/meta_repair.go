@@ -23,17 +23,21 @@ type MetaRepairOutcome struct {
 	SessionName       string
 	Skipped           bool   // meta.json needs no repair or is still in flight
 	RecoveredFromJSON bool   // pulled a clean title out of summary.json
-	BumpedAttempts    bool   // no recovery available; SummaryAttempts incremented
-	FlippedTerminal   bool   // hit MaxSummaryAttempts; status set to unrecoverable
+	MovedDiagnostic   bool   // moved leaked error prose from summary to validation_error
 	Error             string // non-fatal; meta.json was not modified
 }
 
 // RecoverEmptyTitleMeta inspects one session's meta.json for the
 // post-Apr-27 empty-title failure shape. Draft and pending sessions still
 // legitimately lack a title and are skipped. When summary.json carries a real
-// title, promotes it back into meta and stamps SummaryStatus=ok. Otherwise
-// increments SummaryAttempts and, at MaxSummaryAttempts, flips status to
-// unrecoverable so future calls early-exit.
+// title, promotes it back into meta and stamps SummaryStatus=ok. Otherwise it
+// leaves the session for the summarizer.
+//
+// It never touches summary_attempts except to reset it on a recovered title.
+// The counter means "real LLM attempts" and only the finalize worker counts
+// them. This check runs every 30 minutes and on every `ox doctor`, on every
+// clone, so counting here turned one real failure into "unrecoverable" about
+// an hour later, as uncommitted edits on each machine (GH #1107).
 //
 // This is the daemon-safe empty-title repair. The explicit CLI
 // `ox session repair-meta-summary` also repairs non-empty leaky titles.
@@ -42,8 +46,9 @@ type MetaRepairOutcome struct {
 //
 // Idempotency contract: running this repeatedly on a healthy meta is a
 // no-op (Skipped=true, no write). The same holds for draft, pending, and
-// unrecoverable metadata. Running it on a fixable meta
-// applies the fix once and then early-exits on subsequent calls.
+// unrecoverable metadata, and for an empty title with nothing to recover.
+// Running it on a fixable meta applies the fix once and then early-exits on
+// subsequent calls.
 //
 // dryRun=true returns the outcome without writing meta.json.
 func RecoverEmptyTitleMeta(sessionDir string, dryRun bool) MetaRepairOutcome {
@@ -59,13 +64,10 @@ func RecoverEmptyTitleMeta(sessionDir string, dryRun bool) MetaRepairOutcome {
 
 		// A draft placeholder legitimately has no title (ADR-029): it is a
 		// meta.json-only marker for a LIVE recording, not a session whose
-		// summarization failed. Without this skip, every autofix tick would treat
-		// the empty title as a fault, bump SummaryAttempts, and at
-		// MaxSummaryAttempts stamp summary_status="unrecoverable" into a session
-		// that is still being recorded — which the daemon's finalize (a
-		// preserve-unowned-fields RMW) would then carry into the finished session,
-		// permanently marking real work as unsummarizable. It would also dirty the
-		// ledger worktree mid-recording for a file the CLI is about to purge.
+		// summarization failed. Any write here would dirty the ledger worktree
+		// mid-recording for a file the CLI is about to purge, and the daemon's
+		// finalize (a preserve-unowned-fields RMW) would carry whatever it wrote
+		// into the finished session.
 		if meta.IsDraft() {
 			out.Skipped = true
 			return nil, nil
@@ -109,8 +111,8 @@ func RecoverEmptyTitleMeta(sessionDir string, dryRun bool) MetaRepairOutcome {
 
 		// Try to recover a clean title from summary.json. The daemon may
 		// have written a failure-stub summary.json with title="" too — in
-		// which case readSummaryJSONTitle returns "" and we fall through to
-		// the bump-attempts path.
+		// which case there is nothing to recover and only a summarizer can
+		// produce a title.
 		if cleanTitle := readSummaryJSONTitle(sessionDir); cleanTitle != "" {
 			meta.Title = cleanTitle
 			// Mirror title into summary if summary.json doesn't carry a
@@ -124,13 +126,11 @@ func RecoverEmptyTitleMeta(sessionDir string, dryRun bool) MetaRepairOutcome {
 			// retain diagnostics, including ones moved by an earlier pass.
 			meta.SummaryAttempts = 0
 			out.RecoveredFromJSON = true
+		} else if leakySummary {
+			out.MovedDiagnostic = true
 		} else {
-			meta.SummaryAttempts++
-			out.BumpedAttempts = true
-			if meta.SummaryAttempts >= MaxSummaryAttempts {
-				meta.SummaryStatus = "unrecoverable"
-				out.FlippedTerminal = true
-			}
+			out.Skipped = true
+			return nil, nil
 		}
 
 		if err := meta.Validate(); err != nil {

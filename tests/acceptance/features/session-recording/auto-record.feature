@@ -47,3 +47,11 @@ Feature: Recording a Session to the Ledger
       When she runs the session recovery step
       Then ox recovers the recording
       And the session can still be finalized and land in the Ledger
+
+  Rule: Background housekeeping never writes off a session's summary
+
+    Scenario: Sam's first summary attempt fails and the session stays retryable
+      Given summarizing Sam's session failed once
+      When ox's background checks and "ox doctor" run many times on every teammate's machine
+      Then the session is still recorded as having one failed attempt
+      And no teammate's machine has a local change to that session waiting to be committed

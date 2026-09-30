@@ -3,6 +3,7 @@ package lfs
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,7 +148,7 @@ func TestRecoverEmptyTitleMeta_PreservesLegacyData(t *testing.T) {
 		skip       bool
 	}{
 		{name: "recover legacy error", summary: diagnostic, recovery: "Recovered title"},
-		{name: "bound legacy error retries", summary: diagnostic},
+		{name: "move legacy error without counting an attempt", summary: diagnostic},
 		{name: "preserve both diagnostics", summary: diagnostic, diagnostic: "Earlier validation failure"},
 		{name: "preserve valid summary", summary: "Customer-written summary", recovery: "Recovered title"},
 		{name: "healthy title", title: "Customer-written title", summary: "Customer-written summary", recovery: "Stale title", skip: true},
@@ -194,8 +195,8 @@ func TestRecoverEmptyTitleMeta_PreservesLegacyData(t *testing.T) {
 					assert.Equal(t, tc.recovery, meta.Title)
 					assert.True(t, out.RecoveredFromJSON)
 				} else {
-					assert.True(t, out.BumpedAttempts)
-					assert.Equal(t, 1, meta.SummaryAttempts)
+					assert.True(t, out.MovedDiagnostic)
+					assert.Zero(t, meta.SummaryAttempts, "moving a diagnostic is not a summary attempt")
 				}
 				if tc.summary == diagnostic {
 					assert.Contains(t, meta.ValidationError, diagnostic, "moving an error out of display fields must preserve it")
@@ -404,8 +405,6 @@ func TestRecoverEmptyTitleMeta_PendingSkipped(t *testing.T) {
 				out := RecoverEmptyTitleMeta(dir, false)
 				assert.True(t, out.Skipped)
 				assert.False(t, out.RecoveredFromJSON)
-				assert.False(t, out.BumpedAttempts)
-				assert.False(t, out.FlippedTerminal)
 				assert.Empty(t, out.Error)
 				after, err := os.ReadFile(metaPath)
 				require.NoError(t, err)
@@ -426,7 +425,6 @@ func TestRecoverEmptyTitleMeta_UnrecoverableTerminalSkipped(t *testing.T) {
 
 	out := RecoverEmptyTitleMeta(dir, false)
 	assert.True(t, out.Skipped, "unrecoverable meta is terminal; must be skipped")
-	assert.False(t, out.BumpedAttempts, "must not bump attempt counter past terminal")
 }
 
 // TestRecoverEmptyTitleMeta_RecoversFromSummaryJSON is the happy
@@ -455,50 +453,36 @@ func TestRecoverEmptyTitleMeta_RecoversFromSummaryJSON(t *testing.T) {
 	assert.Equal(t, 0, got.SummaryAttempts, "attempt counter must reset on success")
 }
 
-// TestRecoverEmptyTitleMeta_BumpsAttemptsWithoutSummary covers the
-// degenerate case the user actually has on disk: meta.title is empty
-// and summary.json is also empty (the daemon's failure stub). We can't
-// recover anything, but we must still make progress toward the
-// terminal state so the autofix scheduler eventually stops trying.
-func TestRecoverEmptyTitleMeta_BumpsAttemptsWithoutSummary(t *testing.T) {
-	dir := t.TempDir()
-	writeTestMeta(t, dir, &SessionMeta{Title: "", SummaryStatus: "failed_validation", SummaryAttempts: 0})
-	writeTestSummary(t, dir, "") // empty title in summary.json too
-
-	out := RecoverEmptyTitleMeta(dir, false)
-	assert.True(t, out.BumpedAttempts, "no recovery available → must bump attempts")
-	assert.False(t, out.FlippedTerminal, "should not flip terminal on the first bump")
-
-	got, err := ReadSessionMeta(dir)
-	require.NoError(t, err)
-	assert.Equal(t, 1, got.SummaryAttempts, "attempts must increment exactly once")
-	assert.Equal(t, "failed_validation", got.SummaryStatus, "status stays failed_validation until cap")
-}
-
-// TestRecoverEmptyTitleMeta_FlipsToUnrecoverableAtCap is the cap
-// behavior. After MaxSummaryAttempts bumps the status flips to
-// unrecoverable, breaking the autofix loop on the next pass.
+// TestRecoverEmptyTitleMeta_NeverCountsSummaryAttempts covers the shape the
+// daemon leaves after a failed summary: meta.title empty and summary.json
+// empty too. Nothing can be recovered, so the session is left for the
+// summarizer, however many times the repair runs.
 //
-// Failure prevented: an unbounded autofix loop on a session whose
-// raw.jsonl is corrupt, prompt is too large for the model, or
-// summary.json is permanently empty. Without the cap, the daemon
-// would re-finalize this session every 30 minutes forever.
-func TestRecoverEmptyTitleMeta_FlipsToUnrecoverableAtCap(t *testing.T) {
-	dir := t.TempDir()
-	writeTestMeta(t, dir, &SessionMeta{Title: "", SummaryStatus: "failed_validation", SummaryAttempts: MaxSummaryAttempts - 1})
+// Failure prevented: this repair used to add one attempt per call and flip
+// the session to unrecoverable at MaxSummaryAttempts. It runs every 30
+// minutes and on every `ox doctor`, on every clone, so one real LLM failure
+// became "unrecoverable" about an hour later with no retry (GH #1107).
+func TestRecoverEmptyTitleMeta_NeverCountsSummaryAttempts(t *testing.T) {
+	for attempts := range MaxSummaryAttempts {
+		t.Run(fmt.Sprintf("attempts=%d", attempts), func(t *testing.T) {
+			dir := t.TempDir()
+			writeTestMeta(t, dir, &SessionMeta{SummaryStatus: "failed_validation", SummaryAttempts: attempts})
+			writeTestSummary(t, dir, "") // empty title in summary.json too
+			metaPath := filepath.Join(dir, "meta.json")
+			before, err := os.ReadFile(metaPath)
+			require.NoError(t, err)
 
-	out := RecoverEmptyTitleMeta(dir, false)
-	assert.True(t, out.FlippedTerminal, "the bump that hits the cap must flip to terminal")
+			for range MaxSummaryAttempts + 1 {
+				out := RecoverEmptyTitleMeta(dir, false)
+				assert.True(t, out.Skipped)
+				assert.Empty(t, out.Error)
+			}
 
-	got, err := ReadSessionMeta(dir)
-	require.NoError(t, err)
-	assert.Equal(t, "unrecoverable", got.SummaryStatus)
-	assert.Equal(t, MaxSummaryAttempts, got.SummaryAttempts)
-
-	// Idempotency floor: a second call on the now-terminal meta must
-	// be a no-op.
-	out2 := RecoverEmptyTitleMeta(dir, false)
-	assert.True(t, out2.Skipped, "terminal state must short-circuit subsequent calls")
+			after, err := os.ReadFile(metaPath)
+			require.NoError(t, err)
+			assert.Equal(t, string(before), string(after), "meta.json must stay byte-identical")
+		})
+	}
 }
 
 // TestRecoverEmptyTitleMeta_LeakySummaryRejected ensures that a
@@ -512,7 +496,7 @@ func TestRecoverEmptyTitleMeta_LeakySummaryRejected(t *testing.T) {
 
 	out := RecoverEmptyTitleMeta(dir, false)
 	assert.False(t, out.RecoveredFromJSON, "must not promote a leaky title")
-	assert.True(t, out.BumpedAttempts, "should fall through to the bump path")
+	assert.True(t, out.Skipped, "with nothing clean to recover, the session is left alone")
 }
 
 // TestRecoverEmptyTitleMeta_DryRunWritesNothing confirms dryRun=true

@@ -207,8 +207,8 @@ func repairSessionMetaSummary(sessionDir string, dryRun bool) repairOutcome {
 	// title (e.g., a successful CLI push-summary landed a good
 	// summary.json but the meta-write step never ran, or a future
 	// fix to ParseSummaryJSON gets a clean run on retry), promote
-	// it back into meta. Bounded by MaxSummaryAttempts so a session
-	// whose summary.json is also empty won't churn forever.
+	// it back into meta. With nothing to recover, only the summarizer
+	// can produce a title; this tool never counts summary attempts.
 	titleEmpty := strings.TrimSpace(meta.Title) == ""
 	terminalFailure := meta.SummaryStatus == sessionsummary.SummaryStatusUnrecoverable
 	emptyTitleNeedsRepair := titleEmpty && !terminalFailure && meta.SummaryAttempts < lfs.MaxSummaryAttempts
@@ -291,20 +291,20 @@ func repairSessionMetaSummary(sessionDir string, dryRun bool) repairOutcome {
 		// running this tool repeatedly must be idempotent.
 		if meta.ValidationError == "" && originalDiagnostic != "" {
 			meta.ValidationError = originalDiagnostic
+			oc.ChangedSummary = true
 		}
 
-		// Empty-title path with no recoverable summary.json: bump the
-		// attempt counter and, at the cap, flip to unrecoverable so
-		// future runs (CLI or daemon autofix) skip this session and
-		// stop churning. terminalFailure was already filtered above —
-		// we only get here on a bounded-retry session.
-		if emptyTitleNeedsRepair && cleanTitle == "" {
-			meta.SummaryAttempts++
-			oc.ChangedStatus = true
-			if meta.SummaryAttempts >= lfs.MaxSummaryAttempts {
-				meta.SummaryStatus = sessionsummary.SummaryStatusUnrecoverable
-			}
-		}
+		// No summary attempt is counted here. summary_attempts means real
+		// LLM attempts, counted only by the finalize worker; bumping it
+		// here marked sessions unrecoverable after three runs of this
+		// tool with no LLM involved (GH #1107).
+	}
+
+	// Nothing changed (an empty title already marked failed_validation,
+	// with nothing to recover): leave the file alone.
+	if !oc.ChangedTitle && !oc.ChangedSummary && !oc.ChangedStatus && !oc.RecoveredFromJSON {
+		oc.Skipped = true
+		return oc
 	}
 
 	if dryRun {
