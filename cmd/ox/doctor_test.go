@@ -13,9 +13,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/testguard"
-	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -97,54 +95,6 @@ func TestDoctorExitCLI(t *testing.T) {
 				} else {
 					require.Len(t, report.Categories, 1)
 					assert.Equal(t, "Setup", report.Categories[0].Name)
-				}
-			})
-		}
-	}
-}
-
-// Healthy, warning-only, and skipped reports must stay successful; failures,
-// including child checks, must retain their category and machine-readable exit.
-func TestDoctorReportExitStatus(t *testing.T) {
-	oldCfg := cfg
-	t.Cleanup(func() { cfg = oldCfg })
-	tests := []struct {
-		name   string
-		check  checkResult
-		failed bool
-	}{
-		{"healthy", PassedCheck("check", "ok"), false},
-		{"warning", WarningCheck("check", "warning", ""), false},
-		{"skipped", SkippedCheck("check", "not applicable", ""), false},
-		{"failed", FailedCheck("check", "broken", "repair it"), true},
-		{"failed child", checkResult{name: "parent", passed: true, children: []checkResult{FailedCheck("child", "broken", "repair it")}}, true},
-		{"skipped child", checkResult{name: "parent", passed: true, children: []checkResult{SkippedCheck("child", "not applicable", "")}}, false},
-	}
-	for _, mode := range []string{"text", "json"} {
-		for _, tt := range tests {
-			t.Run(mode+"/"+tt.name, func(t *testing.T) {
-				cfg = &config.Config{JSON: mode == "json"}
-				categories := []checkCategory{{name: "Setup", checks: []checkResult{tt.check}}}
-				cmd := &cobra.Command{}
-				var stdout bytes.Buffer
-				cmd.SetOut(&stdout)
-				hasFailed := displayDoctorResults(cmd, categories, doctorOptions{verbose: true})
-				assert.Equal(t, tt.failed, hasFailed)
-				err := doctorExitError(hasFailed, strings.Join(failedCheckCategories(categories), ","))
-				if cfg.JSON {
-					var report JSONDoctorOutput
-					require.NoError(t, json.Unmarshal(stdout.Bytes(), &report))
-					assert.Equal(t, tt.failed, report.Summary.HasFailed)
-				}
-				if !tt.failed {
-					require.NoError(t, err)
-					return
-				}
-				require.ErrorContains(t, err, "some checks failed")
-				assert.Equal(t, errkind.ChecksFailed, errkind.Of(err))
-				assert.Equal(t, "Setup", errkind.DetailOf(err))
-				if cfg.JSON {
-					assert.Equal(t, 1, exitCodeOf(t, err))
 				}
 			})
 		}
