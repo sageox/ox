@@ -1,0 +1,76 @@
+---
+title: "ox plan save"
+description: "CLI reference for ox plan save"
+sidebar_position: 73
+---
+
+## ox plan save
+
+Save a plan, mockup, or review page to the ledger and share it
+
+### Synopsis
+
+Persist a plan to the ledger and push it so teammates can open it.
+
+Prints the shareable link (https://<endpoint>/plan/<pln_id>) and says loudly —
+on stderr, and as "share":{"shared":false,"reason":...,"fix":...} under --json —
+when the plan was saved locally but NOT pushed (ledger diverged, push failed,
+mid-rebase), with the command that fixes it.
+
+Re-saving a page whose <meta name="ox-plan-slug"> (or --slug) names an existing
+open plan records a new REVISION of that plan (same id and link), never a fork.
+A slug that matches more than one saved plan is refused with the candidates.
+
+PREFERRED — HTML as the plan of record:
+  --file <plan.html>   an authored, self-contained interactive page. ox stores it
+                       as the canonical artifact (meta primary=html), DERIVES
+                       plan.md from it (regenerated on save — never hand-edit),
+                       and computes deterministic enrichment itself when no
+                       --annotations are passed. Contract + quality bar:
+                       docs/specs/plan-authoring-html.md
+
+Quick plans:
+  --file <plan.md>     markdown-primary; annotations optional (self-enriches)
+
+Legacy markdown-only path:
+  --plan        the plan markdown (with --annotations, required together)
+  --annotations a MERGED annotations.json (deterministic + judgment badges)
+
+The former --plan + --html dual-source path is rejected because it could lose
+the authored visual page during review. Use --file plan.html instead.
+
+This command never makes an LLM/network call — enrichment is deterministic and
+local. It always saves, independent of the plan.save config.
+
+```
+ox plan save [flags]
+```
+
+### Options
+
+```
+      --annotations string   merged annotations.json: enrich badges + AI-coworker judgment badges (required with --plan; optional with --file, which self-enriches)
+      --file string          the plan of record: an authored self-contained .html page (preferred; saved as canonical, markdown derived) or a .md quick plan; annotations optional (ox self-enriches)
+  -h, --help                 help for save
+      --html string          deprecated and rejected: save authored HTML canonically with --file plan.html
+      --json                 emit {dir,slug,plan_id,url,event,revision,share:{shared,reason,fix,...}} as JSON
+      --kind string          what this artifact IS: plan (default) | mockup | review | evidence — a mockup, review sheet or evidence page belongs in the ledger exactly as much as a plan does
+      --plan string          legacy: plan markdown file (with --annotations; prefer --file)
+      --slug string          save as this plan slug; an existing open plan with this slug gets a new revision (overrides <meta name="ox-plan-slug">)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
+      --no-input         disable prompts and terminal UI; provide required input with arguments or flags
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+      --yes              answer yes to confirmation prompts without reading stdin (overrides a piped answer)
+```
+
+### SEE ALSO
+
+* [ox plan](/plan)	 - Work with plans (enrich, render, review)
