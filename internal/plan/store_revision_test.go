@@ -362,8 +362,13 @@ func TestResolveSaveDir_MatchesSave(t *testing.T) {
 	}
 
 	// zero CreatedAt defaults to now rather than the zero date
-	if d, err := ResolveSaveDir("/fake/git/root", Meta{Topic: "Fresh topic"}); err != nil || filepath.Base(d)[:4] == "0001" {
-		t.Errorf("zero CreatedAt resolved to %s (err %v)", filepath.Base(d), err)
+	today := time.Now().UTC().Format("2006-01-02")
+	d, err := ResolveSaveDir("/fake/git/root", Meta{Topic: "Fresh topic"})
+	if err != nil {
+		t.Fatalf("ResolveSaveDir with zero CreatedAt: %v", err)
+	}
+	if !strings.HasPrefix(filepath.Base(d), today) {
+		t.Errorf("zero CreatedAt resolved to %s, want a %s dir", filepath.Base(d), today)
 	}
 
 	withLedger(t, "")
