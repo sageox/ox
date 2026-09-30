@@ -208,8 +208,54 @@ func TestLegacyRedactionReconstructionHandlesMissingAndCorruptTranscripts(t *tes
 	require.NoError(t, w.RestoreCaptureRedaction(&RecordingState{}, filepath.Join(t.TempDir(), "absent.jsonl")))
 
 	corrupt := filepath.Join(t.TempDir(), "raw.jsonl")
-	require.NoError(t, os.WriteFile(corrupt, []byte("{not json\n"), 0600))
+	require.NoError(t, os.WriteFile(corrupt, []byte("{not json\n"+`{"type":"user","content":"real content after garbage"}`+"\n"), 0600))
 	require.ErrorContains(t, w.RestoreCaptureRedaction(&RecordingState{}, corrupt), "reconstruct command redaction")
+}
+
+// TestLegacyRedactionReconstructionToleratesWhatALegacyCrashLeaves verifies the
+// scan a legacy recording runs on EVERY batch until one commits does not choke
+// on what a legacy crash actually leaves behind, while still refusing garbage
+// that sits before real content.
+// Failure prevented: a blank line or a torn last entry making every batch fail
+// forever -- hooks log append-failed on each call, the watcher stops, and
+// `session stop` cannot finish -- with the pending redaction never rebuilt.
+func TestLegacyRedactionReconstructionToleratesWhatALegacyCrashLeaves(t *testing.T) {
+	call := func(id string) string {
+		line, err := json.Marshal(SessionEntry{Type: EntryTypeTool, CallID: id, ToolInput: credentialCommand})
+		require.NoError(t, err)
+		return string(line)
+	}
+	for _, tc := range []struct {
+		name    string
+		content string
+		wantErr string
+		pending []string // call ids that must be rebuilt
+	}{
+		{name: "blank lines between entries", content: rawHeaderLine + "\n" + call("c1") + "\n\n   \n" + call("c2") + "\n", pending: []string{"c1", "c2"}},
+		{name: "torn last line", content: rawHeaderLine + call("c1") + "\n" + `{"type":"tool","call_id":"c2","tool_input":"aws configure exp`, pending: []string{"c1"}},
+		{name: "torn line repaired by a footer stamp", content: rawHeaderLine + call("c1") + "\n" + `{"type":"tool","call_id":"c2","tool_inp` + "\n" + `{"type":"footer","native_sessions":[{"id":"n1"}]}` + "\n", pending: []string{"c1"}},
+		{name: "two torn lines then a footer", content: rawHeaderLine + call("c1") + "\n{garbage\n{more garbage\n" + `{"type":"footer"}` + "\n", pending: []string{"c1"}},
+		{name: "garbage before real content", content: rawHeaderLine + "{garbage\n" + call("c1") + "\n", wantErr: "reconstruct command redaction"},
+		{name: "garbage, a footer, then real content", content: rawHeaderLine + "{garbage\n" + `{"type":"footer"}` + "\n" + call("c1") + "\n", wantErr: "reconstruct command redaction"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := filepath.Join(t.TempDir(), "raw.jsonl")
+			require.NoError(t, os.WriteFile(raw, []byte(tc.content), 0600))
+			w, err := NewRawStreamWriter(discard{}, "")
+			require.NoError(t, err)
+
+			err = w.RestoreCaptureRedaction(&RecordingState{}, raw)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, w.cmdRedactor.pending, len(tc.pending))
+			for _, id := range tc.pending {
+				require.NotEmpty(t, w.cmdRedactor.pending[id], "pending redaction for %s was not rebuilt", id)
+			}
+		})
+	}
 }
 
 // TestUnmatchedCredentialCallsAreBounded verifies the pending-redaction map
@@ -366,6 +412,9 @@ func TestCommittedBatchAcceptsOnlyFootersPastItsSealedSize(t *testing.T) {
 // Failure prevented: a footer half-written when the truncate lands, leaving a
 // torn line the next stamp "repairs" into garbage.
 func TestJournalRollbackCannotTakeAConcurrentFooter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits on a held append lock")
+	}
 	raw := filepath.Join(t.TempDir(), "raw.jsonl")
 	require.NoError(t, os.WriteFile(raw, []byte(rawHeaderLine+"{\"type\":\"tool\",\"content\":\"torn\"}\n"), 0o600))
 	journal, err := json.Marshal(rawAppendCheckpoint{RawSize: int64(len(rawHeaderLine)), OldOffset: 0, NewOffset: 10})

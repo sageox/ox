@@ -62,6 +62,9 @@ func requireBlocked(t *testing.T, finished <-chan error, what string) {
 // capture cursor and forgetting a pending credential redaction, so the matching
 // credential output is later captured unredacted.
 func TestLiveRecordingWritersWaitForAnInFlightCaptureCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits on a held state lock")
+	}
 	for _, tc := range []struct {
 		name   string
 		write  func(projectRoot string, state *RecordingState) error
@@ -247,6 +250,9 @@ func TestClearSurfacesAStateItCannotRead(t *testing.T) {
 // Failure prevented: the updater's rename bringing .recording.json straight back
 // after stop removed it -- a ghost recording for a finalized session.
 func TestClearWaitsForAnInFlightStateCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: waits on a held state lock")
+	}
 	_, state := startLockedUpdateRecording(t)
 	release, committed := holdStateLock(t, state, func(current *RecordingState) { current.EntryCount++ })
 
