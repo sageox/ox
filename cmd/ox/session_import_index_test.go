@@ -254,3 +254,53 @@ func TestImportIndexOfAnEmptyLedger(t *testing.T) {
 	state, _ := idx.classify(candidate(), time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, stateReady, state)
 }
+
+// Failure prevented: a preview that calls a session fully in the Ledger when
+// the Ledger holds only part of it: a session continued after its import, or
+// one ox began recording on a resume.
+func TestImportIndexSaysWhatTheLedgerLacks(t *testing.T) {
+	start := candidate().StartedAt
+	importName := nativeimport.Name(nativeimport.AgentClaude, idxNativeID, start)
+	imported := lfs.SessionMeta{AgentType: "claude-code", NativeSessions: []lfs.NativeSession{
+		{ID: idxNativeID, Source: nativeimport.NativeSourceImport, FirstSeen: start, LastSeen: start.Add(2 * time.Hour)},
+	}}
+	recordedFrom := func(at time.Time) lfs.SessionMeta {
+		return lfs.SessionMeta{AgentType: "claude-code", NativeSessions: []lfs.NativeSession{
+			{ID: idxNativeID, Source: "resume", FirstSeen: at, LastSeen: at.Add(time.Hour)},
+		}}
+	}
+	continued := candidate()
+	continued.LastActivity = start.Add(5 * time.Hour)
+	tests := []struct {
+		name    string
+		metas   map[string]lfs.SessionMeta
+		session nativeimport.Session
+		state   importState
+		want    string
+	}{
+		{"imported and untouched since", map[string]lfs.SessionMeta{importName: imported}, candidate(), stateAlreadyImported, ""},
+		{"continued after its import, unrecorded", map[string]lfs.SessionMeta{importName: imported}, continued,
+			stateAlreadyImported, "continued after it was imported; the later part is not in the Ledger"},
+		{"continued after its import, recorded by ox", map[string]lfs.SessionMeta{
+			importName: imported, "2026-09-12T19-00-lau-OxRSME": recordedFrom(start.Add(5 * time.Hour)),
+		}, continued, stateAlreadyImported, "continued after it was imported; ox recorded the rest as 2026-09-12T19-00-lau-OxRSME"},
+		{"recorded from its start", map[string]lfs.SessionMeta{"2026-09-12T14-03-lau-OxLIVE": recordedFrom(start)},
+			candidate(), stateRecordedLive, ""},
+		{"recorded only from a resume", map[string]lfs.SessionMeta{"2026-09-15T09-00-lau-OxRSME": recordedFrom(start.Add(72 * time.Hour))},
+			candidate(), stateRecordedLive, "the part before that is not in the Ledger"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idx, err := buildImportIndex(context.Background(), t.TempDir(), newIndexLedger(t, tt.metas), idxRepoID)
+			require.NoError(t, err)
+			state, _ := idx.classify(tt.session, time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC))
+			require.Equal(t, tt.state, state)
+			note := idx.coverageNote(tt.session, state)
+			if tt.want == "" {
+				assert.Empty(t, note)
+				return
+			}
+			assert.Contains(t, note, tt.want)
+		})
+	}
+}

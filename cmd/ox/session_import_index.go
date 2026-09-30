@@ -27,6 +27,11 @@ import (
 // imported: a session written to in the last half hour may still be running.
 const importQuietPeriod = 30 * time.Minute
 
+// lateRecordingStart: ox starts recording within seconds of a session's start,
+// so a recording that first saw a native session later than this began on a
+// resume or a manual start, and holds only what followed.
+const lateRecordingStart = 10 * time.Minute
+
 // importStaleTurn is how long a Codex turn may stay open with no write before
 // it counts as interrupted: a Codex killed mid-turn never records the turn's
 // end, and its session must not stay "in progress" forever.
@@ -62,6 +67,7 @@ type importIndex struct {
 	imported    map[nativeKey]string       // native session -> its import's name
 	importedTo  map[nativeKey]time.Time    // native session -> last activity the import holds
 	recorded    map[nativeKey]string       // native session -> the ox recording that covers it
+	recordedAt  map[nativeKey]time.Time    // native session -> when a recording first saw it
 	sessionIDs  map[string]string          // ses_ ID, stored or derived -> name
 	byAgentID   map[string][]liveRecording // ox agent instance -> recordings named for it
 	active      map[nativeKey]string       // native session -> a recording still in progress
@@ -74,6 +80,7 @@ func newImportIndex() *importIndex {
 		imported:    map[nativeKey]string{},
 		importedTo:  map[nativeKey]time.Time{},
 		recorded:    map[nativeKey]string{},
+		recordedAt:  map[nativeKey]time.Time{},
 		sessionIDs:  map[string]string{},
 		byAgentID:   map[string][]liveRecording{},
 		active:      map[nativeKey]string{},
@@ -134,7 +141,7 @@ func (idx *importIndex) addMeta(name string, meta *lfs.SessionMeta, repoID strin
 			idx.imported[key] = name
 			idx.importedTo[key] = ns.LastSeen
 		} else {
-			idx.recorded[key] = name
+			idx.addRecorded(key, name, ns.FirstSeen)
 		}
 	}
 	idx.addAgentName(name, meta.AgentID, meta.CreatedAt)
@@ -163,11 +170,46 @@ func (idx *importIndex) addAgentName(name, agentID string, start time.Time) {
 	idx.byAgentID[agentID] = append(idx.byAgentID[agentID], liveRecording{name: name, start: start.UTC()})
 }
 
+// addRecorded notes a recording that covers a native session, keeping the
+// earliest time any recording first saw it.
+func (idx *importIndex) addRecorded(key nativeKey, name string, firstSeen time.Time) {
+	idx.recorded[key] = name
+	if firstSeen.IsZero() {
+		return
+	}
+	if at, ok := idx.recordedAt[key]; !ok || firstSeen.Before(at) {
+		idx.recordedAt[key] = firstSeen
+	}
+}
+
 // continuedSinceImport reports a native session that kept going after it was
 // imported: the Ledger holds only the part before the import.
 func (idx *importIndex) continuedSinceImport(s nativeimport.Session) bool {
 	held, ok := idx.importedTo[keyFor(s.Agent, s.NativeID)]
 	return ok && !held.IsZero() && s.LastActivity.After(held.Add(time.Minute))
+}
+
+// coverageNote says what the Ledger lacks of a session it already holds in
+// part. Such a session is never uploaded again; the note keeps the preview
+// honest about the missing part.
+func (idx *importIndex) coverageNote(s nativeimport.Session, state importState) string {
+	key := keyFor(s.Agent, s.NativeID)
+	switch state {
+	case stateAlreadyImported:
+		if !idx.continuedSinceImport(s) {
+			return ""
+		}
+		if rec := idx.recorded[key]; rec != "" {
+			return "continued after it was imported; ox recorded the rest as " + rec
+		}
+		return "continued after it was imported; the later part is not in the Ledger"
+	case stateRecordedLive:
+		if at, ok := idx.recordedAt[key]; ok && at.After(s.StartedAt.Add(lateRecordingStart)) {
+			return "ox recorded it only from " + at.Local().Format("2006-01-02 15:04 MST") +
+				"; the part before that is not in the Ledger"
+		}
+	}
+	return ""
 }
 
 // addLocalCaptures covers recordings this machine has not uploaded yet: active
@@ -177,19 +219,17 @@ func (idx *importIndex) addLocalCaptures(projectRoot, ledgerPath, repoID string)
 		for _, st := range states {
 			name := filepath.Base(st.SessionPath)
 			agent := canonicalImportAgent(st.AdapterName)
-			ids := []string{st.AgentSessionID}
-			for _, ns := range st.NativeSessions {
-				ids = append(ids, ns.ID)
-			}
-			for _, id := range ids {
-				if id == "" {
+			seen := []lfs.NativeSession{{ID: st.AgentSessionID, FirstSeen: st.StartedAt}}
+			seen = append(seen, st.NativeSessions...)
+			for _, ns := range seen {
+				if ns.ID == "" {
 					continue
 				}
-				key := nativeKey{agent: agent, id: id}
+				key := nativeKey{agent: agent, id: ns.ID}
 				if st.StoppedAt == nil {
 					idx.active[key] = name
 				} else {
-					idx.recorded[key] = name
+					idx.addRecorded(key, name, ns.FirstSeen)
 				}
 			}
 			if st.SessionFile != "" && st.StoppedAt == nil {
@@ -259,7 +299,7 @@ func (idx *importIndex) addCapture(name, rawPath string) {
 	}
 	for _, ns := range natives {
 		if ns.ID != "" {
-			idx.recorded[nativeKey{agent: agent, id: ns.ID}] = name
+			idx.addRecorded(nativeKey{agent: agent, id: ns.ID}, name, ns.FirstSeen)
 		}
 	}
 }

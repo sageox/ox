@@ -572,10 +572,8 @@ func planImport(ctx context.Context, opts importOptions, env *importEnv) ([]*imp
 			switch c.State {
 			case stateInProgress:
 				c.Reason, c.Covered = c.Covered, ""
-			case stateAlreadyImported:
-				if idx.continuedSinceImport(s) {
-					c.Reason = "continued after it was imported; the later part is not uploaded"
-				}
+			case stateAlreadyImported, stateRecordedLive:
+				c.Reason = idx.coverageNote(s, c.State)
 			case stateReady:
 				if v, ok := env.verdicts.lookup(s); ok {
 					c.State, c.Reason = stateNotShared, v.Verdict

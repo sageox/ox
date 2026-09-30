@@ -44,6 +44,7 @@ Feature: Importing Past Sessions into the Ledger
       Given Avery imported a session and later continued it
       When Avery runs the import again
       Then the preview says the session continued after it was imported
+      And it says whether ox recorded the continuation or it is not in the Ledger
       And nothing is uploaded again
 
   Rule: Sessions ox already recorded are never uploaded again
@@ -53,6 +54,12 @@ Feature: Importing Past Sessions into the Ledger
       When Riley runs the import
       Then the preview lists that session as recorded live by ox
       And it is not uploaded a second time
+
+    Scenario: Riley resumed an old session before importing it
+      Given ox recorded one of Riley's sessions only from when Riley resumed it
+      When Riley runs the import
+      Then the preview lists that session as recorded live by ox, not from its start
+      And it says the part before the resume is not in the Ledger
 
   Rule: The preview comes first and nothing moves without confirmation
 

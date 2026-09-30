@@ -690,7 +690,7 @@ func TestImportE2E_RerunUploadsNothingTwice(t *testing.T) {
 		require.NoError(t, later.err, later.out)
 		s := later.session(t, e2eClaudeA)
 		assert.Equal(t, string(stateAlreadyImported), s.State)
-		assert.Contains(t, s.Reason, "continued after it was imported")
+		assert.Equal(t, "continued after it was imported; the later part is not in the Ledger", s.Reason)
 		assert.Equal(t, calls, f.summarizer.calls())
 		assert.Equal(t, head, runGit(t, f.barePath, "rev-parse", "HEAD"))
 	})
@@ -1421,4 +1421,36 @@ func TestImportE2E_SessionThatChangesBeforeItsTurnIsLeft(t *testing.T) {
 	assert.Equal(t, "skipped", changed.Outcome)
 	assert.Equal(t, "became active since the preview", changed.Detail)
 	assert.NotContains(t, f.reads, later, "it was never read")
+}
+
+// A session ox began recording only when it was resumed is skipped like any
+// recorded session, and the preview says the part before the resume is not
+// in the Ledger.
+//
+// Failure prevented: a coworker told a session is in the Ledger when only
+// its tail is.
+func TestImportE2E_SessionRecordedOnlyFromAResumeIsReported(t *testing.T) {
+	f := newImportFixture(t)
+	start := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
+	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: start, prompt: loginPrompt, reply: "Fixed the cookie."})
+	recording := "2026-09-25T10-00-devon-OxRSME"
+	dir := filepath.Join(f.ledgerPath, "sessions", recording)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	resumedAt := start.Add(49 * time.Hour).Format(time.RFC3339)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"version":"1.0","session_name":"`+recording+
+		`","agent_type":"claude-code","created_at":"`+resumedAt+`","title":"Finish the cookie fix","native_sessions":[{"id":"`+e2eClaudeA+
+		`","source":"resume","first_seen":"`+resumedAt+`","last_seen":"`+resumedAt+`"}]}`), 0o644))
+	runGit(t, f.ledgerPath, "add", "sessions/"+recording)
+	runGit(t, f.ledgerPath, "commit", "--no-verify", "-q", "-m", "session: "+recording)
+
+	r := f.run(t, importOptions{dryRun: true, jsonOut: true})
+	require.NoError(t, r.err, r.out)
+	s := r.session(t, e2eClaudeA)
+	assert.Equal(t, string(stateRecordedLive), s.State)
+	assert.Equal(t, recording, s.CoveredBy)
+	assert.Contains(t, s.Reason, "the part before that is not in the Ledger")
+
+	text := f.run(t, importOptions{dryRun: true})
+	require.NoError(t, text.err, text.out)
+	assert.Contains(t, text.out, "recorded live by ox, not from its start (1)")
 }

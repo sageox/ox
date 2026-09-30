@@ -225,6 +225,7 @@ func TestImportPreviewLabels(t *testing.T) {
 	assert.Equal(t, "already imported", label(stateAlreadyImported, ""))
 	assert.Equal(t, "already imported, continued since", label(stateAlreadyImported, "continued after it was imported"))
 	assert.Equal(t, "recorded live by ox", label(stateRecordedLive, ""))
+	assert.Equal(t, "recorded live by ox, not from its start", label(stateRecordedLive, "ox recorded it only from …"))
 	assert.Equal(t, "in progress", label(stateInProgress, "changed in the last 30 minutes"))
 	assert.Equal(t, "needs summarizer", label(stateNeedsSummarizer, ""))
 	assert.Equal(t, "no conversation", label(stateIneligible, "no conversation"))

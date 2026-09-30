@@ -158,6 +158,9 @@ func skipLabel(c *importCandidate) string {
 		verdict, _, _ := strings.Cut(c.Reason, ":")
 		return verdict
 	case stateRecordedLive:
+		if c.Reason != "" {
+			return "recorded live by ox, not from its start"
+		}
 		return "recorded live by ox"
 	case stateInProgress:
 		return "in progress"
