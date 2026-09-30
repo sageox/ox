@@ -291,7 +291,7 @@ func writeSyncResultText(w io.Writer, result SyncResult) error {
 		return err
 	}
 	if result.Transport.Ledger != nil {
-		if _, err := fmt.Fprintf(w, "  Ledger: %s\n", result.Transport.Ledger.Status); err != nil {
+		if err := writeLedgerSyncLine(w, *result.Transport.Ledger); err != nil {
 			return err
 		}
 	}
@@ -339,6 +339,18 @@ func writeSyncResultText(w io.Writer, result SyncResult) error {
 	return nil
 }
 
+// writeLedgerSyncLine prints the ledger's transport line. A not-synced ledger
+// carries its reasons on the same line, so the one line a user reads cannot
+// say "synced" while the error below it says otherwise.
+func writeLedgerSyncLine(w io.Writer, ledger SyncLedgerResult) error {
+	if ledger.Status == ledgerSyncStatusNotSynced {
+		_, err := fmt.Fprintf(w, "  Ledger: NOT synced — %s\n", ledger.Error)
+		return err
+	}
+	_, err := fmt.Fprintf(w, "  Ledger: %s\n", ledger.Status)
+	return err
+}
+
 // syncViaDaemon triggers a sync via the daemon.
 // The daemon handles pull operations.
 func syncViaDaemon(_ context.Context, jsonOutput bool, result *SyncResult) error {
@@ -361,6 +373,14 @@ func syncViaDaemon(_ context.Context, jsonOutput bool, result *SyncResult) error
 	if err != nil {
 		result.Transport.Ledger = &SyncLedgerResult{Status: "error", Error: err.Error()}
 		return fmt.Errorf("daemon sync: %w", err)
+	}
+
+	// The IPC succeeding only means the daemon accepted the request; its ledger
+	// pull returns nil for every skip. Verify before claiming "synced".
+	if reasons := classifyLedgerSync(gatherLedgerSyncFacts(ledgerStatusForSync())); len(reasons) > 0 {
+		msg := ledgerNotSyncedError(reasons)
+		result.Transport.Ledger = &SyncLedgerResult{Status: ledgerSyncStatusNotSynced, Error: msg}
+		return fmt.Errorf("ledger not synced: %s", msg)
 	}
 
 	result.Transport.Ledger = &SyncLedgerResult{Status: "synced"}

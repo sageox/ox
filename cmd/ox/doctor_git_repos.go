@@ -598,48 +598,70 @@ func checkGitLockFiles() checkResult {
 	if gitRoot == "" {
 		return SkippedCheck("git locks", "not in git repo", "")
 	}
+	return gitLockFilesResult("git locks", filepath.Join(gitRoot, ".git"), time.Now())
+}
 
-	gitDir := filepath.Join(gitRoot, ".git")
-	lockFiles := []string{
-		"index.lock",
-		"shallow.lock",
-		"config.lock",
-		"HEAD.lock",
+// checkLedgerGitLockFiles runs the same lock check against the ledger. A stale
+// ledger index.lock blocks every ledger write — including doctor's own
+// `git rebase --abort` — and the project-repo check never looked there.
+// Report-only: an ownerless index.lock carries no PID, so whether a git process
+// still holds it is the user's call (gitutil.AbandonedLockAge explains why age
+// alone is not proof).
+func checkLedgerGitLockFiles() checkResult {
+	const name = "ledger git locks"
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck(name, "not in git repo", "")
 	}
+	ledgerPath := resolveLocalLedgerPath(gitRoot)
+	if ledgerPath == "" {
+		return SkippedCheck(name, "no ledger configured", "")
+	}
+	gitDir := filepath.Join(ledgerPath, ".git")
+	if info, err := os.Stat(gitDir); err != nil || !info.IsDir() {
+		return SkippedCheck(name, "ledger not cloned", "")
+	}
+	return gitLockFilesResult(name, gitDir, time.Now())
+}
 
-	var found []string
-	var oldLocks []string
-	oneHourAgo := time.Now().UTC().Add(-1 * time.Hour)
-
-	for _, lock := range lockFiles {
+// gitLockFilesResult reports git lock files in gitDir. Locks older than an hour
+// fail; younger ones warn, since a live git may still hold them. The remove
+// command lists each full path: a one-element brace expansion ({index.lock})
+// is not expanded by the shell, so the old form named a file that does not exist.
+func gitLockFilesResult(name, gitDir string, now time.Time) checkResult {
+	var found, paths, oldLocks []string
+	oneHourAgo := now.Add(-1 * time.Hour)
+	for _, lock := range gitutil.HasLockFiles(gitDir) {
 		path := filepath.Join(gitDir, lock)
-		if info, err := os.Stat(path); err == nil {
-			found = append(found, lock)
-			if info.ModTime().UTC().Before(oneHourAgo) {
-				oldLocks = append(oldLocks, lock)
-			}
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		found = append(found, lock)
+		paths = append(paths, path)
+		if info.ModTime().Before(oneHourAgo) {
+			oldLocks = append(oldLocks, lock)
 		}
 	}
 
 	if len(found) == 0 {
-		return PassedCheck("git locks", "no stale lock files")
+		return PassedCheck(name, "no stale lock files")
 	}
 
 	detail := fmt.Sprintf(
 		"Lock files found: %s\n"+
 			"If no git commands are running, remove with:\n"+
-			"  rm %s/{%s}",
+			"  rm %s",
 		strings.Join(found, ", "),
-		gitDir,
-		strings.Join(found, ","))
+		strings.Join(paths, " "))
 
 	if len(oldLocks) > 0 {
-		return FailedCheck("git locks",
+		return FailedCheck(name,
 			fmt.Sprintf("%d stale lock file(s) > 1 hour old", len(oldLocks)),
 			detail).WithFixInfo(CheckSlugGitLock, FixLevelSuggested)
 	}
 
-	return WarningCheck("git locks",
+	return WarningCheck(name,
 		"lock files present (may be from active git process)",
 		detail)
 }
