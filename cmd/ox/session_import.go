@@ -29,6 +29,7 @@ import (
 	"github.com/sageox/ox/internal/session/nativeimport"
 	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var sessionImportCmd = &cobra.Command{
@@ -57,7 +58,10 @@ conversation to the current recording.`,
 
 func init() {
 	sessionCmd.AddCommand(sessionImportCmd)
-	f := sessionImportCmd.Flags()
+	addSessionImportFlags(sessionImportCmd.Flags())
+}
+
+func addSessionImportFlags(f *pflag.FlagSet) {
 	f.String("agent", "", "only sessions from this tool: claude or codex")
 	f.String("since", "", "only sessions active within this window (7d, 48h) or since a date (2026-09-01)")
 	f.StringSlice("session", nil, "import exactly these sessions, by native session ID or a unique prefix of 8+ characters")
@@ -350,14 +354,18 @@ func productionImportDeps(env *importEnv) importDeps {
 			u := agentwork.CheckAgentUsability(string(agent))
 			return u.Installed && u.Authenticated
 		},
-		syncLedger: requestLedgerSync,
+		syncLedger:  requestLedgerSync,
+		interactive: cli.IsInteractive,
+		confirm: func(prompt string) (bool, error) {
+			return cli.ConfirmYesNoRequired(prompt, false, false)
+		},
 	}
 }
 
 // runImport is everything after preflight: discovery, classification, the
 // preview and, once confirmed, the uploads.
 func runSessionImportFlow(ctx context.Context, out io.Writer, opts importOptions, env *importEnv, dest importDestination) error {
-	if !importMayUpload(opts, cli.IsInteractive()) {
+	if !importMayUpload(opts, env.deps.interactive()) {
 		cands, ignored, failure := planImport(ctx, opts, env)
 		if failure != nil {
 			return renderImportFailure(out, opts.jsonOut, *failure)
@@ -423,7 +431,7 @@ func runLockedImport(ctx context.Context, out io.Writer, opts importOptions, env
 			return err
 		}
 		prompt := fmt.Sprintf("Upload %d session%s to %s (%s)?", len(selected), plural(len(selected)), ledgerLabel(dest), dest.Visibility)
-		confirmed, err := cli.ConfirmYesNoRequired(prompt, false, false)
+		confirmed, err := env.deps.confirm(prompt)
 		if err != nil || !confirmed {
 			fmt.Fprintln(out, "Nothing was uploaded.")
 			return nil

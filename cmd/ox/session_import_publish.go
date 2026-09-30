@@ -51,15 +51,17 @@ var errImportHeld = errors.New("held")
 // importDeps are the seams a test replaces. Production wires the real
 // adapters, isolated vendor runners, LFS client, push and notify.
 type importDeps struct {
-	readNative func(agent nativeimport.Agent, path string) ([]adapters.RawEntry, error)
-	runner     func(agent nativeimport.Agent) agentwork.Runner
-	lfsClient  func() (*lfs.Client, error)
-	push       func(ctx context.Context, ledgerPath string) error
-	notify     func(meta *lfs.SessionMeta, name string)
-	urlFor     func(sessionID string) string
-	now        func() time.Time
-	usable     func(agent nativeimport.Agent) bool // installed and logged in
-	syncLedger func()                              // best-effort fresh pull
+	readNative  func(agent nativeimport.Agent, path string) ([]adapters.RawEntry, error)
+	runner      func(agent nativeimport.Agent) agentwork.Runner
+	lfsClient   func() (*lfs.Client, error)
+	push        func(ctx context.Context, ledgerPath string) error
+	notify      func(meta *lfs.SessionMeta, name string)
+	urlFor      func(sessionID string) string
+	now         func() time.Time
+	usable      func(agent nativeimport.Agent) bool // installed and logged in
+	syncLedger  func()                              // best-effort fresh pull
+	interactive func() bool                         // a coworker can answer a prompt
+	confirm     func(prompt string) (bool, error)
 }
 
 // importEnv is one run's fixed context.
@@ -178,6 +180,15 @@ func publishImport(ctx context.Context, env *importEnv, c *importCandidate) (ski
 		return "", heldf("a possible secret remains in %s after redaction; add a REDACT.md rule or redact the native session, then retry", file)
 	}
 
+	// Before anything leaves the machine: a pull during the summary may have
+	// brought another machine's import of this session, or left the clone
+	// mid-rebase. commitImport checks both again, under the clone lock.
+	if _, err := gitutil.RunGit(ctx, env.ledgerPath, "cat-file", "-e", "HEAD:sessions/"+c.Name); err == nil {
+		return "imported from another machine meanwhile", nil
+	}
+	if err := prepareDraftLedgerWrite(env.ledgerPath, c.Name); err != nil {
+		return "", heldf("the Ledger is not safe to write: %v", err)
+	}
 	refs, err := lfs.UploadSessionFiles(env.lfs, staging, env.logger)
 	if err != nil {
 		return "", heldf("upload to LFS: %v", err)

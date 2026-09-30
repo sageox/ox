@@ -5,8 +5,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -146,4 +148,62 @@ func TestClaudeUsabilityHonorsClaudeConfigDir(t *testing.T) {
 	got := CheckAgentUsability("claude")
 	assert.True(t, got.Installed)
 	assert.True(t, got.Authenticated, "the login lives in CLAUDE_CONFIG_DIR, not the home directory")
+}
+
+// Failure prevented: a CLI whose capabilities cannot be confirmed treated as
+// isolated, or a CLI that never answers stalling the import.
+func TestIsolationProbesFailClosed(t *testing.T) {
+	const fullHelp = "--sandbox --ephemeral --color --config --ignore-user-config --ignore-rules --skip-git-repo-check --disable"
+	big := `head -c 300000 /dev/zero | tr '\\0' x`
+	tests := []struct {
+		name, cli, body, wantErr string
+	}{
+		{"a Claude that fails its help probe", "claude", `if [ "$1" = "--help" ]; then exit 3; fi`, "cannot verify Claude Code isolation"},
+		{"a Codex whose help overflows", "codex", `if [ "$2" = "--help" ]; then ` + big + `; exit; fi`, "help output exceeds limit"},
+		{"a Codex that cannot list its features", "codex", `if [ "$2" = "--help" ]; then echo "` + fullHelp + `"; exit; fi
+if [ "$1" = "features" ]; then exit 2; fi`, "cannot list Codex features"},
+		{"a Codex whose feature list overflows", "codex", `if [ "$2" = "--help" ]; then echo "` + fullHelp + `"; exit; fi
+if [ "$1" = "features" ]; then ` + big + `; exit; fi`, "output exceeds limit"},
+		{"a Codex that never lists its features", "codex", `if [ "$2" = "--help" ]; then echo "` + fullHelp + `"; exit; fi
+if [ "$1" = "features" ]; then exec sleep 5; fi`, "did not answer within"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prior := codexProbeTimeout
+			codexProbeTimeout = 300 * time.Millisecond
+			t.Cleanup(func() { codexProbeTimeout = prior })
+			prompted := filepath.Join(t.TempDir(), "prompted")
+			script := fakeCLI(t, tt.cli, tt.body+"\ntouch \""+prompted+"\"\n")
+			var err error
+			if tt.cli == "claude" {
+				_, err = (&ClaudeRunner{binaryPath: script, logger: slog.Default()}).Run(context.Background(), RunRequest{Prompt: "p", Isolated: true})
+			} else {
+				_, err = (&CodexRunner{binaryPath: script, logger: slog.Default()}).Run(context.Background(), RunRequest{Prompt: "p", Isolated: true})
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+			assert.NoFileExists(t, prompted, "no prompt-bearing run after a failed probe")
+		})
+	}
+}
+
+// Failure prevented: a coworker logged in to Claude Code reported as not
+// logged in, so their sessions are never summarized.
+func TestClaudeUsabilityReadsTheHomeLogin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("windows: the home directory does not come from HOME")
+	}
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n"), 0o755))
+	t.Setenv("PATH", bin)
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	home := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"oauthAccount":{"emailAddress":"x"}}`), 0o600))
+	t.Setenv("HOME", home)
+	assert.True(t, CheckAgentUsability("claude").Authenticated)
+
+	t.Setenv("HOME", "")
+	got := CheckAgentUsability("claude")
+	assert.False(t, got.Authenticated)
+	assert.Equal(t, "unable to check", got.AuthDetail)
 }

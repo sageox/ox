@@ -1,6 +1,7 @@
 package session
 
 import (
+	"github.com/sageox/ox/internal/config"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,10 +15,12 @@ import (
 // the strict writer carries on without those rules; the import must refuse.
 func TestValidateRedactPolicy(t *testing.T) {
 	tests := []struct {
-		name    string
-		config  string // .sageox/config.json, empty for none
-		redact  string // .sageox/REDACT.md, empty for none
-		wantErr string
+		name        string
+		config      string // .sageox/config.json, empty for none
+		redact      string // .sageox/REDACT.md, empty for none
+		redactIsDir bool   // .sageox/REDACT.md is a directory, so unreadable
+		teamPath    string // a registered team context checkout, under the test's temp dir
+		wantErr     string
 	}{
 		{name: "no team and no rules is fine"},
 		{name: "valid repo rules are fine", redact: "```redact\nregex \"ACME-[a-f0-9]{32}\" -> [REDACTED_ACME_KEY]\n```\n"},
@@ -26,6 +29,22 @@ func TestValidateRedactPolicy(t *testing.T) {
 			name:    "a team context that is not synced",
 			config:  `{"repo_id":"repo_x","team_id":"team_x","team_name":"Acme Engineering"}`,
 			wantErr: "team context for Acme Engineering is not synced",
+		},
+		{
+			name:    "a team known only by its ID",
+			config:  `{"repo_id":"repo_x","team_id":"team_x"}`,
+			wantErr: "team context for team_x is not synced",
+		},
+		{
+			name:     "a registered checkout that is gone",
+			config:   `{"repo_id":"repo_x","team_id":"team_x"}`,
+			teamPath: "gone",
+			wantErr:  "is missing; run ox sync",
+		},
+		{
+			name:        "a REDACT.md that cannot be read",
+			redactIsDir: true,
+			wantErr:     "REDACT.md",
 		},
 	}
 	for _, tt := range tests {
@@ -39,6 +58,14 @@ func TestValidateRedactPolicy(t *testing.T) {
 			}
 			if tt.redact != "" {
 				require.NoError(t, os.WriteFile(filepath.Join(root, ".sageox", "REDACT.md"), []byte(tt.redact), 0o644))
+			}
+			if tt.redactIsDir {
+				require.NoError(t, os.Mkdir(filepath.Join(root, ".sageox", "REDACT.md"), 0o755))
+			}
+			if tt.teamPath != "" {
+				require.NoError(t, config.SaveLocalConfig(root, &config.LocalConfig{
+					TeamContexts: []config.TeamContext{{TeamID: "team_x", Path: filepath.Join(t.TempDir(), tt.teamPath)}},
+				}))
 			}
 			err := ValidateRedactPolicy(root)
 			if tt.wantErr == "" {

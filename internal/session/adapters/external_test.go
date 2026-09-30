@@ -435,4 +435,13 @@ func TestExternalAdapter_ReadWithTimeout(t *testing.T) {
 	if _, err := ea.ReadWithTimeout("session", 20*time.Millisecond); !errors.Is(err, ErrAdapterTimeout) {
 		t.Fatalf("ReadWithTimeout error = %v, want ErrAdapterTimeout past its own deadline", err)
 	}
+
+	garbled := filepath.Join(t.TempDir(), "ox-adapter-garbled")
+	if err := os.WriteFile(garbled, []byte("#!/bin/sh\nprintf 'not json'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bad := NewExternalAdapterWithInfo(garbled, &adapterprotocol.InfoResponse{Name: "garbled"})
+	if _, err := bad.ReadWithTimeout("session", 5*time.Second); !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("ReadWithTimeout error = %v, want ErrInvalidResponse for output that is not the protocol", err)
+	}
 }

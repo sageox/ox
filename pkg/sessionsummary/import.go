@@ -66,10 +66,9 @@ func TrimEntriesForBudget(entries []Entry, maxChars int) []Entry {
 		for i := head; i < tail; i++ {
 			middleCost += renderedCost(entries[turns[i]])
 		}
+		// middleCost > middleBudget here (the transcript is over budget), so
+		// want < middle.
 		want := middle * middleBudget / middleCost
-		if want > middle {
-			want = middle
-		}
 		var picked []int
 		for k := 0; k < want; k++ {
 			picked = append(picked, head+k*middle/max(want, 1))

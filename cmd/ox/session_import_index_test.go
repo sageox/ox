@@ -171,6 +171,11 @@ func TestImportIndexReadsPendingCaptures(t *testing.T) {
 	later := `{"type":"footer","trace_capture":{"status":"none"}}`
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(header+"\n"+entry+"\n"+footer+"\n"+later+"\n"), 0o600))
 
+	uploaded := filepath.Join(ledger, ".sageox", "cache", "sessions", "2026-09-10T08-00-lau-OxDONE")
+	require.NoError(t, os.MkdirAll(uploaded, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(uploaded, "raw.jsonl"),
+		[]byte(lfs.FormatPointer("sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393", 10)), 0o600))
+
 	idx, err := buildImportIndex(context.Background(), t.TempDir(), ledger, idxRepoID)
 	require.NoError(t, err)
 	state, match := idx.classify(candidate(), time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC))
@@ -218,4 +223,34 @@ func TestImportIndexAgentMarkerUsesTheRecordingsStart(t *testing.T) {
 	state, match := idx.classify(s, time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC))
 	assert.Equal(t, stateRecordedLive, state)
 	assert.Equal(t, name, match)
+}
+
+// Failure prevented: one corrupt session record in the Ledger stopping every
+// import, or hiding the sessions the readable records cover.
+func TestImportIndexToleratesAnUnreadableMeta(t *testing.T) {
+	ledger := newIndexLedger(t, map[string]lfs.SessionMeta{
+		"2026-09-12T14-03-lau-OxLIVE": {AgentType: "claude-code", NativeSessions: nativeSession(idxNativeID, "startup")},
+	})
+	bad := filepath.Join(ledger, "sessions", "2026-09-13T10-00-lau-OxBAD1")
+	require.NoError(t, os.MkdirAll(bad, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(bad, "meta.json"), []byte("{not json"), 0o644))
+	importGit(t, ledger, "add", "-A")
+	importGit(t, ledger, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "a corrupt record")
+
+	idx, err := buildImportIndex(context.Background(), t.TempDir(), ledger, idxRepoID)
+	require.NoError(t, err)
+	state, match := idx.classify(candidate(), time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC))
+	assert.Equal(t, stateRecordedLive, state)
+	assert.Equal(t, "2026-09-12T14-03-lau-OxLIVE", match)
+}
+
+// Failure prevented: a freshly cloned, still empty Ledger refused as
+// unreadable instead of accepting its first import.
+func TestImportIndexOfAnEmptyLedger(t *testing.T) {
+	ledger := t.TempDir()
+	importGit(t, ledger, "init", "-q")
+	idx, err := buildImportIndex(context.Background(), t.TempDir(), ledger, idxRepoID)
+	require.NoError(t, err)
+	state, _ := idx.classify(candidate(), time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC))
+	assert.Equal(t, stateReady, state)
 }

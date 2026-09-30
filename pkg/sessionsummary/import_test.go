@@ -125,3 +125,35 @@ func TestImportFallbackSummary(t *testing.T) {
 		})
 	}
 }
+
+// Failure prevented: a prompt over the summarizer's budget because the evenly
+// sampled middle turns happened to be the long ones.
+func TestTrimEntriesForBudgetShedsLongSampledTurns(t *testing.T) {
+	var entries []Entry
+	for i := 0; i < 21; i++ {
+		content := "ok"
+		if i%2 == 0 {
+			content = strings.Repeat("x", 2000)
+		}
+		entries = append(entries, Entry{Type: EntryTypeUser, Content: content})
+	}
+	const budget = 4000
+	got := TrimEntriesForBudget(entries, budget)
+	cost := 0
+	for _, e := range got {
+		cost += renderedCost(e)
+	}
+	assert.LessOrEqual(t, cost, budget)
+	assert.NotEmpty(t, got, "some of the middle is still sampled")
+}
+
+// Failure prevented: a fallback summary for a long session listing every
+// prompt it ever had.
+func TestImportFallbackSummaryCapsEchoedPrompts(t *testing.T) {
+	var entries []Entry
+	for i := 0; i < maxPromptsToEcho+3; i++ {
+		entries = append(entries, Entry{Type: EntryTypeUser, Content: fmt.Sprintf("prompt number %d about the deploy", i)})
+	}
+	got := ImportFallbackSummary(entries, "Imported Codex session", errors.New("title too short"))
+	assert.Contains(t, got.Summary, "(plus 3 more prompts)")
+}

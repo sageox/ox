@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -19,8 +20,10 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon/agentwork"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/nativeimport"
@@ -54,9 +57,10 @@ const (
 
 // fakeLFSStore is an LFS server that keeps every uploaded object.
 type fakeLFSStore struct {
-	mu      sync.Mutex
-	objects map[string][]byte // bare sha256 hex -> bytes
-	url     string
+	mu        sync.Mutex
+	objects   map[string][]byte // bare sha256 hex -> bytes
+	url       string
+	failBatch bool // answer every batch request with a server error
 }
 
 func newFakeLFSStore(t *testing.T) *fakeLFSStore {
@@ -65,6 +69,13 @@ func newFakeLFSStore(t *testing.T) *fakeLFSStore {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/info/lfs/objects/batch"):
+			s.mu.Lock()
+			fail := s.failBatch
+			s.mu.Unlock()
+			if fail {
+				http.Error(w, "storage unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			var request struct {
 				Objects []lfs.BatchObject `json:"objects"`
 			}
@@ -136,6 +147,9 @@ func (s *fakeLFSStore) count() int {
 
 // fakeSummarizer stands in for the claude or codex CLI.
 type fakeSummarizer struct {
+	unavailable bool // the CLI is not installed
+	exitCode    int  // a non-zero exit fails every call
+
 	mu       sync.Mutex
 	prompts  []string
 	isolated []bool
@@ -144,7 +158,7 @@ type fakeSummarizer struct {
 	reply    func(prompt string) string // a non-empty reply replaces the default summary
 }
 
-func (s *fakeSummarizer) Available() bool { return true }
+func (s *fakeSummarizer) Available() bool { return !s.unavailable }
 
 func (s *fakeSummarizer) Run(_ context.Context, req agentwork.RunRequest) (*agentwork.RunResult, error) {
 	s.mu.Lock()
@@ -159,6 +173,9 @@ func (s *fakeSummarizer) Run(_ context.Context, req agentwork.RunRequest) (*agen
 		if err := fail(req.Prompt); err != nil {
 			return nil, err
 		}
+	}
+	if s.exitCode != 0 {
+		return &agentwork.RunResult{ExitCode: s.exitCode}, nil
 	}
 	if reply != nil {
 		if out := reply(req.Prompt); out != "" {
@@ -208,6 +225,10 @@ type importFixture struct {
 	store          *fakeLFSStore
 	push           func(ctx context.Context, ledgerPath string) error // nil: the real pushLedger
 	pushBatch      int
+	readErr        error // every adapter read fails with it
+	unusable       bool  // no summarizer CLI is installed and logged in
+	interactive    bool  // a coworker at a terminal can answer
+	confirm        func(prompt string) (bool, error)
 
 	mu       sync.Mutex
 	native   map[string][]adapters.RawEntry // adapter output by native file
@@ -256,6 +277,10 @@ type pastSession struct {
 	inFlight bool                // Codex: a turn started and never completed
 	hook     string              // Claude: SessionStart hook output
 	entries  []adapters.RawEntry // adapter output; derived from prompt and reply when nil
+	cwd      string              // where it ran; the project root when empty
+	alsoIn   string              // a second working directory it also used
+	folder   string              // Claude: the projects folder; derived from cwd when empty
+	source   json.RawMessage     // Codex: session_meta.source; "cli" when nil
 }
 
 func jsonLine(t *testing.T, v any) string {
@@ -270,11 +295,18 @@ func jsonLine(t *testing.T, v any) string {
 func (f *importFixture) add(t *testing.T, s pastSession) string {
 	t.Helper()
 	cwd := f.projectRoot
+	if s.cwd != "" {
+		cwd = s.cwd
+	}
 	stamp := func(d time.Duration) string { return s.start.Add(d).UTC().Format(time.RFC3339Nano) }
 	var path string
 	var lines []string
 	if s.agent == nativeimport.AgentClaude {
-		path = filepath.Join(f.claudeProjects, "-work-"+filepath.Base(cwd), s.id+".jsonl")
+		folder := s.folder
+		if folder == "" {
+			folder = "-work-" + filepath.Base(cwd)
+		}
+		path = filepath.Join(f.claudeProjects, folder, s.id+".jsonl")
 		record := func(typ string, d time.Duration, fields map[string]any) string {
 			rec := map[string]any{"type": typ, "sessionId": s.id, "timestamp": stamp(d), "cwd": cwd, "gitBranch": "main"}
 			for k, v := range fields {
@@ -288,6 +320,10 @@ func (f *importFixture) add(t *testing.T, s pastSession) string {
 			}))
 		}
 		lines = append(lines, record("user", time.Second, map[string]any{"message": map[string]any{"role": "user", "content": s.prompt}}))
+		if s.alsoIn != "" {
+			lines = append(lines, jsonLine(t, map[string]any{"type": "user", "sessionId": s.id, "timestamp": stamp(2 * time.Second),
+				"cwd": s.alsoIn, "message": map[string]any{"role": "user", "content": "and over here"}}))
+		}
 		if s.reply != "" {
 			lines = append(lines, record("assistant", time.Minute, map[string]any{
 				"message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": s.reply}}},
@@ -300,13 +336,20 @@ func (f *importFixture) add(t *testing.T, s pastSession) string {
 		record := func(typ string, d time.Duration, payload map[string]any) string {
 			return jsonLine(t, map[string]any{"type": typ, "timestamp": stamp(d), "payload": payload})
 		}
+		source := s.source
+		if source == nil {
+			source = json.RawMessage(`"cli"`)
+		}
 		lines = append(lines,
-			record("session_meta", 0, map[string]any{"id": s.id, "cwd": cwd, "source": "cli", "git": map[string]any{"branch": "main"}}),
+			record("session_meta", 0, map[string]any{"id": s.id, "cwd": cwd, "source": source, "git": map[string]any{"branch": "main"}}),
 			record("response_item", time.Second, map[string]any{
 				"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": s.prompt}},
 			}),
 			record("event_msg", 2*time.Second, map[string]any{"type": "task_started"}),
 		)
+		if s.alsoIn != "" {
+			lines = append(lines, record("turn_context", 3*time.Second, map[string]any{"cwd": s.alsoIn}))
+		}
 		if s.reply != "" {
 			lines = append(lines, record("response_item", time.Minute, map[string]any{
 				"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": s.reply}},
@@ -339,6 +382,9 @@ func (f *importFixture) readNative(_ nativeimport.Agent, path string) ([]adapter
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads = append(f.reads, path)
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
 	entries, ok := f.native[path]
 	if !ok {
 		return nil, errors.New("adapter: no such session file")
@@ -367,6 +413,17 @@ func (f *importFixture) run(t *testing.T, opts importOptions) importRun {
 // production dependencies except the seams the fixture fakes.
 func (f *importFixture) runOn(t *testing.T, ledgerPath string, opts importOptions) importRun {
 	t.Helper()
+	env, dest := f.envFor(ledgerPath, opts)
+	var buf bytes.Buffer
+	r := importRun{err: runSessionImportFlow(context.Background(), &buf, opts, env, dest)}
+	r.out = buf.String()
+	if opts.jsonOut {
+		require.NoError(t, json.Unmarshal(buf.Bytes(), &r.report), r.out)
+	}
+	return r
+}
+
+func (f *importFixture) envFor(ledgerPath string, opts importOptions) (*importEnv, importDestination) {
 	env := &importEnv{
 		projectRoot: f.projectRoot,
 		ledgerPath:  ledgerPath,
@@ -385,21 +442,17 @@ func (f *importFixture) runOn(t *testing.T, ledgerPath string, opts importOption
 		f.notified = append(f.notified, name)
 		f.mu.Unlock()
 	}
-	env.deps.usable = func(nativeimport.Agent) bool { return true }
+	env.deps.usable = func(nativeimport.Agent) bool { return !f.unusable }
 	env.deps.syncLedger = func() {}
+	env.deps.interactive = func() bool { return f.interactive }
+	if f.confirm != nil {
+		env.deps.confirm = f.confirm
+	}
 	if f.push != nil {
 		env.deps.push = f.push
 	}
 	env.pushBatch = f.pushBatch
-	dest := importDestination{Team: e2eTeam, RepoID: e2eRepoID, Visibility: f.visibility, Ledger: ledgerPath, verified: true}
-
-	var buf bytes.Buffer
-	r := importRun{err: runSessionImportFlow(context.Background(), &buf, opts, env, dest)}
-	r.out = buf.String()
-	if opts.jsonOut {
-		require.NoError(t, json.Unmarshal(buf.Bytes(), &r.report), r.out)
-	}
-	return r
+	return env, importDestination{Team: e2eTeam, RepoID: e2eRepoID, Visibility: f.visibility, Ledger: ledgerPath, verified: true}
 }
 
 func (r importRun) session(t *testing.T, nativeID string) importJSONSession {
@@ -870,6 +923,11 @@ func TestImportE2E_UploadCommandPinsWhatWasPreviewed(t *testing.T) {
 	require.NoError(t, preview.err, preview.out)
 	assert.Equal(t, "ox session import --yes --session "+e2eCodexA, preview.report.NextCommand)
 
+	withClaude := f.run(t, importOptions{agent: nativeimport.AgentCodex, summarizer: nativeimport.AgentClaude, agentCtx: true, jsonOut: true})
+	require.NoError(t, withClaude.err, withClaude.out)
+	assert.Equal(t, "ox session import --yes --summarizer claude --session "+e2eCodexA, withClaude.report.NextCommand,
+		"the summarizer the coworker chose is part of what they approved")
+
 	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexB, start: start.Add(2 * time.Hour), prompt: tokenPrompt, reply: "The deploy bot."})
 	r := f.run(t, optionsFromCommand(t, preview.report.NextCommand))
 	require.NoError(t, r.err, r.out)
@@ -892,9 +950,15 @@ func TestImportE2E_SessionsNotWorthSharingStayLocal(t *testing.T) {
 	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: start, prompt: loginPrompt, reply: "Fixed the cookie."})
 	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexA, start: start.Add(time.Hour), prompt: pushPrompt, reply: "Never mind."})
 	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeB, start: start.Add(2 * time.Hour), prompt: "fix the typo", reply: "Done."})
+	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexB, start: start.Add(3 * time.Hour), prompt: tokenPrompt, reply: "Checked."})
+	longReason := strings.Repeat("Personal scratch work on a local credential setup. ", 5)
 	f.summarizer.reply = func(prompt string) string {
-		if strings.Contains(prompt, pushPrompt) {
+		switch {
+		case strings.Contains(prompt, pushPrompt):
 			return `{"quality_category":"skip","score_reason":"Asked one question and left before any work."}`
+		case strings.Contains(prompt, tokenPrompt):
+			return jsonLine(t, map[string]any{"title": "Check the CLI account", "summary": "Looked at which account the CLI uses.",
+				"key_actions": []string{"Checked the account"}, "outcome": "success", "quality_category": "local_only", "score_reason": longReason})
 		}
 		return ""
 	}
@@ -907,10 +971,14 @@ func TestImportE2E_SessionsNotWorthSharingStayLocal(t *testing.T) {
 		assert.Equal(t, "skipped", s.Outcome, id)
 		assert.Contains(t, s.Detail, "not worth sharing", id)
 	}
+	local := r.session(t, e2eCodexB)
+	assert.Equal(t, "skipped", local.Outcome)
+	assert.True(t, strings.HasPrefix(local.Detail, "kept local: Personal scratch work"), local.Detail)
+	assert.True(t, strings.HasSuffix(local.Detail, "…"), "a long reason is clipped: %q", local.Detail)
 	assert.Equal(t, []string{r.session(t, e2eClaudeA).SessionName}, remoteSessionDirs(t, f.barePath))
 	assert.Zero(t, f.store.holding(pushPrompt), "nothing of a skipped session is uploaded")
 	calls := f.summarizer.calls()
-	assert.Equal(t, 2, calls, "a brief session is judged without the summarizer")
+	assert.Equal(t, 3, calls, "a brief session is judged without the summarizer")
 
 	again := f.run(t, importOptions{dryRun: true, jsonOut: true})
 	require.NoError(t, again.err, again.out)
@@ -1017,4 +1085,340 @@ func TestImportE2E_FailedPushIsCarriedByTheNextOne(t *testing.T) {
 		assert.Contains(t, remoteSessionDirs(t, f.barePath), s.SessionName)
 		assert.Equal(t, string(stateAlreadyImported), next.session(t, e2eCodexB).State)
 	})
+}
+
+// The preview accounts for every native file it did not list as a candidate,
+// and keeps one entry per native session.
+//
+// Failure prevented: another repo's sessions, ox's own summarizer runs, or
+// subagent threads uploaded as this repo's history; or a coworker told
+// nothing about why most of their files were left out.
+func TestImportE2E_PreviewCountsWhatItIgnores(t *testing.T) {
+	f := newImportFixture(t)
+	start := time.Date(2026, 9, 15, 9, 0, 0, 0, time.UTC)
+	other := t.TempDir()
+	runGit(t, other, "init", "-q")
+	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: start, prompt: loginPrompt, reply: "Fixed the cookie."})
+	longer := f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: start, prompt: loginPrompt + " and on Firefox too",
+		reply: "Fixed the cookie on both.", folder: "-zz-copy-of-the-repo"})
+	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeB, start: start.Add(time.Hour), prompt: pushPrompt, reply: "Elsewhere.", cwd: other})
+	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeC, start: start.Add(2 * time.Hour), prompt: tokenPrompt, reply: "An ox run.",
+		cwd: filepath.Join(paths.DataDir(), "agent-runs", "run-1")})
+	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexA, start: start.Add(3 * time.Hour), prompt: pushPrompt, reply: "Both repos.", alsoIn: other})
+	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexB, start: start.Add(4 * time.Hour), prompt: tokenPrompt, reply: "A guardian thread.",
+		source: json.RawMessage(`{"subagent":{"other":"guardian"}}`)})
+	writeLines := func(path, content string) {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	}
+	writeLines(filepath.Join(f.claudeProjects, "-work-x", e2eClaudeA, "subagents", "agent-a.jsonl"), "{}\n")
+	writeLines(filepath.Join(f.claudeProjects, "-work-junk", "9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a.jsonl"), "not json\n")
+
+	r := f.run(t, importOptions{dryRun: true, jsonOut: true})
+	require.NoError(t, r.err, r.out)
+	assert.Equal(t, importIgnored{OtherFolders: 1, OxRuns: 1, SubagentThreads: 1, InternalThreads: 1, Unreadable: 1}, r.report.Ignored)
+	mixed := r.session(t, e2eCodexA)
+	assert.Equal(t, string(stateIneligible), mixed.State)
+	assert.Equal(t, "it also worked in other repositories", mixed.Reason)
+	copies := 0
+	for _, s := range r.report.Sessions {
+		if s.NativeID == e2eClaudeA {
+			copies++
+			info, err := os.Stat(longer)
+			require.NoError(t, err)
+			assert.Equal(t, info.Size(), s.SizeBytes, "the longest copy is the one imported")
+		}
+	}
+	assert.Equal(t, 1, copies, "one entry per native session")
+
+	recent := f.run(t, importOptions{dryRun: true, jsonOut: true, since: start.Add(90 * time.Minute)})
+	require.NoError(t, recent.err, recent.out)
+	for _, s := range recent.report.Sessions {
+		assert.NotEqual(t, e2eClaudeA, s.NativeID, "a session last active before --since is left out")
+	}
+	codexOnly := f.run(t, importOptions{dryRun: true, jsonOut: true, agent: nativeimport.AgentCodex})
+	require.NoError(t, codexOnly.err, codexOnly.out)
+	for _, s := range codexOnly.report.Sessions {
+		assert.Equal(t, string(nativeimport.AgentCodex), s.Agent)
+	}
+
+	t.Run("a summarizer that is not installed is named, not attempted", func(t *testing.T) {
+		f.unusable = true
+		r := f.run(t, importOptions{})
+		require.NoError(t, r.err, r.out)
+		assert.Contains(t, r.out, "needs summarizer → --summarizer claude|codex")
+		assert.Zero(t, f.summarizer.calls())
+	})
+}
+
+// At a terminal, the import shows the preview and asks; a "no" moves nothing,
+// and a "yes" reports each session's outcome in plain text.
+//
+// Failure prevented: an upload a coworker declined, or a report that hides
+// which session failed and how to retry it.
+func TestImportE2E_InteractiveRunAsksFirst(t *testing.T) {
+	f := newImportFixture(t)
+	f.interactive = true
+	var asked []string
+	answer := false
+	f.confirm = func(prompt string) (bool, error) {
+		asked = append(asked, prompt)
+		return answer, nil
+	}
+	start := time.Date(2026, 9, 16, 9, 0, 0, 0, time.UTC)
+	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: start, prompt: loginPrompt, reply: "Fixed the cookie."})
+	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexA, start: start.Add(time.Hour), prompt: pushPrompt, reply: "Re-uploaded."})
+	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeB, start: start.Add(2 * time.Hour), prompt: "fix the typo", reply: "Done."})
+	f.summarizer.fail = func(prompt string) error {
+		if strings.Contains(prompt, pushPrompt) {
+			return errors.New("the model is overloaded")
+		}
+		return nil
+	}
+	head := runGit(t, f.barePath, "rev-parse", "HEAD")
+
+	declined := f.run(t, importOptions{})
+	require.NoError(t, declined.err, declined.out)
+	require.Len(t, asked, 1)
+	assert.Equal(t, "Upload 3 sessions to "+e2eTeam+"'s Ledger (private)?", asked[0])
+	assert.Contains(t, declined.out, "Ready to upload (3)")
+	assert.Contains(t, declined.out, "Nothing was uploaded.")
+	assertNothingMoved(t, f, head)
+
+	answer = true
+	r := f.run(t, importOptions{})
+	assert.ErrorIs(t, r.err, cli.ErrSilent, "a failed session fails the run")
+	assert.Contains(t, r.out, "[1/3]")
+	assert.Contains(t, r.out, "summarizing… ready")
+	assert.Contains(t, r.out, "failed\n      summary: the model is overloaded\n      retry: ox session import --session "+e2eCodexA+"\n")
+	assert.Contains(t, r.out, "skipped: not worth sharing")
+	assert.Contains(t, r.out, "/c/ses_")
+	assert.Contains(t, r.out, "3 selected · 1 uploaded · 1 failed · 1 skipped")
+}
+
+// Two imports against one Ledger never interleave: the second is refused
+// while the first holds the import lock.
+//
+// Failure prevented: two runs racing to stage, commit and push the same
+// sessions.
+func TestImportE2E_OneImportAtATime(t *testing.T) {
+	f := newImportFixture(t)
+	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: time.Date(2026, 9, 17, 9, 0, 0, 0, time.UTC),
+		prompt: loginPrompt, reply: "Fixed the cookie."})
+	target := filepath.Join(f.ledgerPath, ".sageox", "cache", "session-import")
+	require.NoError(t, os.MkdirAll(target, 0o700))
+	held, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- fileutil.WithFileLockTimeout(context.Background(), target, time.Second, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	head := runGit(t, f.barePath, "rev-parse", "HEAD")
+	var out bytes.Buffer
+	env, dest := f.envFor(f.ledgerPath, importOptions{yes: true, jsonOut: true})
+	err := runSessionImportFlow(context.Background(), &out, importOptions{yes: true, jsonOut: true}, env, dest)
+	close(release)
+	require.NoError(t, <-done)
+	require.ErrorIs(t, err, cli.ErrSilent)
+	got := decodeRefusal(t, &out)
+	assert.Equal(t, importErrInProgress, got["error"])
+	assertNothingMoved(t, f, head)
+}
+
+// A clone in any state #1105 describes is refused before anything is read,
+// and so is one holding commits it cannot push.
+//
+// Failure prevented: an import adding commits to a clone mid-rebase, where
+// git add would mark a teammate's conflict resolved.
+func TestImportE2E_WedgedLedgerIsRefused(t *testing.T) {
+	cases := []struct {
+		name, want string
+		wedge      func(t *testing.T, f *importFixture)
+	}{
+		{"a rebase in progress", "rebase", func(t *testing.T, f *importFixture) {
+			require.NoError(t, os.MkdirAll(filepath.Join(f.ledgerPath, ".git", "rebase-merge"), 0o755))
+		}},
+		{"an earlier commit that cannot be pushed", "could not be pushed", func(t *testing.T, f *importFixture) {
+			require.NoError(t, os.WriteFile(filepath.Join(f.ledgerPath, "note.txt"), []byte("x"), 0o644))
+			runGit(t, f.ledgerPath, "add", "note.txt")
+			runGit(t, f.ledgerPath, "commit", "--no-verify", "-q", "-m", "an earlier run's commit")
+			f.push = func(context.Context, string) error { return errors.New("offline") }
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newImportFixture(t)
+			f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC),
+				prompt: loginPrompt, reply: "Fixed the cookie."})
+			tc.wedge(t, f)
+			var out bytes.Buffer
+			env, dest := f.envFor(f.ledgerPath, importOptions{yes: true, jsonOut: true})
+			err := runSessionImportFlow(context.Background(), &out, importOptions{yes: true, jsonOut: true}, env, dest)
+			require.ErrorIs(t, err, cli.ErrSilent)
+			got := decodeRefusal(t, &out)
+			assert.Equal(t, importErrLedgerWedged, got["error"])
+			assert.Contains(t, got["message"], tc.want)
+			assert.Zero(t, f.summarizer.calls(), "nothing is summarized")
+			assert.Zero(t, f.store.count(), "nothing is uploaded")
+		})
+	}
+}
+
+// Each way one session can fail holds only that session, with the reason in
+// its report, and leaves nothing of it in the Ledger or the LFS store.
+//
+// Failure prevented: a failure in one step leaving a half-published session,
+// or a misleading reason sending the coworker to fix the wrong thing.
+func TestImportE2E_EachFailureHoldsOnlyItsSession(t *testing.T) {
+	start := time.Date(2026, 9, 19, 9, 0, 0, 0, time.UTC)
+	name := nativeimport.Name(nativeimport.AgentClaude, e2eClaudeA, start.Add(time.Second))
+	cases := []struct {
+		name          string
+		setup         func(t *testing.T, f *importFixture, s *pastSession)
+		outcome, want string
+	}{
+		{"the adapter cannot read it", func(_ *testing.T, f *importFixture, _ *pastSession) {
+			f.readErr = errors.New("adapter crashed")
+		}, "failed", "read claude session: adapter crashed"},
+		{"the converted session is too large", func(_ *testing.T, f *importFixture, _ *pastSession) {
+			f.readErr = fmt.Errorf("convert: %w", adapters.ErrAdapterOutputLimit)
+		}, "failed", "too large to import"},
+		{"the conversion keeps no conversation", func(_ *testing.T, _ *importFixture, s *pastSession) {
+			s.entries = []adapters.RawEntry{} // the adapter understood nothing in it
+		}, "skipped", "no conversation after conversion"},
+		{"the LFS store refuses the upload", func(_ *testing.T, f *importFixture, _ *pastSession) {
+			f.store.failBatch = true
+		}, "failed", "upload to LFS"},
+		{"the summarizer CLI is gone", func(_ *testing.T, f *importFixture, _ *pastSession) {
+			f.summarizer.unavailable = true
+		}, "failed", "not available to summarize"},
+		{"the summarizer keeps exiting with an error", func(_ *testing.T, f *importFixture, _ *pastSession) {
+			f.summarizer.exitCode = 1
+		}, "failed", "summary: claude exited with code 1"},
+		{"the transcript is deleted while it is summarized", func(t *testing.T, f *importFixture, _ *pastSession) {
+			f.summarizer.before = func(string) {
+				for path := range f.native {
+					require.NoError(t, os.Remove(path))
+				}
+			}
+		}, "skipped", "native file is gone"},
+		{"a rebase starts while it is summarized", func(t *testing.T, f *importFixture, _ *pastSession) {
+			f.summarizer.before = func(string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(f.ledgerPath, ".git", "rebase-merge"), 0o755))
+			}
+		}, "failed", "the Ledger is not safe to write"},
+		{"another machine imported it meanwhile", func(t *testing.T, f *importFixture, _ *pastSession) {
+			f.summarizer.before = func(string) {
+				dir := filepath.Join(f.ledgerPath, "sessions", name)
+				require.NoError(t, os.MkdirAll(dir, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"session_name":"`+name+`"}`), 0o644))
+				runGit(t, f.ledgerPath, "add", "sessions/"+name)
+				runGit(t, f.ledgerPath, "commit", "--no-verify", "-q", "-m", "pulled: another machine's import")
+			}
+		}, "skipped", "imported from another machine meanwhile"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newImportFixture(t)
+			s := pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: start, prompt: loginPrompt, reply: "Fixed the cookie."}
+			tc.setup(t, f, &s)
+			f.add(t, s)
+			r := f.run(t, importOptions{yes: true, jsonOut: true})
+			got := r.session(t, e2eClaudeA)
+			assert.Equal(t, tc.outcome, got.Outcome, got.Detail)
+			assert.Contains(t, got.Detail, tc.want)
+			assert.Zero(t, f.store.holding(loginPrompt), "nothing of it reached the LFS store")
+			assert.Empty(t, runGit(t, f.ledgerPath, "status", "--porcelain", "--untracked-files=no"), "nothing half-staged")
+			staging, _ := os.ReadDir(importStagingRoot(f.ledgerPath))
+			assert.Empty(t, staging)
+		})
+	}
+
+	t.Run("summaries that keep failing validation get the deterministic one", func(t *testing.T) {
+		f := newImportFixture(t)
+		f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexA, start: start, prompt: pushPrompt, reply: "Re-uploaded."})
+		f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: start.Add(time.Hour), prompt: loginPrompt, reply: "Fixed it."})
+		f.summarizer.reply = func(string) string { return "I cannot summarize this." }
+		r := f.run(t, importOptions{yes: true, jsonOut: true})
+		require.NoError(t, r.err, r.out)
+		s := r.session(t, e2eCodexA)
+		require.Equal(t, "uploaded", s.Outcome, s.Detail)
+		assert.Equal(t, "uploaded", r.session(t, e2eClaudeA).Outcome)
+		assert.Equal(t, 6, f.summarizer.calls(), "three attempts each")
+		assert.Contains(t, f.summarizer.prompts[1], "Your previous answer was rejected", "a retry says what was wrong")
+		meta := remoteMeta(t, f.barePath, s.SessionName)
+		assert.True(t, strings.HasPrefix(meta.Title, "Every Ledger push"), "the fallback title is the first prompt: %q", meta.Title)
+		assert.Contains(t, meta.Summary, "Summary written from the session's prompts")
+	})
+}
+
+// A session ox is recording right now belongs to that recording.
+//
+// Failure prevented: a live session imported mid-flight, then recorded again
+// when it ends.
+func TestImportE2E_SessionOxIsRecordingIsLeftAlone(t *testing.T) {
+	f := newImportFixture(t)
+	path := f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: time.Date(2026, 9, 20, 9, 0, 0, 0, time.UTC),
+		prompt: loginPrompt, reply: "Fixed the cookie."})
+	state, err := session.StartRecording(f.projectRoot, session.StartRecordingOptions{
+		AgentID: "OxLIVE", AdapterName: "claude-code", Username: "devon",
+		AgentSessionID: e2eClaudeA, AgentSessionSource: "startup", SessionFile: path,
+	})
+	require.NoError(t, err)
+
+	r := f.run(t, importOptions{yes: true, jsonOut: true})
+	require.NoError(t, r.err, r.out)
+	s := r.session(t, e2eClaudeA)
+	assert.Equal(t, string(stateInProgress), s.State)
+	assert.Equal(t, "ox is recording it: "+filepath.Base(state.SessionPath), s.Reason)
+	assert.Zero(t, f.summarizer.calls())
+}
+
+// --session names exactly one of this repo's sessions or the run is refused,
+// before anything is summarized.
+//
+// Failure prevented: a retry that silently imports nothing, or the wrong one
+// of two sessions that share a prefix.
+func TestImportE2E_SessionFlagMustNameOneSession(t *testing.T) {
+	f := newImportFixture(t)
+	start := time.Date(2026, 9, 21, 9, 0, 0, 0, time.UTC)
+	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexA, start: start, prompt: pushPrompt, reply: "Re-uploaded."})
+	f.add(t, pastSession{agent: nativeimport.AgentCodex, id: e2eCodexA2, start: start.Add(30 * time.Second), prompt: tokenPrompt, reply: "The bot."})
+	for _, tc := range []struct{ prefix, want string }{
+		{"ffffffff", "matches no session of this repo"},
+		{e2eCodexA[:8], "matches 2 sessions; use more characters"},
+	} {
+		var out bytes.Buffer
+		opts := importOptions{yes: true, jsonOut: true, sessions: []string{tc.prefix}}
+		env, dest := f.envFor(f.ledgerPath, opts)
+		require.ErrorIs(t, runSessionImportFlow(context.Background(), &out, opts, env, dest), cli.ErrSilent)
+		got := decodeRefusal(t, &out)
+		assert.Equal(t, importErrBadFlag, got["error"])
+		assert.Contains(t, got["message"], tc.want)
+	}
+	assert.Zero(t, f.summarizer.calls())
+}
+
+// A session that changes while an earlier one is being summarized is left
+// for a later run, exactly as if it had changed before the preview.
+func TestImportE2E_SessionThatChangesBeforeItsTurnIsLeft(t *testing.T) {
+	f := newImportFixture(t)
+	start := time.Date(2026, 9, 22, 9, 0, 0, 0, time.UTC)
+	f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeA, start: start, prompt: loginPrompt, reply: "Fixed the cookie."})
+	later := f.add(t, pastSession{agent: nativeimport.AgentClaude, id: e2eClaudeB, start: start.Add(time.Hour), prompt: pushPrompt, reply: "Re-uploaded."})
+	f.summarizer.before = func(prompt string) {
+		if strings.Contains(prompt, loginPrompt) {
+			appendClaudePrompt(t, later, e2eClaudeB, f.projectRoot, "one more question", start.Add(2*time.Hour))
+		}
+	}
+	r := f.run(t, importOptions{yes: true, jsonOut: true})
+	require.NoError(t, r.err, r.out)
+	assert.Equal(t, "uploaded", r.session(t, e2eClaudeA).Outcome)
+	changed := r.session(t, e2eClaudeB)
+	assert.Equal(t, "skipped", changed.Outcome)
+	assert.Equal(t, "became active since the preview", changed.Detail)
+	assert.NotContains(t, f.reads, later, "it was never read")
 }
