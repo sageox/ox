@@ -453,3 +453,23 @@ func TestConversationTranscriptFramesText(t *testing.T) {
 		t.Errorf("guidance lacks the --frames hint:\n%s", plain)
 	}
 }
+
+// TestParseConversationUntil_DateIncludesWholeDay: a person saying "until
+// Sep 14" means through the 14th. Failure prevented: a bare-date --until
+// silently drops every conversation on the named day.
+func TestParseConversationUntil_DateIncludesWholeDay(t *testing.T) {
+	got, err := parseConversationUntil("2026-09-14")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("until = %v, want %v (exclusive bound after the whole day)", got, want)
+	}
+	exact, err := parseConversationUntil("2026-09-14T12:00:00Z")
+	if err != nil || !exact.Equal(time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)) {
+		t.Errorf("RFC3339 until = %v, %v; want the instant itself", exact, err)
+	}
+	if _, err := parseConversationUntil("last tuesday"); err == nil {
+		t.Error("an unparseable --until must be a usage error")
+	}
+}

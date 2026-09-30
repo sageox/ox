@@ -3,10 +3,11 @@ name: ox-cli-conversation
 description: >-
   Read recorded team conversations locally and follow sageox:// citations back
   to what was actually said. Auto-fire when the user asks "what did we say in
-  that meeting", "show me the discussion about X", "what's behind this claim",
-  pastes a sageox:// citation URI or a cnv_/rec_ id, or wants a transcript,
-  the topics, or the summary of a recorded conversation. Run
-  `ox conversation list|show|topics|topic|transcript` — each JSON envelope's
+  that meeting", "show me the discussion about X", "what did I talk to <person>
+  about <concept>", "what's behind this claim", pastes a sageox:// citation URI
+  or a cnv_/rec_ id, or wants a transcript, the topics, or the summary of a
+  recorded conversation. Run `ox conversation search` to find one by keyword,
+  person, and date, then `ox conversation show|topics|topic|transcript` — each JSON envelope's
   guidance field names the next rung and token_estimate reports its cost;
   pass a full sageox:// URI (quoted) to transcript to retrieve the cited
   cues with an honest pinning status.
@@ -29,12 +30,15 @@ conversation's summary, topics, or transcript.
 
 ## Do
 
-1. Run the rung the question requires — `ox conversation list`,
+1. To find a conversation, `ox conversation search <keywords>
+   [--participant <name>] [--speaker <name>] [--since/--until <date>]`;
+   each hit's quoted `sageox://` citation opens in `transcript`.
+2. Run the rung the question requires — `ox conversation list`,
    `show <id>`, `topics <id>`, `topic <id> <tp_id>`, or
    `transcript <id> --cues N-M` (a full `sageox://` URI, quoted, works as
    `<id>` and carries its own selectors).
-2. Follow the `guidance` field in each JSON envelope — it names the next
+3. Follow the `guidance` field in each JSON envelope — it names the next
    rung down and how to follow citations; `token_estimate` tells you what
    reading the payload costs. Descend only as deep as the question needs.
-3. For the full workflow (id forms, disclosure ladder, pinning semantics),
+4. For the full workflow (id forms, disclosure ladder, pinning semantics),
    read `ox guide conversations --raw`.
