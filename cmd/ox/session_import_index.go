@@ -199,8 +199,14 @@ func (idx *importIndex) coverageNote(s nativeimport.Session, state importState) 
 		if !idx.continuedSinceImport(s) {
 			return ""
 		}
+		// A recording naming the session shows when ox saw it again, not
+		// that it holds everything since the import: the session may have
+		// continued unrecorded first.
 		if rec := idx.recorded[key]; rec != "" {
-			return "continued after it was imported; ox recorded the rest as " + rec
+			if at, ok := idx.recordedAt[key]; ok {
+				return "continued after it was imported; ox recorded it from " + at.Local().Format("2006-01-02 15:04 MST") + " as " + rec
+			}
+			return "continued after it was imported; ox also recorded it as " + rec
 		}
 		return "continued after it was imported; the later part is not in the Ledger"
 	case stateRecordedLive:

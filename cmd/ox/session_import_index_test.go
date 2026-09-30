@@ -281,9 +281,14 @@ func TestImportIndexSaysWhatTheLedgerLacks(t *testing.T) {
 		{"imported and untouched since", map[string]lfs.SessionMeta{importName: imported}, candidate(), stateAlreadyImported, ""},
 		{"continued after its import, unrecorded", map[string]lfs.SessionMeta{importName: imported}, continued,
 			stateAlreadyImported, "continued after it was imported; the later part is not in the Ledger"},
-		{"continued after its import, recorded by ox", map[string]lfs.SessionMeta{
+		{"continued after its import, recorded by ox from a later time", map[string]lfs.SessionMeta{
 			importName: imported, "2026-09-12T19-00-lau-OxRSME": recordedFrom(start.Add(5 * time.Hour)),
-		}, continued, stateAlreadyImported, "continued after it was imported; ox recorded the rest as 2026-09-12T19-00-lau-OxRSME"},
+		}, continued, stateAlreadyImported, "continued after it was imported; ox recorded it from " +
+			start.Add(5*time.Hour).Local().Format("2006-01-02 15:04 MST") + " as 2026-09-12T19-00-lau-OxRSME"},
+		{"continued after its import, recorded by ox at an unknown time", map[string]lfs.SessionMeta{
+			importName: imported, "2026-09-12T19-00-lau-OxRSME": {AgentType: "claude-code",
+				NativeSessions: []lfs.NativeSession{{ID: idxNativeID, Source: "resume"}}},
+		}, continued, stateAlreadyImported, "continued after it was imported; ox also recorded it as 2026-09-12T19-00-lau-OxRSME"},
 		{"recorded from its start", map[string]lfs.SessionMeta{"2026-09-12T14-03-lau-OxLIVE": recordedFrom(start)},
 			candidate(), stateRecordedLive, ""},
 		{"recorded only from a resume", map[string]lfs.SessionMeta{"2026-09-15T09-00-lau-OxRSME": recordedFrom(start.Add(72 * time.Hour))},
