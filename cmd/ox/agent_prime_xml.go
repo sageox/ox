@@ -799,7 +799,7 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	sb.WriteString("A plan follows a creed: don't waste human attention, delight them, educate them visually and crisply.\n")
 	// Cross-agent mandate: planning should ALWAYS draw on SageOx conversation
 	// intelligence first, regardless of agent tier.
-	sb.WriteString("Before planning non-trivial work, consult SageOx conversation intelligence: `ox query \"&lt;topic&gt;\"` (discussions+sessions), `ox code search` (code+history) — plans ignoring recent team context get re-litigated.\n")
+	sb.WriteString("Before planning non-trivial work, consult SageOx conversation intelligence: `ox query \"&lt;topic&gt;\"` (discussions+sessions), `ox conversation search` (who/when), `ox code search` (code+history) — plans ignoring recent team context get re-litigated.\n")
 	if prime.ClassifyAgentTier(agentType) == prime.TierBronze {
 		// lighter tier: surface the surface, don't promise real-time nudges.
 		sb.WriteString("When you produce a plan: run `ox plan enrich` (JSON) WHILE drafting. For material work author `plan.html`, save it canonically with `ox plan save --file plan.html`, then present it through `ox plan render --file plan.html --open` so ox injects team context without replacing the page. Verify with `ox plan lint &lt;slug&gt; [--strict]`. Browse prior plans: `ox plan list`. Run `ox guide plan-enrichment` for the full workflow.\n")
