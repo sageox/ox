@@ -262,7 +262,7 @@ func htmlPlanHintLine() string {
 		"source with `ox plan save --file plan.html`, then use `ox plan render --open --file plan.html` to inject",
 		"SageOx team context without replacing the page. Lean into the",
 		"`ox viz` catalog: inline SVG and CSS-only interactivity (radio/checkbox + :has(), details/summary — the",
-		"hosted /plan/ viewer strips scripts) — dependency explorers, charts, swimlane timelines, Tufte tables —",
+		"same page must work in every host, so no scripts by policy) — dependency explorers, charts, swimlane timelines, Tufte tables —",
 		"that surface the critical decisions and tradeoffs and cut the reviewer's cognitive load,",
 		"with one closed Implementation notes appendix for file-level depth. Never use legacy `--plan + --html`.",
 	}, " ")

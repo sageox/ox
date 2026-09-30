@@ -66,10 +66,14 @@ work a document cannot.
 
 ### Interactivity is CSS-only
 
-The hosted viewer at `https://<endpoint>/plan/<pln_id>` — the link `ox plan save`
-prints, and the one teammates actually open — **strips `<script>`**. A page whose
-tabs, inspectors, or toggles need JavaScript arrives there inert. Build every
-interaction from CSS state instead:
+Keep interactivity CSS-only **by policy**, so a page behaves the same in every
+host it lands in: MCP app cards, Claude artifacts, and the hosted viewer at
+`https://<endpoint>/plan/<pln_id>` (the link `ox plan save` prints). The viewer
+does run scripts — in an iframe with `sandbox="allow-scripts"`, no same-origin
+access, and network/forms/popups denied by CSP + sandbox (sageox-monorepo
+ADR-131, 2026-09-28 amendment) — but other hosts differ, and a page whose tabs
+or inspectors depend on JavaScript behaves differently from host to host.
+Build every interaction from CSS state instead:
 
 | Interaction | CSS-only pattern |
 |---|---|
@@ -256,8 +260,9 @@ rediscovered, and the first one is also caught by the `mermaid.font-race` lint.
 
 The plan is the developer's **own local content rendered locally for that
 developer**: the review server binds `127.0.0.1` and is token-gated, so an
-author script is not a threat locally — but it is an enhancement only, because
-the hosted viewer strips `<script>` (see *Interactivity is CSS-only*).
+author script is not a threat locally — but it is an enhancement only: pages
+stay CSS-only by policy so they behave the same in every host, and the hosted
+viewer runs any script in a sandboxed iframe (see *Interactivity is CSS-only*).
 `--artifact` is the strict export for when the page needs to travel beyond the
 local loop: a fully self-contained page — no external fonts, scripts, or
 network fetches; CSS inline. Self-contained is the whole claim: there is

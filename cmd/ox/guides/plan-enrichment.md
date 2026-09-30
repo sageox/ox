@@ -30,8 +30,9 @@ The same path saves every artifact a teammate should see, not only plans:
 review sheet, or evidence page belongs in the ledger exactly as much as a plan.
 
 Interactivity must be CSS-only (radio/checkbox + `:has()`, `<details>`, inline
-SVG): the hosted viewer at `/plan/<pln_id>` strips `<script>`. See
-`docs/specs/plan-authoring-html.md`.
+SVG) by policy, so a page behaves the same in every host (MCP app cards, Claude
+artifacts, the viewer). The hosted viewer at `/plan/<pln_id>` runs scripts in a
+sandboxed iframe. See `docs/specs/plan-authoring-html.md`.
 
 ### Saved means shared
 

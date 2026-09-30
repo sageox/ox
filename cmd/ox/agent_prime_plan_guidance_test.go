@@ -29,7 +29,7 @@ func TestPlanEnrichmentGuidance_OneRuleDetailOnDemand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"--kind plan|mockup|review|evidence", "ox plan lint --file plan.html", "NOT SHARED", "--plan + --html", "zero LLM cost", "strips `<script>`"} {
+	for _, want := range []string{"--kind plan|mockup|review|evidence", "ox plan lint --file plan.html", "NOT SHARED", "--plan + --html", "zero LLM cost", "sandboxed iframe"} {
 		if !strings.Contains(string(guide), want) {
 			t.Errorf("guide missing moved detail %q", want)
 		}
