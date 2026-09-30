@@ -98,6 +98,7 @@ type reviewStateItem struct {
 	Anchor   string `json:"anchor"`
 	Section  string `json:"section,omitempty"`
 	Label    string `json:"label"`
+	Quote    string `json:"quote,omitempty"`
 	Status   string `json:"status"`
 	State    string `json:"state"`
 	Note     string `json:"note,omitempty"`

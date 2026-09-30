@@ -414,9 +414,19 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 		if note == "" {
 			note = "reopened by reviewer"
 		}
-		set := plan.FeedbackSet{Slug: slug, Items: []plan.FeedbackItem{
-			{Anchor: in.Anchor, Status: plan.FeedbackRequestChange, Note: note},
-		}}
+		item := plan.FeedbackItem{Anchor: in.Anchor, Status: plan.FeedbackRequestChange, Note: note}
+		// carry what is being reopened — its section, label, and a highlight's
+		// words — or the agent's digest names it by anchor alone, and a
+		// highlight's anchor cannot be turned back into its words
+		if prior, perr := plan.AssembleReview(planDir); perr == nil {
+			for _, p := range prior {
+				if p.Anchor == in.Anchor && (p.Label != "" || p.Quote != "") {
+					item.Section, item.Label, item.Quote = p.Section, p.Label, p.Quote
+					break
+				}
+			}
+		}
+		set := plan.FeedbackSet{Slug: slug, Items: []plan.FeedbackItem{item}}
 		if _, err := plan.SaveFeedback(planDir, set, time.Now()); err != nil {
 			return nil, http.StatusInternalServerError, err
 		}

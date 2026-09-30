@@ -163,7 +163,8 @@ and to ungrouped review anchors.
 - The bundle carries: (a) the **SageOx enrichment overlay** — collision /
   prior-art / expert-routing chips plus surfaced context; (b) the **footer
   credit**; (c) the full **live review loop** — click any element to attach a
-  mark, content-hash anchored so it works on arbitrary authored markup, served
+  mark, or highlight text to comment on exactly those words, content-hash
+  anchored so it works on arbitrary authored markup, served
   via `ox plan review <slug>`. It binds two keys: `r` toggles review mode, and
   `Esc` closes an open note, then the mode. A page handler that acts on either
   key should call `preventDefault()` — the chrome ignores a keypress an earlier

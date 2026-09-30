@@ -83,15 +83,17 @@ func validResolutionState(s ResolutionState) bool {
 	return false
 }
 
-// FeedbackItem is one anchored review mark. Anchor is a CONTENT hash of the
-// element (section heading + element text), computed page-side, so it survives a
+// FeedbackItem is one anchored review mark. Anchor is a CONTENT hash computed
+// page-side — of (section heading + element text) for a mark on a whole
+// element, of (section heading + Quote) for a highlight — so it survives a
 // re-render and only disappears when the agent rewrites that text — which is
 // itself the signal the item was addressed. Anchor doubles as the item id used
 // by `ox plan feedback resolve`.
 type FeedbackItem struct {
-	Anchor   string         `json:"anchor"`             // stable content-hash id, e.g. "h3f9a1c2"
+	Anchor   string         `json:"anchor"`             // stable content-hash id: "h…" for an element, "q…" for a highlight
 	Section  string         `json:"section,omitempty"`  // section heading the element sits under
-	Label    string         `json:"label"`              // short text of the element
+	Label    string         `json:"label"`              // short text of the element, or the start of Quote
+	Quote    string         `json:"quote,omitempty"`    // the exact words a highlight covers; empty for a whole-element mark
 	Status   FeedbackStatus `json:"status"`             // approve | request-change | flag | comment
 	Note     string         `json:"note,omitempty"`     // the reviewer's comment
 	Reviewer string         `json:"reviewer,omitempty"` // who left this mark (multi-user); stamped from the round on save
@@ -450,7 +452,12 @@ func FeedbackDigest(items []MergedItem) string {
 	}
 	for _, it := range openItems {
 		label := it.Label
-		if label == "" {
+		if it.Quote != "" {
+			// the words the agent searches the plan for: more than the 70-char
+			// label, but on one line and capped, so a highlighted paragraph
+			// can't flood every digest or forge a line of its own
+			label = "“" + clipQuote(it.Quote) + "”"
+		} else if label == "" {
 			label = it.Anchor
 		}
 		fmt.Fprintf(&b, "  [%s] (%s) %s", it.Status, it.Anchor, label)
@@ -477,6 +484,19 @@ func FeedbackDigest(items []MergedItem) string {
 		b.WriteString("\nResolve each: ox plan feedback resolve <slug> <anchor> --state addressed --commit <sha> --note \"…\"\n")
 	}
 	return b.String()
+}
+
+// digestQuoteMax caps a highlight's words in the digest, in runes.
+const digestQuoteMax = 200
+
+// clipQuote collapses a quote's whitespace to single spaces and cuts it to
+// digestQuoteMax runes.
+func clipQuote(q string) string {
+	r := []rune(strings.Join(strings.Fields(q), " "))
+	if len(r) <= digestQuoteMax {
+		return string(r)
+	}
+	return string(r[:digestQuoteMax-1]) + "…"
 }
 
 // CountOpenFeedback returns the number of OPEN, actionable review items for a
