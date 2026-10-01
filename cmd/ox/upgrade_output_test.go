@@ -345,13 +345,20 @@ func TestUpgradeCLI(t *testing.T) {
 		{"offline lookup", "", "check for updates"},
 		{"unsupported target", "v99.0.0", "--target is supported only"},
 	} {
-		for _, jsonOutput := range []bool{false, true} {
-			name := "text"
-			if jsonOutput {
-				name = "json"
-			}
-			t.Run(tt.name+"/"+name, func(t *testing.T) {
+		for _, mode := range []struct {
+			name string
+			env  string
+			flag string
+			json bool
+		}{
+			{"text", "", "", false},
+			{"json flag", "0", "--json", true},
+			{"json environment", "1", "", true},
+			{"json disabled", "1", "--json=false", false},
+		} {
+			t.Run(tt.name+"/"+mode.name, func(t *testing.T) {
 				env := noInputCLIEnv(t) // empty cache and an unreachable proxy, never a real install
+				env = append(env, "OX_JSON="+mode.env)
 				args := []string{"upgrade"}
 				bin := oxBin
 				if tt.target != "" {
@@ -368,8 +375,8 @@ func TestUpgradeCLI(t *testing.T) {
 					args = append(args, "--target="+tt.target)
 					bin = inHomebrewKeg(t, oxBin)
 				}
-				if jsonOutput {
-					args = append(args, "--json")
+				if mode.flag != "" {
+					args = append(args, mode.flag)
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
@@ -382,7 +389,7 @@ func TestUpgradeCLI(t *testing.T) {
 				var exit *exec.ExitError
 				require.ErrorAs(t, err, &exit, "stdout=%s stderr=%s", stdout.String(), stderr.String())
 				assert.Equal(t, 1, exit.ExitCode())
-				if jsonOutput {
+				if mode.json {
 					var got upgradeResult
 					require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
 					assert.Equal(t, "failed", got.Status)

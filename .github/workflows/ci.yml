@@ -16,50 +16,73 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  # The PR gate runs the full unit tier as one runner per slot (see `make
+  # test-split-slots`), acceptance and twins on runners of their own, and a
+  # final `test` job that merges their coverage and enforces the ratchets.
+  # It used to be one 4-vCPU runner for ~16 minutes: cmd/ox's mostly serial
+  # tests set a 7.5-minute floor, acceptance and twins waited behind them, and
+  # a build cache keyed on go.sum left every run recompiling weeks of changes
+  # under -race. Same tests, same flags, same merged profile, same ratchets.
+  plan:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    outputs:
+      slots: ${{ steps.slots.outputs.slots }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The changed-line coverage ratchet below diffs against the PR base
-          # commit, which a shallow clone does not contain.
-          fetch-depth: 0
+          # Nothing after checkout needs git credentials; leaving the token in
+          # .git/config would hand it to the test code this job runs.
+          persist-credentials: false
+
+      # The matrix comes from the Makefile so it cannot drift from the layout
+      # the merge step expects; `coverage-merge-unit` refuses a missing slot.
+      - id: slots
+        run: echo "slots=$(make -s test-split-slots)" >> "$GITHUB_OUTPUT"
+
+      - name: Test harness contracts
+        run: make coverage-ratchet-test
+
+  unit:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: ${{ fromJSON(needs.plan.outputs.slots) }}
+    name: unit (${{ matrix.slot }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing after checkout needs git credentials; leaving the token in
+          # .git/config would hand it to the test code this job runs.
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
-          # Cached explicitly below instead. setup-go derives its key from
-          # go.sum and shares that one entry with the lint job; GitHub never
-          # overwrites an existing key, so whichever job first missed it fixed
-          # the contents for as long as go.sum holds. lint builds no test
-          # binaries, so the entry this job restored carried no -race objects
-          # and every run recompiled the race-instrumented stdlib and
-          # dependencies before the first test ran (3m12s on run 35267514816).
+          # Cached explicitly below. setup-go derives its key from go.sum alone,
+          # so the entry never refreshes between dependency bumps.
           cache: false
 
-      # This job is the sole writer of the shared Go cache. It builds the most
-      # expensive variants (-race, -cover), so an entry it saves also serves
-      # lint; the reverse is not true. Keep the key stable rather than rolling
-      # it per run: the repo sits at ~9GB of its 10GB Actions cache budget, and
-      # a fresh ~2.3GB build cache per run would evict the CodeQL and
-      # golangci-lint entries and cost more than it saves.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # One build cache, written only by a push to main (the `main` job) and
+      # read by every job. Keyed per commit so it tracks main; restore-keys
+      # picks the newest. The legacy go.sum-keyed entry is the fallback until
+      # the first main push lands.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          key: go-${{ runner.os }}-test-${{ github.sha }}
+          restore-keys: |
+            go-${{ runner.os }}-test-
+            go-${{ runner.os }}-
 
       - name: Configure git identity for tests
         run: |
           git config --global user.email "ci@sageox.ai"
           git config --global user.name "CI"
-
-      - name: Build
-        run: go build -v ./...
-
-      - name: Check generated CLI docs
-        run: make docs-check
 
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@v1.13.0
@@ -71,59 +94,31 @@ jobs:
       #   --junitfile                       structured artifact for digest + post-mortem
       # Verbose mode (humans/local debugging): OX_TEST_LOG=1 + run gotestsum without
       # these flags, or call `make test` with V=1.
-      - name: Fast tests
-        if: github.event_name == 'push'
+      - name: Full unit tier, slot ${{ matrix.slot }}
         run: |
           TEST_JUNIT=test-results.xml \
           TEST_TIMINGS=test-timings.json \
-          make test
-
-      - name: Test harness contracts
-        run: make coverage-ratchet-test
-
-      # Full unit tier, compiled-binary acceptance, and digital twins — one
-      # instrumented pass. The Coverage workflow used to re-run these same three
-      # suites in a parallel job purely to collect coverage, so every PR paid for
-      # them twice (15m50s + 16m07s on run 35267514816). Instrumentation costs
-      # ~15-20%; a second uninstrumented run cost 100%.
-      - name: Full suites with coverage (PR gate)
-        if: github.event_name == 'pull_request'
-        run: |
-          TEST_JUNIT=test-results.xml \
-          TEST_TIMINGS=test-timings.json \
-          make coverage-integration
+          make test-split-slot TEST_SPLIT_ONLY=${{ matrix.slot }}
 
       - name: Require requested test artifacts
         run: |
           test -s test-results.xml
           test -s test-timings.json
-          python3 -c 'import xml.etree.ElementTree as ET; root = ET.parse("test-results.xml").getroot(); assert any(root.iter("testcase")), "JUnit artifact has no test cases"'
+          python3 -c 'import xml.etree.ElementTree as ET; root = ET.parse("test-results.xml").getroot(); assert next(root.iter("testcase"), None) is not None, "JUnit artifact has no test cases"'
           python3 scripts/test_metrics.py test-timings.json >/dev/null
 
-      - name: Enforce risk-package coverage ratchets
-        if: github.event_name == 'pull_request'
-        run: python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json
-
-      - name: Enforce changed-line coverage
-        if: github.event_name == 'pull_request'
-        run: python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json --diff-base "${{ github.event.pull_request.base.sha }}"
-
-      - name: Upload coverage
-        if: always() && github.event_name == 'pull_request' && hashFiles('coverage-all.out') != ''
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      - name: Upload unit coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          files: coverage-all.out
-          flags: ox-cli
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          name: unit-coverage-${{ matrix.slot }}
+          path: tmp/unit-parts/coverage-${{ matrix.slot }}.out
+          retention-days: 3
+          overwrite: true
 
       # Codecov deprecated test-results-action in favor of this action with
       # report_type: test_results; test-results-action has no node24 release.
-      # PR-only, matching what the Coverage workflow uploaded: a push to main
-      # runs the fast tier, and feeding that subset in would misrepresent which
-      # tests ran.
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() && github.event_name == 'pull_request' && hashFiles('test-results.xml') != '' }}
+        if: ${{ !cancelled() && hashFiles('test-results.xml') != '' }}
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: test-results.xml
@@ -142,9 +137,90 @@ jobs:
         if: always() && hashFiles('test-results.xml') != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          name: test-results-${{ matrix.slot }}
+          path: test-results.xml
+          retention-days: 14
+          overwrite: true
+
+      - name: Upload test timing events
+        if: always() && hashFiles('test-timings.json') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-timing-events-${{ matrix.slot }}
+          path: test-timings.json
+          retention-days: 14
+          overwrite: true
+
+  # A push to main validates the merge with the fast tier, then compiles what
+  # PR jobs compile and saves it as the build cache every PR job restores.
+  main:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write  # prune superseded build caches
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing after checkout needs git credentials; leaving the token in
+          # .git/config would hand it to the test code this job runs.
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-test-${{ github.sha }}
+          restore-keys: |
+            go-${{ runner.os }}-test-
+            go-${{ runner.os }}-
+
+      - name: Configure git identity for tests
+        run: |
+          git config --global user.email "ci@sageox.ai"
+          git config --global user.name "CI"
+
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@v1.13.0
+
+      - name: Fast tests
+        run: |
+          TEST_JUNIT=test-results.xml \
+          TEST_TIMINGS=test-timings.json \
+          make test
+
+      - name: Test harness contracts
+        run: make coverage-ratchet-test
+
+      - name: Require requested test artifacts
+        run: |
+          test -s test-results.xml
+          test -s test-timings.json
+          python3 -c 'import xml.etree.ElementTree as ET; root = ET.parse("test-results.xml").getroot(); assert next(root.iter("testcase"), None) is not None, "JUnit artifact has no test cases"'
+          python3 scripts/test_metrics.py test-timings.json >/dev/null
+
+      - name: Failure digest
+        if: always() && hashFiles('test-results.xml') != ''
+        run: |
+          python3 .github/scripts/junit_to_summary.py test-results.xml >> "$GITHUB_STEP_SUMMARY"
+          if test -f test-timings.json; then
+            python3 scripts/test_metrics.py --markdown test-timings.json >> "$GITHUB_STEP_SUMMARY" || echo "Test timing metrics unavailable." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload JUnit results
+        if: always() && hashFiles('test-results.xml') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
           name: test-results
           path: test-results.xml
           retention-days: 14
+          overwrite: true
 
       - name: Upload test timing events
         if: always() && hashFiles('test-timings.json') != ''
@@ -153,6 +229,201 @@ jobs:
           name: test-timing-events
           path: test-timings.json
           retention-days: 14
+          overwrite: true
+
+      # The repo's Actions cache sits near its 10 GB budget, so exactly one
+      # ~1.5 GB entry is kept; GitHub would otherwise evict by LRU.
+      - name: Warm the build cache for PRs
+        run: make warm-test-cache
+
+      - name: Save build cache
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-test-${{ github.sha }}
+
+      - name: Prune superseded build caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "go-${RUNNER_OS}-" \
+            --sort created_at --order desc --limit 100 --json id --jq '.[1:][].id' \
+            | xargs -r -n1 gh cache delete --repo "$GITHUB_REPOSITORY"
+
+  # Compiled-binary acceptance journeys through a coverage-instrumented ox.
+  acceptance:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing after checkout needs git credentials; leaving the token in
+          # .git/config would hand it to the test code this job runs.
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-test-${{ github.sha }}
+          restore-keys: |
+            go-${{ runner.os }}-test-
+            go-${{ runner.os }}-
+
+      - name: Configure git identity for tests
+        run: |
+          git config --global user.email "ci@sageox.ai"
+          git config --global user.name "CI"
+
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@v1.13.0
+
+      - name: Acceptance journeys with coverage
+        run: make test-acceptance-cover coverage-integration-profile
+
+      - name: Upload acceptance coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: acceptance-coverage
+          path: |
+            tmp/coverage/integration.out
+            tmp/coverage/integration-test.out
+            tmp/coverage/slow-test.out
+          retention-days: 3
+          overwrite: true
+
+  # Deterministic cloud-auth, Ledger, and KB digital twins.
+  twins:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing after checkout needs git credentials; leaving the token in
+          # .git/config would hand it to the test code this job runs.
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-test-${{ github.sha }}
+          restore-keys: |
+            go-${{ runner.os }}-test-
+            go-${{ runner.os }}-
+
+      - name: Configure git identity for tests
+        run: |
+          git config --global user.email "ci@sageox.ai"
+          git config --global user.name "CI"
+
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@v1.13.0
+
+      - name: Digital twins with coverage
+        run: make test-digital-twin-cover
+
+      - name: Upload twin coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: twins-coverage
+          path: tmp/coverage/twins/*.out
+          retention-days: 3
+          overwrite: true
+
+  # The single verdict for the workflow. `if: always()` matters: a job skipped
+  # because a dependency failed reports as skipped, not failed, so without it a
+  # red suite could leave this check looking green.
+  test:
+    if: always()
+    needs: [plan, unit, main, acceptance, twins]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every suite to pass
+        env:
+          EVENT: ${{ github.event_name }}
+          PLAN: ${{ needs.plan.result }}
+          UNIT: ${{ needs.unit.result }}
+          MAIN: ${{ needs.main.result }}
+          ACCEPTANCE: ${{ needs.acceptance.result }}
+          TWINS: ${{ needs.twins.result }}
+        run: |
+          echo "plan=$PLAN unit=$UNIT main=$MAIN acceptance=$ACCEPTANCE twins=$TWINS"
+          if [ "$EVENT" = pull_request ]; then
+            for result in "$PLAN" "$UNIT" "$ACCEPTANCE" "$TWINS"; do test "$result" = success; done
+          else
+            test "$MAIN" = success
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          persist-credentials: false
+          # The changed-line coverage ratchet below diffs against the PR base
+          # commit, which a shallow clone does not contain.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: github.event_name == 'pull_request'
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          pattern: unit-coverage-*
+          merge-multiple: true
+          path: tmp/unit-parts
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          name: acceptance-coverage
+          path: tmp/coverage
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          name: twins-coverage
+          path: tmp/coverage/twins
+
+      - name: Merge coverage
+        if: github.event_name == 'pull_request'
+        run: |
+          make coverage-merge-unit
+          make coverage-merge
+
+      - name: Enforce risk-package coverage ratchets
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json
+
+      - name: Enforce changed-line coverage
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json --diff-base "${{ github.event.pull_request.base.sha }}"
+
+      - name: Upload coverage
+        if: always() && github.event_name == 'pull_request' && hashFiles('coverage-all.out') != ''
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: coverage-all.out
+          flags: ox-cli
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
 
   lint:
     runs-on: ubuntu-latest
@@ -164,17 +435,28 @@ jobs:
           go-version-file: 'go.mod'
           cache: false
 
-      # Restore-only, on the key the test job owns. This job finishes in about a
-      # minute, so under setup-go's shared cache it usually won the race to save
-      # and pinned the entry to a lint build — no test binaries, no -race
-      # objects — for as long as go.sum stayed put. Reading without writing keeps
-      # one entry in the budget and lets the expensive job decide its contents.
+      # Restore-only, on the key the unit job writes from main. This job finishes
+      # in about a minute, so under setup-go's shared cache it usually won the
+      # race to save and pinned the entry to a lint build — no test binaries, no
+      # -race objects. Reading without writing keeps one entry in the budget and
+      # lets the expensive job decide its contents.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          key: go-${{ runner.os }}-test-${{ github.sha }}
+          restore-keys: |
+            go-${{ runner.os }}-test-
+            go-${{ runner.os }}-
+
+      # Moved here from the test job, which no longer needs a plain build: the
+      # unit tier compiles every package anyway, and this job finishes first.
+      - name: Build
+        run: go build -v ./...
+
+      - name: Check generated CLI docs
+        run: make docs-check
 
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:

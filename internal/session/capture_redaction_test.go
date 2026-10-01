@@ -3,10 +3,11 @@ package session
 import (
 	"context"
 	"encoding/json"
-	"github.com/sageox/ox/internal/session/adapters"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/sageox/ox/internal/session/adapters"
 
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/stretchr/testify/require"

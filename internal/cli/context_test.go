@@ -82,6 +82,20 @@ func TestContext_LogMethods_WithLogger(t *testing.T) {
 	assert.NotPanics(t, func() { ctx.LogError("error msg", "key", "val") })
 }
 
+// TestContext_SetOutcome records a command's outcome for its usage event, and
+// does nothing on a nil Context. Failure prevented: a command reports how it
+// ended in a test or tool run with no Context, and panics instead.
+func TestContext_SetOutcome(t *testing.T) {
+	var none *Context
+	assert.NotPanics(t, func() { none.SetOutcome("review_outcome", "idle") })
+	assert.Nil(t, none.Outcome())
+
+	c := &Context{}
+	c.SetOutcome("review_outcome", "approved")
+	c.SetOutcome("rounds", 2)
+	assert.Equal(t, map[string]any{"review_outcome": "approved", "rounds": 2}, c.Outcome())
+}
+
 func TestContext_Shutdown_NilTelemetry(t *testing.T) {
 	ctx := &Context{Config: &config.Config{}, TelemetryClient: nil}
 	assert.NotPanics(t, func() { ctx.Shutdown() })

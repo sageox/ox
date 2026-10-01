@@ -22,6 +22,14 @@ themselves and AI coworkers drift — rebuilding the same lost context every
 session. `ox` closes that gap. Decisions become shared memory; every session
 starts with the full picture instead of from zero.
 
+> **Capture the conversation, then build on it.** `ox` brings team context into
+> your coding sessions; the [SageOx desktop app](https://sageox.ai/product/desktop)
+> helps make capturing human context in the first place even easier. One click
+> records a call or an in-person conversation, and within 60 seconds after the
+> recording ends, SageOx distills it into shared context your AI coworkers can
+> build on — no re-explaining, no copied notes.
+> **[Install SageOx Desktop →](https://sageox.ai/product/desktop)** (macOS 14.4+)
+
 **Ask your coding agent what the team already figured out — even if it happened
 in a different agent, on a different machine, days ago.**
 

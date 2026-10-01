@@ -46,10 +46,9 @@ func TestStatusE2E_UnauthenticatedOutsideGitRepo_ExitsNonZero(t *testing.T) {
 	assert.Contains(t, out, "not authenticated", "the failure reason must be named")
 }
 
-// TestStatusE2E_JSONModeStaysExitZero mirrors `ox doctor`'s convention: a
-// --json consumer branches on the auth/project fields in the payload, not
-// the process exit code, so JSON output must stay exit-0 even when
-// unauthenticated/uninitialized.
+// TestStatusE2E_JSONModeStaysExitZero preserves status's existing contract:
+// a --json consumer branches on the auth/project fields in the payload,
+// so status stays exit-0 even when unauthenticated/uninitialized.
 func TestStatusE2E_JSONModeStaysExitZero(t *testing.T) {
 	oxBin := buildOxBinary(t)
 	dir := t.TempDir()

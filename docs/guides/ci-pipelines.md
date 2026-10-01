@@ -93,6 +93,25 @@ ox agent prime
 
 > **Future:** Service account and token-based auth (`ox login --token`) is planned but not yet implemented. Once available, this pattern will work in true headless CI/CD environments.
 
+### Check repository health
+
+`ox doctor` exits **1** when checks fail or required setup is missing, and
+**0** when there are no failed checks. Warnings and skipped checks alone do not
+fail the command. This applies to text output and `--json` (including `OX_JSON=1`).
+
+```bash
+if ox doctor --json > doctor.json; then
+  echo "Checks passed"
+else
+  echo "Doctor failed; inspect doctor.json and stderr" >&2
+fi
+```
+
+The JSON report is still written on check failures, with `summary.has_failed`
+and individual check details. Invocation errors or interruption can stop the
+command before a complete report is available. Scripts that previously relied
+on JSON mode always exiting 0 should handle its exit status explicitly.
+
 ---
 
 ## Other Useful Variables

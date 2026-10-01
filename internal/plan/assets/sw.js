@@ -5,7 +5,13 @@
 // banner. Marks live in localStorage, so nothing is lost while offline.
 // Scope: only GET / on this origin — every other request passes through.
 var CACHE = 'ox-plan-review-v1';
-self.addEventListener('install', function () { self.skipWaiting(); });
+// A tab's first load happens before this worker is installed, so the fetch
+// handler below never sees it: save a copy at install, or a reload during an
+// outage before the tab's next load finds no plan to show.
+self.addEventListener('install', function (e) {
+  self.skipWaiting();
+  e.waitUntil(caches.open(CACHE).then(function (c) { return c.add('/'); }).catch(function () {}));
+});
 self.addEventListener('activate', function (e) { e.waitUntil(self.clients.claim()); });
 self.addEventListener('fetch', function (e) {
   var url = new URL(e.request.url);

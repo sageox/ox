@@ -67,6 +67,9 @@ type Context struct {
 	// commandPath overrides the path derived from the command; see
 	// SetCommandPath.
 	commandPath string
+
+	// outcome is how the command ended, for usage telemetry; see SetOutcome.
+	outcome map[string]any
 }
 
 // NewContext creates a new CLI context from a Cobra command.
@@ -338,6 +341,29 @@ func (c *Context) CommandPath(cmd *cobra.Command) string {
 // session stop` is "agent session stop", not "agent".
 func (c *Context) SetCommandPath(path string) {
 	c.commandPath = path
+}
+
+// SetOutcome records how a command ended, for its usage event, when the exit
+// code cannot say (a review session exits 0 whether it was approved or
+// abandoned). Counts and fixed words only: ADR-008's PostHog addendum lists
+// each key, and no value may carry anything a person wrote. A nil Context
+// records nothing.
+func (c *Context) SetOutcome(key string, value any) {
+	if c == nil {
+		return
+	}
+	if c.outcome == nil {
+		c.outcome = map[string]any{}
+	}
+	c.outcome[key] = value
+}
+
+// Outcome returns what SetOutcome recorded; nil for a nil Context.
+func (c *Context) Outcome() map[string]any {
+	if c == nil {
+		return nil
+	}
+	return c.outcome
 }
 
 // TrackCommandError tracks a command error via telemetry

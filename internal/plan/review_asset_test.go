@@ -56,9 +56,13 @@ func TestReviewJS_DisconnectedModeContract(t *testing.T) {
 }
 
 // TestReviewSW_OfflineShellContract pins the service worker: network-first,
-// cache fallback, and scoped to GET / only. Failure prevented: a reload with
-// the server down shows the browser's connection-error page and the plan (and
-// the disconnected-mode messaging) vanishes with it.
+// cache fallback, a copy saved at install, and scoped to GET / only. The
+// real-browser proof of the install copy is
+// TestBrowser_UnsentHighlightSurvivesServerRestart (cmd/ox, build tag
+// `browser`). Failure prevented: a reload with the server down shows the
+// browser's connection-error page — or, before the tab's second load, the
+// worker's bare "not running" page — and the plan (and the disconnected-mode
+// messaging) vanishes with it.
 func TestReviewSW_OfflineShellContract(t *testing.T) {
 	b, err := ReviewServiceWorkerJS()
 	if err != nil {
@@ -68,6 +72,7 @@ func TestReviewSW_OfflineShellContract(t *testing.T) {
 	for _, want := range []string{
 		"fetch(e.request)",     // network-first
 		"caches.match('/')",    // cache fallback
+		"return c.add('/');",   // the first load, which the worker never sees, is saved at install
 		"url.pathname !== '/'", // everything else passes through
 		"ox plan review",       // even the bare 503 names the restart command
 	} {
@@ -164,6 +169,68 @@ func TestReviewRail_MinimizeContract(t *testing.T) {
 			".rev-rail-show{",                          // …on both page kinds
 			"margin:24px 16px 72px",                    // in flow, it ends above the review bar
 		} {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("%s missing %q", f.name, want)
+			}
+		}
+	}
+}
+
+// TestReviewJS_HighlightContract pins how a highlight coexists with the
+// click-an-element mark: a selection this click made (not one left over)
+// comments on those words before any element is considered, a click opens a
+// highlight only on the highlight's own words, the words are saved with the
+// mark, they match only as whole words — with text split by anything but
+// inline markup kept apart — and words the section repeats are refused, the
+// note opens below the click (so a double-click's second press reaches the
+// word), a comment whose text is gone keeps a rail row that opens it, a click
+// elsewhere closes that note even outside review mode, and every tint
+// review.js paints is styled on both page kinds. The real-browser proofs are
+// TestBrowser_HighlightCommentsOnExactWords,
+// TestBrowser_LeftoverSelectionDoesNotHijackAClick and
+// TestBrowser_HighlightStopsAtElementEdges (cmd/ox, build tag `browser`); this
+// is the hermetic guard CI sees.
+// Failure prevented: highlighting a phrase opens a whole-section note, the
+// agent receives the comment without the words it is about, or an addressed
+// highlight whose words were rewritten can no longer be accepted.
+func TestReviewJS_HighlightContract(t *testing.T) {
+	js, err := renderAssets.ReadFile("assets/review.js")
+	if err != nil {
+		t.Fatalf("read review.js: %v", err)
+	}
+	for _, want := range []string{
+		"var t = (madeSelection(ev) && selectionTarget()) || highlightAt(ev);",                                // this click's selection wins over the element click
+		"var rects = qRanges[a].range.getClientRects();",                                                      // a click opens a highlight only on its own words
+		"if (t.quote) marks[a].quote = t.quote;",                                                              // the words travel with the mark
+		"(/^\\w/.test(q) ? '(^|\\\\W)' : '()')",                                                               // word edges match only at word boundaries…
+		"if (prev && (brk || !inlineBetween(prev, n))) text += '\\n';",                                        // …and text split by more than inline markup stays apart
+		"if (n > 1) return { refuse:",                                                                         // a repeated word names no one place
+		"var r = t.rect || { left: ev.clientX, bottom: ev.clientY };",                                         // the note opens below, never over
+		"if (!r.at) { openPop({ a: r.a, section: r.section, label: r.label, quote: r.quote }, ev); return; }", // a comment with no text left opens from its row
+		"if (pop && !pop.contains(ev.target)) closePop();",                                                    // …and closes on a click elsewhere, even outside review mode
+		"['sage', 'amber', 'red', 'gold', 'faint'].forEach",                                                   // the tints the stylesheets must style
+	} {
+		if !strings.Contains(string(js), want) {
+			t.Errorf("review.js missing %q", want)
+		}
+	}
+	for _, f := range []struct {
+		name string
+		read func(string) ([]byte, error)
+	}{
+		{"assets/scaffold.css", renderAssets.ReadFile},
+		{"assets/chrome.css", chromeAssets.ReadFile},
+	} {
+		b, err := f.read(f.name)
+		if err != nil {
+			t.Fatalf("read %s: %v", f.name, err)
+		}
+		for _, tint := range []string{"sage", "amber", "red", "gold", "faint", "focus"} {
+			if !strings.Contains(string(b), "::highlight(rev-q-"+tint+"){") {
+				t.Errorf("%s does not style the %s highlight", f.name, tint)
+			}
+		}
+		for _, want := range []string{".rev-pop .rev-quote{", ".rev-rail-quote{"} {
 			if !strings.Contains(string(b), want) {
 				t.Errorf("%s missing %q", f.name, want)
 			}

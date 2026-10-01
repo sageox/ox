@@ -152,7 +152,11 @@ var doctorCmd = &cobra.Command{
 	Short: "Run diagnostics on ox installation and configuration",
 	Long: `Run comprehensive diagnostics on your ox installation, project configuration,
 git health, agent environment, and connected services. Use --fix to auto-repair
-common issues, or --fix-slug to target specific checks.`,
+common issues, or --fix-slug to target specific checks.
+
+Exits 1 if any check fails or required setup is missing, including with --json.
+Warnings and skipped checks alone exit 0. JSON output remains a single report;
+read summary.has_failed for the result and the process exit code for scripting.`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// --force-session-uploads: force detection and upload of incomplete sessions
@@ -227,7 +231,7 @@ common issues, or --fix-slug to target specific checks.`,
 		// short-circuit: not in a git repo
 		if gitRoot == "" {
 			if cfg != nil && cfg.JSON {
-				return cli.PrintJSONTo(cmd.OutOrStdout(), JSONDoctorOutput{
+				if err := cli.PrintJSONTo(cmd.OutOrStdout(), JSONDoctorOutput{
 					Summary: JSONSummary{Failed: 1, HasFailed: true},
 					Categories: []JSONCategory{{
 						Name: "Setup",
@@ -236,7 +240,10 @@ common issues, or --fix-slug to target specific checks.`,
 							Message: "not inside a git repository",
 						}},
 					}},
-				})
+				}); err != nil {
+					return err
+				}
+				return doctorExitError(true, "Setup")
 			}
 			w := cmd.OutOrStdout()
 			renderDoctorHeader(w, false)
@@ -252,7 +259,7 @@ common issues, or --fix-slug to target specific checks.`,
 			content := strings.Join(steps, "\n")
 			fmt.Fprintln(w, ui.RenderBox("No Git Repository", content, ui.BoxWarning))
 			fmt.Fprintln(w)
-			return nil
+			return doctorExitError(true, "Setup")
 		}
 
 		// short-circuit with setup guidance if not ready
@@ -271,10 +278,13 @@ common issues, or --fix-slug to target specific checks.`,
 						Message: "not initialized — run 'ox init' to set up this project",
 					})
 				}
-				return cli.PrintJSONTo(cmd.OutOrStdout(), JSONDoctorOutput{
+				if err := cli.PrintJSONTo(cmd.OutOrStdout(), JSONDoctorOutput{
 					Summary:    JSONSummary{Failed: len(checks), HasFailed: true},
 					Categories: []JSONCategory{{Name: "Setup", Checks: checks}},
-				})
+				}); err != nil {
+					return err
+				}
+				return doctorExitError(true, "Setup")
 			}
 			w := cmd.OutOrStdout()
 			renderDoctorHeader(w, false)
@@ -309,7 +319,7 @@ common issues, or --fix-slug to target specific checks.`,
 			content := strings.Join(steps, "\n")
 			fmt.Fprintln(w, ui.RenderBox("Setup Required", content, ui.BoxWarning))
 			fmt.Fprintln(w)
-			return nil
+			return doctorExitError(true, "Setup")
 		}
 
 		fix, _ := cmd.Flags().GetBool("fix")
@@ -382,13 +392,21 @@ common issues, or --fix-slug to target specific checks.`,
 		// PAT is exactly the class of thing they'd want surfaced.
 		_ = auth.CheckAndWarnExpiry(cmd.Context(), projectEndpoint, os.Stderr)
 
-		if hasFailed && (cfg == nil || !cfg.JSON) {
-			return errkind.WithDetail(errkind.ChecksFailed,
-				strings.Join(failedCheckCategories(categories), ","),
-				errors.New("some checks failed"))
-		}
-		return nil
+		return doctorExitError(hasFailed, strings.Join(failedCheckCategories(categories), ","))
 	},
+}
+
+// The report decides success in every output mode. JSON already contains the
+// failure details, so return its exit code without a second error message.
+func doctorExitError(hasFailed bool, detail string) error {
+	if !hasFailed {
+		return nil
+	}
+	err := errors.New("some checks failed")
+	if cfg != nil && cfg.JSON {
+		err = &commandExitError{ExitCode: 1, Message: err.Error()}
+	}
+	return errkind.WithDetail(errkind.ChecksFailed, detail, err)
 }
 
 // failedCheckCategories names the categories holding a failed check, in
