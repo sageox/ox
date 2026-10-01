@@ -49,14 +49,19 @@ func checkClaudeUsability() AgentUsability {
 		return result
 	}
 
-	// check OAuth in ~/.claude.json
-	home, err := os.UserHomeDir()
-	if err != nil {
-		result.AuthDetail = "unable to check"
-		return result
+	// check OAuth in .claude.json: Claude Code keeps it inside
+	// CLAUDE_CONFIG_DIR when that is set, and in the home directory otherwise.
+	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if configDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			result.AuthDetail = "unable to check"
+			return result
+		}
+		configDir = home
 	}
 
-	data, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	data, err := os.ReadFile(filepath.Join(configDir, ".claude.json"))
 	if err != nil {
 		result.AuthDetail = "not logged in"
 		return result

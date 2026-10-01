@@ -59,7 +59,8 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	if err := r.checkCapabilities(ctx); err != nil {
+	help, err := r.checkCapabilities(ctx)
+	if err != nil {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("codex timed out after %s: %w", timeout, ctx.Err())
 		}
@@ -70,7 +71,15 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 	// (potentially sensitive) session transcript does not appear in
 	// ps / /proc/<pid>/cmdline / sysctl kern.procargs2 (security finding #10).
 	// `-` as the positional prompt tells codex to read the prompt from stdin.
-	args := []string{"exec", "--sandbox", "read-only", "--ephemeral", "--color", "never", "-c", "features.hooks=false", "-"}
+	args := []string{"exec", "--sandbox", "read-only", "--ephemeral", "--color", "never", "-c", "features.hooks=false"}
+	if req.Isolated {
+		isolation, err := codexIsolatedArgs(ctx, r.binaryPath, help)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, isolation...)
+	}
+	args = append(args, "-")
 
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	cmd.Stdin = strings.NewReader(req.Prompt)
@@ -137,7 +146,9 @@ var codexProbeTimeout = 10 * time.Second
 
 // Probe without session content before sending a prompt. Never retry with broader
 // permissions when an older installation lacks the isolation flags we require.
-func (r *CodexRunner) checkCapabilities(ctx context.Context) error {
+// It returns the exec help so an isolated run checks its flags without a
+// second probe.
+func (r *CodexRunner) checkCapabilities(ctx context.Context) (string, error) {
 	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, codexProbeTimeout)
 	defer cancel()
@@ -155,21 +166,21 @@ func (r *CodexRunner) checkCapabilities(ctx context.Context) error {
 		// the real cause. The parent's own cancellation/timeout is left to the
 		// caller, which already wraps ctx.Err().
 		if parent.Err() == nil && ctx.Err() != nil {
-			return fmt.Errorf("could not verify Codex worker isolation within %s (is the machine under heavy load?): %w",
+			return "", fmt.Errorf("could not verify Codex worker isolation within %s (is the machine under heavy load?): %w",
 				codexProbeTimeout, ctx.Err())
 		}
-		return fmt.Errorf("cannot verify Codex worker isolation; update Codex and retry: %w", err)
+		return "", fmt.Errorf("cannot verify Codex worker isolation; update Codex and retry: %w", err)
 	}
 	if output.overflow {
-		return fmt.Errorf("cannot verify Codex worker isolation: help output exceeds limit")
+		return "", fmt.Errorf("cannot verify Codex worker isolation: help output exceeds limit")
 	}
 	help := output.buf.String()
 	for _, flag := range []string{"--sandbox", "--ephemeral", "--color", "--config"} {
 		if !strings.Contains(help, flag) {
-			return fmt.Errorf("codex worker requires %s; update Codex and retry", flag)
+			return "", fmt.Errorf("codex worker requires %s; update Codex and retry", flag)
 		}
 	}
-	return nil
+	return help, nil
 }
 
 // boundedCodexOutput keeps memory bounded while continuing to drain child output.

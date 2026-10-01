@@ -164,6 +164,24 @@ func (ea *ExternalAdapter) Read(sessionPath string) ([]RawEntry, error) {
 	return protocolToInternal(result.Entries), nil
 }
 
+// ReadWithTimeout reads a session like Read, within a caller-chosen deadline.
+// Importing a months-long transcript takes longer than the 10s a live capture
+// batch allows; the output limit still applies, so an oversized session fails
+// with ErrAdapterOutputLimit instead of being cut short.
+func (ea *ExternalAdapter) ReadWithTimeout(sessionPath string, timeout time.Duration) ([]RawEntry, error) {
+	out, err := ea.execOneShotWithin(timeout, "read", "--session-file", sessionPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var result adapterprotocol.ReadResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
+	}
+
+	return protocolToInternal(result.Entries), nil
+}
+
 // ReadMetadata calls the adapter's read-metadata subcommand.
 func (ea *ExternalAdapter) ReadMetadata(sessionPath string) (*SessionMetadata, error) {
 	out, err := ea.execOneShot("read-metadata", "--session-file", sessionPath)
@@ -588,6 +606,11 @@ func (ea *ExternalAdapter) callInfo() (*adapterprotocol.InfoResponse, error) {
 // Pre-validates --repo-root before spawning the subprocess to fail fast
 // with a clear error instead of letting the adapter silently produce garbage.
 func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byte, error) {
+	return ea.execOneShotWithin(ea.oneShotTimeout, subcommand, args...)
+}
+
+// execOneShotWithin is execOneShot with a caller-chosen deadline.
+func (ea *ExternalAdapter) execOneShotWithin(timeout time.Duration, subcommand string, args ...string) ([]byte, error) {
 	if subcommand == "find-session" {
 		if err := validateRepoRootArg(args, true); err != nil {
 			return nil, fmt.Errorf("pre-flight check for %s %s: %w", ea.binaryPath, subcommand, err)
@@ -595,7 +618,7 @@ func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byt
 	}
 
 	cmdArgs := append([]string{subcommand}, args...)
-	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), ea.oneShotTimeout)
+	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), timeout)
 	defer timeoutCancel()
 	ctx, outputCancel := context.WithCancel(timeoutCtx)
 	defer outputCancel()
