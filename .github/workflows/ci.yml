@@ -30,6 +30,10 @@ jobs:
       slots: ${{ steps.slots.outputs.slots }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing after checkout needs git credentials; leaving the token in
+          # .git/config would hand it to the test code this job runs.
+          persist-credentials: false
 
       # The matrix comes from the Makefile so it cannot drift from the layout
       # the merge step expects; `coverage-merge-unit` refuses a missing slot.
@@ -49,6 +53,10 @@ jobs:
     name: unit (${{ matrix.slot }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing after checkout needs git credentials; leaving the token in
+          # .git/config would hand it to the test code this job runs.
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -153,6 +161,10 @@ jobs:
       actions: write  # prune superseded build caches
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing after checkout needs git credentials; leaving the token in
+          # .git/config would hand it to the test code this job runs.
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -246,6 +258,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing after checkout needs git credentials; leaving the token in
+          # .git/config would hand it to the test code this job runs.
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -290,6 +306,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing after checkout needs git credentials; leaving the token in
+          # .git/config would hand it to the test code this job runs.
+          persist-credentials: false
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -352,6 +372,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'pull_request'
         with:
+          persist-credentials: false
           # The changed-line coverage ratchet below diffs against the PR base
           # commit, which a shallow clone does not contain.
           fetch-depth: 0
