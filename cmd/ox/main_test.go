@@ -189,3 +189,92 @@ func TestCLIOutputWriteFailures(t *testing.T) {
 		}
 	}
 }
+
+// A misspelled subcommand must fail without printing successful help or running
+// a suggested command. Exercise the real parser, output streams, and exit code.
+func TestCLIInvalidSubcommands(t *testing.T) {
+	skipIntegration(t)
+	oxBin := testguard.BuildOxBinary(t, repoPath("..", ".."))
+	for _, group := range []string{
+		"", "adapter", "agent hooks", "agent tasks", "carts", "carts dep",
+		"code", "daemon", "decision", "dev", "hooks", "kb", "memory", "plan",
+		"plan feedback", "pr", "session redaction", "session", "session trace", "bubble",
+	} {
+		t.Run(group, func(t *testing.T) {
+			env := append(noInputCLIEnv(t), "FEATURE_CLOUD=false", "FEATURE_AUTH=false",
+				"FEATURE_MEMORY=true", "FEATURE_CARTS=true", "FEATURE_TRACE=true")
+			args := append(strings.Fields(group), "unexpected-command", "--json")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := testguard.OxCmdContext(t, ctx, oxBin, t.TempDir(), env, args...)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			require.NoError(t, ctx.Err(), "stderr: %s", stderr.String())
+			var exitErr *exec.ExitError
+			require.ErrorAs(t, err, &exitErr, "stdout: %s; stderr: %s", stdout.String(), stderr.String())
+			assert.Equal(t, 1, exitErr.ExitCode())
+			assert.Empty(t, stdout.String(), "usage errors must not look like successful output")
+			canonical := group
+			if group == "bubble" {
+				canonical = "kb"
+			}
+			commandPath := strings.TrimSpace("ox " + canonical)
+			assert.Contains(t, stderr.String(), fmt.Sprintf("Error: unknown command %q for %q", "unexpected-command", commandPath))
+			assert.Contains(t, stderr.String(), "Run '"+commandPath+" --help' for usage")
+			assert.NotContains(t, stderr.String(), "\nUsage\n", "keep error guidance concise")
+		})
+	}
+
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+		fail bool
+	}{
+		{"bare root", nil, "Usage", false},
+		{"bare group", []string{"plan"}, "ox plan", false},
+		{"nested group", []string{"plan", "feedback"}, "ox plan feedback", false},
+		{"alias help", []string{"bubble", "--help"}, "ox kb", false},
+		{"explicit help", []string{"plan", "unexpected-command", "--help"}, "ox plan", false},
+		{"short help", []string{"plan", "unexpected-command", "-h"}, "ox plan", false},
+		{"help command", []string{"help", "plan"}, "ox plan", false},
+		{"root version", []string{"--version"}, "ox version", false},
+		{"help without loading config", []string{"plan", "--config", "missing.yaml"}, "ox plan", false},
+		{"catalog correction", []string{"daemons"}, "ox daemon", false},
+		{"group typo", []string{"plan", "lsit"}, "Did you mean 'ox plan list'?", true},
+		{"JSON typo", []string{"--json", "plan", "lsit"}, "Did you mean 'ox plan list'?", true},
+		{"runnable group typo", []string{"session", "lsit"}, "Did you mean 'ox session list'?", true},
+		{"custom dispatcher", []string{"agent", "unexpected-command"}, "unknown command or invalid agent_id: unexpected-command", true},
+		{"global flag value", []string{"--config", "unused.yaml", "plan", "foo"}, `unknown command "foo" for "ox plan"`, true},
+		{"literal help argument", []string{"plan", "--", "--help"}, `unknown command "--help" for "ox plan"`, true},
+		{"invalid flag", []string{"plan", "--invalid-flag"}, "unknown flag: --invalid-flag", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env := append(noInputCLIEnv(t), "FEATURE_CLOUD=false", "FEATURE_AUTH=false")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := testguard.OxCmdContext(t, ctx, oxBin, t.TempDir(), env, tt.args...)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			require.NoError(t, ctx.Err(), "stderr: %s", stderr.String())
+			if tt.fail {
+				var exitErr *exec.ExitError
+				require.ErrorAs(t, err, &exitErr, "stdout: %s; stderr: %s", stdout.String(), stderr.String())
+				assert.Equal(t, 1, exitErr.ExitCode())
+				assert.Empty(t, stdout.String())
+				assert.Contains(t, stderr.String(), tt.want)
+				assert.True(t, strings.HasPrefix(stderr.String(), "Error:"), "show the error before suggestions: %s", stderr.String())
+			} else {
+				require.NoError(t, err, "stderr: %s", stderr.String())
+				assert.Contains(t, stdout.String(), tt.want)
+				if tt.name == "catalog correction" {
+					assert.Contains(t, stderr.String(), "Correcting to: daemon")
+				} else {
+					assert.Empty(t, stderr.String())
+				}
+			}
+		})
+	}
+}

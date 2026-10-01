@@ -75,6 +75,13 @@ arguments before their handlers run. A stray path must not silently select the
 current repository, and `--force false` must not proceed with force enabled.
 Use `--force=false` to explicitly disable a boolean flag.
 
+Unknown subcommands exit 1 with an error and a short `--help` hint on stderr.
+Command groups must validate arguments even when they have no runnable handler;
+otherwise Cobra prints help and reports success. Bare groups and explicit help
+requests continue to show help on stdout and exit 0. Nested typo suggestions
+come from that group's available subcommands; the curated correction catalog
+retains its existing behavior.
+
 ## Color Palette
 
 Colors are sourced from `sageox-design` and generated into `internal/theme/generated.go`.
