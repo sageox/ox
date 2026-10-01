@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
@@ -25,56 +26,150 @@ import (
 // the best-effort warning a push failure gets.
 var errBackfillCommitFailed = errors.New("backfill commit failed before landing locally")
 
+// planCommitStatus reports how far a plan write got toward the shared Ledger,
+// so a caller that answers a human (the review page) can say "saved locally,
+// not yet shared" instead of a blanket success.
+//
+// Committed means the plan dir's staged state is in a local Ledger commit —
+// including the idempotent case where nothing changed since the last commit.
+// Pushed means pushLedger returned nil, i.e. that commit is on the remote.
+// Err carries the first failure (sanitized) when either is false.
+type planCommitStatus struct {
+	Committed bool
+	Pushed    bool
+	Err       string
+}
+
+// planCommitMu serializes plan commit+push inside one process. The review
+// server handles POSTs concurrently, and two goroutines staging + committing
+// the same clone race on .git/index.lock. gitutil.WithRepoLock already covers
+// add+commit across processes, but it is not held across pushLedger (whose
+// pull-rebase retry takes that same non-reentrant lock), so this mutex also
+// keeps two in-process pushes from fighting over the branch tip.
+var planCommitMu sync.Mutex
+
+// planLedgerPathFor resolves the Ledger clone a plan under gitRoot commits to.
+// A variable only so tests can point the review server at a temp Ledger
+// without provisioning a full project context.
+var planLedgerPathFor = func(gitRoot string) (string, error) {
+	ctx, err := config.LoadProjectContext(gitRoot)
+	if err != nil || ctx == nil {
+		return "", fmt.Errorf("no project context for %q: cannot commit plan", gitRoot)
+	}
+	ledgerPath := ctx.DefaultLedgerPath()
+	if ledgerPath == "" {
+		return "", fmt.Errorf("no ledger configured for %q: cannot commit plan", gitRoot)
+	}
+	return ledgerPath, nil
+}
+
 // commitPlanToLedger durably commits a captured plan directory to the ledger
 // and pushes it. This closes a real gap: plan.Save only materializes files into
 // the ledger working tree, and commitAndPushLedger stages only sessions/<name>/
 // — so without this, saved plans sit dirty-but-uncommitted indefinitely.
 //
-// Mirrors commitAndPushLedger's pattern (explicit-path `git add --sparse`,
-// --no-verify commit, pushLedger with pull-rebase retry), scoped to the plan
-// dir. Commit AND push are synchronous (the chosen durability model: the plan
-// is on the remote before the caller returns). Best-effort on the caller's
-// side: a push failure returns an error to log, but the local commit stands and
-// the next push / `ox doctor` carries it.
+// Commit AND push are synchronous (the chosen durability model: the plan is on
+// the remote before the caller returns). On any failure a pending marker is
+// recorded so `ox agent prime` retries the push later through the full gate
+// stack (see plan_push_pending.go) — the error is still returned for callers
+// to log.
 func commitPlanToLedger(gitRoot, planDir string) error {
-	ctx, err := config.LoadProjectContext(gitRoot)
-	if err != nil || ctx == nil {
-		return fmt.Errorf("no project context for %q: cannot commit plan", gitRoot)
+	ledgerPath, err := planLedgerPathFor(gitRoot)
+	if err != nil {
+		return err
 	}
-	ledgerPath := ctx.DefaultLedgerPath()
-	if ledgerPath == "" {
-		return fmt.Errorf("no ledger configured for %q: cannot commit plan", gitRoot)
-	}
+	ctx := context.Background()
+	_, err = commitAndPushPlanDir(ctx, ledgerPath, planDir)
+	recordPlanPushOutcome(ctx, ledgerPath, planDir, err)
+	return err
+}
 
-	// Mid-rebase safety belongs at index-mutation time, not just push time. An
-	// unguarded `git add` during a conflicted rebase marks the conflict resolved,
-	// and the following commit consumes the replay step — silently destroying
-	// whatever was being replayed (see .claude/rules/cache-only-design.md).
-	// pushLedger guards its own push, but the add+commit below mutate the index
-	// BEFORE that guard runs, so a plan save mid-rebase needs this check here.
-	if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
-		return fmt.Errorf("ledger not safe for plan commit (%s): %w", ledgerPath, err)
+// commitPlanToLedgerStatus is commitPlanToLedger for callers that must report
+// the outcome rather than just log it (the live review server's responses).
+func commitPlanToLedgerStatus(ctx context.Context, gitRoot, planDir string) planCommitStatus {
+	ledgerPath, err := planLedgerPathFor(gitRoot)
+	if err != nil {
+		return planCommitStatus{Err: err.Error()}
+	}
+	st, err := commitAndPushPlanDir(ctx, ledgerPath, planDir)
+	recordPlanPushOutcome(ctx, ledgerPath, planDir, err)
+	return st
+}
+
+// commitAndPushPlanDir stages planDir, commits ONLY that path, and pushes.
+//
+// Path-scoped on purpose: a bare `git commit` takes the whole index, so any
+// unrelated change someone else staged in the Ledger (a half-finished session
+// upload, a doctor repair) would ship under a "plan:" subject — and past
+// pushLedger's per-writer assumptions. `git commit -- <path>` would scope it
+// too (and does work after an `add --sparse`), but it re-reads the WORKTREE at
+// commit time; gitutil.CommitLedgerSnapshot commits the exact index entries
+// under the pathspec as an immutable, validated tree instead, and is the
+// canonical Ledger commit path (AGENTS.md).
+//
+// Add+commit run under gitutil.WithRepoLock (cross-process) and planCommitMu
+// (in-process, held through the push as well). The push runs outside the repo
+// lock because PushWithRetry takes it itself when it must pull.
+func commitAndPushPlanDir(ctx context.Context, ledgerPath, planDir string) (planCommitStatus, error) {
+	planCommitMu.Lock()
+	defer planCommitMu.Unlock()
+
+	rel, err := ledgerRelPath(ledgerPath, planDir)
+	if err != nil {
+		return planCommitStatus{Err: err.Error()}, err
 	}
 
 	// ensure .gitignore is in place before any commit to prevent cache leakage
-	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
-
-	// --sparse: ledger repos use sparse-checkout (cone mode).
-	addArgs := []string{"-C", ledgerPath, "add", "--sparse", planDir}
-	if out, err := exec.Command("git", addArgs...).CombinedOutput(); err != nil {
-		return fmt.Errorf("git add failed: %s: %w", string(out), err)
-	}
+	gitserver.EnsureGitignoreBeforeCommitCtx(ctx, ledgerPath)
 
 	commitMsg := fmt.Sprintf("plan: %s", filepath.Base(planDir))
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if out, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(out), "nothing to commit") {
-			return nil // idempotent: re-save with no change
+	err = gitutil.WithRepoLock(ctx, ledgerPath, func() error {
+		// Mid-rebase safety belongs at index-mutation time, not just push time:
+		// an unguarded `git add` during a conflicted rebase marks the conflict
+		// resolved (see .claude/rules/cache-only-design.md).
+		if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+			return fmt.Errorf("ledger not safe for plan commit (%s): %w", ledgerPath, err)
 		}
-		return fmt.Errorf("%s: %w", wrapCommitError(string(out), err), err)
+		// --sparse: ledger repos use sparse-checkout (cone mode).
+		if out, err := gitutil.RunGit(ctx, ledgerPath, "add", "--sparse", "--", rel); err != nil {
+			return fmt.Errorf("git add %s failed: %s: %w", rel, gitutil.SanitizeOutput(out), err)
+		}
+		if _, err := gitutil.CommitLedgerSnapshot(ctx, ledgerPath, commitMsg, rel); err != nil {
+			return fmt.Errorf("commit %s: %w", rel, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return planCommitStatus{Err: gitutil.SanitizeOutput(err.Error())}, err
 	}
 
-	return pushLedger(context.Background(), ledgerPath)
+	// Push even when the snapshot was a no-op: an earlier commit of this plan
+	// may be the one still waiting on a failed push.
+	st := planCommitStatus{Committed: true}
+	if err := pushLedger(ctx, ledgerPath); err != nil {
+		st.Err = gitutil.SanitizeOutput(err.Error())
+		return st, fmt.Errorf("push plan %s: %w", rel, err)
+	}
+	st.Pushed = true
+	return st, nil
+}
+
+// ledgerRelPath returns planDir relative to the Ledger root as a slash path,
+// refusing anything outside it (a pathspec must never widen past the plan).
+// Symlinks are resolved first: on macOS a temp or XDG path may be reached via
+// /var while git reports /private/var.
+func ledgerRelPath(ledgerPath, planDir string) (string, error) {
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return p
+	}
+	rel, err := filepath.Rel(resolve(ledgerPath), resolve(planDir))
+	if err != nil || rel == "." || !filepath.IsLocal(rel) {
+		return "", fmt.Errorf("plan dir %q is not inside ledger %q", planDir, ledgerPath)
+	}
+	return filepath.ToSlash(rel), nil
 }
 
 // commitPlanBackfillToLedger stages every backfilled plan rename, in-place
