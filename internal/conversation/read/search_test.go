@@ -2,6 +2,8 @@ package read
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -481,5 +483,46 @@ func TestSearchEmptyTeamIsNotAnError(t *testing.T) {
 	d := mustSearch(t, New(root, time.Time{}), SearchOptions{Query: "anything"})
 	if len(d.Results) != 0 || d.Summarized != 0 {
 		t.Fatalf("empty team: %+v", d)
+	}
+}
+
+// TestCatalogCountsACorruptSummaryAsUnreadable: Failure prevented: a corrupt
+// summary.json either aborts the whole search or vanishes without a trace,
+// so "searched N" overstates what was actually read.
+func TestCatalogCountsACorruptSummaryAsUnreadable(t *testing.T) {
+	dir := stageSearchCorpus(t)
+	corrupt := filepath.Join(dir, "2026-09-23-00-00-corrupt")
+	mustMkdir(t, corrupt)
+	mustWrite(t, filepath.Join(corrupt, "summary.json"), "{not json")
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	entries, unreadable, cErr := loadCatalog(root, nil)
+	if cErr != nil {
+		t.Fatalf("loadCatalog: %+v", cErr)
+	}
+	if unreadable != 1 || len(entries) != 4 {
+		t.Fatalf("entries %d unreadable %d, want 4 and 1", len(entries), unreadable)
+	}
+	if entries, unreadable, cErr := loadCatalog(nil, nil); entries != nil || unreadable != 0 || cErr != nil {
+		t.Fatalf("nil root = %v %d %v, want nothing", entries, unreadable, cErr)
+	}
+}
+
+// TestSummarizedFolderResolverMisses: Failure prevented: a recording the
+// catalog does not hold, or a discussions root that is gone, resolves to
+// some other folder instead of a not-found error the reader can report.
+func TestSummarizedFolderResolverMisses(t *testing.T) {
+	root := stageSearchCorpus(t)
+	if folder, err := (summarizedFolderResolver{discussionsRoot: root}).ResolveFolder(oldRec); err != nil || folder != "2026-08-10-17-00-ryan" {
+		t.Fatalf("ResolveFolder(oldRec) = %q, %v", folder, err)
+	}
+	if _, err := (summarizedFolderResolver{discussionsRoot: root}).ResolveFolder("rec_01a0bfc2-a680-7000-8000-0000000000ff"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("unknown recording err = %v, want fs.ErrNotExist", err)
+	}
+	if _, err := (summarizedFolderResolver{discussionsRoot: filepath.Join(root, "gone")}).ResolveFolder(oldRec); err == nil {
+		t.Fatal("a missing discussions root must be an error")
 	}
 }

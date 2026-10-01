@@ -57,6 +57,7 @@ func resetConversationFlagSets() {
 	conversationTranscriptFlagSet = conversationTranscriptFlags{}
 	conversationTopicsFlagSet = conversationFormatFlags{}
 	conversationTopicFlagSet = conversationTopicFlags{}
+	conversationSearchFlagSet = conversationSearchFlags{}
 }
 
 // runConversationInProc executes one conversation subcommand in-process on a
@@ -83,6 +84,9 @@ func runConversationInProc(t *testing.T, sub string, args ...string) (string, st
 	case "topic":
 		cmd.RunE = runConversationTopic
 		registerConversationTopicFlags(cmd, &conversationTopicFlagSet)
+	case "search":
+		cmd.RunE = runConversationSearch
+		registerConversationSearchFlags(cmd, &conversationSearchFlagSet)
 	default:
 		t.Fatalf("unknown subcommand %q", sub)
 	}
@@ -497,5 +501,143 @@ func TestTranscriptTextShowsSanitizedSpeakerNames(t *testing.T) {
 	}
 	if !strings.Contains(out, "usr_emory00000000000000000000") {
 		t.Errorf("unresolved cue must fall back to the raw tag:\n%s", out)
+	}
+}
+
+// TestConversationSearchUsageErrors: Failure prevented: a malformed or
+// inverted date window silently searches everything (or nothing) instead of
+// telling the caller which flag is wrong, before any team file is opened.
+func TestConversationSearchUsageErrors(t *testing.T) {
+	orig := openConversationReader
+	t.Cleanup(func() { openConversationReader = orig })
+	openConversationReader = func() (*read.Reader, *read.Error) {
+		t.Fatal("a usage error must not open the team context")
+		return nil, nil
+	}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"bad format", []string{"search", "--format", "yaml"}, "--format"},
+		{"bad since", []string{"search", "--since", "yesterday"}, "--since"},
+		{"bad until", []string{"search", "--until", "last tuesday"}, "--until"},
+		{"inverted window", []string{"search", "--since", "2026-09-14", "--until", "2026-09-01"}, "--until must be after --since"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stdout, _, err := runConversationInProc(t, "search", tt.args...)
+			if got := exitCodeOf(t, err); got == 0 {
+				t.Fatalf("exit code = 0, want a usage error")
+			}
+			env := decodeConvEnvelope(t, stdout)
+			if env.Success || env.Error == nil || !strings.Contains(env.Error.Message, tt.want) {
+				t.Fatalf("error = %+v, want a message naming %q", env.Error, tt.want)
+			}
+		})
+	}
+}
+
+// TestConversationSearchNoTeamContext: Failure prevented: search outside a
+// team context crashes or prints an empty success instead of the shared
+// no_team_context envelope every sibling command returns.
+func TestConversationSearchNoTeamContext(t *testing.T) {
+	orig := openConversationReader
+	t.Cleanup(func() { openConversationReader = orig })
+	openConversationReader = func() (*read.Reader, *read.Error) {
+		return nil, &read.Error{Code: read.ErrCodeNoTeamContext, Message: "no local team context"}
+	}
+	stdout, _, err := runConversationInProc(t, "search", "anything")
+	if got := exitCodeOf(t, err); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
+	}
+	if env := decodeConvEnvelope(t, stdout); env.Error == nil || env.Error.Code != read.ErrCodeNoTeamContext {
+		t.Fatalf("error = %+v, want no_team_context", env.Error)
+	}
+}
+
+// TestConversationSearchRunsOverTheFixtureCorpus: the shipped RunE wires
+// every flag into the search and returns one envelope in both formats.
+// Failure prevented: a flag is registered but never reaches SearchOptions,
+// or --text falls back to JSON.
+func TestConversationSearchRunsOverTheFixtureCorpus(t *testing.T) {
+	useConversationTestReader(t)
+	stdout, _, err := runConversationInProc(t, "search", "legacy",
+		"--since", "2026-01-01", "--until", "2026-12-31", "--limit", "3")
+	if got := exitCodeOf(t, err); got != 0 {
+		t.Fatalf("exit code = %d, want 0\n%s", got, stdout)
+	}
+	env := decodeConvEnvelope(t, stdout)
+	if !env.Success {
+		t.Fatalf("search failed: %+v", env.Error)
+	}
+	var data read.SearchData
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		t.Fatalf("data is not SearchData: %v", err)
+	}
+	if strings.Join(data.Terms, " ") != "legacy" {
+		t.Errorf("terms = %v, want [legacy]", data.Terms)
+	}
+
+	text, _, _ := runConversationInProc(t, "search", "legacy", "--participant", "Nobody Here", "--speaker", "Nobody Here", "--text")
+	if strings.HasPrefix(strings.TrimSpace(text), "{") {
+		t.Fatalf("--text produced JSON: %s", text)
+	}
+	if !strings.Contains(text, "searched") {
+		t.Errorf("text output lacks the summary line:\n%s", text)
+	}
+}
+
+// TestConversationSearchTextRendering: a person scanning results sees the
+// date, id, title, who was there, where it matched, the folded duplicate
+// recordings, and each hit with the citation that opens it. Failure
+// prevented: a team-controlled title or name repaints the terminal, a hit
+// with a cue time prints the whole timestamp, or an empty result prints
+// nothing at all.
+func TestConversationSearchTextRendering(t *testing.T) {
+	env := &read.Envelope{Success: true, Data: &read.SearchData{
+		Terms:      []string{"search"},
+		Searched:   4,
+		Summarized: 9,
+		Truncated:  true,
+		Results: []read.SearchResult{
+			{
+				ConversationID: "cnv_one", RecordedAt: "2026-09-03T20:16:00Z",
+				Title: "Search \x1b[2Jplanning", Speakers: []string{"Ryan", "Ajit"},
+				MatchedIn: []string{"title", "transcript"}, AlsoRecordedAs: []string{"rec_dup"},
+				Hits: []read.SearchHit{
+					{Kind: "cue", Start: "00:01:02.500", Speaker: "Ryan", Text: "we should ship search", Citation: "sageox://cnv_one#cue=3"},
+					{Kind: "decision", Text: "ship search first", Citation: "sageox://cnv_one"},
+				},
+			},
+			{ConversationID: "cnv_two", Title: "No date", Participants: []string{"Emory"}},
+			{ConversationID: "cnv_three", Title: "Nobody"},
+		},
+	}}
+	var buf bytes.Buffer
+	renderConversationSearchText(&buf, env)
+	out := buf.String()
+	for _, want := range []string{
+		"2026-09-03  cnv_one", "Ryan, Ajit", "matched in title, transcript", "also recorded as rec_dup",
+		"[00:01:02 Ryan] we should ship search", "sageox://cnv_one#cue=3", "[decision] ship search first",
+		"unknown", "Emory", "3 shown · 4 searched · 9 summarized on disk", "terms: search", "truncated by --limit",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("text output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\x1b[2J") {
+		t.Errorf("title reached the terminal unsanitized:\n%q", out)
+	}
+
+	buf.Reset()
+	renderConversationSearchText(&buf, &read.Envelope{Success: true, Data: &read.SearchData{}})
+	if !strings.Contains(buf.String(), "(no matching conversations)") {
+		t.Errorf("empty result must say so:\n%s", buf.String())
+	}
+	buf.Reset()
+	renderConversationSearchText(&buf, &read.Envelope{Success: true, Data: "not search data"})
+	if buf.Len() != 0 {
+		t.Errorf("foreign payload must render nothing, got %q", buf.String())
 	}
 }
