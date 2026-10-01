@@ -38,8 +38,9 @@ the video instead of from the video itself:
                         fetch_command (downloads it, prints the path)
 
 Select moments by cue range (--cues N-M) or media-clock window (--from/--to);
-with neither, the whole recording is served up to --limit moments. Read what
-was said at a moment with ox conversation transcript <id> --cues N.
+with neither, a sageox:// citation's own cue= or t= window applies, else the
+whole recording is served up to --limit moments. Read what was said at a
+moment with ox conversation transcript <id> --cues N.
 
 Missing screen data is reported in notes, never as an error: a walkthrough
 whose pointer layer never reached the server still lists its keyframes, and

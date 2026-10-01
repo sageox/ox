@@ -2,6 +2,7 @@ package read
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -454,6 +455,114 @@ func TestPointerMomentsDwellRules(t *testing.T) {
 	want := "00:00:08.500/2000,00:00:10.500/2500,00:00:12.900/2100"
 	if strings.Join(dwells, ",") != want {
 		t.Errorf("dwells = %v, want %s", dwells, want)
+	}
+}
+
+// TestDwellNamedWhenNodeRowArrivesWithFirstSample: the producer writes an
+// element's node row when a pointer row first references it, and on a 2 Hz
+// grid that first row can already carry dwell_ms. The rest is back-dated
+// to where it began, but the element is named at the first row.
+// Failure prevented: a deliberate rest on a never-hovered element reads as
+// "unnamed" although the accessibility layer names it.
+func TestDwellNamedWhenNodeRowArrivesWithFirstSample(t *testing.T) {
+	root := stageDesktopWalkthrough(t)
+	layers := filepath.Join(root, desktopWalkFolder, "layers")
+	writeFile(t, filepath.Join(layers, "pointer.clyr_01a0f484-0000-7000-8000-0000000000c1", "pointer.jsonl"), strings.Join([]string{
+		`{"t_ms":10000,"vis":true,"dwell_ms":400,"ax_ref":"axn_new"}`,
+		`{"t_ms":10500,"vis":true,"dwell_ms":900,"ax_ref":"axn_new"}`,
+		`{"t_ms":11000,"vis":true,"dwell_ms":1400,"ax_ref":"axn_new"}`,
+		`{"t_ms":11500,"vis":true,"dwell_ms":1900,"ax_ref":"axn_new"}`,
+		`{"t_ms":12000,"vis":true,"dwell_ms":2400,"ax_ref":"axn_new"}`,
+		`{"t_ms":12500,"vis":false}`,
+	}, "\n"))
+	writeFile(t, filepath.Join(layers, "ax-tree.clyr_01a0f484-0000-7000-8000-0000000000c2", "ax.jsonl"), strings.Join([]string{
+		`{"t_ms":10000,"snapshot":"axs_1","reason":"hover","hit":"axn_new"}`,
+		`{"t_ms":10000,"snapshot":"axs_1","ax_ref":"axn_new","role":"AXButton","title":"Export"}`,
+	}, "\n"))
+	_, d := readWalkthrough(t, root, desktopWalkCnv, WalkthroughOptions{})
+	for _, m := range d.Moments {
+		if m.Kind != MomentDwell {
+			continue
+		}
+		if m.At != "00:00:09.600" || m.Element.Unnamed || m.Element.Title != "Export" {
+			t.Errorf("dwell = %s %+v, want 00:00:09.600 on the Export button", m.At, m.Element)
+		}
+		return
+	}
+	t.Fatal("no dwell moment")
+}
+
+// TestLongAXTreeKeepsLateSnapshots: interval snapshots re-walk the same
+// elements every few seconds; repeats must not exhaust the kept-row cap
+// before the recording's later pages and elements are read.
+// Failure prevented: a long walkthrough loses every page change and
+// element name after its first several minutes.
+func TestLongAXTreeKeepsLateSnapshots(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: writes and parses a 70k-row accessibility sidecar")
+	}
+	root := stageDesktopWalkthrough(t)
+	var b strings.Builder
+	snapshots := (maxSidecarRows / 3) + 1000 // three node rows each: well past the cap
+	for i := 0; i < snapshots; i++ {
+		ms := 1000 + i
+		fmt.Fprintf(&b, `{"t_ms":%d,"snapshot":"axs_%d","reason":"interval"}`+"\n", ms, i)
+		fmt.Fprintf(&b, `{"t_ms":%d,"snapshot":"axs_%d","ax_ref":"axn_win","depth":0,"role":"AXWindow","title":"Team - Browser"}`+"\n", ms, i)
+		fmt.Fprintf(&b, `{"t_ms":%d,"snapshot":"axs_%d","ax_ref":"axn_web","parent":"axn_win","depth":1,"role":"AXWebArea","title":"Team home","url":"https://sageox.test/team/t1"}`+"\n", ms, i)
+		fmt.Fprintf(&b, `{"t_ms":%d,"snapshot":"axs_%d","ax_ref":"axn_btn","parent":"axn_web","depth":2,"role":"AXButton","title":"Save"}`+"\n", ms, i)
+	}
+	late := 1000 + snapshots
+	fmt.Fprintf(&b, `{"t_ms":%d,"snapshot":"axs_late","reason":"interval"}`+"\n", late)
+	fmt.Fprintf(&b, `{"t_ms":%d,"snapshot":"axs_late","ax_ref":"axn_web","parent":"axn_win","depth":1,"role":"AXWebArea","title":"Settings","url":"https://sageox.test/team/t1/settings"}`+"\n", late)
+	writeFile(t, filepath.Join(root, desktopWalkFolder, "layers", "ax-tree.clyr_01a0f484-0000-7000-8000-0000000000c2", "ax.jsonl"), b.String())
+
+	env, d := readWalkthrough(t, root, desktopWalkCnv, WalkthroughOptions{Limit: 1000})
+	for _, w := range env.Warnings {
+		if strings.Contains(w, "usable rows") {
+			t.Errorf("repeated rows hit the kept-row cap: %s", w)
+		}
+	}
+	var pages []string
+	for _, m := range d.Moments {
+		if m.Kind == MomentPage {
+			pages = append(pages, m.Page.Title)
+		}
+	}
+	if strings.Join(pages, ",") != "Team home,Settings" {
+		t.Errorf("pages = %v, want the late Settings page reached", pages)
+	}
+}
+
+// TestWalkthroughFollowsCitationSelectors: a sageox:// citation carries its
+// own window, as it does for transcript; explicit flags still win.
+// Failure prevented: an AI coworker following a cited moment gets the whole
+// recording instead of the cited cues.
+func TestWalkthroughFollowsCitationSelectors(t *testing.T) {
+	base := "sageox://" + desktopWalkCnv + "/clyr_01a0f48b-0000-7000-8000-0000000000d1@1#"
+	t0 := time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)
+	ms := func(sec float64) int64 { return t0.Add(time.Duration(sec * float64(time.Second))).UnixMilli() }
+
+	cases := []struct {
+		name, uri string
+		opts      WalkthroughOptions
+		want      []int // cues of the served moments
+	}{
+		{"cue range", base + "cue=2-3", WalkthroughOptions{}, []int{2, 2, 2, 3, 3}},
+		{"time range", base + fmt.Sprintf("t=%d--%d", ms(16), ms(19)), WalkthroughOptions{}, []int{4, 4}},
+		{"instant picks its cue", base + fmt.Sprintf("t=%d", ms(11.5)), WalkthroughOptions{}, []int{3, 3}},
+		{"explicit flags win", base + "cue=2-3", WalkthroughOptions{CueFirst: 5, CueLast: 5}, []int{5}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, d := readWalkthrough(t, desktopWalkRoot, c.uri, c.opts)
+			var got []int
+			for _, m := range d.Moments {
+				got = append(got, m.Cue)
+			}
+			if fmt.Sprint(got) != fmt.Sprint(c.want) {
+				t.Errorf("cues = %v, want %v", got, c.want)
+			}
+		})
 	}
 }
 

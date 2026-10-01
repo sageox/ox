@@ -181,6 +181,7 @@ func (r *Reader) Walkthrough(rawID string, opts WalkthroughOptions) *Envelope {
 	// transcript has not landed is still readable by time; a cue range on
 	// one is not.
 	cues, cueErr := loadCues(droot)
+	opts = applyCitationWindow(opts, id, cues, manifest, &warnings)
 	if cueErr != nil && opts.CueFirst != 0 {
 		return r.finishError(start, cueErr, warnings)
 	}
@@ -236,7 +237,7 @@ func (r *Reader) Walkthrough(rawID string, opts WalkthroughOptions) *Envelope {
 	}
 	if pointerLayer != nil {
 		for _, p := range loadPointerMoments(droot, pointerLayer, manifest, &warnings) {
-			m := WalkthroughMoment{at: p.at, Kind: MomentDwell, Element: tree.element(p.axRef, p.at)}
+			m := WalkthroughMoment{at: p.at, Kind: MomentDwell, Element: tree.element(p.axRef, p.seen)}
 			if p.click {
 				m.Kind = MomentClick
 			} else {
@@ -291,6 +292,44 @@ func (r *Reader) Walkthrough(rawID string, opts WalkthroughOptions) *Envelope {
 
 	data.Notes = walkthroughNotes(data, hasFrames, pointerLayer != nil, axLayer != nil, cueErr != nil)
 	return r.finishSuccess(start, data, walkthroughGuidance(id.ConversationID, data), warnings)
+}
+
+// applyCitationWindow narrows an unwindowed read to the selectors a
+// sageox:// citation carries, as transcript does: explicit options win; a
+// cue= range is used as-is; a t= range maps onto the media clock through the
+// recording t0, and a t= instant selects the cue it falls in.
+func applyCitationWindow(opts WalkthroughOptions, id *ID, cues []vtt.Cue, manifest *format.Manifest, warnings *[]string) WalkthroughOptions {
+	if opts.CueFirst != 0 || opts.HasWindow || id.Address == nil {
+		return opts
+	}
+	sel := id.Address.Selectors
+	if c := sel.Cue; c != nil {
+		opts.CueFirst, opts.CueLast = int(c.From), int(c.To)
+		return opts
+	}
+	t := sel.Time
+	if t == nil {
+		return opts
+	}
+	t0, ok := manifestT0(manifest)
+	if !ok {
+		*warnings = append(*warnings, "t= selector cannot be resolved: no recording clock t0 on disk; serving the whole recording instead")
+		return opts
+	}
+	from, okFrom := boundOffset(time.UnixMilli(t.StartMS).Sub(t0))
+	to, okTo := boundOffset(time.UnixMilli(t.EndMS).Sub(t0))
+	if okFrom != rowKept || okTo != rowKept {
+		*warnings = append(*warnings, "t= selector falls outside this recording; serving the whole recording instead")
+		return opts
+	}
+	if !t.IsRange {
+		if n, ok := owningCue(cues, from); ok {
+			opts.CueFirst, opts.CueLast = n, n
+			return opts
+		}
+	}
+	opts.FromOffset, opts.ToOffset, opts.HasWindow = from, to, true
+	return opts
 }
 
 // conversationTitle is the show command's title rule: the index title, then

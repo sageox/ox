@@ -54,8 +54,15 @@ type ScreenPage struct {
 }
 
 // pointerMoment is a click or a dwell on the media clock, before naming.
+// at is where the moment sits on the timeline (a dwell's is where the rest
+// began, back-dated by the first row's dwell_ms); seen is the first row that
+// observed it, the instant the element is named at. The producer writes an
+// element's node row when a pointer row first references it, so a rest that
+// starts on a never-hovered element has no node row until seen, and naming
+// it at the back-dated start would find nothing.
 type pointerMoment struct {
 	at    time.Duration
+	seen  time.Duration
 	click bool
 	dwell time.Duration
 	axRef string
@@ -120,7 +127,7 @@ func loadPointerMoments(droot *os.Root, layer *format.DiscoveredLayer, manifest 
 	}
 	for _, s := range rows {
 		if s.click {
-			out = append(out, pointerMoment{at: s.at, click: true, axRef: s.axRef})
+			out = append(out, pointerMoment{at: s.at, seen: s.at, click: true, axRef: s.axRef})
 		}
 		switch {
 		case s.brk || s.dwell <= 0:
@@ -129,7 +136,7 @@ func loadPointerMoments(droot *os.Root, layer *format.DiscoveredLayer, manifest 
 			open.dwell = s.dwell
 		default:
 			closeRest()
-			open = &pointerMoment{at: max(s.at-s.dwell, 0), dwell: s.dwell, axRef: s.axRef}
+			open = &pointerMoment{at: max(s.at-s.dwell, 0), seen: s.at, dwell: s.dwell, axRef: s.axRef}
 		}
 	}
 	closeRest()
@@ -163,38 +170,49 @@ type axTreeNode struct {
 	depth                    int
 	role, title, desc, domID string
 	url                      string
-	snapshot                 string
+}
+
+// sameState reports whether two rows describe the same element state, so a
+// snapshot that re-walks an unchanged element costs nothing.
+func (n axTreeNode) sameState(o axTreeNode) bool {
+	return n.parent == o.parent && n.role == o.role && n.title == o.title &&
+		n.desc == o.desc && n.domID == o.domID && n.url == o.url
 }
 
 // axTree is the walkthrough's accessibility layer, indexed for naming
-// (nodes by ref, time-sorted) and for the page timeline (snapshots in file
-// order with the reason each was taken).
+// (each element's distinct states by ref, time-sorted) and for the page
+// timeline (per snapshot: why it was taken and its outermost web area and
+// window).
 type axTree struct {
 	byRef     map[string][]axTreeNode
 	snapshots []axSnapshot
 }
 
 type axSnapshot struct {
-	key    string
-	at     time.Duration
-	reason string
-	nodes  []axTreeNode
+	key         string
+	at          time.Duration
+	reason      string
+	web, window *axTreeNode
 }
 
-// loadAXTree streams the ax-tree sidecar once, keeping node rows (bounded
-// by forEachSidecarRow's kept-row cap) and snapshot reasons.
+// loadAXTree streams the ax-tree sidecar once. Interval snapshots re-walk
+// the same elements every few seconds, so only a node row that changes its
+// element's state is kept (a repeat is skipped and does not count against
+// forEachSidecarRow's kept-row cap), and a snapshot keeps just the two rows
+// the page timeline reads. That keeps a long walkthrough's late snapshots
+// within reach.
 func loadAXTree(droot *os.Root, layer *format.DiscoveredLayer, manifest *format.Manifest, warnings *[]string) *axTree {
 	t0, hasT0 := layerT0(layer, manifest)
 	tree := &axTree{byRef: map[string][]axTreeNode{}}
 	index := map[string]int{} // snapshot key -> position in tree.snapshots
-	snapshot := func(key string, at time.Duration) *axSnapshot {
+	snapshot := func(key string, at time.Duration) (*axSnapshot, bool) {
 		i, ok := index[key]
 		if !ok {
 			i = len(tree.snapshots)
 			index[key] = i
 			tree.snapshots = append(tree.snapshots, axSnapshot{key: key, at: at})
 		}
-		return &tree.snapshots[i]
+		return &tree.snapshots[i], !ok
 	}
 	forEachSidecarRow(droot, layer, defaultAXSidecar, warnings, func(line []byte) rowResult {
 		var row axTreeRow
@@ -207,8 +225,12 @@ func loadAXTree(droot *os.Root, layer *format.DiscoveredLayer, manifest *format.
 		}
 		key := strings.Trim(string(row.Snapshot), `"`)
 		if row.Role == "" {
-			if key != "" {
-				snapshot(key, at).reason = row.Reason
+			if key == "" {
+				return rowSkipped
+			}
+			snap, created := snapshot(key, at)
+			snap.reason = row.Reason
+			if created {
 				return rowKept
 			}
 			return rowSkipped
@@ -218,26 +240,47 @@ func loadAXTree(droot *os.Root, layer *format.DiscoveredLayer, manifest *format.
 			depth = *row.Depth
 		}
 		n := axTreeNode{
-			at: at, parent: row.Parent, depth: depth, snapshot: key,
+			at: at, parent: row.Parent, depth: depth,
 			role: row.Role, title: row.Title, desc: row.Desc, domID: row.DOMID,
 		}
 		if row.Role == "AXWebArea" {
 			n.url = pageURL(row.URL)
 		}
+		result := rowSkipped
+		if key != "" && (n.role == "AXWebArea" || n.role == "AXWindow") {
+			snap, created := snapshot(key, at)
+			if created {
+				result = rowKept
+			}
+			slot := &snap.window
+			if n.role == "AXWebArea" {
+				slot = &snap.web
+			}
+			if named := cleanScreenText(n.title) != "" || n.url != ""; named && shallower(n, *slot) {
+				kept := n
+				*slot = &kept
+			}
+		}
 		if row.AXRef != "" {
-			tree.byRef[row.AXRef] = append(tree.byRef[row.AXRef], n)
+			states := tree.byRef[row.AXRef]
+			if len(states) == 0 || !states[len(states)-1].sameState(n) {
+				tree.byRef[row.AXRef] = append(states, n)
+				result = rowKept
+			}
 		}
-		if key != "" {
-			s := snapshot(key, at)
-			s.nodes = append(s.nodes, n)
-		}
-		return rowKept
+		return result
 	})
 	for ref := range tree.byRef {
 		nodes := tree.byRef[ref]
 		sort.SliceStable(nodes, func(i, j int) bool { return nodes[i].at < nodes[j].at })
 	}
 	return tree
+}
+
+// shallower reports whether n is a better page candidate than best: any row
+// beats none, and a known smaller depth beats a larger or unknown one.
+func shallower(n axTreeNode, best *axTreeNode) bool {
+	return best == nil || (n.depth >= 0 && (best.depth < 0 || n.depth < best.depth))
 }
 
 // nodeAt returns the latest node row for ref at or before at. The producer
@@ -336,8 +379,7 @@ func (t *axTree) pages() []pageMoment {
 		if s.reason == "hover" {
 			continue
 		}
-		web := shallowest(s.nodes, "AXWebArea")
-		window := shallowest(s.nodes, "AXWindow")
+		web, window := s.web, s.window
 		windowTitle := ""
 		if window != nil {
 			windowTitle = cleanScreenText(window.title)
@@ -366,22 +408,6 @@ func (t *axTree) pages() []pageMoment {
 		}
 	}
 	return out
-}
-
-// shallowest returns the snapshot's outermost named node of role (title or
-// address), preferring a known depth over an unknown one.
-func shallowest(nodes []axTreeNode, role string) *axTreeNode {
-	var best *axTreeNode
-	for i := range nodes {
-		n := &nodes[i]
-		if n.role != role || (cleanScreenText(n.title) == "" && n.url == "") {
-			continue
-		}
-		if best == nil || (n.depth >= 0 && (best.depth < 0 || n.depth < best.depth)) {
-			best = n
-		}
-	}
-	return best
 }
 
 // pageURL reduces a web area's address to scheme, host, and path. The query
