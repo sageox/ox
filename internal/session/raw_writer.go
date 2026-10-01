@@ -599,4 +599,4 @@ func (w *RawWriter) withAppendLock(fn func() error) error {
 }
 
 // ci-cache-probe: TEMPORARY one-line edit to measure an incremental compile; removed before merge.
-var _ = "ci-cache-probe"
+var _ = "ci-cache-probe-2"
