@@ -210,7 +210,8 @@ func TestBuildPrompt_EmptyTranscriptRechecksLedger(t *testing.T) {
 // for a re-armed empty download: no LLM, "Brief session" at status ok, and the
 // Ledger's own record kept. Failure prevented: finalizing a download started
 // meta.json from blank and copied it over the Ledger's, erasing repo_id,
-// user_id and model and minting a new session id that 404s /c/ links.
+// user_id and model, re-deriving identity from the transcript header, and
+// minting a new session id that 404s /c/ links.
 func TestProcessResult_SettlesEmptyLedgerDownload(t *testing.T) {
 	const name = "2026-09-24T23-03-riley-OxRiLy"
 	legacy := &lfs.SessionMeta{RepoID: "repo_empty_test", SessionName: name}
@@ -264,7 +265,13 @@ func TestProcessResult_SettlesEmptyLedgerDownload(t *testing.T) {
 			assert.Equal(t, "repo_empty_test", got.RepoID)
 			assert.Equal(t, "usr_riley", got.UserID)
 			assert.Equal(t, "claude-opus", got.Model)
-			assert.Equal(t, tc.wantID, got.SessionID, "the session id the team resolves must not change")
+			// The transcript header here carries only agent_id: identity must come
+			// from the Ledger's record, not be re-derived from the header.
+			assert.Equal(t, "riley", got.Username)
+			assert.Equal(t, "OxRiLy", got.AgentID)
+			assert.Equal(t, "claude-code", got.AgentType)
+			assert.Equal(t, tc.sessionID, got.SessionID, "the stored session id is kept as is, never backfilled")
+			assert.Equal(t, tc.wantID, got.EffectiveSessionID(), "the session id the team resolves must not change")
 			assert.NoDirExists(t, f.cacheDir, "the download is removed once the session is published")
 
 			skipped := tel.lastByName("summarization_skipped")

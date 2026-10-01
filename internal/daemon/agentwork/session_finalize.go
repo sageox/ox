@@ -1595,13 +1595,6 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	if preservedSessionID == "" && payload.PreservedSessionID != "" {
 		preservedSessionID = payload.PreservedSessionID
 	}
-	// A download of a session already in the Ledger has no meta.json of its
-	// own. Keep the id the team already resolves, or /c/ links 404.
-	if preservedSessionID == "" {
-		if ledgerMeta := ledgerMetaForDownload(payload); ledgerMeta != nil {
-			preservedSessionID = ledgerMeta.EffectiveSessionID()
-		}
-	}
 	// start-minted ID carried in the raw.jsonl header so conversation URLs
 	// circulated during the live session (commit trailers, PR bodies) keep
 	// resolving after a daemon-side finalize
@@ -1641,8 +1634,10 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	var meta *lfs.SessionMeta
 	if err := lfs.MutateSessionMeta(context.Background(), payload.SessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 		next := current
+		fromLedger := false
 		if next == nil {
 			next = ledgerMetaForDownload(payload)
+			fromLedger = next != nil
 		}
 		if next == nil {
 			// no meta.json yet — seed one; there is nothing to preserve.
@@ -1681,11 +1676,17 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		}
 
 		// identity — safe to (re)assert; these describe the recording itself.
-		next.SessionName = sessionName
-		next.Username = username
-		next.AgentID = agentID
-		next.AgentType = agentType
-		next.SessionID = sessionIDForMeta
+		// A download of a session already in the Ledger keeps the Ledger's
+		// identity as stored: the header may lack these fields, and a legacy
+		// session's id is derived, never backfilled. Re-deriving would 404
+		// /c/ links already shared.
+		if !fromLedger {
+			next.SessionName = sessionName
+			next.Username = username
+			next.AgentID = agentID
+			next.AgentType = agentType
+			next.SessionID = sessionIDForMeta
+		}
 		if stored.Meta != nil && stored.Meta.ContinuedFromSessionID != "" {
 			next.ContinuedFromSessionID = stored.Meta.ContinuedFromSessionID
 		}
