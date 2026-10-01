@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/cli"
+	lfspointer "github.com/sageox/ox/internal/lfs/pointer"
 	"github.com/sageox/ox/internal/vtt"
 )
 
@@ -50,8 +51,12 @@ type TranscriptFrame struct {
 	// synced checkout the file is a stub.
 	Image string `json:"image,omitempty"`
 	// FetchCommand is the ready-to-run, shell-quoted `ox fetch` command
-	// that downloads Image's real bytes.
+	// that downloads Image's real bytes. Omitted when LocalImage is set.
 	FetchCommand string `json:"fetch_command,omitempty"`
+	// LocalImage is a path whose bytes are the real image, ready to open:
+	// the file in the checkout when it is not a stub, else the ox fetch
+	// cache copy when an earlier fetch already downloaded it.
+	LocalImage string `json:"local_image,omitempty"`
 }
 
 // keyframesFile is the subset of keyframes.json this reader consumes.
@@ -59,14 +64,19 @@ type TranscriptFrame struct {
 // re-opens by absolute path, bypassing the os.Root folder guard every read
 // in this package goes through.
 type keyframesFile struct {
-	Keyframes []struct {
-		TimestampSeconds float64 `json:"timestamp_seconds"`
-		ExtractionMethod string  `json:"extraction_method"`
-		ContentType      string  `json:"content_type"`
-		Description      string  `json:"description"`
-		Filename         string  `json:"filename"`
-		S3Key            string  `json:"s3_key"`
-	} `json:"keyframes"`
+	Keyframes []keyframeEntry `json:"keyframes"`
+	// Duration is the video length in seconds, when the server recorded it.
+	Duration float64 `json:"duration"`
+}
+
+// keyframeEntry is one keyframes.json row.
+type keyframeEntry struct {
+	TimestampSeconds float64 `json:"timestamp_seconds"`
+	ExtractionMethod string  `json:"extraction_method"`
+	ContentType      string  `json:"content_type"`
+	Description      string  `json:"description"`
+	Filename         string  `json:"filename"`
+	S3Key            string  `json:"s3_key"`
 }
 
 // hasKeyframes reports whether the folder carries a keyframes.json (a screen
@@ -110,28 +120,11 @@ func readBoundedFile(droot *os.Root, rel string, max int64) (data []byte, trunca
 // the served window — so a --cues window gets exactly its own frames and a
 // frame near a window edge is never attributed to the wrong cue.
 func (r *Reader) attachFrames(droot *os.Root, folder string, all []vtt.Cue, out []TranscriptCue, warnings *[]string) {
-	raw, truncated, err := readBoundedFile(droot, KeyframesFileName, maxScreenFileBytes)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return // audio-only recording: no frames, no error
-	case err != nil:
-		*warnings = append(*warnings, "keyframes unreadable: "+err.Error())
-		return
-	case truncated:
-		*warnings = append(*warnings, fmt.Sprintf("%s exceeds %d bytes; frames skipped", KeyframesFileName, maxScreenFileBytes))
-		return
-	}
-	var kf keyframesFile
-	if err := json.Unmarshal(raw, &kf); err != nil {
-		*warnings = append(*warnings, fmt.Sprintf("%s is not valid JSON: %v", KeyframesFileName, err))
+	kf, ok := loadKeyframes(droot, warnings)
+	if !ok {
 		return
 	}
 	frames := kf.Keyframes
-	if len(frames) > maxKeyframes {
-		*warnings = append(*warnings, fmt.Sprintf("%s lists %d frames; only the first %d were considered", KeyframesFileName, len(frames), maxKeyframes))
-		frames = frames[:maxKeyframes]
-	}
-	sort.SliceStable(frames, func(i, j int) bool { return frames[i].TimestampSeconds < frames[j].TimestampSeconds })
 
 	pos := servedPositions(out)
 	outOfRange := 0
@@ -149,21 +142,92 @@ func (r *Reader) attachFrames(droot *os.Root, folder string, all []vtt.Cue, out 
 		if !served {
 			continue
 		}
-		frame := TranscriptFrame{
-			At:          formatVTTTimestamp(at),
-			Why:         cleanScreenText(f.ExtractionMethod),
-			ContentType: cleanScreenText(f.ContentType),
-			Description: cleanScreenText(f.Description),
-		}
-		if rel, ok := keyframeImagePath(droot, keyframeImageName(f.Filename, f.S3Key)); ok {
-			frame.Image = filepath.Join(r.discussionsRoot, folder, filepath.FromSlash(rel))
-			frame.FetchCommand = "ox fetch " + shellQuoteIfNeeded(frame.Image)
-		}
-		out[i].Frames = append(out[i].Frames, frame)
+		out[i].Frames = append(out[i].Frames, r.buildFrame(droot, folder, f, at))
 	}
 	if outOfRange > 0 {
 		*warnings = append(*warnings, fmt.Sprintf("%s: %d frames with an out-of-range timestamp skipped", KeyframesFileName, outOfRange))
 	}
+}
+
+// loadKeyframes reads and parses keyframes.json through the folder root,
+// capped at maxKeyframes and sorted by time. ok is false when there is
+// nothing usable; a missing file is silent (audio-only recording), every
+// other failure is reported through warnings.
+func loadKeyframes(droot *os.Root, warnings *[]string) (kf keyframesFile, ok bool) {
+	raw, truncated, err := readBoundedFile(droot, KeyframesFileName, maxScreenFileBytes)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return kf, false // audio-only recording: no frames, no error
+	case err != nil:
+		*warnings = append(*warnings, "keyframes unreadable: "+err.Error())
+		return kf, false
+	case truncated:
+		*warnings = append(*warnings, fmt.Sprintf("%s exceeds %d bytes; frames skipped", KeyframesFileName, maxScreenFileBytes))
+		return kf, false
+	}
+	if err := json.Unmarshal(raw, &kf); err != nil {
+		*warnings = append(*warnings, fmt.Sprintf("%s is not valid JSON: %v", KeyframesFileName, err))
+		return kf, false
+	}
+	if len(kf.Keyframes) > maxKeyframes {
+		*warnings = append(*warnings, fmt.Sprintf("%s lists %d frames; only the first %d were considered", KeyframesFileName, len(kf.Keyframes), maxKeyframes))
+		kf.Keyframes = kf.Keyframes[:maxKeyframes]
+	}
+	sort.SliceStable(kf.Keyframes, func(i, j int) bool { return kf.Keyframes[i].TimestampSeconds < kf.Keyframes[j].TimestampSeconds })
+	return kf, true
+}
+
+// buildFrame turns one keyframes.json row (already placed at media offset
+// at) into its output form: cleaned text, the guarded image path, and either
+// the bytes' local path or the ox fetch command that downloads them.
+func (r *Reader) buildFrame(droot *os.Root, folder string, f keyframeEntry, at time.Duration) TranscriptFrame {
+	frame := TranscriptFrame{
+		At:          formatVTTTimestamp(at),
+		Why:         cleanScreenText(f.ExtractionMethod),
+		ContentType: cleanScreenText(f.ContentType),
+		Description: cleanScreenText(f.Description),
+	}
+	rel, ok := keyframeImagePath(droot, keyframeImageName(f.Filename, f.S3Key))
+	if !ok {
+		return frame
+	}
+	frame.Image = filepath.Join(r.discussionsRoot, folder, filepath.FromSlash(rel))
+	if local := r.localImage(droot, folder, rel, frame.Image); local != "" {
+		frame.LocalImage = local
+	} else {
+		frame.FetchCommand = "ox fetch " + shellQuoteIfNeeded(frame.Image)
+	}
+	return frame
+}
+
+// maxPointerProbeBytes is how much of an image is read to tell an LFS stub
+// (well under 200 bytes) from real image bytes.
+const maxPointerProbeBytes = 512
+
+// localImage returns a path whose bytes are the real image, or "" when the
+// image is still a stub nobody fetched. The checkout copy counts when it is
+// not an LFS pointer; otherwise the ox fetch cache copy counts when it
+// exists and has the size the pointer promises. The cache sits beside the
+// discussions tree (<team context>/.sageox/cache/discussions/...), where
+// ox fetch writes it; it is only stat-ed here, never read.
+func (r *Reader) localImage(droot *os.Root, folder, rel, image string) string {
+	head, _, err := readBoundedFile(droot, filepath.FromSlash(rel), maxPointerProbeBytes)
+	if err != nil {
+		return ""
+	}
+	_, size, perr := lfspointer.Parse(string(head))
+	if perr != nil {
+		if strings.HasPrefix(string(head), "version https://git-lfs") {
+			return "" // pointer-shaped but unparseable: not an image
+		}
+		return image // real bytes, already in the checkout
+	}
+	cached := filepath.Join(filepath.Dir(r.discussionsRoot), ".sageox", "cache", DiscussionsDirName, folder, filepath.FromSlash(rel))
+	info, err := os.Lstat(cached)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != size {
+		return ""
+	}
+	return cached
 }
 
 // maxMediaOffset bounds any media-clock offset read from screen data. No

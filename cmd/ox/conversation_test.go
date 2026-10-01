@@ -57,6 +57,7 @@ func resetConversationFlagSets() {
 	conversationTranscriptFlagSet = conversationTranscriptFlags{}
 	conversationTopicsFlagSet = conversationFormatFlags{}
 	conversationTopicFlagSet = conversationTopicFlags{}
+	conversationWalkthroughFlagSet = conversationWalkthroughFlags{}
 }
 
 // runConversationInProc executes one conversation subcommand in-process on a
@@ -83,6 +84,9 @@ func runConversationInProc(t *testing.T, sub string, args ...string) (string, st
 	case "topic":
 		cmd.RunE = runConversationTopic
 		registerConversationTopicFlags(cmd, &conversationTopicFlagSet)
+	case "walkthrough":
+		cmd.RunE = runConversationWalkthrough
+		registerConversationWalkthroughFlags(cmd, &conversationWalkthroughFlagSet)
 	default:
 		t.Fatalf("unknown subcommand %q", sub)
 	}
@@ -451,5 +455,105 @@ func TestConversationTranscriptFramesText(t *testing.T) {
 	}
 	if !strings.Contains(plain, "--frames") {
 		t.Errorf("guidance lacks the --frames hint:\n%s", plain)
+	}
+}
+
+// useDesktopWalkthroughReader points the command layer at the read
+// package's desktop-produced walkthrough fixture.
+func useDesktopWalkthroughReader(t *testing.T) {
+	t.Helper()
+	isolateConversationAuth(t)
+	orig := openConversationReader
+	t.Cleanup(func() { openConversationReader = orig })
+	openConversationReader = func() (*read.Reader, *read.Error) {
+		return read.New(repoPath("..", "..", "internal", "conversation", "read", "testdata", "walkthrough-desktop", "discussions"), time.Time{}), nil
+	}
+}
+
+const convTestWalkthroughCnv = "cnv_01a0f488-0000-7000-8000-0000000000b1"
+
+// TestConversationWalkthroughEnvelope: the walkthrough command serves the
+// read layer's payload as one JSON envelope, honoring --cues and --limit.
+// Failure prevented: the flags parse but never reach the reader, so an AI
+// coworker asking for one cue gets the whole recording.
+func TestConversationWalkthroughEnvelope(t *testing.T) {
+	useDesktopWalkthroughReader(t)
+
+	stdout, _, err := runConversationInProc(t, "walkthrough", convTestWalkthroughCnv, "--cues", "2", "--limit", "2")
+	if err != nil {
+		t.Fatalf("walkthrough failed: %v\n%s", err, stdout)
+	}
+	env := decodeConvEnvelope(t, stdout)
+	var d read.WalkthroughData
+	if err := json.Unmarshal(env.Data, &d); err != nil {
+		t.Fatalf("data: %v", err)
+	}
+	if !env.Success || len(d.Moments) != 2 || d.Window.Total != 3 || !d.Window.Truncated {
+		t.Fatalf("envelope = %+v, window = %+v", env, d.Window)
+	}
+	if d.Moments[0].Kind != read.MomentClick || d.Moments[0].Cue != 2 {
+		t.Errorf("first moment = %+v", d.Moments[0])
+	}
+	if !strings.Contains(env.Guidance, "ox conversation transcript "+convTestWalkthroughCnv) {
+		t.Errorf("guidance = %q", env.Guidance)
+	}
+}
+
+// TestConversationWalkthroughText pins the human rendering: header, notes,
+// one line per moment with its cue, and the open/fetch line under a frame.
+func TestConversationWalkthroughText(t *testing.T) {
+	useDesktopWalkthroughReader(t)
+
+	stdout, _, err := runConversationInProc(t, "walkthrough", convTestWalkthroughCnv, "--text")
+	if err != nil {
+		t.Fatalf("walkthrough --text failed: %v\n%s", err, stdout)
+	}
+	for _, want := range []string{
+		"Saved page walkthrough",
+		"window: Browser · Team (1440x900)",
+		"screen data: 3 keyframes (2 described, 1 downloaded), pointer layer, ax-tree layer, keyframe-hints layer, video 00:00:25.200",
+		"note: 1 of 3 keyframes have no description",
+		`click    AXLink "Saved" #nav-saved`,
+		`dwell    AXImage "Team mural for 2026-09-30" for 2.5s`,
+		`click    AXGroup in AXGroup "Pinned items"`,
+		`page     "Saved" https://sageox.test/team/t1/saved`,
+		"fetch: ox fetch ",
+		"open: ",
+		"pointer outside the window 00:00:01.000 to 00:00:02.000",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("walkthrough text lacks %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestConversationWalkthroughUsageErrors: malformed flags are usage errors
+// (exit 2) with an envelope, before any reader call.
+func TestConversationWalkthroughUsageErrors(t *testing.T) {
+	useDesktopWalkthroughReader(t)
+
+	tests := []struct {
+		name string
+		args []string
+		code string
+	}{
+		{"no id", nil, conversationUsageErrorCode},
+		{"zero limit", []string{convTestWalkthroughCnv, "--limit", "0"}, conversationUsageErrorCode},
+		{"half window", []string{convTestWalkthroughCnv, "--from", "1s"}, read.ErrCodeInvalidSelector},
+		{"bad cues", []string{convTestWalkthroughCnv, "--cues", "x"}, read.ErrCodeInvalidSelector},
+		{"cue zero", []string{convTestWalkthroughCnv, "--cues", "0-2"}, read.ErrCodeInvalidSelector},
+		{"reversed", []string{convTestWalkthroughCnv, "--cues", "3-2"}, read.ErrCodeInvalidSelector},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stdout, _, err := runConversationInProc(t, "walkthrough", tt.args...)
+			if exitCodeOf(t, err) != 2 {
+				t.Errorf("exit = %d, want 2", exitCodeOf(t, err))
+			}
+			env := decodeConvEnvelope(t, stdout)
+			if env.Success || env.Error == nil || env.Error.Code != tt.code {
+				t.Errorf("envelope = %+v, want code %s", env.Error, tt.code)
+			}
+		})
 	}
 }
