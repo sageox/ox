@@ -66,6 +66,11 @@ type pointerMoment struct {
 	click bool
 	dwell time.Duration
 	axRef string
+	// base and peak are the producer's dwell_ms when this element was first
+	// seen and at its latest row. dwell_ms counts stillness at one screen
+	// spot, not time over one element (sidecar PointerSampler.swift), so a
+	// rest on an element that appeared under a still pointer is peak - base.
+	base, peak time.Duration
 }
 
 // pointerSeqRow is the subset of a pointer.jsonl row the moment pass needs.
@@ -118,26 +123,37 @@ func loadPointerMoments(droot *os.Root, layer *format.DiscoveredLayer, manifest 
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].at < rows[j].at })
 
 	var out []pointerMoment
-	var open *pointerMoment // the rest in progress; dwell holds its peak
+	var open *pointerMoment // the rest in progress
 	closeRest := func() {
 		if open != nil && open.dwell >= minDwell {
 			out = append(out, *open)
 		}
 		open = nil
 	}
-	for _, s := range rows {
+	var prev *seq // the previous row, to tell a new element from a new rest
+	for i := range rows {
+		s := rows[i]
 		if s.click {
 			out = append(out, pointerMoment{at: s.at, seen: s.at, click: true, axRef: s.axRef})
 		}
 		switch {
 		case s.brk || s.dwell <= 0:
 			closeRest()
-		case open != nil && s.axRef == open.axRef && s.dwell >= open.dwell:
-			open.dwell = s.dwell
+		case open != nil && s.axRef == open.axRef && s.dwell >= open.peak:
+			open.peak = s.dwell
+			open.dwell = s.dwell - open.base
 		default:
 			closeRest()
-			open = &pointerMoment{at: max(s.at-s.dwell, 0), seen: s.at, dwell: s.dwell, axRef: s.axRef}
+			if prev != nil && !prev.brk && prev.dwell > 0 && s.dwell >= prev.dwell {
+				// The pointer never moved; the element under it changed (a
+				// page loaded, a menu opened). The rest on this element
+				// starts here, not when the pointer stopped.
+				open = &pointerMoment{at: s.at, seen: s.at, axRef: s.axRef, base: s.dwell, peak: s.dwell}
+			} else {
+				open = &pointerMoment{at: max(s.at-s.dwell, 0), seen: s.at, dwell: s.dwell, axRef: s.axRef, peak: s.dwell}
+			}
 		}
+		prev = &rows[i]
 	}
 	closeRest()
 	sort.SliceStable(out, func(i, j int) bool { return out[i].at < out[j].at })

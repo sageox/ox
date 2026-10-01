@@ -41,3 +41,24 @@ func TestWalkthroughTextNamesAreaAndMarks(t *testing.T) {
 		t.Errorf("the mark at 00:00:04 must print before the click at the same instant:\n%s", out)
 	}
 }
+
+// TestWalkthroughTextTargetLineJoinsOnlyWhatIsThere: a window target missing
+// its app or title must not print a dangling separator.
+func TestWalkthroughTextTargetLineJoinsOnlyWhatIsThere(t *testing.T) {
+	for _, tc := range []struct {
+		target read.WalkthroughTarget
+		want   string
+	}{
+		{read.WalkthroughTarget{Kind: "window", Title: "Team", Width: 1280, Height: 800}, "window: Team (1280x800)"},
+		{read.WalkthroughTarget{Kind: "window", App: "Browser", Width: 1280, Height: 800}, "window: Browser (1280x800)"},
+		{read.WalkthroughTarget{Kind: "window", Width: 1280, Height: 800}, "window: (1280x800)"},
+		{read.WalkthroughTarget{App: "Browser", Title: "Team"}, "window: Browser · Team"},
+	} {
+		target := tc.target
+		var buf bytes.Buffer
+		renderConversationWalkthroughText(&buf, &read.Envelope{Success: true, Data: &read.WalkthroughData{Title: "T", Target: &target}})
+		if !strings.Contains(buf.String(), tc.want+"\n") {
+			t.Errorf("%+v: want %q in:\n%s", tc.target, tc.want, buf.String())
+		}
+	}
+}

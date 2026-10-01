@@ -123,7 +123,13 @@ func renderConversationWalkthroughText(w io.Writer, env *read.Envelope) {
 	}
 	fmt.Fprintln(w, cli.StyleBold.Render(d.Title))
 	if t := d.Target; t != nil {
-		line := "window: " + strings.TrimSpace(t.App+" · "+t.Title)
+		var name []string
+		for _, part := range []string{t.App, t.Title} {
+			if part != "" {
+				name = append(name, part)
+			}
+		}
+		line := strings.TrimSpace("window: " + strings.Join(name, " · "))
 		if t.Kind == "area" {
 			line = "area: a screen area"
 		}

@@ -476,6 +476,43 @@ func TestPointerMomentsDwellRules(t *testing.T) {
 	}
 }
 
+// TestDwellCountsOnlyTimeOverTheElement: the producer's dwell_ms is how long
+// the pointer has stayed within 3 pt of one screen spot, whatever element is
+// under it (sidecar PointerSampler.swift). When a page changes under a still
+// pointer, the new element's first row already carries the whole stillness.
+// Its rest is timed from the first row that saw it, not back-dated to when
+// the pointer stopped.
+// Failure prevented: an element the person never pointed at reads as a
+// deliberate 2 s+ rest, dated before the click that loaded it.
+func TestDwellCountsOnlyTimeOverTheElement(t *testing.T) {
+	root := stageDesktopWalkthrough(t)
+	rows := strings.Join([]string{
+		`{"t_ms":10000,"vis":true,"dwell_ms":0,"ax_ref":"link"}`,
+		`{"t_ms":10500,"vis":true,"dwell_ms":500,"ax_ref":"link"}`,
+		`{"t_ms":11000,"vis":true,"dwell_ms":1000,"ax_ref":"link"}`,
+		`{"t_ms":11500,"vis":true,"dwell_ms":1500,"ax_ref":"heading"}`,
+		`{"t_ms":12000,"vis":true,"dwell_ms":2000,"ax_ref":"heading"}`,
+		`{"t_ms":12500,"vis":true,"dwell_ms":2500,"ax_ref":"heading"}`,
+		`{"t_ms":13000,"vis":true,"dwell_ms":3000,"ax_ref":"heading"}`,
+		`{"t_ms":13500,"vis":true,"dwell_ms":3500,"ax_ref":"heading"}`,
+		`{"t_ms":14000,"vis":true,"dwell_ms":4000,"ax_ref":"heading"}`,
+		`{"t_ms":14500,"vis":true,"dwell_ms":0,"ax_ref":"heading"}`,
+	}, "\n")
+	writeFile(t, filepath.Join(root, desktopWalkFolder, "layers", "pointer.clyr_01a0f484-0000-7000-8000-0000000000c1", "pointer.jsonl"), rows)
+	_, d := readWalkthrough(t, root, desktopWalkCnv, WalkthroughOptions{})
+	var dwells []string
+	for _, m := range d.Moments {
+		if m.Kind == MomentDwell {
+			dwells = append(dwells, m.At+"/"+itoa(int(m.DwellMS)))
+		}
+	}
+	// link: 1 s, under minDwell. heading: first seen at 11.5 s, and
+	// rested 2.5 s of the 4 s the pointer was still.
+	if want := "00:00:11.500/2500"; strings.Join(dwells, ",") != want {
+		t.Errorf("dwells = %v, want %s", dwells, want)
+	}
+}
+
 // TestDwellNamedWhenNodeRowArrivesWithFirstSample: the producer writes an
 // element's node row when a pointer row first references it, and on a 2 Hz
 // grid that first row can already carry dwell_ms. The rest is back-dated
@@ -660,6 +697,43 @@ func TestWalkthroughMarksAreMoments(t *testing.T) {
 	_, c := readWalkthrough(t, areaWalkRoot, areaWalkCnv, WalkthroughOptions{CueFirst: 2, CueLast: 2})
 	if len(c.Moments) != 1 || c.Moments[0].Kind != MomentMark {
 		t.Errorf("cue 2 moments = %+v", c.Moments)
+	}
+}
+
+// TestWalkthroughMarksWithOnlyTheHintsLayer: keyframes not extracted yet and
+// the pointer and ax-tree layers not uploaded, but the keyframe-hints layer is
+// there. Its marks are still screen data: the read must not call it "not a
+// screen walkthrough" while listing mark moments, and show must point at it.
+func TestWalkthroughMarksWithOnlyTheHintsLayer(t *testing.T) {
+	root := filepath.Join(t.TempDir(), DiscussionsDirName)
+	if err := os.Rename(copyTree(t, areaWalkRoot), root); err != nil {
+		t.Fatal(err)
+	}
+	folder := filepath.Join(root, "2026-10-01-09-00-area-walkthrough", "layers")
+	for _, l := range []string{"pointer.clyr_01a0f490-0000-7000-8000-0000000000e1", "ax-tree.clyr_01a0f490-0000-7000-8000-0000000000e2"} {
+		if err := os.RemoveAll(filepath.Join(folder, l)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, d := readWalkthrough(t, root, areaWalkCnv, WalkthroughOptions{})
+	if !d.ScreenRecording {
+		t.Fatalf("a hints layer with marks is screen data; notes = %q", d.Notes)
+	}
+	if hasNote(d, "Not a screen walkthrough") {
+		t.Errorf("notes = %q", d.Notes)
+	}
+	marks := 0
+	for _, m := range d.Moments {
+		if m.Kind == MomentMark {
+			marks++
+		}
+	}
+	if marks != 3 {
+		t.Errorf("marks = %d, want 3", marks)
+	}
+	show := New(root, time.Time{}).Show(areaWalkCnv)
+	if !strings.Contains(show.Guidance, "ox conversation walkthrough") {
+		t.Errorf("show guidance must name walkthrough, got %q", show.Guidance)
 	}
 }
 

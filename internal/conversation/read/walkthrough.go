@@ -230,7 +230,8 @@ func (r *Reader) Walkthrough(rawID string, opts WalkthroughOptions) *Envelope {
 	var moments []WalkthroughMoment
 
 	// Marks first, so a mark sorts ahead of anything else at its instant.
-	if hintsLayer := activeLayer(discovery, layerKindKeyframeHints); hintsLayer != nil {
+	hintsLayer := activeLayer(discovery, layerKindKeyframeHints)
+	if hintsLayer != nil {
 		for _, mk := range loadMarks(droot, hintsLayer, manifest, &warnings) {
 			moments = append(moments, WalkthroughMoment{at: mk.at, Kind: MomentMark, Mark: &MarkRef{By: "presenter", Seq: mk.seq}})
 		}
@@ -285,7 +286,7 @@ func (r *Reader) Walkthrough(rawID string, opts WalkthroughOptions) *Envelope {
 		moments = append(moments, WalkthroughMoment{at: p.at, Kind: MomentPage, Page: &page})
 	}
 
-	data.ScreenRecording = hasFrames || pointerLayer != nil || axLayer != nil
+	data.ScreenRecording = hasFrames || pointerLayer != nil || axLayer != nil || hintsLayer != nil
 	data.Target = walkthroughTarget(droot, pointerLayer, axLayer)
 
 	// Window, cue ownership, and the limit.
@@ -547,7 +548,8 @@ func walkthroughGuidance(conversationID string, d *WalkthroughData) string {
 }
 
 // isScreenRecording reports whether a folder carries any screen data:
-// keyframes, or a pointer or ax-tree layer. Any failure reads as "no".
+// keyframes, or a pointer, ax-tree, or keyframe-hints layer (the presenter's
+// marks live there). Any failure reads as "no".
 func isScreenRecording(droot *os.Root) bool {
 	if hasKeyframes(droot) {
 		return true
@@ -556,5 +558,6 @@ func isScreenRecording(droot *os.Root) bool {
 	if err != nil {
 		return false
 	}
-	return activeLayer(discovery, layerKindPointer) != nil || activeLayer(discovery, layerKindAXTree) != nil
+	return activeLayer(discovery, layerKindPointer) != nil || activeLayer(discovery, layerKindAXTree) != nil ||
+		activeLayer(discovery, layerKindKeyframeHints) != nil
 }
