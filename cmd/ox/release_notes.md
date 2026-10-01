@@ -11,9 +11,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **AI coworkers can read a screen walkthrough without watching it** — `ox conversation walkthrough <id>` turns a walkthrough recorded with SageOx Desktop into a short timeline of what was clicked, what the pointer rested on, which page was showing, and the keyframe stills, each tied to the moment in the narration. "What was on screen when they said this?" becomes one command. A new `ox-cli-walkthrough` skill teaches coworkers to use it, and when part of a recording's screen data is missing, ox says what is missing instead of guessing.
 
+## [0.20.0] - 2026-09-30
+
+Comment on exact words in a plan review, hand your AI coworker a SageOx recording link, and stop teammates' sessions from being rewritten on your machine.
+
+### New
+
+- **Comment on exact words in a plan review** — in `ox plan review`, drag across a phrase or double-click a word to comment on just that text. A plain click still marks the whole section, and your AI coworker sees the quoted words with your note.
+- **Paste a SageOx link and your AI coworker opens the recording** — `ox conversation` commands accept sageox.ai recording and share links. `ox conversation transcript --frames` also shows what was on screen and what the narrator pointed at.
+
+### Improved
+
+- **`ox doctor` fails when your setup does** — it now exits non-zero when checks fail or ox isn't set up, including with `--json`, so scripts stop instead of carrying on.
+
+### Fixed
+
+- **Opening a teammate's session no longer rewrites it** — downloading or viewing a session used to regenerate its title and summary on your machine and publish them over the original.
+- **A failed summary is retried instead of written off** — `ox doctor` and `ox session repair-meta-summary` no longer mark sessions as unrecoverable while they wait for a summary. Empty sessions left behind by 0.17 and 0.18 are settled once as brief sessions.
+- **Ledger sync recovers when it falls far behind** — it carries an interrupted update through to the end instead of getting stuck and asking for manual git repair.
+- **`--json` and `OX_JSON=1` work on every command** — and `--json=false` turns JSON off when your AI coworker would otherwise get it by default.
+- **`--config` now selects your preferences file** — reads and writes use the file you name, and a missing or malformed file stops the command instead of being silently ignored.
+
+### Security
+
+- **Credential output stays redacted in recorded sessions** — output from commands that print credentials, such as `aws configure export-credentials`, is now reliably redacted even when a tool's request and its result are captured separately.
+- **Recordings and team context open only for your team** — `ox conversation` and `ox agent team-ctx` check that you're signed in and still a member of the repo's team before showing anything.
+
 ### Privacy
 
 - **Usage data now says which failure it was** — when a command fails, its event names the failure in ox's own wording or by its error type, with no values filled in: never arguments, paths, or anything you typed. `ox config get telemetry` lists what's sent.
+- **Usage data records how a plan review ended** — approved, timed out, or closed, with counts of comments and highlights; never their text.
 
 ## [0.19.0] - 2026-09-28
 

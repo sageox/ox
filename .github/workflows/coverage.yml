@@ -38,7 +38,7 @@ jobs:
       - name: Require requested test artifact
         run: |
           test -s junit.xml
-          python3 -c 'import xml.etree.ElementTree as ET; root = ET.parse("junit.xml").getroot(); assert any(root.iter("testcase")), "JUnit artifact has no test cases"'
+          python3 -c 'import xml.etree.ElementTree as ET; root = ET.parse("junit.xml").getroot(); assert next(root.iter("testcase"), None) is not None, "JUnit artifact has no test cases"'
 
       - name: Enforce risk-package coverage ratchets
         run: python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json
