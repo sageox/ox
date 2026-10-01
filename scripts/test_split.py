@@ -17,7 +17,8 @@ still runs exactly once, with the same flags:
 
 Each shard is a contiguous slice of the package's own run order, cut where the
 per-test seconds in the weights file (tests of 0.5s or more on CI) add up to an
-equal share; every other test counts as DEFAULT_SECONDS. MAX_RUN_BYTES keeps
+equal share; every other test counts as the package's recorded average for
+tests under that floor (DEFAULT_SECONDS if none is recorded). MAX_RUN_BYTES keeps
 each -run argument well below Linux's 128 KiB per-argument limit.
 """
 
@@ -52,7 +53,7 @@ def parse_list_output(text: str) -> list[str]:
     return names
 
 
-def plan(names: list[str], weights: dict[str, float], shards: int) -> list[list[str]]:
+def plan(names: list[str], weights: dict[str, float], shards: int, default_seconds: float = DEFAULT_SECONDS) -> list[list[str]]:
     """Cut the package's run order into contiguous shards of about equal time.
 
     Contiguous, not interleaved: each shard is a consecutive slice of the order
@@ -69,7 +70,7 @@ def plan(names: list[str], weights: dict[str, float], shards: int) -> list[list[
         duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
         raise ValueError(f"duplicate test names in listing: {duplicates[:5]}")
 
-    cost = [max(weights.get(name, 0.0), DEFAULT_SECONDS) for name in names]
+    cost = [weights.get(name, default_seconds) for name in names]
     lists = _cut(names, cost, _min_max_capacity(cost, shards))
 
     if [name for shard in lists for name in shard] != names:
@@ -154,13 +155,22 @@ def merge_junit(reports: list[Path], destination: Path) -> None:
     ET.ElementTree(root).write(destination, encoding="utf-8", xml_declaration=True)
 
 
-def load_weights(path: Path | None) -> dict[str, dict[str, float]]:
+class PackageWeights:
+    def __init__(self, tests: dict[str, float] | None = None, default_seconds: float = DEFAULT_SECONDS):
+        self.tests = tests or {}
+        self.default_seconds = default_seconds
+
+
+def load_weights(path: Path | None) -> dict[str, PackageWeights]:
     if path is None:
         return {}
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("version") != 1:
         raise ValueError(f"{path}: unsupported weights version")
-    return {package: {name: float(seconds) for name, seconds in tests.items()} for package, tests in payload["packages"].items()}
+    return {
+        package: PackageWeights({name: float(seconds) for name, seconds in entry["tests"].items()}, float(entry["default_seconds"]))
+        for package, entry in payload["packages"].items()
+    }
 
 
 def go_list(go: list[str], patterns: list[str]) -> list[str]:
@@ -248,7 +258,7 @@ class Layout:
         return names
 
 
-def build_jobs(layout: Layout, only: str | None, go: list[str], gotestsum: list[str], go_flags: list[str], packages: list[str], weights: dict[str, dict[str, float]], work_dir: Path) -> list[Job]:
+def build_jobs(layout: Layout, only: str | None, go: list[str], gotestsum: list[str], go_flags: list[str], packages: list[str], weights: dict[str, PackageWeights], work_dir: Path) -> list[Job]:
     if only is not None and only not in layout.slots():
         raise SystemExit(f"unknown slot {only!r}; slots are {layout.slots()}")
     wanted = lambda slot: only is None or only == slot  # noqa: E731
@@ -275,7 +285,8 @@ def build_jobs(layout: Layout, only: str | None, go: list[str], gotestsum: list[
         if not slots:
             continue
         import_path = go_list(go, [package])[0]
-        shards = plan(list_tests(go, go_flags, package), weights.get(import_path, {}), count)
+        known = weights.get(import_path, PackageWeights())
+        shards = plan(list_tests(go, go_flags, package), known.tests, count, known.default_seconds)
         for index in slots:
             slot = layout.split_slot(package, index)
             if index >= len(shards):
@@ -361,6 +372,7 @@ def merge_slots(args: argparse.Namespace) -> int:
 def update_weights(args: argparse.Namespace) -> int:
     """Rebuild the weights file from a CI timing artifact (gotestsum events)."""
     seconds: dict[str, dict[str, float]] = {package: {} for package in args.package}
+    light: dict[str, list[float]] = {package: [] for package in args.package}
     lines = [line for path in args.timings for line in Path(path).read_text(encoding="utf-8").splitlines()]
     for line in lines:
         try:
@@ -372,10 +384,21 @@ def update_weights(args: argparse.Namespace) -> int:
             elapsed = float(event.get("Elapsed", 0))
             if elapsed >= WEIGHT_FLOOR_SECONDS:
                 seconds[package][test] = max(seconds[package].get(test, 0.0), round(elapsed, 1))
+            else:
+                light[package].append(elapsed)
     payload = {
         "version": 1,
         "source": args.source,
-        "packages": {package: dict(sorted(tests.items(), key=lambda item: (-item[1], item[0]))) for package, tests in sorted(seconds.items())},
+        "packages": {
+            package: {
+                # Most tests are too quick to list one by one, but there are
+                # thousands of them: costing them at their real average keeps
+                # the slices even.
+                "default_seconds": round(sum(light[package]) / len(light[package]), 4) if light[package] else DEFAULT_SECONDS,
+                "tests": dict(sorted(tests.items(), key=lambda item: (-item[1], item[0]))),
+            }
+            for package, tests in sorted(seconds.items())
+        },
     }
     Path(args.output).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return 0

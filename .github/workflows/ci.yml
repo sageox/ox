@@ -96,7 +96,7 @@ jobs:
         run: |
           test -s test-results.xml
           test -s test-timings.json
-          python3 -c 'import xml.etree.ElementTree as ET; root = ET.parse("test-results.xml").getroot(); assert any(root.iter("testcase")), "JUnit artifact has no test cases"'
+          python3 -c 'import xml.etree.ElementTree as ET; root = ET.parse("test-results.xml").getroot(); assert next(root.iter("testcase"), None) is not None, "JUnit artifact has no test cases"'
           python3 scripts/test_metrics.py test-timings.json >/dev/null
 
       - name: Upload unit coverage
@@ -190,7 +190,7 @@ jobs:
         run: |
           test -s test-results.xml
           test -s test-timings.json
-          python3 -c 'import xml.etree.ElementTree as ET; root = ET.parse("test-results.xml").getroot(); assert any(root.iter("testcase")), "JUnit artifact has no test cases"'
+          python3 -c 'import xml.etree.ElementTree as ET; root = ET.parse("test-results.xml").getroot(); assert next(root.iter("testcase"), None) is not None, "JUnit artifact has no test cases"'
           python3 scripts/test_metrics.py test-timings.json >/dev/null
 
       - name: Failure digest

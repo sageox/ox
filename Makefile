@@ -355,6 +355,8 @@ coverage-merge-unit: ## Merge one coverage part per slot ($(TEST_SPLIT_PARTS)) i
 # save a build cache that PRs restore. A stale cache costs a PR run minutes of
 # race-instrumented recompiling; a drifted flag here only costs cache hits.
 warm-test-cache: build-cover ## Compile the full, acceptance, and twin test binaries into the Go build cache
+	@# testguard.BuildOxBinary: about 18 cmd/ox tests build a plain ox this way.
+	@CGO_ENABLED=0 $(GO) build -o /dev/null ./cmd/ox
 	@$(GO) test $(FULL_TEST_FLAGS) -covermode=atomic -run '^$$' ./... >/dev/null
 	@$(GO) test -tags=integration -race -covermode=atomic -run '^$$' ./cmd/ox >/dev/null
 	@$(GO) test -tags=slow -race -covermode=atomic -run '^$$' ./cmd/ox >/dev/null

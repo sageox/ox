@@ -19,6 +19,13 @@ class PlanTest(unittest.TestCase):
         shards = test_split.plan(list(weights), weights, 2)
         self.assertEqual([["TestA", "TestC"], ["TestB", "TestD"]], shards)
 
+    def test_unlisted_tests_cost_the_recorded_average(self):
+        names = ["TestHeavy"] + [f"TestLight{i}" for i in range(100)]
+        # At the 0.05s default the heavy test outweighs all 100 others; at the
+        # recorded 0.3s average they outweigh it, so the cut moves.
+        self.assertEqual(1, len(test_split.plan(names, {"TestHeavy": 10.0}, 2)[0]))
+        self.assertGreater(len(test_split.plan(names, {"TestHeavy": 10.0}, 2, default_seconds=0.3)[0]), 1)
+
     def test_light_tests_split_evenly(self):
         names = [f"TestLight{i}" for i in range(9)]
         self.assertEqual([3, 3, 3], [len(shard) for shard in test_split.plan(names, {}, 3)])
@@ -123,7 +130,9 @@ class WeightsTest(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / ".config/test-split-weights.json"
         weights = test_split.load_weights(path)
         self.assertIn("github.com/sageox/ox/cmd/ox", weights)
-        self.assertTrue(all(seconds >= test_split.WEIGHT_FLOOR_SECONDS for seconds in weights["github.com/sageox/ox/cmd/ox"].values()))
+        cmd_ox = weights["github.com/sageox/ox/cmd/ox"]
+        self.assertTrue(all(seconds >= test_split.WEIGHT_FLOOR_SECONDS for seconds in cmd_ox.tests.values()))
+        self.assertLess(cmd_ox.default_seconds, test_split.WEIGHT_FLOOR_SECONDS)
 
     def test_rejects_unknown_version(self):
         with tempfile.TemporaryDirectory() as directory:
