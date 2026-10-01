@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Plan review answers reach your team, and you can see when they have** — the review page now says "synced to your team" or "saved on the author's machine, not yet synced" instead of assuming success. A review that couldn't be pushed is retried automatically the next time an AI coworker session starts.
+- **Review answers are no longer lost or doubled** — resubmitting after a reload or a double-click sends the same round once. Two open tabs keep each other's unsent marks. Applying the same exported review twice is a no-op.
+- **Resolved review items stay resolved across machines** — each resolution is saved as its own file, so syncing two machines can no longer drop one.
+
+### Changed
+
+- **`ox plan feedback show --json` returns `{"items": [...], "corrupt_rounds": [...]}`** instead of a bare array, so a damaged review round is reported rather than silently skipped.
+
 ## [0.20.0] - 2026-09-30
 
 Comment on exact words in a plan review, hand your AI coworker a SageOx recording link, and stop teammates' sessions from being rewritten on your machine.
