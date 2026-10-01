@@ -1,7 +1,9 @@
 package ledger
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -65,4 +67,56 @@ func TestConfigureSparseCheckout_DataPlansIsNotWindowed(t *testing.T) {
 		}
 	}
 	t.Fatalf("no data/plans entry in sparse-checkout list:\n%s", output)
+}
+
+// TestConfigureSparseCheckout_KeepsPlanReviewState pins the review state that
+// lives below a plan dir — round files and the per-entry resolutions/ dir —
+// inside the cone and un-ignored, across a sparse reapply. Resolutions moved
+// from one shared resolutions.json to one file per entry (so two machines
+// never rebase-conflict on them); a nested dir the cone or an ignore rule
+// dropped would lose agent dispositions the same way plans once went
+// write-only.
+func TestConfigureSparseCheckout_KeepsPlanReviewState(t *testing.T) {
+	tempDir := t.TempDir()
+	git := func(args ...string) ([]byte, error) {
+		full := append([]string{"-C", tempDir, "-c", "user.name=test", "-c", "user.email=test@test.sageox.ai", "-c", "commit.gpgsign=false"}, args...)
+		return exec.Command("git", full...).CombinedOutput()
+	}
+	if out, err := exec.Command("git", "init", tempDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if err := ConfigureSparseCheckout(tempDir); err != nil {
+		t.Fatalf("ConfigureSparseCheckout: %v", err)
+	}
+
+	paths := []string{
+		"data/plans/2026-09-01-x/feedback/round-20260901-000000.000000000-abcd1234.json",
+		"data/plans/2026-09-01-x/feedback/resolutions/20260901-000000.000000000-abcd1234.json",
+	}
+	for _, p := range paths {
+		full := filepath.Join(tempDir, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := git("check-ignore", "-q", p); err == nil {
+			t.Fatalf("%s is gitignored:\n%s", p, out)
+		}
+	}
+	if out, err := git(append([]string{"add", "--sparse"}, paths...)...); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	if out, err := git("commit", "--no-verify", "-m", "review state"); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+	if out, err := git("sparse-checkout", "reapply"); err != nil {
+		t.Fatalf("sparse-checkout reapply: %v\n%s", err, out)
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(filepath.Join(tempDir, p)); err != nil {
+			t.Errorf("%s dropped from the working tree by the sparse cone: %v", p, err)
+		}
+	}
 }

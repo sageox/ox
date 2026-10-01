@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -95,6 +96,16 @@ func runPlanFeedbackApply(cmd *cobra.Command, slug, from string) error {
 		return fmt.Errorf("no slug: pass it as an argument or include it in the feedback JSON")
 	}
 	set.Slug = slug
+	// An export without an id gets one derived from its content, so applying
+	// the same file twice (a retried paste, a re-run script) is a no-op instead
+	// of a duplicate round that double-counts every mark.
+	if set.ID == "" {
+		id, ierr := plan.ContentRoundID(set)
+		if ierr != nil {
+			return ierr
+		}
+		set.ID = id
+	}
 
 	gitRoot := findGitRoot()
 	_, _, info, err := plan.Load(gitRoot, slug)
@@ -102,6 +113,14 @@ func runPlanFeedbackApply(cmd *cobra.Command, slug, from string) error {
 		return fmt.Errorf("load plan %q: %w", slug, err)
 	}
 	path, err := plan.SaveFeedback(info.Dir, set, time.Now())
+	if errors.Is(err, plan.ErrDuplicateRound) {
+		// Already on disk from an earlier apply: skip the commit and the notify
+		// (the first apply did both) and exit 0 — the caller's intent is met.
+		if _, werr := fmt.Fprintf(cmd.OutOrStdout(), "Feedback already applied (round %s): %s\n", set.ID, cli.StyleFile.Render(path)); werr != nil {
+			return fmt.Errorf("write output: %w", werr)
+		}
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -211,11 +230,23 @@ func enqueueFailureIsSettled(err error) bool {
 	return false
 }
 
+// planFeedbackShowJSON is the `ox plan feedback show --json` shape. Items is
+// the merged review; CorruptRounds lists round files that could not be read,
+// so a consumer can tell "no feedback" from "feedback we failed to load".
+type planFeedbackShowJSON struct {
+	Items         []plan.MergedItem `json:"items"`
+	CorruptRounds []string          `json:"corrupt_rounds"`
+}
+
 func runPlanFeedbackShow(cmd *cobra.Command, slug string, jsonOut bool) error {
 	gitRoot := findGitRoot()
 	_, _, info, err := plan.Load(gitRoot, slug)
 	if err != nil {
 		return fmt.Errorf("load plan %q: %w", slug, err)
+	}
+	corrupt, err := plan.CorruptFeedbackRounds(info.Dir)
+	if err != nil {
+		return fmt.Errorf("check review rounds: %w", err)
 	}
 	if jsonOut {
 		items, err := plan.AssembleReview(info.Dir)
@@ -225,14 +256,33 @@ func runPlanFeedbackShow(cmd *cobra.Command, slug string, jsonOut bool) error {
 		if items == nil {
 			items = []plan.MergedItem{}
 		}
-		return cli.PrintJSONTo(cmd.OutOrStdout(), items)
+		if corrupt == nil {
+			corrupt = []string{}
+		}
+		return cli.PrintJSONTo(cmd.OutOrStdout(), planFeedbackShowJSON{Items: items, CorruptRounds: corrupt})
+	}
+	out := cmd.OutOrStdout()
+	if len(corrupt) > 0 {
+		// On stdout, ahead of the digest, so an agent reading the digest cannot
+		// miss that it is incomplete.
+		var b strings.Builder
+		fmt.Fprintf(&b, "WARNING: %d review round(s) could not be read and are missing from this digest:\n", len(corrupt))
+		for _, p := range corrupt {
+			fmt.Fprintf(&b, "  %s\n", p)
+		}
+		b.WriteByte('\n')
+		if _, werr := io.WriteString(out, b.String()); werr != nil {
+			return fmt.Errorf("write output: %w", werr)
+		}
 	}
 	shown, derr := printPlanReviewDigest(cmd, info.Dir)
 	if derr != nil {
 		return derr
 	}
 	if !shown {
-		fmt.Fprintln(cmd.OutOrStdout(), "No review feedback for this plan yet.")
+		if _, werr := fmt.Fprintln(out, "No review feedback for this plan yet."); werr != nil {
+			return fmt.Errorf("write output: %w", werr)
+		}
 	}
 	return nil
 }
@@ -280,7 +330,7 @@ func printPlanReviewDigest(cmd *cobra.Command, planDir string) (bool, error) {
 
 func init() {
 	planFeedbackApplyCmd.Flags().String("from", "", "feedback JSON file (use - or omit for stdin)")
-	planFeedbackShowCmd.Flags().Bool("json", false, "emit the merged review items as JSON")
+	planFeedbackShowCmd.Flags().Bool("json", false, "emit {items, corrupt_rounds} as JSON")
 	planFeedbackResolveCmd.Flags().String("state", "addressed", "addressed | wontfix | verified")
 	planFeedbackResolveCmd.Flags().String("commit", "", "commit SHA that made the change")
 	planFeedbackResolveCmd.Flags().String("note", "", "what the agent did, or why wontfix")
