@@ -47,7 +47,7 @@ func TestReviewJS_DisconnectedModeContract(t *testing.T) {
 		"ox plan review ' + slug", // copyable restart command
 		"serviceWorker",           // offline shell registration
 		"unsent mark(s) restored", // restored-marks notice after reconnect
-		"if (offline) { offlineNotice(); return; }", // sends refused while offline
+		"if (offline) { offlineNotice(); if (fail) fail('offline', true); return; }", // sends refused while offline
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("review.js missing %q", want)
