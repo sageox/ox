@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### New
+
+- **AI coworkers can read a screen walkthrough without watching it** — `ox conversation walkthrough <id>` turns a walkthrough recorded with SageOx Desktop into a short timeline of what was clicked, what the pointer rested on, which page was showing, and the keyframe stills, each tied to the moment in the narration. "What was on screen when they said this?" becomes one command. A new `ox-cli-walkthrough` skill teaches coworkers to use it, and when part of a recording's screen data is missing, ox says what is missing instead of guessing.
+
 ### Privacy
 
 - **Usage data now says which failure it was** — when a command fails, its event names the failure in ox's own wording or by its error type, with no values filled in: never arguments, paths, or anything you typed. `ox config get telemetry` lists what's sent.
