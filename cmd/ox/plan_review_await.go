@@ -87,9 +87,12 @@ func runPlanReviewAwait(cmd *cobra.Command, slug string, timeout time.Duration) 
 		return fmt.Errorf("watch feedback: %w", err)
 	}
 	defer w.Close()
-	_ = os.MkdirAll(filepath.Join(planDir, "feedback"), 0o755)
+	// feedback/resolutions/ holds one file per resolution; fsnotify is not
+	// recursive, so watch it explicitly or later resolves never wake await.
+	_ = os.MkdirAll(filepath.Join(planDir, "feedback", "resolutions"), 0o755)
 	_ = w.Add(planDir)
 	_ = w.Add(filepath.Join(planDir, "feedback"))
+	_ = w.Add(filepath.Join(planDir, "feedback", "resolutions"))
 
 	// Re-snapshot AFTER registering the watcher: feedback written in the gap between
 	// the first snapshot and watch registration would otherwise be seen by neither

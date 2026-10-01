@@ -457,12 +457,6 @@ func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, b
 		if err != nil {
 			return nil, http.StatusBadRequest, err
 		}
-		// TEMPORARY until FeedbackSet carries ID: read the client round id
-		// straight from the body. ParseFeedback already proved it is JSON.
-		var roundID struct {
-			ID string `json:"id"`
-		}
-		_ = json.Unmarshal(body, &roundID)
 		set.Slug = slug
 		duplicate := false
 		if _, err := saveReviewFeedback(planDir, set, time.Now()); err != nil {
@@ -472,7 +466,7 @@ func liveReviewHandlerWithActivity(gitRoot, slug, planDir, base, token string, b
 			duplicate = true
 		}
 		resp := planCommitFields(commitPlanForReview(ctx, gitRoot, planDir))
-		resp["round_id"] = roundID.ID
+		resp["round_id"] = set.ID
 		resp["duplicate"] = duplicate
 		resp["notified"] = false
 		if duplicate {
@@ -647,8 +641,14 @@ func watchPlanDir(ctx context.Context, planDir string, bc *broadcaster) {
 		return
 	}
 	defer w.Close()
+	// Resolutions are one file per entry under feedback/resolutions/, and
+	// fsnotify is not recursive: without watching that subdir only the first
+	// resolve (which creates it) would reload the live page.
+	resDir := filepath.Join(planDir, "feedback", "resolutions")
+	_ = os.MkdirAll(resDir, 0o755) // best effort; a non-dir feedback path is surfaced by the handlers
 	_ = w.Add(planDir)
-	_ = w.Add(filepath.Join(planDir, "feedback")) // may not exist yet; ignore error
+	_ = w.Add(filepath.Join(planDir, "feedback"))
+	_ = w.Add(resDir)
 	var debounce *time.Timer
 	for {
 		select {

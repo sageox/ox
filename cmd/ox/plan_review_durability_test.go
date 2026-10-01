@@ -116,7 +116,7 @@ func feedbackRoundsOnRemote(t *testing.T, origin string) int {
 func TestPlanReviewDurability_FeedbackCommittedAndPushed(t *testing.T) {
 	f := newDurableReviewFixture(t)
 
-	code, body := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("r-1", "h1"))
+	code, body := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("round-0001", "h1"))
 	if code != http.StatusOK {
 		t.Fatalf("status %d: %s", code, body)
 	}
@@ -124,7 +124,7 @@ func TestPlanReviewDurability_FeedbackCommittedAndPushed(t *testing.T) {
 	if !r.OK || !r.Saved || !r.Committed || !r.Pushed {
 		t.Fatalf("want saved+committed+pushed, got %+v", r)
 	}
-	if r.RoundID == nil || *r.RoundID != "r-1" || r.Duplicate == nil || *r.Duplicate || r.Notified == nil || !*r.Notified {
+	if r.RoundID == nil || *r.RoundID != "round-0001" || r.Duplicate == nil || *r.Duplicate || r.Notified == nil || !*r.Notified {
 		t.Fatalf("round metadata wrong: %s", body)
 	}
 	if !strings.Contains(runGitInDir(t, f.origin, "log", "--format=%s", "main"), "plan: 2026-10-01-durable") {
@@ -152,7 +152,8 @@ func TestPlanReviewDurability_FeedbackCommittedAndPushed(t *testing.T) {
 	default:
 		t.Fatal("/accept must reset the idle timer too")
 	}
-	if !strings.Contains(remoteFiles(t, f.origin), "resolutions.json") {
+	// resolutions are one file per entry under feedback/resolutions/
+	if !strings.Contains(remoteFiles(t, f.origin), "feedback/resolutions/") {
 		t.Fatal("accept resolution was not pushed")
 	}
 }
@@ -164,7 +165,7 @@ func TestPlanReviewDurability_PushFailureMarksPendingAndFlushRecovers(t *testing
 	f := newDurableReviewFixture(t)
 	runGitInDir(t, f.ledger, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
 
-	code, body := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("r-1", "h1"))
+	code, body := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("round-0001", "h1"))
 	if code != http.StatusOK {
 		t.Fatalf("a push failure must not fail the save: %d %s", code, body)
 	}
@@ -210,7 +211,7 @@ func TestPlanReviewDurability_ConcurrentRoundsAllCommitted(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			codes[i], results[i] = reviewPOSTBody(t, f.srv.URL+"/feedback", "secret",
-				roundBody(fmt.Sprintf("r-%d", i), fmt.Sprintf("h%d", i)))
+				roundBody(fmt.Sprintf("round-%04d", i), fmt.Sprintf("h%d", i)))
 		}()
 	}
 	wg.Wait()
@@ -237,7 +238,7 @@ func TestPlanCommit_PathspecExcludesUnrelatedStagedChange(t *testing.T) {
 	}
 	runGitInDir(t, f.ledger, "add", "data/unrelated.txt")
 
-	if code, body := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("r-1", "h1")); code != http.StatusOK {
+	if code, body := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("round-0001", "h1")); code != http.StatusOK {
 		t.Fatalf("status %d: %s", code, body)
 	}
 	committed := runGitInDir(t, f.ledger, "show", "--name-only", "--format=", "HEAD")
@@ -272,7 +273,7 @@ func TestPlanReviewDurability_DuplicateRoundNotRenotified(t *testing.T) {
 	t.Cleanup(func() { saveReviewFeedback = prevSave })
 
 	for i, wantDup := range []bool{false, true} {
-		code, body := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("r-1", "h1"))
+		code, body := reviewPOSTBody(t, f.srv.URL+"/feedback", "secret", roundBody("round-0001", "h1"))
 		if code != http.StatusOK {
 			t.Fatalf("post %d: %d %s", i, code, body)
 		}
