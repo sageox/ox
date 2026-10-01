@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -140,4 +141,25 @@ func waitForReviewServer(t *testing.T, gitRoot, dirName string) plan.ReviewServe
 	}
 	t.Fatal("the review server never answered")
 	return plan.ReviewServerState{}
+}
+
+// await must fail fast when it cannot watch the plan's review dirs, rather
+// than sit until --timeout on a watch set that can never fire.
+func TestPlanReviewAwait_FailsWhenFeedbackCannotBeWatched(t *testing.T) {
+	gitRoot := newPlanStatusTestRepo(t)
+	dir, _, err := plan.Save(gitRoot, plan.Input{Raw: "# Await Unwatchable\n\n## Risks\n\nNone.\n"},
+		plan.Result{}, nil, plan.Meta{Topic: "Await Unwatchable", Slug: "await-unwatchable"})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "feedback"), []byte("x"), 0o644))
+	t.Chdir(gitRoot)
+	saved := cliCtx
+	t.Cleanup(func() { cliCtx = saved })
+	cliCtx = &cli.Context{}
+
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+	err = runPlanReviewAwait(cmd, "await-unwatchable", time.Minute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "watch feedback")
 }

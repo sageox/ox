@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/fsnotify/fsnotify"
 	"net/http"
@@ -357,4 +358,37 @@ func TestAddPlanReviewWatches(t *testing.T) {
 			t.Fatal("want an error when the resolutions dir cannot be created")
 		}
 	})
+	t.Run("watch registration fails", func(t *testing.T) {
+		w, err := fsnotify.NewWatcher()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := addPlanReviewWatches(w, t.TempDir()); !errors.Is(err, fsnotify.ErrClosed) {
+			t.Fatalf("err = %v, want fsnotify.ErrClosed", err)
+		}
+	})
+}
+
+// A watch set that cannot be built degrades live reload but must not stop the
+// review server: watchPlanDir logs and keeps serving until ctx ends.
+func TestWatchPlanDir_DegradesWhenWatchesFail(t *testing.T) {
+	planDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(planDir, "feedback"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		watchPlanDir(ctx, planDir, newBroadcaster())
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watchPlanDir did not return after cancel")
+	}
 }
